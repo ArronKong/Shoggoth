@@ -1,5 +1,7 @@
 # Shoggoth
 
+**English** | [简体中文](README.zh-CN.md)
+
 Shoggoth is a local macOS desktop workspace for AI agents. It brings chat,
 models, agent management, scheduled tasks, skills, usage and inspiration notes
 into one Electron application. The React interface communicates with a local
