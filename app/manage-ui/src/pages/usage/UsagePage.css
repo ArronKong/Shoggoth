@@ -1,0 +1,884 @@
+/*
+ * UsagePage.css — token 仪表盘页面级皮肤。
+ * 模式照抄 ChatPage.css：独立文件、所有规则 scope 在 .usage-page 下。
+ * R197：按 Figma 6994-135 严格还原——hero 统计+趋势合一卡、Agent Usage 右列、
+ * 卡片 8px 栅格、排行 4px 黑条、图表黑/品牌黄/灰配色、无坐标轴装饰。
+ * tooltip/hover 交互层（R162 OpenRouter 式）保持不变。
+ * 颜色一律 light-dark() 或 text-1 color-mix（品牌黄/设计稿取色橙红除外）。
+ */
+
+.usage-page {
+  /* —— 按模型堆叠八色序列（Usage by model = 100% 堆叠面积，用户拍板形态+配色）：
+     品牌黄领衔 + 黑次席 + 暖色阶递深（金橙→橙→珊瑚→砖红→深红褐），固定
+     顺序不循环；名次即颜色（1 黄 / 2 黑 / 3-6 暖色渐深 / 「其他」深红褐），
+     与环图 d* 同板。暖色实色两主题同值，明度递减保证相邻面积带可辨，
+     另有图例 hover 聚焦 + tooltip 兜底。 —— */
+  /* 生长动效节拍（R238）：与 UsagePage.tsx 里 CountUp 的 900ms / anime out(3)
+     同参，数字滚动和图表生长踩同一拍；缓动是 easeOutCubic 的标准贝塞尔。 */
+  --uc-grow-dur: 900ms;
+  --uc-grow-ease: cubic-bezier(0.215, 0.61, 0.355, 1);
+
+  --uc-c0: #ffef84; /* 品牌黄（第 1 名，两主题同值） */
+  --uc-c1: light-dark(#000000, #e4e4e7); /* 黑（第 2 名，暗色翻白） */
+  --uc-c2: #f5b13e; /* 金橙（第 3 名） */
+  --uc-c3: #ee8734; /* 橙（第 4 名） */
+  --uc-c4: #e5654a; /* 珊瑚（第 5 名） */
+  --uc-c5: #cb4a3e; /* 砖红（第 6 名） */
+  --uc-c6: #a64c3d; /* 深红褐（「其他」） */
+  --uc-c7: #8a4a3c; /* 备用（系列上限 7 用不到） */
+
+  /* 用量构成（Figma 6994-135）：输入黑、输出品牌黄、缓存 10% 灰、推理中灰。 */
+  --uc-in: var(--ui-text-1);
+  --uc-out: #ffef84;
+  --uc-cache: color-mix(in srgb, var(--ui-text-1) 10%, transparent);
+  --uc-reason: color-mix(in srgb, var(--ui-text-1) 38%, transparent);
+
+  /* 每日活动折线（设计稿取色）：消息橙 / 工具黄 / 错误红。
+     错误红原引用 --uc-c2，R199 起 c 板改灰阶，红独立成变量。 */
+  --uc-act-msg: #fcb154;
+  --uc-act-tool: #ffef84;
+  --uc-act-err: light-dark(#e34948, #e66767);
+
+  --uc-cursor: color-mix(in srgb, var(--ui-text-1) 6%, transparent);
+
+  /* 排行条/统计的公共灰阶 */
+  --uc-track: color-mix(in srgb, var(--ui-text-1) 10%, transparent);
+  --uc-ink-80: color-mix(in srgb, var(--ui-text-1) 80%, transparent);
+  --uc-ink-50: color-mix(in srgb, var(--ui-text-1) 50%, transparent);
+
+  /* 模型占比环图六段：与堆叠面积同板（黄/黑/暖色阶），top5 + 其他。
+     引用 c* 单一色源，改配色只动上面一处。 */
+  --uc-d0: var(--uc-c0);
+  --uc-d1: var(--uc-c1);
+  --uc-d2: var(--uc-c2);
+  --uc-d3: var(--uc-c3);
+  --uc-d4: var(--uc-c4);
+  --uc-d5: var(--uc-c6); /* 「其他」，对齐面积图 c6 */
+}
+
+/* 注意：本页不能再加 overflow-x:hidden——那会把 .usage-page 变成裁剪容器,
+   toolbar 的 sticky 吸顶会失效(滚动容器是外层 main.content)。表格横滚
+   已收进 .usage-table-scroll,页面级不需要兜横向溢出。 */
+.management-page.usage-page {
+  min-width: 0;
+  max-width: 100%;
+  /* main.content 是定高 flex 列：不禁止收缩的话本页会被压成视口高、
+     内容溢出盒外滚动,toolbar 吸顶的约束矩形随之只剩一屏,滚过即脱粘。 */
+  flex-shrink: 0;
+  color: var(--ui-text-1);
+}
+
+/* 副标题 16/20/字距 0 使用全站页头规格，见 manage-skin.css
+   的 .management-page .page-head-subtitle——本页覆盖删除，避免两份同值定义漂移。 */
+
+/* 工具行到首排卡片 16px（设计稿 172→188）。
+   滚动时吸顶：粘在 main.content 顶部。行底透明（用户拍板,R203）——
+   内容从胶囊之间穿过,胶囊自身不透明底保证可读；padding 上 10 由负
+   margin 抵消、下 12 + margin 4 = 16,吸顶前版面节奏与原来完全一致。
+   两组胶囊（后端/区间）全部走 components/PillTabs 组件（R206）——
+   页面层不再写任何胶囊样式,改样式去 PillTabs.module.css。 */
+.management-page.usage-page .toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin: -10px 0 4px;
+  padding: 10px 0 12px;
+}
+
+/* —— 卡片栅格：全部 8px 间距（设计稿） —— */
+.management-page.usage-page .usage-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+/* 同排卡片拉伸等高（设计稿两卡同 320 高） */
+.management-page.usage-page .usage-row--hero {
+  grid-template-columns: minmax(0, 1fr) 303px;
+}
+.management-page.usage-page .usage-row--split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* R221 契约:双卡高度绑定——任一内容变高另一同步(行高=较高者,537 封顶,
+     见 --split>.usage-section 的 max-height)。grid 默认即 stretch,这里显式
+     写死防将来被 align-items 改动悄悄破坏;注入测试证据见 PROGRESS R221。 */
+  align-items: stretch;
+}
+.management-page.usage-page .usage-row .usage-section {
+  margin-bottom: 0;
+}
+/* R210：卡片固定高——拉宽窗口只让图表横向间距变大，卡片不再长高。
+   设计稿：hero(Total tokens)/Agent/Daily activity/Usage by model = 320；
+   Model share ranking / Tool calls = 537。图表卡纵向排、图表区 flex 填充。 */
+.management-page.usage-page .usage-row--hero > .usage-section {
+  height: 320px;
+}
+/* 537 只作上限：内容少（如 Hermes 4 行）卡随内容收，不再空一大块（R220）。
+   同排两卡仍靠 grid stretch 等高（取较高者）。 */
+.management-page.usage-page .usage-row--split > .usage-section {
+  height: auto;
+  max-height: 537px;
+}
+.management-page.usage-page .usage-section:has(> .uc-box) {
+  display: flex;
+  flex-direction: column;
+  height: 320px;
+}
+
+/* —— 区块卡片 —— */
+/* 卡片本体不做滚动容器（否则悬浮层/图形一越界就能在卡内上下滑）；
+   Top 会话的横滚由 .usage-table-scroll 自己承担。 */
+.management-page.usage-page .usage-section {
+  min-width: 0;
+  max-width: 100%;
+  margin-bottom: 8px;
+  padding: 20px 24px 24px;
+  background: var(--ui-surface-1);
+  /* 设计稿(6999-633)卡片无描边:纯白圆角卡,用户拍板全部去掉(R205) */
+  border-radius: 24px;
+  box-shadow: var(--ui-shadow-card);
+  transition: box-shadow var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.management-page.usage-page .usage-section:hover {
+  box-shadow: var(--ui-shadow-hover);
+}
+.management-page.usage-page .usage-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+  margin-bottom: 20px;
+}
+/* 卡片标题：设计稿 14px 细体 */
+.management-page.usage-page .usage-section-head h3 {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  line-height: 21px;
+  font-weight: 300;
+}
+
+/* —— hero 卡：左统计列 + 右趋势图（设计稿 925×320） —— */
+.management-page.usage-page .usage-hero {
+  display: flex;
+  gap: 28px;
+}
+.management-page.usage-page .usage-hero-stats {
+  flex: 0 0 252px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.management-page.usage-page .usage-stat-label {
+  color: var(--ui-text-1);
+  font-size: 14px;
+  line-height: 21px;
+  font-weight: 300;
+}
+.management-page.usage-page .usage-stat-big {
+  margin-top: 4px;
+  color: var(--ui-text-1);
+  font-size: 32px;
+  line-height: 38px;
+  font-weight: 300;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.management-page.usage-page .usage-cost-summary {
+  margin-top: 16px;
+}
+.management-page.usage-page .usage-cost-summary .usage-stat-label {
+  color: var(--uc-ink-50);
+  font-size: 10px;
+  line-height: 12px;
+}
+.management-page.usage-page .usage-cost-value {
+  margin-top: 4px;
+  color: var(--ui-text-1);
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+}
+/* 小统计 2×2：贴卡片下缘（设计稿），标签 10px 半透明 + 值 16px */
+.management-page.usage-page .usage-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 16px;
+  margin-top: auto;
+  padding-top: 28px;
+}
+.management-page.usage-page .usage-stat .usage-stat-label {
+  color: var(--uc-ink-50);
+  font-size: 10px;
+  line-height: 12px;
+}
+.management-page.usage-page .usage-stat-val {
+  margin-top: 4px;
+  color: var(--ui-text-1);
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+}
+.management-page.usage-page .usage-hero-chart {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* R210：改 flex 容器,让内部 uc-box/svg 填满并按实测 1:1 渲染 */
+  display: flex;
+  min-height: 0;
+}
+
+/* —— Agent Usage 卡（设计稿 303×320）：16px 头像 + 4px 黑条，48px 节距。
+   卡高由 hero 决定（同排等高）；agent 多时列表在卡内滚动（flex-basis 0
+   让列表不把行撑高，剩余高度内 overflow 滚）。 —— */
+.management-page.usage-page .usage-agents {
+  display: flex;
+  flex-direction: column;
+  /* 卡内列表滚到底贴卡缘（用户拍板去掉下间距,R204）；左右/顶 padding 不动 */
+  padding-bottom: 0;
+}
+.management-page.usage-page .usage-agents .arank {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 列表内底 24 间距：滚到底末行不贴卡缘（R220 用户拍板，撤 R204 的贴边） */
+  padding-bottom: 24px;
+}
+.management-page.usage-page .arank {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.management-page.usage-page .arank-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.management-page.usage-page .arank-ava {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--ui-agent-avatar-bg);
+  font-size: 9px;
+  line-height: 1;
+}
+.management-page.usage-page .arank-name {
+  color: var(--ui-text-1);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.management-page.usage-page .arank-val {
+  margin-left: auto;
+  padding-left: 8px;
+  flex-shrink: 0;
+  color: var(--uc-ink-80);
+  font-size: 12px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+}
+.management-page.usage-page .arank-bar {
+  margin-top: 4px;
+  height: 4px;
+  border-radius: 8px;
+  background: var(--uc-track);
+  overflow: hidden;
+}
+.management-page.usage-page .arank-fill {
+  display: block;
+  height: 100%;
+  border-radius: 8px;
+  background: var(--ui-text-1);
+}
+
+/* —— 图表画布（卡片即容器，画布本身透明无边框） —— */
+.usage-page .usage-chart {
+  display: block;
+  width: 100%;
+  /* R210：flex 撑高，svg 按容器实测 1:1 渲染（组件 viewBox=svg 实测像素），
+     窗口拉宽只变横向间距、柱宽/字号/线宽像素恒定，不再等比放大。 */
+  flex: 1 1 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+/* x 轴日期标签：设计稿正文黑细体（字号由组件按图幅传入） */
+.usage-page .uc-xlabel {
+  fill: var(--ui-text-1);
+  font-weight: 300;
+}
+
+/* 折线基类（stroke 颜色由组件按系列传入） */
+.usage-page .uc-l {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* —— 交互层（R162，OpenRouter 式）：图例 / tooltip / hover 光标 —— */
+.usage-page .uc-box {
+  position: relative;
+  min-width: 0;
+  /* 纵向排 svg + 图例，填满卡片图表区剩余高（svg flex 撑、图例固定） */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+}
+.usage-page .uc-seg {
+  transition: opacity 0.15s ease;
+}
+.usage-page .uc-fade {
+  opacity: 0.1;
+}
+.usage-page .uc-cursor {
+  fill: var(--uc-cursor);
+}
+.usage-page .uc-cross {
+  stroke: color-mix(in srgb, var(--ui-text-1) 28%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.usage-page .uc-dot {
+  stroke: var(--ui-surface-1);
+  stroke-width: 2;
+}
+
+.usage-page .uc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 8px 2px 0;
+  flex-shrink: 0; /* R210：图表区 flex 布局下图例不被压缩 */
+}
+.usage-page .uc-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  transition: opacity 0.15s ease;
+  cursor: default;
+}
+.usage-page .uc-sw {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.usage-page .uc-tip {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  transform: translate(14px, 8px);
+  min-width: 150px;
+  max-width: 280px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ui-surface-1) 94%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--ui-hairline);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  font-size: 12px;
+  line-height: 18px;
+}
+.usage-page .uc-tip--flip {
+  transform: translate(calc(-100% - 14px), 8px);
+}
+.usage-page .uc-tip-title {
+  color: color-mix(in srgb, var(--ui-text-1) 82%, var(--ui-surface-1));
+  font-size: 11px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-page .uc-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.usage-page .uc-tip-key {
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.usage-page .uc-tip-label {
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+.usage-page .uc-tip-v {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--ui-text-1);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.usage-page .uc-tip-foot {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--ui-hairline);
+}
+
+/* —— 排行条（设计稿）：名称+读数一行 + 4px 黑条，47px 节距 —— */
+.usage-page .rank {
+  position: relative; /* hover 浮层(.uc-tip absolute)的定位上下文 */
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.usage-page .rank-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 3px;
+}
+.usage-page .rank-name {
+  color: var(--ui-text-1);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-page .rank-val {
+  flex-shrink: 0;
+  color: var(--uc-ink-80);
+  font-size: 12px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+}
+.usage-page .rank-bar {
+  height: 4px;
+  background: var(--uc-track);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.usage-page .rank-fill {
+  height: 100%;
+  background: var(--ui-text-1);
+  border-radius: 8px;
+}
+/* 模型占比卡：左环图（设计稿左槽 208/614）+ 右排行列表 */
+.management-page.usage-page .usage-rank-split {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  min-width: 0;
+}
+.management-page.usage-page .usage-donut {
+  flex: 0 0 30%;
+  max-width: 208px;
+  min-width: 0;
+}
+.management-page.usage-page .usage-donut-svg {
+  display: block;
+  width: 100%;
+  max-width: 190px;
+  height: auto;
+  margin: 0 auto;
+}
+.management-page.usage-page .usage-donut-num {
+  fill: var(--ui-text-1);
+  font-size: 20px;
+  font-weight: 200;
+}
+.management-page.usage-page .usage-rank-list {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* —— 提示 / 表格 —— */
+.usage-page .usage-hint {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: light-dark(#fff7d0, #343019);
+  color: light-dark(#7a5200, #f4cf67);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+/* Top 会话表格：横滚边界收在表格自己的包装层，不外溢成卡片滚动 */
+.management-page.usage-page .usage-table-scroll {
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.management-page.usage-page .usage-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  color: var(--ui-text-1);
+  font-size: 13px;
+  line-height: 20px;
+}
+.management-page.usage-page .usage-table th,
+.management-page.usage-page .usage-table td {
+  text-align: left;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--ui-hairline);
+}
+.management-page.usage-page .usage-table th {
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 300;
+}
+.management-page.usage-page .usage-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.management-page.usage-page .usage-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--ui-text-1) 5%, var(--ui-surface-1));
+}
+.management-page.usage-page .usage-table .num {
+  text-align: right;
+  font-weight: 300;
+}
+.management-page.usage-page .usage-table td.mono {
+  font-variant-numeric: tabular-nums;
+}
+.management-page.usage-page .usage-table-key {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Top 会话「模型」列：一行一个模型 + 该模型 token 数（后端已按 token 降序） */
+.usage-page .usage-session-models {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.usage-page .usage-session-model {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.usage-page .usage-session-model-tk {
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* 会话标题是原生按钮：鼠标与键盘使用同一条 transcript 预览入口。 */
+.management-page.usage-page .usage-table tbody tr.usage-row-click {
+  cursor: pointer;
+}
+.management-page.usage-page .usage-table tbody tr.usage-row-click:hover td {
+  background: color-mix(in srgb, var(--ui-text-1) 4%, transparent);
+}
+.management-page.usage-page .usage-session-open {
+  display: block;
+  width: 100%;
+  padding: 4px;
+  margin: -4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.management-page.usage-page .usage-session-open:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+/* 主文案=语义标题（截断省略）；次行=原始 key 尾段（等宽小字，排查用） */
+.usage-page .usage-session-title {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-page .usage-session-sub {
+  display: block;
+  margin-top: 2px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--ui-text-1) 42%, var(--ui-surface-1));
+  font-family: var(--mono);
+  font-size: 11px;
+}
+/* 预览弹窗（R219）：聊天窗式气泡——助手左/用户右；markdown 复用聊天页
+   显示规则（全局 .chat-md 元素样式，本地类只补它消费的变量包+气泡排版）。 */
+.usage-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.usage-preview-note {
+  margin: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  font-size: 12px;
+  text-align: center;
+}
+.usage-chatmsg {
+  display: flex;
+  justify-content: flex-start;
+}
+.usage-chatmsg--user {
+  justify-content: flex-end;
+}
+.usage-chatmsg-bubble {
+  max-width: 82%;
+  min-width: 0;
+  padding: 8px 14px;
+  border-radius: 16px;
+  border-bottom-left-radius: 6px;
+  background: color-mix(in srgb, var(--ui-text-1) 5%, var(--ui-surface-1));
+}
+.usage-chatmsg--user .usage-chatmsg-bubble {
+  border-radius: 16px;
+  border-bottom-right-radius: 6px;
+  background: color-mix(in srgb, var(--ui-text-1) 11%, var(--ui-surface-1));
+}
+.usage-chatmsg-ts {
+  margin-top: 4px;
+  color: color-mix(in srgb, var(--ui-text-1) 45%, var(--ui-surface-1));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-chatmsg--user .usage-chatmsg-ts {
+  text-align: right;
+}
+/* chat-md 规则消费的变量包——与 .cron-delivery-md（styles.css）同值同先例 */
+.usage-chatmsg-md {
+  font-size: 13px;
+  line-height: 20px;
+  color: light-dark(#171717, #e4e4e7);
+  word-break: break-word;
+  --bg-muted: light-dark(#f4f4f5, #232327);
+  --chat-text: light-dark(#171717, #e4e4e7);
+  --muted-strong: light-dark(#4b5563, #b8bcc4);
+  --muted-fg: #8993a3;
+  --border-strong: light-dark(#dfe4ea, #34343a);
+  --bg-hover: light-dark(rgba(247, 247, 247, 0.9), rgba(42, 42, 46, 0.9));
+}
+.usage-chatmsg-md > :first-child {
+  margin-top: 0;
+}
+.usage-chatmsg-md > :last-child {
+  margin-bottom: 0;
+}
+
+/* —— 响应式 —— */
+@media (max-width: 980px) {
+  .management-page.usage-page .usage-row--hero,
+  .management-page.usage-page .usage-row--split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .management-page.usage-page .usage-rank-split {
+    flex-direction: column;
+  }
+  .management-page.usage-page .usage-donut {
+    flex: none;
+    width: 100%;
+  }
+  /* 单列后 agent 卡不再与 hero 同排，列表恢复自然高度 */
+  .management-page.usage-page .usage-agents .arank {
+    flex: none;
+    overflow-y: visible;
+  }
+  /* 单列堆叠后「同排等高」不再成立：释放 R212 的固定卡高，卡随内容自然长，
+     否则列表(Agent/占比/工具)超出固定高又无滚动裁剪,溢出叠进下一张卡。
+     纯图表卡(:has(>.uc-box))不在此列——svg 靠 flex 撑高,保持固定 320。
+     R238：`max-height` 必须一起放开——只写 height:auto 时 --split 基础规则的
+     `max-height: 537px` 仍然生效，卡就卡在 537 不长，正是上面这段注释要防的
+     溢出（实测 980px 断点下 .usage-rank-split 转 column 后内容 684px，
+     模型占比排名的列表溢出 208px 压在「工具调用」卡上）。 */
+  .management-page.usage-page .usage-row--hero > .usage-section,
+  .management-page.usage-page .usage-row--split > .usage-section {
+    height: auto;
+    max-height: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .management-page.usage-page .usage-section {
+    padding: 16px;
+  }
+  .management-page.usage-page .usage-hero {
+    flex-direction: column;
+  }
+  .management-page.usage-page .usage-hero-stats {
+    flex: 0 0 auto;
+  }
+  .management-page.usage-page .usage-hero-chart {
+    align-self: stretch;
+    /* 纵向堆叠后 svg 失去行向拉伸的高度来源(1:1 渲染无固有高),给显式高防塌 0 */
+    height: 200px;
+  }
+  .management-page.usage-page .usage-stat-grid {
+    padding-top: 20px;
+  }
+}
+
+/* —— 生长动效（R238） ——
+   uc-wait-* = 零态待播，uc-grow-* = 播放；两个 class 都由 charts.tsx 的 useGrow
+   按「进视口/换数据」发放，prefers-reduced-motion 下一个都不发（元素保持终态，
+   故此处无需再写 reduce 分支）。承接 R235/R236 的运动语言：只动 transform 与
+   stroke-*（合成层），不动布局属性——hero 图 30 根柱 × 3 段近百个节点也不掉帧。 */
+
+/* SVG 的 transform-origin 默认相对 viewBox 原点，必须 fill-box 才是元素自身盒 */
+.usage-page .uc-wait-bar,
+.usage-page .uc-grow-bar,
+.usage-page .uc-wait-area,
+.usage-page .uc-grow-area {
+  transform-box: fill-box;
+  transform-origin: bottom;
+}
+@keyframes uc-grow-y {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* 堆叠柱：整根（含圆顶 clip）从底部长高，逐根 12ms 错峰扫过去 */
+.usage-page .uc-wait-bar {
+  transform: scaleY(0);
+}
+.usage-page .uc-grow-bar {
+  animation: uc-grow-y var(--uc-grow-dur) var(--uc-grow-ease) both;
+  animation-delay: calc(var(--i) * 12ms);
+}
+
+/* 堆叠面积：整叠一起从基线撑开（无错峰，它本就是一个整体） */
+.usage-page .uc-wait-area {
+  transform: scaleY(0);
+}
+.usage-page .uc-grow-area {
+  animation: uc-grow-y var(--uc-grow-dur) var(--uc-grow-ease) both;
+}
+
+/* 折线：pathLength=1 归一化后 dashoffset 1→0 = 从头描到尾，逐条 80ms 错峰 */
+.usage-page .uc-wait-line {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+.usage-page .uc-grow-line {
+  stroke-dasharray: 1;
+  animation: uc-draw var(--uc-grow-dur) var(--uc-grow-ease) both;
+  animation-delay: calc(var(--i) * 80ms);
+}
+@keyframes uc-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* 线下渐变面积：等线描过半再淡入，免得面积跑在线头前面 */
+.usage-page .uc-wait-fill {
+  opacity: 0;
+}
+.usage-page .uc-grow-fill {
+  animation: uc-fade-in calc(var(--uc-grow-dur) * 0.6) ease both;
+  animation-delay: calc(var(--i) * 80ms + var(--uc-grow-dur) * 0.45);
+}
+@keyframes uc-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 末端锚点：线描到头才弹出，收个尾 */
+.usage-page .uc-wait-dot {
+  opacity: 0;
+}
+.usage-page .uc-grow-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: uc-pop 260ms var(--uc-grow-ease) both;
+  animation-delay: calc(var(--i) * 80ms + var(--uc-grow-dur) * 0.9);
+}
+@keyframes uc-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 排行条：从左伸展，逐行 40ms 错峰（行少，错峰可以给大些）。
+   两处共用：RankBars 的 .rank-fill（模型/工具排行）与 Agent 用量自己的 .arank-fill——
+   两者都是 inline width 定长度，这里只叠一层 scaleX，不碰它们算出来的宽度。 */
+.usage-page .uc-wait-rank,
+.usage-page .uc-grow-rank {
+  transform-origin: left center;
+}
+.usage-page .uc-wait-rank {
+  transform: scaleX(0);
+}
+.usage-page .uc-grow-rank {
+  animation: uc-grow-x var(--uc-grow-dur) var(--uc-grow-ease) both;
+  animation-delay: calc(var(--i) * 40ms);
+}
+@keyframes uc-grow-x {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* 环图：每段的延迟与时长都按自己的占比分摊总时长，首尾相接扫成连续一圈。
+   故用 linear——逐段各自 easeOut 会在每个色段边界顿一下。 */
+.usage-page .uc-wait-arc {
+  stroke-dasharray: 0 var(--c);
+}
+.usage-page .uc-grow-arc {
+  animation: uc-arc var(--uc-grow-dur) linear both;
+  animation-delay: calc(var(--d) * var(--uc-grow-dur));
+  animation-duration: calc(var(--f) * var(--uc-grow-dur));
+}
+@keyframes uc-arc {
+  from {
+    stroke-dasharray: 0 var(--c);
+  }
+  to {
+    stroke-dasharray: var(--len) var(--c);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .management-page.usage-page .usage-section,
+  .management-page.usage-page .usage-section:hover {
+    transform: none;
+    transition: none;
+  }
+
+  .usage-page .uc-seg,
+  .usage-page .uc-legend-item {
+    transition: none;
+  }
+}

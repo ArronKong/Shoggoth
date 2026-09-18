@@ -1,0 +1,164 @@
+/* Hermes 模型设置整合面（官方「模型」+「提供方」移植，R286）。
+   外观遵循 docs/ui-design-spec.md：一级工具栏件用全局 .ui-*，此处只做布局。 */
+
+/* R290：面板不再是一整块灰底容器——每个功能区各自一张白卡（规范 §4 配方 B），
+   靠留白与字号分层，不再用 hairline 下划线分隔。 */
+.pane {
+  display: block;
+}
+
+.card {
+  margin: 0 0 16px;
+  padding: 20px 24px 22px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+}
+
+/* 自定义端点卡内的子区（列表 / 表单）。 */
+.inlineLabel {
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 主模型行：provider / model 两级 + 应用；未配置态换成 Key 粘贴或设置按钮 */
+.mainRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.2rem;
+}
+/* Field 的 Select 根是 width:100%（表单纵排场景）；这里是横排工具行，按内容
+   自适应收窄。锚 role=combobox 是 base-ui Select 的 ARIA 契约，不锚 hash 类名。 */
+.mainRow [role="combobox"],
+.auxEdit [role="combobox"],
+.moaToolbar [role="combobox"],
+.moaSlotRow [role="combobox"] {
+  width: auto;
+  min-width: 11rem;
+  max-width: 26rem;
+}
+.keyInput {
+  flex: 1 1 16rem;
+  min-width: 12rem;
+}
+.currentNote {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.defaultsRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  margin: 0.6rem 0 0.2rem;
+}
+.defaultsItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+/* 辅助模型任务行（官方 ListRow 同构：左侧任务名+说明，右侧动作/编辑区） */
+.auxList {
+  display: grid;
+  gap: 0.25rem;
+}
+.auxRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.07));
+}
+.auxRow:last-child {
+  border-bottom: none;
+}
+.auxMeta {
+  flex: 1 1 14rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.auxLabel {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.86rem;
+  font-weight: 500;
+}
+.auxPill {
+  font-size: 0.7rem;
+  color: var(--muted);
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  white-space: nowrap;
+}
+.auxCurrent {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.auxActions {
+  display: inline-flex;
+  gap: 0.4rem;
+  flex: none;
+}
+.auxEdit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1 1 100%;
+  padding: 0.25rem 0 0.1rem;
+}
+
+/* MoA 工具条与槽位行；后备链复用同一套行布局 */
+.moaToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0;
+}
+.moaPresetInput {
+  width: 10rem;
+}
+.moaDefaultNote {
+  margin: 0.15rem 0 0.5rem;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.moaSlots {
+  display: grid;
+  gap: 0.4rem;
+}
+.moaSlotRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.moaSlotName {
+  flex: none;
+  min-width: 5.5rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.emptyNote {
+  margin: 0.25rem 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* 自定义端点抽屉 */

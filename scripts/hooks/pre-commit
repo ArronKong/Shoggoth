@@ -1,0 +1,22 @@
+#!/bin/sh
+# pre-commit — 自包含、秒级。见 ARCHITECTURE.md §10。
+# 只做类型检查（最常踩、最快）。依赖真后端的 smoke 不放这里。
+# 跳过：git commit --no-verify
+
+ROOT=$(git rev-parse --show-toplevel)
+UI="$ROOT/app/manage-ui"
+
+if [ ! -d "$UI/node_modules" ]; then
+  echo "[pre-commit] ⚠ app/manage-ui/node_modules 缺失，跳过 tsc。先跑 npm run build:manage。"
+  exit 0
+fi
+
+echo "[pre-commit] tsc --noEmit …"
+cd "$UI" || exit 1
+if npx tsc --noEmit; then
+  echo "[pre-commit] ✓ 类型检查通过"
+  exit 0
+else
+  echo "[pre-commit] ✗ 类型错误（如确需跳过：git commit --no-verify）"
+  exit 1
+fi

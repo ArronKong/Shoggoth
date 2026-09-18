@@ -1,0 +1,70 @@
+/* blocking agent prompt card (approval / clarify / sudo / secret) */
+.chat-prompt {
+  --chat-text: #1a1a1a;
+  --ui-focus: #2563eb;
+  margin: 6px 0; padding: 24px; border-radius: 24px; border: 0;
+  background: linear-gradient(180deg, #FFEEE5 0%, #FFF7F3 100%);
+  display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 640px;
+  color: var(--chat-text); color-scheme: light;
+}
+.chat-prompt__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-prompt__badge {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+  padding: 0; border-radius: 0; background: transparent; color: #b45309;
+}
+.chat-prompt__desc { font-size: 12px; line-height: 1.5; color: #69584f; overflow-wrap: anywhere; }
+.chat-prompt__cmd {
+  margin: 0; padding: 8px 10px; border-radius: 8px; font-family: var(--mono); font-size: 12px;
+  line-height: 1.5; background: rgba(72, 38, 18, 0.05);
+  color: var(--chat-text, var(--ui-text-1)); white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto;
+}
+.chat-prompt__q { font-size: 13px; line-height: 1.6; color: var(--chat-text, var(--ui-text-1)); white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-prompt__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chat-prompt__btn {
+  min-height: 36px; padding: 7px 14px; border-radius: 999px; font-size: 13px; cursor: pointer;
+  border: 1px solid #000; background: transparent; color: #000;
+  max-width: 100%; overflow-wrap: anywhere; white-space: normal;
+}
+.chat-prompt__btn:hover:not(:disabled) { background: rgba(72, 38, 18, 0.06); border-color: #000; }
+.chat-prompt__btn.is-primary { background: #000; color: #fff; border-color: #000; font-weight: 600; }
+.chat-prompt__btn.is-primary:hover:not(:disabled), .chat-prompt__btn.is-primary:active:not(:disabled) { background: #000; }
+.chat-prompt__btn.is-primary:disabled { opacity: 0.4; cursor: default; }
+.chat-prompt__input {
+  flex: 1; min-width: 160px; padding: 6px 10px; border-radius: 8px; font-size: 13px;
+  border: 1px solid #000; background: transparent; color: var(--chat-text, var(--ui-text-1));
+}
+
+.chat-prompt__fields { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.chat-prompt__field { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; }
+.chat-prompt__options { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; width: 100%; min-width: 0; }
+.chat-prompt__options > .chat-prompt__field { max-width: 100%; }
+.chat-prompt__field > .chat-prompt__input { align-self: stretch; }
+.chat-prompt--input, .chat-prompt--approval { gap: 8px; }
+/* 标题间距为 8px 容器间隔 + 8px 外边距，底部操作间距为 12px + 4px。 */
+.chat-prompt--input > .chat-prompt__head,
+.chat-prompt--approval > .chat-prompt__head { margin-bottom: 8px; }
+.chat-prompt--input .chat-prompt__field { gap: 4px; }
+.chat-prompt--input > .chat-prompt__fields > .chat-prompt__row { margin-top: 4px; }
+.chat-prompt__btn:disabled { cursor: default; opacity: 0.5; }
+.chat-prompt__btn:focus-visible, .chat-prompt__input:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+
+.chat-prompt__action { margin: 0; font-size: 16px; line-height: 1.5; font-weight: 600; overflow-wrap: anywhere; }
+.chat-prompt__summary { display: grid; gap: 4px; margin: 0; }
+.chat-prompt__summary { grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; column-gap: 12px; }
+.chat-prompt__summary > div { display: contents; }
+.chat-prompt__summary dt {
+  font-size: 12px; line-height: 1.6; color: #69584f;
+}
+.chat-prompt__summary dd { margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-prompt__summary dd { max-height: 104px; overflow: auto; }
+.chat-prompt__actions { gap: 10px; margin-top: 8px; }
+.chat-prompt__head + .chat-prompt__actions { margin-top: 0; }
+.chat-prompt--file-change { gap: 4px; }
+.chat-prompt--file-change > .chat-prompt__head { margin-bottom: 12px; }
+.chat-prompt--file-change > .chat-prompt__action + .chat-prompt__q { margin-top: 4px; }
+.chat-prompt--file-change > .chat-prompt__actions { margin-top: 12px; }
+.chat-prompt__status { color: #69584f; font-size: 12px; }
+@media (max-width: 600px), (pointer: coarse) {
+  .chat-prompt__btn { min-height: 44px; font-size: 14px; }
+  .chat-prompt__summary dd, .chat-prompt__q { font-size: 14px; }
+}

@@ -1,0 +1,282 @@
+/* 自定义端点卡的样式（R300 从 HermesModelSettings.module.css 拆出）。
+   那份 CSS 随 per-agent 设置面搬到了 pages/agents/，本卡留在模型页，样式跟着自己走
+   ——不让模型页反向依赖 agents 目录的 module。card/emptyNote 两条与设置面同形，
+   各留一份是 CSS Module 的常态（作用域隔离的代价），不做跨目录共享。 */
+
+.card {
+  margin: 0 0 16px;
+  padding: 20px 24px 22px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+}
+
+.subBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.subHead {
+  margin: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.emptyNote {
+  margin: 0.25rem 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.endpointRow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
+}
+
+.endpointRow:last-child {
+  border-bottom: none;
+}
+
+.endpointMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.endpointName {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+.endpointUrl {
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.endpointMeta {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.endpointActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+}
+
+/* ---- 卡头右侧的「新增模型」入口 ---- */
+.headActions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ---- 端点弹窗（设计稿 7099-2537）---- */
+.modalGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem 1.5rem;
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .modalGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.modelsBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 1.1rem;
+  min-width: 0;
+}
+.modelsHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.modelsLabel {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ui-text-1);
+}
+/* 目录 >20 才出现的搜索开关（KeysPanel iconBtn 同形，模块隔离各留一份）。 */
+.searchBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--ui-text-1);
+  cursor: pointer;
+}
+.searchBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-text-1) 8%, transparent);
+  color: var(--ui-text-1);
+}
+.searchBtnOn {
+  background: color-mix(in srgb, var(--ui-text-1) 10%, transparent);
+}
+.modelsHint {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--ui-text-3);
+}
+.fetchNote {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--ui-text-2);
+}
+/* chips：32 高圆角胶囊，选中反色（设计稿黑底白字）。 */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 32px;
+  padding: 0 0.9rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+  font-size: 0.78rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-text-1) 10%, var(--ui-surface-2));
+  color: var(--ui-text-1);
+}
+.chipOn,
+.chipOn:hover:not(:disabled) {
+  background: light-dark(#111111, #e4e6eb);
+  color: light-dark(#ffffff, #111111);
+}
+.chipDefault {
+  font-size: 0.66rem;
+  opacity: 0.72;
+}
+.manualRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+.manualRow input {
+  flex: 1;
+  min-width: 0;
+}
+
+.recoveryNote {
+  margin: 0.55rem 0 0;
+  color: var(--ui-text-2);
+  font-size: 0.76rem;
+}
+
+.referenceList {
+  margin: 0.45rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--ui-text-2);
+  font-size: 0.74rem;
+}
+
+.keyInputRow {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.keyInputRow input {
+  flex: 1;
+  min-width: 0;
+}
+
+.keyPreview {
+  display: block;
+  margin-top: 0.35rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.advancedBlock {
+  margin-top: 0.85rem;
+}
+
+.advancedToggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-text-2);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.advancedToggle::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 0.35rem;
+  transform: rotate(0deg);
+}
+
+.advancedToggle[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+
+.advancedBlock > label {
+  margin-top: 0.55rem;
+  max-width: 320px;
+}
+
+.recoveryBox {
+  margin-top: 0.9rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--ui-text-2) 22%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ui-text-2) 5%, transparent);
+  color: var(--ui-text-2);
+  font-size: 0.76rem;
+}
+
+.recoveryBox p {
+  margin: 0.35rem 0 0;
+}

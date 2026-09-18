@@ -1,0 +1,1211 @@
+/* AgentsPage — Figma 7000-1074 / 7025-487 / 7035-871 / 7034-664 / 7046-4605。
+   首页 = 横滑卡片；点卡展开整块白面板（tab: Overview/Setup/Cron/Kanban/Files）。
+   颜色一律 light-dark() 配对（品牌黄 / 语义红 / 固定黑白头像除外，见 ARCHITECTURE §5 主题）。 */
+
+/* 页面根：本页专用弹性列（只挂在 Agents 页，不动全站 .page 规则）。
+   flex-shrink:0 —— 页面是 main.content(flex column) 的 item，默认会被压回视口高，
+   内容溢出时就滚不出来了（矮窗实测）。 */
+.root {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* 后端胶囊→内容区的间距对齐设计稿 16px；只连一个后端时 BackendTabs 返回 null、
+   toolbar 空壳整个隐藏（含 margin），面板/卡片区自动上移收回这 64px（48 胶囊 + 16 距）。
+   选择器必须复合 .management-page 抬到 (0,3,0)：manage-skin.css 的
+   `.management-page .toolbar{margin-bottom:24px}` 同特异性且在后面，会赢（实踩 72≠64）。 */
+.root:global(.management-page) :global(.toolbar) {
+  margin-bottom: 16px;
+}
+
+.root:global(.management-page) :global(.toolbar):empty {
+  display: none;
+}
+
+/* ---------- 头像基元（先定义，供卡片大图位以方形覆盖） ---------- */
+
+/* 卡片和详情面板共用的头像几何；图像与回退由 AgentAvatar 处理。 */
+.avatarBase {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+}
+
+.avatar {
+  width: 48px;
+  height: 48px;
+  font-size: 18px;
+}
+
+/* ---------- 首页卡片横滑 ---------- */
+
+/* 卡片相对**整个窗口**垂直居中（用户拍板）。deck 留在文档流里（不用绝对定位：
+   那会脱离 .page 的内边距导致卡片左缘不再对齐页头，还会铺满整窗拦截页头点击、
+   让滚轮在任何位置都横滑）。做法是拿上下内边距的差值把「上方页头区」补偿掉：
+   deck 上沿在 --deck-above、下沿被 flex 拉到 .page 内边距底（即 vh - --deck-below），
+   令 content-box 中心 = vh/2 → padding-bottom - padding-top = --deck-above - --deck-below。
+   这两个量**由 TSX 运行时量出来写进来**，不能写死：BackendTabs 只连一个后端时整组
+   隐藏、toolbar 塌成 0 高，页头也会随窄屏换行，写死的常量当场偏掉（实踩 48px）。
+   flex:1 0 auto = 有空间就填满、空间不足不压缩（矮窗时溢出可滚，配 .root 的 flex-shrink:0）。 */
+.deck {
+  --deck-above: 0px;
+  --deck-below: 0px;
+  --deck-pad: 24px;
+  display: flex;
+  align-items: center;
+  gap: 60px;
+  flex: 1 0 auto;
+  margin: 0 calc(-1 * 1.25rem);
+  padding: var(--deck-pad) 1.25rem
+    max(var(--deck-pad), calc(var(--deck-pad) + var(--deck-above) - var(--deck-below)));
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* 3D 悬浮倾斜（首页卡与 Overview 内卡共用）：mousemove 把指针相对卡心的位置写进
+   --tiltX/--tiltY（TSX 里直接 set style，不走 React 渲染），这里只负责把变量装进
+   transform。纯 CSS 3D，无需 three.js。transition 同时充当阻尼，指针快扫时柔性跟随。 */
+.tilt3d {
+  transform: perspective(900px) translateY(var(--lift, 0px)) rotateX(var(--tiltX, 0deg))
+    rotateY(var(--tiltY, 0deg));
+  transition: transform 0.18s ease;
+  will-change: transform;
+}
+
+.card {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 12px;
+}
+
+.card:hover {
+  --lift: -6px;
+}
+
+/* 收起形变期间的目标卡片：全程藏起来，等面板缩到位、长得已与它一致时瞬间交接。
+   不藏的话面板还很大时就能从底下看见它 = 重影（用户实测报告）。 */
+.cardHandoff {
+  opacity: 0;
+}
+
+.card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-focus);
+}
+
+/* 卡片正面（首页与 Overview 左卡共用）：320 方图 + 100 名牌 */
+.cardFace {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  border-radius: 12px;
+  background: light-dark(#ffffff, #1f1f23);
+  box-shadow: 0 30px 40px 0 light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.4));
+}
+
+.cardArt {
+  position: relative;
+  width: 320px;
+  height: 320px;
+  border-radius: 12px 12px 0 0;
+  overflow: hidden;
+}
+
+/* 大图位的头像：铺满 + 初始字母兜底放大 */
+.cardImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  font-size: 96px;
+  font-weight: 200;
+}
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  height: 100px;
+  padding: 8px 16px 12px;
+  box-sizing: border-box;
+}
+
+.cardNameRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cardName {
+  font-size: 32px;
+  font-weight: 200;
+  line-height: 44px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: light-dark(#000000, #f4f4f5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cardDefault {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 30px;
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.12));
+  color: light-dark(rgba(0, 0, 0, 0.6), rgba(255, 255, 255, 0.7));
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.cardFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  font-size: 10px;
+  font-weight: 300;
+  line-height: 14px;
+  color: light-dark(#000000, rgba(255, 255, 255, 0.85));
+}
+
+.cardBrand {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* 末尾的「+ 新建」幽灵卡 */
+.cardNew {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  width: 320px;
+  height: 420px;
+  box-sizing: border-box;
+  border: 1px dashed light-dark(rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.2));
+  border-radius: 12px;
+  background: light-dark(rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.03));
+  color: var(--muted);
+  cursor: pointer;
+  transition: transform 0.22s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.cardNew:hover {
+  transform: translateY(-4px);
+  border-color: light-dark(rgba(0, 0, 0, 0.35), rgba(255, 255, 255, 0.4));
+  color: light-dark(#000000, #ffffff);
+}
+
+.cardNew:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-focus);
+}
+
+.cardNewPlus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 28px;
+  font-weight: 200;
+  line-height: 1;
+}
+
+.cardNewLabel {
+  font-size: 14px;
+  font-weight: 300;
+}
+
+/* 形变专用的「卡片名牌」层：平时完全隐形，只在展开/收起形变期由 WAAPI 控制透明度。
+   它是**面板自己的内容**（不是替身）：跟着面板一起缩放，等面板到卡片尺寸时，
+   面板 = 挖角0 + 圆角12 + 头像铺满方图 + 这块名牌 = 与真卡片像素一致，
+   于是可以瞬间交接，不需要「真卡片淡入 + 面板淡出」那种会产生双影的交叉淡化。 */
+.panelCardFace {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  height: 100px;
+  padding: 8px 16px 12px;
+  border-radius: 0 0 12px 12px;
+  background: light-dark(#ffffff, #1f1f23);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---------- 展开面板 ---------- */
+
+/* 面板形状（设计稿 SVG）：24px 圆角矩形 + 左上角台阶缺口——两肩各 24px 凸圆角，
+   中间一段以 (27.7,27.7) 为圆心、r≈32 的凹弧环抱角落的圆头像（头像 r24，留 8px
+   呼吸缝露页面底色）。实现 = ::before 画白底，mask 三层取并集：84×84 角部 SVG
+   瓦片（含全部弧线，定尺寸不随面板缩放变形）+ 右侧/下方两条矩形渐变层；外圈
+   24px 圆角由 ::before 自身 border-radius 提供。阴影不能用 box-shadow（会按矩形
+   画），挂在 .panel 的 drop-shadow 上跟随挖角后的真实轮廓。 */
+.panel {
+  /* 实际值由 TSX 的 ResizeObserver 实时写入（holoList 等面板高用）；
+     面板本体高度交给 flex 自适应，不再写 100dvh 硬编码。 */
+  --panel-h: 520px;
+  --panel-shadow: light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.4));
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto; /* 吃满页头以下全部剩余高度；胶囊隐藏时自动多收 64px */
+  min-height: 520px;
+  /* .page 的全站 padding-bottom 是 32，设计稿要求面板距窗口底 24 → 向下探 8px。 */
+  margin-bottom: -8px;
+  filter: drop-shadow(0 30px 40px var(--panel-shadow));
+}
+
+/* 挖角尺寸与圆角注册成可插值的自定义属性——展开形变要让**挖角自己长出来**
+   （0 = 完整圆角矩形 = 卡片形状，84px = 设计稿挖角）。不注册的话自定义属性只能
+   离散跳变，挖角会在动画末尾"啪"地出现。 */
+@property --panel-notch-size {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 84px;
+}
+
+@property --panel-radius {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 24px;
+}
+
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: var(--panel-radius);
+  background: light-dark(#ffffff, #1f1f23);
+  --panel-notch: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='84' height='84'><path d='M0 84C0 70.75 10.75 60 24 60L27.73 60C45.51 60 59.88 45.51 59.73 27.73L59.7 24.2C59.59 10.87 70.37 0 83.7 0L84 0L84 84Z'/></svg>");
+  -webkit-mask:
+    var(--panel-notch) 0 0 / var(--panel-notch-size) var(--panel-notch-size) no-repeat,
+    linear-gradient(#000, #000) var(--panel-notch-size) 0 /
+      calc(100% - var(--panel-notch-size)) 100% no-repeat,
+    linear-gradient(#000, #000) 0 var(--panel-notch-size) / var(--panel-notch-size)
+      calc(100% - var(--panel-notch-size)) no-repeat;
+  mask:
+    var(--panel-notch) 0 0 / var(--panel-notch-size) var(--panel-notch-size) no-repeat,
+    linear-gradient(#000, #000) var(--panel-notch-size) 0 /
+      calc(100% - var(--panel-notch-size)) 100% no-repeat,
+    linear-gradient(#000, #000) 0 var(--panel-notch-size) / var(--panel-notch-size)
+      calc(100% - var(--panel-notch-size)) no-repeat;
+}
+
+/* ---------- 卡片 → 面板 展开形变（面板本体形变，无替身） ---------- */
+
+/* 形变期（展开与收起共用）：面板本体（fixed + WAAPI 驱动几何）就是动画主体，
+   没有任何替身，背景/挖角/头像全程都是真的，结束不存在"交接"这一步。
+   只改定位，**不要**动 margin/min-height：量自然终点几何时是临时把 position 摘成
+   static 量的，改了 margin 就会量少 8px（面板那条 margin-bottom:-8px），收尾时高度
+   会跳一下。fixed 且四边几何都显式给定时，margin/min-height 本就不参与，无需清。 */
+.panelMorphing {
+  position: fixed;
+  z-index: 60;
+}
+
+/* 形变起手的初始态：tab / 关闭钮 / 内容先隐身，随后由 TSX 的 WAAPI 分层淡入
+   （带 delay，与形变收尾重叠）。这里**不能**再写 transition：会和 WAAPI 抢同一个
+   opacity，类移除的那一帧两者一起跑，反而把分层节奏打乱。 */
+.panelMorphing .panelTabs,
+.panelMorphing .panelClose,
+.panelMorphing .panelBody {
+  opacity: 0;
+}
+
+/* 形变期间头像不接受指针（几何在动，hover 出浮层会打断动画观感） */
+.panelMorphing .holo {
+  pointer-events: none;
+}
+
+/* z 必须高于 .panelBody：.panelHead 有 position+z 后是独立堆叠上下文，头像浮层的
+   z-index 只在其内部生效——head 若与 body 同层，浮层会被 Overview 大卡盖住（实踩）。 */
+.panelHead {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px 0 76px;
+}
+
+/* tab 行 = 全站统一的 FilterTabs 组件，这里只把字号/字色调到面板的口径。 */
+.panelTabs {
+  min-width: 0;
+  --ft-color: light-dark(#000000, #ffffff);
+  --ft-font-size: 14px;
+  --ft-line-height: 22px;
+}
+
+.panelClose {
+  flex-shrink: 0;
+  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: light-dark(#000000, #ffffff);
+  opacity: 0.65;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.panelClose:hover {
+  opacity: 1;
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.1));
+  color: light-dark(#000000, #ffffff);
+}
+
+.panelClose svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.panelBody {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 20px 20px;
+}
+
+.dim {
+  margin: 24px 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* ---------- 左上角头像 + 悬浮 agent 列表 ---------- */
+
+/* 头像圆心对齐挖角凹弧圆心 (27.7,27.7)：48px 头像放 (4,4)，四周 8px 缝露页面底。 */
+/* 显式尺寸 + overflow：展开形变要把这一格从「铺满卡片的方图」收成 48px 圆，
+   所以几何必须长在 .holo 上（内部头像 100% 跟随），而不是由内容撑出来。 */
+.holo {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 48px;
+  height: 48px;
+  z-index: 40;
+  border-radius: 50%;
+  overflow: hidden;
+}
+
+/* 悬浮列表要溢出这 48px 的格子——它自己是 absolute，靠父级 overflow 可见。
+   形变期间父级 overflow:hidden 是必需的（圆角裁切），此时列表也不该出现。 */
+.holo:hover {
+  overflow: visible;
+}
+
+.panelMorphing .holo:hover {
+  overflow: hidden;
+}
+
+.holoAvatar {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  cursor: pointer;
+}
+
+/* 悬浮列表：白 92% 磨玻璃感浮层，贴面板左上角、与面板等高（设计稿 7035-871） */
+.holoList {
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  width: 328px;
+  height: var(--panel-h);
+  padding: 24px;
+  overflow-y: auto;
+  border-radius: 24px;
+  background: light-dark(rgba(255, 255, 255, 0.92), rgba(31, 31, 35, 0.94));
+  backdrop-filter: blur(6px);
+  box-shadow: 0 30px 40px 0 light-dark(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.55));
+  animation: holoIn 0.16s ease;
+}
+
+@keyframes holoIn {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+}
+
+.holoItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 16px 8px 8px;
+  border: 0;
+  border-radius: 32px;
+  background: transparent;
+  color: light-dark(#000000, #ffffff);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.holoItem:hover:not(.holoItemOn) {
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
+  color: light-dark(#000000, #ffffff);
+}
+
+.holoItemOn,
+.holoItemOn:hover {
+  background: light-dark(#000000, #ffffff);
+  color: light-dark(#ffffff, #000000);
+}
+
+.holoText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.holoName {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.holoModel {
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+  opacity: 0.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Overview ---------- */
+
+.ovLayout {
+  display: flex;
+  align-items: flex-start;
+  gap: 64px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 72px 48px 32px 56px;
+}
+
+.ovCardWrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+/* 悬浮卡片出现删除按钮（删除功能移到这里） */
+.ovDelete {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 5px 16px;
+  border: 0;
+  border-radius: 30px;
+  background: #e5484d;
+  color: #ffffff;
+  font-size: 13px;
+  line-height: 20px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  cursor: pointer;
+}
+
+.ovCardWrap:hover .ovDelete,
+.ovDelete:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ovDelete:hover {
+  background: #d93036;
+  color: #ffffff;
+}
+
+.ovFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 36px 32px;
+  align-content: start;
+  flex: 1;
+  min-width: 0;
+  max-width: 720px;
+  padding-top: 16px;
+}
+
+.ovField {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ovFieldWide {
+  grid-column: 1 / -1;
+}
+
+.ovLabel {
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 18px;
+  color: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.5));
+}
+
+.ovValue {
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  color: light-dark(#000000, #f4f4f5);
+  word-break: break-all;
+}
+
+.ovValueNote {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 可编辑值：外观即纯文本，聚焦时出现下划线 */
+.ovInput {
+  width: 100%;
+  padding: 0 0 1px;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: light-dark(#000000, #f4f4f5);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+}
+
+.ovInput:hover {
+  border-bottom-color: light-dark(rgba(0, 0, 0, 0.15), rgba(255, 255, 255, 0.2));
+}
+
+.ovInput:focus {
+  outline: none;
+  border-bottom-color: light-dark(#000000, #ffffff);
+}
+
+.ovLink {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: light-dark(#000000, #f4f4f5);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  text-align: left;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.ovLink:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.ovHint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--muted);
+}
+
+/* 模型触发器：把聊天页胶囊皮成设计稿里的纯文本值，悬浮出现虚线下划线 */
+.modelPicker {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.modelPicker :global(.chat-pill--model) {
+  appearance: none;
+  height: auto;
+  max-width: none;
+  padding: 0 0 1px;
+  border: 0;
+  border-bottom: 1px dashed transparent;
+  border-radius: 0;
+  background: none;
+  color: light-dark(#000000, #f4f4f5);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  text-align: left;
+  white-space: normal;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.modelPicker :global(.chat-pill--model:hover) {
+  color: light-dark(#000000, #f4f4f5);
+  border-bottom-color: light-dark(rgba(0, 0, 0, 0.35), rgba(255, 255, 255, 0.4));
+  background: none;
+}
+
+/* 降级链 chips */
+.fallbacks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 4px;
+}
+
+.fallbackChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 300;
+  line-height: 24px;
+  color: light-dark(#000000, #f4f4f5);
+}
+
+.fallbackArrow {
+  margin-right: 6px;
+  color: var(--muted);
+}
+
+.fallbackRef {
+  word-break: break-all;
+}
+
+.fallbackX {
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fallbackX:hover {
+  color: #e5484d;
+}
+
+/* 黄色 Save 胶囊（设计稿 7046-4800；品牌黄不做暗色配对） */
+.saveBtn {
+  align-self: start;
+  padding: 8px 24px;
+  border: 1px solid #fff7bf;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, #f7de37 0%, rgba(255, 239, 132, 0) 49.5%, rgba(255, 239, 132, 0) 100%),
+    linear-gradient(180deg, #ffef84 0%, #ffef84 51%, #fff29c 100%);
+  color: #000000;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.31px;
+  box-shadow: 0 8px 12px rgba(251, 234, 125, 0.3);
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.saveBtn:hover:not(:disabled) {
+  filter: brightness(1.03);
+  color: #000000;
+}
+
+.saveBtn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.saveBtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ---------- Setup ---------- */
+
+.suLayout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 56px 24px 4px 8px;
+  gap: 0;
+}
+
+.suList {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  flex: 0 0 148px;
+  overflow-y: auto;
+  padding: 4px 12px 16px 0;
+}
+
+.suItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 32px;
+  background: transparent;
+  color: light-dark(#000000, #f4f4f5);
+  font-size: 14px;
+  font-weight: 300;
+  line-height: 22px;
+  letter-spacing: 0.02em;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.suItem:hover {
+  background: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.08));
+  color: light-dark(#000000, #f4f4f5);
+}
+
+.suItemOn {
+  font-weight: 500;
+}
+
+.suItemIcon {
+  flex: 0 0 auto;
+  width: 16px;
+  font-size: 12px;
+  line-height: 1;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.suItemOn .suItemIcon {
+  opacity: 1;
+}
+
+.suItemName {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.suDivider {
+  flex: 0 0 1px;
+  margin: 4px 0 24px;
+  border-radius: 24px;
+  background: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.08));
+}
+
+.suMain {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding-left: 24px;
+}
+
+.suHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-bottom: 20px;
+}
+
+.suFileIcon {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+}
+
+.suFileIcon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.suHeadText {
+  flex: 1;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.suFileName {
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 24px;
+  color: light-dark(#1a1a1a, #f4f4f5);
+}
+
+.suFileDesc {
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 18px;
+  color: light-dark(rgba(26, 26, 26, 0.75), rgba(255, 255, 255, 0.6));
+}
+
+/* 阅读态：点击进入编辑（光标提示可编辑） */
+.suRead {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  margin: 0 0 12px;
+  border-radius: 16px;
+  font-size: 14px;
+  font-weight: 300;
+  line-height: 22px;
+  color: light-dark(#000000, #e8e8ea);
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+  transition: background-color 0.15s ease;
+}
+
+.suRead:hover {
+  background: light-dark(rgba(0, 0, 0, 0.02), rgba(255, 255, 255, 0.03));
+}
+
+/* 编辑态：内容区衬 3% 黑圆角底（设计稿 7046-4666） */
+.suEditor {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  margin: 0 0 12px;
+  border: 0;
+  border-radius: 16px;
+  background: light-dark(rgba(0, 0, 0, 0.03), rgba(255, 255, 255, 0.05));
+  color: light-dark(#000000, #e8e8ea);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 300;
+  line-height: 22px;
+  resize: none;
+}
+
+.suEditor:focus {
+  outline: none;
+}
+
+/* ---------- Cron / Inspiration / Files 列表 ---------- */
+
+.tabPane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 40px 40px 16px;
+}
+
+.paneNote {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rowList {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 4px;
+  border: 0;
+  border-bottom: 1px solid light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.08));
+  background: none;
+  text-align: left;
+  color: light-dark(#000000, #f4f4f5);
+  font-size: 14px;
+}
+
+.rowClickable {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.rowClickable:hover {
+  background: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.04));
+  color: light-dark(#000000, #f4f4f5);
+}
+
+.rowTitle {
+  font-size: 15px;
+  font-weight: 400;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMonoTitle {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.rowMono {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rowMeta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rowSpacer {
+  flex: 1;
+}
+
+.chip {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border-radius: 30px;
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.1));
+  color: light-dark(rgba(0, 0, 0, 0.65), rgba(255, 255, 255, 0.7));
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chipOn {
+  background: light-dark(#e8f7ec, #1d3323);
+  color: light-dark(#1f7a37, #7ed695);
+}
+
+.pillBtn {
+  flex: 0 0 auto;
+  padding: 4px 14px;
+  border: 0;
+  border-radius: 30px;
+  background: light-dark(#000000, #ffffff);
+  color: light-dark(#ffffff, #000000);
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.pillBtn:hover {
+  opacity: 0.8;
+  color: light-dark(#ffffff, #000000);
+}
+
+.pillBtnGhost {
+  flex: 0 0 auto;
+  padding: 3px 14px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.2), rgba(255, 255, 255, 0.25));
+  border-radius: 30px;
+  background: transparent;
+  color: light-dark(#000000, #ffffff);
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.pillBtnGhost:hover {
+  border-color: light-dark(rgba(0, 0, 0, 0.45), rgba(255, 255, 255, 0.5));
+  color: light-dark(#000000, #ffffff);
+}
+
+/* ---------- Persistent Agent Harness ---------- */
+
+.harnessActions,
+.harnessMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.harnessActions {
+  padding: 0 4px 16px;
+}
+
+.harnessHistory {
+  padding: 24px 40px 16px;
+}
+
+.harnessHistory h3 {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 400;
+}
+
+.harnessList {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.harnessCard {
+  padding: 16px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+}
+
+.harnessMeta {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.harnessEditor {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 88px;
+  padding: 12px 16px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-radius: 16px;
+  background: light-dark(rgba(0, 0, 0, 0.02), rgba(255, 255, 255, 0.04));
+  color: var(--ui-text-1);
+  font: 300 12px/18px var(--mono);
+  resize: vertical;
+}
+
+.harnessEditor:focus {
+  border-color: var(--ui-text-1);
+  outline: none;
+}
+
+.harnessCard .harnessActions {
+  justify-content: flex-end;
+  padding: 12px 0 0;
+}
+
+.harnessPre {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ui-text-1);
+  font: 300 12px/18px var(--mono);
+}
+
+.historyLayout {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  gap: 24px;
+  padding: 32px 40px 16px;
+}
+
+.historySessions {
+  display: flex;
+  width: 220px;
+  flex: 0 0 220px;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 1180px) {
+  .ovLayout {
+    gap: 40px;
+    padding: 40px 32px 24px;
+  }
+
+  .ovFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .ovLayout {
+    flex-direction: column;
+  }
+
+  .suLayout {
+    padding-left: 0;
+  }
+
+  .suList {
+    flex-basis: 120px;
+  }
+
+  .historyLayout {
+    flex-direction: column;
+  }
+
+  .historySessions {
+    width: 100%;
+    flex-basis: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .cardNew,
+  .holoList {
+    animation: none;
+    transition: none;
+  }
+
+  .tilt3d {
+    transform: none;
+    transition: none;
+  }
+}
+
+/* 图标描边并入全站 1.2 CSS px 口径（R376）。类名经 CSS module 哈希，全局样式表选不到。
+   `vector-effect` 不可继承，故连子元素一起选。 */
+.panelClose svg,
+.panelClose svg *,
+.suFileIcon svg,
+.suFileIcon svg * {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2;
+}

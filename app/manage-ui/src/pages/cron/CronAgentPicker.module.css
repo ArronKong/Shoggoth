@@ -1,0 +1,57 @@
+/* Adapted from InspirationAutoGrowth's assistant picker; the same assets and
+   proportions keep both selectors familiar without importing its settings panel. */
+.popup {
+  position: relative; box-sizing: border-box; max-width: calc(100vw - 28px);
+  border: 0; border-radius: 24px;
+  background: linear-gradient(180deg, light-dark(#f9f9f9, #29292c), light-dark(#fff, #222225));
+  color: light-dark(#000, #fff); box-shadow: 2px 6px 20px light-dark(#0000000d, #00000040);
+  font-size: 14px; font-weight: 300; line-height: 20px; letter-spacing: -.3125px;
+  transform-origin: var(--transform-origin); transition: opacity 160ms ease, transform 160ms cubic-bezier(.22, 1, .36, 1);
+}
+.popup[data-starting-style], .popup[data-ending-style] { opacity: 0; }
+.avatar { position: relative; display: grid; place-items: center; width: 24px; height: 24px; flex: none; overflow: hidden; border-radius: 50%; background: var(--ui-agent-avatar-bg); color: var(--ui-agent-avatar-fg); font-size: 9px; font-weight: 400; letter-spacing: 0; }
+.agentName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.glyph { display: block; width: 16px; height: 16px; flex: none; background: currentColor; mask: var(--growth-glyph) center / 100% 100% no-repeat; }
+.check { --growth-glyph: url('../../assets/inspiration/check.svg'); position: relative; background: none; mask: none; }
+/* Figma 205:1165: keep the 16px frame fixed; rotate the exported 12 × 6 vector
+   around its own center at (7.5, 6.5) inside that frame. */
+.check::before {
+  content: ''; position: absolute; left: 1.5px; top: 3.5px; width: 12px; height: 6px;
+  background: currentColor; mask: var(--growth-glyph) center / 100% 100% no-repeat; transform: rotate(-45deg);
+}
+.runtimes { display: flex; align-items: center; flex: none; height: 32px; gap: 0; margin-bottom: 16px; overflow-x: auto; scrollbar-width: none; }
+.runtime { display: grid; place-items: center; min-width: 32px; height: 32px; flex: none; padding: 8px; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.runtime:hover:not(:disabled) { background: light-dark(#0000000d, #ffffff14); }
+.runtime[aria-selected=true], .runtime[aria-selected=true]:hover:not(:disabled) { background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
+.runtimeName { font-size: 10px; line-height: 16px; white-space: nowrap; }
+.runtime[data-runtime=shoggoth] { --growth-glyph: url('../../assets/inspiration/runtime-shoggoth.svg'); }
+.runtime[data-runtime=hermes] { --growth-glyph: url('../../assets/inspiration/runtime-hermes.svg'); }
+.runtime[data-runtime=codex] { --growth-glyph: url('../../assets/inspiration/runtime-codex.svg'); }
+.runtime[data-runtime=claude-code] { --growth-glyph: url('../../assets/inspiration/runtime-claude-code.svg'); }
+.runtime[data-runtime=grok-build] { --growth-glyph: url('../../assets/inspiration/runtime-grok-build.svg'); }
+.runtime[data-runtime=deepseek-harness] { --growth-glyph: url('../../assets/inspiration/runtime-deepseek-harness.svg'); }
+.runtime[data-runtime=deepseek-harness] .glyph { width: 18px; height: 18px; margin: -1px; }
+.agents { display: flex; flex-direction: column; min-height: 32px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.agent { display: flex; align-items: center; box-sizing: border-box; width: 100%; flex: none; padding: 4px; border: 0; border-radius: 16px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.agent:hover:not(:disabled) { background: light-dark(#0000000d, #ffffff14); }
+.agent > .check { margin: 0 8px; }
+.agent:disabled { opacity: .35; cursor: not-allowed; }
+.empty { margin: 8px 4px; color: var(--ui-text-2); font: inherit; }
+.required { color: var(--ui-text-3); }
+.trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; text-align: left; cursor: pointer; }
+.trigger > svg { flex: none; color: var(--ui-text-3); }
+.value, .placeholder { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.placeholder { color: var(--ui-text-3); }
+.trigger:disabled { cursor: default; opacity: .5; }
+.positioner { z-index: 300; }
+.popup { width: 380px; padding: 20px 24px; max-height: min(400px, calc(100dvh - 24px), var(--available-height, 400px)); overflow-y: auto; }
+.popup[data-starting-style], .popup[data-ending-style] { transform: translateY(-4px); }
+.runtime[data-runtime=openclaw], .runtime[data-runtime=antigravity], .runtime[data-runtime=pi] { border-radius: 16px; }
+.agents { max-height: 264px; margin-bottom: 0; gap: 4px; }
+.agent { gap: 8px; height: 40px; min-height: 40px; }
+.agent[aria-pressed=true], .agent[aria-pressed=true]:hover { background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
+.retry { display: block; border: 0; padding: 0; margin-top: 8px; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.trigger:focus-visible, .popup button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.agent:focus-visible { outline-offset: -2px; }
+
+@media (prefers-reduced-motion: reduce) { .popup { transition: none; } }

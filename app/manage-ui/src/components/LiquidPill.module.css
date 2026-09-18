@@ -1,0 +1,36 @@
+/* 运动参数与 PillTabs.module.css / App.tsx 的 NavActiveBlob 同一组：
+   前缘 250ms 先到位、后缘 330ms 慢半拍追上，两条边的进度差最大 ≈ 行程的 32%
+   （= 胶囊最多被拉长三分之一）。lead/lag 的比值定形变幅度，lag 定快慢。 */
+.pill {
+  position: absolute;
+  z-index: 0;
+  border-radius: 999px;
+  pointer-events: none;
+  transition-property: left, right;
+  --pill-lead: 250ms;
+  --pill-lag: 330ms;
+  /* 前缘：冲出去再缓停；后缘：起步慢半拍（拉出形变）再追上来 */
+  --pill-ease-lead: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --pill-ease-lag: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+.pill[data-flow="right"] {
+  transition-duration: var(--pill-lag), var(--pill-lead);
+  transition-timing-function: var(--pill-ease-lag), var(--pill-ease-lead);
+}
+
+.pill[data-flow="left"] {
+  transition-duration: var(--pill-lead), var(--pill-lag);
+  transition-timing-function: var(--pill-ease-lead), var(--pill-ease-lag);
+}
+
+/* 首帧/重量（none）不能有位移动画，否则胶囊会从容器左边缘飞进来 */
+.pill[data-flow="none"] {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill {
+    transition: none;
+  }
+}

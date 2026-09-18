@@ -1,0 +1,82 @@
+/* 48px 玻璃胶囊搜索框 —— 与 PillTabs / CronFilterMenu 同一份表面配方
+   （Figma 6999-633）：底部白光晕 + 顶部 3% 黑内影 + #F3F3F3 底，1px 白描边，极软投影。 */
+.box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: var(--search-w, min(280px, 42vw));
+  max-width: 100%;
+  height: 48px;
+  padding: 0 24px;
+  border: 1px solid #ffffff;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+  color: light-dark(#000000, #ffffff);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+  cursor: text;
+  transition:
+    border-color var(--ui-motion-state) ease,
+    box-shadow var(--ui-motion-state) ease;
+}
+
+:global(:root[data-theme="dark"]) .box {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+
+.box:focus-within {
+  border-color: var(--ui-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus) 18%, transparent);
+}
+
+.input {
+  font: inherit;
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  background: none;
+  color: light-dark(#000000, #ffffff);
+  outline: none;
+}
+
+.input::placeholder {
+  color: inherit;
+  opacity: 1;
+}
+
+/* type=search 的原生清除按钮在 macOS 上是灰色小叉，与胶囊语言不符，去掉。 */
+.input::-webkit-search-decoration,
+.input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.collapsed {
+  width: 48px;
+  min-width: 48px;
+  flex: none;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+.collapsed:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .box {
+    transition: none;
+  }
+}

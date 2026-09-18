@@ -1,0 +1,90 @@
+/* FilterTabs — 一排筛选胶囊的统一皮肤（源自 Dashboard 活动流筛选 R237）。
+   使用方可覆盖的变量：
+     --ft-color         静止字色（Dashboard 用次级灰，模型菜单用正文色）
+     --ft-font-size     字号
+     --ft-line-height   行高
+     --ft-font-weight   静止字重
+     --ft-active-weight 选中字重
+   颜色一律走 --ui-* 语义 token，亮/暗自适应。 */
+.row {
+  --ft-color: var(--ui-text-secondary);
+  --ft-font-size: var(--ui-fs-label);
+  --ft-line-height: 22px;
+  --ft-font-weight: 300;
+  --ft-active-weight: 300;
+  position: relative; /* LiquidPill 的定位基准，也是量 offsetLeft 的基准 */
+  display: inline-flex;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 项多到放不下时横向滚动（滚轮横滑在 TSX 里接管）。 */
+.scrollable {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* 选中态的底交给 LiquidPill 在项之间滑过去（R237/R238 同一套运动语言） */
+.pill {
+  background: var(--ui-text-1);
+}
+
+.tab {
+  position: relative; /* 压在 LiquidPill 上面 */
+  z-index: 1;
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: var(--ft-font-size);
+  line-height: var(--ft-line-height);
+  font-weight: var(--ft-font-weight);
+  white-space: nowrap;
+  color: var(--ft-color);
+  cursor: pointer;
+  /* 字色跟着胶囊的行程走（同 PillTabs）：让出的一侧 230ms 变回常色，太早会有
+     深色字压在还没走干净的深色胶囊上，太晚字像黏在胶囊上。 */
+  transition:
+    background var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1),
+    color 130ms ease 100ms;
+}
+
+/* 选中项不吃 hover 底色——它身下已经是胶囊，再垫一层会把胶囊盖掉。
+   :not(:disabled) 提权是为了压过全局 button:hover 的 accent 染色（单类压不过，
+   故 hover 规则显式重申 color，同 .chat-iconbtn 的做法）。 */
+.tab:hover:not(:disabled):not(.on) {
+  background: color-mix(in srgb, var(--ui-text-1) 8%, transparent);
+  color: var(--ft-color);
+}
+
+.on {
+  color: var(--ui-surface-1);
+  font-weight: var(--ft-active-weight);
+  transition:
+    background var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1),
+    color 120ms ease 40ms;
+}
+
+.on:hover:not(:disabled) {
+  color: var(--ui-surface-1);
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-focus);
+}
+
+.tooltipPositioner { z-index: 1200; }
+.tooltipPopup {
+  padding: 6px 10px;
+  border-radius: 9999px;
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  box-shadow: 0 3px 12px #0000001f;
+}

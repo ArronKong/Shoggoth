@@ -1,0 +1,13 @@
+/* Figma: roots 201:758, fruit 197:658, favorite 197:592; seed/sprout 187:1005.
+   Full 16px exports preserve the design's padding; tint with currentColor. */
+.icon { display: inline-grid; width: 16px; height: 16px; flex: none; vertical-align: middle; }
+.glyph { grid-area: 1 / 1; display: block; width: 100%; height: 100%; background: currentColor; mask: var(--inspiration-glyph) center / 100% 100% no-repeat; opacity: 0; transform: scale(.75); transition: opacity 220ms ease, transform 330ms cubic-bezier(.22, .61, .36, 1); }
+.glyph[data-visible=true] { opacity: 1; transform: scale(1); }
+.seed { --inspiration-glyph: url('../assets/inspiration/seed.svg'); }
+.roots { --inspiration-glyph: url('../assets/inspiration/roots.svg'); }
+.sprout { --inspiration-glyph: url('../assets/inspiration/sprout.svg'); }
+.fruit { --inspiration-glyph: url('../assets/inspiration/fruit.svg'); }
+.favorite { --inspiration-glyph: url('../assets/inspiration/favorite.svg'); display: inline-block; width: 16px; height: 16px; flex: none; vertical-align: middle; background: currentColor; mask: var(--inspiration-glyph) center / 100% 100% no-repeat; }
+@media (prefers-reduced-motion: reduce) {
+  .glyph { transition: none; }
+}

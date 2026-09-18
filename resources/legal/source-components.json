@@ -1,0 +1,223 @@
+{
+  "components": [
+    {
+      "name": "OpenClaw Control UI",
+      "license": "MIT",
+      "source": "https://github.com/openclaw/openclaw/tree/v2026.8.1",
+      "revision": "v2026.8.1 (workboard source annotation); other ports retain their source-file mappings",
+      "localFiles": [
+        "app/manage-ui/src/lib/markdown.ts",
+        "app/manage-ui/src/lib/slashCommands.ts",
+        "app/manage-ui/src/pages/workboard"
+      ],
+      "licenseFiles": [
+        "licenses/source/OPENCLAW.txt",
+        "licenses/source/OPENCLAW-THIRD-PARTY.txt"
+      ],
+      "notes": "Adapted to React/TypeScript, localized, and integrated with Shoggoth. The upstream Pi/pi-mono notice is retained conservatively."
+    },
+    {
+      "name": "Hermes Agent model settings",
+      "license": "MIT",
+      "source": "https://github.com/NousResearch/hermes-agent/tree/180291162ff4df0d42b5dc4fecd08005cf7cebf9/web",
+      "revision": "180291162ff4df0d42b5dc4fecd08005cf7cebf9 (locally available upstream reference)",
+      "localFiles": [
+        "app/manage-ui/src/pages/agents/AgentModelSettings.module.css",
+        "app/manage-ui/src/pages/agents/useAgentModelSettings.ts",
+        "app/manage-ui/src/pages/agents/AgentModelCards.tsx",
+        "app/manage-ui/src/pages/keys/OAuthProvidersCard.tsx"
+      ],
+      "licenseFiles": [
+        "licenses/source/HERMES.txt"
+      ],
+      "notes": "Shoggoth source annotations describe porting the upstream model/provider settings workflow. Adapted UI/API integration; original import revision and copied-line extent were not recorded. Upstream notice is retained conservatively rather than asserting every local line was copied."
+    },
+    {
+      "name": "LiquidGlass",
+      "license": "MIT",
+      "source": "https://github.com/ybouane/liquidglass/tree/00aafe50202e916951d6f30d49afa1197ca236a7",
+      "revision": "00aafe50202e916951d6f30d49afa1197ca236a7",
+      "localFiles": [
+        "app/manage-ui/src/pages/glass/liquidGlassGL.ts",
+        "app/manage-ui/src/pages/glass/shaders.ts"
+      ],
+      "licenseFiles": [
+        "licenses/source/LIQUIDGLASS.txt"
+      ],
+      "notes": "Upstream README/package.json explicitly declare MIT. Four shader bodies match this reference after removing comments/whitespace; the glass fragment shader and renderer are adapted. Original import commit was not recorded; this is a verified source reference, not a claim about the original import date."
+    },
+    {
+      "name": "Lobe Icons provider logos",
+      "license": "MIT",
+      "source": "https://github.com/lobehub/lobe-icons/tree/a94750e3f5f8fc33757b839d85030e742284e43a",
+      "revision": "a94750e3f5f8fc33757b839d85030e742284e43a (license reference)",
+      "localFiles": [
+        "app/manage-ui/src/assets/provider-logos",
+        "app/manage-ui/src/pages/keys/ProviderLogo.tsx"
+      ],
+      "licenseFiles": [
+        "licenses/source/LOBE-ICONS.txt"
+      ],
+      "notes": "Local static SVGs and a React wrapper. Source annotations identify the Lobe Icons format; original individual import revisions were not recorded. Brand trademarks are separate from this copyright license."
+    },
+    {
+      "name": "Lucide / Feather icons",
+      "license": "ISC AND MIT",
+      "source": "https://github.com/lucide-icons/lucide/tree/ba6751ac45d379f6359d75ef2228cff6ba96c122",
+      "revision": "ba6751ac45d379f6359d75ef2228cff6ba96c122 (license reference)",
+      "localFiles": [
+        "app/manage-ui/src/pages/workboard/icons.tsx",
+        "app/manage-ui/src/pages/keys/OAuthProvidersCard.tsx"
+      ],
+      "licenseFiles": [
+        "licenses/source/LUCIDE-FEATHER.txt"
+      ],
+      "notes": "Selected icon paths embedded in JSX; OAuth unlink icon adapted. Retains both Lucide and applicable Feather notices."
+    },
+    {
+      "name": "OpenAI Codex",
+      "license": "Apache-2.0",
+      "source": "https://github.com/openai/codex/tree/rust-v0.149.0",
+      "revision": "0.149.0",
+      "localFiles": [
+        "schemas/codex-app-server/0.149.0",
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "CODEX-LICENSE.txt",
+        "CODEX-NOTICE.txt"
+      ],
+      "notes": "Pinned unmodified runtime; generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately."
+    },
+    {
+      "name": "ChillKai",
+      "license": "OFL-1.1",
+      "source": "app/manage-ui/public/fonts/chill-kai",
+      "revision": "bundled font files; original copyright and license retained",
+      "localFiles": [
+        "app/manage-ui/public/fonts/chill-kai"
+      ],
+      "licenseFiles": [
+        "licenses/source/CHILL-KAI.txt"
+      ],
+      "notes": "Fonts retain their original names and license. CSS loading and subsetting/format conversion do not relicense them as MIT."
+    },
+    {
+      "name": "Courier Prime",
+      "license": "OFL-1.1",
+      "source": "app/manage-ui/public/fonts/courier-prime",
+      "revision": "bundled font files; original copyright and license retained",
+      "localFiles": [
+        "app/manage-ui/public/fonts/courier-prime"
+      ],
+      "licenseFiles": [
+        "licenses/source/COURIER-PRIME.txt"
+      ],
+      "notes": "Fonts retain their original names and license. CSS loading and subsetting/format conversion do not relicense them as MIT."
+    },
+    {
+      "name": "Source Han Serif CN",
+      "license": "OFL-1.1",
+      "source": "app/manage-ui/public/fonts/source-han-serif-cn",
+      "revision": "bundled font files; original copyright and license retained",
+      "localFiles": [
+        "app/manage-ui/public/fonts/source-han-serif-cn"
+      ],
+      "licenseFiles": [
+        "licenses/source/SOURCE-HAN-SERIF-CN.txt"
+      ],
+      "notes": "Fonts retain their original names and license. CSS loading and subsetting/format conversion do not relicense them as MIT."
+    },
+    {
+      "name": "ripgrep (Codex bundled program)",
+      "license": "MIT OR Unlicense",
+      "source": "https://github.com/BurntSushi/ripgrep/tree/15.2.0",
+      "revision": "15.2.0 (binary reports e89fff89ac)",
+      "localFiles": [
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "licenses/source/RIPGREP-MIT.txt",
+        "licenses/source/RIPGREP-UNLICENSE.txt"
+      ],
+      "notes": "Unmodified program in the pinned Codex package; both upstream license alternatives retained."
+    },
+    {
+      "name": "PCRE2 (ripgrep embedded library)",
+      "license": "BSD-3-Clause WITH PCRE2-exception",
+      "source": "https://github.com/PCRE2Project/pcre2/tree/pcre2-10.45",
+      "revision": "10.45 (reported by bundled ripgrep --version)",
+      "localFiles": [
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "licenses/source/PCRE2.txt"
+      ],
+      "notes": "Bundled through ripgrep; full upstream notice includes the contributed-file notices."
+    },
+    {
+      "name": "zsh (Codex bundled shell)",
+      "license": "LicenseRef-Zsh",
+      "source": "https://github.com/zsh-users/zsh/tree/zsh-5.9",
+      "revision": "binary reports 5.9.0.3-test; 5.9 upstream license reference",
+      "localFiles": [
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "licenses/source/ZSH.txt"
+      ],
+      "notes": "Preserved zsh upstream redistribution terms. Shell shipped unchanged as part of the pinned Codex package; upstream package does not identify a separate zsh source commit."
+    }
+  ],
+  "npmOverrides": [
+    {
+      "names": [
+        "@trycua/cua-driver",
+        "@trycua/cua-driver-darwin-arm64",
+        "@trycua/cua-driver-darwin-x64"
+      ],
+      "version": "0.22.0",
+      "licenseFiles": [
+        "CUA-LICENSE.md",
+        "CUA-NOTICE.md",
+        "MPL-2.0.txt"
+      ],
+      "source": "https://github.com/trycua/cua/tree/cua-driver-rs-v0.22.0"
+    },
+    {
+      "names": [
+        "@ubjs/core",
+        "@ubjs/node",
+        "@ubjs/node-darwin-arm64",
+        "@ubjs/node-darwin-x64"
+      ],
+      "version": "0.31.0-3",
+      "licenseFiles": [
+        "MPL-2.0.txt",
+        "CUA-NOTICE.md",
+        "RUNTIME-LICENSE-SOURCES.md"
+      ],
+      "source": "https://github.com/jhugman/uniffi-bindgen-react-native"
+    },
+    {
+      "names": [
+        "@xterm/headless"
+      ],
+      "version": "6.0.0",
+      "licenseFiles": [
+        "XTERM-LICENSE.txt"
+      ],
+      "source": "https://github.com/xtermjs/xterm.js/tree/6.0.0"
+    },
+    {
+      "names": [
+        "html-parse-stringify"
+      ],
+      "version": "3.0.1",
+      "licenseFiles": [
+        "licenses/source/HTML-PARSE-STRINGIFY.txt"
+      ],
+      "source": "https://github.com/HenrikJoreteg/html-parse-stringify/tree/ada9e1448f34a57c17e7e23ba4af6d217e3d7baf"
+    }
+  ]
+}

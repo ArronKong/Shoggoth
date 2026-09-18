@@ -1,0 +1,172 @@
+/* Confirm dialog — base-ui AlertDialog styled as a centered modal. Toast stack —
+   base-ui Toast (a11y live region + hover-pause) overridden to a plain vertical
+   stack. Page-facing button classes (.btn-danger / .btn-primary) stay global.
+   Backdrop and Popup are siblings under the portal, so the panel centers itself. */
+/* Confirm 的 Portal 浮层使用根级语义 token，避免脱离页面作用域后主题失配。 */
+/* 遮罩与内容弹窗同口径：70% 纯黑、两个主题同值（设计稿 7111:261）。 */
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 110;
+  opacity: 1;
+  transition: opacity var(--ui-motion-modal-enter) var(--ui-motion-modal-ease);
+}
+
+.modalOverlay[data-starting-style],
+.modalOverlay[data-ending-style] {
+  opacity: 0;
+}
+
+.modalOverlay[data-ending-style] {
+  transition-duration: var(--ui-motion-modal-exit);
+}
+/* 文字小弹窗（设计稿 7111:261）：640 宽、圆角 40、无描边、四周内距 40，**高度跟着
+   正文长短自适应**——设计稿给的 200/224 两态正是一行/两行正文的结果
+   （40 + 标题 28 + 4 + 正文 n×24 + 24 + 按钮 40 + 40）。没有关闭键（设计稿里
+   那枚 ✕ 被 mask 裁掉了）。 */
+.modalPanel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border: 0;
+  border-radius: 40px;
+  background: var(--ui-surface-1);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.2);
+  padding: 40px;
+  width: min(640px, calc(100vw - 80px));
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 111;
+  opacity: 1;
+  transition:
+    opacity var(--ui-motion-modal-enter) var(--ui-motion-modal-ease),
+    transform var(--ui-motion-modal-enter) var(--ui-motion-modal-ease);
+}
+
+.modalPanel[data-starting-style],
+.modalPanel[data-ending-style] {
+  opacity: 0;
+  transform: translate(-50%, -48%);
+}
+
+.modalPanel[data-ending-style] {
+  transition-duration: var(--ui-motion-modal-exit);
+  pointer-events: none;
+}
+.modalTitle {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 28px;
+  letter-spacing: -0.4395px;
+  color: var(--ui-text-1);
+}
+.modalBody {
+  color: light-dark(rgba(0, 0, 0, 0.8), rgba(255, 255, 255, 0.8));
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  word-break: break-word;
+  min-height: 0;
+  overflow-y: auto;
+}
+.modalFoot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+  flex-shrink: 0;
+}
+
+/* --- Toast (base-ui Toast as a plain vertical stack; Root forced to flow) --- */
+.toastStack {
+  position: fixed;
+  right: 1.25rem;
+  top: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  /* 通知层，跟 ChatPage 的 .chat-toast 同档：必须高过沉浸覆盖层(1000) 与浮在它上面
+     的侧边导航(1001)——导航栏在沉浸模式下可点，点当前项刷新的「已刷新」就必须看得见，
+     200 会被整片背景视频吃掉（R361 实测）。 */
+  z-index: 10001;
+  pointer-events: none;
+}
+/* Toast：success/error 两颗语义色固定不随明暗切换；中性 info 深色取反（见下）。 */
+.toast {
+  position: relative;
+  pointer-events: auto;
+  width: max-content;
+  max-width: 360px;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  color: #ffffff;
+  box-shadow: var(--ui-shadow-card);
+  word-break: break-word;
+  animation: toastIn var(--ui-motion-popover) ease;
+  transition:
+    box-shadow var(--ui-motion-state) ease,
+    opacity var(--ui-motion-state) ease,
+    transform var(--ui-motion-state) ease;
+}
+@keyframes toastIn {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.toast[data-ending-style] {
+  opacity: 0;
+}
+.toast:hover {
+  box-shadow: var(--ui-shadow-hover);
+}
+.success { background: #5CD757; }
+.error { background: #FA5B5B; }
+/* 中性 info 是纯黑实底，深色画布 (#18181b) 上会整颗隐形——按「中性色深色取反」
+   的既有先例（--ui-switch-on: light-dark(#000,#fff)）翻白配墨字；两颗语义色
+   照旧固定不动。color 写在这里靠源序压过 .toast 的恒白字。 */
+.info {
+  background: light-dark(#000000, #ffffff);
+  color: light-dark(#ffffff, #171717);
+}
+.toastTitle {
+  margin: 0;
+  font: inherit;
+  font-weight: inherit;
+}
+
+/* 减少动态效果时保留 modal 的居中几何，并清除 toast 的位移状态。 */
+@media (prefers-reduced-motion: reduce) {
+  .modalOverlay,
+  .modalOverlay[data-starting-style],
+  .modalOverlay[data-ending-style],
+  .modalPanel,
+  .modalPanel[data-starting-style],
+  .modalPanel[data-ending-style],
+  .toast {
+    animation: none;
+    transition: none;
+  }
+
+  .modalOverlay,
+  .modalOverlay[data-starting-style],
+  .modalOverlay[data-ending-style] {
+    opacity: 1;
+  }
+
+  .modalPanel,
+  .modalPanel[data-starting-style],
+  .modalPanel[data-ending-style] {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+
+  .toast {
+    transform: none;
+  }
+}

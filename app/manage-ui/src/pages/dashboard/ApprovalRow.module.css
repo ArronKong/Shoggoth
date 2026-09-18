@@ -1,0 +1,111 @@
+/* Figma 279:886 / 279:1389, shared attention color with InspirationRunBar. */
+.root {
+  --approval-color: #e58b5a; --status-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --status-header-height: 32px;
+  position: relative; isolation: isolate;
+  min-width: 0; color: #fff; font-size: 12px; line-height: 20px;
+  transition: margin-bottom 220ms var(--status-ease);
+}
+.root[data-expanded=true] { margin-bottom: 8px; }
+/* One continuous surface follows the reveal's actual height, stopping before
+   the actions. Only its contents fade; there is no header/body background seam. */
+.root::before {
+  content: ""; position: absolute; z-index: -1; inset: 0 0 auto; pointer-events: none;
+  height: min(100%, calc(var(--status-header-height) + var(--approval-content-height, 0px)));
+  border-radius: 16px; background: #1c1c1c;
+  transition: background-color 220ms var(--status-ease);
+}
+.root[data-tone=attention]::before { background: var(--approval-color); }
+.header {
+  position: relative; isolation: isolate; overflow: hidden;
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: var(--status-header-height);
+  padding: 0 20px 0 8px; border: 0; border-radius: 16px; background: transparent;
+  color: #fff; font: inherit; text-align: left; cursor: pointer;
+}
+.header:hover:not(:disabled), .header:active:not(:disabled) { background: transparent; color: #fff; }
+.header:disabled { cursor: default; opacity: 1; }
+.header > * { position: relative; z-index: 1; }
+.header::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent 25%, #ffffff26 50%, transparent 75%);
+  transform: translateX(-100%); animation: running-sheen 2.8s linear infinite;
+  transition: opacity 220ms var(--status-ease);
+}
+.root[data-tone=attention] .header::after { opacity: 0; }
+@keyframes running-sheen { to { transform: translateX(100%); } }
+.header:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.avatar {
+  position: relative; display: grid; place-items: center; flex: 0 0 16px; width: 16px; height: 16px;
+  overflow: hidden; border-radius: 50%; background: var(--ui-agent-avatar-bg); color: var(--ui-agent-avatar-fg); font-size: 10px;
+}
+.name { flex: 0 1 auto; max-width: 25%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 300; }
+.summary { flex: 1; min-width: 0; transition: opacity 160ms var(--status-ease); }
+.root[data-expanded=true] .summary { opacity: 0; }
+.status { flex: 0 1 auto; max-width: 55%; min-width: 0; margin-left: auto; font-weight: 300; text-align: right; }
+.summary, .status { display: grid; }
+.summary > span, .status > span {
+  grid-area: 1 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: opacity 180ms var(--status-ease);
+}
+.root [data-status-copy=attention], .root[data-tone=attention] [data-status-copy=running] { opacity: 0; }
+.root[data-tone=attention] [data-status-copy=attention] { opacity: 1; }
+.reveal {
+  display: grid; grid-template-rows: 0fr; opacity: 0; visibility: hidden;
+  transition: grid-template-rows 220ms var(--status-ease), opacity 160ms var(--status-ease), visibility 0s 220ms;
+}
+.root[data-expanded=true] .reveal { grid-template-rows: 1fr; opacity: 1; visibility: visible; transition-delay: 0s; }
+.clip { min-height: 0; overflow: hidden; }
+.expansion { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 12px; }
+.expansion :global(.chat-prompt--approval) { display: contents; }
+.expansion :global(.chat-prompt__content), .readonly {
+  box-sizing: border-box; display: flex; flex-direction: column; gap: 20px; width: 100%; min-width: 0;
+  min-height: 96px; max-height: min(320px, 40vh); padding: 0 20px 16px 32px;
+  overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #ffffff66 transparent;
+  border-radius: 0; background: transparent; color: #fff;
+}
+.expansion :global(.chat-prompt__content) > *, .readonly > * { flex-shrink: 0; }
+.expansion :global(.chat-prompt__head) { display: none; }
+.expansion :global(.chat-prompt__action) { font: inherit; margin: 0; }
+/* A command already names the operation; file/permission summaries retain their action heading. */
+.expansion :global(.chat-prompt__content):has(:global(.chat-prompt__cmd)) > :global(.chat-prompt__action) { display: none; }
+.expansion :global(.chat-prompt__q), .expansion :global(.chat-prompt__desc),
+.expansion :global(.chat-prompt__summary) :is(dt, dd), .readonly p {
+  margin: 0; color: #fff; font-size: 12px; font-weight: 400; line-height: 20px; overflow-wrap: anywhere;
+}
+.expansion :global(.chat-prompt__content) > :global(.chat-prompt__q) { max-width: 318px; }
+.expansion :global(.chat-prompt__cmd), .readonly pre {
+  margin: 0; padding: 0; max-height: none; overflow: visible; border-radius: 0; background: transparent;
+  color: #fff; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.expansion :global(.chat-prompt__actions) { flex: 1 1 auto; gap: 8px; margin: 8px 0 0; }
+.expansion :global(.chat-prompt__btn), .expansion :global(.chat-prompt__btn.is-primary) {
+  min-height: 32px; padding: 6px 8px; border: 1px solid var(--ui-text-1); border-radius: 16px;
+  background: transparent; color: var(--ui-text-1); font: inherit; line-height: 18px;
+}
+.expansion :global(.chat-prompt__btn):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -3px; }
+.expansion :global(.chat-prompt__status) { color: var(--ui-text-2); }
+.utilities { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-height: 32px; margin: 8px 0 0 auto; }
+.utilities button { padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--ui-text-2); font: inherit; cursor: pointer; }
+.utilities button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
+.expansion :global(.chat-prompt--input) {
+  box-sizing: border-box; width: 100%; max-width: none; margin: 0; padding: 8px 20px 16px 32px;
+  border-radius: 0; background: transparent; color: #fff;
+  max-height: min(440px, 50vh); overflow: auto; overscroll-behavior: contain;
+}
+.expansion :global(.chat-prompt__input) { min-width: 0; color: #fff; border-color: #fff; }
+.expansion :global(.chat-prompt__input)::placeholder { color: #ffffffbb; }
+.expansion :global(.chat-prompt--input) :global(.chat-prompt__btn) { color: #fff; border-color: #fff; }
+.expansion :global(.chat-prompt--input) :global(.chat-prompt__btn[aria-pressed=true]) { background: #ffffff30; }
+@media (hover: hover) and (pointer: fine) {
+  .expansion :global(.chat-prompt__btn):hover:not(:disabled) { background: color-mix(in srgb, var(--ui-text-1) 6%, transparent); }
+  .utilities button:hover:not(:disabled) { color: var(--ui-text-1); }
+}
+.root[data-keyboard=true], .root[data-keyboard=true] :is(.header, .summary, .reveal) { transition: none; }
+@media (pointer: coarse) {
+  .root { --status-header-height: 44px; }
+  .expansion :global(.chat-prompt__btn), .utilities button { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .root, .root::before, .root *, .root *::before, .root *::after { transition: none !important; animation: none !important; }
+  .header::after { display: none; }
+}

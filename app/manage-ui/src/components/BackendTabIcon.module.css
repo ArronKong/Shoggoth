@@ -1,0 +1,36 @@
+/* The exported monochrome assets inherit both the selected and theme colors. */
+.icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: var(--backend-tab-icon-size, 16px);
+  height: var(--backend-tab-icon-size, 16px);
+  flex: none;
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.glyph::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  mask: var(--backend-tab-glyph) center / 100% 100% no-repeat;
+}
+
+.icon[data-backend-icon="shoggoth"] { --backend-tab-glyph: url("../assets/backend-icons/shoggoth.svg"); }
+.icon[data-backend-icon="hermes"] { --backend-tab-glyph: url("../assets/backend-icons/hermes.svg"); }
+.icon[data-backend-icon="openclaw"] { --backend-tab-glyph: url("../assets/backend-icons/openclaw.svg"); }
+.icon[data-backend-icon="codex"] { --backend-tab-glyph: url("../assets/backend-icons/codex.svg"); }
+.icon[data-backend-icon="claude-code"] { --backend-tab-glyph: url("../assets/backend-icons/claude-code.svg"); }
+.icon[data-backend-icon="grok-build"] { --backend-tab-glyph: url("../assets/backend-icons/grok-build.svg"); }
+.icon[data-backend-icon="antigravity"] { --backend-tab-glyph: url("../assets/backend-icons/antigravity.svg"); }
+.icon[data-backend-icon="deepseek-harness"] { --backend-tab-glyph: url("../assets/backend-icons/deepseek-harness.svg"); }
+.icon[data-backend-icon="pi"] { --backend-tab-glyph: url("../assets/backend-icons/pi.svg"); }
+
+/* These three exports contain the inner glyph rather than its 16px frame. */
+.icon[data-backend-icon="shoggoth"]::before { inset: 9.375% 8.59375% 8.59375% 9.375%; }
+.icon[data-backend-icon="openclaw"]::before { inset: 4.93% 0 3.47%; }
+.icon[data-backend-icon="claude-code"]::before { inset: 3.125%; }

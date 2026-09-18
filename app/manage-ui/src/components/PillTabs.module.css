@@ -1,0 +1,160 @@
+/* PillTabs — 统一胶囊切换组件（Figma 6999-633,R206）。
+   BackendTabs（OpenClaw|Hermes）与 usage 区间切换共用这一份视觉:
+   容器三层背景 = 底部白光晕 + 顶部 3% 黑内影 + #F3F3F3（用户给的 dev 参数）;
+   非选中文字纯黑（暗色纯白）;hover 字色不变、底 = 黑 10%（暗色白 10%）。 */
+.root {
+  display: contents;
+}
+
+.tabs {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 48px;
+  /* 32px tab + 14px padding + 2px border preserves the 48px single-row control. */
+  padding: 7px 8px;
+  gap: 4px 0;
+  border: 1px solid light-dark(#ffffff, rgba(255, 255, 255, 0.08));
+  border-radius: 24px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+}
+
+:global(:root[data-theme="dark"]) .tabs {
+  /* 同配方暗色适配：光晕/内影换低亮度,底 #2a2a2e */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+
+/* 选中态的黑胶囊不再由每个 tab 自己画，而是这一块在 tab 之间「流」过去（R235）。
+   液体感 = 两条竖边走不同的时长/曲线：朝行进方向的那条（前缘）先到位，另一条
+   （后缘）慢半拍才跟上，途中胶囊被拉长、落位时收回；竖向的挤压回弹在 TSX 里补。 */
+.indicator {
+  position: absolute;
+  z-index: 0;
+  top: var(--active-tab-top);
+  left: var(--active-tab-left);
+  right: var(--active-tab-right);
+  height: var(--active-tab-height);
+  border-radius: 999px;
+  background: light-dark(#000000, #ffffff);
+  pointer-events: none;
+  transition-property: left, right;
+  /* 这四个数决定「多快」和「多软」：总时长 = lag；两条边的进度差最大 ≈ 行程的
+     32%（t≈62ms 处）= 胶囊最多被拉长三分之一，够看出液体感又不糊满整条轨道。
+     lead/lag 的比值定形变幅度（等比缩放不改幅度），lag 定快慢。 */
+  --pill-lead: 250ms;
+  --pill-lag: 330ms;
+  /* 前缘：冲出去再缓停；后缘：起步慢半拍（拉出形变）再追上来 */
+  --pill-ease-lead: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --pill-ease-lag: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+.indicator[data-activation-direction="right"] {
+  transition-duration: var(--pill-lag), var(--pill-lead);
+  transition-timing-function: var(--pill-ease-lag), var(--pill-ease-lead);
+}
+
+.indicator[data-activation-direction="left"] {
+  transition-duration: var(--pill-lead), var(--pill-lag);
+  transition-timing-function: var(--pill-ease-lead), var(--pill-ease-lag);
+}
+
+/* 首帧/无来源（none）不能有位移动画，否则胶囊会从容器左边缘飞进来 */
+.indicator[data-activation-direction="none"] {
+  transition: none;
+}
+
+.tab {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: light-dark(#000000, #ffffff);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  white-space: nowrap;
+  letter-spacing: -0.31px;
+  cursor: pointer;
+  /* 字色跟着胶囊的行程走：让出的那一侧 230ms 就变回黑（后缘此时已扫过约八成，
+     再等下去会显得字「黏」在胶囊上）。接管的一侧在 .tabOn 里更早变白。 */
+  transition:
+    background-color var(--ui-motion-state) ease,
+    color 130ms ease 100ms;
+}
+
+/* hover：字色不变，只垫黑 10%（暗色白 10%）底（用户拍板）。
+   color 必须在这里重申：styles.css 有全局 button:hover:not(:disabled)
+   把字色翻成 accent 蓝，特异性 (0,2,1) 压过裸 .tab——hover 态不显式
+   声明 color 就会漏蓝（R206 追修）。 */
+.tab:hover:not(.tabOn) {
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.1));
+  color: light-dark(#000000, #ffffff);
+}
+
+/* 选中态悬浮同理防全局蓝：黑底白字保持不变 */
+.tab.tabOn:hover {
+  color: light-dark(#ffffff, #000000);
+}
+
+.tabOn {
+  color: light-dark(#ffffff, #000000);
+  transition:
+    background-color var(--ui-motion-state) ease,
+    color 120ms ease 40ms;
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-focus);
+}
+
+/* Figma 251:1385: 32px targets + 8px inset, including the container border. */
+.iconTabs {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  gap: 0;
+  padding: 7px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+/* Base UI measures the trailing inset against scrollWidth. The indicator's
+   containing block is clientWidth, so derive its right edge from the tab size. */
+.iconTabs .indicator {
+  right: calc(100% - var(--active-tab-left) - var(--active-tab-width));
+}
+
+.iconTab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab,
+  .tabOn,
+  .indicator {
+    transition: none;
+  }
+}

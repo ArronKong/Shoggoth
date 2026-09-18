@@ -1,0 +1,872 @@
+/* main.content 是 column flex 滚动容器，页壳作为 flex item 默认会被 shrink 到
+   容器高度（内容溢出但盒子只有一屏高）——粘性保存条的包含块因此只有一屏，
+   滚过一屏就脱开。让页壳按内容撑开即可（只作用于设置页，不动其它页面）。 */
+.page.management-page.settings-page {
+  flex-shrink: 0;
+}
+
+/* 设置页只负责页面内视觉，外层 gutter 与页头排版统一交给 management chrome。 */
+.management-page.settings-page {
+  --settings-muted-surface-1: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  --settings-muted-surface-2: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-2));
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--ui-text-1);
+}
+
+/* 单列阅读布局：页头、分区和保存条共用 960px 内容宽。 */
+.management-page.settings-page > .page-head,
+.management-page.settings-page > .error,
+.management-page.settings-page .settings-stack,
+.management-page.settings-page .settings-savebar {
+  max-width: 960px;
+}
+
+.management-page.settings-page .settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+  min-width: 0;
+}
+
+.management-page.settings-page .settings-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 24px;
+  min-width: 0;
+}
+
+.management-page.settings-page .settings-pair .settings-section {
+  min-width: 0;
+}
+
+.management-page.settings-page .settings-pair .settings-prefs-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.management-page.settings-page .settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  scroll-margin-top: 16px;
+}
+
+.management-page.settings-page .settings-section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 0 4px;
+}
+
+/* 区块标题与 Models/Skills 的 .ui-secthead 同一档（18/24·500，规范 §6）。 */
+.management-page.settings-page .settings-h {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+/* 区块说明：把原先散在卡片里的「这一节是干嘛的」提到标题下面。 */
+.management-page.settings-page .settings-sech {
+  margin: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-canvas));
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 300;
+}
+
+/* 副标题里的「有未保存改动」。 */
+.management-page.settings-page .settings-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.management-page.settings-page .settings-dirty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ui-warning) 14%, var(--ui-canvas));
+  color: var(--ui-warning);
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: 0;
+}
+
+.management-page.settings-page .settings-dirty::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+/* 卡片表面上的辅助文字按 surface-1 重新计算对比度。 */
+.management-page.settings-page .status-label,
+.management-page.settings-page .settings-card .field-label,
+.management-page.settings-page .settings-card .field-hint,
+.management-page.settings-page .creds-desc {
+  color: var(--settings-muted-surface-1);
+}
+
+/* 次级表面上的辅助文字按 surface-2 重新计算对比度。 */
+.management-page.settings-page .status-conn.off,
+.management-page.settings-page .creds-status {
+  color: var(--settings-muted-surface-2);
+}
+
+/* 页头动作走全站统一的胶囊（.ui-cbtn / .ui-cbtn--gold，见 manage-skin.css）；
+   这里只保证两颗之间有间距。 */
+.management-page.settings-page .page-head-actions {
+  gap: 8px;
+}
+
+/* 状态概览采用语义色，卡片表面则统一使用设计 token。 */
+.management-page.settings-page .status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: 16px;
+  min-width: 0;
+}
+
+.management-page.settings-page .status-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  color: var(--ui-text-1);
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+}
+
+
+.management-page.settings-page .status-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.management-page.settings-page .status-name {
+  min-width: 0;
+  color: var(--ui-text-1);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.management-page.settings-page .status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+.management-page.settings-page .status-dot.on {
+  background: var(--ui-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-success) 16%, transparent);
+}
+
+.management-page.settings-page .status-dot.off {
+  background: var(--ui-text-3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-text-3) 16%, transparent);
+}
+
+.management-page.settings-page .status-conn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.management-page.settings-page .status-conn.on {
+  border: 1px solid color-mix(in srgb, var(--ui-success) 32%, var(--ui-surface-1));
+  color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 10%, var(--ui-surface-1));
+}
+
+.management-page.settings-page .status-conn.off {
+  border: 1px solid var(--ui-hairline);
+  background: var(--ui-surface-2);
+}
+
+.management-page.settings-page .status-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* 端点：卡片的第二行身份信息，等宽 + 单行省略（完整值在 title 里）。 */
+.management-page.settings-page .status-endpoint {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--ui-text-1) 58%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 指标格：原来 5 行 label/value 表格压成一排「大数字 + 小标签」。
+   用 flex 而不是 grid —— grid 在「格数填不满一行」时会留下空的灰格子
+   （容器底色从空位透出来，实测 3 格排 2 列时右下角一块灰）。 */
+.management-page.settings-page .status-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--ui-surface-2);
+}
+
+/* 只有一格时不撑满整卡——一个大数字占满一行会显得空。 */
+.management-page.settings-page .status-metrics:has(.status-metric:only-child) {
+  width: fit-content;
+  min-width: 160px;
+}
+
+.management-page.settings-page .status-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 96px;
+  min-width: 96px;
+  padding: 12px 14px;
+}
+
+/* 分隔线画在格子自己的左内边，容器不再需要靠 gap 露底色。 */
+.management-page.settings-page .status-metric + .status-metric {
+  box-shadow: inset 1px 0 0 var(--ui-hairline);
+}
+
+.management-page.settings-page .status-metric-value {
+  color: var(--ui-text-1);
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「已配置 / 未配置」是文字不是数值，降到正文档，别跟数字抢字号。 */
+.management-page.settings-page .status-metric-value.is-text {
+  font-size: 14px;
+  line-height: 28px;
+}
+
+.management-page.settings-page .status-metric-label {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-2));
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 300;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 版本条：当前 · 最新 在左，状态 + 立即更新 在右。 */
+.management-page.settings-page .status-version {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  min-width: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--ui-hairline);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.management-page.settings-page .status-version-nums {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-width: 0;
+}
+
+.management-page.settings-page .status-version-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.management-page.settings-page .status-version-label {
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  font-size: 12px;
+  font-weight: 300;
+}
+
+.management-page.settings-page .status-version-pair .mono {
+  color: var(--ui-text-1);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* 卡片在两列网格里只有 ~400px，状态那一簇基本必然换行——与其右对齐吊在半空，
+   不如明确排成第二行左对齐，读起来是「版本号 / 结论+动作」两段。 */
+.management-page.settings-page .status-version-state {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+/* 更新日志外链：跟正文同色系 + 下划线表意可点，不引入链接蓝（R317 起全站去蓝）。 */
+.management-page.settings-page .status-release-notes {
+  color: color-mix(in srgb, var(--ui-text-1) 72%, var(--ui-surface-1));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.management-page.settings-page .status-release-notes:hover {
+  color: var(--ui-text-1);
+}
+
+.management-page.settings-page .update-state,
+.management-page.settings-page .standing-grants {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ui-hairline);
+}
+
+.management-page.settings-page .update-decision {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+}
+
+.management-page.settings-page .update-decision--warning {
+  border-color: color-mix(in srgb, var(--ui-warning) 45%, var(--ui-hairline));
+}
+
+.management-page.settings-page .update-decision p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.management-page.settings-page .update-decision > button {
+  justify-self: start;
+}
+
+.management-page.settings-page .update-capability-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.management-page.settings-page .update-capability-list li span {
+  display: block;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  overflow-wrap: anywhere;
+}
+
+.management-page.settings-page .standing-grants__head,
+.management-page.settings-page .standing-grant {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.management-page.settings-page .standing-grants__head {
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.management-page.settings-page .standing-grants__list {
+  display: grid;
+  gap: 8px;
+}
+
+.management-page.settings-page .standing-grant {
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+}
+
+.management-page.settings-page .standing-grant__body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.management-page.settings-page .standing-grant__body > * {
+  overflow-wrap: anywhere;
+}
+
+/* 更新失败块（罕见路径）仍是 label/value 行，保留紧凑排版。 */
+.management-page.settings-page .status-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  color: var(--ui-text-1);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.management-page.settings-page .status-label {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.management-page.settings-page .status-row .mono {
+  min-width: 0;
+  color: var(--ui-text-1);
+  overflow-wrap: anywhere;
+}
+
+/* 卡片头右侧的「断开连接 / 重新连接」贴右；外形走 .ui-cbtn--sm。 */
+.management-page.settings-page .status-conn-toggle {
+  margin-left: auto;
+}
+
+.management-page.settings-page .status-dashboards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ui-hairline);
+}
+
+/* 基础层（styles.css .status-dash）带 flex-wrap:wrap，会把版本/徽标甩到第二行；
+   这里明确取消换行，改成「URL 省略」吸收多余宽度。 */
+.management-page.settings-page .status-dash {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 12px;
+  color: var(--ui-text-1);
+  background: var(--ui-surface-2);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* URL 是最长也最不重要的一段：让它独吞剩余宽度并省略，版本/徽标才不会被挤到下一行。 */
+.management-page.settings-page .status-dash .mono {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-page.settings-page .status-dash > span:not(.mono) {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 表单卡与状态卡共用 surface / hairline / radius / shadow 语言。 */
+.management-page.settings-page .settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  padding: 24px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  color: var(--ui-text-1);
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+}
+
+.management-page.settings-page .settings-card > .field {
+  min-width: 0;
+}
+
+/* 输入 / 多行 / Select 触发器的**外观一律不在这里定义**（R320）。本页原先照旧口径
+   重写过一整套（边界 50% 灰、圆角 12、内距 8/12、蓝色 focus 环），特异性 (0,3,0)
+   压死全局，导致设计稿（7112:1813）改了共享组件后设置页原样不动。字号/字重/间距
+   同理交还给 `.field-*`。这里只保留本页布局需要的一条 min-width。 */
+.management-page.settings-page .settings-card :is(.field-input, .field-textarea) {
+  min-width: 0;
+}
+
+.management-page.settings-page .settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+/* 卡片内的次级动作全部走 .ui-cbtn--sm（manage-skin.css），这里不再复写外形。 */
+
+/* 禁用态保持完整不透明度，用明确的次级表面与文字色表达不可操作。
+   胶囊按钮自带禁用配方，别被这条盖掉。实际命中的是 base-ui Select 触发器
+   （本页其余可禁用按钮全是 .ui-cbtn）。描边亮色保持原配方；深色下 50% 墨会比
+   正常态描边亮一倍以上（可供性反转），单独降到 18% 且基色纠正为按钮实底
+   surface-2。 */
+.management-page.settings-page button:disabled:not(.ui-cbtn) {
+  opacity: 1;
+  cursor: not-allowed;
+  color: var(--settings-muted-surface-2);
+  background: var(--ui-surface-2);
+  border-color: light-dark(
+    color-mix(in srgb, var(--ui-text-1) 50%, var(--ui-surface-1)),
+    color-mix(in srgb, var(--ui-text-1) 18%, var(--ui-surface-2))
+  );
+}
+
+
+/* Hermes 远程项维持原顺序，只整理卡片内层级与可收缩宽度。 */
+.management-page.settings-page .remotes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.management-page.settings-page .remote-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  color: var(--ui-text-1);
+  background: var(--ui-surface-2);
+}
+
+.management-page.settings-page .remote-row .field-row {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+}
+
+.management-page.settings-page .remote-row .field-row > * {
+  min-width: 0;
+}
+
+.management-page.settings-page .remotes > button {
+  align-self: flex-start;
+  border-style: dashed;
+  box-shadow: none;
+}
+
+.management-page.settings-page .settings-prefs-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.management-page.settings-page .settings-switch-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--ui-surface-2);
+}
+
+.management-page.settings-page .settings-switch-row {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--ui-hairline);
+}
+
+.management-page.settings-page .settings-switch-row:last-child {
+  border-bottom: 0;
+}
+
+.management-page.settings-page .settings-switch-row label {
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.management-page.settings-page .settings-switch-row span {
+  min-width: 0;
+  color: var(--ui-text-1);
+  font-size: 0.88rem;
+}
+
+.management-page.settings-page .settings-card > label[class*="switch"] {
+  padding: 4px 0;
+}
+
+.management-page.settings-page .creds {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+
+.management-page.settings-page .creds-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--ui-hairline);
+}
+
+.management-page.settings-page .creds-row:first-child {
+  padding-top: 4px;
+}
+
+.management-page.settings-page .creds-row:last-child {
+  padding-bottom: 4px;
+  border-bottom: 0;
+}
+
+.management-page.settings-page .creds-head,
+.management-page.settings-page .creds-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.management-page.settings-page .creds-key {
+  min-width: 0;
+  color: var(--ui-text-1);
+  font-size: 0.86rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.management-page.settings-page .creds-desc {
+  margin: 0;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.management-page.settings-page .creds-status {
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.management-page.settings-page .creds-actions .field-input {
+  flex: 1 1 220px;
+  width: auto;
+  min-width: 0;
+}
+
+.management-page.settings-page .error {
+  border-color: color-mix(in srgb, var(--ui-error) 35%, var(--ui-surface-1));
+  border-radius: 12px;
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 10%, var(--ui-surface-1));
+}
+
+.management-page.settings-page .status-ok {
+  color: var(--ui-success);
+}
+
+.management-page.settings-page .status-error,
+.management-page.settings-page .status-err {
+  color: var(--ui-error);
+}
+
+.management-page.settings-page .status-version-warn {
+  color: var(--ui-warning);
+}
+
+.management-page.settings-page :is(
+    .page-head-actions > button,
+    .settings-actions > button,
+    .remotes > button,
+    .creds-actions > button
+  ):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+}
+
+/* 深色焦点环：亮色里 2px surface-1 内圈演的是「白缝」，深色 surface-1 比选中
+   rail 项(#2c2c33)/remote-row(surface-2) 的底更暗，内圈成了一道暗色勒痕。
+   深色改用带 offset 的 outline，缝隙透真实底色，四种底一次修对；亮色配方不动。 */
+:root[data-theme="dark"] .management-page.settings-page :is(
+    .page-head-actions > button,
+    .settings-actions > button,
+    .remotes > button,
+    .creds-actions > button
+  ):focus-visible {
+  box-shadow: none;
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+/* ============================================================
+   适配：≤960 偏好卡叠为单列；≤900 状态卡单列；≤720 表单/动作单列。
+   ============================================================ */
+@media (max-width: 960px) {
+  .management-page.settings-page .settings-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .management-page.settings-page .settings-pair .settings-prefs-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .management-page.settings-page .status-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .management-page.settings-page .settings-stack {
+    gap: 24px;
+  }
+
+  .management-page.settings-page .settings-card,
+  .management-page.settings-page .status-card {
+    padding: 20px;
+  }
+
+  .management-page.settings-page .settings-prefs-row,
+  .management-page.settings-page .settings-pair .settings-prefs-row,
+  .management-page.settings-page .remote-row .field-row,
+  .management-page.settings-page .settings-actions,
+  .management-page.settings-page .creds-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .management-page.settings-page .settings-actions > button,
+  .management-page.settings-page .remotes > button,
+  .management-page.settings-page .creds-actions > button,
+  .management-page.settings-page .creds-actions .field-input {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .management-page.settings-page .remotes > button {
+    align-self: stretch;
+  }
+
+  .management-page.settings-page .status-row {
+    flex-wrap: wrap;
+  }
+
+  .management-page.settings-page .status-label {
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .management-page.settings-page .settings-card :is(.field-input, .field-textarea),
+  .management-page.settings-page .settings-card button[class*="trigger"] {
+    transform: none;
+    transition: none;
+  }
+}
+
+/* 粘性保存条：作为页面最后一个流内子元素 + sticky bottom，
+   在整段滚动过程中都吊在视口底部，滚到最后自然落位。只在 dirty 时渲染。 */
+.management-page.settings-page .settings-savebar {
+  position: sticky;
+  bottom: 16px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 12px 12px 12px 20px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 32px;
+  /* 浮条压在同为 surface-1 的卡片上，深色下 token 阴影(8% 黑)不可见会糊成一体：
+     底色抬一档（与 rail 选中态同款「比 surface-1 亮」的做法）+ 阴影深色加重。
+     亮侧两个值都与原 token/surface-1 的亮值逐字节一致（写字面值是因为 light-dark
+     里嵌 var(--ui-surface-1) 会嵌套 light-dark，不赌解析），亮色零变化。 */
+  background: light-dark(#ffffff, #2c2c33);
+  box-shadow: 0 16px 32px -12px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.6));
+  animation: settingsSaveBarIn var(--ui-motion-popover) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.management-page.settings-page .settings-savebar-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 72%, var(--ui-surface-1));
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 300;
+}
+
+@keyframes settingsSaveBarIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 720px) {
+  .management-page.settings-page .settings-savebar {
+    padding: 12px;
+  }
+
+  .management-page.settings-page .settings-savebar .ui-cbtn {
+    flex: 1 1 auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .management-page.settings-page .settings-savebar {
+    animation: none;
+  }
+}
+/* The global shortcut applies as soon as macOS accepts the new combination. */
+.settings-shortcut-row { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
+.settings-shortcut-row > span { margin-right: auto; }
+.settings-shortcut { min-width: 96px; }
+.settings-shortcut kbd { font: inherit; letter-spacing: 2px; }
+.settings-shortcut[data-shortcut-capturing] { outline: 2px solid var(--ui-focus); outline-offset: 3px; }

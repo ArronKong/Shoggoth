@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "version": "0.22.0",
+  "contractVersion": "0.7.0",
+  "archiveUrl": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.22.0/cua-driver-rs-0.22.0-darwin-universal-binary.tar.gz",
+  "archiveSha256": "202eb9dd2185d64fc0599079671f50efe2bf71b300a85644cf26d627bb7355e6",
+  "archiveSizeBytes": 41555217,
+  "binarySha256": "cb6580c18673e54aac7105d91074e7bbb10aad96054fa8d0a9db8180d576d6b1",
+  "binarySizeBytes": 62404736,
+  "architectures": ["arm64", "x86_64"],
+  "destination": ".vendor/cua/package/cua-driver",
+  "nodePackages": [
+    {
+      "name": "@trycua/cua-driver-darwin-arm64",
+      "version": "0.22.0",
+      "arch": "arm64",
+      "archiveUrl": "https://registry.npmjs.org/@trycua/cua-driver-darwin-arm64/-/cua-driver-darwin-arm64-0.22.0.tgz",
+      "archiveSha256": "bd25afaa192b4ab2e82cf9a54ed8e0ab5e9240c28d09b98a99ae438a48c0b361",
+      "archiveSizeBytes": 17416158,
+      "destination": ".vendor/cua/node-modules/arm64/node_modules/@trycua/cua-driver-darwin-arm64"
+    },
+    {
+      "name": "@ubjs/node-darwin-arm64",
+      "version": "0.31.0-3",
+      "arch": "arm64",
+      "archiveUrl": "https://registry.npmjs.org/@ubjs/node-darwin-arm64/-/node-darwin-arm64-0.31.0-3.tgz",
+      "archiveSha256": "206201d85b7e1e5763bd1c3b2deaa46af6e367d3799554080f2293723e3b162e",
+      "archiveSizeBytes": 318814,
+      "destination": ".vendor/cua/node-modules/arm64/node_modules/@ubjs/node-darwin-arm64"
+    },
+    {
+      "name": "@trycua/cua-driver-darwin-x64",
+      "version": "0.22.0",
+      "arch": "x64",
+      "archiveUrl": "https://registry.npmjs.org/@trycua/cua-driver-darwin-x64/-/cua-driver-darwin-x64-0.22.0.tgz",
+      "archiveSha256": "6ab53e19242c9581c2455f64f787474f4f805be512dd9f9547a0a147fee2a8da",
+      "archiveSizeBytes": 17416153,
+      "destination": ".vendor/cua/node-modules/x64/node_modules/@trycua/cua-driver-darwin-x64"
+    },
+    {
+      "name": "@ubjs/node-darwin-x64",
+      "version": "0.31.0-3",
+      "arch": "x64",
+      "archiveUrl": "https://registry.npmjs.org/@ubjs/node-darwin-x64/-/node-darwin-x64-0.31.0-3.tgz",
+      "archiveSha256": "3d141850b34d9d6a03508b1a20dbda6c1263d80798a303a6d0de656754575cc3",
+      "archiveSizeBytes": 334675,
+      "destination": ".vendor/cua/node-modules/x64/node_modules/@ubjs/node-darwin-x64"
+    }
+  ]
+}

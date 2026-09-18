@@ -1,0 +1,1048 @@
+{
+  "version": 1,
+  "npm": [
+    {
+      "name": "@babel/runtime",
+      "version": "7.29.7",
+      "license": "MIT",
+      "integrity": "sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_babel_runtime@7.29.7/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@babel/runtime/-/runtime-7.29.7.tgz"
+    },
+    {
+      "name": "@base-ui/react",
+      "version": "1.5.0",
+      "license": "MIT",
+      "integrity": "sha512-z1gSAlced1yY+iM+mHDEtIkD8UI3Ebs52MuBPxvV6f5hRutk+xvCH/wuB7hDqDzK9JG5FoMz5nhrqtSs1wjt1A==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_base-ui_react@1.5.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@base-ui/react/-/react-1.5.0.tgz"
+    },
+    {
+      "name": "@base-ui/utils",
+      "version": "0.2.9",
+      "license": "MIT",
+      "integrity": "sha512-x/PDDCYzoqPpjrdyb3VcyylTI2IjUXEtYDGi5foh7KsnmNJIIaVwA2GLgDH1dps1GgXiJbA60hM+AyuTfQzIvw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_base-ui_utils@0.2.9/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@base-ui/utils/-/utils-0.2.9.tgz"
+    },
+    {
+      "name": "@floating-ui/core",
+      "version": "1.7.5",
+      "license": "MIT",
+      "integrity": "sha512-1Ih4WTWyw0+lKyFMcBHGbb5U5FtuHJuujoyyr5zTaWS5EYMeT6Jb2AuDeftsCsEuchO+mM2ij5+q9crhydzLhQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_floating-ui_core@1.7.5/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@floating-ui/core/-/core-1.7.5.tgz"
+    },
+    {
+      "name": "@floating-ui/dom",
+      "version": "1.7.6",
+      "license": "MIT",
+      "integrity": "sha512-9gZSAI5XM36880PPMm//9dfiEngYoC6Am2izES1FF406YFsjvyBMmeJ2g4SAju3xWwtuynNRFL2s9hgxpLI5SQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_floating-ui_dom@1.7.6/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@floating-ui/dom/-/dom-1.7.6.tgz"
+    },
+    {
+      "name": "@floating-ui/react-dom",
+      "version": "2.1.8",
+      "license": "MIT",
+      "integrity": "sha512-cC52bHwM/n/CxS87FH0yWdngEZrjdtLW/qVruo68qg+prK7ZQ4YGdut2GyDVpoGeAYe/h899rVeOVm6Oi40k2A==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_floating-ui_react-dom@2.1.8/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@floating-ui/react-dom/-/react-dom-2.1.8.tgz"
+    },
+    {
+      "name": "@floating-ui/utils",
+      "version": "0.2.11",
+      "license": "MIT",
+      "integrity": "sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_floating-ui_utils@0.2.11/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@floating-ui/utils/-/utils-0.2.11.tgz"
+    },
+    {
+      "name": "@trycua/cua-driver-darwin-arm64",
+      "version": "0.22.0",
+      "license": "MIT AND MPL-2.0",
+      "integrity": "sha512-CD83Bvwx5XQtds+nxDOcY2CxKqSxr6spjjdpwYDb/34jtTt46jedt1A73QEEP/xkf9Ckw9Z7CWs68bt+bmGMYA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "CUA-LICENSE.md",
+        "CUA-NOTICE.md",
+        "MPL-2.0.txt"
+      ],
+      "source": "https://github.com/trycua/cua/tree/cua-driver-rs-v0.22.0"
+    },
+    {
+      "name": "@trycua/cua-driver-darwin-x64",
+      "version": "0.22.0",
+      "license": "MIT AND MPL-2.0",
+      "integrity": "sha512-uHqMAbYRqLs8MUHyODrAR0kX7rmgwFINcSGVGgrULr5E2OmeJHx6F/THQk/1lLV6jtrKX/bZsqxROehRJmtPNg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "CUA-LICENSE.md",
+        "CUA-NOTICE.md",
+        "MPL-2.0.txt"
+      ],
+      "source": "https://github.com/trycua/cua/tree/cua-driver-rs-v0.22.0"
+    },
+    {
+      "name": "@trycua/cua-driver",
+      "version": "0.22.0",
+      "license": "MIT",
+      "integrity": "sha512-NElsgryvNTl7arPdx7trvYhz4geMhPztsi8RFeECY2XhuuhWWzSPPPHTC4cBVsb/gprqqPtb+Hy2I1kGGEGddg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "CUA-LICENSE.md",
+        "CUA-NOTICE.md",
+        "MPL-2.0.txt"
+      ],
+      "source": "https://github.com/trycua/cua/tree/cua-driver-rs-v0.22.0"
+    },
+    {
+      "name": "@types/linkify-it",
+      "version": "5.0.0",
+      "license": "MIT",
+      "integrity": "sha512-sVDA58zAw4eWAffKOaQH5/5j3XeayukzDk+ewSsnv3p4yJEZHCCzMDiZM8e0OUrRvmpGZ85jf4yDHkHsgBNr9Q==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_types_linkify-it@5.0.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@types/linkify-it/-/linkify-it-5.0.0.tgz"
+    },
+    {
+      "name": "@types/markdown-it",
+      "version": "14.1.2",
+      "license": "MIT",
+      "integrity": "sha512-promo4eFwuiW+TfGxhi+0x3czqTYJkG8qB17ZUJiVF10Xm7NLVRSLUsfRTU/6h1e24VvRnXCx+hG7li58lkzog==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_types_markdown-it@14.1.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@types/markdown-it/-/markdown-it-14.1.2.tgz"
+    },
+    {
+      "name": "@types/mdurl",
+      "version": "2.0.0",
+      "license": "MIT",
+      "integrity": "sha512-RGdgjQUZba5p6QEFAVx2OGb8rQDL/cPRG7GiedRzMcJ1tYnUANBncjbSB1NRGwbvjcPeikRABz2nshyPk1bhWg==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_types_mdurl@2.0.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@types/mdurl/-/mdurl-2.0.0.tgz"
+    },
+    {
+      "name": "@types/prop-types",
+      "version": "15.7.15",
+      "license": "MIT",
+      "integrity": "sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_types_prop-types@15.7.15/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@types/prop-types/-/prop-types-15.7.15.tgz"
+    },
+    {
+      "name": "@types/react",
+      "version": "18.3.29",
+      "license": "MIT",
+      "integrity": "sha512-ch0qJdr2JY0r04NXSprbK6TXOgnaJ1Tz23fm5W+z0/CBah6BSBc3n96h7K9GOtwh0HrilNWHIBzE1Ko4Dcw/Wg==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_types_react@18.3.29/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@types/react/-/react-18.3.29.tgz"
+    },
+    {
+      "name": "@types/trusted-types",
+      "version": "2.0.7",
+      "license": "MIT",
+      "integrity": "sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_types_trusted-types@2.0.7/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@types/trusted-types/-/trusted-types-2.0.7.tgz"
+    },
+    {
+      "name": "@ubjs/core",
+      "version": "0.31.0-3",
+      "license": "MPL-2.0",
+      "integrity": "sha512-39XrJgUZ2VVb561sSnkXPhczNoeBsNiSRArecsV0JE7CJq69ajFkcn9/tBAUS2NpgHkLIDU+z6Ks2+1wXnboxg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "MPL-2.0.txt",
+        "CUA-NOTICE.md",
+        "RUNTIME-LICENSE-SOURCES.md"
+      ],
+      "source": "https://github.com/jhugman/uniffi-bindgen-react-native"
+    },
+    {
+      "name": "@ubjs/node-darwin-arm64",
+      "version": "0.31.0-3",
+      "license": "MPL-2.0",
+      "integrity": "sha512-GGQVPLkVo4Gc8qVLW4IGvS8bjl8eHXyeP4a97ntGmsAdXwE5gsS29o8xUEFROjhwHKD+9sgVeblCSWVG3CpHsw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "MPL-2.0.txt",
+        "CUA-NOTICE.md",
+        "RUNTIME-LICENSE-SOURCES.md"
+      ],
+      "source": "https://github.com/jhugman/uniffi-bindgen-react-native"
+    },
+    {
+      "name": "@ubjs/node-darwin-x64",
+      "version": "0.31.0-3",
+      "license": "MPL-2.0",
+      "integrity": "sha512-2sc47u4XFYOsbmP5EW+Gx8m/yGrYnfFDFQm6+kz7goSWTNg84eEiz3COs9HKJDVuNJ5Khv5XipTO8CFadMLXCw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "MPL-2.0.txt",
+        "CUA-NOTICE.md",
+        "RUNTIME-LICENSE-SOURCES.md"
+      ],
+      "source": "https://github.com/jhugman/uniffi-bindgen-react-native"
+    },
+    {
+      "name": "@ubjs/node",
+      "version": "0.31.0-3",
+      "license": "MPL-2.0",
+      "integrity": "sha512-qNMpi2LICNwxGXZyRF8fSDBSpbezyZbEsydrbiMPJOmtOWr4tmZIEl7jkWGHVGShoBvHfFo4eHp5B4UVP928Cg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "MPL-2.0.txt",
+        "CUA-NOTICE.md",
+        "RUNTIME-LICENSE-SOURCES.md"
+      ],
+      "source": "https://github.com/jhugman/uniffi-bindgen-react-native"
+    },
+    {
+      "name": "@xterm/headless",
+      "version": "6.0.0",
+      "license": "MIT",
+      "integrity": "sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "XTERM-LICENSE.txt"
+      ],
+      "source": "https://github.com/xtermjs/xterm.js/tree/6.0.0"
+    },
+    {
+      "name": "animejs",
+      "version": "4.4.1",
+      "license": "MIT",
+      "integrity": "sha512-XimhJw4vPb6tAd6Zaoa6BaspJ8UteQMKvL7Pvrt6MW/6u2UvJs0TB/LLqR1sigaiYvpVPC3Tokr9emcCMhWFhw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/animejs@4.4.1/LICENSE.md"
+      ],
+      "source": "https://registry.npmjs.org/animejs/-/animejs-4.4.1.tgz"
+    },
+    {
+      "name": "argparse",
+      "version": "2.0.1",
+      "license": "Python-2.0",
+      "integrity": "sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==",
+      "distributed": true,
+      "scopes": [
+        "desktop",
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/argparse@2.0.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/argparse/-/argparse-2.0.1.tgz"
+    },
+    {
+      "name": "better-sqlite3",
+      "version": "13.0.3",
+      "license": "MIT",
+      "integrity": "sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/better-sqlite3@13.0.3/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-13.0.3.tgz"
+    },
+    {
+      "name": "cookie",
+      "version": "1.1.1",
+      "license": "MIT",
+      "integrity": "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/cookie@1.1.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/cookie/-/cookie-1.1.1.tgz"
+    },
+    {
+      "name": "cron-parser",
+      "version": "5.4.0",
+      "license": "MIT",
+      "integrity": "sha512-HxYB8vTvnQFx4dLsZpGRa0uHp6X3qIzS3ZJgJ9v6l/5TJMgeWQbLkR5yiJ5hOxGbc9+jCADDnydIe15ReLZnJA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/cron-parser@5.4.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/cron-parser/-/cron-parser-5.4.0.tgz"
+    },
+    {
+      "name": "csstype",
+      "version": "3.2.3",
+      "license": "MIT",
+      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/csstype@3.2.3/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz"
+    },
+    {
+      "name": "dompurify",
+      "version": "3.4.15",
+      "license": "(MPL-2.0 OR Apache-2.0)",
+      "integrity": "sha512-EUBjM+B+lkDE41iE82DDSCfkoPGfXx8IxFxPMjNzm/Uk4xDet77rTN9wqlxlVg71kK7XGuUMv6wUxJUwwv+Xyw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/dompurify@3.4.15/LICENSE",
+        "licenses/npm/dompurify@3.4.15/LICENSE-MPL"
+      ],
+      "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.15.tgz",
+      "selectedLicense": "Apache-2.0"
+    },
+    {
+      "name": "electron",
+      "version": "44.4.2",
+      "license": "MIT",
+      "integrity": "sha512-872t/+8M8TyribWm2cYpRwHY2aDlyDHOn+CHnhN9kHQStVW8pAijIhFolYA/qQyDdri28Xp8Mi3HEj5kFvajCw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/electron@44.4.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/electron/-/electron-44.4.2.tgz"
+    },
+    {
+      "name": "entities",
+      "version": "4.5.0",
+      "license": "BSD-2-Clause",
+      "integrity": "sha512-V0hjH4dGPh9Ao5p0MoRY6BVqtwCjhz6vI5LT8AJ55H+4g9/4vbHx1I54fS0XuclLhDHArPQCiMjDxjaL8fPxhw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/entities@4.5.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/entities/-/entities-4.5.0.tgz"
+    },
+    {
+      "name": "fflate",
+      "version": "0.8.3",
+      "license": "MIT",
+      "integrity": "sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==",
+      "distributed": true,
+      "scopes": [
+        "desktop",
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/fflate@0.8.3/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/fflate/-/fflate-0.8.3.tgz"
+    },
+    {
+      "name": "highlight.js",
+      "version": "11.11.1",
+      "license": "BSD-3-Clause",
+      "integrity": "sha512-Xwwo44whKBVCYoliBQwaPvtd/2tYFkRQtXDWj1nackaV2JPXx3L0+Jvd8/qCJ2p+ML0/XVkJ2q+Mr+UVdpJK5w==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/highlight.js@11.11.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/highlight.js/-/highlight.js-11.11.1.tgz"
+    },
+    {
+      "name": "html-parse-stringify",
+      "version": "3.0.1",
+      "license": "MIT",
+      "integrity": "sha512-KknJ50kTInJ7qIScF3jeaFRpMpE8/lfiTdzf/twXyPBLAGrLRTmkz3AdTnKeh40X8k9L2fdYwEp/42WGXIRGcg==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/source/HTML-PARSE-STRINGIFY.txt"
+      ],
+      "source": "https://github.com/HenrikJoreteg/html-parse-stringify/tree/ada9e1448f34a57c17e7e23ba4af6d217e3d7baf"
+    },
+    {
+      "name": "i18next",
+      "version": "26.3.0",
+      "license": "MIT",
+      "integrity": "sha512-gHSgGpUXVmuqE2El1W61DmxeyeTlFfZgdJRWMo9jScAn5pu7TuTuiccb1zh3E2J9hEBVGJ23+96x0ieBhfuIHA==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/i18next@26.3.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/i18next/-/i18next-26.3.0.tgz"
+    },
+    {
+      "name": "js-tokens",
+      "version": "4.0.0",
+      "license": "MIT",
+      "integrity": "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/js-tokens@4.0.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz"
+    },
+    {
+      "name": "linkify-it",
+      "version": "5.0.2",
+      "license": "MIT",
+      "integrity": "sha512-ONTm2jCMAVZjgQa/Fy1kScXsuOoF5NPTsoFBdE1KVIZ2vAh/r9+Bqo+0jINCBYnavTPQZz38QzFTme79ENoN3Q==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/linkify-it@5.0.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/linkify-it/-/linkify-it-5.0.2.tgz"
+    },
+    {
+      "name": "liquid-gooey",
+      "version": "0.1.0",
+      "license": "MIT",
+      "integrity": "sha512-iFG1/RaI9Qntvpv6tzxOQGesTJSmctd3gb1pNYH9Tn8elnolknDI2WeYpr5IenClNe/6hWonS/zPvOCJm+9uaQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/liquid-gooey@0.1.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/liquid-gooey/-/liquid-gooey-0.1.0.tgz"
+    },
+    {
+      "name": "loose-envify",
+      "version": "1.4.0",
+      "license": "MIT",
+      "integrity": "sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/loose-envify@1.4.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/loose-envify/-/loose-envify-1.4.0.tgz"
+    },
+    {
+      "name": "luxon",
+      "version": "3.7.2",
+      "license": "MIT",
+      "integrity": "sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/luxon@3.7.2/LICENSE.md"
+      ],
+      "source": "https://registry.npmjs.org/luxon/-/luxon-3.7.2.tgz"
+    },
+    {
+      "name": "markdown-it-task-lists",
+      "version": "2.1.1",
+      "license": "ISC",
+      "integrity": "sha512-TxFAc76Jnhb2OUu+n3yz9RMu4CwGfaT788br6HhEDlvWfdeJcLUsxk1Hgw2yJio0OXsxv7pyIPmvECY7bMbluA==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/markdown-it-task-lists@2.1.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/markdown-it-task-lists/-/markdown-it-task-lists-2.1.1.tgz"
+    },
+    {
+      "name": "markdown-it",
+      "version": "14.2.0",
+      "license": "MIT",
+      "integrity": "sha512-1TGiQiJVRQ3NPmZH6sx5Cfnmg6GQm9jvC1ch4TK511NjSJvjzKLzn5pPfZRNZkRPZP0HqCioSndqH8v2nRaWVQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/markdown-it@14.2.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/markdown-it/-/markdown-it-14.2.0.tgz"
+    },
+    {
+      "name": "mdurl",
+      "version": "2.0.0",
+      "license": "MIT",
+      "integrity": "sha512-Lf+9+2r+Tdp5wXDXC4PcIBjTDtq4UKjCPMQhKIuzpJNW0b96kVqSwW0bT7FhRSfmAiFYgP+SCRvdrDozfh0U5w==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/mdurl@2.0.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/mdurl/-/mdurl-2.0.0.tgz"
+    },
+    {
+      "name": "node-addon-api",
+      "version": "7.1.1",
+      "license": "MIT",
+      "integrity": "sha512-5m3bsyrjFWE1xf7nz7YXdN4udnVtXK6/Yfgn5qnahL6bCkf2yKt4k3nuTKAtT4r3IG8JNR2ncsIMdZuAzJjHQQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/node-addon-api@7.1.1/LICENSE.md"
+      ],
+      "source": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-7.1.1.tgz"
+    },
+    {
+      "name": "node-addon-api",
+      "version": "8.9.2",
+      "license": "MIT",
+      "integrity": "sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/node-addon-api@8.9.2/LICENSE.md"
+      ],
+      "source": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.2.tgz"
+    },
+    {
+      "name": "node-pty",
+      "version": "1.1.0",
+      "license": "MIT",
+      "integrity": "sha512-20JqtutY6JPXTUnL0ij1uad7Qe1baT46lyolh2sSENDd4sTzKZ4nmAFkeAARDKwmlLjPx6XKRlwRUxwjOy+lUg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/node-pty@1.1.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/node-pty/-/node-pty-1.1.0.tgz"
+    },
+    {
+      "name": "pinyin-pro",
+      "version": "3.29.3",
+      "license": "MIT",
+      "integrity": "sha512-+UU9bx6vfDw8amOJGHm0TE0rdQl8VPylsDWviQ5OOQ3e+on1xRP4OqDbiDuMT5OISgvfl/Y6ez1BBRaIP80GLQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop",
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/pinyin-pro@3.29.3/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/pinyin-pro/-/pinyin-pro-3.29.3.tgz"
+    },
+    {
+      "name": "punycode.js",
+      "version": "2.3.1",
+      "license": "MIT",
+      "integrity": "sha512-uxFIHU0YlHYhDQtV4R9J6a52SLx28BCjT+4ieh7IGbgwVJWO+km431c4yRlREUAsAmt/uMjQUyQHNEPf0M39CA==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/punycode.js@2.3.1/LICENSE-MIT.txt"
+      ],
+      "source": "https://registry.npmjs.org/punycode.js/-/punycode.js-2.3.1.tgz"
+    },
+    {
+      "name": "react-dom",
+      "version": "18.3.1",
+      "license": "MIT",
+      "integrity": "sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/react-dom@18.3.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/react-dom/-/react-dom-18.3.1.tgz"
+    },
+    {
+      "name": "react-i18next",
+      "version": "17.0.8",
+      "license": "MIT",
+      "integrity": "sha512-0ooKbGLU8JXhe1zwpQUWIeXSgLPOfwJmgheWRIUpcoA0CpyabpGhayjdG+/eA5esC1AQ8h2jWpXjJfzQzeDOCw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/react-i18next@17.0.8/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/react-i18next/-/react-i18next-17.0.8.tgz"
+    },
+    {
+      "name": "react-router-dom",
+      "version": "7.18.4",
+      "license": "MIT",
+      "integrity": "sha512-yrfmJHIpDG7taCpqKjT1G5B6q3O2K+RN8/fgNf0lTjCwiPbQ0ei6vXX9ZjQR+7ld8Tr7Z5xmyMnZ8YJrphWQUw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/react-router-dom@7.18.4/LICENSE.md"
+      ],
+      "source": "https://registry.npmjs.org/react-router-dom/-/react-router-dom-7.18.4.tgz"
+    },
+    {
+      "name": "react-router",
+      "version": "7.18.4",
+      "license": "MIT",
+      "integrity": "sha512-PUPQcMhMGRAslLcvtlPz/kmzBEWPhLdgLFrL7pLNepBL6dX0lWj4WD2cUYVgYCuT3jxvghYFg81cDTj44DhetQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/react-router@7.18.4/LICENSE.md"
+      ],
+      "source": "https://registry.npmjs.org/react-router/-/react-router-7.18.4.tgz"
+    },
+    {
+      "name": "react",
+      "version": "18.3.1",
+      "license": "MIT",
+      "integrity": "sha512-wS+hAgJShR0KhEvPJArfuPVN1+Hz1t0Y6n5jLrGQbkb4urgPE/0Rve+1kMB1v/oWgHgm4WIcV+i7F2pTVj+2iQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/react@18.3.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/react/-/react-18.3.1.tgz"
+    },
+    {
+      "name": "reselect",
+      "version": "5.2.0",
+      "license": "MIT",
+      "integrity": "sha512-AgZ3UOZm3YndfrJ4OYjgrT7bmCm/1iqkjvEfH/oYjzh6PD2qw4QuT3jjnXIrpdt4MTpMXclMT3lXbmRY+XRakw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/reselect@5.2.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/reselect/-/reselect-5.2.0.tgz"
+    },
+    {
+      "name": "scheduler",
+      "version": "0.23.2",
+      "license": "MIT",
+      "integrity": "sha512-UOShsPwz7NrMUqhR6t0hWjFduvOzbtv7toDH1/hIrfRNIDBnnBWd0CwJTGvTpngVlmwGCdP9/Zl/tVrDqcuYzQ==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/scheduler@0.23.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/scheduler/-/scheduler-0.23.2.tgz"
+    },
+    {
+      "name": "set-cookie-parser",
+      "version": "2.7.2",
+      "license": "MIT",
+      "integrity": "sha512-oeM1lpU/UvhTxw+g3cIfxXHyJRc/uidd3yK1P242gzHds0udQBYzs3y8j4gCCW+ZJ7ad0yctld8RYO+bdurlvw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/set-cookie-parser@2.7.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-2.7.2.tgz"
+    },
+    {
+      "name": "three",
+      "version": "0.185.0",
+      "license": "MIT",
+      "integrity": "sha512-+yRrcRO2iZa8uzvNNl0d7cL4huhgKgBvVJ0njcTe8xFqZ6DMAFZdCKDP91SEAuj25bNAj7k1QQdf+srZywVK6w==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/three@0.185.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/three/-/three-0.185.0.tgz"
+    },
+    {
+      "name": "typescript",
+      "version": "5.9.3",
+      "license": "Apache-2.0",
+      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/typescript@5.9.3/LICENSE.txt"
+      ],
+      "source": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"
+    },
+    {
+      "name": "uc.micro",
+      "version": "2.1.0",
+      "license": "MIT",
+      "integrity": "sha512-ARDJmphmdvUk6Glw7y9DQ2bFkKBHwQHLi2lsaH6PPmz/Ka9sFOBsBluozhDltWmnv9u/cF6Rt87znRTPV+yp/A==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/uc.micro@2.1.0/LICENSE.txt"
+      ],
+      "source": "https://registry.npmjs.org/uc.micro/-/uc.micro-2.1.0.tgz"
+    },
+    {
+      "name": "use-sync-external-store",
+      "version": "1.6.0",
+      "license": "MIT",
+      "integrity": "sha512-Pp6GSwGP/NrPIrxVFAIkOQeyw8lFenOHijQWkUTrDvrF4ALqylP2C/KCkeS9dpUM3KvYRQhna5vt7IL95+ZQ9w==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/use-sync-external-store@1.6.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/use-sync-external-store/-/use-sync-external-store-1.6.0.tgz"
+    },
+    {
+      "name": "void-elements",
+      "version": "3.1.0",
+      "license": "MIT",
+      "integrity": "sha512-Dhxzh5HZuiHQhbvTW9AMetFfBHDMYpo23Uo9btPXgdYP+3T5S+p+jgNy7spra+veYhBP2dCSgxR/i2Y02h5/6w==",
+      "distributed": true,
+      "scopes": [
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/void-elements@3.1.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/void-elements/-/void-elements-3.1.0.tgz"
+    },
+    {
+      "name": "ws",
+      "version": "8.21.0",
+      "license": "MIT",
+      "integrity": "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/ws@8.21.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/ws/-/ws-8.21.0.tgz"
+    }
+  ],
+  "components": [
+    {
+      "name": "OpenClaw Control UI",
+      "license": "MIT",
+      "source": "https://github.com/openclaw/openclaw/tree/v2026.8.1",
+      "revision": "v2026.8.1 (workboard source annotation); other ports retain their source-file mappings",
+      "localFiles": [
+        "app/manage-ui/src/lib/markdown.ts",
+        "app/manage-ui/src/lib/slashCommands.ts",
+        "app/manage-ui/src/pages/workboard"
+      ],
+      "licenseFiles": [
+        "licenses/source/OPENCLAW.txt",
+        "licenses/source/OPENCLAW-THIRD-PARTY.txt"
+      ],
+      "notes": "Adapted to React/TypeScript, localized, and integrated with Shoggoth. The upstream Pi/pi-mono notice is retained conservatively."
+    },
+    {
+      "name": "Hermes Agent model settings",
+      "license": "MIT",
+      "source": "https://github.com/NousResearch/hermes-agent/tree/180291162ff4df0d42b5dc4fecd08005cf7cebf9/web",
+      "revision": "180291162ff4df0d42b5dc4fecd08005cf7cebf9 (locally available upstream reference)",
+      "localFiles": [
+        "app/manage-ui/src/pages/agents/AgentModelSettings.module.css",
+        "app/manage-ui/src/pages/agents/useAgentModelSettings.ts",
+        "app/manage-ui/src/pages/agents/AgentModelCards.tsx",
+        "app/manage-ui/src/pages/keys/OAuthProvidersCard.tsx"
+      ],
+      "licenseFiles": [
+        "licenses/source/HERMES.txt"
+      ],
+      "notes": "Shoggoth source annotations describe porting the upstream model/provider settings workflow. Adapted UI/API integration; original import revision and copied-line extent were not recorded. Upstream notice is retained conservatively rather than asserting every local line was copied."
+    },
+    {
+      "name": "LiquidGlass",
+      "license": "MIT",
+      "source": "https://github.com/ybouane/liquidglass/tree/00aafe50202e916951d6f30d49afa1197ca236a7",
+      "revision": "00aafe50202e916951d6f30d49afa1197ca236a7",
+      "localFiles": [
+        "app/manage-ui/src/pages/glass/liquidGlassGL.ts",
+        "app/manage-ui/src/pages/glass/shaders.ts"
+      ],
+      "licenseFiles": [
+        "licenses/source/LIQUIDGLASS.txt"
+      ],
+      "notes": "Upstream README/package.json explicitly declare MIT. Four shader bodies match this reference after removing comments/whitespace; the glass fragment shader and renderer are adapted. Original import commit was not recorded; this is a verified source reference, not a claim about the original import date."
+    },
+    {
+      "name": "Lobe Icons provider logos",
+      "license": "MIT",
+      "source": "https://github.com/lobehub/lobe-icons/tree/a94750e3f5f8fc33757b839d85030e742284e43a",
+      "revision": "a94750e3f5f8fc33757b839d85030e742284e43a (license reference)",
+      "localFiles": [
+        "app/manage-ui/src/assets/provider-logos",
+        "app/manage-ui/src/pages/keys/ProviderLogo.tsx"
+      ],
+      "licenseFiles": [
+        "licenses/source/LOBE-ICONS.txt"
+      ],
+      "notes": "Local static SVGs and a React wrapper. Source annotations identify the Lobe Icons format; original individual import revisions were not recorded. Brand trademarks are separate from this copyright license."
+    },
+    {
+      "name": "Lucide / Feather icons",
+      "license": "ISC AND MIT",
+      "source": "https://github.com/lucide-icons/lucide/tree/ba6751ac45d379f6359d75ef2228cff6ba96c122",
+      "revision": "ba6751ac45d379f6359d75ef2228cff6ba96c122 (license reference)",
+      "localFiles": [
+        "app/manage-ui/src/pages/workboard/icons.tsx",
+        "app/manage-ui/src/pages/keys/OAuthProvidersCard.tsx"
+      ],
+      "licenseFiles": [
+        "licenses/source/LUCIDE-FEATHER.txt"
+      ],
+      "notes": "Selected icon paths embedded in JSX; OAuth unlink icon adapted. Retains both Lucide and applicable Feather notices."
+    },
+    {
+      "name": "OpenAI Codex",
+      "license": "Apache-2.0",
+      "source": "https://github.com/openai/codex/tree/rust-v0.149.0",
+      "revision": "0.149.0",
+      "localFiles": [
+        "schemas/codex-app-server/0.149.0",
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "CODEX-LICENSE.txt",
+        "CODEX-NOTICE.txt"
+      ],
+      "notes": "Pinned unmodified runtime; generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately."
+    },
+    {
+      "name": "ChillKai",
+      "license": "OFL-1.1",
+      "source": "app/manage-ui/public/fonts/chill-kai",
+      "revision": "bundled font files; original copyright and license retained",
+      "localFiles": [
+        "app/manage-ui/public/fonts/chill-kai"
+      ],
+      "licenseFiles": [
+        "licenses/source/CHILL-KAI.txt"
+      ],
+      "notes": "Fonts retain their original names and license. CSS loading and subsetting/format conversion do not relicense them as MIT."
+    },
+    {
+      "name": "Courier Prime",
+      "license": "OFL-1.1",
+      "source": "app/manage-ui/public/fonts/courier-prime",
+      "revision": "bundled font files; original copyright and license retained",
+      "localFiles": [
+        "app/manage-ui/public/fonts/courier-prime"
+      ],
+      "licenseFiles": [
+        "licenses/source/COURIER-PRIME.txt"
+      ],
+      "notes": "Fonts retain their original names and license. CSS loading and subsetting/format conversion do not relicense them as MIT."
+    },
+    {
+      "name": "Source Han Serif CN",
+      "license": "OFL-1.1",
+      "source": "app/manage-ui/public/fonts/source-han-serif-cn",
+      "revision": "bundled font files; original copyright and license retained",
+      "localFiles": [
+        "app/manage-ui/public/fonts/source-han-serif-cn"
+      ],
+      "licenseFiles": [
+        "licenses/source/SOURCE-HAN-SERIF-CN.txt"
+      ],
+      "notes": "Fonts retain their original names and license. CSS loading and subsetting/format conversion do not relicense them as MIT."
+    },
+    {
+      "name": "ripgrep (Codex bundled program)",
+      "license": "MIT OR Unlicense",
+      "source": "https://github.com/BurntSushi/ripgrep/tree/15.2.0",
+      "revision": "15.2.0 (binary reports e89fff89ac)",
+      "localFiles": [
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "licenses/source/RIPGREP-MIT.txt",
+        "licenses/source/RIPGREP-UNLICENSE.txt"
+      ],
+      "notes": "Unmodified program in the pinned Codex package; both upstream license alternatives retained."
+    },
+    {
+      "name": "PCRE2 (ripgrep embedded library)",
+      "license": "BSD-3-Clause WITH PCRE2-exception",
+      "source": "https://github.com/PCRE2Project/pcre2/tree/pcre2-10.45",
+      "revision": "10.45 (reported by bundled ripgrep --version)",
+      "localFiles": [
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "licenses/source/PCRE2.txt"
+      ],
+      "notes": "Bundled through ripgrep; full upstream notice includes the contributed-file notices."
+    },
+    {
+      "name": "zsh (Codex bundled shell)",
+      "license": "LicenseRef-Zsh",
+      "source": "https://github.com/zsh-users/zsh/tree/zsh-5.9",
+      "revision": "binary reports 5.9.0.3-test; 5.9 upstream license reference",
+      "localFiles": [
+        "build/codex-runtime-manifest.json"
+      ],
+      "licenseFiles": [
+        "licenses/source/ZSH.txt"
+      ],
+      "notes": "Preserved zsh upstream redistribution terms. Shell shipped unchanged as part of the pinned Codex package; upstream package does not identify a separate zsh source commit."
+    }
+  ]
+}

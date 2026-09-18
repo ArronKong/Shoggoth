@@ -1,0 +1,53 @@
+node_modules/
+.vendor/
+app/control-ui/
+dist/
+*.log
+.DS_Store
+.gstack/
+
+# Internal working notes and editor state are not part of public source exports.
+/.superpowers/
+/.vscode/
+/docs/
+/tasks/
+/ARCHITECTURE.md
+/BUG_REPORT.md
+/CLAUDE.md
+/PROGRESS.md
+/prd.md
+/openclaw-hermes-kanban-flow.png
+/openclaw-hermes-kanban-flow.svg
+/app/manage-ui/openclawdesign.md
+/SOURCE-EXPORT.json
+
+# Private local evidence and extracted builds; kept on disk, excluded from source releases.
+.asar_check/
+.artifacts/
+.preview-server.pid
+.claude/launch.json
+.tmp-check-xai.py
+docs/reports/
+docs/superpowers/
+
+# Credentials and signing material. Public examples can be committed explicitly.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.p12
+*.pfx
+*.key
+id_rsa
+id_ed25519
+credentials.json
+
+# Playwright 调试快照与本地回归测试产物，不纳入版本控制。
+.playwright-cli/
+output/
+
+# Claude Code 本机设置：含已批准命令串（可能内嵌网关 token），不入库。
+.claude/settings.local.json
+
+# Desktop QA creates an independent, temporary Git workspace here.
+docs/reports/2026-09-13-shoggoth-0.8.94-cua/agent-workspace/

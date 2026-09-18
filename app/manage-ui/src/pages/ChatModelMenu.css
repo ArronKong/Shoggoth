@@ -1,0 +1,155 @@
+/* Chat/Agent/Cron 共用的模型触发器与目录浮层。组件自己携带皮肤，避免直接打开
+   非 Chat 路由时依赖尚未加载的 ChatPage.css。ChatPage 的旧规则保持原位。 */
+.chat-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 0;
+  background: color-mix(in srgb, var(--bg, var(--ui-surface-1)) 96%, var(--bg-accent, var(--ui-surface-2)) 4%);
+  color: var(--chat-text, var(--ui-text-1));
+  font-size: 13px;
+  font-weight: 400;
+  white-space: nowrap;
+  box-shadow: 0 10px 30px -24px var(--skin-shadow-soft, rgba(43, 52, 55, 0.12));
+}
+
+.chat-pill--select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  max-width: 220px;
+  padding-right: 34px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238993a3' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+
+.chat-pill--select:hover { background-color: var(--bg-hover, var(--ui-surface-2)); }
+.chat-pill--select:disabled { cursor: not-allowed; opacity: 0.55; }
+.chat-model-menu { position: relative; display: inline-flex; min-width: 0; }
+
+.model-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  z-index: 30;
+  width: min(440px, 84vw);
+  height: min(84vh, 440px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  overflow: hidden;
+  padding: 8px;
+  border-radius: 16px;
+  border: 1px solid var(--skin-glass-border, light-dark(rgba(24, 31, 42, 0.08), rgba(255, 255, 255, 0.08)));
+  background: var(--skin-glass-strong, light-dark(rgba(255, 255, 255, 0.96), rgba(31, 31, 35, 0.96)));
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--skin-shadow-composer, 0 25px 50px -12px light-dark(rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.6)));
+}
+
+.model-menu--portal { bottom: auto; }
+.model-menu__head { min-width: 0; }
+.model-menu__search {
+  width: 100%;
+  padding: 8px 14px;
+  margin-bottom: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--skin-glass-border, light-dark(rgba(24, 31, 42, 0.08), rgba(255, 255, 255, 0.08)));
+  background: var(--bg, var(--ui-surface-1));
+  color: var(--chat-text, var(--ui-text-1));
+  font: inherit;
+}
+
+.model-menu .model-menu__search:focus,
+:root[data-theme="dark"] .model-menu .model-menu__search:focus {
+  border-color: #000;
+  outline: none;
+  box-shadow: none;
+}
+
+.model-menu__tabs {
+  --ft-color: var(--ui-text-1);
+  --ft-font-size: 13px;
+  --ft-active-weight: 500;
+}
+
+.model-menu__list {
+  min-height: 0;
+  overflow: hidden auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.model-menu__provisional {
+  padding: 7px 14px;
+  color: var(--muted-fg, var(--ui-text-3));
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.model-menu__error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+  color: var(--muted-fg, var(--ui-text-3));
+  font-size: 13px;
+}
+
+.model-menu__error button {
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: var(--bg-hover, var(--ui-surface-2));
+  color: var(--chat-text, var(--ui-text-1));
+  font: inherit;
+  cursor: pointer;
+}
+
+.model-menu__label {
+  padding: 8px 14px 3px;
+  color: var(--composer-fg, var(--ui-text-1));
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.model-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--chat-text, var(--ui-text-1));
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-menu__item:hover,
+.model-menu__item.is-active { background: var(--bg-hover, var(--ui-surface-2)); }
+.model-menu__name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-menu__tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-hover, var(--ui-surface-2));
+  color: var(--muted-fg, var(--ui-text-3));
+}
+.model-menu__price { flex: 0 0 auto; font-size: 11px; color: var(--muted-fg, var(--ui-text-3)); font-family: var(--mono); }
+.model-menu__check { flex: 0 0 auto; color: var(--composer-fg, var(--ui-text-1)); }
+.model-menu__empty { padding: 12px; color: var(--muted-fg, var(--ui-text-3)); text-align: center; font-size: 13px; }

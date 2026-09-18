@@ -1,0 +1,148 @@
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+
+const licenseName = /^(licen[sc]e|copying|notice|copyright|unlicense)([.-]|$)/i;
+const safeName = (value) => value.replace(/[^a-zA-Z0-9._-]/g, "_");
+const digest = (value) => crypto.createHash("sha256").update(value).digest("hex");
+
+export function collectThirdPartyLicenses(root, { check = false } = {}) {
+  const legalDir = path.join(root, "resources/legal");
+  const sources = JSON.parse(fs.readFileSync(path.join(legalDir, "source-components.json"), "utf8"));
+  const components = new Map();
+  for (const scope of ["desktop", "frontend"]) {
+    const prefix = scope === "desktop" ? root : path.join(root, "app/manage-ui");
+    const lock = JSON.parse(fs.readFileSync(path.join(prefix, "package-lock.json"), "utf8"));
+    for (const [packagePath, entry] of Object.entries(lock.packages)) {
+      if (!packagePath) continue;
+      const name = entry.name || packagePath.split("node_modules/").at(-1);
+      const key = `${name}@${entry.version}`;
+      const supportedPlatform = !entry.os || entry.os.includes("darwin");
+      const distributed = supportedPlatform && (!entry.dev || name === "electron");
+      let component = components.get(key);
+      if (!component) {
+        component = { name, version: entry.version, license: entry.license, integrity: entry.integrity,
+          distributed: false, scopes: [], locations: [], licenseFiles: [], source: entry.resolved || null };
+        components.set(key, component);
+      }
+      component.distributed ||= distributed;
+      if (!component.scopes.includes(scope)) component.scopes.push(scope);
+      component.locations.push({ prefix, packagePath, distributed });
+    }
+  }
+
+  const expectedFiles = new Map();
+  const copyLicense = (target, content) => {
+    if (!content.trim()) throw new Error(`Empty license: ${target}`);
+    expectedFiles.set(target, content.endsWith("\n") ? content : `${content}\n`);
+    return target;
+  };
+  for (const component of components.values()) {
+    if (!component.license) throw new Error(`Missing SPDX license: ${component.name}@${component.version}`);
+    if (!component.distributed) continue;
+    const override = sources.npmOverrides.find((item) =>
+      item.names.includes(component.name) && item.version === component.version);
+    if (override) {
+      component.licenseFiles = override.licenseFiles;
+      component.source = override.source;
+    } else {
+      for (const { prefix, packagePath, distributed } of component.locations) {
+        if (!distributed) continue;
+        const directory = path.join(prefix, packagePath);
+        if (!fs.existsSync(path.join(directory, "package.json"))) continue;
+        const installed = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8"));
+        if (installed.version !== component.version) throw new Error(`Run npm ci: ${component.name} version mismatch`);
+        const files = fs.readdirSync(directory).filter((file) => licenseName.test(file)
+          && fs.statSync(path.join(directory, file)).isFile()).sort();
+        for (const file of files) {
+          const target = `licenses/npm/${safeName(component.name)}@${component.version}/${file}`;
+          component.licenseFiles.push(copyLicense(target, fs.readFileSync(path.join(directory, file), "utf8")));
+        }
+        if (component.licenseFiles.length) break;
+      }
+    }
+    if (!component.licenseFiles.length) {
+      throw new Error(`Full license text missing: ${component.name}@${component.version}`);
+    }
+    // DOMPurify offers either license. Preserve its complete supplied text and
+    // explicitly select Apache-2.0 for Shoggoth's distribution.
+    if (component.name === "dompurify") component.selectedLicense = "Apache-2.0";
+    for (const file of component.licenseFiles) {
+      if (!expectedFiles.has(file) && !fs.existsSync(path.join(legalDir, file))) {
+        throw new Error(`License source missing: ${file}`);
+      }
+    }
+  }
+  for (const component of sources.components) {
+    for (const file of component.licenseFiles) {
+      if (!fs.existsSync(path.join(legalDir, file))) throw new Error(`Source license missing: ${file}`);
+    }
+    for (const file of component.localFiles) {
+      if (!fs.existsSync(path.join(root, file))) throw new Error(`Attribution target missing: ${file}`);
+    }
+  }
+
+  const sorted = [...components.values()].sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`, "en"));
+  const distributed = sorted.filter((component) => component.distributed);
+  const escapeCell = (value) => String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
+  const links = (files) => files.map((file) => `[${path.basename(file)}](${file})`).join(", ");
+  const notice = [
+    "# Shoggoth third-party notices", "",
+    "Shoggoth-authored code is MIT licensed. The components below retain their own licenses.",
+    "Generated by `npm run release:metadata` from both lockfiles and `source-components.json`.",
+    "The npm table conservatively includes all macOS production dependencies (including frontend build inputs)",
+    "and Electron. Development-only and other-platform packages are recorded separately in the source SBOM.",
+    "Electron's original LICENSE and LICENSES.chromium.html must also remain in the application bundle.", "",
+    "## npm components", "", "| Component | Version | License | Complete texts |", "|---|---|---|---|",
+    ...distributed.map((item) => `| ${escapeCell(item.name)} | ${item.version} | ${escapeCell(item.selectedLicense || item.license)} | ${links(item.licenseFiles)} |`),
+    "", "## Copied source, fonts and bundled programs", "",
+    ...sources.components.flatMap((item) => [
+      `### ${item.name}`, "", `- License: ${item.license}.`,
+      `- Source: ${item.source}`, `- Revision / evidence: ${item.revision}.`,
+      `- Local files: ${item.localFiles.map((file) => `\`${file}\``).join(", ")}.`,
+      `- Full text: ${links(item.licenseFiles)}.`, `- Changes / provenance: ${item.notes}`, "",
+    ]),
+    "See [runtime source locations](RUNTIME-LICENSE-SOURCES.md) for MPL corresponding source.",
+    "Brand names and logos identify compatible services; their trademarks remain with their owners.", "",
+  ].join("\n");
+  expectedFiles.set("THIRD-PARTY-NOTICES.md", notice);
+  const index = { version: 1, npm: distributed.map(({ locations, ...item }) => item), components: sources.components };
+  expectedFiles.set("third-party-index.json", `${JSON.stringify(index, null, 2)}\n`);
+  const checksums = [...new Set(distributed.flatMap((item) => item.licenseFiles)
+    .concat(sources.components.flatMap((item) => item.licenseFiles)))].sort().map((file) =>
+    `${digest(expectedFiles.get(file) ?? fs.readFileSync(path.join(legalDir, file)))}  ${file}`).join("\n");
+  expectedFiles.set("LICENSE-SHA256SUMS", `${checksums}\n`);
+  const stale = [];
+  const generatedRoot = path.join(legalDir, "licenses/npm");
+  if (fs.existsSync(generatedRoot)) {
+    for (const dir of fs.readdirSync(generatedRoot)) {
+      const target = path.join(generatedRoot, dir);
+      if (!fs.statSync(target).isDirectory()) continue;
+      for (const file of fs.readdirSync(target)) {
+        if (!expectedFiles.has(`licenses/npm/${dir}/${file}`)) stale.push(path.join(target, file));
+      }
+    }
+  }
+  if (check) {
+    const mismatches = [...expectedFiles].filter(([file, text]) => {
+      const target = path.join(legalDir, file);
+      return !fs.existsSync(target) || fs.readFileSync(target, "utf8") !== text;
+    }).map(([file]) => file);
+    if (stale.length || mismatches.length) {
+      throw new Error(`License metadata out of date; run npm run release:metadata: ${mismatches.concat(stale).join(", ")}`);
+    }
+  } else {
+    for (const [file, text] of expectedFiles) {
+      const target = path.join(legalDir, file);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, text);
+    }
+    // Only remove stale files in the directory owned by this generator.
+    for (const target of stale) fs.unlinkSync(target);
+    if (fs.existsSync(generatedRoot)) for (const dir of fs.readdirSync(generatedRoot)) {
+      const target = path.join(generatedRoot, dir);
+      if (fs.statSync(target).isDirectory() && !fs.readdirSync(target).length) fs.rmdirSync(target);
+    }
+  }
+  return { npm: sorted, sources: sources.components, distributedCount: distributed.length };
+}
