@@ -1,0 +1,3112 @@
+/* Theme: lib/theme.ts always lands a concrete data-theme="light|dark" on <html>
+   ("system" is resolved in JS + re-resolved on OS change). color-scheme drives
+   every light-dark(light, dark) pair below — that's the whole switching
+   mechanism; ChatPage.css additionally keys explicit :root[data-theme="dark"]
+   selectors for its skin overrides. */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root {
+  /* 日历当前时间标记的水滴形状（Figma 6833-261）：左端正圆向右收窄成 2px 细线。
+     只作形状用（mask），颜色由使用处的 background 决定。 */
+  --cal-now-drop: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 6'%3E%3Cpath d='M3 0A3 3 0 1 0 3 6C5.6 6 6.2 4 8.6 4L24 4L24 2L8.6 2C6.2 2 5.6 0 3 0Z' fill='%23000'/%3E%3C/svg%3E");
+  /* 旧基础变量是受保护兼容层；以下仅新增管理界面的统一语义 token。 */
+  --ui-canvas: light-dark(#f4f4f4, #18181b);
+  --ui-surface-1: light-dark(#ffffff, #1f1f23);
+  --ui-surface-2: light-dark(#f3f3f3, #28282e);
+  /* Default agent avatars use the same fixed palette in every theme. */
+  --ui-agent-avatar-bg: #000000;
+  --ui-agent-avatar-fg: #ffffff;
+  --ui-surface-glass: light-dark(rgba(255, 255, 255, 0.55), rgba(40, 40, 46, 0.55));
+  --ui-text-1: light-dark(#1a1a1a, #e4e4e7);
+  --ui-text-2: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.62));
+  --ui-text-3: light-dark(#7d8796, #a1a1aa);
+  --ui-hairline: light-dark(rgba(20, 24, 31, 0.08), rgba(228, 230, 235, 0.1));
+  --ui-control-border: light-dark(rgba(20, 24, 31, 0.12), rgba(228, 230, 235, 0.16));
+  /* 焦点环：使用跨明暗主题均有足够对比度的语义蓝，统一由这一个 token 控制。
+     Switch 选中态是另一种语义，单独走 --ui-switch-on，不跟随焦点色。 */
+  --ui-focus: light-dark(#2563eb, #60a5fa);
+  /* 开关开态：设计稿 7112:1840 是**纯黑**（暗色对称取白，配深色滑块）。R318 曾按
+     旧规范把它当「语义蓝」，7112:1813 到手后确认设计里没有蓝。 */
+  --ui-switch-on: light-dark(#000000, #ffffff);
+  --ui-success: light-dark(#047857, #34d399);
+  --ui-warning: light-dark(#b45309, #f59e0b);
+  --ui-error: light-dark(#b91c1c, #f87171);
+  --ui-info: light-dark(#0369a1, #38bdf8);
+  --ui-primary: #ffef84;
+  --ui-primary-hover: #ffe96a;
+  --ui-primary-active: #f7de37;
+  --ui-primary-ink: #171717;
+  --ui-radius-control: 20px;
+  --ui-radius-compact: 16px;
+  --ui-radius-card: 24px;
+  --ui-shadow-card: 0 8px 10px rgba(0, 0, 0, 0.02);
+  --ui-shadow-hover: 0 16px 32px -12px rgba(0, 0, 0, 0.08);
+  --ui-motion-state: 140ms;
+  --ui-motion-popover: 200ms;
+  --ui-motion-overlay: 280ms;
+  --ui-motion-modal-enter: 220ms;
+  --ui-motion-modal-exit: 160ms;
+  --ui-motion-modal-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* 字号 token（排版标尺，语义按文本角色）。当前 Dashboard 采用；7 档。 */
+  --ui-fs-display: 32px; /* 页面主标题 / KPI 大数值 */
+  --ui-fs-subtitle: 16px; /* 页面副标题 */
+  --ui-fs-label: 14px; /* 卡片标签 / 面板标题 / 筛选胶囊 */
+  --ui-fs-body: 12px; /* 正文主力：列表各行 / 时间 / 摘要 */
+  --ui-fs-caption: 10px; /* 图片角标 / 徽标·类型标签 */
+  --ui-fs-micro: 9px; /* 头像首字母 */
+  --ui-fs-nano: 8px; /* running 胶囊小头像首字母 */
+
+  --bg: light-dark(#ffffff, #18181b);
+  --fg: light-dark(#1a1a1a, #e4e4e7);
+  --muted: light-dark(#6b7280, #a1a1aa);
+  --border: light-dark(#e5e7eb, #2e2e33);
+  --accent: light-dark(#2563eb, #3b82f6);
+  --row-hover: light-dark(#f9fafb, #232327);
+  --nav-bg: light-dark(#f4f4f4, #202024);
+  --nav-hover: light-dark(#e8e8e8, #2c2c31);
+  /* brand yellow active pill reads fine on both themes (black label on it) */
+  --nav-active: #ffef84;
+  /* 等宽字唯一源。写的就是实际渲染的：Chromium 不认 ui-monospace，"SF Mono"/SFMono-Regular
+     是引用不到的隐藏字体，Consolas 不在 macOS —— 原先那些栈全部一路落到 Menlo。见 ARCHITECTURE §9。 */
+  --mono: Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  /* system-ui = macOS 内置的可变 SF Pro（.SF NS），opsz 轴自动做 Text/Display 光学切换。
+     不要把 "SF Pro Text"/"SF Pro Display" 放回来：那是 Apple 开发者站下载的老式静态切片，
+     9 个字面挤同一家族名超出 RIBBI 模型，CoreText 会把 CSS 字重 100/200/300 全塌成
+     Ultralight（400+ 才正常）——且只在装过它的机器上发生，等于本机渲染与用户不一致。 */
+  font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+}
+.sidebar {
+  width: 64px;
+  height: 100vh;
+  flex-shrink: 0;
+  border-right: 0;
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--nav-bg);
+  overflow: hidden;
+}
+.nav {
+  position: relative; /* 选中态黄球（.nav-blob）的定位基准，也是量 offsetTop 的基准 */
+  width: 40px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+}
+/* 选中态的黄球：外层管位移、内层管形变，两层都只动 transform（见 App.tsx
+   NavActiveBlob）。圆被沿行进方向拉长 + 横向收窄 = 水滴形的液体形变。 */
+.nav-blob {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40px;
+  height: 40px;
+  pointer-events: none;
+  will-change: transform;
+}
+.nav-blob-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 32px;
+  border: 1px solid #fff7bf;
+  /* 顶部往下的高光渐变压在品牌黄底色上（#FFEF84 = --nav-active） */
+  background: linear-gradient(180deg, #f7de37 0%, rgba(255, 239, 132, 0) 49.52%, rgba(255, 239, 132, 0) 100%),
+    var(--nav-active);
+  /* 黄投影按亮色侧栏调校（叠 #f4f4f4 近乎不可见）；深色侧栏上 0.3 会合成明显
+     暖黄光圈，降到 0.12 只留少量辉光。黄底/奶油描边是品牌黄白名单，不动。 */
+  box-shadow: 0 8px 10px 0 light-dark(rgba(244, 232, 153, 0.3), rgba(244, 232, 153, 0.12));
+  will-change: transform;
+}
+.nav-primary {
+  width: 40px;
+  padding-top: 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.nav-bottom {
+  width: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.nav-link {
+  position: relative; /* 压在 .nav-blob 上面 */
+  z-index: 1;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: light-dark(#111111, #d4d4d8);
+  background: transparent;
+  text-decoration: none;
+  outline: none;
+  transition:
+    background-color 120ms ease,
+    transform 120ms ease;
+}
+/* 选中项不吃 hover 底色——它身下已经是黄球，再垫一层灰会把黄球盖掉 */
+.nav-link:hover:not(.active) {
+  background: var(--nav-hover);
+  color: light-dark(#111111, #d4d4d8);
+}
+.nav-link.active {
+  color: #000000;
+}
+.nav-link:focus-visible {
+  box-shadow: 0 0 0 2px light-dark(#ffffff, #1f1f23), 0 0 0 4px light-dark(#111111, #d4d4d8);
+}
+.nav-link:active {
+  transform: scale(0.96);
+}
+.nav-icon {
+  width: 40px;
+  height: 40px;
+  display: block;
+  pointer-events: none;
+}
+.nav-icon--inspiration { position: relative; }
+/* Figma 210:2663：16px 图框内的种子含描边溢出，保留导出尺寸与原始位置。 */
+.ni-seed {
+  position: absolute;
+  left: 11.7175px;
+  top: 11.695px;
+  width: 16.565px;
+  height: 17px;
+  transform-origin: 50% 70%;
+}
+/* ── 再点一次已选中的导航项 = 刷新本页，图标随即播一段动画（R371/R372/R373）。后端
+   数据本来就没变化时页面一动不动，这段动画是「确实刷了」唯一的可见证据。
+
+   只有设置仍是整体旋转的 `<img>`（齿轮转动，语义天然贴合）——选择器必须钉在
+   `img.nav-icon` 上，否则内联 SVG 的图标会连壳一起转，压掉自己的专属动画。其余 9 个
+   是内联 SVG（components/NavIcons.tsx），每个按自身图形做局部动画；灵感的导出 SVG
+   放在容器内，只让种子舒展回摆，不命中齿轮的整体旋转。
+
+   ★ 不跳跃的两条硬规则（R373 用户要求，改动画时必须一起守住）★
+   ① **周期必须整除 App.tsx 的 SPIN_MS（1200ms）**：只许 1.2s / 0.6s / 0.4s / 0.3s。
+      周期对不上就会停在半程——例如原先 0.75s 的分针播 1200ms 会停在 240°。
+   ② **0% 与 100% 关键帧必须等于「静止态」**：所以生长类动画一律写成
+      `0%,100% 完整 → 中段擦除`，而不是「从没画出来长到完整」——后者一启动就闪一下、
+      收尾又跳回完整。
+   ③ 由 ① 推出的结果：**不能用 animation-delay 做错相**（延迟会让该元素在 1200ms 时
+      停在半程）。要错相就写多份关键帧，把相位差做进时间轴里（见三个点、两颗星）。 ── */
+@keyframes nav-icon-spin {
+  to { transform: rotate(360deg); }
+}
+/* 设置：转**一圈**就停（0.6s），停在 360° ≡ 静止态的 0°。
+   ★ 旋转类动画（这个齿轮 + 定时任务的两根针）**一律 iteration-count: 1，加载再久也只转
+   一圈**（R373 用户定案：「圈数太多、时间太长」）。整圈旋转是最容易显得「转不完」的动画
+   类型，所以它不参与「加载中持续循环」——那条留给其余 8 个呼吸/跳动型动画，它们循环起来
+   不刺眼。代价是这两个图标在慢加载时没有持续反馈，用户明确取前者。 */
+.nav-link.is-refreshing img.nav-icon {
+  animation: nav-icon-spin 0.6s linear 1;
+}
+
+/* 定时任务：表盘不动，两根针绕表心 (20,20)，0.6s **各转整一圈**（R373 用户定速）。
+   快慢差不靠圈数、靠**速度曲线**：分针匀速，时针 ease-in（起步慢、末段加速追上）。
+   两者时长相同、都是整圈，所以同时回到原位不跳；但全程时针都落在分针后面——
+   t=25% 时分针 90°、时针才 32°，t=75% 时 270° vs 220°，最后一刻并拢。
+   （用圈数做快慢差要 2:1 起步，圈数就下不来；曲线这条路才能既只转一圈又有快慢。）
+
+   周期 0.6s 短于 SPIN_MS，所以要显式 `iteration-count: 1`：否则 1200ms 的播放窗口里会转
+   两圈。转完停在 360°（≡ 静止态的 0°），窗口剩下的 600ms 静止无妨；加载再久也只转这一圈
+   ——理由见上面齿轮那段。 */
+@keyframes ni-hand { to { transform: rotate(360deg); } }
+.nav-link.is-refreshing .ni-minute,
+.nav-link.is-refreshing .ni-hour { transform-origin: 20px 20px; animation-name: ni-hand; animation-duration: 0.6s; animation-iteration-count: 1; }
+.nav-link.is-refreshing .ni-minute { animation-timing-function: linear; }
+.nav-link.is-refreshing .ni-hour   { animation-timing-function: cubic-bezier(0.42, 0, 1, 1); }
+
+/* 总览：两列各自高低互换。y 与 height 成对写死，两列跨度恒为 13→27、块间距恒为
+   2——「总高度和间距不变」。左右两列反相，看着像柱状图在此起彼伏。 */
+@keyframes ni-card-tallA  { 0%, 100% { y: 13px; height: 9px; } 50% { y: 13px; height: 3px; } }
+@keyframes ni-card-shortA { 0%, 100% { y: 24px; height: 3px; } 50% { y: 18px; height: 9px; } }
+@keyframes ni-card-shortB { 0%, 100% { y: 13px; height: 3px; } 50% { y: 13px; height: 9px; } }
+@keyframes ni-card-tallB  { 0%, 100% { y: 18px; height: 9px; } 50% { y: 24px; height: 3px; } }
+.nav-link.is-refreshing .ni-card { animation-duration: 1.2s; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.nav-link.is-refreshing .ni-card--tallA  { animation-name: ni-card-tallA; }
+.nav-link.is-refreshing .ni-card--shortA { animation-name: ni-card-shortA; }
+.nav-link.is-refreshing .ni-card--shortB { animation-name: ni-card-shortB; }
+.nav-link.is-refreshing .ni-card--tallB  { animation-name: ni-card-tallB; }
+
+/* 聊天：三个点依次跳（typing indicator）。相位差写进各自的时间轴而不是用
+   animation-delay——延迟会让后两个点在 1200ms 收尾时停在半空（规则 ③）。三条轴的
+   0%/100% 都是落下态，跳完各自归位。 */
+/* 只动位移、不动 opacity：静止态的点是不透明的，若首尾帧写 opacity:0.4，动画起停时
+   三个点会明暗闪一下（同样是规则 ②，容易漏——静止态的值是「没写声明时的默认值」）。 */
+@keyframes ni-dot-1 {
+  0%, 24%, 100% { transform: translateY(0); }
+  12%           { transform: translateY(-2.5px); }
+}
+@keyframes ni-dot-2 {
+  0%, 16%, 40%, 100% { transform: translateY(0); }
+  28%                { transform: translateY(-2.5px); }
+}
+@keyframes ni-dot-3 {
+  0%, 32%, 56%, 100% { transform: translateY(0); }
+  44%                { transform: translateY(-2.5px); }
+}
+.nav-link.is-refreshing .ni-dot { animation-duration: 1.2s; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.nav-link.is-refreshing .ni-dot--1 { animation-name: ni-dot-1; }
+.nav-link.is-refreshing .ni-dot--2 { animation-name: ni-dot-2; }
+.nav-link.is-refreshing .ni-dot--3 { animation-name: ni-dot-3; }
+
+/* 灵感：种子轻轻蓄力、舒展后归位。与进页/刷新共用 1.2s 周期，首尾保持设计稿原形，
+   不加延迟，加载结束或快速切页都沿用导航现有的整轮收尾。 */
+@keyframes ni-seed {
+  0%, 100% { transform: rotate(0deg) scale(1); }
+  25%      { transform: rotate(-10deg) scale(0.94); }
+  60%      { transform: rotate(6deg) scale(1.1); }
+  80%      { transform: rotate(-2deg) scale(1.02); }
+}
+.nav-link.is-refreshing .ni-seed {
+  animation: ni-seed 1.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+/* 看板：勾先快速收回、再按笔顺重新长出来（路径长 ≈12.7，dasharray 取 14 兜住）。
+   写成「完整 → 收回 → 长回完整」而不是「从零长到完整」：后者的 0% 帧是「勾不存在」，
+   一启动勾就凭空消失一下、收尾又跳回完整（规则 ②）。生长占后 72%，仍是主体动作。 */
+@keyframes ni-check {
+  0%, 100% { stroke-dashoffset: 0; }
+  28%      { stroke-dashoffset: 14; }
+}
+.nav-link.is-refreshing .ni-check { stroke-dasharray: 14; animation: ni-check 1.2s ease-in-out infinite; }
+
+/* 代理：两只眼睛同步眨（大部分时间睁着，中间快速压扁一次）+ 头顶天线伸缩。
+   杆以根部 (20,18) 为原点 scaleY：垂直线只改长度、描边粗细不受影响。球的位移必须
+   跟杆的端点算出来——杆长 4，scaleY 1.5 ⇒ 顶端 y 从 14 抬到 12，所以球走 -2px，
+   两者始终连着。 */
+@keyframes ni-blink { 0%, 38%, 62%, 100% { transform: scaleY(1); } 50% { transform: scaleY(0.1); } }
+.nav-link.is-refreshing .ni-eye { animation: ni-blink 1.2s ease-in-out infinite; }
+.nav-link.is-refreshing .ni-eye--l { transform-origin: 16px 22px; }
+.nav-link.is-refreshing .ni-eye--r { transform-origin: 24px 22px; }
+@keyframes ni-antenna { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(1.5); } }
+@keyframes ni-bulb    { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+.nav-link.is-refreshing .ni-antenna { transform-origin: 20px 18px; animation: ni-antenna 1.2s ease-in-out infinite; }
+.nav-link.is-refreshing .ni-bulb    { animation: ni-bulb 1.2s ease-in-out infinite; }
+
+/* Token：圆圈不动，货币符号绕垂直中心线做 3D 旋转一整圈。
+   `perspective()` 写在 transform 函数里（而不是靠父级的 perspective 属性 +
+   preserve-3d，SVG 不支持那条路）。实测 Chromium 会落成带透视分量的 matrix3d，
+   是真 3D；符号只有 ~11px 高，纵深因此很微妙。后半圈显示镜像——转满 360° 本该看到
+   背面。90°/270° 处压成一条竖线是旋转的正常表现。 */
+@keyframes ni-symbol {
+  0%   { transform: perspective(90px) rotateY(0deg); }
+  100% { transform: perspective(90px) rotateY(360deg); }
+}
+.nav-link.is-refreshing .ni-symbol {
+  transform-box: fill-box;
+  transform-origin: center;
+  /* 整圈：360° 视觉上等于 0°，收尾天然回到正面。linear 而非 ease-in-out——匀速转才
+     像在转，缓入缓出会让它在正面「粘」一下。 */
+  animation: ni-symbol 1.2s linear infinite;
+}
+
+/* 模型：12 根引脚**同时**生长（不再依次），外框与内框轻微缩放呼吸。
+   外框和引脚同属 .ni-chip 一起缩放——这是「线始终连着外框」的实现方式，几何关系
+   恒定，不可能脱开。内框幅度略大一点，做出内外层次。 */
+/* 引脚同看板的勾：写成「完整 → 收回 → 长回完整」，首尾都是伸满的静止态。 */
+@keyframes ni-pin { 0%, 100% { stroke-dashoffset: 0; } 30% { stroke-dashoffset: 2; } }
+@keyframes ni-chip { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+@keyframes ni-core { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+.nav-link.is-refreshing .ni-pin { stroke-dasharray: 2; animation: ni-pin 1.2s ease-in-out infinite; }
+.nav-link.is-refreshing .ni-chip { transform-origin: 20px 20px; animation: ni-chip 1.2s ease-in-out infinite; }
+.nav-link.is-refreshing .ni-core { transform-origin: 20px 20px; animation: ni-core 1.2s ease-in-out infinite; }
+
+/* 技能：两颗星一闪一闪、不同时亮。首尾都是常态（不透明、原尺寸）——原先首尾停在
+   暗态，动画一起一停都会突兀地明暗跳一下（规则 ②）。错相同样写进各自的时间轴，
+   不用 animation-delay（规则 ③）。 */
+@keyframes ni-twinkle-a {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  18%      { opacity: 0.25; transform: scale(0.85); }
+  42%      { opacity: 1;    transform: scale(1.08); }
+}
+@keyframes ni-twinkle-b {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  50%      { opacity: 0.25; transform: scale(0.85); }
+  74%      { opacity: 1;    transform: scale(1.08); }
+}
+.nav-link.is-refreshing .ni-star { transform-box: fill-box; transform-origin: center; animation-duration: 1.2s; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.nav-link.is-refreshing .ni-star--a { animation-name: ni-twinkle-a; }
+.nav-link.is-refreshing .ni-star--b { animation-name: ni-twinkle-b; }
+
+/* CLI：提示符 `>` 像光标一样闪；后面那行先清掉、再像敲字一样打回来。首尾都是打满
+   的静止态（规则 ②），所以停下时那一行是完整的、不会凭空缺一截。 */
+@keyframes ni-caret { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes ni-typeline {
+  0%, 100% { stroke-dashoffset: 0; }
+  22%      { stroke-dashoffset: 4; }
+}
+.nav-link.is-refreshing .ni-caret { animation: ni-caret 0.6s ease-in-out infinite; }
+.nav-link.is-refreshing .ni-typeline { stroke-dasharray: 4; animation: ni-typeline 1.2s ease-in-out infinite; }
+
+/* 减少动效偏好：所有刷新动画一律停掉，改用降透明度表示「正在刷新」。 */
+@media (prefers-reduced-motion: reduce) {
+  .nav-link.is-refreshing :is(
+    img.nav-icon, .ni-card, .ni-dot, .ni-minute, .ni-hour, .ni-check, .ni-eye,
+    .ni-antenna, .ni-bulb, .ni-symbol, .ni-pin, .ni-chip, .ni-core, .ni-star,
+    .ni-caret, .ni-typeline, .ni-seed
+  ) { animation: none; }
+  .nav-link.is-refreshing .nav-icon { opacity: 0.55; }
+}
+/* 图标是 <img> 引入的 SVG：隔离文档里 stroke="var(--stroke-0, black)" 取不到页面
+   变量、恒落黑色 fallback，不吃 .nav-link 的 color——深色下整列黑描边压深底失明。
+   反相 + 降亮把纯黑折成 ~#d4d4d8，正对齐 .nav-link 深色字色；图标全部是
+   fill=none 的纯描边（已核 12 只 44 处），invert 不会误伤别的颜色。 */
+:root[data-theme="dark"] .nav-icon {
+  filter: invert(1) brightness(0.83);
+}
+/* 黄球上的选中项保持黑描边（品牌黄配深内容白名单，与浅色一致）。 */
+:root[data-theme="dark"] .nav-link.active .nav-icon {
+  filter: none;
+}
+/* ── 沉浸模式（body[data-immersive]，ChatPage 在沉浸激活且位于聊天路由时打标）：
+   左侧导航抬到沉浸覆盖层（z-index:1000）之上保持可见可点，底色换成暗玻璃压在
+   背景视频上。图标一律走深色反相——沉浸背景恒暗，与页面主题无关；黄球上的选中
+   项保持黑描边（品牌黄白名单）。标记由 ChatPage 的 effect 管生命周期（pathname
+   守卫 + cleanup 双保险），普通模式下这些规则永不生效。 ── */
+body[data-immersive] .sidebar {
+  position: relative;
+  z-index: 1001;
+  background: transparent;
+}
+body[data-immersive] .nav-icon {
+  filter: invert(1) brightness(0.83);
+}
+body[data-immersive] .nav-link.active .nav-icon {
+  filter: none;
+}
+body[data-immersive] .nav-link:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.1);
+}
+.content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+/* 12 项主导航在常规规格（132 顶距 + 16 间隙）下连底部设置需要 ≥840px 视口，
+   低于此高度必须换紧凑间距，否则尾部图标被 100vh 侧栏裁掉（R337：阈值 700→840，
+   间隙 10→8，12 项 + 设置的紧凑总高 692px，720 高窗口放得下）。 */
+@media (max-height: 840px) {
+  .nav-primary {
+    padding-top: 72px;
+    gap: 8px;
+  }
+}
+.page {
+  /* 顶部统一 36px，与聊天页栏头（chat-aside__head）同一起点 */
+  padding: 36px 1.25rem 1.25rem;
+}
+.placeholder h2 {
+  margin: 0 0 0.5rem;
+}
+.chat-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  display: block;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  background: light-dark(#fef2f2, #3a1d1d);
+  color: light-dark(#b91c1c, #f87171);
+  border: 1px solid light-dark(#fecaca, #5f2828);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+
+button {
+  font: inherit;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: light-dark(#fff, #1f1f23);
+  color: var(--fg);
+  cursor: pointer;
+}
+/* 悬停只加深描边，**不再把字和边翻成 accent 蓝**（R318）。旧规则的 (0,2,1) 会
+   压过任何单类变体的基线描边色，全项目十几处组件因此各写一遍「重申 color 防蓝」；
+   设计语言里根本没有蓝，去掉它比继续到处打补丁便宜。 */
+button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ui-text-1) 35%, transparent);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.cron-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.cron-table th,
+.cron-table td {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.cron-table th {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+.cron-table tr.row-disabled {
+  opacity: 0.55;
+}
+.cron-table tbody tr:hover {
+  background: var(--row-hover);
+}
+
+.job-name {
+  font-weight: 400;
+}
+.job-prompt {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 400;
+  border: 1px solid var(--border);
+}
+.badge-hermes {
+  background: light-dark(#eef2ff, #27274d);
+  color: light-dark(#4338ca, #a5b4fc);
+  border-color: light-dark(#c7d2fe, #3f3f7a);
+}
+.badge-openclaw {
+  background: light-dark(#ecfdf5, #0e2f23);
+  color: light-dark(#047857, #34d399);
+  border-color: light-dark(#a7f3d0, #155e44);
+}
+
+.status-ok {
+  color: light-dark(#047857, #34d399);
+}
+.status-error,
+.status-failed {
+  color: light-dark(#b91c1c, #f87171);
+}
+
+.actions {
+  display: flex;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.cron-toolbar {
+  flex-wrap: wrap;
+}
+
+.cron-table-rich td {
+  min-width: 6rem;
+}
+
+.cron-table-rich td:first-child {
+  min-width: 16rem;
+}
+
+.job-error {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+}
+
+.tag-list {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.compact-tags {
+  margin-top: 0.35rem;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid light-dark(#d1d5db, #3f3f46);
+  border-radius: 999px;
+  background: light-dark(#f8fafc, #222227);
+  color: light-dark(#334155, #cbd5e1);
+  padding: 0.05rem 0.45rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* list/calendar view toggle */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg button {
+  border: 0;
+  border-radius: 0;
+  padding: 0.35rem 0.9rem;
+}
+.seg button + button {
+  border-left: 1px solid var(--border);
+}
+.seg button:hover:not(:disabled) {
+  background: var(--row-hover);
+  color: var(--accent);
+}
+.seg .seg-on {
+  background: var(--nav-active);
+  color: #000;
+}
+
+/* cron calendar */
+/* Calendar fills the content height: the day/week hour-grid scrolls inside
+   instead of being capped at a fixed height, so there's no dead space below.
+   Scoped via :has(.cal) to the cron route + calendar view — the shared .page
+   wrapper used by every other page, and the cron list view, stay untouched. */
+.page:has(.cal),
+.cron-page:has(> .cal),
+.cron-page > .cal,
+.cal-tg {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cal-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  /* header row = content height, 6 week rows split the remaining height equally
+     so the month card fills the view (no dead space below) like week/day. */
+  grid-template-rows: auto repeat(6, 1fr);
+  gap: 2px;
+  background: light-dark(#fff, #1f1f23);
+  border: 0;
+  border-radius: 24px;
+  overflow: hidden;
+  padding: 10px 12px 14px;
+}
+.cal-grid-day {
+  grid-template-columns: 1fr;
+}
+.cal-wd {
+  background: transparent;
+  color: light-dark(#1c2532, #e4e6eb);
+  font-size: 0.95rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  text-align: center;
+  padding: 4px 0 10px;
+}
+.cal-cell {
+  background: transparent;
+  padding: 4px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+}
+/* Month grid: cells grow with their content (these days are packed with many
+   daily jobs) instead of a fixed square — a square cell was taller than its grid
+   row track and overflowed onto the next row's date. */
+.cal-grid-month .cal-cell {
+  min-height: 96px;
+}
+.cal-out {
+  background: transparent;
+}
+.cal-out .cal-day {
+  color: light-dark(#c7c7cc, #52525b);
+}
+.cal-day {
+  font-size: 0.8rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  line-height: 1.5rem;
+  text-align: center;
+  flex-shrink: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.cal-day:hover {
+  background: light-dark(rgba(20, 24, 31, 0.07), rgba(228, 230, 235, 0.1));
+}
+.cal-day:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.cal-today .cal-day {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+}
+.cal-today .cal-day:hover {
+  filter: brightness(0.92);
+}
+.cal-chips {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+}
+.cal-chip {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  color: light-dark(#1c2532, #e7e9ee);
+}
+.cal-chip:hover {
+  filter: brightness(0.94);
+}
+.cal-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.cal-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cal-chip-time {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.cal-chip-n {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+/* 事件底色统一：不再按后端分成两色，一律 #000000 3%（暗色用等效白叠加，
+   否则黑底上加黑等于看不见）。类名保留——后端身份仍在 DOM 上可用。 */
+.cal-chip-openclaw,
+.cal-chip-hermes {
+  background: light-dark(rgba(0, 0, 0, 0.03), rgba(255, 255, 255, 0.06));
+}
+.cal-chip-off {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.cal-more {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  font-size: 0.7rem;
+  color: var(--muted);
+  padding: 1px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.cal-more:hover {
+  background: light-dark(rgba(20, 24, 31, 0.06), rgba(228, 230, 235, 0.09));
+  color: light-dark(#1c2532, #e7e9ee);
+}
+.cal-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* cron time grid (week / day views) — hour axis + time-positioned event cards */
+.cal-tg {
+  border: 0;
+  border-radius: 24px;
+  overflow: hidden;
+  background: light-dark(#fff, #1f1f23);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 10px 30px rgba(0, 0, 0, 0.04);
+}
+.cal-tg-head {
+  display: flex;
+  background: transparent;
+  padding-top: 2px;
+}
+.cal-tg-gutter {
+  width: 52px;
+  flex-shrink: 0;
+}
+.cal-tg-chead {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 14px 0.25rem 12px;
+  border-left: 0;
+}
+.cal-tg-dow {
+  font-size: 0.95rem;
+  font-weight: 400;
+  color: light-dark(#1c2532, #e4e6eb);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.cal-tg-date {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+.cal-tg-chead.is-today .cal-tg-dow {
+  color: light-dark(#1c2532, #f3f4f6);
+  font-weight: 600;
+}
+.cal-tg-chead.is-today .cal-tg-date {
+  color: var(--accent);
+  font-weight: 700;
+}
+.cal-tg-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* one hour = one row: a right-aligned time label + N day cells that auto-grow */
+.cal-hrow {
+  display: flex;
+  min-height: 56px;
+}
+.cal-hlabel {
+  width: 52px;
+  flex-shrink: 0;
+  padding: 8px 6px 0 12px;
+  text-align: left;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.cal-hcell {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 当前时间标记（Figma 6833-261）：左端一颗向右收窄的水滴 + 一条细线，按当前
+   分钟在小时格内的比例定位（--cal-now-at 由组件按分钟写入）。
+   水滴走 mask 而不是内联 SVG 背景：形状一份，颜色仍由 background 给，
+   明暗两套主题共用同一个 mask。 */
+.cal-hcell.is-now {
+  position: relative;
+}
+.cal-hcell.is-now::before,
+.cal-hcell.is-now::after {
+  content: "";
+  position: absolute;
+  top: var(--cal-now-at, 0%);
+  background: light-dark(#000000, #ffffff);
+  transform: translateY(-50%);
+  pointer-events: none;
+  z-index: 2;
+}
+.cal-hcell.is-now::before {
+  left: 0;
+  width: 24px;
+  height: 6px;
+  -webkit-mask: var(--cal-now-drop) no-repeat center / 24px 6px;
+  mask: var(--cal-now-drop) no-repeat center / 24px 6px;
+}
+/* 水滴尾部在 x=8.6 之后已经是 2px 高的直线，线从 22px 起接上，重叠 2px 防缝。 */
+.cal-hcell.is-now::after {
+  left: 22px;
+  right: 0;
+  height: 2px;
+  border-radius: 999px;
+}
+/* event card — full width, stacked vertically in the hour cell */
+.cal-ev {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: light-dark(#1c2532, #e7e9ee);
+}
+.cal-ev:hover {
+  filter: brightness(0.96);
+}
+.cal-ev-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cal-ev-n {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+/* 同上：周/日视图的事件卡也统一成 #000000 3%。 */
+.cal-ev-openclaw,
+.cal-ev-hermes {
+  background: light-dark(rgba(0, 0, 0, 0.03), rgba(255, 255, 255, 0.06));
+}
+.cal-ev-off {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+/* fold / unfold buttons inside an hour cell */
+.cal-hmore,
+.cal-hless {
+  border: 1px dashed var(--border);
+  background: transparent;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 0.66rem;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: center;
+}
+.cal-hmore:hover,
+.cal-hless:hover {
+  background: var(--row-hover);
+  border-color: var(--muted);
+}
+/* day view: single wide column → roomier cards, names wrap instead of truncate */
+.cal-tg-day .cal-ev {
+  font-size: 0.85rem;
+  padding: 0 18px;
+}
+
+/* cron delivery modal (latest delivered content viewer) */
+.cron-delivery-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+.cron-delivery-note {
+  font-size: 0.8rem;
+  margin: 0;
+}
+/* delivery report renders with the chat markdown styles (.chat-md, defined in
+   ChatPage.css). Match the chat bubble's base type (15px/20px) and supply the
+   `.chat-shell`-scoped vars .chat-md reads, so it renders identically out here. */
+.cron-delivery-md {
+  font-size: 15px;
+  line-height: 20px;
+  color: light-dark(#171717, #e4e4e7);
+  word-break: break-word;
+  --bg-muted: light-dark(#f4f4f5, #232327);
+  --chat-text: light-dark(#171717, #e4e4e7);
+  --muted-strong: light-dark(#4b5563, #b8bcc4);
+  --muted-fg: #8993a3;
+  --border-strong: light-dark(#dfe4ea, #34343a);
+  --bg-hover: light-dark(rgba(247, 247, 247, 0.9), rgba(42, 42, 46, 0.9));
+}
+
+/* backend tab-switch moved to components/BackendTabs.module.css (base-ui Tabs). */
+
+/* 模型 page（辅助模型区已随 per-agent 设置面搬到 pages/agents/，样式随组件走 CSS Module） */
+.model-group {
+  margin-bottom: 1.25rem;
+}
+.model-provider {
+  font-weight: 400;
+}
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.6rem;
+}
+.model-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.7rem;
+  background: light-dark(#fff, #1f1f23);
+}
+.model-name {
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.45rem;
+  min-height: 1.1rem;
+}
+.tag {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: light-dark(#f1f5f9, #26262b);
+  color: light-dark(#475569, #94a3b8);
+  border: 1px solid var(--border);
+}
+.tag-reason {
+  background: light-dark(#fef3c7, #3a2e10);
+  color: light-dark(#92400e, #fbbf24);
+  border-color: light-dark(#fde68a, #5c4a16);
+}
+.tag-active {
+  background: light-dark(#ecfdf5, #0e2f23);
+  color: light-dark(#047857, #34d399);
+  border-color: light-dark(#a7f3d0, #155e44);
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sched-hint {
+  margin-top: 0.4rem;
+  font-size: 0.82rem;
+}
+
+
+
+/* Skills page —— 结构（扁平网格 + 右侧详情）随 R359 改版走 manage-skin.css 皮肤层，
+   这里只留跨皮肤复用的字面外观。 */
+.skill-off {
+  opacity: 0.55;
+}
+.skill-emoji {
+  font-size: 1.1rem;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.skill-name {
+  font-weight: 400;
+}
+.skill-desc {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-top: 0.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.skill-badge {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.skill-badge.on {
+  background: light-dark(#ecfdf5, #0e2f23);
+  color: light-dark(#047857, #34d399);
+  border-color: light-dark(#a7f3d0, #155e44);
+}
+.skill-badge.off {
+  background: light-dark(#f3f4f6, #26262b);
+  color: light-dark(#6b7280, #a1a1aa);
+}
+
+/* tasks 一级页面 chrome（Figma 6379-530，R109）：统计行 + 胶囊过滤条结构。
+   页头标题已归一到共享 PageHead 组件；外观（玻璃胶囊/黑滑块/列距）在
+   manage-skin.css 看板段。 */
+.kb-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.6rem;
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.kb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.kb-picon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--fg);
+  opacity: 0.7;
+}
+.kb-date {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* tasks kanban */
+.kanban {
+  display: flex;
+  gap: 0.75rem;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+  align-items: flex-start;
+}
+.kanban-col {
+  flex: 0 0 280px;
+  background: light-dark(#f7f7f8, #1f1f23);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 130px);
+}
+.kanban-col-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.6rem 0.8rem;
+  font-weight: 400;
+}
+.kanban-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0 0.6rem 0.6rem;
+  overflow-y: auto;
+}
+.kanban-card {
+  background: light-dark(#fff, #1f1f23);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 0.65rem;
+}
+.kanban-card-title {
+  font-weight: 400;
+  font-size: 0.88rem;
+}
+.kanban-card-excerpt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.kanban-card-meta {
+  margin-top: 0.4rem;
+  display: flex;
+  gap: 0.4rem;
+}
+.kanban-assignee {
+  font-size: 0.72rem;
+  background: light-dark(#eef2ff, #27274d);
+  color: light-dark(#4338ca, #a5b4fc);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+/* 卡片圆头像：/avatar/<id> 真图，缺图回退首字母 monogram（同 CliPage .cli-u-avatar） */
+.kanban-avatar {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: 0.6rem;
+  font-weight: 600;
+}
+.kanban-empty {
+  padding: 0.5rem;
+  text-align: center;
+  font-size: 0.8rem;
+}
+
+/* workboard rich cards */
+.kanban-card { position: relative; }
+.kanban-card.is-live { box-shadow: inset 3px 0 0 var(--accent, #e5484d); }
+.wb-prio { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 6px; margin-bottom: 4px; }
+.wb-prio--low { background: light-dark(#eef, #26264a); color: light-dark(#446, #9fa8da); }
+.wb-prio--normal { background: light-dark(#eee, #2a2a2e); color: light-dark(#555, #b0b0b8); }
+.wb-prio--high { background: light-dark(#fde8cf, #3d2a12); color: light-dark(#8a4b00, #f0a35e); }
+.wb-prio--urgent { background: light-dark(#fde0e0, #3d1a1a); color: light-dark(#b42318, #f47c7c); }
+.wb-live { position: absolute; top: 8px; right: 8px; color: #e5484d; font-size: 10px; }
+.wb-labels { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.wb-label { font-size: 10px; padding: 0 6px; border-radius: 999px; background: light-dark(#f0f0f3, #2a2a2f); color: light-dark(#555, #b0b0b8); }
+.wb-badges { font-size: 11px; color: light-dark(#888, #94949c); }
+
+/* drag-drop */
+.kanban-col.drag-over { outline: 2px dashed var(--accent, #e5484d); outline-offset: -4px; }
+.kanban-card[draggable="true"] { cursor: grab; }
+.kanban-card[draggable="true"]:active { cursor: grabbing; }
+
+/* Hermes kanban rich board (Slice 1) */
+.hk-colname { display: flex; align-items: center; }
+.hk-dot { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 999px; margin-right: 0.4rem; }
+.hk-colsub { font-size: 0.7rem; line-height: 1.3; padding: 0 0.8rem 0.45rem; }
+.hk-row1 { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; margin-bottom: 0.25rem; }
+.hk-id { font-family: var(--mono); font-size: 0.68rem; color: light-dark(#9aa0a6, #80808a); }
+.hk-warn { font-size: 0.72rem; font-weight: 700; line-height: 1; }
+.hk-warn--warning { color: light-dark(#b78103, #eab308); }
+.hk-warn--error { color: light-dark(#c2410c, #fb923c); }
+.hk-warn--critical { color: light-dark(#b42318, #f47c7c); }
+.hk-prio { font-size: 0.66rem; background: light-dark(#eee, #2a2a2e); color: light-dark(#555, #b0b0b8); border-radius: 6px; padding: 0 0.3rem; }
+.hk-tenant { font-size: 0.66rem; border: 1px solid var(--border, light-dark(#ddd, #3a3a40)); color: light-dark(#666, #a8a8b0); border-radius: 999px; padding: 0 0.35rem; }
+.hk-prog { font-size: 0.66rem; color: light-dark(#666, #a8a8b0); border: 1px solid var(--border, light-dark(#ddd, #3a3a40)); border-radius: 999px; padding: 0 0.35rem; }
+.hk-prog.is-done { color: light-dark(#1a7f4b, #34d399); border-color: light-dark(#9bd9b4, #2e6b4f); background: light-dark(#eafaf1, #0e2f23); }
+.hk-need { font-size: 0.62rem; color: light-dark(#8a4b00, #f0a35e); border: 1px solid light-dark(#f0c389, #6b4f1d); border-radius: 999px; padding: 0 0.35rem; }
+.hk-meta { align-items: center; flex-wrap: wrap; }
+.hk-chip { font-size: 0.7rem; color: light-dark(#777, #9c9ca4); }
+.hk-age { font-size: 0.7rem; color: light-dark(#9aa0a6, #80808a); margin-left: auto; }
+.kanban-assignee.hk-unassigned { background: light-dark(#fff4e5, #3a2c14); color: light-dark(#8a4b00, #f0a35e); }
+.kanban-card.hk-stale-amber { box-shadow: inset 0 0 0 1px light-dark(#e0b050, #8a6d1f); }
+.kanban-card.hk-stale-red { box-shadow: inset 0 0 0 1px #d14a4a, 0 0 8px rgba(209, 74, 74, 0.35); }
+/* Hermes kanban filters + lanes (Slice 2) */
+.hk-check { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; color: light-dark(#555, #b0b0b8); white-space: nowrap; }
+.hk-check input { margin: 0; }
+.hk-lane { display: flex; flex-direction: column; gap: 0.5rem; padding-top: 0.35rem; margin-top: 0.15rem; border-top: 1px dashed var(--border, light-dark(#ddd, #3a3a40)); }
+.hk-lane:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+.hk-lane-head { display: flex; align-items: center; font-size: 0.65rem; color: var(--muted, light-dark(#888, #94949c)); padding: 0 0.1rem; }
+.hk-lane-name { font-family: var(--mono); font-weight: 600; }
+.hk-lane-count { margin-left: auto; }
+/* tasks toolbar wraps to a 2nd row once the Hermes filter controls are present (Slice 2) */
+.tasks-page .toolbar { flex-wrap: wrap; row-gap: 0.5rem; }
+.tasks-page .toolbar > button,
+.tasks-page .toolbar .hk-check { flex-shrink: 0; white-space: nowrap; }
+.tasks-page .toolbar button[role="combobox"] { width: auto; min-width: 8rem; max-width: 14rem; }
+/* Hermes attention banner (Slice 3) */
+.hk-attn-head { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
+.hk-attn-head .ui-toggle:first-of-type { margin-left: auto; }
+.hk-attn-title { font-size: 14px; color: inherit; font-weight: 400; }
+.hk-attn-list { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.5rem; width: 100%; }
+.hk-attn-row { display: flex; align-items: center; gap: 0.5rem; background: light-dark(#fff, #1f1f23); border: 1px solid var(--border, light-dark(#eee, #2a2a2e)); border-radius: 6px; padding: 0.3rem 0.5rem; text-align: left; cursor: pointer; font: inherit; width: 100%; }
+.hk-attn-row:hover { background: light-dark(#faf0f0, #3a2222); }
+.hk-attn-rowtitle { flex: 1 1 auto; font-size: 0.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Hermes board switcher (Slice 4) */
+.hk-boardbar { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+.hk-boardbar-label { font-size: 0.8rem; color: var(--muted, light-dark(#888, #94949c)); font-weight: 500; }
+.hk-boardbar button[role="combobox"] { min-width: 10rem; max-width: 18rem; }
+/* Hermes orchestration bar (Slice 5) */
+.hk-orch { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.hk-orch-panel { flex-basis: 100%; display: flex; flex-direction: column; gap: 0.5rem; border: 1px solid var(--border, light-dark(#eee, #2a2a2e)); border-radius: 8px; padding: 0.7rem; background: light-dark(#fafafa, #202024); max-width: 420px; }
+.hk-orch-panel button[role="combobox"] { max-width: 16rem; }
+/* Hermes drawer extras (Slice 6) */
+.hk-reassign { display: inline-flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.hk-dep-list { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.5rem; }
+.hk-dep-row { display: flex; align-items: center; gap: 0.4rem; }
+.hk-dep-link { font-family: var(--mono); font-size: 0.72rem; color: light-dark(#4338ca, #a5b4fc); background: none; border: none; cursor: pointer; padding: 0; }
+.hk-dep-x { background: none; border: none; color: light-dark(#b42318, #f47c7c); cursor: pointer; font-size: 0.85rem; line-height: 1; padding: 0 0.2rem; }
+.hk-dep-add { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.hk-dep-add button[role="combobox"] { min-width: 7rem; }
+.hk-log { max-height: 280px; overflow: auto; background: #1e1e1e; color: #d4d4d4; font-size: 0.72rem; padding: 0.6rem; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
+
+/* diagnostics + actions */
+.diag-row { padding: 6px 0; border-bottom: 1px solid var(--border, light-dark(#eee, #2a2a2e)); }
+.diag-head { display: flex; gap: 8px; align-items: center; }
+.diag-detail { font-size: 12px; margin: 4px 0 6px; }
+.diag-actions { display: flex; gap: 6px; }
+.btn-sm { font-size: 12px; padding: 2px 10px; }
+
+/* CLI page */
+.search {
+  font: inherit;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 14rem;
+}
+.search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.cli-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.4rem;
+}
+.cli-item {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.55rem;
+  background: light-dark(#fff, #1f1f23);
+  min-width: 0;
+}
+.cli-name {
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+.cli-path {
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* CLI page: master list + detail drawer */
+.cli-page-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.cli-main-content {
+  flex: 1;
+  min-width: 0;
+}
+.cli-grid-large {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+.cli-item-interactive {
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background 0.12s;
+}
+.cli-item-interactive:hover {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+.cli-item-selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.cli-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+.cli-user-badge {
+  font-size: 0.65rem;
+  background: light-dark(#eef2ff, #27274d);
+  color: light-dark(#4338ca, #a5b4fc);
+  border-radius: 999px;
+  padding: 0.05rem 0.35rem;
+  flex-shrink: 0;
+}
+.cli-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+.cli-used-badge {
+  font-size: 0.65rem;
+  background: light-dark(#dcfce7, #14321f);
+  color: light-dark(#15803d, #86efac);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cli-unused-badge {
+  font-size: 0.65rem;
+  color: light-dark(#9ca3af, #6b7280);
+  flex-shrink: 0;
+}
+.cli-item-unused .cli-name {
+  opacity: 0.5;
+}
+.cli-usage-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0.1rem 0 0.7rem;
+  font-size: 0.85rem;
+}
+.cli-usage-cov {
+  font-weight: 600;
+}
+.cli-usage-scope {
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+.cli-drawer {
+  flex: 0 0 340px;
+  position: sticky;
+  top: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: light-dark(#fff, #1f1f23);
+  padding: 1rem;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+}
+.cli-drawer-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.cli-drawer-header h3 {
+  margin: 0;
+  word-break: break-all;
+}
+.cli-drawer-close {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 1rem;
+  color: var(--muted);
+  padding: 0.2rem 0.4rem;
+}
+.cli-drawer-path {
+  color: var(--muted);
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+.cli-drawer-version {
+  font-size: 0.8rem;
+  margin-top: 0.3rem;
+}
+.cli-drawer-section {
+  margin-top: 1rem;
+}
+.cli-drawer-section h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+}
+.cli-drawer-desc {
+  font-size: 0.82rem;
+  color: light-dark(#444, #c0c0c6);
+  line-height: 1.5;
+  margin: 0;
+}
+.cli-drawer-code {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  background: light-dark(#f6f8fa, #26262b);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  line-height: 1.5;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+.cli-drawer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.cli-drawer-actions button {
+  width: 100%;
+}
+
+/* CLI page: category-grouped sections */
+.cli-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+.cli-category-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  margin: 0 0 0.5rem;
+  padding: 0.2rem 0 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 400;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.cli-category-head:hover {
+  color: var(--accent);
+}
+.cli-cat-caret {
+  font-size: 0.7rem;
+  color: var(--muted);
+  width: 0.9rem;
+  flex-shrink: 0;
+}
+
+/* 代理 page */
+/* toolbar wraps to a 2nd row on narrow windows (same pattern as .tasks-page) */
+.agents-page .toolbar { flex-wrap: wrap; row-gap: 0.5rem; }
+.agents-page .toolbar > button { flex-shrink: 0; white-space: nowrap; }
+/* 身份圆头像：/avatar/<id> 真图，缺图回退 emoji/首字母 monogram（同 .kanban-avatar 配方） */
+.agent-avatar {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: 1rem;
+  font-weight: 600;
+}
+.agent-avatar::before { content: attr(data-initial); }
+.agent-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+/* Overview 的模型选择器 = 聊天页那个浮层（.chat-model-menu/.model-menu，样式定义在
+   ChatPage.css）。那些规则读的是 `.chat-shell` 作用域里的皮肤变量，故照
+   .cron-delivery-md 的先例在这里补齐，让它在 Agent 页渲染成同一个样子。 */
+.agents-model-picker {
+  --chat-text: light-dark(#171717, #e4e4e7);
+  --muted-fg: #8993a3;
+  --bg: light-dark(#ffffff, #18181b);
+  --bg-accent: light-dark(#f7f7f7, #202024);
+  --bg-hover: light-dark(rgba(247, 247, 247, 0.9), rgba(42, 42, 46, 0.9));
+  --font-body: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  --skin-glass-border: light-dark(rgba(24, 31, 42, 0.08), rgba(255, 255, 255, 0.08));
+  --skin-glass-strong: light-dark(rgba(255, 255, 255, 0.94), rgba(31, 31, 35, 0.94));
+  --skin-shadow-soft: light-dark(rgba(43, 52, 55, 0.06), rgba(0, 0, 0, 0.45));
+  --skin-shadow-composer: 0 25px 50px -12px light-dark(rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.6));
+}
+/* 聊天页的浮层朝上弹（触发器在底部 composer）；这里触发器在表单顶部，改朝下。 */
+.agents-model-picker .model-menu {
+  top: calc(100% + 8px);
+  bottom: auto;
+}
+/* 右半格的 Model 字段：浮层右对齐触发器，否则 440px 宽会甩出卡片右缘。
+   降级链那个触发器在整行左侧，保持默认 left:0 即可。 */
+.agents-model-picker--right .model-menu {
+  left: auto;
+  right: 0;
+}
+/* 触发钮：宽度随模型名自适应（同聊天页），只把高度/描边调成表单控件的样子。 */
+.agents-model-picker .chat-pill--model {
+  justify-content: space-between;
+  height: 38px;
+  border: 1px solid var(--border);
+  background-color: light-dark(#fff, #1f1f23);
+}
+/* 降级链：有序 chip + 末尾一个「+ 添加模型」多选浮层触发器。 */
+
+/* 设置 / status page */
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 0.75rem;
+}
+.status-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  background: light-dark(#fff, #1f1f23);
+}
+.status-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.status-name {
+  font-weight: 400;
+  font-size: 1rem;
+}
+.status-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.status-dot.on {
+  background: light-dark(#16a34a, #22c55e);
+}
+.status-dot.off {
+  background: light-dark(#d1d5db, #3f3f46);
+}
+.status-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.status-row {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+.status-label {
+  color: var(--muted);
+  flex: 0 0 4.5rem;
+}
+.status-dashboards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+.status-dash {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  flex-wrap: wrap;
+  row-gap: 0.25rem;
+}
+.status-dash .mono {
+  flex: 1 1 9rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-err {
+  color: light-dark(#b91c1c, #f87171);
+}
+.status-err .mono {
+  word-break: break-all;
+}
+.status-version-warn {
+  color: light-dark(#b45309, #fbbf24);
+}
+/* 设置卡片「上次更新失败」块：原因全文 + 可折叠日志尾（styles 见 SettingsPage）。 */
+.update-failure {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.update-failure-reason {
+  font-size: 0.78rem;
+  color: light-dark(#b91c1c, #f87171);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 7.5rem;
+  overflow-y: auto;
+}
+.update-log summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.update-log pre {
+  margin: 0.3rem 0 0;
+  padding: 0.5rem;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  max-height: 12rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: light-dark(#f6f6f7, #17171a);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.chip-update {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.25rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid light-dark(#f59e0b, #fbbf24);
+  color: light-dark(#92400e, #fde68a);
+  background: light-dark(#fffbeb, #451a03);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+/* native React chat (over /__chatws) */
+.chat-layout {
+  padding: 0;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+.chat-sessions {
+  flex: 0 0 240px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.chat-sessions-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+.chat-sessions-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.chat-session {
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0.5rem 0.8rem;
+  background: light-dark(#fff, #1f1f23);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  cursor: pointer;
+}
+.chat-session:hover {
+  background: var(--row-hover);
+}
+.chat-session.on {
+  background: var(--nav-active);
+}
+.chat-session-title {
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-session-agent {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.chat-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.chat-empty {
+  padding: 2rem;
+}
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-width: 760px;
+}
+.chat-msg-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+.chat-msg-role {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.chat-msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: light-dark(#fff, #1f1f23);
+  line-height: 1.5;
+}
+.chat-msg-user .chat-msg-text {
+  background: light-dark(#eef2ff, #27274d);
+  border-color: light-dark(#c7d2fe, #3f3f7a);
+}
+.chat-msg-system .chat-msg-text {
+  background: light-dark(#fef2f2, #3a1d1d);
+  border-color: light-dark(#fecaca, #5f2828);
+  color: light-dark(#b91c1c, #f87171);
+}
+.chat-cursor {
+  animation: blink 1s step-start infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+.chat-input {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border);
+}
+.chat-input textarea {
+  flex: 1;
+  resize: none;
+  min-height: 2.4rem;
+  max-height: 8rem;
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chat-input textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.chat-input button {
+  align-self: flex-end;
+}
+
+/* New CLI Page Layout */
+.cli-page-layout {
+  display: flex;
+  gap: 1.5rem;
+  height: 100%;
+  min-height: 0;
+  align-items: stretch;
+  overflow: hidden;
+  padding: 1.25rem;
+}
+.cli-main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+/* The scroll region: toolbar + usage summary stay pinned at the top of the
+   fixed-height column while the grouped command list scrolls inside it. */
+.cli-groups {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.cli-grid-large {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+  padding-bottom: 2rem;
+  align-content: start;
+}
+.cli-item-interactive {
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 0.8rem 1rem;
+  border-radius: 10px;
+  background: light-dark(rgba(255, 255, 255, 0.7), rgba(32, 32, 36, 0.7));
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+}
+.cli-item-interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+  border-color: light-dark(#cbd5e1, #52525b);
+}
+.cli-item-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.cli-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+.cli-name {
+  font-size: 1rem;
+  font-weight: 400;
+}
+.cli-user-badge {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  background: light-dark(#f0fdf4, #0e2f1e);
+  color: light-dark(#15803d, #4ade80);
+  border: 1px solid light-dark(#bbf7d0, #155e44);
+  border-radius: 4px;
+}
+
+/* Right Drawer */
+.cli-drawer {
+  width: 320px;
+  flex-shrink: 0;
+  background: light-dark(rgba(249, 250, 251, 0.8), rgba(30, 30, 34, 0.8));
+  backdrop-filter: blur(20px);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.02);
+  overflow-y: auto;
+}
+.cli-drawer-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1rem;
+}
+.cli-drawer-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+.cli-drawer-title-row h3 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+.cli-drawer-close {
+  background: transparent;
+  border: none;
+  font-size: 1.2rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.cli-drawer-close:hover {
+  color: var(--fg);
+}
+.cli-drawer-path {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  word-break: break-all;
+  margin-bottom: 0.5rem;
+}
+.cli-drawer-version {
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--accent);
+}
+.cli-drawer-section h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  color: var(--fg);
+}
+.cli-drawer-desc {
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+}
+.cli-drawer-code {
+  background: light-dark(#f1f5f9, #26262b);
+  padding: 0.75rem;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: light-dark(#334155, #cbd5e1);
+  white-space: pre-wrap;
+}
+.cli-drawer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.cli-drawer-actions button {
+  width: 100%;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+}
+.cli-drawer-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.cli-drawer-usage-total {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.cli-usage-agents {
+  list-style: none;
+  margin: 0 0 0.4rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.cli-usage-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+.cli-usage-agent-avatar {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: 0.6rem;
+  font-weight: 600;
+}
+.cli-usage-agent-avatar::before {
+  content: attr(data-initial);
+}
+.cli-usage-agent-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.cli-usage-agent-id {
+  flex-shrink: 0;
+  min-width: 4.5rem;
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cli-usage-agent-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.cli-usage-agent-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.cli-usage-agent-count {
+  flex-shrink: 0;
+  min-width: 3.5rem;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* ============================================================
+   按钮系统 —— 设计稿 Figma 7108:1106「Variants & states」
+   五个变体（黄主 / 白底黑边次要 / 黑 / 灰 / 红危险）共用一份几何：
+   基准 Large 48 = 内边距 12/24、16/24 Light、字距 -0.3125、圆角 32。
+   border-box 下描边算进盒高，纵向内边距因此写 11（11+24+11+2 = 48）；没有
+   描边的变体也留 1px transparent，五个并排才等高。
+   基类 `button` 有意不动：base-ui 的 Select/Switch、`.seg`/`.tab`、图标按钮
+   全是 <button>，把几何写进基类会连它们一起撑坏。同理尺寸修饰
+   `.btn-md`/`.btn-sm` 只在带变体类时生效（`.btn-sm` 另被 TasksPage 单用在
+   裸按钮上，那份旧语义保持不变）。
+   ============================================================ */
+:is(.btn-primary, .btn-secondary, .btn-dark, .btn-subtle, .btn-danger) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 120px;
+  padding: 11px 24px;
+  border: 1px solid transparent;
+  border-radius: 32px;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+  transition:
+    box-shadow var(--ui-motion-state) ease,
+    filter var(--ui-motion-state) ease;
+}
+/* 设计稿 Disabled 态是整体降到 30%（比全局 button:disabled 的 50% 更弱）。 */
+:is(.btn-primary, .btn-secondary, .btn-dark, .btn-subtle, .btn-danger):disabled {
+  opacity: 0.3;
+}
+/* 尺寸档：Medium 40（14/22，内边距 9/16）、Small 32（12/18，内边距 7/8），
+   纵向同样各减 1 抵描边。 */
+:is(.btn-primary, .btn-secondary, .btn-dark, .btn-subtle, .btn-danger).btn-md {
+  min-width: 108px;
+  padding: 8px 16px;
+  font-size: 14px;
+  line-height: 22px;
+  letter-spacing: 0;
+}
+:is(.btn-primary, .btn-secondary, .btn-dark, .btn-subtle, .btn-danger).btn-sm {
+  min-width: 80px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: 0;
+}
+
+/* 黄主按钮：三层黄渐变 + #fff7bf 描边 + 黄投影（与 Cron「新建」同一份配方）。
+   `.is-hover`/`.is-pressed` 是组件页规范镜像用来静态摆出状态的钩子，不进业务页。 */
+.btn-primary {
+  border-color: #fff7bf;
+  background:
+    linear-gradient(180deg, #f7de37 0%, rgba(255, 239, 132, 0) 49.52%, rgba(255, 239, 132, 0) 100%),
+    linear-gradient(180deg, #ffef84 0%, #ffef84 50.96%, #fff29c 100%),
+    #ffef84;
+  /* 黄投影亮色近乎不可见、深色会合成明显光圈——深色降档，黄底黑字白名单不动。 */
+  box-shadow: 0 8px 10px 0 light-dark(rgba(251, 234, 125, 0.3), rgba(251, 234, 125, 0.12));
+  color: #000000;
+}
+/* hover 只把投影抬近一档（8/10/.3 → 4/10/.2），底色描边都不变。
+   **color 与 border-color 都必须重申**：全局 `button:hover:not(:disabled)` 把
+   两者都翻成 accent 蓝，且它的 (0,2,1) 压过变体基线的 (0,1,0)——只重申 color
+   会漏出一圈蓝描边（已踩，五个变体里只有本来就声明了描边色的 .btn-secondary 幸免）。 */
+.btn-primary:hover:not(:disabled),
+.btn-primary.is-hover {
+  border-color: #fff7bf;
+  box-shadow: 0 4px 10px 0 light-dark(rgba(251, 234, 125, 0.2), rgba(251, 234, 125, 0.08));
+  color: #000000;
+}
+/* pressed 在渐变最上层叠 5% 黑并撤掉投影。 */
+.btn-primary:active:not(:disabled),
+.btn-primary.is-pressed {
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.05) 0%, rgba(0, 0, 0, 0.05) 100%),
+    linear-gradient(180deg, #f7de37 0%, rgba(255, 239, 132, 0) 49.52%, rgba(255, 239, 132, 0) 100%),
+    linear-gradient(180deg, #ffef84 0%, #ffef84 50.96%, #fff29c 100%),
+    #ffef84;
+  box-shadow: none;
+  color: #000000;
+}
+
+/* 次要：白底 + 纯黑描边。设计稿是裸黑，暗色对称取白。 */
+.btn-secondary {
+  background: var(--ui-surface-1);
+  border-color: light-dark(#000000, #ffffff);
+  color: var(--ui-text-1);
+}
+.btn-secondary:hover:not(:disabled),
+.btn-secondary.is-hover {
+  background: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.08));
+  border-color: light-dark(#000000, #ffffff);
+  color: var(--ui-text-1);
+}
+
+/* 强调次要：黑实底白字。 */
+.btn-dark {
+  background: light-dark(#000000, #e4e4e7);
+  color: light-dark(#ffffff, #18181b);
+}
+.btn-dark:hover:not(:disabled),
+.btn-dark.is-hover {
+  border-color: transparent;
+  filter: brightness(1.25);
+  color: light-dark(#ffffff, #18181b);
+}
+
+/* 弱次要：5% 黑底、无描边。 */
+.btn-subtle {
+  background: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.08));
+  color: var(--ui-text-1);
+}
+.btn-subtle:hover:not(:disabled),
+.btn-subtle.is-hover {
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-color: transparent;
+  color: var(--ui-text-1);
+}
+
+/* 危险：红实底白字（设计稿 #e5484d，两个主题同色——语义色不做 light-dark）。 */
+.btn-danger {
+  background: #e5484d;
+  color: #ffffff;
+}
+.btn-danger:hover:not(:disabled),
+.btn-danger.is-hover {
+  border-color: transparent;
+  filter: brightness(0.93);
+  color: #ffffff;
+}
+
+/* ============================================================
+   Shared management primitives (Modal / Toast / Form)
+   Used by every detail+edit page. See components/{Modal,Field,ui}.tsx
+   ============================================================ */
+
+
+/* 浮层 chrome 在 components/Modal.module.css（R370 起右侧抽屉已退役，只剩居中弹窗）。
+   The `.foot-left` margin is handled there via :global(); page-facing `.detail-pre`
+   (below) stays global. */
+.detail-pre {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  background: light-dark(#f6f8fa, #26262b);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+}
+.detail-pre-compact {
+  max-height: 180px;
+  width: 100%;
+}
+
+/* confirm modal moved to components/ui.module.css (base-ui AlertDialog). */
+
+/* toast stack */
+.toast-stack {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 200;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  min-width: 220px;
+  max-width: 360px;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #fff;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  animation: toast-in 160ms ease;
+  word-break: break-word;
+}
+@keyframes toast-in {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.toast-success { background: #16a34a; }
+.toast-error { background: #dc2626; }
+.toast-info { background: #334155; }
+
+/* form fields —— 设计稿 Figma 7112:1813（标签 / 输入 / 提示 / 开关一整套）。
+   标签底到输入顶 8、输入底到提示顶 8，所以 .field 的 gap 就是 8。 */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.field-label {
+  font-size: 14px;
+  font-weight: 300;
+  line-height: 21px;
+  color: var(--ui-text-1);
+}
+.field-hint {
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 18px;
+  color: light-dark(rgba(0, 0, 0, 0.6), rgba(255, 255, 255, 0.6));
+}
+/* 常态描边只有 10% 黑（设计稿远比原来的 50% 灰轻），圆角统一 20——40 高的单行
+   输入因此正好是胶囊，多行输入是圆角矩形，同一个数管两种。字号 12/16 Light。 */
+.field-input,
+.field-textarea {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 16px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-radius: 20px;
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  width: 100%;
+  transition:
+    background-color var(--ui-motion-state) ease,
+    border-color var(--ui-motion-state) ease,
+    box-shadow var(--ui-motion-state) ease,
+    color var(--ui-motion-state) ease;
+}
+/* 高 40：border-box 下描边占 1px，纵向内边距因此写 11（11+16+11+2 = 40）。 */
+.field-input {
+  min-height: 40px;
+  padding: 11px 16px;
+}
+.field-input::placeholder,
+.field-textarea::placeholder {
+  color: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.5));
+}
+/* 多行沿用同一描边/圆角/内距；**min-height 有意保持 5rem** ——设计稿那只 180 高的
+   框是「rows≈7」那一个实例的高度，不是合同，拔上去会把所有 rows={3} 的表单撑坏。 */
+.field-textarea {
+  padding: 11px 16px;
+  resize: vertical;
+  min-height: 5rem;
+}
+/* 聚焦态（设计稿 7112:1834）：**只把描边换成纯黑**，不加外环、不加粗。
+   单行与多行同口径——R316 当时给 textarea 留的半透明蓝外环到此取消。 */
+.field-input:focus-visible,
+.field-textarea:focus-visible {
+  outline: none;
+  border-color: light-dark(#000000, #ffffff);
+  box-shadow: none;
+}
+.field-input:disabled,
+.field-textarea:disabled {
+  background: var(--ui-surface-2);
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-2));
+  cursor: not-allowed;
+  opacity: 1;
+}
+.field-input[aria-invalid="true"],
+.field-textarea[aria-invalid="true"] {
+  border-color: var(--ui-error);
+}
+@media (prefers-reduced-motion: reduce) {
+  .field-input,
+  .field-textarea {
+    transition: none;
+  }
+}
+/* 等宽变体只换字族，字号跟着字段规格走 12（原先 0.82rem=13.12 会把规格盖回去）。 */
+.field-mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.field-row {
+  display: flex;
+  gap: 0.6rem;
+}
+.field-row > .field {
+  flex: 1;
+}
+
+/* Cron 创建默认只展示常用字段；高级项使用原生 details 保持键盘与折叠语义。 */
+.cron-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.cron-form .field-row {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+}
+.cron-form .field-row > .field { flex: 1 1 220px; min-width: 0; }
+.cron-form .field-row > .field-input { flex: 1 1 220px; min-width: 0; }
+.cron-form-schedule-types {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 24px;
+  background: var(--ui-surface-2);
+}
+.cron-form-schedule-types button,
+.cron-form-custom-trigger {
+  flex: 1 1 auto;
+  min-height: 32px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 20px;
+  background: transparent;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: center;
+}
+.cron-form-schedule-types button[aria-pressed="true"],
+.cron-form-custom-trigger {
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+}
+.cron-form-schedule-types button:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+.cron-form-modal .foot-left { display: flex; align-items: center; }
+@media (max-width: 600px) {
+  .cron-form-modal { max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); padding: 24px; border-radius: 28px; }
+  .cron-form-modal > footer { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .cron-form-modal .foot-left { grid-column: 1 / -1; min-height: 24px; margin-right: 0; }
+  .cron-form-modal > footer > button { width: 100%; min-width: 0; }
+}
+
+/* Cron 新建/编辑：计划和值都由选择控件组成；窄弹窗允许整组自然换行。 */
+.cron-schedule-row,
+.cron-time-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.cron-time-controls { flex: 1 1 360px; }
+.cron-pattern-select { flex: 1 1 150px; min-width: 140px; }
+.cron-weekday-select { flex: 0 0 82px; }
+.cron-number-select { flex: 0 0 72px; }
+.cron-interval-select { flex: 1 1 180px; min-width: 150px; }
+.cron-seconds-select { flex: 0 0 140px; }
+.cron-timezone-select { flex: 1 1 190px; min-width: 170px; }
+.cron-schedule-row > [role="combobox"] { flex: 1 1 150px; width: auto; }
+.cron-schedule-row > .field-input[type="number"] { flex: 0 0 112px; width: 112px; }
+.cron-time-controls .field-input[type="date"] { width: 164px; }
+.cron-time-separator { color: var(--ui-text-3); }
+.cron-time-inline-label { color: var(--ui-text-3); font-size: 12px; }
+.cron-time-clear {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+}
+
+/* Cron 复用 ChatModelMenu；这里只把触发器皮成表单控件，目录浮层仍由组件自己渲染。 */
+.cron-model-picker {
+  width: 100%;
+  min-width: 0;
+}
+.cron-model-picker .chat-model-menu { width: 100%; }
+.cron-model-picker .chat-pill--model {
+  width: 100%;
+  max-width: none;
+  height: 40px;
+  justify-content: space-between;
+  padding: 0 34px 0 16px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-radius: 20px;
+  background-color: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  text-align: left;
+}
+.cron-fallback-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 40px;
+}
+.cron-fallback-picker .cron-model-picker { width: auto; flex: 1 1 180px; }
+.cron-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px 8px 4px 12px;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  font-size: 12px;
+}
+.cron-model-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cron-model-chip button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+}
+
+.drawer-body .field-row {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.drawer-body .field-row > .field {
+  min-width: 10rem;
+}
+
+.drawer-body .field-row > .switch {
+  margin: 0.35rem 0;
+}
+
+/* toggle switch (native; base-ui Switch in Field.module.css supersedes it where used) */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch-track {
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: light-dark(#d1d5db, #3f3f46);
+  position: relative;
+  transition: background 120ms ease;
+  flex-shrink: 0;
+}
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  /* stays light on both themes — must contrast the track */
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 120ms ease;
+}
+.switch input:checked + .switch-track {
+  background: var(--accent);
+}
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(16px);
+}
+.switch input:focus-visible + .switch-track {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+}
+.switch-label {
+  font-size: 0.85rem;
+}
+.switch-disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* clickable rows/cards affordance */
+.clickable {
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+.clickable:hover {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+
+/* rendered markdown body (reuses lib/markdown.ts output) */
+.md-body {
+  font-size: 0.88rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+.md-body p { margin: 0 0 0.6rem; }
+.md-body h1, .md-body h2, .md-body h3 { margin: 0.8rem 0 0.4rem; }
+.md-body pre {
+  background: light-dark(#f6f8fa, #26262b);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+  overflow: auto;
+}
+.md-body code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+.md-body ul, .md-body ol { padding-left: 1.3rem; margin: 0 0 0.6rem; }
+
+/* small helpers */
+.toolbar .spacer { margin-left: auto; }
+.empty-hint {
+  color: var(--muted);
+  padding: 1.5rem 0;
+  text-align: center;
+}
+/* agents 空态：居中引导 + 新建 CTA */
+.agents-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 3.5rem 0;
+}
+.agents-empty-icon { font-size: 2rem; line-height: 1; }
+.agents-empty-title { color: var(--fg); font-weight: 500; margin: 0; }
+.agents-empty p { margin: 0; }
+/* Switch 下的说明行，左缩进对齐轨道（36px 轨 + 0.5rem gap） */
+.switch-hint {
+  margin: 0.15rem 0 0 calc(36px + 0.5rem);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.chip-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: light-dark(#f8fafc, #222227);
+  color: light-dark(#475569, #94a3b8);
+}
+/* 启用/停用状态 chip（agents 抽屉 cron 行；绿三元组同 .tag-active 系） */
+.chip-state-on {
+  background: light-dark(#ecfdf5, #0e2f23);
+  color: light-dark(#047857, #34d399);
+  border-color: light-dark(#a7f3d0, #155e44);
+}
+.chip-state-off { color: var(--muted); }
+
+/* cron run history list (detail drawer) */
+.run-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.run-history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.run-history-tools {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(7rem, 1fr));
+  gap: 0.45rem;
+  align-items: center;
+}
+.run-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+.run-row .status {
+  font-weight: 400;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+}
+.run-row-rich {
+  align-items: flex-start;
+  flex-direction: column;
+}
+.run-outcomes {
+  display: grid;
+  width: 100%;
+  gap: 0.35rem;
+}
+.run-outcome {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.run-outcome__label {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.run-outcome__detail {
+  min-width: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.run-outcome--error .run-outcome__detail { color: var(--ui-error); }
+.run-outcome--warning .run-outcome__detail { color: light-dark(#92400e, #fbbf24); }
+.run-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.run-row__summary {
+  overflow-wrap: anywhere;
+}
+.status-ok { color: light-dark(#047857, #34d399); }
+.status-succeeded { color: light-dark(#047857, #34d399); }
+.status-skipped { color: light-dark(#b45309, #f59e0b); }
+.status-delivered { color: light-dark(#0369a1, #38bdf8); }
+.status-not-delivered,
+.status-not-requested,
+.status-unknown { color: light-dark(#64748b, #94a3b8); }
+
+@media (max-width: 1100px) {
+  .run-history-tools {
+    grid-template-columns: repeat(2, minmax(8rem, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .run-history-tools {
+    grid-template-columns: 1fr;
+  }
+  .actions {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  .run-outcome {
+    grid-template-columns: 1fr auto;
+  }
+  .run-outcome__detail {
+    grid-column: 1 / -1;
+  }
+}
+
+/* task comments (detail drawer) */
+.comment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.comment {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+}
+.comment-author {
+  font-size: 0.75rem;
+  color: var(--accent);
+  font-weight: 400;
+  margin-bottom: 0.2rem;
+}
+.comment-body {
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.comment-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.file-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* CLI page: category filter chips + grouped grid */
+.cli-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+.cli-cat {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: light-dark(#f4f4f5, #232327);
+  border: 1px solid var(--border);
+}
+.cli-cat-on {
+  background: var(--nav-active);
+  border-color: light-dark(#e6d873, #6b6420);
+  color: #000;
+}
+.cli-group {
+  margin-bottom: 1.25rem;
+}
+
+/* 设置 page forms */
+.settings-h {
+  margin: 1.5rem 0 0.6rem;
+  font-size: 0.95rem;
+}
+.settings-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  background: light-dark(#fff, #1f1f23);
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  max-width: 720px;
+}
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.settings-note {
+  font-size: 0.8rem;
+  line-height: 1.6;
+  margin: 0;
+}
+.remotes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.remote-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  background: light-dark(#fafafa, #202024);
+}
+
+/* 批量选择（Hermes 看板多选，R64） */
+.hk-card-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  cursor: pointer;
+  accent-color: var(--accent, #e5484d);
+}
+.hk-bulkbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  border-radius: 8px;
+  background: var(--accent-soft, rgba(229, 72, 77, 0.08));
+  border: 1px solid var(--accent, #e5484d);
+}
+.hk-bulkbar-count { font-weight: 600; margin-right: 4px; }
+/* base-ui Select trigger 内部是 width:100% → 在 flex 里会撑满；限宽让两个下拉紧凑横排成一行 */
+.hk-bulkbar > button[class*="trigger"] { flex: 0 1 auto; min-width: 130px; max-width: 190px; }
+.hk-bulk-group { display: inline-flex; align-items: center; gap: 6px; }
+.hk-bulk-group > button[class*="trigger"] { flex: 0 1 auto; min-width: 130px; max-width: 190px; }
+.hk-bulk-group input { width: 72px; }
+
+/* ---- R360：对齐官方 kanban 的多选 / 垃圾桶 / 抽屉新区块 ---- */
+/* 选中与批量失败的卡：选中用品牌描边，失败用警示描边（官方 failedIds 同款语义） */
+.kanban-card.is-selected { outline: 2px solid var(--accent, #e5484d); outline-offset: -2px; }
+.kanban-card.is-failed { outline: 2px solid light-dark(#b42318, #f47c7c); outline-offset: -2px; }
+.hk-col-check { margin-right: 2px; cursor: pointer; accent-color: var(--accent, #e5484d); }
+.hk-col-add {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--muted, #888);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 4px;
+}
+.hk-col-add:hover { color: var(--fg, #111); }
+/* 拖多张卡时跟着光标的替身；离屏渲染一帧后即移除 */
+.hk-drag-ghost {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--accent, #e5484d);
+  color: #fff;
+  font-size: 0.78rem;
+}
+/* 垃圾桶：平时淡出，拖拽中才浮起来（官方 --active/--drop 两态） */
+.hk-trash {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
+  padding: 14px 12px;
+  border-radius: 12px;
+  border: 1px dashed light-dark(#d0d0d5, #3a3a40);
+  color: var(--muted, #888);
+  font-size: 0.78rem;
+  opacity: 0.35;
+  transition: opacity 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.hk-trash.is-active { opacity: 1; }
+.hk-trash.is-over {
+  opacity: 1;
+  border-color: light-dark(#b42318, #f47c7c);
+  background: light-dark(rgba(180, 35, 24, 0.08), rgba(244, 124, 124, 0.12));
+}
+.hk-trash-icon { font-size: 1.1rem; }
+
+/* 附件区 */
+.hk-att-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.hk-att-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+.hk-att-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* home 频道订阅开关 */
+.hk-home-subs { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 点击即编辑的值（模型覆盖） */
+.hk-editable { background: none; border: none; padding: 0; cursor: pointer; color: inherit; text-align: left; }
+.hk-editable:hover { text-decoration: underline; }
+
+/* 诊断卡（恢复动作） */
+.hk-diag {
+  border-left: 3px solid light-dark(#d8a800, #d4b348);
+  padding: 6px 0 6px 10px;
+  margin-bottom: 10px;
+}
+.hk-diag--error, .hk-diag--critical { border-left-color: light-dark(#b42318, #f47c7c); }
+.hk-diag-head { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 0.82rem; }
+.hk-diag-detail { font-size: 0.78rem; margin: 4px 0; }
+.hk-diag-data { display: flex; flex-direction: column; gap: 2px; font-size: 0.74rem; }
+.hk-diag-data-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.hk-diag-reassign { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.hk-diag-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.hk-diag-unknown { opacity: 0.5; cursor: default; }
+.hk-msg-ok { font-size: 0.76rem; color: light-dark(#1a7f37, #4ac26b); margin-top: 6px; }
+.hk-msg-err { font-size: 0.76rem; color: light-dark(#b42318, #f47c7c); margin-top: 6px; }
+.hk-id-chip {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: light-dark(#f0f0f2, #2a2a30);
+}
+/* 事件流：幻觉类诊断事件高亮 + payload */
+.hk-event-diag { background: light-dark(rgba(216, 168, 0, 0.08), rgba(212, 179, 72, 0.12)); border-radius: 6px; }
+.hk-phantoms { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.hk-event-payload { font-family: var(--mono); font-size: 0.7rem; opacity: 0.7; word-break: break-all; }
+.hk-run-meta { font-size: 0.72rem; }
+.hk-run-meta code { font-family: var(--mono); white-space: pre-wrap; word-break: break-all; }
+/* 子任务结果 */
+.hk-child-list { display: flex; flex-direction: column; gap: 10px; }
+.hk-child-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.8rem; }
+.hk-child-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Profile 描述编辑（编排面板内） */
+.hk-profiles { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid light-dark(#e5e5e8, #2f2f35); }
+.hk-profiles-head { display: flex; flex-direction: column; gap: 2px; font-size: 0.8rem; font-weight: 600; }
+.hk-profile-row { display: flex; flex-direction: column; gap: 4px; }
+.hk-profile-name { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; }
+.hk-profile-edit { display: flex; align-items: center; gap: 6px; }
+.hk-profile-edit input { flex: 1; }
+
+/* ============================================================
+   CLI page — Figma redesign (node 6851-480)
+   New markup: .cli-page > PageHead + .cli-body(.cli-main-content + .cli-drawer)
+   Appended last so it overrides the legacy .cli-* rules for reused class names.
+   ============================================================ */
+.cli-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+/* topbar 标题/布局已归一到共享 PageHead 组件（cli-search 皮肤仍在下方）。 */
+.cli-scope { margin: 0; font-size: 0.72rem; color: light-dark(#9aa3b0, #6b7484); }
+.cli-seg { display: inline-flex; background: light-dark(rgba(0,0,0,0.05), rgba(255,255,255,0.08)); border-radius: 999px; padding: 2px; }
+.cli-seg button {
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 0.78rem; color: var(--muted);
+  padding: 0.25rem 0.7rem; border-radius: 999px; line-height: 1.4;
+}
+.cli-seg button.on { background: light-dark(#fff, #34353b); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.cli-search {
+  display: flex; align-items: center; gap: 0.5rem;
+  width: min(401px, 42vw); height: 46px; padding: 0 1rem;
+  background: light-dark(#fff, #1f2024);
+  border: 1px solid light-dark(rgba(0,0,0,0.06), rgba(255,255,255,0.08));
+  border-radius: 999px;
+}
+.cli-search-icon { font-size: 1.15rem; color: #8e98a9; }
+.cli-search input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; font-size: 0.9rem; color: var(--fg); }
+.cli-search input::placeholder { color: #8e98a9; }
+
+.cli-body { flex: 1; min-height: 0; display: flex; gap: 1rem; align-items: stretch; }
+.cli-main-content { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 2px 0.25rem 0.5rem 2px; }
+.cli-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; align-content: start; }
+
+.cli-card {
+  display: flex; flex-direction: column; justify-content: center; align-items: stretch; gap: 0.55rem;
+  width: 100%; min-height: 94px; padding: 0 1.5rem;
+  min-width: 0; overflow: hidden; /* clip long paths to the rounded card; allow grid shrink */
+  text-align: left; cursor: pointer;
+  background: light-dark(#fff, #1f2024);
+  border: 1px solid light-dark(rgba(0,0,0,0.05), rgba(255,255,255,0.06));
+  border-radius: 24px;
+  transition: box-shadow 0.15s ease, transform 0.05s ease;
+}
+.cli-card:hover { box-shadow: 0 4px 18px rgba(0,0,0,0.07); }
+.cli-card:active { transform: scale(0.995); }
+.cli-card-selected, .cli-card-selected:hover { background: light-dark(#000, #000); border-color: transparent; }
+.cli-card-top { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 0.5rem; min-width: 0; }
+.cli-card-path { width: 100%; }
+.cli-card-name { min-width: 0; flex: 0 1 auto; font-size: 1.125rem; color: light-dark(#1a1a1a, #f0f0f0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-card-selected .cli-card-name { color: #fff; }
+.cli-card-unused .cli-card-name { color: light-dark(rgba(26,26,26,0.5), rgba(240,240,240,0.5)); }
+.cli-card-selected.cli-card-unused .cli-card-name { color: rgba(255,255,255,0.85); }
+.cli-card-path {
+  display: flex; align-items: center; gap: 0.35rem; min-width: 0;
+  font-size: 0.85rem; font-weight: 300;
+  color: light-dark(rgba(0,0,0,0.5), rgba(255,255,255,0.45));
+  font-family: var(--mono);
+}
+/* text-overflow:ellipsis needs a block/inline element, NOT the flex row — so the
+   path string lives in its own shrinkable span that ellipsizes on overflow. */
+.cli-card-path-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-card-selected .cli-card-path { color: rgba(255,255,255,0.5); }
+.cli-path-icon { flex-shrink: 0; opacity: 0.7; }
+.cli-badge {
+  flex-shrink: 0; color: #000;
+  font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+  padding: 0.22rem 0.55rem; border-radius: 999px; white-space: nowrap; line-height: 1.3;
+}
+.cli-badge-used { background: #ffef84; }
+.cli-badge-never { background: light-dark(rgba(0,0,0,0.06), rgba(255,255,255,0.14)); color: light-dark(#000, #ddd); }
+
+.cli-drawer {
+  flex: 0 0 401px; width: 401px; align-self: stretch;
+  position: static; overflow-y: auto;
+  background: light-dark(#fff, #1f2024);
+  border: 1px solid light-dark(rgba(0,0,0,0.05), rgba(255,255,255,0.06));
+  border-radius: 24px; padding: 1.5rem;
+  display: flex; flex-direction: column; gap: 1.5rem;
+  backdrop-filter: none; box-shadow: none; max-height: none; top: auto;
+}
+.cli-drawer-head { position: relative; padding-right: 1.5rem; }
+.cli-drawer-x { position: absolute; top: -2px; right: -4px; border: 0; background: transparent; cursor: pointer; font-size: 1rem; color: var(--muted); padding: 0.2rem 0.35rem; }
+.cli-drawer-x:hover { color: var(--fg); }
+.cli-drawer-name { margin: 0 0 0.45rem; font-size: 1.375rem; font-weight: 400; color: light-dark(#1a1a1a, #f0f0f0); word-break: break-all; }
+.cli-drawer-version { font-size: 0.75rem; color: light-dark(rgba(0,0,0,0.5), rgba(255,255,255,0.5)); margin-bottom: 0.25rem; }
+.cli-drawer-path { display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; color: light-dark(rgba(0,0,0,0.5), rgba(255,255,255,0.5)); font-family: var(--mono); word-break: break-all; }
+
+.cli-sec { display: flex; flex-direction: column; gap: 0.5rem; }
+.cli-sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+.cli-sec h4 { margin: 0; font-size: 0.875rem; font-weight: 400; color: light-dark(#1a1a1a, #f0f0f0); }
+.cli-sec-aside { font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cli-sec-desc { margin: 0; font-size: 0.78rem; line-height: 1.5; color: light-dark(rgba(0,0,0,0.5), rgba(255,255,255,0.5)); white-space: pre-wrap; word-break: break-word; }
+
+.cli-usage-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.cli-u-row { display: flex; align-items: center; gap: 0.5rem; }
+.cli-u-avatar { position: relative; width: 20px; height: 20px; flex-shrink: 0; border-radius: 50%; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; background: var(--ui-agent-avatar-bg); color: var(--ui-agent-avatar-fg); font-size: 0.6rem; font-weight: 600; }
+.cli-u-label { font-size: 0.75rem; color: light-dark(#1a1a1a, #e8e8e8); white-space: nowrap; flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+.cli-u-bar { flex: 1; height: 4px; border-radius: 2px; background: light-dark(rgba(0,0,0,0.15), rgba(255,255,255,0.15)); overflow: hidden; }
+.cli-u-bar > span { display: block; height: 100%; border-radius: 2px; background: light-dark(#000, #fff); }
+
+.cli-help-block { margin: 0; padding: 1rem; background: light-dark(rgba(0,0,0,0.03), rgba(255,255,255,0.04)); border-radius: 16px; font-family: var(--mono); font-size: 0.72rem; line-height: 1.5; color: light-dark(rgba(0,0,0,0.7), rgba(255,255,255,0.7)); white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto; }
+.cli-drawer-actions { flex-direction: row; gap: 0.5rem; }
+.cli-drawer-actions button { flex: 1; padding: 0.5rem; font-size: 0.85rem; border-radius: 12px; }
+
+@media (max-width: 900px) {
+  .cli-body { flex-direction: column; }
+  .cli-drawer { flex: 0 0 auto; width: 100%; max-width: none; }
+  .cli-search { width: min(401px, 60vw); }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   全站图标描边统一 1.2 CSS px（R376）
+
+   为什么需要这一段：组件里写的 `stroke-width` 是 **viewBox 用户单位**，实际粗细 =
+   `stroke-width × 渲染宽 / viewBox宽`。实测同样写 1.2，在 12px 渲染下只有 0.60、24px
+   下才 1.20——「都写 1.6」根本不等于「看起来一样粗」。审计全 app 后实际散成
+   0.49 / 1.00 / 1.07 / 1.10 / 1.25 / 1.33 / 1.40 / 1.50 八档。
+
+   `vector-effect: non-scaling-stroke` 让描边不受 viewBox→渲染尺寸的缩放影响，
+   `stroke-width` 直接以 CSS px 计（canvas 像素实测：12px 与 24px 渲染下都恒为 1.2）。
+   因此**不需要给每个容器算补偿系数**，将来改图标尺寸也不用回来改这段。
+
+   ★ 为什么选择器要列两遍 ★ `vector-effect` 在规范里 **Inherited: no**——只写在
+   `<svg>` 上，真正画线的 `<path>` 拿不到（实测子元素 computed 是 `none`，视觉上等于
+   没改）。所以必须连子元素一起选中。
+
+   ★ 作用域必须精确到「图标」★ 数据可视化的线宽要按比例缩放，绝不能套进来：
+   总览 sparkline（`.kpi` 内 viewBox 405）、用量页折线 `.uc-box`(vb 901) 与甜甜圈
+   `.usage-donut`(vb 100 / stroke 17) 都刻意排除。base-ui 的 Checkbox 勾（vb 13）属于
+   控件而非图标，也不收编。
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+:is(.nav-icon, .cli-path-icon,
+    .chat-headbtn svg, .chat-pill--ghost svg, .chat-iconbtn svg,
+    .chat-copybtn svg, .chat-ctxmenu__item svg,
+    .chat-pinbar__ico svg, .chat-pinbar__toggle svg,
+    .chat-thinking__ico svg, .chat-card__ico svg, .slash-menu__icon svg,
+    .wb-card-updated svg, .wb-card-iconbtn svg, .wb-move svg,
+    .ui-toggle svg, .ui-cbtn svg,
+    .cron-search-box svg, .btn-primary svg),
+:is(.nav-icon, .cli-path-icon,
+    .chat-headbtn svg, .chat-pill--ghost svg, .chat-iconbtn svg,
+    .chat-copybtn svg, .chat-ctxmenu__item svg,
+    .chat-pinbar__ico svg, .chat-pinbar__toggle svg,
+    .chat-thinking__ico svg, .chat-card__ico svg, .slash-menu__icon svg,
+    .wb-card-updated svg, .wb-card-iconbtn svg, .wb-move svg,
+    .ui-toggle svg, .ui-cbtn svg,
+    .cron-search-box svg, .btn-primary svg) * {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2;
+}
+/* 导航图标的圆点（聊天三点、代理双眼）是靠 2 倍粗描边 + 圆头画出来的零长度路径，
+   保持 2 倍关系，否则加粗后点会相对变小。特异性 (0,2,0) 高过上面的 (0,1,0)，压得住。 */
+.nav-icon .ni-dot,
+.nav-icon .ni-eye {
+  stroke-width: 2.4;
+}

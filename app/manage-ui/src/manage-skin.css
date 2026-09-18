@@ -1,0 +1,1864 @@
+/*
+ * manage-skin.css — 管理面 7 页的聊天质感皮肤（R68，纯 CSS 不动功能）。
+ * 挂点 :is(.page, .cron-page)：CronPage 根是裸 cron-page；聊天页根
+ * .chat-shell 完全隔离。浮层：R68 明确不动；R107 曾为 Agents 抽屉把 token
+ * 上移 :root 并给 .subtabs/.file-on/.agent-cron-row 去前缀；R108 详情收进
+ * 页面主从布局（抽屉只剩「新建」），这些规则保持无前缀无妨，token 留 :root。
+ * 必须 import 在 styles.css 之后、debug-overrides.css 之前（靠 cascade 覆盖，
+ * 不堆 specificity）。双后端身份色（badge/日历 chip 绿=OpenClaw 靛=Hermes）
+ * 是语义色，保留；黄 #ffef84 只做 accent。
+ * spec: docs/superpowers/specs/2026-06-11-manage-skin-rollout-design.md
+ */
+
+:root {
+  /* R67 表面 token（自 UsagePage.css 上移；R107 再上移 :root——抽屉在
+     Dialog.Portal（.page 之外），页面作用域取不到）。应用仍留页面作用域。 */
+  --u-bg: var(--ui-canvas);
+  --u-card: var(--ui-surface-1);
+  --u-hairline: var(--ui-hairline);
+  --u-shadow-card: var(--ui-shadow-card);
+  --u-shadow-hover: var(--ui-shadow-hover);
+  --u-glass-pill: var(--ui-surface-glass);
+  --u-hi: var(--ui-primary);
+  --u-hi-ink: var(--ui-primary-ink);
+  --u-gold: #f2c94c;
+  --u-amber: #c99014;
+  --u-tint-hover: light-dark(#fbf8ec, #2a2917);
+  --u-tint-banner: light-dark(#fff9db, #32301a);
+}
+
+:is(.page, .cron-page) {
+  background: var(--u-bg);
+  min-height: 100%;
+}
+/* 页级滚动条槽（12px）从 main.content 宽度里划出，.page 的画布背景盖不到
+   那一条，会露出底下 app 的白（R204 用户报右缘「白边」）——滚动容器自己
+   也涂画布色补齐。聊天页 .chat-shell 自带全幅背景，不受影响。 */
+main.content {
+  background: var(--u-bg);
+}
+
+/* —— seg 胶囊（R67 自 usage 页上移，全管理页生效）。
+   R205 按 Figma 6999-633 还原：#f3f3f3 实底 + 1px 白描边 + 极软投影
+   （去玻璃模糊），item 12/4 内边距 16px Light；与 BackendTabs 同一语言。 —— */
+:is(.page, .cron-page) .seg {
+  border: 1px solid light-dark(#ffffff, rgba(255, 255, 255, 0.08));
+  border-radius: 24px;
+  /* 设计稿背景三层：底部白光晕 + 顶部 3% 黑内影 + #F3F3F3 底（用户给的 dev 参数） */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+  padding: 8px;
+  gap: 0;
+  overflow: visible;
+}
+:root[data-theme="dark"] :is(.page, .cron-page) .seg {
+  /* 同配方暗色适配：光晕/内影换低亮度,底 #2a2a2e */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+:is(.page, .cron-page) .seg button {
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 12px;
+  background: transparent;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.31px;
+}
+:is(.page, .cron-page) .seg button + button {
+  border-left: 0;
+}
+:is(.page, .cron-page) .seg button:hover:not(:disabled):not(.seg-on) {
+  /* 与 PillTabs 同口径：字色不变,黑 10%(暗色白 10%)底(R206)。
+     color 重申防全局 button:hover 翻 accent 蓝(styles.css:240)。 */
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.1));
+  color: inherit;
+}
+:is(.page, .cron-page) .seg .seg-on:hover:not(:disabled) {
+  /* 激活项悬浮同理防蓝 */
+  color: var(--u-hi-ink);
+}
+:is(.page, .cron-page) .seg .seg-on {
+  background: var(--u-hi);
+  color: var(--u-hi-ink);
+}
+
+/* —— 搜索框：胶囊 + 金色 focus 圈 —— */
+:is(.page, .cron-page) .search {
+  border: 1px solid var(--u-hairline);
+  border-radius: 999px;
+  background: var(--u-card);
+  padding: 0.35rem 0.9rem;
+}
+:is(.page, .cron-page) .search:focus {
+  outline: none;
+  border-color: var(--u-gold);
+  box-shadow: 0 0 0 3px rgba(242, 201, 76, 0.25);
+}
+
+/* —— 按钮：整套变体/尺寸/状态已在 styles.css 的「按钮系统」里按设计稿
+   （Figma 7108:1106）统一定义，页面作用域不再另立黄胶囊/红描边覆盖，
+   否则会以更高特异性压掉全局配方。这里只留裸 `.btn-sm` 的胶囊圆角。 —— */
+:is(.page, .cron-page) .btn-sm {
+  border-radius: 999px;
+}
+
+/* —— 表格：去硬边、行 hover 淡黄（cron 表 / run 列表等通用） —— */
+:is(.page, .cron-page) .table-wrap {
+  background: var(--u-card);
+  border: 1px solid var(--u-hairline);
+  border-radius: 20px;
+  padding: 6px 14px;
+  box-shadow: var(--u-shadow-card);
+}
+:is(.page, .cron-page) table th {
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--u-hairline);
+}
+:is(.page, .cron-page) table td {
+  border-bottom: 1px solid var(--u-hairline);
+}
+:is(.page, .cron-page) table tbody tr:last-child td {
+  border-bottom: 0;
+}
+:is(.page, .cron-page) table tbody tr:hover td {
+  background: var(--u-tint-hover);
+}
+
+/* —— 卡片族：白卡 + hairline + 大圆角 + 柔影 —— */
+:is(.page, .cron-page) :is(.model-card, .skill-row, .status-card, .settings-card) {
+  border-color: var(--u-hairline);
+  border-radius: 16px;
+  box-shadow: var(--u-shadow-card);
+}
+:is(.page, .cron-page) .cli-item {
+  border-color: var(--u-hairline);
+  border-radius: 14px;
+  box-shadow: var(--u-shadow-card);
+}
+/* 可点击卡片 hover 浮起（打开详情抽屉的那些） */
+:is(.page, .cron-page) :is(.model-card, .cli-item-interactive, .clickable) {
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+:is(.page, .cron-page) :is(.model-card, .cli-item-interactive, .clickable):hover {
+  box-shadow: var(--u-shadow-hover);
+  transform: translateY(-1px);
+}
+/* —— 看板（Tasks 页）：去列底容器 + Figma 白卡直接浮在页面灰底（对齐设计稿 6379-530，纯 CSS 不动功能） —— */
+:is(.page, .cron-page) .kanban-col {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+/* 列头与卡片左缘对齐（去掉列底容器后不再靠它统一左缘） */
+:is(.page, .cron-page) .kanban-col-head {
+  padding-left: 0.6rem;
+}
+/* 卡片：去硬边、大圆角、内距更足、柔影浮起 */
+:is(.page, .cron-page) .kanban-card {
+  border: 0;
+  border-radius: 24px;
+  padding: 16px;
+  box-shadow: var(--u-shadow-card);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+:is(.page, .cron-page) .kanban-card:hover {
+  box-shadow: var(--u-shadow-hover);
+  transform: translateY(-1px);
+}
+/* 标题：更大字号、深墨色、两行截断 */
+:is(.page, .cron-page) .kanban-card-title {
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 描述：半透明、两行截断 */
+:is(.page, .cron-page) .kanban-card-excerpt {
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--muted);
+  margin-top: 6px;
+  -webkit-line-clamp: 2;
+}
+/* 底部 meta：头像+名字左簇、时间/年龄靠右、垂直居中 */
+:is(.page, .cron-page) .kanban-card-meta {
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+/* 指派人：靛蓝药丸 → 真·agent 头像 + 名字（设计稿风格），去底色 */
+:is(.page, .cron-page) .kanban-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+/* 未指派：文字保留琥珀语义，头像仍使用统一黑白配色。 */
+:is(.page, .cron-page) .kanban-assignee.hk-unassigned {
+  background: transparent;
+  color: var(--u-amber);
+}
+/* Hermes 卡片勾选框：随大圆角内移，不压圆角 */
+:is(.page, .cron-page) .hk-card-check {
+  top: 10px;
+  right: 10px;
+}
+
+/* —— 看板一级页面 chrome（Figma 6379-530，R109）：48px 玻璃胶囊过滤条 + 黑滑块
+   seg + 32px 列距 + 行内列头。全部 .tasks-page 前缀，不外溢其它页。 —— */
+/* 过滤胶囊 = 与 PillTabs / .ui-cbtn 同一份 48px 玻璃配方（Figma 6999-633）。 */
+.tasks-page .ui-toolbar .kb-pill {
+  box-sizing: border-box;
+  height: 48px;
+  padding: 0 20px;
+  border: 1px solid #ffffff;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+  color: light-dark(#000000, #ffffff);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+}
+:root[data-theme="dark"] .tasks-page .ui-toolbar .kb-pill {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+/* 后端切换（OpenClaw|Hermes）整组样式已删——它和 Cron 的「日历|列表」是同一个
+   PillTabs 组件，视觉一律由 PillTabs.module.css 出。这里原先重绘成玻璃胶囊
+   （999px 圆角 + backdrop-filter + tab 0.95rem），还给 tab 自己画了选中底色，
+   会和组件那块「流动」的 .indicator 滑块叠成双层黑。 */
+/* 胶囊内的 Select / 搜索框去自身边框底色（外壳就是胶囊） */
+.tasks-page .kb-pill [role="combobox"] {
+  min-width: 0;
+  max-width: 16rem;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  font: inherit;
+}
+.tasks-page .kb-pill [role="combobox"]:hover:not(:disabled) {
+  color: var(--fg);
+}
+/* 板面：列距 32px（设计稿），列头「名称 计数」左排 16px 同色，列高适配加高的页头 */
+.tasks-page .kanban {
+  gap: 32px;
+}
+.tasks-page .kanban-col {
+  max-height: calc(100vh - 260px);
+}
+.tasks-page .kanban-col-head {
+  justify-content: flex-start;
+  gap: 0.55rem;
+  padding: 0.1rem 0.6rem 0.4rem;
+  font-size: 1rem;
+}
+.tasks-page .kanban-col-head .muted {
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* —— 日历（定时任务页）：软化网格线 + 今日黑圈（无黄底） —— */
+:is(.page, .cron-page) .cal-grid {
+  background: light-dark(#fff, #1f1f23);
+  border: 0;
+  border-radius: 24px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 10px 30px rgba(0, 0, 0, 0.04);
+}
+:is(.page, .cron-page) .cal-today .cal-day {
+  background: var(--u-hi-ink);
+}
+
+/* —— CLI 分类 chips：胶囊 + 黄激活 —— */
+:is(.page, .cron-page) .cli-cat {
+  border-radius: 999px;
+}
+:is(.page, .cron-page) .cli-cat-on {
+  background: var(--u-hi);
+  color: var(--u-hi-ink);
+  border-color: transparent;
+}
+
+/* —— 开关选中态：金色 ——
+   两套实现都覆盖：旧版原生 .switch（全局类）+ base-ui Switch（Field.module.css，
+   类名被哈希 → 按 role+data-checked 属性命中）。drawer 等浮层在 portal
+   （.page 之外）→ 天然不受影响（本轮浮层不动）。 */
+:is(.page, .cron-page) .switch input:checked + .switch-track {
+  background: var(--u-gold);
+}
+:is(.page, .cron-page) [role="switch"][data-checked] {
+  background: var(--u-gold);
+}
+/* management-page:start */
+.page.management-page,
+.page:has(> .cron-page.management-page) {
+  min-height: 100%;
+  padding: 36px 40px 32px;
+  background: var(--ui-canvas);
+}
+
+.cron-page.management-page {
+  min-height: 100%;
+  padding: 0;
+}
+
+/* 页头排版的唯一源（R248 起全站统一，规格取自 Cron 设计稿 6458:121）：
+   标题 32/32 Light → 间隔 4 → 副标题 16/20 Light 字距 0 → 间隔 24 → 内容。
+   作用域故意挂在 .page-head 自身而不是 .management-page：CLI 页根是
+   `page cli-page`（没有 management-page 类），挂管理页前缀它就漏了；而
+   .page-head 只由 PageHead 组件产出，等价于「所有用页头的页面」。
+   优先级要压过 PageHead.module.css 的默认值（都是单类 0,1,0）——所以标题/副标题
+   走 `.page-head .page-head-*`(0,2,0)，容器走 `header.page-head`(0,1,1)。
+   下面 @media(max-width:720px) 的窄屏覆盖是 (0,2,0)，仍然照常赢过这里。 */
+header.page-head {
+  margin-bottom: 24px;
+}
+
+/* PageHead.module.css 给 titles 留了 0.3rem 的 flex gap；这里归零，
+   标题↔副标题的间距只由下面 subtitle 的 margin-top 说了算。 */
+.page-head .page-head-titles {
+  gap: 0;
+}
+
+/* 颜色按设计稿：标题纯黑、副标题黑 50%。深色模式没有对应稿，沿用原来的
+   --ui-text-1 深色值与等价的白 50%，浅色侧则严格是设计稿的值。 */
+.page-head .page-head-title {
+  margin: 0;
+  color: light-dark(#000000, #e4e4e7);
+  font-size: 32px;
+  line-height: 32px;
+  font-weight: 300;
+  letter-spacing: 0;
+}
+
+.page-head .page-head-subtitle {
+  margin-top: 4px;
+  color: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.5));
+  font-size: 16px;
+  line-height: 20px;
+  letter-spacing: 0;
+}
+
+/* CLI 页壳没有 .management-page 类（同上），左右内边距因此还停在全局 .page 的
+   20px，标题左起点是 84 而不是 104；这里补齐，与其它页同列。 */
+.page.cli-page {
+  padding-left: 40px;
+  padding-right: 40px;
+}
+
+/* 副标题里的统计条自带字号/颜色会顶掉上面那份，一律拉回继承。 */
+.page-head .page-head-subtitle :is(.cron-stats, .kb-stats) {
+  font-size: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+.management-page .toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+/* 后端切换（OpenClaw|Hermes）与 Cron 的「日历|列表」是同一个 PillTabs 组件，
+   这里原先的 padding/描边覆盖会把它改造成另一副长相（999px 圆角、白 55% 底、
+   灰描边、tab 字号 15.2）。已删——统一走 PillTabs.module.css 的组件规格。 */
+
+/* Tasks：看板只在自身形成横向画布，列与卡片保持清晰、轻量的层级。 */
+.management-page.tasks-page {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.management-page.tasks-page .kanban {
+  width: 100%;
+  max-width: 100%;
+  gap: 32px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+
+.management-page.tasks-page .kanban-col {
+  flex: 1 0 288px;
+  min-width: 288px;
+  max-width: 360px;
+  max-height: calc(100dvh - 280px);
+  background: transparent;
+  border: 0;
+}
+
+.management-page.tasks-page .kanban-col-head {
+  padding: 4px 0 12px;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.management-page.tasks-page .kanban-col-body {
+  gap: 12px;
+  padding: 0 0 12px;
+  overscroll-behavior: contain;
+}
+
+.management-page.tasks-page .kanban-card {
+  background: var(--ui-surface-1);
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  padding: 20px;
+  box-shadow: var(--ui-shadow-card);
+  transition:
+    box-shadow var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1),
+    transform var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.management-page.tasks-page .kanban-card:hover {
+  box-shadow: var(--ui-shadow-hover);
+  transform: translateY(-1px);
+}
+
+.management-page.tasks-page .kanban-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.management-page.tasks-page .kanban-card-excerpt {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 8px;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.management-page.tasks-page .kanban-card-meta {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.management-page.tasks-page .kanban-assignee,
+.management-page.tasks-page .kb-date,
+.management-page.tasks-page .hk-chip,
+.management-page.tasks-page .hk-age {
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.management-page.tasks-page .kanban-assignee.hk-unassigned {
+  color: var(--ui-warning);
+}
+
+/* 卡片表面不能抹掉 live、陈旧和告警等业务语义。 */
+.management-page.tasks-page .kanban-card.is-live {
+  box-shadow: inset 3px 0 0 var(--accent, #e5484d), var(--ui-shadow-card);
+}
+
+.management-page.tasks-page .kanban-card.is-live:hover {
+  box-shadow: inset 3px 0 0 var(--accent, #e5484d), var(--ui-shadow-hover);
+}
+
+.management-page.tasks-page .kanban-card.hk-stale-amber {
+  box-shadow: inset 0 0 0 1px light-dark(#b78103, #eab308), var(--ui-shadow-card);
+}
+
+.management-page.tasks-page .kanban-card.hk-stale-amber:hover {
+  box-shadow: inset 0 0 0 1px light-dark(#b78103, #eab308), var(--ui-shadow-hover);
+}
+
+.management-page.tasks-page .kanban-card.hk-stale-red {
+  box-shadow: inset 0 0 0 1px var(--ui-error), 0 0 8px color-mix(in srgb, var(--ui-error) 35%, transparent), var(--ui-shadow-card);
+}
+
+.management-page.tasks-page .kanban-card.hk-stale-red:hover {
+  box-shadow: inset 0 0 0 1px var(--ui-error), 0 0 8px color-mix(in srgb, var(--ui-error) 35%, transparent), var(--ui-shadow-hover);
+}
+
+.management-page.tasks-page .kanban-card.is-live.hk-stale-amber {
+  box-shadow: inset 3px 0 0 var(--accent, #e5484d), inset 0 0 0 1px light-dark(#b78103, #eab308), var(--ui-shadow-card);
+}
+
+.management-page.tasks-page .kanban-card.is-live.hk-stale-amber:hover {
+  box-shadow: inset 3px 0 0 var(--accent, #e5484d), inset 0 0 0 1px light-dark(#b78103, #eab308), var(--ui-shadow-hover);
+}
+
+.management-page.tasks-page .kanban-card.is-live.hk-stale-red {
+  box-shadow: inset 3px 0 0 var(--accent, #e5484d), inset 0 0 0 1px var(--ui-error), 0 0 8px color-mix(in srgb, var(--ui-error) 35%, transparent), var(--ui-shadow-card);
+}
+
+.management-page.tasks-page .kanban-card.is-live.hk-stale-red:hover {
+  box-shadow: inset 3px 0 0 var(--accent, #e5484d), inset 0 0 0 1px var(--ui-error), 0 0 8px color-mix(in srgb, var(--ui-error) 35%, transparent), var(--ui-shadow-hover);
+}
+
+/* Cron：工具、筛选、列表与日历共享同一控制高度和卡片表面。 */
+.management-page.cron-page {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* 页头几何走全站统一那份（见上方 .management-page .page-head*）。这里只补一处：
+   副标题包的是 inline-flex 的 .cron-stats，行盒底下会多出 1px 基线余量（盒 21 / 字 20），
+   间距永远差 1 凑不出整数——换 flex 后盒高=20，设计稿的 4 / 24 才是真值。 */
+.management-page.cron-page .page-head-subtitle {
+  display: flex;
+}
+
+/* 日历撑满剩余高度，底距由页壳的下内边距决定（设计稿：876 → 900）。 */
+.page:has(> .cron-page.management-page) {
+  padding-bottom: 24px;
+}
+
+/* 新建：设计稿(7018:187)自带一份黄色配方——三层渐变 + #fff7bf 描边 + 黄色投影，
+   文字与其它工具栏控件同规格(SF Pro Light 16/24，字距 -0.3125，纯黑)。 */
+.management-page.cron-page .cron-toolbar > .btn-primary.cron-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  padding: 0 24px;
+  border: 1px solid #fff7bf;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgb(247, 222, 55) 0%, rgba(255, 239, 132, 0) 49.519%, rgba(255, 239, 132, 0) 100%),
+    linear-gradient(180deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 50.962%, rgb(255, 242, 156) 100%),
+    linear-gradient(90deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 100%);
+  box-shadow: 0 8px 10px 0 rgba(255, 240, 143, 0.3);
+  color: #000000;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+}
+
+.management-page.cron-page .cron-toolbar > .btn-primary.cron-new:hover:not(:disabled) {
+  color: #000000;
+  filter: brightness(0.97);
+}
+
+/* 设计稿把视图切换、筛选、新建、日期导航排成一整条；窄屏按 flex 自然折行。 */
+.management-page.cron-page .cron-toolbar {
+  flex-wrap: wrap;
+  /* 设计稿(6458:121)控件间距 8，整排到日历 16（按钮底 164 → 日历顶 180）。 */
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 16px;
+}
+
+.management-page.cron-page .cron-filters,
+.management-page.cron-page .cron-cal-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 日期这一组贴右边缘（设计稿：左半是视图/筛选/新建，右半是日期导航）。 */
+.management-page.cron-page .cron-cal-nav {
+  margin-left: auto;
+}
+
+/* 「今天」与筛选胶囊、PillTabs 共用同一份表面配方（Figma 6999-633）：
+   底部白光晕 + 顶部 3% 黑内影 + #F3F3F3 底，1px 白描边，极软投影。 */
+.management-page.cron-page .cron-cal-today {
+  border: 1px solid #ffffff;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+}
+
+:root[data-theme="dark"] .management-page.cron-page .cron-cal-today {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+
+/* hover 同 PillTabs 口径：字色不变，只垫黑 10%（暗色白 10%）。 */
+.management-page.cron-page .cron-cal-today:hover:not(:disabled) {
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.1));
+  color: inherit;
+}
+
+/* 日期前后翻页是裸箭头，不带胶囊背景；字号/色值取自设计稿 6888:839。 */
+.management-page.cron-page .cron-cal-arrow {
+  width: 32px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: light-dark(#1b1f27, #e4e4e7);
+  font-size: 23px;
+  font-weight: 300;
+  line-height: 36px;
+}
+
+.management-page.cron-page .cron-cal-arrow:hover:not(:disabled) {
+  background: none;
+  color: light-dark(#1b1f27, #e4e4e7);
+  opacity: 0.6;
+}
+
+/* 日期区间文字：与工具栏其它文字同规格（设计稿 6888:821）。 */
+.management-page.cron-page .cron-cal-title {
+  min-width: 88px;
+  color: light-dark(#000000, #ffffff);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+  text-align: center;
+}
+
+.management-page.cron-page .cron-cal-today {
+  height: 48px;
+  padding: 0 24px;
+  color: light-dark(#000000, #ffffff);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+}
+
+/* 页头：标题下的实时统计 + 右侧搜索。 */
+.management-page.cron-page .cron-stats {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+/* 搜索框与「今天」/筛选胶囊共用 PillTabs（Figma 6999-633）的表面配方。
+   宽度跟随「月|周|日」那组标签——它的宽度随中英文文案变化，页面用
+   ResizeObserver 把实测值写进 --cron-search-w，两者始终等宽。 */
+.management-page.cron-page .cron-search-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: var(--cron-search-w, min(280px, 42vw));
+  max-width: 100%;
+  height: 48px;
+  padding: 0 24px;
+  border: 1px solid #ffffff;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+  color: light-dark(#000000, #ffffff);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+  cursor: text;
+  transition:
+    border-color var(--ui-motion-state) ease,
+    box-shadow var(--ui-motion-state) ease;
+}
+
+:root[data-theme="dark"] .management-page.cron-page .cron-search-box {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+
+.management-page.cron-page .cron-search-box:focus-within {
+  border-color: var(--ui-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus) 18%, transparent);
+}
+
+.management-page.cron-page .cron-search-input {
+  font: inherit;
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  background: none;
+  color: light-dark(#000000, #ffffff);
+  outline: none;
+}
+
+.management-page.cron-page .cron-search-input::placeholder {
+  color: inherit;
+  opacity: 1;
+}
+
+/* 统计行的字号/行高/字距/颜色全部走页头那份统一规格（见 .page-head .page-head-subtitle），
+   这里不再重写——原先写死的灰蓝 #7d8796 会盖掉统一色，已删。 */
+.management-page.cron-page .cron-stats {
+  font-weight: 300;
+}
+
+/* 新建下拉：双后端时才出现，样式与筛选面板同源。 */
+.cron-menu-positioner {
+  z-index: 300;
+}
+
+.cron-menu-popup {
+  min-width: 180px;
+  padding: 6px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: var(--ui-radius-compact);
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-hover);
+}
+
+.cron-menu-item {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  color: var(--ui-text-1);
+  font-size: 0.86rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cron-menu-item[data-highlighted] {
+  background: var(--ui-surface-2);
+}
+
+.management-page.cron-page .table-wrap {
+  width: 100%;
+  max-width: 100%;
+  padding: 8px 16px;
+  overflow-x: auto;
+  background: var(--ui-surface-1);
+  border: 0;
+  border-radius: 24px;
+  box-shadow: var(--ui-shadow-card);
+  overscroll-behavior-inline: contain;
+}
+
+.management-page.cron-page .cron-table {
+  min-width: 1040px;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.management-page.cron-page .cron-table th {
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.management-page.cron-page .cron-backend-icon {
+  --backend-tab-icon-size: 20px;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.management-page.cron-page .cron-table .actions button {
+  border-radius: 999px;
+}
+
+.management-page.cron-page .job-name {
+  color: var(--ui-text-1);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.management-page.cron-page .job-prompt {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 4px;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 16px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.management-page.cron-page .cal {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* 日历卡：设计稿(6458:474)是纯白圆角面，没有描边——只留投影做层次。 */
+.management-page.cron-page .cal-grid {
+  max-width: 100%;
+  background: var(--ui-surface-1);
+  border: 0;
+  border-radius: 24px;
+  box-shadow: var(--ui-shadow-card);
+}
+
+.management-page.cron-page .cal-tg {
+  max-width: 100%;
+  background: var(--ui-surface-1);
+  border: 0;
+  border-radius: 24px;
+  box-shadow: var(--ui-shadow-card);
+}
+
+.management-page.cron-page .cal-wd,
+.management-page.cron-page .cal-tg-dow {
+  color: var(--ui-text-1);
+}
+
+.management-page.cron-page .cal-tg-date,
+.management-page.cron-page .cal-hlabel,
+.management-page.cron-page .cal-chip-time,
+.management-page.cron-page .cal-chip-n,
+.management-page.cron-page .cal-ev-n {
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  opacity: 1;
+}
+
+.management-page.cron-page .cal-chip {
+  flex: 0 0 40px;
+  min-height: 40px;
+  max-height: 40px;
+  padding: 0 12px;
+  border-radius: 20px;
+  color: var(--ui-text-1);
+}
+
+/* 月视图格子只有周视图的零头（1117 窗口下 140px，还要分掉日期行），40px 的胶囊
+   放两条加一行「+N」要 108px 而只有 105px——差 3px 就退成只显示 1 条、空 42px。
+   月视图单独收到 28（周/日视图不动，那里仍是设计稿 6831:182 的 40）。 */
+.management-page.cron-page .cal-grid-month .cal-chip {
+  flex: 0 0 28px;
+  min-height: 28px;
+  max-height: 28px;
+  border-radius: 14px;
+}
+
+.management-page.cron-page .cal-ev {
+  min-height: 40px;
+  max-height: 40px;
+  padding: 0 14px;
+  border-radius: 20px;
+  color: var(--ui-text-1);
+}
+
+/* 身份色和 disabled 样式由既有后端专属类承担，此处只确保禁用状态仍清楚可辨。 */
+.management-page.cron-page :is(.cal-chip-off, .cal-ev-off) {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+/* 已经跑过的时刻：底色抽空，只留文字。和还没跑的实心卡拉开层次，
+   一眼能看出时间轴上"到哪儿了"。 */
+.management-page.cron-page :is(.cal-chip, .cal-ev).is-past {
+  background: transparent;
+}
+
+/* 下一个要触发的任务：纯黑底纯白字，压过后端身份色（暗色下反转，同 PillTabs
+   选中态口径）。次要文字（时间/×N）跟着反色，否则会糊在黑底上。 */
+.management-page.cron-page :is(.cal-chip, .cal-ev).is-next {
+  background: light-dark(#000000, #ffffff);
+  color: light-dark(#ffffff, #000000);
+}
+
+.management-page.cron-page :is(.cal-chip, .cal-ev).is-next :is(.cal-chip-time, .cal-chip-n, .cal-ev-n) {
+  color: light-dark(rgba(255, 255, 255, 0.72), rgba(0, 0, 0, 0.72));
+}
+
+/* Models / Skills / Agents 共享页面边界：窄屏下宽内容只在自身容器内收缩。 */
+.management-page.models-page,
+.management-page.skills-page,
+.management-page.agents-page {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Models：辅助模型区已随 per-agent 设置面搬到 pages/agents/（样式随组件 CSS Module 走）。 */
+.management-page.models-page .model-group {
+  min-width: 0;
+  margin-bottom: 32px;
+}
+
+/* provider 名是小写标识串，跟中文区块标题混排时需要一点字距才不糊成一团。 */
+.management-page.models-page .model-provider {
+  letter-spacing: 0.2px;
+}
+
+.management-page.models-page .model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  min-width: 0;
+}
+
+.management-page.models-page .model-card {
+  min-width: 0;
+  padding: 16px;
+  background: var(--ui-surface-1);
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  box-shadow: var(--ui-shadow-card);
+}
+
+.management-page.models-page .model-card:hover {
+  box-shadow: var(--ui-shadow-hover);
+}
+
+.management-page.models-page .model-name {
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-page.models-page .model-meta {
+  overflow: hidden;
+  margin-top: 4px;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 300;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-page.models-page .model-tags {
+  gap: 6px;
+  min-height: 20px;
+  margin-top: 12px;
+}
+
+.management-page.models-page .tag {
+  padding: 2px 8px;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-2));
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 300;
+  background: var(--ui-surface-2);
+  border: 1px solid var(--ui-hairline);
+}
+
+/* 激活与推理标签保留绿/琥珀业务语义，不被通用 tag 表面覆盖。 */
+.management-page.models-page .tag-active {
+  color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 12%, var(--ui-surface-1));
+  border-color: color-mix(in srgb, var(--ui-success) 28%, var(--ui-surface-1));
+}
+
+.management-page.models-page .tag-reason {
+  color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 12%, var(--ui-surface-1));
+  border-color: color-mix(in srgb, var(--ui-warning) 28%, var(--ui-surface-1));
+}
+
+/* Skills（R359 改版）：去分类、扁平一张网格 + 右侧常驻详情，卡片与详情栏的尺寸
+   规格照 CLI 页（styles.css 的 .cli-body/.cli-grid/.cli-card/.cli-drawer 段）。
+   两页的类名各自独立——CLI 页调版式时不该顺带改这里。停用状态依靠表面而非整行透明。 */
+.management-page.skills-page .skill-body {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.management-page.skills-page .skill-main-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 4px 8px 2px;
+}
+
+/* 列数规则与 CLI 页 `.cli-grid` 逐字一致：auto-fill + minmax(340px,1fr)，宽屏自然
+   排 4 列，详情展开吃掉 401px 后自己减列。**别改回定列**——定列在详情展开时和 CLI
+   对不上（CLI 3 列时这里只有 2 列），用户点名以 CLI 为准。 */
+.management-page.skills-page .skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+  align-content: start;
+  min-width: 0;
+}
+
+/* 尺寸同 `.cli-card`：min-height 94 + 纯横向内边距 + 居中，不给竖向 padding。 */
+.management-page.skills-page .skill-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 9px;
+  min-width: 0;
+  min-height: 94px;
+  padding: 14px 24px;
+  overflow: hidden;
+  text-align: left;
+  cursor: pointer;
+  background: var(--ui-surface-1);
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  box-shadow: var(--ui-shadow-card);
+  transition: box-shadow 0.15s ease, transform 0.05s ease;
+}
+
+.management-page.skills-page .skill-card-open {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.management-page.skills-page .skill-card-open:focus-visible {
+  outline: 3px solid var(--ui-focus);
+  outline-offset: -4px;
+}
+
+.management-page.skills-page .skill-card:hover {
+  box-shadow: var(--ui-shadow-hover);
+}
+
+.management-page.skills-page .skill-card:active {
+  transform: scale(0.995);
+}
+
+.management-page.skills-page .skill-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 第二行：说明占满，开关贴右下。开关自带点击拦截（stopPropagation）。 */
+.management-page.skills-page .skill-card-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.management-page.skills-page .skill-card-switch {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 选中卡反白，与 CLI 页 .cli-card-selected 同一套语言。多带一个 .skill-card 提到
+   (0,4,0)：下面的 .skill-off 是同级 (0,3,0) 且源序更靠后，不加权重会让「选中 +
+   已停用」的卡片退回灰底黑字。 */
+.management-page.skills-page .skill-card.skill-card-selected,
+.management-page.skills-page .skill-card.skill-card-selected:hover {
+  background: light-dark(#000, #000);
+  border-color: transparent;
+}
+
+.management-page.skills-page .skill-card.skill-card-selected .skill-name {
+  color: #fff;
+}
+
+.management-page.skills-page .skill-card.skill-card-selected .skill-desc {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.management-page.skills-page .skill-card.skill-card-selected .skill-emoji {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* emoji 收进圆角底片：几百张卡平铺时给每张一个稳定的视觉锚点（同 CLI 卡片的做法）。 */
+.management-page.skills-page .skill-emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.management-page.skills-page .skill-off .skill-emoji {
+  background: color-mix(in srgb, var(--ui-text-1) 6%, var(--ui-surface-2));
+}
+
+.management-page.skills-page .skill-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 使用次数徽章：黄底=用过、灰底=没用过，与 CLI 卡片的 .cli-badge 同一套读法。 */
+.management-page.skills-page .skill-badge {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 999px;
+  color: #000;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.management-page.skills-page .skill-badge-used {
+  background: #ffef84;
+}
+
+.management-page.skills-page .skill-badge-never {
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.14));
+  color: light-dark(#000, #ddd);
+}
+
+/* 卡内竖向间距由 .skill-card 的 gap 统一给，这里不再自带 margin。 */
+.management-page.skills-page .skill-desc {
+  display: -webkit-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.management-page.skills-page .skill-off {
+  background: var(--ui-surface-2);
+  opacity: 1;
+}
+
+.management-page.skills-page .skill-off .skill-name,
+.management-page.skills-page .skill-off .skill-desc {
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-2));
+}
+
+/* ---- 右侧详情栏（对位 CLI 页的 .cli-drawer：常驻分栏，不是浮层）---- */
+.management-page.skills-page .skill-detail {
+  flex: 0 0 401px;
+  width: 401px;
+  align-self: stretch;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 24px;
+  background: var(--ui-surface-1);
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  box-shadow: var(--ui-shadow-card);
+}
+
+.management-page.skills-page .skill-detail-head {
+  position: relative;
+  padding-right: 24px;
+}
+
+.management-page.skills-page .skill-detail-x {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  padding: 3px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ui-text-2, var(--muted));
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.management-page.skills-page .skill-detail-x:hover {
+  color: var(--ui-text-1);
+}
+
+.management-page.skills-page .skill-detail-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  color: var(--ui-text-1);
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.management-page.skills-page .skill-detail-emoji {
+  flex: 0 0 auto;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.management-page.skills-page .skill-detail-meta {
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.management-page.skills-page .skill-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.management-page.skills-page .skill-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.management-page.skills-page .skill-sec h4 {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.management-page.skills-page .skill-sec-aside {
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.management-page.skills-page .skill-sec-desc {
+  margin: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 18px;
+  word-break: break-word;
+}
+
+/* per-agent 使用条：与 CLI 抽屉的 .cli-u-* 同构（头像 + 名字·次数 + 比例条）。 */
+.management-page.skills-page .skill-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.management-page.skills-page .skill-u-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.management-page.skills-page .skill-u-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.management-page.skills-page .skill-u-label {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.management-page.skills-page .skill-u-bar {
+  flex: 1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--ui-text-1) 15%, var(--ui-surface-1));
+}
+
+.management-page.skills-page .skill-u-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ui-text-1);
+}
+
+/* 管理页 Switch 的开态覆盖 marker 外的旧品牌金。走 --ui-switch-on（R319 起=纯黑，
+   见设计稿 7112:1840），与焦点环不是一回事，别合并回 --ui-focus。 */
+.management-page [role="switch"][data-checked]:not([data-disabled]) {
+  background: var(--ui-switch-on);
+}
+
+.management-page [role="switch"][data-disabled] {
+  background: var(--ui-surface-2);
+  opacity: 1;
+}
+
+/* 通配焦点环只做「自己没定义焦点态」的兜底：表单控件按设计稿（7112:1834）只把
+   描边换成纯黑、不加环，必须排除掉——它们的 `.field-input:focus-visible` 与本条
+   特异性打平 (0,2,0)，而本文件后加载会靠源序赢，不排除就会把环加回去。
+   下拉用 [role="combobox"] 命中，因为 base-ui 的触发器类名是 CSS Module 哈希。 */
+.management-page :focus-visible:not(:is(.field-input, .field-textarea, [role="combobox"])) {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--ui-surface-1),
+    0 0 0 4px var(--ui-focus);
+}
+
+.management-page.tasks-page .kb-pill:focus-within {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+}
+
+@media (max-width: 960px) {
+  .page.management-page,
+  .page:has(> .cron-page.management-page) {
+    padding-right: 24px;
+    padding-left: 24px;
+  }
+
+  .management-page.tasks-page .kanban-col {
+    flex-basis: 280px;
+    min-width: 280px;
+    max-width: 320px;
+  }
+
+  .management-page.cron-page .cron-toolbar {
+    gap: 8px;
+  }
+
+  /* 中等宽度去掉基础样式中的固定列宽，rail 收紧但仍保持主从双栏。 */
+  .management-page.models-page .model-aux__grid,
+  .management-page.models-page .model-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  }
+
+}
+
+/* 双栏放不下就堆成上下——断点与 `.cli-body` 同为 900px（别用 960/720 另立一套）。 */
+@media (max-width: 900px) {
+  .management-page.skills-page .skill-body {
+    flex-direction: column;
+  }
+
+  .management-page.skills-page .skill-detail {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .page.management-page,
+  .page:has(> .cron-page.management-page) {
+    padding: 24px 20px;
+  }
+
+  .management-page .page-head {
+    margin-bottom: 24px;
+  }
+
+  .management-page .page-head-title {
+    font-size: 28px;
+    line-height: 30px;
+  }
+
+  .management-page .toolbar {
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .management-page.tasks-page .ui-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .management-page.tasks-page .ui-toolbar > *,
+  .management-page.tasks-page .ui-toolbar .kb-pill,
+  .management-page.tasks-page .ui-toolbar [role="tablist"] {
+    width: 100%;
+    max-width: 100%;
+    margin-left: 0;
+  }
+
+  .management-page.tasks-page .ui-toolbar [role="tablist"] {
+    justify-content: stretch;
+  }
+
+  .management-page.tasks-page .toolbar [role="tab"] {
+    flex: 1 1 0;
+  }
+
+  .management-page.tasks-page .kanban-col {
+    flex: 0 0 min(82vw, 320px);
+    min-width: min(82vw, 320px);
+    max-width: min(82vw, 320px);
+    max-height: calc(100dvh - 240px);
+  }
+
+  /* 窄屏：日期组不再吊右，跟着筛选自然折行；组内控件等分。 */
+  .management-page.cron-page .cron-cal-nav {
+    margin-left: 0;
+  }
+
+  .management-page.cron-page .cron-filters,
+  .management-page.cron-page .cron-cal-nav {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .management-page.cron-page .cron-filters > *,
+  .management-page.cron-page .cron-cal-today {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  .management-page.cron-page .cron-cal-title {
+    flex: 1 1 88px;
+  }
+
+  .management-page.cron-page .cal-grid {
+    grid-template-columns: repeat(7, minmax(104px, 1fr));
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+  }
+
+  .management-page.cron-page .cal-tg {
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+  }
+
+  .management-page.cron-page .cal-tg-week :is(.cal-tg-head, .cal-tg-body) {
+    min-width: 760px;
+  }
+
+  /* 手机宽度下目录与主从区都收成单列，不把横向滚动转嫁给整页。 */
+
+  .management-page.models-page .model-aux {
+    padding: 20px;
+  }
+
+  .management-page.models-page .model-aux__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .management-page.models-page .model-aux__task {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 停用管理页动态效果，但不改变内容的可见性与最终状态。 */
+  .management-page,
+  .management-page::before,
+  .management-page::after,
+  .management-page *,
+  .management-page *::before,
+  .management-page *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .management-page.tasks-page .kanban-card,
+  .management-page.tasks-page .kanban-card:hover {
+    transform: none !important;
+  }
+}
+/* management-page:end */
+
+/* ============================================================
+   一级工具栏统一件（R268）—— Workboard / Models / Skills / Settings 四页
+   对齐 docs/ui-design-spec.md 的「48px 控件高度合同」与「三种表面配方」。
+   六个达标页（Dashboard/Chat/Cron/Agents/Usage/CLI）不引用这些类，
+   改动不波及它们；Cron 的 .cron-cal-today / .cron-new 是同配方的先行实现，
+   带页面专属尺寸约束，保持原样。
+   ============================================================ */
+
+/* 工具栏行：48px 控件 + 8px 间距（规范 §3）。 */
+.management-page .ui-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 24px;
+}
+
+/* 贴右的一簇动作。 */
+.management-page .ui-toolbar-end {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* A 配方：玻璃胶囊按钮（规范 §4）。 */
+.management-page .ui-cbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 48px;
+  padding: 0 24px;
+  border: 1px solid #ffffff;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+  color: light-dark(#000000, #ffffff);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+:root[data-theme="dark"] .management-page .ui-cbtn {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+
+/* hover 与 PillTabs 同口径：字色不变，只垫黑 10%（暗色白 16%——hover 是单层
+   半透明垫在画布上，深色画布比胶囊静息底更暗，10% 白只有 ~5 灰阶几乎不可感，
+   16% 才与亮色的 ~23 灰阶感知对齐）。color 必须重申——全局 button:hover 会把字
+   翻成 accent 蓝。 */
+.management-page .ui-cbtn:hover:not(:disabled) {
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.16));
+  color: light-dark(#000000, #ffffff);
+}
+
+.management-page .ui-cbtn:disabled {
+  color: color-mix(in srgb, var(--ui-text-1) 45%, var(--ui-surface-1));
+  cursor: not-allowed;
+}
+
+/* 按下态（aria-pressed / .is-on）= 黑胶囊，与 tabs 的选中语言一致；
+   蓝色只留给焦点环（规范 §7）。 */
+.management-page .ui-cbtn[aria-pressed="true"],
+.management-page .ui-cbtn.is-on {
+  border-color: transparent;
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+  box-shadow: none;
+}
+
+.management-page .ui-cbtn[aria-pressed="true"]:hover:not(:disabled),
+.management-page .ui-cbtn.is-on:hover:not(:disabled) {
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+}
+
+/* 图标按钮：同配方的正方胶囊。 */
+.management-page .ui-cbtn.ui-cbtn--icon {
+  width: 48px;
+  padding: 0;
+}
+
+/* 紧凑变体：分组头/卡片内的次级动作，配方一致只是矮一档。 */
+.management-page .ui-cbtn.ui-cbtn--sm {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  line-height: 20px;
+  letter-spacing: 0;
+}
+
+/* C 配方：黄主按钮（Figma 7018:187，与 Cron「新建」同一份）。 */
+.management-page .ui-cbtn.ui-cbtn--gold {
+  border: 1px solid #fff7bf;
+  background:
+    linear-gradient(180deg, rgb(247, 222, 55) 0%, rgba(255, 239, 132, 0) 49.519%, rgba(255, 239, 132, 0) 100%),
+    linear-gradient(180deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 50.962%, rgb(255, 242, 156) 100%),
+    linear-gradient(90deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 100%);
+  box-shadow: 0 8px 10px 0 rgba(255, 240, 143, 0.3);
+  color: #000000;
+}
+
+.management-page .ui-cbtn.ui-cbtn--gold:hover:not(:disabled) {
+  background:
+    linear-gradient(180deg, rgb(247, 222, 55) 0%, rgba(255, 239, 132, 0) 49.519%, rgba(255, 239, 132, 0) 100%),
+    linear-gradient(180deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 50.962%, rgb(255, 242, 156) 100%),
+    linear-gradient(90deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 100%);
+  color: #000000;
+  filter: brightness(0.97);
+}
+
+.management-page .ui-cbtn.ui-cbtn--gold:disabled {
+  filter: grayscale(0.7);
+  color: rgba(0, 0, 0, 0.45);
+}
+
+/* 深色：上面 1313 行的裸 .ui-cbtn 深色覆盖特异性 (0,4,0) 压过 --gold 变体的
+   (0,3,0)，金底/奶油描边会被整个换成深玻璃底、只剩黑字 + 黄晕（黑字不可读）。
+   这里按品牌黄白名单（黄底配黑字，与 cron-new / .btn-primary 深色同款不变色）
+   把金色配方原样夺回来，只把黄色投影降档——0.3 的黄 alpha 压深色画布会合成
+   ~2.4:1 的明显光圈，亮色下同值近乎不可见，方向是反的。 */
+:root[data-theme="dark"] .management-page .ui-cbtn.ui-cbtn--gold {
+  border-color: #fff7bf;
+  background:
+    linear-gradient(180deg, rgb(247, 222, 55) 0%, rgba(255, 239, 132, 0) 49.519%, rgba(255, 239, 132, 0) 100%),
+    linear-gradient(180deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 50.962%, rgb(255, 242, 156) 100%),
+    linear-gradient(90deg, rgb(255, 239, 132) 0%, rgb(255, 239, 132) 100%);
+  box-shadow: 0 8px 10px 0 rgba(255, 240, 143, 0.12);
+}
+
+/* 深色禁用：灰化后的奶油底（~#f1edcc）会成为全页最亮的控件，禁用态视觉权重
+   倒挂；补一档 brightness 整体压暗（filter 作用于整元素，描边/投影/文字一并
+   跟随，明暗对比比例不变，无需再单独调 color）。 */
+:root[data-theme="dark"] .management-page .ui-cbtn.ui-cbtn--gold:disabled {
+  filter: grayscale(0.7) brightness(0.5);
+}
+
+/* 危险动作：保持红语义，外形仍是胶囊。 */
+.management-page .ui-cbtn.ui-cbtn--danger {
+  color: var(--ui-error);
+}
+
+.management-page .ui-cbtn.ui-cbtn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-error) 10%, var(--ui-surface-1));
+  color: var(--ui-error);
+}
+
+.management-page .ui-cbtn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--ui-surface-1),
+    0 0 0 4px var(--ui-focus);
+}
+
+/* 轻量开关：32px 胶囊，选中＝黑底（不是蓝，规范 §7）。用于第二层的视图开关，
+   与 48px 主行控件拉开层级；工作板视图行与 Hermes 看板筛选行共用。 */
+.management-page .ui-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  background: var(--ui-surface-1);
+  color: color-mix(in srgb, var(--ui-text-1) 70%, var(--ui-canvas));
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 300;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.management-page .ui-toggle:hover:not(:disabled) {
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
+  color: var(--ui-text-1);
+}
+
+.management-page .ui-toggle[aria-pressed="true"],
+.management-page .ui-toggle.is-on {
+  border-color: transparent;
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+}
+
+.management-page .ui-toggle[aria-pressed="true"]:hover:not(:disabled),
+.management-page .ui-toggle.is-on:hover:not(:disabled) {
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+}
+
+.management-page .ui-toggle.ui-toggle--icon {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
+.management-page .ui-toggle:disabled {
+  color: color-mix(in srgb, var(--ui-text-1) 40%, var(--ui-surface-1));
+  cursor: not-allowed;
+}
+
+.management-page .ui-toggle:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--ui-surface-1),
+    0 0 0 4px var(--ui-focus);
+}
+
+/* 区块标题（规范 §6 的 18/24·500）：靠留白与字号分层，不再用 hairline 下划线。 */
+.management-page .ui-secthead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  margin: 0 0 12px;
+}
+
+.management-page .ui-secthead-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 计数走中性 chip，不用裸 muted 数字。 */
+.management-page .ui-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ui-text-1) 8%, transparent);
+  color: color-mix(in srgb, var(--ui-text-1) 62%, var(--ui-canvas));
+  font-size: 12px;
+  line-height: 20px;
+  font-weight: 400;
+}
+
+/* 说明文字：12/18 次级色、无底无框（取代旧的灰底提示块）。 */
+.management-page .ui-hint {
+  margin: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 62%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+  overflow-wrap: anywhere;
+}
+
+.management-page .ui-hint .mono,
+.management-page .ui-hint code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ui-text-1);
+}
+
+/* 横幅：B 白卡配方 + 左侧语义色条，替代各页自造的灰底方块。 */
+.management-page .ui-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 14px 20px;
+  border: 1px solid var(--ui-hairline);
+  border-left: 3px solid color-mix(in srgb, var(--ui-text-1) 30%, transparent);
+  border-radius: 16px;
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+  color: color-mix(in srgb, var(--ui-text-1) 74%, var(--ui-surface-1));
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 300;
+}
+
+.management-page .ui-banner > :first-child {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.management-page .ui-banner--warn {
+  border-left-color: var(--ui-warning);
+}
+
+.management-page .ui-banner--danger {
+  border-left-color: var(--ui-error);
+  color: var(--ui-error);
+}
+
+/* 无结果空态：与 .muted 一行文字相比更明确，且不抢卡片的视觉重量。 */
+.management-page .ui-empty {
+  padding: 48px 24px;
+  border: 1px dashed var(--ui-control-border);
+  border-radius: var(--ui-radius-card);
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-canvas));
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 300;
+  text-align: center;
+}

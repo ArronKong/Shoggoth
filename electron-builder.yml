@@ -1,0 +1,117 @@
+appId: ai.shoggoth.desktop
+productName: Shoggoth
+copyright: Copyright (c) 2026 Shoggoth contributors
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - app/**/*
+  - "!app/manage-ui/node_modules/**/*"
+  - schemas/**/*
+  - package.json
+  - node_modules/ws/**/*
+  - node_modules/@xterm/headless/lib-headless/**/*
+  - node_modules/@xterm/headless/package.json
+  - node_modules/node-pty/lib/**/*
+  - node_modules/node-pty/package.json
+  - node_modules/node-pty/LICENSE
+  - node_modules/node-pty/prebuilds/darwin-*/**/*
+  - "!node_modules/node-pty/lib/*.test.js"
+  - node_modules/pinyin-pro/**/*
+  - "!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"
+  - node_modules/@trycua/cua-driver/**/*
+  - node_modules/@ubjs/core/**/*
+  - node_modules/@ubjs/node/**/*
+  - node_modules/better-sqlite3/lib/**/*
+  - node_modules/better-sqlite3/package.json
+  - "!node_modules/better-sqlite3/build/**/*"
+  - "!node_modules/better-sqlite3/prebuilds/**/*"
+  # npm optional dependencies reflect the host architecture and may be nested by rebuild.
+  # Exclude those copies; the verified per-target FileSet below is the only native source.
+  - "!node_modules/@trycua/cua-driver/node_modules/**/*"
+  - "!node_modules/@ubjs/node/node_modules/**/*"
+  - "!node_modules/@trycua/cua-driver-darwin-*/**/*"
+  - "!node_modules/@ubjs/node-darwin-*/**/*"
+  - from: .vendor/cua/node-modules/${arch}/node_modules
+    to: node_modules
+    filter:
+      - "**/*"
+  - "!**/*.map"
+
+asar: true
+# SQLite and Cua/UniFFI artifacts come from the architecture-specific verified FileSet;
+# node-pty ships pinned N-API prebuilds for both macOS architectures. Rebuild would install the host architecture again
+# under nested node_modules and can make an x64 package resolve an arm64 dylib first.
+npmRebuild: false
+asarUnpack:
+  # Cua's FFI resolver passes a dylib path to dlopen; that path must be physical,
+  # so the SDK, UniFFI JS and native packages are loaded from app.asar.unpacked.
+  - node_modules/@trycua/**/*
+  - node_modules/@ubjs/**/*
+  # FileSet unpack matching uses the source path before mapping to node_modules.
+  - .vendor/cua/node-modules/${arch}/node_modules/**/*
+  - node_modules/better-sqlite3/**/*
+  - node_modules/node-pty/**/*
+
+# 每个 App 只携带与 Electron 相同架构的官方完整 Codex package。
+extraResources:
+  - from: LICENSE
+    to: legal/SHOGGOTH-LICENSE.txt
+  - from: resources/legal
+    to: legal
+  - from: node_modules/electron/dist/LICENSE
+    to: legal/ELECTRON-LICENSE.txt
+  - from: node_modules/electron/dist/LICENSES.chromium.html
+    to: legal/LICENSES.chromium.html
+  - from: .vendor/codex/${arch}/package
+    to: codex/package
+  - from: build/codex-runtime-manifest.json
+    to: codex/runtime-manifest.json
+  - from: resources/shoggoth-skills
+    to: shoggoth-skills
+  - from: resources/pi/shoggoth-pi-extension.mjs
+    to: pi/shoggoth-pi-extension.mjs
+  - from: resources/deepseek-harness/shoggoth-dsh-bridge.mjs
+    to: deepseek-harness/shoggoth-dsh-bridge.mjs
+  - from: .vendor/cua/package
+    to: cua-driver
+  - from: build/cua-driver-manifest.json
+    to: cua-driver/manifest.json
+  - from: node_modules/better-sqlite3/LICENSE
+    to: legal/BETTER-SQLITE3-LICENSE.txt
+  - from: node_modules/node-pty/LICENSE
+    to: legal/NODE-PTY-LICENSE.txt
+  - from: build/inspiration-sqlite-manifest.json
+    to: sqlite/manifest.json
+  - from: .vendor/sqlite/${arch}
+    to: sqlite
+    filter:
+      - better_sqlite3.node
+  - from: build/release-sbom.cdx.json
+    to: legal/release-sbom.cdx.json
+
+# 无 Developer ID 时 builder 跳过签名，产物只剩 linker 签名 → macOS 通知中心
+# 拒绝注册（原生通知静默丢弃）。afterPack 补 ad-hoc 深签名（详见脚本头注释）。
+afterPack: scripts/adhoc-sign.cjs
+afterSign: scripts/notarize.cjs
+
+mac:
+  # 完全由 afterPack 执行显式签名。禁用 electron-builder 自动发现钥匙串
+  # identity，避免 afterPack 完成后再次签名并弹出不可恢复的授权窗口。
+  identity: null
+  category: public.app-category.developer-tools
+  entitlements: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: "用于在灵感便签中录制语音。"
+  # ZIP-only：DMG 路径上 electron-builder 双架构共用卷名 `/Volumes/Shoggoth`，
+  # hdiutil detach 在被 Spotlight/Finder 占用 + 磁盘紧张时确定性失败（实测两次重试
+  # 都炸在 arm64 dmg 的 detach），故仅出 zip 即可装的 .app。
+  target:
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false

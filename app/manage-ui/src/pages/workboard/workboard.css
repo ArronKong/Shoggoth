@@ -1,0 +1,816 @@
+/* OpenClaw 工作板（1:1 官方 control-ui workboard）—— 布局结构对齐官方页面，
+   颜色/圆角/阴影走本项目设计 token。类名沿用官方语义（wb- 前缀防冲突）。 */
+
+.wb {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.wb-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+/* ---- 工具条（R268 重排）：主行＝筛选+动作(48px)，视图行＝健康分诊+视图开关(32px)。
+       表面/高度/圆角配方见 docs/ui-design-spec.md §3/§4；胶囊按钮类 .ui-cbtn 在
+       manage-skin.css，本文件只补工作板专属的布局与下拉外壳。 ---- */
+.wb-bar {
+  /* 主行控件多（后端切换 + 搜索 + 3 个筛选 + 3 个动作）：搜索比默认窄一档，
+     配合下面收紧的下拉宽度，1440 视口下能排成一行；再窄就按 flex 自然折行。 */
+  --search-w: 220px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.wb-bar-end {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.wb-bar2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* base-ui Select 的 trigger 是 width:100%，工具条里用定宽壳约束宽度；
+   trigger 本身在下面套上 48px 玻璃胶囊配方。 */
+.wb-select {
+  display: inline-block;
+  flex: none;
+  width: 156px;
+}
+.wb-select--priority {
+  width: 136px;
+}
+.wb-select--agent {
+  width: 168px;
+}
+.wb-select--auto {
+  width: 116px;
+}
+
+/* 主行的三个下拉 = 与搜索/按钮同一份 48px 玻璃胶囊（Figma 6999-633）。 */
+.wb-bar .wb-select button[class*="trigger"] {
+  box-sizing: border-box;
+  height: 48px;
+  padding: 0 20px;
+  border: 1px solid #ffffff;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+  color: light-dark(#000000, #ffffff);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+}
+:root[data-theme="dark"] .wb-bar .wb-select button[class*="trigger"] {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+.wb-bar .wb-select button[class*="trigger"]:hover:not([data-disabled]) {
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.1));
+}
+
+.wb-bar .ui-cbtn .wb-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* 视图行的轻量开关外形 = 全站共享的 .ui-toggle（manage-skin.css）。 */
+
+/* 密度切换是二选一，两颗贴在一起成一组。 */
+.wb-layout-toggle {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.wb-viewopts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+}
+.wb-refresh-status {
+  font-size: 12px;
+  color: var(--ui-text-3);
+  white-space: nowrap;
+}
+.wb-refresh-status.is-error {
+  color: var(--ui-error);
+}
+.wb-auto-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 300;
+  color: color-mix(in srgb, var(--ui-text-1) 70%, var(--ui-canvas));
+  white-space: nowrap;
+}
+/* 自动刷新的下拉留在视图行的 32px 档，不跟主行等高。 */
+.wb-viewopts .wb-select button[class*="trigger"] {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+/* ---- 模态 / 抽屉 / 卡片里的按钮（工具条已改用 .ui-cbtn，这些是页面内的次级动作） ---- */
+.wb-btn,
+.wb-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--ui-control-border);
+  border-radius: var(--ui-radius-control);
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wb-btn:hover:not(:disabled),
+.wb-btn-icon:hover:not(:disabled) {
+  background: var(--row-hover);
+  color: var(--ui-text-1);
+}
+.wb-btn:disabled,
+.wb-btn-icon:disabled,
+.wb-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wb-btn-icon {
+  padding: 6px;
+}
+/* 模板条的选中项＝黑胶囊，与全站选中语言一致（蓝只留给焦点环）。 */
+.wb-btn.is-active {
+  border-color: transparent;
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+}
+.wb-btn.is-active:hover:not(:disabled) {
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+}
+.wb-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-control);
+  background: var(--ui-primary);
+  color: var(--ui-primary-ink);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wb-btn-primary:hover:not(:disabled) {
+  background: var(--ui-primary-hover);
+  color: var(--ui-primary-ink);
+}
+
+/* 危险动作（卡片删除等）保持红语义。 */
+.wb-btn-danger {
+  color: var(--ui-error);
+}
+
+/* ---- 健康条：一排分诊筛选 chip。选中＝黑胶囊，异常项保留红语义。 ---- */
+.wb-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.wb-health-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  background: var(--ui-surface-1);
+  color: color-mix(in srgb, var(--ui-text-1) 70%, var(--ui-canvas));
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 300;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--ui-motion-state) ease, color var(--ui-motion-state) ease;
+}
+.wb-health-item strong {
+  color: var(--ui-text-1);
+  font-weight: 500;
+}
+.wb-health-item:hover:not(.is-active) {
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
+}
+/* 计数为 0 的分诊项没有内容可看：退成画布上的一层薄影，不抢注意力。 */
+.wb-health-item.is-empty {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--ui-text-1) 4%, transparent);
+  color: color-mix(in srgb, var(--ui-text-1) 45%, var(--ui-canvas));
+  box-shadow: none;
+}
+.wb-health-item.is-empty strong {
+  color: inherit;
+}
+.wb-health-item.is-active,
+.wb-health-item.is-active:hover {
+  border-color: transparent;
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+}
+.wb-health-item.is-active strong {
+  color: var(--ui-surface-1);
+}
+.wb-health-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+}
+/* 非零的异常分诊：红语义（选中时让位给黑胶囊，白字仍然可读）。 */
+.wb-health-item--blocked:not(.is-empty):not(.is-active),
+.wb-health-item--stale:not(.is-empty):not(.is-active),
+.wb-health-item--missingProof:not(.is-empty):not(.is-active),
+.wb-health-item--failedAttempts:not(.is-empty):not(.is-active) {
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 8%, var(--ui-surface-1));
+  border-color: color-mix(in srgb, var(--ui-error) 22%, transparent);
+}
+.wb-health-item--blocked:not(.is-empty):not(.is-active) strong,
+.wb-health-item--stale:not(.is-empty):not(.is-active) strong,
+.wb-health-item--missingProof:not(.is-empty):not(.is-active) strong,
+.wb-health-item--failedAttempts:not(.is-empty):not(.is-active) strong {
+  color: var(--ui-error);
+}
+
+/* ---- 提示区 ---- */
+.wb-callout {
+  padding: 10px 14px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: var(--ui-radius-compact);
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  font-size: 13px;
+}
+.wb-callout.is-danger {
+  border-color: color-mix(in srgb, var(--ui-error) 40%, transparent);
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 7%, var(--ui-surface-1));
+}
+.wb-callout code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.wb-empty-state {
+  padding: 32px;
+  text-align: center;
+  border: 1px dashed var(--ui-control-border);
+  border-radius: var(--ui-radius-card);
+  color: var(--ui-text-3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wb-empty-state strong {
+  color: var(--ui-text-1);
+}
+
+/* ---- 看板 ---- */
+.wb-board {
+  display: flex;
+  gap: 32px;
+  overflow-x: auto;
+  align-items: flex-start;
+  padding-bottom: 8px;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+.wb-board--single-column .wb-column {
+  max-width: 560px;
+}
+/* 列不再自带容器底：白卡直接浮在页面画布上（规范 §1，与 Hermes 看板 .kanban-col 同口径）。 */
+.wb-column {
+  flex: 0 0 292px;
+  width: 292px;
+  border: 0;
+  border-radius: var(--ui-radius-card);
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 320px);
+  min-height: 160px;
+}
+.wb-board--comfortable .wb-column {
+  flex-basis: 340px;
+  width: 340px;
+}
+/* 列头与卡片左缘对齐；字号走 14/20·400，不再是 12px 大写加粗（规范 §6）。 */
+.wb-column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 12px;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+}
+.wb-column-head span {
+  flex: none;
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-canvas));
+  font-weight: 300;
+}
+.wb-column-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 2px 10px;
+  overflow-y: auto;
+}
+.wb-column-empty {
+  margin: 2px 2px 10px;
+  padding: 28px 10px;
+  border: 1px dashed var(--ui-control-border);
+  border-radius: var(--ui-radius-card);
+  color: color-mix(in srgb, var(--ui-text-1) 45%, var(--ui-canvas));
+  font-size: 12px;
+  font-weight: 300;
+  text-align: center;
+}
+.wb-column.is-drop .wb-column-cards {
+  border-radius: var(--ui-radius-card);
+  outline: 1.5px dashed var(--ui-focus);
+  outline-offset: 2px;
+}
+
+/* ---- 卡片 ---- */
+.wb-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--ui-hairline);
+  border-left: 3px solid transparent;
+  border-radius: var(--ui-radius-compact);
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+  cursor: pointer;
+  font-size: 12px;
+  transition: box-shadow var(--ui-motion-state) ease, transform var(--ui-motion-state) ease;
+}
+/* 可点击卡片 hover 浮起——与 Models/Skills/CLI 的白卡同一口径（规范 §4）。 */
+.wb-card:hover {
+  box-shadow: var(--ui-shadow-hover);
+  transform: translateY(-1px);
+}
+.wb-card.priority-high {
+  border-left-color: var(--ui-warning);
+}
+.wb-card.priority-urgent {
+  border-left-color: var(--ui-error);
+}
+.wb-card.is-busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.wb-card.is-archived {
+  opacity: 0.65;
+}
+.wb-card.is-highlight {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: -1px;
+}
+.wb-board--compact .wb-card p.wb-card-notes {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.wb-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--ui-text-3);
+  font-size: 11.5px;
+}
+.wb-card-updated {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.wb-card-updated .wb-icon {
+  width: 12px;
+  height: 12px;
+}
+.wb-card-quick {
+  display: inline-flex;
+  gap: 2px;
+}
+.wb-card .wb-card-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ui-text-3);
+  cursor: pointer;
+}
+.wb-card .wb-card-iconbtn:hover:not(:disabled) {
+  background: var(--row-hover);
+  color: var(--ui-text-1);
+}
+.wb-card .wb-card-iconbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.wb-card-iconbtn.is-danger:hover:not(:disabled) {
+  color: var(--ui-error);
+}
+.wb-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.wb-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  border: 1px solid var(--ui-hairline);
+  color: var(--ui-text-2);
+  font-size: 11px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-chip--priority-high {
+  color: light-dark(#b4232f, #ff9da4);
+  background: light-dark(#fdebec, rgba(244, 63, 94, 0.14));
+  border-color: transparent;
+}
+.wb-chip--priority-urgent {
+  color: light-dark(#fff, #fff);
+  background: var(--ui-error);
+  border-color: transparent;
+}
+.wb-chip--priority-low {
+  color: var(--ui-text-3);
+}
+.wb-chip--agent {
+  background: light-dark(#e9f5ef, rgba(52, 211, 153, 0.14));
+  color: light-dark(#0c6b4f, #6ee7b7);
+  border-color: transparent;
+}
+.wb-chip--live {
+  color: var(--ui-success);
+  border-color: color-mix(in srgb, var(--ui-success) 40%, transparent);
+}
+/* 标题是卡片的第一信息：字号提到 14、字重收到 400（规范 §6 不用 600/700）。 */
+.wb-card-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ui-text-1);
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+.wb-card-notes {
+  margin: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 62%, var(--ui-surface-1));
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* 状态区：生命周期/依赖/标签/徽标/会话收成一段，与上面的内容区用一条细线分层。 */
+.wb-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-hairline);
+}
+.wb-lifecycle-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.wb-lifecycle {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--ui-hairline);
+  font-size: 11px;
+  color: var(--ui-text-2);
+  background: var(--ui-surface-2);
+}
+.wb-lifecycle--live {
+  color: var(--ui-success);
+  border-color: color-mix(in srgb, var(--ui-success) 40%, transparent);
+  background: color-mix(in srgb, var(--ui-success) 8%, var(--ui-surface-1));
+}
+.wb-lifecycle--done {
+  color: var(--ui-info);
+  border-color: color-mix(in srgb, var(--ui-info) 40%, transparent);
+}
+.wb-lifecycle--blocked {
+  color: var(--ui-error);
+  border-color: color-mix(in srgb, var(--ui-error) 40%, transparent);
+}
+.wb-lifecycle-detail {
+  color: var(--ui-text-3);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-deps {
+  display: flex;
+}
+.wb-dep {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--ui-hairline);
+  color: var(--ui-text-2);
+}
+.wb-dep--blocked {
+  color: var(--ui-warning);
+  border-color: color-mix(in srgb, var(--ui-warning) 45%, transparent);
+}
+.wb-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.wb-label {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: light-dark(#eef2f7, #2c2c33);
+  color: var(--ui-text-2);
+  font-size: 11px;
+}
+.wb-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.wb-badge {
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--ui-hairline);
+  color: var(--ui-text-3);
+  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-badge.is-warning {
+  color: var(--ui-warning);
+  border-color: color-mix(in srgb, var(--ui-warning) 45%, transparent);
+}
+.wb-badge .wb-icon {
+  width: 11px;
+  height: 11px;
+}
+.wb-card-session {
+  color: var(--ui-text-3);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-events {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--ui-text-3);
+}
+.wb-events li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.wb-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-top: 1px solid var(--ui-hairline);
+  padding-top: 6px;
+  margin-top: 2px;
+}
+.wb-card-actions-mid {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.wb-move {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-text-3);
+  border: 1px solid var(--ui-control-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  min-width: 0;
+}
+.wb-move select {
+  border: none;
+  background: transparent;
+  color: var(--ui-text-2);
+  font-size: 11.5px;
+  max-width: 104px;
+  cursor: pointer;
+}
+.wb-move select:focus {
+  outline: none;
+}
+.wb-move--wide {
+  padding: 4px 10px;
+}
+.wb-move--wide select {
+  max-width: none;
+  font-size: 13px;
+}
+
+/* 开始 / Run / Open 控件 */
+.wb-start-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wb-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--ui-control-border);
+  border-radius: 999px;
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  font-size: 12px;
+  cursor: pointer;
+}
+.wb-start:hover:not(:disabled) {
+  background: var(--row-hover);
+}
+.wb-start:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.wb-engine-mark {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 999px;
+}
+.wb-engine-mark--codex {
+  background: light-dark(#e7f0ff, rgba(96, 165, 250, 0.18));
+  color: light-dark(#1d4ed8, #93c5fd);
+}
+.wb-engine-mark--claude {
+  background: light-dark(#feefe4, rgba(251, 146, 60, 0.16));
+  color: light-dark(#c2410c, #fdba74);
+}
+
+/* ---- 新建/编辑居中模态 ---- */
+.wb-template-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.wb-modal-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 20px;
+}
+.wb-modal-grid .wb-field--wide {
+  grid-column: 1 / -1;
+}
+.wb-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.wb-comments-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ui-text-2);
+}
+
+/* ---- 详情抽屉内部 ---- */
+.wb-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+.wb-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: var(--ui-radius-compact);
+  font-size: 12px;
+  color: var(--ui-text-3);
+  min-width: 0;
+}
+.wb-detail-row strong {
+  color: var(--ui-text-1);
+  font-weight: 600;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.wb-detail-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--ui-text-2);
+}
+.wb-detail-list li {
+  overflow-wrap: anywhere;
+}
+.wb-detail-deps li.is-blocked {
+  color: var(--ui-warning);
+}
+.wb-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.wb-note-input {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-control-border);
+  border-radius: var(--ui-radius-compact);
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  font-size: 13px;
+  font-family: inherit;
+}

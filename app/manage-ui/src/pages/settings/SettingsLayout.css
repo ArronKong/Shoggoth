@@ -1,0 +1,110 @@
+.management-page.settings-page .settings-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  max-width: 960px;
+  margin-bottom: 16px;
+  padding-block: 12px;
+  background: var(--ui-canvas);
+}
+
+.management-page.settings-page .settings-save-state {
+  color: var(--settings-muted-surface-1);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.management-page.settings-page .settings-category,
+.management-page.settings-page .settings-preferences {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 32px;
+}
+
+.management-page.settings-page .settings-category[hidden] {
+  display: none;
+}
+
+/* Keep drafts, diagnostics and authentication mounted when switching categories. */
+.management-page.settings-page .settings-stack {
+  gap: 0;
+}
+
+.management-page.settings-page .settings-preferences .settings-prefs-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 28px;
+}
+
+.management-page.settings-page .settings-preferences .settings-prefs-row > .field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 240px);
+  align-items: center;
+  gap: 4px 24px;
+}
+
+.management-page.settings-page .settings-preferences .settings-prefs-row > .field .field-label {
+  grid-column: 1;
+  color: var(--ui-text-1);
+}
+
+.management-page.settings-page .settings-preferences .settings-prefs-row > .field .field-hint {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.management-page.settings-page .settings-preferences .settings-prefs-row [role="combobox"] {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  width: 100%;
+}
+
+.management-page.settings-page .settings-preferences .settings-switch-list {
+  gap: 24px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  overflow: visible;
+}
+
+.management-page.settings-page .settings-preferences .settings-switch-row {
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+}
+
+.management-page.settings-page .settings-notification-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.management-page.settings-page .settings-notification-copy small {
+  color: var(--settings-muted-surface-1);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+}
+
+.management-page.settings-page .settings-savebar-text {
+  flex: 1 1 240px;
+}
+
+.management-page.settings-page .settings-themes input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+@media (max-width: 540px) {
+  .management-page.settings-page .settings-toolbar [role="tablist"] { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .management-page.settings-page .settings-toolbar [role="tab"] { flex-shrink: 0; padding-inline: 10px; font-size: 14px; white-space: nowrap; }
+  .management-page.settings-page .settings-preferences .settings-prefs-row > .field { display: flex; gap: 8px; align-items: stretch; }
+  .management-page.settings-page .settings-savebar { border-radius: 24px; }
+}

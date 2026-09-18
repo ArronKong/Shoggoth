@@ -1,0 +1,53 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  isolated-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/manage-ui/package-lock.json
+      - name: Install locked dependencies without desktop download
+        run: |
+          npm ci --ignore-scripts
+          npm --prefix app/manage-ui ci --ignore-scripts
+      - name: Type check and production UI build
+        run: |
+          npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json
+          npm run build:manage
+      - name: Third-party license completeness and consistency
+        run: |
+          npm run licenses:check
+          node scripts/third-party-licenses-unit.mjs
+      - name: Isolated release-policy and transport checks
+        run: |
+          node scripts/shoggoth-builtin-cli-profiles-unit.cjs
+          node scripts/runtime-cli-auth-unit.cjs
+          node scripts/shoggoth-runtime-adapter-registry-unit.cjs
+          node scripts/shoggoth-runtime-registry-integration-unit.cjs
+          node scripts/proxy-smoke.mjs
+          node scripts/proxy-chat-smoke.mjs
+          node scripts/hermes-start-smoke.cjs
+      - name: Dependency vulnerability audit
+        run: |
+          npm audit --audit-level=moderate
+          npm --prefix app/manage-ui audit --audit-level=moderate
+      - name: Scan the public source export for secrets
+        shell: bash
+        run: |
+          npm run export:source -- "$RUNNER_TEMP/shoggoth-public-source"
+          curl --fail --location --silent --show-error --max-time 120 \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" dir "$RUNNER_TEMP/shoggoth-public-source" --redact --no-banner

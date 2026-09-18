@@ -1,0 +1,1280 @@
+/* 沉浸模式覆盖层：fixed 铺满视口，z-index 高于普通聊天外壳。
+   布局按 Figma node 6721:74「Agent中文」：左列（内容 ~617px）+ 右侧留给视频主体。 */
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  overflow: hidden;
+  background: #0b0d12;
+  /* 聊天列宽（thread/composer/jump 共用）：拖拽把手把用户宽度写进 --imm-col(px)，
+     未拖过时走 Figma 默认；上限窗口一半（需求硬约束）、下限 400px 防 composer 挤爆。 */
+  --imm-colw: clamp(400px, var(--imm-col, min(617px, 46vw)), 50vw);
+  color: #f3f5f9;
+}
+
+
+/* WebGL 折射层：盖在视频上，pointer-events:none 让点击穿透到下面的 DOM。 */
+.gl {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 左列几何：Figma 内容列 left=112 / width=617（1380 设计）。响应式收窄，右侧始终露出视频主体。 */
+
+/* ── 左上角：身份（会话名 Jarvis 大字 + 状态 STANDBY + dashboard）── */
+.topleft {
+  position: absolute;
+  top: 34px;
+  left: 112px;
+  z-index: 5;
+}
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  color: #fff;
+  text-align: left;
+}
+.identity:disabled {
+  cursor: default;
+}
+.avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.idText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.idName {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.5px;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.55);
+}
+.idMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.6);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+}
+/* 身份区状态点：配色与普通模式 .chat-status--* 同源（running=accent 脉冲） */
+.statusDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.statusOnline {
+  background: #16a34a;
+}
+.statusOffline {
+  background: rgba(255, 255, 255, 0.35);
+}
+.statusRunning {
+  background: var(--accent);
+  animation: immersiveStatusPulse 1.2s ease-in-out infinite;
+}
+@keyframes immersiveStatusPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 会话切换浮层 */
+.picker {
+  position: relative;
+  z-index: 2;
+  margin-top: 10px;
+  width: 320px;
+  max-width: 320px;
+  max-height: 60vh;
+  /* Tab 行钉住不滚，只有列表行滚 —— 单一滚动条（同模型菜单的 grid 结构）。
+     列锁到 minmax(0,1fr)：否则单列默认 auto=max-content，不换行的 Tab 行会把浮层撑宽。
+     三行显式指派（tabs/list/actions 各占固定行）：Tab 条件渲染时行号不因缺席漂移。 */
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  overflow: hidden;
+  padding: 6px;
+  border-radius: 16px;
+  background: rgba(16, 20, 28, 0.82);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+/* 类型筛选 Tab = 全站统一的 FilterTabs。浮层是固定暗玻璃（不随主题），所以把组件
+   用到的两个语义 token 就地翻成「白胶囊 + 深字」，比逐条覆盖 --ft-* 更少。 */
+.pickerTabs {
+  --ui-text-1: rgba(255, 255, 255, 0.92);
+  --ui-surface-1: #10141c;
+  --ft-color: rgba(255, 255, 255, 0.6);
+  --ft-font-size: 12px;
+  padding: 2px 2px 0;
+  grid-row: 1;
+}
+.pickerList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  grid-row: 2;
+}
+/* 当前会话动作行（刷新/重命名/删除，S2 自右上角收纳） */
+.pickerActions {
+  grid-row: 3;
+  display: flex;
+  gap: 6px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.pickerAction {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pickerAction:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.pickerAction svg {
+  width: 15px;
+  height: 15px;
+}
+.pickerItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #e8ebf0;
+  text-align: left;
+}
+.pickerTop {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.pickerTime {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+}
+.pickerItem:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.pickerItemActive {
+  background: rgba(255, 255, 255, 0.14);
+}
+/* 名字与 key 尾段都单行省略：浮层现在是定宽的，subagent:workboard-<uuid> 这类
+   长尾段不省略会把行撑成三行。 */
+.pickerName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.pickerSub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* ── 右上角：工具（search/todo/cron/archive）+ 退出 ── */
+.topright {
+  position: absolute;
+  top: 48px;
+  right: 44px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 纯 icon 按钮：无底板无模糊（用户指定），投影保证亮背景区可读；激活态用辉光。 */
+.tool {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.45));
+}
+.tool:hover:not(:disabled) {
+  color: #fff;
+}
+.tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* 图标与普通模式同形状（共享 chatIcons.tsx），仅着色为白（按钮 color:#fff + currentColor）。
+   尺寸对齐普通模式：headbtn 20px→本层 tool 18px（按钮 40px 同规格）、iconbtn/pill 16px。 */
+.tool svg {
+  width: 18px;
+  height: 18px;
+}
+.toolActive {
+  color: #fff;
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.7));
+}
+
+/* ── 浮层公共：点外面关闭的透明背板。渲染在浮层的同一父容器里（topleft/topright 的
+   层叠上下文内）：z=1 盖住页面其余内容，浮层自身 z 更高保持可点。 ── */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  background: transparent;
+}
+
+/* ── 左上角浮层：重命名 ── */
+.renamePop {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(16, 20, 28, 0.88);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+.renamePop {
+  flex-direction: column;
+  width: 300px;
+}
+/* 重命名浮层随会话动作行迁到左上身份区：改左锚 */
+.renamePopLeft {
+  left: 0;
+  right: auto;
+}
+.renameTitle {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+.renameInput {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+}
+.renameInput:focus {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.renameBtns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.renameBtn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.renameBtnPrimary {
+  background: rgba(255, 255, 255, 0.22);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+/* ── 今日动态视图的左下胶囊（Figma 6677 workspace-composer 310×48）：
+   聊天收起后的回聊天入口，显示草稿首行或占位文案。 ── */
+.capsule {
+  position: absolute;
+  left: 112px;
+  bottom: 36px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 310px;
+  height: 48px;
+  padding: 0 6px 0 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(20, 26, 38, 0.45);
+  backdrop-filter: blur(14px);
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  text-align: left;
+}
+.capsule:hover {
+  background: rgba(30, 38, 54, 0.55);
+}
+.capsuleText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.capsuleSend {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.capsuleSend svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── 折射玻璃 composer：左列，背景透明（折射由下层 WebGL 提供）。Figma rounded-24 / w617。 ── */
+.composer {
+  position: absolute;
+  left: 112px;
+  bottom: 36px;
+  width: var(--imm-colw);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px;
+  border-radius: 24px;
+  background: transparent;
+  color: #f3f5f9;
+}
+/* WebGL 不可用时的降级：CSS 毛玻璃，功能不受影响。 */
+.composer.fallback {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.input {
+  flex: none;
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #f3f5f9;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.5;
+  max-height: 160px;
+  padding: 2px 2px;
+}
+.input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+.connectingHint {
+  padding: 0 2px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 11px;
+  line-height: 1.2;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.send {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 15px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.send svg {
+  width: 18px;
+  height: 18px;
+}
+.send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── composer 工具行（两行 composer 的下行）：左组 pills + 右组 icon ── */
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.barLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden; /* 窄视口下左组 pills 裁剪而不是叠到右组图标上 */
+}
+.barRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.pill,
+.pillStatic {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.pill {
+  cursor: pointer;
+}
+.pill:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.pill svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+.modelWrap {
+  display: inline-flex;
+  min-width: 0;
+}
+.stale {
+  opacity: 0.6;
+}
+.iconBtn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.iconBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.iconBtn svg {
+  width: 16px;
+  height: 16px;
+}
+.iconBtnActive {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* 复用的 ChatModelMenu 在沉浸 composer 内的深色玻璃样式（覆盖其对 .chat-shell 变量的依赖）。
+   scope 在 .bar 内 → 不影响普通聊天页的同名 class。 */
+.bar :global(.chat-model-menu) {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.bar :global(.chat-pill--model) {
+  height: 32px;
+  max-width: 200px;
+  padding: 0 12px;
+  border-radius: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar :global(.model-menu) {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 280px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  border-radius: 14px;
+  background: rgba(16, 20, 28, 0.92);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  z-index: 20;
+}
+.bar :global(.model-menu__search) {
+  height: 32px;
+  padding: 0 10px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+}
+.bar :global(.model-menu__list) {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.bar :global(.model-menu__label) {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 6px 8px 2px;
+}
+.bar :global(.model-menu__item) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  color: #e8ebf0;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.bar :global(.model-menu__item:hover),
+.bar :global(.model-menu__item.is-active) {
+  background: rgba(255, 255, 255, 0.1);
+}
+.bar :global(.model-menu__name) {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar :global(.model-menu__tag),
+.bar :global(.model-menu__price) {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  flex: none;
+}
+.bar :global(.model-menu__check) {
+  color: #9ec5ff;
+  flex: none;
+}
+.bar :global(.model-menu__empty) {
+  padding: 12px 8px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
+}
+
+/* ── 中央消息流：左列，assistant 折射玻璃卡 + user 气泡 ── */
+.thread {
+  position: absolute;
+  left: 112px;
+  top: 112px;
+  bottom: 180px;
+  width: var(--imm-colw);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 8px 4px;
+  z-index: 2;
+}
+.empty {
+  margin: auto;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 14px;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+}
+.asstRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: 96%;
+}
+.userRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  align-self: flex-end;
+  max-width: 82%;
+}
+/* assistant 卡：背景透明，折射由下层 WebGL 提供（data-glass-panel）。 */
+.asstCard {
+  padding: 16px 20px;
+  border-radius: 20px;
+  background: transparent;
+  color: #f3f5f9;
+}
+/* 用户气泡与 assistant 卡同底：背景透明，折射由下层 WebGL 提供（data-glass-panel）。 */
+.userBubble {
+  padding: 16px 20px;
+  border-radius: 20px;
+  background: transparent;
+  color: #f3f5f9;
+}
+.footer {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 0 6px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+/* markdown 内容基本排版（沉浸不在 .chat-shell，需自带） */
+.md {
+  font-size: 15px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+.md :global(p) {
+  margin: 0 0 8px;
+}
+.md :global(p:last-child) {
+  margin-bottom: 0;
+}
+.md :global(pre) {
+  background: rgba(0, 0, 0, 0.35);
+  padding: 12px;
+  border-radius: 10px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.md :global(code) {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+.md :global(pre code) {
+  background: none;
+  padding: 0;
+}
+.md :global(a) {
+  color: #9ec5ff;
+  text-decoration: none;
+}
+.md :global(a[data-local-path] code) {
+  background: none;
+  padding: 0;
+}
+/* markdown 基础排版补全（沉浸不在 .chat-shell/.chat-md 体系内，自带一套） */
+.md :global(ul),
+.md :global(ol) {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+.md :global(li) {
+  margin: 2px 0;
+}
+.md :global(h1),
+.md :global(h2),
+.md :global(h3),
+.md :global(h4),
+.md :global(h5),
+.md :global(h6) {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.md :global(h1) { font-size: 19px; }
+.md :global(h2) { font-size: 17px; }
+.md :global(h3) { font-size: 16px; }
+.md :global(h4),
+.md :global(h5),
+.md :global(h6) { font-size: 15px; }
+.md :global(blockquote) {
+  margin: 8px 0;
+  padding: 2px 12px;
+  border-left: 3px solid rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.75);
+}
+.md :global(hr) {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  margin: 10px 0;
+}
+.md :global(table) {
+  border-collapse: collapse;
+  margin: 8px 0;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+  font-size: 13px;
+}
+.md :global(th),
+.md :global(td) {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  padding: 4px 9px;
+  text-align: left;
+}
+.md :global(th) {
+  background: rgba(255, 255, 255, 0.08);
+}
+.md :global(img) {
+  max-width: 100%;
+  border-radius: 8px;
+}
+.md :global(.markdown-inline-image) {
+  max-width: 380px;
+  max-height: 300px;
+  margin: 0.4em 0;
+}
+/* 代码块 chrome（markdown.ts 产出的 header/复制键/JSON 折叠）——.chat-md 那套是亮色皮肤，
+   这里给沉浸自己的暗玻璃版。复制键的点击代理在 document 上，沉浸内直接可用。 */
+.md :global(.code-block-wrapper) {
+  margin: 8px 0;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.35);
+}
+.md :global(.code-block-wrapper pre) {
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.md :global(.code-block-header) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.md :global(.code-block-lang) {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.md :global(.code-block-copy) {
+  margin-left: auto;
+  padding: 2px 9px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.md :global(.code-block-copy:hover) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.md :global(.code-block-copy__done) { display: none; }
+.md :global(.code-block-copy.copied .code-block-copy__idle) { display: none; }
+.md :global(.code-block-copy.copied .code-block-copy__done) { display: inline; color: #9ec5ff; }
+.md :global(.json-collapse) {
+  margin: 8px 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+}
+.md :global(.json-collapse > summary) {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  list-style: none;
+}
+.md :global(.json-collapse > summary::-webkit-details-marker) { display: none; }
+.md :global(.json-collapse[open] > summary) { border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+.md :global(.json-collapse .code-block-wrapper) { margin: 0; border: none; border-radius: 0; }
+.md :global(.markdown-plain-text-fallback) { white-space: pre-wrap; }
+/* hljs 是亮色 github 主题（全局 import），深底下重映射到暗色调色板保证可读 */
+.md :global(.hljs) { color: #e6edf3; background: transparent; }
+.md :global(.hljs-comment),
+.md :global(.hljs-quote) { color: #8b949e; }
+.md :global(.hljs-keyword),
+.md :global(.hljs-selector-tag),
+.md :global(.hljs-type) { color: #ff7b72; }
+.md :global(.hljs-string),
+.md :global(.hljs-regexp),
+.md :global(.hljs-addition) { color: #a5d6ff; }
+.md :global(.hljs-number),
+.md :global(.hljs-literal) { color: #79c0ff; }
+.md :global(.hljs-title),
+.md :global(.hljs-name),
+.md :global(.hljs-section) { color: #d2a8ff; }
+.md :global(.hljs-attr),
+.md :global(.hljs-attribute),
+.md :global(.hljs-variable),
+.md :global(.hljs-template-variable) { color: #ffa657; }
+.md :global(.hljs-built_in),
+.md :global(.hljs-symbol) { color: #ffa657; }
+.md :global(.hljs-deletion) { color: #ffa198; }
+
+/* ── 消息里的图片（user 自发图 / agent MEDIA 图）── */
+.attRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.attThumb {
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: 12px;
+  object-fit: cover;
+  cursor: zoom-in;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+}
+/* 视频附件预览窗（点击进灯箱播放）+ 非图附件文件 chip */
+.attVideo {
+  position: relative;
+  display: inline-flex;
+  cursor: zoom-in;
+}
+.attVideo video {
+  pointer-events: none;
+}
+.attPlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 22px;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
+}
+.attChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 240px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 分隔线（封存边界 / 模型切换提示行）── */
+.divider {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
+}
+.dividerLabel {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 2px 10px;
+  border-radius: 999px;
+}
+
+/* ── 注入伪 user 灰条（cron/系统信封）：折叠单行，点开展开全文 ── */
+.injectedWrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  align-self: flex-end;
+  max-width: 82%;
+}
+.sysline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(10px);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  cursor: pointer;
+}
+.sysline:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.syslineOpen {
+  border-bottom-left-radius: 10px;
+  border-bottom-right-radius: 10px;
+}
+.syslineIco {
+  flex: 0 0 auto;
+}
+.syslineText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.syslineChev {
+  flex: 0 0 auto;
+  color: rgba(255, 255, 255, 0.4);
+}
+.injectedBody {
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: rgba(20, 24, 34, 0.55);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.85);
+  max-width: 100%;
+}
+
+/* ── 失败轮次：红调卡 + ×N 徽标 + 重试 ── */
+.errCard {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 18px;
+  background: rgba(150, 40, 40, 0.32);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 110, 100, 0.35);
+  color: #ffd7d2;
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.errText {
+  white-space: pre-wrap;
+}
+.errRepeat {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 110, 100, 0.85);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.errRetry {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+}
+.errRetry:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ── 本地 slash 结果卡：中性淡化 ── */
+.localCard {
+  color: rgba(235, 240, 248, 0.8);
+}
+
+/* 所有交互卡片复用共享的渐变背景与黑白按钮。 */
+.promptCard {
+  padding: 10px 12px;
+}
+.promptCard :global(.chat-prompt) {
+  margin: 0;
+}
+
+/* ── 流式光标：delta 进行中缀在正文尾部 ── */
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: #f3f5f9;
+  animation: immersiveCursor 1s ease-in-out infinite;
+  vertical-align: baseline;
+}
+@keyframes immersiveCursor {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+
+/* ── 消息悬浮操作条：hover 该行时淡入（复制/置顶/本地删除） ── */
+.rowActions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  pointer-events: none;
+}
+.userRow:hover .rowActions,
+.asstRow:hover .rowActions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.actBtn {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.actBtn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+.actBtn svg {
+  width: 13px;
+  height: 13px;
+}
+.actBtnOn {
+  color: var(--accent);
+  border-color: rgba(255, 239, 132, 0.5);
+}
+.actBtnDanger:hover {
+  color: #ff9c90;
+  border-color: rgba(255, 140, 120, 0.5);
+}
+
+/* ── R280 mirror：发送锚定站位块 + 跳到最新胶囊 ── */
+.spacer {
+  flex: none;
+  height: 0;
+}
+/* ── 聊天列宽拖拽把手：悬停在列右缘浮现细条，拖动改宽，双击复位（默认全透明不占视觉） ── */
+.colHandle {
+  position: absolute;
+  top: 112px;
+  bottom: 36px;
+  left: calc(112px + var(--imm-colw) - 5px);
+  width: 12px;
+  cursor: col-resize;
+  z-index: 6;
+  touch-action: none;
+}
+.colHandle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.4);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.colHandle:hover::after,
+.colHandleActive::after {
+  opacity: 1;
+}
+
+.jump {
+  position: absolute;
+  left: calc(112px + var(--imm-colw) / 2);
+  transform: translateX(-50%);
+  bottom: 190px;
+  z-index: 6;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(20, 26, 38, 0.65);
+  backdrop-filter: blur(12px);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.jump:hover {
+  background: rgba(36, 44, 60, 0.75);
+}
+
+/* ── 等待指示：发出后 assistant 尚无可见输出时的脉冲点 ── */
+.typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 12px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.typingDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.75);
+  animation: immersiveTyping 1.2s ease-in-out infinite;
+}
+.typingDot:nth-child(2) { animation-delay: 0.15s; }
+.typingDot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes immersiveTyping {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* ── composer 内：引用条 + 待发附件 ── */
+.quoteBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border-left: 3px solid rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+}
+.quoteIco { flex: none; opacity: 0.7; }
+.quoteText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quoteX {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.pendRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pendChip {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.pendChip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.pendX {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0;
+}
+
+/* ctx 用量 pill */
+.pillCtx {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+}
+
+/* ── slash 命令菜单（ChatPage 传入的同一份 JSX；亮色皮肤类在沉浸内覆成暗玻璃）──
+   .slash-menu 自身是 absolute bottom:100%，相对本 composer（absolute 容器）定位。 */
+.composer :global(.slash-menu) {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(16, 20, 28, 0.92);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+.composer :global(.slash-menu__label) { color: rgba(255, 255, 255, 0.5); }
+.composer :global(.slash-menu__item) { color: #e8ebf0; }
+.composer :global(.slash-menu__item.is-active) { background: rgba(255, 255, 255, 0.1); }
+.composer :global(.slash-menu__icon) { color: rgba(255, 255, 255, 0.7); }
+.composer :global(.slash-menu__name) { color: #fff; }
+.composer :global(.slash-menu__args),
+.composer :global(.slash-menu__desc) { color: rgba(255, 255, 255, 0.5); }
+.composer :global(.slash-menu__badge) {
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.8);
+}
+.composer :global(.slash-menu__footer) { color: rgba(255, 255, 255, 0.45); }
+.composer :global(.slash-menu__footer kbd) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* 图标描边并入全站 1.2 CSS px 口径（R376）。类名经 CSS module 哈希，全局样式表选不到。
+   `vector-effect` 不可继承，故连子元素一起选。 */
+.actBtn svg,
+.actBtn svg *,
+.capsuleSend svg,
+.capsuleSend svg *,
+.iconBtn svg,
+.iconBtn svg *,
+.pickerAction svg,
+.pickerAction svg *,
+.pill svg,
+.pill svg *,
+.send svg,
+.send svg *,
+.tool svg,
+.tool svg * {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2;
+}

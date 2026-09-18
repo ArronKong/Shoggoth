@@ -1,0 +1,87 @@
+.widget {
+  width: min(100%, 760px);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--skin-bg-assistant);
+  box-shadow: 0 8px 24px var(--skin-shadow-soft);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.header > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pin {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--chat-text);
+  background: var(--card);
+  font: inherit;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.pin:hover:not(:disabled) {
+  color: var(--chat-text);
+  background: var(--bg-hover);
+}
+
+.pin:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: var(--skin-bg-assistant);
+  transition: height var(--ui-motion-state) ease;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 88px;
+  gap: 10px;
+  padding: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.retry {
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  color: var(--chat-text);
+  background: var(--card);
+  font: inherit;
+  cursor: pointer;
+}
+
+.retry:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}

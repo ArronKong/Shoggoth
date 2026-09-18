@@ -1,0 +1,115 @@
+/* ModelsPage 专属小样式（全局外观仍走 styles.css / manage-skin.css 皮肤层）。 */
+
+/* 「模型 | 提供方」两个页签：都常驻挂载，非当前页签整块收起（切页签零重拉）。 */
+.pane {
+  display: block;
+}
+.paneOff {
+  display: none;
+}
+
+/* 工具栏里的 profile 作用域选择器（只在「模型」页签出现——「提供方」页签跨全部 Profile）。 */
+.profileBox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.profileLabel {
+  color: color-mix(in srgb, var(--ui-text-1) 62%, var(--ui-canvas));
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+/* 后端能力不足时在填表前展示稳定只读原因，避免信息只藏在 disabled 按钮 title。 */
+.capabilityBanner {
+  margin: 0.75rem 0 1rem;
+  border: 1px solid color-mix(in srgb, var(--ui-danger) 32%, var(--ui-hairline));
+  border-radius: 12px;
+  padding: 0.75rem 0.9rem;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+/* 授权管理弹窗的 profile 行 */
+.authProfileRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--ui-hairline);
+  margin-bottom: 0.5rem;
+}
+
+/* API Key 输入 + 显示/隐藏切换 */
+.keyRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.keyRow > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.keyToggle {
+  flex: none;
+  font-size: 12px;
+  padding: 4px 10px;
+  min-height: 36px;
+}
+
+/* 凭证池条目行 */
+.poolRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
+}
+.poolRow:last-child {
+  border-bottom: none;
+}
+.poolMeta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+.poolLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* 模型卡改用原生 button 后清除按钮默认排版，同时保留键盘 focus 可见性。 */
+:global(.model-card-button) {
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+:global(.model-card-button:focus-visible) {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+}
+
+@media (max-width: 560px) {
+  .keyRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .keyToggle {
+    width: 100%;
+  }
+}
+
+/* 「提供方」页签顶部的作用域说明：这一页没有 Profile 选择器，作用域靠这句话说死。 */

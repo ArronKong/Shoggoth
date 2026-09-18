@@ -1,0 +1,190 @@
+/* Centered modal — base-ui Dialog styled as a centered popup，R370 起是全站唯一
+   浮层形态（右侧抽屉已退役）。Part of the base-ui component layer; see
+   ARCHITECTURE.md §5「UI 组件层」. Page-facing helpers like `.foot-left` /
+   `.detail-pre` stay global; bridged here via :global() where needed. */
+
+/* 遮罩 70% 纯黑，两个主题同值（设计稿 7108:896 的 rgba(0,0,0,.7)——遮罩压的是
+   页面不是表面，不做 light-dark 对）。 */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 100;
+  opacity: 1;
+  transition: opacity var(--ui-motion-modal-enter) var(--ui-motion-modal-ease);
+}
+
+/* Base UI 在打开与关闭阶段分别挂载状态属性，两端都过渡到透明遮罩。 */
+.overlay[data-starting-style],
+.overlay[data-ending-style] {
+  opacity: 0;
+}
+
+.overlay[data-ending-style] {
+  transition-duration: var(--ui-motion-modal-exit);
+}
+
+/* 内容大弹窗（设计稿 7108:896 / 最大高 7111:185）：800×576，最大高 820 = 视口
+   900 减上下各 40，所以写成 calc(100vh - 80px)；圆角 40、无描边、内距 32/40/40
+   （上 32 是标题行，左右下 40）。 */
+.panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100vw - 80px);
+  max-height: calc(100vh - 80px);
+  border: 0;
+  border-radius: 40px;
+  background: var(--ui-surface-1);
+  padding: 32px 40px 40px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.2);
+  z-index: 101;
+  opacity: 1;
+  transition:
+    opacity var(--ui-motion-modal-enter) var(--ui-motion-modal-ease),
+    transform var(--ui-motion-modal-enter) var(--ui-motion-modal-ease);
+}
+
+/* 入退场只做轻微位移，不改变面板外形；scale 会让首帧看起来像另一个小弹窗。 */
+.panel[data-starting-style],
+.panel[data-ending-style] {
+  opacity: 0;
+  transform: translate(-50%, -48%);
+}
+
+.panel[data-ending-style] {
+  transition-duration: var(--ui-motion-modal-exit);
+  pointer-events: none;
+}
+
+/* 标题行不带分隔线（设计稿靠留白分区）。内距已在 .panel 上，这里只管排布。 */
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0;
+  flex-shrink: 0;
+}
+.titles {
+  min-width: 0;
+}
+.title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 28px;
+  letter-spacing: -0.4395px;
+  color: var(--ui-text-1);
+  word-break: break-word;
+}
+.subtitle {
+  margin: 0.15rem 0 0;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+/* 关闭键 32×32，设计稿把它的**盒子**放在距边 30 而不是 40——因为盒里的 ✕ 只有
+   十几 px，退 10px 后字形的视觉边缘才和正文的 40 对齐。负 margin 把盒子从 40 的
+   内距里再拉出这 10px，字形落点才与设计稿一致。 */
+.close {
+  border: 0;
+  width: 32px;
+  height: 32px;
+  margin: -2px -10px 0 0;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 1rem;
+  color: var(--ui-text-3);
+  padding: 0;
+  flex-shrink: 0;
+}
+.panel .close:hover:not(:disabled) {
+  color: var(--ui-text-1);
+  background: var(--ui-surface-2);
+  border-color: transparent;
+}
+.panel .close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+}
+/* 内容区顶到标题底 32（设计稿标题 32..60、内容区从 92 起），底到页脚也是 32。 */
+.body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+  margin-top: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0;
+  margin-top: 32px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.foot :global(.foot-left) {
+  margin-right: auto;
+}
+
+/* 详情结构（R370 自 Drawer.module.css 平移，视觉不变）：分节标题 + 标签/值行。 */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.sectionTitle {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+}
+.detailRow {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.86rem;
+  align-items: baseline;
+}
+.detailLabel {
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  flex: 0 0 6.5rem;
+}
+.detailValue {
+  min-width: 0;
+  word-break: break-word;
+  flex: 1;
+}
+
+/* 减少动态效果时覆盖全部生命周期状态，并始终保留 modal 的居中位移。 */
+@media (prefers-reduced-motion: reduce) {
+  .overlay,
+  .overlay[data-starting-style],
+  .overlay[data-ending-style],
+  .panel,
+  .panel[data-starting-style],
+  .panel[data-ending-style] {
+    transition: none;
+  }
+
+  .overlay,
+  .overlay[data-starting-style],
+  .overlay[data-ending-style] {
+    opacity: 1;
+  }
+
+  .panel,
+  .panel[data-starting-style],
+  .panel[data-ending-style] {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}

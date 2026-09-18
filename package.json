@@ -1,0 +1,44 @@
+{
+  "name": "shoggoth-desktop",
+  "productName": "Shoggoth",
+  "version": "0.8.108",
+  "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
+  "private": true,
+  "license": "MIT",
+  "main": "app/bootstrap.js",
+  "scripts": {
+    "postinstall": "node scripts/prepare-native-terminal.cjs",
+    "build:manage": "npm --prefix app/manage-ui run build && node scripts/manage-bundle-budget-regression.mjs",
+    "fetch:cua": "node scripts/fetch-cua-driver.mjs",
+    "fetch:sqlite": "node scripts/fetch-inspiration-sqlite.mjs",
+    "release:metadata": "node scripts/generate-release-metadata.mjs",
+    "start": "electron .",
+    "start:dev": "UI_DEV_URL=http://127.0.0.1:5173 electron .",
+    "dist": "npm run build:manage && npm run prepare:runtimes && npm run release:metadata && electron-builder --mac",
+    "watch:dist": "node scripts/watch-and-dist.mjs",
+    "fetch:codex": "node scripts/fetch-codex-runtime.mjs --platform all",
+    "prepare:runtimes": "npm run fetch:codex && npm run fetch:cua && npm run fetch:sqlite",
+    "licenses:check": "node scripts/generate-release-metadata.mjs --check",
+    "export:source": "node scripts/export-public-source.mjs"
+  },
+  "dependencies": {
+    "@trycua/cua-driver": "0.22.0",
+    "@xterm/headless": "6.0.0",
+    "better-sqlite3": "13.0.3",
+    "cron-parser": "5.4.0",
+    "fflate": "0.8.3",
+    "node-pty": "1.1.0",
+    "pinyin-pro": "^3.29.3",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@electron/asar": "4.3.0",
+    "electron": "44.4.2",
+    "electron-builder": "26.15.3",
+    "js-yaml": "5.4.2",
+    "yauzl": "3.4.0"
+  },
+  "engines": {
+    "node": ">=22.22.3"
+  }
+}

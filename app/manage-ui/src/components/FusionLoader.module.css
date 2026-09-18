@@ -1,0 +1,86 @@
+.root {
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+}
+
+.motion {
+  display: block;
+  overflow: visible;
+}
+
+.sm {
+  flex-direction: row;
+  gap: 8px;
+}
+
+.sm .motion {
+  width: 36px;
+  height: 18px;
+}
+
+.md {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.md .motion {
+  width: 72px;
+  height: 36px;
+}
+
+.leftTrack,
+.rightTrack {
+  animation-name: orbit;
+  animation-duration: 1.6s;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-fill-mode: both;
+  transform-box: view-box;
+  transform-origin: 36px 18px;
+}
+
+.rightTrack {
+  animation-delay: -0.8s;
+}
+
+.leftBall,
+.rightBall {
+  fill: var(--fusion-loader-color, currentColor);
+}
+
+.label {
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* 侧视 3D 圆轨道：所有关键帧保持 y=0，水平位置取圆周的 x 投影，尺度取深度投影。
+   第二颗球用负半周期延迟始终领先半圈，因此每半圈交换一次左右位置但永不倒放。 */
+@keyframes orbit {
+  0%, 100% { transform: translate(-18px, 0) scale(1); }
+  6.25% { transform: translate(-16.63px, 0) scale(0.939); }
+  12.5% { transform: translate(-12.73px, 0) scale(0.887); }
+  18.75% { transform: translate(-6.89px, 0) scale(0.852); }
+  25% { transform: translate(0, 0) scale(0.84); }
+  31.25% { transform: translate(6.89px, 0) scale(0.852); }
+  37.5% { transform: translate(12.73px, 0) scale(0.887); }
+  43.75% { transform: translate(16.63px, 0) scale(0.939); }
+  50% { transform: translate(18px, 0) scale(1); }
+  56.25% { transform: translate(16.63px, 0) scale(1.061); }
+  62.5% { transform: translate(12.73px, 0) scale(1.113); }
+  68.75% { transform: translate(6.89px, 0) scale(1.148); }
+  75% { transform: translate(0, 0) scale(1.16); }
+  81.25% { transform: translate(-6.89px, 0) scale(1.148); }
+  87.5% { transform: translate(-12.73px, 0) scale(1.113); }
+  93.75% { transform: translate(-16.63px, 0) scale(1.061); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .leftTrack,
+  .rightTrack {
+    animation: none;
+  }
+
+  .leftTrack { transform: translate(-18px, 0); }
+  .rightTrack { transform: translate(18px, 0); }
+}

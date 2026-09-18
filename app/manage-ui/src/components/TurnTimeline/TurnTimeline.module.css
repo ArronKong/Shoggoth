@@ -1,0 +1,409 @@
+/* TurnTimeline —— 竖向步骤时间线。全部颜色走 light-dark() token(遵守 R77 主题规矩),
+   表面配方不越界:行悬停用全局 --row-hover,展开体用 --ui-surface-2 内衬块。 */
+
+.wrap {
+  position: relative;
+  overflow: auto;
+  --trajectory-wrap-padding-block: 4px;
+  --trajectory-row-height: 36px;
+  padding: var(--trajectory-wrap-padding-block) 2px;
+  /* 模块内自定义色(styles.css 没有的语义槽),同样必须是 light-dark() 对 */
+  --tl-message: light-dark(#7c3aed, #a78bfa);
+  --tl-plan: light-dark(#2563eb, #93b4ff);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  gap: 4px;
+  min-height: var(--trajectory-row-height);
+  padding: 0 8px;
+  border-radius: 16px;
+}
+/* 稿:步骤行底色 rgba(255,255,255,0) → hover 才浮出白胶囊(用户 R354 校准)。 */
+.row:hover {
+  background: light-dark(#ffffff, #2c2c31);
+}
+
+/* ---- 左侧轨道 + 节点(Figma 稿:无底 16px 纯黑图标,行间 12px 短竖线段) ---- */
+.gutter {
+  width: 16px;
+  /* 稿:行内容先有 12px 占位 + 4px gap,图标起点距行左 24px(含行 padding 8)。 */
+  margin-left: 16px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.railTop {
+  width: 1px;
+  border-radius: 2px;
+  background: light-dark(rgba(0, 0, 0, 0.2), rgba(255, 255, 255, 0.28));
+  height: 12px;
+  /* 稿:线段相对行盒 [-8px,+4px](骑在行界上偏上行);净占位 10px,把 16px
+     图标的中心压到行文字中心(main 顶 padding 2 + 行高 32 的一半)。 */
+  margin: -6px 0 4px;
+  flex: none;
+  transform-origin: top;
+}
+/* 稿里连接线只有行与行之间一段(上一行不再向下延伸),railBottom 退役但保留
+   DOM 结构(进入动画/首末行判定不用改)。 */
+.railBottom {
+  display: none;
+}
+.railTop[data-hidden="1"],
+.railBottom[data-hidden="1"] {
+  visibility: hidden;
+}
+
+.node {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  /* 稿:图标一律纯黑(stroke=black),不随语义灰阶(用户 R354 校准)。 */
+  color: light-dark(#000000, #ffffff);
+}
+.node[data-accent="error"] {
+  color: light-dark(#c12727, #f87171);
+}
+.node[data-running="1"] {
+  animation: tlPulse 1.1s ease-in-out infinite; /* 克隆 immersiveLivePulse 的节奏 */
+}
+@keyframes tlPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ---- 行头(Figma 稿:名称 12px 黑 + 摘要 12px 灰,gap 4) ---- */
+.main {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+}
+.head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.head:disabled {
+  cursor: default;
+}
+.name {
+  flex: none;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 400;
+  color: var(--ui-text-1);
+}
+.name[data-mono="1"] {
+  font-family: var(--mono);
+  font-size: var(--ui-fs-body);
+}
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+  color: var(--ui-text-3);
+}
+.updates {
+  flex: none;
+  font-size: var(--ui-fs-caption);
+  color: var(--ui-text-3);
+}
+.chip {
+  flex: none;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 2px 8px;
+  border-radius: 22px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  transition: background var(--ui-motion-state), color var(--ui-motion-state);
+}
+.chip[data-st="running"],
+.chip[data-st="pending"] {
+  background: color-mix(in srgb, var(--ui-warning) 14%, transparent);
+  color: var(--ui-warning);
+}
+/* 稿的徽章色值(#1fb556/#c12727 + 10% 同色底),与全局 success/error token 值不同,
+   模块内按稿硬编码(保持 R77 light-dark 成对)。 */
+.chip[data-st="ok"] {
+  background: light-dark(rgba(31, 181, 86, 0.1), rgba(52, 211, 153, 0.14));
+  color: light-dark(#1fb556, #34d399);
+}
+.chip[data-st="error"] {
+  background: light-dark(rgba(193, 39, 39, 0.1), rgba(248, 113, 113, 0.14));
+  color: light-dark(#c12727, #f87171);
+}
+.chip[data-st="aborted"] {
+  color: var(--ui-text-3);
+}
+.dur {
+  flex: none;
+  min-width: 30px;
+  text-align: right;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-2);
+}
+/* 稿:行尾箭头是 24px 盒(login1,node 7167:560),线形纯黑。 */
+.chev {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  color: light-dark(#000000, #ffffff);
+  transition: transform var(--ui-motion-state);
+  visibility: hidden;
+}
+.chev[data-show="1"] {
+  visibility: visible;
+}
+.chev[data-open="1"] {
+  transform: rotate(90deg);
+}
+
+/* ---- 重试/换工具徽标 ---- */
+.relBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: var(--ui-fs-caption);
+  line-height: 1;
+}
+.relBadge[data-type="retry"] {
+  background: color-mix(in srgb, var(--ui-warning) 14%, transparent);
+  color: var(--ui-warning);
+}
+.relBadge[data-type="switch"] {
+  background: color-mix(in srgb, var(--ui-info) 14%, transparent);
+  color: var(--ui-info);
+}
+
+/* ---- 展开体 ---- */
+.bodyClip {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--ui-motion-popover);
+}
+.bodyClip[data-open="1"] {
+  grid-template-rows: 1fr;
+}
+.bodyInner {
+  overflow: hidden;
+  min-height: 0;
+}
+.body {
+  padding: 2px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.secLabel {
+  font-size: var(--ui-fs-caption);
+  color: var(--ui-text-3);
+}
+.pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+  background: var(--ui-surface-2);
+  border-radius: var(--ui-radius-compact);
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ui-text-2);
+}
+.bodyText {
+  font-size: var(--ui-fs-body);
+  line-height: 1.7;
+  color: var(--ui-text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.noArgs {
+  font-size: var(--ui-fs-caption);
+  color: var(--ui-text-3);
+}
+.diffAdd { color: var(--ui-success); }
+.diffDel { color: var(--ui-error); }
+.diffHunk { color: var(--ui-info); }
+.diffCtx { color: var(--ui-text-3); }
+
+/* ---- plan 清单 ---- */
+.planList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.planLine {
+  display: flex;
+  gap: 8px;
+  font-size: var(--ui-fs-body);
+  color: var(--ui-text-2);
+}
+.planLine[data-st="done"] .planMark { color: var(--ui-success); }
+.planLine[data-st="run"] .planMark { color: var(--ui-warning); }
+.planLine[data-st="todo"] .planMark { color: var(--ui-text-3); }
+.planLine[data-st="done"] { color: var(--ui-text-3); }
+.planMark {
+  flex: none;
+  width: 14px;
+  text-align: center;
+}
+
+/* ---- TurnProcess(聊天线程里的回合过程区,Figma node 7171:818) ---- */
+.proc {
+  /* 外框 rgba(0,0,0,0.05)、圆角 24；卡片底色透明。 */
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.08));
+  border-radius: 24px;
+  background: transparent;
+  padding: 8px;
+  /* 卡片定宽 794(R348 用户在样式检查器里定的观感);max-width:100% 是护栏——
+     窄窗口(实测 709px 视口)下死值会把聊天流撑出横向滚动条,够宽时二者等价。 */
+  width: 794px;
+  max-width: 100%;
+}
+/* 稿:头部整行是一条 32px 胶囊(箭头与 ⤢ 都在胶囊内),底色白只在 hover 时浮出
+   (用户 R354 校准:稿里画的 bg-white 是 hover 态)。 */
+.procRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  border-radius: 16px;
+  padding-right: 4px;
+}
+.procRow:hover {
+  background: light-dark(#ffffff, #2c2c31);
+}
+.procHead {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 0 0 6px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 16px;
+}
+.procIco {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  /* 稿:图标纯黑。 */
+  color: light-dark(#000000, #ffffff);
+}
+.procIco[data-live="1"] {
+  animation: tlPulse 1.1s ease-in-out infinite;
+}
+.procIco[data-err="1"] {
+  color: light-dark(#c12727, #f87171);
+}
+.procLabel {
+  flex: none;
+  font-size: 14px;
+  line-height: 21px;
+  font-weight: 400;
+  letter-spacing: -0.15px;
+  color: var(--ui-text-1);
+}
+.procMeta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
+  color: var(--ui-text-3);
+}
+.procErr {
+  color: light-dark(#c12727, #f87171);
+}
+/* 稿:头部展开箭头与行尾同款 24px 盒、纯黑。 */
+.procChev {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  color: light-dark(#000000, #ffffff);
+  transition: transform var(--ui-motion-state);
+}
+.procChev[data-open="1"] {
+  transform: rotate(90deg);
+}
+/* 稿:⤢ 是 24px 圆钮(node 7167:569),图标 12px,纯黑。 */
+.procZoom {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: none;
+  border-radius: 12px;
+  color: light-dark(#000000, #ffffff);
+  cursor: pointer;
+}
+.procZoom:hover {
+  background: var(--row-hover);
+}
+.procTimeline {
+  --trajectory-visible-rows: 6;
+  height: auto;
+  max-height: calc(var(--trajectory-row-height) * var(--trajectory-visible-rows) + var(--trajectory-wrap-padding-block) * 2);
+  padding-inline: 0;
+  overflow-y: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node[data-running="1"] { animation: none; }
+  .procIco[data-live="1"] { animation: none; }
+  .bodyClip { transition: none; }
+  .chev { transition: none; }
+  .procChev { transition: none; }
+  .chip { transition: none; }
+}

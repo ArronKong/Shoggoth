@@ -1,0 +1,708 @@
+/* Dashboard 总览页。全部选择器挂 .dashboard-page 前缀（防泄漏到其它页）；
+   颜色一律 --ui-* token（token 内已是 light-dark() 对，主题自动跟随）。
+   布局 / 尺寸 / 字号对齐 Figma 6933-129（浅色为基准，深色由 token 自适应）。 */
+
+/* —— 页面容器（仅本页覆盖全局 .page/.management-page）——
+   全局 .page 把内容锁 max-width:1200 居中，宽窗两侧留大空槽 → 设计是铺满宽度的；
+   这里撤掉封顶、收紧顶部留白，左右取设计的 40px。限定 .dashboard-page，不影响他页。 */
+.page.management-page.dashboard-page {
+  max-width: none;
+  /* 顶距 36 与其它页一致（R248：标题起点全站对齐 Cron 的 36）。 */
+  padding: 36px 40px 24px;
+  /* 滚动收进卡片内部：页面填满 .content，常态无页级滚动条；
+     窗口过矮（columns 触到 min-height）时才退回页面滚动。 */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 页头（margin 24 / 标题 32 / 副标题 16）已升为全站页头规格，见 manage-skin.css
+   的 .management-page .page-head*——本页三条同值覆盖删除，页头改样式只改那一处。 */
+
+/* —— KPI 卡（照设计 4 张 2:2:1:1，Figma 6941:441-463：白卡圆角 16、高 140、卡间距 8）；
+      卡内标签左上，大数值贴底，副行与数值基线并排。 —— */
+.management-page.dashboard-page .kpi-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+  flex: none;
+  margin-bottom: 24px;
+}
+
+@media (max-width: 1080px) {
+  .management-page.dashboard-page .kpi-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  /* 两列断点：Task Board 内容较满，独占整行（tokens + cost 一行，它一行）。 */
+  .management-page.dashboard-page .kpi-row .kpi-taskboard {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .management-page.dashboard-page .kpi-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.management-page.dashboard-page .kpi {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: 140px;
+  padding: 20px 24px 16px;
+  background: var(--ui-surface-1);
+  border: none;
+  border-radius: 20px;
+  transition: box-shadow var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.management-page.dashboard-page .kpi:hover {
+  box-shadow: var(--ui-shadow-hover);
+}
+
+/* 本轮只对齐 Figma 指定的成本卡与 Task Board；Tokens 保留现有外壳。 */
+.management-page.dashboard-page .kpi-cost,
+.management-page.dashboard-page .kpi-taskboard {
+  border-radius: 24px;
+}
+
+/* Token / Cost 共用的装饰折线铺满卡片、垫在文字层下。 */
+.management-page.dashboard-page .kpi-spark {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 文字层与曲线层之间的渐变遮罩：左=卡片背景（浅色即纯白，暗色自适应）→ 右透明，
+   让左侧文字压过曲线保持清晰，右侧曲线透出。DOM 在 chart 之后、文字之前 → 层级居中。 */
+.management-page.dashboard-page .kpi-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to right,
+    var(--ui-surface-1) 0%,
+    color-mix(in srgb, var(--ui-surface-1) 0%, transparent) 100%
+  );
+  pointer-events: none;
+}
+
+.management-page.dashboard-page .kpi-label {
+  position: relative;
+  color: var(--ui-text-1);
+  font-size: var(--ui-fs-label);
+  line-height: 22px;
+  font-weight: 300;
+}
+
+.management-page.dashboard-page .kpi-bottom {
+  position: relative;
+  margin-top: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.management-page.dashboard-page .kpi-val {
+  color: var(--ui-text-1);
+  font-size: var(--ui-fs-display);
+  line-height: 1;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+/* 副行（昨日值 + 环比）：与大数值基线并排。 */
+.management-page.dashboard-page .kpi-sub {
+  font-size: var(--ui-fs-body);
+  line-height: 14px;
+  font-weight: 300;
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  white-space: nowrap;
+}
+
+.management-page.dashboard-page .kpi-sub .delta-up {
+  color: var(--ui-success);
+}
+
+.management-page.dashboard-page .kpi-sub .delta-down {
+  color: var(--ui-error);
+}
+
+/* —— Task Board 卡（Figma 25:666）：纯白外壳 + 标题行 + 两列 agent 排行。 —— */
+.management-page.dashboard-page .kpi-taskboard .tb-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 18px;
+}
+
+/* 成功 / 失败总数徽标（胶囊）：绿 / 红，随主题 token 自适应。 */
+.management-page.dashboard-page .tb-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.management-page.dashboard-page .tb-badge {
+  min-width: 24px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: var(--ui-fs-body);
+  line-height: 16px;
+  font-weight: 400;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.management-page.dashboard-page .tb-badge-ok {
+  color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 15%, var(--ui-surface-1));
+}
+
+.management-page.dashboard-page .tb-badge-fail {
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 15%, var(--ui-surface-1));
+}
+
+/* 两列固定 149px，与最新设计的 24→173 / 232→381 横向坐标一致；窄窗可收缩。 */
+.management-page.dashboard-page .tb-cols {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 149px));
+  justify-content: space-between;
+  width: 100%;
+}
+
+.management-page.dashboard-page .tb-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* 单行：头像 + agent 名（撑开）+ 完成数（右对齐）。 */
+.management-page.dashboard-page .tb-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.management-page.dashboard-page .tb-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--ui-fs-body);
+  line-height: 18px;
+  color: var(--ui-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-page.dashboard-page .tb-count {
+  flex: none;
+  margin-left: 6px;
+  font-size: var(--ui-fs-body);
+  line-height: 18px;
+  color: var(--ui-text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 16px 圆形头像（设计尺寸），显示状态由共享组件处理。 */
+.management-page.dashboard-page .tb-avatar {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: var(--ui-fs-nano);
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* —— 主体两栏（照设计）：左「今日动态」: 右「最近产出」≈ 818:410 —— */
+.management-page.dashboard-page .dash-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 818fr) minmax(0, 410fr);
+  gap: 8px;
+  margin-top: 0;
+  /* 吃掉页面剩余高度，滚动交给面板内部；过矮时触底线退回页面滚动。 */
+  flex: 1 1 auto;
+  min-height: 280px;
+}
+
+@media (max-width: 900px) {
+  .management-page.dashboard-page .dash-columns {
+    grid-template-columns: minmax(0, 1fr);
+    flex: none;
+    min-height: 0;
+  }
+
+  /* 单列堆叠时取消内部滚动，退回自然高度 + 页面滚动。 */
+  .management-page.dashboard-page .dash-columns .dash-activity-scroll,
+  .management-page.dashboard-page .dash-columns .dash-art-list {
+    flex: none;
+    min-height: auto;
+    overflow-y: visible;
+  }
+}
+
+/* 两栏内的 section 都是白面板（活动 / 产出）；flex 列便于把滚动限制在列表区。 */
+.management-page.dashboard-page .dash-columns > .dash-section {
+  margin-top: 0;
+  padding: 20px 24px 0; /* 去掉底部下间距：滚动区延伸到面板底，最后一项由 .dash-run/.dash-art 自身 12px padding 兜底不贴边 */
+  background: var(--ui-surface-1);
+  border: none;
+  border-radius: 20px;
+  overflow: hidden; /* 裁掉滚动区方角，贴合面板圆角 */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 面板内滚动区：活动列表 / 产出列表自己滚，头部（标题+筛选）钉住。 */
+.management-page.dashboard-page .dash-columns .dash-activity-scroll,
+.management-page.dashboard-page .dash-columns .dash-art-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* —— 分区标题 —— */
+.management-page.dashboard-page .dash-section {
+  margin-top: 20px;
+  min-width: 0;
+}
+
+/* 面板标题与 KPI 卡标签同规格（设计里所有卡片左上角名称统一 14/300）。 */
+.management-page.dashboard-page .dash-section-title {
+  margin: 0 0 14px;
+  font-size: var(--ui-fs-label);
+  line-height: 22px;
+  font-weight: 300;
+  color: var(--ui-text-1);
+}
+
+/* 标题后的计数（今日动态 N / 新产出文件 N）：弱化次要色，与标题基线并排。 */
+.management-page.dashboard-page .dash-section-count {
+  margin-left: 8px;
+  font-weight: 300;
+  /* 用户手调为纯黑；折成 --ui-text-1 token 以明暗自适应（写死 #000 会在深色模式黑字黑底）。 */
+  color: var(--ui-text-1);
+}
+
+/* —— 今日动态 feed —— */
+.management-page.dashboard-page .dash-feed {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 活动行的基础布局。 */
+.management-page.dashboard-page .dash-run {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--ui-surface-1);
+  border: 1px solid var(--ui-hairline);
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--ui-text-1);
+  min-width: 0;
+  transition: box-shadow var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.management-page.dashboard-page .dash-run:hover {
+  box-shadow: var(--ui-shadow-hover);
+}
+
+/* 两栏内（活动面板 / 产出面板）的行：面板内纯行，无独立边框，hover 浅底。 */
+.management-page.dashboard-page .dash-columns .dash-run,
+.management-page.dashboard-page .dash-columns .dash-art {
+  align-items: center;
+  padding: 12px 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  box-shadow: none;
+  transition: background var(--ui-motion-state) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.management-page.dashboard-page .dash-columns .dash-run:hover,
+.management-page.dashboard-page .dash-columns .dash-art:hover {
+  box-shadow: none;
+  background: color-mix(in srgb, var(--ui-text-1) 4%, transparent);
+}
+
+/* 活动行：头像对齐首行（名字/任务名），不对整行垂直居中。首行 line-height(22) 比
+   头像(20) 高、且文字光学重心偏低 → flex-start 会显得头像偏高，下移 2px 视觉居中。 */
+.management-page.dashboard-page .dash-columns .dash-run {
+  align-items: flex-start;
+}
+
+.management-page.dashboard-page .dash-columns .dash-run > .dash-run-agent-avatar {
+  margin-top: 2px;
+}
+
+.management-page.dashboard-page .dash-run-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* 头部行：agent · job名 · 类型标签 · 后端标签 ···· 时间（时间推到最右）。 */
+.management-page.dashboard-page .dash-run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.management-page.dashboard-page .dash-run-name {
+  font-weight: 400;
+  font-size: var(--ui-fs-label);
+  line-height: 22px;
+  color: var(--ui-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.management-page.dashboard-page .dash-run-agent {
+  font-size: var(--ui-fs-label);
+  line-height: 22px;
+  color: var(--ui-text-1);
+}
+
+/* 活动行头像尺寸；图片和默认头像由共享组件切换。 */
+.management-page.dashboard-page .dash-run-agent-avatar {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: var(--ui-fs-micro);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.management-page.dashboard-page .dash-run-meta {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--ui-fs-body);
+  font-weight: 300;
+  color: color-mix(in srgb, var(--ui-text-1) 50%, var(--ui-surface-1));
+}
+
+.management-page.dashboard-page .dash-run-summary {
+  font-size: var(--ui-fs-label);
+  line-height: 22px;
+  font-weight: 400;
+  color: color-mix(in srgb, var(--ui-text-1) 78%, var(--ui-surface-1));
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.management-page.dashboard-page .dash-run-summary.is-error {
+  color: var(--ui-error);
+}
+
+/* —— 类型标签（承载失败态）：正常中性灰，失败 → 红字红底 —— */
+.management-page.dashboard-page .dash-kind-chip {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: var(--ui-fs-caption);
+  line-height: 16px;
+  font-weight: 400;
+  border: none;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  background: color-mix(in srgb, var(--ui-text-1) 5%, var(--ui-surface-1));
+}
+
+.management-page.dashboard-page .dash-kind-chip.is-error {
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 14%, var(--ui-surface-1));
+}
+
+/* 活动行内的后端徽标：设计里与类型标签同为中性灰（覆盖全局绿/紫配色）。 */
+.management-page.dashboard-page .dash-run-head .badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: var(--ui-fs-caption);
+  line-height: 16px;
+  font-weight: 400;
+  border: none;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  background: color-mix(in srgb, var(--ui-text-1) 5%, var(--ui-surface-1));
+}
+
+/* 待审批与运行状态共享活动滚动区，展开多条也不会挤掉底部操作。 */
+.management-page.dashboard-page .dash-activity-scroll {
+  --dash-scroll-inset: var(--ui-scrollbar-track-size, 12px);
+  scrollbar-gutter: stable;
+}
+.management-page.dashboard-page .dash-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 18px 0 12px;
+}
+
+/* —— 最近产出（右栏）：80×80 缩略图 + 文件名 / agent / 大小·时间 —— */
+.management-page.dashboard-page .dash-art-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 产出面板：图标贴左到 8，右侧滚动槽由全局方案贴面板边缘；标题/说明与卡片内容仍保持右距 24。 */
+.management-page.dashboard-page .dash-columns > .dash-section.dash-artifacts {
+  padding-left: 8px;
+  padding-right: 0;
+}
+.management-page.dashboard-page .dash-artifacts .dash-section-title,
+.management-page.dashboard-page .dash-artifacts .dash-remote-note,
+.management-page.dashboard-page .dash-artifacts .dash-empty {
+  margin-left: 16px;
+}
+/* 卡片文字/时间右边界距面板右 24。 */
+.management-page.dashboard-page .dash-artifacts .dash-art {
+  padding-right: 24px;
+}
+/* 活动面板：滚动槽同样贴面板右边；head 与活动行内容仍距面板右 24，头像距左 24 不变。 */
+.management-page.dashboard-page .dash-columns > .dash-section:not(.dash-artifacts) {
+  padding-right: 0;
+}
+.management-page.dashboard-page .dash-feed-head {
+  padding-right: 24px;
+}
+.management-page.dashboard-page .dash-status-list,
+.management-page.dashboard-page .dash-columns .dash-feed .dash-run {
+  padding-right: calc(24px - var(--dash-scroll-inset, 0px));
+}
+@media (max-width: 900px) {
+  .management-page.dashboard-page .dash-activity-scroll {
+    --dash-scroll-inset: 0px;
+    scrollbar-gutter: auto;
+  }
+}
+/* 产出区滚动条已收敛到 ScrollbarProvider 的全局方案：
+   12px 滚动槽贴面板边缘，thumb 通过透明右边框自然距右 8px。 */
+
+.management-page.dashboard-page .dash-art {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--ui-text-1);
+  min-width: 0;
+}
+
+/* 缩略图区：relative 容器（放类别图标）+ 后缀叠加。 */
+.management-page.dashboard-page .dash-art-thumb {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 所有产出：按 6 大类的拟物文件夹图标（PNG 自带留白，contain 居中）。 */
+.management-page.dashboard-page .dash-art-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 后缀标签：印在文件夹前壁左下角。图标 PNG 满幅、文件夹实体在 112 容器内约 (21,25)→(91,85)，
+   故文字落点按实体定位（左 34 / 下 30），不是设计稿的居中小文件夹坐标。颜色随类别（JSX inline）。 */
+.management-page.dashboard-page .dash-art-ext {
+  position: absolute;
+  left: 34px;
+  bottom: 30px;
+  font-size: var(--ui-fs-body);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  color: rgba(0, 0, 0, 0.34); /* 兜底；由 JSX inline 按类别覆盖 */
+  pointer-events: none;
+}
+
+.management-page.dashboard-page .dash-art-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.management-page.dashboard-page .dash-art-name {
+  font-size: var(--ui-fs-label);
+  font-weight: 400;
+  line-height: 22px;
+  color: var(--ui-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.management-page.dashboard-page .dash-art-sub {
+  font-size: var(--ui-fs-body);
+  font-weight: 300;
+  color: color-mix(in srgb, var(--ui-text-1) 60%, var(--ui-surface-1));
+}
+
+.management-page.dashboard-page .dash-art-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--ui-fs-body);
+  font-weight: 300;
+  color: color-mix(in srgb, var(--ui-text-1) 50%, var(--ui-surface-1));
+}
+
+.management-page.dashboard-page .dash-art-time {
+  margin-left: auto;
+}
+
+.management-page.dashboard-page .dash-remote-note {
+  margin-bottom: 8px;
+  font-size: var(--ui-fs-body);
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+}
+
+/* —— 空态 / 错误态 —— */
+.management-page.dashboard-page .dash-empty {
+  padding: 24px;
+  text-align: center;
+  font-size: var(--ui-fs-body);
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  background: var(--ui-surface-1);
+  border: 1px dashed var(--ui-hairline);
+  border-radius: 12px;
+}
+
+/* 面板内空态不再叠加边框（面板已是白卡）。 */
+.management-page.dashboard-page .dash-columns > .dash-section .dash-empty {
+  background: transparent;
+  border: none;
+}
+
+.management-page.dashboard-page .dash-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--ui-error);
+  border-radius: 12px;
+  color: var(--ui-error);
+  font-size: var(--ui-fs-body);
+}
+
+/* ---- 统一活动流（ActivityFeed）：面板头（标题 + 筛选）/ 筛选胶囊 / 降级提示 / 加载更多 ---- */
+
+.management-page.dashboard-page .dash-feed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.management-page.dashboard-page .dash-feed-head .dash-section-title {
+  margin: 0;
+}
+
+.management-page.dashboard-page .dash-feed-filters {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+/* Figma 252:3077: compact, bare 24px controls with 12px backend glyphs. */
+.management-page.dashboard-page .dash-backend-tabs,
+.management-page.dashboard-page .dash-kind-tabs {
+  --ft-color: var(--ui-text-1);
+  --ft-font-size: 12px;
+  --ft-line-height: 20px;
+  --backend-tab-icon-size: 12px;
+  gap: 0;
+  max-width: 100%;
+  scrollbar-width: none;
+}
+
+.management-page.dashboard-page .dash-feed-filters [role="tab"] {
+  box-sizing: border-box;
+  height: 24px;
+  padding: 2px 8px;
+}
+
+.management-page.dashboard-page .dash-backend-tabs [role="tab"]:has([data-backend-icon]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  padding: 6px;
+}
+
+/* Keep keyboard focus visible inside the compact scrolling row. */
+.management-page.dashboard-page .dash-feed-filters [role="tab"]:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--ui-focus);
+}
+
+.management-page.dashboard-page .dash-degraded-note {
+  margin: 8px 0 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px dashed var(--ui-border);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-fs-body);
+}
+
+.management-page.dashboard-page .dash-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+}

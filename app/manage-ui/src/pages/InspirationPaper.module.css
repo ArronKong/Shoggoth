@@ -1,0 +1,80 @@
+@font-face {
+  font-family: 'Courier Prime';
+  src: url('/fonts/courier-prime/CourierPrime-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Courier Prime';
+  src: url('/fonts/courier-prime/CourierPrime-Bold.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Source Han Serif CN';
+  src: url('/fonts/source-han-serif-cn/SourceHanSerifCN-Regular.otf') format('opentype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'ChillKai';
+  src: url('/fonts/chill-kai/ChillKai.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+.typeface { --note-font-family: 'Courier Prime', 'Source Han Serif CN', 'Songti SC', 'SimSun', serif; font-family: var(--note-font-family); }
+.typeface:lang(zh) { --note-font-family: 'ChillKai', 'Source Han Serif CN', 'Songti SC', 'SimSun', serif; }
+.surface {
+  composes: typeface;
+  --note-font-size: 12px;
+  --note-line-height: 20px;
+  --note-paper: light-dark(#fcfcfa, #3b3f37);
+  --note-ink: rgb(0 0 0 / 90%);
+  --note-muted: var(--note-ink);
+  --note-edge-light: light-dark(#ffffffbf, #c7d1b926);
+  --note-edge-shade: light-dark(#71756a2e, #10170d70);
+  position: relative;
+  isolation: isolate;
+  border-radius: 24px;
+  color: var(--note-ink);
+  background-color: var(--note-paper);
+  background-image: radial-gradient(ellipse 131% 131% at 12% 3%, light-dark(#ffffff9c, #dae6c809), transparent 68%),
+    linear-gradient(124.184deg, transparent 33.43%, light-dark(#d2d1c909, #0a140a14) 91.425%);
+  box-shadow: inset 1px 0 0 var(--note-edge-light),
+    4px 18px 24px -12px light-dark(#484b4017, #080c064d);
+}
+.surface::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: inherit;
+  background: url('../assets/inspiration-paper-figma.png') center / cover no-repeat;
+  opacity: .2;
+  pointer-events: none;
+}
+.surface[data-paper="1"] {
+  --note-paper: light-dark(#f2fff9, #333f32);
+}
+.surface[data-paper="2"] {
+  --note-paper: light-dark(#ffefec, #483930);
+}
+.surface[data-paper="3"] {
+  --note-paper: light-dark(#fffff4, #414032);
+}
+.surface[data-paper="4"] {
+  --note-paper: light-dark(#fffbff, #403b42);
+}
+.surface[data-paper="5"] {
+  --note-paper: light-dark(#fff2f8, #44343e);
+}
+.surface[data-paper="6"] {
+  --note-paper: light-dark(#fff8f2, #473e32);
+}
+.surface[data-paper="7"] {
+  --note-paper: light-dark(#f8ffff, #323f40);
+}

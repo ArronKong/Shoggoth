@@ -1,0 +1,83 @@
+.editor { min-width: 0; border-radius: 4px; }
+.editorContent { min-width: 0; --fade-top: 0px; --fade-bottom: 0px; mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent); }
+.editorContent[data-fade-top] { --fade-top: 16px; }
+.editorContent[data-fade-bottom] { --fade-bottom: 16px; }
+.textInput { display: block; width: 100%; resize: none; overflow: hidden; }
+.textInput[data-inline-text] { min-height: 20px; }
+.editor[data-capture] { display: flex; flex: 1; flex-direction: column; min-height: 114px; max-height: 364px; }
+.editor[data-capture] .editorContent { overflow: auto; min-height: 0; overscroll-behavior: contain; }
+.editor[data-capture] .toolbar { position: absolute; bottom: 16px; left: 24px; right: 24px; margin-top: 0; opacity: 0; transition: opacity 120ms ease; }
+.editor[data-capture]:hover .toolbar, .editor[data-capture]:focus-within .toolbar, .editor[data-capture][data-busy] .toolbar { opacity: 1; }
+.editor[data-drag-over] { outline: 2px dashed currentColor; outline-offset: 12px; }
+.toolbar { display: flex; align-items: center; gap: 4px; margin-top: 20px; min-height: 32px; font-family: var(--font-sans, sans-serif); }
+.tool { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.tool:hover:not(:disabled) { background: color-mix(in srgb, currentColor 8%, transparent); }
+.tool[data-recording] { color: #000; background: color-mix(in srgb, currentColor 10%, transparent); }
+.stopIcon { width: 9px; height: 9px; border-radius: 2px; background: currentColor; }
+.tool:disabled { opacity: .4; cursor: default; }
+.tool:focus-visible, .remove:focus-visible, .attachment a:focus-visible, .filenameButton:focus-visible, .playbackButton:focus-visible, .videoPlay:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.hint { flex: 1; min-width: 0; padding: 0 8px; font-size: 11px; line-height: 1.5; opacity: .65; }
+.editor[data-capture] .hint { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.attachments { display: flex; flex-direction: column; min-width: 0; }
+.attachments[data-files] { gap: 8px; margin-block: 8px; }
+.attachments[data-files] + .attachments[data-files] { margin-top: 0; }
+/* Keep an editable insertion point between files without reserving a full text line. */
+.editor .textInput[data-file-gap] { height: 8px !important; min-height: 8px; padding-block: 0; border-block-width: 0; }
+.attachments[data-files]:has(+ .textInput[data-file-gap]) { margin-bottom: 0; }
+.textInput[data-file-gap] + .attachments[data-files] { margin-top: 0; }
+.attachment { position: relative; min-width: 0; width: 100%; }
+.duration { font-family: 'Courier Prime', 'Source Han Serif CN', monospace; font-size: 12px; font-weight: 400; line-height: 20px; letter-spacing: 0; }
+.filename { composes: typeface from './InspirationPaper.module.css'; display: block; width: 100%; overflow: hidden; white-space: nowrap; font-size: var(--note-font-size, 12px); font-weight: 400; line-height: var(--note-line-height, 20px); letter-spacing: 0; }
+.filenameButton { display: block; width: 100%; min-width: 0; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.filenameButton:hover:not(:disabled) { color: inherit; background: transparent; }
+.visualViewport { min-width: 0; overflow-x: auto; margin: 8px 0; }
+.visual { position: relative; width: max-content; line-height: 0; }
+.visual a { display: block; width: max-content; color: inherit; }
+.visualOpen { display: block; width: max-content; padding: 0; border: 0; border-radius: 8px; background: transparent; color: inherit; line-height: 0; cursor: pointer; }
+.visualOpen:hover:not(:disabled) { background: transparent; color: inherit; }
+.visualOpen:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.visualImage, .video { display: block; height: 112px; width: auto; max-width: none; object-fit: contain; border-radius: 8px; }
+.visual[data-live] .video { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+.visual[data-live][data-playing] .video { opacity: 1; }
+.videoPlay { position: absolute; bottom: 6px; left: 6px; display: flex; align-items: center; height: 32px; padding: 0; border: 0; border-radius: 16px; color: #000; background: #ffffffe6; cursor: pointer; }
+.videoPlay:hover:not(:disabled) { color: #000; background: #fff; }
+.videoPlay span { padding-right: 10px; font-family: var(--font-sans, sans-serif); font-size: 10px; line-height: 20px; }
+.videoPlay:disabled { cursor: progress; opacity: .6; }
+.audio { display: flex; align-items: center; gap: 23px; width: 100%; min-width: 0; height: 46px; margin: 8px 0 16px; padding: 6px 15px 6px 6px; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 23px; }
+.audio audio { display: none; }
+.playbackButton { display: grid; place-items: center; flex: 0 0 32px; height: 32px; width: 32px; border: 0; border-radius: 50%; padding: 0; color: inherit; background: transparent; cursor: pointer; }
+.playbackButton:hover:not(:disabled) { color: inherit; background: color-mix(in srgb, currentColor 6%, transparent); }
+.playbackButton:disabled { cursor: progress; opacity: .4; }
+.playbackIcon { display: block; width: 32px; height: 32px; max-width: none; }
+.spectrum { position: relative; flex: 1; min-width: 24px; max-width: 248px; height: 16px; margin-right: auto; }
+.spectrum > img, .spectrum canvas { display: block; width: 100%; height: 16px; }
+.spectrum canvas { position: absolute; inset: 0; opacity: 0; }
+.spectrum canvas[data-active] { opacity: 1; }
+.spectrum:has(canvas[data-active]) > img { visibility: hidden; }
+.spectrum input { position: absolute; inset: -8px 0; width: 100%; height: 32px; opacity: 0; cursor: pointer; margin: 0; padding: 0; }
+.spectrum:focus-within { outline: 1px solid currentColor; outline-offset: 5px; border-radius: 2px; }
+.duration { flex-shrink: 0; min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.attachments[data-compact] .spectrum { max-width: 160px; }
+.playbackError { max-width: 100%; color: var(--ui-danger, #b33b35); font: 11px/20px var(--font-sans, sans-serif); margin: 8px 0; white-space: normal; }
+.playbackError a { color: inherit; text-decoration: underline; }
+.remove { position: absolute; top: 0; right: -24px; display: grid; place-items: center; border: 0; background: transparent; color: inherit; width: 24px; height: 20px; padding: 0; border-radius: 50%; cursor: pointer; font: 18px/20px var(--font-sans, sans-serif); opacity: .5; }
+.remove:hover { opacity: 1; }
+.editor:not([data-capture]) .attachment { width: calc(100% - 24px); }
+.editor[data-capture] .remove { right: 0; background: var(--note-paper, var(--ui-surface-1)); opacity: 0; }
+.editor[data-capture] .attachment:hover .remove, .editor[data-capture] .attachment:focus-within .remove { opacity: 1; }
+.error { font-family: var(--font-sans, sans-serif); font-size: 12px; line-height: 1.6; margin-top: 10px; color: var(--ui-danger, #b33b35); }
+.retry { display: flex; gap: 12px; margin-top: 4px; }
+.retry button { border: 0; padding: 2px 0; background: transparent; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+@media (prefers-reduced-motion: reduce) {
+  .editor[data-capture] .toolbar { transition: none; }
+  .spectrum canvas[data-active] { opacity: 0; }
+  .spectrum:has(canvas[data-active]) > img { visibility: visible; }
+}
+@media (hover: none) {
+  .editor[data-capture] .toolbar, .editor[data-capture] .remove { opacity: 1; }
+}
+.fileRow { display: flex; align-items: center; gap: 4px; min-width: 0; color: inherit; text-decoration: none; }
+.fileRow > svg { flex: none; }
+.fileRow .filename { margin: 0; flex: 1; min-width: 0; }
+.fileRow:hover { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.fileRow:focus-visible { outline: 1px solid var(--ui-focus); outline-offset: 4px; border-radius: 2px; }

@@ -1,0 +1,36 @@
+/* Pages own size, shape and typography; image/fallback compositing is shared. */
+:where(.avatar) {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+}
+
+.avatar::before {
+  content: attr(data-initial);
+  grid-area: 1 / 1;
+}
+
+.avatar[data-avatar-state="loaded"]::before {
+  content: none;
+}
+
+/* Only the wrapper clips the image. A second rounded edge darkens antialiasing. */
+.avatar > img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 0;
+  background: transparent;
+}
+
+.avatar[data-avatar-state="loading"] > img {
+  visibility: hidden;
+}
