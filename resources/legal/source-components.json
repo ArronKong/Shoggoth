@@ -218,6 +218,16 @@
         "licenses/source/HTML-PARSE-STRINGIFY.txt"
       ],
       "source": "https://github.com/HenrikJoreteg/html-parse-stringify/tree/ada9e1448f34a57c17e7e23ba4af6d217e3d7baf"
+    },
+    {
+      "names": [
+        "lazy-val"
+      ],
+      "version": "1.0.5",
+      "licenseFiles": [
+        "licenses/overrides/LAZY-VAL.txt"
+      ],
+      "source": "https://github.com/develar/lazy-val"
     }
   ]
 }

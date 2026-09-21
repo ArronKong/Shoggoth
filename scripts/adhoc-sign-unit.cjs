@@ -10,6 +10,7 @@ const {
   isMachOFile,
   listNativeNodeModules,
   nestedHostOptionalDependencyPaths,
+  writeReleaseMarker,
   shouldSignMachO,
   inspectCodeSignature,
 } = require("./adhoc-sign.cjs");
@@ -68,6 +69,29 @@ assert.deepEqual(nestedHostOptionalDependencyPaths("/tmp/Shoggoth.app"), [
   "/tmp/Shoggoth.app/Contents/Resources/app.asar.unpacked/node_modules/@trycua/cua-driver/node_modules",
   "/tmp/Shoggoth.app/Contents/Resources/app.asar.unpacked/node_modules/@ubjs/node/node_modules",
 ]);
+
+const releaseFixture = path.join(__dirname, ".adhoc-sign-release-fixture", "Shoggoth.app");
+try {
+  fs.mkdirSync(path.join(releaseFixture, "Contents", "Resources"), { recursive: true });
+  const markerPath = writeReleaseMarker(releaseFixture, { mode: "developer-id", version: "0.8.125" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(markerPath, "utf8")), {
+    schemaVersion: 1,
+    distribution: "official",
+    signingMode: "developer-id",
+    updateChannel: "stable",
+    version: "0.8.125",
+  });
+  writeReleaseMarker(releaseFixture, { mode: "adhoc", version: "0.8.125" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(markerPath, "utf8")), {
+    schemaVersion: 1,
+    distribution: "internal",
+    signingMode: "adhoc",
+    updateChannel: null,
+    version: "0.8.125",
+  });
+} finally {
+  fs.rmSync(path.dirname(releaseFixture), { recursive: true, force: true });
+}
 
 const machoFixture = path.join(__dirname, ".adhoc-sign-macho-fixture");
 try {

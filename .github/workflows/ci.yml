@@ -30,6 +30,10 @@ jobs:
           node scripts/third-party-licenses-unit.mjs
       - name: Isolated release-policy and transport checks
         run: |
+          node scripts/desktop-app-update-unit.cjs
+          node scripts/app-update-release-contract-unit.cjs
+          node scripts/adhoc-sign-unit.cjs
+          node scripts/notarize-unit.cjs
           node scripts/shoggoth-builtin-cli-profiles-unit.cjs
           node scripts/runtime-cli-auth-unit.cjs
           node scripts/shoggoth-runtime-adapter-registry-unit.cjs

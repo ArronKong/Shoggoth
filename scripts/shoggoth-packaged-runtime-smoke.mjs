@@ -556,6 +556,8 @@ async function verifyPackagedDeepSeekHarnessBridge(appPath, electronExecutable) 
 
 async function verifySourceContract(onlyArch = null) {
   const packageJson = JSON.parse(await readFile(path.join(REPO_ROOT, "package.json"), "utf8"));
+  assert.equal(packageJson.dependencies?.["electron-updater"], "6.8.9");
+  assert.equal(packageJson.repository?.url, "https://github.com/Tang99-eng/Shoggoth.git");
   assert.equal(
     packageJson.scripts?.dist,
     "npm run build:manage && npm run prepare:runtimes && npm run release:metadata && electron-builder --mac",
@@ -567,8 +569,13 @@ async function verifySourceContract(onlyArch = null) {
   assert.equal(typeof agentServiceServer.createAgentService, "function");
   const builder = await readFile(path.join(REPO_ROOT, "electron-builder.yml"), "utf8");
   assert.match(builder, /files:[\s\S]*\n\s*- schemas\/\*\*\/\*/);
-  assert.ok(require("js-yaml").load(builder).files.includes("!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"));
-  assert.ok(require("js-yaml").load(builder).extraResources.some((resource) => (
+  const builderConfig = require("js-yaml").load(builder);
+  assert.ok(builderConfig.files.includes("!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"));
+  assert.ok(builderConfig.files.includes("node_modules/electron-updater/**/*"));
+  assert.deepEqual(builderConfig.publish, {
+    provider: "github", owner: "Tang99-eng", repo: "Shoggoth", releaseType: "draft",
+  });
+  assert.ok(builderConfig.extraResources.some((resource) => (
     resource.from === ".vendor/codex/${arch}/package" && resource.to === "codex/package"
   )), "extraResources must include the architecture-specific Codex package");
   assert.match(builder, /from: \.vendor\/cua\/node-modules\/\$\{arch\}\/node_modules/u);
@@ -858,6 +865,24 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: agent-service-persistence`);
   await verifyPackagedService(appPath);
   const archivePath = path.join(appPath, "Contents", "Resources", "app.asar");
+  assert.equal(JSON.parse(extractAsarFile(
+    archivePath, "node_modules/electron-updater/package.json",
+  ).toString("utf8")).version, "6.8.9");
+  const releaseMarker = JSON.parse(await readFile(path.join(
+    appPath, "Contents", "Resources", "shoggoth-release.json",
+  ), "utf8"));
+  assert.equal(releaseMarker.schemaVersion, 1);
+  assert.equal(releaseMarker.version, require(path.join(REPO_ROOT, "package.json")).version);
+  if (process.env.SHOGGOTH_EXPECT_NOTARIZED === "1") {
+    assert.deepEqual({
+      distribution: releaseMarker.distribution,
+      signingMode: releaseMarker.signingMode,
+      updateChannel: releaseMarker.updateChannel,
+    }, { distribution: "official", signingMode: "developer-id", updateChannel: "stable" });
+  } else {
+    assert.equal(releaseMarker.distribution, "internal");
+  }
+  await access(path.join(appPath, "Contents", "Resources", "app-update.yml"));
   const schemaManifest = JSON.parse(extractAsarFile(
     archivePath, "schemas/codex-app-server/0.149.0/schema-manifest.json",
   ).toString("utf8"));

@@ -1,10 +1,14 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.124",
+  "version": "0.8.125",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Tang99-eng/Shoggoth.git"
+  },
   "main": "app/bootstrap.js",
   "scripts": {
     "postinstall": "node scripts/prepare-native-terminal.cjs",
@@ -26,6 +30,7 @@
     "@xterm/headless": "6.0.0",
     "better-sqlite3": "13.0.3",
     "cron-parser": "5.4.0",
+    "electron-updater": "6.8.9",
     "fflate": "0.8.3",
     "node-pty": "1.1.0",
     "pinyin-pro": "^3.29.3",
