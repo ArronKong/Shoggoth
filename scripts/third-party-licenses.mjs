@@ -34,7 +34,7 @@ export function collectThirdPartyLicenses(root, { check = false } = {}) {
   const expectedFiles = new Map();
   const copyLicense = (target, content) => {
     if (!content.trim()) throw new Error(`Empty license: ${target}`);
-    expectedFiles.set(target, content.endsWith("\n") ? content : `${content}\n`);
+    expectedFiles.set(target, `${content.trimEnd()}\n`);
     return target;
   };
   for (const component of components.values()) {

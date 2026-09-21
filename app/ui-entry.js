@@ -54,6 +54,7 @@ const { createDesktopBackendStopAction } = require("./desktop-backend-stop");
 const { registerDesktopMicrophoneIpc } = require("./desktop-microphone-ipc");
 const { registerDesktopChatClipboardIpc } = require("./desktop-chat-clipboard-ipc");
 const { registerDesktopTelemetryIpc } = require("./desktop-telemetry-ipc");
+const { createDesktopAppUpdateController } = require("./desktop-app-update");
 const { createProductTelemetry } = require("./core/product-telemetry");
 const productTelemetryBuildConfig = require("./product-telemetry-build-config");
 const { createBoardWidgetHost } = require("./board-widget-host");
@@ -153,6 +154,8 @@ const NATIVE_STRINGS = {
     "controlUi.missing.body": "未找到 {path}/index.html。\n请先运行: npm run build:manage",
     "proxy.failed.title": "本地安全代理启动失败",
     "proxy.failed.body": "Shoggoth 无法安全连接后端。应用将退出，请重启后再试。",
+    "appUpdate.ready.title": "Shoggoth 更新已就绪",
+    "appUpdate.ready.body": "版本 {version} 已下载。打开设置即可重新启动并安装。",
   },
   en: {
     "menu.gateway": "Gateway",
@@ -171,6 +174,8 @@ const NATIVE_STRINGS = {
       "{path}/index.html was not found.\nRun: npm run build:manage first.",
     "proxy.failed.title": "Local security proxy failed",
     "proxy.failed.body": "Shoggoth cannot connect to backends safely. The app will quit; please restart it and try again.",
+    "appUpdate.ready.title": "Shoggoth update ready",
+    "appUpdate.ready.body": "Version {version} is downloaded. Open Settings to restart and install it.",
   },
 };
 
@@ -208,6 +213,7 @@ let appBackendRegistry = null;
 let boardWidgetHost = null;
 let productTelemetry = null;
 let disposeTelemetryIpc = null;
+let appUpdateController = null;
 const boardWidgetNavigation = createBoardWidgetNavigationGuard();
 
 // Config read/write/ensure delegate to the shared store (config-store.js), which
@@ -573,6 +579,18 @@ function openGatewaySettings() {
   }
   mainWindow.focus();
   mainWindow.webContents.send("openclaw:navigate", "/settings");
+}
+
+function showUpdateReadyNotification(state) {
+  if (!Notification.isSupported()) return;
+  const locale = resolveLocale(readConfig().locale);
+  const version = state?.availableVersion || "";
+  const note = new Notification({
+    title: nativeT(locale, "appUpdate.ready.title"),
+    body: nativeT(locale, "appUpdate.ready.body", { version }),
+  });
+  note.on("click", openGatewaySettings);
+  note.show();
 }
 
 function setLocaleAndApply(localeRaw) {
@@ -1161,6 +1179,12 @@ if (!gotLock) {
       getWindows: () => [mainWindow, desktopInspiration?.getWindow()], getUiOrigin: () => serverOrigin });
     disposeChatClipboardIpc = registerDesktopChatClipboardIpc({ ipcMain, clipboard,
       getWindows: () => [mainWindow], getUiOrigin: () => serverOrigin });
+    appUpdateController = createDesktopAppUpdateController({
+      app,
+      ipcMain,
+      getMainWindow: () => mainWindow,
+      onDownloaded: showUpdateReadyNotification,
+    });
     createMainWindow();
     void backgroundStartup.then((status) => {
       if (!hostCanReload()) return;
@@ -1191,6 +1215,7 @@ if (!gotLock) {
     desktopInspiration?.dispose(); desktopInspiration = null;
     disposeMicrophoneIpc?.(); disposeMicrophoneIpc = null;
     disposeChatClipboardIpc?.(); disposeChatClipboardIpc = null;
+    appUpdateController?.dispose(); appUpdateController = null;
     disposeTelemetryIpc?.();
     productTelemetry?.close();
     hostStopping = true;

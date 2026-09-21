@@ -20,6 +20,19 @@ files:
   - node_modules/node-pty/prebuilds/darwin-*/**/*
   - "!node_modules/node-pty/lib/*.test.js"
   - node_modules/pinyin-pro/**/*
+  - node_modules/electron-updater/**/*
+  - node_modules/builder-util-runtime/**/*
+  - node_modules/debug/**/*
+  - node_modules/ms/**/*
+  - node_modules/fs-extra/**/*
+  - node_modules/graceful-fs/**/*
+  - node_modules/jsonfile/**/*
+  - node_modules/universalify/**/*
+  - node_modules/lazy-val/**/*
+  - node_modules/lodash.escaperegexp/**/*
+  - node_modules/lodash.isequal/**/*
+  - node_modules/sax/**/*
+  - node_modules/tiny-typed-emitter/**/*
   - "!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"
   - node_modules/@trycua/cua-driver/**/*
   - node_modules/@ubjs/core/**/*
@@ -96,6 +109,16 @@ extraResources:
 # 拒绝注册（原生通知静默丢弃）。afterPack 补 ad-hoc 深签名（详见脚本头注释）。
 afterPack: scripts/adhoc-sign.cjs
 afterSign: scripts/notarize.cjs
+
+# electron-builder writes this provider into Contents/Resources/app-update.yml.
+# Release CI uploads both macOS ZIPs plus latest-mac.yml as a draft, verifies
+# them, then promotes the draft. Private repositories are rejected by CI because
+# end-user GitHub updates must not depend on a bundled access token.
+publish:
+  provider: github
+  owner: Tang99-eng
+  repo: Shoggoth
+  releaseType: draft
 
 mac:
   # 完全由 afterPack 执行显式签名。禁用 electron-builder 自动发现钥匙串

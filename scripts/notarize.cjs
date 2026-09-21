@@ -7,15 +7,21 @@ const path = require("node:path");
 
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
-function buildNotarytoolArgs(archivePath, keychainProfile) {
+function buildNotarytoolArgs(archivePath, keychainProfile, keychainPath) {
   if (!path.isAbsolute(archivePath) || !PROFILE_PATTERN.test(keychainProfile || "")) {
     throw new TypeError("notarization archive/profile is invalid");
   }
-  return [
+  if (keychainPath !== undefined
+    && (!path.isAbsolute(keychainPath) || keychainPath.includes("\0"))) {
+    throw new TypeError("notarization keychain path is invalid");
+  }
+  const args = [
     "notarytool", "submit", archivePath,
     "--keychain-profile", keychainProfile,
-    "--wait", "--output-format", "json",
   ];
+  if (keychainPath) args.push("--keychain", keychainPath);
+  args.push("--wait", "--output-format", "json");
+  return args;
 }
 
 function assertAcceptedReceipt(stdout) {
@@ -33,6 +39,7 @@ exports.default = function notarize(context) {
   const mode = process.env.SHOGGOTH_CODESIGN_MODE
     || (process.env.SHOGGOTH_CODESIGN_IDENTITY ? "local" : "adhoc");
   const keychainProfile = process.env.SHOGGOTH_NOTARY_KEYCHAIN_PROFILE;
+  const keychainPath = process.env.SHOGGOTH_NOTARY_KEYCHAIN;
   if (!keychainProfile) {
     if (mode === "developer-id") {
       throw new Error("Developer ID release requires SHOGGOTH_NOTARY_KEYCHAIN_PROFILE");
@@ -50,7 +57,7 @@ exports.default = function notarize(context) {
     execFileSync("/usr/bin/ditto", ["-c", "-k", "--keepParent", appPath, archivePath], {
       stdio: "ignore", timeout: 180_000,
     });
-    const stdout = execFileSync("/usr/bin/xcrun", buildNotarytoolArgs(archivePath, keychainProfile), {
+    const stdout = execFileSync("/usr/bin/xcrun", buildNotarytoolArgs(archivePath, keychainProfile, keychainPath), {
       encoding: "utf8", timeout: 30 * 60_000,
     });
     const receipt = assertAcceptedReceipt(stdout);

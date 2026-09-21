@@ -5,6 +5,7 @@ import { useToast } from "../../components/ui";
 import { fireNotification } from "../../lib/notify";
 import ThemePicker from "./ThemePicker";
 import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
+import SettingsAppUpdate from "./SettingsAppUpdate";
 
 // Keep the theme preference and picker implementation available for a later
 // re-enable, but do not expose theme switching in Settings for now.
@@ -48,6 +49,7 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
       </section>
 
       <SettingsDesktopPrinter disabled={disabled} />
+      <SettingsAppUpdate />
       </div>
 
       {/* Notifications — native macOS desktop notifications, per category */}

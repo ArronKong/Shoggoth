@@ -7,14 +7,16 @@ const {
 } = require("./notarize.cjs");
 
 assert.deepEqual(buildNotarytoolArgs(
-  "/tmp/Shoggoth-notarization.zip", "shoggoth-release",
+  "/tmp/Shoggoth-notarization.zip", "shoggoth-release", "/tmp/release.keychain-db",
 ), [
   "notarytool", "submit", "/tmp/Shoggoth-notarization.zip",
   "--keychain-profile", "shoggoth-release",
+  "--keychain", "/tmp/release.keychain-db",
   "--wait", "--output-format", "json",
 ]);
 assert.throws(() => buildNotarytoolArgs("relative.zip", "shoggoth-release"), TypeError);
 assert.throws(() => buildNotarytoolArgs("/tmp/release.zip", "bad profile"), TypeError);
+assert.throws(() => buildNotarytoolArgs("/tmp/release.zip", "release", "relative.keychain-db"), TypeError);
 assert.deepEqual(assertAcceptedReceipt(JSON.stringify({
   id: "12345678-1234-1234-1234-123456789abc", status: "Accepted", message: "Package Approved",
 })), {
@@ -25,4 +27,4 @@ assert.throws(() => assertAcceptedReceipt(JSON.stringify({
 })), /NOTARIZATION_REJECTED/u);
 assert.throws(() => assertAcceptedReceipt("not-json"), /NOTARIZATION_RECEIPT_INVALID/u);
 
-console.log("Developer ID notarization contract unit: PASS (6 checks)");
+console.log("Developer ID notarization contract unit: PASS (7 checks)");

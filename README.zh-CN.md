@@ -61,6 +61,17 @@ npm run dist
 
 构建产物位于 `dist/`。未配置 Developer ID 和公证凭据时，生成的包用于内部预览。正式向 macOS 用户分发前，需要完成签名、公证、Gatekeeper 检查和干净 Mac 账户下的验证。
 
+## 正式发布与自动更新
+
+正式构建会在启动后及每六小时检查一次公开的 [GitHub Releases](https://github.com/Tang99-eng/Shoggoth/releases)。每个版本必须同时上传 Apple Silicon、Intel 两个 macOS ZIP 和 `latest-mac.yml`；只上传源码压缩包不能更新已安装的 App。开发版、ad-hoc 和本地签名包不会连接正式更新通道。
+
+`Signed macOS release` 工作流会构建双架构版本，用 Developer ID Application 证书签名，完成 Apple 公证与 stapling，验证 ZIP 和更新元数据，并在全部检查通过前把 GitHub Release 保持为草稿。仓库必须公开，并在 GitHub Actions 中配置以下 Secrets：
+
+- `MACOS_CERTIFICATE_BASE64`、`MACOS_CERTIFICATE_PASSWORD`、`MACOS_SIGNING_IDENTITY`
+- `APPLE_API_KEY_BASE64`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER`、`APPLE_TEAM_ID`
+
+创建并推送与 `package.json` 一致的标签（例如 `v0.8.125`）即可触发发布。第一个带自动更新能力的正式签名版本仍需手动安装；后续正式签名版本才可以原位自动更新。
+
 ## 后端连接与数据
 
 在「设置」中连接需要的本地后端，在「模型」中配置模型和账号。OpenClaw 与 Hermes 需要单独安装，请按各自上游项目的说明配置。
@@ -79,6 +90,11 @@ npm run build:manage
 npm run release:metadata
 npm run licenses:check
 node scripts/third-party-licenses-unit.mjs
+node scripts/desktop-app-update-unit.cjs
+node scripts/app-update-release-contract-unit.cjs
+node scripts/adhoc-sign-unit.cjs
+node scripts/notarize-unit.cjs
+node scripts/shoggoth-packaged-runtime-smoke.mjs
 node scripts/shoggoth-builtin-cli-profiles-unit.cjs
 node scripts/runtime-cli-auth-unit.cjs
 node scripts/shoggoth-runtime-adapter-registry-unit.cjs

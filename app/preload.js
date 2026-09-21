@@ -137,6 +137,18 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
   productTelemetry: {
     recordActivity: () => ipcRenderer.send("shoggoth:telemetry:activity"),
   },
+  appUpdate: {
+    getState: () => ipcRenderer.invoke("shoggoth:app-update:get-state"),
+    check: () => ipcRenderer.invoke("shoggoth:app-update:check"),
+    install: () => ipcRenderer.invoke("shoggoth:app-update:install"),
+    onState: (cb) => {
+      const handler = (_event, state) => {
+        try { cb(state); } catch { /* best-effort */ }
+      };
+      ipcRenderer.on("shoggoth:app-update:state", handler);
+      return () => ipcRenderer.removeListener("shoggoth:app-update:state", handler);
+    },
+  },
   // Convenience accessor used by the skin layer's i18n bootstrap.
   getLocale: () => currentConfig.effectiveLocale || currentConfig.locale || "",
   scanCliTools: () => ipcRenderer.invoke("openclaw:scan-cli-tools"),

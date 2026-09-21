@@ -91,6 +91,20 @@ function nestedHostOptionalDependencyPaths(appPath) {
   ];
 }
 
+function writeReleaseMarker(appPath, { mode, version }) {
+  const official = mode === "developer-id";
+  const markerPath = path.join(appPath, "Contents", "Resources", "shoggoth-release.json");
+  const marker = {
+    schemaVersion: 1,
+    distribution: official ? "official" : "internal",
+    signingMode: mode,
+    updateChannel: official ? "stable" : null,
+    version: String(version || ""),
+  };
+  fs.writeFileSync(markerPath, `${JSON.stringify(marker, null, 2)}\n`, { encoding: "utf8", mode: 0o644 });
+  return markerPath;
+}
+
 const MACHO_MAGIC = new Set([
   "cafebabe", "bebafeca", "cafebabf", "bfbafeca",
   "feedface", "cefaedfe", "feedfacf", "cffaedfe",
@@ -172,6 +186,9 @@ exports.default = function adhocSign(context) {
   for (const target of nestedHostOptionalDependencyPaths(appPath)) {
     if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: false });
   }
+  // This marker is covered by the final App signature. Runtime update checks are
+  // enabled only when it says this is an official Developer ID build.
+  writeReleaseMarker(appPath, { mode, version: context.packager.appInfo.version });
   // arbitrary Resources 目录下的 native Node addons 不属于标准 bundle nesting，
   // --deep 不保证会重签。先逐个签这些 addons，保留 Codex/Cua 自带的第三方
   // Developer ID 可执行文件和 dylib，再签整个 App。
@@ -209,6 +226,7 @@ exports.listNativeNodeModules = listNativeNodeModules;
 exports.isMachOFile = isMachOFile;
 exports.listMachOFiles = listMachOFiles;
 exports.nestedHostOptionalDependencyPaths = nestedHostOptionalDependencyPaths;
+exports.writeReleaseMarker = writeReleaseMarker;
 exports.shouldSignMachO = shouldSignMachO;
 exports.inspectCodeSignature = inspectCodeSignature;
 exports.verifyPackagedSqlite = verifyPackagedSqlite;

@@ -31,6 +31,47 @@
   justify-content: space-between;
 }
 
+.management-page.settings-page .settings-app-update-card {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.management-page.settings-page .settings-app-update-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.management-page.settings-page .settings-app-update-copy > div {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.management-page.settings-page .settings-app-update-label,
+.management-page.settings-page .settings-app-update-copy p {
+  color: var(--settings-muted-surface-1);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.management-page.settings-page .settings-app-update-copy p { margin: 0; }
+.management-page.settings-page .settings-app-update-copy progress { width: min(100%, 360px); }
+
+.management-page.settings-page .settings-app-update-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .management-page.settings-page .settings-stack {
   gap: 24px;
 }
@@ -156,6 +197,8 @@
   .management-page.settings-page .page-head-actions { width: 100%; justify-content: space-between; }
   .management-page.settings-page .settings-preferences .settings-prefs-row > .field { display: flex; gap: 8px; align-items: stretch; }
   .management-page.settings-page .settings-notification-footer { align-items: flex-start; }
+  .management-page.settings-page .settings-app-update-card { align-items: stretch; flex-direction: column; }
+  .management-page.settings-page .settings-app-update-actions { justify-content: flex-start; }
   .management-page.settings-page .settings-advanced-summary { gap: 10px; }
   .management-page.settings-page .settings-shortcut-row { gap: 12px; }
   .management-page.settings-page .settings-shortcut-row > span { flex-basis: 100%; }
