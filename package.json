@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Tang99-eng/Shoggoth.git"
+    "url": "https://github.com/ArronKong/Shoggoth.git"
   },
   "main": "app/bootstrap.js",
   "scripts": {

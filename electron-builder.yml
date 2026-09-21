@@ -116,7 +116,7 @@ afterSign: scripts/notarize.cjs
 # end-user GitHub updates must not depend on a bundled access token.
 publish:
   provider: github
-  owner: Tang99-eng
+  owner: ArronKong
   repo: Shoggoth
   releaseType: draft
 

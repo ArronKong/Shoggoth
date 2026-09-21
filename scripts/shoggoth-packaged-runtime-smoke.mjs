@@ -557,7 +557,7 @@ async function verifyPackagedDeepSeekHarnessBridge(appPath, electronExecutable) 
 async function verifySourceContract(onlyArch = null) {
   const packageJson = JSON.parse(await readFile(path.join(REPO_ROOT, "package.json"), "utf8"));
   assert.equal(packageJson.dependencies?.["electron-updater"], "6.8.9");
-  assert.equal(packageJson.repository?.url, "https://github.com/Tang99-eng/Shoggoth.git");
+  assert.equal(packageJson.repository?.url, "https://github.com/ArronKong/Shoggoth.git");
   assert.equal(
     packageJson.scripts?.dist,
     "npm run build:manage && npm run prepare:runtimes && npm run release:metadata && electron-builder --mac",
@@ -573,7 +573,7 @@ async function verifySourceContract(onlyArch = null) {
   assert.ok(builderConfig.files.includes("!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"));
   assert.ok(builderConfig.files.includes("node_modules/electron-updater/**/*"));
   assert.deepEqual(builderConfig.publish, {
-    provider: "github", owner: "Tang99-eng", repo: "Shoggoth", releaseType: "draft",
+    provider: "github", owner: "ArronKong", repo: "Shoggoth", releaseType: "draft",
   });
   assert.ok(builderConfig.extraResources.some((resource) => (
     resource.from === ".vendor/codex/${arch}/package" && resource.to === "codex/package"
