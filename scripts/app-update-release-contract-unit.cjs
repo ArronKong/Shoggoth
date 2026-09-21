@@ -9,7 +9,7 @@ const root = path.resolve(__dirname, "..");
 const builder = yaml.load(fs.readFileSync(path.join(root, "electron-builder.yml"), "utf8"));
 assert.deepEqual(builder.publish, {
   provider: "github",
-  owner: "Tang99-eng",
+  owner: "ArronKong",
   repo: "Shoggoth",
   releaseType: "draft",
 });

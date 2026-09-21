@@ -63,7 +63,7 @@ npm run dist
 
 ## 正式发布与自动更新
 
-正式构建会在启动后及每六小时检查一次公开的 [GitHub Releases](https://github.com/Tang99-eng/Shoggoth/releases)。每个版本必须同时上传 Apple Silicon、Intel 两个 macOS ZIP 和 `latest-mac.yml`；只上传源码压缩包不能更新已安装的 App。开发版、ad-hoc 和本地签名包不会连接正式更新通道。
+正式构建会在启动后及每六小时检查一次公开的 [GitHub Releases](https://github.com/ArronKong/Shoggoth/releases)。每个版本必须同时上传 Apple Silicon、Intel 两个 macOS ZIP 和 `latest-mac.yml`；只上传源码压缩包不能更新已安装的 App。开发版、ad-hoc 和本地签名包不会连接正式更新通道。
 
 `Signed macOS release` 工作流会构建双架构版本，用 Developer ID Application 证书签名，完成 Apple 公证与 stapling，验证 ZIP 和更新元数据，并在全部检查通过前把 GitHub Release 保持为草稿。仓库必须公开，并在 GitHub Actions 中配置以下 Secrets：
 

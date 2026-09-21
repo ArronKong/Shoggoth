@@ -48,7 +48,7 @@ on a clean Mac account.
 
 ## Signed releases and automatic updates
 
-Official builds check the public [GitHub Releases](https://github.com/Tang99-eng/Shoggoth/releases)
+Official builds check the public [GitHub Releases](https://github.com/ArronKong/Shoggoth/releases)
 feed after launch and every six hours. A release must contain both macOS ZIPs
 and `latest-mac.yml`; source archives alone cannot update the installed app.
 Development, ad-hoc and local-signing builds deliberately keep the production

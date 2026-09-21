@@ -47,7 +47,7 @@ for (const appDirectory of ["mac-arm64", "mac"]) {
   });
   const updateConfig = yaml.load(await readFile(path.join(resources, "app-update.yml"), "utf8"));
   assert.equal(updateConfig.provider, "github");
-  assert.equal(updateConfig.owner, "Tang99-eng");
+  assert.equal(updateConfig.owner, "ArronKong");
   assert.equal(updateConfig.repo, "Shoggoth");
 }
 
