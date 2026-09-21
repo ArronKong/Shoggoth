@@ -210,6 +210,9 @@ exports.default = function adhocSign(context) {
       targetPath, identity, keychainPath, timestamp,
     }), { stdio: "inherit" });
   }
+  // macOS can reattach provenance while nested binaries are being signed.
+  // Clear it again before sealing the final Framework/App bundles.
+  execFileSync("xattr", ["-cr", appPath], { stdio: "inherit" });
   execFileSync("codesign", buildCodesignArgs({
     appPath,
     entitlementsPath,

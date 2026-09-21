@@ -19,7 +19,7 @@ const { BackendRegistry } = require("../app/core/backend-registry.js");
 const { AgentBackend } = require("../app/core/agent-backend.js");
 const { HermesBackend } = require("../app/core/hermes-backend.js");
 
-const HERMES_AGENTS = [{ id: "hermes-default", name: "default · Hermes", model: "grok-4.3" }];
+const HERMES_AGENTS = [{ id: "hermes-default", name: "default", model: "grok-4.3" }];
 const HERMES_TRANSCRIPTS = new Map([
   [
     "agent:hermes-default:main",
@@ -309,7 +309,7 @@ const idempotentBackend = new HermesBackend({
   getConfig: () => ({ hermesMode: "local", hermesRemotes: [] }),
 });
 idempotentBackend.profileById.set("hermes-idem", "idem");
-idempotentBackend.agents = [{ id: "hermes-idem", name: "idem · Hermes" }];
+idempotentBackend.agents = [{ id: "hermes-idem", name: "idem" }];
 idempotentBackend._sendMessageInner = async (_sessionKey, _message, _key, hooks) => {
   idempotentExecutions += 1;
   await new Promise((resolve) => setTimeout(resolve, 20));

@@ -111,6 +111,11 @@ function fakeProc() {
 
       ok("start() 成功", okStart === true);
       ok("5 个 profile 全部拉起", calls.length === 5, `${calls.map((c) => c.profile).join(",")}`);
+      ok(
+        "Agent 展示名只保留 profile 名",
+        JSON.stringify(be.agents.map((agent) => agent.name)) === JSON.stringify(["default", "bull", "coder", "horse", "owl"]),
+        JSON.stringify(be.agents.map((agent) => agent.name)),
+      );
       // 核心断言：全部在第一波并行开始，没有谁在等 default 就绪。
       const maxStart = Math.max(...calls.map((c) => c.startedAt));
       ok("所有 spawn 都在第一波并行开始（不等 default）", maxStart < SLOW_MS, `最晚起步 ${maxStart}ms`);

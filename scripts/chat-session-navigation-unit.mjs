@@ -36,7 +36,7 @@ for (const [agentId, name, backendId] of [
   ["shoggoth-61ccd39b-7a29-8bbc-a47c-3af127d719b8", "溪桥", "shoggoth"],
   ["shoggoth-f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4", "Shoggoth", "shoggoth"],
   ["ada", "Product", "openclaw"], ["main", "CEO", "openclaw"],
-  ["hermes-bull", "bull · Hermes", "hermes"],
+  ["hermes-bull", "bull", "hermes"],
   ["codex-c79e0e41-2c12-8cc9-978b-aa7882d56be4", "星帆", "codex"],
   ["deepseek-harness-2031c7ed-e75e-8a61-8cf4-ea24551b3887", "晴川", "deepseek-harness"],
   ["shoggoth-grok", "Grok", "grok-build"], ["shoggoth-antigravity", "Antigravity", "antigravity"],

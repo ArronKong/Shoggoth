@@ -21,7 +21,7 @@ const agents = [
   { id: "shoggoth-grok", name: "Grok", backendId: "grok-build" },
   { id: "shoggoth-antigravity", name: "Antigravity", backendId: "antigravity" },
   { id: "shoggoth-pi", name: "Pi", backendId: "pi" },
-  { id: "hermes-bull", name: "bull · Hermes", backendId: "hermes" },
+  { id: "hermes-bull", name: "bull", backendId: "hermes" },
 ];
 type Row = { key: string; agentId: string; agentName?: string; backendId: string; model: string; modelProvider: string; updatedAt: number };
 const parents: Row[] = agents.map((agent, index) => ({

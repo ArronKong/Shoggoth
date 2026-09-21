@@ -1153,7 +1153,7 @@ class HermesBackend extends AgentBackend {
       this.profileById.set(id, profile.name);
       this.agents.push({
         id,
-        name: `${profile.name} · Hermes`,
+        name: profile.name,
         model: typeof profile.model === "string" ? profile.model : undefined,
         provider: typeof profile.provider === "string" ? profile.provider : undefined,
       });
@@ -4858,7 +4858,7 @@ class HermesBackend extends AgentBackend {
             bySource.get(agentId) ||
             {
               id: agentId,
-              label: `${profile} · Hermes`,
+              label: profile,
               kind: "profile",
               backendId: "hermes",
               profile,

@@ -104,7 +104,6 @@ function browserPageAction(command, phase) {
       ".app-shell",
       ".chat-queue__chip",
       ".chat-queue__pending",
-      ".chat-composer__connecting",
       ".chat-banner",
     ];
     const counts = Object.fromEntries(selectors.map((selector) => [

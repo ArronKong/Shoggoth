@@ -854,6 +854,9 @@ function cap(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 export function chatAgentDisplayName(agentId: string): string {
+  if (agentId.toLowerCase().startsWith("hermes-")) {
+    return agentId.slice("hermes-".length) || "default";
+  }
   return cap(agentId);
 }
 export function shouldRefreshChatAvatars(pathname: string): boolean {
@@ -6766,7 +6769,7 @@ function ChatPageApp() {
     await patchSession({ permissionMode: option.id }, t("chat.labelPermission"));
   };
   const activeSendReady = canSendActiveSession(active?.key);
-  const activeConnectingHint = !active || activeSendReady
+  const activeRecoveryHint = !active || activeSendReady
     ? null
     : activeBackendDescriptor?.connectionMode === "managed-service"
       ? t("chat.hermesConnecting")
@@ -8310,13 +8313,13 @@ function ChatPageApp() {
                     return st.error === "remote" ? <div className="chat-archive-bar is-note">{t("chat.archiveRemote")}</div> : null;
                   return null; // loaded → dividers in the thread say it all
                 })()}
-                {/* 后端正在恢复时，首个 history 失败只是启动竞态：沿用 composer 的中性
+                {/* 后端正在恢复时，首个 history 失败只是启动竞态：在消息区显示中性
                     恢复提示；就绪后仍失败才展示真实错误和手动重试，避免把自愈窗口误报
-                    成需要用户处理的故障。 */}
-                {!historyLoaded && !historyVisible && historyError && activeConnectingHint && (
-                  <div className="chat-empty">{activeConnectingHint}</div>
+                    成需要用户处理的故障。composer 保持只承载输入与工具。 */}
+                {!historyLoaded && !historyVisible && historyError && activeRecoveryHint && (
+                  <div className="chat-empty">{activeRecoveryHint}</div>
                 )}
-                {!historyLoaded && !historyVisible && historyError && !activeConnectingHint && (
+                {!historyLoaded && !historyVisible && historyError && !activeRecoveryHint && (
                   <>
                     <div className="chat-empty">{t("chat.historyLoadFailed", { msg: historyError })}</div>
                     <button
@@ -8969,11 +8972,6 @@ function ChatPageApp() {
                 onChange={(e) => composerChange(e.target.value)}
                 onKeyDown={composerKeyDown}
               />
-              {activeConnectingHint && (
-                <div className="chat-composer__connecting" data-testid="chat-connecting-hint">
-                  {activeConnectingHint}
-                </div>
-              )}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -9227,7 +9225,6 @@ function ChatPageApp() {
           abortActive={abortActive}
           hasActiveSession={!!active}
           canSend={activeSendReady}
-          connectingHint={activeConnectingHint}
           slashMenu={slashMenuNode}
           slashOpen={slashOpen}
           attachments={attachments}
@@ -9297,7 +9294,6 @@ interface ChatPageTestDeps {
       quote: { id?: string; text?: string } | null;
       immersive: boolean;
       canSend: boolean;
-      connectingHint: string | null;
     };
     setDraft(value: string): void;
     invoke(entry: ChatSendEntry): void;
@@ -9326,7 +9322,6 @@ function ChatPageHistoryFixture({ deps }: { deps: ChatPageTestDeps }) {
           }
         }}
       />
-      {send.connectingHint && <div data-testid="chat-connecting-hint">{send.connectingHint}</div>}
       <button
         type="button"
         data-send-entry="composerButton"
@@ -9366,7 +9361,6 @@ function ChatPageHistoryFixture({ deps }: { deps: ChatPageTestDeps }) {
           abortActive={() => {}}
           hasActiveSession={!!snapshot.activeKey}
           canSend={send.canSend}
-          connectingHint={send.connectingHint}
           slashMenu={null}
           slashOpen={false}
           models={[]}
@@ -9573,11 +9567,6 @@ export function createChatPageTestFixture(options: {
             ...structuredClone(sendState),
             immersive: sendImmersive,
             canSend: fixtureCanSend(snapshot.activeKey),
-            connectingHint: fixtureCanSend(snapshot.activeKey)
-              ? null
-              : snapshot.activeKey
-                ? `正在连接 ${fixtureBackendOf(snapshot.activeKey)}…`
-                : null,
           }),
           setDraft(value: string) {
             sendState = { ...sendState, draft: value };

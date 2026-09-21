@@ -90,7 +90,7 @@ async function listen(handler) {
 
     servedRows = [];
     backend.profileById.set("hermes-default", "default");
-    backend.agents = [{ id: "hermes-default", name: "default · Hermes" }];
+    backend.agents = [{ id: "hermes-default", name: "default" }];
     backend.dashboards.set("default", { baseUrl: fixture.baseUrl, token: "fixture" });
     const emptyProfileRows = await backend.refreshSessions();
     assert.deepEqual(
