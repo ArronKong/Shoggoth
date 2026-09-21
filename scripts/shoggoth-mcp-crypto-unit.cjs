@@ -33,6 +33,9 @@ const { createLocalFileSafeStorage, localCryptoKeyPath } = require(path.join(
 const { PendingCommandInbox } = require(path.join(
   ROOT, "app/agent-service/pending-command-inbox",
 ));
+const { EncryptedSecretStore } = require(path.join(
+  ROOT, "app/agent-service/encrypted-secret-store",
+));
 const {
   decodeWorkerResponse, encodeWorkerResponse,
 } = require(path.join(ROOT, "app/agent-service/mcp-crypto-protocol"));
@@ -729,7 +732,7 @@ test("ad-hoc 包按当前 CDHash 隔离 Keychain service，稳定签名沿用固
   assert.equal(keychainServiceNameForIdentity(null), SHOGGOTH_AGENT_SERVICE_NAME);
 });
 
-test("本地稳定签名与严格 ad-hoc 完全绕过 Electron safeStorage，Developer ID 保持不变", () => {
+test("本地稳定签名与严格 ad-hoc 绕过 safeStorage，Developer ID 新写入使用系统存储", () => {
   const paths = fixturePaths("smcw-local-storage-selection-");
   const localIdentity = {
     localSigned: true,
@@ -739,7 +742,7 @@ test("本地稳定签名与严格 ad-hoc 完全绕过 Electron safeStorage，Dev
     designatedRequirement: "identifier \"ai.shoggoth.desktop\" and certificate root = H\"ddb8a6fee24f4bd865bab191d92c44062f213137\"",
   };
   const localStorage = { kind: "local-file" };
-  const systemStorage = { kind: "keychain" };
+  const systemStorage = { ...safeStorage, kind: "keychain" };
   let safeStorageReads = 0;
   let localFactoryCalls = 0;
   const electron = {};
@@ -762,10 +765,15 @@ test("本地稳定签名与严格 ad-hoc 完全绕过 Electron safeStorage，Dev
   assert.equal(localFactoryCalls, 1);
   assert.equal(safeStorageReads, 0, "本地签名路径不得触碰登录钥匙串 getter");
 
-  assert.equal(cryptoStorageForIdentity({
+  const officialStorage = cryptoStorageForIdentity({
     teamIdentifier: "SHOGGOTH01",
     designatedRequirement: "identifier ai.shoggoth.desktop and anchor apple generic",
-  }, options), systemStorage);
+  }, options);
+  assert.equal(officialStorage.isEncryptionAvailable(), true);
+  const encrypted = officialStorage.encryptString("official-value");
+  assert.deepEqual(encrypted, systemStorage.encryptString("official-value"));
+  assert.equal(officialStorage.decryptString(encrypted), "official-value");
+  officialStorage.close();
   assert.equal(cryptoStorageForIdentity({
     adHoc: true,
     teamIdentifier: null,
@@ -775,6 +783,105 @@ test("本地稳定签名与严格 ad-hoc 完全绕过 Electron safeStorage，Dev
   }, options), localStorage);
   assert.equal(localFactoryCalls, 2);
   assert.equal(safeStorageReads, 1);
+});
+
+test("正式 worker 可读取测试版的 MCP 密钥及密文，保留原文件且只读打开旧主密钥", async () => {
+  const paths = fixturePaths("smcw-official-upgrade-");
+  const local = createLocalFileSafeStorage({ paths });
+  const serviceGate = gate();
+  const request = { version: 1, generation: 3, operation: "service.loadOrCreate", paths };
+  const originalFrame = await performWorkerOperation({ gate: serviceGate, request, safeStorage: local });
+  const originalSecret = decodeWorkerResponse(originalFrame, serviceGate);
+  const originalFile = fs.readFileSync(paths.mcpAuthPath);
+  const key = fs.readFileSync(localCryptoKeyPath(paths));
+  const encrypted = local.encryptString("legacy-credential");
+  local.close();
+  let readOnly;
+  let legacy;
+  const official = cryptoStorageForIdentity({ teamIdentifier: "SHOGGOTH01" }, {
+    paths, safeStorage,
+    createLocalFileSafeStorage(options) {
+      readOnly = options.readOnly;
+      legacy = createLocalFileSafeStorage(options);
+      return legacy;
+    },
+  });
+  try {
+    for (const operation of ["service.loadOrCreate", "helper.read"]) {
+      const operationGate = operation === "helper.read" ? gate({ callerRole: "mcp" }) : serviceGate;
+      const response = await performWorkerOperation({
+        gate: operationGate, request: { ...request, operation }, safeStorage: official,
+      });
+      const secret = decodeWorkerResponse(response, operationGate);
+      assert.deepEqual(secret, originalSecret);
+      secret.fill(0);
+    }
+    assert.equal(official.decryptString(encrypted), "legacy-credential");
+    assert.equal(readOnly, true);
+    assert.deepEqual(fs.readFileSync(paths.mcpAuthPath), originalFile);
+    assert.deepEqual(fs.readFileSync(localCryptoKeyPath(paths)), key);
+    const corrupt = Buffer.from(encrypted);
+    corrupt[corrupt.length - 1] ^= 1;
+    assert.throws(() => official.decryptString(corrupt), { code: "LOCAL_CRYPTO_UNAVAILABLE" });
+    assert.deepEqual(official.encryptString("new-value"), safeStorage.encryptString("new-value"));
+  } finally {
+    official.close();
+    originalSecret.fill(0);
+    key.fill(0);
+  }
+  assert.equal(legacy.isEncryptionAvailable(), false);
+});
+
+test("正式 worker 不为缺失旧密钥创建替代品，不用旧格式绕过锁定的系统存储", () => {
+  const oldPaths = fixturePaths("smcw-old-key-");
+  const oldStorage = createLocalFileSafeStorage({ paths: oldPaths });
+  const encrypted = oldStorage.encryptString("old-value");
+  oldStorage.close();
+  const paths = fixturePaths("smcw-missing-old-key-");
+  const official = cryptoStorageForIdentity({ teamIdentifier: "SHOGGOTH01" }, { paths, safeStorage });
+  assert.throws(() => official.decryptString(encrypted), { code: "LOCAL_CRYPTO_UNAVAILABLE" });
+  assert.equal(fs.existsSync(localCryptoKeyPath(paths)), false);
+  official.close();
+  let localReads = 0;
+  const locked = cryptoStorageForIdentity({ teamIdentifier: "SHOGGOTH01" }, {
+    paths: oldPaths,
+    safeStorage: { ...safeStorage, isEncryptionAvailable: () => false },
+    createLocalFileSafeStorage() { localReads += 1; throw new Error("must not read"); },
+  });
+  assert.equal(locked.isEncryptionAvailable(), false);
+  assert.throws(() => locked.decryptString(encrypted), { code: "MCP_CRYPTO_UNAVAILABLE" });
+  assert.equal(localReads, 0);
+  locked.close();
+});
+
+test("从测试版升级后仍可读待处理命令和 Provider 凭据，后续写入使用系统格式", async () => {
+  const { paths, pendingPath } = await seedStrictLocalEncryptedState("smcw-legacy-domains-");
+  const local = createLocalFileSafeStorage({ paths, readOnly: true });
+  const oldSecrets = new EncryptedSecretStore({ paths, safeStorage: local });
+  await oldSecrets.open();
+  await oldSecrets.put("upgrade-credential", "fixture-value", { kind: "openai-api-key" });
+  await oldSecrets.close();
+  local.close();
+  const official = cryptoStorageForIdentity({ teamIdentifier: "SHOGGOTH01" }, { paths, safeStorage });
+  const inbox = new PendingCommandInbox({ paths, safeStorage: official });
+  const secrets = new EncryptedSecretStore({ paths, safeStorage: official });
+  try {
+    await inbox.open();
+    assert.equal(inbox.isLocked(), false);
+    assert.equal(inbox.get("strict-local-failure-fixture").prompt, "strict local encrypted pending command");
+    await inbox.transition("strict-local-failure-fixture", "canceled");
+    const persistedInbox = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+    assert.doesNotThrow(() => JSON.parse(safeStorage.decryptString(Buffer.from(persistedInbox.ciphertext, "base64"))));
+    await secrets.open();
+    assert.equal(await secrets.get("upgrade-credential"), "fixture-value");
+    await secrets.put("upgrade-credential", "updated-fixture-value", { kind: "openai-api-key" });
+    const persistedSecrets = JSON.parse(fs.readFileSync(paths.encryptedSecretsPath, "utf8"));
+    assert.equal(safeStorage.decryptString(Buffer.from(persistedSecrets.credentials["upgrade-credential"].ciphertext, "base64")), "updated-fixture-value");
+  } finally {
+    await inbox.close();
+    await secrets.close();
+    official.close();
+  }
 });
 
 test("本地稳定签名 packaged worker 不命名/聚焦 Keychain App，也不读取 safeStorage getter", async () => {
