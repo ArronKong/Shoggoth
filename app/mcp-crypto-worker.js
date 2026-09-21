@@ -25,6 +25,7 @@ const {
 const { assertPrivateDirectory, ensurePrivateDirectoryTree } = require("./agent-service/security");
 const {
   createLocalFileSafeStorage,
+  isLocalFileCiphertext,
 } = require("./agent-service/local-file-safe-storage");
 
 // 后台 Service/MCP 使用独立 profile，也必须使用独立的 Keychain service name。
@@ -129,8 +130,27 @@ function cryptoStorageForIdentity(identity, options = {}) {
       readOnly: options.readOnly === true,
     });
   }
-  if (options.safeStorage) return options.safeStorage;
-  return options.electron?.safeStorage;
+  const systemStorage = options.safeStorage || options.electron?.safeStorage;
+  let legacyStorage = null;
+  return {
+    isEncryptionAvailable: () => systemStorage?.isEncryptionAvailable() === true,
+    encryptString: (value) => systemStorage.encryptString(value),
+    decryptString(value) {
+      if (!isLocalFileCiphertext(value)) return systemStorage.decryptString(value);
+      // Internal builds used a private local key. Read that exact old format
+      // during upgrade; new writes always use Keychain and never create a local key.
+      if (systemStorage?.isEncryptionAvailable() !== true) throw cryptoError();
+      if (!legacyStorage) {
+        const createStorage = options.createLocalFileSafeStorage || createLocalFileSafeStorage;
+        legacyStorage = createStorage({ paths: options.paths, fs: options.fs, readOnly: true });
+      }
+      return legacyStorage.decryptString(value);
+    },
+    close() {
+      legacyStorage?.close();
+      legacyStorage = null;
+    },
+  };
 }
 
 function assertWorkerParent(gate, runtime = {}) {
@@ -399,7 +419,7 @@ async function startMcpCryptoWorker(options = {}) {
     if (typeof electronApp.exit === "function") electronApp.exit(exitCode);
     else electronApp.quit();
   } finally {
-    if (usesLocalFileCrypto && typeof safeStorage?.close === "function") safeStorage.close();
+    if (typeof safeStorage?.close === "function") safeStorage.close();
   }
 }
 

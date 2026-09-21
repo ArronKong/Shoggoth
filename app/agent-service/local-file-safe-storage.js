@@ -21,6 +21,11 @@ const LOCAL_CRYPTO_HEADER_BYTES = LOCAL_CRYPTO_MAGIC.length
   + LOCAL_CRYPTO_NONCE_BYTES + LOCAL_CRYPTO_TAG_BYTES;
 const LOCAL_CRYPTO_AAD = Buffer.from("ai.shoggoth.desktop/local-file-safe-storage/v1", "utf8");
 
+function isLocalFileCiphertext(value) {
+  return Buffer.isBuffer(value) && value.length >= LOCAL_CRYPTO_MAGIC.length
+    && value.subarray(0, LOCAL_CRYPTO_MAGIC.length).equals(LOCAL_CRYPTO_MAGIC);
+}
+
 function localCryptoError(cause = null) {
   const error = serviceError("LOCAL_CRYPTO_UNAVAILABLE", "local_crypto_unavailable");
   if (cause instanceof Error) error.cause = cause;
@@ -191,5 +196,6 @@ module.exports = {
   LOCAL_CRYPTO_KEY_FILENAME,
   LocalFileSafeStorage,
   createLocalFileSafeStorage,
+  isLocalFileCiphertext,
   localCryptoKeyPath,
 };
