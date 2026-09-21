@@ -84,7 +84,7 @@ function makeBackend(home, bin = process.execPath) {
   be.refreshModelChoices = async () => [];
   be._refreshAgentsFor = async () => {
     be.profileById = new Map([["hermes-default", "default"]]);
-    be.agents = [{ id: "hermes-default", name: "default · Hermes" }];
+    be.agents = [{ id: "hermes-default", name: "default" }];
   };
   return be;
 }

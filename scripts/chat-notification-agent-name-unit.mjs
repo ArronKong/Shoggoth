@@ -100,7 +100,7 @@ async function fixture(native = true) {
 const rows = [
   { id: "ada", name: "产品经理", backendId: "openclaw" },
   { id: "main", name: "CEO", backendId: "openclaw" },
-  { id: "hermes-main", name: "research · Hermes", backendId: "hermes" },
+  { id: "hermes-main", name: "research", backendId: "hermes" },
   { id: "shoggoth-61ccd39b", name: "溪桥", backendId: "shoggoth" },
   { id: "codex-c79e0e41", name: "星帆", backendId: "codex" },
   { id: "deepseek-harness-2031c7ed", name: "晴川", backendId: "deepseek-harness" },
@@ -119,7 +119,7 @@ await f.respond(rows);
 assert.deepEqual(f.notices.map(notice => notice.title), rows.map(row => row.name.trim() || row.identity.name.trim()),
   "Desktop titles must match current names for every routing namespace, preserving case and Unicode");
 assert.equal(f.notices[1].title, "CEO");
-assert.equal(f.notices[2].title, "research · Hermes", "Backend-local main ids must not collide");
+assert.equal(f.notices[2].title, "research", "Backend-local main ids must not collide");
 assert.ok(f.notices.every(notice => notice.body === "已处理完毕。"));
 await f.click(3);
 assert.equal(f.location.hash, "#/chat");

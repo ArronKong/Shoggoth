@@ -396,13 +396,15 @@ assert.match(zhLocale, /approval:\s*"等待审批"[\s\S]*?input:\s*"等待输入
   "中文必须区分审批和输入请求");
 assert.match(enLocale, /approval:\s*"Awaiting approval"[\s\S]*?input:\s*"Awaiting input"/,
   "英文必须区分审批和输入请求");
-assert.match(chatPage, /const\s+activeConnectingHint\s*=/,
-  "普通与沉浸 composer 必须共用 activeConnectingHint");
-assert.match(chatPage, /connectingHint=\{activeConnectingHint\}/,
-  "沉浸 composer 必须复用普通 composer 的恢复提示");
-assert.match(chatPage, /historyError\s*&&\s*activeConnectingHint[\s\S]*?chat-empty[\s\S]*?activeConnectingHint/,
+assert.match(chatPage, /const\s+activeRecoveryHint\s*=/,
+  "后端恢复期间必须保留消息区的中性恢复提示");
+for (const [label, source] of [["普通", chatPage], ["沉浸", immersiveChat]]) {
+  assert.doesNotMatch(source, /chat-composer__connecting|chat-connecting-hint|\bconnectingHint\b/,
+    `${label} composer 不得为任何 backend 渲染连接状态`);
+}
+assert.match(chatPage, /historyError\s*&&\s*activeRecoveryHint[\s\S]*?chat-empty[\s\S]*?activeRecoveryHint/,
   "后端恢复窗口的历史失败必须显示中性恢复提示，不能先渲染通用错误");
-assert.match(chatPage, /historyError\s*&&\s*!activeConnectingHint[\s\S]*?historyLoadFailed/,
+assert.match(chatPage, /historyError\s*&&\s*!activeRecoveryHint[\s\S]*?historyLoadFailed/,
   "后端已就绪后仍失败时必须保留真实历史错误与手动重试入口");
 
 for (const target of [kanbanPath, profilePath]) {

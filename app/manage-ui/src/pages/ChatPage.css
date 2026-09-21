@@ -1411,12 +1411,6 @@
   font-family: var(--font-body); font-size: 15px; font-weight: 400; line-height: 20px; outline: none;
 }
 .chat-composer__input::placeholder { color: var(--muted-fg); }
-.chat-composer__connecting {
-  padding: 0 4px;
-  color: var(--muted-fg);
-  font-size: 11px;
-  line-height: 1.2;
-}
 .chat-composer__bar {
   display: flex; align-items: center; gap: 6px; margin-top: 10px; padding-top: 10px;
 }

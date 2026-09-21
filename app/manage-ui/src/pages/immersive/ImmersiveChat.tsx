@@ -94,7 +94,6 @@ export interface ImmersiveBundle {
   abortActive: () => void;
   hasActiveSession: boolean;
   canSend: boolean;
-  connectingHint: string | null;
   // slash 命令菜单：节点由 ChatPage 构建（与普通模式同一份 JSX），渲染进沉浸 composer。
   slashMenu: ReactNode;
   slashOpen: boolean;
@@ -151,7 +150,7 @@ export interface ImmersiveBundle {
 export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
     onExit, phase, live, sendSeq, onNearTop, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
-    submit, sending, canSteer, abortActive, hasActiveSession, canSend, connectingHint, slashMenu, slashOpen,
+    submit, sending, canSteer, abortActive, hasActiveSession, canSend, slashMenu, slashOpen,
     models, displayModel, changeModel, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
@@ -856,9 +855,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           rows={2}
           disabled={!hasActiveSession}
         />
-        {connectingHint && (
-          <div className={styles.connectingHint} data-testid="chat-connecting-hint">{connectingHint}</div>
-        )}
         <div className={styles.bar}>
           <div className={styles.barLeft}>
             {hasActiveSession && (

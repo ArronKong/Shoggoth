@@ -13,7 +13,7 @@ const state = window as any;
 const backend = new URLSearchParams(location.search).get("backend") || "hermes";
 const agentId = backend === "hermes" ? "hermes-fixture" : backend === "openclaw" ? "main" : "shoggoth-fixture";
 const key = `agent:${agentId}:inspiration-display`;
-const name = backend === "hermes" ? "owl · Hermes" : backend === "openclaw" ? "OpenClaw" : "Shoggoth";
+const name = backend === "hermes" ? "owl" : backend === "openclaw" ? "OpenClaw" : "Shoggoth";
 const sessions = [{ key, agentId, agentName: name, backendId: backend, displayName: "灵感 · RSI 学习卡片", updatedAt: Date.now() }];
 const realFetch = window.fetch.bind(window);
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));

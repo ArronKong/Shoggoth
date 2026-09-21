@@ -398,13 +398,6 @@
 .input::placeholder {
   color: rgba(255, 255, 255, 0.4);
 }
-.connectingHint {
-  padding: 0 2px;
-  color: rgba(255, 255, 255, 0.58);
-  font-size: 11px;
-  line-height: 1.2;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
-}
 .send {
   flex: none;
   width: 40px;
