@@ -347,6 +347,84 @@ test("显式调用冻结 Skill ref，成功读取才记录使用次数", () => {
   } finally { value.cleanup(); }
 });
 
+test("全局安装启用所有现有 Profile，后建 Profile 自动继承且普通安装仍保持隔离", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a", "profile-b"]);
+    const source = packageDir(value.root, { name: "shared-fetch" });
+    const installed = value.store.installGlobalFromDirectory({
+      sourcePath: source,
+      expectedRevision: value.store.revision,
+      operationId: "install-shared-fetch-global",
+      profileIds: ["profile-a", "profile-b"],
+    });
+    assert.equal(installed.complete, true);
+    assert.equal(installed.availableToFutureProfiles, true);
+    assert.deepEqual(installed.enabledProfiles, ["profile-a", "profile-b"]);
+    assert.equal(value.store.list("profile-a").items[0].enabled, true);
+    assert.equal(value.store.list("profile-b").items[0].enabled, true);
+    assert.equal(value.store.list("profile-a").items[0].globalEnabled, true);
+
+    value.profiles.add("profile-c");
+    value.store.ensureProfile("profile-c");
+    assert.equal(value.store.list("profile-c").items[0].enabled, true);
+
+    value.store.close();
+    value.store.open(["profile-a", "profile-b", "profile-c"]);
+    assert.equal(value.store.list("profile-c").items[0].globalEnabled, true);
+    assert.equal(value.store.list("profile-c").items[0].enabled, true);
+
+    value.store.installGlobalFromDirectory({
+      sourcePath: packageDir(value.root, { name: "shared-fetch", version: "1.1.0" }),
+      expectedRevision: value.store.revision,
+      operationId: "upgrade-shared-fetch-global",
+      profileIds: ["profile-a", "profile-b", "profile-c"],
+    });
+    const versions = value.store.list("profile-a").items
+      .filter((item) => item.name === "shared-fetch")
+      .map(({ version, enabled, globalEnabled }) => ({ version, enabled, globalEnabled }));
+    assert.deepEqual(versions, [
+      { version: "1.0.0", enabled: false, globalEnabled: false },
+      { version: "1.1.0", enabled: true, globalEnabled: true },
+    ]);
+
+    const localOnly = packageDir(value.root, { name: "local-only" });
+    value.store.installFromDirectory({
+      sourcePath: localOnly,
+      expectedRevision: value.store.revision,
+      operationId: "install-local-only",
+    });
+    value.profiles.add("profile-d");
+    value.store.ensureProfile("profile-d");
+    const byName = new Map(value.store.list("profile-d").items.map((item) => [item.name, item]));
+    assert.equal(byName.get("shared-fetch").enabled, true);
+    assert.equal(byName.get("shared-fetch").version, "1.1.0");
+    assert.equal(byName.get("local-only").enabled, false);
+  } finally { value.cleanup(); }
+});
+
+test("旧版 Skill registry 原子迁移为非全局，不会意外启用已有包", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    value.store.installFromDirectory({
+      sourcePath: packageDir(value.root, { name: "legacy-local" }),
+      expectedRevision: value.store.revision,
+      operationId: "install-legacy-local",
+    });
+    value.store.close();
+    const legacy = JSON.parse(fs.readFileSync(value.paths.skillRegistryPath, "utf8"));
+    legacy.schemaVersion = 1;
+    legacy.packages = legacy.packages.map(({ globalEnabled, ...record }) => record);
+    fs.writeFileSync(value.paths.skillRegistryPath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+    value.store.open(["profile-a"]);
+    const migrated = JSON.parse(fs.readFileSync(value.paths.skillRegistryPath, "utf8"));
+    assert.equal(migrated.schemaVersion, 2);
+    assert.equal(migrated.packages[0].globalEnabled, false);
+    assert.equal(value.store.list("profile-a").items[0].enabled, false);
+  } finally { value.cleanup(); }
+});
+
 (async () => {
   for (const { name, fn } of tests) {
     await fn();

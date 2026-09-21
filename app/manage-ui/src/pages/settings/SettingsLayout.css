@@ -1,39 +1,38 @@
-.management-page.settings-page .settings-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  max-width: 960px;
-  margin-bottom: 16px;
-  padding-block: 12px;
-  background: var(--ui-canvas);
-}
-
-.management-page.settings-page .settings-save-state {
-  color: var(--settings-muted-surface-1);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.management-page.settings-page .settings-category,
-.management-page.settings-page .settings-preferences {
+.management-page.settings-page .settings-group,
+.management-page.settings-page .settings-preferences-main {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  gap: 32px;
+  gap: 24px;
 }
 
-.management-page.settings-page .settings-category[hidden] {
-  display: none;
+.management-page.settings-page .settings-preferences,
+.management-page.settings-page .settings-connection-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: 24px;
 }
 
-/* Keep drafts, diagnostics and authentication mounted when switching categories. */
+.management-page.settings-page .settings-connection-tools {
+  align-items: start;
+}
+
+.management-page.settings-page #settings-notif > .settings-card {
+  flex: 1;
+}
+
+.management-page.settings-page #settings-desktop-printer,
+.management-page.settings-page #settings-desktop-printer > .settings-card {
+  flex: 1;
+}
+
+.management-page.settings-page #settings-desktop-printer > .settings-card {
+  justify-content: space-between;
+}
+
 .management-page.settings-page .settings-stack {
-  gap: 0;
+  gap: 24px;
 }
 
 .management-page.settings-page .settings-preferences .settings-prefs-row {
@@ -45,7 +44,7 @@
 
 .management-page.settings-page .settings-preferences .settings-prefs-row > .field {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(160px, 240px);
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);
   align-items: center;
   gap: 4px 24px;
 }
@@ -67,7 +66,9 @@
 }
 
 .management-page.settings-page .settings-preferences .settings-switch-list {
-  gap: 24px;
+  flex: 1;
+  gap: 0;
+  justify-content: space-between;
   border: 0;
   border-radius: 0;
   background: none;
@@ -75,9 +76,18 @@
 }
 
 .management-page.settings-page .settings-preferences .settings-switch-row {
-  min-height: 44px;
-  padding: 0;
-  border: 0;
+  min-height: 72px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--ui-hairline);
+}
+
+.management-page.settings-page .settings-preferences .settings-switch-row:first-child {
+  padding-top: 0;
+}
+
+.management-page.settings-page .settings-preferences .settings-switch-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .management-page.settings-page .settings-notification-copy {
@@ -86,25 +96,67 @@
   gap: 4px;
 }
 
+.management-page.settings-page .settings-notification-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding-top: 20px;
+  margin-top: 4px;
+  border-top: 1px solid var(--ui-hairline);
+}
+
+.management-page.settings-page .settings-notification-footer .ui-hint {
+  flex: 1 1 200px;
+  margin: 0;
+}
+
+.management-page.settings-page .settings-notification-footer button {
+  flex-shrink: 0;
+}
+
+/* Infrequent developer tools stay collapsed until needed. */
+.management-page.settings-page .settings-advanced {
+  min-width: 0;
+  border-top: 1px solid var(--ui-hairline);
+}
+
+.management-page.settings-page .settings-advanced-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 4px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.management-page.settings-page .settings-advanced-summary::-webkit-details-marker { display: none; }
+.management-page.settings-page .settings-advanced-summary .settings-h { font-size: 14px; }
+.management-page.settings-page .settings-advanced-summary .settings-sech { font-size: 12px; }
+.management-page.settings-page .settings-advanced-summary > svg { color: var(--ui-text-2); }
+.management-page.settings-page .settings-advanced[open] > summary > svg { transform: rotate(180deg); }
+.management-page.settings-page .settings-advanced-summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; border-radius: 8px; }
+.management-page.settings-page .settings-advanced-summary:hover .settings-h { color: var(--ui-text-2); }
+
 .management-page.settings-page .settings-notification-copy small {
   color: var(--settings-muted-surface-1);
   font-size: 12px;
   line-height: 18px;
   font-weight: 300;
 }
-
-.management-page.settings-page .settings-savebar-text {
-  flex: 1 1 240px;
-}
-
 .management-page.settings-page .settings-themes input:focus-visible {
   outline: none;
   box-shadow: none;
 }
 
-@media (max-width: 540px) {
-  .management-page.settings-page .settings-toolbar [role="tablist"] { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
-  .management-page.settings-page .settings-toolbar [role="tab"] { flex-shrink: 0; padding-inline: 10px; font-size: 14px; white-space: nowrap; }
+/* Container width excludes the app rail and the shared management-page gutters. */
+@container settings (max-width: 540px) {
+  .management-page.settings-page > .page-head { gap: 16px; }
+  .management-page.settings-page .page-head-actions { width: 100%; justify-content: space-between; }
   .management-page.settings-page .settings-preferences .settings-prefs-row > .field { display: flex; gap: 8px; align-items: stretch; }
-  .management-page.settings-page .settings-savebar { border-radius: 24px; }
+  .management-page.settings-page .settings-notification-footer { align-items: flex-start; }
+  .management-page.settings-page .settings-advanced-summary { gap: 10px; }
+  .management-page.settings-page .settings-shortcut-row { gap: 12px; }
+  .management-page.settings-page .settings-shortcut-row > span { flex-basis: 100%; }
 }

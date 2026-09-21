@@ -8,6 +8,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { createStopImpact, validStopImpact, MAX_STOP_IMPACT_RUNS } = require("../app/agent-service/stop-impact");
 const { createProductHostController } = require("../app/product-host-controller");
+const { createDesktopBackendStopAction } = require("../app/desktop-backend-stop");
 const { createAgentService, PROTOCOL_VERSION } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { requestService, readClientToken } = require("../app/agent-service/client");
@@ -113,6 +114,77 @@ test("a newer background intent supersedes an in-flight stop impact check", asyn
   release(initial);
   await assert.rejects(first, { code: "SHOGGOTH_STOP_IMPACT_CHANGED" });
   assert.equal(value.stops, 1);
+});
+
+function desktopStopFixture(value, respond = async () => ({ response: 1 }), locale = "zh-CN") {
+  const dialogs = [];
+  const stop = createDesktopBackendStopAction({ productHost: value.host, getLocale: () => locale,
+    dialog: { async showMessageBox(options) { dialogs.push(options); return respond(options); } } });
+  return { dialogs, stop };
+}
+
+test("tray stop reaches the shared service lifecycle directly when there are no active tasks", async () => {
+  const value = hostFixture(), desktop = desktopStopFixture(value);
+  assert.equal(await desktop.stop(), true);
+  assert.equal(value.stops, 1); assert.equal(value.loaded, false);
+  assert.equal(desktop.dialogs.length, 0);
+});
+
+test("tray stop shows affected tasks, respects cancel and merges duplicate clicks", async () => {
+  const value = hostFixture(); value.runs = [run("working", "running"), run("approval", "waiting_approval")];
+  let answer;
+  const desktop = desktopStopFixture(value, () => new Promise(resolve => { answer = resolve; }));
+  const canceled = desktop.stop();
+  assert.equal(desktop.stop(), canceled, "one confirmation per pending stop");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(desktop.dialogs[0].message, /2 个活动任务/);
+  assert.match(desktop.dialogs[0].detail, /Task approval · Grok/);
+  assert.equal(desktop.dialogs[0].cancelId, 0);
+  answer({ response: 0 }); assert.equal(await canceled, false); assert.equal(value.stops, 0);
+  const approved = desktop.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  answer({ response: 1 }); assert.equal(await approved, true); assert.equal(value.stops, 1);
+});
+
+test("tray stop cannot interrupt tasks that appeared while the user was reviewing", async () => {
+  const value = hostFixture(); value.runs = [run("first", "running")];
+  const desktop = desktopStopFixture(value, async options => {
+    if (options.type === "warning") value.runs.push(run("new", "starting"));
+    return { response: 1 };
+  });
+  assert.equal(await desktop.stop(), false); assert.equal(value.stops, 0);
+  assert.equal(desktop.dialogs[1].type, "error");
+  assert.match(desktop.dialogs[1].detail, /任务状态已变化/);
+});
+
+test("tray stop preserves unknown impact, but already-stopped service needs no confirmation", async () => {
+  const value = hostFixture(); value.unavailable = true;
+  const desktop = desktopStopFixture(value, undefined, "en");
+  assert.equal(await desktop.stop(), true); assert.equal(value.stops, 1);
+  assert.match(desktop.dialogs[0].message, /Task status is unavailable/);
+  assert.equal(await desktop.stop(), true); assert.equal(value.stops, 1);
+  assert.equal(desktop.dialogs.length, 1);
+});
+
+test("tray stop reports failure without leaking errors and can be retried", async () => {
+  const value = hostFixture();
+  const originalStop = value.host.stopBackground;
+  value.host.stopBackground = async () => { throw Error("private diagnostic detail"); };
+  const desktop = desktopStopFixture(value);
+  assert.equal(await desktop.stop(), false); assert.equal(value.stops, 0);
+  assert.equal(desktop.dialogs[0].type, "error");
+  assert.doesNotMatch(JSON.stringify(desktop.dialogs), /private diagnostic detail/);
+  value.host.stopBackground = originalStop;
+  assert.equal(await desktop.stop(), true); assert.equal(value.stops, 1);
+});
+
+test("tray stop accepts a late confirmed shutdown but rejects a still-enabled launch agent", async () => {
+  const value = hostFixture(), desktop = desktopStopFixture(value);
+  value.host.stopBackground = async () => { value.loaded = false; throw Error("response timed out"); };
+  assert.equal(await desktop.stop(), true); assert.equal(desktop.dialogs.length, 0);
+  value.host.stopBackground = async () => ({ background: { supported: true, enabled: true, loaded: false } });
+  value.host.getStatus = async () => ({ background: { supported: true, enabled: true, loaded: false } });
+  assert.equal(await desktop.stop(), false); assert.equal(desktop.dialogs[0].type, "error");
 });
 
 test("real private Service endpoint is read-only, validates params and changes generation on restart", async t => {

@@ -10,6 +10,37 @@ const { validateChatServiceResult, mapChatServiceError } = require("../app/agent
 const { fixture, until } = require("./fixtures/inspiration-coordinator-fixture.cjs");
 const id = () => crypto.randomUUID();
 
+test('灵感聊天额度耗尽立即落为可见失败，历史保留且恢复后不会重放旧消息', async (t) => {
+  const f = await fixture(t, { accountAdmission: true });
+  const idea = await f.start(await f.create('中国科技新闻'));
+  const first = await f.running(idea);
+  f.accountAdmission.noteRateLimitBackoff({ runtimeAccountId: f.profile.runtimeAccountId,
+    generation: 1, retryAt: Date.now() + 4 * 86400000, errorCode: 'RUNTIME_QUOTA_EXHAUSTED' });
+  f.host.complete(first, '上一条已完成');
+  await until(() => f.dispatcher.getRun(first.id).status === 'completed');
+  const input = { sessionKey: idea.latestExecution.sessionKey, operationId: id(), prompt: '中国科技新闻' };
+  const ack = f.service.sendFromSession(input);
+  validateChatServiceResult('chat.send', ack);
+  await until(() => f.dispatcher.getRun(ack.run.id).status === 'failed');
+  await f.coordinator.waitForIdle(ack.run.id);
+  assert.equal(f.dispatcher.getRun(ack.run.id).errorCode, 'RUNTIME_QUOTA_EXHAUSTED');
+  assert.equal(f.coordinator.getRunSnapshot(ack.run.id).queue, undefined);
+  assert.equal((await f.call('get', { id: idea.id })).idea.latestExecution.status, 'failed');
+  const session = f.sessions.getSession(input.sessionKey);
+  const terminal = f.transcript.listEvents(f.profile.id, session.id)
+    .find(event => event.runId === ack.run.id && event.kind === 'error');
+  assert.equal(terminal.content.errorCode, 'RUNTIME_QUOTA_EXHAUSTED');
+  f.accountAdmission.noteRateLimitBackoff({ runtimeAccountId: f.profile.runtimeAccountId,
+    generation: 1, retryAt: 0 });
+  const replay = f.service.sendFromSession(input);
+  validateChatServiceResult('chat.send', replay);
+  assert.equal(replay.run.status, 'failed');
+  assert.equal(f.host.turnStarts, 1);
+  await f.restart();
+  assert.equal(f.dispatcher.getRun(ack.run.id).status, 'failed');
+  assert.equal(f.host.turnStarts, 1);
+});
+
 test('Agent 次数按完整执行历史统计，重放不重复计数，重试和删除后的历史仍保留', async (t) => {
   const f = await fixture(t);
   const native = { backendId: f.profile.backendId, agentId: f.profile.agentId };

@@ -191,6 +191,10 @@
   font-size: 0.66rem;
   opacity: 0.72;
 }
+.chipPrimary:disabled {
+  opacity: 1;
+  cursor: help;
+}
 .manualRow {
   display: flex;
   align-items: center;
@@ -213,58 +217,6 @@
   padding-left: 1.1rem;
   color: var(--ui-text-2);
   font-size: 0.74rem;
-}
-
-.keyInputRow {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-}
-
-.keyInputRow input {
-  flex: 1;
-  min-width: 0;
-}
-
-.keyPreview {
-  display: block;
-  margin-top: 0.35rem;
-  padding: 0.45rem 0.6rem;
-  border-radius: 8px;
-  background: var(--ui-surface-2);
-  color: var(--ui-text-2);
-  font-size: 0.72rem;
-  overflow-wrap: anywhere;
-}
-
-.advancedBlock {
-  margin-top: 0.85rem;
-}
-
-.advancedToggle {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--ui-text-2);
-  font: inherit;
-  font-size: 0.76rem;
-  cursor: pointer;
-}
-
-.advancedToggle::before {
-  content: "›";
-  display: inline-block;
-  margin-right: 0.35rem;
-  transform: rotate(0deg);
-}
-
-.advancedToggle[aria-expanded="true"]::before {
-  transform: rotate(90deg);
-}
-
-.advancedBlock > label {
-  margin-top: 0.55rem;
-  max-width: 320px;
 }
 
 .recoveryBox {

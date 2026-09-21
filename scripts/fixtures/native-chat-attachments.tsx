@@ -5,6 +5,7 @@ import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
 import i18n from "../../app/manage-ui/src/i18n";
+import { putFiles, getFiles } from "../../app/manage-ui/src/lib/imageCache";
 import "../../app/manage-ui/src/styles.css";
 
 // Real composer and history; all transports stay in this isolated fixture.
@@ -23,6 +24,9 @@ let history: any[] = [
   { id: "failed", role: "assistant", content: "", stopReason: "error", errorMessage: "测试用失败，可重试附件" },
 ];
 const sent: any[] = [], slash: string[] = [];
+const attachmentOpens: { name: string; content: string }[] = [];
+let failAttachmentOpen = false;
+const originalFetch = window.fetch.bind(window);
 localStorage.clear();
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
 localStorage.setItem("shoggoth.chat.lastActive.v1", key);
@@ -69,6 +73,14 @@ class FixtureSocket {
 state.WebSocket = FixtureSocket;
 state.fetch = async (url: unknown, init?: RequestInit) => {
   const pathname = String(url);
+  if (pathname.startsWith("data:")) return originalFetch(pathname);
+  if (pathname.startsWith("/__api/inspirations/media?")) return new Response("%PDF-1.7\nfixture");
+  if (pathname.startsWith("/__api/host/open-attachment?")) {
+    attachmentOpens.push({ name: new URL(pathname, "http://fixture").searchParams.get("name")!, content: await (init!.body as Blob).text() });
+    return new Response(JSON.stringify(failAttachmentOpen ? { error: "File opener failed" } : { ok: true }), {
+      status: failAttachmentOpen ? 500 : 200, headers: { "Content-Type": "application/json" },
+    });
+  }
   if (pathname.includes("/slash/exec")) slash.push(String(init?.body));
   const payload = pathname.includes("/chat/capabilities") ? { attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
     slash: true, maxPromptBytes: 61440, maxAttachments: 8, maxAttachmentBytes: 52428800 }
@@ -84,8 +96,8 @@ const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwM
 const pdf = btoa("%PDF-1.7\nfixture");
 state.openclawDesktop = { readClipboardFiles: async () => [{ fileName: "Finder 文件.pdf", mimeType: "application/pdf", content: pdf }] };
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-const wait = async (predicate: () => unknown, label: string) => {
-  const deadline = Date.now() + 7000;
+const wait = async (predicate: () => unknown, label: string, timeoutMs = 7000) => {
+  const deadline = Date.now() + timeoutMs;
   while (!predicate()) { if (Date.now() > deadline) throw Error(`Timeout: ${label}`); await pause(20); }
 };
 const check = (value: unknown, label: string) => { if (!value) throw Error(label); };
@@ -94,13 +106,16 @@ const setInput = async (text: string) => {
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input(), text);
   input().dispatchEvent(new Event("input", { bubbles: true })); await pause(40);
 };
-const paste = (withFiles: boolean) => {
+const paste = (withFiles: boolean, text = "") => {
   const data = new DataTransfer();
+  if (text) data.setData("text/plain", text);
   if (withFiles) {
     data.items.add(new File([Uint8Array.from(atob(png), c => c.charCodeAt(0))], "中文 图片.png", { type: "image/png" }));
     data.items.add(new File(["%PDF-1.7\nfixture"], "需求文档.pdf", { type: "application/pdf" }));
   }
-  input().dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  const event = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+  input().dispatchEvent(event);
+  return event;
 };
 const pending = () => document.querySelectorAll(".chat-att-row--pending .chat-att-chip").length;
 const submit = async (count: number) => {
@@ -108,8 +123,89 @@ const submit = async (count: number) => {
   await wait(() => sent.length === count, "chat.send");
   await wait(() => !document.querySelector(".chat-stop"), "turn complete"); await pause(120);
 };
+const clipboardChecks = async () => {
+  await wait(() => !document.querySelector(".chat-toast"), "earlier notices expire", 8500);
+  const readFiles = state.openclawDesktop.readClipboardFiles;
+  const errorToast = () => document.querySelector<HTMLElement>(".chat-toast--error");
+  try {
+    state.openclawDesktop.readClipboardFiles = async () => [];
+    await setInput("保留草稿：");
+    check(!paste(false, "复制的文字 /Users/example/report.pdf").defaultPrevented, "plain text keeps native paste behavior");
+    // Synthetic paste events do not insert text, so model the browser's default edit.
+    await setInput("保留草稿：复制的文字 /Users/example/report.pdf");
+    check(!errorToast() && pending() === 0, "text paste creates no error or attachment");
+
+    state.openclawDesktop.readClipboardFiles = async () => { throw Error("测试用剪贴板读取失败"); };
+    paste(false);
+    await wait(() => errorToast(), "clipboard failure notice");
+    check(errorToast()?.getAttribute("role") === "alert", "errors announce an accessible alert");
+    check(input().value === "保留草稿：复制的文字 /Users/example/report.pdf", "clipboard failure preserves the draft");
+    const close = document.querySelector<HTMLButtonElement>(".chat-toast__dismiss")!;
+    check(close.getAttribute("aria-label") === i18n.t("common.close"), "error close button has an accessible label");
+    check(getComputedStyle(close).pointerEvents === "auto", "error close button accepts pointer input");
+    close.click();
+    await wait(() => !errorToast(), "manual error dismissal");
+
+    paste(false);
+    await wait(() => errorToast(), "first timed error");
+    await pause(3700);
+    paste(false);
+    await pause(3600);
+    check(errorToast(), "an earlier error timer must not dismiss an identical newer error");
+    await wait(() => !errorToast(), "clipboard error automatically expires", 4500);
+
+    let rejectRead!: (error: Error) => void;
+    state.openclawDesktop.readClipboardFiles = () => new Promise((_resolve, reject) => { rejectRead = reject; });
+    paste(false);
+    window.location.hash = "/chat?session=agent:shoggoth-native:22222222-2222-4222-8222-222222222222";
+    await pause(80);
+    rejectRead(Error("另一个会话中已过期的剪贴板错误"));
+    await pause(80);
+    check(!errorToast(), "late clipboard failures must not appear in another conversation");
+    window.location.hash = `/chat?session=${encodeURIComponent(key)}`;
+    await pause(80);
+  } finally {
+    state.openclawDesktop.readClipboardFiles = readFiles;
+  }
+};
 state.runFixture = async () => {
   await wait(() => input() && document.querySelector(".chat-retrybtn"), "native history");
+  const historyFile = document.querySelector<HTMLButtonElement>(".is-sent .chat-att-chip__open")!;
+  historyFile.click();
+  await wait(() => attachmentOpens.length === 1, "history attachment opens");
+  check(attachmentOpens[0].name === "需求文档.pdf" && attachmentOpens[0].content === "%PDF-1.7\nfixture", "history click opens the original bytes");
+  const fileData = new DataTransfer();
+  fileData.items.add(new File(["first content"], "11README.md", { type: "text/markdown" }));
+  fileData.items.add(new File(["second content"], "11README.md", { type: "text/markdown" }));
+  input().dispatchEvent(new ClipboardEvent("paste", { clipboardData: fileData, bubbles: true, cancelable: true }));
+  await wait(() => pending() === 2, "file drafts");
+  const fileButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-att-row--pending .chat-att-chip__open"));
+  const chip = fileButtons[0].parentElement!;
+  check(getComputedStyle(chip).borderRadius === "999px" && getComputedStyle(chip).backgroundColor === "rgba(0, 0, 0, 0)", "file chips are transparent capsules");
+  fileButtons[0].focus();
+  check(getComputedStyle(chip).backgroundColor === "rgba(0, 0, 0, 0.05)", "focused file has five percent black background");
+  fileButtons[0].click();
+  await wait(() => attachmentOpens.length === 2, "first draft opens");
+  fileButtons[1].click();
+  await wait(() => attachmentOpens.length === 3, "second draft opens");
+  check(attachmentOpens[1].content === "first content" && attachmentOpens[2].content === "second content", "same-name drafts open their own content");
+  failAttachmentOpen = true;
+  fileButtons[0].click();
+  await wait(() => document.querySelector(".chat-toast--error")?.textContent?.includes("File opener failed"), "failed open is visible");
+  failAttachmentOpen = false;
+  document.querySelector<HTMLButtonElement>(".chat-toast__dismiss")!.click();
+  const openCount = attachmentOpens.length;
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".chat-att-row--pending .chat-att-x")) button.click();
+  await wait(() => pending() === 0, "draft removal");
+  check(attachmentOpens.length === openCount, "remove never opens a file");
+  const repeatedTextKey = `files::fixture::${crypto.randomUUID()}`;
+  const firstFiles = [{ name: "same.md", kind: "file", src: "data:text/plain;base64,Zmlyc3Q=" }];
+  await putFiles(repeatedTextKey, firstFiles);
+  check((await getFiles(repeatedTextKey))?.[0].src === firstFiles[0].src, "unambiguous cached file retains its source");
+  await putFiles(repeatedTextKey, [{ ...firstFiles[0], src: "data:text/plain;base64,c2Vjb25k" }]);
+  check(await getFiles(repeatedTextKey) === undefined, "repeated message text must not open another attachment's bytes");
+  await putFiles(repeatedTextKey, firstFiles);
+  check(await getFiles(repeatedTextKey) === undefined, "ambiguous history cache stays unavailable");
   await wait(() => document.querySelector(".chat-pill--think"), "native thinking options");
   const thinking = document.querySelector<HTMLButtonElement>(".chat-pill--think")!;
   const inheritedThinking = i18n.t("chat.thinkingInherited", { level: i18n.t("chat.thinkLevel.medium") });
@@ -151,12 +247,13 @@ state.runFixture = async () => {
   await wait(() => !document.querySelector(".chat-stop"), "upload retry complete"); await pause(120);
   paste(false); await wait(() => pending() === 1, "Finder bridge paste"); await submit(5);
   check(sent[4].attachments[0].fileName === "Finder 文件.pdf", "Finder filename survives");
+  await clipboardChecks();
   await setInput("中".repeat(22000));
   document.querySelector<HTMLButtonElement>(".chat-send:not(.chat-stop)")!.click(); await pause(100);
   check(sent.length === 5 && input().value.length === 22000, "oversized UTF-8 text must retain draft without sending");
   await setInput("请结合图片和 PDF，帮我分析需求。"); paste(true);
   await wait(() => pending() === 2, "preview draft");
-  return { passed: true, checks: ["native thinking options and reset", "fast settings and failure state", "history image/PDF retry", "absolute path routing", "mixed file paste", "failed-upload retry with original bytes", "Finder clipboard bridge", "UTF-8 budget and draft retention"] };
+  return { passed: true, checks: ["native thinking options and reset", "fast settings and failure state", "history image/PDF retry", "absolute path routing", "mixed file paste", "failed-upload retry with original bytes", "Finder clipboard bridge", "plain text paste", "clipboard errors preserve drafts", "error dismissal and timer renewal", "late clipboard failure isolation", "UTF-8 budget and draft retention"] };
 };
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
 document.getElementById("run-checks")!.onclick = async () => {

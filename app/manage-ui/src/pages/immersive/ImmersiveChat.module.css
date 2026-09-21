@@ -112,11 +112,11 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 4px;
   overflow: hidden;
-  padding: 6px;
+  padding: 32px;
   border-radius: 16px;
   background: rgba(16, 20, 28, 0.82);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 0;
 }
 /* 类型筛选 Tab = 全站统一的 FilterTabs。浮层是固定暗玻璃（不随主题），所以把组件
    用到的两个语义 token 就地翻成「白胶囊 + 深字」，比逐条覆盖 --ft-* 更少。 */
@@ -165,7 +165,7 @@
 .pickerItem {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  flex-shrink: 0;
   padding: 8px 12px;
   border-radius: 10px;
   border: none;
@@ -192,21 +192,13 @@
 .pickerItemActive {
   background: rgba(255, 255, 255, 0.14);
 }
-/* 名字与 key 尾段都单行省略：浮层现在是定宽的，subagent:workboard-<uuid> 这类
-   长尾段不省略会把行撑成三行。 */
+/* 会话标题单行省略，时间保持可见。 */
 .pickerName {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 14px;
-}
-.pickerSub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.5);
 }
 
 /* ── 右上角：工具（search/todo/cron/archive）+ 退出 ── */
@@ -430,6 +422,7 @@
   width: 18px;
   height: 18px;
 }
+.stop svg { width: 12px; height: 12px; }
 .send:disabled {
   opacity: 0.4;
   cursor: default;
@@ -891,14 +884,34 @@
   max-width: 240px;
   padding: 6px 12px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
+  background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: rgba(255, 255, 255, 0.85);
+  font: inherit;
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
+.attChip:hover, .attChip:focus-visible { background: rgba(0, 0, 0, 0.05); }
+.attChip:focus-visible { outline: none; }
+.attName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pendFile {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 260px;
+  border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 999px; background: transparent;
+}
+.pendFile:hover, .pendFile:focus-within { background: rgba(0, 0, 0, 0.05); }
+.pendFile .attChip { min-width: 0; max-width: 100%; padding-right: 0; border: 0; background: transparent; }
+.pendFile .pendX {
+  position: static; inset: auto; display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 24px; width: 24px; height: 24px; margin-right: 4px;
+  background: transparent; color: #fff; font-size: 14px; line-height: 1;
+}
+.pendFile .pendX > span { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; }
+.pendFile .pendX:focus-visible { outline: none; }
+.pendFile .pendX:hover, .pendFile .pendX:focus-visible { background: rgba(0, 0, 0, 0.05); }
+.pendFile:has(.pendX:hover, .pendX:focus-visible) { background: transparent; }
 
 /* ── 分隔线（封存边界 / 模型切换提示行）── */
 .divider {
@@ -1204,7 +1217,7 @@
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
-.pendChip img {
+.pendChip img, .pendChip video {
   width: 100%;
   height: 100%;
   object-fit: cover;

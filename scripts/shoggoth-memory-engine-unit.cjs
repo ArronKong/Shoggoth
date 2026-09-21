@@ -13,13 +13,10 @@ try {
   assert.match(value.definitions.get("profile-1").documents.USER, /用户偏好中文交流/u);
   assert.match(value.definitions.readGeneratedView("profile-1", "MEMORY").content, /用户偏好中文交流/u);
 
-  const inferred = value.engine.propose({
+  assert.throws(() => value.engine.propose({
     profileId: "profile-1", scope: "agent", type: "semantic",
     content: "用户可能喜欢深色主题", sourceRefs: ["transcript-2"], classification: "inferred",
-  });
-  assert.equal(inferred.status, "candidate");
-  const confirmed = value.engine.confirm({ profileId: "profile-1", id: inferred.id });
-  assert.equal(confirmed.status, "active");
+  }), (error) => error.code === "MEMORY_INVALID");
 
   const replacement = value.engine.propose({
     profileId: "profile-1", scope: "user", type: "semantic",
@@ -50,6 +47,6 @@ try {
   value.store.open();
   value.engine.open(["profile-1"]);
   assert.deepEqual(value.store.exportProfile("profile-1"), beforeRestart);
-  console.log("ok - candidate/active/superseded/deleted、来源、视图与重启恢复");
+  console.log("ok - 直接 active、superseded/deleted、来源、视图与重启恢复");
   console.log("1 memory engine unit suite passed");
 } finally { value.cleanup(); }

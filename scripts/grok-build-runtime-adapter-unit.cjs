@@ -2696,3 +2696,29 @@ test("unknown client fs/terminal reverse requests are denied by default", async 
     child.closeProcess();
   }
 });
+
+
+test("completed Grok prompts publish authoritative consumed tokens and reported USD before completion", async () => {
+  const calls = [];
+  const fixture = fixtureOptions(standardServer(message => message.method === "session/prompt" ? rpcResult({ stopReason: "end_turn" }) : undefined), { hostOptions: { readUsage: async input => {
+    calls.push(input);
+    return [{ responseId: "grok-reported-turn", createdAt: input.untilMs, model: "grok-4.6-build", provider: "xai", costUsd: 0.125,
+      usage: { totalTokens: 100, inputTokens: 80, outputTokens: 20, cachedInputTokens: 30, cacheWriteInputTokens: 0, reasoningOutputTokens: 5 } }];
+  } } });
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    const events = [];
+    runtime.host.subscribe(event => events.push(event));
+    await runtime.turnStart({ sessionId: "session-1", operationId: "metered-prompt", prompt: "Meter me" });
+    await waitFor(() => events.some(event => event.type === "complete"), "metered completion");
+    const usage = events.find(event => event.type === "usage");
+    assert.equal(usage.usage.totalTokens, 100);
+    assert.equal(usage.costUsd, 0.125);
+    assert.equal(usage.sessionId, "session-1");
+    assert.ok(events.indexOf(usage) < events.findIndex(event => event.type === "complete"));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].env.SECRET_TOKEN, undefined);
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});

@@ -47,6 +47,8 @@ const HERMES_SKILL_VIEW_TOOL = "skill_view";
 const { AgentBackend, dirCreatedAtMs, sortAgentsByCreatedAt } = require("./agent-backend");
 const { SelfUpdater } = require("./self-updater");
 const { readHermesUsageHistory } = require("./hermes-usage-history");
+const { estimateUsageCost } = require("./usage-cost");
+const { readHermesCronHistory } = require("./hermes-cron-history");
 
 const DEFAULT_PORT = 9119;
 const HERMES_CATALOG_UNAVAILABLE_CODE = "ERR_HERMES_CATALOG_UNAVAILABLE";
@@ -954,6 +956,7 @@ function rowFromSession(session, agentId) {
     backendId: "hermes",
     agentId,
     kind: session.source === "cron" ? "cron" : "direct",
+    ...(typeof session.source === "string" ? { source: session.source } : {}),
     label: displayName,
     displayName,
     subject: preview ? preview.slice(0, 200) : undefined,
@@ -4744,8 +4747,9 @@ class HermesBackend extends AgentBackend {
   _usageParts(row) {
     return {
       inputTokens: Number(row?.input_tokens) || 0,
-      outputTokens: Number(row?.output_tokens) || 0,
+      outputTokens: Math.max(0, (Number(row?.output_tokens) || 0) - (Number(row?.reasoning_tokens) || 0)),
       cacheReadTokens: Number(row?.cache_read_tokens) || 0,
+      cacheWriteTokens: Number(row?.cache_write_tokens) || 0,
       reasoningTokens: Number(row?.reasoning_tokens) || 0,
     };
   }
@@ -4753,7 +4757,24 @@ class HermesBackend extends AgentBackend {
   // Hermes analytics 会把缺失的 actual_cost 聚合成数值 0；此时 `??` 不会回退，
   // 导致已有 estimated_cost 的模型仍显示 $0。统一按“非零实际值优先，否则估算值”
   // 选择，并兼容 analytics 行与 session 行的两套字段名。
+  _usageCostInfo(row) {
+    const count = Number(row?.entry_count) || 1;
+    const parts = this._usageParts(row);
+    if (row?.cost_quality === "missing" || (row?.cost_quality === "estimated" && Number(row.resolved_cost) === 0
+      && Object.values(parts).some(value => value > 0))) {
+      const cost = estimateUsageCost(row.model, parts);
+      return { cost: cost ?? 0, missing: cost === null ? count : 0, estimated: cost === null ? 0 : count };
+    }
+    const cost = this._usageCost(row);
+    const hasTokens = Object.values(parts).some(value => value > 0);
+    const estimated = row?.cost_quality === "estimated"
+      || (!row?.cost_quality && !(Number(row?.actual_cost ?? row?.actual_cost_usd) > 0) && cost > 0);
+    return { cost, missing: !row?.cost_quality && hasTokens && cost === 0 ? count : 0, estimated: estimated ? count : 0 };
+  }
+
   _usageCost(row) {
+    if (row?.cost_quality === "missing" || (row?.cost_quality === "estimated" && Number(row.resolved_cost) === 0))
+      return estimateUsageCost(row.model, this._usageParts(row)) ?? 0;
     // Local full-history SQL resolves actual-vs-estimated per session before
     // aggregation. Honor its explicit zero as well as mixed paid/estimated rows.
     if (row?.resolved_cost != null && Number.isFinite(Number(row.resolved_cost))) return Number(row.resolved_cost);
@@ -4768,6 +4789,7 @@ class HermesBackend extends AgentBackend {
     target.inputTokens = (Number(target.inputTokens) || 0) + parts.inputTokens;
     target.outputTokens = (Number(target.outputTokens) || 0) + parts.outputTokens;
     target.cacheReadTokens = (Number(target.cacheReadTokens) || 0) + parts.cacheReadTokens;
+    target.cacheWriteTokens = (Number(target.cacheWriteTokens) || 0) + (parts.cacheWriteTokens || 0);
     target.reasoningTokens = (Number(target.reasoningTokens) || 0) + parts.reasoningTokens;
   }
 
@@ -4775,8 +4797,8 @@ class HermesBackend extends AgentBackend {
   // points + per-model/profile totals. Snake_case fields are the Hermes contract.
   // Hermes analytics 端点只认 days 整数（trailing 窗口 now - days*86400），不认
   // range 字符串——旧代码传 ?range= 一直被忽略、恒为默认 30 天，此处一并修正。
-  // "today" 取最近 24 小时（端点无自然日概念，见 agent-backend 契约说明）；
-  // "all" 只读本地权威数据库；远端无全历史接口时明确不可用。
+  // 本地各窗口均只读完整数据库，并按本地自然日筛选。远端仅有 trailing
+  // 窗口，明确标记 partial；无全历史接口时标记 unavailable。
   _usageRangeDays(range) {
     switch (range) {
       case "today":
@@ -4796,15 +4818,16 @@ class HermesBackend extends AgentBackend {
     }
   }
 
-  async _fetchLifetimeUsage(profile) {
+  async _fetchLifetimeUsage(profile, range = "all") {
     if (this._getConfig().hermesMode === "remote") throw new Error("Hermes remote lifetime usage is unavailable");
     this._usageHistoryPending ||= new Map();
-    if (!this._usageHistoryPending.has(profile)) {
-      const pending = readHermesUsageHistory(path.join(hermesHomeForProfile(profile), "state.db"))
-        .finally(() => this._usageHistoryPending.delete(profile));
-      this._usageHistoryPending.set(profile, pending);
+    const key = `${profile}:${range}`;
+    if (!this._usageHistoryPending.has(key)) {
+      const pending = readHermesUsageHistory(path.join(hermesHomeForProfile(profile), "state.db"), { range })
+        .finally(() => this._usageHistoryPending.delete(key));
+      this._usageHistoryPending.set(key, pending);
     }
-    return this._usageHistoryPending.get(profile);
+    return this._usageHistoryPending.get(key);
   }
 
   async _fetchUsageAnalytics(range) {
@@ -4812,20 +4835,25 @@ class HermesBackend extends AgentBackend {
     const byModel = new Map();
     const bySource = new Map();
     let failures = 0;
+    let approximate = false;
+    const local = this._getConfig().hermesMode !== "remote";
+    const profiles = local ? [...new Set(this.profileById.values())] : [...this.dashboards.keys()];
     const qs = `?days=${this._usageRangeDays(range)}`;
     await Promise.all(
-      [...this.dashboards.entries()].map(async ([profile, dash]) => {
+      profiles.map(async profile => {
+        const dash = this.dashboards.get(profile);
         const agentId = this._agentIdForRoutableProfile(profile);
         if (!agentId) return;
         try {
           let j;
-          if (range === "all") j = await this._fetchLifetimeUsage(profile);
+          if (local || range === "all") j = await this._fetchLifetimeUsage(profile, range);
           else {
             const { status, body } = await httpGet(`${dash.baseUrl}/api/analytics/usage${qs}`, { token: dash.token });
             if (status !== 200) throw new Error("Hermes usage unavailable");
             j = JSON.parse(body);
           }
           if (!Array.isArray(j?.daily)) throw new Error("Hermes usage response invalid");
+          if (j.overlapping_sessions > 0 || (!local && range !== "all")) approximate = true;
           const source =
             bySource.get(agentId) ||
             {
@@ -4841,9 +4869,11 @@ class HermesBackend extends AgentBackend {
             const date = String(d.day || d.date || "");
             if (!date) continue;
             const parts = this._usageParts(d);
-            const tok = parts.inputTokens + parts.outputTokens + parts.cacheReadTokens + parts.reasoningTokens;
-            const cost = this._usageCost(d);
-            const cur = daily.get(date) || { date, totalTokens: 0, totalCost: 0 };
+            const tok = Object.values(parts).reduce((sum, value) => sum + value, 0);
+            const { cost, missing, estimated } = this._usageCostInfo(d);
+            const cur = daily.get(date) || { date, totalTokens: 0, totalCost: 0, missingCostEntries: 0, estimatedCostEntries: 0 };
+            cur.missingCostEntries += missing;
+            cur.estimatedCostEntries += estimated;
             cur.totalTokens += tok;
             cur.totalCost += cost;
             this._addUsageParts(cur, parts);
@@ -4858,7 +4888,7 @@ class HermesBackend extends AgentBackend {
             const parts = this._usageParts(m);
             const tok =
               Number(m.total_tokens) ||
-              parts.inputTokens + parts.outputTokens + parts.cacheReadTokens + parts.reasoningTokens;
+              Object.values(parts).reduce((sum, value) => sum + value, 0);
             const cost = this._usageCost(m);
             const cur = byModel.get(name) || { model: name, provider: m.provider || undefined, totalTokens: 0, totalCost: 0 };
             cur.totalTokens += tok;
@@ -4871,7 +4901,7 @@ class HermesBackend extends AgentBackend {
         }
       }),
     );
-    return { daily, byModel, bySource, availability: !bySource.size ? "unavailable" : failures ? "partial" : "complete",
+    return { daily, byModel, bySource, availability: profiles.length && !bySource.size ? "unavailable" : failures || approximate ? "partial" : "complete",
       ...(range === "all" && this._getConfig().hermesMode === "remote" ? { availabilityReason: "unsupported-range" } : {}) };
   }
 
@@ -4883,15 +4913,12 @@ class HermesBackend extends AgentBackend {
       (acc, d) => {
         acc.totalTokens += Number(d.totalTokens) || 0;
         acc.totalCost += Number(d.totalCost) || 0;
-        this._addUsageParts(acc, this._usageParts({
-          input_tokens: d.inputTokens,
-          output_tokens: d.outputTokens,
-          cache_read_tokens: d.cacheReadTokens,
-          reasoning_tokens: d.reasoningTokens,
-        }));
+        this._addUsageParts(acc, d);
+        acc.missingCostEntries += d.missingCostEntries || 0;
+        acc.estimatedCostEntries += d.estimatedCostEntries || 0;
         return acc;
       },
-      { totalTokens: 0, totalCost: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0 },
+      { totalTokens: 0, totalCost: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, missingCostEntries: 0, estimatedCostEntries: 0 },
     );
     return {
       daily: rows,
@@ -4919,22 +4946,26 @@ class HermesBackend extends AgentBackend {
   // cron_complete/cli_close/session_reset）→ dailyActivity.errors 恒 0。
   async _fetchUsageExtras(range) {
     const days = this._usageRangeDays(range);
-    const cutoffSec = range === "all" ? 0 : Date.now() / 1000 - days * 86400;
+    const local = this._getConfig().hermesMode !== "remote";
+    const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - (days || 1) + 1);
+    const cutoffSec = range === "all" ? 0 : local ? start.getTime() / 1000 : Date.now() / 1000 - days * 86400;
+    const profiles = local ? [...new Set(this.profileById.values())] : [...this.dashboards.keys()];
     const toolAgg = new Map(); // name -> count
     const modelFull = new Map(); // model -> rank row（analytics/models 全分项）
     const dayAct = new Map(); // date -> {messages, toolCalls}
     const modelDay = new Map(); // `${date}|${model}` -> {date, model, tokens, cost}
     const top = [];
     await Promise.all(
-      [...this.dashboards.entries()].map(async ([profile, dash]) => {
+      profiles.map(async profile => {
+        const dash = this.dashboards.get(profile);
         const agentId = this._agentIdForRoutableProfile(profile);
         if (!agentId) return;
         const get = (path, timeoutMs = 6000) =>
           httpGet(`${dash.baseUrl}${path}`, { token: dash.token, timeoutMs })
             .then(({ status, body }) => (status === 200 ? JSON.parse(body) : null))
             .catch(() => null);
-        const lifetime = range === "all" ? await this._fetchLifetimeUsage(profile).catch(() => null) : null;
-        const [usage, models, sess] = range === "all" ? [lifetime, lifetime, lifetime] : await Promise.all([
+        const lifetime = local || range === "all" ? await this._fetchLifetimeUsage(profile, range).catch(() => null) : null;
+        const [usage, models, sess] = local || range === "all" ? [lifetime, lifetime, lifetime] : await Promise.all([
           get(`/api/analytics/usage?days=${days}`),
           get(`/api/analytics/models?days=${days}`),
           // 单页 1000 条覆盖当前量级（实测 total 两百级）;total 超出即截断,
@@ -4967,7 +4998,7 @@ class HermesBackend extends AgentBackend {
             { model: name, provider: m.provider || undefined, count: 0, totalTokens: 0, totalCost: 0 };
           this._addUsageParts(cur, parts);
           cur.totalTokens +=
-            parts.inputTokens + parts.outputTokens + parts.cacheReadTokens + parts.reasoningTokens;
+            Object.values(parts).reduce((sum, value) => sum + value, 0);
           cur.totalCost += this._usageCost(m);
           cur.count += Number(m.api_calls) || 0;
           if (!cur.provider && m.provider) cur.provider = m.provider;
@@ -4987,7 +5018,7 @@ class HermesBackend extends AgentBackend {
           const cacheR = Number(s.cache_read_tokens) || 0;
           const cacheW = Number(s.cache_write_tokens) || 0;
           const reason = Number(s.reasoning_tokens) || 0;
-          const tok = inTok + outTok + cacheR + cacheW + reason;
+          const tok = inTok + outTok + cacheR + cacheW;
           const cost = this._usageCost(s);
           const date = this._usageDayStr((startSec || lastSec) * 1000);
           if (inWindow) {
@@ -5047,6 +5078,7 @@ class HermesBackend extends AgentBackend {
           inputTokens: Number(row.inputTokens) || 0,
           outputTokens: Number(row.outputTokens) || 0,
           cacheReadTokens: Number(row.cacheReadTokens) || 0,
+          cacheWriteTokens: Number(row.cacheWriteTokens) || 0,
           reasoningTokens: Number(row.reasoningTokens) || 0,
         });
         return acc;
@@ -9024,22 +9056,42 @@ class HermesBackend extends AgentBackend {
     await Promise.all(Array.from({ length: Math.min(6, queue.length) }, worker));
   }
 
-  // Dashboard 活动流：真实 per-run 历史。GET /api/cron/jobs/{id}/runs 是
-  // v2026.6.19+ 才有的端点（旧版 404 或执行先于 session 创建而返回空行 →
-  // 退回 job 级 last-run 合成行并标 latestOnly）；limit 上限 100 且无 offset——这是每次请求的分页上限，
-  // 历史本身无限增长，整页 100 条且最旧仍在今天 → truncated。
-  // 行 = sessions 行：started_at/ended_at 为秒、无 status/output 字段 →
-  // 最新一条合并 job 级 last_status/last_error（否则比旧合成行丢状态）。
+  // 本地执行账本提供完整次数和结果；HTTP 会话仅补充转录入口。
+  // 旧版或远端无账本时兼容 /runs（最多 100 条）及 job 的 last-run，
+  // 并明确标记截断、仅最新执行或未知结果。
+  _readCronExecutionHistory(profile, sinceMs) {
+    return readHermesCronHistory(path.join(hermesHomeForProfile(profile), "cron", "executions.db"), sinceMs);
+  }
+
   async getRecentCronRuns({ sinceMs = 0, limit = 50 } = {}) {
-    let jobs;
+    let jobs = [];
+    let jobsUnavailable = false;
     try {
       jobs = await this.getCronJobs();
     } catch {
-      return { runs: [] };
+      jobsUnavailable = true;
     }
     const out = [];
     let latestOnly = false;
     let truncated = false;
+    let incomplete = false;
+    const ledgerProfiles = new Set();
+    if (this._getConfig().hermesMode !== "remote") {
+      await Promise.all([...new Set(this.profileById.values())].map(async profile => {
+        const agentId = this._agentIdForRoutableProfile(profile);
+        if (!agentId) return;
+        try {
+          const history = await this._readCronExecutionHistory(profile, sinceMs);
+          ledgerProfiles.add(profile);
+          truncated ||= history.truncated;
+          for (const entry of history.items) {
+            const jobId = `${agentId}:${entry.jobId}`;
+            const job = jobs.find(job => job.id === jobId);
+            out.push({ ...entry, backendId: this.id, agentId, jobId, jobName: job?.name, runId: entry.id });
+          }
+        } catch { /* Older Hermes versions use the session-backed HTTP fallback. */ }
+      }));
+    }
     const synthesizeFromJob = (job) => {
       if (!(typeof job?.lastRunAt === "number" && job.lastRunAt >= sinceMs)) return [];
       const latest = synthesizeHermesLastRun(job);
@@ -9055,8 +9107,9 @@ class HermesBackend extends AgentBackend {
     await Promise.all(
       (Array.isArray(jobs) ? jobs : []).map(async (job) => {
         const profile = this.profileById.get(job.agentId);
+        const hasLedger = ledgerProfiles.has(profile);
         const dash = profile ? this.dashboards.get(profile) : null;
-        if (!dash) return; // 找不到归属 dashboard 的 job 静默跳过
+        if (!dash) { if (!hasLedger) incomplete = true; return; }
         const unified = String(job.id || "");
         const localId = unified.includes(":") ? unified.slice(unified.indexOf(":") + 1) : unified;
         try {
@@ -9064,17 +9117,33 @@ class HermesBackend extends AgentBackend {
             `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(localId)}/runs?limit=100`,
             dash.token,
           );
+          if (hasLedger) {
+            // Preserve trajectory/assistant summaries without counting the
+            // session-backed rows again. Only link an unambiguous owned run.
+            if (status !== 200 || !Array.isArray(json?.runs)) return;
+            const ledger = out.filter(run => run.jobId === job.id);
+            const sessions = json.runs.map(normalizeHermesRunRow).filter(Boolean);
+            for (const session of sessions) {
+              const matches = ledger.filter(run => session.startedAt >= run.startedAt
+                && session.startedAt <= (run.finishedAt ?? Date.now()));
+              if (matches.length !== 1) continue;
+              const run = matches[0];
+              if (sessions.filter(candidate => candidate.startedAt >= run.startedAt
+                && candidate.startedAt <= (run.finishedAt ?? Date.now())).length === 1) run.sessionKey = session.sessionKey;
+            }
+            return;
+          }
           if (status === 404) {
             latestOnly = true;
             out.push(...synthesizeFromJob(job));
             return;
           }
-          if (status !== 200) return; // 单 job 失败静默（铁律 4）
+          if (status !== 200) { incomplete = true; return; } // 单 job 失败静默（铁律 4）
           const rows = Array.isArray(json?.runs) ? json.runs : [];
           const kept = [];
           for (const row of rows) {
             const base = normalizeHermesRunRow(row);
-            if (!base || base.startedAt < sinceMs) continue;
+            if (!base || (base.finishedAt ?? base.startedAt) < sinceMs) continue;
             kept.push({
               backendId: this.id,
               jobId: job.id,
@@ -9090,10 +9159,11 @@ class HermesBackend extends AgentBackend {
           if (synthesized) latestOnly = true;
           out.push(...kept);
         } catch {
-          /* 单 job 失败静默 */
+          if (!hasLedger) incomplete = true;
         }
       }),
     );
+    if (jobsUnavailable && [...new Set(this.profileById.values())].some(profile => !ledgerProfiles.has(profile))) incomplete = true;
     out.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
     const capped = Math.max(1, limit);
     if (out.length > capped) truncated = true;
@@ -9105,6 +9175,7 @@ class HermesBackend extends AgentBackend {
     const result = { runs: selected };
     if (truncated) result.truncated = true;
     if (latestOnly) result.latestOnly = true;
+    if (incomplete || selected.some(run => !["ok", "error", "running", "skipped"].includes(run.status))) result.reason = "unknown-outcome";
     return result;
   }
 

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getAgent, getAgentFile } from "../../api/client";
 import { usePageCache } from "../../lib/usePageCache";
+import { visibleAgentFiles } from "../../lib/agentFiles";
 import styles from "./ImmersivePanels.module.css";
 
 // 当前 agent 的档案面板（只读 v1）：getAgent 详情（名/emoji/模型/工作区/profile/
@@ -77,11 +78,11 @@ export default function ImmersiveProfilePanel({
           <span className={`${styles.kvValue} ${styles.mono}`}>{detail.workspace}</span>
         </div>
       )}
-      {(detail.files?.length ?? 0) > 0 && (
+      {visibleAgentFiles(detail.files).length > 0 && (
         <>
           <div className={styles.sectionTitle}>{t("chat.panelFiles")}</div>
           <div className={styles.list}>
-            {detail.files!.map((f) => (
+            {visibleAgentFiles(detail.files).map((f) => (
               <div key={f.name}>
                 <button
                   type="button"

@@ -1,4 +1,24 @@
-interface LinkedSessionRow { key: string }
+import { createAgentNameIndex, findAgentDisplayName, type AgentNameIndex } from "./agentDisplay";
+
+interface LinkedSessionRow { key: string; agentName?: string }
+
+/** Session keys use gateway routing ids, including the namespace of each backend. */
+export function applyChatSessionAgentNames<T extends LinkedSessionRow>(
+  rows: T[],
+  currentNames: AgentNameIndex,
+  previous: readonly T[] = [],
+): T[] {
+  const agentIdOf = (row: T) => row.key.split(":")[1] || row.key;
+  const knownNames = createAgentNameIndex([...previous, ...rows].map((row) => ({
+    id: agentIdOf(row), name: row.agentName,
+  })));
+  return rows.map((row) => {
+    const id = agentIdOf(row);
+    const name = findAgentDisplayName(currentNames, id)
+      || row.agentName || findAgentDisplayName(knownNames, id);
+    return name && name !== row.agentName ? { ...row, agentName: name } : row;
+  });
+}
 
 /** A metadata refresh is not proof that a pending link appeared in sessions.list. */
 export function mergeLinkedSessionRows<T extends LinkedSessionRow>(

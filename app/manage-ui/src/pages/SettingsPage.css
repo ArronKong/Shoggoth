@@ -13,15 +13,10 @@
   min-width: 0;
   max-width: 100%;
   color: var(--ui-text-1);
+  container: settings / inline-size;
 }
 
-/* 单列阅读布局：页头、分区和保存条共用 960px 内容宽。 */
-.management-page.settings-page > .page-head,
-.management-page.settings-page > .error,
-.management-page.settings-page .settings-stack,
-.management-page.settings-page .settings-savebar {
-  max-width: 960px;
-}
+/* 与其他管理页共用可用宽度和外层 gutter，分栏由实际内容宽度决定。 */
 
 .management-page.settings-page .settings-stack {
   display: flex;
@@ -81,33 +76,12 @@
   font-weight: 300;
 }
 
-/* 副标题里的「有未保存改动」。 */
+/* 页头副标题。 */
 .management-page.settings-page .settings-sub {
   display: inline-flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-}
-
-.management-page.settings-page .settings-dirty {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ui-warning) 14%, var(--ui-canvas));
-  color: var(--ui-warning);
-  font-size: 12px;
-  line-height: 18px;
-  letter-spacing: 0;
-}
-
-.management-page.settings-page .settings-dirty::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: currentColor;
 }
 
 /* 卡片表面上的辅助文字按 surface-1 重新计算对比度。 */
@@ -141,7 +115,7 @@
 .management-page.settings-page .status-card {
   min-width: 0;
   padding: 20px;
-  border: 1px solid var(--ui-hairline);
+  border: 0;
   border-radius: 24px;
   color: var(--ui-text-1);
   background: var(--ui-surface-1);
@@ -353,7 +327,7 @@
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--ui-hairline);
+  border: 0;
   border-radius: 10px;
   background: var(--ui-surface-2);
 }
@@ -491,7 +465,7 @@
   white-space: nowrap;
 }
 
-/* 表单卡与状态卡共用 surface / hairline / radius / shadow 语言。 */
+/* 表单卡与状态卡共用无描边的表面、圆角与阴影。 */
 .management-page.settings-page .settings-card {
   display: flex;
   flex-direction: column;
@@ -500,7 +474,7 @@
   min-width: 0;
   max-width: none;
   padding: 24px;
-  border: 1px solid var(--ui-hairline);
+  border: 0;
   border-radius: 24px;
   color: var(--ui-text-1);
   background: var(--ui-surface-1);
@@ -561,7 +535,7 @@
   gap: 12px;
   min-width: 0;
   padding: 16px;
-  border: 1px solid var(--ui-hairline);
+  border: 0;
   border-radius: 16px;
   color: var(--ui-text-1);
   background: var(--ui-surface-2);
@@ -806,64 +780,6 @@
   }
 }
 
-/* 粘性保存条：作为页面最后一个流内子元素 + sticky bottom，
-   在整段滚动过程中都吊在视口底部，滚到最后自然落位。只在 dirty 时渲染。 */
-.management-page.settings-page .settings-savebar {
-  position: sticky;
-  bottom: 16px;
-  z-index: 6;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 24px;
-  padding: 12px 12px 12px 20px;
-  border: 1px solid var(--ui-hairline);
-  border-radius: 32px;
-  /* 浮条压在同为 surface-1 的卡片上，深色下 token 阴影(8% 黑)不可见会糊成一体：
-     底色抬一档（与 rail 选中态同款「比 surface-1 亮」的做法）+ 阴影深色加重。
-     亮侧两个值都与原 token/surface-1 的亮值逐字节一致（写字面值是因为 light-dark
-     里嵌 var(--ui-surface-1) 会嵌套 light-dark，不赌解析），亮色零变化。 */
-  background: light-dark(#ffffff, #2c2c33);
-  box-shadow: 0 16px 32px -12px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.6));
-  animation: settingsSaveBarIn var(--ui-motion-popover) cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.management-page.settings-page .settings-savebar-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: color-mix(in srgb, var(--ui-text-1) 72%, var(--ui-surface-1));
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 300;
-}
-
-@keyframes settingsSaveBarIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (max-width: 720px) {
-  .management-page.settings-page .settings-savebar {
-    padding: 12px;
-  }
-
-  .management-page.settings-page .settings-savebar .ui-cbtn {
-    flex: 1 1 auto;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .management-page.settings-page .settings-savebar {
-    animation: none;
-  }
-}
 /* The global shortcut applies as soon as macOS accepts the new combination. */
 .settings-shortcut-row { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
 .settings-shortcut-row > span { margin-right: auto; }

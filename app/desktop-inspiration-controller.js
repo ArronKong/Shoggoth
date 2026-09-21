@@ -4,12 +4,15 @@ const path = require("node:path");
 const { DEFAULT_INSPIRATION_SHORTCUT, normalizeInspirationShortcut } = require("./desktop-inspiration-shortcut");
 
 const PREFIX = "shoggoth:desktop-inspiration:";
-const CHANNELS = Object.fromEntries(["preferences", "capture-shortcut", "set-shortcut", "ready", "dismiss", "interaction", "busy", "tray-target"]
+const CHANNELS = Object.fromEntries(["preferences", "capture-shortcut", "set-shortcut", "ready", "reveal", "conceal", "dismiss", "interaction", "busy", "tray-target"]
   .map(name => [name, PREFIX + name]));
 
 function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeImage, globalShortcut, screen, ipcMain,
-  configStore, getMainWindow, showMainWindow, getUiOrigin, getLocale, quit, iconPath }) {
+  configStore, getMainWindow, showMainWindow, getUiOrigin, getLocale, stopBackend, quit }) {
   let window = null, tray = null, disposed = false, busy = false, loaded = false, presenting = false;
+  let stoppingBackend = false;
+  let visibleRequested = false, presentationId = 0;
+  let hideTimer = null;
   let registered = null, captureTimer = null, captureOwner = null;
   const handles = [], listeners = [];
   const configured = () => normalizeInspirationShortcut(configStore.read().inspirationShortcut) || DEFAULT_INSPIRATION_SHORTCUT;
@@ -32,21 +35,33 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
       tray: icon?.width > 0 && icon?.height > 0 ? { x: icon.x + icon.width / 2 - bounds.x, y: icon.y + icon.height / 2 - bounds.y }
         : { x: monitor.x + monitor.width - 32 - bounds.x, y: monitor.y + 12 - bounds.y } };
   };
-  const hide = () => {
-    if (!window || window.isDestroyed() || busy) return;
+  const finishHide = id => {
+    if (disposed || !window || window.isDestroyed() || visibleRequested || id !== presentationId) return false;
+    clearTimeout(hideTimer); hideTimer = null;
     window.webContents.send(PREFIX + "hidden");
     window.hide();
     window.setIgnoreMouseEvents(true, { forward: true });
+    return true;
+  };
+  const hide = () => {
+    if (!window || window.isDestroyed() || busy || !visibleRequested) return;
+    visibleRequested = false;
+    const id = ++presentationId;
+    window.setIgnoreMouseEvents(true, { forward: true });
+    if (!loaded || !window.isVisible()) { finishHide(id); return; }
+    window.webContents.send(PREFIX + "hide", id);
+    // A stalled renderer must not leave an invisible, focused panel behind.
+    hideTimer = setTimeout(() => finishHide(id), 750);
   };
   const present = () => {
-    if (!window || window.isDestroyed() || !loaded || disposed) return;
+    if (!window || window.isDestroyed() || !loaded || disposed || !visibleRequested) return;
+    clearTimeout(hideTimer); hideTimer = null;
     window.setBounds(display().bounds);
     window.setAlwaysOnTop(true, "screen-saver");
     window.setIgnoreMouseEvents(true, { forward: true });
-    presenting = true;
-    try { window.showInactive(); window.focus(); }
-    finally { presenting = false; }
-    window.webContents.send(PREFIX + "show", geometry());
+    // The renderer prepares the off-screen machine and retracted paper before
+    // acknowledging this generation. Never expose its previous resting frame.
+    window.webContents.send(PREFIX + "show", { ...geometry(), presentationId: ++presentationId });
   };
   const createWindow = () => {
     const instance = new BrowserWindow({ ...display().bounds, title: "Shoggoth — Spark Notes", show: false,
@@ -63,13 +78,19 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
     instance.webContents.on("will-navigate", event => event.preventDefault());
     instance.webContents.on("will-frame-navigate", event => event.preventDefault());
     instance.webContents.on("render-process-gone", () => { if (!instance.isDestroyed()) instance.destroy(); });
-    instance.on("blur", () => hide());
-    instance.on("closed", () => { if (window === instance) { window = null; loaded = false; busy = false; } });
+    // macOS can deliver the blur from hide() after the next shortcut has
+    // already requested a reveal. Only dismiss an actually visible panel.
+    instance.on("blur", () => { if (instance.isVisible() && !instance.isFocused()) hide(); });
+    instance.on("closed", () => { if (window === instance) {
+      clearTimeout(hideTimer); hideTimer = null;
+      window = null; loaded = false; busy = false; visibleRequested = false; presentationId++;
+    } });
     void instance.loadURL(`${getUiOrigin()}/#/desktop-inspiration`).catch(() => { if (!instance.isDestroyed()) instance.destroy(); });
   };
   const toggle = () => {
     if (disposed || captureOwner) return;
-    if (window?.isVisible()) { hide(); return; }
+    if (visibleRequested) { hide(); return; }
+    visibleRequested = true;
     if (!window || window.isDestroyed()) createWindow();
     else present();
   };
@@ -127,28 +148,51 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
     return { ok: true, ...state() };
   });
   bind("ready", true, () => { loaded = true; present(); return geometry(); });
+  bind("reveal", true, id => {
+    if (disposed || !loaded || !visibleRequested || id !== presentationId) return false;
+    presenting = true;
+    try { window.showInactive(); window.focus(); }
+    finally { presenting = false; }
+    return true;
+  });
   bind("dismiss", true, () => { hide(); return true; });
+  bind("conceal", true, finishHide);
   bind("tray-target", true, () => geometry().tray);
-  listen("interaction", interactive => { if (typeof interactive === "boolean" && window?.isVisible()) window.setIgnoreMouseEvents(!interactive, { forward: true }); });
+  listen("interaction", interactive => { if (typeof interactive === "boolean" && visibleRequested && window?.isVisible()) window.setIgnoreMouseEvents(!interactive, { forward: true }); });
   listen("busy", value => { if (typeof value === "boolean") busy = value; });
-  const onDisplayChange = () => { if (window?.isVisible()) { window.setBounds(display().bounds); window.webContents.send(PREFIX + "show", geometry()); } };
+  const onDisplayChange = () => { if (visibleRequested && window && !window.isDestroyed()) {
+    window.setBounds(display().bounds); window.webContents.send(PREFIX + "geometry", geometry());
+  } };
   screen.on("display-metrics-changed", onDisplayChange); screen.on("display-removed", onDisplayChange);
-  const image = nativeImage.createFromPath(iconPath || path.join(__dirname, "manage-ui/dist/logo.png")).resize({ width: 18, height: 18 });
+  // Dedicated 14pt transparent white (90%) artwork, with an @2x representation for
+  // Retina. Keep it non-template so macOS preserves the requested color/alpha.
+  const image = nativeImage.createFromPath(path.join(__dirname, "assets/tray/shoggoth.png"));
   tray = new Tray(image);
   tray.setToolTip(`Shoggoth · ${configured()}`);
-  tray.on("click", toggle);
+  const openMainWindow = () => { hide(); showMainWindow(); };
+  const stopBackendFromTray = async () => {
+    if (disposed || stoppingBackend) return;
+    stoppingBackend = true;
+    try { await stopBackend(); }
+    finally { stoppingBackend = false; }
+  };
+  tray.on("click", openMainWindow);
   tray.on("right-click", () => {
     const zh = getLocale() === "zh-CN";
     tray.popUpContextMenu(Menu.buildFromTemplate([
       { label: zh ? "记录灵感" : "Capture a thought", click: toggle },
-      { label: zh ? "打开 Shoggoth" : "Open Shoggoth", click: () => { hide(); showMainWindow(); } },
-      { type: "separator" }, { label: zh ? "退出 Shoggoth" : "Quit Shoggoth", click: quit },
+      { label: zh ? "打开 Shoggoth" : "Open Shoggoth", click: openMainWindow },
+      { type: "separator" },
+      { label: stoppingBackend ? (zh ? "正在退出后端…" : "Stopping backend…") : (zh ? "退出后端" : "Stop backend"),
+        enabled: !stoppingBackend, click: stopBackendFromTray },
+      { label: zh ? "退出 Shoggoth" : "Quit Shoggoth", click: quit },
     ]));
   });
   register(configured());
   return { toggle, getWindow: () => window, isPresenting: () => presenting, getTrayBounds: () => tray?.getBounds(), state,
     dispose() {
       disposed = true; stopCapture();
+      clearTimeout(hideTimer); hideTimer = null;
       if (registered) globalShortcut.unregister(registered);
       registered = null;
       handles.forEach(channel => ipcMain.removeHandler(channel));

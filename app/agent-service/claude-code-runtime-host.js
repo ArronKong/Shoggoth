@@ -1606,6 +1606,8 @@ class ClaudeCodeRuntimeHost {
       responseId,
       usage,
       ...usageIdentity(result, active.model),
+      ...(typeof result.total_cost_usd === "number" && Number.isFinite(result.total_cost_usd) && result.total_cost_usd >= 0
+        ? { costUsd: result.total_cost_usd } : {}),
     });
     this._publish({ ...common, type: "complete", status });
     active.terminal.resolve({ status });

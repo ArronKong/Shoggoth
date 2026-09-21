@@ -83,6 +83,28 @@ export function mergeLiveText(current: string, incoming: string): string {
   return current + incoming;
 }
 
+/**
+ * Runtime chat events carry the accumulated text for the current output item.
+ * After a steer the UI starts a new assistant bubble, so only the suffix written
+ * after the accepted steer belongs in that bubble. Keep the raw accumulator
+ * separate from the projected text so cumulative and incremental backends both
+ * retain their existing streaming semantics.
+ */
+export function projectSteeredLiveText(
+  accumulated: string,
+  incoming: string,
+  steerBaseline?: string,
+): { accumulated: string; visible: string } {
+  const next = mergeLiveText(accumulated, incoming);
+  if (steerBaseline === undefined) return { accumulated: next, visible: next };
+  if (next.startsWith(steerBaseline)) {
+    return { accumulated: next, visible: next.slice(steerBaseline.length) };
+  }
+  // A backend may restart its item accumulator when it accepts steering. In
+  // that case the incoming text is already the post-steer segment.
+  return { accumulated: next, visible: incoming };
+}
+
 export function upsertPromptEntry<T extends { id: string; requestId?: string }>(
   entries: readonly T[],
   incoming: T,

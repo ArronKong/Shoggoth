@@ -20,18 +20,16 @@ try {
     content: "联系邮箱 user@example.com", sourceRefs: ["pii-source"], classification: "explicit",
   });
   assert.equal(pii.sensitivity, "private");
-  assert.equal(pii.status, "candidate");
-  const restricted = value.engine.propose({
+  assert.equal(pii.status, "active");
+  assert.throws(() => value.engine.propose({
     profileId: "profile-1", scope: "user", type: "semantic",
     content: "受限的医疗背景", sourceRefs: ["restricted-source"],
-    classification: "inferred", sensitivity: "restricted",
-  });
-  assert.throws(() => value.engine.confirm({ profileId: "profile-1", id: restricted.id }),
-    (error) => error.code === "MEMORY_RESTRICTED");
+    classification: "explicit", sensitivity: "restricted",
+  }), (error) => error.code === "MEMORY_RESTRICTED");
   const disk = require("node:fs").readFileSync(
     require("node:path").join(value.paths.agentsDir, "profile-1", "memory", "events.jsonl"), "utf8",
   );
   assert.doesNotMatch(disk, /sk-proj|123456|token=/u);
-  console.log("ok - secret/验证码拒绝、PII 降级 candidate、restricted 不可激活");
+  console.log("ok - secret/验证码拒绝、PII 直接生效、restricted 拒绝保存");
   console.log("1 memory secret regression passed");
 } finally { value.cleanup(); }

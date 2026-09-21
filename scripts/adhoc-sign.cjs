@@ -126,15 +126,21 @@ function listMachOFiles(root) {
     || left.localeCompare(right));
 }
 
-function inspectCodeSignature(target) {
-  const verified = spawnSync("codesign", ["--verify", "--strict", target], { encoding: "utf8" });
-  if (verified.status !== 0) return { valid: false, teamId: null };
-  const details = spawnSync("codesign", ["-d", "--verbose=4", target], { encoding: "utf8" });
+function inspectCodeSignature(target, options = {}) {
+  const run = options.spawnSync || spawnSync;
+  // Keep the claimed vendor identity even when verification is unavailable
+  // (for example inside a restricted build sandbox). Re-signing it would make
+  // the runtime's parent-identity gate reject every subsequent MCP connection.
+  const details = run("codesign", ["-d", "--verbose=4", target], { encoding: "utf8" });
   const teamId = /^TeamIdentifier=(.+)$/mu.exec(`${details.stdout || ""}\n${details.stderr || ""}`)?.[1] || null;
-  return { valid: true, teamId };
+  const verified = run("codesign", ["--verify", "--strict", target], { encoding: "utf8" });
+  return { valid: verified.status === 0 && !verified.error, teamId };
 }
 
 function shouldSignMachO({ mode, valid, teamId }) {
+  if (!valid && PRESERVED_VENDOR_TEAMS.has(teamId)) {
+    throw new Error("Vendor code signature could not be verified; refusing to replace it");
+  }
   if (!valid) return true;
   if (mode !== "developer-id") return false;
   return !PRESERVED_VENDOR_TEAMS.has(teamId);
@@ -204,4 +210,5 @@ exports.isMachOFile = isMachOFile;
 exports.listMachOFiles = listMachOFiles;
 exports.nestedHostOptionalDependencyPaths = nestedHostOptionalDependencyPaths;
 exports.shouldSignMachO = shouldSignMachO;
+exports.inspectCodeSignature = inspectCodeSignature;
 exports.verifyPackagedSqlite = verifyPackagedSqlite;

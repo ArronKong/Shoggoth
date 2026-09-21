@@ -13,6 +13,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { UI_CONTENT_SECURITY_POLICY } = require("./ui-content-security");
 const { randomUUID } = require("node:crypto");
+const { createChatAttachmentOpener, validAttachmentName, MAX_OPEN_ATTACHMENT_BYTES } = require("./chat-attachment-open");
 const {
   AVATAR_EXTS: AGENT_AVATAR_EXTS,
   BG_STATES: IMMERSIVE_BG_STATES,
@@ -965,6 +966,7 @@ async function resolveResourceBackend(registry, kind, id) {
 //   GET    /__api/chat/cache-scope?backend=       opaque renderer history-cache identity
 //   POST   /__api/host/openclaw/start             代跑网关启动 {mode:"start"|"install"}
 //   POST   /__api/host/open-path                  用系统默认程序打开文件/目录
+//   POST   /__api/host/open-attachment?name=       用系统默认程序打开附件字节的私有副本
 //   POST   /__api/host/reveal-path                在系统文件管理器中定位文件
 //   POST   /__api/host/terminal                   在系统终端里跑 provider 的登录/断开命令
 //                                                 {backend,provider,kind:"cli"|"disconnect"} —— **不收命令串**
@@ -1000,6 +1002,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
   const {
     configStore,
     hostOps,
+    attachmentOpener,
     productHost,
     onConfigChanged,
     modelChangeCoordinator,
@@ -1838,7 +1841,10 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       const queryProfile = url.searchParams.get("profile") || undefined;
       if (segs.length === 2) {
         if (method === "GET") {
-          return sendJson(res, 200, await backend.listCustomEndpoints({ profile: queryProfile }));
+          return sendJson(res, 200, await backend.listCustomEndpoints({
+            profile: queryProfile,
+            ...(url.searchParams.get("refreshAuth") === "false" ? { refreshAuth: false } : {}),
+          }));
         }
         if (method === "POST") {
           const body = await readJsonBody(req);
@@ -1879,6 +1885,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (!body || !Array.isArray(body.items)) return sendJson(res, 400, { error: "missing items" });
       return sendModelChangeResult(res, await coordinator.batchCompat(backendId, body.items, {
         operationId: typeof body.operationId === "string" && body.operationId ? body.operationId : undefined,
+        confirmReferences: body.confirmReferences === true,
+        force: body.force === true,
+        preservePrimaryRefs: body.preservePrimaryRefs === true,
       }));
     }
     if (segs[0] === "models" && segs[1] === "config" && segs[2] === "capabilities" && segs.length === 3) {
@@ -2578,6 +2587,16 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 200, { ok: hostOps.reveal(body.path) !== false });
     }
+    if (segs[0] === "host" && segs[1] === "open-attachment" && segs.length === 2) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      const name = requestUrl?.searchParams.get("name");
+      if (!validAttachmentName(name)) return sendJson(res, 400, { error: "invalid attachment name" });
+      if (!attachmentOpener) return sendJson(res, 501, { error: "openPath unavailable (non-Electron host)" });
+      const bytes = await readRawBody(req, MAX_OPEN_ATTACHMENT_BYTES);
+      const failure = await attachmentOpener.open(name, bytes);
+      if (failure) return sendJson(res, 500, { ok: false, error: failure });
+      return sendJson(res, 200, { ok: true });
+    }
     // Open a folder/file with the OS default handler (Electron host only) — the
     // agent 页 workspace row. Host-side capability like /cli/reveal, never the registry.
     if (segs[0] === "host" && segs[1] === "open-path" && segs.length === 2) {
@@ -2748,8 +2767,12 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         }
         const body = await readJsonBody(req);
         if (!body) return sendJson(res, 400, { error: "invalid JSON body" });
-        const action = method === "POST" ? "confirm" : method === "PUT" ? "update" : "delete";
-        return sendJson(res, 200, { result: await backend.mutateAgentMemory(id, action, body) });
+        const { action: requestedAction, ...input } = body;
+        if (requestedAction !== undefined && (method !== "POST" || requestedAction !== "create")) {
+          return sendJson(res, 400, { error: "unknown memory action" });
+        }
+        const action = method === "POST" ? requestedAction || "confirm" : method === "PUT" ? "update" : "delete";
+        return sendJson(res, 200, { result: await backend.mutateAgentMemory(id, action, input) });
       }
       if (segs.length === 3 && segs[2] === "transcripts") {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
@@ -3232,9 +3255,12 @@ function startStaticServer(
     assetsMigrated = true;
   }
   const cliExecutionGate = createCliExecutionGate();
+  const attachmentOpener = typeof hostOps?.openPath === "function"
+    ? createChatAttachmentOpener((file) => hostOps.openPath(file)) : null;
   const apiDeps = {
     configStore,
     hostOps,
+    attachmentOpener,
     productHost,
     onConfigChanged,
     modelChangeCoordinator,
@@ -3520,6 +3546,7 @@ function startStaticServer(
           await Promise.all(brokerServers.map((wss) => closeWebSocketServer(wss)));
           await httpClosed;
           clearTimeout(forceHttpTimer);
+          attachmentOpener?.dispose();
         })();
         return closePromise;
       };

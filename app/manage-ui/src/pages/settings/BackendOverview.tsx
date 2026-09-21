@@ -2,16 +2,11 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { BackendDescriptor, BackendStatus, BackendVersionStatus } from "../../types";
 import { REMOTE_CONNECTIONS_ENABLED } from "../../lib/connectionOptions";
-import ProviderLogo, { providerLogoFor } from "../keys/ProviderLogo";
-
-const LOGO_NAMES: Record<string, string> = {
-  codex: "openai", "grok-build": "xai", antigravity: "google", hermes: "nous",
-};
+import BackendTabIcon from "../../components/BackendTabIcon";
 
 export function BackendMark({ id, name }: { id: string; name: string }) {
-  const logo = LOGO_NAMES[id] || id;
   return <span className="settings-backend-mark" aria-hidden="true">
-    {providerLogoFor(logo) ? <ProviderLogo name={logo} /> : name.slice(0, 1)}
+    <BackendTabIcon backend={id} label={name} />
   </span>;
 }
 

@@ -4,8 +4,9 @@ const { validRuntimeAccountId } = require("./runtime-adapter");
 const { validateRuntimeAccount } = require("./runtime-account");
 const { serviceError } = require("./security");
 
-const DEFAULT_MAX_ACTIVE = 1;
+const DEFAULT_MAX_ACTIVE = require("./execution-policy").account;
 const MAX_ACTIVE_LIMIT = 64;
+const QUOTA_ERROR_CODES = new Set(["RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_SPENDING_LIMIT_REACHED"]);
 
 function admissionError(code, message) {
   return serviceError(code, message);
@@ -60,12 +61,22 @@ class RuntimeAccountAdmission {
         retryAt: null,
       });
     }
-    if (state.backoffUntil > current) {
+    if (state.rateLimitErrorCode !== null
+      && (state.rateLimitBackoffUntil === null || state.rateLimitBackoffUntil > current)) {
+      return Object.freeze({
+        disposition: "rejected",
+        reason: state.rateLimitErrorCode,
+        generation: state.generation,
+        retryAt: state.rateLimitBackoffUntil,
+      });
+    }
+    const backoffUntil = Math.max(state.backoffUntil, state.rateLimitBackoffUntil ?? 0);
+    if (backoffUntil > current) {
       return Object.freeze({
         disposition: "queued",
         reason: "RUNTIME_ACCOUNT_BACKOFF",
         generation: state.generation,
-        retryAt: state.backoffUntil,
+        retryAt: backoffUntil,
       });
     }
     const limit = this.#limit(account);
@@ -137,6 +148,8 @@ class RuntimeAccountAdmission {
     state.mutation = null;
     state.generation += 1;
     state.backoffUntil = 0;
+    state.rateLimitBackoffUntil = 0;
+    state.rateLimitErrorCode = null;
     return state.generation;
   }
 
@@ -160,6 +173,33 @@ class RuntimeAccountAdmission {
     return state.backoffUntil;
   }
 
+  noteRateLimitBackoff(input) {
+    this.assertGeneration(input);
+    const errorCode = input?.errorCode ?? null;
+    if (errorCode !== null && !QUOTA_ERROR_CODES.has(errorCode)) {
+      throw admissionError("RUNTIME_ACCOUNT_ADMISSION_INVALID", "Runtime account quota error is invalid");
+    }
+    const retryAt = input?.retryAt === null && errorCode !== null
+      ? null : this.#timestamp(input?.retryAt);
+    const state = this.#state(input.runtimeAccountId);
+    if (state.rateLimitErrorCode !== null && state.rateLimitBackoffUntil !== null
+      && state.rateLimitBackoffUntil <= this.#timestamp(this.now())) {
+      state.rateLimitErrorCode = null;
+      state.rateLimitBackoffUntil = 0;
+    }
+    // Credit/quota recovery must not erase an independent transport Retry-After.
+    if (retryAt === 0) {
+      state.rateLimitBackoffUntil = 0;
+      state.rateLimitErrorCode = null;
+    } else if (errorCode !== null) {
+      state.rateLimitErrorCode = errorCode;
+      state.rateLimitBackoffUntil = retryAt;
+    } else if (state.rateLimitErrorCode === null) {
+      state.rateLimitBackoffUntil = Math.max(state.rateLimitBackoffUntil ?? 0, retryAt);
+    }
+    return state.rateLimitBackoffUntil;
+  }
+
   assertGeneration(input) {
     const account = this.#account(input?.runtimeAccountId);
     if (!Number.isSafeInteger(input?.generation) || input.generation < 1
@@ -176,13 +216,14 @@ class RuntimeAccountAdmission {
     const account = this.#account(runtimeAccountId);
     const state = this.#state(account.id);
     const current = this.#timestamp(this.now());
+    const backoffUntil = Math.max(state.backoffUntil, state.rateLimitBackoffUntil ?? 0);
     return Object.freeze({
       runtimeAccountId: account.id,
       generation: state.generation,
       active: state.active.size,
       maxActive: this.#limit(account),
       mutationActive: state.mutation !== null,
-      backoffUntil: state.backoffUntil > current ? state.backoffUntil : null,
+      backoffUntil: backoffUntil > current ? backoffUntil : null,
     });
   }
 
@@ -206,7 +247,8 @@ class RuntimeAccountAdmission {
   #state(runtimeAccountId) {
     let state = this.accounts.get(runtimeAccountId);
     if (!state) {
-      state = { generation: 1, active: new Set(), mutation: null, backoffUntil: 0 };
+      state = { generation: 1, active: new Set(), mutation: null, backoffUntil: 0,
+        rateLimitBackoffUntil: 0, rateLimitErrorCode: null };
       this.accounts.set(runtimeAccountId, state);
     }
     return state;

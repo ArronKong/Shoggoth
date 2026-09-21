@@ -1078,7 +1078,7 @@ test("Service start 将 lock acquisition 纳入清理边界且失败不残留 ow
 });
 
 test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认 profile 不回归", async () => {
-  assert.equal(PROTOCOL_VERSION, 3);
+  assert.equal(PROTOCOL_VERSION, 4);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-store-lifecycle-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   for (let restart = 0; restart < 2; restart += 1) {
@@ -1533,6 +1533,16 @@ test("Provider IPC 严格分派 list/save/delete/secret set-clear/protocol valid
     assert.deepEqual(await requestService(paths, {
       ...base, method: "provider.list", params: {},
     }), [provider]);
+    const endpoints = await requestService(paths, {
+      ...base, method: "provider.endpoints.list", params: { profileId: null },
+    });
+    assert.equal(endpoints.supported, true);
+    assert.deepEqual(endpoints.endpoints, []);
+    assert.deepEqual(endpoints.form.apiOptions, ["openai-responses"]);
+    const invalidEndpoint = await requestService(paths, {
+      ...base, method: "provider.endpoints.discover", params: { profileId: null, endpoint: { baseUrl: "file:///tmp/models" } },
+    });
+    assert.equal(invalidEndpoint.code, "invalid_url");
     assert.deepEqual(await requestService(paths, {
       ...base, method: "provider.save", params: { provider: {
         id: provider.id, kind: provider.kind, name: provider.name, model: provider.model,
@@ -1566,7 +1576,7 @@ test("Provider IPC 严格分派 list/save/delete/secret set-clear/protocol valid
     });
     assert.equal(response.response.error.code, "INVALID_PARAMS");
     assert.equal(JSON.stringify(response.response).includes(secret), false);
-    assert.equal(calls.length, 6);
+    assert.equal(calls.length, 7);
   } finally {
     await service.stop({ notify: false });
   }

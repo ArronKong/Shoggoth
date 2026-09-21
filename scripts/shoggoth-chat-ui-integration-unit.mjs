@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
-import ts from "typescript";
+import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const appPath = path.join(ROOT, "app/manage-ui/src/App.tsx");
@@ -39,6 +39,7 @@ const {
   resolveBackendOwner,
   isLiveChatState,
   mergeLiveText,
+  projectSteeredLiveText,
   supportsBackendAttachments,
   supportsBackendSlash,
   upsertPromptEntry,
@@ -112,6 +113,14 @@ assert.equal(mergeLiveText("已恢复", "已恢复到较新文本"), "已恢复�
   "新的累计 delta 必须替换旧前缀");
 assert.equal(mergeLiveText("incremental ", "chunk"), "incremental chunk",
   "非累计后端的增量 chunk 仍保持兼容");
+const cumulativeSteerProjection = projectSteeredLiveText("旧回答", "旧回答新回答", "旧回答");
+assert.equal(cumulativeSteerProjection.accumulated, "旧回答新回答");
+assert.equal(cumulativeSteerProjection.visible, "新回答",
+  "steer 后的新气泡必须切掉 Runtime 累计文本的旧前缀");
+const resetSteerProjection = projectSteeredLiveText("", "重置后的新回答", "旧回答");
+assert.equal(resetSteerProjection.accumulated, "重置后的新回答");
+assert.equal(resetSteerProjection.visible, "重置后的新回答",
+  "Runtime 在 steer 后重置累计器时不得误切新文本");
 
 const existingPrompt = { id: "local-1", requestId: "request-1", kind: "approval", question: "旧问题" };
 const replayedPrompt = { id: "local-2", requestId: "request-1", kind: "approval", question: "新问题" };
@@ -257,10 +266,22 @@ assert.match(chatPage, /const nativeModelSelectionDisabled\s*=\s*activeBackendDe
   "Native 模型切换只应在发送或活动 Run 期间禁用");
 assert.match(chatPage, /const\s+activeRunInFlight\s*=\s*sending\s*\|\|\s*\(activeKey\s*\?\s*runningKeys\.has\(activeKey\)\s*:\s*false\)/,
   "重连事件恢复 runningKeys 后必须重新显示停止键");
+assert.match(chatPage, /canSteerActiveChat\(\s*activeCaps,\s*runStatusBySessionRef\.current\.get\(activeKey\),\s*0\s*\)/,
+  "运行中发送键必须由 Runtime steer 能力与精确 running 状态共同门禁");
+assert.match(chatPage, /await\s+send\("chat\.steer",\s*\{\s*sessionKey:\s*key,\s*message:\s*text\s*\}\)/,
+  "支持 steering 的运行中文本必须追加当前 turn");
+assert.match(chatPage, /case\s+"steer":[\s\S]*?if\s*\(nativeAgent\)[\s\S]*?await\s+sendSteeringMessage\(key,\s*args\)/,
+  "原生 /steer 必须复用 chat.steer 而不是 OpenClaw 的 deliver=false 兼容协议");
+assert.match(chatPage, /if\s*\(shouldSteer\)\s*\{\s*await\s+sendSteeringMessage\(key,\s*outgoing\);\s*return;/,
+  "steering 成功路径不得同时进入待发队列");
 assert.match(chatPage, /\{activeRunInFlight\s*\?\s*\(/,
   "普通 composer 的停止键必须使用统一运行态");
 assert.match(chatPage, /sending=\{activeRunInFlight\}/,
   "沉浸 composer 必须使用统一运行态");
+assert.match(chatPage, /canSteer=\{activeCanSteer\}/,
+  "沉浸 composer 必须复用同一 steering 能力门禁");
+assert.match(immersiveChat, /sending\s*&&\s*canSteer[\s\S]*?chat\.steerCurrentTurn/,
+  "沉浸 composer 运行中必须同时保留追加与停止入口");
 assert.match(chatPage, /catch\s*\(error\)\s*\{[\s\S]*?setError\([\s\S]*?return;[\s\S]*?\}\s*markInFlight\(key,\s*false\)/,
   "chat.abort 失败时必须保留运行态并显示错误");
 assert.match(chatPage, /disabled=\{nativeModelSelectionDisabled\}/,

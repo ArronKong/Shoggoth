@@ -1487,7 +1487,7 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
 
       {/* 首载提示（老工具条 spacer 的加载态挪到这里；后台刷新 loading=false 不闪） */}
       {loading && columns.length === 0 && (
-        <p className="muted"><FusionLoader size="md" label={t("common.loading")} /></p>
+        <div className="page-loading muted"><FusionLoader size="md" label={t("common.loading")} /></div>
       )}
       {error && <div className="error">{t("tasks.error", { msg: error })}</div>}
       {!loading && !error && columns.length === 0 && (

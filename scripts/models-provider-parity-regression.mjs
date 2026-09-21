@@ -283,6 +283,16 @@ async function installApiFake(page, state) {
         json: { error: "unexpected fixture request" },
       });
     };
+    if (url.pathname === "/__api/backends") {
+      if (method !== "GET") return rejectUnexpected(["GET"]);
+      await route.fulfill({ json: { backends: [] } });
+      return;
+    }
+    if (url.pathname === "/__api/shoggoth/status") {
+      if (method !== "GET") return rejectUnexpected(["GET"]);
+      await route.fulfill({ status: 503, json: { error: "native service is outside the provider fixture" } });
+      return;
+    }
     if (!globalRoute && rawBackend !== state.backend) return rejectUnexpected([], 400);
     const backend = globalRoute ? state.backend : rawBackend;
 
@@ -296,7 +306,7 @@ async function installApiFake(page, state) {
             locale: "zh-CN",
             theme: "light",
             disabledBackends: [],
-            notifications: {},
+            notifications: { chat: false, cron: false, task: false },
             setupCompletedAt: 1,
           },
         },
@@ -601,6 +611,25 @@ async function createHarness(browser, baseUrl, backend) {
   const state = createState(backend);
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  // Credential reveal is desktop IPC only. Keep the browser fixture isolated
+  // with a fake preload bridge; never reopen the retired HTTP secret route.
+  await page.exposeFunction("__providerFixtureReveal", (owner, key, modelProvider) => {
+    assert.equal(owner, backend);
+    const baseUrl = !modelProvider && key.endsWith("_BASE_URL");
+    recordCall(state, {
+      kind: baseUrl ? "reveal-provider-base-url" : "reveal-provider-secret",
+      method: "IPC", backend: owner, key, valueMatchesExpected: true,
+    });
+    return { ok: true, value: modelProvider
+      ? { apiKey: REVEALED_SENTINEL }
+      : { value: baseUrl ? state.provider.baseUrl : REVEALED_SENTINEL } };
+  });
+  await page.addInitScript(() => {
+    window.openclawDesktop = {
+      revealEnvVar: (owner, key) => window.__providerFixtureReveal(owner, key, false),
+      revealModelProviderKey: (owner, key) => window.__providerFixtureReveal(owner, key, true),
+    };
+  });
   await installApiFake(page, state);
   await page.goto(`${baseUrl}/#/models`, { waitUntil: "domcontentloaded" });
 
@@ -611,7 +640,6 @@ async function createHarness(browser, baseUrl, backend) {
     await page.getByText("Auth-only Custom", { exact: true }).waitFor();
     await page.getByText("Manual No URL", { exact: true }).waitFor();
   }
-  await page.getByText("EXA_API_KEY", { exact: true }).waitFor();
   const harness = { backend, context, page, pageErrors, state };
   assertHarnessClean(harness);
   return harness;
@@ -779,7 +807,7 @@ async function exerciseProviderHarness(harness) {
   await secretField.getByRole("button", { name: "查看明文", exact: true }).click();
   await secretField.getByText(REVEALED_SENTINEL, { exact: true }).waitFor();
   assertSingleCall(state, "reveal-provider-secret", {
-    method: "POST",
+    method: "IPC",
     backend,
     key: backend === "hermes" ? "OPENROUTER_API_KEY" : "openrouter",
     valueMatchesExpected: true,
@@ -821,7 +849,7 @@ async function providerScenario(browser, baseUrl) {
     const layoutByBackend = {};
     for (const { backend, page } of harnesses) {
       const providerTitle = backend === "hermes" ? "模型 Provider" : "模型 Provider（API Key）";
-      const titles = ["Provider 登录（OAuth）", providerTitle, "自定义端点", "工具密钥"];
+      const titles = ["Provider 登录（OAuth）", providerTitle, "自定义端点"];
       const cards = [];
       for (const title of titles) {
         const heading = title === "自定义端点"
@@ -845,7 +873,7 @@ async function providerScenario(browser, baseUrl) {
       }
       assert.ok(
         cards.every((card, index) => index === 0 || card.top > cards[index - 1].top),
-        `${backend}: 卡片顺序必须是 OAuth → Provider → 自定义端点 → 工具密钥`,
+        `${backend}: 卡片顺序必须是 OAuth → Provider → 自定义端点`,
       );
       assert.equal(new Set(cards.map((card) => card.left)).size, 1, `${backend}: 卡片左边缘未对齐`);
       assert.equal(new Set(cards.map((card) => card.width)).size, 1, `${backend}: 卡片宽度不一致`);
@@ -885,7 +913,10 @@ async function providerScenario(browser, baseUrl) {
     );
 
     const results = [];
-    for (const harness of harnesses) results.push(await exerciseProviderHarness(harness));
+    for (const harness of harnesses) {
+      try { results.push(await exerciseProviderHarness(harness)); }
+      catch (error) { throw new Error(`${harness.backend}: ${formatError(error)}\nCalls: ${JSON.stringify(harness.state.calls)}`); }
+    }
     assert.deepEqual(results[0], results[1], "Provider 两后端的字段及按钮顺序必须一致");
   });
 }
@@ -1031,27 +1062,21 @@ async function toolKeysScenario(browser, baseUrl) {
     );
     assert.deepEqual(
       markerCounts,
-      { hermes: 1, openclaw: 1 },
-      "工具密钥两后端必须各使用一个 data-tool-key-row 共享结构",
+      { hermes: 0, openclaw: 0 },
+      "工具密钥隐藏时两后端都不得渲染 data-tool-key-row",
     );
-
-    const results = [];
-    for (const harness of harnesses) results.push(await exerciseToolHarness(harness));
-    assert.deepEqual(results[0], results[1], "工具密钥两后端的读态按钮顺序必须一致");
-    for (const harness of harnesses) await exerciseDelayedRevealHarness(harness);
-
-    const hermes = harnesses.find(({ backend }) => backend === "hermes");
-    const openclaw = harnesses.find(({ backend }) => backend === "openclaw");
-    assert.ok(hermes && openclaw);
-    await exerciseOpenClawAdd(openclaw);
-    await openclaw.page.getByRole("button", { name: "添加变量", exact: true }).waitFor();
-    const expandUnset = hermes.page.getByRole("button", { name: "显示全部", exact: true });
-    await expandUnset.waitFor();
-    await expandUnset.click();
-    await hermes.page
-      .locator("[data-tool-key-row]")
-      .filter({ hasText: "FIRECRAWL_API_KEY" })
-      .waitFor();
+    for (const { backend, page, state } of harnesses) {
+      assert.equal(
+        await page.getByRole("heading", { name: "工具密钥", exact: true }).count(),
+        0,
+        `${backend}: 工具密钥卡片必须保持可逆隐藏`,
+      );
+      assert.equal(
+        state.calls.some(({ kind }) => kind.includes("tool-secret")),
+        false,
+        `${backend}: 隐藏工具密钥不得触发读取或写入`,
+      );
+    }
   });
 }
 
@@ -1071,6 +1096,7 @@ server.stderr.on("data", (chunk) => {
 });
 
 let browser;
+let serverStoppedByHarness = false;
 const failures = [];
 try {
   await waitFor(async () => {
@@ -1107,6 +1133,7 @@ try {
     browserCloseError = error;
   } finally {
     try {
+      serverStoppedByHarness = !processExited(server);
       await stopProcess(server);
     } catch (error) {
       failures.push(`vite cleanup: ${formatError(error)}`);
@@ -1115,7 +1142,7 @@ try {
   if (browserCloseError) failures.push(`browser cleanup: ${formatError(browserCloseError)}`);
 }
 
-if (server.exitCode && server.exitCode !== 0) {
+if (!serverStoppedByHarness && server.exitCode && server.exitCode !== 0) {
   failures.push(`Vite exited with ${server.exitCode}${serverLog ? `\n${serverLog}` : ""}`);
 }
 if (failures.length > 0) {

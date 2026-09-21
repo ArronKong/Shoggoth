@@ -13,6 +13,7 @@ const AGENT_HARNESS_METHODS = Object.freeze([
   "harness.definition.import.preview",
   "harness.definition.import.commit",
   "harness.memory.list",
+  "harness.memory.create",
   "harness.memory.confirm",
   "harness.memory.update",
   "harness.memory.delete",
@@ -45,6 +46,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   MEMORY_NOT_CONFIRMABLE: "候选记忆不存在或已处理",
   MEMORY_NOT_FOUND: "记忆不存在",
   MEMORY_SECRET_REJECTED: "记忆拒绝保存敏感信息",
+  MEMORY_INVALID: "记忆内容无效，请填写不超过 8 KB 的有效文本",
   TOOL_PERMISSION_REVISION_CONFLICT: "工具权限已被其他窗口更新",
   SKILL_REGISTRY_REVISION_CONFLICT: "Skill 列表已变化，请刷新后重试",
   SKILL_PROFILE_REVISION_CONFLICT: "Agent 的 Skill 配置已变化，请刷新后重试",
@@ -150,8 +152,10 @@ function validComputerStatus(value) {
   if (!own(value) || typeof value.available !== "boolean"
     || (value.driverVersion !== null && !text(value.driverVersion, 64, false))
     || (value.contractVersion !== null && !text(value.contractVersion, 64, false))
-    || !own(value.permissions) || typeof value.permissions.accessibility !== "boolean"
-    || typeof value.permissions.screenRecording !== "boolean"
+    || !own(value.permissions)
+    || ![value.permissions.accessibility, value.permissions.screenRecording].every(permission => (
+      typeof permission === "boolean" || (value.available === false && permission === null)
+    ))
     || !Array.isArray(value.sessions) || !value.sessions.every(validComputerSession)) return false;
   if (value.available === false) return text(value.reason, 128, false);
   return !Object.hasOwn(value, "reason");
@@ -212,6 +216,10 @@ function validateAgentHarnessParams(method, params) {
       && (params.status === null || ["candidate", "active", "superseded", "deleted"].includes(params.status))
       && (params.scope === null || ["user", "agent", "project", "workspace"].includes(params.scope))
       && integer(params.cursor, 0) && integer(params.limit, 1, 100);
+  } else if (method === "harness.memory.create") {
+    valid = exact(params, ["profileId", "content", "scope", "expectedRevision"])
+      && text(params.content, 8 * 1024, false) && params.content.trim().length > 0
+      && ["user", "agent"].includes(params.scope) && integer(params.expectedRevision, 0);
   } else if (method === "harness.memory.confirm" || method === "harness.memory.delete") {
     valid = exact(params, ["profileId", "id", "expectedRevision"])
       && id(params.id) && integer(params.expectedRevision, 0);
@@ -251,7 +259,8 @@ function validateAgentHarnessResult(method, result) {
         && KINDS.has(file.kind) && file.name === `${file.kind}.md` && typeof file.readOnly === "boolean");
   } else if (method === "harness.definition.read") {
     valid = KINDS.has(result.kind) && (result.revision === null
-      || integer(result.revision, 1) || hash(result.revision))
+      || integer(result.revision, ["MEMORY", "TOOLS"].includes(result.kind) ? 0 : 1)
+      || hash(result.revision))
       && text(result.content) && typeof result.readOnly === "boolean";
   } else if (["harness.definition.update", "harness.definition.restore", "harness.definition.import.commit"].includes(method)) {
     valid = validDefinitionSummary(result.current);
@@ -263,8 +272,10 @@ function validateAgentHarnessResult(method, result) {
         && typeof change.changed === "boolean" && hash(change.beforeHash) && hash(change.afterHash));
   } else if (method === "harness.memory.list") {
     valid = validPage(result, validMemoryItem, true);
-  } else if (["harness.memory.confirm", "harness.memory.update", "harness.memory.delete"].includes(method)) {
-    valid = integer(result.revision) && (result.item === null || validMemoryItem(result.item));
+  } else if (["harness.memory.create", "harness.memory.confirm", "harness.memory.update", "harness.memory.delete"].includes(method)) {
+    valid = integer(result.revision) && (method === "harness.memory.create"
+      ? validMemoryItem(result.item) && result.item.status === "active"
+      : result.item === null || validMemoryItem(result.item));
   } else if (method === "harness.transcript.sessions") {
     valid = validPage(result, validTranscriptSession);
   } else if (method === "harness.transcript.events") {

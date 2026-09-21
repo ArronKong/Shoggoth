@@ -40,7 +40,7 @@ function fixture() {
   const clock = { value: 10_000 };
   const productStore = new JsonlProductStore({ paths, now: () => clock.value });
   productStore.open();
-  const effects = { initialized: [], activated: [], stopped: [], failInitialize: 0, failStop: 0 };
+  const effects = { initialized: [], activated: [], stopped: [], profileChanges: [], failInitialize: 0, failStop: 0 };
   const controller = createAgentLifecycleServiceController({
     productStore,
     runtimeManager: {
@@ -52,8 +52,9 @@ function fixture() {
         }
       },
     },
-    async initializeProfile(profile) {
+    async initializeProfile(profile, initialization) {
       effects.initialized.push(profile.id);
+      effects.lastInitialization = initialization;
       if (effects.failInitialize > 0) {
         effects.failInitialize -= 1;
         throw new Error("injected initialize failure");
@@ -62,6 +63,7 @@ function fixture() {
     async activateProfile(profile) {
       effects.activated.push({ id: profile.id, enabled: profile.enabled });
     },
+    onProfileChanged(payload) { effects.profileChanges.push(payload); },
     now: () => clock.value,
   });
   controller.open();
@@ -279,6 +281,10 @@ async function testServiceResourceWiringAndRestart() {
     await service.start();
     let token = readClientToken(paths);
     const builtin = service.productStore.getAgentProfile(BUILTIN_CLI_AGENT_PROFILES[0].id);
+    for (const profile of service.productStore.listAgentProfiles()) {
+      assert.equal(service.agentDefinitionStore.get(profile.id).documents.IDENTITY
+        .match(/^- Name: (.+)$/mu)?.[1], profile.name);
+    }
     await assert.rejects(
       () => requestService(paths, {
         method: "agent.archive",
@@ -310,6 +316,7 @@ async function testServiceResourceWiringAndRestart() {
           operationId: `service-create-${backendId}`,
           backendId,
           name: `Service ${backendId}`,
+          initialIdentity: `我的身份是 ${backendId} 的辅助助理，协助完成任务。`,
           defaultCwd: null,
           createdAt: Date.now() + index,
         },
@@ -319,7 +326,10 @@ async function testServiceResourceWiringAndRestart() {
         approvalPolicy: "on-request",
         sandbox: "danger-full-access",
       });
-      assert.ok(service.agentDefinitionStore.get(result.profile.id));
+      assert.equal(service.agentDefinitionStore.get(result.profile.id).documents.IDENTITY
+        .match(/^- Name: (.+)$/mu)?.[1], result.profile.name);
+      assert.ok(service.agentDefinitionStore.get(result.profile.id).documents.IDENTITY
+        .includes(`我的身份是 ${backendId} 的辅助助理，协助完成任务。`));
       assert.equal(Number.isSafeInteger(service.memoryStore.getRevision(result.profile.id)), true);
       assert.ok(service.nativeSkillStore.ensureProfile(result.profile.id));
       assert.equal(service.nativeKanbanStore.listBoards()
@@ -331,6 +341,13 @@ async function testServiceResourceWiringAndRestart() {
       );
       assert.equal(fs.existsSync(runtimeHome), false,
         "creating an Agent must not allocate a per-Profile Runtime Home");
+    }
+    const events = await requestService(paths, {
+      method: "events.subscribe", token, version: PROTOCOL_VERSION, params: { afterSeq: 0 },
+    });
+    for (const profile of created) {
+      assert.ok(events.events.some(event => event.type === "agent.profile.changed"
+        && event.payload.profileId === profile.id && event.payload.backendId === profile.backendId));
     }
     await service.stop();
 
@@ -349,7 +366,10 @@ async function testServiceResourceWiringAndRestart() {
       assert.equal(listed.agents.some((entry) => (
         entry.profile.id === profile.id && entry.state === "active"
       )), true);
-      assert.ok(service.agentDefinitionStore.get(profile.id));
+      assert.equal(service.agentDefinitionStore.get(profile.id).documents.IDENTITY
+        .match(/^- Name: (.+)$/mu)?.[1], profile.name);
+      assert.ok(service.agentDefinitionStore.get(profile.id).documents.IDENTITY
+        .includes(`我的身份是 ${profile.backendId} 的辅助助理，协助完成任务。`));
       assert.equal(service.nativeKanbanStore.listBoards()
         .some((board) => board.profileId === profile.id), true);
     }
@@ -359,11 +379,78 @@ async function testServiceResourceWiringAndRestart() {
   }
 }
 
+async function testNativeMcpManagement() {
+  const { McpProductToolController } = require(path.join(ROOT, "app/agent-service/mcp-product-tool-controller"));
+  const value = fixture();
+  const noop = () => null;
+  const makeMcp = () => new McpProductToolController({
+    productStore: value.productStore, agentLifecycleService: value.controller,
+    domainController: { handle: noop }, kanbanStore: Object.fromEntries([
+      "getBoard", "getCard", "listCardRunLinks", "getCardRunLinkByRunId", "addComment", "addArtifact", "listArtifacts",
+    ].map(name => [name, noop])),
+    kanbanRunService: { requestCompletionFromAgent: noop }, cronStore: { getJob: noop },
+    workDispatcher: { getRun: () => ({ id: "caller-run", profileId: DEFAULT_AGENT_PROFILE_ID, status: "running" }) },
+    getRuntimeContext: (_profileId, selector) => ({ ...selector, profileId: DEFAULT_AGENT_PROFILE_ID, runId: "caller-run" }),
+    notificationSender: async () => {}, isSensitiveValue: () => false, artifactRoot: path.join(value.root, "artifacts"),
+    now: () => value.clock.value,
+  });
+  try {
+    const context = { source: "chat", sourceId: "caller-session" };
+    const authority = n => ({ profileId: DEFAULT_AGENT_PROFILE_ID, confirmation: true,
+      callId: `11111111-1111-4111-8111-${String(n).padStart(12, "0")}` });
+    const createArgs = { ...context, backendId: "codex", name: "星帆", workspace: null,
+      identity: "身份是你的辅助助理，协助你完成任务。" };
+    const createAuthority = { profileId: DEFAULT_AGENT_PROFILE_ID, callId: authority(7).callId };
+    value.effects.failInitialize = 1;
+    await assert.rejects(() => makeMcp().handle("native_agent_create", createArgs, createAuthority),
+      { code: "AGENT_INITIALIZATION_FAILED" });
+    const creation = await makeMcp().handle("native_agent_create", createArgs, createAuthority);
+    assert.equal(creation.identitySaved, true);
+    assert.deepEqual(value.effects.lastInitialization, { initialIdentity: createArgs.identity });
+    const effectCount = value.effects.initialized.length;
+    assert.deepEqual(await makeMcp().handle("native_agent_create", createArgs, createAuthority), creation);
+    assert.equal(value.effects.initialized.length, effectCount);
+    const matches = value.productStore.listAgentProfiles().filter(profile => profile.agentId === creation.agent.agentId);
+    assert.equal(matches.length, 1);
+    const created = { profile: matches[0] };
+    const target = { backendId: "codex", agentId: created.profile.agentId };
+    const mcp = makeMcp();
+    const initial = await mcp.handle("native_agent_get", target, authority(1));
+    const updated = await mcp.handle("native_agent_update", { ...target, ...context,
+      name: "星帆新名称", expectedUpdatedAt: initial.agent.updatedAt }, authority(2));
+    assert.equal(value.productStore.getAgentProfile(created.profile.id).name, "星帆新名称");
+    const args = { ...target, ...context, expectedUpdatedAt: updated.agent.updatedAt };
+    const activeRun = validQueuedRun(created.profile.id);
+    value.productStore.putWorkRun(activeRun);
+    await assert.rejects(() => mcp.handle("native_agent_archive", args, authority(3)), { code: "AGENT_ACTIVE_RUNS" });
+    value.productStore.putWorkRun({ ...activeRun, status: "canceled", eventSeq: 2, finishedAt: value.clock.value });
+    value.effects.failStop = 1;
+    await assert.rejects(() => mcp.handle("native_agent_archive", args, authority(4)), { code: "AGENT_RUNTIME_CLEANUP_FAILED" });
+    assert.deepEqual(value.effects.profileChanges.at(-1), { profileId: created.profile.id, backendId: "codex" });
+    assert.equal(value.productStore.listMcpToolCalls().find(call => call.name === "native_agent_archive"
+      && call.callId === authority(4).callId).status, "pending");
+    const archived = await makeMcp().handle("native_agent_archive", args, authority(4));
+    assert.equal(archived.agent.state, "archived");
+    assert.equal(archived.dataDeleted, false);
+    const stopCount = value.effects.stopped.length;
+    const changeCount = value.effects.profileChanges.length;
+    assert.deepEqual(await makeMcp().handle("native_agent_archive", args, authority(4)), archived);
+    assert.equal(value.effects.stopped.length, stopCount);
+    assert.equal(value.effects.profileChanges.length, changeCount);
+    const restored = await value.controller.handle("agent.restore", { operationId: "mcp-restore",
+      profileId: created.profile.id, expectedUpdatedAt: archived.agent.updatedAt, createdAt: value.clock.value });
+    assert.equal(restored.profile.name, "星帆新名称");
+    assert.equal(restored.profile.enabled, true);
+    assert.equal(value.productStore.getWorkRun(activeRun.id).status, "canceled");
+  } finally { await closeFixture(value); }
+}
+
 (async () => {
   const tests = [
     ["protocol exactness", testProtocol],
     ["CRUD replay and guards", testCrudReplayAndGuards],
     ["pending recovery", testPendingRecovery],
+    ["native MCP management, recovery and data retention", testNativeMcpManagement],
     ["store identity uniqueness", testStoreIdentityUniqueness],
     ["service resource wiring and restart", testServiceResourceWiringAndRestart],
   ];

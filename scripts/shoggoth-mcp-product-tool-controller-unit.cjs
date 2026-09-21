@@ -239,6 +239,7 @@ function makeFixture(overrides = {}) {
   };
   const productStore = {
     getAgentProfile(id) { calls.push(["profile.get", id]); return structuredClone(profiles.get(id) || null); },
+    listAgentProfiles() { return [...profiles.values()].map((item) => structuredClone(item)); },
     addRunNote(note) { calls.push(["note.add", structuredClone(note)]); addedNotes.push(note); return structuredClone(note); },
     lookupMcpToolCall(input) {
       calls.push(["mcp.lookup", structuredClone(input)]);
@@ -409,23 +410,64 @@ test("运行上下文以数据形式冻结 Agent Profile 名称与 Runtime", () 
   assert.match(instructions, /introduce yourself using only the active Agent Profile name/u);
   assert.match(instructions,
     /Do not mention Shoggoth App, product role, runtime, provider, or effective model in that introduction unless the user explicitly asks/u);
+  assert.doesNotMatch(instructions, /unnamespaced Codex request_user_input/u);
+  assert.throws(() => shoggothProductDeveloperInstructions({
+    source: "chat", sourceId: "session-identity", profileName: "Codex", runtime: "codex", backendId: "",
+  }), TypeError);
 });
 
-test("固定 80 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 80);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 80);
+test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定，能力查询与目录一致", async () => {
+  const f = makeFixture();
+  const source = { source: "chat", sourceId: "current-user-conversation" };
+  const calls = [
+    ["memory_search", { ...source, query: "" }],
+    ["memory_save", { ...source, expectedRevision: 0, content: "使用中文", scope: "user",
+      classification: "explicit", sourceQuote: "使用中文" }],
+    ["memory_forget", { ...source, id: "memory-1", expectedRevision: 1, sourceQuote: "忘记它" }],
+    ["agent_definition_read", { ...source, kind: "IDENTITY" }],
+    ["agent_definition_update", { ...source, kind: "IDENTITY", expectedRevision: 1,
+      oldText: "Shoggoth", newText: "Other", sourceQuote: "改名字" }],
+    ["computer_status", {}],
+    ["native_agent_get", { backendId: "codex", agentId: "target-agent" }],
+    ["native_agent_update", { ...source, backendId: "codex", agentId: "target-agent", name: "新名称", expectedUpdatedAt: 1 }],
+    ["native_agent_archive", { ...source, backendId: "codex", agentId: "target-agent", expectedUpdatedAt: 1 }],
+  ];
+  for (const federationClient of ["openclaw", "hermes"]) {
+    const trusted = authority({ federationClient, confirmation: true });
+    const beforeCalls = f.calls.length;
+    for (const [name, args] of calls) {
+      assert.equal(validateMcpProductToolArguments(name, args), true);
+      await expectCode(() => f.controller.handle(name, args, trusted), "MCP_TOOL_FORBIDDEN");
+    }
+    assert.equal(f.mcpCalls.size, 0, "refused external access must not create native durable writes");
+    assert.equal(f.calls.length, beforeCalls);
+    const projection = await f.controller.handle("app_capabilities", {}, trusted);
+    assert.equal(projection.capabilities.length, 71);
+    for (const [name] of calls) assert.equal(projection.capabilities.some((item) => item.tool === name), false);
+    assert.ok(projection.capabilities.some((item) => item.tool === "federation_agent_list"));
+  }
+});
+
+test("固定 95 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 95);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 95);
   for (const required of [
     "app_capabilities", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
     "cron_create", "cron_delete", "backend_status", "external_cron_list",
     "federation_agent_list", "federation_agent_get", "federation_agent_run",
     "federation_agent_message", "federation_task_get", "federation_task_cancel",
-    "skill_catalog", "skill_read", "system_application_search", "system_application_launch",
+    "skill_catalog", "skill_read", "skill_install_global",
+    "mcp_server_list", "mcp_server_register", "mcp_server_tools", "mcp_server_call", "mcp_server_remove",
+    "system_application_search", "system_application_launch",
     "system_open_url", "finder_open_folder", "computer_status", "computer_session_open", "computer_snapshot",
     "computer_click", "computer_type", "computer_key",
     "inspiration_list", "inspiration_get", "inspiration_create", "inspiration_update", "inspiration_delete",
     "inspiration_start", "inspiration_executions", "inspiration_cancel", "inspiration_growth_get", "inspiration_growth_set",
+    "memory_search", "memory_save", "memory_forget",
+    "agent_definition_read", "agent_definition_update",
+    "native_agent_create", "native_agent_get", "native_agent_update", "native_agent_archive",
   ]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(required), true, required);
-  for (const hidden of ["external_agent_list", "external_agent_get", "external_agent_run"]) {
+  for (const hidden of ["memory_confirm", "external_agent_list", "external_agent_get", "external_agent_run"]) {
     assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(hidden), false, hidden);
   }
   assert.equal(MCP_PRODUCT_TOOL_NAMES.some((name) => name.startsWith("browser_")), false);
@@ -459,7 +501,7 @@ test("固定 80 个模型可见产品工具及 strict object schemas，不暴露
   assert.deepEqual(PRODUCT_CAPABILITIES.filter(({ modelVisible }) => modelVisible !== false)
     .map(({ tool }) => tool), MCP_PRODUCT_TOOL_NAMES);
   for (const phrase of ["native Agent", "Kanban", "Cron", "Token usage", "OpenClaw/Hermes",
-    "mcp__shoggoth", "unnamespaced Codex request_user_input",
+    "mcp__shoggoth", "host product name",
     "backend_status", "uiTarget.href", "App-internal", "absolute http(s)", "UI-only", "skill_catalog", "skill_read",
     "current WorkRun workspace", "~/Downloads", "absolute path of every deliverable",
     "finder_open_folder", "macOS open command", ".app/Contents/MacOS",
@@ -624,7 +666,7 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 80);
+  assert.equal(capabilities.capabilities.length, 95);
   assert.equal(capabilities.capabilities.some((item) => item.tool === "cron_create"), true);
   assert.equal(capabilities.capabilities.some((item) => item.domain === "browser"), false);
   assert.equal(capabilities.lifecycle.nativeWhenAppQuit, true);
@@ -710,6 +752,95 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
   await expectCode(() => fixture.controller.handle("skill_read", {
     name: "careful-review", contentHash: "c".repeat(64), cursor: 0, maxBytes: 32,
   }, authorityFor("f")), "MCP_TOOL_NOT_FOUND");
+});
+
+test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 Agent 使用", async () => {
+  const extensionCalls = [];
+  const server = {
+    id: "fetch", name: "Fetch", command: "/Users/fixture/work/fetch",
+    args: ["-m", "mcp_server_fetch"], cwd: "/Users/fixture/work", enabled: true,
+  };
+  const nativeMcpStore = {
+    prepare(value) { extensionCalls.push(["prepare", structuredClone(value)]); return { ...value }; },
+    list() { return { revision: 1, servers: [] }; },
+    get() { return null; },
+    register(value) {
+      extensionCalls.push(["register", structuredClone(value)]);
+      return { revision: 2, server: { ...value.server, createdAt: 1, updatedAt: 1 }, replaced: false };
+    },
+    remove(value) { extensionCalls.push(["remove", structuredClone(value)]); return { revision: 3, removed: { ...server } }; },
+  };
+  const nativeMcpClientManager = {
+    async probe(value) { extensionCalls.push(["probe", structuredClone(value)]); return [{ name: "fetch", description: "Fetch", inputSchema: { type: "object" } }]; },
+    async listTools(id) { extensionCalls.push(["tools", id]); return [{ name: "fetch", description: "Fetch", inputSchema: { type: "object" } }]; },
+    async callTool(id, name, args) { extensionCalls.push(["call", id, name, structuredClone(args)]); return { content: [{ type: "text", text: "ok" }] }; },
+    async closeServer(id) { extensionCalls.push(["close", id]); },
+  };
+  const skillStore = {
+    catalog() { return { registryRevision: "a".repeat(64), profileRevision: 1, items: [], ineligible: [] }; },
+    read() { throw new Error("not used"); },
+    installGlobalFromDirectory(value) {
+      extensionCalls.push(["skill.install", structuredClone(value)]);
+      return { revision: 2, package: { id: "shared", name: "shared", version: "1.0.0" },
+        enabledProfiles: value.profileIds, failedProfiles: [], availableToFutureProfiles: true, complete: true };
+    },
+  };
+  const fixture = makeFixture({ nativeMcpStore, nativeMcpClientManager, skillStore });
+  fixture.profiles.get(OTHER_PROFILE_ID).enabled = false;
+
+  const installed = await fixture.controller.handle("skill_install_global", {
+    sourcePath: "/Users/fixture/work/shared-skill", expectedRevision: 1,
+  }, authorityFor("1"));
+  assert.equal(installed.complete, true);
+  assert.deepEqual(installed.enabledProfiles.sort(), [OTHER_PROFILE_ID, PROFILE_ID].sort());
+
+  const registered = await fixture.controller.handle("mcp_server_register", {
+    expectedRevision: 1, ...server,
+  }, authorityFor("2"));
+  assert.equal(registered.toolCount, 1);
+  assert.deepEqual(registered.toolNames, ["fetch"]);
+  assert.deepEqual(await fixture.controller.handle("mcp_server_tools", {
+    serverId: "fetch", cursor: 0, limit: 20,
+  }, authorityFor("3")), {
+    serverId: "fetch", items: [{ name: "fetch", description: "Fetch", inputSchema: { type: "object" } }],
+    nextCursor: 1, hasMore: false,
+  });
+  assert.deepEqual(await fixture.controller.handle("mcp_server_call", {
+    serverId: "fetch", toolName: "fetch", arguments: { url: "https://example.com" },
+  }, authorityFor("4")), {
+    serverId: "fetch", toolName: "fetch", result: { content: [{ type: "text", text: "ok" }] },
+  });
+  await fixture.controller.handle("mcp_server_remove", { id: "fetch", expectedRevision: 2 }, authorityFor("5"));
+  assert.equal(extensionCalls.some(([kind]) => kind === "skill.install"), true);
+  assert.equal(extensionCalls.some(([kind]) => kind === "probe"), true);
+  assert.equal(extensionCalls.some(([kind]) => kind === "call"), true);
+
+  const external = authorityFor("6");
+  external.federationClient = "openclaw";
+  assert.deepEqual(await fixture.controller.handle("mcp_server_list", {}, external), {
+    revision: 1, servers: [],
+  });
+
+  let hostileRegistered = false;
+  const hostile = makeFixture({
+    nativeMcpStore: {
+      prepare(value) { return { ...value }; },
+      list() { return { revision: 1, servers: [] }; },
+      get() { return null; },
+      register() { hostileRegistered = true; return { revision: 2 }; },
+      remove() { throw new Error("not used"); },
+    },
+    nativeMcpClientManager: {
+      async probe() { return [{ name: "fetch", inputSchema: null }]; },
+      async listTools() { return []; },
+      async callTool() { throw new Error("not used"); },
+      async closeServer() {},
+    },
+  });
+  await expectCode(() => hostile.controller.handle("mcp_server_register", {
+    expectedRevision: 1, ...server,
+  }, authorityFor("7")), "MCP_TOOL_RESPONSE_INVALID");
+  assert.equal(hostileRegistered, false);
 });
 
 test("System Host 工具走 Service Controller，写操作 durable replay 且拒绝伪造响应", async () => {
@@ -1776,6 +1907,83 @@ test("hostile Error code accessor 不执行并固定 fail-closed；最终结果�
     const result = await normal.controller.handle(name, args, authorityFor(callIndex));
     assert(Buffer.byteLength(JSON.stringify({ id: "\0".repeat(256), ok: true, result })) <= 64 * 1024,
       `${name} response must fit worst-case frame`);
+  }
+});
+
+test("本地 Agent 管理拒绝空更新、越界目标、额外字段和非数据输入", () => {
+  const create = { backendId: "shoggoth", name: "测试", workspace: null, source: "chat", sourceId: "session-a",
+    identity: "辅助助理，协助完成任务。" };
+  assert.equal(validateMcpProductToolArguments("native_agent_create", create), true);
+  for (const args of [{ ...create, name: " " }, { ...create, identity: " " }, { ...create, identity: "x".repeat(8193) },
+    { ...create, runtimeAccountId: "secret-account" }, { ...create, workspace: "../escape" },
+    { ...create, backendId: "hermes" }, { ...create, get identity() { assert.fail("must not invoke getter"); } }]) {
+    assert.equal(validateMcpProductToolArguments("native_agent_create", args), false);
+  }
+  const base = { backendId: "codex", agentId: "target-agent", source: "chat", sourceId: "session-a", expectedUpdatedAt: 1 };
+  for (const args of [null, [], {}, base, { ...base, name: " " }, { ...base, workspace: "relative" },
+    { ...base, name: "Valid", providerRef: "unexpected" }, { ...base, name: "Valid", agentId: "a".repeat(129) },
+    { ...base, workspace: null, backendId: "hermes" }, { ...base, get name() { assert.fail("must not invoke getter"); } }]) {
+    assert.equal(validateMcpProductToolArguments("native_agent_update", args), false);
+  }
+  assert.equal(validateMcpProductToolArguments("native_agent_update", { ...base, workspace: null }), true);
+});
+
+test("本地 Agent 通过 MCP 读取、修改和归档，保留确认与版本边界", async () => {
+  let fixture;
+  const lifecycleCalls = [];
+  fixture = makeFixture({ agentLifecycleService: { async handle(method, params) {
+    lifecycleCalls.push([method, structuredClone(params)]);
+    const target = fixture.profiles.get(OTHER_PROFILE_ID);
+    if (method === "agent.lifecycle.list") return { agents: [...fixture.profiles.values()].map(profile => ({
+      profile: structuredClone(profile), state: profile.enabled ? "active" : "archived", pendingOperationId: null,
+    })) };
+    assert.equal(params.profileId, OTHER_PROFILE_ID);
+    assert.equal(params.expectedUpdatedAt, target.updatedAt);
+    assert.match(params.operationId, /^mcp-v1-/u);
+    if (method === "agent.update") Object.assign(target, { name: params.name, defaultCwd: params.defaultCwd });
+    else { assert.equal(method, "agent.archive"); target.enabled = false; }
+    target.updatedAt += 1;
+    return { profile: structuredClone(target) };
+  } } });
+  const selector = { backendId: "grok-build", agentId: "agent-other" };
+  const context = { source: "kanban", sourceId: CARD_ID };
+  const read = await fixture.controller.handle("native_agent_get", selector, authorityFor("1"));
+  assert.equal(read.agent.updatedAt, 2);
+  assert.doesNotMatch(JSON.stringify(read), /private-provider|runtimeProfileId|permissionPolicy/u);
+  fixture.profiles.get(OTHER_PROFILE_ID).isDefault = true;
+  await expectCode(() => fixture.controller.handle("native_agent_archive", { ...selector, ...context,
+    expectedUpdatedAt: 2 }, authorityFor("5")), "AGENT_PROTECTED");
+  fixture.profiles.get(OTHER_PROFILE_ID).isDefault = false;
+  const caller = fixture.profiles.get(PROFILE_ID);
+  caller.isDefault = false;
+  await expectCode(() => fixture.controller.handle("native_agent_archive", { ...context,
+    backendId: caller.backendId, agentId: caller.agentId, expectedUpdatedAt: caller.updatedAt }, authorityFor("6")), "AGENT_ACTIVE_RUNS");
+  const update = { ...selector, ...context, expectedUpdatedAt: 2, name: "星帆" };
+  await expectCode(() => fixture.controller.handle("native_agent_update", update, authority()), "MCP_TOOL_CONFIRMATION_REQUIRED");
+  const changed = await fixture.controller.handle("native_agent_update", update, authorityFor("2"));
+  assert.equal(changed.agent.name, "星帆");
+  assert.equal(changed.agent.workspace, "/private/default-cwd");
+  const archive = { ...selector, ...context, expectedUpdatedAt: 3 };
+  await expectCode(() => fixture.controller.handle("native_agent_archive", archive, authority({ federationClient: "hermes" })), "MCP_TOOL_FORBIDDEN");
+  await expectCode(() => fixture.controller.handle("native_agent_archive", { ...archive, expectedUpdatedAt: 2 }, authorityFor("3")), "AGENT_PROFILE_CONFLICT");
+  const archived = await fixture.controller.handle("native_agent_archive", archive, authorityFor("4"));
+  assert.equal(archived.agent.state, "archived");
+  assert.equal(archived.recoverable, true);
+  assert.equal(archived.dataDeleted, false);
+  assert.deepEqual(await fixture.controller.handle("native_agent_archive", archive, authorityFor("4")), archived);
+  assert.equal(lifecycleCalls.filter(([method]) => method === "agent.archive").length, 1);
+});
+
+test("Computer Use 的权限、驱动和读取错误保留安全的具体错误码", async () => {
+  for (const code of ["COMPUTER_PERMISSION_REQUIRED", "COMPUTER_DRIVER_UNAVAILABLE", "COMPUTER_PERMISSION_STATUS_FAILED"]) {
+    const stub = Object.fromEntries(["status", "create", "resume", "closeSession", "applicationList", "windowList", "snapshot", "focus", "action"]
+      .map(name => [name, () => { throw Object.assign(new Error("private diagnostic canary"), { code }); }]));
+    const fixture = makeFixture({ computerUseController: stub });
+    await assert.rejects(() => fixture.controller.handle("computer_status", {}, authority()), error => {
+      assert.equal(error.code, code);
+      assert.doesNotMatch(error.message, /canary/u);
+      return true;
+    });
   }
 });
 

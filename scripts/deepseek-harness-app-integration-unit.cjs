@@ -360,6 +360,7 @@ async function main() {
       maxAttachments: 8,
       maxPromptBytes: 60 * 1024,
       slash: true,
+      steer: true,
       modelProvider: "deepseek-harness",
       modelScope: deepSeekHarnessSpec.id,
       permissions: undefined,

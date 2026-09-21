@@ -336,6 +336,7 @@ async function main() {
     assert.deepEqual({ ...chatCapabilities, permissions: undefined }, {
       attachments: {},
       slash: true,
+      steer: true,
       modelProvider: "pi",
       modelScope: piSpec.id,
       permissions: undefined,

@@ -69,12 +69,6 @@
   color: light-dark(oklch(39% 0.08 65), oklch(82% 0.07 84));
 }
 
-.loading {
-  display: grid;
-  min-height: 320px;
-  place-items: center;
-}
-
 .boardScroller {
   width: 100%;
   overflow-x: auto;

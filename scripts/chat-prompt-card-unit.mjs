@@ -5,11 +5,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import vm from "node:vm";
-import ts from "typescript";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const componentPath = path.join(ROOT, "app/manage-ui/src/pages/ChatPromptCard.tsx");
 const uiRequire = createRequire(path.join(ROOT, "app/manage-ui/package.json"));
+const ts = uiRequire("typescript");
 const React = uiRequire("react");
 const TestRenderer = uiRequire("react-test-renderer");
 
@@ -154,6 +154,82 @@ assert.deepEqual(structuredClone(replies.map(({ data }) => data)), [{
   action: "submit", answers: { region: "cn-north" },
 }], "UI 必须提交 option value，且同事件循环双击只能响应一次");
 renderer.unmount();
+
+const confirmationMessage = "删除后其配置可能无法恢复，确定要删除吗？";
+const confirmationEntry = {
+  id: "confirmation", version: 1, requestId: "confirmation-request", runId: "confirmation-run",
+  kind: "user_input", title: "需要补充信息", message: confirmationMessage,
+  fields: [{ id: "confirm_delete", type: "choice", label: "确认删除", description: confirmationMessage,
+    required: true, secret: false, options: [
+      { value: "确定删除 (Recommended)", label: "确定删除 (Recommended)", description: "永久删除这个 AI 助理。" },
+      { value: "cancel-value", label: "取消", description: "保留助理，不做任何更改。" },
+    ] }], approvalChoices: [], expiresAt: null,
+};
+for (const kind of ["user_input", "product_confirmation"]) {
+  for (const index of [0, 1]) {
+    const responses = [];
+    TestRenderer.act(() => {
+      renderer = TestRenderer.create(React.createElement(ChatPromptCard, {
+        entry: { ...confirmationEntry, kind }, onRespond: (_entry, data) => { responses.push(data); },
+      }));
+    });
+    const buttons = renderer.root.findAllByType("button");
+    assert.deepEqual(buttons.map(visibleTextOf), ["确定删除", "取消"],
+      "both model questions and product confirmations need exactly two direct actions");
+    assert.equal(responses.length, 0, "mounting a confirmation must never submit or preselect an answer");
+    assert.equal(visibleTextOf(renderer.toJSON()).split(confirmationMessage).length - 1, 1,
+      "duplicate message and field descriptions must appear only once");
+    assert.equal(renderer.root.findAllByProps({ className: "chat-prompt__desc" }).length, 0,
+      "confirmation buttons must not have a second explanatory row");
+    assert.equal(buttons[0].props.title, "永久删除这个 AI 助理。", "option hints remain available on hover");
+    assert.equal(buttons[0].props["aria-pressed"], undefined, "confirmation controls are actions, not selected answers");
+    await TestRenderer.act(async () => { buttons[index].props.onClick(); buttons[index].props.onClick(); });
+    assert.deepEqual(structuredClone(responses), [{ action: "submit", answers: {
+      confirm_delete: confirmationEntry.fields[0].options[index].value,
+    } }], "each action must immediately submit its exact original value once, including Cancel");
+    renderer.unmount();
+  }
+}
+
+let rejectConfirmation;
+const confirmationResponses = [];
+TestRenderer.act(() => {
+  renderer = TestRenderer.create(React.createElement(ChatPromptCard, {
+    entry: confirmationEntry,
+    onRespond: (_entry, data) => {
+      confirmationResponses.push(data);
+      return new Promise((_resolve, reject) => { rejectConfirmation = reject; });
+    },
+  }));
+});
+TestRenderer.act(() => renderer.root.findAllByType("button")[0].props.onClick());
+assert.ok(renderer.root.findAllByType("button").every((button) => button.props.disabled),
+  "confirmation actions must be disabled while the response is in flight");
+await TestRenderer.act(async () => { rejectConfirmation(new Error("response failed")); });
+assert.ok(renderer.root.findAllByType("button").every((button) => !button.props.disabled),
+  "failed confirmation submissions must remain retryable");
+TestRenderer.act(() => renderer.root.findAllByType("button")[1].props.onClick());
+assert.equal(confirmationResponses.length, 2, "the user can choose Cancel after a failed confirmation");
+await TestRenderer.act(async () => { rejectConfirmation(new Error("response failed")); });
+renderer.unmount();
+
+for (const fields of [
+  [{ ...confirmationEntry.fields[0], options: [{ value: "a", label: "A" }, { value: "b", label: "B" }] }],
+  [{ ...confirmationEntry.fields[0], secret: true }],
+  [confirmationEntry.fields[0], { id: "reason", type: "text", label: "原因", description: "", required: false, secret: false, options: [] }],
+]) {
+  const responses = [];
+  TestRenderer.act(() => {
+    renderer = TestRenderer.create(React.createElement(ChatPromptCard, {
+      entry: { ...confirmationEntry, fields }, onRespond: (_entry, data) => { responses.push(data); },
+    }));
+  });
+  assert.ok(renderer.root.findAllByType("button").some((button) => visibleTextOf(button) === "chat.promptSubmit"),
+    "ordinary choices, secret fields and multi-field forms must keep explicit submission");
+  TestRenderer.act(() => renderer.root.findAllByType("button")[0].props.onClick());
+  assert.equal(responses.length, 0, "ordinary form selections must not submit the form");
+  renderer.unmount();
+}
 
 TestRenderer.act(() => {
   renderer = TestRenderer.create(React.createElement(ChatPromptCard, {

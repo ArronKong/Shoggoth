@@ -105,7 +105,8 @@ for (const backendId of ["openclaw", "hermes"]) test(`${backendId}: Service owns
   assert.match(prompts[0].message, /工作目录：\n\/tmp\/inspiration-fixture/);
   assert.equal(calls.filter(call => call.method === "inspiration.executions").length, 1);
   assert.deepEqual(events.filter(event => event[0] === "promptExpire").map(event => event[1]), [{ requestId: request.requestId }]);
-  assert.deepEqual(events.at(-1), ["final", "Fixture finished", false, { runId: execution.runId }]);
+  assert.deepEqual(events.at(-1), ["final", "Fixture finished", false,
+    { runId: execution.runId, notificationCategory: "inspiration" }]);
   const count = calls.length;
   await assert.rejects(route.sendMessage(target.sessionKey, "Attachment", "client-other", {}, { attachments: [{}] }), /附件/);
   assert.equal(calls.length, count);

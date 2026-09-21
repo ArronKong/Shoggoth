@@ -26,8 +26,8 @@
   font-weight: 400;
   font-display: swap;
 }
-.typeface { --note-font-family: 'Courier Prime', 'Source Han Serif CN', 'Songti SC', 'SimSun', serif; font-family: var(--note-font-family); }
-.typeface:lang(zh) { --note-font-family: 'ChillKai', 'Source Han Serif CN', 'Songti SC', 'SimSun', serif; }
+/* Courier Prime supplies Latin glyphs; Chinese falls through to ChillKai in every UI locale. */
+.typeface { --note-font-family: 'Courier Prime', 'ChillKai', 'Source Han Serif CN', 'Songti SC', 'SimSun', serif; font-family: var(--note-font-family); }
 .surface {
   composes: typeface;
   --note-font-size: 12px;

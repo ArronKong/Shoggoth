@@ -3,9 +3,7 @@
 // Keep the route's loading state until its actual fonts are ready to paint.
 export async function loadInspirationFonts() {
   if (!document.fonts) return;
-  const chinese = document.documentElement.lang.toLowerCase().startsWith('zh');
-  const faces = chinese
-    ? ['400 12px "ChillKai"']
-    : ['400 12px "Courier Prime"', '700 12px "Courier Prime"', '400 12px "Source Han Serif CN"'];
+  // Every locale can contain mixed Chinese and English notes.
+  const faces = ['400 12px "Courier Prime"', '700 12px "Courier Prime"', '400 12px "ChillKai"'];
   await Promise.allSettled(faces.map(face => document.fonts.load(face, '灵感 Spark Notes')));
 }

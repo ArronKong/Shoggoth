@@ -17,14 +17,14 @@ const cronPage = readSource("app/manage-ui/src/pages/CronPage.tsx");
 // Cron 轮询发现新运行记录时，通知必须携带统一任务 ID，点击后才能识别目标任务。
 assert.match(
   notifier,
-  /category:\s*"cron",[\s\S]*?target:\s*j\.id/,
-  "Cron 通知必须把 job.id 作为 target 传给桌面端",
+  /kind:\s*"cron",\s*jobId:\s*j\.id,\s*backendId:\s*j\.backendId/,
+  "Cron 通知必须携带任务 ID 和后端身份",
 );
 
 // 点击事件需编码任务 ID 到 HashRouter 可解析的查询参数，特殊字符不能破坏路由。
 assert.match(
   notifier,
-  /window\.location\.hash\s*=\s*target\s*\?\s*`#\/cron\?job=\$\{encodeURIComponent\(target\)\}`\s*:\s*"#\/cron"/,
+  /#\/cron\?job=\$\{encodeURIComponent\(jobId\)\}/,
   "Cron 通知点击后必须跳转到携带编码 job 参数的详情深链",
 );
 
@@ -32,7 +32,7 @@ assert.match(
 assert.match(cronPage, /useSearchParams\(\)/, "Cron 页面必须读取通知深链中的 job 参数");
 assert.match(
   cronPage,
-  /jobs\.find\(\(job\)\s*=>\s*job\.id\s*===\s*notificationJobId\)/,
+  /jobs\.find\(\(job\)\s*=>\s*job\.id\s*===\s*notificationJobId\s*&&\s*\(!notificationBackendId\s*\|\|\s*job\.backendId\s*===\s*notificationBackendId\)\)/,
   "Cron 页面必须按通知目标定位任务",
 );
 assert.match(cronPage, /void openView\(notificationJob\)/, "定位到任务后必须复用现有详情弹窗打开逻辑");

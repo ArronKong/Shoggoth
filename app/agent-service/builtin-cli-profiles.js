@@ -72,7 +72,7 @@ function createProfile(spec) {
       approvalPolicy: "on-request",
       sandbox: "danger-full-access",
     },
-    concurrency: { maxActive: 1, maxWorkspaceWrites: 1 },
+    concurrency: { maxActive: require("./execution-policy").profile, maxWorkspaceWrites: require("./execution-policy").profile },
     isDefault: false,
     enabled: true,
     createdAt: null,

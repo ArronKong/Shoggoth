@@ -433,9 +433,10 @@ function testStructuredAccountRateLimitBackoff() {
   });
   assert.deepEqual(exhausted, {
     known: true,
-    type: "account_backoff",
+    type: "account_unavailable",
     method: "account/rateLimits/updated",
     retryAt: secondaryResetSeconds * 1_000,
+    errorCode: "RUNTIME_QUOTA_EXHAUSTED",
   });
 
   const sparse = accountRateLimitRetryAt({
@@ -471,6 +472,73 @@ function testStructuredAccountRateLimitBackoff() {
     primary: { usedPercent: 1, resetsAt: primaryResetSeconds },
     retryAt: secondaryResetSeconds * 1_000,
   }, now), null);
+}
+
+function testExhaustedPlanWithCreditsRemainsAvailable() {
+  const now = Date.now();
+  const resetsAt = Math.ceil((now + 4 * 24 * 60 * 60 * 1000) / 1000);
+  const snapshot = {
+    limitId: "codex",
+    primary: { usedPercent: 100, windowDurationMins: 10080, resetsAt },
+    secondary: null,
+    credits: { hasCredits: true, unlimited: false, balance: "1000" },
+    spendControlReached: false,
+    individualLimit: null,
+    rateLimitReachedType: null,
+  };
+  const event = (rateLimits) => normalizeCodexEvent({
+    method: "account/rateLimits/updated", params: { rateLimits },
+  });
+  for (const credits of [snapshot.credits, { hasCredits: true, unlimited: false, balance: null },
+    { hasCredits: false, unlimited: true, balance: null }]) {
+    const value = { ...snapshot, credits };
+    assert.equal(accountRateLimitRetryAt(value, now), null, "available credits must bypass exhausted plan windows");
+    assert.deepEqual(event(value), {
+      known: true, type: "account_available", method: "account/rateLimits/updated",
+    });
+  }
+  for (const credits of [null, undefined, [], {},
+    { hasCredits: "true", unlimited: "true", balance: "1000" }]) {
+    assert.equal(accountRateLimitRetryAt({ ...snapshot, credits }, now), null,
+      "unknown credit state cannot prove that plan exhaustion blocks usage");
+    assert.equal(event({ ...snapshot, credits }).type, "account_rate_limits");
+  }
+  assert.equal(accountRateLimitRetryAt({ ...snapshot,
+    credits: { hasCredits: false, unlimited: false, balance: "0" } }, now), resetsAt * 1000);
+  for (const rateLimitReachedType of ["rate_limit_reached", "workspace_owner_credits_depleted",
+    "workspace_member_credits_depleted", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached"]) {
+    assert.equal(event({ ...snapshot, rateLimitReachedType }).type, "account_unavailable",
+      "an explicit backend restriction takes precedence over credits");
+  }
+  const spendReset = Math.ceil((now + 60_000) / 1000);
+  assert.equal(accountRateLimitRetryAt({ ...snapshot, spendControlReached: true,
+    individualLimit: { resetsAt: spendReset } }, now), spendReset * 1000,
+  "credits do not bypass spend control or make it wait for an unrelated plan reset");
+  for (const spendControlReached of [null, undefined]) {
+    assert.equal(event({ ...snapshot, spendControlReached }).type, "account_rate_limits",
+      "sparse spend-control metadata cannot clear an existing cooldown");
+  }
+  assert.equal(event({ ...snapshot, rateLimitReachedType: undefined }).type, "account_rate_limits");
+  assert.equal(event({ ...snapshot, credits: null,
+    primary: { usedPercent: 0, resetsAt }, secondary: null }).type, "account_available",
+  "a complete reset snapshot can recover quota backoff without spending credits");
+  assert.equal(event({ ...snapshot, credits: null,
+    primary: { usedPercent: 0, resetsAt }, secondary: undefined }).type, "account_rate_limits");
+  assert.deepEqual(event({ credits: { hasCredits: false, unlimited: false },
+    primary: { usedPercent: 100, resetsAt: null } }), {
+    known: true, type: "account_unavailable", method: "account/rateLimits/updated",
+    retryAt: null, errorCode: "RUNTIME_QUOTA_EXHAUSTED",
+  }, "a missing reset must not hide confirmed quota exhaustion");
+  assert.equal(event({ spendControlReached: true, individualLimit: null }).errorCode,
+    "RUNTIME_SPENDING_LIMIT_REACHED");
+  assert.equal(event({ rateLimitReachedType: "workspace_owner_credits_depleted" }).errorCode,
+    "RUNTIME_QUOTA_EXHAUSTED");
+  assert.equal(event({ rateLimitReachedType: "rate_limit_reached",
+    primary: { usedPercent: 20, resetsAt } }).type, "account_backoff",
+  "a generic transient limit without quota exhaustion still queues");
+  assert.equal(event({ credits: { hasCredits: false, unlimited: false },
+    primary: { usedPercent: 100, resetsAt: Math.floor(now / 1000) - 1 } }).type, "account_rate_limits",
+  "an already expired usage window cannot reject new work");
 }
 
 function testPublicThreadUsageIsExactStableAndSecretFree() {
@@ -611,6 +679,7 @@ function main() {
     testConfiguredSnapshotLimitCountsTheEntireFinalJson,
     testAccountNotificationsAreStableBoundedSummaries,
     testStructuredAccountRateLimitBackoff,
+    testExhaustedPlanWithCreditsRemainsAvailable,
     testPublicThreadUsageIsExactStableAndSecretFree,
     testInternalRawUsageIsDiagnosticOnlyAndSecretFree,
   ];

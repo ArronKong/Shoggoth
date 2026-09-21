@@ -135,6 +135,15 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     profileSelection: "agents/<profileId>/skills/manifest.json",
     runtimeProjection: "ContextCompiler + authorized MCP injection (no Runtime Home materialization)",
   }),
+  mcpExtensions: Object.freeze({
+    owner: "shoggoth",
+    classification: "authority",
+    source: "NativeMcpStore",
+    registry: "mcp-servers/registry.json",
+    childProcesses: "ephemeral runtime state; recreated lazily from the registry",
+    runtimeProjection: "shared Shoggoth MCP proxy for native and bridged OpenClaw/Hermes Agents",
+    externalOwnership: "OpenClaw/Hermes-owned MCP and Skill configuration remains independent",
+  }),
   nativeRuntimeImport: Object.freeze({
     owner: "shoggoth",
     classification: "legacyCompatibility",
@@ -299,7 +308,8 @@ function validateDataAuthorityManifest(manifest) {
     || !manifest.runtime?.deepSeekHarnessIntegration
     || !manifest.runtime?.deepSeekHarnessLedger
     || !manifest.transcript || !manifest.definition
-    || !manifest.memory || !manifest.tools || !manifest.skills || !manifest.nativeRuntimeImport
+    || !manifest.memory || !manifest.tools || !manifest.skills || !manifest.mcpExtensions
+    || !manifest.nativeRuntimeImport
     || !manifest.computer || !manifest.upgrade
     || !manifest.backends?.shoggoth || !manifest.backends?.openclaw
     || !manifest.backends?.hermes) {

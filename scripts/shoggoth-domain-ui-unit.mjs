@@ -37,15 +37,20 @@ async function compileTarget(relativePath, name) {
   };
 }
 
-// Registry catalog 的静态首帧 fallback 必须包含全部平级 backend。
+// Registry catalog 的静态首帧 fallback 必须包含发布策略允许的全部平级 backend。
 {
   const compiled = await compileTarget("app/manage-ui/src/lib/backends.ts", "backends");
   try {
     const descriptors = compiled.mod.FALLBACK_BACKEND_DESCRIPTORS;
+    const releasePolicy = JSON.parse(fs.readFileSync(path.join(ROOT, "app/release-policy.json"), "utf8"));
+    const expectedBackends = [
+      "openclaw", "hermes", "shoggoth", "codex", "grok-build", "antigravity",
+      "pi", "claude-code", "deepseek-harness",
+    ].filter((id) => !releasePolicy.disabledRuntimes.includes(id));
     check(
-      "全局 backend fallback 包含所有平级 native runtime",
+      "全局 backend fallback 包含发布策略允许的所有平级 runtime",
       compiled.mod.BACKENDS?.map((backend) => backend.id).join(",")
-        === "openclaw,hermes,shoggoth,codex,grok-build,antigravity,pi,claude-code,deepseek-harness",
+        === expectedBackends.join(","),
     );
     check(
       "native descriptor 统一声明 cron/kanban/agentHarness surfaces",
@@ -94,7 +99,7 @@ async function compileTarget(relativePath, name) {
     /surfaces\.agentHarness === true/u.test(agents)
       && /agentLifecycle\?\.create === true/u.test(agents)
       && /readOnly=\{!canUpdateAgent\}/u.test(agents)
-      && /canRestoreAgent/u.test(agents),
+      && !/agents\.archivedAgents|const doRestore|canRestoreAgent/u.test(agents),
   );
   check(
     "AI 助理两种详情均显示灵感便签并移除看板入口",

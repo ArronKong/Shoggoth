@@ -163,7 +163,7 @@ class ProviderRuntimeBridge {
           kind: provider.kind,
           name: provider.name,
           baseUrl: provider.baseUrl,
-          model: provider.model,
+          model: provider.kind === "custom-responses" ? profile.defaultModel ?? provider.model : provider.model,
           headers: provider.headers,
           awsRegion: provider.awsRegion,
           awsProfile: provider.awsProfile,

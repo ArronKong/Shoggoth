@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 // 管理页在路由切换时整页卸载重挂（App.tsx 只保活 ChatPage），每次进页都要重拉
 // 数据、过一遍加载态。这里是全站统一的 stale-while-revalidate：结果留在模块级
@@ -6,11 +6,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // 即首帧渲染旧数据，effect 照常后台刷新并回写；fetch 完成时即使组件已卸载也落
 // 缓存（首次加载中途切走，扫完回来仍秒开）。refresh() 写穿缓存且不进加载态，
 // 供变更操作后与手动刷新键调用。
-// 注：UsagePage 先于本 hook 手写了同款模式（多一层 cacheStatus=refreshing 的
-// 15s 重拉特判），工作良好，暂不迁移。
+// 连接配置变化通过 invalidatePageCache 统一失效，不删除用户数据或草稿。
 const PAGE_CACHE_LIMIT = 64;
 const cache = new Map<string, unknown>();
 const generations = new Map<string, number>();
+let cacheRevision = 0;
+const revisionListeners = new Set<() => void>();
+const readRevision = () => cacheRevision;
+const subscribeRevision = (listener: () => void) => {
+  revisionListeners.add(listener);
+  return () => { revisionListeners.delete(listener); };
+};
+
+// A saved connection change invalidates mounted pages and pages revisited later.
+// Revision-qualified keys also prevent old requests from repopulating the cache.
+export function invalidatePageCache(): void {
+  cacheRevision += 1;
+  cache.clear();
+  generations.clear();
+  for (const listener of revisionListeners) listener();
+}
 
 // generation 让同 key 的本地 mutation 可以淘汰更早发出的迟到 GET。
 function generationOf(key: string): number {
@@ -57,7 +72,9 @@ export type PageCache<T> = {
   replace: (next: T) => void;
 };
 
-export function usePageCache<T>(key: string, fetcher: () => Promise<T>): PageCache<T> {
+export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>): PageCache<T> {
+  const revision = useSyncExternalStore(subscribeRevision, readRevision, readRevision);
+  const key = `${revision}:${resourceKey}`;
   // fetcher 是每次渲染新建的闭包：走 ref 出依赖，只在 key 变化时重新拉。
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;

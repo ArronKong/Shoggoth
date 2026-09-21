@@ -117,7 +117,10 @@ test("按本地日、Agent、模型与会话汇总真实 token 分项", () => {
     assert.equal(today.series.totals.cacheReadTokens, 40);
     assert.equal(today.series.totals.cacheWriteTokens, 10);
     assert.equal(today.series.totals.reasoningTokens, 20);
-    assert.equal(today.series.totals.missingCostEntries, 1);
+    assert.equal(today.series.totals.missingCostEntries, 0);
+    assert.equal(today.series.totals.estimatedCostEntries, 1);
+    assert.equal(today.series.totals.totalCost, (50 * 4 + 40 * 0.4 + 10 * 5 + 50 * 20) / 1e6);
+    assert.equal(today.breakdown.topSessions[0].totalCost, today.series.totals.totalCost);
 
     const month = store.summarize("30d");
     assert.equal(month.series.totals.totalTokens, 180);
@@ -220,6 +223,27 @@ test("长区间按周/月收敛且排行始终落在单帧预算内", () => {
     assert.ok(Buffer.byteLength(JSON.stringify(all.series), "utf8") <= MAX_USAGE_RESULT_BYTES);
     assert.ok(Buffer.byteLength(JSON.stringify(all.breakdown), "utf8") <= MAX_USAGE_RESULT_BYTES);
     store.close();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("reported cost overrides estimates, zero is valid, unknown prices stay missing and old rows remain readable", () => {
+  const { root, paths } = fixture();
+  const now = new Date(2026, 0, 10, 12).getTime();
+  try {
+    const store = new TokenUsageStore({ paths, now: () => now }).open();
+    store.record(usage({ responseId: "old-format" }));
+    store.record(usage({ responseId: "paid", costUsd: 0.25 }));
+    store.record(usage({ responseId: "free", costUsd: 0 }));
+    store.record(usage({ responseId: "unknown", model: "unknown-model" }));
+    assert.throws(() => store.record(usage({ costUsd: -1 })), { code: "TOKEN_USAGE_INVALID" });
+    const totals = store.summarize("today").series.totals;
+    assert.equal(totals.missingCostEntries, 1);
+    assert.equal(totals.estimatedCostEntries, 1);
+    assert.ok(totals.totalCost > 0.25 && totals.totalCost < 0.26);
+    store.close();
+    const reopened = new TokenUsageStore({ paths, now: () => now }).open();
+    assert.deepEqual(reopened.summarize("today").series.totals, totals);
+    reopened.close();
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

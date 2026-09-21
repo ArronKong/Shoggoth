@@ -133,6 +133,19 @@ test("显式状态机接受合法迁移、更新时间与事件 seq 单调，拒
   store.close();
 });
 
+test("已确认的额度拒绝可在 queued 阶段失败，不伪造开始时间或占用执行槽", () => {
+  const { store, dispatcher } = fixture(() => 1000);
+  dispatcher.enqueue(runInput("quota-rejected"));
+  const rejected = dispatcher.transition("quota-rejected", "failed", { errorCode: "RUNTIME_QUOTA_EXHAUSTED" });
+  assert.equal(rejected.startedAt, null);
+  assert.equal(rejected.finishedAt, 1000);
+  assert.equal(rejected.eventSeq, 2);
+  assert.throws(() => dispatcher.admit(rejected.id), { code: "WORK_RUN_NOT_QUEUED" });
+  dispatcher.enqueue(runInput("quota-retry"));
+  assert.equal(dispatcher.admit("quota-retry").disposition, "started");
+  store.close();
+});
+
 test("queued -> starting 只能经过 admit，public transition 不得绕过准入", () => {
   const { store, dispatcher } = fixture();
   dispatcher.enqueue(runInput("run-admission-gate"));

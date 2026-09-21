@@ -765,6 +765,40 @@ test("transcript history 只给 federation 用户输入附加 inter-session prov
   });
 });
 
+test("transcript history 保留同一 Run 中的 steer 用户消息与前后助理分段", async () => {
+  const rows = [
+    [1, "assistant-before-steer", "assistant", { text: "旧回答" }],
+    [2, "steered-user-event", "user", {
+      text: "改成最近 24 小时", operationId: "steer-operation", transcriptType: "steer",
+    }],
+    [3, "assistant-after-steer", "assistant", { text: "新回答" }],
+  ];
+  const transcriptStore = {
+    ensureSession() {},
+    listEvents() {
+      return rows.map(([seq, id, kind, content]) => ({
+        seq, id, runId: "same-run", kind, content,
+        contextExcluded: false, occurredAt: 100 + seq,
+      }));
+    },
+    importHistoryItems() {},
+    getSessionDerivedTitle() { return null; },
+  };
+  const { controller } = fixture({ transcriptStore });
+  await controller.open();
+  const history = await controller.handle("chat.history", {
+    sessionKey: SESSION_KEY, cursor: null, limit: 10,
+  }, "history-steer-user");
+  assert.deepEqual(history.messages.map((item) => [
+    item.payload.message.role,
+    item.payload.message.content[0].text,
+  ]), [
+    ["assistant", "旧回答"],
+    ["user", "改成最近 24 小时"],
+    ["assistant", "新回答"],
+  ]);
+});
+
 test("当前 WorkRun context snapshot 贯通 chat.send/run.list/run.get", async () => {
   const liveRun = currentRun({ idempotencyKey: "shoggoth:chat-send:current-run" });
   const { controller, coordinator } = fixture({ runs: [liveRun] });
@@ -800,7 +834,8 @@ test("session.create 验证 enabled profile，null workspace 使用 defaultCwd �
   const created = await managed.controller.handle("chat.session.create", {
     operationId: "create-1", profileId: PROFILE_ID, workspace: null, createdAt: 900,
   }, "create-managed");
-  const expected = path.join(managed.paths.defaultWorkspaceDir, PROFILE_ID);
+  const expected = path.join(managed.paths.defaultWorkspaceDir, PROFILE_ID, "sessions",
+    crypto.createHash("sha256").update("create-1").digest("hex"));
   assert.equal(created.session.workspace, expected);
   assert.equal(fs.statSync(fs.realpathSync(expected)).isDirectory(), true);
   assert.equal(fs.statSync(expected).mode & 0o777, 0o700);
@@ -1522,8 +1557,8 @@ test("真实 Socket 在 listen 前创建默认 Session，并接通完整十五�
     });
     assert.equal(listed.sessions.length, 1);
     assert.equal(listed.sessions[0].status, "draft");
-    assert.equal(listed.sessions[0].workspace,
-      path.join(paths.defaultWorkspaceDir, DEFAULT_AGENT_PROFILE_ID));
+    assert.equal(path.dirname(listed.sessions[0].workspace),
+      path.join(paths.defaultWorkspaceDir, DEFAULT_AGENT_PROFILE_ID, "sessions"));
     calls.sessionKey = listed.sessions[0].sessionKey;
 
     const created = await ipc(paths, "chat.session.create", {
@@ -1686,6 +1721,30 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
       },
       createdAt: Date.now(),
     });
+    const usageSession = service.chatSessionStore.createSession({
+      operationId: "usage-activity-session",
+      profileId: DEFAULT_AGENT_PROFILE_ID,
+      workspace: null,
+      createdAt: Date.now(),
+    });
+    const appendUsageEvent = (id, kind, content) => service.transcriptStore.appendEvent({
+      profileId: DEFAULT_AGENT_PROFILE_ID,
+      sessionId: usageSession.id,
+      id,
+      runId: "usage-activity-run",
+      kind,
+      content,
+      runtimeRef: null,
+      contextExcluded: false,
+      occurredAt: Date.now(),
+    });
+    appendUsageEvent("usage-activity-user", "user", { text: "count me" });
+    appendUsageEvent("usage-activity-assistant", "assistant", { text: "working" });
+    appendUsageEvent("usage-activity-tool-1", "tool_call", { tool: { name: "command" } });
+    appendUsageEvent("usage-activity-result-1", "tool_result", { tool: { name: "command" } });
+    appendUsageEvent("usage-activity-tool-2", "tool_call", { tool: { name: "command" } });
+    appendUsageEvent("usage-activity-tool-3", "tool_call", { tool: { name: "webSearch" } });
+    appendUsageEvent("usage-activity-error", "error", { message: "failed" });
     for (const [index, spec] of BUILTIN_CLI_AGENT_PROFILES.entries()) {
       service.tokenUsageStore.record({
         profileId: spec.id,
@@ -1721,11 +1780,29 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
     assert.equal(breakdown.bySource[0].backendId, "shoggoth");
     assert.equal(breakdown.byModel[0].model, "gpt-5.6-sol");
     assert.equal(breakdown.topSessions[0].sessionId, SESSION_KEY);
+    assert.deepEqual(breakdown.tools, {
+      totalCalls: 3,
+      uniqueTools: 2,
+      tools: [{ name: "command", count: 2 }, { name: "webSearch", count: 1 }],
+    });
+    assert.deepEqual(breakdown.messages, {
+      total: 2, user: 1, assistant: 1, toolCalls: 3, errors: 1,
+    });
+    assert.equal(breakdown.dailyActivity.length, 1);
+    assert.deepEqual(breakdown.dailyActivity[0], {
+      date: breakdown.dailyActivity[0].date,
+      messages: 2,
+      toolCalls: 3,
+      errors: 1,
+      tokens: 100,
+      cost: breakdown.dailyActivity[0].cost,
+    });
     const codex = await ipc(paths, "usage.breakdown", { range: "today", backendId: "codex" });
     assert.deepEqual(codex.bySource.map((row) => [row.backendId, row.label, row.totalTokens]), [
       ["codex", "Codex", 200],
     ]);
     assert.equal(codex.topSessions[0].key.startsWith("codex:"), true);
+    assert.equal(codex.tools.totalCalls, 0);
     const grok = await ipc(paths, "usage.series", { range: "today", backendId: "grok-build" });
     assert.equal(grok.totals.totalTokens, 300);
     await assert.rejects(

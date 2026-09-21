@@ -20,12 +20,60 @@ const compile = (file, stubs = {}) => {
   vm.runInNewContext(outputText, { exports: mod.exports, require: name => stubs[name] || require(name) });
   return mod.exports;
 };
-const { mergeLinkedSessionRows, openChatSessionLink } = compile("lib/chatSessionNavigation.ts");
+const agentDisplay = compile("lib/agentDisplay.ts");
+const { applyChatSessionAgentNames, mergeLinkedSessionRows, openChatSessionLink } = compile("lib/chatSessionNavigation.ts", {
+  "./agentDisplay": agentDisplay,
+});
 const { createChatHistoryController } = compile("lib/chatHistoryRuntime.ts");
 const gate = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const flush = () => new Promise(setImmediate);
 const existing = { key: "agent:worker:main", backendId: "openclaw" };
 const cron = { key: "agent:worker:cron:job:run:42", backendId: "openclaw" };
+
+// The display name belongs to the agent, including before its new session is
+// listed by the backend. Never derive it from a UUID or the session title.
+for (const [agentId, name, backendId] of [
+  ["shoggoth-61ccd39b-7a29-8bbc-a47c-3af127d719b8", "溪桥", "shoggoth"],
+  ["shoggoth-f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4", "Shoggoth", "shoggoth"],
+  ["ada", "Product", "openclaw"], ["main", "CEO", "openclaw"],
+  ["hermes-bull", "bull · Hermes", "hermes"],
+  ["codex-c79e0e41-2c12-8cc9-978b-aa7882d56be4", "星帆", "codex"],
+  ["deepseek-harness-2031c7ed-e75e-8a61-8cf4-ea24551b3887", "晴川", "deepseek-harness"],
+  ["shoggoth-grok", "Grok", "grok-build"], ["shoggoth-antigravity", "Antigravity", "antigravity"],
+  ["shoggoth-pi", "Pi", "pi"], ["shoggoth-claude", "Claude", "claude-code"],
+]) {
+  const old = { key: `agent:${agentId}:main`, agentId, agentName: name, backendId };
+  const fresh = { key: `agent:${agentId}:new`, backendId, model: "fixture-model" };
+  const names = agentDisplay.createAgentNameIndex([{ id: agentId, name }]);
+  for (const catalog of [names, {}]) {
+    const [created] = applyChatSessionAgentNames([fresh], catalog, [old]);
+    assert.equal(created.agentName, name, `${name}: immediate /new with or without agents.list`);
+    assert.equal(created.key, fresh.key, "name enrichment must not change routing or avatar identity");
+    assert.equal(created.model, fresh.model);
+    assert.equal(fresh.agentName, undefined, "do not mutate the input row");
+    const linked = new Map([[fresh.key, created]]);
+    let rows = applyChatSessionAgentNames(mergeLinkedSessionRows([old], linked, [old]), catalog, [old, created]);
+    assert.equal(rows.find(row => row.key === fresh.key).agentName, name, "omitted new rows keep the agent name after refresh");
+    rows = applyChatSessionAgentNames(mergeLinkedSessionRows([old, fresh], linked, [old, fresh]), catalog, rows);
+    assert.equal(rows.find(row => row.key === fresh.key).agentName, name, "an authoritative row without agentName inherits the known name");
+    assert.equal(linked.size, 0);
+    const renamed = agentDisplay.createAgentNameIndex([{ id: agentId, name: `${name}新版` }]);
+    rows = applyChatSessionAgentNames(rows, renamed, rows);
+    assert.ok(rows.every(row => row.agentName === `${name}新版`), "a current roster rename wins for all sessions");
+  }
+}
+{
+  const rows = [
+    { key: "agent:main:empty", agentId: "main" },
+    { key: "agent:hermes-main:empty", agentId: "main" },
+    { key: "agent:other:empty", displayName: "Conversation title" },
+  ];
+  const names = agentDisplay.createAgentNameIndex([{ id: "main", name: "CEO" }, { id: "hermes-main", name: "Hermes" }]);
+  const enriched = applyChatSessionAgentNames(rows, names);
+  assert.equal(enriched[0].agentName, "CEO");
+  assert.equal(enriched[1].agentName, "Hermes", "route namespace must win over backend-local agentId");
+  assert.equal(enriched[2].agentName, undefined, "do not borrow another agent's name or a conversation title");
+}
 
 for (const metadataFirst of [true, false]) {
   let rows = [existing], activeKey = existing.key, quote = null, history = [];
@@ -145,7 +193,11 @@ const RenameModal = compile("pages/ChatSessionRenameModal.tsx", {
 const chat = fs.readFileSync(path.join(uiRoot, "src/pages/ChatPage.tsx"), "utf8");
 assert.doesNotMatch(chat, /window\.prompt\s*\(/, "installed Electron cannot use browser prompt");
 assert.match(chat, /onSubmit=\{\(key, label\) => renameSessionTo\(label, key\)\}/);
-assert.match(chat, /commitSessions\(applyCurrentAgentNames\(next\.rows\), true\)/);
-assert.match(chat, /commitSessions\(applyCurrentAgentNames\(fetchedRows \|\| sessionsRef\.current\)\)/);
+assert.match(chat, /commitSessions\(next\.rows, true\)/);
+assert.match(chat, /commitSessions\(fetchedRows \|\| sessionsRef\.current\)/);
+assert.match(chat, /applyChatSessionAgentNames\(\s*mergeSynthetic\(merged, authoritative \? all : undefined\)/,
+  "refresh must enrich names after the linked placeholders are merged");
+assert.match(chat, /const \[row\] = applyChatSessionAgentNames<SessionRow>\(/,
+  "new, fork and deep-link entries must resolve their name before opening");
 assert.match(chat, /void openChatSessionLink\(key,/);
 console.log("PASS Chat session navigation: both metadata/list race orders, exact history and quote, authoritative rows, degradation, stale navigation, errors; rename submit, cancel, retry, blank input and duplicate guard");

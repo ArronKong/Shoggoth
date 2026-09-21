@@ -37,6 +37,11 @@ class InspirationRuntime {
     return { thread: structuredClone(thread) };
   }
   threadResume(params) { return this.threadRead(params); }
+  async threadInjectItems(params) {
+    await this.threadRead(params);
+    this.lastInjectedItems = structuredClone(params);
+    return {};
+  }
   async turnStart(params) {
     const thread = this.threads.find((item) => item.id === params.threadId);
     const turn = { id: `inspiration-turn-${++this.turnStarts}`, status: "inProgress", itemsView: "full",

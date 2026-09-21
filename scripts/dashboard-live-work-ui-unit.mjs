@@ -31,7 +31,7 @@ const fallback = { generatedAt: 1, running: [{ backend: 'a', supported: true, it
   approvals: [{ backend: 'a', supported: true, items: [] }] };
 const failed = { backend: 'a', supported: false, reason: 'error', items: [] };
 const snapshot = (id) => ({ generatedAt: 2, running: [{ backend: 'a', supported: true, items: id ? [{ id }] : [] }], approvals: fallback.approvals });
-function Host() { state = module.exports.useDashboardLiveWork(fallback); return null; }
+function Host({ scope = '', seed = fallback }) { state = module.exports.useDashboardLiveWork(seed, scope); return null; }
 const settle = async fn => act(async () => { fn?.(); await new Promise(setImmediate); });
 const tick = () => { for (const fn of timers.values()) fn(); };
 let renderer;
@@ -71,4 +71,17 @@ await settle(() => requests[7].resolve(snapshot('late-run')));
 assert.equal(timers.size, 0);
 assert.equal(listeners.size, 0);
 assert.equal(state.work.running[0].items.length, 0, 'Unmounted Dashboard ignores in-flight responses');
-console.log('PASS Dashboard live work polling: visible-only, single-flight, mutation ordering, partial/transport failure and cleanup');
+await settle(() => { renderer = create(React.createElement(Host, { scope: 'a' })); });
+const previousRequest = requests.at(-1);
+const seedB = { generatedAt: 4, running: [{ backend: 'b', supported: true, items: [{ id: 'b-run' }] }], approvals: [] };
+await settle(() => renderer.update(React.createElement(Host, { scope: 'b', seed: seedB })));
+assert.equal(state.work, undefined, 'Connection scope changes clear the old live snapshot immediately');
+assert.notEqual(requests.at(-1), previousRequest, 'A scope change starts a fresh poll without waiting for the previous request');
+await settle(() => previousRequest.resolve(snapshot('disabled-a-run')));
+assert.equal(state.work, undefined, 'A poll from a disconnected scope cannot repopulate live work');
+await settle(() => requests.at(-1).resolve({ generatedAt: 5,
+  running: [{ backend: 'b', supported: false, reason: 'error', items: [] }], approvals: [],
+}));
+assert.equal(state.work.running[0].items[0].id, 'b-run', 'Failure fallback belongs to the new connection scope');
+await settle(() => renderer.unmount());
+console.log('PASS Dashboard live polling: single-flight, response ordering, source failures, connection scope and cleanup');

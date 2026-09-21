@@ -267,6 +267,16 @@ class RuntimeSessionOwnershipStore {
     this.opened = false;
   }
 
+  purgeProfile(profileId) {
+    this.#assertOpen();
+    if (!validOpaqueId(profileId, 128)) throw ownershipError("RUNTIME_SESSION_OWNERSHIP_INVALID", "Profile 无效");
+    const records = Object.fromEntries(Object.entries(this.container.records)
+      .filter(([, record]) => record.profileId !== profileId));
+    const legacyMigrations = Object.fromEntries(Object.entries(this.container.legacyMigrations)
+      .filter(([, record]) => record.profileId !== profileId));
+    this.#persist({ ...this.container, revision: this.container.revision + 1, records, legacyMigrations });
+  }
+
   claim(input) {
     this.#assertOpen();
     const timestamp = this.#timestamp(input.lastSeenAt ?? this.now());

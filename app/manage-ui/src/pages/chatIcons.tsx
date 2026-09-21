@@ -19,6 +19,15 @@ export function IconClip() {
     </svg>
   );
 }
+export function IconAttachmentFolder() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1"
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"
+      style={{ verticalAlign: "-2px", flexShrink: 0 }}>
+      <path d="M1.5 4A1.5 1.5 0 0 1 3 2.5h3l1.5 2H13A1.5 1.5 0 0 1 14.5 6v6a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 12Z" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
 export function IconSearch() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -72,8 +81,8 @@ export function IconFast() {
 }
 export function IconStop() {
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
-      <rect x="6.5" y="6.5" width="11" height="11" rx="2.5" />
+    <svg viewBox="0 0 12 12" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true">
+      <rect width="12" height="12" rx="2" />
     </svg>
   );
 }

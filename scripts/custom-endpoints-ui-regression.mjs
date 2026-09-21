@@ -559,7 +559,7 @@ async function runUiRuntime() {
       };
       const clickButton = (label) => {
         const button = [...document.querySelectorAll("button")].find(
-          (item) => item.textContent?.trim() === label,
+          (item) => (item.getAttribute("aria-label") || item.textContent?.trim()) === label,
         );
         if (!button) throw new Error(`missing button: ${label}`);
         button.click();
@@ -680,7 +680,8 @@ async function runUiRuntime() {
       await waitFor(() => document.body.textContent.includes("Reopen endpoint"), "reopen fixture did not list");
       clickButtonContaining("Reopen endpoint");
       let reopenDialog = await waitFor(
-        () => document.querySelector('[role="dialog"]'),
+        () => [...document.querySelectorAll('[role="dialog"]')].find((dialog) =>
+          [...dialog.querySelectorAll("input")].some((input) => input.value === "Reopen endpoint")),
         "reopen modal did not open",
       );
       const reopenName = [...reopenDialog.querySelectorAll("label")]
@@ -716,12 +717,86 @@ async function runUiRuntime() {
       }
       root.unmount();
 
+      // OpenClaw 没有独立端点名称：直接输入 ID 后仍能新增，编辑保留身份和协议。
+      for (const editing of [false, true]) {
+        const directEndpoint = endpoint("direct-provider", {
+          name: "direct-provider", model: "direct-model", models: ["direct-model"],
+          api: "openai-responses",
+        });
+        const directSnapshot = snapshot(editing ? [directEndpoint] : [], {
+          nameIsProviderId: true, nameEditable: false, providerIdEditable: true, firstModelIsDefault: false,
+          apiOptions: ["openai-completions", "openai-responses"], defaultApi: "openai-completions",
+        });
+        const directCalls = [];
+        const directController = {
+          backend: "openclaw-direct",
+          validate: async () => ({ ok: true, models: ["direct-model"] }),
+          save: async (input, session, source) => {
+            directCalls.push({ input, session, source });
+            return outcome(session.rootOperationId, {
+              status: "applied", sync: "synced", snapshot: directSnapshot,
+            });
+          },
+        };
+        root = mount();
+        render(root, React.createElement(EndpointModal, {
+          open: true, controller: directController, snapshot: directSnapshot,
+          endpoint: editing ? directEndpoint : null,
+          onClose() {}, onOpenChangeComplete() {}, onSaved() {},
+        }));
+        const directDialog = await waitFor(() => document.querySelector('[role="dialog"]'), "ID-only modal missing");
+        const directFields = [...directDialog.querySelectorAll("label.field")];
+        const labels = directFields.map((field) => field.querySelector(".field-label")?.textContent);
+        if (labels.join("|") !== "Provider ID|API protocol|Endpoint URL|API Key") {
+          throw new Error(`unexpected ID-only field order: ${labels.join("|")}`);
+        }
+        const directId = directFields[0].querySelector("input");
+        const protocol = directFields[1].querySelector('[role="combobox"]');
+        const directUrl = directFields[2].querySelector("input");
+        if (!directId || !protocol || !directUrl || directId.disabled) {
+          throw new Error("ID must remain editable on creation and edit");
+        }
+        const expectedProtocol = editing ? "openai-responses" : "openai-completions";
+        if (!protocol.textContent.includes(expectedProtocol)) throw new Error("ID-only protocol value lost");
+        setNativeInputValue.call(directUrl, "https://direct-provider.test/v2");
+        directUrl.dispatchEvent(new Event("input", { bubbles: true }));
+        if (!editing) {
+          const modelChip = await waitFor(
+            () => [...directDialog.querySelectorAll("button")].find((button) => button.textContent === "direct-model"),
+            "ID-only creation did not discover models",
+          );
+          modelChip.click();
+          await waitFor(() => modelChip.getAttribute("aria-pressed") === "true", "discovered model not selected");
+          const save = [...directDialog.querySelectorAll("button")].find((button) => button.textContent === "Save");
+          if (!save?.disabled) throw new Error("empty provider ID must block creation");
+          setNativeInputValue.call(directId, "direct-provider");
+          directId.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        if (editing) {
+          setNativeInputValue.call(directId, "renamed.Provider-1");
+          directId.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        await clickSave();
+        await waitFor(() => directCalls.length === 1, "ID-only save blocked by hidden name");
+        const { input, session, source } = directCalls[0];
+        if (editing && source?.id !== "direct-provider") throw new Error("rename lost source identity");
+        if (input.id !== (editing ? "renamed.Provider-1" : "direct-provider") || input.name !== input.id
+          || input.baseUrl !== "https://direct-provider.test/v2"
+          || input.models.join("|") !== "direct-model"
+          || session.kind !== (editing ? "edit" : "create")
+          || Object.hasOwn(input, "api") || Object.hasOwn(input, "apiKey")) {
+          throw new Error(`ID-only ${editing ? "edit" : "create"} changed the save payload`);
+        }
+        root.unmount();
+      }
+
       // Modal 能力与完成门：只在 applied+synced+snapshot 时关闭；所有重试复用 session。
       const modalEndpoint = endpoint("caps", {
         name: "Locked name",
         api: "chat-completions",
         canRevealApiKey: true,
         canClearApiKey: true,
+        apiKeyPreview: "sk-f...1234",
       });
       const modalSnapshot = snapshot([modalEndpoint], {
         nameEditable: false,
@@ -799,15 +874,29 @@ async function runUiRuntime() {
       if (document.body.textContent.includes("default") || document.querySelector("[class*='chipDefault']")) {
         throw new Error("firstModelIsDefault:false still claims a default model");
       }
-      clickButton("Advanced");
-      await waitFor(() => document.body.textContent.includes("API protocol"), "advanced API control did not expand");
+      await waitFor(() => document.body.textContent.includes("API protocol"), "API protocol field is not directly visible");
+      const keySlot = document.querySelector("[data-provider-secret]");
+      if (!keySlot?.textContent.includes("sk-f...1234") || keySlot.querySelector("input")) {
+        throw new Error("configured key must initially show its abbreviated preview in the field");
+      }
       clickButton("Reveal");
-      await waitFor(() => document.body.textContent.includes("sk-visible-fixture"), "revealed key preview missing");
+      await waitFor(() => keySlot.textContent.includes("sk-visible-fixture"), "revealed key must stay inside the same field");
       clickButton("Hide");
       await waitFor(
         () => !document.body.textContent.includes("sk-visible-fixture"),
         "hidden key remains visible",
       );
+      clickButton("API Key — Replace");
+      const keyInput = await waitFor(() => keySlot.querySelector("input"), "key edit input missing");
+      if (keyInput.value !== "") throw new Error("abbreviated or revealed key must never initialize the replacement draft");
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(keyInput, "cancelled-fixture-key");
+      keyInput.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor(() => keyInput.value === "cancelled-fixture-key", "replacement draft missing");
+      keyInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await waitFor(() => !keySlot.querySelector("input"), "Escape did not cancel the inline edit");
+      if (!document.querySelector('[role="dialog"]') || !keySlot.textContent.includes("sk-f...1234")) {
+        throw new Error("cancel must retain the endpoint dialog and original abbreviated key");
+      }
       clickButton("Clear key");
       await confirmDanger();
       await waitFor(() => clearCalls.length === 1, "clear-key controller was not called");
@@ -840,9 +929,98 @@ async function runUiRuntime() {
         throw new Error("save retries did not reuse the mutation session");
       }
       if (saveCalls.some((call) => Object.hasOwn(call.input, "api"))) {
-        throw new Error("unchanged/collapsed API protocol was submitted");
+        throw new Error("unchanged API protocol was submitted");
+      }
+      if (saveCalls.some((call) => Object.hasOwn(call.input, "apiKey"))) {
+        throw new Error("key preview, reveal or cancelled edit must not replace the persisted key");
       }
       if (activations.length !== 1) throw new Error("partial outcome activation was not surfaced immediately");
+      root.unmount();
+
+      // 已确认的子步骤之后遇到主模型阻塞：回到编辑并提交新意图，不能重用 journal ID。
+      const intentCalls = [];
+      const intentEndpoint = endpoint("intent", { models: ["used", "optional"], model: "used" });
+      const intentBaseline = { ...intentEndpoint, primaryModelUsage: [{ modelId: "used", isDefault: false, agentIds: ["main", "sara"] }] };
+      const intentSnapshot = snapshot([intentBaseline], { firstModelIsDefault: false });
+      const intentController = {
+        backend: "openclaw-intent",
+        validate: async () => ({ ok: true, reachable: true, models: ["used", "optional"] }),
+        release() {},
+        save: async (input, session) => {
+          intentCalls.push({ input, id: session.rootOperationId });
+          if (intentCalls.length === 1) return outcome(session.rootOperationId, {
+            status: "blocked", code: "primary_model_in_use", stage: "preflight", sync: "pending", snapshot: intentSnapshot,
+            steps: [{ operationId: `${session.rootOperationId}:delete:0`, status: "applied" },
+              { operationId: `${session.rootOperationId}:delete:1`, status: "blocked", stage: "preflight" }],
+            recovery: { code: "primary_model_in_use", locked: false, baseline: intentBaseline },
+          });
+          return outcome(session.rootOperationId, { status: "applied", sync: "synced", snapshot: intentSnapshot });
+        },
+      };
+      root = mount();
+      render(root, React.createElement(EndpointModal, {
+        open: true, controller: intentController, snapshot: snapshot([intentEndpoint], { firstModelIsDefault: false }),
+        endpoint: intentEndpoint, onClose() {}, onOpenChangeComplete() {}, onSaved() {},
+      }));
+      await waitFor(() => document.querySelector('[role="dialog"]'), "intent modal missing");
+      clickButton("used");
+      await clickSave();
+      await waitFor(() => document.body.textContent.includes("primary_model_in_use"), "primary block missing");
+      const protectedChip = [...document.querySelectorAll("button")].find(button => button.textContent === "usedPrimary");
+      if (!protectedChip?.disabled || protectedChip.getAttribute("aria-pressed") !== "true") {
+        throw new Error("fresh primary usage was not reselected and protected");
+      }
+      if (!protectedChip.title.includes("main、sara")) {
+        throw new Error("primary model tooltip must retain the affected assistants");
+      }
+      clickButton("optional");
+      await clickSave();
+      await waitFor(() => intentCalls.length === 2, "edited intent not submitted");
+      if (intentCalls[0].id === intentCalls[1].id) throw new Error("edited save reused a partially committed operation ID");
+      if (JSON.stringify(intentCalls[1].input.models) !== JSON.stringify(["used"])) throw new Error("primary retention did not reach save input");
+      root.unmount();
+
+      // The current endpoint API permits deselection without rewriting Agent bindings.
+      const editablePrimaryCalls = [];
+      let confirmedPrimary = false;
+      let primarySaved = false;
+      const editablePrimarySnapshot = snapshot([intentBaseline], {
+        firstModelIsDefault: false, batchModelSelection: true, allowPrimaryModelRemoval: true,
+      });
+      const primaryReference = { store: "config", referenceKey: "agents.entries.main.model.primary", agent: "main" };
+      const editablePrimaryController = {
+        backend: "openclaw-primary",
+        validate: intentController.validate,
+        release() {},
+        save: async (input, session) => {
+          editablePrimaryCalls.push(input);
+          return outcome(session.rootOperationId, {
+            status: "blocked", code: "primary_model_in_use", stage: "preflight", sync: "pending", canForce: true,
+            steps: [], recovery: { code: "primary_model_in_use", locked: false, references: [primaryReference],
+              blockedRemoval: { operationId: `${session.rootOperationId}:selection`, modelId: "used" } },
+          });
+        },
+        confirmBlockedRemoval: async (session) => {
+          confirmedPrimary = true;
+          return outcome(session.rootOperationId, { status: "applied", sync: "synced", snapshot: editablePrimarySnapshot });
+        },
+      };
+      root = mount();
+      render(root, React.createElement(EndpointModal, {
+        open: true, controller: editablePrimaryController, snapshot: editablePrimarySnapshot,
+        endpoint: intentBaseline, onClose() {}, onOpenChangeComplete() {}, onSaved() { primarySaved = true; },
+      }));
+      await waitFor(() => document.querySelector('[role="dialog"]'), "editable primary modal missing");
+      const editablePrimaryChip = [...document.querySelectorAll("button")].find(button => button.textContent === "usedPrimary");
+      if (editablePrimaryChip?.disabled) throw new Error("primary model chip is still locked");
+      clickButton("usedPrimary");
+      await waitFor(() => editablePrimaryChip.getAttribute("aria-pressed") === "false", "primary could not be deselected");
+      await clickSave();
+      await waitFor(() => document.body.textContent.includes("Saving keeps those bindings"), "primary consequence confirmation missing");
+      if (confirmedPrimary || primarySaved) throw new Error("primary was removed without confirmation");
+      if (JSON.stringify(editablePrimaryCalls[0].models) !== JSON.stringify(["optional"])) throw new Error("primary was silently selected again");
+      await confirmDanger();
+      await waitFor(() => primarySaved && confirmedPrimary, "confirmed primary save did not complete");
       root.unmount();
 
       // 删除：仅 references_exist 可二次 force，安全引用可见，且两次调用复用 session。

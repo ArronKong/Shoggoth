@@ -147,15 +147,15 @@ test("Memory/Transcript/Tool mutations 都以实时 revision 防止旧窗口覆�
   const value = fixture();
   try {
     const candidate = value.memoryEngine.propose({
-      profileId: "profile-1", classification: "inferred", scope: "user", type: "semantic",
-      content: "User may prefer concise reports", sourceRefs: ["session-1:event-1"], confidence: 0.5,
+      profileId: "profile-1", classification: "explicit", scope: "user", type: "semantic",
+      content: "User prefers concise reports", sourceRefs: ["session-1:event-1"], confidence: 0.5,
     });
     let memories = value.controller.handle("harness.memory.list", {
       profileId: "profile-1", status: null, scope: null, cursor: 0, limit: 50,
     });
-    assert.equal(memories.items[0].status, "candidate");
-    const confirmed = value.controller.handle("harness.memory.confirm", {
-      profileId: "profile-1", id: candidate.id, expectedRevision: memories.revision,
+    assert.equal(memories.items[0].status, "active");
+    const confirmed = value.controller.handle("harness.memory.update", {
+      profileId: "profile-1", id: candidate.id, expectedRevision: memories.revision, content: "User prefers concise Chinese reports",
     });
     assert.equal(confirmed.item.status, "active");
     assert.throws(() => value.controller.handle("harness.memory.delete", {
@@ -211,6 +211,31 @@ test("拒绝任一 Computer Use 工具会立即关闭该 Profile 的活动会话
   } finally { value.cleanup(); }
 });
 
+test("空记忆视图 revision 0 可读取，保存后返回新 revision，设定仍从 revision 1 开始", () => {
+  const value = fixture();
+  const read = (kind) => validateAgentHarnessResult("harness.definition.read",
+    value.controller.handle("harness.definition.read", { profileId: "profile-1", kind, revision: null }));
+  try {
+    assert.equal(read("MEMORY").revision, 0);
+    assert.equal(read("MEMORY").readOnly, true);
+    assert.equal(read("TOOLS").revision, value.permissions.toolRegistry.revision);
+    assert.equal(read("IDENTITY").revision, 1);
+    for (const kind of ["IDENTITY", "SOUL", "AGENTS", "USER"]) {
+      assert.throws(() => validateAgentHarnessResult("harness.definition.read", {
+        kind, revision: 0, content: "", readOnly: false,
+      }), (error) => error.code === "HARNESS_RESPONSE_INVALID");
+    }
+    assert.throws(() => validateAgentHarnessResult("harness.definition.read", {
+      kind: "MEMORY", revision: -1, content: "", readOnly: true,
+    }), (error) => error.code === "HARNESS_RESPONSE_INVALID");
+    value.memoryEngine.propose({ profileId: "profile-1", classification: "explicit", scope: "user",
+      type: "semantic", content: "用户希望被称呼为 Arron", sourceRefs: ["user-request"] });
+    const saved = read("MEMORY");
+    assert.ok(saved.revision > 0);
+    assert.match(saved.content, /Arron/u);
+  } finally { value.cleanup(); }
+});
+
 test("Harness protocol 严格拒绝未知字段并限制单帧结果", () => {
   assert.deepEqual(validateAgentHarnessParams("harness.memory.list", {
     profileId: "profile-1", status: null, scope: null, cursor: 0, limit: 50,
@@ -227,6 +252,14 @@ test("Harness protocol 严格拒绝未知字段并限制单帧结果", () => {
   assert.throws(() => validateAgentHarnessResult("harness.tools.list", {
     registryRevision: "not-a-revision", revision: 1, tools: [],
   }), (error) => error.code === "HARNESS_RESPONSE_INVALID");
+  const unavailableComputer = {
+    available: false, reason: "COMPUTER_PERMISSION_STATUS_FAILED", driverVersion: null, contractVersion: null,
+    permissions: { accessibility: null, screenRecording: null }, sessions: [],
+  };
+  assert.deepEqual(validateAgentHarnessResult("harness.computer.status", unavailableComputer), unavailableComputer);
+  const { reason, ...ambiguousReady } = unavailableComputer;
+  assert.throws(() => validateAgentHarnessResult("harness.computer.status", { ...ambiguousReady, available: true }),
+    (error) => error.code === "HARNESS_RESPONSE_INVALID");
 });
 
 test("Memory 与 Transcript 管理结果按 cursor 分页且保留稳定 revision", () => {
@@ -234,7 +267,7 @@ test("Memory 与 Transcript 管理结果按 cursor 分页且保留稳定 revisio
   try {
     for (let index = 0; index < 3; index += 1) {
       value.memoryEngine.propose({
-        profileId: "profile-1", classification: "inferred", scope: "user", type: "semantic",
+        profileId: "profile-1", classification: "explicit", scope: "user", type: "semantic",
         content: `Preference ${index}`, sourceRefs: [`session-1:source-${index}`], confidence: 0.5,
       });
       value.append({ id: `event-${index}`, kind: "user", content: { text: `event ${index}` } });

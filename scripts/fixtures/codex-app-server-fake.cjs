@@ -225,6 +225,9 @@ process.stdin.on("data", (chunk) => {
       } });
     } else if (elicitationEnabled && message.method === "thread/resume") {
       send({ id: message.id, result: threadConfigResponse(thread(message.params.threadId)) });
+    } else if (elicitationEnabled && message.method === "thread/inject_items") {
+      thread(message.params.threadId);
+      send({ id: message.id, result: {} });
     } else if (elicitationEnabled && message.method === "thread/read") {
       send({ id: message.id, result: { thread: thread(message.params.threadId) } });
     } else if (elicitationEnabled && message.method === "thread/list") {

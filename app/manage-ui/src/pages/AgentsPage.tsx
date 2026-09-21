@@ -15,7 +15,6 @@ import type {
   AgentComputerState,
   DashboardArtifactItem,
   AgentDefinitionState,
-  AgentMemoryPage,
   AgentTranscriptEvent,
   AgentTranscriptSession,
   AgentToolsState,
@@ -32,22 +31,18 @@ import {
   exportAgentDefinition,
   getAgent,
   getAgentComputerState,
-  getDesktopComputerPermissions,
   getAgentDefinition,
   getAgentFile,
   getModelCatalog,
   getShoggothProviders,
   importAgentDefinition,
   listAgentArtifacts,
-  listAgentMemories,
   listAgents,
   listCronJobs,
   listAgentTools,
   listAgentTranscripts,
-  mutateAgentMemory,
   openDesktopComputerScreenRecordingSettings,
   openPath,
-  restoreAgent,
   restoreAgentDefinition,
   requestDesktopComputerPermissions,
   runCronJob,
@@ -76,16 +71,21 @@ import { createTargetRequestGuard } from "../lib/lowUiLifecycle";
 import { classifyAgentCreateError, openclawWorkspacePlaceholder } from "../lib/agent-create-error";
 import { useConfirm, useToast } from "../components/ui";
 import { ShoggothProviderSetup } from "../components/ShoggothProviderSetup";
+import ShoggothCustomEndpointPanel from "./models/ShoggothCustomEndpointPanel";
 import { useAgentModelSettings } from "./agents/useAgentModelSettings";
 import AgentMainModelField from "./agents/AgentMainModelField";
 import AgentModelCards from "./agents/AgentModelCards";
 import EmojiField from "./agents/EmojiField";
+import AgentMemoryEditor from "./agents/AgentMemoryEditor";
+import { visibleAgentFiles } from "../lib/agentFiles";
 import s from "./AgentsPage.module.css";
 
 const AgentInspirationPanel = lazy(() => import("./InspirationPage").then(module => ({ default: module.AgentInspirationPanel })));
 
 type Tab = "overview" | "setup" | "memory" | "history" | "tools" | "computer" | "cron" | "inspiration" | "artifacts";
 const HIDDEN_NATIVE_TABS = new Set<Tab>(["memory", "history", "tools", "computer"]);
+// Keep definition persistence and editing available while hiding version management.
+const SHOW_DEFINITION_MANAGEMENT = false;
 
 type LifecycleRetryOperation = { target: string; operationId: string; createdAt: number };
 const RETRYABLE_LIFECYCLE_CODES = new Set([
@@ -151,7 +151,6 @@ export default function AgentsPage() {
   const canUpdateAgent = agentLifecycle?.update === true;
   const canRemoveAgent = agentLifecycle?.remove === true;
   const canArchiveAgent = agentLifecycle?.archive === true;
-  const canRestoreAgent = agentLifecycle?.restore === true;
   const runWillResumePaused = (job: UnifiedCronJob) => (
     cronForceRunResumesPaused(backendDescriptors.get(job.backendId), job)
   );
@@ -180,14 +179,13 @@ export default function AgentsPage() {
   const [fileEditing, setFileEditing] = useState(false);
   const [fileReadOnly, setFileReadOnly] = useState(false);
   const fileOrigRef = useRef("");
+  const fileRevisionRef = useRef<number | undefined>(undefined);
   const fileTargetRef = useRef<string | null>(null);
   const fileRequestGuardRef = useRef<ReturnType<typeof createTargetRequestGuard> | null>(null);
   if (!fileRequestGuardRef.current) fileRequestGuardRef.current = createTargetRequestGuard();
   const fileRequestGuard = fileRequestGuardRef.current;
 
   const [definition, setDefinition] = useState<AgentDefinitionState | null>(null);
-  const [memories, setMemories] = useState<AgentMemoryPage | null>(null);
-  const [memoryDrafts, setMemoryDrafts] = useState<Record<string, string>>({});
   const [transcriptSessions, setTranscriptSessions] = useState<AgentTranscriptSession[] | null>(null);
   const [transcriptSessionsCursor, setTranscriptSessionsCursor] = useState(0);
   const [transcriptSessionsHasMore, setTranscriptSessionsHasMore] = useState(false);
@@ -219,7 +217,6 @@ export default function AgentsPage() {
   const [savingCreate, setSavingCreate] = useState(false);
   const createOperationRef = useRef<LifecycleRetryOperation | null>(null);
   const archiveOperationRef = useRef<LifecycleRetryOperation | null>(null);
-  const restoreOperationRef = useRef<LifecycleRetryOperation | null>(null);
 
   useEffect(() => {
     createOperationRef.current = null;
@@ -249,18 +246,13 @@ export default function AgentsPage() {
     `agents:${backend}`,
     () => listAgents(backend),
   );
-  const { data: archivedData, refresh: refreshArchived } = usePageCache(
-    `agents:${backend}:archived`,
-    () => (canRestoreAgent ? listAgents(backend, { lifecycle: "archived" }) : Promise.resolve([])),
-  );
   const agents = agentsData ?? [];
-  const archivedAgents = archivedData ?? [];
   // 刷新同时重拉 per-agent 模型设置面快照（同 ModelsPage 的 doRefresh 口径）。
   // 回传 refresh 的 promise：导航栏刷新要等数据落地才弹 toast。
   const [modelReload, setModelReload] = useState(0);
   const doRefresh = () => {
     setModelReload((n) => n + 1);
-    return Promise.all([refresh(), refreshArchived()]).then(() => undefined);
+    return refresh().then(() => undefined);
   };
   useRegisterPageRefresh("/agents", doRefresh);
   useRegisterPageLoading("/agents", loading);
@@ -282,8 +274,6 @@ export default function AgentsPage() {
     setFileEditing(false);
     setFileReadOnly(false);
     setDefinition(null);
-    setMemories(null);
-    setMemoryDrafts({});
     setTranscriptSessions(null);
     setTranscriptSessionsCursor(0);
     setTranscriptSessionsHasMore(false);
@@ -419,7 +409,7 @@ export default function AgentsPage() {
     }
     // 进 Setup 默认打开第一个 .md（agent 的人设/记忆文件都是 md，没有则退回第一个文件）。
     if (tab === "setup" && !activeFile) {
-      const files = detail.files || [];
+      const files = visibleAgentFiles(detail.files);
       const first = files.find((f) => /\.md$/i.test(f.name)) || files[0];
       if (first) void openFile(first.name);
     }
@@ -427,11 +417,6 @@ export default function AgentsPage() {
       getAgentDefinition(backend, agentId)
         .then((value) => { if (alive) setDefinition(value); })
         .catch(() => { if (alive) setDefinition(null); });
-    }
-    if (hasAgentHarness && tab === "memory" && memories === null) {
-      listAgentMemories(backend, agentId)
-        .then((value) => { if (alive) setMemories(value); })
-        .catch(() => { if (alive) setMemories({ supported: true, revision: 0, items: [], nextCursor: 0, hasMore: false }); });
     }
     if (hasAgentHarness && tab === "history" && transcriptSessions === null) {
       listAgentTranscripts(backend, agentId)
@@ -458,7 +443,7 @@ export default function AgentsPage() {
         }); });
     }
     return () => { alive = false; };
-  }, [tab, detail, backend, agentCron, artifacts, activeFile, hasAgentHarness, definition, memories, transcriptSessions, toolsState, computerState]);
+  }, [tab, detail, backend, agentCron, artifacts, activeFile, hasAgentHarness, definition, transcriptSessions, toolsState, computerState]);
 
   useEffect(() => {
     const profileId = backend === "shoggoth" ? detail?.profile : undefined;
@@ -509,11 +494,19 @@ export default function AgentsPage() {
     setFileEditing(false);
     setFileLoading(true);
     setFileContent("");
+    if (hasAgentHarness && name === "MEMORY.md") {
+      // The embedded editor reads the complete, paginated memory authority.
+      // A missing/stale Markdown projection must not block manual repairs.
+      setFileReadOnly(true);
+      setFileLoading(false);
+      return;
+    }
     try {
       const f = await getAgentFile(backend, detail.id, name);
       if (!fileRequestGuard.isCurrent(ticket, target)) return;
       setFileContent(f.content || "");
       setFileReadOnly(f.readOnly === true);
+      fileRevisionRef.current = typeof f.revision === "number" ? f.revision : undefined;
       fileOrigRef.current = f.content || "";
       fileTargetRef.current = target;
     } catch (e) {
@@ -536,7 +529,7 @@ export default function AgentsPage() {
     const targetAgentId = detail.id;
     const targetFile = activeFile;
     const nextContent = fileContent;
-    const targetDefinitionRevision = detail.definitionRevision;
+    const targetDefinitionRevision = fileRevisionRef.current ?? detail.definitionRevision;
     setSavingFile(true);
     try {
       const result = await setAgentFile(
@@ -550,6 +543,7 @@ export default function AgentsPage() {
       fileOrigRef.current = nextContent;
       setFileEditing(false);
       if (result?.definitionRevision) {
+        fileRevisionRef.current = result.definitionRevision;
         setDetail((current) =>
           current?.id === targetAgentId
             ? { ...current, definitionRevision: result.definitionRevision }
@@ -653,47 +647,6 @@ export default function AgentsPage() {
     }
   };
 
-  const reloadMemories = async () => {
-    if (!detail) return;
-    const next = await listAgentMemories(backend, detail.id);
-    setMemories(next);
-    setMemoryDrafts(Object.fromEntries(next.items.map((item) => [item.id, item.content])));
-  };
-
-  const memoryAction = async (action: "confirm" | "update" | "delete", itemId: string) => {
-    if (!detail || !memories) return;
-    const item = memories.items.find((candidate) => candidate.id === itemId);
-    if (!item) return;
-    try {
-      await mutateAgentMemory(backend, detail.id, action, action === "update" ? {
-        id: item.id,
-        content: memoryDrafts[item.id] ?? item.content,
-        confidence: item.confidence,
-        validUntil: item.validUntil,
-        expectedRevision: memories.revision,
-      } : { id: item.id, expectedRevision: memories.revision });
-      await reloadMemories();
-      toast.success(t(action === "delete" ? "agents.memoryForgotten" : "agents.memorySaved"));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const loadMoreMemories = async () => {
-    if (!detail || !memories?.hasMore || harnessLoadingMore) return;
-    setHarnessLoadingMore(true);
-    try {
-      const next = await listAgentMemories(backend, detail.id, undefined, undefined, memories.nextCursor);
-      // 索引型 cursor 只在同一 revision 内可拼接；后台若变化就重拉第一页。
-      if (next.revision !== memories.revision) await reloadMemories();
-      else setMemories({ ...next, items: [...memories.items, ...next.items] });
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setHarnessLoadingMore(false);
-    }
-  };
-
   const loadMoreTranscriptSessions = async () => {
     if (!detail || !transcriptSessionsHasMore || harnessLoadingMore) return;
     setHarnessLoadingMore(true);
@@ -779,21 +732,19 @@ export default function AgentsPage() {
 
   const refreshComputerState = async () => {
     if (!detail) return;
-    const [state, permissions] = await Promise.all([
-      getAgentComputerState(backend, detail.id),
-      getDesktopComputerPermissions(),
-    ]);
-    setComputerState({ ...state, permissions });
+    // The background service performs the operation; GUI permissions can have
+    // a different macOS attribution and must not overwrite its status.
+    setComputerState(await getAgentComputerState(backend, detail.id));
   };
 
   const grantComputerPermissions = async () => {
     if (!detail || computerPermissionBusy) return;
     setComputerPermissionBusy(true);
     try {
-      const permissions = await requestDesktopComputerPermissions();
+      await requestDesktopComputerPermissions();
       const state = await getAgentComputerState(backend, detail.id);
-      setComputerState({ ...state, permissions });
-      if (permissions.accessibility && permissions.screenRecording) {
+      setComputerState(state);
+      if (state.available && state.permissions.accessibility && state.permissions.screenRecording) {
         toast.success(t("agents.computerPermissionGranted"));
       } else {
         toast.error(t("agents.computerPermissionIncomplete"));
@@ -958,27 +909,6 @@ export default function AgentsPage() {
       toast.error(kind ? t(`agents.createError.${kind}`) : message);
     } finally {
       setSavingCreate(false);
-    }
-  };
-
-  const doRestore = async (agent: UnifiedAgent) => {
-    if (!canRestoreAgent) return;
-    const target = `${backend}\u0000${agent.id}`;
-    const operation = restoreOperationRef.current?.target === target
-      ? restoreOperationRef.current : lifecycleOperation("agent-restore", target);
-    restoreOperationRef.current = operation;
-    try {
-      await restoreAgent(backend, agent.id, {
-        expectedUpdatedAt: agent.updatedAt,
-        operationId: operation.operationId,
-        createdAt: operation.createdAt,
-      });
-      restoreOperationRef.current = null;
-      toast.success(t("agents.restored"));
-      await doRefresh();
-    } catch (e) {
-      if (!retainLifecycleOperation(e)) restoreOperationRef.current = null;
-      toast.error(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -1181,7 +1111,6 @@ export default function AgentsPage() {
     panel.style.position = "";
     // inline 一律写**起点**值（不是终点）：动画若有任何一帧没生效，元素落回的是 inline，
     // 而 inline = 起点 = 卡片形态，视觉上仍然正确。写终点则会闪一帧全尺寸空面板。
-    // minHeight 必须在量完 to 之后解除：卡片 420 低于面板 520 下限，不解除就缩不到位。
     Object.assign(panel.style, {
       minHeight: "0px",
       top: `${from.card.top}px`,
@@ -1332,7 +1261,7 @@ export default function AgentsPage() {
     const from = closeFrom.current ?? panel.getBoundingClientRect();
     // inline 写**起点**（当前全尺寸），不是终点：任何未生效帧落回的都是正确的起点形态。
     Object.assign(panel.style, {
-      minHeight: "0px", // 同展开：不解除就缩不到卡片的 420 高
+      minHeight: "0px",
       top: `${from.top}px`,
       left: `${from.left}px`,
       width: `${from.width}px`,
@@ -1454,7 +1383,7 @@ export default function AgentsPage() {
   }, [selectedId]);
 
   return (
-    <div className={`page management-page agents-page ${s.root}`}>
+    <div className={`page management-page agents-page ${s.root}`} data-detail-open={!!selectedId && !closing}>
       <PageHead
         title={t("agents.pageTitle")}
         subtitle={t("agents.pageSubtitle")}
@@ -1531,24 +1460,6 @@ export default function AgentsPage() {
             </button>
           )}
         </div>
-      )}
-
-      {!selectedId && canRestoreAgent && archivedAgents.length > 0 && (
-        <section className={s.harnessHistory} aria-label={t("agents.archivedAgents")}>
-          <h3>{t("agents.archivedAgents")}</h3>
-          <div className={s.rowList}>
-            {archivedAgents.map((agent) => (
-              <div key={agent.id} className={s.row}>
-                <span className={s.rowTitle}>{agent.name}</span>
-                <span className={s.rowMeta}>{agent.lifecycleState || "archived"}</span>
-                <span className={s.rowSpacer} />
-                <button type="button" className={s.pillBtnGhost} onClick={() => void doRestore(agent)}>
-                  {t("agents.restore")}
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
       )}
 
       {/* 展开态：整块白面板 */}
@@ -1637,7 +1548,7 @@ export default function AgentsPage() {
             {detailLoading && <p className={s.dim}>{t("common.loading")}</p>}
 
             {detail && tab === "overview" && (
-              <>
+              <div className={s.ovPane}>
               <div className={s.ovLayout}>
                 {/* 左：与首页同款卡片（含同款 3D 悬浮倾斜）；悬浮出现删除按钮 */}
                 <div
@@ -1816,6 +1727,7 @@ export default function AgentsPage() {
                 <AgentModelCards state={modelSettings} />
               )}
               {backend === "shoggoth" && detail.profile && (
+                <>
                 <ShoggothProviderSetup
                   snapshot={shoggothProviderSnapshot}
                   profileId={detail.profile}
@@ -1828,13 +1740,28 @@ export default function AgentsPage() {
                     setShoggothProviderSnapshot(snapshot);
                   }}
                 />
+                {shoggothProviderSnapshot?.profile?.id === detail.profile && (
+                  <ShoggothCustomEndpointPanel key={detail.profile}
+                    snapshot={shoggothProviderSnapshot}
+                    profileId={detail.profile}
+                    onConfigured={async () => {
+                      const [snapshot] = await Promise.all([
+                        getShoggothProviders(detail.profile || null),
+                        reloadDetail(),
+                        doRefresh(),
+                      ]);
+                      setShoggothProviderSnapshot(snapshot);
+                    }}
+                  />
+                )}
+                </>
               )}
-              </>
+              </div>
             )}
 
             {detail && tab === "setup" && (
-              <div className={s.tabPane}>
-                {hasAgentHarness && (
+              <div className={`${s.tabPane} ${s.setupPane}`}>
+                {SHOW_DEFINITION_MANAGEMENT && hasAgentHarness && (
                   <div className={s.harnessActions}>
                     <span className={s.rowMeta}>
                       {definition ? t("agents.definitionRevision", { revision: definition.current.revision }) : t("common.loading")}
@@ -1860,8 +1787,8 @@ export default function AgentsPage() {
                 )}
               <div className={s.suLayout}>
                 <nav className={s.suList}>
-                  {(detail.files || []).length === 0 && <p className={s.dim}>{t("agents.noFiles")}</p>}
-                  {(detail.files || []).map((f) => (
+                  {visibleAgentFiles(detail.files).length === 0 && <p className={s.dim}>{t("agents.noFiles")}</p>}
+                  {visibleAgentFiles(detail.files).map((f) => (
                     <button
                       key={f.name}
                       type="button"
@@ -1898,7 +1825,9 @@ export default function AgentsPage() {
                           </button>
                         )}
                       </header>
-                      {fileLoading ? (
+                      {hasAgentHarness && activeFile === "MEMORY.md" ? (
+                        <AgentMemoryEditor key={`${backend}:${detail.id}`} backendId={backend} agentId={detail.id} />
+                      ) : fileLoading ? (
                         <p className={s.dim}>{t("common.loading")}</p>
                       ) : fileEditing && !fileReadOnly ? (
                         <textarea
@@ -1929,7 +1858,7 @@ export default function AgentsPage() {
                   )}
                 </div>
               </div>
-                {hasAgentHarness && definition && definition.history.length > 1 && (
+                {SHOW_DEFINITION_MANAGEMENT && hasAgentHarness && definition && definition.history.length > 1 && (
                   <div className={s.harnessHistory}>
                     <h3>{t("agents.definitionHistory")}</h3>
                     <div className={s.rowList}>
@@ -1951,50 +1880,7 @@ export default function AgentsPage() {
 
             {detail && tab === "memory" && (
               <div className={s.tabPane}>
-                <p className={s.paneNote}>{t("agents.memoryExplain")}</p>
-                {memories === null ? <p className={s.dim}>{t("common.loading")}</p>
-                  : memories.items.length === 0 ? <p className={s.dim}>{t("agents.memoryEmpty")}</p>
-                    : <div className={s.harnessList}>
-                      {memories.items.map((item) => (
-                        <article key={item.id} className={s.harnessCard}>
-                          <div className={s.harnessMeta}>
-                            <span className={s.chip}>{item.status}</span>
-                            <span className={s.chip}>{item.scope}</span>
-                            <span>{t("agents.memoryConfidence", { value: Math.round(item.confidence * 100) })}</span>
-                            <span className={s.rowSpacer} />
-                            <span className={s.rowMono}>{item.sourceRefs.join(", ")}</span>
-                          </div>
-                          <textarea
-                            className={s.harnessEditor}
-                            value={memoryDrafts[item.id] ?? item.content}
-                            disabled={item.status === "deleted" || item.status === "superseded"}
-                            onChange={(event) => setMemoryDrafts({ ...memoryDrafts, [item.id]: event.target.value })}
-                          />
-                          <div className={s.harnessActions}>
-                            {item.status === "candidate" && (
-                              <button type="button" className={s.pillBtn} onClick={() => void memoryAction("confirm", item.id)}>
-                                {t("agents.memoryConfirm")}
-                              </button>
-                            )}
-                            {["candidate", "active"].includes(item.status) && (
-                              <>
-                                <button type="button" className={s.pillBtnGhost} onClick={() => void memoryAction("update", item.id)}>
-                                  {t("common.save")}
-                                </button>
-                                <button type="button" className={s.pillBtnGhost} onClick={() => void memoryAction("delete", item.id)}>
-                                  {t("agents.forget")}
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </article>
-                      ))}
-                      {memories.hasMore && (
-                        <button type="button" className={s.pillBtnGhost} disabled={harnessLoadingMore} onClick={() => void loadMoreMemories()}>
-                          {t("common.loadMore")}
-                        </button>
-                      )}
-                    </div>}
+                <AgentMemoryEditor key={`${backend}:${detail.id}`} backendId={backend} agentId={detail.id} />
               </div>
             )}
 
@@ -2088,13 +1974,15 @@ export default function AgentsPage() {
                       <div className={s.row}>
                         <span className={s.rowTitle}>{t("agents.computerAccessibility")}</span>
                         <span className={computerState.permissions.accessibility ? `${s.chip} ${s.chipOn}` : s.chip}>
-                          {computerState.permissions.accessibility ? t("agents.computerGranted") : t("agents.computerNotGranted")}
+                          {t(computerState.permissions.accessibility === null ? "agents.computerPermissionUnknown"
+                            : computerState.permissions.accessibility ? "agents.computerGranted" : "agents.computerNotGranted")}
                         </span>
                       </div>
                       <div className={s.row}>
                         <span className={s.rowTitle}>{t("agents.computerScreenRecording")}</span>
                         <span className={computerState.permissions.screenRecording ? `${s.chip} ${s.chipOn}` : s.chip}>
-                          {computerState.permissions.screenRecording ? t("agents.computerGranted") : t("agents.computerNotGranted")}
+                          {t(computerState.permissions.screenRecording === null ? "agents.computerPermissionUnknown"
+                            : computerState.permissions.screenRecording ? "agents.computerGranted" : "agents.computerNotGranted")}
                         </span>
                       </div>
                     </div>

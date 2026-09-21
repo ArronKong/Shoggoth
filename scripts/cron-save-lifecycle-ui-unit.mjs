@@ -38,7 +38,8 @@ const jobs = ["A", "B", "System"].map(name => ({ id: name, name, backendId: "ope
   schedule: { kind: "every", everyMs: 60000 }, actions: name === "System" ? { edit: false, toggle: false, delete: false, run: true, reason: "system-managed" } : {} }));
 
 async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: "Fixture", backendId: "openclaw" }], fixtureJobs = jobs) {
-  const state = { updates: [], creates: [], refreshes: [], successes: [], errors: [], gates: new Map() };
+  const state = { updates: [], creates: [], refreshes: [], successes: [], errors: [], infos: [], gates: new Map(),
+    allJobs: fixtureJobs, listRequests: [], runRequests: [] };
   const form = { __esModule: true, default: host("cron-form"), emptyOpenClawDraft: () => ({ name: "", backendId: "openclaw" }),
     openClawDraftFromJob: job => ({ name: job.name, backendId: job.backendId }), openClawInputFromDraft: draft => ({ ...draft }),
     validateOpenClawDraft: () => null };
@@ -55,7 +56,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
       default: props => React.createElement("modal", props, props.open ? props.children : null, props.open ? props.footer : null),
       DetailRow: host("detail-row"), ModalSection: host("section") },
     "../components/ui": { useConfirm: () => async () => true,
-      useToast: () => ({ success: message => state.successes.push(message), error: message => state.errors.push(message) }) },
+      useToast: () => ({ success: message => state.successes.push(message), error: message => state.errors.push(message), info: message => state.infos.push(message) }) },
     "../components/TurnTimeline/TurnProcess": host("timeline"),
     "../lib/markdown": { toSanitizedMarkdownHtml: text => text },
     "../lib/turnTimeline": { stepsFromParts: () => [] },
@@ -85,7 +86,8 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "./cron/HermesCronForm": { __esModule: true, default: host("hermes-form"), emptyHermesDraft: () => ({}), hermesDraftFromJob: () => ({}), hermesInputFromDraft: () => ({}), validateHermesDraft: () => null },
     "./cron/ShoggothCronForm": { __esModule: true, default: host("native-form"), emptyNativeCronDraft: () => ({}), nativeCronDraftFromJob: () => ({}), nativeCronEditPlan: () => ({}), nativeCronInputFromDraft: () => ({}), validateNativeCronDraft: () => null },
     "../api/client": {
-      listAgents: agentsLoader, getCronRuns: async () => [], listCronJobs: async () => fixtureJobs,
+      listAgents: agentsLoader, getCronRuns: async id => { state.runRequests.push(id); return []; },
+      listCronJobs: async filters => { state.listRequests.push(filters); await state.gates.get('list')?.promise; return state.allJobs; },
       getCronJobDetail: async id => fixtureJobs.find(job => job.id === id),
       getModelCatalog: async () => ({}),
       updateCronJob: async (id, input) => { state.updates.push({ id, input }); await state.gates.get(id)?.promise; },
@@ -106,11 +108,44 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   const edit = async id => click(buttons(row(id)).find(button => button.children.includes("common.edit")));
   const formModal = () => renderer.root.findAllByType("modal").find(modal => modal.props.open && (String(modal.props.title).includes("OpenClawTitle") || modal.props.title === "cron.createTitle"));
   const save = async () => click(buttons(formModal()).find(button => button.children.includes("common.save") || button.children.includes("cronForm.createAction")));
-  const notify = async id => { await act(async () => { state.setSearchParams(new URLSearchParams({ job: id, backend: "openclaw" })); await flush(); }); };
+  let notificationSequence = 0;
+  const notify = async (id, backend = "openclaw") => { await act(async () => {
+    state.setSearchParams(new URLSearchParams({ job: id, backend, notification: String(++notificationSequence) })); await flush();
+  }); };
   const dispose = () => act(() => renderer.unmount());
   return { state, renderer, buttons, click, row, edit, formModal, save, notify, dispose };
 }
 
+{
+  const f = await fixture(undefined, [jobs[0]]);
+  f.state.allJobs = jobs;
+  await f.notify('B');
+  let detail = f.renderer.root.findAllByType('modal').find(modal => modal.props.open);
+  assert.equal(detail.props.title, 'B', 'A notification opens a task outside the current list filter');
+  assert.equal(f.state.listRequests[0].backend, 'openclaw');
+  assert.equal(Object.keys(f.state.listRequests[0]).join(), 'backend', 'Notification lookup must ignore saved search/status filters');
+  assert.equal(f.state.runRequests.at(-1), 'B', 'Notification details load the selected task history');
+  act(() => detail.props.onClose());
+  assert.equal(f.renderer.root.findAllByType('modal').filter(modal => modal.props.open).length, 0);
+  await f.notify('B');
+  detail = f.renderer.root.findAllByType('modal').find(modal => modal.props.open);
+  assert.equal(detail.props.title, 'B', 'Clicking another notification for the same task reopens its details');
+  await f.notify('B', 'wrong-backend');
+  assert.equal(f.state.infos.at(-1), 'notif.cronUnavailable', 'A same-ID task from another backend must not be opened');
+  f.dispose();
+}
+{
+  const f = await fixture(undefined, [jobs[0]]);
+  f.state.allJobs = jobs;
+  const pending = gate(); f.state.gates.set('list', pending);
+  await f.notify('B');
+  await f.notify('A');
+  await act(async () => { pending.resolve(); await flush(); });
+  assert.equal(f.renderer.root.findAllByType('modal').find(modal => modal.props.open).props.title, 'A',
+    'A slow filtered-task lookup cannot replace a later notification target');
+  assert.deepEqual(f.state.runRequests, ['A']);
+  f.dispose();
+}
 {
   const now = Date.now();
   const visibleJobs = [

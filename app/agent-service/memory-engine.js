@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { serviceError } = require("./security");
+const { VIEW_HEADERS, EMPTY_VIEW_MESSAGES } = require("./agent-definition-defaults");
 
 const SECRET_PATTERNS = Object.freeze([
   /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/iu,
@@ -17,7 +18,7 @@ const PII_PATTERNS = Object.freeze([
   /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
   /(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)/u,
 ]);
-const CLASSIFICATIONS = new Set(["explicit", "inferred", "rule", "imported"]);
+const CLASSIFICATIONS = new Set(["explicit", "imported"]);
 const SENSITIVITY_RANK = Object.freeze({ normal: 0, private: 1, restricted: 2 });
 
 function engineError(code, message) { return serviceError(code, message); }
@@ -32,6 +33,25 @@ function lexicalTerms(value) {
 }
 function hasSecret(value) { return SECRET_PATTERNS.some((pattern) => pattern.test(value)); }
 function hasPii(value) { return PII_PATTERNS.some((pattern) => pattern.test(value)); }
+function workspaceMemoryRef(workspace) {
+  return `workspace:${crypto.createHash("sha256").update(workspace || "").digest("hex")}`;
+}
+function boundedView(kind, items, render, maxBytes) {
+  const header = VIEW_HEADERS[kind];
+  if (items.length === 0) return header + EMPTY_VIEW_MESSAGES[kind];
+  const omission = (count) => `\n[${count} additional records are stored; use memory_search to retrieve them.]\n`;
+  // Reserve the footer before choosing whole entries. Never slice a UTF-8 note
+  // or delete authoritative records merely because the Markdown view is full.
+  let remaining = maxBytes - Buffer.byteLength(header + omission(items.length), "utf8");
+  const lines = [];
+  for (const item of items) {
+    const line = `${render(item)}\n`;
+    const size = Buffer.byteLength(line, "utf8");
+    if (size > remaining) continue;
+    lines.push(line); remaining -= size;
+  }
+  return header + lines.join("") + (lines.length < items.length ? omission(items.length - lines.length) : "");
+}
 
 class MemoryEngine {
   constructor(options) {
@@ -47,30 +67,59 @@ class MemoryEngine {
     this.opened = true;
     for (const profileId of profileIds) {
       this.store.ensureProfile(profileId);
+      this._migrateCandidates(profileId);
       this._rebuildViews(profileId);
     }
   }
   close() { this.opened = false; this.viewsStale.clear(); }
+  _migrateCandidates(profileId) {
+    // Old versions queued private facts and imports. Preserve their provenance
+    // and confidence, but retire the queue without reviving forgotten records.
+    const records = new Map(this.store.list(profileId).map((item) => [item.id, item]));
+    const changes = new Map();
+    const now = this.now();
+    const stage = (item, status) => {
+      const updated = { ...item, status, updatedAt: Math.max(now, item.updatedAt) };
+      records.set(item.id, updated); changes.set(item.id, updated);
+    };
+    for (const item of [...records.values()].filter((entry) => entry.status === "candidate")
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))) {
+      if (item.sensitivity === "restricted" || hasSecret(item.content)
+        || (item.validUntil !== null && item.validUntil <= now)) {
+        stage(item, "deleted"); continue;
+      }
+      if (item.supersedes !== null) {
+        const prior = records.get(item.supersedes);
+        if (!prior || prior.status !== "active" || prior.scope !== item.scope) {
+          stage(item, "superseded"); continue;
+        }
+        stage(prior, "superseded");
+      }
+      stage(item, "active");
+    }
+    if (changes.size) this.store.upsertMany([...changes.values()]);
+  }
   _afterCommit(profileId) {
     try { this._rebuildViews(profileId); this.viewsStale.delete(profileId); }
     catch { this.viewsStale.add(profileId); }
   }
   _rebuildViews(profileId) {
     if (!this.definitionStore) return;
-    const active = this.store.list(profileId, { status: "active" });
+    const now = this.now();
+    const active = this.store.list(profileId, { status: "active" })
+      .filter((item) => item.validFrom <= now && (item.validUntil === null || item.validUntil > now));
     const revision = this.store.getRevision(profileId);
-    const memoryContent = ["# Memory", "", ...active.map((item) => (
+    const maxBytes = this.definitionStore.maxDocumentBytes ?? 32 * 1024;
+    const memoryContent = boundedView("MEMORY", active, (item) => (
       `- [${item.scope}/${item.type}; confidence=${item.confidence.toFixed(2)}] ${item.content}`
-    )), ""].join("\n");
+    ), maxBytes);
     this.definitionStore.writeGeneratedView({
       profileId, kind: "MEMORY", revision, content: memoryContent,
     });
     const definition = this.definitionStore.get(profileId);
     if (!definition) return;
     const userItems = active.filter((item) => item.scope === "user" && item.sensitivity !== "restricted");
-    const userContent = userItems.length === 0
-      ? "# User\n\nNo confirmed user profile facts have been recorded yet.\n"
-      : ["# User", "", ...userItems.map((item) => `- ${item.content}`), ""].join("\n");
+    const userContent = boundedView("USER", userItems, (item) => `- ${item.content}`, maxBytes);
     if (definition.documents.USER !== userContent) {
       this.definitionStore.update({
         profileId,
@@ -92,17 +141,23 @@ class MemoryEngine {
     }
     if (hasSecret(input.content)) throw engineError("MEMORY_SECRET_REJECTED", "Memory 拒绝保存 secret/验证码");
     const now = this.now();
-    const sensitivity = input.sensitivity || (hasPii(input.content) ? "private" : "normal");
+    const sensitivity = hasPii(input.content) && (!input.sensitivity || input.sensitivity === "normal")
+      ? "private" : input.sensitivity || "normal";
     if (!Object.hasOwn(SENSITIVITY_RANK, sensitivity)) throw engineError("MEMORY_INVALID", "Memory sensitivity 无效");
-    const status = input.classification === "explicit" && sensitivity === "normal"
-      ? "active" : "candidate";
+    if (sensitivity === "restricted") throw engineError("MEMORY_RESTRICTED", "Restricted Memory 不可保存");
+    const status = "active";
     const duplicate = this.store.list(input.profileId).find((item) => (
-      item.status !== "deleted" && item.scope === input.scope && item.type === input.type
+      item.status === "active" && item.scope === input.scope && item.type === input.type
+      && item.validUntil === (input.validUntil ?? null)
+      && item.sensitivity === sensitivity
+      && (!input.supersedes || item.supersedes === input.supersedes)
+      && JSON.stringify(item.sourceRefs.filter((ref) => ref.startsWith("workspace:")))
+        === JSON.stringify((input.sourceRefs || []).filter((ref) => ref.startsWith("workspace:")))
       && contentHash(item.content) === contentHash(input.content)
     ));
     if (duplicate) return duplicate;
     const item = {
-      id: this.randomUUID(),
+      id: input.id || this.randomUUID(),
       profileId: input.profileId,
       scope: input.scope,
       type: input.type,
@@ -123,11 +178,6 @@ class MemoryEngine {
       if (!prior || prior.status !== "active" || prior.scope !== item.scope) {
         throw engineError("MEMORY_CONFLICT_INVALID", "supersedes 目标无效");
       }
-      if (status !== "active") {
-        const candidate = this.store.upsert(item);
-        this._afterCommit(input.profileId);
-        return candidate;
-      }
       const superseded = { ...prior, status: "superseded", updatedAt: now };
       const [created] = this.store.upsertMany([item, superseded]);
       this._afterCommit(input.profileId);
@@ -140,18 +190,13 @@ class MemoryEngine {
 
   confirm(input) {
     this._assertOpen();
+    // Compatibility for older local clients. New MCP catalogs have no confirm
+    // tool: accepted memories are already active when their write completes.
+    this._migrateCandidates(input.profileId);
     const item = this.store.get(input.profileId, input.id);
-    if (!item || item.status !== "candidate") throw engineError("MEMORY_NOT_CONFIRMABLE", "Memory candidate 不存在");
-    if (item.sensitivity === "restricted") throw engineError("MEMORY_RESTRICTED", "Restricted Memory 不可激活");
-    const now = this.now();
-    const updates = [{ ...item, status: "active", confidence: Math.max(item.confidence, 0.9), updatedAt: now }];
-    if (item.supersedes !== null) {
-      const prior = this.store.get(input.profileId, item.supersedes);
-      if (prior?.status === "active") updates.push({ ...prior, status: "superseded", updatedAt: now });
-    }
-    const [confirmed] = this.store.upsertMany(updates);
     this._afterCommit(input.profileId);
-    return confirmed;
+    if (!item || item.status !== "active") throw engineError("MEMORY_NOT_FOUND", "有效记忆不存在");
+    return item;
   }
 
   update(input) {
@@ -159,10 +204,14 @@ class MemoryEngine {
     const item = this.store.get(input.profileId, input.id);
     if (!item || item.status === "deleted") throw engineError("MEMORY_NOT_FOUND", "Memory 不存在");
     const content = input.content ?? item.content;
+    if (typeof content !== "string" || !content.trim()) throw engineError("MEMORY_INVALID", "Memory content 无效");
     if (hasSecret(content)) throw engineError("MEMORY_SECRET_REJECTED", "Memory 拒绝保存 secret/验证码");
     const updated = this.store.upsert({
       ...item,
       content,
+      sourceRefs: input.sourceRef && item.sourceRefs.length < 64
+        ? [...new Set([...item.sourceRefs, input.sourceRef])] : item.sourceRefs,
+      sensitivity: hasPii(content) && item.sensitivity === "normal" ? "private" : item.sensitivity,
       confidence: input.confidence ?? item.confidence,
       validUntil: input.validUntil === undefined ? item.validUntil : input.validUntil,
       updatedAt: this.now(),
@@ -191,10 +240,15 @@ class MemoryEngine {
     const scopes = new Set(input.scopes || ["user", "agent", "project", "workspace"]);
     const maxItems = Math.min(Math.max(input.limit ?? 10, 1), 100);
     const maxBytes = Math.min(Math.max(input.maxBytes ?? 16 * 1024, 256), 128 * 1024);
-    const scored = this.store.list(input.profileId, { status: "active" })
+    const statuses = new Set(input.statuses || ["active"]);
+    const scored = this.store.list(input.profileId)
+      .filter((item) => statuses.has(item.status))
       .filter((item) => scopes.has(item.scope))
       .filter((item) => SENSITIVITY_RANK[item.sensitivity] <= allowedRank)
+      .filter((item) => item.validFrom <= now)
       .filter((item) => item.validUntil === null || item.validUntil > now)
+      .filter((item) => input.workspace === undefined || !["project", "workspace"].includes(item.scope)
+        || item.sourceRefs.includes(workspaceMemoryRef(input.workspace)))
       .map((item) => {
         const terms = lexicalTerms(item.content);
         const overlap = [...queryTerms].filter((term) => terms.has(term)).length;
@@ -210,7 +264,8 @@ class MemoryEngine {
     for (const entry of scored) {
       const projected = { ...entry.item, score: Number(entry.score.toFixed(6)) };
       const size = Buffer.byteLength(JSON.stringify(projected), "utf8");
-      if (results.length >= maxItems || bytes + size > maxBytes) break;
+      if (results.length >= maxItems) break;
+      if (bytes + size > maxBytes) continue;
       results.push(projected); bytes += size;
     }
     return { revision: this.store.getRevision(input.profileId), items: results, truncated: results.length < scored.length };
@@ -222,8 +277,7 @@ class MemoryEngine {
     for (const event of input.events || []) {
       if (event.kind !== "user" || event.contextExcluded || typeof event.content?.text !== "string") continue;
       const text = event.content.text.trim();
-      const explicit = text.match(/(?:请记住|记住)\s*[:：]?\s*(.+)$/u)
-        || text.match(/(?:I prefer|I usually|我喜欢|我偏好|我通常)\s*[:：]?\s*(.+)$/iu);
+      const explicit = text.match(/^(?:请记住|记住)\s*[:：]?\s*(.+)$/u);
       if (!explicit?.[1]) continue;
       proposals.push(this.propose({
         profileId: input.profileId,
@@ -282,4 +336,4 @@ class MemoryEngine {
   }
 }
 
-module.exports = { MemoryEngine, contentHash, hasPii, hasSecret, lexicalTerms };
+module.exports = { MemoryEngine, contentHash, hasPii, hasSecret, lexicalTerms, workspaceMemoryRef };

@@ -58,6 +58,8 @@ async function listen(handler) {
     assert.equal(firstTwoPages.length, 200, "Hermes 0.20.4 的 100 条上限不能让 session 列表降级为空");
     assert.deepEqual(calls, [{ limit: 100, offset: 0 }, { limit: 100, offset: 100 }]);
     assert.equal(new Set(firstTwoPages.map((row) => row.key)).size, 200, "分页不得产生重复 session");
+    assert.deepEqual(firstTwoPages.map((row) => row.source), rows.slice(0, 200).map((row) => row.source),
+      "会话分类需要保留 Hermes 的原始来源");
     assert.deepEqual(
       [...new Set(firstTwoPages.map((row) => `${row.backendId}:${row.agentId}`))],
       ["hermes:hermes-default"],

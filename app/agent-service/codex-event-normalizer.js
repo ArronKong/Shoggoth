@@ -123,13 +123,35 @@ function safeFutureResetAt(value, now) {
   return retryAt > now && retryAt - now <= MAX_ACCOUNT_BACKOFF_MS ? retryAt : null;
 }
 
+function accountCreditsAvailable(value) {
+  const credits = value?.credits;
+  return credits && typeof credits === "object" && !Array.isArray(credits)
+    && (credits.hasCredits === true || credits.unlimited === true);
+}
+
+function accountRateLimitsAvailable(value) {
+  // Rolling notifications are sparse: missing metadata is not recovery.
+  if (!value || value.spendControlReached !== false || value.rateLimitReachedType !== null) return false;
+  if (accountCreditsAvailable(value)) return true;
+  if (value.primary === undefined || value.secondary === undefined) return false;
+  const windows = [value.primary, value.secondary].filter((window) => window !== null);
+  return windows.length > 0 && windows.every((window) => window && !Array.isArray(window)
+    && typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent)
+    && window.usedPercent >= 0 && window.usedPercent < 100);
+}
+
 function accountRateLimitRetryAt(value, now = Date.now()) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || !Number.isSafeInteger(now) || now < 0) return null;
   const windows = [value.primary, value.secondary].filter(
     (window) => window && typeof window === "object" && !Array.isArray(window),
   );
-  const exhaustedResets = windows.filter(
+  // An exhausted plan window alone does not prevent credit-backed usage.
+  // Unknown credits in a sparse update must not be treated as zero credits;
+  // in that case let the runtime report an actual restriction or Retry-After.
+  const reached = RATE_LIMIT_REACHED_TYPES.has(value.rateLimitReachedType);
+  const noCredits = value.credits?.hasCredits === false && value.credits?.unlimited === false;
+  const exhaustedResets = (reached || noCredits ? windows : []).filter(
     (window) => typeof window.usedPercent === "number"
       && Number.isFinite(window.usedPercent) && window.usedPercent >= 100,
   ).map((window) => safeFutureResetAt(window.resetsAt, now)).filter(Number.isSafeInteger);
@@ -140,7 +162,7 @@ function accountRateLimitRetryAt(value, now = Date.now()) {
     if (spendReset !== null) exhaustedResets.push(spendReset);
   }
   if (exhaustedResets.length > 0) return Math.max(...exhaustedResets);
-  if (!RATE_LIMIT_REACHED_TYPES.has(value.rateLimitReachedType)) return null;
+  if (!reached) return null;
   const knownResets = [
     ...windows.map((window) => safeFutureResetAt(window.resetsAt, now)),
     safeFutureResetAt(value.individualLimit?.resetsAt, now),
@@ -149,6 +171,25 @@ function accountRateLimitRetryAt(value, now = Date.now()) {
   // which window caused it. Use the nearest protocol-provided reset rather
   // than manufacturing a delay or pessimistically blocking on an unrelated window.
   return knownResets.length > 0 ? Math.min(...knownResets) : null;
+}
+
+function accountRateLimitErrorCode(value, now) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.spendControlReached === true
+    && (value.individualLimit?.resetsAt == null
+      || safeFutureResetAt(value.individualLimit.resetsAt, now) !== null)) {
+    return "RUNTIME_SPENDING_LIMIT_REACHED";
+  }
+  const reached = RATE_LIMIT_REACHED_TYPES.has(value.rateLimitReachedType);
+  if (reached && value.rateLimitReachedType !== "rate_limit_reached") {
+    return "RUNTIME_QUOTA_EXHAUSTED";
+  }
+  const noCredits = value.credits?.hasCredits === false && value.credits?.unlimited === false;
+  const exhausted = [value.primary, value.secondary].some((window) => window
+    && typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent)
+    && window.usedPercent >= 100
+    && (window.resetsAt == null || safeFutureResetAt(window.resetsAt, now) !== null));
+  return exhausted && (reached || noCredits) ? "RUNTIME_QUOTA_EXHAUSTED" : null;
 }
 
 function threadUsageResponseId(identifiers, totalUsage) {
@@ -354,10 +395,12 @@ function normalizeCodexEvent(message, rawOptions = {}) {
     });
   }
   if (method === "account/rateLimits/updated") {
-    const retryAt = accountRateLimitRetryAt(params.rateLimits);
-    return retryAt === null
-      ? known("account_rate_limits")
-      : known("account_backoff", { retryAt });
+    const now = Date.now();
+    const retryAt = accountRateLimitRetryAt(params.rateLimits, now);
+    const errorCode = accountRateLimitErrorCode(params.rateLimits, now);
+    if (errorCode !== null) return known("account_unavailable", { retryAt, errorCode });
+    if (retryAt !== null) return known("account_backoff", { retryAt });
+    return known(accountRateLimitsAvailable(params.rateLimits) ? "account_available" : "account_rate_limits");
   }
   if (method === "error") {
     return known("error", {

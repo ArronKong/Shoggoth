@@ -1,0 +1,41 @@
+.editor {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 24px 0;
+}
+.hint { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.add, .entry { padding: 16px 0; border-bottom: 1px solid var(--ui-hairline); }
+.add { padding-top: 0; }
+.label, .meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; font-size: 13px; }
+.meta { color: var(--muted); }
+.text {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 88px;
+  padding: 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 12px;
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  resize: vertical;
+}
+.text:focus { outline: 1px solid var(--ui-text-1); outline-offset: 1px; }
+.actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.actions select { margin-right: auto; max-width: 100%; }
+.actions button, .actions select, .more, .error button {
+  padding: 7px 16px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.actions button:disabled, .more:disabled { opacity: .4; cursor: default; }
+.more { display: block; margin: 20px auto 0; }
+.error { margin-bottom: 16px; color: var(--danger, #b53232); font-size: 13px; overflow-wrap: anywhere; }

@@ -46,7 +46,7 @@ assert.match(
 );
 assert.match(
   chatPage,
-  /setSessions\(mergeSynthetic\(all\)\)/,
+  /const named = applyChatSessionAgentNames\(\s*mergeSynthetic\(merged,\s*authoritative\s*\?\s*all\s*:\s*undefined\),[\s\S]*?setSessions\(named\);\s*writeSessionCache\(named\)/,
   "实时 sessions.list 刷新后必须保留尚未被服务端列表收录的通知目标",
 );
 

@@ -108,6 +108,7 @@ class MemoryStore {
     this.profiles.clear(); this.poisonError = null; this.opened = true;
   }
   close() { this.profiles.clear(); this.poisonError = null; this.opened = false; }
+  forgetProfile(profileId) { this._assertOpen(); this.profiles.delete(profileId); }
   _empty(profileId) { return { profileId, revision: 0, items: new Map() }; }
   _snapshot(state) {
     const snapshot = {

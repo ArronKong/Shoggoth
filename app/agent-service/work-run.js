@@ -3,6 +3,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { assertNoSensitiveFields, storeError } = require("./product-store");
+const EXECUTION_LIMITS = require("./execution-policy");
 
 const WORK_RUN_STATUSES = Object.freeze([
   "queued",
@@ -24,7 +25,7 @@ const TERMINAL_WORK_RUN_STATUSES = new Set([
   "completed", "failed", "canceled", "interrupted", "skipped",
 ]);
 const LEGAL_WORK_RUN_TRANSITIONS = Object.freeze({
-  queued: new Set(["starting", "canceled", "skipped"]),
+  queued: new Set(["starting", "failed", "canceled", "skipped"]),
   starting: new Set(["running", "failed", "canceled", "interrupted"]),
   running: new Set([
     "waiting_approval", "waiting_input", "completed", "failed", "canceled", "interrupted",
@@ -299,6 +300,19 @@ function createWorkDispatcher(options = {}) {
       if (profileWrites >= profile.concurrency.maxWorkspaceWrites) {
         return busyResult(run, "PROFILE_WORKSPACE_WRITE_LIMIT", onBusy);
       }
+    }
+    // Synchronous admission + durable starting transition form one Service
+    // transaction. Waiting for approval/input still occupies execution capacity.
+    // Profile.backendId is immutable in ProductStore. Count that durable product
+    // identity, not the runtime (two backends may use the same CLI) or a process.
+    const backendActive = active.filter((candidate) =>
+      store.getAgentProfile(candidate.profileId)?.backendId === profile.backendId);
+    if (run.source !== "chat" && backendActive.filter((candidate) => candidate.source !== "chat").length
+      >= EXECUTION_LIMITS.backendBackground) {
+      return busyResult(run, "BACKEND_BACKGROUND_ACTIVE_LIMIT", onBusy);
+    }
+    if (backendActive.length >= EXECUTION_LIMITS.backend) {
+      return busyResult(run, "BACKEND_ACTIVE_LIMIT", onBusy);
     }
     const contextSnapshotId = admissionOptions.contextSnapshotId ?? null;
     if (contextSnapshotId !== null

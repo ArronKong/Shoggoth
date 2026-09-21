@@ -144,6 +144,12 @@ class FakeHost {
     return { thread: clone(thread) };
   }
 
+  async threadInjectItems(params) {
+    assert.ok(this.threads.some(thread => thread.id === params.threadId));
+    this.lastInjectedItems = clone(params);
+    return {};
+  }
+
   async threadRead(params) {
     const thread = this.threads.find((candidate) => candidate.id === params.threadId);
     if (!thread) {

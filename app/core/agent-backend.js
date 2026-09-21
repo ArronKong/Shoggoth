@@ -763,7 +763,10 @@ class AgentBackend {
    *   tool({toolCallId, name?, args?, phase, result?, partialResult?, isError?, durationS?,
    *         diff?, diffText?})    — tool lifecycle (phase start|update|result)
    *   plan(entries)               — agent todo list ([{content, status?}])
-   *   status({kind, text})        — session status (kind compacting|compacted)
+   *   status({kind, text, reason?, queuedAt?}) — session progress: queued,
+   *                                 starting, running, waiting_approval/input,
+   *                                 compacting or compacted. Queue timestamps
+   *                                 use milliseconds since the Unix epoch.
    *   prompt(InteractiveRequestV1 | legacyPrompt)
    *                               — the agent BLOCKED on a user answer. Shoggoth
    *                                 emits the versioned canonical request; legacy
@@ -807,7 +810,7 @@ class AgentBackend {
    * transport exposes one; it includes JSON/base64 envelope overhead.
    * `gatewayPolicy` lets the renderer use its live sanitized hello policy while
    * this management-plane snapshot is temporarily not ready.
-   * @returns {{attachments: {image?: {maxBytes?: number}, pdf?: {maxBytes?: number, maxPages?: number}, file?: {maxBytes?: number}}, maxPayloadBytes?: number, gatewayPolicy?: boolean, slash?: boolean, modelProvider?: string, modelScope?: string, permissions?: {scope: "session"|"profile", apply: "next-turn"|"live", defaultMode?: string, options: Array<{id: string, label: string, description?: string, risk?: "safe"|"standard"|"elevated"|"danger", requiresConfirmation?: boolean}>}, notReady?: boolean}}
+   * @returns {{attachments: {image?: {maxBytes?: number}, pdf?: {maxBytes?: number, maxPages?: number}, file?: {maxBytes?: number}}, maxPayloadBytes?: number, gatewayPolicy?: boolean, slash?: boolean, steer?: boolean, modelProvider?: string, modelScope?: string, permissions?: {scope: "session"|"profile", apply: "next-turn"|"live", defaultMode?: string, options: Array<{id: string, label: string, description?: string, risk?: "safe"|"standard"|"elevated"|"danger", requiresConfirmation?: boolean}>}, notReady?: boolean}}
    */
   getChatCapabilities(agentId) {
     return { attachments: { image: {} } };
@@ -1691,7 +1694,9 @@ class AgentBackend {
   }
 
   /**
-   * Delete an agent. opts: { trash?: boolean }.
+   * Remove an agent according to descriptor.agentLifecycle. Native backends
+   * archive for seven days before deleting their owned product data; external
+   * workspace files and shared Runtime accounts are retained. opts: { trash?: boolean }.
    * @param {string} id
    * @param {object} [opts]
    * @returns {Promise<void>}
@@ -1699,7 +1704,7 @@ class AgentBackend {
   async deleteAgent(id, opts) { throw new Error(`${this.id}: deleteAgent() not supported`); }
 
   /**
-   * Restore a recoverably archived agent. Backends that only support permanent
+   * Restore a recoverably archived agent within its retention period. Backends that only support permanent
    * removal leave descriptor.agentLifecycle.restore=false and inherit this method.
    * @param {string} id
    * @param {object} [opts]

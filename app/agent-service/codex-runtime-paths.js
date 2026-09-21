@@ -6,6 +6,7 @@ const path = require("node:path");
 const { createRequire } = require("node:module");
 const { CODEX_VERSION } = require("./codex-schema-contract");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
+const { PROXY_ENV_PAIRS, normalizeProxyEnvironment } = require("./proxy-environment");
 
 const CODEX_APP_SERVER_ARGS = Object.freeze([
   "-c",
@@ -257,6 +258,12 @@ function buildCodexSpawnEnv({ codexHome, parentEnv = process.env, spawnEnv = {},
   for (const key of PARENT_ENV_ALLOWLIST) {
     if (typeof parentEnv[key] === "string" && parentEnv[key].length > 0) env[key] = parentEnv[key];
   }
+  // Codex WebSocket requests use these variables even on macOS. Dropping them
+  // makes every new session exhaust direct-connection retries before HTTP fallback.
+  const proxyKeys = PROXY_ENV_PAIRS.flat();
+  Object.assign(env, normalizeProxyEnvironment(Object.fromEntries(proxyKeys
+    .filter(key => parentEnv[key] !== undefined).map(key => [key, parentEnv[key]])),
+  () => runtimeError("CODEX_SPAWN_ENV_INVALID", "Codex proxy environment is invalid")));
   env.HOME ||= os.homedir();
   env.PATH ||= "/usr/bin:/bin";
   if (installationKind === "system") {
@@ -275,6 +282,9 @@ function buildCodexSpawnEnv({ codexHome, parentEnv = process.env, spawnEnv = {},
     }
     env[key] = value;
   }
+  Object.assign(env, normalizeProxyEnvironment(Object.fromEntries(proxyKeys
+    .filter(key => env[key] !== undefined).map(key => [key, env[key]])),
+  () => runtimeError("CODEX_SPAWN_ENV_INVALID", "Codex proxy environment is invalid")));
   env.CODEX_HOME = codexHome;
   return Object.freeze(env);
 }

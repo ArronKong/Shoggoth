@@ -2,7 +2,7 @@ import AgentAvatarView from "../components/AgentAvatar";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { animate } from "animejs";
 import {
   getCronLatestDelivery,
@@ -35,7 +35,7 @@ import { toSanitizedMarkdownHtml } from "../lib/markdown";
 import { selectCronRunHandoffSource, writeCronChatHandoff } from "../lib/cronChatHandoff";
 import { fmtCost, fmtTokens, fmtMs } from "./usage/charts";
 import { cronDeliveryView, cronExecutionView } from "./cron/runPresentation";
-import ActivityFeed, { isVisibleDashboardActivity } from "./dashboard/ActivityFeed";
+import ActivityFeed from "./dashboard/ActivityFeed";
 import { useDashboardLiveWork } from "./dashboard/useDashboardLiveWork";
 import { useBackendCatalog, useEnabledBackends } from "../lib/backends";
 import { createAgentNameIndex, resolveAgentDisplayName } from "../lib/agentDisplay";
@@ -203,12 +203,14 @@ function TaskBoardCard({
   okLabel,
   failLabel,
   ranking,
+  note,
 }: {
   label: string;
-  ok: number;
-  fail: number;
+  ok: number | null;
+  fail: number | null;
   okLabel: string;
   failLabel: string;
+  note?: string;
   ranking: { agentId: string; backendId: string; displayName: string; count: number }[];
 }) {
   const cols = [ranking.slice(0, 3), ranking.slice(3, 6)];
@@ -217,14 +219,15 @@ function TaskBoardCard({
       <div className="tb-head">
         <span className="kpi-label">{label}</span>
         <span className="tb-badges">
-          <span className="tb-badge tb-badge-ok" title={okLabel} aria-label={`${okLabel}: ${fmtCount(ok)}`}>
-            {fmtCount(ok)}
+          <span className="tb-badge tb-badge-ok" title={okLabel} aria-label={`${okLabel}: ${ok === null ? "—" : fmtCount(ok)}`}>
+            {ok === null ? "—" : fmtCount(ok)}
           </span>
-          <span className="tb-badge tb-badge-fail" title={failLabel} aria-label={`${failLabel}: ${fmtCount(fail)}`}>
-            {fmtCount(fail)}
+          <span className="tb-badge tb-badge-fail" title={failLabel} aria-label={`${failLabel}: ${fail === null ? "—" : fmtCount(fail)}`}>
+            {fail === null ? "—" : fmtCount(fail)}
           </span>
         </span>
       </div>
+      {note && <div className="tb-note">{note}</div>}
       <div className="tb-cols">
         {cols.map((col, i) => (
           <div className="tb-col" key={i}>
@@ -249,10 +252,6 @@ function deltaPct(today: number, yesterday: number): { text: string; up: boolean
   return { text: `${pct >= 0 ? "+" : ""}${pct.toFixed(0)}%`, up: pct >= 0 };
 }
 
-function runFailed(run: DashboardRunEntry): boolean {
-  if (run.completionStatus) return run.completionStatus === "failed";
-  return run.status === "error" || !!run.error;
-}
 
 const fmtSize = (n?: number): string => {
   if (typeof n !== "number") return "";
@@ -354,6 +353,8 @@ function ArtifactThumb({ name }: { name: string }) {
 export default function DashboardPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const enabledBackendIds = useEnabledBackends();
+  const backendScopeKey = [...enabledBackendIds].sort().join(",");
   const backendCatalog = useBackendCatalog("dashboardRuns");
   const dashboardRunBackends = useMemo(
     () => new Set(backendCatalog.map((descriptor) => descriptor.id)),
@@ -361,14 +362,15 @@ export default function DashboardPage() {
   );
   const [persistedData] = useState(() => readDashboardCache());
   const cachedGeneratedAtRef = useRef(persistedData?.generatedAt);
-  const { data: liveData, loading, error, refresh: refreshDashboard } = usePageCache("dashboard", getDashboardSummary);
+  const { data: liveData, loading, error, refresh: refreshDashboard } = usePageCache(`dashboard:${backendScopeKey}`, getDashboardSummary);
   const { data, showLoading, blockingError, nonBlockingError } = resolveDashboardViewState(
     liveData,
     persistedData,
     loading,
     error,
+    enabledBackendIds,
   );
-  const { work: liveWork, refresh: refreshLiveWork } = useDashboardLiveWork(data);
+  const { work: liveWork, refresh: refreshLiveWork } = useDashboardLiveWork(data, backendScopeKey);
   const currentWork = liveWork || data;
   // Agent 目录与 Dashboard summary 并行加载，避免名称展示形成二次请求瀑布。
   const agentBackendIds = useEnabledBackends("agents");
@@ -420,90 +422,52 @@ export default function DashboardPage() {
     };
   }, []);
 
-  // KPI 聚合：usage 跨后端求和；运行成败从今日 runs 数（注意 runs 被 runsLimit
-  // 截断，极端多产日会低估——feed 同源，口径一致）。
   const usageAgg = useMemo(() => {
-    const z = { todayCost: 0, todayTokens: 0, yCost: 0, yTokens: 0 };
+    const z = { todayCost: 0, todayTokens: 0, yCost: 0, yTokens: 0, missing: 0, incomplete: false,
+      ready: 0, yesterdayReady: false };
     for (const u of data?.usage || []) {
       z.todayCost += u.today?.totalCost || 0;
       z.todayTokens += u.today?.totalTokens || 0;
       z.yCost += u.yesterday?.totalCost || 0;
       z.yTokens += u.yesterday?.totalTokens || 0;
+      z.missing += u.today?.missingCostEntries || 0;
+      if (!u.today || u.availability === "partial" || u.availability === "unavailable") z.incomplete = true;
+      if (u.today && u.availability !== "unavailable") z.ready++;
+      if (u.yesterday || u.yesterdayComplete) z.yesterdayReady = true;
     }
     return z;
   }, [data]);
-  // KPI 成败口径：优先服务端 runStats（活动层当天全量，消除 runsLimit=50 截断
-  // 低估）；老服务端无该字段时回退旧的 runs 计数。
-  const runStats = useMemo(() => {
-    // 与「今日动态」同口径：成败从今日活动流全量按 severity 归类（error→失败，其余含
-    // kanban 看板操作→成功），使「成功 + 失败 = 今日动态」。今日活动 < 首屏页大小
-    // (DEFAULT_PAGE_LIMIT=100) 时首屏即全量。
-    const acts = data?.activityPage?.items;
-    if (acts) {
-      let okCount = 0;
-      let failCount = 0;
-      for (const a of acts) {
-        if (!isVisibleDashboardActivity(a)) continue;
-        if (a.severity === "error") failCount += 1;
-        else okCount += 1;
-      }
-      return { okCount, failCount };
-    }
-    // 活动流缺失时回退：服务端 cron runStats → 旧 runs 计数。
-    if (data?.runStats?.total) {
-      const t0 = data.runStats.total;
-      return { okCount: t0.ok, failCount: t0.error };
-    }
-    let okCount = 0;
-    let failCount = 0;
-    for (const r of data?.runs || []) {
-      if (runFailed(r)) failCount += 1;
-      else okCount += 1;
-    }
-    return { okCount, failCount };
-  }, [data]);
-  // Task Board 卡：各 agent「今日完成数」排行。口径与上面 runStats 的成功侧一致
-  // （severity 非 error 记为完成），排除系统健康及 heartbeat 记录，只计有 agentId 归属的活动；
-  // 降序取前 6 → 两列各 3 行（照设计 7071-364）。
-  const agentRanking = useMemo(() => {
-    const byAgent = new Map<string, { agentId: string; backendId: string; count: number }>();
-    for (const a of data?.activityPage?.items || []) {
-      if (!isVisibleDashboardActivity(a) || a.severity === "error" || !a.agentId) continue;
-      const key = `${a.backendId}\u0000${a.agentId}`;
-      const row = byAgent.get(key);
-      byAgent.set(key, { agentId: a.agentId, backendId: a.backendId, count: (row?.count || 0) + 1 });
-    }
-    return [...byAgent.values()]
-      .map((row) => ({ ...row, displayName: currentAgentName(row.agentId, row.backendId) }))
-      .sort((a, b) => (b.count !== a.count ? b.count - a.count : a.agentId < b.agentId ? -1 : 1))
-      .slice(0, 6);
-  }, [currentAgentName, data]);
-  const costDelta = deltaPct(usageAgg.todayCost, usageAgg.yCost);
-  const tokenDelta = deltaPct(usageAgg.todayTokens, usageAgg.yTokens);
+  // Authoritative totals/rankings are computed before activity pagination.
+  const runStats = data?.taskStats?.total;
+  const agentRanking = useMemo(() => (data?.taskStats?.byAgent || [])
+    .filter(row => row.ok > 0)
+    .map(row => ({ ...row, count: row.ok, displayName: currentAgentName(row.agentId, row.backendId) }))
+    .sort((a, b) => b.count - a.count || a.agentId.localeCompare(b.agentId))
+    .slice(0, 6), [currentAgentName, data?.taskStats]);
+  const costReady = usageAgg.ready > 0 && !(usageAgg.missing > 0 && usageAgg.todayCost === 0);
+  const costDelta = costReady && usageAgg.yesterdayReady && !usageAgg.incomplete && !usageAgg.missing ? deltaPct(usageAgg.todayCost, usageAgg.yCost) : null;
+  const tokenDelta = usageAgg.ready && usageAgg.yesterdayReady && !usageAgg.incomplete ? deltaPct(usageAgg.todayTokens, usageAgg.yTokens) : null;
 
-  // Token 与成本曲线共用最近 7 天序列（双后端按日求和）。status 首次就绪后
-  // 拉一次；单后端失败静默忽略（铁律 4），至少一个成功就渲染对应趋势。
-  const [trendPoints, setTrendPoints] = useState<{ tokens: number[]; costs: number[] }>({ tokens: [], costs: [] });
-  const sparkFetchedRef = useRef(false);
-  const backendIds = (data?.status || []).map((b) => b.id).join(",");
+  // Trends use the same enabled backend scope as the summary and its caches.
+  const [trend, setTrend] = useState<{ scope: string; tokens: number[]; costs: number[] }>({ scope: "", tokens: [], costs: [] });
+  const trendPoints = trend.scope === backendScopeKey ? trend : { tokens: [], costs: [] };
   const usagePending = (data?.usage || []).some((entry) => entry.error === "pending");
   useEffect(() => {
-    if (sparkFetchedRef.current || !backendIds) return;
-    sparkFetchedRef.current = true;
+    if (!backendScopeKey) return;
     let cancelled = false;
-    const ids = backendIds.split(",");
+    const ids = backendScopeKey.split(",");
     void Promise.all(
       ids.map((id) => getUsageSeries(id, "7d").catch(() => null)),
     ).then((series) => {
       if (cancelled) return;
       const points = aggregateKpiTrendPoints(series);
-      if (points.tokens.length > 0 || points.costs.length > 0) setTrendPoints(points);
+      setTrend({ scope: backendScopeKey, ...points });
       // 首屏 usage 因冷扫描超时只返回 pending 时，此处已复用/完成同一单飞扫描；
       // 立刻补刷 summary，让 KPI 获得权威 today/7d 口径，无需等 45s 轮询。
       if (usagePending) void refreshRef.current();
     });
     return () => { cancelled = true; };
-  }, [backendIds, usagePending]);
+  }, [backendScopeKey, usagePending]);
 
   const [openInspirationId, setOpenInspirationId] = useState<string | null>(null);
   const [inspirationModalOpen, setInspirationModalOpen] = useState(false);
@@ -658,34 +622,37 @@ export default function DashboardPage() {
           <div className="kpi-row">
             <Kpi
               label={t("dashboard.kpiTodayTokens")}
-              value={<CountUp value={usageAgg.todayTokens} fmt={fmtTokens} />}
+              value={usageAgg.ready ? <CountUp value={usageAgg.todayTokens} fmt={fmtTokens} /> : "—"}
               sub={
-                <>
-                  {t("dashboard.vsYesterday", { value: fmtTokens(usageAgg.yTokens) })}
-                  {tokenDelta && <span className={tokenDelta.up ? "delta-up" : "delta-down"}> {tokenDelta.text}</span>}
-                </>
+                <Trans
+                  i18nKey="dashboard.vsYesterday"
+                  values={{ value: tokenDelta?.text ?? "—" }}
+                  components={{ percent: <span className={tokenDelta ? (tokenDelta.up ? "delta-up" : "delta-down") : undefined} /> }}
+                />
               }
               chart={<KpiSpark points={trendPoints.tokens} gradientId="kpi-token-spark-fill" />}
             />
             <Kpi
               className="kpi-cost"
               label={t("dashboard.kpiTodayCost")}
-              value={<CountUp value={usageAgg.todayCost} fmt={fmtCost} />}
+              value={costReady ? <CountUp value={usageAgg.todayCost} fmt={fmtCost} /> : "—"}
               sub={
-                <>
-                  {t("dashboard.vsYesterday", { value: fmtCost(usageAgg.yCost) })}
-                  {costDelta && <span className={costDelta.up ? "delta-up" : "delta-down"}> {costDelta.text}</span>}
-                </>
+                <Trans
+                  i18nKey="dashboard.vsYesterday"
+                  values={{ value: costDelta?.text ?? "—" }}
+                  components={{ percent: <span className={costDelta ? (costDelta.up ? "delta-up" : "delta-down") : undefined} /> }}
+                />
               }
               chart={<KpiSpark points={trendPoints.costs} gradientId="kpi-cost-spark-fill" />}
             />
             <TaskBoardCard
               label={t("dashboard.taskBoard")}
-              ok={runStats.okCount}
-              fail={runStats.failCount}
+              ok={runStats?.ok ?? null}
+              fail={runStats?.error ?? null}
               okLabel={t("dashboard.kpiRunsOk")}
               failLabel={t("dashboard.kpiRunsFail")}
               ranking={agentRanking}
+              note={data.taskStats?.complete === false ? t("dashboard.statsIncomplete") : undefined}
             />
           </div>
 

@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const { DOCUMENT_KINDS, DEFINITION_EXPORT_FORMAT } = require("./agent-definition-store");
 const { hasSecret } = require("./memory-engine");
 const { serviceError } = require("./security");
@@ -40,7 +41,7 @@ class AgentHarnessServiceController {
       [options.productStore, ["getAgentProfile"], "ProductStore"],
       [options.definitionStore, ["get", "history", "readRevision", "update", "restore", "previewImport", "import", "readGeneratedView"], "AgentDefinitionStore"],
       [options.memoryStore, ["getRevision", "list"], "MemoryStore"],
-      [options.memoryEngine, ["confirm", "update", "delete"], "MemoryEngine"],
+      [options.memoryEngine, ["propose", "confirm", "update", "delete"], "MemoryEngine"],
       [options.chatSessionStore, ["listSessions"], "ChatSessionStore"],
       [options.transcriptStore, ["listEvents", "getRevision", "setContextExcluded"], "TranscriptStore"],
       [options.toolRegistry, ["list"], "ToolRegistry"],
@@ -191,11 +192,19 @@ class AgentHarnessServiceController {
       });
       return { revision: this.memoryStore.getRevision(params.profileId), ...page(all, params.cursor, params.limit) };
     }
+    if (method === "harness.memory.create") {
+      this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+      const item = this.memoryEngine.propose({
+        profileId: params.profileId, content: params.content, scope: params.scope,
+        type: "semantic", classification: "explicit", sourceRefs: [`user-edit:${crypto.randomUUID()}`],
+      });
+      return { revision: this.memoryStore.getRevision(params.profileId), item };
+    }
     if (["harness.memory.confirm", "harness.memory.update", "harness.memory.delete"].includes(method)) {
       this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
       const value = method.endsWith("confirm") ? this.memoryEngine.confirm(params)
         : method.endsWith("delete") ? this.memoryEngine.delete(params)
-          : this.memoryEngine.update(params);
+          : this.memoryEngine.update({ ...params, sourceRef: "user-edit:agent-settings" });
       return { revision: this.memoryStore.getRevision(params.profileId), item: value };
     }
     if (method === "harness.transcript.sessions") {

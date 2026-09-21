@@ -370,7 +370,7 @@ export default function FederatedTasksPage() {
         </div>
       )}
       {loading && !board ? (
-        <div className={styles.loading}><FusionLoader label={t("common.loading")} /></div>
+        <div className="page-loading"><FusionLoader label={t("common.loading")} /></div>
       ) : (
         <div className={styles.boardScroller}>
           <div className={styles.board}>

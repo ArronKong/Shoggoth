@@ -226,6 +226,7 @@ export default function CronPage() {
   // 仅由 Cron 桌面通知写入；普通访问不会携带该参数。
   const notificationJobId = searchParams.get("job");
   const notificationBackendId = searchParams.get("backend");
+  const notificationRequest = searchParams.get("notification");
   // 打开后保留消费标记，用户手动关闭详情时不应因同一深链再次自动弹出。
   const openedNotificationJobId = useRef<string | null>(null);
   const stats = useMemo(() => countJobs(jobs), [jobs]);
@@ -397,15 +398,29 @@ export default function CronPage() {
     if (!detailIntentController.isCurrent(ticket, intent)) return;
   }, [authoritativeJob, detailIntentController, loadRunsFor, selectionController]);
 
-  // Cron 列表加载完成后，根据通知深链定位任务并打开现有详情弹窗；找不到任务时保留列表页。
+  // 通知可定位当前筛选之外的任务；notification 区分同一任务的再次点击。
   useEffect(() => {
-    if (!notificationJobId || loading || openedNotificationJobId.current === notificationJobId) return;
+    if (!notificationJobId || loading) return;
+    const identity = JSON.stringify([notificationBackendId, notificationJobId, notificationRequest]);
+    if (openedNotificationJobId.current === identity) return;
+    openedNotificationJobId.current = identity;
     const notificationJob = jobs.find((job) =>
       job.id === notificationJobId && (!notificationBackendId || job.backendId === notificationBackendId));
-    if (!notificationJob) return;
-    openedNotificationJobId.current = notificationJobId;
-    void openView(notificationJob);
-  }, [jobs, loading, notificationBackendId, notificationJobId, openView]);
+    if (notificationJob) {
+      void openView(notificationJob);
+      return;
+    }
+    const ticket = detailIntentController.begin("detail", `notification:${identity}`);
+    void listCronJobs(notificationBackendId ? { backend: notificationBackendId } : {}).then(allJobs => {
+      if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
+      const job = allJobs.find(item => item.id === notificationJobId
+        && (!notificationBackendId || item.backendId === notificationBackendId));
+      if (job) void openView(job);
+      else toast.info(t("notif.cronUnavailable"));
+    }).catch(error => {
+      if (detailIntentController.isCurrent(ticket, ticket.context)) toast.error(error instanceof Error ? error.message : String(error));
+    });
+  }, [jobs, loading, notificationBackendId, notificationJobId, notificationRequest, openView, detailIntentController, t, toast]);
 
   const openEdit = async (job: UnifiedCronJob) => {
     const intent = `edit:${job.backendId}:${job.id}`;

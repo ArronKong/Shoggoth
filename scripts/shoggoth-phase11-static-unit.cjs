@@ -14,6 +14,10 @@ async function request(base, path, options = {}) {
 (async () => {
   const calls = [];
   const shoggoth = {
+    async validateCustomEndpoint(input, options) {
+      calls.push(["endpoint.validate", input, options]);
+      return { ok: true, reachable: true, message: "", models: ["discovered-model"] };
+    },
     async getDashboardRunDetail(id) {
       calls.push(["run.detail", id]);
       if (id === "explode") throw new Error("private runtime path /Users/private");
@@ -144,6 +148,20 @@ async function request(base, path, options = {}) {
   const server = await startStaticServer(0, { registry, productHost });
   try {
     const headers = { Origin: server.url, "Content-Type": "application/json" };
+    const discovered = await request(server.url, "/__api/models/endpoints/validate?backend=shoggoth", {
+      method: "POST", headers,
+      body: JSON.stringify({ profile: "profile-second", baseUrl: "https://gateway.example/v1", apiKey: "fixture-only-key", model: "" }),
+    });
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, ["discovered-model"]);
+    assert.equal(calls.at(-1)[0], "endpoint.validate");
+    assert.deepEqual(calls.at(-1)[2], { profile: "profile-second" });
+    const discoveryCalls = calls.length;
+    const rejectedDiscovery = await request(server.url, "/__api/models/endpoints/validate?backend=shoggoth", {
+      method: "POST", headers: { ...headers, Origin: "https://untrusted.example" }, body: "{}",
+    });
+    assert.equal(rejectedDiscovery.status, 403);
+    assert.equal(calls.length, discoveryCalls);
     let result = await request(server.url, "/__api/shoggoth/status", { headers });
     assert.equal(result.status, 200);
     assert.equal(result.body.service.healthy, true);

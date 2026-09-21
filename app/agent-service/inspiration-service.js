@@ -409,10 +409,12 @@ class InspirationService {
     let result;
     if (method === "inspiration.agent-stats") result = { agents: this.store.agentExecutionStats(input.agents) };
     else if (method === "inspiration.activities") {
-      result = this.#page(this.store.dashboardExecutionsPage(input), "items", execution => {
+      const finishedRunIds = this.dispatcher.listRuns({ source: "inspiration" })
+        .filter(run => run.finishedAt !== null && run.finishedAt >= input.sinceMs).map(run => run.id);
+      result = this.#page(this.store.dashboardExecutionsPage({ ...input, finishedRunIds }), "items", execution => {
         const view = this.#executionView(execution);
         return { id: view.id, ideaId: view.ideaId, runId: view.runId, backendId: view.backendId,
-          agentId: view.agentId, createdAt: view.createdAt, status: view.status,
+          agentId: view.agentId, createdAt: view.createdAt, finishedAt: view.finishedAt, status: view.status,
           title: [...(execution.title || execution.body.trim().split("\n")[0] || execution.attachments?.[0]?.name || "")].slice(0, 80).join(""),
           summary: [...(view.resultSummary || "")].slice(0, 500).join("") };
       });

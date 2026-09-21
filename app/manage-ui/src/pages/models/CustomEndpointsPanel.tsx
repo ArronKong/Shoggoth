@@ -4,7 +4,9 @@ import type { CustomEndpoint, CustomEndpointsSnapshot } from "../../types";
 import { useConfirm, useToast } from "../../components/ui";
 import EndpointModal from "./EndpointModal";
 import {
+  canConfirmEndpointRemoval,
   createEndpointMutationSession,
+  endpointOutcomeReferences as safeReferences,
   isEndpointMutationComplete,
   type EndpointController,
   type EndpointMutationOutcome,
@@ -24,42 +26,20 @@ type DeleteRecovery = {
   outcome: EndpointMutationOutcome;
 };
 
-function safeReferences(outcome: EndpointMutationOutcome): EndpointSafeReference[] {
-  const references = [
-    ...(outcome.recovery?.references ?? []),
-    ...outcome.steps.flatMap((step) => step.references ?? []),
-  ];
-  const seen = new Set<string>();
-  return references.filter((reference) => {
-    const key = JSON.stringify([
-      reference.store,
-      reference.referenceKey,
-      reference.scope,
-      reference.agent,
-      reference.profile,
-    ]);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 function mayForceReferenceDelete(outcome: EndpointMutationOutcome): boolean {
-  const blockerCodes = outcome.steps.flatMap((step) =>
-    (step.blockers ?? []).map((blocker) => blocker.code));
-  const hasReferenceBlocker = (
-    outcome.code === "references_exist"
-    || outcome.recovery?.code === "references_exist"
-    || blockerCodes.includes("references_exist")
-  );
-  const hasHardBlocker = blockerCodes.some((code) => code !== "references_exist");
-  return hasReferenceBlocker && !hasHardBlocker && safeReferences(outcome).length > 0;
+  return canConfirmEndpointRemoval({
+    code: outcome.code ?? outcome.recovery?.code,
+    blockers: outcome.steps.flatMap((step) => step.blockers ?? []),
+    references: safeReferences(outcome),
+    canForce: outcome.canForce,
+  });
 }
 
 export default function CustomEndpointsPanel({
   controller,
   active,
   anchorId,
+  description,
   onChanged,
   onActivation,
 }: {
@@ -67,6 +47,7 @@ export default function CustomEndpointsPanel({
   active: boolean;
   /** 供「代理」页概览的设置引导跳转定位（?section=endpoints）。 */
   anchorId?: string;
+  description?: string;
   /** 完整保存/删除后通知页面刷新（端点进出会改目录）。 */
   onChanged: () => void;
   onActivation?: (activation?: { kind: string; available?: boolean } | null) => void;
@@ -299,7 +280,7 @@ export default function CustomEndpointsPanel({
           </span>
         )}
       </div>
-      <p className="ui-hint">{t("models.settings.endpoints.subtitle")}</p>
+      <p className="ui-hint">{description ?? t("models.settings.endpoints.subtitle")}</p>
       {loading && !snapshot && <p className="ui-hint">{t("common.loading")}</p>}
       {listError && <p className={styles.recoveryNote} role="status">{listError}</p>}
       {mutationNote && <p className={styles.recoveryNote} role="status">{mutationNote}</p>}

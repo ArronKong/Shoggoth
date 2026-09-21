@@ -431,6 +431,23 @@ body[data-immersive] .nav-link:hover:not(.active) {
   /* 顶部统一 36px，与聊天页栏头（chat-aside__head）同一起点 */
   padding: 36px 1.25rem 1.25rem;
 }
+/* 页面加载占位以内容画布为中心，路由首载和看板首载共用。 */
+.page-loading {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.page.page-loading {
+  flex: 1;
+}
+.page:has(> .page-loading) {
+  position: relative;
+}
+.page > .page-loading {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
 .placeholder h2 {
   margin: 0 0 0.5rem;
 }
@@ -457,7 +474,7 @@ body[data-immersive] .nav-link:hover:not(.active) {
   color: light-dark(#b91c1c, #f87171);
   border: 1px solid light-dark(#fecaca, #5f2828);
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  border-radius: 999px;
   margin-bottom: 1rem;
 }
 

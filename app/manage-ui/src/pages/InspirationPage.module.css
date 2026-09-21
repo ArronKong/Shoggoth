@@ -149,12 +149,12 @@
 .detailGrowth { width: 64px; height: 64px; padding: 10px; flex: 0 0 auto; border-radius: 50%; background: color-mix(in srgb, currentColor 7%, transparent); }
 .detailTitleText { display: flex; flex-direction: column; min-width: 0; gap: 5px; }
 .detailEyebrow { display: flex; align-items: center; gap: 12px; font-size: 12px; font-weight: 400; line-height: 20px; letter-spacing: .03em; }
-.detailHeading { color: var(--ui-text-1); font-size: clamp(20px, 2.3vw, 26px); font-weight: 400; line-height: 1.45; letter-spacing: -.025em; overflow-wrap: anywhere; }
+.detailHeading { composes: typeface from './InspirationPaper.module.css'; color: var(--ui-text-1); font-size: clamp(20px, 2.3vw, 26px); font-weight: 400; line-height: 1.45; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .archiveBadge { display: inline-flex; align-items: center; gap: 4px; color: var(--ui-text-2); font-size: 11px; letter-spacing: 0; }
 .archiveBadge svg { width: 16px; height: 16px; }
 .sectionHeading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 28px; margin-bottom: 12px; }
 .detail h3 { font-size: 13px; font-weight: 400; line-height: 1.6; color: var(--ui-text-2); margin: 0; }
-.original { font-size: 17px; line-height: 1.95; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.original { composes: typeface from './InspirationPaper.module.css'; font-size: 17px; line-height: 1.95; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 .noteDate { font-size: 11px; line-height: 1.6; color: var(--ui-text-2); margin: 14px 0 0; }
 .textAction { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 3px 7px; margin-right: -7px; border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-2); font-size: 12px; cursor: pointer; }
 .textAction:hover:not(:disabled) { background: var(--ui-surface-2); color: var(--ui-text-1); border-color: transparent; }

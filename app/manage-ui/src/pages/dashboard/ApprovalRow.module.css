@@ -27,8 +27,8 @@
 .header > * { position: relative; z-index: 1; }
 .header::after {
   content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(100deg, transparent 25%, #ffffff26 50%, transparent 75%);
-  transform: translateX(-100%); animation: running-sheen 2.8s linear infinite;
+  background: linear-gradient(100deg, transparent 17.5%, rgb(255 255 255 / 34%) 50%, transparent 82.5%);
+  transform: translateX(-100%); animation: running-sheen 2.2s linear infinite;
   transition: opacity 220ms var(--status-ease);
 }
 .root[data-tone=attention] .header::after { opacity: 0; }

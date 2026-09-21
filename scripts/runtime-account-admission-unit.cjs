@@ -19,7 +19,7 @@ function fixture(options = {}) {
   return { admission, setNow: (value) => { now = value; } };
 }
 
-test("same RuntimeAccount shares a conservative active limit", () => {
+test("same RuntimeAccount shares four active slots and queues the fifth", () => {
   const { admission } = fixture();
   assert.deepEqual(admission.admit({
     runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
@@ -27,9 +27,13 @@ test("same RuntimeAccount shares a conservative active limit", () => {
   }), {
     disposition: "started", reason: null, generation: 1, retryAt: null,
   });
+  for (const runId of ["run-b", "run-c", "run-d"]) {
+    assert.equal(admission.admit({ runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
+      runId }).disposition, "started");
+  }
   assert.equal(admission.admit({
     runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
-    runId: "run-b",
+    runId: "run-e",
   }).reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
   assert.equal(admission.release({
     runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
@@ -37,8 +41,18 @@ test("same RuntimeAccount shares a conservative active limit", () => {
   }), true);
   assert.equal(admission.admit({
     runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
-    runId: "run-b",
+    runId: "run-e",
   }).disposition, "started");
+  assert.equal(admission.read(NATIVE_CODEX_RUNTIME_ACCOUNT_ID).active, 4);
+});
+
+test("an explicitly lower account limit is preserved", () => {
+  const { admission } = fixture({ resolveMaxActive: () => 2 });
+  const runtimeAccountId = NATIVE_CODEX_RUNTIME_ACCOUNT_ID;
+  assert.equal(admission.admit({ runtimeAccountId, runId: "a" }).disposition, "started");
+  assert.equal(admission.admit({ runtimeAccountId, runId: "b" }).disposition, "started");
+  assert.equal(admission.admit({ runtimeAccountId, runId: "c" }).reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
+  assert.equal(admission.read(runtimeAccountId).maxActive, 2);
 });
 
 test("mutation fences active work and advances account generation", () => {
@@ -68,7 +82,7 @@ test("Retry-After backoff is account-wide and expires against the injected clock
     runtimeAccountId: account,
     generation: 1,
     active: 0,
-    maxActive: 1,
+    maxActive: 4,
     mutationActive: false,
     backoffUntil: 250,
   });
@@ -89,4 +103,60 @@ test("unknown accounts and invalid limit resolvers fail closed", () => {
     () => invalid.read(NATIVE_CODEX_RUNTIME_ACCOUNT_ID),
     { code: "RUNTIME_ACCOUNT_ADMISSION_LIMIT_INVALID" },
   );
+});
+
+test("credit recovery clears quota backoff without erasing a transport Retry-After", () => {
+  const { admission, setNow } = fixture();
+  const identity = { runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID, generation: 1 };
+  admission.noteRateLimitBackoff({ ...identity, retryAt: 1000 });
+  admission.noteRateLimitBackoff({ ...identity, retryAt: 900 });
+  assert.equal(admission.read(identity.runtimeAccountId).backoffUntil, 1000);
+  admission.noteBackoff({ ...identity, retryAt: 250 });
+  assert.equal(admission.admit({ ...identity, runId: "queued" }).retryAt, 1000);
+  admission.noteRateLimitBackoff({ ...identity, retryAt: 0 });
+  assert.equal(admission.read(identity.runtimeAccountId).backoffUntil, 250);
+  assert.equal(admission.admit({ ...identity, runId: "queued" }).retryAt, 250);
+  setNow(250);
+  assert.equal(admission.admit({ ...identity, runId: "queued" }).disposition, "started");
+});
+
+test("account mutations clear both cooldown sources and reject stale quota recovery", () => {
+  const { admission } = fixture();
+  const identity = { runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID, generation: 1 };
+  admission.noteBackoff({ ...identity, retryAt: 250 });
+  admission.noteRateLimitBackoff({ ...identity, retryAt: 1000 });
+  admission.finishMutation(admission.beginMutation({ ...identity, operationId: "new-login" }));
+  assert.equal(admission.read(identity.runtimeAccountId).backoffUntil, null);
+  admission.noteRateLimitBackoff({ ...identity, generation: 2, retryAt: 2000 });
+  assert.throws(() => admission.noteRateLimitBackoff({ ...identity, retryAt: 0 }),
+    { code: "RUNTIME_ACCOUNT_GENERATION_STALE" });
+  assert.equal(admission.read(identity.runtimeAccountId).backoffUntil, 2000);
+});
+
+test("exhausted quota rejects immediately without occupying a slot and expires at reset", () => {
+  const { admission, setNow } = fixture();
+  const identity = { runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID, generation: 1 };
+  admission.noteRateLimitBackoff({ ...identity, retryAt: 1000, errorCode: "RUNTIME_QUOTA_EXHAUSTED" });
+  assert.deepEqual(admission.admit({ ...identity, runId: "denied" }), {
+    disposition: "rejected", reason: "RUNTIME_QUOTA_EXHAUSTED", generation: 1, retryAt: 1000,
+  });
+  assert.equal(admission.read(identity.runtimeAccountId).active, 0);
+  setNow(1000);
+  assert.equal(admission.admit({ ...identity, runId: "retry" }).disposition, "started");
+  admission.release({ ...identity, runId: "retry" });
+  admission.noteRateLimitBackoff({ ...identity, retryAt: 1200 });
+  assert.equal(admission.admit({ ...identity, runId: "next" }).reason, "RUNTIME_ACCOUNT_BACKOFF",
+    "an expired quota failure must not suppress a new transient backoff");
+});
+
+test("spending limits without a reset reject until recovery, which preserves real Retry-After", () => {
+  const { admission, setNow } = fixture();
+  const identity = { runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID, generation: 1 };
+  admission.noteRateLimitBackoff({ ...identity, retryAt: null, errorCode: "RUNTIME_SPENDING_LIMIT_REACHED" });
+  assert.equal(admission.admit({ ...identity, runId: "denied" }).reason, "RUNTIME_SPENDING_LIMIT_REACHED");
+  admission.noteBackoff({ ...identity, retryAt: 250 });
+  admission.noteRateLimitBackoff({ ...identity, retryAt: 0 });
+  assert.equal(admission.admit({ ...identity, runId: "retry" }).reason, "RUNTIME_ACCOUNT_BACKOFF");
+  setNow(250);
+  assert.equal(admission.admit({ ...identity, runId: "retry" }).disposition, "started");
 });

@@ -492,6 +492,12 @@ function createOpenClawModelChange({
     if (["delete-model", "delete-provider"].includes(safeSpec.kind)
       && scanned.references?.some((reference) => reference.definition !== true)) {
       blockers.push({ code: "references_exist", store: "all", message: "仍有未来模型引用" });
+      // Surface primary usage before confirmation/journaling. Ordinary deletion
+      // blocks it; endpoint reselection can explicitly preserve these bindings.
+      if (scanned.references.some((reference) => reference.store === "config"
+        && reference.referenceKey?.endsWith(".model.primary"))) {
+        blockers.push({ code: "primary_model_in_use", store: "config", message: "请先切换正在使用的主模型" });
+      }
     }
 
     let runtimeApplyMode = "unsupported";
@@ -1131,4 +1137,5 @@ function createOpenClawModelChange({
 module.exports = {
   OpenClawModelChangeError,
   createOpenClawModelChange,
+  providerPublicDigest,
 };

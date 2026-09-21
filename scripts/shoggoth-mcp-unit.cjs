@@ -64,6 +64,21 @@ const { readClientToken, requestService } = require(path.join(
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
+async function listAllTools(handler, id) {
+  const tools = [];
+  const cursors = new Set();
+  let cursor;
+  do {
+    const response = await handler({ jsonrpc: "2.0", id, method: "tools/list", params: cursor ? { cursor } : {} });
+    assert.equal(response.error, undefined);
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MCP_MAX_FRAME_BYTES);
+    tools.push(...response.result.tools);
+    cursor = response.result.nextCursor;
+    if (cursor) { assert.equal(cursors.has(cursor), false); cursors.add(cursor); }
+  } while (cursor);
+  return tools;
+}
+
 function deferred() {
   let resolve;
   let reject;
@@ -1666,9 +1681,8 @@ test("完整 MCP helper 经认证 Service 操作灵感，确认删除并保留�
       protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: { elicitation: {} },
       clientInfo: { name: "inspiration-integration", version: "1" },
     } });
-    const tools = await handler({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    assert.equal(tools.result.tools.filter(tool => tool.name.startsWith("inspiration_")).length, 10);
-    assert.ok(Buffer.byteLength(JSON.stringify(tools)) < MCP_MAX_FRAME_BYTES);
+    const tools = await listAllTools(handler, 2);
+    assert.equal(tools.filter(tool => tool.name.startsWith("inspiration_")).length, 10);
     let sequence = 3;
     const call = (name, args, context) => handler({ jsonrpc: "2.0", id: sequence++, method: "tools/call",
       params: { name: `inspiration_${name}`, arguments: args } }, context);
@@ -2099,14 +2113,17 @@ test("MCP stdio 提供初始化、ping、固定产品工具与受控 request_use
     jsonrpc: "2.0",
     id: 2,
     method: "initialize",
-    params: { protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "fixture", version: "1" } },
+    params: { protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+      capabilities: { sampling: {}, elicitation: {} },
+      clientInfo: { name: "fixture", version: "1" },
+      _meta: { progressToken: "hermes-compatible" } },
   });
   assert.equal(initialized.result.protocolVersion, MCP_STDIO_PROTOCOL_VERSION);
   assert.deepEqual(initialized.result.capabilities, { tools: { listChanged: false } });
   assert.equal(await handler({ jsonrpc: "2.0", method: "notifications/initialized" }), null);
   assert.deepEqual((await handler({ jsonrpc: "2.0", id: 3, method: "ping" })).result, {});
-  const listed = await handler({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} });
-  assert.deepEqual(listed.result.tools.map((tool) => tool.name), MCP_PRODUCT_TOOL_NAMES);
+  const listed = await listAllTools(handler, 4);
+  assert.deepEqual(listed.map((tool) => tool.name), MCP_PRODUCT_TOOL_NAMES);
   const called = await handler({
     jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "profile_get", arguments: {} },
   });
@@ -2314,6 +2331,8 @@ test("MCP stdio JSONL 有界串行处理，多帧响应不把 session token 写�
   assert.equal(responses[0].error.code, -32700);
   assert.equal(responses[1].id, 1);
   assert.equal(responses[2].id, 2);
+  assert.ok(responses[2].result.tools.length > 0);
+  assert.equal(typeof responses[2].result.nextCursor, "string");
   assert.equal(output.read().includes(token), false);
 });
 
@@ -2353,7 +2372,7 @@ test("完整 helper 入口通过 Service 握手后服务 stdio，EOF 清理且�
     assert.equal(responses[0].result.serverInfo.name, "shoggoth");
     assert.equal(responses[1].result.structuredContent.name, "Shoggoth");
     assert.deepEqual(electronCalls, [
-      ["activation", "prohibited"], "ready", "dock-hide", "quit",
+      ["activation", "prohibited"], "ready", "dock-hide", ["activation", "prohibited"], "quit",
     ]);
   } finally {
     await service.stop({ notify: false });

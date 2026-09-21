@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.108",
+      "version": "0.8.124",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.108",
-      "purl": "pkg:generic/shoggoth@0.8.108",
+      "bom-ref": "pkg:generic/shoggoth@0.8.124",
+      "purl": "pkg:generic/shoggoth@0.8.124",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -13056,7 +13056,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.108",
+      "ref": "pkg:generic/shoggoth@0.8.124",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/openai-codex@0.149.0?platform=darwin-arm64",

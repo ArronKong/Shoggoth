@@ -326,6 +326,7 @@ async function startAgentServiceProcess(options = {}) {
 
   if (electronApp && typeof electronApp.on === "function" && typeof openUiApp === "function") {
     activateHandler = () => {
+      hideBackgroundDock(electronApp, options.platform);
       if (shuttingDown || uiOpenInFlight) return;
       uiOpenInFlight = Promise.resolve()
         .then(() => openUiApp())

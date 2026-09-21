@@ -6,7 +6,7 @@ import { useConfirm, useToast } from "../../components/ui";
 import OAuthProvidersCard from "./OAuthProvidersCard";
 import ProviderLogo from "./ProviderLogo";
 import { ProviderCredentialFields } from "./ProviderCredentialFields";
-import { ToolKeysCard, type ToolKeyItem } from "./ToolKeysCard";
+import { SHOW_TOOL_KEYS, ToolKeysCard, type ToolKeyItem } from "./ToolKeysCard";
 import { builtinEndpointFor } from "./hermes-endpoints";
 import styles from "./KeysPanel.module.css";
 
@@ -402,7 +402,7 @@ export default function KeysPanel({
           （内置 provider 的密钥 / 自建 provider 的地址），工具密钥是另一码事。 */}
       {endpointsSlot}
 
-      {toolCount > 0 && (
+      {SHOW_TOOL_KEYS && toolCount > 0 && (
         <ToolKeysCard
           id="keys-tool"
           title={t("keys.catTool")}

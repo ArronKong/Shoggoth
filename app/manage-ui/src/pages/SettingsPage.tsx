@@ -31,17 +31,15 @@ import {
 import { Field, Switch, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
 import { applyConfiguredLocale } from "../i18n";
-import { applyTheme, setTheme, type ThemePref } from "../lib/theme";
+import { setTheme } from "../lib/theme";
 import { createSettingsLifecycleGuard } from "../lib/lowUiLifecycle";
 import { isLocalGatewayUrl, REMOTE_CONNECTIONS_ENABLED } from "../lib/connectionOptions";
 import {
   recoverShoggothStartup,
   shouldRecoverShoggothStartup,
 } from "../lib/shoggothStartupRecovery";
-import { useNavigationGuard } from "../lib/navigation-guard";
 import { setDebugEnabled, useDebugEnabled } from "../components/debug/store";
 import { PageHead } from "../components/PageHead";
-import PillTabs from "../components/PillTabs";
 import SettingsPreferences from "./settings/SettingsPreferences";
 import BackendOverview from "./settings/BackendOverview";
 import ServiceSettings from "./settings/ServiceSettings";
@@ -53,6 +51,8 @@ import "./settings/SettingsLayout.css";
 import "./settings/SettingsOperations.css";
 
 const SHOGGOTH_POST_START_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
+// Keep writes ordered even when Settings is left and reopened before a response.
+let settingsSaveQueue: Promise<void> = Promise.resolve();
 
 export function updateActionForCapabilityReview(status?: SelfUpdateRun): "update" | "repair" {
   return status?.operation === "repair" ? "repair" : "update";
@@ -74,30 +74,6 @@ export function standingGrantView(grant: StandingGrant) {
   };
 }
 
-// 「有未保存改动」只看用户能编辑的那几个字段——setupCompletedAt 由保存动作自己
-// 盖章，disabledBackends 由「断开/重连」按钮即时写盘（不经保存），都不算脏。
-function editableSnapshot(c: AppConfig): string {
-  return JSON.stringify({
-    gatewayUrl: c.gatewayUrl,
-    token: c.token,
-    locale: c.locale,
-    theme: c.theme,
-    hermesMode: c.hermesMode,
-    hermesRemotes: c.hermesRemotes,
-    notifications: c.notifications,
-  });
-}
-
-export function runSavedRefreshIfCurrent(
-  mounted: boolean,
-  savedSnapshot: string,
-  currentSnapshot: string,
-  refresh: () => void,
-): void {
-  if (!mounted || currentSnapshot !== savedSnapshot) return;
-  refresh();
-}
-
 function cloneConfig(c: AppConfig): AppConfig {
   return {
     ...c,
@@ -116,7 +92,7 @@ const EMPTY: AppConfig = {
   hermesRemotes: [],
   hermesKeepAlive: true,
   disabledBackends: [],
-  notifications: { chat: true, cron: false, task: false },
+  notifications: { chat: true, cron: true, task: true },
   setupCompletedAt: 0,
 };
 
@@ -179,12 +155,11 @@ export default function SettingsPage() {
   const [togglingBackend, setTogglingBackend] = useState(false);
   const backendConnectionBusy = useRef(false);
   const [reconnectingBackends, setReconnectingBackends] = useState<string[]>([]);
-  const [activeCategory, setActiveCategory] = useState("general");
-  const [showRemoteErrors, setShowRemoteErrors] = useState(false);
-  const remoteErrorRef = useRef<HTMLDivElement>(null);
-  // 保存基线：refresh 落配置时记一份，用来算「有未保存改动」。
-  const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const savedConfigRef = useRef<AppConfig | null>(null);
+  const pendingSavesRef = useRef(0);
+  const editVersionsRef = useRef<Partial<Record<keyof AppConfig, number>>>({});
+  const connectionSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingConnectionRef = useRef<Partial<AppConfig>>({});
   const [tests, setTests] = useState<Record<string, ConnTestResult | "testing">>({});
   // Stable per-row ids for the remote list so test results + React keys don't
   // shift when a row above is removed (a bare array index would). Not persisted.
@@ -194,17 +169,94 @@ export default function SettingsPage() {
   const lifecycleGuardRef = useRef<ReturnType<typeof createSettingsLifecycleGuard> | null>(null);
   if (!lifecycleGuardRef.current) lifecycleGuardRef.current = createSettingsLifecycleGuard();
   const lifecycleGuard = lifecycleGuardRef.current;
-  // Electron 保存后的延迟刷新必须在卸载时取消。
-  const saveRefreshTimerRef = useRef<number | null>(null);
-  // 主题预览只改 DOM；这里保留后端已保存值，离页时恢复。
-  const savedThemeRef = useRef<ThemePref | null>(null);
-  const themeLoadedRef = useRef(false);
 
   const toast = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   const confirm = useConfirm();
   const debugOn = useDebugEnabled();
   const versionsById = useMemo(() => new Map(versions.map((v) => [v.id, v])), [versions]);
   const selfUpdatesById = useMemo(() => new Map(selfUpdates.map((u) => [u.id, u])), [selfUpdates]);
+
+  // Only write edited fields, in order. A slow response must not replace a newer
+  // choice or another control's independently persisted configuration.
+  const persistSettings = useCallback((patch: Partial<AppConfig>) => {
+    const keys = Object.keys(patch) as Array<keyof AppConfig>;
+    if (keys.length === 0) return settingsSaveQueue;
+    const versions = { ...editVersionsRef.current };
+    pendingSavesRef.current += 1;
+    if (lifecycleGuard.isMounted()) setSaving(true);
+    const reconcile = (values: AppConfig) => {
+      const current = { ...cfgRef.current };
+      for (const key of keys) {
+        if (editVersionsRef.current[key] === versions[key]) {
+          Object.assign(current, { [key]: values[key] });
+        }
+      }
+      cfgRef.current = current;
+      if (lifecycleGuard.isMounted()) setCfg(current);
+    };
+    settingsSaveQueue = settingsSaveQueue.then(async () => {
+      try {
+        const saved = await updateConfig({
+          ...patch, setupCompletedAt: savedConfigRef.current?.setupCompletedAt || Date.now(),
+        });
+        const confirmed = { ...savedConfigRef.current!, setupCompletedAt: saved.setupCompletedAt };
+        for (const key of keys) Object.assign(confirmed, { [key]: saved[key] });
+        savedConfigRef.current = cloneConfig(confirmed);
+        reconcile(saved);
+        if ("theme" in patch) setTheme(saved.theme);
+        if ("locale" in patch) await applyConfiguredLocale(saved.locale);
+        window.dispatchEvent(new CustomEvent("openclaw:config-changed"));
+        if (lifecycleGuard.isMounted() && ("gatewayUrl" in patch || "hermesMode" in patch || "hermesRemotes" in patch)) {
+          const ids = ["gatewayUrl" in patch ? "openclaw" : "hermes"];
+          if ("hermesMode" in patch || "hermesRemotes" in patch) ids.push("hermes");
+          setReconnectingBackends((current) => [...new Set([...current, ...ids])]);
+        }
+      } catch (e) {
+        if (savedConfigRef.current) {
+          reconcile(savedConfigRef.current);
+          if ("theme" in patch) setTheme(savedConfigRef.current.theme);
+        }
+        toastRef.current.error(i18n.t("settings.autoSaveFailed", { msg: e instanceof Error ? e.message : String(e) }));
+      } finally {
+        pendingSavesRef.current -= 1;
+        if (lifecycleGuard.isMounted()) setSaving(pendingSavesRef.current > 0);
+      }
+    });
+    return settingsSaveQueue;
+  }, [i18n, lifecycleGuard]);
+
+  const flushConnectionChanges = useCallback(() => {
+    if (connectionSaveTimerRef.current !== null) clearTimeout(connectionSaveTimerRef.current);
+    connectionSaveTimerRef.current = null;
+    const patch = pendingConnectionRef.current;
+    // Incomplete text stays in the editor, while unrelated preferences can save.
+    if (patch.gatewayUrl !== undefined && !REMOTE_CONNECTIONS_ENABLED && !isLocalGatewayUrl(patch.gatewayUrl)) return;
+    if (REMOTE_CONNECTIONS_ENABLED && cfgRef.current.hermesMode === "remote"
+      && validateRemoteProfilesForSave(cfgRef.current.hermesRemotes)) return;
+    pendingConnectionRef.current = {};
+    void persistSettings(patch);
+  }, [persistSettings]);
+
+  const changeSettings = (patch: Partial<AppConfig>, textInput = false) => {
+    if (loading || configFailed) return;
+    const changed = Object.fromEntries(Object.entries(patch)
+      .filter(([key, value]) => JSON.stringify(cfgRef.current[key as keyof AppConfig]) !== JSON.stringify(value))) as Partial<AppConfig>;
+    if (Object.keys(changed).length === 0) return;
+    for (const key of Object.keys(changed) as Array<keyof AppConfig>) {
+      editVersionsRef.current[key] = (editVersionsRef.current[key] || 0) + 1;
+    }
+    cfgRef.current = { ...cfgRef.current, ...changed };
+    setCfg(cfgRef.current);
+    if (textInput) {
+      pendingConnectionRef.current = { ...pendingConnectionRef.current, ...changed };
+      if (connectionSaveTimerRef.current !== null) clearTimeout(connectionSaveTimerRef.current);
+      connectionSaveTimerRef.current = setTimeout(flushConnectionChanges, 500);
+    } else {
+      void persistSettings(changed);
+    }
+  };
 
   const refresh = useCallback(async () => {
     if (!lifecycleGuard.isMounted()) return;
@@ -214,25 +266,26 @@ export default function SettingsPage() {
     setStandingGrants({});
     // 每个异步分支落状态前都复用同一判定，避免旧实例覆盖新页面。
     const isCurrentRefresh = () => lifecycleGuard.isRefreshCurrent(refreshTicket);
-    if (themeLoadedRef.current && savedThemeRef.current) applyTheme(savedThemeRef.current);
     setLoading(true);
     setError(null);
     setConfigFailed(false);
     // Config is a local file read (instant) — load it FIRST and unblock the form,
     // so the editable fields appear even when a backend is unreachable (getStatus
-    // can block ~8s on a dead gateway). A config-load failure disables Save so we
+    // can block ~8s on a dead gateway). A config-load failure disables editing so we
     // never PUT an empty form back over the user's real settings.
     try {
+      flushConnectionChanges();
+      await settingsSaveQueue;
+      if (!isCurrentRefresh()) return;
       const c = await getConfig();
       if (!isCurrentRefresh()) return;
       const nextConfig = { ...EMPTY, ...c };
       savedConfigRef.current = cloneConfig(nextConfig);
-      savedThemeRef.current = nextConfig.theme;
-      themeLoadedRef.current = true;
       setThemeLoaded(true);
-      applyTheme(nextConfig.theme);
+      setTheme(nextConfig.theme);
+      cfgRef.current = nextConfig;
       setCfg(nextConfig);
-      setSavedSnapshot(editableSnapshot(nextConfig));
+      pendingConnectionRef.current = {};
       setRemoteUids((c.hermesRemotes || []).map(() => nextUid()));
     } catch (e) {
       if (!isCurrentRefresh()) return;
@@ -279,7 +332,7 @@ export default function SettingsPage() {
     getSelfUpdates()
       .then((next) => { if (isCurrentRefresh()) setSelfUpdates(next); })
       .catch(() => {});
-  }, [lifecycleGuard]);
+  }, [flushConnectionChanges, lifecycleGuard]);
 
   const shoggothRetry = useCallback(() => {
     // Retry service diagnostics without replacing the user's connection draft.
@@ -348,10 +401,11 @@ export default function SettingsPage() {
     void refresh();
     return () => {
       lifecycleGuard.unmount();
-      if (saveRefreshTimerRef.current !== null) clearTimeout(saveRefreshTimerRef.current);
-      if (themeLoadedRef.current && savedThemeRef.current) applyTheme(savedThemeRef.current);
+      // Navigation must not discard the last debounced edit. The queue finishes
+      // without writing component state after unmount.
+      flushConnectionChanges();
     };
-  }, [lifecycleGuard, refresh]);
+  }, [flushConnectionChanges, lifecycleGuard, refresh]);
   const shoggothStartupRecoveryNeeded = shoggothBusy === null
     && shouldRecoverShoggothStartup(shoggothStatus);
   useEffect(() => {
@@ -497,15 +551,15 @@ export default function SettingsPage() {
     next[i] = { ...next[i], ...patch };
     const uid = remoteUids[i];
     if (uid && ("baseUrl" in patch || "token" in patch)) invalidateTest(`hermes-${uid}`);
-    setCfg({ ...cfg, hermesRemotes: next });
+    changeSettings({ hermesRemotes: next }, true);
   };
   const addRemote = () => {
-    setCfg({ ...cfg, hermesRemotes: [...cfg.hermesRemotes, { profile: "default", baseUrl: "", token: "" }] });
+    changeSettings({ hermesRemotes: [...cfg.hermesRemotes, { profile: "default", baseUrl: "", token: "" }] }, true);
     setRemoteUids((u) => [...u, nextUid()]);
   };
   const removeRemote = (i: number) => {
     const uid = remoteUids[i];
-    setCfg({ ...cfg, hermesRemotes: cfg.hermesRemotes.filter((_, idx) => idx !== i) });
+    changeSettings({ hermesRemotes: cfg.hermesRemotes.filter((_, idx) => idx !== i) }, true);
     setRemoteUids((u) => u.filter((_, idx) => idx !== i));
     if (uid) invalidateTest(`hermes-${uid}`);
   };
@@ -600,10 +654,6 @@ export default function SettingsPage() {
     const current = cfgRef.current.disabledBackends || [];
     const next = disconnect ? [...new Set([...current, b.id])] : current.filter((id) => id !== b.id);
     if (disconnect && !backends.some((backend) => !next.includes(backend.id))) return;
-    if (saveRefreshTimerRef.current !== null) {
-      clearTimeout(saveRefreshTimerRef.current);
-      saveRefreshTimerRef.current = null;
-    }
     backendConnectionBusy.current = true;
     setTogglingBackend(true);
     try {
@@ -643,69 +693,6 @@ export default function SettingsPage() {
     } catch (e) {
       if (!isCurrentTest()) return;
       setTests((t) => ({ ...t, [key]: { ok: false, error: e instanceof Error ? e.message : String(e) } }));
-    }
-  };
-
-  const save = async () => {
-    if (saving || backendConnectionBusy.current) return;
-    // 隐藏的旧远程配置不妨碍保存偏好；新编辑的网关地址只允许本机。
-    if (gatewayUrlError && cfg.gatewayUrl !== savedConfigRef.current?.gatewayUrl) {
-      setActiveCategory("connections");
-      requestAnimationFrame(() => {
-        const editor = document.getElementById("settings-openclaw");
-        if (editor instanceof HTMLDetailsElement) editor.open = true;
-        document.getElementById("settings-gateway-url")?.focus();
-      });
-      return;
-    }
-    const invalid = validateRemotes();
-    if (invalid) {
-      setActiveCategory("connections");
-      setShowRemoteErrors(true);
-      requestAnimationFrame(() => {
-        const editor = document.getElementById("settings-hermes");
-        if (editor instanceof HTMLDetailsElement) editor.open = true;
-        remoteErrorRef.current?.focus();
-      });
-      return;
-    }
-    setSaving(true);
-    try {
-      // 在设置页保存过 = 不再需要首启引导；顺手盖章，SetupOverlay 不会再自动出现。
-      const saved = await updateConfig({ ...cfg, setupCompletedAt: cfg.setupCompletedAt || Date.now() });
-      const savedEditableSnapshot = editableSnapshot(cfg);
-      // Persist the previewed theme only now (onChange used applyTheme = DOM-only),
-      // so a theme the user previewed but never saved doesn't pollute the boot cache.
-      savedConfigRef.current = cloneConfig(cfg);
-      savedThemeRef.current = cfg.theme;
-      setSavedSnapshot(savedEditableSnapshot);
-      setTheme(cfg.theme);
-      // Apply the saved locale live: a host reload can be blocked by the
-      // dirty/busy navigation guard before this save has finished rendering.
-      await applyConfiguredLocale(saved.locale);
-      toast.success(i18n.t("settings.saved"));
-      // 通知同一渲染进程里的常驻组件（Notifier）重新读取 prefs。Electron 只在
-      // 连接配置变化时才 reload 窗口；偏好设置在当前页面生效，
-      // Notifier 的 prefsRef 会一直停在旧值（cron/task 轮询压根不启动）。
-      window.dispatchEvent(new CustomEvent("openclaw:config-changed"));
-      if (!(window as { openclawDesktop?: unknown }).openclawDesktop) {
-        if (connectionChanged) window.location.reload();
-      } else {
-        if (saveRefreshTimerRef.current !== null) clearTimeout(saveRefreshTimerRef.current);
-        saveRefreshTimerRef.current = window.setTimeout(() => {
-          saveRefreshTimerRef.current = null;
-          runSavedRefreshIfCurrent(
-            lifecycleGuard.isMounted(),
-            savedEditableSnapshot,
-            editableSnapshot(cfgRef.current),
-            () => void refresh(),
-          );
-        }, 800);
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -944,30 +931,8 @@ export default function SettingsPage() {
     );
   };
 
-  const dirty = savedSnapshot !== null && savedSnapshot !== editableSnapshot(cfg);
   const gatewayUrlError = !REMOTE_CONNECTIONS_ENABLED && !loading && !configFailed && !isLocalGatewayUrl(cfg.gatewayUrl)
     ? t("settings.localGatewayUrlRequired") : null;
-
-  const discardChanges = () => {
-    const saved = savedConfigRef.current;
-    if (!saved || saving) return;
-    const restored = cloneConfig(saved);
-    setShowRemoteErrors(false);
-    invalidateTest("openclaw");
-    remoteUids.forEach((uid) => invalidateTest(`hermes-${uid}`));
-    setCfg(restored);
-    setRemoteUids(restored.hermesRemotes.map(() => nextUid()));
-    applyTheme(restored.theme);
-  };
-
-  useNavigationGuard({ dirty, busy: saving || togglingBackend, onDiscard: discardChanges });
-
-  const connectionChanged = savedConfigRef.current !== null && (
-    cfg.gatewayUrl !== savedConfigRef.current.gatewayUrl ||
-    cfg.hermesMode !== savedConfigRef.current.hermesMode ||
-    JSON.stringify(cfg.hermesRemotes) !== JSON.stringify(savedConfigRef.current.hermesRemotes)
-  );
-  const saveLabel = saving ? t("common.saving") : t(connectionChanged ? "settings.saveReconnect" : "settings.saveSettings");
 
   return (
     <div className="page management-page settings-page">
@@ -978,11 +943,6 @@ export default function SettingsPage() {
             <span>{t("settings.pageSubtitle")}</span>
           </span>
         }
-        actions={
-          <button className="ui-cbtn ui-cbtn--gold" onClick={save} disabled={saving || togglingBackend || loading || configFailed || !dirty}>
-            {saveLabel}
-          </button>
-        }
       />
 
       {configFailed ? (
@@ -991,28 +951,8 @@ export default function SettingsPage() {
         error && <div className="error">{t("settings.error", { msg: error })}</div>
       )}
 
-      <div className="settings-toolbar">
-        <PillTabs
-          value={activeCategory}
-          onChange={setActiveCategory}
-          ariaLabel={t("settings.categories")}
-          items={["general", "connections", "services", "advanced"].map((value) => ({
-            value,
-            label: t(`settings.category.${value}`),
-            id: `settings-tab-${value}`,
-            panelId: `settings-panel-${value}`,
-          }))}
-        />
-        <span className={dirty ? "settings-dirty" : "settings-save-state"} role="status">
-          {loading ? t("common.loading") : configFailed ? t("settings.savePaused") : dirty ? t("settings.unsaved") : t("settings.allSaved")}
-        </span>
-      </div>
-
       <div className="settings-stack">
-        <div className="settings-category" id="settings-panel-general" role="tabpanel" aria-labelledby="settings-tab-general" tabIndex={0} hidden={activeCategory !== "general"}>
-          <SettingsPreferences cfg={cfg} setCfg={setCfg} disabled={loading || configFailed || saving} themeLoaded={themeLoaded} />
-        </div>
-        <div className="settings-category" id="settings-panel-connections" role="tabpanel" aria-labelledby="settings-tab-connections" tabIndex={0} hidden={activeCategory !== "connections"}>
+        <div className="settings-group" id="settings-connections">
         <BackendOverview
           backends={backends} descriptors={backendDescriptors} versions={versionsById} loading={loading || saving || togglingBackend}
           attention={(id) => {
@@ -1032,6 +972,34 @@ export default function SettingsPage() {
           }}
         />
 
+        <ServiceSettings
+          status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
+          onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
+        />
+        </div>
+        <div className="settings-group" id="settings-general">
+          <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} />
+          <details className="settings-advanced" id="settings-debug">
+            <summary className="settings-advanced-summary">
+              <div><h3 className="settings-h">{t("debug.section")}</h3><p className="settings-sech">{t("settings.debugSectionDesc")}</p></div>
+              <span className="settings-count">{t("settings.immediateEffect")}</span>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 6 3 3 3-3" /></svg>
+            </summary>
+            <div className="settings-card settings-debug-card">
+              <div className="settings-heading-row">
+                <div><h4 id="settings-debug-label">{t("debug.toggleLabel")}</h4><p>{t("settings.debugPurpose")}</p></div>
+                <Switch checked={debugOn} onChange={setDebugEnabled} ariaLabelledBy="settings-debug-label" />
+              </div>
+              <div className="settings-debug-guide">
+                <p>{t("settings.debugInstructions")} <kbd>Shift</kbd> + {t("settings.debugClick")}</p>
+              </div>
+              {debugOn && <p className="ui-hint" role="status">{t("debug.toggleHint")}</p>}
+            </div>
+          </details>
+        </div>
+
+        <div className="settings-group">
+        <div className="settings-connection-tools">
         {/* OpenClaw connection */}
         <details className="settings-section settings-connection-editor" id="settings-openclaw">
           <summary className="settings-section-head">
@@ -1046,10 +1014,12 @@ export default function SettingsPage() {
                 className="field-input field-mono"
                 aria-invalid={!!gatewayUrlError}
                 aria-describedby={gatewayUrlError ? "settings-gateway-url-error" : undefined}
+                disabled={loading || configFailed}
                 value={cfg.gatewayUrl}
+                onBlur={flushConnectionChanges}
                 onChange={(e) => {
                   invalidateTest("openclaw");
-                  setCfg({ ...cfg, gatewayUrl: e.target.value });
+                  changeSettings({ gatewayUrl: e.target.value }, true);
                 }}
                 placeholder="ws://127.0.0.1:18792"
               />
@@ -1058,10 +1028,12 @@ export default function SettingsPage() {
               <TextInput
                 type="password"
                 className="field-input field-mono"
+                disabled={loading || configFailed}
                 value={cfg.token}
+                onBlur={flushConnectionChanges}
                 onChange={(e) => {
                   invalidateTest("openclaw");
-                  setCfg({ ...cfg, token: e.target.value });
+                  changeSettings({ token: e.target.value }, true);
                 }}
                 autoComplete="off"
               />
@@ -1109,12 +1081,13 @@ export default function SettingsPage() {
             <p className="settings-sech">{t("settings.hermesConnDesc")}</p>
           </summary>
           <div className="settings-card">
-            {showRemoteErrors && validateRemotes() && (
-              <div className="error" role="alert" tabIndex={-1} ref={remoteErrorRef}>{validateRemotes()}</div>
+            {validateRemotes() && (
+              <div className="error" role="alert">{validateRemotes()}</div>
             )}
             <Switch
               checked={cfg.hermesMode === "remote"}
-              onChange={(v) => setCfg({ ...cfg, hermesMode: v ? "remote" : "local" })}
+              disabled={loading || configFailed}
+              onChange={(v) => changeSettings({ hermesMode: v ? "remote" : "local" }, true)}
               label={cfg.hermesMode === "remote" ? t("settings.hermesRemoteMode") : t("settings.hermesLocalMode")}
             />
             {cfg.hermesMode === "remote" && (
@@ -1183,59 +1156,20 @@ export default function SettingsPage() {
           </div>
         </details>}
         </div>
-        <div className="settings-category" id="settings-panel-services" role="tabpanel" aria-labelledby="settings-tab-services" tabIndex={0} hidden={activeCategory !== "services"}>
-        {stopDialogOpen && <BackgroundStopDialog
-          onCancel={() => setStopDialogOpen(false)}
-          onStopped={(status) => {
-            serviceRetrySequence.current += 1;
-            setShoggothStatus(status);
-            setShoggothError(false);
-            setStopDialogOpen(false);
-            toast.success(t("settings.shoggothActionDone"));
-          }}
-        />}
-        <ServiceSettings
-          status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
-          onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
-        />
         </div>
-        <div className="settings-category" id="settings-panel-advanced" role="tabpanel" aria-labelledby="settings-tab-advanced" tabIndex={0} hidden={activeCategory !== "advanced"}>
-        {/* Debug — element style inspector (frontend-only, localStorage flag, no save/reload) */}
-        <section className="settings-section" id="settings-debug">
-          <header className="settings-section-head">
-            <h3 className="settings-h">{t("debug.section")}</h3>
-            <p className="settings-sech">{t("settings.debugSectionDesc")}</p>
-          </header>
-          <div className="settings-card settings-debug-card">
-            <div className="settings-heading-row">
-              <div><h4 id="settings-debug-label">{t("debug.toggleLabel")}</h4><p>{t("settings.debugPurpose")}</p></div>
-              <Switch checked={debugOn} onChange={setDebugEnabled} ariaLabelledBy="settings-debug-label" />
-            </div>
-            <div className="settings-debug-guide">
-              <span className="settings-count">{t("settings.immediateEffect")}</span>
-              <p>{t("settings.debugInstructions")} <kbd>Shift</kbd> + {t("settings.debugClick")}</p>
-            </div>
-            {debugOn && <p className="ui-hint" role="status">{t("debug.toggleHint")}</p>}
-          </div>
-        </section>
-        </div>
-
       </div>
 
-      {/* Keep the shared draft actions reachable in every category. */}
-      {dirty && (
-        <div className="settings-savebar">
-          <span className="settings-savebar-text">{t(connectionChanged ? "settings.reconnectHint" : "settings.unsavedBar")}</span>
-          <button className="ui-cbtn" onClick={discardChanges} disabled={saving}>{t("settings.discardChanges")}</button>
-          <button
-            className="ui-cbtn ui-cbtn--gold"
-            onClick={save}
-            disabled={saving || togglingBackend || loading || configFailed || !dirty}
-          >
-            {saveLabel}
-          </button>
-        </div>
-      )}
+      {stopDialogOpen && <BackgroundStopDialog
+        onCancel={() => setStopDialogOpen(false)}
+        onStopped={(status) => {
+          serviceRetrySequence.current += 1;
+          setShoggothStatus(status);
+          setShoggothError(false);
+          setStopDialogOpen(false);
+          toast.success(t("settings.shoggothActionDone"));
+        }}
+      />}
+
     </div>
   );
 }

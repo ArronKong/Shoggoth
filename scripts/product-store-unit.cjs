@@ -182,7 +182,7 @@ test("首次启动创建字段完整且内部 ID 与显示名分离的唯一默�
       defaultModel: null,
       defaultCwd: null,
       permissionPolicy: { approvalPolicy: "on-request", sandbox: "danger-full-access" },
-      concurrency: { maxActive: 1, maxWorkspaceWrites: 1 },
+      concurrency: { maxActive: 4, maxWorkspaceWrites: 4 },
       isDefault: true,
       enabled: true,
       createdAt: 1_700_000_000_000,
@@ -982,7 +982,7 @@ test("日志轮转发现 events 被替换为 symlink 时拒绝且不清空 victi
 });
 
 test("当前 schema 持久化 append-only RunNote，重放/快照顺序稳定且返回 clone", () => {
-  assert.equal(STORE_SCHEMA_VERSION, 8);
+  assert.equal(STORE_SCHEMA_VERSION, 10);
   assert.deepEqual(RUN_NOTE_FIELDS, [
     "id", "runId", "profileId", "kind", "cardId", "body", "percent", "createdAt",
   ]);

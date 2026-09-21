@@ -75,12 +75,12 @@ try {
   assert.deepEqual(marker.imports, [{
     profileId: "profile-1", runtimeProfileId: "runtime-1", imported: 1,
   }]);
-  assert.equal(memory.store.list("profile-1", { status: "candidate" }).length, 1);
+  assert.equal(memory.store.list("profile-1", { status: "active" }).length, 1);
   assert.deepEqual(completeMemoryMigration({
     paths: value.paths, memoryEngine: memory.engine, profiles, now: () => 400,
   }), marker, "完成标记存在时不得重复导入");
   assert.deepEqual(readMarker(value.paths), marker);
-  assert.equal(memory.store.list("profile-1", { status: "candidate" }).length, 1);
+  assert.equal(memory.store.list("profile-1", { status: "active" }).length, 1);
   memory.engine.close();
   memory.store.close();
   memory.definitions.close();

@@ -102,3 +102,20 @@ test("Owner walks bounded Service pages and reports truncation", async () => {
   assert.equal(result.items.length, 52);
   assert.equal(result.truncated, true);
 });
+
+
+test("an Inspiration started yesterday and finished today enters today's terminal totals", async t => {
+  const f = await fixture(t);
+  let clock = 100;
+  f.store.now = () => clock;
+  const idea = await f.create("跨日灵感");
+  const execution = f.store.prepareExternalExecution({ id: idea.id, expectedRevision: idea.revision,
+    operationId: randomUUID(), backendId: "hermes", agentId: "same-agent", workspace: null, instruction: "" }, () => true);
+  clock = 300;
+  f.store.failPreparation(execution.id, "INSPIRATION_START_FAILED");
+  const result = await f.call("activities", { sinceMs: 200, cursor: null, limit: 50 });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].createdAt, 100);
+  assert.equal(result.items[0].finishedAt, 300);
+  assert.equal(inspirationExecutionToActivity(result.items[0]).occurredAt, 300);
+});

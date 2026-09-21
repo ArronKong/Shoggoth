@@ -170,6 +170,7 @@ function createRuntimeAccountAdmission(log, options = {}) {
     active,
     admit(input) {
       log.push(["account.admit", clone(input)]);
+      if (options.rejected) return { disposition: "rejected", reason: options.rejected, generation, retryAt: null };
       if (options.queued === true) {
         return {
           disposition: "queued",
@@ -192,6 +193,11 @@ function createRuntimeAccountAdmission(log, options = {}) {
     },
     noteBackoff(input) {
       log.push(["account.noteBackoff", clone(input)]);
+      return input.retryAt;
+    },
+    noteRateLimitBackoff(input) {
+      this.assertGeneration(input);
+      log.push(["account.noteRateLimitBackoff", clone(input)]);
       return input.retryAt;
     },
     bumpGeneration() { generation += 1; },
@@ -666,6 +672,13 @@ class FakeHost {
     return { thread: clone(thread) };
   }
 
+  async threadInjectItems(params) {
+    this.log.push("host.threadInjectItems");
+    assert.ok(this.loadedThreads.has(params.threadId));
+    this.lastInjectedItems = clone(params);
+    return {};
+  }
+
   async threadRead(params) {
     this.log.push("host.threadRead");
     if (this.freshUnreadableThreadIds.has(params.threadId)) {
@@ -763,7 +776,8 @@ function fixture(options = {}) {
       return {
         id: PROFILE_ID,
         agentId: "shoggoth-agent",
-        name: "Shoggoth",
+        name: options.profileName || "Shoggoth",
+        ...(options.backendId === undefined ? {} : { backendId: options.backendId }),
         enabled: true,
         runtime: options.runtime || "codex",
         runtimeProfileId,
@@ -2316,8 +2330,8 @@ test("canonical turn status 映射 failed/interrupted/canceled 并各自只发�
   }
 });
 
-test("terminal failed turn 只从结构化错误映射认证状态，不泄露 Runtime message", async () => {
-  for (const [name, failure] of [
+test("terminal failed turn 只从结构化错误映射认证和额度状态，不泄露 Runtime message", async () => {
+  for (const [name, failure, expectedCode = "RUNTIME_AUTH_REQUIRED"] of [
     ["codex", {
       error: {
         message: "401 includes private upstream details",
@@ -2326,6 +2340,8 @@ test("terminal failed turn 只从结构化错误映射认证状态，不泄露 R
       },
     }],
     ["grok", { errorCode: "AUTH_REQUIRED" }],
+    ["codex-quota", { error: { codexErrorInfo: "usageLimitExceeded",
+      message: "private upstream details" } }, "RUNTIME_QUOTA_EXHAUSTED"],
   ]) {
     const value = await openFixture({
       sessionStatus: "ready",
@@ -2350,7 +2366,7 @@ test("terminal failed turn 只从结构化错误映射认证状态，不泄露 R
       });
       const terminal = await value.coordinator.waitForIdle(running.id);
       assert.equal(terminal.status, "failed");
-      assert.equal(terminal.errorCode, "RUNTIME_AUTH_REQUIRED");
+      assert.equal(terminal.errorCode, expectedCode);
       assert.equal(JSON.stringify(terminal).includes("private upstream details"), false);
       assert.equal(JSON.stringify(terminal).includes("authorization header details"), false);
     } finally {
@@ -2361,7 +2377,8 @@ test("terminal failed turn 只从结构化错误映射认证状态，不泄露 R
 
 test("terminal failed turn 保留权限与上游不可用公共错误码", async () => {
   for (const errorCode of ["RUNTIME_PERMISSION_REQUIRED", "RUNTIME_UPSTREAM_UNAVAILABLE",
-    "RUNTIME_APPROVAL_UNAVAILABLE", "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED"]) {
+    "RUNTIME_APPROVAL_UNAVAILABLE", "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED",
+    "RUNTIME_SPENDING_LIMIT_REACHED"]) {
     const value = await openFixture({
       sessionStatus: "ready",
       threadId: `thread-terminal-${errorCode}`,
@@ -2481,6 +2498,18 @@ test("并发 open 共享同一恢复过程，恢复 settle 前 send 固定拒绝
   await value.coordinator.close();
 });
 
+test("without ContextCompiler, shared Codex runtime still receives the exact backend and custom Agent name", async () => {
+  for (const [backendId, profileName] of [["shoggoth", "Shoggoth"], ["codex", "Codex"], ["codex", "小码"]]) {
+    const value = await openFixture({ backendId, profileName });
+    try {
+      await sendAndDrain(value);
+      const instructions = value.host.lastThreadStartParams.developerInstructions;
+      const identity = JSON.parse(instructions.match(/^Active Agent Profile identity .*?: (.+)$/mu)[1]);
+      assert.deepEqual(identity, { name: profileName, backendId, runtime: "codex" });
+    } finally { await value.coordinator.close(); }
+  }
+});
+
 test("send 严格 Inbox→queued→admit 后后台执行，prompt 永不进入 ProductStore", async () => {
   const value = await openFixture();
   const { ack, operationId } = await sendAndDrain(value);
@@ -2498,6 +2527,29 @@ test("send 严格 Inbox→queued→admit 后后台执行，prompt 永不进入 P
   assert.equal(Object.prototype.hasOwnProperty.call(value.host.lastTurnStartParams, "sandbox"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(value.host.lastTurnStartParams, "sandboxPolicy"), false);
   await value.coordinator.close();
+});
+
+test("额度拒绝保持 terminal 持久化顺序，提交不确定时停止且不调用 Runtime", async () => {
+  for (const cut of ["product", "inbox"]) {
+    const events = [];
+    const runtimeAccountAdmission = createRuntimeAccountAdmission(events, { rejected: "RUNTIME_QUOTA_EXHAUSTED" });
+    const value = await openFixture({ runtimeAccountAdmission,
+      transitionFailures: cut === "product" ? { failed: "STORE_COMMIT_UNCERTAIN" } : {},
+      inboxTransitionFailures: cut === "inbox" ? { completed: "PENDING_COMMAND_COMMIT_UNCERTAIN" } : {},
+    });
+    const expected = cut === "product" ? "STORE_COMMIT_UNCERTAIN" : "PENDING_COMMAND_COMMIT_UNCERTAIN";
+    try {
+      await assert.rejects(value.coordinator.send({ operationId: `quota-cut-${cut}`,
+        sessionKey: SESSION_KEY, prompt: "quota" }), { code: expected });
+      assert.notEqual(value.inbox.get(`quota-cut-${cut}`).state, "completed");
+      assert.equal(events.some(([name]) => name === "account.release"), false);
+      assert.equal(value.log.includes("host.turnStart"), false);
+      await assert.rejects(value.coordinator.send({ operationId: `after-quota-cut-${cut}`,
+        sessionKey: SESSION_KEY, prompt: "quota" }), { code: expected });
+    } finally {
+      await value.coordinator.close();
+    }
+  }
 });
 
 test("RuntimeAccount busy 在 WorkDispatcher 前保持 queued，未取得账号槽时不 release", async () => {
@@ -2659,9 +2711,9 @@ test("Codex 账号级限流通知只影响当前 generation 的 active RuntimeAc
       method: "account/rateLimits/updated",
       retryAt: 5_000,
     });
-    assert.deepEqual(accountEvents.filter(([name]) => name === "account.noteBackoff"), [[
-      "account.noteBackoff",
-      { runtimeAccountId: RUNTIME_ACCOUNT_ID, retryAt: 5_000 },
+    assert.deepEqual(accountEvents.filter(([name]) => name === "account.noteRateLimitBackoff"), [[
+      "account.noteRateLimitBackoff",
+      { runtimeAccountId: RUNTIME_ACCOUNT_ID, generation: 1, retryAt: 5_000 },
     ]]);
 
     for (const retryAt of [1_000, "6000", 1_000 + 367 * 24 * 60 * 60 * 1_000]) {
@@ -2672,7 +2724,7 @@ test("Codex 账号级限流通知只影响当前 generation 的 active RuntimeAc
         retryAt,
       });
     }
-    assert.equal(accountEvents.filter(([name]) => name === "account.noteBackoff").length, 1);
+    assert.equal(accountEvents.filter(([name]) => name === "account.noteRateLimitBackoff").length, 1);
 
     runtimeAccountAdmission.bumpGeneration();
     value.host.emit({
@@ -2681,7 +2733,10 @@ test("Codex 账号级限流通知只影响当前 generation 的 active RuntimeAc
       method: "account/rateLimits/updated",
       retryAt: 6_000,
     });
-    assert.equal(accountEvents.filter(([name]) => name === "account.noteBackoff").length, 1);
+    assert.equal(accountEvents.filter(([name]) => name === "account.noteRateLimitBackoff").length, 1);
+    value.host.emit({ known: true, type: "account_available", method: "account/rateLimits/updated" });
+    assert.equal(accountEvents.filter(([name]) => name === "account.noteRateLimitBackoff").length, 1,
+      "stale host recovery cannot clear a newer account generation");
   } finally {
     await value.coordinator.close();
   }
@@ -4329,11 +4384,18 @@ test("每 run 串行，重复 kick 与同 operation send 不会并发执行远�
 
 test("steer 只命中当前 assigned turn，并以 operationId 做同参并发幂等与冲突拒绝", async () => {
   const steerGate = deferred();
+  const transcriptEvents = [];
   const value = await openFixture({
     sessionStatus: "ready",
     threadId: "thread-steer",
     threads: [{ id: "thread-steer", threadSource: null, turns: [] }],
     steerGate,
+    transcriptStore: {
+      appendEvent(input) {
+        transcriptEvents.push(clone(input));
+        return clone(input);
+      },
+    },
   });
   const { ack } = await sendAndDrain(value, { operationId: "steer-source" });
   const running = value.coordinator.getRun(ack.run.id);
@@ -4365,6 +4427,12 @@ test("steer 只命中当前 assigned turn，并以 operationId 做同参并发�
   });
   assert.deepEqual(await duplicate, await first);
   assert.equal(value.host.turnSteerCalls, 1);
+  const steeringMessages = transcriptEvents.filter((event) => event.content?.transcriptType === "steer");
+  assert.equal(steeringMessages.length, 1, "幂等 steer 只能持久化一条用户消息");
+  assert.equal(steeringMessages[0].runId, running.id);
+  assert.equal(steeringMessages[0].kind, "user");
+  assert.equal(steeringMessages[0].content.text, input.message);
+  assert.equal(steeringMessages[0].runtimeRef.turnId, running.codexTurnId);
   await assert.rejects(
     () => value.coordinator.steer({
       ...input,

@@ -27,7 +27,7 @@ function contextFixture(options = {}) {
   const randomUUID = () => `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`;
   const definitions = new AgentDefinitionStore({ paths, now, randomUUID });
   definitions.open();
-  definitions.ensureProfile({ profileId: "profile-1" });
+  definitions.ensureProfile({ profileId: "profile-1", profileName: options.profileName || "Test Agent" });
   const memoryStore = new MemoryStore({ paths });
   memoryStore.open();
   const memoryEngine = new MemoryEngine({
@@ -47,6 +47,7 @@ function contextFixture(options = {}) {
     toolRegistry: DEFAULT_TOOL_REGISTRY,
     permissionEngine: permissions,
     skillStore: options.skillStore,
+    shouldOfferIntroduction: options.shouldOfferIntroduction,
     runtimeCapabilitiesForProfile: options.runtimeCapabilitiesForProfile,
     snapshotStore: snapshots,
     now,

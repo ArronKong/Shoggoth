@@ -293,6 +293,8 @@ export interface ChatCapabilities {
   gatewayPolicy?: boolean;
   // 未被本地处理的 / 命令交给 execSlash 服务端执行（而不是当聊天消息发出）。
   slash?: boolean;
+  // Runtime 能把新文本追加到当前正在执行的 turn，而不是等结束后新开一轮。
+  steer?: boolean;
   // 共享 backend 下按 Agent 固定的 provider/runtime 目录边界。声明后模型菜单只展示
   // 该 provider 的条目，避免相同 model id 或其它 CLI 的模型跨 Agent 误选。
   modelProvider?: string;
@@ -489,6 +491,8 @@ export interface ModelChangeApplyResult {
     | "compensated";
   stage: string;
   code?: string;
+  /** Server-verified availability of the reference-removal confirmation path. */
+  canForce?: boolean;
   catalog?: ModelCatalogSnapshot;
   // config-only 保存成功时的生效方式（如 gateway_restart）；完整应用无此字段。
   activation?: { kind: string; available?: boolean } | null;
@@ -613,6 +617,8 @@ export interface CustomEndpoint {
   baseUrl: string;
   model: string;
   models: string[];
+  /** 主模型绑定的只读用途信息，不含凭据或原始配置。 */
+  primaryModelUsage?: Array<{ modelId: string; isDefault: boolean; agentIds: string[] }>;
   api?: string | null;
   hasApiKey: boolean;
   apiKeyPreview?: string | null;
@@ -642,7 +648,15 @@ export interface CustomEndpointsSnapshot {
     apiOptions?: string[];
     defaultApi?: string;
     nameEditable?: boolean;
+    /** The endpoint name is the provider ID, with no separate display name. */
+    nameIsProviderId?: boolean;
+    /** Existing provider IDs can be renamed with their references. */
+    providerIdEditable?: boolean;
     firstModelIsDefault?: boolean;
+    /** Model selection can be saved atomically with reference confirmation. */
+    batchModelSelection?: boolean;
+    /** Confirmed deselection may retain existing Agent primary bindings. */
+    allowPrimaryModelRemoval?: boolean;
   };
 }
 
@@ -669,6 +683,8 @@ export interface CustomEndpointValidation {
   reachable: boolean;
   message: string;
   models: string[];
+  /** Optional stable discovery error code; remote error bodies are not required. */
+  code?: string;
 }
 
 // Editable custom model-config subset (user-defined providers; management UI).
@@ -841,6 +857,8 @@ export interface UsageTokenParts {
   reasoningTokens?: number;
 }
 export interface UsageDailyPoint extends UsageTokenParts {
+  missingCostEntries?: number;
+  estimatedCostEntries?: number;
   date: string; // YYYY-MM-DD
   totalTokens: number;
   totalCost: number;
@@ -853,6 +871,7 @@ export interface UsageTotals extends UsageTokenParts {
   cacheReadCost?: number;
   cacheWriteCost?: number;
   missingCostEntries?: number;
+  estimatedCostEntries?: number;
 }
 export interface UsageSeries {
   availability?: "complete" | "partial" | "unavailable";
@@ -1892,7 +1911,7 @@ export interface AgentComputerState {
   available: boolean;
   driverVersion: string | null;
   contractVersion: string | null;
-  permissions: { accessibility: boolean; screenRecording: boolean };
+  permissions: { accessibility: boolean | null; screenRecording: boolean | null };
   sessions: ComputerUseSession[];
 }
 // Create/edit spec for POST/PUT /__api/agents.
@@ -2024,7 +2043,7 @@ export interface HermesRemote {
 export interface NotificationPrefs {
   chat: boolean;
   cron: boolean;
-  task: boolean;
+  task: boolean; // Kanban tasks and Inspiration
 }
 export interface AppConfig {
   gatewayUrl: string;
@@ -2540,6 +2559,8 @@ export interface ShoggothProviderSummary {
   kind: string;
   displayName: string;
   baseUrlHost?: string;
+  /** Custom Responses API root, exposed only when the URL contains no auth/query/fragment. */
+  baseUrl?: string;
   authState: "authenticated" | "configured" | "missing" | "not_required" | string;
   defaultModel?: string;
   validationStatus?: "unverified" | "protocol_valid" | "agent_compatible" | "invalid" | string;
@@ -2642,7 +2663,9 @@ export interface DashboardArtifactItem {
 
 export interface DashboardUsageEntry {
   backend: string;
-  /** 后端无当日/昨日行时缺省（UI 记 0）。 */
+  availability?: "complete" | "partial" | "unavailable";
+  yesterdayComplete?: boolean;
+  /** 缺失今日数据不能解释为零用量。 */
   today?: UsageDailyPoint;
   yesterday?: UsageDailyPoint;
   error?: string;
@@ -2728,6 +2751,13 @@ export interface DashboardRunStats {
   byBackend: Array<{ backend: string } & DashboardRunStatsBucket>;
 }
 
+export interface DashboardTaskStats {
+  total: { ok: number; error: number };
+  byKind: Record<"cron" | "kanban" | "inspiration", { ok: number; error: number }>;
+  byAgent: Array<{ backendId: string; agentId: string; ok: number; error: number }>;
+  complete: boolean;
+}
+
 export interface DashboardSummary {
   generatedAt: number;
   /** 服务端实际使用的「今日 0 点」（本地时区），UI 与 smoke 都以它为准。 */
@@ -2742,6 +2772,7 @@ export interface DashboardSummary {
   /** 统一活动流首屏（默认筛选第一页）；活动层失败时缺省（summary 本身照常）。 */
   activityPage?: DashboardActivityPage;
   runStats?: DashboardRunStats;
+  taskStats?: DashboardTaskStats;
 }
 
 export type DashboardLiveWork = Pick<DashboardSummary, "generatedAt" | "running" | "approvals">;

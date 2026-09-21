@@ -18,13 +18,13 @@
 }
 .management-page.settings-page .settings-backend-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 .management-page.settings-page .settings-backend--card,
 .management-page.settings-page .settings-native-list {
   min-width: 0;
-  border: 1px solid var(--ui-hairline);
+  border: 0;
   border-radius: 24px;
   background: var(--ui-surface-1);
   box-shadow: var(--ui-shadow-card);
@@ -32,6 +32,7 @@
 .management-page.settings-page .settings-backend--card { padding: 20px; }
 .management-page.settings-page .settings-backend-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .management-page.settings-page .settings-backend-mark {
+  --backend-tab-icon-size: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -44,7 +45,6 @@
   font-size: 18px;
   font-weight: 500;
 }
-.management-page.settings-page .settings-backend-mark > span { font-size: 22px; width: 22px; height: 22px; }
 .management-page.settings-page .settings-backend-copy { flex: 1; min-width: 0; }
 .management-page.settings-page .settings-backend-copy h4,
 .management-page.settings-page .settings-service-copy h4,
@@ -57,7 +57,7 @@
 .management-page.settings-page .settings-health i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .management-page.settings-page .settings-health.is-healthy { color: var(--ui-success); }
 .management-page.settings-page .settings-version-short { font-size: 11px; color: var(--settings-muted-surface-1); }
-.management-page.settings-page .settings-backend-actions { display: flex; align-items: center; gap: 8px; }
+.management-page.settings-page .settings-backend-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .management-page.settings-page .settings-detail-toggle {
   display: flex; align-items: center; justify-content: center;
   width: 32px; height: 32px; flex: 0 0 32px;
@@ -86,7 +86,7 @@
 .management-page.settings-page .settings-update-link { border: 0; background: none; padding: 8px 0 0; color: var(--ui-warning); cursor: pointer; font-size: 12px; }
 .management-page.settings-page .settings-section,
 .management-page.settings-page .settings-connection-editor { scroll-margin-top: 80px; }
-.management-page.settings-page .settings-connection-editor { display: block; border: 1px solid var(--ui-hairline); border-radius: 24px; background: var(--ui-surface-1); box-shadow: var(--ui-shadow-card); }
+.management-page.settings-page .settings-connection-editor { display: block; border: 0; border-radius: 24px; background: var(--ui-surface-1); box-shadow: var(--ui-shadow-card); }
 .management-page.settings-page .settings-connection-editor > summary { position: relative; padding: 20px 52px 20px 24px; cursor: pointer; list-style: none; }
 .management-page.settings-page .settings-connection-editor > summary::-webkit-details-marker { display: none; }
 .management-page.settings-page .settings-connection-editor > summary::after { content: ""; position: absolute; right: 28px; top: 30px; width: 7px; height: 7px; border-right: 1.5px solid var(--ui-text-2); border-bottom: 1.5px solid var(--ui-text-2); transform: rotate(45deg); }
@@ -112,15 +112,24 @@
 .management-page.settings-page .settings-debug-guide p { margin: 0; }
 .management-page.settings-page .settings-debug-guide kbd { border: 1px solid var(--ui-hairline); border-radius: 4px; padding: 2px 4px; font: inherit; background: var(--ui-surface-2); }
 .management-page.settings-page :is(.settings-detail-toggle, .settings-update-link, .settings-connection-editor > summary):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
-@media (max-width: 740px) {
-  .management-page.settings-page .settings-backend-grid { grid-template-columns: 1fr; }
-  .management-page.settings-page .settings-backend--local .settings-backend-row { flex-wrap: wrap; }
-  .management-page.settings-page .settings-backend--local .settings-backend-actions { margin-left: 52px; }
-  .management-page.settings-page .settings-backend--local .settings-backend-copy { flex-basis: calc(100% - 180px); }
+@container settings (min-width: 860px) {
+  .management-page.settings-page .settings-backend-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@container settings (max-width: 740px) {
+  .management-page.settings-page .settings-backend--local .settings-backend-row { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; }
+  .management-page.settings-page .settings-backend--local .settings-backend-actions { grid-column: 2 / -1; }
+  .management-page.settings-page .settings-backend--local .settings-detail-toggle { margin-left: auto; }
   .management-page.settings-page .settings-heading-row { flex-wrap: wrap; }
 }
-@media (max-width: 480px) {
+@container settings (max-width: 540px) {
   .management-page.settings-page .settings-service-facts { grid-template-columns: 1fr; gap: 16px; }
   .management-page.settings-page .settings-service-facts > div { border: 0; padding: 0; }
   .management-page.settings-page .settings-inline-state { flex-direction: column; align-items: flex-start; }
+  .management-page.settings-page .settings-service-top { flex-wrap: wrap; }
+  .management-page.settings-page .settings-service-copy { flex-basis: calc(100% - 62px); }
+  .management-page.settings-page .settings-backend--card { padding: 20px; }
+  .management-page.settings-page .settings-backend--local { padding: 16px; }
+  .management-page.settings-page .settings-backend--local .settings-backend-row { grid-template-columns: 32px minmax(0, 1fr) auto; gap: 10px; }
+  .management-page.settings-page .settings-backend--local .settings-backend-mark { width: 32px; height: 32px; }
+  .management-page.settings-page .settings-backend-copy h4 { overflow-wrap: anywhere; }
 }

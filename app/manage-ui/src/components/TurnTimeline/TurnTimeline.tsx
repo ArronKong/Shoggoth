@@ -117,7 +117,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
       const el = rowRefs.current.get(s.id);
       if (!el || reducedMotion()) continue;
       el.animate(ENTER_KEYFRAMES, { duration: ENTER_MS, easing: ENTER_EASE });
-      const rail = el.querySelector(`.${styles.railTop}`);
+      const rail = el.querySelector(`.${styles.rail}`);
       if (rail instanceof HTMLElement) rail.animate([{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }], { duration: ENTER_MS, easing: ENTER_EASE });
     }
   }, [steps]);
@@ -292,11 +292,11 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
               aria-current={running ? "step" : undefined}
             >
               <div className={styles.gutter}>
-                <span className={styles.railTop} data-hidden={i === 0 ? "1" : undefined} />
                 <span className={styles.node} data-accent={nodeAccent(s)} data-running={running ? "1" : undefined}>
                   {nodeGlyph(s)}
                 </span>
-                <span className={styles.railBottom} data-hidden={i === steps.length - 1 ? "1" : undefined} />
+                {/* 连接下一项；随标签行增高而延长，当前项展开时隐藏。 */}
+                {i < steps.length - 1 ? <span className={styles.rail} data-hidden={isOpen ? "1" : undefined} /> : null}
               </div>
               <div className={styles.main}>
                 {rel ? (

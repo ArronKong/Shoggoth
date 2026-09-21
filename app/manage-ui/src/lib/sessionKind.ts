@@ -19,23 +19,6 @@ export type SessionKind =
   | "system" // 心跳、网关兜底、单次模型试跑等系统会话
   | "other"; // 未识别（保底，永远有个去处）
 
-/** Tab 与分组的固定顺序：先人跑的，再自动跑的，系统兜底殿后。 */
-export const SESSION_KIND_ORDER: SessionKind[] = [
-  "main",
-  "web",
-  "channel",
-  "cron",
-  "subagent",
-  "dream",
-  "system",
-  "other",
-];
-
-/** i18n key（`chat.sessionFilter.<kind>`）——调用方 t() 时拼，省得各处写死。 */
-export function sessionKindI18nKey(kind: SessionKind): string {
-  return `chat.sessionFilter.${kind}`;
-}
-
 /** key 尾段（去掉 `agent:<id>:` 前缀）。空 key / 无前缀时退回整串。 */
 export function sessionTail(key: string): string {
   const segs = String(key || "").split(":");
@@ -56,6 +39,43 @@ export function sessionKindOf(key: string, declaredKind?: string): SessionKind {
   if (/^explicit:(gateway-fallback|model-run)/i.test(tail)) return "system";
   if (/^dashboard:/i.test(tail)) return "web";
   if (/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(tail)) return "web";
+  return "other";
+}
+
+/** 展示分类独立于后台会话判定，避免改菜单时改变未读和代表会话的选择。 */
+export type SessionCategory = "app" | "task" | "inspiration" | "channel" | "subagent" | "dream" | "system" | "other";
+
+export const SESSION_CATEGORY_ORDER: SessionCategory[] = [
+  "app", "task", "inspiration", "channel", "subagent", "dream", "system", "other",
+];
+
+export interface SessionCategoryRow {
+  key: string;
+  kind?: string;
+  source?: string;
+  inspirationId?: string;
+  title?: string;
+  sub?: string;
+}
+
+export function sessionCategoryOf(row: SessionCategoryRow): SessionCategory {
+  const tail = sessionTail(row.key);
+  const sources = [row.kind, row.source].map((value) => value?.toLowerCase());
+  if (row.inspirationId || sources.includes("inspiration")
+    || /^(?:dashboard:)?inspiration(?:[:_-]|$)/i.test(tail)) return "inspiration";
+  // 旧 Hermes 列表没有灵感关联字段，只兼容产品生成的固定开场，不按普通关键词猜。
+  const inspirationPrompt = /^(?:这是用户当前委派的灵感任务[。.]|The user has captured the following idea and entrusted you with moving it forward\.)/;
+  if ([row.title, row.sub].some((text) => inspirationPrompt.test(text?.trim() || ""))) return "inspiration";
+  if (sources.some((source) => source && ["cron", "kanban", "workboard", "task"].includes(source))
+    || /^(?:cron(?:[:_-]|$)|(?:work[:_-])?(?:kanban|workboard)(?:[:_-]|$)|sub-?agent:workboard-)/i.test(tail)
+    || /^work kanban task t_[a-z0-9]+$/i.test(row.title?.trim() || "")) return "task";
+
+  if (sources.some((source) => source && ["telegram", "discord", "slack", "whatsapp", "signal", "imessage"].includes(source))) return "channel";
+  const kind = sessionKindOf(row.key, row.kind);
+  if (kind === "main" || kind === "web") return "app";
+  if (kind === "cron") return "task";
+  if (kind !== "other") return kind;
+  if (sources.some((source) => source && ["direct", "chat", "desktop", "dashboard", "web", "app", "acp", "cli"].includes(source))) return "app";
   return "other";
 }
 

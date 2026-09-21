@@ -23,10 +23,10 @@ function cronSeverity(status) {
 }
 
 function cronRunToActivity(run) {
-  const occurredAt = Number.isFinite(run.startedAt) ? run.startedAt
-    : Number.isFinite(run.finishedAt) ? run.finishedAt : 0;
+  const occurredAt = Number.isFinite(run.finishedAt) ? run.finishedAt
+    : Number.isFinite(run.startedAt) ? run.startedAt : 0;
   return {
-    id: `cron:${run.backendId}:${run.jobId}:${occurredAt}:${run.runId || ""}`,
+    id: `cron:${run.backendId}:${run.jobId}:${run.startedAt ?? occurredAt}:${run.runId || run.id || ""}`,
     backendId: run.backendId,
     kind: "cron",
     occurredAt,
@@ -44,7 +44,7 @@ function inspirationExecutionToActivity(execution) {
     id: `inspiration:${execution.backendId}:${execution.id}`,
     backendId: execution.backendId,
     kind: "inspiration",
-    occurredAt: execution.createdAt,
+    occurredAt: execution.finishedAt ?? execution.createdAt,
     severity: status === "completed" ? "success" : status === "failed" ? "error"
       : ["waiting_input", "waiting_approval", "canceled", "interrupted", "skipped", "unknown"].includes(status) ? "warning" : "info",
     title: execution.title,
@@ -266,13 +266,50 @@ function computeRunStats(runs) {
   return { total, byBackend: [...byBackend.entries()].map(([backend, s]) => ({ backend, ...s })) };
 }
 
+// Count terminal work before activity pagination. A card's lifecycle events are
+// not separate completed tasks; Cron and Inspiration count each execution.
+function computeTaskStats(entries, { sinceMs = 0, degradedSources = [] } = {}) {
+  const total = { ok: 0, error: 0 };
+  const byAgent = new Map();
+  const byKind = Object.fromEntries(["cron", "inspiration", "kanban"].map(kind => [kind, { ok: 0, error: 0 }]));
+  const seen = new Set();
+  for (const entry of entries) {
+    if (entry.occurredAt < sinceMs) continue;
+    let outcome;
+    let identity;
+    if (entry.kind === "cron" && !isHeartbeatCronNoise(entry.run)) {
+      outcome = entry.run.status === "ok" ? "ok" : entry.run.status === "error" ? "error" : null;
+      identity = entry.run.runId || entry.run.id || `${entry.run.jobId}:${entry.run.startedAt}`;
+    } else if (entry.kind === "inspiration") {
+      outcome = entry.inspiration.status === "completed" ? "ok" : entry.inspiration.status === "failed" ? "error" : null;
+      identity = entry.inspiration.runId;
+    } else if (entry.kind === "kanban") {
+      outcome = entry.kanban.action === "completed" ? "ok" : entry.kanban.action === "failed" ? "error" : null;
+      identity = `${entry.kanban.board || ""}:${entry.kanban.taskId}`;
+    }
+    if (!outcome) continue;
+    const key = `${entry.backendId}\0${entry.kind}\0${identity}\0${outcome}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    total[outcome]++;
+    byKind[entry.kind][outcome]++;
+    if (entry.agentId) {
+      const agentKey = `${entry.backendId}\0${entry.agentId}`;
+      const row = byAgent.get(agentKey) || { backendId: entry.backendId, agentId: entry.agentId, ok: 0, error: 0 };
+      row[outcome]++;
+      byAgent.set(agentKey, row);
+    }
+  }
+  return { total, byKind, byAgent: [...byAgent.values()], complete: !degradedSources.some(source => source.source !== "health") };
+}
+
 // 契约形状：getRecentCronRuns 返回 {runs, truncated?, latestOnly?}（registry
 // 消费 .runs）；兼容裸数组与 {items} 以防御性归一。
 function normalizeRunsResult(r) {
   if (Array.isArray(r)) return { items: r };
   if (r && typeof r === "object") {
     const items = Array.isArray(r.runs) ? r.runs : Array.isArray(r.items) ? r.items : [];
-    return { items, truncated: !!r.truncated, latestOnly: !!r.latestOnly };
+    return { items, truncated: !!r.truncated, latestOnly: !!r.latestOnly, reason: r.reason };
   }
   return { items: [] };
 }
@@ -313,6 +350,7 @@ async function collectActivities({ backends, sinceMs, healthEvents = [], inspira
       (async () => {
         try {
           const r = normalizeRunsResult(await backend.getRecentCronRuns({ sinceMs, limit: maxPerSource }));
+          if (r.reason) degradedSources.push({ backend: backend.id, source: "cron", reason: r.reason });
           let items = r.items;
           let truncated = r.truncated || items.length > maxPerSource;
           if (items.length > maxPerSource) items = items.slice(0, maxPerSource);
@@ -352,7 +390,8 @@ async function collectActivities({ backends, sinceMs, healthEvents = [], inspira
     if (!activeIds.has(ev.backendId)) continue;
     if (Number.isFinite(ev.at) && ev.at >= sinceMs) entries.push(healthEventToActivity(ev));
   }
-  return { entries, degradedSources, runs: allRuns, runStats: computeRunStats(allRuns) };
+  return { entries, degradedSources, runs: allRuns, runStats: computeRunStats(allRuns),
+    taskStats: computeTaskStats(entries, { sinceMs, degradedSources }) };
 }
 
 module.exports = {
@@ -366,5 +405,6 @@ module.exports = {
   decodeCursor,
   buildActivityPage,
   computeRunStats,
+  computeTaskStats,
   collectActivities,
 };

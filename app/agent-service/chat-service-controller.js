@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const path = require("node:path");
+const { managedChatWorkspace } = require("./chat-workspace");
 const {
   federationInputProvenanceForOperationId,
 } = require("../federation-chat-provenance");
@@ -17,7 +18,7 @@ const { createCodexChatHistoryMapper } = require("./codex-chat-history");
 const { adaptCodexChatHistoryPage } = require("./chat-history-adapter");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
-const { normalizeInteractiveRequestV1, parseMcpToolPermission } = require("../core/shoggoth-interaction-contract");
+const { normalizeInteractiveRequestV1, mcpElicitationUsesApprovalWait } = require("../core/shoggoth-interaction-contract");
 
 const RESTART_INTERRUPTION_CODES = new Set([
   "SERVICE_RESTARTED", "EXECUTION_CONTRACT_LOST", "RUNTIME_HOST_RESTARTED",
@@ -244,7 +245,7 @@ function paginateTranscriptEvents(options) {
   // Resolve request identities across the full transcript before pagination so
   // decisions stay hidden even when their request is on another page.
   const isApproval = (event) => event.kind === "approval"
-    || (event.kind === "input" && parseMcpToolPermission(event.content) !== null);
+    || (event.kind === "input" && mcpElicitationUsesApprovalWait(event.content));
   const requestKey = (event) => JSON.stringify([event.runId, event.content?.requestId]);
   const approvalRequests = new Set(options.events.filter(isApproval).map(requestKey));
   const query = {
@@ -298,6 +299,11 @@ function resolveProfileWorkspace(options = {}) {
   if (!paths?.defaultWorkspaceDir || !paths?.trustedRoot || !profile?.id) {
     throw controllerError(errorCode, "AgentProfile workspace 解析参数无效");
   }
+  if (options.sessionOperationId !== undefined && (typeof options.sessionOperationId !== "string"
+    || options.sessionOperationId.length === 0 || options.sessionOperationId.length > 512
+    || !options.sessionOperationId.isWellFormed() || options.sessionOperationId.includes("\0"))) {
+    throw controllerError(errorCode, "ChatSession workspace 标识无效");
+  }
   const candidate = requested ?? profile.defaultCwd;
   if (candidate !== null) {
     if (!path.isAbsolute(candidate)) {
@@ -308,8 +314,10 @@ function resolveProfileWorkspace(options = {}) {
 
   ensurePrivateDirectoryTree(paths.defaultWorkspaceDir, paths.trustedRoot);
   const workspaceRoot = path.resolve(paths.defaultWorkspaceDir);
-  const target = path.resolve(workspaceRoot, profile.id);
-  if (path.dirname(target) !== workspaceRoot) {
+  const profileRoot = path.resolve(workspaceRoot, profile.id);
+  const target = options.sessionOperationId === undefined ? profileRoot
+    : managedChatWorkspace(profileRoot, options.sessionOperationId);
+  if (path.dirname(profileRoot) !== workspaceRoot) {
     throw controllerError(errorCode, "AgentProfile workspace 标识无效");
   }
   ensurePrivateDirectoryTree(target, paths.trustedRoot);
@@ -959,10 +967,15 @@ function createChatServiceController(options = {}) {
     }
     if (method === "chat.session.create") {
       const profile = enabledProfile(params.profileId);
+      const previous = params.workspace === null && profile.defaultCwd === null
+        ? chatSessionStore.getCreateOperation?.(params.operationId) : null;
+      const legacyDefault = path.resolve(options.paths.defaultWorkspaceDir, profile.id);
       const session = chatSessionStore.createSession({
         operationId: params.operationId,
         profileId: params.profileId,
-        workspace: resolveWorkspace(profile, params.workspace),
+        workspace: previous?.workspace === legacyDefault ? previous.workspace
+          : resolveProfileWorkspace({ paths: options.paths, profile, requested: params.workspace,
+            sessionOperationId: params.operationId }),
         createdAt: params.createdAt,
       });
       if (transcriptStore) transcriptStore.ensureSession({
@@ -1107,10 +1120,12 @@ function createChatServiceController(options = {}) {
         .some((session) => session.profileId === profile.id);
       if (hasSession) continue;
       const time = now();
+      const operationId = `default-session-${randomUUID()}`;
       const session = chatSessionStore.createSession({
-        operationId: `default-session-${randomUUID()}`,
+        operationId,
         profileId: profile.id,
-        workspace: resolveWorkspace(profile, null),
+        workspace: resolveProfileWorkspace({ paths: options.paths, profile, requested: null,
+          sessionOperationId: operationId }),
         createdAt: time,
       });
       if (transcriptStore) transcriptStore.ensureSession({

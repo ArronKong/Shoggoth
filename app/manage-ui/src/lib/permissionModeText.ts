@@ -4,6 +4,9 @@ import type { ChatPermissionModeOption } from "../types";
 // Match catalog prose exactly: runtimes can share a mode ID but describe different policies.
 const permissionTextKeys = new Map<string, string>([
   ["Read only", "readOnly"],
+  ["Guarded", "guarded"],
+  ["Inherit", "inherit"],
+  ["YOLO", "yolo"],
   ["Ask", "ask"],
   ["Workspace auto", "workspaceAuto"],
   ["Full access", "fullAccess"],
@@ -16,6 +19,10 @@ const permissionTextKeys = new Map<string, string>([
   ["Bypass", "bypass"],
   ["Workspace", "workspace"],
   ["Read files without changing the workspace.", "readOnlyDescription"],
+  ["Ask before sensitive commands or changes.", "guardedDescription"],
+  ["Use the Hermes profile approval mode.", "inheritDescription"],
+  ["Approve all tool actions for this session.", "yoloDescription"],
+  ["Automatically allow changes inside the workspace.", "workspaceAllowDescription"],
   ["Ask before commands that need broader access.", "askCommandsDescription"],
   ["Automatically approve changes inside the workspace.", "workspaceAutoDescription"],
   ["Run without approval or sandbox restrictions.", "fullAccessDescription"],

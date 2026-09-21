@@ -107,8 +107,9 @@ async function withController(run, options = {}) {
     binaryPath: path.join(root, "cua-driver"),
     binaryManifest: { version: "0.22.0", contractVersion: "0.7.0" },
     verifyBinary: false,
-    sdkLoader: async () => fakeSdk(driver),
-    permissionStatus: options.permissionStatus || (() => ({ accessibility: true, screenRecording: true })),
+    sdkLoader: options.sdkLoader || (async () => fakeSdk(driver)),
+    permissionStatus: Object.hasOwn(options, "permissionStatus") ? options.permissionStatus
+      : (() => ({ accessibility: true, screenRecording: true })),
     getSystemIdleTime: () => idle,
     isScreenLocked: () => locked,
     ...(options.captureExpiry ? {
@@ -297,6 +298,22 @@ async function main() {
     ]);
   });
   console.log("ok 10 - screen lock pauses before any new snapshot is captured");
+
+  for (const [options, reason] of [
+    [{ permissionStatus: null, sdkLoader: async () => { throw new Error("private SDK failure"); } }, "COMPUTER_DRIVER_UNAVAILABLE"],
+    [{ permissionStatus: () => { throw new Error("private permission failure"); } }, "COMPUTER_PERMISSION_STATUS_FAILED"],
+    [{ permissionStatus: () => ({}) }, "COMPUTER_PERMISSION_STATUS_FAILED"],
+  ]) {
+    await withController(async ({ controller }) => {
+      const state = await controller.status("default");
+      assert.equal(state.available, false);
+      assert.equal(state.reason, reason);
+      assert.deepEqual(state.permissions, { accessibility: null, screenRecording: null });
+      await assert.rejects(() => controller.create({ profileId: "default", workRunId: "run-diagnostic",
+        allowedApplications: ["com.apple.TextEdit"], expiresInSeconds: 60 }), { code: reason });
+    }, options);
+  }
+  console.log("ok 11 - SDK and permission-read failures are not reported as denied grants");
 }
 
 main().catch((error) => {

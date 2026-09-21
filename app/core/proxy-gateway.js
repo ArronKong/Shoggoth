@@ -70,6 +70,7 @@ function isAllowedInboundOrigin(origin) {
 const FOREIGN_ROUTED_METHODS = new Set([
   "chat.history",
   "chat.send",
+  "chat.steer",
   "chat.abort",
   "chat.respond",
   "sessions.patch",
@@ -673,7 +674,8 @@ function startProxyGateway({
         role: "assistant",
         content: [{ type: "text", text: activity.result || "" }],
         timestamp: activity.finishedAt,
-        ...(activity.notificationCategory === "cron" ? { shoggoth: { source: "cron" } } : {}),
+        ...(["cron", "inspiration"].includes(activity.notificationCategory)
+          ? { shoggoth: { source: activity.notificationCategory } } : {}),
       };
     } else {
       payload.errorMessage = activity.errorCode || "AGENT_OPERATION_FAILED";
@@ -810,6 +812,8 @@ function startProxyGateway({
             timestamp: Date.now(),
             ...(meta?.usage ? { usage: meta.usage } : {}),
             ...(meta?.model ? { model: meta.model } : {}),
+            ...(["cron", "inspiration"].includes(meta?.notificationCategory)
+              ? { shoggoth: { source: meta.notificationCategory } } : {}),
           },
         }, meta?.runId ?? runId ?? null);
       return {
@@ -826,7 +830,9 @@ function startProxyGateway({
           ),
         thinking: (text) => chatEvent("thinking", { thinking: text }),
         plan: (entries) => chatEvent("plan", { plan: entries }),
-        status: (data) => chatEvent("status", { statusKind: data?.kind, text: data?.text }),
+        status: (data) => chatEvent("status", { statusKind: data?.kind, text: data?.text,
+          ...(typeof data?.reason === "string" ? { reason: data.reason } : {}),
+          ...(Number.isSafeInteger(data?.queuedAt) ? { queuedAt: data.queuedAt } : {}) }),
         prompt: (data) => {
           livePromptsBySession.set(sessionKey, { runId, prompt: data, owner: promptOwner });
           chatEvent("prompt", { prompt: data });
@@ -1458,6 +1464,7 @@ function startProxyGateway({
             return; // do NOT forward
           }
         } else if (
+          frame.method === "chat.steer" ||
           frame.method === "chat.abort" ||
           frame.method === "chat.respond" ||
           frame.method === "sessions.patch" ||
@@ -1474,6 +1481,10 @@ function startProxyGateway({
           if (owns(agentId)) {
             const backend = registry?.route(agentId);
             const run = async () => {
+              if (frame.method === "chat.steer") {
+                if (!backend?.steerChat) throw new Error("该后端不支持追加当前回合");
+                return (await backend.steerChat(key, String(frame.params?.message ?? ""))) ?? {};
+              }
               if (frame.method === "chat.abort") {
                 await backend?.abortChat?.(key);
                 return {};

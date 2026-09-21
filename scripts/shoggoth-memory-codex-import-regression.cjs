@@ -15,14 +15,14 @@ try {
   const first = value.engine.importCodexNative({ profileId: "profile-1", root });
   const second = value.engine.importCodexNative({ profileId: "profile-1", root });
   assert.equal(first.imported, 1);
-  assert.equal(second.imported, 0, "重复导入命中同一 candidate，不产生第二条记录");
-  const candidates = value.store.list("profile-1", { status: "candidate" });
-  assert.equal(candidates.length, 1);
-  assert.match(candidates[0].content, /deterministic tests/u);
-  assert.doesNotMatch(JSON.stringify(candidates), /api_key/u);
+  assert.equal(second.imported, 0, "重复导入命中同一 active，不产生第二条记录");
+  const actives = value.store.list("profile-1", { status: "active" });
+  assert.equal(actives.length, 1);
+  assert.match(actives[0].content, /deterministic tests/u);
+  assert.doesNotMatch(JSON.stringify(actives), /api_key/u);
   const config = managedConfigFor(null);
   assert.match(config, /^generate_memories = false$/mu);
   assert.match(config, /^use_memories = false$/mu);
-  console.log("ok - Codex native memory 只读导入 candidate、secret 跳过、原生生成/注入关闭");
+  console.log("ok - Codex native memory 只读导入 active、secret 跳过、原生生成/注入关闭");
   console.log("1 codex memory import regression passed");
 } finally { value.cleanup(); }

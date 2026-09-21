@@ -218,13 +218,18 @@ try {
         },
         removeModelConfig: async (_backend, id, model, operationId, force) => {
           calls.push(["delete-model", operationId, id, model, force]);
-          if (modelDeleteMode === "references" && !force) {
+          if (modelDeleteMode === "references-force-lost" && force) {
+            modelDeleteMode = "normal";
+            throw { code: "response_lost", stage: "request" };
+          }
+          if (["references", "references-force-lost", "references-hard"].includes(modelDeleteMode) && !force) {
             throw {
               status: 409,
               code: "references_exist",
               stage: "preflight",
-              safeBlockers: [{ code: "references_exist" }],
-              safeReferences: [{ store: "agents.json", referenceKey: "model.primary" }],
+              canForce: modelDeleteMode !== "references-hard",
+              safeBlockers: [{ code: "references_exist" }, { code: "runtime_apply_unsupported" }],
+              safeReferences: [{ store: "config", referenceKey: "agents.defaults.model.fallbacks[7]" }],
             };
           }
           if (modelDeleteMode === "hard-preflight") {
@@ -364,6 +369,31 @@ try {
         modelDeleteSession,
         modelDeleteFirst.recovery.blockedRemoval.operationId,
       );
+
+      const selectionInput = { id: "fixture", name: "fixture", baseUrl: "https://fixture.test/v1", model: "b", models: ["b"], discoverModels: false };
+      snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
+      await controller.list();
+      modelDeleteMode = "references-hard";
+      snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
+      const hardReferences = await controller.save(selectionInput,
+        shared.createEndpointMutationSession("openclaw", "edit", "hard-refs-root"));
+
+      snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
+      await controller.list();
+      modelDeleteMode = "references-force-lost";
+      const lostModelSession = shared.createEndpointMutationSession("openclaw", "edit", "lost-model-root");
+      snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
+      const lostModelBlocked = await controller.save(selectionInput, lostModelSession);
+      snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
+      const lostModelForced = await controller.confirmBlockedRemoval(lostModelSession, lostModelBlocked.recovery.blockedRemoval.operationId);
+      snapshots = [{ supported: true, endpoints: [endpoint(["b"])] }];
+      const lostModelRetry = await controller.retry(lostModelSession);
+
+      snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
+      await controller.list();
+      snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
+      const reordered = await controller.save({ ...selectionInput, models: ["b", "a"] },
+        shared.createEndpointMutationSession("openclaw", "edit", "reordered-root"));
 
       snapshots = [{ supported: true, endpoints: [endpoint(["a", "b"])] }];
       await controller.list();
@@ -587,6 +617,34 @@ try {
       const uncertainEditRetries = [];
       for (let index = 0; index < 4; index++) uncertainEditRetries.push(await uncertainEditController.retry(uncertainEditSession));
 
+      const providerRenames = [];
+      for (const loseResponse of [false, true]) {
+        const source = endpoint(["keep", "remove"], { id: "old", name: "old" });
+        let visible = [source];
+        let attempts = 0;
+        const writes = [];
+        const renamed = controllerModule.createOpenClawEndpointController("openclaw", {
+          ...deps,
+          listCustomEndpoints: async () => ({ supported: true, endpoints: visible, form: { batchModelSelection: true } }),
+          addModelConfig: async () => { throw new Error("renaming must never create a separate endpoint"); },
+          updateModelProvider: async (_backend, id, patch, operationId) => {
+            writes.push({ kind: "rename", id, patch, operationId });
+            visible = [endpoint(source.models, { id: "new", name: "new" })];
+            return { operationId, status: loseResponse && attempts++ === 0 ? "partial" : "applied", code: "response_lost" };
+          },
+          applyModelBatch: async (_backend, items, operationId) => {
+            writes.push({ kind: "selection", items, operationId });
+            visible = [endpoint(["keep", "added"], { id: "new", name: "new" })];
+            return { operationId, status: "applied" };
+          },
+        });
+        await renamed.list();
+        const session = shared.createEndpointMutationSession("openclaw", "edit", `provider-rename-${loseResponse}`);
+        const first = await renamed.save({ ...source, id: "new", name: "new", model: "keep", models: ["keep", "added"] }, session, source);
+        const final = loseResponse ? await renamed.retry(session) : first;
+        providerRenames.push({ first, final, writes });
+      }
+
       return {
         calls,
         createFirst,
@@ -599,6 +657,8 @@ try {
         replaceKey,
         modelDeleteFirst,
         modelDeleteForced,
+        hardReferences, lostModelForced, lostModelRetry, reordered,
+        uniqueReferences: shared.endpointOutcomeReferences(modelDeleteFirst),
         unlockedFirst,
         unlockedSecond,
         secretFirst,
@@ -621,8 +681,19 @@ try {
         uncertainEditFirst,
         uncertainEditRetries,
         editChangedIdentity,
+        providerRenames,
       };
     });
+
+    for (const rename of result.providerRenames) {
+      assert.equal(rename.final.status, "applied");
+      assert.equal(rename.final.sync, "synced");
+      const writes = rename.writes.filter(write => write.kind === "rename");
+      assert.ok(writes.every(write => write.id === "old" && write.patch.renameTo === "new"));
+      assert.equal(new Set(writes.map(write => write.operationId)).size, 1, "retry must reuse the rename operation");
+      assert.equal(rename.writes.filter(write => write.kind === "selection").length, 1);
+      assert.ok(rename.writes.find(write => write.kind === "selection").items.every(item => item.providerKey === "new"));
+    }
 
     assert.equal(result.createFirst.status, "applied");
     assert.equal(result.createFirst.sync, "pending");
@@ -671,6 +742,20 @@ try {
     assert.equal(result.modelDeleteFirst.status, "blocked");
     assert.equal(result.modelDeleteFirst.recovery.blockedRemoval.modelId, "a");
     assert.equal(result.modelDeleteForced.sync, "synced");
+    assert.equal(result.modelDeleteFirst.canForce, true);
+    assert.equal(result.uniqueReferences.length, 1, "recovery/step 引用必须去重");
+    assert.equal(result.hardReferences.recovery.blockedRemoval, undefined);
+    assert.equal(result.hardReferences.recovery.locked, false);
+    assert.equal(result.lostModelForced.status, "partial");
+    assert.equal(result.lostModelRetry.sync, "synced");
+    assert.deepEqual(result.calls.filter(call => call[0] === "delete-model" && call[1].startsWith("lost-model-root"))
+      .map(call => [call[1], call[4]]), [
+        ["lost-model-root:delete:0", false], ["lost-model-root:delete:0", true], ["lost-model-root:delete:0", true],
+      ], "确认后的断线重试必须保留同一子操作授权");
+    assert.equal(result.reordered.status, "applied");
+    assert.equal(result.reordered.sync, "synced");
+    assert.equal(result.calls.some(call => String(call[1]).startsWith("reordered-root")), false, "重选相同模型集合不能写配置");
+
     assert.equal(result.unlockedFirst.recovery.locked, false, "proven zero-write preflight must unlock");
     assert.equal(result.unlockedSecond.sync, "synced");
     assert.equal(

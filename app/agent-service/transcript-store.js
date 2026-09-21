@@ -15,6 +15,7 @@ const {
   serviceError,
 } = require("./security");
 const { deriveSessionTitleFromEvents } = require("./session-display-projection");
+const { validateUsageRange } = require("./token-usage-protocol");
 
 const TRANSCRIPT_SCHEMA_VERSION = 1;
 const TRANSCRIPT_KINDS = Object.freeze([
@@ -28,6 +29,8 @@ const RUNTIME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_LOG_BYTES = 256 * 1024 * 1024;
+const MAX_USAGE_TOOL_ROWS = 32;
+const MAX_USAGE_ACTIVITY_ROWS = 240;
 
 function transcriptError(code, message) {
   return serviceError(code, message);
@@ -67,6 +70,42 @@ function assertId(value, field) {
     throw transcriptError("TRANSCRIPT_EVENT_INVALID", `${field} 无效`);
   }
   return value;
+}
+
+function usageRangeStart(range, now) {
+  if (range === "all") return 0;
+  const days = { today: 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[range];
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - Math.max(0, days - 1));
+  return start.getTime();
+}
+
+function usageTimelineDate(timestamp, range) {
+  const date = new Date(timestamp);
+  date.setHours(0, 0, 0, 0);
+  if (range === "1y") {
+    date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  } else if (range === "all") {
+    date.setDate(1);
+  }
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function usageToolName(event) {
+  const values = [
+    event.content?.tool?.name,
+    event.content?.toolName,
+    event.content?.name,
+    event.content?.method,
+  ];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const name = value.trim();
+    if (name && name.isWellFormed() && !name.includes("\0")
+      && Buffer.byteLength(name, "utf8") <= 512) return name;
+  }
+  return "unknown";
 }
 
 function exactKeys(value, fields) {
@@ -189,6 +228,13 @@ class TranscriptStore {
     this.sessions.clear();
     this.poisonError = null;
     this.opened = false;
+  }
+
+  forgetProfile(profileId) {
+    this._assertOpen();
+    for (const [key, session] of this.sessions) {
+      if (session.profileId === profileId) this.sessions.delete(key);
+    }
   }
 
   _emptyState(profileId, sessionId) {
@@ -449,6 +495,55 @@ class TranscriptStore {
     return state.events
       .filter((event) => includeExcluded || !event.contextExcluded)
       .map((event) => structuredClone(event));
+  }
+
+  summarizeUsageActivity(rawRange = "30d", profileIds) {
+    this._assertOpen();
+    const range = validateUsageRange(rawRange);
+    if (!(profileIds instanceof Set) || [...profileIds].some((profileId) => !ID_PATTERN.test(profileId))) {
+      throw transcriptError("TRANSCRIPT_USAGE_SCOPE_INVALID", "Transcript usage Profile 范围无效");
+    }
+    const cutoff = usageRangeStart(range, this.now());
+    const toolCounts = new Map();
+    const daily = new Map();
+    const messages = { total: 0, user: 0, assistant: 0, toolCalls: 0, errors: 0 };
+    for (const state of this.sessions.values()) {
+      if (!profileIds.has(state.profileId)) continue;
+      for (const event of state.events) {
+        if (event.occurredAt < cutoff) continue;
+        const date = usageTimelineDate(event.occurredAt, range);
+        const day = daily.get(date) || { date, messages: 0, toolCalls: 0, errors: 0 };
+        if (event.kind === "user" || event.kind === "assistant") {
+          messages.total += 1;
+          messages[event.kind] += 1;
+          day.messages += 1;
+        } else if (event.kind === "tool_call") {
+          const name = usageToolName(event);
+          messages.toolCalls += 1;
+          day.toolCalls += 1;
+          toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+        } else if (event.kind === "error") {
+          messages.errors += 1;
+          day.errors += 1;
+        }
+        daily.set(date, day);
+      }
+    }
+    const tools = [...toolCounts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+    return {
+      tools: {
+        totalCalls: messages.toolCalls,
+        uniqueTools: tools.length,
+        tools: tools.slice(0, MAX_USAGE_TOOL_ROWS),
+      },
+      messages,
+      dailyActivity: [...daily.values()]
+        .filter((day) => day.messages > 0 || day.toolCalls > 0 || day.errors > 0)
+        .sort((left, right) => left.date.localeCompare(right.date))
+        .slice(-MAX_USAGE_ACTIVITY_ROWS),
+    };
   }
 
   getSessionDerivedTitle(profileId, sessionId) {

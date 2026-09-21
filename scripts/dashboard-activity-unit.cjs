@@ -46,7 +46,7 @@ function testCronActivityShape() {
   const a = cronRunToActivity(run);
   assert.equal(a.kind, "cron");
   assert.equal(a.backendId, "hermes");
-  assert.equal(a.occurredAt, T0 + 5000);
+  assert.equal(a.occurredAt, T0 + 9000);
   assert.equal(a.title, "早报");
   assert.equal(a.agentId, "hermes-default");
   assert.equal(a.run.jobId, "hermes-default:5ec8"); // 原 run 完整携带（Drawer 依赖）

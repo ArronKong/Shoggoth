@@ -100,11 +100,18 @@ function projectSafeProvider(value) {
     throw hostError("HOST_PROVIDER_RESPONSE_INVALID", "Provider response is invalid");
   }
   const host = baseUrlHost(provider.baseUrl);
+  // The custom endpoint editor needs the full API root. Never project URL
+  // credentials, query strings or fragments from legacy/malformed records.
+  const customUrl = provider.kind === "custom-responses" && provider.baseUrl
+    ? new URL(provider.baseUrl) : null;
+  const editableBaseUrl = customUrl && !customUrl.username && !customUrl.password
+    && !customUrl.search && !customUrl.hash ? provider.baseUrl : null;
   return {
     id: provider.id,
     kind: provider.kind,
     displayName: provider.name,
     ...(host ? { baseUrlHost: host } : {}),
+    ...(editableBaseUrl ? { baseUrl: editableBaseUrl } : {}),
     authState: providerAuthState(provider),
     ...(provider.model ? { defaultModel: provider.model } : {}),
     validationStatus: provider.validationStatus,

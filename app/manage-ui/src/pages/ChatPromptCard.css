@@ -30,7 +30,7 @@
 .chat-prompt__btn.is-primary:hover:not(:disabled), .chat-prompt__btn.is-primary:active:not(:disabled) { background: #000; }
 .chat-prompt__btn.is-primary:disabled { opacity: 0.4; cursor: default; }
 .chat-prompt__input {
-  flex: 1; min-width: 160px; padding: 6px 10px; border-radius: 8px; font-size: 13px;
+  flex: 1; min-width: 160px; padding: 6px 10px; border-radius: 999px; font-size: 13px;
   border: 1px solid #000; background: transparent; color: var(--chat-text, var(--ui-text-1));
 }
 
@@ -39,10 +39,11 @@
 .chat-prompt__options { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; width: 100%; min-width: 0; }
 .chat-prompt__options > .chat-prompt__field { max-width: 100%; }
 .chat-prompt__field > .chat-prompt__input { align-self: stretch; }
-.chat-prompt--input, .chat-prompt--approval { gap: 8px; }
+.chat-prompt--input, .chat-prompt--approval, .chat-prompt--confirmation { gap: 8px; }
 /* 标题间距为 8px 容器间隔 + 8px 外边距，底部操作间距为 12px + 4px。 */
 .chat-prompt--input > .chat-prompt__head,
-.chat-prompt--approval > .chat-prompt__head { margin-bottom: 8px; }
+.chat-prompt--approval > .chat-prompt__head,
+.chat-prompt--confirmation > .chat-prompt__head { margin-bottom: 8px; }
 .chat-prompt--input .chat-prompt__field { gap: 4px; }
 .chat-prompt--input > .chat-prompt__fields > .chat-prompt__row { margin-top: 4px; }
 .chat-prompt__btn:disabled { cursor: default; opacity: 0.5; }

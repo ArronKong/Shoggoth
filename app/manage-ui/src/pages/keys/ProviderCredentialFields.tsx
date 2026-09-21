@@ -73,6 +73,112 @@ export function IconPulse() {
   );
 }
 
+/** Shared read/reveal/edit presentation for Provider keys and endpoint dialogs. */
+export function ProviderSecretField({
+  secret, editValue, revealedValue, busy, canReveal, canClear, editDisabled = false,
+  onBeginEdit, onChange, onSave, onCancel, onReveal, onClear, onValidate, clearLabel,
+}: {
+  secret: EditableFieldValue;
+  editValue: string | null;
+  revealedValue: string | null;
+  busy: boolean;
+  editDisabled?: boolean;
+  canReveal: boolean;
+  canClear: boolean;
+  onBeginEdit(): void;
+  onChange(value: string): void;
+  onSave(): void;
+  onCancel(): void;
+  onReveal(): void;
+  onClear(): void;
+  onValidate?(): void;
+  clearLabel?: string;
+}) {
+  const { t } = useTranslation();
+  const shown = secret.configured
+    ? (revealedValue ?? secret.preview ?? secret.value ?? "—")
+    : (secret.placeholder ?? "—");
+  return (
+    <div className={styles.fieldSlot} data-provider-secret>
+      {editValue !== null ? (
+        <>
+          <input
+            autoFocus
+            type="text"
+            className={`field-input ${styles.fieldBox} field-mono`}
+            value={editValue}
+            spellCheck={false}
+            autoComplete="off"
+            aria-label={secret.ariaLabel ?? "API Key"}
+            placeholder={secret.configured
+              ? t("keys.replaceCurrent", { preview: secret.preview ?? "—" })
+              : secret.placeholder}
+            disabled={editDisabled}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                if (event.key === "Enter") onSave(); else onCancel();
+              }
+            }}
+          />
+          <div className={styles.fieldIcons}>
+            {onValidate && (
+              <button type="button" className={styles.iconBtn} disabled={busy || !editValue.trim()}
+                title={t("keys.validate")} aria-label={t("keys.validate")} onClick={onValidate}>
+                <IconPulse />
+              </button>
+            )}
+            <button type="button" className={styles.iconBtn} disabled={busy || !editValue.trim()}
+              title={t("common.save")} aria-label={t("common.save")} onClick={onSave}>
+              <IconCheck />
+            </button>
+            <button type="button" className={styles.iconBtn} disabled={busy}
+              title={t("common.cancel")} aria-label={t("common.cancel")} onClick={onCancel}>
+              <IconClose />
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            className={`field-input ${styles.fieldBox} ${styles.fieldBoxBtn} ${secret.configured ? "" : styles.fieldBoxEmpty}`}
+            title={secret.title}
+            disabled={busy}
+            aria-label={secret.ariaLabel
+              ? `${secret.ariaLabel} — ${secret.configured ? t("keys.replace") : t("keys.set")}`
+              : (secret.configured ? t("keys.replace") : t("keys.set"))}
+            onClick={onBeginEdit}
+          >
+            <span className={`mono ${revealedValue !== null ? styles.valueShown : ""}`}>{shown}</span>
+          </button>
+          {secret.configured && (
+            <div className={styles.fieldIcons}>
+              {canReveal && (
+                <button type="button" className={styles.iconBtn} disabled={busy}
+                  title={revealedValue !== null ? t("keys.hide") : t("keys.reveal")}
+                  aria-label={revealedValue !== null ? t("keys.hide") : t("keys.reveal")}
+                  onClick={onReveal}>
+                  {revealedValue !== null ? <IconEyeOff /> : <IconEye />}
+                </button>
+              )}
+              {canClear && (
+                <button type="button" className={styles.iconBtn} disabled={busy}
+                  title={clearLabel ?? t("keys.clear")} aria-label={clearLabel ?? t("keys.clear")}
+                  onClick={onClear}>
+                  <IconTrash />
+                </button>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ProviderCredentialFields({
   baseUrl,
   secret,
@@ -228,9 +334,6 @@ export function ProviderCredentialFields({
   const baseShown = baseUrl.configured
     ? (baseUrl.preview ?? baseUrl.value ?? "—")
     : (baseUrl.value ?? baseUrl.fallback ?? baseUrl.placeholder ?? "—");
-  const secretShown = secret.configured
-    ? (revealedSecret ?? secret.preview ?? secret.value ?? "—")
-    : (secret.placeholder ?? "—");
 
   return (
     <div className={styles.groupFields} data-provider-fields>
@@ -298,77 +401,21 @@ export function ProviderCredentialFields({
         </div>
       )}
 
-      <div className={styles.fieldSlot}>
-        {secretEdit !== null ? (
-          <>
-            <input
-              autoFocus
-              type="text"
-              className={`field-input ${styles.fieldBox} field-mono`}
-              value={secretEdit}
-              autoComplete="off"
-              aria-label={secret.ariaLabel ?? "API Key"}
-              placeholder={secret.configured
-                ? t("keys.replaceCurrent", { preview: secret.preview ?? "—" })
-                : secret.placeholder}
-              onChange={(event) => setSecretEdit(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void saveSecret();
-                if (event.key === "Escape") cancelSecretEdit();
-              }}
-            />
-            <div className={styles.fieldIcons}>
-              {capabilities.validateSecret && (
-                <button className={styles.iconBtn} disabled={isBusy || !secretEdit.trim()}
-                  title={t("keys.validate")} aria-label={t("keys.validate")} onClick={() => void validateSecret()}>
-                  <IconPulse />
-                </button>
-              )}
-              <button className={styles.iconBtn} disabled={isBusy || !secretEdit.trim()}
-                title={t("common.save")} aria-label={t("common.save")} onClick={() => void saveSecret()}>
-                <IconCheck />
-              </button>
-              <button className={styles.iconBtn} disabled={isBusy}
-                title={t("common.cancel")} aria-label={t("common.cancel")} onClick={cancelSecretEdit}>
-                <IconClose />
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <button
-              className={`field-input ${styles.fieldBox} ${styles.fieldBoxBtn} ${secret.configured ? "" : styles.fieldBoxEmpty}`}
-              title={secret.title}
-              disabled={isBusy}
-              aria-label={secret.ariaLabel
-                ? `${secret.ariaLabel} — ${secret.configured ? t("keys.replace") : t("keys.set")}`
-                : (secret.configured ? t("keys.replace") : t("keys.set"))}
-              onClick={() => setSecretEdit("")}
-            >
-              <span className={`mono ${revealedSecret !== null ? styles.valueShown : ""}`}>{secretShown}</span>
-            </button>
-            {secret.configured && (
-              <div className={styles.fieldIcons}>
-                {capabilities.revealSecret && (
-                  <button className={styles.iconBtn} disabled={isBusy}
-                    title={revealedSecret !== null ? t("keys.hide") : t("keys.reveal")}
-                    aria-label={revealedSecret !== null ? t("keys.hide") : t("keys.reveal")}
-                    onClick={() => void toggleSecretReveal()}>
-                    {revealedSecret !== null ? <IconEyeOff /> : <IconEye />}
-                  </button>
-                )}
-                {capabilities.clearSecret && (
-                  <button className={styles.iconBtn} disabled={isBusy}
-                    title={t("keys.clear")} aria-label={t("keys.clear")}
-                    onClick={() => void onClearSecret()}>
-                    <IconTrash />
-                  </button>
-                )}
-              </div>
-            )}
-          </>
-        )}
-      </div>
+      <ProviderSecretField
+        secret={secret}
+        editValue={secretEdit}
+        revealedValue={revealedSecret}
+        busy={isBusy}
+        canReveal={capabilities.revealSecret}
+        canClear={capabilities.clearSecret}
+        onBeginEdit={() => setSecretEdit("")}
+        onChange={setSecretEdit}
+        onSave={() => void saveSecret()}
+        onCancel={cancelSecretEdit}
+        onReveal={() => void toggleSecretReveal()}
+        onClear={() => void onClearSecret()}
+        onValidate={capabilities.validateSecret ? () => void validateSecret() : undefined}
+      />
     </div>
   );
 }

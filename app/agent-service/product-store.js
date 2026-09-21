@@ -18,7 +18,8 @@ const {
   validateRuntimeAccount,
 } = require("./runtime-account");
 
-const STORE_SCHEMA_VERSION = 9;
+const STORE_SCHEMA_VERSION = 10;
+const SINGLE_MODEL_PROVIDER_SCHEMA_VERSION = 9;
 const PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION = 8;
 const LEGACY_STORE_SCHEMA_VERSION = 1;
 const PREVIOUS_STORE_SCHEMA_VERSION = 2;
@@ -444,11 +445,21 @@ function isWellFormedUnicode(value) {
 }
 
 function validateModelProvider(record) {
-  const provider = pickExact(record, MODEL_PROVIDER_FIELDS, "ModelProvider");
+  const hasModels = Object.prototype.hasOwnProperty.call(record || {}, "models");
+  const provider = pickExact(record, [...MODEL_PROVIDER_FIELDS, ...(hasModels ? ["models"] : [])], "ModelProvider");
   for (const field of ["id", "kind", "name", "validationStatus"]) {
     requireString(provider[field], `ModelProvider.${field}`);
   }
   requireString(provider.model, "ModelProvider.model", true);
+  if (hasModels && (provider.kind !== "custom-responses" || !Array.isArray(provider.models)
+    || provider.models.length === 0 || provider.models.length > 500
+    || new Set(provider.models).size !== provider.models.length
+    || !provider.models.includes(provider.model)
+    || provider.models.some((model) => typeof model !== "string" || !model.trim()
+      || model !== model.trim() || !isWellFormedUnicode(model)
+      || /[\u0000-\u001f\u007f]/u.test(model) || Buffer.byteLength(model, "utf8") > 512))) {
+    throw storeError("STORE_INVALID_RECORD", "Custom ModelProvider.models 无效");
+  }
   if (provider.id.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(provider.id)) {
     throw storeError("STORE_INVALID_RECORD", "ModelProvider.id 必须是有界稳定 ID");
   }
@@ -544,6 +555,9 @@ function migrateLegacyModelProvider(record) {
 }
 
 function modelProviderFromDisk(record, schemaVersion) {
+  if (schemaVersion < STORE_SCHEMA_VERSION && Object.hasOwn(record || {}, "models")) {
+    throw storeError("STORE_INVALID_RECORD", "旧 ModelProvider schema 不支持模型目录");
+  }
   return schemaVersion === LEGACY_STORE_SCHEMA_VERSION
     ? migrateLegacyModelProvider(record)
     : validateModelProvider(record);
@@ -912,7 +926,7 @@ function defaultAgentProfile(now) {
     defaultModel: null,
     defaultCwd: null,
     permissionPolicy: { approvalPolicy: "on-request", sandbox: "danger-full-access" },
-    concurrency: { maxActive: 1, maxWorkspaceWrites: 1 },
+    concurrency: { maxActive: require("./execution-policy").profile, maxWorkspaceWrites: require("./execution-policy").profile },
     isDefault: true,
     enabled: true,
     createdAt: now,
@@ -1033,7 +1047,7 @@ class JsonlProductStore extends ProductStore {
     this.legacyRuntimeAccountIdsToReclaim = new Set();
     this.legacyRuntimeAccountAliases = new Map();
     this.runtimeAccountAuthorityStarted = false;
-    this.currentSchemaAuthorityStarted = false;
+    this.currentSchemaAuthorityVersion = 0;
     this.profileProviderAuthorityStarted = false;
     this.modelProviders = new Map();
     this.runtimeAccounts = new Map();
@@ -1066,7 +1080,7 @@ class JsonlProductStore extends ProductStore {
     this.legacyRuntimeAccountIdsToReclaim.clear();
     this.legacyRuntimeAccountAliases.clear();
     this.runtimeAccountAuthorityStarted = false;
-    this.currentSchemaAuthorityStarted = false;
+    this.currentSchemaAuthorityVersion = 0;
     this.profileProviderAuthorityStarted = false;
     this.#readSnapshot();
     this.#ensureDefaultRuntimeAccounts();
@@ -1097,6 +1111,44 @@ class JsonlProductStore extends ProductStore {
     }
     this.requiredSensitiveValueMatcher = matcher;
     return this;
+  }
+
+  purgeArchivedProfile(profileId) {
+    this.#assertOpen();
+    const profile = this.agentProfiles.get(profileId);
+    if (!profile) return;
+    if (profile.enabled || profile.isDefault || profileId === DEFAULT_AGENT_PROFILE_ID
+      || BUILTIN_CLI_AGENT_PROFILES.some((entry) => entry.id === profileId)) {
+      throw storeError("AGENT_PROTECTED", "只能清理已归档的自建 Agent");
+    }
+    const runs = new Set([...this.workRuns.values()]
+      .filter((run) => run.profileId === profileId).map((run) => run.id));
+    const ownsCall = (call) => call.profileId === profileId
+      || call.binding?.profileId === profileId || call.binding?.targetProfileId === profileId;
+    if ([...this.workRuns.values()].some((run) => runs.has(run.id)
+      ? (run.status === "queued" || ACTIVE_WORK_RUN_STATUSES.has(run.status)) : runs.has(run.retryOf))
+      || [...this.mcpToolCalls.values()].some((call) => ownsCall(call) && call.status === "pending")) {
+      throw storeError("AGENT_OPERATION_BUSY", "Agent 仍有未完成或被引用的操作");
+    }
+    this.agentProfiles.delete(profileId);
+    for (const id of runs) {
+      this.workRunIdempotency.delete(this.workRuns.get(id).idempotencyKey);
+      this.workRuns.delete(id);
+    }
+    for (const [id, note] of this.runNotes) {
+      if (note.profileId === profileId || runs.has(note.runId)) this.runNotes.delete(id);
+    }
+    for (const [id, call] of this.mcpToolCalls) {
+      if (ownsCall(call)) this.mcpToolCalls.delete(id);
+    }
+    // Snapshot first: replay skips entries through lastSeq after an interrupted
+    // journal truncation, so a purged Profile cannot return after a restart.
+    try { this.#writeSnapshot(); } catch (cause) {
+      this.commitUncertain = true;
+      const error = storeError("STORE_COMMIT_UNCERTAIN", "Agent 清理提交需要重启后核对");
+      error.cause = cause;
+      throw error;
+    }
   }
 
   setSensitiveValueMatcherSessionFactory(factory) {
@@ -1694,7 +1746,8 @@ class JsonlProductStore extends ProductStore {
       RICH_STORE_SCHEMA_VERSION, GENERIC_RUNTIME_STORE_SCHEMA_VERSION,
       PROFILE_BACKEND_MIGRATION_SOURCE_SCHEMA_VERSION,
       RUNTIME_ACCOUNT_MIGRATION_SOURCE_SCHEMA_VERSION,
-      RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION, PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION, STORE_SCHEMA_VERSION]
+      RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION, PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION,
+      SINGLE_MODEL_PROVIDER_SCHEMA_VERSION, STORE_SCHEMA_VERSION]
       .includes(snapshot?.schemaVersion)) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
@@ -1733,7 +1786,8 @@ class JsonlProductStore extends ProductStore {
     this.#assertNoSensitiveFields(snapshot, false);
     this.runtimeAccountAuthorityStarted = snapshot.schemaVersion
       >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION;
-    this.currentSchemaAuthorityStarted = snapshot.schemaVersion === STORE_SCHEMA_VERSION;
+    this.currentSchemaAuthorityVersion = snapshot.schemaVersion >= SINGLE_MODEL_PROVIDER_SCHEMA_VERSION
+      ? snapshot.schemaVersion : 0;
     this.profileProviderAuthorityStarted = snapshot.schemaVersion >= PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION;
     this.loadedLegacySnapshot = legacyShape || snapshot.schemaVersion === LEGACY_STORE_SCHEMA_VERSION;
     for (const raw of snapshot.modelProviders || []) {
@@ -1844,7 +1898,8 @@ class JsonlProductStore extends ProductStore {
       RICH_STORE_SCHEMA_VERSION, GENERIC_RUNTIME_STORE_SCHEMA_VERSION,
       PROFILE_BACKEND_MIGRATION_SOURCE_SCHEMA_VERSION,
       RUNTIME_ACCOUNT_MIGRATION_SOURCE_SCHEMA_VERSION,
-      RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION, PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION, STORE_SCHEMA_VERSION]
+      RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION, PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION,
+      SINGLE_MODEL_PROVIDER_SCHEMA_VERSION, STORE_SCHEMA_VERSION]
       .includes(event?.schemaVersion)) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
@@ -1867,15 +1922,16 @@ class JsonlProductStore extends ProductStore {
     } else if (this.profileProviderAuthorityStarted) {
       throw storeError("STORE_CORRUPT_EVENT_LOG", "events.jsonl 在 Profile Provider authority 后回退到旧 schema");
     }
-    if (event.schemaVersion === STORE_SCHEMA_VERSION) {
-      this.#finishLegacyRuntimeAccountCanonicalization();
-      this.runtimeAccountAuthorityStarted = true;
-      this.currentSchemaAuthorityStarted = true;
-    } else if (this.currentSchemaAuthorityStarted) {
+    if (this.currentSchemaAuthorityVersion && event.schemaVersion < this.currentSchemaAuthorityVersion) {
       throw storeError(
         "STORE_CORRUPT_EVENT_LOG",
         "events.jsonl 在当前 schema authority 后回退到旧 schema",
       );
+    }
+    if (event.schemaVersion >= SINGLE_MODEL_PROVIDER_SCHEMA_VERSION) {
+      this.#finishLegacyRuntimeAccountCanonicalization();
+      this.runtimeAccountAuthorityStarted = true;
+      this.currentSchemaAuthorityVersion = event.schemaVersion;
     } else if (event.schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION) {
       this.#finishLegacyRuntimeAccountCanonicalization();
       this.runtimeAccountAuthorityStarted = true;

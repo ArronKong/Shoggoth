@@ -385,13 +385,13 @@ export default function App() {
       <main className="content">
         {/* 常驻保活：display:contents 让 .chat-shell 仍是 .content 的直接子（不破坏其 grid/flex 布局），隐藏时彻底不占位。 */}
         {(chatMounted || onChat) && (
-          <Suspense fallback={onChat ? <div className="page"><FusionLoader ariaLabel={t("common.loading")} /></div> : null}>
+          <Suspense fallback={onChat ? <div className="page page-loading"><FusionLoader ariaLabel={t("common.loading")} /></div> : null}>
             <div style={{ display: onChat ? "contents" : "none" }}>
               <ChatPage />
             </div>
           </Suspense>
         )}
-        <Suspense fallback={<div className="page"><FusionLoader ariaLabel={t("common.loading")} /></div>}>
+        <Suspense fallback={<div className="page page-loading"><FusionLoader ariaLabel={t("common.loading")} /></div>}>
           <Routes>
             <Route path="/" element={<Navigate to="/chat" replace />} />
             {/* /chat 由上方常驻渲染；此处占位，避免 * 兜底把 /chat 重定向成死循环。 */}

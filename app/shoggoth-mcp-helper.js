@@ -16,10 +16,13 @@ const {
 } = require("./agent-service/federation-mcp-auth");
 const {
   MCP_PRODUCT_TOOL_DEFINITIONS,
+  PUBLIC_MESSAGES: MCP_PRODUCT_PUBLIC_MESSAGES,
+  isNativeOnlyMcpTool,
   validateMcpProductToolArguments,
 } = require("./agent-service/mcp-product-tool-controller");
 const {
   SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS,
+  SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS,
   productToolRisk,
 } = require("./agent-service/product-capability-manifest");
 const {
@@ -66,13 +69,14 @@ const PUBLIC_SERVICE_ERROR_PREFIXES = Object.freeze([
   "SKILL_", "SYSTEM_", "TOOL_", "TRANSCRIPT_", "USAGE_",
 ]);
 const EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS = Object.freeze(
-  MCP_PRODUCT_TOOL_DEFINITIONS.filter((definition) => !definition.name.startsWith("computer_")),
+  MCP_PRODUCT_TOOL_DEFINITIONS.filter((definition) => !isNativeOnlyMcpTool(definition.name)),
 );
 const EXTERNAL_FEDERATION_MCP_INSTRUCTIONS = [
   "You are an external Agent connected to Shoggoth through its local federated MCP server.",
-  "Shoggoth exposes its product tools here except Computer Use. Call federation_agent_list with no arguments for the native, OpenClaw, and Hermes directory. For connected/available Agent counts, count only agents with connected=true; distinguish configured directory totals and unavailableBackends. Use federation_agent_get for one target; use federation_agent_run, federation_task_get, federation_agent_message, and federation_task_cancel for owner-bound collaboration.",
+  "Your own Agent name, persona, memory and current model remain owned by your external backend. profile_get describes the Shoggoth native Profile authorized for product operations, not your external Agent identity. Connecting to this MCP server does not rename you or replace your own definitions or memory.",
+  "Shoggoth exposes its product tools here except Computer Use and native Agent definition/memory tools. Call federation_agent_list with no arguments for the native, OpenClaw, and Hermes directory. For connected/available Agent counts, count only agents with connected=true; distinguish configured directory totals and unavailableBackends. Use federation_agent_get for one target; use federation_agent_run, federation_task_get, federation_agent_message, and federation_task_cancel for owner-bound collaboration.",
   "Never invent or alter a federation task handle, never answer a waiting target Agent prompt on the user's behalf, and report waitingFor plainly.",
-  ...SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.split("\n").slice(1),
+  SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS,
 ].join("\n");
 
 function helperError(code, message) {
@@ -378,6 +382,16 @@ function publicServiceErrorCode(error) {
     : "SERVICE_REQUEST_FAILED";
 }
 
+function toolFailureResponse(id, error) {
+  const code = publicServiceErrorCode(error);
+  const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || "Shoggoth Service request failed";
+  return jsonRpcResult(id, {
+    content: [{ type: "text", text: `${message} (${code})` }],
+    structuredContent: { error: { code } },
+    isError: true,
+  });
+}
+
 function cloneMcpServiceResult(value, state = { nodes: 0 }, depth = 0) {
   state.nodes += 1;
   if (state.nodes > 16_384 || depth > 32) {
@@ -458,6 +472,7 @@ function cloneMcpServiceResult(value, state = { nodes: 0 }, depth = 0) {
 }
 
 function validateInitializeParams(params) {
+  const hasMeta = params && Object.prototype.hasOwnProperty.call(params, "_meta");
   const clientInfoKeys = params?.clientInfo && typeof params.clientInfo === "object"
     ? Object.keys(params.clientInfo)
     : [];
@@ -488,7 +503,10 @@ function validateInitializeParams(params) {
       || boundedJsonObject(capabilities.sampling, MCP_INITIALIZE_CAPABILITIES_MAX_BYTES))
     && (!Object.prototype.hasOwnProperty.call(capabilities, "elicitation")
       || boundedJsonObject(capabilities.elicitation, MCP_INITIALIZE_CAPABILITIES_MAX_BYTES));
-  return exactObject(params, ["protocolVersion", "capabilities", "clientInfo"])
+  return exactObject(params, hasMeta
+    ? ["protocolVersion", "capabilities", "clientInfo", "_meta"]
+    : ["protocolVersion", "capabilities", "clientInfo"])
+    && (!hasMeta || boundedJsonObject(params._meta, 4 * 1024))
     && boundedNonEmptyString(params.protocolVersion, 32)
     && capabilitiesShapeValid
     && validClientInfoShape
@@ -591,7 +609,22 @@ function normalizeElicitationResult(value, questions) {
   return { answers };
 }
 
-function confirmationQuestionFor(name, args) {
+function confirmationQuestionFor(name, args, nativeAgent = null) {
+  if (name === "native_agent_archive" || name === "native_agent_update") {
+    const target = `${JSON.stringify(nativeAgent.name)}（${args.backendId}/${args.agentId}）`;
+    const changes = [
+      ...(Object.hasOwn(args, "name") ? [`名称改为 ${JSON.stringify(args.name)}`] : []),
+      ...(Object.hasOwn(args, "workspace") ? [`工作目录改为 ${args.workspace === null ? "默认目录" : JSON.stringify(args.workspace)}`] : []),
+    ].join("；");
+    return [{ header: name === "native_agent_archive" ? "确认归档" : "确认修改",
+      id: "confirm_product_action",
+      question: name === "native_agent_archive"
+        ? `Shoggoth 将归档并隐藏本地助理 ${target}。配置、记忆和历史保留 7 天，到期后自动删除；工作区文件和共享账号保留。是否继续？`
+        : `Shoggoth 将修改本地助理 ${target}：${changes}。是否继续？`,
+      options: [{ label: "确认执行", description: "执行这一次已明确列出的操作。" },
+        { label: "取消", description: "不修改任何产品状态。" }],
+    }];
+  }
   const targetFactories = {
     cron_delete: () => `Cron Job ${args.jobId}`,
     inspiration_delete: () => `灵感 ${args.id}（版本 ${args.expectedRevision}）`,
@@ -603,6 +636,9 @@ function confirmationQuestionFor(name, args) {
     external_agent_file_write: () => `${args.backendId} Agent ${args.agentId} 的 ${args.file}`,
     computer_session_open: () => `Computer Use 会话（${args.allowedApplications.join(", ")}）`,
     computer_session_resume: () => `Computer Use 会话 ${args.sessionId}`,
+    skill_install_global: () => `全局 Skill 包 ${JSON.stringify(args.sourcePath)}`,
+    mcp_server_register: () => `共享 MCP Server ${JSON.stringify(args.name)}（${args.id}；${JSON.stringify(args.command)}）`,
+    mcp_server_remove: () => `共享 MCP Server ${args.id}（仅移除注册，不删除安装文件）`,
   };
   const risk = productToolRisk(name);
   if (!targetFactories[name] || !["confirm", "destructive"].includes(risk)) return null;
@@ -652,6 +688,30 @@ function toolSuccessResponse(id, result) {
   response = jsonRpcResult(id, { content, isError: false });
   if (Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES) return response;
   throw helperError("MCP_HELPER_RESPONSE_TOO_LARGE", "mcp_helper_response_too_large");
+}
+
+function toolListPages(definitions) {
+  const revision = crypto.createHash("sha256").update(JSON.stringify(definitions)).digest("base64url");
+  const pages = new Map();
+  let start = 0;
+  while (start < definitions.length) {
+    const tools = [];
+    let end = start;
+    let bytes = 0;
+    // Reserve room for the JSON-RPC envelope, escaped request ID and cursor.
+    while (end < definitions.length) {
+      const size = Buffer.byteLength(JSON.stringify(definitions[end]), "utf8") + 1;
+      if (bytes + size > MCP_MAX_FRAME_BYTES - 2048) break;
+      tools.push(structuredClone(definitions[end++]));
+      bytes += size;
+    }
+    if (end === start) throw helperError("MCP_HELPER_RESPONSE_TOO_LARGE", "mcp_tool_definition_too_large");
+    pages.set(start === 0 ? "" : `${revision}.${start}`, {
+      tools, ...(end < definitions.length ? { nextCursor: `${revision}.${end}` } : {}),
+    });
+    start = end;
+  }
+  return pages;
 }
 
 function computerSnapshotResponse(id, result, thumbnail, mimeType) {
@@ -751,6 +811,7 @@ function createMcpStdioHandler(options = {}) {
     throw helperError("MCP_HELPER_OPTIONS_INVALID", "mcp_helper_options_invalid");
   }
   const allowedTools = new Set(toolDefinitions.map((definition) => definition.name));
+  const toolPages = toolListPages(toolDefinitions);
   const paths = options.paths || resolveServicePaths();
   const serviceVersion = typeof options.serviceVersion === "string" ? options.serviceVersion : "0.0.0";
   const refreshSession = options.refreshSession || null;
@@ -820,6 +881,21 @@ function createMcpStdioHandler(options = {}) {
     },
   }, { timeoutMs: MCP_TOOL_SERVICE_TIMEOUT_MS });
 
+  const invokeTool = async (name, args, confirmed = false) => {
+    let callId;
+    try { callId = randomUUID(); } catch {
+      throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
+    }
+    if (!UUID_PATTERN.test(callId)) throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
+    const refreshed = await refreshIfExpiring();
+    try { return await requestTool(name, args, callId, confirmed); }
+    catch (error) {
+      if (dataErrorCode(error) !== "MCP_SESSION_INVALID" || refreshed || !refreshSession) throw error;
+      await refresh();
+      return requestTool(name, args, callId, confirmed);
+    }
+  };
+
   const handler = async (message, context = {}) => {
     if (!message || typeof message !== "object" || Array.isArray(message)
       || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
@@ -847,9 +923,16 @@ function createMcpStdioHandler(options = {}) {
     if (!initialized) return hasId ? jsonRpcError(message.id, -32002, "Server not initialized") : null;
     if (message.method === "ping" && hasId) return jsonRpcResult(message.id, {});
     if (message.method === "tools/list" && hasId) {
-      return jsonRpcResult(message.id, {
-        tools: structuredClone(toolDefinitions),
-      });
+      const params = message.params === undefined ? {} : message.params;
+      const fields = ["cursor", "_meta"].filter(field => Object.hasOwn(params || {}, field));
+      if (!exactObject(params, fields)
+        || (Object.hasOwn(params, "_meta") && !boundedJsonObject(params._meta, 4 * 1024))
+        || (Object.hasOwn(params, "cursor") && (typeof params.cursor !== "string" || !params.cursor))) {
+        return jsonRpcError(message.id, -32602, "Invalid params");
+      }
+      const page = toolPages.get(params.cursor ?? "");
+      return page ? jsonRpcResult(message.id, structuredClone(page))
+        : jsonRpcError(message.id, -32602, "Invalid params");
     }
     if (message.method === "tools/call" && hasId) {
       const hasArguments = exactObject(message.params, ["name", "arguments"])
@@ -890,9 +973,42 @@ function createMcpStdioHandler(options = {}) {
       if (!validateMcpProductToolArguments(message.params.name, toolArguments)) {
         return jsonRpcError(message.id, -32602, "Invalid params");
       }
-      const confirmation = confirmationQuestionFor(
-        message.params.name, toolArguments,
-      );
+      let nativeAgent = null;
+      try {
+        if (["computer_session_open", "computer_session_resume"].includes(message.params.name)) {
+          const state = cloneMcpServiceResult(await invokeTool("computer_status", {}));
+          if (state?.available !== true) {
+            const reason = Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, state?.reason || "")
+              ? state.reason : "COMPUTER_DRIVER_UNAVAILABLE";
+            throw helperError(reason, "computer_preflight_failed");
+          }
+          if (typeof state.permissions?.accessibility !== "boolean"
+            || typeof state.permissions?.screenRecording !== "boolean") {
+            throw helperError("COMPUTER_PERMISSION_STATUS_FAILED", "computer_preflight_failed");
+          }
+          if (!state.permissions.accessibility || !state.permissions.screenRecording) {
+            throw helperError("COMPUTER_PERMISSION_REQUIRED", "computer_preflight_failed");
+          }
+        }
+        if (["native_agent_update", "native_agent_archive"].includes(message.params.name)) {
+          const result = cloneMcpServiceResult(await invokeTool("native_agent_get", {
+            backendId: toolArguments.backendId, agentId: toolArguments.agentId,
+          }));
+          nativeAgent = result?.agent;
+          if (!nativeAgent || nativeAgent.backendId !== toolArguments.backendId
+            || nativeAgent.agentId !== toolArguments.agentId || typeof nativeAgent.name !== "string") {
+            throw helperError("MCP_TOOL_RESPONSE_INVALID", "native_agent_preflight_failed");
+          }
+          if (nativeAgent.updatedAt !== toolArguments.expectedUpdatedAt) {
+            throw helperError("AGENT_PROFILE_CONFLICT", "native_agent_preflight_failed");
+          }
+          if (nativeAgent.state !== "active") throw helperError("AGENT_OPERATION_BUSY", "native_agent_preflight_failed");
+          if (message.params.name === "native_agent_archive" && nativeAgent.isDefault) {
+            throw helperError("AGENT_PROTECTED", "native_agent_preflight_failed");
+          }
+        }
+      } catch (error) { return toolFailureResponse(message.id, error); }
+      const confirmation = confirmationQuestionFor(message.params.name, toolArguments, nativeAgent);
       let confirmed = false;
       if (confirmation) {
         if (!supportsElicitation || typeof context.requestClient !== "function") {
@@ -922,24 +1038,7 @@ function createMcpStdioHandler(options = {}) {
         }
       }
       try {
-        let callId;
-        try { callId = randomUUID(); } catch {
-          throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
-        }
-        if (!UUID_PATTERN.test(callId)) {
-          throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
-        }
-        const refreshed = await refreshIfExpiring();
-        let rawResult;
-        try {
-          rawResult = await requestTool(message.params.name, toolArguments, callId, confirmed);
-        } catch (error) {
-          if (dataErrorCode(error) !== "MCP_SESSION_INVALID" || refreshed || !refreshSession) {
-            throw error;
-          }
-          await refresh();
-          rawResult = await requestTool(message.params.name, toolArguments, callId, confirmed);
-        }
+        const rawResult = await invokeTool(message.params.name, toolArguments, confirmed);
         const result = cloneMcpServiceResult(rawResult);
         if (message.params.name === "computer_snapshot" && result?.image?.thumbnail) {
           const thumbnail = result.image.thumbnail;
@@ -953,12 +1052,7 @@ function createMcpStdioHandler(options = {}) {
         }
         return toolSuccessResponse(message.id, result);
       } catch (error) {
-        const code = publicServiceErrorCode(error);
-        return jsonRpcResult(message.id, {
-          content: [{ type: "text", text: `Shoggoth Service request failed (${code})` }],
-          structuredContent: { error: { code } },
-          isError: true,
-        });
+        return toolFailureResponse(message.id, error);
       }
     }
     return hasId ? jsonRpcError(message.id, -32601, "Method not found") : null;

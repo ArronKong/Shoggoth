@@ -11,6 +11,7 @@ const {
   listNativeNodeModules,
   nestedHostOptionalDependencyPaths,
   shouldSignMachO,
+  inspectCodeSignature,
 } = require("./adhoc-sign.cjs");
 
 assert.equal(typeof buildCodesignArgs, "function", "签名脚本必须导出可测试的参数构造器");
@@ -81,6 +82,20 @@ assert.equal(shouldSignMachO({ mode: "developer-id", valid: true, teamId: "2DC43
 assert.equal(shouldSignMachO({ mode: "developer-id", valid: true, teamId: "YCK386LBJ7" }), false);
 assert.equal(shouldSignMachO({ mode: "developer-id", valid: true, teamId: "OTHERTEAM" }), true);
 
+for (const teamId of ["2DC432GLL2", "YCK386LBJ7"]) {
+  const signature = inspectCodeSignature("/tmp/vendor", {
+    spawnSync(_command, args) {
+      return args[0] === "-d"
+        ? { status: 0, stderr: `TeamIdentifier=${teamId}\n` }
+        : { status: 1, stderr: "signature verification unavailable" };
+    },
+  });
+  assert.deepEqual(signature, { valid: false, teamId });
+  for (const mode of ["adhoc", "local", "developer-id"]) {
+    assert.throws(() => shouldSignMachO({ mode, ...signature }), /refusing to replace/);
+  }
+}
+
 assert.deepEqual(buildCodesignArgs({
   appPath: "/tmp/Shoggoth.app",
   entitlementsPath: "/repo/build/entitlements.mac.plist",
@@ -118,4 +133,4 @@ assert.equal(
   "electron-builder 必须禁用自动证书发现，签名只允许由 afterPack 完成",
 );
 
-console.log("Ad-hoc/local/Developer ID signing unit: PASS (15 checks)");
+console.log("Ad-hoc/local/Developer ID signing unit: PASS (including vendor verification failure)");

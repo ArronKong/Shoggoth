@@ -68,6 +68,7 @@ let failAsyncCreate = false;
 let shoggothWatchMode = "active";
 const shoggothWatchRecords = [];
 const shoggothAbortCalls = [];
+const shoggothSteerCalls = [];
 const shoggothHistoryBehaviors = [];
 const shoggothSendRecords = [];
 let mainCloseWatchRecord = null;
@@ -163,6 +164,10 @@ class AsyncChatBackend extends AgentBackend {
   }
   async abortChat(sessionKey) {
     shoggothAbortCalls.push(sessionKey);
+  }
+  async steerChat(sessionKey, message) {
+    shoggothSteerCalls.push({ sessionKey, message });
+    return { accepted: true, runId: "service-run", turnId: "service-turn" };
   }
   async sendMessage(sessionKey, message, runId, hooks = {}, opts = {}) {
     const record = {
@@ -1136,14 +1141,23 @@ try {
     // CRUD routing remains backend-generic; none of these writes may reach
     // OpenClaw merely because this backend is not OpenClaw.
     const mutationsBefore = upstreamReceived.length;
+    send({ type: "req", id: "steer-native", method: "chat.steer", params: { sessionKey: "agent:shoggoth-default:real-default", message: "focus on tests" } });
     send({ type: "req", id: "abort-foreign", method: "chat.abort", params: { sessionKey: "agent:hermes-default:hist-1" } });
     send({ type: "req", id: "rename-foreign", method: "sessions.patch", params: { key: "agent:hermes-default:hist-1", label: "Renamed" } });
     send({ type: "req", id: "delete-foreign", method: "sessions.delete", params: { key: "agent:hermes-default:hist-1" } });
-    const [abortForeign, renameForeign, deleteForeign] = await Promise.all([
+    const [steerNative, abortForeign, renameForeign, deleteForeign] = await Promise.all([
+      waitFor((f) => f.type === "res" && f.id === "steer-native", "native steer res"),
       waitFor((f) => f.type === "res" && f.id === "abort-foreign", "foreign abort res"),
       waitFor((f) => f.type === "res" && f.id === "rename-foreign", "foreign rename res"),
       waitFor((f) => f.type === "res" && f.id === "delete-foreign", "foreign delete res"),
     ]);
+    check(
+      "native chat.steer routes through the owning backend",
+      steerNative.ok === true
+        && steerNative.payload?.turnId === "service-turn"
+        && shoggothSteerCalls.some((call) => call.sessionKey === "agent:shoggoth-default:real-default"
+          && call.message === "focus on tests"),
+    );
     check(
       "foreign abort/rename/delete route through the backend contract",
       abortForeign.ok === true && renameForeign.ok === true && deleteForeign.ok === true
@@ -1152,7 +1166,7 @@ try {
         && sessionMutationCalls.some((call) => call.method === "delete"),
     );
     await new Promise((resolve) => setTimeout(resolve, 30));
-    check("foreign abort/rename/delete never reach upstream", upstreamReceived.length === mutationsBefore);
+    check("foreign steer/abort/rename/delete never reach upstream", upstreamReceived.length === mutationsBefore);
   }
 
   // 4d. Hermes final 的 usage/model meta 必须钉到广播的 final message 上。

@@ -75,6 +75,25 @@ function isOpenClawQuestionPromptEntry(entry: ChatPromptEntry): entry is OpenCla
     && Array.isArray(entry.questions);
 }
 
+function confirmationOptionLabel(label: string): string {
+  return label.replace(/\s*[（(](?:recommended|推荐)[）)]\s*$/iu, "").trim();
+}
+
+function isCancelOption(label: string): boolean {
+  return /^(?:cancel|取消)$/iu.test(confirmationOptionLabel(label));
+}
+
+// A single two-way choice with an explicit Cancel is already a complete
+// confirmation. This only changes presentation: every click submits the
+// original option value, including Cancel, through the input protocol.
+function directConfirmationField(request: InteractiveRequestV1 | null): InteractiveFieldV1 | null {
+  if (request?.fields.length !== 1) return null;
+  const field = request.fields[0];
+  return field.type === "choice" && !field.secret && field.options.length === 2
+    && field.options.filter((option) => isCancelOption(option.label)).length === 1
+    ? field : null;
+}
+
 // Interactive card for a blocking agent prompt (Hermes gateway approval /
 // clarify / sudo / secret). Approval renders choice buttons (once/session/
 // always/deny); clarify renders its choices + a free-text answer; sudo/secret
@@ -220,13 +239,12 @@ export default function ChatPromptCard({
                             className={selected ? "chat-prompt__btn is-primary" : "chat-prompt__btn"}
                             role={question.multiSelect ? "checkbox" : "radio"}
                             aria-checked={selected}
+                            title={option.description || undefined}
                             disabled={submitting}
                             onClick={() => toggleOption(question, option.label)}
                           >
                             {option.label}
                           </button>
-                          {option.description
-                            ? <span className="chat-prompt__desc">{option.description}</span> : null}
                         </span>
                       );
                     })}
@@ -266,19 +284,19 @@ export default function ChatPromptCard({
           <div className="chat-prompt__row">
             <button
               type="button"
-              className="chat-prompt__btn is-deny"
-              disabled={submitting}
-              onClick={() => { void respond({ action: "cancel" }); }}
-            >
-              {t("setup.skip")}
-            </button>
-            <button
-              type="button"
               className="chat-prompt__btn is-primary"
               disabled={submitting || !ready}
               onClick={submitQuestionAnswers}
             >
               {t("chat.promptSubmit")}
+            </button>
+            <button
+              type="button"
+              className="chat-prompt__btn is-deny"
+              disabled={submitting}
+              onClick={() => { void respond({ action: "cancel" }); }}
+            >
+              {t("setup.skip")}
             </button>
           </div>
         ) : (
@@ -323,6 +341,35 @@ export default function ChatPromptCard({
         options: [],
       }))
       : [];
+  const confirmation = directConfirmationField(canonical);
+  if (confirmation && canonical) {
+    const message = canonical.message.trim();
+    const description = confirmation.description.trim();
+    const sameDescription = message.replace(/\s+/gu, " ") === description.replace(/\s+/gu, " ");
+    return (
+      <div className="chat-prompt chat-prompt--confirmation" aria-busy={submitting}>
+        <div className="chat-prompt__head">
+          <span className="chat-prompt__badge">{confirmation.label || heading}</span>
+        </div>
+        {message ? <div className="chat-prompt__q">{message}</div> : null}
+        {description && !sameDescription ? <div className="chat-prompt__q">{description}</div> : null}
+        <div className="chat-prompt__row chat-prompt__actions">
+          {confirmation.options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`chat-prompt__btn ${isCancelOption(option.label) ? "is-deny" : "is-primary"}`}
+              title={option.description || undefined}
+              disabled={submitting}
+              onClick={() => { void respond({ action: "submit", answers: { [confirmation.id]: option.value } }); }}
+            >
+              {confirmationOptionLabel(option.label)}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
   const multiAnswerReady = questions.every((question) => question.required === false
     || (answers[question.id] ?? "").trim().length > 0);
   const submitAnswers = () => {
@@ -379,14 +426,13 @@ export default function ChatPromptCard({
                                 ? "chat-prompt__btn is-primary" : "chat-prompt__btn"}
                               disabled={submitting}
                               aria-pressed={answers[question.id] === option.value}
+                              title={option.description || undefined}
                               onClick={() => setAnswers((previous) => ({
                                 ...previous, [question.id]: option.value,
                               }))}
                             >
                               {option.label}
                             </button>
-                            {option.description
-                              ? <span className="chat-prompt__desc">{option.description}</span> : null}
                           </span>
                         ))}
                       </span>
@@ -408,6 +454,14 @@ export default function ChatPromptCard({
                 );
               })}
               <div className="chat-prompt__row">
+                <button
+                  type="button"
+                  className="chat-prompt__btn is-primary"
+                  disabled={submitting || !multiAnswerReady}
+                  onClick={submitAnswers}
+                >
+                  {t("chat.promptSubmit")}
+                </button>
                 {canonical ? (
                   <button
                     type="button"
@@ -418,14 +472,6 @@ export default function ChatPromptCard({
                     {t("common.cancel")}
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  className="chat-prompt__btn is-primary"
-                  disabled={submitting || !multiAnswerReady}
-                  onClick={submitAnswers}
-                >
-                  {t("chat.promptSubmit")}
-                </button>
               </div>
             </div>
           ) : needsInput ? (

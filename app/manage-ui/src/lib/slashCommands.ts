@@ -95,6 +95,7 @@ const NATIVE_LOCAL_COMMANDS = new Set([
   "usage",
   "help",
   "commands",
+  "steer",
 ]);
 
 // /new 是故障恢复入口：即使旧轮次尚未收尾，也必须能切到一条不依赖旧 runtime 的空会话。

@@ -2,6 +2,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { randomUUID: id, createHash } = require("node:crypto");
 const { test } = require("node:test");
 const { fixture, until } = require("./fixtures/inspiration-coordinator-fixture.cjs");
@@ -56,20 +57,40 @@ test("explicit paths preserve spaces and Chinese names; directories and missing 
 test("Finder clipboard parsing is format-specific and IPC rejects untrusted frames", async t => {
   const f = await fixture(t), target = path.join(f.root, "剪贴板.png");
   fs.writeFileSync(target, PNG);
-  const clipboard = { availableFormats: () => ["public.file-url"], readBuffer: () => Buffer.from(new URL(`file://${target}`).href) };
-  assert.deepEqual(clipboardFilePaths(clipboard), [target]);
-  assert.deepEqual(clipboardFilePaths({ availableFormats: () => ["text/plain"], readBuffer() { assert.fail("must not infer text"); } }), []);
-  assert.deepEqual(clipboardFilePaths({ availableFormats: () => ["NSFilenamesPboardType"], readBuffer: () => Buffer.from("plist") }, () => [target, target]), [target]);
+  const item = { types: ["text/uri-list"], getType: async () => new Blob([pathToFileURL(target).href]) };
+  const clipboard = { read: async () => [item] };
+  assert.deepEqual(await clipboardFilePaths(clipboard), [target]);
+  assert.deepEqual(await clipboardFilePaths({ read: async () => [{ types: ["text/plain", "text/html"],
+    getType() { assert.fail("must not read copied text as an attachment"); } }] }), []);
+  assert.deepEqual(await clipboardFilePaths({ read: async () => [] }), []);
   let handler, removed = false;
   const sender = { isDestroyed: () => false, mainFrame: {}, getURL: () => "http://127.0.0.1:19000/chat" };
   const window = { isDestroyed: () => false, webContents: sender };
   const dispose = registerDesktopChatClipboardIpc({ ipcMain: { handle(_channel, fn) { handler = fn; }, removeHandler() { removed = true; } },
     clipboard, getWindows: () => [window], getUiOrigin: () => "http://127.0.0.1:19000" });
-  assert.deepEqual(handler({ sender, senderFrame: sender.mainFrame }), [file("剪贴板.png", PNG, "image/png")]);
-  assert.throws(() => handler({ sender, senderFrame: {} }), /Untrusted/);
+  assert.deepEqual(await handler({ sender, senderFrame: sender.mainFrame }), [file("剪贴板.png", PNG, "image/png")]);
+  await assert.rejects(handler({ sender, senderFrame: {} }), /Untrusted/);
   sender.getURL = () => "https://untrusted.example";
-  assert.throws(() => handler({ sender, senderFrame: sender.mainFrame }), /Untrusted/);
+  await assert.rejects(handler({ sender, senderFrame: sender.mainFrame }), /Untrusted/);
+  sender.getURL = () => "http://127.0.0.1:19000/chat";
+  clipboard.read = async () => { sender.getURL = () => "https://untrusted.example"; return [item]; };
+  await assert.rejects(handler({ sender, senderFrame: sender.mainFrame }), /Untrusted/, "navigation during async read must invalidate trust");
   dispose(); assert.equal(removed, true);
+});
+
+test("Electron clipboard URI lists preserve filenames, deduplicate files, and enforce the total byte limit", async () => {
+  const targets = ["/tmp/中文 # 100%.pdf", "/tmp/second.png"];
+  const item = content => ({ types: ["text/uri-list"], getType: async () => new Blob([content]) });
+  assert.deepEqual(await clipboardFilePaths({ read: async () => [
+    item(`# copied files\r\n${pathToFileURL(targets[0]).href}\r\nhttps://example.com\r\n`),
+    item(`${targets.map(target => pathToFileURL(target).href).join("\n")}\0`),
+  ] }), targets);
+  let oversizedRead = false;
+  await assert.rejects(clipboardFilePaths({ read: async () => [{ types: ["text/uri-list"],
+    getType: async () => ({ size: 65537, text() { oversizedRead = true; } }) }] }), /文件列表过大/);
+  assert.equal(oversizedRead, false, "reject oversized blobs before materializing their contents");
+  await assert.rejects(clipboardFilePaths({ read: async () => [item(" ".repeat(40000)), item(" ".repeat(40000))] }), /文件列表过大/);
+  await assert.rejects(clipboardFilePaths({ read: async () => [item("file:///tmp/bad%") ] }), URIError);
 });
 
 test("attachment-only chat reaches Codex image input and the durable transcript exactly once", async t => {

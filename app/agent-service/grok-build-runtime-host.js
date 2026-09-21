@@ -11,6 +11,7 @@ const { spawn } = require("node:child_process");
 const { GrokBuildAcpJsonlClient } = require("./grok-build-acp-jsonl");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { GrokBuildRuntimeLedger } = require("./grok-build-runtime-ledger");
+const { readGrokUsage } = require("./grok-build-usage");
 const {
   GROK_BUILD_RUNTIME,
   buildGrokBuildArgs,
@@ -709,6 +710,7 @@ class GrokBuildRuntimeHost {
     this.binaryPath = binaryPath;
     const args = buildGrokBuildArgs(this.permissionPolicy);
     const env = await buildSpawnEnv(this.runtimeEnvironment, this.options);
+    this.usageEnv = env;
     if (this.state !== "starting") {
       throw hostError("RUNTIME_HOST_TERMINATED", "Grok Build host stopped before process spawn");
     }
@@ -1492,6 +1494,8 @@ class GrokBuildRuntimeHost {
     const acceptance = makeDeferred();
     const active = {
       sessionId: session.id,
+      createdAt,
+      cwd: session.cwd,
       turnId,
       operationId: input.operationId,
       promptText: prompt,
@@ -1984,7 +1988,7 @@ class GrokBuildRuntimeHost {
     this.rpc?.notify("session/cancel", { sessionId: active.sessionId }).catch(() => {});
   }
 
-  _finishPrompt(active, response) {
+  async _finishPrompt(active, response) {
     if (this.activeTurns.get(active.sessionId) !== active) return;
     if (!plain(response) || !STOP_REASONS.has(response.stopReason)) {
       throw hostError("GROK_ACP_PROMPT_RESPONSE_INVALID", "Grok ACP prompt response is invalid");
@@ -1993,6 +1997,13 @@ class GrokBuildRuntimeHost {
     const status = response.stopReason === "end_turn" ? "completed"
       : response.stopReason === "cancelled" ? "canceled" : "failed";
     const timestamp = this.now();
+    let usage = [];
+    try {
+      usage = await (this.options.readUsage || readGrokUsage)({ binaryPath: this.binaryPath,
+        env: this.usageEnv, cwd: active.cwd, sessionId: active.sessionId,
+        sinceMs: active.createdAt, untilMs: timestamp });
+    } catch { /* Unavailable metering must not change the outcome of the work. */ }
+    if (this.activeTurns.get(active.sessionId) !== active) return;
     const assistantMessages = active.messageOrder.map((id) => ({ id, text: active.messages.get(id) || "" }));
     this.ledger.update((data) => {
       const session = sessionById(data, active.sessionId);
@@ -2016,6 +2027,7 @@ class GrokBuildRuntimeHost {
       sessionId: active.sessionId,
       turnId: active.turnId,
     };
+    for (const record of usage) this._publish({ ...common, ...record, type: "usage" });
     for (const message of assistantMessages) {
       if (message.text.length > 0) {
         this._publish({ ...common, type: "text", itemId: message.id, text: message.text, phase: "final_answer" });
@@ -2148,6 +2160,7 @@ class GrokBuildRuntimeHost {
 
 module.exports = {
   GROK_COMPAT_DISABLE_ENV,
+  buildGrokSpawnEnv: buildSpawnEnv,
   GrokBuildRuntimeHost,
   PARENT_ENV_ALLOWLIST,
   modelCatalogFromInitialize,

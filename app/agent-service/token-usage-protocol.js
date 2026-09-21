@@ -35,7 +35,8 @@ function validDate(value) {
 
 function validParts(value, extraFields = []) {
   const fields = [...extraFields, ...PART_FIELDS];
-  if (!exactObject(value, fields)) return false;
+  if (!exactObject(value, fields) && !(extraFields.includes("missingCostEntries")
+    && exactObject(value, [...fields, "estimatedCostEntries"]) && validCount(value.estimatedCostEntries))) return false;
   return validCount(value.totalTokens) && validCost(value.totalCost)
     && ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"]
       .every((field) => validCount(value[field]));
@@ -60,7 +61,9 @@ function assertBounded(value, label) {
 }
 
 function validateUsageSeries(series) {
-  if (!exactObject(series, ["daily", "totals"]) || !Array.isArray(series.daily)
+  if ((!exactObject(series, ["daily", "totals"]) && !exactObject(series, ["daily", "totals", "availability"]))
+    || (series.availability !== undefined && !["complete", "partial", "unavailable"].includes(series.availability))
+    || !Array.isArray(series.daily)
     || !validParts(series.totals, ["missingCostEntries"])
     || !validCount(series.totals.missingCostEntries)) {
     throw new TypeError("invalid usage series");
@@ -75,9 +78,13 @@ function validateUsageSeries(series) {
 }
 
 function validateUsageBreakdown(breakdown) {
-  if (!exactObject(breakdown, [
+  const baseFields = [
     "byModel", "byAgent", "bySource", "totals", "modelDaily", "topSessions", "sourceKind",
-  ]) || !Array.isArray(breakdown.byModel) || !Array.isArray(breakdown.byAgent)
+  ];
+  const activityFields = ["tools", "messages", "dailyActivity"];
+  const hasActivity = exactObject(breakdown, [...baseFields, ...activityFields]);
+  if ((!exactObject(breakdown, baseFields) && !hasActivity)
+    || !Array.isArray(breakdown.byModel) || !Array.isArray(breakdown.byAgent)
     || !Array.isArray(breakdown.bySource) || !Array.isArray(breakdown.modelDaily)
     || !Array.isArray(breakdown.topSessions) || breakdown.sourceKind !== "agent"
     || !validParts(breakdown.totals, ["missingCostEntries"])
@@ -122,6 +129,28 @@ function validateUsageBreakdown(breakdown) {
         !exactObject(entry, ["model", "tokens"]) || !boundedString(entry.model)
         || !validCount(entry.tokens)
       ))) throw new TypeError("invalid usage top session row");
+  }
+  if (hasActivity) {
+    if (!exactObject(breakdown.tools, ["totalCalls", "uniqueTools", "tools"])
+      || !validCount(breakdown.tools.totalCalls) || !validCount(breakdown.tools.uniqueTools)
+      || !Array.isArray(breakdown.tools.tools)
+      || breakdown.tools.uniqueTools < breakdown.tools.tools.length
+      || breakdown.tools.tools.some((row) => !exactObject(row, ["name", "count"])
+        || !boundedString(row.name) || !validCount(row.count))) {
+      throw new TypeError("invalid usage tools");
+    }
+    const listedCalls = breakdown.tools.tools.reduce((sum, row) => sum + row.count, 0);
+    if (listedCalls > breakdown.tools.totalCalls
+      || !exactObject(breakdown.messages, ["total", "user", "assistant", "toolCalls", "errors"])
+      || !Object.values(breakdown.messages).every(validCount)
+      || breakdown.messages.toolCalls !== breakdown.tools.totalCalls
+      || !Array.isArray(breakdown.dailyActivity)
+      || breakdown.dailyActivity.some((row) => !exactObject(row, [
+        "date", "messages", "toolCalls", "errors", "tokens", "cost",
+      ]) || !validDate(row.date) || !validCount(row.messages) || !validCount(row.toolCalls)
+        || !validCount(row.errors) || !validCount(row.tokens) || !validCost(row.cost))) {
+      throw new TypeError("invalid usage activity");
+    }
   }
   assertBounded(breakdown, "usage breakdown");
   return structuredClone(breakdown);

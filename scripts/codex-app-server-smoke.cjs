@@ -77,6 +77,7 @@ function testGeneratedMethodMappingAndContracts() {
     initialize: "initialize",
     threadStart: "thread/start",
     threadResume: "thread/resume",
+    threadInjectItems: "thread/inject_items",
     threadRead: "thread/read",
     threadList: "thread/list",
     threadSetName: "thread/name/set",

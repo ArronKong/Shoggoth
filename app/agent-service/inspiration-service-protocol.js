@@ -239,7 +239,9 @@ function validateInspirationServiceResult(method, result) {
       }
     } else if (method === "inspiration.activities") {
       for (const item of result.items) {
-        if (!exact(item, ["id", "ideaId", "runId", "backendId", "agentId", "createdAt", "title", "summary", "status"])
+        if ((!exact(item, ["id", "ideaId", "runId", "backendId", "agentId", "createdAt", "title", "summary", "status"])
+          && !exact(item, ["id", "ideaId", "runId", "backendId", "agentId", "createdAt", "finishedAt", "title", "summary", "status"]))
+          || (item.finishedAt !== undefined && item.finishedAt !== null && !at(item.finishedAt))
           || ![item.id, item.ideaId, item.runId].every(uuid) || ![item.backendId, item.agentId].every(publicId)
           || !at(item.createdAt) || !string(item.title, 1024) || !string(item.summary, 4096)
           || !STATUSES.has(item.status) || item.status === "saved") invalid("INSPIRATION_RESPONSE_INVALID");

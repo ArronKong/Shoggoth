@@ -171,7 +171,7 @@ function createProfileServiceController(options = {}) {
     if (!READY_PROVIDER_STATUSES.has(provider.validationStatus)) {
       throw profileError("PROFILE_PROVIDER_NOT_READY", "Provider has not passed protocol validation");
     }
-    if (provider.model !== defaultModel) {
+    if (provider.model !== defaultModel && !(provider.kind === "custom-responses" && provider.models?.includes(defaultModel))) {
       throw profileError("PROFILE_MODEL_MISMATCH", "Default model does not match provider configuration");
     }
     return provider;
@@ -289,6 +289,25 @@ function createProfileServiceController(options = {}) {
   }
 
   async function readRuntimeModelPage(profile, pageParams, generation) {
+    if (profile.runtime === "codex" && profile.providerRef !== null) {
+      const provider = productStore.getModelProvider(profile.providerRef);
+      if (provider?.kind === "custom-responses") {
+        loadReadyProvider(provider.id, profile.defaultModel);
+        const models = provider.models ?? [provider.model];
+        const fingerprint = crypto.createHash("sha256").update(JSON.stringify(models)).digest("hex").slice(0, 16);
+        const prefix = `custom-${fingerprint}-`;
+        const cursor = pageParams.cursor;
+        const offset = cursor === null ? 0 : Number(cursor.slice(prefix.length));
+        if (cursor !== null && (!cursor.startsWith(prefix) || !Number.isSafeInteger(offset)
+          || offset < 0 || offset >= models.length || cursor !== `${prefix}${offset}`)) {
+          throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Custom model catalog cursor is invalid");
+        }
+        const page = models.slice(offset, offset + pageParams.limit);
+        const nextCursor = offset + page.length < models.length ? `${prefix}${offset + page.length}` : null;
+        return { models: page.map((id) => ({ id, displayName: id, description: "", isDefault: id === profile.defaultModel })),
+          nextCursor, hasMore: nextCursor !== null };
+      }
+    }
     if (profile.runtime === "codex") {
       return readAuthorityModelPage(profile, pageParams, generation);
     }

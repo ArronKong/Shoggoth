@@ -687,6 +687,17 @@ class NativeCronStore {
     });
   }
 
+  purgeProfile(profileId) {
+    this.#assertOpen();
+    if (!validOpaqueId(profileId)) throw cronError("CRON_JOB_INVALID", "Profile 无效");
+    const candidate = { ...this.container, revision: this.container.revision + 1 };
+    candidate.jobs = Object.fromEntries(Object.entries(this.container.jobs)
+      .filter(([, job]) => job.profileId !== profileId));
+    candidate.operations = Object.fromEntries(Object.entries(this.container.operations)
+      .filter(([, operation]) => operation.result?.profileId !== profileId));
+    this.container = this.#write(candidate);
+  }
+
   getJob(jobId) {
     this.#assertOpen();
     if (!UUID_PATTERN.test(jobId)) throw cronError("CRON_JOB_INVALID", "jobId 无效");

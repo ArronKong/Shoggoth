@@ -380,6 +380,25 @@ class InspirationStore extends EventEmitter {
     this.emit("changed");
   }
 
+  purgeProfile(profileId) {
+    this.#assertOpen();
+    if (!validId(profileId)) fail("INSPIRATION_INVALID", "Profile 无效");
+    const executions = this.#statement("SELECT id,idea_id,run_id FROM executions WHERE json_extract(data,'$.profileId')=?")
+      .all(profileId);
+    if (executions.length === 0) return;
+    this.db.exec("PRAGMA secure_delete=ON");
+    this.#commit({ revision: this.revision + 1, ideas: {}, executions: {}, operations: {} }, () => {
+      for (const execution of executions) {
+        this.#statement("DELETE FROM operations WHERE type='executions' AND target_id=?").run(execution.id);
+        this.#statement("DELETE FROM growth_jobs WHERE json_extract(data,'$.runId')=?").run(execution.run_id);
+        this.#statement("DELETE FROM executions WHERE id=?").run(execution.id);
+      }
+      for (const ideaId of new Set(executions.map((execution) => execution.idea_id))) this.#projectLatest(ideaId);
+    });
+    // Ideas are shared user objects and survive deletion of an executor.
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
   growthSettings() {
     this.#assertOpen();
     const row = this.#statement("SELECT value FROM meta WHERE key='growth_settings'").get();
@@ -629,16 +648,20 @@ class InspirationStore extends EventEmitter {
     return { rows: rows.slice(0, limit), total, hasMore: rows.length > limit };
   }
 
-  dashboardExecutionsPage({ sinceMs, cursor, limit }) {
+  dashboardExecutionsPage({ sinceMs, cursor, limit, finishedRunIds = [] }) {
     this.#assertOpen();
     const after = this.#cursor(cursor);
-    // Match Cron's execution-start day. Include every round and archived ideas;
-    // deleted ideas cannot be opened from Dashboard and must not expose old text.
-    const where = "created_at>=? AND idea_id IN (SELECT id FROM ideas WHERE deleted=0)";
-    const total = this.#statement(`SELECT COUNT(*) AS count FROM executions WHERE ${where}`).get(sinceMs).count;
+    // Include executions crossing midnight. Native completion times live in the
+    // dispatcher; external times are part of the durable execution envelope.
+    const where = `(created_at>=? OR json_extract(data,'$.external.finishedAt')>=?
+      OR json_extract(data,'$.preparationFailure.occurredAt')>=?
+      OR run_id IN (SELECT value FROM json_each(?)))
+      AND idea_id IN (SELECT id FROM ideas WHERE deleted=0)`;
+    const args = [sinceMs, sinceMs, sinceMs, JSON.stringify(finishedRunIds)];
+    const total = this.#statement(`SELECT COUNT(*) AS count FROM executions WHERE ${where}`).get(...args).count;
     const rows = this.#statement(`SELECT data FROM executions WHERE ${where}
       ${after ? "AND (created_at,id)<(?,?)" : ""} ORDER BY created_at DESC,id DESC LIMIT ?`)
-      .all(sinceMs, ...(after ? [after.at, after.id] : []), limit + 1).map(row => this.#decode("executions", row));
+      .all(...args, ...(after ? [after.at, after.id] : []), limit + 1).map(row => this.#decode("executions", row));
     return { rows: rows.slice(0, limit), total, hasMore: rows.length > limit };
   }
 

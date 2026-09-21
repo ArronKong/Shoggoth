@@ -4,6 +4,9 @@ import type { EnvVar } from "../../types";
 import { TextInput } from "../../components/Field";
 import styles from "./KeysPanel.module.css";
 
+// Hide tool-key management across backends while retaining existing configuration and UI.
+export const SHOW_TOOL_KEYS = false;
+
 export type ToolKeyItem = EnvVar & {
   canReveal: boolean;
   canValidate: boolean;

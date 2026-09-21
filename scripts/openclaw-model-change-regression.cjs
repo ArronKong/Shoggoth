@@ -1661,7 +1661,11 @@ test("OpenClaw 自定义端点只纳入目录外有效 config provider 并保持
     ],
     defaultApi: "openai-completions",
     nameEditable: false,
+    nameIsProviderId: true,
+    providerIdEditable: true,
     firstModelIsDefault: false,
+    batchModelSelection: true,
+    allowPrimaryModelRemoval: true,
   });
   const alpha = snapshot.endpoints[0];
   assert.equal(alpha.name, "alpha", "OpenClaw 显示名必须回落 provider id");
@@ -1689,6 +1693,114 @@ test("OpenClaw 自定义端点只纳入目录外有效 config provider 并保持
   assert.deepEqual(keyDigests, before.keyDigests, "只读 mapper 不得改写 key 摘要输入");
   assert.equal(Object.values(reads).every((count) => count > 0), true);
   assert.equal(getWrites(), 0);
+});
+
+test("OpenClaw 端点模型用途包含默认和多助理主模型，不把回退或歧义裸 ID 当作主模型", async () => {
+  const { backend } = createOpenClawEndpointBackend({ parsed: {
+    models: { providers: {
+      alpha: { baseUrl: "https://fixture.test/v1", models: [{ id: "old" }, { id: "new" }, { id: "shared" }] },
+      beta: { baseUrl: "https://fixture.test/v1", models: [{ id: "shared" }] },
+    } },
+    agents: {
+      defaults: { model: { primary: "alpha/new", fallbacks: ["alpha/shared"] } },
+      entries: {
+        main: { model: { primary: "alpha/old" } }, sara: { model: { primary: "old" } },
+        travelplanner: { model: { primary: "beta/shared" } }, ambiguous: { model: { primary: "shared" } },
+      },
+    },
+  } });
+  const snapshot = await backend.listCustomEndpoints();
+  assert.deepEqual(snapshot.endpoints[0].primaryModelUsage, [
+    { modelId: "old", isDefault: false, agentIds: ["main", "sara"] },
+    { modelId: "new", isDefault: true, agentIds: [] },
+  ]);
+  assert.deepEqual(snapshot.endpoints[1].primaryModelUsage, [
+    { modelId: "shared", isDefault: false, agentIds: ["travelplanner"] },
+  ]);
+});
+
+test("OpenClaw 端点加载走实时 Gateway 授权摘要，模型回读缓存不跨 Agent 或连接", async () => {
+  const backend = new OpenClawBackend();
+  backend._isLocalGateway = () => true;
+  backend._modelAuthCliVersionOverride = "2026.9.1";
+  backend._modelAuthAgentIdsOverride = ["main"];
+  backend._localKeyDigests = () => new Map();
+  backend._providerCatalogSnapshot = () => ({ providers: {} });
+  backend.getModelChangeCapabilities = async () => ({ supported: true, updateProvider: true });
+  let authReads = 0;
+  let profiles = [{ id: "custom:default", provider: "custom", type: "api_key" }];
+  backend._runModelAuthCli = async () => { throw new Error("page loads must not launch the CLI"); };
+  backend.request = async (method, params) => {
+    assert.equal(method, "models.authStatus");
+    assert.deepEqual(params, { agentId: backend._modelAuthAgentId(), refresh: true });
+    authReads++;
+    return { providers: [{ provider: "custom", profiles: profiles.map(profile => ({
+      profileId: profile.id, type: profile.type, key: "must-not-leak",
+    })) }] };
+  };
+  const config = { models: { providers: { custom: { baseUrl: "https://example.test/v1", models: [{ id: "one" }] } } } };
+  backend._configSnapshot = async () => ({ parsed: structuredClone(config) });
+  let snapshot = await backend.listCustomEndpoints({ refreshAuth: false });
+  assert.equal(authReads, 1, "cold read queries the official Gateway without starting a CLI process");
+  assert.equal(snapshot.endpoints[0].hasApiKey, true);
+  assert.equal(snapshot.endpoints[0].canRevealApiKey, true);
+  assert.equal(snapshot.endpoints[0].canClearApiKey, true);
+  assert.equal(JSON.stringify(snapshot).includes("must-not-leak"), false);
+  assert.equal(backend._canonicalAuthProfiles, null, "Gateway status must not replace the CLI profile inventory");
+  config.models.providers.custom.models.push({ id: "two" });
+  snapshot = await backend.listCustomEndpoints({ refreshAuth: false });
+  assert.deepEqual(snapshot.endpoints[0].models, ["one", "two"], "config must never come from the auth cache");
+  assert.equal(authReads, 1);
+  profiles = [];
+  snapshot = await backend.listCustomEndpoints();
+  assert.equal(authReads, 2, "normal loads and credential edits require a fresh authorization list");
+  assert.equal(snapshot.endpoints[0].hasApiKey, false);
+  backend._modelAuthAgentIdsOverride = ["another-owner"];
+  await backend.listCustomEndpoints({ refreshAuth: false });
+  assert.equal(authReads, 3, "credential metadata cannot cross Agent owners");
+  backend._advanceModelRuntimeGeneration();
+  await backend.listCustomEndpoints({ refreshAuth: false });
+  assert.equal(authReads, 4, "credential metadata cannot cross Gateway connections");
+  backend._getUpstreamUrl = () => "ws://127.0.0.1:28792";
+  await backend.listCustomEndpoints({ refreshAuth: false });
+  assert.equal(authReads, 5, "credential metadata cannot cross Gateway URLs");
+  profiles = [{ id: "custom:team", provider: "custom", type: "api_key" },
+    { id: "custom:default", provider: "custom", type: "oauth" }];
+  snapshot = await backend.listCustomEndpoints();
+  assert.equal(snapshot.endpoints[0].hasApiKey, true);
+  assert.equal(snapshot.endpoints[0].canRevealApiKey, false, "named profiles must not expose a default-key action");
+  assert.equal(snapshot.endpoints[0].canClearApiKey, false);
+});
+
+test("OpenClaw 端点授权 RPC 不兼容时回退官方 CLI，双重失败不能返回旧状态", async () => {
+  const backend = new OpenClawBackend();
+  backend._isLocalGateway = () => true;
+  backend._modelAuthCliVersionOverride = "2026.9.1";
+  backend._modelAuthAgentIdsOverride = ["main"];
+  let cliReads = 0;
+  backend._runModelAuthCli = async () => {
+    cliReads++;
+    return { profiles: [{ id: "custom:default", provider: "custom", type: "api_key" }] };
+  };
+  for (const response of [null, { providers: [], unavailable: { code: "not_ready" } },
+    { providers: [{ provider: "custom", profiles: [{ type: "api_key" }] }] }]) {
+    backend.request = async () => response;
+    const profiles = await backend._loadEndpointAuthKeyProfiles();
+    assert.equal(profiles.get("custom").has("custom:default"), true);
+  }
+  assert.equal(cliReads, 3, "each normal load checks fresh official credentials even on fallback");
+  backend.request = async () => { throw new Error("unknown method"); };
+  backend._runModelAuthCli = async () => { throw new Error("official auth read failed"); };
+  await assert.rejects(backend._loadEndpointAuthKeyProfiles(), /official auth read failed/);
+  backend._isLocalGateway = () => false;
+  assert.equal((await backend._loadEndpointAuthKeyProfiles()).size, 0, "remote Gateways must not consult local credentials");
+});
+
+test("OpenClaw 已知 Gateway 版本满足规范时不额外启动 CLI 探测版本", () => {
+  const backend = new OpenClawBackend();
+  backend._gatewayVersion = "2026.9.1";
+  backend._localOpenClawVersion = () => { throw new Error("unnecessary CLI version probe"); };
+  assert.equal(backend._usesCanonicalModelAuthCli(), true);
 });
 
 test("OpenClaw 自定义端点配置读取失败必须抛出而非伪装成空快照", async () => {
@@ -2138,6 +2250,26 @@ test("delete-provider 聚合多模型扫描时 policy ref 去重并阻断悬空�
   ]);
   assert.equal(new Set(policyRefs.map((item) => item.referenceKey)).size, policyRefs.length);
   assert.ok(result.blockers.some((item) => item.code === "references_exist"));
+});
+
+test("delete preview 在确认之前识别默认或助理主模型，回退引用仍可确认清理", async () => {
+  for (const holder of ["defaults", "agent", "fallback"]) {
+    const model = holder === "fallback" ? { fallbacks: ["alpha/old"] } : { primary: "alpha/old" };
+    const backend = createFakeRpc({ config: {
+      models: { providers: { alpha: { models: [{ id: "old" }] } } },
+      agents: holder === "agent" ? { entries: { writer: { model } } } : { defaults: { model } },
+    } });
+    const adapter = createOpenClawModelChange({ backend, runtimeApply: {
+      async inspect() { return { mode: "unsupported", safeApply: false }; },
+      async acquireForApply() { throw new Error("preview 不应 acquire"); },
+      async recoverLease() {},
+    } });
+    for (const kind of ["delete-model", "delete-provider"]) {
+      const result = await adapter.preview({ kind, providerKey: "alpha", sourceModelId: kind === "delete-model" ? "old" : null });
+      assert.equal(result.blockers.some(item => item.code === "references_exist"), true);
+      assert.equal(result.blockers.some(item => item.code === "primary_model_in_use"), holder !== "fallback");
+    }
+  }
 });
 
 test("models alias 与 modelPolicy visibility 都不能伪装成模型存在性", async () => {

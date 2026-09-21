@@ -86,7 +86,7 @@ app.whenReady().then(async()=>{
     const persisted=await w.webContents.executeJavaScript("({lang:document.documentElement.lang,...window.fixtureConfig()})");
     if (${connections}) {
       assert.deepEqual(persisted.disabledBackends,result.disabledBackends,"new document must load saved connection switches");
-      assert.equal(persisted.gatewayUrl,"ws://127.0.0.1:1","unsaved draft must not be persisted by toggles");
+      assert.equal(persisted.gatewayUrl,"ws://127.0.0.1:9","corrected endpoint must auto-save");
     } else {
       assert.equal(persisted.lang,result.locale,"new document must load the saved locale");
       assert.equal(persisted.locale,result.locale);
@@ -96,11 +96,11 @@ app.whenReady().then(async()=>{
     context.mainWindow={webContents:{reload:()=>reloads++}};
     for (const patch of [{gatewayUrl:"ws://127.0.0.1:2"},{hermesMode:"remote"}]) {
       const before=reloads;config={...config,...patch};await context.applyConfigChange();
-      assert.equal(reloads,before+1,"endpoint edits must still reload");
+      assert.equal(reloads,before,"endpoint edits must apply without reloading");
     }
     config={...config,disabledBackends:["hermes"],theme:"dark",notifications:{chat:false,cron:true,task:false}};
     await context.applyConfigChange();
-    assert.equal(reloads,2,"connection toggles and preference saves must stay live");
+    assert.equal(reloads,0,"all settings must stay live");
     passed=true;
   } catch(error) {console.error(error);console.error(JSON.stringify({blockedReloads,reloads}));}
   finally {w.destroy();app.exit(passed?0:1);}

@@ -2,7 +2,7 @@
 .editorContent { min-width: 0; --fade-top: 0px; --fade-bottom: 0px; mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent); }
 .editorContent[data-fade-top] { --fade-top: 16px; }
 .editorContent[data-fade-bottom] { --fade-bottom: 16px; }
-.textInput { display: block; width: 100%; resize: none; overflow: hidden; }
+.textInput { composes: typeface from './InspirationPaper.module.css'; display: block; width: 100%; resize: none; overflow: hidden; }
 .textInput[data-inline-text] { min-height: 20px; }
 .editor[data-capture] { display: flex; flex: 1; flex-direction: column; min-height: 114px; max-height: 364px; }
 .editor[data-capture] .editorContent { overflow: auto; min-height: 0; overscroll-behavior: contain; }

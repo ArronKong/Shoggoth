@@ -12,6 +12,8 @@ const {
   lstatIfExists,
   serviceError,
 } = require("./security");
+const { DEFAULT_DOCUMENTS, LEGACY_DEFAULT_DOCUMENTS, DEFAULT_TEMPLATE_VERSION,
+  createDefaultDocuments, LEGACY_MEMORY_RULE, CURRENT_MEMORY_RULE } = require("./agent-definition-defaults");
 
 const DEFINITION_SCHEMA_VERSION = 1;
 const DEFINITION_EXPORT_FORMAT = "shoggoth-agent-definition-v1";
@@ -21,13 +23,6 @@ const DEFAULT_MAX_DOCUMENT_BYTES = 32 * 1024;
 const DEFAULT_MAX_EXPORT_BYTES = 256 * 1024;
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
-
-const DEFAULT_DOCUMENTS = Object.freeze({
-  IDENTITY: "# Shoggoth\n\nYou are the Shoggoth agent owned and configured by this Shoggoth profile.\n",
-  SOUL: "# Soul\n\nBe clear, thoughtful, honest about uncertainty, and respectful of user control.\n",
-  USER: "# User\n\nNo confirmed user profile facts have been recorded yet.\n",
-  AGENTS: "# Operating Rules\n\nFollow current user instructions, product permissions, and workspace rules.\n",
-});
 
 function definitionError(code, message) {
   return serviceError(code, message);
@@ -239,16 +234,82 @@ class AgentDefinitionStore {
   ensureProfile(input) {
     this._assertOpen();
     const profileId = assertProfileId(input?.profileId);
+    const defaults = createDefaultDocuments(input.profileName);
+    const defaultIdentity = defaults.IDENTITY;
+    if (input.initialIdentity !== undefined) {
+      if (typeof input.initialIdentity !== "string" || !input.initialIdentity.trim()
+        || !input.initialIdentity.isWellFormed() || input.initialIdentity.includes("\0")
+        || Buffer.byteLength(input.initialIdentity, "utf8") > 8192) {
+        throw definitionError("DEFINITION_DOCUMENT_INVALID", "Initial Agent identity is invalid");
+      }
+      defaults.IDENTITY += `\n## 用户指定的身份与职责\n\n${input.initialIdentity}\n`;
+    }
     const existing = lstatIfExists(this._rootManifestPath(profileId));
-    if (existing) return this.get(profileId);
+    if (existing) {
+      const current = this.get(profileId);
+      if (input.initialIdentity !== undefined) {
+        if (current.documents.IDENTITY === defaults.IDENTITY) return current;
+        // Startup may bootstrap the default after a crash between Profile
+        // creation and definition initialization. Complete only an untouched
+        // default; never overwrite a user's intervening identity edit/restore.
+        if (current.documents.IDENTITY !== defaultIdentity || this.history(profileId).some(revision =>
+          revision.documents.IDENTITY.contentHash !== sha256(defaultIdentity)
+          || ["import", "restore"].includes(revision.actor))) {
+          throw definitionError("DEFINITION_REVISION_CONFLICT", "Initial Agent identity conflicts with saved changes");
+        }
+        return this._commit({ profileId, expectedRevision: current.manifest.revision,
+          documents: { IDENTITY: defaults.IDENTITY }, actor: "bootstrap", reason: "agent-create-identity" });
+      }
+      return input.profileName === undefined ? current
+        : this._upgradeMemoryRule(this._upgradeLegacyDefaults(current, defaults));
+    }
     return this._commit({
       profileId,
       expectedRevision: 0,
-      documents: { ...DEFAULT_DOCUMENTS },
+      documents: defaults,
       actor: "bootstrap",
-      reason: "default-profile",
+      reason: `default-profile:v${DEFAULT_TEMPLATE_VERSION}`,
       createdAt: this.now(),
     });
+  }
+
+  _upgradeMemoryRule(current) {
+    const content = current.documents.AGENTS;
+    if (!content.split("\n").includes(LEGACY_MEMORY_RULE)) return current;
+    const revisions = this.history(current.manifest.profileId);
+    // Replace only the product-authored v2 paragraph; keep all custom text and
+    // preserve deliberately imported/restored definitions.
+    if (revisions.at(-1)?.reason !== "default-profile:v2"
+      && !revisions.some((entry) => entry.actor === "bootstrap" && entry.reason === "default-template:v2")) return current;
+    if (revisions.some((entry) => ["import", "restore"].includes(entry.actor))) return current;
+    return this._commit({ profileId: current.manifest.profileId,
+      expectedRevision: current.manifest.revision,
+      documents: { AGENTS: content.split("\n").map((line) => line === LEGACY_MEMORY_RULE ? CURRENT_MEMORY_RULE : line).join("\n") },
+      actor: "bootstrap", reason: `default-memory-rule:v${DEFAULT_TEMPLATE_VERSION}` });
+  }
+
+  _upgradeLegacyDefaults(current, defaults) {
+    const candidates = DOCUMENT_KINDS.filter((kind) => (
+      current.documents[kind] === LEGACY_DEFAULT_DOCUMENTS[kind]
+    ));
+    if (candidates.length === 0) return current;
+    const revisions = this.history(current.manifest.profileId);
+    const first = revisions.at(-1);
+    // Only upgrade files continuously untouched since the original bootstrap.
+    // An import or restore is an explicit choice, even if it matches a template.
+    if (first?.revision !== 1 || first.actor !== "bootstrap" || first.reason !== "default-profile"
+      || revisions.some((revision) => ["import", "restore"].includes(revision.actor))) return current;
+    const documents = {};
+    for (const kind of candidates) {
+      const originalHash = sha256(LEGACY_DEFAULT_DOCUMENTS[kind]);
+      if (revisions.every((revision) => revision.documents[kind].contentHash === originalHash)) {
+        documents[kind] = defaults[kind];
+      }
+    }
+    if (Object.keys(documents).length === 0) return current;
+    return this._commit({ profileId: current.manifest.profileId,
+      expectedRevision: current.manifest.revision, documents, actor: "bootstrap",
+      reason: `default-template:v${DEFAULT_TEMPLATE_VERSION}` });
   }
 
   _readJson(target, maxBytes = this.maxExportBytes) {

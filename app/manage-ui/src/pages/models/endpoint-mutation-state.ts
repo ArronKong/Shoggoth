@@ -5,7 +5,7 @@ export function endpointMutationNotice(outcome: EndpointMutationOutcome):
   "syncPending" | "partiallyApplied" | "preflightBlocked" | "writeUnconfirmed" {
   if (outcome.status === "applied") return "syncPending";
   if (outcome.steps.some((step) => step.status === "applied")) return "partiallyApplied";
-  if (outcome.status === "blocked" && outcome.stage === "preflight") return "preflightBlocked";
+  if (["blocked", "failed"].includes(outcome.status) && outcome.stage === "preflight") return "preflightBlocked";
   return "writeUnconfirmed";
 }
 

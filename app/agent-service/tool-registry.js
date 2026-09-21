@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { VIEW_HEADERS } = require("./agent-definition-defaults");
 
 function canonicalJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -92,7 +93,7 @@ class ToolRegistry {
   }
   toolsMarkdown() {
     return [
-      "# Tools",
+      VIEW_HEADERS.TOOLS.trimEnd(),
       "",
       `Registry revision: \`${this.revision}\``,
       "",

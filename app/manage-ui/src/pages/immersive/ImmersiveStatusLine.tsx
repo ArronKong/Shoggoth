@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ImmersivePhase } from "./immersiveBg";
 import { toolLabelKey } from "../../lib/turnTimeline";
+import { ChatRunWait, type ChatRunWaitState } from "../../components/ChatRunWait";
 import styles from "./ImmersiveStatusLine.module.css";
 
 // 轻量状态行：流式期间在消息流尾部显示一行半透明状态（思考中/正在运行某工具），
@@ -18,6 +19,7 @@ export interface ImmersiveLiveTool {
 }
 
 export interface ImmersiveLiveStatus {
+  wait?: ChatRunWaitState;
   tools: ImmersiveLiveTool[];
   thinkingText?: string; // 全量累积推理文本（原文；详情里 <pre> 展示）
 }
@@ -55,6 +57,7 @@ export default function ImmersiveStatusLine({ phase, live }: { phase: ImmersiveP
   }, [open]);
 
   if (!shown) return null;
+  if (shown.wait && live?.wait) return <div className={styles.wrap}><ChatRunWait state={live.wait} /></div>;
   // 工具显示名(R340):中文模式映射成人话,未收录/英文模式回退原标识符。
   const toolDisp = (name?: string): string => {
     const raw = (name || "").trim();

@@ -106,6 +106,7 @@ const PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES = new Set([
   "ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED",
   "ANTIGRAVITY_APPROVAL_CHANGED",
   "RUNTIME_QUOTA_EXHAUSTED",
+  "RUNTIME_SPENDING_LIMIT_REACHED",
   "RUNTIME_ACCOUNT_BLOCKED",
   "RUNTIME_UPSTREAM_UNAVAILABLE",
   ...CODEX_SETUP_ERROR_CODES,
@@ -186,6 +187,7 @@ function failedTurnErrorCode(turn) {
     || turn?.error?.codexErrorInfo === "unauthorized") {
     return RUNTIME_AUTH_REQUIRED_CODE;
   }
+  if (turn?.error?.codexErrorInfo === "usageLimitExceeded") return "RUNTIME_QUOTA_EXHAUSTED";
   if (PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES.has(turn?.errorCode)) return turn.errorCode;
   return "RUNTIME_TURN_FAILED";
 }
@@ -586,7 +588,7 @@ class WorkRunCoordinator {
     if (options.runtimeAccountAdmission !== undefined) {
       requireMethods(
         options.runtimeAccountAdmission,
-        ["admit", "release", "assertGeneration", "noteBackoff"],
+        ["admit", "release", "assertGeneration", "noteBackoff", "noteRateLimitBackoff"],
         "RuntimeAccountAdmission",
       );
     }
@@ -761,6 +763,8 @@ class WorkRunCoordinator {
     this.runTails = new Map();
     this.lastErrors = new Map();
     this.runStreams = new Map();
+    this.runQueueStates = new Map();
+    this.admissionRetryTimer = null;
     this.terminalStreams = new Map();
     this.rehydratedTerminalStreams = new Set();
     this.terminalizingRuns = new Set();
@@ -827,6 +831,9 @@ class WorkRunCoordinator {
         ));
         for (const stream of this.runStreams.values()) stream.close();
         this.runStreams.clear();
+        this.runQueueStates.clear();
+        clearTimeout(this.admissionRetryTimer);
+        this.admissionRetryTimer = null;
         this.terminalStreams.clear();
         this.rehydratedTerminalStreams.clear();
         this.terminalizingRuns.clear();
@@ -876,6 +883,9 @@ class WorkRunCoordinator {
       this.terminalWaiters.clear();
       for (const stream of this.runStreams.values()) stream.close();
       this.runStreams.clear();
+      this.runQueueStates.clear();
+      clearTimeout(this.admissionRetryTimer);
+      this.admissionRetryTimer = null;
       this.terminalStreams.clear();
       this.rehydratedTerminalStreams.clear();
       this.terminalizingRuns.clear();
@@ -996,6 +1006,17 @@ class WorkRunCoordinator {
           || response?.turnId !== context.turnId) {
           throw coordinatorError("WORK_RUN_CONTROL_STALE", "turn/steer 返回后 Run binding 已变化");
         }
+        // Steering is a real user message inside the active turn. Persist it only
+        // after the Runtime accepts the control request so chat.history can retain
+        // every instruction without recording rejected steering attempts.
+        this.#appendTranscript(run.id, {
+          id: transcriptEventId("chat-steer-user", input.operationId),
+          kind: "user",
+          content: { text: input.message, operationId: input.operationId, transcriptType: "steer" },
+          runtimeRef: context.turnRef || null,
+          contextExcluded: false,
+          occurredAt: this.now(),
+        });
         return Object.freeze({ accepted: true, runId: run.id, turnId: context.turnId });
       });
     });
@@ -1011,8 +1032,10 @@ class WorkRunCoordinator {
     }
     const fingerprint = controlFingerprint("abort", input);
     return this.#idempotentControl(input.operationId, fingerprint, async () => {
-      const initial = this.#selectChatRun(input.sessionKey, input.runId);
+      const initial = this.#selectChatRun(input.sessionKey, input.runId, true);
       return this.#chainRunTask(initial.id, async () => {
+        const current = this.dispatcher.getRun(initial.id);
+        if (current?.status === "queued") return this.#cancelQueuedChatRun(current);
         const { run, assignment, context, token } = this.#activeAssignment(
           initial.id,
           input.sessionKey,
@@ -1193,6 +1216,10 @@ class WorkRunCoordinator {
           await this.inbox.transition(command.operationId, "pending");
         }
         const admission = this.#admit(run.id, session.profileId);
+        if (admission.disposition === "rejected") {
+          await this.#rejectAccountAdmission(run, admission.reason, lifecycle);
+          continue;
+        }
         run = admission.run;
         if (admission.disposition === "queued") continue;
       }
@@ -1284,6 +1311,9 @@ class WorkRunCoordinator {
     let reason = null;
     if (run.status === "queued") {
       const admission = this.#admit(run.id, session.profileId);
+      if (admission.disposition === "rejected") {
+        return this.#rejectAccountAdmission(run, admission.reason, this.lifecycleGeneration);
+      }
       run = admission.run;
       disposition = admission.disposition;
       reason = admission.reason;
@@ -1365,6 +1395,9 @@ class WorkRunCoordinator {
     let reason = null;
     if (run.status === "queued") {
       const admission = this.#admit(run.id, run.profileId);
+      if (admission.disposition === "rejected") {
+        return this.#rejectAccountAdmission(run, admission.reason, this.lifecycleGeneration);
+      }
       run = admission.run;
       disposition = admission.disposition;
       reason = admission.reason;
@@ -1462,7 +1495,7 @@ class WorkRunCoordinator {
     }
   }
 
-  #selectChatRun(sessionKey, runId) {
+  #selectChatRun(sessionKey, runId, includeQueued = false) {
     const session = this.chatSessionStore.getSession(sessionKey);
     if (!session) throw coordinatorError("CHAT_SESSION_NOT_FOUND", `ChatSession 不存在: ${sessionKey}`);
     if (runId !== null) {
@@ -1473,8 +1506,11 @@ class WorkRunCoordinator {
       }
       return run;
     }
-    const matches = this.listSessionRuns(sessionKey)
+    let matches = this.listSessionRuns(sessionKey)
       .filter((run) => ACTIVE_RUN_STATES.has(run.status));
+    if (matches.length === 0 && includeQueued) {
+      matches = this.listSessionRuns(sessionKey).filter((run) => run.status === "queued");
+    }
     if (matches.length !== 1) {
       throw coordinatorError(
         matches.length === 0 ? "WORK_RUN_NOT_FOUND" : "CHAT_SESSION_BUSY",
@@ -1630,6 +1666,9 @@ class WorkRunCoordinator {
 
   #runStreamSnapshot(runId) {
     const run = this.dispatcher.getRun(runId);
+    if (run?.status === "queued" && this.runQueueStates.has(runId)) {
+      return { run, queue: this.runQueueStates.get(runId) };
+    }
     const record = run?.waitingRequestId
       ? this.pendingRequests.get(run.waitingRequestId) : null;
     if (!record || record.runId !== runId || !record.publicPayload) return { run };
@@ -1838,6 +1877,7 @@ class WorkRunCoordinator {
   }
 
   #releaseTerminalRun(runId) {
+    this.runQueueStates.delete(runId);
     this.#releaseRuntimeAccountAdmission(runId);
     this.#settlePendingForAbort(runId);
     this.#resolveTerminalWaiter(runId);
@@ -1938,6 +1978,25 @@ class WorkRunCoordinator {
     return this.#cancelActiveCommand(record.operationId, record.command, fence);
   }
 
+  async #cancelQueuedChatRun(run) {
+    const lifecycle = this.lifecycleGeneration;
+    return this.#withTerminalizing(run.id, async () => {
+      try {
+        this.#fenceLifecycle(lifecycle);
+        const terminal = this.dispatcher.transition(run.id, "canceled", {});
+        this.#appendTerminal(run.id, { status: "canceled", resultSummary: null, errorCode: null });
+        await this.#cancelCommandForRun(terminal, () => this.#fenceLifecycle(lifecycle));
+        this.#fenceLifecycle(lifecycle);
+        this.#releaseTerminalRun(run.id);
+        await this.#drainQueuedRuns(lifecycle);
+        return terminal;
+      } catch (error) {
+        if (error?.code !== "WORK_RUN_COORDINATOR_CLOSING") this.#poison(error);
+        throw error;
+      }
+    });
+  }
+
   async #cancelRunAfterInterrupt(runId, token) {
     this.#fence(token);
     return this.#withTerminalizing(runId, async () => {
@@ -1974,8 +2033,11 @@ class WorkRunCoordinator {
     });
   }
 
-  #observeHost(host, runtimeProfileId) {
-    if (this.hostObservers.has(host)) return;
+  #observeHost(host, runtimeProfileId, accountAdmission) {
+    if (this.hostObservers.has(host)) {
+      this.hostObservers.get(host).runtimeAccountAdmission = accountAdmission;
+      return;
+    }
     requireMethods(
       host,
       ["subscribe", "registerServerRequestHandler"],
@@ -1995,6 +2057,7 @@ class WorkRunCoordinator {
       pendingEvents: [],
       unregisterHandlers: [],
       sessionApprovalRules: new Map(),
+      runtimeAccountAdmission: accountAdmission,
     };
     this.hostObservers.set(host, observer);
     try {
@@ -2692,13 +2755,32 @@ class WorkRunCoordinator {
   }
 
   #routeRuntimeAccountBackoff(host, event) {
-    if (event.type !== "account_backoff") return false;
+    if (!["account_backoff", "account_available", "account_unavailable"].includes(event.type)) return false;
     if (!this.runtimeAccountAdmission || host?.runtime !== "codex"
       || typeof host.runtimeAccountId !== "string") return true;
+    const observer = this.hostObservers.get(host);
+    if (!observer) return true;
+    if (event.type === "account_available") {
+      // The run that observed exhaustion may already have finished. A bound
+      // host (including a peer Agent on the same account) may report recovery,
+      // but a host from before logout/account changes must not clear it.
+      const admission = observer.runtimeAccountAdmission;
+      if (!admission || admission.runtimeAccountId !== host.runtimeAccountId) return true;
+      try {
+        this.runtimeAccountAdmission.noteRateLimitBackoff({ ...admission, retryAt: 0 });
+      } catch (error) {
+        if (ownDataErrorCode(error) !== "RUNTIME_ACCOUNT_GENERATION_STALE") throw error;
+      }
+      return true;
+    }
+    const errorCode = event.type === "account_unavailable" ? event.errorCode : null;
+    if (errorCode !== null
+      && !["RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_SPENDING_LIMIT_REACHED"].includes(errorCode)) return true;
     const current = this.now();
     if (!Number.isSafeInteger(current) || current < 0
-      || !Number.isSafeInteger(event.retryAt) || event.retryAt <= current
-      || event.retryAt - current > MAX_TRUSTED_ACCOUNT_BACKOFF_MS) return true;
+      || (!(errorCode !== null && event.retryAt === null)
+        && (!Number.isSafeInteger(event.retryAt) || event.retryAt <= current
+          || event.retryAt - current > MAX_TRUSTED_ACCOUNT_BACKOFF_MS))) return true;
     const accounts = new Set();
     for (const [runId, assignment] of this.runHostAssignments) {
       const run = this.dispatcher.getRun(runId);
@@ -2716,9 +2798,10 @@ class WorkRunCoordinator {
         if (ownDataErrorCode(error) === "RUNTIME_ACCOUNT_GENERATION_STALE") continue;
         throw error;
       }
-      this.runtimeAccountAdmission.noteBackoff({
-        runtimeAccountId: admission.runtimeAccountId,
+      this.runtimeAccountAdmission.noteRateLimitBackoff({
+        ...admission,
         retryAt: event.retryAt,
+        ...(errorCode === null ? {} : { errorCode }),
       });
       accounts.add(admission.runtimeAccountId);
     }
@@ -2781,7 +2864,10 @@ class WorkRunCoordinator {
           model: runtimeModel ?? execution?.defaultModel ?? profile.defaultModel ?? null,
           provider: runtimeProvider ?? profile.providerRef ?? null,
           usage: event.usage,
-          createdAt: this.now(),
+          ...(typeof event.costUsd === "number" && Number.isFinite(event.costUsd) && event.costUsd >= 0
+            ? { costUsd: event.costUsd } : {}),
+          createdAt: Number.isSafeInteger(event.createdAt) && event.createdAt >= (run.startedAt ?? run.createdAt)
+            && event.createdAt <= this.now() ? event.createdAt : this.now(),
         });
       } catch {
         // 用量统计是旁路观测，落盘故障不得反向中断已被模型接受的对话。
@@ -2914,6 +3000,50 @@ class WorkRunCoordinator {
     for (const event of matching) this.#routeHostEvent(host, event, false);
   }
 
+  #queuedAdmission(run, reason, retryAt = null) {
+    const previous = this.runQueueStates.get(run.id);
+    const queuedAt = previous?.queuedAt ?? this.#commandForRun(run)?.command?.createdAt ?? this.now();
+    const payload = { status: "queued", reason, queuedAt };
+    this.runQueueStates.set(run.id, payload);
+    if (previous?.reason !== reason) this.#streamFor(run.id).append("status", payload);
+    // Terminals drain immediately. This bounded retry also wakes a queue when
+    // an account cooldown/login ends without another running turn to wake it.
+    if (this.admissionRetryTimer === null) {
+      const lifecycle = this.lifecycleGeneration;
+      const delay = retryAt === null ? 1_000 : Math.max(25, Math.min(1_000, retryAt - this.now()));
+      this.admissionRetryTimer = setTimeout(() => {
+        this.admissionRetryTimer = null;
+        if (this.lifecycleGeneration !== lifecycle || !["opening", "open"].includes(this.state)) return;
+        this.#drainQueuedRuns(lifecycle).catch((error) => {
+          if (error?.code !== "WORK_RUN_COORDINATOR_CLOSING") this.#poison(error);
+        });
+      }, delay);
+      this.admissionRetryTimer.unref?.();
+    }
+    return { disposition: "queued", reason, run };
+  }
+
+  async #rejectAccountAdmission(run, errorCode, lifecycle) {
+    // Quota exhaustion is terminal, not a scheduled future send. Preserve the
+    // same durable terminal -> event -> Inbox tombstone order as runtime failure.
+    return this.#withTerminalizing(run.id, async () => {
+      try {
+        this.#fenceLifecycle(lifecycle);
+        const terminal = this.dispatcher.transition(run.id, "failed", { errorCode });
+        this.runQueueStates.delete(run.id);
+        this.#appendTerminal(run.id, { status: "failed", resultSummary: null, errorCode });
+        this.#fenceLifecycle(lifecycle);
+        await this.#completeCommandForRun(terminal, () => this.#fenceLifecycle(lifecycle));
+        this.#fenceLifecycle(lifecycle);
+        this.#releaseTerminalRun(run.id);
+        return { disposition: "completed", reason: null, run: terminal };
+      } catch (error) {
+        if (error?.code !== "WORK_RUN_COORDINATOR_CLOSING") this.#poison(error);
+        throw error;
+      }
+    });
+  }
+
   #admit(runId, profileId, lifecycle = null) {
     const profile = this.productStore.getAgentProfile(profileId);
     if (!profile) {
@@ -2921,10 +3051,8 @@ class WorkRunCoordinator {
     }
     const run = this.dispatcher.getRun(runId);
     const sessionKey = this.getRunSessionKey(run);
-    if (sessionKey && this.listSessionRuns(sessionKey)
-      .some((candidate) => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status))) {
-      return { disposition: "queued", reason: "CHAT_SESSION_BUSY", run };
-    }
+    const sessionBusy = sessionKey && this.listSessionRuns(sessionKey)
+      .some((candidate) => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status));
     // execution contract 必须在 durable 状态进入 starting 前完整可构建；否则
     // 准入写入成功、随后校验失败会留下永远占槽的 starting Run。
     const executionContract = this.#executionContract(profile, run);
@@ -2933,8 +3061,17 @@ class WorkRunCoordinator {
       runtimeAccountId: executionContract.runtimeAccountId,
       runId,
     }) || null;
+    if (accountAdmission?.disposition === "rejected") {
+      return { disposition: "rejected", reason: accountAdmission.reason, run };
+    }
+    if (sessionBusy) {
+      if (accountAdmission?.disposition === "started") {
+        this.runtimeAccountAdmission.release({ runtimeAccountId: executionContract.runtimeAccountId, runId });
+      }
+      return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+    }
     if (accountAdmission?.disposition === "queued") {
-      return { ...accountAdmission, run };
+      return this.#queuedAdmission(run, accountAdmission.reason, accountAdmission.retryAt);
     }
     let admission;
     try {
@@ -2955,6 +3092,7 @@ class WorkRunCoordinator {
       throw error;
     }
     if (admission.disposition === "started") {
+      this.runQueueStates.delete(runId);
       const admittedContract = Object.freeze({
         ...executionContract,
         runtimeAccountGeneration: accountAdmission?.generation ?? null,
@@ -2966,13 +3104,19 @@ class WorkRunCoordinator {
           generation: accountAdmission.generation,
         }));
       }
+      try {
+        this.#streamFor(runId).append("status", { status: "starting" });
+      } catch (error) {
+        this.#poison(error);
+        throw error;
+      }
     } else if (accountAdmission) {
       this.runtimeAccountAdmission.release({
         runtimeAccountId: executionContract.runtimeAccountId,
         runId,
       });
     }
-    return admission;
+    return admission.disposition === "queued" ? this.#queuedAdmission(run, admission.reason) : admission;
   }
 
   #executionContract(profile, run) {
@@ -3034,6 +3178,7 @@ class WorkRunCoordinator {
           source: run.source,
           sourceId: run.sourceId,
           profileName: profile.name,
+          backendId: profile.backendId,
           runtime: profile.runtime || "codex",
         }),
       dynamicContext: snapshot?.dynamicContext ?? null,
@@ -3187,6 +3332,10 @@ class WorkRunCoordinator {
         command = await this.inbox.transition(operationId, "pending");
       }
       const admission = this.#admit(run.id, run.profileId);
+      if (admission.disposition === "rejected") {
+        await this.#rejectAccountAdmission(run, admission.reason, token.lifecycle);
+        return;
+      }
       run = admission.run;
       if (admission.disposition === "queued") return;
     }
@@ -3270,7 +3419,7 @@ class WorkRunCoordinator {
       generation: token.run,
       lifecycle: token.lifecycle,
     }));
-    this.#observeHost(host, executionContract.runtimeProfileId);
+    this.#observeHost(host, executionContract.runtimeProfileId, this.runAccountAdmissions.get(runId));
 
     const threadBinding = productSessionKey && run.source !== "cron"
       ? await this.#ensureThread(
@@ -3604,7 +3753,13 @@ class WorkRunCoordinator {
         }
       }
       this.#fenceLifecycle(lifecycle);
+      // Another terminal or the retry timer can drain while inbox I/O yields.
+      if (this.dispatcher.getRun(candidate.id)?.status !== "queued") continue;
       const admission = this.#admit(candidate.id, candidate.profileId, lifecycle);
+      if (admission.disposition === "rejected") {
+        await this.#rejectAccountAdmission(candidate, admission.reason, lifecycle);
+        continue;
+      }
       this.#fenceLifecycle(lifecycle);
       if (admission.disposition === "started") this.#schedule(candidate.id);
     }

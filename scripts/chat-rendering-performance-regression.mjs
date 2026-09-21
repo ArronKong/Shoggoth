@@ -24,7 +24,7 @@ try {
       "process.env.NODE_ENV": '"production"',
       __CHAT_PERF_WITH_TOOLS__: String(process.env.CHAT_PERF_WITH_TOOLS === "1"),
     },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl" }, outfile: bundle,
+    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" }, outfile: bundle,
     nodePaths: [path.join(uiRoot, "node_modules")], logLevel: "silent",
     plugins: [{ name: "markdown-work", setup(builder) {
       builder.onLoad({ filter: /\/lib\/markdown\.ts$/ }, ({ path: file }) => ({

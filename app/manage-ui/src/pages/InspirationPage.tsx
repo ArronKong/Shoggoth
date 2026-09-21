@@ -341,7 +341,7 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
             <InspirationActionIcon name="edit" />{t('inspiration.edit')}</button>}
         </div>
         {edit ? <div className={styles.editFields}>
-        <Field label={t('inspiration.optionalTitle')}><TextInput value={edit.title} disabled={busy} maxLength={160} onChange={(event) => setEdit({ ...edit, title: event.target.value })} /></Field>
+        <Field label={t('inspiration.optionalTitle')}><TextInput className={`field-input ${paperStyles.typeface}`} value={edit.title} disabled={busy} maxLength={160} onChange={(event) => setEdit({ ...edit, title: event.target.value })} /></Field>
         <InspirationMediaEditor body={edit.body} attachments={edit.attachments} disabled={busy} onBusyChange={setMediaBusy}
           onChange={update => setEdit(previous => previous ? { ...previous, ...update(previous) } : null)}
           inputProps={{ rows: 7, 'aria-label': t('inspiration.original') }} />
@@ -382,7 +382,7 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
           </Select>
         </Field>
         </div>
-        <Field label={t('inspiration.instruction')}><TextArea value={instruction} disabled={busy} rows={3}
+        <Field label={t('inspiration.instruction')}><TextArea className={`field-textarea ${paperStyles.typeface}`} value={instruction} disabled={busy} rows={3}
           placeholder={t('inspiration.instructionPlaceholder')} onChange={(event) => setInstruction(event.target.value)} /></Field>
         {externalAgent ? <p className={styles.meta}>{t('inspiration.externalWorkspaceHint')}</p> : <details className={styles.workspaceDisclosure}><summary><InspirationActionIcon name="chevron" />{t('inspiration.workspace')}</summary>
           <Field label={t('inspiration.workspace')} hint={t('inspiration.workspaceHint')}><TextInput value={workspace} disabled={busy} placeholder={idea.latestExecution?.workspace || t('inspiration.defaultWorkspace')}

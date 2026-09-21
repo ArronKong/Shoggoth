@@ -25,7 +25,7 @@
 //   disabledBackends  backend id 列表（如 ["hermes"]）：用户在设置页「断开连接」
 //                  的后端。registry 聚合/路由跳过它们，UI 隐藏对应切换项。
 //   notifications  { chat, cron, task } per-category desktop-notification toggles
-//                  (chat on by default; cron/task off — they poll, can be chatty)
+//                  (all on by default; task also includes Inspiration)
 //   setupCompletedAt  epoch ms when the first-run setup overlay was completed or
 //                  dismissed; 0 = never. The SPA auto-shows the overlay only when
 //                  this is 0 AND token is empty (pre-existing installs skip it).
@@ -88,14 +88,13 @@ function sanitizeDisabledBackends(raw) {
   return out;
 }
 
-// Per-category desktop-notification toggles. chat defaults on (you're waiting on
-// the reply); cron/task default off (they poll and can be chatty).
+// All categories default on. Keep explicit saved choices, including false.
 function sanitizeNotifications(raw) {
   const n = raw && typeof raw === "object" ? raw : {};
   return {
     chat: typeof n.chat === "boolean" ? n.chat : true,
-    cron: typeof n.cron === "boolean" ? n.cron : false,
-    task: typeof n.task === "boolean" ? n.task : false,
+    cron: typeof n.cron === "boolean" ? n.cron : true,
+    task: typeof n.task === "boolean" ? n.task : true,
   };
 }
 

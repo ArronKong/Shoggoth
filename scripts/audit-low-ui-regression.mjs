@@ -143,16 +143,15 @@ check("Tasks 列表刷新会按可见 id 修剪批量选择", /visibleTaskIds/.t
 check("Tasks 卡片使用共享头像的失败回退", /function CardAvatar[\s\S]{0,100}<AgentAvatarView agentId=\{id\}/.test(source.tasks) && /onError=\{\(\) => setState\("fallback"\)/.test(source.avatar));
 check("共享头像在 URL 变化后重试", /<AvatarImage key=\{src\}/.test(source.avatar));
 
-// #20-#22：连接测试防乱序、延迟刷新可取消、主题预览离页/刷新回滚。
+// #20-#22：连接测试防乱序；自动保存串行、按字段回填，离页补交待保存输入。
 check("Settings 连接测试使用生产生命周期 guard", /createSettingsLifecycleGuard/.test(source.settings) && /lifecycleGuard\.beginTest\(key\)/.test(source.settings));
 check("Settings 仅当前测试代际写结果", /lifecycleGuard\.isTestCurrent\(testTicket\)/.test(source.settings));
-check("Settings 保存后的 refresh timer 有 ref", /saveRefreshTimerRef\s*=\s*useRef/.test(source.settings));
-check("Settings 卸载清理保存后的 refresh timer", /clearTimeout\(saveRefreshTimerRef\.current\)/.test(source.settings));
-check("Settings 记录已保存主题", /savedThemeRef\s*=\s*useRef/.test(source.settings));
-check("Settings 卸载回滚未保存主题预览", /applyTheme\(savedThemeRef\.current\)/.test(source.settings));
-check("Settings 仅成功读取配置后建立主题基线", /themeLoadedRef\s*=\s*useRef\(false\)/.test(source.settings) && /themeLoadedRef\.current\s*=\s*true/.test(source.settings));
-check("Settings 主题选择在无可靠基线时禁用", /disabled=\{loading\s*\|\|\s*configFailed\s*\|\|\s*saving\}/.test(source.settings) && /disabled=\{disabled\s*\|\|\s*!themeLoaded\}/.test(source.settingsPreferences));
-check("Settings 卸载只在主题基线可靠时回滚", /themeLoadedRef\.current\s*&&\s*savedThemeRef\.current/.test(source.settings));
+check("Settings 不再为自动保存创建整页延迟刷新", !/saveRefreshTimerRef|runSavedRefreshIfCurrent/.test(source.settings));
+check("Settings 自动保存有串行写入队列", /settingsSaveQueue = settingsSaveQueue\.then/.test(source.settings));
+check("Settings 输入防抖 timer 可清理", /clearTimeout\(connectionSaveTimerRef\.current\)/.test(source.settings));
+check("Settings 离页补交输入且禁止落组件状态", /lifecycleGuard\.unmount\(\);[\s\S]{0,230}flushConnectionChanges\(\)/.test(source.settings) && /if \(lifecycleGuard\.isMounted\(\)\) setCfg\(current\)/.test(source.settings));
+check("Settings 主题选择在无可靠配置时禁用", /disabled=\{loading\s*\|\|\s*configFailed\}/.test(source.settings) && /disabled=\{disabled\s*\|\|\s*!themeLoaded\}/.test(source.settingsPreferences));
+check("Settings 主题从确认的保存结果生效", /if \("theme" in patch\) setTheme\(saved\.theme\)/.test(source.settings));
 check("Settings refresh 记录组件 mounted 状态", /lifecycleGuard\.mount\(\)/.test(source.settings) && /lifecycleGuard\.isMounted\(\)/.test(source.settings));
 check("Settings refresh 每次领取请求代际", /refreshTicket\s*=\s*lifecycleGuard\.beginRefresh\(\)/.test(source.settings));
 check("Settings refresh 异步落状态前校验挂载与代际", /isCurrentRefresh/.test(source.settings) && /lifecycleGuard\.isRefreshCurrent\(refreshTicket\)/.test(source.settings));
@@ -160,7 +159,7 @@ check("Settings 卸载时作废 refresh 代际", /lifecycleGuard\.unmount\(\)/.t
 check("Settings refresh 递增 config test epoch 并清可见结果", /lifecycleGuard\.beginRefresh\(\)/.test(source.settings) && /setTests\(\{\}\)/.test(source.settings));
 check("Settings 连接测试同时校验 key seq 与 config epoch", /lifecycleGuard\.beginTest\(key\)/.test(source.settings) && /isCurrentTest/.test(source.settings));
 check("Settings 不清空测试序号 Map 导致序号重用", !/testReqSeqRef\.current\.clear\(/.test(source.settings));
-check("BUG-022 Settings 注册 dirty/busy navigation guard", /useNavigationGuard\(\{[\s\S]{0,220}dirty[\s\S]{0,120}busy:\s*saving/.test(source.settings));
+check("BUG-022 Settings 不再保留手动保存及离页撤销流程", !/useNavigationGuard|settings-savebar|settings\.saveSettings|settings\.unsaved/.test(source.settings));
 {
   const connectionActions = source.settings.slice(source.settings.indexOf("const toggleBackendConnection"), source.settings.indexOf("const runTest"));
   check("BUG-022 Settings 切换连接只保存连接状态并保留表单草稿",
@@ -169,28 +168,10 @@ check("BUG-022 Settings 注册 dirty/busy navigation guard", /useNavigationGuard
       && /savedConfigRef\.current\.disabledBackends = \[\.\.\.saved\.disabledBackends\]/.test(connectionActions)
       && !/requestNavigation\(|\brefresh\(|location\.reload\(/.test(connectionActions));
 }
-{
-  const compiled = compileExportedFunction(source.settings, "runSavedRefreshIfCurrent", "settings-saved-refresh");
-  try {
-    const runSavedRefreshIfCurrent = compiled.mod?.runSavedRefreshIfCurrent;
-    let refreshes = 0;
-    const refresh = () => { refreshes += 1; };
-    runSavedRefreshIfCurrent?.(true, "saved", "edited-after-save", refresh);
-    check("BUG-022 Settings 保存后再次编辑会跳过延迟 refresh", typeof runSavedRefreshIfCurrent === "function" && refreshes === 0);
-    runSavedRefreshIfCurrent?.(true, "saved", "saved", refresh);
-    check("BUG-022 Settings 保存后未再编辑会执行延迟 refresh", refreshes === 1);
-    runSavedRefreshIfCurrent?.(false, "saved", "saved", refresh);
-    check("BUG-022 Settings 卸载后会跳过延迟 refresh", refreshes === 1);
-  } finally {
-    if (compiled.outDir) fs.rmSync(compiled.outDir, { recursive: true, force: true });
-  }
-}
-check(
-  "BUG-022 Settings timer 捕获保存快照并读取最新 cfg ref",
-  /cfgRef\.current\s*=\s*cfg/.test(source.settings) &&
-    /const savedEditableSnapshot\s*=\s*editableSnapshot\(cfg\)/.test(source.settings) &&
-    /runSavedRefreshIfCurrent\(\s*lifecycleGuard\.isMounted\(\),\s*savedEditableSnapshot,\s*editableSnapshot\(cfgRef\.current\)/.test(source.settings),
-);
+check("BUG-022 Settings 保存响应仅回填未再次编辑的字段", /editVersionsRef\.current\[key\] === versions\[key\]/.test(source.settings));
+check("BUG-022 Settings 刷新前等待自动保存完成", /flushConnectionChanges\(\);\s*await settingsSaveQueue/.test(source.settings));
+// Actual rapid edits, failed requests, debounce and navigation run against the
+// mounted production page in settings-locale-regression.mjs.
 check("BUG-023 Agents 聚合 overview/setup dirty guard", /useNavigationGuard\(\{[\s\S]{0,220}(?:overviewDirty[\s\S]{0,100}fileDirty|fileDirty[\s\S]{0,100}overviewDirty)/.test(source.agents));
 check("BUG-023 Agents 内部 agent/tab/file 切换经共享 navigation request", /requestNavigation\(\(\)\s*=>\s*selectAgent/.test(source.agents) && /requestNavigation\(\(\)\s*=>\s*setTab/.test(source.agents) && /requestNavigation\(\(\)\s*=>\s*void openFile/.test(source.agents));
 check("BUG-002 Agent 文件读取绑定目标代际", /fileRequestGuardRef/.test(source.agents) && /fileRequestGuard\.begin\(/.test(source.agents) && /fileRequestGuard\.isCurrent\(/.test(source.agents));

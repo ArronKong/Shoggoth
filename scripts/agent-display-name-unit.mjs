@@ -4,9 +4,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
-import ts from "typescript";
+import { createRequire } from "node:module";
 
 const root = path.resolve(import.meta.dirname, "..");
+const ts = createRequire(path.join(root, "app/manage-ui/package.json"))("typescript");
 const helperPath = path.join(root, "app/manage-ui/src/lib/agentDisplay.ts");
 const helperSource = fs.readFileSync(helperPath, "utf8");
 const helperJavaScript = ts.transpileModule(helperSource, {
@@ -43,8 +44,10 @@ const activityFeed = fs.readFileSync(path.join(root, "app/manage-ui/src/pages/da
 const usagePage = fs.readFileSync(path.join(root, "app/manage-ui/src/pages/UsagePage.tsx"), "utf8");
 assert.match(chatPage, /send\("agents\.list",\s*\{\}\)/,
   "Chat 刷新会话时必须同时读取当前 Agent roster");
-assert.match(chatPage, /commitSessions\(applyCurrentAgentNames\(next\.rows\)\)/,
-  "Chat 必须在提交列表前覆盖旧 session 名称");
+assert.match(chatPage, /const named = applyChatSessionAgentNames\([\s\S]{0,250}agentNamesRef\.current/,
+  "Chat 必须统一覆盖服务端行和新会话临时行的旧名称");
+assert.match(chatPage, /setSessions\(named\);\s*writeSessionCache\(named\)/,
+  "状态与缓存必须写入同一份已补全名称的会话列表");
 assert.match(dashboardPage, /listAgents\(backendId\)/,
   "Dashboard 必须读取各后端当前 Agent 名称");
 assert.match(activityFeed, /getAgentDisplayName\(e\.agentId,\s*e\.backendId\)/,

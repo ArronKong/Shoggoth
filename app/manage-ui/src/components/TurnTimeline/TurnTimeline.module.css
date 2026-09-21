@@ -32,34 +32,30 @@
   background: light-dark(#ffffff, #2c2c31);
 }
 
-/* ---- 左侧轨道 + 节点(Figma 稿:无底 16px 纯黑图标,行间 12px 短竖线段) ---- */
+/* ---- 左侧轨道 + 节点(无底 16px 图标;普通行间 12px 竖线,标签行随高度延长) ---- */
 .gutter {
   width: 16px;
   /* 稿:行内容先有 12px 占位 + 4px gap,图标起点距行左 24px(含行 padding 8)。 */
   margin-left: 16px;
+  /* 图标中心对齐普通行标题;不让连接线的长度参与图标定位。 */
+  padding-top: 10px;
   flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
-.railTop {
+.rail {
   width: 1px;
   border-radius: 2px;
   background: light-dark(rgba(0, 0, 0, 0.2), rgba(255, 255, 255, 0.28));
-  height: 12px;
-  /* 稿:线段相对行盒 [-8px,+4px](骑在行界上偏上行);净占位 10px,把 16px
-     图标的中心压到行文字中心(main 顶 padding 2 + 行高 32 的一半)。 */
-  margin: -6px 0 4px;
-  flex: none;
+  /* 填满当前行剩余高度并伸入下一行 6px,两端距图标均为 4px。 */
+  margin: 4px 0 -6px;
+  flex: 1;
+  /* 延伸到下一行的部分也要显示在该行的悬停底色上方。 */
+  z-index: 1;
   transform-origin: top;
 }
-/* 稿里连接线只有行与行之间一段(上一行不再向下延伸),railBottom 退役但保留
-   DOM 结构(进入动画/首末行判定不用改)。 */
-.railBottom {
-  display: none;
-}
-.railTop[data-hidden="1"],
-.railBottom[data-hidden="1"] {
+.rail[data-hidden="1"] {
   visibility: hidden;
 }
 

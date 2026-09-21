@@ -268,6 +268,57 @@ test("Runtime home 缺失不影响权威 transcript export", () => {
   } finally { value.cleanup(); }
 });
 
+test("用量活动按 Profile 与区间汇总 tool_call，且不重复计算 tool_result", () => {
+  const current = new Date(2026, 8, 21, 12, 0, 0).getTime();
+  const value = fixture({ now: () => current });
+  try {
+    const store = value.create();
+    store.open();
+    append(store, { id: "usage-user", occurredAt: current - 1000 });
+    append(store, { id: "usage-assistant", kind: "assistant", occurredAt: current - 900 });
+    append(store, {
+      id: "usage-tool-command", kind: "tool_call", occurredAt: current - 800,
+      content: { transcriptType: "tool.start", tool: { name: "command" } },
+    });
+    append(store, {
+      id: "usage-tool-command-result", kind: "tool_result", occurredAt: current - 700,
+      content: { transcriptType: "tool.result", tool: { name: "command" } },
+    });
+    append(store, {
+      id: "usage-tool-search", kind: "tool_call", occurredAt: current - 600,
+      content: { transcriptType: "tool.start", tool: { name: "webSearch" } },
+      contextExcluded: true,
+    });
+    append(store, { id: "usage-error", kind: "error", occurredAt: current - 500 });
+    append(store, {
+      id: "usage-tool-old", kind: "tool_call", occurredAt: current - 40 * 86400_000,
+      content: { transcriptType: "tool.start", tool: { name: "oldTool" } },
+    });
+    store.appendEvent({
+      profileId: "profile-2", sessionId: "session-2", id: "other-profile-tool",
+      runId: "run-2", kind: "tool_call", content: { tool: { name: "otherTool" } },
+      runtimeRef: null, contextExcluded: false, occurredAt: current - 400,
+    });
+
+    const summary = store.summarizeUsageActivity("30d", new Set(["profile-1"]));
+    assert.deepEqual(summary.tools, {
+      totalCalls: 2,
+      uniqueTools: 2,
+      tools: [{ name: "command", count: 1 }, { name: "webSearch", count: 1 }],
+    });
+    assert.deepEqual(summary.messages, {
+      total: 2, user: 1, assistant: 1, toolCalls: 2, errors: 1,
+    });
+    assert.deepEqual(summary.dailyActivity, [{
+      date: "2026-09-21", messages: 2, toolCalls: 2, errors: 1,
+    }]);
+    assert.throws(
+      () => store.summarizeUsageActivity("30d", new Set(["bad profile"])),
+      (error) => error.code === "TRANSCRIPT_USAGE_SCOPE_INVALID",
+    );
+  } finally { value.cleanup(); }
+});
+
 (async () => {
   let passed = 0;
   for (const item of tests) {

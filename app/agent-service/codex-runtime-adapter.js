@@ -90,6 +90,7 @@ class CodexRuntimeHandle {
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = CODEX_CAPABILITIES;
     this.host = host;
+    this.sessionInstructions = new Map();
   }
 
   get terminated() { return this.host.terminated; }
@@ -124,6 +125,11 @@ class CodexRuntimeHandle {
       cwd: input.cwd,
       ...permissionParams(input.permissionPolicy),
     })));
+    if (typeof input.developerInstructions === "string") {
+      this.sessionInstructions.set(response.thread.id, {
+        current: input.developerInstructions, applied: input.developerInstructions,
+      });
+    }
     return mapThreadEnvelope(response);
   }
 
@@ -135,6 +141,12 @@ class CodexRuntimeHandle {
       cwd: input.cwd,
       ...permissionParams(input.permissionPolicy),
     })));
+    if (typeof input.developerInstructions === "string") {
+      const previous = this.sessionInstructions.get(response.thread.id);
+      this.sessionInstructions.set(response.thread.id, {
+        current: input.developerInstructions, applied: previous?.applied,
+      });
+    }
     return mapThreadEnvelope(response);
   }
 
@@ -182,6 +194,18 @@ class CodexRuntimeHandle {
   sessionDelete(input) { return this.host.threadDelete({ threadId: input.sessionId }); }
 
   async turnStart(input) {
+    const instructions = this.sessionInstructions.get(input.sessionId);
+    if (instructions && instructions.current !== instructions.applied) {
+      // 0.149.0 accepts developerInstructions on resume but leaves model-visible
+      // history unchanged. Append the current trusted policy before the next turn,
+      // never while reattaching to a running turn. Failed injection blocks dispatch.
+      await this.host.threadInjectItems({ threadId: input.sessionId, items: [{
+        type: "message", role: "developer", content: [{ type: "input_text", text:
+          "These are the current Shoggoth developer instructions. They supersede earlier Shoggoth developer instructions; retain the conversation history as context.\n\n"
+          + instructions.current }],
+      }] });
+      instructions.applied = instructions.current;
+    }
     let effort = input.thinkingLevel;
     // A null effort in turn/start means "keep the previous override". Resolve
     // the catalog default explicitly when the user selects inherited settings.

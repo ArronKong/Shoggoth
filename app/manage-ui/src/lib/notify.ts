@@ -10,18 +10,24 @@
 
 export type NotifyCategory = "chat" | "cron" | "task";
 
+export type TaskNotificationTarget = {
+  kind: "task"; backendId: string; taskId: string; boardId?: string; sessionKey?: string;
+};
+export type NotifyTarget = string | TaskNotificationTarget
+  | { kind: "cron"; backendId: string; jobId: string };
+
 export interface NotifyPayload {
   category: NotifyCategory;
   title: string;
   body: string;
-  // chat 传 sessionKey，cron 传统一任务 ID；task 暂无单任务详情，因此传 null。
-  target?: string | null;
+  // Strings retain existing chat / inspiration and legacy cron click targets.
+  target?: NotifyTarget | null;
   force?: boolean; // 设置 test button: bypass focus + toggle gating
 }
 
 export interface OpenTargetPayload {
   category: NotifyCategory;
-  target: string | null;
+  target: NotifyTarget | null;
 }
 
 interface OpenclawDesktop {
@@ -49,7 +55,7 @@ export function agentOf(key: string): string {
 export function sessionTailKind(key: string): "chat" | "cron" | "channel" | "internal" {
   const tail = String(key || "").split(":").slice(2).join(":");
   if (/^cron/i.test(tail)) return "cron";
-  if (/^(sub-?agent|dream)/i.test(tail)) return "internal";
+  if (/^(sub-?agent|dream|dashboard:inspiration-)/i.test(tail)) return "internal";
   if (/^telegram/i.test(tail)) return "channel";
   return "chat"; // main, dashboard:*, or any other UI-driven session
 }
@@ -79,11 +85,13 @@ export function snippet(s: string, max = 120): string {
 
 // Build a chat notification from a final assistant message, or null when it is
 // NOT notify-worthy: not a UI-driven session, an error/empty turn, or a
-// heartbeat ack. (Channel/cron/internal sessions are intentionally skipped —
-// cron has its own polled category; telegram has its own app.)
+// heartbeat ack. Cron and Inspiration are polled separately; channels have
+// their own apps.
 export function chatNotificationFor(message: unknown, sessionKey: string): NotifyPayload | null {
-  if (message && typeof message === "object" && "shoggoth" in message
-    && (message.shoggoth as { source?: string } | null)?.source === "cron") return null;
+  if (message && typeof message === "object" && "shoggoth" in message) {
+    const source = (message.shoggoth as { source?: string } | null)?.source;
+    if (source === "cron" || source === "inspiration") return null;
+  }
   if (sessionTailKind(sessionKey) !== "chat") return null;
   const m = message as { stopReason?: string; isError?: boolean } | null;
   if (m?.stopReason === "error" || m?.isError) return null;

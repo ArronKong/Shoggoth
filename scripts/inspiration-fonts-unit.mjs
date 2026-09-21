@@ -23,9 +23,9 @@ for (const lang of ['zh', 'zh-CN', 'en']) {
   const loading = f.load().then(() => { ready = true; });
   await flush();
   assert.equal(ready, false, 'a cold route waits for its fonts instead of painting the serif fallback');
-  assert.deepEqual(f.requests.map(item => item.face), lang.startsWith('zh')
-    ? ['400 12px "ChillKai"']
-    : ['400 12px "Courier Prime"', '700 12px "Courier Prime"', '400 12px "Source Han Serif CN"']);
+  assert.deepEqual(f.requests.map(item => item.face),
+    ['400 12px "Courier Prime"', '700 12px "Courier Prime"', '400 12px "ChillKai"'],
+    'mixed-language notes load both paper faces regardless of the UI locale');
   for (const resolve of pending) resolve([]);
   await loading;
   assert.equal(ready, true);
@@ -34,4 +34,4 @@ for (const lang of ['zh', 'zh-CN', 'en']) {
   const f = fixture('zh-CN', () => Promise.reject(new Error('Font unavailable')));
   await f.load(); // A missing font must not make notes inaccessible.
 }
-console.log('PASS Inspiration fonts: Chinese and English cold loads wait for the paper faces, missing fonts leave the page usable');
+console.log('PASS Inspiration fonts: every UI locale waits for both paper faces, missing fonts leave the page usable');

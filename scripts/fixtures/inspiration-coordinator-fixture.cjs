@@ -14,6 +14,7 @@ const { resolveServicePaths } = require("../../app/agent-service/paths");
 const { WorkRunCoordinator } = require("../../app/agent-service/work-run-coordinator");
 const { createWorkDispatcher } = require("../../app/agent-service/work-run");
 const { DomainWorkRunExecutor } = require("../../app/agent-service/domain-work-run-executor");
+const { RuntimeAccountAdmission } = require("../../app/agent-service/runtime-account-admission");
 const { InspirationRuntime } = require("./inspiration-runtime.cjs");
 const id = () => crypto.randomUUID();
 
@@ -26,7 +27,7 @@ async function until(predicate) {
   assert.fail("Timed out waiting for Inspiration state");
 }
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-inspiration-"));
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
@@ -36,12 +37,16 @@ async function fixture(t) {
   const transcript = new TranscriptStore({ paths });
   transcript.open();
   const dispatcher = createWorkDispatcher({ store: productStore });
+  const accountAdmission = options.accountAdmission ? new RuntimeAccountAdmission({
+    runtimeAccountLookup: accountId => productStore.getRuntimeAccount(accountId),
+  }) : null;
   const host = new InspirationRuntime();
   const inbox = { enqueue() { assert.fail("Inspiration must not create a second chat run"); },
     get() { return null; }, list() { return []; }, transition() { assert.fail("Unexpected chat inbox transition"); } };
   let service;
   const makeCoordinator = () => new WorkRunCoordinator({ dispatcher, productStore,
     chatSessionStore: sessions, transcriptStore: transcript, inbox,
+    ...(accountAdmission ? { runtimeAccountAdmission: accountAdmission } : {}),
     getMediaStore: () => store.media,
     runtimePool: { async get() { return host; } }, assertSecretSafe: () => true,
     resolveRunSession: (run) => store.executionForRun(run.id),
@@ -72,7 +77,7 @@ async function fixture(t) {
     transcript.close(); sessions.close(); store.close(); productStore.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  return { root, paths, store, sessions, productStore, profile, transcript, dispatcher, host,
+  return { root, paths, store, sessions, productStore, profile, transcript, dispatcher, host, accountAdmission,
     get coordinator() { return coordinator; }, service, call, create, start,
     async restart() {
       service.close(); await coordinator.close(); store.close(); store.open();

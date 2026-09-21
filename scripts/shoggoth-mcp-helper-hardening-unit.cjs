@@ -6,6 +6,7 @@ const { EventEmitter } = require("node:events");
 const { PassThrough, Readable } = require("node:stream");
 const {
   MCP_CLIENT_REQUEST_TIMEOUT_MS,
+  MCP_MAX_FRAME_BYTES,
   MCP_SERVICE_PROTOCOL_VERSION,
   MCP_STDIO_PROTOCOL_VERSION,
   createMcpStdioHandler: createRawMcpStdioHandler,
@@ -36,6 +37,21 @@ function createMcpStdioHandler(options = {}) {
     runtimeAccountId: "runtime-a-account",
     ...options,
   });
+}
+
+async function listAllTools(handler, id) {
+  const tools = [];
+  const cursors = new Set();
+  let cursor;
+  do {
+    const response = await handler({ jsonrpc: "2.0", id, method: "tools/list", params: cursor ? { cursor } : {} });
+    assert.equal(response.error, undefined);
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MCP_MAX_FRAME_BYTES);
+    tools.push(...response.result.tools);
+    cursor = response.result.nextCursor;
+    if (cursor) { assert.equal(cursors.has(cursor), false); cursors.add(cursor); }
+  } while (cursor);
+  return tools;
 }
 
 function session(byte, expiresAt) {
@@ -243,9 +259,9 @@ test("request_user_input 只接受严格 questions 输入并通过 MCP elicitati
     capabilities: { elicitation: {} },
   }));
   assert.equal(initialized.error, undefined);
-  const listed = await handler({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-  assert.deepEqual(listed.result.tools.map((tool) => tool.name), MCP_PRODUCT_TOOL_NAMES);
-  const toolsByName = new Map(listed.result.tools.map((tool) => [tool.name, tool]));
+  const listed = await listAllTools(handler, 2);
+  assert.deepEqual(listed.map((tool) => tool.name), MCP_PRODUCT_TOOL_NAMES);
+  const toolsByName = new Map(listed.map((tool) => [tool.name, tool]));
   assert.deepEqual(toolsByName.get("backend_status").annotations, {
     title: "Shoggoth federation/status",
     readOnlyHint: true,
@@ -603,6 +619,9 @@ test("Computer Use 只在开/恢复会话确认，已授权会话内输入不重
     randomUUID: () => "90909090-9090-4090-8090-909090909090",
     requestService: async (_paths, request) => {
       calls.push(request);
+      if (request.params.name === "computer_status") return {
+        available: true, permissions: { accessibility: true, screenRecording: true }, sessions: [],
+      };
       return { ok: true };
     },
   });
@@ -631,10 +650,11 @@ test("Computer Use 只在开/恢复会话确认，已授权会话内输入不重
     requestClient: async () => assert.fail("已确认会话内输入不得重复发起 elicitation"),
   });
   assert.equal(typed.result.isError, false);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].params.confirmation, true);
-  assert.equal(Object.hasOwn(calls[1].params, "confirmation"), false);
-  assert.equal(calls[1].params.arguments.text, secretText);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].params.name, "computer_status");
+  assert.equal(calls[1].params.confirmation, true);
+  assert.equal(Object.hasOwn(calls[2].params, "confirmation"), false);
+  assert.equal(calls[2].params.arguments.text, secretText);
   handler.close();
 });
 
@@ -1007,6 +1027,106 @@ test("output.write(true) 后的异步 error 也被有界捕获", async () => {
   );
   assert.equal(Buffer.isBuffer(writtenFrame), true);
   assert.equal(writtenFrame.every((byte) => byte === 0), true);
+});
+
+test("工具目录分页覆盖全部工具，拒绝无效游标且最坏 request ID 不超帧", async () => {
+  const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x37),
+    requestService: async () => assert.fail("工具目录不应调用 Service"),
+  });
+  await handler(initialize());
+  const id = "\0".repeat(256);
+  const first = await handler({ jsonrpc: "2.0", id, method: "tools/list" });
+  assert.equal(typeof first.result.nextCursor, "string");
+  assert.deepEqual((await listAllTools(handler, id)).map(tool => tool.name), MCP_PRODUCT_TOOL_NAMES);
+  for (const params of [{ cursor: "" }, { cursor: 1 }, { cursor: "invalid" }, { cursor: first.result.nextCursor + "x" },
+    { injected: true }, null]) {
+    const result = await handler({ jsonrpc: "2.0", id: 3, method: "tools/list", params });
+    assert.equal(result.error.code, -32602);
+  }
+  const repeated = await handler({ jsonrpc: "2.0", id, method: "tools/list", params: { _meta: {} } });
+  assert.deepEqual(repeated, first);
+  handler.close();
+});
+
+test("电脑操作缺少权限时在确认前失败，并提供具体处理方式", async () => {
+  const calls = [];
+  const handler = createMcpStdioHandler({
+    runtimeProfileId: "runtime-a", sessionToken: token(0x37),
+    requestService: async (_paths, request) => {
+      calls.push(request.params.name);
+      return { available: true, permissions: { accessibility: false, screenRecording: true }, sessions: [] };
+    },
+  });
+  await handler(initialize(1, { capabilities: { elicitation: {} } }));
+  const result = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+    name: "computer_session_open", arguments: { source: "chat", sourceId: "session-a",
+      allowedApplications: ["ai.shoggoth.desktop"], expiresInSeconds: 120 },
+  } }, { requestClient: async () => assert.fail("未就绪时不得要求确认") });
+  assert.deepEqual(calls, ["computer_status"]);
+  assert.equal(result.result.structuredContent.error.code, "COMPUTER_PERMISSION_REQUIRED");
+  assert.match(result.result.content[0].text, /辅助功能/u);
+  handler.close();
+});
+
+test("本地助理修改和归档确认展示已核对目标，拒绝时不写入", async () => {
+  for (const tool of ["native_agent_update", "native_agent_archive"]) {
+    for (const accept of [true, false]) {
+      const calls = [];
+      const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x37),
+        requestService: async (_paths, request) => {
+          calls.push(request);
+          if (request.params.name === "native_agent_get") return { agent: {
+            backendId: "codex", agentId: "target-agent", name: "星帆", updatedAt: 2,
+            state: "active", isDefault: false,
+          } };
+          assert.equal(request.params.name, tool);
+          assert.equal(request.params.confirmation, true);
+          return { saved: true };
+        },
+      });
+      await handler(initialize(1, { capabilities: { elicitation: {} } }));
+      let prompts = 0;
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name: tool, arguments: { backendId: "codex", agentId: "target-agent", source: "chat", sourceId: "s",
+          expectedUpdatedAt: 2, ...(tool === "native_agent_update" ? { name: "新名字", workspace: null } : {}) },
+      } }, { requestClient: async (_method, params) => {
+        prompts += 1;
+        assert.match(params.message, /星帆/u);
+        assert.doesNotMatch(params.message, /Computer Use|永久删除/u);
+        assert.match(params.message, tool === "native_agent_archive" ? /保留 7 天.*自动删除.*工作区文件和共享账号保留/u : /新名字.*工作目录/u);
+        return accept ? { action: "accept", content: { confirm_product_action: "确认执行" } } : { action: "cancel" };
+      } });
+      assert.equal(prompts, 1);
+      assert.equal(response.result.isError, false, JSON.stringify(response.result));
+      assert.deepEqual(calls.map(call => call.params.name), accept ? ["native_agent_get", tool] : ["native_agent_get"]);
+      handler.close();
+    }
+  }
+});
+
+test("确认期间权限丢失仍被服务拒绝，驱动与读取故障不会弹确认", async () => {
+  for (const reason of ["COMPUTER_DRIVER_UNAVAILABLE", "COMPUTER_PERMISSION_STATUS_FAILED", null]) {
+    let prompts = 0;
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x37),
+      requestService: async (_paths, request) => {
+        if (request.params.name === "computer_status") return reason
+          ? { available: false, reason, permissions: { accessibility: null, screenRecording: null } }
+          : { available: true, permissions: { accessibility: true, screenRecording: true } };
+        throw Object.assign(new Error("private-path-canary"), { code: "COMPUTER_PERMISSION_REQUIRED" });
+      },
+    });
+    await handler(initialize(1, { capabilities: { elicitation: {} } }));
+    const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+      name: "computer_session_resume", arguments: { source: "chat", sourceId: "s", sessionId: "session-a" },
+    } }, { requestClient: async () => {
+      prompts += 1; return { action: "accept", content: { confirm_product_action: "确认执行" } };
+    } });
+    assert.equal(prompts, reason ? 0 : 1);
+    assert.equal(response.result.isError, true);
+    assert.equal(response.result.structuredContent.error.code, reason || "COMPUTER_PERMISSION_REQUIRED");
+    assert.doesNotMatch(JSON.stringify(response), /private-path-canary/u);
+    handler.close();
+  }
 });
 
 (async () => {

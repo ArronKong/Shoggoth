@@ -148,6 +148,7 @@ async function testOcKanbanUnavailableOnRpcFailure() {
 
 function mkHermes({ jobs, runsByLocalId = {}, messagesBySessionId = {}, status = 200 }) {
   const b = new HermesBackend({});
+  b._readCronExecutionHistory = async () => { throw new Error("fixture without local ledger"); };
   b.dashboards = new Map([
     ["default", { baseUrl: "http://127.0.0.1:9119", token: "tok1" }],
     ["bull", { baseUrl: "http://127.0.0.1:9120", token: "tok2" }],

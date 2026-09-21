@@ -17,6 +17,7 @@ const OPERATION_DEFINITIONS = Object.freeze({
   initialize: ["InitializeParams", "InitializeResponse"],
   threadStart: ["ThreadStartParams", "ThreadStartResponse"],
   threadResume: ["ThreadResumeParams", "ThreadResumeResponse"],
+  threadInjectItems: ["ThreadInjectItemsParams", "ThreadInjectItemsResponse"],
   threadRead: ["ThreadReadParams", "ThreadReadResponse"],
   threadList: ["ThreadListParams", "ThreadListResponse"],
   threadSetName: ["ThreadSetNameParams", "ThreadSetNameResponse"],

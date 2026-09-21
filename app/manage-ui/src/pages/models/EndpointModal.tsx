@@ -4,12 +4,13 @@ import type { CustomEndpoint, CustomEndpointInput, CustomEndpointsSnapshot } fro
 import { Field, Option, Select, TextInput } from "../../components/Field";
 import Modal from "../../components/Modal";
 import { useConfirm, useToast } from "../../components/ui";
+import { ProviderSecretField } from "../keys/ProviderCredentialFields";
 import {
   createEndpointMutationSession,
+  endpointOutcomeReferences as outcomeReferences,
   isEndpointMutationComplete,
   type EndpointController,
   type EndpointMutationOutcome,
-  type EndpointSafeReference,
 } from "./endpoint-controller";
 import styles from "./CustomEndpointsPanel.module.css";
 import { endpointMutationNotice } from "./endpoint-mutation-state";
@@ -34,13 +35,6 @@ function fetchableUrl(raw: string): boolean {
   } catch {
     return false;
   }
-}
-
-function outcomeReferences(outcome: EndpointMutationOutcome): EndpointSafeReference[] {
-  return [
-    ...(outcome.recovery?.references ?? []),
-    ...outcome.steps.flatMap((step) => step.references ?? []),
-  ];
 }
 
 export default function EndpointModal({
@@ -70,24 +64,32 @@ export default function EndpointModal({
   const confirm = useConfirm();
   const editing = Boolean(endpoint);
   const form = snapshot.form;
+  const nameIsProviderId = form?.nameIsProviderId === true;
+  const providerIdReadOnly = editing && form?.providerIdEditable !== true;
   const nameReadOnly = editing && form?.nameEditable === false;
+  const canRevealKey = Boolean(endpoint?.canRevealApiKey && controller.revealApiKey);
+  const canClearKey = Boolean(endpoint?.canClearApiKey && controller.clearApiKey);
   const firstModelIsDefault = form?.firstModelIsDefault !== false;
+  const allowPrimaryRemoval = form?.allowPrimaryModelRemoval === true;
   const apiOptions = form?.apiOptions ?? [];
-  const hasAdvancedApi = apiOptions.length > 0;
 
   const [name, setName] = useState(endpoint?.name ?? "");
   const [id, setId] = useState(endpoint?.id ?? "");
   const [idTouched, setIdTouched] = useState(editing);
+  const providerId = nameIsProviderId || idTouched ? id.trim() : slugify(name);
+  const endpointName = nameIsProviderId ? providerId : name.trim();
+  const providerIdInvalid = Boolean(providerId) && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(providerId);
   const [baseUrl, setBaseUrl] = useState(endpoint?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [keyEditing, setKeyEditing] = useState(false);
+  const keyBeforeEdit = useRef("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(false);
   const [api, setApi] = useState(
     endpoint?.api ?? form?.defaultApi ?? apiOptions[0] ?? "",
   );
   const [apiChanged, setApiChanged] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [selected, setSelected] = useState<string[]>(() => [...new Set(endpoint?.models ?? [])]);
+  const [chosen, setSelected] = useState<string[]>(() => [...new Set(endpoint?.models ?? [])]);
   const [fetched, setFetched] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
   const [fetchNote, setFetchNote] = useState<string | null>(null);
@@ -96,13 +98,19 @@ export default function EndpointModal({
   const [clearing, setClearing] = useState(false);
   const [mutationOutcome, setMutationOutcome] = useState<EndpointMutationOutcome | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const primaryUsage = (mutationOutcome?.recovery?.baseline ?? endpoint)?.primaryModelUsage ?? [];
+  const selected = allowPrimaryRemoval ? chosen
+    : [...new Set([...chosen, ...primaryUsage.map((usage) => usage.modelId)])];
+  const primaryOwners = (usage: (typeof primaryUsage)[number]) => [
+    ...(usage.isDefault ? [t("models.settings.endpoints.primaryDefaultScope")] : []), ...usage.agentIds,
+  ];
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const fetchEpoch = useRef(0);
   const revealEpoch = useRef(0);
   const mutationEpoch = useRef(0);
   const saveSession = useMemo(
-    () => createEndpointMutationSession(controller.backend, editing ? "edit" : "create"),
+    () => ({ current: createEndpointMutationSession(controller.backend, editing ? "edit" : "create") }),
     [controller, editing],
   );
   const clearSession = useMemo(
@@ -112,22 +120,24 @@ export default function EndpointModal({
 
   const inputForRequest = (): CustomEndpointInput => {
     const input: CustomEndpointInput = {
-      id: (idTouched ? id : slugify(name)) || undefined,
-      name: name.trim(),
+      id: providerId || undefined,
+      name: endpointName,
       baseUrl: baseUrl.trim(),
       model: selected[0] ?? "",
       models: selected,
       discoverModels: false,
     };
     if (apiKey.trim()) input.apiKey = apiKey.trim();
-    // 折叠、展开但未改、或编辑已有端点时都省略 api，让 controller/后端保留原值。
+    // 仅在用户修改协议后提交 api，否则由 controller/后端保留原值。
     if (apiChanged && api) input.api = api;
     return input;
   };
 
   useEffect(() => {
     const epoch = ++fetchEpoch.current;
-    if (!fetchableUrl(baseUrl)) {
+    setFetched([]);
+    setFetchNote(null);
+    if (!open || !fetchableUrl(baseUrl)) {
       setFetching(false);
       return;
     }
@@ -142,7 +152,9 @@ export default function EndpointModal({
         const result = await controller.validate(request, abort.signal);
         if (epoch !== fetchEpoch.current) return;
         setFetched(result.models ?? []);
-        if (!result.ok) setFetchNote(result.message || t("common.error"));
+        if (!result.ok) setFetchNote(result.code
+          ? t(result.code === "authentication_failed" ? "models.settings.endpoints.fetchAuthFailed" : "models.settings.endpoints.fetchFailed")
+          : result.message || t("common.error"));
         else if (!result.models?.length) {
           setFetchNote(t("models.settings.endpoints.fetchEmpty"));
         }
@@ -154,24 +166,25 @@ export default function EndpointModal({
       }
     }, 700);
     return () => {
+      fetchEpoch.current += 1;
       window.clearTimeout(timer);
       abort.abort();
     };
     // name/selected/id 不触发目录探测；它们不改变远端连接身份。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller, baseUrl, apiKey, api, apiChanged]);
+  }, [controller, open, baseUrl, apiKey, api, apiChanged]);
 
   useEffect(() => () => {
     fetchEpoch.current += 1;
     revealEpoch.current += 1;
     mutationEpoch.current += 1;
-    controller.release?.(saveSession);
+    controller.release?.(saveSession.current);
     controller.release?.(clearSession);
   }, [clearSession, controller, saveSession]);
 
   const chips = useMemo(
-    () => [...new Set([...fetched, ...selected])],
-    [fetched, selected],
+    () => [...new Set([...fetched, ...selected, ...primaryUsage.map((usage) => usage.modelId)])],
+    [fetched, selected, primaryUsage],
   );
   const visibleChips = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -179,11 +192,13 @@ export default function EndpointModal({
     return chips.filter((model) => model.toLowerCase().includes(normalized));
   }, [chips, query]);
 
-  const toggle = (model: string) =>
+  const toggle = (model: string) => {
+    if (!allowPrimaryRemoval && primaryUsage.some((usage) => usage.modelId === model)) return;
     setSelected((current) =>
       current.includes(model)
         ? current.filter((candidate) => candidate !== model)
         : [...current, model]);
+  };
 
   const addManual = () => {
     const model = manual.trim();
@@ -219,7 +234,7 @@ export default function EndpointModal({
     setApiKey("");
     controller.release?.(outcome.operationId === clearSession.rootOperationId
       ? clearSession
-      : saveSession);
+      : saveSession.current);
     onSaved(outcome.snapshot);
     return true;
   };
@@ -228,7 +243,7 @@ export default function EndpointModal({
   const recoveryNeedsSecret = mutationOutcome?.recovery?.needsSecret === true;
   const recoverySession = mutationOutcome?.operationId === clearSession.rootOperationId
     ? clearSession
-    : saveSession;
+    : saveSession.current;
   const canRetry = recoveryLocked
     && mutationOutcome?.recovery?.retryable !== false
     && Boolean(controller.retry)
@@ -238,40 +253,49 @@ export default function EndpointModal({
     && !clearing
     && (recoveryLocked
       ? canRetry
-      : name.trim() && baseUrl.trim() && selected.length > 0),
+      : endpointName && !providerIdInvalid && baseUrl.trim() && selected.length > 0),
   );
 
   const confirmBlockedModelRemoval = async (
     outcome: EndpointMutationOutcome,
     epoch: number,
-  ): Promise<EndpointMutationOutcome> => {
-    const blocked = outcome.recovery?.blockedRemoval;
-    if (!blocked || !controller.confirmBlockedRemoval) return outcome;
-    const approved = await confirm({
-      title: t("models.settings.endpoints.deleteReferencesTitle"),
-      message: (
-        <div>
-          <p>{t("models.settings.endpoints.deleteReferencesConfirm", { name: blocked.modelId })}</p>
-          {outcomeReferences(outcome).length > 0 && (
-            <ul className={styles.referenceList}>
-              {outcomeReferences(outcome).map((reference, index) => (
-                <li key={`${reference.store}:${reference.referenceKey ?? ""}:${index}`}>
-                  <span className="mono">{reference.store}</span>
-                  {reference.referenceKey && <> · <span className="mono">{reference.referenceKey}</span></>}
-                  {reference.scope && <> · {reference.scope}</>}
-                  {reference.agent && <> · {reference.agent}</>}
-                  {reference.profile && <> · {reference.profile}</>}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ),
-      confirmLabel: t("models.settings.endpoints.deleteForce"),
-      danger: true,
-    });
-    if (!approved || epoch !== mutationEpoch.current) return outcome;
-    return controller.confirmBlockedRemoval(saveSession, blocked.operationId);
+  ): Promise<{ outcome: EndpointMutationOutcome; cancelled: boolean }> => {
+    const confirmed = new Set<string>();
+    while (epoch === mutationEpoch.current) {
+      const blocked = outcome.recovery?.blockedRemoval;
+      if (!blocked || !controller.confirmBlockedRemoval || confirmed.has(blocked.operationId)) break;
+      const approved = await confirm({
+        title: t("models.settings.endpoints.removeModelTitle"),
+        message: (
+          <div>
+            <p>{t("models.settings.endpoints.removeModelConfirm", { name: (blocked.modelIds ?? [blocked.modelId]).join("、") })}</p>
+            {outcomeReferences(outcome).some((reference) => reference.referenceKey?.endsWith(".model.primary")) && (
+              <p>{t("models.settings.endpoints.removePrimaryModelConfirm")}</p>
+            )}
+            {outcomeReferences(outcome).length > 0 && (
+              <ul className={styles.referenceList}>
+                {outcomeReferences(outcome).map((reference, index) => (
+                  <li key={`${reference.store}:${reference.referenceKey ?? ""}:${index}`}>
+                    <span className="mono">{reference.store}</span>
+                    {reference.referenceKey && <> · <span className="mono">{reference.referenceKey}</span></>}
+                    {reference.scope && <> · {reference.scope}</>}
+                    {reference.agent && <> · {reference.agent}</>}
+                    {reference.profile && <> · {reference.profile}</>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ),
+        confirmLabel: t("models.settings.endpoints.removeModelContinue"),
+        danger: true,
+      });
+      if (!approved) return { outcome, cancelled: true };
+      if (epoch !== mutationEpoch.current) break;
+      confirmed.add(blocked.operationId);
+      outcome = await controller.confirmBlockedRemoval(saveSession.current, blocked.operationId);
+    }
+    return { outcome, cancelled: false };
   };
 
   const doSave = async () => {
@@ -280,18 +304,33 @@ export default function EndpointModal({
     const activeController = controller;
     setSaving(true);
     setMutationError(null);
+    // A new editable submission is a new intent. Only recovery retries retain
+    // the previous operation identity, even if earlier children already applied.
+    if (!recoveryLocked && (!mutationOutcome || mutationOutcome.recovery?.locked === false
+      || mutationOutcome.operationId === clearSession.rootOperationId)) {
+      controller.release?.(saveSession.current);
+      saveSession.current = createEndpointMutationSession(controller.backend, editing ? "edit" : "create");
+    }
     try {
       const first = recoveryLocked && controller.retry
         ? await controller.retry(
             recoverySession,
             recoveryNeedsSecret ? { apiKey: apiKey.trim() } : undefined,
           )
-        : await controller.save(inputForRequest(), saveSession);
+        : await controller.save(inputForRequest(), saveSession.current, mutationOutcome?.recovery?.baseline ?? endpoint ?? undefined);
       if (epoch !== mutationEpoch.current || activeController !== controller) return;
-      const outcome = recoverySession.kind === "clear-key"
-        ? first
+      const { outcome, cancelled } = recoverySession.kind === "clear-key"
+        ? { outcome: first, cancelled: false }
         : await confirmBlockedModelRemoval(first, epoch);
       if (epoch !== mutationEpoch.current || activeController !== controller) return;
+      if (cancelled) {
+        noteOutcome(outcome);
+        const zeroWrite = outcome.steps.every((step) => step.status === "blocked" && step.stage === "preflight");
+        if (zeroWrite) controller.release?.(saveSession.current);
+        setMutationOutcome(zeroWrite ? null : outcome);
+        setMutationError(null);
+        return;
+      }
       finishOutcome(
         outcome,
         t(recoverySession.kind === "clear-key"
@@ -309,12 +348,17 @@ export default function EndpointModal({
   };
 
   const doReveal = async () => {
-    if (!endpoint || !controller.revealApiKey || revealing) return;
+    if (revealing) return;
     if (revealedKey !== null) {
       revealEpoch.current += 1;
       setRevealedKey(null);
       return;
     }
+    if (apiKey.trim()) {
+      setRevealedKey(apiKey.trim());
+      return;
+    }
+    if (!endpoint || !controller.revealApiKey) return;
     const epoch = ++revealEpoch.current;
     const abort = new AbortController();
     setRevealing(true);
@@ -359,6 +403,20 @@ export default function EndpointModal({
   };
 
   const references = mutationOutcome ? outcomeReferences(mutationOutcome) : [];
+  const apiProtocolField = apiOptions.length > 0 && (
+    <Field label={t("models.settings.endpoints.apiProtocol")}>
+      <Select
+        value={api}
+        disabled={recoveryLocked}
+        onChange={(value) => {
+          setApi(value);
+          setApiChanged(true);
+        }}
+      >
+        {apiOptions.map((option) => <Option key={option} value={option}>{option}</Option>)}
+      </Select>
+    </Field>
+  );
 
   return (
     <Modal
@@ -366,7 +424,7 @@ export default function EndpointModal({
       title={editing ? t("models.settings.endpoints.formEdit") : t("models.settings.endpoints.formAdd")}
       onClose={() => {
         mutationEpoch.current += 1;
-        controller.release?.(saveSession);
+        controller.release?.(saveSession.current);
         controller.release?.(clearSession);
         setApiKey("");
         setRevealedKey(null);
@@ -386,36 +444,37 @@ export default function EndpointModal({
       }
     >
       <div className={styles.modalGrid}>
-        <Field
-          label={t("models.settings.endpoints.name")}
-          hint={!editing && form?.nameEditable === false
-            ? t("models.settings.endpoints.nameCreateHint")
-            : undefined}
-        >
+        {!nameIsProviderId && (
+          <Field label={t("models.settings.endpoints.name")}>
+            <TextInput
+              value={name}
+              autoComplete="off"
+              placeholder="openai"
+              disabled={nameReadOnly || recoveryLocked}
+              onChange={(event) => {
+                setName(event.target.value);
+                if (!idTouched) setId(slugify(event.target.value));
+              }}
+            />
+          </Field>
+        )}
+        <Field label={t("models.settings.endpoints.providerId")}
+          error={providerIdInvalid ? t("models.settings.endpoints.idInvalid") : undefined}>
           <TextInput
-            value={name}
-            autoComplete="off"
-            placeholder="openai"
-            disabled={nameReadOnly || recoveryLocked}
-            onChange={(event) => {
-              setName(event.target.value);
-              if (!idTouched) setId(slugify(event.target.value));
-            }}
-          />
-        </Field>
-        <Field label={t("models.settings.endpoints.providerId")}>
-          <TextInput
-            value={idTouched ? id : slugify(name)}
+            value={providerId}
             spellCheck={false}
             autoComplete="off"
-            disabled={editing || recoveryLocked}
-            title={editing ? t("models.settings.endpoints.idLocked") : undefined}
+            placeholder={nameIsProviderId ? "openai" : undefined}
+            disabled={providerIdReadOnly || recoveryLocked}
+            aria-invalid={providerIdInvalid || undefined}
+            title={providerIdReadOnly ? t("models.settings.endpoints.idLocked") : undefined}
             onChange={(event) => {
               setIdTouched(true);
-              setId(slugify(event.target.value));
+              setId(nameIsProviderId ? event.target.value : slugify(event.target.value));
             }}
           />
         </Field>
+        {nameIsProviderId && apiProtocolField}
         <Field label={t("models.settings.endpoints.url")}>
           <TextInput
             value={baseUrl}
@@ -426,74 +485,52 @@ export default function EndpointModal({
             onChange={(event) => setBaseUrl(event.target.value)}
           />
         </Field>
-        <Field
-          label={t("models.settings.endpoints.apiKey")}
-          hint={editing ? t("models.settings.endpoints.apiKeyKeepHint") : undefined}
-        >
-          <div className={styles.keyInputRow}>
-            <TextInput
-              type="password"
-              value={apiKey}
-              spellCheck={false}
-              autoComplete="new-password"
-              placeholder={editing
-                ? t("models.settings.endpoints.apiKeyKeepHint")
-                : t("models.settings.endpoints.apiKeyOptional")}
-              disabled={recoveryLocked && !recoveryNeedsSecret}
-              onChange={(event) => {
-                setApiKey(event.target.value);
+        <Field label={t("models.settings.endpoints.apiKey")}>
+          <ProviderSecretField
+            secret={{
+              value: null,
+              configured: Boolean(apiKey.trim() || endpoint?.hasApiKey),
+              preview: apiKey.trim()
+                ? (apiKey.trim().length >= 10 ? `${apiKey.trim().slice(0, 4)}...${apiKey.trim().slice(-4)}` : "••••••")
+                : endpoint?.apiKeyPreview || t("models.settings.endpoints.apiKeySet"),
+              placeholder: t("models.settings.endpoints.apiKeyOptional"),
+              ariaLabel: t("models.settings.endpoints.apiKey"),
+            }}
+            editValue={keyEditing || recoveryNeedsSecret ? apiKey : null}
+            revealedValue={revealedKey}
+            busy={saving || clearing || revealing || (recoveryLocked && !recoveryNeedsSecret)}
+            editDisabled={recoveryLocked && !recoveryNeedsSecret}
+            canReveal={Boolean(apiKey.trim()) || canRevealKey}
+            canClear={canClearKey || (!endpoint?.hasApiKey && Boolean(apiKey.trim()))}
+            clearLabel={t("models.settings.endpoints.clearKey")}
+            onBeginEdit={() => {
+              revealEpoch.current += 1;
+              setRevealedKey(null);
+              keyBeforeEdit.current = apiKey;
+              setKeyEditing(true);
+            }}
+            onChange={setApiKey}
+            onSave={() => {
+              if (!apiKey.trim()) return;
+              setApiKey(apiKey.trim());
+              setKeyEditing(false);
+            }}
+            onCancel={() => {
+              setApiKey(keyBeforeEdit.current);
+              setKeyEditing(false);
+            }}
+            onReveal={() => void doReveal()}
+            onClear={() => {
+              if (endpoint?.hasApiKey) void doClear();
+              else {
+                setApiKey("");
                 setRevealedKey(null);
-              }}
-            />
-            {endpoint?.canRevealApiKey && controller.revealApiKey && (
-              <button className="ui-cbtn ui-cbtn--sm" type="button" disabled={recoveryLocked} onClick={() => void doReveal()}>
-                {revealedKey !== null ? t("keys.hide") : t("keys.reveal")}
-              </button>
-            )}
-            {endpoint?.canClearApiKey && controller.clearApiKey && (
-              <button
-                className="btn-danger"
-                type="button"
-                disabled={clearing || recoveryLocked}
-                onClick={() => void doClear()}
-              >
-                {t("models.settings.endpoints.clearKey")}
-              </button>
-            )}
-          </div>
-          {revealedKey !== null && (
-            <span className={`${styles.keyPreview} mono`}>{revealedKey}</span>
-          )}
+              }
+            }}
+          />
         </Field>
+        {!nameIsProviderId && apiProtocolField}
       </div>
-
-      {hasAdvancedApi && (
-        <div className={styles.advancedBlock}>
-          <button
-            type="button"
-            className={styles.advancedToggle}
-            aria-expanded={advancedOpen}
-            disabled={recoveryLocked}
-            onClick={() => setAdvancedOpen((open) => !open)}
-          >
-            {t("models.settings.endpoints.advanced")}
-          </button>
-          {advancedOpen && (
-            <Field label={t("models.settings.endpoints.apiProtocol")}>
-              <Select
-                value={api}
-                disabled={recoveryLocked}
-                onChange={(value) => {
-                  setApi(value);
-                  setApiChanged(true);
-                }}
-              >
-                {apiOptions.map((option) => <Option key={option} value={option}>{option}</Option>)}
-              </Select>
-            </Field>
-          )}
-        </div>
-      )}
 
       {(mutationOutcome || mutationError) && (
         <div className={styles.recoveryBox} role="status">
@@ -508,6 +545,9 @@ export default function EndpointModal({
                 stage: mutationOutcome.stage ?? mutationOutcome.recovery?.stage ?? "—",
               })}</p>
               <p>{t(`models.settings.endpoints.${endpointMutationNotice(mutationOutcome)}`)}</p>
+              {mutationOutcome.code === "primary_model_in_use" && (
+                <p>{t("models.settings.endpoints.primaryModelInUse")}</p>
+              )}
               {references.length > 0 && (
                 <ul className={styles.referenceList}>
                   {references.map((reference, index) => (
@@ -573,15 +613,18 @@ export default function EndpointModal({
           <div className={styles.chips}>
             {visibleChips.map((model) => {
               const selectedModel = selected.includes(model);
+              const usage = primaryUsage.find((item) => item.modelId === model);
               return (
                 <button
                   key={model}
-                  className={`${styles.chip} ${selectedModel ? styles.chipOn : ""}`}
+                  className={`${styles.chip} ${selectedModel ? styles.chipOn : ""} ${usage ? styles.chipPrimary : ""}`}
                   aria-pressed={selectedModel}
-                  disabled={recoveryLocked}
+                  disabled={recoveryLocked || (!allowPrimaryRemoval && Boolean(usage))}
+                  title={usage ? t("models.settings.endpoints.primaryModelFor", { agents: primaryOwners(usage).join("、") }) : undefined}
                   onClick={() => toggle(model)}
                 >
                   {model}
+                  {usage && <span className={styles.chipDefault}>{t("models.settings.endpoints.primaryBadge")}</span>}
                   {firstModelIsDefault && selectedModel && selected[0] === model && (
                     <span className={styles.chipDefault}>
                       {t("models.settings.endpoints.defaultBadge")}

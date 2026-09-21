@@ -5,6 +5,7 @@ import { ShoggothProviderSetup } from "../../components/ShoggothProviderSetup";
 import { usePageCache } from "../../lib/usePageCache";
 import type { BackendDescriptor } from "../../types";
 import OAuthProvidersCard from "../keys/OAuthProvidersCard";
+import ShoggothCustomEndpointPanel from "./ShoggothCustomEndpointPanel";
 import cardStyles from "../keys/KeysPanel.module.css";
 import styles from "./ModelAccounts.module.css";
 
@@ -20,7 +21,9 @@ function ShoggothModelSettings({ refreshKey, onChanged }: {
   });
   useEffect(() => { if (refreshKey > 0) void refresh(); }, [refreshKey, refresh]);
   const providers = data?.providers ?? null;
-  return <details className={cardStyles.card} open={!providers?.profile?.ready}>
+  const onConfigured = async () => { await refresh(); onChanged(); };
+  const presets = providers?.providers.filter((provider) => provider.kind !== "custom-responses") ?? [];
+  return <><details className={cardStyles.card} open={!providers?.profile?.ready}>
     <summary className={styles.providerSummary}>
       <div>
         <h4 className={cardStyles.cardTitle}>{t("models.providerSettingsTitle")}</h4>
@@ -34,17 +37,20 @@ function ShoggothModelSettings({ refreshKey, onChanged }: {
           <p className="muted">{t(error ? "models.accountUnavailable" : "models.providerServiceRequired")}</p>
           <button className="ui-cbtn ui-cbtn--sm" onClick={() => void refresh()}>{t("settings.retry")}</button>
         </div> : <>
-          {providers.providers.length > 0 && <div className={styles.providerList}>
-            {providers.providers.map((provider) => <div key={provider.id}>
+          {presets.length > 0 && <div className={styles.providerList}>
+            {presets.map((provider) => <div key={provider.id}>
               <strong>{provider.displayName}</strong>{provider.baseUrlHost && <span>{provider.baseUrlHost}</span>}
               <span>{t(provider.authState === "authenticated" ? "settings.providerAuthenticated"
                 : provider.authState === "configured" || provider.authState === "not_required" ? "settings.configured" : "settings.providerNeedsAuth")}</span>
             </div>)}
           </div>}
-          <ShoggothProviderSetup snapshot={providers} onConfigured={onChanged} />
+          <ShoggothProviderSetup snapshot={providers} onConfigured={onConfigured} />
         </>}
     </div>
-  </details>;
+  </details>
+    {providers && <ShoggothCustomEndpointPanel key={providers.profile?.id ?? "default"}
+      snapshot={providers} onConfigured={onConfigured} />}
+  </>;
 }
 
 export default function ModelAccounts({ backend, refreshKey, onChanged }: {

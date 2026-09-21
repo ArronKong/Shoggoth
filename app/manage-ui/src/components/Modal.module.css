@@ -98,7 +98,7 @@
   border-radius: 999px;
   background: transparent;
   font-size: 1rem;
-  color: var(--ui-text-3);
+  color: light-dark(#000000, #ffffff);
   padding: 0;
   flex-shrink: 0;
 }

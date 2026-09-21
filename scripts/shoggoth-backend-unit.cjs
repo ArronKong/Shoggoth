@@ -603,17 +603,17 @@ test("runtime catalog/provider stays bound to each visible Agent", async () => {
   const codexCaps = backend.getChatCapabilities(codex.agentId);
   assert.deepEqual({ ...codexCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
-    maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, modelProvider: "codex", modelScope: codex.id, permissions: undefined,
+    maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: true, modelProvider: "codex", modelScope: codex.id, permissions: undefined,
   });
   const codexOtherCaps = backend.getChatCapabilities(codexOther.agentId);
   assert.deepEqual({ ...codexOtherCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
-    maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, modelProvider: "codex", modelScope: codexOther.id, permissions: undefined,
+    maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: true, modelProvider: "codex", modelScope: codexOther.id, permissions: undefined,
   });
   const grokCaps = backend.getChatCapabilities(grok.agentId);
   assert.deepEqual({ ...grokCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
-    maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, modelProvider: "grok-build", modelScope: grok.id, permissions: undefined,
+    maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: false, modelProvider: "grok-build", modelScope: grok.id, permissions: undefined,
   });
   assert.deepEqual(codexCaps.permissions.options.map((option) => option.id), ["read-only", "ask", "workspace-auto", "full"]);
   assert.deepEqual(grokCaps.permissions.options.map((option) => option.id), ["ask", "auto", "always-approve"]);
@@ -645,6 +645,7 @@ test("runtime catalog/provider stays bound to each visible Agent", async () => {
 });
 
 test("all native facades and Shoggoth's bound runtimes route scoped command catalogs", async () => {
+  const steerable = new Set(["codex", "claude-code", "pi", "deepseek-harness"]);
   for (const runtime of ["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness"]) {
     for (const backendId of new Set([runtime, "shoggoth"])) {
       const bound = profile({ backendId, runtime, providerRef: null });
@@ -659,6 +660,7 @@ test("all native facades and Shoggoth's bound runtimes route scoped command cata
       }, { id: backendId });
       assert.equal(await backend.start(), true);
       assert.equal(backend.getChatCapabilities(bound.agentId).slash, true, `${backendId}/${runtime}`);
+      assert.equal(backend.getChatCapabilities(bound.agentId).steer, steerable.has(runtime), `${backendId}/${runtime}`);
       const key = backend.getSessionRows()[0].key;
       const catalog = await backend.listSlashCommands(bound.agentId, key);
       assert.equal(catalog.commands[0].source, runtime);
@@ -1978,6 +1980,111 @@ test("start paginates profiles and sessions, uses a fresh token per request, the
       backendId: "shoggoth",
     }],
   });
+});
+
+test("conversation rename events refresh Agent and row names without resetting chat state", async () => {
+  let currentProfile = profile();
+  let events = [];
+  const otherProfile = profile({ id: "profile-other", agentId: "shoggoth-other", name: "Other",
+    runtimeProfileId: "runtime-other", isDefault: false });
+  const { backend, calls } = fakeBackend((request) => {
+    if (request.method === "profile.list") return page("profiles", [currentProfile, otherProfile]);
+    if (request.method === "chat.session.list") return page("sessions", [session(), session(SESSION_B, { profileId: otherProfile.id })]);
+    if (request.method === "events.subscribe") return serviceEventPage(events, { afterSeq: request.params.afterSeq });
+    throw new Error(`unexpected ${request.method}`);
+  });
+  try {
+    assert.equal(await backend.start(), true);
+    const otherAgent = backend._agents.find((agent) => agent.id === otherProfile.agentId);
+    const otherRow = backend._rows.find((row) => row.agentId === otherProfile.agentId);
+    const sessions = backend._sessionsByKey;
+    const active = { runId: "run-active", requestId: "request-active" };
+    const prompt = { text: "pending user input" };
+    backend._activeBySession.set(SESSION_A, active);
+    backend._promptByRequest.set("request-active", prompt);
+    let readyNotices = 0;
+    backend._readyNotifier = () => { readyNotices += 1; };
+    backend._serviceEventPollGeneration = backend._generation;
+    calls.length = 0;
+    currentProfile = profile({ name: "小墨", updatedAt: 101 });
+    events = [{ seq: 1, type: "agent.profile.renamed", payload: { profileId: currentProfile.id, backendId: "shoggoth" } }];
+    await backend._pollServiceEvents(backend._generation);
+    assert.equal(backend.getAgents().find((agent) => agent.id === currentProfile.agentId).name, "小墨");
+    assert.equal(backend.getSessionRows().find((row) => row.agentId === currentProfile.agentId).agentName, "小墨");
+    assert.equal(backend._profilesById.get(currentProfile.id).name, "小墨");
+    assert.equal(backend._sessionsByKey, sessions);
+    assert.equal(backend._activeBySession.get(SESSION_A), active);
+    assert.equal(backend._promptByRequest.get("request-active"), prompt);
+    assert.equal(backend._agents.find((agent) => agent.id === otherProfile.agentId), otherAgent);
+    assert.equal(backend._rows.find((row) => row.agentId === otherProfile.agentId), otherRow);
+    assert.equal(readyNotices, 1);
+    assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe", "profile.list"]);
+    calls.length = 0;
+    events = [{ seq: 2, type: "agent.profile.renamed", payload: { profileId: "peer", backendId: "codex" } }];
+    await backend._pollServiceEvents(backend._generation);
+    assert.equal(backend._serviceEventCursor, 2);
+    assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe"]);
+    events = [{ seq: 3, type: "agent.profile.renamed", payload: { profileId: "peer", backendId: "shoggoth", name: "untrusted" } }];
+    await backend._pollServiceEvents(backend._generation);
+    assert.equal(backend._serviceEventCursor, 2, "malformed rename data cannot advance the cursor or supply a name");
+    currentProfile = profile({ name: "Old cached result", updatedAt: 100 });
+    events = [{ seq: 3, type: "agent.profile.renamed", payload: { profileId: currentProfile.id, backendId: "shoggoth" } }];
+    await backend._pollServiceEvents(backend._generation);
+    assert.equal(backend.getAgents().find((agent) => agent.id === currentProfile.agentId).name, "小墨",
+      "a delayed old profile response cannot undo a newer displayed name");
+    assert.equal(backend._serviceEventCursor, 3);
+  } finally { await backend.stop(); }
+});
+
+test("native profile changes refresh name, workspace and archived roster while retaining current chat", async () => {
+  const owner = profile();
+  let target = profile({ id: "profile-other", agentId: "shoggoth-other", name: "Other",
+    runtimeProfileId: "runtime-other", isDefault: false });
+  let events = [];
+  const { backend, calls } = fakeBackend(request => {
+    if (request.method === "profile.list") return page("profiles", [owner, target]);
+    if (request.method === "agent.lifecycle.list") return { agents: [owner, target].map(profile => ({
+      profile, state: profile.enabled ? "active" : "archived", pendingOperationId: null,
+    })) };
+    if (request.method === "chat.session.list") return page("sessions", [session(), session(SESSION_B, { profileId: target.id })]
+      .filter(row => !request.params.profileId || row.profileId === request.params.profileId));
+    if (request.method === "events.subscribe") return serviceEventPage(events, { afterSeq: request.params.afterSeq });
+    throw new Error(`unexpected ${request.method}`);
+  });
+  try {
+    assert.equal(await backend.start(), true);
+    backend._serviceEventPollGeneration = backend._generation;
+    const active = { runId: "run-active", requestId: "request-active" };
+    const prompt = { text: "pending input" };
+    backend._activeBySession.set(SESSION_A, active);
+    backend._promptByRequest.set("request-active", prompt);
+    let notices = 0;
+    backend._readyNotifier = () => { notices += 1; };
+    for (const [index, patch] of [{ name: "星帆", defaultCwd: "/tmp/new-workspace" },
+      { enabled: false }, { enabled: true }].entries()) {
+      target = { ...target, ...patch, updatedAt: 101 + index };
+      events = [{ seq: index + 1, type: "agent.profile.changed", payload: { profileId: target.id, backendId: "shoggoth" } }];
+      await backend._pollServiceEvents(backend._generation);
+      const agent = backend.getAgents().find(agent => agent.id === target.agentId);
+      assert.equal(!!agent, target.enabled);
+      assert.equal(backend.getSessionRows().some(row => row.agentId === target.agentId), target.enabled);
+      if (target.enabled) {
+        assert.equal(agent.name, "星帆");
+        assert.equal(backend._profilesById.get(target.id).defaultCwd, "/tmp/new-workspace");
+      }
+      assert.equal(backend._activeBySession.get(SESSION_A), active);
+      assert.equal(backend._promptByRequest.get("request-active"), prompt);
+    }
+    assert.equal(notices, 3);
+    calls.length = 0;
+    events = [{ seq: 4, type: "agent.profile.changed", payload: { profileId: target.id, backendId: "codex" } }];
+    await backend._pollServiceEvents(backend._generation);
+    assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe"]);
+    assert.equal(backend._serviceEventCursor, 4);
+    target = { ...target, enabled: false, updatedAt: 104 };
+    await backend._refreshProfileNames(backend._generation);
+    assert.equal(backend.ownsAgentId(target.agentId), false, "stream-gap reconciliation must also repair a missed archive");
+  } finally { await backend.stop(); }
 });
 
 test("native federation terminal becomes a target-session activity in the live registry snapshot", async () => {
@@ -3472,6 +3579,26 @@ test("session create inherits its parent workspace unless explicitly overridden"
   );
 });
 
+test("UI new-session inheritance isolates generated directories and preserves explicit overrides", async () => {
+  const root = "/private/generated-workspaces";
+  for (const workspace of [root + "/profile-default", root + "/profile-default/sessions/" + "a".repeat(64)]) {
+    const requests = [];
+    const { backend } = fakeBackend(request => {
+      requests.push(request);
+      if (request.method === "profile.list") return page("profiles", [profile()]);
+      if (request.method === "chat.session.list") return page("sessions", [session(SESSION_A, { workspace })]);
+      if (request.method === "chat.session.create") return { session: session(SESSION_B, { workspace: request.params.workspace }) };
+      throw new Error(`unexpected ${request.method}`);
+    }, { paths: { tokenPath: "/private/client.token", defaultWorkspaceDir: root } });
+    await backend.start();
+    await backend.createSession("shoggoth-default", { parentSessionKey: `agent:shoggoth-default:${SESSION_A}` });
+    assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, null);
+    await backend.createSession("shoggoth-default", { parentSessionKey: `agent:shoggoth-default:${SESSION_A}`, workspace });
+    assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, workspace);
+    await backend.stop();
+  }
+});
+
 test("failed session deletion preserves a pending federation approval", async () => {
   const requestId = "request-delete-busy";
   const runId = "run-delete-busy";
@@ -4774,7 +4901,7 @@ test("tool result without a useful summary does not repeat terminal status as gr
   assert.equal(tools[1].result, undefined);
 });
 
-test("native lifecycle noise is hidden while real context compaction remains visible", async () => {
+test("native execution status clears queue UI while unknown lifecycle noise stays hidden", async () => {
   const { backend } = await readyBackend((request) => {
     if (request.method === "chat.send") return { disposition: "started", reason: null, run: run() };
     if (request.method === "run.subscribe") return subscription([
@@ -4793,9 +4920,37 @@ test("native lifecycle noise is hidden while real context compaction remains vis
     final: () => {},
   });
   assert.deepEqual(statuses, [
+    { kind: "running", text: "running" },
     { kind: "compacting", text: "compacting" },
     { kind: "compacted", text: "compacted" },
   ]);
+});
+
+test("queued ack and stream reset expose the durable reason and elapsed start before running", async () => {
+  const queued = run("queued", { startedAt: null });
+  let polls = 0;
+  const { backend } = await readyBackend((request) => {
+    if (request.method === "chat.send") return { disposition: "queued", reason: "RUNTIME_ACCOUNT_ACTIVE_LIMIT", run: queued };
+    if (request.method === "run.subscribe" && ++polls === 1) return {
+      ...cursorGapSnapshot(queued),
+      snapshot: { run: queued, queue: { status: "queued", reason: "BACKEND_ACTIVE_LIMIT", queuedAt: 123 } },
+    };
+    if (request.method === "run.subscribe") return subscription([
+      event(4, "status", { status: "starting" }),
+      event(5, "status", { status: "running" }),
+      event(6, "terminal", { status: "completed", resultSummary: "done", errorCode: null }),
+    ], { cursor: 3, nextCursor: 6, latestSeq: 6 });
+    if (request.method === "chat.history") return page("messages", []);
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const statuses = [];
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "queue test", null, {
+    status: status => statuses.push(status), final: () => {},
+  });
+  assert.equal(statuses[0].kind, "queued");
+  assert.equal(statuses[0].reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
+  assert.deepEqual(statuses[1], { kind: "queued", text: "queued", reason: "BACKEND_ACTIVE_LIMIT", queuedAt: 123 });
+  assert.deepEqual(statuses.slice(2).map(status => status.kind), ["starting", "running"]);
 });
 
 test("STREAM_RESET consumes its snapshot without duplicating live events and terminal history can fill missing text", async () => {
@@ -5061,7 +5216,8 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
     ["RUNTIME_AUTH_REQUIRED", "当前 Agent 登录验证失败，请前往「设置」检查账号状态或重新登录后重试"],
     ["RUNTIME_PERMISSION_REQUIRED", "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试"],
     ["RUNTIME_APPROVAL_UNAVAILABLE", "Antigravity 的非交互模式无法弹出原生工具授权，本次操作已被拒绝；请检查权限设置，调整后可在当前会话重新发送"],
-    ["RUNTIME_QUOTA_EXHAUSTED", "模型服务商返回额度不足，请核对当前登录账号、订阅和额度；确认可用后可在当前会话重试"],
+    ["RUNTIME_QUOTA_EXHAUSTED", "当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试"],
+    ["RUNTIME_SPENDING_LIMIT_REACHED", "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试"],
     ["RUNTIME_ACCOUNT_BLOCKED", "模型服务商返回账号受限（account blocked），请前往服务商检查账号状态；解除限制或更换可用账号后重试"],
     ["RUNTIME_UPSTREAM_UNAVAILABLE", "Agent 上游服务暂时不可用，请稍后重试"],
     ["CODEX_SYSTEM_BINARY_NOT_FOUND", "未找到可执行的本机 Codex CLI，请先安装 Codex 并检查 PATH"],

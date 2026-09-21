@@ -1,38 +1,37 @@
 "use strict";
 
-const { spawnSync } = require("node:child_process");
 const { fileURLToPath } = require("node:url");
 const { explicitPathAttachment } = require("./agent-service/chat-attachments");
 const CHANNEL = "shoggoth:chat:clipboard-files";
 
-function clipboardFilePaths(clipboard, decodePlist = buffer => {
-  const result = spawnSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", "--", "-"],
-    { input: buffer, encoding: "utf8", timeout: 1500, maxBuffer: 64 * 1024 });
-  return result.status === 0 ? JSON.parse(result.stdout) : [];
-}) {
-  const formats = clipboard.availableFormats();
-  if (formats.includes("NSFilenamesPboardType")) {
-    const buffer = clipboard.readBuffer("NSFilenamesPboardType");
-    if (buffer.length > 64 * 1024) throw new Error("剪贴板文件列表过大");
-    const paths = decodePlist(buffer);
-    if (Array.isArray(paths) && paths.every(value => typeof value === "string")) return [...new Set(paths)];
+async function clipboardFilePaths(clipboard) {
+  const paths = new Set();
+  let remaining = 64 * 1024;
+  // Electron maps Finder's native file list to text/uri-list. Ordinary text,
+  // including text that happens to look like a path, must stay in the composer.
+  for (const item of await clipboard.read()) {
+    if (!item.types.includes("text/uri-list")) continue;
+    const blob = await item.getType("text/uri-list");
+    if (blob.size > remaining) throw new Error("剪贴板文件列表过大");
+    remaining -= blob.size;
+    const uris = (await blob.text()).replace(/\0+$/u, "").split(/\r?\n/u);
+    for (const uri of uris) {
+      if (uri.startsWith("file://")) paths.add(fileURLToPath(uri));
+    }
   }
-  const format = ["public.file-url", "text/uri-list"].find(value => formats.includes(value));
-  if (!format) return [];
-  const buffer = clipboard.readBuffer(format);
-  if (buffer.length > 64 * 1024) throw new Error("剪贴板文件列表过大");
-  return [...new Set(buffer.toString("utf8").replace(/\0+$/u, "").split(/\r?\n/u)
-    .filter(value => value.startsWith("file://")).map(value => fileURLToPath(value)))];
+  return [...paths];
 }
 
 function registerDesktopChatClipboardIpc({ ipcMain, clipboard, getWindows, getUiOrigin }) {
-  ipcMain.handle(CHANNEL, event => {
+  ipcMain.handle(CHANNEL, async event => {
     const wc = event?.sender;
-    const trusted = wc && !wc.isDestroyed() && event.senderFrame === wc.mainFrame
+    const trusted = () => wc && !wc.isDestroyed() && event.senderFrame === wc.mainFrame
       && getWindows().some(window => window && !window.isDestroyed() && window.webContents === wc)
       && (() => { try { return new URL(wc.getURL()).origin === new URL(getUiOrigin()).origin; } catch { return false; } })();
-    if (!trusted) throw new Error("Untrusted clipboard request");
-    const paths = clipboardFilePaths(clipboard);
+    if (!trusted()) throw new Error("Untrusted clipboard request");
+    const paths = await clipboardFilePaths(clipboard);
+    // The renderer may navigate or close while the OS clipboard read is pending.
+    if (!trusted()) throw new Error("Untrusted clipboard request");
     if (paths.length > 8) throw new Error("最多添加 8 个附件");
     let remaining = 50 * 1024 * 1024;
     const files = [];

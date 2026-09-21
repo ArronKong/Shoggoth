@@ -436,6 +436,7 @@ class ModelChangeCoordinator {
       return null;
     }
     if (!isPlainObject(caps) || caps.supported !== true || caps[kindField] !== true) return null;
+    if (safeSpec.kind === "update-provider" && safeSpec.patch?.renameTo && caps.renameProvider !== true) return null;
     // bypassBlockerCodes 两种形状：数组 = 全 kind 通用；map = "*" 通用 + 按 safeSpec.kind
     // 追加（如 update-provider 可绕过枚举不完整）。force 删除（用户已在确认框知情）
     // 再叠加 `<kind>:forced` 键——backend 借此声明仅在显式确认后才可绕过的 blocker。
@@ -497,7 +498,7 @@ class ModelChangeCoordinator {
         } : {}),
       };
     } else if (safeSpec.kind === "update-provider") {
-      target = { provider: safeSpec.providerKey };
+      target = { provider: safeSpec.patch?.renameTo || safeSpec.providerKey };
     } else if (safeSpec.kind === "delete-model") {
       modelDiff = {
         before: publicModelSnapshot(sourceSnapshot || { id: safeSpec.sourceModelId }, safeSpec.providerKey, backendId),
@@ -672,6 +673,17 @@ class ModelChangeCoordinator {
     const known = this._existingOperation(operationId, requestDigest, submittedToken);
     if (known && TERMINAL_STATUSES.has(known.existing.status)) return known.existing.result;
 
+    // A completed config write can be left pending only because the immediate
+    // catalog refresh failed. Recover that receipt before starting a later edit;
+    // never bypass unresolved writes, missing secrets or reference cleanup.
+    const catalogPending = this.journal.listPending().filter((entry) => (
+      entry.operationId !== operationId && entry.backendId === backendId
+      && entry.providerKey === safeSpec.providerKey && entry.mode === "config-only"
+      && entry.kind === "update-provider" && entry.stage === "config-write"
+      && entry.secretStep !== "pending" && entry.result?.code === "catalog_pending"
+    ));
+    for (const entry of catalogPending) await this._recoverEntry(entry);
+
     const mutexKey = `${backendId}\0${safeSpec.providerKey}`;
     return this._withKeyedMutex(mutexKey, async () => {
       const afterWait = this._existingOperation(operationId, requestDigest, submittedToken);
@@ -703,7 +715,8 @@ class ModelChangeCoordinator {
         const otherPending = this.journal.listPending().find((entry) => (
           entry.operationId !== operationId
           && entry.backendId === backendId
-          && entry.providerKey === safeSpec.providerKey
+          && [entry.providerKey, entry.target?.provider].some(provider => provider &&
+            (provider === safeSpec.providerKey || provider === safeSpec.patch?.renameTo))
         ));
         if (otherPending) {
           throw new ModelChangeError("provider_change_pending", "该 Provider 存在未完成的模型变更", {
@@ -807,7 +820,11 @@ class ModelChangeCoordinator {
         let configOnlyContext = configOnly || lockedExisting?.existing.mode === "config-only";
         let configWriteCaps = null;
         if (configOnlyContext || currentPreview.blockers.length > 0) {
-          const blockers = verifiedConfigOnlyTarget
+          const resumingProviderRename = lockedExisting?.existing.mode === "config-only"
+            && lockedExisting.existing.fingerprints?.providerRename;
+          const blockers = resumingProviderRename
+            ? currentPreview.blockers.filter((blocker) => !["provider_not_found", "source_not_found", "provider_exists"].includes(blocker.code))
+            : verifiedConfigOnlyTarget
             ? currentPreview.blockers.filter((blocker) => !["target_conflict", "provider_conflict"].includes(blocker.code))
             : currentPreview.blockers;
           configWriteCaps = await this._configOnlyEligible(backendId, safeSpec, blockers, { forced: force });
@@ -877,6 +894,11 @@ class ModelChangeCoordinator {
           if (useConfigOnly) {
             result.status = "partial";
             result.retryable = true;
+            if (safeSpec.kind === "update-provider" && safeSpec.patch?.renameTo && error.providerRenameNotStarted === true) {
+              result.status = "failed";
+              result.stage = "preflight";
+              result.retryable = false;
+            }
             // Some gateways explicitly acknowledge a persisted, active write in
             // an error receipt while requiring a recovery restart. Verify once;
             // never repeat the write or infer success from that receipt alone.
@@ -1047,7 +1069,7 @@ class ModelChangeCoordinator {
       providerKey,
       sourceModelId: null,
       sourceKey: modelIdentityKey(providerKey, "*"),
-      targetKey: modelIdentityKey(providerKey, "*"),
+      targetKey: modelIdentityKey(safePatch.renameTo || providerKey, "*"),
       target: null,
       patch: Object.freeze(safePatch),
     });
@@ -1063,7 +1085,7 @@ class ModelChangeCoordinator {
    * 单 patch 要么全落要么全不落;子项冲突抛错并在文案里标注第几项。
    * 不进 journal 状态机(每个子项幂等,失败由 UI 保留草稿整批重试)。
    */
-  async batchCompat(backendId, items, { operationId = randomUUID() } = {}) {
+  async batchCompat(backendId, items, { operationId = randomUUID(), confirmReferences = false, force = false, preservePrimaryRefs = false } = {}) {
     if (!Array.isArray(items) || items.length === 0) {
       throw new ModelChangeError("invalid_input", "批量项不能为空", { field: "items" });
     }
@@ -1105,11 +1127,53 @@ class ModelChangeCoordinator {
     if (!isPlainObject(caps) || caps.supported !== true || caps.batch !== true) {
       throw new ModelChangeError("batch_unsupported", "该后端不支持批量配置写", { status: 409 });
     }
+    // Endpoint selection may remove a definition while leaving Agent bindings
+    // alone. This opt-in does not apply to provider deletion or ordinary batches.
+    const canPreservePrimaryRefs = preservePrimaryRefs === true
+      && confirmReferences === true && caps.preservePrimaryRefs === true;
     const opId = normalizeOperationId(operationId);
     return this._withJournalLock(opId, "batch", async () => {
+      if (confirmReferences) {
+        // Endpoint reselection is one atomic patch. Inspect every removal before
+        // writing anything. Primary bindings can only remain after confirmation.
+        const references = new Map();
+        const blockers = [];
+        let canForce = true;
+        let canApply = true;
+        for (const spec of specs.filter((item) => item.kind === "delete-model")) {
+          const preview = this._normalizePreviewOutput(await backend.previewModelChange(spec));
+          // A lost response may be retried after the entire patch already landed.
+          // An absent source is an idempotent no-op in the batch writer.
+          const currentBlockers = preview.blockers.filter((item) => item.code !== "source_not_found");
+          blockers.push(...currentBlockers);
+          for (const reference of preview.references) {
+            references.set(stableJson(reference), reference);
+          }
+          const eligibleBlockers = canPreservePrimaryRefs
+            ? currentBlockers.filter((item) => item.code !== "primary_model_in_use") : currentBlockers;
+          const eligible = await this._configOnlyEligible(backendId, spec, eligibleBlockers, { forced: force });
+          canApply = canApply && Boolean(eligible);
+          if (!eligible) {
+            canForce = canForce && Boolean(await this._configOnlyEligible(backendId, spec, eligibleBlockers, { forced: true }));
+          }
+        }
+        if (!canApply || (!force && references.size > 0)) {
+          const uniqueBlockers = [...new Map(blockers.map((item) => [stableJson(item), item])).values()];
+          return {
+            operationId: opId, status: "blocked", stage: "preflight",
+            code: uniqueBlockers.some((item) => item.code === "primary_model_in_use")
+              ? "primary_model_in_use" : references.size > 0 ? "references_exist"
+                : uniqueBlockers[0]?.code || "config_write_unsupported",
+            canForce,
+            references: [...references.values()], blockers: uniqueBlockers,
+          };
+        }
+      }
       let raw;
       try {
-        raw = await backend.applyModelChangeConfigOnlyBatch(specs);
+        raw = await backend.applyModelChangeConfigOnlyBatch(specs, {
+          preservePrimaryRefs: canPreservePrimaryRefs && force === true,
+        });
       } catch (err) {
         if (err instanceof ModelChangeError) throw err;
         const index = Number.isInteger(err?.batchIndex) ? err.batchIndex : null;
@@ -1148,10 +1212,16 @@ class ModelChangeCoordinator {
     const preview = await this._previewSafe(backendId, safeSpec);
     // 引用存在默认零写返回，供 UI 弹知情确认；force = 用户已确认引用将失效，照删。
     if (!force && preview.references.length > 0) {
+      // Only the backend knows which capability blockers its confirmed delete
+      // path can handle. Publish that decision instead of making the UI guess.
+      const canForce = preview.blockers.length === 0
+        || Boolean(await this._configOnlyEligible(backendId, safeSpec, preview.blockers, { forced: true }));
       return {
         status: "blocked",
-        code: "references_exist",
+        code: preview.blockers.some((item) => item.code === "primary_model_in_use")
+          ? "primary_model_in_use" : "references_exist",
         stage: "preflight",
+        canForce,
         references: preview.references,
         blockers: preview.blockers,
       };

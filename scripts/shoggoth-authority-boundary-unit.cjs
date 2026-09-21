@@ -181,6 +181,10 @@ test("当前 Transcript 与各 Runtime home 的真实 owner 被显式记录", ()
   assert.equal(DATA_AUTHORITY_MANIFEST.skills.owner, "shoggoth");
   assert.equal(DATA_AUTHORITY_MANIFEST.skills.source, "NativeSkillStore");
   assert.match(DATA_AUTHORITY_MANIFEST.skills.runtimeProjection, /no Runtime Home materialization/u);
+  assert.equal(DATA_AUTHORITY_MANIFEST.mcpExtensions.owner, "shoggoth");
+  assert.equal(DATA_AUTHORITY_MANIFEST.mcpExtensions.source, "NativeMcpStore");
+  assert.match(DATA_AUTHORITY_MANIFEST.mcpExtensions.runtimeProjection, /OpenClaw\/Hermes/u);
+  assert.match(DATA_AUTHORITY_MANIFEST.mcpExtensions.externalOwnership, /remains independent/u);
   assert.match(DATA_AUTHORITY_MANIFEST.nativeRuntimeImport.source, /disabled by default/u);
   assert.match(DATA_AUTHORITY_MANIFEST.nativeRuntimeImport.scope, /never runs/u);
   assert.equal(DATA_AUTHORITY_MANIFEST.computer.owner, "shoggoth");

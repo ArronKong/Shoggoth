@@ -132,11 +132,14 @@ test("外部 helper 通过独立 Service 握手认证，配置文件不直接携
   assert.equal(seen.params.client, "hermes");
 });
 
-test("外部 MCP 固定排除全部 Computer Use 工具，并在触碰 Service 前拒绝调用", async () => {
-  assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.length, 65);
+test("外部 MCP 排除原生设定、记忆和 Computer Use，保留外部 Agent 的自身身份", async () => {
+  assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.length, 71);
   assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.filter(tool => tool.name.startsWith("inspiration_")).length, 10);
   assert.equal(EXTERNAL_FEDERATION_MCP_INSTRUCTIONS
     .includes("You are the Shoggoth App's native Agent"), false);
+  assert.match(EXTERNAL_FEDERATION_MCP_INSTRUCTIONS, /own Agent name, persona, memory and current model remain owned by your external backend/u);
+  assert.doesNotMatch(EXTERNAL_FEDERATION_MCP_INSTRUCTIONS,
+    /memory_save|memory_search|agent_definition_update|agent_definition_read|unnamespaced Codex request_user_input/u);
   assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS
     .some((definition) => definition.name.startsWith("computer_")), false);
   let serviceCalls = 0;
@@ -151,14 +154,21 @@ test("外部 MCP 固定排除全部 Computer Use 工具，并在触碰 Service �
     protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" },
   } });
   const listed = await handler({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.equal(listed.result.tools.length, 65);
-  for (const hidden of ["external_agent_list", "external_agent_get", "external_agent_run"]) {
+  assert.equal(listed.result.tools.length, 71);
+  for (const shared of ["skill_catalog", "skill_read", "mcp_server_list", "mcp_server_tools", "mcp_server_call"]) {
+    assert.equal(listed.result.tools.some((definition) => definition.name === shared), true, shared);
+  }
+  for (const hidden of ["external_agent_list", "external_agent_get", "external_agent_run",
+    "native_agent_get", "native_agent_update", "native_agent_archive",
+    "memory_search", "memory_save", "memory_confirm", "memory_forget", "agent_definition_read", "agent_definition_update"]) {
     assert.equal(listed.result.tools.some((definition) => definition.name === hidden), false);
   }
-  const refused = await handler({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
-    name: "computer_status", arguments: {},
-  } });
-  assert.equal(refused.error.code, -32602);
+  for (const name of ["computer_status", "memory_search", "agent_definition_read"]) {
+    const refused = await handler({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
+      name, arguments: {},
+    } });
+    assert.equal(refused.error.code, -32602);
+  }
   assert.equal(serviceCalls, 0);
   handler.close();
 });
@@ -233,6 +243,8 @@ test("静默注册使用官方 CLI 配置入口、覆盖本地 Hermes profiles�
   ), true);
   const hermesConfig = JSON.parse(calls[2][1].at(-1));
   assert.equal(hermesConfig.env.SHOGGOTH_FEDERATION_MCP_CLIENT, "hermes");
+  assert.equal(calls[2][1][3], "mcp_servers.shoggoth");
+  assert.equal(calls.every(([, args]) => !args.includes("remove") && !args.includes("reset")), true);
 
   const remoteCalls = [];
   const remoteRegistrar = createFederationMcpRegistrar({

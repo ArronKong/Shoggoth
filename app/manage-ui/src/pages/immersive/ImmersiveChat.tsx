@@ -4,7 +4,7 @@ import type { CSSProperties, ClipboardEvent, DragEvent, KeyboardEvent, MouseEven
 import { useTranslation } from "react-i18next";
 import { useGlassRenderer } from "./useGlassRenderer";
 import FilterTabs from "../../components/FilterTabs";
-import { SESSION_KIND_ORDER, sessionKindI18nKey, sessionKindOf, type SessionKind } from "../../lib/sessionKind";
+import { SESSION_CATEGORY_ORDER, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../../lib/sessionKind";
 import ChatModelMenu, { type ModelMenuChoice } from "../ChatModelMenu";
 import ChatPermissionMenu from "../ChatPermissionMenu";
 import type { ChatPermissionModeOption } from "../../types";
@@ -18,16 +18,14 @@ import ImmersiveKanbanPanel from "./ImmersiveKanbanPanel";
 import ImmersiveProfilePanel from "./ImmersiveProfilePanel";
 import { type ImmersivePhase } from "./immersiveBg";
 import type { MediaSource } from "../glass/scene";
-import { IconSend, IconClip, IconClock, IconArchive, IconMic, IconStop, IconPencil, IconActivity, IconBoard, IconUser, IconImmersiveExit } from "../chatIcons";
+import { IconSend, IconClip, IconAttachmentFolder, IconClock, IconArchive, IconMic, IconStop, IconPencil, IconActivity, IconBoard, IconUser, IconImmersiveExit } from "../chatIcons";
 import styles from "./ImmersiveChat.module.css";
 
 // 聊天列宽持久化键（右缘把手拖出的宽度，px；无键=Figma 默认）
 const COL_W_KEY = "shoggoth.chat.immersive.colw.v1";
 
 // 一条会话（切换浮层用）。用纯字符串而非 ChatPage 内部 SessionRow，避免类型耦合 / 循环 import。
-export interface ImmersiveSessionRow {
-  key: string;
-  kind?: string;
+export interface ImmersiveSessionRow extends SessionCategoryRow {
   title: string;
   sub: string;
   /** 已格式化的相对时间（"3m"），空串 = 不显示。 */
@@ -46,7 +44,7 @@ export interface ImmersiveMessage {
   html: string; // 已 sanitize 的 markdown（injected = 展开后的全文；divider/error 不用）
   images: string[]; // user 自发图（base64）/ agent MEDIA 图（/__media 或 URL）
   // 非图附件（视频/PDF/文件）。带 src 的视频渲染成可点开灯箱的预览窗，其余是文件 chip。
-  files?: { name: string; kind: string; src?: string }[];
+  files?: { name: string; kind: string; src?: string; path?: string }[];
   footer: string;
   pending?: boolean; // 流式中 → 正文尾部渲染光标
   prompts?: ChatPromptEntry[]; // 阻塞等答的审批/澄清/sudo/密钥卡（挂在 pending 泡上）
@@ -92,6 +90,7 @@ export interface ImmersiveBundle {
   onInputPaste: (e: ClipboardEvent<HTMLTextAreaElement>) => void;
   submit: (overrideText?: string) => void;
   sending: boolean;
+  canSteer: boolean;
   abortActive: () => void;
   hasActiveSession: boolean;
   canSend: boolean;
@@ -121,7 +120,7 @@ export interface ImmersiveBundle {
   onAttachClick: () => void;
   supportsAttachments: boolean;
   // 发送前可见状态：附件预览（可移除）+ 引用条（可取消）——否则发送时会带上看不见的内容
-  attachments: { id: string; dataUrl: string; name: string }[];
+  attachments: { id: string; dataUrl: string; name: string; kind?: string }[];
   removeAttachment: (id: string) => void;
   quoteText: string | null;
   clearQuote: () => void;
@@ -143,6 +142,7 @@ export interface ImmersiveBundle {
   onDelete: () => void;
   // 灯箱：复用 ChatPage 的（其 z-index 高于本层）。kind 缺省 image；视频附件传 "video"。
   openLightbox: (src: string, kind?: "image" | "video") => void;
+  openAttachmentFile?: (file: { name: string; src?: string; path?: string }) => void;
   lightboxOpen: boolean;
   // 回答阻塞式 agent 请求卡（approval/clarify/sudo/secret）→ ChatPage 的 chat.respond
   onRespondPrompt: (entry: ChatPromptEntry, data: ChatPromptResponse) => void;
@@ -151,14 +151,14 @@ export interface ImmersiveBundle {
 export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
     onExit, phase, live, sendSeq, onNearTop, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
-    submit, sending, abortActive, hasActiveSession, canSend, connectingHint, slashMenu, slashOpen,
+    submit, sending, canSteer, abortActive, hasActiveSession, canSend, connectingHint, slashMenu, slashOpen,
     models, displayModel, changeModel, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
     attachments, removeAttachment, quoteText, clearQuote,
     sessionTitle, sessionMeta, liveStatusKind, activeAgentId, activeBackendId, avatarVersion, sessions, openSession,
     onRefresh, sessionLabel, onRenameSubmit, onDelete,
-    openLightbox, lightboxOpen, onRespondPrompt,
+    openLightbox, openAttachmentFile, lightboxOpen, onRespondPrompt,
   } = props;
   const { t } = useTranslation();
   // 背景媒体层的前台元素（视频/图片），由 Backdrop 维护——GL 折射纹理源。
@@ -173,7 +173,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const [pickerOpen, setPickerOpen] = useState(false);
   // 会话类型筛选（null = 全部）。R266 起会话列表不再按类型隐藏 cron/子代理/dream，
   // 靠这排 Tab 分流——与普通模式的 ChatSessionMenu 同一个分类函数、同一个组件。
-  const [pickerKind, setPickerKind] = useState<SessionKind | null>(null);
+  const [pickerKind, setPickerKind] = useState<SessionCategory | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   // 聊天列宽（px）：右缘把手拖出的用户宽度，null=未拖过（走 Figma 默认 min(617px,46vw)）。
@@ -276,15 +276,15 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const activeSessKey = useMemo(() => sessions.find((s) => s.active)?.key ?? "", [sessions]);
   // Tab 行只列真实存在的类型（自动分 Tab），顺序固定、各带条数。
   const pickerKinds = useMemo(() => {
-    const count = new Map<SessionKind, number>();
+    const count = new Map<SessionCategory, number>();
     for (const s of sessions) {
-      const k = sessionKindOf(s.key, s.kind);
+      const k = sessionCategoryOf(s);
       count.set(k, (count.get(k) ?? 0) + 1);
     }
-    return SESSION_KIND_ORDER.filter((k) => count.has(k)).map((k) => ({ kind: k, count: count.get(k) ?? 0 }));
+    return SESSION_CATEGORY_ORDER.filter((k) => count.has(k)).map((k) => ({ kind: k, count: count.get(k) ?? 0 }));
   }, [sessions]);
   const pickerSessions = useMemo(
-    () => (pickerKind ? sessions.filter((s) => sessionKindOf(s.key, s.kind) === pickerKind) : sessions),
+    () => (pickerKind ? sessions.filter((s) => sessionCategoryOf(s) === pickerKind) : sessions),
     [sessions, pickerKind],
   );
   // 关掉浮层就把筛选清回「全部」（下次打开是干净的，与模型菜单同一收尾）。
@@ -436,13 +436,13 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                   scrollable
                   toggleOff=""
                   value={pickerKind ?? ""}
-                  onChange={(v) => setPickerKind(v === "" ? null : (v as SessionKind))}
+                  onChange={(v) => setPickerKind(v === "" ? null : (v as SessionCategory))}
                   items={[
                     { value: "", label: t("chat.sessionFilterAll", { count: sessions.length }) },
                     ...pickerKinds.map((k) => ({
                       value: k.kind,
-                      label: `${t(sessionKindI18nKey(k.kind))} ${k.count}`,
-                      title: t(sessionKindI18nKey(k.kind)),
+                      label: `${t(`chat.sessionFilter.${k.kind}`)} ${k.count}`,
+                      title: t(`chat.sessionFilter.${k.kind}`),
                     })),
                   ]}
                 />
@@ -463,7 +463,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                       <span className={styles.pickerName}>{s.title}</span>
                       {s.time && <span className={styles.pickerTime}>{s.time}</span>}
                     </span>
-                    {s.sub && <span className={styles.pickerSub}>{s.sub}</span>}
                   </button>
                 ))}
               </div>
@@ -683,9 +682,10 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                       <span className={styles.attPlay}>▶</span>
                     </span>
                   ) : (
-                    <span key={`f${i}`} className={styles.attChip} title={f.name}>
-                      {f.kind === "pdf" ? "📄" : f.kind === "video" ? "🎬" : "📎"} {f.name}
-                    </span>
+                    <button key={`f${i}`} type="button" className={styles.attChip} title={f.name}
+                      onClick={() => openAttachmentFile?.(f)} disabled={!openAttachmentFile}>
+                      <IconAttachmentFolder /><span className={styles.attName}>{f.name}</span>
+                    </button>
                   ),
                 )}
               </div>
@@ -828,10 +828,18 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         {attachments.length > 0 && (
           <div className={styles.pendRow}>
             {attachments.map((a) => (
-              <div key={a.id} className={styles.pendChip}>
-                <img src={a.dataUrl} alt={a.name} />
-                <button type="button" className={styles.pendX} onClick={() => removeAttachment(a.id)} title={t("common.remove")}>
-                  ×
+              <div key={a.id} className={a.kind && a.kind !== "image" && a.kind !== "video" ? styles.pendFile : styles.pendChip}>
+                {a.kind && a.kind !== "image" && a.kind !== "video" ? (
+                  <button type="button" className={styles.attChip} title={a.name} disabled={!openAttachmentFile}
+                    onClick={() => openAttachmentFile?.({ name: a.name, src: a.dataUrl })}>
+                    <IconAttachmentFolder /><span className={styles.attName}>{a.name}</span>
+                  </button>
+                ) : a.kind === "video" ? (
+                  <video src={a.dataUrl} title={a.name} preload="metadata" muted playsInline />
+                ) : <img src={a.dataUrl} alt={a.name} />}
+                <button type="button" className={styles.pendX} onClick={() => removeAttachment(a.id)}
+                  title={t("common.remove")} aria-label={`${t("common.remove")} ${a.name}`}>
+                  <span aria-hidden="true">{a.kind && a.kind !== "image" && a.kind !== "video" ? "✕" : "×"}</span>
                 </button>
               </div>
             ))}
@@ -887,8 +895,20 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                 <IconClip />
               </button>
             )}
+            {sending && canSteer && (
+              <button
+                type="button"
+                className={styles.send}
+                data-send-entry="immersiveButton"
+                onClick={() => submit()}
+                disabled={!hasActiveSession || !canSend || (!input.trim() && attachments.length === 0)}
+                title={t(attachments.length ? "chat.send" : "chat.steerCurrentTurn")}
+              >
+                <IconSend />
+              </button>
+            )}
             {sending ? (
-              <button type="button" className={styles.send} onClick={abortActive} title={t("chat.stopGenerating")}>
+              <button type="button" className={`${styles.send} ${styles.stop}`} onClick={abortActive} title={t("chat.stopGenerating")}>
                 <IconStop />
               </button>
             ) : (

@@ -1,0 +1,13 @@
+.chat-run-wait {
+  display: block;
+  max-width: 100%;
+  color: var(--text-secondary, #788396);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.chat-run-wait.is-compact {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 12px;
+}

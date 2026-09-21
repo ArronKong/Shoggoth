@@ -36,6 +36,7 @@ const PROTECTED_PROFILE_IDS = new Set([
   ...BUILTIN_CLI_AGENT_PROFILES.map((profile) => profile.id),
 ]);
 const RETRYABLE_CODES = new Set([
+  "AGENT_RETENTION_FAILED",
   "AGENT_INITIALIZATION_FAILED", "AGENT_RUNTIME_CLEANUP_FAILED", "AGENT_COMMIT_UNCERTAIN",
   "AGENT_SERVICE_CLOSED",
 ]);
@@ -156,6 +157,7 @@ function durableBinding(method, params) {
       expectedUpdatedAt: null,
       createdAt: params.createdAt,
       identity,
+      ...(params.initialIdentity !== undefined ? { initialIdentity: params.initialIdentity } : {}),
     };
   }
   return {
@@ -176,6 +178,7 @@ function validateDurableBinding(method, value) {
     "method", "operationId", "targetProfileId", "backendId", "name", "defaultCwd",
     "expectedUpdatedAt", "createdAt", "identity",
   ];
+  if (method === "agent.create" && value && Object.hasOwn(value, "initialIdentity")) fields.push("initialIdentity");
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype
     || Object.keys(value).length !== fields.length || fields.some((field) => !Object.hasOwn(value, field))
@@ -190,7 +193,8 @@ function createAgentLifecycleServiceController(options = {}) {
   ], "ProductStore");
   requireMethods(options.runtimeManager, ["stop"], "RuntimeManager");
   if (typeof options.initializeProfile !== "function"
-    || typeof options.activateProfile !== "function") {
+    || typeof options.activateProfile !== "function"
+    || (options.onProfileChanged !== undefined && typeof options.onProfileChanged !== "function")) {
     throw lifecycleError("AGENT_SERVICE_CLOSED", "Profile lifecycle callbacks are invalid");
   }
   const productStore = options.productStore;
@@ -270,9 +274,9 @@ function createAgentLifecycleServiceController(options = {}) {
     }
   }
 
-  async function initialize(profile, expectedGeneration) {
+  async function initialize(profile, expectedGeneration, initialIdentity) {
     assertOpen(expectedGeneration);
-    try { await options.initializeProfile(structuredClone(profile)); }
+    try { await options.initializeProfile(structuredClone(profile), { initialIdentity }); }
     catch (error) {
       throw lifecycleError("AGENT_INITIALIZATION_FAILED", error?.message);
     }
@@ -308,7 +312,7 @@ function createAgentLifecycleServiceController(options = {}) {
           approvalPolicy: "on-request",
           sandbox: "danger-full-access",
         },
-        concurrency: { maxActive: 1, maxWorkspaceWrites: 1 },
+        concurrency: { maxActive: require("./execution-policy").profile, maxWorkspaceWrites: require("./execution-policy").profile },
         isDefault: false,
         enabled: false,
         createdAt: binding.createdAt,
@@ -320,7 +324,7 @@ function createAgentLifecycleServiceController(options = {}) {
       || profile.isDefault !== false) {
       throw lifecycleError("AGENT_OPERATION_CONFLICT");
     }
-    await initialize(profile, expectedGeneration);
+    await initialize(profile, expectedGeneration, binding.initialIdentity);
     await activate(profile, expectedGeneration);
     profile = loadProfile(identity.id);
     if (!profile.enabled) profile = putProfile({ ...profile, enabled: true });
@@ -352,6 +356,7 @@ function createAgentLifecycleServiceController(options = {}) {
       // single writer and independently rejects new WorkRuns for disabled Profiles.
       profile = putProfile({ ...profile, enabled: false });
     }
+    options.archiveRetention?.recordArchive(profile);
     assertOpen(expectedGeneration);
     try {
       await options.runtimeManager.stop(runtimeBinding({
@@ -368,11 +373,13 @@ function createAgentLifecycleServiceController(options = {}) {
 
   async function restore(binding, expectedGeneration) {
     let profile = loadProfile(binding.targetProfileId);
+    options.archiveRetention?.assertRestorable(profile.id);
     if (!require("../runtime-availability").isRuntimeAvailable(profile.runtime)) {
       throw lifecycleError("AGENT_BACKEND_NOT_SUPPORTED");
     }
     if (profile.enabled) {
       await activate(profile, expectedGeneration);
+      options.archiveRetention?.cancel(profile.id);
       return validateAgentLifecycleResult("agent.restore", { profile });
     }
     assertCas(profile, binding.expectedUpdatedAt);
@@ -380,6 +387,7 @@ function createAgentLifecycleServiceController(options = {}) {
     await activate(profile, expectedGeneration);
     profile = loadProfile(profile.id);
     if (!profile.enabled) profile = putProfile({ ...profile, enabled: true });
+    options.archiveRetention?.cancel(profile.id);
     return validateAgentLifecycleResult("agent.restore", { profile });
   }
 
@@ -432,6 +440,13 @@ function createAgentLifecycleServiceController(options = {}) {
         const mapped = mapAgentLifecycleError(error);
         const saved = complete(durable, { ok: false, publicCode: mapped.code });
         return replayOutcome(durable.name, saved.result);
+      } finally {
+        // Publish after the durable outcome, including a partially completed
+        // archive. Observers cannot invalidate a committed lifecycle operation.
+        try {
+          const profile = productStore.getAgentProfile(binding.targetProfileId);
+          if (profile) options.onProfileChanged?.({ profileId: profile.id, backendId: profile.backendId });
+        } catch {}
       }
     }).finally(() => {
       inFlight.delete(durable.callId);
@@ -508,6 +523,12 @@ function createAgentLifecycleServiceController(options = {}) {
   }
 
   const controller = {
+    runMaintenance(action) {
+      const expectedGeneration = generation;
+      const operation = tail.then(() => { assertOpen(expectedGeneration); return action(); });
+      tail = operation.catch(() => {});
+      return operation;
+    },
     open() {
       if (state === "open") return controller;
       if (poisonError) throw poisonError;

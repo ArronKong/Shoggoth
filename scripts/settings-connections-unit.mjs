@@ -9,7 +9,9 @@ const require = createRequire(path.join(root, "app/manage-ui/package.json"));
 const React = require("react");
 const { create, act } = require("react-test-renderer");
 const ts = require("typescript");
-const ids = ["openclaw", "hermes", "shoggoth", "codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"];
+const releasePolicy = JSON.parse(fs.readFileSync(path.join(root, "app/release-policy.json"), "utf8"));
+const ids = ["openclaw", "hermes", "shoggoth", "codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]
+  .filter(id => !releasePolicy.disabledRuntimes.includes(id));
 let disabledBackends = [];
 const api = {
   getConfig: async () => ({ disabledBackends }),
@@ -21,7 +23,8 @@ function load(file, stubs = {}, desktop = { getConfig: () => ({ disabledBackends
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const mod = { exports: {} };
   vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(require, module, module.exports);`, {
-    module: mod, require: name => stubs[name] || require(name),
+    module: mod, require: name => stubs[name] || (name === "./usePageCache" ? { invalidatePageCache() {} }
+      : name === "../../../release-policy.json" ? releasePolicy : require(name)),
     window: { openclawDesktop: desktop },
   });
   return mod.exports;
@@ -36,7 +39,7 @@ assert.ok(FALLBACK_BACKEND_DESCRIPTORS.every(d => d.disconnectable));
 const Overview = load("app/manage-ui/src/pages/settings/BackendOverview.tsx", {
   "react-i18next": { useTranslation: () => ({ t: key => key }) },
   "../../lib/connectionOptions": { REMOTE_CONNECTIONS_ENABLED: false },
-  "../keys/ProviderLogo": { __esModule: true, default: () => null, providerLogoFor: () => null },
+  "../../components/BackendTabIcon": { __esModule: true, default: () => null },
 }).default;
 const descriptors = new Map(FALLBACK_BACKEND_DESCRIPTORS.map(d => [d.id, d]));
 const render = async (disabled, extra = {}) => {
@@ -151,4 +154,14 @@ for (const id of ids) {
   await context.applyConfigChange();
   assert.deepEqual(calls, [[id, "start"]], "reconnect must not reload the settings page");
 }
-console.log("PASS settings: all 9 connection controls, final connection guard, reconnect, backend filtering and isolated host lifecycle");
+// Endpoint autosaves refresh the affected transport without reloading the form.
+config = { ...config, gatewayUrl: "ws://127.0.0.1:18793" };
+calls.length = 0;
+await context.applyConfigChange();
+assert.deepEqual(calls, [["openclaw", "stop"]]);
+backends.get("hermes").reconfigure = async () => calls.push(["hermes", "reconfigure"]);
+config = { ...config, hermesMode: "remote" };
+calls.length = 0;
+await context.applyConfigChange();
+assert.deepEqual(calls, [["hermes", "reconfigure"]]);
+console.log(`PASS settings: all ${ids.length} released connection controls, final connection guard, reconnect, backend filtering and live endpoint changes`);

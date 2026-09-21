@@ -46,9 +46,9 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   overflow: hidden;
-  padding: 8px;
+  padding: 32px;
   border-radius: 16px;
-  border: 1px solid var(--skin-glass-border, light-dark(rgba(24, 31, 42, 0.08), rgba(255, 255, 255, 0.08)));
+  border: 0;
   background: var(--skin-glass-strong, light-dark(rgba(255, 255, 255, 0.96), rgba(31, 31, 35, 0.96)));
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   backdrop-filter: blur(24px) saturate(160%);
@@ -62,17 +62,17 @@
   padding: 8px 14px;
   margin-bottom: 6px;
   border-radius: 999px;
-  border: 1px solid var(--skin-glass-border, light-dark(rgba(24, 31, 42, 0.08), rgba(255, 255, 255, 0.08)));
-  background: var(--bg, var(--ui-surface-1));
+  border: 0;
+  background: var(--bg-hover, var(--ui-surface-2));
   color: var(--chat-text, var(--ui-text-1));
   font: inherit;
 }
 
 .model-menu .model-menu__search:focus,
 :root[data-theme="dark"] .model-menu .model-menu__search:focus {
-  border-color: #000;
   outline: none;
   box-shadow: none;
+  background: color-mix(in srgb, var(--bg-hover, var(--ui-surface-2)) 90%, var(--ui-text-1) 10%);
 }
 
 .model-menu__tabs {

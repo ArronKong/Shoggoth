@@ -100,6 +100,24 @@ async function testSafeProviderProjectionNeverLeaksStorageFieldsOrUrlSecrets() {
   assert.throws(() => projectSafeProvider(hostile), (error) => error.code === "HOST_PROVIDER_RESPONSE_INVALID");
 }
 
+async function testCustomEndpointEditorReceivesOnlySafeApiRoots() {
+  const baseUrl = "https://gateway.example:8443/openai/v1";
+  const safe = projectSafeProvider(rawProvider({ kind: "custom-responses", baseUrl }));
+  assert.equal(safe.baseUrl, baseUrl);
+  assert.equal(safe.baseUrlHost, "gateway.example:8443");
+  for (const unsafeUrl of [
+    "https://user:password@gateway.example/v1",
+    "https://gateway.example/v1?api_key=private",
+    "https://gateway.example/v1#private",
+  ]) {
+    const projected = projectSafeProvider(rawProvider({ kind: "custom-responses", baseUrl: unsafeUrl }));
+    assert.equal(projected.baseUrl, undefined);
+    assert.equal(projected.baseUrlHost, "gateway.example");
+    assert.ok(!JSON.stringify(projected).includes("private"));
+    assert.ok(!JSON.stringify(projected).includes("password"));
+  }
+}
+
 async function testProductHostCombinesSafeServiceBackgroundAndProviderAuthority() {
   const calls = [];
   const serviceRequest = async (method, params) => {
@@ -1025,6 +1043,7 @@ async function testAuthenticatedCodexDefaultModelDoesNotRequireProviderSetup() {
 const tests = [
   testAuthenticatedCodexDefaultModelDoesNotRequireProviderSetup,
   testSafeProviderProjectionNeverLeaksStorageFieldsOrUrlSecrets,
+  testCustomEndpointEditorReceivesOnlySafeApiRoots,
   testProductHostCombinesSafeServiceBackgroundAndProviderAuthority,
   testProductHostInstallActionStartsServiceInOneStep,
   testProductHostAutoStartsBackgroundServiceIdempotently,

@@ -43,6 +43,8 @@ class MockBackend extends AgentBackend {
   getAgents() { return INJECT; }
   async sendMessage(sessionKey, message, idempotencyKey, hooks, opts) {
     this.sends.push({ sessionKey, message, idempotencyKey, inputProvenance: opts.inputProvenance });
+    if (message === "inspiration-notification-fixture") hooks.final("Inspiration result", false,
+      { runId: "inspiration-hook-run", notificationCategory: "inspiration" });
   }
 }
 
@@ -199,6 +201,14 @@ try {
     JSON.stringify(mockBackend.sends[1]?.inputProvenance)
       === JSON.stringify({ kind: "inter_session", sourceTool: "federation_agent_run" }));
 
+  send({ type: "req", id: "r2i", method: "chat.send", params: {
+    sessionKey: "agent:hermes:inspiration-session", message: "inspiration-notification-fixture",
+  } });
+  const inspirationHookFinal = await waitFor(f => f.event === "chat" && f.payload?.state === "final"
+    && f.payload?.sessionKey === "agent:hermes:inspiration-session", "inspiration hook final");
+  check("inspiration hook final preserves notification provenance",
+    inspirationHookFinal.payload?.message?.shoggoth?.source === "inspiration");
+
   // 3. chat.send to real agent passes through
   send({ type: "req", id: "r3", method: "chat.send", params: { sessionKey: "agent:main:main", message: "yo" } });
   await waitFor((f) => f.type === "res" && f.id === "r3", "real chat.send res");
@@ -315,6 +325,20 @@ try {
     check("native cron reply is hidden from unauthenticated sockets",
       !nakedFrames.some((frame) => frame.type === "event" && frame.event === "chat"
         && frame.payload?.runId === "run-native-cron-visible"));
+
+    registry.emit("backend.sessionActivity", {
+      backendId: "mock-hermes", name: "Hermes (demo)", agentIds: ["hermes"],
+      activity: {
+        kind: "federation.chat.terminal", runId: "run-inspiration-visible",
+        sessionKey: "agent:hermes:inspiration-session", status: "completed",
+        result: "Inspiration result", errorCode: null, finishedAt: completedAt,
+        notificationCategory: "inspiration",
+      },
+    });
+    const inspirationFinal = await waitFor(frame => frame.event === "chat"
+      && frame.payload?.runId === "run-inspiration-visible", "inspiration terminal final");
+    check("inspiration terminal preserves notification provenance",
+      inspirationFinal.payload?.message?.shoggoth?.source === "inspiration");
 
     const requestId = "request-federation-visible-1";
     registry.emit("backend.sessionActivity", {

@@ -1021,6 +1021,44 @@ function armConfigOnly(harness, { activation = { kind: "gateway_restart" }, caps
 
 const CAPABILITY_BLOCKER = { code: "runtime_apply_unsupported", store: "runtime", message: "运行时变更能力不可用" };
 
+test("OpenClaw 已完成清 Key 的 catalog_pending 收据可恢复，后续编辑无需重放旧写入", async () => {
+  const { OpenClawBackend } = require("../app/core/openclaw-backend");
+  const { providerPublicDigest } = require("../app/core/openclaw-model-change");
+  const harness = createCoordinatorHarness();
+  try {
+    armConfigOnly(harness);
+    const provider = { baseUrl: "https://api.deepseek.com", api: "openai-completions", models: [{ id: "deepseek-flash" }, { id: "deepseek-v4-pro" }] };
+    const digest = providerPublicDigest(provider);
+    harness.state.nextPreview = { references: [], blockers: [CAPABILITY_BLOCKER], runtimeApply: "blocked",
+      fingerprints: { config: "config:alpha" }, providerDiff: { beforeDigest: digest, afterDigest: digest } };
+    const backend = new OpenClawBackend();
+    backend._configSnapshot = async () => ({ parsed: { models: { providers: { alpha: provider } } }, hash: "fixture" });
+    harness.backend.recoverModelChangeConfigOnly = backend.recoverModelChangeConfigOnly.bind(backend);
+    let writes = 0;
+    harness.backend.applyModelChangeConfigOnly = async (_spec, context, secret) => {
+      writes += 1;
+      await context.recordStage("config-write", secret?.apiKey ? { secretStep: "applied" } : {});
+      return { status: "applied", stage: "config-write", restartRequired: false };
+    };
+    const fresh = harness.registry.listModelsSnapshot;
+    harness.registry.listModelsSnapshot = async () => { throw new Error("gateway reconnecting"); };
+    const first = await harness.coordinator.updateProviderCompat("openclaw", "alpha", { clearApiKey: true }, { operationId: "old-clear-key" });
+    assert.equal(first.code, "catalog_pending");
+    const entry = harness.journal.get("old-clear-key");
+    assert.equal((await backend.recoverModelChangeConfigOnly({ ...entry, stage: "preflight" })).status, "partial");
+    assert.equal((await backend.recoverModelChangeConfigOnly({ ...entry, secretStep: "pending" })).status, "partial");
+    provider.baseUrl = "https://other.example/v1";
+    assert.equal((await backend.recoverModelChangeConfigOnly(entry)).status, "partial");
+    provider.baseUrl = "https://api.deepseek.com";
+    harness.registry.listModelsSnapshot = fresh;
+    const next = await harness.coordinator.updateProviderCompat("openclaw", "alpha", { apiKey: "fixture-replacement-key" }, { operationId: "new-edit" });
+    assert.equal(next.status, "applied");
+    assert.equal(harness.journal.get("old-clear-key").status, "applied");
+    assert.equal(writes, 2, "只执行初始清除和当前编辑，恢复不重放旧写入");
+    assert.equal(harness.journal.listPending().length, 0);
+  } finally { harness.cleanup(); }
+});
+
 test("能力类 blocker + configWrite 支持时 applyCompat 降级为 config-only 并附 activation", async () => {
   const harness = createCoordinatorHarness();
   try {
@@ -1155,6 +1193,8 @@ test("delete 引用拦截可被 force 覆盖：默认 references_exist 零写，
     }, { operationId: "force-del-1" });
     assert.equal(blocked.status, "blocked");
     assert.equal(blocked.code, "references_exist");
+    assert.equal(blocked.canForce, true, "后端允许处理的能力阻塞应提供引用确认入口");
+    assert.equal(harness.journal.get("force-del-1"), null, "确认前不应创建 journal");
     assert.equal(harness.state.configOnlyCalls, 0, "默认引用拦截必须零写");
 
     harness.state.nextPreview = previewWithRefs;
@@ -1165,6 +1205,27 @@ test("delete 引用拦截可被 force 覆盖：默认 references_exist 零写，
     assert.equal(harness.state.configOnlyCalls, 1);
   } finally {
     harness.cleanup();
+  }
+});
+
+test("delete 引用确认不允许绕过主模型或其他硬阻塞", async () => {
+  for (const code of ["primary_model_in_use", "policy_denied", "target_conflict"]) {
+    const harness = createCoordinatorHarness();
+    try {
+      armConfigOnly(harness);
+      harness.state.nextPreview = {
+        references: [{ store: "config", referenceKey: "agents.defaults.model.primary" }],
+        blockers: [CAPABILITY_BLOCKER, { code, store: "config" }],
+        runtimeApply: "blocked", fingerprints: { config: "config:alpha" },
+      };
+      const result = await harness.coordinator.deleteCompat("openclaw", {
+        providerKey: "alpha", modelId: "m-used",
+      }, { operationId: `hard-ref-${code}` });
+      assert.equal(result.canForce, false);
+      assert.equal(result.code, code === "primary_model_in_use" ? code : "references_exist");
+      assert.equal(harness.state.configOnlyCalls, 0);
+      assert.equal(harness.journal.get(`hard-ref-${code}`), null);
+    } finally { harness.cleanup(); }
   }
 });
 
@@ -1464,7 +1525,23 @@ test("OpenClaw config-only 写分离 modelPolicy allow 与 models alias/settings
     const calls = [];
     seq += 1;
     backend._configSnapshot = async () => ({ parsed, hash: "hash-1" });
-    backend.request = async (method, params) => { calls.push({ method, params }); };
+    backend.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "sessions.list") return { sessions: [], hasMore: false };
+      if (method === "cron.list") return { jobs: [], total: 0, offset: 0, limit: params.limit || 500,
+        hasMore: false, nextOffset: null, snapshotRevision: "empty" };
+      if (method === "config.patch") {
+        const merge = (target, patch) => {
+          for (const [key, value] of Object.entries(patch)) {
+            if (value === null) delete target[key];
+            else if (value && typeof value === "object" && !Array.isArray(value)) {
+              target[key] ||= {}; merge(target[key], value);
+            } else target[key] = structuredClone(value);
+          }
+        };
+        merge(parsed, JSON.parse(params.raw));
+      }
+    };
     // 密钥/注册表路径落到隔离临时目录,sqlite 分发与分身清理打成记录桩——绝不触碰真实 ~/.openclaw
     backend._authProfilesPathOverride = path.join(authDir, `auth-${seq}.json`);
     backend._modelAuthCliVersionOverride = "2026.8.1";
@@ -1479,7 +1556,7 @@ test("OpenClaw config-only 写分离 modelPolicy allow 与 models alias/settings
     return { backend, calls };
   };
   const configPatchCalls = (calls) => calls.filter((call) => call.method === "config.patch");
-  const rawOf = (calls) => JSON.parse(configPatchCalls(calls)[0].params.raw);
+  const rawOf = (calls) => JSON.parse(configPatchCalls(calls).at(-1).params.raw);
   try {
 
   // create：provider 配置与 modelPolicy 允许列表登记同一次 patch；既有 alias/settings 不动
@@ -1620,34 +1697,33 @@ test("OpenClaw config-only 写分离 modelPolicy allow 与 models alias/settings
     assert.equal(raw.models.providers.alpha, null, "旧键应删除");
     assert.equal(raw.models.providers.beta.baseUrl, "https://a");
     assert.equal(raw.models.providers.beta.models[0].id, "m1");
-    assert.deepEqual(raw.agents.defaults.modelPolicy.allow, ["keep/x", "beta/m1"], "默认可见性策略搬前缀");
-    assert.deepEqual(raw.agents.defaults.models, {
-      "alpha/m1": null,
+    assert.deepEqual(raw.agents.defaults.modelPolicy.allow, ["beta/m1", "keep/x"], "默认可见性策略搬前缀");
+    assert.deepEqual(parsed.agents.defaults.models, {
+      "keep/x": { alias: "keep" },
       "beta/m1": { alias: "fast", params: { target: true }, codeMode: true },
     }, "alias/settings 搬迁时目标显式设置优先，仅补缺失字段");
     assert.equal(raw.agents.defaults.model.primary, "beta/m1", "defaults primary 改写");
     assert.deepEqual(raw.agents.defaults.model.fallbacks, ["beta/m1", "keep/x"]);
     assert.equal(raw.agents.entries.a1.model.primary, "beta/m1", "agent primary 改写");
     assert.deepEqual(raw.agents.entries.a1.modelPolicy.allow, ["beta/m1"]);
-    assert.deepEqual(raw.agents.entries.a1.models, {
-      "alpha/m1": null, "beta/m1": { alias: "agent-fast" },
+    assert.deepEqual(parsed.agents.entries.a1.models, {
+      "beta/m1": { alias: "agent-fast" },
     });
     assert.deepEqual(raw.agents.entries.a2.model.fallbacks, ["beta/m1"]);
-    assert.equal(raw.agents.entries.a2.model.primary, "keep/x", "无关引用不动");
+    assert.equal(parsed.agents.entries.a2.model.primary, "keep/x", "无关引用不动");
     assert.deepEqual(raw.agents.entries.a2.modelPolicy.allow, ["beta/m1", "keep/x"]);
-    assert.deepEqual(raw.agents.entries.a2.models, {
-      "alpha/m1": null,
+    assert.deepEqual(parsed.agents.entries.a2.models, {
       "beta/m1": { temperature: 0.2, params: { target: true } },
     });
     assert.deepEqual(
-      calls[0].params.replacePaths.sort(),
+      configPatchCalls(calls).at(-1).params.replacePaths.sort(),
       [
+        "models.providers.alpha.models",
         "agents.defaults.model.fallbacks",
         "agents.defaults.modelPolicy.allow",
         "agents.entries.a1.modelPolicy.allow",
         "agents.entries.a2.model.fallbacks",
         "agents.entries.a2.modelPolicy.allow",
-        "models.providers.alpha.models",
       ].sort(),
     );
     const store = JSON.parse(fs.readFileSync(backend._authProfilesPathOverride, "utf8"));
@@ -1661,20 +1737,17 @@ test("OpenClaw config-only 写分离 modelPolicy allow 与 models alias/settings
     const registry = JSON.parse(fs.readFileSync(backend._registryPathOverride, "utf8"));
     assert.equal("alpha" in registry.providers, false, "注册表旧键应删除");
     assert.equal(registry.providers.beta.baseUrl, "https://a");
-    assert.equal(registry.providers.beta.apiKey, "profile:alpha:default", "注册表原 key 引用保留");
+    assert.equal(registry.providers.beta.apiKey, "profile:beta:default", "注册表 key 引用随授权改名");
     assert.equal("other" in registry.providers, true);
     assert.deepEqual(backend._shadowRenameCalls, [["alpha", "beta"]], "分身注册表同步改名");
   }
-  // 改名重试幂等:旧键已搬走且新键存在 → 全程零写
+  // 配置已搬走但本地镜像未收敛时，重试补齐镜像，不再写配置。
   {
     const parsed = { models: { providers: { beta: { baseUrl: "https://a", models: [{ id: "m1" }] } } } };
     const { backend, calls } = makeBackend(parsed);
-    await backend.applyModelChangeConfigOnly({
-      kind: "update-provider", providerKey: "alpha", patch: { renameTo: "beta" },
-    }, {});
-    assert.equal(calls.length, 0, "重试应零 config 写");
-    assert.equal(fs.existsSync(backend._authProfilesPathOverride), false, "重试不得再碰授权文件");
-    assert.deepEqual(backend._shadowRenameCalls, [], "重试不得再迁分身注册表");
+    await backend._configOnlyRenameProvider("alpha", "beta", {}, { staged: true });
+    assert.equal(configPatchCalls(calls).length, 0);
+    assert.deepEqual(backend._shadowRenameCalls, [["alpha", "beta"]]);
   }
   // 改名撞已有 provider → 409 拒绝
   {
@@ -1692,10 +1765,15 @@ test("OpenClaw config-only 写分离 modelPolicy allow 与 models alias/settings
     fs.writeFileSync(backend._authProfilesPathOverride, JSON.stringify({ profiles: {
       "alpha:default": { type: "api_key", provider: "alpha", key: "sk-old" },
     } }));
+    fs.writeFileSync(backend._registryPathOverride, JSON.stringify({ providers: {
+      alpha: { baseUrl: "https://a", models: [{ id: "m1" }], apiKey: "old-mirrored-key" },
+    } }));
     await backend.applyModelChangeConfigOnly({
       kind: "update-provider", providerKey: "alpha", patch: { renameTo: "beta" },
     }, {}, { apiKey: "sk-new" });
     const raw = rawOf(calls);
+    const renamedRegistry = JSON.parse(fs.readFileSync(backend._registryPathOverride, "utf8"));
+    assert.equal(renamedRegistry.providers.beta.apiKey, undefined, "换 Key 后不得保留旧镜像密钥");
     assert.equal("apiKey" in raw.models.providers.beta, false, "config 新条目不得带明文 key");
     const store = JSON.parse(fs.readFileSync(backend._authProfilesPathOverride, "utf8"));
     assert.equal(store.profiles["beta:default"].key, "sk-new", "新 key 必须在搬迁后写入新名");
@@ -2459,86 +2537,37 @@ test("OpenClaw 9.1 保存 Key 同步 agent 同名覆盖，任一失败不得报�
   assert.ok([...stores.values()].every((store) => store["deepseek:default"].key === "retry-key"));
 });
 
-test("OpenClaw 9.1 Key 同步必须完整读取 configured agent roster", async () => {
+test("OpenClaw 9.1 Provider 改名复用 API Key，外部密钥和登录授权保持显式错误", async () => {
   const { OpenClawBackend } = require("../app/core/openclaw-backend");
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "auth-roster-91-"));
-  const originalHome = process.env.OPENCLAW_HOME;
-  process.env.OPENCLAW_HOME = directory;
-  try {
-    const backend = new OpenClawBackend();
-    backend._isLocalGateway = () => true;
-    backend._modelAuthCliVersionOverride = "2026.9.1";
-    backend._runModelAuthCli = async () => assert.fail("未读到 roster 不得调用授权 CLI");
-    await assert.rejects(backend.setModelAuthProfileKey("deepseek", "test-key"), { code: "ENOENT" });
-    fs.writeFileSync(path.join(directory, "openclaw.json"), JSON.stringify({
-      agents: { entries: { cto: {}, main: {}, ada: {} } },
-    }));
-    assert.deepEqual(backend._modelAuthAgentIds(), ["main", "cto", "ada"]);
-    fs.writeFileSync(path.join(directory, "openclaw.json"), "broken");
-    await assert.rejects(backend.setModelAuthProfileKey("deepseek", "test-key"), SyntaxError);
-  } finally {
-    if (originalHome === undefined) delete process.env.OPENCLAW_HOME;
-    else process.env.OPENCLAW_HOME = originalHome;
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  const backend = new OpenClawBackend();
+  backend._modelAuthAgentIdsOverride = ["main"];
+  backend._loadProviderRenameAuth = async () => [{ agent: "main", id: "old:default", type: "api_key", key: "existing", order: [] }];
+  assert.equal((await backend._readProviderRenameAuth("old", "next", "", false))[0].key, "existing");
+  assert.equal((await backend._readProviderRenameAuth("old", "next", "replacement", false))[0].key, "replacement");
+  backend._loadProviderRenameAuth = async () => [{ agent: "main", id: "old:default", type: "api_key" }];
+  await assert.rejects(backend._readProviderRenameAuth("old", "next", "", false), error => error.code === "auth_profile_reauth_required");
+  backend._loadProviderRenameAuth = async () => [{ agent: "main", id: "old:user", type: "oauth" }];
+  await assert.rejects(backend._readProviderRenameAuth("old", "next", "replacement", false), error => error.code === "auth_profile_reauth_required");
 });
 
-test("OpenClaw 9.1 provider 改名：旧授权必须显式重建，OAuth 要求重新登录", async () => {
+test("OpenClaw 改名后模型发现从 canonical 授权读取原 Key，不回读过时 JSON", async () => {
   const { OpenClawBackend } = require("../app/core/openclaw-backend");
-  const makeCanonicalBackend = (profiles) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "renamed-provider-key-"));
+  const previous = process.env.OPENCLAW_HOME;
+  try {
+    process.env.OPENCLAW_HOME = dir;
+    fs.writeFileSync(path.join(dir, "openclaw.json"), JSON.stringify({ models: { providers: { renamed: {} } } }));
     const backend = new OpenClawBackend();
     backend._isLocalGateway = () => true;
     backend._usesCanonicalModelAuthCli = () => true;
     backend._modelAuthAgentIdsOverride = ["main"];
-    backend._loadCanonicalAuthProfiles = async () => profiles.map((profile) => ({ ...profile }));
-    return backend;
-  };
-
-  const missingKey = makeCanonicalBackend([
-    { id: "old:default", provider: "old", type: "api_key" },
-  ]);
-  let renamed = false;
-  missingKey._configOnlyRenameProvider = async () => { renamed = true; };
-  await assert.rejects(
-    missingKey._configOnlyUpdateProvider({ providerKey: "old", patch: { renameTo: "next" } }, {}),
-    (error) => error.code === "auth_profile_reauth_required" && error.status === 409,
-  );
-  assert.equal(renamed, false, "缺新 key 时必须在 config 改名前阻断");
-
-  const oauth = makeCanonicalBackend([
-    { id: "old:user", provider: "old", type: "oauth" },
-  ]);
-  oauth._configOnlyRenameProvider = async () => { throw new Error("must not rename"); };
-  await assert.rejects(
-    oauth._configOnlyUpdateProvider(
-      { providerKey: "old", patch: { renameTo: "next" } },
-      { apiKey: "new-key-does-not-convert-oauth" },
-    ),
-    (error) => error.code === "auth_profile_reauth_required" && error.status === 409,
-  );
-
-  const apiKey = makeCanonicalBackend([
-    { id: "old:default", provider: "old", type: "api_key" },
-  ]);
-  const order = [];
-  apiKey._writeAuthProfileKey = async (provider, key) => {
-    order.push(["create", provider, key]);
-    return `${provider}:default`;
-  };
-  apiKey._configOnlyRenameProvider = async (oldKey, newKey) => {
-    order.push(["rename", oldKey, newKey]);
-    return { restart: true };
-  };
-  apiKey._deleteCanonicalAuthProfile = async (id) => { order.push(["delete", id]); };
-  await apiKey._configOnlyUpdateProvider(
-    { providerKey: "old", patch: { renameTo: "next" } },
-    { apiKey: "replacement" },
-  );
-  assert.deepEqual(order, [
-    ["create", "next", "replacement"],
-    ["rename", "old", "next"],
-    ["delete", "old:default"],
-  ]);
+    backend._loadProviderRenameAuth = async key => [{ agent: "main", id: `${key}:default`, type: "api_key", key: "retained-fixture-key" }];
+    backend._readAuthProfiles = () => { throw new Error("Legacy JSON must not be consulted"); };
+    assert.deepEqual(await backend.revealModelProviderKey("renamed"), { apiKey: "retained-fixture-key" });
+  } finally {
+    if (previous === undefined) delete process.env.OPENCLAW_HOME; else process.env.OPENCLAW_HOME = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /** 逐项执行已注册测试，并以进程退出码让 CI 判断契约是否成立。 */

@@ -51,6 +51,7 @@ export function Select({
   disabled,
   invalid,
   triggerClassName = styles.trigger,
+  popupClassName,
   title,
   side = "bottom",
   hideIcon = false,
@@ -61,6 +62,7 @@ export function Select({
   disabled?: boolean;
   invalid?: boolean;
   triggerClassName?: string;
+  popupClassName?: string;
   title?: string;
   side?: "top" | "bottom";
   hideIcon?: boolean;
@@ -101,7 +103,7 @@ export function Select({
           sideOffset={4}
           alignItemWithTrigger={false}
         >
-          <BaseSelect.Popup className={styles.popup}>
+          <BaseSelect.Popup className={[styles.popup, popupClassName].filter(Boolean).join(" ")}>
             <BaseSelect.List>{children}</BaseSelect.List>
           </BaseSelect.Popup>
         </BaseSelect.Positioner>

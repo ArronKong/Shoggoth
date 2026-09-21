@@ -16,9 +16,10 @@ import type {
 } from "../types";
 import { Field, Option, Select, TextInput } from "./Field";
 import { useConfirm } from "./ui";
+import { profileProviderId, providerOperationId as operationId } from "../lib/shoggothProvider";
 import styles from "./ShoggothProviderSetup.module.css";
 
-type Kind = ShoggothProviderConfiguration["provider"]["kind"] | "chatgpt";
+type Kind = Exclude<ShoggothProviderConfiguration["provider"]["kind"], "custom-responses"> | "chatgpt";
 
 const INTERNAL_CODEX_ACCOUNT_ID = "shoggoth-internal-codex-default-v1";
 
@@ -28,26 +29,8 @@ const NAMES: Record<Kind, string> = {
   openrouter: "OpenRouter",
   ollama: "Ollama",
   lmstudio: "LM Studio",
-  "custom-responses": "Custom Responses",
   "amazon-bedrock": "Amazon Bedrock",
 };
-
-function operationId(prefix: string): string {
-  return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-}
-
-function profileProviderId(kind: Exclude<Kind, "chatgpt">, snapshot: ShoggothProviderSnapshot | null): string {
-  const profile = snapshot?.profile;
-  if (!profile || profile.isDefault) return `provider-${kind}`;
-  let hash = 0x811c9dc5;
-  for (const point of profile.id) {
-    hash ^= point.codePointAt(0) || 0;
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  const prefix = `provider-${kind}-`;
-  const suffix = `-${hash.toString(16).padStart(8, "0")}`;
-  return `${prefix}${profile.id.slice(0, 128 - prefix.length - suffix.length)}${suffix}`;
-}
 
 export function ShoggothProviderSetup({
   snapshot,
@@ -66,7 +49,6 @@ export function ShoggothProviderSetup({
   const [catalogState, setCatalogState] = useState<"idle" | "loading" | "ready" | "empty" | "failed">("idle");
   const [catalogAttempt, setCatalogAttempt] = useState(0);
   const [secret, setSecret] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
   const [awsRegion, setAwsRegion] = useState("");
   const [awsProfile, setAwsProfile] = useState("");
   const [busy, setBusy] = useState(false);
@@ -75,7 +57,9 @@ export function ShoggothProviderSetup({
   const [locallyLoggedOut, setLocallyLoggedOut] = useState(false);
   const chatgpt = snapshot?.providers.find((provider) => provider.kind === "chatgpt");
   const effectiveChatGptAuthState = locallyLoggedOut ? "missing" : chatgpt?.authState;
-  const needsSecret = ["openai-api-key", "openrouter", "custom-responses"].includes(kind);
+  const needsSecret = ["openai-api-key", "openrouter"].includes(kind);
+  const customConfigured = snapshot?.providers.some((provider) =>
+    provider.id === snapshot.profile?.configuredProviderId && provider.kind === "custom-responses");
   const selectedModel = useMemo(
     () => models.find((entry) => entry.id === model) || null,
     [model, models],
@@ -163,7 +147,7 @@ export function ShoggothProviderSetup({
             kind,
             name: NAMES[kind],
             model: model.trim(),
-            baseUrl: kind === "custom-responses" ? baseUrl.trim() || null : null,
+            baseUrl: null,
             awsRegion: kind === "amazon-bedrock" ? awsRegion.trim() || null : null,
             awsProfile: kind === "amazon-bedrock" ? awsProfile.trim() || null : null,
           },
@@ -245,7 +229,10 @@ export function ShoggothProviderSetup({
 
   return (
     <div className={styles.root}>
-      {kind === "chatgpt" && effectiveChatGptAuthState === "authenticated"
+      {customConfigured && <span className="ui-hint" role="status">
+        {t("shoggothProvider.customCurrent", { model: snapshot?.profile?.defaultModel })}
+      </span>}
+      {!customConfigured && kind === "chatgpt" && effectiveChatGptAuthState === "authenticated"
         && chatgpt?.authSource === "native-codex" && (
         <span className="ui-hint" role="status">{t("shoggothProvider.nativeCodexConnected")}</span>
       )}
@@ -296,11 +283,6 @@ export function ShoggothProviderSetup({
             onChange={(event) => setSecret(event.target.value)} />
         </Field>
       )}
-      {kind === "custom-responses" && (
-        <Field label={t("shoggothProvider.baseUrl")}>
-          <TextInput value={baseUrl} disabled={busy} onChange={(event) => setBaseUrl(event.target.value)} />
-        </Field>
-      )}
       {kind === "amazon-bedrock" && (
         <div className={styles.row}>
           <Field label={t("shoggothProvider.awsRegion")}>
@@ -330,7 +312,7 @@ export function ShoggothProviderSetup({
             </button>
           </>
         )}
-        {snapshot?.profile && (snapshot.profile.configuredProviderId !== null
+        {!customConfigured && snapshot?.profile && (snapshot.profile.configuredProviderId !== null
           || snapshot.profile.defaultModel !== null) && (
           <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={busy}
             onClick={() => void clear()}>

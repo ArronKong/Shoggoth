@@ -495,6 +495,12 @@ class ChatSessionStore {
     this.opened = false;
   }
 
+  getCreateOperation(operationId) {
+    this.#assertOpen();
+    if (!validOpaqueId(operationId)) throw chatSessionError("CHAT_SESSION_INVALID", "operationId 无效");
+    return clone(this.container.createOperations[operationId] || null);
+  }
+
   createSession(input) {
     this.#assertOpen();
     if (!exactObject(input, ["operationId", "profileId", "workspace", "createdAt"])
@@ -744,6 +750,22 @@ class ChatSessionStore {
   listSessions() {
     this.#assertOpen();
     return Object.values(this.container.sessions).map(clone);
+  }
+
+  purgeProfile(profileId) {
+    this.#assertOpen();
+    if (!validOpaqueId(profileId)) throw chatSessionError("CHAT_SESSION_INVALID", "Profile 无效");
+    const keys = new Set(Object.values(this.container.sessions)
+      .filter((session) => session.profileId === profileId).map((session) => session.sessionKey));
+    for (const operation of Object.values(this.container.createOperations)) {
+      if (operation.profileId === profileId) keys.add(operation.sessionKey);
+    }
+    const candidate = { ...this.container, revision: this.container.revision + 1 };
+    for (const field of ["sessions", "createOperations", "bindingOperations", "remoteOperations", "cronRuns"]) {
+      candidate[field] = Object.fromEntries(Object.entries(this.container[field])
+        .filter(([, record]) => record.profileId !== profileId && !keys.has(record.sessionKey)));
+    }
+    this.container = this.#write(candidate);
   }
 
   requestBinding(sessionKey, operationId, createdAt) {

@@ -1171,12 +1171,12 @@ function runMigrationContracts() {
   }));
   const oldHookRefs = sourceWithoutProviderVariables.filter(({ source }) => /\buseAutoHideScrollbars\b/.test(source));
   check("Old auto-hide Hook file and references are removed", !oldHook.exists && oldHookRefs.length === 0, `references=${oldHookRefs.map(({ file }) => relative(file)).join(", ") || "none"}`);
-  // Provider 的五个 --ui-scrollbar-* 变量是新系统本身；除此之外，对 TSX/CSS 原文（含注释）
-  // 做词边界扫描，保证旧 class 字符串无论位于模板字符串什么位置都无法漏过。
+  // 业务样式可以引用共享的 --ui-scrollbar-* 变量；扫描原文（含注释）时
+  // 只匹配完整旧 class，避免把这些变量的消费者误报为遗留样式。
   const uiScrollbarFiles = sourceFiles
     .filter((file) => file !== providerPath && file !== providerCssPath)
-    .filter((file) => /\bui-scrollbar\b/.test(safeRead(file).source));
-  check("Legacy ui-scrollbar text is removed outside Provider (including comments)", uiScrollbarFiles.length === 0, `files=${uiScrollbarFiles.map(relative).join(", ") || "none"}`);
+    .filter((file) => /(?<![\w-])ui-scrollbar(?![\w-])/.test(safeRead(file).source));
+  check("Legacy ui-scrollbar class is removed outside Provider (including comments)", uiScrollbarFiles.length === 0, `files=${uiScrollbarFiles.map(relative).join(", ") || "none"}`);
   check(
     "Immersive chat has no local scrollbar state or timer",
     !/\bscrollHideTimer\b|\bsetScrolling\b|\bstyles\.scrolling\b/.test(immersive.source),

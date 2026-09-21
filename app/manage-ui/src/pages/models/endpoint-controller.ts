@@ -32,6 +32,7 @@ export type EndpointMutationStep = {
   stage?: string;
   blockers?: EndpointMutationBlocker[];
   references?: EndpointSafeReference[];
+  canForce?: boolean;
 };
 
 // UI 只消费结构化、安全字段；controller 不把配置正文、密钥或任意后端消息放进恢复视图。
@@ -47,6 +48,7 @@ export interface EndpointRecoveryView {
   blockedRemoval?: {
     operationId: string;
     modelId: string;
+    modelIds?: string[];
   };
 }
 
@@ -57,6 +59,7 @@ export type EndpointMutationOutcome = {
   code?: string;
   stage?: string;
   activation?: ModelChangeApplyResult["activation"];
+  canForce?: boolean;
   sync: "synced" | "pending";
   snapshot?: CustomEndpointsSnapshot;
   steps: EndpointMutationStep[];
@@ -79,6 +82,7 @@ export interface EndpointController {
   save(
     input: CustomEndpointInput,
     session: EndpointMutationSession,
+    source?: CustomEndpoint,
   ): Promise<EndpointMutationOutcome>;
   remove(
     endpoint: CustomEndpoint,
@@ -108,6 +112,26 @@ export function createEndpointRootOperationId(): string {
   const uuid = globalThis.crypto?.randomUUID?.();
   if (uuid) return `endpoint-${uuid}`;
   return `endpoint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function canConfirmEndpointRemoval(step: Pick<EndpointMutationStep,
+  "code" | "blockers" | "references" | "canForce">): boolean {
+  const codes = (step.blockers ?? []).map((blocker) => blocker.code);
+  if (!step.references?.length || (step.code !== "references_exist" && !codes.includes("references_exist"))) return false;
+  if (typeof step.canForce === "boolean") return step.canForce;
+  // Older servers did not expose a decision; retain their narrow behavior.
+  return codes.every((code) => code === "references_exist");
+}
+
+export function endpointOutcomeReferences(outcome: EndpointMutationOutcome): EndpointSafeReference[] {
+  const seen = new Set<string>();
+  return [...(outcome.recovery?.references ?? []), ...outcome.steps.flatMap((step) => step.references ?? [])]
+    .filter((reference) => {
+      const key = JSON.stringify([reference.store, reference.referenceKey, reference.scope, reference.agent, reference.profile]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 export function createEndpointMutationSession(
@@ -187,6 +211,21 @@ export function createHermesEndpointController(backend: string): EndpointControl
       void force;
       const snapshot = await deleteCustomEndpoint(backend, undefined, endpoint.id);
       return appliedSnapshot(session, snapshot);
+    },
+  };
+}
+
+export function createShoggothEndpointController(profile?: string): EndpointController {
+  const backend = "shoggoth";
+  return {
+    backend,
+    list: (signal) => withAbortSignal(signal, () => listCustomEndpoints(backend, profile)),
+    validate: (input, signal) => validateCustomEndpoint(backend, profile, input, signal),
+    async save(input, session) {
+      return appliedSnapshot(session, await saveCustomEndpoint(backend, profile, input));
+    },
+    async remove(endpoint, session) {
+      return appliedSnapshot(session, await deleteCustomEndpoint(backend, profile, endpoint.id));
     },
   };
 }

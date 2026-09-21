@@ -4,6 +4,7 @@ const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
 const { lstatIfExists, serviceError } = require("./security");
 
 const RETIRED_TOOL_NAMES = new Set([
+  "memory_confirm",
   "browser_session_open", "browser_session_close", "browser_navigate", "browser_back",
   "browser_snapshot", "browser_click", "browser_type", "browser_press", "browser_scroll",
   "browser_tabs", "browser_tab_open", "browser_tab_activate", "browser_tab_close",
@@ -113,6 +114,18 @@ class PermissionEngine {
         effect: overrides.get(tool.tool) || "allow",
       })),
     };
+  }
+  purgeProfile(profileId) {
+    this._assertOpen();
+    if (!this.profileOverrides.has(profileId)) return;
+    const previous = this.profileOverrides.get(profileId);
+    this.profileOverrides.delete(profileId);
+    this.revision += 1;
+    try { this._persist(); } catch (error) {
+      this.profileOverrides.set(profileId, previous);
+      this.revision -= 1;
+      throw error;
+    }
   }
   authorize(input) {
     this._assertOpen();

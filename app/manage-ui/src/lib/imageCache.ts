@@ -67,11 +67,10 @@ export async function getImages(key: string): Promise<string[] | undefined> {
 // 文件」的结构化字段（Hermes 只有转录里的 `[file: x]` 文本 marker，OpenClaw
 // 连 marker 都没有——纯媒体消息在历史里是 `[User sent media without caption]`
 // 这样的占位）。于是重开 app / 切回会话后，用户看不到自己发过什么文件。
-// 这里只缓存元数据（文件名 + 类别），不存字节——chip 只需要名字。
+// 缓存元数据与有界的文件来源，让附件标签可以重新打开文件。
 // 复用同一个 store，靠 key 前缀分空间（避免为此升 DB 版本动已有数据）。
-// `src`：仅视频缓存 dataURL（重载后仍可播放）。其余类别只留名字——chip 不需要
-// 数据，而视频若超过调用方的大小上限也会退化成无 src 的 chip。
-export interface CachedFileRef { name: string; kind: string; src?: string }
+// `src`：安全的应用媒体引用或有界 dataURL；超过调用方大小上限只保留名字。
+export interface CachedFileRef { name: string; kind: string; src?: string; sourceAmbiguous?: boolean }
 
 export function fileCacheKey(sessionKey: string, text: string): string {
   return `files::${sessionKey}::${(text || "").trim()}`;
@@ -83,7 +82,18 @@ export async function putFiles(key: string, files: CachedFileRef[]): Promise<voi
     const d = await openDb();
     await new Promise<void>((resolve, reject) => {
       const tx = d.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(files, key);
+      const store = tx.objectStore(STORE);
+      const previous = store.get(key);
+      previous.onsuccess = () => {
+        const old: CachedFileRef[] | undefined = Array.isArray(previous.result) ? previous.result : undefined;
+        // The legacy key is session + text. Repeated text with different files
+        // cannot identify a historical message, so never lend it the new bytes.
+        const ambiguous = old && (old.some((file) => file.sourceAmbiguous)
+          || old.length !== files.length
+          || old.some((file, index) => file.name !== files[index].name
+            || file.kind !== files[index].kind || file.src !== files[index].src));
+        store.put(ambiguous ? files.map(({ name, kind }) => ({ name, kind, sourceAmbiguous: true })) : files, key);
+      };
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -100,7 +110,7 @@ export async function getFiles(key: string): Promise<CachedFileRef[] | undefined
       const req = tx.objectStore(STORE).get(key);
       req.onsuccess = () => {
         const v = req.result;
-        resolve(Array.isArray(v) && v.every((x) => x && typeof x === "object" && typeof x.name === "string")
+        resolve(Array.isArray(v) && v.every((x) => x && typeof x === "object" && typeof x.name === "string" && !x.sourceAmbiguous)
           ? (v as CachedFileRef[])
           : undefined);
       };

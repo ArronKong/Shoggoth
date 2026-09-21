@@ -32,7 +32,7 @@
 .leftTrack,
 .rightTrack {
   animation-name: orbit;
-  animation-duration: 1.6s;
+  animation-duration: calc(1.6s / 1.5);
   animation-timing-function: linear;
   animation-iteration-count: infinite;
   animation-fill-mode: both;
@@ -41,7 +41,7 @@
 }
 
 .rightTrack {
-  animation-delay: -0.8s;
+  animation-delay: calc(-0.8s / 1.5);
 }
 
 .leftBall,

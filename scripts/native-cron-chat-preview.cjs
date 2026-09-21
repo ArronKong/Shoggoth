@@ -17,9 +17,9 @@ const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
     bundle: true, format: "esm", platform: "browser", target: "chrome120", outdir: output,
     nodePaths: [path.join(root, "app/manage-ui/node_modules")], entryNames: "preview",
     define: { "process.env.NODE_ENV": '"development"' },
-    loader: { ".woff2": "file", ".woff": "file", ".svg": "file", ".png": "file" },
+    loader: { ".woff2": "file", ".woff": "file", ".svg": "file", ".png": "file", ".webp": "file" },
     plugins: [{ name: "provider-logos", setup(build) {
-      build.onLoad({ filter: /ProviderLogo\.tsx$/u }, ({ path: file }) => {
+      build.onLoad({ filter: /ProviderLogo\.tsx$/ }, ({ path: file }) => {
         const directory = path.join(root, "app/manage-ui/src/assets/provider-logos");
         const logos = Object.fromEntries(fs.readdirSync(directory).filter((name) => name.endsWith(".svg"))
           .map((name) => [`../../assets/provider-logos/${name}`, fs.readFileSync(path.join(directory, name), "utf8")]));
@@ -34,7 +34,7 @@ const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
     if (!file.startsWith(output + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
       response.writeHead(404); response.end(); return;
     }
-    response.setHeader("Content-Type", ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml" })[path.extname(file)] || "application/octet-stream");
+    response.setHeader("Content-Type", ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".webp": "image/webp" })[path.extname(file)] || "application/octet-stream");
     fs.createReadStream(file).pipe(response);
   });
   server.listen(0, "127.0.0.1", () => console.log(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/#/chat`, output })));

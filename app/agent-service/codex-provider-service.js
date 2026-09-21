@@ -24,7 +24,7 @@ const PRESET_KINDS = new Set([
 ]);
 const CUSTOM_SECRET_KINDS = new Set(["openai-api-key", "openrouter", "custom-responses"]);
 const CONFIG_FIELDS = Object.freeze([
-  "id", "kind", "name", "baseUrl", "model", "headers", "awsRegion", "awsProfile",
+  "id", "kind", "name", "baseUrl", "model", "models", "headers", "awsRegion", "awsProfile",
 ]);
 
 function providerError(code, message) {
@@ -106,7 +106,7 @@ function buildProviderPreset(input, options = {}) {
       awsProfile: null,
     };
   } else if (input.kind === "custom-responses") {
-    allowed = [...commonAllowed, "baseUrl", "headers"];
+    allowed = [...commonAllowed, "baseUrl", "headers", "models"];
     assertNoFields(input, ["awsRegion", "awsProfile"]);
     fixed = {
       baseUrl: normalizedApiRoot(input.baseUrl),
@@ -144,6 +144,7 @@ function buildProviderPreset(input, options = {}) {
     name: input.name,
     baseUrl: fixed.baseUrl,
     model: input.model ?? null,
+    ...(own(input, "models") ? { models: input.models } : {}),
     credentialRef: options.credentialRef ?? null,
     headers: fixed.headers,
     awsRegion: fixed.awsRegion,

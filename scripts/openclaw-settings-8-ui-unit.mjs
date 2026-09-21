@@ -2,11 +2,13 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import vm from "node:vm";
-import ts from "typescript";
 
 const root = path.resolve(import.meta.dirname, "..");
+const requireUi = createRequire(path.join(root, "app/manage-ui/package.json"));
+const ts = requireUi("typescript");
 const pagePath = path.join(root, "app/manage-ui/src/pages/SettingsPage.tsx");
 const source = fs.readFileSync(pagePath, "utf8");
 const ast = ts.createSourceFile(pagePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);

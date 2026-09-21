@@ -1114,6 +1114,9 @@ class PiRuntimeHost {
         texts,
         usage,
         responseId: responseIdFor(active, assistants),
+        ...(assistants.length && assistants.every(message => typeof message.usage?.cost?.total === "number"
+          && Number.isFinite(message.usage.cost.total) && message.usage.cost.total >= 0)
+          ? { costUsd: assistants.reduce((sum, message) => sum + message.usage.cost.total, 0) } : {}),
         provider: safeString(last?.provider, 128) ? last.provider : null,
         model: safeString(last?.model, 512) ? last.model : null,
       });
@@ -1184,6 +1187,7 @@ class PiRuntimeHost {
       provider: result.provider,
       model: result.model,
       usage: result.usage,
+      ...(typeof result.costUsd === "number" ? { costUsd: result.costUsd } : {}),
     });
     this._publish({
       known: true,

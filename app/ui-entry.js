@@ -50,6 +50,7 @@ const { registerDesktopSecretIpc } = require("./desktop-secret-ipc");
 const { registerDesktopComputerIpc } = require("./desktop-computer-ipc");
 const { registerDesktopInspirationIpc } = require("./desktop-inspiration-ipc");
 const { createDesktopInspirationController } = require("./desktop-inspiration-controller");
+const { createDesktopBackendStopAction } = require("./desktop-backend-stop");
 const { registerDesktopMicrophoneIpc } = require("./desktop-microphone-ipc");
 const { registerDesktopChatClipboardIpc } = require("./desktop-chat-clipboard-ipc");
 const { registerDesktopTelemetryIpc } = require("./desktop-telemetry-ipc");
@@ -248,8 +249,8 @@ function connectionFieldsChanged(prev, next) {
 }
 
 // Called after the 设置 page (or native dialog) saves config. Re-points ONLY the
-// live connections whose settings actually changed and reloads the UI only when
-// needed — a theme/notification-only save applies live and must not kill the page
+// live connections whose settings actually changed. Auto-saved settings must
+// apply in place without killing the page
 // (or an in-flight chat stream) with a full reconnect + reload. Best-effort: a
 // failed reconnect surfaces on the next request.
 async function applyConfigChange() {
@@ -304,11 +305,8 @@ async function applyConfigChange() {
 
   buildMenu(); // menu labels may depend on locale; cheap to always rebuild.
 
-  // Editing connection endpoints still needs a fresh transport. Toggling a
-  // backend updates the existing settings page without losing its local state.
-  if (mainWindow && (diff.gateway || diff.hermes)) {
-    mainWindow.webContents.reload();
-  }
+  // stop/reconfigure above refresh the affected transports. Keep the renderer
+  // mounted so an automatic save cannot interrupt later edits or queued writes.
 
   appliedConfig = next;
 }
@@ -750,7 +748,7 @@ ipcMain.handle("openclaw:resolve-cli-version", async (_event, cliPath) => {
 });
 
 // Desktop notifications. The renderer-side Notifier detects a notify-worthy event
-// (chat reply / cron run / task change) and asks main to fire a native macOS
+// (chat reply / cron run / task or Inspiration change) and asks main to fire a native macOS
 // notification. Main is the authoritative gate: it re-checks the per-category
 // config toggle (config-store is the single source) and suppresses while the
 // window is focused (you're already looking at the app). A click routes back to
@@ -798,6 +796,9 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    // The shared bundle starts as an agent so Service/MCP launches never become
+    // a second foreground App. Only the single-instance UI owner is promoted.
+    if (process.platform === "darwin") app.setActivationPolicy("regular");
     const startupGeneration = ++hostGeneration;
     // UI role + single-instance owner only. Inspect config BEFORE ensure() so a
     // lost config alongside existing telemetry state is not mistaken for setup.
@@ -1153,7 +1154,8 @@ if (!gotLock) {
     buildMenu();
     desktopInspiration = createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeImage, globalShortcut, screen, ipcMain,
       configStore, getMainWindow: () => mainWindow, showMainWindow, getUiOrigin: () => serverOrigin,
-      iconPath: app.isPackaged ? path.join(process.resourcesPath, 'icon.icns') : path.join(__dirname, '../build/icon.png'),
+      stopBackend: createDesktopBackendStopAction({ dialog, productHost: shoggothProductHost,
+        getLocale: () => resolveLocale(readConfig().locale) }),
       getLocale: () => resolveLocale(readConfig().locale), quit: () => app.quit() });
     disposeMicrophoneIpc = registerDesktopMicrophoneIpc({ ipcMain, session: session.defaultSession, systemPreferences,
       getWindows: () => [mainWindow, desktopInspiration?.getWindow()], getUiOrigin: () => serverOrigin });

@@ -18,7 +18,7 @@ import { useConfirm, useToast } from "../../components/ui";
 import OAuthProvidersCard from "../keys/OAuthProvidersCard";
 import ProviderLogo from "../keys/ProviderLogo";
 import { ProviderCredentialFields } from "../keys/ProviderCredentialFields";
-import { ToolKeysCard } from "../keys/ToolKeysCard";
+import { SHOW_TOOL_KEYS, ToolKeysCard } from "../keys/ToolKeysCard";
 import styles from "../keys/KeysPanel.module.css";
 import CustomEndpointsPanel from "./CustomEndpointsPanel";
 import { createOpenClawEndpointController } from "./openclaw-endpoint-controller";
@@ -476,7 +476,9 @@ export default function OpenClawProvidersPane({
         onActivation={onActivation}
       />
 
-      <OpenClawToolKeysCard backend={backend} active={active} onActivation={onActivation} />
+      {SHOW_TOOL_KEYS && (
+        <OpenClawToolKeysCard backend={backend} active={active} onActivation={onActivation} />
+      )}
     </div>
   );
 }

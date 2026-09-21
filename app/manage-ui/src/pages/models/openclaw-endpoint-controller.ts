@@ -16,6 +16,7 @@ import type {
   ModelChangeApplyResult,
 } from "../../types";
 import {
+  canConfirmEndpointRemoval,
   type EndpointController,
   type EndpointMutationOutcome,
   type EndpointMutationSession,
@@ -29,7 +30,7 @@ import {
 } from "./endpoint-mutation-state";
 
 export interface OpenClawEndpointDependencies {
-  listCustomEndpoints(backend: string): Promise<CustomEndpointsSnapshot>;
+  listCustomEndpoints(backend: string, profile?: string, options?: { refreshAuth?: boolean }): Promise<CustomEndpointsSnapshot>;
   validateCustomEndpoint(
     backend: string,
     profile: string | undefined,
@@ -50,6 +51,7 @@ export interface OpenClawEndpointDependencies {
     backend: string,
     items: Parameters<typeof applyModelBatch>[1],
     operationId?: string,
+    options?: Parameters<typeof applyModelBatch>[3],
   ): Promise<ModelChangeApplyResult>;
   removeModelConfig(
     backend: string,
@@ -89,7 +91,10 @@ type FrozenPlan = {
   secret?: string;
   state: EndpointMutationState;
   pendingActivation?: ModelChangeApplyResult["activation"];
-  blockedRemoval?: { operationId: string; modelId: string };
+  blockedRemoval?: { operationId: string; modelId: string; modelIds?: string[] };
+  readonly batchModelSelection: boolean;
+  readonly preservePrimaryRefs: boolean;
+  confirmedRemovals: Set<string>;
   baseline?: CustomEndpoint;
   removeForce?: boolean;
 };
@@ -133,6 +138,7 @@ function stepFromResult(operationId: string, result: ModelChangeApplyResult): En
         ? [{ code: blocker.code, ...(blocker.scope ? { scope: blocker.scope } : {}) }]
         : []),
     references: safeReferences(extended.references),
+    canForce: result.canForce,
   };
 }
 
@@ -154,13 +160,14 @@ function stepFromError(operationId: string, error: unknown): EndpointMutationSte
     stage: typeof source.stage === "string" ? source.stage : "request",
     blockers,
     references: safeReferences(source.safeReferences),
+    ...(typeof source.canForce === "boolean" ? { canForce: source.canForce } : {}),
   };
 }
 
 function sameModels(endpoint: CustomEndpoint | undefined, expected: string[]): boolean {
   if (!endpoint) return false;
   return endpoint.models.length === expected.length
-    && endpoint.models.every((model, index) => model === expected[index]);
+    && endpoint.models.every((model) => expected.includes(model));
 }
 
 function endpointMatches(plan: FrozenPlan, endpoint: CustomEndpoint | undefined): boolean {
@@ -201,8 +208,8 @@ export function createOpenClawEndpointController(
   let lastSnapshot: CustomEndpointsSnapshot | null = null;
   const plans = new Map<string, FrozenPlan>();
 
-  const load = async () => {
-    const snapshot = await dependencies.listCustomEndpoints(backend);
+  const load = async (options?: { refreshAuth?: boolean }) => {
+    const snapshot = await dependencies.listCustomEndpoints(backend, undefined, options);
     lastSnapshot = snapshot;
     return snapshot;
   };
@@ -216,7 +223,8 @@ export function createOpenClawEndpointController(
     if (existing) return existing;
     const models = uniqueModels(input);
     const id = (input.id || input.name).trim();
-    const source = lastSnapshot?.endpoints.find((endpoint) => endpoint.id === id) ?? sourceFallback ?? null;
+    const sourceId = sourceFallback?.id ?? id;
+    const source = lastSnapshot?.endpoints.find((endpoint) => endpoint.id === sourceId) ?? sourceFallback ?? null;
     const { apiKey, ...publicInput } = input;
     const plan: FrozenPlan = {
       session: { ...session },
@@ -229,6 +237,9 @@ export function createOpenClawEndpointController(
       target: { ...publicInput, id, model: models[0] ?? "", models },
       ...(apiKey?.trim() ? { secret: apiKey.trim() } : {}),
       state: createEndpointMutationState(session.rootOperationId, backend, session.kind),
+      batchModelSelection: lastSnapshot?.form?.batchModelSelection === true,
+      preservePrimaryRefs: lastSnapshot?.form?.allowPrimaryModelRemoval === true,
+      confirmedRemovals: new Set(),
     };
     plans.set(session.rootOperationId, plan);
     return plan;
@@ -260,7 +271,8 @@ export function createOpenClawEndpointController(
     try {
       const result = await request();
       const step = stepFromResult(operationId, result);
-      plan.state = reduceEndpointMutationState(plan.state, { type: "phase_result", step });
+      plan.state = reduceEndpointMutationState(plan.state, { type: "phase_result", step,
+        zeroWrite: step.status === "failed" && step.stage === "preflight" });
       if (step.status === "applied") emitActivation(plan, result.activation);
       return step;
     } catch (error) {
@@ -294,6 +306,7 @@ export function createOpenClawEndpointController(
       operationId: plan.session.rootOperationId,
       status,
       ...(code ? { code } : {}),
+      ...(typeof step?.canForce === "boolean" ? { canForce: step.canForce } : {}),
       stage: step?.stage ?? (sync === "synced" ? "snapshot" : "recovery"),
       ...(activation ? { activation } : {}),
       sync,
@@ -321,8 +334,13 @@ export function createOpenClawEndpointController(
     snapshotProvesApplied = false,
   ): Promise<EndpointMutationOutcome> => {
     try {
-      const snapshot = await load();
-      const current = snapshot.endpoints.find((endpoint) => endpoint.id === plan.target.id);
+      const modelOnlyEdit = plan.session.kind === "edit" && Boolean(plan.source)
+        && plan.target.id === plan.source?.id
+        && !plan.secret && plan.target.baseUrl === plan.source?.baseUrl
+        && (!Object.hasOwn(plan.target, "api") || plan.target.api === plan.source?.api);
+      const snapshot = await load(modelOnlyEdit ? { refreshAuth: false } : undefined);
+      const current = snapshot.endpoints.find((endpoint) => endpoint.id === plan.source?.id)
+        ?? snapshot.endpoints.find((endpoint) => endpoint.id === plan.target.id);
       if (current) {
         // This is display/recovery context only. Public config (including
         // hasApiKey) cannot prove that the requested secret or mutation applied.
@@ -360,7 +378,8 @@ export function createOpenClawEndpointController(
     const id = plan.target.id ?? "";
     const models = plan.target.models ?? [];
     const complete = (snapshot: CustomEndpointsSnapshot) =>
-      endpointMatches(plan, snapshot.endpoints.find((endpoint) => endpoint.id === id));
+      endpointMatches(plan, snapshot.endpoints.find((endpoint) => endpoint.id === id))
+      && (!plan.source || plan.source.id === id || !snapshot.endpoints.some((endpoint) => endpoint.id === plan.source?.id));
 
     if (!plan.source) {
       const providerOperation = `${plan.session.rootOperationId}:provider`;
@@ -387,6 +406,7 @@ export function createOpenClawEndpointController(
       }
     } else {
       const patch: Parameters<typeof updateModelProvider>[2] = {};
+      if (id !== plan.source.id) patch.renameTo = id;
       if (plan.target.baseUrl !== plan.source.baseUrl) patch.baseUrl = plan.target.baseUrl;
       if (
         Object.prototype.hasOwnProperty.call(plan.target, "api")
@@ -398,11 +418,30 @@ export function createOpenClawEndpointController(
       if (Object.keys(patch).length > 0) {
         const providerOperation = `${plan.session.rootOperationId}:provider`;
         const providerStep = await runStep(plan, providerOperation, () =>
-          dependencies.updateModelProvider(backend, id, patch, providerOperation));
+          dependencies.updateModelProvider(backend, plan.source!.id, patch, providerOperation));
         if (providerStep.status !== "applied") return reconcile(plan, providerStep, complete);
       }
 
       const additions = models.filter((model) => !plan.source?.models.includes(model));
+      const deletions = plan.source.models.filter((model) => !models.includes(model));
+      if (plan.batchModelSelection && additions.length + deletions.length > 0
+        && additions.length + deletions.length <= 100) {
+        const selectionOperation = `${plan.session.rootOperationId}:selection`;
+        const force = plan.confirmedRemovals.has(selectionOperation);
+        const selectionStep = await runStep(plan, selectionOperation, () =>
+          dependencies.applyModelBatch(backend, [
+            ...additions.map((model) => ({ providerKey: id, model: { id: model } })),
+            ...deletions.map((modelId) => ({ op: "delete" as const, providerKey: id, modelId })),
+          ], selectionOperation, { confirmReferences: true, force, preservePrimaryRefs: plan.preservePrimaryRefs }));
+        if (selectionStep.status !== "applied") {
+          plan.blockedRemoval = !force && canConfirmEndpointRemoval(selectionStep)
+            ? { operationId: selectionOperation, modelId: deletions[0], modelIds: deletions }
+            : undefined;
+          return reconcile(plan, selectionStep, complete);
+        }
+        plan.blockedRemoval = undefined;
+        return reconcile(plan, null, complete);
+      }
       if (additions.length > 0) {
         const addOperation = `${plan.session.rootOperationId}:add`;
         const addStep = await runStep(plan, addOperation, () =>
@@ -414,19 +453,15 @@ export function createOpenClawEndpointController(
         if (addStep.status !== "applied") return reconcile(plan, addStep, complete);
       }
 
-      const deletions = plan.source.models.filter((model) => !models.includes(model));
       for (const [index, model] of deletions.entries()) {
         const deleteOperation = `${plan.session.rootOperationId}:delete:${index}`;
+        const force = plan.confirmedRemovals.has(deleteOperation);
         const deleteStep = await runStep(plan, deleteOperation, () =>
-          dependencies.removeModelConfig(backend, id, model, deleteOperation, false));
+          dependencies.removeModelConfig(backend, id, model, deleteOperation, force));
         if (deleteStep.status !== "applied") {
-          const blockerCodes = (deleteStep.blockers ?? []).map((blocker) => blocker.code);
-          if (
-            (deleteStep.code === "references_exist" || blockerCodes.includes("references_exist"))
-            && blockerCodes.every((code) => code === "references_exist")
-          ) {
+          if (!force && canConfirmEndpointRemoval(deleteStep)) {
             plan.blockedRemoval = { operationId: deleteOperation, modelId: model };
-          }
+          } else plan.blockedRemoval = undefined;
           return reconcile(plan, deleteStep, complete);
         }
       }
@@ -472,8 +507,8 @@ export function createOpenClawEndpointController(
       signal,
       () => dependencies.validateCustomEndpoint(backend, undefined, input),
     ),
-    save(input, session) {
-      return executeSave(planFor(input, session));
+    save(input, session, source) {
+      return executeSave(planFor(input, session, source));
     },
     remove(endpoint, session, force) {
       const plan = planFor({
@@ -503,18 +538,7 @@ export function createOpenClawEndpointController(
       if (!plan || plan.blockedRemoval?.operationId !== childOperationId) {
         throw new Error("endpoint_blocked_removal_session_missing");
       }
-      const { modelId } = plan.blockedRemoval;
-      const step = await runStep(plan, childOperationId, () =>
-        dependencies.removeModelConfig(
-          backend,
-          plan.target.id ?? "",
-          modelId,
-          childOperationId,
-          true,
-        ));
-      if (step.status !== "applied") {
-        return reconcile(plan, step, () => false);
-      }
+      plan.confirmedRemovals.add(childOperationId);
       plan.blockedRemoval = undefined;
       return executeSave(plan);
     },

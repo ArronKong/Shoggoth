@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
 import { animate } from "animejs";
 import "./usage/UsagePage.css";
-import type { SessionPreview, SessionPreviewMessage, UsageBreakdown, UsageDailyPoint, UsageSeries, UsageTopSession } from "../types";
+import type { SessionPreview, SessionPreviewMessage, UsageDailyPoint, UsageTopSession } from "../types";
 import { getSessionPreview, getUsageBreakdown, getUsageSeries, listAgents } from "../api/client";
 import BackendTabs from "../components/BackendTabs";
 import Modal from "../components/Modal";
@@ -12,8 +12,9 @@ import { toSanitizedMarkdownHtml } from "../lib/markdown";
 import PillTabs from "../components/PillTabs";
 import { useBackendState } from "../lib/backends";
 import { useStickyState } from "../lib/useStickyState";
+import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
-import { createAgentNameIndex, resolveAgentDisplayName, type AgentNameIndex } from "../lib/agentDisplay";
+import { createAgentNameIndex, resolveAgentDisplayName } from "../lib/agentDisplay";
 import {
   fmtCost,
   fmtTokens,
@@ -155,9 +156,6 @@ function ModelDonut({ slices, centerPct }: { slices: { label: string; frac: numb
   );
 }
 
-const seriesCache: Record<string, UsageSeries> = {};
-const breakdownCache: Record<string, UsageBreakdown> = {};
-
 const fmtPct = (n: number): string => `${n.toFixed(1)}%`;
 
 // anime.js 数字滚动：挂载从 0 滚入，值变化（切范围/后端命中缓存）从当前显示值滚到新值。
@@ -211,13 +209,20 @@ export default function UsagePage() {
   const { t } = useTranslation();
   const [backend, setBackend] = useBackendState("usage", undefined, { surface: "usage" });
   const [range, setRange] = useStickyState<RangeKey>("usage.range", "30d");
-  const [series, setSeries] = useState<UsageSeries | null>(null);
-  const [seriesLoading, setSeriesLoading] = useState(true);
-  const [breakdown, setBreakdown] = useState<UsageBreakdown | null>(null);
-  const [bdLoading, setBdLoading] = useState(true);
-  const [agentNames, setAgentNames] = useState<AgentNameIndex>({});
-  const [err, setErr] = useState<string | null>(null);
-  const [reloadTick, setReloadTick] = useState(0);
+  // Each source keeps its own failure boundary while sharing connection invalidation.
+  const { data: series, loading: seriesLoading, error: seriesError, refresh: refreshSeries } = usePageCache(
+    `usage:series:${backend}:${range}`, () => getUsageSeries(backend, range),
+  );
+  const { data: breakdown, loading: bdLoading, error: breakdownError, refresh: refreshBreakdown } = usePageCache(
+    `usage:breakdown:${backend}:${range}`, () => getUsageBreakdown(backend, range),
+  );
+  const { data: agents, refresh: refreshAgents } = usePageCache(
+    `usage:agents:${backend}`, () => listAgents(backend),
+  );
+  const agentNames = useMemo(() => createAgentNameIndex(
+    (agents || []).map(agent => ({ ...agent, backendId: backend })),
+  ), [agents, backend]);
+  const err = seriesError || breakdownError;
   // Top 会话行点击的 transcript 预览抽屉（offset 分页，滑动逐步加载）
   const [previewFor, setPreviewFor] = useState<UsageTopSession | null>(null);
   const [preview, setPreview] = useState<SessionPreview | null>(null);
@@ -312,105 +317,20 @@ export default function UsagePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewFor, previewHasMore, previewLoading, previewLoadingMore, previewMsgs.length]);
 
-  // 拉当前 backend/range 的两份数据。首载 effect 与导航栏刷新共用同一份加载体，
-  // 差别只在存活判定：effect 传自己的 alive 标志（切后端/区间后要丢弃回写），
-  // 手动刷新只需组件还挂着。两份都落地才 resolve —— 导航栏靠这个 promise 决定
-  // 什么时候弹「已刷新」（本页没走 usePageCache，拿不到现成的 refresh）。
-  const loadUsage = useCallback(async (isAlive: () => boolean) => {
-    const key = `${backend}:${range}`;
-    await Promise.all([
-      getUsageSeries(backend, range)
-        .then((s) => {
-          if (!isAlive()) return;
-          if (s) {
-            seriesCache[key] = s;
-            setSeries(s);
-          }
-        })
-        .catch((e) => isAlive() && setErr(e instanceof Error ? e.message : String(e)))
-        .finally(() => {
-          if (isAlive()) setSeriesLoading(false);
-        }),
-      getUsageBreakdown(backend, range)
-        .then((b) => {
-          if (!isAlive()) return;
-          if (b) {
-            breakdownCache[key] = b;
-            setBreakdown(b);
-          }
-        })
-        .catch((e) => isAlive() && setErr((prev) => prev || (e instanceof Error ? e.message : String(e))))
-        .finally(() => {
-          if (isAlive()) setBdLoading(false);
-        }),
-      listAgents(backend)
-        .then((agents) => {
-          if (isAlive()) setAgentNames(createAgentNameIndex(
-            agents.map((agent) => ({ ...agent, backendId: backend })),
-          ));
-        })
-        // 名称是辅助展示数据：失败时保留已有名称/按 agentId 回退，不拖垮用量页。
-        .catch(() => {}),
-    ]);
-  }, [backend, range]);
-
-  // 导航栏刷新：先清掉本 key 的内存缓存，否则切走再回来会拿到刚被替换掉的旧值。
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-  useRegisterPageRefresh("/token", async () => {
-    const key = `${backend}:${range}`;
-    delete seriesCache[key];
-    delete breakdownCache[key];
-    setErr(null);
-    await loadUsage(() => mountedRef.current);
-  });
+  const refresh = useCallback(async () => {
+    await Promise.all([refreshSeries(), refreshBreakdown(), refreshAgents()]);
+  }, [refreshSeries, refreshBreakdown, refreshAgents]);
+  useRegisterPageRefresh("/token", refresh);
   useRegisterPageLoading("/token", seriesLoading || bdLoading);
-
-  useEffect(() => {
-    let alive = true;
-    setErr(null);
-    const key = `${backend}:${range}`;
-
-    if (seriesCache[key]) {
-      setSeries(seriesCache[key]);
-      setSeriesLoading(false);
-    } else {
-      setSeries(null);
-      setSeriesLoading(true);
-    }
-    if (breakdownCache[key]) {
-      setBreakdown(breakdownCache[key]);
-      setBdLoading(false);
-    } else {
-      setBreakdown(null);
-      setBdLoading(true);
-    }
-
-    void loadUsage(() => alive);
-
-    return () => {
-      alive = false;
-    };
-  }, [backend, range, reloadTick, loadUsage]);
 
   // 网关冷扫描(refreshing)返回全零快照：提示 + 15s 后自动重拉
   //（openclaw-backend 已对 refreshing 结果跳过缓存，重拉能拿到新数据）。
   const refreshing = series?.cacheStatus === "refreshing" || breakdown?.cacheStatus === "refreshing";
   useEffect(() => {
     if (!refreshing) return;
-    const key = `${backend}:${range}`;
-    const timer = window.setTimeout(() => {
-      delete seriesCache[key];
-      delete breakdownCache[key];
-      setReloadTick((v) => v + 1);
-    }, 15_000);
+    const timer = window.setTimeout(() => { void refresh(); }, 15_000);
     return () => window.clearTimeout(timer);
-  }, [refreshing, backend, range]);
+  }, [refreshing, refresh, series, breakdown]);
 
   const buckets = useMemo(() => bucketSeries(series?.daily ?? [], granOf(range)), [series, range]);
 

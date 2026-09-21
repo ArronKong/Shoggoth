@@ -126,6 +126,7 @@ export class ApiError extends Error {
   readonly field?: string;
   readonly details?: unknown;
   readonly safeBlockers?: Array<{ code: string; scope?: string }>;
+  readonly canForce?: boolean;
   readonly safeReferences?: Array<{
     store: string;
     referenceKey?: string;
@@ -141,6 +142,7 @@ export class ApiError extends Error {
     field?: string;
     details?: unknown;
     safeBlockers?: ApiError["safeBlockers"];
+    canForce?: boolean;
     safeReferences?: ApiError["safeReferences"];
   }) {
     super(message);
@@ -151,6 +153,7 @@ export class ApiError extends Error {
     this.field = options.field;
     this.details = options.details;
     this.safeBlockers = options.safeBlockers;
+    this.canForce = options.canForce;
     this.safeReferences = options.safeReferences;
   }
 }
@@ -200,6 +203,7 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
       ...(typeof source.field === "string" ? { field: source.field } : {}),
       ...(Object.prototype.hasOwnProperty.call(source, "details") ? { details: source.details } : {}),
       ...(safeBlockers ? { safeBlockers } : {}),
+      ...(typeof source.canForce === "boolean" ? { canForce: source.canForce } : {}),
       ...(safeReferences ? { safeReferences } : {}),
     });
   }
@@ -609,9 +613,10 @@ export async function getRecommendedDefaultModel(
 
 // ---- 自定义端点（OpenAI 兼容自建端点；官方 custom-endpoints，R286）----
 
-export async function listCustomEndpoints(backend: string, profile?: string): Promise<CustomEndpointsSnapshot> {
+export async function listCustomEndpoints(backend: string, profile?: string, options?: { refreshAuth?: boolean }): Promise<CustomEndpointsSnapshot> {
   const suffix = profile ? `&profile=${encodeURIComponent(profile)}` : "";
-  return jsonFetch(`/__api/models/endpoints?backend=${encodeURIComponent(backend)}${suffix}`);
+  const auth = options?.refreshAuth === false ? "&refreshAuth=false" : "";
+  return jsonFetch(`/__api/models/endpoints?backend=${encodeURIComponent(backend)}${suffix}${auth}`);
 }
 
 export function saveCustomEndpoint(
@@ -630,11 +635,13 @@ export function validateCustomEndpoint(
   backend: string,
   profile: string | undefined,
   endpoint: CustomEndpointInput,
+  signal?: AbortSignal,
 ): Promise<CustomEndpointValidation> {
   return jsonFetch(`/__api/models/endpoints/validate?backend=${encodeURIComponent(backend)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ profile, ...endpoint }),
+    signal,
   });
 }
 
@@ -778,11 +785,12 @@ export async function applyModelBatch(
     | { providerKey: string; sourceModelId?: string; model: { id: string } }
   >,
   operationId?: string,
+  options?: { confirmReferences: true; force?: boolean; preservePrimaryRefs?: boolean },
 ): Promise<ModelChangeApplyResult> {
   return legacyModelMutation(backend, `/__api/models/config/batch?backend=${encodeURIComponent(backend)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items, ...(operationId ? { operationId } : {}) }),
+    body: JSON.stringify({ items, ...(operationId ? { operationId } : {}), ...options }),
   }, operationId);
 }
 // provider 凭证池（轮换 key，脱敏）。source 说明 key 从哪来（env: / gh_cli / manual…）。
@@ -1445,6 +1453,18 @@ export async function openPath(path: string): Promise<void> {
   });
 }
 
+export async function openAttachment(name: string, src: string): Promise<void> {
+  if (!src.startsWith("data:") && !/^\/(?:__api\/inspirations\/media|__media)\?/.test(src)) {
+    throw new Error("Invalid attachment source");
+  }
+  const response = await fetch(src);
+  if (!response.ok) throw new Error(`File unavailable (${response.status})`);
+  const bytes = await response.blob();
+  await jsonFetch<{ ok: boolean }>(`/__api/host/open-attachment?name=${encodeURIComponent(name)}`, {
+    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: bytes,
+  });
+}
+
 // 在系统文件管理器中定位文件但不打开（聊天 session 产物）。
 export async function revealPath(path: string): Promise<void> {
   const { ok } = await jsonFetch<{ ok: boolean }>(`/__api/host/reveal-path`, {
@@ -1612,12 +1632,13 @@ export async function listAgentMemories(
   return memories;
 }
 export async function mutateAgentMemory(
-  backend: string, id: string, action: "confirm" | "update" | "delete", input: Record<string, unknown>,
+  backend: string, id: string, action: "create" | "confirm" | "update" | "delete", input: Record<string, unknown>,
 ): Promise<{ revision: number; item: import("../types").AgentMemoryItem | null }> {
-  const method = action === "confirm" ? "POST" : action === "update" ? "PUT" : "DELETE";
+  const method = action === "create" || action === "confirm" ? "POST" : action === "update" ? "PUT" : "DELETE";
   const { result } = await jsonFetch<{ result: { revision: number; item: import("../types").AgentMemoryItem | null } }>(
     agentUrl(backend, id, "/memory"), {
-      method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+      method, headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action === "create" ? { ...input, action } : input),
     },
   );
   return result;

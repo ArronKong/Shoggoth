@@ -88,7 +88,13 @@ export default function ActivityFeed({
   onOpenInspiration: (entry: Extract<DashboardActivityEntry, { kind: "inspiration" }>) => void;
 }) {
   const { t } = useTranslation();
-  const [backendFilter, setBackendFilter] = useStickyState("dashboard.backendFilter", "");
+  const [savedBackendFilter, setBackendFilter] = useStickyState("dashboard.backendFilter", "");
+  const activeBackendIds = useMemo(() => new Set(status.filter(backend => !backend.disabled).map(backend => backend.id)), [status]);
+  const backendScopeKey = [...activeBackendIds].sort().join(",");
+  const backendFilter = activeBackendIds.has(savedBackendFilter) ? savedBackendFilter : "";
+  useEffect(() => {
+    if (savedBackendFilter !== backendFilter) setBackendFilter(backendFilter);
+  }, [savedBackendFilter, backendFilter, setBackendFilter]);
   const [savedKindFilter, setKindFilter] = useStickyState<typeof KIND_FILTERS[number]>("dashboard.kindFilter", "");
   // 旧版本保存的「系统」或「看板」筛选回到「全部」，首帧就使用有效分类。
   const kindFilter = KIND_FILTERS.includes(savedKindFilter) ? savedKindFilter : "";
@@ -102,14 +108,19 @@ export default function ActivityFeed({
 
   // 无筛选时以 summary 首屏为基底；有筛选时以服务端筛选页为基底。
   const [entries, setEntries] = useState<DashboardActivityEntry[]>(firstPage?.items || []);
-  const visibleEntries = useMemo(() => entries.filter(isVisibleDashboardActivity), [entries]);
+  const visibleEntries = useMemo(() => entries.filter(isVisibleDashboardActivity)
+    .filter(entry => activeBackendIds.has(entry.backendId)), [entries, activeBackendIds]);
   const [hasMore, setHasMore] = useState(!!firstPage?.hasMore);
   const [nextCursor, setNextCursor] = useState<string | undefined>(firstPage?.nextCursor);
   const [busy, setBusy] = useState(false);
   const [fetchError, setFetchError] = useState(false);
   const requestGeneration = useRef(0);
   const statusOrder = useRef<string[]>([]);
-  const liveRows = useMemo(() => activityStatusRows(running, approvals, statusOrder.current), [running, approvals]);
+  const liveRows = useMemo(() => activityStatusRows(
+    running.filter(item => !!item.backendId && activeBackendIds.has(item.backendId)),
+    approvals.filter(item => !!item.backendId && activeBackendIds.has(item.backendId)),
+    statusOrder.current,
+  ), [running, approvals, activeBackendIds]);
   useEffect(() => { statusOrder.current = liveRows.map(row => row.key); }, [liveRows]);
 
   // 跨本地午夜：sinceMs 变化 → 重置筛选与缓存（旧一天的列表不该延续）。
@@ -162,7 +173,7 @@ export default function ActivityFeed({
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; if (requestGeneration.current === generation) requestGeneration.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendFilter, kindFilter, filteredFirstPage]);
+  }, [backendFilter, kindFilter, filteredFirstPage, backendScopeKey, sinceMs]);
 
   const loadMore = async () => {
     if (!nextCursor || busy) return;

@@ -1,6 +1,7 @@
 "use strict";
 
-const { GrokBuildRuntimeHost } = require("./grok-build-runtime-host");
+const { GrokBuildRuntimeHost, buildGrokSpawnEnv } = require("./grok-build-runtime-host");
+const { readGrokUsage } = require("./grok-build-usage");
 const {
   GROK_BUILD_RUNTIME,
   grokBuildPermissionFingerprint,
@@ -80,6 +81,16 @@ class GrokBuildRuntimePool {
     this.authProofs = new Map();
     this.closing = false;
     this.stopAllPromise = null;
+  }
+
+  async readUsage(value, options = {}) {
+    const binding = poolBinding(value);
+    const environment = validateResolvedEnvironment(this.runtimeAccountResolver.resolve(
+      binding, this.runtimeAccountLookup(binding.runtimeAccountId),
+      { binaryPath: this.options.binaryPath ?? this.hostOptions.binaryPath },
+    ), binding);
+    const env = await buildGrokSpawnEnv(environment, { ...this.hostOptions, ...this.options });
+    return readGrokUsage({ ...options, binaryPath: environment.binaryPath, env });
   }
 
   get(value, options = {}) {

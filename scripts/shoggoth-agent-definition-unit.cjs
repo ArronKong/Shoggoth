@@ -46,6 +46,26 @@ test("bootstrap 创建完整 revision，重启后 hash 与内容保持一致", (
   } finally { value.cleanup(); }
 });
 
+test("创建身份在 bootstrap 后恢复，保留其他文件，拒绝覆盖已编辑身份", () => {
+  const value = fixture();
+  try {
+    value.store.open();
+    const input = { profileId: "profile-create", profileName: "测试", initialIdentity: "辅助助理，协助完成任务。" };
+    const initial = value.store.ensureProfile({ profileId: input.profileId, profileName: input.profileName });
+    value.store.update({ profileId: input.profileId, expectedRevision: initial.manifest.revision,
+      documents: { SOUL: "Preserve this independent change." }, actor: "user" });
+    value.store.close(); value.store.open();
+    const recovered = value.store.ensureProfile(input);
+    assert.ok(recovered.documents.IDENTITY.includes(input.initialIdentity));
+    assert.equal(recovered.documents.SOUL, "Preserve this independent change.");
+    assert.deepEqual(value.store.ensureProfile(input), recovered, "exact retry must not create a revision");
+    value.store.update({ profileId: input.profileId, expectedRevision: recovered.manifest.revision,
+      documents: { IDENTITY: "A newer user identity." }, actor: "user" });
+    assert.throws(() => value.store.ensureProfile(input), { code: "DEFINITION_REVISION_CONFLICT" });
+    assert.equal(value.store.get(input.profileId).documents.IDENTITY, "A newer user identity.");
+  } finally { value.cleanup(); }
+});
+
 test("用户提交使用 expected revision，Agent 只能 proposal 不能 commit", () => {
   const value = fixture();
   try {

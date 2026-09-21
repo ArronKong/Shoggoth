@@ -124,12 +124,15 @@ function isUsagePoint(value: unknown): boolean {
     typeof value.date === "string" &&
     isFiniteNumber(value.totalTokens) &&
     isFiniteNumber(value.totalCost)
+    && ["missingCostEntries", "estimatedCostEntries"].every(key => hasOptionalFiniteNumber(value, key))
   );
 }
 
 /** 校验单条 usage 记录。 */
 function isUsageEntry(value: unknown): boolean {
   if (!isRecord(value) || typeof value.backend !== "string" || !hasOptionalString(value, "error")) return false;
+  if (value.availability !== undefined && !["complete", "partial", "unavailable"].includes(String(value.availability))) return false;
+  if (!hasOptionalBoolean(value, "yesterdayComplete")) return false;
   if (value.today !== undefined && !isUsagePoint(value.today)) return false;
   if (value.yesterday !== undefined && !isUsagePoint(value.yesterday)) return false;
   return true;
@@ -268,6 +271,17 @@ function isRunStats(value: unknown): boolean {
   );
 }
 
+function isTaskStats(value: unknown): boolean {
+  const counts = (row: unknown) => isRecord(row) && [row.ok, row.error].every(
+    count => typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
+  );
+  return isRecord(value) && counts(value.total) && isRecord(value.byKind)
+    && ["cron", "kanban", "inspiration"].every(kind => counts((value.byKind as Record<string, unknown>)[kind]))
+    && Array.isArray(value.byAgent) && value.byAgent.every(row => isRecord(row)
+      && typeof row.backendId === "string" && typeof row.agentId === "string" && counts(row))
+    && typeof value.complete === "boolean";
+}
+
 /**
  * 递归校验 DashboardSummary 的最低安全形状。
  * 仅约束当前读取方会直接访问的结构，并允许额外字段以维持前后兼容。
@@ -283,6 +297,7 @@ function isDashboardSummary(value: unknown, todayStart: number): value is Dashbo
   if (!isBackendSectionArray(value.artifacts, isArtifactItem)) return false;
   if (value.activityPage !== undefined && !isActivityPage(value.activityPage)) return false;
   if (value.runStats !== undefined && !isRunStats(value.runStats)) return false;
+  if (value.taskStats !== undefined && !isTaskStats(value.taskStats)) return false;
   return true;
 }
 
@@ -406,8 +421,17 @@ export function resolveDashboardViewState(
   persistedData: DashboardSummary | null,
   loading: boolean,
   error: string | null,
+  enabledBackendIds?: readonly string[],
 ): DashboardViewState {
-  const data = liveData ?? persistedData ?? undefined;
+  // Aggregate task totals cannot be safely subtracted from a paginated snapshot.
+  // Reuse the whole summary only when it belongs to the current connection scope.
+  const inScope = (summary: DashboardSummary | null | undefined) => {
+    if (!summary || !enabledBackendIds) return summary;
+    const active = summary.status.filter(backend => !backend.disabled).map(backend => backend.id);
+    return active.length === enabledBackendIds.length && active.every(id => enabledBackendIds.includes(id))
+      ? summary : undefined;
+  };
+  const data = inScope(liveData) ?? inScope(persistedData) ?? undefined;
   const hasData = data !== undefined;
 
   return {

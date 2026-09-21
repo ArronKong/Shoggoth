@@ -141,9 +141,16 @@ state.runFixture = async () => {
   await measureInteraction("clear composer", () => setInput(""));
   const trajectoryButton = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-iconbtn"))
     .find((button) => [i18n.t("chat.showTrajectory"), i18n.t("chat.hideTrajectory")].includes(button.title))!;
-  await measureInteraction("show trajectory", () => trajectoryButton().click());
   const trajectoryCards = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-thread button"))
     .filter((button) => button.title === i18n.t("turnLab.processLargeView"));
+  const trajectoryInitiallyVisible = trajectoryButton().getAttribute("aria-pressed") === "true";
+  if (!state.baseline) check(trajectoryInitiallyVisible, "trajectory is enabled by default");
+  if (trajectoryInitiallyVisible) {
+    if (__CHAT_PERF_WITH_TOOLS__) check(trajectoryCards().length === longHistory.filter((message) => message.role === "assistant").length, "trajectory shows historical tool processes by default");
+    await measureInteraction("hide default trajectory", () => trajectoryButton().click());
+    check(trajectoryCards().length === 0, "default trajectory can still be hidden");
+  }
+  await measureInteraction("show trajectory", () => trajectoryButton().click());
   if (__CHAT_PERF_WITH_TOOLS__) check(trajectoryCards().length === longHistory.filter((message) => message.role === "assistant").length, "show trajectory must retain every historical tool process");
   if (__CHAT_PERF_WITH_TOOLS__) {
     const processToggle = trajectoryCards()[0].parentElement!.querySelector<HTMLButtonElement>("button[aria-expanded]")!;

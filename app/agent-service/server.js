@@ -19,6 +19,7 @@ const { ACTIVE_WORK_RUN_STATUSES, createWorkDispatcher } = require("./work-run")
 const { CodexRuntimePool } = require("./codex-runtime-pool");
 const { CodexRuntimeAdapter } = require("./codex-runtime-adapter");
 const { GrokBuildRuntimePool } = require("./grok-build-runtime-pool");
+const { reconcileGrokUsage } = require("./grok-usage-reconcile");
 const { GrokBuildRuntimeAdapter } = require("./grok-build-runtime-adapter");
 const { AntigravityRuntimePool } = require("./antigravity-runtime-pool");
 const { AntigravityRuntimeAdapter } = require("./antigravity-runtime-adapter");
@@ -64,9 +65,13 @@ const { AgentDefinitionStore } = require("./agent-definition-store");
 const { TranscriptStore } = require("./transcript-store");
 const { MemoryStore } = require("./memory-store");
 const { MemoryEngine } = require("./memory-engine");
+const { ConversationMemoryService } = require("./conversation-memory-service");
+const { ConversationDefinitionService } = require("./conversation-definition-service");
 const { ContextSnapshotStore } = require("./context-snapshot-store");
 const { ContextCompiler } = require("./context-compiler");
 const { NativeSkillStore } = require("./native-skill-store");
+const { NativeMcpStore } = require("./native-mcp-store");
+const { NativeMcpClientManager } = require("./native-mcp-client-manager");
 const { SystemHostController } = require("./system-host-controller");
 const { ComputerUseController } = require("./computer-use-controller");
 const { PermissionEngine } = require("./permission-engine");
@@ -111,9 +116,11 @@ const {
   resolveProfileWorkspace,
 } = require("./chat-service-controller");
 const { createProfileServiceController } = require("./profile-service-controller");
+const { CustomEndpointService } = require("./custom-endpoint-service");
 const {
   createAgentLifecycleServiceController,
 } = require("./agent-lifecycle-service-controller");
+const { AgentArchiveRetention } = require("./agent-archive-retention");
 const { AgentHarnessServiceController } = require("./agent-harness-service-controller");
 const { CodexSchemaContract } = require("./codex-schema-contract");
 const {
@@ -634,6 +641,7 @@ function createAgentService(options) {
   let stopping = null;
   let startPromise = null;
   let lifecycleState = "stopped";
+  let activeRuntimeRequests = 0;
   let lifecycleGeneration = 0;
   let mcpTransportReady = false;
   const externalCryptoBroker = options.cryptoBroker || options.mcpCryptoBroker || null;
@@ -803,7 +811,23 @@ function createAgentService(options) {
   const deepSeekHarnessRuntimeAdapter = options.deepSeekHarnessRuntimeAdapter
     || new DeepSeekHarnessRuntimeAdapter({ runtimePool: deepSeekHarnessRuntimePool });
   const runtimeManager = options.runtimeManager || (() => {
-    const registry = new RuntimeAdapterRegistry();
+    const registry = new RuntimeAdapterRegistry({
+      idleTimeoutMs: options.runtimeIdleTimeoutMs,
+      isIdle(binding) {
+        if (lifecycleState !== "started" || activeRuntimeRequests > 0) return false;
+        const admission = runtimeAccountAdmission.read(binding.runtimeAccountId);
+        if (admission.active > 0 || admission.mutationActive
+          || accountAuthManager.active?.has(binding.runtimeAccountId)
+          || accountAuthManager.bindings?.get(binding.runtimeAccountId)?.refreshPromise) return false;
+        return !workRunCoordinator.listRuns().some((run) => {
+          if (!["queued", "starting", "running", "waiting_approval", "waiting_input"].includes(run.status)) return false;
+          const profile = productStore.getAgentProfile(run.profileId);
+          return !profile || (profile.runtime === binding.runtime
+            && profile.runtimeProfileId === binding.runtimeProfileId);
+        });
+      },
+      onIdleError() { console.error("[agent-service] idle runtime cleanup failed"); },
+    });
     registry.register("codex", codexRuntimeAdapter);
     registry.register("grok-build", grokBuildRuntimeAdapter);
     registry.register("antigravity", antigravityRuntimeAdapter);
@@ -1114,6 +1138,10 @@ function createAgentService(options) {
       },
       now: options.now,
     }) : unavailableProfileServiceController);
+  const customEndpointService = new CustomEndpointService({
+    productStore, providerService, secretStore, profileServiceController,
+    now: options.now, randomUUID: options.randomUUID,
+  });
   const chatSessionStore = options.chatSessionStore || new ChatSessionStore({
     paths,
     fs: options.chatSessionFs,
@@ -1234,6 +1262,16 @@ function createAgentService(options) {
     profileExists: (profileId) => productStore.getAgentProfile(profileId) !== null,
     now: options.now,
   });
+  const nativeMcpStore = options.nativeMcpStore || new NativeMcpStore({
+    paths,
+    fs: options.nativeMcpFs,
+    now: options.now,
+  });
+  const nativeMcpClientManager = options.nativeMcpClientManager || new NativeMcpClientManager({
+    store: nativeMcpStore,
+    spawn: options.nativeMcpSpawn,
+    env: options.parentEnv,
+  });
   const systemHostController = options.systemHostController || (options.systemHostAdapter
     ? new SystemHostController({
       host: options.systemHostAdapter,
@@ -1275,6 +1313,11 @@ function createAgentService(options) {
     toolRegistry,
     permissionEngine,
     skillStore: nativeSkillStore,
+    shouldOfferIntroduction: ({ profile, run }) => run.source === "chat"
+      && !/^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey || "")
+      && typeof productStore.listWorkRuns === "function"
+      && !productStore.listWorkRuns({ profileId: profile.id }).some((prior) => prior.id !== run.id
+        && ["chat", "inspiration"].includes(prior.source) && prior.status === "completed"),
     runtimeCapabilitiesForProfile: (profile) => {
       if (profile.runtime === "codex" || profile.runtime === undefined) {
         return ["mcp", "filesystem", "shell"];
@@ -1291,7 +1334,7 @@ function createAgentService(options) {
     [productStore, ["getAgentProfile"]],
     [agentDefinitionStore, ["get", "history", "readRevision", "update", "restore", "previewImport", "import", "readGeneratedView"]],
     [memoryStore, ["getRevision", "list"]],
-    [memoryEngine, ["confirm", "update", "delete"]],
+    [memoryEngine, ["propose", "confirm", "update", "delete"]],
     [chatSessionStore, ["listSessions"]],
     [transcriptStore, ["listEvents", "getRevision", "setContextExcluded"]],
     [toolRegistry, ["list"]],
@@ -1335,11 +1378,43 @@ function createAgentService(options) {
     close() {},
     handle() { throw serviceError("AGENT_SERVICE_CLOSED", "Agent lifecycle is unavailable"); },
   });
+  const retentionStores = [chatSessionStore, nativeCronStore, nativeKanbanStore,
+    inspirationStore, permissionEngine, runtimeSessionOwnershipStore, tokenUsageStore];
+  const agentArchiveRetention = typeof productStore.purgeArchivedProfile === "function"
+    && retentionStores.every((store) => typeof store.purgeProfile === "function")
+    ? new AgentArchiveRetention({
+      paths, productStore, now: options.now,
+      ready: () => ["starting", "started"].includes(lifecycleState) && chatSessionStoreOpened && transcriptStoreOpened
+        && nativeCronStoreOpened && nativeKanbanStoreOpened
+        && inspirationStoreOpened && domainAvailability.cron.available && domainAvailability.kanban.available,
+      async stopProfile(profile) {
+        await runtimeManager.stop({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
+          runtimeAccountId: profile.runtimeAccountId });
+        await computerUseController?.closeForProfile(profile.id);
+      },
+      listPublishedArtifacts() {
+        // A custom artifact location is external to the App-owned cleanup scope.
+        if (options.artifactRoot && path.resolve(options.artifactRoot) !== path.join(paths.stateDir, "artifacts")) return [];
+        return nativeKanbanStore.listCards().flatMap((card) => nativeKanbanStore.listArtifacts(card.id)
+          .map((artifact) => ({ profileId: card.profileId, storageKey: artifact.storageKey })));
+      },
+      purgeProfile(profile) {
+        // Drop all cross-store references before the Product snapshot. Replays
+        // are idempotent, and shared Inspiration notes/accounts remain intact.
+        for (const store of retentionStores) store.purgeProfile(profile.id);
+        productStore.purgeArchivedProfile(profile.id);
+        transcriptStore.forgetProfile(profile.id);
+        memoryStore.forgetProfile(profile.id);
+        nativeSkillStore.profileManifests?.delete(profile.id);
+        eventBuffer.append("agent.profile.changed", { profileId: profile.id, backendId: profile.backendId });
+      },
+    }) : null;
   const agentLifecycleServiceController = options.agentLifecycleServiceController
     || (lifecycleDependencies.every(([value, methods]) => value
       && methods.every((method) => typeof value[method] === "function"))
       ? createAgentLifecycleServiceController({
         productStore,
+        archiveRetention: agentArchiveRetention,
         runtimeManager: {
           stop(binding) {
             if (typeof runtimeManager.stop !== "function") {
@@ -1348,9 +1423,9 @@ function createAgentService(options) {
             return runtimeManager.stop(binding);
           },
         },
-        async initializeProfile(profile) {
+        async initializeProfile(profile, { initialIdentity } = {}) {
           nativeSkillStore.ensureProfile(profile.id);
-          agentDefinitionStore.ensureProfile({ profileId: profile.id });
+          agentDefinitionStore.ensureProfile({ profileId: profile.id, profileName: profile.name, initialIdentity });
           if (typeof toolRegistry.toolsMarkdown === "function"
             && typeof toolRegistry.revision === "string") {
             agentDefinitionStore.writeGeneratedView({
@@ -1368,6 +1443,7 @@ function createAgentService(options) {
             ensureAgentBoard(productStore, nativeKanbanStore, profile.id, { includeDisabled: true });
           }
         },
+        onProfileChanged: (payload) => eventBuffer.append("agent.profile.changed", payload),
         now: options.now,
       })
       : unavailableAgentLifecycleServiceController);
@@ -1377,23 +1453,13 @@ function createAgentService(options) {
     ))) {
     throw new TypeError("Agent Lifecycle Service Controller 必须提供 open/close/handle");
   }
-  const queueMemoryExtraction = (event, run) => {
-    if (event?.kind !== "user" || run?.source !== "chat") return;
-    setImmediate(() => {
-      try { memoryEngine.extractTranscript({ profileId: run.profileId, events: [event] }); } catch {}
-    });
-  };
   const queueMemoryConsolidation = (run, payload) => {
-    if (run?.source !== "chat" || payload?.status !== "completed") return;
+    if (!["chat", "inspiration"].includes(run?.source) || payload?.status !== "completed") return;
     setImmediate(() => {
-      try {
-        const session = chatSessionStore.getSession(run.sourceId);
-        if (!session) return;
-        const events = transcriptStore.listEvents(run.profileId, session.id)
-          .filter((event) => event.runId === run.id);
-        memoryEngine.extractTranscript({ profileId: run.profileId, events });
-        memoryEngine.consolidate(run.profileId);
-      } catch {}
+      // Content is curated through memory_save with authoritative provenance.
+      // Terminal housekeeping only expires records; it must not re-extract a
+      // forgotten item or interpret a quoted/negated 'remember' as consent.
+      try { memoryEngine.consolidate(run.profileId); } catch {}
     });
   };
   const isNativeFederationChatRun = (run) => run?.source === "chat"
@@ -1481,7 +1547,6 @@ function createAgentService(options) {
     contextCompiler,
     resolveRunSession: (run) => inspirationStore.executionForRun(run.id),
     productMcpApprovalPolicy,
-    onTranscriptCommitted: queueMemoryExtraction,
     onRunInteraction: handleRunInteraction,
     onRunTerminal: handleRunTerminal,
     inbox: pendingCommandInbox,
@@ -1630,6 +1695,7 @@ function createAgentService(options) {
   let memoryEngineOpened = false;
   let permissionEngineOpened = false;
   let nativeSkillStoreOpened = false;
+  let nativeMcpStoreOpened = false;
   let computerUseControllerOpened = false;
   let contextSnapshotStoreOpened = false;
   let pendingCommandInboxOpened = false;
@@ -1721,6 +1787,7 @@ function createAgentService(options) {
     const controller = new McpProductToolController({
       productStore,
       domainController: nativeDomainServiceController,
+      agentLifecycleService: agentLifecycleServiceController,
       kanbanStore: nativeKanbanStore,
       kanbanRunService,
       cronStore: nativeCronStore,
@@ -1734,6 +1801,21 @@ function createAgentService(options) {
       federationClient: federationHostClient,
       federationCoordinator,
       skillStore: nativeSkillStore,
+      nativeMcpStore,
+      nativeMcpClientManager,
+      conversationMemoryService: new ConversationMemoryService({
+        memoryEngine, memoryStore, transcriptStore, chatSessionStore,
+        getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
+      }),
+      conversationDefinitionService: new ConversationDefinitionService({
+        definitionStore: agentDefinitionStore, productStore, transcriptStore, chatSessionStore,
+        agentLifecycleService: agentLifecycleServiceController,
+        getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
+        onProfileRenamed: (profileId) => {
+          const profile = productStore.getAgentProfile(profileId);
+          eventBuffer.append("agent.profile.renamed", { profileId, backendId: profile.backendId });
+        },
+      }),
       inspirationService,
       systemHostController,
       computerUseController,
@@ -2153,17 +2235,23 @@ function createAgentService(options) {
       throw serviceError("MCP_SESSION_INVALID", "mcp_session_invalid");
     }
     if (!toolCall) return sanitizeMcpProfile(profile);
-    const result = cloneMcpToolResult(await mcpProductToolController.handle(
-      params.name,
-      params.arguments,
-      Object.freeze({
-        profileId: authorized.profileId,
-        callId: params.callId,
-        ...(params.confirmation === true ? { confirmation: true } : {}),
-        ...(authorized.federationClient
-          ? { federationClient: authorized.federationClient } : {}),
-      }),
-    ));
+    let result;
+    activeRuntimeRequests += 1;
+    try {
+      result = cloneMcpToolResult(await mcpProductToolController.handle(
+        params.name,
+        params.arguments,
+        Object.freeze({
+          profileId: authorized.profileId,
+          callId: params.callId,
+          ...(params.confirmation === true ? { confirmation: true } : {}),
+          ...(authorized.federationClient
+            ? { federationClient: authorized.federationClient } : {}),
+        }),
+      ));
+    } finally {
+      activeRuntimeRequests -= 1;
+    }
     const worstFrame = `${JSON.stringify({
       id: "\0".repeat(256), ok: true, result,
     })}\n`;
@@ -2442,6 +2530,25 @@ function createAgentService(options) {
       }
       const afterSeq = hasCursor ? rawCursor : 0;
       result = eventBuffer.page(afterSeq, id);
+    } else if (["provider.endpoints.list", "provider.endpoints.save", "provider.endpoints.delete", "provider.endpoints.discover"].includes(request.method)) {
+      const fields = request.method === "provider.endpoints.list" ? ["profileId"]
+        : request.method === "provider.endpoints.delete" ? ["profileId", "id"] : ["profileId", "endpoint"];
+      if (!exactObject(request, ["id", "token", "version", "method", "params"])
+        || !exactObject(request.params, fields)
+        || (request.params.profileId !== null && !validBoundedString(request.params.profileId, 128))) {
+        errorResponse(socket, id, "INVALID_PARAMS", "端点参数无效");
+        return;
+      }
+      try {
+        if (request.method === "provider.endpoints.list") result = customEndpointService.list(request.params.profileId);
+        else if (request.method === "provider.endpoints.save") result = await customEndpointService.save(request.params.profileId, request.params.endpoint);
+        else if (request.method === "provider.endpoints.delete") result = await customEndpointService.remove(request.params.profileId, request.params.id);
+        else result = await customEndpointService.discover(request.params.profileId, request.params.endpoint);
+      } catch (error) {
+        errorResponse(socket, id, "CUSTOM_ENDPOINT_REJECTED", error?.code === "CUSTOM_ENDPOINT_REJECTED"
+          ? error.message : "端点操作失败，请检查连接配置和本机 Service 后重试。");
+        return;
+      }
     } else if ([
       "provider.list", "provider.save", "provider.delete", "provider.secret.set",
       "provider.secret.clear", "provider.validate",
@@ -2512,13 +2619,39 @@ function createAgentService(options) {
           throw serviceError("INVALID_PARAMS", "Token usage 参数无效");
         }
         const range = validateUsageRange(request.params.range);
-        const profileIds = new Set(productStore.listAgentProfiles()
-          .filter((profile) => profile.backendId === request.params.backendId)
-          .map((profile) => profile.id));
+        const profiles = productStore.listAgentProfiles().filter(profile => profile.backendId === request.params.backendId);
+        const profileIds = new Set(profiles.map(profile => profile.id));
+        let usageComplete = true;
+        if (profiles.some(profile => profile.runtime === "grok-build") && typeof grokBuildRuntimePool.readUsage === "function") {
+          const now = (options.now || Date.now)();
+          const start = new Date(now);
+          start.setHours(0, 0, 0, 0);
+          start.setDate(start.getDate() - ({ today: 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[range] || 1) + 1);
+          usageComplete = await reconcileGrokUsage({ profiles, runs: workRunCoordinator.listRuns(),
+            usageStore: tokenUsageStore, sinceMs: range === "all" ? 0 : start.getTime(), now,
+            readUsage: (profile, query) => grokBuildRuntimePool.readUsage({ runtime: profile.runtime,
+              runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId }, query) });
+        }
         const summary = tokenUsageStore.summarize(range, {
           backendId: request.params.backendId,
           profileIds,
         });
+        if (!usageComplete) summary.series.availability = "partial";
+        if (request.method === "usage.breakdown"
+          && typeof transcriptStore.summarizeUsageActivity === "function") {
+          const activity = transcriptStore.summarizeUsageActivity(range, profileIds);
+          const usageByDate = new Map(summary.series.daily.map((day) => [day.date, day]));
+          summary.breakdown = {
+            ...summary.breakdown,
+            tools: activity.tools,
+            messages: activity.messages,
+            dailyActivity: activity.dailyActivity.map((day) => ({
+              ...day,
+              tokens: Number(usageByDate.get(day.date)?.totalTokens) || 0,
+              cost: Number(usageByDate.get(day.date)?.totalCost) || 0,
+            })),
+          };
+        }
         result = request.method === "usage.series"
           ? validateUsageSeries(summary.series)
           : validateUsageBreakdown(summary.breakdown);
@@ -2717,6 +2850,7 @@ function createAgentService(options) {
             .catch((error) => handleMcpError(socket, null, error));
           return;
         }
+        activeRuntimeRequests += 1;
         const inFlight = Promise.resolve()
           .then(() => handleRequest(socket, request))
           .catch(() => handleInternalError(socket, request))
@@ -2724,6 +2858,7 @@ function createAgentService(options) {
           // write callback + EOF. An already-disconnected peer has no response
           // left to drain, and its close event may have preceded this microtask.
           .finally(() => {
+            activeRuntimeRequests -= 1;
             if (socket.destroyed) inFlightSockets.delete(socket);
           });
         inFlightSockets.add(socket);
@@ -2769,12 +2904,15 @@ function createAgentService(options) {
     accountAuthManager,
     profileServiceController,
     agentLifecycleServiceController,
+    agentArchiveRetention,
     chatSessionStore,
     agentDefinitionStore,
     transcriptStore,
     memoryStore,
     memoryEngine,
     nativeSkillStore,
+    nativeMcpStore,
+    nativeMcpClientManager,
     systemHostController,
     computerUseController,
     toolRegistry,
@@ -2920,6 +3058,7 @@ function createAgentService(options) {
             ensureBuiltinCliAgentProfiles(productStore);
           }
           runtimeAccountMigrationOrchestrator.reconcileAccountsAndProfiles(productStore);
+          require("./execution-policy").migrateLegacyProfileConcurrency(productStore, paths);
           await migrateLegacySharedCodexApiKey({
             paths,
             productStore,
@@ -2946,6 +3085,8 @@ function createAgentService(options) {
           await nativeSkillStore.open(
             productStore.listAgentProfiles().map((profile) => profile.id),
           );
+          nativeMcpStoreOpened = true;
+          nativeMcpStore.open();
           if (nativeRuntimeImportEnabled) {
             nativeRuntimeImportSummary = importNativeRuntimeHomes({
               paths,
@@ -2967,7 +3108,7 @@ function createAgentService(options) {
           await agentDefinitionStore.open();
           if (typeof productStore.listAgentProfiles === "function") {
             for (const profile of productStore.listAgentProfiles()) {
-              agentDefinitionStore.ensureProfile({ profileId: profile.id });
+              agentDefinitionStore.ensureProfile({ profileId: profile.id, profileName: profile.name });
             }
           }
           if (typeof toolRegistry.toolsMarkdown === "function"
@@ -3066,6 +3207,7 @@ function createAgentService(options) {
           profileServiceControllerOpened = true;
           await profileServiceController.open();
           assertStartGeneration(generation);
+          agentArchiveRetention?.open();
           agentLifecycleServiceControllerOpened = true;
           await agentLifecycleServiceController.open();
           assertStartGeneration(generation);
@@ -3081,6 +3223,12 @@ function createAgentService(options) {
           assertStartGeneration(generation);
           transcriptStoreOpened = true;
           await transcriptStore.open();
+          // Complete a journaled partial purge before domain recovery inspects
+          // WorkRun/Card/Session references that may have been removed already.
+          if (agentArchiveRetention && typeof agentLifecycleServiceController.runMaintenance === "function") {
+            await agentLifecycleServiceController.runMaintenance(() => agentArchiveRetention.sweep({ resumeOnly: true }));
+          }
+          assertStartGeneration(generation);
           for (const session of chatSessionStore.listSessions()) {
             transcriptStore.ensureSession({ profileId: session.profileId, sessionId: session.id });
           }
@@ -3173,6 +3321,19 @@ function createAgentService(options) {
           if (typeof options.onServerReady === "function") options.onServerReady(server);
           assertStartGeneration(generation);
           lifecycleState = "started";
+          if (typeof agentLifecycleServiceController.runMaintenance === "function") {
+            agentArchiveRetention?.start(
+              (action) => agentLifecycleServiceController.runMaintenance(action),
+              (error) => {
+                if (agentArchiveRetention.poisoned || error?.committedUncertain
+                  || /COMMIT_UNCERTAIN/u.test(error?.code || "")) {
+                  void reportRuntimeServerError(error);
+                } else {
+                  console.error("[agent-service] archived Agent cleanup deferred; will retry");
+                }
+              },
+            );
+          }
           // Unlock can land after the earlier startup recovery check but before
           // this state transition. Once `started` is visible, check the durable
           // flag again; later unlocks are handled directly by the callback.
@@ -3284,6 +3445,9 @@ function createAgentService(options) {
 
   async function cleanupService(stopOptions = {}) {
     const errors = [];
+    if (agentArchiveRetention?.opened) {
+      try { await agentArchiveRetention.close(); } catch (error) { errors.push(error); }
+    }
     mcpTransportReady = false;
     token = null;
     const activeServer = server;
@@ -3490,6 +3654,11 @@ function createAgentService(options) {
     if (nativeSkillStoreOpened) {
       nativeSkillStoreOpened = false;
       try { await nativeSkillStore.close(); } catch (error) { errors.push(error); }
+    }
+    try { await nativeMcpClientManager.close(); } catch (error) { errors.push(error); }
+    if (nativeMcpStoreOpened) {
+      nativeMcpStoreOpened = false;
+      try { await nativeMcpStore.close(); } catch (error) { errors.push(error); }
     }
     if (computerUseControllerOpened) {
       computerUseControllerOpened = false;

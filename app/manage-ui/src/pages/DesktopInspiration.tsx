@@ -8,6 +8,7 @@ import InspirationMediaEditor from './InspirationMedia';
 import InspirationArchiveControls from './InspirationArchiveControls';
 import { draftBytes, pickNextPaperTone, useInspirationDraft } from './inspiration-draft';
 import { prepareInspirationPaperFlight, type InspirationPaperFlight } from './inspiration-paper-motion';
+import { captureDesktopPrinterFrame, prepareDesktopPrinterMotion, type DesktopPrinterFrame, type DesktopPrinterMotion } from './desktop-printer-motion';
 import styles from './DesktopInspiration.module.css';
 
 export default function DesktopInspiration() {
@@ -15,13 +16,15 @@ export default function DesktopInspiration() {
   const host = desktopInspirationBridge();
   const { draft, draftRef, draftStored, updateDraft, clearSavedDraft } = useInspirationDraft();
   const [count, setCount] = useState<number | null>(null);
-  const [active, setActive] = useState(!host?.surface);
+  const [active, setActive] = useState(false);
+  const [presentation, setPresentation] = useState<{ geometry?: DesktopPrinterGeometry; concealId?: number; from?: DesktopPrinterFrame } | null>(null);
   const [saving, setSaving] = useState(false), [printing, setPrinting] = useState(false);
   const [mediaBusy, setMediaBusy] = useState(false), [archiveBusy, setArchiveBusy] = useState(false);
   const [reset, setReset] = useState(0), [error, setError] = useState('');
   const root = useRef<HTMLDivElement>(null), workbench = useRef<HTMLDivElement>(null), paper = useRef<HTMLDivElement>(null);
   const busy = useRef({ saving: false, media: false, archive: false });
-  const flight = useRef<InspirationPaperFlight | null>(null), reveal = useRef<Animation | null>(null);
+  const flight = useRef<InspirationPaperFlight | null>(null), reveal = useRef<DesktopPrinterMotion | null>(null);
+  const closing = useRef(false);
   const [printJob, setPrintJob] = useState(0);
   const alive = useRef(true);
   const publishBusy = () => host?.setBusy?.(Object.values(busy.current).some(Boolean));
@@ -37,49 +40,79 @@ export default function DesktopInspiration() {
   useEffect(() => {
     alive.current = true;
     let interactive = false;
-    const show = (geometry?: DesktopPrinterGeometry) => {
-      if (!alive.current) return;
-      interactive = false;
+    const updateGeometry = (geometry?: DesktopPrinterGeometry) => {
       if (geometry && root.current) {
         root.current.style.setProperty('--desktop-top', `${geometry.top}px`);
         root.current.style.setProperty('--desktop-center', `${geometry.center}px`);
       }
+    };
+    const show = (geometry?: DesktopPrinterGeometry) => {
+      if (!alive.current) return;
+      interactive = false;
+      const from = closing.current ? captureDesktopPrinterFrame(workbench.current, paper.current) : undefined;
+      closing.current = false;
+      updateGeometry(geometry);
       setActive(true); setReset(value => value + 1); setError('');
-      reveal.current?.cancel();
-      if (workbench.current && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        reveal.current = workbench.current.animate([{ transform: 'translateY(-24px)', opacity: 0 }, { transform: 'translateY(0)', opacity: 1 }],
-          { duration: 180, easing: 'cubic-bezier(.22, 1, .36, 1)' });
-      }
-      window.requestAnimationFrame(() => { if (alive.current) paper.current?.querySelector('textarea')?.focus({ preventScroll: true }); });
+      setPresentation({ geometry, from });
       void refreshCount();
     };
-    const hide = () => { interactive = false; setActive(false); reveal.current?.cancel(); };
-    const offShow = host?.onShow?.(show), offHidden = host?.onHidden?.(hide);
+    const hide = (concealId: number) => {
+      interactive = false; closing.current = true;
+      host?.setInteractive?.(false);
+      setPresentation({ concealId, from: captureDesktopPrinterFrame(workbench.current, paper.current) });
+    };
+    const hidden = () => { interactive = false; closing.current = false; setActive(false); reveal.current?.cancel(); };
+    const offShow = host?.onShow?.(show), offHide = host?.onHide?.(hide), offHidden = host?.onHidden?.(hidden);
+    const offGeometry = host?.onGeometry?.(updateGeometry);
     // A new desktop renderer has a cold font cache. Load the shared paper face
     // before showing the native window so the first keystroke uses it too.
     const fontsReady = paper.current && document.fonts
       ? document.fonts.load(`400 12px ${getComputedStyle(paper.current).fontFamily}`, '灵感 Spark Notes').catch(() => [])
       : Promise.resolve();
-    if (host?.ready) void fontsReady.then(() => alive.current ? host.ready!() : undefined).then(geometry => { if (geometry && alive.current && root.current) {
-      root.current.style.setProperty('--desktop-top', `${geometry.top}px`);
-      root.current.style.setProperty('--desktop-center', `${geometry.center}px`);
-    } }).catch(() => setError(t('inspiration.desktop.openFailed')));
+    if (host?.ready) void fontsReady.then(() => alive.current ? host.ready!() : undefined)
+      .catch(() => setError(t('inspiration.desktop.openFailed')));
     else show();
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing || Object.values(busy.current).some(Boolean)) return;
       event.preventDefault(); void host?.dismiss?.();
     };
     const pointer = (event: PointerEvent) => {
+      if (closing.current) return;
       const next = Boolean((event.target as Element).closest?.('[data-desktop-interactive], [data-paper], [data-typewriter-housing], [data-typewriter] button'));
       if (next !== interactive) { interactive = next; host?.setInteractive?.(next); }
     };
     document.addEventListener('keydown', escape); document.addEventListener('pointermove', pointer);
     return () => {
-      alive.current = false; offShow?.(); offHidden?.(); reveal.current?.cancel(); flight.current?.cancel();
+      alive.current = false; offShow?.(); offHide?.(); offHidden?.(); offGeometry?.(); reveal.current?.cancel(); flight.current?.cancel();
       host?.setBusy?.(false); host?.setInteractive?.(false);
       document.removeEventListener('keydown', escape); document.removeEventListener('pointermove', pointer);
     };
   }, [host, refreshCount, t]);
+
+  useLayoutEffect(() => {
+    if (!active || !presentation) return;
+    const exiting = presentation.concealId !== undefined;
+    if (root.current) root.current.inert = exiting;
+    const animation = prepareDesktopPrinterMotion(workbench.current, paper.current, exiting, presentation.from);
+    reveal.current = animation;
+    let current = true;
+    const play = () => {
+      if (!current || !alive.current) return;
+      animation?.play();
+      paper.current?.querySelector('textarea')?.focus({ preventScroll: true });
+    };
+    const id = presentation.geometry?.presentationId;
+    if (exiting) {
+      animation?.play();
+      void (animation?.finished ?? Promise.resolve()).then(() => {
+        if (current && alive.current && closing.current) return host?.conceal?.(presentation.concealId!);
+      }).catch(() => { /* The native timeout still closes an unresponsive surface. */ });
+    } else if (host?.reveal && id !== undefined) {
+      void host.reveal(id).then(shown => { if (shown) play(); else animation?.cancel(); })
+        .catch(() => { animation?.cancel(); if (current) setError(t('inspiration.desktop.openFailed')); });
+    } else play();
+    return () => { current = false; animation?.cancel(); };
+  }, [active, presentation, host, t]);
 
   useLayoutEffect(() => {
     if (!printJob) return;
@@ -96,7 +129,8 @@ export default function DesktopInspiration() {
 
   const save = async () => {
     const submitted = draftRef.current;
-    if (Object.values(busy.current).some(Boolean) || (!submitted.body.trim() && !submitted.attachments?.length) || draftBytes(submitted.body) > 16 * 1024) return;
+    if (closing.current || Object.values(busy.current).some(Boolean) || (!submitted.body.trim() && !submitted.attachments?.length) || draftBytes(submitted.body) > 16 * 1024) return;
+    reveal.current?.cancel();
     busy.current.saving = true; publishBusy(); setSaving(true); setError('');
     let animationScheduled = false;
     try {
@@ -118,7 +152,8 @@ export default function DesktopInspiration() {
     }
   };
   const draftError = draftBytes(draft.body) > 16 * 1024 ? t('inspiration.tooLong') : !draftStored ? t('inspiration.draftMemory') : '';
-  return <div ref={root} className={styles.desktop} data-desktop-printer data-active={active || undefined}>
+  return <div ref={root} className={styles.desktop} data-desktop-printer data-active={active || undefined}
+    data-exiting={(active && presentation?.concealId !== undefined) || undefined}>
     <div className={styles.position}>
       <div ref={workbench} className={styles.workbench} data-desktop-workbench>
         <InspirationTypewriter active={active} saving={saving} paperRef={paper} paperTone={draft.paperTone ?? 0} ideaCount={count}

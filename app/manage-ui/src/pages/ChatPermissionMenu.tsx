@@ -68,6 +68,7 @@ export default function ChatPermissionMenu({
         position: "fixed",
         left: Math.max(18, Math.min(rect.left, window.innerWidth - width - 18)),
         bottom: Math.max(18, window.innerHeight - rect.top + 8),
+        maxHeight: Math.max(0, rect.top - 26),
         width,
       });
     };

@@ -484,6 +484,7 @@ class CodexRuntimeHost {
     return this._request("threadResume", params, { timeoutMs: this.sessionStartTimeoutMs, ...options });
   }
   threadRead(params, options) { return this._request("threadRead", params, options); }
+  threadInjectItems(params, options) { return this._request("threadInjectItems", params, options); }
   threadList(params, options) { return this._request("threadList", params, options); }
   threadSetName(params, options) { return this._request("threadSetName", params, options); }
   threadArchive(params, options) { return this._request("threadArchive", params, options); }

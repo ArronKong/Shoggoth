@@ -14,6 +14,9 @@ function hideBackgroundDock(electronApp, platform = process.platform) {
   if (platform !== "darwin" || !electronApp?.dock
     || typeof electronApp.dock.hide !== "function") return false;
   electronApp.dock.hide();
+  // dock.hide() selects accessory. Keep the final policy prohibited, including
+  // after Launch Services delivers an activation to this shared App bundle.
+  prohibitBackgroundActivation(electronApp, platform);
   return true;
 }
 

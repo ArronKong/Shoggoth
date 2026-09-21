@@ -49,7 +49,7 @@ const heartbeat = ['heartbeat wake requested', 'heartbeat completed', 'heartbeat
   run: { backendId: 'openclaw', jobId: 'openclaw:hb', jobName: 'heartbeat-vincent', error: message },
 }));
 const firstPage = { ...empty, items: [inspiration, cron, ...heartbeat] };
-const props = { status: [{ id: 'native', connected: true }, { id: 'other', connected: true }], firstPage,
+const props = { status: [{ id: 'native', connected: true }, { id: 'other', connected: true }, { id: 'openclaw', connected: true }], firstPage,
   sinceMs: 0, running: [], getAgentDisplayName: id => id,
   onOpenRun: row => opened.push(row.kind), onOpenTask: row => opened.push(row.kind),
   onOpenInspiration: row => opened.push(row.inspiration.ideaId), onOpenHealth: () => opened.push('health') };
@@ -157,4 +157,40 @@ await settle();
 assert.equal(requests.length - beforeFailure, 2, 'Pagination errors must not cause an automatic retry loop');
 assert.match(textOf(renderer.toJSON()), /dashboard.activityFetchFailed/);
 await settle(() => renderer.unmount());
-console.log('PASS Dashboard Inspiration filter, detail callback, refresh, backend scope, empty state, stale-page isolation and bounded failure');
+
+const disconnectedStatus = props.status.map(row => row.id === 'native' ? row : { ...row, disabled: true, connected: false });
+const staleFirstPage = { ...empty, items: [inspiration, heartbeatReport] };
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  status: disconnectedStatus, firstPage: staleFirstPage,
+  running: [{ id: 'old-live', backendId: 'openclaw' }], approvals: [{ id: 'old-approval', backendId: 'openclaw' }],
+})); });
+assert.equal(rows(renderer).length, 1, 'Cached activities from disconnected backends are hidden on entry');
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
+assert.equal(renderer.root.findAllByType('approval-row').length, 0, 'Disconnected live work and approvals stay hidden');
+await settle(() => renderer.unmount());
+
+let resolveDisconnectedPage;
+fetchPage = async () => new Promise(resolve => { resolveDisconnectedPage = resolve; });
+await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: {
+  ...staleFirstPage, hasMore: true, nextCursor: 'all-backends-page',
+} })); });
+assert.equal(rows(renderer).length, 2);
+await settle(() => renderer.update(React.createElement(Feed, { ...props, status: disconnectedStatus,
+  firstPage: { ...empty, items: [inspiration] },
+})));
+assert.equal(rows(renderer).length, 1, 'Disconnect drops previously merged history');
+await settle(() => resolveDisconnectedPage({ ...empty, items: [{ ...heartbeatReport, id: 'late-old-page' },
+  { ...cron, id: 'stale-native-page', title: 'stale scoped pagination' }] }));
+assert.equal(rows(renderer).length, 1, 'In-flight pages from the previous backend scope are discarded in full');
+fetchPage = async () => empty;
+await settle(() => renderer.update(React.createElement(Feed, { ...props, firstPage: { ...empty, items: [inspiration, cron] } })));
+assert.equal(rows(renderer).length, 2, 'Reconnect uses the fresh first page instead of resurrecting disconnected history');
+await settle(() => renderer.root.findAllByType('filters').find(node => node.props.className === 'dash-backend-tabs').props.onChange('openclaw'));
+const requestsBeforeDisconnect = requests.length;
+await settle(() => renderer.update(React.createElement(Feed, { ...props, status: disconnectedStatus,
+  firstPage: { ...empty, items: [inspiration] },
+})));
+assert.equal(rows(renderer).length, 1, 'Disconnecting the selected backend resets its hidden filter to All');
+assert.ok(requests.slice(requestsBeforeDisconnect).every(request => request.backend !== 'openclaw'));
+await settle(() => renderer.unmount());
+console.log('PASS Dashboard activity filters, refresh, disconnect/reconnect, stale-cache/page isolation and bounded failure');

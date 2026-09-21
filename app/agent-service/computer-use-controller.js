@@ -208,7 +208,7 @@ class ComputerUseController {
 
   #assertAvailable() {
     this.#assertOpen();
-    if (this.availabilityCode) throw computerError("COMPUTER_DRIVER_UNAVAILABLE");
+    if (this.availabilityCode) throw computerError(this.availabilityCode);
   }
 
   async #loadSdk() {
@@ -218,7 +218,7 @@ class ComputerUseController {
     const required = [
       "CuaDriver", "RuntimeAuthorizationOptions", "ConfiguredDriverOptions",
       "PrivateWorkerOptions", "EmbeddedEnvironmentVariable", "SessionPermissionMode",
-      "StartSessionInput", "EndSessionInput",
+      "StartSessionInput", "EndSessionInput", "currentMacOsPermissionStatus",
     ];
     if (!sdk || required.some((name) => !sdk[name])) throw computerError("COMPUTER_DRIVER_UNAVAILABLE");
     this.sdk = sdk;
@@ -226,36 +226,48 @@ class ComputerUseController {
   }
 
   async #permissions() {
+    // SDK failures are not permission denials. Keep them outside the permission
+    // read boundary so callers can distinguish an unavailable driver from TCC.
+    const sdk = this.permissionStatus ? null : await this.#loadSdk();
     try {
       const value = this.permissionStatus
         ? await this.permissionStatus()
-        : (await this.#loadSdk()).currentMacOsPermissionStatus();
+        : sdk.currentMacOsPermissionStatus();
+      if (typeof value?.accessibility !== "boolean" || typeof value?.screenRecording !== "boolean") {
+        throw new TypeError("invalid permission status");
+      }
       return {
         accessibility: value?.accessibility === true,
         screenRecording: value?.screenRecording === true,
       };
     } catch {
-      return { accessibility: false, screenRecording: false };
+      throw computerError("COMPUTER_PERMISSION_STATUS_FAILED");
     }
   }
 
   async status(profileId = null) {
     this.#assertOpen();
-    if (this.availabilityCode) {
+    let permissions;
+    let reason = this.availabilityCode;
+    if (!reason) {
+      try { permissions = await this.#permissions(); }
+      catch (error) { reason = error.code; }
+    }
+    if (reason) {
       return {
         available: false,
-        reason: this.availabilityCode,
+        reason,
         driverVersion: this.binaryManifest?.version || null,
         contractVersion: this.binaryManifest?.contractVersion || null,
-        permissions: { accessibility: false, screenRecording: false },
-        sessions: [],
+        permissions: { accessibility: null, screenRecording: null },
+        sessions: this.list(profileId),
       };
     }
     return {
       available: true,
       driverVersion: this.binaryManifest?.version || "0.22.0",
       contractVersion: this.binaryManifest?.contractVersion || "0.7.0",
-      permissions: await this.#permissions(),
+      permissions,
       sessions: this.list(profileId),
     };
   }

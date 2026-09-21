@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { ChatRunWait, chatRunWaitState, type ChatRunWaitState } from "../components/ChatRunWait";
 import { setInspirationChatSession } from "../lib/inspiration-navigation";
 import { toSanitizedMarkdownHtml, formatReasoningMarkdown } from "../lib/markdown";
 import ChatMarkdown from "../components/ChatMarkdown";
@@ -102,16 +103,17 @@ import { IconTrajectory } from "../components/TurnTimeline/trajectoryIcons";
 import { createTimeline, reduceTimeline, stepsFromParts, summarizeArgs, toolLabelKey, type TimelinePartLike, type TurnEvent, type TurnStep, type TurnTimelineState } from "../lib/turnTimeline";
 import { isBackgroundSession } from "../lib/sessionKind";
 import { consumeCronChatHandoff } from "../lib/cronChatHandoff";
-import { mergeLinkedSessionRows, openChatSessionLink } from "../lib/chatSessionNavigation";
+import { applyChatSessionAgentNames, mergeLinkedSessionRows, openChatSessionLink } from "../lib/chatSessionNavigation";
 import { mergeIncompleteSessionRows } from "../lib/sessionListCompleteness";
 import { sessionDisplayPreview, sessionDisplayTitle } from "../lib/sessionDisplay";
 import { isInterSessionUserMessage } from "../lib/chatMessageVisibility";
-import { createAgentNameIndex, findAgentDisplayName, type AgentNameIndex } from "../lib/agentDisplay";
+import { createAgentNameIndex, type AgentNameIndex } from "../lib/agentDisplay";
 import {
   backendOfAgentRows,
   backendOfSessionRows,
   isLiveChatState,
   mergeLiveText,
+  projectSteeredLiveText,
   supportsBackendAttachments,
   supportsBackendSlash,
   upsertPromptEntry,
@@ -123,7 +125,7 @@ import ChatPermissionMenu from "./ChatPermissionMenu";
 import { localizePermissionMode } from "../lib/permissionModeText";
 import type { ImmersivePhase } from "./immersive/immersiveBg";
 import type { ImmersiveLiveStatus, ImmersiveLiveTool } from "./immersive/ImmersiveStatusLine";
-import { IconSend, IconClip, IconSearch, IconClock, IconArchive, IconMic, IconFast, IconStop, IconPencil } from "./chatIcons";
+import { IconSend, IconClip, IconAttachmentFolder, IconSearch, IconClock, IconArchive, IconMic, IconFast, IconStop, IconPencil } from "./chatIcons";
 import "./ChatPage.css";
 import type {
   ChatCanvasWidgetPart,
@@ -142,7 +144,7 @@ import type {
   SessionBoardWidget,
   UnifiedModel,
 } from "../types";
-import { useBackendCatalog } from "../lib/backends";
+import { useBackendCatalog, useEnabledBackends } from "../lib/backends";
 import {
   describeSession,
   execSlashCommand,
@@ -158,6 +160,7 @@ import {
   searchGlobalChats,
   updateSessionBoard,
   openPath,
+  openAttachment,
   revealPath,
 } from "../api/client";
 import {
@@ -170,6 +173,9 @@ import { createModelCatalogRefresh } from "./chat-model-refresh";
 
 export const createChatHistoryController = createHistoryController;
 export const createChatSendController = createSendController;
+
+// 暂时隐藏普通/沉浸聊天共用菜单的分叉入口，保留底层能力。
+const SHOW_SESSION_FORK = false;
 
 // Native React chat over the loopback /__chatws broker. The broker auto-performs
 // the device-auth handshake against the federating proxy, so here we just speak
@@ -191,6 +197,7 @@ type AgentListStatus = LiveStatus | ChatPromptAttention;
 interface SessionRow {
   inspirationId?: string;
   kind?: string;
+  source?: string;
   key: string;
   backendId?: string;
   displayName?: string;
@@ -522,11 +529,13 @@ interface ChatFile extends Omit<Partial<ChatMediaFact>, "kind"> {
   name: string;
   kind: string;
   src?: string;
+  path?: string;
 }
 interface ChatMsg {
   role: "user" | "assistant" | "toolResult" | "system";
   parts: Part[];
-  id?: string; // stable identity (gateway __openclaw.id) — used for hide/pin
+  id?: string; // canonical gateway identity — kept separate from local UI actions
+  actionId?: string; // per-session hide/pin identity, including messages without a gateway id
   ts?: number;
   model?: string;
   provider?: string;
@@ -629,9 +638,9 @@ const FILE_REF_RE = /@file:([^\s()]+)/g;
 // OpenClaw 网关给「只有媒体、没有文字」的用户消息写的固定占位串。它不是用户输入，
 // 显示出来毫无意义（截图实证），且会让缓存 key 对不上（发送时文本是空）。
 const OPENCLAW_MEDIA_PLACEHOLDER = "[User sent media without caption]";
-// 视频 dataURL 的缓存上限（base64 字符数，~12MB 原始字节）。超过就只缓存文件名，
+// 文件 dataURL 的缓存上限（base64 字符数，~12MB 原始字节）。超过就只缓存文件名，
 // 重载后回落成 chip —— 预览很好，但不值得为它塞爆浏览器存储配额。
-const VIDEO_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const FILE_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const MEDIA_METADATA_TIMEOUT_MS = 2_000;
 
 function readBrowserMediaMetadata(file: File, kind: ChatAttachment["kind"]): Promise<Pick<ChatAttachment, "durationMs" | "width" | "height">> {
@@ -669,12 +678,11 @@ function attachmentChipTitle(file: ChatFile): string {
   return meta.length ? `${file.name} · ${meta.join(" · ")}` : file.name;
 }
 
-function attachmentChipIcon(kind: string): string {
+function attachmentChipIcon(kind: string): ReactNode {
   if (kind === "image") return "🖼️";
   if (kind === "audio") return "🔊";
   if (kind === "video") return "🎬";
-  if (kind === "pdf") return "📄";
-  return "📎";
+  return <IconAttachmentFolder />;
 }
 /** 历史里只剩文件名时，按扩展名判类别（决定 chip 图标；视频能否播放另看有无 src）。 */
 function kindFromFilename(name: string): string {
@@ -688,8 +696,8 @@ function kindFromFilename(name: string): string {
  * 「Attached Context」区块（权威，Hermes），和我们本地转录写的 `[file: x]`
  * marker（转录尚未被权威历史取代时）。都没有就原样返回。
  */
-function extractAttachmentMarkers(text: string): { text: string; files: { name: string; kind: string }[] } {
-  const files: { name: string; kind: string }[] = [];
+function extractAttachmentMarkers(text: string): { text: string; files: ChatFile[] } {
+  const files: ChatFile[] = [];
   let body = text;
   const ctx = ATTACHED_CONTEXT_RE.exec(body);
   if (ctx) {
@@ -703,7 +711,9 @@ function extractAttachmentMarkers(text: string): { text: string; files: { name: 
       // 后者按 origin 隔离，换端口/换设备/清缓存就没了。`rel` 是相对家目录的
       // 引用路径，服务端补全并做包含性校验。
       const src = kind === "video" && !ref.startsWith("/") ? `/__media?rel=${encodeURIComponent(ref)}` : undefined;
-      files.push({ name, kind, ...(src ? { src } : {}) });
+      const path = ref.startsWith("/") || ref.startsWith("~/") ? ref
+        : ref.startsWith(".hermes/desktop-attachments/") ? `~/${ref}` : undefined;
+      files.push({ name, kind, ...(src ? { src } : {}), ...(path ? { path } : {}) });
     }
   }
   let imageCount = 0;
@@ -1359,7 +1369,7 @@ function applyToolStream(prev: ChatMsg[], tools: ToolEntry[], thinking = "", pla
   }
   return [...out, { role: "assistant", parts: composePendingParts(tools, "", thinking, plan, prompts), pending: true }];
 }
-function finalizeAssistant(prev: ChatMsg[], finalMsg: any): ChatMsg[] {
+function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?: string): ChatMsg[] {
   // Normalize the completed turn the SAME way loadHistory does, so a streamed reply
   // renders identically to a reloaded one. The old path flattened content via
   // contentToText into a single text part, which dropped the thinking/text split:
@@ -1378,6 +1388,30 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any): ChatMsg[] {
   const out = prev.slice();
   for (let i = out.length - 1; i >= 0; i -= 1) {
     if (out[i].role === "assistant" && out[i].pending) {
+      if (streamedTextOverride !== undefined) {
+        const streamed = out[i];
+        const parts = streamed.parts.slice();
+        let textIndex = -1;
+        for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+          if (parts[partIndex].type === "text") {
+            textIndex = partIndex;
+            break;
+          }
+        }
+        const nextText = mergeLiveText(lastText(parts), streamedTextOverride);
+        if (textIndex >= 0) parts[textIndex] = { ...parts[textIndex], text: nextText };
+        else parts.push({ type: "text", text: nextText });
+        out[i] = {
+          ...streamed,
+          ...norm,
+          // A steered final is still the full runtime item. Preserve the already
+          // projected live segment instead of replacing it with that full text.
+          parts,
+          pending: false,
+          ts: norm.ts ?? streamed.ts ?? Date.now(),
+        };
+        return out;
+      }
       out[i] = {
         ...norm,
         // if the final frame carried nothing renderable, keep what streamed in
@@ -1395,6 +1429,33 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any): ChatMsg[] {
     }
   }
   return norm.parts.length ? [...out, norm] : out;
+}
+
+function appendSteeringMessage(prev: ChatMsg[], text: string): ChatMsg[] {
+  const out = prev.slice();
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (out[i].role === "assistant" && out[i].pending) {
+      const hasContent = out[i].parts.some((part) => (
+        part.type !== "text" || (part.text ?? "").length > 0
+      ));
+      if (hasContent) out[i] = { ...out[i], pending: false };
+      else out.splice(i, 1);
+      break;
+    }
+  }
+  return [
+    ...out,
+    { role: "user", parts: [{ type: "text", text }], ts: Date.now() },
+    { role: "assistant", parts: composePendingParts([], ""), pending: true },
+  ];
+}
+
+export function canSteerActiveChat(
+  capabilities: Pick<ChatCapabilities, "steer"> | undefined,
+  runStatus: string | undefined,
+  attachmentCount: number,
+): boolean {
+  return capabilities?.steer === true && runStatus === "running" && attachmentCount === 0;
 }
 
 // consecutive same-role messages collapse into one visual group.
@@ -1616,6 +1677,14 @@ function quoteTextOfParts(parts: Part[]): string {
 }
 function groupQuoteText(g: Group): string {
   return quoteTextOfParts(g.msgs.flatMap((m) => m.parts));
+}
+
+// 右键复制按气泡取原始 Markdown；没有气泡落点时才退到消息/整组。
+function groupCopyText(g: Group, msgIndex?: number, partIndex?: number): string {
+  const message = msgIndex != null ? g.msgs[msgIndex] : undefined;
+  const part = message && partIndex != null ? message.parts[partIndex] : undefined;
+  const parts = part ? [part] : message ? message.parts : g.msgs.flatMap((m) => m.parts);
+  return parts.map((p) => p.text || "").join("\n").trim();
 }
 
 // ---- small components ---------------------------------------------------
@@ -2020,6 +2089,8 @@ function ChatPageApp() {
   const { t } = useTranslation();
   const confirm = useConfirm();
   const chatBackendCatalog = useBackendCatalog("chat");
+  const enabledChatBackends = useEnabledBackends("chat");
+  const chatBackendScopeKey = [...enabledChatBackends].sort().join(",");
   const chatBackendDescriptors = useMemo(
     () => new Map(chatBackendCatalog.map((descriptor) => [descriptor.id, descriptor])),
     [chatBackendCatalog],
@@ -2062,7 +2133,7 @@ function ChatPageApp() {
   // agentName. Seed from cache, then replace from agents.list on each list refresh.
   const agentNamesRef = useRef<AgentNameIndex>(createAgentNameIndex(
     sessions.flatMap((row) => row.agentName
-      ? [{ id: row.agentId || agentOf(row.key), name: row.agentName }]
+      ? [{ id: agentOf(row.key), name: row.agentName }]
       : []),
   ));
   const backendOfSession = useCallback(
@@ -2091,9 +2162,11 @@ function ChatPageApp() {
   const [startingBackends, setStartingBackends] = useState<Set<string>>(new Set());
   // Hermes 可用性按 profile/agent 精确到会话；历史重试只在目标 agent ready 后触发。
   const [readyAgentIds, setReadyAgentIds] = useState<Set<string>>(new Set());
-  // 用户在设置页主动「断开连接」的后端（status 行的 `disabled`，registry.getStatus 合成）。
+  // 用户保存的连接配置立即生效，不等待下一次 status 轮询。
   // 这是**明确意图**，与意外断线语义相反：它的 agent 行照旧整组消失，不留灰行。
-  const [disabledBackends, setDisabledBackends] = useState<Set<string>>(new Set());
+  const disabledBackends = useMemo(() => new Set(chatBackendCatalog
+    .filter(backend => !enabledChatBackends.includes(backend.id)).map(backend => backend.id)),
+  [chatBackendCatalog, enabledChatBackends]);
   const canSendActiveSession = (key: string | null | undefined): boolean =>
     canSendSessionByReadiness(key, {
       backendOfSession,
@@ -2117,7 +2190,8 @@ function ChatPageApp() {
   const sessionListGuard = sessionListGuardRef.current;
   // 上面那个合并要读「上一份列表」，而它发生在 WS 事件闭包里 → render-time 镜像成 ref
   // （与 refreshStatusRef / historyErrorRef 同款模式）。
-  // Bumped on window refocus to force avatars to re-fetch (see the effect below).
+  // Refresh after uploads or returning from management, not on window focus:
+  // changing the version remounts every avatar and discards its loaded image.
   const [avatarVersion, setAvatarVersion] = useState(0);
   // 沉浸模式开关：fixed 覆盖层盖在 .chat-shell 之上，底下 ChatPage 保活不卸载。localStorage 持久。
   const [immersive, setImmersive] = useState<boolean>(() => {
@@ -2228,8 +2302,16 @@ function ChatPageApp() {
       );
       // Only a real sessions.list response may retire a linked placeholder.
       // agents.list can arrive first with sessionsRef (including placeholders).
-      setSessions(mergeSynthetic(merged, authoritative ? all : undefined));
-      writeSessionCache(merged);
+      // Enrich after merging: a new/forked/linked session can be absent from
+      // sessions.list until its first turn, but still belongs to the same agent.
+      const named = applyChatSessionAgentNames(
+        mergeSynthetic(merged, authoritative ? all : undefined),
+        agentNamesRef.current,
+        sessionsRef.current,
+      );
+      sessionsRef.current = named;
+      setSessions(named);
+      writeSessionCache(named);
     },
     [mergeSynthetic],
   );
@@ -2246,12 +2328,12 @@ function ChatPageApp() {
     // 先同步登记，再排队更新 React state：即使本地缓存当前已有该行，紧随其后的
     // sessions.list 整体刷新也会通过 mergeSynthetic 把目标并回去。
     const existing = syntheticRowsRef.current.get(key);
-    const row: SessionRow = {
+    const [row] = applyChatSessionAgentNames<SessionRow>([{
       ...(existing ?? {}),
       ...(seed ?? {}),
       key,
       ...(updatedAt != null ? { updatedAt } : {}),
-    };
+    }], agentNamesRef.current, sessionsRef.current);
     syntheticRowsRef.current.set(key, row);
     // Global search can jump across backends. Seed the ownership row into the
     // synchronous ref before openSession reads it; waiting for React's next
@@ -2261,6 +2343,7 @@ function ChatPageApp() {
     sessionsRef.current = index >= 0
       ? current.map((session, i) => (i === index ? { ...session, ...row } : session))
       : [...current, row];
+    writeSessionCache(sessionsRef.current);
     setSessions((prev) => {
       const rowIndex = prev.findIndex((session) => session.key === key);
       return rowIndex >= 0
@@ -2288,6 +2371,8 @@ function ChatPageApp() {
   // re-render the moment a turn starts/ends. inFlightRef stays the synchronous
   // source of truth; markInFlight keeps both in lock-step.
   const [runningKeys, setRunningKeys] = useState<Set<string>>(new Set());
+  const [runWaitBySession, setRunWaitBySession] = useState<Record<string, ChatRunWaitState>>({});
+  const runStatusBySessionRef = useRef<Map<string, string>>(new Map());
   // Last send per session (text + idempotencyKey + timestamp), for double-fire
   // dedup. A reconnect clears inFlightRef mid-turn (see ws onopen), so the composer
   // unlocks while the gateway turn is still alive; a re-fire then sends the SAME
@@ -2296,9 +2381,14 @@ function ChatPageApp() {
   // collapse the duplicate (findTranscriptMessageByIdempotencyKey) into one.
   const recentSendRef = useRef<Map<string, { text: string; idem: string; at: number }>>(new Map());
   const markInFlight = useCallback((key: string, on: boolean) => {
+    if (!on) setRunWaitBySession((previous) => {
+      if (!previous[key]) return previous;
+      const next = { ...previous }; delete next[key]; return next;
+    });
     if (on) inFlightRef.current.add(key);
     else {
       inFlightRef.current.delete(key);
+      runStatusBySessionRef.current.delete(key);
       // R342:回合已终结（final / error / aborted / chat.send reject）→ 同一句再发是
       // **用户主动重试**，不是双触发，必须换新 idempotencyKey。留着这条记录的话，重试
       // 会复用失败那次的 key，而网关把 chat.send 的结果（含失败）按 key 缓存 5 分钟
@@ -2398,6 +2488,13 @@ function ChatPageApp() {
     // Optional inline action (e.g. 撤销 after a local hide).
     action?: { label: string; run: () => void };
   } | null>(null);
+  useEffect(() => {
+    if (toast?.kind !== "error") return;
+    // Some failure paths have no local timer. Every error still expires, while
+    // existing shorter timers and long-running pending notices keep their policy.
+    const timer = window.setTimeout(() => setToast((current) => current === toast ? null : current), 7000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
   const [sessionArtifactsOpen, setSessionArtifactsOpen] = useState(false);
   const [sessionArtifactReload, setSessionArtifactReload] = useState(0);
   const [sessionArtifactPopoverPosition, setSessionArtifactPopoverPosition] = useState<SessionArtifactPopoverPosition | null>(null);
@@ -2428,6 +2525,10 @@ function ChatPageApp() {
   // Per-session accumulated streamed reasoning (Hermes acp agent_thought_chunk),
   // rendered as a live thinking part on the pending assistant until the turn settles.
   const pendingThinkingRef = useRef<Map<string, string>>(new Map());
+  // Raw runtime text is cumulative within one output item. A successful steer
+  // snapshots it so the next local bubble renders only the post-steer suffix.
+  const liveTextRef = useRef<Map<string, string>>(new Map());
+  const steerTextBaselineRef = useRef<Map<string, string>>(new Map());
   // Per-session ACP plan (todo list) — rendered as a pinned checklist on the pending bubble.
   const pendingPlanRef = useRef<Map<string, PlanEntry[]>>(new Map());
   // Blocking agent prompts (approval/clarify/sudo/secret cards) per session —
@@ -2491,7 +2592,7 @@ function ChatPageApp() {
   // (Figma node 7132:401),语义=整个 Agent Trajectory 的显示/隐藏(用户定案):
   // 关 → 时间线卡(含摘要行)、直播实时卡、散排回退卡全部不渲染,只留正文;
   // 开 → 完整过程(思考+工具)可见。下游读取点保留旧名作别名。
-  const [showTraj, setShowTraj] = useState(false);
+  const [showTraj, setShowTraj] = useState(true);
   const showThinking = showTraj;
   const showTools = showTraj;
   // Single page-level search entry: all active backends × all visible agents.
@@ -2561,7 +2662,7 @@ function ChatPageApp() {
   // session never rides a send in another (defends the cross-session race the
   // QA round saw once — the bar already clears on switch, this closes the gap).
   const [quote, setQuote] = useState<{ key: string; text: string } | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; group: Group; msgIndex?: number; partIndex?: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; group: Group; copyText: string; msgIndex?: number; partIndex?: number } | null>(null);
   const [advancedProbe, setAdvancedProbe] = useState<{
     key: string;
     backendId: string;
@@ -2722,9 +2823,10 @@ function ChatPageApp() {
         if (!cachedFiles?.length) return;
         if (!m.files?.length) m.files = cachedFiles;
         else {
-          const byName = new Map(cachedFiles.map((c) => [c.name, c]));
+          const byName = new Map<string, typeof cachedFiles>();
+          for (const cached of cachedFiles) byName.set(cached.name, [...(byName.get(cached.name) || []), cached]);
           m.files = m.files.map((f) => {
-            const cached = byName.get(f.name);
+            const cached = byName.get(f.name)?.shift();
             return cached ? { ...f, kind: f.kind || cached.kind, src: f.src ?? cached.src } : f;
           });
         }
@@ -2928,11 +3030,6 @@ function ChatPageApp() {
     })));
   }, [send]);
 
-  const applyCurrentAgentNames = useCallback((rows: SessionRow[]): SessionRow[] => rows.map((row) => {
-    const currentName = findAgentDisplayName(agentNamesRef.current, row.agentId || agentOf(row.key));
-    return currentName && currentName !== row.agentName ? { ...row, agentName: currentName } : row;
-  }), []);
-
   const refreshSessions = useCallback(async (): Promise<void> => {
     const ticket = sessionListGuard.begin();
     let fetchedRows: SessionRow[] | null = null;
@@ -2941,7 +3038,7 @@ function ChatPageApp() {
       .then((currentNames) => {
         if (!sessionListGuard.isCurrent(ticket)) return;
         agentNamesRef.current = currentNames;
-        commitSessions(applyCurrentAgentNames(fetchedRows || sessionsRef.current));
+        commitSessions(fetchedRows || sessionsRef.current);
       })
       .catch(() => {});
     try {
@@ -2949,12 +3046,12 @@ function ChatPageApp() {
       if (!sessionListGuard.isCurrent(ticket)) return;
       fetchedRows = next.rows;
       degradedBackendsRef.current = next.degradedBackends;
-      commitSessions(applyCurrentAgentNames(next.rows), true);
+      commitSessions(next.rows, true);
       setListLive(true);
     } catch (error) {
       if (sessionListGuard.isCurrent(ticket)) throw error;
     }
-  }, [applyCurrentAgentNames, commitSessions, fetchAgentNames, fetchAllSessions, sessionListGuard]);
+  }, [commitSessions, fetchAgentNames, fetchAllSessions, sessionListGuard]);
 
   useEffect(
     () => () => {
@@ -3213,6 +3310,8 @@ function ChatPageApp() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
       // 每次建立新 socket 都从干净的实时轮次开始；主动发送前仍会按当前 session 再清一次。
       clearLiveTurnState(liveToolsRef.current, pendingThinkingRef.current, pendingPlanRef.current);
+      liveTextRef.current.clear();
+      steerTextBaselineRef.current.clear();
       // R339:半截的直播时间线同样不能跨连接继承(留档的 lastTurnStepsRef 保留——
       // 它只描述已终结的回合,与连接无关)。
       liveTimelinesRef.current.clear();
@@ -3232,6 +3331,7 @@ function ChatPageApp() {
         // forever. A still-running gateway turn's outcome re-arrives via
         // session.message / the loadHistory below regardless.
         inFlightRef.current.clear();
+        runStatusBySessionRef.current.clear();
         setRunningKeys(new Set());
         setSending(false);
       }
@@ -3401,6 +3501,33 @@ function ChatPageApp() {
         const p = f.payload || {};
         const sk: string | undefined = p.sessionKey;
         const isActive = sk === activeKeyRef.current;
+        if (sk) {
+          if (p.state === "status" && typeof p.statusKind === "string") {
+            runStatusBySessionRef.current.set(sk, p.statusKind);
+          } else if (["delta", "interim", "thinking", "plan"].includes(p.state)) {
+            runStatusBySessionRef.current.set(sk, "running");
+          } else if (p.state === "prompt") {
+            runStatusBySessionRef.current.set(
+              sk,
+              p.prompt?.kind === "approval" ? "waiting_approval" : "waiting_input",
+            );
+          } else if (["final", "error", "aborted"].includes(p.state)) {
+            runStatusBySessionRef.current.delete(sk);
+          }
+        }
+        if (sk) setRunWaitBySession((previous) => {
+          const wait = p.state === "status" ? chatRunWaitState(p) : null;
+          if (wait) {
+            const old = previous[sk];
+            if (old?.kind === wait.kind && old.reason === wait.reason) {
+              wait.since = Math.min(old.since, wait.since);
+              if (old.since === wait.since) return previous;
+            }
+            return { ...previous, [sk]: wait };
+          }
+          if (!previous[sk]) return previous;
+          const next = { ...previous }; delete next[sk]; return next;
+        });
         if (sk && isLiveChatState(p.state)) markInFlight(sk, true);
         if (sk) {
           // a real reply is arriving → cancel any slash-command watchdog for this session
@@ -3413,11 +3540,19 @@ function ChatPageApp() {
         if (p.state === "delta") {
           const full = contentToText(p.message?.content) || contentToText(p.message);
           if (sk) timelineFeed(sk, { kind: "delta", text: full });
+          const projected = sk
+            ? projectSteeredLiveText(
+                liveTextRef.current.get(sk) || "",
+                full,
+                steerTextBaselineRef.current.get(sk),
+              )
+            : { accumulated: full, visible: full };
+          if (sk) liveTextRef.current.set(sk, projected.accumulated);
           if (isActive)
             setMessages((prev) =>
               applyDelta(
                 prev,
-                full,
+                projected.visible,
                 (sk && liveToolsRef.current.get(sk)) || [],
                 (sk && pendingThinkingRef.current.get(sk)) || "",
                 (sk && pendingPlanRef.current.get(sk)) || [],
@@ -3429,18 +3564,29 @@ function ChatPageApp() {
           // 中场封段（Hermes 网关 message.interim）：当前 pending 气泡定稿成一条
           // 完整消息（工具卡/思考随之落定），再开新的 pending 继续接本轮余下的流。
           if (sk) {
-            timelineFeed(sk, { kind: "interim", text: contentToText(p.message?.content) || contentToText(p.message) });
+            const full = contentToText(p.message?.content) || contentToText(p.message);
+            const wasSteered = steerTextBaselineRef.current.has(sk);
+            const projected = projectSteeredLiveText(
+              liveTextRef.current.get(sk) || "",
+              full,
+              steerTextBaselineRef.current.get(sk),
+            );
+            timelineFeed(sk, { kind: "interim", text: projected.visible });
             liveToolsRef.current.delete(sk);
             pendingThinkingRef.current.delete(sk);
             if (isActive) {
               setMessages((prev) => [
-                ...finalizeAssistant(prev, p.message),
+                ...finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined),
                 { role: "assistant", parts: [{ type: "text", text: "" }], pending: true },
               ]);
             }
+            // Commentary/interim seals the current runtime text item. The next
+            // item starts a fresh accumulator and no longer needs the steer cut.
+            liveTextRef.current.delete(sk);
+            steerTextBaselineRef.current.delete(sk);
           }
         } else if (p.state === "status") {
-          // 会话状态（目前只有上下文压缩两态）→ 轻量 toast，不进消息流。
+          // 执行等待在会话状态和 pending 气泡显示，压缩仍使用轻量 toast。
           if (sk && typeof p.statusKind === "string") timelineFeed(sk, { kind: "status", status: { kind: p.statusKind, text: typeof p.text === "string" ? p.text : undefined } });
           if (p.statusKind === "compacting") {
             setToast({ text: t("chat.compactingCtx"), kind: "pending" });
@@ -3494,6 +3640,15 @@ function ChatPageApp() {
               setMessages((prev) => applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", p.plan, pendingPromptsRef.current.get(sk) || []));
           }
         } else if (p.state === "final") {
+          const fullFinalText = contentToText(p.message?.content) || contentToText(p.message) || "";
+          const wasSteered = !!sk && steerTextBaselineRef.current.has(sk);
+          const projectedFinal = sk
+            ? projectSteeredLiveText(
+                liveTextRef.current.get(sk) || "",
+                fullFinalText,
+                steerTextBaselineRef.current.get(sk),
+              )
+            : { accumulated: fullFinalText, visible: fullFinalText };
           if (sk) {
             markInFlight(sk, false);
             liveToolsRef.current.delete(sk); // turn done → history (via the reload below) owns the tool cards
@@ -3513,7 +3668,7 @@ function ChatPageApp() {
             // （R266 把这些会话放回了切换器，但「不点红点」的理由不变：红点指的是该 agent 行，
             // 而行代表的是前台会话；后台产出去切换器对应的 Tab 或 Cron 页运行记录里看。）
             const ag = agentOf(sk);
-            const finalText = contentToText(p.message?.content) || contentToText(p.message) || "";
+            const finalText = fullFinalText;
             const isRealReply = canvasPartsFromContent(p.message?.content ?? p.message).length > 0 || !isHeartbeatAckText(finalText);
             const finalSessionKind = p.message?.shoggoth?.source === "cron" ? "cron"
               : sessionsRef.current.find((row) => row.key === sk)?.kind;
@@ -3557,9 +3712,15 @@ function ChatPageApp() {
               sessionsRefreshTimerRef.current = null;
               void refreshSessions().catch(() => {});
             }, 300);
+            liveTextRef.current.delete(sk);
+            steerTextBaselineRef.current.delete(sk);
           }
           if (isActive) {
-            setMessages((prev) => finalizeAssistant(prev, p.message));
+            setMessages((prev) => finalizeAssistant(
+              prev,
+              p.message,
+              wasSteered ? projectedFinal.visible : undefined,
+            ));
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
             setSending(false);
           }
@@ -3585,6 +3746,8 @@ function ChatPageApp() {
             if (durableProgress) pendingPlanRef.current.set(sk, progressCardPlan(durableProgress));
             else pendingPlanRef.current.delete(sk);
             replacePendingPrompts(sk, []);
+            liveTextRef.current.delete(sk);
+            steerTextBaselineRef.current.delete(sk);
           }
           if (isActive) {
             // Store the RAW gateway error; render-time wraps it with errPrefix +
@@ -3614,9 +3777,24 @@ function ChatPageApp() {
             replacePendingPrompts(sk, []);
           }
           if (isActive) {
-            setMessages((prev) => (p.message ? finalizeAssistant(prev, p.message) : prev.filter((m) => !m.pending)));
+            const full = contentToText(p.message?.content) || contentToText(p.message) || "";
+            const wasSteered = !!sk && steerTextBaselineRef.current.has(sk);
+            const projected = sk
+              ? projectSteeredLiveText(
+                  liveTextRef.current.get(sk) || "",
+                  full,
+                  steerTextBaselineRef.current.get(sk),
+                )
+              : { accumulated: full, visible: full };
+            setMessages((prev) => (p.message
+              ? finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined)
+              : prev.filter((m) => !m.pending)));
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
             setSending(false);
+          }
+          if (sk) {
+            liveTextRef.current.delete(sk);
+            steerTextBaselineRef.current.delete(sk);
           }
           if (sk && (isActive || reloadOnFinalRef.current.has(sk))) {
             reloadOnFinalRef.current.delete(sk);
@@ -3637,6 +3815,7 @@ function ChatPageApp() {
         const d = p.data || p; // session.tool/agent both carry the tool fields under data
         const id: string | undefined = d?.toolCallId || d?.id;
         if (sk && id) {
+          runStatusBySessionRef.current.set(sk, "running");
           const arr = liveToolsRef.current.get(sk) ?? [];
           let entry = arr.find((x) => x.id === id);
           if (!entry) {
@@ -4036,22 +4215,6 @@ function ChatPageApp() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  // Avatars are changed in the OpenClaw desktop app (outside this UI) and live at
-  // a constant /avatar/<id> URL, so already-rendered <img>s never refresh on their
-  // own. Re-version them when this window regains focus so the list catches up.
-  useEffect(() => {
-    const bump = () => setAvatarVersion((v) => v + 1);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") bump();
-    };
-    window.addEventListener("focus", bump);
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.removeEventListener("focus", bump);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, []);
-
   // Probe live backend connectivity (same /__api/status the 设置 page uses) so the
   // agent list can hide agents whose backend is offline — the list is built from
   // caches (localStorage sessions + the proxy's injected Hermes rows) that don't
@@ -4071,14 +4234,10 @@ function ChatPageApp() {
         const starting = new Set(
           rows.filter((b) => !b?.connected && b?.info?.starting && b.id).map((b) => b.id as string),
         );
-        // 用户在设置页主动断开的后端（registry.getStatus 合成 disabled:true）——这是明确
-        // 意图，与意外断线相反：它才是列表里唯一该整组消失的情况。
-        const disabled = new Set(rows.filter((b) => b?.disabled && b.id).map((b) => b.id as string));
         const ready = new Set(rows.flatMap((b) => Array.isArray(b.info?.readyAgentIds) ? b.info.readyAgentIds : []));
         if (!cancelled) {
           setConnectedBackends(set);
           setStartingBackends(starting);
-          setDisabledBackends(disabled);
           setReadyAgentIds(ready);
         }
       } catch {
@@ -4104,7 +4263,7 @@ function ChatPageApp() {
       window.removeEventListener("focus", refreshStatus);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, []);
+  }, [chatBackendScopeKey]);
 
   useEffect(() => {
     void chatHistoryController.revalidateReady(readyAgentIds);
@@ -4279,11 +4438,6 @@ function ChatPageApp() {
     }
   }, [routerLocation.key, routerLocation.pathname]);
   useEffect(() => {
-    const refreshAvatarImages = () => setAvatarVersion(Date.now());
-    window.addEventListener("focus", refreshAvatarImages);
-    return () => window.removeEventListener("focus", refreshAvatarImages);
-  }, []);
-  useEffect(() => {
     if (routerLocation.pathname !== "/chat") return;
     const params = new URLSearchParams(routerLocation.search);
     const key = params.get("session");
@@ -4432,6 +4586,19 @@ function ChatPageApp() {
       maxPayloadForSession(key),
     );
   };
+  const inspectChatSteerPayload = (key: string, text: string) => {
+    const maxPromptBytes = chatCapsRef.current[agentOf(key)]?.maxPromptBytes;
+    const promptBytes = new TextEncoder().encode(JSON.stringify(text)).byteLength;
+    if (maxPromptBytes && promptBytes > maxPromptBytes) {
+      return { allowed: false, payloadBytes: promptBytes, maxPayload: maxPromptBytes };
+    }
+    return gatewayRequestPayloadBudget(
+      String(reqId.current),
+      "chat.steer",
+      { sessionKey: key, message: text },
+      maxPayloadForSession(key),
+    );
+  };
   const showPayloadLimit = (translationKey: string, payloadBytes: number, maxPayload?: number) => {
     setToast({
       text: t(translationKey, {
@@ -4514,9 +4681,12 @@ function ChatPageApp() {
     // 本地气泡缩略/缓存只针对图片；PDF/文件走 files chip。
     const imgs = atts.filter((a) => !a.kind || a.kind === "image").map((a) => a.dataUrl);
     const nonImageAtts = atts.filter((a) => a.kind && a.kind !== "image");
+    runStatusBySessionRef.current.set(key, "starting");
     markInFlight(key, true);
     liveToolsRef.current.delete(key); // fresh turn → drop any prior turn's live tool cards
     pendingThinkingRef.current.delete(key);
+    liveTextRef.current.delete(key);
+    steerTextBaselineRef.current.delete(key);
     const durableProgress = progressCardsRef.current.get(key);
     if (durableProgress) pendingPlanRef.current.set(key, progressCardPlan(durableProgress));
     else pendingPlanRef.current.delete(key);
@@ -4541,7 +4711,7 @@ function ChatPageApp() {
           ? nonImageAtts.map((a) => ({
               name: a.name,
               kind: a.kind || "file",
-              ...(a.kind === "video" ? { src: a.dataUrl } : {}),
+              src: a.dataUrl,
               ...(a.sizeBytes !== undefined ? { sizeBytes: a.sizeBytes } : {}),
               ...(a.durationMs !== undefined ? { durationMs: a.durationMs } : {}),
               ...(a.width !== undefined ? { width: a.width } : {}),
@@ -4561,17 +4731,16 @@ function ChatPageApp() {
     setMessages(nextMessages);
     // 落本地缓存：gateway 不持久化用户图片，重开后靠这份缓存 + 「会话::文本」键还原（lib/imageCache）。
     if (imgs.length) void putImages(imgCacheKey(key, text), imgs);
-    // 文件只缓存元数据（名字+类别）作为权威历史尚未返回时的回退；OpenClaw 8.1
-    // 之后可从 `__openclaw.media` 还原安全事实，Hermes 继续从 marker 还原。
+    // 保留文件来源，切回会话后仍可打开；权威历史提供的来源优先于本地缓存。
     if (nonImageAtts.length) {
-      // 视频额外缓存 dataURL 才能在重载后继续播放；但它可能几十 MB，超过
-      // VIDEO_CACHE_MAX_BYTES 就只留文件名（chip 形态），不塞爆 IndexedDB 配额。
+      // 大文件可能几十 MB，超过 FILE_CACHE_MAX_BYTES 只保留元数据，
+      // 原生附件引用和 Hermes 路径仍由权威历史恢复。
       void putFiles(
         fileCacheKey(key, text),
         nonImageAtts.map((a) => ({
           name: a.name,
           kind: a.kind || "file",
-          ...(a.kind === "video" && a.dataUrl.length <= VIDEO_CACHE_MAX_BYTES ? { src: a.dataUrl } : {}),
+          ...(a.dataUrl.length <= FILE_CACHE_MAX_BYTES ? { src: a.dataUrl } : {}),
         })),
       );
     }
@@ -4616,6 +4785,43 @@ function ChatPageApp() {
     }
   };
   sendChatMessageRef.current = sendChatMessage; // keep the widget sendPrompt bridge current
+
+  const sendSteeringMessage = async (key: string, text: string) => {
+    const payloadBudget = inspectChatSteerPayload(key, text);
+    if (!payloadBudget.allowed) {
+      showPayloadLimit("chat.sendPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
+      return false;
+    }
+    try {
+      await send("chat.steer", { sessionKey: key, message: text });
+      steerTextBaselineRef.current.set(key, liveTextRef.current.get(key) || "");
+      liveToolsRef.current.delete(key);
+      pendingThinkingRef.current.delete(key);
+      pendingPlanRef.current.delete(key);
+      if (activeKeyRef.current !== key) return true;
+      const nextMessages = appendSteeringMessage(messagesRef.current, text);
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+      bumpSession(key, Date.now());
+      setImmersiveSendSeq((sequence) => sequence + 1);
+      return true;
+    } catch (error) {
+      if (activeKeyRef.current === key) {
+        setInput((current) => current.trim() ? `${text}\n${current}` : text);
+        setToast({
+          text: t("chat.steerFailedRestored", {
+            msg: error instanceof Error ? error.message : String(error),
+          }),
+          kind: "error",
+        });
+        setTimeout(() => setToast(null), 3200);
+      } else {
+        const current = draftsRef.current.get(key) || "";
+        draftsRef.current.set(key, current.trim() ? `${text}\n${current}` : text);
+      }
+      return false;
+    }
+  };
 
   // ── 待发队列操作（R357）────────────────────────────────────────────────
   // 队列此刻能不能往外发：WS 通着 **且** 目标会话所属后端在线。两个条件缺一不可——
@@ -4983,11 +5189,25 @@ function ChatPageApp() {
         return true;
       }
       case "steer":
-        echo();
         if (!args) {
+          echo();
           pushLocal(t("chat.usageSteer"));
           return true;
         }
+        if (nativeAgent) {
+          if (!canSteerActiveChat(
+            chatCapsRef.current[agentOf(key)],
+            runStatusBySessionRef.current.get(key),
+            0,
+          )) {
+            echo();
+            pushLocal(t("chat.steerUnavailable"));
+            return true;
+          }
+          if (await sendSteeringMessage(key, args)) pushLocal(t("chat.steerInjected"));
+          return true;
+        }
+        echo();
         try {
           await send("chat.send", { sessionKey: key, message: args, deliver: false, idempotencyKey: crypto.randomUUID() });
           pushLocal(t("chat.steerInjected"));
@@ -5040,8 +5260,8 @@ function ChatPageApp() {
         try {
           const res = await send("sessions.create", {
             agentId,
-            // Bare /new inherits the current session's workspace in the owning
-            // backend. An explicit `/new /absolute/path` remains an override.
+            // The owning backend inherits explicit project directories; native
+            // generated directories get a new private workspace for this session.
             parentSessionKey: key,
             // The proxy adapts this backend-neutral identity to the owning
             // transport; raw model ids may themselves contain `/`.
@@ -5092,6 +5312,7 @@ function ChatPageApp() {
           await send("sessions.reset", { key, reason: "reset" });
           // A reset must not flush queued prompts into the fresh conversation.
           inFlightRef.current.delete(key);
+          runStatusBySessionRef.current.delete(key);
           recentSendRef.current.delete(key);
           setRunningKeys(new Set(inFlightRef.current));
           liveToolsRef.current.delete(key);
@@ -5265,7 +5486,14 @@ function ChatPageApp() {
     const q = quote && quote.key === key ? quote : null;
     const prefix = q ? `${q.text.split("\n").map((l) => `> ${l}`).join("\n")}\n\n` : "";
     const outgoing = prefix && !text.startsWith(prefix) ? `${prefix}${text}` : text;
-    const payloadBudget = inspectChatSendPayload(key, outgoing, atts);
+    const shouldSteer = inFlight && canSteerActiveChat(
+      chatCapsRef.current[agentOf(key)],
+      runStatusBySessionRef.current.get(key),
+      atts.length,
+    );
+    const payloadBudget = shouldSteer
+      ? inspectChatSteerPayload(key, outgoing)
+      : inspectChatSendPayload(key, outgoing, atts);
     if (!payloadBudget.allowed) {
       showPayloadLimit("chat.sendPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
       return;
@@ -5273,9 +5501,12 @@ function ChatPageApp() {
     setInput("");
     setComposerAttachments([]);
     setQuote(null);
-    // R357 统一走队列：空闲+空队列 → enqueue 后同 tick 立即出队发出（等价旧的直接发送）；
-    // 生成中 → 排队，回合终结由 markInFlight 钩子链式补发；队列滞留（重连等）→ 新消息
-    // 排队尾保序。
+    if (shouldSteer) {
+      await sendSteeringMessage(key, outgoing);
+      return;
+    }
+    // 空闲时立即新开一轮；Runtime 不支持 steering、Run 尚未 running，
+    // 或消息带附件时继续使用待发队列，保持原有保序与断线恢复语义。
     enqueueMessage(key, outgoing, atts);
     flushQueue(key);
   };
@@ -5562,12 +5793,7 @@ function ChatPageApp() {
     setTimeout(() => setToast(null), 1600);
   };
 
-  // Copy a message group's text as markdown (per-message action).
-  const copyGroup = (g: Group) => {
-    const md = g.msgs
-      .flatMap((m) => m.parts.map((p) => p.text || ""))
-      .join("\n")
-      .trim();
+  const copyText = (md: string) => {
     navigator.clipboard?.writeText(md).catch(() => {});
     setToast({ text: t("chat.copied"), kind: "success" });
     setTimeout(() => setToast(null), 1200);
@@ -5588,7 +5814,7 @@ function ChatPageApp() {
   const deleteGroup = (g: Group) => {
     const key = activeKeyRef.current;
     if (!key) return;
-    const ids = g.msgs.map((m) => m.id).filter((x): x is string => Boolean(x));
+    const ids = g.msgs.map((m) => m.actionId).filter((x): x is string => Boolean(x));
     if (!ids.length) return;
     setHiddenIds((prev) => {
       const n = new Set(prev);
@@ -5634,13 +5860,14 @@ function ChatPageApp() {
     setToast({ text: t("chat.retryNoSource"), kind: "error" });
     setTimeout(() => setToast(null), 2200);
   };
-  // Toggle pin on a group (keyed by its first message id) — persisted per session.
+  // Toggle the group's saved pin, or pin its first actionable message — persisted per session.
   // On add, jump the carousel to the just-pinned item (its thread-order position
   // among the pinned groups) so the bar reflects what you pinned.
   const pinGroup = (g: Group) => {
     const key = activeKeyRef.current;
     if (!key) return;
-    const id = g.msgs.find((m) => m.id)?.id;
+    const id = g.msgs.find((m) => m.actionId && pinnedIds.has(m.actionId))?.actionId
+      ?? g.msgs.find((m) => m.actionId)?.actionId;
     if (!id) return;
     const adding = !pinnedIds.has(id);
     const n = new Set(pinnedIds);
@@ -5649,7 +5876,7 @@ function ChatPageApp() {
     setPinnedIds(n);
     writeIdSet(PINNED_PREFIX, key, n);
     if (adding) {
-      const pos = groups.filter((gg) => gg.msgs.some((m) => m.id && n.has(m.id))).findIndex((gg) => gg.msgs.some((m) => m.id === id));
+      const pos = groups.filter((gg) => gg.msgs.some((m) => m.actionId && n.has(m.actionId))).findIndex((gg) => gg.msgs.some((m) => m.actionId === id));
       if (pos >= 0) setPinNavIndex(pos);
     } else if (n.size === 0) {
       setPinnedOnly(false); // last pin gone → don't strand the thread in a now-toggle-less pinned-only view
@@ -5707,7 +5934,7 @@ function ChatPageApp() {
     if (hit) scrollToMessage(hit.key);
   };
   // Right-click context menu (复制/引用/置顶/删除) on a message group.
-  const openMenu = (e: ReactMouseEvent<HTMLDivElement>, g: Group) => {
+  const openMenu = (e: ReactMouseEvent<HTMLDivElement>, g: Group, copyTextOverride?: string) => {
     e.preventDefault();
     // R154：从事件目标向上找 data-mi（消息序号）/ data-qp（文本气泡的 part 序号），
     // 记录右键落点。引用按落点气泡取文——连续同角色消息归组渲染，整组取文会把
@@ -5719,6 +5946,7 @@ function ChatPageApp() {
       x: e.clientX,
       y: e.clientY,
       group: g,
+      copyText: copyTextOverride ?? groupCopyText(g, mi, pi),
       msgIndex: Number.isNaN(mi) ? undefined : mi,
       partIndex: Number.isNaN(pi) ? undefined : pi,
     });
@@ -6033,7 +6261,10 @@ function ChatPageApp() {
           const bytes = Uint8Array.from(atob(item.content), value => value.charCodeAt(0));
           addFile(new File([bytes], item.fileName, { type: item.mimeType }));
         }
-      }).catch(error => setToast({ text: String(error.message || error), kind: "error" }));
+      }).catch(error => {
+        if (activeKeyRef.current !== key) return;
+        setToast({ text: String(error.message || error), kind: "error" });
+      });
     }
   };
   // drag-and-drop image files onto the composer
@@ -6387,6 +6618,9 @@ function ChatPageApp() {
   const activeAdvancedMethods = activeAdvancedDescription?.methods;
   const showAdvancedSessionDetails = hasAdvancedSessionDetails(activeAdvancedMethods);
   const activeRunInFlight = sending || (activeKey ? runningKeys.has(activeKey) : false);
+  const activeCanSteer = activeKey
+    ? canSteerActiveChat(activeCaps, runStatusBySessionRef.current.get(activeKey), 0)
+    : false;
   const activeSessionArtifactResult = sessionArtifactState.key === activeKey
     ? sessionArtifactState.result
     : null;
@@ -6469,6 +6703,17 @@ function ChatPageApp() {
         text: t("chat.artifactsOpenFailed", { msg: error instanceof Error ? error.message : String(error) }),
         kind: "error",
       });
+      setTimeout(() => setToast(null), 2600);
+    }
+  }, [t]);
+
+  const openAttachmentFile = useCallback(async (file: { name: string; src?: string; path?: string }) => {
+    try {
+      if (file.path) await openPath(file.path);
+      else if (file.src) await openAttachment(file.name, file.src);
+      else throw new Error(t("chat.attachmentSourceMissing"));
+    } catch (error) {
+      setToast({ text: t("chat.artifactsOpenFailed", { msg: error instanceof Error ? error.message : String(error) }), kind: "error" });
       setTimeout(() => setToast(null), 2600);
     }
   }, [t]);
@@ -6582,6 +6827,12 @@ function ChatPageApp() {
     t(`chat.thinkLevel.${lvl}`, {
       defaultValue: THINK_LEVEL_LABELS[lvl] ?? lvl.charAt(0).toUpperCase() + lvl.slice(1),
     });
+  // Compute anonymous identities before hiding/folding messages, so deleting one
+  // duplicate cannot change another's key. Keep backend ids intact for search/fork.
+  const actionableMessages = useMemo(() => keyedChatMessages(messages).map(({ item, key }) => ({
+    ...item,
+    actionId: item.id || (item.pending || item.divider || item.notice ? undefined : `local:${key}`),
+  })), [messages]);
   const groups = useMemo(
     () => {
       const grouped = groupMessages(
@@ -6590,7 +6841,7 @@ function ChatPageApp() {
           // lastTurnStepsRef 是 ref(不进 deps):final 后的 loadHistory 会 setMessages,
           // 本 memo 随之重算并读到最新留档,时序天然成立。
           absorbTurnTimelines(
-            messages.filter((m) => !(m.id && hiddenIds.has(m.id)) && !isHeartbeatNoise(m)),
+            actionableMessages.filter((m) => !(m.actionId && hiddenIds.has(m.actionId)) && !isHeartbeatNoise(m)),
             lastTurnStepsRef.current.get(activeKeyRef.current || ""),
           ),
         ),
@@ -6604,13 +6855,13 @@ function ChatPageApp() {
         return msgs.length > 0 ? [{ ...group, msgs, ts: msgs[0].ts }] : [];
       });
     },
-    [messages, hiddenIds],
+    [actionableMessages, hiddenIds],
   );
   // The thread only has its explicit pinned-only filter. Global search lives in
   // a modal and never mutates the active message projection.
   const shownGroups = useMemo(
     () => pinnedOnly
-      ? groups.filter((g) => g.msgs.some((m) => m.id && pinnedIds.has(m.id)))
+      ? groups.filter((g) => g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)))
       : groups,
     [groups, pinnedOnly, pinnedIds],
   );
@@ -6851,9 +7102,9 @@ function ChatPageApp() {
             errorRaw: translated !== segText && segText ? segText : undefined,
             errorRepeat: m0.repeat,
             onRetry: () => retryErrorGroup(g),
-            onCopy: segText ? () => copyGroup(g) : undefined,
-            onDelete: g.msgs.some((m) => m.id) ? () => deleteGroup(g) : undefined,
-            onCtx: (e) => openMenu(e, g),
+            onCopy: segText ? () => copyText(segText) : undefined,
+            onDelete: g.msgs.some((m) => m.actionId) ? () => deleteGroup(g) : undefined,
+            onCtx: (e) => openMenu(e, g, segText),
           });
           return;
         }
@@ -6864,7 +7115,7 @@ function ChatPageApp() {
         const prompts = seg.msgs.flatMap((m) =>
           m.parts.filter((p) => p.type === "prompt" && p.promptEntry).map((p) => p.promptEntry as ChatPromptEntry),
         );
-        const hasId = seg.msgs.some((m) => m.id) || g.msgs.some((m) => m.id);
+        const hasId = g.msgs.some((m) => m.actionId);
         entries.push({
           id: segId,
           role: String(g.role),
@@ -6876,11 +7127,11 @@ function ChatPageApp() {
           pending: seg.msgs.some((m) => m.pending) || undefined,
           prompts: prompts.length ? prompts : undefined,
           // 悬浮操作/右键：无参闭包捕获 Group，动作与普通模式同一套 handler
-          onCopy: segText ? () => copyGroup(g) : undefined,
+          onCopy: segText ? () => copyText(segText) : undefined,
           onPin: hasId ? () => pinGroup(g) : undefined,
-          pinned: hasId ? g.msgs.some((m) => m.id && pinnedIds.has(m.id)) : undefined,
+          pinned: hasId ? g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) : undefined,
           onDelete: hasId ? () => deleteGroup(g) : undefined,
-          onCtx: (e) => openMenu(e, g),
+          onCtx: (e) => openMenu(e, g, segText),
         });
       });
       // 空段（纯 thinking/工具轮次）不保留；审批卡在正文之前到达时靠 prompts 保住 pending 段
@@ -6922,6 +7173,9 @@ function ChatPageApp() {
   // pendingThinkingRef 的每次变更都经 applyToolStream 回流进 messages，这里纯派生、
   // 零新订阅。没有过程信息（OpenClaw 首包前）返回 null → 沉浸层继续用三点等待。
   const immersiveLive = useMemo((): ImmersiveLiveStatus | null => {
+    if (activeKey && activeRunInFlight && runWaitBySession[activeKey]) {
+      return { tools: [], wait: runWaitBySession[activeKey] };
+    }
     const last = messages[messages.length - 1];
     if (!last?.pending) return null;
     const tools: ImmersiveLiveTool[] = [];
@@ -6936,14 +7190,14 @@ function ChatPageApp() {
     }
     if (!tools.length && !thinkingText) return null;
     return { tools, thinkingText: thinkingText || undefined };
-  }, [messages]);
+  }, [messages, activeKey, activeRunInFlight, runWaitBySession]);
   // Loaded pinned messages, in thread order, for the single-line pin carousel. Pins to
   // not-yet-loaded (very old) messages simply don't appear until scrolled into range.
   const pinnedList = useMemo(
     () =>
       groups
         .map((g) => {
-          const id = g.msgs.find((m) => m.id && pinnedIds.has(m.id))?.id;
+          const id = g.msgs.find((m) => m.actionId && pinnedIds.has(m.actionId))?.actionId;
           return id ? { id, text: groupSnippet(g) } : null;
         })
         .filter((x): x is { id: string; text: string } => !!x),
@@ -7252,6 +7506,8 @@ function ChatPageApp() {
         return {
           key: s.key,
           kind: s.kind,
+          source: s.source,
+          inspirationId: s.inspirationId,
           title,
           sub: sessionDisplayPreview(s, title),
           time: ts ? relTime(ts, t("chat.justNow")) : "",
@@ -7777,8 +8033,8 @@ function ChatPageApp() {
           </div>
         ) : null}
         {toast && (
-          <div className={`chat-toast chat-toast--${toast.kind}`}>
-            {toast.text}
+          <div className={`chat-toast chat-toast--${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
+            <span className="chat-toast__text" title={toast.text}>{toast.text}</span>
             {toast.action && (
               <button
                 type="button"
@@ -7789,6 +8045,19 @@ function ChatPageApp() {
                 }}
               >
                 {toast.action.label}
+              </button>
+            )}
+            {toast.kind === "error" && (
+              <button
+                type="button"
+                className="chat-toast__dismiss"
+                aria-label={t("common.close")}
+                title={t("common.close")}
+                onClick={() => setToast(null)}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                  <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
               </button>
             )}
           </div>
@@ -7804,6 +8073,9 @@ function ChatPageApp() {
               <div className="chat-header__id">
                 <div className="chat-header__name">{sessionName(active)}</div>
                 <div className="chat-header__statusline">
+                {activeRunInFlight && runWaitBySession[active.key] && (
+                  <ChatRunWait state={runWaitBySession[active.key]} compact />
+                )}
                 {(activeHeaderStatus === "reconnecting" || activeHeaderStatus === "offline") && (
                   <span className={`chat-status chat-status--${activeHeaderStatus}`}>
                     <span className="status-dot" />
@@ -8095,9 +8367,8 @@ function ChatPageApp() {
                   }
                   const last = g.msgs[g.msgs.length - 1];
                   const cls = g.role === "user" ? "is-user" : g.role === "toolResult" ? "is-tool" : "is-assistant";
-                  // pin id = 组内首个带 id 的消息（pinGroup 存的就是它）；置顶走马灯按 message
-                  // id 定位，故仍要注册它。跳转锚点则用 groupRenderKey（恒有，R155）。
-                  const pinId = g.msgs.find((m) => m.id)?.id;
+                  // A saved pin can belong to any message after groups merge.
+                  const pinIds = g.msgs.map((m) => m.actionId).filter((id): id is string => !!id);
                   // Footer meta: ↑input ↓output Rcache N%ctx. N%ctx = the context occupancy
                   // *at the moment this turn was sent* = that turn's prompt size
                   // (fresh input + cache read + cache write) / window. It grows down the thread
@@ -8161,14 +8432,13 @@ function ChatPageApp() {
                       key={groupRenderKey}
                       ref={(el) => {
                         // 渲染 key 恒有 → 无 id 组（cron 投递等）也能被引用跳转锚定（R155）。
-                        // 额外注册 pin id 让置顶走马灯仍按 message id 定位（两 key 指同一节点，
-                        // 键空间不冲突：renderKey 形如 group:…，pin id 是裸 UUID）。
+                        // 同时注册各条消息的操作 ID，让已有置顶在组归并后仍能定位。
                         if (el) {
                           groupRefs.current.set(groupRenderKey, el);
-                          if (pinId) groupRefs.current.set(pinId, el);
+                          pinIds.forEach((id) => groupRefs.current.set(id, el));
                         } else {
                           groupRefs.current.delete(groupRenderKey);
-                          if (pinId) groupRefs.current.delete(pinId);
+                          pinIds.forEach((id) => groupRefs.current.delete(id));
                         }
                       }}
                       onContextMenu={(e) => openMenu(e, g)}
@@ -8224,9 +8494,11 @@ function ChatPageApp() {
                                       </span>
                                     ) : (
                                       <span key={fileRenderKey} className="chat-att-chip chat-att-chip--file is-sent" title={attachmentChipTitle(f)}>
-                                        <span className="chat-att-chip__file">
-                                          {attachmentChipIcon(f.kind)} {f.name}
-                                        </span>
+                                        <button type="button" className="chat-att-chip__open" onClick={() => void openAttachmentFile(f)}>
+                                          <span className="chat-att-chip__file">
+                                            {attachmentChipIcon(f.kind)} {f.name}
+                                          </span>
+                                        </button>
                                       </span>
                                     ),
                                   )}
@@ -8370,6 +8642,7 @@ function ChatPageApp() {
                                   <ChatMarkdown
                                     key={k}
                                     className="chat-bubble chat-md is-local"
+                                    data-qp={pi}
                                     text={p.text}
                                   />
                                 );
@@ -8379,7 +8652,10 @@ function ChatPageApp() {
                               // the cursor trailing the rendered HTML.
                               if (m.pending) {
                                 return (
-                                  <div key={k} className="chat-bubble">
+                                  <div key={k} className="chat-bubble" data-qp={pi}>
+                                    {!p.text?.trim() && activeKey && runWaitBySession[activeKey] && (
+                                      <ChatRunWait state={runWaitBySession[activeKey]} />
+                                    )}
                                     {p.text?.trim() ? (
                                       <ChatMarkdown
                                         className="chat-md"
@@ -8400,7 +8676,7 @@ function ChatPageApp() {
                                 const translated = rawErr ? translateGatewayError(rawErr, t) : "";
                                 const shownErr = m.errPrefix ? t(m.errPrefix, { msg: translated || t("chat.unknown") }) : translated;
                                 return (
-                                  <div key={k} className="chat-bubble is-error" title={translated !== rawErr && rawErr ? rawErr : undefined}>
+                                  <div key={k} className="chat-bubble is-error" data-qp={pi} title={translated !== rawErr && rawErr ? rawErr : undefined}>
                                     {shownErr}
                                     {pi === m.parts.length - 1 && (m.repeat ?? 1) > 1 ? (
                                       <span
@@ -8443,6 +8719,7 @@ function ChatPageApp() {
                                     {qr.body.trim() ? (
                                       <ChatMarkdown
                                         className="chat-bubble chat-md"
+                                        data-qp={pi}
                                         text={qr.body}
                                       />
                                     ) : null}
@@ -8529,17 +8806,17 @@ function ChatPageApp() {
                               type="button"
                               className="chat-copybtn"
                               title={t("chat.copyAsMarkdown")}
-                              onClick={() => copyGroup(g)}
+                              onClick={() => copyText(groupCopyText(g))}
                             >
                               <IconCopy />
                             </button>
                           )}
-                          {!last.pending && g.msgs.some((m) => m.id) && (
+                          {!last.pending && g.msgs.some((m) => m.actionId) && (
                             <>
                               <button
                                 type="button"
-                                className={g.msgs.some((m) => m.id && pinnedIds.has(m.id)) ? "chat-copybtn is-pinned" : "chat-copybtn"}
-                                title={g.msgs.some((m) => m.id && pinnedIds.has(m.id)) ? t("chat.unpin") : t("chat.pin")}
+                                className={g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) ? "chat-copybtn is-pinned" : "chat-copybtn"}
+                                title={g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) ? t("chat.unpin") : t("chat.pin")}
                                 onClick={() => pinGroup(g)}
                               >
                                 <IconPin />
@@ -8670,12 +8947,14 @@ function ChatPageApp() {
                         // 待发区也给视频真预览（首帧），而不是一个看不出内容的文件名。
                         <video src={a.dataUrl} title={a.name} preload="metadata" muted playsInline />
                       ) : (
-                        <span className="chat-att-chip__file" title={a.name}>
-                          {a.kind === "pdf" ? "📄" : "📎"} {a.name}
-                        </span>
+                        <button type="button" className="chat-att-chip__open" title={a.name}
+                          onClick={() => void openAttachmentFile({ name: a.name, src: a.dataUrl })}>
+                          <span className="chat-att-chip__file"><IconAttachmentFolder /> {a.name}</span>
+                        </button>
                       )}
-                      <button className="chat-att-x" onClick={() => removeAttachment(a.id)} title={t("common.remove")}>
-                        ×
+                      <button type="button" className="chat-att-x" onClick={() => removeAttachment(a.id)}
+                        title={t("common.remove")} aria-label={`${t("common.remove")} ${a.name}`}>
+                        <span aria-hidden="true">{a.kind && a.kind !== "image" && a.kind !== "video" ? "✕" : "×"}</span>
                       </button>
                     </div>
                   ))}
@@ -8723,6 +9002,7 @@ function ChatPageApp() {
                   {(activeThinkingOptions?.length || activeThinkingDefault) && (
                     <Select
                       triggerClassName="chat-pill chat-pill--select chat-pill--think"
+                      popupClassName="chat-composer-select-menu"
                       value={active.thinkingLevel ?? ""}
                       onChange={(value) => { void patchSession({ thinkingLevel: value || null }, t("chat.labelThinking")); }}
                       title={t("chat.switchThinking")}
@@ -8795,6 +9075,18 @@ function ChatPageApp() {
                       <IconClip />
                     </button>
                   )}
+                  {activeRunInFlight && activeCanSteer && (
+                    <button
+                      type="button"
+                      className="chat-iconbtn chat-send"
+                      data-send-entry="composerButton"
+                      onClick={() => sendController.composerButton(activeKeyRef.current, () => { void submit(); })}
+                      disabled={!activeSendReady || (!input.trim() && !attachments.length)}
+                      title={t(attachments.length ? "chat.send" : "chat.steerCurrentTurn")}
+                    >
+                      <IconSend />
+                    </button>
+                  )}
                   {activeRunInFlight ? (
                     <button
                       type="button"
@@ -8845,12 +9137,12 @@ function ChatPageApp() {
             top: Math.min(menu.y, window.innerHeight - 228),
           }}
         >
-          {menu.group.msgs.some((m) => m.parts.some((p) => p.text?.trim())) && (
+          {menu.copyText && (
             <button
               type="button"
               className="chat-ctxmenu__item"
               onClick={() => {
-                copyGroup(menu.group);
+                copyText(menu.copyText);
                 closeMenu();
               }}
             >
@@ -8868,7 +9160,7 @@ function ChatPageApp() {
               <span>{t("chat.quote")}</span>
             </button>
           )}
-          {menuForkEntryId && activeKey ? (
+          {SHOW_SESSION_FORK && menuForkEntryId && activeKey ? (
             <button
               type="button"
               className="chat-ctxmenu__item"
@@ -8879,7 +9171,7 @@ function ChatPageApp() {
               <span>{t("chat.advanced.forkHere")}</span>
             </button>
           ) : null}
-          {menu.group.msgs.some((m) => m.id) && (
+          {menu.group.msgs.some((m) => m.actionId) && (
             <>
               <button
                 type="button"
@@ -8890,7 +9182,7 @@ function ChatPageApp() {
                 }}
               >
                 <IconPin />
-                <span>{menu.group.msgs.some((m) => m.id && pinnedIds.has(m.id)) ? t("chat.unpin") : t("chat.pin")}</span>
+                <span>{menu.group.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) ? t("chat.unpin") : t("chat.pin")}</span>
               </button>
               <button
                 type="button"
@@ -8931,6 +9223,7 @@ function ChatPageApp() {
             sendController.immersiveButton(activeKeyRef.current, () => { void submit(overrideText); });
           }}
           sending={activeRunInFlight}
+          canSteer={activeCanSteer}
           abortActive={abortActive}
           hasActiveSession={!!active}
           canSend={activeSendReady}
@@ -8954,6 +9247,7 @@ function ChatPageApp() {
           onRenameSubmit={(label) => void renameSessionTo(label)}
           onDelete={deleteActiveSession}
           openLightbox={(src: string, kind?: "image" | "video") => setLightbox({ src, kind: kind ?? "image" })}
+          openAttachmentFile={openAttachmentFile}
           lightboxOpen={!!lightbox}
           onRespondPrompt={respondPrompt}
           messages={immersiveMessages}
@@ -9068,6 +9362,7 @@ function ChatPageHistoryFixture({ deps }: { deps: ChatPageTestDeps }) {
           onInputPaste={() => {}}
           submit={() => deps.sendHarness?.invoke("immersiveButton")}
           sending={false}
+          canSteer={false}
           abortActive={() => {}}
           hasActiveSession={!!snapshot.activeKey}
           canSend={send.canSend}

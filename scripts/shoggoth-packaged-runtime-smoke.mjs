@@ -882,20 +882,11 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
     assert.equal(signature.code, 0, `${signedPath} code signature is invalid`);
     const signatureDetails = await runCaptured("/usr/bin/codesign", ["-d", "--verbose=4", signedPath]);
     assert.equal(signatureDetails.code, 0, `${signedPath} signature details are unavailable`);
-    if (!/^TeamIdentifier=2DC432GLL2$/m.test(signatureDetails.stderr)) {
-      assert.match(signatureDetails.stderr, /^Signature=adhoc$/m,
-        `${signedPath} must retain the OpenAI signature or use the App's ad-hoc signature`);
-      const sourcePath = path.join(
-        REPO_ROOT, ".vendor", "codex", expected.arch, "package",
-        path.relative(packageRoot, signedPath),
-      );
-      assert.deepEqual(
-        await unsignedMachOIdentity(signedPath),
-        await unsignedMachOIdentity(sourcePath),
-        `${signedPath} executable code changed while replacing its signature`,
-      );
-    }
+    assert.match(signatureDetails.stderr, /^TeamIdentifier=2DC432GLL2$/m,
+      `${signedPath} must retain its OpenAI signature for the MCP parent-identity gate`);
   }
+  const { assertCodeIdentity, CODEX_TEAM_IDENTIFIER, CODEX_DESIGNATED_REQUIREMENT } = require("../app/agent-service/code-identity");
+  assertCodeIdentity(runtimePath, { teamIdentifier: CODEX_TEAM_IDENTIFIER, designatedRequirement: CODEX_DESIGNATED_REQUIREMENT });
   const architecture = await runCaptured("/usr/bin/lipo", ["-archs", runtimePath]);
   assert.equal(architecture.code, 0);
   assert.equal(architecture.stdout.trim(), expected.binaryArch);

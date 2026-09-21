@@ -13,7 +13,7 @@ const {
   serviceError,
 } = require("./security");
 
-const SKILL_REGISTRY_SCHEMA_VERSION = 1;
+const SKILL_REGISTRY_SCHEMA_VERSION = 2;
 const SKILL_PROFILE_SCHEMA_VERSION = 1;
 const MAX_PACKAGE_FILES = 256;
 const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
@@ -379,6 +379,7 @@ function publicPackage(record, enabled = false, eligibility = null) {
     requiredTools: [...record.requiredTools],
     requiredRuntimeCapabilities: [...record.requiredRuntimeCapabilities],
     sourceCompatibility: [...record.sourceCompatibility],
+    globalEnabled: record.globalEnabled === true,
     enabled,
     eligible: eligibility ? eligibility.eligible : true,
     ineligibleReason: eligibility?.reason || null,
@@ -411,6 +412,7 @@ class NativeSkillStore {
       registryRevision: this.registry.revision,
       packages: this._allPackages().map((item) => ({
         id: item.id, version: item.version, source: item.source, contentHash: item.contentHash,
+        globalEnabled: item.globalEnabled === true,
       })),
     }));
   }
@@ -424,7 +426,7 @@ class NativeSkillStore {
   _usagePath(profileId) {
     return path.join(path.dirname(this._profilePath(profileId)), "usage.json");
   }
-  _recordFromScan(scan, source) {
+  _recordFromScan(scan, source, globalEnabled = false) {
     return Object.freeze({
       id: scan.manifest.id,
       name: scan.manifest.name,
@@ -437,6 +439,7 @@ class NativeSkillStore {
       source,
       contentHash: scan.contentHash,
       files: scan.files.map((file) => ({ ...file })),
+      globalEnabled: source === "user" && globalEnabled === true,
     });
   }
   _scanBuiltins() {
@@ -465,12 +468,13 @@ class NativeSkillStore {
         || !HASH_PATTERN.test(record.contentHash) || !Array.isArray(record.files)
         || !uniqueStrings(record.requiredTools, (item) => ID_PATTERN.test(item))
         || !uniqueStrings(record.requiredRuntimeCapabilities, (item) => ID_PATTERN.test(item))
-        || !uniqueStrings(record.sourceCompatibility, (item) => COMPATIBILITY.has(item), 4)) {
+        || !uniqueStrings(record.sourceCompatibility, (item) => COMPATIBILITY.has(item), 4)
+        || typeof record.globalEnabled !== "boolean") {
         throw skillError("SKILL_REGISTRY_CORRUPT", "Skill Registry package 无效");
       }
       const packageRoot = path.join(this.paths.skillPackagesDir, record.id, record.version);
       const scan = scanPackage(packageRoot);
-      const actual = this._recordFromScan(scan, "user");
+      const actual = this._recordFromScan(scan, "user", record.globalEnabled);
       if (stable(actual) !== stable(record)) {
         throw skillError("SKILL_REGISTRY_CORRUPT", "Skill Registry package hash 不一致");
       }
@@ -478,6 +482,10 @@ class NativeSkillStore {
     });
     const keys = packages.map((item) => `${item.id}\0${item.version}`);
     if (new Set(keys).size !== keys.length) throw skillError("SKILL_REGISTRY_CORRUPT", "Skill Registry 包重复");
+    const globalIds = packages.filter((item) => item.globalEnabled).map((item) => item.id);
+    if (new Set(globalIds).size !== globalIds.length) {
+      throw skillError("SKILL_REGISTRY_CORRUPT", "同一 Skill 存在多个全局版本");
+    }
     return { ...value, packages };
   }
   _cleanupOrphanPackages() {
@@ -500,7 +508,11 @@ class NativeSkillStore {
     const target = this._profilePath(profileId);
     ensurePrivateDirectoryTree(path.dirname(target), this.paths.trustedRoot);
     if (!lstatIfExists(target)) {
-      const created = { schemaVersion: SKILL_PROFILE_SCHEMA_VERSION, revision: 1, updatedAt: this.now(), selections: [] };
+      const selections = this.registry.packages.filter((item) => item.globalEnabled).map((item) => ({
+        skillId: item.id, source: item.source, version: item.version, enabled: true,
+      })).sort((left, right) => left.skillId.localeCompare(right.skillId));
+      const created = { schemaVersion: SKILL_PROFILE_SCHEMA_VERSION, revision: 1,
+        updatedAt: this.now(), selections };
       atomicWritePrivateFile(target, `${JSON.stringify(created)}\n`, { trustedRoot: this.paths.trustedRoot });
     }
     let value;
@@ -544,6 +556,20 @@ class NativeSkillStore {
         maxBytes: MAX_REGISTRY_BYTES,
       }).toString("utf8"));
     } catch { throw skillError("SKILL_REGISTRY_CORRUPT", "Skill Registry 无法读取"); }
+    if (parsed?.schemaVersion === 1
+      && exact(parsed, ["schemaVersion", "revision", "updatedAt", "packages"])
+      && Array.isArray(parsed.packages)) {
+      parsed = {
+        ...parsed,
+        schemaVersion: SKILL_REGISTRY_SCHEMA_VERSION,
+        revision: parsed.revision + 1,
+        updatedAt: this.now(),
+        packages: parsed.packages.map((record) => ({ ...record, globalEnabled: false })),
+      };
+      atomicWritePrivateFile(this.paths.skillRegistryPath, `${JSON.stringify(parsed)}\n`, {
+        trustedRoot: this.paths.trustedRoot,
+      });
+    }
     this.registry = this._validateRegistry(parsed);
     this._cleanupOrphanPackages();
     this.opened = true;
@@ -602,13 +628,27 @@ class NativeSkillStore {
     const prepared = prepareInstallSource(input.sourcePath, this.paths.skillStagingDir);
     try {
       const { scan } = prepared;
-      const record = this._recordFromScan(scan, "user");
+      const globalEnabled = input.globalEnabled === true;
+      const record = this._recordFromScan(scan, "user", globalEnabled);
       const existing = this.registry.packages.find((item) => (
         item.id === record.id && item.version === record.version
       ));
       if (existing) {
         if (existing.contentHash !== record.contentHash) {
           throw skillError("SKILL_VERSION_CONFLICT", "同一 Skill 版本内容冲突");
+        }
+        if (globalEnabled && (!existing.globalEnabled || this.registry.packages.some((item) => (
+          item.id === existing.id && item.version !== existing.version && item.globalEnabled
+        )))) {
+          const promoted = Object.freeze({ ...existing, globalEnabled: true });
+          const revision = this._commitRegistry(this.registry.packages.map((item) => (
+            item.id === promoted.id && item.version === promoted.version
+              ? promoted
+              : item.id === promoted.id && item.globalEnabled
+                ? Object.freeze({ ...item, globalEnabled: false })
+                : item
+          )));
+          return { revision, package: publicPackage(promoted) };
         }
         return { revision: this.registry.revision, package: publicPackage(existing) };
       }
@@ -617,7 +657,7 @@ class NativeSkillStore {
       const destination = path.join(idRoot, record.version);
       const staging = path.join(this.paths.skillStagingDir, `${record.id}-${record.version}-${crypto.randomBytes(8).toString("hex")}`);
       if (lstatIfExists(destination)) {
-        const recovered = this._recordFromScan(scanPackage(destination), "user");
+        const recovered = this._recordFromScan(scanPackage(destination), "user", globalEnabled);
         if (recovered.contentHash !== record.contentHash) {
           throw skillError("SKILL_VERSION_CONFLICT", "Skill 目标版本目录已存在且内容不同");
         }
@@ -630,13 +670,63 @@ class NativeSkillStore {
           if (lstatIfExists(staging)) safeRemoveTree(staging);
         }
       }
-      const revision = this._commitRegistry([...this.registry.packages, record].sort((left, right) => (
+      const existingPackages = globalEnabled ? this.registry.packages.map((item) => (
+        item.id === record.id && item.globalEnabled
+          ? Object.freeze({ ...item, globalEnabled: false }) : item
+      )) : this.registry.packages;
+      const revision = this._commitRegistry([...existingPackages, record].sort((left, right) => (
         left.id.localeCompare(right.id) || left.version.localeCompare(right.version)
       )));
       return { revision, package: publicPackage(record) };
     } finally {
       if (prepared.extracted && lstatIfExists(prepared.extracted)) safeRemoveTree(prepared.extracted);
     }
+  }
+  installGlobalFromDirectory(input) {
+    this._assertOpen();
+    if (!input || !Array.isArray(input.profileIds)
+      || input.profileIds.some((profileId) => !ID_PATTERN.test(profileId))) {
+      throw skillError("SKILL_INSTALL_INVALID", "全局 Skill 安装参数无效");
+    }
+    const installed = this.installFromDirectory({
+      operationId: input.operationId,
+      sourcePath: input.sourcePath,
+      expectedRevision: input.expectedRevision,
+      globalEnabled: true,
+    });
+    const enabledProfiles = [];
+    const failedProfiles = [];
+    for (const profileId of [...new Set(input.profileIds)].sort()) {
+      try {
+        const profile = this.list(profileId);
+        const selected = profile.items.find((item) => item.id === installed.package.id
+          && item.version === installed.package.version && item.source === "user");
+        if (!selected) throw skillError("SKILL_NOT_FOUND", "Skill 未进入 Profile catalog");
+        if (!selected.enabled) {
+          this.setProfileSkill({
+            profileId,
+            skillId: selected.id,
+            source: selected.source,
+            version: selected.version,
+            enabled: true,
+            expectedRevision: profile.profileRevision,
+          });
+        }
+        enabledProfiles.push(profileId);
+      } catch {
+        failedProfiles.push(profileId);
+      }
+    }
+    return {
+      revision: this.registry.revision,
+      package: publicPackage(this._findPackage(
+        installed.package.id, installed.package.source, installed.package.version,
+      ), true),
+      enabledProfiles,
+      failedProfiles,
+      availableToFutureProfiles: true,
+      complete: failedProfiles.length === 0,
+    };
   }
   importLegacySkill(input) {
     this._assertOpen();

@@ -30,6 +30,8 @@ const PUBLIC_MESSAGES = Object.freeze({
   AGENT_OPERATION_EXPIRED: "Agent 操作已过期",
   AGENT_INITIALIZATION_FAILED: "Agent 初始化未完成，请重试",
   AGENT_RUNTIME_CLEANUP_FAILED: "Agent 已停止调度，但运行时清理尚未完成，请重试",
+  AGENT_RETENTION_FAILED: "Agent 归档清理未完成，将保留记录重试",
+  AGENT_RETENTION_EXPIRED: "Agent 的 7 天保留期已结束，无法恢复",
   AGENT_SERVICE_CLOSED: "Agent 生命周期服务不可用",
   AGENT_COMMIT_UNCERTAIN: "Agent 生命周期结果不确定，需要重启 Service",
   AGENT_RESPONSE_INVALID: "Agent 生命周期响应无效",
@@ -87,9 +89,13 @@ function validateAgentLifecycleParams(method, params) {
     return cloneParams(params);
   }
   if (method === "agent.create") {
-    if (!exactObject(params, ["operationId", "backendId", "name", "defaultCwd", "createdAt"])
+    const fields = ["operationId", "backendId", "name", "defaultCwd", "createdAt"];
+    if (ownDataObject(params) && Object.hasOwn(params, "initialIdentity")) fields.push("initialIdentity");
+    if (!exactObject(params, fields)
       || !validMutationEnvelope(params) || !BACKEND_ID_PATTERN.test(params.backendId)
-      || !validString(params.name, 128) || !validString(params.defaultCwd, 4096, true)) {
+      || !validString(params.name, 128) || !validString(params.defaultCwd, 4096, true)
+      || (Object.hasOwn(params, "initialIdentity")
+        && (!validString(params.initialIdentity, 8192) || !params.initialIdentity.trim()))) {
       throw protocolError("INVALID_PARAMS");
     }
     return cloneParams(params);

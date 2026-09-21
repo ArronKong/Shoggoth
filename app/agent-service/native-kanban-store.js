@@ -917,6 +917,26 @@ class NativeKanbanStore {
     return this.#sorted(this.container.boards);
   }
 
+  purgeProfile(profileId) {
+    this.#assertOpen();
+    if (!validOpaqueId(profileId)) throw kanbanError("KANBAN_BOARD_INVALID", "Profile 无效");
+    const boardIds = new Set(Object.values(this.container.boards)
+      .filter((board) => board.profileId === profileId).map((board) => board.id));
+    const cardIds = new Set(Object.values(this.container.cards)
+      .filter((card) => card.profileId === profileId || boardIds.has(card.boardId)).map((card) => card.id));
+    const belongs = (record) => record && (record.profileId === profileId
+      || boardIds.has(record.id) || boardIds.has(record.boardId)
+      || cardIds.has(record.id) || cardIds.has(record.cardId));
+    const candidate = { ...this.container, revision: this.container.revision + 1 };
+    for (const field of ["boards", "cards", "comments", "attachments", "artifacts", "cardRunLinks", "auditEvents"]) {
+      candidate[field] = Object.fromEntries(Object.entries(this.container[field])
+        .filter(([, record]) => !belongs(record)));
+    }
+    candidate.operations = Object.fromEntries(Object.entries(this.container.operations)
+      .filter(([, operation]) => !belongs(operation.result)));
+    this.container = this.#write(candidate);
+  }
+
   createCard(input) {
     this.#assertMutationBase(input, [
       "operationId", "boardId", "profileId", "title", "body", "status", "position", "createdAt",

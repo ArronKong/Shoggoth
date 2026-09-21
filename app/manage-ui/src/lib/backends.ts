@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getBackendDescriptors, getConfig } from "../api/client";
 import type { BackendDescriptor, UnifiedCronJob } from "../types";
 import { useStickyState } from "./useStickyState";
+import { invalidatePageCache } from "./usePageCache";
 import releasePolicy from "../../../release-policy.json";
 
 const isAvailableBackend = (descriptor: BackendDescriptor) =>
@@ -183,8 +184,11 @@ let disabledRevision = 0;
 const disabledListeners = new Set<(ids: string[]) => void>();
 
 export function applyDisabledBackends(ids: string[]): void {
+  const next = [...new Set(ids)].sort();
+  const changed = cachedDisabled === null || [...new Set(cachedDisabled)].sort().join(",") !== next.join(",");
   disabledRevision += 1;
-  cachedDisabled = [...ids];
+  cachedDisabled = next;
+  if (changed) invalidatePageCache();
   for (const listener of disabledListeners) listener(cachedDisabled);
 }
 
@@ -194,7 +198,7 @@ function loadDisabled(): Promise<string[]> {
   configRequest ??= getConfig()
     .then((config) => {
       if (revision === disabledRevision) {
-        cachedDisabled = Array.isArray(config.disabledBackends) ? config.disabledBackends : [];
+        applyDisabledBackends(Array.isArray(config.disabledBackends) ? config.disabledBackends : []);
       }
       return cachedDisabled ?? [];
     })

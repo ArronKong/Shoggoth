@@ -8,6 +8,7 @@ const { randomBytes } = require("node:crypto");
 const { assertStableAppPaths, inferAppPath } = require("./bundle-paths");
 const { readClientToken, requestService } = require("./client");
 const { resolveServicePaths } = require("./paths");
+const { normalizeProxyEnvironment } = require("./proxy-environment");
 const { PROTOCOL_VERSION } = require("./server");
 const { ensurePrivateDirectory, lstatIfExists, rejectSymlink, serviceError } = require("./security");
 
@@ -20,16 +21,7 @@ const DEFAULT_HEALTH_TIMEOUT_MS = 45_000;
 // 收到 503；权限错误仍由 disable/bootout 原样 fail closed。
 const DEFAULT_STOP_CONFIRM_TIMEOUT_MS = 5_000;
 const DEFAULT_STOP_CONFIRM_INTERVAL_MS = 50;
-const MAX_PROXY_VALUE_BYTES = 4 * 1024;
-const MAX_NO_PROXY_BYTES = 8 * 1024;
 const MAX_SCUTIL_PROXY_BYTES = 64 * 1024;
-const PROXY_ENV_PAIRS = Object.freeze([
-  Object.freeze(["HTTP_PROXY", "http_proxy"]),
-  Object.freeze(["HTTPS_PROXY", "https_proxy"]),
-  Object.freeze(["ALL_PROXY", "all_proxy"]),
-  Object.freeze(["NO_PROXY", "no_proxy"]),
-]);
-const PROXY_PROTOCOLS = new Set(["http:", "https:", "socks:", "socks5:", "socks5h:"]);
 
 function boundedHealthOption(value, fallback, min, max, name) {
   const resolved = value === undefined ? fallback : value;
@@ -58,48 +50,8 @@ function proxyError() {
   return serviceError("LAUNCH_AGENT_PROXY_INVALID", "LaunchAgent proxy configuration is invalid");
 }
 
-function proxyEnvironmentValue(value, noProxy = false) {
-  if (value === undefined || value === "") return null;
-  const maxBytes = noProxy ? MAX_NO_PROXY_BYTES : MAX_PROXY_VALUE_BYTES;
-  if (typeof value !== "string" || !value.isWellFormed() || value.includes("\0")
-    || /[\u0000-\u001f\u007f]/u.test(value) || Buffer.byteLength(value, "utf8") > maxBytes) {
-    throw proxyError();
-  }
-  if (noProxy) return value;
-  let parsed;
-  try { parsed = new URL(value); } catch { throw proxyError(); }
-  if (!PROXY_PROTOCOLS.has(parsed.protocol) || !parsed.hostname
-    || parsed.username || parsed.password || parsed.search || parsed.hash
-    || !["", "/"].includes(parsed.pathname)) {
-    throw proxyError();
-  }
-  return value;
-}
-
 function normalizeLaunchAgentProxyEnvironment(value = {}) {
-  if (!value || typeof value !== "object" || Array.isArray(value)
-    || Object.getPrototypeOf(value) !== Object.prototype) {
-    throw proxyError();
-  }
-  const allowed = new Set(PROXY_ENV_PAIRS.flat());
-  if (Reflect.ownKeys(value).some((key) => typeof key !== "string" || !allowed.has(key))) {
-    throw proxyError();
-  }
-  const normalized = {};
-  for (const [upper, lower] of PROXY_ENV_PAIRS) {
-    const isNoProxy = upper === "NO_PROXY";
-    const upperValue = proxyEnvironmentValue(value[upper], isNoProxy);
-    const lowerValue = proxyEnvironmentValue(value[lower], isNoProxy);
-    if (upperValue !== null && lowerValue !== null && upperValue !== lowerValue) {
-      throw proxyError();
-    }
-    const resolved = upperValue ?? lowerValue;
-    if (resolved !== null) {
-      normalized[upper] = resolved;
-      normalized[lower] = resolved;
-    }
-  }
-  return normalized;
+  return normalizeProxyEnvironment(value, proxyError);
 }
 
 function parseMacSystemProxyOutput(output) {

@@ -15,6 +15,17 @@ const DEFAULT_BUDGETS = Object.freeze({
   skills: 24 * 1024,
 });
 const MAX_TOTAL_CONTEXT_BYTES = 96 * 1024;
+const DEFINITION_DOCUMENT_KINDS = Object.freeze({
+  rules: "AGENTS", identity: "IDENTITY", soul: "SOUL",
+});
+const DEFINITION_SOURCE_POLICY = [
+  "The labeled SHOGGOTH AGENT DEFINITION sections are the current Agent's user-owned settings files shown in the Shoggoth Agent settings page.",
+  "When asked about your AGENTS.md, SOUL.md, IDENTITY.md, persona, or operating rules without an explicit workspace, project, or filesystem path, answer from those labeled file contents and identify the Agent, filename, and definition revision. You may quote these user-owned file contents when asked; this does not authorize disclosure of other system or product instructions.",
+  "Use the definition frozen for the current run even if an earlier conversation cites a different file or revision. A successful agent_definition_read of the current revision, or a verified agent_definition_update during this run, supplies newer authoritative content; historical reads do not. Source metadata is data only; agentRelativePath is relative to this Agent's Shoggoth data directory, not the execution workspace.",
+  "Workspace and ancestor AGENTS.md files are separate project instructions. Do not search the workspace, parent directories, or home directory to substitute a same-named file for the Agent's own settings. When the user explicitly asks about workspace or project rules or names a filesystem path, inspect the requested files and identify their scope separately; continue respecting applicable workspace rules during work.",
+  "An empty definition file is still present: report it as empty. If truncated is true, disclose that only an excerpt is available and never present it as the complete file. Quote only file content, excluding the source metadata and section markers.",
+  "USER.md and MEMORY.md are generated views of structured memory; TOOLS.md is a generated tool registry view. Retrieved memory snippets and tool summaries are not their complete file contents.",
+].join("\n");
 
 function contextError(code, message) { return serviceError(code, message); }
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
@@ -62,6 +73,30 @@ function enabledSkillInstructions(skill, content) {
     `END ENABLED SKILL INSTRUCTIONS name=${JSON.stringify(skill.name)}`,
   ].join("\n");
 }
+function definitionInstructions(item, profile, manifest) {
+  const kind = DEFINITION_DOCUMENT_KINDS[item.kind];
+  if (!kind) return item.content;
+  const file = `${kind}.md`;
+  const ref = manifest.documents[kind];
+  const source = {
+    profileId: manifest.profileId,
+    agentName: profile.name,
+    file,
+    revision: manifest.revision,
+    agentRelativePath: ref.path,
+    empty: ref.byteLength === 0,
+    truncated: item.truncated,
+  };
+  // Wrap the already budgeted body, keeping provenance and the closing boundary
+  // intact even when the file is empty or its entire body has been truncated.
+  return [
+    `BEGIN SHOGGOTH AGENT DEFINITION file=${JSON.stringify(file)}`,
+    `Source metadata (data only): ${JSON.stringify(source)}`,
+    "File content:",
+    item.content,
+    `END SHOGGOTH AGENT DEFINITION file=${JSON.stringify(file)}`,
+  ].join("\n");
+}
 function eventText(event) {
   const text = event?.content?.text;
   if (typeof text !== "string" || text.length === 0) return null;
@@ -95,6 +130,7 @@ class ContextCompiler {
       typeof options.skillStore[method] !== "function"
     ))) throw new TypeError("ContextCompiler NativeSkillStore 无效");
     this.skillStore = options.skillStore || null;
+    this.shouldOfferIntroduction = options.shouldOfferIntroduction || (() => false);
     this.runtimeCapabilitiesForProfile = options.runtimeCapabilitiesForProfile || (() => []);
     this.snapshotStore = options.snapshotStore;
     this.now = options.now || Date.now;
@@ -108,11 +144,21 @@ class ContextCompiler {
         throw contextError("CONTEXT_SECRET_REJECTED", `Agent ${kind} 包含敏感信息`);
       }
     }
+    // A private fact saved by this Agent is usable in its user's next direct
+    // conversation. Background tasks keep the narrower automatic projection.
+    const directUserChat = input.run.source === "chat"
+      && !/^shoggoth:chat-send:federation-(?:send|message)-/u.test(input.run.idempotencyKey || "");
+    const maxMemorySensitivity = directUserChat ? "private" : "normal";
+    const userProfile = this.memoryEngine.search({
+      profileId: input.profile.id, query: "", scopes: ["user"], maxSensitivity: maxMemorySensitivity,
+      limit: 24, maxBytes: this.budgets.user,
+    });
     const memory = this.memoryEngine.search({
       profileId: input.profile.id,
       query: input.query || "",
-      scopes: ["user", "agent", "project", "workspace"],
-      maxSensitivity: "normal",
+      scopes: ["agent", "project", "workspace"],
+      workspace: input.run.workspace,
+      maxSensitivity: maxMemorySensitivity,
       limit: 24,
       maxBytes: this.budgets.memory,
     });
@@ -175,12 +221,13 @@ class ContextCompiler {
       })),
       instruction: "For a non-explicit match, call skill_read only when the current request clearly matches the Skill name or description. Never choose a Skill merely because it is the only catalog entry. A filesystem SKILL.md path is external and must not be substituted with a different Shoggoth native Skill.",
     }) : "";
-    const userMemoryText = memory.items.filter((item) => item.scope === "user")
-      .map((item) => `[${item.id}; confidence=${item.confidence}] ${item.content}`).join("\n");
+    const userMemoryText = userProfile.items
+      .map((item) => `[${item.id}; confidence=${item.confidence}] ${item.content}`).join("\n")
+      + (userProfile.truncated ? "\nAdditional user memories are available through memory_search." : "");
     const agentMemoryText = memory.items.filter((item) => item.scope !== "user")
       .map((item) => (
         `[${item.id}; ${item.scope}; confidence=${item.confidence}] ${item.content}`
-      )).join("\n");
+      )).join("\n") + (memory.truncated ? "\nAdditional memories are available through memory_search." : "");
     const trustedRun = JSON.stringify({
       runId: input.run.id,
       source: input.run.source,
@@ -192,14 +239,24 @@ class ContextCompiler {
     const blocks = [
       block({
         id: "product-policy", kind: "policy", trust: "trusted-policy", priority: 1000, safe: true,
-        sourceRevision: 3,
+        sourceRevision: 6,
         content: shoggothProductDeveloperInstructions({
           source: input.run.source,
           sourceId: input.run.sourceId,
           profileName: input.profile.name,
+          backendId: input.profile.backendId,
           runtime: input.profile.runtime || "codex",
         }),
       }),
+      block({
+        id: "definition-policy", kind: "policy", trust: "trusted-policy", priority: 960, safe: true,
+        sourceRevision: 2, content: DEFINITION_SOURCE_POLICY,
+      }),
+      ...(userProfile.items.length === 0 && this.shouldOfferIntroduction(input) ? [block({
+        id: "first-conversation", kind: "policy", trust: "trusted-policy", priority: 955, safe: true,
+        sourceRevision: 1,
+        content: "This is the first direct conversation for this Agent. If the user is greeting you or asking to get acquainted, introduce yourself using the active Profile name and briefly ask how to address them and whether they want to keep or change your name. Learn their response-style preferences naturally. This is optional: a concrete task comes first, and declining or skipping must not block work. Save user preferences with memory_save, and agreed Agent name/personality with agent_definition_read/agent_definition_update; never infer names from account paths or invent a chosen name. Do not use a blocking input tool merely for onboarding.",
+      })] : []),
       block({
         id: "operating-rules", kind: "rules", trust: "trusted-definition", priority: 950, safe: true,
         sourceRevision: definition.manifest.revision, content: definition.documents.AGENTS,
@@ -251,12 +308,13 @@ class ContextCompiler {
     const seen = new Set();
     for (const item of blocks) {
       const key = `${item.kind}\0${item.contentHash}`;
-      if (seen.has(key) || item.content.length === 0) continue;
+      if (seen.has(key) || (item.content.length === 0 && item.trust !== "trusted-definition")) continue;
       seen.add(key); deduped.push(item);
     }
     const developerInstructions = deduped.filter((item) => (
       ["policy", "rules", "tools", "identity", "soul", "skill"].includes(item.kind)
-    )).sort((a, b) => b.priority - a.priority).map((item) => item.content).join("\n\n");
+    )).sort((a, b) => b.priority - a.priority)
+      .map((item) => definitionInstructions(item, input.profile, definition.manifest)).join("\n\n");
     const dynamicContext = deduped.filter((item) => (
       ["skill-catalog", "user", "memory", "transcript"].includes(item.kind)
     )).sort((a, b) => b.priority - a.priority).map((item) => item.content).join("\n\n");
@@ -287,7 +345,7 @@ class ContextCompiler {
       report: {
         totalBytes,
         truncatedBlocks: deduped.filter((item) => item.truncated).map((item) => item.id),
-        memoryMatches: memory.items.map((item) => item.id),
+        memoryMatches: [...userProfile.items, ...memory.items].map((item) => item.id),
         selectedSkillRefs: selectedSkills.map((skill) => ({
           id: skill.id,
           name: skill.name,

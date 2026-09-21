@@ -8,8 +8,13 @@ function retainFailedSources<T>(next: DashboardBackendSection<T>[], previous: Da
     ? previous.find(old => old.backend === section.backend) || section : section);
 }
 
-export function useDashboardLiveWork(fallback?: DashboardLiveWork | null) {
+export function useDashboardLiveWork(fallback?: DashboardLiveWork | null, backendScopeKey = "") {
   const [work, setWork] = useState<DashboardLiveWork>();
+  const [previousScopeKey, setPreviousScopeKey] = useState(backendScopeKey);
+  if (previousScopeKey !== backendScopeKey) {
+    setPreviousScopeKey(backendScopeKey);
+    setWork(undefined);
+  }
   const fallbackRef = useRef(fallback);
   fallbackRef.current = fallback;
   const mounted = useRef(false);
@@ -27,7 +32,7 @@ export function useDashboardLiveWork(fallback?: DashboardLiveWork | null) {
     pending.current = task;
     await task;
     if (pending.current === task) pending.current = null;
-  }, []);
+  }, [backendScopeKey]);
 
   useEffect(() => {
     mounted.current = true;
@@ -40,6 +45,7 @@ export function useDashboardLiveWork(fallback?: DashboardLiveWork | null) {
     return () => {
       mounted.current = false;
       generation.current++;
+      pending.current = null;
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", tick);
     };

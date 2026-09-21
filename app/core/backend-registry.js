@@ -44,7 +44,7 @@ function advancedSessionFailureReason(value) {
 
 // Dashboard 首屏不能被本地全历史 usage 冷扫描拖住。超时只让本轮该 section
 // 降级；原 Promise 继续执行并填充 backend 的单飞缓存，前端随后自动补刷。
-const DASHBOARD_USAGE_WAIT_MS = 1_750;
+const DASHBOARD_USAGE_WAIT_MS = 5_000;
 const { computeCatalogRevision, normalizeCatalogRows } = require("./model-catalog-revision");
 
 /**
@@ -1618,12 +1618,9 @@ class BackendRegistry extends EventEmitter {
         backends.map(async (backend) => {
           let timer;
           try {
-            // 今日必须与 Usage 页同源：getUsageSeries("today")（OpenClaw 本地自然日、
-            // Hermes 最近 24h）。不能从 7d.daily.find(todayKey) 取——网关 daily 若按 UTC
-            // 分组，本地"今天"会错配到 UTC 桶只拿到时区偏移的一部分，严重少算；Hermes
-            // 端点强制 UTC 分组更是直接 find 不到→0（见 PROGRESS R150）。昨日仍从 7d.daily
-            // 取（OpenClaw 已随 mode:"gateway" 本地分组而准；Hermes 端点 UTC、近似）。
-            const usage = Promise.all([
+            // Today and yesterday have separate failure boundaries. A failed
+            // trend query must not discard a valid full today's total.
+            const usage = Promise.allSettled([
               backend.getUsageSeries("today"),
               backend.getUsageSeries("7d"),
             ]);
@@ -1634,20 +1631,23 @@ class BackendRegistry extends EventEmitter {
               }),
             ]);
             if (!result) return { backend: backend.id, error: "pending" };
-            const [todaySeries, series7d] = result.series;
+            const [todayResult, weekResult] = result.series;
+            if (todayResult.status !== "fulfilled") return { backend: backend.id, error: "unavailable", availability: "unavailable" };
+            const todaySeries = todayResult.value;
+            const series7d = weekResult.status === "fulfilled" ? weekResult.value : null;
             const now = Date.now();
             const yesterdayKey = this._localDateStr(now - 86_400_000);
             const daily = Array.isArray(series7d?.daily) ? series7d.daily : [];
-            const yesterday = daily.find((d) => d?.date === yesterdayKey);
+            const yesterday = daily.find(d => d?.date === yesterdayKey);
             const tt = todaySeries?.totals;
-            const today =
-              tt && (tt.totalTokens || tt.totalCost)
-                ? { date: this._localDateStr(now), ...tt }
-                : undefined;
+            const valid = tt && Number.isFinite(tt.totalTokens) && Number.isFinite(tt.totalCost);
+            const availability = !valid ? "unavailable" : todaySeries.availability
+              || (todaySeries.cacheStatus === "refreshing" ? "partial" : "complete");
             return {
-              backend: backend.id,
-              ...(today ? { today } : {}),
+              backend: backend.id, availability,
+              ...(valid ? { today: { date: this._localDateStr(now), ...tt } } : { error: "unavailable" }),
               ...(yesterday ? { yesterday } : {}),
+              yesterdayComplete: !!series7d && !["partial", "unavailable"].includes(series7d.availability),
             };
           } catch (err) {
             return { backend: backend.id, error: err?.message || String(err) };
@@ -1692,6 +1692,7 @@ class BackendRegistry extends EventEmitter {
       generatedAt: Date.now(), sinceMs: since, status, runs, running, approvals, artifacts, usage,
       ...(activityPage ? { activityPage } : {}),
       ...(runStats ? { runStats } : {}),
+      ...(activity?.taskStats ? { taskStats: activity.taskStats } : {}),
     };
   }
 

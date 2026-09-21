@@ -505,6 +505,26 @@ test("generatedAt 去重保留首次网络写入并跳过重复持久化", () =>
   assert.equal(shouldWriteDashboardCache(liveData, TODAY_NOON), false);
 });
 
+test("后端范围变化时整份摘要缓存失效，重连和离线沿用相同范围约定", () => {
+  const both = makeSummary({ status: [
+    { id: "openclaw", name: "OpenClaw", connected: true, info: {} },
+    { id: "shoggoth", name: "Shoggoth", connected: true, info: {} },
+  ] });
+  const shoggoth = makeSummary({ status: [
+    { id: "openclaw", name: "OpenClaw", connected: false, disabled: true, info: {} },
+    { id: "shoggoth", name: "Shoggoth", connected: false, info: {} },
+  ] });
+  assert.equal(resolveDashboardViewState(both, both, true, null, ["shoggoth"]).data, undefined,
+    "旧内存和持久缓存不能把已断开后端的费用、任务、产物带回页面");
+  assert.equal(resolveDashboardViewState(shoggoth, both, false, null, ["shoggoth"]).data, shoggoth,
+    "已启用但暂时离线的后端不等于用户断开");
+  assert.equal(resolveDashboardViewState(undefined, shoggoth, true, null, ["shoggoth", "openclaw"]).data, undefined,
+    "重连也不能复用缺少新后端的统计");
+  assert.equal(resolveDashboardViewState(both, null, false, null, ["shoggoth", "openclaw"]).data, both,
+    "范围比较忽略后端排序");
+  assert.equal(resolveDashboardViewState(both, null, false, null, []).data, undefined);
+});
+
 test("Dashboard 页面接入持久缓存并按统一视图状态渲染", () => {
   const source = fs.readFileSync(dashboardPagePath, "utf8");
 
@@ -517,8 +537,9 @@ test("Dashboard 页面接入持久缓存并按统一视图状态渲染", () => {
   assert.match(source, /data:\s*liveData/);
   assert.match(
     source,
-    /resolveDashboardViewState\(\s*liveData,\s*persistedData,\s*loading,\s*error,?\s*\)/,
+    /resolveDashboardViewState\(\s*liveData,\s*persistedData,\s*loading,\s*error,\s*enabledBackendIds,?\s*\)/,
   );
+  assert.match(source, /usePageCache\(`dashboard:\$\{backendScopeKey\}`/);
   assert.match(source, /shouldWriteDashboardCache\(liveData,\s*cachedGeneratedAtRef\.current\)/);
   assert.match(
     source,

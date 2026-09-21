@@ -342,6 +342,12 @@ class ServiceDomainHost {
     return { thread: structuredClone(thread) };
   }
 
+  async threadInjectItems(params) {
+    assert.ok(this.threads.some(thread => thread.id === params.threadId));
+    this.lastInjectedItems = structuredClone(params);
+    return {};
+  }
+
   async threadRead(params) {
     const thread = this.threads.find((candidate) => candidate.id === params.threadId);
     if (!thread) throw Object.assign(new Error("thread not found"), { code: "THREAD_NOT_FOUND" });

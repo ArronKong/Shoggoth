@@ -165,12 +165,12 @@
   width: 36px;
   height: 36px;
   padding: 0;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 999px;
   background: transparent;
   color: light-dark(rgba(0, 0, 0, 0.58), rgba(255, 255, 255, 0.62));
   cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+  transition: background 140ms ease, color 140ms ease;
 }
 .chat-aside__search::before {
   content: "";
@@ -179,7 +179,7 @@
 }
 .chat-aside__search svg { width: 20px; height: 20px; }
 .chat-aside__search:hover {
-  background: var(--bg-hover);
+  background: rgba(0, 0, 0, 0.05);
   color: var(--chat-text);
 }
 .chat-aside__search:focus-visible {
@@ -230,11 +230,17 @@
   border: 0;
   outline: none;
   background: transparent;
-  color: var(--ui-text-1);
+  color: #000000;
   font: inherit;
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 300;
+  line-height: 20px;
 }
-.chat-global-search__field input::placeholder { color: var(--ui-text-3); }
+.chat-global-search__field input::placeholder {
+  color: rgba(0, 0, 0, 0.5);
+  line-height: inherit;
+  opacity: 1;
+}
 .chat-global-search__results {
   display: flex;
   min-height: 0;
@@ -637,6 +643,10 @@
   white-space: nowrap;
 }
 .chat-header__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted-fg);
   font-size: 12px;
   font-weight: 400;
@@ -910,6 +920,8 @@
 
 /* model-switch toast (matches the skin's chat-skin-model-toast) */
 .chat-toast {
+  display: flex;
+  align-items: center;
   position: fixed;
   top: 50%;
   left: 50%;
@@ -931,6 +943,23 @@
   pointer-events: none;
   animation: chat-toast-in 140ms ease-out;
 }
+.chat-toast__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-toast__dismiss {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: -4px -6px -4px 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.chat-toast__dismiss:hover { background: var(--bg-hover); }
 .chat-toast--pending { color: var(--muted-fg); }
 .chat-toast--error { border-color: #c0392b; color: #c0392b; }
 @keyframes chat-toast-in {
@@ -981,8 +1010,15 @@
   --chat-fade: 36px;
   --chat-fade-top: 102px;
   --chat-fade-bottom: 179px;
-  -webkit-mask-image: linear-gradient(to bottom, transparent var(--chat-fade-top), #000 calc(var(--chat-fade-top) + var(--chat-fade)), #000 calc(100% - var(--chat-fade-bottom) - var(--chat-fade)), transparent calc(100% - var(--chat-fade-bottom)));
-          mask-image: linear-gradient(to bottom, transparent var(--chat-fade-top), #000 calc(var(--chat-fade-top) + var(--chat-fade)), #000 calc(100% - var(--chat-fade-bottom) - var(--chat-fade)), transparent calc(100% - var(--chat-fade-bottom)));
+  /* The opaque right-hand strip keeps the native scrollbar outside the fade. */
+  -webkit-mask-image: linear-gradient(to bottom, transparent var(--chat-fade-top), #000 calc(var(--chat-fade-top) + var(--chat-fade)), #000 calc(100% - var(--chat-fade-bottom) - var(--chat-fade)), transparent calc(100% - var(--chat-fade-bottom))), linear-gradient(#000, #000);
+          mask-image: linear-gradient(to bottom, transparent var(--chat-fade-top), #000 calc(var(--chat-fade-top) + var(--chat-fade)), #000 calc(100% - var(--chat-fade-bottom) - var(--chat-fade)), transparent calc(100% - var(--chat-fade-bottom))), linear-gradient(#000, #000);
+  -webkit-mask-size: 100% 100%, var(--ui-scrollbar-track-size) 100%;
+          mask-size: 100% 100%, var(--ui-scrollbar-track-size) 100%;
+  -webkit-mask-position: left top, right top;
+          mask-position: left top, right top;
+  -webkit-mask-repeat: no-repeat;
+          mask-repeat: no-repeat;
 }
 .chat-thread__inner {
   display: flex;
@@ -1300,17 +1336,36 @@
    选择器**必须双类名**：基类定义在本文件更靠后的位置，同特异性下它会赢。 */
 .chat-att-chip.chat-att-chip--file {
   display: inline-flex; align-items: center; gap: 4px;
-  width: auto; height: auto; min-width: 0; max-width: 260px; padding: 6px 10px;
-  overflow: hidden;
+  width: auto; height: auto; min-width: 0; max-width: 260px; padding: 0;
+  overflow: hidden; border-radius: 999px; background: transparent;
 }
+.chat-att-chip__open {
+  display: flex; align-items: center; min-width: 0; max-width: 100%; padding: 6px 10px;
+  border: 0; border-radius: inherit; background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+.chat-att-chip__open:focus-visible { outline: none; }
+.chat-att-row--pending .chat-att-chip--file .chat-att-chip__open { padding-right: 0; }
+.chat-att-chip--file .chat-att-x {
+  position: static; inset: auto; display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 24px; width: 24px; height: 24px; margin-right: 4px;
+  background: transparent; color: light-dark(#000000, #ffffff); font-size: 14px; line-height: 1;
+}
+.chat-att-chip--file .chat-att-x > span { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; }
+.chat-att-chip--file .chat-att-x:focus-visible { outline: none; }
+.chat-att-chip--file .chat-att-x:hover,
+.chat-att-chip--file .chat-att-x:focus-visible { background: rgba(0, 0, 0, 0.05); }
+.chat-att-chip.chat-att-chip--file:hover,
+.chat-att-chip.chat-att-chip--file:focus-within {
+  background: rgba(0, 0, 0, 0.05);
+}
+.chat-att-chip.chat-att-chip--file:has(.chat-att-x:hover, .chat-att-x:focus-visible) { background: transparent; }
 .chat-att-chip__file {
   font-size: 12px; color: var(--chat-text); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
-/* 已随消息发出的附件 chip（气泡内，只读——没有移除按钮） */
+/* 已随消息发出的附件 chip（气泡内可打开，没有移除按钮） */
 .chat-att-chip.chat-att-chip--file.is-sent {
-  background: light-dark(rgba(120, 120, 128, 0.10), rgba(160, 160, 170, 0.14));
-  border: 1px solid var(--skin-hairline); border-radius: 10px; cursor: default;
+  border: 1px solid var(--skin-hairline);
 }
 
 /* per-group footer: sender · model · tokens · time */
@@ -1431,8 +1486,8 @@
   z-index: 20;
   width: min(520px, calc(100vw - 36px));
   max-height: min(620px, 72vh);
-  padding: 12px;
-  border: 1px solid var(--skin-glass-border);
+  padding: 32px;
+  border: 0;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 24px 56px -28px rgba(15, 23, 42, 0.42);
@@ -1444,9 +1499,9 @@
   width: 100%;
   height: 42px;
   padding: 0 14px;
-  border: 1px solid var(--skin-glass-border);
+  border: 0;
   border-radius: 14px;
-  background: #fff;
+  background: var(--bg-hover);
   color: var(--chat-text);
   font-family: var(--font-body);
   font-size: 15px;
@@ -1647,9 +1702,9 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   overflow: hidden;
-  padding: 8px;
+  padding: 32px;
   border-radius: 16px;
-  border: 1px solid var(--skin-glass-border);
+  border: 0;
   background: var(--skin-glass-strong);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   backdrop-filter: blur(24px) saturate(160%);
@@ -1660,8 +1715,8 @@
   padding: 8px 14px;
   margin-bottom: 6px;
   border-radius: 999px;
-  border: 1px solid var(--skin-glass-border);
-  background: var(--bg);
+  border: 0;
+  background: var(--bg-hover);
   color: var(--chat-text);
   font: inherit;
 }
@@ -1739,9 +1794,9 @@
   z-index: 30;
   max-height: min(52vh, 440px);
   overflow-y: auto;
-  padding: 8px;
+  padding: 32px;
   border-radius: 20px;
-  border: 1px solid var(--skin-glass-border);
+  border: 0;
   background: var(--skin-glass-strong);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   backdrop-filter: blur(24px) saturate(160%);
@@ -2061,7 +2116,7 @@
 /* 停止态按设计图：近黑圆底 + 米黄圆角方块（与发送态「黄圆黑箭头」成对，同为写死配色）。 */
 .chat-send.chat-stop { background: #141414; color: #ffef84; }
 .chat-send.chat-stop:hover:not(:disabled) { background: #000; color: #ffe96b; }
-.chat-send.chat-stop svg { width: 15px; height: 15px; }
+.chat-send.chat-stop svg { width: 12px; height: 12px; }
 
 /* attachment thumbnails (composer pending row + sent user bubbles) */
 .chat-att-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 6px; }
@@ -2152,6 +2207,7 @@
 
 /* toast inline action (撤销 etc.) — parent toast is pointer-events:none */
 .chat-toast__act {
+  flex: none;
   pointer-events: auto;
   margin-left: 10px;
   padding: 1px 10px;
@@ -2223,49 +2279,37 @@
 
 /* ── 会话切换弹层（ChatSessionMenu，R266）─────────────────────────────────
    皮肤整套复用模型菜单的 `.model-menu*`（同一种弹层语言，不再写第二份——R264 刚
-   清掉过一轮重复），这里只覆盖定位/尺寸与「两行一项」的排版。
+   清掉过一轮重复），这里只覆盖定位/尺寸与单行排版。
    **必须放在文件最末**：`.model-menu` 在本文件里有两块（R264 记录的历史重复），
    同特异性下后写的胜，写在它们前面这些覆盖会被整片吃掉。 */
 .chat-session-menu { position: relative; min-width: 0; }
-.chat-session-menu .chat-session-select { max-width: 320px; white-space: nowrap; overflow: hidden; }
+.chat-session-menu .chat-session-select { max-width: min(320px, 100%); white-space: nowrap; overflow: hidden; }
 /* 模型菜单从 composer 向上弹（bottom: 100%），会话菜单从 header 的会话行向下弹。
    高度是模型菜单的两倍（420 → 840）：会话数是模型数的量级之上，一屏能扫完才不用一直滚；
    84vh 兜住矮屏（弹层顶边在 header 下方，再高就顶出视口了）。 */
 .session-menu {
+  position: absolute;
   top: calc(100% + 8px);
   bottom: auto;
-  width: min(460px, 84vw);
+  right: auto;
+  width: min(520px, 84vw);
   height: min(84vh, 840px);
   /* 从页面里「浮起来」：白底弹层压在同样是白的聊天页上，只靠玻璃边框几乎看不出边界。
      这里给一层更实的底 + 两段式投影（近处收紧的接触阴影 + 远处扩散的悬浮阴影）。 */
   background: light-dark(rgba(255, 255, 255, 0.98), rgba(28, 28, 32, 0.98));
-  border-color: light-dark(rgba(15, 23, 42, 0.12), rgba(255, 255, 255, 0.14));
   box-shadow:
     0 32px 72px -18px light-dark(rgba(15, 23, 42, 0.34), rgba(0, 0, 0, 0.66)),
     0 10px 26px -12px light-dark(rgba(15, 23, 42, 0.2), rgba(0, 0, 0, 0.52));
 }
-/* 会话项两行（名字 + key 尾段）：`.model-menu__name` 是单行 nowrap，这里改竖排，
-   两行各自省略号收尾。 */
-.session-menu__name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.session-menu__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-menu__sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted-fg);
-  font-size: 11px;
-  font-weight: 300;
-}
-/* 项内是竖排两行，基线对齐会把时间/✓ 拽到第一行以下 —— 顶部对齐才跟名字齐平。 */
-.session-menu .model-menu__item { align-items: flex-start; }
-.session-menu .model-menu__price,
-.session-menu .model-menu__check { margin-top: 1px; }
+/* 类型、标题、时间和选中标记保持单行、垂直居中；长标题省略。 */
+.session-menu__name { min-width: 0; }
+.session-menu__title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-menu .model-menu__item { flex-shrink: 0; align-items: center; }
 /* 类型标记：不分组之后，它是「这条属于哪一类」的唯一线索。定宽让名字列对齐成一条竖线，
    扫列表时不会被长短不一的标记推得参差。 */
 .session-menu__kind {
   flex: 0 0 auto;
   width: 74px; /* 放得下最长的 "Subagents"，再宽就开始啃标题 */
-  margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2273,6 +2317,12 @@
   font-size: 10px;
   font-weight: 400;
   text-transform: uppercase;
+}
+/* 思考等级经 Portal 渲染，用显式类限定到聊天输入框的浮层。 */
+:root .chat-composer-select-menu {
+  padding: 32px;
+  border: 0;
+  border-radius: 16px;
 }
 /* 弹层向下展开时会盖到底部工具区：`.chat-topdock`（弹层的祖先）与 `.chat-botdock`
    （「↓ 最新消息」浮标所在）**同为 z-index:5**，同层时文档序靠后的 botdock 赢 ——

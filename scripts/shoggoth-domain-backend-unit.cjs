@@ -1301,6 +1301,7 @@ test("Cron force run, histories, recent feed, summary delivery and trajectory st
     if (request.method === "cron.job.get") return { job };
     if (request.method === "cron.job.list") return page("jobs", [job]);
     if (request.method === "cron.run.list") return page("runs", cronRuns);
+    if (request.method === "run.list") return page("runs", cronRuns.map(row => row.run));
     if (request.method === "cron.run.trigger") {
       return { run: workRun({
         id: "cron-triggered", source: "cron", sourceId: JOB_ID,
@@ -1434,4 +1435,20 @@ test("stop disconnects only the adapter and all domain methods fail closed after
   );
   assert.equal(fixture.calls.length, count);
   assert.equal(fixture.calls.some((call) => /stop|shutdown|terminate/u.test(call.method)), false);
+});
+
+
+test("Dashboard history includes archived Agents and tasks finishing after midnight", async () => {
+  const profiles = [chatProfile(), chatProfile({ id: "archived-profile", agentId: "archived-agent", enabled: false, isDefault: false })];
+  const fixture = await readyBackend(request => {
+    if (request.method === "cron.job.list") return page("jobs", []);
+    if (request.method === "run.list") return page("runs", [workRun({ id: `cron-${request.params.profileId}`,
+      profileId: request.params.profileId, source: "cron", sourceId: JOB_ID, status: "completed", startedAt: 100, finishedAt: 300 })]);
+    throw new Error(`unexpected ${request.method}`);
+  }, { profiles });
+  assert.equal(fixture.backend._profilesById.size, 1);
+  const recent = await fixture.backend.getRecentCronRuns({ sinceMs: 200 });
+  assert.equal(recent.runs.length, 2);
+  assert.deepEqual(new Set(recent.runs.map(row => row.agentId)), new Set(["shoggoth-default", "archived-agent"]));
+  assert.equal(fixture.calls.find(call => call.method === "profile.list").params.enabledOnly, false);
 });

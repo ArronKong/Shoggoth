@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
-const { prepareBackgroundRoleActivation } = require("../app/background-role-activation");
+const { prepareBackgroundRoleActivation, hideBackgroundDock } = require("../app/background-role-activation");
 const bootstrap = require("../app/bootstrap-role");
 
 test("all internal background launches are hidden, including rejected role arguments", () => {
@@ -17,6 +17,19 @@ test("all internal background launches are hidden, including rejected role argum
     }), true);
     assert.deepEqual(calls, ["prohibited"]);
   }
+});
+
+test("hiding or reactivating a background process ends in prohibited policy", () => {
+  let policy = "regular";
+  const app = {
+    dock: { hide() { policy = "accessory"; } },
+    setActivationPolicy(value) { policy = value; },
+  };
+  assert.equal(hideBackgroundDock(app, "darwin"), true);
+  assert.equal(policy, "prohibited");
+  policy = "regular";
+  hideBackgroundDock(app, "darwin");
+  assert.equal(policy, "prohibited");
 });
 
 test("UI, Node-mode and non-macOS processes keep their normal launch behavior", () => {

@@ -21,6 +21,37 @@ const {
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
+test("Codex 旧会话更新指令先于下一轮，注入失败阻止派发，重试不串会话", async () => {
+  const calls = [];
+  let fail = true;
+  const host = {
+    threadResume: async ({ threadId }) => ({ thread: { id: threadId } }),
+    threadStart: async () => ({ thread: { id: "fresh" } }),
+    async threadInjectItems(params) {
+      calls.push(["inject", params]);
+      if (fail) throw new Error("injected RPC failure");
+      return {};
+    },
+    async turnStart(params) { calls.push(["turn", params]); return { turn: { id: "turn" } }; },
+  };
+  const adapter = new CodexRuntimeAdapter({ runtimePool: { get: async () => host } });
+  const handle = await adapter.acquire({ runtime: "codex", runtimeProfileId: "profile", runtimeAccountId: "account" });
+  await handle.sessionResume({ sessionId: "old", developerInstructions: "Current native_agent_create policy" });
+  assert.equal(calls.length, 0, "resuming an active thread must not inject or interrupt it");
+  await assert.rejects(() => handle.turnStart({ sessionId: "old", prompt: "go" }), /RPC failure/u);
+  assert.equal(calls.some(([kind]) => kind === "turn"), false);
+  fail = false;
+  await handle.turnStart({ sessionId: "old", prompt: "go" });
+  assert.deepEqual(calls.map(([kind]) => kind), ["inject", "inject", "turn"]);
+  assert.equal(calls[1][1].items[0].role, "developer");
+  await handle.sessionResume({ sessionId: "old", developerInstructions: "Current native_agent_create policy" });
+  await handle.turnStart({ sessionId: "old", prompt: "continue" });
+  assert.equal(calls.filter(([kind]) => kind === "inject").length, 2);
+  await handle.sessionStart({ developerInstructions: "Separate fresh policy" });
+  await handle.turnStart({ sessionId: "fresh", prompt: "fresh" });
+  assert.equal(calls.filter(([kind]) => kind === "inject").length, 2);
+});
+
 function deferred() {
   let resolve;
   const promise = new Promise((yes) => { resolve = yes; });

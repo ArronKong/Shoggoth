@@ -107,9 +107,11 @@
   position: relative;
   margin-top: auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  max-width: 100%;
 }
 
 .management-page.dashboard-page .kpi-val {
@@ -120,12 +122,12 @@
   letter-spacing: -0.01em;
 }
 
-/* 副行（昨日值 + 环比）：与大数值基线并排。 */
+/* 副行只显示昨日环比，与大数值基线并排。 */
 .management-page.dashboard-page .kpi-sub {
   font-size: var(--ui-fs-body);
   line-height: 14px;
   font-weight: 300;
-  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  color: var(--ui-text-1);
   white-space: nowrap;
 }
 
@@ -705,4 +707,12 @@
   display: flex;
   justify-content: center;
   padding: 12px 0 4px;
+}
+
+.management-page.dashboard-page .tb-note {
+  color: var(--ui-text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: -6px;
+  margin-bottom: 10px;
 }

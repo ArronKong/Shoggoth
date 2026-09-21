@@ -104,6 +104,7 @@ mac:
   category: public.app-category.developer-tools
   entitlements: build/entitlements.mac.plist
   extendInfo:
+    LSUIElement: true
     NSMicrophoneUsageDescription: "用于在灵感便签中录制语音。"
   # ZIP-only：DMG 路径上 electron-builder 双架构共用卷名 `/Volumes/Shoggoth`，
   # hdiutil detach 在被 Spotlight/Finder 占用 + 磁盘紧张时确定性失败（实测两次重试

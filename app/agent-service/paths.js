@@ -42,6 +42,7 @@ function resolveServicePaths(options = {}) {
   const backupsDir = path.join(stateDir, "backups");
   const agentsDir = path.join(stateDir, "agents");
   const skillsDir = path.join(stateDir, "skills");
+  const nativeMcpDir = path.join(stateDir, "mcp-servers");
   const nativeRuntimeImportsDir = path.join(stateDir, "native-runtime-imports");
   const runtimeAccountsDir = path.join(stateDir, "runtime-accounts");
   const runtimeIntegrationDir = path.join(stateDir, "runtime-integration");
@@ -87,6 +88,8 @@ function resolveServicePaths(options = {}) {
     skillPackagesDir: path.join(skillsDir, "packages"),
     skillStagingDir: path.join(skillsDir, "staging"),
     skillRegistryPath: path.join(skillsDir, "registry.json"),
+    nativeMcpDir,
+    nativeMcpRegistryPath: path.join(nativeMcpDir, "registry.json"),
     computerDir,
     computerArtifactsDir: path.join(computerDir, "artifacts"),
     computerEphemeralDir: path.join(cacheDir, "computer-sessions"),

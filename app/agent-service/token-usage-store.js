@@ -11,6 +11,7 @@ const {
   writeFully,
 } = require("./private-file");
 const { validateTokenUsageSummary, validateUsageRange } = require("./token-usage-protocol");
+const { resolveUsageCost, validUsd } = require("../core/usage-cost");
 
 const STORE_VERSION = 1;
 const DEFAULT_MAX_RECORDS = 200_000;
@@ -72,7 +73,7 @@ function recordIdentity(input) {
 }
 
 function validateRecord(value) {
-  if (!exactObject(value, RECORD_FIELDS)) {
+  if (!exactObject(value, RECORD_FIELDS) && !exactObject(value, [...RECORD_FIELDS, "costUsd"])) {
     throw usageError("TOKEN_USAGE_INVALID", "Token usage record 字段无效");
   }
   safeString(value.id, "id", 70);
@@ -89,15 +90,17 @@ function validateRecord(value) {
   safeString(value.model, "model", 512, true);
   safeString(value.provider, "provider", 512, true);
   for (const field of USAGE_FIELDS) safeCount(value[field], field);
+  if (Object.hasOwn(value, "costUsd") && !validUsd(value.costUsd)) throw usageError("TOKEN_USAGE_INVALID", "costUsd 无效");
   safeCount(value.createdAt, "createdAt");
   return clone(value);
 }
 
 function validateRecordInput(input) {
-  if (!exactObject(input, [
+  const fields = [
     "profileId", "agentId", "agentName", "source", "sourceId", "threadId", "turnId",
     "responseId", "model", "provider", "usage", "createdAt",
-  ]) || !exactObject(input.usage, USAGE_FIELDS)) {
+  ];
+  if ((!exactObject(input, fields) && !exactObject(input, [...fields, "costUsd"])) || !exactObject(input.usage, USAGE_FIELDS)) {
     throw usageError("TOKEN_USAGE_INVALID", "Token usage 输入无效");
   }
   safeString(input.responseId, "responseId", 512);
@@ -114,6 +117,7 @@ function validateRecordInput(input) {
     provider: input.provider,
     ...input.usage,
     createdAt: input.createdAt,
+    ...(Object.hasOwn(input, "costUsd") ? { costUsd: input.costUsd } : {}),
   });
 }
 
@@ -158,7 +162,7 @@ function emptyParts() {
 }
 
 function displayParts(record) {
-  return {
+  const parts = {
     totalTokens: record.totalTokens,
     totalCost: 0,
     inputTokens: Math.max(
@@ -170,6 +174,9 @@ function displayParts(record) {
     cacheWriteTokens: record.cacheWriteInputTokens,
     reasoningTokens: record.reasoningOutputTokens,
   };
+  const resolved = resolveUsageCost(record, parts);
+  parts.totalCost = resolved.cost ?? 0;
+  return { parts, missing: resolved.cost === null, estimated: resolved.estimated };
 }
 
 function addParts(target, parts) {
@@ -352,6 +359,25 @@ class TokenUsageStore {
     return clone(normalized);
   }
 
+  purgeProfile(profileId) {
+    this.#assertOpen();
+    safeString(profileId, "profileId", 128);
+    const records = new Map([...this.records].filter(([, record]) => record.profileId !== profileId));
+    if (records.size === this.records.size) return;
+    const text = [...records.values()].map((record) => `${JSON.stringify({
+      version: STORE_VERSION, record, checksum: recordChecksum(record),
+    })}\n`).join("");
+    try {
+      atomicWritePrivateFile(this.paths.tokenUsagePath, text, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
+    } catch (error) {
+      if (error?.committed !== true) {
+        if (error?.committedUncertain) this.commitUncertain = true;
+        throw error;
+      }
+    }
+    this.records = records;
+  }
+
   list(query = {}) {
     this.#assertOpen();
     if (!query || typeof query !== "object" || Array.isArray(query)
@@ -383,8 +409,12 @@ class TokenUsageStore {
     const byAgent = new Map();
     const bySession = new Map();
     const modelDaily = new Map();
+    let missingCostEntries = 0;
+    let estimatedCostEntries = 0;
     for (const record of records) {
-      const parts = displayParts(record);
+      const { parts, missing, estimated } = displayParts(record);
+      if (missing) missingCostEntries++;
+      if (estimated) estimatedCostEntries++;
       addParts(totals, parts);
       const date = timelineDate(record.createdAt, range);
       mapRow(daily, date, () => ({ date, ...emptyParts() }), parts);
@@ -414,6 +444,7 @@ class TokenUsageStore {
         cost: 0,
       };
       dayModel.tokens += record.totalTokens;
+      dayModel.cost += parts.totalCost;
       modelDaily.set(modelDayKey, dayModel);
       const sessionKey = `${record.source}\0${record.sourceId}`;
       const session = bySession.get(sessionKey) || {
@@ -428,12 +459,13 @@ class TokenUsageStore {
         updatedAt: 0,
       };
       session.totalTokens += record.totalTokens;
+      session.totalCost += parts.totalCost;
       session.updatedAt = Math.max(session.updatedAt, record.createdAt);
       session.model = record.model || session.model;
       session.modelTokens.set(model, (session.modelTokens.get(model) || 0) + record.totalTokens);
       bySession.set(sessionKey, session);
     }
-    const completeTotals = { ...totals, missingCostEntries: records.length };
+    const completeTotals = { ...totals, missingCostEntries, estimatedCostEntries };
     const agentRows = [...byAgent.values()].sort((a, b) => b.totalTokens - a.totalTokens);
     const summary = {
       series: {

@@ -1,4 +1,5 @@
 "use strict";
+const { isImplicitChatWorkspace } = require("../agent-service/chat-workspace");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -6,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 const { AgentBackend } = require("./agent-backend");
+const { validateCustomEndpointResult } = require("../agent-service/custom-endpoint-protocol");
 const { inspirationExecutionToActivity } = require("./dashboard-activity");
 const {
   normalizeInteractiveRequestV1,
@@ -69,6 +71,7 @@ const DEFAULT_READINESS_INTERVAL_MS = 500;
 const DEFAULT_SERVICE_STATUS_TIMEOUT_MS = 1_000;
 const DEFAULT_READINESS_MAX_ATTEMPTS = 140;
 const ENCRYPTED_MUTATION_METHODS = new Set([
+  "provider.endpoints.save", "provider.endpoints.delete", "provider.endpoints.discover",
   "chat.send",
   "chat.abort",
   "chat.steer",
@@ -81,6 +84,7 @@ const ENCRYPTED_MUTATION_METHODS = new Set([
 ]);
 const RUNTIME_COMMAND_METHODS = new Set(["chat.command.list", "chat.command.exec"]);
 const NATIVE_SLASH_RUNTIMES = new Set(["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness"]);
+const NATIVE_STEER_RUNTIMES = new Set(["codex", "claude-code", "pi", "deepseek-harness"]);
 // 1 MiB of JSON-escaped control text can require ~130 protocol-sized frames;
 // 256 remains finite while covering both that case and 8,192 ordinary page items.
 const DEFAULT_MAX_PAGES = 256;
@@ -153,7 +157,8 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   ANTIGRAVITY_ONBOARDING_REQUIRED: "请先在 Antigravity CLI 中完成首次登录引导，再回到当前会话重试",
   ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED: "暂时无法识别 Antigravity 的原生授权界面，本次操作已停止；请检查 CLI 与 Shoggoth 的版本兼容性",
   ANTIGRAVITY_APPROVAL_CHANGED: "Antigravity 的原生授权请求已变化，旧选择未被应用；请在当前会话重新发送",
-  RUNTIME_QUOTA_EXHAUSTED: "模型服务商返回额度不足，请核对当前登录账号、订阅和额度；确认可用后可在当前会话重试",
+  RUNTIME_QUOTA_EXHAUSTED: "当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试",
+  RUNTIME_SPENDING_LIMIT_REACHED: "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试",
   RUNTIME_ACCOUNT_BLOCKED: "模型服务商返回账号受限（account blocked），请前往服务商检查账号状态；解除限制或更换可用账号后重试",
   RUNTIME_UPSTREAM_UNAVAILABLE: "Agent 上游服务暂时不可用，请稍后重试",
   CODEX_SYSTEM_BINARY_NOT_FOUND: "未找到可执行的本机 Codex CLI，请先安装 Codex 并检查 PATH",
@@ -180,6 +185,7 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   CODEX_START_TURN_START_FAILED: "发送本次任务失败；为避免重复执行，未自动重放",
 });
 const CHAT_REQUEST_MESSAGES = Object.freeze({
+  CUSTOM_ENDPOINT_REJECTED: "端点操作失败，请检查配置、当前任务和本机 Service 后重试。",
   ...INSPIRATION_PUBLIC_MESSAGES,
   RUNTIME_AUTH_REQUIRED: CHAT_PUBLIC_MESSAGES.RUNTIME_AUTH_REQUIRED,
   CHAT_ATTACHMENT_INVALID: CHAT_PUBLIC_MESSAGES.CHAT_ATTACHMENT_INVALID,
@@ -193,6 +199,7 @@ const CONNECTION_MODES = new Set(["builtin-service", "native-runtime"]);
 const CLIENT_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SAFE_ADAPTER_ERRORS = new WeakSet();
 const PUBLIC_SERVICE_ERROR_CODES = new Set([
+  "CUSTOM_ENDPOINT_REJECTED",
   ...Object.keys(CHAT_PUBLIC_MESSAGES),
   ...Object.keys(INSPIRATION_PUBLIC_MESSAGES),
   ...Object.keys(DOMAIN_PUBLIC_MESSAGES),
@@ -478,6 +485,7 @@ function parseGatewaySessionKey(value) {
 
 function runFromSnapshot(snapshot, runId) {
   if (!exactObject(snapshot, ["run"])
+    && !exactObject(snapshot, ["run", "queue"])
     && !exactObject(snapshot, ["run", "interaction"])) return null;
   let result;
   try {
@@ -485,6 +493,10 @@ function runFromSnapshot(snapshot, runId) {
   } catch {
     return null;
   }
+  if (Object.hasOwn(snapshot, "queue") && (result.run.status !== "queued"
+    || !exactObject(snapshot.queue, ["status", "reason", "queuedAt"])
+    || snapshot.queue.status !== "queued" || !safeString(snapshot.queue.reason, 128)
+    || !Number.isSafeInteger(snapshot.queue.queuedAt) || snapshot.queue.queuedAt < 0)) return null;
   return result.run.id === runId ? result.run : null;
 }
 
@@ -573,7 +585,14 @@ function validateServiceEventPage(value, params) {
       || event.payload === undefined) {
       throw new TypeError("invalid events.subscribe event");
     }
-    if (event.type === "federation.chat.terminal") {
+    if (event.type === "agent.profile.renamed" || event.type === "agent.profile.changed") {
+      const payload = event.payload;
+      if (!exactObject(payload, ["profileId", "backendId"])
+        || !safeString(payload.profileId, 256) || payload.profileId.length === 0
+        || !safeString(payload.backendId, 128) || payload.backendId.length === 0) {
+        throw new TypeError("invalid Agent profile event");
+      }
+    } else if (event.type === "federation.chat.terminal") {
       const payload = event.payload;
       if (!exactObject(payload, [
         "runId", "profileId", "sessionKey", "status", "result", "errorCode", "finishedAt",
@@ -649,6 +668,7 @@ function validateServiceEventPage(value, params) {
 
 function validateServiceResult(method, value, params) {
   try {
+    if (method.startsWith("provider.endpoints.")) return validateCustomEndpointResult(method, value);
     if (INSPIRATION_SERVICE_METHOD_SET.has(method)) return validateInspirationServiceResult(method, value);
     if (method === "service.status") {
       if (!ownDataObject(value) || value.healthy !== true
@@ -1224,6 +1244,32 @@ class ShoggothBackend extends AgentBackend {
     return refresh;
   }
 
+  async listCustomEndpoints({ profile } = {}) {
+    if (this.id !== "shoggoth") return { supported: false, endpoints: [] };
+    return this._call("provider.endpoints.list", { profileId: profile || null });
+  }
+
+  async saveCustomEndpoint(endpoint, { profile } = {}) {
+    if (this.id !== "shoggoth") throw safeError(null, "INVALID_PARAMS");
+    const result = await this._call("provider.endpoints.save", { profileId: profile || null, endpoint });
+    this._modelChoices = [];
+    if (this._state === "started") await this._refreshManagedProfiles();
+    return result;
+  }
+
+  async deleteCustomEndpoint(id, { profile } = {}) {
+    if (this.id !== "shoggoth") throw safeError(null, "INVALID_PARAMS");
+    const result = await this._call("provider.endpoints.delete", { profileId: profile || null, id });
+    this._modelChoices = [];
+    if (this._state === "started") await this._refreshManagedProfiles();
+    return result;
+  }
+
+  async validateCustomEndpoint(endpoint = {}, { profile } = {}) {
+    if (this.id !== "shoggoth") throw safeError(null, "INVALID_PARAMS");
+    return this._call("provider.endpoints.discover", { profileId: profile || null, endpoint });
+  }
+
   async getModels() {
     if (this._state !== "started") return [];
     if (this._modelChoices.length > 0) {
@@ -1695,8 +1741,8 @@ class ShoggothBackend extends AgentBackend {
 
   async mutateAgentMemory(id, action, input) {
     const profile = this._profileForManagedAgent(id);
-    if (!["confirm", "update", "delete"].includes(action)) throw safeError(null, "INVALID_PARAMS");
-    return this._call(`harness.memory.${action}`, { profileId: profile.id, ...input });
+    if (!["create", "confirm", "update", "delete"].includes(action)) throw safeError(null, "INVALID_PARAMS");
+    return this._call(`harness.memory.${action}`, { ...input, profileId: profile.id });
   }
 
   async listAgentTranscripts(id, options = {}) {
@@ -1920,6 +1966,7 @@ class ShoggothBackend extends AgentBackend {
       maxAttachmentBytes: 50 * 1024 * 1024,
       maxAttachments: 8,
       slash: NATIVE_SLASH_RUNTIMES.has(profile.runtime),
+      steer: NATIVE_STEER_RUNTIMES.has(profile.runtime),
       modelProvider: profile.providerRef || profile.runtime,
       modelScope: profile.id,
       permissions: {
@@ -2411,7 +2458,8 @@ class ShoggothBackend extends AgentBackend {
         result: payload.result,
         errorCode: payload.errorCode,
         finishedAt: payload.finishedAt,
-        ...(this._sessionsByKey.get(payload.sessionKey)?.cronJobId ? { notificationCategory: "cron" } : {}),
+        ...(this._sessionsByKey.get(payload.sessionKey)?.cronJobId ? { notificationCategory: "cron" }
+          : this._sessionsByKey.get(payload.sessionKey)?.inspirationId ? { notificationCategory: "inspiration" } : {}),
       });
     } catch {
       // Registry/UI listeners are observers and cannot invalidate durable state.
@@ -2489,6 +2537,40 @@ class ShoggothBackend extends AgentBackend {
     }
   }
 
+  async _refreshProfileNames(generation, profileId = null) {
+    const profiles = await this._page("profile.list", { backendId: this.id, enabledOnly: false }, "profiles", {
+      maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS,
+    });
+    if (generation !== this._generation || this._state !== "started") return;
+    if (profiles.some((profile) => profile.backendId !== this.id)) throw safeError(null, "PROFILE_NOT_FOUND");
+    if (profileId === null) {
+      const activeIds = new Set(profiles.filter(profile => profile.enabled).map(profile => profile.id));
+      if (activeIds.size !== this._profilesById.size
+        || [...activeIds].some(id => !this._profilesById.has(id))) {
+        await this._refreshManagedProfiles();
+        return;
+      }
+    }
+    const renamed = new Map();
+    let workspaceChanged = false;
+    for (const profile of profiles) {
+      const prior = this._profilesById.get(profile.id);
+      if (!prior || !profile.enabled || (profileId !== null && profile.id !== profileId)
+        || profile.updatedAt < prior.updatedAt) continue;
+      this._profilesById.set(profile.id, profile);
+      this._profilesByAgent.set(profile.agentId, profile);
+      if (prior.name !== profile.name) renamed.set(profile.agentId, profile.name);
+      if (prior.defaultCwd !== profile.defaultCwd) workspaceChanged = true;
+    }
+    if (renamed.size === 0 && !workspaceChanged) return;
+    // Keep sessions, active streams, drafts and unrelated row objects intact.
+    this._agents = this._agents.map((agent) => renamed.has(agent.id)
+      ? Object.freeze({ ...agent, name: renamed.get(agent.id) }) : agent);
+    this._rows = this._rows.map((row) => renamed.has(row.agentId)
+      ? Object.freeze({ ...row, agentName: renamed.get(row.agentId) }) : row);
+    try { this._readyNotifier?.(); } catch {}
+  }
+
   async _pollServiceEvents(generation) {
     let nextDelayMs = this.serviceEventPollMs;
     try {
@@ -2499,6 +2581,7 @@ class ShoggothBackend extends AgentBackend {
         || this._serviceEventPollGeneration !== generation) return;
       const streamChanged = this._serviceEventStreamId !== result.streamId;
       if (streamChanged || result.latestSeq < this._serviceEventCursor) {
+        if (this._serviceEventStreamId !== null) await this._refreshProfileNames(generation);
         this._serviceEventCursor = 0;
         const reconciled = await this._reconcileFederationInteractions(generation);
         if (!reconciled || generation !== this._generation || this._state !== "started"
@@ -2506,6 +2589,7 @@ class ShoggothBackend extends AgentBackend {
         this._serviceEventStreamId = result.streamId;
         nextDelayMs = 0;
       } else if (result.gap) {
+        await this._refreshProfileNames(generation);
         const reconciled = await this._reconcileFederationInteractions(generation);
         if (!reconciled || generation !== this._generation || this._state !== "started"
           || this._serviceEventPollGeneration !== generation) return;
@@ -2513,7 +2597,11 @@ class ShoggothBackend extends AgentBackend {
         nextDelayMs = 0;
       } else {
         for (const event of result.events) {
-          if (event.type === "federation.chat.terminal") {
+          if (event.type === "agent.profile.renamed" && event.payload.backendId === this.id) {
+            await this._refreshProfileNames(generation, event.payload.profileId);
+          } else if (event.type === "agent.profile.changed" && event.payload.backendId === this.id) {
+            await this._refreshProfileNames(generation);
+          } else if (event.type === "federation.chat.terminal") {
             await this._applyFederationTerminalActivity(event.payload, generation);
           } else if (event.type === "federation.chat.interaction") {
             await this._applyFederationInteractionActivity(event.payload, generation);
@@ -3765,7 +3853,7 @@ class ShoggothBackend extends AgentBackend {
         if (requestId) this._invokeHook(hooks, "promptExpire", { requestId });
         if (execution.status === "completed" || execution.status === "canceled") {
           this._invokeHook(hooks, "final", execution.resultSummary || "", false,
-            { runId, ...(execution.status === "canceled" ? { stopReason: "cancelled" } : {}) });
+            { runId, notificationCategory: "inspiration", ...(execution.status === "canceled" ? { stopReason: "cancelled" } : {}) });
         } else {
           this._invokeHook(hooks, "error", `灵感任务未完成 (${execution.errorCode || execution.status})`);
         }
@@ -4075,33 +4163,75 @@ class ShoggothBackend extends AgentBackend {
     return { runs: runs.slice(offset, offset + limit) };
   }
 
+  async _dashboardProfiles() {
+    this._assertDomainReady();
+    const profiles = await this._page("profile.list", { backendId: this.id, enabledOnly: false }, "profiles", {
+      maxBytes: MAX_DOMAIN_AGGREGATE_BYTES, maxItems: MAX_DOMAIN_AGGREGATE_ITEMS,
+    });
+    if (profiles.some(profile => profile.backendId !== this.id)) throw safeError(null, "PROFILE_NOT_FOUND");
+    return profiles;
+  }
+
   async getRecentCronRuns({ sinceMs = 0, limit = 50 } = {}) {
-    const jobs = await this.getCronJobs();
+    const profiles = await this._dashboardProfiles();
     const rows = [];
     let aggregate = { bytes: 0, items: 0 };
-    for (const job of jobs) {
-      const target = await this._loadCronTarget(job.id);
-      const values = await this._cronRunsForTarget(target);
-      aggregate = this._assertDomainAggregate(values, aggregate.bytes, aggregate.items);
-      for (const value of values) {
-        const run = this._mapCronRun(value);
-        if ((run.startedAt || 0) < sinceMs) continue;
-        rows.push({
-          backendId: this.id,
-          jobId: job.id,
-          jobName: job.name,
-          agentId: job.agentId,
-          ...run,
-        });
+    for (const profile of profiles) {
+      const [jobs, runs] = await Promise.all([
+        this._domainPage("cron.job.list", { profileId: profile.id, enabled: null }, "jobs"),
+        this._page("run.list", { profileId: profile.id, sessionKey: null, status: null }, "runs", {
+          maxBytes: MAX_DOMAIN_AGGREGATE_BYTES, maxItems: MAX_DOMAIN_AGGREGATE_ITEMS,
+        }),
+      ]);
+      aggregate = this._assertDomainAggregate(runs, aggregate.bytes, aggregate.items);
+      const byId = new Map(jobs.map(job => [job.id, job]));
+      for (const value of runs) {
+        if (value.profileId !== profile.id) throw safeError(null, "CRON_PROFILE_MISMATCH");
+        if (value.source !== "cron" || (value.finishedAt ?? value.startedAt ?? value.createdAt) < sinceMs) continue;
+        const run = this._mapCronRun({ run: value, createdAt: value.createdAt });
+        rows.push({ backendId: this.id, jobId: `${this.id}:${value.sourceId}`,
+          jobName: byId.get(value.sourceId)?.name, agentId: profile.agentId, runId: value.id, ...run });
       }
     }
-    rows.sort((left, right) => (
-      (right.startedAt || 0) - (left.startedAt || 0) || String(right.id).localeCompare(String(left.id))
-    ));
+    rows.sort((left, right) => (right.finishedAt ?? right.startedAt ?? 0) - (left.finishedAt ?? left.startedAt ?? 0));
     const cap = Number.isSafeInteger(limit) && limit > 0 ? limit : 50;
-    const result = { runs: rows.slice(0, cap) };
-    if (rows.length > cap) result.truncated = true;
-    return result;
+    return { runs: rows.slice(0, cap), ...(rows.length > cap ? { truncated: true } : {}) };
+  }
+
+  async getRecentKanbanActivities({ sinceMs = 0 } = {}) {
+    this._assertDomainReady();
+    const items = [];
+    let aggregate = { bytes: 0, items: 0 };
+    for (const profile of await this._dashboardProfiles()) {
+      const boards = await this._listBoardsForProfile(profile);
+      for (const board of boards) {
+        const cards = await this._domainPage("kanban.card.list", { boardId: board.id, status: null }, "cards");
+        aggregate = this._assertDomainAggregate(cards, aggregate.bytes, aggregate.items);
+        for (const card of cards) {
+          if (card.profileId !== profile.id || card.boardId !== board.id) throw safeError(null, "KANBAN_PROFILE_MISMATCH");
+          const activity = (action, at, identity, summary) => ({
+            id: `kanban:${this.id}:${card.id}:${identity}`, backendId: this.id, kind: "kanban",
+            occurredAt: at, severity: action === "completed" ? "success" : "error",
+            title: card.title, agentId: profile.agentId,
+            ...(summary ? { summary } : {}),
+            kanban: { taskId: card.id, board: board.id, action },
+          });
+          if (card.completion && card.completion.at >= sinceMs) {
+            items.push(activity("completed", card.completion.at, `completed:${card.completion.at}`, card.completion.note));
+          }
+          if (card.updatedAt < sinceMs) continue;
+          const runs = await this._domainPage("kanban.run.list", { cardId: card.id, status: null }, "runs");
+          aggregate = this._assertDomainAggregate(runs, aggregate.bytes, aggregate.items);
+          for (const run of runs) {
+            if (run.profileId !== profile.id) throw safeError(null, "KANBAN_PROFILE_MISMATCH");
+            if (run.status === "failed" && run.finishedAt >= sinceMs) {
+              items.push(activity("failed", run.finishedAt, run.id, run.errorCode));
+            }
+          }
+        }
+      }
+    }
+    return { supported: true, items };
   }
 
   async _dashboardRuns() {
@@ -4490,6 +4620,7 @@ class ShoggothBackend extends AgentBackend {
       const parent = this._sessionTarget(options.parentSessionKey);
       if (parent.agentId !== agentId) throw safeError(null, "CHAT_SESSION_INVALID");
       workspace = parent.session.workspace;
+      if (isImplicitChatWorkspace(this.paths, profile, workspace)) workspace = null;
     }
     const result = await this._call("chat.session.create", {
       operationId: `create-${this.randomUUID()}`,
@@ -4724,6 +4855,9 @@ class ShoggothBackend extends AgentBackend {
         run: sent.run,
       };
       this._activeBySession.set(sessionKey, active);
+      this._emitRunStatus(observerHooks, state, sent.run.status, {
+        reason: sent.reason, queuedAt: this.now(),
+      });
       let observedRun = sent.run;
       let streamId = null;
       let afterSeq = 0;
@@ -5067,10 +5201,7 @@ class ShoggothBackend extends AgentBackend {
       if (safeString(payload.requestId, 128)) {
         this._expirePrompt(context, payload.requestId);
       }
-      if (["compacting", "compacted"].includes(status) && state.lastStatus !== status) {
-        state.lastStatus = status;
-        this._invokeHook(context.hooks, "status", { kind: status, text: status });
-      }
+      this._emitRunStatus(context.hooks, state, status, payload);
     } else if (event.type === "approval") {
       let request;
       try {
@@ -5110,6 +5241,19 @@ class ShoggothBackend extends AgentBackend {
     return false;
   }
 
+  _emitRunStatus(hooks, state, status, payload = {}) {
+    if (!["queued", "starting", "running", "waiting_approval", "waiting_input", "compacting", "compacted"].includes(status)) return;
+    const reason = status === "queued" ? boundedText(payload?.reason, 128) || null : null;
+    const queuedAt = status === "queued" && Number.isSafeInteger(payload?.queuedAt) && payload.queuedAt >= 0
+      ? payload.queuedAt : null;
+    if (state.lastStatus === status && state.lastQueueReason === reason && state.lastQueuedAt === queuedAt) return;
+    state.lastStatus = status;
+    state.lastQueueReason = reason;
+    state.lastQueuedAt = queuedAt;
+    this._invokeHook(hooks, "status", { kind: status, text: status,
+      ...(reason ? { reason } : {}), ...(queuedAt !== null ? { queuedAt } : {}) });
+  }
+
   async _consumeActiveSnapshot(context, state, snapshotRun, snapshot = null) {
     this._expireSupersededPrompts(context, snapshotRun.waitingRequestId);
     this._activeBySession.set(context.sessionKey, {
@@ -5118,13 +5262,7 @@ class ShoggothBackend extends AgentBackend {
       status: snapshotRun.status,
       run: snapshotRun,
     });
-    if (state.lastStatus !== snapshotRun.status) {
-      state.lastStatus = snapshotRun.status;
-      this._invokeHook(context.hooks, "status", {
-        kind: snapshotRun.status,
-        text: snapshotRun.status,
-      });
-    }
+    this._emitRunStatus(context.hooks, state, snapshotRun.status, snapshot?.queue);
     if (!["waiting_approval", "waiting_input"].includes(snapshotRun.status)
       || !snapshotRun.waitingRequestId) return;
     const kind = snapshotRun.status === "waiting_approval" ? "approval" : "input";
@@ -5247,7 +5385,8 @@ class ShoggothBackend extends AgentBackend {
       }
       if (!text) text = typeof terminal.resultSummary === "string" ? terminal.resultSummary : "";
       if (context.poll.consumerCancelled) return;
-      this._invokeHook(context.hooks, "final", text, false, { runId: terminal.id });
+      this._invokeHook(context.hooks, "final", text, false, { runId: terminal.id,
+        ...(context.run.source === "inspiration" ? { notificationCategory: "inspiration" } : {}) });
       return;
     }
     const code = typeof terminal.errorCode === "string" && SAFE_CODE_PATTERN.test(terminal.errorCode)

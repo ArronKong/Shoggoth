@@ -178,3 +178,36 @@ test("approval visibility uses request and run identity instead of matching conv
   assert.ok(ids.has(user.id) && ids.has(assistant.id) && ids.has(unrelatedResponse.id));
   assert.ok(!ids.has(request.id) && !ids.has(decision.id));
 });
+
+test("product confirmations keep one live card without a duplicate history bubble", async t => {
+  const f = await fixture(t);
+  const idea = await f.start(await f.create());
+  const run = await f.running(idea);
+  const session = f.sessions.getSession(idea.latestExecution.sessionKey);
+  const before = await history(f, session.sessionKey);
+  const confirmation = f.host.request("mcpServer/elicitation/request", {
+    threadId: run.codexThreadId, turnId: run.codexTurnId, serverName: "shoggoth", mode: "form",
+    message: "Shoggoth 将操作 Computer Use 会话。是否继续？",
+    requestedSchema: { type: "object", required: ["confirm_product_action"], properties: {
+      confirm_product_action: { type: "string", title: "确认修改", enum: ["确认执行", "取消"] },
+    } },
+  });
+  await until(() => f.dispatcher.getRun(run.id).status === "waiting_input");
+  const requestId = f.dispatcher.getRun(run.id).waitingRequestId;
+  const subscription = f.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, () => {});
+  assert.ok(subscription.events.some(event => event.type === "prompt" && event.payload.requestId === requestId),
+    "the confirmation must still reach the live interactive card");
+  subscription.unsubscribe();
+  assert.deepEqual(await history(f, session.sessionKey, 1), before,
+    "a pending product confirmation must not also render as an assistant message");
+  await f.coordinator.respondInput({ operationId: crypto.randomUUID(), runId: run.id,
+    requestId, action: "submit", answers: { confirm_product_action: "取消" } });
+  assert.deepEqual(await confirmation, { action: "accept", content: { confirm_product_action: "取消" } },
+    "Cancel must reach the product helper as the original selected answer");
+  assert.deepEqual(await history(f, session.sessionKey, 1), before,
+    "confirmation responses must not reappear as ordinary chat messages");
+  const events = f.transcript.listEvents(run.profileId, session.id);
+  assert.ok(events.some(event => event.kind === "input" && event.content.requestId === requestId));
+  assert.ok(events.some(event => event.content.transcriptType === "interaction.response" && event.content.requestId === requestId),
+    "raw confirmation requests and responses must remain in the transcript");
+});

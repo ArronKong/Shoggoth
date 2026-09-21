@@ -1,10 +1,8 @@
-import type { Dispatch, SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import type { AppConfig } from "../../types";
 import { Field, Option, Select, Switch } from "../../components/Field";
 import { useToast } from "../../components/ui";
 import { fireNotification } from "../../lib/notify";
-import { applyTheme } from "../../lib/theme";
 import ThemePicker from "./ThemePicker";
 import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
 
@@ -12,9 +10,9 @@ import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
 // re-enable, but do not expose theme switching in Settings for now.
 const SHOW_THEME_PICKER = false;
 
-export default function SettingsPreferences({ cfg, setCfg, disabled, themeLoaded }: {
+export default function SettingsPreferences({ cfg, onChange, disabled, themeLoaded }: {
   cfg: AppConfig;
-  setCfg: Dispatch<SetStateAction<AppConfig>>;
+  onChange: (patch: Partial<AppConfig>) => void;
   disabled: boolean;
   themeLoaded: boolean;
 }) {
@@ -23,6 +21,7 @@ export default function SettingsPreferences({ cfg, setCfg, disabled, themeLoaded
   return (
     <div className="settings-preferences">
       {/* Common preferences stay together and are visible on first entry. */}
+      <div className="settings-preferences-main">
       <section className="settings-section" id="settings-appearance">
         <header className="settings-section-head">
           <h3 className="settings-h">{t("settings.appearanceSection")}</h3>
@@ -34,14 +33,11 @@ export default function SettingsPreferences({ cfg, setCfg, disabled, themeLoaded
               <ThemePicker
                 value={cfg.theme}
                 disabled={disabled || !themeLoaded}
-                onChange={(theme) => {
-                  setCfg({ ...cfg, theme });
-                  applyTheme(theme);
-                }}
+                onChange={(theme) => onChange({ theme })}
               />
             )}
             <Field label={t("settings.langLabel")} hint={t("settings.langHint")}>
-              <Select disabled={disabled} value={cfg.locale} onChange={(v) => setCfg({ ...cfg, locale: v })}>
+              <Select disabled={disabled} value={cfg.locale} onChange={(v) => onChange({ locale: v })}>
                 <Option value="">{t("settings.langAuto")}</Option>
                 <Option value="zh-CN">简体中文</Option>
                 <Option value="en">English</Option>
@@ -52,6 +48,7 @@ export default function SettingsPreferences({ cfg, setCfg, disabled, themeLoaded
       </section>
 
       <SettingsDesktopPrinter disabled={disabled} />
+      </div>
 
       {/* Notifications — native macOS desktop notifications, per category */}
       <section className="settings-section" id="settings-notif">
@@ -65,7 +62,7 @@ export default function SettingsPreferences({ cfg, setCfg, disabled, themeLoaded
               <Switch
                 disabled={disabled}
                 checked={cfg.notifications.chat}
-                onChange={(v) => setCfg({ ...cfg, notifications: { ...cfg.notifications, chat: v } })}
+                onChange={(v) => onChange({ notifications: { ...cfg.notifications, chat: v } })}
                 label={<span className="settings-notification-copy"><span>{t("settings.notifChat")}</span><small>{t("settings.notifChatDesc")}</small></span>}
               />
             </div>
@@ -73,7 +70,7 @@ export default function SettingsPreferences({ cfg, setCfg, disabled, themeLoaded
               <Switch
                 disabled={disabled}
                 checked={cfg.notifications.cron}
-                onChange={(v) => setCfg({ ...cfg, notifications: { ...cfg.notifications, cron: v } })}
+                onChange={(v) => onChange({ notifications: { ...cfg.notifications, cron: v } })}
                 label={<span className="settings-notification-copy"><span>{t("settings.notifCron")}</span><small>{t("settings.notifCronDesc")}</small></span>}
               />
             </div>
@@ -81,13 +78,13 @@ export default function SettingsPreferences({ cfg, setCfg, disabled, themeLoaded
               <Switch
                 disabled={disabled}
                 checked={cfg.notifications.task}
-                onChange={(v) => setCfg({ ...cfg, notifications: { ...cfg.notifications, task: v } })}
+                onChange={(v) => onChange({ notifications: { ...cfg.notifications, task: v } })}
                 label={<span className="settings-notification-copy"><span>{t("settings.notifTask")}</span><small>{t("settings.notifTaskDesc")}</small></span>}
               />
             </div>
           </div>
-          <p className="ui-hint">{t("settings.notifHint")}</p>
-          <div className="settings-actions">
+          <div className="settings-notification-footer">
+            <p className="ui-hint">{t("settings.notifHint")}</p>
             <button
               className="ui-cbtn ui-cbtn--sm"
               onClick={async () => {
