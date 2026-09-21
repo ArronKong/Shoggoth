@@ -44,6 +44,7 @@ function fixture({ packaged = true, marker = "official", config = true } = {}) {
     : { schemaVersion: 1, distribution: "internal", signingMode: "adhoc", updateChannel: null };
   const controller = createDesktopAppUpdateController({
     app: { isPackaged: packaged, getVersion: () => "0.8.125" },
+    platform: "darwin",
     ipcMain,
     getMainWindow: () => window,
     resourcesPath: "/app/Resources",
