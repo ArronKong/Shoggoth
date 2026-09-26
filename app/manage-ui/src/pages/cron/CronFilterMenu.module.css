@@ -1,0 +1,160 @@
+/* Cron 工具栏的筛选胶囊：48px 控件高度 + 与 PillTabs（Figma 6999-633）同一份
+   表面配方——底部白光晕 + 顶部 3% 黑内影 + #F3F3F3 底，1px 白描边，极软投影。 */
+.trigger {
+  /* 文字规格来自设计稿：SF Pro Light 16/24，字距 -0.3125，纯黑（暗色反白）。 */
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 24px;
+  letter-spacing: -0.3125px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 48px;
+  padding: 0 24px;
+  border: 1px solid #ffffff;
+  border-radius: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
+    #f3f3f3;
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
+  color: light-dark(#000000, #ffffff);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--ui-motion-state) ease,
+    border-color var(--ui-motion-state) ease,
+    box-shadow var(--ui-motion-state) ease;
+}
+
+/* 同配方暗色适配（与 PillTabs 一致）：光晕/内影换低亮度，底 #2a2a2e。 */
+:global(:root[data-theme="dark"]) .trigger {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
+    #2a2a2e;
+}
+
+/* hover 与 PillTabs 同口径：字色不变，只垫黑 10%（暗色白 10%）。 */
+.trigger:hover:not(:disabled) {
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.1));
+  color: light-dark(#000000, #ffffff);
+}
+.trigger:focus-visible,
+.trigger[data-popup-open] {
+  outline: none;
+  border-color: var(--ui-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus) 18%, transparent);
+}
+/* 选中态不改字重：设计稿整排统一 Light，加粗会让这一颗跳出来。
+   选中反馈靠触发文案本身（显示选中项名）+ 多选时的计数徽标。 */
+.trigger:disabled {
+  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
+  cursor: not-allowed;
+}
+
+.icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: inherit;
+}
+.text {
+  overflow: hidden;
+  max-width: 12ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--ui-text-1);
+  color: var(--ui-surface-1);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.positioner {
+  z-index: 300;
+}
+.popup {
+  min-width: max(var(--anchor-width), 200px);
+  max-height: min(20rem, var(--available-height));
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: var(--ui-radius-compact);
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-hover);
+  animation: cronFilterPopIn var(--ui-motion-popover) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 0.86rem;
+  color: var(--ui-text-1);
+  cursor: pointer;
+  user-select: none;
+}
+.item[data-highlighted] {
+  background: var(--ui-surface-2);
+}
+.item[data-checked] {
+  font-weight: 500;
+}
+.itemText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.indicator {
+  flex-shrink: 0;
+  color: var(--ui-focus);
+  font-size: 0.8rem;
+}
+.empty {
+  padding: 10px;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 0.82rem;
+}
+
+@keyframes cronFilterPopIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trigger {
+    transition: none;
+  }
+  .popup {
+    animation: none;
+  }
+}
+
+/* 图标描边并入全站 1.2 CSS px 口径（R376）。类名经 CSS module 哈希，全局样式表选不到，
+   只能写在这里。`vector-effect` 不可继承，故连子元素一起选。 */
+.icon svg,
+.icon svg * {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2;
+}

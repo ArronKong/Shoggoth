@@ -1,0 +1,145 @@
+.icon {
+  --growth-duration: 10s;
+  --seed-left: path("M11.2206 2.78038C10.2075 2.23274 8.81105 2.69823 7.33245 3.46491C5.97706 4.17683 4.8202 5.20364 3.97821 6.37077C3.13623 7.53791 2.60914 8.84537 2.5133 10.1186C2.34901 12.3365 3.71809 13.733 5.99075 13.8425");
+  --seed-right: path("M11.2206 2.78038C12.2474 3.32801 12.94562 4.19737 13.27763 5.22418C13.60963 6.25099 13.5754 7.43524 13.1373 8.61264C12.5623 10.17337 11.52866 11.51506 10.26226 12.44946C8.99587 13.38385 7.49674 13.91095 5.99075 13.8425");
+  --root-left: path("M8.16855 6.72021C7.66868 6.94238 7.11326 7.23397 6.53176 7.58111C5.95025 7.92824 5.34264 8.33092 4.73839 8.77524C4.13414 9.21957 3.53324 9.70556 2.96514 10.21931C2.39703 10.73307 1.86173 11.27459 1.38867 11.83");
+  --root-right: path("M8.28369 6.72021C9.06127 7.11092 9.7833 7.52843 10.49767 8.00054C11.21204 8.47264 11.91875 8.99933 12.6657 9.60837C13.0564 9.72328 13.41838 9.88991 13.74493 10.06994C14.07147 10.24997 14.3626 10.4434 14.6116 10.6119");
+  --sprout-left: path("M8.43802 9.76506C8.43802 7.66581 7.86073 6.00391 6.69739 4.91055C5.53406 3.81719 3.78469 3.29237 1.44053 3.46731C1.44053 5.56656 2.0878 7.141 3.28612 8.19062C4.48444 9.24025 6.23381 9.76506 8.43802 9.76506");
+  --sprout-right: path("M8.43802 6.966C8.43802 5.32159 8.99781 3.92209 10.1524 2.9337C11.30698 1.9453 13.05635 1.36801 15.4355 1.36801C15.5055 3.46725 14.84075 5.09417 13.61619 6.08257C12.39163 7.07097 10.60726 7.42084 8.43802 6.966");
+  --fruit-left: path("M8.00031 6.19947C7.77574 6.19947 7.55118 6.13966 7.35744 6.02003C5.07574 4.61112 1.38849 5.23448 1.99455 9.09037C2.48331 13.2204 5.20953 15.1775 7.40771 14.0531C7.59158 13.95905 7.79595 13.91202 8.00031 13.91202");
+  --fruit-right: path("M8.00031 6.19947C8.22488 6.19947 8.44945 6.13966 8.64319 6.02003C10.9249 4.61112 14.6121 5.23448 14.0061 9.09037C13.5173 13.2204 10.7911 15.1775 8.59291 14.0531C8.40904 13.95905 8.20468 13.91202 8.00031 13.91202");
+  --collapse: path("M8.28335 6.72021C8.28335 6.72021 8.28335 6.72021 8.28335 6.72021C8.28335 6.72021 8.28335 6.72021 8.28335 6.72021C8.28335 6.72021 8.28335 6.72021 8.28335 6.72021C8.28335 6.72021 8.28335 6.72021 8.28335 6.72021");
+  --spine-seed: path("M9.35843 5.51842C8.15364 6.1482 7.14052 7.27084 6.56551 8.58515C6.2917 9.18755 6.15479 9.73518 6.12741 10.2554");
+  --spine-root: path("M8.28335 6.72021C8.28335 7.83104 7.94627 8.7197 7.84668 9.60837C7.94627 10.7192 8.28335 11.3627 8.61277 11.83");
+  --spine-sprout: path("M8.43802 6.966C8.43802 7.89902 8.43802 8.83204 8.43802 9.76506C8.43802 11.39777 8.43802 13.03049 8.43802 14.6632");
+  --spine-fruit: path("M11.036 0.7998C10.38544 1.23353 9.73487 1.77568 9.19272 2.53469C8.65058 3.2937 8.21686 4.26957 8 5.57073");
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  overflow: visible;
+}
+.icon path { vector-effect: non-scaling-stroke; }
+.roots, .veins, .fruitLeaf { opacity: 0; }
+.fruitLeaf { transform-origin: 7.827px 4.018px; }
+
+/* A shared clock keeps shape changes and branch growth in phase. All spines use
+   two cubics; all outer contours use four, including the open apple halves. */
+.icon[data-growing=true] path {
+  animation-duration: var(--growth-duration);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-fill-mode: both;
+}
+.icon[data-growing=true] path[pathLength] { stroke-dasharray: 1 2; stroke-dashoffset: 1; }
+.icon[data-growing=true] :is(.roots, .veins) { opacity: 1; }
+.icon[data-growing=true] .spine {
+  animation-name: spine;
+  animation-timing-function: cubic-bezier(.4, 0, .2, 1);
+}
+.icon[data-growing=true] .contourLeft {
+  animation-name: contourLeft, rootLeft;
+  animation-timing-function: cubic-bezier(.4, 0, .2, 1), linear;
+}
+.icon[data-growing=true] .contourRight {
+  animation-name: contourRight, rootRight;
+  animation-timing-function: cubic-bezier(.4, 0, .2, 1), linear;
+}
+.icon[data-growing=true] .rootStem { animation-name: rootStem; }
+.icon[data-growing=true] .rootTipRight { animation-name: rootTipRight; }
+.icon[data-growing=true] .rootTipLeft { animation-name: rootTipLeft; }
+.icon[data-growing=true] .rootForkRight { animation-name: rootForkRight; }
+.icon[data-growing=true] .rootForkDown { animation-name: rootForkDown; }
+.icon[data-growing=true] .veinLeft { animation-name: veinLeft; }
+.icon[data-growing=true] .veinRight { animation-name: veinRight; }
+.icon[data-growing=true] .fruitLeaf { animation-name: fruitLeaf; }
+.icon[data-paused=true] :is(g, path) { animation-play-state: paused; }
+
+/* The seed vein becomes the main root, straightens into the sprout's stem,
+   and bends upward into the apple stalk. This path never fades out. */
+@keyframes spine {
+  0%, 10%, 100% { d: var(--spine-seed); }
+  20%, 43% { d: var(--spine-root); }
+  54%, 62% { d: var(--spine-sprout); }
+  78%, 90% { d: var(--spine-fruit); }
+}
+@keyframes contourLeft {
+  0%, 10%, 100% { d: var(--seed-left); }
+  14% { d: var(--collapse); }
+  15%, 43% { d: var(--root-left); }
+  54%, 62% { d: var(--sprout-left); }
+  78%, 90% { d: var(--fruit-left); }
+}
+@keyframes contourRight {
+  0%, 10%, 100% { d: var(--seed-right); }
+  14% { d: var(--collapse); }
+  16.5%, 43% { d: var(--root-right); }
+  54%, 62% { d: var(--sprout-right); }
+  78%, 90% { d: var(--fruit-right); }
+}
+
+/* Each root draws at its own speed. Hidden tips cannot expose round-cap dots;
+   the longer dash gap also keeps the far end of each path clear. */
+@keyframes rootLeft {
+  0%, 10%, 32%, 100% { stroke-dashoffset: 0; opacity: 1; }
+  14%, 15% { stroke-dashoffset: 1; opacity: 0; }
+  15.5% { opacity: 1; }
+}
+@keyframes rootRight {
+  0%, 10%, 27%, 100% { stroke-dashoffset: 0; opacity: 1; }
+  14%, 16.5% { stroke-dashoffset: 1; opacity: 0; }
+  17% { opacity: 1; }
+}
+
+/* Tips wait for their parent to reach the junction, then retract before the
+   main roots turn upward into leaves. The shared spine remains in place. */
+@keyframes rootStem {
+  0%, 15%, 43%, 100% { stroke-dashoffset: 1; opacity: 0; }
+  15.5% { opacity: 1; }
+  28%, 39% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes rootTipRight {
+  0%, 24.5%, 43%, 100% { stroke-dashoffset: 1; opacity: 0; }
+  25% { opacity: 1; }
+  32%, 39% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes rootTipLeft {
+  0%, 21.5%, 43%, 100% { stroke-dashoffset: 1; opacity: 0; }
+  22% { opacity: 1; }
+  33%, 39% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes rootForkRight {
+  0%, 27.5%, 43%, 100% { stroke-dashoffset: 1; opacity: 0; }
+  28% { opacity: 1; }
+  33.5%, 39% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes rootForkDown {
+  0%, 28%, 43%, 100% { stroke-dashoffset: 1; opacity: 0; }
+  28.5% { opacity: 1; }
+  35%, 39% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes veinLeft {
+  0%, 54%, 62%, 100% { stroke-dashoffset: 1; opacity: 0; }
+  54.5% { opacity: 1; }
+  57%, 60% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes veinRight {
+  0%, 54.5%, 62%, 100% { stroke-dashoffset: 1; opacity: 0; }
+  55% { opacity: 1; }
+  58.5%, 60% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes fruitLeaf {
+  0%, 78%, 94%, 100% { stroke-dashoffset: 1; opacity: 0; transform: rotate(20deg) scale(.7); }
+  78.5% { opacity: 1; }
+  83%, 89% { stroke-dashoffset: 0; opacity: 1; transform: rotate(0deg) scale(1); }
+}
+
+/* Reuse the same paths for a static sprout when motion is reduced. */
+@media (prefers-reduced-motion: reduce) {
+  .icon[data-growing=true] [data-growth-part] { animation: none; }
+  .icon[data-growing=true] path[pathLength] { stroke-dasharray: none; stroke-dashoffset: 0; }
+  .icon[data-growing=true] .spine { d: var(--spine-sprout); }
+  .icon[data-growing=true] .contourLeft { d: var(--sprout-left); }
+  .icon[data-growing=true] .contourRight { d: var(--sprout-right); }
+  .icon[data-growing=true] .roots { opacity: 0; }
+}

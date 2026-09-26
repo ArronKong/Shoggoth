@@ -1,0 +1,139 @@
+name: Signed macOS release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed release tag to build
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shoggoth-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-release:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      SHOGGOTH_CODESIGN_MODE: developer-id
+      SHOGGOTH_CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      SHOGGOTH_NOTARY_KEYCHAIN_PROFILE: shoggoth-release
+      SHOGGOTH_EXPECT_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      SHOGGOTH_EXPECT_NOTARIZED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/manage-ui/package-lock.json
+
+      - name: Validate public release inputs
+        shell: bash
+        env:
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          test "$REPOSITORY_VISIBILITY" = "public" || { echo "Release blocked: GitHub updater requires a public repository." >&2; exit 1; }
+          case "$RELEASE_TAG" in v*) ;; *) echo "Release tag must start with v." >&2; exit 1 ;; esac
+          PACKAGE_VERSION="$(node -p 'require("./package.json").version')"
+          test "$RELEASE_TAG" = "v$PACKAGE_VERSION" || { echo "Tag/version mismatch: $RELEASE_TAG != v$PACKAGE_VERSION" >&2; exit 1; }
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/existing-release-state" 2>/dev/null; then
+            grep -x true "$RUNNER_TEMP/existing-release-state" > /dev/null \
+              || { echo "Release blocked: $RELEASE_TAG is already published." >&2; exit 1; }
+          fi
+          for value in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID SHOGGOTH_CODESIGN_IDENTITY; do
+            test -n "${!value:-}" || { echo "Release secret missing: $value" >&2; exit 1; }
+          done
+
+      - name: Install locked dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm --prefix app/manage-ui ci --ignore-scripts
+
+      - name: Run update, signing, and UI contracts
+        run: |
+          npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json
+          node scripts/desktop-app-update-unit.cjs
+          node scripts/app-update-release-contract-unit.cjs
+          node scripts/adhoc-sign-unit.cjs
+          node scripts/notarize-unit.cjs
+          npm audit --audit-level=moderate
+          npm --prefix app/manage-ui audit --audit-level=moderate
+
+      - name: Import Developer ID certificate and Notary credentials
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/shoggoth-release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          CERTIFICATE_PATH="$RUNNER_TEMP/shoggoth-release.p12"
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$API_KEY_PATH"
+          chmod 600 "$CERTIFICATE_PATH" "$API_KEY_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          xcrun notarytool store-credentials "$SHOGGOTH_NOTARY_KEYCHAIN_PROFILE" \
+            --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
+            --keychain "$KEYCHAIN_PATH"
+          echo "SHOGGOTH_CODESIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "SHOGGOTH_NOTARY_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "SHOGGOTH_RELEASE_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build, notarize, and upload draft artifacts
+        run: |
+          npm run build:manage
+          npm run prepare:runtimes
+          npm run release:metadata
+          npm run licenses:check
+          npx electron-builder --mac --publish always
+
+      - name: Verify signed packages and updater metadata
+        run: |
+          node scripts/verify-app-update-release.mjs
+          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike
+          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -x true
+
+      - name: Publish verified release
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest --verify-tag
+
+      - name: Remove temporary signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${SHOGGOTH_RELEASE_KEYCHAIN:-}" && -f "$SHOGGOTH_RELEASE_KEYCHAIN" ]]; then
+            security delete-keychain "$SHOGGOTH_RELEASE_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP"/shoggoth-release.p12 "$RUNNER_TEMP"/AuthKey_*.p8

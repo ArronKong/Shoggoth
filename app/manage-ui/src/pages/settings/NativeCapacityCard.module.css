@@ -1,0 +1,11 @@
+.card { display: flex; flex-direction: column; gap: 20px; }
+.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.fields input { max-width: 180px; }
+.counts { display: flex; flex-wrap: wrap; gap: 16px 48px; margin: 0; }
+.counts div { display: flex; align-items: baseline; gap: 12px; }
+.counts dt { color: var(--muted); font-size: 13px; }
+.counts dd { margin: 0; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.reasons { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.reasons li { display: flex; justify-content: space-between; gap: 20px; font-size: 13px; }
+.reasons span { font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) { .fields { grid-template-columns: 1fr; gap: 16px; } }

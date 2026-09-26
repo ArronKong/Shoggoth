@@ -1,0 +1,30 @@
+.management-page.settings-page .runtime-current-card { min-width: 0; border: 1px solid var(--ui-hairline); border-radius: 24px; background: var(--ui-surface-1); box-shadow: var(--ui-shadow-card); }
+.management-page.settings-page .runtime-current-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px; }
+.management-page.settings-page .runtime-current-head h4 { margin: 0; font-size: 15px; font-weight: 500; }
+.management-page.settings-page .runtime-current-head p { margin: 4px 0 0; font-size: 12px; line-height: 18px; color: var(--settings-muted-surface-1); }
+.management-page.settings-page .runtime-account-row { border-top: 1px solid var(--ui-hairline); }
+.management-page.settings-page .runtime-account-row > summary { display: flex; align-items: center; gap: 12px; padding: 16px 24px; cursor: pointer; list-style: none; }
+.management-page.settings-page .runtime-account-row > summary::-webkit-details-marker { display: none; }
+.management-page.settings-page .runtime-account-row > summary:hover { background: color-mix(in srgb, var(--ui-surface-2) 50%, transparent); }
+.management-page.settings-page .runtime-account-row:last-child:not([open]) > summary { border-radius: 0 0 24px 24px; }
+.management-page.settings-page .runtime-account-label { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.management-page.settings-page .runtime-account-label strong { font-size: 14px; font-weight: 500; }
+.management-page.settings-page .runtime-account-label > span { font-size: 12px; color: var(--settings-muted-surface-1); }
+.management-page.settings-page .runtime-shared { color: var(--settings-muted-surface-1); font-size: 12px; }
+.management-page.settings-page .runtime-account-size { min-width: 92px; text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; }
+.management-page.settings-page .runtime-chevron { font-size: 16px; color: var(--ui-text-2); margin-left: 6px; }
+.management-page.settings-page .runtime-account-row[open] .runtime-chevron { transform: rotate(180deg); }
+.management-page.settings-page .runtime-account-detail { padding: 0 24px 20px 76px; }
+.management-page.settings-page .runtime-account-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 0 0 12px; }
+.management-page.settings-page .runtime-account-facts dt { font-size: 11px; color: var(--settings-muted-surface-1); }
+.management-page.settings-page .runtime-account-facts dd { margin: 4px 0 0; font-size: 12px; }
+.management-page.settings-page .runtime-updated { margin: 0 4px; font-size: 11px; color: var(--settings-muted-surface-1); }
+.management-page.settings-page .runtime-accounts-empty { padding: 0 24px 20px; }
+.management-page.settings-page .runtime-account-row > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -4px; border-radius: 12px; }
+@media (max-width: 600px) {
+  .management-page.settings-page .runtime-shared { display: none; }
+  .management-page.settings-page .runtime-account-row > summary { padding-inline: 16px; gap: 8px; }
+  .management-page.settings-page .runtime-account-detail { padding: 0 16px 20px; }
+  .management-page.settings-page .runtime-account-label strong { overflow-wrap: anywhere; }
+  .management-page.settings-page .runtime-account-size { min-width: 70px; font-size: 12px; }
+}

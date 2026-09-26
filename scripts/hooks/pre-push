@@ -1,0 +1,32 @@
+#!/bin/sh
+# pre-push — 自包含的重检查。见 ARCHITECTURE.md §10。
+# 只放不依赖真后端的：build + proxy-smoke(自造假 gateway)。
+# crud-smoke / proxy-chat-smoke 依赖真后端，保持手动，不放这里。
+# 跳过：git push --no-verify
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT" || exit 1
+
+echo "[pre-push] build:manage …"
+if ! npm run build:manage; then
+  echo "[pre-push] ✗ 构建失败"
+  exit 1
+fi
+
+# proxy-smoke 起 WebSocket 服务；加看门狗，卡住也算失败而非挂死推送。
+echo "[pre-push] proxy-smoke …"
+node scripts/proxy-smoke.mjs &
+SMOKE_PID=$!
+( sleep 60; kill -9 "$SMOKE_PID" 2>/dev/null ) &
+WATCH_PID=$!
+wait "$SMOKE_PID" 2>/dev/null
+SMOKE_EC=$?
+kill "$WATCH_PID" 2>/dev/null
+
+if [ "$SMOKE_EC" -ne 0 ]; then
+  echo "[pre-push] ✗ proxy-smoke 失败/超时 (exit=$SMOKE_EC)（如确需跳过：git push --no-verify）"
+  exit 1
+fi
+
+echo "[pre-push] ✓ 构建 + proxy 联邦验证通过"
+exit 0

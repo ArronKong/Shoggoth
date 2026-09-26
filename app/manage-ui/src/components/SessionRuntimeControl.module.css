@@ -1,0 +1,17 @@
+.root { min-width: 0; margin-top: 6px; }
+.trigger { display: inline-flex; align-items: center; max-width: 100%; gap: 6px; white-space: nowrap; }
+.trigger > span:first-child { flex-shrink: 0; }
+.model { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.panel { min-width: 0; color: var(--fg); font-size: 13px; }
+.hint { color: var(--muted); line-height: 1.6; margin: 0 0 10px; }
+.list { list-style: none; margin: 0; padding: 0; }
+.option { text-align: left; width: 100%; background: none; color: var(--fg); border: none; border-top: 1px solid var(--border); padding: 10px 0; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.option small { display: block; color: var(--muted); line-height: 1.5; margin-top: 4px; }
+.option:disabled { cursor: default; opacity: .65; }
+.option:not(:disabled):hover { color: var(--accent); }
+.option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.current { margin-left: 8px; color: var(--muted); }
+.busy { margin: 10px 0; line-height: 1.6; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.manage { display: flex; justify-content: flex-end; margin-top: 16px; }
+@media (max-width: 600px) { .trigger .model { display: none; } }

@@ -1,0 +1,11 @@
+Shoggoth
+Copyright 2026 Shoggoth contributors
+
+Shoggoth-authored source code is licensed under the Apache License, Version 2.0.
+See LICENSE for the license text.
+
+Third-party code, fonts, and bundled programs retain their own licenses and
+notices. Their attribution and source information is in
+THIRD-PARTY-NOTICES.md and RUNTIME-LICENSE-SOURCES.md under resources/legal in
+the source repository, or alongside this notice in the packaged application.
+This notice does not change any third-party license.

@@ -1,0 +1,509 @@
+"use strict";
+
+// OpenClaw token 用量的本地文件扫描聚合（R173）。
+//
+// 动机：gateway 的 usage.cost / sessions.usage 按 sessions.json 索引统计会话，
+// 而索引与落盘存在错位（索引指向不存在的 sessionId、真实 transcript 反而未登记，
+// 见 PROGRESS R173），且不含 trajectory-only 会话——计到的 token 会凭空消失。
+// 本地 gateway 时改为直接扫 `~/.openclaw/agents/*/sessions/` 的 transcript，
+// 口径 =「落盘即算」；远程 gateway 无本地文件，仍走 RPC（openclaw-backend.js）。
+//
+// 形态：scanUsageCube() 一次全量扫描出「按本地日分桶」的聚合立方体，
+// cubeToSeries()/cubeToBreakdown() 从立方体切任意 range——series 与 breakdown
+// 天然同口径，缓存一份立方体即可服务两个接口的全部 range。
+//
+// 数据源事实（2026-07-19 实测）：
+// - 普通 `<uuid>.jsonl`：每行 { type:"message", message:{ role, content, provider,
+//   model, usage:{ input,output,cacheRead,cacheWrite,totalTokens,cost:{..,total} },
+//   stopReason, errorMessage, timestamp } }；append-only 不重复。
+// - `<uuid>.trajectory.jsonl`：type==="model.completed" 行的 data.messagesSnapshot
+//   是**累积快照**（同一消息随后续事件反复出现），必须按消息 timestamp 去重；
+//   同一 UUID 两种文件并存时普通 transcript 是权威，只有 trajectory 时才用它兜底。
+// - 每 agent 的 sessions.json 提供 uuid→{channel,displayName,key}；孤儿会话
+//   （不在索引，正是 gateway 统计丢数的那类）channel 归 "unknown"、照算不丢。
+
+const fs = require("fs");
+const path = require("path");
+const { estimateUsageCost } = require("./usage-cost");
+
+const RANGE_DAYS = { today: 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 };
+
+function localDateStr(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function emptyTotals() {
+  return {
+    totalTokens: 0,
+    totalCost: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    inputCost: 0,
+    outputCost: 0,
+    cacheReadCost: 0,
+    cacheWriteCost: 0,
+    missingCostEntries: 0,
+    estimatedCostEntries: 0,
+  };
+}
+
+// usage（文件形状）累加进契约 totals；返回该消息的 token 数。
+function addUsage(t, u, model) {
+  const input = Number(u.input) || 0;
+  const output = Number(u.output) || 0;
+  const cacheRead = Number(u.cacheRead) || 0;
+  const cacheWrite = Number(u.cacheWrite) || 0;
+  const tokens = Number(u.totalTokens) || input + output + cacheRead + cacheWrite;
+  const c = u.cost || {};
+  const inputCost = Number(c.input) || 0;
+  const outputCost = Number(c.output) || 0;
+  const cacheReadCost = Number(c.cacheRead) || 0;
+  const cacheWriteCost = Number(c.cacheWrite) || 0;
+  const componentCost = inputCost + outputCost + cacheReadCost + cacheWriteCost;
+  const reportedTotal = Number(c.total);
+  // 标准 OpenClaw transcript 带 total；部分兼容 provider 只写四个分项。
+  // total 缺失/为 0 且分项非零时以分项和兜底，避免成本被静默归零。
+  const reportedCost = Number.isFinite(reportedTotal) && reportedTotal > 0 ? reportedTotal : componentCost;
+  // OpenClaw writes zero placeholders for models without configured prices.
+  const estimate = tokens > 0 && reportedCost === 0 ? estimateUsageCost(model, {
+    inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
+  }) : null;
+  const cost = reportedCost || estimate || 0;
+  t.totalTokens += tokens;
+  t.totalCost += cost;
+  t.inputTokens += input;
+  t.outputTokens += output;
+  t.cacheReadTokens += cacheRead;
+  t.cacheWriteTokens += cacheWrite;
+  t.inputCost += inputCost;
+  t.outputCost += outputCost;
+  t.cacheReadCost += cacheReadCost;
+  t.cacheWriteCost += cacheWriteCost;
+  if (tokens > 0 && !reportedCost && estimate === null) t.missingCostEntries += 1;
+  if (estimate !== null) t.estimatedCostEntries += 1;
+  return { tokens, cost };
+}
+
+function msgTimestampMs(m, lineTs) {
+  const raw = m.timestamp ?? lineTs;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string") {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+// 一行 JSON → 该行携带的消息（统一普通 transcript 与 trajectory 两种形状）。
+function* messagesFromLine(obj, isTrajectory) {
+  if (!obj || typeof obj !== "object") return;
+  if (isTrajectory) {
+    if (obj.type !== "model.completed") return;
+    const snap = obj.data && Array.isArray(obj.data.messagesSnapshot) ? obj.data.messagesSnapshot : [];
+    for (const m of snap) {
+      if (m && typeof m.role === "string") yield { msg: m, tsMs: msgTimestampMs(m, obj.ts) };
+    }
+    return;
+  }
+  const m = obj.message;
+  if (m && typeof m.role === "string") yield { msg: m, tsMs: msgTimestampMs(m, obj.timestamp) };
+}
+
+// message.content（string | parts 数组）→ 纯文本。collapse=true（默认，标题用）
+// 把空白归一成单空格；false（预览正文用）保留换行——markdown 的块级结构
+// （标题/列表/代码围栏）靠换行，压平会全部退化成行内文字。
+function extractMessageText(content, collapse = true) {
+  let text = "";
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content)) {
+    text = content
+      .filter((c) => c && c.type === "text" && typeof c.text === "string")
+      .map((c) => c.text)
+      .join("\n");
+  }
+  return collapse ? text.replace(/\s+/g, " ").trim() : text.trim();
+}
+
+// key 尾段没有人类语义（uuid/长 hex）→ 值得用首条消息当标题；"main"/"cron:x"/
+// "telegram:…" 这类 tail 本身表意，保持原显示。
+function isOpaqueSessionTail(tail) {
+  return /^[0-9a-f][0-9a-f-]{18,}$/i.test(String(tail || ""));
+}
+
+function dayBucket(cube, date) {
+  let b = cube.days.get(date);
+  if (!b) {
+    b = {
+      totals: emptyTotals(),
+      models: new Map(), // "provider\0model" -> { provider, model, count, totals }
+      agents: new Map(), // agentId -> totals
+      channels: new Map(), // channel -> totals
+      tools: new Map(), // toolName -> count
+      messages: { total: 0, user: 0, assistant: 0, toolCalls: 0, errors: 0 },
+    };
+    cube.days.set(date, b);
+  }
+  return b;
+}
+
+function mapTotals(map, key) {
+  let t = map.get(key);
+  if (!t) {
+    t = emptyTotals();
+    map.set(key, t);
+  }
+  return t;
+}
+
+// 主入口：全量扫描 agents 目录，产出聚合立方体。
+async function scanUsageCube({ agentsDir, maxFiles = Infinity } = {}) {
+  let readFailures = 0;
+  let agentIds;
+  try {
+    // withFileTypes：只取目录（agents 目录里可能混 .DS_Store 等文件）。
+    // 全量名单进 cube——0 用量 agent 也要出现在 Agent 榜（R222 用户拍板）。
+    const dirents = await fs.promises.readdir(agentsDir, { withFileTypes: true });
+    agentIds = dirents.filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch {
+    agentIds = [];
+  }
+  // 收集文件并按 UUID 去重（普通 transcript 权威、trajectory 兜底）。
+  const byUuid = new Map(); // "agent/uuid" -> { agentId, uuid, file, isTrajectory, mtimeMs }
+  const indexMeta = new Map(); // "agent/uuid" -> { key, channel, label }
+  for (const agentId of agentIds) {
+    const sessDir = path.join(agentsDir, agentId, "sessions");
+    let names;
+    try {
+      names = await fs.promises.readdir(sessDir);
+    } catch (error) {
+      if (error.code !== "ENOENT") readFailures++;
+      continue;
+    }
+    try {
+      const idx = JSON.parse(await fs.promises.readFile(path.join(sessDir, "sessions.json"), "utf8"));
+      for (const [key, entry] of Object.entries(idx)) {
+        const sid = entry && entry.sessionId;
+        if (typeof sid === "string" && sid) {
+          indexMeta.set(`${agentId}/${sid}`, {
+            key,
+            channel: typeof entry.channel === "string" ? entry.channel : undefined,
+            label: typeof entry.displayName === "string" ? entry.displayName : undefined,
+          });
+        }
+      }
+    } catch {
+      /* 无索引不影响计量，只丢 channel/label 元数据 */
+    }
+    for (const name of names) {
+      if (!name.endsWith(".jsonl")) continue;
+      const isTrajectory = name.includes(".trajectory.");
+      const uuid = name.replace(".trajectory.jsonl", "").replace(/\.jsonl$/, "");
+      if (!uuid) continue;
+      let st;
+      try {
+        st = await fs.promises.stat(path.join(sessDir, name));
+      } catch {
+        continue;
+      }
+      if (!st.isFile()) continue;
+      const id = `${agentId}/${uuid}`;
+      const prev = byUuid.get(id);
+      if (prev && !prev.isTrajectory) continue; // 已有权威 transcript
+      if (prev && prev.isTrajectory && isTrajectory) continue;
+      byUuid.set(id, { agentId, uuid, file: path.join(sessDir, name), isTrajectory, mtimeMs: st.mtimeMs });
+    }
+  }
+  const sessions = [...byUuid.values()].sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const scanned = sessions.slice(0, maxFiles);
+  const truncated = sessions.length - scanned.length;
+
+  const cube = {
+    days: new Map(),
+    sessions: new Map(), // "agent/uuid" -> { agentId, key, label, channel, lastModel, lastProvider, lastTs, days: Map<date,{tokens,cost,models:Map<label,tokens>}> }
+    agentIds, // 目录里的全量 agent（含 0 用量），Agent 榜零行补齐用
+    truncated,
+    readFailures,
+    scannedFiles: scanned.length,
+  };
+
+  for (const s of scanned) {
+    let raw;
+    try {
+      raw = await fs.promises.readFile(s.file, "utf8");
+    } catch {
+      cube.readFailures++;
+      continue;
+    }
+    const id = `${s.agentId}/${s.uuid}`;
+    const meta = indexMeta.get(id);
+    const channel = (meta && meta.channel) || "unknown";
+    let sess = cube.sessions.get(id);
+    if (!sess) {
+      sess = {
+        agentId: s.agentId,
+        sessionId: s.uuid,
+        key: (meta && meta.key) || s.uuid,
+        label: meta && meta.label,
+        channel,
+        firstUserText: undefined,
+        firstCleanUserText: undefined,
+        lastModel: undefined,
+        lastProvider: undefined,
+        lastTs: 0,
+        days: new Map(),
+      };
+      cube.sessions.set(id, sess);
+    }
+    // trajectory 快照会重复投递同一消息；普通 transcript 天然唯一，去重无副作用。
+    const seen = new Set();
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      for (const { msg, tsMs } of messagesFromLine(obj, s.isTrajectory)) {
+        if (!tsMs) continue; // 无时间戳归不了日，放弃该条
+        const dedupeKey = `${msg.role}:${tsMs}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        const date = localDateStr(tsMs);
+        const day = dayBucket(cube, date);
+        day.messages.total += 1;
+        if (msg.role === "user") {
+          day.messages.user += 1;
+          // 会话标题素材：最早的一条非空用户文本（文件按时间追加，首见即最早）。
+          // "[" 开头的多为注入噪音（[OpenClaw heartbeat poll]/[System: …]），优先
+          // 找首条干净文本，全是噪音才回落首条（诚实兜底）。
+          if (!sess.firstCleanUserText) {
+            const text = extractMessageText(msg.content);
+            if (text) {
+              if (!sess.firstUserText) sess.firstUserText = text.slice(0, 140);
+              if (!text.startsWith("[")) sess.firstCleanUserText = text.slice(0, 140);
+            }
+          }
+        }
+        if (msg.role !== "assistant") continue;
+        day.messages.assistant += 1;
+        if (msg.stopReason === "error" || msg.errorMessage) day.messages.errors += 1;
+        if (Array.isArray(msg.content)) {
+          for (const c of msg.content) {
+            if (c && c.type === "toolCall") {
+              day.messages.toolCalls += 1;
+              const name = typeof c.name === "string" && c.name ? c.name : "unknown";
+              day.tools.set(name, (day.tools.get(name) || 0) + 1);
+            }
+          }
+        }
+        if (!msg.usage || typeof msg.usage !== "object") continue;
+        const model = typeof msg.model === "string" && msg.model ? msg.model : "unknown";
+        const provider = typeof msg.provider === "string" && msg.provider ? msg.provider : undefined;
+        const modelKey = `${provider || ""}\0${model}`;
+        let modelRow = day.models.get(modelKey);
+        if (!modelRow) {
+          modelRow = { provider, model, count: 0, totals: emptyTotals() };
+          day.models.set(modelKey, modelRow);
+        }
+        modelRow.count += 1;
+        const { tokens, cost } = addUsage(modelRow.totals, msg.usage, model);
+        addUsage(day.totals, msg.usage, model);
+        addUsage(mapTotals(day.agents, s.agentId), msg.usage, model);
+        addUsage(mapTotals(day.channels, channel), msg.usage, model);
+        let sd = sess.days.get(date);
+        if (!sd) {
+          sd = { tokens: 0, cost: 0, models: new Map() };
+          sess.days.set(date, sd);
+        }
+        sd.tokens += tokens;
+        sd.cost += cost;
+        const modelLabel = provider ? `${provider}/${model}` : model;
+        sd.models.set(modelLabel, (sd.models.get(modelLabel) || 0) + tokens);
+        if (tsMs >= sess.lastTs) {
+          sess.lastTs = tsMs;
+          sess.lastModel = model;
+          sess.lastProvider = provider;
+        }
+      }
+    }
+  }
+  return cube;
+}
+
+// range → 该 range 覆盖的连续本地日期列表（asc，含今天）。all = 最早数据日起。
+function rangeDates(cube, range, nowMs) {
+  const days = RANGE_DAYS[range];
+  let startMs;
+  if (days) {
+    startMs = nowMs - (days - 1) * 86_400_000;
+  } else {
+    // "all"（及未知 range）：从立方体最早日期起；无数据则只有今天。
+    let earliest = nowMs;
+    for (const date of cube.days.keys()) {
+      const ts = Date.parse(`${date}T00:00:00`);
+      if (Number.isFinite(ts) && ts < earliest) earliest = ts;
+    }
+    startMs = earliest;
+  }
+  const dates = [];
+  const end = localDateStr(nowMs);
+  // 按自然日推进（每日中午取 localDateStr，避开 DST 边界的 23/25 小时日）。
+  let cursor = new Date(startMs);
+  cursor.setHours(12, 0, 0, 0);
+  for (let i = 0; i < 40_000; i++) {
+    const date = localDateStr(cursor.getTime());
+    dates.push(date);
+    if (date === end) break;
+    cursor = new Date(cursor.getTime() + 86_400_000);
+  }
+  return dates;
+}
+
+function sumInto(target, src) {
+  for (const [k, v] of Object.entries(src)) {
+    if (typeof v === "number") target[k] = (target[k] || 0) + v;
+  }
+}
+
+// getUsageSeries 契约形状：{ daily, totals, cacheStatus }。
+function cubeToSeries(cube, range, nowMs = Date.now()) {
+  const dates = rangeDates(cube, range, nowMs);
+  const daily = dates.map((date) => {
+    const day = cube.days.get(date);
+    return { date, ...(day ? day.totals : emptyTotals()) };
+  });
+  const totals = emptyTotals();
+  for (const d of daily) sumInto(totals, d); // date 是字符串，sumInto 只累加 number 字段
+  return { daily, totals, cacheStatus: "fresh",
+    availability: cube.truncated || cube.readFailures ? "partial" : "complete" };
+}
+
+// getUsageBreakdown 契约形状（无 latency/dailyLatency——本地文件没有可靠延迟数据，
+// UI 对缺失区块本就隐藏，与网关冷扫描时的降级行为一致）。
+function cubeToBreakdown(cube, range, nowMs = Date.now()) {
+  const dates = rangeDates(cube, range, nowMs);
+  const inRange = new Set(dates);
+  const byTokensDesc = (a, b) => b.totalTokens - a.totalTokens;
+
+  const modelAgg = new Map();
+  const agentAgg = new Map();
+  const channelAgg = new Map();
+  const toolAgg = new Map();
+  const messages = { total: 0, user: 0, assistant: 0, toolCalls: 0, errors: 0 };
+  const totals = emptyTotals();
+  const modelDaily = [];
+  const dailyActivity = [];
+
+  for (const date of dates) {
+    const day = cube.days.get(date);
+    if (!day) continue;
+    sumInto(totals, day.totals);
+    sumInto(messages, day.messages);
+    for (const [key, row] of day.models) {
+      let agg = modelAgg.get(key);
+      if (!agg) {
+        agg = { provider: row.provider, model: row.model, count: 0, totals: emptyTotals() };
+        modelAgg.set(key, agg);
+      }
+      agg.count += row.count;
+      sumInto(agg.totals, row.totals);
+      if (row.totals.totalTokens > 0 || row.totals.totalCost > 0) {
+        modelDaily.push({ date, model: row.model, provider: row.provider, tokens: row.totals.totalTokens, cost: row.totals.totalCost });
+      }
+    }
+    for (const [agentId, t] of day.agents) sumInto(mapTotals(agentAgg, agentId), t);
+    for (const [channel, t] of day.channels) sumInto(mapTotals(channelAgg, channel), t);
+    for (const [name, count] of day.tools) toolAgg.set(name, (toolAgg.get(name) || 0) + count);
+    dailyActivity.push({
+      date,
+      messages: day.messages.total,
+      toolCalls: day.messages.toolCalls,
+      errors: day.messages.errors,
+      tokens: day.totals.totalTokens,
+      cost: day.totals.totalCost,
+    });
+  }
+
+  const byModel = [...modelAgg.values()]
+    .map((m) => ({ model: m.model, provider: m.provider, count: m.count, ...m.totals }))
+    .sort(byTokensDesc);
+  // 0 用量 agent 也进榜（目录存在即列出，R222）：窗口内没消息的补零行，
+  // 排序后自然沉底；UI 全量渲染 bySource，零行显示「0 · 0.0%」。
+  for (const agentId of cube.agentIds || []) mapTotals(agentAgg, agentId);
+  const byAgent = [...agentAgg.entries()]
+    .map(([agentId, t]) => ({ agentId, ...t }))
+    .sort(byTokensDesc);
+  const bySource = byAgent.map((a) => ({ ...a, id: a.agentId, label: a.agentId, kind: "agent", backendId: "openclaw" }));
+  const byChannel = [...channelAgg.entries()]
+    .map(([channel, t]) => ({ channel, ...t }))
+    .sort(byTokensDesc);
+  const toolRows = [...toolAgg.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+  const tools = {
+    totalCalls: toolRows.reduce((sum, t) => sum + t.count, 0),
+    uniqueTools: toolRows.length,
+    tools: toolRows,
+  };
+  const topSessions = [...cube.sessions.values()]
+    .map((s) => {
+      let tokens = 0;
+      let cost = 0;
+      const modelTokens = new Map();
+      for (const [date, v] of s.days) {
+        if (!inRange.has(date)) continue;
+        tokens += v.tokens;
+        cost += v.cost;
+        for (const [label, mt] of v.models) modelTokens.set(label, (modelTokens.get(label) || 0) + mt);
+      }
+      // title 只发给「key 尾段无语义（uuid）」的会话——main/cron:x/telegram:… 的
+      // tail 本身表意，首条消息反而降低辨识度（R217）。
+      const tail = String(s.key).replace(/^agent:[^:]*:/, "");
+      return {
+        key: s.key,
+        label: s.label,
+        title: isOpaqueSessionTail(tail) ? s.firstCleanUserText || s.firstUserText || undefined : undefined,
+        sessionId: s.sessionId,
+        agentId: s.agentId,
+        channel: s.channel,
+        model: s.lastProvider ? `${s.lastProvider}/${s.lastModel}` : s.lastModel,
+        // 零 token 模型行（失败轮次/不回报 usage 的 provider）只添噪音，不进明细
+        models: [...modelTokens.entries()]
+          .filter(([, t]) => t > 0)
+          .map(([model, t]) => ({ model, tokens: t }))
+          .sort((a, b) => b.tokens - a.tokens),
+        totalTokens: tokens,
+        totalCost: cost,
+        updatedAt: s.lastTs || undefined,
+      };
+    })
+    .filter((s) => s.totalTokens > 0)
+    .sort(byTokensDesc)
+    .slice(0, 20);
+
+  return {
+    byModel,
+    byAgent,
+    bySource,
+    byChannel,
+    tools,
+    // 本地文件没有可靠的回合延迟数据：dailyLatency 恒空数组（契约字段，smoke 断言
+    // 其存在），顶层 latency 缺省——UI 的延迟区块以 latency.count>0 为显示门槛。
+    dailyLatency: [],
+    modelDaily,
+    dailyActivity,
+    messages,
+    topSessions,
+    totals,
+    missingCostEntries: totals.missingCostEntries,
+    cacheStatus: "fresh",
+    sourceKind: "agent",
+    ...(cube.truncated > 0 ? { scanLimit: cube.scannedFiles } : {}),
+  };
+}
+
+module.exports = { scanUsageCube, cubeToSeries, cubeToBreakdown, localDateStr, messagesFromLine, extractMessageText };

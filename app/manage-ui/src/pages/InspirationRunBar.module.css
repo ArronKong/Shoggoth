@@ -1,0 +1,56 @@
+.root {
+  --run-color: #000;
+  position: absolute; z-index: 2; top: 20px; left: 20px; right: 20px; height: 24px;
+  color: #fff; font-family: var(--font-body, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif); cursor: default;
+}
+.root[data-tone=error] { --run-color: #f96060; }
+.root[data-tone=attention] { --run-color: #e58b5a; }
+.root::before {
+  content: ''; position: absolute; inset: 0 0 auto; height: 24px; border-radius: 16px;
+  background: var(--run-color); transition: height 180ms ease, background-color 180ms ease;
+}
+.root[data-expanded=true] { height: 192px; }
+.root[data-expanded=true]::before { height: 152px; }
+.root[data-expanded=true]::after {
+  content: ''; position: absolute; z-index: -1; inset: 0; border-radius: 16px; background: var(--note-paper);
+}
+.header {
+  position: relative; display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0;
+  height: 24px; padding: 4px 12px 4px 4px; border: 0; border-radius: 16px;
+  color: #fff; background: transparent; font: inherit; font-size: 10px; font-weight: 400; line-height: 14px; cursor: pointer;
+}
+.header:hover:not(:disabled), .header:active:not(:disabled) { color: #fff; background: transparent; border-color: transparent; }
+.header:focus-visible { outline: 2px solid var(--note-ink); outline-offset: 3px; }
+.root[data-expanded=true] .header { height: 48px; padding: 16px; }
+.avatar { position: relative; display: grid; place-items: center; width: 16px; height: 16px; flex: 0 0 16px; overflow: hidden; border-radius: 50%; background: var(--ui-agent-avatar-bg); color: var(--ui-agent-avatar-fg); }
+.name { flex: 0 1 auto; max-width: 25%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.line { flex: 1; min-width: 0; margin-left: 4px; overflow: hidden; text-overflow: ellipsis; text-align: right; white-space: nowrap; }
+.elapsed { flex-shrink: 0; margin-left: 4px; }
+.root[data-tone=running] .line { margin-left: 0; text-align: left; }
+.expansion { position: relative; height: 144px; overflow: auto; scrollbar-width: thin; }
+.expansion > div { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.expansion[data-approval=true] { overflow: visible; }
+.expansion :global(.chat-prompt) { --chat-text: #fff; max-width: none; margin: 0; padding: 0; background: transparent; border: 0; gap: 0; }
+.expansion :global(.chat-prompt__content) {
+  box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; height: 104px; flex: 0 0 104px;
+  padding: 0 16px 16px; overflow: auto; scrollbar-width: thin; overscroll-behavior: contain;
+  border-radius: 0 0 16px 16px; scrollbar-color: #ffffff66 transparent;
+  color: #fff; font-family: inherit;
+}
+.expansion :global(.chat-prompt__content) > * { flex-shrink: 0; }
+.expansion :global(.chat-prompt__head) { margin: 0; }
+.expansion :global(.chat-prompt__badge) { padding: 0; color: #fff; background: transparent; }
+.expansion :global(.chat-prompt__q), .expansion :global(.chat-prompt__summary) :is(dt, dd),
+.expansion :global(.chat-prompt__action), .expansion :global(.chat-prompt__desc), .expansion :global(.chat-prompt__cmd) {
+  color: #fff; font-size: 12px; font-weight: 400; line-height: 20px;
+}
+.expansion :global(.chat-prompt__cmd) { padding: 0; margin: 0; background: transparent; border-radius: 0; font-family: inherit; max-height: none; overflow: visible; }
+.expansion :global(.chat-prompt__actions) { flex-wrap: nowrap; height: 32px; min-height: 32px; margin: 8px 0 0; gap: 8px; overflow-x: auto; scrollbar-width: thin; }
+.expansion :global(.chat-prompt__btn), .expansion :global(.chat-prompt__btn.is-primary) {
+  flex-shrink: 0; min-height: 32px; padding: 6px 8px; border: 1px solid var(--note-ink); border-radius: 16px;
+  color: var(--note-ink); background: transparent; font-family: inherit; font-size: 12px; font-weight: 400; line-height: 18px; white-space: nowrap;
+}
+.expansion :global(.chat-prompt__btn):hover:not(:disabled) { color: var(--note-ink); background: #0000000a; }
+.expansion :global(.chat-prompt__status) { color: var(--note-ink); white-space: nowrap; }
+.expansion[data-approval=false] { padding: 0 16px; border-radius: 0 0 16px 16px; background: var(--run-color); }
+@media (prefers-reduced-motion: reduce) { .root::before { transition: none; } }

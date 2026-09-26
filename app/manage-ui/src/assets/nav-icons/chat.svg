@@ -1,0 +1,8 @@
+<svg preserveAspectRatio="none" width="100%" height="100%" overflow="visible" style="display: block;" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Chat">
+<path id="Rectangle 231" d="M12 19C12 15.6863 14.6863 13 18 13H22C25.3137 13 28 15.6863 28 19V21C28 24.3137 25.3137 27 22 27H12V19Z" stroke="var(--stroke-0, black)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="Vector" d="M16 20H16.01" stroke="var(--stroke-0, black)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="Vector_2" d="M20 20H20.01" stroke="var(--stroke-0, black)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="Vector_3" d="M24 20H24.01" stroke="var(--stroke-0, black)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+</svg>

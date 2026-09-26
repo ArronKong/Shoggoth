@@ -1,0 +1,5 @@
+.control { display: grid; gap: 8px; justify-items: start; min-width: 0; }
+.form { display: grid; gap: 7px; width: min(100%, 360px); min-width: 0; }
+.form input { width: 100%; min-width: 0; }
+.hint { color: var(--ui-text-2); line-height: 1.45; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }

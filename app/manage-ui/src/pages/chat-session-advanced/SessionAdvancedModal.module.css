@@ -1,0 +1,107 @@
+.note {
+  color: var(--ui-text-3);
+  font-size: 13px;
+}
+
+.error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 14px;
+  padding: 12px 14px;
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 8%, var(--ui-surface-1));
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.preview {
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.card,
+.branch {
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: var(--ui-surface-1);
+}
+
+.environments {
+  display: grid;
+  gap: 8px;
+}
+
+.card.placed {
+  border-color: color-mix(in srgb, var(--ui-focus) 45%, var(--ui-hairline));
+}
+
+.branch.active {
+  border-color: color-mix(in srgb, var(--ui-focus) 45%, var(--ui-hairline));
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.cardHead strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--ui-text-2);
+  background: var(--ui-surface-2);
+  font-size: 11px;
+}
+
+.cardMeta,
+.issue {
+  margin-top: 6px;
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.issue {
+  color: var(--ui-error);
+}
+
+.profiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.profile {
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  font-size: 11px;
+}
+
+.branches {
+  display: grid;
+  gap: 8px;
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "shoggoth-skill-authoring",
+  "name": "shoggoth-skill-authoring",
+  "version": "1.0.0",
+  "description": "Design and review a portable Shoggoth native Skill package without coupling it to Codex internals.",
+  "entry": "SKILL.md",
+  "requiredTools": [],
+  "requiredRuntimeCapabilities": [],
+  "sourceCompatibility": [
+    "shoggoth",
+    "codex"
+  ]
+}

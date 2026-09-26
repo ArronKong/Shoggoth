@@ -1,0 +1,346 @@
+.pageRoot {
+  flex-shrink: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 24px;
+  align-items: start;
+  margin-top: 32px;
+  padding-bottom: 40px;
+}
+
+.card {
+  min-width: 0;
+  background: var(--ui-surface-1);
+  border: 1px solid var(--ui-hairline);
+  border-radius: var(--ui-radius-card);
+  box-shadow: var(--ui-shadow-card);
+  padding: 24px;
+  transition: border-color var(--ui-motion-state), box-shadow var(--ui-motion-state), transform var(--ui-motion-state);
+}
+
+.card:hover {
+  border-color: color-mix(in srgb, var(--ui-text-1) 14%, transparent);
+  box-shadow: var(--ui-shadow-hover);
+  transform: translateY(-1px);
+}
+
+.wide {
+  grid-column: span 2;
+}
+
+.cardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.cardTitle {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 24px;
+}
+
+.cardDescription {
+  max-width: 54ch;
+  margin: 6px 0 0;
+  color: var(--ui-text-2);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.kind {
+  flex: 0 0 auto;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: var(--ui-text-3);
+  background: var(--ui-surface-2);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.sample {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+/* 按钮卡照设计稿(Figma 7108:1106)分三组摆：变体 / 状态 / 尺寸。组标签沿用
+   设计稿的注释规格 11/16，颜色正好是 token 里的 --ui-text-3(#7d8796)。 */
+.specGroup + .specGroup {
+  margin-top: 20px;
+}
+
+.specLabel {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--ui-text-3);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.fieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 24px;
+}
+
+.switchRow {
+  display: flex;
+  align-items: center;
+  min-height: 72px;
+  padding-top: 22px;
+}
+
+.stack {
+  display: grid;
+  gap: 20px;
+}
+
+.badgeRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  border-top: 1px solid var(--ui-hairline);
+  padding-top: 16px;
+  color: var(--ui-text-2);
+  font-size: 14px;
+}
+
+.result {
+  min-height: 20px;
+  color: var(--ui-text-2);
+  margin: 18px 0 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.loaderGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.loaderSample {
+  min-height: 132px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.fusionSwatch {
+  background: #f5f4ef;
+  color: #20201f;
+}
+
+.fusionSwatch .specLabel {
+  color: #6f6e68;
+}
+
+.modalCopy {
+  margin: 0;
+  color: var(--ui-text-2);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.fontList {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fontRow {
+  display: flex;
+  align-items: baseline;
+  gap: 20px;
+  min-width: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.fontRow:nth-child(odd) {
+  background: var(--ui-surface-2);
+}
+
+/* 字重被钳位的行仍要看得见（对比 600 才是重点），只把元信息压暗 */
+.fontRowClamped .weightValue,
+.fontRowClamped .weightName {
+  color: var(--ui-text-3);
+}
+
+.weightMeta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 8px;
+  width: 190px;
+}
+
+.weightValue {
+  color: var(--ui-text-1);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.weightName {
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.clampTag {
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--ui-text-3);
+  font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+/* 样张不能撑破卡片：超长就地横滚，不换行（换行会打乱字重对比的视觉基线） */
+.fontSample {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  color: var(--ui-text-1);
+  font-size: 22px;
+  line-height: 32px;
+  white-space: nowrap;
+}
+
+.glyphSample {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  color: var(--ui-text-1);
+  font-size: 26px;
+  line-height: 36px;
+  letter-spacing: 2px;
+  white-space: nowrap;
+}
+
+.subSection {
+  margin-top: 28px;
+  border-top: 1px solid var(--ui-hairline);
+  padding-top: 20px;
+}
+
+.subTitle {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.subSection .fontList {
+  margin-top: 16px;
+}
+
+.hiddenList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 上下堆叠而非左右并排：族名（.SF NS Rounded 这类）挤在一行会被截断 */
+.hiddenRow {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--ui-surface-2);
+}
+
+.hiddenLabel {
+  color: var(--ui-text-2);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.hiddenFamily {
+  min-width: 0;
+  overflow-x: auto;
+  color: var(--ui-text-3);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.note {
+  max-width: 76ch;
+  margin: 18px 0 0;
+  color: var(--ui-text-2);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+@media (max-width: 960px) {
+  .wide {
+    grid-column: auto;
+  }
+
+  .fieldGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .card {
+    padding: 20px;
+  }
+
+  .cardHead {
+    display: grid;
+  }
+
+  .actions > button {
+    flex: 1 1 180px;
+  }
+
+  .fontRow {
+    display: grid;
+    gap: 4px;
+  }
+
+  .weightMeta {
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    transition: none;
+  }
+}

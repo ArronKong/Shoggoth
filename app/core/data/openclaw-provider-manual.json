@@ -1,0 +1,169 @@
+{
+  "__comment": "手工维护段：provider 控制台「获取密钥」URL + label 人话覆盖。生成脚本永不触碰本文件。id 可以超出生成快照（常见自定义 provider 如 deepseek/modelscope 也能拿到链接）。",
+  "providers": {
+    "anthropic": {
+      "getKeyUrl": "https://console.anthropic.com/settings/keys"
+    },
+    "openai": {
+      "getKeyUrl": "https://platform.openai.com/api-keys"
+    },
+    "openrouter": {
+      "getKeyUrl": "https://openrouter.ai/settings/keys",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "keyProbePath": "/key"
+    },
+    "deepseek": {
+      "getKeyUrl": "https://platform.deepseek.com/api_keys",
+      "label": "DeepSeek"
+    },
+    "modelscope": {
+      "getKeyUrl": "https://modelscope.cn/my/myaccesstoken",
+      "label": "ModelScope"
+    },
+    "xai": {
+      "getKeyUrl": "https://console.x.ai",
+      "baseUrl": "https://api.x.ai/v1"
+    },
+    "google": {
+      "getKeyUrl": "https://aistudio.google.com/apikey",
+      "label": "Google AI Studio",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai"
+    },
+    "google-gemini-cli": {
+      "label": "Google Gemini CLI"
+    },
+    "google-vertex": {
+      "getKeyUrl": "https://console.cloud.google.com/vertex-ai",
+      "label": "Google Vertex AI"
+    },
+    "mistral": {
+      "getKeyUrl": "https://console.mistral.ai/api-keys"
+    },
+    "minimax": {
+      "getKeyUrl": "https://platform.minimax.io/user-center/basic-information/interface-key"
+    },
+    "minimax-portal": {
+      "label": "MiniMax Portal"
+    },
+    "xiaomi": {
+      "getKeyUrl": "https://platform.xiaomimimo.com",
+      "label": "Xiaomi MiMo"
+    },
+    "xiaomi-token-plan": {
+      "getKeyUrl": "https://platform.xiaomimimo.com",
+      "label": "Xiaomi Token Plan"
+    },
+    "together": {
+      "getKeyUrl": "https://api.together.ai/settings/api-keys"
+    },
+    "novita": {
+      "getKeyUrl": "https://novita.ai/settings/key-management"
+    },
+    "huggingface": {
+      "getKeyUrl": "https://huggingface.co/settings/tokens"
+    },
+    "github-copilot": {
+      "getKeyUrl": "https://github.com/settings/copilot",
+      "label": "GitHub Copilot"
+    },
+    "copilot-proxy": {
+      "label": "Copilot Proxy"
+    },
+    "cohere": {
+      "getKeyUrl": "https://dashboard.cohere.com/api-keys"
+    },
+    "volcengine": {
+      "getKeyUrl": "https://console.volcengine.com/ark",
+      "label": "Volcano Engine (火山方舟)"
+    },
+    "volcengine-plan": {
+      "getKeyUrl": "https://console.volcengine.com/ark",
+      "label": "Volcano Engine Coding Plan"
+    },
+    "byteplus": {
+      "getKeyUrl": "https://console.byteplus.com"
+    },
+    "byteplus-plan": {
+      "getKeyUrl": "https://console.byteplus.com",
+      "label": "BytePlus Coding Plan"
+    },
+    "nvidia": {
+      "getKeyUrl": "https://build.nvidia.com"
+    },
+    "fal": {
+      "getKeyUrl": "https://fal.ai/dashboard/keys",
+      "label": "Fal"
+    },
+    "synthetic": {
+      "getKeyUrl": "https://synthetic.new"
+    },
+    "meta": {
+      "getKeyUrl": "https://llama.developer.meta.com"
+    },
+    "microsoft-foundry": {
+      "getKeyUrl": "https://ai.azure.com"
+    },
+    "azure": {
+      "getKeyUrl": "https://portal.azure.com",
+      "label": "Azure OpenAI"
+    },
+    "azure-speech": {
+      "getKeyUrl": "https://portal.azure.com",
+      "label": "Azure Speech"
+    },
+    "alibaba": {
+      "getKeyUrl": "https://bailian.console.aliyun.com/?apiKey=1"
+    },
+    "clawrouter": {
+      "getKeyUrl": "https://clawrouter.ai"
+    },
+    "opencode": {
+      "getKeyUrl": "https://opencode.ai/auth"
+    },
+    "opencode-go": {
+      "getKeyUrl": "https://opencode.ai/auth",
+      "label": "OpenCode Go"
+    },
+    "moonshot": {
+      "getKeyUrl": "https://platform.moonshot.cn/console/api-keys",
+      "label": "Moonshot (Kimi)"
+    },
+    "zhipu": {
+      "getKeyUrl": "https://open.bigmodel.cn/usercenter/apikeys",
+      "label": "Zhipu (智谱)"
+    },
+    "groq": {
+      "getKeyUrl": "https://console.groq.com/keys",
+      "label": "Groq"
+    },
+    "voyage": {
+      "getKeyUrl": "https://dashboard.voyageai.com",
+      "label": "Voyage AI"
+    },
+    "deepgram": {
+      "getKeyUrl": "https://console.deepgram.com",
+      "label": "Deepgram"
+    },
+    "elevenlabs": {
+      "getKeyUrl": "https://elevenlabs.io/app/settings/api-keys",
+      "label": "ElevenLabs"
+    },
+    "runway": {
+      "getKeyUrl": "https://dev.runwayml.com",
+      "label": "Runway"
+    },
+    "vydra": {
+      "getKeyUrl": "https://vydra.ai"
+    },
+    "ollama-cloud": {
+      "getKeyUrl": "https://ollama.com/settings/keys",
+      "label": "Ollama Cloud"
+    },
+    "senseaudio": {
+      "label": "SenseAudio"
+    },
+    "claude-cli": {
+      "label": "Claude CLI"
+    }
+  }
+}

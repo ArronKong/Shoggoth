@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "name": "codex",
+    "version": "0.149.0",
+    "tag": "rust-v0.149.0",
+    "releaseUrl": "https://github.com/openai/codex/releases/tag/rust-v0.149.0",
+    "publishedAt": "2026-08-20T21:04:55Z",
+    "license": "Apache-2.0"
+  },
+  "schema": {
+    "version": "0.149.0",
+    "directory": "schemas/codex-app-server/0.149.0",
+    "includeExperimental": false
+  },
+  "platforms": {
+    "darwin-arm64": {
+      "arch": "arm64",
+      "assetName": "codex-package-aarch64-apple-darwin.tar.gz",
+      "archiveUrl": "https://releases.openai.com/codex/releases/0.149.0/codex-package-aarch64-apple-darwin.tar.gz",
+      "archiveSha256": "6c7589a52fe90e3742e35662115a4c55c39715601df0d41345ba8ec8f4221d4e",
+      "archiveSize": 110045256,
+      "archiveEntry": "bin/codex",
+      "destination": ".vendor/codex/arm64/package/bin/codex",
+      "packageDestination": ".vendor/codex/arm64/package",
+      "hostDestination": ".vendor/codex/arm64/package/bin/codex-code-mode-host",
+      "packageEntries": {
+        "directories": [
+          "bin",
+          "codex-path",
+          "codex-resources",
+          "codex-resources/zsh",
+          "codex-resources/zsh/bin"
+        ],
+        "executableFiles": [
+          "bin/codex",
+          "bin/codex-code-mode-host",
+          "codex-path/rg",
+          "codex-resources/zsh/bin/zsh"
+        ],
+        "regularFiles": [
+          "codex-package.json"
+        ]
+      }
+    },
+    "darwin-x64": {
+      "arch": "x64",
+      "assetName": "codex-package-x86_64-apple-darwin.tar.gz",
+      "archiveUrl": "https://releases.openai.com/codex/releases/0.149.0/codex-package-x86_64-apple-darwin.tar.gz",
+      "archiveSha256": "ba332e647cc898e3b4e86a3bc6e8db414a124eb88d8480f4707bbc66b0432f9d",
+      "archiveSize": 119594797,
+      "archiveEntry": "bin/codex",
+      "destination": ".vendor/codex/x64/package/bin/codex",
+      "packageDestination": ".vendor/codex/x64/package",
+      "hostDestination": ".vendor/codex/x64/package/bin/codex-code-mode-host",
+      "packageEntries": {
+        "directories": [
+          "bin",
+          "codex-path",
+          "codex-resources",
+          "codex-resources/zsh",
+          "codex-resources/zsh/bin"
+        ],
+        "executableFiles": [
+          "bin/codex",
+          "bin/codex-code-mode-host",
+          "codex-path/rg",
+          "codex-resources/zsh/bin/zsh"
+        ],
+        "regularFiles": [
+          "codex-package.json"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1453 @@
+{
+  "sourceVersion": "2026.7.1-2",
+  "generatedBy": "node scripts/generate-openclaw-provider-catalog.cjs",
+  "generatedAt": "openclaw@2026.7.1-2",
+  "providers": {
+    "alibaba": {
+      "label": "Alibaba Model Studio",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "MODELSTUDIO_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "QWEN_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [
+        "image-generation"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "anthropic": {
+      "label": "Anthropic",
+      "icon": "https://cdn.simpleicons.org/anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "api": "anthropic-messages",
+      "envKeys": [
+        "ANTHROPIC_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "claude-fable-5",
+          "name": "Claude Fable 5"
+        },
+        {
+          "id": "claude-sonnet-5",
+          "name": "Claude Sonnet 5"
+        },
+        {
+          "id": "claude-mythos-5",
+          "name": "Claude Mythos 5"
+        },
+        {
+          "id": "claude-opus-4-8",
+          "name": "Claude Opus 4.8"
+        },
+        {
+          "id": "claude-opus-4-7",
+          "name": "Claude Opus 4.7"
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "name": "Claude Haiku 4.5"
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Claude Haiku 4.5"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6"
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": [
+        {
+          "choiceId": "anthropic-cli",
+          "method": "cli",
+          "label": "Anthropic Claude CLI",
+          "hint": "Reuse a local Claude CLI login on this host"
+        },
+        {
+          "choiceId": "setup-token",
+          "method": "setup-token",
+          "label": "Anthropic setup-token",
+          "hint": "Manual token path"
+        }
+      ]
+    },
+    "claude-cli": {
+      "label": "claude-cli",
+      "icon": "https://cdn.simpleicons.org/anthropic",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [],
+      "defaultModels": [
+        {
+          "id": "claude-sonnet-5",
+          "name": "Claude Sonnet 5 (Claude CLI)"
+        },
+        {
+          "id": "claude-opus-4-8",
+          "name": "Claude Opus 4.8 (Claude CLI)"
+        },
+        {
+          "id": "claude-opus-4-7",
+          "name": "Claude Opus 4.7 (Claude CLI)"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (Claude CLI)"
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6 (Claude CLI)"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "azure-speech": {
+      "label": "azure-speech",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "AZURE_SPEECH_KEY",
+        "AZURE_SPEECH_API_KEY",
+        "SPEECH_KEY",
+        "AZURE_SPEECH_REGION",
+        "SPEECH_REGION"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "azure": {
+      "label": "azure",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "AZURE_SPEECH_KEY",
+        "AZURE_SPEECH_API_KEY",
+        "SPEECH_KEY",
+        "AZURE_SPEECH_REGION",
+        "SPEECH_REGION"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "byteplus": {
+      "label": "BytePlus",
+      "icon": null,
+      "baseUrl": "https://ark.ap-southeast.bytepluses.com/api/v3",
+      "api": "openai-completions",
+      "envKeys": [
+        "BYTEPLUS_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "seed-1-8-251228",
+          "name": "Seed 1.8"
+        },
+        {
+          "id": "kimi-k2-5-260127",
+          "name": "Kimi K2.5"
+        },
+        {
+          "id": "glm-4-7-251222",
+          "name": "GLM 4.7"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "byteplus-plan": {
+      "label": "byteplus-plan",
+      "icon": null,
+      "baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+      "api": "openai-completions",
+      "envKeys": [],
+      "defaultModels": [
+        {
+          "id": "ark-code-latest",
+          "name": "Ark Coding Plan"
+        },
+        {
+          "id": "doubao-seed-code",
+          "name": "Doubao Seed Code"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7 Coding"
+        },
+        {
+          "id": "kimi-k2-thinking",
+          "name": "Kimi K2 Thinking"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5 Coding"
+        }
+      ],
+      "declared": true,
+      "aliasOf": "byteplus",
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "clawrouter": {
+      "label": "ClawRouter",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "CLAWROUTER_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "cohere": {
+      "label": "Cohere",
+      "icon": null,
+      "baseUrl": "https://api.cohere.ai/compatibility/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "COHERE_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "command-a-03-2025",
+          "name": "Command A"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "comfy": {
+      "label": "ComfyUI",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "COMFY_API_KEY",
+        "COMFY_CLOUD_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "image-generation"
+      ],
+      "keyMethods": [
+        "cloud-api-key"
+      ],
+      "oauth": []
+    },
+    "copilot-proxy": {
+      "label": "Copilot",
+      "icon": "https://cdn.simpleicons.org/githubcopilot",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "local"
+      ],
+      "oauth": []
+    },
+    "deepgram": {
+      "label": "deepgram",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "DEEPGRAM_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "elevenlabs": {
+      "label": "elevenlabs",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "ELEVENLABS_API_KEY",
+        "XI_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "fal": {
+      "label": "fal",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "FAL_KEY",
+        "FAL_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "image-generation",
+        "music-generation"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "github-copilot": {
+      "label": "Copilot",
+      "icon": null,
+      "baseUrl": "https://api.individual.githubcopilot.com",
+      "api": "openai-responses",
+      "envKeys": [
+        "COPILOT_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN"
+      ],
+      "defaultModels": [
+        {
+          "id": "claude-opus-4.6",
+          "name": "Claude Opus 4.6"
+        },
+        {
+          "id": "claude-opus-4.7",
+          "name": "Claude Opus 4.7"
+        },
+        {
+          "id": "claude-opus-4.8",
+          "name": "Claude Opus 4.8"
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "name": "Claude Sonnet 4.6"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro"
+        },
+        {
+          "id": "gemini-3-flash",
+          "name": "Gemini 3 Flash"
+        },
+        {
+          "id": "gemini-3.1-pro",
+          "name": "Gemini 3.1 Pro"
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "name": "GPT-5.3-Codex"
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4"
+        },
+        {
+          "id": "gpt-5.5",
+          "name": "GPT-5.5"
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "name": "GPT-5.4 mini"
+        },
+        {
+          "id": "gpt-5.4-nano",
+          "name": "GPT-5.4 nano"
+        },
+        {
+          "id": "raptor-mini",
+          "name": "Raptor mini"
+        },
+        {
+          "id": "goldeneye",
+          "name": "Goldeneye"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [],
+      "oauth": [
+        {
+          "choiceId": "github-copilot",
+          "method": "device",
+          "label": "GitHub Copilot",
+          "hint": "Device login with your GitHub account"
+        }
+      ]
+    },
+    "google": {
+      "label": "Google",
+      "icon": "https://cdn.simpleicons.org/google",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "google-gemini-cli": {
+      "label": "Google",
+      "icon": "https://cdn.simpleicons.org/google",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [],
+      "oauth": [
+        {
+          "choiceId": "google-gemini-cli",
+          "method": "oauth",
+          "label": "Gemini CLI OAuth",
+          "hint": "Google OAuth with project-aware token payload"
+        }
+      ]
+    },
+    "google-vertex": {
+      "label": "google-vertex",
+      "icon": "https://cdn.simpleicons.org/google",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "GOOGLE_CLOUD_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "huggingface": {
+      "label": "Hugging Face",
+      "icon": "https://cdn.simpleicons.org/huggingface",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "HUGGINGFACE_HUB_TOKEN",
+        "HF_TOKEN"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "litellm": {
+      "label": "LiteLLM",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "LITELLM_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "lmstudio": {
+      "label": "LM Studio",
+      "icon": "https://cdn.simpleicons.org/lmstudio",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "LM_API_TOKEN"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "custom"
+      ],
+      "oauth": []
+    },
+    "meta": {
+      "label": "Meta",
+      "icon": null,
+      "baseUrl": "https://api.meta.ai/v1",
+      "api": "openai-responses",
+      "envKeys": [
+        "MODEL_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "muse-spark-1.1",
+          "name": "Muse Spark 1.1"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "microsoft-foundry": {
+      "label": "Microsoft Foundry",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "AZURE_OPENAI_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference",
+        "image-generation"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": [
+        {
+          "choiceId": "microsoft-foundry-entra",
+          "method": "entra-id",
+          "label": "Microsoft Foundry (Entra ID / az login)",
+          "hint": "Use your Azure login — no API key needed"
+        }
+      ]
+    },
+    "minimax": {
+      "label": "MiniMax",
+      "icon": "https://cdn.simpleicons.org/minimax",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "MINIMAX_CODE_PLAN_KEY",
+        "MINIMAX_CODING_API_KEY",
+        "MINIMAX_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-global",
+        "api-cn"
+      ],
+      "oauth": []
+    },
+    "minimax-portal": {
+      "label": "MiniMax",
+      "icon": "https://cdn.simpleicons.org/minimax",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "MINIMAX_OAUTH_TOKEN",
+        "MINIMAX_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [],
+      "oauth": [
+        {
+          "choiceId": "minimax-global-oauth",
+          "method": "oauth",
+          "label": "MiniMax OAuth (Global)",
+          "hint": "Global endpoint - api.minimax.io"
+        },
+        {
+          "choiceId": "minimax-cn-oauth",
+          "method": "oauth-cn",
+          "label": "MiniMax OAuth (CN)",
+          "hint": "CN endpoint - api.minimaxi.com"
+        }
+      ]
+    },
+    "mistral": {
+      "label": "Mistral AI",
+      "icon": "https://cdn.simpleicons.org/mistralai",
+      "baseUrl": "https://api.mistral.ai/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "MISTRAL_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "codestral-latest",
+          "name": "Codestral (latest)"
+        },
+        {
+          "id": "devstral-medium-latest",
+          "name": "Devstral 2 (latest)"
+        },
+        {
+          "id": "magistral-small",
+          "name": "Magistral Small"
+        },
+        {
+          "id": "mistral-large-latest",
+          "name": "Mistral Large (latest)"
+        },
+        {
+          "id": "mistral-medium-2508",
+          "name": "Mistral Medium 3.1"
+        },
+        {
+          "id": "mistral-medium-3-5",
+          "name": "Mistral Medium 3.5"
+        },
+        {
+          "id": "mistral-small-latest",
+          "name": "Mistral Small (latest)"
+        },
+        {
+          "id": "pixtral-large-latest",
+          "name": "Pixtral Large (latest)"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "novita": {
+      "label": "NovitaAI",
+      "icon": null,
+      "baseUrl": "https://api.novita.ai/openai/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "NOVITA_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "moonshotai/kimi-k2.5",
+          "name": "Kimi K2.5"
+        },
+        {
+          "id": "minimax/minimax-m2.7",
+          "name": "MiniMax M2.7"
+        },
+        {
+          "id": "zai-org/glm-5",
+          "name": "GLM-5"
+        },
+        {
+          "id": "deepseek/deepseek-v3-0324",
+          "name": "DeepSeek V3 0324"
+        },
+        {
+          "id": "deepseek/deepseek-r1-0528",
+          "name": "DeepSeek R1 0528"
+        },
+        {
+          "id": "qwen/qwen3-235b-a22b-fp8",
+          "name": "Qwen3 235B A22B FP8"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "novita-ai": {
+      "label": "novita-ai",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": "novita",
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "novitaai": {
+      "label": "novitaai",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": "novita",
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "nvidia": {
+      "label": "NVIDIA",
+      "icon": "https://cdn.simpleicons.org/nvidia",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "NVIDIA_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "nvidia/nemotron-3-ultra-550b-a55b",
+          "name": "NVIDIA Nemotron 3 Ultra 550B"
+        },
+        {
+          "id": "nvidia/nemotron-3-super-120b-a12b",
+          "name": "NVIDIA Nemotron 3 Super 120B"
+        },
+        {
+          "id": "moonshotai/kimi-k2.5",
+          "name": "Kimi K2.5"
+        },
+        {
+          "id": "minimaxai/minimax-m2.7",
+          "name": "Minimax M2.7"
+        },
+        {
+          "id": "z-ai/glm-5.1",
+          "name": "GLM 5.1"
+        },
+        {
+          "id": "minimaxai/minimax-m2.5",
+          "name": "MiniMax M2.5"
+        },
+        {
+          "id": "z-ai/glm5",
+          "name": "GLM-5"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "ollama": {
+      "label": "Ollama",
+      "icon": "https://cdn.simpleicons.org/ollama",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "OLLAMA_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "local"
+      ],
+      "oauth": []
+    },
+    "ollama-cloud": {
+      "label": "Ollama",
+      "icon": "https://cdn.simpleicons.org/ollama",
+      "baseUrl": "https://ollama.com",
+      "api": "ollama",
+      "envKeys": [
+        "OLLAMA_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "kimi-k2.5:cloud",
+          "name": "kimi-k2.5:cloud"
+        },
+        {
+          "id": "minimax-m2.7:cloud",
+          "name": "minimax-m2.7:cloud"
+        },
+        {
+          "id": "glm-5.1:cloud",
+          "name": "glm-5.1:cloud"
+        },
+        {
+          "id": "glm-5.2:cloud",
+          "name": "glm-5.2:cloud"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "openai": {
+      "label": "OpenAI",
+      "icon": null,
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-responses",
+      "envKeys": [
+        "OPENAI_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "gpt-5.3-chat-latest",
+          "name": "GPT-5.3 Chat (latest)"
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "name": "GPT-5.3 Codex"
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4"
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "name": "GPT-5.4 mini"
+        },
+        {
+          "id": "gpt-5.4-nano",
+          "name": "GPT-5.4 nano"
+        },
+        {
+          "id": "gpt-5.4-pro",
+          "name": "GPT-5.4 Pro"
+        },
+        {
+          "id": "gpt-5.6",
+          "name": "GPT-5.6"
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "name": "GPT-5.6 Sol"
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "name": "GPT-5.6 Terra"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "name": "GPT-5.6 Luna"
+        },
+        {
+          "id": "gpt-5.5",
+          "name": "GPT-5.5"
+        },
+        {
+          "id": "o1",
+          "name": "o1"
+        },
+        {
+          "id": "o1-pro",
+          "name": "o1-pro"
+        },
+        {
+          "id": "o3",
+          "name": "o3"
+        },
+        {
+          "id": "o3-deep-research",
+          "name": "o3-deep-research"
+        },
+        {
+          "id": "o3-mini",
+          "name": "o3-mini"
+        },
+        {
+          "id": "o3-pro",
+          "name": "o3-pro"
+        },
+        {
+          "id": "o4-mini",
+          "name": "o4-mini"
+        },
+        {
+          "id": "o4-mini-deep-research",
+          "name": "o4-mini-deep-research"
+        },
+        {
+          "id": "gpt-5.5-pro",
+          "name": "gpt-5.5-pro"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": [
+        {
+          "choiceId": "openai",
+          "method": "oauth",
+          "label": "ChatGPT Login",
+          "hint": "Sign in with your ChatGPT or Codex subscription"
+        },
+        {
+          "choiceId": "openai-device-code",
+          "method": "device-code",
+          "label": "ChatGPT Device Pairing",
+          "hint": "Pair your ChatGPT account in browser with a device code"
+        }
+      ]
+    },
+    "opencode": {
+      "label": "OpenCode",
+      "icon": "https://cdn.simpleicons.org/opencode",
+      "baseUrl": "https://opencode.ai/zen/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "OPENCODE_API_KEY",
+        "OPENCODE_ZEN_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "claude-opus-4-8",
+          "name": "Claude Opus 4.8"
+        },
+        {
+          "id": "gpt-5.5",
+          "name": "GPT-5.5"
+        },
+        {
+          "id": "gemini-3.1-pro",
+          "name": "Gemini 3.1 Pro"
+        },
+        {
+          "id": "minimax-m2.7",
+          "name": "MiniMax M2.7"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "opencode-go": {
+      "label": "OpenCode",
+      "icon": "https://cdn.simpleicons.org/opencode",
+      "baseUrl": "https://opencode.ai/zen/go/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "OPENCODE_API_KEY",
+        "OPENCODE_ZEN_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro"
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "openrouter": {
+      "label": "OpenRouter",
+      "icon": "https://cdn.simpleicons.org/openrouter",
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "OPENROUTER_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference",
+        "music-generation"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": [
+        {
+          "choiceId": "openrouter-oauth",
+          "method": "oauth",
+          "label": "OpenRouter OAuth",
+          "hint": "Browser sign-in"
+        }
+      ]
+    },
+    "runway": {
+      "label": "Runway",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "RUNWAYML_API_SECRET",
+        "RUNWAY_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [
+        "image-generation"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "senseaudio": {
+      "label": "senseaudio",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "SENSEAUDIO_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "sglang": {
+      "label": "SGLang",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "SGLANG_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "custom"
+      ],
+      "oauth": []
+    },
+    "synthetic": {
+      "label": "Synthetic",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "SYNTHETIC_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "together": {
+      "label": "Together AI",
+      "icon": null,
+      "baseUrl": "https://api.together.xyz/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "TOGETHER_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "moonshotai/Kimi-K2.6",
+          "name": "Kimi K2.6 FP4"
+        },
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "name": "Llama 3.3 70B Instruct Turbo"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-V4-Pro",
+          "name": "DeepSeek V4 Pro"
+        },
+        {
+          "id": "Qwen/Qwen2.5-7B-Instruct-Turbo",
+          "name": "Qwen2.5 7B Instruct Turbo"
+        },
+        {
+          "id": "zai-org/GLM-5.1",
+          "name": "GLM 5.1 FP4"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "vllm": {
+      "label": "vLLM",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "VLLM_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "custom"
+      ],
+      "oauth": []
+    },
+    "volcengine": {
+      "label": "Volcano Engine",
+      "icon": null,
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+      "api": "openai-completions",
+      "envKeys": [
+        "VOLCANO_ENGINE_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "doubao-seed-code-preview-251028",
+          "name": "doubao-seed-code-preview-251028"
+        },
+        {
+          "id": "doubao-seed-1-8-251228",
+          "name": "Doubao Seed 1.8"
+        },
+        {
+          "id": "kimi-k2-5-260127",
+          "name": "Kimi K2.5"
+        },
+        {
+          "id": "glm-4-7-251222",
+          "name": "GLM 4.7"
+        },
+        {
+          "id": "deepseek-v3-2-251201",
+          "name": "DeepSeek V3.2"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "volcengine-plan": {
+      "label": "volcengine-plan",
+      "icon": null,
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "api": "openai-completions",
+      "envKeys": [],
+      "defaultModels": [
+        {
+          "id": "ark-code-latest",
+          "name": "Ark Coding Plan"
+        },
+        {
+          "id": "doubao-seed-code",
+          "name": "Doubao Seed Code"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7 Coding"
+        },
+        {
+          "id": "kimi-k2-thinking",
+          "name": "Kimi K2 Thinking"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5 Coding"
+        },
+        {
+          "id": "doubao-seed-code-preview-251028",
+          "name": "Doubao Seed Code Preview"
+        }
+      ],
+      "declared": true,
+      "aliasOf": "volcengine",
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "volcengine-tts": {
+      "label": "volcengine-tts",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "VOLCENGINE_TTS_API_KEY",
+        "BYTEPLUS_SEED_SPEECH_API_KEY",
+        "VOLCENGINE_TTS_APPID",
+        "VOLCENGINE_TTS_TOKEN"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "voyage": {
+      "label": "voyage",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "VOYAGE_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": false,
+      "aliasOf": null,
+      "scopes": [],
+      "keyMethods": [],
+      "oauth": []
+    },
+    "vydra": {
+      "label": "Vydra",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "VYDRA_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "image-generation"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "xai": {
+      "label": "xAI (Grok)",
+      "icon": null,
+      "baseUrl": null,
+      "api": null,
+      "envKeys": [
+        "XAI_API_KEY"
+      ],
+      "defaultModels": [],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": [
+        {
+          "choiceId": "xai-oauth",
+          "method": "oauth",
+          "label": "xAI OAuth",
+          "hint": "Remote-friendly browser sign-in without a localhost callback"
+        },
+        {
+          "choiceId": "xai-device-code",
+          "method": "device-code",
+          "label": "xAI device code",
+          "hint": "Compatibility alias for xAI OAuth device-code sign-in"
+        }
+      ]
+    },
+    "xiaomi": {
+      "label": "Xiaomi",
+      "icon": "https://cdn.simpleicons.org/xiaomi",
+      "baseUrl": "https://api.xiaomimimo.com/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "XIAOMI_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "mimo-v2-flash",
+          "name": "Xiaomi MiMo V2 Flash"
+        },
+        {
+          "id": "mimo-v2-pro",
+          "name": "Xiaomi MiMo V2 Pro"
+        },
+        {
+          "id": "mimo-v2-omni",
+          "name": "Xiaomi MiMo V2 Omni"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [
+        "api-key"
+      ],
+      "oauth": []
+    },
+    "xiaomi-token-plan": {
+      "label": "Xiaomi",
+      "icon": "https://cdn.simpleicons.org/xiaomi",
+      "baseUrl": "https://token-plan-sgp.xiaomimimo.com/v1",
+      "api": "openai-completions",
+      "envKeys": [
+        "XIAOMI_TOKEN_PLAN_API_KEY"
+      ],
+      "defaultModels": [
+        {
+          "id": "mimo-v2.5-pro",
+          "name": "Xiaomi MiMo V2.5 Pro"
+        },
+        {
+          "id": "mimo-v2.5",
+          "name": "Xiaomi MiMo V2.5"
+        }
+      ],
+      "declared": true,
+      "aliasOf": null,
+      "scopes": [
+        "text-inference"
+      ],
+      "keyMethods": [],
+      "oauth": []
+    }
+  }
+}

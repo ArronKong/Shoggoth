@@ -1,0 +1,20 @@
+{
+  "version": "13.0.3",
+  "electronVersion": "44.4.2",
+  "nativeApi": "Node-API",
+  "sqliteVersion": "3.53.4",
+  "source": {
+    "package": "better-sqlite3",
+    "integrity": "sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ=="
+  },
+  "architectures": {
+    "arm64": {
+      "packageFile": "prebuilds/darwin-arm64.node",
+      "binarySha256": "98e0e8acd01c632fe5615243e1296af0372826f8783b18fc31c506f73c47459c"
+    },
+    "x64": {
+      "packageFile": "prebuilds/darwin-x64.node",
+      "binarySha256": "e6db154afe9d250e242e2ea3d45d273718ab80a0751d08873637553031752d21"
+    }
+  }
+}

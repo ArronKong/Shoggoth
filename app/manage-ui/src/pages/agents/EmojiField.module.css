@@ -1,0 +1,81 @@
+.positioner {
+  z-index: 300;
+}
+
+.popup {
+  box-sizing: border-box;
+  width: 20.5rem;
+  max-width: min(20.5rem, calc(100vw - 32px));
+  padding: 8px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: var(--ui-radius-compact);
+  background: var(--ui-surface-1);
+  box-shadow: 0 16px 32px -12px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.6));
+  animation: emojiPopoverIn var(--ui-motion-popover) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cats {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.cat {
+  box-sizing: border-box;
+  width: 2.25rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cat:hover,
+.cat[data-on],
+.cell:hover,
+.cell[data-highlighted],
+.cell[data-selected] {
+  background: var(--ui-surface-2);
+}
+
+.cat:focus-visible,
+.cell:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+}
+
+.scroller {
+  max-height: 14.5rem;
+  overflow-y: auto;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(8, 2.25rem);
+  gap: 2px;
+}
+
+.cell {
+  box-sizing: border-box;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@keyframes emojiPopoverIn {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .popup { animation: none; }
+}

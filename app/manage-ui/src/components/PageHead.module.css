@@ -1,0 +1,43 @@
+/* 统一页头（规格源自 cli-topbar / settings-head）：
+   左标题 2rem/300 + 副标题 muted，右动作区；窄窗 flex-wrap 自动折行。 */
+.head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  /* 上边距 0：标题起点 = 容器 36px 顶距，与聊天页栏头对齐 */
+  margin: 0 0 1.5rem;
+}
+
+.titles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: 2rem;
+  line-height: 1;
+  font-weight: 300;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 300;
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}

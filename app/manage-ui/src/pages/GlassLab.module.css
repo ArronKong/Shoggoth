@@ -1,0 +1,342 @@
+.lab {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  padding: 0;
+  color: var(--ui-text-1);
+  background: var(--ui-canvas);
+}
+
+/* 舞台与参数栏共享剩余高度，且两列都允许内容安全收缩。 */
+.body {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 280px);
+  align-items: stretch;
+  gap: 24px;
+  min-width: 0;
+  min-height: 360px;
+  overflow: hidden;
+}
+
+/* 深色场景仍是 WebGL 的坐标系，只把外层 chrome 收进统一卡片系统。 */
+.stage {
+  position: relative;
+  min-width: 0;
+  min-height: 360px;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  background: #0b1020;
+  box-shadow: var(--ui-shadow-card);
+}
+
+.video,
+.gl {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+.video {
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.gl {
+  z-index: 1;
+}
+
+.failed {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: #ffffff;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+/* 透明命中层只负责拖拽，不改变玻璃渲染与 pointer 行为。 */
+.lensHit {
+  position: absolute;
+  z-index: 3;
+  cursor: grab;
+  touch-action: none;
+}
+
+.lensHit:active {
+  cursor: grabbing;
+}
+
+.handle {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--ui-focus);
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.panel {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 280px;
+  min-width: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 20px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+}
+
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sliderHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  color: var(--ui-text-1);
+  font-size: 0.85rem;
+}
+
+.num {
+  width: 76px;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--ui-text-1) 50%, var(--ui-surface-1));
+  border-radius: 12px;
+  color: var(--ui-text-1);
+  background: var(--ui-surface-1);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  transition:
+    border-color var(--ui-motion-state) ease,
+    box-shadow var(--ui-motion-state) ease,
+    background-color var(--ui-motion-state) ease;
+}
+
+.num:hover:not(:disabled) {
+  background: var(--ui-surface-2);
+}
+
+.num:focus-visible {
+  border-color: var(--ui-focus);
+}
+
+.range {
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--ui-focus);
+  background: transparent;
+  cursor: pointer;
+  border-radius: 999px;
+}
+
+.range::-webkit-slider-runnable-track {
+  height: 6px;
+  border: 1px solid var(--ui-control-border);
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+}
+
+.range::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  margin-top: -7px;
+  border: 2px solid var(--ui-surface-1);
+  border-radius: 50%;
+  background: var(--ui-focus);
+  box-shadow: 0 0 0 1px var(--ui-control-border);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.range::-moz-range-track {
+  height: 6px;
+  border: 1px solid var(--ui-control-border);
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+}
+
+.range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--ui-surface-1);
+  border-radius: 50%;
+  background: var(--ui-focus);
+  box-shadow: 0 0 0 1px var(--ui-control-border);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.saveBtn,
+.resetBtn {
+  width: 100%;
+  padding: 0 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition:
+    border-color var(--ui-motion-state) ease,
+    background-color var(--ui-motion-state) ease,
+    box-shadow var(--ui-motion-state) ease;
+}
+
+.saveBtn {
+  min-height: 48px;
+  border: 1px solid transparent;
+  background: var(--ui-primary);
+  color: var(--ui-primary-ink);
+  font-weight: 600;
+}
+
+.saveBtn:hover:not(:disabled) {
+  background: var(--ui-primary-hover);
+}
+
+.saveBtn:active:not(:disabled) {
+  background: var(--ui-primary-active);
+}
+
+.resetBtn {
+  min-height: 40px;
+  border: 1px solid var(--ui-control-border);
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+}
+
+.resetBtn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ui-text-1) 50%, var(--ui-surface-1));
+  background: var(--ui-surface-2);
+}
+
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preset {
+  display: inline-flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--ui-control-border);
+  border-radius: 999px;
+  background: var(--ui-surface-1);
+}
+
+.presetLoad,
+.presetDel {
+  min-height: 32px;
+  border: 0;
+  color: var(--ui-text-1);
+  background: transparent;
+  cursor: pointer;
+}
+
+.presetLoad {
+  padding: 0 3px 0 10px;
+  font-size: 0.78rem;
+}
+
+.presetDel {
+  padding: 0 9px;
+  color: var(--ui-text-2);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.presetLoad:hover:not(:disabled) {
+  background: var(--ui-surface-2);
+}
+
+.presetDel:hover:not(:disabled) {
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 10%, var(--ui-surface-1));
+}
+
+.saveBtn:focus-visible,
+.resetBtn:focus-visible,
+.presetLoad:focus-visible,
+.presetDel:focus-visible,
+.num:focus-visible,
+.range:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
+}
+
+.hint {
+  margin: 0;
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .lab {
+    height: auto;
+    min-height: 100%;
+  }
+
+  .lab .body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+    overflow: visible;
+  }
+
+  .lab .stage {
+    min-height: 360px;
+  }
+
+  .lab .panel {
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .num,
+  .saveBtn,
+  .resetBtn {
+    transition: none;
+  }
+}

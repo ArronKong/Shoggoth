@@ -1,0 +1,74 @@
+.dock {
+  position: fixed;
+  z-index: 80;
+  left: 64px;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: flex-end;
+  height: calc(180px + env(safe-area-inset-bottom));
+  box-sizing: border-box;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: linear-gradient(to bottom, transparent, var(--ui-canvas));
+  color: var(--ui-text-1);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  animation: arrive 180ms ease-out both;
+}
+.dragHint, .dropHint {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 25px;
+  text-align: center;
+  white-space: nowrap;
+}
+.dragHint { position: absolute; bottom: calc(8px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); }
+.dropHint { position: fixed; bottom: calc(8px + env(safe-area-inset-bottom)); left: 64px; width: max-content; visibility: hidden; pointer-events: none; }
+.dock:has([data-inspiration-drop-over]) .dragHint { visibility: hidden; }
+.agent[data-inspiration-drop-over] .dropHint { visibility: visible; }
+.track {
+  display: flex;
+  justify-content: safe center;
+  width: 100%;
+  min-width: 0;
+  padding: 12px 0 40px;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  pointer-events: auto;
+}
+.track::-webkit-scrollbar { display: none; }
+.agent {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 64px;
+  height: 48px;
+  min-width: 0;
+}
+.avatar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: 15px;
+  font-weight: 600;
+  transition: transform 200ms linear;
+}
+.avatar::after { content: ''; position: absolute; inset: 0; border: calc(2px * 48 / 56) solid light-dark(#000, #fff); border-radius: inherit; opacity: 0; transition: opacity 200ms linear; }
+.agent[data-inspiration-drop-over] .avatar { transform: scale(calc(56 / 48)); }
+.agent[data-inspiration-drop-over] .avatar::after { opacity: 1; }
+.agent[aria-disabled=true] { opacity: .4; }
+.empty { margin: 12px 24px; font-size: 13px; text-align: center; }
+@keyframes arrive { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .dock { animation: none; }
+  .avatar, .avatar::after { transition: none; }
+}

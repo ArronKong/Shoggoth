@@ -1,0 +1,19 @@
+.card { min-width: 0; border: 1px solid var(--border); border-radius: 14px; padding: 18px; background: var(--bg-card); }
+.header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.header h3 { margin: 0; font-size: 14px; }
+.header p { margin: 6px 0 14px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.list { list-style: none; margin: 0; padding: 0; }
+.item { min-width: 0; padding: 14px 0; border-top: 1px solid var(--border); }
+.identity { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; overflow-wrap: anywhere; }
+.tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; }
+.account { display: flex; gap: 12px; align-items: center; margin: 12px 0; font-size: 12px; color: var(--muted); }
+.account > button { min-width: 0; max-width: 100%; flex: 1; }
+.actions, .editor { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.editor { margin: 10px 0; }
+.editor input { min-width: 0; flex: 1 1 160px; }
+.actions > :first-child { margin-right: auto; }
+.add { border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 12px; padding-top: 16px; }
+.add > * { min-width: 0; max-width: 100%; }
+.add button { max-width: 100%; }
+.error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .card { padding: 14px; } .header { flex-wrap: wrap; } .account { align-items: stretch; flex-direction: column; gap: 6px; } }

@@ -1,0 +1,8 @@
+/* OpenClaw「提供方」目录的本 pane 特有布局；卡片与字段主体复用
+   KeysPanel.module.css。 */
+
+.headActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}

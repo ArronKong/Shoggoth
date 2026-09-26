@@ -1,0 +1,619 @@
+/* Hermes 密钥面板（对齐官方 dashboard 的 /env 页）。外观走本项目 token，
+   结构照官方：OAuth 卡 → Provider 分组卡 → 分类卡 → 自定义密钥卡。 */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* ---- 卡片（设计稿 6958-135：1236 宽的白卡，内边距 24，标题下无分隔线）----
+   这两张卡现在直接落在页面上，不再套外层白卡，所以配方跟 ModelsPage 的区块卡
+   对齐（16px 圆角 + card 阴影）。 */
+.card {
+  padding: 20px 24px 22px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+}
+.cardHead {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0 0 0.9rem;
+}
+.cardHeadRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.cardTitle {
+  margin: 0;
+  /* 别让右侧的搜索框把「模型 Provider」挤成两行——标题不参与收缩。 */
+  flex: none;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ui-text-1);
+  white-space: nowrap;
+}
+.cardDesc {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--ui-text-2);
+}
+.cardHint {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--ui-text-3);
+  line-height: 1.45;
+}
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0;
+  min-width: 0;
+}
+.cardBodyFlush {
+  gap: 32px;
+}
+.linkBtn {
+  border: 0;
+  background: none;
+  padding: 0;
+  min-height: 0;
+  font-size: 0.74rem;
+  color: var(--ui-text-2);
+  cursor: pointer;
+}
+.linkBtn:hover:not(:disabled) {
+  color: var(--ui-text-1);
+  background: none;
+}
+
+/* ---- provider 分组（设计稿：标题 21 + 8 + 输入框 32 = 61 高，组间距 32）---- */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 提供方 logo：素材是 width/height=1em 的形制，尺寸由这里的 font-size 定；
+   单色标走 currentColor，用略淡的文字色，别抢 provider 名的视觉重量。
+   认不出 logo 的 provider 渲染成同尺寸空位，保证名字左边缘对齐。 */
+.logo {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: color-mix(in srgb, var(--ui-text-1) 78%, var(--ui-surface-1));
+  font-size: 16px;
+  line-height: 1;
+}
+.logo svg {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+}
+.groupMeta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+  font-size: 0.74rem;
+  color: var(--ui-text-3);
+}
+
+/* ---- 徽标 ---- */
+.badge {
+  flex: none;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--ui-text-2);
+  white-space: nowrap;
+}
+.badgeOk {
+  border-color: color-mix(in srgb, var(--ui-success) 40%, transparent);
+  color: var(--ui-success);
+}
+
+/* ---- 单个 env 行 ---- */
+.rowCompact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.2rem 0;
+  min-width: 0;
+}
+.rowCompactMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.rowCompactDesc {
+  font-size: 0.72rem;
+  color: var(--ui-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 12px;
+  min-width: 0;
+}
+.rowHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.rowKey {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+.rowDesc {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--ui-text-2);
+  line-height: 1.45;
+}
+.tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.tool {
+  padding: 0.02rem 0.35rem;
+  border-radius: 6px;
+  background: var(--ui-surface-2);
+  font-size: 0.68rem;
+  color: var(--ui-text-2);
+}
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.value {
+  flex: 1 1 160px;
+  min-width: 0;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-3);
+  font-size: 0.74rem;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.valueShown {
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  user-select: all;
+}
+.rowActions input {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+.smallBtn {
+  flex: none;
+  min-height: 32px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.74rem;
+}
+.getKey {
+  flex: none;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+/* ---- 自定义密钥新增表单 ---- */
+.addForm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px dashed var(--ui-control-border);
+  border-radius: 12px;
+}
+.addLabel {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--ui-text-2);
+}
+.addRow {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.addRow input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.addError {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--ui-error);
+}
+
+/* ---- OAuth 卡（设计稿 7093-366：两列网格，操作图标 hover 才出）---- */
+.oauthGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 4px;
+  /* 行的 hover 底色要比卡片内边距更宽一点，好让行内文字与卡片标题左对齐
+     （设计稿：卡内边距 24，行左缘 12，行内再 12）。 */
+  margin: 0 -12px;
+  min-width: 0;
+}
+/* Runtime accounts use visible action labels and one provider per row. */
+.oauthList {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0 -12px;
+  min-width: 0;
+}
+@media (max-width: 980px) {
+  .oauthGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.oauthRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 61px;
+  padding: 0.35rem 12px;
+  border-radius: 12px;
+  min-width: 0;
+  transition: background 120ms ease;
+}
+.oauthRow:hover,
+.oauthRow:focus-within {
+  background: var(--ui-surface-2);
+}
+/* 主操作 = 整行左侧（与右侧那颗图标同一件事）：logo + 名字 + 一句状态。 */
+.oauthMain {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.oauthMain:hover:not(:disabled) {
+  background: none;
+  color: inherit;
+}
+.oauthText {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.oauthName {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ui-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oauthSub {
+  font-size: 0.74rem;
+  color: var(--ui-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 过期与出错共用红字：这一行的副标题就是「现在该做什么」。 */
+.oauthSubErr {
+  color: var(--ui-error);
+}
+.oauthRowErr .oauthName {
+  color: var(--ui-error);
+}
+/* 已连接的小绿点跟在名字后面（替代原来的「已连接」徽章）。 */
+.oauthDot {
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--ui-success);
+}
+/* 图标组：平时透明，指到行上或键盘聚焦进来才显形（设计稿 hover 态）。 */
+.oauthIcons {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.oauthRow:hover .oauthIcons,
+.oauthRow:focus-within .oauthIcons {
+  opacity: 1;
+}
+@media (hover: none) {
+  /* 触摸屏没有 hover：图标常显，否则整行操作不可达。 */
+  .oauthIcons {
+    opacity: 1;
+  }
+}
+.oauthActions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: none;
+}
+
+.modalSteps {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+  color: var(--ui-text-2);
+  line-height: 1.6;
+}
+.userCode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 12px;
+  background: var(--ui-surface-2);
+}
+.userCode code {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  letter-spacing: 0.18em;
+  color: var(--ui-text-1);
+}
+.modalFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.modalError {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--ui-error) 32%, var(--ui-hairline));
+  border-radius: 10px;
+  font-size: 0.78rem;
+  color: var(--ui-error);
+}
+.modalOk {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ui-success);
+}
+/* external 登录面板的命令块（官方 flow.tsx 的 CodeBlock）：`$ 命令` + 复制/在终端运行。 */
+.cmdBlock {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+}
+.cmdBlock code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--ui-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmdBlock code::before {
+  content: "$ ";
+  color: var(--ui-text-3);
+  user-select: none;
+}
+/* 回查未检出 = 警告不是报错：copilot-acp 这类 provider 服务端恒报未登录，
+   命令其实已经跑成功了，红色报错会骗人。 */
+.modalWarn {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--ui-warning) 32%, var(--ui-hairline));
+  border-radius: 10px;
+  font-size: 0.78rem;
+  color: var(--ui-warning);
+}
+
+/* provider 组（设计稿 6958-135）：一行标题 + 一行两列输入框（Base URL / API Key）。 */
+.groupHeadRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.groupName {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.25rem 0;
+  min-height: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.groupName:disabled {
+  cursor: default;
+}
+.groupName:hover:not(:disabled) {
+  background: none;
+  color: inherit;
+}
+.groupTitle {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ui-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 已配置状态点（官方用一个实心圆表示 hasAnySet，替代原来的「已设 N」徽章——
+   徽章数的是条数，会把「只设了 Base URL」显示成已配置）。 */
+.dotOn {
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--ui-success);
+}
+/* 两列值区：窄屏落回单列，输入框比按钮更需要宽度。 */
+.groupFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  min-width: 0;
+}
+@media (max-width: 980px) {
+  .groupFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* 一个值槽 = 圆角框 + 右侧浮出的图标组（查看明文 / 清除 / 保存…）。 */
+.fieldSlot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+/* 外观一律交给全局 `.field-input`（调用端两个类一起戴）。本页原先自带一份 32 高、
+   无描边、灰底、0.76rem 的皮肤，与设计稿 7112:1813 的字段规格不是一回事——R320 起
+   这里只留行内布局与单行省略。 */
+.fieldBox {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fieldBox > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fieldBoxBtn {
+  cursor: text;
+}
+/* 未设置：占位文案压淡，别看着像已经填了东西。 */
+.fieldBoxEmpty {
+  color: var(--ui-text-3);
+}
+/* 不可改端点：Hermes 把 base_url 写死在 provider 里，没有覆盖变量可写。 */
+.fieldBoxLocked {
+  color: var(--ui-text-3);
+  cursor: not-allowed;
+}
+.fieldBoxLocked::placeholder {
+  color: var(--ui-text-3);
+}
+/* 编辑态与焦点态都不再本地定义：`.field-input` 的规格（描边 10% 黑、聚焦换纯黑、
+   无外环）本身就是设计稿要的样子，本地再写一份只会重新分叉。 */
+/* 编辑态图标常显（保存/取消要能一眼看见），读态跟着 hover 浮现。 */
+.fieldIcons {
+  position: absolute;
+  right: 0.15rem;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.fieldSlot:hover .fieldIcons,
+.fieldSlot:focus-within .fieldIcons {
+  opacity: 1;
+}
+@media (hover: none) {
+  .fieldIcons {
+    opacity: 1;
+  }
+}
+/* 图标浮在圆角框上，给个同色底避免压住文字。 */
+.fieldIcons .iconBtn {
+  background: color-mix(in srgb, var(--ui-surface-2) 88%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+/* ---- 通用图标按钮（OAuth 行与值槽共用）---- */
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  /* 设计稿里这些图标是实黑，不是次级灰——它们是这一行唯一的操作入口，
+     压淡了在浅灰输入框上就糊掉了。 */
+  color: var(--ui-text-1);
+  cursor: pointer;
+}
+.iconBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-text-1) 8%, transparent);
+  color: var(--ui-text-1);
+}
+.iconBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.iconDanger {
+  color: var(--ui-error);
+}
+.iconDanger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  color: var(--ui-error);
+}
+
+/* 图标描边并入全站 1.2 CSS px 口径（R376）。类名经 CSS module 哈希，全局样式表选不到，
+   只能写在这里。`vector-effect` 不可继承，故连子元素一起选。 */
+.iconBtn svg,
+.iconBtn svg * {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2;
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "local-issues": {
+      "type": "stdio",
+      "command": "./bin/issue-fixture",
+      "args": ["--data", "${PLUGIN_DATA}/issues"],
+      "cwd": "${PLUGIN_ROOT}"
+    },
+    "remote-issues": {
+      "type": "streamable-http",
+      "url": "https://example.com/mcp",
+      "headers": { "X-Fixture": "project-assistant" }
+    },
+    "bad-issue-server": {
+      "type": "stdio",
+      "command": "../escape",
+      "extra": true
+    }
+  }
+}

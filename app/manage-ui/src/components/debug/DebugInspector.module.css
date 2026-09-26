@@ -1,0 +1,852 @@
+/* Floating element-style inspector. Sits above everything (incl. toasts), uses
+   its own scoped chrome so it reads as tooling, not part of the page. */
+
+/* On-page band overlay — margin / border / padding / content, DevTools colors.
+   Each layer draws its own band as a border, so the child's box IS the next box
+   down. Widths come from inline styles (computed per element). */
+.hlMargin,
+.hlBorder,
+.hlPadding {
+  box-sizing: border-box;
+  border-style: solid;
+}
+.hlMargin {
+  position: fixed;
+  z-index: 2147483646;
+  pointer-events: none;
+  border-color: rgba(246, 178, 107, 0.55);
+}
+.hlBorder,
+.hlPadding {
+  width: 100%;
+  height: 100%;
+}
+.hlBorder {
+  border-color: rgba(255, 229, 153, 0.7);
+}
+.hlPadding {
+  border-color: rgba(147, 196, 125, 0.55);
+  /* outline sits on the border-box edge — keeps the element outline readable even
+     when it has no border and no padding */
+  outline: 1px solid rgba(37, 99, 235, 0.5);
+}
+.hlContent {
+  width: 100%;
+  height: 100%;
+  background: rgba(111, 168, 220, 0.45);
+}
+.hlSize {
+  position: fixed;
+  z-index: 2147483646;
+  pointer-events: none;
+  background: #1d1d1f;
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.panel {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483647;
+  width: 300px;
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  /* 面板自己的色板。主色走中性黑而不是项目的品牌蓝——工具面板不该跟宿主界面抢视觉重心。 */
+  --si-accent: #1d1d1f;
+  --si-line: #ececec;
+  --si-label: #86868b;
+  --si-field: #f5f5f7;
+  --si-field-hover: #ebebed;
+  --si-pad: 14px;
+  background: #fff;
+  /* 无描边：纯白面板靠阴影与页面分离，加边框在浅色背景上会显脏 */
+  border: 0;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.06);
+  font-size: 11px;
+  color: #1d1d1f;
+  overflow: hidden;
+}
+
+/* Figma-style header: no dark bar — just a title row over a hairline. */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 12px 10px;
+  background: #fff;
+  color: #1d1d1f;
+  border-bottom: 1px solid var(--si-line);
+  cursor: move;
+  user-select: none;
+  flex-shrink: 0;
+}
+.title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.headRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* segmented language switch (panel + export only, not the app locale) */
+.langSwitch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--si-field);
+  border-radius: 999px;
+  cursor: default;
+}
+.langBtn {
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--si-label);
+  cursor: pointer;
+}
+.langBtn:hover {
+  color: #1d1d1f;
+}
+.langBtnOn {
+  background: #fff;
+  color: #1d1d1f;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.close {
+  border: 0;
+  background: transparent;
+  color: var(--si-label);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.close:hover {
+  background: var(--si-field);
+  color: #1d1d1f;
+}
+
+.empty {
+  padding: 20px 14px;
+  color: var(--si-label);
+  line-height: 1.6;
+}
+
+.body {
+  overflow-y: auto;
+  padding: 10px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ancestor breadcrumb */
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  align-items: center;
+}
+.crumb {
+  border: 0;
+  background: transparent;
+  color: var(--si-label);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.crumb:hover {
+  background: var(--si-field);
+  color: #1d1d1f;
+}
+.crumbCur {
+  color: #1d1d1f;
+  font-weight: 600;
+}
+
+/* target selector */
+.targetRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.targetLabel {
+  color: var(--si-label);
+  flex-shrink: 0;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chip {
+  border: 1px solid transparent;
+  background: var(--si-field);
+  color: #1d1d1f;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.chip:hover {
+  background: var(--si-line);
+}
+.chipOn {
+  background: var(--si-accent);
+  border-color: var(--si-accent);
+  color: #fff;
+}
+.chipOn:hover {
+  background: var(--si-accent);
+}
+.thisOnly {
+  color: #92400e;
+  font-size: 10px;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* Figma fields: filled, borderless at rest; the border only appears on focus. */
+.search {
+  font: inherit;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  background: var(--si-field);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #1d1d1f;
+}
+.search::placeholder {
+  color: #999;
+}
+.search:hover {
+  background: var(--si-field-hover);
+}
+.search:focus {
+  outline: none;
+  background: #fff;
+  border-color: var(--si-accent);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.toolBtn {
+  font: inherit;
+  font-size: 11px;
+  height: 24px;
+  padding: 0 9px;
+  /* 定宽：反馈时文案会换成「已复制」这类短词，不定宽整排按钮会横向跳动 */
+  min-width: 76px;
+  text-align: center;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--si-field);
+  color: #1d1d1f;
+  cursor: pointer;
+}
+.toolBtn:hover {
+  background: var(--si-line);
+}
+.toolBtn:disabled {
+  opacity: 1;
+  cursor: default;
+  background: #f7f7f7;
+  color: #b8b8b8;
+}
+.toolBtnErr {
+  background: #fdeceb;
+  border-color: #fdeceb;
+  color: #b3261e;
+}
+.toolBtnPrimary {
+  background: var(--si-accent);
+  border-color: var(--si-accent);
+  color: #fff;
+}
+.toolBtnPrimary.toolBtnErr {
+  background: #fdeceb;
+  border-color: #fdeceb;
+  color: #b3261e;
+}
+.toolBtnPrimary:hover {
+  background: #000;
+  border-color: #000;
+  color: #fff;
+}
+
+/* 固定底栏：不随属性列表滚动。flex-shrink:0 让它在面板高度不足时也保住位置，
+   上边一条发丝线与滚动区分隔。 */
+.footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--si-line);
+  background: #fff;
+}
+
+/* 组内小标题：比 groupHead 低一级，用来把盒模型收在「间距」里 */
+.subHead {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--si-label);
+  margin: 2px 0 1px;
+}
+
+/* property groups + rows — Figma sections: bold title, full-width hairline above,
+   generous top padding, no underline under the title itself */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  /* 分割线与内容同宽（不再出血到面板边缘）：线的两端和标题、字段左右对齐，
+     视觉上是「同一栏里的分节」，而不是把面板横切成几块。 */
+  border-top: 1px solid var(--si-line);
+  margin: 0;
+  padding: 12px 0 2px;
+}
+.groupHead {
+  font-weight: 600;
+  font-size: 13px;
+  color: #1d1d1f;
+  margin-bottom: 3px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+.rowLabel {
+  flex: 0 0 88px;
+  color: var(--si-label);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* two-column tagged fields (Figma's Dimensions block) */
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+/* editors — the scrub wrapper IS the field: filled box holding tag + value, so a
+   tagged input and a plain one read as the same control */
+.scrub {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  background: var(--si-field);
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+.scrub:hover {
+  background: var(--si-field-hover);
+}
+.scrub:focus-within {
+  background: #fff;
+  border-color: var(--si-accent);
+}
+.scrub .scrubInput,
+.scrub .scrubInput:hover,
+.scrub .scrubInput:focus {
+  height: auto;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+}
+.scrubTag {
+  color: var(--si-label);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.scrubGrip {
+  cursor: ew-resize;
+  color: #b0b0b0;
+  user-select: none;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.scrubGrip:hover {
+  color: var(--si-accent);
+}
+/* expression value (min()/calc()/var()): not scrubbable — say so with the cursor
+   instead of letting a drag wipe the expression */
+.scrubGripOff {
+  cursor: default;
+  opacity: 0.45;
+}
+.scrubGripOff:hover {
+  color: #b0b0b0;
+}
+.scrubInput {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--si-field);
+  color: #1d1d1f;
+}
+.scrubInput:hover {
+  background: var(--si-field-hover);
+}
+.scrubInput:focus {
+  outline: none;
+  background: #fff;
+  border-color: var(--si-accent);
+}
+.color {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+/* checkerboard shared by the swatch and the alpha rail, so transparency reads as
+   transparency instead of as white */
+.colorSwatch,
+.picker {
+  --checker: linear-gradient(45deg, #d8d8d8 25%, transparent 25%, transparent 75%, #d8d8d8 75%),
+    linear-gradient(45deg, #d8d8d8 25%, #fff 25%, #fff 75%, #d8d8d8 75%);
+}
+
+.colorSwatch {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--si-line);
+  border-radius: 6px;
+  background-image: var(--checker);
+  background-size: 8px 8px;
+  background-position: 0 0, 4px 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.colorSwatchFill {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* picker popover — fixed, because the panel body scrolls and would clip it */
+.picker {
+  position: fixed;
+  z-index: 2147483647;
+  width: 232px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid var(--si-line);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18), 0 1px 3px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pickerSv {
+  position: relative;
+  height: 148px;
+  border-radius: 8px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.pickerKnob {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+.pickerRails {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pickerEye {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--si-field);
+  color: #1d1d1f;
+  cursor: pointer;
+}
+.pickerEye:hover {
+  background: var(--si-field-hover);
+}
+.pickerRailCol {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pickerHue,
+.pickerAlpha {
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  touch-action: none;
+}
+.pickerHue {
+  background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+}
+.pickerAlpha {
+  background-size: auto, 8px 8px, 8px 8px;
+  background-position: 0 0, 0 0, 4px 4px;
+  background-repeat: no-repeat, repeat, repeat;
+}
+.pickerFoot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pickerMode {
+  font: inherit;
+  font-size: 10px;
+  height: 24px;
+  padding: 0 2px;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--si-field);
+  color: #1d1d1f;
+  cursor: pointer;
+}
+.pickerNum {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 10px;
+  height: 24px;
+  min-width: 0;
+  flex: 1;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--si-field);
+  color: #1d1d1f;
+}
+.pickerNum:focus {
+  outline: none;
+  background: #fff;
+  border-color: var(--si-accent);
+}
+.pickerAlphaNum {
+  flex: 0 0 38px;
+}
+
+/* box model diagram — same color order as the on-page overlay so a number here
+   maps to a band you can see on the element */
+.bmBox {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 2px;
+  border-radius: 4px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: #1d1d1f;
+}
+/* 轻量浅色系：外层中性灰 → 白底细边 → 浅蓝实边 → 白底虚线，靠「底色深浅 + 边框样式」
+   分层，而不是四种饱和色块。深色实线只给 padding 层，让内容框的位置一眼可见。 */
+.bmMargin {
+  background: var(--si-field);
+}
+.bmBorder {
+  background: #fff;
+  border: 1px solid #e3e3e6;
+  grid-area: 2 / 2 / 3 / 3;
+}
+.bmPadding {
+  background: #e6f0fb;
+  border: 1.5px solid #3a3a3c;
+  grid-area: 2 / 2 / 3 / 3;
+}
+.bmTag {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 9px;
+  color: var(--si-label);
+  pointer-events: none;
+}
+.bmContent {
+  grid-area: 2 / 2 / 3 / 3;
+  background: #fff;
+  border: 1px dashed #b0b0b5;
+  border-radius: 3px;
+  padding: 7px 10px;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+}
+.bmCell {
+  cursor: ew-resize;
+  user-select: none;
+  border-radius: 3px;
+  padding: 1px 3px;
+  min-width: 16px;
+}
+.bmCell:hover {
+  background: rgba(255, 255, 255, 0.75);
+}
+.bmTop {
+  grid-area: 1 / 1 / 2 / 4;
+  margin-top: 1px;
+}
+.bmBottom {
+  grid-area: 3 / 1 / 4 / 4;
+  margin-bottom: 1px;
+}
+.bmLeft {
+  grid-area: 2 / 1 / 3 / 2;
+  align-self: center;
+}
+.bmRight {
+  grid-area: 2 / 3 / 3 / 4;
+  align-self: center;
+}
+.bmInput {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: center;
+  cursor: text; /* the cell it replaces is ew-resize / unselectable */
+  user-select: text;
+  width: 44px;
+  padding: 0 2px;
+  border: 1px solid var(--si-accent);
+  border-radius: 3px;
+  background: #fff;
+  color: #1d1d1f;
+}
+.bmInput:focus {
+  outline: none;
+}
+
+/* spacing block — flex/grid gap, previewed to scale */
+.gapRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+.gapLabel {
+  flex: 0 0 46px;
+  color: var(--si-label);
+  font-size: 10px;
+}
+.gapViz {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+.gapVizV {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  flex: 1;
+  min-width: 0;
+}
+.gapBlock {
+  background: #94a3b8;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.gapViz .gapBlock {
+  width: 20px;
+  height: 15px;
+}
+.gapVizV .gapBlock {
+  width: 40px;
+  height: 6px;
+}
+.gapSpace {
+  background: #93c47d;
+  flex-shrink: 0;
+}
+.gapViz .gapSpace {
+  height: 15px;
+}
+.gapVizV .gapSpace {
+  width: 40px;
+}
+.gapCell {
+  flex: 0 0 auto;
+  min-width: 24px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #1f2937;
+}
+.gapCell:hover {
+  background: #eef2f7;
+}
+.gapHint {
+  color: #6b7280;
+  line-height: 1.6;
+}
+.gapParentBtn {
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.gapParentBtn:hover {
+  border-color: var(--si-accent);
+  color: var(--si-accent);
+}
+
+/* rendered-font readout (read-only row under the typography group) */
+.renderedFont {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #1d1d1f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
+}
+.renderedFontWarn {
+  color: #92400e;
+}
+
+/* change log — same section chrome as the property groups */
+.hist {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.histHead .toolBtn {
+  min-width: 0;
+}
+.histHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: #1d1d1f;
+  margin-bottom: 2px;
+}
+.histList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 104px;
+  overflow-y: auto;
+}
+.histRow {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.histSel {
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 104px;
+}
+.histProp {
+  color: #4b5563;
+  flex-shrink: 0;
+}
+.histForced {
+  flex: 0 0 auto;
+  min-width: 14px;
+  padding: 0 3px;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 3px;
+  cursor: help;
+}
+.histLegend {
+  color: #9ca3af;
+  font-size: 10px;
+  line-height: 1.5;
+  margin-top: 2px;
+}
+.histVal {
+  color: #1d1d1f;
+  font-weight: 600;
+  margin-left: auto;
+  flex-shrink: 0;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.histEmpty {
+  color: #9ca3af;
+  font-size: 11px;
+}
