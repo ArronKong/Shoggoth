@@ -1,0 +1,67 @@
+name: Build macOS DMG previews
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      SHOGGOTH_CODESIGN_MODE: adhoc
+      SHOGGOTH_RELEASE_DISTRIBUTION: internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/manage-ui/package-lock.json
+
+      - name: Install locked dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm --prefix app/manage-ui ci --ignore-scripts
+
+      - name: Build and check both architectures
+        run: |
+          npm run build:manage
+          npm run prepare:runtimes
+          npm run release:metadata
+          npm run licenses:check
+          npx electron-builder --mac --publish never
+          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike
+
+      - name: Create and verify internal DMGs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./package.json").version')"
+          for ARCH in arm64 x64; do
+            node scripts/create-macos-dmg.mjs --arch "$ARCH" --distribution internal
+            hdiutil verify "dist/Shoggoth-${VERSION}-${ARCH}.dmg"
+          done
+          (
+            cd dist
+            shasum -a 256 \
+              "Shoggoth-${VERSION}-arm64.dmg" \
+              "Shoggoth-${VERSION}-x64.dmg" > SHA256SUMS.txt
+            shasum -a 256 -c SHA256SUMS.txt
+          )
+
+      - name: Upload checked preview images
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shoggoth-${{ github.sha }}-internal-DMG
+          path: |
+            dist/Shoggoth-*-arm64.dmg
+            dist/Shoggoth-*-x64.dmg
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
