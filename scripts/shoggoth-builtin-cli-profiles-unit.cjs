@@ -19,7 +19,9 @@ function fixture(initial = []) {
       listAgentProfiles() { return [...profiles.values()].map((profile) => structuredClone(profile)); },
       getAgentProfile(id) { return structuredClone(profiles.get(id) || null); },
       putAgentProfile(profile) {
-        const saved = { ...structuredClone(profile), createdAt: 1, updatedAt: 1 };
+        const previous = profiles.get(profile.id);
+        const saved = { ...structuredClone(profile), createdAt: previous?.createdAt ?? 1,
+          updatedAt: previous ? (previous.updatedAt ?? 0) + 1 : 1 };
         profiles.set(saved.id, saved);
         writes.push(saved);
         return structuredClone(saved);
@@ -38,25 +40,25 @@ function test(name, action) {
   }
 }
 
-test("首次启动幂等补建五个可用 CLI AgentProfile", () => {
+test("首次启动幂等补建六个可用 CLI AgentProfile", () => {
   const ctx = fixture();
   const created = ensureBuiltinCliAgentProfiles(ctx.store);
-  assert.equal(created.length, 5);
+  assert.equal(created.length, 6);
   assert.deepEqual(created.map((profile) => profile.name), [
-    "Codex", "Grok", "Antigravity", "Pi", "DeepSeek Harness",
+    "Codex", "Grok", "Antigravity", "Pi", "OpenCode", "DeepSeek",
   ]);
   assert.deepEqual(created.map((profile) => profile.runtime), [
-    "codex", "grok-build", "antigravity", "pi", "deepseek-harness",
+    "codex", "grok-build", "antigravity", "pi", "opencode", "deepseek-harness",
   ]);
-  assert.equal(new Set(created.map((profile) => profile.runtimeProfileId)).size, 5);
+  assert.equal(new Set(created.map((profile) => profile.runtimeProfileId)).size, 6);
   assert.deepEqual(created.map((profile) => profile.backendId), [
-    "codex", "grok-build", "antigravity", "pi", "deepseek-harness",
+    "shoggoth", "shoggoth", "shoggoth", "shoggoth", "shoggoth", "shoggoth",
   ]);
   assert.equal(created.every((profile) => profile.enabled && !profile.isDefault), true);
   assert.equal(created.every((profile) => profile.permissionPolicy.approvalPolicy === "on-request"
     && profile.permissionPolicy.sandbox === "danger-full-access"), true);
   assert.equal(ensureBuiltinCliAgentProfiles(ctx.store).length, 0);
-  assert.equal(ctx.writes.length, 5);
+  assert.equal(ctx.writes.length, 6);
 });
 
 test("已存在的内置 Agent 保留用户可变配置", () => {
@@ -77,8 +79,32 @@ test("已存在的内置 Agent 保留用户可变配置", () => {
   const ctx = fixture([existing]);
   ensureBuiltinCliAgentProfiles(ctx.store);
   assert.deepEqual(ctx.profiles.get(spec.id), existing);
-  assert.equal(ctx.writes.length, 4,
-    "只应补建缺失的 Grok、Antigravity、Pi 与 DeepSeek Harness profile");
+  assert.equal(ctx.writes.length, 5,
+    "只应补建缺失的 Grok、Antigravity、Pi、DeepSeek 与 OpenCode profile");
+});
+
+test("旧默认名升级为 DeepSeek，保留已有 Agent 配置且重复启动不再写入", () => {
+  const spec = BUILTIN_CLI_AGENT_PROFILES.find((item) => item.runtime === "deepseek-harness");
+  const existing = { ...spec, name: "DeepSeek Harness", providerRef: null,
+    defaultModel: "saved-model", defaultCwd: "/workspace",
+    permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+    concurrency: { maxActive: 2, maxWorkspaceWrites: 0 },
+    isDefault: false, enabled: false, createdAt: 7, updatedAt: 8 };
+  const ctx = fixture([existing]);
+  ensureBuiltinCliAgentProfiles(ctx.store);
+  assert.deepEqual(ctx.profiles.get(spec.id), { ...existing, name: "DeepSeek", updatedAt: 9 });
+  assert.equal(ctx.writes.filter((item) => item.id === spec.id).length, 1);
+  ensureBuiltinCliAgentProfiles(ctx.store);
+  assert.equal(ctx.writes.filter((item) => item.id === spec.id).length, 1);
+});
+
+test("已自行命名的 DeepSeek Agent 不被默认名升级覆盖", () => {
+  const spec = BUILTIN_CLI_AGENT_PROFILES.find((item) => item.runtime === "deepseek-harness");
+  const existing = { ...spec, name: "我的助手", isDefault: false, enabled: true };
+  const ctx = fixture([existing]);
+  ensureBuiltinCliAgentProfiles(ctx.store);
+  assert.deepEqual(ctx.profiles.get(spec.id), existing);
+  assert.equal(ctx.writes.some((item) => item.id === spec.id), false);
 });
 
 test("稳定 ID 被不同 runtime 占用时 fail closed", () => {

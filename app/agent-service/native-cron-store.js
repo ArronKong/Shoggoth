@@ -15,8 +15,7 @@ const {
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
 
-const NATIVE_CRON_STORE_VERSION = 2;
-const LEGACY_NATIVE_CRON_STORE_VERSION = 1;
+const NATIVE_CRON_STORE_VERSION = 3;
 const MAX_NATIVE_CRON_STORE_BYTES = 64 * 1024 * 1024;
 const IDEMPOTENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_OPERATION_FUTURE_SKEW_MS = 5 * 60 * 1000;
@@ -49,15 +48,8 @@ const UPDATE_FIELDS = Object.freeze([
   "overlapPolicy", "threadPolicy", "threadId", "nextRunAt",
 ]);
 const DERIVED_UPDATE_FIELDS = Object.freeze(UPDATE_FIELDS.filter((field) => field !== "nextRunAt"));
-const LEGACY_OPERATION_RESULT_TYPES = Object.freeze({
-  create_job: "job",
-  update_job: "job",
-  set_job_enabled: "job",
-  set_job_next_run_at: "job",
-  delete_job: "none",
-});
 const OPERATION_RESULT_TYPES = Object.freeze({
-  ...LEGACY_OPERATION_RESULT_TYPES,
+  create_job: "job", update_job: "job", set_job_enabled: "job", set_job_next_run_at: "job", delete_job: "none",
   update_job_derived: "job",
   set_job_enabled_derived: "job",
 });
@@ -300,10 +292,6 @@ function normalizeOperation(value, corrupt = false) {
   return normalizeOperationShape(value, corrupt, OPERATION_RESULT_TYPES);
 }
 
-function normalizeLegacyOperation(value, corrupt = false) {
-  return normalizeOperationShape(value, corrupt, LEGACY_OPERATION_RESULT_TYPES);
-}
-
 function normalizeMap(value, limit, normalize, label, idField) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype
@@ -318,7 +306,7 @@ function normalizeMap(value, limit, normalize, label, idField) {
 }
 
 function validateContainerShape(value, version, operationNormalizer) {
-  if (!exactObject(value, CONTAINER_FIELDS) || value.version !== version
+  if (!exactObject(value, [...CONTAINER_FIELDS, "tombstones"]) || value.version !== version
     || !Number.isSafeInteger(value.revision) || value.revision < 0
     || !validTimestamp(value.idempotencyFloorMs)) {
     throw cronError("CRON_STORE_CORRUPT", "Native Cron 容器损坏");
@@ -334,35 +322,26 @@ function validateContainerShape(value, version, operationNormalizer) {
   if (Object.values(operations).some((operation) => (
     operation.createdAt < value.idempotencyFloorMs
   ))) throw cronError("CRON_STORE_CORRUPT", "Cron Operation 超出幂等窗口");
+  const tombstones = normalizeMap(value.tombstones, DEFAULT_CAPACITIES.operations, item => {
+    if (!exactObject(item, ["id", "profileId", "name", "deletedAt", "operationId"])
+      || !UUID_PATTERN.test(item.id) || !validOpaqueId(item.profileId) || !validOpaqueId(item.operationId)
+      || typeof item.name !== "string" || item.name.length > 512 || !validTimestamp(item.deletedAt) || jobs[item.id]) {
+      throw cronError("CRON_STORE_CORRUPT", "Cron 删除记录损坏");
+    }
+    return clone(item);
+  }, "Cron tombstone", "id");
   return {
     version,
     revision: value.revision,
     idempotencyFloorMs: value.idempotencyFloorMs,
     jobs,
     operations,
+    tombstones,
   };
 }
 
 function validateContainer(value) {
   return validateContainerShape(value, NATIVE_CRON_STORE_VERSION, normalizeOperation);
-}
-
-function migrateV1Container(value, trustedTime) {
-  const legacy = validateContainerShape(
-    value, LEGACY_NATIVE_CRON_STORE_VERSION, normalizeLegacyOperation,
-  );
-  const idempotencyFloorMs = Math.max(
-    legacy.idempotencyFloorMs,
-    Math.max(0, trustedTime - IDEMPOTENCY_WINDOW_MS),
-  );
-  return validateContainer({
-    ...legacy,
-    version: NATIVE_CRON_STORE_VERSION,
-    revision: legacy.revision + 1,
-    idempotencyFloorMs,
-    operations: Object.fromEntries(Object.entries(legacy.operations)
-      .filter(([, operation]) => operation.createdAt >= idempotencyFloorMs)),
-  });
 }
 
 function canonicalJson(value) {
@@ -489,13 +468,12 @@ class NativeCronStore {
       const parsed = stat ? this.#parse(readPrivateFile(this.filePath, {
         fs: this.fs,
         maxBytes: MAX_NATIVE_CRON_STORE_BYTES,
-      }), openTime) : { container: this.#emptyContainer(), migrated: false };
-      this.container = parsed.container;
+      })) : this.#emptyContainer();
+      this.container = parsed;
       assertNoSensitive(this.container, this.isSensitiveValue);
       this.#assertExternalReferences(this.container);
       this.commitUncertain = false;
-      if (parsed.migrated) this.container = this.#write(this.container);
-      else this.#refreshWindow(openTime, Boolean(stat));
+      this.#refreshWindow(openTime, Boolean(stat));
       this.writerLease = lease;
       this.cleanupPending = false;
       this.opened = true;
@@ -543,7 +521,7 @@ class NativeCronStore {
       }
       this.#assertCapacity(candidate, "jobs");
       const job = normalizeJob({
-        id: this.#newId(candidate.jobs),
+        id: this.#newId({ ...candidate.jobs, ...candidate.tombstones }),
         name: input.name,
         enabled: input.enabled,
         profileId: input.profileId,
@@ -681,7 +659,12 @@ class NativeCronStore {
       throw cronError("CRON_JOB_INVALID", "deleteJob 输入无效");
     }
     return this.#mutate("delete_job", input, (candidate) => {
-      if (!candidate.jobs[input.jobId]) throw cronError("CRON_JOB_NOT_FOUND", "Cron Job 不存在");
+      if (candidate.tombstones[input.jobId]) return null;
+      const job = candidate.jobs[input.jobId];
+      if (!job) throw cronError("CRON_JOB_NOT_FOUND", "Cron Job 不存在");
+      if (Object.keys(candidate.tombstones).length >= DEFAULT_CAPACITIES.operations) throw cronError("CRON_CAPACITY", "Cron 删除记录已满");
+      candidate.tombstones = { ...candidate.tombstones, [job.id]: { id: job.id, profileId: job.profileId,
+        name: job.name, deletedAt: input.createdAt, operationId: input.operationId } };
       delete candidate.jobs[input.jobId];
       return null;
     });
@@ -695,6 +678,7 @@ class NativeCronStore {
       .filter(([, job]) => job.profileId !== profileId));
     candidate.operations = Object.fromEntries(Object.entries(this.container.operations)
       .filter(([, operation]) => operation.result?.profileId !== profileId));
+    candidate.tombstones = Object.fromEntries(Object.entries(this.container.tombstones).filter(([, item]) => item.profileId !== profileId));
     this.container = this.#write(candidate);
   }
 
@@ -703,6 +687,7 @@ class NativeCronStore {
     if (!UUID_PATTERN.test(jobId)) throw cronError("CRON_JOB_INVALID", "jobId 无效");
     return clone(this.container.jobs[jobId] || null);
   }
+  getJobTombstone(jobId) { this.#assertOpen(); return clone(this.container.tombstones[jobId] || null); }
 
   listJobs(query = {}) {
     this.#assertOpen();
@@ -875,16 +860,13 @@ class NativeCronStore {
     };
   }
 
-  #parse(bytes, trustedTime) {
+  #parse(bytes) {
     try {
       const value = JSON.parse(bytes.toString("utf8"));
-      if (value?.version === LEGACY_NATIVE_CRON_STORE_VERSION) {
-        return { container: migrateV1Container(value, trustedTime), migrated: true };
-      }
-      return { container: validateContainer(value), migrated: false };
+      return validateContainer(value);
     } catch (error) {
       const code = safeOwnDataValue(error, "code");
-      if (code === "CRON_STORE_CORRUPT") throw error;
+      if (["CRON_STORE_CORRUPT", "CRON_WRITE_FAILED", "STORE_COMMIT_UNCERTAIN"].includes(code)) throw error;
       if (typeof code === "string" && code.startsWith("UNSAFE_")) throw error;
       throw cronError("CRON_STORE_CORRUPT", "Native Cron 容器损坏");
     }
@@ -928,6 +910,7 @@ class NativeCronStore {
       idempotencyFloorMs: 0,
       jobs: {},
       operations: {},
+      tombstones: {},
     };
   }
 

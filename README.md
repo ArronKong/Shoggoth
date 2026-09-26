@@ -67,7 +67,10 @@ the workflow. The first updater-capable signed build must be installed manually;
 later signed releases can update it in place.
 
 For a first source publication, run `npm run export:source -- /absolute/path/to/an-empty-directory`.
-The export excludes internal development notes and Git history; its file-hash
+The export excludes internal development notes and Git history. It also omits
+the third-party bundled plugin packages until their redistribution terms have
+been reviewed; the source build shows an empty built-in plugin catalog. Other
+plugin installation paths remain available. Its file-hash
 manifest is written beside the directory as `<directory>.manifest.json` for local
 verification. Review and scan the exported source before creating a public repo.
 

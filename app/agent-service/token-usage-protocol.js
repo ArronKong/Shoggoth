@@ -81,6 +81,7 @@ function validateUsageBreakdown(breakdown) {
   const baseFields = [
     "byModel", "byAgent", "bySource", "totals", "modelDaily", "topSessions", "sourceKind",
   ];
+  if (Object.hasOwn(breakdown || {}, "runtimes")) baseFields.push("runtimes");
   const activityFields = ["tools", "messages", "dailyActivity"];
   const hasActivity = exactObject(breakdown, [...baseFields, ...activityFields]);
   if ((!exactObject(breakdown, baseFields) && !hasActivity)
@@ -91,6 +92,10 @@ function validateUsageBreakdown(breakdown) {
     || !validCount(breakdown.totals.missingCostEntries)) {
     throw new TypeError("invalid usage breakdown");
   }
+  if (breakdown.runtimes !== undefined && (!Array.isArray(breakdown.runtimes) || breakdown.runtimes.length > 128
+    || breakdown.runtimes.some((row) => !validParts(row, ["runtime", "runtimeAccountId"])
+      || !boundedString(row.runtime, 128, true) || !boundedString(row.runtimeAccountId, 128, true)
+      || (row.runtime === null) !== (row.runtimeAccountId === null)))) throw new TypeError("invalid usage runtime rows");
   for (const row of breakdown.byModel) {
     if (!validParts(row, ["model", "provider", "count"])
       || !boundedString(row.model) || !boundedString(row.provider, 512, true)

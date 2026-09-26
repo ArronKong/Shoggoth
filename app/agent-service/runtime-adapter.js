@@ -22,6 +22,11 @@ const RUNTIME_CAPABILITY_KEYS = Object.freeze([
   "account.logout",
   "events",
   "serverRequests",
+  "context.usage.exact",
+  "context.usage.estimated",
+  "context.compact.native",
+  "context.compact.auto",
+  "model.generate.toolFree",
 ]);
 
 function runtimeError(code, message) {
@@ -107,7 +112,7 @@ function authenticationState(status) {
   return Object.freeze({ status });
 }
 
-async function readRuntimeAuthenticationState(handle) {
+async function readRuntimeAuthenticationState(handle, { allowDeferred = false } = {}) {
   if (!handle || (typeof handle !== "object" && typeof handle !== "function")) {
     throw runtimeError("RUNTIME_AUTH_STATUS_INVALID", "Runtime auth status is invalid");
   }
@@ -138,9 +143,15 @@ async function readRuntimeAuthenticationState(handle) {
   if (typeof runtimeAuthenticationState === "function") {
     let raw;
     try {
-      raw = await runtimeAuthenticationState.call(handle);
+      raw = await runtimeAuthenticationState.call(handle, { allowDeferred });
     } catch {
       throw runtimeError("RUNTIME_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
+    }
+    // An adapter may let its executing CLI authenticate the request instead
+    // of doing a second network login check. Settings still require an actual
+    // check; deferred verification must never be advertised as authenticated.
+    if (allowDeferred && ownDataValue(raw, "verificationDeferred") === true) {
+      return authenticationState("unverified");
     }
     const authenticated = ownDataValue(raw, "authenticated");
     const credentialPresent = ownDataValue(raw, "credentialPresent");

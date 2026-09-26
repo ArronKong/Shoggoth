@@ -152,17 +152,13 @@ class MemoryStore {
     for (let index = 0; index < lines.length; index += 1) {
       let record;
       try { record = JSON.parse(lines[index]); } catch { throw memoryError("MEMORY_LOG_CORRUPT", "Memory journal 中间损坏"); }
-      const legacy = record?.type === "memory.upsert";
-      const batched = record?.type === "memory.batch";
-      if ((!legacy && !batched)
-        || !exactKeys(record, legacy
-          ? ["schemaVersion", "seq", "type", "item", "checksum"]
-          : ["schemaVersion", "seq", "type", "items", "checksum"])
+      if (record?.type !== "memory.batch"
+        || !exactKeys(record, ["schemaVersion", "seq", "type", "items", "checksum"])
         || record.schemaVersion !== MEMORY_SCHEMA_VERSION || record.seq !== index + 1
         || !HASH_PATTERN.test(record.checksum) || recordChecksum(record) !== record.checksum) {
         throw memoryError("MEMORY_LOG_CORRUPT", "Memory journal record 无效");
       }
-      const items = legacy ? [record.item] : record.items;
+      const items = record.items;
       if (!Array.isArray(items) || items.length === 0 || items.length > 128) {
         throw memoryError("MEMORY_LOG_CORRUPT", "Memory journal batch 无效");
       }

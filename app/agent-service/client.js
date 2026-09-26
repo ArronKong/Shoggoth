@@ -59,7 +59,9 @@ function requestService(paths, request, options = {}) {
   // Auth reads may start the bundled CLI and let Codex refresh native tokens.
   // Keep ordinary control requests fast while allowing this bounded cold path.
   const authRead = ["auth.read", "runtime.account.auth.read", "profile.models.list"].includes(request.method);
-  const timeoutMs = options.timeoutMs ?? (authRead ? 20_000 : DEFAULT_TIMEOUT_MS);
+  // Explicit legacy migration may wait for one macOS Keychain authorization.
+  const migration = request.method === "service.mcpAuth.migrateKeychain";
+  const timeoutMs = options.timeoutMs ?? (migration ? 65_000 : authRead ? 20_000 : DEFAULT_TIMEOUT_MS);
   const payload = {
     id: request.id || randomUUID(),
     ...request,

@@ -1,4 +1,5 @@
 "use strict";
+const { openRuntimeLedger } = require("./runtime-shared-ledger");
 
 const { imageAttachments } = require("./chat-attachments");
 
@@ -10,10 +11,13 @@ const { statIfExists, atomicWritePrivateFile, validatePrivateStat } = require(".
 const { serviceError } = require("./security");
 const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
+const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
+const { piRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { PiRpcProcess } = require("./pi-rpc-process");
 const { PiRuntimeLedger, emptyPiUsage } = require("./pi-runtime-ledger");
 const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
+const { classifyProviderLimit } = require("./runtime-provider-errors");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const PI_RPC_COMMANDS = normalizeRuntimeCommands([
   { name: "compact", description: "Compact conversation context", args: "[instructions]" },
@@ -38,7 +42,7 @@ const {
 const PARENT_ENV_ALLOWLIST = Object.freeze([
   "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY",
   "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN",
   "ANT_LING_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL",
   "AZURE_OPENAI_RESOURCE_NAME", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
@@ -262,6 +266,8 @@ class PiRuntimeHost {
     });
     this.runtimeProfileId = this.binding.runtimeProfileId;
     this.runtimeAccountId = this.binding.runtimeAccountId;
+    this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
+    this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizePiPermissionPolicy(options.permissionPolicy);
     this.controlInstance = options.controlInstance === true;
@@ -289,6 +295,7 @@ class PiRuntimeHost {
       auth: null,
       authExpiresAt: 0,
     };
+    this.modelCatalogCache = getModelCatalogCache(this.profileState);
     this.mcpGateIssuer = options.mcpGateIssuer;
     if (!this.mcpGateIssuer || ["reserveMcpServer", "bindMcpServer", "revokeMcpServer"]
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
@@ -344,7 +351,8 @@ class PiRuntimeHost {
       if (versionResult.code !== 0 || !supportsPiVersion(version)) {
         throw hostError("PI_VERSION_UNSUPPORTED", "Pi CLI 0.84.4 (0.84.x) is required");
       }
-      this.ledger = new PiRuntimeLedger({
+      this.cliVersion = version;
+      this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new PiRuntimeLedger({
         fs: this.fs,
         stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", PI_RUNTIME),
         trustedRoot: this.paths.trustedRoot,
@@ -354,7 +362,7 @@ class PiRuntimeHost {
           workspace: this.workspace,
         }),
         now: this.now,
-      }).open();
+      }).open());
       this.state = "ready";
       return this;
     } catch (error) {
@@ -366,21 +374,32 @@ class PiRuntimeHost {
     }
   }
 
+  canRetireIdle() {
+    return this.state === "ready" && !this.cleanupIncomplete && !this.stopping
+      && this.activeTurns.size === 0 && this.turnProcesses.size === 0 && this.controlProcesses.size === 0;
+  }
+
   beginAcquire() { this._assertReady(); }
 
   async authenticationState() {
     this._assertReady();
     const localCredentialPresent = securePiCredentialPresent(this.fs, this.home)
       || PI_CREDENTIAL_ENV_KEYS.some((key) => safeString(this.parentEnv[key], 64 * 1024));
+    const cachedAuth = this.profileState.authIdentity === this._modelCatalogIdentity()
+      && this.profileState.auth?.state.authenticated ? this.profileState.auth : null;
     let catalog;
     try {
-      catalog = await this._ensureModelCatalog();
+      // Readiness may reuse the last explicitly checked model's catalog while
+      // still performing the real auth check below when its own TTL expires.
+      catalog = await this._ensureModelCatalog({ model: cachedAuth?.model });
     } catch {
       return Object.freeze({ authenticated: false, credentialPresent: localCredentialPresent });
     }
     const selected = catalog.find((model) => model.isDefault) || catalog[0];
+    const identity = this._modelCatalogIdentity();
     const now = this.now();
     if (this.profileState.auth && this.profileState.authExpiresAt > now
+      && this.profileState.authIdentity === identity
       && this.profileState.auth.model === selected.model) {
       return this.profileState.auth.state;
     }
@@ -392,7 +411,13 @@ class PiRuntimeHost {
     const authenticated = result.code === 0 && payload?.status === "ready";
     const credentialPresent = authenticated || localCredentialPresent;
     const state = Object.freeze({ authenticated, credentialPresent });
+    this._assertReady();
+    if (identity !== this._modelCatalogIdentity()) {
+      throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "Pi authentication identity changed");
+    }
+    if (!authenticated) this._invalidateAuthentication();
     this.profileState.auth = { model: selected.model, state };
+    this.profileState.authIdentity = this._modelCatalogIdentity();
     this.profileState.authExpiresAt = now + 30_000;
     return state;
   }
@@ -415,7 +440,7 @@ class PiRuntimeHost {
 
   async sessionStart(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
+    const models = await this._ensureModelCatalog({ model: input?.model });
     if (!plain(input) || !safeString(input.source, 256)
       || (input.developerInstructions !== undefined
         && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
@@ -423,7 +448,7 @@ class PiRuntimeHost {
     }
     this._assertInputPermissionPolicy(input.permissionPolicy);
     const cwd = this._sessionCwd(input.cwd);
-    const model = this._validateModel(input.model);
+    const model = this._validateModel(input.model, models);
     const snapshot = this.ledger.snapshot();
     const existing = snapshot.sessions.find((session) => session.source === input.source);
     if (existing) {
@@ -462,7 +487,7 @@ class PiRuntimeHost {
 
   async sessionResume(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
+    const models = await this._ensureModelCatalog({ model: input?.model });
     if (!plain(input) || !safeString(input.sessionId, 512)
       || (input.developerInstructions !== undefined
         && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
@@ -478,7 +503,7 @@ class PiRuntimeHost {
     this.sessionConfigs.set(session.id, {
       developerInstructions: typeof input.developerInstructions === "string"
         ? input.developerInstructions : "",
-      model: this._validateModel(input.model),
+      model: this._validateModel(input.model, models),
     });
     return { session: this._projectSession(session) };
   }
@@ -569,7 +594,8 @@ class PiRuntimeHost {
 
   async turnStart(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
+    const requestedModel = input?.model ?? this.sessionConfigs.get(input?.sessionId)?.model;
+    const models = await this._ensureModelCatalog({ model: requestedModel });
     if (!plain(input) || !safeString(input.sessionId, 512)
       || !safeString(input.operationId, 512)
       || !safeString(input.prompt, 1024 * 1024, { empty: true })
@@ -583,7 +609,7 @@ class PiRuntimeHost {
     if (this._sessionCwd(input.cwd) !== session.cwd) {
       throw hostError("RUNTIME_SESSION_NOT_FOUND", "Pi turn workspace does not match");
     }
-    const model = this._validateModel(input.model ?? this.sessionConfigs.get(session.id)?.model);
+    const model = this._validateModel(requestedModel, models);
     const fingerprint = inputFingerprint({ ...input, model });
     const existing = turnByOperation(session, input.operationId);
     if (existing) {
@@ -634,6 +660,8 @@ class PiRuntimeHost {
       turnId,
       cwd: session.cwd,
       model,
+      contextWindow: models.find((entry) => entry.model === model)?.contextWindow ?? null,
+      observeContextUsage: input.observeContextUsage === true,
       title: session.title,
       prompt: this._promptText(session.id, input),
       images: imageAttachments(input.attachments).map(image => ({ type: "image", ...image })),
@@ -732,6 +760,7 @@ class PiRuntimeHost {
       isDefault: model.isDefault,
       hidden: false,
       capabilities: model.capabilities,
+      contextWindow: model.contextWindow,
     }));
     const next = offset + page.length;
     return { data: page, nextCursor: next < models.length ? String(next) : null };
@@ -741,6 +770,7 @@ class PiRuntimeHost {
     if (this.stopping) return this.stopping;
     if (this.state === "stopped") return undefined;
     this.state = "stopping";
+    this._invalidateAuthentication();
     this.stopping = (async () => {
       const active = [...this.activeTurns.values()];
       const turnProcesses = [...this.turnProcesses.entries()];
@@ -786,6 +816,7 @@ class PiRuntimeHost {
     const reservation = this.mcpGateIssuer.reserveMcpServer({
       runtimeProfileId: this.runtimeProfileId,
       runtimeAccountId: this.runtimeAccountId,
+      executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.launch.command,
     });
     active.reservationId = reservation.reservationId;
@@ -958,6 +989,9 @@ class PiRuntimeHost {
           ...(command.args ? { customInstructions: command.args } : {}),
         }, { timeoutMs: this.promptTimeoutMs });
         text = `Pi context compacted${Number.isSafeInteger(result?.tokensBefore) ? ` (${result.tokensBefore} tokens before)` : ""}.`;
+        this._publish({ known: true, type: "context_compacted", sessionId: active.sessionId, turnId: active.turnId,
+          contextUsage: unknownRuntimeContextUsage(active.sessionId, { contextWindow: active.contextWindow,
+            observedAt: this.now(), source: "session_stats" }) });
       } else if (command.command.name === "thinking") {
         if (command.args) {
           const available = await active.process.request("get_available_thinking_levels", {});
@@ -976,6 +1010,7 @@ class PiRuntimeHost {
       const current = await active.process.request("get_state", {});
       if (current.sessionId !== active.remoteSessionId) throw hostError("PI_RPC_STATE_INVALID", "Pi command changed the session binding");
       this._recordSessionFile(active.sessionId, current.sessionFile);
+      await this._observeContextUsage(active);
       this._finishActive(active, {
         status: "completed", errorCode: null, texts: [text], usage: emptyPiUsage(),
         responseId: `pi-command-${active.turnId}`, provider: null, model: null,
@@ -1033,6 +1068,7 @@ class PiRuntimeHost {
       this._publish({
         known: true,
         method: "pi/tool_execution_start",
+        ...require("./context-tool-content").contextToolContent({ input: event.args }, this.registeredSecrets),
         type: "tool_start",
         sessionId: active.sessionId,
         turnId: active.turnId,
@@ -1054,6 +1090,7 @@ class PiRuntimeHost {
       this._publish({
         known: true,
         method: "pi/tool_execution_end",
+        ...require("./context-tool-content").contextToolContent({ output: event.result }, this.registeredSecrets),
         type: "tool_result",
         sessionId: active.sessionId,
         turnId: active.turnId,
@@ -1075,6 +1112,18 @@ class PiRuntimeHost {
     }
   }
 
+  async _observeContextUsage(active, messages = null) {
+    if (!active.observeContextUsage) return;
+    let stats = null;
+    try {
+      stats = await active.process.request("get_session_stats", {}, { timeoutMs: Math.min(this.requestTimeoutMs, 2000) });
+      if (stats?.sessionId !== undefined && stats.sessionId !== active.remoteSessionId) stats = null;
+    } catch { /* Context observations cannot turn a completed task into a failure. */ }
+    if (active.settled) return;
+    this._publish({ known: true, type: "context_usage", sessionId: active.sessionId, turnId: active.turnId,
+      contextUsage: piRuntimeContextUsage(active.sessionId, stats, active.contextWindow, this.now(), messages) });
+  }
+
   async _finishSettled(active) {
     if (active.settled || active.finishing) return;
     active.finishing = true;
@@ -1088,6 +1137,7 @@ class PiRuntimeHost {
         throw hostError("PI_RPC_STATE_INVALID", "Pi terminal state is invalid");
       }
       this._recordSessionFile(active.sessionId, state.sessionFile);
+      await this._observeContextUsage(active, payload.messages);
       const turnMessages = payload.messages.slice(active.baselineMessageCount);
       const assistants = turnMessages.filter((message) => message?.role === "assistant");
       let usage = emptyPiUsage();
@@ -1095,13 +1145,15 @@ class PiRuntimeHost {
       const last = assistants[assistants.length - 1] || null;
       const status = active.interruptRequested || last?.stopReason === "aborted"
         ? "interrupted" : last?.stopReason === "error" ? "failed" : "completed";
-      const authenticationFailed = status === "failed"
+      // A limit message may mention the key or account it applies to; it is
+      // not an authentication failure and must not invalidate the login.
+      const providerLimit = status === "failed" ? classifyProviderLimit(last?.errorMessage) : null;
+      const authenticationFailed = status === "failed" && providerLimit === null
         && typeof last?.errorMessage === "string" && AUTH_ERROR_PATTERN.test(last.errorMessage);
       const accountBlocked = authenticationFailed
         && /\b(?:user )?account (?:is )?(?:blocked|suspended|deactivated)\b/iu.test(last.errorMessage);
       if (authenticationFailed) {
-        this.profileState.auth = null;
-        this.profileState.authExpiresAt = 0;
+        this._invalidateAuthentication();
       }
       const texts = assistants.map(messageText).filter((text) => text.length > 0);
       if (texts.some((text) => Buffer.byteLength(text, "utf8") > MAX_ASSISTANT_TEXT_BYTES)) {
@@ -1110,7 +1162,7 @@ class PiRuntimeHost {
       this._finishActive(active, {
         status,
         errorCode: status === "failed" ? (accountBlocked ? "RUNTIME_ACCOUNT_BLOCKED"
-          : authenticationFailed ? "AUTH_REQUIRED" : "PI_TURN_FAILED") : null,
+          : authenticationFailed ? "AUTH_REQUIRED" : providerLimit ?? "PI_TURN_FAILED") : null,
         texts,
         usage,
         responseId: responseIdFor(active, assistants),
@@ -1229,8 +1281,7 @@ class PiRuntimeHost {
       return;
     }
     if (failure.code === "AUTH_REQUIRED" || AUTH_ERROR_PATTERN.test(active.process?.stderr || "")) {
-      this.profileState.auth = null;
-      this.profileState.authExpiresAt = 0;
+      this._invalidateAuthentication();
     }
     active.settled = true;
     active.failed = true;
@@ -1244,6 +1295,7 @@ class PiRuntimeHost {
       sessionId: active.sessionId,
       turnId: active.turnId,
       status,
+      errorCode: failure.code,
     });
     active.terminal.resolve({ status });
     active.process?.endInput();
@@ -1445,26 +1497,73 @@ class PiRuntimeHost {
     }
   }
 
-  async _ensureModelCatalog() {
-    const now = this.now();
-    if (Array.isArray(this.profileState.models) && this.profileState.modelsExpiresAt > now) {
-      return this.profileState.models;
-    }
-    const rpc = this._spawnControlRpc();
+  _modelCatalogIdentity() {
+    return modelCatalogIdentity({
+      fs: this.fs,
+      values: [this.runtimeEnvironment, this.cliVersion, this.profileState.authGeneration || 0,
+        PARENT_ENV_ALLOWLIST.map((key) => [key, this.parentEnv[key] ?? null])],
+      files: [this.binaryPath, ...["auth.json", "settings.json", "models.json"]
+        .map((name) => path.join(this.home, name))],
+    });
+  }
+
+  _invalidateAuthentication() {
+    this.profileState.auth = null;
+    this.profileState.authExpiresAt = 0;
+    this.profileState.authGeneration = (this.profileState.authGeneration || 0) + 1;
+    this.modelCatalogCache.invalidate();
+  }
+
+  async _ensureModelCatalog({ model } = {}) {
     try {
-      const [state, payload] = await Promise.all([
-        rpc.request("get_state", {}, { timeoutMs: 30_000 }),
-        rpc.request("get_available_models", {}, { timeoutMs: 30_000 }),
-      ]);
-      const models = validateCatalog(state, payload);
-      this.profileState.models = models;
-      this.profileState.modelsExpiresAt = now + 5 * 60 * 1000;
-      return models;
-    } finally {
-      rpc.endInput();
-      await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]);
-      if (!rpc.closed) rpc.kill("SIGKILL");
+      return await this._readModelCatalog(model);
+    } catch (error) {
+      // Catalog discovery is read-only. A peer host retiring or credentials
+      // changing may invalidate a shared in-flight probe; validate once in the
+      // new generation, never replay a turn or hide an auth/transport failure.
+      if (error?.code !== "RUNTIME_MODEL_CATALOG_CHANGED" || this.state !== "ready") throw error;
+      return this._readModelCatalog(model);
     }
+  }
+
+  async _readModelCatalog(model) {
+    const key = this._modelCatalogIdentity();
+    const models = await this.modelCatalogCache.read({
+      key,
+      now: this.now,
+      isCurrent: () => this.state === "ready" && key === this._modelCatalogIdentity(),
+      // An unspecified/default or previously unknown model still requires a
+      // fresh catalog. Never silently substitute an old default at execution.
+      allowStale: (catalog) => typeof model === "string"
+        && catalog.some((candidate) => candidate.model === model),
+      onRefreshError: (error) => {
+        const authFailure = ["AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(error?.code);
+        if (authFailure) {
+          this._invalidateAuthentication();
+        }
+        try { this.onDiagnostic?.({ code: authFailure ? error.code : "RUNTIME_MODEL_CATALOG_UNAVAILABLE" }); } catch {}
+      },
+      load: async () => {
+        const rpc = this._spawnControlRpc();
+        try {
+          const [state, payload] = await Promise.all([
+            rpc.request("get_state", {}, { timeoutMs: this.requestTimeoutMs }),
+            rpc.request("get_available_models", {}, { timeoutMs: this.requestTimeoutMs }),
+          ]);
+          return validateCatalog(state, payload);
+        } finally {
+          rpc.endInput();
+          await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]);
+          if (!rpc.closed) rpc.kill("SIGKILL");
+        }
+      },
+    });
+    this._assertReady();
+    if (key !== this._modelCatalogIdentity()) {
+      throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "Pi model catalog identity changed");
+    }
+    this.profileState.models = models;
+    return models;
   }
 
   async commandsList(input = {}) {
@@ -1500,6 +1599,39 @@ class PiRuntimeHost {
     return { kind: "send", text: parsed.text, warning: null };
   }
 
+  async generateModelOnly(input) {
+    return require("./runtime-model-only").runBoundedModelOnly(input, async signal => {
+      const done = makeDeferred();
+      const rpc = this._spawnControlRpc({ model: input.model,
+        onEvent: event => {
+          if (["agent_end", "agent_settled"].includes(event.type)) done.resolve();
+          if (event.type === "tool_execution_start") done.reject(hostError("MODEL_ONLY_TOOLS_FORBIDDEN", "Tool-free contract violated"));
+        } });
+      const abort = () => { rpc.kill(); done.reject(hostError("MODEL_ONLY_CANCELED", "Model task canceled")); };
+      signal.addEventListener("abort", abort, { once: true });
+      void rpc.closedPromise.then(() => done.reject(hostError("MODEL_ONLY_ACCEPTANCE_UNKNOWN", "Model task disconnected")));
+      try {
+        await rpc.request("prompt", { message: input.prompt });
+        await done.promise;
+        const result = await rpc.request("get_messages");
+        const assistants = (result?.messages || []).filter(message => message.role === "assistant");
+        const last = assistants.at(-1);
+        if (!last || ["error", "aborted", "toolUse"].includes(last.stopReason)) {
+          throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model task did not produce a final response");
+        }
+        let usage = emptyPiUsage();
+        for (const message of assistants) usage = addUsage(usage, piUsage(message.usage));
+        return { text: messageText(last), model: last.model || input.model, provider: last.provider || null, usage };
+      } finally {
+        signal.removeEventListener("abort", abort);
+        rpc.endInput(); rpc.kill();
+        await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]);
+        if (!rpc.closed) { rpc.kill("SIGKILL"); await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]); }
+        if (!rpc.closed) throw hostError("RUNTIME_STOP_UNCONFIRMED", "Model worker did not stop");
+      }
+    });
+  }
+
   _spawnControlRpc(options = {}) {
     const args = [
       "--mode", "rpc", "--no-session", "--no-tools", "--no-extensions",
@@ -1527,7 +1659,7 @@ class PiRuntimeHost {
       maxFrameBytes: this.maxFrameBytes,
       maxStreamBytes: this.maxStreamBytes,
       randomUUID: this.randomUUID,
-      onEvent: () => {},
+      onEvent: options.onEvent || (() => {}),
       onFatal: (error) => {
         try { this.onDiagnostic?.({ code: error?.code || "PI_CONTROL_RPC_FAILED" }); } catch {}
       },
@@ -1541,10 +1673,10 @@ class PiRuntimeHost {
     return rpc;
   }
 
-  _validateModel(model) {
+  _validateModel(model, models = this.profileState.models) {
     if (model === undefined || model === null) return null;
     if (!safeString(model, 640) || !parsePiModelRef(model)
-      || !this.profileState.models?.some((candidate) => candidate.model === model)) {
+      || !models?.some((candidate) => candidate.model === model)) {
       throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Pi model is unavailable");
     }
     return model;
@@ -1624,6 +1756,7 @@ class PiRuntimeHost {
     const env = Object.create(null);
     for (const key of PARENT_ENV_ALLOWLIST) {
       const value = this.parentEnv[key];
+      if (key === "NODE_USE_ENV_PROXY" && !["0", "1"].includes(value)) continue;
       if (typeof value === "string" && value.isWellFormed() && !value.includes("\0")
         && Buffer.byteLength(value, "utf8") <= 64 * 1024) env[key] = value;
     }

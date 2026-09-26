@@ -89,6 +89,22 @@ try {
     updateChannel: null,
     version: "0.8.125",
   });
+  writeReleaseMarker(releaseFixture, {
+    mode: "developer-id", distribution: "internal", version: "0.8.127",
+  });
+  const internalSigned = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  assert.deepEqual(internalSigned, {
+    schemaVersion: 1, distribution: "internal", signingMode: "developer-id",
+    updateChannel: null, version: "0.8.127",
+  });
+  const { supportStatus } = require("../app/desktop-app-update");
+  assert.deepEqual(supportStatus({
+    platform: "darwin", isPackaged: true,
+    resourcesPath: path.dirname(markerPath), existsSync: () => true,
+  }), { supported: false, reason: "internal-build" });
+  assert.throws(() => writeReleaseMarker(releaseFixture, {
+    mode: "adhoc", distribution: "official", version: "0.8.127",
+  }), TypeError);
 } finally {
   fs.rmSync(path.dirname(releaseFixture), { recursive: true, force: true });
 }

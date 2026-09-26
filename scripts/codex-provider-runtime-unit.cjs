@@ -755,7 +755,7 @@ test("共享 internal Home 的 OpenAI key 只注入绑定 Profile，ChatGPT Prof
 
 test("Bedrock 只向绑定 runtimeProfile 透传标准 AWS 凭据链，secret 登记脱敏且 shell policy 继续 deny", async () => {
   const awsEnv = {
-    AWS_ACCESS_KEY_ID: "AKIAABCDEFGHIJKLMNOP", // gitleaks:allow -- synthetic test fixture; not a usable credential
+    AWS_ACCESS_KEY_ID: "bedrock-access-key-id-fixture-000001",
     AWS_SECRET_ACCESS_KEY: "bedrock-secret-access-key-fixture-000001",
     AWS_SESSION_TOKEN: "bedrock-session-token-fixture-000001",
     AWS_SECURITY_TOKEN: "bedrock-security-token-fixture-000001",

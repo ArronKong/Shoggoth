@@ -25,7 +25,7 @@ class CodexJsonlRpcClient {
     this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     this.maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
     this.maxBufferedNotifications = options.maxBufferedNotifications ?? 256;
-    this.maxBufferedNotificationBytes = options.maxBufferedNotificationBytes ?? (2 * 1024 * 1024);
+    this.maxBufferedNotificationBytes = options.maxBufferedNotificationBytes ?? (16 * 1024 * 1024);
     this.maxRetiredIds = options.maxRetiredIds ?? 1024;
     this.maxServerRequestIds = options.maxServerRequestIds ?? 4096;
     this.maxActiveServerRequests = options.maxActiveServerRequests ?? 64;

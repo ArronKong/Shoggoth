@@ -14,11 +14,13 @@ export default function TurnProcess({
   live,
   defaultOpen,
   onOpenLargeView,
+  pluginConversation,
 }: {
   steps: TurnStep[];
   live?: boolean;
   defaultOpen?: boolean;
   onOpenLargeView?: () => void;
+  pluginConversation?: { backendId: string; sessionKey: string };
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(!!defaultOpen);
@@ -56,7 +58,7 @@ export default function TurnProcess({
       <div className={styles.bodyClip} data-open={open ? "1" : undefined}>
         <div className={styles.bodyInner}>
           {open ? (
-            <TurnTimeline steps={steps} status={live ? "running" : "done"} showDurations={showDurations} autoFollow={!!live} className={styles.procTimeline} />
+            <TurnTimeline steps={steps} status={live ? "running" : "done"} showDurations={showDurations} autoFollow={!!live} className={styles.procTimeline} pluginConversation={pluginConversation} />
           ) : (
             <div />
           )}

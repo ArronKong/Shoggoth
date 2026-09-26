@@ -1,4 +1,5 @@
 import AgentAvatarView from "../components/AgentAvatar";
+import AgentDefaultRuntime from "../components/AgentDefaultRuntime";
 import {
   lazy,
   Suspense,
@@ -91,6 +92,7 @@ type LifecycleRetryOperation = { target: string; operationId: string; createdAt:
 const RETRYABLE_LIFECYCLE_CODES = new Set([
   "AGENT_INITIALIZATION_FAILED",
   "AGENT_RUNTIME_CLEANUP_FAILED",
+  "AGENT_PLUGIN_REVOKE_FAILED",
   "AGENT_COMMIT_UNCERTAIN",
   "AGENT_SERVICE_CLOSED",
   "REQUEST_TIMEOUT",
@@ -1721,6 +1723,8 @@ export default function AgentsPage() {
 
               {/* 重设置（辅助模型 / MoA / 回退链）全宽摆在两列区之后：一眼先看到主模型，
                   往下滚才是这些。与主模型区共用同一份快照，不各拉一次。 */}
+              {activeBackendDescriptor?.surfaces.runtimeBindings && <AgentDefaultRuntime key={`${backend}:${detail.id}`}
+                backend={backend} agentId={detail.id} onChanged={() => { void reloadDetail(); void refresh(); }} />}
               {hasAgentHarness ? (
                 <p className={s.dim}>{t("agents.managedReadOnly", { backend: backendName })}</p>
               ) : (

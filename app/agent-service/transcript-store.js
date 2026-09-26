@@ -28,6 +28,7 @@ const RUNTIME_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const RUNTIME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_EVENT_BYTES = 64 * 1024;
+const MAX_CONTEXT_CONTENT_BYTES = 8 * 1024 * 1024;
 const MAX_LOG_BYTES = 256 * 1024 * 1024;
 const MAX_USAGE_TOOL_ROWS = 32;
 const MAX_USAGE_ACTIVITY_ROWS = 240;
@@ -115,7 +116,7 @@ function exactKeys(value, fields) {
     && fields.every((field) => Object.hasOwn(value, field));
 }
 
-function validateRuntimeRef(value, allowLegacy = false) {
+function validateRuntimeRef(value) {
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype) {
@@ -125,14 +126,9 @@ function validateRuntimeRef(value, allowLegacy = false) {
   const fields = turn
     ? ["runtime", "runtimeProfileId", "runtimeAccountId", "sessionId", "turnId"]
     : ["runtime", "runtimeProfileId", "runtimeAccountId", "sessionId"];
-  const legacyFields = turn
-    ? ["runtime", "runtimeProfileId", "sessionId", "turnId"]
-    : ["runtime", "runtimeProfileId", "sessionId"];
-  const legacy = allowLegacy && exactKeys(value, legacyFields);
-  if ((!legacy && !exactKeys(value, fields)) || !RUNTIME_PATTERN.test(value.runtime)
+  if (!exactKeys(value, fields) || !RUNTIME_PATTERN.test(value.runtime)
     || !ID_PATTERN.test(value.runtimeProfileId)
-    || (!legacy && (typeof value.runtimeAccountId !== "string"
-      || !RUNTIME_ACCOUNT_ID_PATTERN.test(value.runtimeAccountId)))
+    || typeof value.runtimeAccountId !== "string" || !RUNTIME_ACCOUNT_ID_PATTERN.test(value.runtimeAccountId)
     || typeof value.sessionId !== "string" || value.sessionId.length === 0
     || value.sessionId.length > 512 || !value.sessionId.isWellFormed()
     || (turn && (typeof value.turnId !== "string" || value.turnId.length === 0
@@ -164,7 +160,7 @@ function validateEvent(input, expectedSessionId = null, options = {}) {
   const event = {
     ...input,
     content: cloneJson(input.content),
-    runtimeRef: validateRuntimeRef(input.runtimeRef, options.allowLegacyRuntimeRef === true),
+    runtimeRef: validateRuntimeRef(input.runtimeRef),
   };
   cloneJson(event);
   return event;
@@ -362,7 +358,7 @@ class TranscriptStore {
       try { record = JSON.parse(lines[index]); } catch {
         throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript journal 中间记录损坏");
       }
-      this._validateRecord(record, index + 1, state, { allowLegacyRuntimeRef: true });
+      this._validateRecord(record, index + 1, state);
     }
     const manifestStat = lstatIfExists(targets.manifest);
     let manifestCurrent = state.revision === 0 && !manifestStat;
@@ -440,19 +436,32 @@ class TranscriptStore {
     this._assertOpen(true);
     const state = this._load(input.profileId, input.sessionId);
     const existing = state.byId.get(input.id);
+    let content = input.content;
+    const encoded = JSON.stringify(input.contextContent ?? content);
+    if (input.contextContent !== undefined || Buffer.byteLength(encoded || "") > 48 * 1024) {
+      const contextRef = this.saveContextContent(input.profileId, input.sessionId, input.contextContent ?? content);
+      // The journal remains a bounded display projection. The model projection
+      // resolves the verified content object rather than this display excerpt.
+      content = input.contextContent !== undefined ? { ...content, contextRef } : {
+        ...(typeof content?.text === "string" ? { text: Buffer.from(content.text).subarray(0, 24 * 1024)
+          .toString("utf8").toWellFormed() } : {}),
+        ...(content?.operationId ? { operationId: content.operationId } : {}),
+        ...(content?.attachments ? { attachments: content.attachments } : {}),
+        contextRef,
+      };
+    }
     const candidate = {
       id: input.id,
       sessionId: input.sessionId,
       runId: input.runId ?? null,
       seq: existing?.seq ?? state.lastEventSeq + 1,
       kind: input.kind,
-      content: input.content,
+      content,
       runtimeRef: input.runtimeRef ?? null,
       contextExcluded: input.contextExcluded === true,
       occurredAt: input.occurredAt ?? existing?.occurredAt ?? this.now(),
     };
     const event = validateEvent(candidate, input.sessionId, {
-      allowLegacyRuntimeRef: existing !== undefined,
     });
     const safe = this.assertSecretSafe(event, Object.freeze({
       profileId: input.profileId,
@@ -493,8 +502,49 @@ class TranscriptStore {
     const state = this._load(profileId, sessionId);
     const includeExcluded = options.includeContextExcluded !== false;
     return state.events
-      .filter((event) => includeExcluded || !event.contextExcluded)
+      .filter((event) => (includeExcluded || !event.contextExcluded)
+        && (options.afterSeq === undefined || event.seq > options.afterSeq)
+        && (options.throughSeq === undefined || event.seq <= options.throughSeq))
       .map((event) => structuredClone(event));
+  }
+
+  saveContextContent(profileId, sessionId, content) {
+    this._assertOpen(true);
+    const encoded = JSON.stringify(content);
+    if (!encoded || Buffer.byteLength(encoded) > MAX_CONTEXT_CONTENT_BYTES) {
+      throw transcriptError("TRANSCRIPT_EVENT_TOO_LARGE", "可迁移正文超过单个对象容量");
+    }
+    const safe = this.assertSecretSafe(content, Object.freeze({ profileId, sessionId, kind: "contextContent" }));
+    if (safe === false || safe?.then || require("./memory-engine").hasSecret(encoded)) {
+      throw transcriptError("TRANSCRIPT_SECRET_REJECTED", "可迁移正文含敏感信息");
+    }
+    const hash = sha256(encoded), bytes = Buffer.byteLength(encoded);
+    const dir = path.join(this._sessionDir(profileId, sessionId), "context-content");
+    ensurePrivateDirectoryTree(dir, this.paths.trustedRoot);
+    const file = path.join(dir, `${hash}.json`);
+    if (lstatIfExists(file)) {
+      const saved = readPrivateFile(file, { fs: this.fs, maxBytes: MAX_CONTEXT_CONTENT_BYTES });
+      if (sha256(saved) !== hash) throw transcriptError("CONTEXT_CONTENT_CORRUPT", "可迁移正文校验失败");
+    } else atomicWritePrivateFile(file, encoded, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
+    return { version: 1, hash, bytes, characters: encoded.length, complete: content?.contextComplete !== false,
+      estimatedTokens: require("./conversation-context-budget").estimateContextTokens(encoded) };
+  }
+
+  contextEvent(profileId, sessionId, event) {
+    const ref = event.content?.contextRef;
+    if (!ref || event.contextExcluded) return event;
+    if (ref.version !== 1 || !HASH_PATTERN.test(ref.hash) || !Number.isSafeInteger(ref.bytes)
+      || ref.bytes < 1 || ref.bytes > MAX_CONTEXT_CONTENT_BYTES) {
+      throw transcriptError("CONTEXT_CONTENT_CORRUPT", "可迁移正文引用无效");
+    }
+    const file = path.join(this._sessionDir(profileId, sessionId), "context-content", `${ref.hash}.json`);
+    let bytes;
+    try { bytes = readPrivateFile(file, { fs: this.fs, maxBytes: MAX_CONTEXT_CONTENT_BYTES }); }
+    catch { throw transcriptError("CONTEXT_CONTENT_UNAVAILABLE", "可迁移正文缺失，无法完整续接"); }
+    if (bytes.length !== ref.bytes || sha256(bytes) !== ref.hash) {
+      throw transcriptError("CONTEXT_CONTENT_CORRUPT", "可迁移正文校验失败");
+    }
+    return { ...event, content: JSON.parse(bytes.toString("utf8")) };
   }
 
   summarizeUsageActivity(rawRange = "30d", profileIds) {

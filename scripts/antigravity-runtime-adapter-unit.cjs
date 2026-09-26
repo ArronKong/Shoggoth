@@ -134,14 +134,17 @@ function fixture(behavior = {}) {
   const revocations = [];
   let reservationSequence = 0;
   const mcpGateIssuer = {
-    reserveMcpServer() {
+    reserveMcpServer(input) {
+      behavior.onMcpReserve?.(input);
       reservationSequence += 1;
       const reservationId = reservationSequence.toString(16).padStart(64, "0");
       return {
         reservationId,
         name: "shoggoth",
         command: binaryPath,
-        args: ["bootstrap", "--shoggoth-internal-role=mcp"],
+        args: ["bootstrap", "--shoggoth-internal-role=mcp",
+          `--shoggoth-runtime-profile=${input.runtimeProfileId}`,
+          `--shoggoth-runtime-account=${input.runtimeAccountId}`],
         env: [
           { name: "ELECTRON_RUN_AS_NODE", value: "1" },
           { name: "SHOGGOTH_RUNTIME_MCP_GATE_NONCE", value: reservationId },
@@ -246,6 +249,7 @@ function fixture(behavior = {}) {
     mcpGateIssuer,
     acceptanceTimeoutMs: 1_000,
     requestTimeoutMs: 1_000,
+    now: behavior.now,
     promptTimeoutMs: 1_000,
     shutdownGraceMs: 100,
     killGraceMs: 100,
@@ -387,136 +391,13 @@ test("version, arguments and managed config use safe Antigravity defaults", () =
     env: { ELECTRON_RUN_AS_NODE: "1" },
     disabled: false,
   });
+  const beforeSettings = fs.statSync(settingsPath);
+  writeAntigravityManagedConfig({ home, trustedRoot,
+    mcpServer: { command: "/tmp/shoggoth-helper", args: ["bootstrap"], env: [] } });
+  const afterSettings = fs.statSync(settingsPath);
+  assert.equal(afterSettings.ino, beforeSettings.ino, "unchanged settings retain catalog identity across turns");
+  assert.equal(afterSettings.mtimeMs, beforeSettings.mtimeMs);
   fs.rmSync(trustedRoot, { recursive: true, force: true });
-});
-
-test("legacy ledger drops the default-project conversation binding exactly once", () => {
-  const trustedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-antigravity-ledger-"));
-  fs.chmodSync(trustedRoot, 0o700);
-  const stateRoot = path.join(trustedRoot, "state", "runtime-ledgers", "antigravity");
-  const runtimeProfileId = "antigravity-main";
-  const workspaceShardId = "a".repeat(64);
-  const runtimeRoot = path.join(stateRoot, runtimeProfileId, workspaceShardId);
-  const ledgerPath = path.join(runtimeRoot, "runtime-ledger.json");
-  const workspace = path.join(trustedRoot, "workspace");
-  fs.mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(workspace, { mode: 0o700 });
-  fs.writeFileSync(ledgerPath, `${JSON.stringify({
-    schemaVersion: 1,
-    runtime: "antigravity",
-    runtimeProfileId,
-    workspaceShardId,
-    sessions: [{
-      id: "antigravity-session-legacy",
-      remoteConversationId: "legacy-default-project-conversation",
-      source: "chat:legacy",
-      cwd: workspace,
-      title: null,
-      archived: false,
-      lastUsage: {
-        inputTokens: 100,
-        outputTokens: 20,
-        reasoningOutputTokens: 5,
-        cachedInputTokens: 10,
-        cacheWriteInputTokens: 3,
-        totalTokens: 120,
-      },
-      createdAt: 1,
-      updatedAt: 2,
-      turns: [{
-        id: "antigravity-turn-legacy",
-        operationId: "operation-legacy",
-        fingerprint: "b".repeat(64),
-        acceptance: "accepted",
-        status: "completed",
-        errorCode: null,
-        assistantMessages: [{ id: "message-legacy", text: "旧会话回答" }],
-        responseId: null,
-        createdAt: 1,
-        updatedAt: 2,
-      }],
-    }],
-  })}\n`, { mode: 0o600 });
-
-  try {
-    const migrated = new AntigravityRuntimeLedger({
-      stateRoot,
-      trustedRoot,
-      runtimeProfileId,
-      workspaceShardId,
-    }).open();
-    assert.equal(ANTIGRAVITY_LEDGER_SCHEMA_VERSION, 2);
-    assert.equal(migrated.snapshot().schemaVersion, 2);
-    assert.equal(migrated.snapshot().sessions[0].remoteConversationId, null);
-    assert.deepEqual(migrated.snapshot().sessions[0].lastUsage, emptyAntigravityUsage());
-    assert.equal(migrated.snapshot().sessions[0].turns[0].assistantMessages[0].text,
-      "旧会话回答");
-    assert.deepEqual({
-      source: migrated.snapshot().sessions[0].source,
-      title: migrated.snapshot().sessions[0].title,
-      archived: migrated.snapshot().sessions[0].archived,
-      createdAt: migrated.snapshot().sessions[0].createdAt,
-      updatedAt: migrated.snapshot().sessions[0].updatedAt,
-      operationId: migrated.snapshot().sessions[0].turns[0].operationId,
-      fingerprint: migrated.snapshot().sessions[0].turns[0].fingerprint,
-      status: migrated.snapshot().sessions[0].turns[0].status,
-    }, {
-      source: "chat:legacy",
-      title: null,
-      archived: false,
-      createdAt: 1,
-      updatedAt: 2,
-      operationId: "operation-legacy",
-      fingerprint: "b".repeat(64),
-      status: "completed",
-    });
-    const persistedMigration = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
-    assert.equal(persistedMigration.schemaVersion, 2);
-    assert.equal(persistedMigration.sessions[0].remoteConversationId, null);
-    assert.deepEqual(persistedMigration.sessions[0].lastUsage, emptyAntigravityUsage());
-    const reboundUsage = {
-      inputTokens: 50,
-      outputTokens: 10,
-      reasoningOutputTokens: 2,
-      cachedInputTokens: 5,
-      cacheWriteInputTokens: 1,
-      totalTokens: 60,
-    };
-    migrated.update((data) => {
-      data.sessions[0].remoteConversationId = "project-aware-conversation";
-      data.sessions[0].lastUsage = reboundUsage;
-    });
-
-    const reopened = new AntigravityRuntimeLedger({
-      stateRoot,
-      trustedRoot,
-      runtimeProfileId,
-      workspaceShardId,
-    }).open();
-    assert.equal(reopened.snapshot().sessions[0].remoteConversationId,
-      "project-aware-conversation");
-    assert.deepEqual(reopened.snapshot().sessions[0].lastUsage, reboundUsage);
-
-    const invalidShardId = "c".repeat(64);
-    const invalidRoot = path.join(stateRoot, runtimeProfileId, invalidShardId);
-    const invalidPath = path.join(invalidRoot, "runtime-ledger.json");
-    const invalidLegacy = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
-    invalidLegacy.schemaVersion = 1;
-    invalidLegacy.workspaceShardId = invalidShardId;
-    invalidLegacy.sessions[0].remoteConversationId = "invalid\0conversation";
-    fs.mkdirSync(invalidRoot, { recursive: true, mode: 0o700 });
-    const invalidBytes = `${JSON.stringify(invalidLegacy)}\n`;
-    fs.writeFileSync(invalidPath, invalidBytes, { mode: 0o600 });
-    assert.throws(() => new AntigravityRuntimeLedger({
-      stateRoot,
-      trustedRoot,
-      runtimeProfileId,
-      workspaceShardId: invalidShardId,
-    }).open(), { code: "ANTIGRAVITY_LEDGER_INVALID" });
-    assert.equal(fs.readFileSync(invalidPath, "utf8"), invalidBytes);
-  } finally {
-    fs.rmSync(trustedRoot, { recursive: true, force: true });
-  }
 });
 
 test("macOS managed HOME mirrors only the user default keychain and stays idempotent", () => {
@@ -725,6 +606,43 @@ test("Antigravity control queries stay headless, coalesce in flight and retain n
     await value.adapter.stopAll();
     value.cleanup();
   }
+});
+
+test("parallel per-run Antigravity hosts share a ledger but retain independent MCP gate environments", async () => {
+  const reservations = [];
+  const value = fixture({ onMcpReserve: input => reservations.push(input), onTurnInput(child, options) {
+    const conversationId = `conversation-${child.pid}`;
+    child.send({ event: "init", conversation_id: conversationId,
+      init: { cwd: options.cwd, tools: ["shoggoth"], permission_mode: "request-review" } });
+    child.send({ event: "step_update", step_update: { conversation_id: conversationId,
+      step_index: 0, state: "DONE", step_type: "user_input" } });
+  } });
+  const binding = { runtime: "antigravity", runtimeProfileId: "parallel-profile",
+    runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID };
+  const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+  try {
+    const hosts = await Promise.all(["run-one", "run-two"].map(runId => value.pool.get(binding,
+      { workspace: value.workspace, permissionPolicy, executionContract: { runId } })));
+    assert.notEqual(hosts[0], hosts[1]);
+    assert.equal(hosts[0].ledger, hosts[1].ledger);
+    const sessions = await Promise.all(hosts.map((host, index) => host.sessionStart({
+      source: `parallel-session-${index}`, cwd: value.workspace, permissionPolicy,
+    })));
+    await Promise.all(hosts.map((host, index) => host.turnStart({
+      sessionId: sessions[index].session.id, operationId: `parallel-turn-${index}`,
+      prompt: "hold", cwd: value.workspace, permissionPolicy,
+    })));
+    const processes = value.spawns.filter(entry => entry.command === "/bin/sh");
+    assert.equal(processes.length, 2);
+    const nonces = processes.map(entry => entry.options.env.SHOGGOTH_RUNTIME_MCP_GATE_NONCE);
+    assert.notEqual(nonces[0], nonces[1]);
+    assert.deepEqual(reservations.map(entry => entry.executionRunId), ["run-one", "run-two"]);
+    const config = fs.readFileSync(path.join(hosts[0].home, ".gemini", "config", "mcp_config.json"), "utf8");
+    for (const nonce of nonces) assert.equal(config.includes(nonce), false);
+    assert.deepEqual(JSON.parse(config).mcpServers.shoggoth.env, { ELECTRON_RUN_AS_NODE: "1" });
+    assert.equal(hosts[0].ledger.snapshot().sessions.length, 2);
+    assert.equal(hosts[0].ledger.snapshot().sessions.every(session => session.turns[0].status === "inProgress"), true);
+  } finally { await value.pool.stopAll(); value.cleanup(); }
 });
 
 test("adapter executes a turn with account-shared integration HOME, MCP bind barrier and local durable session", async () => {
@@ -1113,6 +1031,51 @@ test("Google 上游 503 保留为暂时不可用且不自动重放", async () =>
   }
 });
 
+for (const [label, stderr, expectedCode] of [
+  ["rate limit", 'Request failed: RESOURCE_EXHAUSTED (code 429), status "RESOURCE_EXHAUSTED"\n', "RUNTIME_RATE_LIMITED"],
+  ["quota", 'Request failed: RESOURCE_EXHAUSTED (code 429): Quota exceeded for quota metric\n', "RUNTIME_QUOTA_EXHAUSTED"],
+]) {
+  test(`Google 429 ${label} is reported with a public reason and never replayed`, async () => {
+    let inputs = 0;
+    const value = fixture({
+      onTurnInput(child) {
+        inputs += 1;
+        child.stderr.write(stderr);
+        child.send({ event: "result", result: { status: "ERROR" } });
+        child.finish(1);
+      },
+    });
+    try {
+      const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+      const runtime = await value.adapter.acquire({
+        runtime: "antigravity",
+        runtimeProfileId: "antigravity-main",
+        runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID,
+      }, { workspace: value.workspace, permissionPolicy });
+      const started = await runtime.sessionStart({
+        source: `chat:limit-${label.replace(/\s/gu, "-")}`,
+        developerInstructions: "",
+        model: "gemini-3.7-flash-high",
+        cwd: value.workspace,
+        permissionPolicy,
+      });
+      await assert.rejects(runtime.turnStart({
+        sessionId: started.session.id,
+        operationId: "operation-limit",
+        prompt: "检查项目",
+        model: "gemini-3.7-flash-high",
+        cwd: value.workspace,
+        permissionPolicy,
+      }), { code: expectedCode });
+      assert.equal(runtime.host.ledger.snapshot().sessions[0].turns[0].errorCode, expectedCode);
+      assert.equal(inputs, 1);
+    } finally {
+      await value.adapter.stopAll().catch(() => {});
+      value.cleanup();
+    }
+  });
+}
+
 test("a failed tool step remains recoverable and does not interrupt the turn", async () => {
   const value = fixture({
     onTurnInput(child, options) {
@@ -1380,4 +1343,231 @@ test("stopping during version discovery fences initialization and reaps the cont
   } finally {
     value.cleanup();
   }
+});
+
+test("Antigravity catalog SWR unblocks known models, coalesces refresh, and still validates unknown models", async () => {
+  let now = 1_000, hold = false;
+  const held = [];
+  const value = fixture({ now: () => now, onControl(child, args) {
+    if (args[0] === "models" && hold) { held.push(child); return true; }
+    return false;
+  } });
+  const binding = { runtime: "antigravity", runtimeProfileId: "catalog-swr", runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID };
+  try {
+    const runtime = await value.adapter.acquire(binding, { workspace: value.workspace });
+    await runtime.modelsList();
+    now += 6 * 60_000; hold = true;
+    const first = await runtime.sessionStart({ source: "known-one", cwd: value.workspace, model: "gemini-3.7-flash-high" });
+    const second = await runtime.sessionStart({ source: "known-two", cwd: value.workspace, model: "gemini-3.7-pro-high" });
+    assert.notEqual(first.session.id, second.session.id);
+    await waitFor(() => held.length === 1, "one shared refresh");
+    let unknownSettled = false;
+    const unknown = runtime.sessionStart({ source: "unknown", cwd: value.workspace, model: "not-in-catalog" })
+      .finally(() => { unknownSettled = true; });
+    const rejection = assert.rejects(unknown, { code: "RUNTIME_MODEL_UNAVAILABLE" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unknownSettled, false, "unknown models must await real catalog validation");
+    assert.equal(held.length, 1);
+    held[0].stdout.write("gemini-3.7-flash-high\tFlash\ngemini-3.7-pro-high\tPro\n"); held[0].finish(0);
+    await rejection;
+    assert.equal(runtime.host.ledger.snapshot().sessions.length, 2);
+    assert.equal(value.spawns.filter((entry) => entry.args[0] === "models").length, 2);
+    assert.equal(value.bindings.length, 0, "catalog refresh never receives an MCP gate");
+  } finally { await value.pool.stopAll(); value.cleanup(); }
+});
+
+test("Antigravity catalog identity changes wait for fresh data and auth failure invalidates previous models", async () => {
+  let hold = false;
+  const held = [];
+  const value = fixture({ onControl(child, args) {
+    if (args[0] === "models" && hold) { held.push(child); return true; }
+    return false;
+  } });
+  try {
+    const runtime = await value.adapter.acquire({ runtime: "antigravity", runtimeProfileId: "catalog-auth",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { workspace: value.workspace });
+    await runtime.modelsList();
+    const authPath = path.join(runtime.host.runtimeEnvironment.nativeHome, "oauth_creds.json");
+    fs.mkdirSync(path.dirname(authPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(authPath, '{"fixture":"new-account-generation"}', { mode: 0o600 });
+    hold = true;
+    let settled = false;
+    const opening = runtime.sessionStart({ source: "changed-identity", cwd: value.workspace, model: "gemini-3.7-flash-high" })
+      .finally(() => { settled = true; });
+    const rejected = assert.rejects(opening, { code: "AUTH_REQUIRED" });
+    await waitFor(() => held.length === 1, "identity refresh");
+    assert.equal(settled, false, "old account catalog cannot authorize the new identity");
+    held[0].stderr.write("authentication required"); held[0].finish(1);
+    await rejected;
+    assert.equal(runtime.host.profileState.authenticated, false);
+    assert.equal(runtime.host.profileState.models, null);
+    assert.equal(runtime.host.ledger.snapshot().sessions.length, 0);
+    assert.equal(value.spawns.filter((entry) => entry.args[0] === "models").length, 2, "authentication failure is not retried");
+  } finally { await value.pool.stopAll(); value.cleanup(); }
+});
+
+test("Antigravity catalog fences invalidated replies and retries only that read once", async () => {
+  const held = [];
+  const value = fixture({ onControl(child, args) {
+    if (args[0] === "models") { held.push(child); return true; }
+    return false;
+  } });
+  try {
+    const runtime = await value.adapter.acquire({ runtime: "antigravity", runtimeProfileId: "catalog-generation",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { workspace: value.workspace });
+    const listing = runtime.modelsList();
+    await waitFor(() => held.length === 1, "first catalog");
+    runtime.host.modelCatalogCache.invalidate();
+    held[0].stdout.write("obsolete\tObsolete\n"); held[0].finish(0);
+    await waitFor(() => held.length === 2, "safe read retry");
+    held[1].stdout.write("current\tCurrent\n"); held[1].finish(0);
+    assert.deepEqual((await listing).data.map((model) => model.model), ["current"]);
+    assert.deepEqual(runtime.host.profileState.models.map((model) => model.model), ["current"]);
+    assert.equal(value.spawns.filter((entry) => entry.args[0] === "models").length, 2);
+  } finally { await value.pool.stopAll(); value.cleanup(); }
+});
+
+test("native terminal approval signal crosses the production Host and Adapter and interruption clears it", async () => {
+  const { AntigravityNativeTerminal } = require("../app/agent-service/antigravity-native-terminal");
+  const value = fixture();
+  let terminal, onExit, requestContext, requestParams;
+  const writes = [];
+  try {
+    const runtime = await value.adapter.acquire({ runtime: "antigravity", runtimeProfileId: "native-signal",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { workspace: value.workspace });
+    runtime.host.nativeApprovalsAvailable = true;
+    const nativeConsent = path.join(runtime.host.runtimeEnvironment.nativeHome, "antigravity-cli", "cache", "onboarding.json");
+    fs.mkdirSync(path.dirname(nativeConsent), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(nativeConsent, '{"onboardingComplete":true}', { mode: 0o600 });
+    runtime.host.nativeTerminalFactory = async (options) => {
+      terminal = await AntigravityNativeTerminal.launch({ ...options,
+        spawnPty: () => ({ pid: 70_777, write: (data) => writes.push(data), onData() {}, onExit(callback) { onExit = callback; } }),
+        killProcessGroup: (_pid, signal) => queueMicrotask(() => onExit({ exitCode: 0, signal: signal === "SIGINT" ? 2 : 9 })),
+      });
+      clearInterval(terminal.timer);
+      return terminal;
+    };
+    runtime.registerServerRequestHandler("item/commandExecution/requestApproval", (params, context) => {
+      requestParams = params; requestContext = context;
+      return new Promise((resolve) => context.signal.addEventListener("abort", () => resolve({ decision: "cancel" }), { once: true }));
+    });
+    const session = (await runtime.sessionStart({ source: "signal", cwd: value.workspace, model: "gemini-3.7-flash-high" })).session;
+    const turnStarting = runtime.turnStart({ sessionId: session.id, operationId: "signal-turn", prompt: "read fixture", cwd: value.workspace });
+    await waitFor(() => terminal?.ready && terminal.prompt, "bound launch barrier and input");
+    terminal._state({ cwd: value.workspace, conversation_id: "conversation-signal", agent_state: "working" });
+    terminal._record({ step_index: 0, type: "USER_INPUT", content: `<USER_REQUEST>\n${terminal.prompt}\n</USER_REQUEST>` });
+    const turn = (await turnStarting).turn;
+    terminal._state({ cwd: value.workspace, conversation_id: "conversation-signal", agent_state: "tool_use", tool_confirmation_pending: true });
+    await new Promise((resolve) => terminal.terminal.write("\x1b[2J\x1b[HRead URL\r\nhttps://example.invalid/\r\n> 1. Yes, allow once\r\n  2. No, cancel\r\n↑/↓ Navigate", resolve));
+    terminal._checkApproval();
+    await waitFor(() => requestContext, "request through Host and Adapter");
+    assert.equal(requestContext.signal, terminal.pending.controller.signal);
+    assert.equal(requestContext.sourceMethod, "native/approval");
+    assert.equal(requestParams.sessionId, session.id);
+    assert.equal(requestParams.turnId, turn.id);
+    assert.equal(runtime.host.activeTurns.get(session.id).promptTimer, null);
+    await runtime.turnInterrupt({ sessionId: session.id, turnId: turn.id });
+    assert.equal(requestContext.signal.aborted, true);
+    assert.equal(terminal.pending, null);
+    assert.equal(terminal.approvalTimer, null);
+    assert.equal(runtime.host.activeTurns.size, 0);
+    assert.equal(value.revocations.length, 1);
+    assert.deepEqual(writes, ["go\n"], "interruption never writes a grant to the native menu");
+  } finally {
+    if (terminal && !terminal.closed) { terminal.closed = true; terminal.dispose(); }
+    await value.pool.stopAll(); value.cleanup();
+  }
+});
+
+test("default-model sessions start, resume and send without a catalog dependency", async () => {
+  const value = fixture({ onControl(_child, args) {
+    assert.notEqual(args[0], "models", "the CLI resolves its own default model");
+    return false;
+  } });
+  try {
+    const runtime = await value.adapter.acquire({ runtime: "antigravity", runtimeProfileId: "default-model",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { workspace: value.workspace });
+    const { readRuntimeAuthenticationState } = require("../app/agent-service/runtime-adapter");
+    assert.deepEqual(await readRuntimeAuthenticationState(runtime, { allowDeferred: true }), { status: "unverified" });
+    const session = (await runtime.sessionStart({ source: "default-model", cwd: value.workspace })).session;
+    await runtime.sessionResume({ sessionId: session.id, cwd: value.workspace });
+    await runtime.turnStart({ sessionId: session.id, operationId: "default-turn", prompt: "hello", cwd: value.workspace });
+    await waitFor(() => runtime.host.ledger.snapshot().sessions[0].turns[0]?.status === "completed", "default-model reply");
+    assert.equal(value.spawns.filter((entry) => entry.args[0] === "models").length, 0);
+  } finally { await value.pool.stopAll(); value.cleanup(); }
+});
+
+test("native eligibility rejection is durable failed, releases busy state, and is not replayed", async () => {
+  const { AntigravityNativeTerminal } = require("../app/agent-service/antigravity-native-terminal");
+  const value = fixture();
+  let terminal, onExit;
+  try {
+    const runtime = await value.adapter.acquire({ runtime: "antigravity", runtimeProfileId: "native-rejection",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { workspace: value.workspace });
+    runtime.host.nativeApprovalsAvailable = true;
+    runtime.host.acceptanceTimeoutMs = 100;
+    runtime.host.nativeStartupTimeoutMs = 1_000;
+    const nativeConsent = path.join(runtime.host.runtimeEnvironment.nativeHome, "antigravity-cli", "cache", "onboarding.json");
+    fs.mkdirSync(path.dirname(nativeConsent), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(nativeConsent, '{"onboardingComplete":true}', { mode: 0o600 });
+    let launches = 0;
+    runtime.host.nativeTerminalFactory = async (options) => {
+      launches += 1;
+      terminal = await AntigravityNativeTerminal.launch({ ...options,
+        spawnPty: () => ({ pid: 70_778, write() {}, onData() {}, onExit(callback) { onExit = callback; } }),
+        killProcessGroup: () => queueMicrotask(() => onExit({ exitCode: 0, signal: 9 })),
+      });
+      clearInterval(terminal.timer); return terminal;
+    };
+    const session = (await runtime.sessionStart({ source: "rejection", cwd: value.workspace })).session;
+    const input = { sessionId: session.id, operationId: "rejection-turn", prompt: "no tools", cwd: value.workspace };
+    const starting = runtime.turnStart(input);
+    const rejected = assert.rejects(starting, { code: "ANTIGRAVITY_NETWORK_UNAVAILABLE" });
+    await waitFor(() => terminal?.ready && terminal.prompt, "native launch");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(runtime.host.activeTurns.size, 1, "startup does not consume the post-submit acceptance budget");
+    terminal.sent = true;
+    terminal.options.onInputSubmitted();
+    fs.appendFileSync(terminal.logPath, "W0923 10:07:36.660092     450 conversation_manager.go:694] Not sending user message: Eligibility check failed: net/http: TLS handshake timeout\n");
+    try { terminal._readInputRejection(); } catch (error) { terminal._fail(error); }
+    await rejected;
+    const turn = runtime.host.ledger.snapshot().sessions[0].turns[0];
+    assert.equal(turn.status, "failed"); assert.equal(turn.acceptance, "failed");
+    assert.equal(turn.errorCode, "ANTIGRAVITY_NETWORK_UNAVAILABLE");
+    assert.equal(runtime.host.activeTurns.size, 0);
+    assert.equal(value.revocations.length, 1);
+    await assert.rejects(runtime.turnStart(input), { code: "ANTIGRAVITY_NETWORK_UNAVAILABLE" });
+    assert.equal(launches, 1, "the failed operation is never automatically replayed");
+  } finally {
+    if (terminal && !terminal.closed) { terminal.closed = true; terminal.dispose(); }
+    await value.pool.stopAll(); value.cleanup();
+  }
+});
+
+test("native startup has its own deadline and only unsent input is definitely rejected", async () => {
+  const value = fixture();
+  try {
+    const runtime = await value.adapter.acquire({ runtime: "antigravity", runtimeProfileId: "native-startup",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { workspace: value.workspace });
+    const session = (await runtime.sessionStart({ source: "startup", cwd: value.workspace })).session;
+    let active;
+    runtime.host._spawnTurn = async (value) => {
+      active = value;
+      active.nativeTerminal = true;
+      active.child = { sent: false };
+    };
+    for (const sent of [false, true]) {
+      const starting = runtime.turnStart({ sessionId: session.id, operationId: `startup-${sent}`, prompt: "hello", cwd: value.workspace });
+      const code = sent ? "RUNTIME_TURN_ACCEPTANCE_UNKNOWN" : "ANTIGRAVITY_STARTUP_TIMEOUT";
+      const rejected = assert.rejects(starting, { code });
+      await waitFor(() => active?.child, "turn allocation");
+      active.child.sent = sent;
+      runtime.host._acceptanceTimedOut(active);
+      await rejected;
+      const turn = runtime.host.ledger.snapshot().sessions[0].turns.at(-1);
+      assert.equal(turn.acceptance, sent ? "unknown" : "failed");
+      assert.equal(turn.status, sent ? "interrupted" : "failed");
+      active = null;
+    }
+  } finally { await value.pool.stopAll(); value.cleanup(); }
 });

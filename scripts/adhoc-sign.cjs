@@ -7,6 +7,7 @@
 const { execFileSync, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { releaseDistribution } = require("./release-distribution.cjs");
 
 function verifyPackagedSqlite(appPath) {
   const { extractFile } = require("@electron/asar");
@@ -91,8 +92,8 @@ function nestedHostOptionalDependencyPaths(appPath) {
   ];
 }
 
-function writeReleaseMarker(appPath, { mode, version }) {
-  const official = mode === "developer-id";
+function writeReleaseMarker(appPath, { mode, version, distribution }) {
+  const official = releaseDistribution(mode, distribution) === "official";
   const markerPath = path.join(appPath, "Contents", "Resources", "shoggoth-release.json");
   const marker = {
     schemaVersion: 1,
@@ -169,6 +170,7 @@ exports.default = function adhocSign(context) {
   const identity = process.env.SHOGGOTH_CODESIGN_IDENTITY || "-";
   const keychainPath = process.env.SHOGGOTH_CODESIGN_KEYCHAIN || undefined;
   const mode = process.env.SHOGGOTH_CODESIGN_MODE || (identity === "-" ? "adhoc" : "local");
+  const distribution = releaseDistribution(mode, process.env.SHOGGOTH_RELEASE_DISTRIBUTION);
   if (!new Set(["adhoc", "local", "developer-id"]).has(mode)
     || (mode === "adhoc") !== (identity === "-")
     || (mode === "developer-id" && !keychainPath)) {
@@ -188,7 +190,7 @@ exports.default = function adhocSign(context) {
   }
   // This marker is covered by the final App signature. Runtime update checks are
   // enabled only when it says this is an official Developer ID build.
-  writeReleaseMarker(appPath, { mode, version: context.packager.appInfo.version });
+  writeReleaseMarker(appPath, { mode, distribution, version: context.packager.appInfo.version });
   // arbitrary Resources 目录下的 native Node addons 不属于标准 bundle nesting，
   // --deep 不保证会重签。先逐个签这些 addons，保留 Codex/Cua 自带的第三方
   // Developer ID 可执行文件和 dylib，再签整个 App。

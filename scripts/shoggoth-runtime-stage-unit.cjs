@@ -48,6 +48,18 @@ for (const stage of STARTUP_STAGES.slice(0, -1)) {
   assert.equal(runtimeStageError("runtime_acquire", legacy), legacy, "旧错误码必须继续可读");
 }
 assert.throws(() => runtimeStageCode("unknown"), TypeError);
+for (const code of ["RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN",
+  "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "RUNTIME_SESSION_BUSY", "RUNTIME_MODEL_UNAVAILABLE",
+  "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED"]) {
+  const cause = Object.assign(new Error("private"), { code });
+  assert.equal(isRetryablePreTurnStageError(runtimeStageError("session_start_or_resume", cause)), false, code);
+}
+let getterCalls = 0;
+const unsafeCause = Object.defineProperty({}, "code", { get() { getterCalls += 1; return "AUTH_REQUIRED"; } });
+const safeWrapper = runtimeStageError("session_start_or_resume");
+Object.defineProperty(safeWrapper, "cause", { value: unsafeCause });
+isRetryablePreTurnStageError(safeWrapper);
+assert.equal(getterCalls, 0);
 
 const rawAuthRequired = Object.assign(new Error("private auth detail"), { code: "AUTH_REQUIRED" });
 const normalizedAuthRequired = runtimeOperationalError(rawAuthRequired);

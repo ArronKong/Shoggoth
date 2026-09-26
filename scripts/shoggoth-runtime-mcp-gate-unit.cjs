@@ -52,6 +52,7 @@ try {
     runtimeProfileId: "runtime-antigravity",
     runtimeAccountId,
     parentExecutable: grok,
+    executionRunId: "execution-bound-only-in-service-memory",
   });
   const reservationEnv = Object.fromEntries(
     reservation.env.map(({ name, value }) => [name, value]),
@@ -68,13 +69,16 @@ try {
   }));
   issuer.bindMcpServer({ reservationId: reservation.reservationId, parentPid: 9527 });
   assert.equal(fs.existsSync(reservationGatePath), true);
+  assert.equal(fs.readFileSync(reservationGatePath, "utf8").includes("execution-bound-only-in-service-memory"), false);
+  assert.equal(JSON.stringify(reservation).includes("execution-bound-only-in-service-memory"), false);
   assert.deepEqual(issuer.consume({
     runtimeProfileId: "runtime-antigravity",
     runtimeAccountId,
     gatePath: reservationGatePath,
     nonce: reservationEnv.SHOGGOTH_RUNTIME_MCP_GATE_NONCE,
     parentPid: 9527,
-  }), { consumed: true });
+    executionRunId: "forged-bridge-run",
+  }), { consumed: true, executionRunId: "execution-bound-only-in-service-memory" });
 
   const descriptor = issuer.createMcpServer({
     runtime: "grok-build",

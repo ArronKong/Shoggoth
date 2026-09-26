@@ -60,7 +60,7 @@ const MANAGED_CONFIG = Object.freeze([
   "[memories]",
   "generate_memories = false",
   "use_memories = false",
-  // Shoggoth Memory Store 是唯一真源；Codex native memory 仅由显式迁移器只读导入。
+  // Shoggoth Memory Store 是产品记忆的唯一真源。
   "disable_on_external_context = false",
   "",
 ].join("\n"));

@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -16,6 +17,7 @@ const { createWorkDispatcher } = require(path.join(ROOT, "app", "agent-service",
 const { WorkRunCoordinator } = require(path.join(
   ROOT, "app", "agent-service", "work-run-coordinator.js",
 ));
+const { RunExecutionStore } = require(path.join(ROOT, "app", "agent-service", "run-execution-store.js"));
 
 let DomainWorkRunExecutor;
 let domainOperationId;
@@ -222,12 +224,14 @@ function makeFixture(options = {}) {
   });
   const dispatcher = createWorkDispatcher({ store: productStore, now: () => clock.value });
   const host = options.host || new FakeHost();
+  const runExecutionStore = options.createRunExecutionStore?.(paths) || null;
   const coordinator = new WorkRunCoordinator({
     dispatcher,
     productStore,
     chatSessionStore: new EmptyChatSessionStore(),
     inbox: new EmptyInbox(),
     runtimePool: { async get() { return host; } },
+    runExecutionStore,
     now: () => clock.value,
     randomUUID: (() => {
       let next = 0;
@@ -265,7 +269,8 @@ function makeFixture(options = {}) {
     roots.delete(root);
   }
 
-  return { root, paths, clock, productStore, dispatcher, host, coordinator, executor, enqueueRun, close };
+  return { root, paths, clock, productStore, dispatcher, host, coordinator, executor,
+    runExecutionStore, enqueueRun, close };
 }
 
 function payloadFor(run, overrides = {}) {
@@ -674,6 +679,82 @@ test("同生命周期 recover 不重复启动 turn，Host approval/input 继续�
   await Promise.all([scheduled, recovered]);
   assert.equal(ctx.host.turnStartCalls, 1);
   await ctx.close();
+});
+
+test("真实 Cron WorkRun 加密绑定在派发前持久，重建后只读取 completed 原生轮次而不重发", async () => {
+  const key = crypto.randomBytes(32);
+  const cryptoBroker = {
+    async encrypt(input) {
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+      const encrypted = Buffer.concat([cipher.update(input), cipher.final()]);
+      return Buffer.concat([iv, cipher.getAuthTag(), encrypted]);
+    },
+    async decrypt(input) {
+      const cipher = crypto.createDecipheriv("aes-256-gcm", key, input.subarray(0, 12));
+      cipher.setAuthTag(input.subarray(12, 28));
+      return Buffer.concat([cipher.update(input.subarray(28)), cipher.final()]);
+    },
+  };
+  const ctx = makeFixture({ createRunExecutionStore: (paths) => new RunExecutionStore({ paths, cryptoBroker }) });
+  let replacement;
+  let reopenedProduct;
+  try {
+    await ctx.coordinator.open();
+    const run = ctx.enqueueRun({ id: "cron-durable-recovery", source: "cron", sourceId: "job-durable-recovery" });
+    const prompt = "private durable cron prompt fixture";
+    const originalStart = ctx.host.turnStart.bind(ctx.host);
+    let durableBeforeDispatch = false;
+    ctx.host.turnStart = async (params) => {
+      assert.equal(ctx.dispatcher.getRun(run.id).status, "starting");
+      const saved = await ctx.runExecutionStore.get(ctx.dispatcher.getRun(run.id));
+      assert.equal(saved.command.prompt, prompt);
+      assert.equal(saved.command.operationId, domainOperationId(run));
+      assert.equal(saved.contract.runtimeAccountGeneration, undefined);
+      const folder = path.join(ctx.paths.stateDir, "run-executions");
+      const contents = fs.readFileSync(path.join(folder, fs.readdirSync(folder)[0]), "utf8");
+      assert.equal(contents.includes(prompt), false);
+      durableBeforeDispatch = true;
+      return originalStart(params);
+    };
+    const firstTask = ctx.executor.schedule(payloadFor(run, { prompt, threadPolicy: "continue" }));
+    void firstTask.catch(() => {});
+    await waitUntil(() => ctx.dispatcher.getRun(run.id)?.status === "running", "durable cron running");
+    assert.equal(durableBeforeDispatch, true);
+    const running = ctx.dispatcher.getRun(run.id);
+    await ctx.coordinator.close();
+    ctx.productStore.close();
+    // Native completion while the Service is absent: no old subscription can
+    // settle ProductStore. The replacement must prove it from native history.
+    ctx.host.completeTurn(running.codexTurnId, "completed while service was stopped");
+    const replacementHost = new FakeHost();
+    replacementHost.threads = clone(ctx.host.threads);
+    reopenedProduct = new JsonlProductStore({ paths: ctx.paths, now: () => ctx.clock.value + 1 });
+    reopenedProduct.open();
+    const dispatcher = createWorkDispatcher({ store: reopenedProduct, now: () => ctx.clock.value + 1 });
+    assert.equal(dispatcher.getRun(run.id).status, "running");
+    const reopenedExecution = new RunExecutionStore({ paths: ctx.paths, cryptoBroker });
+    replacement = new WorkRunCoordinator({
+      dispatcher, productStore: reopenedProduct, runExecutionStore: reopenedExecution,
+      chatSessionStore: new EmptyChatSessionStore(), inbox: new EmptyInbox(),
+      runtimePool: { async get() { return replacementHost; } },
+      now: () => ctx.clock.value + 1,
+      assertSecretSafe: () => true, sanitizeSummary: (value) => value,
+      terminalRetryDelaysMs: [], recoverOrphanedDomainRuns: true,
+    });
+    await replacement.open();
+    await waitUntil(() => dispatcher.getRun(run.id)?.status === "completed", "durable cron native reconciliation");
+    assert.equal(dispatcher.getRun(run.id).resultSummary, "completed while service was stopped");
+    assert.equal(ctx.host.turnStartCalls, 1);
+    assert.equal(replacementHost.turnStartCalls, 0);
+    assert.equal(replacementHost.threadStartCalls, 0);
+    assert.equal(await reopenedExecution.get(dispatcher.getRun(run.id)), null);
+  } finally {
+    await replacement?.close().catch(() => {});
+    reopenedProduct?.close();
+    await ctx.close();
+    key.fill(0);
+  }
 });
 
 test("Coordinator 重建后 active domain Run 缺少冻结合同，recover 安全 interrupted 且不启动 Host", async () => {

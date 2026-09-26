@@ -203,14 +203,12 @@ function TaskBoardCard({
   okLabel,
   failLabel,
   ranking,
-  note,
 }: {
   label: string;
   ok: number | null;
   fail: number | null;
   okLabel: string;
   failLabel: string;
-  note?: string;
   ranking: { agentId: string; backendId: string; displayName: string; count: number }[];
 }) {
   const cols = [ranking.slice(0, 3), ranking.slice(3, 6)];
@@ -227,7 +225,6 @@ function TaskBoardCard({
           </span>
         </span>
       </div>
-      {note && <div className="tb-note">{note}</div>}
       <div className="tb-cols">
         {cols.map((col, i) => (
           <div className="tb-col" key={i}>
@@ -652,7 +649,6 @@ export default function DashboardPage() {
               okLabel={t("dashboard.kpiRunsOk")}
               failLabel={t("dashboard.kpiRunsFail")}
               ranking={agentRanking}
-              note={data.taskStats?.complete === false ? t("dashboard.statsIncomplete") : undefined}
             />
           </div>
 

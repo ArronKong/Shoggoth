@@ -1969,6 +1969,9 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
                       {r.startedAt && <span className="mono">{new Date(r.startedAt).toLocaleString()}</span>}
                       {r.error && <span className="status-error">{r.error}</span>}
                       {r.summary && !r.error && <span className="muted">{r.summary}</span>}
+                      {r.sessionKey && <button className="ui-cbtn ui-cbtn--sm"
+                        onClick={() => navigate(`/chat?backend=${encodeURIComponent(backend)}&session=${encodeURIComponent(r.sessionKey!)}`)}>
+                        {t("tasks.openRunConversation")}</button>}
                       {caps.kind === "hermes" && r.metadata && Object.keys(r.metadata).length > 0 && (
                         <details className="hk-run-meta">
                           <summary>{t("tasks.runMetadata")}</summary>

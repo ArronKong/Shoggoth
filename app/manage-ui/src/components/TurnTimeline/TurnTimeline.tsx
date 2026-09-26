@@ -6,6 +6,8 @@ import { useTranslation } from "react-i18next";
 import { deriveRelations, formatDuration, summarizeArgs, toolLabelKey, type StepStatus, type TurnStep, type TurnTimelineState } from "../../lib/turnTimeline";
 import { TrajChevron, TrajGlyphExec, TrajGlyphRead, TrajGlyphThinking, TrajGlyphWorkboard } from "./trajectoryIcons";
 import styles from "./TurnTimeline.module.css";
+import { PluginAppCard, pluginAppCallReference } from "../PluginAppCard";
+import { validPluginAppCallId } from "../../lib/turnTimeline";
 
 export interface TurnTimelineProps {
   steps: TurnStep[];
@@ -15,6 +17,7 @@ export interface TurnTimelineProps {
   onUserScrollAway?: () => void;
   emptyHint?: ReactNode;
   className?: string;
+  pluginConversation?: { backendId: string; sessionKey: string };
 }
 
 const ENTER_KEYFRAMES: Keyframe[] = [
@@ -90,7 +93,7 @@ function nodeGlyph(step: TurnStep): ReactNode {
   return glyph(step.kind === "tool" ? (step.category === "other" ? "wrench" : step.category ?? "wrench") : step.kind);
 }
 
-export default function TurnTimeline({ steps, status, showDurations = true, autoFollow = true, onUserScrollAway, emptyHint, className }: TurnTimelineProps) {
+export default function TurnTimeline({ steps, status, showDurations = true, autoFollow = true, onUserScrollAway, emptyHint, className, pluginConversation }: TurnTimelineProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -205,6 +208,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
   const bodyFor = (s: TurnStep): ReactNode => {
     if (s.kind === "tool") {
       const argsText = s.args !== undefined ? JSON.stringify(s.args, null, 2) : "";
+      const appCall = pluginConversation && (validPluginAppCallId(s.pluginAppCallId) || pluginAppCallReference(s.output));
       return (
         <>
           <div className={styles.secLabel}>{t("turnLab.argsLabel")}</div>
@@ -236,6 +240,8 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
               {s.outputTruncated ? <div className={styles.noArgs}>{t("turnLab.truncatedNote")}</div> : null}
             </>
           ) : null}
+          {appCall && pluginConversation && <PluginAppCard key={`${pluginConversation.sessionKey}:${appCall}`}
+            callId={appCall} {...pluginConversation} />}
         </>
       );
     }
@@ -265,7 +271,8 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
   };
 
   const hasBody = (s: TurnStep): boolean => {
-    if (s.kind === "tool") return s.args !== undefined || !!s.output || !!s.diffText || !!s.diff;
+    if (s.kind === "tool") return s.args !== undefined || !!s.output || !!s.diffText || !!s.diff
+      || !!validPluginAppCallId(s.pluginAppCallId);
     if (s.kind === "plan") return (s.planEntries?.length ?? 0) > 0;
     if (s.kind === "prompt") return !!(s.prompt?.description || s.prompt?.command || s.prompt?.choices?.length);
     return !!s.text?.trim();

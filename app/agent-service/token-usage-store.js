@@ -7,29 +7,33 @@ const {
   openExistingPrivateFile,
   preparePrivateParent,
   readPrivateFile,
+  recoverInterruptedPrivateFile,
   statIfExists,
   writeFully,
 } = require("./private-file");
 const { validateTokenUsageSummary, validateUsageRange } = require("./token-usage-protocol");
 const { resolveUsageCost, validUsd } = require("../core/usage-cost");
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 const DEFAULT_MAX_RECORDS = 200_000;
 const DEFAULT_MAX_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_MODEL_ROWS = 24;
 const MAX_AGENT_ROWS = 32;
 const MAX_MODEL_TIMELINE_ROWS = 240;
 const MAX_PROFILE_SCOPE_SIZE = 8192;
-const SOURCES = new Set(["chat", "kanban", "cron", "inspiration"]);
+const SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
 const BACKEND_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const USAGE_FIELDS = Object.freeze([
   "totalTokens", "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",
   "outputTokens", "reasoningOutputTokens",
 ]);
-const RECORD_FIELDS = Object.freeze([
+const BASE_RECORD_FIELDS = Object.freeze([
   "id", "profileId", "agentId", "agentName", "source", "sourceId", "threadId", "turnId",
   "model", "provider", ...USAGE_FIELDS, "createdAt",
 ]);
+
+const ATTRIBUTION_FIELDS = ["identityVersion", "runId", "runtime", "runtimeAccountId", "responseId"];
+const RECORD_FIELDS = Object.freeze([...BASE_RECORD_FIELDS, ...ATTRIBUTION_FIELDS]);
 
 function usageError(code, message) {
   const error = new Error(message);
@@ -68,12 +72,12 @@ function recordChecksum(record) {
 
 function recordIdentity(input) {
   return `usage-${crypto.createHash("sha256").update(JSON.stringify([
-    input.threadId, input.turnId, input.responseId,
+    "v2", input.runtime, input.runtimeAccountId, input.threadId, input.turnId, input.responseId,
   ])).digest("hex")}`;
 }
-
 function validateRecord(value) {
-  if (!exactObject(value, RECORD_FIELDS) && !exactObject(value, [...RECORD_FIELDS, "costUsd"])) {
+  const fields = RECORD_FIELDS;
+  if (!exactObject(value, fields) && !exactObject(value, [...fields, "costUsd"])) {
     throw usageError("TOKEN_USAGE_INVALID", "Token usage record 字段无效");
   }
   safeString(value.id, "id", 70);
@@ -92,13 +96,21 @@ function validateRecord(value) {
   for (const field of USAGE_FIELDS) safeCount(value[field], field);
   if (Object.hasOwn(value, "costUsd") && !validUsd(value.costUsd)) throw usageError("TOKEN_USAGE_INVALID", "costUsd 无效");
   safeCount(value.createdAt, "createdAt");
+  {
+    if (value.identityVersion !== 2) throw usageError("TOKEN_USAGE_INVALID", "Token usage identityVersion 无效");
+    for (const field of ["runId", "runtime", "runtimeAccountId", "responseId"]) safeString(value[field], field,
+      field === "responseId" ? 512 : 128);
+    if (value.id !== recordIdentity(value)) {
+      throw usageError("TOKEN_USAGE_INVALID", "Token usage identity 与归因不匹配");
+    }
+  }
   return clone(value);
 }
 
 function validateRecordInput(input) {
   const fields = [
     "profileId", "agentId", "agentName", "source", "sourceId", "threadId", "turnId",
-    "responseId", "model", "provider", "usage", "createdAt",
+    "responseId", "runId", "runtime", "runtimeAccountId", "model", "provider", "usage", "createdAt",
   ];
   if ((!exactObject(input, fields) && !exactObject(input, [...fields, "costUsd"])) || !exactObject(input.usage, USAGE_FIELDS)) {
     throw usageError("TOKEN_USAGE_INVALID", "Token usage 输入无效");
@@ -106,6 +118,8 @@ function validateRecordInput(input) {
   safeString(input.responseId, "responseId", 512);
   return validateRecord({
     id: recordIdentity(input),
+    identityVersion: 2, runId: input.runId, runtime: input.runtime,
+    runtimeAccountId: input.runtimeAccountId, responseId: input.responseId,
     profileId: input.profileId,
     agentId: input.agentId,
     agentName: input.agentName,
@@ -217,6 +231,7 @@ class TokenUsageStore {
     this.paths = options.paths;
     this.fs = options.fs || fs;
     this.now = options.now || Date.now;
+    this.atomicWrite = options.atomicWrite || atomicWritePrivateFile;
     this.maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.isSensitiveValue = options.isSensitiveValue || null;
@@ -235,6 +250,9 @@ class TokenUsageStore {
   open() {
     if (this.opened) return this;
     preparePrivateParent(this.paths.tokenUsagePath, this.paths.trustedRoot, this.fs);
+    if (recoverInterruptedPrivateFile(this.paths.tokenUsagePath, { fs: this.fs, trustedRoot: this.paths.trustedRoot }) === "uncertain") {
+      throw usageError("TOKEN_USAGE_MIGRATION_COMMIT_UNCERTAIN", "Token usage 文件恢复不确定");
+    }
     if (!statIfExists(this.fs, this.paths.tokenUsagePath)) {
       atomicWritePrivateFile(this.paths.tokenUsagePath, "", {
         fs: this.fs,
@@ -260,7 +278,7 @@ class TokenUsageStore {
         || envelope.version !== STORE_VERSION || typeof envelope.checksum !== "string") {
         throw usageError("TOKEN_USAGE_STORE_CORRUPT", "Token usage envelope 无效");
       }
-      const record = validateRecord(envelope.record);
+      let record = validateRecord(envelope.record, envelope.version);
       if (envelope.checksum !== recordChecksum(record)) {
         throw usageError("TOKEN_USAGE_STORE_CORRUPT", "Token usage checksum 无效");
       }
@@ -303,7 +321,8 @@ class TokenUsageStore {
     if (!this.isSensitiveValue) return;
     for (const value of [
       record.profileId, record.agentId, record.agentName, record.sourceId,
-      record.threadId, record.turnId, record.model, record.provider,
+      record.threadId, record.turnId, record.model, record.provider, record.runId, record.runtime,
+      record.runtimeAccountId, record.responseId,
     ]) {
       if (value !== null && this.isSensitiveValue(value) === true) {
         throw usageError("TOKEN_USAGE_SENSITIVE_VALUE", "Token usage 含已登记敏感值");
@@ -382,11 +401,11 @@ class TokenUsageStore {
     this.#assertOpen();
     if (!query || typeof query !== "object" || Array.isArray(query)
       || Object.getPrototypeOf(query) !== Object.prototype
-      || Object.keys(query).some((field) => !["threadId", "turnId", "profileId"].includes(field))) {
+      || Object.keys(query).some((field) => !["threadId", "turnId", "profileId", "runId", "runtime", "runtimeAccountId"].includes(field))) {
       throw usageError("TOKEN_USAGE_INVALID", "Token usage 查询无效");
     }
     let records = [...this.records.values()];
-    for (const field of ["threadId", "turnId", "profileId"]) {
+    for (const field of ["threadId", "turnId", "profileId", "runId", "runtime", "runtimeAccountId"]) {
       if (query[field] !== undefined) {
         safeString(query[field], field, 512);
         records = records.filter((record) => record[field] === query[field]);
@@ -465,6 +484,12 @@ class TokenUsageStore {
       session.modelTokens.set(model, (session.modelTokens.get(model) || 0) + record.totalTokens);
       bySession.set(sessionKey, session);
     }
+    const runtimeRows = new Map();
+    for (const record of records) {
+      const key = JSON.stringify([record.runtime, record.runtimeAccountId]);
+      mapRow(runtimeRows, key, () => ({ runtime: record.runtime, runtimeAccountId: record.runtimeAccountId,
+        ...emptyParts() }), displayParts(record).parts);
+    }
     const completeTotals = { ...totals, missingCostEntries, estimatedCostEntries };
     const agentRows = [...byAgent.values()].sort((a, b) => b.totalTokens - a.totalTokens);
     const summary = {
@@ -473,6 +498,7 @@ class TokenUsageStore {
         totals: { ...completeTotals },
       },
       breakdown: {
+        runtimes: [...runtimeRows.values()].sort((a,b) => b.totalTokens - a.totalTokens).slice(0,128),
         byModel: [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens)
           .slice(0, MAX_MODEL_ROWS),
         byAgent: agentRows.map(({ agentId, agentName: _name, profileId: _profile, model: _model,

@@ -9,7 +9,9 @@ dist/
 # Internal working notes and editor state are not part of public source exports.
 /.superpowers/
 /.vscode/
-/docs/
+# Keep implementation ADRs reviewable; other local design notes remain ignored.
+/docs/*
+!/docs/architecture/
 /tasks/
 /ARCHITECTURE.md
 /BUG_REPORT.md

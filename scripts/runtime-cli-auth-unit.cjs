@@ -8,9 +8,6 @@ const path = require("node:path");
 const test = require("node:test");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const {
-  LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
-} = require("../app/agent-service/runtime-account-resolver");
-const {
   NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID,
   NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
   NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
@@ -41,14 +38,14 @@ function fixture() {
   return { root, userHome, paths, create };
 }
 
-test("catalog exposes six available account-scoped environments without creating Runtime Homes", () => {
+test("catalog exposes seven available account-scoped environments without creating Runtime Homes", () => {
   const value = fixture();
   try {
     const before = fs.readdirSync(value.paths.stateDir);
     const catalog = value.create();
     assert.ok(catalog.every((item) => !item.runtimeAccountId.includes("claude")));
-    assert.equal(catalog.length, 6);
-    assert.equal(new Set(catalog.map((entry) => entry.runtimeAccountId)).size, 6);
+    assert.equal(catalog.length, 7);
+    assert.equal(new Set(catalog.map((entry) => entry.runtimeAccountId)).size, 7);
     const internal = catalog.find((entry) => (
       entry.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
     ));
@@ -61,6 +58,10 @@ test("catalog exposes six available account-scoped environments without creating
     const antigravity = catalog.find((entry) => (
       entry.runtimeAccountId === NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID
     ));
+    const deepseek = catalog.find((entry) => (
+      entry.runtimeAccountId === NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID
+    ));
+    assert.equal(deepseek.name, "DeepSeek");
     assert.deepEqual({
       internalHome: internal.accountHome,
       internalKind: internal.accountKind,
@@ -101,20 +102,30 @@ test("catalog exposes six available account-scoped environments without creating
   }
 });
 
-test("legacy internal Codex Home remains the one shared account Home", () => {
+test("retired profile Homes never replace the current managed account Home", () => {
   const value = fixture();
   try {
     const legacyHome = path.join(
       value.paths.stateDir,
       "codex",
-      LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
+      "retired-profile",
     );
     fs.mkdirSync(legacyHome, { recursive: true, mode: 0o700 });
     const internal = value.create().find((entry) => (
       entry.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
     ));
-    assert.equal(internal.accountHome, legacyHome);
+    assert.equal(internal.accountHome, path.join(
+      value.paths.runtimeAccountsDir, "codex", SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID, "home",
+    ));
+    assert.ok(fs.statSync(legacyHome).isDirectory());
     assert.equal(fs.existsSync(value.paths.runtimeAccountsDir), false);
+    fs.mkdirSync(internal.accountHome, { recursive: true, mode: 0o700 });
+    const current = value.create().find((entry) => (
+      entry.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
+    ));
+    assert.equal(current.accountHome, internal.accountHome);
+    assert.ok(current.binaryPath);
+    assert.equal(current.unavailableReason, undefined);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
@@ -204,7 +215,7 @@ test("DeepSeek authority overlap rejects equal, ancestor, and descendant Homes w
         logoutArgs: descriptor.logoutArgs,
       }, {
         binaryPath: null,
-        unavailableReason: "Native DeepSeek Harness Home overlaps its Shoggoth integration Home",
+        unavailableReason: "Native DeepSeek Home overlaps its Shoggoth integration Home",
         loginArgs: [],
         logoutArgs: [],
       });

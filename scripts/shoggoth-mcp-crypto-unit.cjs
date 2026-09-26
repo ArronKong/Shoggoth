@@ -884,7 +884,78 @@ test("从测试版升级后仍可读待处理命令和 Provider 凭据，后续�
   }
 });
 
-test("本地稳定签名 packaged worker 不命名/聚焦 Keychain App，也不读取 safeStorage getter", async () => {
+test("正式版混合旧 MCP 与系统密文升级到同身份内部包后，Service 和原生后端可就绪", async () => {
+  const { paths, pendingPath } = await seedStrictLocalEncryptedState("smcw-signed-upgrade-");
+  // A deterministic protocol fixture, not a replacement for real macOS Keychain acceptance.
+  const system = {
+    isEncryptionAvailable: () => true,
+    encryptString(value) { return Buffer.concat([Buffer.from("v10"), safeStorage.encryptString(value)]); },
+    decryptString(bytes) {
+      assert.equal(bytes.subarray(0, 3).toString(), "v10");
+      return safeStorage.decryptString(bytes.subarray(3));
+    },
+  };
+  const upgradedStorage = () => cryptoStorageForIdentity(developerIdentity(), { paths, safeStorage: system });
+  const first = upgradedStorage();
+  const oldInbox = new PendingCommandInbox({ paths, safeStorage: first });
+  const oldSecrets = new EncryptedSecretStore({ paths, safeStorage: first });
+  try {
+    await oldInbox.open();
+    await oldInbox.transition("strict-local-failure-fixture", "canceled");
+    await oldSecrets.open();
+    await oldSecrets.put("signed-upgrade", "credential-canary", { kind: "openai-api-key" });
+  } finally {
+    await oldInbox.close();
+    await oldSecrets.close();
+    first.close();
+  }
+  assert.equal(Buffer.from(JSON.parse(fs.readFileSync(pendingPath)).ciphertext, "base64")
+    .subarray(0, 3).toString(), "v10");
+  const originalMcp = fs.readFileSync(paths.mcpAuthPath);
+  const originalKey = fs.readFileSync(localCryptoKeyPath(paths));
+  const selector = new PackagedMcpCryptoBroker(selectorOptions({
+    paths,
+    readCodeIdentityAsync: async () => developerIdentity(),
+    createLocalFileSafeStorage() { throw new Error("signed package must keep system storage"); },
+    createExternalBroker() {
+      return new InProcessMcpCryptoBroker({
+        paths, callerRole: "agent-service", safeStorage: upgradedStorage(), ownsSafeStorage: true,
+      });
+    },
+  }));
+  const service = createAgentService({
+    paths, version: "signed-internal-upgrade", cryptoBroker: selector, prewarmMcpAuth: true,
+  });
+  const { ShoggothBackend } = require(path.join(ROOT, "app/core/shoggoth-backend"));
+  const backend = new ShoggothBackend({ paths });
+  try {
+    await service.start();
+    await new Promise((resolve) => setImmediate(resolve));
+    const status = await requestService(paths, {
+      token: readClientToken(paths), version: PROTOCOL_VERSION, method: "service.status", params: {},
+    });
+    assert.equal(status.pendingCommandsLocked, false);
+    assert.equal(status.mcpCredentialsLocked, false);
+    assert.equal(await backend.start(), true);
+    assert.equal((await backend.getStatus()).connected, true);
+    const readerStorage = upgradedStorage();
+    const reader = new EncryptedSecretStore({ paths, safeStorage: readerStorage });
+    try {
+      await reader.open();
+      assert.equal(await reader.get("signed-upgrade"), "credential-canary");
+    } finally { await reader.close(); readerStorage.close(); }
+    assert.deepEqual(fs.readFileSync(paths.mcpAuthPath), originalMcp);
+    assert.deepEqual(fs.readFileSync(localCryptoKeyPath(paths)), originalKey);
+  } finally {
+    await backend.stop();
+    await service.stop({ notify: false });
+    originalMcp.fill(0);
+    originalKey.fill(0);
+    fs.rmSync(paths.trustedRoot, { recursive: true, force: true });
+  }
+});
+
+test("本地稳定签名 packaged worker 提前固定后台名，但不聚焦或读取 safeStorage getter", async () => {
   const paths = fixturePaths("smcw-local-packaged-worker-");
   const applicationsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "smcw-applications-"));
   const appPath = path.join(applicationsRoot, "Shoggoth.app");
@@ -899,7 +970,7 @@ test("本地稳定签名 packaged worker 不命名/聚焦 Keychain App，也不�
   const calls = [];
   const electronApp = {
     getAppPath: () => appRoot,
-    setName() { calls.push("name"); },
+    setName(value) { assert.equal(value, SHOGGOTH_AGENT_SERVICE_NAME); calls.push("name"); },
     setPath() { calls.push("path"); },
     async whenReady() { calls.push("ready"); },
     setActivationPolicy() { calls.push("activation"); },
@@ -960,7 +1031,7 @@ test("本地稳定签名 packaged worker 不命名/聚焦 Keychain App，也不�
   });
   assert.equal(calls.includes("ready"), true);
   assert.equal(calls.includes("exit"), true);
-  assert.equal(calls.includes("name"), false);
+  assert.equal(calls[0], "name");
   assert.equal(calls.includes("activation"), false);
   assert.equal(calls.includes("focus"), false);
   assert.equal(calls.includes("safeStorage"), false);
@@ -2305,6 +2376,8 @@ test("Service start 不解析损坏 MCP store；crypto broker 初始化并发 si
   let resolveLoad;
   const broker = {
     open() {}, close() {},
+    encrypt() { assert.fail("MCP initialization must not encrypt execution state"); },
+    decrypt() { assert.fail("MCP initialization must not decrypt execution state"); },
     loadOrCreateForService() {
       loads += 1;
       return new Promise((resolve) => { resolveLoad = resolve; });

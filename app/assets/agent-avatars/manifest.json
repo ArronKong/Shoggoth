@@ -1,9 +1,605 @@
 {
-  "shoggoth-f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4": "shoggoth.png",
-  "shoggoth-codex": "codex.png",
-  "shoggoth-grok": "grok.png",
-  "shoggoth-antigravity": "antigravity.png",
-  "shoggoth-pi": "pi.png",
-  "shoggoth-claude-code": "claude-code.png",
-  "shoggoth-deepseek-harness": "deepseek-harness.png"
+  "version": 1,
+  "entries": [
+    {
+      "file": "shoggothavatar15_19_37 (1).jpg",
+      "sha256": "ac41852a43eebefd2b04306ad5ea44148b8fed6b5ea7263efa26911730fafe19"
+    },
+    {
+      "file": "shoggothavatar15_19_37 (2).jpg",
+      "sha256": "5b0940162acb5e6bef76b63d281f4abe870cb61583a0b0342c1e2a01fd5aecf5"
+    },
+    {
+      "file": "shoggothavatar15_19_37 (3).jpg",
+      "sha256": "b11ca01eada1c51cb39877cf5a2ab90324c2c298d42fd9a4b47ec72afc9aca4c"
+    },
+    {
+      "file": "shoggothavatar15_19_38 (4).jpg",
+      "sha256": "1075e9455f943bc9d56caa8a6d8a5d0c95880937c5372b340bad58c053948723"
+    },
+    {
+      "file": "shoggothavatar15_19_38 (5).jpg",
+      "sha256": "14f856419b5f05a2b75935208112f67b7a9b9131f19a24aa926839c1cdf83a8f"
+    },
+    {
+      "file": "shoggothavatar15_19_38 (6).jpg",
+      "sha256": "adabc9444a05a3231815ba2a61377b8fc5de74b1f8f4d335d2e10b81bc815141"
+    },
+    {
+      "file": "shoggothavatar15_23_19 (1).jpg",
+      "sha256": "a23238cf0c1132a31fbdd3c4f2b5ff649d9469f1f20e2251da51fba95647906b"
+    },
+    {
+      "file": "shoggothavatar15_23_20 (2).jpg",
+      "sha256": "fde85d9d6860a7c9ca44ea1d6c10c9dcdd621034f773a0cde3832f114026f99a"
+    },
+    {
+      "file": "shoggothavatar15_23_21 (3).jpg",
+      "sha256": "19a94c2a126132ab2fb8fc95fb9629a0ff2864f5b147bf7e01c28edba820c7ea"
+    },
+    {
+      "file": "shoggothavatar15_23_22 (4).jpg",
+      "sha256": "81222dfc53e37c0a30613884f441da2657a0c9af66b4deb0b7c9f754c6dfadf0"
+    },
+    {
+      "file": "shoggothavatar15_23_23 (5).jpg",
+      "sha256": "2c39036d137cec26f4d7c346a8c1c497afa55b9ab7f0f0ac36b2b4a38a26903c"
+    },
+    {
+      "file": "shoggothavatar15_23_23 (6).jpg",
+      "sha256": "6f8a5cc5a4fa6656dcd9f2206e197e01d7662b0a4ddc65ab6e7aa9a8a991f020"
+    },
+    {
+      "file": "shoggothavatar15_23_24 (7).jpg",
+      "sha256": "203b278433306b9b49b29c07c3035540b39b9d2cc4faeb378b22f0ce26b66df9"
+    },
+    {
+      "file": "shoggothavatar15_23_24 (8).jpg",
+      "sha256": "957f8555b7a3c9fc1d9d7b6aaa7dce0ad0b0ceee92b3125948d627e11deb2ce9"
+    },
+    {
+      "file": "shoggothavatar15_23_25 (9).jpg",
+      "sha256": "e896a5e677d9840345f59be6e25ac8800a911fa920b68462253db281e41ee089"
+    },
+    {
+      "file": "shoggothavatar15_23_26 (10).jpg",
+      "sha256": "05b712dcd3be51559c4fc80b660edc7620b480b4744e1b9ae4ac8ad4817f91e6"
+    },
+    {
+      "file": "shoggothavatar15_27_33 (1).jpg",
+      "sha256": "f5f9acd1e560a0ce4cc866b25236abbafd69272a52e84e936a5f8f82dc34442e"
+    },
+    {
+      "file": "shoggothavatar15_27_33 (2).jpg",
+      "sha256": "f596a8459c4f4dc35e8caf1dee1e19187e909045ce0d4782b90bcb089bea5c1d"
+    },
+    {
+      "file": "shoggothavatar15_27_35 (5).jpg",
+      "sha256": "9fd044452d17e9f8271f4b98761daa0970fdbea22a77cdf0413f48539d8349a6"
+    },
+    {
+      "file": "shoggothavatar15_27_36 (7).jpg",
+      "sha256": "25c034ca67ff709244587bb7cf1b59900aad5e494b09df4ab032757a006a0957"
+    },
+    {
+      "file": "shoggothavatar15_27_37 (8).jpg",
+      "sha256": "d363e7631a5a894cc158c8840baffcb5888b5cc93a966e8eb4bc45a2e3bc21f4"
+    },
+    {
+      "file": "shoggothavatar15_27_38 (10).jpg",
+      "sha256": "ea5990a7ef6e91d989073d4af9578eaf51f9126cc83104508ae21d2dd6360f90"
+    },
+    {
+      "file": "shoggothavatar15_54_12 (1).jpg",
+      "sha256": "99851395ab3f84bf4b93448ba40d4bc82af52a96f4c8f21b5f257b6c67fc6dd7"
+    },
+    {
+      "file": "shoggothavatar15_54_12 (2).jpg",
+      "sha256": "fa4c368db1462ff2a6780ab4bd765ff823189a032ca721d39ad3fcc7b817ae63"
+    },
+    {
+      "file": "shoggothavatar15_54_13 (3).jpg",
+      "sha256": "8a92e8399d1814faae227e3e317e4b4a9ce3e0ec10a9cdccf8d45bc8dfea0dad"
+    },
+    {
+      "file": "shoggothavatar15_54_14 (4).jpg",
+      "sha256": "16a027909ecb6b8f1d4190eda882a7f316b8cf1f7f090f8a83da944c1548e9c7"
+    },
+    {
+      "file": "shoggothavatar15_54_14 (5).jpg",
+      "sha256": "181accc6106e1c32a18d16f15ea1fbb3b4d779bad7e6ff7fb5ab1cbe889f41c8"
+    },
+    {
+      "file": "shoggothavatar15_54_15 (6).jpg",
+      "sha256": "0eeffdde47ebb1bb701f2383651025258c5d5e9af7c4712cd5d6736ce00638fb"
+    },
+    {
+      "file": "shoggothavatar15_54_16 (7).jpg",
+      "sha256": "35ff6fcbe3a0ae45a7147ad741207bcbf46d5c3b950c781d44ed9e131fb2cfce"
+    },
+    {
+      "file": "shoggothavatar15_54_16 (8).jpg",
+      "sha256": "de739f23276c05f30df0caab5d798c315f6b785846a62ba00533c003fffb3c8d"
+    },
+    {
+      "file": "shoggothavatar15_54_17 (10).jpg",
+      "sha256": "d37de1dc7a3f6552178f05eaab24f5f0925bc6322c0bca62a85a90de88c4fdc7"
+    },
+    {
+      "file": "shoggothavatar15_54_17 (9).jpg",
+      "sha256": "cd7edc8ef951a65dc5a8d495b0fc37b31b5e931e4d79ac1abd773639943308ae"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (1).jpg",
+      "sha256": "b2c3e81bd78707a7a97a108ba12969458800e7725a56a1bce8de602fffa73fa5"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (2).jpg",
+      "sha256": "2f0dd313bda84d513fb07b76fe366305fafc9306972867202d8145287ebb274c"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (3).jpg",
+      "sha256": "528cee1b2ebfbfc3ab0fc9b9d8538b4af1f3dd82f2d28656de4e1025ef8168d1"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (4).jpg",
+      "sha256": "6cadf6bf308cab91fdae2e626e2c5ce61d4636cd502ad8b491aa52289e25d027"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (5).jpg",
+      "sha256": "19ddb95edfc44d75357441cc1fdb10ecb8a503f3c928b97adb53961e52245999"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (6).jpg",
+      "sha256": "6139bf926f81b4b302e93f53b96e44723a22968585485b9602e72cd2256c231c"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (7).jpg",
+      "sha256": "e6d355855bee7176bdc71c61978163ad70b7481fd3f5bd17fbb0893d7fbed52c"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (8).jpg",
+      "sha256": "668970cc3f5340d4d3a8bf7f7051c55ddb4973fc39499ebb17951ff19033ef64"
+    },
+    {
+      "file": "shoggothavatar16_04_59 (9).jpg",
+      "sha256": "f3209f2f453f4bd63f7a2046e2632382ee7308e668ef36fb651fb8325dec4786"
+    },
+    {
+      "file": "shoggothavatar16_05_00 (10).jpg",
+      "sha256": "4d8468753273eb03cb7cc1f94584bd110885ba7414ea2aa2259a2bef2decd479"
+    },
+    {
+      "file": "shoggothavatar17_12_33 (1).jpg",
+      "sha256": "149635cc5bfd542f9d527be9b143a090679e254cef694347983f793f063e5e22"
+    },
+    {
+      "file": "shoggothavatar17_12_34 (2).jpg",
+      "sha256": "3eddb17bff10b0e9153773712aaac2664bec7edbedd8c77329d05010a5c714fb"
+    },
+    {
+      "file": "shoggothavatar17_12_34 (3).jpg",
+      "sha256": "575db31e717f3d20d60078cb6106d0fe4421608d724ba86afcd7bcdb1a26bee4"
+    },
+    {
+      "file": "shoggothavatar17_12_36 (4).jpg",
+      "sha256": "8cd3376b2c10f8c878062b3c1b5b1e451f9e3ff2d7f077abd2dd92610d4fb8a8"
+    },
+    {
+      "file": "shoggothavatar17_12_37 (5).jpg",
+      "sha256": "d92791471a7c2ccaa3f2757aa5c5aaec85e4ef912c1cd866b3e7a789cc29c6d6"
+    },
+    {
+      "file": "shoggothavatar17_12_38 (6).jpg",
+      "sha256": "944833d24fa249d0eaeffe5940b773e694786ee1c8cf22154200a50cf8483944"
+    },
+    {
+      "file": "shoggothavatar17_12_38 (7).jpg",
+      "sha256": "fe0f34b73e5b08f4a70699190df81d1576540f20de6b349ec091dd38579babe6"
+    },
+    {
+      "file": "shoggothavatar17_12_39 (8).jpg",
+      "sha256": "6169512c656bcbb59660cdcb00e3600d4a393215c5f06055b6a2b482294684ee"
+    },
+    {
+      "file": "shoggothavatar17_12_39 (9).jpg",
+      "sha256": "5c02b68b716c9482622ae6c28145552c5a7862c1f197340181d3daabacdcc671"
+    },
+    {
+      "file": "shoggothavatar17_12_41 (10).jpg",
+      "sha256": "b4661b516d92ae4456d276a4161a062d1abad67060f904178a5e775380c25131"
+    },
+    {
+      "file": "shoggothavatar17_13_22 (1).jpg",
+      "sha256": "a806717c1cf8f585c2a0a141e6a428a09f40361856f92207c4bdbffbe04d8e67"
+    },
+    {
+      "file": "shoggothavatar17_13_24 (2).jpg",
+      "sha256": "ce2b6fa66bf2b43bb48bc11d7e964bb80f9b60d443c76b12c0388b919b015d09"
+    },
+    {
+      "file": "shoggothavatar17_13_25 (3).jpg",
+      "sha256": "d9d24dcdc48883b908b78e105e5128c55f6f2615dfdcd30f02db296b2e0dd0ed"
+    },
+    {
+      "file": "shoggothavatar17_13_27 (4).jpg",
+      "sha256": "cf566a3d76b97e51e47151f9844578aff2b3f92ba873c8d00aec12ac10ada099"
+    },
+    {
+      "file": "shoggothavatar17_13_28 (5).jpg",
+      "sha256": "e17217a2637787ebce1b6a6534e194b3e626f6d41f3f5a89b37fbb9a72a0e1c9"
+    },
+    {
+      "file": "shoggothavatar17_13_29 (6).jpg",
+      "sha256": "91f327eeb9160bb4e7d0915cb2a0b0d8be389536342093222a30476bf161f7e1"
+    },
+    {
+      "file": "shoggothavatar17_13_30 (7).jpg",
+      "sha256": "494cbe3abcb1333dcc5e425862f39caf5aa0cc789c9424adb0c569c4019f0e78"
+    },
+    {
+      "file": "shoggothavatar17_13_31 (8).jpg",
+      "sha256": "c9510a5b86d8a11f7a445d4de036e2e688392d7e8fbb0b82b4a9199b1c468e23"
+    },
+    {
+      "file": "shoggothavatar17_13_32 (9).jpg",
+      "sha256": "5e408e3d179a4d0980f52cc5fa8303c720fce8adf40c583ea9ef8e279b62f822"
+    },
+    {
+      "file": "shoggothavatar17_13_33 (10).jpg",
+      "sha256": "a16b316a1460ebf81ba4d712d3f7a6a5bda750f7bc39951aff1f9a4df2a7f829"
+    },
+    {
+      "file": "shoggothavatar17_17_41.jpg",
+      "sha256": "9cadd19e6a2b7d72683444b798c722d405eeafc566c44c08873565a6920e3b1b"
+    },
+    {
+      "file": "shoggothavatar17_21_59 (1).jpg",
+      "sha256": "9cadd19e6a2b7d72683444b798c722d405eeafc566c44c08873565a6920e3b1b"
+    },
+    {
+      "file": "shoggothavatar17_22_02 (4).jpg",
+      "sha256": "713edb42c35c947692e1aedefb5ee56797029ca1865f0d48756c9b1b5ddb7db3"
+    },
+    {
+      "file": "shoggothavatar17_22_03 (5).jpg",
+      "sha256": "b20b908f65975d7934f0ec862e0d5036c5d9be9b277c9a984f85ca0eb8a15aa6"
+    },
+    {
+      "file": "shoggothavatar17_41_19 (1).jpg",
+      "sha256": "d6091d64fbeb4623a7dc9dd6c14d8000eca19026392ec92a7391590152b613bc"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (10).jpg",
+      "sha256": "9dcfb7e5a2385cf751866d4e1e98844a3ea85a50596f4199ef0dc15a0fd7add2"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (2).jpg",
+      "sha256": "2b05094002c14f08eee3e6adde3168369acbb3d9b4e034cfbf2385e407f5d640"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (3).jpg",
+      "sha256": "5cafced1039bba4e0858c94585fb2e368e722e1bc59576e95db29678f6eef9cb"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (4).jpg",
+      "sha256": "3a283210f03ab20759c5d6fe94cf09c6be3a6c9c26e22ca7fa03d953a34a7b20"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (5).jpg",
+      "sha256": "802eedd7cd921f1837b8654ddadc187a807f542bec35304a5e3bf324c417dcfa"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (6).jpg",
+      "sha256": "8c65efe7920ea85733b1b11f41e52afa4f476201367faeb4e02c9e98d1848a30"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (7).jpg",
+      "sha256": "c288d041027eb360749dbf1803e87fe196b9be6a3f1348c26a595a2f763db431"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (8).jpg",
+      "sha256": "abbab978cf92ffe5f2bfe7e5dd1c42c73af85ea85fcc7ba2bec99350d0b6d5b0"
+    },
+    {
+      "file": "shoggothavatar17_41_20 (9).jpg",
+      "sha256": "b6c6970efbb889a4a14e5ea322db730de8521b917ef7d99e3e7b13c47ca9c229"
+    },
+    {
+      "file": "shoggothavatar17_41_48 (1).jpg",
+      "sha256": "c1885046d65e535b36a6ce584cbde6d0ebbba5552018ce6508c5cd7f41148e8e"
+    },
+    {
+      "file": "shoggothavatar17_41_49 (2).jpg",
+      "sha256": "39e031c625f0308470b8b8e64a36353c7542aa218a686a8922e59ddc5c7a2682"
+    },
+    {
+      "file": "shoggothavatar17_41_50 (3).jpg",
+      "sha256": "79638cc7de85f11b11b92bb2a1611bbc38e4912012485999c1751e8a7ec8c6f1"
+    },
+    {
+      "file": "shoggothavatar17_41_51 (4).jpg",
+      "sha256": "06ac671c5e82e797f4ed652bfb869b8a6116110e2bd00052c2eaf6f9d7705212"
+    },
+    {
+      "file": "shoggothavatar17_41_53 (5).jpg",
+      "sha256": "18e199d0935232cdac9f8a172bd3fadb1d853b20875cf1d8c7da81154caf867d"
+    },
+    {
+      "file": "shoggothavatar17_41_55 (6).jpg",
+      "sha256": "efba9b8602968a91d374ad826b8a18bbb5a4b5b7016f1cc87e2b899dddc72e3c"
+    },
+    {
+      "file": "shoggothavatar17_41_56 (7).jpg",
+      "sha256": "427df83c608b0b00bffb874568a68d66625d2dd752f3ab375270a3dbd92b0b97"
+    },
+    {
+      "file": "shoggothavatar17_41_57 (8).jpg",
+      "sha256": "eff7625cb0c2cf091ab6580fead19f14c8d330787f9519a7a178fd598893db7c"
+    },
+    {
+      "file": "shoggothavatar17_41_58 (9).jpg",
+      "sha256": "7841b5c9837e7c4a82497194deee308be49482d69ed7c1c4d523e88b4c6b7fac"
+    },
+    {
+      "file": "shoggothavatar17_41_59 (10).jpg",
+      "sha256": "9689521f058725e64609b7e52c1ce882fe9b141f4ab4b378f3c9b67014c62bfb"
+    },
+    {
+      "file": "shoggothavatar18_00_59 (1).jpg",
+      "sha256": "fe0ed1a9e06dda8805c7b1cc81265c32fdd9d23f94d78d2fc31c141224e675b8"
+    },
+    {
+      "file": "shoggothavatar18_01_00 (2).jpg",
+      "sha256": "2af796fe393b6c84a8deb54be8075773cca7c26a4535c097107fcd42d3d7eac5"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (10).jpg",
+      "sha256": "229dc21144908b1d649d5d6d20a3d45c7ce4aa624f35474d5de4b8ccf9957afd"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (3).jpg",
+      "sha256": "38d5a4c59f6fabe8b0ad5a139a8113cfd8663625c3a1439a00c76e093ffbbf11"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (4).jpg",
+      "sha256": "3fc2405ecad26cf851715baa3ee46278bc06ac41c78544ea60bdc6c404ddc07c"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (5).jpg",
+      "sha256": "495f81befff263ebd50090e7af66c3263d3672994c6b854b137b5a3e70411e84"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (6).jpg",
+      "sha256": "740b8f68461edf5488dcd68c0fa89f73da724ba0ea876cacd2c70834fcc5d273"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (7).jpg",
+      "sha256": "d6d7319f5ee8d5ad8a3ea9b9ae7a21c4d673414e5b01d5723e207ec837f3357c"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (8).jpg",
+      "sha256": "cfc45bb4f35de368eb7d5a041fd7a882adf8d722befb981f284f2611ccdd57ec"
+    },
+    {
+      "file": "shoggothavatar18_01_02 (9).jpg",
+      "sha256": "b4a2f76f730a1ec4bebf47c97ceb256fd99e1db0174e8acbf8317f86e5351d1f"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (1).jpg",
+      "sha256": "eb56f68b596e9cbd694c074d7643af978bf69d8f8eb59ee9ec665dcc5f08ae02"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (10).jpg",
+      "sha256": "9056f6391d91fcb84822059369b158c3ffbe921b6f5fa2d9aaba57076de6bb14"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (2).jpg",
+      "sha256": "1a625da435963cb37e7958fd9649db2312ca76f517498af60f7e28ac8134f40b"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (3).jpg",
+      "sha256": "39448505cc792c0b7285101d3f91b95107747bbf588d17dfdc51be1c85b57882"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (4).jpg",
+      "sha256": "12bfda6a472bff611a707e713235a9adbf12a752b814e9840907e2ef92e19b56"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (5).jpg",
+      "sha256": "ebbbb86a1701c33b041c4dfc52bc9ba8119e54493c74ee893fb0c962ee0796bb"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (6).jpg",
+      "sha256": "cd07d633f8dab609af270ea4a3b9ef312acd418965f0729c22046e8f6e18627d"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (7).jpg",
+      "sha256": "d3895f77995dc901a034e138386ee3b66f0bcc6d0d8bbfe8cf76390bc4bd202d"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (8).jpg",
+      "sha256": "92f9d904b7953096bae46768c66fdb7aad28bddb38aeeb3566a3488f66a8dc9d"
+    },
+    {
+      "file": "shoggothavatar18_14_44 (9).jpg",
+      "sha256": "55aa70c7724a0061e0518d3f04ea961aefa6a6a97586f76b66a88055a7fbf947"
+    },
+    {
+      "file": "shoggothavatar18_17_33 (1).jpg",
+      "sha256": "086797a43e867eb8268739b579867c03b9a734d93b3f64c6f1e0230e85135e01"
+    },
+    {
+      "file": "shoggothavatar18_17_34 (2).jpg",
+      "sha256": "89420cd7006da78685f06c5a784945370773966941d5e60c02b691df26affcd7"
+    },
+    {
+      "file": "shoggothavatar18_17_35 (3).jpg",
+      "sha256": "0cebcaff4cc938f56a2498a138f7c1a38869143eb17ebd3328780361a4d20632"
+    },
+    {
+      "file": "shoggothavatar18_17_36 (4).jpg",
+      "sha256": "1b031fb2f4fbcb2f56297a1e03f890fbdbc84f09598380999ed586d73e38c1e6"
+    },
+    {
+      "file": "shoggothavatar18_17_37 (5).jpg",
+      "sha256": "46637764794be318bceb2ddda67f00ee1bf44fd7be16187c8bce4750dab02fb8"
+    },
+    {
+      "file": "shoggothavatar18_17_38 (6).jpg",
+      "sha256": "2ad1ed2d5cea4f52c7018be5f0610c75e4a04c5d70a5e5d849e2dd72becc4eb3"
+    },
+    {
+      "file": "shoggothavatar18_17_39 (7).jpg",
+      "sha256": "6048ab178f94a5a93bd54070a32f24aab768e86e4e9730ea2ba7ef60a36c8924"
+    },
+    {
+      "file": "shoggothavatar18_17_39 (8).jpg",
+      "sha256": "9ecae4523b32e64be9594f0bb71a76385a6093efb4aa8bc70923d8b984db3922"
+    },
+    {
+      "file": "shoggothavatar18_17_40 (10).jpg",
+      "sha256": "e971fc80f768f1bd1458de95be6d24c000ec989b894b33e3a3632c284ecc3e75"
+    },
+    {
+      "file": "shoggothavatar18_17_40 (9).jpg",
+      "sha256": "03358e8a8eca31ef006c06730ccbf24ebf30a6706e790faf9763cfd187c8699a"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (1).jpg",
+      "sha256": "cbc7f363cfeb3a1b457f7523db041a72978cdc51e75900fb3f9b84066f9626ac"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (10).jpg",
+      "sha256": "29ea0642bb8fcb4201b8794c6cb9d25de910210c5ebd5d6a5a1c5e200c40b983"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (2).jpg",
+      "sha256": "28d27d3c460a05f94e8485a851f2fa6002c1d8bfc01a1676b1e577c8ff3fe292"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (3).jpg",
+      "sha256": "ecd9d84c0403476956fc5cd080b11ee598645f181ee04ab315fabd5cce0de134"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (4).jpg",
+      "sha256": "7e4b4a308ff9d1901a0bc02f1c9e025e6ffaac9cbe427276cdaf0baf523cadaf"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (5).jpg",
+      "sha256": "dbbd08bf2fbc120fdf0cbf901d095218e7c185e7d1d78fc085b51f0d2e447535"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (6).jpg",
+      "sha256": "65ed767750fc210f99a2e831c9007124fbfa21c5c84309983bec76252dd98dbf"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (7).jpg",
+      "sha256": "c7ccdcc5916c049e9bf3a81427e53613ca8b82e935d63b47e3a45968cd0e59bf"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (8).jpg",
+      "sha256": "f8b2c7d79767e368f032755d77d69a1f84acbcfb68defc7bcf4cfa2656818945"
+    },
+    {
+      "file": "shoggothavatar18_20_31 (9).jpg",
+      "sha256": "d4df5d553e232d55142c1c1517f35f083731f84e0a49ecbfe4dfe7c65881207a"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (1).jpg",
+      "sha256": "4a3a04c9ed2d95e6a18c1900b259580c87e970d049b4a2c3a4bb8f58bbc86f73"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (10).jpg",
+      "sha256": "4cd91a7bcd85204cb8e3d71b28144016d61a61c417739c5851de6c2f848b9251"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (2).jpg",
+      "sha256": "b9b66d0d514c17ae65c668a2cb8c1e0fbb8812838f75064dfeb3c8b68bf5d7d7"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (4).jpg",
+      "sha256": "9397bfcb75ea9ec207050c41f6d095f528b59c410e8c46fa548ffca4e999c67d"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (6).jpg",
+      "sha256": "20c1bf2b7789e46f75922e2cfa6ef22b55f883cf2e2767ede73c5ef2b0c35db6"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (7).jpg",
+      "sha256": "33a6578ff3444f9456367ebda1131641808bea6b408ba80dbdf33895ea32402b"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (8).jpg",
+      "sha256": "e65772b1f6d0d25cba85dbfe22c2a5788f8800b7d85e31459d17a02810a3d6b0"
+    },
+    {
+      "file": "shoggothavatar18_54_20 (9).jpg",
+      "sha256": "ca9e441f1c6b57f727705aefd7c5e02eeac24f92661354289a48e9769162d36d"
+    },
+    {
+      "file": "shoggothavatar18_54_47 (1).jpg",
+      "sha256": "b4177d030188bd99408ac9222a9895df06c6e194d6e05525115ca1fdc8c1c2c8"
+    },
+    {
+      "file": "shoggothavatar18_54_47 (10).jpg",
+      "sha256": "9856ca97c6bf0fec75e348b3dbba99e809d7e972a0f08d8c5cbeae6f9bf7fc77"
+    },
+    {
+      "file": "shoggothavatar18_54_47 (4).jpg",
+      "sha256": "4c17edf3e9c5e181602d540582b1bc3753170ee60d047af74f9dc7e693c2b4ba"
+    },
+    {
+      "file": "shoggothavatar18_54_47 (5).jpg",
+      "sha256": "60c7e1c0a23d898dba6833da31055c4fab30fc72bc2fcd5c89a73f4aea029f5d"
+    },
+    {
+      "file": "shoggothavatar18_54_47 (6).jpg",
+      "sha256": "618048a2f25115cf5ea0ead96a776eead99edc41ec0650196775d12285880a6b"
+    },
+    {
+      "file": "shoggothavatar18_54_47 (8).jpg",
+      "sha256": "c6918258bcd552c4b65e47c553c9f8ee0f2f8e8a9cdd242d2f0111d53914667e"
+    },
+    {
+      "file": "shoggothavatar18_54_47 (9).jpg",
+      "sha256": "2f411424cd08832891948741c1e53c5f6ad8c472ad73208e19ce7d0065d4f526"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (1).jpg",
+      "sha256": "73339bcdfa403e107e8b4098d1bf4e49560e35c51709e7126399908fcd178301"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (10).jpg",
+      "sha256": "a6c882b28dd031ffe4415c44ca7e866034305de8e7f48db048eb22b8e6a67a9b"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (2).jpg",
+      "sha256": "eb831d7ee0651fe20b8df78261f68ec20e472a0eb3bf4102b6dc053bf06a8652"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (3).jpg",
+      "sha256": "0d330dfa4341b68d4f55e94ace81442ed91d5682ba4738a12c12e46c1f32e82f"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (4).jpg",
+      "sha256": "fb175eb6c6cb46a4a13da77a3e7cfe2d51187e91d22ac8649705d5caaa0edc61"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (5).jpg",
+      "sha256": "81f32fb00f1249eb4c570ff36aad0c4d915e6c740a2af123f857ebac85a4b4ef"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (6).jpg",
+      "sha256": "e749d7a865db356b6d9f880c7e13a4d062a11311bd9b7e9d8eb9212200d5fe50"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (7).jpg",
+      "sha256": "88f706064231861fb50e0d80ea3330671d1b7f16b549327437ac12bd5fe96241"
+    },
+    {
+      "file": "shoggothavatar18_55_10 (8).jpg",
+      "sha256": "5df75041badd81459ea5db7d5a1621c1c22ec28de59ea95b427644c23051414e"
+    }
+  ]
 }

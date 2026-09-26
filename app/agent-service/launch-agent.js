@@ -7,7 +7,7 @@ const { execFile, execFileSync } = require("node:child_process");
 const { randomBytes } = require("node:crypto");
 const { assertStableAppPaths, inferAppPath } = require("./bundle-paths");
 const { readClientToken, requestService } = require("./client");
-const { resolveServicePaths } = require("./paths");
+const { resolveServicePaths, resolveCanonicalServicePaths, systemHome } = require("./paths");
 const { normalizeProxyEnvironment } = require("./proxy-environment");
 const { PROTOCOL_VERSION } = require("./server");
 const { ensurePrivateDirectory, lstatIfExists, rejectSymlink, serviceError } = require("./security");
@@ -212,7 +212,7 @@ function isLaunchctlAlreadyLoaded(error) {
 
 function createLaunchAgentController(options = {}) {
   const platform = options.platform || process.platform;
-  const homeDir = path.resolve(options.homeDir || os.homedir());
+  const homeDir = path.resolve(options.homeDir || systemHome());
   const uid = options.uid ?? os.userInfo().uid;
   const runner = options.runner || defaultRunner;
   const clearExtendedAttributes = options.clearExtendedAttributes || ((target) => {
@@ -227,7 +227,9 @@ function createLaunchAgentController(options = {}) {
     throw new TypeError("resolveProxyEnvironment must be a function");
   }
   const serviceVersion = String(options.serviceVersion || require("../../package.json").version);
-  const servicePaths = options.servicePaths || resolveServicePaths({ homeDir });
+  const servicePaths = options.servicePaths || (platform !== "darwin" ? resolveServicePaths({ homeDir }) : options.homeDir
+    ? resolveCanonicalServicePaths({ userInfo: () => ({ homedir: homeDir }) })
+    : resolveCanonicalServicePaths());
   const healthTimeoutMs = boundedHealthOption(
     options.healthTimeoutMs, DEFAULT_HEALTH_TIMEOUT_MS, 1, 45_000, "healthTimeoutMs",
   );

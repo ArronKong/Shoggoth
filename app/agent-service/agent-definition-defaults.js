@@ -2,14 +2,7 @@
 
 // Pure template data: MCP schema helpers also load this module through ToolRegistry.
 const DEFAULT_TEMPLATE_VERSION = 3;
-const LEGACY_MEMORY_RULE = "明确事实引用当前用户消息；推测与需要确认的私人信息先作为候选，不说成已经生效。一次性要求、原始聊天、引用示例、凭据和用户要求不记住的内容不保存。";
 const CURRENT_MEMORY_RULE = "明确事实引用当前用户消息，保存成功即生效，无待确认状态，不要求再次确认或引导用户去设置手动激活。推测、一次性要求、原始聊天、引用示例、凭据和用户要求不记住的内容不保存。";
-const LEGACY_DEFAULT_DOCUMENTS = Object.freeze({
-  IDENTITY: "# Shoggoth\n\nYou are the Shoggoth agent owned and configured by this Shoggoth profile.\n",
-  SOUL: "# Soul\n\nBe clear, thoughtful, honest about uncertainty, and respectful of user control.\n",
-  USER: "# User\n\nNo confirmed user profile facts have been recorded yet.\n",
-  AGENTS: "# Operating Rules\n\nFollow current user instructions, product permissions, and workspace rules.\n",
-});
 
 const VIEW_HEADERS = Object.freeze({
   USER: `# USER.md
@@ -54,7 +47,7 @@ const EMPTY_VIEW_MESSAGES = Object.freeze({
 function createDefaultDocuments(profileName = "Shoggoth") {
   if (typeof profileName !== "string" || !profileName.trim() || !profileName.isWellFormed()
     || profileName.includes("\0")) throw new TypeError("Default Agent profile name is invalid");
-  // A legacy display name can contain line breaks. Keep it as escaped data,
+  // Display names can contain line breaks. Keep them as escaped data,
   // never let it create additional Markdown fields or instructions.
   const nameLine = /[\r\n\u2028\u2029]/u.test(profileName)
     ? `- Profile name (JSON): ${JSON.stringify(profileName)}`
@@ -133,6 +126,6 @@ ${CURRENT_MEMORY_RULE}
 const DEFAULT_DOCUMENTS = Object.freeze(createDefaultDocuments());
 
 module.exports = {
-  DEFAULT_TEMPLATE_VERSION, DEFAULT_DOCUMENTS, LEGACY_DEFAULT_DOCUMENTS,
-  VIEW_HEADERS, EMPTY_VIEW_MESSAGES, createDefaultDocuments, LEGACY_MEMORY_RULE, CURRENT_MEMORY_RULE,
+  DEFAULT_TEMPLATE_VERSION, DEFAULT_DOCUMENTS,
+  VIEW_HEADERS, EMPTY_VIEW_MESSAGES, createDefaultDocuments, CURRENT_MEMORY_RULE,
 };

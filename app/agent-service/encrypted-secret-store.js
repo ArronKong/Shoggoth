@@ -16,7 +16,8 @@ const MAX_ENCRYPTED_SECRET_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_CREDENTIALS = 1024;
 const MAX_PLAINTEXT_BYTES = 64 * 1024;
 const CUSTOM_PROVIDER_SECRET_KINDS = new Set([
-  "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses",
+  "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses", "runtime-worker-token",
+  "mcp-oauth",
 ]);
 
 function secretError(code, message = code) {
@@ -157,6 +158,15 @@ class EncryptedSecretStore {
       .map(([credentialRef, entry]) => ({ credentialRef, kind: entry.kind }));
   }
 
+  getCredentialRevision(credentialRef) {
+    this.#assertOpen();
+    assertCredentialRef(credentialRef);
+    // The existing encrypted container owns one durable monotonic revision.
+    // Using it conservatively fences even unrelated credential mutations and
+    // detects delete/recreate ABA without exposing ciphertext or plaintext.
+    return Object.hasOwn(this.container.credentials, credentialRef) ? this.container.revision : null;
+  }
+
   matchesPlaintext(candidate) {
     if (typeof candidate !== "string") {
       throw secretError("SECRET_MATCH_VALUE_INVALID", "敏感值匹配输入必须是字符串");
@@ -220,6 +230,18 @@ class EncryptedSecretStore {
   }
 
   put(credentialRef, plaintextValue, metadata) {
+    return this.#put(credentialRef, plaintextValue, metadata);
+  }
+
+  putIfRevision(credentialRef, plaintextValue, metadata, expectedRevision) {
+    if (expectedRevision !== null && (!Number.isSafeInteger(expectedRevision)
+      || expectedRevision < 0)) {
+      return Promise.reject(secretError("SECRET_REVISION_CONFLICT", "凭据版本无效"));
+    }
+    return this.#put(credentialRef, plaintextValue, metadata, expectedRevision);
+  }
+
+  #put(credentialRef, plaintextValue, metadata, expectedRevision = undefined) {
     this.#assertOpen();
     assertCredentialRef(credentialRef);
     if (!assertExactKeys(metadata, ["kind"]) || !CUSTOM_PROVIDER_SECRET_KINDS.has(metadata.kind)) {
@@ -231,6 +253,11 @@ class EncryptedSecretStore {
     }
     let plaintext = plaintextValue;
     const result = this.#enqueue(async () => {
+      if (expectedRevision !== undefined
+        && (Object.hasOwn(this.container.credentials, credentialRef)
+          ? this.container.revision : null) !== expectedRevision) {
+        throw secretError("SECRET_REVISION_CONFLICT", "凭据已变化");
+      }
       let encrypted = null;
       let plaintextBytes = null;
       try {

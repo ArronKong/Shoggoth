@@ -1,4 +1,5 @@
 import AgentAvatarView from "../components/AgentAvatar";
+import RuntimeUsageBreakdown from "../components/RuntimeUsageBreakdown";
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
@@ -28,7 +29,12 @@ import {
 } from "./usage/charts";
 
 type Gran = "day" | "week" | "month";
-type RangeKey = "today" | "7d" | "30d" | "90d" | "1y" | "all";
+const USAGE_RANGES = ["7d", "30d", "90d", "1y", "all"] as const;
+type RangeKey = (typeof USAGE_RANGES)[number];
+
+function isUsageRange(value: string): value is RangeKey {
+  return (USAGE_RANGES as readonly string[]).includes(value);
+}
 
 // 长区间自动聚合（设计稿 6994-135 的 hero 卡无粒度切换控件）：1 年按周、全部按月。
 const granOf = (r: RangeKey): Gran => (r === "1y" ? "week" : r === "all" ? "month" : "day");
@@ -89,7 +95,6 @@ function bucketSeries(daily: UsageDailyPoint[], gran: Gran): Bucket[] {
 }
 
 const RANGE_KEY: Record<RangeKey, string> = {
-  today: "usage.rangeToday",
   "7d": "usage.rank7d",
   "30d": "usage.rank30d",
   "90d": "usage.range90d",
@@ -208,7 +213,12 @@ const fmtWhen = (ts?: number): string =>
 export default function UsagePage() {
   const { t } = useTranslation();
   const [backend, setBackend] = useBackendState("usage", undefined, { surface: "usage" });
-  const [range, setRange] = useStickyState<RangeKey>("usage.range", "30d");
+  const [storedRange, setRange] = useStickyState<string>("usage.range", "30d");
+  // 旧存档里的「当天」不再提供；所有后端最短都是近 7 天。
+  const range: RangeKey = isUsageRange(storedRange) ? storedRange : "7d";
+  useEffect(() => {
+    if (storedRange !== range) setRange(range);
+  }, [storedRange, range, setRange]);
   // Each source keeps its own failure boundary while sharing connection invalidation.
   const { data: series, loading: seriesLoading, error: seriesError, refresh: refreshSeries } = usePageCache(
     `usage:series:${backend}:${range}`, () => getUsageSeries(backend, range),
@@ -455,7 +465,7 @@ export default function UsagePage() {
         <PillTabs
           value={range}
           onChange={(v) => setRange(v as RangeKey)}
-          items={(["today", "7d", "30d", "90d", "1y", "all"] as RangeKey[]).map((r) => ({
+          items={USAGE_RANGES.map((r) => ({
             value: r,
             label: t(RANGE_KEY[r]),
           }))}
@@ -463,7 +473,6 @@ export default function UsagePage() {
         />
       </div>
 
-      {backend === "hermes" && range === "today" && <div className="usage-hint">{t("usage.hermesTodayHint")}</div>}
       {err && <div className="error">{t("usage.error", { msg: err })}</div>}
       {usageUnavailable && <div className="error" role="alert">{t(series?.availabilityReason === "unsupported-range" ? "usage.rangeUnavailable" : "usage.dataUnavailable")}</div>}
       {!usageUnavailable && usagePartial && <div className="usage-hint" role="status">{t("usage.dataPartial")}</div>}
@@ -553,6 +562,7 @@ export default function UsagePage() {
         </section>
       )}
 
+      {breakdown?.runtimes !== undefined && <section className="usage-section"><RuntimeUsageBreakdown data={breakdown} /></section>}
       <div className="usage-row usage-row--split">
         <section className="usage-section">
           <div className="usage-section-head">

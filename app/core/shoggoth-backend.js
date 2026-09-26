@@ -1,5 +1,8 @@
 "use strict";
 const { isImplicitChatWorkspace } = require("../agent-service/chat-workspace");
+const { claimsNativeAgentId,
+  isNativeBindingDisabled } = require("../agent-service/native-backend-identity");
+const { isRuntimeAvailable } = require("../runtime-availability");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -17,6 +20,14 @@ const {
 const { requestService, readClientToken } = require("../agent-service/client");
 const { resolveServicePaths } = require("../agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../agent-service/service-protocol-version");
+const {
+  NATIVE_RUNTIME_CONFIG_METHODS, NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES,
+  validateNativeRuntimeConfigProjection, validateNativeRuntimeConfigResult,
+} = require("../agent-service/native-runtime-config-protocol");
+const { AGENT_BINDING_METHODS, AGENT_BINDING_PUBLIC_MESSAGES, validateAgentBindingParams,
+  validateAgentBindingResult } = require("../agent-service/agent-runtime-binding-protocol");
+const { SESSION_RUNTIME_METHODS, SESSION_RUNTIME_PUBLIC_MESSAGES, validateSessionRuntimeParams,
+  validateSessionRuntimeResult } = require("../agent-service/session-runtime-protocol");
 const { INSPIRATION_SERVICE_METHODS, PUBLIC_MESSAGES: INSPIRATION_PUBLIC_MESSAGES,
   validateInspirationServiceResult } = require("../agent-service/inspiration-service-protocol");
 const { deriveSessionTitle } = require("../agent-service/session-display-projection");
@@ -39,6 +50,7 @@ const {
   validateAgentLifecycleResult,
 } = require("../agent-service/agent-lifecycle-service-protocol");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../agent-service/product-store");
+const { DEFAULT_RUNTIME_ACCOUNTS } = require("../agent-service/runtime-account");
 const { BUILTIN_CLI_AGENT_PROFILES } = require("../agent-service/builtin-cli-profiles");
 const {
   defaultRuntimePermissionMode,
@@ -61,11 +73,14 @@ const {
   validateUsageSeries,
 } = require("../agent-service/token-usage-protocol");
 const { collectSessionOutputArtifacts } = require("./session-output-artifacts");
+const { validatePluginManagementResult } = require("./plugin-management-dto");
+const { validatePluginAppResult } = require("./plugin-app-dto");
 
 const SERVICE_TIMEOUT_MS = 5_000;
 const ENCRYPTED_MUTATION_TIMEOUT_MS = 15_000;
 const RUNTIME_COMMAND_TIMEOUT_MS = 45_000;
 const MODEL_CATALOG_TIMEOUT_MS = 45_000;
+const PLUGIN_INSTALL_TIMEOUT_MS = 30_000;
 const DEFAULT_READINESS_TIMEOUT_MS = 70_000;
 const DEFAULT_READINESS_INTERVAL_MS = 500;
 const DEFAULT_SERVICE_STATUS_TIMEOUT_MS = 1_000;
@@ -151,21 +166,58 @@ const RUN_RECONCILE_STREAM_IDS = Object.freeze([
   "00000000-0000-4000-8000-000000000002",
 ]);
 const RUNTIME_START_MESSAGES = Object.freeze({
+  RUNTIME_PROTOCOL_ERROR: "CLI 返回的通信数据不符合协议，本次任务已停止；请检查 CLI 与 App 的版本兼容性及原生会话结果",
+  RUNTIME_CONNECTION_LOST: "CLI 进程或通信连接异常中断，未自动重放；请检查原生会话结果后决定是否重试",
+  CODEX_HOST_TERMINATED: "Codex 运行进程已终止，本次任务未自动重放；请检查原生会话结果后决定是否重试",
   RUNTIME_AUTH_REQUIRED: "当前 Agent 登录验证失败，请前往「设置」检查账号状态或重新登录后重试",
   RUNTIME_PERMISSION_REQUIRED: "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试",
   RUNTIME_APPROVAL_UNAVAILABLE: "Antigravity 的非交互模式无法弹出原生工具授权，本次操作已被拒绝；请检查权限设置，调整后可在当前会话重新发送",
   ANTIGRAVITY_ONBOARDING_REQUIRED: "请先在 Antigravity CLI 中完成首次登录引导，再回到当前会话重试",
+  ANTIGRAVITY_NETWORK_UNAVAILABLE: "Antigravity 网络检查失败，本次消息未发送；请检查代理与 Google 服务的连接后重试",
+  ANTIGRAVITY_REGION_UNSUPPORTED: "Antigravity 服务不支持当前账号的访问地区，本次消息未发送；请检查服务可用地区后重试",
+  ANTIGRAVITY_ELIGIBILITY_FAILED: "Antigravity 账号可用性检查未通过，本次消息未发送；请在原生 CLI 中查看账号状态后重试",
+  ANTIGRAVITY_STARTUP_TIMEOUT: "Antigravity 启动或登录检查超时，本次消息未发送；请检查网络和 CLI 登录状态后重试",
   ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED: "暂时无法识别 Antigravity 的原生授权界面，本次操作已停止；请检查 CLI 与 Shoggoth 的版本兼容性",
   ANTIGRAVITY_APPROVAL_CHANGED: "Antigravity 的原生授权请求已变化，旧选择未被应用；请在当前会话重新发送",
+  ANTIGRAVITY_APPROVAL_TIMEOUT: "等待 Antigravity 授权选择已超时，本次任务已停止，迟到的选择不会应用",
+  ANTIGRAVITY_APPROVAL_RESPONSE_UNCONFIRMED: "Antigravity 尚未确认授权选择，任务已停止；无法确定工具是否执行，请检查原生会话结果后决定是否重试",
   RUNTIME_QUOTA_EXHAUSTED: "当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试",
+  RUNTIME_RATE_LIMITED: "模型服务限流，本次回复未完成。请稍后重试，或更换模型",
   RUNTIME_SPENDING_LIMIT_REACHED: "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试",
   RUNTIME_ACCOUNT_BLOCKED: "模型服务商返回账号受限（account blocked），请前往服务商检查账号状态；解除限制或更换可用账号后重试",
   RUNTIME_UPSTREAM_UNAVAILABLE: "Agent 上游服务暂时不可用，请稍后重试",
+  RUNTIME_SESSION_BUSY: "此原生会话仍有任务在执行，请等待任务结束或取消后再发送",
+  RUNTIME_SESSION_ACCEPTANCE_UNKNOWN: "未能确认原生会话是否创建成功，已暂停自动重试以避免重复创建；请先检查 CLI 的会话记录",
+  RUNTIME_TURN_ACCEPTANCE_UNKNOWN: "未能确认 CLI 是否已接受本次任务，已暂停自动重试以避免重复执行；请先检查原生会话的执行结果",
+  RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED: "原生会话历史不足以确认任务执行状态，已暂停恢复以避免重复执行",
+  RUNTIME_MODEL_CATALOG_UNAVAILABLE: "暂时无法读取当前账号的模型列表，请检查 CLI 登录和网络后重试",
+  RUNTIME_MODEL_CATALOG_INVALID: "CLI 返回的模型列表无法识别，请检查 CLI 与 App 的版本兼容性",
+  RUNTIME_MODEL_UNAVAILABLE: "当前账号无法使用所选模型，请检查登录状态或选择可用模型",
+  GROK_ACP_OUTBOUND_FRAME_TOO_LARGE: "消息或附件超过 Grok CLI 的传输大小限制，本次消息未发送；请缩小附件或减少内容后重试",
+  GROK_ACP_REQUEST_TIMEOUT: "Grok CLI 响应超时，未自动重放；请检查原生会话结果后决定是否重试",
+  GROK_ACP_WRITE_FAILED: "写入 Grok CLI 时连接中断，尚无法确认完整执行结果；请检查原生会话记录",
+  GROK_ACP_STDIN_CLOSED: "Grok CLI 通信通道已关闭，未自动重放；请检查 CLI 状态和原生会话结果",
+  RUNTIME_REQUEST_NOT_SENT: "本次请求在发送前已停止；确认未发送，可以在当前会话重新提交",
+  PI_TURN_TIMEOUT: "Pi 本次任务执行超时，未自动重放；请检查原生会话结果后决定是否重试",
+  PI_PROCESS_CLOSED: "Pi 进程在任务完成前退出，未自动重放；请检查 CLI 状态和原生会话结果",
+  PI_RPC_STARTUP_TIMEOUT: "Pi 通信初始化超时，请检查 CLI 安装与登录状态后重试",
+  DEEPSEEK_HARNESS_REQUEST_TIMEOUT: "DeepSeek 通信超时，未自动重放；请检查原生会话结果后决定是否重试",
+  DEEPSEEK_HARNESS_STARTUP_TIMEOUT: "DeepSeek 初始化超时，请检查 CLI 安装与登录状态后重试",
+  DEEPSEEK_HARNESS_PROCESS_CLOSED: "DeepSeek 进程在任务完成前退出，未自动重放；请检查原生会话结果",
+  ANTIGRAVITY_TURN_TIMEOUT: "Antigravity 本次任务执行超时，未自动重放；请检查原生会话结果后决定是否重试",
+  OPENCODE_TURN_TIMEOUT: "OpenCode 本次任务执行超时，已通知 CLI 停止；未自动重放，请检查会话结果后决定是否重试",
+  CODEX_TERMINAL_RECONCILIATION_FAILED: "未能从原生 CLI 读取本次任务的最终结果，已停止等待；未自动重放，请先检查原生会话记录，避免重复执行",
+  ANTIGRAVITY_PROCESS_EXIT_INVALID: "Antigravity 进程异常退出，未自动重放；请检查 CLI 状态和原生会话结果",
+  RUNTIME_TURN_INTERRUPTED: "Agent 本次任务已中断，尚无法确认完整执行结果；请检查会话记录后决定是否重试",
+  EXECUTION_BINDING_UNAVAILABLE: "无法安全保存任务的恢复记录，本次任务尚未发送；请检查本地存储后重试",
+  EXECUTION_CONTRACT_LOST: "缺少原任务的完整执行记录，无法安全恢复；请检查原生会话结果后决定是否重试",
+  RUNTIME_RECOVERY_UNAVAILABLE: "Service 重启后无法确认原任务的完整结果或恢复执行绑定，已停止自动恢复；请检查原生会话结果后决定是否重试",
   CODEX_SYSTEM_BINARY_NOT_FOUND: "未找到可执行的本机 Codex CLI，请先安装 Codex 并检查 PATH",
   CODEX_RUNTIME_VERSION_MISMATCH: "Codex CLI 版本与当前 App 不兼容，请检查 CLI 与 App 版本",
   CODEX_RUNTIME_VERSION_PROBE_FAILED: "无法读取 Codex CLI 版本，请检查本机安装与执行权限",
   CODEX_SCHEMA_ERROR: "Codex 协议校验失败，请检查 CLI 与 App 的版本兼容性",
   RUNTIME_TURN_FAILED: "Agent 本次任务执行失败，请重试；若持续失败，请在「设置」中检查登录状态",
+  RUNTIME_TURN_OUTCOME_UNKNOWN: "原生 CLI 尚未确认本次任务的最终结果，已停止等待；请先检查原生会话记录，避免重复执行",
   RUNTIME_START_FAILED: "启动 Agent Runtime 失败，请重试；若持续失败，请检查 CLI 安装与登录状态",
   RUNTIME_START_RUNTIME_ACQUIRE_FAILED: "获取 Agent Runtime 失败，请重试",
   RUNTIME_START_PROCESS_SPAWN_FAILED: "启动 Agent Runtime 进程失败，请重试或检查 CLI 安装",
@@ -185,6 +237,12 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   CODEX_START_TURN_START_FAILED: "发送本次任务失败；为避免重复执行，未自动重放",
 });
 const CHAT_REQUEST_MESSAGES = Object.freeze({
+  ...require("../agent-service/product-context-protocol").MESSAGES,
+  ...require("../agent-service/runtime-selection-policy").RUNTIME_POLICY_MESSAGES,
+  ...SESSION_RUNTIME_PUBLIC_MESSAGES,
+  NATIVE_RUNTIME_DISABLED: "该运行环境已停用，请在设置中恢复后再执行任务",
+  ...AGENT_BINDING_PUBLIC_MESSAGES,
+  ...NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES,
   CUSTOM_ENDPOINT_REJECTED: "端点操作失败，请检查配置、当前任务和本机 Service 后重试。",
   ...INSPIRATION_PUBLIC_MESSAGES,
   RUNTIME_AUTH_REQUIRED: CHAT_PUBLIC_MESSAGES.RUNTIME_AUTH_REQUIRED,
@@ -199,6 +257,12 @@ const CONNECTION_MODES = new Set(["builtin-service", "native-runtime"]);
 const CLIENT_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SAFE_ADAPTER_ERRORS = new WeakSet();
 const PUBLIC_SERVICE_ERROR_CODES = new Set([
+  ...Object.keys(require("../agent-service/product-context-protocol").MESSAGES),
+  ...Object.keys(require("../agent-service/runtime-selection-policy").RUNTIME_POLICY_MESSAGES),
+  ...Object.keys(SESSION_RUNTIME_PUBLIC_MESSAGES),
+  "NATIVE_RUNTIME_DISABLED",
+  ...Object.keys(AGENT_BINDING_PUBLIC_MESSAGES),
+  ...Object.keys(NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES),
   "CUSTOM_ENDPOINT_REJECTED",
   ...Object.keys(CHAT_PUBLIC_MESSAGES),
   ...Object.keys(INSPIRATION_PUBLIC_MESSAGES),
@@ -221,6 +285,66 @@ const PUBLIC_SERVICE_ERROR_CODES = new Set([
   "SERVICE_DISCONNECTED",
   "INVALID_PARAMS",
   "USAGE_RESPONSE_INVALID",
+  "PLUGIN_UNAVAILABLE",
+  "PLUGIN_RESPONSE_INVALID",
+  "PLUGIN_REQUEST_INVALID",
+  "PLUGIN_SERVICE_FAILED",
+  "PLUGIN_OPERATION_INVALID",
+  "PLUGIN_OPERATION_FAILED",
+  "PLUGIN_OPERATION_OUTCOME_UNKNOWN",
+  "PACKAGE_CHANGED",
+  "PACKAGE_INVALID",
+  "PACKAGE_PATH_INVALID",
+  "GIT_SOURCE_INVALID",
+  "GIT_REMOTE_CANCELLED",
+  "GIT_REMOTE_FAILED",
+  "GIT_REMOTE_TIMEOUT",
+  "GIT_REMOTE_TOO_LARGE",
+  "GIT_REMOTE_LOG_LIMIT",
+  "GIT_REMOTE_LIMIT",
+  "GIT_REMOTE_EXIT_UNKNOWN",
+  "REVISION_CONFLICT",
+  "PLUGIN_INSTALLATION_INVALID",
+  "PLUGIN_BINDING_INVALID",
+  "PLUGIN_COMPONENT_INACTIVE",
+  "PLUGIN_COMPONENT_REVISION_CHANGED",
+  "ACTIVATION_DEFERRED",
+  "PLUGIN_UPDATE_REQUIRES_DISABLE",
+  "PLUGIN_CONNECTION_CLOSE_FAILED",
+  "PLUGIN_UNINSTALL_REQUIRES_DISABLE",
+  "PLUGIN_GRANT_INVALID",
+  "PLUGIN_RESPONSE_TOO_LARGE",
+  "LEGACY_SOURCE_OVERLAP",
+  "PLUGIN_CONSENT_EXPIRED",
+  "PLUGIN_CONSENT_BUSY",
+  "PLUGIN_OAUTH_PROVIDER_UNSUPPORTED",
+  "PLUGIN_OAUTH_CONFIG_INVALID",
+  "PLUGIN_OAUTH_FLOW_NOT_FOUND",
+  "PLUGIN_CONNECTION_LIMIT",
+  "CONNECTION_AUTH_REQUIRED",
+  "CONNECTION_IDENTITY_CHANGED",
+  "TOOL_CONTRACT_CHANGED",
+  "DEPENDENCY_PREPARATION_REQUIRED",
+  "DEPENDENCY_MISSING",
+  "DEPENDENCY_REQUIRES_DISABLE",
+  "DEPENDENCY_CHANGED",
+  "DEPENDENCY_EXECUTABLE_INVALID",
+  "DEPENDENCY_INTERPRETER_UNSUPPORTED",
+  "DEPENDENCY_ARGUMENTS_UNSUPPORTED",
+  "DEPENDENCY_ENV_UNSUPPORTED",
+  "DEPENDENCY_PROBE_FAILED",
+  "DEPENDENCY_REGISTRY_INVALID",
+  "DEPENDENCY_REGISTRY_LIMIT",
+  "DEPENDENCY_CONFIRMATION_REQUIRED",
+  "MCP_APP_AUTHORITY_INVALID",
+  "MCP_APP_AUTHORITY_REVOKED",
+  "MCP_APP_RESOURCE_FORBIDDEN",
+  "MCP_APP_RESOURCE_INVALID",
+  "MCP_APP_SESSION_EXPIRED",
+  "MCP_APP_TRANSPORT_INVALID",
+  "MCP_APP_LIMIT",
+  "MCP_APP_UNSUPPORTED",
+  "MCP_APP_SEED_UNAVAILABLE",
 ]);
 const AUTH_STATUS_TRANSIENT_ERROR_CODES = new Set([
   "SERVICE_UNAVAILABLE",
@@ -249,6 +373,112 @@ function exactObject(value, fields) {
   return ownDataObject(value)
     && Object.keys(value).length === fields.length
     && fields.every((field) => Object.prototype.hasOwnProperty.call(value, field));
+}
+
+function validatePluginCatalogPage(value, params) {
+  const digest = /^[a-f0-9]{64}$/u;
+  const shortText = (text, max = 2048) => typeof text === "string"
+    && text.isWellFormed() && Buffer.byteLength(text, "utf8") <= max;
+  if (!exactObject(value, ["supported", "catalogRevision", "items", "nextCursor"])
+    || value.supported !== true || !digest.test(value.catalogRevision)
+    || !Array.isArray(value.items) || value.items.length > params.limit
+    || value.items.length > 20
+    || (value.nextCursor !== null
+      && (!Number.isSafeInteger(value.nextCursor)
+        || value.nextCursor <= params.cursor))) {
+    throw new TypeError("invalid plugin catalog page");
+  }
+  const items = value.items.map((item) => {
+    if (!exactObject(item, ["installationId", "releaseDigest", "desiredState",
+      "revision", "createdAt", "updatedAt", "sourceKind", "packageName",
+      "declaredVersion", "components", "diagnostics"])
+      || !shortText(item.installationId, 128) || !digest.test(item.releaseDigest)
+      || !["enabled", "disabled"].includes(item.desiredState)
+      || !Number.isSafeInteger(item.revision) || item.revision < 1
+      || !Number.isSafeInteger(item.createdAt) || item.createdAt < 0
+      || !Number.isSafeInteger(item.updatedAt) || item.updatedAt < 0
+      || !["directory", "git", "legacy-directory", "remote-git", "bundled"].includes(item.sourceKind)
+      || !shortText(item.packageName, 256)
+      || (item.declaredVersion !== null && !shortText(item.declaredVersion, 256))
+      || !Array.isArray(item.components) || item.components.length > 256
+      || !Array.isArray(item.diagnostics) || item.diagnostics.length > 256) {
+      throw new TypeError("invalid plugin catalog item");
+    }
+    const components = item.components.map((component) => {
+      const common = ["componentId", "kind", "localName", "title",
+        "descriptorDigest", "state"];
+      const skill = component?.kind === "skill";
+      if (!exactObject(component, [...common, skill ? "description" : "transport"])
+        || !digest.test(component.componentId)
+        || !digest.test(component.descriptorDigest)
+        || !shortText(component.localName, 256)
+        || !shortText(component.title, 256)
+        || !shortText(component.state, 64)
+        || (skill ? !shortText(component.description, 2048)
+          : component.kind !== "mcp-server"
+            || !["stdio", "streamable-http"].includes(component.transport))) {
+        throw new TypeError("invalid plugin component");
+      }
+      return { componentId: component.componentId, kind: component.kind,
+        localName: component.localName, title: component.title,
+        descriptorDigest: component.descriptorDigest, state: component.state,
+        ...(skill ? { description: component.description }
+          : { transport: component.transport }) };
+    });
+    return { installationId: item.installationId,
+      releaseDigest: item.releaseDigest, desiredState: item.desiredState,
+      revision: item.revision, createdAt: item.createdAt,
+      updatedAt: item.updatedAt, sourceKind: item.sourceKind,
+      packageName: item.packageName, declaredVersion: item.declaredVersion,
+      components, diagnosticCount: item.diagnostics.length };
+  });
+  return { supported: true, catalogRevision: value.catalogRevision,
+    items, nextCursor: value.nextCursor };
+}
+
+function validateBundledPluginList(value) {
+  const digest = /^[a-f0-9]{64}$/u;
+  const id = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+  if (!exactObject(value, ["batchDigest", "items"]) || !digest.test(value.batchDigest)
+    || !Array.isArray(value.items) || value.items.length > 62) {
+    throw new TypeError("invalid bundled plugin list");
+  }
+  const seen = new Set();
+  const items = value.items.map(item => {
+    if (!exactObject(item, ["id", "installationId", "displayName",
+      "shortDescription", "category", "version", "iconAvailable",
+      "components", "converted", "unconvertedMcp", "importStatus", "installationState",
+      "installedReleaseDigest"])
+      || !id.test(item.id) || seen.has(item.id) || !digest.test(item.installationId)
+      || typeof item.displayName !== "string" || item.displayName.length > 128
+      || typeof item.shortDescription !== "string" || item.shortDescription.length > 1024
+      || typeof item.category !== "string" || item.category.length > 128
+      || typeof item.version !== "string" || item.version.length > 128
+      || typeof item.iconAvailable !== "boolean"
+      || !exactObject(item.components, ["skills", "allSkillFiles", "apps", "mcp"])
+      || Object.values(item.components).some(count => !Number.isSafeInteger(count) || count < 0)
+      || !exactObject(item.converted, ["skills", "mcp"])
+      || !Number.isSafeInteger(item.converted.skills) || item.converted.skills < 0
+      || !Number.isSafeInteger(item.converted.mcp) || item.converted.mcp < 0
+      || item.converted.skills > item.components.skills
+      || item.converted.mcp > item.components.mcp
+      || !Array.isArray(item.unconvertedMcp)
+      || item.converted.mcp + item.unconvertedMcp.length !== item.components.mcp
+      || item.unconvertedMcp.some(issue => !exactObject(issue, ["name", "reasonCode"])
+        || typeof issue.name !== "string" || issue.name.length < 1 || issue.name.length > 128
+        || !["LEGACY_MCP_FIELD_UNSUPPORTED", "LEGACY_MCP_ENTRY_INVALID"].includes(issue.reasonCode))
+      || (item.importStatus === "previewable") !== (item.converted.skills + item.converted.mcp > 0)
+      || !["previewable", "needs-adapter"].includes(item.importStatus)
+      || !["not-installed", "enabled", "disabled"].includes(item.installationState)
+      || (item.installationState === "not-installed"
+        ? item.installedReleaseDigest !== null : !digest.test(item.installedReleaseDigest))) {
+      throw new TypeError("invalid bundled plugin item");
+    }
+    seen.add(item.id);
+    return { ...item, components: { ...item.components }, converted: { ...item.converted },
+      unconvertedMcp: item.unconvertedMcp.map(issue => ({ ...issue })) };
+  });
+  return { batchDigest: value.batchDigest, items };
 }
 
 function boundedIntegerOption(options, name, fallback, min, max) {
@@ -592,6 +822,11 @@ function validateServiceEventPage(value, params) {
         || !safeString(payload.backendId, 128) || payload.backendId.length === 0) {
         throw new TypeError("invalid Agent profile event");
       }
+    } else if (event.type === "runtime.context.updated") {
+      const payload = event.payload;
+      if (!exactObject(payload, ["profileId", "sessionKey"])
+        || !safeString(payload.profileId, 256) || payload.profileId.length === 0
+        || !UUID_PATTERN.test(payload.sessionKey)) throw new TypeError("invalid context observation event");
     } else if (event.type === "federation.chat.terminal") {
       const payload = event.payload;
       if (!exactObject(payload, [
@@ -668,6 +903,13 @@ function validateServiceEventPage(value, params) {
 
 function validateServiceResult(method, value, params) {
   try {
+    if (require("../agent-service/product-context-protocol").METHODS.includes(method)) return require("../agent-service/product-context-protocol").validateResult(value);
+    if (require("../agent-service/runtime-selection-policy").RUNTIME_POLICY_METHODS.includes(method)) {
+      return require("../agent-service/runtime-selection-policy").validateRuntimeSelectionPolicy(value);
+    }
+    if (SESSION_RUNTIME_METHODS.includes(method)) return validateSessionRuntimeResult(value, params);
+    if (AGENT_BINDING_METHODS.includes(method)) return validateAgentBindingResult(method, value, params);
+    if (NATIVE_RUNTIME_CONFIG_METHODS.includes(method)) return validateNativeRuntimeConfigResult(method, value);
     if (method.startsWith("provider.endpoints.")) return validateCustomEndpointResult(method, value);
     if (INSPIRATION_SERVICE_METHOD_SET.has(method)) return validateInspirationServiceResult(method, value);
     if (method === "service.status") {
@@ -683,6 +925,23 @@ function validateServiceResult(method, value, params) {
       });
     }
     if (method === "events.subscribe") return validateServiceEventPage(value, params);
+    if (method === "plugins.capabilities.list") {
+      return validatePluginCatalogPage(value, params);
+    }
+    if (method === "plugins.bundled.list") return validateBundledPluginList(value);
+    if (method.startsWith("plugins.apps.")) return validatePluginAppResult(method, value);
+    if (method.startsWith("plugins.oauth.")) return require("./plugin-oauth-dto").validatePluginOAuthResult(method, value);
+    if (method.startsWith("plugins.connections.")) return require("./plugin-connection-dto").validatePluginConnectionResult(method, value);
+    if (method.startsWith("plugins.dependencies.")) return require("./plugin-dependency-dto").validatePluginDependencyResult(method, value);
+    if (method.startsWith("plugins.rollback.")) return require("./plugin-rollback-dto").validatePluginRollbackResult(method, value);
+    if (["plugins.install.preview", "plugins.install", "plugins.installations.set",
+      "plugins.skills.bindings.list", "plugins.skills.bindings.set",
+      "plugins.mcp.status", "plugins.mcp.tools.list", "plugins.mcp.grants.revoke",
+      "plugins.mcp.grants.revoke-all",
+      "plugins.mcp.consent.prepare", "plugins.mcp.consent.commit", "plugins.mcp.discover",
+      "plugins.uninstall.preview", "plugins.uninstall",
+      "plugins.operations.get"]
+      .includes(method)) return validatePluginManagementResult(method, value);
     if (DOMAIN_SERVICE_METHOD_SET.has(method)) {
       return validateDomainServiceResult(method, value, params);
     }
@@ -704,6 +963,7 @@ function validateServiceResult(method, value, params) {
     throw safeError(error, method === "service.status"
       ? "SERVICE_UNAVAILABLE"
       : method.startsWith("usage.") ? "USAGE_RESPONSE_INVALID"
+        : method.startsWith("plugins.") ? "PLUGIN_RESPONSE_INVALID"
         : AGENT_HARNESS_METHOD_SET.has(method) ? "HARNESS_RESPONSE_INVALID"
           : "CHAT_RESPONSE_INVALID");
   }
@@ -738,7 +998,7 @@ function profileToAgent(profile, backendId, sharedAgentCount = 1) {
     provider: profile.providerRef || profile.runtime || undefined,
     runtime: profile.runtime,
     runtimeAccountId: profile.runtimeAccountId,
-    environmentKind: profile.backendId === "shoggoth" ? "shoggoth-managed" : "native-user",
+    environmentKind: DEFAULT_RUNTIME_ACCOUNTS.find((account) => account.id === profile.runtimeAccountId)?.kind,
     sharedAgentCount,
     backendId,
   });
@@ -781,6 +1041,8 @@ function sessionToRow(profile, value, backendId) {
     model: value.modelOverride || profile.defaultModel || undefined,
     ...(value.modelSettings ? { thinkingLevel: value.modelSettings.thinkingLevel,
       fastMode: value.modelSettings.serviceTier !== null } : {}),
+    ...(value.contextCapabilities ? { contextUsage: value.contextUsage, contextCapabilities: value.contextCapabilities } : {}),
+    ...(value.productContext ? { productContext: value.productContext } : {}),
     permissionMode: value.permissionMode
       || defaultRuntimePermissionMode(profile.runtime || "codex", profile.permissionPolicy),
     provider: profile.providerRef || profile.runtime,
@@ -886,8 +1148,8 @@ class ShoggothBackend extends AgentBackend {
     const backendName = options.name === undefined ? "Shoggoth" : options.name;
     const connectionMode = options.connectionMode === undefined
       ? "builtin-service" : options.connectionMode;
-    if (typeof backendId !== "string" || !BACKEND_ID_PATTERN.test(backendId)) {
-      throw new TypeError("ShoggothBackend id 必须是合法 backend id");
+    if (backendId !== "shoggoth") {
+      throw new TypeError("ShoggothBackend id 必须为 shoggoth");
     }
     if (typeof backendName !== "string" || backendName.length === 0
       || !backendName.isWellFormed() || Buffer.byteLength(backendName, "utf8") > 128) {
@@ -904,6 +1166,9 @@ class ShoggothBackend extends AgentBackend {
     }
     if (options.readToken !== undefined && typeof options.readToken !== "function") {
       throw new TypeError("ShoggothBackend readToken 必须是函数");
+    }
+    if (options.getNativeRuntimeConfig !== undefined && typeof options.getNativeRuntimeConfig !== "function") {
+      throw new TypeError("ShoggothBackend getNativeRuntimeConfig 必须是函数");
     }
     if (options.randomUUID !== undefined && typeof options.randomUUID !== "function") {
       throw new TypeError("ShoggothBackend randomUUID 必须是函数");
@@ -928,12 +1193,12 @@ class ShoggothBackend extends AgentBackend {
     this.backendId = backendId;
     this.backendName = backendName;
     this.connectionMode = connectionMode;
-    this._claimsAgentId = options.claimsAgentId || ((agentId) => (
-      typeof agentId === "string" && /^shoggoth-/u.test(agentId)
-    ));
+    this._claimsAgentId = options.claimsAgentId || claimsNativeAgentId;
+    this._getDisabledBackendIds = null;
     this.paths = options.paths || resolveServicePaths();
     this.requestService = options.requestService || requestService;
     this.readToken = options.readToken || readClientToken;
+    this.getNativeRuntimeConfig = options.getNativeRuntimeConfig || null;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.now = options.now || Date.now;
     this.readinessNow = options.readinessNow || (() => performance.now());
@@ -967,6 +1232,10 @@ class ShoggothBackend extends AgentBackend {
     this.timeZone = options.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     this.version = options.version || null;
     this.runtimeCliAuth = normalizeRuntimeCliAuth(options.runtimeCliAuth);
+    if (options.getRuntimeCliAuth !== undefined && typeof options.getRuntimeCliAuth !== "function") {
+      throw new TypeError("ShoggothBackend getRuntimeCliAuth must be a function");
+    }
+    this.getRuntimeCliAuth = options.getRuntimeCliAuth || null;
     try { new Intl.DateTimeFormat("en", { timeZone: this.timeZone }).format(0); } catch {
       throw new TypeError("ShoggothBackend timeZone 必须是有效 IANA 时区");
     }
@@ -1009,7 +1278,7 @@ class ShoggothBackend extends AgentBackend {
       id: this.id,
       name: this.name,
       connectionMode: this.connectionMode,
-      disconnectable: true,
+      disconnectable: false,
       agentLifecycle: {
         create: true,
         update: true,
@@ -1027,6 +1296,11 @@ class ShoggothBackend extends AgentBackend {
         oauth: true,
         dashboardRuns: true,
         agentHarness: true,
+        nativeCapacity: true,
+        runtimeBindings: true,
+        runtimeStatus: true,
+        sessionRuntimeSwitch: true,
+        runtimeUsage: true,
         cron: { kind: "native" },
         kanban: { kind: "native" },
       },
@@ -1047,10 +1321,86 @@ class ShoggothBackend extends AgentBackend {
 
   getAgents() { return [...this._agents]; }
 
+  setDisabledBackendsProvider(provider) { this._getDisabledBackendIds = provider; }
+
+  _bindingAvailability(agentId, runtime, runtimeAccountId) {
+    let disabled;
+    try { disabled = this._getDisabledBackendIds?.() || []; } catch { disabled = []; }
+    return !isRuntimeAvailable(runtime) ? { available: false, reason: "runtime-unavailable" }
+      : isNativeBindingDisabled(agentId, runtime, disabled, runtimeAccountId) ? { available: false, reason: "runtime-disabled" }
+        : { available: true, reason: null };
+  }
+
+  _assertRuntimeEnabled(profile, runtime = profile.runtime) {
+    if (!this._bindingAvailability(profile.agentId, runtime, profile.runtimeAccountId).available) throw safeError(null, "NATIVE_RUNTIME_DISABLED");
+  }
+
+  async _connectedCliAccounts() {
+    const descriptors = this.getRuntimeCliAuth
+      ? normalizeRuntimeCliAuth(await this.getRuntimeCliAuth()) : this.runtimeCliAuth;
+    return DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user"
+      && descriptors.get(account.id)?.binaryPath
+      && this._bindingAvailability("", account.runtime, account.id).available).map(account => account.id);
+  }
+
+  _rememberBindings(profileId, state) {
+    this._bindingsByProfile ||= new Map();
+    this._bindingsByProfile.set(profileId, state.bindings);
+    return state;
+  }
+
+  async _syncCliBindings(profileId, runtimeAccountIds) {
+    return this._rememberBindings(profileId, await this._call("agent.binding.sync", { profileId, runtimeAccountIds }));
+  }
+
+  _profileForSession(profile, session) {
+    const binding = this._bindingsByProfile?.get(profile.id)?.find(entry => entry.id === session.runtimeBindingId);
+    return binding ? { ...profile, runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
+      runtimeAccountId: binding.runtimeAccountId } : profile;
+  }
+
+  _acceptsProfileBackend(backendId) {
+    return backendId === this.id;
+  }
+
+  getNativeCapacity() { return this._call("runtime.capacity.read", {}); }
+
+  async getRuntimeStatuses() {
+    // Resolve the executables again on an explicit settings refresh so a newly
+    // installed CLI is visible without restarting. Do not launch auth probes.
+    const descriptors = this.getRuntimeCliAuth
+      ? normalizeRuntimeCliAuth(await this.getRuntimeCliAuth()) : this.runtimeCliAuth;
+    const serviceConnected = await this.getStatus().then(status => status.connected === true, () => false);
+    let disabled = [];
+    try { disabled = this._getDisabledBackendIds?.() || []; } catch { /* configuration unavailable */ }
+    const names = new Map(require("../runtime-cli-auth").AUTH_SPECS.map(spec => [spec.runtimeAccountId, spec.name]));
+    return DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user").map(account => {
+      const descriptor = descriptors.get(account.id);
+      const releaseEnabled = isRuntimeAvailable(account.runtime);
+      return {
+        runtime: account.runtime, name: names.get(account.id) || account.runtime,
+        runtimeAccountId: account.id, releaseEnabled,
+        enabled: !isNativeBindingDisabled("", account.runtime, disabled, account.id),
+        installation: !releaseEnabled ? "unknown" : descriptor?.binaryPath ? "available" : "unavailable",
+        serviceConnected,
+      };
+    });
+  }
+
+  async applyNativeRuntimeConfig(input) {
+    const projection = validateNativeRuntimeConfigProjection(input);
+    const applied = await this._call("runtime.config.apply", projection);
+    if (JSON.stringify(applied) !== JSON.stringify(projection)) {
+      throw safeError(null, "NATIVE_RUNTIME_CONFIG_CONFLICT");
+    }
+    return applied;
+  }
+
   _isServiceReady(status) {
+    // MCP credentials initialize on the first authenticated helper handshake.
+    // Their optional lock must not hide the native Agent roster.
     return status.healthy === true
-      && status.pendingCommandsLocked === false
-      && status.mcpCredentialsLocked === false;
+      && status.pendingCommandsLocked === false;
   }
 
   _statusResult() {
@@ -1363,7 +1713,7 @@ class ShoggothBackend extends AgentBackend {
   async _lifecycleSnapshot() {
     this._assertDomainReady();
     const result = await this._call("agent.lifecycle.list", { backendId: this.id });
-    if (result.agents.some((entry) => entry.profile.backendId !== this.id)) {
+    if (result.agents.some((entry) => !this._acceptsProfileBackend(entry.profile.backendId))) {
       throw safeError(null, "AGENT_RESPONSE_INVALID");
     }
     return result.agents;
@@ -1408,8 +1758,10 @@ class ShoggothBackend extends AgentBackend {
     refresh = (async () => {
       const entries = await this._lifecycleSnapshot();
       const profiles = entries.filter((entry) => entry.profile.enabled).map((entry) => entry.profile);
+      const connectedAccounts = await this._connectedCliAccounts();
       const sessionsByProfile = await mapBounded(
         profiles, MAX_PROFILE_SESSION_CONCURRENCY, async (profile) => {
+          if (connectedAccounts.length) await this._syncCliBindings(profile.id, connectedAccounts);
           const sessions = await this._page("chat.session.list", {
             profileId: profile.id,
             includeArchived: false,
@@ -1431,7 +1783,7 @@ class ShoggothBackend extends AgentBackend {
       for (const entry of sessionsByProfile) {
         for (const session of entry.sessions) {
           sessionsByKey.set(session.sessionKey, session);
-          rows.push(sessionToRow(entry.profile, session, this.id));
+          rows.push(sessionToRow(this._profileForSession(entry.profile, session), session, this.id));
         }
       }
       // Expire bridge-owned cards before publishing a profile/session snapshot
@@ -1490,7 +1842,7 @@ class ShoggothBackend extends AgentBackend {
       defaultCwd: spec.workspace || null,
       createdAt: spec.createdAt ?? this.now(),
     });
-    if (result.profile.backendId !== this.id || result.profile.enabled !== true) {
+    if (!this._acceptsProfileBackend(result.profile.backendId) || result.profile.enabled !== true) {
       throw safeError(null, "AGENT_RESPONSE_INVALID");
     }
     await this._refreshManagedProfiles();
@@ -1511,7 +1863,7 @@ class ShoggothBackend extends AgentBackend {
       expectedUpdatedAt: patch.expectedUpdatedAt ?? profile.updatedAt,
       createdAt: patch.createdAt ?? this.now(),
     });
-    if (result.profile.backendId !== this.id || result.profile.agentId !== id) {
+    if (!this._acceptsProfileBackend(result.profile.backendId) || result.profile.agentId !== id) {
       throw safeError(null, "AGENT_RESPONSE_INVALID");
     }
     await this._refreshManagedProfiles();
@@ -1526,7 +1878,7 @@ class ShoggothBackend extends AgentBackend {
       expectedUpdatedAt: options.expectedUpdatedAt ?? profile.updatedAt,
       createdAt: options.createdAt ?? this.now(),
     });
-    if (result.profile.backendId !== this.id || result.profile.agentId !== id
+    if (!this._acceptsProfileBackend(result.profile.backendId) || result.profile.agentId !== id
       || result.profile.enabled !== false) throw safeError(null, "AGENT_RESPONSE_INVALID");
     await this._refreshManagedProfiles();
   }
@@ -1544,7 +1896,7 @@ class ShoggothBackend extends AgentBackend {
       expectedUpdatedAt: options.expectedUpdatedAt ?? entry.profile.updatedAt,
       createdAt: options.createdAt ?? this.now(),
     });
-    if (result.profile.backendId !== this.id || result.profile.agentId !== id
+    if (!this._acceptsProfileBackend(result.profile.backendId) || result.profile.agentId !== id
       || result.profile.enabled !== true) throw safeError(null, "AGENT_RESPONSE_INVALID");
     await this._refreshManagedProfiles();
     const refreshed = this._profilesByAgent.get(result.profile.agentId) || result.profile;
@@ -1570,7 +1922,7 @@ class ShoggothBackend extends AgentBackend {
         ? { provider: profile.providerRef || profile.runtime } : {}),
       runtime: profile.runtime,
       runtimeAccountId: profile.runtimeAccountId,
-      environmentKind: profile.backendId === "shoggoth" ? "shoggoth-managed" : "native-user",
+      environmentKind: DEFAULT_RUNTIME_ACCOUNTS.find((account) => account.id === profile.runtimeAccountId)?.kind,
       sharedAgentCount,
       profile: profile.id,
       ...(profile.defaultCwd ? { workspace: profile.defaultCwd } : {}),
@@ -1659,6 +2011,145 @@ class ShoggothBackend extends AgentBackend {
     const profile = this._profilesByAgent.get(id);
     if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
     return profile;
+  }
+
+  async _agentRuntimeBindings(method, id, input = {}) {
+    const profile = this._profileForManagedAgent(id);
+    const params = validateAgentBindingParams(method, { profileId: profile.id, ...input });
+    const result = await this._call(method, params);
+    if (method !== "agent.binding.list") await this._refreshManagedProfiles();
+    return { ...result, availability: result.bindings.map((binding) => ({ bindingId: binding.id,
+      ...this._bindingAvailability(id, binding.runtime, binding.runtimeAccountId) })) };
+  }
+
+  async getAgentRuntimeBindings(id) {
+    const profile = this._profileForManagedAgent(id);
+    const connectedAccounts = await this._connectedCliAccounts();
+    if (connectedAccounts.length) await this._syncCliBindings(profile.id, connectedAccounts);
+    return this._rememberBindings(profile.id, await this._agentRuntimeBindings("agent.binding.list", id));
+  }
+  async getAgentRuntimePolicy(id) {
+    return this._call("agent.runtimePolicy.get", { profileId: this._profileForManagedAgent(id).id });
+  }
+  async compactConversation(id, key, operationId) {
+    const profile = this._profileForManagedAgent(id), target = this._sessionTarget(key);
+    if (target.profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
+    return this._call("chat.context.compact", require("../agent-service/product-context-protocol").validateParams("chat.context.compact",
+      { profileId: profile.id, sessionKey: target.sessionKey, operationId }));
+  }
+  async setAgentRuntimePolicy(id, policy) {
+    const params = require("../agent-service/runtime-selection-policy").validateRuntimePolicyParams("agent.runtimePolicy.set",
+      { profileId: this._profileForManagedAgent(id).id, policy });
+    return this._call("agent.runtimePolicy.set", params);
+  }
+  addAgentRuntimeBinding(id, spec, { operationId, revision } = {}) {
+    return this._agentRuntimeBindings("agent.binding.add", id, { spec, operationId, revision });
+  }
+  updateAgentRuntimeBinding(id, bindingId, patch, { revision } = {}) {
+    return this._agentRuntimeBindings("agent.binding.update", id, { bindingId, patch, revision });
+  }
+  removeAgentRuntimeBinding(id, bindingId, { revision } = {}) {
+    return this._agentRuntimeBindings("agent.binding.remove", id, { bindingId, revision });
+  }
+  setAgentDefaultBinding(id, bindingId, { revision } = {}) {
+    return this._agentRuntimeBindings("agent.binding.setDefault", id, { bindingId, revision });
+  }
+
+  async _sessionRuntimeRequest(method, id, key, input = {}) {
+    const selectingModel = method === "chat.session.runtime.model.set";
+    if (!exactObject(input, method === "chat.session.runtime.switch" || selectingModel
+      ? ["bindingId", "revision", "acceptAdjustments", ...(selectingModel ? ["model"] : [])] : [])) {
+      throw safeError(null, "INVALID_PARAMS");
+    }
+    const profile = this._profileForManagedAgent(id);
+    const target = this._sessionTarget(key);
+    if (target.profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
+    const params = validateSessionRuntimeParams(method, { profileId: profile.id, sessionKey: target.sessionKey, ...input });
+    const result = await this._call(method, params);
+    if (method === "chat.session.runtime.switch" || selectingModel) {
+      await this._syncFederationTargetSession({ profileId: profile.id, sessionKey: target.sessionKey }, this._generation);
+      this._sessionActivityNotifier?.({ kind: "sessions.changed", sessionKey: key });
+    }
+    return result;
+  }
+  getSessionRuntime(id, key) { return this._sessionRuntimeRequest("chat.session.runtime.get", id, key); }
+
+  async getSessionRuntimeModels(id, key) {
+    const profile = this._profileForManagedAgent(id);
+    if (this._sessionTarget(key).profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
+    const bindings = await this.getAgentRuntimeBindings(id);
+    const selection = await this._sessionRuntimeRequest("chat.session.runtime.state", id, key);
+    const accounts = new Set(await this._connectedCliAccounts());
+    const connectedRuntimes = new Set(DEFAULT_RUNTIME_ACCOUNTS.filter(account => accounts.has(account.id)).map(account => account.runtime));
+    const names = new Map(require("../runtime-cli-auth").AUTH_SPECS.map(spec => [spec.runtimeAccountId, spec.name]));
+    const candidates = bindings.bindings.filter(binding => binding.enabled
+      && this._bindingAvailability(id, binding.runtime, binding.runtimeAccountId).available
+      && connectedRuntimes.has(binding.runtime));
+    // Prefer the conversation's existing Binding for duplicate runtime/accounts;
+    // historical Binding rows remain durable but never create duplicate options.
+    candidates.sort((a, b) => Number(b.id === selection.bindingId) - Number(a.id === selection.bindingId)
+      || Number(b.id === bindings.defaultBindingId) - Number(a.id === bindings.defaultBindingId));
+    const unique = candidates.filter((binding, index) => candidates.findIndex(entry => entry.runtime === binding.runtime) === index);
+    unique.sort((a, b) => DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === a.runtime)
+      - DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === b.runtime));
+    const groups = await mapBounded(unique, 3, async binding => {
+      const runtimeName = names.get(binding.runtimeAccountId) || binding.runtime;
+      const capabilities = this._chatCapabilitiesForProfile({ ...profile, ...binding, id: profile.id });
+      try {
+        const models = await this._page("profile.binding.models.list", { profileId: profile.id, bindingId: binding.id }, "models",
+          { maxBytes: MAX_HISTORY_BYTES, maxItems: 512 });
+        return { runtime: binding.runtime, name: runtimeName, available: true, capabilities, models: models.map(model => ({
+          id: model.id, name: model.displayName, backendId: this.id, provider: binding.runtime === "codex" ? profile.providerRef || binding.runtime : binding.runtime,
+          runtime: binding.runtime, runtimeName, bindingId: binding.id, isDefault: model.isDefault,
+          ...(model.capabilities ? { thinkingOptions: model.capabilities.thinkingOptions,
+            thinkingDefault: model.capabilities.thinkingDefault, reasoning: model.capabilities.thinkingOptions.length > 0,
+            fast: model.capabilities.fastTier !== null } : {}),
+        })) };
+      } catch { return { runtime: binding.runtime, name: runtimeName, available: false, capabilities, models: [] }; }
+    });
+    const currentBinding = bindings.bindings.find(binding => binding.id === selection.bindingId);
+    return { selection, models: groups.flatMap(group => group.models),
+      runtimes: groups.map(({ models: _models, ...group }) => group),
+      capabilities: this._chatCapabilitiesForProfile(currentBinding ? { ...profile, ...currentBinding, id: profile.id } : profile) };
+  }
+
+  async selectSessionRuntimeModel(id, key, input) {
+    if (!exactObject(input, ["bindingId", "model", "revision", "acceptAdjustments"])) throw safeError(null, "INVALID_PARAMS");
+    const target = this._sessionTarget(key);
+    if (target.profile.agentId !== id) throw safeError(null, "CHAT_SESSION_INVALID");
+    validateSessionRuntimeParams("chat.session.runtime.model.set", { ...input, profileId: target.profile.id, sessionKey: target.sessionKey });
+    const bindings = await this.getAgentRuntimeBindings(id);
+    const binding = bindings.bindings.find(entry => entry.id === input.bindingId);
+    if (!binding) throw safeError(null, "AGENT_BINDING_NOT_FOUND");
+    this._assertRuntimeEnabled({ agentId: id, ...binding });
+    const accounts = await this._connectedCliAccounts();
+    if (!DEFAULT_RUNTIME_ACCOUNTS.some(account => accounts.includes(account.id) && account.runtime === binding.runtime)) {
+      throw safeError(null, "RUNTIME_NOT_INSTALLED");
+    }
+    return this._sessionRuntimeRequest("chat.session.runtime.model.set", id, key, input);
+  }
+  async switchSessionRuntime(id, key, input) {
+    if (!exactObject(input, ["bindingId", "revision", "acceptAdjustments"])) throw safeError(null, "INVALID_PARAMS");
+    const target = this._sessionTarget(key);
+    if (target.profile.agentId !== id) throw safeError(null, "CHAT_SESSION_INVALID");
+    validateSessionRuntimeParams("chat.session.runtime.switch", { profileId: target.profile.id, sessionKey: target.sessionKey, ...input });
+    const bindings = await this.getAgentRuntimeBindings(id);
+    const binding = bindings.bindings.find((entry) => entry.id === input?.bindingId);
+    if (binding) this._assertRuntimeEnabled({ agentId: id, ...binding });
+    return this._sessionRuntimeRequest("chat.session.runtime.switch", id, key, input);
+  }
+
+  _assertSessionRuntimeEnabled(target) {
+    let disabled;
+    try { disabled = this._getDisabledBackendIds?.() || []; } catch { disabled = []; }
+    if (!disabled.length) return;
+    return (async () => {
+      const sessionRuntime = await this._call("chat.session.runtime.get", { profileId: target.profile.id, sessionKey: target.sessionKey });
+      const bindings = await this.getAgentRuntimeBindings(target.profile.agentId);
+      const binding = bindings.bindings.find((entry) => entry.id === sessionRuntime.bindingId);
+      if (!binding) throw safeError(null, "AGENT_BINDING_NOT_FOUND");
+      this._assertRuntimeEnabled({ agentId: target.profile.agentId, ...binding });
+    })();
   }
 
   async getAgentFile(id, file) {
@@ -1791,6 +2282,162 @@ class ShoggothBackend extends AgentBackend {
     return this._profileForManagedAgent(options.agentId);
   }
 
+  async getPluginCapabilitiesPage(query = {}) {
+    if (!exactObject(query, ["cursor", "limit", "catalogRevision"])
+      || !Number.isSafeInteger(query.cursor) || query.cursor < 0
+      || !Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 20
+      || (query.catalogRevision !== null
+        && (typeof query.catalogRevision !== "string"
+          || !/^[a-f0-9]{64}$/u.test(query.catalogRevision)))) {
+      throw safeError(null, "INVALID_PARAMS");
+    }
+    try {
+      return await this._call("plugins.capabilities.list", query);
+    } catch (error) {
+      if (error?.code === "PLUGIN_UNAVAILABLE") {
+        return { supported: false, reasonCode: "PLUGIN_UNAVAILABLE",
+          catalogRevision: null, items: [], nextCursor: null };
+      }
+      throw error;
+    }
+  }
+
+  async previewPluginInstall(source) {
+    return this._call("plugins.install.preview", { source });
+  }
+
+  async listBundledPlugins() {
+    return this._call("plugins.bundled.list", {});
+  }
+
+  async previewPluginUninstall(input) { return this._call("plugins.uninstall.preview", input); }
+  async uninstallPlugin(input) { return this._call("plugins.uninstall", input); }
+  async preparePluginApp(sessionKey, callId) {
+    const target = this._sessionTarget(sessionKey);
+    return this._call("plugins.apps.prepare", { profileId: target.profile.id,
+      conversationId: target.sessionKey, callId });
+  }
+  async commitPluginApp(input) { return this._call("plugins.apps.commit", input); }
+  async readPluginAppChunk(transport, index) { return this._call("plugins.apps.chunk", { transport, index }); }
+  async messagePluginApp(transport, message) { return this._call("plugins.apps.message", { transport, message }); }
+  async closePluginApp(transport) { return this._call("plugins.apps.close", { transport }); }
+
+  async preparePluginMcpConsent(input) {
+    const profile = this._profilesByAgent.get(input.agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    const { agentId, ...request } = input;
+    return this._call("plugins.mcp.consent.prepare", { ...request, profileId: profile.id });
+  }
+
+  async preparePluginOAuth(input) {
+    const profile = this._profilesByAgent.get(input.agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    const { agentId, ...request } = input;
+    return this._call("plugins.oauth.prepare", { ...request, profileId: profile.id });
+  }
+  async commitPluginOAuth(input) { return this._call("plugins.oauth.commit", input); }
+  async preparePluginDisconnect(input) {
+    const profile = this._profilesByAgent.get(input.agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    const { agentId, ...request } = input;
+    return this._call("plugins.connections.prepare", { ...request, profileId: profile.id });
+  }
+  async commitPluginDisconnect(input) { return this._call("plugins.connections.commit", input); }
+  async getPluginDisconnectOperation(agentId, operationId) {
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.connections.operation", { profileId: profile.id, operationId });
+  }
+  async previewPluginDependency(input) { return this._call("plugins.dependencies.preview", input); }
+  async commitPluginDependency(input) { return this._call("plugins.dependencies.commit", input); }
+  async getPluginDependencyStatus(input) { return this._call("plugins.dependencies.status", input); }
+  async getPluginDependencyOperation(operationId) { return this._call("plugins.dependencies.operation", { operationId }); }
+  async listPluginRollback(input) { return this._call("plugins.rollback.list", input); }
+  async preparePluginRollback(input) { return this._call("plugins.rollback.prepare", input); }
+  async commitPluginRollback(input) { return this._call("plugins.rollback.commit", input); }
+  async getPluginRollbackOperation(input) { return this._call("plugins.rollback.operation", input); }
+  async getPluginOAuthStatus(agentId, flowId) {
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.oauth.status", { profileId: profile.id, flowId });
+  }
+  async cancelPluginOAuth(agentId, flowId) {
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.oauth.cancel", { profileId: profile.id, flowId });
+  }
+
+  async commitPluginMcpConsent(input) {
+    return this._call("plugins.mcp.consent.commit", input);
+  }
+
+  async discoverPluginMcpTools(agentId, bindingId) {
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.mcp.discover", { profileId: profile.id, bindingId });
+  }
+
+  async installPlugin(input) {
+    return this._call("plugins.install", input);
+  }
+
+  async getPluginOperation(operationId) {
+    return this._call("plugins.operations.get", { operationId });
+  }
+
+  async setPluginInstallationState(input) {
+    return this._call("plugins.installations.set", input);
+  }
+
+  async getPluginSkillBindings(agentId) {
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.skills.bindings.list", { profileId: profile.id });
+  }
+
+  async getPluginMcpStatus(agentId, installationId) {
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.mcp.status", { profileId: profile.id,
+      installationId });
+  }
+
+  async getPluginMcpTools(agentId, bindingId) {
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.mcp.tools.list", { profileId: profile.id,
+      bindingId });
+  }
+
+  async revokePluginMcpGrant(input) {
+    const profile = this._profilesByAgent.get(input.agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.mcp.grants.revoke", {
+      profileId: profile.id, bindingId: input.bindingId,
+      toolIdentity: input.toolIdentity, expectedRevision: input.expectedRevision,
+      operationId: input.operationId,
+    });
+  }
+
+  async revokeAllPluginMcpGrants(input) {
+    const profile = this._profilesByAgent.get(input.agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.mcp.grants.revoke-all", {
+      profileId: profile.id, bindingId: input.bindingId,
+      expectedRevision: input.expectedRevision, operationId: input.operationId,
+    });
+  }
+
+  async setPluginSkillBinding(input) {
+    const profile = this._profilesByAgent.get(input.agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    return this._call("plugins.skills.bindings.set", {
+      profileId: profile.id, installationId: input.installationId,
+      componentId: input.componentId, enabled: input.enabled,
+      expectedRevision: input.expectedRevision, operationId: input.operationId,
+    });
+  }
+
   async _nativeSkills(profile) {
     const items = [];
     let cursor = 0;
@@ -1831,6 +2478,7 @@ class ShoggothBackend extends AgentBackend {
       id: skill.id,
       version: skill.version,
       source: skill.source,
+      globalEnabled: skill.globalEnabled,
       contentHash: skill.contentHash,
       requiredTools: skill.requiredTools,
       requiredRuntimeCapabilities: skill.requiredRuntimeCapabilities,
@@ -1860,15 +2508,19 @@ class ShoggothBackend extends AgentBackend {
     if (typeof patch.enabled !== "boolean") throw safeError(null, "INVALID_PARAMS");
     const current = await this._nativeSkills(profile);
     const skill = this._resolveNativeSkill(current.items, name, patch);
-    const result = await this._call("harness.skills.enable", {
+    const global = skill.source === "user";
+    const result = await this._call(global ? "harness.skills.global.set" : "harness.skills.enable", {
       profileId: profile.id,
       skillId: skill.id,
       source: skill.source,
       version: skill.version,
       enabled: patch.enabled,
-      expectedRevision: patch.expectedRevision || current.profileRevision,
+      expectedRevision: global ? patch.expectedRevision ?? current.registryVersion
+        : patch.expectedRevision ?? current.profileRevision,
     });
-    return { ...skill, ...result.skill, backendId: this.id, profileRevision: result.profileRevision };
+    return { ...skill, ...result.skill, backendId: this.id,
+      profileRevision: global ? current.profileRevision : result.profileRevision,
+      registryVersion: global ? result.registryRevision : current.registryVersion };
   }
 
   async installSkill(sourcePath, options = {}) {
@@ -1960,6 +2612,10 @@ class ShoggothBackend extends AgentBackend {
         notReady: this.claimsAgentId(agentId),
       };
     }
+    return this._chatCapabilitiesForProfile(profile);
+  }
+
+  _chatCapabilitiesForProfile(profile) {
     return {
       attachments: structuredClone(CHAT_ATTACHMENT_CAPABILITIES),
       maxPromptBytes: CHAT_MAX_PROMPT_BYTES,
@@ -1967,7 +2623,7 @@ class ShoggothBackend extends AgentBackend {
       maxAttachments: 8,
       slash: NATIVE_SLASH_RUNTIMES.has(profile.runtime),
       steer: NATIVE_STEER_RUNTIMES.has(profile.runtime),
-      modelProvider: profile.providerRef || profile.runtime,
+      modelProvider: profile.runtime === "codex" ? profile.providerRef || profile.runtime : profile.runtime,
       modelScope: profile.id,
       permissions: {
         scope: "session",
@@ -1980,7 +2636,7 @@ class ShoggothBackend extends AgentBackend {
 
   async listSlashCommands(agentId, key) {
     const profile = this._profilesByAgent.get(agentId);
-    if (!profile || !NATIVE_SLASH_RUNTIMES.has(profile.runtime)) {
+    if (!profile) {
       return { supported: false, reason: "unsupported", commands: [] };
     }
     if (typeof key !== "string" || key.length === 0) {
@@ -1988,15 +2644,22 @@ class ShoggothBackend extends AgentBackend {
     }
     const target = this._sessionTarget(key);
     if (target.profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
+    if (!NATIVE_SLASH_RUNTIMES.has(this._profileForSession(profile, target.session).runtime)) {
+      return { supported: false, reason: "unsupported", commands: [] };
+    }
     return this._call("chat.command.list", { sessionKey: target.sessionKey });
   }
 
   async execSlash(agentId, key, text) {
     const profile = this._profilesByAgent.get(agentId);
-    if (!profile || !NATIVE_SLASH_RUNTIMES.has(profile.runtime)) {
+    if (!profile) {
       throw safeError(null, "RUNTIME_CAPABILITY_UNSUPPORTED");
     }
     const target = this._sessionTarget(key);
+    if (!NATIVE_SLASH_RUNTIMES.has(this._profileForSession(profile, target.session).runtime)) {
+      throw safeError(null, "RUNTIME_CAPABILITY_UNSUPPORTED");
+    }
+    await this._assertSessionRuntimeEnabled(target);
     if (target.profile.id !== profile.id || !safeString(text, MAX_ITEM_BYTES)
       || !text.trimStart().startsWith("/")) {
       throw safeError(null, "INVALID_PARAMS");
@@ -2047,9 +2710,20 @@ class ShoggothBackend extends AgentBackend {
       let timeoutMs = ENCRYPTED_MUTATION_METHODS.has(method)
         ? ENCRYPTED_MUTATION_TIMEOUT_MS : SERVICE_TIMEOUT_MS;
       if (RUNTIME_COMMAND_METHODS.has(method)) timeoutMs = RUNTIME_COMMAND_TIMEOUT_MS;
+      if (SESSION_RUNTIME_METHODS.includes(method)) timeoutMs = 12_000;
       // Discovery may start/authenticate a native CLI and query its catalog. The
       // ordinary 5-second control budget is shorter than the runtime's own deadline.
-      if (method === "profile.models.list") timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
+      if (method === "profile.models.list" || method === "profile.binding.models.list"
+        || method === "chat.session.runtime.model.set") timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
+      if (method === "plugins.install.preview" || method === "plugins.install"
+        || method === "plugins.installations.set" || method === "plugins.mcp.discover"
+        || method === "plugins.uninstall" || method.startsWith("plugins.apps.")
+        || method.startsWith("plugins.dependencies.") || method.startsWith("plugins.connections.") || method.startsWith("plugins.rollback.")) {
+        timeoutMs = PLUGIN_INSTALL_TIMEOUT_MS;
+      }
+      if (method === "plugins.oauth.commit") timeoutMs = 60_000;
+      if (["plugins.install.preview", "plugins.install"].includes(method)
+        && params.source?.kind === "remote-git") timeoutMs = 120_000;
       if (method === "inspiration.media.read" && params.preview === true) timeoutMs = 125_000;
       if (options.timeoutMs !== undefined) {
         if (method !== "service.status" || !Number.isSafeInteger(options.timeoutMs)
@@ -2542,7 +3216,7 @@ class ShoggothBackend extends AgentBackend {
       maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS,
     });
     if (generation !== this._generation || this._state !== "started") return;
-    if (profiles.some((profile) => profile.backendId !== this.id)) throw safeError(null, "PROFILE_NOT_FOUND");
+    if (profiles.some((profile) => !this._acceptsProfileBackend(profile.backendId))) throw safeError(null, "PROFILE_NOT_FOUND");
     if (profileId === null) {
       const activeIds = new Set(profiles.filter(profile => profile.enabled).map(profile => profile.id));
       if (activeIds.size !== this._profilesById.size
@@ -2581,7 +3255,10 @@ class ShoggothBackend extends AgentBackend {
         || this._serviceEventPollGeneration !== generation) return;
       const streamChanged = this._serviceEventStreamId !== result.streamId;
       if (streamChanged || result.latestSeq < this._serviceEventCursor) {
-        if (this._serviceEventStreamId !== null) await this._refreshProfileNames(generation);
+        if (this._serviceEventStreamId !== null) {
+          if (this._rows.some((row) => row.contextCapabilities)) await this._refreshManagedProfiles();
+          else await this._refreshProfileNames(generation);
+        }
         this._serviceEventCursor = 0;
         const reconciled = await this._reconcileFederationInteractions(generation);
         if (!reconciled || generation !== this._generation || this._state !== "started"
@@ -2589,7 +3266,8 @@ class ShoggothBackend extends AgentBackend {
         this._serviceEventStreamId = result.streamId;
         nextDelayMs = 0;
       } else if (result.gap) {
-        await this._refreshProfileNames(generation);
+        if (this._rows.some((row) => row.contextCapabilities)) await this._refreshManagedProfiles();
+        else await this._refreshProfileNames(generation);
         const reconciled = await this._reconcileFederationInteractions(generation);
         if (!reconciled || generation !== this._generation || this._state !== "started"
           || this._serviceEventPollGeneration !== generation) return;
@@ -2597,10 +3275,20 @@ class ShoggothBackend extends AgentBackend {
         nextDelayMs = 0;
       } else {
         for (const event of result.events) {
-          if (event.type === "agent.profile.renamed" && event.payload.backendId === this.id) {
+          if (event.type === "agent.profile.renamed" && this._acceptsProfileBackend(event.payload.backendId)) {
             await this._refreshProfileNames(generation, event.payload.profileId);
-          } else if (event.type === "agent.profile.changed" && event.payload.backendId === this.id) {
+          } else if (event.type === "agent.profile.changed" && this._acceptsProfileBackend(event.payload.backendId)) {
             await this._refreshProfileNames(generation);
+          } else if (event.type === "runtime.context.updated") {
+            // All native facades share this stream. Only its owning facade
+            // refreshes one profile; no content or token counts ride the event.
+            if (this._profilesById.has(event.payload.profileId)) {
+              const target = await this._syncFederationTargetSession(event.payload, generation);
+              if (target?.liveSession) {
+                try { this._sessionActivityNotifier?.({ kind: "sessions.changed", sessionKey: target.sessionKey }); }
+                catch { /* UI listeners cannot invalidate a context observation. */ }
+              }
+            }
           } else if (event.type === "federation.chat.terminal") {
             await this._applyFederationTerminalActivity(event.payload, generation);
           } else if (event.type === "federation.chat.interaction") {
@@ -2692,6 +3380,10 @@ class ShoggothBackend extends AgentBackend {
         this._retryOnStatus = true;
         return false;
       }
+      if (this.getNativeRuntimeConfig) {
+        await this.applyNativeRuntimeConfig(this.getNativeRuntimeConfig());
+        if (!this._startGenerationActive(generation)) return false;
+      }
       const profiles = await this._page(
         "profile.list", { backendId: this.id, enabledOnly: false }, "profiles", {
           maxBytes: MAX_HISTORY_BYTES,
@@ -2699,10 +3391,11 @@ class ShoggothBackend extends AgentBackend {
         },
       );
       if (!this._startGenerationActive(generation)) return false;
-      if (profiles.some((value) => value.backendId !== this.id)) {
+      if (profiles.some((value) => !this._acceptsProfileBackend(value.backendId))) {
         throw safeError(null, "PROFILE_NOT_FOUND");
       }
       const enabled = profiles.filter((value) => value.enabled);
+      const connectedAccounts = await this._connectedCliAccounts();
       let snapshotItems = 0;
       let snapshotBytes = 0;
       const sessionsByProfile = await mapBounded(
@@ -2710,6 +3403,7 @@ class ShoggothBackend extends AgentBackend {
           if (!this._startGenerationActive(generation)) {
             throw safeError(null, "BACKEND_START_CANCELLED");
           }
+          if (connectedAccounts.length) await this._syncCliBindings(value.id, connectedAccounts);
           const sessions = await this._page("chat.session.list", {
             profileId: value.id,
             includeArchived: false,
@@ -2717,7 +3411,7 @@ class ShoggothBackend extends AgentBackend {
             maxBytes: MAX_HISTORY_BYTES,
             maxItems: MAX_HISTORY_ITEMS,
           });
-          const rows = sessions.map((session) => sessionToRow(value, session, this.id));
+          const rows = sessions.map((session) => sessionToRow(this._profileForSession(value, session), session, this.id));
           snapshotItems += rows.length;
           for (const row of rows) snapshotBytes += encodedBytes(row);
           if (snapshotItems > MAX_HISTORY_ITEMS || snapshotBytes > MAX_HISTORY_BYTES) {
@@ -3131,6 +3825,7 @@ class ShoggothBackend extends AgentBackend {
     if (["canceled", "interrupted", "skipped"].includes(status)) status = "failed";
     return {
       id: value.id,
+      ...(value.sessionKey ? { sessionKey: gatewaySessionKey(profile.agentId, value.sessionKey) } : {}),
       status,
       startedAt: value.startedAt,
       finishedAt: value.finishedAt,
@@ -3435,6 +4130,7 @@ class ShoggothBackend extends AgentBackend {
 
   async runTaskCard(id, opts = {}) {
     const target = await this._loadCardTarget(id);
+    this._assertRuntimeEnabled(target.profile);
     if (opts.engine !== undefined || opts.model !== undefined
       || opts.mode === "manual") throw safeError(null, "KANBAN_RUN_MODE_UNSUPPORTED");
     const workspace = opts.workspace === undefined ? null : opts.workspace;
@@ -3496,10 +4192,7 @@ class ShoggothBackend extends AgentBackend {
     if (separator < 1) return null;
     const prefix = value.slice(0, separator);
     const localId = value.slice(separator + 1);
-    // `shoggoth:<uuid>` was the one-facade canonical form. All native facades
-    // accept it only for a read-only ownership probe / scoped load during the
-    // compatibility window; profile ownership below remains authoritative.
-    if (prefix !== this.id && prefix !== "shoggoth") return null;
+    if (prefix !== this.id) return null;
     return validLocalId(localId) ? localId : null;
   }
 
@@ -3891,6 +4584,7 @@ class ShoggothBackend extends AgentBackend {
     if (!profile || input.backendId !== this.id || !this.getInspirationCapabilities().execute) {
       throw safeError(null, "INSPIRATION_UNSUPPORTED");
     }
+    this._assertRuntimeEnabled(profile);
     const result = await this._inspirationCall("inspiration.start", { ...input, id });
     const execution = result.idea.latestExecution;
     if (!execution || execution.profileId !== profile.id || execution.backendId !== this.id
@@ -4128,6 +4822,7 @@ class ShoggothBackend extends AgentBackend {
       throw safeError(null, "CRON_RUN_MODE_UNSUPPORTED");
     }
     const target = await this._loadCronTarget(id);
+    this._assertRuntimeEnabled(target.profile);
     const createdAt = this.now();
     const result = await this._call("cron.run.trigger", {
       operationId: `cron-trigger-${this.randomUUID()}`,
@@ -4168,7 +4863,7 @@ class ShoggothBackend extends AgentBackend {
     const profiles = await this._page("profile.list", { backendId: this.id, enabledOnly: false }, "profiles", {
       maxBytes: MAX_DOMAIN_AGGREGATE_BYTES, maxItems: MAX_DOMAIN_AGGREGATE_ITEMS,
     });
-    if (profiles.some(profile => profile.backendId !== this.id)) throw safeError(null, "PROFILE_NOT_FOUND");
+    if (profiles.some(profile => !this._acceptsProfileBackend(profile.backendId))) throw safeError(null, "PROFILE_NOT_FOUND");
     return profiles;
   }
 
@@ -4642,7 +5337,7 @@ class ShoggothBackend extends AgentBackend {
       ...value, derivedTitle: Object.hasOwn(value, "derivedTitle") ? value.derivedTitle : current?.derivedTitle ?? null,
     };
     this._sessionsByKey.set(session.sessionKey, session);
-    const row = sessionToRow(profile, session, this.id);
+    const row = sessionToRow(this._profileForSession(profile, session), session, this.id);
     const index = this._rows.findIndex((candidate) => candidate.sessionId === value.sessionKey);
     if (index < 0) this._rows = [...this._rows, row];
     else this._rows = this._rows.map((candidate, rowIndex) => rowIndex === index ? row : candidate);
@@ -4779,6 +5474,8 @@ class ShoggothBackend extends AgentBackend {
 
   async sendMessage(key, message, runId, hooks = {}, opts = {}) {
     let target = this._sessionTarget(key);
+    const enabled = this._assertSessionRuntimeEnabled(target);
+    if (enabled) await enabled;
     const { sessionKey } = target;
     const operationId = sendOperationId(sessionKey, runId, this.randomUUID);
     let generation = this._generation;
@@ -5191,6 +5888,8 @@ class ShoggothBackend extends AgentBackend {
         args: ownDataObject(tool.displayArgs) ? tool.displayArgs : undefined,
         phase: event.type === "tool.start" ? "start" : event.type === "tool.result" ? "result" : "update",
         result: event.type === "tool.result" ? result : undefined,
+        pluginAppCallId: event.type === "tool.result"
+          ? require("./plugin-app-call-reference").pluginAppCallId(tool.pluginAppCallId) || undefined : undefined,
         partialResult: event.type === "tool.update" ? partialResult : undefined,
         isError: tool.status === "failed" || tool.isError === true,
         durationS: Number.isSafeInteger(tool.durationMs) && tool.durationMs > 0
@@ -5242,8 +5941,9 @@ class ShoggothBackend extends AgentBackend {
   }
 
   _emitRunStatus(hooks, state, status, payload = {}) {
-    if (!["queued", "starting", "running", "waiting_approval", "waiting_input", "compacting", "compacted"].includes(status)) return;
-    const reason = status === "queued" ? boundedText(payload?.reason, 128) || null : null;
+    if (!["queued", "starting", "running", "retrying", "waiting_approval", "waiting_input", "compacting", "compacted"].includes(status)) return;
+    const reason = status === "queued" ? boundedText(payload?.reason, 128) || null
+      : status === "retrying" && payload?.reason === "RUNTIME_RATE_LIMITED" ? payload.reason : null;
     const queuedAt = status === "queued" && Number.isSafeInteger(payload?.queuedAt) && payload.queuedAt >= 0
       ? payload.queuedAt : null;
     if (state.lastStatus === status && state.lastQueueReason === reason && state.lastQueuedAt === queuedAt) return;
@@ -5420,6 +6120,9 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async respondChatPrompt(key, data = {}) {
+    // A stream can recover before the profile/session snapshot finishes loading.
+    // Preserve the delivered approval while waiting for that same recovery.
+    if (this._state === "recovering" && this._startPromise) await this._startPromise;
     const target = this._sessionTarget(key);
     const { sessionKey } = target;
     const record = this._promptByRequest.get(String(data.requestId || ""));

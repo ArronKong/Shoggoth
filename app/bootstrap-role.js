@@ -411,11 +411,24 @@ function resolveRole(argv = process.argv.slice(1), env = process.env, runtime) {
 }
 
 function dispatchRole(role, loaders = {}, runtimeMcpBridge = null) {
-  const loadUi = loaders.ui || (() => require("./ui-entry"));
+  const loadUi = loaders.ui || (() => {
+    const paths = require("./desktop-data-bootstrap").prepareDesktopData(require("electron").app);
+    if (!paths) return null;
+    return require("./ui-entry");
+  });
   const loadService = loaders.service || (() => {
     assertServiceRoleIsolation();
     const serviceModule = require("./agent-service");
     assertServiceRoleIsolation();
+    // The existing defaultApp-only fixture gate owns its isolated directory.
+    // Do not let a test that replaces HOME fall through to the real account's
+    // selected production root after canonical path resolution is enabled.
+    if (verifyTestRoleGate(process.env, { defaultApp: process.defaultApp, ppid: process.ppid })) {
+      const fixturePaths = require("./agent-service/paths").resolveServicePaths({
+        homeDir: path.dirname(process.env.SHOGGOTH_TEST_ROLE_GATE_FILE),
+      });
+      return serviceModule.startAgentServiceProcess({ paths: fixturePaths, electronApp: require("electron").app });
+    }
     return serviceModule.startAgentServiceProcess();
   });
   const loadMcp = loaders.mcp || (() => {

@@ -1,4 +1,5 @@
 "use strict";
+const { openRuntimeLedger } = require("./runtime-shared-ledger");
 
 const { imageAttachments } = require("./chat-attachments");
 
@@ -29,7 +30,13 @@ const {
 } = require("./runtime-commands");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
+const { classifyProviderLimit } = require("./runtime-provider-errors");
 const { serviceError } = require("./security");
+
+// A written prompt with an unknown receipt can only run in the process that
+// received it. The shared workspace ledger is reopened only after every host
+// of the previous generation stopped, so liveness is kept per ledger instance.
+const LIVE_UNKNOWN_TURNS = new WeakMap();
 
 const PARENT_ENV_ALLOWLIST = Object.freeze([
   "HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "USER", "LOGNAME", "SHELL",
@@ -129,8 +136,35 @@ function turnById(session, turnId) {
   return session?.turns.find((turn) => turn.id === turnId) || null;
 }
 
-function inputFingerprint(input) {
-  return crypto.createHash("sha256").update(JSON.stringify([
+function canonicalAttachmentValue(value, depth = 0) {
+  if (depth > 16) throw hostError("RUNTIME_TURN_PARAMS_INVALID", "Grok Build attachment is too deeply nested");
+  if (value === null || typeof value === "boolean"
+    || (typeof value === "string" && value.isWellFormed())
+    || (typeof value === "number" && Number.isFinite(value))) return value;
+  if (Array.isArray(value)) return Array.from(value, (item) => canonicalAttachmentValue(item, depth + 1));
+  if (plain(value)) {
+    const entries = Object.keys(value).sort().map((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !Object.hasOwn(descriptor, "value")) {
+        throw hostError("RUNTIME_TURN_PARAMS_INVALID", "Grok Build attachment must contain data fields");
+      }
+      return [key, canonicalAttachmentValue(descriptor.value, depth + 1)];
+    });
+    return Object.fromEntries(entries);
+  }
+  throw hostError("RUNTIME_TURN_PARAMS_INVALID", "Grok Build attachment is not JSON data");
+}
+
+function fingerprintAttachments(attachments) {
+  if (attachments === undefined || attachments === null) return [];
+  if (!Array.isArray(attachments) || attachments.some((attachment) => !plain(attachment))) {
+    throw hostError("RUNTIME_TURN_PARAMS_INVALID", "Grok Build attachments are invalid");
+  }
+  return canonicalAttachmentValue(attachments);
+}
+
+function inputFingerprint(input, attachments, images) {
+  const fields = [
     input.sessionId,
     input.operationId,
     input.prompt,
@@ -139,7 +173,9 @@ function inputFingerprint(input) {
     input.cwd ?? null,
     input.permissionPolicy ?? null,
     input.permissionMode ?? null,
-  ])).digest("hex");
+  ];
+  fields.push(attachments, images);
+  return crypto.createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 }
 
 function normalizePermissionMode(value) {
@@ -585,6 +621,8 @@ class GrokBuildRuntimeHost {
     });
     this.runtimeProfileId = this.binding.runtimeProfileId;
     this.runtimeAccountId = this.binding.runtimeAccountId;
+    this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
+    this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeGrokBuildPermissionPolicy(options.permissionPolicy);
     if (options.controlInstance !== undefined && typeof options.controlInstance !== "boolean") {
@@ -698,7 +736,7 @@ class GrokBuildRuntimeHost {
   }
 
   async _start() {
-    this.ledger.open();
+    this.ledger = await openRuntimeLedger(this.ledgerSlot, () => this.ledger.open());
     const runtimeHome = this.runtimeEnvironment.home;
     const ledgerRelative = path.relative(runtimeHome, this.ledger.ledgerPath);
     if (ledgerRelative === "" || (!ledgerRelative.startsWith(`..${path.sep}`)
@@ -989,6 +1027,13 @@ class GrokBuildRuntimeHost {
     });
   }
 
+  canRetireIdle() {
+    return this.state === "ready" && !this.cleanupIncomplete && !this.stopping
+      && this.activeTurns.size === 0 && !this.authRefresh && this.rpc?.pending.size === 0
+      && this.rpc.activeServerRequestIds.size === 0 && !this.rpc.ended
+      && this.child?.stdin?.writableLength === 0;
+  }
+
   beginAcquire() {
     this.authAttemptFingerprint = null;
     this.authRejectedFingerprint = null;
@@ -1081,6 +1126,28 @@ class GrokBuildRuntimeHost {
     }
   }
 
+  _markLive(turnId) {
+    let live = LIVE_UNKNOWN_TURNS.get(this.ledger);
+    if (!live) { live = new Map(); LIVE_UNKNOWN_TURNS.set(this.ledger, live); }
+    live.set(turnId, this);
+  }
+
+  // An unknown receipt stays the fence for its own operation forever, but
+  // blocks other operations only while the receiving process may still run it.
+  _mayStillRun(turn) {
+    return LIVE_UNKNOWN_TURNS.get(this.ledger)?.has(turn.id) === true;
+  }
+
+  _clearLive(turnId) {
+    const live = LIVE_UNKNOWN_TURNS.get(this.ledger);
+    if (live?.get(turnId) === this) live.delete(turnId);
+  }
+
+  _releaseLiveTurns() {
+    const live = LIVE_UNKNOWN_TURNS.get(this.ledger);
+    for (const [turnId, owner] of live || []) if (owner === this) live.delete(turnId);
+  }
+
   async _prepareAuthentication() {
     this._assertReady();
     if (await this._refreshAuthenticationIfChanged()) return;
@@ -1118,6 +1185,7 @@ class GrokBuildRuntimeHost {
       runtime: GROK_BUILD_RUNTIME,
       runtimeProfileId: this.runtimeProfileId,
       runtimeAccountId: this.runtimeAccountId,
+      executionRunId: this.mcpExecutionRunId,
       parentPid: this.child?.pid,
       parentExecutable: this.binaryPath,
     });
@@ -1181,23 +1249,41 @@ class GrokBuildRuntimeHost {
       throw hostError("RUNTIME_SESSION_ACCEPTANCE_UNKNOWN", "Grok Build session acceptance is unknown");
     }
     const mcpServers = await this._mcpServers({ operation: "session.start", cwd });
+    const params = defined({
+      cwd,
+      mcpServers,
+      _meta: model === null && input.permissionMode == null
+        ? undefined
+        : { ...(model === null ? {} : { modelId: model }), ...(input.permissionMode == null ? {} : permissionMeta(permissionMode)) },
+    });
+    this.rpc.preflightRequest("session/new", params);
     const createdAt = this.now();
     this.ledger.update((data) => {
-      data.pendingSessions.push({ source: input.source, cwd, createdAt });
+      // MCP setup is asynchronous. Another caller may have reserved this source
+      // since the initial snapshot; never submit session/new twice for it.
+      if (data.pendingSessions.some((pending) => pending.source === input.source)) {
+        throw hostError("RUNTIME_SESSION_ACCEPTANCE_UNKNOWN", "Grok Build session acceptance is unknown");
+      }
+      if (data.sessions.some((session) => session.source === input.source)) {
+        throw hostError("RUNTIME_SESSION_CONFLICT", "Grok Build session source was already created");
+      }
+      data.pendingSessions.push({ source: input.source, cwd, createdAt, dispatchState: "not_sent" });
     });
     let response;
     let request;
     try {
-      request = this._startAuthBoundRequest("session/new", defined({
-        cwd,
-        mcpServers,
-        _meta: model === null && input.permissionMode == null
-          ? undefined
-          : { ...(model === null ? {} : { modelId: model }), ...(input.permissionMode == null ? {} : permissionMeta(permissionMode)) },
-      }), { timeoutMs: this.requestTimeoutMs });
+      request = this._startAuthBoundRequest("session/new", params, {
+        timeoutMs: this.requestTimeoutMs,
+        onWriteAttempt: () => this.ledger.update((data) => {
+          const pending = data.pendingSessions.find((item) => item.source === input.source);
+          if (!pending) throw hostError("RUNTIME_SESSION_CONFLICT", "Grok Build pending session is missing");
+          pending.dispatchState = "write_attempted";
+        }),
+      });
       response = await request.promise;
     } catch (error) {
-      if (["AUTH_REQUIRED", "GROK_ACP_REMOTE_ERROR"].includes(error?.code)) {
+      if (error?.dispatchState === "not_sent"
+        || ["AUTH_REQUIRED", "GROK_ACP_REMOTE_ERROR"].includes(error?.code)) {
         this.ledger.update((data) => {
           data.pendingSessions = data.pendingSessions.filter((item) => item.source !== input.source);
         });
@@ -1318,7 +1404,7 @@ class GrokBuildRuntimeHost {
     }
     const session = sessionById(this.ledger.snapshot(), input.sessionId);
     if (!session) return Promise.reject(hostError("RUNTIME_SESSION_NOT_FOUND", "Grok Build session was not found"));
-    if (session.turns.some((turn) => turn.acceptance === "unknown")) {
+    if (session.turns.some((turn) => turn.acceptance === "unknown" && this._mayStillRun(turn))) {
       return Promise.reject(hostError(
         "RUNTIME_TURN_ACCEPTANCE_UNKNOWN",
         "Grok Build turn acceptance is unknown",
@@ -1450,8 +1536,17 @@ class GrokBuildRuntimeHost {
     const session = this._requireSession(input.sessionId);
     this._assertTurnCwd(input.cwd, session);
     if (session.archived) throw hostError("RUNTIME_SESSION_ARCHIVED", "Grok Build session is archived");
-    const fingerprint = inputFingerprint(input);
     const existing = turnByOperation(session, input.operationId);
+    if (!existing && session.turns.some((turn) => turn.acceptance === "unknown" && this._mayStillRun(turn))) {
+      throw hostError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "A previous Grok Build turn is unresolved");
+    }
+    if (!existing && this.activeTurns.has(session.id)) {
+      throw hostError("RUNTIME_SESSION_BUSY", "Grok Build session already has an active turn");
+    }
+    const fingerprintVersion = 2;
+    const attachments = fingerprintAttachments(input.attachments);
+    const images = imageAttachments(attachments);
+    const fingerprint = inputFingerprint(input, attachments, images);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
         throw hostError("RUNTIME_OPERATION_CONFLICT", "Grok Build operationId was reused with different input");
@@ -1466,12 +1561,15 @@ class GrokBuildRuntimeHost {
       }
       return { turn: { id: existing.id, status: existing.status, items: [] } };
     }
-    if (session.turns.some((turn) => turn.acceptance === "unknown")) {
-      throw hostError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "A previous Grok Build turn is unresolved");
-    }
-    if (this.activeTurns.has(session.id)) {
-      throw hostError("RUNTIME_SESSION_BUSY", "Grok Build session already has an active turn");
-    }
+    // Read attachments and validate the whole encoded frame before creating a
+    // receipt. Text limits alone do not cover base64 expansion or JSON overhead.
+    const prompt = this._promptText(session.id, input);
+    const params = {
+      sessionId: session.id,
+      prompt: [{ type: "text", text: prompt }, ...images
+        .map(image => ({ type: "image", ...image }))],
+    };
+    this.rpc.preflightRequest("session/prompt", params);
     const turnId = `grok-turn-${this.randomUUID()}`;
     if (!safeString(turnId, 512)) throw hostError("RUNTIME_TURN_ID_INVALID", "Grok Build turn id is invalid");
     const createdAt = this.now();
@@ -1481,7 +1579,9 @@ class GrokBuildRuntimeHost {
         id: turnId,
         operationId: input.operationId,
         fingerprint,
+        fingerprintVersion,
         acceptance: "unknown",
+        dispatchState: "not_sent",
         status: "inProgress",
         errorCode: null,
         assistantMessages: [],
@@ -1490,7 +1590,6 @@ class GrokBuildRuntimeHost {
       });
       current.updatedAt = Math.max(current.updatedAt, createdAt);
     });
-    const prompt = this._promptText(session.id, input);
     const acceptance = makeDeferred();
     const active = {
       sessionId: session.id,
@@ -1502,6 +1601,7 @@ class GrokBuildRuntimeHost {
       acceptance,
       terminal: makeDeferred(),
       accepted: false,
+      dispatchState: "not_sent",
       timedOut: false,
       messages: new Map(),
       messageOrder: [],
@@ -1514,13 +1614,21 @@ class GrokBuildRuntimeHost {
       permissionMode,
     };
     this.activeTurns.set(session.id, active);
-    active.timer = setTimeout(() => this._markAcceptanceUnknown(active), this.acceptanceTimeoutMs);
-    active.timer.unref?.();
-    const promptRequest = this._startAuthBoundRequest("session/prompt", {
-      sessionId: session.id,
-      prompt: [{ type: "text", text: prompt }, ...imageAttachments(input.attachments)
-        .map(image => ({ type: "image", ...image }))],
-    }, { timeoutMs: this.promptTimeoutMs });
+    const promptRequest = this._startAuthBoundRequest("session/prompt", params, {
+      timeoutMs: this.promptTimeoutMs,
+      onWriteAttempt: () => {
+        this.ledger.update((data) => {
+          const current = sessionById(data, session.id);
+          const turn = turnById(current, turnId);
+          if (!turn) throw hostError("RUNTIME_TURN_RECEIPT_CONFLICT", "Grok Build turn receipt is missing");
+          turn.dispatchState = "write_attempted";
+        });
+        this._markLive(turnId);
+        active.dispatchState = "write_attempted";
+        active.timer = setTimeout(() => this._markAcceptanceUnknown(active), this.acceptanceTimeoutMs);
+        active.timer.unref?.();
+      },
+    });
     active.authFingerprint = promptRequest.authFingerprint;
     void promptRequest.promise.then(
       (response) => this._finishPrompt(active, response),
@@ -1722,10 +1830,13 @@ class GrokBuildRuntimeHost {
       if (active?.nativePromptId && update?.sessionUpdate === "turn_completed"
         && update.prompt_id === active.nativePromptId && update.stop_reason === "error"
         && typeof update.agent_result === "string" && update.agent_result.length <= 16 * 1024) {
-        if (/\b(?:usage balance exhausted|insufficient_quota)\b|\b402 Payment Required\b/iu.test(update.agent_result)) {
-          active.failureCode = "RUNTIME_QUOTA_EXHAUSTED";
+        const limit = classifyProviderLimit(update.agent_result);
+        if (limit === "RUNTIME_QUOTA_EXHAUSTED") {
+          active.failureCode = limit;
         } else if (/\b(?:user )?account (?:is )?(?:blocked|suspended|deactivated)\b/iu.test(update.agent_result)) {
           active.failureCode = "RUNTIME_ACCOUNT_BLOCKED";
+        } else if (limit) {
+          active.failureCode = limit;
         }
       }
       return;
@@ -1741,7 +1852,7 @@ class GrokBuildRuntimeHost {
       return;
     }
     const active = this.activeTurns.get(sessionId);
-    if (!active || active.timedOut) return;
+    if (!active || active.timedOut || active.dispatchState !== "write_attempted") return;
     if (TURN_ACCEPTANCE_UPDATE_KINDS.has(update.sessionUpdate)) this._acceptTurn(active);
     else if (!active.accepted) return;
     const common = {
@@ -1750,6 +1861,13 @@ class GrokBuildRuntimeHost {
       sessionId,
       turnId: active.turnId,
     };
+    if (update.sessionUpdate === "usage_update") {
+      this._publish({ ...common, type: "context_usage", contextUsage: {
+        runtimeSessionId: sessionId, usedTokens: update.used, contextWindow: update.size > 0 ? update.size : null,
+        quality: "exact", source: "runtime_event", observedAt: this.now(),
+      } });
+      return;
+    }
     if (update.sessionUpdate === "agent_message_chunk") {
       const text = update.content.type === "text" ? update.content.text : "";
       const itemId = safeString(update.messageId, 512)
@@ -1782,6 +1900,7 @@ class GrokBuildRuntimeHost {
       this._publish({
         ...common,
         type: "tool_start",
+        ...require("./context-tool-content").contextToolContent({ input: update.rawInput }, this.registeredSecrets),
         itemId: update.toolCallId,
         toolCallId: update.toolCallId,
         tool: {
@@ -1813,6 +1932,7 @@ class GrokBuildRuntimeHost {
         itemId: update.toolCallId,
         toolCallId: update.toolCallId,
         ...(completed ? {
+          ...require("./context-tool-content").contextToolContent({ output: rawOutput }, this.registeredSecrets),
           tool: {
             ...(update.kind ? { kind: update.kind } : {}),
             ...(update.title ? { name: update.title } : {}),
@@ -1832,7 +1952,9 @@ class GrokBuildRuntimeHost {
 
   async _handlePermissionRequest(params) {
     const active = this.activeTurns.get(params.sessionId);
-    if (!active || active.timedOut) return { outcome: { outcome: "cancelled" } };
+    if (!active || active.timedOut || active.dispatchState !== "write_attempted") {
+      return { outcome: { outcome: "cancelled" } };
+    }
     this._acceptTurn(active);
     if (active.permissionMode === "always-approve") {
       const allowed = ["allow_always", "allow_once"]
@@ -1923,7 +2045,7 @@ class GrokBuildRuntimeHost {
     if (!plain(params) || !safeString(params.sessionId, 512)
       || !Array.isArray(params.entries) || params.entries.length > 256) return;
     const active = this.activeTurns.get(params.sessionId);
-    if (!active || active.timedOut) return;
+    if (!active || active.timedOut || active.dispatchState !== "write_attempted") return;
     const candidates = [...params.entries, {
       id: params.runningPromptId,
       kind: params.runningKind,
@@ -1941,7 +2063,7 @@ class GrokBuildRuntimeHost {
   }
 
   _acceptTurn(active) {
-    if (active.accepted || active.timedOut) return;
+    if (active.accepted || active.timedOut || active.dispatchState !== "write_attempted") return;
     const timestamp = this.now();
     this.ledger.update((data) => {
       const session = sessionById(data, active.sessionId);
@@ -1954,26 +2076,33 @@ class GrokBuildRuntimeHost {
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
     active.accepted = true;
+    this._clearLive(active.turnId);
     this._markRuntimeAuthenticated(active.authFingerprint);
     clearTimeout(active.timer);
     active.timer = null;
     active.acceptance.resolve({ turn: { id: active.turnId, status: "inProgress", items: [] } });
   }
 
-  _markAcceptanceUnknown(active) {
+  _markAcceptanceUnknown(active, cause = null) {
     if (active.accepted || active.timedOut || this.activeTurns.get(active.sessionId) !== active) return;
+    if (active.dispatchState === "not_sent") {
+      this._failPrompt(active, cause || hostError("RUNTIME_REQUEST_NOT_SENT", "Grok Build request was not sent"));
+      return;
+    }
     active.timedOut = true;
     const error = hostError(
       "RUNTIME_TURN_ACCEPTANCE_UNKNOWN",
       "Grok Build did not prove turn acceptance",
     );
+    error.dispatchState = active.dispatchState;
+    if (cause) Object.defineProperty(error, "cause", { value: cause });
     const timestamp = this.now();
     try {
       this.ledger.update((data) => {
         const session = sessionById(data, active.sessionId);
         const turn = turnById(session, active.turnId);
         turn.status = "interrupted";
-        turn.errorCode = error.code;
+        turn.errorCode = cause?.code || error.code;
         turn.updatedAt = Math.max(turn.updatedAt, timestamp);
         session.updatedAt = Math.max(session.updatedAt, timestamp);
       });
@@ -2017,6 +2146,7 @@ class GrokBuildRuntimeHost {
       turn.updatedAt = Math.max(turn.updatedAt, timestamp);
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
+    this._clearLive(active.turnId);
     clearTimeout(active.timer);
     this.activeTurns.delete(active.sessionId);
     // The caller already received the timeout; never replay or complete it twice.
@@ -2033,22 +2163,30 @@ class GrokBuildRuntimeHost {
         this._publish({ ...common, type: "text", itemId: message.id, text: message.text, phase: "final_answer" });
       }
     }
-    this._publish({ ...common, method: "session/prompt", type: "complete", status });
+    this._publish({ ...common, method: "session/prompt", type: "complete", status,
+      ...(status === "failed" ? { errorCode: active.failureCode || "GROK_BUILD_TURN_FAILED" } : {}) });
     active.terminal.resolve({ status });
   }
 
   _failPrompt(active, error) {
     if (this.activeTurns.get(active.sessionId) !== active) return;
+    if (!error?.dispatchState) {
+      const original = error;
+      error = hostError(original?.code || "GROK_BUILD_TURN_FAILED", "Grok Build prompt failed");
+      error.dispatchState = active.dispatchState;
+      if (original) Object.defineProperty(error, "cause", { value: original });
+    }
     clearTimeout(active.timer);
     active.timer = null;
-    const explicit = ["AUTH_REQUIRED", "GROK_ACP_REMOTE_ERROR"].includes(error?.code);
+    const explicit = active.dispatchState === "not_sent"
+      || ["AUTH_REQUIRED", "GROK_ACP_REMOTE_ERROR"].includes(error?.code);
     if (active.timedOut && !explicit) {
       this.activeTurns.delete(active.sessionId);
       active.terminal.reject(error);
       return;
     }
     if (!active.accepted && !explicit) {
-      this._markAcceptanceUnknown(active);
+      this._markAcceptanceUnknown(active, error);
       return;
     }
     const timestamp = this.now();
@@ -2062,6 +2200,7 @@ class GrokBuildRuntimeHost {
         turn.updatedAt = Math.max(turn.updatedAt, timestamp);
         session.updatedAt = Math.max(session.updatedAt, timestamp);
       });
+      this._clearLive(active.turnId);
       active.acceptance.reject(error);
       this.activeTurns.delete(active.sessionId);
       active.terminal.reject(error);
@@ -2077,6 +2216,11 @@ class GrokBuildRuntimeHost {
       turn.updatedAt = Math.max(turn.updatedAt, timestamp);
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
+    // The Host gave up on an accepted prompt (timeout or transport failure);
+    // stop it natively so it cannot keep working behind the next turn.
+    if (status === "interrupted") {
+      try { this.rpc?.notify("session/cancel", { sessionId: active.sessionId })?.catch?.(() => {}); } catch {}
+    }
     this.activeTurns.delete(active.sessionId);
     active.terminal.reject(error);
     this._publish({
@@ -2086,6 +2230,7 @@ class GrokBuildRuntimeHost {
       sessionId: active.sessionId,
       turnId: active.turnId,
       status,
+      errorCode: error?.code || "GROK_BUILD_TURN_FAILED",
     });
   }
 
@@ -2095,8 +2240,7 @@ class GrokBuildRuntimeHost {
     this.state = "failed";
     for (const active of [...this.activeTurns.values()]) {
       try {
-        if (!active.accepted) this._markAcceptanceUnknown(active);
-        else this._failPrompt(active, this.fatalError);
+        this._failPrompt(active, this.fatalError);
       } catch {
         active.terminal.reject(this.fatalError);
       }
@@ -2127,8 +2271,7 @@ class GrokBuildRuntimeHost {
     const termination = hostError("RUNTIME_HOST_TERMINATED", "Grok Build host stopped");
     for (const active of [...this.activeTurns.values()]) {
       clearTimeout(active.timer);
-      if (!active.accepted && !active.timedOut) this._markAcceptanceUnknown(active);
-      else if (active.accepted && !active.timedOut) this._failPrompt(active, termination);
+      if (!active.timedOut) this._failPrompt(active, termination);
     }
     this.activeTurns.clear();
     try { await this.rpc?.terminate(); } catch {}
@@ -2154,7 +2297,11 @@ class GrokBuildRuntimeHost {
       const cleanup = hostError("GROK_BUILD_PROCESS_CLOSE_TIMEOUT", "Grok Build process cleanup is incomplete");
       cleanup.cleanupIncomplete = true;
       if (!fromFatal) throw cleanup;
+      return;
     }
+    // Nothing this process received can run any more; unknown receipts remain
+    // fences for their own operations only.
+    this._releaseLiveTurns();
   }
 }
 

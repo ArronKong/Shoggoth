@@ -307,7 +307,7 @@ const CLI_COMMAND_ROWS = {
 
 const RUNTIME_LABELS = {
   codex: "Codex", "claude-code": "Claude Code", "grok-build": "Grok Build",
-  pi: "Pi", antigravity: "Antigravity", "deepseek-harness": "DeepSeek Harness",
+  pi: "Pi", antigravity: "Antigravity", "deepseek-harness": "DeepSeek",
 };
 const CLIENT_COMMANDS = new Set(["new", "clear", "model", "rename", "name", "copy", "help"]);
 

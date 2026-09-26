@@ -199,7 +199,7 @@ function makeFixture(overrides = {}) {
   const calls = [];
   const profiles = new Map([[PROFILE_ID, profile()], [OTHER_PROFILE_ID, profile({
     id: OTHER_PROFILE_ID,
-    backendId: "grok-build",
+    backendId: "shoggoth",
     agentId: "agent-other",
     runtime: "grok-build",
     runtimeProfileId: "runtime-other",
@@ -428,9 +428,9 @@ test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定�
     ["agent_definition_update", { ...source, kind: "IDENTITY", expectedRevision: 1,
       oldText: "Shoggoth", newText: "Other", sourceQuote: "改名字" }],
     ["computer_status", {}],
-    ["native_agent_get", { backendId: "codex", agentId: "target-agent" }],
-    ["native_agent_update", { ...source, backendId: "codex", agentId: "target-agent", name: "新名称", expectedUpdatedAt: 1 }],
-    ["native_agent_archive", { ...source, backendId: "codex", agentId: "target-agent", expectedUpdatedAt: 1 }],
+    ["native_agent_get", { backendId: "shoggoth", agentId: "target-agent" }],
+    ["native_agent_update", { ...source, backendId: "shoggoth", agentId: "target-agent", name: "新名称", expectedUpdatedAt: 1 }],
+    ["native_agent_archive", { ...source, backendId: "shoggoth", agentId: "target-agent", expectedUpdatedAt: 1 }],
   ];
   for (const federationClient of ["openclaw", "hermes"]) {
     const trusted = authority({ federationClient, confirmation: true });
@@ -688,7 +688,7 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
   });
   assert.deepEqual(usageCalls, [
     ["30d", { backendId: "shoggoth", profileIds: [PROFILE_ID] }],
-    ["7d", { backendId: "grok-build", profileIds: [OTHER_PROFILE_ID] }],
+    ["7d", { backendId: "shoggoth", profileIds: [OTHER_PROFILE_ID] }],
   ]);
   assert.equal(statusCalls.length, 1);
 });
@@ -739,6 +739,7 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
     {
       availableTools: calls.find(([kind]) => kind === "catalog")[2].availableTools,
       allowedTools: calls.find(([kind]) => kind === "catalog")[2].allowedTools,
+      allowPluginSkills: true,
       runtimeCapabilities: ["mcp", "filesystem", "shell"],
     },
   ]);
@@ -752,6 +753,58 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
   await expectCode(() => fixture.controller.handle("skill_read", {
     name: "careful-review", contentHash: "c".repeat(64), cursor: 0, maxBytes: 32,
   }, authorityFor("f")), "MCP_TOOL_NOT_FOUND");
+});
+
+test("大型 Skill 目录按查询返回末尾匹配项，默认五条且不暴露未安装项", async () => {
+  const items = Array.from({ length: 5_000 }, (_, index) => ({
+    id: `installed-${index}`, name: `installed-skill-${index}`,
+    version: "1", description: index === 4_999 ? "rare telescope calibration" : "generic task",
+    source: "plugin", contentHash: "a".repeat(64), requiredTools: [],
+    requiredRuntimeCapabilities: [],
+  }));
+  const fixture = makeFixture({ skillStore: {
+    catalog() { return { registryRevision: "b".repeat(64), profileRevision: 1,
+      items, ineligible: [] }; },
+    read() { throw new Error("An unselected Skill must not be read"); },
+  } });
+  const selected = await fixture.controller.handle("skill_catalog", {
+    cursor: 0, query: "telescope calibration",
+  }, authorityFor("1"));
+  assert.deepEqual(selected.items.map(item => item.name), ["installed-skill-4999"]);
+  assert.equal(selected.hasMore, false);
+  const first = await fixture.controller.handle("skill_catalog", { cursor: 0 },
+    authorityFor("2"));
+  assert.equal(first.items.length, 5);
+  assert.equal(first.nextCursor, 5);
+  const absent = await fixture.controller.handle("skill_catalog", {
+    cursor: 0, query: "uninstalled-private-connector",
+  }, authorityFor("3"));
+  assert.deepEqual(absent.items, []);
+  await expectCode(() => fixture.controller.handle("skill_catalog", {
+    cursor: 0, query: "x".repeat(257),
+  }, authorityFor("4")), "MCP_TOOL_INVALID_ARGUMENTS");
+});
+
+test("联邦 Skill 目录不继承默认原生 Profile 的插件绑定", async () => {
+  const calls = [];
+  const fixture = makeFixture({
+    skillStore: {
+      catalog(_profileId, options) {
+        calls.push(options.allowPluginSkills);
+        return { registryRevision: "b".repeat(64), profileRevision: 1,
+          items: options.allowPluginSkills ? [{
+            id: "plugin-fixture", name: "plugin-fixture", version: "1",
+            description: "Plugin fixture", source: "plugin", contentHash: "a".repeat(64),
+            requiredTools: [], requiredRuntimeCapabilities: [],
+          }] : [], ineligible: [] };
+      },
+      read() { throw new Error("Federation client must not read plugin Skill"); },
+    },
+  });
+  const external = authority({ federationClient: "openclaw" });
+  const catalog = await fixture.controller.handle("skill_catalog", { cursor: 0, limit: 10 }, external);
+  assert.deepEqual(catalog.items, []);
+  assert.deepEqual(calls, [false]);
 });
 
 test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 Agent 使用", async () => {
@@ -1234,7 +1287,7 @@ test("联邦状态、Agent 管理与委派走固定方法，写入 preflight 且
 test("统一联邦工具把目录、异步派活、查询、续聊与取消交给同一协调器", async () => {
   const coordinatorCalls = [];
   const task = (turn, status = "running") => ({
-    agent: { backendId: "codex", agentId: "agent-other", name: "Other", kind: "native",
+    agent: { backendId: "shoggoth", agentId: "agent-other", name: "Other", kind: "native",
       connected: true, model: null, provider: null },
     task: { taskId: `task-${turn}`, sessionKey: "session-federated", status, turn,
       waitingFor: null, result: null, errorCode: null },
@@ -1275,11 +1328,11 @@ test("统一联邦工具把目录、异步派活、查询、续聊与取消交�
   assert.equal(listed.agents[0].agentId, "agent-other");
   assert.equal(coordinatorCalls[0][2].federationClient, "openclaw");
   assert.equal((await fixture.controller.handle("federation_agent_get", {
-    backendId: "codex", agentId: "agent-other",
+    backendId: "shoggoth", agentId: "agent-other",
   }, authorityFor("b"))).agent.kind, "native");
 
   const runArgs = {
-    backendId: "codex", agentId: "agent-other", prompt: "do work", timeoutMs: 5_000,
+    backendId: "shoggoth", agentId: "agent-other", prompt: "do work", timeoutMs: 5_000,
   };
   const started = await fixture.controller.handle("federation_agent_run", runArgs, authorityFor("c"));
   assert.deepEqual(await fixture.controller.handle(
@@ -1348,9 +1401,9 @@ test("runtime_context_get 只返回当前授权 WorkRun 冻结的有效模型", 
     effectiveModel: "gpt-5.6-sol",
     scope: "current-turn",
   });
-  assert.equal((await fixture.controller.handle(
+  await expectCode(() => fixture.controller.handle(
     "runtime_context_get", { runId: "stale-cached-run" }, authorityFor("c"),
-  )).effectiveModel, "gpt-5.6-sol", "旧线程缓存的 runId schema 应安全解析唯一 active Run");
+  ), "MCP_TOOL_INVALID_ARGUMENTS");
   fixture.runtimeContexts.set(`${PROFILE_ID}:cron:${JOB_ID}`, {
     runId: "run-concurrent",
     profileId: PROFILE_ID,
@@ -1362,7 +1415,7 @@ test("runtime_context_get 只返回当前授权 WorkRun 冻结的有效模型", 
   });
   await expectCode(() => fixture.controller.handle(
     "runtime_context_get", { runId: "stale-cached-run" }, authorityFor("d"),
-  ), "MCP_TOOL_NOT_FOUND");
+  ), "MCP_TOOL_INVALID_ARGUMENTS");
   fixture.runtimeContexts.delete(`${PROFILE_ID}:cron:${JOB_ID}`);
   fixture.runtimeContexts.set(`${PROFILE_ID}:kanban:${OTHER_CARD_ID}`, {
     runId: OTHER_RUN_ID,
@@ -1916,10 +1969,11 @@ test("本地 Agent 管理拒绝空更新、越界目标、额外字段和非数�
   assert.equal(validateMcpProductToolArguments("native_agent_create", create), true);
   for (const args of [{ ...create, name: " " }, { ...create, identity: " " }, { ...create, identity: "x".repeat(8193) },
     { ...create, runtimeAccountId: "secret-account" }, { ...create, workspace: "../escape" },
-    { ...create, backendId: "hermes" }, { ...create, get identity() { assert.fail("must not invoke getter"); } }]) {
+    { ...create, backendId: "hermes" }, { ...create, backendId: "codex" },
+    { ...create, get identity() { assert.fail("must not invoke getter"); } }]) {
     assert.equal(validateMcpProductToolArguments("native_agent_create", args), false);
   }
-  const base = { backendId: "codex", agentId: "target-agent", source: "chat", sourceId: "session-a", expectedUpdatedAt: 1 };
+  const base = { backendId: "shoggoth", agentId: "target-agent", source: "chat", sourceId: "session-a", expectedUpdatedAt: 1 };
   for (const args of [null, [], {}, base, { ...base, name: " " }, { ...base, workspace: "relative" },
     { ...base, name: "Valid", providerRef: "unexpected" }, { ...base, name: "Valid", agentId: "a".repeat(129) },
     { ...base, workspace: null, backendId: "hermes" }, { ...base, get name() { assert.fail("must not invoke getter"); } }]) {
@@ -1945,7 +1999,7 @@ test("本地 Agent 通过 MCP 读取、修改和归档，保留确认与版本�
     target.updatedAt += 1;
     return { profile: structuredClone(target) };
   } } });
-  const selector = { backendId: "grok-build", agentId: "agent-other" };
+  const selector = { backendId: "shoggoth", agentId: "agent-other" };
   const context = { source: "kanban", sourceId: CARD_ID };
   const read = await fixture.controller.handle("native_agent_get", selector, authorityFor("1"));
   assert.equal(read.agent.updatedAt, 2);

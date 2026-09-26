@@ -5,8 +5,6 @@ const os = require("node:os");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { resolveServicePaths } = require("./agent-service/paths");
-const BUILTIN_AGENT_AVATARS = Object.freeze(require("./assets/agent-avatars/manifest.json"));
-const BUILTIN_AVATAR_DIR = path.join(__dirname, "assets", "agent-avatars");
 
 const AVATAR_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"];
 const BG_STATES = new Set(["offline", "starting", "idle", "waiting", "thinking", "tool", "responding", "error"]);
@@ -38,12 +36,6 @@ function resolveDesktopAssetFile(directory, name) {
     const file = path.join(directory, name);
     return fs.lstatSync(file).isFile() ? file : null;
   } catch { return null; }
-}
-
-// Package assets are read-only defaults, never seeded into the custom-avatar store.
-function resolveBuiltinAgentAvatarFile(agentId) {
-  if (!Object.hasOwn(BUILTIN_AGENT_AVATARS, agentId)) return null;
-  return resolveDesktopAssetFile(BUILTIN_AVATAR_DIR, BUILTIN_AGENT_AVATARS[agentId]);
 }
 
 function avatarKey(name) {
@@ -123,6 +115,5 @@ function migrateLegacyDesktopAssets(paths, { warn = console.warn } = {}) {
 module.exports = {
   AVATAR_EXTS, BG_STATES, BG_VIDEO_EXTS, BG_IMAGE_EXTS,
   resolveDesktopAssetPaths, resolveDesktopAssetFile, validAssetName,
-  resolveBuiltinAgentAvatarFile,
   ensureAssetDirectory, migrateLegacyDesktopAssets,
 };

@@ -19,7 +19,10 @@ const {
 const DEFAULT_REQUEST_TIMEOUT_MS = 8_000;
 const DEFAULT_TERM_GRACE_MS = 100;
 const DEFAULT_KILL_CONFIRM_MS = 1000;
-const MAX_QUEUED_REQUESTS = 32;
+const MAX_QUEUED_REQUESTS = 128;
+const MAX_CAPACITY_WAITERS = 100;
+const MAX_BUFFERED_PAYLOAD_BYTES = 128 * 1024 * 1024;
+const DEFAULT_CAPACITY_WAIT_TIMEOUT_MS = 30_000;
 
 function workerPaths(paths) {
   return {
@@ -269,18 +272,25 @@ class McpCryptoBroker {
     this.requestTimeoutMs = positiveTimeout(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
     this.termGraceMs = positiveTimeout(options.termGraceMs, DEFAULT_TERM_GRACE_MS);
     this.killConfirmMs = positiveTimeout(options.killConfirmMs, DEFAULT_KILL_CONFIRM_MS);
+    this.capacityWaitTimeoutMs = positiveTimeout(
+      options.capacityWaitTimeoutMs, DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
+    );
     this.opened = false;
     this.generation = 0;
     this.active = new Set();
     this.residualGroups = new Set();
     this.requestQueue = Promise.resolve();
     this.queuedRequests = 0;
+    this.capacityWaiters = [];
+    this.bufferedPayloadBytes = 0;
     this.generationUnavailable = false;
   }
 
   open(options = {}) {
     const generation = options.generation ?? 0;
-    if (!Number.isSafeInteger(generation) || generation < 0 || this.residualGroups.size > 0) {
+    if (!Number.isSafeInteger(generation) || generation < 0 || this.residualGroups.size > 0
+      || this.opened || this.active.size > 0 || this.queuedRequests > 0
+      || this.capacityWaiters.length > 0) {
       throw cryptoError();
     }
     this.generation = generation;
@@ -301,24 +311,32 @@ class McpCryptoBroker {
     return this.#request("helper.read", generation);
   }
 
+  rewrapLegacyMcpAuth({ generation }) {
+    if (this.callerRole !== "agent-service") return Promise.reject(cryptoError());
+    return this.#request("service.rewrapLegacyMcpAuth", generation, null, {
+      expectedPayloadBytes: 0, maxPayloadBytes: 4096,
+    });
+  }
+
   encrypt(payload, options = {}) {
     return this.#request("safeStorage.encrypt", options.generation || this.generation, payload, {
       expectedPayloadBytes: 0,
       maxPayloadBytes: MAX_SAFE_STORAGE_PAYLOAD_BYTES,
-    });
+    }, options);
   }
 
   decrypt(payload, options = {}) {
     return this.#request("safeStorage.decrypt", options.generation || this.generation, payload, {
       expectedPayloadBytes: 0,
       maxPayloadBytes: MAX_SAFE_STORAGE_PAYLOAD_BYTES,
-    });
+    }, options);
   }
 
   async close() {
     this.opened = false;
     this.generation = 0;
     this.generationUnavailable = true;
+    this.#rejectCapacityWaiters();
     const results = await Promise.allSettled([
       this.requestQueue,
       ...[...this.active].map((entry) => entry.terminate()),
@@ -330,17 +348,43 @@ class McpCryptoBroker {
 
   #request(operation, generation, payload = null, responseOptions = {
     expectedPayloadBytes: 32, maxPayloadBytes: 32,
-  }) {
+  }, options = {}) {
     if (!this.opened || !Number.isSafeInteger(generation) || generation <= 0
       || (this.generation !== 0 && generation !== this.generation)
       || (payload !== null && (!Buffer.isBuffer(payload) || payload.length === 0
         || payload.length > MAX_SAFE_STORAGE_PAYLOAD_BYTES))) {
       return Promise.reject(cryptoError());
     }
-    if (this.generationUnavailable || this.queuedRequests >= MAX_QUEUED_REQUESTS) {
+    if (this.generationUnavailable) {
       return Promise.reject(cryptoError());
     }
+    if (options.waitForCapacity !== undefined && typeof options.waitForCapacity !== "boolean") {
+      return Promise.reject(cryptoError("MCP_CRYPTO_OPTIONS_INVALID"));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && (!signal || typeof signal.aborted !== "boolean"
+      || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function")) {
+      return Promise.reject(cryptoError("MCP_CRYPTO_OPTIONS_INVALID"));
+    }
+    if (signal?.aborted) return Promise.reject(cryptoError("MCP_CRYPTO_CANCELED"));
+    const full = this.queuedRequests >= MAX_QUEUED_REQUESTS;
+    if (full && options.waitForCapacity !== true) return Promise.reject(cryptoError());
+    if (full && this.capacityWaiters.length >= MAX_CAPACITY_WAITERS) {
+      return Promise.reject(cryptoError("MCP_CRYPTO_BACKPRESSURE"));
+    }
+    if (this.bufferedPayloadBytes + (payload?.length || 0) > MAX_BUFFERED_PAYLOAD_BYTES) {
+      return Promise.reject(cryptoError("MCP_CRYPTO_BACKPRESSURE"));
+    }
     const queuedPayload = payload === null ? null : Buffer.from(payload);
+    this.bufferedPayloadBytes += queuedPayload?.length || 0;
+    if (full) return this.#waitForCapacity(
+      () => this.#enqueueRequest(operation, generation, queuedPayload, responseOptions),
+      queuedPayload, signal,
+    );
+    return this.#enqueueRequest(operation, generation, queuedPayload, responseOptions);
+  }
+
+  #enqueueRequest(operation, generation, queuedPayload, responseOptions) {
     this.queuedRequests += 1;
     const execute = () => {
       if (!this.opened || this.generationUnavailable
@@ -353,13 +397,65 @@ class McpCryptoBroker {
       // macOS 的钥匙串失败可能伴随系统级授权对话框。同一 Service generation
       // 只允许一次真实尝试；后续请求固定降级，避免刷新/MCP 重连反复弹窗。
       if (this.opened && this.generation === generation) this.generationUnavailable = true;
+      this.#rejectCapacityWaiters();
       throw cryptoError();
     });
     this.requestQueue = result.then(() => undefined, () => undefined);
     return result.finally(() => {
       this.queuedRequests -= 1;
-      if (queuedPayload) queuedPayload.fill(0);
+      this.#releasePayload(queuedPayload);
+      this.#dispatchCapacityWaiters();
     });
+  }
+
+  #waitForCapacity(execute, payload, signal) {
+    return new Promise((resolve, reject) => {
+      let timer;
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        const index = this.capacityWaiters.indexOf(waiter);
+        if (index >= 0) this.capacityWaiters.splice(index, 1);
+      };
+      const waiter = {
+        start: () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(execute());
+        },
+        reject: (code = "MCP_CRYPTO_UNAVAILABLE") => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          this.#releasePayload(payload);
+          reject(cryptoError(code));
+        },
+      };
+      const onAbort = () => waiter.reject("MCP_CRYPTO_CANCELED");
+      this.capacityWaiters.push(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => waiter.reject("MCP_CRYPTO_BACKPRESSURE"), this.capacityWaitTimeoutMs);
+      if (signal?.aborted) onAbort();
+    });
+  }
+
+  #dispatchCapacityWaiters() {
+    if (!this.opened || this.generationUnavailable) return this.#rejectCapacityWaiters();
+    while (this.queuedRequests < MAX_QUEUED_REQUESTS && this.capacityWaiters.length > 0) {
+      this.capacityWaiters[0].start();
+    }
+  }
+
+  #rejectCapacityWaiters() {
+    for (const waiter of [...this.capacityWaiters]) waiter.reject();
+  }
+
+  #releasePayload(payload) {
+    if (!payload) return;
+    this.bufferedPayloadBytes -= payload.length;
+    payload.fill(0);
   }
 
   #requestWorker(operation, generation, payload = null, responseOptions = {
@@ -559,10 +655,14 @@ class McpCryptoBroker {
 }
 
 module.exports = {
+  DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
   DEFAULT_KILL_CONFIRM_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
   DEFAULT_TERM_GRACE_MS,
   InProcessMcpCryptoBroker,
+  MAX_CAPACITY_WAITERS,
+  MAX_BUFFERED_PAYLOAD_BYTES,
+  MAX_QUEUED_REQUESTS,
   McpCryptoBroker,
   workerEnvironment,
   workerPaths,

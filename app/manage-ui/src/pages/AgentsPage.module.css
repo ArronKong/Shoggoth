@@ -1,6 +1,6 @@
 /* AgentsPage — Figma 7000-1074 / 7025-487 / 7035-871 / 7034-664 / 7046-4605。
    首页 = 横滑卡片；点卡展开整块白面板（tab: Overview/Setup/Cron/Kanban/Files）。
-   颜色一律 light-dark() 配对（品牌黄 / 语义红 / 固定黑白头像除外，见 ARCHITECTURE §5 主题）。 */
+   颜色一律 light-dark() 配对（品牌黄 / 语义红，见 ARCHITECTURE §5 主题）。 */
 
 /* 页面根：本页专用弹性列（只挂在 Agents 页，不动全站 .page 规则）。
    flex-shrink:0 —— 页面是 main.content(flex column) 的 item，默认会被压回视口高，

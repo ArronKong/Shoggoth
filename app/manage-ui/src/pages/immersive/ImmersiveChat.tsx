@@ -1,4 +1,5 @@
 import AgentAvatarView from "../../components/AgentAvatar";
+import { ChatRunWait } from "../../components/ChatRunWait";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, WheelEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -100,7 +101,9 @@ export interface ImmersiveBundle {
   // composer：工具行
   models: ModelMenuChoice[];
   displayModel: string;
-  changeModel: (id: string, provider?: string) => void;
+  changeModel: (id: string, provider?: string, bindingId?: string) => void;
+  activeBindingId?: string;
+  runtimeGroups?: Array<{ runtime: string; name: string; available: boolean }>;
   activeModelProvider?: string;
   modelsLoading?: boolean;
   modelsError?: boolean;
@@ -151,7 +154,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
     onExit, phase, live, sendSeq, onNearTop, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
     submit, sending, canSteer, abortActive, hasActiveSession, canSend, slashMenu, slashOpen,
-    models, displayModel, changeModel, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
+    models, displayModel, changeModel, activeBindingId, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
     attachments, removeAttachment, quoteText, clearQuote,
@@ -348,8 +351,9 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   // 内部输入框里的 Esc 已 stopPropagation，不会走到这里。
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (lightboxOpen || slashOpen) return;
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]')) return;
+      if (lightboxOpen || slashOpen || document.querySelector(".model-menu")) return;
       if (overlay) { setOverlay(null); return; }
       if (pickerOpen) { setPickerOpen(false); return; }
       if (renameOpen) { setRenameOpen(false); return; }
@@ -724,6 +728,13 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             </div>
           );
         })}
+        {live?.wait?.kind === "retrying" && (
+          <div className={styles.asstRow} data-testid="immersive-retry-status">
+            <div className={styles.errCard}>
+              <ChatRunWait state={live.wait} />
+            </div>
+          </div>
+        )}
         {/* 轻量状态行：本轮有过程信息（思考/工具）时替代三点，点开看详情，完成自动收起 */}
         <ImmersiveStatusLine phase={phase} live={live} />
         {waiting && !live && (
@@ -804,6 +815,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       {view === "chat" && (
       <div
         className={failed ? `${styles.composer} ${styles.fallback}` : styles.composer}
+        data-chat-composer
         data-glass-panel
         onDrop={supportsAttachments ? onDropFiles : undefined}
         onDragOver={supportsAttachments ? (e) => e.preventDefault() : undefined}
@@ -863,6 +875,8 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                   models={models}
                   activeModel={displayModel}
                   activeProvider={activeModelProvider}
+                  activeBindingId={activeBindingId}
+                  runtimeGroups={runtimeGroups}
                   onSelect={changeModel}
                   loading={modelsLoading}
                   loadError={modelsError}

@@ -285,6 +285,7 @@ function createProductHostController(options = {}) {
   const onProfileConfigured = options.onProfileConfigured || (() => {});
   const onBackgroundReady = options.onBackgroundReady || (() => {});
   let backgroundIntentGeneration = 0;
+  let backgroundMaintenance = false;
   const backgroundStartupAuthorities = new WeakMap();
 
   function backgroundIntentIsCurrent(generation) {
@@ -420,7 +421,20 @@ function createProductHostController(options = {}) {
   }
 
   const controller = {
+    suspendBackgroundActions() {
+      if (backgroundMaintenance) throw hostError("SERVICE_MAINTENANCE_BUSY", "Background maintenance is active");
+      backgroundMaintenance = true;
+      backgroundIntentGeneration += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        backgroundMaintenance = false;
+        backgroundIntentGeneration += 1;
+      };
+    },
     async ensureBackgroundRunning() {
+      if (backgroundMaintenance) throw hostError("SERVICE_QUIESCED", "Background maintenance is active");
       const intentGeneration = backgroundIntentGeneration;
       let initialRaw;
       try {
@@ -529,11 +543,7 @@ function createProductHostController(options = {}) {
     },
 
     async listRuntimeAccounts() {
-      const [accounts, homes, backups] = await Promise.all([
-        readAllRuntimePages("runtime.account.list", "accounts"),
-        readAllRuntimePages("runtime.account.legacyHomes.list", "homes", null),
-        readAllRuntimePages("runtime.account.backups.list", "backups"),
-      ]);
+      const accounts = await readAllRuntimePages("runtime.account.list", "accounts");
       // The Service scans synchronously. Concurrent requests would spend their
       // timeout waiting behind other Homes, even when each scan is bounded.
       const storage = [];
@@ -542,64 +552,29 @@ function createProductHostController(options = {}) {
           runtimeAccountId: account.id,
         }));
       }
-      const accountIds = new Set(accounts.map((account) => account.id));
-      if (storage.some((item, index) => item.runtimeAccountId !== accounts[index].id)
-        || homes.some((home) => !accountIds.has(home.runtimeAccountId))) {
+      if (storage.some((item, index) => item.runtimeAccountId !== accounts[index].id)) {
         throw hostError(
           "HOST_RUNTIME_ACCOUNT_RESPONSE_INVALID",
           "Runtime account storage references are inconsistent",
         );
       }
-      let legacyReclaimableBytes = 0;
-      for (const home of homes) {
-        if (home.role !== "reclaimable") continue;
-        if (home.bytes > Number.MAX_SAFE_INTEGER - legacyReclaimableBytes) {
-          throw hostError(
-            "HOST_RUNTIME_ACCOUNT_RESPONSE_INVALID",
-            "Runtime account storage total exceeds host budget",
-          );
-        }
-        legacyReclaimableBytes += home.bytes;
-      }
-      let backupReclaimableBytes = 0;
-      for (const backup of backups) {
-        if (backup.role !== "reclaimable") continue;
-        if (backup.bytes > Number.MAX_SAFE_INTEGER - backupReclaimableBytes) {
-          throw hostError(
-            "HOST_RUNTIME_ACCOUNT_RESPONSE_INVALID",
-            "Runtime backup storage total exceeds host budget",
-          );
-        }
-        backupReclaimableBytes += backup.bytes;
-      }
-      return {
-        accounts: accounts.map((account, index) => ({
-          ...account,
-          storage: storage[index],
-          legacyHomes: homes.filter((home) => home.runtimeAccountId === account.id),
-        })),
-        backups,
-        legacyReclaimableBytes,
-        backupReclaimableBytes,
-      };
+      return { accounts: accounts.map((account, index) => ({ ...account, storage: storage[index] })) };
     },
 
     async readRuntimeAccount(input) {
       const params = validateRuntimeHostInput("runtime.account.read", input);
-      const [{ account }, storage, homes] = await Promise.all([
+      const [{ account }, storage] = await Promise.all([
         runtimeRequest("runtime.account.read", params),
         runtimeRequest("runtime.account.storage.read", params),
-        readAllRuntimePages("runtime.account.legacyHomes.list", "homes", params.runtimeAccountId),
       ]);
       if (account.id !== params.runtimeAccountId
-        || storage.runtimeAccountId !== params.runtimeAccountId
-        || homes.some((home) => home.runtimeAccountId !== params.runtimeAccountId)) {
+        || storage.runtimeAccountId !== params.runtimeAccountId) {
         throw hostError(
           "HOST_RUNTIME_ACCOUNT_RESPONSE_INVALID",
           "Runtime account detail references are inconsistent",
         );
       }
-      return { account, storage, legacyHomes: homes };
+      return { account, storage };
     },
 
     async readRuntimeAccountAuth(input) {
@@ -632,65 +607,6 @@ function createProductHostController(options = {}) {
         );
       }
       return storage;
-    },
-
-    async listLegacyRuntimeHomes(input) {
-      if (!exactObject(input, ["runtimeAccountId"])
-        || !safeString(data(input, "runtimeAccountId"), 128, true)) {
-        throw hostError("HOST_RUNTIME_ACCOUNT_PARAMS_INVALID", "Runtime account parameters are invalid");
-      }
-      const runtimeAccountId = data(input, "runtimeAccountId");
-      const homes = await readAllRuntimePages(
-        "runtime.account.legacyHomes.list",
-        "homes",
-        runtimeAccountId,
-      );
-      if (runtimeAccountId !== null
-        && homes.some((home) => home.runtimeAccountId !== runtimeAccountId)) {
-        throw hostError(
-          "HOST_RUNTIME_ACCOUNT_RESPONSE_INVALID",
-          "Legacy runtime Home reference is inconsistent",
-        );
-      }
-      return { homes };
-    },
-
-    async prepareLegacyRuntimeHomeCleanup(input) {
-      const params = validateRuntimeHostInput(
-        "runtime.account.legacyHomes.cleanup.prepare",
-        input,
-      );
-      return runtimeRequest("runtime.account.legacyHomes.cleanup.prepare", params);
-    },
-
-    async commitLegacyRuntimeHomeCleanup(input) {
-      const params = validateRuntimeHostInput(
-        "runtime.account.legacyHomes.cleanup.commit",
-        input,
-      );
-      return runtimeRequest("runtime.account.legacyHomes.cleanup.commit", params);
-    },
-
-    async listRuntimeBackups() {
-      return {
-        backups: await readAllRuntimePages("runtime.account.backups.list", "backups"),
-      };
-    },
-
-    async prepareRuntimeBackupCleanup(input) {
-      const params = validateRuntimeHostInput(
-        "runtime.account.backups.cleanup.prepare",
-        input,
-      );
-      return runtimeRequest("runtime.account.backups.cleanup.prepare", params);
-    },
-
-    async commitRuntimeBackupCleanup(input) {
-      const params = validateRuntimeHostInput(
-        "runtime.account.backups.cleanup.commit",
-        input,
-      );
-      return runtimeRequest("runtime.account.backups.cleanup.commit", params);
     },
 
     async listChatGptModels(input = { profileId: null }) {
@@ -758,6 +674,7 @@ function createProductHostController(options = {}) {
     },
 
     async runBackgroundAction(action) {
+      if (backgroundMaintenance) throw hostError("SERVICE_QUIESCED", "Background maintenance is active");
       // 手动操作代表新的用户意图；必须在任何 await 前同步失效自动启动和旧手动结果。
       const intentGeneration = ++backgroundIntentGeneration;
       const launchAction = action === "install" ? "start" : action;

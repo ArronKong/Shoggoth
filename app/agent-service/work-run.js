@@ -38,7 +38,7 @@ const LEGAL_WORK_RUN_TRANSITIONS = Object.freeze({
   interrupted: new Set(),
   skipped: new Set(),
 });
-const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration"]);
+const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
 const TRANSITION_PATCH_FIELDS = new Set([
   "contextSnapshotId", "runtimeSessionRef", "runtimeTurnRef", "waitingRequestId", "resultSummary", "errorCode",
 ]);
@@ -106,6 +106,7 @@ function createWorkDispatcher(options = {}) {
   }
   const now = options.now || Date.now;
   const admissions = new Map();
+  const getNativeRuntimeConfig = options.getNativeRuntimeConfig || (() => null);
 
   function getRun(id) {
     return store.getWorkRun(id);
@@ -285,6 +286,10 @@ function createWorkDispatcher(options = {}) {
     }
     const active = store.listWorkRuns().filter((candidate) => candidate.id !== run.id
       && ACTIVE_WORK_RUN_STATUSES.has(candidate.status));
+    const policy = EXECUTION_LIMITS.resolveAdmissionPolicy(getNativeRuntimeConfig());
+    if (policy.enabled && active.length >= policy.maxActive) {
+      return busyResult(run, "GLOBAL_CAPACITY", onBusy);
+    }
     const workspace = canonicalWorkspace(run.workspace);
     if (writable && workspace) {
       const workspaceConflict = active.find((candidate) => writableFor(candidate)
@@ -292,12 +297,13 @@ function createWorkDispatcher(options = {}) {
       if (workspaceConflict) return busyResult(run, "WORKSPACE_WRITE_BUSY", onBusy);
     }
     const profileActive = active.filter((candidate) => candidate.profileId === run.profileId);
-    if (profileActive.length >= profile.concurrency.maxActive) {
+    const inherited = policy.enabled ? policy.maxActive : EXECUTION_LIMITS.profile;
+    if (profileActive.length >= (profile.concurrency.maxActive ?? inherited)) {
       return busyResult(run, "PROFILE_ACTIVE_LIMIT", onBusy);
     }
     if (writable) {
       const profileWrites = profileActive.filter(writableFor).length;
-      if (profileWrites >= profile.concurrency.maxWorkspaceWrites) {
+      if (profileWrites >= (profile.concurrency.maxWorkspaceWrites ?? inherited)) {
         return busyResult(run, "PROFILE_WORKSPACE_WRITE_LIMIT", onBusy);
       }
     }
@@ -307,11 +313,11 @@ function createWorkDispatcher(options = {}) {
     // identity, not the runtime (two backends may use the same CLI) or a process.
     const backendActive = active.filter((candidate) =>
       store.getAgentProfile(candidate.profileId)?.backendId === profile.backendId);
-    if (run.source !== "chat" && backendActive.filter((candidate) => candidate.source !== "chat").length
+    if (!policy.enabled && run.source !== "chat" && backendActive.filter((candidate) => candidate.source !== "chat").length
       >= EXECUTION_LIMITS.backendBackground) {
       return busyResult(run, "BACKEND_BACKGROUND_ACTIVE_LIMIT", onBusy);
     }
-    if (backendActive.length >= EXECUTION_LIMITS.backend) {
+    if (!policy.enabled && backendActive.length >= EXECUTION_LIMITS.backend) {
       return busyResult(run, "BACKEND_ACTIVE_LIMIT", onBusy);
     }
     const contextSnapshotId = admissionOptions.contextSnapshotId ?? null;
@@ -331,6 +337,21 @@ function createWorkDispatcher(options = {}) {
     return recovered;
   }
 
+  // This is intentionally separate from transition(): callers must prove the
+  // turn was never dispatched or explicitly rejected without execution. Native
+  // acceptance/ownership can never be cleared through this path.
+  function requeueBeforeDispatch(id) {
+    const run = store.getWorkRun(id);
+    if (!run || run.status !== "starting" || run.runtimeSessionRef !== null
+      || run.runtimeTurnRef !== null || run.waitingRequestId !== null) {
+      throw workRunError("WORK_RUN_REQUEUE_UNSAFE", "已派发的 WorkRun 不能重新排队");
+    }
+    const saved = store.putWorkRun({ ...run, status: "queued", startedAt: null,
+      eventSeq: run.eventSeq + 1 });
+    admissions.delete(id);
+    return saved;
+  }
+
   return Object.freeze({
     admit,
     enqueue,
@@ -338,6 +359,7 @@ function createWorkDispatcher(options = {}) {
     getRun,
     listRuns,
     recoverActiveRunAfterServiceRestart,
+    requeueBeforeDispatch,
     transition,
   });
 }

@@ -697,13 +697,28 @@ function hasStoreConcurrency(capabilities, store, references) {
 }
 
 /**
- * 扫描 config/Session/Cron 三个封闭 store，并返回显式完整性、内容 fingerprint 与
- * 可补偿引用。preview 阶段只有 config.get/list RPC，写调用数始终为 0。
+ * 新增只依赖配置；其它变更扫描 config/Session/Cron 三个封闭 store，并返回显式
+ * 完整性、内容 fingerprint 与可补偿引用。preview 阶段写调用数始终为 0。
  */
 async function scanOpenClawReferences(rpc, safeSpec) {
   if (!safeSpec || typeof safeSpec !== "object") throw new TypeError("safeSpec 必须是对象");
-  const capabilities = await readCapabilities(rpc);
   const configResult = await enumerateConfig(rpc, safeSpec);
+  // 新增不会迁移或删除已有 Session/Cron 引用。把这些动态行纳入指纹会使无关
+  // 聊天的 updatedAt/Token 变化触发 preview_stale，甚至在首个配置写入前锁住表单。
+  // 仍保留完整配置指纹：Provider/模型冲突与真正的配置变化必须在首写前拦截。
+  if (safeSpec.kind === "create") {
+    return {
+      scannerVersion: OPENCLAW_SCANNER_VERSION,
+      stores: { config: configResult.meta },
+      references: configResult.references,
+      blockers: configResult.blockers,
+      fingerprints: {
+        scannerVersion: OPENCLAW_SCANNER_VERSION,
+        config: configResult.meta.fingerprint,
+      },
+    };
+  }
+  const capabilities = await readCapabilities(rpc);
   const matcher = createModelMatcher(configResult.rows[0] || {}, safeSpec);
   const sessionResult = await enumerateSessions(rpc, capabilities);
   const cronResult = await enumerateCron(rpc, capabilities);

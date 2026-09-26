@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
-const { AntigravityNativeTerminal, approvalKeys, approvalParams, nativeTurnArgs, parseNativeApproval, terminalPaste } = require("../app/agent-service/antigravity-native-terminal");
+const { AntigravityNativeTerminal, approvalKeys, approvalParams, nativeInputRejection, nativeTurnArgs, parseNativeApproval, terminalPaste } = require("../app/agent-service/antigravity-native-terminal");
 const { prepareAntigravityNativeOnboarding } = require("../app/agent-service/antigravity-runtime-config");
 const { AntigravityStreamJsonDecoder } = require("../app/agent-service/antigravity-stream-json");
 
@@ -23,15 +23,16 @@ Allow access to this file?
 ↑/↓ Navigate`;
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-async function fixture(t, requestApproval) {
+async function fixture(t, requestApproval, options = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-native-unit-")));
   fs.chmodSync(root, 0o700);
   const home = path.join(root, "home");
   fs.mkdirSync(home, { mode: 0o700 });
-  const writes = [], signals = [], events = [], errors = [];
+  const writes = [], signals = [], events = [], errors = [], waiting = [], diagnostics = [];
   let onExit;
   const terminal = await AntigravityNativeTerminal.launch({ home, cwd: root, stateRoot: path.join(root, "state"), trustedRoot: root,
-    binaryPath: "/fixture/agy", args: [], env: {}, requestApproval,
+    binaryPath: "/fixture/agy", args: [], env: {}, requestApproval, ...options,
+    onApprovalWaiting: (value) => waiting.push(value), onDiagnostic: (value) => diagnostics.push(value),
     spawnPty: () => ({ pid: 70_001, write: (data) => writes.push(data), onData() {}, onExit: (callback) => { onExit = callback; } }),
     killProcessGroup: (_pid, signal) => { signals.push(signal); queueMicrotask(() => onExit({ exitCode: 0, signal: 9 })); },
   });
@@ -46,7 +47,7 @@ async function fixture(t, requestApproval) {
   fs.writeFileSync(transcript, "", { mode: 0o600 });
   const append = (record) => fs.appendFileSync(transcript, `${JSON.stringify(record)}\n`);
   t.after(() => { terminal.closed = true; terminal.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { terminal, root, home, writes, signals, events, errors, screen, state, transcript, append };
+  return { terminal, root, home, writes, signals, events, errors, waiting, diagnostics, screen, state, transcript, append };
 }
 
 test("native choices retain exact scope and cannot invent an allow response", () => {
@@ -189,7 +190,7 @@ test("changed native modal and stale clicks after interruption cannot authorize"
   }
 });
 
-test("native metadata, transcript identity and unsupported prompts fail closed", async (t) => {
+test("native metadata and transcript identity fail closed", async (t) => {
   const f = await fixture(t, () => assert.fail("must not ask"));
   assert.throws(() => f.state({ cwd: "/other" }), { code: "ANTIGRAVITY_STREAM_EVENT_INVALID" });
   f.state();
@@ -197,9 +198,170 @@ test("native metadata, transcript identity and unsupported prompts fail closed",
   f.terminal._transcriptSize();
   fs.renameSync(f.transcript, `${f.transcript}.old`); fs.writeFileSync(f.transcript, "", { mode: 0o600 });
   assert.throws(() => f.terminal._openTranscript(), { code: "ANTIGRAVITY_TRANSCRIPT_INVALID" });
-  f.terminal.accepted = true; f.state({ agent_state: "tool_use", tool_confirmation_pending: true });
-  f.terminal.unrecognizedApprovalAt = Date.now() - 3_000;
-  assert.throws(() => f.terminal._checkApproval(), { code: "ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED" });
+});
+
+test("only the CLI pre-send rejection is classified; transient auth and echoed text are ignored", () => {
+  const prefix = "W0923 10:07:36.660092     450 conversation_manager.go:694] Not sending user message: Eligibility check failed: ";
+  const network = 'failed to get profile picture: Get "https://private.invalid/avatar?token=secret": net/http: TLS handshake timeout';
+  const error = nativeInputRejection(prefix + network);
+  assert.equal(error.code, "ANTIGRAVITY_NETWORK_UNAVAILABLE");
+  assert.ok(!error.message.includes("private.invalid"));
+  assert.equal(nativeInputRejection(prefix + "User location is not supported for the API use.").code, "ANTIGRAVITY_REGION_UNSUPPORTED");
+  assert.equal(nativeInputRejection(prefix + "authentication required").code, "AUTH_REQUIRED");
+  assert.equal(nativeInputRejection(prefix + "unknown upstream policy").code, "ANTIGRAVITY_ELIGIBILITY_FAILED");
+  for (const line of ["You are not logged into Antigravity.", network,
+    `I0923 10:07:36.660092     450 input_loop.go:107] HandleUserInput called with text: ${JSON.stringify(prefix + network)}`,
+    prefix.replace("conversation_manager.go", "model.go") + network]) {
+    assert.equal(nativeInputRejection(line), null);
+  }
+});
+
+test("native rejection is read before acceptance, handles partial lines, and never leaks private text", async (t) => {
+  let submitted = 0;
+  const f = await fixture(t, () => assert.fail("must not ask"), { onInputSubmitted: () => { submitted += 1; } });
+  f.state({ agent_state: "idle" }); await f.screen(">\n? for shortcuts");
+  f.terminal.stdin.end(JSON.stringify({ event: "user", message: { content: "diagnostic" } }));
+  f.terminal.stdio[3].end("go\n"); f.terminal._poll();
+  assert.equal(submitted, 1);
+  fs.appendFileSync(f.terminal.logPath, 'W0923 10:07:36.660092     450 conversation_manager.go:694] Not sending user message: Eligibility check failed: Get "https://private.invalid": ');
+  f.terminal._poll(); assert.equal(f.terminal.inputRejected, false);
+  fs.appendFileSync(f.terminal.logPath, "EOF\n");
+  assert.throws(() => f.terminal._poll(), { code: "ANTIGRAVITY_NETWORK_UNAVAILABLE" });
+  assert.equal(f.terminal.inputRejected, true);
+  assert.equal(f.terminal.accepted, false);
+  assert.ok(!JSON.stringify(f.diagnostics).includes("private.invalid"));
+  assert.equal(submitted, 1, "rejection never resubmits the prompt");
+  const directory = f.terminal.stateDir;
+  f.terminal.closed = true; f.terminal.dispose();
+  assert.equal(fs.existsSync(directory), false, "private CLI log is removed with the terminal");
+});
+
+test("a log rejection cannot replace a proven accepted turn", async (t) => {
+  const f = await fixture(t, () => assert.fail("must not ask"));
+  f.terminal.sent = true; f.terminal.accepted = true;
+  fs.appendFileSync(f.terminal.logPath, "W0923 10:07:36.660092     450 conversation_manager.go:694] Not sending user message: Eligibility check failed: EOF\n");
+  f.terminal._readInputRejection();
+  assert.equal(f.terminal.inputRejected, false);
+});
+
+test("Read URL native approval preserves URL and every grant scope", () => {
+  const screen = `Read URL\n\nhttps://example.invalid/private?token=opaque\n\n> 1. Yes, read URL\n  2. Yes, and always allow this domain\n  3. No, cancel\n\n↑/↓ Navigate`;
+  const approval = parseNativeApproval(screen);
+  assert.ok(approval);
+  assert.ok(approval.reason.includes("https://example.invalid/private?token=opaque"));
+  assert.equal(approval.options[1].label, "Yes, and always allow this domain");
+  assert.deepEqual(approval.options.map((value) => value.kind), ["allow_once", "allow_always", "reject_once"]);
+  assert.equal(approvalKeys(approval, { decision: "accept", approvalChoice: "runtime:antigravity-1" }), "\r");
+});
+
+test("a delayed paint beyond two seconds waits and then routes the actual approval", async (t) => {
+  let now = 1_000;
+  const requests = [];
+  const f = await fixture(t, (params) => { requests.push(params); return new Promise(() => {}); }, { now: () => now });
+  f.terminal.accepted = true;
+  f.state({ agent_state: "tool_use", tool_confirmation_pending: true });
+  f.terminal._checkApproval();
+  now += 3_000; f.terminal._checkApproval(); await tick();
+  assert.deepEqual(f.waiting, [true]);
+  assert.deepEqual(f.errors, []);
+  assert.deepEqual(f.signals, []);
+  assert.deepEqual(requests, []);
+  await f.screen(modal()); f.terminal._checkApproval(); await tick();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].approvalOptions.length, 3);
+  f.state({ tool_confirmation_pending: false });
+  assert.deepEqual(f.waiting, [true, false]);
+  assert.equal(f.terminal.approvalTimer, null);
+});
+
+test("unknown native menus expose only bounded cancellation and emit content-free diagnostics", async (t) => {
+  let now = 1_000, respond, context;
+  const requests = [];
+  const f = await fixture(t, (params, options) => {
+    requests.push(params); context = options;
+    return new Promise((resolve) => { respond = resolve; });
+  }, { now: () => now });
+  f.terminal.accepted = true;
+  f.state({ agent_state: "tool_use", tool_confirmation_pending: true });
+  await f.screen("Secret unsupported screen https://user:password@host/?token=secret\n/outside/private.txt");
+  f.terminal._checkApproval(); now += 5_000; f.terminal._checkApproval(); await tick();
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].approvalOptions, [{ choice: "deny", label: "Cancel this turn", kind: "reject_once" }]);
+  assert.deepEqual(f.writes, []);
+  const metadata = JSON.stringify(f.diagnostics);
+  for (const secret of ["password", "secret", "private.txt", "https://", f.root]) assert.ok(!metadata.includes(secret));
+  respond({ decision: "decline", approvalChoice: "deny" }); await tick();
+  assert.deepEqual(f.signals, ["SIGINT"]);
+  assert.deepEqual(f.writes, []);
+  assert.equal(context.signal.aborted, true);
+  assert.equal(f.events.at(-1).result.status, "INTERRUPTED");
+  assert.equal(f.terminal.pending, null);
+  assert.equal(f.terminal.approvalTimer, null);
+});
+
+test("an unknown menu cannot be approved even with a forged Allow response", async (t) => {
+  let now = 1_000;
+  const f = await fixture(t, () => ({ decision: "accept", approvalChoice: "runtime:antigravity-1" }), { now: () => now });
+  f.terminal.accepted = true;
+  f.state({ agent_state: "tool_use", tool_confirmation_pending: true });
+  f.terminal._checkApproval(); now += 5_000; f.terminal._checkApproval(); await tick();
+  assert.equal(f.errors[0].code, "RUNTIME_APPROVAL_RESPONSE_INVALID");
+  assert.deepEqual(f.writes, []);
+});
+
+test("a late supported paint retires the cancel-only card without replay or accepting a stale click", async (t) => {
+  let now = 1_000;
+  const requests = [];
+  const f = await fixture(t, (params, context) => new Promise((resolve) => requests.push({ params, context, resolve })), { now: () => now });
+  f.terminal.accepted = true;
+  f.state({ agent_state: "tool_use", tool_confirmation_pending: true });
+  f.terminal._checkApproval(); now += 5_000; f.terminal._checkApproval(); await tick();
+  assert.equal(requests.length, 1);
+  await f.screen(modal()); f.terminal._checkApproval(); await tick();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].context.signal.aborted, true);
+  assert.notEqual(requests[0].params.itemId, requests[1].params.itemId);
+  requests[0].resolve({ decision: "decline", approvalChoice: "deny" }); await tick();
+  assert.deepEqual(f.signals, []);
+  assert.deepEqual(f.writes, []);
+  requests[1].resolve({ decision: "accept", approvalChoice: "runtime:antigravity-1" }); await tick();
+  assert.deepEqual(f.writes, ["\r"]);
+  assert.deepEqual(f.errors, []);
+});
+
+test("unknown-format deadline aborts the outstanding request and fences a late rejection", async (t) => {
+  let now = 1_000, reject, context;
+  const f = await fixture(t, (_params, options) => {
+    context = options; return new Promise((_resolve, onReject) => { reject = onReject; });
+  }, { now: () => now });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  f.terminal.accepted = true;
+  f.state({ agent_state: "tool_use", tool_confirmation_pending: true });
+  f.terminal._checkApproval(); now += 5_000; f.terminal._checkApproval(); await tick();
+  t.mock.timers.tick(30_000); await tick();
+  assert.equal(f.errors[0].code, "ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED");
+  assert.equal(context.signal.aborted, true);
+  assert.equal(f.terminal.pending, null);
+  assert.equal(f.terminal.approvalTimer, null);
+  assert.deepEqual(f.waiting, [true, false]);
+  reject(new Error("late callback")); await tick();
+  assert.equal(f.errors.length, 1);
+  assert.deepEqual(f.writes, []);
+});
+
+test("approval waiting ends only after native acknowledgement; missing acknowledgement is bounded", async (t) => {
+  const f = await fixture(t, () => ({ decision: "accept", approvalChoice: "runtime:antigravity-1" }));
+  f.terminal.accepted = true;
+  f.state({ agent_state: "tool_use", tool_confirmation_pending: true });
+  await f.screen(modal());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  f.terminal._checkApproval(); await tick();
+  assert.deepEqual(f.writes, ["\r"]);
+  assert.deepEqual(f.waiting, [true]);
+  t.mock.timers.tick(5_000); await tick();
+  assert.equal(f.errors[0].code, "ANTIGRAVITY_APPROVAL_RESPONSE_UNCONFIRMED");
+  assert.equal(f.terminal.pending, null);
+  assert.deepEqual(f.waiting, [true, false]);
 });
 
 test("onboarding only reuses existing native consent and leaves its source unchanged", async (t) => {

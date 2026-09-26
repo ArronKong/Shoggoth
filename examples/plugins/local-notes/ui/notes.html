@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>本地笔记</title>
+  <style>
+    :root{color-scheme:light dark;font:15px/1.5 system-ui,sans-serif}
+    *{box-sizing:border-box}body{margin:0;padding:24px;background:Canvas;color:CanvasText}
+    main{max-width:720px;margin:auto}h1{font-size:23px;margin:0 0 6px}
+    p{margin:0 0 18px;opacity:.75}label{display:block;font-weight:600;margin-bottom:8px}
+    textarea{font:inherit;color:inherit;background:Canvas;width:100%;min-height:230px;padding:14px;
+      border:1px solid GrayText;border-radius:12px;resize:vertical}
+    .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
+    button{font:inherit;padding:9px 16px;border:1px solid GrayText;border-radius:9px;cursor:pointer;
+      color:inherit;background:Canvas}button:disabled{opacity:.45;cursor:default}
+    button.primary{background:#235dd6;border-color:#235dd6;color:white}
+    :focus-visible{outline:3px solid #719cf2;outline-offset:3px}
+    #status{min-height:3em;margin-top:16px;white-space:pre-wrap;font-size:14px}
+    @media(max-width:420px){body{padding:16px}textarea{min-height:190px}.actions button{flex:1}}
+  </style>
+</head>
+<body><main>
+  <h1>本地笔记</h1>
+  <p>保存在当前插件连接的数据目录中。保存会替换原笔记。</p>
+  <label for="note">笔记内容</label>
+  <textarea id="note" spellcheck="false" placeholder="在这里记录…" disabled></textarea>
+  <div class="actions"><button id="refresh" disabled>重新读取</button><button id="save" class="primary" disabled>保存笔记</button><span id="revision">尚未读取</span></div>
+  <div id="status" role="status" aria-live="polite">正在连接 Shoggoth…</div>
+</main>
+<script>
+(() => {
+  const editor=document.getElementById('note'),status=document.getElementById('status');
+  const refresh=document.getElementById('refresh'),save=document.getElementById('save');
+  let revision=null,sequence=0,ready=false,busy=false;
+  const pending=new Map();
+  const controls=()=>{editor.disabled=!ready||busy;refresh.disabled=!ready||busy;save.disabled=!ready||busy||revision===null;};
+  const request=(method,params)=>new Promise((resolve,reject)=>{
+    const id=++sequence,timer=setTimeout(()=>{pending.delete(id);reject(new Error('请求超时，请检查插件连接。'));},8000);
+    pending.set(id,{resolve,reject,timer});parent.postMessage({jsonrpc:'2.0',id,method,params},'*');
+  });
+  const display=result=>{
+    if(result?.isError)throw new Error(result.content?.find(item=>item.type==='text')?.text||'操作未完成。');
+    const note=result?.structuredContent?.note;
+    if(!note||typeof note.text!=='string'||!Number.isSafeInteger(note.revision)||note.revision<0)throw new Error('笔记响应无效。');
+    editor.value=note.text;revision=note.revision;
+    document.getElementById('revision').textContent='版本 '+revision;controls();
+  };
+  addEventListener('message',event=>{
+    if(event.source!==parent||event.data?.jsonrpc!=='2.0')return;
+    const message=event.data;
+    if(pending.has(message.id)){
+      const item=pending.get(message.id);pending.delete(message.id);clearTimeout(item.timer);
+      if(message.error)item.reject(new Error('请求未获授权或连接已变化。请在插件管理中检查权限。'));else item.resolve(message.result);
+    }else if(message.method==='ui/notifications/tool-result'){
+      try{display(message.params);status.textContent='已载入工具结果。';}catch(error){status.textContent=error.message;}
+    }else if(message.method==='ui/resource-teardown'){
+      ready=false;controls();status.textContent='会话已关闭。';
+      for(const item of pending.values()){clearTimeout(item.timer);item.reject(new Error('会话已关闭。'));}pending.clear();
+    }
+  });
+  const call=async(name,args)=>{
+    if(busy||!ready)return;busy=true;controls();status.textContent='处理中…';
+    try{display(await request('tools/call',{name,arguments:args}));status.textContent=name==='write_note'?'已保存。':'已重新读取。';}
+    catch(error){status.textContent=error.message;}finally{busy=false;controls();}
+  };
+  refresh.addEventListener('click',()=>call('read_note',{}));
+  save.addEventListener('click',()=>call('write_note',{text:editor.value,expectedRevision:revision}));
+  if(parent===window){status.textContent='请从 Shoggoth 的工具结果打开此页面。文字工具结果不依赖本页面。';return;}
+  request('ui/initialize',{appInfo:{name:'local-notes',version:'1.0.0'},appCapabilities:{},protocolVersion:'2026-01-26'})
+    .then(result=>{
+      if(result?.protocolVersion!=='2026-01-26')throw new Error('当前 Host 不支持此 App 协议。');
+      ready=true;controls();status.textContent='已连接；等待工具结果，或点击重新读取。';
+      parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
+    }).catch(error=>{status.textContent=error.message;});
+})();
+</script></body></html>

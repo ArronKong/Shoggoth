@@ -270,6 +270,18 @@ try {
       upstreamReceived.filter((f) => f.method === "chat.send").length === sendBefore,
     );
 
+    registry.emit("backend.sessionActivity", {
+      backendId: "mock-hermes", name: "Hermes (demo)", agentIds: ["hermes"],
+      activity: { kind: "sessions.changed", sessionKey: "agent:hermes:context-session" },
+    });
+    const contextChanged = await waitFor((frame) => frame.type === "event" && frame.event === "sessions.changed",
+      "native context session invalidation");
+    check("native context invalidation is scoped and contains no usage or content",
+      JSON.stringify(contextChanged.payload) === JSON.stringify({ sessionKey: "agent:hermes:context-session", backendId: "mock-hermes" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check("native context invalidation requires an authenticated socket",
+      !nakedFrames.some((frame) => frame.event === "sessions.changed") && !lateAuthFrames.some((frame) => frame.event === "sessions.changed"));
+
     const completedAt = Date.now();
     registry.emit("backend.sessionActivity", {
       backendId: "mock-hermes",

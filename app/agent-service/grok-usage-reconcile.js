@@ -3,8 +3,8 @@
 // Recover only turns already owned by a Shoggoth WorkRun. Native CLI sessions
 // outside those bindings, and inherited/forked history, are never charged again.
 async function reconcileGrokUsage({ profiles, runs, usageStore, readUsage, sinceMs, now = Date.now() }) {
-  const byProfile = new Map(profiles.filter(p => p.runtime === "grok-build").map(p => [p.id, p]));
-  const recorded = new Set(usageStore.list().map(row => `${row.profileId}\0${row.threadId}\0${row.turnId}`));
+  const byProfile = new Map(profiles.map(p => [p.id, p]));
+  const recorded = new Set(usageStore.list().map(row => `${row.profileId}\0${row.runtimeAccountId ?? "unknown"}\0${row.threadId}\0${row.turnId}`));
   const groups = new Map();
   let complete = true;
   for (const run of runs) {
@@ -12,11 +12,15 @@ async function reconcileGrokUsage({ profiles, runs, usageStore, readUsage, since
     const session = run.runtimeSessionRef;
     const turnId = run.runtimeTurnRef?.turnId;
     if (!profile || !session?.sessionId || !turnId || run.finishedAt === null || run.finishedAt < sinceMs) continue;
-    if (session.runtime !== "grok-build" || session.runtimeProfileId !== profile.runtimeProfileId
-      || session.runtimeAccountId !== profile.runtimeAccountId) { complete = false; continue; }
-    if (recorded.has(`${profile.id}\0${session.sessionId}\0${turnId}`)) continue;
-    const key = `${profile.runtimeAccountId}\0${session.sessionId}`;
-    const group = groups.get(key) || { profile, sessionId: session.sessionId, runs: [] };
+    if (session.runtime !== "grok-build") continue;
+    const turn = run.runtimeTurnRef;
+    if (!session.runtimeAccountId || turn.runtime !== session.runtime || turn.runtimeProfileId !== session.runtimeProfileId
+      || turn.runtimeAccountId !== session.runtimeAccountId || turn.sessionId !== session.sessionId) { complete = false; continue; }
+    if (recorded.has(`${profile.id}\0${session.runtimeAccountId}\0${session.sessionId}\0${turnId}`)
+      || recorded.has(`${profile.id}\0unknown\0${session.sessionId}\0${turnId}`)) continue;
+    const key = `${profile.id}\0${session.runtimeAccountId}\0${session.sessionId}`;
+    const group = groups.get(key) || { profile: { ...profile, runtime: session.runtime,
+      runtimeProfileId: session.runtimeProfileId, runtimeAccountId: session.runtimeAccountId }, sessionId: session.sessionId, runs: [] };
     group.runs.push(run);
     groups.set(key, group);
   }
@@ -35,7 +39,8 @@ async function reconcileGrokUsage({ profiles, runs, usageStore, readUsage, since
           if (matches.length !== 1) continue;
           const run = matches[0];
           recovered.add(run.id);
-          usageStore.record({ profileId: run.profileId,
+          usageStore.record({ profileId: run.profileId, runId: run.id,
+            runtime: run.runtimeTurnRef.runtime, runtimeAccountId: run.runtimeTurnRef.runtimeAccountId,
             agentId: group.profile.agentId || group.profile.id,
             agentName: group.profile.name || group.profile.agentId || group.profile.id,
             source: run.source, sourceId: run.sourceId, threadId: group.sessionId,

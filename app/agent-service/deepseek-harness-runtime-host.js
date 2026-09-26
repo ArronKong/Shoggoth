@@ -1,4 +1,5 @@
 "use strict";
+const { openRuntimeLedger } = require("./runtime-shared-ledger");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -9,6 +10,7 @@ const { serviceError } = require("./security");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
+const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
 const { DeepSeekHarnessProcess } = require("./deepseek-harness-process");
 const { DEFAULT_MCP_TOOL_TIMEOUT_MS } = require("./interactive-timeouts");
 const {
@@ -134,7 +136,7 @@ function addUsage(left, right) {
     if (!Number.isSafeInteger(candidate) || candidate < 0) {
       throw hostError(
         "DEEPSEEK_HARNESS_USAGE_INVALID",
-        "DeepSeek Harness token usage exceeds its limit",
+        "DeepSeek token usage exceeds its limit",
       );
     }
     output[key] = candidate;
@@ -152,7 +154,7 @@ function validateCatalog(payload) {
     || payload.models.length === 0 || payload.models.length > MAX_MODELS) {
     throw hostError(
       "RUNTIME_MODEL_CATALOG_INVALID",
-      "DeepSeek Harness model catalog is invalid",
+      "DeepSeek model catalog is invalid",
     );
   }
   const seen = new Set();
@@ -163,7 +165,7 @@ function validateCatalog(payload) {
       || typeof model.isDefault !== "boolean" || seen.has(model.model)) {
       throw hostError(
         "RUNTIME_MODEL_CATALOG_INVALID",
-        "DeepSeek Harness model catalog item is invalid",
+        "DeepSeek model catalog item is invalid",
       );
     }
     seen.add(model.model);
@@ -173,6 +175,7 @@ function validateCatalog(payload) {
       description: model.description || model.model,
       isDefault: model.isDefault,
       input: Array.isArray(model.input) ? Object.freeze([...model.input]) : Object.freeze(["text"]),
+      contextWindow: Number.isSafeInteger(model.contextWindow) && model.contextWindow > 0 ? model.contextWindow : null,
     });
   });
   if (!models.some((model) => model.isDefault)) {
@@ -190,7 +193,7 @@ function secureCredentialPresent(fileSystem, home) {
     || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
     throw hostError(
       "DEEPSEEK_HARNESS_CREDENTIAL_UNSAFE",
-      "DeepSeek Harness credential file is unsafe",
+      "DeepSeek credential file is unsafe",
     );
   }
   return true;
@@ -202,7 +205,7 @@ class DeepSeekHarnessRuntimeHost {
     if (!this.paths?.stateDir || !this.paths?.trustedRoot) {
       throw hostError(
         "DEEPSEEK_HARNESS_HOST_OPTIONS_INVALID",
-        "DeepSeek Harness host paths are invalid",
+        "DeepSeek host paths are invalid",
       );
     }
     this.binding = runtimeBinding(options.runtimeBinding || {
@@ -212,6 +215,8 @@ class DeepSeekHarnessRuntimeHost {
     });
     this.runtimeProfileId = this.binding.runtimeProfileId;
     this.runtimeAccountId = this.binding.runtimeAccountId;
+    this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
+    this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeDeepSeekHarnessPermissionPolicy(options.permissionPolicy);
     this.controlInstance = options.controlInstance === true;
@@ -239,12 +244,13 @@ class DeepSeekHarnessRuntimeHost {
       auth: null,
       authExpiresAt: 0,
     };
+    this.modelCatalogCache = getModelCatalogCache(this.profileState);
     this.mcpGateIssuer = options.mcpGateIssuer;
     if (!this.mcpGateIssuer || ["reserveMcpServer", "bindMcpServer", "revokeMcpServer"]
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
       throw hostError(
         "DEEPSEEK_HARNESS_HOST_OPTIONS_INVALID",
-        "DeepSeek Harness MCP gate issuer is invalid",
+        "DeepSeek MCP gate issuer is invalid",
       );
     }
     for (const value of [this.requestTimeoutMs, this.serverRequestTimeoutMs, this.startupTimeoutMs,
@@ -252,7 +258,7 @@ class DeepSeekHarnessRuntimeHost {
       if (!Number.isSafeInteger(value) || value < 100 || value > 10 * 60 * 1000) {
         throw hostError(
           "DEEPSEEK_HARNESS_HOST_OPTIONS_INVALID",
-          "DeepSeek Harness host timeout is invalid",
+          "DeepSeek host timeout is invalid",
         );
       }
     }
@@ -264,6 +270,7 @@ class DeepSeekHarnessRuntimeHost {
     this.bridgePath = null;
     this.ledger = null;
     this.process = null;
+    this.processFailure = null;
     this.reservationId = null;
     this.sessionConfigs = new Map();
     this.activeTurns = new Map();
@@ -281,7 +288,7 @@ class DeepSeekHarnessRuntimeHost {
   async initialize() {
     if (this.state === "ready") return this;
     if (this.state !== "new") {
-      throw hostError("DEEPSEEK_HARNESS_STATE_INVALID", "DeepSeek Harness host state is invalid");
+      throw hostError("DEEPSEEK_HARNESS_STATE_INVALID", "DeepSeek host state is invalid");
     }
     this.state = "initializing";
     try {
@@ -303,16 +310,17 @@ class DeepSeekHarnessRuntimeHost {
       if (versionResult.code !== 0 || !supportsDeepSeekHarnessVersion(version)) {
         throw hostError(
           "DEEPSEEK_HARNESS_VERSION_UNSUPPORTED",
-          "DeepSeek Harness CLI 0.1.1 or newer is required",
+          "DeepSeek CLI 0.1.1 or newer is required",
         );
       }
-      this.ledger = new DeepSeekHarnessRuntimeLedger({
+      this.cliVersion = version;
+      this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new DeepSeekHarnessRuntimeLedger({
         fs: this.fs,
         stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", DEEPSEEK_HARNESS_RUNTIME),
         trustedRoot: this.paths.trustedRoot,
         runtimeProfileId: this.runtimeProfileId,
         workspaceShardId: workspaceShardId(this.controlInstance, this.workspace),
-      }).open();
+      }).open());
       this._spawnBridge();
       let startupTimer;
       try {
@@ -321,7 +329,7 @@ class DeepSeekHarnessRuntimeHost {
           new Promise((_, reject) => {
             startupTimer = setTimeout(() => reject(hostError(
               "DEEPSEEK_HARNESS_STARTUP_TIMEOUT",
-              "DeepSeek Harness Bridge did not become ready",
+              "DeepSeek Bridge did not become ready",
             )), this.startupTimeoutMs);
           }),
         ]);
@@ -329,7 +337,7 @@ class DeepSeekHarnessRuntimeHost {
         clearTimeout(startupTimer);
       }
       if (this.state !== "initializing") {
-        throw hostError("RUNTIME_HOST_TERMINATED", "DeepSeek Harness stopped during initialization");
+        throw hostError("RUNTIME_HOST_TERMINATED", "DeepSeek stopped during initialization");
       }
       this.state = "ready";
       return this;
@@ -344,12 +352,21 @@ class DeepSeekHarnessRuntimeHost {
     }
   }
 
+  canRetireIdle() {
+    return this.state === "ready" && !this.cleanupIncomplete && !this.stopping
+      && this.activeTurns.size === 0 && this.process?.pending.size === 0
+      && this.process.activeServerRequests === 0 && !this.process.closed
+      && this.process.child.stdin.writableLength === 0;
+  }
+
   beginAcquire() { this._assertReady(); }
 
   async authenticationState() {
     this._assertReady();
+    const identity = this._modelCatalogIdentity();
     const now = this.now();
-    if (this.profileState.auth && this.profileState.authExpiresAt > now) {
+    if (this.profileState.auth && this.profileState.authExpiresAt > now
+      && this.profileState.authIdentity === identity) {
       return this.profileState.auth;
     }
     const state = await this.process.request("auth/read", {}, { timeoutMs: this.requestTimeoutMs });
@@ -357,7 +374,7 @@ class DeepSeekHarnessRuntimeHost {
       || typeof state.credentialPresent !== "boolean") {
       throw hostError(
         "DEEPSEEK_HARNESS_AUTH_STATE_INVALID",
-        "DeepSeek Harness authentication state is invalid",
+        "DeepSeek authentication state is invalid",
       );
     }
     const local = secureCredentialPresent(this.fs, this.home);
@@ -365,7 +382,13 @@ class DeepSeekHarnessRuntimeHost {
       authenticated: state.authenticated,
       credentialPresent: state.credentialPresent || local,
     });
+    this._assertReady();
+    if (identity !== this._modelCatalogIdentity()) {
+      throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "DeepSeek authentication identity changed");
+    }
+    if (!result.authenticated) this._invalidateAuthentication();
     this.profileState.auth = result;
+    this.profileState.authIdentity = this._modelCatalogIdentity();
     this.profileState.authExpiresAt = now + 30_000;
     return result;
   }
@@ -374,7 +397,7 @@ class DeepSeekHarnessRuntimeHost {
     if (typeof listener !== "function") {
       throw hostError(
         "DEEPSEEK_HARNESS_SUBSCRIBER_INVALID",
-        "DeepSeek Harness listener is invalid",
+        "DeepSeek listener is invalid",
       );
     }
     this.listeners.add(listener);
@@ -385,7 +408,7 @@ class DeepSeekHarnessRuntimeHost {
     if (!safeString(method, 256) || typeof handler !== "function") {
       throw hostError(
         "DEEPSEEK_HARNESS_HANDLER_INVALID",
-        "DeepSeek Harness request handler is invalid",
+        "DeepSeek request handler is invalid",
       );
     }
     this.serverRequestHandlers.set(method, handler);
@@ -396,22 +419,22 @@ class DeepSeekHarnessRuntimeHost {
 
   async sessionStart(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
+    const models = await this._ensureModelCatalog({ model: input?.model });
     if (!plain(input) || !safeString(input.source, 256)
       || (input.developerInstructions !== undefined
         && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
       throw hostError(
         "RUNTIME_SESSION_PARAMS_INVALID",
-        "DeepSeek Harness session input is invalid",
+        "DeepSeek session input is invalid",
       );
     }
     this._assertInputPermissionPolicy(input.permissionPolicy);
     const permissionMode = input.permissionMode || "workspace-write";
     if (!["workspace-write", "danger-full-access"].includes(permissionMode)) {
-      throw hostError("RUNTIME_PERMISSION_POLICY_INVALID", "DeepSeek Harness permission mode is invalid");
+      throw hostError("RUNTIME_PERMISSION_POLICY_INVALID", "DeepSeek permission mode is invalid");
     }
     const cwd = this._sessionCwd(input.cwd);
-    const model = this._validateModel(input.model);
+    const model = this._validateModel(input.model, models);
     const snapshot = this.ledger.snapshot();
     const existing = snapshot.sessions.find((session) => session.source === input.source);
     if (existing) {
@@ -438,7 +461,7 @@ class DeepSeekHarnessRuntimeHost {
     if (!safeString(session.id, 512) || !safeString(session.remoteSessionId, 256)) {
       throw hostError(
         "RUNTIME_SESSION_ID_INVALID",
-        "DeepSeek Harness session id is invalid",
+        "DeepSeek session id is invalid",
       );
     }
     this.ledger.update((data) => data.sessions.push(session));
@@ -453,36 +476,36 @@ class DeepSeekHarnessRuntimeHost {
 
   async sessionResume(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
+    const models = await this._ensureModelCatalog({ model: input?.model });
     if (!plain(input) || !safeString(input.sessionId, 512)
       || (input.developerInstructions !== undefined
         && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
       throw hostError(
         "RUNTIME_SESSION_PARAMS_INVALID",
-        "DeepSeek Harness resume input is invalid",
+        "DeepSeek resume input is invalid",
       );
     }
     this._assertInputPermissionPolicy(input.permissionPolicy);
     const permissionMode = input.permissionMode || "workspace-write";
     if (!["workspace-write", "danger-full-access"].includes(permissionMode)) {
-      throw hostError("RUNTIME_PERMISSION_POLICY_INVALID", "DeepSeek Harness permission mode is invalid");
+      throw hostError("RUNTIME_PERMISSION_POLICY_INVALID", "DeepSeek permission mode is invalid");
     }
     const session = this._requireSession(input.sessionId);
     if (session.archived) {
-      throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek Harness session is archived");
+      throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek session is archived");
     }
     if (this.activeTurns.has(session.id)) {
-      throw hostError("RUNTIME_SESSION_BUSY", "DeepSeek Harness session is active");
+      throw hostError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     }
     if (this._sessionCwd(input.cwd) !== session.cwd) {
       throw hostError(
         "RUNTIME_SESSION_NOT_FOUND",
-        "DeepSeek Harness session workspace does not match",
+        "DeepSeek session workspace does not match",
       );
     }
     this.sessionConfigs.set(session.id, {
       developerInstructions: input.developerInstructions || "",
-      model: this._validateModel(input.model),
+      model: this._validateModel(input.model, models),
       permissionMode,
     });
     await this._bridgeSession("session/resume", session);
@@ -494,14 +517,14 @@ class DeepSeekHarnessRuntimeHost {
     if (!plain(input) || !safeString(input.sessionId, 512)) {
       return Promise.reject(hostError(
         "RUNTIME_SESSION_PARAMS_INVALID",
-        "DeepSeek Harness read input is invalid",
+        "DeepSeek read input is invalid",
       ));
     }
     const session = sessionById(this.ledger.snapshot(), input.sessionId);
     if (!session) {
       return Promise.reject(hostError(
         "RUNTIME_SESSION_NOT_FOUND",
-        "DeepSeek Harness session was not found",
+        "DeepSeek session was not found",
       ));
     }
     return Promise.resolve({ session: this._projectSession(session, input.includeTurns === true) });
@@ -516,7 +539,7 @@ class DeepSeekHarnessRuntimeHost {
       || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       return Promise.reject(hostError(
         "RUNTIME_SESSION_CURSOR_INVALID",
-        "DeepSeek Harness cursor is invalid",
+        "DeepSeek cursor is invalid",
       ));
     }
     const sessions = this.ledger.snapshot().sessions.filter((session) => session.archived === archived)
@@ -531,13 +554,13 @@ class DeepSeekHarnessRuntimeHost {
     if (!plain(input) || !safeString(input.sessionId, 512) || !safeString(input.name, 1024)) {
       return Promise.reject(hostError(
         "RUNTIME_SESSION_PARAMS_INVALID",
-        "DeepSeek Harness rename input is invalid",
+        "DeepSeek rename input is invalid",
       ));
     }
     this.ledger.update((data) => {
       const session = sessionById(data, input.sessionId);
       if (!session) {
-        throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek Harness session was not found");
+        throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek session was not found");
       }
       session.title = input.name;
       session.updatedAt = Math.max(session.updatedAt, this.now());
@@ -549,7 +572,7 @@ class DeepSeekHarnessRuntimeHost {
     this._assertReady();
     const session = this._requireSession(input?.sessionId);
     if (this.activeTurns.has(session.id)) {
-      return Promise.reject(hostError("RUNTIME_SESSION_BUSY", "DeepSeek Harness session is active"));
+      return Promise.reject(hostError("RUNTIME_SESSION_BUSY", "DeepSeek session is active"));
     }
     this.ledger.update((data) => {
       const current = sessionById(data, session.id);
@@ -574,13 +597,13 @@ class DeepSeekHarnessRuntimeHost {
     this._assertReady();
     const session = this._requireSession(input?.sessionId);
     if (this.activeTurns.has(session.id)) {
-      throw hostError("RUNTIME_SESSION_BUSY", "DeepSeek Harness session is active");
+      throw hostError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     }
     await this.process.request("session/delete", { remoteSessionId: session.remoteSessionId });
     this.ledger.update((data) => {
       const index = data.sessions.findIndex((candidate) => candidate.id === session.id);
       if (index < 0) {
-        throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek Harness session was not found");
+        throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek session was not found");
       }
       data.sessions.splice(index, 1);
     });
@@ -590,7 +613,8 @@ class DeepSeekHarnessRuntimeHost {
 
   async turnStart(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
+    const requestedModel = input?.model ?? this.sessionConfigs.get(input?.sessionId)?.model;
+    const models = await this._ensureModelCatalog({ model: requestedModel });
     if (!plain(input) || !safeString(input.sessionId, 512)
       || !safeString(input.operationId, 512)
       || !safeString(input.prompt, 1024 * 1024, { empty: true })
@@ -598,36 +622,36 @@ class DeepSeekHarnessRuntimeHost {
         && !safeString(input.context, 4 * 1024 * 1024, { empty: true }))) {
       throw hostError(
         "RUNTIME_TURN_PARAMS_INVALID",
-        "DeepSeek Harness turn input is invalid",
+        "DeepSeek turn input is invalid",
       );
     }
     this._assertInputPermissionPolicy(input.permissionPolicy);
     const session = this._requireSession(input.sessionId);
     if (session.archived) {
-      throw hostError("RUNTIME_SESSION_ARCHIVED", "DeepSeek Harness session is archived");
+      throw hostError("RUNTIME_SESSION_ARCHIVED", "DeepSeek session is archived");
     }
     if (this._sessionCwd(input.cwd) !== session.cwd) {
       throw hostError(
         "RUNTIME_SESSION_NOT_FOUND",
-        "DeepSeek Harness turn workspace does not match",
+        "DeepSeek turn workspace does not match",
       );
     }
-    const model = this._validateModel(input.model ?? this.sessionConfigs.get(session.id)?.model);
+    const model = this._validateModel(requestedModel, models);
     const fingerprint = inputFingerprint({ ...input, model });
     const existing = turnByOperation(session, input.operationId);
     if (existing && existing.fingerprint !== fingerprint) {
       throw hostError(
         "RUNTIME_OPERATION_CONFLICT",
-        "DeepSeek Harness operationId input changed",
+        "DeepSeek operationId input changed",
       );
     }
     const currentActive = this.activeTurns.get(session.id);
     if (currentActive) {
       if (existing && currentActive.turnId === existing.id) return currentActive.acceptance.promise;
-      throw hostError("RUNTIME_SESSION_BUSY", "DeepSeek Harness session is active");
+      throw hostError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     }
     if (existing?.acceptance === "failed") {
-      throw hostError(existing.errorCode || "DEEPSEEK_HARNESS_TURN_FAILED", "DeepSeek Harness turn failed");
+      throw hostError(existing.errorCode || "DEEPSEEK_HARNESS_TURN_FAILED", "DeepSeek turn failed");
     }
     if (existing && existing.acceptance === "accepted" && TERMINAL_STATUSES.has(existing.status)) {
       return { turn: { id: existing.id, status: existing.status, items: [] } };
@@ -635,7 +659,7 @@ class DeepSeekHarnessRuntimeHost {
     // Native commands can mutate state without creating a model user/message.
     // Never replay an ambiguous dispatch against a restarted bridge.
     if (existing && input.prompt.trimStart().startsWith("/")) {
-      throw hostError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "DeepSeek Harness command acceptance is unknown; it will not be repeated");
+      throw hostError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "DeepSeek command acceptance is unknown; it will not be repeated");
     }
     let turnId = existing?.id;
     if (!existing) {
@@ -691,12 +715,12 @@ class DeepSeekHarnessRuntimeHost {
       || !safeString(input.operationId, 512) || !safeString(input.message, 1024 * 1024)) {
       throw hostError(
         "RUNTIME_TURN_PARAMS_INVALID",
-        "DeepSeek Harness steer input is invalid",
+        "DeepSeek steer input is invalid",
       );
     }
     const active = this.activeTurns.get(input.sessionId);
     if (!active || active.turnId !== input.turnId || !active.accepted || active.settled) {
-      throw hostError("RUNTIME_TURN_NOT_ACTIVE", "DeepSeek Harness turn is not active");
+      throw hostError("RUNTIME_TURN_NOT_ACTIVE", "DeepSeek turn is not active");
     }
     await this.process.request("turn/steer", {
       remoteSessionId: active.remoteSessionId,
@@ -712,19 +736,19 @@ class DeepSeekHarnessRuntimeHost {
     if (!plain(input) || !safeString(input.sessionId, 512) || !safeString(input.turnId, 512)) {
       throw hostError(
         "RUNTIME_TURN_PARAMS_INVALID",
-        "DeepSeek Harness interrupt input is invalid",
+        "DeepSeek interrupt input is invalid",
       );
     }
     const session = this._requireSession(input.sessionId);
     const turn = turnById(session, input.turnId);
-    if (!turn) throw hostError("RUNTIME_TURN_STALE", "DeepSeek Harness turn is stale");
+    if (!turn) throw hostError("RUNTIME_TURN_STALE", "DeepSeek turn is stale");
     const active = this.activeTurns.get(session.id);
     if (!active) {
       if (["canceled", "interrupted"].includes(turn.status)) return {};
-      throw hostError("RUNTIME_TURN_NOT_ACTIVE", "DeepSeek Harness turn is no longer active");
+      throw hostError("RUNTIME_TURN_NOT_ACTIVE", "DeepSeek turn is no longer active");
     }
     if (active.turnId !== input.turnId) {
-      throw hostError("RUNTIME_TURN_STALE", "DeepSeek Harness turn is stale");
+      throw hostError("RUNTIME_TURN_STALE", "DeepSeek turn is stale");
     }
     active.interruptRequested = true;
     await this.process.request("turn/interrupt", {
@@ -746,10 +770,22 @@ class DeepSeekHarnessRuntimeHost {
     if (!terminal || !["canceled", "interrupted"].includes(terminal.status)) {
       throw hostError(
         "RUNTIME_TURN_CANCEL_UNKNOWN",
-        "DeepSeek Harness did not confirm interruption",
+        "DeepSeek did not confirm interruption",
       );
     }
     return {};
+  }
+
+  async generateModelOnly(input) {
+    this._assertReady();
+    return require("./runtime-model-only").runBoundedModelOnly(input, async signal => {
+      const cancel = () => { void this.process.request("model/cancel", { operationId: input.operationId }).catch(() => {}); };
+      signal.addEventListener("abort", cancel, { once: true });
+      try { return await this.process.request("model/generate", {
+        operationId: input.operationId, prompt: input.prompt, model: input.model,
+      }, { timeoutMs: 180_000 }); }
+      finally { signal.removeEventListener("abort", cancel); }
+    });
   }
 
   async modelsList(input = {}) {
@@ -761,7 +797,7 @@ class DeepSeekHarnessRuntimeHost {
       || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw hostError(
         "RUNTIME_MODEL_CURSOR_INVALID",
-        "DeepSeek Harness model cursor is invalid",
+        "DeepSeek model cursor is invalid",
       );
     }
     const page = models.slice(offset, offset + limit).map((model) => ({
@@ -770,6 +806,7 @@ class DeepSeekHarnessRuntimeHost {
       description: model.description,
       isDefault: model.isDefault,
       hidden: false,
+      contextWindow: model.contextWindow,
     }));
     const next = offset + page.length;
     return { data: page, nextCursor: next < models.length ? String(next) : null };
@@ -779,6 +816,7 @@ class DeepSeekHarnessRuntimeHost {
     if (this.stopping) return this.stopping;
     if (this.state === "stopped") return undefined;
     this.state = "stopping";
+    this._invalidateAuthentication();
     this.stopping = (async () => {
       try {
         await this.process?.request("shutdown", {}, { timeoutMs: this.shutdownGraceMs });
@@ -798,8 +836,8 @@ class DeepSeekHarnessRuntimeHost {
       if (this.process && !this.process.closed) this.cleanupIncomplete = true;
       for (const active of [...this.activeTurns.values()]) {
         this._failActive(active, hostError(
-          "DEEPSEEK_HARNESS_PROCESS_CLOSE_TIMEOUT",
-          "DeepSeek Harness process did not terminate",
+          this.process?.closed ? "RUNTIME_HOST_TERMINATED" : "DEEPSEEK_HARNESS_PROCESS_CLOSE_TIMEOUT",
+          this.process?.closed ? "DeepSeek host stopped" : "DeepSeek process did not terminate",
         ));
       }
       this._revokeMcp();
@@ -808,7 +846,7 @@ class DeepSeekHarnessRuntimeHost {
       if (this.cleanupIncomplete) {
         const error = hostError(
           "DEEPSEEK_HARNESS_PROCESS_CLOSE_TIMEOUT",
-          "DeepSeek Harness process cleanup is incomplete",
+          "DeepSeek process cleanup is incomplete",
         );
         error.cleanupIncomplete = true;
         throw error;
@@ -849,7 +887,7 @@ class DeepSeekHarnessRuntimeHost {
       if (!turn || !["unknown", "accepted"].includes(turn.acceptance)) {
         throw hostError(
           "RUNTIME_TURN_RECEIPT_CONFLICT",
-          "DeepSeek Harness receipt is inconsistent",
+          "DeepSeek receipt is inconsistent",
         );
       }
       turn.acceptance = "accepted";
@@ -877,6 +915,9 @@ class DeepSeekHarnessRuntimeHost {
 
   _handleEvent(active, event) {
     if (active.settled) return;
+    if (["tool_start", "tool_result"].includes(event.type) && event.tool) {
+      event = { ...event, ...require("./context-tool-content").contextToolContent(event.tool, this.registeredSecrets) };
+    }
     if (event.type === "text" && safeString(event.itemId, 512)
       && safeString(event.text, 8 * 1024 * 1024, { empty: true })) {
       const timestamp = this.now();
@@ -928,6 +969,9 @@ class DeepSeekHarnessRuntimeHost {
       turn.updatedAt = Math.max(turn.updatedAt, timestamp);
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
+    if (["AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(errorCode)) {
+      this._invalidateAuthentication();
+    }
     active.settled = true;
     if (this.activeTurns.get(active.sessionId) === active) this.activeTurns.delete(active.sessionId);
     active.terminal.resolve({ status });
@@ -937,21 +981,35 @@ class DeepSeekHarnessRuntimeHost {
     if (!active || active.settled) return;
     const failure = error?.code ? error : hostError(
       "DEEPSEEK_HARNESS_TURN_FAILED",
-      "DeepSeek Harness turn failed",
+      "DeepSeek turn failed",
     );
     const definitelyRejected = options.definitelyRejected === true;
     const timestamp = this.now();
     const acceptance = active.accepted ? "accepted" : definitelyRejected ? "failed" : "unknown";
     const status = active.interruptRequested || active.accepted ? "interrupted" : "failed";
-    this.ledger.update((data) => {
-      const session = sessionById(data, active.sessionId);
-      const turn = turnById(session, active.turnId);
-      turn.acceptance = acceptance;
-      turn.status = status;
-      turn.errorCode = failure.code;
-      turn.updatedAt = Math.max(turn.updatedAt, timestamp);
-      session.updatedAt = Math.max(session.updatedAt, timestamp);
-    });
+    try {
+      this.ledger.update((data) => {
+        const session = sessionById(data, active.sessionId);
+        const turn = turnById(session, active.turnId);
+        turn.acceptance = acceptance;
+        turn.status = status;
+        turn.errorCode = failure.code;
+        turn.updatedAt = Math.max(turn.updatedAt, timestamp);
+        session.updatedAt = Math.max(session.updatedAt, timestamp);
+      });
+    } catch (ledgerFailure) {
+      // Do not leave an unsettled in-memory turn after its worker is gone.
+      // No terminal event is published without a durable ledger result.
+      active.settled = true;
+      if (this.activeTurns.get(active.sessionId) === active) this.activeTurns.delete(active.sessionId);
+      active.acceptance.reject(ledgerFailure);
+      active.terminal.resolve({ status: "interrupted" });
+      this._killProcess("SIGKILL");
+      return;
+    }
+    if (["AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(failure.code)) {
+      this._invalidateAuthentication();
+    }
     active.settled = true;
     if (this.activeTurns.get(active.sessionId) === active) this.activeTurns.delete(active.sessionId);
     if (!active.accepted) active.acceptance.reject(failure);
@@ -972,21 +1030,24 @@ class DeepSeekHarnessRuntimeHost {
     if (!handler) {
       throw hostError(
         "RUNTIME_SERVER_REQUEST_UNAVAILABLE",
-        "DeepSeek Harness request handler is unavailable",
+        "DeepSeek request handler is unavailable",
       );
     }
     return handler(params);
   }
 
   _spawnBridge() {
-    const reservation = this.mcpGateIssuer.reserveMcpServer({
+    // Catalog/auth/command discovery has no execution authority. A locked MCP
+    // helper must not prevent those reads from reaching the native CLI.
+    const reservation = this.controlInstance ? null : this.mcpGateIssuer.reserveMcpServer({
       runtimeProfileId: this.runtimeProfileId,
       runtimeAccountId: this.runtimeAccountId,
+      executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.launch.command,
     });
-    this.reservationId = reservation.reservationId;
-    const mcpEnv = Object.fromEntries(reservation.env.map((entry) => [entry.name, entry.value]));
-    const mcpConfig = {
+    this.reservationId = reservation?.reservationId || null;
+    const mcpEnv = Object.fromEntries((reservation?.env || []).map((entry) => [entry.name, entry.value]));
+    const mcpConfig = reservation ? {
       transport: "stdio",
       serverName: reservation.name,
       command: reservation.command,
@@ -995,12 +1056,14 @@ class DeepSeekHarnessRuntimeHost {
       cwd: this.workspace || this.userHome,
       toolCallTimeoutMs: DEFAULT_MCP_TOOL_TIMEOUT_MS,
       failOnStartupError: true,
-    };
-    const env = this._spawnEnvironment(reservation.env, {
+    } : {};
+    const env = this._spawnEnvironment(reservation?.env || [], {
       DSH_HOME: this.runtimeEnvironment.spawnEnv.DSH_HOME,
       DSH_PERMISSION_MODE: this.permissionPolicy.sandbox,
       SHOGGOTH_DSH_APPROVAL_POLICY: this.permissionPolicy.approvalPolicy === "never"
         ? "never" : "ask",
+      SHOGGOTH_DSH_CONTROL_INSTANCE: this.controlInstance ? "1" : "0",
+      ...(this.launch.argsPrefix[0] ? { SHOGGOTH_DSH_ENTRYPOINT: this.launch.argsPrefix[0] } : {}),
       SHOGGOTH_DSH_MCP_CONFIG: JSON.stringify(mcpConfig),
       DSH_TELEMETRY_DISABLED: "1",
       DO_NOT_TRACK: "1",
@@ -1027,7 +1090,7 @@ class DeepSeekHarnessRuntimeHost {
       this._revokeMcp();
       throw hostError(
         "DEEPSEEK_HARNESS_PROCESS_SPAWN_FAILED",
-        "DeepSeek Harness process could not start",
+        "DeepSeek process could not start",
       );
     }
     if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 1
@@ -1036,7 +1099,7 @@ class DeepSeekHarnessRuntimeHost {
       this._revokeMcp();
       throw hostError(
         "DEEPSEEK_HARNESS_PROCESS_SPAWN_FAILED",
-        "DeepSeek Harness process pipes are invalid",
+        "DeepSeek process pipes are invalid",
       );
     }
     this.process = new DeepSeekHarnessProcess({
@@ -1049,12 +1112,13 @@ class DeepSeekHarnessRuntimeHost {
       onEvent: (event) => this._onEvent(event),
       onServerRequest: (method, params) => this._onServerRequest(method, params),
       onFatal: (error) => {
+        this.processFailure ||= error;
         try { this.onDiagnostic?.({ code: error?.code || "DEEPSEEK_HARNESS_PROCESS_FAILED" }); } catch {}
       },
     });
     void this.process.closedPromise.then((result) => this._onProcessClosed(result)).catch(() => {});
     try {
-      this.mcpGateIssuer.bindMcpServer({
+      if (reservation) this.mcpGateIssuer.bindMcpServer({
         reservationId: reservation.reservationId,
         parentPid: child.pid,
       });
@@ -1069,10 +1133,13 @@ class DeepSeekHarnessRuntimeHost {
   _onProcessClosed(result) {
     this._revokeMcp();
     if (["stopping", "stopped"].includes(this.state)) return;
-    const error = hostError(
+    this._invalidateAuthentication();
+    const protocolFailure = result?.error?.code === "DEEPSEEK_HARNESS_PROCESS_CLOSED"
+      ? null : result?.error;
+    const error = this.processFailure || protocolFailure || hostError(
       /auth|credential|api[ -]?key|unauthorized/iu.test(result?.stderr || "")
         ? "AUTH_REQUIRED" : "DEEPSEEK_HARNESS_PROCESS_CLOSED",
-      "DeepSeek Harness process closed unexpectedly",
+      "DeepSeek process closed unexpectedly",
     );
     for (const active of [...this.activeTurns.values()]) this._failActive(active, error);
     this.state = "failed";
@@ -1095,15 +1162,59 @@ class DeepSeekHarnessRuntimeHost {
     this.reservationId = null;
   }
 
-  async _ensureModelCatalog() {
-    const now = this.now();
-    if (Array.isArray(this.profileState.models) && this.profileState.modelsExpiresAt > now) {
-      return this.profileState.models;
+  _modelCatalogIdentity() {
+    return modelCatalogIdentity({
+      fs: this.fs,
+      values: [this.runtimeEnvironment, this.cliVersion, this.profileState.authGeneration || 0,
+        PARENT_ENV_ALLOWLIST.map((key) => [key, this.parentEnv[key] ?? null])],
+      files: [this.binaryPath, ...[".credentials.yaml", "settings.yaml", "settings.yml", "settings.json"]
+        .map((name) => path.join(this.home, name))],
+      directories: [path.join(this.home, "profiles")],
+    });
+  }
+
+  _invalidateAuthentication() {
+    this.profileState.auth = null;
+    this.profileState.authExpiresAt = 0;
+    this.profileState.authGeneration = (this.profileState.authGeneration || 0) + 1;
+    this.modelCatalogCache.invalidate();
+  }
+
+  async _ensureModelCatalog({ model } = {}) {
+    try {
+      return await this._readModelCatalog(model);
+    } catch (error) {
+      // Revalidate only read-only discovery after an identity/generation race.
+      // Session creation and turn dispatch are never repeated here.
+      if (error?.code !== "RUNTIME_MODEL_CATALOG_CHANGED" || this.state !== "ready") throw error;
+      return this._readModelCatalog(model);
     }
-    const payload = await this.process.request("models/list", {}, { timeoutMs: this.requestTimeoutMs });
-    const models = validateCatalog(payload);
+  }
+
+  async _readModelCatalog(model) {
+    const key = this._modelCatalogIdentity();
+    const models = await this.modelCatalogCache.read({
+      key,
+      now: this.now,
+      isCurrent: () => this.state === "ready" && key === this._modelCatalogIdentity(),
+      allowStale: (catalog) => typeof model === "string"
+        && catalog.some((candidate) => candidate.model === model),
+      onRefreshError: (error) => {
+        const authFailure = ["AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(error?.code);
+        if (authFailure) {
+          this._invalidateAuthentication();
+        }
+        try { this.onDiagnostic?.({ code: authFailure ? error.code : "RUNTIME_MODEL_CATALOG_UNAVAILABLE" }); } catch {}
+      },
+      load: async () => validateCatalog(await this.process.request("models/list", {}, {
+        timeoutMs: this.requestTimeoutMs,
+      })),
+    });
+    this._assertReady();
+    if (key !== this._modelCatalogIdentity()) {
+      throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "DeepSeek model catalog identity changed");
+    }
     this.profileState.models = models;
-    this.profileState.modelsExpiresAt = now + 5 * 60 * 1000;
     return models;
   }
 
@@ -1115,7 +1226,7 @@ class DeepSeekHarnessRuntimeHost {
       remoteSessionId: session?.remoteSessionId || null,
     }, { timeoutMs: this.requestTimeoutMs });
     const commands = mergeNativeCommands("deepseek-harness", (payload?.commands || []).map((entry) => ({
-      ...entry, source: "DeepSeek Harness registry",
+      ...entry, source: "DeepSeek registry",
       // Permissions must update the application’s durable session policy too.
       execution: entry.name === "permission" ? "client" : "runtime",
     })));
@@ -1129,11 +1240,11 @@ class DeepSeekHarnessRuntimeHost {
     return { kind: "send", text: parsed.text, warning: null };
   }
 
-  _validateModel(model) {
+  _validateModel(model, models = this.profileState.models) {
     if (model === undefined || model === null) return null;
     if (!safeString(model, 640) || !parseModelRef(model)
-      || !this.profileState.models?.some((candidate) => candidate.model === model)) {
-      throw hostError("RUNTIME_MODEL_UNAVAILABLE", "DeepSeek Harness model is unavailable");
+      || !models?.some((candidate) => candidate.model === model)) {
+      throw hostError("RUNTIME_MODEL_UNAVAILABLE", "DeepSeek model is unavailable");
     }
     return model;
   }
@@ -1144,7 +1255,7 @@ class DeepSeekHarnessRuntimeHost {
     if (this.workspace !== null && cwd !== this.workspace) {
       throw hostError(
         "DEEPSEEK_HARNESS_WORKSPACE_INVALID",
-        "DeepSeek Harness workspace route changed",
+        "DeepSeek workspace route changed",
       );
     }
     try {
@@ -1153,7 +1264,7 @@ class DeepSeekHarnessRuntimeHost {
     } catch {
       throw hostError(
         "DEEPSEEK_HARNESS_WORKSPACE_INVALID",
-        "DeepSeek Harness workspace is unavailable",
+        "DeepSeek workspace is unavailable",
       );
     }
     return cwd;
@@ -1167,12 +1278,12 @@ class DeepSeekHarnessRuntimeHost {
     if (!safeString(sessionId, 512)) {
       throw hostError(
         "RUNTIME_SESSION_PARAMS_INVALID",
-        "DeepSeek Harness session id is invalid",
+        "DeepSeek session id is invalid",
       );
     }
     const session = sessionById(this.ledger.snapshot(), sessionId);
     if (!session) {
-      throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek Harness session was not found");
+      throw hostError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek session was not found");
     }
     return session;
   }
@@ -1221,7 +1332,7 @@ class DeepSeekHarnessRuntimeHost {
         || !safeString(entry.value, 4096, { empty: true })) {
         throw hostError(
           "DEEPSEEK_HARNESS_MCP_CONFIG_INVALID",
-          "DeepSeek Harness MCP environment is invalid",
+          "DeepSeek MCP environment is invalid",
         );
       }
       env[entry.name] = entry.value;
@@ -1230,7 +1341,7 @@ class DeepSeekHarnessRuntimeHost {
       if (!/^[A-Z][A-Z0-9_]{0,63}$/u.test(key) || !safeString(value, 128 * 1024)) {
         throw hostError(
           "DEEPSEEK_HARNESS_CONFIG_INVALID",
-          "DeepSeek Harness Bridge environment is invalid",
+          "DeepSeek Bridge environment is invalid",
         );
       }
       env[key] = value;
@@ -1242,7 +1353,7 @@ class DeepSeekHarnessRuntimeHost {
     if (!Array.isArray(args) || args.length === 0 || args.some((arg) => !safeString(arg, 4096))) {
       return Promise.reject(hostError(
         "DEEPSEEK_HARNESS_CONTROL_INVALID",
-        "DeepSeek Harness control command is invalid",
+        "DeepSeek control command is invalid",
       ));
     }
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
@@ -1259,7 +1370,7 @@ class DeepSeekHarnessRuntimeHost {
       } catch {
         reject(hostError(
           "DEEPSEEK_HARNESS_PROCESS_SPAWN_FAILED",
-          "DeepSeek Harness control process failed",
+          "DeepSeek control process failed",
         ));
         return;
       }
@@ -1271,7 +1382,7 @@ class DeepSeekHarnessRuntimeHost {
         if (Buffer.byteLength(next, "utf8") > MAX_CONTROL_OUTPUT_BYTES) {
           throw hostError(
             "DEEPSEEK_HARNESS_CONTROL_OUTPUT_TOO_LARGE",
-            "DeepSeek Harness control output is too large",
+            "DeepSeek control output is too large",
           );
         }
         return next;
@@ -1282,7 +1393,7 @@ class DeepSeekHarnessRuntimeHost {
         try { child.kill("SIGKILL"); } catch {}
         reject(hostError(
           "DEEPSEEK_HARNESS_CONTROL_TIMEOUT",
-          "DeepSeek Harness control command timed out",
+          "DeepSeek control command timed out",
         ));
       }, timeoutMs);
       timer.unref?.();
@@ -1297,7 +1408,7 @@ class DeepSeekHarnessRuntimeHost {
       child.stderr.on("data", (chunk) => { try { stderr = append(stderr, chunk); } catch (error) { fail(error); } });
       child.on("error", () => fail(hostError(
         "DEEPSEEK_HARNESS_PROCESS_FAILED",
-        "DeepSeek Harness control process failed",
+        "DeepSeek control process failed",
       )));
       child.on("close", (code, signal) => {
         if (settled) return;
@@ -1316,7 +1427,7 @@ class DeepSeekHarnessRuntimeHost {
 
   _assertReady() {
     if (this.state !== "ready") {
-      throw hostError("DEEPSEEK_HARNESS_NOT_READY", "DeepSeek Harness runtime is not ready");
+      throw hostError("DEEPSEEK_HARNESS_NOT_READY", "DeepSeek runtime is not ready");
     }
   }
 
@@ -1325,7 +1436,7 @@ class DeepSeekHarnessRuntimeHost {
     if (this.controlInstance) {
       throw hostError(
         "RUNTIME_CAPABILITY_UNSUPPORTED",
-        "DeepSeek Harness control hosts cannot run sessions",
+        "DeepSeek control hosts cannot run sessions",
       );
     }
   }

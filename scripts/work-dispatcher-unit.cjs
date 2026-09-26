@@ -214,8 +214,8 @@ test("非空 Runtime session/turn 绑定不可清空或更换，waiting 与 term
   const waiting = dispatcher.transition("run-binding", "waiting_input", {
     waitingRequestId: "request-binding",
   });
-  assert.equal(waiting.codexThreadId, "thread-binding");
-  assert.equal(waiting.codexTurnId, "turn-binding");
+  assert.equal(waiting.runtimeSessionRef?.sessionId, "thread-binding");
+  assert.equal(waiting.runtimeTurnRef?.turnId, "turn-binding");
   for (const patch of [
     { runtimeSessionRef: null },
     { runtimeSessionRef: runtimePatch("thread-other").runtimeSessionRef },
@@ -229,8 +229,8 @@ test("非空 Runtime session/turn 绑定不可清空或更换，waiting 与 term
   }
   dispatcher.transition("run-binding", "running");
   const completed = dispatcher.transition("run-binding", "completed");
-  assert.equal(completed.codexThreadId, "thread-binding");
-  assert.equal(completed.codexTurnId, "turn-binding");
+  assert.equal(completed.runtimeSessionRef?.sessionId, "thread-binding");
+  assert.equal(completed.runtimeTurnRef?.turnId, "turn-binding");
   store.close();
 });
 

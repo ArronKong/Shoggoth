@@ -3,12 +3,24 @@
 const { TextDecoder } = require("node:util");
 const { serviceError } = require("./security");
 
-const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
+const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_SERVER_REQUEST_TIMEOUT_MS = 330_000;
 
 function acpError(code, message) {
   return serviceError(code, message);
+}
+
+function requestError(error, dispatchState) {
+  // Each pending request has its own send boundary. Never mutate a shared
+  // connection error: another request may still be waiting in the write queue.
+  const result = acpError(error?.code || "GROK_ACP_FAILED", error?.message || "Grok ACP failed");
+  result.dispatchState = dispatchState;
+  if (Number.isSafeInteger(error?.rpcCode)) result.rpcCode = error.rpcCode;
+  for (const key of ["frameBytes", "maxFrameBytes"]) {
+    if (Number.isSafeInteger(error?.[key])) result[key] = error[key];
+  }
+  return result;
 }
 
 function validRequestId(value) {
@@ -195,20 +207,42 @@ class GrokBuildAcpJsonlClient {
     };
   }
 
-  request(method, params, options = {}) {
-    if (this.fatalError) return Promise.reject(this.fatalError);
-    if (this.ended) return Promise.reject(acpError("GROK_ACP_TERMINATED", "Grok ACP is terminated"));
+  _requestFrame(method, params) {
+    if (this.fatalError) throw this.fatalError;
+    if (this.ended) throw acpError("GROK_ACP_TERMINATED", "Grok ACP is terminated");
     if (typeof method !== "string" || method.length === 0 || method.includes("\0")) {
-      return Promise.reject(acpError("GROK_ACP_METHOD_INVALID", "Grok ACP method is invalid"));
+      throw acpError("GROK_ACP_METHOD_INVALID", "Grok ACP method is invalid");
     }
     if (this.nextId > Number.MAX_SAFE_INTEGER || this.pending.size >= 256) {
-      const error = acpError("GROK_ACP_REQUEST_LIMIT", "Grok ACP request capacity was exceeded");
-      this._fail(error);
-      return Promise.reject(error);
+      throw acpError("GROK_ACP_REQUEST_LIMIT", "Grok ACP request capacity was exceeded");
+    }
+    return this._serialize(params === undefined
+      ? { jsonrpc: "2.0", id: this.nextId, method }
+      : { jsonrpc: "2.0", id: this.nextId, method, params });
+  }
+
+  preflightRequest(method, params) {
+    try {
+      const frame = this._requestFrame(method, params);
+      return { frameBytes: Buffer.byteLength(frame, "utf8"), maxFrameBytes: this.maxFrameBytes };
+    } catch (error) {
+      throw requestError(error, "not_sent");
+    }
+  }
+
+  request(method, params, options = {}) {
+    let frame;
+    let timeoutMs;
+    try {
+      // Serialize the complete actual frame before reserving a pending request.
+      // This is repeated even if the caller preflighted before writing its ledger.
+      frame = this._requestFrame(method, params);
+      timeoutMs = validTimeout(options.timeoutMs, this.requestTimeoutMs);
+    } catch (error) {
+      return Promise.reject(requestError(error, "not_sent"));
     }
     const id = this.nextId;
     this.nextId += 1;
-    const timeoutMs = validTimeout(options.timeoutMs, this.requestTimeoutMs);
     let resolveResult;
     let rejectResult;
     const result = new Promise((resolve, reject) => {
@@ -224,17 +258,36 @@ class GrokBuildAcpJsonlClient {
       deadlineAt: 0,
       remainingTimeoutMs: timeoutMs,
       pauseDepth: 0,
+      dispatchState: "not_sent",
     };
     this.pending.set(id, pending);
     this._armRequestTimeout(id, pending, timeoutMs);
-    const message = params === undefined
-      ? { jsonrpc: "2.0", id, method }
-      : { jsonrpc: "2.0", id, method, params };
-    this._write(message).then(() => {
+    this._writeFrame(frame, {
+      shouldWrite: () => this.pending.get(id) === pending,
+      beforeWrite: () => {
+        // The observer must durably record this conservative boundary before
+        // stdin.write can possibly deliver bytes, including on synchronous throw.
+        options.onWriteAttempt?.();
+        pending.dispatchState = "write_attempted";
+      },
+      onWriteFailure: (error) => {
+        if (pending.dispatchState === "write_attempted"
+          || error?.code === "GROK_ACP_STDIN_CLOSED") this._fail(error);
+      },
+    }).then((written) => {
+      if (!written) return;
       try { options.onWritten?.(); } catch {
         this._fail(acpError("GROK_ACP_WRITE_OBSERVER_FAILED", "Grok ACP write observer failed"));
       }
-    }).catch((error) => this._fail(error));
+    }).catch((error) => {
+      if (this.pending.get(id) === pending) {
+        this.pending.delete(id);
+        this.authFailureRequestIds.delete(id);
+        clearTimeout(pending.timer);
+        this._retire(id);
+        pending.reject(requestError(error, pending.dispatchState));
+      }
+    });
     return result;
   }
 
@@ -246,7 +299,9 @@ class GrokBuildAcpJsonlClient {
       this.pending.delete(id);
       this.authFailureRequestIds.delete(id);
       this._retire(id);
-      pending.reject(acpError("GROK_ACP_REQUEST_TIMEOUT", "Grok ACP request timed out"));
+      pending.reject(requestError(
+        acpError("GROK_ACP_REQUEST_TIMEOUT", "Grok ACP request timed out"), pending.dispatchState,
+      ));
     }, timeoutMs);
     pending.timer.unref?.();
   }
@@ -359,7 +414,7 @@ class GrokBuildAcpJsonlClient {
         required ? "Grok Build authentication is required" : "Grok ACP request failed",
       );
       if (Number.isSafeInteger(message.error.code)) error.rpcCode = message.error.code;
-      pending.reject(error);
+      pending.reject(requestError(error, pending.dispatchState));
     } else {
       pending.resolve(message.result);
     }
@@ -437,33 +492,51 @@ class GrokBuildAcpJsonlClient {
     })();
   }
 
-  _write(message) {
-    if (this.fatalError) return Promise.reject(this.fatalError);
-    if (this.ended || !this.child.stdin.writable) {
-      return Promise.reject(acpError("GROK_ACP_STDIN_CLOSED", "Grok ACP stdin is closed"));
-    }
+  _serialize(message) {
     let frame;
     try { frame = `${JSON.stringify(message)}\n`; } catch {
-      return Promise.reject(acpError("GROK_ACP_SERIALIZE_FAILED", "Grok ACP message is not serializable"));
+      throw acpError("GROK_ACP_SERIALIZE_FAILED", "Grok ACP message is not serializable");
     }
-    if (Buffer.byteLength(frame, "utf8") > this.maxFrameBytes) {
-      return Promise.reject(acpError("GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "Grok ACP request exceeded its limit"));
+    const frameBytes = Buffer.byteLength(frame, "utf8");
+    if (frameBytes > this.maxFrameBytes) {
+      const error = acpError("GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "Grok ACP request exceeded its limit");
+      error.frameBytes = frameBytes;
+      error.maxFrameBytes = this.maxFrameBytes;
+      throw error;
     }
+    return frame;
+  }
+
+  _write(message) {
+    let frame;
+    try { frame = this._serialize(message); } catch (error) { return Promise.reject(error); }
+    return this._writeFrame(frame);
+  }
+
+  _writeFrame(frame, options = {}) {
     const write = this.writeTail.then(() => new Promise((resolve, reject) => {
+      // Timed-out/terminated queued requests must never be sent later.
+      if (options.shouldWrite && !options.shouldWrite()) { resolve(false); return; }
       if (this.ended || !this.child.stdin.writable) {
         reject(acpError("GROK_ACP_STDIN_CLOSED", "Grok ACP stdin is closed"));
         return;
       }
+      try { options.beforeWrite?.(); } catch (error) { reject(error); return; }
       try {
         this.child.stdin.write(frame, (error) => {
           if (error) reject(acpError("GROK_ACP_WRITE_FAILED", "Grok ACP write failed"));
-          else resolve();
+          else resolve(true);
         });
       } catch {
         reject(acpError("GROK_ACP_WRITE_FAILED", "Grok ACP write failed"));
       }
     }));
-    this.writeTail = write.catch(() => {});
+    this.writeTail = write.catch((error) => {
+      // Fence the connection before allowing the next queued writer to run.
+      // A local observer failure leaves the transport usable; a write failure
+      // may have delivered only part of a JSONL frame.
+      options.onWriteFailure?.(error);
+    });
     return write;
   }
 
@@ -495,7 +568,7 @@ class GrokBuildAcpJsonlClient {
   _rejectOutstanding(error) {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(requestError(error, pending.dispatchState));
     }
     this.pending.clear();
     this.authFailureRequestIds.clear();

@@ -17,6 +17,8 @@ function harness(extra = {}) {
   let now = 0; let serial = 0;
   const timers = new Map(); const stops = []; const acquisitions = []; const errors = [];
   const registry = new RuntimeAdapterRegistry({
+    // This fixture tests queue retirement with generation-only sentinel handles.
+    validateHandles: false,
     idleTimeoutMs: 120,
     isIdle: () => true,
     setTimer(fn, delay) { const id = ++serial; timers.set(id, { at: now + delay, fn }); return id; },

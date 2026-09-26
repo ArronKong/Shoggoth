@@ -296,7 +296,7 @@ test("Memory 与 Transcript 管理结果按 cursor 分页且保留稳定 revisio
   } finally { value.cleanup(); }
 });
 
-test("Native Skill 管理按 Profile revision 安装、预览、启用并严格校验协议", () => {
+test("Native Skill 管理全局安装、预览、启停并严格校验 registry revision", () => {
   const value = fixture();
   try {
     const sourcePath = createSkillPackage(value.root);
@@ -312,7 +312,8 @@ test("Native Skill 管理按 Profile revision 安装、预览、启用并严格�
       profileId: "profile-1", cursor: 0, limit: 50,
     });
     assert.equal(listed.registryVersion, 2);
-    assert.equal(listed.items[0].enabled, false);
+    assert.equal(listed.items[0].enabled, true);
+    assert.equal(listed.items[0].globalEnabled, true);
     validateAgentHarnessResult("harness.skills.list", listed);
     const preview = value.controller.handle("harness.skills.preview", {
       profileId: "profile-1", skillId: "local-review", source: "user", version: "1.0.0",
@@ -320,22 +321,32 @@ test("Native Skill 管理按 Profile revision 安装、预览、启用并严格�
     });
     assert.match(preview.content, /Read evidence/u);
     validateAgentHarnessResult("harness.skills.preview", preview);
-    const enabled = value.controller.handle("harness.skills.enable", {
+    const disabled = value.controller.handle("harness.skills.global.set", {
       profileId: "profile-1", skillId: "local-review", source: "user", version: "1.0.0",
-      enabled: true, expectedRevision: listed.profileRevision,
+      enabled: false, expectedRevision: listed.registryVersion,
     });
-    assert.equal(enabled.skill.enabled, true);
+    assert.equal(disabled.skill.enabled, false);
+    assert.equal(disabled.registryRevision, 3);
     for (const runtime of [
       "codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness",
     ]) {
       assert.equal(fs.existsSync(path.join(value.paths.stateDir, runtime)), false,
-        `enabling a Skill must not materialize a ${runtime} Profile Home`);
+        `changing a global Skill must not materialize a ${runtime} Profile Home`);
     }
-    validateAgentHarnessResult("harness.skills.enable", enabled);
-    assert.throws(() => value.controller.handle("harness.skills.enable", {
+    validateAgentHarnessResult("harness.skills.global.set", disabled);
+    const enabled = value.controller.handle("harness.skills.global.set", {
+      profileId: "profile-1", skillId: "local-review", source: "user", version: "1.0.0",
+      enabled: true, expectedRevision: disabled.registryRevision,
+    });
+    assert.equal(enabled.skill.enabled, true);
+    assert.throws(() => value.controller.handle("harness.skills.global.set", {
+      profileId: "profile-1", skillId: "local-review", source: "user", version: "1.0.0",
+      enabled: false, expectedRevision: listed.registryVersion,
+    }), (error) => error.code === "SKILL_REGISTRY_REVISION_CONFLICT");
+    assert.throws(() => validateAgentHarnessParams("harness.skills.enable", {
       profileId: "profile-1", skillId: "local-review", source: "user", version: "1.0.0",
       enabled: false, expectedRevision: listed.profileRevision,
-    }), (error) => error.code === "SKILL_PROFILE_REVISION_CONFLICT");
+    }), (error) => error.code === "INVALID_PARAMS");
     assert.deepEqual(validateAgentHarnessParams("harness.skills.list", {
       profileId: "profile-1", cursor: 0, limit: 50,
     }), { profileId: "profile-1", cursor: 0, limit: 50 });

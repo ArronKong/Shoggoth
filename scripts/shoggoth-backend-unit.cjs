@@ -14,6 +14,7 @@ const { normalizeInteractiveRequestV1 } = require("../app/core/shoggoth-interact
 const { createAgentService } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-protocol-version");
+const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
 
 const SESSION_A = "11111111-1111-4111-8111-111111111111";
 const SESSION_B = "22222222-2222-4222-8222-222222222222";
@@ -347,7 +348,7 @@ test("peer native facade loads and stamps only its backendId profile partition",
     id: "shoggoth-codex", name: "Codex", model: undefined,
     provider: "codex", runtime: "codex",
     runtimeAccountId: "fixture-runtime-account",
-    environmentKind: "native-user", sharedAgentCount: 1,
+    environmentKind: undefined, sharedAgentCount: 1,
     backendId: "codex",
   }]);
   assert.equal(value.backend.getSessionRows()[0].backendId, "codex");
@@ -1175,7 +1176,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
     provider: "openrouter",
     runtime: "codex",
     runtimeAccountId: "fixture-runtime-account",
-    environmentKind: "shoggoth-managed",
+    environmentKind: undefined,
     sharedAgentCount: 1,
     isDefault: true,
     backendId: "shoggoth",
@@ -1187,7 +1188,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
     provider: "openrouter",
     runtime: "codex",
     runtimeAccountId: "fixture-runtime-account",
-    environmentKind: "shoggoth-managed",
+    environmentKind: undefined,
     sharedAgentCount: 1,
     profile: "profile-default",
     isDefault: true,
@@ -1308,7 +1309,7 @@ test("native facade creates, updates, archives and restores a long-lived Agent",
   assert.equal(value.backend.ownsAgentId(created.agentId), true);
 });
 
-test("native Skills stay profile-scoped and preserve optimistic revisions through the backend", async () => {
+test("user-installed native Skills use a global registry revision through the backend", async () => {
   let profileRevision = 4;
   let registryVersion = 7;
   const skill = (patch = {}) => ({
@@ -1317,6 +1318,7 @@ test("native Skills stay profile-scoped and preserve optimistic revisions throug
     version: "1.0.0",
     description: "Review a change carefully",
     source: "user",
+    globalEnabled: true,
     contentHash: "a".repeat(64),
     requiredTools: [],
     requiredRuntimeCapabilities: ["filesystem"],
@@ -1337,9 +1339,10 @@ test("native Skills stay profile-scoped and preserve optimistic revisions throug
         hasMore: false,
       };
     }
-    if (request.method === "harness.skills.enable") {
-      profileRevision += 1;
-      return { profileRevision, skill: skill({ enabled: request.params.enabled }) };
+    if (request.method === "harness.skills.global.set") {
+      registryVersion += 1;
+      return { registryRevision: registryVersion, skill: skill({ enabled: request.params.enabled,
+        globalEnabled: request.params.enabled }) };
     }
     if (request.method === "harness.skills.install") {
       registryVersion += 1;
@@ -1368,6 +1371,7 @@ test("native Skills stay profile-scoped and preserve optimistic revisions throug
     id: "careful-review",
     version: "1.0.0",
     source: "user",
+    globalEnabled: true,
     contentHash: "a".repeat(64),
     requiredTools: [],
     requiredRuntimeCapabilities: ["filesystem"],
@@ -1384,7 +1388,8 @@ test("native Skills stay profile-scoped and preserve optimistic revisions throug
     agentId: "shoggoth-default",
   });
   assert.equal(disabled.enabled, false);
-  assert.equal(disabled.profileRevision, 5);
+  assert.equal(disabled.profileRevision, 4);
+  assert.equal(disabled.registryVersion, 8);
   await backend.installSkill("/trusted/package", { agentId: "shoggoth-default" });
   assert.match((await backend.previewSkill("careful-review", {
     agentId: "shoggoth-default",
@@ -1395,14 +1400,14 @@ test("native Skills stay profile-scoped and preserve optimistic revisions throug
     skills: { "careful-review": { "shoggoth-default": 3 } },
   });
 
-  const enableCall = calls.find(({ request }) => request.method === "harness.skills.enable").request;
+  const enableCall = calls.find(({ request }) => request.method === "harness.skills.global.set").request;
   assert.deepEqual(enableCall.params, {
     profileId: "profile-default",
     skillId: "careful-review",
     source: "user",
     version: "1.0.0",
     enabled: false,
-    expectedRevision: 4,
+    expectedRevision: 7,
   });
   const installCall = calls.find(({ request }) => request.method === "harness.skills.install").request;
   assert.equal(installCall.params.sourcePath, "/trusted/package");
@@ -1427,8 +1432,9 @@ test("native Skill operations resolve exact package identity and reject ambiguou
     const selected = packages.find((item) => item.id === request.params.skillId
       && item.version === request.params.version);
     assert.ok(selected, "IPC must carry an exact package identity");
-    if (request.method === "harness.skills.enable") return {
-      profileRevision: 5, skill: { ...selected, enabled: request.params.enabled },
+    if (request.method === "harness.skills.global.set") return {
+      registryRevision: 4, skill: { ...selected, enabled: request.params.enabled,
+        globalEnabled: request.params.enabled },
     };
     if (request.method === "harness.skills.preview") return {
       skill: selected, content: selected.version, nextCursor: 5, hasMore: false,
@@ -1440,7 +1446,7 @@ test("native Skill operations resolve exact package identity and reject ambiguou
   assert.equal((await backend.previewSkill("review", options)).content, "1.0.1");
   await backend.updateSkill("review", { ...options, enabled: true }, options);
   await backend.uninstallSkill("review", options);
-  const targeted = calls.filter(({ request }) => /^harness.skills.(enable|preview|uninstall)$/u.test(request.method));
+  const targeted = calls.filter(({ request }) => /^harness.skills.(global.set|preview|uninstall)$/u.test(request.method));
   assert.equal(targeted.length, 3);
   for (const { request } of targeted) {
     assert.equal(request.params.skillId, "review");
@@ -1451,7 +1457,7 @@ test("native Skill operations resolve exact package identity and reject ambiguou
     () => backend.uninstallSkill("review", { agentId: options.agentId, version: "1.0.1" }),
     () => backend.updateSkill("review", { enabled: true }, { agentId: options.agentId }),
   ]) await assert.rejects(invoke, { code: "SKILL_IDENTITY_AMBIGUOUS" });
-  assert.equal(calls.filter(({ request }) => /^harness.skills.(enable|preview|uninstall)$/u.test(request.method)).length, 3);
+  assert.equal(calls.filter(({ request }) => /^harness.skills.(global.set|preview|uninstall)$/u.test(request.method)).length, 3);
 });
 
 test("native Skills reject profile-less access and never fall back across shared agents", async () => {
@@ -1487,8 +1493,9 @@ test("native Skills reject profile-less access and never fall back across shared
         hasMore: false,
       };
     }
-    if (request.method === "harness.skills.enable") {
-      return { profileRevision: 5, skill: { ...skill, enabled: request.params.enabled } };
+    if (request.method === "harness.skills.global.set") {
+      return { registryRevision: 8, skill: { ...skill, enabled: request.params.enabled,
+        globalEnabled: request.params.enabled } };
     }
     throw new Error(`unexpected ${request.method}`);
   }, { profiles: [profile(), secondary] });
@@ -1510,7 +1517,7 @@ test("native Skills reject profile-less access and never fall back across shared
   });
   assert.deepEqual(calls.map(({ request }) => [request.method, request.params.profileId]), [
     ["harness.skills.list", secondary.id],
-    ["harness.skills.enable", secondary.id],
+    ["harness.skills.global.set", secondary.id],
   ]);
 });
 
@@ -1630,28 +1637,50 @@ test("status retries a failed startup after the background Service becomes avail
   assert.equal(calls.filter(({ request }) => request.method === "profile.list").length, 2);
 });
 
-test("任一持久 lock 都阻止 profiles、connected 与 readyAgentIds", async () => {
-  for (const lockedField of ["pendingCommandsLocked", "mcpCredentialsLocked"]) {
-    const { backend, calls } = fakeBackend(() => {
-      throw new Error("unexpected profile read");
-    }, {
-      readinessTimeoutMs: 20,
-      serviceStatusTimeoutMs: 5,
-      readinessIntervalMs: 1,
-      serviceStatus: () => ({
-        healthy: true,
-        pendingCommandsLocked: lockedField === "pendingCommandsLocked",
-        mcpCredentialsLocked: lockedField === "mcpCredentialsLocked",
-      }),
-    });
-    assert.equal(await backend.start(), false);
-    assert.equal(calls.some(({ request }) => request.method === "profile.list"), false);
-    assert.deepEqual(backend.getAgents(), []);
-    const recovering = await backend.getStatus();
-    assert.equal(recovering.connected, false);
-    assert.deepEqual(recovering.info.readyAgentIds, []);
-    await backend.stop();
-  }
+test("待执行命令锁定阻止 profiles、connected 与 readyAgentIds", async () => {
+  const { backend, calls } = fakeBackend(() => {
+    throw new Error("unexpected profile read");
+  }, {
+    readinessTimeoutMs: 20,
+    serviceStatusTimeoutMs: 5,
+    readinessIntervalMs: 1,
+    serviceStatus: () => ({ healthy: true, pendingCommandsLocked: true, mcpCredentialsLocked: false }),
+  });
+  assert.equal(await backend.start(), false);
+  assert.equal(calls.some(({ request }) => request.method === "profile.list"), false);
+  assert.deepEqual(backend.getAgents(), []);
+  const recovering = await backend.getStatus();
+  assert.equal(recovering.connected, false);
+  assert.deepEqual(recovering.info.readyAgentIds, []);
+  await backend.stop();
+});
+
+test("MCP 凭据按需初始化时仍显示 OpenCode 并保持 Service 连接", async () => {
+  const openCode = profile({
+    id: "e7f48b2a-9c51-4d36-8f0e-2b8a71d5c603",
+    agentId: "shoggoth-opencode",
+    name: "OpenCode",
+    runtime: "opencode",
+    runtimeProfileId: "shoggoth-opencode-cli-v1",
+    runtimeAccountId: "native-opencode-default-v1",
+    providerRef: null,
+    defaultModel: null,
+    isDefault: false,
+  });
+  const { backend, calls } = fakeBackend((request) => {
+    if (request.method === "profile.list") return page("profiles", [profile(), openCode]);
+    if (request.method === "chat.session.list") return page("sessions", []);
+    throw new Error(`unexpected ${request.method}`);
+  }, {
+    serviceStatus: () => ({ healthy: true, pendingCommandsLocked: false, mcpCredentialsLocked: true }),
+  });
+  assert.equal(await backend.start(), true, JSON.stringify(calls.map(({ request }) => request.method)));
+  assert.deepEqual(backend.getAgents().map((agent) => agent.id), ["shoggoth-default", "shoggoth-opencode"]);
+  assert.equal(backend.getAgents()[1].name, "OpenCode");
+  const status = await backend.getStatus();
+  assert.equal(status.connected, true);
+  assert.deepEqual(status.info.readyAgentIds, ["shoggoth-default", "shoggoth-opencode"]);
+  await backend.stop();
 });
 
 test("同一 single-flight 在解锁后发布快照并通知 registry 一次", async () => {
@@ -1957,7 +1986,7 @@ test("start paginates profiles and sessions, uses a fresh token per request, the
   assert.deepEqual(backend.getAgents(), [{
     id: "shoggoth-default", name: "Shoggoth", model: "openai/gpt-5", provider: "openrouter",
     runtime: "codex", runtimeAccountId: "fixture-runtime-account",
-    environmentKind: "shoggoth-managed", sharedAgentCount: 1,
+    environmentKind: undefined, sharedAgentCount: 1,
     backendId: "shoggoth",
   }]);
   assert.equal(backend.ownsAgentId("shoggoth-default"), true);
@@ -2020,7 +2049,7 @@ test("conversation rename events refresh Agent and row names without resetting c
     assert.equal(readyNotices, 1);
     assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe", "profile.list"]);
     calls.length = 0;
-    events = [{ seq: 2, type: "agent.profile.renamed", payload: { profileId: "peer", backendId: "codex" } }];
+    events = [{ seq: 2, type: "agent.profile.renamed", payload: { profileId: "peer", backendId: "hermes" } }];
     await backend._pollServiceEvents(backend._generation);
     assert.equal(backend._serviceEventCursor, 2);
     assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe"]);
@@ -2033,6 +2062,37 @@ test("conversation rename events refresh Agent and row names without resetting c
     assert.equal(backend.getAgents().find((agent) => agent.id === currentProfile.agentId).name, "小墨",
       "a delayed old profile response cannot undo a newer displayed name");
     assert.equal(backend._serviceEventCursor, 3);
+  } finally { await backend.stop(); }
+});
+
+test("context updates refresh only the owning profile and publish a content-free session invalidation", async () => {
+  const { runtimeContextCapabilities } = require("../app/agent-service/runtime-context-usage");
+  let current = session(SESSION_A, { codexThreadId: "thread-1", status: "ready" });
+  let events = [];
+  const { backend, calls } = fakeBackend((request) => {
+    if (request.method === "profile.list") return page("profiles", [profile()]);
+    if (request.method === "chat.session.list") return page("sessions", [current]);
+    if (request.method === "events.subscribe") return serviceEventPage(events, { afterSeq: request.params.afterSeq });
+    throw new Error(`unexpected ${request.method}`);
+  });
+  try {
+    assert.equal(await backend.start(), true);
+    const notices = [];
+    backend._sessionActivityNotifier = (notice) => notices.push(notice);
+    backend._serviceEventPollGeneration = backend._generation;
+    current = { ...current, contextCapabilities: runtimeContextCapabilities("codex"),
+      contextUsage: { runtimeSessionId: current.codexThreadId, usedTokens: 60000, contextWindow: 200000,
+        quality: "exact", source: "runtime_event", observedAt: 200 } };
+    events = [{ seq: 1, type: "runtime.context.updated", payload: { profileId: current.profileId, sessionKey: current.sessionKey } }];
+    calls.length = 0;
+    await backend._pollServiceEvents(backend._generation);
+    assert.equal(backend.getSessionRows()[0].contextUsage.usedTokens, 60000);
+    assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe", "chat.session.list"]);
+    assert.deepEqual(notices, [{ kind: "sessions.changed", sessionKey: `agent:shoggoth-default:${SESSION_A}` }]);
+    calls.length = 0;
+    events = [{ seq: 2, type: "runtime.context.updated", payload: { profileId: "other-facade", sessionKey: SESSION_B } }];
+    await backend._pollServiceEvents(backend._generation);
+    assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe"]);
   } finally { await backend.stop(); }
 });
 
@@ -2077,7 +2137,7 @@ test("native profile changes refresh name, workspace and archived roster while r
     }
     assert.equal(notices, 3);
     calls.length = 0;
-    events = [{ seq: 4, type: "agent.profile.changed", payload: { profileId: target.id, backendId: "codex" } }];
+    events = [{ seq: 4, type: "agent.profile.changed", payload: { profileId: target.id, backendId: "hermes" } }];
     await backend._pollServiceEvents(backend._generation);
     assert.deepEqual(calls.map(({ request }) => request.method), ["events.subscribe"]);
     assert.equal(backend._serviceEventCursor, 4);
@@ -3274,7 +3334,7 @@ test("disconnecting a native facade leaves peers and the shared Service running"
   for (const { backend } of fixtures) registry.register(backend);
   try {
     await registry.start();
-    for (const { backend, calls } of fixtures) {
+    for (const { backend, calls } of fixtures.filter(({ backend }) => backend.getBackendDescriptor().disconnectable)) {
       disabled = [backend.id];
       calls.length = 0;
       await backend.stop();
@@ -4816,6 +4876,43 @@ test("completed text does not duplicate a delta and commentary seals before the 
   assert.deepEqual(seen, { delta: ["note", "answer"], interim: ["note"], final: ["answer"] });
 });
 
+test("native Codex commentary closes live before the final answer starts", async () => {
+  const nativeMessages = [
+    { method: "item/agentMessage/delta", params: { itemId: "note-1", delta: "Checking sources." } },
+    { method: "item/completed", params: { item: { id: "note-1", type: "agentMessage", text: "Checking sources.", phase: "commentary" } } },
+    { method: "item/agentMessage/delta", params: { itemId: "answer-1", delta: "The **answer**." } },
+    { method: "item/completed", params: { item: { id: "answer-1", type: "agentMessage", text: "The **answer**.", phase: "final_answer" } } },
+  ];
+  const events = nativeMessages.map((message, index) => {
+    const normalized = normalizeCodexEvent({ ...message, params: {
+      ...message.params, threadId: "thread-1", turnId: "turn-1",
+    } });
+    return event(index + 1, normalized.type === "text_delta" ? "text.delta" : normalized.type, {
+      method: normalized.method, itemId: normalized.itemId,
+      ...(normalized.delta !== undefined ? { delta: normalized.delta } : {}),
+      ...(normalized.text !== undefined ? { text: normalized.text } : {}),
+      ...(normalized.phase !== undefined ? { phase: normalized.phase } : {}),
+    });
+  });
+  const { backend } = await readyBackend((request) => {
+    if (request.method === "chat.send") return { disposition: "started", reason: null, run: run() };
+    if (request.method === "run.subscribe") return subscription([
+      ...events, event(5, "terminal", { status: "completed", resultSummary: "The **answer**.", errorCode: null }),
+    ], { nextCursor: 5, latestSeq: 5 });
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const seen = [];
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
+    delta: (text) => seen.push(["delta", text]),
+    interim: (text) => seen.push(["interim", text]),
+    final: (text) => seen.push(["final", text]),
+  });
+  assert.deepEqual(seen, [
+    ["delta", "Checking sources."], ["interim", "Checking sources."],
+    ["delta", "The **answer**."], ["final", "The **answer**."],
+  ], "the first bubble must finish before any final-answer text is displayed");
+});
+
 test("hook exceptions are isolated and a throwing final never turns into a second error", async () => {
   const { backend } = await readyBackend((request) => {
     if (request.method === "chat.send") return { disposition: "started", reason: null, run: run() };
@@ -4924,6 +5021,32 @@ test("native execution status clears queue UI while unknown lifecycle noise stay
     { kind: "compacting", text: "compacting" },
     { kind: "compacted", text: "compacted" },
   ]);
+});
+
+test("retry status and terminal rate limits reach chat hooks and clear active waiting", async () => {
+  const { backend } = fakeBackend(() => { throw new Error("unexpected service request"); });
+  const statuses = [], errors = [];
+  const context = { sessionKey: SESSION_A, run: run(), hooks: {
+    status: status => statuses.push(status), error: message => errors.push(message),
+  } };
+  const state = { text: "", reasoning: "", settled: false };
+  backend._activeBySession.set(SESSION_A, { runId: context.run.id, status: "running" });
+  const retry = { status: "retrying", reason: "RUNTIME_RATE_LIMITED", message: "private provider trace" };
+  await backend._consumeEvent(context, state, event(1, "status", retry));
+  await backend._consumeEvent(context, state, event(2, "status", retry));
+  await backend._consumeEvent(context, state, event(3, "status", { status: "running" }));
+  assert.deepEqual(statuses, [
+    { kind: "retrying", text: "retrying", reason: "RUNTIME_RATE_LIMITED" },
+    { kind: "running", text: "running" },
+  ]);
+  assert.equal(state.settled, false);
+  assert.equal(backend._activeBySession.has(SESSION_A), true);
+  const terminal = event(4, "terminal", { status: "failed", errorCode: "RUNTIME_RATE_LIMITED" });
+  assert.equal(await backend._consumeEvent(context, state, terminal), true);
+  await backend._consumeEvent(context, state, terminal);
+  assert.deepEqual(errors, ["模型服务限流，本次回复未完成。请稍后重试，或更换模型"]);
+  assert.equal(state.settled, true);
+  assert.equal(backend._activeBySession.has(SESSION_A), false);
 });
 
 test("queued ack and stream reset expose the durable reason and elapsed start before running", async () => {
@@ -5220,6 +5343,10 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
     ["RUNTIME_SPENDING_LIMIT_REACHED", "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试"],
     ["RUNTIME_ACCOUNT_BLOCKED", "模型服务商返回账号受限（account blocked），请前往服务商检查账号状态；解除限制或更换可用账号后重试"],
     ["RUNTIME_UPSTREAM_UNAVAILABLE", "Agent 上游服务暂时不可用，请稍后重试"],
+    ["GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "消息或附件超过 Grok CLI 的传输大小限制，本次消息未发送；请缩小附件或减少内容后重试"],
+    ["ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED", "暂时无法识别 Antigravity 的原生授权界面，本次操作已停止；请检查 CLI 与 Shoggoth 的版本兼容性"],
+    ["RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "未能确认 CLI 是否已接受本次任务，已暂停自动重试以避免重复执行；请先检查原生会话的执行结果"],
+    ["RUNTIME_RECOVERY_UNAVAILABLE", "Service 重启后无法确认原任务的完整结果或恢复执行绑定，已停止自动恢复；请检查原生会话结果后决定是否重试"],
     ["CODEX_SYSTEM_BINARY_NOT_FOUND", "未找到可执行的本机 Codex CLI，请先安装 Codex 并检查 PATH"],
     ["CODEX_RUNTIME_VERSION_MISMATCH", "Codex CLI 版本与当前 App 不兼容，请检查 CLI 与 App 版本"],
     ["CODEX_RUNTIME_VERSION_PROBE_FAILED", "无法读取 Codex CLI 版本，请检查本机安装与执行权限"],

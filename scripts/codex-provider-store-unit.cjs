@@ -19,10 +19,6 @@ const { EncryptedSecretStore } = require(path.join(
   ROOT, "app", "agent-service", "encrypted-secret-store.js",
 ));
 const { resolveServicePaths } = require(path.join(ROOT, "app", "agent-service", "paths.js"));
-const { runtimeAccountForLegacyProfile } = require(path.join(
-  ROOT, "app", "agent-service", "runtime-account-migration.js",
-));
-
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
@@ -67,6 +63,7 @@ function validProfile(id, providerRef = null) {
     name: `Fixture ${id}`,
     runtime: "codex",
     runtimeProfileId: id,
+    runtimeAccountId: "shoggoth-internal-codex-default-v1",
     providerRef,
     defaultModel: null,
     defaultCwd: null,
@@ -86,7 +83,11 @@ function encodeSnapshot(snapshot) {
 function removeRuntimeAccountSchema(snapshot) {
   delete snapshot.runtimeAccounts;
   delete snapshot.runtimeAccountTombstones;
-  for (const profile of snapshot.agentProfiles) delete profile.runtimeAccountId;
+  for (const profile of snapshot.agentProfiles) {
+    delete profile.runtimeAccountId;
+    if (profile.concurrency.maxActive === null) profile.concurrency = { maxActive: 4, maxWorkspaceWrites: 4 };
+  }
+  for (const provider of snapshot.modelProviders || []) delete provider.revision;
 }
 
 test("ModelProvider 七种 kind 可持久化、查询、更新、删除并跨重启恢复", () => {
@@ -305,88 +306,6 @@ test("ModelProvider 四态 validation 与 Bedrock AWS 字段严格持久化", ()
   store.close();
 });
 
-test("v1 Provider snapshot 迁移 AWS null 且旧 valid fail-safe 为 unverified", () => {
-  const paths = fixturePaths();
-  const first = openStore(paths, { now: () => 600 });
-  first.putModelProvider(validProvider("legacy-provider"));
-  first.close();
-  const snapshot = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  snapshot.schemaVersion = 1;
-  removeRuntimeAccountSchema(snapshot);
-  delete snapshot.runNotes;
-  delete snapshot.mcpToolCalls;
-  const legacyProvider = snapshot.modelProviders[0];
-  delete legacyProvider.awsRegion;
-  delete legacyProvider.awsProfile;
-  legacyProvider.validationStatus = "valid";
-  fs.writeFileSync(paths.stateSnapshotPath, encodeSnapshot(snapshot), { mode: 0o600 });
-
-  const reopened = openStore(paths);
-  assert.deepEqual(reopened.getModelProvider("legacy-provider"), {
-    ...legacyProvider,
-    awsRegion: null,
-    awsProfile: null,
-    validationStatus: "unverified",
-  });
-  reopened.close();
-  const migrated = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  assert.equal(migrated.schemaVersion, STORE_SCHEMA_VERSION);
-  assert.equal(migrated.modelProviders[0].validationStatus, "unverified");
-  assert.equal(migrated.modelProviders[0].awsRegion, null);
-  assert.equal(migrated.modelProviders[0].awsProfile, null);
-});
-
-test("v1 本地 Provider 的非法 credentialRef 迁移为 null 且不删除孤立密文证据", async () => {
-  for (const kind of ["ollama", "lmstudio"]) {
-    const paths = fixturePaths();
-    const first = openStore(paths, { now: () => 610 });
-    first.close();
-    const secretStore = new EncryptedSecretStore({
-      paths,
-      safeStorage: {
-        isEncryptionAvailable: () => true,
-        encryptString: (value) => Buffer.from(value, "utf8").reverse(),
-        decryptString: (value) => Buffer.from(value).reverse().toString("utf8"),
-      },
-    });
-    secretStore.open();
-    await secretStore.put(
-      `legacy-orphan-${kind}`,
-      `legacy-local-secret-${kind}-000001`,
-      { kind: "custom-responses" },
-    );
-    await secretStore.close();
-    const snapshot = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-    snapshot.schemaVersion = 1;
-    removeRuntimeAccountSchema(snapshot);
-    delete snapshot.runNotes;
-    delete snapshot.mcpToolCalls;
-    snapshot.modelProviders = [{
-      id: `legacy-${kind}`,
-      kind,
-      name: kind,
-      baseUrl: kind === "ollama" ? "http://127.0.0.1:11434/v1" : "http://127.0.0.1:1234/v1",
-      model: "fixture/model",
-      credentialRef: `legacy-orphan-${kind}`,
-      headers: null,
-      validationStatus: "valid",
-    }];
-    fs.writeFileSync(paths.stateSnapshotPath, encodeSnapshot(snapshot), { mode: 0o600 });
-
-    const reopened = openStore(paths);
-    assert.equal(reopened.getModelProvider(`legacy-${kind}`).credentialRef, null);
-    assert.equal(reopened.getModelProvider(`legacy-${kind}`).validationStatus, "unverified");
-    reopened.close();
-    assert.equal(fs.readFileSync(paths.stateSnapshotPath, "utf8").includes(`legacy-orphan-${kind}`), false);
-    secretStore.open();
-    assert.equal(
-      await secretStore.get(`legacy-orphan-${kind}`),
-      `legacy-local-secret-${kind}-000001`,
-    );
-    await secretStore.close();
-  }
-});
-
 test("AgentProfile.providerRef 必须存在，引用中的 Provider 不可删除", () => {
   const paths = fixturePaths();
   const store = openStore(paths);
@@ -403,70 +322,6 @@ test("AgentProfile.providerRef 必须存在，引用中的 Provider 不可删除
   store.putAgentProfile(validProfile("profile-linked", null));
   assert.equal(store.deleteModelProvider("provider-linked").id, "provider-linked");
   store.close();
-});
-
-test("旧 v1 snapshot 无 modelProviders 且引用为空时原样载入并在下次 snapshot 明确升级", () => {
-  const paths = fixturePaths();
-  const first = openStore(paths, { now: () => 200 });
-  first.close();
-  const current = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  current.schemaVersion = 1;
-  removeRuntimeAccountSchema(current);
-  delete current.modelProviders;
-  delete current.runNotes;
-  delete current.mcpToolCalls;
-  fs.writeFileSync(paths.stateSnapshotPath, encodeSnapshot(current), { mode: 0o600 });
-
-  const reopened = openStore(paths, { now: () => 201 });
-  assert.equal(reopened.listAgentProfiles().length, 1);
-  assert.deepEqual(reopened.listModelProviders(), []);
-  reopened.close();
-  const upgraded = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  assert.deepEqual(upgraded.modelProviders, []);
-  assert.equal(upgraded.checksum, snapshotChecksum(upgraded));
-});
-
-test("v2 snapshot 必须含 modelProviders，不能借 legacy shape 丢弃 lastSeq 前的 Provider", () => {
-  const paths = fixturePaths();
-  const store = openStore(paths, { now: () => 250 });
-  store.putModelProvider(validProvider("provider-must-survive"));
-  store.close();
-  const snapshot = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  assert.equal(snapshot.schemaVersion, STORE_SCHEMA_VERSION);
-  assert.equal(snapshot.lastSeq > 0, true);
-  snapshot.schemaVersion = 2;
-  removeRuntimeAccountSchema(snapshot);
-  delete snapshot.runNotes;
-  delete snapshot.mcpToolCalls;
-  delete snapshot.modelProviders;
-  const evidence = encodeSnapshot(snapshot);
-  fs.writeFileSync(paths.stateSnapshotPath, evidence, { mode: 0o600 });
-
-  assert.throws(
-    () => openStore(paths),
-    (error) => error.code === "STORE_CORRUPT_SNAPSHOT",
-  );
-  assert.equal(fs.readFileSync(paths.stateSnapshotPath, "utf8"), evidence);
-});
-
-test("旧 v1 snapshot 的悬空 providerRef 显式 fail closed，保留原始证据且不静默丢引用", () => {
-  const paths = fixturePaths();
-  const first = openStore(paths, { now: () => 300 });
-  first.close();
-  const legacy = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  legacy.schemaVersion = 1;
-  removeRuntimeAccountSchema(legacy);
-  delete legacy.modelProviders;
-  delete legacy.runNotes;
-  delete legacy.mcpToolCalls;
-  legacy.agentProfiles[0].providerRef = "legacy-provider-not-defined";
-  const evidence = encodeSnapshot(legacy);
-  fs.writeFileSync(paths.stateSnapshotPath, evidence, { mode: 0o600 });
-  assert.throws(
-    () => openStore(paths),
-    (error) => error.code === "STORE_LEGACY_PROVIDER_REFERENCE_UNRESOLVED",
-  );
-  assert.equal(fs.readFileSync(paths.stateSnapshotPath, "utf8"), evidence);
 });
 
 test("Provider 事件使用既有 checksum/seq/fsync 日志语义且 secret canary 不进入日志或 snapshot", () => {
@@ -536,27 +391,23 @@ test("event replay 在 Provider 删除发生当下就校验引用，不接受随
 test("event replay 在 AgentProfile put 当下要求 Provider 已存在", () => {
   const paths = fixturePaths();
   const store = openStore(paths, { now: () => 520 });
-  const profile = {
-    ...validProfile("profile-before-provider", "provider-after-profile"),
-    createdAt: 520,
-    updatedAt: 520,
-  };
-  const migrated = runtimeAccountForLegacyProfile(profile);
-  profile.runtimeAccountId = migrated.runtimeAccountId;
-  const runtimeAccount = { ...migrated.account, createdAt: 520, updatedAt: 520 };
+  store.putAgentProfile(validProfile("profile-before-provider")); store.close();
+  const snapshot = JSON.parse(fs.readFileSync(paths.stateSnapshotPath));
+  const profile = snapshot.agentProfiles.find(item => item.id === "profile-before-provider");
+  profile.providerRef = "provider-after-profile";
   const provider = validProvider("provider-after-profile");
   const events = [
     {
       schemaVersion: STORE_SCHEMA_VERSION,
-      seq: 2,
+      seq: snapshot.lastSeq + 1,
       aggregateId: profile.id,
       type: "agent_profile.put",
       time: 521,
-      payload: { profile, runtimeAccount },
+      payload: { profile },
     },
     {
       schemaVersion: STORE_SCHEMA_VERSION,
-      seq: 3,
+      seq: snapshot.lastSeq + 2,
       aggregateId: provider.id,
       type: "model_provider.put",
       time: 522,
@@ -571,7 +422,7 @@ test("event replay 在 AgentProfile put 当下要求 Provider 已存在", () => 
   );
 });
 
-test("credentialRef 在 put、snapshot migration 与逐事件 replay 中必须全 Store 唯一", () => {
+test("credentialRef 在当前 put、snapshot 与逐事件 replay 中必须全 Store 唯一", () => {
   const putPaths = fixturePaths();
   const putStore = openStore(putPaths);
   putStore.putModelProvider(validProvider("provider-owner-a", { credentialRef: "shared-ref" }));
@@ -584,15 +435,7 @@ test("credentialRef 在 put、snapshot migration 与逐事件 replay 中必须�
   const snapshotStore = openStore(snapshotPaths, { now: () => 530 });
   snapshotStore.close();
   const snapshot = JSON.parse(fs.readFileSync(snapshotPaths.stateSnapshotPath, "utf8"));
-  snapshot.schemaVersion = 1;
-  removeRuntimeAccountSchema(snapshot);
-  snapshot.modelProviders = ["a", "b"].map((suffix) => {
-    const provider = validProvider(`legacy-owner-${suffix}`, { credentialRef: "legacy-shared-ref" });
-    delete provider.awsRegion;
-    delete provider.awsProfile;
-    provider.validationStatus = "valid";
-    return provider;
-  });
+  snapshot.modelProviders = ["a", "b"].map(suffix => ({ ...validProvider(`snapshot-owner-${suffix}`, { credentialRef: "snapshot-shared-ref" }), revision: 1 }));
   fs.writeFileSync(snapshotPaths.stateSnapshotPath, encodeSnapshot(snapshot), { mode: 0o600 });
   assert.throws(
     () => openStore(snapshotPaths),

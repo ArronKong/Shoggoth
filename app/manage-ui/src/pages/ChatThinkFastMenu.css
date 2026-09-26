@@ -1,0 +1,167 @@
+.chat-think-fast-menu { position: relative; display: inline-flex; min-width: 0; }
+.chat-pill--think-fast { display: inline-flex; align-items: center; gap: 6px; border: 0; cursor: pointer; white-space: nowrap; }
+.chat-pill--think-fast:disabled { cursor: default; opacity: 0.45; }
+.chat-pill--think-fast:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+
+/* Figma 308:15287 / 309:16239 — exact Dev Mode values */
+.think-fast-menu {
+  z-index: 10020;
+  overflow: hidden;
+  box-sizing: border-box;
+  width: 288px;
+  height: 92px;
+  max-width: calc(100vw - 36px);
+  padding: 24px 22px;
+  border: 0;
+  border-radius: 16px;
+  color: var(--chat-text, #000);
+  --chat-text: #000;
+  --track: #d9d9d9;
+  --dot: #d9d9d9;
+  --thumb: #000;
+  background: rgba(255, 255, 255, .8);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .05);
+  font-weight: 300;
+}
+
+.think-fast-menu--dark {
+  --chat-text: #e8ebf0;
+  --track: rgba(255, 255, 255, .18);
+  --dot: rgba(255, 255, 255, .28);
+  --thumb: #fff;
+  background: rgba(28, 31, 38, .85);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  color: var(--chat-text);
+}
+
+.think-fast-menu__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 16px;
+  margin-bottom: 16px;
+}
+
+.think-fast-menu__level {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.think-fast-menu__brain {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--chat-text, currentColor);
+}
+
+/* 与 composer 脸面 .chat-pill 文案一致（ChatPage.css .chat-composer__bar .chat-pill） */
+.think-fast-menu__level-label {
+  color: var(--chat-text, #000);
+  font-family: var(--font-body, "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 16px;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.think-fast-menu__fast-btn {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--chat-text, currentColor);
+  cursor: pointer;
+}
+/* Figma 原版闪电 11×13 */
+.think-fast-menu__fast-btn svg { width: 11px; height: 13px; display: block; }
+.think-fast-menu__fast-btn:hover { opacity: .75; }
+.think-fast-menu__fast-btn.is-on { opacity: 1; }
+.think-fast-menu__fast-btn:disabled { cursor: default; opacity: 0.45; }
+.think-fast-menu__fast-btn:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+.think-fast-menu__effort { display: flex; flex-direction: column; }
+
+/* Figma Group 364: 240×12; track 240×2 #d9d9d9 r=2; dots 6×6; thumb 12×12 */
+.think-fast-menu__slider {
+  position: relative;
+  width: 240px;
+  height: 12px;
+  margin: 0 2px;
+  display: flex;
+  align-items: center;
+  touch-action: none;
+  cursor: pointer;
+  outline: none;
+}
+.think-fast-menu__slider:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+.think-fast-menu__track {
+  position: absolute;
+  left: 0; right: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--track);
+}
+/* Design keeps a uniform track — no progress fill. */
+.think-fast-menu__fill { display: none; }
+.think-fast-menu__dots {
+  position: absolute;
+  left: 0; right: 0;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+  align-items: center;
+}
+.think-fast-menu__dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dot);
+  display: block;
+}
+.think-fast-menu__dots i.is-lit {
+  background: var(--dot);
+}
+.think-fast-menu__thumb {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--thumb);
+  pointer-events: none;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Face: Fast on → swap brain CSS icon for Figma 原版闪电（309:16240，11×13 slot 在 15px 对齐） */
+.chat-composer__bar .chat-pill--think.chat-pill--think-fast.is-fast {
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='11' height='13' viewBox='0 0 11 13' fill='none'><path d='M0.760102 7.60791C0.849112 7.66825 0.952147 7.70008 1.05724 7.6997H4.94465C5.03448 7.69938 5.12304 7.72261 5.20274 7.76738C5.28243 7.81216 5.35088 7.87715 5.40221 7.95677C5.45354 8.0364 5.48622 8.12829 5.49745 8.22456C5.50868 8.32082 5.49812 8.4186 5.46668 8.50949L4.40042 12.1205C4.38371 12.1861 4.38815 12.2559 4.413 12.3184C4.43785 12.3809 4.48164 12.4325 4.53718 12.4646C4.59272 12.4966 4.65671 12.5074 4.71864 12.495C4.78057 12.4826 4.83677 12.4479 4.87801 12.3965L10.3759 6.27807C10.4421 6.18991 10.4838 6.08328 10.4962 5.97055C10.5085 5.85782 10.491 5.74363 10.4456 5.64124C10.4002 5.53885 10.3289 5.45246 10.2399 5.39211C10.1509 5.33176 10.0479 5.29993 9.94276 5.30032H6.05534C5.96551 5.30064 5.87695 5.27741 5.79726 5.23264C5.71757 5.18786 5.64912 5.12287 5.59779 5.04324C5.54646 4.96362 5.51378 4.87173 5.50255 4.77546C5.49132 4.6792 5.50188 4.58142 5.53332 4.49053L6.59958 0.879473C6.61629 0.813879 6.61185 0.744099 6.587 0.681589C6.56214 0.619078 6.51836 0.567551 6.46282 0.535465C6.40728 0.503378 6.34329 0.492639 6.28136 0.50501C6.21943 0.517381 6.16323 0.552127 6.12199 0.603544L0.624068 6.72195C0.55786 6.8101 0.516168 6.91674 0.503836 7.02947C0.491504 7.14219 0.509038 7.25639 0.5544 7.35878C0.599763 7.46117 0.671093 7.54756 0.760102 7.60791Z' stroke='black' stroke-linecap='round'/></svg>"),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238993a3' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-size: 11px 13px, 0;
+  background-position: left 11px center, right 10px center;
+}
+:root[data-theme="dark"] .chat-composer__bar .chat-pill--think.chat-pill--think-fast.is-fast {
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='11' height='13' viewBox='0 0 11 13' fill='none'><path d='M0.760102 7.60791C0.849112 7.66825 0.952147 7.70008 1.05724 7.6997H4.94465C5.03448 7.69938 5.12304 7.72261 5.20274 7.76738C5.28243 7.81216 5.35088 7.87715 5.40221 7.95677C5.45354 8.0364 5.48622 8.12829 5.49745 8.22456C5.50868 8.32082 5.49812 8.4186 5.46668 8.50949L4.40042 12.1205C4.38371 12.1861 4.38815 12.2559 4.413 12.3184C4.43785 12.3809 4.48164 12.4325 4.53718 12.4646C4.59272 12.4966 4.65671 12.5074 4.71864 12.495C4.78057 12.4826 4.83677 12.4479 4.87801 12.3965L10.3759 6.27807C10.4421 6.18991 10.4838 6.08328 10.4962 5.97055C10.5085 5.85782 10.491 5.74363 10.4456 5.64124C10.4002 5.53885 10.3289 5.45246 10.2399 5.39211C10.1509 5.33176 10.0479 5.29993 9.94276 5.30032H6.05534C5.96551 5.30064 5.87695 5.27741 5.79726 5.23264C5.71757 5.18786 5.64912 5.12287 5.59779 5.04324C5.54646 4.96362 5.51378 4.87173 5.50255 4.77546C5.49132 4.6792 5.50188 4.58142 5.53332 4.49053L6.59958 0.879473C6.61629 0.813879 6.61185 0.744099 6.587 0.681589C6.56214 0.619078 6.51836 0.567551 6.46282 0.535465C6.40728 0.503378 6.34329 0.492639 6.28136 0.50501C6.21943 0.517381 6.16323 0.552127 6.12199 0.603544L0.624068 6.72195C0.55786 6.8101 0.516168 6.91674 0.503836 7.02947C0.491504 7.14219 0.509038 7.25639 0.5544 7.35878C0.599763 7.46117 0.671093 7.54756 0.760102 7.60791Z' stroke='%23e4e6eb' stroke-linecap='round'/></svg>"),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238993a3' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}

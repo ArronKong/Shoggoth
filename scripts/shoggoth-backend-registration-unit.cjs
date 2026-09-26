@@ -79,134 +79,54 @@ test("Shoggoth backend exposes the registry adapter contract", () => {
   assert.equal(backend.claimsAgentId("hermes-default"), false);
 });
 
-test("registry exposes fixed descriptors for external and peer native backends", () => {
+test("registry exposes external backends and one native Shoggoth authority", () => {
   const registry = new BackendRegistry();
-  const peerIds = new Set([
-    "shoggoth-codex", "shoggoth-grok", "shoggoth-antigravity", "shoggoth-pi",
-    "shoggoth-claude-code", "shoggoth-deepseek-harness",
-  ]);
   registry.register(new OpenClawBackend());
   registry.register(new HermesBackend());
-  registry.register(nativeFacade({
-    id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service",
-    claimsAgentId: (agentId) => typeof agentId === "string"
-      && agentId.startsWith("shoggoth-") && !peerIds.has(agentId),
-  }));
-  registry.register(nativeFacade({
-    id: "codex", name: "Codex", connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-codex"
-      || (typeof agentId === "string" && agentId.startsWith("codex-")),
-  }));
-  registry.register(nativeFacade({
-    id: "grok-build", name: "Grok", connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-grok"
-      || (typeof agentId === "string" && agentId.startsWith("grok-")),
-  }));
-  registry.register(nativeFacade({
-    id: "antigravity", name: "Antigravity", connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-antigravity"
-      || (typeof agentId === "string" && agentId.startsWith("antigravity-")),
-  }));
-  registry.register(nativeFacade({
-    id: "pi", name: "Pi", connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-pi"
-      || (typeof agentId === "string" && agentId.startsWith("pi-")),
-  }));
-  registry.register(nativeFacade({
-    id: "claude-code", name: "Claude Code", connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-claude-code"
-      || (typeof agentId === "string" && agentId.startsWith("claude-code-")),
-  }));
-  registry.register(nativeFacade({
-    id: "deepseek-harness", name: "DeepSeek Harness", connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-deepseek-harness"
-      || (typeof agentId === "string" && agentId.startsWith("deepseek-harness-")),
-  }));
-
+  registry.register(nativeFacade({ id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service" }));
   const descriptors = registry.listBackendDescriptors();
   assert.deepEqual(descriptors.map(({ id, name, connectionMode, disconnectable }) => ({
     id, name, connectionMode, disconnectable,
   })), [
     { id: "openclaw", name: "OpenClaw", connectionMode: "gateway", disconnectable: true },
     { id: "hermes", name: "Hermes", connectionMode: "managed-service", disconnectable: true },
-    { id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service", disconnectable: true },
-    { id: "codex", name: "Codex", connectionMode: "native-runtime", disconnectable: true },
-    { id: "grok-build", name: "Grok", connectionMode: "native-runtime", disconnectable: true },
-    { id: "antigravity", name: "Antigravity", connectionMode: "native-runtime", disconnectable: true },
-    { id: "pi", name: "Pi", connectionMode: "native-runtime", disconnectable: true },
-    { id: "claude-code", name: "Claude Code", connectionMode: "native-runtime", disconnectable: true },
-    { id: "deepseek-harness", name: "DeepSeek Harness", connectionMode: "native-runtime", disconnectable: true },
+    { id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service", disconnectable: false },
   ]);
-  assert.deepEqual(descriptors.find(({ id }) => id === "codex").surfaces, {
+  assert.deepEqual(descriptors.find(({ id }) => id === "shoggoth").surfaces, {
     chat: true, agents: true, models: true, skills: true, usage: true, oauth: true,
-    dashboardRuns: true, agentHarness: true,
+    dashboardRuns: true, agentHarness: true, nativeCapacity: true, runtimeBindings: true,
+    runtimeStatus: true, sessionRuntimeSwitch: true, runtimeUsage: true,
     cron: { kind: "native" }, kanban: { kind: "native" },
   });
-  assert.deepEqual(descriptors.find(({ id }) => id === "codex").agentLifecycle, {
+  assert.deepEqual(descriptors.find(({ id }) => id === "shoggoth").agentLifecycle, {
     create: true, update: true, remove: false, archive: true, restore: true, readStates: true,
   });
   for (const remaining of descriptors) {
     registry.setDisabledBackendsProvider(() => descriptors.filter(({ id }) => id !== remaining.id).map(({ id }) => id));
-    assert.deepEqual(registry._activeBackends().map(({ id }) => id), [remaining.id]);
+    assert.deepEqual(registry._activeBackends().map(({ id }) => id), descriptors
+      .filter(descriptor => descriptor.id === remaining.id || descriptor.disconnectable === false).map(({ id }) => id));
     for (const { id } of descriptors) {
-      assert.equal(registry.getBackend(id)?.id || null, id === remaining.id ? id : null);
+      assert.equal(registry.getBackend(id)?.id || null, id === remaining.id || id === "shoggoth" ? id : null);
     }
   }
 });
 
-test("peer native facade agent namespaces are mutually exclusive", () => {
-  const peerIds = new Set([
-    "shoggoth-codex", "shoggoth-grok", "shoggoth-antigravity", "shoggoth-pi",
-    "shoggoth-claude-code", "shoggoth-deepseek-harness",
-  ]);
-  const backends = [
-    nativeFacade({
-      id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service",
-      claimsAgentId: (agentId) => typeof agentId === "string"
-        && agentId.startsWith("shoggoth-") && !peerIds.has(agentId),
-    }),
-    nativeFacade({
-      id: "codex", name: "Codex", connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-codex"
-        || (typeof agentId === "string" && agentId.startsWith("codex-")),
-    }),
-    nativeFacade({
-      id: "grok-build", name: "Grok", connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-grok"
-        || (typeof agentId === "string" && agentId.startsWith("grok-")),
-    }),
-    nativeFacade({
-      id: "antigravity", name: "Antigravity", connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-antigravity"
-        || (typeof agentId === "string" && agentId.startsWith("antigravity-")),
-    }),
-    nativeFacade({
-      id: "pi", name: "Pi", connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-pi"
-        || (typeof agentId === "string" && agentId.startsWith("pi-")),
-    }),
-    nativeFacade({
-      id: "claude-code", name: "Claude Code", connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-claude-code"
-        || (typeof agentId === "string" && agentId.startsWith("claude-code-")),
-    }),
-    nativeFacade({
-      id: "deepseek-harness", name: "DeepSeek Harness", connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-deepseek-harness"
-        || (typeof agentId === "string" && agentId.startsWith("deepseek-harness-")),
-    }),
-  ];
+test("native Runtime namespaces resolve to Shoggoth and cannot become peer backend authorities", () => {
+  const backend = nativeFacade({ id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service" });
   for (const agentId of [
     "shoggoth-default", "shoggoth-codex", "shoggoth-grok", "shoggoth-antigravity",
     "shoggoth-pi", "shoggoth-claude-code", "shoggoth-deepseek-harness",
-    "codex-11111111-1111-8111-8111-111111111111",
-    "grok-22222222-2222-8222-8222-222222222222",
-    "antigravity-33333333-3333-8333-8333-333333333333",
-    "pi-44444444-4444-8444-8444-444444444444",
-    "claude-code-55555555-5555-8555-8555-555555555555",
-    "deepseek-harness-66666666-6666-8666-8666-666666666666",
+  ]) assert.equal(backend.claimsAgentId(agentId), true, agentId);
+  for (const agentId of ["hermes-default", "openclaw-main", null, 1, "",
+    "codex-11111111-1111-8111-8111-111111111111", "grok-22222222-2222-8222-8222-222222222222",
+    "antigravity-33333333-3333-8333-3333-333333333333", "pi-44444444-4444-8444-4444-444444444444",
+    "claude-code-55555555-5555-8555-8555-555555555555", "deepseek-harness-66666666-6666-8666-8666-666666666666",
   ]) {
-    assert.equal(backends.filter((backend) => backend.claimsAgentId(agentId)).length, 1, agentId);
+    assert.equal(backend.claimsAgentId(agentId), false);
+  }
+  for (const id of ["codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]) {
+    assert.throws(() => nativeFacade({ id, name: id, connectionMode: "native-runtime" }), TypeError,
+      "Runtime identity must not manufacture another native backend");
   }
 });
 
@@ -227,49 +147,14 @@ test("async resource owner resolution requires exactly one authoritative claiman
   assert.equal(await registry.resolveResourceOwner("kanban", "ambiguous"), null);
 });
 
-test("Electron composition root registers all native facades over one Service host", () => {
+test("Electron composition root registers one native facade over one Service host", () => {
   const source = fs.readFileSync(UI_ENTRY, "utf8");
-  assert.match(
-    source,
-    /const\s*\{\s*ShoggothBackend\s*\}\s*=\s*require\("\.\/core\/shoggoth-backend"\)/,
-  );
-  assert.match(
-    source,
-    /const\s*\{\s*resolveServicePaths\s*\}\s*=\s*require\("\.\/agent-service\/paths"\)/,
-  );
-  assert.match(
-    source,
-    /const\s+shoggothServicePaths\s*=\s*resolveServicePaths\(\{[\s\S]*?homeDir:\s*os\.homedir\(\)[\s\S]*?userDataRoot:\s*app\.getPath\("userData"\)[\s\S]*?\}\)/,
-  );
-  assert.match(
-    source,
-    /const\s+nativeBackendOptions\s*=\s*\{[\s\S]*?paths:\s*shoggothServicePaths,[\s\S]*?runtimeCliAuth,[\s\S]*?\};/,
-  );
-  for (const [variable, id, name, mode] of [
-    ["shoggothBackend", "shoggoth", "Shoggoth", "builtin-service"],
-    ["codexBackend", "codex", "Codex", "native-runtime"],
-    ["grokBackend", "grok-build", "Grok", "native-runtime"],
-    ["antigravityBackend", "antigravity", "Antigravity", "native-runtime"],
-    ["piBackend", "pi", "Pi", "native-runtime"],
-    ["claudeCodeBackend", "claude-code", "Claude Code", "native-runtime"],
-    ["deepSeekHarnessBackend", "deepseek-harness", "DeepSeek Harness", "native-runtime"],
-  ]) {
-    assert.match(source, new RegExp(
-      `const\\s+${variable}\\s*=\\s*new\\s+ShoggothBackend\\(\\{[\\s\\S]*?id:\\s*"${id}"[\\s\\S]*?name:\\s*"${name}"[\\s\\S]*?connectionMode:\\s*"${mode}"[\\s\\S]*?\\}\\);`,
-    ));
-    assert.match(source, new RegExp(`registry\\.register\\(${variable}\\)`));
-  }
-  assert.match(source, /const\s+nativeBackends\s*=\s*\[\s*shoggothBackend,\s*codexBackend,\s*grokBackend,\s*antigravityBackend,\s*piBackend,\s*claudeCodeBackend,\s*deepSeekHarnessBackend,?\s*\]/);
-  assert.match(source, /Promise\.all\(nativeBackends\.map\(\(backend\)\s*=>\s*backend\.stop\(\)\)\)/);
-  assert.match(source, /nativeBackends\.filter\(\(backend\) => !disabled\.has\(backend\.id\)\)/);
-  assert.match(source, /backend\.getBackendDescriptor\(\)\?\.disconnectable\s*===\s*true/);
-  assert.match(source, /if\s*\(!disconnectable\)\s*continue/);
-  const registerAt = source.indexOf("registry.register(deepSeekHarnessBackend)");
-  const disabledProviderAt = source.indexOf("registry.setDisabledBackendsProvider");
-  assert.ok(registerAt >= 0, "all native facades must be registered");
-  assert.ok(disabledProviderAt > registerAt, "native facades must use the generic disabledBackends provider");
+  assert.equal((source.match(/new ShoggothBackend\(/g) || []).length, 1);
+  assert.match(source, /registry\.register\(shoggothBackend\)/);
+  assert.match(source, /const nativeBackends = \[shoggothBackend\]/);
+  assert.match(source, /registry\.setDisabledBackendsProvider/);
   assert.equal((source.match(/createLaunchAgentController\s*\(/g) || []).length, 1);
-  assert.doesNotMatch(source, /(?:shoggoth|codex|grok|antigravity|pi|claudeCode|deepSeekHarness)Backend\.(?:stopService|shutdownService|terminateService)\s*\(/);
+  assert.doesNotMatch(source, /shoggothBackend\.(?:stopService|shutdownService|terminateService)\s*\(/);
 });
 
 test("Electron startup fails closed when the federating proxy cannot bind", () => {

@@ -4,7 +4,6 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const {
-  LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
   internalCodexHomePaths,
   resolveNativeHome,
   runtimeAccountIntegrationRoot,
@@ -17,6 +16,7 @@ const {
   NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
   NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
   NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
+  NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID,
   NATIVE_PI_RUNTIME_ACCOUNT_ID,
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
 } = require("./agent-service/runtime-account");
@@ -28,6 +28,7 @@ const { resolveGrokBuildBinary } = require("./agent-service/grok-build-runtime-p
 const { resolveAntigravityBinary } = require("./agent-service/antigravity-runtime-paths");
 const { resolvePiBinary } = require("./agent-service/pi-runtime-paths");
 const { resolveClaudeCodeBinary } = require("./agent-service/claude-code-runtime-paths");
+const { resolveOpenCodeBinary } = require("./agent-service/opencode-runtime-paths");
 const { resolveDeepSeekHarnessBinary } = require("./agent-service/deepseek-harness-runtime-paths");
 
 const ACCOUNT_BY_ID = new Map(DEFAULT_RUNTIME_ACCOUNTS.map((account) => [account.id, account]));
@@ -37,6 +38,7 @@ const NATIVE_HOME_SEGMENTS = Object.freeze({
   antigravity: Object.freeze([".gemini"]),
   pi: Object.freeze([".pi", "agent"]),
   "claude-code": Object.freeze([".claude"]),
+  opencode: Object.freeze([".local", "share"]),
   "deepseek-harness": Object.freeze([".dsh"]),
 });
 const AUTH_SPECS = Object.freeze([
@@ -103,8 +105,18 @@ const AUTH_SPECS = Object.freeze([
     docsUrl: "https://code.claude.com/docs/en/authentication",
   }),
   Object.freeze({
+    runtimeAccountId: NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID,
+    name: "OpenCode",
+    homeEnv: "XDG_DATA_HOME",
+    credentialFile: null,
+    credentialProbe: "runtime",
+    loginArgs: Object.freeze(["auth", "login"]),
+    logoutArgs: Object.freeze([]),
+    docsUrl: "https://opencode.ai/docs/providers/",
+  }),
+  Object.freeze({
     runtimeAccountId: NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
-    name: "DeepSeek Harness",
+    name: "DeepSeek",
     homeEnv: "DSH_HOME",
     credentialFile: null,
     credentialProbe: "runtime",
@@ -128,26 +140,11 @@ function directoryState(fileSystem, target) {
 }
 
 function resolveManagedCodexHome(paths, fileSystem) {
-  const legacyHome = path.join(
-    paths.stateDir,
-    "codex",
-    LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
-  );
-  const accountHome = path.join(
-    paths.runtimeAccountsDir,
-    "codex",
-    SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
-    "home",
-  );
-  const legacy = directoryState(fileSystem, legacyHome);
+  const [accountHome] = internalCodexHomePaths(paths);
   const account = directoryState(fileSystem, accountHome);
-  const unsafe = legacy.state === "unsafe" || account.state === "unsafe";
-  const conflict = legacy.state === "safe" && account.state === "safe";
   return {
-    home: legacy.state === "safe" ? legacy.path
-      : account.state === "safe" ? account.path : accountHome,
-    error: unsafe ? "Internal Codex Home is invalid or unsafe"
-      : conflict ? "Both legacy and account-scoped internal Codex Homes exist" : null,
+    home: account.state === "safe" ? account.path : accountHome,
+    error: account.state === "unsafe" ? "Internal Codex Home is invalid or unsafe" : null,
   };
 }
 
@@ -223,7 +220,7 @@ function authorityConflictReason(account, options) {
       account.id,
     );
     return runtimePathsOverlap(nativeHome, integrationRoot)
-      ? `Native ${account.runtime === "antigravity" ? "Antigravity" : "DeepSeek Harness"} Home overlaps its Shoggoth integration Home`
+      ? `Native ${account.runtime === "antigravity" ? "Antigravity" : "DeepSeek"} Home overlaps its Shoggoth integration Home`
       : null;
   }
   return null;
@@ -258,6 +255,7 @@ function createRuntimeCliAuth(options = {}) {
       antigravity: resolveAntigravityBinary,
       pi: resolvePiBinary,
       "claude-code": resolveClaudeCodeBinary,
+      opencode: resolveOpenCodeBinary,
       "deepseek-harness": resolveDeepSeekHarnessBinary,
       ...(options.binaryResolvers || {}),
     },

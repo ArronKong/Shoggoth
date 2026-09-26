@@ -51,8 +51,8 @@ class InspirationRuntime {
   }
   async turnInterrupt() { this.interrupts += 1; return {}; }
   complete(run, text = "已整理出第一版方案。") {
-    const thread = this.threads.find((item) => item.id === run.codexThreadId);
-    const turn = thread.turns.find((item) => item.id === run.codexTurnId);
+    const thread = this.threads.find((item) => item.id === run.runtimeSessionRef?.sessionId);
+    const turn = thread.turns.find((item) => item.id === run.runtimeTurnRef?.turnId);
     turn.status = "completed";
     turn.items.push({ type: "agentMessage", phase: "final_answer", delivery: "sync", text });
     this.emit({ known: true, type: "text", method: "item/completed", threadId: thread.id,
@@ -61,8 +61,8 @@ class InspirationRuntime {
       turnId: turn.id, status: "completed" });
   }
   ask(run, question = "主要给谁使用？") {
-    return this.request("mcpServer/elicitation/request", { threadId: run.codexThreadId,
-      turnId: run.codexTurnId, serverName: "inspiration-fixture", message: question,
+    return this.request("mcpServer/elicitation/request", { threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId, serverName: "inspiration-fixture", message: question,
       requestedSchema: { type: "object", properties: {
         audience: { type: "string", title: "使用对象", enum: ["family", "friends"],
           oneOf: [{ const: "family", title: "家人", description: "日常一起使用" },
@@ -70,8 +70,8 @@ class InspirationRuntime {
       }, required: ["audience"] } });
   }
   approve(run) {
-    return this.request("item/commandExecution/requestApproval", { threadId: run.codexThreadId,
-      turnId: run.codexTurnId, itemId: "approval-command", command: "mkdir -p coffee-notes",
+    return this.request("item/commandExecution/requestApproval", { threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId, itemId: "approval-command", command: "mkdir -p coffee-notes",
       cwd: run.workspace, reason: "创建咖啡记录目录" });
   }
 }

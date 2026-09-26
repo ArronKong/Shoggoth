@@ -969,6 +969,7 @@ export interface UsageTopSession {
   updatedAt?: number;
 }
 export interface UsageBreakdown {
+  runtimes?: Array<UsageTokenParts & { runtime: string | null; runtimeAccountId: string | null; totalTokens: number; totalCost: number }>;
   availability?: "complete" | "partial" | "unavailable";
   availabilityReason?: "unsupported-range";
   byModel: UsageModelRank[];
@@ -1000,6 +1001,7 @@ export interface UnifiedSkill {
   id?: string;
   version?: string;
   source?: "builtin" | "user";
+  globalEnabled?: boolean;
   contentHash?: string;
   requiredTools?: string[];
   requiredRuntimeCapabilities?: string[];
@@ -1262,6 +1264,7 @@ export interface TaskComment {
   createdAt?: string | number;
 }
 export interface TaskRun {
+  sessionKey?: string;
   id?: string;
   status?: string;
   outcome?: string;
@@ -2046,6 +2049,8 @@ export interface NotificationPrefs {
   task: boolean; // Kanban tasks and Inspiration
 }
 export interface AppConfig {
+  nativeConcurrency?: NativeConcurrencyConfig;
+  runtimeFrameworkFlags?: RuntimeFrameworkFlags;
   gatewayUrl: string;
   token: string;
   locale: string;
@@ -2060,6 +2065,75 @@ export interface AppConfig {
   // 首启引导完成/跳过的时间戳（epoch ms）；0 = 从未。SetupOverlay 仅在
   // setupCompletedAt===0 且 token==="" 时自动出现一次。
   setupCompletedAt: number;
+}
+export interface RuntimeContextUsage {
+  runtimeSessionId: string;
+  usedTokens: number | null;
+  contextWindow: number | null;
+  quality: "exact" | "estimated" | "unknown";
+  source: "runtime_event" | "session_stats" | "estimate";
+  observedAt: number;
+}
+export interface ProductContextState {
+  automatic: "enabled" | "unavailable" | "disabled";
+  reason: "NO_TOOL_FREE_BINDING" | "FEATURE_DISABLED" | null;
+  summaryBindingId: string | null;
+  summaryRuntime: string | null;
+  summaryModel: string | null;
+  checkpointId: string | null;
+  coveredThroughSeq: number;
+  pendingRunId: string | null;
+  lastError: string | null;
+  measurement: "live" | "restored" | "missing" | "stale" | "unsupported";
+  nativeAuto: "enabled" | "disabled" | "unknown";
+  transfer: {
+    state: "preparing" | "ready" | "accepted" | "unknown" | "failed";
+    targetBindingId: string;
+    model: string | null;
+    sourceRevision: number;
+    sourceSessionRevision: number;
+    snapshotId: string | null;
+    mode: "original" | "summary" | "partial" | "transport_summary";
+    errorCode: string | null;
+    updatedAt: number;
+  } | null;
+  budget: {
+    tokens: number;
+    source: "runtime" | "catalog" | "last_observed" | "model_spec" | "fallback";
+    triggerTokens: number;
+    retainedTokens: number;
+  };
+}
+
+export interface RuntimeContextCapabilities {
+  "context.usage.exact": boolean;
+  "context.usage.estimated": boolean;
+  "context.compact.native": boolean;
+  "context.compact.auto": boolean;
+}
+
+export interface RuntimeFrameworkFlags {
+  runtimeAdmissionV1: boolean;
+  runtimeContextLifecycleV1: boolean;
+  runtimeMultiBinding: boolean;
+  runtimeConversationHandoff: boolean;
+}
+export interface NativeConcurrencyConfig {
+  maxActive: number;
+  startupConcurrency: number;
+  revision: number;
+}
+export interface NativeCapacitySnapshot extends NativeConcurrencyConfig {
+  enabled: boolean;
+  active: number;
+  queued: number;
+  byReason: Array<{ reason: string; count: number }>;
+}
+export interface NativeCapacityUpdate {
+  expectedRevision: number;
+  maxActive: number;
+  startupConcurrency: number;
+  enabled: boolean;
 }
 export interface ConnTestResult {
   ok: boolean;
@@ -2079,6 +2153,7 @@ export type BackendCronKind = "openclaw" | "hermes" | "native";
 export type BackendKanbanKind = "workboard" | "hermes" | "native";
 
 export interface BackendDescriptor {
+  aliases?: readonly string[];
   id: string;
   name: string;
   connectionMode: BackendConnectionMode;
@@ -2100,9 +2175,25 @@ export interface BackendDescriptor {
     oauth: boolean;
     dashboardRuns: boolean;
     agentHarness: boolean;
+    nativeCapacity?: boolean;
+    runtimeBindings?: boolean;
+    runtimeStatus?: boolean;
+    sessionRuntimeSwitch?: boolean;
+    runtimeUsage?: boolean;
     cron: null | { kind: BackendCronKind };
     kanban: null | { kind: BackendKanbanKind };
   };
+}
+
+export interface RuntimeStatus {
+  backendId: string;
+  runtime: string;
+  name: string;
+  runtimeAccountId: string;
+  enabled: boolean;
+  releaseEnabled: boolean;
+  installation: "available" | "unavailable" | "unknown";
+  serviceConnected: boolean;
 }
 
 export interface BackendStatus {
@@ -2395,7 +2486,7 @@ export interface ShoggothStopImpact {
   totalCount: number | null;
   runs: Array<{
     runId: string;
-    source: "chat" | "kanban" | "cron" | "inspiration";
+    source: "chat" | "kanban" | "cron" | "inspiration" | "compaction";
     status: "starting" | "running" | "waiting_approval" | "waiting_input";
     agentName: string | null;
     title: string | null;
@@ -2412,7 +2503,7 @@ export interface RuntimeAccountAdmissionSummary {
 
 export interface RuntimeAccountStorage {
   runtimeAccountId: string;
-  scope: "native-system" | "managed-account" | "managed-legacy";
+  scope: "native-system" | "managed-account";
   available: boolean;
   bytes: number;
   files: number;
@@ -2420,45 +2511,6 @@ export interface RuntimeAccountStorage {
   symlinks: number;
   incomplete: boolean;
   limitReason: "bytes" | "depth" | "duration" | "entries" | null;
-}
-
-/** Renderer-safe legacy Home projection. Filesystem paths and Profile IDs never cross this boundary. */
-export interface LegacyRuntimeHomeSummary {
-  id: string;
-  runtime: string;
-  runtimeAccountId: string;
-  accountKind: "native-user" | "shoggoth-managed";
-  role: "canonical" | "reclaimable";
-  affectedAgentCount: number;
-  bytes: number;
-  files: number;
-  dirs: number;
-  symlinks: number;
-  incomplete: boolean;
-  lastModifiedAt: number;
-}
-
-export type RuntimeBackupCategory =
-  | "native-runtime-import"
-  | "runtime-schema-history"
-  | "runtime-schema-current"
-  | "native-capabilities"
-  | "memory-migration"
-  | "permission-policy"
-  | "staging"
-  | "unknown";
-
-/** Renderer-safe backup projection. Backup names and filesystem paths stay inside the Service. */
-export interface RuntimeBackupSummary {
-  id: string;
-  category: RuntimeBackupCategory;
-  role: "retained" | "reclaimable";
-  bytes: number;
-  files: number;
-  dirs: number;
-  symlinks: number;
-  incomplete: boolean;
-  lastModifiedAt: number;
 }
 
 export interface RuntimeAccountSummary {
@@ -2472,22 +2524,66 @@ export interface RuntimeAccountSummary {
   admission: RuntimeAccountAdmissionSummary;
 }
 
+export interface AgentRuntimeBinding {
+  id: string;
+  profileId: string;
+  runtime: string;
+  runtimeProfileId: string;
+  runtimeAccountId: string;
+  label: string | null;
+  enabled: boolean;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface AgentRuntimeBindingsSnapshot {
+  checkpointBindingIds?: string[];
+  bindings: AgentRuntimeBinding[];
+  defaultBindingId: string;
+  revision: number;
+  canAdd: boolean;
+  availability?: Array<{ bindingId: string; available: boolean; reason: "runtime-unavailable" | "runtime-disabled" | null }>;
+}
+export type AgentRuntimeBindingSpec = Pick<AgentRuntimeBinding, "runtime" | "runtimeAccountId">
+  & Partial<Pick<AgentRuntimeBinding, "label" | "enabled">>;
+export type AgentRuntimeBindingPatch = Partial<Pick<AgentRuntimeBinding, "label" | "enabled" | "runtimeAccountId">>;
+export interface AgentRuntimeBindingMutation extends AgentRuntimeBindingsSnapshot { binding: AgentRuntimeBinding | null }
+export interface SessionRuntimeSnapshot {
+  sessionKey: string;
+  revision: number;
+  bindingId: string;
+  runtime: string;
+  model: string | null;
+  contextUsage: RuntimeContextUsage | null;
+  candidates: Array<{ bindingId: string; support: { supported: true } | { supported: false; code: string };
+    adjustments: { clearModelOverride: boolean; permissionMode: string | null } }>;
+  canSwitch: boolean;
+}
+
+export interface SessionRuntimeModel extends UnifiedModel {
+  bindingId: string;
+  runtime: string;
+  runtimeName: string;
+  isDefault: boolean;
+}
+export interface SessionRuntimeModels {
+  selection: SessionRuntimeSnapshot;
+  models: SessionRuntimeModel[];
+  runtimes: Array<{ runtime: string; name: string; available: boolean; capabilities: ChatCapabilities }>;
+  capabilities: ChatCapabilities;
+}
+
 export interface RuntimeAccountCardSnapshot extends RuntimeAccountSummary {
   storage: RuntimeAccountStorage;
-  legacyHomes: LegacyRuntimeHomeSummary[];
 }
 
 export interface RuntimeAccountSnapshot {
   accounts: RuntimeAccountCardSnapshot[];
-  backups: RuntimeBackupSummary[];
-  legacyReclaimableBytes: number;
-  backupReclaimableBytes: number;
 }
 
 export interface RuntimeAccountDetail {
   account: RuntimeAccountSummary;
   storage: RuntimeAccountStorage;
-  legacyHomes: LegacyRuntimeHomeSummary[];
 }
 
 export interface RuntimeAccountAuth {
@@ -2505,51 +2601,6 @@ export interface RuntimeAccountAuth {
     updatedAt: number;
     errorCode: string | null;
   };
-}
-
-export interface LegacyRuntimeHomeCleanupPlan {
-  planId: string;
-  entryId: string;
-  runtime: string;
-  runtimeAccountId: string;
-  affectedAgentCount: number;
-  bytes: number;
-  files: number;
-  dirs: number;
-  symlinks: number;
-  expiresAt: number;
-}
-
-export interface LegacyRuntimeHomeCleanupResult {
-  entryId: string;
-  runtime: string;
-  runtimeAccountId: string;
-  bytesReleased: number;
-  filesRemoved: number;
-  dirsRemoved: number;
-  symlinksRemoved: number;
-  deletedAt: number;
-}
-
-export interface RuntimeBackupCleanupPlan {
-  planId: string;
-  entryId: string;
-  category: RuntimeBackupCategory;
-  bytes: number;
-  files: number;
-  dirs: number;
-  symlinks: number;
-  expiresAt: number;
-}
-
-export interface RuntimeBackupCleanupResult {
-  entryId: string;
-  category: RuntimeBackupCategory;
-  bytesReleased: number;
-  filesRemoved: number;
-  dirsRemoved: number;
-  symlinksRemoved: number;
-  deletedAt: number;
 }
 
 /** Renderer-safe provider projection; storage references and request headers never cross this boundary. */
@@ -2824,4 +2875,14 @@ export interface InspirationGrowthResult {
 export interface InspirationStartInput {
   operationId: string; expectedRevision: number; agentId: string; backendId: string;
   instruction: string; workspace: string | null;
+}
+export interface RuntimeSelectionPolicy {
+  version: 1;
+  revision: number;
+  mode: "fixed" | "preferred" | "auto";
+  allowedBindingIds: string[];
+  preferredBindingIds: string[];
+  affinity: boolean;
+  weights: Record<string, number>;
+  compactionBindingId: string | null;
 }

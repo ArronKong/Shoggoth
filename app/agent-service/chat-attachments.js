@@ -111,7 +111,10 @@ function prepareChatAttachments(media, attachments, sessionKey) {
     const file = path.join(media.paths.stateDir, "chat-attachments", sessionKey,
       attachment.id, attachmentName(attachment.name));
     const data = readPrivateFile(source, { maxBytes: MAX_VIDEO_BYTES });
-    atomicWritePrivateFile(file, data, { trustedRoot: media.paths.trustedRoot });
+    let existing;
+    try { existing = readPrivateFile(file, { maxBytes: MAX_VIDEO_BYTES }); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (!existing?.equals(data)) atomicWritePrivateFile(file, data, { trustedRoot: media.paths.trustedRoot });
     return { ...attachment, path: file };
   });
 }

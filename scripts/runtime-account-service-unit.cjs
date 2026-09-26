@@ -12,10 +12,6 @@ const {
   validateRuntimeAccountServiceParams,
   validateRuntimeAccountServiceResult,
 } = require("../app/agent-service/runtime-account-service-protocol");
-const { LegacyRuntimeHomeStore } = require("../app/agent-service/legacy-runtime-home-store");
-const { RuntimeStorageCleanup } = require("../app/agent-service/runtime-storage-cleanup");
-const { RuntimeBackupStore } = require("../app/agent-service/runtime-backup-store");
-const { RuntimeBackupCleanup } = require("../app/agent-service/runtime-backup-cleanup");
 const {
   NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
   NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
@@ -34,11 +30,6 @@ function fixture(options = {}) {
     trustedRoot: root,
     stateDir,
     runtimeAccountsDir: path.join(stateDir, "runtime-accounts"),
-    legacyRuntimeHomesDir: path.join(stateDir, "legacy-runtime-homes"),
-    legacyRuntimeHomesPath: path.join(stateDir, "legacy-runtime-homes", "manifest.json"),
-    runtimeCleanupAuditPath: path.join(stateDir, "legacy-runtime-homes", "cleanup-audit.jsonl"),
-    backupsDir: path.join(stateDir, "backups"),
-    backupCleanupAuditPath: path.join(stateDir, "backups", ".cleanup-audit.jsonl"),
   };
   const accounts = DEFAULT_RUNTIME_ACCOUNTS.filter((account) => [
     SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
@@ -73,40 +64,6 @@ function fixture(options = {}) {
     getRuntimeAccount: (id) => accounts.find((account) => account.id === id) || null,
     listAgentProfiles: () => profiles.map((profile) => ({ ...profile })),
   };
-  const legacyRuntimeHomeStore = new LegacyRuntimeHomeStore({ paths, now: () => 1_000 });
-  const refreshInventory = legacyRuntimeHomeStore.refresh.bind(legacyRuntimeHomeStore);
-  let inventoryRefreshes = 0;
-  legacyRuntimeHomeStore.refresh = (input) => {
-    inventoryRefreshes += 1;
-    return refreshInventory(input);
-  };
-  const inventory = () => legacyRuntimeHomeStore.refresh({
-    accounts: productStore.listRuntimeAccounts(),
-    profiles: productStore.listAgentProfiles(),
-  });
-  const runtimeStorageCleanup = new RuntimeStorageCleanup({
-    paths,
-    inventory,
-    readCleanupState: async () => ({ serviceReady: true, cleanupEligible: true }),
-    isInUse: async () => false,
-    now: () => 1_000,
-  });
-  fs.mkdirSync(path.join(paths.backupsDir, "pre-runtime-schema-v6"), {
-    recursive: true,
-    mode: 0o700,
-  });
-  fs.writeFileSync(
-    path.join(paths.backupsDir, "pre-runtime-schema-v6", "payload.bin"),
-    Buffer.alloc(32),
-  );
-  const runtimeBackupStore = new RuntimeBackupStore({ paths, now: () => 1_000 });
-  const runtimeBackupCleanup = new RuntimeBackupCleanup({
-    paths,
-    inventory: () => runtimeBackupStore.refresh(),
-    readCleanupState: async () => ({ serviceReady: true, cleanupEligible: true }),
-    isInUse: async () => false,
-    now: () => 1_000,
-  });
   const authCalls = [];
   const accountAuthManager = {
     read: async (input) => {
@@ -147,10 +104,6 @@ function fixture(options = {}) {
       }),
     },
     accountAuthManager,
-    legacyRuntimeHomeStore,
-    runtimeStorageCleanup,
-    runtimeBackupStore,
-    runtimeBackupCleanup,
     paths,
     fs: options.fs,
     now: options.now || (() => 1_000),
@@ -159,7 +112,7 @@ function fixture(options = {}) {
       : {
         readAccountStorage: (account) => ({
           runtimeAccountId: account.id,
-          scope: account.kind === "native-user" ? "native-system" : "managed-legacy",
+          scope: account.kind === "native-user" ? "native-system" : "managed-account",
           available: true,
           bytes: 16,
           files: 1,
@@ -176,7 +129,6 @@ function fixture(options = {}) {
     stateDir,
     controller,
     authCalls,
-    inventoryRefreshCount: () => inventoryRefreshes,
   };
 }
 
@@ -250,42 +202,6 @@ test("account list exposes sharing and admission without authority internals", a
   }
 });
 
-test("legacy list excludes paths and marks native legacy Homes reclaimable", async () => {
-  const value = fixture();
-  try {
-    const result = await value.controller.handle("runtime.account.legacyHomes.list", {
-      runtimeAccountId: null,
-      cursor: null,
-      limit: 100,
-    });
-    assert.equal(result.homes.length, 4);
-    assert.equal(result.homes.find((home) => home.runtime === "grok-build").role, "reclaimable");
-    assert.equal(JSON.stringify(result).includes(value.stateDir), false);
-    assert.equal(JSON.stringify(result).includes("runtimeProfileId"), false);
-  } finally {
-    value.controller.close();
-    fs.rmSync(value.root, { recursive: true });
-  }
-});
-
-test("one settings read window reuses one legacy inventory scan", async () => {
-  const value = fixture();
-  try {
-    await value.controller.handle("runtime.account.legacyHomes.list", {
-      runtimeAccountId: null,
-      cursor: null,
-      limit: 100,
-    });
-    await value.controller.handle("runtime.account.storage.read", {
-      runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
-    });
-    assert.equal(value.inventoryRefreshCount(), 1);
-  } finally {
-    value.controller.close();
-    fs.rmSync(value.root, { recursive: true });
-  }
-});
-
 test("native storage inspection is read-only and constrained to a temporary CLI Home", async () => {
   const value = fixture({ defaultStorage: true });
   try {
@@ -342,72 +258,6 @@ test("native storage endpoint tolerates live IPC entries and stays within its sc
     assert.equal(bounded.limitReason, "duration");
   } finally {
     Date.now = realNow;
-    value.controller.close();
-    fs.rmSync(value.root, { recursive: true });
-  }
-});
-
-test("cleanup is prepare then opaque one-shot commit", async () => {
-  const value = fixture();
-  try {
-    const homes = await value.controller.handle("runtime.account.legacyHomes.list", {
-      runtimeAccountId: NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
-      cursor: null,
-      limit: 100,
-    });
-    const plan = await value.controller.handle(
-      "runtime.account.legacyHomes.cleanup.prepare",
-      { entryId: homes.homes[0].id },
-    );
-    assert.match(plan.planId, /^[a-f0-9]{64}$/u);
-    assert.equal(plan.affectedAgentCount, 1);
-    assert.equal(Object.prototype.hasOwnProperty.call(plan, "path"), false);
-    const result = await value.controller.handle(
-      "runtime.account.legacyHomes.cleanup.commit",
-      { planId: plan.planId },
-    );
-    assert.equal(result.runtime, "grok-build");
-    await assert.rejects(
-      value.controller.handle(
-        "runtime.account.legacyHomes.cleanup.commit",
-        { planId: plan.planId },
-      ),
-      { code: "RUNTIME_STORAGE_PLAN_NOT_FOUND" },
-    );
-  } finally {
-    value.controller.close();
-    fs.rmSync(value.root, { recursive: true });
-  }
-});
-
-test("backup inventory and cleanup expose only opaque identities", async () => {
-  const value = fixture();
-  try {
-    const listed = await value.controller.handle("runtime.account.backups.list", {
-      cursor: null,
-      limit: 100,
-    });
-    assert.equal(listed.backups.length, 1);
-    assert.equal(listed.backups[0].category, "runtime-schema-history");
-    assert.equal(listed.backups[0].role, "reclaimable");
-    assert.equal(JSON.stringify(listed).includes(value.stateDir), false);
-    assert.equal(JSON.stringify(listed).includes("pre-runtime-schema-v6"), false);
-
-    const plan = await value.controller.handle("runtime.account.backups.cleanup.prepare", {
-      entryId: listed.backups[0].id,
-    });
-    assert.equal(Object.prototype.hasOwnProperty.call(plan, "path"), false);
-    assert.equal(Object.prototype.hasOwnProperty.call(plan, "backupName"), false);
-    const result = await value.controller.handle("runtime.account.backups.cleanup.commit", {
-      planId: plan.planId,
-    });
-    assert.equal(result.bytesReleased, 32);
-    assert.equal(fs.existsSync(path.join(
-      value.stateDir,
-      "backups",
-      "pre-runtime-schema-v6",
-    )), false);
-  } finally {
     value.controller.close();
     fs.rmSync(value.root, { recursive: true });
   }

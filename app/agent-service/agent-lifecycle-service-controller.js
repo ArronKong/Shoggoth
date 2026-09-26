@@ -1,10 +1,11 @@
 "use strict";
 
+
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { BUILTIN_CLI_AGENT_PROFILES } = require("./builtin-cli-profiles");
 const { DEFAULT_AGENT_PROFILE_ID } = require("./product-store");
-const { DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND } = require("./runtime-account");
+const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 const { runtimeBinding } = require("./runtime-adapter");
 const { serviceError } = require("./security");
 const {
@@ -19,18 +20,7 @@ const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const NON_TERMINAL_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
 ]);
-const BACKEND_BINDINGS = Object.freeze({
-  shoggoth: Object.freeze({ runtime: "codex", agentPrefix: "shoggoth-" }),
-  codex: Object.freeze({ runtime: "codex", agentPrefix: "codex-" }),
-  "grok-build": Object.freeze({ runtime: "grok-build", agentPrefix: "grok-" }),
-  antigravity: Object.freeze({ runtime: "antigravity", agentPrefix: "antigravity-" }),
-  pi: Object.freeze({ runtime: "pi", agentPrefix: "pi-" }),
-  "claude-code": Object.freeze({ runtime: "claude-code", agentPrefix: "claude-code-" }),
-  "deepseek-harness": Object.freeze({
-    runtime: "deepseek-harness",
-    agentPrefix: "deepseek-harness-",
-  }),
-});
+const BACKEND_BINDINGS = Object.freeze({ shoggoth: Object.freeze({ runtime: "codex" }) });
 const PROTECTED_PROFILE_IDS = new Set([
   DEFAULT_AGENT_PROFILE_ID,
   ...BUILTIN_CLI_AGENT_PROFILES.map((profile) => profile.id),
@@ -38,6 +28,7 @@ const PROTECTED_PROFILE_IDS = new Set([
 const RETRYABLE_CODES = new Set([
   "AGENT_RETENTION_FAILED",
   "AGENT_INITIALIZATION_FAILED", "AGENT_RUNTIME_CLEANUP_FAILED", "AGENT_COMMIT_UNCERTAIN",
+  "AGENT_PLUGIN_REVOKE_FAILED",
   "AGENT_SERVICE_CLOSED",
 ]);
 
@@ -105,8 +96,8 @@ function createIdentity(params) {
   if (!binding || !require("../runtime-availability").isRuntimeAvailable(binding.runtime)) {
     throw lifecycleError("AGENT_BACKEND_NOT_SUPPORTED");
   }
-  const id = stableUuid("shoggoth-agent-profile-v1", `${params.backendId}\0${params.operationId}`);
-  const agentId = `${binding.agentPrefix}${id}`;
+  const id = stableUuid("shoggoth-agent-profile-v2", params.operationId);
+  const agentId = `shoggoth-agent-${id}`;
   return Object.freeze({
     id,
     agentId,
@@ -194,7 +185,9 @@ function createAgentLifecycleServiceController(options = {}) {
   requireMethods(options.runtimeManager, ["stop"], "RuntimeManager");
   if (typeof options.initializeProfile !== "function"
     || typeof options.activateProfile !== "function"
-    || (options.onProfileChanged !== undefined && typeof options.onProfileChanged !== "function")) {
+    || (options.onProfileChanged !== undefined && typeof options.onProfileChanged !== "function")
+    || (options.revokePluginProfile !== undefined
+      && typeof options.revokePluginProfile !== "function")) {
     throw lifecycleError("AGENT_SERVICE_CLOSED", "Profile lifecycle callbacks are invalid");
   }
   const productStore = options.productStore;
@@ -229,13 +222,6 @@ function createAgentLifecycleServiceController(options = {}) {
     }
   }
 
-  function assertNameAvailable(backendId, name, exceptProfileId = null) {
-    const key = nameKey(name);
-    if (productStore.listAgentProfiles().some((profile) => profile.id !== exceptProfileId
-      && profile.backendId === backendId && nameKey(profile.name) === key)) {
-      throw lifecycleError("AGENT_NAME_CONFLICT");
-    }
-  }
 
   function loadProfile(profileId) {
     const profile = productStore.getAgentProfile(profileId);
@@ -274,6 +260,18 @@ function createAgentLifecycleServiceController(options = {}) {
     }
   }
 
+  function revokePluginProfile(profileId) {
+    if (!options.revokePluginProfile) return;
+    try {
+      const result = options.revokePluginProfile(profileId);
+      if (result && typeof result.then === "function") {
+        throw new TypeError("plugin revocation must complete synchronously");
+      }
+    } catch {
+      throw lifecycleError("AGENT_PLUGIN_REVOKE_FAILED");
+    }
+  }
+
   async function initialize(profile, expectedGeneration, initialIdentity) {
     assertOpen(expectedGeneration);
     try { await options.initializeProfile(structuredClone(profile), { initialIdentity }); }
@@ -296,7 +294,6 @@ function createAgentLifecycleServiceController(options = {}) {
     const { identity } = binding;
     let profile = productStore.getAgentProfile(identity.id);
     if (!profile) {
-      assertNameAvailable(binding.backendId, binding.name);
       profile = putProfile({
         id: identity.id,
         backendId: binding.backendId,
@@ -304,7 +301,7 @@ function createAgentLifecycleServiceController(options = {}) {
         name: binding.name,
         runtime: identity.runtime,
         runtimeProfileId: identity.runtimeProfileId,
-        runtimeAccountId: DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND[binding.backendId],
+        runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
         providerRef: null,
         defaultModel: null,
         defaultCwd: binding.defaultCwd,
@@ -312,7 +309,7 @@ function createAgentLifecycleServiceController(options = {}) {
           approvalPolicy: "on-request",
           sandbox: "danger-full-access",
         },
-        concurrency: { maxActive: require("./execution-policy").profile, maxWorkspaceWrites: require("./execution-policy").profile },
+        concurrency: { maxActive: null, maxWorkspaceWrites: null },
         isDefault: false,
         enabled: false,
         createdAt: binding.createdAt,
@@ -338,7 +335,6 @@ function createAgentLifecycleServiceController(options = {}) {
       return validateAgentLifecycleResult("agent.update", { profile });
     }
     assertCas(profile, binding.expectedUpdatedAt);
-    assertNameAvailable(profile.backendId, binding.name, profile.id);
     const saved = putProfile({ ...profile, name: binding.name, defaultCwd: binding.defaultCwd });
     return validateAgentLifecycleResult("agent.update", { profile: saved });
   }
@@ -352,18 +348,24 @@ function createAgentLifecycleServiceController(options = {}) {
         .some((run) => NON_TERMINAL_RUN_STATUSES.has(run.status))) {
         throw lifecycleError("AGENT_ACTIVE_RUNS");
       }
-      // No await between the final run check and disabled commit. ProductStore is the
-      // single writer and independently rejects new WorkRuns for disabled Profiles.
+      // Revoke in the plugin Store before publishing disabled Product state.
+      // A failed plugin transaction must not leave a frozen dispatch ticket
+      // authorized while the UI reports this Profile as archived.
+      revokePluginProfile(profile.id);
+      // No await between the final run check and disabled commit. ProductStore
+      // independently rejects new WorkRuns for disabled Profiles.
       profile = putProfile({ ...profile, enabled: false });
+    } else {
+      // Repair a disabled Profile left by an older interrupted archive.
+      revokePluginProfile(profile.id);
     }
     options.archiveRetention?.recordArchive(profile);
     assertOpen(expectedGeneration);
     try {
-      await options.runtimeManager.stop(runtimeBinding({
-        runtime: profile.runtime,
-        runtimeProfileId: profile.runtimeProfileId,
-        runtimeAccountId: profile.runtimeAccountId,
-      }));
+      for (const view of require("./agent-runtime-profile-views").agentRuntimeProfileViews(productStore, profile.id)) {
+        await options.runtimeManager.stop(runtimeBinding({ runtime: view.runtime,
+          runtimeProfileId: view.runtimeProfileId, runtimeAccountId: view.runtimeAccountId }));
+      }
     } catch (error) {
       throw lifecycleError("AGENT_RUNTIME_CLEANUP_FAILED", error?.message);
     }
@@ -383,6 +385,9 @@ function createAgentLifecycleServiceController(options = {}) {
       return validateAgentLifecycleResult("agent.restore", { profile });
     }
     assertCas(profile, binding.expectedUpdatedAt);
+    // An interrupted archive may have disabled ProductStore before revoking
+    // plugin authority. Never restore the Profile before fencing those Grants.
+    revokePluginProfile(profile.id);
     await initialize(profile, expectedGeneration);
     await activate(profile, expectedGeneration);
     profile = loadProfile(profile.id);

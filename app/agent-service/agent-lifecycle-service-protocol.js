@@ -30,6 +30,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   AGENT_OPERATION_EXPIRED: "Agent 操作已过期",
   AGENT_INITIALIZATION_FAILED: "Agent 初始化未完成，请重试",
   AGENT_RUNTIME_CLEANUP_FAILED: "Agent 已停止调度，但运行时清理尚未完成，请重试",
+  AGENT_PLUGIN_REVOKE_FAILED: "插件授权撤销未完成，Agent 归档或恢复尚未完成，请重试",
   AGENT_RETENTION_FAILED: "Agent 归档清理未完成，将保留记录重试",
   AGENT_RETENTION_EXPIRED: "Agent 的 7 天保留期已结束，无法恢复",
   AGENT_SERVICE_CLOSED: "Agent 生命周期服务不可用",

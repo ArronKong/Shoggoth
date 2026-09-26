@@ -173,6 +173,12 @@ class RuntimeMcpGateIssuer {
       throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP account is invalid");
     }
     const runtimeAccountId = input.runtimeAccountId;
+    const executionRunId = input.executionRunId ?? null;
+    if (executionRunId !== null && (typeof executionRunId !== "string"
+      || !executionRunId.trim() || executionRunId.includes("\0")
+      || Buffer.byteLength(executionRunId, "utf8") > 256)) {
+      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP execution binding is invalid");
+    }
     const parentExecutable = assertExecutable(
       this.fs,
       input.parentExecutable,
@@ -209,6 +215,7 @@ class RuntimeMcpGateIssuer {
       runtimeProfileId,
       runtimeAccountId,
       parentPid: null,
+      executionRunId,
       parentExecutable,
       parentIdentity: null,
       expiresAt,
@@ -343,7 +350,8 @@ class RuntimeMcpGateIssuer {
       if (fd !== undefined) this.fs.closeSync(fd);
     }
     this.#removeIssued(input.gatePath);
-    return Object.freeze({ consumed: true });
+    return Object.freeze({ consumed: true,
+      ...(record.executionRunId ? { executionRunId: record.executionRunId } : {}) });
   }
 
   close() {

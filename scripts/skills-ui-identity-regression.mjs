@@ -22,7 +22,8 @@ const mocks = {
     export const updateSkill = async (backend, name, patch, agent) => {
       globalThis.calls.push({ method: 'update', backend, name, patch, agent });
       globalThis.skills = globalThis.skills.map(s => s.id === patch.id && s.source === patch.source && s.version === patch.version
-        ? { ...s, enabled: patch.enabled } : s);
+        ? { ...s, enabled: patch.enabled, registryVersion: s.registryVersion + 1 } : s);
+      return globalThis.skills.find(s => s.id === patch.id && s.source === patch.source && s.version === patch.version);
     };
     export const uninstallSkill = async (backend, skill, agent) => {
       globalThis.calls.push({ method: 'uninstall', backend, skill, agent });
@@ -109,12 +110,14 @@ try {
         const updated = globalThis.calls.find(call => call.method === 'update');
         assert.equal(updated.patch.id, 'review');
         assert.equal(updated.patch.version, '1.0.1');
+        assert.equal(updated.patch.expectedRevision, 2);
         assert.equal(updated.agent, 'agent-a');
         assert.equal(globalThis.skills[0].enabled, false);
         assert.equal(globalThis.skills[1].enabled, true);
         await act(async () => { await detail().findAllByType('button').find(node => node.props.className === 'btn-danger').props.onClick(); });
         assert.match(globalThis.confirmation.message, /review v1.0.1/);
         assert.equal(globalThis.calls.find(call => call.method === 'uninstall').skill.version, '1.0.1');
+        assert.equal(globalThis.calls.find(call => call.method === 'uninstall').skill.registryVersion, 4);
         assert.equal(renderer.root.findAllByType('aside').length, 0);
         assert.deepEqual(globalThis.skills.map(skill => skill.version), ['1.0.0']);
         await act(async () => renderer.unmount());

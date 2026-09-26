@@ -13,7 +13,7 @@ const AGENT_ARCHIVE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const AGENT_ARCHIVE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const PROTECTED = new Set([DEFAULT_AGENT_PROFILE_ID, ...BUILTIN_CLI_AGENT_PROFILES.map((p) => p.id)]);
-const RUNTIMES = new Set(["codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]);
+const RUNTIMES = new Set(["codex", "grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const BUSY = new Set(["queued", "starting", "running", "waiting_approval", "waiting_input"]);
 

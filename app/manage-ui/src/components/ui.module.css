@@ -17,6 +17,8 @@
 .modalOverlay[data-ending-style] {
   opacity: 0;
 }
+:global(body[data-immersive]) .modalOverlay { z-index: 1110; }
+:global(body[data-immersive]) .modalPanel { z-index: 1111; }
 
 .modalOverlay[data-ending-style] {
   transition-duration: var(--ui-motion-modal-exit);

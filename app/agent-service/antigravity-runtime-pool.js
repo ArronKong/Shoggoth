@@ -1,4 +1,5 @@
 "use strict";
+const { poolLedgerSlot } = require("./runtime-shared-ledger");
 
 const { AntigravityRuntimeHost } = require("./antigravity-runtime-host");
 const {
@@ -15,6 +16,7 @@ const {
   validateResolvedEnvironment,
 } = require("./runtime-account-resolver");
 const { serviceError } = require("./security");
+const { configurePoolCapacity, poolHostLimit, retirePoolHost, trackPoolHost, executionRunIdForPool } = require("./runtime-pool-capacity");
 
 function poolError(code, message) {
   return serviceError(code, message);
@@ -39,12 +41,13 @@ function poolBinding(value) {
   return binding;
 }
 
-function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace) {
+function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace, executionRunId) {
   return JSON.stringify([
     runtimeProfileId,
     runtimeAccountId,
     controlInstance ? "control" : "execution",
     workspace,
+    executionRunId,
   ]);
 }
 
@@ -69,10 +72,7 @@ class AntigravityRuntimePool {
       parentEnv: options.parentEnv ?? options.hostOptions?.parentEnv,
       homedir: options.homedir ?? options.hostOptions?.homedir,
     });
-    this.maxHosts = options.maxHosts ?? 16;
-    if (!Number.isSafeInteger(this.maxHosts) || this.maxHosts < 1 || this.maxHosts > 64) {
-      throw poolError("ANTIGRAVITY_POOL_OPTIONS_INVALID", "Antigravity host limit is invalid");
-    }
+    configurePoolCapacity(this, options, "ANTIGRAVITY_POOL_OPTIONS_INVALID");
     this.entries = new Map();
     this.profileStates = new Map();
     this.stopPromises = new Map();
@@ -89,7 +89,9 @@ class AntigravityRuntimePool {
     const accountId = binding.runtimeAccountId;
     const controlInstance = !Object.prototype.hasOwnProperty.call(options, "workspace");
     const workspace = controlInstance ? null : normalizeAntigravityWorkspace(options.workspace);
-    const key = routeKey(id, accountId, controlInstance, workspace);
+    let executionRunId;
+    try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
+    const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
     const permissionPolicy = normalizeAntigravityPermissionPolicy(options.permissionPolicy);
     const policyFingerprint = antigravityPermissionFingerprint(permissionPolicy);
     if (this.blockedProfiles.has(id)) {
@@ -112,6 +114,7 @@ class AntigravityRuntimePool {
     }
     const existing = this.entries.get(key);
     if (existing) {
+      if (existing.retiring) return existing.retiring.then(() => this.get(binding, options));
       if (existing.policyFingerprint !== policyFingerprint) {
         return Promise.reject(poolError(
           "RUNTIME_PERMISSION_POLICY_CONFLICT",
@@ -123,8 +126,10 @@ class AntigravityRuntimePool {
         return host;
       });
     }
-    if (this.entries.size >= this.maxHosts) {
-      return Promise.reject(poolError("ANTIGRAVITY_HOST_LIMIT", "Antigravity host limit was reached"));
+    let hostLimit;
+    try { hostLimit = poolHostLimit(this); } catch (error) { return Promise.reject(error); }
+    if (this.entries.size >= hostLimit) {
+      return retirePoolHost(this).then(() => this.get(binding, options));
     }
     let profileState = this.profileStates.get(accountId);
     if (!profileState) {
@@ -141,6 +146,8 @@ class AntigravityRuntimePool {
     } catch (error) {
       return Promise.reject(error);
     }
+    const ledgerKey = routeKey(id, accountId, controlInstance, workspace, null);
+    const ledgerSlot = poolLedgerSlot(this, ledgerKey);
     const host = this.hostFactory({
       ...this.hostOptions,
       paths: this.options.paths ?? this.hostOptions.paths,
@@ -155,6 +162,7 @@ class AntigravityRuntimePool {
       requestTimeoutMs: this.options.requestTimeoutMs ?? this.hostOptions.requestTimeoutMs,
       promptTimeoutMs: this.options.promptTimeoutMs ?? this.hostOptions.promptTimeoutMs,
       acceptanceTimeoutMs: this.options.acceptanceTimeoutMs ?? this.hostOptions.acceptanceTimeoutMs,
+      nativeStartupTimeoutMs: this.options.nativeStartupTimeoutMs ?? this.hostOptions.nativeStartupTimeoutMs,
       shutdownGraceMs: this.options.shutdownGraceMs ?? this.hostOptions.shutdownGraceMs,
       killGraceMs: this.options.killGraceMs ?? this.hostOptions.killGraceMs,
       maxFrameBytes: this.options.maxFrameBytes ?? this.hostOptions.maxFrameBytes,
@@ -166,6 +174,8 @@ class AntigravityRuntimePool {
       runtimeProfileId: id,
       runtimeAccountId: accountId,
       runtimeBinding: binding,
+      mcpExecutionRunId: executionRunId,
+      ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,
       controlInstance,
@@ -173,6 +183,7 @@ class AntigravityRuntimePool {
       profileState,
     });
     const entry = {
+      ledgerKey, ledgerSlot,
       host,
       key,
       runtimeProfileId: id,
@@ -180,7 +191,9 @@ class AntigravityRuntimePool {
       policyFingerprint,
       promise: null,
     };
+    trackPoolHost(entry, binding);
     entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+      entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
           () => {

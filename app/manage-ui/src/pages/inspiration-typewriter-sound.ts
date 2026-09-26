@@ -1,25 +1,33 @@
 // Web Audio mixes this effect with other audio without taking over Media Session
-// controls. Keep one decoded buffer for the lifetime of the screen prompt.
+// controls. On macOS without microphone access, native output-only playback
+// avoids opening a duplex USB device merely to play the ambient effect.
 export function createTypewriterSound() {
   let context: AudioContext | null = null;
   let buffer: Promise<AudioBuffer> | null = null;
   let source: AudioBufferSourceNode | null = null;
   let gain: GainNode | null = null;
+  let nativePlaying = false;
   let typing = false;
   let disposed = false;
   let generation = 0;
   const abort = new AbortController();
+  const desktop = (window as unknown as { openclawDesktop?: {
+    getMicrophoneAccessStatus?: () => Promise<string>;
+    typewriterSound?: { start: () => void; stop: () => void };
+  } }).openclawDesktop;
 
   const play = async () => {
-    if (!typing || disposed || source || !window.AudioContext) return;
+    if (!typing || disposed || source || nativePlaying) return;
     const request = ++generation;
     try {
-      // On macOS, opening a duplex USB output can trigger a native microphone
-      // prompt even for playback, outside Electron's media permission handlers.
-      // This ambient effect must stay silent until recording has been authorized.
-      const desktop = (window as unknown as { openclawDesktop?: { getMicrophoneAccessStatus?: () => Promise<string> } }).openclawDesktop;
-      if (desktop?.getMicrophoneAccessStatus && await desktop.getMicrophoneAccessStatus() !== 'granted') return;
+      const status = desktop?.getMicrophoneAccessStatus
+        ? await desktop.getMicrophoneAccessStatus().catch(() => 'unknown') : undefined;
       if (disposed || !typing || request !== generation) return;
+      if ((status !== undefined && status !== 'granted') || !window.AudioContext) {
+        desktop?.typewriterSound?.start();
+        nativePlaying = Boolean(desktop?.typewriterSound);
+        return;
+      }
       const audio = context ??= new AudioContext();
       buffer ??= fetch('/audio/typewriter-loop.wav', { signal: abort.signal })
         .then(response => {
@@ -45,6 +53,10 @@ export function createTypewriterSound() {
   };
   const stop = () => {
     generation++;
+    if (nativePlaying) {
+      nativePlaying = false;
+      try { desktop?.typewriterSound?.stop(); } catch { /* Renderer teardown can revoke IPC first. */ }
+    }
     source?.stop();
     source?.disconnect();
     source = null;

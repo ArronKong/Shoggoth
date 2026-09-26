@@ -24,6 +24,10 @@ const PI_CAPABILITIES = runtimeCapabilities({
   "account.logout": false,
   events: true,
   serverRequests: true,
+  "context.usage.estimated": true,
+  "context.compact.native": true,
+  "context.compact.auto": true,
+  "model.generate.toolFree": true,
 });
 
 function adapterError(code, message) {
@@ -44,6 +48,7 @@ class PiRuntimeHandle {
   get terminated() { return this.host.terminated; }
   get registeredSecrets() { return []; }
   authenticationState() { return this.host.authenticationState(); }
+  generateModelOnly(input) { return this.host.generateModelOnly(input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);
@@ -72,6 +77,7 @@ class PiRuntimeAdapter {
       throw adapterError("RUNTIME_ADAPTER_INVALID", "Pi adapter requires a PiRuntimePool");
     }
     this.runtimePool = options.runtimePool;
+    this.modelOnly = true;
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }

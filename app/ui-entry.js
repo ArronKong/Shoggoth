@@ -15,13 +15,15 @@ const os = require("node:os");
 const path = require("node:path");
 const { startStaticServer } = require("./static-server");
 const { assertUiHostOpsCoverage } = require("./host-capability-manifest");
+const { DesktopPluginAppHost } = require("./desktop-plugin-app-host");
+const pluginAppHost = new DesktopPluginAppHost({ BrowserWindow, ipcMain, session });
 const { scanInstalledClis, resolveCliVersion } = require("./cli-scanner");
 const { startProxyGateway } = require("./core/proxy-gateway");
 const { HermesBackend } = require("./core/hermes-backend");
 const { ShoggothBackend } = require("./core/shoggoth-backend");
 const { BackendRegistry } = require("./core/backend-registry");
 const { OpenClawBackend, resolveOpenclawBin } = require("./core/openclaw-backend");
-const { resolveServicePaths } = require("./agent-service/paths");
+const { getBootstrappedDesktopPaths } = require("./desktop-data-bootstrap");
 const { createRuntimeCliAuth } = require("./runtime-cli-auth");
 const { requestService, readClientToken } = require("./agent-service/client");
 const { createLaunchAgentController } = require("./agent-service/launch-agent");
@@ -52,6 +54,7 @@ const { registerDesktopInspirationIpc } = require("./desktop-inspiration-ipc");
 const { createDesktopInspirationController } = require("./desktop-inspiration-controller");
 const { createDesktopBackendStopAction } = require("./desktop-backend-stop");
 const { registerDesktopMicrophoneIpc } = require("./desktop-microphone-ipc");
+const { registerDesktopTypewriterSoundIpc } = require("./desktop-typewriter-sound-ipc");
 const { registerDesktopChatClipboardIpc } = require("./desktop-chat-clipboard-ipc");
 const { registerDesktopTelemetryIpc } = require("./desktop-telemetry-ipc");
 const { createDesktopAppUpdateController } = require("./desktop-app-update");
@@ -202,6 +205,7 @@ function nativeT(locale, key, params) {
 let mainWindow = null;
 let desktopInspiration = null;
 let disposeMicrophoneIpc = null;
+let disposeTypewriterSoundIpc = null;
 let disposeChatClipboardIpc = null;
 let appIsQuitting = false;
 let staticServer = null;
@@ -331,8 +335,8 @@ const hostOps = {
     const abs = raw === "~" || raw.startsWith("~/") ? path.join(os.homedir(), raw.slice(1)) : raw;
     try { return await shell.openPath(abs); } catch (e) { return e?.message || String(e); }
   },
-  openExternal: (url) => {
-    if (typeof url === "string" && /^https?:\/\//i.test(url)) { void shell.openExternal(url); return true; }
+  openExternal: async (url) => {
+    if (typeof url === "string" && /^https?:\/\//i.test(url)) { await shell.openExternal(url); return true; }
     return false;
   },
   selectSkillPackage: async () => {
@@ -359,6 +363,101 @@ const hostOps = {
     });
     if (result.canceled || result.filePaths.length !== 1) return null;
     return result.filePaths[0];
+  },
+  selectPluginPackage: async () => {
+    const format = await dialog.showMessageBox(mainWindow || undefined, {
+      type: "question", title: "选择能力包格式", message: "选择安装来源",
+      buttons: ["Agent Plugins 标准包", "Claude 内容包", "Codex 内容包", "取消"],
+      defaultId: 0, cancelId: 3, noLink: true,
+      detail: "历史内容包仅导入所选技能与 MCP；不执行 hooks、命令或宿主扩展。",
+    });
+    if (format.response === 3) return null;
+    let components = ["skills", "mcp-servers"];
+    if (format.response !== 0) {
+      const selected = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "question", title: "选择导入内容", message: "选择需要转换的组件",
+        buttons: ["技能与 MCP", "仅技能", "仅 MCP", "取消"], defaultId: 0, cancelId: 3, noLink: true,
+      });
+      if (selected.response === 3) return null;
+      components = selected.response === 1 ? ["skills"] : selected.response === 2 ? ["mcp-servers"] : components;
+    }
+    const result = await dialog.showOpenDialog(mainWindow || undefined, {
+      title: "选择 Agent Plugin 能力包目录",
+      properties: ["openDirectory"],
+      buttonLabel: "预览能力包",
+    });
+    if (result.canceled || result.filePaths.length !== 1) return null;
+    return format.response === 0 ? result.filePaths[0]
+      : { kind: "legacy-directory", path: result.filePaths[0],
+        format: format.response === 1 ? "claude-plugin" : "codex-plugin", components };
+  },
+  confirmPluginCapability: async (summary) => {
+    const clean = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 256);
+    const cleanPath = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 4096);
+    const connect = summary.action === "connect";
+    const oauth = summary.action === "oauth-connect";
+    if (["rollback-snapshot", "rollback-code", "rollback-restore", "rollback-retry"].includes(summary.action)) {
+      const snapshot = summary.action === "rollback-snapshot", code = summary.action === "rollback-code";
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "插件代码与数据回退", message: snapshot ? "保存停用插件的数据快照？"
+          : code ? "切回旧代码并保持停用？" : "按已核对快照恢复插件数据？",
+        detail: `能力包：${clean(summary.package)}\n当前代码：${clean(summary.fromDigest)}\n目标代码：${clean(summary.targetDigest)}\n快照：${clean(summary.snapshotId || (snapshot ? "新建" : "需要另行选择匹配快照"))}\n\n${snapshot
+          ? "插件进程会先排空。只保存此安装的持久数据，不运行包代码；账号凭据不包含在快照中。"
+          : code ? "只更换代码，当前数据会保留。恢复匹配数据快照之前无法重新启用；旧授权失效。"
+            : `将以快照替换当前插件数据${summary.byteLength === null ? "" : `（${summary.byteLength} 字节）`}，快照之后的写入将退出活动数据。原数据会单独保留，账号和工具必须重新授权。`}`,
+        buttons: ["取消", snapshot ? "保存快照" : code ? "切换代码并停用" : "确认恢复数据"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "mcp-disconnect") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "断开插件账号", message: "断开这个插件账号？",
+        detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n受影响的 Agent 绑定：${summary.affectedBindings}\n\n此账号的所有绑定将停用，工具授权将撤销，旧连接和未完成的登录将关闭。插件数据保留。${summary.credentialDisposition === "retained_encrypted_unusable"
+          ? "本地加密凭据保留但不可使用；这不会撤销提供方的远端令牌。" : "此连接没有保存的账号凭据。"}重新连接后需要重新发现工具并授权。`,
+        buttons: ["取消", "断开账号"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "remote-git") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "question", title: "获取固定 Git 能力包", message: "从此仓库获取指定提交并预览？",
+        detail: `仓库：${cleanPath(summary.repositoryUrl)}\n提交：${clean(summary.commit)}\n子目录：${cleanPath(summary.subdir || ".")}\n\n将通过 HTTPS 获取这一提交。不会运行仓库代码、Git hooks、安装脚本或子模块；安装后默认停用。`,
+        buttons: ["取消", "获取并预览"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (["dependency-prepare", "dependency-revoke"].includes(summary.action)) {
+      const prepare = summary.action === "dependency-prepare";
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "插件解释器", message: prepare ? "检查并固定这个解释器？" : "撤销此组件的解释器登记？",
+        detail: `能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n解释器：${clean(summary.interpreter)}\n路径：${cleanPath(summary.executablePath || "")}\nSHA-256：${clean(summary.sha256 || "")}\n\n${prepare
+          ? "将运行此文件的 --version 并固定其摘要。后续仅用它执行包内脚本；不会自动下载依赖。仅选择你信任的解释器。"
+          : "需要重新准备后才能启动此组件。能力包数据和账号凭据会保留。"}`,
+        buttons: ["取消", prepare ? "检查并固定" : "撤销登记"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    const appView = summary.action === "app-open";
+    const result = await dialog.showMessageBox(mainWindow || undefined, {
+      type: "warning", title: "Shoggoth 插件授权",
+      message: oauth ? "在浏览器中连接插件账号？" : appView ? "打开这个工具的交互界面？" : connect ? "连接本地 MCP 组件？" : "允许此 Agent 使用这个工具？",
+      detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件 / 工具：${clean(summary.capability)}\n\n${connect
+        ? "连接会运行能力包内的程序。工具调用仍需逐项授权。"
+        : oauth ? `认证服务：${clean(summary.provider)}\n申请权限：${summary.scopes.map(clean).join(", ")}\n${summary.reconnect ? "重连会撤销此 Agent 原有工具授权。" : ""}完成账号验证后仍需逐项授权工具。`
+        : appView ? "此页面仅限当前会话，可使用当前已授权且无需逐次确认的工具。外部网络关闭；页面关闭或授权撤销后失效。"
+        : summary.approvalMode === "each-call"
+          ? "每次工具调用均需确认具体参数；可以随时在插件页撤销。"
+          : "授权适用于后续执行；现有产品审批仍生效。可以随时在插件页撤销。"}`,
+      buttons: ["取消", appView ? "打开" : connect || oauth ? "连接" : "允许"], defaultId: 0, cancelId: 0, noLink: true,
+    });
+    return result.response === 1;
+  },
+  openPluginApp: options => pluginAppHost.open(options),
+  selectPluginDependency: async () => {
+    const result = await dialog.showOpenDialog(mainWindow || undefined, {
+      title: "选择已安装的 Node 或 Python 解释器", properties: ["openFile"], buttonLabel: "检查文件摘要",
+    });
+    return result.canceled || result.filePaths.length !== 1 ? null : result.filePaths[0];
   },
   // 在系统终端里跑一条命令（external provider 的 `claude setup-token` / 断开命令）。
   // 官方桌面版有内置终端，我们没有 → 借 Terminal.app，用户能看见执行的是什么。
@@ -798,7 +897,8 @@ ipcMain.handle("openclaw:notify", (_event, opts) => {
 
 // --- App lifecycle -----------------------------------------------------
 
-const gotLock = app.requestSingleInstanceLock();
+// desktop-data-bootstrap acquired the canonical-root lock before any writer.
+const gotLock = app.hasSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
@@ -883,10 +983,7 @@ if (!gotLock) {
     // The UI process owns only this lightweight adapter and its polling loops;
     // the background Agent Service has a separate lifecycle/role and is never
     // terminated when the registry or desktop window stops.
-    const shoggothServicePaths = resolveServicePaths({
-      homeDir: os.homedir(),
-      userDataRoot: app.getPath("userData"),
-    });
+    const shoggothServicePaths = getBootstrappedDesktopPaths(app);
     const federationMcpRegistrar = createFederationMcpRegistrar({
       paths: shoggothServicePaths,
       packaged: app.isPackaged,
@@ -899,7 +996,7 @@ if (!gotLock) {
     // Authentication and CLI commands are keyed by RuntimeAccount, never by
     // Agent/Profile. Native accounts point at the user's existing CLI Home;
     // resolving this catalog performs no import, copy, pnpm install, or mkdir.
-    const runtimeCliAuth = createRuntimeCliAuth({
+    const getRuntimeCliAuth = () => createRuntimeCliAuth({
       paths: shoggothServicePaths,
       parentEnv: process.env,
       homedir: os.homedir,
@@ -907,77 +1004,19 @@ if (!gotLock) {
       packaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
     });
-    const peerNativeAgentIds = new Set([
-      "shoggoth-codex", "shoggoth-grok", "shoggoth-antigravity", "shoggoth-pi",
-      "shoggoth-claude-code", "shoggoth-deepseek-harness",
-    ]);
-    const nativeBackendOptions = {
-      paths: shoggothServicePaths,
-      runtimeCliAuth,
-    };
     const shoggothBackend = new ShoggothBackend({
-      ...nativeBackendOptions,
+      paths: shoggothServicePaths,
+      runtimeCliAuth: getRuntimeCliAuth(),
+      getRuntimeCliAuth,
+      getNativeRuntimeConfig: () => require("./core/config-store").projectNativeRuntimeConfig(configStore.read()),
       id: "shoggoth",
       name: "Shoggoth",
       connectionMode: "builtin-service",
       version: APP_VERSION,
-      claimsAgentId: (agentId) => typeof agentId === "string"
-        && agentId.startsWith("shoggoth-") && !peerNativeAgentIds.has(agentId),
     });
-    const codexBackend = new ShoggothBackend({
-      ...nativeBackendOptions,
-      id: "codex",
-      name: "Codex",
-      connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-codex"
-        || (typeof agentId === "string" && agentId.startsWith("codex-")),
-    });
-    const grokBackend = new ShoggothBackend({
-      ...nativeBackendOptions,
-      id: "grok-build",
-      name: "Grok",
-      connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-grok"
-        || (typeof agentId === "string" && agentId.startsWith("grok-")),
-    });
-    const antigravityBackend = new ShoggothBackend({
-      ...nativeBackendOptions,
-      id: "antigravity",
-      name: "Antigravity",
-      connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-antigravity"
-        || (typeof agentId === "string" && agentId.startsWith("antigravity-")),
-    });
-    const piBackend = new ShoggothBackend({
-      ...nativeBackendOptions,
-      id: "pi",
-      name: "Pi",
-      connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-pi"
-        || (typeof agentId === "string" && agentId.startsWith("pi-")),
-    });
-    const claudeCodeBackend = new ShoggothBackend({
-      ...nativeBackendOptions,
-      id: "claude-code",
-      name: "Claude Code",
-      connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-claude-code"
-        || (typeof agentId === "string" && agentId.startsWith("claude-code-")),
-    });
-    const deepSeekHarnessBackend = new ShoggothBackend({
-      ...nativeBackendOptions,
-      id: "deepseek-harness",
-      name: "DeepSeek Harness",
-      connectionMode: "native-runtime",
-      claimsAgentId: (agentId) => agentId === "shoggoth-deepseek-harness"
-        || (typeof agentId === "string" && agentId.startsWith("deepseek-harness-")),
-    });
-    const nativeBackends = [
-      shoggothBackend, codexBackend, grokBackend, antigravityBackend, piBackend,
-      claudeCodeBackend, deepSeekHarnessBackend,
-    ].filter((backend) => require("./runtime-availability").isRuntimeAvailable(backend.id));
+    const nativeBackends = [shoggothBackend];
     const shoggothLaunchAgent = createLaunchAgentController({
-      homeDir: os.homedir(),
+      homeDir: os.userInfo().homedir,
       servicePaths: shoggothServicePaths,
       serviceVersion: APP_VERSION,
     });
@@ -989,9 +1028,7 @@ if (!gotLock) {
       if (!canReload()) return;
       await Promise.all(nativeBackends.map((backend) => backend.stop()));
       if (!canReload()) return;
-      const disabled = new Set(readConfig().disabledBackends);
-      await Promise.all(nativeBackends.filter((backend) => !disabled.has(backend.id))
-        .map((backend) => registry.start(backend.id)));
+      await registry.start(shoggothBackend.id);
     };
     const shoggothProductHost = createProductHostController({
       launchAgent: shoggothLaunchAgent,
@@ -1029,14 +1066,6 @@ if (!gotLock) {
     registry.register(openclawBackend);
     registry.register(hermesBackend);
     registry.register(shoggothBackend);
-    registry.register(codexBackend);
-    registry.register(grokBackend);
-    registry.register(antigravityBackend);
-    registry.register(piBackend);
-    if (require("./runtime-availability").isRuntimeAvailable(claudeCodeBackend.id)) {
-      registry.register(claudeCodeBackend);
-    }
-    registry.register(deepSeekHarnessBackend);
     registry.setInspirationOwner(shoggothBackend);
     // 设置页「断开连接」的后端：registry 聚合/路由/健康采样全部跳过（实时读
     // config，与 getUpstreamUrl 同款拉模型），startup 也不启动它们。
@@ -1063,6 +1092,8 @@ if (!gotLock) {
     // broker connects lazily per browser session, so the proxy is listening by
     // the time chat opens.
     staticServer = await startStaticServer(UI_PORT, {
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
       userDataRoot: app.getPath("userData"),
       registry,
       chatUpstreamUrl: `ws://127.0.0.1:${GATEWAY_PROXY_PORT}`,
@@ -1177,6 +1208,11 @@ if (!gotLock) {
       getLocale: () => resolveLocale(readConfig().locale), quit: () => app.quit() });
     disposeMicrophoneIpc = registerDesktopMicrophoneIpc({ ipcMain, session: session.defaultSession, systemPreferences,
       getWindows: () => [mainWindow, desktopInspiration?.getWindow()], getUiOrigin: () => serverOrigin });
+    if (process.platform === "darwin") disposeTypewriterSoundIpc = registerDesktopTypewriterSoundIpc({ ipcMain,
+      getWindows: () => [mainWindow, desktopInspiration?.getWindow()], getUiOrigin: () => serverOrigin,
+      audioPath: app.isPackaged
+        ? path.join(process.resourcesPath, "app.asar.unpacked", "app", "manage-ui", "public", "audio", "typewriter-loop.wav")
+        : path.join(__dirname, "manage-ui", "public", "audio", "typewriter-loop.wav") });
     disposeChatClipboardIpc = registerDesktopChatClipboardIpc({ ipcMain, clipboard,
       getWindows: () => [mainWindow], getUiOrigin: () => serverOrigin });
     appUpdateController = createDesktopAppUpdateController({
@@ -1212,8 +1248,10 @@ if (!gotLock) {
 
   app.on("before-quit", async () => {
     appIsQuitting = true;
+    await pluginAppHost.closeAll();
     desktopInspiration?.dispose(); desktopInspiration = null;
     disposeMicrophoneIpc?.(); disposeMicrophoneIpc = null;
+    disposeTypewriterSoundIpc?.(); disposeTypewriterSoundIpc = null;
     disposeChatClipboardIpc?.(); disposeChatClipboardIpc = null;
     appUpdateController?.dispose(); appUpdateController = null;
     disposeTelemetryIpc?.();

@@ -299,12 +299,26 @@ class AgentBackend {
    *     archive: boolean, restore: boolean, readStates: boolean},
    *   surfaces: {chat: boolean, agents: boolean, models: boolean, skills: boolean,
    *     usage: boolean, oauth: boolean, dashboardRuns: boolean, agentHarness: boolean,
+   *     nativeCapacity?: boolean, runtimeBindings?: boolean, runtimeStatus?: boolean,
    *     cron: null|{kind: "openclaw"|"hermes"|"native"},
    *     kanban: null|{kind: "workboard"|"hermes"|"native"}}}}
    */
   getBackendDescriptor() {
     throw new Error("AgentBackend subclass must implement getBackendDescriptor()");
   }
+
+  /** Service-wide native execution capacity; expose only with surfaces.nativeCapacity. */
+  async getNativeCapacity() { throw new Error(`${this.id}: getNativeCapacity() not supported`); }
+
+  /** Local CLI inventory, separate from backend/Agent ownership. Read-only;
+   * ready means executable available and Service connected, not verified login.
+   * Never starts a CLI, model turn, auth flow, or scans runtime Home contents.
+   * @returns {Promise<Array<{runtime:string,name:string,runtimeAccountId:string,enabled:boolean,releaseEnabled:boolean,installation:"available"|"unavailable"|"unknown",serviceConnected:boolean}>>}
+   */
+  async getRuntimeStatuses() { return []; }
+
+  /** Apply a validated revisioned core config projection to the native Service. */
+  async applyNativeRuntimeConfig(projection) { throw new Error(`${this.id}: applyNativeRuntimeConfig() not supported`); }
 
   /**
    * Start the backend. Called once during app boot.
@@ -764,7 +778,7 @@ class AgentBackend {
    *         diff?, diffText?})    — tool lifecycle (phase start|update|result)
    *   plan(entries)               — agent todo list ([{content, status?}])
    *   status({kind, text, reason?, queuedAt?}) — session progress: queued,
-   *                                 starting, running, waiting_approval/input,
+   *                                 starting, running, retrying, waiting_approval/input,
    *                                 compacting or compacted. Queue timestamps
    *                                 use milliseconds since the Unix epoch.
    *   prompt(InteractiveRequestV1 | legacyPrompt)
@@ -1247,6 +1261,63 @@ class AgentBackend {
    * opts: {agentId?, id?, source?, version?}; ambiguous identities must be rejected. */
   async previewSkill(_name, _opts = {}) { throw new Error(`${this.id}: previewSkill() not supported`); }
 
+  /** Bounded, read-only plugin catalog page. Unsupported backends expose no installations. */
+  async getExternalPluginCapabilities() {
+    return { supported: false, reasonCode: "PLUGIN_UNSUPPORTED" };
+  }
+  async getExternalPluginCatalog(_query = {}) {
+    return { supported: false, reasonCode: "PLUGIN_UNSUPPORTED", items: [] };
+  }
+  async getPluginCapabilitiesPage(_query = {}) {
+    return { supported: false, reasonCode: "PLUGIN_UNSUPPORTED",
+      catalogRevision: null, items: [], nextCursor: null };
+  }
+  async previewPluginInstall(_source) { throw new Error(`${this.id}: plugin install not supported`); }
+  async previewPluginUninstall(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
+  async uninstallPlugin(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
+  async preparePluginMcpConsent(_input) { throw new Error(`${this.id}: plugin consent not supported`); }
+  async preparePluginOAuth(_input) { throw new Error(`${this.id}: plugin OAuth not supported`); }
+  async preparePluginDisconnect(_input) { throw new Error(`${this.id}: plugin disconnect not supported`); }
+  async commitPluginDisconnect(_input) { throw new Error(`${this.id}: plugin disconnect not supported`); }
+  async getPluginDisconnectOperation(_agentId, _operationId) { throw new Error(`${this.id}: plugin disconnect not supported`); }
+  async previewPluginDependency(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
+  async commitPluginDependency(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
+  async getPluginDependencyStatus(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
+  async getPluginDependencyOperation(_operationId) { throw new Error(`${this.id}: plugin dependencies not supported`); }
+  async commitPluginOAuth(_input) { throw new Error(`${this.id}: plugin OAuth not supported`); }
+  async getPluginOAuthStatus(_agentId, _flowId) { throw new Error(`${this.id}: plugin OAuth not supported`); }
+  async cancelPluginOAuth(_agentId, _flowId) { throw new Error(`${this.id}: plugin OAuth not supported`); }
+  async preparePluginApp(_sessionKey, _callId) { throw new Error(`${this.id}: plugin Apps not supported`); }
+  async commitPluginApp(_input) { throw new Error(`${this.id}: plugin Apps not supported`); }
+  async readPluginAppChunk(_transport, _index) { throw new Error(`${this.id}: plugin Apps not supported`); }
+  async messagePluginApp(_transport, _message) { throw new Error(`${this.id}: plugin Apps not supported`); }
+  async closePluginApp(_transport) { throw new Error(`${this.id}: plugin Apps not supported`); }
+  async commitPluginMcpConsent(_input) { throw new Error(`${this.id}: plugin consent not supported`); }
+  async discoverPluginMcpTools(_agentId, _bindingId) { throw new Error(`${this.id}: plugin discovery not supported`); }
+  async installPlugin(_input) { throw new Error(`${this.id}: plugin install not supported`); }
+  async getPluginOperation(_operationId) { return { found: false, operation: null }; }
+  async setPluginInstallationState(_input) {
+    throw new Error(`${this.id}: plugin installation state not supported`);
+  }
+  async getPluginSkillBindings(_agentId) {
+    throw new Error(`${this.id}: plugin Skill bindings not supported`);
+  }
+  async getPluginMcpStatus(_agentId, _installationId) {
+    throw new Error(`${this.id}: plugin MCP status not supported`);
+  }
+  async getPluginMcpTools(_agentId, _bindingId) {
+    throw new Error(`${this.id}: plugin MCP tools not supported`);
+  }
+  async revokePluginMcpGrant(_input) {
+    throw new Error(`${this.id}: plugin MCP grant revocation not supported`);
+  }
+  async revokeAllPluginMcpGrants(_input) {
+    throw new Error(`${this.id}: plugin MCP grant revocation not supported`);
+  }
+  async setPluginSkillBinding(_input) {
+    throw new Error(`${this.id}: plugin Skill bindings not supported`);
+  }
+
   // ---- models (management UI) ----
 
   /**
@@ -1711,6 +1782,21 @@ class AgentBackend {
    * @returns {Promise<object>}
    */
   async restoreAgent(id, opts) { throw new Error(`${this.id}: restoreAgent() not supported`); }
+
+  async getAgentRuntimeBindings(_id) { throw new Error(`${this.id}: runtime bindings not supported`); }
+  async getAgentRuntimePolicy(_id) { throw new Error(`${this.id}: runtime policy not supported`); }
+  async compactConversation(_id, _key, _operationId) { throw new Error(`${this.id}: product context not supported`); }
+  async setAgentRuntimePolicy(_id, _policy) { throw new Error(`${this.id}: runtime policy not supported`); }
+  async addAgentRuntimeBinding(_id, _spec, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
+  async updateAgentRuntimeBinding(_id, _bindingId, _patch, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
+  async removeAgentRuntimeBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
+  async setAgentDefaultBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
+  async getSessionRuntime(_id, _key) { throw new Error(`${this.id}: session runtime switching not supported`); }
+  async switchSessionRuntime(_id, _key, _input) { throw new Error(`${this.id}: session runtime switching not supported`); }
+  /** Connected CLI catalogs for this Agent's conversation; choices retain their Runtime Binding identity. */
+  async getSessionRuntimeModels(_id, _key) { throw new Error(`${this.id}: session runtime models not supported`); }
+  /** Atomically select the conversation's Runtime and model, without changing the Agent default. */
+  async selectSessionRuntimeModel(_id, _key, _input) { throw new Error(`${this.id}: session runtime models not supported`); }
 
   /**
    * List the agent's editable workspace files.

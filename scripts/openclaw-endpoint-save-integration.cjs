@@ -144,6 +144,73 @@ const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
     assert.equal(reopened.endpoints[0].primaryModelUsage.length, 2, "retained bindings remain visible after a confirmed removal");
     assert.deepEqual(reopened.endpoints[0].models, ["replacement-choice"], "removed primaries must not be silently selected again");
     console.log("PASS: confirmed primary deselection persists while preserving all Agent bindings; reopening and ordinary batch guards");
+    await server.close();
+    const createFixture = createEndpointBackendFixture(path.join(directory, "create"));
+    const createRpc = createFixture.backend.request.bind(createFixture.backend);
+    let activityRevision = 0;
+    createFixture.backend.request = async (method, params) => {
+      if (method === "sessions.list") return { sessions: [{ key: "agent:other:active",
+        providerOverride: "other", modelOverride: "unchanged-model", updatedAt: ++activityRevision,
+        totalTokens: activityRevision }], hasMore: false };
+      if (method === "cron.list") return { jobs: [{ id: "unrelated-job", payload: { model: "other/unchanged-model" },
+        state: { lastRunAtMs: ++activityRevision } }], hasMore: false };
+      return createRpc(method, params);
+    };
+    server = await startStaticServer(0, { registry: createFixture.coordinator.registry,
+      modelChangeCoordinator: createFixture.coordinator, homeDir: directory, userDataRoot: directory });
+    const createController = createOpenClawEndpointController("openclaw");
+    await createController.list();
+    const createDraft = { id: "newendpoint", name: "newendpoint", baseUrl: "https://fixture.example/v1",
+      model: "fixture-model", models: ["fixture-model"] };
+    const created = await createController.save(createDraft,
+      createEndpointMutationSession("openclaw", "create", "create-with-activity"));
+    assert.equal(created.status, "applied", "unrelated Session/Cron activity must not invalidate endpoint creation");
+    assert.equal(created.sync, "synced");
+    assert.deepEqual(created.snapshot.endpoints.find(endpoint => endpoint.id === createDraft.id).models, createDraft.models);
+    assert.equal(createFixture.state().writes, 1);
+    assert.deepEqual(createFixture.state().journal.map(row => [row.operationId, row.status]), [["create-with-activity:provider", "applied"]]);
+    assert.equal(createFixture.state().allowed.includes("newendpoint/fixture-model"), true);
+    console.log("PASS: new endpoint saves and reads back through client/controller/REST/coordinator despite unrelated Session/Cron activity");
+    await server.close();
+    const staleDirectory = path.join(directory, "create-config-conflict");
+    const staleFixture = createEndpointBackendFixture(staleDirectory);
+    const originalPreview = staleFixture.backend.previewModelChange.bind(staleFixture.backend);
+    let externalWrites = 0;
+    staleFixture.backend.previewModelChange = async (spec) => {
+      const preview = await originalPreview(spec);
+      if (externalWrites === 0) {
+        const snapshot = await staleFixture.backend._configSnapshot();
+        // A separate configuration edit really changes the fixture's hash between
+        // the initial preview and the provider-locked preflight.
+        await staleFixture.backend.request("config.patch", { baseHash: snapshot.hash,
+          raw: JSON.stringify({ agents: { defaults: { model: { primary: "other/changed-default" } } } }) });
+        externalWrites++;
+      }
+      return preview;
+    };
+    server = await startStaticServer(0, { registry: staleFixture.coordinator.registry,
+      modelChangeCoordinator: staleFixture.coordinator, homeDir: directory, userDataRoot: directory });
+    const staleController = createOpenClawEndpointController("openclaw");
+    await staleController.list();
+    const stale = await staleController.save(createDraft,
+      createEndpointMutationSession("openclaw", "create", "create-config-stale"));
+    assert.equal(stale.code, "preview_stale");
+    assert.equal(stale.status, "blocked");
+    assert.equal(stale.stage, "preflight");
+    assert.equal(stale.recovery.locked, false, "proven zero-write conflicts must leave the draft editable");
+    assert.equal(staleFixture.state().writes, externalWrites, "the rejected create must not write configuration");
+    assert.deepEqual(staleFixture.state().journal, [], "config conflicts must stop before journal.begin");
+    assert.equal(fs.existsSync(path.join(staleDirectory, "model-change-journal.json")), false);
+    assert.equal(stale.snapshot.endpoints.some(endpoint => endpoint.id === createDraft.id), false);
+    const revisedDraft = { ...createDraft, model: "revised-model", models: ["revised-model"] };
+    const revised = await staleController.save(revisedDraft,
+      createEndpointMutationSession("openclaw", "create", "create-after-conflict"));
+    assert.equal(revised.status, "applied");
+    assert.equal(revised.sync, "synced");
+    assert.deepEqual(revised.snapshot.endpoints.find(endpoint => endpoint.id === createDraft.id).models, revisedDraft.models);
+    assert.equal(staleFixture.state().writes, externalWrites + 1);
+    assert.deepEqual(staleFixture.state().journal.map(row => [row.operationId, row.status]), [["create-after-conflict:provider", "applied"]]);
+    console.log("PASS: real config drift returns preview_stale before journal/config writes, unlocks the draft, and allows a revised submission");
   } finally {
     global.fetch = transport;
     await server?.close();

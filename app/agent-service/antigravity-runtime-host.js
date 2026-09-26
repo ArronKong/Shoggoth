@@ -1,13 +1,16 @@
 "use strict";
+const { openRuntimeLedger } = require("./runtime-shared-ledger");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { serviceError } = require("./security");
+const { classifyProviderLimit } = require("./runtime-provider-errors");
 const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { safeSnapshot } = require("./codex-event-snapshot");
+const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
 const {
   ANTIGRAVITY_RUNTIME,
   antigravityWorkspaceShardId,
@@ -56,6 +59,7 @@ const PARENT_ENV_ALLOWLIST = Object.freeze([
 const AUTH_ERROR_PATTERN = /(?:please sign in|sign-in required|not signed in|not logged in(?:to)?|authentication required|unauthenticated)/iu;
 const TOOL_PERMISSION_ERROR_PATTERN = /(?:\bpermission denied\b|\buser denied permission\b|\bapproval required\b|\bnot approved\b|soft-denying tool confirmation)/iu;
 const UPSTREAM_UNAVAILABLE_PATTERN = /(?:UNAVAILABLE\s*\(code 503\)|"code"\s*:\s*503|"status"\s*:\s*"UNAVAILABLE")/iu;
+const PROVIDER_LIMIT_PATTERN = /(?:RESOURCE_EXHAUSTED\s*\(code 429\)|"code"\s*:\s*429|"status"\s*:\s*"RESOURCE_EXHAUSTED")/iu;
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
 const MAX_STDERR_BYTES = 256 * 1024;
 const MAX_TURN_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -82,6 +86,11 @@ function diagnosticFailure(active, extra = "", { auth = false } = {}) {
       "Antigravity upstream service is temporarily unavailable",
     );
   }
+  // Google reports both per-minute limits and exhausted quota as 429; the
+  // accompanying text decides which public reason applies.
+  const limit = classifyProviderLimit(extra) ?? (PROVIDER_LIMIT_PATTERN.test(diagnostics)
+    ? classifyProviderLimit(diagnostics) ?? "RUNTIME_RATE_LIMITED" : null);
+  if (limit) return hostError(limit, "Antigravity provider limit reached");
   if (auth && AUTH_ERROR_PATTERN.test(diagnostics)) {
     return hostError("AUTH_REQUIRED", "Antigravity authentication is required");
   }
@@ -245,6 +254,8 @@ class AntigravityRuntimeHost {
     });
     this.runtimeProfileId = this.binding.runtimeProfileId;
     this.runtimeAccountId = this.binding.runtimeAccountId;
+    this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
+    this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeAntigravityPermissionPolicy(options.permissionPolicy);
     this.controlInstance = options.controlInstance === true;
@@ -264,6 +275,7 @@ class AntigravityRuntimeHost {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
     this.promptTimeoutMs = options.promptTimeoutMs ?? 310_000;
     this.acceptanceTimeoutMs = options.acceptanceTimeoutMs ?? 30_000;
+    this.nativeStartupTimeoutMs = options.nativeStartupTimeoutMs ?? 60_000;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
     this.killGraceMs = options.killGraceMs ?? 2_000;
     this.maxFrameBytes = options.maxFrameBytes;
@@ -273,12 +285,13 @@ class AntigravityRuntimeHost {
       models: null,
       modelsExpiresAt: 0,
     };
+    this.modelCatalogCache = getModelCatalogCache(this.profileState);
     this.mcpGateIssuer = options.mcpGateIssuer;
     if (!this.mcpGateIssuer || ["reserveMcpServer", "bindMcpServer", "revokeMcpServer"]
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
       throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity MCP gate issuer is invalid");
     }
-    for (const value of [this.requestTimeoutMs, this.promptTimeoutMs, this.acceptanceTimeoutMs,
+    for (const value of [this.requestTimeoutMs, this.promptTimeoutMs, this.acceptanceTimeoutMs, this.nativeStartupTimeoutMs,
       this.shutdownGraceMs, this.killGraceMs]) {
       if (!Number.isSafeInteger(value) || value < 100 || value > 10 * 60 * 1_000) {
         throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity host timeout is invalid");
@@ -334,20 +347,21 @@ class AntigravityRuntimeHost {
           "Antigravity CLI 1.1.16 or newer is required",
         );
       }
+      this.cliVersion = version.join(".");
       this.nativeApprovalsAvailable = this.platform === "darwin"
         && (version[0] > 1 || (version[0] === 1 && (version[1] > 2 || (version[1] === 2 && version[2] >= 5))));
       const workspaceShardId = antigravityWorkspaceShardId({
         controlInstance: this.controlInstance,
         workspace: this.workspace,
       });
-      this.ledger = new AntigravityRuntimeLedger({
+      this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new AntigravityRuntimeLedger({
         fs: this.fs,
         stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", ANTIGRAVITY_RUNTIME),
         trustedRoot: this.paths.trustedRoot,
         runtimeProfileId: this.runtimeProfileId,
         workspaceShardId,
         now: this.now,
-      }).open();
+      }).open());
       this.state = "ready";
       return this;
     } catch (error) {
@@ -359,12 +373,21 @@ class AntigravityRuntimeHost {
     }
   }
 
+  canRetireIdle() {
+    return this.state === "ready" && !this.cleanupIncomplete && !this.stopping
+      && this.activeTurns.size === 0 && this.controlProcesses.size === 0 && this.controlRequests.size === 0;
+  }
+
   beginAcquire() {
     this._assertReady();
   }
 
-  async authenticationState() {
+  async authenticationState({ allowDeferred = false } = {}) {
     this._assertReady();
+    // agy authenticates and checks eligibility before forwarding any message.
+    // A separate `models` process duplicates those network requests and can
+    // fail on profile/avatar fetching before the actual CLI is even started.
+    if (allowDeferred) return Object.freeze({ verificationDeferred: true });
     try {
       await this._ensureModelCatalog();
       return Object.freeze({ authenticated: true, credentialPresent: true });
@@ -394,16 +417,16 @@ class AntigravityRuntimeHost {
 
   async sessionStart(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
     if (!plain(input) || !safeString(input.source, 256)
       || (input.developerInstructions !== undefined
         && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
       throw hostError("RUNTIME_SESSION_PARAMS_INVALID", "Antigravity session input is invalid");
     }
+    const models = input.model == null ? null : await this._ensureModelCatalog({ model: input.model });
     this._assertInputPermissionPolicy(input.permissionPolicy);
     const permissionMode = normalizePermissionMode(input.permissionMode);
     const cwd = this._sessionCwd(input.cwd);
-    const model = this._validateModel(input.model);
+    const model = this._validateModel(input.model, models);
     const snapshot = this.ledger.snapshot();
     const existing = snapshot.sessions.find((session) => session.source === input.source);
     if (existing) {
@@ -443,12 +466,12 @@ class AntigravityRuntimeHost {
 
   async sessionResume(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
     if (!plain(input) || !safeString(input.sessionId, 512)
       || (input.developerInstructions !== undefined
         && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
       throw hostError("RUNTIME_SESSION_PARAMS_INVALID", "Antigravity resume input is invalid");
     }
+    const models = input.model == null ? null : await this._ensureModelCatalog({ model: input.model });
     this._assertInputPermissionPolicy(input.permissionPolicy);
     const permissionMode = normalizePermissionMode(input.permissionMode);
     const session = this._requireSession(input.sessionId);
@@ -462,7 +485,7 @@ class AntigravityRuntimeHost {
     if (cwd !== session.cwd) {
       throw hostError("RUNTIME_SESSION_NOT_FOUND", "Antigravity session workspace does not match");
     }
-    const model = this._validateModel(input.model);
+    const model = this._validateModel(input.model, models);
     this.sessionConfigs.set(session.id, {
       developerInstructions: typeof input.developerInstructions === "string"
         ? input.developerInstructions : "",
@@ -549,7 +572,6 @@ class AntigravityRuntimeHost {
 
   async turnStart(input) {
     this._assertExecutionInstance();
-    await this._ensureModelCatalog();
     if (!plain(input) || !safeString(input.sessionId, 512)
       || !safeString(input.operationId, 512)
       || !safeString(input.prompt, 1024 * 1024, { empty: true })
@@ -557,6 +579,10 @@ class AntigravityRuntimeHost {
         && !safeString(input.context, 4 * 1024 * 1024, { empty: true }))) {
       throw hostError("RUNTIME_TURN_PARAMS_INVALID", "Antigravity turn input is invalid");
     }
+    const requestedModel = input.model ?? this.sessionConfigs.get(input.sessionId)?.model;
+    // The CLI owns its default model and performs authentication itself. An
+    // unrelated network catalog fetch must not block default-model sessions.
+    const models = requestedModel == null ? null : await this._ensureModelCatalog({ model: requestedModel });
     const permissionPolicy = this._assertInputPermissionPolicy(input.permissionPolicy);
     const permissionMode = normalizePermissionMode(input.permissionMode
       ?? this.sessionConfigs.get(input.sessionId)?.permissionMode);
@@ -567,7 +593,7 @@ class AntigravityRuntimeHost {
     if (this._sessionCwd(input.cwd) !== session.cwd) {
       throw hostError("RUNTIME_SESSION_NOT_FOUND", "Antigravity turn workspace does not match");
     }
-    const model = this._validateModel(input.model ?? this.sessionConfigs.get(session.id)?.model);
+    const model = this._validateModel(requestedModel, models);
     const encodedInput = encodeAntigravityUserMessage(this._promptText(session.id, input));
     const fingerprint = inputFingerprint({ ...input, model });
     const existing = turnByOperation(session, input.operationId);
@@ -747,6 +773,7 @@ class AntigravityRuntimeHost {
     if (this.stopping) return this.stopping;
     if (this.state === "stopped") return undefined;
     this.state = "stopping";
+    this.modelCatalogCache.invalidate();
     this.stopping = (async () => {
       const active = [...this.activeTurns.values()];
       for (const turn of active) this._signal(turn, "SIGTERM");
@@ -802,6 +829,7 @@ class AntigravityRuntimeHost {
     const reservation = this.mcpGateIssuer.reserveMcpServer({
       runtimeProfileId: this.runtimeProfileId,
       runtimeAccountId: this.runtimeAccountId,
+      executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.binaryPath,
     });
     active.reservationId = reservation.reservationId;
@@ -843,16 +871,27 @@ class AntigravityRuntimeHost {
         home: this.home, cwd: active.cwd, trustedRoot: this.paths.trustedRoot,
         stateRoot: path.join(this.paths.stateDir, "antigravity-terminals"),
         env, binaryPath: this.binaryPath, args, conversationId: active.remoteConversationId,
-        requestApproval: async (params) => {
+        requestApproval: async (params, context = {}) => {
           // Let the coordinator commit turn acceptance before routing a request.
           await active.acceptance.promise;
           await new Promise((resolve) => setImmediate(resolve));
-          if (active.settled || active.interruptRequested) return { decision: "cancel" };
+          if (active.settled || active.interruptRequested || context.signal?.aborted) return { decision: "cancel" };
           const handler = this.serverRequestHandlers.get("item/commandExecution/requestApproval");
           if (!handler) throw hostError("RUNTIME_APPROVAL_UNAVAILABLE", "No Antigravity approval handler is attached");
-          return handler({ ...params, sessionId: active.sessionId, threadId: active.sessionId, turnId: active.turnId });
+          return handler({ ...params, sessionId: active.sessionId, threadId: active.sessionId, turnId: active.turnId }, {
+            method: "item/commandExecution/requestApproval", sourceMethod: "native/approval", signal: context.signal,
+          });
         },
         onApprovalWaiting: (waiting) => this._setApprovalWaiting(active, waiting),
+        onInputSubmitted: () => {
+          if (active.settled || active.accepted) return;
+          clearTimeout(active.acceptanceTimer);
+          active.acceptanceTimer = setTimeout(() => this._acceptanceTimedOut(active), this.acceptanceTimeoutMs);
+          active.acceptanceTimer.unref?.();
+        },
+        onDiagnostic: (diagnostic) => {
+          try { this.onDiagnostic?.(diagnostic); } catch {}
+        },
       }) : this.spawnProcess(launcher, launcherArgs, {
         cwd: active.cwd,
         env,
@@ -886,7 +925,7 @@ class AntigravityRuntimeHost {
     child.on("error", (error) => this._deferActiveFailure(
       active,
       native && error?.code ? error : hostError("ANTIGRAVITY_PROCESS_FAILED", "Antigravity process failed"),
-      { definitelyRejected: error?.code === "ENOENT" },
+      { definitelyRejected: error?.code === "ENOENT" || (native && child.inputRejected === true) },
     ));
     child.on("close", (code, signal) => {
       try { this._onClose(active, code, signal); } catch (error) {
@@ -895,7 +934,7 @@ class AntigravityRuntimeHost {
     });
     active.acceptanceTimer = setTimeout(
       () => this._acceptanceTimedOut(active),
-      this.acceptanceTimeoutMs,
+      native ? this.nativeStartupTimeoutMs : this.acceptanceTimeoutMs,
     );
     active.acceptanceTimer.unref?.();
     active.promptRemainingMs = this.promptTimeoutMs;
@@ -1026,6 +1065,7 @@ class AntigravityRuntimeHost {
         this._publish({
           ...common,
           type: "tool_start",
+          ...require("./context-tool-content").contextToolContent({ input: payload.tool_info?.parameters }, this.registeredSecrets),
           toolCallId,
           tool: {
             kind: "other", name, status: "in_progress",
@@ -1049,6 +1089,7 @@ class AntigravityRuntimeHost {
         this._publish({
           ...common,
           type: "tool_result",
+          ...require("./context-tool-content").contextToolContent({ output: rawOutput }, this.registeredSecrets),
           toolCallId,
           tool: {
             kind: "other",
@@ -1245,10 +1286,7 @@ class AntigravityRuntimeHost {
       return;
     }
     if (failure.code === "AUTH_REQUIRED") {
-      this.profileState.authenticated = false;
-      this.profileState.authCheckedAt = timestamp;
-      this.profileState.models = null;
-      this.profileState.modelsExpiresAt = 0;
+      this._invalidateAuthentication();
     }
     active.settled = true;
     this._clearActive(active);
@@ -1266,11 +1304,12 @@ class AntigravityRuntimeHost {
 
   _acceptanceTimedOut(active) {
     if (active.settled || active.accepted) return;
+    const notSubmitted = active.nativeTerminal && active.child?.sent === false;
     this._signal(active, "SIGKILL");
     this._failActive(active, hostError(
-      "RUNTIME_TURN_ACCEPTANCE_UNKNOWN",
-      "Antigravity did not prove turn acceptance",
-    ));
+      notSubmitted ? "ANTIGRAVITY_STARTUP_TIMEOUT" : "RUNTIME_TURN_ACCEPTANCE_UNKNOWN",
+      notSubmitted ? "Antigravity did not become ready; no prompt was submitted" : "Antigravity did not prove turn acceptance",
+    ), { definitelyRejected: notSubmitted });
   }
 
   _promptTimedOut(active) {
@@ -1308,33 +1347,74 @@ class AntigravityRuntimeHost {
     }
   }
 
-  async _ensureModelCatalog() {
-    const now = this.now();
-    if (Array.isArray(this.profileState.models) && this.profileState.modelsExpiresAt > now) {
-      return this.profileState.models;
+  _modelCatalogIdentity() {
+    return modelCatalogIdentity({
+      fs: this.fs,
+      values: [this.runtimeEnvironment, this.cliVersion, this.permissionPolicy, this.profileState.authGeneration || 0,
+        PARENT_ENV_ALLOWLIST.map((key) => [key, this.parentEnv[key] ?? null])],
+      files: [this.binaryPath,
+        path.join(this.home, ".gemini", "antigravity-cli", "settings.json"),
+        path.join(this.runtimeEnvironment.nativeHome, "antigravity-cli", "settings.json"),
+        path.join(this.home, ".gemini", "oauth_creds.json"),
+        path.join(this.runtimeEnvironment.nativeHome, "oauth_creds.json"),
+        path.join(this.userHome, "Library", "Keychains", "login.keychain-db")],
+    });
+  }
+
+  _invalidateAuthentication() {
+    this.profileState.authenticated = false;
+    this.profileState.authCheckedAt = this.now();
+    this.profileState.models = null;
+    this.profileState.modelsExpiresAt = 0;
+    this.profileState.authGeneration = (this.profileState.authGeneration || 0) + 1;
+    this.modelCatalogCache.invalidate();
+  }
+
+  async _ensureModelCatalog({ model } = {}) {
+    try { return await this._readModelCatalog(model); }
+    catch (error) {
+      // Account-shared cache invalidation (for example a sibling host stopping)
+      // can fence a read-only probe. Retry that identity race once; never retry
+      // auth failures, timeouts, session creation, or any accepted turn.
+      if (error?.code !== "RUNTIME_MODEL_CATALOG_CHANGED" || this.state !== "ready") throw error;
+      return this._readModelCatalog(model);
     }
-    const result = await this._runControl(["models"], { timeoutMs: 15_000 });
+  }
+
+  async _readModelCatalog(model) {
+    const key = this._modelCatalogIdentity();
+    const models = await this.modelCatalogCache.read({
+      key, now: this.now,
+      isCurrent: () => this.state === "ready" && key === this._modelCatalogIdentity(),
+      allowStale: (catalog) => typeof model === "string" && catalog.some((candidate) => candidate.model === model),
+      onRefreshError: (error) => {
+        if (error?.code === "AUTH_REQUIRED") this._invalidateAuthentication();
+        try { this.onDiagnostic?.({ code: error?.code || "RUNTIME_MODEL_CATALOG_UNAVAILABLE" }); } catch {}
+      },
+      load: async () => {
+        const result = await this._runControl(["models"], { timeoutMs: 15_000, identity: key });
+        this._assertReady();
+        if (result.code !== 0) {
+          if (AUTH_ERROR_PATTERN.test(`${result.stdout}\n${result.stderr}`)) {
+            throw hostError("AUTH_REQUIRED", "Antigravity authentication is required");
+          }
+          throw hostError("RUNTIME_MODEL_CATALOG_UNAVAILABLE", "Antigravity models command failed");
+        }
+        return parseModelCatalog(result.stdout);
+      },
+    });
     this._assertReady();
-    if (result.code !== 0) {
-      if (AUTH_ERROR_PATTERN.test(`${result.stdout}\n${result.stderr}`)) {
-        this.profileState.authenticated = false;
-        this.profileState.authCheckedAt = now;
-        throw hostError("AUTH_REQUIRED", "Antigravity authentication is required");
-      }
-      throw hostError("RUNTIME_MODEL_CATALOG_UNAVAILABLE", "Antigravity models command failed");
-    }
-    const models = parseModelCatalog(result.stdout);
+    if (key !== this._modelCatalogIdentity()) throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "Antigravity model catalog identity changed");
     this.profileState.models = models;
-    this.profileState.modelsExpiresAt = now + 5 * 60 * 1_000;
     this.profileState.authenticated = true;
-    this.profileState.authCheckedAt = now;
+    this.profileState.authCheckedAt = this.now();
     return models;
   }
 
-  _validateModel(model) {
+  _validateModel(model, models) {
     if (model === undefined || model === null) return null;
     if (!safeString(model, 512)
-      || !this.profileState.models?.some((candidate) => candidate.model === model)) {
+      || !models?.some((candidate) => candidate.model === model)) {
       throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Antigravity model is unavailable");
     }
     return model;
@@ -1440,7 +1520,7 @@ class AntigravityRuntimeHost {
       || args.some((arg) => !safeString(arg, 4096))) {
       return Promise.reject(hostError("ANTIGRAVITY_CONTROL_INVALID", "Antigravity control command is invalid"));
     }
-    const key = JSON.stringify([args, options.cwd || this.home, options.timeoutMs ?? this.requestTimeoutMs]);
+    const key = JSON.stringify([args, options.cwd || this.home, options.timeoutMs ?? this.requestTimeoutMs, options.identity ?? null]);
     const existing = this.controlRequests.get(key);
     if (existing) return existing;
     const pending = this._spawnControl(args, options).finally(() => {

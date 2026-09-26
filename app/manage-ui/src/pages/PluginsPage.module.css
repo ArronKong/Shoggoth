@@ -1,0 +1,371 @@
+.page {
+  min-width: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  max-width: 920px;
+}
+.grid[hidden] { display: none; }
+
+.libraryTabs {
+  display: flex;
+  width: fit-content;
+  gap: 3px;
+  padding: 3px;
+  margin: 0 0 18px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+}
+.libraryTabs button {
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ui-text-2);
+  font: inherit;
+  font-size: 12px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+.libraryTabs button[aria-selected="true"] {
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+}
+.libraryTabs button:focus-visible,
+.bundledCard button:focus-visible,
+.librarySearch input:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.bundledLibrary { max-width: 1040px; }
+.libraryIntro {
+  color: var(--ui-text-2);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 14px;
+}
+.librarySearch {
+  display: grid;
+  gap: 6px;
+  max-width: 390px;
+  margin-bottom: 18px;
+  color: var(--ui-text-2);
+  font-size: 12px;
+}
+.librarySearch input {
+  min-width: 0;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 9px;
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  font: inherit;
+}
+.bundledGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 245px), 1fr));
+  gap: 12px;
+}
+.bundledCard {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 16px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 14px;
+  background: var(--ui-surface-1);
+}
+.bundledCardTop { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.bundledIcon,
+.bundledIconFallback {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+}
+.bundledIcon { padding: 5px; }
+.bundledIconFallback { display: block; }
+.bundledTitle { display: grid; min-width: 0; gap: 2px; }
+.bundledTitle strong { color: var(--ui-text-1); font-size: 13px; overflow-wrap: anywhere; }
+.bundledTitle span,
+.bundledMeta { color: var(--ui-text-2); font-size: 11px; line-height: 1.4; }
+.bundledMeta { display: grid; gap: 2px; }
+.bundledGaps {
+  color: var(--ui-text-2);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.bundledGaps summary { cursor: pointer; }
+.bundledGaps ul { margin: 6px 0 0; padding-left: 17px; }
+.bundledGaps li + li { margin-top: 4px; }
+.bundledCard p {
+  flex: 1;
+  margin: 0;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.bundledCardBottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--ui-text-2);
+  font-size: 11px;
+}
+
+.externalCatalog { max-width: 920px; }
+
+.card {
+  min-width: 0;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--ui-surface-1);
+  padding: 20px;
+}
+
+.packages { grid-column: 1 / -1; }
+
+.cardHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cardHeading h2 {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.card p {
+  min-height: 3em;
+  margin: 12px 0 20px;
+  color: var(--ui-text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.available,
+.pending {
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.available {
+  background: color-mix(in srgb, var(--ui-success) 12%, var(--ui-surface-1));
+  color: var(--ui-success);
+}
+
+.pending {
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+}
+
+.catalogMessage,
+.packageMeta {
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.packageList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.packageItem {
+  min-width: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--ui-hairline);
+  overflow-wrap: anywhere;
+}
+
+.packageItem > button {
+  margin-top: 10px;
+}
+.packageItem > button + button { margin-inline-start: 8px; }
+
+.agentChoice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--ui-text-2);
+  font-size: 12px;
+}
+
+.agentChoice select {
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 8px;
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+  padding: 7px 9px;
+  font: inherit;
+}
+
+.packageHeading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--ui-text-1);
+  font-size: 13px;
+}
+
+.packageHeading strong {
+  min-width: 0;
+  font-weight: 600;
+}
+
+.packageHeading span {
+  color: var(--ui-text-2);
+  font-size: 11px;
+}
+
+.componentList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 9px 0 0;
+  padding: 0;
+}
+
+.componentList li {
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.mcpStatusList {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.mcpStatusList li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 8px;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.mcpStatusList strong {
+  color: var(--ui-text-1);
+  font-weight: 600;
+}
+
+.mcpStatusList > li > button {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.mcpTools {
+  min-width: 0;
+}
+
+.mcpToolList {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.mcpToolList li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  padding: 5px 0;
+  border-top: 1px solid var(--ui-hairline);
+}
+
+.mcpToolList li > span:first-child {
+  color: var(--ui-text-1);
+  overflow-wrap: anywhere;
+}
+
+.previewPanel {
+  min-width: 0;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 10px;
+  background: var(--ui-surface-2);
+  overflow-wrap: anywhere;
+}
+
+.previewPanel h3 {
+  margin: 0 0 6px;
+  color: var(--ui-text-1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.diagnosticList {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--ui-text-2);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.previewActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.catalogMessage button {
+  margin-left: 8px;
+}
+.gitSourceForm {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  max-width: 640px;
+}
+.gitSourceForm input {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  border: 1px solid var(--ui-hairline); border-radius: 8px;
+  padding: 8px 10px; background: var(--ui-surface-1); color: var(--ui-text-1);
+}
+.gitSourceForm label { color: var(--ui-text-2); font-size: 13px; }
+.gitSourceForm button { justify-self: start; }

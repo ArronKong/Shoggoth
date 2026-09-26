@@ -1,30 +1,31 @@
 "use strict";
 
 const fs = require("node:fs");
-const path = require("node:path");
 const { validatePrivateFileStat } = require("./security");
+const { sqliteNativeBinding } = require("./sqlite-native-binding");
 
 // Use the Node runtime SQLite engine when available. Older runtimes fall back
 // to the pinned better-sqlite3 Node-API addon supplied for each architecture.
-function openDatabase(filePath) {
+function openDatabase(filePath, { readOnly = false } = {}) {
   for (const suffix of ["", "-wal", "-shm", "-journal"]) {
     try { validatePrivateFileStat(fs.lstatSync(filePath + suffix), filePath + suffix); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
   }
-  if (!fs.existsSync(filePath)) {
+  if (!fs.existsSync(filePath) && !readOnly) {
     const fd = fs.openSync(filePath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
     fs.closeSync(fd);
   }
   let Database;
+  let builtin = true;
   try { Database = require("node:sqlite").DatabaseSync; }
   catch (error) {
     if (error.code !== "ERR_UNKNOWN_BUILTIN_MODULE") throw error;
-    Database = require("better-sqlite3");
+    Database = require("better-sqlite3"); builtin = false;
   }
-  const vendor = path.resolve(__dirname, "../../.vendor/sqlite", process.arch, "better_sqlite3.node");
-  const bundled = path.resolve(__dirname, "../../../sqlite/better_sqlite3.node");
-  const nativeBinding = fs.existsSync(bundled) ? bundled : fs.existsSync(vendor) ? vendor : null;
-  const db = new Database(filePath, process.versions.electron && nativeBinding ? { nativeBinding } : {});
+  const nativeBinding = !builtin ? sqliteNativeBinding() : null;
+  const db = new Database(filePath, { ...(process.versions.electron && nativeBinding && !builtin ? { nativeBinding } : {}),
+    ...(readOnly ? { [builtin ? "readOnly" : "readonly"]: true } : {}) });
+  if (readOnly) return db;
   try { db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;"); }
   catch (error) { db.close(); throw error; }
   return db;
@@ -68,7 +69,6 @@ END;
 CREATE TRIGGER ideas_search_delete AFTER DELETE ON ideas BEGIN
   INSERT INTO ideas_search(ideas_search,rowid,search) VALUES ('delete',old.rowid,old.search);
 END;
-PRAGMA user_version=1;
 `;
 
 function transaction(db, action) {
@@ -82,7 +82,7 @@ function transaction(db, action) {
 
 module.exports = { openDatabase, SCHEMA, transaction };
 
-// Additive migration: the existing idea, execution and operation identities stay intact.
+// All tables are created together for a fresh current-schema database.
 module.exports.GROWTH_SCHEMA = `
 CREATE INDEX ideas_growth_queue ON ideas(deleted, archived, bucket);
 CREATE TABLE growth_jobs (
@@ -91,5 +91,4 @@ CREATE TABLE growth_jobs (
   CHECK(idea_id=json_extract(data,'$.ideaId') AND state=json_extract(data,'$.state'))
 );
 CREATE INDEX growth_jobs_state ON growth_jobs(state, idea_id);
-PRAGMA user_version=2;
 `;

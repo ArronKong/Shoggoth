@@ -23,7 +23,7 @@ function adapter(overrides = {}) {
 
 test("acquire 与 stop 按 RuntimeBinding 路由到唯一 Adapter", async () => {
   const calls = [];
-  const registry = new RuntimeAdapterRegistry();
+  const registry = new RuntimeAdapterRegistry({ validateHandles: false });
   registry.register("codex", adapter({
     acquire(binding, options) {
       calls.push(["acquire", binding, options]);
@@ -53,8 +53,8 @@ test("acquire 与 stop 按 RuntimeBinding 路由到唯一 Adapter", async () => 
   assert.equal(calls[0][2], options);
 });
 
-test("重复注册、非法注册与未知 Runtime 都严格拒绝", () => {
-  const registry = new RuntimeAdapterRegistry();
+test("重复注册、非法注册与未知 Runtime 都严格拒绝", async () => {
+  const registry = new RuntimeAdapterRegistry({ validateHandles: false });
   registry.register("codex", adapter());
   assert.throws(
     () => registry.register("codex", adapter()),
@@ -73,7 +73,7 @@ test("重复注册、非法注册与未知 Runtime 都严格拒绝", () => {
     runtimeProfileId: "profile-grok",
     runtimeAccountId: "account-grok",
   };
-  assert.throws(
+  await assert.rejects(
     () => registry.acquire(unknown),
     (error) => error.code === "RUNTIME_UNSUPPORTED",
   );
@@ -83,18 +83,18 @@ test("重复注册、非法注册与未知 Runtime 都严格拒绝", () => {
   );
 });
 
-test("被禁用的 Claude 即使被注册也不能启动", () => {
-  const registry = new RuntimeAdapterRegistry();
+test("被禁用的 Claude 即使被注册也不能启动", async () => {
+  const registry = new RuntimeAdapterRegistry({ validateHandles: false });
   let called = false;
   registry.register("claude-code", adapter({ acquire() { called = true; } }));
-  assert.throws(() => registry.acquire({ runtime: "claude-code", runtimeProfileId: "saved-profile",
+  await assert.rejects(() => registry.acquire({ runtime: "claude-code", runtimeProfileId: "saved-profile",
     runtimeAccountId: "saved-account" }), error => error.code === "RUNTIME_UNSUPPORTED");
   assert.equal(called, false);
 });
 
 test("stop 保留目标 Adapter 的清理失败", async () => {
   const expected = new Error("profile cleanup failed");
-  const registry = new RuntimeAdapterRegistry();
+  const registry = new RuntimeAdapterRegistry({ validateHandles: false });
   registry.register("codex", adapter({
     async stop() { throw expected; },
   }));
@@ -112,7 +112,7 @@ test("stopAll 尝试全部 Adapter 后聚合所有清理失败", async () => {
   const calls = [];
   const firstFailure = new Error("codex cleanup failed");
   const secondFailure = new Error("future cleanup failed");
-  const registry = new RuntimeAdapterRegistry();
+  const registry = new RuntimeAdapterRegistry({ validateHandles: false });
   registry.register("codex", adapter({
     stopAll() {
       calls.push("codex");

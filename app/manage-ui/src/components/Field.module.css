@@ -130,6 +130,7 @@
 .positioner {
   z-index: 300;
 }
+:global(body[data-immersive]) .positioner { z-index: 1300; }
 .popup {
   min-width: var(--anchor-width);
   max-height: min(20rem, var(--available-height));

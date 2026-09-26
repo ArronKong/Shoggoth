@@ -1,3 +1,4 @@
+import { isNativeAgentId, nativeBackendCatalog } from "./nativeBackendIdentity";
 export type ChatBackendId = string;
 
 export interface BackendOwnedSession {
@@ -12,12 +13,11 @@ type ChatCapabilitySummary = {
 };
 
 /**
- * Legacy fallback for rows that predate the backendId contract. Agent ids are
- * opaque (native facades intentionally keep their historical ids), so ownership
- * must never be inferred from a prefix.
+ * Reserve the native namespace during offline/startup discovery.
+ * It must never become an OpenClaw write target.
  */
-export function backendOfAgent(_agentId: string): ChatBackendId {
-  return "openclaw";
+export function backendOfAgent(agentId: string): ChatBackendId {
+  return isNativeAgentId(agentId) ? nativeBackendCatalog.id : "openclaw";
 }
 
 export function resolveBackendOwner(declaredBackendId: unknown, agentId = ""): ChatBackendId {

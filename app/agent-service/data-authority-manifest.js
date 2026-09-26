@@ -22,10 +22,102 @@ function recordAuthority({ authority = [], runtimeCache = [], derived = [], uiCa
 const DATA_AUTHORITY_MANIFEST = Object.freeze({
   schemaVersion: 1,
   stores: Object.freeze({
+    runtimeSelectionPolicy: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["agents/<profileId>/runtime-selection-policy.json"]),
+      records: Object.freeze({ RuntimeSelectionPolicy: recordAuthority({ authority: ["version", "revision", "mode",
+        "allowedBindingIds", "preferredBindingIds", "affinity", "weights", "compactionBindingId"] }) }),
+      recovery: "CAS policy belongs to the Agent; recovery uses the frozen execution binding, never a new selection",
+    }),
+    sourceConversation: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["stateDir/source-conversations-v1.json"]),
+      records: Object.freeze({ SourceConversation: recordAuthority({ authority: ["runId", "source", "sourceId", "profileId",
+        "workspace", "sessionKey", "policy", "createdAt"] }) }),
+      recovery: "Kanban associations persist; deleted conversations are not recreated for an old run",
+    }),
+    cron: Object.freeze({
+      owner: "shoggoth", schemaVersion: 3,
+      pathRules: Object.freeze(["stateDir/native-cron.json", "stateDir/native-cron.json.pre-v3"]),
+      records: Object.freeze({ CronTombstone: recordAuthority({ authority: ["id", "profileId", "name", "deletedAt", "operationId"] }) }),
+      recovery: "Deleted job IDs remain reserved and historical WorkRuns remain attributable",
+    }),
+    runtimeExtensions: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["stateDir/runtime-extensions-v1.json", "stateDir/runtime-acp-ledgers/<sha256-binding-workspace>.json"]),
+      records: Object.freeze({ RuntimeExtension: recordAuthority({ authority: ["enabled", "envelope", "trustedKey"] }),
+        AcpLedger: recordAuthority({ authority: ["version", "sessions", "pending"] }) }),
+      recovery: "Signed opt-in packages; ACP pending receipts reject replay when remote acceptance is unknown",
+    }),
+    plugins: Object.freeze({
+      owner: "shoggoth", schemaVersion: 8,
+      pathRules: Object.freeze(["stateDir/plugins/catalog.sqlite", "stateDir/plugins/packages/<contentDigest>",
+        "stateDir/plugins/staging/<operationId>", "stateDir/plugins/data/<installationId>/<dataScopeId>",
+        "stateDir/plugins/oauth-providers.json", "stateDir/plugins/data/.prepared-dependencies",
+        "stateDir/plugins/plugin-rollback/<installationId>"]),
+      records: Object.freeze({
+        PluginAuthorityState: recordAuthority({ authority: ["incarnation", "restoredAt", "restoredFrom", "receiptGap"] }),
+        PluginRelease: recordAuthority({ authority: ["sourceIdentity", "contentDigest", "name", "declaredVersion",
+          "manifest", "components", "diagnostics", "createdAt"] }),
+        PluginInstallation: recordAuthority({ authority: ["installationId", "sourceIdentity", "releaseDigest",
+          "desiredState", "revision", "createdAt", "updatedAt"] }),
+        PluginOperation: recordAuthority({ authority: ["operationId", "fingerprint", "kind", "phase", "result",
+          "createdAt", "updatedAt"] }),
+        PluginOperationIntent: recordAuthority({ authority: ["operationId", "installationId",
+          "desiredState", "expectedRevision"] }),
+        PluginConnection: recordAuthority({ authority: ["connectionId", "installationId", "componentId",
+          "endpointIdentity", "principalIdentity", "credentialRef", "state", "authRevision", "revision"] }),
+        PluginBinding: recordAuthority({ authority: ["bindingId", "subjectKind", "subjectId", "installationId",
+          "componentId", "componentKind", "connectionId", "enabled", "revision"] }),
+        PluginGrant: recordAuthority({ authority: ["grantId", "bindingId", "connectionId", "principalIdentity",
+          "toolIdentity", "contractDigest", "effect", "approvalMode", "expiresAt", "epoch", "revision"] }),
+        PluginCapabilityCall: recordAuthority({ authority: ["callId", "runRef", "bindingId", "connectionId",
+          "principalIdentity", "toolIdentity", "contractDigest", "argumentDigest", "phase", "createdAt",
+          "updatedAt"] }),
+      }),
+      recovery: "Catalog schema 8 is preflighted read-only; maintenance intents survive restart; code rollback stays disabled until explicit pinned data restoration; authority restore rotates incarnation and preserves unknown receipts; all new installations use Product15 in one canonical root; incompatible data is rejected before writers open",
+    }),
+    encryptedSecrets: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["stateDir/encrypted-secrets.json"]),
+      records: Object.freeze({
+        SecretContainer: recordAuthority({ authority: ["version", "revision"] }),
+        EncryptedCredential: recordAuthority({ authority: ["credentialRef", "kind", "ciphertext"] }),
+      }),
+      recovery: "EncryptedSecretStore is the sole ciphertext owner; mcp-oauth remains fixture-only until live identity and installed new-App acceptance",
+    }),
+    runtimeObservation: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["cacheDir/runtime-context-v1.json", "cacheDir/runtime-queue-clock-v1.json"]),
+      records: Object.freeze({ ContextObservation: recordAuthority({ derived: ["key", "usage"] }),
+        QueueArrival: recordAuthority({ derived: ["runId", "queuedAt"] }) }),
+      recovery: "Bounded disposable caches; missing queue age falls back to the encrypted command timestamp",
+    }),
+    conversationCheckpoint: Object.freeze({
+      owner: "shoggoth",
+      schemaVersion: 2,
+      pathRules: Object.freeze(["agents/<profileId>/conversation-checkpoints/<sha256-session-id>.json",
+        "agents/<profileId>/conversation-checkpoints/checkpoint-<sha256>.json",
+        "agents/<profileId>/conversation-checkpoints/<sha256-session-id>.json.invalidation"]),
+      records: Object.freeze({ ConversationCheckpoint: recordAuthority({ authority: [
+        "version", "id", "profileId", "sessionId", "coveredThroughSeq", "coveredHash", "transcriptRevision",
+        "previousId", "summary", "provenance", "createdAt", "contentHash", "partial",
+      ] }), CheckpointInvalidation: recordAuthority({ authority: ["version", "checkpointId", "coverageHash", "nativeSessionId", "bindingId"] }) }),
+      recovery: "Only a matching Transcript prefix permits projection; summaries never replace original events",
+    }),
+    runExecution: Object.freeze({
+      owner: "shoggoth",
+      schemaVersion: 2,
+      pathRules: Object.freeze(["stateDir/run-executions/<sha256-run-id>.json"]),
+      records: Object.freeze({
+        RunExecutionBinding: recordAuthority({ authority: ["version", "identity", "contract", "command"] }),
+      }),
+      encryption: "Service crypto broker; removed after durable Product terminal and command completion",
+      recovery: "Frozen identity and execution only; native complete history must prove remote outcome",
+    }),
     inspiration: Object.freeze({
       owner: "shoggoth",
       pathRules: Object.freeze(["stateDir/inspirations.sqlite", "stateDir/inspirations.sqlite-wal"]),
-      legacyBackup: "stateDir/inspirations.migrated.json (read-only pre-migration recovery copy)",
       records: Object.freeze({
         Inspiration: recordAuthority({ authority: IDEA_FIELDS }),
         InspirationExecution: recordAuthority({ authority: EXECUTION_FIELDS }),
@@ -34,20 +126,29 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     }),
     product: Object.freeze({
       owner: "shoggoth",
+      schemaVersion: 15,
+      identity: "Agent id/agentId remain stable; backendId is always shoggoth; selected runtimes belong to Agent bindings",
       pathRules: Object.freeze(["stateSnapshotPath", "eventLogPath"]),
       records: Object.freeze({
-        RuntimeAccount: recordAuthority({ authority: RUNTIME_ACCOUNT_FIELDS }),
+        RuntimeAccount: recordAuthority({ authority: [...RUNTIME_ACCOUNT_FIELDS, "maxActive"] }),
         AgentProfile: recordAuthority({
           authority: [
-            "id", "backendId", "agentId", "name", "runtime", "runtimeProfileId",
-            "runtimeAccountId", "defaultModel", "defaultCwd", "permissionPolicy", "concurrency",
+            "id", "backendId", "agentId", "name", "providerRef",
+            "defaultModel", "defaultCwd", "permissionPolicy", "concurrency",
             "isDefault", "enabled", "createdAt", "updatedAt",
+            "defaultBindingId", "bindingsRevision", "bindings", "bindingOperations",
           ],
-          derived: ["providerRef"],
         }),
+        AgentRuntimeBinding: recordAuthority({ authority: [
+          "id", "profileId", "runtime", "runtimeProfileId", "runtimeAccountId",
+          "label", "enabled", "revision", "createdAt", "updatedAt",
+        ] }),
+        AgentProfileRuntimeProjection: recordAuthority({ derived: [
+          "runtime", "runtimeProfileId", "runtimeAccountId",
+        ] }),
         ModelProvider: recordAuthority({ authority: [
           "id", "kind", "name", "baseUrl", "model", "credentialRef", "headers",
-          "awsRegion", "awsProfile", "validationStatus",
+          "awsRegion", "awsProfile", "validationStatus", "models", "revision",
         ] }),
         WorkRun: recordAuthority({
           authority: [
@@ -68,12 +169,14 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     }),
     chatSession: Object.freeze({
       owner: "shoggoth",
+      schemaVersion: 8,
       pathRules: Object.freeze(["stateDir/chat-sessions.json"]),
       records: Object.freeze({
         ChatSession: recordAuthority({
           authority: [
             "id", "sessionKey", "profileId", "workspace", "title", "modelOverride",
-            "permissionMode", "status", "createdAt", "updatedAt",
+            "permissionMode", "status", "createdAt", "updatedAt", "modelSettings",
+            "runtimeBindingId", "retiredRuntimeSessions", "revision",
           ],
           runtimeCache: ["runtimeSessionId"],
         }),
@@ -92,6 +195,22 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
           "operationId", "profileId", "workspace", "sessionKey", "state", "createdAt",
           "finishedAt",
         ] }),
+        ChatRuntimeSwitchReceipt: recordAuthority({ authority: [
+          "sessionKey", "revision", "fromBindingId", "fromRuntimeSessionId", "toBindingId", "switchedAt", "audited",
+        ] }),
+      }),
+    }),
+    tokenUsage: Object.freeze({
+      owner: "shoggoth",
+      schemaVersion: 2,
+      pathRules: Object.freeze(["tokenUsagePath"]),
+      records: Object.freeze({
+        TokenUsage: recordAuthority({ authority: [
+          "id", "profileId", "agentId", "agentName", "source", "sourceId", "threadId", "turnId",
+          "model", "provider", "totalTokens", "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",
+          "outputTokens", "reasoningOutputTokens", "createdAt", "identityVersion", "runId",
+          "runtime", "runtimeAccountId", "responseId",
+        ] }),
       }),
     }),
   }),
@@ -105,6 +224,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     source: "TranscriptStore",
     runtimeSource: "thread/read reconciliation/import only",
     shoggothStore: "agents/<profileId>/transcripts/<sessionId>",
+    contextContentStore: "agents/<profileId>/transcripts/<sessionId>/context-content/<sha256>.json",
   }),
   definition: Object.freeze({
     owner: "shoggoth",
@@ -118,7 +238,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     classification: "authority",
     source: "MemoryStore",
     shoggothStore: "agents/<profileId>/memory",
-    runtimeSource: "codex memories read-only migration candidate",
+    runtimeSource: "Shoggoth MemoryEngine",
   }),
   tools: Object.freeze({
     owner: "shoggoth",
@@ -144,16 +264,6 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     runtimeProjection: "shared Shoggoth MCP proxy for native and bridged OpenClaw/Hermes Agents",
     externalOwnership: "OpenClaw/Hermes-owned MCP and Skill configuration remains independent",
   }),
-  nativeRuntimeImport: Object.freeze({
-    owner: "shoggoth",
-    classification: "legacyCompatibility",
-    source: "disabled by default; explicit legacy migration/test input only",
-    marker: "nativeRuntimeImportPath",
-    staging: "nativeRuntimeImportStagingDir (runtimeCache, excluded from backup)",
-    scope: "never runs during normal startup or Agent creation",
-    excluded: "credentials, chat/session history, memories, attachments, caches",
-    executableContent: "quarantined pending explicit review",
-  }),
   computer: Object.freeze({
     owner: "shoggoth",
     classification: "authority",
@@ -166,15 +276,18 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     owner: "shoggoth",
     classification: "authority",
     switchJournal: "runtimeSwitchPath",
-    legacyCodexApiKeyMigrationJournal:
-      "legacyCodexApiKeyMigrationPath (metadata only; never contains credential plaintext)",
     snapshotManifest: "backups/upgrade-<generationId>/generation.json",
   }),
   runtime: Object.freeze({
+    extensionHome: Object.freeze({
+      owner: "shoggoth", classification: "authority",
+      rootRule: "stateDir/runtime-extension-homes/<runtime>/<runtimeAccountId>", backupRequired: true,
+      credentialPolicy: "Explicit signed plugins use an isolated Home; Remote Worker tokens live only in EncryptedSecretStore",
+    }),
     codexHome: Object.freeze({
       owner: "shoggoth",
       classification: "authority",
-      rootRule: "runtimeAccountsDir/codex/<runtimeAccountId>/home (legacy default canonical may remain in place)",
+      rootRule: "runtimeAccountsDir/codex/<runtimeAccountId>/home",
       backupRequired: true,
       credentialPolicy: "one managed Home per internal RuntimeAccount; API keys live only in EncryptedSecretStore and never in shared auth.json; native Codex access tokens may be borrowed in memory, with a persistent logout opt-out",
     }),
@@ -239,6 +352,25 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       owner: "shoggoth",
       classification: "authority",
       rootRule: "stateDir/runtime-ledgers/claude-code/<runtimeProfileId>/<workspaceShardId>",
+      backupRequired: true,
+    }),
+    openCodeHome: Object.freeze({
+      owner: "opencode",
+      classification: "externalAuthority",
+      rootRule: "XDG_DATA_HOME/opencode || ~/.local/share/opencode",
+      backupRequired: false,
+      credentialPolicy: "native OpenCode account data remains external and is never copied",
+    }),
+    openCodeIntegration: Object.freeze({
+      owner: "shoggoth",
+      classification: "derivedIntegration",
+      rootRule: "runtimeIntegrationDir/opencode/<runtimeAccountId>/<runtimeProfileId>/<workspaceShardId>",
+      backupRequired: false,
+    }),
+    openCodeLedger: Object.freeze({
+      owner: "shoggoth",
+      classification: "authority",
+      rootRule: "stateDir/runtime-ledgers/opencode/<runtimeProfileId>/<runtimeAccountId>/<workspaceShardId>",
       backupRequired: true,
     }),
     deepSeekHarnessHome: Object.freeze({
@@ -309,7 +441,6 @@ function validateDataAuthorityManifest(manifest) {
     || !manifest.runtime?.deepSeekHarnessLedger
     || !manifest.transcript || !manifest.definition
     || !manifest.memory || !manifest.tools || !manifest.skills || !manifest.mcpExtensions
-    || !manifest.nativeRuntimeImport
     || !manifest.computer || !manifest.upgrade
     || !manifest.backends?.shoggoth || !manifest.backends?.openclaw
     || !manifest.backends?.hermes) {

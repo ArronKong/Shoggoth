@@ -370,15 +370,12 @@ class ProviderService {
       throw providerError("PROVIDER_SECRET_PARAMS_INVALID", "Provider secret parameters are invalid");
     }
     const existing = this.#get(input.providerId);
-    const hasLegacyRuntimeProfile = existing.kind === "openai-api-key"
-      && Object.keys(input).length === 3 && typeof input.runtimeProfileId === "string";
-    if (Object.keys(input).length !== 2 && !hasLegacyRuntimeProfile) {
+    if (Object.keys(input).length !== 2) {
       throw providerError("PROVIDER_SECRET_PARAMS_INVALID", "Provider secret parameters are invalid");
     }
     if (!CUSTOM_SECRET_KINDS.has(existing.kind)) {
       throw providerError("PROVIDER_SECRET_AUTHORITY_FORBIDDEN", "This provider secret is managed by its authority");
     }
-    if (hasLegacyRuntimeProfile) this.#assertRuntimeProfileBinding(existing, input.runtimeProfileId);
     const oldRef = existing.credentialRef;
     const newRef = `provider-credential-${this.randomUUID()}`;
     let secret = input.secret;
@@ -436,15 +433,12 @@ class ProviderService {
     }
     const { providerId } = input;
     const existing = this.#get(providerId);
-    const hasLegacyRuntimeProfile = existing.kind === "openai-api-key"
-      && Object.keys(input).length === 2 && typeof input.runtimeProfileId === "string";
-    if (Object.keys(input).length !== 1 && !hasLegacyRuntimeProfile) {
+    if (Object.keys(input).length !== 1) {
       throw providerError("PROVIDER_SECRET_PARAMS_INVALID", "Provider secret parameters are invalid");
     }
     if (!CUSTOM_SECRET_KINDS.has(existing.kind)) {
       throw providerError("PROVIDER_SECRET_AUTHORITY_FORBIDDEN", "This provider secret is managed by its authority");
     }
-    if (hasLegacyRuntimeProfile) this.#assertRuntimeProfileBinding(existing, input.runtimeProfileId);
     if (existing.credentialRef === null) return existing;
     const saved = this.#put({ ...existing, credentialRef: null, validationStatus: "unverified" });
     await this.#stopBoundRuntimes(existing.id);

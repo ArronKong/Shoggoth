@@ -93,17 +93,8 @@ function attachChatBroker(httpServer, { getUpstreamUrl, getOrigin, authResolver 
   });
 
   function bridge(client) {
-    // upstream 是联邦代理;凭证/设备令牌必须按真网关 URL 解析(resolver 内部用
-    // config.gatewayUrl),不能用 proxy 的 upstream URL 键控。
-    const auth = authResolver ? authResolver.resolveConnectAuth() : loadOperatorAuth();
-    if (!auth) {
-      try {
-        client.close(1011, "no operator identity");
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
+    // The proxy URL is not the credential namespace. Freeze both endpoints
+    // before awaiting SecretRef resolution, and reject changed configuration.
     const url = (getUpstreamUrl?.() || "").trim();
     if (!url) {
       try {
@@ -114,19 +105,11 @@ function attachChatBroker(httpServer, { getUpstreamUrl, getOrigin, authResolver 
       return;
     }
     const origin = getOrigin?.() || DEFAULT_ORIGIN;
-
+    const gatewayUrl = authResolver?.getGatewayUrl?.();
+    const endpointCurrent = () => url === (getUpstreamUrl?.() || "").trim()
+      && (!authResolver?.getGatewayUrl || gatewayUrl === authResolver.getGatewayUrl());
     let upstream;
-    try {
-      upstream = new WebSocket(url, origin ? { headers: { Origin: origin } } : undefined);
-    } catch {
-      try {
-        client.close(1011, "upstream connect failed");
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
-
+    let closed = false;
     let ready = false;
     const backlog = [];
     const toClient = (s) => {
@@ -139,13 +122,13 @@ function attachChatBroker(httpServer, { getUpstreamUrl, getOrigin, authResolver 
       }
     };
     const flush = () => {
-      while (backlog.length && upstream.readyState === WebSocket.OPEN) upstream.send(backlog.shift());
+      while (backlog.length && upstream?.readyState === WebSocket.OPEN) upstream.send(backlog.shift());
     };
 
     const timer = setTimeout(() => {
       if (!ready) {
         try {
-          upstream.close();
+          upstream?.close();
         } catch {
           /* ignore */
         }
@@ -156,8 +139,21 @@ function attachChatBroker(httpServer, { getUpstreamUrl, getOrigin, authResolver 
         }
       }
     }, CONNECT_TIMEOUT_MS);
-
+    async function connectGateway() {
+      const auth = authResolver
+        ? await (typeof authResolver.resolveConnectAuthAsync === "function"
+          ? authResolver.resolveConnectAuthAsync(gatewayUrl) : authResolver.resolveConnectAuth(gatewayUrl))
+        : loadOperatorAuth();
+      if (closed || client.readyState !== WebSocket.OPEN) return;
+      if (!endpointCurrent()) { client.close(1011, "gateway configuration changed"); return; }
+      if (!auth) { client.close(1011, "no operator identity"); return; }
+      upstream = new WebSocket(url, origin ? { headers: { Origin: origin } } : undefined);
     upstream.on("message", (data) => {
+      if (closed || !endpointCurrent()) {
+        try { client.close(1011, "gateway configuration changed"); } catch { /* ignore */ }
+        try { upstream.terminate(); } catch { /* ignore */ }
+        return;
+      }
       const raw = data.toString();
       const frame = safeParse(raw);
       // Consume the device-auth handshake; relay everything else to the browser.
@@ -206,7 +202,7 @@ function attachChatBroker(httpServer, { getUpstreamUrl, getOrigin, authResolver 
           // 网关随 hello-ok 签发/轮换设备令牌 → 持久化(与管理面共用一份存储)。
           const issued = frame.payload?.auth?.deviceToken;
           if (authResolver && typeof issued === "string" && issued) {
-            try { authResolver.storeDeviceToken(issued, frame.payload?.auth?.issuedAtMs); } catch { /* 不影响中继 */ }
+            try { authResolver.storeDeviceToken(issued, frame.payload?.auth?.issuedAtMs, gatewayUrl); } catch { /* 不影响中继 */ }
           }
           toClient(JSON.stringify({ type: "event", event: "gateway.ready", payload: gatewayReady }));
           flush();
@@ -243,24 +239,29 @@ function attachChatBroker(httpServer, { getUpstreamUrl, getOrigin, authResolver 
         /* ignore */
       }
     });
-
+    }
     client.on("message", (data) => {
       const raw = data.toString();
-      if (ready && upstream.readyState === WebSocket.OPEN) upstream.send(raw);
+      if (ready && upstream?.readyState === WebSocket.OPEN) upstream.send(raw);
       else backlog.push(raw);
     });
     const releaseUpstream = () => {
+      closed = true;
       clearTimeout(timer);
       backlog.length = 0;
       // Once the browser side is gone there is nobody left to complete a graceful
       // upstream close handshake. Terminate so server shutdown cannot retain it.
-      try { upstream.terminate(); } catch { /* already closed */ }
+      try { upstream?.terminate(); } catch { /* already closed */ }
     };
     client.on("close", () => {
       releaseUpstream();
     });
     client.on("error", () => {
       releaseUpstream();
+    });
+    void connectGateway().catch(() => {
+      clearTimeout(timer);
+      if (!closed) { try { client.close(1011, "upstream connect failed"); } catch { /* ignore */ } }
     });
   }
 

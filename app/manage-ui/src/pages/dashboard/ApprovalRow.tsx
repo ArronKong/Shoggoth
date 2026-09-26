@@ -170,7 +170,7 @@ export default function ApprovalRow({ item, running, agentName, canRespond, onRe
       aria-expanded={expandable ? expanded : undefined} aria-controls={expandable ? panelId : undefined}
       disabled={!expandable && !onOpenRun}
       aria-label={`${agentName} · ${status} · ${summary}`} onClick={() => { if (expandable) setPinned(value => !value); else onOpenRun?.(); }}>
-      <AgentAvatarView agentId={running?.agentId || item?.agentId || running?.backendId || item?.backendId || "?"} name={agentName} className={styles.avatar} />
+      <AgentAvatarView agentId={running?.agentId || item?.agentId} name={agentName} className={styles.avatar} />
       <span className={styles.name}>{agentName}</span>
       <span className={styles.summary} aria-hidden="true">
         <span data-status-copy="running">{runningSummary}</span>

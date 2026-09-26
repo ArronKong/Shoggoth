@@ -19,6 +19,16 @@ function containsErrorCode(error, code, seen = new Set()) {
   return Array.isArray(nested) && nested.some((entry) => containsErrorCode(entry, code, seen));
 }
 
+function permissionFingerprint(policy) {
+  if (policy === undefined) return null;
+  if (!policy || Object.keys(policy).sort().join(",") !== "approvalPolicy,sandbox"
+    || !["untrusted", "on-failure", "on-request", "never"].includes(policy.approvalPolicy)
+    || !["read-only", "workspace-write", "danger-full-access"].includes(policy.sandbox)) {
+    throw runtimeError("RUNTIME_PERMISSION_POLICY_INVALID", "Runtime permission policy is invalid");
+  }
+  return JSON.stringify([policy.approvalPolicy, policy.sandbox]);
+}
+
 class CodexRuntimePool {
   constructor(options = {}) {
     this.options = { ...options };
@@ -81,7 +91,23 @@ class CodexRuntimePool {
       ));
     }
     const existing = this.entries.get(key);
-    if (existing) return existing.promise;
+    const permissionKey = permissionFingerprint(options.permissionPolicy);
+    if (existing) {
+      if (permissionKey !== null && existing.permissionKey !== null && permissionKey !== existing.permissionKey) {
+        return Promise.reject(runtimeError("RUNTIME_PERMISSION_POLICY_CONFLICT", "Stop the existing Runtime before changing permissions"));
+      }
+      if (permissionKey !== null) existing.permissionKey = permissionKey;
+      return existing.promise.then(async (host) => {
+        try { host.assertExecutionProviderCurrent?.(); }
+        catch (error) {
+          if (error?.code !== "EXECUTION_CONTRACT_STALE"
+            || this.options.canRetireStaleHost?.(binding, host, options.executionContract?.runId) !== true) throw error;
+          await this.stop(runtimeProfileId);
+          return this.get(value, options);
+        }
+        return host;
+      });
+    }
     const now = this.now();
     const circuit = this.circuits.get(runtimeProfileId);
     if (circuit?.openUntil > now) {
@@ -115,9 +141,10 @@ class CodexRuntimePool {
       runtimeEnvironment,
       spawnEnv: options.spawnEnv,
       nativeAuth: this.options.nativeAuth,
+      executionContract: options.executionContract,
     });
     this.options.nativeAuth?.open();
-    const entry = { host, runtimeProfileId, runtimeAccountId, promise: null };
+    const entry = { host, runtimeProfileId, runtimeAccountId, permissionKey, promise: null };
     entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
       this.circuits.delete(runtimeProfileId);
       if (host.terminated && typeof host.terminated.then === "function") {

@@ -436,6 +436,8 @@
   flex: 1 1 auto;
   overflow: hidden; /* 窄视口下左组 pills 裁剪而不是叠到右组图标上 */
 }
+.barLeft:has(:global(.model-menu)) { overflow: visible; }
+.composer:has(:global(.model-menu)) { z-index: 6; }
 .barRight {
   display: flex;
   align-items: center;
@@ -521,81 +523,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.bar :global(.model-menu) {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  width: 280px;
-  max-height: 320px;
-  display: flex;
-  flex-direction: column;
-  padding: 6px;
-  border-radius: 14px;
+/* The same catalog layout sits on a dark surface in immersive mode. */
+.bar :global(.model-menu.model-menu--catalog) {
+  --model-menu-ink: #fff;
+  --model-menu-selected-text: #171717;
+  --model-menu-text: #e8ebf0;
+  --model-menu-muted: rgba(255, 255, 255, 0.62);
+  --model-menu-hover: rgba(255, 255, 255, 0.1);
   background: rgba(16, 20, 28, 0.92);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  z-index: 20;
-}
-.bar :global(.model-menu__search) {
-  height: 32px;
-  padding: 0 10px;
-  margin-bottom: 6px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.06);
-  color: #fff;
-  font-size: 13px;
-  outline: none;
-}
-.bar :global(.model-menu__list) {
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.bar :global(.model-menu__label) {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.45);
-  padding: 6px 8px 2px;
-}
-.bar :global(.model-menu__item) {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 7px 8px;
-  border-radius: 8px;
-  border: none;
-  background: none;
-  color: #e8ebf0;
-  font-size: 13px;
-  cursor: pointer;
-  text-align: left;
-}
-.bar :global(.model-menu__item:hover),
-.bar :global(.model-menu__item.is-active) {
-  background: rgba(255, 255, 255, 0.1);
-}
-.bar :global(.model-menu__name) {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.bar :global(.model-menu__tag),
-.bar :global(.model-menu__price) {
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.5);
-  flex: none;
-}
-.bar :global(.model-menu__check) {
-  color: #9ec5ff;
-  flex: none;
-}
-.bar :global(.model-menu__empty) {
-  padding: 12px 8px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 13px;
+  color-scheme: dark;
 }
 
 /* ── 中央消息流：左列，assistant 折射玻璃卡 + user 气泡 ── */

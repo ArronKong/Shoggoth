@@ -459,7 +459,7 @@ async function disabledClaudeRelease() {
   let service = createAgentService({ paths, version: "disabled-claude-proof", builtinCliProfiles: true });
   try {
     await service.start();
-    assert.equal(service.productStore.listAgentProfiles().length, 6);
+    assert.equal(service.productStore.listAgentProfiles().length, 7);
     const spec = BUILTIN_CLI_AGENT_PROFILES.find(item => item.runtime === "claude-code");
     assert.equal(service.productStore.getAgentProfile(spec.id), null);
     const account = service.productStore.listRuntimeAccounts().find(item => item.runtime === "claude-code");

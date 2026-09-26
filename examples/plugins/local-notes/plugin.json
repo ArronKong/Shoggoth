@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "local-notes",
+  "version": "1.0.0",
+  "description": "A local note with text tools, explicit write authorization, and an optional MCP App.",
+  "author": { "name": "Shoggoth contributors" },
+  "license": "MIT",
+  "keywords": ["example", "notes", "local"]
+}

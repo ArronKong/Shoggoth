@@ -9,6 +9,10 @@ const subscribe = (name, callback) => {
 contextBridge.exposeInMainWorld("openclawDesktop", {
   requestMicrophoneAccess: () => ipcRenderer.invoke("shoggoth:microphone:request"),
   getMicrophoneAccessStatus: () => ipcRenderer.invoke("shoggoth:microphone:status"),
+  ...(process.platform === "darwin" ? { typewriterSound: {
+    start: () => ipcRenderer.send("shoggoth:typewriter-sound:start"),
+    stop: () => ipcRenderer.send("shoggoth:typewriter-sound:stop"),
+  } } : {}),
   saveInspirationArchive: input => ipcRenderer.invoke("shoggoth:inspiration:save-archive", input),
   desktopInspiration: {
     surface: true,

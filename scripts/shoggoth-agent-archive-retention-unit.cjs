@@ -215,7 +215,8 @@ async function main() {
     service.nativeKanbanStore.addArtifact({ operationId: `artifact-${++operation}`, cardId: card.id,
       runId: artifactRun.id, name: "result.txt", kind: "file", mimeType: "text/plain", sizeBytes: 16,
       sha256: crypto.createHash("sha256").update("private artifact").digest("hex"), storageKey, createdAt: time });
-    service.tokenUsageStore.record({ profileId: profile.id, agentId: profile.agentId, agentName: profile.name,
+    service.tokenUsageStore.record({ profileId: profile.id, runId: artifactRun.id, runtime: profile.runtime,
+      runtimeAccountId: profile.runtimeAccountId, agentId: profile.agentId, agentName: profile.name,
       source: "chat", sourceId: session.sessionKey, threadId: "fixture-thread", turnId: "fixture-turn",
       responseId: `response-${++operation}`, model: "fixture-model", provider: "fixture-provider",
       usage: { totalTokens: 3, inputTokens: 1, cachedInputTokens: 0, cacheWriteInputTokens: 0,

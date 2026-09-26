@@ -46,6 +46,14 @@ const HERMES_CLI_TOOLS = new Set(["terminal", "bash", "shell", "exec"]);
 const HERMES_SKILL_VIEW_TOOL = "skill_view";
 const { AgentBackend, dirCreatedAtMs, sortAgentsByCreatedAt } = require("./agent-backend");
 const { SelfUpdater } = require("./self-updater");
+const {
+  MAX_BYTES: EXTERNAL_PLUGIN_RESPONSE_MAX_BYTES,
+  normalizeExternalPluginQuery,
+  unavailableExternalPluginCatalog,
+  capabilitiesFromCatalog,
+  projectHermesExternalPlugins,
+  externalPluginWriteUnsupported,
+} = require("./external-plugin-catalog");
 const { readHermesUsageHistory } = require("./hermes-usage-history");
 const { estimateUsageCost } = require("./usage-cost");
 const { readHermesCronHistory } = require("./hermes-cron-history");
@@ -5136,6 +5144,55 @@ class HermesBackend extends AgentBackend {
       ...(availabilityReason ? { availabilityReason } : {}),
     };
   }
+
+  // Native plugin inventory is read through the selected host's public API.
+  // Never inspect another Home or infer that configured enablement is activation.
+  async getExternalPluginCapabilities() {
+    return capabilitiesFromCatalog(await this.getExternalPluginCatalog({ limit: 1 }));
+  }
+
+  async getExternalPluginCatalog(input = {}) {
+    const query = normalizeExternalPluginQuery(input);
+    const profile = query.agentId !== undefined ? this.profileById.get(query.agentId)
+      : this.dashboards.has("default") ? "default"
+        : this.dashboards.size === 1 ? this.dashboards.keys().next().value : null;
+    const dash = profile !== null && profile !== undefined ? this.dashboards.get(profile) : null;
+    if (!dash) return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_SCOPE_UNAVAILABLE");
+    const generation = this._lifecycleGeneration;
+    const baseUrl = dash.baseUrl;
+    const token = dash.token;
+    try {
+      const [status, inventory] = await Promise.all([
+        httpGet(`${baseUrl}/api/status`, { token, timeoutMs: 5000, maxResponseBytes: 64 * 1024 }),
+        httpGet(`${baseUrl}/api/dashboard/plugins/hub`, { token, timeoutMs: 5000,
+          maxResponseBytes: EXTERNAL_PLUGIN_RESPONSE_MAX_BYTES }),
+      ]);
+      if (generation !== this._lifecycleGeneration || this.dashboards.get(profile) !== dash
+        || dash.baseUrl !== baseUrl || dash.token !== token
+        || (query.agentId !== undefined && this.profileById.get(query.agentId) !== profile)) {
+        return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_OBSERVATION_STALE");
+      }
+      if ([404, 405].includes(inventory.status)) {
+        return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_API_UNSUPPORTED");
+      }
+      if (status.status !== 200 || inventory.status !== 200) {
+        return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_UNAVAILABLE");
+      }
+      const host = JSON.parse(status.body);
+      return projectHermesExternalPlugins(JSON.parse(inventory.body), {
+        query, scope: [baseUrl, profile], hostVersion: host?.version || host?.hermes_version,
+        connectionGeneration: generation });
+    } catch (err) {
+      if (["PLUGIN_EXTERNAL_CATALOG_CHANGED", "PLUGIN_EXTERNAL_QUERY_INVALID"].includes(err?.code)) throw err;
+      return unavailableExternalPluginCatalog(this.id,
+        err?.code === "PLUGIN_EXTERNAL_RESPONSE_INVALID" || err instanceof SyntaxError
+          ? "PLUGIN_EXTERNAL_RESPONSE_INVALID" : "PLUGIN_EXTERNAL_UNAVAILABLE");
+    }
+  }
+
+  async previewPluginInstall() { return externalPluginWriteUnsupported(); }
+  async installPlugin() { return externalPluginWriteUnsupported(); }
+  async setPluginInstallationState() { return externalPluginWriteUnsupported(); }
 
   // ---- skills (management UI, read-only) ----
 

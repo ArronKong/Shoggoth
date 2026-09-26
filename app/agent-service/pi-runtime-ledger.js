@@ -181,22 +181,8 @@ class PiRuntimeLedger {
       }
       throw ledgerError("PI_LEDGER_INVALID", "Pi ledger is malformed");
     }
-    const migrated = parsed?.schemaVersion === 1;
-    if (migrated) {
-      parsed.schemaVersion = SCHEMA_VERSION;
-      for (const session of Array.isArray(parsed.sessions) ? parsed.sessions : []) {
-        for (const turn of Array.isArray(session?.turns) ? session.turns : []) {
-          if (!plain(turn)) continue;
-          if (Object.prototype.hasOwnProperty.call(turn, "executionEndedAt")) {
-            throw ledgerError("PI_LEDGER_INVALID", "Legacy Pi turn contains unsupported exit evidence");
-          }
-          // Old records contain no proof that a dispatched worker stopped.
-          turn.executionEndedAt = null;
-        }
-      }
-    }
     this.data = validateLedger(parsed, this.runtimeProfileId, this.workspaceShardId);
-    let changed = migrated;
+    let changed = false;
     for (const session of this.data.sessions) {
       for (const turn of session.turns) {
         if (turn.acceptance === "unknown" && session.sessionFile === null) {
@@ -210,6 +196,18 @@ class PiRuntimeLedger {
           turn.status = "interrupted";
           turn.errorCode = "RUNTIME_HOST_RESTARTED";
           turn.updatedAt = Math.max(turn.updatedAt, this.now());
+          session.updatedAt = Math.max(session.updatedAt, turn.updatedAt);
+          changed = true;
+        } else if (turn.acceptance === "unknown" && turn.executionEndedAt === null) {
+          // The ledger is reopened only after every worker of the previous
+          // generation stopped. Keep the unknown receipt as this operation's
+          // fence, but let other operations continue the session.
+          if (turn.status === "inProgress") {
+            turn.status = "interrupted";
+            turn.errorCode ||= "RUNTIME_HOST_RESTARTED";
+          }
+          turn.executionEndedAt = Math.max(turn.createdAt, this.now());
+          turn.updatedAt = Math.max(turn.updatedAt, turn.executionEndedAt);
           session.updatedAt = Math.max(session.updatedAt, turn.updatedAt);
           changed = true;
         }

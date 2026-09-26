@@ -11,3 +11,8 @@
   white-space: nowrap;
   font-size: 12px;
 }
+.chat-run-wait[data-kind="retrying"] {
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}

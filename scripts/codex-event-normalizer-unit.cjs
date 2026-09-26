@@ -76,6 +76,25 @@ function testToolLifecycleAcrossKinds() {
   assert.equal(update.delta, "partial");
 }
 
+function testCompletedMessagePhasesSealOnlyFinishedItems() {
+  for (const phase of ["commentary", "final_answer"]) {
+    const params = { ...ids, item: { type: "agentMessage", id: "item-1", text: "hello", phase } };
+    const completed = normalizeCodexEvent({ method: "item/completed", params });
+    assertBase(completed, "text");
+    assert.equal(completed.text, "hello");
+    assert.equal(completed.phase, phase, "completed Codex message boundaries must reach the live chat bridge");
+    const started = normalizeCodexEvent({ method: "item/started", params });
+    assert.equal(started.phase, undefined, "an initial snapshot must not seal a still streaming item");
+  }
+  for (const phase of [undefined, null, "future-phase"]) {
+    const message = normalizeCodexEvent({ method: "item/completed", params: {
+      ...ids, item: { type: "agentMessage", id: "item-1", text: "legacy answer", phase },
+    } });
+    assert.equal(message.text, "legacy answer");
+    assert.equal(message.phase, undefined, "legacy and unknown phases retain the existing text fallback");
+  }
+}
+
 function testStatusApprovalPromptCompleteAndError() {
   const started = normalizeCodexEvent({
     method: "turn/started",
@@ -669,6 +688,7 @@ function testInternalRawUsageIsDiagnosticOnlyAndSecretFree() {
 function main() {
   const tests = [
     testTextReasoningAndPlan,
+    testCompletedMessagePhasesSealOnlyFinishedItems,
     testToolLifecycleAcrossKinds,
     testStatusApprovalPromptCompleteAndError,
     testUnknownIsBoundedAndSecretFree,

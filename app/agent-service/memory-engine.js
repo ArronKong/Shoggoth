@@ -67,38 +67,10 @@ class MemoryEngine {
     this.opened = true;
     for (const profileId of profileIds) {
       this.store.ensureProfile(profileId);
-      this._migrateCandidates(profileId);
       this._rebuildViews(profileId);
     }
   }
   close() { this.opened = false; this.viewsStale.clear(); }
-  _migrateCandidates(profileId) {
-    // Old versions queued private facts and imports. Preserve their provenance
-    // and confidence, but retire the queue without reviving forgotten records.
-    const records = new Map(this.store.list(profileId).map((item) => [item.id, item]));
-    const changes = new Map();
-    const now = this.now();
-    const stage = (item, status) => {
-      const updated = { ...item, status, updatedAt: Math.max(now, item.updatedAt) };
-      records.set(item.id, updated); changes.set(item.id, updated);
-    };
-    for (const item of [...records.values()].filter((entry) => entry.status === "candidate")
-      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))) {
-      if (item.sensitivity === "restricted" || hasSecret(item.content)
-        || (item.validUntil !== null && item.validUntil <= now)) {
-        stage(item, "deleted"); continue;
-      }
-      if (item.supersedes !== null) {
-        const prior = records.get(item.supersedes);
-        if (!prior || prior.status !== "active" || prior.scope !== item.scope) {
-          stage(item, "superseded"); continue;
-        }
-        stage(prior, "superseded");
-      }
-      stage(item, "active");
-    }
-    if (changes.size) this.store.upsertMany([...changes.values()]);
-  }
   _afterCommit(profileId) {
     try { this._rebuildViews(profileId); this.viewsStale.delete(profileId); }
     catch { this.viewsStale.add(profileId); }
@@ -186,17 +158,6 @@ class MemoryEngine {
     const created = this.store.upsert(item);
     this._afterCommit(input.profileId);
     return created;
-  }
-
-  confirm(input) {
-    this._assertOpen();
-    // Compatibility for older local clients. New MCP catalogs have no confirm
-    // tool: accepted memories are already active when their write completes.
-    this._migrateCandidates(input.profileId);
-    const item = this.store.get(input.profileId, input.id);
-    this._afterCommit(input.profileId);
-    if (!item || item.status !== "active") throw engineError("MEMORY_NOT_FOUND", "有效记忆不存在");
-    return item;
   }
 
   update(input) {

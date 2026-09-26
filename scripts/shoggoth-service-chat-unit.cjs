@@ -77,7 +77,7 @@ function session(overrides = {}) {
     id: SESSION_ID,
     sessionKey: SESSION_KEY,
     profileId: PROFILE_ID,
-    codexThreadId: null,
+    runtimeSessionId: null,
     workspace: null,
     title: null,
     modelOverride: null,
@@ -90,54 +90,18 @@ function session(overrides = {}) {
 }
 
 function run(overrides = {}) {
-  return {
-    id: "run-1",
-    source: "chat",
-    sourceId: SESSION_KEY,
-    idempotencyKey: "shoggoth:chat-send:send-1",
-    profileId: PROFILE_ID,
-    workspace: null,
-    status: "queued",
-    codexThreadId: null,
-    codexTurnId: null,
-    eventSeq: 1,
-    waitingRequestId: null,
-    startedAt: null,
-    finishedAt: null,
-    resultSummary: null,
-    errorCode: null,
-    retryOf: null,
-    ...overrides,
-  };
+  const { codexThreadId = null, codexTurnId = null, ...extra } = overrides;
+  const ref = codexThreadId === null ? null : { runtime: "codex", runtimeProfileId: "shoggoth-profile-1",
+    runtimeAccountId: "shoggoth-internal-codex-default-v1", sessionId: codexThreadId };
+  return { id: "run-1", source: "chat", sourceId: SESSION_KEY, idempotencyKey: "shoggoth:chat-send:send-1",
+    profileId: PROFILE_ID, workspace: null, status: "queued", contextSnapshotId: null,
+    runtimeSessionRef: ref, runtimeTurnRef: codexTurnId === null ? null : { ...ref, turnId: codexTurnId },
+    eventSeq: 1, waitingRequestId: null, startedAt: null, finishedAt: null, resultSummary: null,
+    errorCode: null, retryOf: null, ...extra };
 }
-
 function currentRun(overrides = {}) {
-  const legacyRun = run({
-    status: "running",
-    codexThreadId: "thread-1",
-    codexTurnId: "turn-1",
-    startedAt: 101,
-    eventSeq: 3,
-    contextSnapshotId: CONTEXT_SNAPSHOT_ID,
-    ...overrides,
-  });
-  const { codexThreadId, codexTurnId, ...current } = legacyRun;
-  return {
-    ...current,
-    runtimeSessionRef: {
-      runtime: "codex",
-      runtimeProfileId: "shoggoth-profile-1",
-      runtimeAccountId: "shoggoth-internal-codex-default-v1",
-      sessionId: codexThreadId,
-    },
-    runtimeTurnRef: {
-      runtime: "codex",
-      runtimeProfileId: "shoggoth-profile-1",
-      runtimeAccountId: "shoggoth-internal-codex-default-v1",
-      sessionId: codexThreadId,
-      turnId: codexTurnId,
-    },
-  };
+  return run({ status: "running", codexThreadId: "thread-1", codexTurnId: "turn-1", startedAt: 101,
+    eventSeq: 3, contextSnapshotId: CONTEXT_SNAPSHOT_ID, ...overrides });
 }
 
 function codexThreadReadFixture(items, overrides = {}) {
@@ -321,7 +285,7 @@ function boundControllerFixture(overrides = {}) {
   };
   const calls = { remote: [], runtime: [], runtimeOptions: [] };
   const host = overrides.host || {
-    registeredSecrets: [],
+    registeredSecrets: [], terminated: new Promise(() => {}), subscribe() { return () => {}; },
     async threadSetName(params) { calls.remote.push(["rename", structuredClone(params)]); return {}; },
     async threadArchive(params) { calls.remote.push(["archive", structuredClone(params)]); return {}; },
     async threadDelete(params) { calls.remote.push(["delete", structuredClone(params)]); return {}; },
@@ -483,7 +447,7 @@ function serviceFixture(options = {}) {
     },
   };
   const host = {
-    registeredSecrets: [],
+    registeredSecrets: [], terminated: new Promise(() => {}), subscribe() { return () => {}; },
     async threadSetName(params) { calls.remote.push(["rename", structuredClone(params)]); return {}; },
     async threadArchive(params) { calls.remote.push(["archive", structuredClone(params)]); return {}; },
     async threadDelete(params) { calls.remote.push(["delete", structuredClone(params)]); return {}; },
@@ -521,7 +485,7 @@ async function ipc(paths, method, params, id = `ipc-${method}`) {
     version: PROTOCOL_VERSION,
     method,
     params,
-  });
+  }).catch(error => { error.message = `${method}: ${error.message}`; throw error; });
 }
 
 test("paths 暴露独立 managed workspace 根目录", () => {
@@ -596,7 +560,7 @@ test("基础 list/get 方法稳定分页、按 query 过滤并拒绝篡改与跨
     sessions: [session(), session({
       id: "55555555-5555-4555-8555-555555555555",
       sessionKey: "66666666-6666-4666-8666-666666666666",
-      status: "archived", codexThreadId: "thread-2",
+      status: "archived", runtimeSessionId: "thread-2",
     })],
   });
   await controller.open();
@@ -821,10 +785,10 @@ test("当前 WorkRun context snapshot 贯通 chat.send/run.list/run.get", async 
 
   for (const result of [sent.run, listed.runs[0], fetched.run]) {
     assert.equal(result.contextSnapshotId, CONTEXT_SNAPSHOT_ID);
-    assert.equal(result.codexThreadId, "thread-1");
-    assert.equal(result.codexTurnId, "turn-1");
-    assert.equal("runtimeSessionRef" in result, false);
-    assert.equal("runtimeTurnRef" in result, false);
+    assert.equal(result.runtimeSessionRef.sessionId, "thread-1");
+    assert.equal(result.runtimeTurnRef.turnId, "turn-1");
+    assert.equal("codexThreadId" in result, false);
+    assert.equal("codexTurnId" in result, false);
   }
 });
 
@@ -1251,6 +1215,10 @@ test("原生命令目录与执行按当前 Session 的 Runtime binding、workspa
       },
     },
   });
+  value.coordinator.send = async input => {
+    commandCalls.push(["send", { ...input, operationId: "generated" }]);
+    return { run: { status: "queued" } };
+  };
   await value.controller.open();
   const catalog = await value.controller.handle("chat.command.list", {
     sessionKey: value.bound.sessionKey,
@@ -1259,14 +1227,12 @@ test("原生命令目录与执行按当前 Session 的 Runtime binding、workspa
     sessionKey: value.bound.sessionKey, text: "/compact",
   }, "commands-exec");
   assert.deepEqual(catalog.commands.map((command) => command.name), ["compact"]);
-  assert.deepEqual(executed, { kind: "output", text: "Compaction started.", warning: null });
+  assert.deepEqual(executed, { kind: "output", text: "上下文压缩已排队。", warning: null });
   assert.deepEqual(commandCalls, [
     ["list", { sessionId: "thread-bound", cwd: "/tmp/shoggoth-bound" }],
-    ["exec", {
-      sessionId: "thread-bound", cwd: "/tmp/shoggoth-bound", text: "/compact",
-    }],
+    ["send", { operationId: "generated", sessionKey: value.bound.sessionKey, prompt: "/compact" }],
   ]);
-  assert.deepEqual(value.calls.runtime, Array.from({ length: 2 }, () => ({
+  assert.deepEqual(value.calls.runtime, Array.from({ length: 1 }, () => ({
     runtime: "codex",
     runtimeProfileId: "shoggoth-profile-1",
     runtimeAccountId: "shoggoth-internal-codex-default-v1",
@@ -1313,7 +1279,7 @@ test("同 operationId 的并发 remote operation singleflight，冲突参数仍�
   const entered = new Promise((resolve) => { enteredResolve = resolve; });
   const value = boundControllerFixture({
     host: {
-      registeredSecrets: [],
+      registeredSecrets: [], terminated: new Promise(() => {}), subscribe() { return () => {}; },
       async threadSetName() {
         hostCalls += 1;
         enteredResolve();
@@ -1405,7 +1371,7 @@ test("chat.history 只读取 ready/archived thread，用最终 mapper 分页并�
 
 test("chat.history 对从未获得远端 turn 的不可读新线程返回空历史，已有 turn 仍严格失败", async () => {
   const unreadableHost = {
-    registeredSecrets: [],
+    registeredSecrets: [], terminated: new Promise(() => {}), subscribe() { return () => {}; },
     async threadRead() {
       const error = new Error("thread not readable before first turn");
       error.code = "RPC_REMOTE_ERROR";
@@ -1488,7 +1454,7 @@ test("Controller.open 在对外服务前补偿 pending remote op，close 封住�
   const entered = new Promise((resolve) => { enteredRemote = resolve; });
   const blocked = boundControllerFixture({
     host: {
-      registeredSecrets: [],
+      registeredSecrets: [], terminated: new Promise(() => {}), subscribe() { return () => {}; },
       async threadSetName() {
         enteredRemote();
         await new Promise((resolve) => { releaseRemote = resolve; });
@@ -1701,6 +1667,8 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
   try {
     ensureBuiltinCliAgentProfiles(service.productStore);
     service.tokenUsageStore.record({
+      runId: "fixture-run-usage", runtime: "codex",
+      runtimeAccountId: service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).runtimeAccountId,
       profileId: DEFAULT_AGENT_PROFILE_ID,
       agentId: `shoggoth-${DEFAULT_AGENT_PROFILE_ID}`,
       agentName: "Shoggoth",
@@ -1745,8 +1713,12 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
     appendUsageEvent("usage-activity-tool-2", "tool_call", { tool: { name: "command" } });
     appendUsageEvent("usage-activity-tool-3", "tool_call", { tool: { name: "webSearch" } });
     appendUsageEvent("usage-activity-error", "error", { message: "failed" });
-    for (const [index, spec] of BUILTIN_CLI_AGENT_PROFILES.entries()) {
+    const nativeSpecs = [...BUILTIN_CLI_AGENT_PROFILES.entries()].filter(([, spec]) => service.productStore.getAgentProfile(spec.id));
+    const expectedTotal = 100 + nativeSpecs.reduce((sum, [index]) => sum + 200 + index * 100, 0);
+    for (const [index, spec] of nativeSpecs) {
       service.tokenUsageStore.record({
+        runId: `fixture-run-usage-${index}`, runtime: spec.runtime,
+        runtimeAccountId: service.productStore.getAgentProfile(spec.id).runtimeAccountId,
         profileId: spec.id,
         agentId: spec.agentId,
         agentName: spec.name,
@@ -1769,17 +1741,16 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
       });
     }
     const series = await ipc(paths, "usage.series", { range: "today", backendId: "shoggoth" });
-    assert.equal(series.totals.totalTokens, 100);
+    assert.equal(series.totals.totalTokens, expectedTotal);
     assert.equal(series.totals.cacheReadTokens, 20);
     const breakdown = await ipc(paths, "usage.breakdown", {
       range: "today", backendId: "shoggoth",
     });
-    assert.deepEqual(breakdown.bySource.map((row) => [row.label, row.totalTokens]), [
-      ["Shoggoth", 100],
-    ]);
-    assert.equal(breakdown.bySource[0].backendId, "shoggoth");
-    assert.equal(breakdown.byModel[0].model, "gpt-5.6-sol");
-    assert.equal(breakdown.topSessions[0].sessionId, SESSION_KEY);
+    assert.equal(breakdown.bySource.reduce((sum, row) => sum + row.totalTokens, 0), expectedTotal);
+    assert.ok(breakdown.bySource.every(row => row.backendId === "shoggoth"));
+    assert.ok(breakdown.bySource.some(row => row.label === "Shoggoth" && row.totalTokens === 100));
+    assert.ok(breakdown.byModel.some(row => row.model === "gpt-5.6-sol"));
+    assert.ok(breakdown.topSessions.some(row => row.sessionId === SESSION_KEY));
     assert.deepEqual(breakdown.tools, {
       totalCalls: 3,
       uniqueTools: 2,
@@ -1794,17 +1765,12 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
       messages: 2,
       toolCalls: 3,
       errors: 1,
-      tokens: 100,
+      tokens: expectedTotal,
       cost: breakdown.dailyActivity[0].cost,
     });
-    const codex = await ipc(paths, "usage.breakdown", { range: "today", backendId: "codex" });
-    assert.deepEqual(codex.bySource.map((row) => [row.backendId, row.label, row.totalTokens]), [
-      ["codex", "Codex", 200],
-    ]);
-    assert.equal(codex.topSessions[0].key.startsWith("codex:"), true);
-    assert.equal(codex.tools.totalCalls, 0);
-    const grok = await ipc(paths, "usage.series", { range: "today", backendId: "grok-build" });
-    assert.equal(grok.totals.totalTokens, 300);
+    for (const backendId of ["codex", "grok-build"]) {
+      await assert.rejects(ipc(paths, "usage.breakdown", { range: "today", backendId }));
+    }
     await assert.rejects(
       ipc(paths, "usage.series", { range: "forever", backendId: "shoggoth" }),
       (error) => error.code === "INVALID_PARAMS",
@@ -2180,7 +2146,7 @@ test("非空加密 Inbox 解密 locked 时 Service 只读启动且证据保留�
   });
   const state = { available: true };
   const host = {
-    registeredSecrets: [],
+    registeredSecrets: [], terminated: new Promise(() => {}), subscribe() { return () => {}; },
     async threadRead(params) {
       assert.deepEqual(params, { threadId: "thread-locked-restart", includeTurns: true });
       return codexThreadReadFixture([{
@@ -2200,6 +2166,10 @@ test("非空加密 Inbox 解密 locked 时 Service 只读启动且证据保留�
   first.chatSessionStore.completeBinding(
     sessionValue.sessionKey, binding.operationId, "thread-locked-restart",
   );
+  const owner = first.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+  first.runtimeSessionOwnershipStore.claim({ runtime: owner.runtime, runtimeProfileId: owner.runtimeProfileId,
+    runtimeAccountId: owner.runtimeAccountId, sessionId: "thread-locked-restart", profileId: owner.id,
+    workspace: sessionValue.workspace });
   const command = {
     operationId: "locked-restart-command",
     runId: "locked-restart-run",

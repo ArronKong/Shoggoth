@@ -281,7 +281,8 @@ function createRealTransportHost(options = {}) {
       ...(options.spawnEnv || {}),
     },
     spawnProcess(_command, _args, spawnOptions) {
-      return spawn(process.execPath, [path.join(ROOT, "scripts", "fixtures", "codex-app-server-fake.cjs")], spawnOptions);
+      return spawn(process.execPath, [options.fixturePath
+        || path.join(ROOT, "scripts", "fixtures", "codex-app-server-fake.cjs")], spawnOptions);
     },
     requestTimeoutMs: options.requestTimeoutMs || 500,
     initializeTimeoutMs: 500,
@@ -335,8 +336,8 @@ class FakeDispatcher {
       ...clone(input),
       workspace: input.workspace === null ? null : (this.canonicalWorkspace || input.workspace),
       status: "queued",
-      codexThreadId: null,
-      codexTurnId: null,
+      runtimeSessionRef: null,
+      runtimeTurnRef: null,
       resultSummary: null,
       errorCode: null,
     };
@@ -369,12 +370,6 @@ class FakeDispatcher {
     if (!run) throw codedError("WORK_RUN_NOT_FOUND");
     run.status = status;
     Object.assign(run, clone(patch));
-    if (Object.prototype.hasOwnProperty.call(patch, "runtimeSessionRef")) {
-      run.codexThreadId = patch.runtimeSessionRef?.sessionId ?? null;
-    }
-    if (Object.prototype.hasOwnProperty.call(patch, "runtimeTurnRef")) {
-      run.codexTurnId = patch.runtimeTurnRef?.turnId ?? null;
-    }
     if (status !== "waiting_approval" && status !== "waiting_input") run.waitingRequestId = null;
     return clone(run);
   }
@@ -472,7 +467,7 @@ class FakeChatSessionStore {
       workspace,
       modelOverride: null,
       status,
-      codexThreadId: threadId,
+      runtimeSessionId: threadId,
     };
     this.binding = null;
     if (status === "ready" && threadId) {
@@ -481,7 +476,7 @@ class FakeChatSessionStore {
         sessionKey: SESSION_KEY,
         threadSource: `shoggoth:${SESSION_KEY}:bind-existing`,
         state: "bound",
-        codexThreadId: threadId,
+        runtimeSessionId: threadId,
         createdAt: 1,
       };
     }
@@ -500,7 +495,7 @@ class FakeChatSessionStore {
       sessionKey,
       threadSource: `shoggoth:${sessionKey}:${operationId}`,
       state: "pending",
-      codexThreadId: null,
+      runtimeSessionId: null,
       createdAt,
     };
     return clone(this.binding);
@@ -511,29 +506,29 @@ class FakeChatSessionStore {
     assert.equal(sessionKey, this.session.sessionKey);
     assert.equal(operationId, this.binding.operationId);
     this.binding.state = "bound";
-    this.binding.codexThreadId = threadId;
+    this.binding.runtimeSessionId = threadId;
     this.session.status = "ready";
-    this.session.codexThreadId = threadId;
+    this.session.runtimeSessionId = threadId;
     return clone(this.session);
   }
 
   recoverBinding(input) {
     this.log.push("sessions.recoverBinding");
     assert.equal(input.threadSource, this.binding.threadSource);
-    return this.completeBinding(this.binding.sessionKey, this.binding.operationId, input.codexThreadId);
+    return this.completeBinding(this.binding.sessionKey, this.binding.operationId, input.runtimeSessionId);
   }
 
   getBinding(sessionKey) {
     return sessionKey === this.session.sessionKey ? clone(this.binding) : null;
   }
 
-  replaceBoundThread(input) {
-    this.log.push("sessions.replaceBoundThread");
+  replaceBoundRuntimeSession(input) {
+    this.log.push("sessions.replaceBoundRuntimeSession");
     assert.equal(input.sessionKey, this.session.sessionKey);
     assert.equal(input.operationId, this.binding.operationId);
-    assert.equal(input.expectedCodexThreadId, this.session.codexThreadId);
-    this.session.codexThreadId = input.codexThreadId;
-    this.binding.codexThreadId = input.codexThreadId;
+    assert.equal(input.expectedRuntimeSessionId, this.session.runtimeSessionId);
+    this.session.runtimeSessionId = input.runtimeSessionId;
+    this.binding.runtimeSessionId = input.runtimeSessionId;
     return clone(this.session);
   }
 
@@ -805,6 +800,14 @@ function fixture(options = {}) {
     dispatcher,
     productStore,
     usageStore,
+    getNativeRuntimeConfig: options.getNativeRuntimeConfig,
+    captureExecutionProviderRoute: options.captureExecutionProviderRoute,
+    assertExecutionProviderRouteCurrent: options.assertExecutionProviderRouteCurrent,
+    onRuntimeContextChanged: options.onRuntimeContextChanged,
+    onRuntimeMcpRequest: options.onRuntimeMcpRequest,
+    pluginRuntimeToolService: options.pluginRuntimeToolService,
+    getCapabilityPolicyRevision: options.getCapabilityPolicyRevision,
+    ...(options.runExecutionStore ? { runExecutionStore: options.runExecutionStore } : {}),
     ...(options.transcriptStore ? { transcriptStore: options.transcriptStore } : {}),
     chatSessionStore: sessions,
     inbox,
@@ -824,11 +827,13 @@ function fixture(options = {}) {
     terminalStreamTtlMs: options.terminalStreamTtlMs,
     promptTimeoutMs: options.promptTimeoutMs,
     approvalTimeoutMs: options.approvalTimeoutMs,
+    manualCompactionTimeoutMs: options.manualCompactionTimeoutMs,
     promptScheduler: options.promptScheduler,
     recoverOrphanedDomainRuns: options.recoverOrphanedDomainRuns,
     ...(options.productMcpApprovalPolicy
       ? { productMcpApprovalPolicy: options.productMcpApprovalPolicy } : {}),
     ...(options.contextCompiler ? { contextCompiler: options.contextCompiler } : {}),
+    ...(options.conversationCheckpointStore ? { conversationCheckpointStore: options.conversationCheckpointStore } : {}),
     ...(options.onRunInteraction ? { onRunInteraction: options.onRunInteraction } : {}),
   });
   return {
@@ -885,7 +890,7 @@ function directRuntimeManager(host, runtime) {
     },
   };
   if (typeof host.authenticationState === "function") {
-    handle.authenticationState = () => host.authenticationState();
+    handle.authenticationState = (options) => host.authenticationState(options);
   }
   return {
     async acquire(binding) {
@@ -902,6 +907,216 @@ async function openFixture(options = {}) {
   await value.coordinator.open();
   return value;
 }
+
+function recoveryStore() {
+  const records = new Map();
+  return { records,
+    async put(run, contract, command, fence) {
+      fence();
+      records.set(run.id, clone({ contract, command }));
+    },
+    async get(run) { return clone(records.get(run.id) || null); },
+    remove(run) { records.delete(run.id); },
+  };
+}
+
+test("加密恢复描述写入失败时不创建原生会话或发送任务", async () => {
+  const store = recoveryStore();
+  store.put = async () => { throw new Error("private crypto failure"); };
+  const value = await openFixture({ runExecutionStore: store });
+  const { ack } = await sendAndDrain(value);
+  assert.equal(value.dispatcher.getRun(ack.run.id).errorCode, "EXECUTION_BINDING_UNAVAILABLE");
+  assert.equal(value.host.threadStartCalls, 0);
+  assert.equal(value.host.turnStartCalls, 0);
+  await value.coordinator.close();
+});
+
+test("Service重启核验原生已完成turn并恢复终态，不重新发送，清理执行描述", async () => {
+  const store = recoveryStore();
+  const first = await openFixture({ runExecutionStore: store });
+  const { ack } = await sendAndDrain(first, { operationId: "recovery-completed" });
+  assert.ok(store.records.has(ack.run.id));
+  await first.coordinator.close();
+  const threads = clone(first.host.threads);
+  threads[0].turns[0].status = "completed";
+  const second = await openFixture({ runExecutionStore: store, dispatcher: first.dispatcher,
+    inbox: first.inbox, sessions: first.sessions, threads });
+  assert.equal(second.dispatcher.getRun(ack.run.id).status, "completed");
+  assert.equal(second.host.turnStartCalls, 0);
+  assert.equal(second.host.threadStartCalls, 0);
+  assert.equal(second.host.resumeCalls, 1);
+  assert.equal(store.records.has(ack.run.id), false);
+  assert.equal(second.inbox.get("recovery-completed").state, "completed");
+  await second.coordinator.close();
+});
+
+test("Service重启仍在执行或历史不完整的旧turn不猜成功也不重发", async () => {
+  for (const partialHistory of [false, true]) {
+    const store = recoveryStore();
+    const first = await openFixture({ runExecutionStore: store });
+    const { ack } = await sendAndDrain(first, { operationId: `recovery-unknown-${partialHistory}` });
+    await first.coordinator.close();
+    const second = await openFixture({ runExecutionStore: store, dispatcher: first.dispatcher,
+      inbox: first.inbox, sessions: first.sessions, threads: first.host.threads, partialHistory });
+    const run = second.dispatcher.getRun(ack.run.id);
+    assert.equal(run.status, "interrupted");
+    assert.equal(run.errorCode, "RUNTIME_RECOVERY_UNAVAILABLE");
+    assert.equal(second.host.turnStartCalls, 0);
+    assert.equal(second.host.threadStartCalls, 0);
+    await second.coordinator.close();
+  }
+});
+
+test("starting crash-cut 已有原生operation时按持久冻结参数恢复且不重发", async () => {
+  const store = recoveryStore();
+  const first = await openFixture({ runExecutionStore: store });
+  const { ack } = await sendAndDrain(first, { operationId: "recovery-starting" });
+  await first.coordinator.close();
+  first.dispatcher.runs.get(ack.run.id).status = "starting";
+  const threads = clone(first.host.threads);
+  threads[0].turns[0].status = "completed";
+  const second = await openFixture({ runExecutionStore: store, dispatcher: first.dispatcher,
+    inbox: first.inbox, sessions: first.sessions, threads });
+  assert.equal(second.dispatcher.getRun(ack.run.id).status, "completed");
+  assert.equal(second.host.turnStartCalls, 0);
+  assert.equal(second.host.threadStartCalls, 0);
+  await second.coordinator.close();
+});
+
+test("恢复时权限或命令binding变化即停止，不读取新CLI执行", async () => {
+  for (const change of ["permission", "command"]) {
+    const store = recoveryStore();
+    const first = await openFixture({ runExecutionStore: store });
+    const { ack } = await sendAndDrain(first, { operationId: `recovery-changed-${change}` });
+    await first.coordinator.close();
+    if (change === "command") store.records.get(ack.run.id).command.prompt = "changed";
+    const second = await openFixture({ runExecutionStore: store, dispatcher: first.dispatcher,
+      inbox: first.inbox, sessions: first.sessions, threads: first.host.threads,
+      ...(change === "permission" ? { sandbox: "danger-full-access" } : {}) });
+    assert.equal(second.dispatcher.getRun(ack.run.id).errorCode, "RUNTIME_RECOVERY_UNAVAILABLE");
+    assert.equal(second.host.resumeCalls, 0);
+    assert.equal(second.host.turnStartCalls, 0);
+    await second.coordinator.close();
+  }
+});
+
+test("interrupted 保留安全具体原因且任意CLI文本不会成为公共错误", async () => {
+  for (const [code, expected] of [["ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED", "ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED"],
+    ["DEEPSEEK_HARNESS_FRAME_INVALID", "RUNTIME_PROTOCOL_ERROR"],
+    ["DEEPSEEK_HARNESS_WRITE_FAILED", "RUNTIME_CONNECTION_LOST"],
+    ["PI_PROCESS_FAILED", "RUNTIME_CONNECTION_LOST"],
+    ["GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE"],
+    ["AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED"], ["PRIVATE_UNTRUSTED_CODE", "RUNTIME_TURN_INTERRUPTED"]]) {
+    const value = await openFixture();
+    const { ack } = await sendAndDrain(value, { operationId: `cause-${code}` });
+    const run = value.dispatcher.getRun(ack.run.id);
+    const turn = value.host.threads[0].turns[0];
+    Object.assign(turn, { status: "interrupted", errorCode: code, error: { message: "secret diagnostic" } });
+    value.host.emit({ known: true, type: "complete", method: "turn/completed", threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId, status: "interrupted" });
+    await value.coordinator.waitForIdle(run.id);
+    const terminal = value.dispatcher.getRun(run.id);
+    assert.equal(terminal.errorCode, expected);
+    assert.equal(JSON.stringify(terminal).includes("secret diagnostic"), false);
+    await value.coordinator.close();
+  }
+});
+
+test("native审批AbortSignal立即撤销卡片与旧答复权限并释放等待状态", async () => {
+  const value = await openFixture();
+  const { ack } = await sendAndDrain(value);
+  const run = value.dispatcher.getRun(ack.run.id);
+  const abort = new AbortController();
+  const handler = value.host.serverRequestHandlers.get("item/commandExecution/requestApproval");
+  const response = handler({ threadId: run.runtimeSessionRef?.sessionId, turnId: run.runtimeTurnRef?.turnId, itemId: "approval-item",
+    command: "echo test", cwd: run.workspace }, { signal: abort.signal });
+  assert.equal(value.dispatcher.getRun(run.id).status, "waiting_approval");
+  abort.abort();
+  assert.deepEqual(await response, { decision: "cancel" });
+  await value.coordinator.waitForIdle(run.id);
+  assert.equal(value.dispatcher.getRun(run.id).status, "running");
+  assert.equal(value.coordinator.getMemoryStats().pendingRequests, 0);
+  await value.coordinator.close();
+});
+
+test("native审批替换同步释放waiting，旧答复不可再授权", async () => {
+  const value = await openFixture();
+  const { ack } = await sendAndDrain(value);
+  const run = value.dispatcher.getRun(ack.run.id);
+  const handler = value.host.serverRequestHandlers.get("item/commandExecution/requestApproval");
+  const params = { threadId: run.runtimeSessionRef?.sessionId, turnId: run.runtimeTurnRef?.turnId, itemId: "replace-item", command: "echo test" };
+  const abort = new AbortController();
+  const first = handler(params, { signal: abort.signal });
+  const oldRequestId = value.dispatcher.getRun(run.id).waitingRequestId;
+  abort.abort();
+  const nextAbort = new AbortController();
+  const second = handler(params, { signal: nextAbort.signal });
+  assert.notEqual(value.dispatcher.getRun(run.id).waitingRequestId, oldRequestId);
+  assert.equal(value.coordinator.getMemoryStats().pendingRequests, 1);
+  assert.deepEqual(await first, { decision: "cancel" });
+  nextAbort.abort();
+  assert.deepEqual(await second, { decision: "cancel" });
+  await value.coordinator.close();
+});
+
+test("native审批撤销的持久写失败使coordinator失败保护，不留下可用的无卡waiting", async () => {
+  const value = await openFixture();
+  const { ack } = await sendAndDrain(value);
+  const run = value.dispatcher.getRun(ack.run.id);
+  const abort = new AbortController();
+  const handler = value.host.serverRequestHandlers.get("item/commandExecution/requestApproval");
+  const response = handler({ threadId: run.runtimeSessionRef?.sessionId, turnId: run.runtimeTurnRef?.turnId,
+    itemId: "failed-abort-item", command: "echo test" }, { signal: abort.signal });
+  value.dispatcher.transitionFailures.set("running", "INJECTED_STORAGE_FAILURE");
+  abort.abort();
+  assert.deepEqual(await response, { decision: "cancel" });
+  await assert.rejects(value.coordinator.recover(), { code: "INJECTED_STORAGE_FAILURE" });
+  await value.coordinator.close();
+});
+
+test("Host崩溃保留协议错误分类而不泄露底层异常文本", async () => {
+  const value = await openFixture();
+  const { ack } = await sendAndDrain(value);
+  value.host.terminate(Object.assign(new Error("private diagnostic"), { code: "DEEPSEEK_HARNESS_FRAME_INVALID" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  await value.coordinator.waitForIdle(ack.run.id);
+  const terminal = value.dispatcher.getRun(ack.run.id);
+  assert.equal(terminal.errorCode, "RUNTIME_PROTOCOL_ERROR");
+  assert.equal(JSON.stringify(terminal).includes("private diagnostic"), false);
+  await value.coordinator.close();
+});
+
+test("同lifecycle重复recover不会resume或中断正常活跃任务", async () => {
+  const store = recoveryStore();
+  const value = await openFixture({ runExecutionStore: store });
+  const { ack } = await sendAndDrain(value);
+  await value.coordinator.recover();
+  await value.coordinator.recover();
+  assert.equal(value.dispatcher.getRun(ack.run.id).status, "running");
+  assert.equal(value.host.resumeCalls, 0);
+  assert.equal(value.host.turnStartCalls, 1);
+  await value.coordinator.close();
+});
+
+test("恢复记录读取期间已取消的任务不会重新占有或resume", async () => {
+  const store = recoveryStore();
+  const first = await openFixture({ runExecutionStore: store });
+  const { ack } = await sendAndDrain(first);
+  await first.coordinator.close();
+  const originalGet = store.get;
+  store.get = async (run) => {
+    const stored = await originalGet(run);
+    first.dispatcher.transition(run.id, "canceled");
+    return stored;
+  };
+  const second = await openFixture({ runExecutionStore: store, dispatcher: first.dispatcher,
+    inbox: first.inbox, sessions: first.sessions, threads: first.host.threads });
+  assert.equal(second.dispatcher.getRun(ack.run.id).status, "canceled");
+  assert.equal(second.host.resumeCalls, 0);
+  assert.equal(second.host.turnStartCalls, 0);
+  assert.equal(second.coordinator.getMemoryStats().runExecutionContracts, 0);
+  await second.coordinator.close();
+});
 
 async function sendAndDrain(value, input = {}) {
   const operationId = input.operationId || "send-one";
@@ -945,7 +1160,7 @@ async function assertTerminalRecoverReentrancy(mode) {
     } else {
       if (mode === "normal") {
         const turn = value.host.threads[0].turns.find(
-          (candidate) => candidate.id === running.codexTurnId,
+          (candidate) => candidate.id === running.runtimeTurnRef?.turnId,
         );
         turn.status = "completed";
         turn.items.push({ type: "agentMessage", text: "exactly once", phase: "final_answer" });
@@ -959,8 +1174,8 @@ async function assertTerminalRecoverReentrancy(mode) {
         known: true,
         type: "complete",
         method: "turn/completed",
-        threadId: running.codexThreadId,
-        turnId: running.codexTurnId,
+        threadId: running.runtimeSessionRef?.sessionId,
+        turnId: running.runtimeTurnRef?.turnId,
         status: "completed",
       });
     }
@@ -1004,7 +1219,7 @@ test("公开 Run 查询/订阅并只路由当前 generation 与 thread/turn 的�
     type: "text_delta",
     method: "item/agentMessage/delta",
     threadId: "wrong-thread",
-    turnId: running.codexTurnId,
+    turnId: running.runtimeTurnRef?.turnId,
     itemId: "item-wrong",
     delta: "ignored",
   });
@@ -1012,7 +1227,7 @@ test("公开 Run 查询/订阅并只路由当前 generation 与 thread/turn 的�
     known: true,
     type: "text_delta",
     method: "item/agentMessage/delta",
-    threadId: running.codexThreadId,
+    threadId: running.runtimeSessionRef?.sessionId,
     turnId: "wrong-turn",
     itemId: "item-wrong",
     delta: "ignored",
@@ -1021,8 +1236,8 @@ test("公开 Run 查询/订阅并只路由当前 generation 与 thread/turn 的�
     known: true,
     type: "text_delta",
     method: "item/agentMessage/delta",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     itemId: "item-live",
     delta: "hello",
   });
@@ -1039,8 +1254,8 @@ test("公开 Run 查询/订阅并只路由当前 generation 与 thread/turn 的�
     known: true,
     type: "status",
     method: "turn/started",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "inProgress",
   });
   assert.equal(received.length, 2);
@@ -1052,19 +1267,54 @@ test("公开 Run 查询/订阅并只路由当前 generation 与 thread/turn 的�
   assert.equal(replay.events.length, 1);
   assert.equal(replay.events[0].type, "status");
   replay.unsubscribe();
-  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.codexTurnId);
+  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
   turn.status = "completed";
   turn.items.push({ type: "agentMessage", text: "finished without UI", phase: "final_answer" });
   value.host.emit({
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   });
   assert.equal((await value.coordinator.waitForIdle(ack.run.id)).status, "completed");
   await value.coordinator.close();
+});
+
+test("Runtime retry status reaches the run stream without private provider text", async () => {
+  const value = await openFixture({
+    sessionStatus: "ready", threadId: "thread-retry-status",
+    threads: [{ id: "thread-retry-status", threadSource: null, turns: [] }],
+  });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "retry-status" });
+    const run = value.coordinator.getRun(ack.run.id);
+    const observed = [];
+    const subscription = value.coordinator.subscribeRun(run.id,
+      { streamId: null, afterSeq: 0 }, event => observed.push(event));
+    value.host.emit({ known: true, type: "status", method: "opencode/session.status",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
+      status: "retrying", reason: "RUNTIME_RATE_LIMITED", message: "private provider trace" });
+    assert.deepEqual(observed.at(-1).payload, {
+      method: "opencode/session.status", status: "retrying", reason: "RUNTIME_RATE_LIMITED",
+    });
+    assert.equal(JSON.stringify(observed).includes("private provider trace"), false);
+    value.host.emit({ known: true, type: "status", method: "opencode/session.status",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
+      status: "running" });
+    assert.equal(observed.at(-1).payload.status, "running");
+    subscription.unsubscribe();
+    const turn = value.host.threads[0].turns.find(item => item.id === run.runtimeTurnRef.turnId);
+    turn.status = "failed";
+    turn.errorCode = "RUNTIME_RATE_LIMITED";
+    value.host.emit({ known: true, type: "complete", method: "opencode/session.message",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, status: "failed" });
+    const terminal = await value.coordinator.waitForIdle(run.id);
+    assert.equal(terminal.errorCode, "RUNTIME_RATE_LIMITED");
+  } finally {
+    await value.coordinator.close();
+  }
 });
 
 test("text/reasoning/plan/tool/status 事件按白名单快照追加，工具只公开安全展示摘要", async () => {
@@ -1083,8 +1333,8 @@ test("text/reasoning/plan/tool/status 事件按白名单快照追加，工具只
   );
   const common = {
     known: true,
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     opaque: "must-not-pass",
   };
   for (const event of [
@@ -1160,8 +1410,8 @@ test("通用 MCP 包装调用按 toolCallId 关联为去密的联邦结果", asy
   const common = {
     known: true,
     method: "antigravity/step_update",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "wrapped-federation-tool",
     toolCallId: "wrapped-federation-tool",
   };
@@ -1280,8 +1530,8 @@ test("工具展示摘要命中敏感信息时省略，名称与终态仍可观�
   );
   const common = {
     known: true,
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "tool-secret",
     toolCallId: "tool-secret",
   };
@@ -1337,8 +1587,8 @@ test("运行阶段耗时以安全 performance.stage 事件公开", async () => {
     known: true,
     type: "reasoning",
     method: "item/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     itemId: "reason-performance",
     reasoning: ["started"],
   });
@@ -1347,8 +1597,8 @@ test("运行阶段耗时以安全 performance.stage 事件公开", async () => {
     known: true,
     type: "tool_start",
     method: "item/started",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     itemId: "tool-performance",
     toolCallId: "tool-performance",
     tool: { kind: "commandExecution", name: "command", status: "inProgress", input: "npm test" },
@@ -1358,8 +1608,8 @@ test("运行阶段耗时以安全 performance.stage 事件公开", async () => {
     known: true,
     type: "tool_result",
     method: "item/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     itemId: "tool-performance",
     toolCallId: "tool-performance",
     tool: { kind: "commandExecution", name: "command", status: "completed", exitCode: 0, output: "all tests passed" },
@@ -1432,7 +1682,7 @@ test("turn/completed 以 full thread/read 对账并按 durable 顺序 exactly-on
   const running = value.coordinator.getRun(ack.run.id);
   assert.equal(running.status, "running");
   assert.equal(value.inbox.get(operationId).state, "dispatching");
-  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.codexTurnId);
+  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
   turn.status = "completed";
   turn.itemsView = "full";
   turn.items.push(
@@ -1452,8 +1702,8 @@ test("turn/completed 以 full thread/read 对账并按 durable 顺序 exactly-on
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "failed",
   };
   value.host.emit(completedEvent);
@@ -1512,7 +1762,7 @@ test("terminal canonical read 必须证明 operationId 与目标 turn 的 userMe
     });
     const { ack } = await sendAndDrain(value, { operationId: "terminal-correlation" });
     const running = value.coordinator.getRun(ack.run.id);
-    const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.codexTurnId);
+    const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
     turn.status = "completed";
     turn.items = [
       ...clone(items),
@@ -1522,8 +1772,8 @@ test("terminal canonical read 必须证明 operationId 与目标 turn 的 userMe
       known: true,
       type: "complete",
       method: "turn/completed",
-      threadId: running.codexThreadId,
-      turnId: running.codexTurnId,
+      threadId: running.runtimeSessionRef?.sessionId,
+      turnId: running.runtimeTurnRef?.turnId,
       status: "completed",
     });
     await assert.rejects(
@@ -1545,7 +1795,7 @@ test("terminal 单次通知遇到 thread/read 瞬时失败时有界自动重试�
   });
   const { ack } = await sendAndDrain(value, { operationId: "terminal-retry" });
   const running = value.coordinator.getRun(ack.run.id);
-  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.codexTurnId);
+  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
   turn.status = "completed";
   turn.items.push({ type: "agentMessage", text: "eventually done", phase: "final_answer" });
   const originalRead = value.host.threadRead.bind(value.host);
@@ -1562,8 +1812,8 @@ test("terminal 单次通知遇到 thread/read 瞬时失败时有界自动重试�
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   };
   value.log.length = 0;
@@ -1583,7 +1833,7 @@ test("terminal 单次通知读到暂时 inProgress 时自动重读 canonical ter
   });
   const { ack } = await sendAndDrain(value, { operationId: "terminal-stale" });
   const running = value.coordinator.getRun(ack.run.id);
-  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.codexTurnId);
+  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
   turn.items.push({ type: "agentMessage", text: "eventually canonical", phase: "final_answer" });
   const originalRead = value.host.threadRead.bind(value.host);
   let terminalReads = 0;
@@ -1596,8 +1846,8 @@ test("terminal 单次通知读到暂时 inProgress 时自动重读 canonical ter
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   });
   assert.equal((await value.coordinator.waitForIdle(running.id)).status, "completed");
@@ -1633,8 +1883,8 @@ test("terminal canonical 对账重试耗尽后按 durable 顺序收敛 interrupt
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   });
   const terminal = await value.coordinator.waitForIdle(running.id);
@@ -1681,8 +1931,8 @@ test("terminal retry exhausted 的 subscriber 同步 close 后不 tombstone 或 
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: firstRun.codexThreadId,
-    turnId: firstRun.codexTurnId,
+    threadId: firstRun.runtimeSessionRef?.sessionId,
+    turnId: firstRun.runtimeTurnRef?.turnId,
     status: "completed",
   });
   while (closing === null) await new Promise((resolve) => setImmediate(resolve));
@@ -1707,7 +1957,7 @@ test("terminal Inbox tombstone 持久化后才 drain 同 Session queued run", as
     prompt: "queued behind first",
   });
   assert.equal(secondAck.disposition, "queued");
-  const firstTurn = value.host.threads[0].turns.find((turn) => turn.id === firstRun.codexTurnId);
+  const firstTurn = value.host.threads[0].turns.find((turn) => turn.id === firstRun.runtimeTurnRef?.turnId);
   firstTurn.status = "completed";
   firstTurn.items.push({ type: "agentMessage", text: "first done", phase: "final_answer" });
   value.log.length = 0;
@@ -1715,8 +1965,8 @@ test("terminal Inbox tombstone 持久化后才 drain 同 Session queued run", as
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: firstRun.codexThreadId,
-    turnId: firstRun.codexTurnId,
+    threadId: firstRun.runtimeSessionRef?.sessionId,
+    turnId: firstRun.runtimeTurnRef?.turnId,
     status: "completed",
   });
   await value.coordinator.waitForIdle(firstRun.id);
@@ -1743,7 +1993,7 @@ test("terminal subscriber 同步 close 后 lifecycle fence 阻止 Inbox tombston
     sessionKey: SESSION_KEY,
     prompt: "must remain queued while closing",
   });
-  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === firstRun.codexTurnId);
+  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === firstRun.runtimeTurnRef?.turnId);
   turn.status = "completed";
   turn.items.push({ type: "agentMessage", text: "durable before close", phase: "final_answer" });
   let closing = null;
@@ -1754,8 +2004,8 @@ test("terminal subscriber 同步 close 后 lifecycle fence 阻止 Inbox tombston
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: firstRun.codexThreadId,
-    turnId: firstRun.codexTurnId,
+    threadId: firstRun.runtimeSessionRef?.sessionId,
+    turnId: firstRun.runtimeTurnRef?.turnId,
     status: "completed",
   });
   while (closing === null) await new Promise((resolve) => setImmediate(resolve));
@@ -1784,7 +2034,7 @@ test("terminal stream LRU 有界保留，淘汰后以 authoritative STREAM_RESET
       () => {},
     );
     const turn = value.host.threads[0].turns.find(
-      (candidate) => candidate.id === running.codexTurnId,
+      (candidate) => candidate.id === running.runtimeTurnRef?.turnId,
     );
     turn.status = "completed";
     turn.items.push({ type: "agentMessage", text: `done ${index}`, phase: "final_answer" });
@@ -1792,8 +2042,8 @@ test("terminal stream LRU 有界保留，淘汰后以 authoritative STREAM_RESET
       known: true,
       type: "complete",
       method: "turn/completed",
-      threadId: running.codexThreadId,
-      turnId: running.codexTurnId,
+      threadId: running.runtimeSessionRef?.sessionId,
+      turnId: running.runtimeTurnRef?.turnId,
       status: "completed",
     });
     await value.coordinator.waitForIdle(running.id);
@@ -1913,14 +2163,14 @@ test("terminal stream TTL 到期后释放内存并在重订阅时返回 authorit
     { streamId: null, afterSeq: 0 },
     () => {},
   );
-  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.codexTurnId);
+  const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
   turn.status = "completed";
   value.host.emit({
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   });
   await value.coordinator.waitForIdle(running.id);
@@ -2095,8 +2345,8 @@ test("close fence 阻止已排队但尚未执行的 Host-terminated 收敛继续
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   });
   while (!value.log.includes("host.threadRead:gated")) {
@@ -2137,8 +2387,8 @@ test("重启 crash cut：WorkRun 已 terminal 但 Inbox 仍 active 时先补 ter
   });
   value.dispatcher.admit(terminalRunId);
   value.dispatcher.transition(terminalRunId, "running", {
-    codexThreadId: "thread-terminal-recovery",
-    codexTurnId: "turn-terminal-recovery",
+    runtimeSessionRef: { runtime: "codex", runtimeProfileId: "runtime-default", runtimeAccountId: RUNTIME_ACCOUNT_ID, sessionId: "thread-terminal-recovery" },
+    runtimeTurnRef: { runtime: "codex", runtimeProfileId: "runtime-default", runtimeAccountId: RUNTIME_ACCOUNT_ID, sessionId: "thread-terminal-recovery", turnId: "turn-terminal-recovery" },
   });
   value.dispatcher.transition(terminalRunId, "completed", { resultSummary: "persisted result" });
   value.inbox.transition("terminal-cut", "dispatching");
@@ -2190,7 +2440,7 @@ test("terminal commit uncertain 会 poison Coordinator 且绝不删除 active In
     const operationId = `uncertain-${cut}`;
     const { ack } = await sendAndDrain(value, { operationId });
     const run = value.dispatcher.getRun(ack.run.id);
-    const turn = value.host.threads[0].turns.find((candidate) => candidate.id === run.codexTurnId);
+    const turn = value.host.threads[0].turns.find((candidate) => candidate.id === run.runtimeTurnRef?.turnId);
     turn.status = "completed";
     turn.items.push({ type: "agentMessage", text: "done", phase: "final_answer" });
     const terminalEvents = [];
@@ -2205,8 +2455,8 @@ test("terminal commit uncertain 会 poison Coordinator 且绝不删除 active In
       known: true,
       type: "complete",
       method: "turn/completed",
-      threadId: run.codexThreadId,
-      turnId: run.codexTurnId,
+      threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId,
       status: "completed",
     });
     if (cut === "product") {
@@ -2214,8 +2464,8 @@ test("terminal commit uncertain 会 poison Coordinator 且绝不删除 active In
         known: true,
         type: "complete",
         method: "turn/completed",
-        threadId: run.codexThreadId,
-        turnId: run.codexTurnId,
+        threadId: run.runtimeSessionRef?.sessionId,
+        turnId: run.runtimeTurnRef?.turnId,
         status: "completed",
       });
     }
@@ -2300,7 +2550,7 @@ test("canonical turn status 映射 failed/interrupted/canceled 并各自只发�
     });
     const { ack } = await sendAndDrain(value, { operationId: `terminal-${remoteStatus}` });
     const running = value.coordinator.getRun(ack.run.id);
-    const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.codexTurnId);
+    const turn = value.host.threads[0].turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
     turn.status = remoteStatus;
     const terminalEvents = [];
     const subscription = value.coordinator.subscribeRun(
@@ -2314,8 +2564,8 @@ test("canonical turn status 映射 failed/interrupted/canceled 并各自只发�
       known: true,
       type: "complete",
       method: "turn/completed",
-      threadId: running.codexThreadId,
-      turnId: running.codexTurnId,
+      threadId: running.runtimeSessionRef?.sessionId,
+      turnId: running.runtimeTurnRef?.turnId,
       status: "completed",
     };
     value.host.emit(event);
@@ -2352,7 +2602,7 @@ test("terminal failed turn 只从结构化错误映射认证和额度状态，�
       const { ack } = await sendAndDrain(value, { operationId: `terminal-auth-${name}` });
       const running = value.coordinator.getRun(ack.run.id);
       const turn = value.host.threads[0].turns.find(
-        (candidate) => candidate.id === running.codexTurnId,
+        (candidate) => candidate.id === running.runtimeTurnRef?.turnId,
       );
       turn.status = "failed";
       Object.assign(turn, clone(failure));
@@ -2360,8 +2610,8 @@ test("terminal failed turn 只从结构化错误映射认证和额度状态，�
         known: true,
         type: "complete",
         method: "turn/completed",
-        threadId: running.codexThreadId,
-        turnId: running.codexTurnId,
+        threadId: running.runtimeSessionRef?.sessionId,
+        turnId: running.runtimeTurnRef?.turnId,
         status: "failed",
       });
       const terminal = await value.coordinator.waitForIdle(running.id);
@@ -2377,8 +2627,9 @@ test("terminal failed turn 只从结构化错误映射认证和额度状态，�
 
 test("terminal failed turn 保留权限与上游不可用公共错误码", async () => {
   for (const errorCode of ["RUNTIME_PERMISSION_REQUIRED", "RUNTIME_UPSTREAM_UNAVAILABLE",
-    "RUNTIME_APPROVAL_UNAVAILABLE", "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED",
-    "RUNTIME_SPENDING_LIMIT_REACHED"]) {
+    "RUNTIME_APPROVAL_UNAVAILABLE", "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_RATE_LIMITED", "RUNTIME_ACCOUNT_BLOCKED",
+    "RUNTIME_SPENDING_LIMIT_REACHED", "ANTIGRAVITY_NETWORK_UNAVAILABLE",
+    "ANTIGRAVITY_REGION_UNSUPPORTED", "ANTIGRAVITY_ELIGIBILITY_FAILED", "ANTIGRAVITY_STARTUP_TIMEOUT"]) {
     const value = await openFixture({
       sessionStatus: "ready",
       threadId: `thread-terminal-${errorCode}`,
@@ -2388,7 +2639,7 @@ test("terminal failed turn 保留权限与上游不可用公共错误码", async
       const { ack } = await sendAndDrain(value, { operationId: `terminal-${errorCode}` });
       const running = value.coordinator.getRun(ack.run.id);
       const turn = value.host.threads[0].turns.find(
-        (candidate) => candidate.id === running.codexTurnId,
+        (candidate) => candidate.id === running.runtimeTurnRef?.turnId,
       );
       turn.status = "failed";
       turn.errorCode = errorCode;
@@ -2396,8 +2647,8 @@ test("terminal failed turn 保留权限与上游不可用公共错误码", async
         known: true,
         type: "complete",
         method: "turn/completed",
-        threadId: running.codexThreadId,
-        turnId: running.codexTurnId,
+        threadId: running.runtimeSessionRef?.sessionId,
+        turnId: running.runtimeTurnRef?.turnId,
         status: "failed",
       });
       const terminal = await value.coordinator.waitForIdle(running.id);
@@ -2423,7 +2674,7 @@ test("resultSummary 只取目标 turn 的 canonical final_answer 并按 UTF-8 �
   });
   const { ack } = await sendAndDrain(value, { operationId: "summary-bound" });
   const running = value.coordinator.getRun(ack.run.id);
-  const target = value.host.threads[0].turns.find((turn) => turn.id === running.codexTurnId);
+  const target = value.host.threads[0].turns.find((turn) => turn.id === running.runtimeTurnRef?.turnId);
   target.status = "completed";
   target.items.push({ type: "agentMessage", text: "secretab好", phase: "final_answer" });
   value.host.threads[0].turns.push({
@@ -2436,8 +2687,8 @@ test("resultSummary 只取目标 turn 的 canonical final_answer 并按 UTF-8 �
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   });
   await value.coordinator.waitForIdle(running.id);
@@ -2633,7 +2884,7 @@ test("结构化 Retry-After 写入账号级 backoff：同账号 Agent 排队，�
     requestBinding: (sessionKey, ...args) => storeFor(sessionKey).requestBinding(sessionKey, ...args),
     completeBinding: (sessionKey, ...args) => storeFor(sessionKey).completeBinding(sessionKey, ...args),
     getBinding: (sessionKey) => storeFor(sessionKey)?.getBinding(sessionKey) || null,
-    replaceBoundThread: (input) => storeFor(input.sessionKey).replaceBoundThread(input),
+    replaceBoundRuntimeSession: (input) => storeFor(input.sessionKey).replaceBoundRuntimeSession(input),
     listPendingBindings: () => [...sessionStores.values()].flatMap((store) => store.listPendingBindings()),
     recoverBinding(input) {
       const store = [...sessionStores.values()].find(
@@ -2806,16 +3057,16 @@ test("RuntimeAccount admission 在 terminal、close 与 open 失败边界 exactl
     const { ack } = await sendAndDrain(value, { operationId: "account-terminal-release" });
     const running = value.coordinator.getRun(ack.run.id);
     assert.equal(runtimeAccountAdmission.active.has(running.id), true);
-    const thread = value.host.threads.find((candidate) => candidate.id === running.codexThreadId);
-    const turn = thread.turns.find((candidate) => candidate.id === running.codexTurnId);
+    const thread = value.host.threads.find((candidate) => candidate.id === running.runtimeSessionRef?.sessionId);
+    const turn = thread.turns.find((candidate) => candidate.id === running.runtimeTurnRef?.turnId);
     turn.status = "completed";
     turn.items.push({ type: "agentMessage", phase: "final_answer", text: "done" });
     value.host.emit({
       known: true,
       type: "complete",
       method: "turn/completed",
-      threadId: running.codexThreadId,
-      turnId: running.codexTurnId,
+      threadId: running.runtimeSessionRef?.sessionId,
+      turnId: running.runtimeTurnRef?.turnId,
       status: "completed",
     });
     await value.coordinator.waitForIdle(running.id);
@@ -3109,9 +3360,9 @@ test("迁移后 detached ChatSession 无 Transcript 证明时 fail closed 且不
     });
     const settled = await value.coordinator.waitForIdle(ack.run.id);
     assert.equal(settled.status, "failed");
-    assert.equal(settled.errorCode, "RUNTIME_START_FAILED");
+    assert.equal(settled.errorCode, "RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED");
     assert.equal(value.sessions.session.status, "ready");
-    assert.equal(value.sessions.session.codexThreadId, null);
+    assert.equal(value.sessions.session.runtimeSessionId, null);
     assert.equal(value.host.threadStartCalls, 0);
     assert.equal(value.host.turnStartCalls, 0);
   } finally {
@@ -3179,7 +3430,7 @@ test("迁移后 detached ChatSession 以 ChatSession.id 编译旧 Transcript 并
     assert.equal(host.turnStartCalls, 1);
     assert.equal(turnStartInput.context, "LEGACY TRANSCRIPT SEMANTICS");
     assert.equal(value.sessions.session.status, "ready");
-    assert.equal(value.sessions.session.codexThreadId, "thread-created-1");
+    assert.equal(value.sessions.session.runtimeSessionId, "thread-created-1");
   } finally {
     await value.coordinator.close();
   }
@@ -3295,6 +3546,21 @@ test("Grok 缺少凭据时被中央门禁拦截，有凭据但未验证时允许
   } finally {
     await unverified.coordinator.close();
   }
+});
+
+test("Antigravity execution can defer auth to the CLI without claiming verified login", async () => {
+  const host = new FakeHost([], { accountReadSupported: false });
+  host.authenticationState = (options) => {
+    assert.deepEqual(options, { allowDeferred: true });
+    return { verificationDeferred: true };
+  };
+  const value = await openFixture({ runtime: "antigravity", host,
+    runtimeManager: directRuntimeManager(host, "antigravity") });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "antigravity-deferred-auth" });
+    assert.equal(value.coordinator.getRun(ack.run.id).status, "running");
+    assert.equal(host.turnStartCalls, 1);
+  } finally { await value.coordinator.close(); }
 });
 
 test("Runtime session 阶段迟到 AUTH_REQUIRED 保留认证错误且不做无意义重试", async () => {
@@ -3619,10 +3885,10 @@ test("binding 并发收敛到 ready 的 resume 分支仍使用冻结 WorkRun wor
       sessionKey: SESSION_KEY,
       threadSource: `shoggoth:${SESSION_KEY}:bind-race-ready`,
       state: "bound",
-      codexThreadId: "thread-race-ready",
+      runtimeSessionId: "thread-race-ready",
       createdAt: 1,
     };
-    return clone({ ...sessions.session, status: "ready", codexThreadId: "thread-race-ready" });
+    return clone({ ...sessions.session, status: "ready", runtimeSessionId: "thread-race-ready" });
   };
   sessions.listPendingBindings = () => [];
   const value = await openFixture({
@@ -3789,7 +4055,7 @@ test("draft 先分页 thread/list 对账，找到唯一 threadSource 后等 turn
   await sendAndDrain(value, { operationId: "paged" });
   assert.ok(value.log.filter((entry) => entry === "host.threadList").length >= 2);
   assert.equal(host.threadStartCalls, 0);
-  assert.equal(value.sessions.session.codexThreadId, "thread-recovered");
+  assert.equal(value.sessions.session.runtimeSessionId, "thread-recovered");
   assert.ok(value.log.includes("sessions.completeBinding"));
   assert.ok(value.log.indexOf("host.turnStart") < value.log.indexOf("sessions.completeBinding"));
   await value.coordinator.close();
@@ -3857,7 +4123,7 @@ test("threadSource 恢复先验证 resume 的 id/source 再持久化 binding", a
     (error) => error.code === "CODEX_THREAD_RESUME_SOURCE_MISMATCH",
   );
   assert.equal(value.sessions.getSession(SESSION_KEY).status, "binding");
-  assert.equal(value.sessions.getSession(SESSION_KEY).codexThreadId, null);
+  assert.equal(value.sessions.getSession(SESSION_KEY).runtimeSessionId, null);
   assert.equal(value.inbox.get("binding-source-mismatch").state, "dispatching");
   await value.coordinator.close();
 });
@@ -3884,7 +4150,7 @@ test("threadSource 扫到 archived orphan 时不绑定、不 resume、不二次 
   assert.equal(value.host.threadStartCalls, 0);
   assert.equal(value.host.resumeCalls, 0);
   assert.equal(value.sessions.session.status, "binding");
-  assert.equal(value.sessions.session.codexThreadId, null);
+  assert.equal(value.sessions.session.runtimeSessionId, null);
   assert.equal(value.host.turnStartCalls, 0);
   await value.coordinator.close();
 });
@@ -3928,7 +4194,7 @@ test("thread/start 响应丢失后按 threadSource 对账，不重复创建", as
   const value = await openFixture({ loseThreadStartResponse: true });
   await sendAndDrain(value, { operationId: "lost-thread-response" });
   assert.equal(value.host.threadStartCalls, 1);
-  assert.equal(value.sessions.session.codexThreadId, "thread-created-1");
+  assert.equal(value.sessions.session.runtimeSessionId, "thread-created-1");
   assert.equal(value.host.turnStartCalls, 1);
   await value.coordinator.close();
 });
@@ -4001,9 +4267,7 @@ test("ready session 先 resume，再读 full history，并携 clientUserMessageI
   assert.equal(value.coordinator
     .getRuntimeContextForSource(PROFILE_ID, "chat", SESSION_KEY).effectiveModel, "gpt-5.6-terra",
     "当前 Run 必须继续报告准入时冻结的模型");
-  assert.equal(value.coordinator
-    .getRuntimeContextForLegacyRun(PROFILE_ID, "stale-cached-run").effectiveModel, "gpt-5.6-terra",
-  "旧线程的过期 runId 只允许回退到当前 Profile 唯一 active Run");
+  assert.equal(value.coordinator.getRuntimeContextForSource(PROFILE_ID, "chat", "stale-session"), null);
   const turn = value.host.threads[0].turns[0];
   assert.equal(turn.items[0].clientId, "resume-operation");
   await value.coordinator.close();
@@ -4030,8 +4294,8 @@ test("ready session 指向未持久化 thread 时按稳定 threadSource 重建�
   await sendAndDrain(value, { operationId: "repair-ephemeral-thread" });
   assert.equal(value.host.threadStartCalls, 1);
   assert.equal(value.host.turnStartCalls, 1);
-  assert.equal(value.sessions.session.codexThreadId, "thread-created-1");
-  assert.ok(value.log.indexOf("host.turnStart") < value.log.indexOf("sessions.replaceBoundThread"));
+  assert.equal(value.sessions.session.runtimeSessionId, "thread-created-1");
+  assert.ok(value.log.indexOf("host.turnStart") < value.log.indexOf("sessions.replaceBoundRuntimeSession"));
   await value.coordinator.close();
 });
 
@@ -4059,7 +4323,7 @@ test("turn/start 响应丢失后从 full history 找 clientId，禁止重发", a
   });
   await sendAndDrain(value, { operationId: "lost-turn-response" });
   assert.equal(value.host.turnStartCalls, 1);
-  assert.equal(value.dispatcher.listRuns()[0].codexTurnId, "turn-1");
+  assert.equal(value.dispatcher.listRuns()[0].runtimeTurnRef?.turnId, "turn-1");
   assert.equal(value.inbox.get("lost-turn-response").state, "dispatching");
   await value.coordinator.close();
 });
@@ -4180,6 +4444,9 @@ test("公开 thread usage 在 turn context 发布前缓冲并按 Run/Profile 精
   await sendAndDrain(value, { operationId: "usage-buffered" });
   assert.deepEqual(value.usageRecords, [{
     profileId: PROFILE_ID,
+    runId: value.coordinator.listRuns()[0].id,
+    runtime: "codex",
+    runtimeAccountId: RUNTIME_ACCOUNT_ID,
     agentId: "shoggoth-agent",
     agentName: "Shoggoth",
     source: "chat",
@@ -4214,8 +4481,8 @@ test("公开 thread usage 在 turn context 发布前缓冲并按 Run/Profile 精
     known: true,
     type: "usage",
     method: "thread/tokenUsage/updated",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     responseId: `thread-usage-${"b".repeat(64)}`,
     usage: {
       totalTokens: 1,
@@ -4353,8 +4620,8 @@ test("重启时 running 不由 Coordinator 猜测成功，保留给 Service 标�
   });
   value.dispatcher.admit("00000000-0000-4000-8000-000000000077");
   value.dispatcher.transition("00000000-0000-4000-8000-000000000077", "running", {
-    codexThreadId: "thread-running-cut",
-    codexTurnId: "turn-running-cut",
+    runtimeSessionRef: { runtime: "codex", runtimeProfileId: "runtime-default", runtimeAccountId: RUNTIME_ACCOUNT_ID, sessionId: "thread-running-cut" },
+    runtimeTurnRef: { runtime: "codex", runtimeProfileId: "runtime-default", runtimeAccountId: RUNTIME_ACCOUNT_ID, sessionId: "thread-running-cut", turnId: "turn-running-cut" },
   });
   value.inbox.transition("running-cut", "dispatching");
   value.log.length = 0;
@@ -4410,8 +4677,8 @@ test("steer 只命中当前 assigned turn，并以 operationId 做同参并发�
   while (value.host.turnSteerCalls === 0) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(value.host.turnSteerCalls, 1);
   assert.deepEqual(value.host.lastTurnSteerParams, {
-    threadId: running.codexThreadId,
-    expectedTurnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    expectedTurnId: running.runtimeTurnRef?.turnId,
     clientUserMessageId: input.operationId,
     input: [{ type: "text", text: input.message, text_elements: [] }],
   });
@@ -4423,7 +4690,7 @@ test("steer 只命中当前 assigned turn，并以 operationId 做同参并发�
   assert.deepEqual(await first, {
     accepted: true,
     runId: running.id,
-    turnId: running.codexTurnId,
+    turnId: running.runtimeTurnRef?.turnId,
   });
   assert.deepEqual(await duplicate, await first);
   assert.equal(value.host.turnSteerCalls, 1);
@@ -4432,7 +4699,7 @@ test("steer 只命中当前 assigned turn，并以 operationId 做同参并发�
   assert.equal(steeringMessages[0].runId, running.id);
   assert.equal(steeringMessages[0].kind, "user");
   assert.equal(steeringMessages[0].content.text, input.message);
-  assert.equal(steeringMessages[0].runtimeRef.turnId, running.codexTurnId);
+  assert.equal(steeringMessages[0].runtimeRef.turnId, running.runtimeTurnRef?.turnId);
   await assert.rejects(
     () => value.coordinator.steer({
       ...input,
@@ -4506,8 +4773,8 @@ test("abort 精确 interrupt assigned turn，再以 durable canceled→terminal�
   while (value.host.turnInterruptCalls === 0) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(value.host.turnInterruptCalls, 1);
   assert.deepEqual(value.host.lastTurnInterruptParams, {
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
   });
   assert.equal(value.dispatcher.getRun(running.id).status, "running");
   interruptGate.resolve();
@@ -4580,18 +4847,18 @@ test("真实 MCP helper request_user_input 经 elicitation 桥接 assigned turn�
   assert.equal(value.host.serverRequestHandlers.has("item/tool/requestUserInput"), false);
 
   const rogueProfileHost = new FakeHost([], {
-    threads: [{ id: run.codexThreadId, threadSource: null, turns: [] }],
+    threads: [{ id: run.runtimeSessionRef?.sessionId, threadSource: null, turns: [] }],
   });
   await assert.rejects(
     () => rogueProfileHost.request("mcpServer/elicitation/request", {
-      serverName: "shoggoth", threadId: run.codexThreadId, turnId: run.codexTurnId,
+      serverName: "shoggoth", threadId: run.runtimeSessionRef?.sessionId, turnId: run.runtimeTurnRef?.turnId,
       mode: "form", message: "cross profile", requestedSchema: { type: "object", properties: {} },
     }),
     (error) => error.code === "CODEX_SERVER_HANDLER_NOT_FOUND",
   );
   for (const wrongBinding of [
-    { threadId: "thread-other", turnId: run.codexTurnId },
-    { threadId: run.codexThreadId, turnId: "turn-other" },
+    { threadId: "thread-other", turnId: run.runtimeTurnRef?.turnId },
+    { threadId: run.runtimeSessionRef?.sessionId, turnId: "turn-other" },
   ]) {
     assert.throws(
       () => value.host.request("mcpServer/elicitation/request", {
@@ -4656,8 +4923,8 @@ test("真实 MCP helper request_user_input 经 elicitation 桥接 assigned turn�
   assert.equal(Object.prototype.hasOwnProperty.call(outbound.params, "runId"), false);
   const bridgeResponse = value.host.request("mcpServer/elicitation/request", {
     serverName: "shoggoth",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     ...outbound.params,
   }, outbound.id);
@@ -4865,8 +5132,8 @@ test("两个真实 Profile Host 通过 JSONL 拒绝 cross-profile thread/turn", 
       runtimeProfileId: "runtime-other",
       mode: "cross-profile",
       spawnEnv: {
-        CODEX_FAKE_ELICITATION_THREAD_ID: firstRun.codexThreadId,
-        CODEX_FAKE_ELICITATION_TURN_ID: firstRun.codexTurnId,
+        CODEX_FAKE_ELICITATION_THREAD_ID: firstRun.runtimeSessionRef?.sessionId,
+        CODEX_FAKE_ELICITATION_TURN_ID: firstRun.runtimeTurnRef?.turnId,
       },
     });
     await secondTransport.host.initialize();
@@ -4993,8 +5260,8 @@ test("command approval 生成独立公开 requestId，durable waiting 后 exactl
   );
   const rawRpcId = "raw-rpc-id-that-must-not-be-public";
   const serverResponse = value.host.request("item/commandExecution/requestApproval", {
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     itemId: "item-approval",
     startedAtMs: 1_000,
     environmentId: null,
@@ -5095,7 +5362,7 @@ test("显式不支持会话授权时，目录和命令规则不能恢复会话�
       }],
     ]) {
       const response = value.host.request(method, {
-        threadId: run.codexThreadId, turnId: run.codexTurnId, itemId: `once-${index}`,
+        threadId: run.runtimeSessionRef?.sessionId, turnId: run.runtimeTurnRef?.turnId, itemId: `once-${index}`,
         reason: "one-time permission", sessionApprovalAvailable: false, ...params,
         toolName: "shoggoth__kanban_card_create",
         toolInput: { boardId: "board-1", title: "New card", password: "private-not-for-display" },
@@ -5134,7 +5401,7 @@ test("Grok 原生授权保留各个范围并拒绝未提供的选择", async () 
     const events = [];
     value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, (event) => events.push(event));
     const response = value.host.request("item/commandExecution/requestApproval", {
-      threadId: run.codexThreadId, turnId: run.codexTurnId, itemId: "tool-native-options",
+      threadId: run.runtimeSessionRef?.sessionId, turnId: run.runtimeTurnRef?.turnId, itemId: "tool-native-options",
       command: "shoggoth__kanban_card_create", sessionApprovalAvailable: false, approvalOptions: options,
     });
     response.catch(() => {});
@@ -5167,8 +5434,8 @@ test("ego-browser nodejs 的本会话授权可跨动态 heredoc 复用且不重�
       (event) => events.push(event),
     );
     const approvalParams = (itemId, command) => ({
-      threadId: running.codexThreadId,
-      turnId: running.codexTurnId,
+      threadId: running.runtimeSessionRef?.sessionId,
+      turnId: running.runtimeTurnRef?.turnId,
       itemId,
       environmentId: null,
       command: `/bin/zsh -lc ${JSON.stringify(command)}`,
@@ -5240,8 +5507,8 @@ test("Runtime shell 不能经批准绕过 Shoggoth System Host 产品工具", as
     ];
     for (const [index, command] of commands.entries()) {
       const response = await value.host.request("item/commandExecution/requestApproval", {
-        threadId: running.codexThreadId,
-        turnId: running.codexTurnId,
+        threadId: running.runtimeSessionRef?.sessionId,
+        turnId: running.runtimeTurnRef?.turnId,
         itemId: `item-reserved-${index}`,
         startedAtMs: 2_000 + index,
         environmentId: null,
@@ -5261,8 +5528,8 @@ test("Runtime shell 不能经批准绕过 Shoggoth System Host 产品工具", as
     assert.equal(events.some((event) => event.type === "approval"), false);
 
     const ordinaryResponse = value.host.request("item/commandExecution/requestApproval", {
-      threadId: running.codexThreadId,
-      turnId: running.codexTurnId,
+      threadId: running.runtimeSessionRef?.sessionId,
+      turnId: running.runtimeTurnRef?.turnId,
       itemId: "item-ordinary-command",
       startedAtMs: 3_000,
       environmentId: null,
@@ -5307,8 +5574,8 @@ test("command/file/permissions approval choices 严格映射，permissions 回�
   async function approve(method, params, choice, expected) {
     responseIndex += 1;
     const serverResponse = value.host.request(method, {
-      threadId: run.codexThreadId,
-      turnId: run.codexTurnId,
+      threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId,
       itemId: `item-${responseIndex}`,
       startedAtMs: 1_000 + responseIndex,
       ...params,
@@ -5373,7 +5640,7 @@ test("approval request 必须匹配 assigned host/thread/turn，事件遇到 sec
   const run = value.coordinator.getRun(ack.run.id);
   assert.throws(
     () => value.host.request("item/fileChange/requestApproval", {
-      threadId: run.codexThreadId,
+      threadId: run.runtimeSessionRef?.sessionId,
       turnId: "wrong-turn",
       itemId: "wrong",
       startedAtMs: 1,
@@ -5385,8 +5652,8 @@ test("approval request 必须匹配 assigned host/thread/turn，事件遇到 sec
   const events = [];
   value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, (event) => events.push(event));
   const pending = value.host.request("item/commandExecution/requestApproval", {
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "safe-item",
     startedAtMs: 1,
     environmentId: null,
@@ -5440,8 +5707,8 @@ test("near-limit approval reserves federation envelope headroom in authoritative
   const { ack } = await sendAndDrain(value, { operationId: "approval-envelope-headroom" });
   const run = value.coordinator.getRun(ack.run.id);
   const pending = value.host.request("item/commandExecution/requestApproval", {
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "near-limit-item",
     startedAtMs: 1,
     environmentId: null,
@@ -5494,8 +5761,8 @@ test("near-limit MCP input remains usable instead of being approval-redacted", a
   const description = "x".repeat(36 * 1024);
   const pending = value.host.request("mcpServer/elicitation/request", {
     serverName: "shoggoth",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: "Need a large but valid form",
     requestedSchema: {
@@ -5559,8 +5826,8 @@ test("Shoggoth MCP 工具权限在 assigned turn 且 frozen contract 匹配时�
   const run = value.coordinator.getRun(ack.run.id);
   const response = await value.host.request("mcpServer/elicitation/request", {
     serverName: "shoggoth",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: 'Allow the shoggoth MCP server to run tool "computer_type"?',
     requestedSchema: {
@@ -5588,8 +5855,8 @@ test("MCP elicitation 进入 waiting_input，submit/cancel 映射稳定 response
   async function elicit(index, action, answers, expected) {
     const pending = value.host.request("mcpServer/elicitation/request", {
       serverName: "shoggoth",
-      threadId: run.codexThreadId,
-      turnId: run.codexTurnId,
+      threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId,
       mode: "form",
       message: `Need input ${index}`,
       requestedSchema: {
@@ -5645,8 +5912,8 @@ test("产品确认 MCP elicitation 持续等待且仍通过 input response API �
   });
   const pending = value.host.request("mcpServer/elicitation/request", {
     serverName: "shoggoth",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: "确认修改",
     requestedSchema: {
@@ -5697,8 +5964,8 @@ test("abort 在 interrupt 前先 settle 当前 pending server request，并清�
   const { ack } = await sendAndDrain(value, { operationId: "abort-pending-source" });
   const run = value.coordinator.getRun(ack.run.id);
   const serverResponse = value.host.request("item/fileChange/requestApproval", {
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "abort-pending-item",
     startedAtMs: 1,
     grantRoot: null,
@@ -5748,8 +6015,8 @@ test("approval 超过默认五分钟仍保持 pending，expiresAt 为 null 且�
   const events = [];
   value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, (event) => events.push(event));
   const response = value.host.request("item/commandExecution/requestApproval", {
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "approval-unbounded-item",
     command: "echo safe",
     cwd: "/tmp/project",
@@ -5801,8 +6068,8 @@ test("prompt timeout 有界 settle/interrupt，并 durable 收敛 interrupted �
   });
   const serverResponse = value.host.request("mcpServer/elicitation/request", {
     serverName: "shoggoth",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: "timeout me",
     requestedSchema: { type: "object", properties: {}, required: [] },
@@ -5839,8 +6106,8 @@ test("Host terminate 清理 pending deferred/timer/handler 并沿既有 durable 
   const { ack } = await sendAndDrain(value, { operationId: "pending-host-dead-source" });
   const run = value.coordinator.getRun(ack.run.id);
   const response = value.host.request("item/permissions/requestApproval", {
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "pending-host-dead-item",
     startedAtMs: 1,
     cwd: "/tmp/project",
@@ -5877,8 +6144,8 @@ test("close 立即 settle 所有 pending server request 并清除 timer/handler�
   const run = value.coordinator.getRun(ack.run.id);
   const response = value.host.request("mcpServer/elicitation/request", {
     serverName: "shoggoth",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: "close",
     requestedSchema: { type: "object", properties: {}, required: [] },
@@ -5912,8 +6179,8 @@ test("prompt timer 建立失败时回滚 waiting 状态并清除 pending record�
   const run = value.coordinator.getRun(ack.run.id);
   assert.throws(
     () => value.host.request("item/fileChange/requestApproval", {
-      threadId: run.codexThreadId,
-      turnId: run.codexTurnId,
+      threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId,
       itemId: "prompt-setup-failure-item",
       startedAtMs: 1,
       grantRoot: null,
@@ -5951,8 +6218,8 @@ test("waiting approval unknown commit 立即 sticky poison，禁止 reread/rollb
   value.dispatcher.getRunCalls = 0;
   assert.throws(
     () => value.host.request("item/fileChange/requestApproval", {
-      threadId: run.codexThreadId,
-      turnId: run.codexTurnId,
+      threadId: run.runtimeSessionRef?.sessionId,
+      turnId: run.runtimeTurnRef?.turnId,
       itemId: "waiting-uncertain-item",
       startedAtMs: 1,
       grantRoot: null,
@@ -5986,8 +6253,8 @@ test("approval 恢复 running unknown commit 立即 sticky poison，不 settle r
   const events = [];
   value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, (event) => events.push(event));
   const serverResponse = value.host.request("item/fileChange/requestApproval", {
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "approval-restore-uncertain-item",
     startedAtMs: 1,
     grantRoot: null,
@@ -6036,8 +6303,8 @@ test("MCP input 恢复 running unknown commit 立即 sticky poison，不 settle 
   value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, (event) => events.push(event));
   const serverResponse = value.host.request("mcpServer/elicitation/request", {
     serverName: "shoggoth",
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: "unknown commit",
     requestedSchema: { type: "object", properties: {}, required: [] },
@@ -6083,8 +6350,8 @@ test("abort 从 waiting 恢复 running unknown commit 立即 sticky poison，禁
   const { ack } = await sendAndDrain(value, { operationId: "abort-restore-uncertain-source" });
   const run = value.coordinator.getRun(ack.run.id);
   const serverResponse = value.host.request("item/fileChange/requestApproval", {
-    threadId: run.codexThreadId,
-    turnId: run.codexTurnId,
+    threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId,
     itemId: "abort-restore-uncertain-item",
     startedAtMs: 1,
     grantRoot: null,
@@ -6160,8 +6427,8 @@ test("close 取消 terminal retry timer 并阻止迟到 terminal 写入", async 
     known: true,
     type: "complete",
     method: "turn/completed",
-    threadId: running.codexThreadId,
-    turnId: running.codexTurnId,
+    threadId: running.runtimeSessionRef?.sessionId,
+    turnId: running.runtimeTurnRef?.turnId,
     status: "completed",
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -6235,17 +6502,20 @@ test("Product Core 可由只实现通用 session/turn 契约的 Future Runtime �
   const { ack } = await sendAndDrain(value, { operationId: "future-runtime-send" });
   const running = value.coordinator.getRun(ack.run.id);
   assert.equal(running.status, "running");
-  assert.equal(running.codexThreadId, "future-session", "legacy disk field remains a projection during migration");
-  assert.equal(running.codexTurnId, "future-turn", "legacy disk field remains a projection during migration");
+  assert.equal(running.runtimeSessionRef?.sessionId, "future-session", "legacy disk field remains a projection during migration");
+  assert.equal(running.runtimeTurnRef?.turnId, "future-turn", "legacy disk field remains a projection during migration");
   assert.deepEqual(calls.find(([name]) => name === "acquire")[1], {
     runtime: "future",
     runtimeProfileId: "runtime-default",
     runtimeAccountId: RUNTIME_ACCOUNT_ID,
   });
-  assert.deepEqual(calls.find(([name]) => name === "acquire")[2], {
+  const { executionContract, ...acquireOptions } = calls.find(([name]) => name === "acquire")[2];
+  assert.deepEqual(acquireOptions, {
     permissionPolicy: { approvalPolicy: "on-failure", sandbox: "workspace-write" },
     workspace: "/tmp/shoggoth-workspace",
   });
+  assert.equal(executionContract.runtime, "future");
+  assert.equal(executionContract.runId, value.coordinator.listRuns()[0].id);
   const start = calls.find(([name]) => name === "sessionStart")[1];
   assert.equal(start.persistent, true);
   assert.equal(start.permissionPolicy.approvalPolicy, "on-failure");
@@ -6299,7 +6569,11 @@ test("Chat Run 在 Runtime admission 前持久化 user Transcript，失败时保
   await failing.coordinator.close();
 });
 
-(async () => {
+module.exports = { openFixture, sendAndDrain, waitUntil, FakeChatSessionStore, FakeHost,
+  createRealTransportHost, codexRuntimeEnvironment, recoveryStore, directRuntimeManager,
+  SESSION_KEY, PROFILE_ID, RUNTIME_ACCOUNT_ID };
+
+if (require.main === module) (async () => {
   let failed = 0;
   for (const entry of tests) {
     try {

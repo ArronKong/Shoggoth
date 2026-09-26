@@ -141,10 +141,15 @@ function writeAntigravityManagedConfig(options = {}) {
       ...(permissions.ask === undefined ? {} : { ask: uniqueStrings(permissions.ask) }),
     },
   };
-  atomicWritePrivateFile(settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, {
-    fs: fileSystem,
-    trustedRoot,
-  });
+  // Keep metadata stable when only the per-turn MCP reservation changed. The
+  // model catalog identity includes settings, so rewriting identical settings
+  // would turn its cache into a new control-process spawn on every turn.
+  if (JSON.stringify(settings) !== JSON.stringify(nextSettings)) {
+    atomicWritePrivateFile(settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, {
+      fs: fileSystem,
+      trustedRoot,
+    });
+  }
 
   const mcpPath = path.join(configRoot, "mcp_config.json");
   const mcpConfig = readJson(fileSystem, mcpPath, trustedRoot, { allowEmpty: true });

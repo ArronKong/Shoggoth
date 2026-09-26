@@ -511,6 +511,14 @@ function startProxyGateway({
   const onBackendSessionActivity = (event) => {
     const activity = event?.activity;
     if (!activity) return;
+    if (activity.kind === "sessions.changed") {
+      if (!isPlainRecord(activity) || Object.keys(activity).length !== 2
+        || typeof activity.sessionKey !== "string"
+        || federationActivityAgentIds(event, activity.sessionKey) === null) return;
+      broadcastAuthenticated(JSON.stringify({ type: "event", event: "sessions.changed",
+        payload: { sessionKey: activity.sessionKey, backendId: event.backendId } }));
+      return;
+    }
     if (activity.kind === "federation.chat.interaction.reset") {
       if (!isPlainRecord(activity) || Object.keys(activity).length !== 1
         || typeof event.backendId !== "string"

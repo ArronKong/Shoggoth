@@ -27,6 +27,8 @@ const { PiRuntimePool } = require("./pi-runtime-pool");
 const { PiRuntimeAdapter } = require("./pi-runtime-adapter");
 const { ClaudeCodeRuntimePool } = require("./claude-code-runtime-pool");
 const { ClaudeCodeRuntimeAdapter } = require("./claude-code-runtime-adapter");
+const { OpenCodeRuntimePool } = require("./opencode-runtime-pool");
+const { OpenCodeRuntimeAdapter } = require("./opencode-runtime-adapter");
 const { DeepSeekHarnessRuntimePool } = require("./deepseek-harness-runtime-pool");
 const { DeepSeekHarnessRuntimeAdapter } = require("./deepseek-harness-runtime-adapter");
 const { RuntimeAdapterRegistry } = require("./runtime-adapter-registry");
@@ -35,25 +37,28 @@ const { RuntimeMcpGateIssuer } = require("./runtime-mcp-gate");
 const { ensureBuiltinCliAgentProfiles } = require("./builtin-cli-profiles");
 const { CodexRuntimeConfigWriter } = require("./codex-runtime-config");
 const { EncryptedSecretStore } = require("./encrypted-secret-store");
+const { RunExecutionStore } = require("./run-execution-store");
 const { McpAuthSecretStore } = require("./mcp-auth-secret-store");
 const { InProcessMcpCryptoBroker } = require("./mcp-crypto-broker");
 const { McpSessionManager } = require("./mcp-session-manager");
 const { ProviderRuntimeBridge } = require("./provider-runtime-bridge");
+const { captureExecutionProviderRoute, assertExecutionProviderRouteCurrent } = require("./execution-provider-route");
 const { ProviderService } = require("./codex-provider-service");
-const { migrateLegacySharedCodexApiKey } = require("./legacy-codex-api-key-migration");
 const { reconcileProviderCredentialSecrets } = require("./provider-secret-reconciliation");
 const { AccountAuthStateStore } = require("./account-auth-state-store");
 const { AccountAuthManager } = require("./account-auth-manager");
 const { NativeCodexAuth } = require("./codex-native-auth");
 const { RuntimeAccountAdmission } = require("./runtime-account-admission");
-const { LegacyRuntimeHomeStore } = require("./legacy-runtime-home-store");
-const { RuntimeStorageCleanup } = require("./runtime-storage-cleanup");
-const { RuntimeBackupStore } = require("./runtime-backup-store");
-const { RuntimeBackupCleanup } = require("./runtime-backup-cleanup");
+const { NativeRuntimeConfig } = require("./native-runtime-config");
+const { RuntimeStartupGate } = require("./runtime-startup-gate");
+const { NATIVE_RUNTIME_CONFIG_METHODS, NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES,
+  validateNativeRuntimeConfigParams, validateNativeRuntimeConfigResult } = require("./native-runtime-config-protocol");
+const { agentRuntimeProfileViews } = require("./agent-runtime-profile-views");
 const {
   createRuntimeAccountServiceController,
 } = require("./runtime-account-service-controller");
 const { RuntimeSessionOwnershipStore } = require("./runtime-session-ownership-store");
+const { assertCurrentStorageBaseline } = require("./storage-baseline");
 const { ChatSessionStore } = require("./chat-session-store");
 const { createStopImpact } = require("./stop-impact");
 const { InspirationStore } = require("./inspiration-store");
@@ -72,18 +77,34 @@ const { ContextCompiler } = require("./context-compiler");
 const { NativeSkillStore } = require("./native-skill-store");
 const { NativeMcpStore } = require("./native-mcp-store");
 const { NativeMcpClientManager } = require("./native-mcp-client-manager");
+const { PluginStore } = require("./plugin-store");
+const { PluginPackageInstaller } = require("./plugin-package-installer");
+const { BundledPluginCatalog, bundledRoot } = require("../core/bundled-plugin-catalog");
+const { PluginComponentCatalog } = require("./plugin-component-catalog");
+const { PluginComponentResolver } = require("./plugin-component-resolver");
+const { PluginSkillFacade } = require("./plugin-skill-facade");
+const { PluginToolCatalogRegistry } = require("./plugin-tool-catalog-registry");
+const { CapabilityDispatcher } = require("./capability-dispatcher");
+const { PluginServiceController, PLUGIN_SERVICE_METHODS } = require("./plugin-service-controller");
+const { PluginDataScopeLeaseManager } = require("./plugin-data-scope-lease");
+const { PluginMcpConnectionPool } = require("./plugin-mcp-connection-pool");
+const { PluginCredentialVault } = require("./plugin-credential-vault");
+const { PluginOAuthProviderRegistry } = require("./plugin-oauth-provider-registry");
+const { PluginOAuthConnectionController } = require("./plugin-oauth-connection-controller");
+const { loadPluginOAuthProviders } = require("./plugin-oauth-config");
+const { PluginDependencyRegistry } = require("./plugin-dependency-registry");
+const { PluginDependencyController } = require("./plugin-dependency-controller");
+const { PluginDataRollback } = require("./plugin-data-rollback");
+const { PluginRollbackController } = require("./plugin-rollback-controller");
+const { PluginConnectionController } = require("./plugin-connection-controller");
+const { PluginConnectionAuth } = require("./plugin-connection-auth");
+const { PluginMcpConnectionManager } = require("./plugin-mcp-connection-manager");
+const { PluginMcpConsent } = require("./plugin-mcp-consent");
+const { PluginRuntimeToolService } = require("./plugin-runtime-tool-service");
+const { PluginAppController } = require("./plugin-app-controller");
 const { SystemHostController } = require("./system-host-controller");
 const { ComputerUseController } = require("./computer-use-controller");
 const { PermissionEngine } = require("./permission-engine");
-const {
-  completeMemoryMigration,
-} = require("./memory-migration");
-const { ensureRuntimeSchemaMigrationBackup } = require("./runtime-schema-migration");
-const {
-  RuntimeAccountMigrationOrchestrator,
-} = require("./runtime-account-migration-orchestrator");
-const { importNativeRuntimeHomes } = require("./native-runtime-home-import");
-const { ensureNativeRuntimeImportBackup } = require("./native-runtime-import-migration");
 const { PendingCommandInbox } = require("./pending-command-inbox");
 const { TokenUsageStore } = require("./token-usage-store");
 const { FederationHostClient } = require("./federation-host-client");
@@ -191,6 +212,7 @@ const INSPIRATION_SERVICE_METHOD_SET = new Set(INSPIRATION_SERVICE_METHODS);
 const DOMAIN_SERVICE_METHOD_SET = new Set(DOMAIN_SERVICE_METHODS);
 const PROFILE_SERVICE_METHOD_SET = new Set(PROFILE_SERVICE_METHODS);
 const RUNTIME_ACCOUNT_SERVICE_METHOD_SET = new Set(RUNTIME_ACCOUNT_SERVICE_METHODS);
+const PLUGIN_SERVICE_METHOD_SET = new Set(PLUGIN_SERVICE_METHODS);
 const AGENT_LIFECYCLE_METHOD_SET = new Set(AGENT_LIFECYCLE_METHODS);
 const AGENT_HARNESS_METHOD_SET = new Set(AGENT_HARNESS_METHODS);
 const DOMAIN_RUNTIME_FATAL_REASON = "runtime_fatal";
@@ -198,6 +220,65 @@ const MCP_SERVICE_METHODS = new Set([
   "mcp.runtime.bridge.open", "mcp.runtime.gate.consume", "mcp.auth.challenge", "mcp.auth.exchange",
   "mcp.federation.open", "mcp.profile.get", "mcp.tool.call",
 ]);
+const PLUGIN_PUBLIC_MESSAGES = Object.freeze({
+  PLUGIN_REQUEST_INVALID: "插件管理参数无效",
+  PLUGIN_RESPONSE_TOO_LARGE: "插件管理响应超出容量上限",
+  REVISION_CONFLICT: "插件目录或安装版本已变化，请重新读取",
+  PACKAGE_CHANGED: "插件与预览不一致，请重新预览",
+  PACKAGE_INVALID: "插件包无效",
+  PACKAGE_PATH_INVALID: "插件包路径不安全",
+  GIT_SOURCE_INVALID: "Git 来源必须是安全 HTTPS 地址、完整提交 SHA 和包内子目录",
+  GIT_REMOTE_CANCELLED: "远程 Git 获取已取消",
+  GIT_REMOTE_FAILED: "无法获取指定 Git 提交",
+  GIT_REMOTE_TIMEOUT: "远程 Git 获取超时",
+  GIT_REMOTE_TOO_LARGE: "远程 Git 仓库超过容量上限",
+  GIT_REMOTE_LOG_LIMIT: "远程 Git 输出超过容量上限",
+  GIT_REMOTE_LIMIT: "远程 Git 获取并发已达上限",
+  GIT_REMOTE_EXIT_UNKNOWN: "远程 Git 进程退出未确认，已停止清理",
+  PLUGIN_OPERATION_INVALID: "插件操作参数无效",
+  PLUGIN_OPERATION_FAILED: "此前插件操作已失败，请新建操作",
+  PLUGIN_OPERATION_OUTCOME_UNKNOWN: "恢复前的操作结果待核对，不能自动重试",
+  PLUGIN_INSTALLATION_INVALID: "插件安装不存在",
+  PLUGIN_BINDING_INVALID: "插件 Skill 绑定无效",
+  PLUGIN_GRANT_INVALID: "插件工具授权无效",
+  PLUGIN_COMPONENT_INACTIVE: "插件安装尚未启用",
+  PLUGIN_COMPONENT_REVISION_CHANGED: "插件组件已变化，请重新读取",
+  ACTIVATION_DEFERRED: "插件连接仍被使用，等待释放后重试",
+  PLUGIN_UPDATE_REQUIRES_DISABLE: "更新前必须先停用能力包并排空旧连接",
+  PLUGIN_UNINSTALL_REQUIRES_DISABLE: "卸载前必须先停用能力包并排空旧连接",
+  LEGACY_SOURCE_OVERLAP: "导入来源不能与插件存储目录重叠",
+  MCP_APP_AUTHORITY_INVALID: "交互界面不属于当前会话或授权",
+  MCP_APP_AUTHORITY_REVOKED: "交互界面授权已失效",
+  MCP_APP_RESOURCE_FORBIDDEN: "工具未提供可用的交互界面",
+  MCP_APP_RESOURCE_INVALID: "交互界面资源无效",
+  MCP_APP_SESSION_EXPIRED: "交互界面会话已过期",
+  MCP_APP_TRANSPORT_INVALID: "交互界面来源无效",
+  MCP_APP_LIMIT: "交互界面超过容量限制",
+  MCP_APP_UNSUPPORTED: "连接未提供交互界面支持",
+  MCP_APP_SEED_UNAVAILABLE: "交互界面原始结果已不可用，请查看文本结果",
+  PLUGIN_CONNECTION_CLOSE_FAILED: "插件连接退出未确认，停用未完成",
+  PLUGIN_SERVICE_FAILED: "插件管理操作失败",
+  PLUGIN_CONSENT_EXPIRED: "授权确认已过期，请重试",
+  PLUGIN_CONSENT_BUSY: "待确认授权过多，请稍后重试",
+  PLUGIN_OAUTH_PROVIDER_UNSUPPORTED: "此 HTTP 服务尚未配置受信认证信息",
+  PLUGIN_OAUTH_CONFIG_INVALID: "插件认证服务配置无效",
+  PLUGIN_OAUTH_FLOW_NOT_FOUND: "账号连接流程已失效，请重新连接",
+  CONNECTION_AUTH_REQUIRED: "此连接需要完成账号认证",
+  CONNECTION_IDENTITY_CHANGED: "连接身份已变化，请重新连接",
+  TOOL_CONTRACT_CHANGED: "工具合同已变化，请重新发现工具",
+  DEPENDENCY_PREPARATION_REQUIRED: "启动命令需要固定版本的依赖准备",
+  DEPENDENCY_MISSING: "插件启动文件不可用",
+  DEPENDENCY_REQUIRES_DISABLE: "准备或撤销依赖前，请先停用能力包",
+  DEPENDENCY_CHANGED: "解释器或依赖登记已变化，请重新准备",
+  DEPENDENCY_EXECUTABLE_INVALID: "所选解释器不可用或路径不安全",
+  DEPENDENCY_INTERPRETER_UNSUPPORTED: "仅支持固定 Node 或 Python 解释器运行包内脚本",
+  DEPENDENCY_ARGUMENTS_UNSUPPORTED: "此组件启动参数不支持固定解释器准备",
+  DEPENDENCY_ENV_UNSUPPORTED: "此组件环境变量不支持固定解释器准备",
+  DEPENDENCY_PROBE_FAILED: "解释器版本检查未通过",
+  DEPENDENCY_REGISTRY_INVALID: "插件依赖登记无法验证",
+  DEPENDENCY_REGISTRY_LIMIT: "插件依赖登记已达容量上限",
+  DEPENDENCY_CONFIRMATION_REQUIRED: "准备依赖需要原生确认",
+});
 
 function recoverStalePersistentWriterLeases(paths) {
   for (const lockBasename of PERSISTENT_WRITER_LOCK_BASENAMES) {
@@ -608,16 +689,26 @@ function stableJsonContainsMatchedString(value, matches) {
 
 function createAgentService(options) {
   const { paths } = options;
+  const nativeRuntimeConfig = options.nativeRuntimeConfig || new NativeRuntimeConfig({ paths,
+    onApplied: () => workRunCoordinator.capacityChanged?.(),
+  });
+  const getNativeRuntimeConfig = () => nativeRuntimeConfig.read();
+  const startupGate = new RuntimeStartupGate({ getConfig: getNativeRuntimeConfig });
+  const poolCapacityOptions = {
+    resolveMaxHosts: () => {
+      const config = getNativeRuntimeConfig();
+      return config.flags.runtimeAdmissionV1 ? Math.min(128, config.maxActive + 16) : 16;
+    },
+    canRetireHost(binding, host) {
+      if ((!getNativeRuntimeConfig().flags.runtimeAdmissionV1 && !host.mcpExecutionRunId)
+        || lifecycleState !== "started" || activeRuntimeRequests > 0) return false;
+      const account = runtimeAccountAdmission.read(binding.runtimeAccountId);
+      if (account.mutationActive || accountAuthManager.active?.has(binding.runtimeAccountId)
+        || accountAuthManager.bindings?.get(binding.runtimeAccountId)?.refreshPromise) return false;
+      return workRunCoordinator.isRuntimeHostIdle?.(binding, host) === true;
+    },
+  };
   const repoRoot = options.repoRoot || path.join(__dirname, "..", "..");
-  const nativeRuntimeImportHome = options.nativeRuntimeImportHome ?? null;
-  if (nativeRuntimeImportHome !== null && (typeof nativeRuntimeImportHome !== "string"
-    || !path.isAbsolute(nativeRuntimeImportHome)
-    || path.resolve(nativeRuntimeImportHome) !== nativeRuntimeImportHome
-    || nativeRuntimeImportHome.includes("\0"))) {
-    throw new TypeError("Native Runtime import home must be a canonical absolute path");
-  }
-  const nativeRuntimeImportEnabled = options.builtinCliProfiles === true
-    && nativeRuntimeImportHome !== null;
   const serviceVersion = String(options.version || "0.0.0");
   const frameTimeoutMs = options.frameTimeoutMs ?? 2000;
   const mcpAuthInitTimeoutMs = options.mcpAuthInitTimeoutMs ?? DEFAULT_MCP_AUTH_INIT_TIMEOUT_MS;
@@ -644,6 +735,8 @@ function createAgentService(options) {
   let activeRuntimeRequests = 0;
   let lifecycleGeneration = 0;
   let mcpTransportReady = false;
+  const runtimeTelemetry = new (require("./runtime-telemetry").RuntimeTelemetry)({ now: options.now,
+    sink: event => eventBuffer.append(event.name, event) });
   const externalCryptoBroker = options.cryptoBroker || options.mcpCryptoBroker || null;
   const mcpAuthSecretStore = options.mcpAuthSecretStore || (externalCryptoBroker ? null
     : new McpAuthSecretStore({
@@ -652,23 +745,19 @@ function createAgentService(options) {
       safeStorage: options.safeStorage,
       fs: options.mcpAuthFs,
     }));
-  const mcpCryptoBroker = externalCryptoBroker || new InProcessMcpCryptoBroker({
+  const mcpCryptoBroker = require("./runtime-telemetry").observeCryptoBroker(externalCryptoBroker || new InProcessMcpCryptoBroker({
     paths,
     safeStorage: options.safeStorage,
     fs: options.mcpAuthFs,
     store: mcpAuthSecretStore,
-  });
+  }), runtimeTelemetry);
   const secretStore = options.secretStore || new EncryptedSecretStore({
     paths,
     cryptoBroker: mcpCryptoBroker,
     fs: options.secretFs,
   });
+  const runExecutionStore = options.runExecutionStore || new RunExecutionStore({ paths, cryptoBroker: mcpCryptoBroker });
   const productStore = options.productStore || new JsonlProductStore({ paths });
-  const runtimeAccountLookup = (runtimeAccountId) => (
-    productStore.getRuntimeAccount(runtimeAccountId)
-  );
-  let nativeSkillStore = null;
-  let nativeRuntimeImportSummary = null;
   if (typeof secretStore.withPlaintextMatcher !== "function") {
     throw serviceError("SECRET_STORE_MATCHER_REQUIRED", "SecretStore 必须提供有界敏感值 matcher session");
   }
@@ -681,6 +770,64 @@ function createAgentService(options) {
   productStore.setSensitiveValueMatcherSessionFactory(
     (action) => secretStore.withPlaintextMatcher(action),
   );
+  // Plugins are part of every new installation and share the current Service
+  // root. Storage preflight rejects incompatible data before any writer opens.
+  const pluginStore = options.pluginStore || new PluginStore({ paths, now: options.now });
+  const bundledPluginCatalog = options.bundledPluginCatalog || new BundledPluginCatalog(
+    bundledRoot({ packaged: options.packaged === true, resourcesPath: options.resourcesPath }),
+  );
+  const pluginPackageInstaller = pluginStore
+    ? (options.pluginPackageInstaller || new PluginPackageInstaller({ store: pluginStore,
+      bundledCatalog: bundledPluginCatalog })) : null;
+  const pluginComponentCatalog = pluginStore
+    ? (options.pluginComponentCatalog || new PluginComponentCatalog({ store: pluginStore })) : null;
+  const pluginComponentResolver = pluginStore
+    ? (options.pluginComponentResolver || new PluginComponentResolver({ store: pluginStore })) : null;
+  const pluginToolCatalogRegistry = pluginStore
+    ? (options.pluginToolCatalogRegistry || new PluginToolCatalogRegistry()) : null;
+  const pluginServiceController = pluginStore
+    ? (options.pluginServiceController || new PluginServiceController({ store: pluginStore,
+      installer: pluginPackageInstaller, catalog: pluginComponentCatalog,
+      bundledCatalog: bundledPluginCatalog,
+      resolver: pluginComponentResolver, productStore,
+      toolCatalogRegistry: pluginToolCatalogRegistry,
+      getConsent: () => pluginMcpConsent,
+      getAppController: () => pluginAppController,
+      getOAuthController: () => pluginOAuthController,
+      getDependencyController: () => pluginDependencyController,
+      getRollbackController: () => pluginRollbackController,
+      getConnectionController: () => pluginConnectionController,
+      drainInstallation: (installationId) => pluginMcpConnectionPool.drainInstallation(
+        installationId),
+      resumeInstallation: (installationId) => pluginMcpConnectionPool.resumeInstallation(
+        installationId),
+    })) : null;
+  // The Service may hold encrypted OAuth records, but account activation
+  // stays closed until a trusted verifier is supplied. No fixture token is
+  // accepted merely because it was written to the private credential store.
+  const pluginOAuthProviders = pluginStore ? new PluginOAuthProviderRegistry({
+    providers: options.pluginOAuthProviders ?? loadPluginOAuthProviders(paths),
+    fetchImpl: options.pluginOAuthFetch || globalThis.fetch,
+  }) : null;
+  const pluginCredentialVault = pluginStore
+    ? (options.pluginCredentialVault || new PluginCredentialVault({
+      store: pluginStore, secretStore,
+      verifyPrincipal: options.pluginPrincipalVerifier || (input => pluginOAuthProviders.verifyPrincipal(input)),
+      refreshTokens: options.pluginRefreshTokens || (input => pluginOAuthProviders.refreshTokens(input)),
+      invalidateToolCatalog: (connectionId) => pluginToolCatalogRegistry.invalidate(connectionId),
+      now: options.now,
+    })) : null;
+  const pluginConnectionAuth = pluginStore
+    ? (options.pluginConnectionAuth || new PluginConnectionAuth({
+      getConnection: (connectionId) => pluginStore.getConnection(connectionId),
+      readCredential: (connectionId) => pluginCredentialVault.readCredential(connectionId),
+      refreshCredential: (context) => pluginCredentialVault.refreshCredential(context),
+      now: options.now,
+    })) : null;
+  const runtimeAccountLookup = (runtimeAccountId) => (
+    productStore.getRuntimeAccount(runtimeAccountId)
+  );
+  let nativeSkillStore = null;
   const federationMcpSessionManager = options.federationMcpSessionManager
     || new FederationMcpSessionManager({
       productStore,
@@ -708,6 +855,8 @@ function createAgentService(options) {
   });
   const runtimePool = options.runtimePool || new CodexRuntimePool({
     paths,
+    canRetireStaleHost: (binding, host, runId) => lifecycleState === "started"
+      && workRunCoordinator.isRuntimeHostIdle?.(binding, host, runId) === true,
     nativeAuth: new NativeCodexAuth({
       paths, repoRoot, packageVersion: serviceVersion,
       packaged: options.packaged, resourcesPath: options.resourcesPath,
@@ -736,6 +885,7 @@ function createAgentService(options) {
   const codexRuntimeAdapter = options.codexRuntimeAdapter
     || new CodexRuntimeAdapter({ runtimePool });
   const grokBuildRuntimePool = options.grokBuildRuntimePool || new GrokBuildRuntimePool({
+      ...poolCapacityOptions,
     paths,
     runtimeAccountLookup,
     binaryPath: options.grokBuildBinaryPath,
@@ -750,6 +900,7 @@ function createAgentService(options) {
   const grokBuildRuntimeAdapter = options.grokBuildRuntimeAdapter
     || new GrokBuildRuntimeAdapter({ runtimePool: grokBuildRuntimePool });
   const antigravityRuntimePool = options.antigravityRuntimePool || new AntigravityRuntimePool({
+      ...poolCapacityOptions,
     paths,
     runtimeAccountLookup,
     binaryPath: options.antigravityBinaryPath,
@@ -766,6 +917,7 @@ function createAgentService(options) {
     ? path.join(piResourcesPath, "pi", "shoggoth-pi-extension.mjs")
     : path.join(repoRoot, "resources", "pi", "shoggoth-pi-extension.mjs"));
   const piRuntimePool = options.piRuntimePool || new PiRuntimePool({
+      ...poolCapacityOptions,
     paths,
     runtimeAccountLookup,
     binaryPath: options.piBinaryPath,
@@ -779,6 +931,7 @@ function createAgentService(options) {
   const piRuntimeAdapter = options.piRuntimeAdapter
     || new PiRuntimeAdapter({ runtimePool: piRuntimePool });
   const claudeCodeRuntimePool = options.claudeCodeRuntimePool || new ClaudeCodeRuntimePool({
+      ...poolCapacityOptions,
     paths,
     runtimeAccountLookup,
     binaryPath: options.claudeCodeBinaryPath,
@@ -791,6 +944,19 @@ function createAgentService(options) {
   });
   const claudeCodeRuntimeAdapter = options.claudeCodeRuntimeAdapter
     || new ClaudeCodeRuntimeAdapter({ runtimePool: claudeCodeRuntimePool });
+  const openCodeRuntimePool = options.openCodeRuntimePool || new OpenCodeRuntimePool({
+    ...poolCapacityOptions,
+    paths,
+    runtimeAccountLookup,
+    binaryPath: options.openCodeBinaryPath,
+    parentEnv: options.parentEnv,
+    homedir: options.runtimeStorageHomedir,
+    mcpGateIssuer: runtimeMcpGateIssuer,
+    now: options.now,
+    randomUUID: options.randomUUID,
+  });
+  const openCodeRuntimeAdapter = options.openCodeRuntimeAdapter
+    || new OpenCodeRuntimeAdapter({ runtimePool: openCodeRuntimePool });
   const deepSeekHarnessResourcesPath = options.resourcesPath || process.resourcesPath;
   const deepSeekHarnessBridgePath = options.deepSeekHarnessBridgePath
     || (options.packaged && deepSeekHarnessResourcesPath
@@ -798,6 +964,7 @@ function createAgentService(options) {
       : path.join(repoRoot, "resources", "deepseek-harness", "shoggoth-dsh-bridge.mjs"));
   const deepSeekHarnessRuntimePool = options.deepSeekHarnessRuntimePool
     || new DeepSeekHarnessRuntimePool({
+      ...poolCapacityOptions,
       paths,
       runtimeAccountLookup,
       binaryPath: options.deepSeekHarnessBinaryPath,
@@ -810,9 +977,13 @@ function createAgentService(options) {
     });
   const deepSeekHarnessRuntimeAdapter = options.deepSeekHarnessRuntimeAdapter
     || new DeepSeekHarnessRuntimeAdapter({ runtimePool: deepSeekHarnessRuntimePool });
+  const extensionCatalog = new (require("./runtime-extension-manifest").RuntimeExtensionCatalog)(paths);
+  const runtimeExtensions = options.runtimeManager ? [] : extensionCatalog.read().filter(entry => entry.enabled);
   const runtimeManager = options.runtimeManager || (() => {
     const registry = new RuntimeAdapterRegistry({
       idleTimeoutMs: options.runtimeIdleTimeoutMs,
+      onProtocolViolation: event => runtimeTelemetry.record("runtime.handle.violation", {
+        source: event.runtime, reason: event.code, stage: event.type }),
       isIdle(binding) {
         if (lifecycleState !== "started" || activeRuntimeRequests > 0) return false;
         const admission = runtimeAccountAdmission.read(binding.runtimeAccountId);
@@ -821,8 +992,8 @@ function createAgentService(options) {
           || accountAuthManager.bindings?.get(binding.runtimeAccountId)?.refreshPromise) return false;
         return !workRunCoordinator.listRuns().some((run) => {
           if (!["queued", "starting", "running", "waiting_approval", "waiting_input"].includes(run.status)) return false;
-          const profile = productStore.getAgentProfile(run.profileId);
-          return !profile || (profile.runtime === binding.runtime
+          const profiles = agentRuntimeProfileViews(productStore, run.profileId);
+          return !profiles.length || profiles.some(profile => profile.runtime === binding.runtime
             && profile.runtimeProfileId === binding.runtimeProfileId);
         });
       },
@@ -835,7 +1006,17 @@ function createAgentService(options) {
     if (require("../runtime-availability").isRuntimeAvailable("claude-code")) {
       registry.register("claude-code", claudeCodeRuntimeAdapter);
     }
+    if (require("../runtime-availability").isRuntimeAvailable("opencode")) {
+      registry.register("opencode", openCodeRuntimeAdapter);
+    }
     registry.register("deepseek-harness", deepSeekHarnessRuntimeAdapter);
+    for (const entry of runtimeExtensions) {
+      const manifest = require("./runtime-extension-manifest").verifyManifest(entry.envelope, entry.trustedKey);
+      registry.register(manifest.runtime, new (require("./runtime-extension-adapter").RuntimeExtensionAdapter)({
+        manifest, paths, verify: () => require("./runtime-extension-manifest").verifyManifest(entry.envelope, entry.trustedKey),
+        getToken: reference => secretStore.get(reference),
+      }));
+    }
     return registry;
   })();
   const providerService = options.providerService || new ProviderService({
@@ -852,9 +1033,14 @@ function createAgentService(options) {
   const runtimeAccountAdmission = options.runtimeAccountAdmission || new RuntimeAccountAdmission({
     runtimeAccountLookup,
     now: options.now,
+    resolveMaxActive: (account) => {
+      const policy = require("./execution-policy").resolveAdmissionPolicy(getNativeRuntimeConfig());
+      return policy.enabled ? Math.min(account.maxActive ?? policy.maxActive, policy.maxActive)
+        : Math.min(account.maxActive ?? 4, 4);
+    },
   });
   const resolveProfileAuthBinding = (runtimeProfileId) => {
-    const matches = productStore.listAgentProfiles()
+    const matches = agentRuntimeProfileViews(productStore)
       .filter((profile) => profile.runtimeProfileId === runtimeProfileId);
     if (matches.length !== 1) {
       throw serviceError("AUTH_PROFILE_BINDING_INVALID", "Account auth Profile binding is invalid");
@@ -871,9 +1057,12 @@ function createAgentService(options) {
     if (!account) {
       throw serviceError("AUTH_ACCOUNT_BINDING_INVALID", "Account auth RuntimeAccount is invalid");
     }
-    const profiles = productStore.listAgentProfiles()
+    const profiles = agentRuntimeProfileViews(productStore)
       .filter((profile) => profile.runtimeAccountId === runtimeAccountId)
       .sort((left, right) => Number(right.enabled) - Number(left.enabled)
+        // A Profile provider override changes how its process authenticates;
+        // the account's own login must be read through one without it.
+        || Number(left.providerRef != null) - Number(right.providerRef != null)
         || Number(right.isDefault) - Number(left.isDefault)
         || left.id.localeCompare(right.id));
     if (profiles.length === 0 || profiles[0].runtime !== account.runtime) {
@@ -889,12 +1078,9 @@ function createAgentService(options) {
     paths,
     fs: options.accountAuthFs,
     now: options.now,
-    resolveRuntimeAccountId(runtimeProfileId) {
-      return resolveProfileAuthBinding(runtimeProfileId).runtimeAccountId;
-    },
   });
   const invalidateRuntimeAccount = async ({ runtimeAccountId, binding }) => {
-    const profiles = productStore.listAgentProfiles()
+    const profiles = agentRuntimeProfileViews(productStore)
       .filter((profile) => profile.runtimeAccountId === runtimeAccountId)
       .sort((left, right) => left.id.localeCompare(right.id));
     if (profiles.length === 0 || profiles.some((profile) => profile.runtime !== binding.runtime)) {
@@ -941,121 +1127,8 @@ function createAgentService(options) {
   );
   const runtimeAccountAuthAvailable = ["read", "loginStart", "loginCancel", "logout"]
     .every((method) => typeof accountAuthManager[method] === "function");
-  const runtimeStoragePathsAvailable = [
-    "stateDir", "trustedRoot", "runtimeAccountsDir", "legacyRuntimeHomesDir",
-    "legacyRuntimeHomesPath", "runtimeCleanupAuditPath", "backupsDir", "backupCleanupAuditPath",
-  ].every((field) => typeof paths[field] === "string");
-  if (options.runtimeStorageInUse !== undefined
-    && typeof options.runtimeStorageInUse !== "function") {
-    throw serviceError(
-      "RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID",
-      "Runtime storage in-use resolver is invalid",
-    );
-  }
-  if (options.runtimeBackupInUse !== undefined
-    && typeof options.runtimeBackupInUse !== "function") {
-    throw serviceError(
-      "RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID",
-      "Runtime backup in-use resolver is invalid",
-    );
-  }
-  const runtimePoolByName = new Map([
-    ["codex", runtimePool],
-    ["grok-build", grokBuildRuntimePool],
-    ["antigravity", antigravityRuntimePool],
-    ["pi", piRuntimePool],
-    ["claude-code", claudeCodeRuntimePool],
-    ["deepseek-harness", deepSeekHarnessRuntimePool],
-  ]);
-  const readRuntimeCleanupState = options.readRuntimeCleanupState
-    || options.readRuntimeBackupCleanupState
-    || (() => {
-      const migration = runtimeAccountMigrationOrchestrator.status();
-      return Object.freeze({
-        serviceReady: lifecycleState === "started",
-        cleanupEligible: migration.active === false || migration.stage === "cleanup_eligible",
-      });
-    });
-  if (typeof readRuntimeCleanupState !== "function") {
-    throw serviceError(
-      "RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID",
-      "Runtime cleanup state resolver is invalid",
-    );
-  }
-  const legacyRuntimeHomeStore = options.legacyRuntimeHomeStore
-    || (runtimeStoragePathsAvailable ? new LegacyRuntimeHomeStore({
-      paths,
-      now: options.now,
-      scanLimits: options.runtimeStorageScanLimits,
-      parentEnv: options.parentEnv,
-      homedir: options.runtimeStorageHomedir,
-    }) : null);
-  const runtimeStorageInventory = () => legacyRuntimeHomeStore.refresh({
-    accounts: productStore.listRuntimeAccounts(),
-    profiles: productStore.listAgentProfiles(),
-  });
-  const runtimeStorageCleanup = options.runtimeStorageCleanup
-    || (legacyRuntimeHomeStore && runtimeAccountStoreAvailable
-      ? new RuntimeStorageCleanup({
-        paths,
-        inventory: runtimeStorageInventory,
-        readCleanupState: readRuntimeCleanupState,
-        isInUse: async (entry) => {
-          const persistentReferences = typeof runtimeAccountMigrationOrchestrator
-            .legacyHomePersistentReferences === "function"
-            ? runtimeAccountMigrationOrchestrator.legacyHomePersistentReferences(entry, {
-              productStore,
-              chatSessionStore,
-              ownershipStore: runtimeSessionOwnershipStore,
-            })
-            : ["legacy-session-lineage-unavailable"];
-          if (persistentReferences.length > 0) {
-            return { reasons: persistentReferences };
-          }
-          const admission = runtimeAccountAdmission.read(entry.runtimeAccountId);
-          const pool = runtimePoolByName.get(entry.runtime);
-          const activeHost = pool?.entries instanceof Map
-            && [...pool.entries.values()].some(
-              (candidate) => candidate?.runtimeAccountId === entry.runtimeAccountId,
-            );
-          const inUse = {
-            activeRun: admission.active > 0,
-            activeHost,
-            activeLogin: admission.mutationActive,
-          };
-          if (inUse.activeRun || inUse.activeHost || inUse.activeLogin) return inUse;
-          return options.runtimeStorageInUse
-            ? options.runtimeStorageInUse(entry) : false;
-        },
-        now: options.now,
-        randomBytes: options.runtimeStorageRandomBytes,
-        fs: options.runtimeStorageFs,
-        scanLimits: options.runtimeStorageScanLimits,
-        planTtlMs: options.runtimeStorageCleanupPlanTtlMs,
-      }) : null);
-  const runtimeBackupStore = options.runtimeBackupStore
-    || (runtimeStoragePathsAvailable ? new RuntimeBackupStore({
-      paths,
-      fs: options.runtimeStorageFs,
-      now: options.now,
-      scanLimits: options.runtimeStorageScanLimits,
-      maxDirectories: options.runtimeBackupInventoryMaxDirectories,
-      maxDurationMs: options.runtimeBackupInventoryMaxDurationMs,
-      stagingStaleMs: options.runtimeBackupStagingStaleMs,
-    }) : null);
-  const runtimeBackupInventory = () => runtimeBackupStore.refresh();
-  const runtimeBackupCleanup = options.runtimeBackupCleanup
-    || (runtimeBackupStore ? new RuntimeBackupCleanup({
-      paths,
-      inventory: runtimeBackupInventory,
-      readCleanupState: readRuntimeCleanupState,
-      isInUse: options.runtimeBackupInUse || (async () => false),
-      now: options.now,
-      randomBytes: options.runtimeBackupRandomBytes,
-      fs: options.runtimeStorageFs,
-      scanLimits: options.runtimeStorageScanLimits,
-      planTtlMs: options.runtimeBackupCleanupPlanTtlMs,
-    }) : null);
+  const runtimeStoragePathsAvailable = ["stateDir", "trustedRoot", "runtimeAccountsDir"]
+    .every(field => typeof paths[field] === "string");
   const unavailableRuntimeAccountServiceController = Object.freeze({
     open() {},
     close() {},
@@ -1068,15 +1141,11 @@ function createAgentService(options) {
   });
   const runtimeAccountServiceController = options.runtimeAccountServiceController
     || (runtimeAccountStoreAvailable && runtimeAccountAuthAvailable
-      && legacyRuntimeHomeStore && runtimeStorageCleanup && runtimeBackupStore && runtimeBackupCleanup
+      && runtimeStoragePathsAvailable
       ? createRuntimeAccountServiceController({
         productStore,
         runtimeAccountAdmission,
         accountAuthManager,
-        legacyRuntimeHomeStore,
-        runtimeStorageCleanup,
-        runtimeBackupStore,
-        runtimeBackupCleanup,
         paths,
         fs: options.runtimeStorageFs,
         parentEnv: options.parentEnv,
@@ -1145,6 +1214,9 @@ function createAgentService(options) {
   const chatSessionStore = options.chatSessionStore || new ChatSessionStore({
     paths,
     fs: options.chatSessionFs,
+    getProfileBinding(profileId, bindingId) {
+      return productStore.getAgentRuntimeBinding(profileId, bindingId ?? productStore.getAgentProfile(profileId)?.defaultBindingId);
+    },
     now: options.now,
     randomUUID: options.randomUUID,
   });
@@ -1165,17 +1237,12 @@ function createAgentService(options) {
   const workDispatcher = options.workDispatcher || createWorkDispatcher({
     store: productStore,
     now: options.now || productStore.now,
+    getNativeRuntimeConfig,
   });
   const runtimeSessionOwnershipStore = options.runtimeSessionOwnershipStore
     || new RuntimeSessionOwnershipStore({
       paths,
       fs: options.runtimeSessionOwnershipFs,
-      now: options.now,
-    });
-  const runtimeAccountMigrationOrchestrator = options.runtimeAccountMigrationOrchestrator
-    || new RuntimeAccountMigrationOrchestrator({
-      paths,
-      fs: options.runtimeAccountMigrationFs,
       now: options.now,
     });
   const isSensitiveValue = options.isSensitiveValue || ((value) => (
@@ -1248,6 +1315,74 @@ function createAgentService(options) {
     toolRegistry,
     paths,
   });
+  const pluginCapabilityDispatcher = pluginStore
+    ? (options.pluginCapabilityDispatcher || new CapabilityDispatcher({
+      store: pluginStore, permissionEngine,
+      resolveToolContract: (records) => pluginToolCatalogRegistry.resolve(records),
+      now: options.now,
+    })) : null;
+  const pluginMcpConnectionPool = pluginStore
+    ? (options.pluginMcpConnectionPool || new PluginMcpConnectionPool({
+      leaseManager: new PluginDataScopeLeaseManager({ paths }),
+      authorizeEgress: (request) => pluginCapabilityDispatcher.authorizeEgress(request),
+      onToolsChanged: ({ connectionId }) => pluginToolCatalogRegistry.invalidate(connectionId),
+      onConnectionInvalidated: ({ connectionId }) =>
+        pluginToolCatalogRegistry.invalidate(connectionId),
+      canAcquire: ({ installationId, releaseDigest }) => {
+        const installation = pluginStore.getInstallation(installationId);
+        return installation?.desiredState === "enabled"
+          && installation.releaseDigest === releaseDigest
+          && !pluginStore.hasPendingInstallationDisable(installationId);
+      },
+    })) : null;
+  const pluginMcpConnectionManager = pluginStore ? new PluginMcpConnectionManager({
+    store: pluginStore, resolver: pluginComponentResolver, pool: pluginMcpConnectionPool,
+    auth: pluginConnectionAuth, allowLoopback: options.pluginAllowLoopback === true,
+  }) : null;
+  const pluginDependencyController = pluginStore ? new PluginDependencyController({
+    store: pluginStore, registry: new PluginDependencyRegistry({ store: pluginStore, resolver: pluginComponentResolver }),
+    drainInstallation: id => pluginMcpConnectionPool.drainInstallation(id),
+    resumeInstallation: id => pluginMcpConnectionPool.resumeInstallation(id), now: options.now,
+  }) : null;
+  const pluginRollbackController = pluginStore ? new PluginRollbackController({
+    store: pluginStore, rollback: new PluginDataRollback({ store: pluginStore,
+      drainInstallation: id => pluginMcpConnectionPool.drainInstallation(id) }),
+    resumeInstallation: id => pluginMcpConnectionPool.resumeInstallation(id), now: options.now,
+  }) : null;
+  const pluginMcpConsent = pluginStore ? new PluginMcpConsent({ store: pluginStore,
+    productStore, manager: pluginMcpConnectionManager, registry: pluginToolCatalogRegistry,
+    now: options.now,
+  }) : null;
+  const pluginOAuthController = pluginStore ? new PluginOAuthConnectionController({
+    store: pluginStore, productStore, manager: pluginMcpConnectionManager,
+    providers: pluginOAuthProviders, vault: pluginCredentialVault, now: options.now,
+  }) : null;
+  const pluginConnectionController = pluginStore ? new PluginConnectionController({
+    store: pluginStore, productStore, now: options.now,
+    drainConnection: id => pluginMcpConnectionPool.drainConnection(id),
+    cancelStaleOAuth: bindings => pluginOAuthController.cancelStaleForBindings(bindings),
+    invalidateConnection: connectionId => {
+      pluginToolCatalogRegistry.invalidate(connectionId);
+      pluginAppController.revoke({ connectionId });
+    },
+  }) : null;
+  const pluginRuntimeToolService = pluginStore ? new PluginRuntimeToolService({
+    store: pluginStore, productStore, permissionEngine, getRun: id => workDispatcher.getRun(id),
+    toolCatalogRegistry: pluginToolCatalogRegistry,
+    capabilityDispatcher: pluginCapabilityDispatcher,
+    acquireConnection: records => pluginMcpConnectionManager.acquire(records),
+    requestApproval: input => workRunCoordinator.requestPluginToolApproval(input),
+    recordAppCall: input => pluginAppController.recordCall(input),
+  }) : null;
+  const pluginAppController = pluginStore ? new PluginAppController({
+    store: pluginStore, productStore, getRun: id => workDispatcher.getRun(id),
+    getConversation: run => {
+      const key = workRunCoordinator.getRunSessionKey(run);
+      const session = key && chatSessionStore.getSession(key);
+      return session ? { id: key, profileId: session.profileId } : null;
+    }, manager: pluginMcpConnectionManager, catalog: pluginToolCatalogRegistry,
+    dispatcher: pluginCapabilityDispatcher, permissionEngine, now: options.now,
+  }) : null;
   const productMcpApprovalPolicy = options.productMcpApprovalPolicy
     || new ProductMcpApprovalPolicy({ toolRegistry, permissionEngine, productStore });
   const serviceResourcesPath = options.resourcesPath || process.resourcesPath;
@@ -1262,6 +1397,9 @@ function createAgentService(options) {
     profileExists: (profileId) => productStore.getAgentProfile(profileId) !== null,
     now: options.now,
   });
+  const runtimeSkillStore = pluginComponentResolver
+    ? new PluginSkillFacade({ nativeStore: nativeSkillStore,
+      resolver: pluginComponentResolver }) : nativeSkillStore;
   const nativeMcpStore = options.nativeMcpStore || new NativeMcpStore({
     paths,
     fs: options.nativeMcpFs,
@@ -1305,6 +1443,12 @@ function createAgentService(options) {
     paths,
     fs: options.contextSnapshotFs,
   });
+  const conversationCheckpointStore = options.conversationCheckpointStore
+    || new (require("./conversation-checkpoint-store").ConversationCheckpointStore)({ paths, transcriptStore, now: options.now });
+  const runtimeSelectionPolicyStore = options.runtimeSelectionPolicyStore
+    || new (require("./runtime-selection-policy").RuntimeSelectionPolicyStore)({ paths, productStore });
+  const sourceConversationStore = options.sourceConversationStore
+    || new (require("./source-conversation-policy").SourceConversationStore)({ paths, chatSessionStore, now: options.now });
   const contextCompiler = options.contextCompiler || new ContextCompiler({
     definitionStore: agentDefinitionStore,
     memoryEngine,
@@ -1312,7 +1456,7 @@ function createAgentService(options) {
     transcriptStore,
     toolRegistry,
     permissionEngine,
-    skillStore: nativeSkillStore,
+    skillStore: runtimeSkillStore,
     shouldOfferIntroduction: ({ profile, run }) => run.source === "chat"
       && !/^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey || "")
       && typeof productStore.listWorkRuns === "function"
@@ -1322,11 +1466,12 @@ function createAgentService(options) {
       if (profile.runtime === "codex" || profile.runtime === undefined) {
         return ["mcp", "filesystem", "shell"];
       }
-      return ["grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]
+      return ["grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness"]
         .includes(profile.runtime)
         ? ["mcp", "filesystem", "shell"] : [];
     },
     snapshotStore: contextSnapshotStore,
+    checkpointStore: conversationCheckpointStore,
     now: options.now,
     budgets: options.contextBudgets,
   });
@@ -1334,12 +1479,12 @@ function createAgentService(options) {
     [productStore, ["getAgentProfile"]],
     [agentDefinitionStore, ["get", "history", "readRevision", "update", "restore", "previewImport", "import", "readGeneratedView"]],
     [memoryStore, ["getRevision", "list"]],
-    [memoryEngine, ["propose", "confirm", "update", "delete"]],
+    [memoryEngine, ["propose", "update", "delete"]],
     [chatSessionStore, ["listSessions"]],
     [transcriptStore, ["listEvents", "getRevision", "setContextExcluded"]],
     [toolRegistry, ["list"]],
     [permissionEngine, ["profileProjection", "setProfileOverride"]],
-    [nativeSkillStore, ["list", "setProfileSkill", "installFromDirectory", "uninstall", "preview", "usage"]],
+    [nativeSkillStore, ["list", "setProfileSkill", "setGlobalSkill", "installFromDirectory", "uninstall", "preview", "usage"]],
   ];
   const agentHarnessServiceController = options.agentHarnessServiceController
     || (harnessDependencies.every(([value, methods]) => value
@@ -1379,7 +1524,7 @@ function createAgentService(options) {
     handle() { throw serviceError("AGENT_SERVICE_CLOSED", "Agent lifecycle is unavailable"); },
   });
   const retentionStores = [chatSessionStore, nativeCronStore, nativeKanbanStore,
-    inspirationStore, permissionEngine, runtimeSessionOwnershipStore, tokenUsageStore];
+    inspirationStore, permissionEngine, runtimeSessionOwnershipStore, tokenUsageStore, sourceConversationStore];
   const agentArchiveRetention = typeof productStore.purgeArchivedProfile === "function"
     && retentionStores.every((store) => typeof store.purgeProfile === "function")
     ? new AgentArchiveRetention({
@@ -1388,9 +1533,12 @@ function createAgentService(options) {
         && nativeCronStoreOpened && nativeKanbanStoreOpened
         && inspirationStoreOpened && domainAvailability.cron.available && domainAvailability.kanban.available,
       async stopProfile(profile) {
-        await runtimeManager.stop({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
-          runtimeAccountId: profile.runtimeAccountId });
+        for (const view of agentRuntimeProfileViews(productStore, profile.id)) {
+          await runtimeManager.stop({ runtime: view.runtime, runtimeProfileId: view.runtimeProfileId,
+            runtimeAccountId: view.runtimeAccountId });
+        }
         await computerUseController?.closeForProfile(profile.id);
+        pluginStore?.assertProfilePurgeReady(profile.id);
       },
       listPublishedArtifacts() {
         // A custom artifact location is external to the App-owned cleanup scope.
@@ -1401,6 +1549,7 @@ function createAgentService(options) {
       purgeProfile(profile) {
         // Drop all cross-store references before the Product snapshot. Replays
         // are idempotent, and shared Inspiration notes/accounts remain intact.
+        pluginStore?.purgeProfileBindings(profile.id);
         for (const store of retentionStores) store.purgeProfile(profile.id);
         productStore.purgeArchivedProfile(profile.id);
         transcriptStore.forgetProfile(profile.id);
@@ -1443,7 +1592,10 @@ function createAgentService(options) {
             ensureAgentBoard(productStore, nativeKanbanStore, profile.id, { includeDisabled: true });
           }
         },
-        onProfileChanged: (payload) => eventBuffer.append("agent.profile.changed", payload),
+        onProfileChanged: (payload) => eventBuffer.append("agent.profile.changed",
+          { ...payload, backendId: payload.backendId }),
+        ...(pluginStore ? { revokePluginProfile: (profileId) =>
+          pluginStore.revokeProfileBindings(profileId) } : {}),
         now: options.now,
       })
       : unavailableAgentLifecycleServiceController);
@@ -1537,7 +1689,17 @@ function createAgentService(options) {
       try { Promise.resolve(computerUseController.closeForWorkRun(run.profileId, run.id)).catch(() => {}); } catch {}
     });
   };
+  const runtimeSupportFacts = require("./runtime-support").createRuntimeSupportFacts({
+    runtimeManager, runtimeAccountAdmission, now: options.now,
+    contextIdentity: (binding, profile) => {
+      const resolved = productStore.resolveAgentRuntimeProfile(profile.id, binding.id);
+      return captureExecutionProviderRoute({ productStore, secretStore, profile: resolved,
+        modelRef: resolved.defaultModel }).providerFence;
+    },
+    ...(options.runtimeSupportDiscover ? { discover: options.runtimeSupportDiscover } : {}),
+  });
   const createDefaultWorkRunCoordinator = () => createWorkRunCoordinator({
+    pluginRuntimeToolService,
     dispatcher: workDispatcher,
     productStore,
     usageStore: tokenUsageStore,
@@ -1545,20 +1707,52 @@ function createAgentService(options) {
     getMediaStore: () => inspirationStore.media,
     transcriptStore,
     contextCompiler,
+    conversationCheckpointStore,
+    sourceConversationStore,
+    queueClock: new (require("./runtime-telemetry").RuntimeQueueClock)({ paths, now: options.now }),
+    telemetry: runtimeTelemetry,
+    runtimeContextCache: new (require("./runtime-context-cache").RuntimeContextCache)({ paths, now: options.now }),
+    getRuntimeModelContextWindow: (session, profile) => session.runtimeBindingId ? runtimeSupportFacts.contextWindow(
+      productStore.getAgentRuntimeBinding(session.profileId, session.runtimeBindingId), profile,
+      session.modelOverride ?? profile.defaultModel) : null,
+    getRuntimeModelContextLimits: (session, profile) => session.runtimeBindingId ? runtimeSupportFacts.contextLimits(
+      productStore.getAgentRuntimeBinding(session.profileId, session.runtimeBindingId), profile,
+      session.modelOverride ?? profile.defaultModel) : {},
+    runExecutionStore,
+    captureExecutionProviderRoute: (profile, modelRef) => captureExecutionProviderRoute({
+      productStore, secretStore, profile, modelRef,
+    }),
+    assertExecutionProviderRouteCurrent: (contract) => assertExecutionProviderRouteCurrent(contract, {
+      productStore, secretStore,
+    }),
     resolveRunSession: (run) => inspirationStore.executionForRun(run.id),
     productMcpApprovalPolicy,
     onRunInteraction: handleRunInteraction,
     onRunTerminal: handleRunTerminal,
+    onRuntimeContextChanged: (payload) => eventBuffer.append("runtime.context.updated", payload),
+    runtimeSelectionPolicyStore,
+    getCapabilityPolicyRevision: profileId => {
+      const projection = permissionEngine.profileProjection(profileId);
+      return crypto.createHash("sha256").update(JSON.stringify([projection.registryRevision, projection.tools])).digest("hex");
+    },
+    beforeSessionSend: input => sessionRuntimeController.selectForSend(input),
+    onRuntimeMcpRequest: async (profileId, request, scope) => cloneMcpToolResult(await mcpProductToolController.handle(
+      request.name, request.arguments, Object.freeze({ profileId, callId: request.callId,
+        ...(request.confirmation === true ? { confirmation: true } : {}) }), scope)),
+    onConversationRenewed: payload => { sessionRuntimeController.auditPending(); eventBuffer.append("runtime.context.updated", payload); },
+    followDefaultSessionBinding: (sessionKey, runId) => sessionRuntimeController.followDefault(sessionKey, runId),
     inbox: pendingCommandInbox,
     runtimeManager,
     runtimeAccountAdmission,
     runtimeSessionOwnershipStore,
+    getNativeRuntimeConfig,
+    startupGate,
     now: options.now,
     randomUUID: options.randomUUID,
     assertSecretSafe,
     sanitizeSummary,
-    // 默认 DomainWorkRunExecutor 的 execution contract 只存在于当前 lifecycle；
-    // 自定义 executor 保留自己的 crash recovery ownership，不由 Coordinator 抢占。
+    // Persisted execution bindings belong to the default coordinator; custom
+    // domain executors retain their own recovery ownership.
     recoverOrphanedDomainRuns: options.domainWorkRunExecutor === undefined,
   });
   const codexSchemaContract = options.codexSchemaContract || new CodexSchemaContract({
@@ -1579,8 +1773,18 @@ function createAgentService(options) {
     now: options.now,
     randomUUID: options.randomUUID,
     listProfileModels: (params) => profileServiceController.handle("profile.models.list", params),
+    listBindingModels: (params) => profileServiceController.handle("profile.binding.models.list", params),
+    getRuntimeContext: (session) => coordinator.getRuntimeContext?.(session),
   });
   let workRunCoordinator = options.workRunCoordinator || createDefaultWorkRunCoordinator();
+  const sessionRuntimeController = require("./session-runtime-controller").createSessionRuntimeController({
+    productStore, chatSessionStore, transcriptStore, getCoordinator: () => workRunCoordinator, facts: runtimeSupportFacts,
+    policyStore: runtimeSelectionPolicyStore,
+    getNativeRuntimeConfig,
+    ensureTranscript: session => chatServiceController.handle("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 1 }, null),
+    listBindingModels: params => profileServiceController.handle("profile.binding.models.list", params),
+    onChanged: payload => eventBuffer.append("runtime.context.updated", payload),
+  });
   let chatServiceController = options.chatServiceController
     || createDefaultChatServiceController(workRunCoordinator);
   const federationCoordinator = options.federationCoordinator || new FederationCoordinator({
@@ -1673,7 +1877,9 @@ function createAgentService(options) {
   let mcpSessionManager = null;
   let mcpAuthInitAttempt = null;
   let mcpAuthFailureGeneration = null;
+  let mcpAuthMigration = null;
   let storeOpened = false;
+  let pluginStoreOpened = false;
   let tokenUsageStoreOpened = false;
   let secretStoreOpened = false;
   let mcpCryptoBrokerOpened = false;
@@ -1682,7 +1888,6 @@ function createAgentService(options) {
   let providerServiceOpened = false;
   let accountAuthStateOpened = false;
   let accountAuthManagerOpened = false;
-  let runtimeAccountMigrationOrchestratorOpened = false;
   let runtimeSessionOwnershipStoreOpened = false;
   let runtimeAccountServiceControllerOpened = false;
   let profileServiceControllerOpened = false;
@@ -1698,6 +1903,7 @@ function createAgentService(options) {
   let nativeMcpStoreOpened = false;
   let computerUseControllerOpened = false;
   let contextSnapshotStoreOpened = false;
+  let conversationCheckpointStoreOpened = false;
   let pendingCommandInboxOpened = false;
   let chatServiceControllerOpened = false;
   let workRunCoordinatorOpened = false;
@@ -1762,7 +1968,7 @@ function createAgentService(options) {
       [kanbanRunService, ["requestCompletionFromAgent"]],
       [nativeCronStore, ["getJob"]],
       [workDispatcher, ["getRun"]],
-      [workRunCoordinator, ["getRuntimeContextForSource", "getRuntimeContextForLegacyRun"]],
+      [workRunCoordinator, ["getRuntimeContextForSource"]],
       [tokenUsageStore, ["summarize"]],
       [federationHostClient, ["request"]],
       [federationCoordinator, ["list", "get", "run", "message", "taskGet", "cancel"]],
@@ -1792,17 +1998,15 @@ function createAgentService(options) {
       kanbanRunService,
       cronStore: nativeCronStore,
       workDispatcher,
-      getRuntimeContext: (profileId, selector) => selector.runId === undefined
-        ? workRunCoordinator.getRuntimeContextForSource(
-          profileId, selector.source, selector.sourceId,
-        )
-        : workRunCoordinator.getRuntimeContextForLegacyRun(profileId, selector.runId),
+      getRuntimeContext: (profileId, selector) => workRunCoordinator.getRuntimeContextForSource(
+        profileId, selector.source, selector.sourceId),
       usageStore: tokenUsageStore,
       federationClient: federationHostClient,
       federationCoordinator,
-      skillStore: nativeSkillStore,
+      skillStore: runtimeSkillStore,
       nativeMcpStore,
       nativeMcpClientManager,
+      pluginRuntimeToolService,
       conversationMemoryService: new ConversationMemoryService({
         memoryEngine, memoryStore, transcriptStore, chatSessionStore,
         getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
@@ -1857,6 +2061,7 @@ function createAgentService(options) {
   const eventBuffer = options.eventBuffer || createEventBuffer(MAX_FRAME_BYTES);
   const sockets = new Set();
   const inFlightSockets = new Set();
+  let maintenanceQuiesced = false;
   const bridgeSockets = new Map();
 
   function mcpAuthGenerationIsActive(generation) {
@@ -1918,6 +2123,9 @@ function createAgentService(options) {
           new McpSessionManager(managerOptions)
         ));
         manager = factory({
+          // Codex starts one helper per conversation. Tokens may coexist;
+          // every native call still requires its exact one-use Run proof.
+          concurrentHelperSessions: true,
           handshakeSecret,
           profileStore: productStore,
           protocolVersion: PROTOCOL_VERSION,
@@ -2196,7 +2404,7 @@ function createAgentService(options) {
     errorResponse(socket, id, code, messages[code] || "mcp_auth_failed");
   }
 
-  async function executeAuthorizedMcpRequest(method, params) {
+  async function executeAuthorizedMcpRequest(method, params, executionRunId = null) {
     const toolCall = method === "mcp.tool.call";
     const expectedFields = toolCall
       ? ["runtimeProfileId", "runtimeAccountId", "sessionToken", "callId", "name", "arguments",
@@ -2228,7 +2436,8 @@ function createAgentService(options) {
         token: params.sessionToken,
       });
     }
-    const profile = productStore.getAgentProfile(authorized.profileId);
+    const profile = agentRuntimeProfileViews(productStore, authorized.profileId)
+      .find(view => view.runtimeProfileId === authorized.runtimeProfileId);
     if (!profile || profile.enabled !== true
       || profile.runtimeProfileId !== authorized.runtimeProfileId
       || profile.runtimeAccountId !== authorized.runtimeAccountId) {
@@ -2238,7 +2447,7 @@ function createAgentService(options) {
     let result;
     activeRuntimeRequests += 1;
     try {
-      result = cloneMcpToolResult(await mcpProductToolController.handle(
+      const invoke = scope => mcpProductToolController.handle(
         params.name,
         params.arguments,
         Object.freeze({
@@ -2247,8 +2456,17 @@ function createAgentService(options) {
           ...(params.confirmation === true ? { confirmation: true } : {}),
           ...(authorized.federationClient
             ? { federationClient: authorized.federationClient } : {}),
-        }),
-      ));
+        }), scope,
+      );
+      result = cloneMcpToolResult(await (authorized.federationClient ? invoke(undefined)
+        : executionRunId ? workRunCoordinator.invokeRuntimeCapability({ runtimeProfileId: params.runtimeProfileId,
+          runtimeAccountId: params.runtimeAccountId, runId: executionRunId,
+          kind: params.name === "artifact_publish" ? "artifact" : "mcp" }, invoke)
+          : workRunCoordinator.invokeBoundRuntimeMcpCall({ profileId: authorized.profileId,
+            runtimeProfileId: params.runtimeProfileId, runtimeAccountId: params.runtimeAccountId,
+            callId: params.callId, name: params.name, arguments: params.arguments,
+            sessionToken: params.sessionToken,
+            confirmation: params.confirmation === true }, invoke)));
     } finally {
       activeRuntimeRequests -= 1;
     }
@@ -2278,7 +2496,7 @@ function createAgentService(options) {
         ])) {
           throw serviceError("MCP_AUTH_REQUEST_INVALID", "mcp_auth_request_invalid");
         }
-        const profiles = productStore.listAgentProfiles().filter((profile) => (
+        const profiles = agentRuntimeProfileViews(productStore).filter((profile) => (
           profile.enabled === true
           && profile.runtimeProfileId === request.params.runtimeProfileId
           && profile.runtimeAccountId === request.params.runtimeAccountId
@@ -2331,6 +2549,7 @@ function createAgentService(options) {
   }
 
   async function openMcpRuntimeBridge(socket, request) {
+    if (maintenanceQuiesced) throw serviceError("SERVICE_QUIESCED", "mcp_auth_unavailable");
     if (!exactObject(request, ["version", "method", "params"])
       || request.version !== PROTOCOL_VERSION
       || request.method !== "mcp.runtime.bridge.open"
@@ -2349,7 +2568,7 @@ function createAgentService(options) {
     const generation = lifecycleGeneration;
     const runtimeProfileId = request.params.runtimeProfileId;
     const runtimeAccountId = request.params.runtimeAccountId;
-    const boundProfiles = productStore.listAgentProfiles().filter((profile) => (
+    const boundProfiles = agentRuntimeProfileViews(productStore).filter((profile) => (
       profile.enabled === true
       && profile.runtimeProfileId === runtimeProfileId
       && profile.runtimeAccountId === runtimeAccountId
@@ -2357,7 +2576,7 @@ function createAgentService(options) {
     if (boundProfiles.length !== 1) {
       throw serviceError("MCP_AUTH_FAILED", "mcp_auth_failed");
     }
-    await runtimeMcpGateIssuer.consume(request.params);
+    const gateAuthority = await runtimeMcpGateIssuer.consume(request.params);
     const manager = await ensureMcpSessionManager();
     if (!mcpAuthGenerationIsActive(generation) || manager !== mcpSessionManager) {
       throw serviceError("SERVICE_UNAVAILABLE", "mcp_auth_unavailable");
@@ -2392,11 +2611,12 @@ function createAgentService(options) {
           throw serviceError("MCP_SESSION_INVALID", "mcp_session_invalid");
         }
         const refreshed = manager.issueBridgeSession({ runtimeProfileId, runtimeAccountId });
+        revokeActiveSession();
         activeToken = refreshed.token;
         return refreshed;
       };
       const requestBridgeService = async (_paths, serviceRequest) => {
-        if (closed || socket.destroyed || lifecycleGeneration !== generation
+        if (maintenanceQuiesced || closed || socket.destroyed || lifecycleGeneration !== generation
           || !mcpAuthGenerationIsActive(generation) || manager !== mcpSessionManager
           || !exactObject(serviceRequest, ["version", "method", "params"])
           || serviceRequest.version !== PROTOCOL_VERSION
@@ -2405,7 +2625,11 @@ function createAgentService(options) {
           || serviceRequest.params.runtimeAccountId !== runtimeAccountId) {
           throw serviceError("MCP_SESSION_INVALID", "mcp_session_invalid");
         }
-        return executeAuthorizedMcpRequest(serviceRequest.method, serviceRequest.params);
+        if (serviceRequest.method === "mcp.tool.call"
+          && !workRunCoordinator.hasActiveRuntimeWork?.(runtimeProfileId, runtimeAccountId, gateAuthority.executionRunId)) {
+          throw serviceError("MCP_SESSION_INVALID", "mcp_session_invalid");
+        }
+        return executeAuthorizedMcpRequest(serviceRequest.method, serviceRequest.params, gateAuthority.executionRunId);
       };
       handler = createMcpStdioHandler({
         paths,
@@ -2445,6 +2669,10 @@ function createAgentService(options) {
       return;
     }
     const isMcpRequest = MCP_SERVICE_METHODS.has(request.method);
+    if (maintenanceQuiesced && !["service.hello", "service.status", "service.stopImpact", "service.stop"].includes(request.method)) {
+      errorResponse(socket, id, "SERVICE_QUIESCED", "Service 已暂停接收任务，等待重新启动");
+      return;
+    }
     // Startup 期提前 bind 仅供 Runtime MCP helper 完成 one-shot gate + HMAC。
     // 普通客户端即使读到了本代 token，也必须等所有恢复入口完成后才能观察 Service。
     if (!isMcpRequest && lifecycleState !== "started") {
@@ -2491,6 +2719,21 @@ function createAgentService(options) {
     let result;
     if (request.method === "service.hello") {
       result = { protocolVersion: PROTOCOL_VERSION, serviceVersion };
+    } else if (NATIVE_RUNTIME_CONFIG_METHODS.includes(request.method)) {
+      try {
+        if (!exactObject(request, [...baseFields, "params"])) {
+          throw serviceError("NATIVE_RUNTIME_CONFIG_INVALID", "原生并发参数无效");
+        }
+        const params = validateNativeRuntimeConfigParams(request.method, request.params);
+        result = request.method === "runtime.config.apply"
+          ? nativeRuntimeConfig.apply(params) : workRunCoordinator.nativeCapacitySnapshot();
+        result = validateNativeRuntimeConfigResult(request.method, result);
+      } catch (error) {
+        const code = Object.hasOwn(NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES, error?.code || "")
+          ? error.code : "NATIVE_RUNTIME_CONFIG_UNAVAILABLE";
+        errorResponse(socket, id, code, NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES[code]);
+        return;
+      }
     } else if (request.method === "service.status") {
       result = {
         healthy: true,
@@ -2500,12 +2743,52 @@ function createAgentService(options) {
         serviceVersion,
         startedAt,
         instanceNonce,
+        productSchemaVersion: paths.productSchemaVersion || productStore.schemaVersion || 15,
+        maintenanceQuiesced,
         domainAvailability: domainAvailabilitySnapshot(),
         pendingCommandsLocked: typeof pendingCommandInbox.isLocked === "function"
           ? pendingCommandInbox.isLocked() : true,
         // MCP authority is lazily unlocked on the first authenticated helper handshake.
         mcpCredentialsLocked: mcpSessionManager === null,
       };
+    } else if (request.method === "service.mcpAuth.migrateKeychain") {
+      if (!exactObject(request, [...baseFields, "params"])
+        || !exactObject(request.params, ["confirm"]) || request.params.confirm !== true) {
+        errorResponse(socket, id, "INVALID_PARAMS", "MCP 凭据迁移需要明确确认");
+        return;
+      }
+      const generation = lifecycleGeneration;
+      const impact = createStopImpact({ runs: workRunCoordinator.listRuns(),
+        instanceNonce: `${instanceNonce}:${generation}` });
+      if (!mcpAuthGenerationIsActive(generation) || impact.totalCount !== 0
+        || mcpSessionManager || mcpAuthInitAttempt) {
+        errorResponse(socket, id, "MCP_AUTH_MIGRATION_BUSY", "MCP 凭据迁移需要空闲且未解锁的服务");
+        return;
+      }
+      if (typeof mcpCryptoBroker.migrateLegacyMcpAuth !== "function") {
+        errorResponse(socket, id, "MCP_CRYPTO_UNAVAILABLE", "mcp_crypto_unavailable");
+        return;
+      }
+      // Keep MCP closed until a fresh generation reloads the migrated file.
+      // An explicit maintenance request must never race a helper handshake.
+      mcpAuthFailureGeneration = generation;
+      try {
+        if (!mcpAuthMigration || mcpAuthMigration.generation !== generation) {
+          mcpAuthMigration = { generation,
+            result: Promise.resolve().then(() => mcpCryptoBroker.migrateLegacyMcpAuth({
+              generation,
+              isCurrent: () => mcpAuthGenerationIsActive(generation) && !mcpSessionManager
+                && !mcpAuthInitAttempt && createStopImpact({ runs: workRunCoordinator.listRuns(),
+                  instanceNonce: `${instanceNonce}:${generation}` }).totalCount === 0,
+            })) };
+        }
+        const migration = await mcpAuthMigration.result;
+        if (!mcpAuthGenerationIsActive(generation)) throw new Error("migration generation retired");
+        result = { migrated: migration.migrated === true, restartRequired: true };
+      } catch {
+        errorResponse(socket, id, "MCP_CRYPTO_UNAVAILABLE", "mcp_crypto_unavailable");
+        return;
+      }
     } else if (request.method === "service.stopImpact") {
       result = createStopImpact({
         runs: workRunCoordinator.listRuns(),
@@ -2530,6 +2813,22 @@ function createAgentService(options) {
       }
       const afterSeq = hasCursor ? rawCursor : 0;
       result = eventBuffer.page(afterSeq, id);
+    } else if (PLUGIN_SERVICE_METHOD_SET.has(request.method)) {
+      if (!pluginServiceController) {
+        errorResponse(socket, id, "PLUGIN_UNAVAILABLE", "插件管理服务不可用");
+        return;
+      }
+      try {
+        if (!exactObject(request, [...baseFields, "params"])) {
+          throw serviceError("PLUGIN_REQUEST_INVALID", "插件管理请求 envelope 无效");
+        }
+        result = await pluginServiceController.handle(request.method, request.params);
+      } catch (error) {
+        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
+          ? error.code : "PLUGIN_SERVICE_FAILED";
+        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
+        return;
+      }
     } else if (["provider.endpoints.list", "provider.endpoints.save", "provider.endpoints.delete", "provider.endpoints.discover"].includes(request.method)) {
       const fields = request.method === "provider.endpoints.list" ? ["profileId"]
         : request.method === "provider.endpoints.delete" ? ["profileId", "id"] : ["profileId", "endpoint"];
@@ -2597,6 +2896,73 @@ function createAgentService(options) {
         errorResponse(socket, id, "AUTH_RESPONSE_INVALID", "账户认证响应无效");
         return;
       }
+    } else if (request.method === "runtime.observability.get") {
+      if (!exactObject(request, ["id", "token", "version", "method", "params"]) || !exactObject(request.params, [])) {
+        errorResponse(socket, id, "INVALID_PARAMS", "Invalid diagnostics request"); return;
+      }
+      result = workRunCoordinator.getRuntimeObservability();
+    } else if (request.method === "runtime.extension.credential.set") {
+      if (!exactObject(request, ["id", "token", "version", "method", "params"])
+        || !exactObject(request.params, ["credentialRef", "token"])
+        || !/^runtime-worker-[a-z0-9-]{1,100}$/u.test(request.params.credentialRef || "")
+        || typeof request.params.token !== "string" || request.params.token.length < 32 || request.params.token.length > 4096) {
+        errorResponse(socket, id, "INVALID_PARAMS", "Invalid worker credential"); return;
+      }
+      await secretStore.put(request.params.credentialRef, request.params.token, { kind: "runtime-worker-token" });
+      result = { stored: true };
+    } else if (require("./product-context-protocol").METHODS.includes(request.method)) {
+      const protocol = require("./product-context-protocol");
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("PRODUCT_CONTEXT_INVALID", "Invalid envelope");
+        const params = protocol.validateParams(request.method, request.params);
+        const session = chatSessionStore.getSession(params.sessionKey);
+        if (!session || session.profileId !== params.profileId) throw serviceError("CHAT_SESSION_NOT_FOUND", "会话不存在");
+        await chatServiceController.handle("chat.history", { sessionKey: params.sessionKey, cursor: null, limit: 1 }, null);
+        result = protocol.validateResult(await workRunCoordinator.compactConversation(params));
+      } catch (error) {
+        const code = Object.hasOwn(protocol.MESSAGES, error?.code) ? error.code : "PRODUCT_CONTEXT_FAILED";
+        errorResponse(socket, id, code, protocol.MESSAGES[code]); return;
+      }
+    } else if (require("./runtime-selection-policy").RUNTIME_POLICY_METHODS.includes(request.method)) {
+      const protocol = require("./runtime-selection-policy");
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("RUNTIME_SELECTION_POLICY_INVALID", "Invalid envelope");
+        const params = protocol.validateRuntimePolicyParams(request.method, request.params);
+        result = request.method === "agent.runtimePolicy.set"
+          ? runtimeSelectionPolicyStore.set(params.profileId, params.policy) : runtimeSelectionPolicyStore.get(params.profileId);
+        if (request.method === "agent.runtimePolicy.set") eventBuffer.append("agent.profile.changed", { profileId: params.profileId });
+      } catch (error) {
+        const code = Object.hasOwn(protocol.RUNTIME_POLICY_MESSAGES, error?.code) ? error.code : "RUNTIME_SELECTION_POLICY_UNAVAILABLE";
+        errorResponse(socket, id, code, protocol.RUNTIME_POLICY_MESSAGES[code]); return;
+      }
+    } else if (require("./session-runtime-protocol").SESSION_RUNTIME_METHODS.includes(request.method)) {
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("INVALID_PARAMS", "Invalid envelope");
+        result = await sessionRuntimeController.handle(request.method, request.params);
+      } catch (error) {
+        const { SESSION_RUNTIME_PUBLIC_MESSAGES: messages } = require("./session-runtime-protocol");
+        const code = Object.hasOwn(messages, error?.code) ? error.code : "SESSION_RUNTIME_UNAVAILABLE";
+        errorResponse(socket, id, code, messages[code]);
+        return;
+      }
+    } else if (["agent.binding.list", "agent.binding.sync", "agent.binding.add", "agent.binding.update", "agent.binding.remove",
+      "agent.binding.setDefault"].includes(request.method)) {
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) {
+          throw serviceError("INVALID_PARAMS", "Binding request envelope is invalid");
+        }
+        result = require("./agent-runtime-binding-controller").createAgentRuntimeBindingController({
+          productStore, chatSessionStore, getNativeRuntimeConfig,
+          policyStore: runtimeSelectionPolicyStore,
+          canGenerateCheckpoint: runtime => runtimeManager.canGenerateModelOnly?.(runtime) === true,
+          onChanged: payload => eventBuffer.append("agent.profile.changed", payload),
+        }).handle(request.method, request.params);
+      } catch (error) {
+        const { AGENT_BINDING_PUBLIC_MESSAGES: PUBLIC_MESSAGES } = require("./agent-runtime-binding-protocol");
+        const code = Object.hasOwn(PUBLIC_MESSAGES, error?.code) ? error.code : "AGENT_BINDING_INVALID";
+        errorResponse(socket, id, code, PUBLIC_MESSAGES[code] || "Runtime Binding 操作失败");
+        return;
+      }
     } else if (RUNTIME_ACCOUNT_SERVICE_METHOD_SET.has(request.method)) {
       try {
         if (!exactObject(request, ["id", "token", "version", "method", "params"])) {
@@ -2615,14 +2981,15 @@ function createAgentService(options) {
         if (!exactObject(request, ["id", "token", "version", "method", "params"])
           || !exactObject(request.params, ["range", "backendId"])
           || typeof request.params.backendId !== "string"
-          || !BACKEND_ID_PATTERN.test(request.params.backendId)) {
+          || request.params.backendId !== "shoggoth") {
           throw serviceError("INVALID_PARAMS", "Token usage 参数无效");
         }
         const range = validateUsageRange(request.params.range);
         const profiles = productStore.listAgentProfiles().filter(profile => profile.backendId === request.params.backendId);
         const profileIds = new Set(profiles.map(profile => profile.id));
         let usageComplete = true;
-        if (profiles.some(profile => profile.runtime === "grok-build") && typeof grokBuildRuntimePool.readUsage === "function") {
+        if (workRunCoordinator.listRuns().some(run => profileIds.has(run.profileId)
+          && run.runtimeSessionRef?.runtime === "grok-build") && typeof grokBuildRuntimePool.readUsage === "function") {
           const now = (options.now || Date.now)();
           const start = new Date(now);
           start.setHours(0, 0, 0, 0);
@@ -2748,6 +3115,28 @@ function createAgentService(options) {
         errorResponse(socket, id, mapped.code, mapped.message);
         return;
       }
+    } else if (request.method === "service.quiesceIdle") {
+      if (!exactObject(request, [...baseFields, "params"])
+        || !exactObject(request.params, ["instanceNonce", "revision"])
+        || request.params.instanceNonce !== instanceNonce
+        || typeof request.params.revision !== "string") {
+        errorResponse(socket, id, "INVALID_PARAMS", "数据目录切换请求无效");
+        return;
+      }
+      const impact = createStopImpact({ runs: workRunCoordinator.listRuns(),
+        instanceNonce: `${instanceNonce}:${lifecycleGeneration}` });
+      if (activeRuntimeRequests !== 1 || impact.totalCount !== 0
+        || impact.revision !== request.params.revision) {
+        errorResponse(socket, id, "SERVICE_MAINTENANCE_BUSY", "Service 正忙，请稍后重试");
+        return;
+      }
+      try { workRunCoordinator.quiesceIfIdle(); }
+      catch {
+        errorResponse(socket, id, "SERVICE_MAINTENANCE_BUSY", "Service 正忙，请稍后重试");
+        return;
+      }
+      maintenanceQuiesced = true;
+      result = { quiesced: true, instanceNonce };
     } else if (request.method === "service.stop") {
       result = { stopping: true };
     } else {
@@ -2755,6 +3144,12 @@ function createAgentService(options) {
       return;
     }
 
+    const publicProfile = profile => ({ ...profile, backendId: profile.backendId });
+    if (request.method === "profile.list") result = { ...result, profiles: result.profiles.map(publicProfile) };
+    else if (request.method === "agent.lifecycle.list") result = { ...result,
+      agents: result.agents.map(item => ({ ...item, profile: publicProfile(item.profile) })) };
+    else if ((AGENT_LIFECYCLE_METHOD_SET.has(request.method) || PROFILE_SERVICE_METHOD_SET.has(request.method))
+      && result.profile) result = { ...result, profile: publicProfile(result.profile) };
     writeResponse(socket, { id, ok: true, result });
     if (request.method === "service.stop") {
       setImmediate(() => { void api.stop().catch(reportStopFailure); });
@@ -2888,15 +3283,12 @@ function createAgentService(options) {
     piRuntimeAdapter,
     claudeCodeRuntimePool,
     claudeCodeRuntimeAdapter,
+    openCodeRuntimePool,
+    openCodeRuntimeAdapter,
     deepSeekHarnessRuntimePool,
     deepSeekHarnessRuntimeAdapter,
     runtimeManager,
     runtimeAccountAdmission,
-    runtimeAccountMigrationOrchestrator,
-    legacyRuntimeHomeStore,
-    runtimeStorageCleanup,
-    runtimeBackupStore,
-    runtimeBackupCleanup,
     runtimeAccountServiceController,
     runtimeSessionOwnershipStore,
     runtimeMcpGateIssuer,
@@ -2911,7 +3303,26 @@ function createAgentService(options) {
     memoryStore,
     memoryEngine,
     nativeSkillStore,
+    runtimeSkillStore,
     nativeMcpStore,
+    pluginStore,
+    pluginPackageInstaller,
+    pluginComponentCatalog,
+    pluginComponentResolver,
+    pluginServiceController,
+    pluginMcpConsent,
+    pluginAppController,
+    pluginOAuthController,
+    pluginDependencyController,
+    pluginRollbackController,
+    pluginConnectionController,
+    pluginRuntimeToolService,
+    pluginMcpConnectionManager,
+    pluginCredentialVault,
+    pluginConnectionAuth,
+    pluginToolCatalogRegistry,
+    pluginCapabilityDispatcher,
+    pluginMcpConnectionPool,
     nativeMcpClientManager,
     systemHostController,
     computerUseController,
@@ -2920,11 +3331,14 @@ function createAgentService(options) {
     federationCoordinator,
     federationMcpSessionManager,
     contextSnapshotStore,
+    conversationCheckpointStore,
     contextCompiler,
     agentHarnessServiceController,
     tokenUsageStore,
     pendingCommandInbox,
     workDispatcher,
+    nativeRuntimeConfig,
+    startupGate,
     nativeKanbanStore,
     inspirationStore,
     inspirationService,
@@ -2936,11 +3350,6 @@ function createAgentService(options) {
     get mcpProductToolController() { return mcpProductToolController; },
     get workRunCoordinator() { return workRunCoordinator; },
     get chatServiceController() { return chatServiceController; },
-
-    getNativeRuntimeImportSummary() {
-      return nativeRuntimeImportSummary === null
-        ? null : structuredClone(nativeRuntimeImportSummary);
-    },
 
     getDomainAvailability() {
       return domainAvailabilitySnapshot();
@@ -3014,32 +3423,11 @@ function createAgentService(options) {
           // stop 可能在 lock acquisition 挂起期间到达；先登记刚取得的所有权，
           // 再过 generation fence，确保取消路径能关闭 fd 并只删除自己的 inode。
           assertStartGeneration(generation);
-          // 独占 lock 已证明没有合法 Service 持有这个 endpoint。崩溃可能遗留
-          // service.sock；schema backup 仍应把运行期 socket 当作 active 证据，
-          // 所以必须在进入迁移备份前先按原有 no-symlink 规则清掉 stale path。
+          if (!options.productStore) assertCurrentStorageBaseline(paths);
+          // 独占 lock 已证明没有合法 Service 持有这个 endpoint，清理崩溃遗留 socket。
           const staleSocketStat = rejectSymlink(paths.socketPath);
           if (staleSocketStat) fs.unlinkSync(paths.socketPath);
-          let runtimeSchemaMigrationBackup = null;
-          if (!options.productStore && !options.chatSessionStore) {
-            recoverStalePersistentWriterLeases(paths);
-            runtimeSchemaMigrationBackup = ensureRuntimeSchemaMigrationBackup({
-              paths,
-              activeServiceLock: ownedLockIdentity,
-              now: options.now,
-            });
-            if (nativeRuntimeImportEnabled) {
-              ensureNativeRuntimeImportBackup({
-                paths,
-                activeServiceLock: ownedLockIdentity,
-                now: options.now,
-              });
-            }
-          }
-          runtimeAccountMigrationOrchestratorOpened = true;
-          runtimeAccountMigrationOrchestrator.prepare({
-            metadataBackup: runtimeSchemaMigrationBackup,
-            activeServiceLock: ownedLockIdentity,
-          });
+          if (!options.productStore && !options.chatSessionStore) recoverStalePersistentWriterLeases(paths);
           assertStartGeneration(generation);
           // 单实例锁取得后才打开 Store，确保整个产品状态只有 Service 这一位 writer。
           runtimeMcpGateIssuerOpened = true;
@@ -3053,24 +3441,27 @@ function createAgentService(options) {
           assertStartGeneration(generation);
           storeOpened = true;
           productStore.open();
+          if (pluginStore) {
+            pluginStoreOpened = true;
+            pluginStore.open();
+            // A crash can leave ProductStore disabled while the separate
+            // plugin transaction has not yet run. Fence it before IPC opens.
+            for (const profile of productStore.listAgentProfiles()) {
+              if (!profile.enabled) pluginStore.revokeProfileBindings(profile.id);
+            }
+            pluginMcpConnectionPool.open();
+          }
+          for (const entry of runtimeExtensions) {
+            const runtime = entry.envelope.manifest.runtime, id = `extension-${runtime}`;
+            if (!productStore.getRuntimeAccount(id)) productStore.putRuntimeAccount({ id, runtime,
+              kind: "shoggoth-managed", installationKind: "system", homeKind: "managed-shared",
+              providerRef: null, isDefault: false, createdAt: null, updatedAt: null });
+          }
+          nativeRuntimeConfig.open();
           assertStartGeneration(generation);
           if (options.builtinCliProfiles === true) {
             ensureBuiltinCliAgentProfiles(productStore);
           }
-          runtimeAccountMigrationOrchestrator.reconcileAccountsAndProfiles(productStore);
-          require("./execution-policy").migrateLegacyProfileConcurrency(productStore, paths);
-          await migrateLegacySharedCodexApiKey({
-            paths,
-            productStore,
-            secretStore,
-            now: options.now,
-            parentEnv: options.parentEnv,
-            homedir: options.runtimeStorageHomedir,
-          });
-          assertStartGeneration(generation);
-          // API-key migration must resume before generic orphan GC: a crash after
-          // encrypted put but before Provider binding leaves a deterministic,
-          // journal-owned ref that is not an orphan.
           await reconcileProviderCredentialSecrets({ productStore, secretStore });
           assertStartGeneration(generation);
           runtimeSessionOwnershipStoreOpened = true;
@@ -3087,18 +3478,6 @@ function createAgentService(options) {
           );
           nativeMcpStoreOpened = true;
           nativeMcpStore.open();
-          if (nativeRuntimeImportEnabled) {
-            nativeRuntimeImportSummary = importNativeRuntimeHomes({
-              paths,
-              profiles: productStore.listAgentProfiles(),
-              homeDir: nativeRuntimeImportHome,
-              skillStore: nativeSkillStore,
-              now: options.now,
-            });
-            if (typeof options.onNativeRuntimeImport === "function") {
-              try { options.onNativeRuntimeImport(nativeRuntimeImportSummary); } catch { /* diagnostic only */ }
-            }
-          }
           if (computerUseController) {
             computerUseControllerOpened = true;
             await computerUseController.open();
@@ -3129,9 +3508,6 @@ function createAgentService(options) {
           memoryEngineOpened = true;
           const memoryProfiles = productStore.listAgentProfiles();
           await memoryEngine.open(memoryProfiles.map((profile) => profile.id));
-          if (!options.memoryStore && !options.memoryEngine) {
-            completeMemoryMigration({ paths, memoryEngine, profiles: memoryProfiles, now: options.now });
-          }
           contextSnapshotStoreOpened = true;
           await contextSnapshotStore.open();
           assertStartGeneration(generation);
@@ -3215,14 +3591,12 @@ function createAgentService(options) {
           await chatSessionStore.open();
           inspirationStoreOpened = true;
           inspirationStore.open();
-          runtimeAccountMigrationOrchestrator.backfillOwnership({
-            productStore,
-            chatSessionStore,
-            ownershipStore: runtimeSessionOwnershipStore,
-          });
           assertStartGeneration(generation);
           transcriptStoreOpened = true;
           await transcriptStore.open();
+          conversationCheckpointStoreOpened = true;
+          await conversationCheckpointStore.open();
+          sessionRuntimeController.auditPending();
           // Complete a journaled partial purge before domain recovery inspects
           // WorkRun/Card/Session references that may have been removed already.
           if (agentArchiveRetention && typeof agentLifecycleServiceController.runMaintenance === "function") {
@@ -3232,25 +3606,29 @@ function createAgentService(options) {
           for (const session of chatSessionStore.listSessions()) {
             transcriptStore.ensureSession({ profileId: session.profileId, sessionId: session.id });
           }
-          runtimeAccountMigrationOrchestrator.reconcileLegacyRuntimeSessions({
-            productStore,
-            chatSessionStore,
-            transcriptStore,
-            ownershipStore: runtimeSessionOwnershipStore,
-          });
-          runtimeAccountMigrationOrchestrator.reconcileRuntimeRefs(productStore);
           assertStartGeneration(generation);
           pendingCommandInboxOpened = true;
           await pendingCommandInbox.open();
           assertStartGeneration(generation);
-          // Kanban/Cron active run 先保留给 domain owner：默认 Coordinator 会收敛
-          // 丢失内存 execution contract 的 starting Run；自定义 executor 则保有自己的
-          // recover ownership。chat running/waiting 不能在 crash 后继续，starting 留给
-          // Coordinator 对账。
+          // Only an unlocked, matching command plus a private execution record
+          // can enter native reconciliation. Legacy/locked active runs retain
+          // Product's restricted SERVICE_RESTARTED recovery, which is safe even
+          // when the secret matcher is unavailable.
+          const recoverableCommandRuns = new Set(pendingCommandInbox.isLocked?.() === true ? []
+            : pendingCommandInbox.list().filter((command) => ["pending", "dispatching"].includes(command.state))
+              .map((command) => command.runId));
           for (const run of productStore.listWorkRuns()) {
+            if (options.workRunCoordinator === undefined
+              && ["completed", "failed", "canceled", "interrupted", "skipped"].includes(run.status)) {
+              // A crash after the Product terminal but before descriptor cleanup
+              // must not retain an encrypted duplicate of the prompt forever.
+              runExecutionStore.remove?.(run);
+            }
             if (!ACTIVE_WORK_RUN_STATUSES.has(run.status)) continue;
             if (["kanban", "cron", "inspiration"].includes(run.source)) continue;
             if (run.source === "chat" && run.status === "starting") continue;
+            if (run.source === "chat" && options.workRunCoordinator === undefined
+              && recoverableCommandRuns.has(run.id) && runExecutionStore.has?.(run) === true) continue;
             const recovered = workDispatcher.recoverActiveRunAfterServiceRestart(run.id);
             publishFederationTerminal(recovered, {
               status: recovered.status,
@@ -3314,7 +3692,6 @@ function createAgentService(options) {
             await new Promise((resolve) => setImmediate(resolve));
           }
           assertStartGeneration(generation);
-          runtimeAccountMigrationOrchestrator.markServiceReady();
           assertStartGeneration(generation);
           startedAt = Date.now();
           assertStartGeneration(generation);
@@ -3396,10 +3773,11 @@ function createAgentService(options) {
       if (lifecycleState === "stopping" || lifecycleState === "stop_failed") return stopping;
       const ownsInstance = server !== null || lockFd !== null
         || ownedSocketIdentity !== null || ownedLockIdentity !== null || storeOpened
+        || pluginStoreOpened
         || bridgeSockets.size > 0
         || secretStoreOpened || mcpCryptoBrokerOpened || mcpSessionManager
         || providerRuntimeOpened || providerServiceOpened || accountAuthStateOpened
-        || accountAuthManagerOpened || runtimeAccountMigrationOrchestratorOpened
+        || accountAuthManagerOpened
         || runtimeAccountServiceControllerOpened || profileServiceControllerOpened
         || agentLifecycleServiceControllerOpened
         || chatSessionStoreOpened || inspirationStoreOpened || agentDefinitionStoreOpened || transcriptStoreOpened
@@ -3581,10 +3959,6 @@ function createAgentService(options) {
       accountAuthStateOpened = false;
       try { await accountAuthStateStore.close(); } catch (error) { errors.push(error); }
     }
-    if (runtimeAccountMigrationOrchestratorOpened) {
-      runtimeAccountMigrationOrchestratorOpened = false;
-      try { runtimeAccountMigrationOrchestrator.close(); } catch (error) { errors.push(error); }
-    }
     if (runtimeSessionOwnershipStoreOpened) {
       runtimeSessionOwnershipStoreOpened = false;
       try { await runtimeSessionOwnershipStore.close(); } catch (error) { errors.push(error); }
@@ -3600,6 +3974,10 @@ function createAgentService(options) {
     if (inspirationStoreOpened) {
       inspirationStoreOpened = false;
       try { inspirationStore.close(); } catch (error) { errors.push(error); }
+    }
+    if (conversationCheckpointStoreOpened) {
+      conversationCheckpointStoreOpened = false;
+      try { await conversationCheckpointStore.close(); } catch (error) { errors.push(error); }
     }
     if (chatSessionStoreOpened) {
       if (transcriptStoreOpened) {
@@ -3645,6 +4023,22 @@ function createAgentService(options) {
       nativeKanbanStoreOpened = false;
       try { await nativeKanbanStore.close(); } catch (error) { errors.push(error); }
     }
+    if (pluginMcpConnectionPool) {
+      try { await pluginPackageInstaller?.remoteGitFetcher?.close(); } catch (error) { errors.push(error); }
+      pluginDependencyController?.clear();
+      pluginRollbackController?.clear();
+      pluginConnectionController?.clear();
+      try { await pluginOAuthController?.close(); } catch (error) { errors.push(error); }
+      pluginMcpConsent?.clear();
+      pluginAppController?.clear();
+      pluginRuntimeToolService?.clear();
+      pluginMcpConnectionManager?.clear();
+      try { await pluginMcpConnectionPool.close(); } catch (error) { errors.push(error); }
+    }
+    if (pluginCapabilityDispatcher) {
+      try { pluginCapabilityDispatcher.clear(); } catch (error) { errors.push(error); }
+      try { pluginToolCatalogRegistry.clear(); } catch (error) { errors.push(error); }
+    }
     if (permissionEngineOpened) {
       permissionEngineOpened = false;
       try { await permissionEngine.close(); } catch (error) {
@@ -3663,6 +4057,10 @@ function createAgentService(options) {
     if (computerUseControllerOpened) {
       computerUseControllerOpened = false;
       try { await computerUseController.close(); } catch (error) { errors.push(error); }
+    }
+    if (pluginStoreOpened) {
+      pluginStoreOpened = false;
+      try { pluginStore.close(); } catch (error) { errors.push(error); }
     }
     if (storeOpened) {
       if (tokenUsageStoreOpened) {

@@ -1,4 +1,5 @@
 "use strict";
+const { poolLedgerSlot } = require("./runtime-shared-ledger");
 
 const { DeepSeekHarnessRuntimeHost } = require("./deepseek-harness-runtime-host");
 const {
@@ -15,6 +16,7 @@ const {
   validateResolvedEnvironment,
 } = require("./runtime-account-resolver");
 const { serviceError } = require("./security");
+const { configurePoolCapacity, poolHostLimit, retirePoolHost, trackPoolHost, executionRunIdForPool } = require("./runtime-pool-capacity");
 
 function poolError(code, message) {
   return serviceError(code, message);
@@ -24,7 +26,7 @@ function profileId(value) {
   if (!validRuntimeProfileId(value)) {
     throw poolError(
       "DEEPSEEK_HARNESS_RUNTIME_PROFILE_INVALID",
-      "DeepSeek Harness runtime profile id is invalid",
+      "DeepSeek runtime profile id is invalid",
     );
   }
   return value;
@@ -37,17 +39,18 @@ function poolBinding(value) {
     runtimeAccountId: NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
   }) : runtimeBinding(value);
   if (binding.runtime !== DEEPSEEK_HARNESS_RUNTIME) {
-    throw poolError("RUNTIME_UNSUPPORTED", `DeepSeek Harness pool cannot run ${binding.runtime}`);
+    throw poolError("RUNTIME_UNSUPPORTED", `DeepSeek pool cannot run ${binding.runtime}`);
   }
   return binding;
 }
 
-function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace) {
+function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace, executionRunId) {
   return JSON.stringify([
     runtimeProfileId,
     runtimeAccountId,
     controlInstance ? "control" : "execution",
     workspace,
+    executionRunId,
   ]);
 }
 
@@ -72,13 +75,7 @@ class DeepSeekHarnessRuntimePool {
       parentEnv: options.parentEnv ?? options.hostOptions?.parentEnv,
       homedir: options.homedir ?? options.hostOptions?.homedir,
     });
-    this.maxHosts = options.maxHosts ?? 16;
-    if (!Number.isSafeInteger(this.maxHosts) || this.maxHosts < 1 || this.maxHosts > 64) {
-      throw poolError(
-        "DEEPSEEK_HARNESS_POOL_OPTIONS_INVALID",
-        "DeepSeek Harness host limit is invalid",
-      );
-    }
+    configurePoolCapacity(this, options, "DEEPSEEK_HARNESS_POOL_OPTIONS_INVALID");
     this.entries = new Map();
     this.profileStates = new Map();
     this.stopPromises = new Map();
@@ -95,19 +92,21 @@ class DeepSeekHarnessRuntimePool {
     const accountId = binding.runtimeAccountId;
     const controlInstance = !Object.prototype.hasOwnProperty.call(options, "workspace");
     const workspace = controlInstance ? null : normalizeDeepSeekHarnessWorkspace(options.workspace);
-    const key = routeKey(id, accountId, controlInstance, workspace);
+    let executionRunId;
+    try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
+    const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
     const permissionPolicy = normalizeDeepSeekHarnessPermissionPolicy(options.permissionPolicy);
     const policyFingerprint = deepSeekHarnessPermissionFingerprint(permissionPolicy);
     if (this.blockedProfiles.has(id)) {
       return Promise.reject(poolError(
         "DEEPSEEK_HARNESS_RUNTIME_CLEANUP_INCOMPLETE",
-        "DeepSeek Harness cleanup is incomplete",
+        "DeepSeek cleanup is incomplete",
       ));
     }
     if (this.closing || this.stoppingProfiles.has(id)) {
       return Promise.reject(poolError(
         "DEEPSEEK_HARNESS_POOL_STOPPING",
-        "DeepSeek Harness pool is stopping",
+        "DeepSeek pool is stopping",
       ));
     }
     const conflicting = [...this.entries.values()].find((entry) => (
@@ -116,24 +115,24 @@ class DeepSeekHarnessRuntimePool {
     if (conflicting) {
       return Promise.reject(poolError(
         "RUNTIME_ACCOUNT_BINDING_CONFLICT",
-        "Stop the DeepSeek Harness runtime before changing its RuntimeAccount",
+        "Stop the DeepSeek runtime before changing its RuntimeAccount",
       ));
     }
     const existing = this.entries.get(key);
     if (existing) {
+      if (existing.retiring) return existing.retiring.then(() => this.get(binding, options));
       if (existing.policyFingerprint !== policyFingerprint) {
         return Promise.reject(poolError(
           "RUNTIME_PERMISSION_POLICY_CONFLICT",
-          "Stop DeepSeek Harness before changing its permission policy",
+          "Stop DeepSeek before changing its permission policy",
         ));
       }
       return existing.promise.then((host) => { host.beginAcquire(); return host; });
     }
-    if (this.entries.size >= this.maxHosts) {
-      return Promise.reject(poolError(
-        "DEEPSEEK_HARNESS_HOST_LIMIT",
-        "DeepSeek Harness host limit was reached",
-      ));
+    let hostLimit;
+    try { hostLimit = poolHostLimit(this); } catch (error) { return Promise.reject(error); }
+    if (this.entries.size >= hostLimit) {
+      return retirePoolHost(this).then(() => this.get(binding, options));
     }
     let profileState = this.profileStates.get(accountId);
     if (!profileState) {
@@ -150,6 +149,8 @@ class DeepSeekHarnessRuntimePool {
     } catch (error) {
       return Promise.reject(error);
     }
+    const ledgerKey = routeKey(id, accountId, controlInstance, workspace, null);
+    const ledgerSlot = poolLedgerSlot(this, ledgerKey);
     const host = this.hostFactory({
       ...this.hostOptions,
       paths: this.options.paths ?? this.hostOptions.paths,
@@ -175,6 +176,8 @@ class DeepSeekHarnessRuntimePool {
       runtimeProfileId: id,
       runtimeAccountId: accountId,
       runtimeBinding: binding,
+      mcpExecutionRunId: executionRunId,
+      ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,
       controlInstance,
@@ -183,8 +186,11 @@ class DeepSeekHarnessRuntimePool {
     });
     const entry = {
       host, key, runtimeProfileId: id, runtimeAccountId: accountId, policyFingerprint, promise: null,
+      ledgerKey, ledgerSlot,
     };
+    trackPoolHost(entry, binding);
     entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+      entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
           () => { if (this.entries.get(key) === entry) this.entries.delete(key); },
@@ -253,7 +259,7 @@ class DeepSeekHarnessRuntimePool {
       }
     }));
     if (failures.length > 0) {
-      const aggregate = new AggregateError(failures, "DeepSeek Harness runtime pool stop failed");
+      const aggregate = new AggregateError(failures, "DeepSeek runtime pool stop failed");
       aggregate.code = "DEEPSEEK_HARNESS_RUNTIME_POOL_STOP_FAILED";
       throw aggregate;
     }

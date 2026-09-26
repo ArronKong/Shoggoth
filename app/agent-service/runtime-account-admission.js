@@ -5,7 +5,7 @@ const { validateRuntimeAccount } = require("./runtime-account");
 const { serviceError } = require("./security");
 
 const DEFAULT_MAX_ACTIVE = require("./execution-policy").account;
-const MAX_ACTIVE_LIMIT = 64;
+const MAX_ACTIVE_LIMIT = 100;
 const QUOTA_ERROR_CODES = new Set(["RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_SPENDING_LIMIT_REACHED"]);
 
 function admissionError(code, message) {
@@ -80,7 +80,7 @@ class RuntimeAccountAdmission {
       });
     }
     const limit = this.#limit(account);
-    if (state.active.size >= limit) {
+    if (state.active.size >= limit && input.recovering !== true) {
       return Object.freeze({
         disposition: "queued",
         reason: "RUNTIME_ACCOUNT_ACTIVE_LIMIT",

@@ -143,7 +143,33 @@ try {
     assert.equal(reads.length, 1, "外部 Skill 路径不得触发无关原生 Skill 读取");
     console.log("PASS Context Snapshot 冻结原生 Skill catalog/ref，显式调用在独立边界读取正文");
   } finally { skillValue.cleanup(); }
-  console.log("PASS shoggoth context compiler unit (4)");
+  let enabledCount = 50;
+  const manySkills = Array.from({ length: 5_000 }, (_, index) => ({
+    id: `plugin-skill-${index}`, name: `plugin-skill-${index}`, version: "1",
+    description: `Installed Skill number ${index}`, source: "plugin",
+    contentHash: "c".repeat(64),
+  }));
+  const scaled = contextFixture({ skillStore: {
+    catalog() { return { registryRevision: "d".repeat(64), profileRevision: 1,
+      items: manySkills.slice(0, enabledCount), ineligible: [] }; },
+    select() { return { registryRevision: "d".repeat(64), profileRevision: 1,
+      items: manySkills.slice(0, enabledCount), ineligible: [], selected: [] }; },
+    read() { throw new Error("Unselected Skills must not be read"); },
+  } });
+  try {
+    const blocks = [];
+    for (const count of [50, 500, 5_000]) {
+      enabledCount = count;
+      const compiled = scaled.compiler.compile({ profile: scaled.profile, run: scaled.run,
+        transcriptSessionId: scaled.transcriptSessionId, query: "Unrelated task" });
+      blocks.push(compiled.blocks.find(item => item.id === "skill-catalog").content);
+      assert.doesNotMatch(compiled.dynamicContext, /Installed Skill number 4999/u);
+    }
+    assert.equal(blocks[0], blocks[1]);
+    assert.equal(blocks[1], blocks[2]);
+    console.log("PASS 50/500/5,000 已安装 Skill 不增加模型常驻目录文本");
+  } finally { scaled.cleanup(); }
+  console.log("PASS shoggoth context compiler unit (5)");
 } finally {
   value.cleanup();
 }

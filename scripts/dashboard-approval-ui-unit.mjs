@@ -25,7 +25,6 @@ function load(file) {
     if (name === 'react-i18next') return { useTranslation: () => ({ t: key => key }) };
     if (name.endsWith('/api/client')) return { respondBackendPrompt: async (backend, input) => { calls.push({ backend, ...input }); return send(); } };
     if (name.endsWith('/components/ui')) return { useToast: () => ({ success: key => notifications.push(key), error: key => notifications.push(key) }) };
-    if (name.endsWith('/lib/avatar-background')) return { agentAvatarStyle: () => ({}) };
     if (name.endsWith('/usage/charts')) return { fmtMs: String };
     if (name.endsWith('.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
     if (!name.startsWith('.')) return require(name);

@@ -207,28 +207,6 @@ test('仅最新一轮已完成的灵感可归档，恢复后继续执行重新�
   await assert.rejects(archive(), { code: 'INSPIRATION_NOT_COMPLETED' });
 });
 
-test('旧版灵感存储无损迁移，未知旧字段仍拒绝加载', async (t) => {
-  const f = await fixture(t);
-  const idea = await f.create('旧版保存的原文');
-  const file = f.store.legacyPath;
-  const previous = f.store.exportSnapshot();
-  f.store.close();
-  fs.unlinkSync(f.store.filePath);
-  previous.version = 1;
-  for (const value of Object.values(previous.ideas)) delete value.deletedAt;
-  fs.writeFileSync(file, JSON.stringify(previous), { mode: 0o600 });
-  f.store.open();
-  assert.equal(f.store.get(idea.id).body, idea.body);
-  await f.call('delete', { id: idea.id, operationId: id(), expectedRevision: idea.revision });
-  assert.equal(f.store.exportSnapshot().version, INSPIRATION_STORE_VERSION);
-  f.store.close();
-  previous.ideas[idea.id].unexpected = true;
-  fs.unlinkSync(f.store.filePath);
-  fs.unlinkSync(f.store.migratedPath);
-  fs.writeFileSync(file, JSON.stringify(previous), { mode: 0o600 });
-  assert.throws(() => f.store.open(), { code: 'INSPIRATION_STORE_CORRUPT' });
-});
-
 test("保存与重复请求不调用 Agent；重开仍有原文，冲突不覆盖", async (t) => {
   const f = await fixture(t);
   const input = { operationId: id(), body: "原文\nhttps://example.com" };
@@ -309,7 +287,7 @@ test("灵感授权保留 Grok 工具与服务器范围，响应和记录使用�
     { choice: "deny", label: "Reject", kind: "reject_once" },
   ];
   const response = f.host.request("item/commandExecution/requestApproval", {
-    threadId: run.codexThreadId, turnId: run.codexTurnId, itemId: "grok-tool",
+    threadId: run.runtimeSessionRef?.sessionId, turnId: run.runtimeTurnRef?.turnId, itemId: "grok-tool",
     command: "shoggoth__kanban_card_create", sessionApprovalAvailable: false, approvalOptions,
   });
   await until(() => f.dispatcher.getRun(run.id).status === "waiting_approval");
@@ -603,8 +581,8 @@ test('密码字段传给 Runtime，但不进入可见 Session 历史', async (t)
   const f = await fixture(t);
   const idea = await f.start(await f.create());
   const run = await f.running(idea);
-  const answer = f.host.request('mcpServer/elicitation/request', { threadId: run.codexThreadId,
-    turnId: run.codexTurnId, serverName: 'inspiration-fixture', message: '输入访问口令',
+  const answer = f.host.request('mcpServer/elicitation/request', { threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId, serverName: 'inspiration-fixture', message: '输入访问口令',
     requestedSchema: { type: 'object', properties: { passphrase: { type: 'string', writeOnly: true } }, required: ['passphrase'] } });
   await until(() => f.dispatcher.getRun(run.id).status === 'waiting_input');
   const value = 'unregistered-private-value';
@@ -621,8 +599,8 @@ test('权限范围完整可见，无法完整展示的审批仅可拒绝或取�
   const f = await fixture(t);
   const idea = await f.start(await f.create());
   const run = await f.running(idea);
-  const approval = f.host.request('item/permissions/requestApproval', { threadId: run.codexThreadId,
-    turnId: run.codexTurnId, itemId: 'permissions', reason: '需要目录权限',
+  const approval = f.host.request('item/permissions/requestApproval', { threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId, itemId: 'permissions', reason: '需要目录权限',
     permissions: { fileSystem: { write: [run.workspace] } } });
   await until(() => f.dispatcher.getRun(run.id).status === 'waiting_approval');
   let attention = (await f.call('executions', { id: idea.id, cursor: null, limit: 1 })).executions[0].attention;
@@ -630,8 +608,8 @@ test('权限范围完整可见，无法完整展示的审批仅可拒绝或取�
   await f.call('respond', { id: idea.id, operationId: id(), runId: run.id,
     requestId: attention.request.requestId, response: { choice: 'deny' } });
   await approval;
-  const oversized = f.host.request('item/commandExecution/requestApproval', { threadId: run.codexThreadId,
-    turnId: run.codexTurnId, itemId: 'too-large', command: 'x'.repeat(40 * 1024), reason: 'Large approval' });
+  const oversized = f.host.request('item/commandExecution/requestApproval', { threadId: run.runtimeSessionRef?.sessionId,
+    turnId: run.runtimeTurnRef?.turnId, itemId: 'too-large', command: 'x'.repeat(40 * 1024), reason: 'Large approval' });
   await until(() => f.dispatcher.getRun(run.id).status === 'waiting_approval');
   attention = (await f.call('executions', { id: idea.id, cursor: null, limit: 1 })).executions[0].attention;
   assert.deepEqual(attention.request.approvalChoices, ['deny', 'cancel']);

@@ -28,6 +28,7 @@ const GROK_BUILD_CAPABILITIES = runtimeCapabilities({
   "account.logout": false,
   events: true,
   serverRequests: true,
+  "context.usage.exact": true,
 });
 
 function adapterError(code, message) {

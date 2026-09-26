@@ -12,10 +12,11 @@ const { DEFAULT_TOOL_REGISTRY } = require("../app/agent-service/mcp-product-tool
 const root = path.resolve(__dirname, "../docs/native-agent-defaults-v2");
 const profiles = [defaultAgentProfile(0), ...BUILTIN_CLI_AGENT_PROFILES]
   .filter((profile) => isRuntimeAvailable(profile.runtime));
+const previewDirectory = (profile) => profile.isDefault ? "shoggoth" : profile.runtime;
 for (const profile of profiles) {
   const documents = { ...createDefaultDocuments(profile.name),
     TOOLS: DEFAULT_TOOL_REGISTRY.toolsMarkdown(), MEMORY: VIEW_HEADERS.MEMORY + EMPTY_VIEW_MESSAGES.MEMORY };
-  const directory = path.join(root, profile.backendId);
+  const directory = path.join(root, previewDirectory(profile));
   fs.mkdirSync(directory, { recursive: true });
   for (const [kind, content] of Object.entries(documents)) {
     fs.writeFileSync(path.join(directory, `${kind}.md`), content);
@@ -28,7 +29,7 @@ const readme = [
   `# 原生 Agent 默认设定 v${DEFAULT_TEMPLATE_VERSION}`, "",
   "由当前源码生成的六套完整正文预览。App 打包携带模板代码，Service 为每个 Profile 在自己的数据目录生成文件；此目录是预览，不是活动 Agent 的存储。", "",
   "| 默认名称 | 后端 | 运行时 | 六份文件 |", "|---|---|---|---|",
-  ...profiles.map((profile) => `| ${profile.name} | \`${profile.backendId}\` | \`${profile.runtime}\` | ${kinds.map((kind) => `[${kind}](${profile.backendId}/${kind}.md)`).join(" · ")} |`),
+  ...profiles.map((profile) => `| ${profile.name} | \`${profile.backendId}\` | \`${profile.runtime}\` | ${kinds.map((kind) => `[${kind}](${previewDirectory(profile)}/${kind}.md)`).join(" · ")} |`),
   "",
   "Shoggoth 与 Codex 共用 Codex 运行时，但 Profile、名称、设定和记忆分别保存。Claude Code 当前在发布配置中停用，不列为第七个启用后端。", "",
   "- IDENTITY 使用该 Profile 的正式名称；新增自定义 Agent 使用用户指定名称，不按后端或模型强行改名。应用名 Shoggoth、工具命名空间、CLI 品牌都不替代 Agent 名字。",

@@ -347,6 +347,59 @@ test("显式调用冻结 Skill ref，成功读取才记录使用次数", () => {
   } finally { value.cleanup(); }
 });
 
+test("Registry 全局启用不依赖逐 Profile 写入，停用和卸载对当前及未来 Profile 生效", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a", "profile-b"]);
+    const installed = value.store.installFromDirectory({
+      sourcePath: packageDir(value.root, { name: "shared-review" }),
+      expectedRevision: value.store.revision, operationId: "install-shared-review",
+      globalEnabled: true,
+    });
+    for (const profileId of ["profile-a", "profile-b"]) {
+      assert.equal(value.store.list(profileId).items[0].enabled, true);
+      assert.equal(value.store.catalog(profileId).items[0].name, "shared-review");
+      assert.match(value.store.read({ profileId, name: "shared-review" }).content, /Inspect the requested change/u);
+      assert.deepEqual(value.store.ensureProfile(profileId).selections, [],
+        "global availability does not create a per-profile installation");
+    }
+    value.profiles.add("profile-c");
+    assert.equal(value.store.list("profile-c").items[0].enabled, true);
+    const disabled = value.store.setGlobalSkill({ skillId: installed.package.id,
+      source: "user", version: installed.package.version, enabled: false,
+      expectedRevision: installed.revision });
+    assert.equal(disabled.skill.enabled, false);
+    assert.deepEqual(value.store.catalog("profile-a").items, []);
+    assert.deepEqual(value.store.catalog("profile-c").items, []);
+    assert.throws(() => value.store.read({ profileId: "profile-b", name: "shared-review" }),
+      { code: "SKILL_NOT_ENABLED" });
+    assert.throws(() => value.store.setGlobalSkill({ skillId: installed.package.id,
+      source: "user", version: installed.package.version, enabled: true,
+      expectedRevision: installed.revision }), { code: "SKILL_REGISTRY_REVISION_CONFLICT" });
+    const enabled = value.store.setGlobalSkill({ skillId: installed.package.id,
+      source: "user", version: installed.package.version, enabled: true,
+      expectedRevision: disabled.revision });
+    assert.equal(value.store.catalog("profile-b").items.length, 1);
+    const upgraded = value.store.installFromDirectory({
+      sourcePath: packageDir(value.root, { name: "shared-review", version: "1.1.0" }),
+      expectedRevision: enabled.revision, operationId: "upgrade-shared-review",
+      globalEnabled: true,
+    });
+    const oldDisabled = value.store.setGlobalSkill({ skillId: installed.package.id,
+      source: "user", version: installed.package.version, enabled: false,
+      expectedRevision: upgraded.revision });
+    assert.equal(value.store.catalog("profile-c").items[0].version, "1.1.0",
+      "disabling an old version must not turn off a newer global version");
+    value.store.setGlobalSkill({ skillId: upgraded.package.id,
+      source: "user", version: upgraded.package.version, enabled: false,
+      expectedRevision: oldDisabled.revision });
+    value.store.uninstall({ skillId: installed.package.id, source: "user",
+      version: installed.package.version, expectedRevision: value.store.revision });
+    assert.equal(value.store.list("profile-a").items.length, 1);
+    assert.equal(value.store.list("profile-a").items[0].enabled, false);
+  } finally { value.cleanup(); }
+});
+
 test("全局安装启用所有现有 Profile，后建 Profile 自动继承且普通安装仍保持隔离", () => {
   const value = fixture();
   try {
@@ -403,7 +456,7 @@ test("全局安装启用所有现有 Profile，后建 Profile 自动继承且普
   } finally { value.cleanup(); }
 });
 
-test("旧版 Skill registry 原子迁移为非全局，不会意外启用已有包", () => {
+test("旧版 Skill registry 明确拒绝且不改写", () => {
   const value = fixture();
   try {
     value.store.open(["profile-a"]);
@@ -417,11 +470,9 @@ test("旧版 Skill registry 原子迁移为非全局，不会意外启用已有�
     legacy.schemaVersion = 1;
     legacy.packages = legacy.packages.map(({ globalEnabled, ...record }) => record);
     fs.writeFileSync(value.paths.skillRegistryPath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
-    value.store.open(["profile-a"]);
-    const migrated = JSON.parse(fs.readFileSync(value.paths.skillRegistryPath, "utf8"));
-    assert.equal(migrated.schemaVersion, 2);
-    assert.equal(migrated.packages[0].globalEnabled, false);
-    assert.equal(value.store.list("profile-a").items[0].enabled, false);
+    const before = fs.readFileSync(value.paths.skillRegistryPath);
+    assert.throws(() => value.store.open(["profile-a"]), { code: "SKILL_REGISTRY_CORRUPT" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), before);
   } finally { value.cleanup(); }
 });
 

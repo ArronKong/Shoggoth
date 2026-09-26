@@ -4,12 +4,17 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import FilterTabs from "../components/FilterTabs";
 import FusionLoader from "../components/FusionLoader";
+import { IconSearch } from "./chatIcons";
 import "./ChatModelMenu.css";
 
 export interface ModelMenuChoice {
   id: string;
   name: string;
   provider?: string;
+  bindingId?: string;
+  runtime?: string;
+  runtimeName?: string;
+  disabled?: boolean;
   reasoning?: boolean;
   pricing?: { input?: string; output?: string; cache?: string | null; free?: boolean };
 }
@@ -22,11 +27,13 @@ function priceLabel(m: ModelMenuChoice, t: TFunction): string | null {
 }
 
 // Composer 模型选择器：用可搜索、按 provider 分组的弹层替换原生 <select>。
-// 这里只消费已有 /__api/models 数据，不新增后端依赖或改变模型切换语义。
+// 原生会话可提供 Runtime 分组；展示与搜索仍复用同一套菜单。
 export default function ChatModelMenu({
   models,
   activeModel,
   activeProvider,
+  activeBindingId,
+  runtimeGroups,
   onSelect,
   disabled,
   loading,
@@ -40,7 +47,9 @@ export default function ChatModelMenu({
   models: ModelMenuChoice[];
   activeModel: string;
   activeProvider?: string;
-  onSelect: (id: string, provider?: string) => void;
+  activeBindingId?: string;
+  runtimeGroups?: Array<{ runtime: string; name: string; available: boolean }>;
+  onSelect: (id: string, provider?: string, bindingId?: string) => void;
   disabled?: boolean;
   loading?: boolean;
   loadError?: boolean;
@@ -71,7 +80,7 @@ export default function ChatModelMenu({
   const [popupHost, setPopupHost] = useState<HTMLElement | null>(null);
   const [popupStyle, setPopupStyle] = useState<CSSProperties | undefined>();
 
-  // 打开（或菜单先开、模型后到）时把列表滚到当前选中模型（居中）——长目录里 ✓ 项
+  // 打开（或菜单先开、模型后到）时把列表滚到当前选中模型（居中）——长目录里选中项
   // 多半在视口外，打开即见才对得上「查看/切换当前模型」的心智。手动算滚动量而非
   // scrollIntoView（后者会连带滚动页面级祖先），且不做 smooth（打开瞬间应直接就位）。
   // 只依赖 open/models：用户随后的筛选/搜索不重新定位。
@@ -111,7 +120,7 @@ export default function ChatModelMenu({
       if (rootRef.current && !rootRef.current.contains(target) && !popupRef.current?.contains(target)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") { e.preventDefault(); setOpen(false); triggerRef.current?.focus({ preventScroll: true }); }
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -121,13 +130,32 @@ export default function ChatModelMenu({
     };
   }, [open]);
 
-  // Modal body 自身滚动；普通 absolute 浮层会被裁掉。只在表单调用方显式要求时，
-  // 把同一菜单 portal 到最近的 Dialog panel，并按触发器实时定位。聊天页仍走原 DOM。
+  // Chat keeps the popup in place and aligns it to the composer frame. Forms
+  // explicitly portal into their Dialog panel to escape the scrolling body.
   useLayoutEffect(() => {
-    if (!open || !portalInDialog) {
+    if (!open) {
       setPopupHost(null);
       setPopupStyle(undefined);
       return;
+    }
+    if (!portalInDialog) {
+      setPopupHost(null);
+      const composer = rootRef.current?.closest<HTMLElement>("[data-chat-composer]");
+      if (!composer) { setPopupStyle(undefined); return; }
+      // Align the surface with the composer frame, independently of its toolbar
+      // padding and the menu's absolute/fixed positioning at narrow widths.
+      const position = () => {
+        const popup = popupRef.current;
+        if (!popup) return;
+        const left = parseFloat(window.getComputedStyle(popup).left) || 0;
+        setPopupStyle({ left: left + composer.getBoundingClientRect().left - popup.getBoundingClientRect().left });
+      };
+      position();
+      const observer = new ResizeObserver(position);
+      observer.observe(composer);
+      if (rootRef.current) observer.observe(rootRef.current);
+      window.addEventListener("resize", position);
+      return () => { observer.disconnect(); window.removeEventListener("resize", position); };
     }
     const trigger = triggerRef.current;
     const host = trigger?.closest<HTMLElement>("[role=dialog]");
@@ -136,7 +164,7 @@ export default function ChatModelMenu({
     const position = () => {
       const triggerRect = trigger.getBoundingClientRect();
       const hostRect = host.getBoundingClientRect();
-      const width = Math.min(440, window.innerWidth * 0.84);
+      const width = Math.min(424, window.innerWidth * 0.84);
       const preferredHeight = Math.min(440, window.innerHeight * 0.84);
       const viewportGap = 18;
       const popupGap = 8;
@@ -173,7 +201,8 @@ export default function ChatModelMenu({
   const isActiveChoice = (m: ModelMenuChoice) =>
     multi
       ? selectedSet.has(m.provider ? `${m.provider}/${m.id}` : m.id)
-      : m.id === activeModel && (!providerQualified || (m.provider || "") === activeProvider);
+      : m.id === activeModel && (activeBindingId ? m.bindingId === activeBindingId
+        : !providerQualified || (m.provider || "") === activeProvider);
   const active = models.find((m) => isActiveChoice(m)) ?? models.find((m) => m.id === activeModel);
   const activeLabel = triggerLabel || active?.name || activeModel || t("chat.switchModel");
   const OTHER = t("chat.otherProvider");
@@ -181,28 +210,34 @@ export default function ChatModelMenu({
   // Tab 行用的 provider 全集：取自全部模型（不随搜索词变化，避免打字时 Tab 抖动）。
   // 顺序与分组一致——字母序、「其他」殿后。
   const providers = useMemo(() => {
+    if (runtimeGroups) return runtimeGroups.map(group => group.runtime);
     const set = new Set<string>();
     for (const m of models) set.add((m.provider || "").trim() || OTHER);
     return [...set].sort((a, b) => (a === OTHER ? 1 : b === OTHER ? -1 : a.localeCompare(b)));
-  }, [models, OTHER]);
+  }, [models, OTHER, runtimeGroups]);
+  const groupName = (id: string) => runtimeGroups?.find(group => group.runtime === id)?.name || id;
+  // 只点名失败的 Runtime：一个分组失败不应让其它已加载的分组看起来也失败了。
+  const failedGroups = runtimeGroups?.filter(group => !group.available && (!providerFilter || group.runtime === providerFilter)) ?? [];
+  const catalogFailed = loadError || failedGroups.length > 0;
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
     const byProv = new Map<string, ModelMenuChoice[]>();
     for (const m of models) {
-      if (q && !`${m.name} ${m.id}`.toLowerCase().includes(q)) continue;
-      const key = (m.provider || "").trim() || OTHER;
+      if (q && !`${m.name} ${m.id} ${m.runtimeName || ""}`.toLowerCase().includes(q)) continue;
+      const key = (runtimeGroups ? m.runtime : m.provider)?.trim() || OTHER;
       // provider Tab 筛选与搜索框叠加：选中某 provider 时只留该组。
       if (providerFilter && key !== providerFilter) continue;
       const bucket = byProv.get(key);
       if (bucket) bucket.push(m);
       else byProv.set(key, [m]);
     }
-    const entries = [...byProv.entries()].sort(([a], [b]) =>
-      a === OTHER ? 1 : b === OTHER ? -1 : a.localeCompare(b),
+    const entries = [...byProv.entries()].sort(([a], [b]) => runtimeGroups
+      ? providers.indexOf(a) - providers.indexOf(b)
+      : a === OTHER ? 1 : b === OTHER ? -1 : a.localeCompare(b),
     );
     return entries.map(([provider, items]) => ({ provider, items }));
-  }, [models, query, providerFilter, OTHER]);
+  }, [models, query, providerFilter, OTHER, runtimeGroups, providers]);
 
   return (
     <div className="chat-model-menu" ref={rootRef}>
@@ -215,14 +250,17 @@ export default function ChatModelMenu({
           setOpen(!open);
         }}
         disabled={disabled}
-        title={activeProvider ? `${activeProvider} / ${activeModel}` : t("chat.switchModel")}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={active?.runtimeName ? `${active.runtimeName} / ${activeModel}`
+          : activeProvider ? `${activeProvider} / ${activeModel}` : t("chat.switchModel")}
       >
         {activeLabel}
       </button>
       {open && (() => {
         const popup = (
         <div
-          className={popupHost ? "model-menu model-menu--portal" : "model-menu"}
+          className={`model-menu model-menu--catalog${popupHost ? " model-menu--portal" : ""}`}
           role="listbox"
           aria-label={t("chat.switchModel")}
           ref={popupRef}
@@ -231,16 +269,20 @@ export default function ChatModelMenu({
           {/* 不滚动的头部：搜索框 + provider 筛选 Tab。占 grid 第一行(auto)，
               列表始终落在第二行(1fr)滚动——单一滚动条不受 Tab 有无影响。 */}
           <div className="model-menu__head">
-            <input
-              ref={searchRef}
-              className="model-menu__search"
-              placeholder={t("chat.modelSearchPlaceholder")}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
+            <div className="model-menu__search-field">
+              <span className="model-menu__search-icon" aria-hidden="true"><IconSearch /></span>
+              <input
+                ref={searchRef}
+                className="model-menu__search"
+                aria-label={t("chat.modelSearchPlaceholder")}
+                placeholder={t("chat.modelSearchPlaceholder")}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
             {/* 与 Dashboard 活动流筛选同一个组件（FilterTabs）：
                 provider 多时横向滚动；再点当前项回落到「全部」（toggleOff=""）。 */}
-            {providers.length > 1 && (
+            {(providers.length > 1 || runtimeGroups?.length) ? (
               <FilterTabs
                 className="model-menu__tabs"
                 ariaLabel={t("chat.switchModel")}
@@ -250,10 +292,10 @@ export default function ChatModelMenu({
                 onChange={(v) => setProviderFilter(v === "" ? null : v)}
                 items={[
                   { value: "", label: t("chat.modelFilterAll") },
-                  ...providers.map((p) => ({ value: p, label: p, title: p })),
+                  ...providers.map((p) => ({ value: p, label: groupName(p), title: groupName(p) })),
                 ]}
               />
-            )}
+            ) : null}
           </div>
           <div className="model-menu__list" ref={listRef}>
             {!multi && emptyLabel && (
@@ -268,47 +310,48 @@ export default function ChatModelMenu({
                 }}
               >
                 <span className="model-menu__name">{emptyLabel}</span>
-                {!activeModel && <span className="model-menu__check">✓</span>}
               </button>
             )}
             {loading && groups.length > 0 && (
               <div className="model-menu__provisional" role="status">{t("chat.loadingModels")}</div>
             )}
-            {!loading && loadError && (
+            {!loading && catalogFailed && (
               <div className="model-menu__error" role="alert">
-                <span>{t("chat.modelLoadFailed")}</span>
+                <span>{loadError || failedGroups.length === 0 ? t("chat.modelLoadFailed")
+                  : t("chat.runtimeModelLoadFailed", { names: failedGroups.map(group => group.name).join(" / ") })}</span>
                 {onRefresh && <button type="button" onClick={onRefresh}>{t("chat.reloadModels")}</button>}
               </div>
             )}
-            {groups.length === 0 && (loading || !loadError) && (
+            {groups.length === 0 && (loading || !catalogFailed) && (
               <div className="model-menu__empty">
                 {loading ? <FusionLoader size="sm" label={t("chat.loadingModels")} />
-                  : models.length === 0 ? t("chat.modelCatalogEmpty") : t("chat.noModelMatch")}
+                  : !query && (providerFilter || models.length === 0) ? t("chat.modelCatalogEmpty") : t("chat.noModelMatch")}
               </div>
             )}
             {groups.map((g) => (
               <Fragment key={g.provider}>
-                <div className="model-menu__label">{g.provider}</div>
+                <div className="model-menu__label">{groupName(g.provider)}</div>
                 {g.items.map((m) => {
                   const price = priceLabel(m, t);
                   const isActive = isActiveChoice(m);
                   return (
                     <button
-                      key={m.id}
+                      key={`${m.bindingId || m.provider || ""}:${m.id}`}
                       type="button"
                       role="option"
                       aria-selected={isActive}
+                      disabled={disabled || m.disabled}
                       className={isActive ? "model-menu__item is-active" : "model-menu__item"}
                       onClick={() => {
-                        onSelect(m.id, m.provider);
+                        if (m.bindingId) onSelect(m.id, m.provider, m.bindingId);
+                        else onSelect(m.id, m.provider);
                         if (!multi) setOpen(false); // 多选:留着菜单继续挑
                       }}
                       title={m.id}
                     >
                       <span className="model-menu__name">{m.name || m.id}</span>
-                      {m.reasoning && <span className="model-menu__tag">{t("common.reasoning")}</span>}
                       {price && <span className="model-menu__price">{price}</span>}
-                      {isActive && <span className="model-menu__check">✓</span>}
+                      {multi && isActive && <span className="model-menu__check">✓</span>}
                     </button>
                   );
                 })}

@@ -1,7 +1,7 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.125",
+  "version": "0.8.150",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "MIT",
@@ -11,6 +11,9 @@
   },
   "main": "app/bootstrap.js",
   "scripts": {
+    "test:plugins:bundled": "node scripts/plugin-bundled-install-unit.cjs",
+    "test:plugins": "node scripts/plugin-package-parser-unit.cjs && node scripts/plugin-package-installer-unit.cjs && node scripts/plugin-component-resolver-unit.cjs && node scripts/plugin-skill-facade-unit.cjs && node scripts/plugin-mcp-launch-planner-unit.cjs && node scripts/plugin-capability-policy-unit.cjs && node scripts/plugin-capability-store-unit.cjs && node scripts/plugin-agent-lifecycle-revoke-unit.cjs && node scripts/plugin-connection-auth-unit.cjs && node scripts/plugin-credential-vault-unit.cjs && node scripts/plugin-oauth-session-unit.cjs && node scripts/plugin-mcp-sdk-unit.cjs && node scripts/plugin-tool-contract-unit.cjs && node scripts/plugin-tool-catalog-registry-unit.cjs && node scripts/plugin-data-scope-lease-unit.cjs && node scripts/plugin-mcp-connection-pool-unit.cjs && node scripts/plugin-current-format-unit.cjs && node scripts/plugin-service-candidate-unit.cjs && node scripts/plugin-management-route-unit.cjs && node scripts/plugin-local-workflow-unit.cjs && node scripts/plugin-uninstall-unit.cjs && node scripts/plugin-runtime-tool-service-unit.cjs && node scripts/plugin-runtime-coordinator-unit.cjs && node scripts/plugin-call-approval-unit.cjs && node scripts/plugin-mcp-consent-unit.cjs && node scripts/plugin-consent-route-unit.cjs && node scripts/plugin-external-catalog-unit.cjs && node scripts/plugin-legacy-content-adapter-unit.cjs && node scripts/plugin-legacy-source-unit.cjs && node scripts/plugin-app-session-unit.cjs && node scripts/plugin-app-resource-unit.cjs && node scripts/plugin-app-controller-unit.cjs && node scripts/plugin-app-host-unit.cjs && node scripts/plugin-management-service-flow-unit.cjs && node scripts/plugin-authority-restore-unit.cjs && node scripts/plugin-oauth-config-unit.cjs && node scripts/plugin-oauth-connection-controller-unit.cjs && node scripts/plugin-oauth-management-unit.cjs && node scripts/plugin-dependency-registry-unit.cjs && node scripts/plugin-dependency-management-unit.cjs && node scripts/plugin-remote-git-fetcher-unit.cjs && node scripts/plugin-local-notes-example-smoke.cjs && node scripts/plugin-data-rollback-unit.cjs && node scripts/plugin-connection-controller-unit.cjs && node scripts/service-maintenance-unit.cjs && node scripts/plugin-rollback-management-unit.cjs && node scripts/plugin-disconnect-management-unit.cjs && node scripts/runtime-mcp-call-binding-unit.cjs && node scripts/plugin-opencode-mcp-chain-unit.cjs && node scripts/plugin-runtime-catalog-pagination-unit.cjs && node scripts/plugin-app-reference-projection-unit.cjs",
+    "test:runtime-baseline": "node scripts/runtime-framework-v2-baseline-unit.cjs",
     "postinstall": "node scripts/prepare-native-terminal.cjs",
     "build:manage": "npm --prefix app/manage-ui run build && node scripts/manage-bundle-budget-regression.mjs",
     "fetch:cua": "node scripts/fetch-cua-driver.mjs",
@@ -23,15 +26,24 @@
     "fetch:codex": "node scripts/fetch-codex-runtime.mjs --platform all",
     "prepare:runtimes": "npm run fetch:codex && npm run fetch:cua && npm run fetch:sqlite",
     "licenses:check": "node scripts/generate-release-metadata.mjs --check",
-    "export:source": "node scripts/export-public-source.mjs"
+    "export:source": "node scripts/export-public-source.mjs",
+    "test:plugins:ui": "node scripts/plugins-page-ui-regression.mjs",
+    "test:plugins:apps": "node scripts/plugin-app-host-electron-smoke.cjs",
+    "test:plugins:codex": "node scripts/codex-runtime-mcp-binding-regression.cjs",
+    "test:plugins:performance": "node scripts/plugin-performance-baseline.cjs",
+    "test:plugins:chat": "node scripts/plugin-app-reference-ui-regression.mjs",
+    "test:plugins:startup": "node scripts/plugin-default-startup-electron.cjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "2.1.0",
     "@trycua/cua-driver": "0.22.0",
     "@xterm/headless": "6.0.0",
+    "ajv": "8.20.0",
     "better-sqlite3": "13.0.3",
     "cron-parser": "5.4.0",
     "electron-updater": "6.8.9",
     "fflate": "0.8.3",
+    "js-yaml": "5.4.2",
     "node-pty": "1.1.0",
     "pinyin-pro": "^3.29.3",
     "ws": "^8.21.0"
@@ -40,7 +52,6 @@
     "@electron/asar": "4.3.0",
     "electron": "44.4.2",
     "electron-builder": "26.15.3",
-    "js-yaml": "5.4.2",
     "yauzl": "3.4.0"
   },
   "engines": {

@@ -195,20 +195,23 @@ function rpcFixture(behavior = {}) {
               },
             });
           } else if (command.type === "get_available_models") {
-            current.send({
-              id: command.id,
-              type: "response",
-              command: "get_available_models",
-              success: true,
-              data: { models: behavior.noModels ? [] : [rpcModel()] },
+            behavior.catalogRequests = (behavior.catalogRequests || 0) + 1;
+            const reply = () => current.send({
+              id: command.id, type: "response", command: "get_available_models",
+              success: !behavior.catalogError,
+              ...(behavior.catalogError ? { error: behavior.catalogError }
+                : { data: { models: behavior.noModels ? [] : [rpcModel()] } }),
             });
+            if (behavior.holdCatalog) (behavior.catalogReplies ||= []).push(reply);
+            else reply();
           } else if (["get_commands", "compact", "get_available_thinking_levels", "set_thinking_level", "get_session_stats"].includes(command.type)) {
+            if (command.type === "get_session_stats") behavior.statsRequests = (behavior.statsRequests || 0) + 1;
             const data = command.type === "get_commands" ? { commands: [
               { name: "skill:project-check", description: "Check this workspace", source: "skill" },
               { name: "project-summary", description: "Summarize changes", source: "prompt" },
             ] } : command.type === "compact" ? { tokensBefore: 100 }
               : command.type === "get_available_thinking_levels" ? { levels: ["medium", "high"] }
-                : command.type === "get_session_stats" ? { sessionId, messageCount: 0 } : {};
+                : command.type === "get_session_stats" ? { sessionId, messageCount: 0, ...(behavior.contextStats || {}) } : {};
             current.send({ id: command.id, type: "response", command: command.type, success: true, data });
           } else if (command.type === "prompt") {
             prompted = true;
@@ -349,7 +352,7 @@ function rpcFixture(behavior = {}) {
     binaryPath,
     extensionPath,
     homedir: trustedRoot,
-    parentEnv: { PATH: binDir, LANG: "C.UTF-8", SECRET_TOKEN: "must-not-leak" },
+    parentEnv: { PATH: binDir, LANG: "C.UTF-8", SECRET_TOKEN: "must-not-leak", ...behavior.parentEnv },
     spawnProcess,
     mcpGateIssuer,
     acceptanceTimeoutMs: 1_000,
@@ -357,6 +360,7 @@ function rpcFixture(behavior = {}) {
     promptTimeoutMs: behavior.promptTimeoutMs || 2_000,
     shutdownGraceMs: 100,
     killGraceMs: 100,
+    now: behavior.now,
     killProcessGroup(pid, signal) {
       groupKills.push({ pid, signal });
       if (behavior.ignoreKill) return;
@@ -393,6 +397,114 @@ async function waitFor(predicate, label, timeoutMs = 1_000) {
   }
   assert.fail(`timed out waiting for ${label}`);
 }
+
+test("Pi carries only explicit Node environment-proxy booleans and never NODE_OPTIONS", async () => {
+  for (const value of ["1", "0", "invalid"]) {
+    const fixture = rpcFixture({ parentEnv: { NODE_USE_ENV_PROXY: value, NODE_OPTIONS: "--require private-do-not-load" } });
+    try {
+      const runtime = await fixture.adapter.acquire(PI_BINDING, { workspace: fixture.workspace,
+        permissionPolicy: { approvalPolicy: "on-request", sandbox: "read-only" } });
+      const env = runtime.host._spawnEnvironment();
+      assert.equal(env.NODE_USE_ENV_PROXY, value === "invalid" ? undefined : value);
+      assert.equal(env.NODE_OPTIONS, undefined);
+    } finally { await fixture.pool.stopAll(); fixture.cleanup(); }
+  }
+});
+
+test("Pi shares one cold catalog probe and resumes a known model during stale refresh", async () => {
+  let clock = Date.now();
+  const behavior = { holdCatalog: true, now: () => clock };
+  const value = rpcFixture(behavior);
+  const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+  try {
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    const control = await value.adapter.acquire(PI_BINDING, { permissionPolicy });
+    const first = runtime.modelsList();
+    const second = control.modelsList();
+    await waitFor(() => behavior.catalogRequests === 1, "one shared cold catalog request");
+    behavior.catalogReplies.shift()();
+    await Promise.all([first, second]);
+    assert.equal(behavior.catalogRequests, 1);
+    const { session } = await runtime.sessionStart({ source: "catalog-warm", model: "openai/gpt-5.6",
+      cwd: value.workspace, permissionPolicy });
+    clock += 5 * 60 * 1000;
+    // The RPC reply remains held: completion proves resume did not await it.
+    await runtime.sessionResume({ sessionId: session.id, model: "openai/gpt-5.6",
+      cwd: value.workspace, permissionPolicy });
+    await waitFor(() => behavior.catalogRequests === 2, "single background refresh");
+    await runtime.sessionResume({ sessionId: session.id, model: "openai/gpt-5.6",
+      cwd: value.workspace, permissionPolicy });
+    assert.equal(behavior.catalogRequests, 2);
+    let settled = false;
+    const changed = runtime.sessionStart({ source: "catalog-new-model", model: "openai/unavailable",
+      cwd: value.workspace, permissionPolicy }).finally(() => { settled = true; });
+    const rejected = assert.rejects(changed, { code: "RUNTIME_MODEL_UNAVAILABLE" });
+    await Promise.resolve();
+    assert.equal(settled, false, "a changed model must await current validation");
+    behavior.catalogReplies.shift()();
+    await rejected;
+  } finally {
+    await value.adapter.stopAll().catch(() => {});
+    value.cleanup();
+  }
+});
+
+test("Pi file identity change prevents stale reuse and discards an older probe", async () => {
+  const behavior = {};
+  const value = rpcFixture(behavior);
+  const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+  try {
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    await runtime.modelsList();
+    behavior.holdCatalog = true;
+    const settings = path.join(runtime.host.home, "settings.json");
+    fs.writeFileSync(settings, '{"defaultProvider":"fixture-a"}', { mode: 0o600 });
+    const old = runtime.modelsList();
+    await waitFor(() => behavior.catalogRequests === 2, "probe after configuration change");
+    fs.writeFileSync(settings, '{"defaultProvider":"fixture-b-longer"}', { mode: 0o600 });
+    const current = runtime.modelsList();
+    await waitFor(() => behavior.catalogRequests === 3, "new identity needs its own probe");
+    behavior.catalogReplies.shift()();
+    behavior.catalogReplies.shift()();
+    assert.equal((await current).data[0].model, "openai/gpt-5.6");
+    assert.equal((await old).data[0].model, "openai/gpt-5.6", "read-only identity race rejoins the current probe");
+    assert.equal((await runtime.modelsList()).data[0].model, "openai/gpt-5.6");
+    assert.equal(behavior.catalogRequests, 3);
+  } finally {
+    await value.adapter.stopAll().catch(() => {});
+    value.cleanup();
+  }
+});
+
+test("Pi background catalog authentication failure invalidates warm session validation", async () => {
+  let clock = Date.now();
+  const behavior = { now: () => clock };
+  const value = rpcFixture(behavior);
+  const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+  try {
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    await runtime.authenticationState();
+    const { session } = await runtime.sessionStart({ source: "catalog-auth", model: "openai/gpt-5.6",
+      cwd: value.workspace, permissionPolicy });
+    clock += 5 * 60 * 1000;
+    behavior.holdCatalog = true;
+    behavior.catalogError = "Authentication required";
+    assert.equal((await runtime.authenticationState()).authenticated, true,
+      "readiness rechecks auth without waiting on the known model's catalog refresh");
+    await runtime.sessionResume({ sessionId: session.id, model: "openai/gpt-5.6",
+      cwd: value.workspace, permissionPolicy });
+    await waitFor(() => behavior.catalogReplies?.length === 1, "held auth error");
+    behavior.catalogReplies.shift()();
+    await waitFor(() => runtime.host.profileState.auth === null, "invalidate stale auth state");
+    behavior.holdCatalog = false;
+    await assert.rejects(runtime.sessionResume({ sessionId: session.id, model: "openai/gpt-5.6",
+      cwd: value.workspace, permissionPolicy }), { code: "AUTH_REQUIRED" });
+    assert.equal(value.spawns.some((entry) => entry.command === "/bin/sh"), false);
+  } finally {
+    await value.adapter.stopAll().catch(() => {});
+    value.cleanup();
+  }
+});
 
 test("strict Pi JSONL and version/model helpers reject malformed input", () => {
   const decoder = new PiRpcJsonlDecoder({ maxFrameBytes: 1024, maxStreamBytes: 4096 });
@@ -529,7 +641,39 @@ test("Node-script Pi turns bind and launch through the resolved Node executable"
   }
 });
 
-test("Pi ledger repairs only unknown turns that failed before a session file existed", () => {
+test("Pi context observations are opt-in, use current stats, and refresh after manual compact", async () => {
+  const behavior = { contextStats: { tokens: { total: 990000 }, contextUsage: { tokens: 64000 } } };
+  const value = rpcFixture(behavior);
+  try {
+    const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    const session = (await runtime.sessionStart({ source: "chat:context", developerInstructions: "Scoped task.",
+      model: "openai/gpt-5.6", cwd: value.workspace, permissionPolicy })).session;
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    for (const [index, prompt] of ["first", "second", "/compact"].entries()) {
+      if (index === 2) behavior.contextStats.contextUsage.tokens = null;
+      const result = await runtime.turnStart({ sessionId: session.id, operationId: `context-${index}`,
+        prompt, model: "openai/gpt-5.6", cwd: value.workspace, permissionPolicy, observeContextUsage: index > 0 });
+      await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === result.turn.id), "context turn settled");
+      if (index === 0) assert.equal(behavior.statsRequests || 0, 0, "flag off makes no new stats RPC");
+      if (index === 1) {
+        const observation = events.findLast((event) => event.type === "context_usage");
+        assert.equal(observation.contextUsage.usedTokens, 64000);
+        assert.equal(observation.contextUsage.contextWindow, 128000);
+        assert.equal(observation.contextUsage.quality, "estimated");
+      }
+    }
+    assert.equal(behavior.statsRequests, 2);
+    assert.equal(events.findLast((event) => event.type === "context_usage").contextUsage.quality, "unknown");
+    assert.equal(events.filter((event) => event.type === "context_compacted").length, 1);
+    const commands = value.spawns.flatMap((entry) => entry.child.input.trim().split("\n").filter(Boolean)
+      .flatMap((line) => { try { return [JSON.parse(line).type]; } catch { return []; } }));
+    assert.equal(commands.filter((command) => command === "compact").length, 1, "observation never requests extra compaction");
+  } finally { await value.adapter.stopAll(); value.cleanup(); }
+});
+
+test("Pi ledger repairs pre-session unknown turns and ends stale unknown executions on reopen", () => {
   const trustedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-pi-ledger-"));
   fs.chmodSync(trustedRoot, 0o700);
   const options = {
@@ -584,21 +728,21 @@ test("Pi ledger repairs only unknown turns that failed before a session file exi
     const recovered = new PiRuntimeLedger({ ...options, now: () => 20 }).open().snapshot();
     assert.equal(recovered.sessions[0].turns[0].acceptance, "failed");
     assert.equal(recovered.sessions[0].turns[0].errorCode, "PI_PROCESS_CLOSED");
+    // The unknown receipt still fences its own operation, but no worker of the
+    // previous generation can run it any more.
     assert.equal(recovered.sessions[1].turns[0].acceptance, "unknown");
+    assert.equal(recovered.sessions[1].turns[0].executionEndedAt, 20);
     const legacy = structuredClone(recovered);
     legacy.schemaVersion = 1;
     for (const session of legacy.sessions) {
       for (const stored of session.turns) delete stored.executionEndedAt;
     }
     fs.writeFileSync(ledger.ledgerPath, JSON.stringify(legacy));
-    const migrated = new PiRuntimeLedger({ ...options, now: () => 30 }).open().snapshot();
-    assert.equal(migrated.schemaVersion, 2);
-    assert.equal(migrated.sessions[1].turns[0].acceptance, "unknown");
-    assert.equal(migrated.sessions[1].turns[0].executionEndedAt, null,
-      "migration must not invent process exit evidence");
-    assert.equal(JSON.parse(fs.readFileSync(ledger.ledgerPath)).schemaVersion, 2);
+    const before = fs.readFileSync(ledger.ledgerPath);
+    assert.throws(() => new PiRuntimeLedger(options).open(), { code: "PI_LEDGER_INVALID" });
+    assert.deepEqual(fs.readFileSync(ledger.ledgerPath), before);
     for (const invalid of [-1, 1.5, 100, "20"]) {
-      const malformed = structuredClone(migrated);
+      const malformed = structuredClone(recovered);
       malformed.sessions[1].turns[0].executionEndedAt = invalid;
       fs.writeFileSync(ledger.ledgerPath, JSON.stringify(malformed));
       assert.throws(() => new PiRuntimeLedger(options).open(), { code: "PI_LEDGER_INVALID" });
@@ -982,6 +1126,8 @@ test("confirmed process exit releases Pi session without replaying an ambiguous 
       workspace: value.workspace,
       permissionPolicy,
     });
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
     const started = await runtime.sessionStart({
       source: "chat:unknown",
       developerInstructions: "",
@@ -1003,6 +1149,7 @@ test("confirmed process exit releases Pi session without replaying an ambiguous 
     await runtime.sessionRead({ sessionId: started.session.id });
     const turn = runtime.host.ledger.snapshot().sessions[0].turns[0];
     assert.equal(turn.acceptance, "unknown");
+    assert.equal(events.find((event) => event.method === "pi/error")?.errorCode, "PI_PROCESS_CLOSED");
     assert(Number.isSafeInteger(turn.executionEndedAt));
     assert.equal(value.spawns.filter((entry) => entry.command === "/bin/sh").length, 1);
     await value.adapter.stop(PI_BINDING);
@@ -1031,7 +1178,10 @@ test("Pi surfaces provider authentication errors without locking the conversatio
     for (const [index, [message, expectedCode]] of [
       ["OAuth refresh failed for xai: xAI OAuth token refresh failed (HTTP 400): invalid_grant: User account is blocked", "RUNTIME_ACCOUNT_BLOCKED"],
       ["OAuth refresh failed: invalid_grant: token expired", "AUTH_REQUIRED"],
-      ["429 rate limit exceeded", "PI_TURN_FAILED"],
+      ["429 rate limit exceeded", "RUNTIME_RATE_LIMITED"],
+      ["Rate limit reached for this API key, please retry later", "RUNTIME_RATE_LIMITED"],
+      ["insufficient_quota: You exceeded your current quota", "RUNTIME_QUOTA_EXHAUSTED"],
+      ["Unexpected provider error", "PI_TURN_FAILED"],
       [null, undefined],
     ].entries()) {
       behavior.assistantError = message;
@@ -1043,6 +1193,7 @@ test("Pi surfaces provider authentication errors without locking the conversatio
       assert.equal(read.session.turns[index].errorCode, expectedCode);
       assert.equal(read.session.turns[index].status, message ? "failed" : "completed");
       if (["AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(expectedCode)) assert.equal(runtime.host.profileState.auth, null);
+      else assert.notEqual(runtime.host.profileState.auth, null, "a provider limit must not invalidate the login");
     }
     await value.adapter.stopAll();
   } finally { value.cleanup(); }

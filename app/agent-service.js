@@ -7,7 +7,7 @@ const { createAgentService } = require("./agent-service/server");
 const { inferAppPath } = require("./agent-service/bundle-paths");
 const { McpCryptoBroker } = require("./agent-service/mcp-crypto-broker");
 const { PackagedMcpCryptoBroker } = require("./agent-service/packaged-mcp-crypto-broker");
-const { resolveServicePaths } = require("./agent-service/paths");
+const { resolveCanonicalServicePaths } = require("./agent-service/paths");
 const { RuntimeMcpGateIssuer } = require("./agent-service/runtime-mcp-gate");
 const { ensurePrivateDirectoryTree } = require("./agent-service/security");
 const { createCuaSdkLoader } = require("./cua-sdk-loader");
@@ -57,10 +57,9 @@ function loadComputerDriverConfiguration(options) {
 }
 
 async function startAgentServiceProcess(options = {}) {
-  const paths = options.paths || resolveServicePaths();
+  const paths = options.paths || resolveCanonicalServicePaths();
   // Native CLI homes remain owned by their official tools. New installations
   // resolve those homes in place and never copy them into Shoggoth state.
-  const nativeRuntimeImportHome = options.nativeRuntimeImportHome ?? null;
   const signalEmitter = options.signalEmitter || process;
   const exitProcess = options.exitProcess || ((code) => process.exit(code));
   let requestedExitCode = 0;
@@ -232,7 +231,6 @@ async function startAgentServiceProcess(options = {}) {
     paths,
     version: packageVersion,
     builtinCliProfiles: options.builtinCliProfiles ?? true,
-    nativeRuntimeImportHome,
     runtimePool: options.runtimePool,
     grokBuildRuntimePool: options.grokBuildRuntimePool,
     grokBuildBinaryPath: options.grokBuildBinaryPath,

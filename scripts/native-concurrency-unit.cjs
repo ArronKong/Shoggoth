@@ -16,8 +16,9 @@ const { WorkRunCoordinator } = require("../app/agent-service/work-run-coordinato
 const { domainOperationId, domainThreadSource } = require("../app/agent-service/domain-work-run-executor");
 const { createChatServiceController, resolveProfileWorkspace } = require("../app/agent-service/chat-service-controller");
 const { validateChatServiceResult } = require("../app/agent-service/chat-service-protocol");
-const { migrateLegacyProfileConcurrency } = require("../app/agent-service/execution-policy");
-const { DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND } = require("../app/agent-service/runtime-account");
+const { DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME } = require("../app/agent-service/runtime-account");
+const { RuntimeStartupGate } = require("../app/agent-service/runtime-startup-gate");
+const { defaultNativeRuntimeConfig } = require("../app/agent-service/native-runtime-config");
 const { InspirationRuntime } = require("./fixtures/inspiration-runtime.cjs");
 
 async function until(fn) {
@@ -48,13 +49,20 @@ async function fixture(t, options = {}) {
     ask(run) { return hosts.get(run.runtimeSessionRef.runtimeProfileId).ask({ ...run,
       codexThreadId: run.runtimeSessionRef.sessionId, codexTurnId: run.runtimeTurnRef.turnId }); },
   };
+  const config = options.config || defaultNativeRuntimeConfig();
+  const getNativeRuntimeConfig = () => config;
+  const startupGate = new RuntimeStartupGate({ getConfig: getNativeRuntimeConfig });
   let dispatcher, accountAdmission, coordinator, controller;
   const initialize = async () => {
-    dispatcher = createWorkDispatcher({ store });
+    dispatcher = createWorkDispatcher({ store, getNativeRuntimeConfig });
     accountAdmission = new RuntimeAccountAdmission({ runtimeAccountLookup: id => store.getRuntimeAccount(id),
-      resolveMaxActive: options.resolveMaxActive });
+      resolveMaxActive: options.resolveMaxActive || (account => config.flags.runtimeAdmissionV1
+        ? Math.min(account.maxActive ?? config.maxActive, config.maxActive) : 4) });
     coordinator = new WorkRunCoordinator({ productStore: store, dispatcher, chatSessionStore: sessions, inbox,
+      getNativeRuntimeConfig, startupGate, runExecutionStore: options.runExecutionStore,
+      startupReconcileTimeoutMs: options.startupReconcileTimeoutMs,
       runtimeManager: { async acquire(binding) {
+        await options.beforeAcquire?.(binding);
         if (!hosts.has(binding.runtimeProfileId)) hosts.set(binding.runtimeProfileId, new InspirationRuntime());
         const raw = hosts.get(binding.runtimeProfileId);
         const session = thread => ({ ...thread, source: thread.threadSource });
@@ -69,11 +77,11 @@ async function fixture(t, options = {}) {
             return { session: session(structuredClone(thread)) };
           },
           async sessionResume(input) { return { session: session((await raw.threadResume({ threadId: input.sessionId })).thread) }; },
-          async sessionRead(input) { return { session: session((await raw.threadRead({ threadId: input.sessionId })).thread) }; },
-          turnStart: input => raw.turnStart({ ...input, threadId: input.sessionId, clientUserMessageId: input.operationId }),
+          async sessionRead(input) { await options.beforeSessionRead?.(input); return { session: session((await raw.threadRead({ threadId: input.sessionId })).thread) }; },
+          turnStart: async input => { await options.beforeTurnStart?.(input); return raw.turnStart({ ...input, threadId: input.sessionId, clientUserMessageId: input.operationId }); },
           turnInterrupt: input => raw.turnInterrupt(input),
         };
-      }, stop() {}, stopAll() {} }, runtimeAccountAdmission: accountAdmission,
+      }, async stop(binding) { await options.onStop?.(binding); }, stopAll() {} }, runtimeAccountAdmission: accountAdmission,
       assertSecretSafe: () => true, sanitizeSummary: text => text });
     await coordinator.open();
     controller = createChatServiceController({ paths, productStore: store, chatSessionStore: sessions, coordinator,
@@ -91,10 +99,10 @@ async function fixture(t, options = {}) {
     const id = randomUUID();
     const backendId = backend === true ? "shoggoth"
       : backend || ["codex", "pi", "deepseek-harness", "grok-build"][nextBackend++ % 4];
-    const accountId = DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND[backendId];
+    const accountId = backendId === "shoggoth" ? profile.runtimeAccountId : DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[backendId];
     const runtime = store.getRuntimeAccount(accountId).runtime;
     return store.putAgentProfile({ ...profile, id, agentId: `agent-${id}`, name: `Test ${id}`,
-      backendId, runtime, runtimeProfileId: `runtime-${id}`, runtimeAccountId: accountId, isDefault: false });
+      backendId: "shoggoth", runtime, runtimeProfileId: `runtime-${id}`, runtimeAccountId: accountId, isDefault: false });
   };
   const session = async (p = profile, workspace = null) => (await controller.handle("chat.session.create", {
     operationId: randomUUID(), profileId: p.id, workspace, createdAt: Date.now(),
@@ -105,7 +113,7 @@ async function fixture(t, options = {}) {
     await coordinator.waitForIdle(result.run.id);
     return { ...result, run: coordinator.getRun(result.run.id) };
   };
-  return { root, paths, store, sessions, inbox, host, profile, addProfile, session, send,
+  return { root, paths, store, sessions, inbox, host, profile, addProfile, session, send, config, startupGate,
     get dispatcher() { return dispatcher; }, get coordinator() { return coordinator; },
     get controller() { return controller; }, get accountAdmission() { return accountAdmission; },
     async restart() {
@@ -143,7 +151,7 @@ test("one native Agent runs four sessions, fifth queues and wakes once; events s
   assert.equal(JSON.stringify(events).includes("only A"), false);
 });
 
-test("four native backends each run four sessions, including two using the same runtime", async t => {
+test("native runtime accounts share one Shoggoth fallback budget", async t => {
   const f = await fixture(t);
   const profiles = [f.profile, f.addProfile("codex"), f.addProfile("pi"), f.addProfile("deepseek-harness")];
   assert.equal(profiles[0].runtime, profiles[1].runtime, "Shoggoth and Codex both use Codex runtime");
@@ -151,15 +159,15 @@ test("four native backends each run four sessions, including two using the same 
     const sessions = await Promise.all(Array.from({ length: 5 }, () => f.session(p)));
     return Promise.all(sessions.map(s => f.send(s)));
   }));
-  for (const runs of results) {
-    assert.deepEqual(runs.map(r => r.run.status), ["running", "running", "running", "running", "queued"]);
-    assert.equal(runs[4].reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
-  }
-  assert.equal(f.host.turnStarts, 16, "different backends do not share a total-four budget");
-  f.host.complete(results[1][0].run);
-  await until(() => f.coordinator.getRun(results[1][4].run.id).status === "running");
-  for (const i of [0, 2, 3]) assert.equal(f.coordinator.getRun(results[i][4].run.id).status, "queued");
-  assert.equal(f.host.turnStarts, 17, "a completion opens one slot only in its own backend");
+  const running = results.flat().filter(result => result.run.status === "running");
+  assert.equal(running.length, 4);
+  assert.equal(f.host.turnStarts, 4);
+  const queued = results.flat().filter(result => result.run.status === "queued");
+  assert.equal(queued.length, 16);
+  f.host.complete(running[0].run);
+  await until(() => f.host.turnStarts === 5);
+  assert.equal(queued.filter(result => f.coordinator.getRun(result.run.id).status === "running").length, 1);
+
 });
 
 test("multiple Agents share their account's four slots", async t => {
@@ -187,11 +195,11 @@ test("backend budget stays four across Profiles even with a higher account limit
   assert.equal(createWorkDispatcher({ store: f.store }).admit(fifth.run.id).reason, "BACKEND_ACTIVE_LIMIT",
     "recreating a dispatcher counts durable active runs");
   const otherRuns = await Promise.all(Array.from({ length: 4 }, async () => f.send(await f.session(other))));
-  assert.ok(otherRuns.every(result => result.run.status === "running"), "another backend starts despite an earlier queued task");
-  assert.equal(f.host.turnStarts, 8);
+  assert.ok(otherRuns.every(result => result.run.status === "queued"), "every native account shares the same product backend budget");
+  assert.equal(f.host.turnStarts, 4);
   f.host.complete(a.run);
   await until(() => f.coordinator.getRun(fifth.run.id).status === "running");
-  assert.equal(f.host.turnStarts, 9);
+  assert.equal(f.host.turnStarts, 5);
 });
 
 test("same session and explicit writable workspace remain exclusive across accounts", async t => {
@@ -233,7 +241,7 @@ test("canceling a queued turn writes a tombstone, survives restart, and never ca
   assert.equal(f.host.turnStarts, 6, "restart starts only the previously queued turn");
 });
 
-test("each backend has two background slots and two remaining chat slots; input waits still count", async t => {
+test("Shoggoth fallback budget reserves two background and two chat slots across native accounts", async t => {
   const f = await fixture(t);
   const profiles = [f.addProfile(true), f.addProfile(true), f.addProfile(true), f.addProfile("pi"), f.addProfile("pi")];
   const background = await Promise.all(profiles.map(async p => {
@@ -243,17 +251,14 @@ test("each backend has two background slots and two remaining chat slots; input 
       threadSource: domainThreadSource(run, "new"), threadId: null });
     return run;
   }));
-  await until(() => [0, 1, 3, 4].every(i => f.coordinator.getRun(background[i].id).status === "running"));
+  await until(() => [0, 1].every(i => f.coordinator.getRun(background[i].id).status === "running"));
   assert.equal(f.coordinator.getRunSnapshot(background[2].id).queue.reason, "BACKEND_BACKGROUND_ACTIVE_LIMIT");
-  assert.equal(f.host.turnStarts, 4, "each backend gets its own background slots");
+  assert.equal(f.host.turnStarts, 2, "native runtimes share Shoggoth background capacity");
   const waitingRun = f.coordinator.getRun(background[0].id);
   const answer = f.host.ask(waitingRun).catch(() => {});
   await until(() => f.coordinator.getRun(waitingRun.id).status === "waiting_input");
   const a = await f.send(await f.session()); const b = await f.send(await f.session());
   assert.equal(a.run.status, "running"); assert.equal(b.run.status, "running");
-  const otherDone = f.coordinator.getRun(background[3].id); f.host.complete(otherDone);
-  await f.coordinator.waitForIdle(otherDone.id);
-  assert.equal(f.coordinator.getRun(background[2].id).status, "queued", "another backend's completion cannot open this background slot");
   f.host.complete(a.run);
   await until(() => f.coordinator.getRun(a.run.id).status === "completed");
   assert.equal(f.coordinator.getRun(background[2].id).status, "queued", "chat slot cannot become third background slot");
@@ -263,19 +268,19 @@ test("each backend has two background slots and two remaining chat slots; input 
   await f.coordinator.close(); await answer;
 });
 
-test("implicit workspaces isolate new sessions; old create retries and explicit defaults are stable", async t => {
+test("implicit workspaces isolate new sessions and current create retries are stable", async t => {
   const f = await fixture(t);
   const operationId = randomUUID(), createdAt = Date.now();
-  const legacy = f.sessions.createSession({ operationId, profileId: f.profile.id,
-    workspace: path.join(f.paths.defaultWorkspaceDir, f.profile.id), createdAt });
+  const first = (await f.controller.handle("chat.session.create", { operationId, profileId: f.profile.id,
+    workspace: null, createdAt })).session;
   const replay = await f.controller.handle("chat.session.create", { operationId, profileId: f.profile.id,
     workspace: null, createdAt });
-  assert.equal(replay.session.sessionKey, legacy.sessionKey);
-  assert.equal(replay.session.workspace, legacy.workspace);
-  const next = await f.session(); assert.notEqual(next.workspace, legacy.workspace);
+  assert.equal(replay.session.sessionKey, first.sessionKey);
+  assert.equal(replay.session.workspace, first.workspace);
+  const next = await f.session(); assert.notEqual(next.workspace, first.workspace);
   const configured = f.store.putAgentProfile({ ...f.addProfile(), defaultCwd: path.join(f.root, "project") });
   assert.equal((await f.session(configured)).workspace, configured.defaultCwd);
-  assert.equal(resolveProfileWorkspace({ paths: f.paths, profile: f.profile, requested: null }), legacy.workspace,
+  assert.equal(resolveProfileWorkspace({ paths: f.paths, profile: f.profile, requested: null }), path.join(f.paths.defaultWorkspaceDir, f.profile.id),
     "non-chat workspace consumers keep profile workspace semantics");
   const explicitOperation = randomUUID();
   await f.controller.handle("chat.session.create", { operationId: explicitOperation, profileId: f.profile.id,
@@ -343,20 +348,6 @@ test("true exhaustion fails immediately; idle-host recovery permits retry withou
   assert.equal(f.host.turnStarts, 2);
 });
 
-test("legacy profile migration is durable/idempotent and preserves custom concurrency", async t => {
-  const f = await fixture(t);
-  f.store.putAgentProfile({ ...f.profile, concurrency: { maxActive: 1, maxWorkspaceWrites: 1 } });
-  const custom = f.store.putAgentProfile({ ...f.addProfile(), concurrency: { maxActive: 3, maxWorkspaceWrites: 2 } });
-  assert.equal(migrateLegacyProfileConcurrency(f.store, f.paths), 1);
-  assert.equal(migrateLegacyProfileConcurrency(f.store, f.paths), 0);
-  assert.deepEqual(f.store.getAgentProfile(custom.id).concurrency, custom.concurrency);
-  await f.restart();
-  assert.deepEqual(f.store.getAgentProfile(f.profile.id).concurrency, { maxActive: 4, maxWorkspaceWrites: 4 });
-  f.store.putAgentProfile({ ...f.store.getAgentProfile(custom.id), concurrency: { maxActive: 1, maxWorkspaceWrites: 1 } });
-  assert.equal(migrateLegacyProfileConcurrency(f.store, f.paths), 0);
-  assert.deepEqual(f.store.getAgentProfile(custom.id).concurrency, { maxActive: 1, maxWorkspaceWrites: 1 });
-});
-
 test("quota recovery is shared by peer Agents but isolated from other accounts", async t => {
   const f = await fixture(t);
   const peer = f.addProfile("shoggoth");
@@ -420,4 +411,134 @@ test("domain tasks report spending limits without joining the cooldown queue", a
   assert.equal(ack.run.status, "failed");
   assert.equal(ack.run.errorCode, "RUNTIME_SPENDING_LIMIT_REACHED");
   assert.equal(f.host.turnStarts, 1);
+});
+
+
+function unifiedConfig(overrides = {}) {
+  const config = defaultNativeRuntimeConfig();
+  return { ...config, flags: { ...config.flags, runtimeAdmissionV1: true }, ...overrides };
+}
+
+test("unified admission permits 100 mixed native runs, queues 101, releases exactly one slot", async t => {
+  const f = await fixture(t, { config: unifiedConfig() });
+  const runs = [];
+  for (let i = 0; i < 100; i++) {
+    const p = f.addProfile();
+    runs.push(await f.send(await f.session(p)));
+  }
+  assert.ok(runs.every(result => result.run.status === "running"));
+  const extra = await f.send(await f.session(f.addProfile()));
+  assert.equal(extra.run.status, "queued");
+  assert.equal(extra.reason, "GLOBAL_CAPACITY");
+  assert.equal(f.host.turnStarts, 100);
+  assert.equal(f.coordinator.nativeCapacitySnapshot().active, 100);
+  f.host.complete(runs[0].run);
+  await until(() => f.coordinator.getRun(extra.run.id).status === "running");
+  assert.equal(f.host.turnStarts, 101);
+  assert.equal(f.coordinator.nativeCapacitySnapshot().active, 100);
+});
+
+test("100 pending interactions hold capacity; lowering live limit never interrupts them", async t => {
+  const f = await fixture(t, { config: unifiedConfig() });
+  const runs = [];
+  const responses = [];
+  for (let i = 0; i < 100; i++) {
+    const result = await f.send(await f.session(f.addProfile()));
+    runs.push(result.run);
+    responses.push(f.host.ask(result.run).catch(() => {}));
+  }
+  await until(() => runs.every(run => f.coordinator.getRun(run.id).status === "waiting_input"));
+  f.config.maxActive = 2;
+  await f.coordinator.capacityChanged();
+  const extra = await f.send(await f.session(f.addProfile()));
+  assert.equal(extra.reason, "GLOBAL_CAPACITY");
+  assert.equal(f.coordinator.nativeCapacitySnapshot().active, 100);
+  assert.equal(f.host.interrupts, 0);
+  await f.coordinator.close();
+  await Promise.all(responses);
+});
+
+test("startup gate covers encryption through turn acknowledgement and returns reservations", async t => {
+  let unblock;
+  const pending = new Promise(resolve => { unblock = resolve; });
+  const config = unifiedConfig({ startupConcurrency: 1 });
+  let encryptions = 0;
+  const f = await fixture(t, { config, runExecutionStore: {
+    async put(run, contract, command, fence, cryptoOptions) {
+      assert.equal(cryptoOptions.waitForCapacity, true);
+      assert.ok(cryptoOptions.signal);
+      encryptions++;
+      await pending;
+      fence();
+    }, remove() {}, has() { return false; }, get() { return null; },
+  } });
+  const firstSession = await f.session(), secondSession = await f.session();
+  const first = await f.coordinator.send({ operationId: randomUUID(), sessionKey: firstSession.sessionKey, prompt: "one" });
+  await until(() => encryptions === 1);
+  const second = await f.send(secondSession);
+  assert.equal(second.reason, "STARTUP_BACKPRESSURE");
+  assert.equal(f.startupGate.read().active, 1);
+  assert.equal(f.accountAdmission.read(f.profile.runtimeAccountId).active, 1);
+  assert.equal(f.host.turnStarts, 0);
+  unblock();
+  await until(() => f.coordinator.getRun(second.run.id).status === "running");
+  assert.equal(f.coordinator.getRun(first.run.id).status, "running");
+  assert.equal(f.startupGate.read().active, 0);
+  assert.equal(encryptions, 2);
+});
+
+test("host capacity before acquisition requeues without a native send or leaked reservations", async t => {
+  let blocked = true, acquires = 0;
+  const f = await fixture(t, { config: unifiedConfig(), beforeAcquire() {
+    acquires++;
+    if (blocked) throw Object.assign(new Error("capacity"), { code: "RUNTIME_HOST_CAPACITY" });
+  } });
+  const result = await f.send(await f.session());
+  assert.equal(result.run.status, "queued");
+  assert.equal(f.coordinator.getRunSnapshot(result.run.id).queue.reason, "HOST_CAPACITY");
+  assert.equal(acquires, 1);
+  assert.equal(f.host.turnStarts, 0);
+  assert.equal(f.accountAdmission.read(f.profile.runtimeAccountId).active, 0);
+  assert.equal(f.startupGate.read().active, 0);
+  blocked = false;
+  await f.coordinator.capacityChanged();
+  await until(() => f.coordinator.getRun(result.run.id).status === "running");
+  assert.equal(f.host.turnStarts, 1);
+});
+
+test("unified admission respects explicit account/profile limits and flag-off legacy limits", async t => {
+  const f = await fixture(t, { config: unifiedConfig() });
+  const limited = f.store.putAgentProfile({ ...f.addProfile(), concurrency: { maxActive: 2, maxWorkspaceWrites: null } });
+  await f.send(await f.session(limited)); await f.send(await f.session(limited));
+  assert.equal((await f.send(await f.session(limited))).reason, "PROFILE_ACTIVE_LIMIT");
+  const p = f.addProfile("codex");
+  f.store.putRuntimeAccount({ ...f.store.getRuntimeAccount(p.runtimeAccountId), maxActive: 1 });
+  await f.send(await f.session(p));
+  assert.equal((await f.send(await f.session(p))).reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
+  for (let i = 0; i < 5; i++) assert.equal((await f.send(await f.session())).run.status, "running");
+  f.config.flags.runtimeAdmissionV1 = false;
+  assert.equal((await f.send(await f.session())).reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
+  assert.equal(f.host.interrupts, 0);
+});
+
+
+test("unknown turn acceptance has bounded reconciliation and stops the host before releasing capacity", async t => {
+  let sends = 0, stopped = 0;
+  const f = await fixture(t, { config: unifiedConfig(), startupReconcileTimeoutMs: 25,
+    beforeTurnStart() { sends++; throw Object.assign(new Error("unknown"), { code: "RUNTIME_TURN_ACCEPTANCE_UNKNOWN" }); },
+    beforeSessionRead() { return new Promise(() => {}); },
+    onStop() {
+      assert.equal(f.coordinator.nativeCapacitySnapshot().active, 1, "reservation must remain until stop");
+      stopped++;
+    },
+  });
+  const result = await f.send(await f.session());
+  assert.equal(result.run.status, "interrupted");
+  assert.equal(result.run.errorCode, "RUNTIME_TURN_ACCEPTANCE_UNKNOWN");
+  assert.equal(sends, 1); assert.equal(stopped, 1);
+  assert.equal(f.coordinator.nativeCapacitySnapshot().active, 0);
+  assert.equal(f.accountAdmission.read(f.profile.runtimeAccountId).active, 0);
+  assert.equal(f.startupGate.read().active, 0);
+  await f.restart();
+  assert.equal(sends, 1, "unknown acceptance must never be replayed after restart");
 });

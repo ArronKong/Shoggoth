@@ -22,6 +22,11 @@ const offline = { healthy: false, domainAvailability: { kanban: false, cron: fal
   pendingCommandsLocked: true, mcpCredentialsLocked: true };
 const ready = observe(initial, healthy, background, 0);
 assert.equal(ready.notice, null, "Healthy first observation is silent");
+const lazyMcp = { ...healthy, mcpCredentialsLocked: true };
+assert.equal(observe(initial, lazyMcp, background, 0).state.wasHealthy, true,
+  "Lazy MCP credential initialization must not make startup unhealthy");
+assert.equal(observe(ready.state, lazyMcp, background, 15_000).notice, null,
+  "Optional MCP credentials must not trigger a background-service fault");
 
 let sample = observe(ready.state, offline, background, 5_000);
 assert.equal(sample.notice, "recovering", "A running service failure must notify immediately");
@@ -59,7 +64,6 @@ assert.equal(sample.notice, null, "Startup that recovers within budget stays sil
 
 for (const fault of [
   { pendingCommandsLocked: true },
-  { mcpCredentialsLocked: true },
   { domainAvailability: { kanban: false, cron: true } },
   { domainAvailability: { kanban: true, cron: false } },
 ]) {

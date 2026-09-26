@@ -8,6 +8,7 @@ const {
   readCodeIdentityAsync,
 } = require("./code-identity");
 const { createLocalFileSafeStorage } = require("./local-file-safe-storage");
+const { migrateLegacyMcpAuth } = require("./mcp-auth-legacy-migration");
 const { InProcessMcpCryptoBroker, McpCryptoBroker } = require("./mcp-crypto-broker");
 const { cryptoError } = require("./mcp-crypto-protocol");
 
@@ -81,6 +82,7 @@ class PackagedMcpCryptoBroker {
       this.requestTimeoutMs = options.requestTimeoutMs;
       this.termGraceMs = options.termGraceMs;
       this.killConfirmMs = options.killConfirmMs;
+      this.fs = options.fs;
     } catch {
       throw cryptoError();
     }
@@ -92,6 +94,11 @@ class PackagedMcpCryptoBroker {
     this.delegate = null;
     this.closePromise = null;
     this.cleanupFailed = false;
+    this.localIdentity = false;
+    this.migrationPromise = null;
+    this.migrationBroker = null;
+    this.migrationBrokerClosePromise = null;
+    this.migrationAttempted = false;
   }
 
   open(options = {}) {
@@ -105,6 +112,8 @@ class PackagedMcpCryptoBroker {
     this.generation = generation;
     this.opened = true;
     this.delegate = null;
+    this.localIdentity = false;
+    this.migrationAttempted = false;
     const selection = Promise.resolve().then(() => this.#select(generation, epoch));
     this.selection = selection;
     void selection.catch(() => {});
@@ -127,6 +136,85 @@ class PackagedMcpCryptoBroker {
     return this.#invoke("decrypt", payload, options);
   }
 
+  migrateLegacyMcpAuth({ generation, isCurrent } = {}) {
+    if (this.callerRole !== "agent-service" || generation !== this.generation
+      || !Number.isSafeInteger(generation) || generation <= 0 || !this.opened
+      || (isCurrent !== undefined && typeof isCurrent !== "function")) {
+      return Promise.reject(cryptoError());
+    }
+    if (this.migrationPromise) return this.migrationPromise;
+    const epoch = this.epoch;
+    const pending = this.#migrate(generation, epoch, isCurrent);
+    this.migrationPromise = pending;
+    void pending.finally(() => {
+      if (this.migrationPromise === pending) this.migrationPromise = null;
+    }).catch(() => {});
+    return pending;
+  }
+
+  async #migrate(generation, epoch, isCurrent) {
+    const assertCurrent = () => {
+      this.#assertCurrent(generation, epoch);
+      if (isCurrent && isCurrent() !== true) throw cryptoError();
+    };
+    try {
+      const delegate = await this.selection;
+      assertCurrent();
+      if (!this.localIdentity || delegate !== this.delegate) throw cryptoError();
+      return await migrateLegacyMcpAuth({
+        paths: this.paths,
+        fs: this.fs,
+        createLocalFileSafeStorage: this.createLocalFileSafeStorage,
+        assertCurrent,
+        rewrap: async () => {
+          assertCurrent();
+          if (this.migrationAttempted) throw cryptoError();
+          this.migrationAttempted = true;
+          const broker = this.createExternalBroker({
+            paths: this.paths, callerRole: "agent-service",
+            executablePath: this.executablePath, appRoot: this.appRoot,
+            defaultApp: this.defaultApp, parentEnv: this.parentEnv,
+            // Only explicit migration may wait for a user's Keychain prompt.
+            requestTimeoutMs: 60_000, termGraceMs: this.termGraceMs,
+            killConfirmMs: this.killConfirmMs,
+          });
+          if (!broker || typeof broker.open !== "function" || typeof broker.close !== "function"
+            || typeof broker.rewrapLegacyMcpAuth !== "function") throw cryptoError();
+          this.migrationBroker = broker;
+          this.migrationBrokerClosePromise = null;
+          try {
+            await broker.open({ generation });
+            assertCurrent();
+            return await broker.rewrapLegacyMcpAuth({ generation });
+          } finally {
+            try { await this.#closeMigrationBroker(); }
+            finally {
+              if (this.migrationBroker === broker) {
+                this.migrationBroker = null;
+                this.migrationBrokerClosePromise = null;
+              }
+            }
+          }
+        },
+      });
+    } catch (error) {
+      throw cryptoError(error?.code === "MCP_CRYPTO_MIGRATION_COMMIT_UNCERTAIN"
+        ? error.code : undefined);
+    }
+  }
+
+  #closeMigrationBroker() {
+    if (!this.migrationBroker) return Promise.resolve();
+    if (!this.migrationBrokerClosePromise) {
+      const broker = this.migrationBroker;
+      this.migrationBrokerClosePromise = Promise.resolve().then(() => broker.close()).catch(() => {
+        this.cleanupFailed = true;
+        throw cryptoError();
+      });
+    }
+    return this.migrationBrokerClosePromise;
+  }
+
   close() {
     if (this.closePromise) return this.closePromise;
     if (!this.opened && !this.selection && !this.delegate) {
@@ -135,14 +223,21 @@ class PackagedMcpCryptoBroker {
 
     const selection = this.selection;
     const delegate = this.delegate;
+    const migration = this.migrationPromise;
     this.epoch += 1;
     this.opened = false;
     this.generation = 0;
     this.selection = null;
     this.delegate = null;
+    this.localIdentity = false;
 
     const closing = (async () => {
       let closeFailed = this.cleanupFailed;
+      try { await this.#closeMigrationBroker(); } catch { closeFailed = true; }
+      if (migration) {
+        try { await migration; } catch { /* retired generations cannot commit */ }
+        closeFailed ||= this.cleanupFailed;
+      }
       if (selection) {
         try { await selection; } catch { /* selection owns unpublished cleanup */ }
         closeFailed ||= this.cleanupFailed;
@@ -235,6 +330,7 @@ class PackagedMcpCryptoBroker {
       await delegate.open({ generation });
       this.#assertCurrent(generation, epoch);
       this.delegate = delegate;
+      this.localIdentity = localIdentity;
       localStorage = null;
       return delegate;
     } catch {
@@ -277,8 +373,16 @@ class PackagedMcpCryptoBroker {
       result = await delegate[operation](...args);
       this.#assertCurrent(generation, epoch);
       return result;
-    } catch {
+    } catch (error) {
       if (Buffer.isBuffer(result)) result.fill(0);
+      let code = null;
+      try {
+        if (error && typeof error === "object") code = Object.getOwnPropertyDescriptor(error, "code")?.value;
+      } catch { /* hostile diagnostics must not escape the fixed error boundary */ }
+      if (this.#isCurrent(generation, epoch)
+        && ["MCP_CRYPTO_BACKPRESSURE", "MCP_CRYPTO_CANCELED"].includes(code)) {
+        throw cryptoError(code);
+      }
       throw cryptoError();
     }
   }

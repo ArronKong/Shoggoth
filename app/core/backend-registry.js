@@ -114,6 +114,7 @@ class BackendRegistry extends EventEmitter {
    */
   setDisabledBackendsProvider(fn) {
     this._getDisabledIds = typeof fn === "function" ? fn : null;
+    for (const backend of this.backends.values()) backend.setDisabledBackendsProvider?.(this._getDisabledIds);
   }
 
   setInspirationOwner(owner) {
@@ -235,8 +236,9 @@ class BackendRegistry extends EventEmitter {
       const ids = this._getDisabledIds();
       const disabled = new Set();
       for (const id of Array.isArray(ids) ? ids : []) {
-        const backend = this.backends.get(id);
+        const backend = this._registeredGet(id);
         if (!backend) continue;
+        if (id !== backend.id) { disabled.add(id); continue; }
         try {
           const descriptor = typeof backend.getBackendDescriptor === "function"
             ? backend.getBackendDescriptor()
@@ -263,9 +265,14 @@ class BackendRegistry extends EventEmitter {
 
   /** 按 id 取后端；断开的视作不存在（数据面/管理面都不再触达它）。 */
   _activeGet(backendId) {
-    const backend = this.backends.get(backendId);
-    if (!backend || this._disabledSet().has(backend.id)) return null;
+    const backend = this._registeredGet(backendId);
+    const disabled = this._disabledSet();
+    if (!backend || disabled.has(backendId) || disabled.has(backend.id)) return null;
     return backend;
+  }
+
+  _registeredGet(backendId) {
+    return this.backends.get(backendId) || null;
   }
 
   /**
@@ -300,6 +307,32 @@ class BackendRegistry extends EventEmitter {
     return rows;
   }
 
+  _nativeCapacityBackend() {
+    // Native facades share one Service. Select one capability owner; never sum
+    // its counters once per facade or broadcast the same configuration write.
+    const backend = this._activeBackends().find((candidate) => {
+      try { return candidate.getBackendDescriptor()?.surfaces?.nativeCapacity === true; }
+      catch { return false; }
+    });
+    if (!backend) throw Object.assign(new Error("Native capacity is unavailable"), { code: "NATIVE_RUNTIME_CONFIG_UNAVAILABLE" });
+    return backend;
+  }
+
+  getNativeCapacity() { return this._nativeCapacityBackend().getNativeCapacity(); }
+
+  async getRuntimeStatuses() {
+    return (await Promise.all([...this.backends.values()].map(async (backend) => {
+      try {
+        if (backend.getBackendDescriptor()?.surfaces?.runtimeStatus !== true) return [];
+        return (await backend.getRuntimeStatuses()).map(row => ({ ...row, backendId: backend.id }));
+      } catch { return []; }
+    }))).flat();
+  }
+
+  applyNativeRuntimeConfig(projection) {
+    return this._nativeCapacityBackend().applyNativeRuntimeConfig(projection);
+  }
+
   /**
    * Register a backend. Must be called before start().
    * @param {import('./agent-backend').AgentBackend} backend
@@ -312,6 +345,7 @@ class BackendRegistry extends EventEmitter {
       throw new Error(`BackendRegistry: duplicate backend id "${backend.id}"`);
     }
     this.backends.set(backend.id, backend);
+    backend.setDisabledBackendsProvider?.(this._getDisabledIds);
     if (["openclaw", "hermes"].includes(backend.id) && typeof backend.setInspirationOwner === "function") {
       backend.setInspirationOwner(this._inspirationOwner);
     }
@@ -897,6 +931,37 @@ class BackendRegistry extends EventEmitter {
     }
   }
 
+  /** Read-only plugin catalog page for one backend. */
+  async getExternalPluginCatalog(backendId, query = {}) {
+    const backend = this._activeGet(backendId);
+    const unavailable = reasonCode => ({ supported: false, reasonCode, items: [], nextCursor: null });
+    if (!backend) return unavailable("BACKEND_UNAVAILABLE");
+    try { return await backend.getExternalPluginCatalog(query); }
+    catch (error) {
+      if (["PLUGIN_EXTERNAL_QUERY_INVALID", "PLUGIN_EXTERNAL_CATALOG_CHANGED"].includes(error?.code)) throw error;
+      return unavailable("PLUGIN_EXTERNAL_UNAVAILABLE");
+    }
+  }
+
+  async listExternalPluginCatalogs() {
+    return Promise.all(this._activeBackends().map(async backend => ({ backend: backend.id,
+      catalog: await this.getExternalPluginCatalog(backend.id) })));
+  }
+
+  async getPluginCapabilitiesPage(backendId, query) {
+    const unavailable = (reasonCode) => ({ supported: false, reasonCode,
+      catalogRevision: null, items: [], nextCursor: null });
+    const backend = this._activeGet(backendId);
+    if (!backend) return unavailable("BACKEND_UNAVAILABLE");
+    try {
+      return await backend.getPluginCapabilitiesPage(query);
+    } catch (error) {
+      console.error(`[registry] ${backendId} getPluginCapabilitiesPage failed:`,
+        error?.code || "PLUGIN_SERVICE_UNAVAILABLE");
+      return unavailable("PLUGIN_SERVICE_UNAVAILABLE");
+    }
+  }
+
   /**
    * Aggregate per-backend CLI command usage for the CLI page overlay. Each
    * entry: { backend, supported, reason?, commands }. A failing/unsupported
@@ -1188,7 +1253,7 @@ class BackendRegistry extends EventEmitter {
     const projectKey = normalizeProjectKey(project);
     const identity = parseAgentIdentity(agentKey);
     if (!identity) throw new Error("请选择执行 Agent");
-    const target = this._kanbanBackends().find((row) => row.backend.id === identity.backendId);
+    const target = this._kanbanBackends().find((row) => row.backend === this._activeGet(identity.backendId));
     if (!target) throw new Error(`unknown Kanban backend ${identity.backendId}`);
     const agents = await target.backend.listAgents();
     const agent = (Array.isArray(agents) ? agents : []).find((row) => row.id === identity.agentId);
@@ -1278,7 +1343,7 @@ class BackendRegistry extends EventEmitter {
 
   async moveFederatedTask(ref = {}, targetStatus, position, completion = {}) {
     const backendId = String(ref.backendId || "");
-    const backendTarget = this._kanbanBackends().find((row) => row.backend.id === backendId);
+    const backendTarget = this._kanbanBackends().find((row) => row.backend === this._activeGet(backendId));
     if (!backendTarget) throw new Error(`unknown Kanban backend ${backendId}`);
     const id = String(ref.id || "");
     if (!id) throw new Error("missing task id");
@@ -1733,7 +1798,8 @@ class BackendRegistry extends EventEmitter {
    */
   async getDashboardActivityPage({ sinceMs, limit, cursor, backend, kind } = {}) {
     const since = Number.isFinite(sinceMs) ? sinceMs : new Date().setHours(0, 0, 0, 0);
-    if (backend && !this.backends.has(backend)) throw new Error(`invalid backend: ${backend}`);
+    if (backend && !this._activeGet(backend)) throw new Error(`invalid backend: ${backend}`);
+    if (backend) backend = this._activeGet(backend).id;
     const data = await this.getDashboardActivityData({ sinceMs: since });
     const page = buildActivityPage(data.entries, {
       limit, cursor, backend, kind, degradedSources: data.degradedSources,
@@ -1839,7 +1905,7 @@ class BackendRegistry extends EventEmitter {
    * @returns {object|null}
    */
   runSelfUpdate(backendId, options = {}) {
-    const backend = this.backends.get(backendId);
+    const backend = this._registeredGet(backendId);
     if (!backend) return null;
     try {
       return { id: backend.id, name: backend.name, ...backend.runSelfUpdate(options) };
@@ -2018,7 +2084,7 @@ class BackendRegistry extends EventEmitter {
    * @returns {Promise<{ok: boolean, error?: string, info?: object}>}
    */
   async testConnection(spec) {
-    const backend = this.backends.get(spec?.backend);
+    const backend = this._registeredGet(spec?.backend);
     if (!backend) return { ok: false, error: `unknown backend "${spec?.backend}"` };
     try {
       return await backend.testConnection(spec);
@@ -2029,7 +2095,7 @@ class BackendRegistry extends EventEmitter {
 
   /** LAN 发现开关状态(单后端透传;未知后端按不支持处理)。 */
   async getLanDiscovery(backendId) {
-    const backend = this.backends.get(backendId);
+    const backend = this._registeredGet(backendId);
     if (!backend) return { supported: false, error: `unknown backend "${backendId}"` };
     try {
       return await backend.getLanDiscovery();
@@ -2040,7 +2106,7 @@ class BackendRegistry extends EventEmitter {
 
   /** 开/关 LAN 发现(单后端透传;错误按契约上抛给路由层转 500)。 */
   async setLanDiscovery(backendId, enabled) {
-    const backend = this.backends.get(backendId);
+    const backend = this._registeredGet(backendId);
     if (!backend) throw new Error(`unknown backend "${backendId}"`);
     return backend.setLanDiscovery(enabled);
   }

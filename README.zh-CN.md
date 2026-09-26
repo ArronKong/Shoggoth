@@ -123,7 +123,7 @@ node_modules/.bin/electron scripts/ui-security-electron-smoke.cjs
 npm run export:source -- /absolute/path/to/an-empty-directory
 ```
 
-导出会排除内部开发记录与原仓库的 Git 历史。文件哈希清单保存在导出目录旁边，名称为 `<directory>.manifest.json`，用于本地核对。创建公开仓库前，应先检查并扫描导出的内容。
+导出会排除内部开发记录与原仓库的 Git 历史。由于部分第三方内置插件尚未核实再分发许可，公开源码暂不包含这些插件包，源码构建中的内置插件目录为空；其他插件安装方式仍可使用。文件哈希清单保存在导出目录旁边，名称为 `<directory>.manifest.json`，用于本地核对。创建公开仓库前，应先检查并扫描导出的内容。
 
 ## 许可证
 

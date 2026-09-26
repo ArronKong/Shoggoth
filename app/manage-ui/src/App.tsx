@@ -10,6 +10,7 @@ import componentsIcon from "./assets/nav-icons/components.svg";
 import cronIcon from "./assets/nav-icons/cron.svg";
 import dashboardIcon from "./assets/nav-icons/dashboard.svg";
 import modelsIcon from "./assets/nav-icons/models.svg";
+import pluginsIcon from "./assets/nav-icons/plugins.svg";
 import settingsIcon from "./assets/nav-icons/settings.svg";
 import skillsIcon from "./assets/nav-icons/skills.svg";
 import tokenIcon from "./assets/nav-icons/token.svg";
@@ -48,6 +49,7 @@ const TasksPage = lazy(() => import("./pages/FederatedTasksPage"));
 const ModelsPage = lazy(() => import("./pages/ModelsPage"));
 const UsagePage = lazy(() => import("./pages/UsagePage"));
 const SkillsPage = lazy(() => import("./pages/SkillsPage"));
+const PluginsPage = lazy(() => import("./pages/PluginsPage"));
 const CliPage = lazy(() => import("./pages/CliPage"));
 const AgentsPage = lazy(() => import("./pages/AgentsPage"));
 const GlassLab = lazy(() => import("./pages/GlassLab"));
@@ -68,6 +70,7 @@ const PRIMARY_NAV: NavEntry[] = [
   { to: "/token", labelKey: "nav.token", iconSrc: tokenIcon },
   { to: "/models", labelKey: "nav.models", iconSrc: modelsIcon },
   { to: "/skills", labelKey: "nav.skills", iconSrc: skillsIcon },
+  { to: "/plugins", labelKey: "nav.plugins", iconSrc: pluginsIcon },
   { to: "/cli", labelKey: "nav.cli", iconSrc: cliIcon },
   { to: "/components", labelKey: "nav.components", iconSrc: componentsIcon },
 ];
@@ -410,6 +413,7 @@ export default function App() {
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/token" element={<UsagePage />} />
             <Route path="/skills" element={<SkillsPage />} />
+            <Route path="/plugins" element={<PluginsPage />} />
             <Route path="/cli" element={<CliPage />} />
             <Route path="/models" element={<ModelsPage />} />
             <Route path="/glass" element={<GlassLab />} />

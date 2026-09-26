@@ -18,7 +18,7 @@ const PRODUCT_CAPABILITIES = Object.freeze([
   { domain: "runtime", feature: "context", tool: "runtime_context_get", risk: "read", description: "Read the current authorized WorkRun's frozen effective model. Use the trusted work source from the runtime developer context." },
   { domain: "usage", feature: "tokens", tool: "usage_get", risk: "read", description: "Read bounded Token usage totals and breakdowns for the current authorized Agent Profile over a supported time range." },
   { domain: "interaction", feature: "questions", tool: "request_user_input", risk: "confirm", description: "Pause the current run and ask the user one to three bounded questions." },
-  { domain: "skills", feature: "catalog", tool: "skill_catalog", risk: "read", description: "List enabled and currently eligible Shoggoth native Skills for the current Agent Profile." },
+  { domain: "skills", feature: "catalog", tool: "skill_catalog", risk: "read", description: "Search enabled and currently eligible Shoggoth native Skills for the current Agent Profile." },
   { domain: "skills", feature: "read", tool: "skill_read", risk: "read", description: "Read a bounded chunk of one enabled frozen Shoggoth native Skill and record real usage." },
   { domain: "skills", feature: "install-global", tool: "skill_install_global", risk: "confirm", description: "Install one validated local Shoggoth Skill package and enable it for every current and future native Agent Profile after user confirmation." },
   { domain: "mcp", feature: "server-list", tool: "mcp_server_list", risk: "read", description: "List third-party MCP servers registered in Shoggoth's shared extension host." },

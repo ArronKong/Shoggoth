@@ -19,7 +19,6 @@ const { EXTERNAL_BACKENDS, EXTERNAL_STATUSES, EXTERNAL_TERMINAL,
 
 const INSPIRATION_STORE_VERSION = 3;
 const MAX_BODY_BYTES = 16 * 1024;
-const MAX_LEGACY_JSON_BYTES = 64 * 1024 * 1024;
 const IDEA_FIELDS = Object.freeze([
   "id", "body", "title", "revision", "favorite", "archivedAt", "acceptedAt", "createdAt", "updatedAt", "deletedAt",
 ]);
@@ -28,7 +27,6 @@ const EXECUTION_FIELDS = Object.freeze([
   "backendId", "profileId", "workspace", "sessionKey", "runId", "retryOf", "createdAt", "attention", "preparationFailure",
   "external",
 ]);
-const LEGACY_EXECUTION_FIELDS = EXECUTION_FIELDS.filter((field) => field !== "external");
 const EXTERNAL_FIELDS = Object.freeze(["phase", "hostId", "mode", "status", "sequence",
   "resultSummary", "errorCode", "finishedAt", "attention", "cancelOperationId", "reconcileFingerprint"]);
 const OBSERVATION_FIELDS = Object.freeze(["status", "sequence", "resultSummary", "errorCode", "finishedAt", "attention"]);
@@ -77,22 +75,6 @@ function validIdea(value) {
       && value.archivedAt === null && value.acceptedAt === null && value.deletedAt === value.updatedAt));
 }
 
-function migrateContainer(value) {
-  if (value?.version === 1) {
-    validateContainer(value, 1);
-    value = { ...value, version: 2, ideas: Object.fromEntries(Object.entries(value.ideas)
-      .map(([id, idea]) => [id, { ...idea, deletedAt: null }])) };
-  }
-  if (value?.version === 2) {
-    // Validate the entire old shape before adding fields. Unknown legacy fields
-    // must never be erased or blessed by a migration.
-    validateContainer(value, 2);
-    value = { ...value, version: 3, executions: Object.fromEntries(Object.entries(value.executions)
-      .map(([id, execution]) => [id, { ...execution, external: null }])) };
-  }
-  return value;
-}
-
 function validExternalState(execution) {
   const value = execution.external;
   const bound = value?.phase !== "preparing";
@@ -117,11 +99,11 @@ function validExternalState(execution) {
         && ["queued", "unknown", "failed", "canceled"].includes(value.status) && value.attention === null);
 }
 
-function validExecution(value, version = INSPIRATION_STORE_VERSION) {
-  const external = version === 3 && value?.external !== null;
-  const fields = [...attachmentFields(value, version < 3 ? LEGACY_EXECUTION_FIELDS : EXECUTION_FIELDS)];
-  if (version === 3 && own(value, "turnAttachments")) fields.push("turnAttachments");
-  if (version === 3 && own(value, "inputSource")) fields.push("inputSource");
+function validExecution(value) {
+  const external = value?.external !== null;
+  const fields = [...attachmentFields(value, EXECUTION_FIELDS)];
+  if (own(value, "turnAttachments")) fields.push("turnAttachments");
+  if (own(value, "inputSource")) fields.push("inputSource");
   return exact(value, fields) && UUID.test(value.id) && UUID.test(value.ideaId)
     && (!own(value, "inputSource") || (value.inputSource === "chat" && value.sessionKey !== null))
     && (!own(value, "attachments") || validAttachments(value.attachments))
@@ -145,21 +127,20 @@ function validExecution(value, version = INSPIRATION_STORE_VERSION) {
       && Buffer.byteLength(JSON.stringify(value.attention), "utf8") <= 48 * 1024));
 }
 
-function validateContainer(value, version = INSPIRATION_STORE_VERSION) {
+function validateContainer(value) {
   if (!exact(value, ["version", "revision", "ideas", "executions", "operations"])
-    || value.version !== version || !time(value.revision)
+    || value.version !== INSPIRATION_STORE_VERSION || !time(value.revision)
     || [value.ideas, value.executions, value.operations].some((map) => !map
       || typeof map !== "object" || Array.isArray(map) || Object.getPrototypeOf(map) !== Object.prototype)) {
     fail("INSPIRATION_STORE_CORRUPT", "灵感存储格式无效");
   }
   for (const [id, idea] of Object.entries(value.ideas)) {
-    const valid = version === 1 ? exact(idea, IDEA_FIELDS.filter((field) => field !== "deletedAt"))
-      && validIdea({ ...idea, deletedAt: null }) : validIdea(idea);
+    const valid = validIdea(idea);
     if (!valid || idea.id !== id) fail("INSPIRATION_STORE_CORRUPT", "灵感记录无效");
   }
   const runIds = new Set();
   for (const [id, execution] of Object.entries(value.executions)) {
-    if (!validExecution(execution, version) || execution.id !== id || !value.ideas[execution.ideaId]
+    if (!validExecution(execution) || execution.id !== id || !value.ideas[execution.ideaId]
       || execution.ideaRevision > value.ideas[execution.ideaId].revision || runIds.has(execution.runId)) {
       fail("INSPIRATION_STORE_CORRUPT", "灵感执行关联无效");
     }
@@ -186,8 +167,6 @@ class InspirationStore extends EventEmitter {
     if (!options.paths?.stateDir || !options.paths?.trustedRoot) throw new TypeError("InspirationStore 需要 paths");
     this.paths = options.paths;
     this.filePath = path.join(this.paths.stateDir, "inspirations.sqlite");
-    this.legacyPath = path.join(this.paths.stateDir, "inspirations.json");
-    this.migratedPath = path.join(this.paths.stateDir, "inspirations.migrated.json");
     this.fs = options.fs || fs;
     this.openDatabase = options.openDatabase || openDatabase;
     this.commitTransaction = options.commitTransaction || transaction;
@@ -209,47 +188,18 @@ class InspirationStore extends EventEmitter {
       trustedRoot: this.paths.trustedRoot, fs: this.fs,
     });
     try {
-      if (recoverInterruptedPrivateFile(this.legacyPath, { trustedRoot: this.paths.trustedRoot, fs: this.fs }) === "uncertain") {
-        fail("INSPIRATION_COMMIT_UNCERTAIN", "灵感保存状态需要恢复核对");
-      }
-      if (!statIfExists(this.fs, this.filePath) && statIfExists(this.fs, this.migratedPath)) {
-        fail("INSPIRATION_STORE_CORRUPT", "灵感数据库缺失，请从完整备份恢复");
-      }
       this.db = this.openDatabase(this.filePath);
       const version = this.db.prepare("PRAGMA user_version").get().user_version;
-      if (![0, 1, 2, 3].includes(version)) fail("INSPIRATION_STORE_CORRUPT", "灵感数据库版本无法识别");
-      const legacy = statIfExists(this.fs, this.legacyPath)
-        ? readPrivateFile(this.legacyPath, { fs: this.fs, maxBytes: MAX_LEGACY_JSON_BYTES }) : null;
-      const digest = legacy ? crypto.createHash("sha256").update(legacy).digest("hex") : "none";
+      if (version !== 0 && version !== 3) fail("INSPIRATION_STORE_CORRUPT", "灵感数据库格式不受支持，请使用新版的独立数据目录");
       if (version === 0) {
-        if (statIfExists(this.fs, this.migratedPath)) fail("INSPIRATION_STORE_CORRUPT", "灵感数据库未完成初始化");
-        const value = legacy ? validateContainer(migrateContainer(JSON.parse(legacy)))
-          : { version: INSPIRATION_STORE_VERSION, revision: 0, ideas: {}, executions: {}, operations: {} };
         transaction(this.db, () => {
-          this.db.exec(SCHEMA);
-          this.#statement("INSERT INTO meta VALUES ('revision', ?)").run(String(value.revision));
-          this.#statement("INSERT INTO meta VALUES ('legacy_sha256', ?)").run(digest);
-          this.#writeRecords(value);
+          this.db.exec(SCHEMA + GROWTH_SCHEMA + MEDIA_SCHEMA);
+          this.#statement("INSERT INTO meta VALUES ('revision', '0')").run();
         });
         this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
         fsyncPrivateParent(this.paths.stateDir, this.fs);
-      } else if (legacy && this.#statement("SELECT value FROM meta WHERE key='legacy_sha256'").get()?.value !== digest) {
-        fail("INSPIRATION_STORE_CORRUPT", "旧版灵感文件在迁移后发生变化，请核对数据");
       }
-      if (version < 2) transaction(this.db, () => this.db.exec(GROWTH_SCHEMA));
-      if (version < 3) transaction(this.db, () => this.db.exec(MEDIA_SCHEMA));
-      // Repair the derived stage index from versions that returned stopped work
-      // to seeds. Preserve the execution's canceled status and all user data.
-      this.db.prepare(`UPDATE ideas SET bucket='active' WHERE bucket='saved'
-        AND latest_id IN (SELECT id FROM executions WHERE status='canceled')`).run();
       this.media = new InspirationMediaStore(this.db, this.paths);
-      // The transaction is the authority switch. A crash before this rename
-      // resumes cleanup by checking its fingerprint, never imports twice.
-      if (legacy) {
-        if (statIfExists(this.fs, this.migratedPath)) fail("INSPIRATION_STORE_CORRUPT", "灵感迁移备份已存在，请核对数据");
-        this.fs.renameSync(this.legacyPath, this.migratedPath);
-        fsyncPrivateParent(this.paths.stateDir, this.fs);
-      }
       this.revision = Number(this.#statement("SELECT value FROM meta WHERE key='revision'").get()?.value);
       if (!time(this.revision)) fail("INSPIRATION_STORE_CORRUPT", "灵感数据库修订号无效");
       this.poisoned = false;
@@ -665,7 +615,7 @@ class InspirationStore extends EventEmitter {
     return { rows: rows.slice(0, limit), total, hasMore: rows.length > limit };
   }
 
-  // Explicit export for migrations and diagnostics; never used by ordinary reads or writes.
+  // Explicit export for diagnostics; never used by ordinary reads or writes.
   exportSnapshot() {
     this.#assertOpen();
     const records = table => Object.fromEntries(this.#statement(`SELECT id,data FROM ${table}`).all().map(row => [row.id, JSON.parse(row.data)]));

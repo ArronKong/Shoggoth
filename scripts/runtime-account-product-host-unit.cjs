@@ -145,40 +145,14 @@ const serviceRequest = async (method, params) => {
 
   const snapshot = await host.listRuntimeAccounts();
   assert.equal(snapshot.accounts.length, 1);
-  assert.equal(snapshot.legacyReclaimableBytes, 2_048);
-  assert.equal(snapshot.backupReclaimableBytes, 8_192);
-  assert.deepEqual(snapshot.backups, [backup()]);
   assert.equal(snapshot.accounts[0].storage.bytes, 4_096);
   assert.equal(JSON.stringify(snapshot).includes("/Users/"), false);
   assert.equal(JSON.stringify(snapshot).includes("runtimeProfileId"), false);
   assert.equal(JSON.stringify(snapshot).includes("providerRef"), false);
 
-  const plan = await host.prepareLegacyRuntimeHomeCleanup({ entryId: ENTRY_ID });
-  assert.equal(plan.planId, PLAN_ID);
-  const committed = await host.commitLegacyRuntimeHomeCleanup({ planId: PLAN_ID });
-  assert.equal(committed.bytesReleased, 2_048);
-  assert.deepEqual(calls.at(-2), [
-    "runtime.account.legacyHomes.cleanup.prepare",
-    { entryId: ENTRY_ID },
-  ]);
-  assert.deepEqual(calls.at(-1), [
-    "runtime.account.legacyHomes.cleanup.commit",
-    { planId: PLAN_ID },
-  ]);
-  await assert.rejects(
-    host.commitLegacyRuntimeHomeCleanup({ planId: PLAN_ID, path: "/tmp/forged" }),
-    { code: "HOST_RUNTIME_ACCOUNT_PARAMS_INVALID" },
-  );
-
-  const backupPlan = await host.prepareRuntimeBackupCleanup({ entryId: BACKUP_ENTRY_ID });
-  assert.equal(backupPlan.planId, BACKUP_PLAN_ID);
-  const backupCommitted = await host.commitRuntimeBackupCleanup({ planId: BACKUP_PLAN_ID });
-  assert.equal(backupCommitted.bytesReleased, 8_192);
-  assert.deepEqual(await host.listRuntimeBackups(), { backups: [backup()] });
-  await assert.rejects(
-    host.prepareRuntimeBackupCleanup({ entryId: BACKUP_ENTRY_ID, path: "/tmp/forged" }),
-    { code: "HOST_RUNTIME_ACCOUNT_PARAMS_INVALID" },
-  );
+  assert.deepEqual(Object.keys(snapshot), ["accounts"]);
+  for (const method of ["prepareLegacyRuntimeHomeCleanup", "commitLegacyRuntimeHomeCleanup", "listRuntimeBackups", "prepareRuntimeBackupCleanup", "commitRuntimeBackupCleanup"]) assert.equal(host[method], undefined);
+  await assert.rejects(host.readRuntimeAccountStorage({ runtimeAccountId: ACCOUNT_ID, path: "/tmp/forged" }), { code: "HOST_RUNTIME_ACCOUNT_PARAMS_INVALID" });
 
   const mismatchedHost = createProductHostController({
     serviceRequest: async (method) => {
@@ -234,7 +208,7 @@ const serviceRequest = async (method, params) => {
   const queued = await queuedHost.listRuntimeAccounts();
   assert.equal(queued.accounts.length, 2);
 
-  process.stdout.write("PASS RuntimeAccount product host safe DTO and opaque cleanup\n");
+  process.stdout.write("PASS RuntimeAccount product host current DTO, retired API absence and bounded sequential scans\n");
 })().catch((error) => {
   process.stderr.write(`${error?.stack || error}\n`);
   process.exitCode = 1;

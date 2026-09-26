@@ -13,6 +13,11 @@ const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const COLS = 160;
 const ROWS = 64;
 const MAX_BYTES = 8 * 1024 * 1024;
+const APPROVAL_RENDER_GRACE_MS = 5_000;
+const APPROVAL_FORMAT_TIMEOUT_MS = 30_000;
+const APPROVAL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
+const APPROVAL_CONSUME_TIMEOUT_MS = 5_000;
+const APPROVAL_TITLE = /^(?:File access|Command|Run this command\?|Run command|Tool permission|Permission|MCP|URL access|Web access|Read URL|Allow)(?:\b|$)/iu;
 const STATE_ENV = "SHOGGOTH_ANTIGRAVITY_TERMINAL_STATE";
 // Each invocation has its own file: a busy CLI must not overwrite an unread
 // idle/approval transition. This command only observes state, never grants it.
@@ -51,6 +56,24 @@ function terminalScreen(terminal) {
   )).join("\n");
 }
 
+function nativeInputRejection(line) {
+  // This is the CLI's pre-send rejection, not terminal/model output or the
+  // transient auth warnings emitted before Keychain authentication succeeds.
+  const match = /^[WE]\d{4} \d{2}:\d{2}:\d{2}\.\d+\s+\d+ conversation_manager\.go:\d+\] Not sending user message: Eligibility check failed: (.+)$/u.exec(line);
+  if (!match) return null;
+  const reason = match[1];
+  if (/(?:TLS handshake timeout|context deadline exceeded|i\/o timeout|connection (?:reset|refused)|no such host|\bEOF\b)/iu.test(reason)) {
+    return failure("ANTIGRAVITY_NETWORK_UNAVAILABLE", "Antigravity could not complete its network eligibility check; no message was sent");
+  }
+  if (/(?:not logged in|unauthenticated|authentication required|please sign in)/iu.test(reason)) {
+    return failure("AUTH_REQUIRED", "Antigravity authentication is required");
+  }
+  if (/User location is not supported/iu.test(reason)) {
+    return failure("ANTIGRAVITY_REGION_UNSUPPORTED", "Antigravity rejected the account location; no message was sent");
+  }
+  return failure("ANTIGRAVITY_ELIGIBILITY_FAILED", "Antigravity rejected its account eligibility check; no message was sent");
+}
+
 function parseNativeApproval(screen) {
   const lines = screen.split("\n");
   const options = [];
@@ -84,11 +107,11 @@ function parseNativeApproval(screen) {
   }
   // Read only the native modal, not earlier assistant/tool output in scrollback.
   let start = first - 1;
-  while (start >= 0 && !/^(?:File access|Command|Run this command\?|Run command|Tool permission|Permission|MCP|URL access|Web access|Allow)/iu.test(lines[start].trim())) start -= 1;
+  while (start >= 0 && !APPROVAL_TITLE.test(lines[start].trim())) start -= 1;
   if (start < 0) return null;
   // Include file/command details above the question when the modal has a title.
   for (let i = start - 1; i >= Math.max(0, first - 30); i -= 1) {
-    if (/^(?:File access|Command|Run this command\?|Run command|Tool permission|Permission|MCP|URL access|Web access)$/iu.test(lines[i].trim())) { start = i; break; }
+    if (/^(?:File access|Command|Run this command\?|Run command|Tool permission|Permission|MCP|URL access|Web access|Read URL)$/iu.test(lines[i].trim())) { start = i; break; }
   }
   const reason = lines.slice(start, first).filter((line) => !/^\s*[─━-]{3,}\s*$/u.test(line))
     .map((line) => line.trimEnd()).join("\n").trim();
@@ -151,6 +174,7 @@ class AntigravityNativeTerminal extends EventEmitter {
     this.closed = false;
     this.sent = false;
     this.accepted = false;
+    this.inputRejected = false;
     this.ready = false;
     this.result = false;
     this.pending = null;
@@ -163,6 +187,18 @@ class AntigravityNativeTerminal extends EventEmitter {
     this.response = "";
     this.prompt = null;
     this.exitTimer = null;
+    this.approvalTimer = null;
+    this.approvalWaiting = false;
+    this.now = options.now || Date.now;
+    this.approvalRenderGraceMs = options.approvalRenderGraceMs ?? APPROVAL_RENDER_GRACE_MS;
+    this.approvalFormatTimeoutMs = options.approvalFormatTimeoutMs ?? APPROVAL_FORMAT_TIMEOUT_MS;
+    this.approvalResponseTimeoutMs = options.approvalResponseTimeoutMs ?? APPROVAL_RESPONSE_TIMEOUT_MS;
+    this.approvalConsumeTimeoutMs = options.approvalConsumeTimeoutMs ?? APPROVAL_CONSUME_TIMEOUT_MS;
+    if (![this.approvalRenderGraceMs, this.approvalFormatTimeoutMs, this.approvalResponseTimeoutMs,
+      this.approvalConsumeTimeoutMs].every((value) => Number.isSafeInteger(value) && value >= 1 && value <= 10 * 60_000)
+      || this.approvalRenderGraceMs >= this.approvalFormatTimeoutMs) {
+      throw failure("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity approval timeout is invalid");
+    }
     this.lastProgressAt = Date.now();
     this.terminal = new Terminal({ cols: COLS, rows: ROWS, scrollback: 0, allowProposedApi: true });
     this.terminal.onData((data) => { if (this.ready && !this.closed) this.process.write(data); });
@@ -196,10 +232,15 @@ class AntigravityNativeTerminal extends EventEmitter {
     ensurePrivateDirectoryTree(stateRoot, trustedRoot);
     this.stateDir = fs.mkdtempSync(path.join(stateRoot, "terminal-"));
     fs.chmodSync(this.stateDir, 0o700);
+    this.logPath = path.join(this.stateDir, "native.log");
+    fs.writeFileSync(this.logPath, "", { flag: "wx", mode: 0o600 });
+    this.logOffset = 0;
+    this.logFragment = "";
+    this.logDecoder = new StringDecoder("utf8");
     const launcher = 'stty -echo; IFS= read -r _ || exit 125; exec "$@"';
     try {
       this.process = (this.options.spawnPty || require("node-pty").spawn)("/bin/sh", [
-        "-c", launcher, "shoggoth-antigravity-terminal", binaryPath, ...nativeTurnArgs(args),
+        "-c", launcher, "shoggoth-antigravity-terminal", binaryPath, ...nativeTurnArgs(args), "--log-file", this.logPath,
       ], { cwd, env: { ...env, TERM: "xterm-256color", [STATE_ENV]: this.stateDir },
         name: "xterm-256color", cols: COLS, rows: ROWS });
     } catch (error) { this.dispose(); throw error; }
@@ -238,6 +279,7 @@ class AntigravityNativeTerminal extends EventEmitter {
     }).sort((a, b) => a.time - b.time);
     for (const { state } of states) this._state(state);
     if (this.conversationId && this.sent) this._readTranscript();
+    this._readInputRejection();
     this._checkApproval();
     const screen = terminalScreen(this.terminal);
     if (!this.sent && this.prompt !== null && this.state?.agent_state === "idle"
@@ -246,12 +288,33 @@ class AntigravityNativeTerminal extends EventEmitter {
       this.offset = this.transcriptPath ? this._transcriptSize() : 0;
       this.sent = true;
       this.process.write(terminalPaste(this.prompt));
+      this.options.onInputSubmitted?.();
     }
     if (this.accepted && this.state?.agent_state === "idle" && !this.state.tool_confirmation_pending
       && this.state.pending_input_count === 0 && this.state.task_count === 0
       && screen.includes("? for shortcuts") && !this.pending && this.tools.length === 0
       && Date.now() - this.lastProgressAt > 300) {
       this._finish();
+    }
+  }
+
+  _readInputRejection() {
+    if (!this.sent || this.accepted) return;
+    // Private per-process log, bounded and removed on disposal. Only a safe
+    // error code leaves this reader; URLs, account details and prompts do not.
+    const data = readPrivateFile(this.logPath, { maxBytes: MAX_BYTES });
+    if (data.length < this.logOffset) throw failure("ANTIGRAVITY_DIAGNOSTIC_INVALID", "Antigravity diagnostic log was replaced");
+    this.logFragment += this.logDecoder.write(data.subarray(this.logOffset));
+    this.logOffset = data.length;
+    let newline;
+    while ((newline = this.logFragment.indexOf("\n")) >= 0) {
+      const line = this.logFragment.slice(0, newline);
+      this.logFragment = this.logFragment.slice(newline + 1);
+      const error = nativeInputRejection(line);
+      if (!error) continue;
+      this.inputRejected = true;
+      this._diagnostic(error.code);
+      throw error;
     }
   }
 
@@ -286,7 +349,7 @@ class AntigravityNativeTerminal extends EventEmitter {
       this.lastProgressAt = Date.now();
     }
     this.state = state;
-    if (this.pending?.responded && !state.tool_confirmation_pending) this.pending = null;
+    if (!state.tool_confirmation_pending) this._clearApproval();
   }
 
   _transcriptSize() {
@@ -378,26 +441,76 @@ class AntigravityNativeTerminal extends EventEmitter {
   }
 
   _checkApproval() {
-    if (!this.accepted || this.closed || this.pending || this.result || this.state?.tool_confirmation_pending !== true) return;
-    const approval = parseNativeApproval(terminalScreen(this.terminal));
+    if (!this.accepted || this.closed || this.result || this.interrupted || this.failing
+      || this.state?.tool_confirmation_pending !== true) return;
+    if (this.pending && !this.pending.unsupported) return;
+    // Native metadata proves a confirmation is pending even while the renderer
+    // has not painted its menu. Waiting for that paint is not model execution.
+    this._setApprovalWaiting(true);
+    const screen = terminalScreen(this.terminal);
+    const approval = parseNativeApproval(screen);
+    if (this.pending?.unsupported) {
+      if (!approval) return;
+      // A late paint can recover without replaying the turn. Retire the
+      // cancel-only card before issuing a new request with actual grant scope;
+      // its late responses are fenced by the pending identity and AbortSignal.
+      this._clearApproval();
+      this._setApprovalWaiting(true);
+      this._diagnostic("ANTIGRAVITY_APPROVAL_RENDER_RECOVERED", screen);
+    }
     if (!approval) {
-      this.unrecognizedApprovalAt ??= Date.now();
-      if (Date.now() - this.unrecognizedApprovalAt > 2_000) {
-        throw failure("ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED", "Antigravity native approval format is unsupported");
+      if (this.unrecognizedApprovalAt == null) {
+        this.unrecognizedApprovalAt = this.now();
+        this._approvalDeadline(this.approvalFormatTimeoutMs, "ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED");
+        this._diagnostic("ANTIGRAVITY_APPROVAL_RENDER_WAIT", screen);
+      }
+      if (this.now() - this.unrecognizedApprovalAt >= this.approvalRenderGraceMs) {
+        // An unknown menu has no trustworthy grant scope or key mapping. Offer
+        // only cancellation, never a fabricated Allow or a default Enter key.
+        const pending = { unsupported: true, controller: new AbortController() };
+        this.pending = pending;
+        this._diagnostic("ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED", screen);
+        this._requestApproval(pending, {
+          itemId: `antigravity-terminal-${this.conversationId}-${this.tools[0]?.index || 0}-unsupported`,
+          cwd: this.options.cwd,
+          toolName: this.tools.length === 1 ? this.tools[0].tool.name : "Antigravity",
+          toolInput: {},
+          reason: "Antigravity is waiting for permission, but this version's native approval could not be read. No permission has been granted. Cancel this turn to continue safely.",
+          sessionApprovalAvailable: false,
+          approvalOptions: [{ choice: "deny", label: "Cancel this turn", kind: "reject_once" }],
+        });
       }
       return;
     }
     this.unrecognizedApprovalAt = null;
-    const matching = this.tools.find(({ tool }) => [tool.parameters.AbsolutePath, tool.parameters.CommandLine]
+    const matching = this.tools.find(({ tool }) => [tool.parameters.AbsolutePath, tool.parameters.CommandLine, tool.parameters.Url, tool.parameters.URL, tool.parameters.url]
       .some((value) => typeof value === "string" && approval.reason.includes(value)));
     const tool = matching?.tool || (this.tools.length === 1 ? this.tools[0].tool : null);
     const params = approvalParams(approval, tool, this.options.cwd, `antigravity-terminal-${this.conversationId}-${this.tools[0]?.index || 0}`);
-    this.pending = approval;
-    this.options.onApprovalWaiting?.(true);
-    Promise.resolve().then(() => this.options.requestApproval(params)).then((response) => {
-      if (this.closed || this.result || this.interrupted || this.failing) return;
+    const pending = { ...approval, controller: new AbortController() };
+    this.pending = pending;
+    this._approvalDeadline(this.approvalResponseTimeoutMs, "ANTIGRAVITY_APPROVAL_TIMEOUT");
+    this._requestApproval(pending, params);
+  }
+
+  _requestApproval(pending, params) {
+    Promise.resolve().then(() => {
+      if (pending.controller.signal.aborted) return null;
+      return this.options.requestApproval(params, { signal: pending.controller.signal });
+    }).then((response) => {
+      if (this.pending !== pending || pending.controller.signal.aborted || this.closed || this.result
+        || this.interrupted || this.failing) return;
+      if (pending.unsupported) {
+        if (!["decline", "cancel"].includes(response?.decision)
+          || response.approvalChoice !== undefined && response.approvalChoice !== "deny") {
+          throw failure("RUNTIME_APPROVAL_RESPONSE_INVALID", "An unreadable Antigravity approval can only be canceled");
+        }
+        this._diagnostic("ANTIGRAVITY_APPROVAL_CANCELED");
+        this.kill("SIGINT");
+        return;
+      }
       const current = parseNativeApproval(terminalScreen(this.terminal));
-      if (this.state?.tool_confirmation_pending !== true || current?.fingerprint !== approval.fingerprint) {
+      if (this.state?.tool_confirmation_pending !== true || current?.fingerprint !== pending.fingerprint) {
         throw failure("ANTIGRAVITY_APPROVAL_CHANGED", "Antigravity native approval changed before the response");
       }
       const keys = approvalKeys(current, response);
@@ -405,9 +518,50 @@ class AntigravityNativeTerminal extends EventEmitter {
       this.process.write(keys);
       // Hold the request until the CLI consumes the key, so a repaint cannot
       // publish the same native prompt a second time.
-      this.pending.responded = true;
-      this.options.onApprovalWaiting?.(false);
-    }).catch((error) => this._fail(error));
+      pending.responded = true;
+      // Keep the execution clock paused until native metadata acknowledges the
+      // choice. A lost key/blocked CLI must not leave a consumed card forever.
+      this._approvalDeadline(this.approvalConsumeTimeoutMs, "ANTIGRAVITY_APPROVAL_RESPONSE_UNCONFIRMED");
+    }).catch((error) => {
+      if (this.pending === pending && !pending.controller.signal.aborted) this._fail(error);
+    });
+  }
+
+  _setApprovalWaiting(waiting) {
+    if (this.approvalWaiting === waiting) return;
+    this.approvalWaiting = waiting;
+    this.options.onApprovalWaiting?.(waiting);
+  }
+
+  _approvalDeadline(ms, code) {
+    clearTimeout(this.approvalTimer);
+    this.approvalTimer = setTimeout(() => {
+      if (!this.closed && !this.result && !this.interrupted && !this.failing) {
+        this._diagnostic(code);
+        this._fail(failure(code, "Antigravity permission waiting could not complete"));
+      }
+    }, ms);
+    this.approvalTimer.unref?.();
+  }
+
+  _clearApproval() {
+    clearTimeout(this.approvalTimer);
+    this.approvalTimer = null;
+    this.pending?.controller.abort();
+    this.pending = null;
+    this.unrecognizedApprovalAt = null;
+    this._setApprovalWaiting(false);
+  }
+
+  _diagnostic(code, screen = "") {
+    // Never persist a terminal screen, URL, command, path, prompt, or tool
+    // parameters. Counts and state are enough to identify protocol drift.
+    try { this.options.onDiagnostic?.({ code, transport: "native-terminal",
+      confirmationPending: this.state?.tool_confirmation_pending === true,
+      screenCharacters: screen.length,
+      menuRows: screen.split("\n").filter((line) => /^\s*[>❯]?\s*\d+\.\s+/u.test(line)).length,
+      pendingTools: this.tools.length,
+    }); } catch {}
   }
 
   _finish() {
@@ -419,6 +573,7 @@ class AntigravityNativeTerminal extends EventEmitter {
 
   _emitResult(status) {
     this.result = true;
+    this._clearApproval();
     this._emit({ event: "result", result: {
       conversation_id: this.conversationId, status, response: this.response, num_turns: 1,
       // statusLine's totals are context estimates in CLI 1.2.5, not billing
@@ -431,12 +586,14 @@ class AntigravityNativeTerminal extends EventEmitter {
   _fail(error) {
     if (this.closed || this.failing) return;
     this.failing = true;
+    this._clearApproval();
     this.emit("error", error);
     this.kill("SIGKILL");
   }
 
   kill(signal = "SIGTERM") {
     if (this.closed) return;
+    this._clearApproval();
     if (["SIGINT", "SIGTERM"].includes(signal) && !this.result) this.interrupted = true;
     if (!Number.isSafeInteger(this.pid) || this.pid <= 1) return;
     if (this.options.killProcessGroup) this.options.killProcessGroup(this.pid, signal);
@@ -451,17 +608,18 @@ class AntigravityNativeTerminal extends EventEmitter {
   }
 
   dispose() {
+    this._clearApproval();
     clearInterval(this.timer);
     clearTimeout(this.exitTimer);
     this.terminal.dispose();
     if (!this.stateDir) return;
     try {
       for (const name of fs.readdirSync(this.stateDir)) {
-        if (/^status\.[1-9][0-9]*\.(?:tmp|json)$/u.test(name)) fs.unlinkSync(path.join(this.stateDir, name));
+        if (name === "native.log" || /^status\.[1-9][0-9]*\.(?:tmp|json)$/u.test(name)) fs.unlinkSync(path.join(this.stateDir, name));
       }
       fs.rmdirSync(this.stateDir);
     } catch {}
   }
 }
 
-module.exports = { AntigravityNativeTerminal, STATUS_COMMAND, approvalKeys, approvalParams, nativeTurnArgs, parseNativeApproval, terminalPaste, terminalScreen };
+module.exports = { AntigravityNativeTerminal, STATUS_COMMAND, approvalKeys, approvalParams, nativeInputRejection, nativeTurnArgs, parseNativeApproval, terminalPaste, terminalScreen };

@@ -1,4 +1,5 @@
 "use strict";
+const { openRuntimeLedger } = require("./runtime-shared-ledger");
 
 const { imageAttachments } = require("./chat-attachments");
 
@@ -378,6 +379,8 @@ class ClaudeCodeRuntimeHost {
     });
     this.runtimeProfileId = this.binding.runtimeProfileId;
     this.runtimeAccountId = this.binding.runtimeAccountId;
+    this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
+    this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeClaudeCodePermissionPolicy(options.permissionPolicy);
     this.controlInstance = options.controlInstance === true;
@@ -463,14 +466,14 @@ class ClaudeCodeRuntimeHost {
         controlInstance: this.controlInstance,
         workspace: this.workspace,
       });
-      this.ledger = new ClaudeCodeRuntimeLedger({
+      this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new ClaudeCodeRuntimeLedger({
         fs: this.fs,
         stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", CLAUDE_CODE_RUNTIME),
         trustedRoot: this.paths.trustedRoot,
         runtimeProfileId: this.runtimeProfileId,
         workspaceShardId,
         now: this.now,
-      }).open();
+      }).open());
       this.state = "ready";
       return this;
     } catch (error) {
@@ -480,6 +483,11 @@ class ClaudeCodeRuntimeHost {
       }
       throw error;
     }
+  }
+
+  canRetireIdle() {
+    return this.state === "ready" && !this.cleanupIncomplete && !this.stopping
+      && this.activeTurns.size === 0 && this.controlProcesses.size === 0 && this.controlQueries.size === 0;
   }
 
   beginAcquire() {
@@ -991,6 +999,7 @@ class ClaudeCodeRuntimeHost {
     const reservation = this.mcpGateIssuer.reserveMcpServer({
       runtimeProfileId: this.runtimeProfileId,
       runtimeAccountId: this.runtimeAccountId,
+      executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.binaryPath,
     });
     active.reservationId = reservation.reservationId;
@@ -1174,6 +1183,7 @@ class ClaudeCodeRuntimeHost {
     }
     if (message.type === "assistant") {
       this._acceptActive(active);
+      if (message.message?.usage) active.currentContextUsage = structuredClone(message.message.usage);
       this._onAssistantMessage(active, message);
       return false;
     }
@@ -1317,6 +1327,7 @@ class ClaudeCodeRuntimeHost {
       this._publish({
         known: true,
         method: "claude-code/tool_result",
+        ...require("./context-tool-content").contextToolContent({ output: block.content }, this.registeredSecrets),
         type: "tool_result",
         sessionId: active.sessionId,
         turnId: active.turnId,
@@ -1342,6 +1353,7 @@ class ClaudeCodeRuntimeHost {
     this._publish({
       known: true,
       method: "claude-code/tool_start",
+      ...require("./context-tool-content").contextToolContent({ input: block.input ?? {} }, this.registeredSecrets),
       type: "tool_start",
       sessionId: active.sessionId,
       turnId: active.turnId,
@@ -1590,6 +1602,11 @@ class ClaudeCodeRuntimeHost {
       sessionId: active.sessionId,
       turnId: active.turnId,
     };
+    const capacity = result.modelUsage?.[active.model]?.contextWindow
+      ?? (Object.keys(result.modelUsage || {}).length === 1 ? Object.values(result.modelUsage)[0]?.contextWindow : null);
+    this._publish({ ...common, type: "context_usage",
+      contextUsage: require("./runtime-context-usage").claudeRuntimeContextUsage(
+        active.sessionId, active.currentContextUsage, capacity, this.now()) });
     if (response.length > 0 && !duplicateLocalOutput) {
       this._publish({
         ...common,
@@ -1709,6 +1726,31 @@ class ClaudeCodeRuntimeHost {
     if (active.outputBytes > MAX_TURN_OUTPUT_BYTES) {
       throw hostError("CLAUDE_CODE_TURN_OUTPUT_TOO_LARGE", "Claude Code response is too large");
     }
+  }
+
+  async generateModelOnly(input) {
+    return require("./runtime-model-only").runBoundedModelOnly(input, async signal => {
+      const query = this.sdk.query({ prompt: input.prompt, options: {
+        cwd: this.userHome, pathToClaudeCodeExecutable: this.binaryPath,
+        env: this._spawnEnvironment(), settingSources: [], strictMcpConfig: true,
+        mcpServers: {}, skills: [], tools: [], allowedTools: [], persistSession: false,
+        permissionMode: "dontAsk", maxTurns: 1, ...(input.model ? { model: input.model } : {}),
+        canUseTool: async () => ({ behavior: "deny", message: "Tool-free model task" }),
+        spawnClaudeCodeProcess: options => this._spawnSdkControlProcess(options),
+      } });
+      const record = { query }; this.controlQueries.add(record);
+      const abort = () => { try { query.close(); } catch {} };
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        for await (const event of query) {
+          if (event.type !== "result") continue;
+          if (event.is_error || event.subtype !== "success") throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model task failed");
+          return { text: event.result, model: Object.keys(event.modelUsage || {})[0] || input.model,
+            provider: null, usage: usageFromResult(event) };
+        }
+        throw hostError("MODEL_ONLY_ACCEPTANCE_UNKNOWN", "Model task disconnected");
+      } finally { signal.removeEventListener("abort", abort); abort(); this.controlQueries.delete(record); }
+    });
   }
 
   async _ensureModelCatalog() {

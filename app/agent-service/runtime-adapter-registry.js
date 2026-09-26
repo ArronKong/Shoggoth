@@ -17,8 +17,13 @@ class RuntimeAdapterRegistry {
   #idle = new Map();
   #stops = new Map();
   #closing = false;
+  #facades = new WeakMap();
+  #hosts = new Set();
+  #retired = 0;
 
   constructor(options = {}) {
+    this.validateHandles = options.validateHandles !== false;
+    this.onProtocolViolation = options.onProtocolViolation || (() => {});
     this.isIdle = options.isIdle;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 120_000;
     this.setTimer = options.setTimer || setTimeout;
@@ -45,12 +50,22 @@ class RuntimeAdapterRegistry {
     this.#adapters.set(runtime, adapter);
   }
 
-  acquire(value, options = {}) {
+  async acquire(value, options = {}) {
     const binding = runtimeBinding(value);
     const adapter = this.#adapter(binding.runtime);
-    if (!this.isIdle) return adapter.acquire(binding, options);
-    return this.#acquireManaged(binding, options, adapter);
+    const raw = await (!this.isIdle ? adapter.acquire(binding, options) : this.#acquireManaged(binding, options, adapter));
+    if (!this.validateHandles) return raw;
+    if (!this.#facades.has(raw)) {
+      const facade = require("./runtime-handle-v1").runtimeHandleV1(raw, binding, { onViolation: this.onProtocolViolation });
+      this.#facades.set(raw, facade); this.#hosts.add(facade);
+      facade.terminated.finally(() => { if (this.#hosts.delete(facade)) this.#retired++; }).catch(() => {});
+    }
+    return this.#facades.get(raw);
   }
+
+  statistics() { return { hosts: this.#hosts.size, retiredHosts: this.#retired, adapters: this.#adapters.size }; }
+
+  canGenerateModelOnly(runtime) { return isRuntimeAvailable(runtime) && this.#adapters.get(runtime)?.modelOnly === true; }
 
   stop(value) {
     const binding = runtimeBinding(value);

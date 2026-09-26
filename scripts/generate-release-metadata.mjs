@@ -57,8 +57,20 @@ const wsRef = addNpm("ws", "node_modules/ws");
 const ptyRef = addNpm("node-pty", "node_modules/node-pty");
 const xtermRef = addNpm("@xterm/headless", "node_modules/@xterm/headless");
 const fflateRef = addNpm("fflate", "node_modules/fflate", [
-  { name: "shoggoth:role", value: "inspiration-archive" },
+  { name: "shoggoth:role", value: "inspiration-archive;plugin-git-archive" },
 ]);
+const mcpClientRef = addNpm("@modelcontextprotocol/client", "node_modules/@modelcontextprotocol/client", [
+  { name: "shoggoth:role", value: "plugin-mcp-client" },
+]);
+const mcpCoreRef = addNpm("@modelcontextprotocol/core", "node_modules/@modelcontextprotocol/core");
+const mcpClientDependencyRefs = [
+  addNpm("cross-spawn", "node_modules/cross-spawn"),
+  addNpm("eventsource", "node_modules/eventsource"),
+  addNpm("eventsource-parser", "node_modules/eventsource-parser"),
+  addNpm("jose", "node_modules/jose"),
+  addNpm("pkce-challenge", "node_modules/pkce-challenge"),
+  addNpm("zod", "node_modules/zod"),
+];
 const cronRef = addNpm("cron-parser", "node_modules/cron-parser");
 const sqlite = JSON.parse(fs.readFileSync(path.join(repoRoot, "build/inspiration-sqlite-manifest.json")));
 const sqliteRef = addNpm("better-sqlite3", "node_modules/better-sqlite3", [
@@ -173,8 +185,10 @@ const bom = {
   components: [...components.values()].sort((left, right) => left["bom-ref"].localeCompare(right["bom-ref"])),
   dependencies: [
     { ref: rootRef, dependsOn: [
-      electronRef, wsRef, ptyRef, xtermRef, fflateRef, cronRef, sqliteRef, cuaSdkRef, cuaBinaryRef, ...codexRefs, ...inventoryRefs,
+      electronRef, wsRef, ptyRef, xtermRef, fflateRef, mcpClientRef, cronRef, sqliteRef, cuaSdkRef, cuaBinaryRef, ...codexRefs, ...inventoryRefs,
     ].filter((ref, index, refs) => refs.indexOf(ref) === index).sort() },
+    { ref: mcpClientRef, dependsOn: [mcpCoreRef, ...mcpClientDependencyRefs].sort() },
+    { ref: mcpCoreRef, dependsOn: [mcpClientDependencyRefs.at(-1)] },
     { ref: cronRef, dependsOn: [luxonRef] },
     { ref: cuaSdkRef, dependsOn: [ubjsCoreRef, ubjsNodeRef, ...nativeRefs].sort() },
     { ref: ubjsNodeRef, dependsOn: nativeRefs.filter((ref) => ref.includes("%40ubjs/")) },

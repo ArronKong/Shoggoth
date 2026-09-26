@@ -49,31 +49,41 @@ function fixture({ decodeGate, resumeGate, fetchError = false, duration = 40, de
 }
 
 for (const status of ['not-determined', 'denied', 'restricted', 'unknown']) {
-  let current = status, checks = 0, prompts = 0;
+  let current = status, checks = 0, prompts = 0, starts = 0, stops = 0;
   const f = fixture({ desktop: {
     async getMicrophoneAccessStatus() { checks++; return current; },
     async requestMicrophoneAccess() { prompts++; return true; },
+    typewriterSound: { start() { starts++; }, stop() { stops++; } },
   } });
   f.player.setTyping(true); await flush();
   f.gesture('pointerdown'); f.gesture('keydown'); await flush();
   assert.ok(checks > 0);
+  assert.equal(starts, 1, 'unapproved ambient sound uses native output-only playback');
   assert.equal(f.contexts.length, 0, 'unapproved ambient sound never opens a duplex audio device');
   assert.equal(f.requests.length, 0);
   assert.equal(prompts, 0, 'entering, typing and clicking on the page cannot request recording permission');
+  f.player.setTyping(false); assert.equal(stops, 1, 'native audio stops with screen typing');
   current = 'granted';
-  f.gesture('pointerdown'); await flush();
-  assert.equal(f.sources.length, 1, 'sound resumes after a separate recording action grants access');
+  f.player.setTyping(true); await flush();
+  assert.equal(f.sources.length, 1, 'granted audio still uses the existing Web Audio effect');
+  assert.equal(starts, 1);
   f.player.dispose();
 }
 {
-  const gate = deferred(), f = fixture({ desktop: { getMicrophoneAccessStatus: () => gate.promise } });
+  const gate = deferred(); let starts = 0;
+  const f = fixture({ desktop: { getMicrophoneAccessStatus: () => gate.promise,
+    typewriterSound: { start() { starts++; }, stop() {} } } });
   f.player.setTyping(true); f.player.dispose(); gate.resolve('granted'); await flush();
   assert.equal(f.contexts.length, 0, 'a late status response cannot open audio after navigation');
+  assert.equal(starts, 0);
 }
 {
-  const f = fixture({ desktop: { getMicrophoneAccessStatus: async () => { throw new Error('IPC unavailable'); } } });
+  let starts = 0;
+  const f = fixture({ desktop: { getMicrophoneAccessStatus: async () => { throw new Error('IPC unavailable'); },
+    typewriterSound: { start() { starts++; }, stop() {} } } });
   f.player.setTyping(true); await flush();
-  assert.equal(f.contexts.length, 0, 'a failed native status check leaves the optional effect silent');
+  assert.equal(starts, 1, 'a failed status check still permits output-only playback');
+  assert.equal(f.contexts.length, 0);
   f.player.dispose();
 }
 
@@ -139,4 +149,4 @@ for (const status of ['not-determined', 'denied', 'restricted', 'unknown']) {
   assert.equal(f.sources.length, 0, 'asset failures are contained');
   f.player.dispose();
 }
-console.log('PASS Inspiration typing audio: no device or permission request before native authorization, 2.5x speed, random excerpt per burst, loop cadence, buffer reuse, no overlap, collapse/load/resume races, autoplay gestures, unmount cleanup and asset failures');
+console.log('PASS Inspiration typing audio: native playback without microphone access, no recording prompts, granted Web Audio, 2.5x speed, random Web Audio excerpts, stop/load/resume races, unmount cleanup and asset failures');

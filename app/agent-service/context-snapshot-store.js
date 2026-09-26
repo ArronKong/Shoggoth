@@ -6,7 +6,9 @@ const path = require("node:path");
 const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 
-const MAX_CONTEXT_SNAPSHOT_BYTES = 1024 * 1024;
+// Native context fields currently accept 4 MiB. Snapshots contain both blocks
+// and their joined projection; JSON escaping also consumes space.
+const MAX_CONTEXT_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 const SNAPSHOT_ID_PATTERN = /^ctx-[a-f0-9]{64}$/u;
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 

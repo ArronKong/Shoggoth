@@ -1,4 +1,5 @@
 "use strict";
+const { poolLedgerSlot } = require("./runtime-shared-ledger");
 
 const { PiRuntimeHost } = require("./pi-runtime-host");
 const {
@@ -15,6 +16,7 @@ const {
   validateResolvedEnvironment,
 } = require("./runtime-account-resolver");
 const { serviceError } = require("./security");
+const { configurePoolCapacity, poolHostLimit, retirePoolHost, trackPoolHost, executionRunIdForPool } = require("./runtime-pool-capacity");
 
 function poolError(code, message) {
   return serviceError(code, message);
@@ -39,12 +41,13 @@ function poolBinding(value) {
   return binding;
 }
 
-function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace) {
+function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace, executionRunId) {
   return JSON.stringify([
     runtimeProfileId,
     runtimeAccountId,
     controlInstance ? "control" : "execution",
     workspace,
+    executionRunId,
   ]);
 }
 
@@ -68,10 +71,7 @@ class PiRuntimePool {
       parentEnv: options.parentEnv ?? options.hostOptions?.parentEnv,
       homedir: options.homedir ?? options.hostOptions?.homedir,
     });
-    this.maxHosts = options.maxHosts ?? 16;
-    if (!Number.isSafeInteger(this.maxHosts) || this.maxHosts < 1 || this.maxHosts > 64) {
-      throw poolError("PI_POOL_OPTIONS_INVALID", "Pi host limit is invalid");
-    }
+    configurePoolCapacity(this, options, "PI_POOL_OPTIONS_INVALID");
     this.entries = new Map();
     this.profileStates = new Map();
     this.stopPromises = new Map();
@@ -88,7 +88,9 @@ class PiRuntimePool {
     const accountId = binding.runtimeAccountId;
     const controlInstance = !Object.prototype.hasOwnProperty.call(options, "workspace");
     const workspace = controlInstance ? null : normalizePiWorkspace(options.workspace);
-    const key = routeKey(id, accountId, controlInstance, workspace);
+    let executionRunId;
+    try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
+    const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
     const permissionPolicy = normalizePiPermissionPolicy(options.permissionPolicy);
     const policyFingerprint = piPermissionFingerprint(permissionPolicy);
     if (this.blockedProfiles.has(id)) {
@@ -108,6 +110,7 @@ class PiRuntimePool {
     }
     const existing = this.entries.get(key);
     if (existing) {
+      if (existing.retiring) return existing.retiring.then(() => this.get(binding, options));
       if (existing.policyFingerprint !== policyFingerprint) {
         return Promise.reject(poolError(
           "RUNTIME_PERMISSION_POLICY_CONFLICT",
@@ -116,8 +119,10 @@ class PiRuntimePool {
       }
       return existing.promise.then((host) => { host.beginAcquire(); return host; });
     }
-    if (this.entries.size >= this.maxHosts) {
-      return Promise.reject(poolError("PI_HOST_LIMIT", "Pi host limit was reached"));
+    let hostLimit;
+    try { hostLimit = poolHostLimit(this); } catch (error) { return Promise.reject(error); }
+    if (this.entries.size >= hostLimit) {
+      return retirePoolHost(this).then(() => this.get(binding, options));
     }
     let profileState = this.profileStates.get(accountId);
     if (!profileState) {
@@ -134,6 +139,8 @@ class PiRuntimePool {
     } catch (error) {
       return Promise.reject(error);
     }
+    const ledgerKey = routeKey(id, accountId, controlInstance, workspace, null);
+    const ledgerSlot = poolLedgerSlot(this, ledgerKey);
     const host = this.hostFactory({
       ...this.hostOptions,
       paths: this.options.paths ?? this.hostOptions.paths,
@@ -158,6 +165,8 @@ class PiRuntimePool {
       runtimeProfileId: id,
       runtimeAccountId: accountId,
       runtimeBinding: binding,
+      mcpExecutionRunId: executionRunId,
+      ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,
       controlInstance,
@@ -166,8 +175,11 @@ class PiRuntimePool {
     });
     const entry = {
       host, key, runtimeProfileId: id, runtimeAccountId: accountId, policyFingerprint, promise: null,
+      ledgerKey, ledgerSlot,
     };
+    trackPoolHost(entry, binding);
     entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+      entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
           () => { if (this.entries.get(key) === entry) this.entries.delete(key); },

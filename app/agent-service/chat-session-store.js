@@ -14,12 +14,9 @@ const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
 const { validModelSettings } = require("./chat-model-settings");
 
-const CHAT_SESSION_STORE_VERSION = 6;
-const MODEL_SETTINGS_SESSION_STORE_VERSION = 5;
-const LEGACY_CHAT_SESSION_STORE_VERSION = 1;
-const PREVIOUS_CHAT_SESSION_STORE_VERSION = 2;
-const RUNTIME_SESSION_STORE_VERSION = 3;
-const PERMISSION_SESSION_STORE_VERSION = 4;
+const CHAT_SESSION_STORE_VERSION = 8;
+const MAX_RETIRED_RUNTIME_SESSIONS = 4096;
+const RUNTIME_SWITCH_FIELDS = ["sessionKey", "revision", "fromBindingId", "fromRuntimeSessionId", "toBindingId", "switchedAt", "audited"];
 const MAX_CHAT_SESSION_STORE_BYTES = 16 * 1024 * 1024;
 // Transcript/Chat 管理面需要覆盖至少 5k 个持久会话；保留 2 的幂次硬上限，
 // 同时继续受 16 MiB 容器字节门禁约束，避免把容量提升变成无界状态。
@@ -31,28 +28,15 @@ const MAX_COMPLETED_REMOTE_OPERATIONS = 256;
 const MAX_CRON_SESSION_BINDINGS = 65_536;
 const IDEMPOTENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_OPERATION_FUTURE_SKEW_MS = 5 * 60 * 1000;
-const SESSION_FIELDS = Object.freeze([
+const PRE_HANDOFF_SESSION_FIELDS = Object.freeze([
   "id", "sessionKey", "profileId", "runtimeSessionId", "workspace",
   "title", "modelOverride", "permissionMode", "status", "createdAt", "updatedAt",
 ]);
-const RUNTIME_SESSION_FIELDS = Object.freeze(
-  SESSION_FIELDS.filter((field) => field !== "permissionMode"),
-);
-const PREVIOUS_SESSION_FIELDS = Object.freeze([
-  "id", "sessionKey", "profileId", "codexThreadId", "workspace",
-  "title", "modelOverride", "status", "createdAt", "updatedAt",
-]);
-const LEGACY_SESSION_FIELDS = Object.freeze(
-  PREVIOUS_SESSION_FIELDS.filter((field) => field !== "modelOverride"),
-);
+const SESSION_FIELDS = Object.freeze([...PRE_HANDOFF_SESSION_FIELDS, "runtimeBindingId", "retiredRuntimeSessions", "revision"]);
 const SESSION_STATUSES = new Set(["draft", "binding", "ready", "archived", "delete_pending"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const BINDING_FIELDS = Object.freeze([
   "operationId", "sessionKey", "threadSource", "state", "runtimeSessionId",
-  "createdAt", "updatedAt", "finishedAt",
-]);
-const LEGACY_BINDING_FIELDS = Object.freeze([
-  "operationId", "sessionKey", "threadSource", "state", "codexThreadId",
   "createdAt", "updatedAt", "finishedAt",
 ]);
 const REMOTE_OPERATION_FIELDS = Object.freeze([
@@ -75,24 +59,7 @@ function exactObject(value, fields) {
 
 function clone(value) {
   if (value === null || value === undefined) return value;
-  const cloned = structuredClone(value);
-  if (Object.prototype.hasOwnProperty.call(cloned, "runtimeSessionId")) {
-    const runtimeSessionId = cloned.runtimeSessionId;
-    delete cloned.runtimeSessionId;
-    Object.defineProperty(cloned, "runtimeSessionId", {
-      configurable: false,
-      enumerable: false,
-      value: runtimeSessionId,
-      writable: false,
-    });
-    Object.defineProperty(cloned, "codexThreadId", {
-      configurable: false,
-      enumerable: true,
-      value: runtimeSessionId,
-      writable: false,
-    });
-  }
-  return cloned;
+  return structuredClone(value);
 }
 
 function validOpaqueId(value) {
@@ -114,55 +81,49 @@ function validNullableText(value, maxLength) {
     && value.length <= maxLength && !value.includes("\0"));
 }
 
-function normalizeSession(input, corrupt = false, version = CHAT_SESSION_STORE_VERSION) {
+function normalizeSession(input, corrupt = false) {
   const fail = () => {
     throw chatSessionError(
       corrupt ? "CHAT_SESSION_STORE_CORRUPT" : "CHAT_SESSION_INVALID",
       "ChatSession 数据无效",
     );
   };
-  let fields = version === LEGACY_CHAT_SESSION_STORE_VERSION
-    ? LEGACY_SESSION_FIELDS
-    : version === PREVIOUS_CHAT_SESSION_STORE_VERSION
-      ? PREVIOUS_SESSION_FIELDS
-      : version === RUNTIME_SESSION_STORE_VERSION ? RUNTIME_SESSION_FIELDS : SESSION_FIELDS;
-  const hasSettings = version >= MODEL_SETTINGS_SESSION_STORE_VERSION && Object.hasOwn(input || {}, "modelSettings");
+  let fields = SESSION_FIELDS;
+  const hasSettings = Object.hasOwn(input || {}, "modelSettings");
   if (hasSettings) fields = [...fields, "modelSettings"];
-  const runtimeSessionId = version >= RUNTIME_SESSION_STORE_VERSION
-    ? input?.runtimeSessionId : input?.codexThreadId;
+  const runtimeSessionId = input?.runtimeSessionId;
   if (!exactObject(input, fields) || (hasSettings && !validModelSettings(input.modelSettings))
     || !UUID_PATTERN.test(input.id) || !UUID_PATTERN.test(input.sessionKey)
     || !validOpaqueId(input.profileId)
     || !validNullableText(runtimeSessionId, 512)
     || !validNullableText(input.workspace, 4096)
     || !validNullableText(input.title, 512)
-    || (version !== LEGACY_CHAT_SESSION_STORE_VERSION
-      && !validNullableText(input.modelOverride, 512))
-    || (version >= PERMISSION_SESSION_STORE_VERSION
-      && !validNullableText(input.permissionMode, 64))
+    || !validNullableText(input.modelOverride, 512)
+    || !validNullableText(input.permissionMode, 64)
     || !SESSION_STATUSES.has(input.status)
     || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0
     || !Number.isSafeInteger(input.updatedAt) || input.updatedAt < input.createdAt) fail();
+  if ((!(input.runtimeBindingId === null || validOpaqueId(input.runtimeBindingId))
+    || !Number.isSafeInteger(input.revision) || input.revision < 1
+    || !Array.isArray(input.retiredRuntimeSessions) || input.retiredRuntimeSessions.length > MAX_RETIRED_RUNTIME_SESSIONS
+    || input.retiredRuntimeSessions.some((entry) => !exactObject(entry,
+      ["bindingId", "runtime", "runtimeAccountId", "runtimeSessionId", "retiredAt"])
+      || !validOpaqueId(entry.bindingId) || !validOpaqueId(entry.runtime) || !validOpaqueId(entry.runtimeAccountId)
+      || !validNullableText(entry.runtimeSessionId, 512) || entry.runtimeSessionId === null
+      || !Number.isSafeInteger(entry.retiredAt) || entry.retiredAt < 0))) fail();
   return Object.fromEntries([...SESSION_FIELDS, ...(hasSettings ? ["modelSettings"] : [])].map((field) => [
     field,
-    field === "runtimeSessionId"
-      ? runtimeSessionId
-      : field === "modelOverride" && version === LEGACY_CHAT_SESSION_STORE_VERSION
-        ? null
-        : field === "permissionMode" && version < PERMISSION_SESSION_STORE_VERSION
-          ? null : input[field],
+    input[field],
   ]));
 }
 
 function normalizeBindingOperation(
   input,
   corrupt = false,
-  version = CHAT_SESSION_STORE_VERSION,
 ) {
   const code = corrupt ? "CHAT_SESSION_STORE_CORRUPT" : "CHAT_BINDING_INVALID";
-  const fields = version >= RUNTIME_SESSION_STORE_VERSION ? BINDING_FIELDS : LEGACY_BINDING_FIELDS;
-  const runtimeSessionId = version >= RUNTIME_SESSION_STORE_VERSION
-    ? input?.runtimeSessionId : input?.codexThreadId;
+  const fields = BINDING_FIELDS;
+  const runtimeSessionId = input?.runtimeSessionId;
   if (!exactObject(input, fields) || !validBindingOperationId(input.operationId)
     || !UUID_PATTERN.test(input.sessionKey) || !["pending", "bound"].includes(input.state)
     || input.threadSource !== threadSourceFor(input.sessionKey, input.operationId)
@@ -216,20 +177,21 @@ function normalizeCreateOperation(input, corrupt = false) {
   return Object.fromEntries(CREATE_OPERATION_FIELDS.map((field) => [field, input[field]]));
 }
 
-function validateContainer(value) {
+function sessionNamespace(session, getProfileBinding) {
+  if (session.runtimeBindingId === null) return "unbound";
+  if (!getProfileBinding) return `binding:${session.runtimeBindingId}`;
+  const binding = getProfileBinding(session.profileId, session.runtimeBindingId);
+  if (!binding || binding.id !== session.runtimeBindingId || binding.profileId !== session.profileId) {
+    throw chatSessionError("CHAT_RUNTIME_BINDING_UNAVAILABLE", "会话 Runtime Binding 无法解析");
+  }
+  return JSON.stringify([binding.runtime, binding.runtimeAccountId]);
+}
+function validateContainer(value, { getProfileBinding = null } = {}) {
   if (!exactObject(value, [
     "version", "revision", "idempotencyFloorMs", "sessions",
     "createOperations", "bindingOperations", "remoteOperations",
-    ...(value?.version >= CHAT_SESSION_STORE_VERSION ? ["cronRuns"] : []),
-  ])
-    || ![
-      LEGACY_CHAT_SESSION_STORE_VERSION,
-      PREVIOUS_CHAT_SESSION_STORE_VERSION,
-      RUNTIME_SESSION_STORE_VERSION,
-      PERMISSION_SESSION_STORE_VERSION,
-      MODEL_SETTINGS_SESSION_STORE_VERSION,
-      CHAT_SESSION_STORE_VERSION,
-    ].includes(value.version)
+    "cronRuns", "runtimeSwitches",
+  ]) || value.version !== CHAT_SESSION_STORE_VERSION
     || !Number.isSafeInteger(value.revision) || value.revision < 0
     || !Number.isSafeInteger(value.idempotencyFloorMs) || value.idempotencyFloorMs < 0
     || !value.sessions || typeof value.sessions !== "object" || Array.isArray(value.sessions)
@@ -256,12 +218,18 @@ function validateContainer(value) {
   const threadIds = new Set();
   for (const [sessionKey, raw] of Object.entries(value.sessions)) {
     const session = normalizeSession(raw, true, value.version);
+    const namespace = sessionNamespace(session, getProfileBinding);
+    const runtimeKey = `${namespace}\0${session.runtimeSessionId}`;
+    const retiredKeys = session.retiredRuntimeSessions.map((entry) => `${JSON.stringify([entry.runtime, entry.runtimeAccountId])}\0${entry.runtimeSessionId}`);
+    if (new Set(retiredKeys).size !== retiredKeys.length || (session.runtimeSessionId !== null && retiredKeys.includes(runtimeKey))) {
+      throw chatSessionError("CHAT_SESSION_STORE_CORRUPT", "retired Runtime session 不得重新成为当前会话");
+    }
     if (session.sessionKey !== sessionKey || ids.has(session.id)
-      || (session.runtimeSessionId !== null && threadIds.has(session.runtimeSessionId))) {
+      || (session.runtimeSessionId !== null && threadIds.has(runtimeKey))) {
       throw chatSessionError("CHAT_SESSION_STORE_CORRUPT", "ChatSession 容器损坏");
     }
     ids.add(session.id);
-    if (session.runtimeSessionId !== null) threadIds.add(session.runtimeSessionId);
+    if (session.runtimeSessionId !== null) threadIds.add(runtimeKey);
     sessions[sessionKey] = session;
   }
   const createOperations = {};
@@ -326,9 +294,8 @@ function validateContainer(value) {
     const boundInvariant = ["ready", "archived", "delete_pending"].includes(session.status)
       && session.runtimeSessionId !== null && binding?.state === "bound"
       && binding.runtimeSessionId === session.runtimeSessionId;
-    // RuntimeAccount migration intentionally detaches the rebuildable Runtime
-    // session while retaining the old bound operation as crash-recovery
-    // evidence until the next semantic continuation replaces it.
+    // A runtime switch detaches its session while preserving the prior binding
+    // receipt until continuation commits the replacement.
     const detachedInvariant = ["ready", "archived", "delete_pending"].includes(session.status)
       && session.runtimeSessionId === null && binding?.state === "bound";
     if (!draftInvariant && !bindingInvariant && !boundInvariant && !detachedInvariant) {
@@ -380,8 +347,25 @@ function validateContainer(value) {
     }
     cronOwners.set(binding.sessionKey, binding.jobId);
   }
+  const runtimeSwitches = value.runtimeSwitches || {};
+  if (!runtimeSwitches || typeof runtimeSwitches !== "object" || Array.isArray(runtimeSwitches)
+    || Object.getPrototypeOf(runtimeSwitches) !== Object.prototype
+    || Object.keys(runtimeSwitches).length > MAX_CHAT_SESSIONS) {
+    throw chatSessionError("CHAT_SESSION_STORE_CORRUPT", "Runtime switch outbox 无效");
+  }
+  for (const [key, receipt] of Object.entries(runtimeSwitches)) {
+    if (!exactObject(receipt, RUNTIME_SWITCH_FIELDS) || key !== receipt.sessionKey || !UUID_PATTERN.test(key)
+      || !Number.isSafeInteger(receipt.revision) || receipt.revision < 2
+      || !(receipt.fromBindingId === null || validOpaqueId(receipt.fromBindingId))
+      || !validNullableText(receipt.fromRuntimeSessionId, 512) || !validOpaqueId(receipt.toBindingId)
+      || !Number.isSafeInteger(receipt.switchedAt) || receipt.switchedAt < 0 || typeof receipt.audited !== "boolean"
+      || (!receipt.audited && (!sessions[key] || sessions[key].revision < receipt.revision))) {
+      throw chatSessionError("CHAT_SESSION_STORE_CORRUPT", "Runtime switch outbox 无效");
+    }
+  }
   return {
     version: CHAT_SESSION_STORE_VERSION,
+    runtimeSwitches: structuredClone(runtimeSwitches),
     revision: value.revision,
     idempotencyFloorMs: value.idempotencyFloorMs,
     sessions,
@@ -403,6 +387,7 @@ class ChatSessionStore {
     this.atomicWrite = options.atomicWrite || atomicWritePrivateFile;
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
+    this.getProfileBinding = options.getProfileBinding || null;
     this.acquireWriterLease = options.acquireWriterLease || acquirePrivateWriterLease;
     this.writerLease = null;
     this.cleanupPending = false;
@@ -503,7 +488,8 @@ class ChatSessionStore {
 
   createSession(input) {
     this.#assertOpen();
-    if (!exactObject(input, ["operationId", "profileId", "workspace", "createdAt"])
+    if (!exactObject(input, ["operationId", "profileId", "workspace", "createdAt",
+      ...(Object.hasOwn(input || {}, "defaultBindingId") ? ["defaultBindingId"] : [])])
       || !validOpaqueId(input.operationId) || !validOpaqueId(input.profileId)
       || !validNullableText(input.workspace, 4096)
       || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0) {
@@ -540,6 +526,8 @@ class ChatSessionStore {
       sessionKey: this.randomUUID(),
       profileId: input.profileId,
       runtimeSessionId: null,
+      runtimeBindingId: this.#resolveBinding(input.profileId, input.defaultBindingId)?.id ?? null,
+      retiredRuntimeSessions: [], revision: 1,
       workspace: input.workspace,
       title: null,
       modelOverride: null,
@@ -571,7 +559,7 @@ class ChatSessionStore {
       },
     };
     this.container = this.#write(candidate);
-    return clone(session);
+    return this.getSession(session.sessionKey);
   }
 
   getSession(sessionKey) {
@@ -665,6 +653,92 @@ class ChatSessionStore {
     return this.getSession(session.sessionKey);
   }
 
+  #resolveBinding(profileId, bindingId) {
+    if (!this.getProfileBinding) {
+      if (bindingId !== undefined && bindingId !== null) throw chatSessionError("CHAT_RUNTIME_BINDING_UNAVAILABLE", "Runtime Binding resolver 不可用");
+      return null;
+    }
+    const binding = this.getProfileBinding(profileId, bindingId);
+    if (!binding || binding.profileId !== profileId || binding.enabled !== true
+      || (bindingId !== undefined && binding.id !== bindingId)) {
+      throw chatSessionError("CHAT_RUNTIME_BINDING_UNAVAILABLE", "Runtime Binding 不可用");
+    }
+    return binding;
+  }
+
+  switchRuntime(sessionKey, input) {
+    this.#assertOpen();
+    if (!UUID_PATTERN.test(sessionKey) || !input || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).some((key) => !["bindingId", "revision", "clearModelOverride", "permissionMode", "model", "renewSession"].includes(key))
+      || !validOpaqueId(input.bindingId) || !Number.isSafeInteger(input.revision)
+      || (input.clearModelOverride !== undefined && typeof input.clearModelOverride !== "boolean")
+      || (input.renewSession !== undefined && typeof input.renewSession !== "boolean")
+      || (input.permissionMode !== undefined && !validNullableText(input.permissionMode,64))
+      || (input.model !== undefined && (input.model === null || !validNullableText(input.model, 512)))) {
+      throw chatSessionError("CHAT_RUNTIME_SWITCH_INVALID", "Runtime 切换输入无效");
+    }
+    const session = this.container.sessions[sessionKey];
+    if (!session) throw chatSessionError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
+    if (session.revision !== input.revision) throw chatSessionError("CHAT_SESSION_REVISION_CONFLICT", "会话已变化，请刷新后重试");
+    if (!["draft", "ready"].includes(session.status)
+      || this.container.bindingOperations[sessionKey]?.state === "pending"
+      || Object.values(this.container.remoteOperations).some((operation) => operation.sessionKey === sessionKey && operation.state === "pending")
+      || this.container.runtimeSwitches[sessionKey]?.audited === false) {
+      throw chatSessionError("CHAT_RUNTIME_SWITCH_PENDING", "会话存在未完成操作");
+    }
+    const target = this.#resolveBinding(session.profileId, input.bindingId);
+    if (input.model !== undefined && session.runtimeBindingId === target.id && input.renewSession !== true) {
+      if (session.modelOverride === input.model && (input.permissionMode === undefined || input.permissionMode === session.permissionMode)) {
+        return this.getSession(sessionKey);
+      }
+      const updated = normalizeSession({ ...session, modelOverride: input.model, revision: session.revision + 1,
+        ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}),
+        ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
+        updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
+      this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+        sessions: { ...this.container.sessions, [sessionKey]: updated } });
+      return this.getSession(sessionKey);
+    }
+    const retired = [...session.retiredRuntimeSessions];
+    if (session.runtimeSessionId !== null) {
+      if (retired.length >= MAX_RETIRED_RUNTIME_SESSIONS) throw chatSessionError("CHAT_RUNTIME_HISTORY_CAPACITY", "会话 Runtime 历史已满，请创建新会话");
+      if (session.runtimeBindingId === null) throw chatSessionError("CHAT_RUNTIME_BINDING_UNAVAILABLE", "当前 session 缺少历史 Binding");
+      const previous = this.#resolveBinding(session.profileId, session.runtimeBindingId);
+      retired.push({ bindingId: previous.id, runtime: previous.runtime, runtimeAccountId: previous.runtimeAccountId,
+        runtimeSessionId: session.runtimeSessionId, retiredAt: this.#currentTime() });
+    }
+    const switchedAt = this.#currentTime();
+    const updated = normalizeSession({ ...session, runtimeBindingId: target.id, runtimeSessionId: null, revision: session.revision + 1,
+      retiredRuntimeSessions: retired, status: "draft", updatedAt: Math.max(switchedAt, session.updatedAt),
+      ...(input.clearModelOverride ? { modelOverride: null,
+        ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}) } : {}),
+      ...(input.model !== undefined ? { modelOverride: input.model,
+        ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}) } : {}),
+      ...(input.permissionMode !== undefined ? {permissionMode: input.permissionMode} : {}),
+    });
+    const bindingOperations = { ...this.container.bindingOperations }; delete bindingOperations[sessionKey];
+    const receipt = { sessionKey, revision: session.revision + 1, fromBindingId: session.runtimeBindingId,
+      fromRuntimeSessionId: session.runtimeSessionId, toBindingId: target.id, switchedAt, audited: false };
+    this.container = this.#write({ ...this.container, revision: this.container.revision + 1, bindingOperations,
+      sessions: { ...this.container.sessions, [sessionKey]: updated },
+      runtimeSwitches: { ...this.container.runtimeSwitches, [sessionKey]: receipt } });
+    return this.getSession(sessionKey);
+  }
+
+  listPendingRuntimeSwitches() {
+    this.#assertOpen();
+    return Object.values(this.container.runtimeSwitches).filter((receipt) => !receipt.audited).map((receipt) => structuredClone(receipt));
+  }
+
+  markRuntimeSwitchAudited(sessionKey, revision) {
+    this.#assertOpen();
+    const receipt = this.container.runtimeSwitches[sessionKey];
+    if (!receipt || receipt.revision !== revision) throw chatSessionError("CHAT_SESSION_REVISION_CONFLICT", "Runtime switch receipt 已变化");
+    if (!receipt.audited) this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+      runtimeSwitches: { ...this.container.runtimeSwitches, [sessionKey]: { ...receipt, audited: true } } });
+    return structuredClone(this.container.runtimeSwitches[sessionKey]);
+  }
+
   setModelOverride(sessionKey, model) {
     this.#assertOpen();
     if (!UUID_PATTERN.test(sessionKey) || !validNullableText(model, 512) || model === null) {
@@ -690,7 +764,7 @@ class ChatSessionStore {
       sessions: { ...this.container.sessions, [sessionKey]: updated },
     };
     this.container = this.#write(candidate);
-    return clone(updated);
+    return this.getSession(updated.sessionKey);
   }
 
   setModelSettings(sessionKey, modelSettings) {
@@ -709,7 +783,7 @@ class ChatSessionStore {
       updatedAt: Math.max(time, session.updatedAt) });
     this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
       sessions: { ...this.container.sessions, [sessionKey]: updated } });
-    return clone(updated);
+    return this.getSession(updated.sessionKey);
   }
 
   setPermissionMode(sessionKey, mode) {
@@ -736,7 +810,7 @@ class ChatSessionStore {
       sessions: { ...this.container.sessions, [sessionKey]: updated },
     };
     this.container = this.#write(candidate);
-    return clone(updated);
+    return this.getSession(updated.sessionKey);
   }
 
   getBinding(sessionKey) {
@@ -819,42 +893,6 @@ class ChatSessionStore {
     return clone(operation);
   }
 
-  detachRuntimeSession(input) {
-    this.#assertOpen();
-    if (!exactObject(input, ["sessionKey", "expectedRuntimeSessionId"])
-      || !UUID_PATTERN.test(input.sessionKey)
-      || !validNullableText(input.expectedRuntimeSessionId, 512)
-      || input.expectedRuntimeSessionId === null) {
-      throw chatSessionError("CHAT_BINDING_INVALID", "runtime session detach 输入无效");
-    }
-    const session = this.container.sessions[input.sessionKey];
-    const operation = this.container.bindingOperations[input.sessionKey];
-    if (!session) throw chatSessionError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
-    const legacyBound = operation?.state === "bound"
-      && operation.runtimeSessionId === input.expectedRuntimeSessionId
-      && (session.runtimeSessionId === input.expectedRuntimeSessionId
-        || session.runtimeSessionId === null);
-    if (!["ready", "archived"].includes(session.status)
-      || !legacyBound) {
-      throw chatSessionError("CHAT_SESSION_BINDING_CONFLICT", "runtime session detach 前置状态已变化");
-    }
-    if (session.runtimeSessionId === null) return clone(session);
-    const time = this.#currentTime();
-    this.#refreshWindow(time);
-    const updated = normalizeSession({
-      ...session,
-      runtimeSessionId: null,
-      updatedAt: Math.max(time, session.updatedAt),
-    });
-    const candidate = {
-      ...this.container,
-      revision: this.container.revision + 1,
-      sessions: { ...this.container.sessions, [input.sessionKey]: updated },
-    };
-    this.container = this.#write(candidate);
-    return clone(updated);
-  }
-
   completeBinding(sessionKey, operationId, runtimeSessionId) {
     this.#assertOpen();
     if (!UUID_PATTERN.test(sessionKey) || !validBindingOperationId(operationId)
@@ -878,7 +916,8 @@ class ChatSessionStore {
     }
     const threadConflict = Object.values(this.container.sessions)
       .find((candidate) => candidate.sessionKey !== sessionKey
-        && candidate.runtimeSessionId === runtimeSessionId);
+        && candidate.runtimeSessionId === runtimeSessionId
+        && sessionNamespace(candidate, this.getProfileBinding) === sessionNamespace(session, this.getProfileBinding));
     if (threadConflict) {
       throw chatSessionError("CHAT_THREAD_ID_CONFLICT", "Runtime session 已绑定其他 ChatSession");
     }
@@ -907,7 +946,7 @@ class ChatSessionStore {
       bindingOperations: { ...this.container.bindingOperations, [sessionKey]: completed },
     };
     this.container = this.#write(candidate);
-    return clone(updated);
+    return this.getSession(updated.sessionKey);
   }
 
   replaceBoundRuntimeSession(input) {
@@ -938,6 +977,7 @@ class ChatSessionStore {
     if (Object.values(this.container.sessions).some((candidate) => (
       candidate.sessionKey !== input.sessionKey
       && candidate.runtimeSessionId === input.runtimeSessionId
+      && sessionNamespace(candidate, this.getProfileBinding) === sessionNamespace(session, this.getProfileBinding)
     ))) {
       throw chatSessionError("CHAT_THREAD_ID_CONFLICT", "Runtime session 已绑定其他 ChatSession");
     }
@@ -961,29 +1001,13 @@ class ChatSessionStore {
       },
     };
     this.container = this.#write(candidate);
-    return clone(updatedSession);
-  }
-
-  replaceBoundThread(input) {
-    if (!exactObject(input, [
-      "sessionKey", "operationId", "expectedCodexThreadId", "codexThreadId",
-    ])) {
-      throw chatSessionError("CHAT_BINDING_INVALID", "bound thread repair 输入无效");
-    }
-    return this.replaceBoundRuntimeSession({
-      sessionKey: input.sessionKey,
-      operationId: input.operationId,
-      expectedRuntimeSessionId: input.expectedCodexThreadId,
-      runtimeSessionId: input.codexThreadId,
-    });
+    return this.getSession(updatedSession.sessionKey);
   }
 
   recoverBinding(input) {
     this.#assertOpen();
-    const legacy = exactObject(input, ["threadSource", "codexThreadId"]);
-    const current = exactObject(input, ["threadSource", "runtimeSessionId"]);
-    const runtimeSessionId = current ? input.runtimeSessionId : input?.codexThreadId;
-    if ((!legacy && !current)
+    const runtimeSessionId = input?.runtimeSessionId;
+    if (!exactObject(input, ["threadSource", "runtimeSessionId"])
       || typeof input.threadSource !== "string" || input.threadSource.length > 112
       || !validNullableText(runtimeSessionId, 512) || runtimeSessionId === null) {
       throw chatSessionError("CHAT_BINDING_INVALID", "binding recovery 输入无效");
@@ -1151,6 +1175,7 @@ class ChatSessionStore {
       bindingOperations: {},
       remoteOperations: {},
       cronRuns: {},
+      runtimeSwitches: {},
     };
   }
 
@@ -1215,13 +1240,14 @@ class ChatSessionStore {
       bindingOperations,
       remoteOperations,
     };
-    this.container = persist ? this.#write(candidate) : validateContainer(candidate);
+    this.container = persist ? this.#write(candidate) : validateContainer(candidate, { getProfileBinding: this.getProfileBinding });
   }
 
   #parse(bytes) {
     try {
       this.cronOriginIndex = null;
-      return validateContainer(JSON.parse(bytes.toString("utf8")));
+      const raw = JSON.parse(bytes.toString("utf8"));
+      return validateContainer(raw, { getProfileBinding: this.getProfileBinding });
     } catch (error) {
       if (error?.code === "CHAT_SESSION_STORE_CORRUPT") throw error;
       throw chatSessionError("CHAT_SESSION_STORE_CORRUPT", "ChatSession 容器损坏");
@@ -1229,7 +1255,16 @@ class ChatSessionStore {
   }
 
   #write(candidate) {
-    const validated = validateContainer(candidate);
+    const sessions = { ...candidate.sessions };
+    for (const [key, session] of Object.entries(sessions)) {
+      const prior = this.container.sessions[key];
+      if (prior && JSON.stringify(session) !== JSON.stringify(prior)) {
+        sessions[key] = { ...session, revision: prior.revision + 1 };
+      }
+    }
+    const runtimeSwitches = Object.fromEntries(Object.entries(candidate.runtimeSwitches)
+      .filter(([key, receipt]) => sessions[key] || !receipt.audited));
+    const validated = validateContainer({ ...candidate, sessions, runtimeSwitches }, { getProfileBinding: this.getProfileBinding });
     const serialized = `${JSON.stringify(validated)}\n`;
     if (Buffer.byteLength(serialized, "utf8") > MAX_CHAT_SESSION_STORE_BYTES) {
       throw chatSessionError("CHAT_SESSION_CAPACITY", "ChatSession 容量已满");
@@ -1273,6 +1308,7 @@ module.exports = {
   CHAT_SESSION_STORE_VERSION,
   CREATE_OPERATION_FIELDS,
   MAX_CHAT_SESSION_STORE_BYTES,
+  MAX_RETIRED_RUNTIME_SESSIONS,
   MAX_CHAT_SESSIONS,
   MAX_ACTIVE_CREATE_OPERATIONS,
   MAX_COMPLETED_REMOTE_OPERATIONS,
@@ -1281,6 +1317,7 @@ module.exports = {
   MAX_TERMINAL_BINDING_OPERATIONS,
   IDEMPOTENCY_WINDOW_MS,
   REMOTE_OPERATION_FIELDS,
+  RUNTIME_SWITCH_FIELDS,
   SESSION_FIELDS,
   SESSION_STATUSES,
   ChatSessionStore,

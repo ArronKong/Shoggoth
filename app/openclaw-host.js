@@ -11,7 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { resolveOpenclawBin } = require("./core/openclaw-backend");
-const { readLocalGatewayToken } = require("./core/device-auth");
+const { readLocalGatewayTokenAsync } = require("./core/device-auth");
 
 const DETECT_CACHE_MS = 3000;   // SetupOverlay ~1.5s 轮询;探测别放大成风暴
 const VERSION_CACHE_MS = 60000; // 版本几乎不变
@@ -157,7 +157,7 @@ async function detectOpenclawHost({ gatewayUrl, paths } = {}) {
     localGatewayUrl: localStatus?.url ?? null,
     localGatewayRunning: localStatus?.running ?? false,
     configExists: fileExists(configPath),
-    localTokenReadable: readLocalGatewayToken(configPath) !== undefined,
+    localTokenReadable: (await readLocalGatewayTokenAsync(configPath)) !== undefined,
     identityExists: fileExists(identityPath),
   };
   detectCache = { key, at: Date.now(), value };
@@ -194,7 +194,7 @@ async function startOpenclawGateway({ mode, paths } = {}) {
     }
     // 只有 Shoggoth 真能读到的新 token 才算修复成功。未来 OpenClaw 若改为写
     // 无法解析的 SecretRef，这里会明确失败，不会制造“已修复但仍认证失败”的假象。
-    if (readLocalGatewayToken(configPath) === undefined) {
+    if ((await readLocalGatewayTokenAsync(configPath)) === undefined) {
       return { ok: false, code: null, output: "openclaw doctor 未生成可读取的 gateway token" };
     }
     const restarted = await runOpenclawCommand(
