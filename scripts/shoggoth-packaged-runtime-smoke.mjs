@@ -58,7 +58,12 @@ function runCaptured(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd ?? REPO_ROOT,
-      env: options.env ?? { PATH: process.env.PATH ?? "", TMPDIR: process.env.TMPDIR ?? tmpdir() },
+      env: options.env ?? {
+        PATH: process.env.PATH ?? "",
+        TMPDIR: process.env.TMPDIR ?? tmpdir(),
+        // Keep the selected Apple toolchain for lipo/xcrun without inheriting credentials.
+        ...(process.env.DEVELOPER_DIR ? { DEVELOPER_DIR: process.env.DEVELOPER_DIR } : {}),
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -100,6 +105,9 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
   const agentServiceServerPath = path.join(
     resourcesPath, "app.asar", "app", "agent-service", "server.js",
   );
+  const pluginMcpClientPath = path.join(
+    resourcesPath, "app.asar", "app", "agent-service", "plugin-mcp-client.js",
+  );
   const scratchPath = await mkdtemp(path.join(tmpdir(), "shoggoth-run-as-node-"));
   await chmod(scratchPath, 0o700);
   try {
@@ -110,6 +118,15 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
         const relay = require(${JSON.stringify(relayPath)});
         const agentService = require(${JSON.stringify(agentServicePath)});
         const agentServiceServer = require(${JSON.stringify(agentServiceServerPath)});
+        const pluginMcpClient = require(${JSON.stringify(pluginMcpClientPath)});
+        const { resolveServicePaths } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/paths.js"))});
+        const { createRuntimeCliAuth } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/runtime-cli-auth.js"))});
+        const { normalizeConfig, projectNativeRuntimeConfig } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/core/config-store.js"))});
+        const authCatalog = createRuntimeCliAuth({
+          paths: resolveServicePaths({ homeDir: ${JSON.stringify(scratchPath)} }),
+          homedir: ${JSON.stringify(scratchPath)}, parentEnv: {},
+          packaged: true, resourcesPath: ${JSON.stringify(resourcesPath)},
+        });
         await new Promise((resolve) => setTimeout(resolve, 750));
         const rows = execFileSync("/bin/ps", ["-axo", "pid=,ppid=,command="], {
           encoding: "utf8", maxBuffer: 1024 * 1024,
@@ -139,6 +156,16 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
           agentServiceStartType: typeof agentService.startAgentServiceProcess,
           agentServiceServerResolved: require.resolve(${JSON.stringify(agentServiceServerPath)}),
           agentServiceCreateType: typeof agentServiceServer.createAgentService,
+          pluginMcpClientResolved: require.resolve(${JSON.stringify(pluginMcpClientPath)}),
+          pluginMcpClientType: typeof pluginMcpClient.PluginMcpClient,
+          initialRuntimeConfig: projectNativeRuntimeConfig(normalizeConfig({})),
+          enabledRuntimeAccountIds: require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/runtime-account.js"))}).DEFAULT_RUNTIME_ACCOUNTS
+            .filter(account => require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/runtime-availability.js"))}).isRuntimeAvailable(account.runtime))
+            .map(account => account.id),
+          authCatalog: authCatalog.map(row => ({
+            id: row.runtimeAccountId, kind: row.accountKind, home: row.accountHome,
+            binaryPath: row.binaryPath,
+          })),
           forbiddenDescendants: descendants.filter(({ command }) => (
             /--type=gpu-process|network\\.mojom\\.NetworkService|Network Service/u.test(command)
           )),
@@ -170,6 +197,21 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
     assert.equal(result.agentServiceStartType, "function");
     assert.equal(result.agentServiceServerResolved, agentServiceServerPath);
     assert.equal(result.agentServiceCreateType, "function");
+    assert.equal(result.pluginMcpClientResolved, pluginMcpClientPath);
+    assert.equal(result.pluginMcpClientType, "function",
+      "packaged plugin MCP client and its transitive SDK modules must load");
+    assert.deepEqual(result.initialRuntimeConfig, { revision: 0, maxActive: 100, startupConcurrency: 8,
+      flags: { runtimeAdmissionV1: true, runtimeContextLifecycleV1: true,
+        runtimeMultiBinding: true, runtimeConversationHandoff: true } },
+    "fresh packaged App must enable the shipped Runtime switching and lifecycle features");
+    assert.deepEqual(result.authCatalog.map(row => row.id).sort(), result.enabledRuntimeAccountIds.sort(),
+      "desktop startup must resolve every enabled account exactly once");
+    const managed = result.authCatalog.filter(row => row.kind === "shoggoth-managed");
+    assert.equal(managed.length, 1);
+    assert.equal(managed[0].home, path.join(scratchPath, "Library/Application Support/Shoggoth",
+      "shoggoth-core/runtime-accounts/codex", managed[0].id, "home"));
+    assert.ok(managed[0].binaryPath, "managed account must resolve the bundled runtime");
+    assert.deepEqual(await readdir(scratchPath), [], "desktop auth catalog must not create Runtime Homes");
     assert.deepEqual(result.forbiddenDescendants, [],
       "RunAsNode must not start GPU or Network Service child processes");
   } finally {
@@ -187,13 +229,17 @@ async function verifyPackagedService(appPath) {
   try {
     const probe = await runCaptured(path.join(canonicalAppPath, "Contents", "MacOS", "Shoggoth"), ["-e", `
       const assert = require("node:assert/strict");
+      const fs = require("node:fs");
       const path = require("node:path");
       const crypto = require("node:crypto");
       const appRoot = ${JSON.stringify(appRoot)};
       const { createAgentService, PROTOCOL_VERSION } = require(path.join(appRoot, "agent-service/server.js"));
       const { resolveServicePaths } = require(path.join(appRoot, "agent-service/paths.js"));
       const { requestService, readClientToken } = require(path.join(appRoot, "agent-service/client.js"));
-      const { DEFAULT_AGENT_PROFILE_ID: profileId } = require(path.join(appRoot, "agent-service/product-store.js"));
+      const { DEFAULT_AGENT_PROFILE_ID: profileId, STORE_SCHEMA_VERSION } = require(path.join(appRoot, "agent-service/product-store.js"));
+      const { CHAT_SESSION_STORE_VERSION } = require(path.join(appRoot, "agent-service/chat-session-store.js"));
+      const { STORE_VERSION: TOKEN_USAGE_STORE_VERSION } = require(path.join(appRoot, "agent-service/token-usage-store.js"));
+      const { DATA_AUTHORITY_MANIFEST, validateDataAuthorityManifest } = require(path.join(appRoot, "agent-service/data-authority-manifest.js"));
       const { CHUNK_BYTES } = require(path.join(appRoot, "agent-service/inspiration-media.js"));
       const root = ${JSON.stringify(scratchPath)};
       const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
@@ -204,8 +250,26 @@ async function verifyPackagedService(appPath) {
       const ipc = (method, params) => requestService(paths, { id: crypto.randomUUID(),
         token: readClientToken(paths), version: PROTOCOL_VERSION, method, params });
       (async () => {
+        assert.equal(PROTOCOL_VERSION, 10, "packaged Service v10 exact DTO contract is required");
+        assert.equal(STORE_SCHEMA_VERSION, 15, "packaged current Product15 reader is required");
+        assert.equal(CHAT_SESSION_STORE_VERSION, 8, "packaged Chat8 reader is required");
+        assert.equal(TOKEN_USAGE_STORE_VERSION, 2, "packaged usage attribution reader is required");
+        assert.equal(validateDataAuthorityManifest(DATA_AUTHORITY_MANIFEST), true);
+        assert.equal(DATA_AUTHORITY_MANIFEST.stores.product.schemaVersion, STORE_SCHEMA_VERSION);
+        assert.equal(DATA_AUTHORITY_MANIFEST.stores.chatSession.schemaVersion, CHAT_SESSION_STORE_VERSION);
+        assert.equal(DATA_AUTHORITY_MANIFEST.stores.tokenUsage.schemaVersion, TOKEN_USAGE_STORE_VERSION);
         let session;
         let idea;
+        let pluginInstallation;
+        let pluginAuthority;
+        const pluginSourcePath = path.join(root, "plugin-source");
+        fs.mkdirSync(path.join(pluginSourcePath, "skills/fixture"), { recursive: true });
+        fs.writeFileSync(path.join(pluginSourcePath, "plugin.json"), JSON.stringify({
+          $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+          name: "packaged-fixture", description: "Local packaged startup fixture",
+        }));
+        fs.writeFileSync(path.join(pluginSourcePath, "skills/fixture/SKILL.md"),
+          "---\\nname: fixture\\ndescription: Local packaged startup regression\\n---\\nRead the local fixture.\\n");
         const image = Buffer.alloc(CHUNK_BYTES + 31, 42);
         Buffer.from("89504e470d0a1a0a", "hex").copy(image);
         const voice = Buffer.alloc(80); voice.write("RIFF"); voice.write("WAVE", 8);
@@ -226,11 +290,54 @@ async function verifyPackagedService(appPath) {
               await new Promise(resolve => setTimeout(resolve, 20));
             }
             assert.equal(status.healthy, true);
+            assert.equal(status.productSchemaVersion, 15);
             assert.equal(status.pendingCommandsLocked, false);
             assert.equal(status.mcpCredentialsLocked, false);
+            assert.ok(service.pluginStore, "default packaged Service must open its plugin database");
+            if (generation === 0) {
+              const source = { kind: "directory", path: pluginSourcePath };
+              const preview = await ipc("plugins.install.preview", { source });
+              assert.equal(preview.installable, true);
+              const result = await ipc("plugins.install", { source, previewDigest: preview.previewDigest,
+                expectedRevision: preview.expectedRevision, operationId: "packaged-default-plugin" });
+              pluginInstallation = result.installation;
+              pluginAuthority = service.pluginStore.getAuthorityIncarnation();
+            }
+            const plugins = await ipc("plugins.capabilities.list", { cursor: 0, limit: 10, catalogRevision: null });
+            assert.deepEqual(plugins.items.map(item => item.installationId), [pluginInstallation.installationId]);
+            assert.equal(service.pluginStore.getAuthorityIncarnation(), pluginAuthority,
+              "plugin authority survives read-only startup preflight and Service restart");
+            assert.ok(service.productStore.listAgentProfiles().every(profile => profile.backendId === "shoggoth"),
+              "packaged native Profiles share the current shoggoth owner");
+            const profile = service.productStore.getAgentProfile(profileId);
+            const bindings = service.productStore.getAgentRuntimeBindings(profileId);
+            assert.equal(bindings.defaultBindingId, profile.defaultBindingId);
+            assert.ok(bindings.bindings.some(binding => binding.id === profile.defaultBindingId && binding.enabled));
+            const selected = service.productStore.resolveAgentRuntimeProfile(profileId, profile.defaultBindingId);
+            assert.equal(selected.runtimeAccountId, profile.runtimeAccountId);
+            const runtimePolicy = await ipc("agent.runtimePolicy.get", { profileId });
+            assert.equal(runtimePolicy.version, 1);
+            if (generation === 0) {
+              await ipc("agent.runtimePolicy.set", { profileId, policy: { ...runtimePolicy,
+                mode: "fixed", allowedBindingIds: [profile.defaultBindingId], affinity: false } });
+            } else {
+              assert.equal(runtimePolicy.affinity, false, "packaged selection policy survives Service restart");
+              assert.deepEqual(runtimePolicy.allowedBindingIds, [profile.defaultBindingId]);
+            }
+            const observations = await ipc("runtime.observability.get", {});
+            assert.equal(observations.version, 1);
+            assert.equal(observations.scope, "service-process");
+            const publicProfiles = await ipc("profile.list", {
+              backendId: "shoggoth", cursor: null, limit: 100, enabledOnly: false });
+            assert.ok(publicProfiles.profiles.length > 0);
+            assert.ok(publicProfiles.profiles.every(item => item.backendId === "shoggoth"),
+              "all native Agent DTOs must use the canonical Shoggoth facade");
             if (generation === 0) {
               session = service.chatSessionStore.listSessions()[0];
               assert.ok(session, "default chat session must exist");
+              assert.equal(session.runtimeBindingId, profile.defaultBindingId);
+              assert.ok(Number.isSafeInteger(session.revision) && session.revision >= 1);
+              assert.deepEqual(session.retiredRuntimeSessions, []);
               service.transcriptStore.appendEvent({ profileId, sessionId: session.id,
                 id: "packaged-chat-event", kind: "user", content: { text: "Packaged chat history survives restart" } });
               for (const item of media) {
@@ -245,6 +352,9 @@ async function verifyPackagedService(appPath) {
             const sessions = await ipc("chat.session.list", {
               profileId, cursor: null, limit: 10, includeArchived: false });
             assert.ok(sessions.sessions.some(item => item.sessionKey === session.sessionKey));
+            const resumed = service.chatSessionStore.getSession(session.sessionKey);
+            assert.equal(resumed.runtimeBindingId, session.runtimeBindingId,
+              "restart must retain the selected Binding instead of resolving a new default");
             const transcript = await ipc("harness.transcript.events", {
               profileId, sessionId: session.id, cursor: 0, limit: 10 });
             assert.ok(JSON.stringify(transcript).includes("Packaged chat history survives restart"));
@@ -551,7 +661,7 @@ async function verifyPackagedDeepSeekHarnessBridge(appPath, electronExecutable) 
       ELECTRON_RUN_AS_NODE: "1", HOME: tmpdir(), PATH: "/usr/bin:/bin", TMPDIR: tmpdir(),
     },
   });
-  assert.equal(probe.code, 0, `packaged DeepSeek Harness Bridge check failed: ${probe.stderr}`);
+  assert.equal(probe.code, 0, `packaged DeepSeek Bridge check failed: ${probe.stderr}`);
 }
 
 async function verifySourceContract(onlyArch = null) {
@@ -1056,18 +1166,11 @@ async function extractVerifiedZip(zipPath, destination, referenceAppPath) {
 }
 
 async function verifyZipArtifact(zipPath, expected) {
-  const checked = await runCaptured("/usr/bin/unzip", ["-t", zipPath], { timeoutMs: 120_000 });
+  // The bundled plugin catalog adds thousands of entries. Quiet integrity
+  // output stays bounded; extractVerifiedZip validates every member name and
+  // payload while comparing the complete inventory with the built App.
+  const checked = await runCaptured("/usr/bin/unzip", ["-tq", zipPath], { timeoutMs: 120_000 });
   assert.equal(checked.code, 0, `${path.basename(zipPath)} failed integrity check`);
-  const listing = await runCaptured("/usr/bin/unzip", ["-Z1", zipPath], { timeoutMs: 120_000 });
-  assert.equal(listing.code, 0, `${path.basename(zipPath)} member listing failed`);
-  const members = listing.stdout.split("\n").filter(Boolean);
-  assert.equal(members.length > 0, true, "ZIP must not be empty");
-  for (const member of members) {
-    assert.equal(member.includes("\\"), false, `unsafe ZIP member: ${member}`);
-    assert.equal(member.startsWith("/"), false, `unsafe ZIP member: ${member}`);
-    assert.equal(member.split("/").some((part) => part === "." || part === ".."), false, `unsafe ZIP member: ${member}`);
-    assert.equal(member.split("/")[0], "Shoggoth.app", `unexpected ZIP top-level member: ${member}`);
-  }
   const scratchPath = await mkdtemp(path.join(tmpdir(), `shoggoth-zip-${expected.arch}-`));
   await chmod(scratchPath, 0o700);
   try {
@@ -1099,7 +1202,7 @@ async function verifyPackagedSpike(onlyArch = null) {
   }
 }
 
-const requestedArch = process.argv[2] === "--spike-arm64" ? "arm64"
+const requestedArch = ["--spike-arm64", "--app-arm64"].includes(process.argv[2]) ? "arm64"
   : process.argv[2] === "--spike-x64" ? "x64" : null;
 if (process.argv[2] === "--service-app") {
   if (process.argv.length !== 4 || !path.isAbsolute(process.argv[3])) {
@@ -1111,7 +1214,10 @@ if (process.argv[2] === "--service-app") {
 }
 await verifySourceContract(requestedArch);
 if (process.argv[2] === "--spike") await verifyPackagedSpike();
+else if (process.argv[2] === "--app-arm64") await verifyApp(path.join(ARTIFACT_ROOT, "mac-arm64", "Shoggoth.app"),
+  { arch: "arm64", target: "aarch64-apple-darwin", binaryArch: "arm64" }, process.arch === "arm64");
 else if (process.argv[2] === "--spike-arm64") await verifyPackagedSpike("arm64");
 else if (process.argv[2] === "--spike-x64") await verifyPackagedSpike("x64");
 else if (process.argv.length > 2) throw new Error(`unknown argument: ${process.argv[2]}`);
-console.log(`[shoggoth-packaged-runtime-smoke] PASS${process.argv[2]?.startsWith("--spike") ? " packaged spike" : " source contract"}`);
+console.log(`[shoggoth-packaged-runtime-smoke] PASS${process.argv[2] === "--app-arm64" ? " packaged App (directory only)"
+  : process.argv[2]?.startsWith("--spike") ? " packaged spike" : " source contract"}`);

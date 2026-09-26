@@ -33,6 +33,7 @@ function usage(overrides = {}) {
     threadId: "thread-default",
     turnId: "turn-default",
     responseId: "response-default",
+    runId: "run-default", runtime: "codex", runtimeAccountId: "native-codex-default-v1",
     model: "gpt-5.6-sol",
     provider: "chatgpt",
     usage: {

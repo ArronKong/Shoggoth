@@ -298,8 +298,11 @@ class McpAuthSecretStore {
 }
 
 module.exports = {
+  assertReadOnlyDirectoryTree,
+  decodeMcpAuthSecretPlaintext: decodeSecretPlaintext,
   MAX_MCP_AUTH_FILE_BYTES,
   MCP_AUTH_SECRET_BYTES,
   MCP_AUTH_STORE_VERSION,
   McpAuthSecretStore,
+  parseMcpAuthContainer: parseContainer,
 };

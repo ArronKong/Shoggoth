@@ -73,7 +73,7 @@ function validateLedger(value, runtimeProfileId, workspaceShardId) {
     || !value.sessions.every(validateSession)) {
     throw ledgerError(
       "DEEPSEEK_HARNESS_LEDGER_INVALID",
-      "DeepSeek Harness runtime ledger is invalid",
+      "DeepSeek runtime ledger is invalid",
     );
   }
   const ids = new Set();
@@ -84,7 +84,7 @@ function validateLedger(value, runtimeProfileId, workspaceShardId) {
     if (ids.has(session.id) || remoteIds.has(session.remoteSessionId) || sources.has(session.source)) {
       throw ledgerError(
         "DEEPSEEK_HARNESS_LEDGER_INVALID",
-        "DeepSeek Harness ledger contains duplicate sessions",
+        "DeepSeek ledger contains duplicate sessions",
       );
     }
     ids.add(session.id);
@@ -95,7 +95,7 @@ function validateLedger(value, runtimeProfileId, workspaceShardId) {
       if (turns.has(turn.id) || operations.has(turn.operationId)) {
         throw ledgerError(
           "DEEPSEEK_HARNESS_LEDGER_INVALID",
-          "DeepSeek Harness ledger contains duplicate turns",
+          "DeepSeek ledger contains duplicate turns",
         );
       }
       turns.add(turn.id);
@@ -111,7 +111,7 @@ class DeepSeekHarnessRuntimeLedger {
     if (!validRuntimeProfileId(options.runtimeProfileId)) {
       throw ledgerError(
         "DEEPSEEK_HARNESS_LEDGER_OPTIONS_INVALID",
-        "DeepSeek Harness runtime profile id is invalid",
+        "DeepSeek runtime profile id is invalid",
       );
     }
     this.runtimeProfileId = options.runtimeProfileId;
@@ -120,7 +120,7 @@ class DeepSeekHarnessRuntimeLedger {
       || typeof options.workspaceShardId !== "string" || !/^[a-f0-9]{64}$/u.test(options.workspaceShardId)) {
       throw ledgerError(
         "DEEPSEEK_HARNESS_LEDGER_OPTIONS_INVALID",
-        "DeepSeek Harness ledger paths are invalid",
+        "DeepSeek ledger paths are invalid",
       );
     }
     this.stateRoot = path.resolve(options.stateRoot);
@@ -133,7 +133,7 @@ class DeepSeekHarnessRuntimeLedger {
       || relative.startsWith("..") || path.isAbsolute(relative)) {
       throw ledgerError(
         "DEEPSEEK_HARNESS_LEDGER_OPTIONS_INVALID",
-        "DeepSeek Harness ledger escapes its root",
+        "DeepSeek ledger escapes its root",
       );
     }
     this.ledgerPath = path.join(this.runtimeRoot, "runtime-ledger.json");
@@ -168,7 +168,7 @@ class DeepSeekHarnessRuntimeLedger {
       }
       throw ledgerError(
         "DEEPSEEK_HARNESS_LEDGER_INVALID",
-        "DeepSeek Harness ledger is malformed",
+        "DeepSeek ledger is malformed",
       );
     }
     this.data = validateLedger(parsed, this.runtimeProfileId, this.workspaceShardId);
@@ -177,14 +177,14 @@ class DeepSeekHarnessRuntimeLedger {
 
   snapshot() {
     if (!this.data) {
-      throw ledgerError("DEEPSEEK_HARNESS_LEDGER_CLOSED", "DeepSeek Harness ledger is closed");
+      throw ledgerError("DEEPSEEK_HARNESS_LEDGER_CLOSED", "DeepSeek ledger is closed");
     }
     return structuredClone(this.data);
   }
 
   update(mutator) {
     if (!this.data || typeof mutator !== "function") {
-      throw ledgerError("DEEPSEEK_HARNESS_LEDGER_CLOSED", "DeepSeek Harness ledger is closed");
+      throw ledgerError("DEEPSEEK_HARNESS_LEDGER_CLOSED", "DeepSeek ledger is closed");
     }
     const next = structuredClone(this.data);
     const result = mutator(next);
@@ -199,7 +199,7 @@ class DeepSeekHarnessRuntimeLedger {
     if (Buffer.byteLength(serialized, "utf8") > MAX_LEDGER_BYTES) {
       throw ledgerError(
         "DEEPSEEK_HARNESS_LEDGER_TOO_LARGE",
-        "DeepSeek Harness ledger exceeds its limit",
+        "DeepSeek ledger exceeds its limit",
       );
     }
     atomicWritePrivateFile(this.ledgerPath, serialized, {

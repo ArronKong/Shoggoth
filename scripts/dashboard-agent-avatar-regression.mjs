@@ -30,18 +30,18 @@ vm.runInNewContext(compiled, {
   module, exports: module.exports, require: uiRequire,
   AgentAvatarView: avatarModule.default,
 }, { filename: feedPath });
-for (const [props, initial] of [
-  [{ agentId: "stable/id", displayName: "Alice" }, "A"],
-  [{ agentId: "stable/id", displayName: "中文助理" }, "中"],
-  [{ agentId: "backend agent" }, "B"],
-  [{ agentId: "fallback", displayName: "" }, "F"],
-  [{ agentId: "" }, "?"],
+for (const props of [
+  { agentId: "stable/id", displayName: "Alice" },
+  { agentId: "stable/id", displayName: "中文助理" },
+  { agentId: "backend agent" },
+  { agentId: "fallback", displayName: "" },
+  { agentId: "" },
 ]) {
   const rendered = create(React.createElement(module.exports.ActivityAgentAvatar, props));
   try {
     const avatar = rendered.root.findByType("span");
     assert.match(avatar.props.className, /dash-run-agent-avatar/);
-    assert.equal(avatar.props["data-initial"], initial);
+    assert.equal(avatar.props["data-initial"], undefined);
     if (props.agentId) {
       const image = rendered.root.findByType("img");
       assert.equal(image.props.src, `/avatar/${encodeURIComponent(props.agentId)}`);
@@ -51,7 +51,7 @@ for (const [props, initial] of [
       act(() => image.props.onError());
     }
     assert.equal(rendered.root.findAllByType("img").length, 0);
-    assert.equal(avatar.props["data-initial"], initial, "failed images retain the fallback");
+    assert.equal(avatar.props["data-initial"], undefined, "failed images contain no letters");
   } finally { rendered.unmount(); }
 }
 

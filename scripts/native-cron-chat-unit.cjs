@@ -136,7 +136,7 @@ test("new runs isolate conversations; duplicate operations do not create another
   await ctx.complete(second, "second result");
   const rows = await ctx.sessions();
   assert.equal(rows.length, 2);
-  assert.notEqual(rows[0].codexThreadId, rows[1].codexThreadId);
+  assert.notEqual(rows[0].runtimeSessionId, rows[1].runtimeSessionId);
   assert.equal(ctx.host.turnStarts, 2);
   for (const row of rows) {
     const history = await ctx.ipc("chat.history", { sessionKey: row.sessionKey, cursor: null, limit: 100 });
@@ -197,13 +197,13 @@ test("authentication failures still have a durable cron conversation and visible
   assert.equal(ctx.host.turnStarts, 0);
 });
 
-test("cron bindings reject changed ownership and v5 migration preserves session model settings", async (t) => {
+test("cron bindings reject changed ownership and unsupported storage versions", async (t) => {
   const ctx = await fixture(t);
   const run = await ctx.complete(await ctx.trigger(await ctx.create()));
   const store = ctx.service.chatSessionStore;
   const binding = store.getCronRunBinding(run.id);
   const { sessionKey, ...input } = binding;
-  input.runtimeSessionId = run.codexThreadId;
+  input.runtimeSessionId = run.runtimeSessionRef?.sessionId;
   for (const patch of [{ jobId: id() }, { profileId: id() }, { workspace: "/tmp/another-workspace" },
     { threadSource: "different-thread-source" }]) {
     assert.throws(() => store.ensureCronSession({ ...input, ...patch }), { code: "CHAT_SESSION_BINDING_CONFLICT" });
@@ -213,32 +213,7 @@ test("cron bindings reject changed ownership and v5 migration preserves session 
   corrupted.cronRuns[run.id].profileId = "other-profile";
   assert.throws(() => validateContainer(corrupted), { code: "CHAT_SESSION_STORE_CORRUPT" });
   container.version = 5;
-  delete container.cronRuns;
-  const settings = { thinkingLevel: "high", serviceTier: "fast" };
-  container.sessions[sessionKey].modelSettings = settings;
-  const migrated = validateContainer(container);
-  assert.deepEqual(migrated.sessions[sessionKey].modelSettings, settings);
-  assert.deepEqual(migrated.cronRuns, {});
-});
-
-test("legacy recovery requires ownership and leaves a full history store available", () => {
-  let attempts = 0;
-  const ref = { runtime: "codex", runtimeProfileId: "runtime", runtimeAccountId: "account", sessionId: "thread" };
-  const context = {
-    dispatcher: { listRuns: () => [{ id: "run", sourceId: "job", status: "completed", profileId: "profile",
-      workspace: null, runtimeSessionRef: ref }] },
-    productStore: { getAgentProfile: () => ref },
-    runtimeSessionOwnershipStore: { assertOwned() {} },
-    chatSessionStore: { getCronRunBinding: () => null, ensureCronSession() {
-      attempts += 1;
-      throw Object.assign(new Error("full"), { code: "CHAT_SESSION_CAPACITY" });
-    } },
-  };
-  assert.doesNotThrow(() => WorkRunCoordinator.prototype.recoverCronChatSessions.call(context));
-  assert.equal(attempts, 1);
-  context.runtimeSessionOwnershipStore = null;
-  WorkRunCoordinator.prototype.recoverCronChatSessions.call(context);
-  assert.equal(attempts, 1);
+  assert.throws(() => validateContainer(container), { code: "CHAT_SESSION_STORE_CORRUPT" });
 });
 
 test("service restart retains completed history and interrupts an active cron without rerunning it", async (t) => {
@@ -257,50 +232,4 @@ test("service restart retains completed history and interrupts an active cron wi
   const history = await ctx.ipc("chat.history", { sessionKey: completed.sessionKey, cursor: null, limit: 100 });
   assert.ok(history.messages.some((item) => item.payload.message.role === "assistant"));
   assert.equal(ctx.host.turnStarts, 2);
-});
-
-test("legacy completed cron imports its original owned runtime history, without sending another prompt", async (t) => {
-  const ctx = await fixture(t);
-  const job = await ctx.create();
-  const run = await ctx.complete(await ctx.trigger(job));
-  const [old] = await ctx.sessions();
-  await ctx.backend.stop();
-  await ctx.service.stop({ notify: false });
-  const filename = path.join(ctx.paths.stateDir, "chat-sessions.json");
-  const legacy = JSON.parse(fs.readFileSync(filename, "utf8"));
-  legacy.version = 5;
-  delete legacy.cronRuns;
-  delete legacy.sessions[old.sessionKey];
-  delete legacy.bindingOperations[old.sessionKey];
-  legacy.createOperations = Object.fromEntries(Object.entries(legacy.createOperations)
-    .filter(([, operation]) => operation.sessionKey !== old.sessionKey));
-  fs.writeFileSync(filename, JSON.stringify(legacy));
-  ctx.host.threadRead = async () => ({ thread: {
-    cliVersion: "0.149.0", cwd: run.workspace, ephemeral: false, id: run.codexThreadId,
-    modelProvider: "openai", preview: "测试任务", projectId: null, sessionId: run.codexThreadId,
-    source: "appServer", status: { type: "idle" }, createdAt: 100, updatedAt: 200,
-    turns: [{ id: run.codexTurnId, itemsView: "full", status: "completed", error: null,
-      startedAt: 100, completedAt: 101, durationMs: 1000, items: [
-        { id: "legacy-user", type: "userMessage", clientId: null,
-          content: [{ type: "text", text: "收到回复我一个我收到了啊", text_elements: [] }] },
-        { id: "legacy-assistant", type: "agentMessage", text: "我收到了啊",
-          phase: "final_answer", memoryCitation: null, delivery: null },
-      ] }],
-  } });
-  await ctx.service.start();
-  const [restored] = await ctx.sessions();
-  assert.ok(restored, "legacy run must become a product conversation");
-  assert.equal(restored.codexThreadId, run.codexThreadId);
-  const history = await ctx.ipc("chat.history", { sessionKey: restored.sessionKey, cursor: null, limit: 100 });
-  assert.equal(history.messages.filter((item) => item.role === "assistant").length, 1);
-  assert.ok(history.messages.every((item) => item.runId === run.id));
-  assert.equal(ctx.host.turnStarts, 1);
-  await ctx.service.stop({ notify: false });
-  await ctx.service.start();
-  assert.equal((await ctx.sessions())[0].sessionKey, restored.sessionKey);
-  const operation = ctx.service.chatSessionStore.requestDelete(restored.sessionKey, id(), ctx.clock.value);
-  ctx.service.chatSessionStore.completeRemoteOperation(operation.operationId);
-  ctx.service.workRunCoordinator.recoverCronChatSessions();
-  assert.equal((await ctx.sessions()).length, 0, "deleted history must not be resurrected");
-  assert.equal(ctx.host.turnStarts, 1);
 });

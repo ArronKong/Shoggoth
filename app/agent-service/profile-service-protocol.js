@@ -7,7 +7,7 @@ const {
 } = require("./chat-service-protocol");
 
 const PROFILE_SERVICE_METHODS = Object.freeze([
-  "profile.models.list", "profile.auth.read", "profile.bind", "profile.configure", "profile.clear",
+  "profile.models.list", "profile.binding.models.list", "profile.auth.read", "profile.bind", "profile.configure", "profile.clear",
 ]);
 const PROFILE_SERVICE_METHOD_SET = new Set(PROFILE_SERVICE_METHODS);
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
@@ -79,9 +79,10 @@ function cloneParams(value) {
 
 function validateProfileServiceParams(method, params) {
   if (!PROFILE_SERVICE_METHOD_SET.has(method)) throw protocolError("INVALID_PARAMS");
-  if (method === "profile.models.list") {
-    if (!exactObject(params, ["profileId", "cursor", "limit"])
+  if (method === "profile.models.list" || method === "profile.binding.models.list") {
+    if (!exactObject(params, ["profileId", "cursor", "limit", ...(method === "profile.binding.models.list" ? ["bindingId"] : [])])
       || !validOpaqueId(params.profileId) || !validString(params.cursor, 1024, true)
+      || (method === "profile.binding.models.list" && !validOpaqueId(params.bindingId))
       || !Number.isSafeInteger(params.limit) || params.limit < 1 || params.limit > 100) {
       throw protocolError("INVALID_PARAMS");
     }
@@ -118,7 +119,7 @@ function validateProfileServiceResult(method, result) {
     }
     return { status: result.status };
   }
-  if (method === "profile.models.list") {
+  if (method === "profile.models.list" || method === "profile.binding.models.list") {
     if (!exactObject(result, ["models", "nextCursor", "hasMore"])
       || !Array.isArray(result.models) || result.models.length > 100
       || !validString(result.nextCursor, 1024, true)

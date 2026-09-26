@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.125",
+      "version": "0.8.150",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.125",
-      "purl": "pkg:generic/shoggoth@0.8.125",
+      "bom-ref": "pkg:generic/shoggoth@0.8.150",
+      "purl": "pkg:generic/shoggoth@0.8.150",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -1566,6 +1566,70 @@
         {
           "name": "shoggoth:distribution",
           "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@modelcontextprotocol/client",
+      "version": "2.1.0",
+      "bom-ref": "pkg:npm/%40modelcontextprotocol/client@2.1.0",
+      "purl": "pkg:npm/%40modelcontextprotocol/client@2.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "983561a32e568c36f453ee1d40fccb71c882d9ead27b1fc645542a9e865d8ae3281376224d97624bb7b335c1705f85c439639a8fb8d9af490b62720b9cbf28ac"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:role",
+          "value": "plugin-mcp-client"
+        },
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@modelcontextprotocol/core",
+      "version": "2.1.0",
+      "bom-ref": "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+      "purl": "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "61d163e603111ebd2060d0214db4038232c788425d200518c689a12ac7943727bb646948490994a0b876b2f785142890ee3d9831f7d3d64812343d0549f2058d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
         }
       ]
     },
@@ -3629,7 +3693,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -5025,7 +5089,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -6145,6 +6209,66 @@
     },
     {
       "type": "library",
+      "name": "eventsource-parser",
+      "version": "3.1.1",
+      "bom-ref": "pkg:npm/eventsource-parser@3.1.1",
+      "purl": "pkg:npm/eventsource-parser@3.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "10a375bca00c719f0c95832968dbb137a47dc9a9331fab9a8c7707553a96273beee695b0f43ca16cfdf91c7f0c54143e7598c07c3c64f80f0d891f4a59a5e2c9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "eventsource",
+      "version": "3.0.7",
+      "bom-ref": "pkg:npm/eventsource@3.0.7",
+      "purl": "pkg:npm/eventsource@3.0.7",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0914f5593cae4280fbef5196e7a5c464543f66849f5a27756a52860d832692ddb297c517ad5478a6ca6a58d11ca8abd523383a3c096d5a3c5c4923eb6e803888"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "exponential-backoff",
       "version": "3.1.3",
       "bom-ref": "pkg:npm/exponential-backoff@3.1.3",
@@ -6199,7 +6323,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -6229,7 +6353,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -6285,7 +6409,7 @@
       "properties": [
         {
           "name": "shoggoth:role",
-          "value": "inspiration-archive"
+          "value": "inspiration-archive;plugin-git-archive"
         },
         {
           "name": "shoggoth:dependency-scopes",
@@ -7553,7 +7677,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -7679,6 +7803,36 @@
     },
     {
       "type": "library",
+      "name": "jose",
+      "version": "6.2.12",
+      "bom-ref": "pkg:npm/jose@6.2.12",
+      "purl": "pkg:npm/jose@6.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f4d88598911ec74b32d83939f23d94181487814b36ca917d7994aee0beaf8ce5f70e9f7a4b0d45dee2fe1fe0f5b31d368d965dcd44f41e0bc2cb9f42baf5dc5b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "js-tokens",
       "version": "4.0.0",
       "bom-ref": "pkg:npm/js-tokens@4.0.0",
@@ -7763,7 +7917,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -7823,7 +7977,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -9773,7 +9927,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -9950,6 +10104,36 @@
         {
           "name": "shoggoth:dependency-scopes",
           "value": "desktop,frontend"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pkce-challenge",
+      "version": "5.0.1",
+      "bom-ref": "pkg:npm/pkce-challenge@5.0.1",
+      "purl": "pkg:npm/pkce-challenge@5.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c10d1bfd6e05af4d6ab691e5a92aaca5c8f712106f8a6b1d8742a51e11fc1d166732c11ad1e6b67d350b397392f5c710af7a26f86706464e1efa2b2b65657ca9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
         },
         {
           "name": "shoggoth:distribution",
@@ -10733,7 +10917,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -11331,7 +11515,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -11361,7 +11545,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -12557,7 +12741,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -12952,6 +13136,36 @@
       ]
     },
     {
+      "type": "library",
+      "name": "zod",
+      "version": "4.6.5",
+      "bom-ref": "pkg:npm/zod@4.6.5",
+      "purl": "pkg:npm/zod@4.6.5",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "bf997f6855d941e6a2e1ac0b6cea52a0779c13d52232b9dfc7be6d1172e33689d754047143998e7a2a538d1394721b3350d0aa9c4fa1a8032e8d1b111ecbadd9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
       "type": "file",
       "name": "ChillKai",
       "version": "bundled font files; original copyright and license retained",
@@ -13176,7 +13390,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.125",
+      "ref": "pkg:generic/shoggoth@0.8.150",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/openai-codex@0.149.0?platform=darwin-arm64",
@@ -13229,6 +13443,8 @@
         "pkg:npm/%40isaacs/fs-minipass@4.0.1",
         "pkg:npm/%40malept/cross-spawn-promise@2.0.0",
         "pkg:npm/%40malept/flatpak-bundler@0.4.0",
+        "pkg:npm/%40modelcontextprotocol/client@2.1.0",
+        "pkg:npm/%40modelcontextprotocol/core@2.1.0",
         "pkg:npm/%40noble/hashes@1.4.0",
         "pkg:npm/%40noble/hashes@2.4.0",
         "pkg:npm/%40oxc-project/types@0.150.0",
@@ -13380,6 +13596,8 @@
         "pkg:npm/esbuild@0.28.2",
         "pkg:npm/escalade@3.2.0",
         "pkg:npm/escape-string-regexp@4.0.0",
+        "pkg:npm/eventsource-parser@3.1.1",
+        "pkg:npm/eventsource@3.0.7",
         "pkg:npm/exponential-backoff@3.1.3",
         "pkg:npm/fast-deep-equal@3.1.3",
         "pkg:npm/fast-uri@3.1.8",
@@ -13431,6 +13649,7 @@
         "pkg:npm/isexe@4.0.0",
         "pkg:npm/jake@10.9.4",
         "pkg:npm/jiti@2.7.0",
+        "pkg:npm/jose@6.2.12",
         "pkg:npm/js-tokens@4.0.0",
         "pkg:npm/js-yaml@4.3.2",
         "pkg:npm/js-yaml@5.4.2",
@@ -13507,6 +13726,7 @@
         "pkg:npm/picocolors@1.1.1",
         "pkg:npm/picomatch@4.0.7",
         "pkg:npm/pinyin-pro@3.29.3",
+        "pkg:npm/pkce-challenge@5.0.1",
         "pkg:npm/pkijs@3.4.0",
         "pkg:npm/plist@3.1.0",
         "pkg:npm/postcss@8.5.28",
@@ -13607,6 +13827,7 @@
         "pkg:npm/yargs@17.7.3",
         "pkg:npm/yauzl@3.4.0",
         "pkg:npm/yocto-queue@0.1.0",
+        "pkg:npm/zod@4.6.5",
         "source:ChillKai",
         "source:Courier Prime",
         "source:Hermes Agent model settings",
@@ -13619,6 +13840,24 @@
         "source:Source Han Serif CN",
         "source:ripgrep (Codex bundled program)",
         "source:zsh (Codex bundled shell)"
+      ]
+    },
+    {
+      "ref": "pkg:npm/%40modelcontextprotocol/client@2.1.0",
+      "dependsOn": [
+        "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+        "pkg:npm/cross-spawn@7.0.6",
+        "pkg:npm/eventsource-parser@3.1.1",
+        "pkg:npm/eventsource@3.0.7",
+        "pkg:npm/jose@6.2.12",
+        "pkg:npm/pkce-challenge@5.0.1",
+        "pkg:npm/zod@4.6.5"
+      ]
+    },
+    {
+      "ref": "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+      "dependsOn": [
+        "pkg:npm/zod@4.6.5"
       ]
     },
     {

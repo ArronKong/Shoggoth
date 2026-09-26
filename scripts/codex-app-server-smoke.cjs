@@ -846,26 +846,27 @@ async function testVersionProbeRunsBeforePrepareAndNeverReceivesProviderEnvironm
 }
 
 async function testBedrockPreparedAwsEnvIsAppServerOnlyAndRedacted() {
+  const accessKeyId = "bedrock-access-key-id-host-fixture-000001";
   const secret = "bedrock-secret-access-key-host-fixture-000001";
   const session = "bedrock-session-token-host-fixture-000001";
   const fixture = hostFixture({
     prepareRuntime: async () => ({
       spawnEnv: {
-        AWS_ACCESS_KEY_ID: "AKIAABCDEFGHIJKLMNOP", // gitleaks:allow -- synthetic test fixture; not a usable credential
+        AWS_ACCESS_KEY_ID: accessKeyId,
         AWS_SECRET_ACCESS_KEY: secret,
         AWS_SESSION_TOKEN: session,
         AWS_PROFILE: "engineering-dev",
         AWS_REGION: "us-west-2",
         AWS_DEFAULT_REGION: "us-west-2",
       },
-      registeredSecrets: ["AKIAABCDEFGHIJKLMNOP", secret, session], // gitleaks:allow -- synthetic test fixture; not a usable credential
+      registeredSecrets: [accessKeyId, secret, session],
       runtimeConfig: { provider: { kind: "amazon-bedrock" } },
     }),
   });
   try {
     await fixture.host.initialize();
     const env = fixture.spawns[0].options.env;
-    assert.equal(env.AWS_ACCESS_KEY_ID, "AKIAABCDEFGHIJKLMNOP"); // gitleaks:allow -- synthetic test fixture; not a usable credential
+    assert.equal(env.AWS_ACCESS_KEY_ID, accessKeyId);
     assert.equal(env.AWS_SECRET_ACCESS_KEY, secret);
     assert.equal(env.AWS_SESSION_TOKEN, session);
     assert.equal(env.AWS_PROFILE, "engineering-dev");
@@ -1740,6 +1741,7 @@ async function testFatalTerminationSettlesAfterProcessCleanup() {
     repoRoot: REPO_ROOT,
     packageVersion: "0.8.41",
     schemaContract: new CodexSchemaContract({ repoRoot: REPO_ROOT }),
+    probeBinary: async () => {},
     spawnProcess: () => child,
     killProcessGroup: (_pid, signal) => {
       if (signal === "SIGTERM") setTimeout(() => { closed = true; child.close(1, signal); }, 15);
@@ -1828,6 +1830,7 @@ async function testShutdownTimeoutFailsClosed() {
     repoRoot: REPO_ROOT,
     packageVersion: "0.8.41",
     schemaContract: new CodexSchemaContract({ repoRoot: REPO_ROOT }),
+    probeBinary: async () => {},
     spawnProcess: () => child,
     killProcessGroup: () => {},
     shutdownGraceMs: 10,
@@ -2070,6 +2073,7 @@ async function testFatalCleanupTimeoutLeavesPoolTombstone() {
         repoRoot: REPO_ROOT,
         packageVersion: "0.8.41",
         schemaContract: new CodexSchemaContract({ repoRoot: REPO_ROOT }),
+        probeBinary: async () => {},
         spawnProcess: () => child,
         killProcessGroup: () => {},
         shutdownGraceMs: 5,
@@ -2110,6 +2114,7 @@ async function testManualCleanupTimeoutLeavesPoolTombstone() {
           repoRoot: REPO_ROOT,
           packageVersion: "0.8.41",
           schemaContract: new CodexSchemaContract({ repoRoot: REPO_ROOT }),
+          probeBinary: async () => {},
           spawnProcess: () => child,
           killProcessGroup: () => {},
           shutdownGraceMs: 5,

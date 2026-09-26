@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { pathToFileURL } from "node:url";
 
 export const name = "shoggoth-runtime-bridge";
 export const inject = [
@@ -52,7 +53,7 @@ function bridgeError(code, message) {
 function serializeError(error) {
   const code = safeString(error?.code, 128) ? error.code : "DEEPSEEK_HARNESS_BRIDGE_FAILED";
   const message = safeString(error?.message, 4096)
-    ? error.message : "DeepSeek Harness Bridge request failed";
+    ? error.message : "DeepSeek Bridge request failed";
   return { code, message };
 }
 
@@ -152,6 +153,7 @@ export class BridgeRuntime {
     this.ctx = ctx;
     this.sessions = new Map();
     this.activeTurns = new Map();
+    this.modelRequests = new Map();
     this.pendingServerRequests = new Map();
     this.writeChain = Promise.resolve();
     this.requestChain = Promise.resolve();
@@ -194,6 +196,10 @@ export class BridgeRuntime {
       this.onServerResponse(message);
       return;
     }
+    if (message?.type === "request" && ["model/generate", "model/cancel"].includes(message.command)) {
+      void this.onRequest(message).catch(error => this.fatal(error));
+      return;
+    }
     this.requestChain = this.requestChain.then(() => this.onRequest(message), () => this.onRequest(message));
     this.requestChain.catch((error) => this.fatal(error));
   }
@@ -215,7 +221,7 @@ export class BridgeRuntime {
       if (message.command === "turn/start") {
         await this.releaseAcceptedTurn(message.params.remoteSessionId, message.params.turnId);
       } else if (message.command === "shutdown") {
-        queueMicrotask(() => this.ctx.get("appExit")?.(0));
+        queueMicrotask(() => this.onInputClosed());
       }
     } catch (error) {
       await this.write({
@@ -233,6 +239,12 @@ export class BridgeRuntime {
       case "models/list": return this.modelsList();
       case "commands/list": return this.commandsList(params);
       case "auth/read": return this.authRead();
+      case "model/generate": return this.generateModelOnly(params);
+      case "model/cancel": {
+        if (!safeString(params.operationId, 256)) throw bridgeError("MODEL_ONLY_INVALID", "Invalid model operation");
+        this.modelRequests.get(params.operationId)?.abort();
+        return {};
+      }
       case "session/start": return this.sessionStart(params);
       case "session/resume": return this.sessionResume(params);
       case "session/read": return this.sessionRead(params);
@@ -243,6 +255,35 @@ export class BridgeRuntime {
       case "shutdown": return this.shutdown();
       default: throw bridgeError("DEEPSEEK_HARNESS_COMMAND_UNSUPPORTED", "Bridge command is unsupported");
     }
+  }
+
+  async generateModelOnly(params) {
+    if (!safeString(params.operationId, 256) || !safeString(params.prompt, 128 * 1024)
+      || this.modelRequests.size >= 4 || this.modelRequests.has(params.operationId)) {
+      throw bridgeError("MODEL_ONLY_INVALID", "Invalid or duplicate model request");
+    }
+    const selection = params.model ? parseModelRef(params.model) : this.ctx.agentDefaultModel.currentSelection();
+    if (!selection?.provider || !selection?.model) throw bridgeError("RUNTIME_MODEL_UNAVAILABLE", "Model unavailable");
+    const controller = new AbortController();
+    this.modelRequests.set(params.operationId, controller);
+    let text = "", usage = null, finished = false;
+    const timer = setTimeout(() => controller.abort(), 170_000);
+    try {
+      // Direct LLM call: no Agent, MCP, tool registry, workspace or permission
+      // preset is attached. Even a returned tool call cannot execute anything.
+      for await (const chunk of this.ctx.llm.stream({ ...selection,
+        messages: [userMessage(params.operationId, params.prompt, { kind: "plugin", plugin: name })],
+        system: "Produce a factual conversation checkpoint from supplied data.", tools: [],
+        maxTokens: 4096, purpose: "compaction", signal: controller.signal })) {
+        if (chunk.type === "text-delta") text += chunk.text;
+        if (Buffer.byteLength(text) > 32 * 1024) throw bridgeError("MODEL_ONLY_OUTPUT_INVALID", "Model output too large");
+        if (chunk.type === "usage") usage = normalizeUsage(chunk.usage);
+        if (chunk.type === "tool-call-delta") throw bridgeError("MODEL_ONLY_OUTPUT_INVALID", "Unexpected tool call");
+        if (chunk.type === "finish") finished = chunk.reason?.kind === "stop";
+      }
+      if (!finished || !text.trim()) throw bridgeError("MODEL_ONLY_OUTPUT_INVALID", "Model task incomplete");
+      return { text, usage, provider: selection.provider, model: modelRef(selection) };
+    } finally { clearTimeout(timer); controller.abort(); this.modelRequests.delete(params.operationId); }
   }
 
   async modelsList() {
@@ -260,6 +301,8 @@ export class BridgeRuntime {
           description: model.description || provider.name || provider.id,
           input: Array.isArray(model.inputModalities) ? [...model.inputModalities] : ["text"],
           isDefault: provider.id === selected.provider && model.id === selected.model,
+          contextWindow: Number.isSafeInteger(model.context?.contextWindow) && model.context.contextWindow > 0
+            ? model.context.contextWindow : null,
         });
       }
     }
@@ -280,7 +323,7 @@ export class BridgeRuntime {
   commandsList(params) {
     const record = params.remoteSessionId == null ? null : this.sessions.get(params.remoteSessionId);
     if (params.remoteSessionId != null && !safeString(params.remoteSessionId, 256)) {
-      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek Harness session id is invalid");
+      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek session id is invalid");
     }
     // ScopedLayers explicitly supports undefined as the global registry view;
     // draft discovery must not create a persisted conversation or run inference.
@@ -301,16 +344,16 @@ export class BridgeRuntime {
     if (!safeString(params.remoteSessionId, 256) || !safeString(params.cwd, 4096)
       || !path.isAbsolute(params.cwd)
       || !safeString(params.developerInstructions ?? "", 1024 * 1024, true)) {
-      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek Harness session input is invalid");
+      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek session input is invalid");
     }
     const selection = params.model == null
       ? this.ctx.agentDefaultModel.currentSelection() : parseModelRef(params.model);
     const permissionMode = params.permissionMode || "workspace-write";
     if (!selection) {
-      throw bridgeError("RUNTIME_MODEL_UNAVAILABLE", "DeepSeek Harness model reference is invalid");
+      throw bridgeError("RUNTIME_MODEL_UNAVAILABLE", "DeepSeek model reference is invalid");
     }
     if (!["workspace-write", "danger-full-access"].includes(permissionMode)) {
-      throw bridgeError("RUNTIME_PERMISSION_POLICY_INVALID", "DeepSeek Harness permission mode is invalid");
+      throw bridgeError("RUNTIME_PERMISSION_POLICY_INVALID", "DeepSeek permission mode is invalid");
     }
     return {
       remoteSessionId: params.remoteSessionId,
@@ -325,7 +368,7 @@ export class BridgeRuntime {
     if (!agentCtx.systemPrompt || typeof agentCtx.systemPrompt.section !== "function") {
       throw bridgeError(
         "DEEPSEEK_HARNESS_API_INCOMPATIBLE",
-        "DeepSeek Harness system prompt API is unavailable",
+        "DeepSeek system prompt API is unavailable",
       );
     }
     agentCtx.systemPrompt.section({
@@ -408,7 +451,7 @@ export class BridgeRuntime {
 
   async sessionRead(params) {
     if (!safeString(params.remoteSessionId, 256)) {
-      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek Harness session id is invalid");
+      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek session id is invalid");
     }
     const live = this.sessions.get(params.remoteSessionId);
     if (live) await this.ctx.sessions.flush(live.agent.session);
@@ -429,10 +472,10 @@ export class BridgeRuntime {
 
   async sessionDelete(params) {
     if (!safeString(params.remoteSessionId, 256)) {
-      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek Harness session id is invalid");
+      throw bridgeError("RUNTIME_SESSION_PARAMS_INVALID", "DeepSeek session id is invalid");
     }
     const active = this.activeTurns.get(params.remoteSessionId);
-    if (active) throw bridgeError("RUNTIME_SESSION_BUSY", "DeepSeek Harness session is active");
+    if (active) throw bridgeError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     const live = this.sessions.get(params.remoteSessionId);
     let inspection;
     if (live) {
@@ -449,7 +492,7 @@ export class BridgeRuntime {
     if (!location || location.kind !== "jsonl" || !path.isAbsolute(location.path)) {
       throw bridgeError(
         "DEEPSEEK_HARNESS_SESSION_DELETE_FAILED",
-        "DeepSeek Harness session artifact cannot be deleted safely",
+        "DeepSeek session artifact cannot be deleted safely",
       );
     }
     const sessionsRoot = path.resolve(process.env.DSH_HOME, "sessions");
@@ -459,7 +502,7 @@ export class BridgeRuntime {
       || path.isAbsolute(relative)) {
       throw bridgeError(
         "DEEPSEEK_HARNESS_SESSION_DELETE_FAILED",
-        "DeepSeek Harness session artifact escapes managed storage",
+        "DeepSeek session artifact escapes managed storage",
       );
     }
     try {
@@ -470,7 +513,7 @@ export class BridgeRuntime {
       if (error?.code !== "ENOENT") {
         throw bridgeError(
           "DEEPSEEK_HARNESS_SESSION_DELETE_FAILED",
-          "DeepSeek Harness session artifact could not be deleted safely",
+          "DeepSeek session artifact could not be deleted safely",
         );
       }
     }
@@ -495,12 +538,12 @@ export class BridgeRuntime {
       || !safeString(params.turnId, 512) || !safeString(params.operationId, 512)
       || !safeString(params.prompt, 1024 * 1024, true)
       || !safeString(params.context ?? "", 4 * 1024 * 1024, true)) {
-      throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek Harness turn input is invalid");
+      throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek turn input is invalid");
     }
     const record = this.sessions.get(params.remoteSessionId);
-    if (!record) throw bridgeError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek Harness session is not active");
+    if (!record) throw bridgeError("RUNTIME_SESSION_NOT_FOUND", "DeepSeek session is not active");
     if (this.activeTurns.has(params.remoteSessionId)) {
-      throw bridgeError("RUNTIME_SESSION_BUSY", "DeepSeek Harness session is active");
+      throw bridgeError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     }
     if (params.prompt.trimStart().startsWith("/")) {
       return this.commandTurnStart(record, params);
@@ -567,7 +610,7 @@ export class BridgeRuntime {
   commandTurnStart(record, params) {
     const name = /^\/([a-z0-9][a-z0-9._:-]*)(?:\s|$)/u.exec(params.prompt.trim())?.[1];
     if (!name || !this.ctx.commands.find(record.agent, name)) {
-      throw bridgeError("RUNTIME_COMMAND_NOT_FOUND", "DeepSeek Harness command is not available");
+      throw bridgeError("RUNTIME_COMMAND_NOT_FOUND", "DeepSeek command is not available");
     }
     const active = {
       remoteSessionId: params.remoteSessionId, sessionId: params.sessionId,
@@ -591,7 +634,7 @@ export class BridgeRuntime {
           { kind: "plugin", plugin: "shoggoth-dynamic-context", form: "snapshot", sections: [] },
         ));
         const execution = await this.ctx.commands.execute(record.agent, params.prompt, [], active.abortController.signal);
-        if (!execution) throw bridgeError("RUNTIME_COMMAND_NOT_FOUND", "DeepSeek Harness command disappeared");
+        if (!execution) throw bridgeError("RUNTIME_COMMAND_NOT_FOUND", "DeepSeek command disappeared");
         await record.agent.whenIdle();
         await this.ctx.sessions.flush(record.agent.session);
         status = execution.result.kind === "error" ? "failed" : "completed";
@@ -622,11 +665,11 @@ export class BridgeRuntime {
   async turnSteer(params) {
     if (!safeString(params.remoteSessionId, 256) || !safeString(params.turnId, 512)
       || !safeString(params.message, 1024 * 1024)) {
-      throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek Harness steer input is invalid");
+      throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek steer input is invalid");
     }
     const active = this.activeTurns.get(params.remoteSessionId);
     if (!active || active.turnId !== params.turnId || active.settled) {
-      throw bridgeError("RUNTIME_TURN_NOT_ACTIVE", "DeepSeek Harness turn is not active");
+      throw bridgeError("RUNTIME_TURN_NOT_ACTIVE", "DeepSeek turn is not active");
     }
     active.agent.steer(userMessage(
       stableUuid(`shoggoth-dsh-steer:${params.operationId || crypto.randomUUID()}`),
@@ -638,12 +681,12 @@ export class BridgeRuntime {
 
   async turnInterrupt(params) {
     if (!safeString(params.remoteSessionId, 256) || !safeString(params.turnId, 512)) {
-      throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek Harness interrupt input is invalid");
+      throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek interrupt input is invalid");
     }
     const active = this.activeTurns.get(params.remoteSessionId);
     if (!active) return {};
     if (active.turnId !== params.turnId) {
-      throw bridgeError("RUNTIME_TURN_STALE", "DeepSeek Harness turn is stale");
+      throw bridgeError("RUNTIME_TURN_STALE", "DeepSeek turn is stale");
     }
     active.abortController?.abort();
     active.agent.cancel({ kind: "user" });
@@ -670,6 +713,18 @@ export class BridgeRuntime {
 
   publishMappedEvent(active, event) {
     const mapped = this.mapEvent(active, event);
+    if (event.type === "turn/end") {
+      try {
+        const measure = this.ctx.get("tokenMeter")?.measure(active.agent.session);
+        if (Number.isSafeInteger(measure?.totalTokens) && measure.totalTokens >= 0) mapped.unshift({
+          known: true, type: "context_usage", method: "deepseek-harness/context_usage",
+          sessionId: active.sessionId, turnId: active.turnId, contextUsage: {
+            runtimeSessionId: active.sessionId, usedTokens: measure.totalTokens,
+            contextWindow: null, quality: "estimated", source: "session_stats", observedAt: Date.now(),
+          },
+        });
+      } catch { /* Optional meter failures cannot affect the completed turn. */ }
+    }
     for (const item of mapped) {
       if (active.commandTurn && item.type === "complete") continue;
       if (active.accepting) active.buffered.push(item);
@@ -794,7 +849,7 @@ export class BridgeRuntime {
     if (!active.settled) {
       await this.failTurn(active, bridgeError(
         "DEEPSEEK_HARNESS_TURN_INCOMPLETE",
-        "DeepSeek Harness became idle without a durable turn end",
+        "DeepSeek became idle without a durable turn end",
       ));
     }
   }
@@ -874,7 +929,7 @@ export class BridgeRuntime {
       turnId: active.turnId,
       serverName: "deepseek-harness",
       mode: "form",
-      message: "DeepSeek Harness 需要补充信息",
+      message: "DeepSeek 需要补充信息",
       requestedSchema: { type: "object", properties, required },
     }, request.signal);
     if (response?.action !== "accept" || !plain(response.content)) {
@@ -926,6 +981,7 @@ export class BridgeRuntime {
   }
 
   async shutdown() {
+    for (const controller of this.modelRequests.values()) controller.abort();
     for (const active of [...this.activeTurns.values()]) {
       active.agent.cancel({ kind: "disposed" });
     }
@@ -956,8 +1012,22 @@ export class BridgeRuntime {
     this.pendingServerRequests.clear();
     const exit = this.ctx.get("appExit");
     const ready = this.ctx.get("appReady");
-    if (ready?.onReady) ready.onReady(() => exit?.(0));
-    else exit?.(0);
+    if (ready?.onReady) {
+      ready.onReady(() => exit?.(0));
+      return;
+    }
+    const entrypoint = process.env.SHOGGOTH_DSH_ENTRYPOINT;
+    let currentEntrypoint = false;
+    try {
+      currentEntrypoint = path.isAbsolute(entrypoint || "")
+        && fs.realpathSync(entrypoint) === fs.realpathSync(process.argv[1]);
+    } catch {}
+    // Older DSH launchers finish their HMR watchers after loader.await(). Wait
+    // for the host-verified CLI entry module to finish booting before disposing
+    // them. Embedded Bridge users retain the ordinary immediate exit path.
+    if (currentEntrypoint) {
+      import(pathToFileURL(entrypoint).href).then(() => exit?.(0), () => exit?.(1));
+    } else exit?.(0);
   }
 
   fatal(error) {

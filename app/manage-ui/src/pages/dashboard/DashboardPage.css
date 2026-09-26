@@ -708,11 +708,3 @@
   justify-content: center;
   padding: 12px 0 4px;
 }
-
-.management-page.dashboard-page .tb-note {
-  color: var(--ui-text-secondary);
-  font-size: 11px;
-  line-height: 1.4;
-  margin-top: -6px;
-  margin-bottom: 10px;
-}

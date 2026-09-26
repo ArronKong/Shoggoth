@@ -82,7 +82,7 @@ test("pins cron-parser as the sole Cron semantic dependency", () => {
   assert.equal(lock.packages["node_modules/cron-parser"].version, "5.4.0");
   assert.equal(installed.version, "5.4.0");
   assert.equal(MIN_EVERY_INTERVAL_MS, 60_000);
-  assert.equal(NATIVE_CRON_STORE_VERSION, 2);
+  assert.equal(NATIVE_CRON_STORE_VERSION, 3);
   assert.ok(IDEMPOTENCY_WINDOW_MS / MIN_EVERY_INTERVAL_MS < DEFAULT_CAPACITIES.operations);
 });
 
@@ -718,7 +718,7 @@ test("write error probes ignore accessor/Proxy traps and never leak raw messages
   })
 ));
 
-test("strict v1 migration writes v2 once and preserves legacy operation replay", () => (
+test("strict v1 migration backs up once and writes v3 with legacy operation replay", () => (
   withRoot((paths) => {
     const seed = createStore(paths).open();
     const create = createInput();
@@ -733,7 +733,7 @@ test("strict v1 migration writes v2 once and preserves legacy operation replay",
     seed.close();
     const filePath = path.join(paths.stateDir, "native-cron.json");
     const legacy = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    legacy.version = 1;
+    legacy.version = 1; delete legacy.tombstones;
     const legacyRevision = legacy.revision;
     fs.writeFileSync(filePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
 
@@ -744,9 +744,10 @@ test("strict v1 migration writes v2 once and preserves legacy operation replay",
         fs.writeFileSync(target, serialized, { mode: 0o600 });
       },
     }).open();
-    assert.equal(writes, 1);
+    assert.equal(writes, 2, "immutable backup and migrated authority are separate writes");
+    assert.deepEqual(JSON.parse(fs.readFileSync(filePath + ".pre-v3", "utf8")), legacy);
     const persisted = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    assert.equal(persisted.version, 2);
+    assert.equal(persisted.version, 3);
     assert.equal(persisted.revision, legacyRevision + 1);
     assert.deepEqual(migrated.updateJob(legacyUpdate), updated);
     migrated.close();
@@ -760,7 +761,7 @@ test("failed v1 migration leaves original bytes intact and releases the writer l
     seed.close();
     const filePath = path.join(paths.stateDir, "native-cron.json");
     const legacy = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    legacy.version = 1;
+    legacy.version = 1; delete legacy.tombstones;
     const originalBytes = Buffer.from(`${JSON.stringify(legacy)}\n`);
     fs.writeFileSync(filePath, originalBytes, { mode: 0o600 });
 
@@ -771,7 +772,7 @@ test("failed v1 migration leaves original bytes intact and releases the writer l
     assert.deepEqual(fs.readFileSync(filePath), originalBytes);
     assert.equal(failed.opened, false);
     const recovered = createStore(paths).open();
-    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).version, 2);
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).version, 3);
     recovered.close();
   })
 ));
@@ -789,7 +790,7 @@ test("v1 rejects derived operation kinds instead of treating them as same-versio
     seed.close();
     const filePath = path.join(paths.stateDir, "native-cron.json");
     const illegal = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    illegal.version = 1;
+    illegal.version = 1; delete illegal.tombstones;
     const originalBytes = Buffer.from(`${JSON.stringify(illegal)}\n`);
     fs.writeFileSync(filePath, originalBytes, { mode: 0o600 });
     expectCode("CRON_STORE_CORRUPT", () => createStore(paths).open());
@@ -1050,6 +1051,7 @@ test("fails closed on unknown or malformed persisted schema", () => withRoot((pa
 
   const clean = {
     version: NATIVE_CRON_STORE_VERSION,
+    tombstones: {},
     revision: 0,
     idempotencyFloorMs: 0,
     jobs: {},

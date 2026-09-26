@@ -4,14 +4,13 @@
 const assert = require("node:assert/strict");
 const {
   DEFAULT_RUNTIME_ACCOUNTS,
-  DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND,
+  DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME,
   RUNTIME_ACCOUNT_FIELDS,
   RUNTIME_ACCOUNT_SCHEMA,
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
   assertRuntimeAccountMatchesProfile,
   cloneRuntimeAccount,
   freezeRuntimeAccount,
-  normalizeLegacyRuntimeAccount,
   runtimeAccountMatchesProfile,
   validateRuntimeAccount,
 } = require("../app/agent-service/runtime-account");
@@ -33,7 +32,7 @@ function expectInvalid(value) {
   );
 }
 
-test("固定七个默认账号覆盖内置 Codex 与六个原生 Runtime", () => {
+test("固定八个默认账号覆盖内置 Codex 与七个原生 Runtime", () => {
   assert.deepEqual(DEFAULT_RUNTIME_ACCOUNTS.map((account) => account.id), [
     "shoggoth-internal-codex-default-v1",
     "native-codex-default-v1",
@@ -41,30 +40,31 @@ test("固定七个默认账号覆盖内置 Codex 与六个原生 Runtime", () =>
     "native-antigravity-default-v1",
     "native-pi-default-v1",
     "native-claude-code-default-v1",
+    "native-opencode-default-v1",
     "native-deepseek-harness-default-v1",
   ]);
   assert.deepEqual(DEFAULT_RUNTIME_ACCOUNTS.map((account) => account.runtime), [
-    "codex", "codex", "grok-build", "antigravity", "pi", "claude-code",
+    "codex", "codex", "grok-build", "antigravity", "pi", "claude-code", "opencode",
     "deepseek-harness",
   ]);
   assert.equal(DEFAULT_RUNTIME_ACCOUNTS.every(Object.isFrozen), true);
   assert.equal(Object.isFrozen(DEFAULT_RUNTIME_ACCOUNTS), true);
-  assert.equal(new Set(DEFAULT_RUNTIME_ACCOUNTS.map((account) => account.id)).size, 7);
+  assert.equal(new Set(DEFAULT_RUNTIME_ACCOUNTS.map((account) => account.id)).size, 8);
 });
 
-test("Backend 映射到稳定且存在的默认 RuntimeAccount", () => {
-  assert.deepEqual(DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND, {
-    shoggoth: "shoggoth-internal-codex-default-v1",
+test("Runtime 映射到稳定且存在的默认 RuntimeAccount", () => {
+  assert.deepEqual(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME, {
     codex: "native-codex-default-v1",
     "grok-build": "native-grok-build-default-v1",
     antigravity: "native-antigravity-default-v1",
     pi: "native-pi-default-v1",
     "claude-code": "native-claude-code-default-v1",
+    opencode: "native-opencode-default-v1",
     "deepseek-harness": "native-deepseek-harness-default-v1",
   });
-  assert.equal(Object.isFrozen(DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND), true);
+  assert.equal(Object.isFrozen(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME), true);
   const ids = new Set(DEFAULT_RUNTIME_ACCOUNTS.map((account) => account.id));
-  assert.equal(Object.values(DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND).every((id) => ids.has(id)), true);
+  assert.equal(Object.values(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME).every((id) => ids.has(id)), true);
 });
 
 test("schema 常量不可变且每个默认账号都严格 round-trip", () => {
@@ -72,7 +72,7 @@ test("schema 常量不可变且每个默认账号都严格 round-trip", () => {
   assert.equal(Object.isFrozen(RUNTIME_ACCOUNT_SCHEMA.fields), true);
   assert.deepEqual(RUNTIME_ACCOUNT_SCHEMA.fields, RUNTIME_ACCOUNT_FIELDS);
   assert.deepEqual(RUNTIME_ACCOUNT_SCHEMA.builtInRuntimes, [
-    "codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness",
+    "codex", "grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness",
   ]);
   assert.equal(Object.prototype.hasOwnProperty.call(RUNTIME_ACCOUNT_SCHEMA, "runtimes"), false);
   for (const account of DEFAULT_RUNTIME_ACCOUNTS) {
@@ -161,18 +161,6 @@ test("shoggoth-managed 只允许 bundled/managed-shared，providerRef 必须留�
     providerRef: "provider-one",
     isDefault: false,
   });
-});
-
-test("旧 RuntimeAccount providerRef 只在迁移入口归一化且不修改输入", () => {
-  const legacy = {
-    ...cloneRuntimeAccount(DEFAULT_RUNTIME_ACCOUNTS[0]),
-    providerRef: "provider-one",
-  };
-  assert.deepEqual(normalizeLegacyRuntimeAccount(legacy), {
-    ...legacy,
-    providerRef: null,
-  });
-  assert.equal(legacy.providerRef, "provider-one");
 });
 
 test("非默认 managed 账号兼容格式合法的未来 Runtime，但 Provider 仍仅属于 Codex", () => {

@@ -28,13 +28,13 @@ function prepareDeepSeekHarnessHome(paths, runtimeProfileId, options = {}) {
   if (!validRuntimeProfileId(runtimeProfileId)) {
     throw runtimeError(
       "DEEPSEEK_HARNESS_RUNTIME_PROFILE_INVALID",
-      "DeepSeek Harness runtime profile id is invalid",
+      "DeepSeek runtime profile id is invalid",
     );
   }
   const profileId = runtimeProfileId;
   if (!paths || typeof paths.stateDir !== "string" || !path.isAbsolute(paths.stateDir)
     || typeof paths.trustedRoot !== "string" || !path.isAbsolute(paths.trustedRoot)) {
-    throw runtimeError("DEEPSEEK_HARNESS_PATHS_INVALID", "DeepSeek Harness runtime paths are invalid");
+    throw runtimeError("DEEPSEEK_HARNESS_PATHS_INVALID", "DeepSeek runtime paths are invalid");
   }
   const base = path.join(paths.stateDir, DEEPSEEK_HARNESS_RUNTIME);
   const home = path.join(base, profileId);
@@ -42,7 +42,7 @@ function prepareDeepSeekHarnessHome(paths, runtimeProfileId, options = {}) {
   if (relative !== profileId || relative.startsWith("..") || path.isAbsolute(relative)) {
     throw runtimeError(
       "DEEPSEEK_HARNESS_RUNTIME_PROFILE_INVALID",
-      "DeepSeek Harness runtime profile path escapes its root",
+      "DeepSeek runtime profile path escapes its root",
     );
   }
   ensurePrivateDirectoryTree(paths.stateDir, paths.trustedRoot);
@@ -126,6 +126,7 @@ function managedPatch(bridgePath, options = {}) {
     "- insert:",
     "    - id: shoggoth-mcp",
     "      name: '@deepseek-ai/dsh-mcp-client'",
+    "      disabled: !!js process.env.SHOGGOTH_DSH_CONTROL_INSTANCE === '1'",
     "      config: !!js JSON.parse(process.env.SHOGGOTH_DSH_MCP_CONFIG)",
     "    - id: shoggoth-runtime-bridge",
     `      name: '${bridgeUrl}'`,
@@ -148,12 +149,12 @@ function prepareDeepSeekHarnessRuntimeAccountIntegration(paths, runtimeAccountId
   if (!validRuntimeAccountId(runtimeAccountId)) {
     throw runtimeError(
       "DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_INVALID",
-      "DeepSeek Harness runtime account id is invalid",
+      "DeepSeek runtime account id is invalid",
     );
   }
   if (!paths || typeof paths.stateDir !== "string" || !path.isAbsolute(paths.stateDir)
     || typeof paths.trustedRoot !== "string" || !path.isAbsolute(paths.trustedRoot)) {
-    throw runtimeError("DEEPSEEK_HARNESS_PATHS_INVALID", "DeepSeek Harness runtime paths are invalid");
+    throw runtimeError("DEEPSEEK_HARNESS_PATHS_INVALID", "DeepSeek runtime paths are invalid");
   }
   const fileSystem = options.fs || fs;
   const bridgePath = assertDeepSeekHarnessBridgePath(options.bridgePath, { fs: fileSystem });
@@ -165,7 +166,7 @@ function prepareDeepSeekHarnessRuntimeAccountIntegration(paths, runtimeAccountId
   if (relative !== runtimeAccountId || relative.startsWith("..") || path.isAbsolute(relative)) {
     throw runtimeError(
       "DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_INVALID",
-      "DeepSeek Harness integration path escapes its root",
+      "DeepSeek integration path escapes its root",
     );
   }
   ensurePrivateDirectoryTree(integrationRoot, paths.trustedRoot);
@@ -190,20 +191,20 @@ function prepareDeepSeekHarnessRuntimeAccountIntegration(paths, runtimeAccountId
     } catch {
       throw runtimeError(
         "DEEPSEEK_HARNESS_INTEGRATION_CONFLICT",
-        "DeepSeek Harness integration ownership marker is invalid",
+        "DeepSeek integration ownership marker is invalid",
       );
     }
     if (!current || typeof current !== "object" || Array.isArray(current)
       || JSON.stringify(current) !== JSON.stringify(marker)) {
       throw runtimeError(
         "DEEPSEEK_HARNESS_INTEGRATION_CONFLICT",
-        "DeepSeek Harness integration is owned by another configuration",
+        "DeepSeek integration is owned by another configuration",
       );
     }
   } else if (fileSystem.readdirSync(accountRoot).length > 0) {
     throw runtimeError(
       "DEEPSEEK_HARNESS_INTEGRATION_CONFLICT",
-      "DeepSeek Harness integration directory is already occupied",
+      "DeepSeek integration directory is already occupied",
     );
   } else {
     atomicWritePrivateFile(markerPath, `${JSON.stringify(marker)}\n`, {
@@ -222,7 +223,7 @@ function prepareDeepSeekHarnessRuntimeAccountIntegration(paths, runtimeAccountId
     if (error?.code !== "ENOENT") {
       throw runtimeError(
         "DEEPSEEK_HARNESS_INTEGRATION_CONFLICT",
-        "DeepSeek Harness integration patch is unsafe",
+        "DeepSeek integration patch is unsafe",
       );
     }
   }
@@ -258,7 +259,7 @@ function resolveDeepSeekHarnessExecutable(candidate, options = {}) {
   if (!resolved) {
     throw runtimeError(
       options.code || "DEEPSEEK_HARNESS_BINARY_INVALID",
-      options.message || "DeepSeek Harness executable is unavailable or unsafe",
+      options.message || "DeepSeek executable is unavailable or unsafe",
     );
   }
   return resolved;
@@ -270,7 +271,7 @@ function resolveDeepSeekHarnessBinary(options = {}) {
     return resolveDeepSeekHarnessExecutable(options.binaryPath, {
       fs: fileSystem,
       code: "DEEPSEEK_HARNESS_BINARY_INVALID",
-      message: "DeepSeek Harness binaryPath must be an absolute executable regular file",
+      message: "DeepSeek binaryPath must be an absolute executable regular file",
     });
   }
   const parentEnv = options.parentEnv || process.env;
@@ -291,7 +292,7 @@ function resolveDeepSeekHarnessBinary(options = {}) {
   }
   throw runtimeError(
     "DEEPSEEK_HARNESS_BINARY_NOT_FOUND",
-    "DeepSeek Harness CLI executable was not found",
+    "DeepSeek CLI executable was not found",
   );
 }
 
@@ -313,7 +314,7 @@ function resolveDeepSeekHarnessLaunch(binaryPath, options = {}) {
   } catch {
     throw runtimeError(
       "DEEPSEEK_HARNESS_BINARY_INVALID",
-      "DeepSeek Harness executable could not be inspected safely",
+      "DeepSeek executable could not be inspected safely",
     );
   }
   if (!descriptor.startsWith("#!")) {
@@ -322,7 +323,7 @@ function resolveDeepSeekHarnessLaunch(binaryPath, options = {}) {
   if (descriptor !== "#!/usr/bin/env node") {
     throw runtimeError(
       "DEEPSEEK_HARNESS_BINARY_INVALID",
-      "DeepSeek Harness executable uses an unsupported interpreter",
+      "DeepSeek executable uses an unsupported interpreter",
     );
   }
   const parentEnv = options.parentEnv || process.env;
@@ -348,7 +349,7 @@ function resolveDeepSeekHarnessLaunch(binaryPath, options = {}) {
   }
   throw runtimeError(
     "DEEPSEEK_HARNESS_NODE_NOT_FOUND",
-    "Node.js executable for DeepSeek Harness was not found",
+    "Node.js executable for DeepSeek was not found",
   );
 }
 
@@ -373,7 +374,7 @@ function supportsDeepSeekHarnessVersion(value) {
 function assertDeepSeekHarnessBridgePath(value, options = {}) {
   const fileSystem = options.fs || fs;
   if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) {
-    throw runtimeError("DEEPSEEK_HARNESS_BRIDGE_INVALID", "DeepSeek Harness Bridge path is invalid");
+    throw runtimeError("DEEPSEEK_HARNESS_BRIDGE_INVALID", "DeepSeek Bridge path is invalid");
   }
   try {
     const stat = fileSystem.lstatSync(value);
@@ -381,7 +382,7 @@ function assertDeepSeekHarnessBridgePath(value, options = {}) {
   } catch {
     throw runtimeError(
       "DEEPSEEK_HARNESS_BRIDGE_INVALID",
-      "DeepSeek Harness Bridge is unavailable or unsafe",
+      "DeepSeek Bridge is unavailable or unsafe",
     );
   }
   return path.resolve(value);
@@ -395,7 +396,7 @@ function normalizeDeepSeekHarnessPermissionPolicy(
     || !VALID_SANDBOXES.has(value.sandbox)) {
     throw runtimeError(
       "DEEPSEEK_HARNESS_PERMISSION_POLICY_INVALID",
-      "DeepSeek Harness permission policy is invalid",
+      "DeepSeek permission policy is invalid",
     );
   }
   return Object.freeze({ approvalPolicy: value.approvalPolicy, sandbox: value.sandbox });
@@ -412,7 +413,7 @@ function normalizeDeepSeekHarnessWorkspace(value) {
     || !value.isWellFormed() || !path.isAbsolute(value) || path.resolve(value) !== value) {
     throw runtimeError(
       "DEEPSEEK_HARNESS_WORKSPACE_INVALID",
-      "DeepSeek Harness workspace must be canonical and absolute",
+      "DeepSeek workspace must be canonical and absolute",
     );
   }
   return value;

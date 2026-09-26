@@ -6,8 +6,6 @@ const { atomicWritePrivateFile, readPrivateFile, statIfExists } = require("./pri
 const { validRuntimeProfileId } = require("./runtime-adapter");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { ANTIGRAVITY_RUNTIME } = require("./antigravity-runtime-paths");
-
-const LEGACY_SCHEMA_VERSION = 1;
 const SCHEMA_VERSION = 2;
 const MAX_LEDGER_BYTES = 16 * 1024 * 1024;
 const TURN_STATUSES = new Set(["inProgress", "completed", "failed", "interrupted", "canceled"]);
@@ -111,18 +109,6 @@ function validateLedger(value, runtimeProfileId, workspaceShardId) {
   return value;
 }
 
-function migrateLegacyLedger(value, runtimeProfileId, workspaceShardId) {
-  if (!plain(value) || value.schemaVersion !== LEGACY_SCHEMA_VERSION) return null;
-  const migrated = structuredClone(value);
-  migrated.schemaVersion = SCHEMA_VERSION;
-  validateLedger(migrated, runtimeProfileId, workspaceShardId);
-  for (const session of migrated.sessions) {
-    session.remoteConversationId = null;
-    session.lastUsage = emptyAntigravityUsage();
-  }
-  return migrated;
-}
-
 class AntigravityRuntimeLedger {
   constructor(options = {}) {
     this.fs = options.fs || fs;
@@ -184,13 +170,8 @@ class AntigravityRuntimeLedger {
       }
       throw ledgerError("ANTIGRAVITY_LEDGER_INVALID", "Antigravity ledger is malformed");
     }
-    const migrated = migrateLegacyLedger(parsed, this.runtimeProfileId, this.workspaceShardId);
-    this.data = validateLedger(
-      migrated || parsed,
-      this.runtimeProfileId,
-      this.workspaceShardId,
-    );
-    let changed = migrated !== null;
+    this.data = validateLedger(parsed, this.runtimeProfileId, this.workspaceShardId);
+    let changed = false;
     for (const session of this.data.sessions) {
       for (const turn of session.turns) {
         if (turn.acceptance === "accepted" && turn.status === "inProgress") {

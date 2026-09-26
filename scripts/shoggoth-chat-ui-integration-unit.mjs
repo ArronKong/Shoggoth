@@ -27,10 +27,18 @@ const helperJavaScript = ts.transpileModule(helperSource, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   fileName: helperPath,
 }).outputText;
+const identityPath = path.join(ROOT, "app/manage-ui/src/lib/nativeBackendIdentity.ts");
+const identityCode = ts.transpileModule(fs.readFileSync(identityPath, "utf8"), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+}).outputText;
+const identityModule = { exports: {} };
+vm.runInNewContext(identityCode, { module: identityModule, exports: identityModule.exports,
+  require: () => JSON.parse(fs.readFileSync(path.join(ROOT, "app/native-backend-catalog.json"), "utf8")) });
 const helperModule = { exports: {} };
 vm.runInNewContext(`(function(module, exports) { ${helperJavaScript}\n})(module, module.exports);`, {
   module: helperModule,
   exports: helperModule.exports,
+  require: () => identityModule.exports,
 });
 const {
   backendOfAgent,
@@ -129,18 +137,18 @@ assert.equal(dedupedPrompts.length, 1, "同 requestId 的重连 prompt 必须 up
 assert.equal(dedupedPrompts[0].id, "local-1", "重放更新内容时保留本地卡片 identity");
 assert.equal(dedupedPrompts[0].question, "新问题");
 
-assert.equal(backendOfAgent("shoggoth-codex"), "openclaw", "opaque agent id 不能推断 backend owner");
+assert.equal(backendOfAgent("shoggoth-codex"), "shoggoth", "原生命名空间离线时不得回退到 OpenClaw");
 assert.equal(backendOfAgent("hermes-default"), "openclaw", "旧行只允许回退 OpenClaw");
 assert.equal(backendOfAgent("main"), "openclaw");
-assert.equal(resolveBackendOwner("codex", "shoggoth-codex"), "codex");
-assert.equal(resolveBackendOwner("grok-build", "shoggoth-grok"), "grok-build");
-assert.equal(resolveBackendOwner("antigravity", "shoggoth-antigravity"), "antigravity");
-assert.equal(resolveBackendOwner("pi", "shoggoth-pi"), "pi");
-assert.equal(resolveBackendOwner("claude-code", "shoggoth-claude-code"), "claude-code");
+assert.equal(resolveBackendOwner("codex", "shoggoth-codex"), "shoggoth");
+assert.equal(resolveBackendOwner("grok-build", "shoggoth-grok"), "shoggoth");
+assert.equal(resolveBackendOwner("antigravity", "shoggoth-antigravity"), "shoggoth");
+assert.equal(resolveBackendOwner("pi", "shoggoth-pi"), "shoggoth");
+assert.equal(resolveBackendOwner("claude-code", "shoggoth-claude-code"), "shoggoth");
 assert.equal(resolveBackendOwner(
   "deepseek-harness", "shoggoth-deepseek-harness",
-), "deepseek-harness");
-assert.equal(backendOfSessionRows([{ key: "agent:shoggoth-codex:main", backendId: "codex" }], "agent:shoggoth-codex:main"), "codex");
+), "shoggoth");
+assert.equal(backendOfSessionRows([{ key: "agent:shoggoth-codex:main", backendId: "codex" }], "agent:shoggoth-codex:main"), "shoggoth");
 const hermesSessionRows = [{
   key: "agent:hermes-default:main",
   backendId: "hermes",

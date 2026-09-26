@@ -16,7 +16,7 @@ export const INITIAL_AGENT_SERVICE_RESTART_STATE: AgentServiceRestartState = {
   notifyAt: null,
 };
 
-// Match the LaunchAgent's startup budget; crypto warm-up gets a shorter grace.
+// Match the LaunchAgent's startup budget; pending-command crypto gets a shorter grace.
 const STARTUP_GRACE_MS = 45_000;
 const DEGRADED_GRACE_MS = 10_000;
 
@@ -36,8 +36,9 @@ export function observeAgentService(
     return { state: INITIAL_AGENT_SERVICE_RESTART_STATE, notice: null };
   }
 
+  // MCP credentials initialize on demand, independently of Service health.
   const ready = service?.healthy === true
-    && !service.pendingCommandsLocked && !service.mcpCredentialsLocked
+    && !service.pendingCommandsLocked
     && service.domainAvailability?.kanban !== false && service.domainAvailability?.cron !== false;
   if (!ready) {
     // A null sample means the host status request failed, not proof of a restart.

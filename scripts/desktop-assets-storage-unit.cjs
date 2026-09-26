@@ -57,7 +57,7 @@ async function bytes(url, options) {
     assert.equal(await (await fetch(`${server.url}/avatar/${encodeURIComponent("provider:hermes:中文")}`)).text(), "legacy JPEG");
     assert.equal(fs.existsSync(path.join(paths.avatarDir, "not-an-asset.json")), false);
     assert.equal(fs.existsSync(path.join(paths.avatarDir, "escape.png")), false);
-    assert.match((await fetch(`${server.url}/avatar/escape`)).headers.get("content-type"), /svg/);
+    assert.equal((await fetch(`${server.url}/avatar/escape`)).headers.get("content-type"), "image/jpeg");
     assert.equal((await fetch(`${server.url}/avatar/invalid%2Fid`)).status, 404);
     assert.equal((await fetch(`${server.url}/avatar/invalid%00id`)).status, 404);
 
@@ -105,8 +105,8 @@ async function bytes(url, options) {
     assert.equal((await fetch(`${fresh.url}/avatar/main`, { method: "PUT", body: png })).status, 200);
     assert.deepEqual(fs.readFileSync(resolveDesktopAssetPaths({ homeDir: freshHome }).avatarDir + "/main.png"), png);
     assert.equal(fs.existsSync(path.join(freshHome, ".openclaw")), false);
-    assert.match((await fetch(`${isolated.url}/avatar/main`)).headers.get("content-type"), /svg/);
-    assert.equal(fs.existsSync(isolatedHome), false);
+    assert.equal((await fetch(`${isolated.url}/avatar/main`)).headers.get("content-type"), "image/jpeg");
+    assert.equal(fs.existsSync(isolatedHome), true, "default selections persist in the isolated user data");
   } finally { await fresh.close(); await isolated.close(); }
   console.log("PASS fresh install: Shoggoth-only writes and independent server roots");
 

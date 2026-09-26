@@ -1,4 +1,5 @@
 "use strict";
+const { poolLedgerSlot } = require("./runtime-shared-ledger");
 
 const { GrokBuildRuntimeHost, buildGrokSpawnEnv } = require("./grok-build-runtime-host");
 const { readGrokUsage } = require("./grok-build-usage");
@@ -16,6 +17,7 @@ const {
   validateResolvedEnvironment,
 } = require("./runtime-account-resolver");
 const { serviceError } = require("./security");
+const { configurePoolCapacity, poolHostLimit, retirePoolHost, trackPoolHost, executionRunIdForPool } = require("./runtime-pool-capacity");
 
 function poolError(code, message) {
   return serviceError(code, message);
@@ -40,12 +42,13 @@ function poolBinding(value) {
   return binding;
 }
 
-function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace) {
+function routeKey(runtimeProfileId, runtimeAccountId, controlInstance, workspace, executionRunId) {
   return JSON.stringify([
     runtimeProfileId,
     runtimeAccountId,
     controlInstance ? "control" : "execution",
     workspace,
+    executionRunId,
   ]);
 }
 
@@ -70,10 +73,7 @@ class GrokBuildRuntimePool {
       parentEnv: options.parentEnv ?? options.hostOptions?.parentEnv,
       homedir: options.homedir ?? options.hostOptions?.homedir,
     });
-    this.maxHosts = options.maxHosts ?? 16;
-    if (!Number.isSafeInteger(this.maxHosts) || this.maxHosts < 1 || this.maxHosts > 64) {
-      throw poolError("GROK_BUILD_POOL_OPTIONS_INVALID", "Grok Build host limit is invalid");
-    }
+    configurePoolCapacity(this, options, "GROK_BUILD_POOL_OPTIONS_INVALID");
     this.entries = new Map();
     this.stopPromises = new Map();
     this.stoppingProfiles = new Set();
@@ -104,7 +104,9 @@ class GrokBuildRuntimePool {
     const accountId = binding.runtimeAccountId;
     const controlInstance = !Object.prototype.hasOwnProperty.call(options, "workspace");
     const workspace = controlInstance ? null : normalizeGrokBuildWorkspace(options.workspace);
-    const key = routeKey(id, accountId, controlInstance, workspace);
+    let executionRunId;
+    try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
+    const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
     const permissionPolicy = normalizeGrokBuildPermissionPolicy(options.permissionPolicy);
     const policyFingerprint = grokBuildPermissionFingerprint(permissionPolicy);
     if (this.blockedProfiles.has(id)) {
@@ -127,6 +129,7 @@ class GrokBuildRuntimePool {
     }
     const existing = this.entries.get(key);
     if (existing) {
+      if (existing.retiring) return existing.retiring.then(() => this.get(binding, options));
       if (existing.policyFingerprint !== policyFingerprint) {
         return Promise.reject(poolError(
           "RUNTIME_PERMISSION_POLICY_CONFLICT",
@@ -138,11 +141,10 @@ class GrokBuildRuntimePool {
         return host;
       });
     }
-    if (this.entries.size >= this.maxHosts) {
-      return Promise.reject(poolError(
-        "GROK_BUILD_HOST_LIMIT",
-        "Grok Build runtime host limit was reached",
-      ));
+    let hostLimit;
+    try { hostLimit = poolHostLimit(this); } catch (error) { return Promise.reject(error); }
+    if (this.entries.size >= hostLimit) {
+      return retirePoolHost(this).then(() => this.get(binding, options));
     }
 
     let runtimeEnvironment;
@@ -155,6 +157,8 @@ class GrokBuildRuntimePool {
     } catch (error) {
       return Promise.reject(error);
     }
+    const ledgerKey = routeKey(id, accountId, controlInstance, workspace, null);
+    const ledgerSlot = poolLedgerSlot(this, ledgerKey);
     const host = this.hostFactory({
       ...this.hostOptions,
       paths: this.options.paths ?? this.hostOptions.paths,
@@ -190,6 +194,8 @@ class GrokBuildRuntimePool {
       runtimeProfileId: id,
       runtimeAccountId: accountId,
       runtimeBinding: binding,
+      mcpExecutionRunId: executionRunId,
+      ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,
       controlInstance,
@@ -220,10 +226,13 @@ class GrokBuildRuntimePool {
       }),
     });
     const entry = {
+      ledgerKey, ledgerSlot,
       host, key, runtimeProfileId: id, runtimeAccountId: accountId,
       workspace, controlInstance, policyFingerprint, promise: null,
     };
+    trackPoolHost(entry, binding);
     entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+      entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
           () => {

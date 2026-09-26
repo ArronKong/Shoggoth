@@ -24,6 +24,8 @@ const DEEPSEEK_HARNESS_CAPABILITIES = runtimeCapabilities({
   "account.logout": false,
   events: true,
   serverRequests: true,
+  "context.usage.estimated": true,
+  "model.generate.toolFree": true,
 });
 
 function adapterError(code, message) {
@@ -46,6 +48,7 @@ class DeepSeekHarnessRuntimeHandle {
     return Array.isArray(this.host.registeredSecrets) ? [...this.host.registeredSecrets] : [];
   }
   authenticationState() { return this.host.authenticationState(); }
+  generateModelOnly(input) { return this.host.generateModelOnly(input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);
@@ -73,10 +76,11 @@ class DeepSeekHarnessRuntimeAdapter {
       || typeof options.runtimePool.stopAll !== "function") {
       throw adapterError(
         "RUNTIME_ADAPTER_INVALID",
-        "DeepSeek Harness adapter requires a DeepSeekHarnessRuntimePool",
+        "DeepSeek adapter requires a DeepSeekHarnessRuntimePool",
       );
     }
     this.runtimePool = options.runtimePool;
+    this.modelOnly = true;
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }
@@ -86,7 +90,7 @@ class DeepSeekHarnessRuntimeAdapter {
     if (binding.runtime !== DEEPSEEK_HARNESS_RUNTIME) {
       throw adapterError(
         "RUNTIME_UNSUPPORTED",
-        `DeepSeek Harness adapter cannot run ${binding.runtime}`,
+        `DeepSeek adapter cannot run ${binding.runtime}`,
       );
     }
     const host = await this.runtimePool.get(binding, options);
@@ -112,7 +116,7 @@ class DeepSeekHarnessRuntimeAdapter {
       if (binding.runtime !== DEEPSEEK_HARNESS_RUNTIME) {
         throw adapterError(
           "RUNTIME_UNSUPPORTED",
-          `DeepSeek Harness adapter cannot stop ${binding.runtime}`,
+          `DeepSeek adapter cannot stop ${binding.runtime}`,
         );
       }
       id = binding.runtimeProfileId;

@@ -9,35 +9,21 @@ const {
   lstatIfExists,
   serviceError,
 } = require("./security");
-const { acquirePrivateWriterLease } = require("./private-writer-lease");
 
 const BACKUP_SCHEMA_VERSION = 1;
-const RUNTIME_SCHEMA_METADATA_BACKUP_SCHEMA_VERSION = 2;
-const RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE = "runtime-schema-metadata";
 const MAX_BACKUP_MANIFEST_BYTES = 16 * 1024 * 1024;
 const BACKUP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
-const RUNTIME_SCHEMA_METADATA_FILES = Object.freeze([
-  "chat-sessions.json",
-  "events.jsonl",
-  "state.snapshot.json",
-]);
-const RUNTIME_SCHEMA_METADATA_WRITER_LOCKS = Object.freeze([
-  "chat-sessions.writer.lock",
-]);
-const RUNTIME_SCHEMA_SOURCE_MATCHES = new Set(["exact", "event-log-continuation"]);
-const MAX_RUNTIME_SCHEMA_EVENT_LINE_BYTES = 16 * 1024 * 1024;
-const ACTIVE_RUNTIME_SCHEMA_WRITER_FENCES = new WeakSet();
 const AUTHORITY_BACKUP_RUNTIME_HOME_MODES = Object.freeze([
   "minimal",
-  "legacy-full",
 ]);
-const LEGACY_RUNTIME_HOME_ROOTS = new Set([
+const RETIRED_RUNTIME_HOME_ROOTS = new Set([
   "codex",
   "grok-build",
   "antigravity",
   "pi",
   "claude-code",
+  "opencode",
   "deepseek-harness",
 ]);
 const MANAGED_CODEX_BACKUP_FILES = new Set(["auth.json", "config.toml", ".shoggoth-native-auth.json"]);
@@ -126,42 +112,13 @@ function portablePath(relativePath) {
   return relativePath.split(path.sep).join("/");
 }
 
-function isExcludedRuntimeCache(relativePath) {
-  const parts = relativePath.split(path.sep);
-  return (parts.length === 3 && parts[0] === "codex" && parts[2] === "tmp")
-    || (parts.length === 5 && parts[0] === "grok-build"
-      && parts[2] === "Library" && parts[3] === "pnpm" && parts[4] === "store")
-    || (parts.length === 5 && parts[0] === "antigravity"
-      && parts[2] === ".gemini" && parts[3] === "antigravity-cli"
-      && (parts[4] === "cli.log" || parts[4] === "log"))
-    || (parts.length === 4 && parts[0] === "deepseek-harness"
-      && parts[2] === "profiles" && parts[3] === "node_modules")
-    || (parts[0] === "native-runtime-imports" && parts[1] === "staging");
-}
-
 function minimalAuthorityPathDisposition(relativePath) {
   const parts = relativePath.split(path.sep);
   const [root] = parts;
+  if (root === "plugins" && parts[1] === "staging") return "exclude";
   if (root === "runtime-integration") return "exclude";
-  if (root === "legacy-runtime-homes") {
-    if (parts.length === 1) return "traverse";
-    return parts.length === 2
-      && ["manifest.json", "cleanup-audit.jsonl"].includes(parts[1])
-      ? "file" : "exclude";
-  }
-  if (root === "native-runtime-imports") {
-    if (parts.length === 1) return "traverse";
-    return parts.length === 2 && parts[1] === "native-runtime-import-v1.json"
-      ? "file" : "exclude";
-  }
-  if (LEGACY_RUNTIME_HOME_ROOTS.has(root)) {
-    if (root !== "codex") return "exclude";
-    if (parts.length === 1) return "traverse";
-    if (!OPAQUE_PATH_SEGMENT_PATTERN.test(parts[1])) return "exclude";
-    if (parts.length === 2) return "traverse";
-    return parts.length === 3 && MANAGED_CODEX_BACKUP_FILES.has(parts[2])
-      ? "file" : "exclude";
-  }
+  if (["legacy-runtime-homes", "native-runtime-imports"].includes(root)
+    || RETIRED_RUNTIME_HOME_ROOTS.has(root)) return "exclude";
   if (root === "runtime-accounts") {
     if (parts.length === 1) return "traverse";
     if (parts[1] !== "codex") return "exclude";
@@ -177,9 +134,7 @@ function minimalAuthorityPathDisposition(relativePath) {
 }
 
 function authorityPathDisposition(relativePath, runtimeHomeMode) {
-  if (isExcludedRuntimeCache(relativePath)) return "exclude";
-  return runtimeHomeMode === "legacy-full"
-    ? "include" : minimalAuthorityPathDisposition(relativePath);
+  return minimalAuthorityPathDisposition(relativePath);
 }
 
 function copyAuthorityFile(source, destination, relative, before) {
@@ -396,32 +351,6 @@ function copyAuthorityTree(sourceRoot, payloadRoot, runtimeHomeMode) {
   return entries;
 }
 
-function runtimeSchemaMetadataSources(sourceRoot) {
-  const sources = [];
-  for (const name of RUNTIME_SCHEMA_METADATA_FILES) {
-    const source = path.join(sourceRoot, name);
-    const before = lstatIfExists(source);
-    if (!before) continue;
-    assertSafeSourceStat(before, source);
-    if (!before.isFile()) {
-      throw backupError("BACKUP_UNSAFE_SOURCE", `Runtime schema metadata 不是普通文件: ${source}`);
-    }
-    sources.push({ name, source, before });
-  }
-  if (sources.length === 0) {
-    throw backupError("BACKUP_SOURCE_CHANGED", "Runtime schema metadata 在备份前消失");
-  }
-  return sources;
-}
-
-function copyRuntimeSchemaMetadata(sourceRoot, payloadRoot) {
-  const entries = [];
-  for (const { name, source, before } of runtimeSchemaMetadataSources(sourceRoot)) {
-    entries.push(copyPinnedAuthorityFile(source, path.join(payloadRoot, name), name, before));
-  }
-  return entries;
-}
-
 function rootDigest(entries) {
   return crypto.createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 }
@@ -440,109 +369,7 @@ function writeManifest(target, manifest) {
   }
 }
 
-function assertRuntimeSchemaMetadataWriterLocks(paths, activeWriterLocks) {
-  if (!Array.isArray(activeWriterLocks)
-    || !ACTIVE_RUNTIME_SCHEMA_WRITER_FENCES.has(activeWriterLocks)
-    || activeWriterLocks.length !== RUNTIME_SCHEMA_METADATA_WRITER_LOCKS.length) {
-    throw backupError("BACKUP_SERVICE_ACTIVE", "Runtime schema metadata writer fence 无效");
-  }
-  const identities = new Map();
-  for (const identity of activeWriterLocks) {
-    if (!identity || typeof identity.lockPath !== "string"
-      || !Number.isSafeInteger(identity.dev) || !Number.isSafeInteger(identity.ino)
-      || identities.has(identity.lockPath)) {
-      throw backupError("BACKUP_SERVICE_ACTIVE", "Runtime schema metadata writer fence 无效");
-    }
-    identities.set(identity.lockPath, identity);
-  }
-  for (const basename of RUNTIME_SCHEMA_METADATA_WRITER_LOCKS) {
-    const lockPath = path.join(paths.stateDir, basename);
-    const identity = identities.get(lockPath);
-    const stat = identity ? lstatIfExists(lockPath) : null;
-    if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 2
-      || stat.dev !== identity.dev || stat.ino !== identity.ino) {
-      throw backupError("BACKUP_SERVICE_ACTIVE", "Runtime schema metadata writer fence 已失效");
-    }
-    assertOwned(stat, lockPath);
-  }
-}
-
-function acquireRuntimeSchemaMetadataWriterFence(options = {}) {
-  const { paths } = options;
-  assertBackupPaths(paths);
-  assertPrivateDirectory(paths.stateDir);
-  const acquireWriterLease = options.acquireWriterLease || acquirePrivateWriterLease;
-  const leases = [];
-  const activeWriterLocks = [];
-  let ownedWriterLocks = null;
-  try {
-    for (const basename of RUNTIME_SCHEMA_METADATA_WRITER_LOCKS) {
-      const lockPath = path.join(paths.stateDir, basename);
-      const lease = acquireWriterLease({
-        lockPath,
-        trustedRoot: paths.trustedRoot,
-      });
-      leases.push(lease);
-      const stat = fs.lstatSync(lockPath);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 2) {
-        throw backupError("BACKUP_SERVICE_ACTIVE", "Runtime schema metadata writer fence 无效");
-      }
-      assertOwned(stat, lockPath);
-      activeWriterLocks.push(Object.freeze({ lockPath, dev: stat.dev, ino: stat.ino }));
-    }
-    ownedWriterLocks = Object.freeze(activeWriterLocks);
-    ACTIVE_RUNTIME_SCHEMA_WRITER_FENCES.add(ownedWriterLocks);
-    assertRuntimeSchemaMetadataWriterLocks(paths, ownedWriterLocks);
-  } catch (error) {
-    if (ownedWriterLocks) ACTIVE_RUNTIME_SCHEMA_WRITER_FENCES.delete(ownedWriterLocks);
-    for (const lease of leases.reverse()) {
-      try { lease.release(); } catch { /* 保留 acquire 主错误 */ }
-    }
-    throw error;
-  }
-
-  let released = false;
-  return Object.freeze({
-    activeWriterLocks: ownedWriterLocks,
-    release() {
-      if (released) return false;
-      ACTIVE_RUNTIME_SCHEMA_WRITER_FENCES.delete(ownedWriterLocks);
-      for (const lease of leases.slice().reverse()) lease.release();
-      released = true;
-      return true;
-    },
-  });
-}
-
-function withRuntimeSchemaMetadataWriterFence(options, action) {
-  if (options.activeWriterLocks !== undefined) {
-    assertRuntimeSchemaMetadataWriterLocks(options.paths, options.activeWriterLocks);
-    return action(options.activeWriterLocks);
-  }
-  const fence = acquireRuntimeSchemaMetadataWriterFence(options);
-  let actionError = null;
-  let result;
-  try {
-    result = action(fence.activeWriterLocks);
-  } catch (error) {
-    actionError = error;
-  }
-  try {
-    fence.release();
-  } catch (releaseError) {
-    if (!actionError) throw releaseError;
-    const aggregate = new AggregateError(
-      [actionError, releaseError],
-      "Runtime schema metadata writer fence 释放失败",
-    );
-    aggregate.code = "BACKUP_WRITER_FENCE_RELEASE_FAILED";
-    throw aggregate;
-  }
-  if (actionError) throw actionError;
-  return result;
-}
-
-function assertServiceStopped(paths, activeServiceLock = null, activeWriterLocks = []) {
+function assertServiceStopped(paths, activeServiceLock = null) {
   const lock = lstatIfExists(paths.lockPath);
   const allowedOwnedLock = lock && activeServiceLock
     && Number.isSafeInteger(activeServiceLock.dev)
@@ -556,22 +383,8 @@ function assertServiceStopped(paths, activeServiceLock = null, activeWriterLocks
   if ((activeServiceLock === null && lock) || lstatIfExists(paths.socketPath)) {
     throw backupError("BACKUP_SERVICE_ACTIVE", "Agent Service 运行时不能建立一致备份");
   }
-  const allowedWriterLocks = new Map(activeWriterLocks.map((identity) => [
-    path.basename(identity.lockPath), identity,
-  ]));
-  const writerLocks = fs.readdirSync(paths.stateDir).filter((name) => name.endsWith(".writer.lock"));
-  for (const name of writerLocks) {
-    const identity = allowedWriterLocks.get(name);
-    const target = path.join(paths.stateDir, name);
-    const stat = identity ? fs.lstatSync(target) : null;
-    if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 2
-      || stat.dev !== identity.dev || stat.ino !== identity.ino) {
-      throw backupError("BACKUP_SERVICE_ACTIVE", "持久化 writer 未关闭，不能建立一致备份");
-    }
-    assertOwned(stat, target);
-  }
-  if (activeWriterLocks.length > 0) {
-    assertRuntimeSchemaMetadataWriterLocks(paths, activeWriterLocks);
+  if (fs.readdirSync(paths.stateDir).some(name => name.endsWith(".writer.lock"))) {
+    throw backupError("BACKUP_SERVICE_ACTIVE", "持久化 writer 未关闭，不能建立一致备份");
   }
 }
 
@@ -585,14 +398,12 @@ function createBackup(
     backupId,
     now = Date.now,
     activeServiceLock = null,
-    activeWriterLocks = [],
   },
   copyPayload,
-  scope = null,
 ) {
   assertBackupPaths(paths);
   assertPrivateDirectory(paths.stateDir);
-  assertServiceStopped(paths, activeServiceLock, activeWriterLocks);
+  assertServiceStopped(paths, activeServiceLock);
   const createdAt = now();
   if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
     throw backupError("BACKUP_TIME_INVALID", "备份时间无效");
@@ -609,31 +420,15 @@ function createBackup(
     const payloadPath = path.join(stagingPath, "payload");
     ensurePrivateDirectoryTree(payloadPath, paths.trustedRoot);
     const entries = copyPayload(paths.stateDir, payloadPath);
-    assertServiceStopped(paths, activeServiceLock, activeWriterLocks);
-    const manifest = scope === RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE
-      ? {
-        schemaVersion: RUNTIME_SCHEMA_METADATA_BACKUP_SCHEMA_VERSION,
-        backupId,
-        createdAt,
-        sourceRoot: "stateDir",
-        scope,
-        entries,
-        rootDigest: rootDigest(entries),
-      }
-      : {
-        schemaVersion: BACKUP_SCHEMA_VERSION,
-        backupId,
-        createdAt,
-        sourceRoot: "stateDir",
-        entries,
-        rootDigest: rootDigest(entries),
-      };
+    assertServiceStopped(paths, activeServiceLock);
+    const manifest = { schemaVersion: BACKUP_SCHEMA_VERSION, backupId, createdAt,
+      sourceRoot: "stateDir", entries, rootDigest: rootDigest(entries) };
     writeManifest(path.join(stagingPath, "manifest.json"), manifest);
     fsyncDirectoryTree(payloadPath);
     fsyncDirectory(stagingPath);
     fs.renameSync(stagingPath, backupPath);
     fsyncDirectory(paths.backupsDir);
-    assertServiceStopped(paths, activeServiceLock, activeWriterLocks);
+    assertServiceStopped(paths, activeServiceLock);
     return Object.freeze({ backupPath, manifest: structuredClone(manifest) });
   } catch (error) {
     cleanupStaging(stagingPath);
@@ -647,20 +442,9 @@ function createAuthorityBackup(options) {
     throw backupError("BACKUP_OPTIONS_INVALID", "Runtime Home 备份模式无效");
   }
   return createBackup(
-    { ...options, activeWriterLocks: [] },
+    options,
     (sourceRoot, payloadRoot) => copyAuthorityTree(sourceRoot, payloadRoot, runtimeHomeMode),
   );
-}
-
-function createRuntimeSchemaMetadataBackup(options) {
-  if (!options?.activeServiceLock) {
-    throw backupError("BACKUP_SERVICE_ACTIVE", "Runtime schema metadata 备份需要当前 Service lock");
-  }
-  return withRuntimeSchemaMetadataWriterFence(options, (activeWriterLocks) => createBackup(
-    { ...options, activeWriterLocks },
-    copyRuntimeSchemaMetadata,
-    RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE,
-  ));
 }
 
 function safeRelativePath(value) {
@@ -686,7 +470,7 @@ function assertUnchangedBackupDirectory(target, expected, label) {
   assertOwned(current, target);
 }
 
-function readManifest(backupPath, backupId, expectedScope = null, backupDirectoryStat = null) {
+function readManifest(backupPath, backupId, backupDirectoryStat = null) {
   if (backupDirectoryStat) {
     assertUnchangedBackupDirectory(backupPath, backupDirectoryStat, "备份目录");
   }
@@ -713,18 +497,8 @@ function readManifest(backupPath, backupId, expectedScope = null, backupDirector
   if (backupDirectoryStat) {
     assertUnchangedBackupDirectory(backupPath, backupDirectoryStat, "备份目录");
   }
-  const metadataScope = manifest?.scope === RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE
-    && manifest?.schemaVersion === RUNTIME_SCHEMA_METADATA_BACKUP_SCHEMA_VERSION;
-  if ((expectedScope === RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE && !metadataScope)
-    || (expectedScope === null && (manifest?.scope !== undefined
-      || manifest?.schemaVersion === RUNTIME_SCHEMA_METADATA_BACKUP_SCHEMA_VERSION))) {
-    throw backupError("BACKUP_SCOPE_MISMATCH", "备份范围与验证器不匹配");
-  }
-  const expectedKeys = expectedScope === RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE
-    ? "schemaVersion,backupId,createdAt,sourceRoot,scope,entries,rootDigest"
-    : "schemaVersion,backupId,createdAt,sourceRoot,entries,rootDigest";
-  const expectedVersion = expectedScope === RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE
-    ? RUNTIME_SCHEMA_METADATA_BACKUP_SCHEMA_VERSION : BACKUP_SCHEMA_VERSION;
+  const expectedKeys = "schemaVersion,backupId,createdAt,sourceRoot,entries,rootDigest";
+  const expectedVersion = BACKUP_SCHEMA_VERSION;
   if (!manifest || Object.keys(manifest).join(",") !== expectedKeys
     || manifest.schemaVersion !== expectedVersion || manifest.backupId !== backupId
     || !Number.isSafeInteger(manifest.createdAt) || manifest.createdAt < 0
@@ -772,7 +546,7 @@ function scanPayload(payloadPath) {
   return entries;
 }
 
-function verifyBackup({ paths, backupId }, expectedScope = null) {
+function verifyBackup({ paths, backupId }) {
   assertBackupPaths(paths);
   const backupPath = backupPathFor(paths, backupId);
   const backupStat = fs.lstatSync(backupPath);
@@ -780,7 +554,7 @@ function verifyBackup({ paths, backupId }, expectedScope = null) {
     throw backupError("BACKUP_CORRUPT", "备份目录无效");
   }
   assertOwned(backupStat, backupPath);
-  const manifest = readManifest(backupPath, backupId, expectedScope, backupStat);
+  const manifest = readManifest(backupPath, backupId, backupStat);
   assertUnchangedBackupDirectory(backupPath, backupStat, "备份目录");
   const payloadPath = path.join(backupPath, "payload");
   const payloadStat = fs.lstatSync(payloadPath);
@@ -819,321 +593,29 @@ function verifyAuthorityBackup(options) {
   return verifyBackup(options);
 }
 
-function assertUnchangedMetadataPayloadDirectory(payloadPath, expected) {
-  const current = fs.lstatSync(payloadPath);
-  if (!current.isDirectory() || current.isSymbolicLink()
-    || !sameFileVersion(expected, current)) {
-    throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 目录发生变化");
-  }
-  assertOwned(current, payloadPath);
-}
-
-function verifyPinnedMetadataPayloadFile(payloadPath, entry, payloadDirectoryStat) {
-  const target = path.join(payloadPath, entry.path);
-  assertUnchangedMetadataPayloadDirectory(payloadPath, payloadDirectoryStat);
-  const before = fs.lstatSync(target);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
-    throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 含不安全文件");
-  }
-  assertOwned(before, target);
-  if ((before.mode & 0o077) !== 0 || before.size !== entry.size) {
-    throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 文件大小或权限无效");
-  }
-
-  let fd;
-  try {
-    try {
-      fd = fs.openSync(target, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    } catch (error) {
-      if (error?.code === "ELOOP") {
-        throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 不允许 symlink");
-      }
-      throw error;
-    }
-    const opened = fs.fstatSync(fd);
-    if (!opened.isFile() || opened.nlink !== 1 || !sameFileVersion(before, opened)) {
-      throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 文件发生变化");
-    }
-    assertOwned(opened, target);
-    assertUnchangedMetadataPayloadDirectory(payloadPath, payloadDirectoryStat);
-
-    const hash = crypto.createHash("sha256");
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    let bytesRead = 0;
-    for (;;) {
-      const bytes = fs.readSync(fd, buffer, 0, buffer.length, null);
-      if (bytes === 0) break;
-      bytesRead += bytes;
-      if (bytesRead > entry.size) {
-        throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 文件大小无效");
-      }
-      hash.update(buffer.subarray(0, bytes));
-    }
-    const after = fs.fstatSync(fd);
-    const pathAfter = fs.lstatSync(target);
-    if (!after.isFile() || !pathAfter.isFile() || pathAfter.isSymbolicLink()
-      || after.nlink !== 1 || pathAfter.nlink !== 1
-      || !sameFileVersion(before, after) || !sameFileVersion(before, pathAfter)
-      || bytesRead !== entry.size || hash.digest("hex") !== entry.sha256) {
-      throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 摘要或版本无效");
-    }
-    assertOwned(after, target);
-    assertOwned(pathAfter, target);
-    assertUnchangedMetadataPayloadDirectory(payloadPath, payloadDirectoryStat);
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-}
-
-function verifyRuntimeSchemaMetadataPayload(
-  backupPath,
-  backupDirectoryStat,
-  manifest,
-  expectedPaths,
-) {
-  assertUnchangedBackupDirectory(backupPath, backupDirectoryStat, "Runtime schema metadata 备份目录");
-  const payloadPath = path.join(backupPath, "payload");
-  const payloadDirectoryStat = fs.lstatSync(payloadPath);
-  if (!payloadDirectoryStat.isDirectory() || payloadDirectoryStat.isSymbolicLink()) {
-    throw backupError("BACKUP_CORRUPT", "Runtime schema metadata payload 无效");
-  }
-  assertOwned(payloadDirectoryStat, payloadPath);
-  assertUnchangedMetadataPayloadDirectory(payloadPath, payloadDirectoryStat);
-  assertUnchangedBackupDirectory(backupPath, backupDirectoryStat, "Runtime schema metadata 备份目录");
-
-  let directory;
-  const names = [];
-  try {
-    directory = fs.opendirSync(payloadPath);
-    assertUnchangedMetadataPayloadDirectory(payloadPath, payloadDirectoryStat);
-    for (;;) {
-      const entry = directory.readSync();
-      if (!entry) break;
-      names.push(entry.name);
-    }
-  } finally {
-    directory?.closeSync();
-  }
-  names.sort((left, right) => left.localeCompare(right));
-  assertUnchangedMetadataPayloadDirectory(payloadPath, payloadDirectoryStat);
-  assertUnchangedBackupDirectory(backupPath, backupDirectoryStat, "Runtime schema metadata 备份目录");
-  if (JSON.stringify(names) !== JSON.stringify(expectedPaths)) {
-    throw backupError("BACKUP_SCOPE_MISMATCH", "Runtime schema metadata payload 含缺失或额外条目");
-  }
-  for (const entry of manifest.entries) {
-    assertUnchangedBackupDirectory(backupPath, backupDirectoryStat, "Runtime schema metadata 备份目录");
-    verifyPinnedMetadataPayloadFile(payloadPath, entry, payloadDirectoryStat);
-  }
-  assertUnchangedMetadataPayloadDirectory(payloadPath, payloadDirectoryStat);
-  assertUnchangedBackupDirectory(backupPath, backupDirectoryStat, "Runtime schema metadata 备份目录");
-}
-
-function sha256FileDescriptor(fd) {
-  const hash = crypto.createHash("sha256");
-  const buffer = Buffer.allocUnsafe(64 * 1024);
-  let position = 0;
-  for (;;) {
-    const bytes = fs.readSync(fd, buffer, 0, buffer.length, position);
-    if (bytes === 0) break;
-    hash.update(buffer.subarray(0, bytes));
-    position += bytes;
-  }
-  return hash.digest("hex");
-}
-
-function completeEventPrefixLength(fd, size) {
-  const buffer = Buffer.allocUnsafe(64 * 1024);
-  let end = size;
-  while (end > 0) {
-    const start = Math.max(0, end - buffer.length);
-    const length = end - start;
-    const bytes = fs.readSync(fd, buffer, 0, length, start);
-    if (bytes !== length) {
-      throw backupError("BACKUP_CORRUPT", "Runtime schema metadata event log 读取不完整");
-    }
-    const newline = buffer.subarray(0, bytes).lastIndexOf(0x0a);
-    if (newline >= 0) return start + newline + 1;
-    end = start;
-  }
-  return 0;
-}
-
-function filePrefixMatches(leftFd, rightFd, length) {
-  const left = Buffer.allocUnsafe(64 * 1024);
-  const right = Buffer.allocUnsafe(64 * 1024);
-  let position = 0;
-  while (position < length) {
-    const expected = Math.min(left.length, length - position);
-    const leftBytes = fs.readSync(leftFd, left, 0, expected, position);
-    const rightBytes = fs.readSync(rightFd, right, 0, expected, position);
-    if (leftBytes !== expected || rightBytes !== expected
-      || !left.subarray(0, expected).equals(right.subarray(0, expected))) {
-      return false;
-    }
-    position += expected;
-  }
-  return true;
-}
-
-function eventSuffixUsesSchema(fd, start, size, targetSchemaVersion) {
-  const buffer = Buffer.allocUnsafe(64 * 1024);
-  let pending = Buffer.alloc(0);
-  let position = start;
-  while (position < size) {
-    const expected = Math.min(buffer.length, size - position);
-    const bytes = fs.readSync(fd, buffer, 0, expected, position);
-    if (bytes !== expected) return false;
-    position += bytes;
-    const combined = pending.length === 0
-      ? Buffer.from(buffer.subarray(0, bytes))
-      : Buffer.concat([pending, buffer.subarray(0, bytes)]);
-    let cursor = 0;
-    for (;;) {
-      const newline = combined.indexOf(0x0a, cursor);
-      if (newline < 0) break;
-      const line = combined.subarray(cursor, newline);
-      if (line.length === 0 || line.length > MAX_RUNTIME_SCHEMA_EVENT_LINE_BYTES) return false;
-      let event;
-      try { event = JSON.parse(line.toString("utf8")); } catch { return false; }
-      if (event?.schemaVersion !== targetSchemaVersion) return false;
-      cursor = newline + 1;
-    }
-    pending = Buffer.from(combined.subarray(cursor));
-    if (pending.length > MAX_RUNTIME_SCHEMA_EVENT_LINE_BYTES) return false;
-  }
-  // ProductStore 会在 open 时丢弃没有换行的崩溃残尾；它不属于已提交事件。
-  return true;
-}
-
-function currentEventLogContinuesBackup(
-  currentTarget,
-  backupTarget,
-  targetSchemaVersion,
-) {
-  return withPinnedRegularFile(
-    backupTarget,
-    { code: "BACKUP_CORRUPT", message: "Runtime schema metadata event backup 发生变化" },
-    (backupFd, backupStat) => withPinnedRegularFile(
-      currentTarget,
-      { code: "BACKUP_SOURCE_MISMATCH", message: "Runtime schema migration 输入已变化" },
-      (currentFd, currentStat) => {
-        const prefixLength = completeEventPrefixLength(backupFd, backupStat.size);
-        return currentStat.size >= prefixLength
-          && filePrefixMatches(backupFd, currentFd, prefixLength)
-          && eventSuffixUsesSchema(
-            currentFd,
-            prefixLength,
-            currentStat.size,
-            targetSchemaVersion,
-          );
-      },
-    ),
-  );
-}
-
-function verifyRuntimeSchemaMetadataSources(options, verified) {
-  const requirements = options.sourceRequirements;
-  if (requirements === undefined) return;
-  if (!Array.isArray(requirements)) {
-    throw backupError("BACKUP_SOURCE_MISMATCH", "Runtime schema migration 输入约束无效");
-  }
-  const seen = new Set();
-  const entries = new Map(verified.manifest.entries.map((entry) => [entry.path, entry]));
-  for (const requirement of requirements) {
-    if (!requirement || typeof requirement.path !== "string"
-      || !RUNTIME_SCHEMA_METADATA_FILES.includes(requirement.path)
-      || !RUNTIME_SCHEMA_SOURCE_MATCHES.has(requirement.match)
-      || seen.has(requirement.path)
-      || (requirement.match === "event-log-continuation"
-        && (!Number.isSafeInteger(requirement.targetSchemaVersion)
-          || requirement.targetSchemaVersion < 1))) {
-      throw backupError("BACKUP_SOURCE_MISMATCH", "Runtime schema migration 输入约束无效");
-    }
-    seen.add(requirement.path);
-    const entry = entries.get(requirement.path);
-    if (!entry) {
-      throw backupError("BACKUP_SOURCE_MISMATCH", `备份缺少仍待迁移的 metadata: ${requirement.path}`);
-    }
-    const currentTarget = path.join(options.paths.stateDir, requirement.path);
-    if (requirement.match === "exact") {
-      let stat;
-      try { stat = fs.lstatSync(currentTarget); } catch {
-        throw backupError("BACKUP_SOURCE_MISMATCH", "Runtime schema migration 输入已变化");
-      }
-      const digest = withPinnedRegularFile(
-        currentTarget,
-        {
-          before: stat,
-          code: "BACKUP_SOURCE_MISMATCH",
-          message: "Runtime schema migration 输入已变化",
-        },
-        sha256FileDescriptor,
-      );
-      if (stat.size !== entry.size || digest !== entry.sha256) {
-        throw backupError("BACKUP_SOURCE_MISMATCH", "Runtime schema migration 输入已变化");
-      }
-      continue;
-    }
-    const backupTarget = path.join(verified.backupPath, "payload", requirement.path);
-    if (!currentEventLogContinuesBackup(
-      currentTarget,
-      backupTarget,
-      requirement.targetSchemaVersion,
-    )) {
-      throw backupError("BACKUP_SOURCE_MISMATCH", "Runtime schema migration event 输入已变化");
-    }
-  }
-}
-
-function verifyRuntimeSchemaMetadataBackupWithFence(options, activeWriterLocks) {
-  if (!options?.activeServiceLock) {
-    throw backupError("BACKUP_SERVICE_ACTIVE", "Runtime schema metadata 验证需要当前 Service lock");
-  }
-  assertBackupPaths(options.paths);
-  assertServiceStopped(options.paths, options.activeServiceLock, activeWriterLocks);
-  const backupPath = backupPathFor(options.paths, options.backupId);
-  const backupStat = fs.lstatSync(backupPath);
-  if (!backupStat.isDirectory() || backupStat.isSymbolicLink()) {
-    throw backupError("BACKUP_CORRUPT", "Runtime schema metadata 备份目录无效");
-  }
-  assertOwned(backupStat, backupPath);
-  const manifest = readManifest(
-    backupPath,
-    options.backupId,
-    RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE,
-    backupStat,
-  );
-  assertUnchangedBackupDirectory(backupPath, backupStat, "Runtime schema metadata 备份目录");
-  const actual = manifest.entries.map((entry) => entry.path);
-  const expected = RUNTIME_SCHEMA_METADATA_FILES.filter((name) => actual.includes(name));
-  if (manifest.entries.some((entry) => entry.type !== "file")
-    || actual.length === 0
-    || JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw backupError("BACKUP_SCOPE_MISMATCH", "Runtime schema metadata 备份范围无效");
-  }
-  verifyRuntimeSchemaMetadataPayload(backupPath, backupStat, manifest, actual);
-  const verified = Object.freeze({ backupPath, manifest: structuredClone(manifest) });
-  verifyRuntimeSchemaMetadataSources(options, verified);
-  assertUnchangedBackupDirectory(backupPath, backupStat, "Runtime schema metadata 备份目录");
-  assertServiceStopped(options.paths, options.activeServiceLock, activeWriterLocks);
-  return verified;
-}
-
-function verifyRuntimeSchemaMetadataBackup(options) {
-  if (!options?.activeServiceLock) {
-    throw backupError("BACKUP_SERVICE_ACTIVE", "Runtime schema metadata 验证需要当前 Service lock");
-  }
-  return withRuntimeSchemaMetadataWriterFence(
-    options,
-    (activeWriterLocks) => verifyRuntimeSchemaMetadataBackupWithFence(
-      options,
-      activeWriterLocks,
-    ),
-  );
-}
-
 function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
   const verified = verifyAuthorityBackup({ paths, backupId });
+  const hasPluginCatalog = verified.manifest.entries.some(entry => entry.type === "file"
+    && entry.path === "plugins/catalog.sqlite");
+  let pluginBarrier = null;
+  let sourceCatalogStat = null;
+  // An old snapshot can predate a completed external write or a revocation.
+  // Merge only no-replay evidence from a stopped source; never copy its grants.
+  if (hasPluginCatalog) {
+    assertServiceStopped(paths);
+    sourceCatalogStat = lstatIfExists(paths.pluginCatalogPath);
+    const { readPluginRestoreBarrier } = require("./plugin-store");
+    pluginBarrier = readPluginRestoreBarrier(paths);
+  }
+  const assertPluginSourceUnchanged = () => {
+    if (!hasPluginCatalog) return;
+    assertServiceStopped(paths);
+    const current = lstatIfExists(paths.pluginCatalogPath);
+    if ((sourceCatalogStat === null) !== (current === null)
+      || (sourceCatalogStat && !sameFileVersion(sourceCatalogStat, current))) {
+      throw backupError("BACKUP_SOURCE_CHANGED", "插件恢复期间源调用账本发生变化");
+    }
+  };
   const destination = assertContained(paths.trustedRoot, destinationStateDir, "BACKUP_RESTORE_PATH_INVALID");
   if (destination === path.resolve(paths.stateDir)
     || destination.startsWith(`${path.resolve(paths.backupsDir)}${path.sep}`)) {
@@ -1170,15 +652,30 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
         }
       }
     }
+    let pluginRestore = null;
+    if (hasPluginCatalog) {
+      assertPluginSourceUnchanged();
+      const { resolveServicePaths } = require("./paths");
+      const { PluginStore } = require("./plugin-store");
+      const restoredPaths = resolveServicePaths({ stateRoot: staging, trustedRoot: paths.trustedRoot });
+      const store = new PluginStore({ paths: restoredPaths }).open();
+      try {
+        pluginRestore = store.rotateAuthorityForRestore({ backupId, replayBarrier: pluginBarrier });
+      } finally { store.close(); }
+      fsyncFile(restoredPaths.pluginCatalogPath);
+      pluginRestore.catalogDigest = sha256File(restoredPaths.pluginCatalogPath);
+    }
     fsyncDirectoryTree(staging);
     for (const [target, mode] of directoryModes.reverse()) fs.chmodSync(target, mode);
     fsyncDirectory(staging);
+    assertPluginSourceUnchanged();
     fs.renameSync(staging, destination);
     fsyncDirectory(parent);
     return Object.freeze({
       destinationStateDir: destination,
       backupId,
       rootDigest: verified.manifest.rootDigest,
+      ...(pluginRestore ? { pluginRestore } : {}),
     });
   } catch (error) {
     cleanupStaging(staging);
@@ -1188,13 +685,7 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
 
 module.exports = {
   BACKUP_SCHEMA_VERSION,
-  RUNTIME_SCHEMA_METADATA_FILES,
-  RUNTIME_SCHEMA_METADATA_BACKUP_SCHEMA_VERSION,
-  RUNTIME_SCHEMA_METADATA_BACKUP_SCOPE,
-  acquireRuntimeSchemaMetadataWriterFence,
   createAuthorityBackup,
-  createRuntimeSchemaMetadataBackup,
   restoreAuthorityBackup,
   verifyAuthorityBackup,
-  verifyRuntimeSchemaMetadataBackup,
 };

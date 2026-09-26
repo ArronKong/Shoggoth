@@ -13,7 +13,6 @@ const {
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
 } = require(path.join(ROOT, "app", "agent-service", "runtime-account.js"));
 const {
-  LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
   RuntimeAccountResolver,
   runtimePathsOverlap,
   validateResolvedEnvironment,
@@ -106,6 +105,7 @@ test("native RuntimeAccounts reuse the real CLI Home across Profiles", () => {
       pi: path.join(current.home, ".pi", "agent"),
       "claude-code": path.join(current.home, ".claude"),
       "deepseek-harness": path.join(current.home, ".dsh"),
+      opencode: path.join(current.home, ".local", "share"),
     };
     for (const [runtime, account] of ACCOUNT_BY_RUNTIME) {
       const firstBinding = binding(runtime, "profile-one", account.id);
@@ -127,6 +127,9 @@ test("native RuntimeAccounts reuse the real CLI Home across Profiles", () => {
         assert.equal(first.strategy, "account-integration");
       } else {
         assert.equal(first.home, expectedHomes[runtime]);
+      }
+      if (runtime === "opencode") {
+        assert.equal(first.configSourceHome, path.join(current.home, ".config"));
       }
     }
     assert.equal(fs.existsSync(path.join(current.paths.stateDir, "grok-build", "profile-one")), false);
@@ -267,11 +270,6 @@ test("native Codex and bundled Codex Homes cannot share an authority tree", () =
     const nativeAccount = ACCOUNT_BY_RUNTIME.get("codex");
     const managedHomes = [
       path.join(
-        current.paths.stateDir,
-        "codex",
-        LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
-      ),
-      path.join(
         current.paths.runtimeAccountsDir,
         "codex",
         INTERNAL_ACCOUNT.id,
@@ -387,17 +385,13 @@ test("native integration Homes cannot overlap Antigravity or DeepSeek account in
   }
 });
 
-test("default bundled Codex reuses the exact legacy Shoggoth Home", () => {
+test("default bundled Codex always uses the current account Home and leaves retired paths untouched", () => {
   const current = fixture();
   try {
-    assert.equal(
-      LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
-      "shoggoth-f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4",
-    );
     const legacyHome = privateDirectory(path.join(
       current.paths.stateDir,
       "codex",
-      LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
+      "shoggoth-f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4",
     ));
     const resolver = new RuntimeAccountResolver({
       paths: current.paths,
@@ -412,14 +406,16 @@ test("default bundled Codex reuses the exact legacy Shoggoth Home", () => {
     );
     const environment = resolver.resolve(runtimeBinding, INTERNAL_ACCOUNT);
     assertFrozenEnvironment(environment, runtimeBinding);
-    assert.equal(environment.home, legacyHome);
+    assert.notEqual(environment.home, legacyHome);
+    assert.equal(fs.existsSync(legacyHome), true);
+    assert.equal(environment.home, path.join(current.paths.runtimeAccountsDir, "codex", INTERNAL_ACCOUNT.id, "home"));
     assert.equal(environment.strategy, "managed-shared");
     assert.equal(fs.existsSync(path.join(
       current.paths.runtimeAccountsDir,
       "codex",
       INTERNAL_ACCOUNT.id,
       "home",
-    )), false);
+    )), true);
   } finally {
     fs.rmSync(current.root, { recursive: true, force: true });
   }
@@ -504,7 +500,7 @@ test("Codex per-Profile configuration is a process overlay, not a shared-Home wr
   }
 });
 
-test("DeepSeek Harness integration is account-shared and occupied roots fail closed", () => {
+test("DeepSeek integration is account-shared and occupied roots fail closed", () => {
   const current = fixture();
   try {
     const accountId = ACCOUNT_BY_RUNTIME.get("deepseek-harness").id;

@@ -26,6 +26,23 @@ const RETRYABLE_PRE_TURN_STAGES = new Set([
   "mcp_initialize",
   "session_start_or_resume",
 ]);
+// A stage describes where a failure happened, not whether replay is safe.
+// In particular, an unknown remote outcome must retain its deduplication fence.
+const NON_RETRYABLE_START_CODES = new Set([
+  "EXECUTION_CONTRACT_STALE",
+  "AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED",
+  "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_SPENDING_LIMIT_REACHED",
+  "RUNTIME_PERMISSION_REQUIRED", "RUNTIME_APPROVAL_UNAVAILABLE",
+  "RUNTIME_SESSION_BUSY", "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN",
+  "RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "RUNTIME_TURN_OUTCOME_UNKNOWN",
+  "RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED",
+  "RUNTIME_MODEL_UNAVAILABLE", "RUNTIME_MODEL_CATALOG_INVALID",
+  "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE",
+  "ANTIGRAVITY_ONBOARDING_REQUIRED", "ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED",
+  "ANTIGRAVITY_APPROVAL_CHANGED",
+  "ANTIGRAVITY_APPROVAL_TIMEOUT", "ANTIGRAVITY_APPROVAL_RESPONSE_UNCONFIRMED",
+  "ANTIGRAVITY_NETWORK_UNAVAILABLE", "ANTIGRAVITY_REGION_UNSUPPORTED", "ANTIGRAVITY_ELIGIBILITY_FAILED",
+]);
 // A process-local WeakMap makes this a trusted adapter contract: remote JSON,
 // stderr text, and arbitrary Error properties cannot forge account backoff.
 const RUNTIME_ACCOUNT_RETRY_AT = new WeakMap();
@@ -93,7 +110,19 @@ function runtimeStageError(stage, cause = null) {
 }
 
 function isRetryablePreTurnStageError(error) {
-  return RETRYABLE_PRE_TURN_STAGES.has(runtimeStageFromError(error));
+  if (!RETRYABLE_PRE_TURN_STAGES.has(runtimeStageFromError(error))
+    || runtimeAccountRetryAt(error) !== null) return false;
+  let current = error;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    try {
+      const code = Object.getOwnPropertyDescriptor(current, "code")?.value;
+      if (NON_RETRYABLE_START_CODES.has(code)) return false;
+      current = Object.getOwnPropertyDescriptor(current, "cause")?.value ?? null;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 module.exports = {

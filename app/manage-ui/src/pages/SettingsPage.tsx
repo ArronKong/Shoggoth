@@ -5,6 +5,7 @@ import type {
   BackendSelfUpdate,
   BackendStatus,
   BackendVersionStatus,
+  RuntimeStatus,
   ConnTestResult,
   HermesRemote,
   LanDiscoveryState,
@@ -19,6 +20,7 @@ import {
   getSelfUpdates,
   getShoggothProductStatus,
   getStatus,
+  getRuntimeStatuses,
   getVersions,
   listStandingGrants,
   revokeStandingGrant,
@@ -43,6 +45,8 @@ import { PageHead } from "../components/PageHead";
 import SettingsPreferences from "./settings/SettingsPreferences";
 import BackendOverview from "./settings/BackendOverview";
 import ServiceSettings from "./settings/ServiceSettings";
+import NativeCapacityCard from "./settings/NativeCapacityCard";
+import RuntimeStatusList from "./settings/RuntimeStatusList";
 import BackgroundStopDialog from "./settings/BackgroundStopDialog";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { applyDisabledBackends, useBackendCatalog } from "../lib/backends";
@@ -129,6 +133,9 @@ export default function SettingsPage() {
     [backendCatalog],
   );
   const [backends, setBackends] = useState<BackendStatus[]>([]);
+  const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
+  const [runtimesLoading, setRuntimesLoading] = useState(true);
+  const [runtimesError, setRuntimesError] = useState(false);
   const [cfg, setCfg] = useState<AppConfig>(EMPTY);
   const cfgRef = useRef(cfg);
   cfgRef.current = cfg;
@@ -296,12 +303,17 @@ export default function SettingsPage() {
     }
     if (!isCurrentRefresh()) return;
     // Status + versions fill in asynchronously; neither blocks editing/saving.
+    setRuntimesLoading(true);
+    setRuntimesError(false);
+    getRuntimeStatuses().then((items) => { if (isCurrentRefresh()) setRuntimes(items); })
+      .catch(() => { if (isCurrentRefresh()) setRuntimesError(true); })
+      .finally(() => { if (isCurrentRefresh()) setRuntimesLoading(false); });
     getStatus()
       .then((next) => {
         if (!isCurrentRefresh()) return;
         setBackends(next.map((backend) => ({ ...backend,
-          disabled: cfgRef.current.disabledBackends.includes(backend.id),
-          connected: !cfgRef.current.disabledBackends.includes(backend.id) && backend.connected,
+          disabled: backendDescriptors.get(backend.id)?.disconnectable !== false && cfgRef.current.disabledBackends.includes(backend.id),
+          connected: (backendDescriptors.get(backend.id)?.disconnectable === false || !cfgRef.current.disabledBackends.includes(backend.id)) && backend.connected,
         })));
         void Promise.all(next.filter((backend) => !backend.disabled).map(async (backend) => {
           try {
@@ -357,10 +369,9 @@ export default function SettingsPage() {
       if (!lifecycleGuard.isMounted()) return;
       setShoggothStatus(next);
       setShoggothError(false);
-      if (next.service.healthy === true
-        && (next.service.pendingCommandsLocked || next.service.mcpCredentialsLocked)) {
-        // Service 健康会先于一次性 crypto 预热完成；启动响应里的 locked 只是
-        // 瞬时快照。做有限次数权威回读，成功即停，真实钥匙串锁定仍会如实保留。
+      if (next.service.healthy === true && next.service.pendingCommandsLocked) {
+        // 待执行命令的加密状态可能晚于 Service 健康收敛，有限回读一次。
+        // MCP 凭据按需初始化，不参与 Service 的启动就绪判定。
         for (const delayMs of SHOGGOTH_POST_START_REFRESH_DELAYS_MS) {
           await new Promise((resolve) => window.setTimeout(resolve, delayMs));
           if (!lifecycleGuard.isMounted()) return;
@@ -368,8 +379,7 @@ export default function SettingsPage() {
             const settledStatus = await getShoggothProductStatus();
             if (!lifecycleGuard.isMounted()) return;
             setShoggothStatus(settledStatus);
-            if (!settledStatus.service.pendingCommandsLocked
-              && !settledStatus.service.mcpCredentialsLocked) break;
+            if (!settledStatus.service.pendingCommandsLocked) break;
           } catch {
             break;
           }
@@ -608,7 +618,7 @@ export default function SettingsPage() {
           if (!reconnectingBackends.includes(backend.id)) return backend;
           const status = statuses.find((item) => item.id === backend.id);
           if (!status) return backend;
-          const disabled = cfgRef.current.disabledBackends.includes(backend.id);
+          const disabled = backendDescriptors.get(backend.id)?.disconnectable !== false && cfgRef.current.disabledBackends.includes(backend.id);
           return { ...status, disabled, connected: !disabled && status.connected };
         }));
         const completed = reconnectingBackends.filter((id) =>
@@ -649,7 +659,17 @@ export default function SettingsPage() {
     await applyBackendConnection(b, disconnect);
   };
 
-  const applyBackendConnection = async (b: BackendStatus, disconnect: boolean) => {
+  const toggleRuntimeConnection = async (runtime: RuntimeStatus) => {
+    if (loading || configFailed || saving || backendConnectionBusy.current || !runtime.releaseEnabled) return;
+    if (runtime.enabled && !await confirm({
+      title: t("settings.disconnectConfirmTitle", { name: runtime.name }),
+      message: t("settings.disconnectNativeConfirmMessage", { name: runtime.name }),
+      confirmLabel: t("settings.disconnect"),
+    })) return;
+    await applyBackendConnection({ id: runtime.runtime, name: runtime.name }, runtime.enabled);
+  };
+
+  const applyBackendConnection = async (b: Pick<BackendStatus, "id" | "name">, disconnect: boolean) => {
     if (saving || backendConnectionBusy.current) return;
     const current = cfgRef.current.disabledBackends || [];
     const next = disconnect ? [...new Set([...current, b.id])] : current.filter((id) => id !== b.id);
@@ -664,10 +684,10 @@ export default function SettingsPage() {
       setCfg(cfgRef.current);
       if (savedConfigRef.current) savedConfigRef.current.disabledBackends = [...saved.disabledBackends];
       setBackends((items) => items.map((backend) => ({ ...backend,
-        disabled: saved.disabledBackends.includes(backend.id),
-        connected: !saved.disabledBackends.includes(backend.id) && backend.connected,
+        disabled: backendDescriptors.get(backend.id)?.disconnectable !== false && saved.disabledBackends.includes(backend.id),
+        connected: (backendDescriptors.get(backend.id)?.disconnectable === false || !saved.disabledBackends.includes(backend.id)) && backend.connected,
       })));
-      setReconnectingBackends((ids) => disconnect ? ids.filter((id) => id !== b.id) : [...new Set([...ids, b.id])]);
+      if (backendDescriptors.has(b.id)) setReconnectingBackends((ids) => disconnect ? ids.filter((id) => id !== b.id) : [...new Set([...ids, b.id])]);
       toast.success(
         disconnect
           ? t("settings.disconnectedToast", { name: b.name })
@@ -972,10 +992,25 @@ export default function SettingsPage() {
           }}
         />
 
+        {backendCatalog.some((descriptor) => descriptor.surfaces.runtimeStatus === true) && <RuntimeStatusList
+          runtimes={runtimes.map((runtime) => ({ ...runtime,
+            enabled: loading || configFailed ? runtime.enabled : !cfg.disabledBackends.includes(runtime.runtime) }))}
+          loading={runtimesLoading} error={runtimesError} busy={loading || saving || togglingBackend || configFailed}
+          onToggle={(runtime) => void toggleRuntimeConnection(runtime)} />}
+
+        {backendCatalog.filter((descriptor) => descriptor.aliases?.length).flatMap((descriptor) =>
+          [descriptor.id, ...(descriptor.surfaces.runtimeStatus ? [] : descriptor.aliases!)].filter((id) => cfg.disabledBackends.includes(id)).map((id) => (
+            <div className="settings-inline-state" key={`legacy-disabled:${id}`}>
+              <div><strong>{t("settings.legacyRuntimeDisabled", { name: id })}</strong><p>{t("settings.legacyRuntimeDisabledHint")}</p></div>
+              <button className="ui-cbtn ui-cbtn--sm" disabled={loading || saving || togglingBackend || configFailed}
+                onClick={() => void applyBackendConnection({ id, name: id }, false)}>{t("settings.reconnect")}</button>
+            </div>
+          ))) }
         <ServiceSettings
           status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
           onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
         />
+        {backendCatalog.some((descriptor) => descriptor.surfaces.nativeCapacity === true) && <NativeCapacityCard />}
         </div>
         <div className="settings-group" id="settings-general">
           <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} />

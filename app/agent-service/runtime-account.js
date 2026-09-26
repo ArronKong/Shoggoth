@@ -20,6 +20,7 @@ const RUNTIME_ACCOUNT_RUNTIMES = Object.freeze([
   "antigravity",
   "pi",
   "claude-code",
+  "opencode",
   "deepseek-harness",
 ]);
 const RUNTIME_ACCOUNT_KINDS = Object.freeze(["native-user", "shoggoth-managed"]);
@@ -32,15 +33,16 @@ const NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID = "native-grok-build-default-v1";
 const NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID = "native-antigravity-default-v1";
 const NATIVE_PI_RUNTIME_ACCOUNT_ID = "native-pi-default-v1";
 const NATIVE_CLAUDE_CODE_RUNTIME_ACCOUNT_ID = "native-claude-code-default-v1";
+const NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID = "native-opencode-default-v1";
 const NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID = "native-deepseek-harness-default-v1";
 
-const DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND = Object.freeze({
-  shoggoth: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
+const DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME = Object.freeze({
   codex: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
   "grok-build": NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
   antigravity: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID,
   pi: NATIVE_PI_RUNTIME_ACCOUNT_ID,
   "claude-code": NATIVE_CLAUDE_CODE_RUNTIME_ACCOUNT_ID,
+  opencode: NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID,
   "deepseek-harness": NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
 });
 
@@ -102,6 +104,13 @@ const DEFAULT_RUNTIME_ACCOUNTS = Object.freeze([
     "system-default",
   ),
   defaultAccount(
+    NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID,
+    "opencode",
+    "native-user",
+    "system",
+    "system-default",
+  ),
+  defaultAccount(
     NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
     "deepseek-harness",
     "native-user",
@@ -112,6 +121,7 @@ const DEFAULT_RUNTIME_ACCOUNTS = Object.freeze([
 
 const RUNTIME_ACCOUNT_SCHEMA = Object.freeze({
   fields: RUNTIME_ACCOUNT_FIELDS,
+  optionalFields: Object.freeze(["maxActive"]),
   builtInRuntimes: RUNTIME_ACCOUNT_RUNTIMES,
   kinds: RUNTIME_ACCOUNT_KINDS,
   installationKinds: RUNTIME_ACCOUNT_INSTALLATION_KINDS,
@@ -149,18 +159,20 @@ function exactRuntimeAccount(record) {
     if (error?.code === "RUNTIME_ACCOUNT_INVALID") throw error;
     throw invalidRuntimeAccount("RuntimeAccount cannot be inspected safely");
   }
-  if (keys.length !== RUNTIME_ACCOUNT_FIELDS.length
-    || keys.some((key) => typeof key !== "string" || !RUNTIME_ACCOUNT_FIELDS.includes(key))) {
+  const fields = Object.hasOwn(descriptors, "maxActive")
+    ? [...RUNTIME_ACCOUNT_FIELDS, "maxActive"] : RUNTIME_ACCOUNT_FIELDS;
+  if (keys.length !== fields.length
+    || keys.some((key) => typeof key !== "string" || !fields.includes(key))) {
     throw invalidRuntimeAccount("RuntimeAccount fields are invalid");
   }
-  for (const field of RUNTIME_ACCOUNT_FIELDS) {
+  for (const field of fields) {
     const descriptor = descriptors[field];
     if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
       throw invalidRuntimeAccount(`RuntimeAccount.${field} must be an enumerable data property`);
     }
   }
   return Object.fromEntries(
-    RUNTIME_ACCOUNT_FIELDS.map((field) => [field, descriptors[field].value]),
+    fields.map((field) => [field, descriptors[field].value]),
   );
 }
 
@@ -187,7 +199,7 @@ function assertFixedDefaultIdentity(account) {
   }
 }
 
-function validateLegacyRuntimeAccountShape(record) {
+function validateRuntimeAccountShape(record) {
   const account = exactRuntimeAccount(record);
   if (!validOpaqueId(account.id)) {
     throw invalidRuntimeAccount("RuntimeAccount.id is invalid");
@@ -227,7 +239,8 @@ function validateLegacyRuntimeAccountShape(record) {
     if (!fixed || fixed.kind !== "native-user") {
       throw invalidRuntimeAccount("Native RuntimeAccount must use its reserved default identity");
     }
-  } else if (account.installationKind !== "bundled" || account.homeKind !== "managed-shared"
+  } else if ((account.installationKind !== "bundled"
+      && !(account.runtime.startsWith("ext-") && account.installationKind === "system")) || account.homeKind !== "managed-shared"
     || (account.runtime !== "codex" && account.providerRef !== null)) {
     throw invalidRuntimeAccount("Managed RuntimeAccount configuration is invalid");
   }
@@ -237,16 +250,15 @@ function validateLegacyRuntimeAccountShape(record) {
 }
 
 function validateRuntimeAccount(record) {
-  const account = validateLegacyRuntimeAccountShape(record);
+  const account = validateRuntimeAccountShape(record);
+  if (Object.hasOwn(account, "maxActive") && account.maxActive !== null
+    && (!Number.isSafeInteger(account.maxActive) || account.maxActive < 1 || account.maxActive > 100)) {
+    throw invalidRuntimeAccount("RuntimeAccount.maxActive must be null or an integer from 1 to 100");
+  }
   if (account.providerRef !== null) {
-    throw invalidRuntimeAccount("RuntimeAccount.providerRef is legacy-only and must be null");
+    throw invalidRuntimeAccount("RuntimeAccount.providerRef must be null; credentials belong to the Agent provider");
   }
   return account;
-}
-
-function normalizeLegacyRuntimeAccount(record) {
-  const account = validateLegacyRuntimeAccountShape(record);
-  return validateRuntimeAccount({ ...account, providerRef: null });
 }
 
 function cloneRuntimeAccount(record) {
@@ -295,12 +307,13 @@ function assertRuntimeAccountMatchesProfile(account, profile) {
 
 module.exports = {
   DEFAULT_RUNTIME_ACCOUNTS,
-  DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND,
+  DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME,
   NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID,
   NATIVE_CLAUDE_CODE_RUNTIME_ACCOUNT_ID,
   NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
   NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
   NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
+  NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID,
   NATIVE_PI_RUNTIME_ACCOUNT_ID,
   RUNTIME_ACCOUNT_FIELDS,
   RUNTIME_ACCOUNT_HOME_KINDS,
@@ -312,7 +325,6 @@ module.exports = {
   assertRuntimeAccountMatchesProfile,
   cloneRuntimeAccount,
   freezeRuntimeAccount,
-  normalizeLegacyRuntimeAccount,
   runtimeAccountMatchesProfile,
   validateRuntimeAccount,
 };

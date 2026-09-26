@@ -184,7 +184,8 @@ export default function SkillsPage() {
         id: s.id,
         source: s.source,
         version: s.version,
-        expectedRevision: s.profileRevision,
+        expectedRevision: isNativeSkills && s.source === "user"
+          ? s.registryVersion : s.profileRevision,
       }, activeAgent);
       toast.success(
         enabled
@@ -229,16 +230,18 @@ export default function SkillsPage() {
     if (!accepted) return;
     setPackageBusy(true);
     try {
+      let uninstallRevision = selected.registryVersion;
       if (selected.enabled) {
-        await updateSkill(backend, selected.name, {
+        const disabled = await updateSkill(backend, selected.name, {
           enabled: false,
           id: selected.id,
           source: selected.source,
           version: selected.version,
-          expectedRevision: selected.profileRevision,
+          expectedRevision: selected.registryVersion,
         }, activeAgent);
+        uninstallRevision = disabled.registryVersion;
       }
-      await uninstallSkill(backend, selected, activeAgent);
+      await uninstallSkill(backend, { ...selected, registryVersion: uninstallRevision }, activeAgent);
       setSelectedIdentity(null);
       toast.success(t("skills.uninstalledToast", { name: selected.name }));
       await refresh();
@@ -355,6 +358,8 @@ export default function SkillsPage() {
                       </span>
                       <span className="skill-name">{s.name}</span>
                       {s.version && <span className="skill-badge">v{s.version}</span>}
+                      {isNativeSkills && s.globalEnabled && <span className="skill-badge">
+                        {t("skills.globalScope")}</span>}
                       {usageSupported &&
                         (used > 0 ? (
                           <span className="skill-badge skill-badge-used">
@@ -400,6 +405,7 @@ export default function SkillsPage() {
               <div className="skill-detail-meta">
                 {backendName}
                 {selected.version ? ` · v${selected.version}` : ""}
+                {isNativeSkills && selected.globalEnabled ? ` · ${t("skills.globalScope")}` : ""}
                 {selected.source ? ` · ${selected.source}` : ""}
                 {selected.category ? ` · ${selected.category}` : ""}
               </div>

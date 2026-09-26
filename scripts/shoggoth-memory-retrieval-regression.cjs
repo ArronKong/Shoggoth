@@ -17,7 +17,7 @@ try {
     profileId: "profile-1", scope: "user", type: "semantic",
     content: "私人邮箱 owner@example.com", sourceRefs: ["private"], classification: "explicit",
   });
-  value.engine.confirm({ profileId: "profile-1", id: privateItem.id });
+  assert.equal(privateItem.status, "active");
 
   const normal = value.engine.search({
     profileId: "profile-1", query: "中文交流", scopes: ["user", "project"],

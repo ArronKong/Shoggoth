@@ -100,6 +100,34 @@
       "source": "https://registry.npmjs.org/@floating-ui/utils/-/utils-0.2.11.tgz"
     },
     {
+      "name": "@modelcontextprotocol/client",
+      "version": "2.1.0",
+      "license": "MIT",
+      "integrity": "sha512-mDVhoy5WjDb0U+4dQPzLcciC2erSex/GRVQqnoZdiuMoE3YiTZdiS7ezNcFwX4XEOWOaj7jZr0kLYnILnL8orA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_modelcontextprotocol_client@2.1.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@modelcontextprotocol/client/-/client-2.1.0.tgz"
+    },
+    {
+      "name": "@modelcontextprotocol/core",
+      "version": "2.1.0",
+      "license": "MIT",
+      "integrity": "sha512-YdFj5gMRHr0gYNAhTbQDgjLHiEJdIAUYxomhKseUNye7ZGlISQmUoLh2sveFFCiQ7j2YMffT1kgSND0FSfIFjQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_modelcontextprotocol_core@2.1.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@modelcontextprotocol/core/-/core-2.1.0.tgz"
+    },
+    {
       "name": "@trycua/cua-driver-darwin-arm64",
       "version": "0.22.0",
       "license": "MIT AND MPL-2.0",
@@ -310,6 +338,20 @@
       "source": "https://github.com/xtermjs/xterm.js/tree/6.0.0"
     },
     {
+      "name": "ajv",
+      "version": "8.20.0",
+      "license": "MIT",
+      "integrity": "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/ajv@8.20.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/ajv/-/ajv-8.20.0.tgz"
+    },
+    {
       "name": "animejs",
       "version": "4.4.1",
       "license": "MIT",
@@ -393,6 +435,20 @@
         "licenses/npm/cron-parser@5.4.0/LICENSE"
       ],
       "source": "https://registry.npmjs.org/cron-parser/-/cron-parser-5.4.0.tgz"
+    },
+    {
+      "name": "cross-spawn",
+      "version": "7.0.6",
+      "license": "MIT",
+      "integrity": "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/cross-spawn@7.0.6/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz"
     },
     {
       "name": "csstype",
@@ -481,6 +537,62 @@
       "source": "https://registry.npmjs.org/entities/-/entities-4.5.0.tgz"
     },
     {
+      "name": "eventsource-parser",
+      "version": "3.1.1",
+      "license": "MIT",
+      "integrity": "sha512-EKN1vKAMcZ8MlYMpaNuxN6R9yakzH6uajHcHVTqWJzvu5pWw9DyhbP35HH8MVBQ+dZjAfDxk+A8NiR9KWaXiyQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/eventsource-parser@3.1.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/eventsource-parser/-/eventsource-parser-3.1.1.tgz"
+    },
+    {
+      "name": "eventsource",
+      "version": "3.0.7",
+      "license": "MIT",
+      "integrity": "sha512-CRT1WTyuQoD771GW56XEZFQ/ZoSfWid1alKGDYMmkt2yl8UXrVR4pspqWNEcqKvVIzg6PAltWjxcSSPrboA4iA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/eventsource@3.0.7/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/eventsource/-/eventsource-3.0.7.tgz"
+    },
+    {
+      "name": "fast-deep-equal",
+      "version": "3.1.3",
+      "license": "MIT",
+      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/fast-deep-equal@3.1.3/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz"
+    },
+    {
+      "name": "fast-uri",
+      "version": "3.1.8",
+      "license": "BSD-3-Clause",
+      "integrity": "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/fast-uri@3.1.8/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz"
+    },
+    {
       "name": "fflate",
       "version": "0.8.3",
       "license": "MIT",
@@ -566,6 +678,34 @@
       "source": "https://registry.npmjs.org/i18next/-/i18next-26.3.0.tgz"
     },
     {
+      "name": "isexe",
+      "version": "2.0.0",
+      "license": "ISC",
+      "integrity": "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/isexe@2.0.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/isexe/-/isexe-2.0.0.tgz"
+    },
+    {
+      "name": "jose",
+      "version": "6.2.12",
+      "license": "MIT",
+      "integrity": "sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/jose@6.2.12/LICENSE.md"
+      ],
+      "source": "https://registry.npmjs.org/jose/-/jose-6.2.12.tgz"
+    },
+    {
       "name": "js-tokens",
       "version": "4.0.0",
       "license": "MIT",
@@ -592,6 +732,34 @@
         "licenses/npm/js-yaml@4.3.2/LICENSE"
       ],
       "source": "https://registry.npmjs.org/js-yaml/-/js-yaml-4.3.2.tgz"
+    },
+    {
+      "name": "js-yaml",
+      "version": "5.4.2",
+      "license": "MIT",
+      "integrity": "sha512-m+aqu+LwO1O6sIopafj8HUVl5aawITwZQe/yHpMCKjaWBaA/d07B/QdMb3529REftiU+RMMHL3Vlsw3hON7vWg==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/js-yaml@5.4.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/js-yaml/-/js-yaml-5.4.2.tgz"
+    },
+    {
+      "name": "json-schema-traverse",
+      "version": "1.0.0",
+      "license": "MIT",
+      "integrity": "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/json-schema-traverse@1.0.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/json-schema-traverse/-/json-schema-traverse-1.0.0.tgz"
     },
     {
       "name": "jsonfile",
@@ -804,6 +972,20 @@
       "source": "https://registry.npmjs.org/node-pty/-/node-pty-1.1.0.tgz"
     },
     {
+      "name": "path-key",
+      "version": "3.1.1",
+      "license": "MIT",
+      "integrity": "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/path-key@3.1.1/license"
+      ],
+      "source": "https://registry.npmjs.org/path-key/-/path-key-3.1.1.tgz"
+    },
+    {
       "name": "pinyin-pro",
       "version": "3.29.3",
       "license": "MIT",
@@ -817,6 +999,20 @@
         "licenses/npm/pinyin-pro@3.29.3/LICENSE"
       ],
       "source": "https://registry.npmjs.org/pinyin-pro/-/pinyin-pro-3.29.3.tgz"
+    },
+    {
+      "name": "pkce-challenge",
+      "version": "5.0.1",
+      "license": "MIT",
+      "integrity": "sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/pkce-challenge@5.0.1/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/pkce-challenge/-/pkce-challenge-5.0.1.tgz"
     },
     {
       "name": "punycode.js",
@@ -903,6 +1099,20 @@
       "source": "https://registry.npmjs.org/react/-/react-18.3.1.tgz"
     },
     {
+      "name": "require-from-string",
+      "version": "2.0.2",
+      "license": "MIT",
+      "integrity": "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/require-from-string@2.0.2/license"
+      ],
+      "source": "https://registry.npmjs.org/require-from-string/-/require-from-string-2.0.2.tgz"
+    },
+    {
       "name": "reselect",
       "version": "5.2.0",
       "license": "MIT",
@@ -971,6 +1181,34 @@
         "licenses/npm/set-cookie-parser@2.7.2/LICENSE"
       ],
       "source": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-2.7.2.tgz"
+    },
+    {
+      "name": "shebang-command",
+      "version": "2.0.0",
+      "license": "MIT",
+      "integrity": "sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/shebang-command@2.0.0/license"
+      ],
+      "source": "https://registry.npmjs.org/shebang-command/-/shebang-command-2.0.0.tgz"
+    },
+    {
+      "name": "shebang-regex",
+      "version": "3.0.0",
+      "license": "MIT",
+      "integrity": "sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/shebang-regex@3.0.0/license"
+      ],
+      "source": "https://registry.npmjs.org/shebang-regex/-/shebang-regex-3.0.0.tgz"
     },
     {
       "name": "three",
@@ -1071,6 +1309,20 @@
       "source": "https://registry.npmjs.org/void-elements/-/void-elements-3.1.0.tgz"
     },
     {
+      "name": "which",
+      "version": "2.0.2",
+      "license": "ISC",
+      "integrity": "sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/which@2.0.2/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/which/-/which-2.0.2.tgz"
+    },
+    {
       "name": "ws",
       "version": "8.21.0",
       "license": "MIT",
@@ -1083,6 +1335,20 @@
         "licenses/npm/ws@8.21.0/LICENSE"
       ],
       "source": "https://registry.npmjs.org/ws/-/ws-8.21.0.tgz"
+    },
+    {
+      "name": "zod",
+      "version": "4.6.5",
+      "license": "MIT",
+      "integrity": "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/zod@4.6.5/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/zod/-/zod-4.6.5.tgz"
     }
   ],
   "components": [

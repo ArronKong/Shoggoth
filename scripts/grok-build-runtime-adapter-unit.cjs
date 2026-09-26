@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -1324,6 +1325,7 @@ test("native failure categories require the exact prompt receipt and survive ses
     ["native-current", "API error (status 402 Payment Required): Grok Build usage balance exhausted", "RUNTIME_QUOTA_EXHAUSTED"],
     ["native-stale", "API error (status 402 Payment Required): Grok Build usage balance exhausted", "GROK_BUILD_TURN_FAILED"],
     ["native-current", "User account is blocked", "RUNTIME_ACCOUNT_BLOCKED"],
+    ["native-current", "API error (status 429 Too Many Requests): rate limit exceeded", "RUNTIME_RATE_LIMITED"],
     ["native-current", "Unexpected upstream error", "GROK_BUILD_TURN_FAILED"],
   ];
   for (const [promptId, diagnostic, expectedCode] of cases) {
@@ -2212,7 +2214,7 @@ test("workspace host limit fails closed without stopping an acquired handle", as
     assert.equal(existingResult.status, "fulfilled");
     assert.equal(existingResult.value, runtimeA);
     assert.equal(newResult.status, "rejected");
-    assert.equal(newResult.reason.code, "GROK_BUILD_HOST_LIMIT");
+    assert.equal(newResult.reason.code, "RUNTIME_HOST_CAPACITY");
     const started = await runtimeA.sessionStart({
       source: "chat:still-live",
       cwd: workspaces[0],
@@ -2721,4 +2723,481 @@ test("completed Grok prompts publish authoritative consumed tokens and reported 
     assert.equal(calls[0].env.SECRET_TOKEN, undefined);
     await fixture.adapter.stopAll();
   } finally { fixture.cleanup(); }
+});
+
+test("complete JSONL preflight counts the actual id and newline without terminating a healthy client", async () => {
+  const child = new FakeChild(() => rpcResult({ ok: true }));
+  const rpc = new GrokBuildAcpJsonlClient(child, { maxFrameBytes: 1024 });
+  try {
+    rpc.nextId = Number.MAX_SAFE_INTEGER;
+    const overhead = Buffer.byteLength(`${JSON.stringify({
+      jsonrpc: "2.0", id: rpc.nextId, method: "session/prompt", params: { text: "" },
+    })}\n`);
+    const exact = { text: "x".repeat(1024 - overhead) };
+    const tooLarge = { text: `${exact.text}x` };
+    assert.deepEqual(rpc.preflightRequest("session/prompt", exact), {
+      frameBytes: 1024, maxFrameBytes: 1024,
+    });
+    await assert.rejects(rpc.request("session/prompt", tooLarge), {
+      code: "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", dispatchState: "not_sent",
+      frameBytes: 1025, maxFrameBytes: 1024,
+    });
+    const cyclic = {}; cyclic.cyclic = cyclic;
+    await assert.rejects(rpc.request("session/prompt", cyclic), {
+      code: "GROK_ACP_SERIALIZE_FAILED", dispatchState: "not_sent",
+    });
+    assert.equal(child.messages.length, 0);
+    assert.equal(rpc.pending.size, 0);
+    assert.equal(rpc.ended, false);
+    assert.deepEqual(await rpc.request("session/prompt", exact), { ok: true });
+    assert.equal(child.messages.length, 1);
+  } finally {
+    await rpc.terminate(); child.closeProcess();
+  }
+});
+
+test("connection failure classifies each request at its own stdin.write boundary", async () => {
+  const child = new FakeChild();
+  let finishWrite;
+  const frames = [];
+  child.stdin.write = (frame, callback) => {
+    frames.push(JSON.parse(frame)); finishWrite = callback; return true;
+  };
+  const rpc = new GrokBuildAcpJsonlClient(child);
+  try {
+    const attempted = rpc.request("session/prompt", { text: "first" });
+    const queued = rpc.request("session/prompt", { text: "second" });
+    const outcomes = Promise.allSettled([attempted, queued]);
+    await waitFor(() => finishWrite, "first write attempt");
+    child.emit("error", new Error("synthetic process loss"));
+    const result = await outcomes;
+    assert.equal(result[0].reason.code, "GROK_ACP_PROCESS_ERROR");
+    assert.equal(result[0].reason.dispatchState, "write_attempted");
+    assert.equal(result[1].reason.code, "GROK_ACP_PROCESS_ERROR");
+    assert.equal(result[1].reason.dispatchState, "not_sent");
+    finishWrite();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(frames.length, 1, "terminated queued request must never reach stdin");
+  } finally {
+    await rpc.terminate(); child.closeProcess();
+  }
+});
+
+test("a queued request timeout cancels its future write while preserving the earlier request", async () => {
+  const child = new FakeChild();
+  let finishWrite;
+  const frames = [];
+  child.stdin.write = (frame, callback) => {
+    frames.push(JSON.parse(frame)); finishWrite = callback; return true;
+  };
+  const rpc = new GrokBuildAcpJsonlClient(child);
+  const keepAlive = setTimeout(() => {}, 1_000);
+  try {
+    const first = rpc.request("session/prompt", { text: "first" });
+    const queued = rpc.request("session/prompt", { text: "second" }, { timeoutMs: 20 });
+    await assert.rejects(queued, { code: "GROK_ACP_REQUEST_TIMEOUT", dispatchState: "not_sent" });
+    finishWrite();
+    child.sendResult(frames[0].id, { done: true });
+    assert.deepEqual(await first, { done: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(frames.length, 1);
+    assert.equal(rpc.ended, false);
+  } finally {
+    clearTimeout(keepAlive); await rpc.terminate(); child.closeProcess();
+  }
+});
+
+for (const failure of ["throw", "callback"]) {
+  test(`stdin ${failure} failure is conservatively write_attempted`, async () => {
+    const child = new FakeChild();
+    child.stdin.write = (_frame, callback) => {
+      if (failure === "throw") throw new Error("synthetic write failure");
+      callback(new Error("synthetic write failure"));
+      return false;
+    };
+    const rpc = new GrokBuildAcpJsonlClient(child);
+    try {
+      await assert.rejects(rpc.request("session/prompt", {}), {
+        code: "GROK_ACP_WRITE_FAILED", dispatchState: "write_attempted",
+      });
+      assert.equal(rpc.ended, true);
+    } finally {
+      await rpc.terminate(); child.closeProcess();
+    }
+  });
+}
+
+test("failed durable write observer prevents stdin writes and leaves the transport usable", async () => {
+  const child = new FakeChild(() => rpcResult({ ok: true }));
+  const rpc = new GrokBuildAcpJsonlClient(child);
+  try {
+    await assert.rejects(rpc.request("session/prompt", {}, {
+      onWriteAttempt() { throw Object.assign(new Error("synthetic ledger failure"), { code: "TEST_LEDGER_FAILED" }); },
+    }), { code: "TEST_LEDGER_FAILED", dispatchState: "not_sent" });
+    assert.equal(child.messages.length, 0);
+    assert.equal(rpc.ended, false);
+    await rpc.request("session/prompt", {});
+    assert.equal(child.messages.length, 1);
+  } finally {
+    await rpc.terminate(); child.closeProcess();
+  }
+});
+
+test("a failed write fences the connection before the next queued writer can send", async () => {
+  const child = new FakeChild();
+  let writes = 0;
+  child.stdin.write = (_frame, callback) => {
+    writes += 1;
+    callback(new Error("synthetic partial write"));
+    return true;
+  };
+  const rpc = new GrokBuildAcpJsonlClient(child);
+  try {
+    const result = await Promise.allSettled([
+      rpc.request("session/prompt", { text: "first" }),
+      rpc.request("session/prompt", { text: "second" }),
+    ]);
+    assert.equal(result[0].reason.dispatchState, "write_attempted");
+    assert.equal(result[1].reason.dispatchState, "not_sent");
+    assert.equal(writes, 1);
+  } finally { await rpc.terminate(); child.closeProcess(); }
+});
+
+test("oversized images and combined prompt frames fail before creating a turn and the session remains usable", async () => {
+  const fixture = fixtureOptions(standardServer(message => message.method === "session/prompt"
+    ? rpcResult({ stopReason: "end_turn" }) : undefined), { maxFrameBytes: 1024 * 1024 });
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    const largeImage = path.join(fixture.paths.trustedRoot, "large.png");
+    const mediumImage = path.join(fixture.paths.trustedRoot, "medium.png");
+    fs.writeFileSync(largeImage, Buffer.alloc(2_432_807), { mode: 0o600 });
+    fs.writeFileSync(mediumImage, Buffer.alloc(450_000), { mode: 0o600 });
+    const input = { sessionId: "session-1", operationId: "oversized", prompt: "inspect" };
+    for (const extra of [
+      { attachments: [{ path: largeImage, mimeType: "image/png" }] },
+      { attachments: Array.from({ length: 2 }, () => ({ path: mediumImage, mimeType: "image/png" })) },
+      { prompt: "x".repeat(1024 * 1024) },
+      { context: "x".repeat(1024 * 1024) },
+    ]) {
+      await assert.rejects(runtime.turnStart({ ...input, ...extra }), error => {
+        assert.equal(error.code, "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE");
+        assert.equal(error.dispatchState, "not_sent");
+        assert.ok(error.frameBytes > error.maxFrameBytes);
+        assert.equal(error.maxFrameBytes, 1024 * 1024);
+        return true;
+      });
+      assert.equal(runtime.host.ledger.snapshot().sessions[0].turns.length, 0);
+      assert.equal(runtime.host.activeTurns.size, 0);
+    }
+    await assert.rejects(runtime.turnStart({ ...input,
+      attachments: [{ path: path.join(fixture.paths.trustedRoot, "missing.png"), mimeType: "image/png" }],
+    }));
+    assert.equal(runtime.host.ledger.snapshot().sessions[0].turns.length, 0);
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/prompt").length, 0);
+    await runtime.sessionRead({ sessionId: "session-1", includeTurns: true });
+    await runtime.turnStart({ ...input, operationId: "small-explicit-retry" });
+    await waitFor(() => runtime.host.activeTurns.size === 0, "small prompt completion");
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/prompt").length, 1);
+    assert.equal(runtime.host.ledger.snapshot().sessions[0].turns[0].dispatchState, "write_attempted");
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});
+
+test("session/new preflight rejects a large MCP frame without leaving a pending-session fence", async () => {
+  let large = true;
+  const fixture = fixtureOptions(standardServer(), { maxFrameBytes: 1024,
+    mcpServersFactory: () => large ? [{ type: "http", name: "test", url: "https://example.com/mcp",
+      headers: [{ name: "X-Fixture", value: "x".repeat(1500) }] }] : [],
+  });
+  try {
+    const runtime = await acquire(fixture);
+    await assert.rejects(startSession(runtime), {
+      code: "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", dispatchState: "not_sent",
+    });
+    assert.equal(runtime.host.ledger.snapshot().pendingSessions.length, 0);
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/new").length, 0);
+    large = false;
+    await startSession(runtime);
+    assert.equal(runtime.host.ledger.snapshot().sessions.length, 1);
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});
+
+test("concurrent session creation after asynchronous MCP setup cannot submit the same source twice", async () => {
+  let releaseMcp;
+  const barrier = new Promise(resolve => { releaseMcp = resolve; });
+  let calls = 0;
+  const fixture = fixtureOptions(standardServer(), {
+    mcpServersFactory: async () => { calls += 1; await barrier; return []; },
+  });
+  try {
+    const runtime = await acquire(fixture);
+    const outcomes = Promise.allSettled([startSession(runtime), startSession(runtime)]);
+    await waitFor(() => calls === 2, "overlapping MCP factories");
+    releaseMcp();
+    const results = await outcomes;
+    assert.equal(results.filter(item => item.status === "fulfilled").length, 1);
+    assert.ok(["RUNTIME_SESSION_ACCEPTANCE_UNKNOWN", "RUNTIME_SESSION_CONFLICT"]
+      .includes(results.find(item => item.status === "rejected").reason.code));
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/new").length, 1);
+    assert.equal(runtime.host.ledger.snapshot().pendingSessions.length, 0);
+    await fixture.adapter.stopAll();
+  } finally { releaseMcp(); fixture.cleanup(); }
+});
+
+test("an attempted prompt write failure retains the unknown fence and the underlying cause across restart", async () => {
+  const fixture = fixtureOptions(standardServer(message => message.method === "session/prompt"
+    ? rpcResult({ stopReason: "end_turn" }) : undefined));
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    let attempts = 0;
+    fixture.children[0].stdin.write = () => { attempts += 1; throw new Error("synthetic partial write"); };
+    const input = { sessionId: "session-1", operationId: "attempted", prompt: "work" };
+    await assert.rejects(runtime.turnStart(input), error => {
+      assert.equal(error.code, "RUNTIME_TURN_ACCEPTANCE_UNKNOWN");
+      assert.equal(error.dispatchState, "write_attempted");
+      assert.equal(error.cause.code, "GROK_ACP_WRITE_FAILED");
+      return true;
+    });
+    await assert.rejects(runtime.terminated, { code: "GROK_ACP_WRITE_FAILED" });
+    const turn = runtime.host.ledger.snapshot().sessions[0].turns[0];
+    assert.equal(turn.acceptance, "unknown");
+    assert.equal(turn.dispatchState, "write_attempted");
+    assert.equal(turn.errorCode, "GROK_ACP_WRITE_FAILED");
+    const restarted = await acquire(fixture);
+    await assert.rejects(restarted.turnStart(input), { code: "RUNTIME_TURN_ACCEPTANCE_UNKNOWN" });
+    assert.equal(fixture.children[1].messages.some(message => message.method === "session/prompt"), false);
+    // The process that received the attempted write is gone, so a different
+    // operation may continue the session; the unknown one is never replayed.
+    await restarted.turnStart({ ...input, operationId: "other", prompt: "next" });
+    await waitFor(() => restarted.host.activeTurns.size === 0, "other operation completion");
+    assert.equal(attempts, 1);
+    assert.equal(fixture.children[1].messages.filter(message => message.method === "session/prompt").length, 1);
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});
+
+test("an unknown receipt fences other operations only while its receiving process lives", async () => {
+  let promptCount = 0;
+  const fixture = fixtureOptions(standardServer((message) => {
+    if (message.method !== "session/prompt") return undefined;
+    promptCount += 1;
+    return promptCount === 1 ? NO_RESPONSE : rpcResult({ stopReason: "end_turn" });
+  }), { acceptanceTimeoutMs: 20 });
+  const keepAlive = setTimeout(() => {}, 2_000);
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    const input = { sessionId: "session-1", operationId: "unknown-receipt", prompt: "maybe accepted" };
+    await assert.rejects(runtime.turnStart(input), { code: "RUNTIME_TURN_ACCEPTANCE_UNKNOWN" });
+    await assert.rejects(runtime.turnStart({ ...input, operationId: "other" }), {
+      code: "RUNTIME_TURN_ACCEPTANCE_UNKNOWN",
+    });
+    await fixture.adapter.stop("grok-main");
+    const restarted = await acquire(fixture);
+    const read = await restarted.sessionRead({ sessionId: "session-1", includeTurns: true });
+    assert.equal(read.session.turns[0].errorCode, "RUNTIME_TURN_ACCEPTANCE_UNKNOWN");
+    await assert.rejects(restarted.turnStart(input), { code: "RUNTIME_TURN_ACCEPTANCE_UNKNOWN" });
+    await restarted.turnStart({ ...input, operationId: "other" });
+    await waitFor(() => restarted.host.activeTurns.size === 0, "other operation completion");
+    assert.equal(promptCount, 2, "the unknown operation itself is never replayed");
+    await fixture.adapter.stopAll();
+  } finally {
+    clearTimeout(keepAlive);
+    fixture.cleanup();
+  }
+});
+
+test("an accepted prompt abandoned by the Host is cancelled natively", async () => {
+  let promptCount = 0;
+  const cancels = [];
+  const fixture = fixtureOptions(standardServer((message, child) => {
+    if (message.method === "session/cancel") { cancels.push(message.params.sessionId); return undefined; }
+    if (message.method !== "session/prompt") return undefined;
+    promptCount += 1;
+    setImmediate(() => child.sendNotification("session/update", { sessionId: message.params.sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "working" } } }));
+    return promptCount === 1 ? NO_RESPONSE : undefined;
+  }), { promptTimeoutMs: 100 });
+  const keepAlive = setTimeout(() => {}, 2_000);
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    await runtime.turnStart({ sessionId: "session-1", operationId: "slow", prompt: "long work" });
+    await waitFor(() => events.some((event) => event.type === "complete"), "abandoned prompt terminal");
+    assert.equal(events.find((event) => event.type === "complete").status, "interrupted");
+    await waitFor(() => cancels.length === 1, "native cancellation");
+    assert.deepEqual(cancels, ["session-1"]);
+    await fixture.adapter.stopAll();
+  } finally {
+    clearTimeout(keepAlive);
+    fixture.cleanup();
+  }
+});
+
+test("queued prompt and session/new timeouts are definite local rejections, not unknown acceptance", async () => {
+  const fixture = fixtureOptions(standardServer(message => message.method === "session/prompt"
+    ? rpcResult({ stopReason: "end_turn" }) : undefined));
+  const keepAlive = setTimeout(() => {}, 5_000);
+  let releaseQueue;
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    runtime.host.promptTimeoutMs = 500;
+    runtime.host.requestTimeoutMs = 500;
+    runtime.host.rpc.writeTail = new Promise(resolve => { releaseQueue = resolve; });
+    const input = { sessionId: "session-1", operationId: "queued", prompt: "do not send late" };
+    const prompt = runtime.turnStart(input);
+    const session = startSession(runtime, "chat:queued");
+    // Observe both promises immediately, even when other parallel suites make
+    // the event loop miss the short test deadline before waitFor can inspect it.
+    const outcomes = Promise.allSettled([prompt, session]);
+    await waitFor(() => runtime.host.activeTurns.size === 1, "queued active turn");
+    fixture.children[0].sendNotification("session/update", { sessionId: "session-1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "stale" } },
+    });
+    const results = await outcomes;
+    for (const result of results) {
+      assert.equal(result.status, "rejected");
+      assert.equal(result.reason.code, "GROK_ACP_REQUEST_TIMEOUT");
+      assert.equal(result.reason.dispatchState, "not_sent");
+    }
+    const ledger = runtime.host.ledger.snapshot();
+    assert.equal(ledger.pendingSessions.length, 0);
+    assert.equal(ledger.sessions[0].turns[0].acceptance, "failed");
+    assert.equal(ledger.sessions[0].turns[0].dispatchState, "not_sent");
+    await runtime.sessionRead({ sessionId: "session-1", includeTurns: true });
+    await assert.rejects(runtime.turnStart(input), { code: "GROK_ACP_REQUEST_TIMEOUT" });
+    releaseQueue();
+    await new Promise(resolve => setImmediate(resolve));
+    runtime.host.promptTimeoutMs = 1_000;
+    runtime.host.requestTimeoutMs = 1_000;
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/prompt").length, 0);
+    await runtime.turnStart({ ...input, operationId: "explicit-next" });
+    await waitFor(() => runtime.host.activeTurns.size === 0, "explicit retry completion");
+    await startSession(runtime, "chat:queued");
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/new").length, 2);
+    await fixture.adapter.stopAll();
+  } finally { releaseQueue?.(); clearTimeout(keepAlive); fixture.cleanup(); }
+});
+
+test("restart releases only durable not_sent records and requires an explicit new turn operation", async () => {
+  let promptCount = 0;
+  const fixture = fixtureOptions(standardServer(message => {
+    if (message.method !== "session/prompt") return undefined;
+    promptCount += 1;
+    return rpcResult({ stopReason: "end_turn" });
+  }));
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    const input = { sessionId: "session-1", operationId: "prepared", prompt: "work" };
+    await runtime.turnStart(input);
+    await waitFor(() => runtime.host.activeTurns.size === 0, "seed completion");
+    const ledgerPath = runtime.host.ledger.ledgerPath;
+    await fixture.adapter.stop(binding());
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
+    Object.assign(ledger.sessions[0].turns[0], {
+      acceptance: "unknown", status: "inProgress", dispatchState: "not_sent", errorCode: null,
+    });
+    ledger.pendingSessions.push(
+      { source: "chat:prepared", cwd: "/tmp/workspace", createdAt: 0, dispatchState: "not_sent" },
+      { source: "chat:attempted", cwd: "/tmp/workspace", createdAt: 0, dispatchState: "write_attempted" },
+    );
+    fs.writeFileSync(ledgerPath, `${JSON.stringify(ledger)}\n`, { mode: 0o600 });
+    const restarted = await acquire(fixture);
+    const restored = restarted.host.ledger.snapshot();
+    assert.equal(restored.sessions[0].turns[0].acceptance, "failed");
+    assert.equal(restored.sessions[0].turns[0].errorCode, "RUNTIME_REQUEST_NOT_SENT");
+    assert.deepEqual(restored.pendingSessions.map(item => item.source), ["chat:attempted"]);
+    await restarted.sessionRead({ sessionId: "session-1", includeTurns: true });
+    await assert.rejects(restarted.turnStart(input), { code: "RUNTIME_REQUEST_NOT_SENT" });
+    await assert.rejects(startSession(restarted, "chat:attempted"), { code: "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN" });
+    assert.equal(promptCount, 1, "opening the ledger must never replay a prompt");
+    await restarted.turnStart({ ...input, operationId: "explicit-retry" });
+    await waitFor(() => restarted.host.activeTurns.size === 0, "retry completion");
+    assert.equal(promptCount, 2);
+    await startSession(restarted, "chat:prepared");
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});
+
+test("version 2 turn fingerprints bind ordered complete attachment descriptors and the exact image bytes", async () => {
+  let promptCount = 0;
+  const fixture = fixtureOptions(standardServer(message => {
+    if (message.method !== "session/prompt") return undefined;
+    promptCount += 1;
+    return rpcResult({ stopReason: "end_turn" });
+  }));
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    const firstImage = require("./fixtures/native-chat-image.cjs")(fixture.paths.trustedRoot);
+    const secondPath = path.join(fixture.paths.trustedRoot, "second.png");
+    fs.copyFileSync(firstImage.path, secondPath);
+    const attachments = [
+      { ...firstImage, name: "first.png", ref: { id: "first", metadata: { alpha: 1, beta: 2 } } },
+      { ...firstImage, path: secondPath, name: "second.png", ref: { id: "second" } },
+    ];
+    const input = { sessionId: "session-1", operationId: "image-operation", prompt: "inspect", attachments };
+    const first = await runtime.turnStart(input);
+    await waitFor(() => runtime.host.activeTurns.size === 0, "image prompt completion");
+    const receipt = runtime.host.ledger.snapshot().sessions[0].turns[0];
+    assert.equal(receipt.fingerprintVersion, 2);
+    assert.equal(receipt.fingerprint.length, 64);
+    assert.equal(JSON.stringify(receipt).includes(firstImage.data), false, "ledger stores no raw image data");
+    const reorderedKeys = [
+      { ref: { metadata: { beta: 2, alpha: 1 }, id: "first" }, name: "first.png",
+        data: firstImage.data, mimeType: firstImage.mimeType, path: firstImage.path },
+      { ref: { id: "second" }, name: "second.png", path: secondPath,
+        mimeType: firstImage.mimeType, data: firstImage.data },
+    ];
+    assert.equal((await runtime.turnStart({ ...input, attachments: reorderedKeys })).turn.id, first.turn.id);
+    const changes = [
+      [{ ...attachments[0], mimeType: "image/jpeg" }, attachments[1]],
+      [{ ...attachments[0], data: "changed-inline-data" }, attachments[1]],
+      [{ ...attachments[0], ref: { id: "changed" } }, attachments[1]],
+      [{ ...attachments[0], path: secondPath }, attachments[1]],
+      [{ ...attachments[0], name: "changed.png" }, attachments[1]],
+      [attachments[1], attachments[0]],
+      [attachments[0]],
+      [...attachments, attachments[0]],
+    ];
+    for (const changed of changes) {
+      await assert.rejects(runtime.turnStart({ ...input, attachments: changed }), {
+        code: "RUNTIME_OPERATION_CONFLICT",
+      });
+    }
+    const originalBytes = fs.readFileSync(firstImage.path);
+    fs.writeFileSync(firstImage.path, Buffer.concat([originalBytes, Buffer.from("different bytes")]), { mode: 0o600 });
+    await assert.rejects(runtime.turnStart(input), { code: "RUNTIME_OPERATION_CONFLICT" });
+    fs.writeFileSync(firstImage.path, originalBytes, { mode: 0o600 });
+    assert.equal(promptCount, 1);
+    await fixture.adapter.stop(binding());
+    const restarted = await acquire(fixture);
+    assert.equal((await restarted.turnStart(input)).turn.id, first.turn.id);
+    assert.equal(restarted.host.ledger.snapshot().sessions[0].turns[0].fingerprintVersion, 2);
+    await assert.rejects(restarted.turnStart({ ...input, attachments: changes[1] }), {
+      code: "RUNTIME_OPERATION_CONFLICT",
+    });
+    assert.equal(promptCount, 1, "same operation must never be submitted again");
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});
+
+for (const version of [2, 3]) test(`ledger schema ${version} is refused without rewriting or dispatching`, async () => {
+  const fixture = fixtureOptions(standardServer(message => message.method === "session/prompt" ? rpcResult({ stopReason: "end_turn" }) : undefined));
+  try {
+    const runtime = await acquire(fixture); await startSession(runtime);
+    const ledgerPath = runtime.host.ledger.ledgerPath;
+    await fixture.adapter.stop(binding());
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath)); ledger.schemaVersion = version;
+    const bytes = Buffer.from(JSON.stringify(ledger)); fs.writeFileSync(ledgerPath, bytes);
+    await assert.rejects(acquire(fixture), { code: "GROK_BUILD_LEDGER_INVALID" });
+    assert.deepEqual(fs.readFileSync(ledgerPath), bytes);
+  } finally { await fixture.adapter.stopAll(); fixture.cleanup(); }
 });

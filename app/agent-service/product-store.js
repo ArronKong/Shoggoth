@@ -9,25 +9,18 @@ const {
   runtimeSessionRef,
   runtimeTurnRef,
 } = require("./runtime-adapter");
-const { runtimeAccountForLegacyProfile } = require("./runtime-account-migration");
 const {
   DEFAULT_RUNTIME_ACCOUNTS,
-  DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND,
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
-  normalizeLegacyRuntimeAccount,
   validateRuntimeAccount,
 } = require("./runtime-account");
+const {
+  BINDING_STATE_FIELDS, PROJECTED_RUNTIME_FIELDS, MAX_AGENT_RUNTIME_BINDINGS, MAX_BINDING_OPERATIONS,
+  bindingError, bindingId, runtimeProfileIdForBinding, validateAgentRuntimeBinding, validateBindingState,
+  withInitialBinding, projectProfile, profileToDisk, profileWithoutBindingState,
+} = require("./agent-runtime-binding");
 
-const STORE_SCHEMA_VERSION = 10;
-const SINGLE_MODEL_PROVIDER_SCHEMA_VERSION = 9;
-const PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION = 8;
-const LEGACY_STORE_SCHEMA_VERSION = 1;
-const PREVIOUS_STORE_SCHEMA_VERSION = 2;
-const RICH_STORE_SCHEMA_VERSION = 3;
-const GENERIC_RUNTIME_STORE_SCHEMA_VERSION = 4;
-const PROFILE_BACKEND_MIGRATION_SOURCE_SCHEMA_VERSION = 5;
-const RUNTIME_ACCOUNT_MIGRATION_SOURCE_SCHEMA_VERSION = 6;
-const RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION = 7;
+const STORE_SCHEMA_VERSION = 15;
 const DEFAULT_AGENT_PROFILE_UUID = "f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4";
 const DEFAULT_AGENT_PROFILE_ID = DEFAULT_AGENT_PROFILE_UUID;
 const DEFAULT_AGENT_BACKEND_ID = "shoggoth";
@@ -39,43 +32,21 @@ const MAX_REGISTERED_SENSITIVE_VALUE_BYTES = 64 * 1024;
 const MIN_REGISTERED_SENSITIVE_VALUE_BYTES = 8;
 const APPROVAL_POLICIES = new Set(["untrusted", "on-failure", "on-request", "never"]);
 const SANDBOX_POLICIES = new Set(["read-only", "workspace-write", "danger-full-access"]);
-const LEGACY_SNAPSHOT_FIELDS = Object.freeze([
-  "schemaVersion", "lastSeq", "agentProfiles", "workRuns", "checksum",
-]);
-const PREVIOUS_SNAPSHOT_FIELDS = Object.freeze([
-  "schemaVersion", "lastSeq", "modelProviders", "agentProfiles", "workRuns", "checksum",
-]);
-const PRE_RUNTIME_ACCOUNT_SNAPSHOT_FIELDS = Object.freeze([
-  "schemaVersion", "lastSeq", "modelProviders", "agentProfiles", "workRuns", "runNotes",
-  "mcpToolCalls", "checksum",
-]);
 const SNAPSHOT_FIELDS = Object.freeze([
   "schemaVersion", "lastSeq", "modelProviders", "runtimeAccounts", "runtimeAccountTombstones",
   "agentProfiles", "workRuns", "runNotes", "mcpToolCalls", "checksum",
-]);
-const LEGACY_AGENT_PROFILE_FIELDS = Object.freeze([
-  "id", "backendId", "agentId", "name", "runtime", "runtimeProfileId",
-  "providerRef", "defaultModel", "defaultCwd", "permissionPolicy", "concurrency",
-  "isDefault", "enabled", "createdAt", "updatedAt",
 ]);
 const AGENT_PROFILE_FIELDS = Object.freeze([
   "id", "backendId", "agentId", "name", "runtime", "runtimeProfileId",
   "runtimeAccountId", "providerRef", "defaultModel", "defaultCwd", "permissionPolicy", "concurrency",
   "isDefault", "enabled", "createdAt", "updatedAt",
 ]);
+const BINDING_AGENT_PROFILE_FIELDS = Object.freeze([
+  ...AGENT_PROFILE_FIELDS.filter((field) => !PROJECTED_RUNTIME_FIELDS.includes(field)), ...BINDING_STATE_FIELDS,
+]);
 const WORK_RUN_FIELDS = Object.freeze([
   "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace", "status",
   "contextSnapshotId", "runtimeSessionRef", "runtimeTurnRef", "eventSeq", "waitingRequestId", "startedAt",
-  "finishedAt", "resultSummary", "errorCode", "retryOf",
-]);
-const GENERIC_RUNTIME_WORK_RUN_FIELDS = Object.freeze([
-  "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace", "status",
-  "runtimeSessionRef", "runtimeTurnRef", "eventSeq", "waitingRequestId", "startedAt",
-  "finishedAt", "resultSummary", "errorCode", "retryOf",
-]);
-const LEGACY_WORK_RUN_FIELDS = Object.freeze([
-  "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace", "status",
-  "codexThreadId", "codexTurnId", "eventSeq", "waitingRequestId", "startedAt",
   "finishedAt", "resultSummary", "errorCode", "retryOf",
 ]);
 const RUN_NOTE_FIELDS = Object.freeze([
@@ -92,9 +63,6 @@ const RUNTIME_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const DEFAULT_RUNTIME_ACCOUNT_IDS = new Set(
   DEFAULT_RUNTIME_ACCOUNTS.map((account) => account.id),
 );
-const DEFAULT_RUNTIME_ACCOUNT_BY_ID = new Map(
-  DEFAULT_RUNTIME_ACCOUNTS.map((account) => [account.id, account]),
-);
 const BACKEND_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const DEFAULT_MAX_RUN_NOTES = 10_000;
 const DEFAULT_MAX_RUN_NOTES_PER_RUN = 1_000;
@@ -107,9 +75,6 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const MODEL_PROVIDER_FIELDS = Object.freeze([
   "id", "kind", "name", "baseUrl", "model", "credentialRef", "headers", "awsRegion",
   "awsProfile", "validationStatus",
-]);
-const LEGACY_MODEL_PROVIDER_FIELDS = Object.freeze([
-  "id", "kind", "name", "baseUrl", "model", "credentialRef", "headers", "validationStatus",
 ]);
 const MODEL_PROVIDER_KINDS = new Set([
   "chatgpt", "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses",
@@ -126,7 +91,7 @@ const FORBIDDEN_HEADER_NAMES = new Set([
   "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
 ]);
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration"]);
+const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
 const WORK_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
   "completed", "failed", "canceled", "interrupted", "skipped",
@@ -281,7 +246,7 @@ function pickExact(record, fields, kind) {
   return Object.fromEntries(fields.map((field) => [field, clone(record[field] ?? null)]));
 }
 
-function validateAgentProfileShape(record, fields) {
+function validateAgentProfileShape(record, fields, allowInheritedConcurrency = false) {
   const profile = pickExact(record, fields, "AgentProfile");
   for (const field of ["id", "backendId", "agentId", "name", "runtime", "runtimeProfileId"]) {
     requireString(profile[field], `AgentProfile.${field}`);
@@ -292,7 +257,7 @@ function validateAgentProfileShape(record, fields) {
       throw storeError("STORE_INVALID_RECORD", "AgentProfile.runtimeAccountId 无效");
     }
   }
-  if (!BACKEND_ID_PATTERN.test(profile.backendId)) {
+  if (profile.backendId !== DEFAULT_AGENT_BACKEND_ID) {
     throw storeError("STORE_INVALID_RECORD", "AgentProfile.backendId 无效");
   }
   if (fields.includes("runtimeAccountId")) {
@@ -322,10 +287,16 @@ function validateAgentProfileShape(record, fields) {
     || !SANDBOX_POLICIES.has(profile.permissionPolicy.sandbox)) {
     throw storeError("STORE_INVALID_RECORD", "AgentProfile.permissionPolicy 无效");
   }
+  const validLimit = (value, minimum) => (allowInheritedConcurrency && value === null)
+    || (Number.isSafeInteger(value) && value >= minimum);
   if (!profile.concurrency || typeof profile.concurrency !== "object"
-    || !Number.isSafeInteger(profile.concurrency.maxActive) || profile.concurrency.maxActive < 1
-    || !Number.isSafeInteger(profile.concurrency.maxWorkspaceWrites)
-    || profile.concurrency.maxWorkspaceWrites < 0) {
+    || Array.isArray(profile.concurrency)
+    || Object.getPrototypeOf(profile.concurrency) !== Object.prototype
+    || Object.keys(profile.concurrency).length !== 2
+    || !Object.hasOwn(profile.concurrency, "maxActive")
+    || !Object.hasOwn(profile.concurrency, "maxWorkspaceWrites")
+    || !validLimit(profile.concurrency.maxActive, 1)
+    || !validLimit(profile.concurrency.maxWorkspaceWrites, 0)) {
     throw storeError("STORE_INVALID_RECORD", "AgentProfile.concurrency 无效");
   }
   if (typeof profile.isDefault !== "boolean" || typeof profile.enabled !== "boolean") {
@@ -338,92 +309,30 @@ function validateAgentProfileShape(record, fields) {
 }
 
 function validateAgentProfile(record) {
-  return validateAgentProfileShape(record, AGENT_PROFILE_FIELDS);
-}
-
-function validateLegacyAgentProfile(record) {
-  return validateAgentProfileShape(record, LEGACY_AGENT_PROFILE_FIELDS);
-}
-
-function builtinRuntimeAccountIdMatches(profile, spec) {
-  if (!Object.prototype.hasOwnProperty.call(profile, "runtimeAccountId")) return true;
-  return profile.runtimeAccountId === DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND[spec.backendId];
-}
-
-function builtinIdentityMatches(profile, spec, backendId = spec.backendId) {
-  return profile.id === spec.id
-    && profile.backendId === backendId
-    && profile.agentId === spec.agentId
-    && profile.runtime === spec.runtime
-    && profile.runtimeProfileId === spec.runtimeProfileId
-    && builtinRuntimeAccountIdMatches(profile, spec)
-    && profile.isDefault === false;
+  if (!Object.hasOwn(record || {}, "bindings")) return validateAgentProfileShape(record, AGENT_PROFILE_FIELDS, true);
+  const bindingState = validateBindingState(record);
+  const profile = validateAgentProfileShape(profileWithoutBindingState(projectProfile(record)), AGENT_PROFILE_FIELDS, true);
+  return { ...profile, ...bindingState };
 }
 
 function builtinRuntimeAccountBindingMatches(profile, account) {
-  const backendAccountId = DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND[profile.backendId];
-  const backendAccount = DEFAULT_RUNTIME_ACCOUNT_BY_ID.get(backendAccountId);
-  if (backendAccount && backendAccount.runtime === profile.runtime) {
-    return account.id === backendAccount.id
-      && account.kind === backendAccount.kind
-      && account.isDefault === true;
-  }
-  if (profile.runtime === "codex" && account.kind === "shoggoth-managed") {
-    return account.id === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
-      && account.isDefault === true;
-  }
-  const spec = BUILTIN_CLI_AGENT_PROFILES.find((candidate) => candidate.id === profile.id);
-  if (!spec) return true;
-  return account.id === DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND[spec.backendId]
-    && account.kind === "native-user"
-    && account.isDefault === true;
+  return profile.bindings.some(binding => binding.runtimeAccountId === account.id && binding.runtime === account.runtime);
 }
 
-function runtimeAccountFromDisk(record, code, location, schemaVersion = STORE_SCHEMA_VERSION) {
-  try {
-    return schemaVersion < PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION
-      ? normalizeLegacyRuntimeAccount(record)
-      : validateRuntimeAccount(record);
-  } catch (error) {
+function runtimeAccountFromDisk(record, code, location) {
+  try { return validateRuntimeAccount(record); }
+  catch (error) {
     if (error?.code !== "RUNTIME_ACCOUNT_INVALID") throw error;
     throw storeError(code, `${location} 的 RuntimeAccount 无效: ${error.message}`);
   }
 }
 
-function canonicalLegacyRuntimeAccountId(profile, account) {
-  const backendAccountId = DEFAULT_RUNTIME_ACCOUNT_ID_BY_BACKEND[profile.backendId];
-  const backendAccount = DEFAULT_RUNTIME_ACCOUNT_BY_ID.get(backendAccountId);
-  if (backendAccount && backendAccount.runtime === profile.runtime) return backendAccount.id;
-  if (profile.runtime === "codex" && account?.kind === "shoggoth-managed") {
-    return SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID;
-  }
-  return profile.runtimeAccountId;
-}
-
-function agentProfileFromDisk(record, schemaVersion) {
-  if (schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION) {
-    return { profile: validateAgentProfile(record), runtimeAccount: null };
-  }
-  let profile = validateLegacyAgentProfile(record);
-  if (schemaVersion === PROFILE_BACKEND_MIGRATION_SOURCE_SCHEMA_VERSION) {
-    const spec = BUILTIN_CLI_AGENT_PROFILES.find((candidate) => candidate.id === profile.id);
-    // schema v5 only predates the Codex/Grok backend split. Later built-ins must
-    // not be reinterpreted as legacy Shoggoth-owned profiles when reading a v5 fixture.
-    if (spec && ["codex", "grok-build"].includes(spec.runtime)) {
-      if (!builtinIdentityMatches(profile, spec, "shoggoth")) {
-        throw storeError(
-          "STORE_PROFILE_MIGRATION_CONFLICT",
-          `schema v5 内置 AgentProfile 身份冲突: ${spec.name}`,
-        );
-      }
-      profile = validateLegacyAgentProfile({ ...profile, backendId: spec.backendId });
-    }
-  }
-  const migrated = runtimeAccountForLegacyProfile(profile);
-  return {
-    profile: validateAgentProfile({ ...profile, runtimeAccountId: migrated.runtimeAccountId }),
-    runtimeAccount: migrated.account,
-  };
+function agentProfileFromDisk(record) {
+  const canonical = pickExact(record, BINDING_AGENT_PROFILE_FIELDS, "AgentProfile");
+  const state = validateBindingState(canonical);
+  const selected = state.bindings.find(binding => binding.id === state.defaultBindingId);
+  return { profile: validateAgentProfile({ ...canonical, runtime: selected.runtime,
+    runtimeProfileId: selected.runtimeProfileId, runtimeAccountId: selected.runtimeAccountId }) };
 }
 
 function byteLengthWithin(value, max) {
@@ -446,7 +355,12 @@ function isWellFormedUnicode(value) {
 
 function validateModelProvider(record) {
   const hasModels = Object.prototype.hasOwnProperty.call(record || {}, "models");
-  const provider = pickExact(record, [...MODEL_PROVIDER_FIELDS, ...(hasModels ? ["models"] : [])], "ModelProvider");
+  const hasRevision = Object.hasOwn(record || {}, "revision");
+  const provider = pickExact(record, [...MODEL_PROVIDER_FIELDS, ...(hasModels ? ["models"] : []),
+    ...(hasRevision ? ["revision"] : [])], "ModelProvider");
+  if (hasRevision && (!Number.isSafeInteger(provider.revision) || provider.revision < 1)) {
+    throw storeError("STORE_INVALID_RECORD", "ModelProvider.revision 无效");
+  }
   for (const field of ["id", "kind", "name", "validationStatus"]) {
     requireString(provider[field], `ModelProvider.${field}`);
   }
@@ -539,28 +453,12 @@ function validateModelProvider(record) {
   return provider;
 }
 
-function migrateLegacyModelProvider(record) {
-  const legacy = pickExact(record, LEGACY_MODEL_PROVIDER_FIELDS, "legacy ModelProvider");
-  if (!["unverified", "valid", "invalid"].includes(legacy.validationStatus)) {
-    throw storeError("STORE_INVALID_RECORD", "legacy ModelProvider.validationStatus 不受支持");
-  }
-  return validateModelProvider({
-    ...legacy,
-    credentialRef: legacy.kind === "ollama" || legacy.kind === "lmstudio"
-      ? null : legacy.credentialRef,
-    awsRegion: legacy.kind === "amazon-bedrock" ? "us-east-1" : null,
-    awsProfile: null,
-    validationStatus: legacy.validationStatus === "invalid" ? "invalid" : "unverified",
-  });
-}
+function modelProviderFromDisk(record) { return validateModelProvider(record); }
 
-function modelProviderFromDisk(record, schemaVersion) {
-  if (schemaVersion < STORE_SCHEMA_VERSION && Object.hasOwn(record || {}, "models")) {
-    throw storeError("STORE_INVALID_RECORD", "旧 ModelProvider schema 不支持模型目录");
-  }
-  return schemaVersion === LEGACY_STORE_SCHEMA_VERSION
-    ? migrateLegacyModelProvider(record)
-    : validateModelProvider(record);
+function modelProviderView(provider) {
+  if (!provider) return null;
+  const { revision: _revision, ...publicFields } = provider;
+  return clone(publicFields);
 }
 
 function validateWorkRun(record) {
@@ -640,110 +538,13 @@ function validateWorkRun(record) {
   return run;
 }
 
-function migrateLegacyWorkRun(record, profile) {
-  const legacy = pickExact(record, LEGACY_WORK_RUN_FIELDS, "legacy WorkRun");
-  if (!profile || profile.id !== legacy.profileId) {
-    throw storeError("STORE_INVALID_RECORD", "legacy WorkRun 缺少 Runtime profile");
-  }
-  const binding = runtimeBinding({
-    runtime: profile.runtime,
-    runtimeProfileId: profile.runtimeProfileId,
-    runtimeAccountId: profile.runtimeAccountId,
-  });
-  const current = Object.fromEntries(WORK_RUN_FIELDS.map((field) => [field, legacy[field] ?? null]));
-  current.runtimeSessionRef = legacy.codexThreadId === null
-    ? null : runtimeSessionRef(binding, legacy.codexThreadId);
-  current.runtimeTurnRef = legacy.codexTurnId === null
-    ? null : runtimeTurnRef(binding, legacy.codexThreadId, legacy.codexTurnId);
-  return validateWorkRun(current);
-}
-
-function migrateRuntimeRefs(record, profile) {
-  if (!profile || profile.id !== record.profileId) {
-    throw storeError("STORE_INVALID_RECORD", "WorkRun 缺少 Runtime profile");
-  }
-  let binding;
-  try {
-    binding = runtimeBinding({
-      runtime: profile.runtime,
-      runtimeProfileId: profile.runtimeProfileId,
-      runtimeAccountId: profile.runtimeAccountId,
-    });
-  } catch {
-    throw storeError("STORE_INVALID_RECORD", "WorkRun Runtime profile 无效");
-  }
-  const migrateRef = (ref, turn = false) => {
-    if (ref === null) return null;
-    const fields = turn
-      ? ["runtime", "runtimeProfileId", "sessionId", "turnId"]
-      : ["runtime", "runtimeProfileId", "sessionId"];
-    const legacy = pickExact(ref, fields, turn ? "RuntimeTurnRef v1" : "RuntimeSessionRef v1");
-    if (legacy.runtime !== binding.runtime
-      || legacy.runtimeProfileId !== binding.runtimeProfileId) {
-      throw storeError("STORE_INVALID_RECORD", "WorkRun Runtime ref 与 Profile 不匹配");
-    }
-    try {
-      return turn
-        ? runtimeTurnRef(binding, legacy.sessionId, legacy.turnId)
-        : runtimeSessionRef(binding, legacy.sessionId);
-    } catch {
-      throw storeError("STORE_INVALID_RECORD", "WorkRun Runtime ref 无效");
-    }
-  };
-  return {
-    ...record,
-    runtimeSessionRef: migrateRef(record.runtimeSessionRef),
-    runtimeTurnRef: migrateRef(record.runtimeTurnRef, true),
-  };
-}
-
-function migrateGenericRuntimeWorkRun(record, profile) {
-  const previous = pickExact(record, GENERIC_RUNTIME_WORK_RUN_FIELDS, "schema v4 WorkRun");
-  return validateWorkRun(migrateRuntimeRefs({ ...previous, contextSnapshotId: null }, profile));
-}
-
-function migrateRuntimeAccountWorkRun(record, profile) {
-  const previous = pickExact(record, WORK_RUN_FIELDS, "schema v5-v7 WorkRun");
-  return validateWorkRun(migrateRuntimeRefs(previous, profile));
-}
-
-function workRunFromDisk(record, schemaVersion, profile) {
-  if (schemaVersion < GENERIC_RUNTIME_STORE_SCHEMA_VERSION) {
-    return migrateLegacyWorkRun(record, profile);
-  }
-  if (schemaVersion === GENERIC_RUNTIME_STORE_SCHEMA_VERSION) {
-    return migrateGenericRuntimeWorkRun(record, profile);
-  }
-  if (schemaVersion < PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION) {
-    return migrateRuntimeAccountWorkRun(record, profile);
-  }
-  return validateWorkRun(record);
-}
+function workRunFromDisk(record) { return validateWorkRun(record); }
 
 function sameRuntimeRef(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function withLegacyWorkRunProjection(run) {
-  if (run === null) return null;
-  Object.defineProperties(run, {
-    codexThreadId: {
-      configurable: false,
-      enumerable: false,
-      get: () => run.runtimeSessionRef?.sessionId ?? null,
-    },
-    codexTurnId: {
-      configurable: false,
-      enumerable: false,
-      get: () => run.runtimeTurnRef?.turnId ?? null,
-    },
-  });
-  return run;
-}
-
-function workRunView(run) {
-  return run === null || run === undefined ? null : withLegacyWorkRunProjection(clone(run));
-}
+function workRunView(run) { return run === null || run === undefined ? null : clone(run); }
 
 function validateRunNote(record) {
   const note = pickExact(record, RUN_NOTE_FIELDS, "RunNote");
@@ -848,55 +649,10 @@ function eventChecksum(event) {
 }
 
 function snapshotBody(snapshot) {
-  if (Object.prototype.hasOwnProperty.call(snapshot, "runtimeAccounts")) {
-    return {
-      schemaVersion: snapshot.schemaVersion,
-      lastSeq: snapshot.lastSeq,
-      modelProviders: snapshot.modelProviders,
-      runtimeAccounts: snapshot.runtimeAccounts,
-      runtimeAccountTombstones: snapshot.runtimeAccountTombstones,
-      agentProfiles: snapshot.agentProfiles,
-      workRuns: snapshot.workRuns,
-      runNotes: snapshot.runNotes,
-      mcpToolCalls: snapshot.mcpToolCalls,
-    };
-  }
-  if (Object.prototype.hasOwnProperty.call(snapshot, "mcpToolCalls")) {
-    return {
-      schemaVersion: snapshot.schemaVersion,
-      lastSeq: snapshot.lastSeq,
-      modelProviders: snapshot.modelProviders,
-      agentProfiles: snapshot.agentProfiles,
-      workRuns: snapshot.workRuns,
-      runNotes: snapshot.runNotes,
-      mcpToolCalls: snapshot.mcpToolCalls,
-    };
-  }
-  if (Object.prototype.hasOwnProperty.call(snapshot, "runNotes")) {
-    return {
-      schemaVersion: snapshot.schemaVersion,
-      lastSeq: snapshot.lastSeq,
-      modelProviders: snapshot.modelProviders,
-      agentProfiles: snapshot.agentProfiles,
-      workRuns: snapshot.workRuns,
-      runNotes: snapshot.runNotes,
-    };
-  }
-  if (Object.prototype.hasOwnProperty.call(snapshot, "modelProviders")) {
-    return {
-      schemaVersion: snapshot.schemaVersion,
-      lastSeq: snapshot.lastSeq,
-      modelProviders: snapshot.modelProviders,
-      agentProfiles: snapshot.agentProfiles,
-      workRuns: snapshot.workRuns,
-    };
-  }
-  return {
-    schemaVersion: snapshot.schemaVersion,
-    lastSeq: snapshot.lastSeq,
-    agentProfiles: snapshot.agentProfiles,
-    workRuns: snapshot.workRuns,
-  };
+  return { schemaVersion: snapshot.schemaVersion, lastSeq: snapshot.lastSeq,
+    modelProviders: snapshot.modelProviders, runtimeAccounts: snapshot.runtimeAccounts,
+    runtimeAccountTombstones: snapshot.runtimeAccountTombstones, agentProfiles: snapshot.agentProfiles,
+    workRuns: snapshot.workRuns, runNotes: snapshot.runNotes, mcpToolCalls: snapshot.mcpToolCalls };
 }
 
 function snapshotChecksum(snapshot) {
@@ -907,9 +663,9 @@ function defaultAgentProfileIdentityMatches(profile) {
   return profile.id === DEFAULT_AGENT_PROFILE_ID
     && profile.backendId === DEFAULT_AGENT_BACKEND_ID
     && profile.agentId === DEFAULT_AGENT_ID
-    && profile.runtime === DEFAULT_AGENT_RUNTIME
-    && profile.runtimeProfileId === DEFAULT_RUNTIME_PROFILE_ID
-    && profile.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
+    && (profile.bindings || (profile.runtime === DEFAULT_AGENT_RUNTIME
+      && profile.runtimeProfileId === DEFAULT_RUNTIME_PROFILE_ID
+      && profile.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID))
     && profile.isDefault === true;
 }
 
@@ -926,7 +682,7 @@ function defaultAgentProfile(now) {
     defaultModel: null,
     defaultCwd: null,
     permissionPolicy: { approvalPolicy: "on-request", sandbox: "danger-full-access" },
-    concurrency: { maxActive: require("./execution-policy").profile, maxWorkspaceWrites: require("./execution-policy").profile },
+    concurrency: { maxActive: null, maxWorkspaceWrites: null },
     isDefault: true,
     enabled: true,
     createdAt: now,
@@ -952,6 +708,7 @@ class ProductStore {
   deleteRuntimeAccount() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.deleteRuntimeAccount 未实现"); }
   listModelProviders() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.listModelProviders 未实现"); }
   getModelProvider() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.getModelProvider 未实现"); }
+  getModelProviderRevision() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.getModelProviderRevision 未实现"); }
   putModelProvider() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.putModelProvider 未实现"); }
   deleteModelProvider() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.deleteModelProvider 未实现"); }
   listWorkRuns() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.listWorkRuns 未实现"); }
@@ -990,6 +747,10 @@ class JsonlProductStore extends ProductStore {
       throw storeError("STORE_PATHS_REQUIRED", "ProductStore 需要完整 Service paths");
     }
     this.paths = options.paths;
+    this.schemaVersion = options.paths.productSchemaVersion ?? STORE_SCHEMA_VERSION;
+    if (this.schemaVersion !== STORE_SCHEMA_VERSION) {
+      throw storeError("STORE_INVALID_OPTIONS", "ProductStore 只支持当前数据格式");
+    }
     this.fs = options.fs || fs;
     this.now = options.now || Date.now;
     this.maxRunNotes = options.maxRunNotes ?? DEFAULT_MAX_RUN_NOTES;
@@ -1039,16 +800,6 @@ class JsonlProductStore extends ProductStore {
     this.opened = false;
     this.commitUncertain = false;
     this.lastEventSeq = 0;
-    this.loadedLegacySnapshot = false;
-    this.sawProviderEvent = false;
-    this.pendingLegacyRuntimeAccountCanonicalization = false;
-    this.legacyRuntimeAccountSource = null;
-    this.legacyRuntimeAccountIds = new Set();
-    this.legacyRuntimeAccountIdsToReclaim = new Set();
-    this.legacyRuntimeAccountAliases = new Map();
-    this.runtimeAccountAuthorityStarted = false;
-    this.currentSchemaAuthorityVersion = 0;
-    this.profileProviderAuthorityStarted = false;
     this.modelProviders = new Map();
     this.runtimeAccounts = new Map();
     this.runtimeAccountTombstones = new Map();
@@ -1072,21 +823,9 @@ class JsonlProductStore extends ProductStore {
     this.mcpToolCalls.clear();
     this.lastEventSeq = 0;
     this.commitUncertain = false;
-    this.loadedLegacySnapshot = false;
-    this.sawProviderEvent = false;
-    this.pendingLegacyRuntimeAccountCanonicalization = false;
-    this.legacyRuntimeAccountSource = null;
-    this.legacyRuntimeAccountIds.clear();
-    this.legacyRuntimeAccountIdsToReclaim.clear();
-    this.legacyRuntimeAccountAliases.clear();
-    this.runtimeAccountAuthorityStarted = false;
-    this.currentSchemaAuthorityVersion = 0;
-    this.profileProviderAuthorityStarted = false;
     this.#readSnapshot();
     this.#ensureDefaultRuntimeAccounts();
     this.#replayEventLog();
-    this.#finishLegacyRuntimeAccountCanonicalization();
-    this.legacyRuntimeAccountAliases.clear();
     this.#assertAllReferences();
     this.opened = true;
     if (!this.agentProfiles.has(DEFAULT_AGENT_PROFILE_ID)) {
@@ -1219,7 +958,7 @@ class JsonlProductStore extends ProductStore {
     if (existing.isDefault) {
       throw storeError("RUNTIME_ACCOUNT_DEFAULT", "默认 RuntimeAccount 不可删除");
     }
-    if ([...this.agentProfiles.values()].some((profile) => profile.runtimeAccountId === id)) {
+    if ([...this.agentProfiles.values()].some((profile) => profile.bindings.some((binding) => binding.runtimeAccountId === id))) {
       throw storeError("RUNTIME_ACCOUNT_IN_USE", "RuntimeAccount 仍被 AgentProfile 引用");
     }
     this.#append("runtime_account.delete", id, {});
@@ -1230,12 +969,140 @@ class JsonlProductStore extends ProductStore {
 
   listAgentProfiles() {
     this.#assertOpen();
-    return [...this.agentProfiles.values()].map(clone);
+    return [...this.agentProfiles.values()].map((profile) => clone(projectProfile(profile)));
   }
 
   getAgentProfile(id) {
     this.#assertOpen();
-    return clone(this.agentProfiles.get(id) || null);
+    const profile = this.agentProfiles.get(id);
+    return profile ? clone(projectProfile(profile)) : null;
+  }
+
+  getAgentRuntimeBindings(profileId) {
+    this.#assertOpen();
+    const profile = this.agentProfiles.get(profileId);
+    if (!profile) throw bindingError("NOT_FOUND");
+    return clone({ bindings: profile.bindings, defaultBindingId: profile.defaultBindingId, revision: profile.bindingsRevision });
+  }
+
+  getAgentRuntimeBinding(profileId, selectedId) {
+    this.#assertOpen();
+    return clone(this.agentProfiles.get(profileId)?.bindings.find((binding) => binding.id === selectedId) || null);
+  }
+
+  resolveAgentRuntimeProfile(profileId, selectedId) {
+    this.#assertOpen();
+    const profile = this.agentProfiles.get(profileId);
+    if (!profile) throw bindingError("NOT_FOUND");
+    const id = selectedId === undefined ? profile.defaultBindingId : selectedId;
+    const binding = profile.bindings.find((entry) => entry.id === id);
+    if (!binding) throw bindingError("NOT_FOUND");
+    if (!binding.enabled || !profile.enabled) throw bindingError("DISABLED");
+    return clone({ ...projectProfile(profile, id), selectedBindingId: id });
+  }
+
+  addAgentRuntimeBinding(profileId, spec, options = {}) {
+    return this.#withSensitiveValueMatcher(() => {
+      this.#assertOpen();
+      const profile = this.agentProfiles.get(profileId);
+      if (!profile) throw bindingError("NOT_FOUND");
+      if (!spec || typeof spec !== "object" || Array.isArray(spec)
+        || Object.keys(spec).some((key) => !["runtime", "runtimeAccountId", "label", "enabled"].includes(key))
+        || typeof options.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(options.operationId)) {
+        throw bindingError("INVALID");
+      }
+      const normalized = { runtime: spec.runtime, runtimeAccountId: spec.runtimeAccountId,
+        label: spec.label ?? null, enabled: spec.enabled ?? true };
+      const fingerprint = crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+      const prior = profile.bindingOperations.find((entry) => entry.operationId === options.operationId);
+      if (prior) {
+        const binding = profile.bindings.find((entry) => entry.id === prior.bindingId);
+        if (prior.fingerprint !== fingerprint || !binding) throw bindingError("OPERATION_CONFLICT");
+        return { binding: clone(binding), ...this.getAgentRuntimeBindings(profileId) };
+      }
+      if (options.revision !== undefined) this.#assertBindingRevision(profile, options.revision);
+      if (profile.bindings.length >= MAX_AGENT_RUNTIME_BINDINGS || profile.bindingOperations.length >= MAX_BINDING_OPERATIONS) {
+        throw bindingError("CAPACITY");
+      }
+      const runtimeProfileId = runtimeProfileIdForBinding(profileId, options.operationId);
+      const time = this.now();
+      const binding = validateAgentRuntimeBinding({ id: bindingId(profileId, runtimeProfileId), profileId,
+        ...normalized, runtimeProfileId, revision: profile.bindingsRevision + 1, createdAt: time, updatedAt: time });
+      return this.#commitProfileBindings(profile, {
+        bindings: [...profile.bindings, binding], defaultBindingId: profile.defaultBindingId,
+        bindingOperations: [...profile.bindingOperations, { operationId: options.operationId, bindingId: binding.id, fingerprint }],
+      }, binding);
+    });
+  }
+
+  updateAgentRuntimeBinding(profileId, selectedId, patch, { revision } = {}) {
+    return this.#withSensitiveValueMatcher(() => {
+      this.#assertOpen();
+      const profile = this.agentProfiles.get(profileId);
+      const current = profile?.bindings.find((entry) => entry.id === selectedId);
+      if (!current) throw bindingError("NOT_FOUND");
+      this.#assertBindingRevision(profile, revision);
+      if (!patch || typeof patch !== "object" || Array.isArray(patch) || Object.keys(patch).length === 0
+        || Object.keys(patch).some((field) => !["label", "enabled", "runtimeAccountId"].includes(field))) throw bindingError("INVALID");
+      if ((patch.enabled === false || (patch.runtimeAccountId !== undefined && patch.runtimeAccountId !== current.runtimeAccountId))
+        && this.#bindingInUse(profileId, current)) throw bindingError("IN_USE");
+      if (patch.enabled === false && profile.defaultBindingId === selectedId) throw bindingError("DEFAULT_PROTECTED");
+      const binding = validateAgentRuntimeBinding({ ...current, ...patch, revision: profile.bindingsRevision + 1,
+        updatedAt: Math.max(this.now(), current.updatedAt + 1) });
+      return this.#commitProfileBindings(profile, { bindings: profile.bindings.map((entry) => entry.id === selectedId ? binding : entry),
+        defaultBindingId: profile.defaultBindingId, bindingOperations: profile.bindingOperations }, binding);
+    });
+  }
+
+  removeAgentRuntimeBinding(profileId, selectedId, { revision } = {}) {
+    return this.#withSensitiveValueMatcher(() => {
+      this.#assertOpen();
+      const profile = this.agentProfiles.get(profileId);
+      const binding = profile?.bindings.find((entry) => entry.id === selectedId);
+      if (!binding) throw bindingError("NOT_FOUND");
+      this.#assertBindingRevision(profile, revision);
+      if (profile.defaultBindingId === selectedId) throw bindingError("DEFAULT_PROTECTED");
+      if (this.#bindingInUse(profileId, binding)) throw bindingError("IN_USE");
+      return this.#commitProfileBindings(profile, { bindings: profile.bindings.filter((entry) => entry.id !== selectedId),
+        defaultBindingId: profile.defaultBindingId, bindingOperations: profile.bindingOperations }, null);
+    });
+  }
+
+  setAgentDefaultBinding(profileId, selectedId, { revision } = {}) {
+    return this.#withSensitiveValueMatcher(() => {
+      this.#assertOpen();
+      const profile = this.agentProfiles.get(profileId);
+      const binding = profile?.bindings.find((entry) => entry.id === selectedId);
+      if (!binding) throw bindingError("NOT_FOUND");
+      this.#assertBindingRevision(profile, revision);
+      if (!binding.enabled) throw bindingError("DISABLED");
+      if (profile.defaultBindingId === selectedId) return { binding: clone(binding), ...this.getAgentRuntimeBindings(profileId) };
+      return this.#commitProfileBindings(profile, { bindings: profile.bindings,
+        defaultBindingId: selectedId, bindingOperations: profile.bindingOperations }, binding);
+    });
+  }
+
+  #assertBindingRevision(profile, revision) {
+    if (!Number.isSafeInteger(revision) || revision !== profile.bindingsRevision) throw bindingError("REVISION_CONFLICT");
+  }
+
+  #bindingInUse(profileId, binding) {
+    return [...this.workRuns.values()].some((run) => run.profileId === profileId
+      && (run.status === "queued" || ACTIVE_WORK_RUN_STATUSES.has(run.status))
+      && (run.runtimeSessionRef === null || (run.runtimeSessionRef.runtime === binding.runtime
+        && run.runtimeSessionRef.runtimeProfileId === binding.runtimeProfileId
+        && run.runtimeSessionRef.runtimeAccountId === binding.runtimeAccountId)));
+  }
+
+  #commitProfileBindings(previous, state, selected) {
+    const profile = validateAgentProfile({ ...previous, ...state, bindingsRevision: previous.bindingsRevision + 1,
+      updatedAt: Math.max(this.now(), (previous.updatedAt ?? -1) + 1) });
+    this.#assertAgentBindingReferences(profile, "AGENT_BINDING_INVALID");
+    this.#assertAgentProfileIdentityUnique(profile, "AGENT_BINDING_INVALID");
+    this.#assertBuiltinProfileIdentity(profile, "AGENT_BINDING_INVALID");
+    this.#append("agent_profile.put", profile.id, { profile: profileToDisk(profile) });
+    this.agentProfiles.set(profile.id, profile);
+    return { binding: clone(selected), ...this.getAgentRuntimeBindings(profile.id) };
   }
 
   putAgentProfile(input) {
@@ -1247,38 +1114,26 @@ class JsonlProductStore extends ProductStore {
     this.#assertNoSensitiveFields(input);
     assertJsonRoundTripStable(input);
     const existing = typeof input?.id === "string" ? this.agentProfiles.get(input.id) : null;
+    if (Object.hasOwn(input || {}, "bindings") || Object.hasOwn(input || {}, "bindingOperations")) {
+      throw bindingError("PROJECTION_READONLY", "Binding 只能通过专用接口修改");
+    }
+    if (existing) {
+      if (PROJECTED_RUNTIME_FIELDS.some((field) => Object.hasOwn(input, field) && input[field] !== existing[field])
+        || (Object.hasOwn(input, "defaultBindingId") && input.defaultBindingId !== existing.defaultBindingId)) {
+        throw bindingError("PROJECTION_READONLY", "Runtime 字段是默认 Binding 的只读投影");
+      }
+      if (Object.hasOwn(input, "bindingsRevision") && input.bindingsRevision !== existing.bindingsRevision) {
+        throw bindingError("REVISION_CONFLICT", "Binding revision 已变化");
+      }
+    }
     const time = this.now();
     const candidate = {
-      ...input,
+      ...profileWithoutBindingState(input),
       createdAt: existing?.createdAt ?? input.createdAt ?? time,
       updatedAt: existing ? Math.max(time, existing.updatedAt + 1) : (input.updatedAt ?? time),
     };
-    let migratedAccount = null;
-    const runtimeAccountOmitted = !Object.prototype.hasOwnProperty.call(input, "runtimeAccountId");
-    if (runtimeAccountOmitted && existing) candidate.runtimeAccountId = existing.runtimeAccountId;
-    if (existing && candidate.id === DEFAULT_AGENT_PROFILE_ID
-      && !defaultAgentProfileIdentityMatches(candidate)) {
-      throw storeError(
-        "DEFAULT_AGENT_PROFILE_IDENTITY_IMMUTABLE",
-        "保留的 Shoggoth profile 稳定身份不可变更",
-      );
-    }
-    const runtimeChanged = existing && candidate.runtime !== existing.runtime;
-    const staleRuntimeSwitchAccount = runtimeChanged
-      && candidate.runtimeAccountId === existing.runtimeAccountId;
-    const builtinSpec = BUILTIN_CLI_AGENT_PROFILES.find((spec) => spec.id === candidate.id);
-    const staleBuiltinAccount = existing && builtinSpec
-      && candidate.runtimeAccountId === existing.runtimeAccountId
-      && !builtinRuntimeAccountIdMatches(candidate, builtinSpec);
-    if ((runtimeAccountOmitted && (!existing || runtimeChanged))
-      || staleRuntimeSwitchAccount || staleBuiltinAccount) {
-      const legacyCandidate = { ...candidate };
-      delete legacyCandidate.runtimeAccountId;
-      const migrated = runtimeAccountForLegacyProfile(validateLegacyAgentProfile(legacyCandidate));
-      candidate.runtimeAccountId = migrated.runtimeAccountId;
-      migratedAccount = migrated.account;
-    }
-    if (candidate.id === DEFAULT_AGENT_PROFILE_ID && !defaultAgentProfileIdentityMatches(candidate)) {
+    if (candidate.id === DEFAULT_AGENT_PROFILE_ID
+      && !defaultAgentProfileIdentityMatches(existing ? { ...candidate, bindings: existing.bindings } : candidate)) {
       throw storeError(
         "DEFAULT_AGENT_PROFILE_IDENTITY_IMMUTABLE",
         "保留的 Shoggoth profile 稳定身份不可变更",
@@ -1290,7 +1145,8 @@ class JsonlProductStore extends ProductStore {
         "AgentProfile.backendId 持久化后不可更改",
       );
     }
-    const profile = validateAgentProfile(candidate);
+    const profile = validateAgentProfile(existing
+      ? { ...candidate, ...validateBindingState(existing) } : withInitialBinding(validateAgentProfile(candidate)));
     this.#assertBuiltinProfileIdentity(profile, "AGENT_PROFILE_IDENTITY_CONFLICT");
     this.#assertAgentProfileIdentityUnique(profile, "AGENT_PROFILE_IDENTITY_CONFLICT");
     if (profile.providerRef !== null && !this.modelProviders.has(profile.providerRef)) {
@@ -1301,30 +1157,26 @@ class JsonlProductStore extends ProductStore {
         .find((candidate) => candidate.isDefault && candidate.id !== profile.id);
       if (conflict) throw storeError("DEFAULT_AGENT_PROFILE_CONFLICT", "只允许一个默认 AgentProfile");
     }
-    const account = this.#runtimeAccountForProfileWrite(profile, migratedAccount, time);
-    const reclaimedAccount = this.#legacyRuntimeAccountToReclaim(existing, profile);
-    const accountChanged = !this.runtimeAccounts.has(account.id)
-      || JSON.stringify(this.runtimeAccounts.get(account.id)) !== JSON.stringify(account);
-    this.#append("agent_profile.put", profile.id, accountChanged
-      ? { profile, runtimeAccount: account }
-      : { profile });
-    if (accountChanged) {
-      this.runtimeAccounts.set(account.id, account);
-      this.runtimeAccountTombstones.delete(account.id);
-    }
+    this.#runtimeAccountForProfileWrite(profile);
+    this.#append("agent_profile.put", profile.id, { profile: profileToDisk(profile) });
     this.agentProfiles.set(profile.id, profile);
-    this.#commitRuntimeAccountReclamation(reclaimedAccount);
-    return clone(profile);
+    return this.getAgentProfile(profile.id);
   }
 
   listModelProviders() {
     this.#assertOpen();
-    return [...this.modelProviders.values()].map(clone);
+    return [...this.modelProviders.values()].map(modelProviderView);
   }
 
   getModelProvider(id) {
     this.#assertOpen();
-    return clone(this.modelProviders.get(id) || null);
+    return modelProviderView(this.modelProviders.get(id));
+  }
+
+  getModelProviderRevision(id) {
+    this.#assertOpen();
+    const provider = this.modelProviders.get(id);
+    return provider ? provider.revision ?? 0 : null;
   }
 
   putModelProvider(input) {
@@ -1335,11 +1187,11 @@ class JsonlProductStore extends ProductStore {
     this.#assertOpen();
     this.#assertNoSensitiveFields(input);
     assertJsonRoundTripStable(input);
-    const provider = validateModelProvider(input);
+    const provider = validateModelProvider({ ...input, revision: this.lastEventSeq + 1 });
     this.#assertCredentialRefUnique(provider, "MODEL_PROVIDER_CREDENTIAL_CONFLICT");
     this.#append("model_provider.put", provider.id, { provider });
     this.modelProviders.set(provider.id, provider);
-    return clone(provider);
+    return modelProviderView(provider);
   }
 
   deleteModelProvider(id) {
@@ -1357,7 +1209,7 @@ class JsonlProductStore extends ProductStore {
     }
     this.#append("model_provider.delete", id, {});
     this.modelProviders.delete(id);
-    return clone(existing);
+    return modelProviderView(existing);
   }
 
   listWorkRuns(query = {}) {
@@ -1742,13 +1594,7 @@ class JsonlProductStore extends ProductStore {
     } catch (error) {
       throw storeError("STORE_CORRUPT_SNAPSHOT", `无法读取 ProductStore snapshot: ${error.message}`);
     } finally { this.fs.closeSync(fd); }
-    if (![LEGACY_STORE_SCHEMA_VERSION, PREVIOUS_STORE_SCHEMA_VERSION,
-      RICH_STORE_SCHEMA_VERSION, GENERIC_RUNTIME_STORE_SCHEMA_VERSION,
-      PROFILE_BACKEND_MIGRATION_SOURCE_SCHEMA_VERSION,
-      RUNTIME_ACCOUNT_MIGRATION_SOURCE_SCHEMA_VERSION,
-      RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION, PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION,
-      SINGLE_MODEL_PROVIDER_SCHEMA_VERSION, STORE_SCHEMA_VERSION]
-      .includes(snapshot?.schemaVersion)) {
+    if (snapshot?.schemaVersion !== this.schemaVersion) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
         `不支持 ProductStore snapshot schemaVersion: ${String(snapshot?.schemaVersion)}`,
@@ -1757,41 +1603,18 @@ class JsonlProductStore extends ProductStore {
     const snapshotKeys = Object.keys(snapshot);
     const currentShape = snapshotKeys.length === SNAPSHOT_FIELDS.length
       && snapshotKeys.every((key, index) => key === SNAPSHOT_FIELDS[index]);
-    const preRuntimeAccountShape = snapshotKeys.length === PRE_RUNTIME_ACCOUNT_SNAPSHOT_FIELDS.length
-      && snapshotKeys.every((key, index) => key === PRE_RUNTIME_ACCOUNT_SNAPSHOT_FIELDS[index]);
-    const previousShape = snapshotKeys.length === PREVIOUS_SNAPSHOT_FIELDS.length
-      && snapshotKeys.every((key, index) => key === PREVIOUS_SNAPSHOT_FIELDS[index]);
-    const legacyShape = snapshotKeys.length === LEGACY_SNAPSHOT_FIELDS.length
-      && snapshotKeys.every((key, index) => key === LEGACY_SNAPSHOT_FIELDS[index]);
-    const validVersionShape = snapshot.schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION
-      ? currentShape
-      : snapshot.schemaVersion >= RICH_STORE_SCHEMA_VERSION
-        ? preRuntimeAccountShape
-      : snapshot.schemaVersion === PREVIOUS_STORE_SCHEMA_VERSION
-        ? previousShape
-        : (previousShape || legacyShape);
-    if (!validVersionShape
-      || !Number.isSafeInteger(snapshot.lastSeq) || snapshot.lastSeq < 0
-      || !Array.isArray(snapshot.agentProfiles) || !Array.isArray(snapshot.workRuns)
-      || ((currentShape || preRuntimeAccountShape || previousShape)
-        && !Array.isArray(snapshot.modelProviders))
-      || (currentShape && !Array.isArray(snapshot.runtimeAccounts))
-      || (currentShape && !Array.isArray(snapshot.runtimeAccountTombstones))
-      || ((currentShape || preRuntimeAccountShape) && !Array.isArray(snapshot.runNotes))
-      || ((currentShape || preRuntimeAccountShape) && !Array.isArray(snapshot.mcpToolCalls))
-      || typeof snapshot.checksum !== "string"
-      || snapshot.checksum !== snapshotChecksum(snapshot)) {
+    if (!currentShape || !Number.isSafeInteger(snapshot.lastSeq) || snapshot.lastSeq < 0
+      || !["agentProfiles", "workRuns", "modelProviders", "runtimeAccounts", "runtimeAccountTombstones", "runNotes", "mcpToolCalls"]
+        .every(field => Array.isArray(snapshot[field]))
+      || typeof snapshot.checksum !== "string" || snapshot.checksum !== snapshotChecksum(snapshot)) {
       throw storeError("STORE_CORRUPT_SNAPSHOT", "ProductStore snapshot 结构无效");
     }
     this.#assertNoSensitiveFields(snapshot, false);
-    this.runtimeAccountAuthorityStarted = snapshot.schemaVersion
-      >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION;
-    this.currentSchemaAuthorityVersion = snapshot.schemaVersion >= SINGLE_MODEL_PROVIDER_SCHEMA_VERSION
-      ? snapshot.schemaVersion : 0;
-    this.profileProviderAuthorityStarted = snapshot.schemaVersion >= PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION;
-    this.loadedLegacySnapshot = legacyShape || snapshot.schemaVersion === LEGACY_STORE_SCHEMA_VERSION;
     for (const raw of snapshot.modelProviders || []) {
       const provider = modelProviderFromDisk(raw, snapshot.schemaVersion);
+      if (provider.revision !== undefined && provider.revision > snapshot.lastSeq) {
+        throw storeError("STORE_CORRUPT_SNAPSHOT", "ModelProvider revision 超过已提交事件序号");
+      }
       if (this.modelProviders.has(provider.id)) {
         throw storeError("STORE_CORRUPT_SNAPSHOT", `重复 ModelProvider: ${provider.id}`);
       }
@@ -1894,13 +1717,7 @@ class JsonlProductStore extends ProductStore {
   }
 
   #validateEnvelope(event, line) {
-    if (![LEGACY_STORE_SCHEMA_VERSION, PREVIOUS_STORE_SCHEMA_VERSION,
-      RICH_STORE_SCHEMA_VERSION, GENERIC_RUNTIME_STORE_SCHEMA_VERSION,
-      PROFILE_BACKEND_MIGRATION_SOURCE_SCHEMA_VERSION,
-      RUNTIME_ACCOUNT_MIGRATION_SOURCE_SCHEMA_VERSION,
-      RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION, PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION,
-      SINGLE_MODEL_PROVIDER_SCHEMA_VERSION, STORE_SCHEMA_VERSION]
-      .includes(event?.schemaVersion)) {
+    if (event?.schemaVersion !== this.schemaVersion) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
         `不支持 events.jsonl 第 ${line} 行 schemaVersion: ${String(event?.schemaVersion)}`,
@@ -1917,32 +1734,7 @@ class JsonlProductStore extends ProductStore {
   }
 
   #applyEvent(event) {
-    if (event.schemaVersion >= PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION) {
-      this.profileProviderAuthorityStarted = true;
-    } else if (this.profileProviderAuthorityStarted) {
-      throw storeError("STORE_CORRUPT_EVENT_LOG", "events.jsonl 在 Profile Provider authority 后回退到旧 schema");
-    }
-    if (this.currentSchemaAuthorityVersion && event.schemaVersion < this.currentSchemaAuthorityVersion) {
-      throw storeError(
-        "STORE_CORRUPT_EVENT_LOG",
-        "events.jsonl 在当前 schema authority 后回退到旧 schema",
-      );
-    }
-    if (event.schemaVersion >= SINGLE_MODEL_PROVIDER_SCHEMA_VERSION) {
-      this.#finishLegacyRuntimeAccountCanonicalization();
-      this.runtimeAccountAuthorityStarted = true;
-      this.currentSchemaAuthorityVersion = event.schemaVersion;
-    } else if (event.schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION) {
-      this.#finishLegacyRuntimeAccountCanonicalization();
-      this.runtimeAccountAuthorityStarted = true;
-    } else if (this.runtimeAccountAuthorityStarted) {
-      throw storeError(
-        "STORE_CORRUPT_EVENT_LOG",
-        "events.jsonl 在 RuntimeAccount authority 后回退到旧 schema",
-      );
-    }
-    if (event.schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION
-      && event.type === "runtime_account.put" && event.payload?.account
+    if (event.type === "runtime_account.put" && event.payload?.account
       && Object.keys(event.payload).length === 1) {
       const account = runtimeAccountFromDisk(
         event.payload.account,
@@ -1964,13 +1756,12 @@ class JsonlProductStore extends ProductStore {
       this.runtimeAccountTombstones.delete(account.id);
       return;
     }
-    if (event.schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION
-      && event.type === "runtime_account.delete"
+    if (event.type === "runtime_account.delete"
       && event.payload && Object.keys(event.payload).length === 0) {
       const account = this.runtimeAccounts.get(event.aggregateId);
       if (!account || account.isDefault
         || [...this.agentProfiles.values()]
-          .some((profile) => profile.runtimeAccountId === event.aggregateId)) {
+          .some((profile) => profile.bindings.some((binding) => binding.runtimeAccountId === event.aggregateId))) {
         throw storeError("STORE_CORRUPT_EVENT_LOG", "events.jsonl 删除了受保护的 RuntimeAccount");
       }
       this.runtimeAccounts.delete(event.aggregateId);
@@ -1979,17 +1770,18 @@ class JsonlProductStore extends ProductStore {
     }
     if (event.type === "model_provider.put" && event.payload?.provider) {
       const provider = modelProviderFromDisk(event.payload.provider, event.schemaVersion);
+      if (provider.revision !== undefined && provider.revision !== event.seq) {
+        throw storeError("STORE_CORRUPT_EVENT_LOG", "ModelProvider revision 与事件序号不匹配");
+      }
       if (provider.id !== event.aggregateId) {
         throw storeError("STORE_CORRUPT_EVENT_LOG", "ModelProvider aggregateId 不匹配");
       }
       this.#assertCredentialRefUnique(provider, "STORE_CORRUPT_EVENT_LOG");
-      this.sawProviderEvent = true;
       this.modelProviders.set(provider.id, provider);
       return;
     }
     if (event.type === "model_provider.delete"
       && event.payload && Object.keys(event.payload).length === 0) {
-      this.sawProviderEvent = true;
       if (!this.modelProviders.has(event.aggregateId)) {
         throw storeError("STORE_CORRUPT_EVENT_LOG", "删除的 ModelProvider 不存在");
       }
@@ -2002,22 +1794,11 @@ class JsonlProductStore extends ProductStore {
     }
     if (event.type === "agent_profile.put" && event.payload?.profile) {
       const payloadKeys = Object.keys(event.payload);
-      const validPayload = (payloadKeys.length === 1 && payloadKeys[0] === "profile")
-        || (event.schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION
-          && payloadKeys.length === 2
-          && payloadKeys[0] === "profile" && payloadKeys[1] === "runtimeAccount");
+      const validPayload = payloadKeys.length === 1 && payloadKeys[0] === "profile";
       if (!validPayload) {
         throw storeError("STORE_CORRUPT_EVENT_LOG", "AgentProfile event payload 无效");
       }
       const decoded = agentProfileFromDisk(event.payload.profile, event.schemaVersion);
-      if (event.payload.runtimeAccount) {
-        decoded.runtimeAccount = runtimeAccountFromDisk(
-          event.payload.runtimeAccount,
-          "STORE_CORRUPT_EVENT_LOG",
-          "events.jsonl",
-          event.schemaVersion,
-        );
-      }
       if (decoded.profile.id !== event.aggregateId) {
         throw storeError("STORE_CORRUPT_EVENT_LOG", "AgentProfile aggregateId 不匹配");
       }
@@ -2036,8 +1817,7 @@ class JsonlProductStore extends ProductStore {
       this.#applyWorkRunFromDisk(run, "events.jsonl");
       return;
     }
-    if (event.schemaVersion >= RICH_STORE_SCHEMA_VERSION
-      && event.type === "run_note.add" && event.payload?.note
+    if (event.type === "run_note.add" && event.payload?.note
       && Object.keys(event.payload).length === 1
       && Object.prototype.hasOwnProperty.call(event.payload, "note")) {
       const note = validateRunNote(event.payload.note);
@@ -2047,8 +1827,7 @@ class JsonlProductStore extends ProductStore {
       this.#applyRunNoteFromDisk(note, "events.jsonl");
       return;
     }
-    if (event.schemaVersion >= RICH_STORE_SCHEMA_VERSION
-      && event.type === "mcp_tool_call.put" && event.payload?.call
+    if (event.type === "mcp_tool_call.put" && event.payload?.call
       && Array.isArray(event.payload?.evictedIds)
       && Object.keys(event.payload).length === 2
       && Object.prototype.hasOwnProperty.call(event.payload, "call")
@@ -2181,244 +1960,82 @@ class JsonlProductStore extends ProductStore {
     }
   }
 
-  #legacyRuntimeAccountToReclaim(existingProfile, nextProfile) {
-    if (!existingProfile || existingProfile.runtimeAccountId === nextProfile.runtimeAccountId) {
-      return null;
-    }
-    const account = this.runtimeAccounts.get(existingProfile.runtimeAccountId);
-    if (!account || account.kind !== "shoggoth-managed" || account.isDefault) return null;
-    let derivedAccountId;
-    try {
-      derivedAccountId = runtimeAccountForLegacyProfile(existingProfile).runtimeAccountId;
-    } catch {
-      return null;
-    }
-    if (account.id !== derivedAccountId
-      || [...this.agentProfiles.values()].some((profile) => (
-        profile.id !== existingProfile.id && profile.runtimeAccountId === account.id
-      ))) {
-      return null;
-    }
+  #runtimeAccountForProfileWrite(profile) {
+    const account = this.runtimeAccounts.get(profile.runtimeAccountId);
+    if (!account) throw storeError("UNKNOWN_RUNTIME_ACCOUNT", "AgentProfile.runtimeAccountId 不存在");
+    if (account.runtime !== profile.runtime) throw storeError("RUNTIME_ACCOUNT_PROFILE_MISMATCH", "AgentProfile runtime 与 RuntimeAccount runtime 不一致");
+    this.#assertBuiltinRuntimeAccountBinding(profile, account, "AGENT_PROFILE_IDENTITY_CONFLICT");
     return account;
   }
 
-  #commitRuntimeAccountReclamation(account) {
-    if (!account) return;
-    this.runtimeAccounts.delete(account.id);
-    this.runtimeAccountTombstones.set(account.id, account);
-  }
-
-  #runtimeAccountForProfileWrite(profile, migratedAccount, time) {
-    let account = this.runtimeAccounts.get(profile.runtimeAccountId) || null;
-    if (!account) {
-      if (!migratedAccount || migratedAccount.id !== profile.runtimeAccountId) {
-        throw storeError("UNKNOWN_RUNTIME_ACCOUNT", "AgentProfile.runtimeAccountId 不存在");
-      }
-      account = validateRuntimeAccount(migratedAccount);
-      const tombstone = this.runtimeAccountTombstones.get(account.id) || null;
-      if (tombstone) {
-        account = validateRuntimeAccount({
-          ...account,
-          createdAt: tombstone.createdAt,
-          updatedAt: Math.max(time, (tombstone.updatedAt ?? -1) + 1),
-        });
-        this.#assertRuntimeAccountIdentityImmutable(
-          tombstone,
-          account,
-          "RUNTIME_ACCOUNT_IDENTITY_CONFLICT",
-        );
-      } else if (!account.isDefault && account.createdAt === null && account.updatedAt === null) {
-        account = validateRuntimeAccount({ ...account, createdAt: time, updatedAt: time });
-      }
-    } else if (migratedAccount) {
-      this.#assertRuntimeAccountIdentityImmutable(
-        account,
-        { ...migratedAccount, createdAt: account.createdAt, updatedAt: account.updatedAt },
-        "RUNTIME_ACCOUNT_IDENTITY_CONFLICT",
-      );
-    }
-    if (account.runtime !== profile.runtime) {
-      throw storeError(
-        "RUNTIME_ACCOUNT_PROFILE_MISMATCH",
-        "AgentProfile runtime 与 RuntimeAccount runtime 不一致",
-      );
-    }
-    this.#assertBuiltinRuntimeAccountBinding(
-      profile,
-      account,
-      "AGENT_PROFILE_IDENTITY_CONFLICT",
-    );
-    return account;
-  }
-
-  #applyAgentProfileFromDisk(decoded, source, schemaVersion, eventTime = null) {
-    let profile = decoded.profile;
+  #applyAgentProfileFromDisk(decoded, source) {
+    const profile = decoded.profile;
     const corruptCode = source === "snapshot" ? "STORE_CORRUPT_SNAPSHOT" : "STORE_CORRUPT_EVENT_LOG";
-    if (schemaVersion === RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION) {
-      const persistedAccountId = profile.runtimeAccountId;
-      if (decoded.runtimeAccount) {
-        const candidate = runtimeAccountFromDisk(
-          decoded.runtimeAccount,
-          corruptCode,
-          source,
-          schemaVersion,
-        );
-        if (candidate.id !== persistedAccountId) {
-          throw storeError(corruptCode, "AgentProfile event 的 RuntimeAccount binding 无效");
-        }
-        const existing = this.runtimeAccounts.get(candidate.id);
-        const tombstone = existing ? null : this.runtimeAccountTombstones.get(candidate.id) || null;
-        this.#assertRuntimeAccountIdentityImmutable(existing || tombstone, candidate, corruptCode);
-        this.runtimeAccounts.set(candidate.id, candidate);
-        this.runtimeAccountTombstones.delete(candidate.id);
-        decoded.runtimeAccount = null;
-      }
-      const persistedAccount = this.runtimeAccounts.get(persistedAccountId) || null;
-      const aliasedAccountId = this.legacyRuntimeAccountAliases.get(persistedAccountId);
-      const canonicalAccountId = aliasedAccountId
-        || canonicalLegacyRuntimeAccountId(profile, persistedAccount);
-      if (canonicalAccountId !== persistedAccountId) {
-        this.legacyRuntimeAccountAliases.set(persistedAccountId, canonicalAccountId);
-        this.legacyRuntimeAccountIdsToReclaim.add(persistedAccountId);
-        profile = validateAgentProfile({ ...profile, runtimeAccountId: canonicalAccountId });
-      }
-    }
-    if (source === "snapshot" && this.agentProfiles.has(profile.id)) {
-      throw storeError(corruptCode, `重复 AgentProfile: ${profile.id}`);
-    }
+    if (source === "snapshot" && this.agentProfiles.has(profile.id)) throw storeError(corruptCode, `重复 AgentProfile: ${profile.id}`);
     if (profile.id === DEFAULT_AGENT_PROFILE_ID && !defaultAgentProfileIdentityMatches(profile)) {
       throw storeError(corruptCode, "保留的 Shoggoth profile 稳定身份无效");
     }
-    const existingProfile = this.agentProfiles.get(profile.id);
-    if (existingProfile && profile.backendId !== existingProfile.backendId) {
-      throw storeError(corruptCode, `${source} 静默改变了 AgentProfile.backendId`);
-    }
+    const existing = this.agentProfiles.get(profile.id);
+    if (existing) this.#assertBindingTransition(existing, profile, corruptCode);
     this.#assertBuiltinProfileIdentity(profile, corruptCode);
     this.#assertAgentProfileIdentityUnique(profile, corruptCode);
-    if (profile.isDefault && [...this.agentProfiles.values()]
-      .some((candidate) => candidate.isDefault && candidate.id !== profile.id)) {
+    if (profile.isDefault && [...this.agentProfiles.values()].some(candidate => candidate.isDefault && candidate.id !== profile.id)) {
       throw storeError(corruptCode, `${source} 产生多个默认 AgentProfile`);
     }
-
-    let account = this.runtimeAccounts.get(profile.runtimeAccountId) || null;
-    if (decoded.runtimeAccount) {
-      let candidate = runtimeAccountFromDisk(
-        decoded.runtimeAccount,
-        corruptCode,
-        source,
-        schemaVersion,
-      );
-      if (candidate.id !== profile.runtimeAccountId) {
-        throw storeError(corruptCode, "AgentProfile event 的 RuntimeAccount binding 无效");
-      }
-      const tombstone = account ? null : this.runtimeAccountTombstones.get(candidate.id) || null;
-      const prior = account || tombstone;
-      if (schemaVersion < RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION) {
-        const revisionTime = eventTime ?? profile.updatedAt ?? profile.createdAt ?? 0;
-        const createdAt = prior
-          ? prior.createdAt
-          : candidate.isDefault
-            ? candidate.createdAt
-            : (profile.createdAt ?? revisionTime);
-        const updatedAt = prior
-          ? prior.updatedAt
-          : candidate.isDefault
-            ? candidate.updatedAt
-            : Math.max(revisionTime, createdAt ?? 0);
-        candidate = validateRuntimeAccount({ ...candidate, createdAt, updatedAt });
-      }
-      if (prior) {
-        this.#assertRuntimeAccountIdentityImmutable(prior, candidate, corruptCode);
-      }
-      account = candidate;
-      if (schemaVersion < RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION) {
-        this.pendingLegacyRuntimeAccountCanonicalization = true;
-        this.legacyRuntimeAccountSource = source;
-        this.legacyRuntimeAccountIds.add(account.id);
-      }
-      this.runtimeAccounts.set(account.id, account);
-      this.runtimeAccountTombstones.delete(account.id);
+    if (profile.providerRef !== null && !this.modelProviders.has(profile.providerRef)) {
+      throw storeError(corruptCode, `${source} 的 AgentProfile Provider 引用无效`);
     }
-    if (!account || account.runtime !== profile.runtime) {
-      throw storeError(corruptCode, "AgentProfile RuntimeAccount 引用无效");
-    }
+    const account = this.runtimeAccounts.get(profile.runtimeAccountId);
+    if (!account || account.runtime !== profile.runtime) throw storeError(corruptCode, "AgentProfile RuntimeAccount 引用无效");
     this.#assertBuiltinRuntimeAccountBinding(profile, account, corruptCode);
-    const reclaimedAccount = this.#legacyRuntimeAccountToReclaim(existingProfile, profile);
+    this.#assertAgentBindingReferences(profile, corruptCode);
     this.agentProfiles.set(profile.id, profile);
-    if (schemaVersion >= RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION) {
-      this.#commitRuntimeAccountReclamation(reclaimedAccount);
-    } else if (reclaimedAccount) {
-      // pre-v7 Profile history never owned RuntimeAccount lifecycle. An
-      // intermediate binding is migration scratch, not a real deleted account.
-      this.runtimeAccounts.delete(reclaimedAccount.id);
-      this.runtimeAccountTombstones.delete(reclaimedAccount.id);
-    }
-  }
-
-  #finishLegacyRuntimeAccountCanonicalization() {
-    if (this.pendingLegacyRuntimeAccountCanonicalization) {
-      const corruptCode = this.legacyRuntimeAccountSource === "snapshot"
-        ? "STORE_CORRUPT_SNAPSHOT" : "STORE_CORRUPT_EVENT_LOG";
-      const expected = new Map();
-      for (const profile of this.agentProfiles.values()) {
-        const migrated = runtimeAccountForLegacyProfile(profile);
-        if (migrated.runtimeAccountId !== profile.runtimeAccountId) {
-          throw storeError(corruptCode, "Legacy AgentProfile RuntimeAccount 派生结果不一致");
-        }
-        const account = migrated.account.isDefault
-          ? migrated.account
-          : validateRuntimeAccount({
-            ...migrated.account,
-            createdAt: profile.createdAt,
-            updatedAt: profile.createdAt !== null && profile.updatedAt !== null
-              ? Math.max(profile.createdAt, profile.updatedAt)
-              : profile.updatedAt,
-          });
-        const prior = expected.get(account.id);
-        if (prior && JSON.stringify(prior) !== JSON.stringify(account)) {
-          throw storeError(corruptCode, "Legacy AgentProfile 无法合成为唯一 RuntimeAccount");
-        }
-        expected.set(account.id, account);
-      }
-      for (const id of this.legacyRuntimeAccountIds) {
-        const account = expected.get(id);
-        if (account) {
-          this.runtimeAccounts.set(id, clone(account));
-        } else if (DEFAULT_RUNTIME_ACCOUNT_IDS.has(id)) {
-          const template = DEFAULT_RUNTIME_ACCOUNTS.find((candidate) => candidate.id === id);
-          this.runtimeAccounts.set(id, clone(template));
-        } else {
-          this.runtimeAccounts.delete(id);
-        }
-        this.runtimeAccountTombstones.delete(id);
-      }
-      this.pendingLegacyRuntimeAccountCanonicalization = false;
-      this.legacyRuntimeAccountSource = null;
-      this.legacyRuntimeAccountIds.clear();
-    }
-    for (const id of this.legacyRuntimeAccountIdsToReclaim) {
-      if (![...this.agentProfiles.values()].some((profile) => profile.runtimeAccountId === id)) {
-        this.runtimeAccounts.delete(id);
-        this.runtimeAccountTombstones.delete(id);
-      }
-    }
-    this.legacyRuntimeAccountIdsToReclaim.clear();
   }
 
   #assertAllReferences() {
     const danglingProfileProvider = [...this.agentProfiles.values()]
       .find((profile) => profile.providerRef !== null && !this.modelProviders.has(profile.providerRef));
-    const invalidProfile = [...this.agentProfiles.values()].find((profile) => {
-      const account = this.runtimeAccounts.get(profile.runtimeAccountId);
-      return !account || account.runtime !== profile.runtime
-        || !builtinRuntimeAccountBindingMatches(profile, account);
-    });
+    const invalidProfile = [...this.agentProfiles.values()].find((profile) => profile.bindings.some((binding) => {
+      const account = this.runtimeAccounts.get(binding.runtimeAccountId);
+      return !account || account.runtime !== binding.runtime;
+    }));
     if (!danglingProfileProvider && !invalidProfile) return;
-    const legacy = this.loadedLegacySnapshot === true || this.sawProviderEvent !== true;
     throw storeError(
-      legacy ? "STORE_LEGACY_PROVIDER_REFERENCE_UNRESOLVED" : "STORE_CORRUPT_EVENT_LOG",
+      "STORE_CORRUPT_EVENT_LOG",
       "ProductStore RuntimeAccount/Profile 引用无效",
     );
+  }
+
+  #assertAgentBindingReferences(profile, code) {
+    for (const binding of profile.bindings) {
+      const account = this.runtimeAccounts.get(binding.runtimeAccountId);
+      if (!account || account.runtime !== binding.runtime) {
+        throw storeError(code, "Binding 必须引用该 Runtime 已有的账号");
+      }
+    }
+  }
+
+  #assertBindingTransition(previous, next, code) {
+    const same = JSON.stringify(validateBindingState(previous)) === JSON.stringify(validateBindingState(next));
+    if ((same && next.bindingsRevision !== previous.bindingsRevision)
+      || (!same && next.bindingsRevision !== previous.bindingsRevision + 1)) {
+      throw storeError(code, "Binding 集合 revision 不连续");
+    }
+    for (const before of previous.bindings) {
+      const after = next.bindings.find((binding) => binding.id === before.id);
+      if (after && (after.runtime !== before.runtime || after.createdAt !== before.createdAt
+        || after.revision < before.revision || after.updatedAt < before.updatedAt
+        || (after.revision === before.revision && JSON.stringify(after) !== JSON.stringify(before)))) {
+        throw storeError(code, "Binding 身份或 revision 不可倒退");
+      }
+      if ((!after || !after.enabled || after.runtimeAccountId !== before.runtimeAccountId)
+        && this.#bindingInUse(previous.id, before)) throw storeError(code, "活跃 WorkRun 引用的 Binding 不可移除或改绑");
+    }
+    for (const operation of previous.bindingOperations) {
+      if (!next.bindingOperations.some((entry) => JSON.stringify(entry) === JSON.stringify(operation))) {
+        throw storeError(code, "Binding operation receipt 不可删除或更换");
+      }
+    }
   }
 
   #assertCredentialRefUnique(candidate, code) {
@@ -2430,7 +2047,8 @@ class JsonlProductStore extends ProductStore {
 
   #assertBuiltinProfileIdentity(candidate, code) {
     for (const spec of BUILTIN_CLI_AGENT_PROFILES) {
-      if (candidate.id === spec.id && !builtinIdentityMatches(candidate, spec)) {
+      const identityMatches = candidate.backendId === spec.backendId && candidate.agentId === spec.agentId && candidate.isDefault === false;
+      if (candidate.id === spec.id && !identityMatches) {
         throw storeError(code, `内置 AgentProfile 稳定身份冲突: ${spec.name}`);
       }
       if (candidate.id !== spec.id && (candidate.agentId === spec.agentId
@@ -2457,8 +2075,9 @@ class JsonlProductStore extends ProductStore {
   #assertAgentProfileIdentityUnique(candidate, code) {
     const conflict = [...this.agentProfiles.values()].find((profile) => profile.id !== candidate.id
       && (profile.agentId === candidate.agentId
-        || (profile.runtime === candidate.runtime
-          && profile.runtimeProfileId === candidate.runtimeProfileId)));
+        || (profile.bindings || [profile]).some((left) => (candidate.bindings || [candidate]).some((right) => (
+          left.runtime === right.runtime && left.runtimeProfileId === right.runtimeProfileId
+        )))));
     if (conflict) {
       throw storeError(code, "AgentProfile agentId/runtimeProfileId 必须全局唯一");
     }
@@ -2473,16 +2092,26 @@ class JsonlProductStore extends ProductStore {
     }
     if (existing.contextSnapshotId !== null
       && candidate.contextSnapshotId !== existing.contextSnapshotId) {
-      throw storeError(code, "WorkRun.contextSnapshotId 非空后不可清空或更换");
+      // A proven-unsent attempt can be requeued before native ownership is
+      // bound. Re-admission freezes a new plan; the append-only journal retains
+      // the previous snapshot. An accepted/running request remains immutable.
+      const replanning = existing.status === "queued" && candidate.status === "starting"
+        && existing.startedAt === null && existing.waitingRequestId === null
+        && existing.runtimeSessionRef === null && existing.runtimeTurnRef === null
+        && candidate.runtimeSessionRef === null && candidate.runtimeTurnRef === null
+        && candidate.contextSnapshotId !== null;
+      if (!replanning) throw storeError(code, "WorkRun.contextSnapshotId 接收后不可清空或更换");
     }
   }
 
   #assertWorkRunRuntimeBinding(run, profile, code) {
     for (const ref of [run.runtimeSessionRef, run.runtimeTurnRef]) {
       if (ref === null) continue;
-      if (ref.runtime !== profile.runtime
-        || ref.runtimeProfileId !== profile.runtimeProfileId
-        || ref.runtimeAccountId !== profile.runtimeAccountId) {
+      const matched = (profile.bindings || [profile]).some((binding) => ref.runtime === binding.runtime
+        && ref.runtimeProfileId === binding.runtimeProfileId && ref.runtimeAccountId === binding.runtimeAccountId);
+      // A terminal WorkRun owns its immutable historical ref even if that
+      // Binding is later removed. Only live work requires a current Binding.
+      if (!matched && (run.status === "queued" || ACTIVE_WORK_RUN_STATUSES.has(run.status))) {
         throw storeError(code, "WorkRun Runtime ref 与 AgentProfile binding 不匹配");
       }
     }
@@ -2514,7 +2143,7 @@ class JsonlProductStore extends ProductStore {
   #append(type, aggregateId, payload, includeRequiredMatcher = true) {
     this.#assertNoSensitiveFields(payload, includeRequiredMatcher);
     const event = {
-      schemaVersion: STORE_SCHEMA_VERSION,
+      schemaVersion: this.schemaVersion,
       seq: this.lastEventSeq + 1,
       aggregateId,
       type,
@@ -2551,12 +2180,12 @@ class JsonlProductStore extends ProductStore {
 
   #writeSnapshot() {
     const snapshot = {
-      schemaVersion: STORE_SCHEMA_VERSION,
+      schemaVersion: this.schemaVersion,
       lastSeq: this.lastEventSeq,
       modelProviders: [...this.modelProviders.values()].map(clone),
       runtimeAccounts: [...this.runtimeAccounts.values()].map(clone),
       runtimeAccountTombstones: [...this.runtimeAccountTombstones.values()].map(clone),
-      agentProfiles: [...this.agentProfiles.values()].map(clone),
+      agentProfiles: [...this.agentProfiles.values()].map((profile) => clone(profileToDisk(profile))),
       workRuns: [...this.workRuns.values()].map(clone),
       runNotes: [...this.runNotes.values()].map(clone),
       mcpToolCalls: [...this.mcpToolCalls.values()].map(clone),
@@ -2695,6 +2324,7 @@ class JsonlProductStore extends ProductStore {
 
 module.exports = {
   AGENT_PROFILE_FIELDS,
+  BINDING_AGENT_PROFILE_FIELDS,
   BACKEND_ID_PATTERN,
   DEFAULT_AGENT_PROFILE_ID,
   DEFAULT_AGENT_PROFILE_UUID,
@@ -2705,10 +2335,6 @@ module.exports = {
   MODEL_PROVIDER_KINDS,
   MODEL_PROVIDER_VALIDATION_STATUSES,
   ProductStore,
-  PROFILE_BACKEND_MIGRATION_SOURCE_SCHEMA_VERSION,
-  PROFILE_PROVIDER_AUTHORITY_SCHEMA_VERSION,
-  RUNTIME_ACCOUNT_MIGRATION_SOURCE_SCHEMA_VERSION,
-  RUNTIME_ACCOUNT_STORE_SCHEMA_VERSION,
   RUN_NOTE_FIELDS,
   STORE_SCHEMA_VERSION,
   WORK_RUN_FIELDS,

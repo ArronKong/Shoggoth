@@ -4,6 +4,7 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { releaseDistribution } = require("./release-distribution.cjs");
 
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
@@ -40,6 +41,12 @@ exports.default = function notarize(context) {
     || (process.env.SHOGGOTH_CODESIGN_IDENTITY ? "local" : "adhoc");
   const keychainProfile = process.env.SHOGGOTH_NOTARY_KEYCHAIN_PROFILE;
   const keychainPath = process.env.SHOGGOTH_NOTARY_KEYCHAIN;
+  const distribution = releaseDistribution(mode, process.env.SHOGGOTH_RELEASE_DISTRIBUTION);
+  if (distribution === "internal") {
+    if (keychainProfile) throw new Error("Internal builds must not configure notarization");
+    console.log("  • notarization skipped (internal preview; signing identity retained)");
+    return;
+  }
   if (!keychainProfile) {
     if (mode === "developer-id") {
       throw new Error("Developer ID release requires SHOGGOTH_NOTARY_KEYCHAIN_PROFILE");

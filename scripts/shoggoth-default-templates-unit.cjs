@@ -29,7 +29,7 @@ function update(f, id, documents, actor = "user") {
 test("all native identities use their Profile name and inject complete v2 defaults", (t) => {
   const f = fixture(t);
   assert.deepEqual(NATIVE_PROFILES.filter((profile) => isRuntimeAvailable(profile.runtime))
-    .map(({ name }) => name), ["Shoggoth", "Codex", "Grok", "Antigravity", "Pi", "DeepSeek Harness"]);
+    .map(({ name }) => name), ["Shoggoth", "Codex", "Grok", "Antigravity", "Pi", "OpenCode", "DeepSeek"]);
   for (const profile of NATIVE_PROFILES) {
     const value = f.definitions.ensureProfile({ profileId: profile.id, profileName: profile.name });
     assert.equal(value.manifest.revision, 1);
@@ -56,6 +56,59 @@ test("all native identities use their Profile name and inject complete v2 defaul
       profile.runtime === "codex", "Codex-only tool guidance must not leak into other runtimes");
     assert.doesNotMatch(snapshot.developerInstructions, /You are the Shoggoth App's native Agent/u);
   }
+});
+
+test("builtin DeepSeek identity follows the renamed default Profile without changing other documents", (t) => {
+  const f = fixture(t);
+  const spec = BUILTIN_CLI_AGENT_PROFILES.find((profile) => profile.runtime === "deepseek-harness");
+  const original = f.definitions.ensureProfile({ profileId: spec.id, profileName: "DeepSeek Harness" });
+  const edited = f.definitions.update({ profileId: spec.id, expectedRevision: original.manifest.revision,
+    documents: { SOUL: "自定义相处方式" }, actor: "user" });
+  const migrated = f.definitions.ensureProfile({ profileId: spec.id, profileName: spec.name });
+  assert.equal(migrated.manifest.revision, edited.manifest.revision + 1);
+  assert.equal(migrated.manifest.reason, "builtin-deepseek-name");
+  assert.match(migrated.documents.IDENTITY, /^- Name: DeepSeek$/mu);
+  assert.equal(migrated.documents.SOUL, "自定义相处方式");
+  assert.equal(f.definitions.readRevision(spec.id, original.manifest.revision).documents.IDENTITY,
+    original.documents.IDENTITY);
+  assert.deepEqual(f.definitions.ensureProfile({ profileId: spec.id, profileName: spec.name }), migrated);
+});
+
+test("older untouched DeepSeek identity keeps its original body when renamed", (t) => {
+  const f = fixture(t);
+  const spec = BUILTIN_CLI_AGENT_PROFILES.find((profile) => profile.runtime === "deepseek-harness");
+  const documents = createDefaultDocuments("DeepSeek Harness");
+  documents.IDENTITY += "\n旧版默认说明。\n";
+  const original = f.definitions._commit({ profileId: spec.id, expectedRevision: 0,
+    documents, actor: "bootstrap", reason: "old-default", createdAt: 500 });
+  const migrated = f.definitions.ensureProfile({ profileId: spec.id, profileName: spec.name });
+  assert.equal(migrated.documents.IDENTITY,
+    original.documents.IDENTITY.replace("- Name: DeepSeek Harness", "- Name: DeepSeek"));
+  assert.equal(migrated.manifest.revision, original.manifest.revision + 1);
+});
+
+test("customized DeepSeek identity keeps the saved name on default Profile migration", (t) => {
+  const f = fixture(t);
+  const spec = BUILTIN_CLI_AGENT_PROFILES.find((profile) => profile.runtime === "deepseek-harness");
+  const original = f.definitions.ensureProfile({ profileId: spec.id, profileName: "DeepSeek Harness" });
+  const customized = f.definitions.update({ profileId: spec.id,
+    expectedRevision: original.manifest.revision,
+    documents: { IDENTITY: original.documents.IDENTITY.replace("- Name: DeepSeek Harness", "- Name: 我的助手") },
+    actor: "user" });
+  assert.deepEqual(f.definitions.ensureProfile({ profileId: spec.id, profileName: spec.name }), customized);
+});
+
+test("restored DeepSeek identity is not silently rewritten", (t) => {
+  const f = fixture(t);
+  const spec = BUILTIN_CLI_AGENT_PROFILES.find((profile) => profile.runtime === "deepseek-harness");
+  const original = f.definitions.ensureProfile({ profileId: spec.id, profileName: "DeepSeek Harness" });
+  const customized = f.definitions.update({ profileId: spec.id,
+    expectedRevision: original.manifest.revision,
+    documents: { IDENTITY: original.documents.IDENTITY.replace("- Name: DeepSeek Harness", "- Name: 我的助手") },
+    actor: "user" });
+  const restored = f.definitions.restore({ profileId: spec.id,
+    expectedRevision: customized.manifest.revision, revision: original.manifest.revision });
+  assert.deepEqual(f.definitions.ensureProfile({ profileId: spec.id, profileName: spec.name }), restored);
 });
 
 test("six backends keep customized names, definitions and user memories separate", (t) => {

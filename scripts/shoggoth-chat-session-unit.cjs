@@ -92,6 +92,7 @@ test("createSession 同步生成稳定 sessionKey，并以 0600 原子文件跨�
   };
   const session = first.createSession(createInput);
   assert.deepEqual(session, {
+    runtimeBindingId: null, retiredRuntimeSessions: [], revision: 1,
     id: "11111111-1111-4111-8111-111111111111",
     sessionKey: "22222222-2222-4222-8222-222222222222",
     profileId: "profile-1",
@@ -186,7 +187,9 @@ test("v1 ChatSession 容器读取时补齐新增字段与 Runtime session，首�
   const legacy = JSON.parse(fs.readFileSync(filePath, "utf8"));
   legacy.version = 1;
   delete legacy.cronRuns;
+  delete legacy.runtimeSwitches;
   for (const value of Object.values(legacy.sessions)) {
+    delete value.runtimeBindingId; delete value.retiredRuntimeSessions; delete value.revision;
     value.codexThreadId = value.runtimeSessionId;
     delete value.runtimeSessionId;
     delete value.modelOverride;

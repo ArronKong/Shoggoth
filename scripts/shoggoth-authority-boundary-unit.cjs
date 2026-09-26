@@ -6,21 +6,31 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 const {
-  AGENT_PROFILE_FIELDS,
+  BINDING_AGENT_PROFILE_FIELDS,
   MCP_TOOL_CALL_FIELDS,
   MODEL_PROVIDER_FIELDS,
   RUN_NOTE_FIELDS,
   WORK_RUN_FIELDS,
+  STORE_SCHEMA_VERSION,
 } = require(path.join(ROOT, "app", "agent-service", "product-store.js"));
 const {
   RUNTIME_ACCOUNT_FIELDS,
+  RUNTIME_ACCOUNT_SCHEMA,
 } = require(path.join(ROOT, "app", "agent-service", "runtime-account.js"));
 const {
   BINDING_FIELDS,
   CREATE_OPERATION_FIELDS,
   REMOTE_OPERATION_FIELDS,
   SESSION_FIELDS,
+  RUNTIME_SWITCH_FIELDS,
+  CHAT_SESSION_STORE_VERSION,
 } = require(path.join(ROOT, "app", "agent-service", "chat-session-store.js"));
+const { BINDING_FIELDS: AGENT_BINDING_FIELDS, PROJECTED_RUNTIME_FIELDS } = require(
+  path.join(ROOT, "app", "agent-service", "agent-runtime-binding.js"),
+);
+const { RECORD_FIELDS, STORE_VERSION: USAGE_STORE_VERSION } = require(
+  path.join(ROOT, "app", "agent-service", "token-usage-store.js"),
+);
 const {
   DATA_AUTHORITY_MANIFEST,
   flattenRecordFields,
@@ -44,22 +54,56 @@ test("权威清单 schema 完整且所有字段恰好归入一个分类", () => 
   }
 });
 
-test("Product Store 与 ChatSession 的真实字段和权威清单逐项一致", () => {
+test("插件账本和密文容器各自持有 Connection 与凭据权威", () => {
+  const pluginStore = DATA_AUTHORITY_MANIFEST.stores.plugins;
+  assert.equal(pluginStore.schemaVersion,
+    require("../app/agent-service/plugin-store").PLUGIN_STORE_SCHEMA_VERSION);
+  assert.deepEqual(pluginStore.records.PluginConnection.authority,
+    ["connectionId", "installationId", "componentId", "endpointIdentity",
+      "principalIdentity", "credentialRef", "state", "authRevision", "revision"]);
+  assert.deepEqual(pluginStore.records.PluginBinding.authority,
+    ["bindingId", "subjectKind", "subjectId", "installationId", "componentId",
+      "componentKind", "connectionId", "enabled", "revision"]);
+  assert.ok(pluginStore.records.PluginGrant.authority.includes("epoch"));
+  assert.ok(pluginStore.records.PluginCapabilityCall.authority.includes("phase"));
+  assert.equal(pluginStore.pathRules.includes("stateDir/encrypted-secrets.json"), false);
+  const secrets = DATA_AUTHORITY_MANIFEST.stores.encryptedSecrets;
+  assert.deepEqual(secrets.pathRules, ["stateDir/encrypted-secrets.json"]);
+  assert.deepEqual(secrets.records.EncryptedCredential.authority,
+    ["credentialRef", "kind", "ciphertext"]);
+});
+
+test("Product15、Chat8、Usage2 与权威清单版本一致", () => {
+  assert.equal(DATA_AUTHORITY_MANIFEST.stores.product.schemaVersion, STORE_SCHEMA_VERSION);
+  assert.equal(DATA_AUTHORITY_MANIFEST.stores.chatSession.schemaVersion, CHAT_SESSION_STORE_VERSION);
+  assert.equal(DATA_AUTHORITY_MANIFEST.stores.tokenUsage.schemaVersion, USAGE_STORE_VERSION);
+  assert.equal(DATA_AUTHORITY_MANIFEST.stores.conversationCheckpoint.schemaVersion,
+    require("../app/agent-service/conversation-checkpoint-store").CHECKPOINT_VERSION);
+  assert.ok(flattenRecordFields(DATA_AUTHORITY_MANIFEST.stores.conversationCheckpoint.records.ConversationCheckpoint).includes("partial"));
+  assert.match(DATA_AUTHORITY_MANIFEST.transcript.contextContentStore, /context-content\/.*sha256/u);
+});
+
+test("Product、ChatSession、Usage 的必需及可选字段和权威清单逐项一致", () => {
   const actual = {
-    RuntimeAccount: RUNTIME_ACCOUNT_FIELDS,
-    AgentProfile: AGENT_PROFILE_FIELDS,
-    ModelProvider: MODEL_PROVIDER_FIELDS,
+    RuntimeAccount: [...RUNTIME_ACCOUNT_FIELDS, ...RUNTIME_ACCOUNT_SCHEMA.optionalFields],
+    AgentProfile: BINDING_AGENT_PROFILE_FIELDS,
+    AgentRuntimeBinding: AGENT_BINDING_FIELDS,
+    AgentProfileRuntimeProjection: PROJECTED_RUNTIME_FIELDS,
+    ModelProvider: [...MODEL_PROVIDER_FIELDS, "models", "revision"],
     WorkRun: WORK_RUN_FIELDS,
     RunNote: RUN_NOTE_FIELDS,
     McpToolCall: MCP_TOOL_CALL_FIELDS,
-    ChatSession: SESSION_FIELDS,
+    ChatSession: [...SESSION_FIELDS, "modelSettings"],
     ChatBindingOperation: BINDING_FIELDS,
     ChatRemoteOperation: REMOTE_OPERATION_FIELDS,
     ChatCreateOperation: CREATE_OPERATION_FIELDS,
+    ChatRuntimeSwitchReceipt: RUNTIME_SWITCH_FIELDS,
+    TokenUsage: RECORD_FIELDS,
   };
   const declared = {
     ...DATA_AUTHORITY_MANIFEST.stores.product.records,
     ...DATA_AUTHORITY_MANIFEST.stores.chatSession.records,
+    ...DATA_AUTHORITY_MANIFEST.stores.tokenUsage.records,
   };
   assert.deepEqual(sorted(Object.keys(declared)), sorted(Object.keys(actual)));
   for (const [name, fields] of Object.entries(actual)) {
@@ -69,17 +113,21 @@ test("Product Store 与 ChatSession 的真实字段和权威清单逐项一致",
 
 test("RuntimeAccount 全部字段属于 Product authority", () => {
   const record = DATA_AUTHORITY_MANIFEST.stores.product.records.RuntimeAccount;
-  assert.deepEqual(record.authority, RUNTIME_ACCOUNT_FIELDS);
+  assert.deepEqual(record.authority, [...RUNTIME_ACCOUNT_FIELDS, ...RUNTIME_ACCOUNT_SCHEMA.optionalFields]);
   assert.deepEqual(record.runtimeCache, []);
   assert.deepEqual(record.derived, []);
   assert.deepEqual(record.uiCache, []);
 });
 
-test("AgentProfile.providerRef 是 RuntimeAccount authority 的兼容投影", () => {
+test("Agent provider/model 属于 Agent authority，runtime 三字段只由 Binding 投影", () => {
   const record = DATA_AUTHORITY_MANIFEST.stores.product.records.AgentProfile;
-  assert.deepEqual(record.derived, ["providerRef"]);
-  assert.equal(record.authority.includes("runtimeAccountId"), true);
-  assert.equal(record.authority.includes("providerRef"), false);
+  assert.deepEqual(record.derived, []);
+  assert.equal(record.authority.includes("runtimeAccountId"), false);
+  assert.equal(record.authority.includes("providerRef"), true);
+  assert.equal(record.authority.includes("defaultBindingId"), true);
+  const projection = DATA_AUTHORITY_MANIFEST.stores.product.records.AgentProfileRuntimeProjection;
+  assert.deepEqual(projection.authority, []);
+  assert.deepEqual(projection.derived, PROJECTED_RUNTIME_FIELDS);
 });
 
 test("Product Core 持久 schema 不含 Codex 专属字段", () => {
@@ -101,6 +149,7 @@ test("当前 Transcript 与各 Runtime home 的真实 owner 被显式记录", ()
     source: "TranscriptStore",
     runtimeSource: "thread/read reconciliation/import only",
     shoggothStore: "agents/<profileId>/transcripts/<sessionId>",
+    contextContentStore: "agents/<profileId>/transcripts/<sessionId>/context-content/<sha256>.json",
   });
   const runtimeHomes = DATA_AUTHORITY_MANIFEST.runtime;
   assert.deepEqual(Object.fromEntries([
@@ -114,7 +163,7 @@ test("当前 Transcript 与各 Runtime home 的真实 owner 被显式记录", ()
   }])), {
     codexHome: {
       owner: "shoggoth", classification: "authority",
-      rootRule: "runtimeAccountsDir/codex/<runtimeAccountId>/home (legacy default canonical may remain in place)",
+      rootRule: "runtimeAccountsDir/codex/<runtimeAccountId>/home",
       backupRequired: true,
     },
     nativeCodexHome: {
@@ -177,7 +226,7 @@ test("当前 Transcript 与各 Runtime home 的真实 owner 被显式记录", ()
   ]);
   assert.equal(DATA_AUTHORITY_MANIFEST.memory.owner, "shoggoth");
   assert.equal(DATA_AUTHORITY_MANIFEST.memory.source, "MemoryStore");
-  assert.match(DATA_AUTHORITY_MANIFEST.memory.runtimeSource, /read-only/u);
+  assert.equal(DATA_AUTHORITY_MANIFEST.memory.runtimeSource, "Shoggoth MemoryEngine");
   assert.equal(DATA_AUTHORITY_MANIFEST.skills.owner, "shoggoth");
   assert.equal(DATA_AUTHORITY_MANIFEST.skills.source, "NativeSkillStore");
   assert.match(DATA_AUTHORITY_MANIFEST.skills.runtimeProjection, /no Runtime Home materialization/u);
@@ -185,18 +234,12 @@ test("当前 Transcript 与各 Runtime home 的真实 owner 被显式记录", ()
   assert.equal(DATA_AUTHORITY_MANIFEST.mcpExtensions.source, "NativeMcpStore");
   assert.match(DATA_AUTHORITY_MANIFEST.mcpExtensions.runtimeProjection, /OpenClaw\/Hermes/u);
   assert.match(DATA_AUTHORITY_MANIFEST.mcpExtensions.externalOwnership, /remains independent/u);
-  assert.match(DATA_AUTHORITY_MANIFEST.nativeRuntimeImport.source, /disabled by default/u);
-  assert.match(DATA_AUTHORITY_MANIFEST.nativeRuntimeImport.scope, /never runs/u);
   assert.equal(DATA_AUTHORITY_MANIFEST.computer.owner, "shoggoth");
   assert.match(DATA_AUTHORITY_MANIFEST.computer.artifacts, /^computer\/artifacts/u);
   assert.match(DATA_AUTHORITY_MANIFEST.computer.ephemeralSessions, /excluded from backup/u);
   assert.match(DATA_AUTHORITY_MANIFEST.computer.driver, /never user authority/u);
   assert.equal(DATA_AUTHORITY_MANIFEST.upgrade.owner, "shoggoth");
   assert.equal(DATA_AUTHORITY_MANIFEST.upgrade.switchJournal, "runtimeSwitchPath");
-  assert.match(
-    DATA_AUTHORITY_MANIFEST.upgrade.legacyCodexApiKeyMigrationJournal,
-    /never contains credential plaintext/u,
-  );
   assert.deepEqual(
     Object.fromEntries(Object.entries(DATA_AUTHORITY_MANIFEST.backends)
       .map(([id, boundary]) => [id, boundary.owner])),

@@ -56,7 +56,8 @@ export default function ImmersiveStatusLine({ phase, live }: { phase: ImmersiveP
     return () => document.removeEventListener("keydown", onKey, true);
   }, [open]);
 
-  if (!shown) return null;
+  if (!shown || live?.wait?.kind === "retrying") return null;
+  if (shown.wait?.kind === "retrying") return null;
   if (shown.wait && live?.wait) return <div className={styles.wrap}><ChatRunWait state={live.wait} /></div>;
   // 工具显示名(R340):中文模式映射成人话,未收录/英文模式回退原标识符。
   const toolDisp = (name?: string): string => {

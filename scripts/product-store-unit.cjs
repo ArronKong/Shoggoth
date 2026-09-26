@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 "use strict";
+const { bindingId, withInitialBinding, profileToDisk } = require("../app/agent-service/agent-runtime-binding");
 
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
@@ -51,6 +52,7 @@ function validProfile(id, overrides = {}) {
     name: `Fixture ${id}`,
     runtime: "codex",
     runtimeProfileId: id,
+    runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
     providerRef: null,
     defaultModel: null,
     defaultCwd: null,
@@ -171,6 +173,8 @@ test("首次启动创建字段完整且内部 ID 与显示名分离的唯一默�
     const profiles = store.listAgentProfiles();
     assert.equal(profiles.length, 1, `restart ${restart}`);
     assert.deepEqual(profiles[0], {
+      bindingsRevision: 1,
+      defaultBindingId: bindingId(DEFAULT_AGENT_PROFILE_UUID, `shoggoth-${DEFAULT_AGENT_PROFILE_UUID}`),
       id: DEFAULT_AGENT_PROFILE_UUID,
       backendId: "shoggoth",
       agentId: `shoggoth-${DEFAULT_AGENT_PROFILE_UUID}`,
@@ -182,7 +186,7 @@ test("首次启动创建字段完整且内部 ID 与显示名分离的唯一默�
       defaultModel: null,
       defaultCwd: null,
       permissionPolicy: { approvalPolicy: "on-request", sandbox: "danger-full-access" },
-      concurrency: { maxActive: 4, maxWorkspaceWrites: 4 },
+      concurrency: { maxActive: null, maxWorkspaceWrites: null },
       isDefault: true,
       enabled: true,
       createdAt: 1_700_000_000_000,
@@ -200,7 +204,7 @@ test("保留 ID 的默认 profile 不允许取消 default，但允许 enabled=fa
   const profile = store.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
   assert.throws(
     () => store.putAgentProfile({ ...profile, isDefault: false }),
-    (error) => error.code === "DEFAULT_AGENT_PROFILE_IDENTITY_IMMUTABLE",
+    (error) => ["DEFAULT_AGENT_PROFILE_IDENTITY_IMMUTABLE", "AGENT_BINDING_PROJECTION_READONLY"].includes(error.code),
   );
   assert.equal(store.putAgentProfile({ ...profile, enabled: false }).enabled, false);
   assert.equal(store.listAgentProfiles().filter((item) => item.isDefault).length, 1);
@@ -231,7 +235,7 @@ test("reserved default 的稳定身份字段不可变且拒绝时不追加日志
   ]) {
     assert.throws(
       () => store.putAgentProfile({ ...profile, ...patch }),
-      (error) => error.code === "DEFAULT_AGENT_PROFILE_IDENTITY_IMMUTABLE",
+      (error) => ["DEFAULT_AGENT_PROFILE_IDENTITY_IMMUTABLE", "AGENT_BINDING_PROJECTION_READONLY"].includes(error.code),
     );
     assert.deepEqual(fs.readFileSync(paths.eventLogPath), before);
   }
@@ -423,12 +427,12 @@ test("snapshot 中出现多个默认 profile 会 fail closed", () => {
   const store = openStore(paths, { now: () => 20 });
   store.close();
   const snapshot = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  snapshot.agentProfiles.push({
+  snapshot.agentProfiles.push(profileToDisk(withInitialBinding({
     ...validProfile("profile-illegal-default", { isDefault: true }),
     runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
     createdAt: 20,
     updatedAt: 20,
-  });
+  })));
   fs.writeFileSync(paths.stateSnapshotPath, encodeSnapshot(snapshot));
   assert.throws(
     () => openStore(paths),
@@ -443,11 +447,15 @@ test("snapshot 中 AgentProfile runtime identity 冲突会 fail closed", () => {
   store.close();
   const snapshot = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
   const source = snapshot.agentProfiles.find((profile) => profile.id === "profile-identity-source");
+  const collisionId = "profile-identity-collision";
   snapshot.agentProfiles.push({
     ...source,
-    id: "profile-identity-collision",
+    id: collisionId,
     name: "Identity collision",
-    agentId: "profile-identity-collision",
+    agentId: collisionId,
+    defaultBindingId: bindingId(collisionId, source.bindings[0].runtimeProfileId),
+    bindings: source.bindings.map(binding => ({ ...binding, profileId: collisionId,
+      id: bindingId(collisionId, binding.runtimeProfileId) })),
   });
   fs.writeFileSync(paths.stateSnapshotPath, encodeSnapshot(snapshot), { mode: 0o600 });
   assert.throws(
@@ -504,6 +512,32 @@ test("Store 拒绝更换非空 thread/turn 绑定", () => {
   store.close();
 });
 
+test("only unsent re-admission can replace a frozen context snapshot and replay preserves it", () => {
+  const paths = fixturePaths();
+  let store = openStore(paths);
+  const id = "run-context-replan", first = `ctx-${"a".repeat(64)}`, second = `ctx-${"b".repeat(64)}`;
+  try {
+    store.putWorkRun(validRun(id));
+    store.putWorkRun(validRun(id, { status: "starting", startedAt: 1, eventSeq: 2, contextSnapshotId: first }));
+    assert.throws(() => store.putWorkRun(validRun(id, {
+      status: "starting", startedAt: 1, eventSeq: 3, contextSnapshotId: second,
+    })), { code: "WORK_RUN_BINDING_IMMUTABLE" });
+    store.putWorkRun(validRun(id, { eventSeq: 3, contextSnapshotId: first }));
+    assert.throws(() => store.putWorkRun(validRun(id, { eventSeq: 4, contextSnapshotId: second })),
+      { code: "WORK_RUN_BINDING_IMMUTABLE" });
+    store.putWorkRun(validRun(id, { status: "starting", startedAt: 2, eventSeq: 4, contextSnapshotId: second }));
+    store.putWorkRun(validRun(id, { status: "running", startedAt: 2, eventSeq: 5, contextSnapshotId: second,
+      codexThreadId: "accepted-session", codexTurnId: "accepted-turn" }));
+    for (const contextSnapshotId of [first, null]) assert.throws(() => store.putWorkRun(validRun(id, {
+      status: "running", startedAt: 2, eventSeq: 6, contextSnapshotId,
+      codexThreadId: "accepted-session", codexTurnId: "accepted-turn",
+    })), { code: "WORK_RUN_BINDING_IMMUTABLE" });
+    store.close(); store = openStore(paths);
+    assert.equal(store.getWorkRun(id).contextSnapshotId, second);
+    assert.equal(store.getWorkRun(id).runtimeSessionRef.sessionId, "accepted-session");
+  } finally { store.close(); fs.rmSync(path.dirname(paths.stateDir), { recursive: true, force: true }); }
+});
+
 test("snapshot 中两个 active Run 绑定同一 Runtime session 会 fail closed 并保留证据", () => {
   const paths = fixturePaths();
   const store = openStore(paths);
@@ -530,146 +564,27 @@ test("snapshot 中两个 active Run 绑定同一 Runtime session 会 fail closed
   assert.equal(fs.readFileSync(paths.stateSnapshotPath, "utf8"), evidence);
 });
 
-test("AgentProfile 接受通用 backendId，但归属持久化后不可静默更改", () => {
+test("AgentProfile 固定归属 shoggoth，CLI 名称只用于 Runtime", () => {
   const paths = fixturePaths();
   const store = openStore(paths);
-  const profile = store.putAgentProfile(validProfile("profile-backendId", { backendId: "codex" }));
-  assert.equal(profile.backendId, "codex");
+  const profile = store.putAgentProfile(validProfile("profile-backendId"));
+  assert.equal(profile.backendId, "shoggoth");
   const before = fs.readFileSync(paths.eventLogPath);
   assert.throws(() => store.putAgentProfile({ ...profile, backendId: "grok-build" }),
     (error) => error.code === "AGENT_PROFILE_BACKEND_IMMUTABLE");
   assert.deepEqual(fs.readFileSync(paths.eventLogPath), before);
-  for (const backendId of ["Codex", "grok_build", "grok:build", `a${"b".repeat(64)}`]) {
+  for (const backendId of ["codex", "antigravity", "Codex", "grok_build", "grok:build", `a${"b".repeat(64)}`]) {
     assert.throws(
       () => store.putAgentProfile(validProfile(`profile-invalid-${crypto.randomUUID()}`, { backendId })),
       (error) => error.code === "STORE_INVALID_RECORD",
     );
   }
+  store.putRuntimeAccount({ id: "future-account", runtime: "future-runtime", kind: "shoggoth-managed",
+    installationKind: "bundled", homeKind: "managed-shared", providerRef: null, isDefault: false, createdAt: null, updatedAt: null });
   assert.equal(store.putAgentProfile(validProfile("profile-future", {
-    runtime: "future-runtime",
+    runtime: "future-runtime", runtimeAccountId: "future-account",
   })).runtime, "future-runtime");
   store.close();
-});
-
-test("schema v5 精确迁移两个内置 CLI Profile 的 backendId，保留所有身份与引用", () => {
-  const paths = fixturePaths("shoggoth-profile-backend-v5-");
-  const snapshot = seedBuiltinSnapshot(paths);
-  const codex = BUILTIN_CLI_AGENT_PROFILES[0];
-  const grok = BUILTIN_CLI_AGENT_PROFILES[1];
-
-  const populated = openStore(paths, { now: () => 601 });
-  populated.putWorkRun(validRun("run-builtin-profile-ref", {
-    profileId: codex.id,
-    idempotencyKey: "idem-builtin-profile-ref",
-  }));
-  populated.addRunNote(validRunNote("note-builtin-profile-ref", "run-builtin-profile-ref", {
-    profileId: codex.id,
-  }));
-  populated.beginMcpToolCall({
-    profileId: grok.id,
-    callId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-    name: "run_add_note",
-    fingerprint: crypto.createHash("sha256").update("builtin-profile-ref").digest("hex"),
-    binding: null,
-    createdAt: 601,
-  });
-  populated.close();
-
-  const legacy = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
-  legacy.schemaVersion = 5;
-  delete legacy.runtimeAccounts;
-  delete legacy.runtimeAccountTombstones;
-  for (const profile of legacy.agentProfiles) {
-    delete profile.runtimeAccountId;
-    if ([codex.id, grok.id].includes(profile.id)) profile.backendId = "shoggoth";
-  }
-  fs.writeFileSync(paths.stateSnapshotPath, encodeSnapshot(legacy), { mode: 0o600 });
-  const codexBefore = legacy.agentProfiles.find((profile) => profile.id === codex.id);
-  const v6Codex = { ...codexBefore, backendId: "codex", name: "Codex after migration" };
-  const event = {
-    schemaVersion: 6,
-    seq: legacy.lastSeq + 1,
-    aggregateId: codex.id,
-    type: "agent_profile.put",
-    time: 602,
-    payload: { profile: v6Codex },
-  };
-  event.checksum = eventChecksum(event);
-  fs.writeFileSync(paths.eventLogPath, `${JSON.stringify(event)}\n`, { mode: 0o600 });
-
-  const migrated = openStore(paths, { now: () => 603 });
-  assert.equal(migrated.getAgentProfile(codex.id).backendId, "codex");
-  assert.equal(migrated.getAgentProfile(codex.id).name, "Codex after migration");
-  assert.equal(migrated.getAgentProfile(grok.id).backendId, "grok-build");
-  assert.equal(migrated.getWorkRun("run-builtin-profile-ref").profileId, codex.id);
-  assert.equal(migrated.getRunNote("note-builtin-profile-ref").profileId, codex.id);
-  assert.equal(migrated.listMcpToolCalls({ profileId: grok.id }).length, 1);
-  for (const spec of BUILTIN_CLI_AGENT_PROFILES) {
-    const before = legacy.agentProfiles.find((profile) => profile.id === spec.id);
-    const after = migrated.getAgentProfile(spec.id);
-    for (const field of ["id", "agentId", "runtime", "runtimeProfileId", "createdAt"]) {
-      assert.equal(after[field], before[field], `${spec.name}.${field}`);
-    }
-  }
-  migrated.close();
-  assert.equal(
-    JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8")).schemaVersion,
-    STORE_SCHEMA_VERSION,
-  );
-  const reopened = openStore(paths);
-  assert.deepEqual(reopened.listAgentProfiles()
-    .filter((profile) => [codex.id, grok.id].includes(profile.id))
-    .map((profile) => profile.backendId), ["codex", "grok-build"]);
-  reopened.close();
-  assert.equal(snapshot.schemaVersion, STORE_SCHEMA_VERSION);
-});
-
-test("schema v5 内置 Profile 半迁移或身份冲突时保留证据并 fail closed", () => {
-  const codex = BUILTIN_CLI_AGENT_PROFILES[0];
-  for (const mutate of [
-    (profile) => { profile.backendId = codex.backendId; },
-    (profile) => { profile.agentId = "conflicting-codex-agent"; },
-  ]) {
-    const paths = fixturePaths("shoggoth-profile-backend-conflict-");
-    const legacy = seedBuiltinSnapshot(paths);
-    legacy.schemaVersion = 5;
-    delete legacy.runtimeAccounts;
-    delete legacy.runtimeAccountTombstones;
-    for (const profile of legacy.agentProfiles) {
-      delete profile.runtimeAccountId;
-      if (BUILTIN_CLI_AGENT_PROFILES.some((spec) => spec.id === profile.id)) {
-        profile.backendId = "shoggoth";
-      }
-    }
-    mutate(legacy.agentProfiles.find((profile) => profile.id === codex.id));
-    const evidence = encodeSnapshot(legacy);
-    fs.writeFileSync(paths.stateSnapshotPath, evidence, { mode: 0o600 });
-    assert.throws(
-      () => openStore(paths),
-      (error) => error.code === "STORE_PROFILE_MIGRATION_CONFLICT",
-    );
-    assert.equal(fs.readFileSync(paths.stateSnapshotPath, "utf8"), evidence);
-  }
-
-  const occupiedPaths = fixturePaths("shoggoth-profile-backend-occupied-");
-  const occupied = seedBuiltinSnapshot(occupiedPaths);
-  const codexIndex = occupied.agentProfiles.findIndex((profile) => profile.id === codex.id);
-  const codexProfile = occupied.agentProfiles[codexIndex];
-  occupied.agentProfiles.splice(codexIndex, 1);
-  occupied.agentProfiles.push({
-    ...codexProfile,
-    id: "11111111-1111-4111-8111-111111111111",
-    backendId: "shoggoth",
-    createdAt: 600,
-    updatedAt: 600,
-  });
-  const evidence = encodeSnapshot(occupied);
-  fs.writeFileSync(occupiedPaths.stateSnapshotPath, evidence, { mode: 0o600 });
-  assert.throws(
-    () => openStore(occupiedPaths),
-    (error) => error.code === "STORE_CORRUPT_SNAPSHOT",
-  );
-  assert.equal(fs.readFileSync(occupiedPaths.stateSnapshotPath, "utf8"), evidence);
 });
 
 test("敏感字段递归拒绝写入，fixture 明文永不出现在 snapshot 或日志", () => {
@@ -982,7 +897,7 @@ test("日志轮转发现 events 被替换为 symlink 时拒绝且不清空 victi
 });
 
 test("当前 schema 持久化 append-only RunNote，重放/快照顺序稳定且返回 clone", () => {
-  assert.equal(STORE_SCHEMA_VERSION, 10);
+  assert.equal(STORE_SCHEMA_VERSION, 15);
   assert.deepEqual(RUN_NOTE_FIELDS, [
     "id", "runId", "profileId", "kind", "cardId", "body", "percent", "createdAt",
   ]);
@@ -1061,51 +976,6 @@ test("RunNote 严格校验 profile/run/progress 引用、容量与动态 secret�
     (error) => error.code === "RUN_NOTE_CAPACITY",
   );
   store.close();
-});
-
-test("schema v2 snapshot 严格迁移为空 RunNote 集合，当前 schema 损坏引用 fail closed", () => {
-  const legacyPaths = fixturePaths("shoggoth-run-note-v2-");
-  const legacyStore = openStore(legacyPaths, { now: () => 500 });
-  legacyStore.putWorkRun(validRun("legacy-run"));
-  legacyStore.close();
-  const legacy = JSON.parse(fs.readFileSync(legacyPaths.stateSnapshotPath, "utf8"));
-  legacy.schemaVersion = 2;
-  delete legacy.runtimeAccounts;
-  delete legacy.runtimeAccountTombstones;
-  for (const profile of legacy.agentProfiles) delete profile.runtimeAccountId;
-  legacy.workRuns = legacy.workRuns.map(({
-    contextSnapshotId: _contextSnapshotId,
-    runtimeSessionRef: sessionRef,
-    runtimeTurnRef: turnRef,
-    ...run
-  }) => ({
-    ...run,
-    codexThreadId: sessionRef?.sessionId ?? null,
-    codexTurnId: turnRef?.turnId ?? null,
-  }));
-  delete legacy.runNotes;
-  delete legacy.mcpToolCalls;
-  fs.writeFileSync(legacyPaths.stateSnapshotPath, encodeSnapshot(legacy), { mode: 0o600 });
-  const migrated = openStore(legacyPaths, { now: () => 501 });
-  assert.deepEqual(migrated.listRunNotes({}), []);
-  migrated.close();
-  assert.equal(
-    JSON.parse(fs.readFileSync(legacyPaths.stateSnapshotPath, "utf8")).schemaVersion,
-    STORE_SCHEMA_VERSION,
-  );
-
-  const corruptPaths = fixturePaths("shoggoth-run-note-corrupt-");
-  const corruptStore = openStore(corruptPaths);
-  corruptStore.putWorkRun(validRun("corrupt-run"));
-  corruptStore.addRunNote(validRunNote("corrupt-note", "corrupt-run"));
-  corruptStore.close();
-  const snapshot = JSON.parse(fs.readFileSync(corruptPaths.stateSnapshotPath, "utf8"));
-  snapshot.runNotes[0].runId = "missing";
-  fs.writeFileSync(corruptPaths.stateSnapshotPath, encodeSnapshot(snapshot), { mode: 0o600 });
-  assert.throws(
-    () => openStore(corruptPaths),
-    (error) => error.code === "STORE_CORRUPT_SNAPSHOT",
-  );
 });
 
 test("McpToolCall 首次冻结 createdAt 与短 hash operationId，最长 Profile 仍小于 128B", () => {

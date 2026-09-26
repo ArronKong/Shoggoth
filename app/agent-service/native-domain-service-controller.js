@@ -373,7 +373,7 @@ class NativeDomainServiceController {
 
   #listCronRuns(params) {
     if (!this.describeCronRun) throw internalError("CRON_UNAVAILABLE");
-    const job = requireEntity(this.cronStore.getJob(params.jobId), "CRON_JOB_NOT_FOUND");
+    const job = requireEntity(this.cronStore.getJob(params.jobId) || this.cronStore.getJobTombstone?.(params.jobId), "CRON_JOB_NOT_FOUND");
     const runs = this.workDispatcher.listRuns({ source: "cron", sourceId: params.jobId })
       .filter((value) => value.source === "cron" && value.sourceId === params.jobId)
       .filter((value) => value.profileId === job.profileId)
@@ -499,7 +499,7 @@ class NativeDomainServiceController {
         if (params.status !== null && runValue.status !== params.status) continue;
         entries.push({
           key: stableTimestampKey(linkValue.createdAt, runValue.id),
-          item: runValue,
+          item: { ...runValue, ...(this.getRunSessionKey(runValue) ? { sessionKey: this.getRunSessionKey(runValue) } : {}) },
         });
       }
       return this.#page(method, params, entries);

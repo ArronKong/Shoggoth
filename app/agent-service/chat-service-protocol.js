@@ -5,6 +5,7 @@ const { validInteractiveApprovalChoice } = require("../core/shoggoth-interaction
 const { PUBLIC_MESSAGES: INSPIRATION_PUBLIC_MESSAGES } = require("./inspiration-service-protocol");
 const { validAttachments, attachmentFields } = require("./inspiration-media");
 const { validModelSettings, validModelSettingsPatch } = require("./chat-model-settings");
+const { validateRuntimeContextUsage, validateRuntimeContextCapabilities } = require("./runtime-context-usage");
 
 const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_ITEM_BYTES = 48 * 1024;
@@ -20,7 +21,7 @@ const HISTORY_TYPES = new Set(["text", "thinking", "plan", "tool", "status", "pr
 const HISTORY_ROLES = new Set(["user", "assistant", "toolResult", "system"]);
 const COMMAND_CATEGORIES = new Set(["session", "model", "tools", "agents"]);
 const SESSION_STATUSES = new Set(["draft", "binding", "ready", "archived", "delete_pending"]);
-const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration"]);
+const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
 const WORK_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
   "completed", "failed", "canceled", "interrupted", "skipped",
@@ -403,10 +404,12 @@ function validateChatServiceRequest(request) {
 }
 
 function validateProfile(value) {
+  const hasBindings = Object.hasOwn(value || {}, "defaultBindingId") || Object.hasOwn(value || {}, "bindingsRevision");
   const fields = [
     "id", "backendId", "agentId", "name", "runtime", "runtimeProfileId",
     "runtimeAccountId", "providerRef", "defaultModel", "defaultCwd", "permissionPolicy", "concurrency",
     "isDefault", "enabled", "createdAt", "updatedAt",
+    ...(hasBindings ? ["defaultBindingId", "bindingsRevision"] : []),
   ];
   if (!exactObject(value, fields) || !validOpaqueId(value.id)
     || !validString(value.backendId, 64) || !BACKEND_ID_PATTERN.test(value.backendId)
@@ -422,41 +425,76 @@ function validateProfile(value) {
     ) || !["read-only", "workspace-write", "danger-full-access"].includes(
       value.permissionPolicy.sandbox,
     ) || !exactObject(value.concurrency, ["maxActive", "maxWorkspaceWrites"])
-    || !Number.isSafeInteger(value.concurrency.maxActive) || value.concurrency.maxActive < 1
-    || !Number.isSafeInteger(value.concurrency.maxWorkspaceWrites)
-    || value.concurrency.maxWorkspaceWrites < 0
+    || (value.concurrency.maxActive !== null
+      && (!Number.isSafeInteger(value.concurrency.maxActive) || value.concurrency.maxActive < 1))
+    || (value.concurrency.maxWorkspaceWrites !== null
+      && (!Number.isSafeInteger(value.concurrency.maxWorkspaceWrites)
+        || value.concurrency.maxWorkspaceWrites < 0))
     || typeof value.isDefault !== "boolean" || typeof value.enabled !== "boolean"
     || !validTimestamp(value.createdAt) || !validTimestamp(value.updatedAt)
-    || value.updatedAt < value.createdAt) failResponse();
+    || value.updatedAt < value.createdAt
+    || (hasBindings && (!validUuid(value.defaultBindingId)
+      || !Number.isSafeInteger(value.bindingsRevision) || value.bindingsRevision < 1))) failResponse();
   return cloneCanonical(value);
 }
 
 const SESSION_FIELDS = [
-  "id", "sessionKey", "profileId", "codexThreadId", "workspace", "title",
+  "id", "sessionKey", "profileId", "runtimeSessionId", "workspace", "title",
   "modelOverride", "permissionMode", "status", "createdAt", "updatedAt",
 ];
 
+function validateRuntimeSessionFields(value, recurse) {
+  const { runtimeBindingId, retiredRuntimeSessions, revision, ...session } = value;
+  if (!(runtimeBindingId === null || validUuid(runtimeBindingId)) || !Number.isSafeInteger(revision) || revision < 1
+    || !Array.isArray(retiredRuntimeSessions) || retiredRuntimeSessions.length > 4096
+    || retiredRuntimeSessions.some(item => !exactObject(item,
+      ["bindingId", "runtime", "runtimeAccountId", "runtimeSessionId", "retiredAt"])
+      || !validUuid(item.bindingId) || !validString(item.runtime, 64)
+      || !validString(item.runtimeAccountId, 128) || !validString(item.runtimeSessionId, 512)
+      || !validTimestamp(item.retiredAt))) failResponse();
+  return { ...recurse(session), runtimeBindingId, retiredRuntimeSessions: cloneCanonical(retiredRuntimeSessions), revision };
+}
+function hasRuntimeSessionFields(value) {
+  return ["runtimeBindingId", "retiredRuntimeSessions", "revision"].some(key => Object.hasOwn(value || {}, key));
+}
+
 function validateSession(value) {
+  if (hasRuntimeSessionFields(value)) return validateRuntimeSessionFields(value, validateSession);
   if (Object.hasOwn(value || {}, "modelSettings")) {
     const { modelSettings, ...session } = value;
     if (!validModelSettings(modelSettings)) failResponse();
     return { ...validateSession(session), modelSettings: cloneCanonical(modelSettings) };
   }
   if (!exactObject(value, SESSION_FIELDS) || !validUuid(value.id) || !validUuid(value.sessionKey)
-    || !validOpaqueId(value.profileId) || !validString(value.codexThreadId, 256, true)
+    || !validOpaqueId(value.profileId) || !validString(value.runtimeSessionId, 256, true)
     || !validString(value.workspace, 4096, true) || !validString(value.title, 512, true)
     || !validString(value.modelOverride, 512, true)
     || !validString(value.permissionMode, 64, true)
     || !SESSION_STATUSES.has(value.status) || !validTimestamp(value.createdAt)
     || !validTimestamp(value.updatedAt) || value.updatedAt < value.createdAt) failResponse();
   const unbound = value.status === "draft" || value.status === "binding";
-  if ((unbound && value.codexThreadId !== null) || (!unbound && value.codexThreadId === null)) {
+  if (unbound && value.runtimeSessionId !== null) {
     failResponse();
   }
   return cloneCanonical(value);
 }
 
 function validateListedSession(value) {
+  if (Object.hasOwn(value || {}, "productContext")) {
+    const { productContext, ...session } = value;
+    return { ...validateListedSession(session), productContext: require("./product-context-protocol").validateProductContext(productContext) };
+  }
+  if (hasRuntimeSessionFields(value)) return validateRuntimeSessionFields(value, validateListedSession);
+  if (Object.hasOwn(value || {}, "contextUsage") || Object.hasOwn(value || {}, "contextCapabilities")) {
+    const { contextUsage, contextCapabilities, ...session } = value;
+    let usage, capabilities;
+    try {
+      usage = contextUsage === null ? null : validateRuntimeContextUsage(contextUsage);
+      capabilities = validateRuntimeContextCapabilities(contextCapabilities);
+    } catch { failResponse(); }
+    if (usage !== null && usage.runtimeSessionId !== session.runtimeSessionId) failResponse();
+    return { ...validateListedSession(session), contextUsage: usage, contextCapabilities: capabilities };
+  }
   if (Object.hasOwn(value || {}, "cronJobId") || Object.hasOwn(value || {}, "cronRunIds")) {
     const { cronJobId, cronRunIds, ...session } = value;
     if (!validOpaqueId(cronJobId) || !Array.isArray(cronRunIds) || cronRunIds.length === 0
@@ -501,73 +539,8 @@ function validateRemoteOperation(value, expectedKind) {
 }
 
 function validateRun(value) {
-  const currentFields = [
-    "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace", "status",
-    "contextSnapshotId", "runtimeSessionRef", "runtimeTurnRef", "eventSeq", "waitingRequestId",
-    "startedAt", "finishedAt", "resultSummary", "errorCode", "retryOf",
-  ];
-  if (exactObject(value, currentFields)) {
-    const validRef = (ref, turn = false) => ref === null || (
-      exactObject(ref, turn
-        ? ["runtime", "runtimeProfileId", "runtimeAccountId", "sessionId", "turnId"]
-        : ["runtime", "runtimeProfileId", "runtimeAccountId", "sessionId"])
-      && /^[a-z][a-z0-9-]{0,63}$/u.test(ref.runtime)
-      && validOpaqueId(ref.runtimeProfileId)
-      && validOpaqueId(ref.runtimeAccountId)
-      && validString(ref.sessionId, 256)
-      && (!turn || validString(ref.turnId, 256))
-    );
-    if ((value.contextSnapshotId !== null
-      && !/^ctx-[a-f0-9]{64}$/u.test(value.contextSnapshotId))
-      || !validRef(value.runtimeSessionRef)
-      || !validRef(value.runtimeTurnRef, true)
-      || (value.runtimeTurnRef !== null && (value.runtimeSessionRef === null
-        || value.runtimeTurnRef.runtime !== value.runtimeSessionRef.runtime
-        || value.runtimeTurnRef.runtimeProfileId !== value.runtimeSessionRef.runtimeProfileId
-        || value.runtimeTurnRef.runtimeAccountId !== value.runtimeSessionRef.runtimeAccountId
-        || value.runtimeTurnRef.sessionId !== value.runtimeSessionRef.sessionId))) failResponse();
-    const {
-      contextSnapshotId, runtimeSessionRef: sessionRef, runtimeTurnRef: turnRef, ...legacy
-    } = value;
-    return validateRun({
-      ...legacy,
-      contextSnapshotId,
-      codexThreadId: sessionRef?.sessionId ?? null,
-      codexTurnId: turnRef?.turnId ?? null,
-    });
-  }
-  const hasContextSnapshotId = Object.prototype.hasOwnProperty.call(value, "contextSnapshotId");
-  const fields = [
-    "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace", "status",
-    ...(hasContextSnapshotId ? ["contextSnapshotId"] : []),
-    "codexThreadId", "codexTurnId", "eventSeq", "waitingRequestId", "startedAt",
-    "finishedAt", "resultSummary", "errorCode", "retryOf",
-  ];
-  if (!exactObject(value, fields) || !validOpaqueId(value.id) || !WORK_RUN_SOURCES.has(value.source)
-    || !validOpaqueId(value.sourceId) || !validOpaqueIdWithLimit(value.idempotencyKey, 256)
-    || !validOpaqueId(value.profileId) || !validString(value.workspace, 4096, true)
-    || !WORK_RUN_STATUSES.has(value.status) || !validString(value.codexThreadId, 256, true)
-    || !validString(value.codexTurnId, 256, true)
-    || !Number.isSafeInteger(value.eventSeq) || value.eventSeq < 1
-    || !validString(value.waitingRequestId, 128, true) || !validTimestamp(value.startedAt, true)
-    || !validTimestamp(value.finishedAt, true) || !validString(value.resultSummary, 16 * 1024, true)
-    || !validString(value.errorCode, 128, true) || !validNullableOpaqueId(value.retryOf)) {
-    failResponse();
-  }
-  if (hasContextSnapshotId && value.contextSnapshotId !== null
-    && !/^ctx-[a-f0-9]{64}$/u.test(value.contextSnapshotId)) failResponse();
-  if (ACTIVE_WORK_RUN_STATUSES.has(value.status)
-    && (value.startedAt === null || value.finishedAt !== null)) failResponse();
-  if (value.codexTurnId !== null && value.codexThreadId === null) failResponse();
-  if (TERMINAL_WORK_RUN_STATUSES.has(value.status)
-    && (value.finishedAt === null
-      || (value.startedAt !== null && value.finishedAt < value.startedAt))) failResponse();
-  if (value.status === "queued" && (value.startedAt !== null || value.finishedAt !== null)) failResponse();
-  if (["waiting_approval", "waiting_input"].includes(value.status)
-    ? value.waitingRequestId === null : value.waitingRequestId !== null) failResponse();
-  const needsError = value.status === "failed" || value.status === "interrupted";
-  if (needsError ? value.errorCode === null : value.errorCode !== null) failResponse();
-  return cloneCanonical(value);
+  try { return require("./product-store").validateWorkRun(cloneCanonical(value)); }
+  catch { failResponse(); }
 }
 
 function validateFragment(value) {

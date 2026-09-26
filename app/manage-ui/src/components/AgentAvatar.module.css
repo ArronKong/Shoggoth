@@ -1,4 +1,4 @@
-/* Pages own size, shape and typography; image/fallback compositing is shared. */
+/* Pages own size and shape; the shared placeholder contains no monogram. */
 :where(.avatar) {
   position: relative;
   display: inline-grid;
@@ -7,16 +7,6 @@
   overflow: hidden;
   border-radius: 50%;
   background: var(--ui-agent-avatar-bg);
-  color: var(--ui-agent-avatar-fg);
-}
-
-.avatar::before {
-  content: attr(data-initial);
-  grid-area: 1 / 1;
-}
-
-.avatar[data-avatar-state="loaded"]::before {
-  content: none;
 }
 
 /* Only the wrapper clips the image. A second rounded edge darkens antialiasing. */

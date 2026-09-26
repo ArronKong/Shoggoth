@@ -1,11 +1,14 @@
 "use strict";
-// Throwaway CRUD smoke for the new management REST routes. Uses far-future /
-// harmless specs and cleans up after itself. Run: node scripts/_crud-smoke.cjs [cron|tasks|skills|models|agents|all]
+// Management REST smoke. `all` combines LIVE_READ_ONLY observations of already
+// running backends with explicitly labelled ISOLATED_MUTATIONS fixtures. It must
+// fail if a backend needs starting; dashboard startup can run background work.
+// Safe offline entry: node scripts/crud-smoke.cjs external-fixtures
+// Native Service/REST fixtures: node scripts/crud-smoke.cjs isolated
 const http = require("node:http");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { HermesBackend } = require("../app/core/hermes-backend");
+const { HermesBackend, __test: hermesReadTransport } = require("../app/core/hermes-backend");
 const { OpenClawBackend } = require("../app/core/openclaw-backend");
 const { sortAgentsByCreatedAt } = require("../app/core/agent-backend");
 const { BackendRegistry } = require("../app/core/backend-registry");
@@ -14,12 +17,16 @@ const { createConfigStore } = require("../app/core/config-store");
 const { createModelChangeJournal } = require("../app/core/model-change-journal");
 const { ModelChangeCoordinator } = require("../app/core/model-change-coordinator");
 
+const { assertSafeSmokeRequest, guardHermesReadOnlyLifecycle, attachExistingHermesReadOnly, withMediaFixture, openClawReadOnlyOptions } = require("./crud-smoke-safety.cjs");
+const { runExternalMutationFixtures } = require("./crud-smoke-external-fixtures.cjs");
 const WHICH = process.argv[2] || "all";
 let failed = false;
+let modelFixture = false;
 
 // opts.raw：body 已是 Buffer（附件上传的原始字节，不再 JSON.stringify）。
 // opts.rawResponse：响应体不当 JSON 解析，原样放在 .text（附件下载）。
 function req(method, url, body, opts = {}) {
+  assertSafeSmokeRequest(method, url, body, { modelFixture });
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const payload = body == null ? null : opts.raw ? Buffer.from(body) : Buffer.from(JSON.stringify(body));
@@ -215,19 +222,49 @@ function installSmokeModelAdapter(backend) {
 }
 
 async function main() {
+  if (WHICH === "all" || WHICH === "isolated") {
+    await require("./runtime-status-rest.cjs").run();
+    await require("./session-runtime-models-rest.cjs").run();
+  }
+  if (WHICH === "external-fixtures") {
+    await runExternalMutationFixtures();
+    return;
+  }
+  if (["all", "cron", "tasks", "kanban"].includes(WHICH)) await runExternalMutationFixtures();
+  if (WHICH === "isolated") {
+    await require("./native-runtime-crud-smoke.cjs").run();
+    await require("./shoggoth-inspiration-rest-smoke.cjs").runInspirationRestSmoke();
+    return;
+  }
   if (WHICH === "inspiration" || WHICH === "all") {
     await require("./shoggoth-inspiration-rest-smoke.cjs").runInspirationRestSmoke();
     if (WHICH === "inspiration") return;
   }
+  log("LIVE_READ_ONLY: existing external backends only; no Cron/task/notification/config writes");
   const hb = new HermesBackend();
-  await hb.start();
-  const oc = new OpenClawBackend();
+  const assertNoHermesStart = guardHermesReadOnlyLifecycle(hb);
+  let oc;
+  let cfgDir;
+  let server;
+  const restoreModelAdapters = [];
+  try {
+  cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "crud-smoke-cfg-"));
+  const appData = process.env.SHOGGOTH_SMOKE_APP_DATA || path.join(os.homedir(), "Library", "Application Support", "Shoggoth");
+  oc = new OpenClawBackend(openClawReadOnlyOptions({
+    configPath: path.join(appData, "config.json"),
+    credentialsDir: path.join(appData, "credentials"), scratchDirectory: cfgDir,
+  }));
+  log("LIVE_READ_ONLY: configured local Gateway; existing App identity, temporary auth cache");
+  await attachExistingHermesReadOnly(hb, {
+    home: process.env.HERMES_HOME || path.join(os.homedir(), ".hermes"),
+    get: hermesReadTransport.http.httpGet,
+  });
+  assertNoHermesStart();
   const registry = new BackendRegistry();
   registry.register(oc);
   registry.register(hb);
   // Scratch config store: exercises the /__api/config plane (设置页 + SetupOverlay
   // 首启盖章) without ever touching the real userData config.json.
-  const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "crud-smoke-cfg-"));
   const configStore = createConfigStore(path.join(cfgDir, "config.json"));
   // 与两个入口(main.js / manage-serve.cjs)同款：断开的后端从聚合/路由消失。
   registry.setDisabledBackendsProvider(() => configStore.read().disabledBackends);
@@ -240,17 +277,18 @@ async function main() {
     hermes: (await hb.getModelChangeCapabilities().catch(() => ({}))).perAgentModelSettings,
     openclaw: (await oc.getModelChangeCapabilities().catch(() => ({}))).perAgentModelSettings,
   };
-  const restoreModelAdapters = [];
   let modelChangeCoordinator;
   if (WHICH === "models" || WHICH === "all") {
     restoreModelAdapters.push(installSmokeModelAdapter(oc), installSmokeModelAdapter(hb));
+    modelFixture = true;
+    log("ISOLATED_MUTATIONS: model config writes use in-memory adapters and scratch journal");
     modelChangeCoordinator = new ModelChangeCoordinator({
       registry,
       journal: createModelChangeJournal(path.join(cfgDir, "model-change-journal.json")),
     });
     modelChangeCoordinator.markReady();
   }
-  const server = await startStaticServer(0, { registry, configStore, modelChangeCoordinator });
+  server = await startStaticServer(0, { registry, configStore, modelChangeCoordinator });
   const B = server.url;
   log(`server ${B}; hermes agents=[${hb.agents.map((a) => a.id).join(",")}]`);
   const hermesAgent = hb.agents[0]?.id;
@@ -339,6 +377,10 @@ async function main() {
       const list = Array.isArray(r.json) ? r.json : r.json?.backends || [];
       const oc = list.find((b) => b.id === "openclaw");
       ok(r.status === 200 && !!oc, `status GET -> ${r.status}, openclaw entry ${oc ? "present" : "MISSING"}`);
+      for (const id of ["openclaw", "hermes"]) {
+        const backend = list.find((entry) => entry.id === id);
+        ok(backend?.connected === true, `LIVE_READ_ONLY ${id} connected=${backend?.connected === true}, reason=${backend?.info?.reason || "-"}`);
+      }
       ok(typeof oc?.info?.gatewayUrl === "string" && typeof oc?.info?.hasIdentity === "boolean",
         `status openclaw shape -> gatewayUrl/hasIdentity`);
       // S1:失败必须带 classifyAuthError 的 reason 机器码;成功则无 reason。
@@ -485,109 +527,33 @@ async function main() {
 
   if (WHICH === "media" || WHICH === "all") {
     log("--- MEDIA ---");
-    // /__media serves agent-attached images (OpenClaw `MEDIA:` directive). Guards: must be
-    // inside the OpenClaw tree AND an image type. Happy path uses a temp PNG written under
-    // ~/.openclaw; the out-of-tree guard is asserted regardless of write success.
-    const tmpDir = path.join(os.homedir(), ".openclaw", "workspace", ".shoggoth-media-smoke");
-    const tmpPng = path.join(tmpDir, "probe.png");
-    const tmpTxt = path.join(tmpDir, "secret.txt");
-    // 1x1 transparent PNG.
-    const PNG_1x1 = Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
-      "base64",
-    );
-    let wrote = false;
+    const mediaParent = path.join(os.homedir(), ".openclaw", "workspace");
     try {
-      fs.mkdirSync(tmpDir, { recursive: true });
-      fs.writeFileSync(tmpPng, PNG_1x1);
-      fs.writeFileSync(tmpTxt, "not an image");
-      wrote = true;
-    } catch {
-      /* ~/.openclaw not writable here — skip the file-backed assertions */
-    }
-    if (wrote) {
-      try {
-        const good = await reqHead(`${B}/__media?path=${encodeURIComponent(tmpPng)}`);
-        ok(good.status === 200 && /image\/png/.test(good.type), `serve in-tree png -> ${good.status} ${good.type}`);
-        const nonImg = await reqHead(`${B}/__media?path=${encodeURIComponent(tmpTxt)}`);
-        ok(nonImg.status === 404, `in-tree non-image refused -> ${nonImg.status}`);
-      } catch (e) {
-        ok(false, `media serve threw: ${e.message}`);
+      if (fs.existsSync(mediaParent)) {
+        await withMediaFixture(mediaParent, async ({ png, text }) => {
+          const good = await reqHead(`${B}/__media?path=${encodeURIComponent(png)}`);
+          ok(good.status === 200 && /image\/png/.test(good.type), `serve unique in-tree png -> ${good.status} ${good.type}`);
+          const nonImg = await reqHead(`${B}/__media?path=${encodeURIComponent(text)}`);
+          ok(nonImg.status === 404, `in-tree non-image refused -> ${nonImg.status}`);
+        });
+      } else {
+        log("LIVE_READ_ONLY media file check unavailable: existing OpenClaw workspace absent");
       }
-    } else {
-      log("  (skip file-backed checks: ~/.openclaw not writable)");
-    }
-    try {
       const trav = await reqHead(`${B}/__media?path=${encodeURIComponent("/etc/passwd")}`);
       ok(trav.status === 404, `out-of-tree path refused -> ${trav.status}`);
     } catch (e) {
-      ok(false, `media out-of-tree threw: ${e.message}`);
-    }
-    try {
-      if (wrote) {
-        fs.unlinkSync(tmpPng);
-        fs.unlinkSync(tmpTxt);
-        fs.rmdirSync(tmpDir);
-      }
-    } catch {
-      /* best-effort cleanup */
+      ok(false, `media: ${e.message}`);
     }
   }
 
   if (WHICH === "cron" || WHICH === "all") {
     log("--- CRON ---");
-    // OpenClaw create → update → runs → delete (far-future, never runs)
-    try {
-      const c = await req("POST", `${B}/__api/cron/jobs`, {
-        backendId: "openclaw", name: "[smoke] oc", description: "advanced smoke", prompt: "noop",
-        schedule: { kind: "at", at: "2031-01-01T00:00:00.000Z" }, enabled: false,
-        sessionTarget: "isolated", wakeMode: "next-heartbeat", deleteAfterRun: false,
-        delivery: { mode: "none" }, failureAlert: { after: 2, cooldownMs: 60000, mode: "announce" },
-      });
-      ok(c.status === 200 && c.json.job?.id, `OpenClaw create -> ${c.json.job?.id || JSON.stringify(c.json)}`);
-      const id = c.json.job?.id;
-      if (id) {
-        // failureAlert:null mirrors the form with the toggle off — gateway only
-        // accepts false|object, so the backend must map null→false (see R45).
-        const u = await req("PUT", `${B}/__api/cron/jobs/${encodeURIComponent(id)}`, {
-          name: "[smoke] oc2", prompt: "noop2", delivery: { mode: "none" }, failureAlert: null,
-        });
-        ok(u.status === 200 && u.json.job?.name === "[smoke] oc2" && !u.json.job?.failureAlert,
-          `OpenClaw update name + disable alert -> ${u.json.job?.name}, alert=${u.json.job?.failureAlert}`);
-        const run = await req("POST", `${B}/__api/cron/jobs/${encodeURIComponent(id)}/run`, { mode: "due" });
-        ok(run.status === 200, `OpenClaw run due -> ${run.status}`);
-        const r = await req("GET", `${B}/__api/cron/jobs/${encodeURIComponent(id)}/runs?status=ok&limit=5`);
-        ok(r.status === 200 && Array.isArray(r.json.runs), `OpenClaw runs -> ${r.json.runs?.length} entries`);
-        const dlv = await req("GET", `${B}/__api/cron/jobs/${encodeURIComponent(id)}/delivery`);
-        ok(dlv.status === 200 && typeof dlv.json.source === "string", `OpenClaw delivery -> source=${dlv.json.source}`);
-        // R342 trajectory:无 sessionKey → supported:false 的 200 降级(形状即契约)
-        const trj = await req("GET", `${B}/__api/cron/jobs/${encodeURIComponent(id)}/trajectory`);
-        ok(trj.status === 200 && trj.json.supported === false && Array.isArray(trj.json.parts),
-          `OpenClaw trajectory no-session -> supported=${trj.json.supported}`);
-        const d = await req("DELETE", `${B}/__api/cron/jobs/${encodeURIComponent(id)}`);
-        ok(d.status === 200, `OpenClaw delete -> ${d.status}`);
-      }
-    } catch (e) { ok(false, `OpenClaw cron: ${e.message}`); }
-    // Hermes create → update → delete
-    if (hermesAgent) {
+    log("LIVE_READ_ONLY Cron list/filter only; creation, toggling and run covered by isolated contracts");
+    for (const backend of ["openclaw", "hermes"]) {
       try {
-        const c = await req("POST", `${B}/__api/cron/jobs`, {
-          agentId: hermesAgent, name: "[smoke] h", prompt: "noop", schedule: { kind: "cron", expr: "0 5 31 12 *" },
-          // Smoke 只验证可移植的高级字段，不依赖用户目录中偶然存在的脚本文件。
-          backendId: "hermes", skills: ["watchers"],
-          workdir: "", profile: "", repeat: 1, enabledToolsets: ["terminal"], enabled: false,
-        });
-        ok(c.status === 200 && c.json.job?.id, `Hermes create -> ${c.json.job?.id || JSON.stringify(c.json)}`);
-        const id = c.json.job?.id;
-        if (id) {
-          const u = await req("PUT", `${B}/__api/cron/jobs/${encodeURIComponent(id)}`, { name: "[smoke] h2", enabled: true });
-          ok(u.status === 200, `Hermes update -> ${u.status} name=${u.json.job?.name}`);
-          const p = await req("PUT", `${B}/__api/cron/jobs/${encodeURIComponent(id)}`, { enabled: false });
-          ok(p.status === 200, `Hermes pause -> ${p.status}`);
-          const d = await req("DELETE", `${B}/__api/cron/jobs/${encodeURIComponent(id)}`);
-          ok(d.status === 200, `Hermes delete -> ${d.status}`);
-        }
-      } catch (e) { ok(false, `Hermes cron: ${e.message}`); }
+        const listed = await req("GET", `${B}/__api/cron/jobs?backend=${backend}`);
+        ok(listed.status === 200 && Array.isArray(listed.json.jobs), `${backend} Cron list -> ${listed.status}`);
+      } catch (e) { ok(false, `${backend} Cron read: ${e.message}`); }
     }
     // agentIds 多选筛选（工具栏 Agent 面板）：命中任一即保留，未知 id 必须筛空。
     try {
@@ -612,234 +578,39 @@ async function main() {
   }
 
   if (WHICH === "tasks" || WHICH === "all") {
-    log("--- TASKS ---");
-    // OpenClaw = gateway workboard plugin (create→move→archive→delete, real cards)
-    try {
-      const board = await req("GET", `${B}/__api/tasks?backend=openclaw`);
-      const cols = board.json.board?.columns || [];
-      const caps = board.json.board?.capabilities || {};
-      ok(board.status === 200 && caps.kind === "workboard",
-        `openclaw board -> ${cols.length} cols, caps.kind=${caps.kind}, ${cols.reduce((s,c)=>s+(c.tasks?.length||0),0)} cards`);
-      // 列集随 gateway workboard 版本变化（6 列 → 9 列），只校验契约形状：
-      // 非空且含本 smoke 依赖的关键列（todo=建卡、review=move 目标、done）。
-      const colIds = cols.map((c) => c.id);
-      ok(cols.length >= 1 && ["todo", "review", "done"].every((k) => colIds.includes(k)),
-        `openclaw columns (need todo/review/done) -> ${colIds.join(",")}`);
-      // 工作板扩展载荷（1:1 官方视图的输入）：statuses/sessions/agents + 卡片 wb。
-      ok(Array.isArray(board.json.board?.statuses) && board.json.board.statuses.length >= 6,
-        `openclaw statuses -> ${(board.json.board?.statuses || []).join(",")}`);
-      ok(Array.isArray(board.json.board?.sessions), `openclaw board sessions -> ${(board.json.board?.sessions || []).length}`);
-      ok(Array.isArray(board.json.board?.agents?.agents), `openclaw board agents -> ${(board.json.board?.agents?.agents || []).length}`);
-      const c = await req("POST", `${B}/__api/tasks?backend=openclaw`,
-        { title: "[smoke] wb", body: "smoke", column: "todo", priorityLevel: "high", labels: ["smoke"] });
-      const id = c.json.task?.id;
-      ok(c.status === 200 && id && c.json.task?.priorityLevel === "high", `openclaw create -> ${id} P=${c.json.task?.priorityLevel}`);
-      if (id) {
-        const u = await req("PUT", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}`, { title: "[smoke] wb2", body: "edited" });
-        ok(u.status === 200 && u.json.task?.title === "[smoke] wb2", `openclaw update -> ${u.json.task?.title}`);
-        const mv = await req("POST", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}&action=move`, { status: "review", position: 999000 });
-        ok(mv.status === 200 && mv.json.task?.column === "review", `openclaw move -> ${mv.json.task?.column}`);
-        // 操作员备注（官方 workboard.cards.comment）。
-        const cm = await req("POST", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}&action=comment`, { body: "[smoke] note" });
-        ok(cm.status === 200, `openclaw comment -> ${cm.status}`);
-        const det = await req("GET", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}`);
-        ok(det.status === 200 && (det.json.task?.comments || []).some((x) => x.body === "[smoke] note"),
-          `openclaw comment visible -> ${(det.json.task?.comments || []).length}`);
-        // stop（官方 Nm）：无会话/无任务的卡应为安全 no-op（ok:false + reason）。
-        const st = await req("POST", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}&action=stop`);
-        ok(st.status === 200 && st.json.result?.ok === false, `openclaw stop(no-session) -> ok=${st.json.result?.ok} ${st.json.result?.reason || ""}`);
-        const ub = await req("POST", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}&action=unblock`);
-        ok(ub.status === 200, `openclaw unblock -> ${ub.status}`);
-        const ar = await req("POST", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}&action=archive`, { archived: true });
-        ok(ar.status === 200, `openclaw archive -> ${ar.status}`);
-        const d = await req("DELETE", `${B}/__api/tasks?backend=openclaw&id=${encodeURIComponent(id)}`);
-        ok(d.status === 200, `openclaw delete -> ${d.status}`);
-      }
-      // 注：workboard dispatch（提醒调度器）有真实副作用（promote/启动 ready 卡），
-      // 与 Hermes nudge 不同没有 dryRun 参数 → 不进 smoke。
-    } catch (e) { ok(false, `openclaw tasks: ${e.message}`); }
-    // Hermes = kanban plugin (create→update→move→archive→delete, real cards)
-    try {
-      const board = await req("GET", `${B}/__api/tasks?backend=hermes`);
-      const cols = board.json.board?.columns || [];
-      const caps = board.json.board?.capabilities || {};
-      ok(board.status === 200 && caps.kind === "hermes" && caps.drag && caps.archive,
-        `hermes board -> ${cols.length} cols, caps.kind=${caps.kind} drag=${!!caps.drag} archive=${!!caps.archive}`);
-      const c = await req("POST", `${B}/__api/tasks?backend=hermes`, { title: "[smoke] task", body: "smoke body", column: cols[0]?.id });
-      const id = c.json.task?.id;
-      ok(c.status === 200 && id, `hermes create -> ${id || JSON.stringify(c.json).slice(0,80)}`);
-      if (id) {
-        const u = await req("PUT", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}`, { title: "[smoke] task2", body: "edited" });
-        ok(u.status === 200, `hermes update -> ${u.status}`);
-        const moveTo = cols[1]?.id || "in_progress";
-        const mv = await req("POST", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}&action=move`, { status: moveTo, position: 0 });
-        ok(mv.status === 200 && mv.json.task?.column === moveTo, `hermes move -> ${mv.json.task?.column}`);
-        // R64: 批量更新（后端扇出复用单任务端点）。建第 2 张卡，bulk 归档两张（顺带清理 id2）。
-        const c2 = await req("POST", `${B}/__api/tasks?backend=hermes`, { title: "[smoke] task-bulk", body: "x", column: cols[0]?.id });
-        const bulkIds = [id, c2.json.task?.id].filter(Boolean);
-        const bk = await req("POST", `${B}/__api/tasks?backend=hermes&action=bulk`, { ids: bulkIds, patch: { archive: true } });
-        ok(bk.status === 200 && bk.json.result?.failed === 0 && bk.json.result?.total === bulkIds.length,
-          `hermes bulk archive ${bulkIds.length} -> total=${bk.json.result?.total} failed=${bk.json.result?.failed}`);
-        // bulk archive(true) 已把 id 与 id2 都归档（Hermes 无硬删除，即清理），无需再单独 cleanup。
-      }
-    } catch (e) { ok(false, `hermes tasks: ${e.message}`); }
+    log("--- TASKS: LIVE_READ_ONLY ---");
+    for (const backend of ["openclaw", "hermes"]) {
+      try {
+        const r = await req("GET", `${B}/__api/tasks?backend=${backend}&readOnly=1`);
+        const board = r.json.board;
+        ok(r.status === 200 && Array.isArray(board?.columns) && !board.error,
+          `${backend} board read -> ${r.status}${board?.error ? `: ${board.error}` : ""}`);
+        ok(board?.capabilities?.kind === (backend === "hermes" ? "hermes" : "workboard"),
+          `${backend} board capability -> ${board?.capabilities?.kind}`);
+      } catch (e) { ok(false, `${backend} tasks read: ${e.message}`); }
+    }
+    log("ISOLATED_MUTATIONS covers task transitions; live create/comment/assign/dispatch/archive/delete intentionally untested");
   }
 
   if (WHICH === "kanban" || WHICH === "all") {
-    log("--- HERMES KANBAN (comments/runs/diagnostics) ---");
+    log("--- HERMES KANBAN: LIVE_READ_ONLY ---");
     try {
-      const board = await req("GET", `${B}/__api/tasks?backend=hermes`);
+      const board = await req("GET", `${B}/__api/tasks?backend=hermes&readOnly=1`);
       const brd = board.json.board || {};
-      const cols = brd.columns || [];
-      ok(brd.capabilities?.kind === "hermes" && Array.isArray(brd.tenants) && Array.isArray(brd.assignees),
-        `board enriched -> kind=${brd.capabilities?.kind} tenants=${(brd.tenants||[]).length} assignees=${(brd.assignees||[]).length}`);
-      const c = await req("POST", `${B}/__api/tasks?backend=hermes`, { title: "[smoke] kanban", body: "x", column: cols[0]?.id, tenant: "smoke-tenant" });
-      const id = c.json.task?.id;
-      ok(!!id, `create -> ${id}`);
-      if (id) {
-        const cm = await req("POST", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}&action=comment`, { body: "[smoke] hi" });
-        ok(cm.status === 200, `add comment -> ${cm.status}`);
-        const det = await req("GET", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}`);
-        const t = det.json.task || {};
-        ok(det.status === 200 && Array.isArray(t.comments) && Array.isArray(t.runs) && Array.isArray(t.diagnostics),
-          `detail comments(${(t.comments||[]).length})/runs(${(t.runs||[]).length})/diag(${(t.diagnostics||[]).length}); comment present=${(t.comments||[]).some(x=>(x.body||'').includes('[smoke]'))}`);
-        ok(t.tenant === "smoke-tenant", `create extras -> tenant=${t.tenant} skills=${JSON.stringify(t.skills)} goal=${t.goalMode}`);
-        const b2 = await req("GET", `${B}/__api/tasks?backend=hermes`);
-        const found = (b2.json.board?.columns || []).flatMap((c2) => c2.tasks || []).find((x) => x.id === id);
-        ok(found && typeof found.createdAt === "number",
-          `card enriched -> createdAt=${found?.createdAt} comments=${found?.commentCount ?? "-"} links=${found?.linkCount ? found.linkCount.parents + found.linkCount.children : "-"}`);
-        // Drawer extras (Slice 6): reassign / worker log / link+unlink a 2nd card — while id is still active.
-        const who = (brd.assignees || [])[0];
-        if (who) {
-          const rs = await req("POST", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}&action=reassign`, { assignee: who });
-          ok(rs.status === 200, `reassign -> ${rs.status} (@${who})`);
-        }
-        // worker log 是结构体（content/exists/size_bytes/truncated/path），不是裸串——
-        // 旧实现读不存在的 j.log、兜底把整个 JSON 回吐给抽屉 <pre>。
-        const lg = await req("GET", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}&action=log`);
-        ok(lg.status === 200 && lg.json.log && typeof lg.json.log.content === "string" && typeof lg.json.log.exists === "boolean",
-          `worker log -> ${lg.status} exists=${lg.json.log?.exists} len=${(lg.json.log?.content || "").length}`);
-        const c2 = await req("POST", `${B}/__api/tasks?backend=hermes`, { title: "[smoke] dep child", body: "x" });
-        const id2 = c2.json.task?.id;
-        if (id2) {
-          const lk = await req("POST", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}&action=link`, { parent: id, child: id2 });
-          ok(lk.status === 200, `link add -> ${lk.status}`);
-          const det2 = await req("GET", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}`);
-          ok((det2.json.task?.linkIds?.children || []).includes(id2), `link visible -> children=${JSON.stringify(det2.json.task?.linkIds?.children || [])}`);
-          const ul = await req("POST", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}&action=unlink`, { parent: id, child: id2 });
-          ok(ul.status === 200, `link remove -> ${ul.status}`);
-          // 官方 POST /tasks/bulk（早期版本没有，旧实现是 N 次扇出）：一次请求、
-          // per-id 成败。混一个不存在的 id 进去，验证「一坏不拖垮整批」+ failedIds。
-          const bulk = await req("POST", `${B}/__api/tasks?backend=hermes&action=bulk`,
-            { ids: [id, id2, "t_zzzz_nonexistent"], patch: { priority: 3 } });
-          ok(bulk.status === 200 && bulk.json.result?.total === 3 && bulk.json.result?.failed === 1
-            && (bulk.json.result?.failedIds || []).includes("t_zzzz_nonexistent"),
-            `bulk priority -> total=${bulk.json.result?.total} failed=${bulk.json.result?.failed} failedIds=${JSON.stringify(bulk.json.result?.failedIds)}`);
-          // 批量永久删除（垃圾桶 / BulkActionBar 的 Delete）——顺带清掉 id2。
-          const bdel = await req("POST", `${B}/__api/tasks?backend=hermes&action=bulkDelete`, { ids: [id2] });
-          ok(bdel.status === 200 && bdel.json.result?.failed === 0, `bulk delete -> total=${bdel.json.result?.total} failed=${bdel.json.result?.failed}`);
-        }
-        // 附件全链路：上传原始字节 → 列表可见 → 下载原样回来 → 删除。
-        const attBody = Buffer.from("hello shoggoth attachment\n");
-        const attUp = await req("POST",
-          `${B}/__api/tasks/attachments?backend=hermes&id=${encodeURIComponent(id)}&filename=smoke.txt&contentType=text%2Fplain`,
-          attBody, { raw: true });
-        ok(attUp.status === 200 && attUp.json.attachment?.id, `attachment upload -> ${attUp.json.attachment?.filename} #${attUp.json.attachment?.id}`);
-        const attId = attUp.json.attachment?.id;
-        if (attId) {
-          const attList = await req("GET", `${B}/__api/tasks/attachments?backend=hermes&id=${encodeURIComponent(id)}`);
-          ok(attList.status === 200 && (attList.json.attachments || []).some((a) => String(a.id) === String(attId)),
-            `attachment list -> ${(attList.json.attachments || []).length}`);
-          const attDl = await req("GET", `${B}/__api/tasks/attachments/${encodeURIComponent(attId)}?backend=hermes`, null, { rawResponse: true });
-          ok(attDl.status === 200 && attDl.text === attBody.toString(), `attachment download -> ${attDl.status} bytes=${(attDl.text || "").length}`);
-          const attDel = await req("DELETE", `${B}/__api/tasks/attachments/${encodeURIComponent(attId)}?backend=hermes`);
-          ok(attDel.status === 200, `attachment delete -> ${attDel.status}`);
-        }
-        // Home 频道订阅：列出已配置 home 的平台；有则对本卡订阅→退订往返（卡稍后被删）。
-        const hc = await req("GET", `${B}/__api/tasks/home-channels?backend=hermes&id=${encodeURIComponent(id)}`);
-        ok(hc.status === 200 && Array.isArray(hc.json.channels), `home channels -> ${(hc.json.channels || []).length}`);
-        const plat = (hc.json.channels || [])[0]?.platform;
-        if (plat) {
-          const sub = await req("POST", `${B}/__api/tasks/home-channels?backend=hermes&id=${encodeURIComponent(id)}&platform=${encodeURIComponent(plat)}`);
-          const hc2 = await req("GET", `${B}/__api/tasks/home-channels?backend=hermes&id=${encodeURIComponent(id)}`);
-          const on = (hc2.json.channels || []).find((c3) => c3.platform === plat)?.subscribed;
-          const unsub = await req("DELETE", `${B}/__api/tasks/home-channels?backend=hermes&id=${encodeURIComponent(id)}&platform=${encodeURIComponent(plat)}`);
-          ok(sub.status === 200 && on === true && unsub.status === 200, `home subscribe round-trip (${plat}) -> on=${on}`);
-        }
-        // R135 起归档与真删除分离：archive 走 action=archive，DELETE 是官方硬删除。
-        const ar = await req("POST", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}&action=archive`, { archived: true });
-        ok(ar.status === 200, `archive -> ${ar.status}`);
-        const arch = await req("GET", `${B}/__api/tasks?backend=hermes&archived=1`);
-        const archCol = (arch.json.board?.columns || []).find((c2) => c2.id === "archived");
-        ok(arch.status === 200 && !!archCol && (archCol.tasks || []).some((x) => x.id === id),
-          `archived filter -> col=${!!archCol} hasCard=${archCol ? (archCol.tasks || []).some((x) => x.id === id) : false}`);
-        const d = await req("DELETE", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}`);
-        ok(d.status === 200, `hard delete -> ${d.status}`);
-        const gone = await req("GET", `${B}/__api/tasks?backend=hermes&id=${encodeURIComponent(id)}`);
-        ok(gone.status !== 200 || !gone.json.task, `hard delete verified gone -> ${gone.status}`);
-        // Nudge dispatcher: dry-run only (never spawn real workers in smoke).
-        const nd = await req("POST", `${B}/__api/tasks?backend=hermes&action=dispatch`, { dryRun: true, max: 1 });
-        ok(nd.status === 200 && typeof nd.json.result?.spawned === "number",
-          `dispatch dry-run -> claimed=${nd.json.result?.claimed} spawned=${nd.json.result?.spawned}`);
-        // Multi-board: create throwaway (no switch) → list includes it → switch → restore default → delete.
-        const bslug = "smoke-board-" + Math.random().toString(36).slice(2, 8);
-        const cb = await req("POST", `${B}/__api/tasks/boards?backend=hermes`, { slug: bslug, name: "[smoke] board", switch: false });
-        ok(cb.status === 200 && cb.json.board?.slug === bslug, `board create -> ${cb.json.board?.slug}`);
-        const lb = await req("GET", `${B}/__api/tasks/boards?backend=hermes`);
-        ok(lb.status === 200 && (lb.json.boards || []).some((b) => b.slug === bslug), `board list incl -> ${(lb.json.boards || []).length}`);
-        const sw = await req("POST", `${B}/__api/tasks/boards/${bslug}/switch?backend=hermes`);
-        ok(sw.status === 200, `board switch -> ${sw.status}`);
-        await req("POST", `${B}/__api/tasks/boards/default/switch?backend=hermes`); // restore current
-        // 板设置（名/描述/项目目录）——只改这块一次性的临时板，随后删掉。
-        const pb = await req("PATCH", `${B}/__api/tasks/boards/${bslug}?backend=hermes`,
-          { name: "[smoke] renamed", description: "smoke desc", defaultWorkdir: "" });
-        const lb2 = await req("GET", `${B}/__api/tasks/boards?backend=hermes`);
-        const renamed = (lb2.json.boards || []).find((b) => b.slug === bslug);
-        ok(pb.status === 200 && renamed?.name === "[smoke] renamed", `board settings patch -> ${renamed?.name}`);
-        const dbd = await req("DELETE", `${B}/__api/tasks/boards/${bslug}?backend=hermes`);
-        ok(dbd.status === 200, `board delete (cleanup) -> ${dbd.status}`);
-        // 看板前端偏好（官方 lane_by_profile 默认 true——UI 的默认分泳道来源）。
-        const kcfg = await req("GET", `${B}/__api/tasks/config?backend=hermes`);
-        ok(kcfg.status === 200 && typeof kcfg.json.config?.laneByProfile === "boolean",
-          `board config -> lanes=${kcfg.json.config?.laneByProfile} archived=${kcfg.json.config?.includeArchivedByDefault} md=${kcfg.json.config?.renderMarkdown}`);
-        // 任务级模型覆盖的候选目录（空 providers 也算通过：UI 会退化成自由文本）。
-        const mopt = await req("GET", `${B}/__api/tasks/model-options?backend=hermes`);
-        ok(mopt.status === 200 && Array.isArray(mopt.json.options?.providers),
-          `task model options -> providers=${(mopt.json.options?.providers || []).length}`);
-        // 编排 profile 名单 + 描述写回（原值 no-op，绝不改用户配置；⚗ 自动生成是
-        // LLM 调用，故意不跑）。
-        const profs = await req("GET", `${B}/__api/tasks/profiles?backend=hermes`);
-        const prof0 = (profs.json.profiles || [])[0];
-        ok(profs.status === 200 && Array.isArray(profs.json.profiles),
-          `board profiles -> ${(profs.json.profiles || []).length}`);
-        if (prof0) {
-          const pp = await req("PATCH", `${B}/__api/tasks/profiles/${encodeURIComponent(prof0.name)}?backend=hermes`,
-            { description: prof0.description || "" });
-          ok(pp.status === 200, `profile description no-op (${prof0.name}) -> ${pp.status}`);
-        }
-        // Orchestration: GET, then a NO-OP PUT (write current values back — never changes config.yaml).
-        const og = await req("GET", `${B}/__api/tasks/orchestration?backend=hermes`);
-        const orch = og.json.orchestration || {};
-        ok(og.status === 200 && typeof orch.autoDecompose === "boolean", `orchestration get -> auto=${orch.autoDecompose} promote=${orch.autoPromoteChildren}`);
-        const op = await req("PUT", `${B}/__api/tasks/orchestration?backend=hermes`, { autoDecompose: orch.autoDecompose, autoPromoteChildren: orch.autoPromoteChildren });
-        ok(op.status === 200, `orchestration put no-op -> ${op.status}`);
-        // Kanban events WS broker (Slice 9): connect to /__kanbanws; expect it to OPEN
-        // and stay open (upstream Hermes dashboard accepted the token = relay works).
-        const WS = require("ws");
-        await new Promise((resolve) => {
-          const wsk = new WS(`${B.replace(/^http/, "ws")}/__kanbanws`, { origin: B });
-          let opened = false, closedEarly = false;
-          const to = setTimeout(() => {
-            ok(opened && !closedEarly, `kanban events WS -> open=${opened} closedEarly=${closedEarly}`);
-            try { wsk.close(); } catch { /* ignore */ }
-            resolve();
-          }, 2500);
-          wsk.on("open", () => { opened = true; });
-          wsk.on("close", () => { if (opened) closedEarly = true; });
-          wsk.on("error", () => { clearTimeout(to); ok(false, `kanban events WS error`); resolve(); });
-        });
-      }
-    } catch (e) { ok(false, `kanban: ${e.message}`); }
+      ok(board.status === 200 && !brd.error && brd.capabilities?.kind === "hermes"
+        && Array.isArray(brd.tenants) && Array.isArray(brd.assignees), "board enriched read shape");
+      const boards = await req("GET", `${B}/__api/tasks/boards?backend=hermes`);
+      ok(boards.status === 200 && Array.isArray(boards.json.boards), "board list read shape (selection unchanged)");
+      const config = await req("GET", `${B}/__api/tasks/config?backend=hermes`);
+      ok(config.status === 200 && typeof config.json.config?.laneByProfile === "boolean", "board config read shape");
+      const options = await req("GET", `${B}/__api/tasks/model-options?backend=hermes`);
+      ok(options.status === 200 && Array.isArray(options.json.options?.providers), "task model options read shape");
+      const profiles = await req("GET", `${B}/__api/tasks/profiles?backend=hermes`);
+      ok(profiles.status === 200 && Array.isArray(profiles.json.profiles), "board profiles read shape");
+      const orchestration = await req("GET", `${B}/__api/tasks/orchestration?backend=hermes`);
+      ok(orchestration.status === 200 && typeof orchestration.json.orchestration?.autoDecompose === "boolean", "orchestration read shape");
+      log("LIVE_READ_ONLY: home subscriptions, board switching and configuration writes intentionally untested");
+    } catch (e) { ok(false, `kanban read: ${e.message}`); }
   }
 
   if (WHICH === "skills" || WHICH === "all") {
@@ -849,13 +620,7 @@ async function main() {
         const list = await req("GET", `${B}/__api/skills?backend=${backend}`);
         const skills = list.json.skills || [];
         ok(list.status === 200, `${backend} skills -> ${skills.length}`);
-        const s = skills[0];
-        if (s) {
-          // idempotent no-op toggle (sets enabled to its CURRENT value) — verifies
-          // the PUT route + backend without changing the user's config.
-          const u = await req("PUT", `${B}/__api/skills?backend=${backend}&name=${encodeURIComponent(s.name)}`, { enabled: s.enabled });
-          ok(u.status === 200, `${backend} toggle no-op (${s.name}) -> ${u.status}`);
-        }
+        log(`LIVE_READ_ONLY ${backend} skill toggles intentionally untested`);
       } catch (e) { ok(false, `${backend} skills: ${e.message}`); }
     }
     // 使用次数叠加层（R359）：与 cli/usage 同形，读本机 JSONL，无需网关在线。
@@ -1093,7 +858,7 @@ async function main() {
       ok(oce.status === 200 && ocVars.every((v) => v.category === "tool" && v.isSet === true),
         `openclaw env -> ${ocVars.length} tool vars (all category:tool)`);
     } catch (e) { ok(false, `env: ${e.message}`); }
-    // OAuth provider 登录（Hermes-only）。只读列表 + 取消一个不存在的会话；
+    // OAuth provider 登录：只读列表；
     // 不真跑 start/submit（会开浏览器并动真凭证）。
     try {
       const oa = await req("GET", `${B}/__api/oauth?backend=hermes`);
@@ -1101,8 +866,6 @@ async function main() {
       const shaped = provs.every((p) => p.id && p.flow && p.status && Array.isArray(p.connectedProfiles));
       ok(oa.status === 200 && provs.length > 0 && shaped && (oa.json.profiles || []).length > 0,
         `hermes oauth -> ${provs.length} providers / ${(oa.json.profiles || []).length} profiles`);
-      const cancel = await req("POST", `${B}/__api/oauth/cancel?backend=hermes`, { sessionId: "smoke-not-a-session" });
-      ok(cancel.status === 200 && cancel.json.ok === false, `hermes oauth cancel unknown session -> ok:false`);
       // OpenClaw 侧（快照 + models.authStatus 拼装）：全部 external 流、可断开、
       // 不发真登录（列表本身只读；start/submit/poll 对 openclaw 是契约默认 throw）。
       const oco = await req("GET", `${B}/__api/oauth?backend=openclaw`);
@@ -1228,17 +991,7 @@ async function main() {
           ok(retiredBrowser.status === 404, `${backend} retired browser route -> 404`);
           ok(computer.status === 200 && computer.json.computer?.supported === false,
             `${backend} computer use -> supported:false`);
-          // 模型降级链回写：原样写回同一组 {model, fallbacks}。后端对「已收敛」是
-          // 零写（不发 config.patch，不触发网关热重载），所以 smoke 可以安全地跑真
-          // agent —— 断言 200 且读回来一字不差。
-          const fb = det.json.agent?.fallbacks;
-          if (Array.isArray(fb) && fb.length) {
-            const put = await req("PUT", `${B}/__api/agents/${encodeURIComponent(aid)}?backend=${backend}`,
-              { model: det.json.agent.model, fallbacks: fb });
-            const after = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}?backend=${backend}`);
-            ok(put.status === 200 && JSON.stringify(after.json.agent?.fallbacks) === JSON.stringify(fb),
-              `${backend} fallbacks round-trip (${fb.length}) -> ${put.status} unchanged=${JSON.stringify(after.json.agent?.fallbacks) === JSON.stringify(fb)}`);
-          }
+          log(`LIVE_READ_ONLY ${backend} Agent settings writes intentionally untested`);
           // agent 页「文件」tab：该 agent 的产出文件（本地磁盘扫描，只读）。
           const art = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}/artifacts?backend=${backend}`);
           const artBody = art.json.artifacts || {};
@@ -1450,12 +1203,6 @@ async function main() {
       const unsupportedArtifacts = await req(
         "GET", `${B}/__api/sessions/artifacts?${routedQuery.toString()}`,
       );
-      const unsupportedFork = await req("POST", `${B}/__api/sessions/fork`, {
-        backend: "hermes",
-        agentId: routedAgent,
-        key: routedKey,
-        entryId: "entry/with/slash",
-      });
       ok(
         unsupportedDescription.status === 200
           && unsupportedDescription.json?.supported === false
@@ -1473,10 +1220,6 @@ async function main() {
           && unsupportedArtifacts.json?.artifacts?.supported === false
           && Array.isArray(unsupportedArtifacts.json?.artifacts?.items),
         "hermes explicit session artifacts -> supported:false with items array",
-      );
-      ok(
-        unsupportedFork.status === 200 && unsupportedFork.json?.supported === false,
-        "hermes explicit session fork -> supported:false (no mutation)",
       );
       const unsupportedBoardQuery = new URLSearchParams({
         backend: "hermes",
@@ -1596,13 +1339,16 @@ async function main() {
     } catch (e) { ok(false, `dashboard: ${e.message}`); }
   }
 
-  await server.close();
-  for (const restore of restoreModelAdapters) restore();
-  hb.stop();
-  fs.rmSync(cfgDir, { recursive: true, force: true });
-  setTimeout(() => process.exit(failed ? 1 : 0), 300);
+  } finally {
+    if (server) await server.close();
+    for (const restore of restoreModelAdapters) restore();
+    modelFixture = false;
+    await Promise.allSettled([hb.stop(), oc?.stop()]);
+    if (cfgDir) fs.rmSync(cfgDir, { recursive: true, force: true });
+  }
+  process.exitCode = failed ? 1 : 0;
 }
 if (require.main === module) {
-  main().catch((e) => { console.error("[crud] FAILED", e); process.exit(1); });
+  main().catch((e) => { console.error("[crud] FAILED", e); process.exitCode = 1; });
 }
 module.exports = { installSmokeModelAdapter };

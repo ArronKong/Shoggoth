@@ -273,101 +273,6 @@ function prepareInstallSource(sourcePath, stagingDirectory) {
     throw error;
   }
 }
-
-function legacySkillName(sourcePath, instructions) {
-  const frontmatter = instructions.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u)?.[1] || "";
-  const declared = frontmatter.match(/^name\s*:\s*["']?([^\r\n"']+)["']?\s*$/imu)?.[1];
-  const raw = (declared || path.basename(sourcePath)).normalize("NFKC").toLocaleLowerCase("en-US");
-  const normalized = raw.replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 64);
-  if (!NAME_PATTERN.test(normalized)) throw skillError("SKILL_IMPORT_INVALID", "导入 Skill 名称无效");
-  const description = frontmatter.match(/^description\s*:\s*["']?([^\r\n"']+)["']?\s*$/imu)?.[1]?.trim();
-  return {
-    name: normalized,
-    description: description && safeText(description, 4096)
-      ? description : "Imported local Skill: " + normalized,
-  };
-}
-
-function legacySkillAlias(runtime, name) {
-  const prefix = String(runtime).toLocaleLowerCase("en-US").replace(/[^a-z0-9]+/gu, "-");
-  const alias = `${prefix}-${name}`.slice(0, 64).replace(/-+$/gu, "");
-  if (!NAME_PATTERN.test(alias)) throw skillError("SKILL_IMPORT_INVALID", "导入 Skill 别名无效");
-  return alias;
-}
-
-function materializeLegacySkill(sourcePath, staging, runtime) {
-  const sourceRoot = path.resolve(sourcePath);
-  const sourceStat = fs.lstatSync(sourceRoot);
-  assertSafeDirectory(sourceStat, sourceRoot, true);
-  const instructionsPath = path.join(sourceRoot, "SKILL.md");
-  const instructionsStat = lstatIfExists(instructionsPath);
-  if (!instructionsStat) {
-    throw skillError("SKILL_IMPORT_INVALID", "导入 Skill 缺少 SKILL.md");
-  }
-  assertSafeFile(instructionsStat, instructionsPath, true);
-  const sourceFiles = [];
-  let totalBytes = 0;
-  const visit = (directory, relativeDirectory = "") => {
-    for (const name of fs.readdirSync(directory).sort((left, right) => left.localeCompare(right))) {
-      if (relativeDirectory === "" && name === "skill.json") continue;
-      const relativePath = relativeDirectory ? path.join(relativeDirectory, name) : name;
-      if (!["SKILL.md", "scripts", "references", "assets"]
-        .includes(relativePath.split(path.sep)[0])) continue;
-      validateRelativePath(relativePath);
-      const source = path.join(directory, name);
-      const stat = fs.lstatSync(source);
-      if (stat.isSymbolicLink()) throw skillError("UNSAFE_SYMLINK", "Skill 拒绝 symlink: " + source);
-      if (stat.isDirectory()) {
-        assertSafeDirectory(stat, source, true);
-        visit(source, relativePath);
-        continue;
-      }
-      assertSafeFile(stat, source, true);
-      totalBytes += stat.size;
-      const bytes = readStableOwnedFile(source);
-      sourceFiles.push({ relativePath, source, size: stat.size, bytes, sha256: sha256(bytes) });
-      if (sourceFiles.length > MAX_PACKAGE_FILES || totalBytes > MAX_PACKAGE_BYTES) {
-        throw skillError("SKILL_PACKAGE_TOO_LARGE", "导入 Skill 超过容量上限");
-      }
-    }
-  };
-  visit(sourceRoot);
-  const instructionsFile = sourceFiles.find((file) => file.relativePath === "SKILL.md");
-  const instructions = decodeText(instructionsFile?.bytes, "SKILL.md", true);
-  if (!instructions.trim() || Buffer.byteLength(instructions, "utf8") > MAX_SKILL_INSTRUCTION_BYTES
-    || hasSecret(instructions)) {
-    throw skillError("SKILL_IMPORT_INVALID", "导入 Skill 指令无效或包含敏感信息");
-  }
-  const metadata = legacySkillName(sourceRoot, instructions);
-  const sourceDigest = sha256(stable(sourceFiles.map((file) => ({
-    path: file.relativePath.split(path.sep).join("/"),
-    sha256: file.sha256,
-  }))));
-  const manifest = {
-    schemaVersion: 1,
-    id: "imported:" + metadata.name,
-    name: metadata.name,
-    version: "0.0.0-imported." + sourceDigest.slice(0, 12),
-    description: metadata.description,
-    entry: "SKILL.md",
-    requiredTools: [],
-    requiredRuntimeCapabilities: [],
-    sourceCompatibility: ["shoggoth"],
-  };
-  validateManifest(manifest);
-  fs.mkdirSync(staging, { mode: 0o700 });
-  for (const file of sourceFiles) {
-    const target = path.join(staging, file.relativePath);
-    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-    fs.chmodSync(path.dirname(target), 0o700);
-    createPrivateFile(target, file.bytes);
-  }
-  fs.writeFileSync(path.join(staging, "skill.json"), JSON.stringify(manifest, null, 2) + "\n", {
-    mode: 0o600,
-    flag: "wx",
-  });
-  return manifest;
-}
 function publicPackage(record, enabled = false, eligibility = null) {
   return Object.freeze({
     id: record.id,
@@ -508,11 +413,8 @@ class NativeSkillStore {
     const target = this._profilePath(profileId);
     ensurePrivateDirectoryTree(path.dirname(target), this.paths.trustedRoot);
     if (!lstatIfExists(target)) {
-      const selections = this.registry.packages.filter((item) => item.globalEnabled).map((item) => ({
-        skillId: item.id, source: item.source, version: item.version, enabled: true,
-      })).sort((left, right) => left.skillId.localeCompare(right.skillId));
       const created = { schemaVersion: SKILL_PROFILE_SCHEMA_VERSION, revision: 1,
-        updatedAt: this.now(), selections };
+        updatedAt: this.now(), selections: [] };
       atomicWritePrivateFile(target, `${JSON.stringify(created)}\n`, { trustedRoot: this.paths.trustedRoot });
     }
     let value;
@@ -556,20 +458,6 @@ class NativeSkillStore {
         maxBytes: MAX_REGISTRY_BYTES,
       }).toString("utf8"));
     } catch { throw skillError("SKILL_REGISTRY_CORRUPT", "Skill Registry 无法读取"); }
-    if (parsed?.schemaVersion === 1
-      && exact(parsed, ["schemaVersion", "revision", "updatedAt", "packages"])
-      && Array.isArray(parsed.packages)) {
-      parsed = {
-        ...parsed,
-        schemaVersion: SKILL_REGISTRY_SCHEMA_VERSION,
-        revision: parsed.revision + 1,
-        updatedAt: this.now(),
-        packages: parsed.packages.map((record) => ({ ...record, globalEnabled: false })),
-      };
-      atomicWritePrivateFile(this.paths.skillRegistryPath, `${JSON.stringify(parsed)}\n`, {
-        trustedRoot: this.paths.trustedRoot,
-      });
-    }
     this.registry = this._validateRegistry(parsed);
     this._cleanupOrphanPackages();
     this.opened = true;
@@ -701,17 +589,7 @@ class NativeSkillStore {
         const profile = this.list(profileId);
         const selected = profile.items.find((item) => item.id === installed.package.id
           && item.version === installed.package.version && item.source === "user");
-        if (!selected) throw skillError("SKILL_NOT_FOUND", "Skill 未进入 Profile catalog");
-        if (!selected.enabled) {
-          this.setProfileSkill({
-            profileId,
-            skillId: selected.id,
-            source: selected.source,
-            version: selected.version,
-            enabled: true,
-            expectedRevision: profile.profileRevision,
-          });
-        }
+        if (!selected?.enabled) throw skillError("SKILL_NOT_FOUND", "Skill 未进入 Profile catalog");
         enabledProfiles.push(profileId);
       } catch {
         failedProfiles.push(profileId);
@@ -727,61 +605,6 @@ class NativeSkillStore {
       availableToFutureProfiles: true,
       complete: failedProfiles.length === 0,
     };
-  }
-  importLegacySkill(input) {
-    this._assertOpen();
-    if (!input || !ID_PATTERN.test(input.profileId)
-      || typeof input.runtime !== "string" || !/^[a-z][a-z0-9-]{0,63}$/u.test(input.runtime)
-      || typeof input.sourcePath !== "string" || !path.isAbsolute(input.sourcePath)) {
-      throw skillError("SKILL_IMPORT_INVALID", "旧 Skill 导入参数无效");
-    }
-    const staging = path.join(
-      this.paths.skillStagingDir,
-      ".legacy-" + crypto.randomBytes(12).toString("hex"),
-    );
-    try {
-      const manifest = materializeLegacySkill(input.sourcePath, staging, input.runtime);
-      const current = this.list(input.profileId);
-      const nameConflict = current.items.find((item) => item.name === manifest.name
-        && (item.id !== manifest.id || item.version !== manifest.version));
-      if (nameConflict) {
-        const alias = legacySkillAlias(input.runtime, manifest.name);
-        const aliasConflict = current.items.find((item) => item.name === alias
-          && (item.id !== `imported:${alias}` || item.version !== manifest.version));
-        if (aliasConflict) {
-          return { enabled: aliasConflict.enabled, conflict: true, package: aliasConflict };
-        }
-        manifest.id = `imported:${alias}`;
-        manifest.name = alias;
-        manifest.description = `Imported ${manifest.name} from ${input.runtime}`;
-        validateManifest(manifest);
-        fs.writeFileSync(path.join(staging, "skill.json"), JSON.stringify(manifest, null, 2) + "\n", {
-          mode: 0o600,
-          flag: "w",
-        });
-      }
-      const installed = this.installFromDirectory({
-        operationId: "native-import-" + crypto.randomBytes(12).toString("hex"),
-        sourcePath: staging,
-        expectedRevision: this.registry.revision,
-      });
-      const profile = this.list(input.profileId);
-      const selected = profile.items.find((item) => item.id === installed.package.id
-        && item.version === installed.package.version);
-      if (!selected) throw skillError("SKILL_IMPORT_INVALID", "导入 Skill 未进入 Registry");
-      if (selected.enabled) return { enabled: true, conflict: false, package: selected };
-      const enabled = this.setProfileSkill({
-        profileId: input.profileId,
-        skillId: selected.id,
-        source: selected.source,
-        version: selected.version,
-        enabled: true,
-        expectedRevision: profile.profileRevision,
-      });
-      return { enabled: true, conflict: false, package: enabled.skill };
-    } finally {
-      if (lstatIfExists(staging)) safeRemoveTree(staging);
-    }
   }
   uninstall(input) {
     this._assertOpen();
@@ -841,18 +664,40 @@ class NativeSkillStore {
     this.profileManifests.set(input.profileId, next);
     return { revision: next.revision, skill: publicPackage(selectedPackage, input.enabled) };
   }
+  setGlobalSkill(input) {
+    this._assertOpen();
+    if (!input || input.source !== "user" || !ID_PATTERN.test(input.skillId)
+      || !VERSION_PATTERN.test(input.version) || typeof input.enabled !== "boolean") {
+      throw skillError("SKILL_NOT_FOUND", "Skill 包不存在");
+    }
+    if (input.expectedRevision !== this.registry.revision) {
+      throw skillError("SKILL_REGISTRY_REVISION_CONFLICT", "Skill Registry revision 已变化");
+    }
+    const selected = this._findPackage(input.skillId, "user", input.version);
+    if (!selected) throw skillError("SKILL_NOT_FOUND", "Skill 包不存在");
+    const packages = this.registry.packages.map((item) => item.id === input.skillId
+      && (input.enabled || item.version === input.version)
+      ? Object.freeze({ ...item, globalEnabled: input.enabled && item.version === input.version })
+      : item);
+    const revision = this._commitRegistry(packages);
+    return { revision, skill: publicPackage(this._findPackage(input.skillId, "user", input.version),
+      input.enabled) };
+  }
   list(profileId) {
     this._assertOpen();
     const manifest = this._manifest(profileId);
     const selections = new Map(manifest.selections.map((item) => [item.skillId, item]));
+    const globalIds = new Set(this.registry.packages.filter((item) => item.globalEnabled)
+      .map((item) => item.id));
     return {
       registryRevision: this.registryRevision,
       registryVersion: this.registry.revision,
       profileRevision: manifest.revision,
       items: this._allPackages().map((record) => {
         const selected = selections.get(record.id);
-        const enabled = selected?.enabled === true && selected.source === record.source
-          && selected.version === record.version;
+        const enabled = record.globalEnabled === true
+          || (!globalIds.has(record.id) && selected?.enabled === true
+            && selected.source === record.source && selected.version === record.version);
         return publicPackage(record, enabled);
       }),
     };
@@ -871,11 +716,15 @@ class NativeSkillStore {
   }
   _selected(profileId) {
     const manifest = this._manifest(profileId);
-    return manifest.selections.filter((item) => item.enabled).map((selection) => {
+    const byId = new Map(manifest.selections.filter((item) => item.enabled).map((selection) => {
       const record = this._findPackage(selection.skillId, selection.source, selection.version);
       if (!record) throw skillError("SKILL_PROFILE_CORRUPT", "Skill Profile 引用丢失");
-      return record;
-    });
+      return [record.id, record];
+    }));
+    for (const record of this.registry.packages) {
+      if (record.globalEnabled) byId.set(record.id, record);
+    }
+    return [...byId.values()];
   }
   catalog(profileId, options = {}) {
     this._assertOpen();

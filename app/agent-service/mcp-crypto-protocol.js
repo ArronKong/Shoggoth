@@ -14,7 +14,7 @@ const MAX_SAFE_STORAGE_PAYLOAD_BYTES = 16 * 1024 * 1024;
 const MAX_MCP_CRYPTO_REQUEST_BYTES = MAX_MCP_CRYPTO_HEADER_BYTES
   + MAX_SAFE_STORAGE_PAYLOAD_BYTES;
 const MCP_CRYPTO_OPERATIONS = new Set([
-  "service.loadOrCreate", "helper.read", "safeStorage.encrypt", "safeStorage.decrypt",
+  "service.loadOrCreate", "service.rewrapLegacyMcpAuth", "helper.read", "safeStorage.encrypt", "safeStorage.decrypt",
 ]);
 const MCP_CRYPTO_CALLER_ROLES = new Set(["agent-service", "mcp"]);
 
@@ -77,11 +77,12 @@ function validateWorkerRequest(request, gate) {
     || request.version !== MCP_CRYPTO_PROTOCOL_VERSION
     || request.generation !== gate.generation
     || !MCP_CRYPTO_OPERATIONS.has(request.operation)
-    || (request.operation === "service.loadOrCreate" && gate.callerRole !== "agent-service")
+    || (["service.loadOrCreate", "service.rewrapLegacyMcpAuth"].includes(request.operation)
+      && gate.callerRole !== "agent-service")
     || (request.operation === "helper.read" && gate.callerRole !== "mcp")
     || !Number.isSafeInteger(request.payloadBytes) || request.payloadBytes < 0
     || request.payloadBytes > MAX_SAFE_STORAGE_PAYLOAD_BYTES
-    || (["service.loadOrCreate", "helper.read"].includes(request.operation)
+    || (["service.loadOrCreate", "service.rewrapLegacyMcpAuth", "helper.read"].includes(request.operation)
       && request.payloadBytes !== 0)
     || (["safeStorage.encrypt", "safeStorage.decrypt"].includes(request.operation)
       && request.payloadBytes === 0)) {

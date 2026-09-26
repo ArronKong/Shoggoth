@@ -40,6 +40,14 @@ const {
   projectStandingGrantRevokeResult,
 } = require("./agent-backend");
 const { OpenClawUpdateController } = require("./openclaw-self-updater");
+const {
+  normalizeExternalPluginQuery,
+  supportedExternalPluginVersion,
+  unavailableExternalPluginCatalog,
+  capabilitiesFromCatalog,
+  projectOpenClawExternalPlugins,
+  externalPluginWriteUnsupported,
+} = require("./external-plugin-catalog");
 const { compareVersions } = require("./version-checker");
 const { workboardCardToActivities } = require("./dashboard-activity");
 const { normalizeArtifactRoots, walkArtifactRoots, resolveArtifactPreviewPath } = require("./artifact-scan");
@@ -634,9 +642,12 @@ class OpenClawBackend extends AgentBackend {
     this._getUpstreamUrl = typeof getUpstreamUrl === "function" ? getUpstreamUrl : () => DEFAULT_GATEWAY_URL;
     this._getOrigin = typeof getOrigin === "function" ? getOrigin : () => DEFAULT_ORIGIN;
     this._ws = null;
+    this._wsGatewayUrl = null;
+    this._stopGeneration = 0;
     this._ready = false;
     this._connecting = null; // dedupe concurrent connects
     this._connectingAttempt = null; // 当前握手代际，防旧回调清掉新单飞 Promise
+    this._cancelConnecting = null;
     this._pending = new Map(); // reqId -> { resolve, reject, socket }
     this._finalObservers = new Map(); // original agent RPC id -> socket-bound final observer
     // 统一凭证解析(config.token / operator 身份 / loopback 网关 token / 已存设备令牌)。
@@ -758,6 +769,7 @@ class OpenClawBackend extends AgentBackend {
     }
     const safePath = normalizeCanvasWidgetResourcePath(resourcePath);
     if (!safePath) return { supported: true, ok: false, reason: "invalid-path" };
+    const gatewayUrl = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL;
 
     try {
       await this._connect();
@@ -766,11 +778,17 @@ class OpenClawBackend extends AgentBackend {
       return { supported: true, ok: false, reason };
     }
 
+    const generation = this._connectionGeneration;
+    const socket = this._ws;
     let auth;
     try {
-      auth = this._loadAuth();
+      auth = await this._loadAuth(gatewayUrl);
     } catch {
       return { supported: true, ok: false, reason: "upstream-rejected" };
+    }
+    if (generation !== this._connectionGeneration || socket !== this._ws
+      || gatewayUrl !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
+      return { supported: true, ok: false, reason: "upstream-error" };
     }
     const bearer = typeof (auth?.token ?? auth?.deviceToken) === "string"
       ? (auth.token ?? auth.deviceToken)
@@ -780,7 +798,7 @@ class OpenClawBackend extends AgentBackend {
     }
 
     const target = gatewayHttpResourceUrl(
-      (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL,
+      gatewayUrl,
       safePath,
     );
     if (!target) return { supported: true, ok: false, reason: "upstream-error" };
@@ -1248,12 +1266,15 @@ class OpenClawBackend extends AgentBackend {
   async start() { return true; }
 
   async stop() {
+    this._stopGeneration += 1;
+    this._cancelConnecting?.(new Error("openclaw: backend stopped"));
     this._ready = false;
     this._gatewayHello = null;
     this._connecting = null;
     this._connectingAttempt = null;
     const ws = this._ws;
     this._ws = null;
+    this._wsGatewayUrl = null;
     this._advanceModelRuntimeGeneration();
     this._flushPending(new Error("openclaw: backend stopped"));
     if (ws) {
@@ -3741,10 +3762,15 @@ class OpenClawBackend extends AgentBackend {
   // ---- device-auth ----
 
   // 统一凭证解析(device-auth.createAuthResolver):config.token / operator 身份 /
-  // loopback 本机网关 token / 已存设备令牌。每次连接现解析(三个小 JSON 读,成本
-  // 可忽略),token 热更新即时生效,也避免旧版「失败缓存导致 backend 死到重启」问题。
-  _loadAuth() {
-    return this._authResolver.resolveConnectAuth((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL);
+  // loopback 本机网关 token / 已存设备令牌。SecretRef 解密可启动外部进程，
+  // 正式 resolver 必须异步等待，不能阻塞 Electron 主线程。
+  async _loadAuth(gatewayUrl = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL) {
+    if (typeof this._authResolver.resolveConnectAuthAsync === "function") {
+      return await this._authResolver.resolveConnectAuthAsync(gatewayUrl);
+    }
+    // Compatibility for injected legacy resolvers; production createAuthResolver
+    // always supplies the asynchronous method.
+    return this._authResolver.resolveConnectAuth(gatewayUrl);
   }
 
   // ---- connection / RPC ----
@@ -3833,12 +3859,15 @@ class OpenClawBackend extends AgentBackend {
 
   /** Ensure an authenticated connection; lazily (re)connects + handshakes. */
   _connect() {
+    const url = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL;
+    if (this._wsGatewayUrl && this._wsGatewayUrl !== url) void this.stop();
     if (this._ready && this._ws && this._ws.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
     if (this._connecting) return this._connecting;
 
     const attempt = Symbol("openclaw-connect");
+    const origin = this._getOrigin() || DEFAULT_ORIGIN;
     let resolveAttempt;
     let rejectAttempt;
     const connecting = new Promise((resolve, reject) => {
@@ -3853,26 +3882,9 @@ class OpenClawBackend extends AgentBackend {
       if (this._connectingAttempt !== attempt) return;
       this._connectingAttempt = null;
       this._connecting = null;
+      this._cancelConnecting = null;
     };
-    const auth = this._loadAuth();
-    if (!auth) {
-      clearConnecting();
-      rejectAttempt(new Error("openclaw: device identity / operator token unavailable"));
-      return connecting;
-    }
-    const url = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL;
-    const origin = this._getOrigin() || DEFAULT_ORIGIN;
-
     let ws;
-    try {
-      ws = new WebSocket(url, origin ? { headers: { Origin: origin } } : undefined);
-    } catch (err) {
-      clearConnecting();
-      rejectAttempt(err);
-      return connecting;
-    }
-    this._ws = ws;
-
     let settled = false;
     let timer = null;
     const fail = (err) => {
@@ -3880,13 +3892,14 @@ class OpenClawBackend extends AgentBackend {
       settled = true;
       if (timer) clearTimeout(timer);
       clearConnecting();
-      try { ws.close(); } catch { /* ignore */ }
+      try { ws?.close(); } catch { /* ignore */ }
       rejectAttempt(err);
     };
     const succeed = () => {
       if (settled) return;
       // 握手完成前连接已被替换时，本次结果已过期，不能把 _ready 写回 true。
-      if (this._ws !== ws) {
+      if (this._ws !== ws || this._connectingAttempt !== attempt
+        || url !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
         fail(new Error("openclaw: connection superseded"));
         return;
       }
@@ -3896,8 +3909,20 @@ class OpenClawBackend extends AgentBackend {
       clearConnecting();
       resolveAttempt();
     };
+    this._cancelConnecting = fail;
     timer = setTimeout(() => fail(new Error("openclaw: connect timeout")), CONNECT_TIMEOUT_MS);
-
+    void (async () => {
+      const auth = await this._loadAuth(url);
+      if (settled) return;
+      if (this._connectingAttempt !== attempt
+        || url !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
+        fail(new Error("openclaw: connection superseded"));
+        return;
+      }
+      if (!auth) throw new Error("openclaw: device identity / operator token unavailable");
+      ws = new WebSocket(url, origin ? { headers: { Origin: origin } } : undefined);
+      this._ws = ws;
+      this._wsGatewayUrl = url;
     ws.on("message", (data) => {
       const frame = safeParse(data.toString());
       if (!frame) return;
@@ -3915,7 +3940,7 @@ class OpenClawBackend extends AgentBackend {
       // Device-auth challenge → sign + send connect, then mark ready.
       if (frame.type === "event" && frame.event === "connect.challenge") {
         const nonce = frame.payload?.nonce;
-        this._sendConnect(auth, nonce).then(succeed).catch((err) => {
+        this._sendConnect(auth, nonce, ws, url, attempt).then(succeed).catch((err) => {
           // 设备令牌陈旧(共享身份被别的客户端轮换)→ 清存储,下次连接自愈。
           if (classifyAuthError(err) === "device_token_stale") {
             try { this._authResolver.clearDeviceToken(url); } catch { /* 清不掉也不影响本次失败上抛 */ }
@@ -3931,25 +3956,32 @@ class OpenClawBackend extends AgentBackend {
       if (isCurrent) {
         this._ready = false;
         this._ws = null;
+        this._wsGatewayUrl = null;
         this._gatewayHello = null;
       }
       this._flushPending(new Error("openclaw: connection closed"), ws);
       fail(new Error("openclaw: closed before handshake"));
     });
     ws.on("error", (err) => fail(err instanceof Error ? err : new Error(String(err))));
+    })().catch(fail);
     return connecting;
   }
 
-  async _sendConnect(auth, nonce) {
+  async _sendConnect(auth, nonce, socket = this._ws,
+    gatewayUrl = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL, attempt = this._connectingAttempt) {
     if (!nonce) throw new Error("openclaw: connect challenge missing nonce");
+    const isCurrent = () => this._ws === socket && this._connectingAttempt === attempt
+      && gatewayUrl === ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL);
+    if (!isCurrent()) throw new Error("openclaw: connection superseded");
     const params = buildConnectParams(auth, nonce);
     const hello = await this.request("connect", params, CONNECT_TIMEOUT_MS);
+    if (!isCurrent()) throw new Error("openclaw: connection superseded");
     this._acceptGatewayHello(hello);
     // 网关随 hello-ok 签发/轮换设备令牌 → 按 URL 持久化,下次连接凭它(token 轮换不断连)。
     const issued = hello?.auth?.deviceToken;
     if (typeof issued === "string" && issued) {
       try {
-        this._authResolver.storeDeviceToken(issued, hello?.auth?.issuedAtMs, (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL);
+        this._authResolver.storeDeviceToken(issued, hello?.auth?.issuedAtMs, gatewayUrl);
       } catch { /* 存储失败不影响本次连接 */ }
     }
     return hello;
@@ -5811,6 +5843,45 @@ class OpenClawBackend extends AgentBackend {
     }
   }
 
+  // External native plugins stay owned by the Gateway. No local CLI/config fallback.
+  async getExternalPluginCapabilities() {
+    return capabilitiesFromCatalog(await this.getExternalPluginCatalog({ limit: 1 }));
+  }
+
+  async getExternalPluginCatalog(input = {}) {
+    const query = normalizeExternalPluginQuery(input);
+    if (query.agentId !== undefined) {
+      return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_SCOPE_UNSUPPORTED");
+    }
+    try {
+      await this._connect();
+      const hello = this._gatewayHello;
+      if (!supportedExternalPluginVersion(this.id, hello?.server?.version)) {
+        return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_VERSION_UNSUPPORTED");
+      }
+      if (!hasGatewayMethod(hello, "plugins.list") || !hasGatewayScope(hello, "operator.read")) {
+        return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_API_UNSUPPORTED");
+      }
+      const generation = this._connectionGeneration;
+      const scope = this._getUpstreamUrl();
+      const payload = await this.request("plugins.list", {}, 8000);
+      if (generation !== this._connectionGeneration || hello !== this._gatewayHello
+        || scope !== this._getUpstreamUrl()) {
+        return unavailableExternalPluginCatalog(this.id, "PLUGIN_EXTERNAL_OBSERVATION_STALE");
+      }
+      return projectOpenClawExternalPlugins(payload, { query, scope,
+        hostVersion: hello.server.version, connectionGeneration: generation });
+    } catch (err) {
+      if (["PLUGIN_EXTERNAL_CATALOG_CHANGED", "PLUGIN_EXTERNAL_QUERY_INVALID"].includes(err?.code)) throw err;
+      return unavailableExternalPluginCatalog(this.id,
+        err?.code === "PLUGIN_EXTERNAL_RESPONSE_INVALID" ? err.code : "PLUGIN_EXTERNAL_UNAVAILABLE");
+    }
+  }
+
+  async previewPluginInstall() { return externalPluginWriteUnsupported(); }
+  async installPlugin() { return externalPluginWriteUnsupported(); }
+  async setPluginInstallationState() { return externalPluginWriteUnsupported(); }
+
   // ---- skills (management UI, read-only) ----
 
   async getSkills() {
@@ -7174,12 +7245,19 @@ class OpenClawBackend extends AgentBackend {
   // ---- status (management UI / 设置) ----
 
   async getStatus() {
+    const gatewayUrl = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL;
+    const generation = this._stopGeneration;
     const info = {
-      gatewayUrl: (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL,
-      hasIdentity: !!this._loadAuth(), // existence only — never expose key/token
+      gatewayUrl,
+      hasIdentity: false,
     };
     let connected = false;
     try {
+      info.hasIdentity = !!(await this._loadAuth(gatewayUrl)); // existence only — never expose key/token
+      if (generation !== this._stopGeneration
+        || gatewayUrl !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
+        throw new Error("openclaw: connection superseded");
+      }
       await this._connect();
       connected = true;
     } catch (err) {

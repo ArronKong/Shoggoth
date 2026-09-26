@@ -196,68 +196,6 @@ test("ownership 持久化、touch 和 archive/delete 状态 fail closed", () => 
 
 });
 
-test("legacy migration marker 与 deleted ownership 原子持久化且重启幂等", () => {
-  const ctx = fixture();
-  let store = ctx.open();
-  store.claim(claimInput());
-  const input = {
-    binding: binding(),
-    sessionId: "shared-looking-session",
-    profileId: "agent-a",
-    workspace: "/tmp/workspace-a",
-    createdAt: 10,
-    lastSeenAt: 10,
-    migrationId: "a".repeat(64),
-    sessionKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    chatSessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    legacyHomeId: `legacy-home-${"c".repeat(64)}-v1`,
-    transcriptRevision: 2,
-  };
-  const marker = store.recordLegacyMigration(input);
-  assert.deepEqual(marker, {
-    migrationId: input.migrationId,
-    sessionKey: input.sessionKey,
-    chatSessionId: input.chatSessionId,
-    profileId: input.profileId,
-    legacyHomeId: input.legacyHomeId,
-    legacyRuntimeSessionId: input.sessionId,
-    transcriptRevision: input.transcriptRevision,
-    migratedAt: 10,
-  });
-  assert.equal(store.readRecord(input).status, "deleted");
-  store.close();
-
-  ctx.tick();
-  store = ctx.open();
-  assert.deepEqual(store.readLegacyMigration(input), marker);
-  assert.deepEqual(store.recordLegacyMigration(input), marker);
-  assert.throws(
-    () => store.recordLegacyMigration({
-      ...input,
-      legacyHomeId: `legacy-home-${"d".repeat(64)}-v1`,
-    }),
-    (error) => error.code === "RUNTIME_SESSION_MIGRATION_CONFLICT",
-  );
-  assert.throws(
-    () => store.claim(claimInput()),
-    (error) => error.code === "RUNTIME_SESSION_OWNERSHIP_DELETED",
-  );
-  store.close();
-
-  const payload = JSON.parse(fs.readFileSync(ctx.paths.runtimeSessionOwnershipPath, "utf8"));
-  const [migrationKey] = Object.keys(payload.legacyMigrations);
-  payload.legacyMigrations[migrationKey].legacyHomeId = "/tmp/arbitrary-legacy-home";
-  fs.writeFileSync(
-    ctx.paths.runtimeSessionOwnershipPath,
-    JSON.stringify(payload),
-    { mode: 0o600 },
-  );
-  assert.throws(
-    () => ctx.open(),
-    (error) => error.code === "RUNTIME_SESSION_OWNERSHIP_CORRUPT",
-  );
-});
-
 test("损坏的 key 与 symlink store 都不能被接受", () => {
   const corrupt = fixture();
   let store = corrupt.open();

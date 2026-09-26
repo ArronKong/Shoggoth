@@ -779,7 +779,15 @@ function createOpenClawModelChange({
     let stagedProvider = null;
     try {
       const fresh = await scanForKind(scan, backend, safeSpec, initialPreview._snapshot?.parsed);
-      if (!fingerprintsEqual(context.journalEntry?.fingerprints, fresh.fingerprints)) {
+      // 旧版本的待恢复 create journal 包含 Session/Cron 指纹；新增已不依赖这两项，
+      // 续提凭据时同样只移除它们，保留配置及其它指纹的严格比较。
+      const expectedFingerprints = safeSpec.kind === "create"
+        && !Object.hasOwn(fresh.fingerprints, "sessions")
+        && !Object.hasOwn(fresh.fingerprints, "cron")
+        ? Object.fromEntries(Object.entries(context.journalEntry?.fingerprints || {})
+          .filter(([key]) => key !== "sessions" && key !== "cron"))
+        : context.journalEntry?.fingerprints;
+      if (!fingerprintsEqual(expectedFingerprints, fresh.fingerprints)) {
         return blocked("reference_fingerprint_changed");
       }
       originalSnapshot = await getConfigSnapshot(backend);

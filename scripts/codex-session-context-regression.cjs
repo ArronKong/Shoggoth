@@ -84,7 +84,20 @@ async function runtime() {
       assert.equal(options.env.SECRET_CANARY, undefined);
       assert.equal(options.env.CODEX_HOME, home);
       capturedSpawn = true;
-      return spawn(command, args, options);
+      const child = spawn(command, args, options);
+      // Only this isolated CLI talks to a local fixture with synthetic data.
+      // Keep native rejection details for transport diagnosis, never payloads.
+      let nativeOutput = "";
+      child.stdout.on("data", chunk => {
+        nativeOutput += chunk.toString();
+        for (;;) {
+          const end = nativeOutput.indexOf("\n");
+          if (end < 0) break;
+          const line = nativeOutput.slice(0, end); nativeOutput = nativeOutput.slice(end + 1);
+          try { const error = JSON.parse(line).error; if (error) console.error("Local fixture native rejection:", String(error.message).slice(0, 1000)); } catch {}
+        }
+      });
+      return child;
     },
   });
   await host.start();
@@ -92,11 +105,12 @@ async function runtime() {
   return new CodexRuntimeAdapter({ runtimePool: { get: async () => host } }).acquire(binding);
 }
 
-async function turn(handle, id, prompt) {
+async function turn(handle, id, prompt, context) {
   const events = [];
   const unsubscribe = host.subscribe(event => events.push(event));
   try {
     const receipt = await handle.turnStart({ sessionId: id, prompt, operationId: `op-${serial}-${Date.now()}`,
+      ...(context ? { context } : {}),
       permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
     const until = Date.now() + 10000;
     while (!events.some(event => event.method === "turn/completed" && event.turnId === receipt.turn.id)) {
@@ -116,7 +130,8 @@ async function turn(handle, id, prompt) {
     assert.throws(() => buildCodexSpawnEnv({ codexHome: home, parentEnv }), { code: "CODEX_SPAWN_ENV_INVALID" });
   }
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  fs.writeFileSync(path.join(home, "config.toml"), `model = "gpt-5.6-sol"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "Local fixture"\nbase_url = "http://127.0.0.1:${server.address().port}/v1"\nwire_api = "responses"\nsupports_websockets = false\n`);
+  const largeContext = process.argv.includes("--large-context");
+  fs.writeFileSync(path.join(home, "config.toml"), `model = "gpt-5.6-sol"\nmodel_provider = "fixture"\n${largeContext ? "model_context_window = 1050000\nmodel_auto_compact_token_limit = 900000\n" : ""}[model_providers.fixture]\nname = "Local fixture"\nbase_url = "http://127.0.0.1:${server.address().port}/v1"\nwire_api = "responses"\nsupports_websockets = false\n`);
   let handle = await runtime();
   const first = await handle.sessionStart({ cwd: scratch, developerInstructions: policy("OLD"),
     permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
@@ -141,6 +156,18 @@ async function turn(handle, id, prompt) {
   parallel = true;
   await Promise.all(concurrent.map(({ session }, index) => turn(handle, session.id, `Parallel request ${index}`)));
   assert.equal(concurrentRequests, 2, "the same Codex host must submit both sessions before either response completes");
+  if (largeContext) {
+    const original = "ORIGINAL_START\n" + "ordinary context words ".repeat(100000) + "\nORIGINAL_END";
+    assert.ok(Buffer.byteLength(original) > 2 * 1024 * 1024);
+    const large = await handle.sessionStart({ cwd: scratch, developerInstructions: policy("LARGE_CONTEXT") });
+    const before = captures.length;
+    await assert.rejects(turn(handle, large.session.id, "Confirm receipt of the supplied data.", original), { code: "RPC_REMOTE_ERROR", rpcCode: -32602 });
+    assert.equal(captures.length, before, "the CLI rejects an oversized user input before model execution");
+    const fitting = "ORIGINAL_START\n" + "ordinary context words ".repeat(40000) + "\nORIGINAL_END";
+    const received = await turn(handle, large.session.id, "Confirm receipt of the supplied data.", fitting);
+    assert.ok(JSON.stringify(received.input).includes(JSON.stringify(fitting).slice(1, -1)), "fitting input arrives without truncation");
+    console.log(`PASS real Codex: verified 1048576-character input guard, no model call on rejection, ${Buffer.byteLength(fitting)} bytes arrived intact; remote capacity is not measured`);
+  }
   console.log("PASS real Codex: proxy inheritance, resumed developer policy, retained history, no repeated injection, separate and concurrent sessions");
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
   try { await host?.stop(); } finally {

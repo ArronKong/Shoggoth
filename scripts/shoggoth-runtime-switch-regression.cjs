@@ -10,12 +10,9 @@ const ROOT = path.resolve(__dirname, "..");
 const { ContextSnapshotStore } = require(path.join(ROOT, "app/agent-service/context-snapshot-store"));
 const { resolveServicePaths } = require(path.join(ROOT, "app/agent-service/paths"));
 const { JsonlProductStore } = require(path.join(ROOT, "app/agent-service/product-store"));
-const { runtimeAccountForLegacyProfile } = require(path.join(
-  ROOT, "app/agent-service/runtime-account-migration",
-));
 const {
   RuntimeSwitchManager,
-} = require(path.join(ROOT, "app/agent-service/runtime-switch-manager"));
+} = require(path.join(ROOT, "scripts/fixtures/legacy-runtime-switch-manager.cjs"));
 const { TranscriptStore } = require(path.join(ROOT, "app/agent-service/transcript-store"));
 
 const tests = [];
@@ -41,6 +38,7 @@ function fixture(checkpoint = () => {}, profileOverrides = {}) {
     name: "Switch Fixture",
     runtime: "codex",
     runtimeProfileId: "runtime-old",
+    runtimeAccountId: "shoggoth-internal-codex-default-v1",
     providerRef: null,
     defaultModel: "fixture-model",
     defaultCwd: "/tmp/runtime-switch-workspace",
@@ -50,6 +48,11 @@ function fixture(checkpoint = () => {}, profileOverrides = {}) {
     enabled: true,
     ...profileOverrides,
   });
+  const candidateAccount = productStore.putRuntimeAccount({ id: "future-account", runtime: "future",
+    kind: "shoggoth-managed", installationKind: "bundled", homeKind: "managed-shared", providerRef: null,
+    isDefault: false, createdAt: null, updatedAt: null });
+  const candidate = productStore.addAgentRuntimeBinding("profile-switch", { runtime: "future",
+    runtimeAccountId: candidateAccount.id }, { operationId: "future-binding-fixture" }).binding;
   const snapshots = new ContextSnapshotStore({ paths });
   snapshots.open();
   const snapshot = snapshots.create({
@@ -111,22 +114,14 @@ function fixture(checkpoint = () => {}, profileOverrides = {}) {
     createManager,
     input(overrides = {}) {
       const profile = productStore.getAgentProfile("profile-switch");
-      let candidateRuntimeAccountId = "unsupported-runtime-account";
-      try {
-        candidateRuntimeAccountId = runtimeAccountForLegacyProfile({
-          ...profile,
-          runtime: "future",
-          runtimeProfileId: "runtime-future",
-        }).runtimeAccountId;
-      } catch {}
       return {
         operationId: "switch-operation",
         profileId: profile.id,
         expectedProfileUpdatedAt: profile.updatedAt,
         candidateBinding: {
           runtime: "future",
-          runtimeProfileId: "runtime-future",
-          runtimeAccountId: candidateRuntimeAccountId,
+          runtimeProfileId: candidate.runtimeProfileId,
+          runtimeAccountId: candidate.runtimeAccountId,
         },
         contextSnapshotId: snapshot.id,
         transcriptSessionId: "session-switch",
@@ -158,7 +153,7 @@ test("fake Future Runtime 用通用 Context/Transcript canary 切换 binding 并
       .getAgentProfile("profile-switch").runtimeAccountId;
     const switched = await manager.switchProfile(value.input());
     assert.equal(switched.runtime, "future");
-    assert.equal(switched.runtimeProfileId, "runtime-future");
+    assert.equal(switched.runtimeProfileId, value.input().candidateBinding.runtimeProfileId);
     assert.equal(switched.runtimeAccountId, value.calls[0][1].runtimeAccountId);
     assert.deepEqual(value.calls.map(([name]) => name), ["acquire", "sessionStart", "turnStart", "stop"]);
     assert.deepEqual(value.calls[0][2], {
@@ -213,7 +208,7 @@ test("Shoggoth Codex Profile 在 ProductStore 层拒绝显式独立账号", asyn
         ...original,
         runtimeAccountId: explicitAccount.id,
       }),
-      (error) => error.code === "AGENT_PROFILE_IDENTITY_CONFLICT",
+      (error) => error.code === "AGENT_BINDING_PROJECTION_READONLY",
     );
     assert.deepEqual(value.productStore.getAgentProfile("profile-switch"), original);
     assert.deepEqual(value.calls, []);
@@ -221,13 +216,13 @@ test("Shoggoth Codex Profile 在 ProductStore 层拒绝显式独立账号", asyn
   } finally { value.cleanup(); }
 });
 
-test("candidate legacy RuntimeAccount 无法推导时不写 journal 或启动 canary", async () => {
-  const value = fixture(() => {}, { backendId: "codex" });
+test("candidate Binding 不存在时不写 journal 或启动 canary", async () => {
+  const value = fixture(() => {}, { runtimeAccountId: "native-codex-default-v1" });
   const before = value.productStore.getAgentProfile("profile-switch");
   const manager = value.createManager();
   try {
     await assert.rejects(
-      manager.switchProfile(value.input()),
+      manager.switchProfile(value.input({candidateBinding:{runtime:"future",runtimeProfileId:"missing",runtimeAccountId:"future-account"}})),
       (error) => error.code === "RUNTIME_SWITCH_ACCOUNT_UNSUPPORTED",
     );
     assert.deepEqual(value.productStore.getAgentProfile("profile-switch"), before);

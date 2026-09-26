@@ -7,7 +7,7 @@ class CodexRpcWriteQueue {
     this.stream = stream;
     this.writeTimeoutMs = options.writeTimeoutMs ?? 5_000;
     this.maxQueuedWrites = options.maxQueuedWrites ?? 256;
-    this.maxQueuedWriteBytes = options.maxQueuedWriteBytes ?? (2 * 1024 * 1024);
+    this.maxQueuedWriteBytes = options.maxQueuedWriteBytes ?? (16 * 1024 * 1024);
     this.onFatal = options.onFatal;
     this.entries = [];
     this.queuedBytes = 0;

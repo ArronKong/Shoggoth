@@ -16,7 +16,7 @@ const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 
 const FILES = ["IDENTITY", "SOUL", "USER", "AGENTS", "TOOLS", "MEMORY"];
 const READ_ONLY = new Set(["USER", "TOOLS", "MEMORY"]);
-const EXPECTED_NAMES = ["Shoggoth", "Codex", "Grok", "Antigravity", "Pi", "DeepSeek Harness"];
+const EXPECTED_NAMES = ["Shoggoth", "Codex", "Grok", "Antigravity", "Pi", "DeepSeek"];
 const uuid = () => crypto.randomUUID();
 const safeStorage = {
   isEncryptionAvailable: () => true,

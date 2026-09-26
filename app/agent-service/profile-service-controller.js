@@ -191,7 +191,9 @@ function createProfileServiceController(options = {}) {
 
   function assertProfileStillCurrent(snapshot, generation) {
     assertAccepting(generation);
-    const current = productStore.getAgentProfile(snapshot.id);
+    const current = snapshot.selectedBindingId
+      ? productStore.resolveAgentRuntimeProfile(snapshot.id, snapshot.selectedBindingId)
+      : productStore.getAgentProfile(snapshot.id);
     if (!current || !sameSnapshot(current, snapshot)) {
       throw profileError("PROFILE_OPERATION_CONFLICT", "Profile changed during configuration");
     }
@@ -601,17 +603,20 @@ function createProfileServiceController(options = {}) {
       } catch (error) {
         return Promise.reject(error);
       }
-      if (method === "profile.models.list" || method === "profile.auth.read") {
+      if (method === "profile.models.list" || method === "profile.binding.models.list" || method === "profile.auth.read") {
         let generation;
         let profile;
         try {
           generation = lifecycleGeneration;
           assertAccepting(generation);
           profile = loadEnabledProfile(params.profileId);
+          if (method === "profile.binding.models.list") {
+            profile = productStore.resolveAgentRuntimeProfile(profile.id, params.bindingId);
+          }
         } catch (error) {
           return Promise.reject(error);
         }
-        const read = method === "profile.models.list"
+        const read = method !== "profile.auth.read"
           ? readRuntimeModelPage(profile, params, generation)
           : readRuntimeAuth(profile, generation);
         return read

@@ -334,7 +334,14 @@ async function main() {
     assert.deepEqual(backend.getAgents().map((agent) => agent.id), [piSpec.agentId]);
     const chatCapabilities = backend.getChatCapabilities(piSpec.agentId);
     assert.deepEqual({ ...chatCapabilities, permissions: undefined }, {
-      attachments: {},
+      attachments: {
+        image: { maxBytes: 10 * 1024 * 1024 },
+        pdf: { maxBytes: 50 * 1024 * 1024 },
+        file: { maxBytes: 50 * 1024 * 1024 },
+      },
+      maxPromptBytes: 60 * 1024,
+      maxAttachmentBytes: 50 * 1024 * 1024,
+      maxAttachments: 8,
       slash: true,
       steer: true,
       modelProvider: "pi",

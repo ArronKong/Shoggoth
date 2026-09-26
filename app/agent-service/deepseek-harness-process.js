@@ -29,7 +29,7 @@ class DeepSeekHarnessProcess {
       || typeof child.on !== "function" || typeof child.kill !== "function") {
       throw processError(
         "DEEPSEEK_HARNESS_PROCESS_INVALID",
-        "DeepSeek Harness process pipes are invalid",
+        "DeepSeek process pipes are invalid",
       );
     }
     this.child = child;
@@ -45,8 +45,10 @@ class DeepSeekHarnessProcess {
     this.onFatal = typeof options.onFatal === "function" ? options.onFatal : () => {};
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.pending = new Map();
+    this.activeServerRequests = 0;
     this.stderr = "";
     this.closed = false;
+    this.failure = null;
     this.inputEnded = false;
     const ready = makeDeferred();
     const close = makeDeferred();
@@ -55,63 +57,74 @@ class DeepSeekHarnessProcess {
     this.rejectReady = ready.reject;
     this.closedPromise = close.promise;
     this.resolveClosed = close.resolve;
+    // Pipe errors are emitted asynchronously, outside request()'s write try/catch.
+    // Keep the listeners through child close to absorb a late error from a write.
+    child.stdin.on("error", () => this._writeFailed());
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.on("error", () => this._fatal(processError(
+        "DEEPSEEK_HARNESS_TRANSPORT_FAILED",
+        "DeepSeek process output could not be read",
+      )));
+    }
     child.stdout.on("data", (chunk) => this._onData(chunk));
     child.stderr.on("data", (chunk) => this._onStderr(chunk));
     child.on("error", () => this._fatal(processError(
       "DEEPSEEK_HARNESS_PROCESS_FAILED",
-      "DeepSeek Harness process failed",
+      "DeepSeek process failed",
     )));
     child.on("close", (code, signal) => this._onClose(code, signal));
   }
 
   request(command, params = {}, options = {}) {
-    if (this.closed || !safeString(command, 128)) {
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.closed || this.inputEnded || !safeString(command, 128)) {
       return Promise.reject(processError(
         "DEEPSEEK_HARNESS_RPC_CLOSED",
-        "DeepSeek Harness process is closed",
+        "DeepSeek process is closed",
       ));
     }
     let id;
     try { id = `shoggoth-${this.randomUUID()}`; } catch {
       return Promise.reject(processError(
         "DEEPSEEK_HARNESS_REQUEST_ID_INVALID",
-        "DeepSeek Harness request id failed",
+        "DeepSeek request id failed",
       ));
     }
     if (!safeString(id, 256) || this.pending.has(id)) {
       return Promise.reject(processError(
         "DEEPSEEK_HARNESS_REQUEST_ID_INVALID",
-        "DeepSeek Harness request id is invalid",
+        "DeepSeek request id is invalid",
       ));
     }
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 10 * 60 * 1000) {
       return Promise.reject(processError(
         "DEEPSEEK_HARNESS_TIMEOUT_INVALID",
-        "DeepSeek Harness request timeout is invalid",
+        "DeepSeek request timeout is invalid",
       ));
     }
     return new Promise((resolve, reject) => {
+      let frame;
+      try { frame = encodeDeepSeekHarnessMessage({ type: "request", id, command, params }); } catch {
+        reject(processError(
+          "DEEPSEEK_HARNESS_WRITE_FAILED",
+          "DeepSeek request could not be encoded",
+        ));
+        return;
+      }
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(processError(
           "DEEPSEEK_HARNESS_REQUEST_TIMEOUT",
-          `DeepSeek Harness ${command} timed out`,
+          `DeepSeek ${command} timed out`,
         ));
       }, timeoutMs);
       timer.unref?.();
       this.pending.set(id, { command, resolve, reject, timer });
       try {
-        this.child.stdin.write(encodeDeepSeekHarnessMessage({
-          type: "request", id, command, params,
-        }));
+        this.child.stdin.write(frame, (error) => { if (error) this._writeFailed(); });
       } catch {
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(processError(
-          "DEEPSEEK_HARNESS_WRITE_FAILED",
-          "DeepSeek Harness request could not be written",
-        ));
+        this._writeFailed();
       }
     });
   }
@@ -127,7 +140,7 @@ class DeepSeekHarnessProcess {
   }
 
   _onData(chunk) {
-    if (this.closed) return;
+    if (this.closed || this.failure) return;
     try {
       for (const message of this.decoder.push(chunk)) this._onMessage(message);
     } catch (error) {
@@ -150,7 +163,7 @@ class DeepSeekHarnessProcess {
       if (message.protocol !== "shoggoth-dsh-runtime" || message.protocolVersion !== 1) {
         throw processError(
           "DEEPSEEK_HARNESS_PROTOCOL_UNSUPPORTED",
-          "DeepSeek Harness Bridge protocol is unsupported",
+          "DeepSeek Bridge protocol is unsupported",
         );
       }
       this.resolveReady();
@@ -161,7 +174,7 @@ class DeepSeekHarnessProcess {
       if (!pending || message.command !== pending.command || typeof message.success !== "boolean") {
         throw processError(
           "DEEPSEEK_HARNESS_RESPONSE_INVALID",
-          "DeepSeek Harness response is invalid",
+          "DeepSeek response is invalid",
         );
       }
       this.pending.delete(message.id);
@@ -175,7 +188,7 @@ class DeepSeekHarnessProcess {
         pending.reject(processError(
           auth ? "AUTH_REQUIRED" : remoteCode,
           safeString(message.error?.message, 4096)
-            ? message.error.message : `DeepSeek Harness ${pending.command} failed`,
+            ? message.error.message : `DeepSeek ${pending.command} failed`,
         ));
       }
       return;
@@ -190,7 +203,7 @@ class DeepSeekHarnessProcess {
     }
     throw processError(
       "DEEPSEEK_HARNESS_MESSAGE_INVALID",
-      "DeepSeek Harness emitted an unknown message",
+      "DeepSeek emitted an unknown message",
     );
   }
 
@@ -211,10 +224,11 @@ class DeepSeekHarnessProcess {
     const timeout = timeoutMs === null ? null : new Promise((_, reject) => {
       timer = setTimeout(() => reject(processError(
         "RUNTIME_SERVER_REQUEST_TIMEOUT",
-        "DeepSeek Harness server request timed out",
+        "DeepSeek server request timed out",
       )), timeoutMs);
       timer.unref?.();
     });
+    this.activeServerRequests += 1;
     Promise.race([
       Promise.resolve().then(() => this.onServerRequest(message.method, message.params)),
       ...(timeout === null ? [] : [timeout]),
@@ -232,45 +246,57 @@ class DeepSeekHarnessProcess {
         },
       }),
     ).finally(() => {
+      this.activeServerRequests -= 1;
       if (timer !== null) clearTimeout(timer);
     }).catch((error) => this._fatal(error));
   }
 
   _writeServerResponse(response) {
-    if (this.closed) return;
-    try { this.child.stdin.write(encodeDeepSeekHarnessMessage(response)); } catch {
-      this._fatal(processError(
-        "DEEPSEEK_HARNESS_WRITE_FAILED",
-        "DeepSeek Harness server response could not be written",
-      ));
-    }
+    if (this.closed || this.failure || this.inputEnded) return;
+    try {
+      this.child.stdin.write(encodeDeepSeekHarnessMessage(response),
+        (error) => { if (error) this._writeFailed(); });
+    } catch { this._writeFailed(); }
+  }
+
+  _writeFailed() {
+    this._fatal(processError(
+      "DEEPSEEK_HARNESS_WRITE_FAILED",
+      "DeepSeek process input pipe failed",
+    ));
   }
 
   _fatal(error) {
-    if (this.closed) return;
+    if (this.closed || this.failure) return;
     const failure = error?.code ? error : processError(
       "DEEPSEEK_HARNESS_TRANSPORT_FAILED",
-      "DeepSeek Harness transport failed",
+      "DeepSeek transport failed",
     );
+    this.failure = failure;
     this.rejectReady(failure);
-    this.onFatal(failure);
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(failure);
+    }
+    this.pending.clear();
+    try { this.onFatal(failure); } catch {}
     this.kill("SIGKILL");
   }
 
   _onClose(code, signal) {
     if (this.closed) return;
     this.closed = true;
-    let failure = null;
-    try { this.decoder.finish(); } catch (error) { failure = error; }
+    let failure = this.failure;
+    try { this.decoder.finish(); } catch (error) { failure ||= error; }
     if (!failure && this.pending.size > 0) {
       failure = processError(
         "DEEPSEEK_HARNESS_PROCESS_CLOSED",
-        "DeepSeek Harness process closed with pending requests",
+        "DeepSeek process closed with pending requests",
       );
     }
     const closedError = failure || processError(
       "DEEPSEEK_HARNESS_PROCESS_CLOSED",
-      "DeepSeek Harness process closed",
+      "DeepSeek process closed",
     );
     this.rejectReady(closedError);
     for (const pending of this.pending.values()) {

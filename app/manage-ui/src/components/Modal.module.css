@@ -55,6 +55,10 @@
   transform: translate(-50%, -48%);
 }
 
+/* Shared dialogs must remain above the immersive chat surface (1000). */
+:global(body[data-immersive]) .overlay { z-index: 1100; }
+:global(body[data-immersive]) .panel { z-index: 1101; }
+
 .panel[data-ending-style] {
   transition-duration: var(--ui-motion-modal-exit);
   pointer-events: none;

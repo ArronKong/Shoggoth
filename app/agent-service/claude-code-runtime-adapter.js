@@ -28,6 +28,8 @@ const CLAUDE_CODE_CAPABILITIES = runtimeCapabilities({
   "account.logout": false,
   events: true,
   serverRequests: true,
+  "context.usage.estimated": true,
+  "model.generate.toolFree": true,
 });
 
 function adapterError(code, message) {
@@ -51,6 +53,7 @@ class ClaudeCodeRuntimeHandle {
   }
 
   authenticationState() { return this.host.authenticationState(); }
+  generateModelOnly(input) { return this.host.generateModelOnly(input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);
@@ -82,6 +85,7 @@ class ClaudeCodeRuntimeAdapter {
       );
     }
     this.runtimePool = options.runtimePool;
+    this.modelOnly = true;
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }

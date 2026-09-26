@@ -74,8 +74,8 @@ function fakeDeepSeekHarnessPool() {
         return Promise.resolve({
           data: [{
             model: DSH_MODEL,
-            displayName: "GPT DeepSeek Harness Test",
-            description: "DeepSeek Harness multi-provider fixture",
+            displayName: "GPT DeepSeek Test",
+            description: "DeepSeek multi-provider fixture",
             isDefault: true,
             hidden: false,
           }],
@@ -106,12 +106,12 @@ function fakeDeepSeekHarnessPool() {
       },
       sessionResume(input) {
         const session = sessions.find((candidate) => candidate.id === input.sessionId);
-        assert.ok(session, "DeepSeek Harness fixture session must exist before resume");
+        assert.ok(session, "DeepSeek fixture session must exist before resume");
         return Promise.resolve({ session: projectSession(session) });
       },
       sessionRead(input) {
         const session = sessions.find((candidate) => candidate.id === input.sessionId);
-        assert.ok(session, "DeepSeek Harness fixture session must exist before read");
+        assert.ok(session, "DeepSeek fixture session must exist before read");
         return Promise.resolve({ session: projectSession(session, input.includeTurns === true) });
       },
       sessionRename(input) {
@@ -141,7 +141,7 @@ function fakeDeepSeekHarnessPool() {
       turnStart(input) {
         calls.turnStart.push(structuredClone(input));
         const session = sessions.find((candidate) => candidate.id === input.sessionId);
-        assert.ok(session, "DeepSeek Harness fixture session must exist before turn");
+        assert.ok(session, "DeepSeek fixture session must exist before turn");
         const existing = session.turns.find((turn) => (
           turn.items.some((item) => item.type === "userMessage" && item.clientId === input.operationId)
         ));
@@ -166,7 +166,7 @@ function fakeDeepSeekHarnessPool() {
             });
             return;
           }
-          const text = `DeepSeek Harness completed ${input.operationId}`;
+          const text = `DeepSeek completed ${input.operationId}`;
           turn.status = "completed";
           turn.items.push({
             type: "agentMessage",
@@ -242,7 +242,7 @@ function fakeDeepSeekHarnessPool() {
 
 function lazyPool(label) {
   return {
-    get() { throw new Error(`${label} runtime must remain lazy in DeepSeek Harness integration`); },
+    get() { throw new Error(`${label} runtime must remain lazy in DeepSeek integration`); },
     stop() { return Promise.resolve(); },
     stopAll() { return Promise.resolve(); },
   };
@@ -291,7 +291,7 @@ async function main() {
   const backend = new ShoggothBackend({
     paths,
     id: "deepseek-harness",
-    name: "DeepSeek Harness",
+    name: "DeepSeek",
     connectionMode: "native-runtime",
     claimsAgentId: (agentId) => agentId === "shoggoth-deepseek-harness"
       || (typeof agentId === "string" && agentId.startsWith("deepseek-harness-")),
@@ -302,7 +302,7 @@ async function main() {
     runtimeCliAuth: [{
       runtime: "deepseek-harness",
       runtimeAccountId: NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
-      name: "DeepSeek Harness",
+      name: "DeepSeek",
       binaryPath,
       accountHome: deepSeekHarnessHome,
       processHome: root,
@@ -391,13 +391,13 @@ async function main() {
       provider: "deepseek-harness",
     }), { model: DSH_MODEL, scope: "session" });
     const chat = { final: [], error: [] };
-    await backend.sendMessage(sessionKey, "DeepSeek Harness App chat", "deepseek-harness-app-chat", {
+    await backend.sendMessage(sessionKey, "DeepSeek App chat", "deepseek-harness-app-chat", {
       final: (...args) => chat.final.push(args),
       error: (error) => chat.error.push(error),
     });
     assert.equal(chat.error.length, 0);
     assert.equal(chat.final.length, 1);
-    assert.match(chat.final[0][0], /^DeepSeek Harness completed /u);
+    assert.match(chat.final[0][0], /^DeepSeek completed /u);
     const chatRunId = chat.final[0][2].runId;
     assert.equal(service.workDispatcher.getRun(chatRunId).status, "completed");
 
@@ -406,8 +406,8 @@ async function main() {
     assert.ok(board);
     const task = await backend.createTask({
       boardId: board.id,
-      title: "DeepSeek Harness App Kanban",
-      body: "Run the DeepSeek Harness Kanban path",
+      title: "DeepSeek App Kanban",
+      body: "Run the DeepSeek Kanban path",
     });
     const taskDispatch = await backend.runTaskCard(task.id, { workspace: workspaces.kanban });
     const kanbanRun = await service.kanbanRunService.waitForIdle(taskDispatch.runId);
@@ -416,8 +416,8 @@ async function main() {
 
     const cron = await backend.createCronJob({
       agentId: deepSeekHarnessSpec.agentId,
-      name: "DeepSeek Harness App Cron",
-      prompt: "Run the DeepSeek Harness Cron path",
+      name: "DeepSeek App Cron",
+      prompt: "Run the DeepSeek Cron path",
       enabled: false,
       workspace: workspaces.cron,
       schedule: { kind: "every", everyMs: 60_000, anchorMs: 0 },
@@ -476,7 +476,7 @@ async function main() {
     }, authority(deepSeekHarnessSpec.id));
     assert.match(read.content, /Shoggoth Skill Authoring/u);
 
-    const createdAgent = await backend.createAgent({ name: "DeepSeek Harness Reviewer" });
+    const createdAgent = await backend.createAgent({ name: "DeepSeek Reviewer" });
     assert.match(createdAgent.id, /^deepseek-harness-/u);
     assert.equal((await backend.getAgent(createdAgent.id)).provider, "deepseek-harness");
     const createdProfile = service.productStore.listAgentProfiles()
@@ -524,7 +524,7 @@ async function main() {
     await service.stop({ notify: false }).catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
   }
-  console.log("PASS DeepSeek Harness App integration: dashboard/chat/cron/kanban/agent/token/models/skills/auth");
+  console.log("PASS DeepSeek App integration: dashboard/chat/cron/kanban/agent/token/models/skills/auth");
 }
 
 main().catch((error) => {

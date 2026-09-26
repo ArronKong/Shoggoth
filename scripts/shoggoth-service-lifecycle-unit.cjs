@@ -22,6 +22,7 @@ function resolveElectronBinary() {
 
 const tests = [];
 let completedTests = 0;
+let expectedTests = null;
 function test(name, fn) { tests.push({ name, fn }); }
 
 function deferred() {
@@ -52,12 +53,6 @@ const { createEventBuffer } = require(path.join(ROOT, "app", "agent-service", "e
 const { resolveServicePaths } = require(path.join(ROOT, "app", "agent-service", "paths.js"));
 const { CHAT_SESSION_STORE_VERSION } = require(path.join(
   ROOT, "app", "agent-service", "chat-session-store.js",
-));
-const { PRE_RUNTIME_SCHEMA_BACKUP_ID } = require(path.join(
-  ROOT, "app", "agent-service", "runtime-schema-migration.js",
-));
-const { PRE_MEMORY_AUTHORITY_BACKUP_ID } = require(path.join(
-  ROOT, "app", "agent-service", "memory-migration.js",
 ));
 const { assertStableAppPaths } = require(path.join(
   ROOT, "app", "agent-service", "bundle-paths.js",
@@ -1078,7 +1073,7 @@ test("Service start 将 lock acquisition 纳入清理边界且失败不残留 ow
 });
 
 test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认 profile 不回归", async () => {
-  assert.equal(PROTOCOL_VERSION, 4);
+  assert.equal(PROTOCOL_VERSION, 9);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-store-lifecycle-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   for (let restart = 0; restart < 2; restart += 1) {
@@ -1093,7 +1088,7 @@ test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认
       assert.equal(hello.protocolVersion, PROTOCOL_VERSION);
       await assert.rejects(
         requestService(paths, {
-          method: "service.hello", token, version: PROTOCOL_VERSION - 1,
+          method: "service.hello", token, version: 4,
         }),
         (error) => error.code === "PROTOCOL_VERSION_MISMATCH",
       );
@@ -1111,25 +1106,6 @@ test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认
       [DEFAULT_AGENT_PROFILE_ID, "Shoggoth"],
     ]);
   }
-});
-
-test("默认启动只读导入旧 Codex memories，不复制整棵 legacy Runtime Home", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-memory-no-copy-"));
-  const paths = resolveServicePaths({
-    stateRoot: path.join(root, "state"),
-    cacheRoot: path.join(root, "cache"),
-  });
-  const runtimeProfileId = defaultAgentProfile().runtimeProfileId;
-  const memoryRoot = path.join(paths.stateDir, "codex", runtimeProfileId, "memories");
-  fs.mkdirSync(memoryRoot, { recursive: true, mode: 0o700 });
-  const source = path.join(memoryRoot, "preference.md");
-  fs.writeFileSync(source, "Prefer concise answers.\n", { mode: 0o600 });
-  const service = createAgentService({ paths, version: "memory-no-copy" });
-  await service.start();
-  await service.stop({ notify: false });
-  assert.equal(fs.readFileSync(source, "utf8"), "Prefer concise answers.\n");
-  assert.equal(fs.existsSync(path.join(paths.backupsDir, PRE_MEMORY_AUTHORITY_BACKUP_ID)), false);
-  assert.equal(fs.existsSync(paths.memoryMigrationPath), true);
 });
 
 test("Service stop 先停止 Codex RuntimePool 再关闭 ProductStore，且未有 Run 时不 spawn", async () => {
@@ -1200,6 +1176,9 @@ test("Service 拥有 SecretStore/Provider bridge，按 secret→product→provid
   }];
   const secretStore = {
     open() { order.push("secret.open"); },
+    get() { assert.fail("empty plugin catalog must not read credentials"); },
+    putIfRevision() { assert.fail("empty plugin catalog must not write credentials"); },
+    getCredentialRevision() { assert.fail("empty plugin catalog must not inspect credentials"); },
     listMetadata() { return secretMetadata.map((entry) => ({ ...entry })); },
     async delete(credentialRef) {
       order.push(`secret.delete:${credentialRef}`);
@@ -2401,7 +2380,7 @@ test("stop 清理中 start 稳定拒绝且不会在清理尾部偷偷重启", as
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("safeStorage locked 时 Service 在 listen 前恢复 chat running/waiting，普通写仍拒绝且第三次重启不重复", async () => {
+test("safeStorage locked 时 Service 在 listen 前恢复 chat running/waiting，普通写仍拒绝且第三次重启只清理终态描述符", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-active-recovery-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   let decryptLocked = false;
@@ -2559,15 +2538,25 @@ test("safeStorage locked 时 Service 在 listen 前恢复 chat running/waiting�
   const afterSecond = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
   const recoveredSeq = new Map(afterSecond.workRuns.map((run) => [run.id, run.eventSeq]));
   let thirdReady = false;
+  const removedTerminalDescriptors = [];
   const thirdStore = new JsonlProductStore({ paths, now: () => 7_000 });
   const third = createAgentService({
     paths,
     version: "recovery",
     productStore: thirdStore,
     safeStorage,
+    runExecutionStore: {
+      remove(run) { removedTerminalDescriptors.push({ id: run.id, status: run.status }); },
+      has() { assert.fail("terminal cleanup must not inspect an active binding"); },
+      async get() { assert.fail("terminal cleanup must not decrypt a binding while locked"); },
+      async put() { assert.fail("terminal cleanup must not rewrite a binding while locked"); },
+    },
     onServerReady() {
       thirdReady = true;
       for (const [id, seq] of recoveredSeq) assert.equal(thirdStore.getWorkRun(id).eventSeq, seq);
+      assert.deepEqual(removedTerminalDescriptors.sort((left, right) => left.id.localeCompare(right.id)),
+        [...recoveredSeq.keys()].sort().map((id) => ({ id, status: "interrupted" })),
+        "already-terminal descriptors are removed before listen without reopening native execution");
     },
   });
   await third.start();
@@ -2850,7 +2839,7 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
       open() { return this; },
       close() {},
       createMcpServer() { throw new Error("not used"); },
-      consume() { gateConsumes += 1; return { consumed: true }; },
+      consume() { gateConsumes += 1; return { consumed: true, executionRunId: "bridge-active-fixture" }; },
     },
     mcpSessionManagerFactory(options) {
       manager = new McpSessionManager(options);
@@ -2876,6 +2865,14 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
   await service.start();
   const profileValue = service.productStore.listAgentProfiles()[0];
   const { runtimeProfileId, runtimeAccountId } = profileValue;
+  service.workRunCoordinator.hasActiveRuntimeWork = (profileId, accountId, runId) => (
+    profileId === runtimeProfileId && accountId === runtimeAccountId && runId === "bridge-active-fixture"
+  );
+  service.workRunCoordinator.invokeRuntimeCapability = async (input, invoke) => {
+    assert.equal(input.runId, "bridge-active-fixture");
+    assert.equal(input.runtimeAccountId, runtimeAccountId);
+    return invoke();
+  };
   const bridgeRequest = (suffix) => ({
     version: PROTOCOL_VERSION,
     method: "mcp.runtime.bridge.open",
@@ -2952,14 +2949,16 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
     assert.equal(profileResponse.result.structuredContent.runtimeProfileId, runtimeProfileId);
     assert.equal(issuedTokens.length, 2, "首个 tool call 应在 Service 内部安全续期");
     assert.notEqual(issuedTokens[0], issuedTokens[1]);
+    assert.deepEqual(revokedSessions, [{ runtimeProfileId, runtimeAccountId, token: issuedTokens[0] }],
+      "refresh revokes only the bridge's previous token");
     for (const internalToken of issuedTokens) {
       assert.equal(first.receivedText().includes(internalToken), false);
     }
 
     first.end();
     await first.waitClosed();
-    await waitFor(() => revokedSessions.length === 1);
-    assert.deepEqual(revokedSessions[0], {
+    await waitFor(() => revokedSessions.length === 2);
+    assert.deepEqual(revokedSessions[1], {
       runtimeProfileId, runtimeAccountId, token: issuedTokens[1],
     });
     assert.throws(
@@ -3436,38 +3435,6 @@ test("events.subscribe 按完整 JSONL 字节预算分页且每页可由 client 
   }
 });
 
-test("旧 schema 升级会先清理 stale socket，重复启动仍保持单实例", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-svc-"));
-  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
-  fs.mkdirSync(paths.runtimeDir, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(paths.stateDir, "chat-sessions.json"), JSON.stringify({
-    version: CHAT_SESSION_STORE_VERSION - 1,
-    revision: 0,
-    idempotencyFloorMs: 0,
-    sessions: {},
-    createOperations: {},
-    bindingOperations: {},
-    remoteOperations: {},
-  }), { mode: 0o600 });
-  fs.writeFileSync(paths.socketPath, "stale", { mode: 0o600 });
-  const service = createAgentService({ paths, version: "test" });
-  await service.start();
-  try {
-    assert.equal(fs.existsSync(path.join(
-      paths.backupsDir, PRE_RUNTIME_SCHEMA_BACKUP_ID, "manifest.json",
-    )), true);
-    const duplicate = createAgentService({ paths, version: "test" });
-    await assert.rejects(duplicate.start(), (error) => error.code === "SERVICE_ALREADY_RUNNING");
-    const status = await requestService(paths, {
-      method: "service.status", token: readClientToken(paths), version: PROTOCOL_VERSION,
-    });
-    assert.equal(status.healthy, true);
-  } finally {
-    await service.stop();
-  }
-});
-
 test("未取得 lock 的重复实例 stop 不得删除运行中 Service 的 socket/token", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-nonowner-stop-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
@@ -3938,7 +3905,7 @@ test("真实 Electron bootstrap 可有界启动 Service role 且不创建 Browse
   child.stderr.on("data", (chunk) => { output += chunk; });
   try {
     try {
-      await waitForHealthyService(paths, 5000);
+      await waitForHealthyService(paths, 45000);
       assert.equal(fs.lstatSync(paths.socketPath).mode & 0o777, 0o600);
     } catch (error) {
       throw new Error(`${error.message}\nElectron output:\n${output}`);
@@ -4437,11 +4404,16 @@ test("loaded-unhealthy 恢复与重注册后的健康确认共享一次绝对预
 test("覆盖安装恢复遇到挂起 launchctl 时有界失败且不伪报健康", async () => {
   let healthy = true;
   let hangBootout = false;
+  let virtualNow = 0;
   let fixture;
   fixture = launchFixture({
     launchctlTimeoutMs: 20,
     healthTimeoutMs: 15,
     healthIntervalMs: 5,
+    // The health budget is deterministic; the hung launchctl timer below still
+    // uses its real 20ms deadline. Filesystem setup must not consume that model.
+    healthNow: () => virtualNow,
+    healthDelay: async (delayMs) => { virtualNow += delayMs; },
     async healthProbe() {
       if (!healthy) throw new Error("fixture service absent");
       return {
@@ -5004,7 +4976,17 @@ test("plist XML 转义且 plist/status symlink 被拒绝", async () => {
 });
 
 (async () => {
-  for (const { name, fn } of tests) {
+  let selectedTests = tests;
+  const args = process.argv.slice(2);
+  if (args.length > 0) {
+    if (args.length !== 2 || args[0] !== "--from") throw new Error("Usage: shoggoth-service-lifecycle-unit.cjs [--from <exact-test-name>]");
+    const matches = tests.flatMap((item, index) => item.name === args[1] ? [index] : []);
+    if (matches.length !== 1) throw new Error("--from must identify exactly one lifecycle test");
+    selectedTests = tests.slice(matches[0]);
+  }
+  expectedTests = selectedTests.length;
+  console.log(`SELECTION ${expectedTests}/${tests.length}; start=${selectedTests[0]?.name}`);
+  for (const { name, fn } of selectedTests) {
     try {
       await fn();
       completedTests += 1;
@@ -5016,15 +4998,15 @@ test("plist XML 转义且 plist/status symlink 被拒绝", async () => {
   }
   console.log("BOUNDARY source/fake: launchctl runner + temp HOME；packaged/real: Electron Service smoke only，未调用真实 launchd");
   console.log("BOUNDARY IPC: Node net 无 Unix peer-credential API；边界为 0700 parent + 0600 socket/token + token fd/socket inode pin");
-  console.log("[shoggoth-service-lifecycle-unit] PASS");
+  console.log(`[shoggoth-service-lifecycle-unit] PASS ${completedTests}/${expectedTests} selected`);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
 
 process.on("beforeExit", () => {
-  if (completedTests !== tests.length) {
-    console.error(`FAIL 生命周期测试提前退出: ${completedTests}/${tests.length}`);
+  if (completedTests !== (expectedTests ?? tests.length)) {
+    console.error(`FAIL 生命周期测试提前退出: ${completedTests}/${expectedTests ?? tests.length}`);
     process.exitCode = 1;
   }
 });

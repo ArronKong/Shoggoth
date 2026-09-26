@@ -97,6 +97,36 @@ function fixturePaths(prefix = "shoggoth-mcp-") {
   });
 }
 
+// Boundary fixtures model the trusted host lease explicitly. Production binding
+// consumption, identity/argument matching and the real Service socket remain in
+// use; real Codex host routing is covered by codex-runtime-mcp-binding-regression.
+function trustedRunFixture(service, profileValue) {
+  const { bindingElicitation, parseBindingElicitation } = require("../app/agent-service/runtime-mcp-call-binding");
+  const runId = "test-bound-runtime-run";
+  const coordinator = service.workRunCoordinator;
+  let live = true;
+  const assertCurrent = () => { assert.equal(live, true); };
+  coordinator.invokeRuntimeCapability = async (input, action) => {
+    assert.deepEqual({ runId: input.runId, runtimeProfileId: input.runtimeProfileId,
+      runtimeAccountId: input.runtimeAccountId }, { runId,
+      runtimeProfileId: profileValue.runtimeProfileId, runtimeAccountId: profileValue.runtimeAccountId });
+    assertCurrent();
+    return action({ runId, assertCurrent, signal: new AbortController().signal });
+  };
+  const register = params => {
+    const proof = parseBindingElicitation({ ...params, serverName: "shoggoth" });
+    assert.ok(proof);
+    coordinator.runtimeMcpCallBindings.register({ proof, runId, profileId: profileValue.id,
+      runtimeProfileId: profileValue.runtimeProfileId, runtimeAccountId: profileValue.runtimeAccountId,
+      assertCurrent });
+  };
+  return {
+    register,
+    bind(input) { register(bindingElicitation(input)); },
+    revoke() { live = false; coordinator.runtimeMcpCallBindings.releaseRun(runId); },
+  };
+}
+
 function xorCipher(value) {
   const bytes = Buffer.from(value, "utf8");
   for (let index = 0; index < bytes.length; index += 1) bytes[index] ^= 0xa5;
@@ -310,6 +340,7 @@ test("Service 仅在真实 packaged 四条件成立时选择共享 selector 并�
     }],
     [path.join(ROOT, "app", "agent-service", "paths.js"), {
       resolveServicePaths: () => paths,
+      resolveCanonicalServicePaths: () => paths,
     }],
     [path.join(ROOT, "app", "agent-service", "packaged-mcp-crypto-broker.js"), {
       PackagedMcpCryptoBroker: FakePackagedBroker,
@@ -442,6 +473,7 @@ test("MCP helper 的真实 packaged 分支选择共享 selector 并保留 30s �
   const fresh = requireFreshWithMocks(path.join(ROOT, "app", "shoggoth-mcp-helper.js"), [
     [path.join(ROOT, "app", "agent-service", "paths.js"), {
       resolveServicePaths: () => paths,
+      resolveCanonicalServicePaths: () => paths,
     }],
     [path.join(ROOT, "app", "agent-service", "packaged-mcp-crypto-broker.js"), {
       PackagedMcpCryptoBroker: FakePackagedBroker,
@@ -980,6 +1012,34 @@ test("token 只存 digest：同 Profile 新认证轮换旧 token，TTL/close/dis
   );
 });
 
+test("Service 并行 helper session 不互相失效，容量、撤销、Profile、TTL 与 close 仍生效", () => {
+  const secret = Buffer.alloc(32, 0x77);
+  let now = 1000;
+  const profiles = [profile("profile-a", "runtime-a")];
+  const manager = new McpSessionManager({ handshakeSecret: secret, profileStore: profileStore(profiles),
+    protocolVersion: 1, now: () => now, sessionTtlMs: 100, maxSessions: 4, concurrentHelperSessions: true });
+  const binding = { runtimeProfileId: "runtime-a", runtimeAccountId: runtimeAccountId("runtime-a") };
+  const exchange = () => manager.exchangeChallenge(authRequest(manager.issueChallenge({
+    protocolVersion: 1, ...binding, clientNonce: nonce(0x12),
+  }), secret));
+  const authorize = session => manager.authorizeSession({ token: session.token, ...binding });
+  const sessions = [exchange(), exchange(), exchange()];
+  for (let round = 0; round < 4; round += 1) {
+    const refreshed = exchange();
+    assert.throws(exchange, error => error.code === "MCP_AUTH_BUSY");
+    for (const session of sessions) assert.equal(authorize(session).profileId, "profile-a");
+    assert.equal(manager.revokeSession({ token: refreshed.token, ...binding }), true);
+    assert.throws(() => authorize(refreshed), error => error.code === "MCP_SESSION_INVALID");
+  }
+  profiles[0].enabled = false;
+  for (const session of sessions) assert.throws(() => authorize(session), error => error.code === "MCP_SESSION_INVALID");
+  profiles[0].enabled = true;
+  const expiring = exchange(); now += 101;
+  assert.throws(() => authorize(expiring), error => error.code === "MCP_SESSION_INVALID");
+  const closed = exchange(); manager.close();
+  assert.throws(() => authorize(closed), error => error.code === "MCP_SESSION_INVALID");
+});
+
 test("Service bridge session 只在内存签发并按 exact Profile/token 撤销", () => {
   const manager = new McpSessionManager({
     handshakeSecret: Buffer.alloc(32, 0x76),
@@ -1235,6 +1295,8 @@ test("正式模式可在 Service 健康后异步预热 MCP，且不阻塞 start/
   const broker = {
     open() {},
     close() {},
+    encrypt() { assert.fail("MCP prewarm must not encrypt an execution descriptor"); },
+    decrypt() { assert.fail("MCP prewarm must not decrypt an execution descriptor"); },
     async loadOrCreateForService() {
       loads += 1;
       return Buffer.alloc(32, 0x71);
@@ -1263,7 +1325,7 @@ test("正式模式可在 Service 健康后异步预热 MCP，且不阻塞 start/
   }
 });
 
-test("Service mcp.tool.call 只以短 session 授权 Profile 为 authority，并严格校验 envelope", async () => {
+test("Service mcp.tool.call 需要短 session 与可信 Run 绑定，并严格校验 envelope", async () => {
   const paths = fixturePaths("sm-tool-route-");
   const safeStorage = fakeSafeStorage();
   const calls = [];
@@ -1286,6 +1348,14 @@ test("Service mcp.tool.call 只以短 session 授权 Profile 为 authority，并
       paths, safeStorage, profileValue.runtimeProfileId, profileValue.runtimeAccountId, 0x67,
     );
     const callId = "11111111-1111-4111-8111-111111111111";
+    const trustedRun = trustedRunFixture(service, profileValue);
+    const params = { runtimeProfileId: profileValue.runtimeProfileId,
+      runtimeAccountId: profileValue.runtimeAccountId, sessionToken: session.token,
+      callId, name: "kanban_list", arguments: { limit: 10 } };
+    await assert.rejects(requestService(paths, { version: PROTOCOL_VERSION,
+      method: "mcp.tool.call", params }), { code: "MCP_SESSION_INVALID" });
+    assert.equal(calls.length, 0, "a Profile session alone cannot execute a tool");
+    trustedRun.bind(params);
     const result = await requestService(paths, {
       version: PROTOCOL_VERSION,
       method: "mcp.tool.call",
@@ -1478,18 +1548,19 @@ test("Service mcp.tool.call 固定映射工具错误，并拒绝 hostile/超限 
       paths, safeStorage, runtimeProfileId, runtimeAccountIdValue, 0x68,
     );
     let index = 0;
-    const invoke = () => requestService(paths, {
-      version: PROTOCOL_VERSION,
-      method: "mcp.tool.call",
-      params: {
+    const trustedRun = trustedRunFixture(service, profileValue);
+    const invoke = () => {
+      const params = {
         runtimeProfileId,
         runtimeAccountId: runtimeAccountIdValue,
         sessionToken: session.token,
         callId: `aaaaaaaa-aaaa-4aaa-8aaa-${String(++index).padStart(12, "0")}`,
         name: "profile_get",
         arguments: {},
-      },
-    });
+      };
+      trustedRun.bind(params);
+      return requestService(paths, { version: PROTOCOL_VERSION, method: "mcp.tool.call", params });
+    };
     await assert.rejects(invoke(), (error) => error.code === "MCP_TOOL_STATE_CONFLICT"
       && error.message === "当前状态不允许该工具操作"
       && !JSON.stringify(error, Object.getOwnPropertyNames(error)).includes("fixture-secret-canary"));
@@ -1551,6 +1622,8 @@ test("默认 MCP Product Controller 每代重建，迟到 fatal 被 fence 且 ac
   const session = await authenticateServiceSession(
     paths, safeStorage, profileValue.runtimeProfileId, profileValue.runtimeAccountId, 0x69,
   );
+  trustedRunFixture(service, profileValue).bind({ callId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    name: "profile_get", arguments: {}, sessionToken: session.token });
   service.productStore.lookupMcpToolCall = () => {
     throw Object.assign(new Error("fixture-secret-canary active fatal"), {
       code: "STORE_COMMIT_UNCERTAIN",
@@ -1645,7 +1718,7 @@ test("默认 MCP Product Controller 装配 Service 状态、Token 用量与 Fede
     assert.equal(usage.usage.series.totals.totalTokens, 0);
 
     await assert.rejects(() => service.mcpProductToolController.handle(
-      "runtime_context_get", { runId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee5" },
+      "runtime_context_get", { source: "chat", sourceId: "nonexistent-chat" },
       authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee6"),
     ), (error) => error.code === "MCP_TOOL_NOT_FOUND",
     "默认 Service composition root 必须真实接入 Coordinator，而不是返回 unavailable stub");
@@ -1675,8 +1748,9 @@ test("完整 MCP helper 经认证 Service 操作灵感，确认删除并保留�
   try {
     const profile = service.productStore.listAgentProfiles()[0];
     const session = await authenticateServiceSession(paths, safeStorage, profile.runtimeProfileId, profile.runtimeAccountId);
+    const trustedRun = trustedRunFixture(service, profile);
     handler = createMcpStdioHandler({ paths, runtimeProfileId: profile.runtimeProfileId,
-      runtimeAccountId: profile.runtimeAccountId, sessionToken: session.token, requestService });
+      runtimeAccountId: profile.runtimeAccountId, sessionToken: session.token, requestService, bindRuntimeCalls: true });
     await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
       protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: { elicitation: {} },
       clientInfo: { name: "inspiration-integration", version: "1" },
@@ -1685,7 +1759,15 @@ test("完整 MCP helper 经认证 Service 操作灵感，确认删除并保留�
     assert.equal(tools.filter(tool => tool.name.startsWith("inspiration_")).length, 10);
     let sequence = 3;
     const call = (name, args, context) => handler({ jsonrpc: "2.0", id: sequence++, method: "tools/call",
-      params: { name: `inspiration_${name}`, arguments: args } }, context);
+      params: { name: `inspiration_${name}`, arguments: args } }, {
+        async requestClient(method, params) {
+          if (params._meta?.["shoggoth/runtime-call-binding"]) {
+            assert.equal(method, "elicitation/create"); trustedRun.register(params);
+            return { action: "accept", content: {} };
+          }
+          return context.requestClient(method, params);
+        },
+      });
     const created = await call("create", { body: "通过完整 MCP 链路保存的灵感" });
     assert.equal(created.result.isError, false, JSON.stringify(created));
     const idea = created.result.structuredContent.idea;
@@ -2370,7 +2452,9 @@ test("完整 helper 入口通过 Service 握手后服务 stdio，EOF 清理且�
     });
     const responses = output.read().trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(responses[0].result.serverInfo.name, "shoggoth");
-    assert.equal(responses[1].result.structuredContent.name, "Shoggoth");
+    assert.equal(responses[1].result.isError, true);
+    assert.equal(responses[1].result.structuredContent.error.code, "MCP_SESSION_INVALID",
+      "a standalone helper without native Run elicitation must fail closed");
     assert.deepEqual(electronCalls, [
       ["activation", "prohibited"], "ready", "dock-hide", ["activation", "prohibited"], "quit",
     ]);

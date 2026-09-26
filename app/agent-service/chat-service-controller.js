@@ -1,5 +1,6 @@
 "use strict";
 
+
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { managedChatWorkspace } = require("./chat-workspace");
@@ -69,13 +70,13 @@ function stableEntries(items, keyOf) {
 function provesNoRemoteTurnWasAccepted(runs) {
   const preTurnTerminalStatuses = new Set(["failed", "canceled", "interrupted", "skipped"]);
   return runs.length > 0 && runs.every((run) => (
-    (run.runtimeTurnRef?.turnId ?? run.codexTurnId) === null
+    (run.runtimeTurnRef?.turnId ?? null) === null
       && preTurnTerminalStatuses.has(run.status)
   ));
 }
 
 function runtimeSessionIdOf(session) {
-  return session?.runtimeSessionId ?? session?.codexThreadId ?? null;
+  return session?.runtimeSessionId ?? null;
 }
 
 function transcriptMessageText(event) {
@@ -201,6 +202,8 @@ function transcriptHistoryItem(event) {
     type = "tool";
     message = transcriptMessage(event, role, [{
       type: "toolResult", name: toolName, content: result, is_error: failed,
+      ...(require("../core/plugin-app-call-reference").pluginAppCallId(tool?.pluginAppCallId)
+        ? { pluginAppCallId: tool.pluginAppCallId } : {}),
       ...(typeof event.content?.toolCallId === "string" ? { toolCallId: event.content.toolCallId } : {}),
       ...(args === undefined ? {} : { arguments: args }),
       ...(durationS === undefined ? {} : { durationS }),
@@ -419,7 +422,8 @@ function createChatServiceController(options = {}) {
   }
 
   function profileForSession(session) {
-    const profile = productStore.getAgentProfile(session.profileId);
+    const profile = productStore.resolveAgentRuntimeProfile?.(session.profileId, session.runtimeBindingId ?? undefined)
+      || productStore.getAgentProfile(session.profileId);
     if (!profile || profile.id !== session.profileId || profile.enabled !== true
       || typeof profile.backendId !== "string" || typeof profile.runtime !== "string"
       || typeof profile.runtimeProfileId !== "string"
@@ -537,6 +541,18 @@ function createChatServiceController(options = {}) {
         if (profile.runtime === "codex" && typeof options.schemaContract?.validateResponse === "function"
           && typeof host[runtimeMethod] !== "function") {
           options.schemaContract.validateResponse(legacyMethod, response);
+        }
+      }
+      if (runtimeSessionOwnershipStore && (kind === "archive" || kind === "delete")) {
+        for (const retired of session.retiredRuntimeSessions || []) {
+          const binding = productStore.getAgentRuntimeBinding(session.profileId, retired.bindingId);
+          if (!binding || binding.runtime !== retired.runtime || binding.runtimeAccountId !== retired.runtimeAccountId) {
+            throw controllerError("CHAT_SESSION_COMMIT_UNCERTAIN", "历史会话 Binding 无法核验");
+          }
+          runtimeSessionOwnershipStore.mark({ binding: { runtime: binding.runtime,
+            runtimeProfileId: binding.runtimeProfileId, runtimeAccountId: binding.runtimeAccountId },
+            profileId: session.profileId, sessionId: retired.runtimeSessionId, workspace: session.workspace,
+            status: kind === "archive" ? "archived" : "deleted" });
         }
       }
       let completedSession;
@@ -730,8 +746,10 @@ function createChatServiceController(options = {}) {
     let available = false;
     try {
       for (let pageIndex = 0; pageIndex < 32; pageIndex += 1) {
-        const page = await options.listProfileModels({
+        const listModels = session.runtimeBindingId && options.listBindingModels ? options.listBindingModels : options.listProfileModels;
+        const page = await listModels({
           profileId: session.profileId,
+          ...(session.runtimeBindingId && options.listBindingModels ? { bindingId: session.runtimeBindingId } : {}),
           cursor,
           limit: 100,
         });
@@ -765,6 +783,10 @@ function createChatServiceController(options = {}) {
       ].includes(run.status))) {
       throw controllerError("THREAD_ACTIVE_TURN_CONFLICT", "ChatSession 已有待执行任务");
     }
+    const current = chatSessionStore.getSession(params.sessionKey);
+    if (!current || current.runtimeBindingId !== session.runtimeBindingId || current.revision !== session.revision) {
+      throw controllerError("CHAT_SESSION_NOT_READY", "会话已变化，请重试");
+    }
     return { session: chatSessionStore.setModelOverride(params.sessionKey, params.model) };
   }
 
@@ -784,7 +806,9 @@ function createChatServiceController(options = {}) {
     let model, cursor = null;
     const cursors = new Set();
     for (let pageIndex = 0; pageIndex < 32; pageIndex++) {
-      const page = await options.listProfileModels({ profileId: profile.id, cursor, limit: 100 });
+      const listModels = initial.runtimeBindingId && options.listBindingModels ? options.listBindingModels : options.listProfileModels;
+      const page = await listModels({ profileId: profile.id, cursor, limit: 100,
+        ...(initial.runtimeBindingId && options.listBindingModels ? { bindingId: initial.runtimeBindingId } : {}) });
       fence(generation);
       model = page.models.find(item => selected ? item.id === selected : item.isDefault);
       if (model || !page.hasMore) break;
@@ -795,7 +819,9 @@ function createChatServiceController(options = {}) {
     assertIdle();
     const current = chatSessionStore.getSession(params.sessionKey);
     const currentProfile = enabledProfile(initial.profileId);
-    if (!current || current.modelOverride !== initial.modelOverride || currentProfile.defaultModel !== profile.defaultModel) {
+    if (!current || current.runtimeBindingId !== initial.runtimeBindingId
+      || current.revision !== initial.revision || current.modelOverride !== initial.modelOverride
+      || currentProfile.defaultModel !== profile.defaultModel) {
       throw controllerError("CHAT_SESSION_NOT_READY", "模型已变化，请重试");
     }
     const settings = { thinkingLevel: null, serviceTier: null, ...current.modelSettings };
@@ -856,7 +882,7 @@ function createChatServiceController(options = {}) {
     requireMethods(chatSessionStore, ["getSession", "setPermissionMode"], "ChatSessionStore permission");
     const session = chatSessionStore.getSession(params.sessionKey);
     if (!session) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
-    const profile = enabledProfile(session.profileId);
+    const profile = profileForSession(session);
     resolveRuntimePermissionMode(profile.runtime || "codex", params.mode, profile.permissionPolicy);
     const busy = sessionRuns(session.sessionKey)
       .some((run) => [
@@ -903,6 +929,13 @@ function createChatServiceController(options = {}) {
         "queued", "starting", "running", "waiting_approval", "waiting_input",
       ].includes(run.status))) {
       throw controllerError("THREAD_ACTIVE_TURN_CONFLICT", "ChatSession 已有待执行任务");
+    }
+    if (/^\/compact\s*$/u.test(params.text.trim())) {
+      const acknowledgement = await coordinator.send({ operationId: `compact-${crypto.randomUUID()}`,
+        sessionKey: session.sessionKey, prompt: "/compact" });
+      fence(generation);
+      return { kind: "output", text: acknowledgement.run.status === "queued"
+        ? "上下文压缩已排队。" : "上下文压缩请求已提交，等待运行时完成。", warning: null };
     }
     const profile = profileForSession(session);
     const runtimeSessionId = runtimeSessionIdOf(session);
@@ -954,7 +987,8 @@ function createChatServiceController(options = {}) {
           if (origin) {
             try { cronTitle = options.getCronJobName?.(origin.cronJobId) || null; } catch {}
           }
-          return { ...session, ...(inspiration()?.sessionOrigin(session.sessionKey) || {}), ...(origin || {}),
+          return { ...session, ...(options.getRuntimeContext?.(session) || {}),
+            ...(inspiration()?.sessionOrigin(session.sessionKey) || {}), ...(origin || {}),
             derivedTitle: origin ? `Cron · ${cronTitle || title || origin.cronJobId.slice(0, 8)}` : title };
         });
       return paginateChatServiceItems({
@@ -967,14 +1001,10 @@ function createChatServiceController(options = {}) {
     }
     if (method === "chat.session.create") {
       const profile = enabledProfile(params.profileId);
-      const previous = params.workspace === null && profile.defaultCwd === null
-        ? chatSessionStore.getCreateOperation?.(params.operationId) : null;
-      const legacyDefault = path.resolve(options.paths.defaultWorkspaceDir, profile.id);
       const session = chatSessionStore.createSession({
         operationId: params.operationId,
         profileId: params.profileId,
-        workspace: previous?.workspace === legacyDefault ? previous.workspace
-          : resolveProfileWorkspace({ paths: options.paths, profile, requested: params.workspace,
+        workspace: resolveProfileWorkspace({ paths: options.paths, profile, requested: params.workspace,
             sessionOperationId: params.operationId }),
         createdAt: params.createdAt,
       });

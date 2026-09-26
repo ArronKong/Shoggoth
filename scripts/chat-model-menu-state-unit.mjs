@@ -26,6 +26,7 @@ vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(requir
     : name === "react-i18next" ? { useTranslation: () => ({ t: key => key }) }
     : name === "../components/FilterTabs" ? () => null
     : name === "../components/FusionLoader" ? ({ label }) => React.createElement("span", { role: "status" }, label)
+    : name === "./chatIcons" ? { IconSearch: () => React.createElement("svg", { "aria-hidden": true }) }
     : require(name),
   document: { addEventListener() {}, removeEventListener() {} },
   requestAnimationFrame: callback => { callback(); return 1; },

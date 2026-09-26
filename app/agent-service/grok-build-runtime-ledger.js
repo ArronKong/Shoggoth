@@ -7,10 +7,11 @@ const { validRuntimeProfileId } = require("./runtime-adapter");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { GROK_BUILD_RUNTIME } = require("./grok-build-runtime-paths");
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 4;
 const MAX_LEDGER_BYTES = 16 * 1024 * 1024;
 const TURN_STATUSES = new Set(["inProgress", "completed", "failed", "interrupted", "canceled"]);
 const ACCEPTANCE_STATES = new Set(["unknown", "accepted", "failed"]);
+const DISPATCH_STATES = new Set(["not_sent", "write_attempted"]);
 
 function ledgerError(code, message) {
   return serviceError(code, message);
@@ -42,11 +43,15 @@ function validateTurn(value) {
   return exact(value, [
     "id", "operationId", "fingerprint", "acceptance", "status", "errorCode",
     "assistantMessages", "createdAt", "updatedAt",
+    "dispatchState", "fingerprintVersion",
   ])
     && safeString(value.id, 512)
     && safeString(value.operationId, 512)
     && /^[a-f0-9]{64}$/u.test(value.fingerprint)
+    && value.fingerprintVersion === 2
     && ACCEPTANCE_STATES.has(value.acceptance)
+    && (DISPATCH_STATES.has(value.dispatchState)
+      && (value.acceptance !== "accepted" || value.dispatchState === "write_attempted"))
     && TURN_STATUSES.has(value.status)
     && (value.errorCode === null || safeString(value.errorCode, 128))
     && Array.isArray(value.assistantMessages) && value.assistantMessages.length <= 1024
@@ -71,10 +76,11 @@ function validateSession(value) {
 }
 
 function validatePendingSession(value) {
-  return exact(value, ["source", "cwd", "createdAt"])
+  return exact(value, ["source", "cwd", "createdAt", "dispatchState"])
     && safeString(value.source, 256)
     && safeString(value.cwd, 4096, { absolute: true })
-    && Number.isSafeInteger(value.createdAt) && value.createdAt >= 0;
+    && Number.isSafeInteger(value.createdAt) && value.createdAt >= 0
+    && DISPATCH_STATES.has(value.dispatchState);
 }
 
 function validateLedger(value, runtimeProfileId, workspaceShardId) {
@@ -92,6 +98,9 @@ function validateLedger(value, runtimeProfileId, workspaceShardId) {
   }
   const sessionIds = new Set();
   const sources = new Set(value.pendingSessions.map((item) => item.source));
+  if (sources.size !== value.pendingSessions.length) {
+    throw ledgerError("GROK_BUILD_LEDGER_INVALID", "Grok Build runtime ledger contains duplicate pending sessions");
+  }
   const turnIds = new Set();
   for (const session of value.sessions) {
     if (sessionIds.has(session.id) || sources.has(session.source)) {
@@ -169,11 +178,25 @@ class GrokBuildRuntimeLedger {
       if (error?.code?.startsWith?.("PRIVATE_FILE_") || error?.code?.startsWith?.("UNSAFE_")) throw error;
       throw ledgerError("GROK_BUILD_LEDGER_INVALID", "Grok Build runtime ledger is malformed");
     }
-    this.data = validateLedger(parsed, this.runtimeProfileId, this.workspaceShardId);
     let changed = false;
+    this.data = validateLedger(parsed, this.runtimeProfileId, this.workspaceShardId);
+    const pendingSessions = this.data.pendingSessions.filter((pending) => pending.dispatchState !== "not_sent");
+    if (pendingSessions.length !== this.data.pendingSessions.length) {
+      // The host persists write_attempted before calling stdin.write. Only this
+      // durable not_sent evidence permits releasing a crashed session/new.
+      this.data.pendingSessions = pendingSessions;
+      changed = true;
+    }
     for (const session of this.data.sessions) {
       for (const turn of session.turns) {
-        if (turn.acceptance === "accepted" && turn.status === "inProgress") {
+        if (turn.acceptance === "unknown" && turn.dispatchState === "not_sent") {
+          turn.acceptance = "failed";
+          turn.status = "failed";
+          turn.errorCode = "RUNTIME_REQUEST_NOT_SENT";
+          turn.updatedAt = Math.max(turn.updatedAt, Date.now());
+          session.updatedAt = Math.max(session.updatedAt, turn.updatedAt);
+          changed = true;
+        } else if (turn.acceptance === "accepted" && turn.status === "inProgress") {
           turn.status = "interrupted";
           turn.errorCode = "RUNTIME_HOST_RESTARTED";
           turn.updatedAt = Math.max(turn.updatedAt, Date.now());

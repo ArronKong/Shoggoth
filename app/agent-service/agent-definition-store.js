@@ -12,8 +12,9 @@ const {
   lstatIfExists,
   serviceError,
 } = require("./security");
-const { DEFAULT_DOCUMENTS, LEGACY_DEFAULT_DOCUMENTS, DEFAULT_TEMPLATE_VERSION,
-  createDefaultDocuments, LEGACY_MEMORY_RULE, CURRENT_MEMORY_RULE } = require("./agent-definition-defaults");
+const { DEFAULT_DOCUMENTS, DEFAULT_TEMPLATE_VERSION,
+  createDefaultDocuments } = require("./agent-definition-defaults");
+const { BUILTIN_CLI_AGENT_PROFILES } = require("./builtin-cli-profiles");
 
 const DEFINITION_SCHEMA_VERSION = 1;
 const DEFINITION_EXPORT_FORMAT = "shoggoth-agent-definition-v1";
@@ -23,6 +24,10 @@ const DEFAULT_MAX_DOCUMENT_BYTES = 32 * 1024;
 const DEFAULT_MAX_EXPORT_BYTES = 256 * 1024;
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const DEEPSEEK_BUILTIN_PROFILE = BUILTIN_CLI_AGENT_PROFILES.find(
+  (profile) => profile.runtime === "deepseek-harness",
+);
+const PREVIOUS_DEEPSEEK_NAME = "DeepSeek Harness";
 
 function definitionError(code, message) {
   return serviceError(code, message);
@@ -260,8 +265,22 @@ class AgentDefinitionStore {
         return this._commit({ profileId, expectedRevision: current.manifest.revision,
           documents: { IDENTITY: defaults.IDENTITY }, actor: "bootstrap", reason: "agent-create-identity" });
       }
-      return input.profileName === undefined ? current
-        : this._upgradeMemoryRule(this._upgradeLegacyDefaults(current, defaults));
+      if (profileId === DEEPSEEK_BUILTIN_PROFILE.id && input.profileName === DEEPSEEK_BUILTIN_PROFILE.name) {
+        const previousNameLine = `- Name: ${PREVIOUS_DEEPSEEK_NAME}`;
+        const nameLines = current.documents.IDENTITY.split("\n").filter((line) => line.startsWith("- Name: "));
+        const identityHash = sha256(current.documents.IDENTITY);
+        if (nameLines.length === 1 && nameLines[0] === previousNameLine
+          && this.history(profileId).every((revision) => (
+            revision.documents.IDENTITY.contentHash === identityHash
+            && !["import", "restore"].includes(revision.actor)
+          ))) {
+          return this._commit({ profileId, expectedRevision: current.manifest.revision,
+            documents: { IDENTITY: current.documents.IDENTITY.replace(/^- Name: DeepSeek Harness$/mu,
+              `- Name: ${DEEPSEEK_BUILTIN_PROFILE.name}`) },
+            actor: "bootstrap", reason: "builtin-deepseek-name" });
+        }
+      }
+      return current;
     }
     return this._commit({
       profileId,
@@ -271,45 +290,6 @@ class AgentDefinitionStore {
       reason: `default-profile:v${DEFAULT_TEMPLATE_VERSION}`,
       createdAt: this.now(),
     });
-  }
-
-  _upgradeMemoryRule(current) {
-    const content = current.documents.AGENTS;
-    if (!content.split("\n").includes(LEGACY_MEMORY_RULE)) return current;
-    const revisions = this.history(current.manifest.profileId);
-    // Replace only the product-authored v2 paragraph; keep all custom text and
-    // preserve deliberately imported/restored definitions.
-    if (revisions.at(-1)?.reason !== "default-profile:v2"
-      && !revisions.some((entry) => entry.actor === "bootstrap" && entry.reason === "default-template:v2")) return current;
-    if (revisions.some((entry) => ["import", "restore"].includes(entry.actor))) return current;
-    return this._commit({ profileId: current.manifest.profileId,
-      expectedRevision: current.manifest.revision,
-      documents: { AGENTS: content.split("\n").map((line) => line === LEGACY_MEMORY_RULE ? CURRENT_MEMORY_RULE : line).join("\n") },
-      actor: "bootstrap", reason: `default-memory-rule:v${DEFAULT_TEMPLATE_VERSION}` });
-  }
-
-  _upgradeLegacyDefaults(current, defaults) {
-    const candidates = DOCUMENT_KINDS.filter((kind) => (
-      current.documents[kind] === LEGACY_DEFAULT_DOCUMENTS[kind]
-    ));
-    if (candidates.length === 0) return current;
-    const revisions = this.history(current.manifest.profileId);
-    const first = revisions.at(-1);
-    // Only upgrade files continuously untouched since the original bootstrap.
-    // An import or restore is an explicit choice, even if it matches a template.
-    if (first?.revision !== 1 || first.actor !== "bootstrap" || first.reason !== "default-profile"
-      || revisions.some((revision) => ["import", "restore"].includes(revision.actor))) return current;
-    const documents = {};
-    for (const kind of candidates) {
-      const originalHash = sha256(LEGACY_DEFAULT_DOCUMENTS[kind]);
-      if (revisions.every((revision) => revision.documents[kind].contentHash === originalHash)) {
-        documents[kind] = defaults[kind];
-      }
-    }
-    if (Object.keys(documents).length === 0) return current;
-    return this._commit({ profileId: current.manifest.profileId,
-      expectedRevision: current.manifest.revision, documents, actor: "bootstrap",
-      reason: `default-template:v${DEFAULT_TEMPLATE_VERSION}` });
   }
 
   _readJson(target, maxBytes = this.maxExportBytes) {

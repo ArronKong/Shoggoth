@@ -1,0 +1,7 @@
+<svg preserveAspectRatio="none" width="100%" height="100%" overflow="visible" style="display: block;" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g stroke="var(--stroke-0, black)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 12V16M24 12V16"/>
+    <path d="M13 16H27V20C27 24 23.9 27 20 27C16.1 27 13 24 13 20V16Z"/>
+    <path d="M20 27V30"/>
+  </g>
+</svg>

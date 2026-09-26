@@ -20,6 +20,25 @@ files:
   - node_modules/node-pty/prebuilds/darwin-*/**/*
   - "!node_modules/node-pty/lib/*.test.js"
   - node_modules/pinyin-pro/**/*
+  - node_modules/ajv/**/*
+  - node_modules/fast-deep-equal/**/*
+  - node_modules/fast-uri/**/*
+  - node_modules/json-schema-traverse/**/*
+  - node_modules/require-from-string/**/*
+  - node_modules/js-yaml/**/*
+  - node_modules/argparse/**/*
+  - node_modules/@modelcontextprotocol/client/**/*
+  - node_modules/@modelcontextprotocol/core/**/*
+  - node_modules/cross-spawn/**/*
+  - node_modules/path-key/**/*
+  - node_modules/shebang-command/**/*
+  - node_modules/shebang-regex/**/*
+  - node_modules/eventsource/**/*
+  - node_modules/eventsource-parser/**/*
+  - node_modules/jose/**/*
+  - node_modules/pkce-challenge/**/*
+  - node_modules/zod/**/*
+  - node_modules/fflate/**/*
   - node_modules/electron-updater/**/*
   - node_modules/builder-util-runtime/**/*
   - node_modules/debug/**/*
@@ -59,6 +78,8 @@ asar: true
 # under nested node_modules and can make an x64 package resolve an arm64 dylib first.
 npmRebuild: false
 asarUnpack:
+  # Native afplay cannot open a WAV stored inside app.asar.
+  - app/manage-ui/public/audio/typewriter-loop.wav
   # Cua's FFI resolver passes a dylib path to dlopen; that path must be physical,
   # so the SDK, UniFFI JS and native packages are loaded from app.asar.unpacked.
   - node_modules/@trycua/**/*
@@ -84,6 +105,9 @@ extraResources:
     to: codex/runtime-manifest.json
   - from: resources/shoggoth-skills
     to: shoggoth-skills
+  # Read-only opt-in plugin source. Presence in the App does not install it.
+  - from: resources/bundled-plugins
+    to: bundled-plugins
   - from: resources/pi/shoggoth-pi-extension.mjs
     to: pi/shoggoth-pi-extension.mjs
   - from: resources/deepseek-harness/shoggoth-dsh-bridge.mjs

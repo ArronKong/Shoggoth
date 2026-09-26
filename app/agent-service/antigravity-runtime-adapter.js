@@ -48,7 +48,7 @@ class AntigravityRuntimeHandle {
   get terminated() { return this.host.terminated; }
   get registeredSecrets() { return []; }
 
-  authenticationState() { return this.host.authenticationState(); }
+  authenticationState(options) { return this.host.authenticationState(options); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);

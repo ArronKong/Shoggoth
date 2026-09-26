@@ -31,16 +31,54 @@
 //                  this is 0 AND token is empty (pre-existing installs skip it).
 //   windowBounds   { width, height } of the desktop window, persisted on resize so
 //                  the next launch reopens at the size the user left it.
+//   nativeConcurrency { maxActive: 1..100, startupConcurrency: 1..16, revision }
+//   runtimeFrameworkFlags four explicit booleans; new installs enable the shipped framework, revisioned with
+//                  nativeConcurrency and projected to the Service over IPC.
 
 const fs = require("node:fs");
 const path = require("node:path");
 const { normalizeInspirationShortcut, DEFAULT_INSPIRATION_SHORTCUT } = require("../desktop-inspiration-shortcut");
+const { DEFAULT_RUNTIME_FRAMEWORK_FLAGS, resolveRuntimeFrameworkFlags } = require("../agent-service/runtime-framework-flags");
+const { validateNativeRuntimeConfigProjection, NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES } = require("../agent-service/native-runtime-config-protocol");
 
 const SUPPORTED_LOCALES = new Set(["", "zh-CN", "en"]);
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 // 窗口尺寸：默认值与下限都住在这里（schema 唯一源），main.js 直接消费这两个常量。
 const DEFAULT_WINDOW_BOUNDS = { width: 1728, height: 1117 };
 const MIN_WINDOW_BOUNDS = { width: 720, height: 560 };
+const DEFAULT_NATIVE_CONCURRENCY = Object.freeze({ maxActive: 100, startupConcurrency: 8, revision: 0 });
+// These features are part of the current unpublished App baseline. Low-level
+// Service defaults remain disabled until Core supplies its authenticated config.
+// Preserve explicit saved choices and keep invalid configuration fail-closed.
+const DEFAULT_NATIVE_RUNTIME_FLAGS = Object.freeze({
+  runtimeAdmissionV1: true,
+  runtimeContextLifecycleV1: true,
+  runtimeMultiBinding: true,
+  runtimeConversationHandoff: true,
+});
+
+function projectNativeRuntimeConfig(config) {
+  return validateNativeRuntimeConfigProjection({
+    ...config.nativeConcurrency,
+    flags: config.runtimeFrameworkFlags,
+  });
+}
+
+function normalizeNativeRuntimeConfig(parsed) {
+  try {
+    return validateNativeRuntimeConfigProjection({
+      ...(parsed.nativeConcurrency === undefined ? DEFAULT_NATIVE_CONCURRENCY : parsed.nativeConcurrency),
+      flags: parsed.runtimeFrameworkFlags === undefined
+        ? DEFAULT_NATIVE_RUNTIME_FLAGS : resolveRuntimeFrameworkFlags(parsed.runtimeFrameworkFlags),
+    });
+  } catch {
+    // Invalid persisted capacity must not turn a corrupt value into an enabled
+    // higher limit. Retain safe defaults with every experimental path disabled.
+    const revision = Number.isSafeInteger(parsed.nativeConcurrency?.revision)
+      && parsed.nativeConcurrency.revision >= 0 ? parsed.nativeConcurrency.revision : 0;
+    return Object.freeze({ ...DEFAULT_NATIVE_CONCURRENCY, revision, flags: DEFAULT_RUNTIME_FRAMEWORK_FLAGS });
+  }
+}
 
 // 与 HermesBackend.agentIdForProfile 完全一致的最终路由身份；专项回归会把
 // 两侧实现逐向量对照，防止 CJS 配置层与 backend 规则以后静默漂移。
@@ -113,6 +151,7 @@ function sanitizeWindowBounds(raw) {
 function normalizeConfig(parsed) {
   const p = parsed && typeof parsed === "object" ? parsed : {};
   const localeRaw = typeof p.locale === "string" ? p.locale : "";
+  const native = normalizeNativeRuntimeConfig(p);
   return {
     gatewayUrl: typeof p.gatewayUrl === "string" ? p.gatewayUrl : "",
     token: typeof p.token === "string" ? p.token : "",
@@ -128,6 +167,8 @@ function normalizeConfig(parsed) {
     setupCompletedAt: Number.isFinite(p.setupCompletedAt) && p.setupCompletedAt > 0 ? p.setupCompletedAt : 0,
     windowBounds: sanitizeWindowBounds(p.windowBounds),
     inspirationShortcut: normalizeInspirationShortcut(p.inspirationShortcut) || DEFAULT_INSPIRATION_SHORTCUT,
+    nativeConcurrency: { maxActive: native.maxActive, startupConcurrency: native.startupConcurrency, revision: native.revision },
+    runtimeFrameworkFlags: { ...native.flags },
   };
 }
 
@@ -145,13 +186,18 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     let raw;
     try {
       raw = fs.readFileSync(configPath, "utf8");
-    } catch {
-      return { config: normalizeConfig({}), corrupt: false };
+    } catch (error) {
+      const missing = error?.code === "ENOENT";
+      return { config: normalizeConfig(missing ? {} : {
+        runtimeFrameworkFlags: DEFAULT_RUNTIME_FRAMEWORK_FLAGS,
+      }), corrupt: !missing };
     }
     try {
-      return { config: normalizeConfig(JSON.parse(raw)), corrupt: false };
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      return { config: normalizeConfig(parsed), corrupt: false };
     } catch {
-      return { config: normalizeConfig({}), corrupt: true };
+      return { config: normalizeConfig({ runtimeFrameworkFlags: DEFAULT_RUNTIME_FRAMEWORK_FLAGS }), corrupt: true };
     }
   }
 
@@ -215,6 +261,29 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     return next;
   }
 
+  function writeNativeRuntimeConfig(input) {
+    const { config: current, corrupt } = readParsed();
+    if (corrupt) {
+      throw Object.assign(new Error(NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES.NATIVE_RUNTIME_CONFIG_INVALID), {
+        code: "NATIVE_RUNTIME_CONFIG_INVALID",
+      });
+    }
+    if (!Number.isSafeInteger(input?.expectedRevision)
+      || input.expectedRevision !== current.nativeConcurrency.revision) {
+      throw Object.assign(new Error(NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES.NATIVE_RUNTIME_CONFIG_STALE), {
+        code: "NATIVE_RUNTIME_CONFIG_STALE",
+      });
+    }
+    const projection = validateNativeRuntimeConfigProjection({
+      revision: current.nativeConcurrency.revision + 1,
+      maxActive: input.maxActive, startupConcurrency: input.startupConcurrency, flags: input.flags,
+    });
+    return write({
+      nativeConcurrency: { revision: projection.revision, maxActive: projection.maxActive, startupConcurrency: projection.startupConcurrency },
+      runtimeFrameworkFlags: projection.flags,
+    });
+  }
+
   // First run: drop an editable file with the default gateway pre-filled.
   function ensure() {
     if (fs.existsSync(configPath)) return;
@@ -230,7 +299,7 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     }
   }
 
-  return { read, write, ensure, getReadStatus, path: configPath };
+  return { read, write, writeNativeRuntimeConfig, ensure, getReadStatus, path: configPath };
 }
 
 module.exports = {
@@ -245,4 +314,6 @@ module.exports = {
   DEFAULT_GATEWAY_URL,
   DEFAULT_WINDOW_BOUNDS,
   MIN_WINDOW_BOUNDS,
+  DEFAULT_NATIVE_CONCURRENCY,
+  projectNativeRuntimeConfig,
 };

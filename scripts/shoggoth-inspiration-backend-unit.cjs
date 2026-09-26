@@ -133,6 +133,7 @@ test("Owner injection never enables unrelated backends and respects service avai
   await assert.rejects(owner.startExternalInspiration("idea", { backendId: "other" }), { code: "INSPIRATION_UNSUPPORTED" });
   const external = Object.create(OpenClawBackend.prototype);
   external.setInspirationOwner(owner);
+  const availableCall = owner._call;
   owner._state = "stopped";
   assert.equal(external.getInspirationCapabilities().execute, true);
   await external.startInspiration("idea", { backendId: "openclaw", agentId: "main" });
@@ -140,12 +141,15 @@ test("Owner injection never enables unrelated backends and respects service avai
   for (const status of [
     { healthy: false, pendingCommandsLocked: false, mcpCredentialsLocked: false },
     { healthy: true, pendingCommandsLocked: true, mcpCredentialsLocked: false },
-    { healthy: true, pendingCommandsLocked: false, mcpCredentialsLocked: true },
   ]) {
     owner._call = async (method) => { assert.equal(method, "service.status"); return status; };
     await assert.rejects(external.startInspiration("idea", { backendId: "openclaw" }), { code: "INSPIRATION_UNAVAILABLE" });
   }
-  assert.equal(calls.filter(({ method }) => method === "inspiration.start").length, 1);
+  owner._call = (method, params) => method === "service.status"
+    ? Promise.resolve({ healthy: true, pendingCommandsLocked: false, mcpCredentialsLocked: true })
+    : availableCall(method, params);
+  await external.startInspiration("idea", { backendId: "openclaw", agentId: "main" });
+  assert.equal(calls.filter(({ method }) => method === "inspiration.start").length, 2);
 });
 
 test("Native execution retains Profile binding, Session prefix, and sync", async () => {

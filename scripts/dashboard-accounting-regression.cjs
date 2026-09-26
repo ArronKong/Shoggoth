@@ -95,13 +95,18 @@ const { estimateUsageCost } = require("../app/core/usage-cost");
     const recorded = [], usageStore = { list: () => recorded, record: value => recorded.push(value) };
     const run = { id: "run", profileId: "p", source: "inspiration", sourceId: "idea", status: "completed",
       startedAt: start, finishedAt: now, createdAt: start, workspace: root,
-      runtimeSessionRef: { runtime: "grok-build", runtimeProfileId: "rp", runtimeAccountId: "ra", sessionId: "session" }, runtimeTurnRef: { turnId: "turn" } };
+      runtimeSessionRef: { runtime: "grok-build", runtimeProfileId: "rp", runtimeAccountId: "ra", sessionId: "session" }, runtimeTurnRef: { runtime: "grok-build", runtimeProfileId: "rp", runtimeAccountId: "ra", sessionId: "session", turnId: "turn" } };
     let reads = 0;
     const input = { profiles: [profile], runs: [run], usageStore, sinceMs: start, now,
       readUsage: async () => { reads++; return projected; } };
     assert.equal(await reconcileGrokUsage(input), true);
     assert.equal(await reconcileGrokUsage(input), true);
     assert.equal(reads, 1); assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].runtime, "grok-build"); assert.equal(recorded[0].runtimeAccountId, "ra");
+    assert.equal(recorded[0].runId, "run");
+    assert.equal(await reconcileGrokUsage({ ...input, profiles: [{...profile, runtime:"pi", runtimeAccountId:"new-default"}],
+      usageStore:{list:()=>[],record:value=>{assert.equal(value.runtimeAccountId,"ra");}},
+      readUsage:async selected=>{assert.equal(selected.runtimeAccountId,"ra");return projected;} }), true);
     assert.equal(recorded[0].source, "inspiration"); assert.equal(recorded[0].createdAt, start + 1);
     assert.equal(await reconcileGrokUsage({ ...input, usageStore: { ...usageStore, list: () => [] }, readUsage: async () => [] }), false);
     assert.equal(await reconcileGrokUsage({ ...input, runs: [{ ...run, runtimeSessionRef: { ...run.runtimeSessionRef, runtimeAccountId: "foreign" } }] }), false);

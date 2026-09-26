@@ -13,9 +13,6 @@ const {
 const { inspectRuntimeStorage } = require("./runtime-storage-inspector");
 const { serviceError } = require("./security");
 
-const DEFAULT_INVENTORY_CACHE_MS = 1_000;
-const MAX_INVENTORY_CACHE_MS = 10_000;
-
 function controllerError(code, message) {
   return serviceError(code, message);
 }
@@ -43,37 +40,6 @@ function safeStats(runtimeAccountId, scope, stats, available = true) {
   };
 }
 
-function projectLegacyHome(entry) {
-  return {
-    id: entry.id,
-    runtime: entry.runtime,
-    runtimeAccountId: entry.runtimeAccountId,
-    accountKind: entry.accountKind,
-    role: entry.role,
-    affectedAgentCount: entry.profileIds.length,
-    bytes: entry.stats.bytes,
-    files: entry.stats.files,
-    dirs: entry.stats.dirs,
-    symlinks: entry.stats.symlinks,
-    incomplete: entry.stats.incomplete,
-    lastModifiedAt: entry.lastModifiedAt,
-  };
-}
-
-function projectBackup(entry) {
-  return {
-    id: entry.id,
-    category: entry.category,
-    role: entry.role,
-    bytes: entry.stats.bytes,
-    files: entry.stats.files,
-    dirs: entry.stats.dirs,
-    symlinks: entry.stats.symlinks,
-    incomplete: entry.stats.incomplete,
-    lastModifiedAt: entry.lastModifiedAt,
-  };
-}
-
 function pageById(items, cursor, limit) {
   const start = cursor === null
     ? 0 : items.findIndex((item) => item.id.localeCompare(cursor, "en") > 0);
@@ -85,20 +51,6 @@ function pageById(items, cursor, limit) {
     nextCursor: hasMore ? page.at(-1).id : null,
     hasMore,
   };
-}
-
-function inventorySignature(accounts, profiles) {
-  const accountProjection = accounts.map((account) => [
-    account.id, account.runtime, account.kind,
-  ]);
-  const profileProjection = profiles.map((profile) => [
-    profile.id,
-    profile.runtime,
-    profile.runtimeProfileId,
-    profile.runtimeAccountId,
-    profile.isDefault,
-  ]).map(JSON.stringify).sort((left, right) => left.localeCompare(right, "en"));
-  return JSON.stringify([accountProjection, profileProjection]);
 }
 
 function pathExists(fileSystem, target) {
@@ -115,12 +67,8 @@ function defaultStorageReader(options) {
   const fileSystem = options.fs || fs;
   const parentEnv = options.parentEnv || process.env;
   const homedir = options.homedir || os.homedir;
-  return (account, manifest) => {
+  return (account) => {
     if (account.kind === "shoggoth-managed") {
-      const canonical = manifest.entries.find((entry) => (
-        entry.runtimeAccountId === account.id && entry.role === "canonical"
-      ));
-      if (canonical) return safeStats(account.id, "managed-legacy", canonical.stats);
       const root = path.join(
         options.paths.runtimeAccountsDir,
         account.runtime,
@@ -143,16 +91,18 @@ function defaultStorageReader(options) {
       typeof homedir === "function" ? homedir() : homedir,
       account.runtime,
     );
-    if (!pathExists(fileSystem, nativeHome)) {
+    // XDG_DATA_HOME is shared by many apps; only OpenCode's child belongs to this account.
+    const scanRoot = account.runtime === "opencode" ? path.join(nativeHome, "opencode") : nativeHome;
+    if (!pathExists(fileSystem, scanRoot)) {
       return safeStats(account.id, "native-system", null, false);
     }
-    return safeStats(account.id, "native-system", inspectRuntimeStorage(nativeHome, {
+    return safeStats(account.id, "native-system", inspectRuntimeStorage(scanRoot, {
       // A live Home can be large. Return a lower bound within the RPC budget.
       maxDurationMs: 1_000,
       ...options.scanLimits,
       ignoreIpcEntries: true,
       fs: fileSystem,
-      trustedRoot: nativeHome,
+      trustedRoot: scanRoot,
     }));
   };
 }
@@ -170,35 +120,16 @@ class RuntimeAccountServiceController {
       ["read", "loginStart", "loginCancel", "logout"],
       "AccountAuthManager",
     );
-    requireMethods(options.legacyRuntimeHomeStore, ["refresh"], "LegacyRuntimeHomeStore");
-    requireMethods(options.runtimeStorageCleanup, ["prepare", "commit", "close"], "RuntimeStorageCleanup");
-    requireMethods(options.runtimeBackupStore, ["refresh"], "RuntimeBackupStore");
-    requireMethods(options.runtimeBackupCleanup, ["prepare", "commit", "close"], "RuntimeBackupCleanup");
-    if (!options.paths?.stateDir || !options.paths?.runtimeAccountsDir || !options.paths?.backupsDir) {
+    if (!options.paths?.stateDir || !options.paths?.runtimeAccountsDir) {
       throw controllerError("RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID", "Service paths are invalid");
     }
     this.productStore = options.productStore;
     this.runtimeAccountAdmission = options.runtimeAccountAdmission;
     this.accountAuthManager = options.accountAuthManager;
-    this.legacyRuntimeHomeStore = options.legacyRuntimeHomeStore;
-    this.runtimeStorageCleanup = options.runtimeStorageCleanup;
-    this.runtimeBackupStore = options.runtimeBackupStore;
-    this.runtimeBackupCleanup = options.runtimeBackupCleanup;
     this.readStorage = options.readAccountStorage || defaultStorageReader(options);
     if (typeof this.readStorage !== "function") {
       throw controllerError("RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID", "Storage reader is invalid");
     }
-    this.now = options.now || Date.now;
-    this.inventoryCacheMs = options.inventoryCacheMs ?? DEFAULT_INVENTORY_CACHE_MS;
-    if (typeof this.now !== "function" || !Number.isSafeInteger(this.inventoryCacheMs)
-      || this.inventoryCacheMs < 0 || this.inventoryCacheMs > MAX_INVENTORY_CACHE_MS) {
-      throw controllerError(
-        "RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID",
-        "Inventory cache options are invalid",
-      );
-    }
-    this.inventoryCache = null;
-    this.backupInventoryCache = null;
     this.opened = false;
   }
 
@@ -209,10 +140,6 @@ class RuntimeAccountServiceController {
 
   close() {
     this.opened = false;
-    this.inventoryCache = null;
-    this.backupInventoryCache = null;
-    this.runtimeStorageCleanup.close();
-    this.runtimeBackupCleanup.close();
   }
 
   #assertOpen() {
@@ -226,7 +153,7 @@ class RuntimeAccountServiceController {
       .map(validateRuntimeAccount)
       .sort((left, right) => left.id.localeCompare(right.id, "en"));
     const accountIds = new Set(accounts.map((account) => account.id));
-    const profiles = this.productStore.listAgentProfiles();
+    const profiles = require("./agent-runtime-profile-views").agentRuntimeProfileViews(this.productStore);
     if (!Array.isArray(profiles) || profiles.length > 10_000
       || profiles.some((profile) => !profile || typeof profile !== "object"
         || typeof profile.runtimeAccountId !== "string"
@@ -245,10 +172,8 @@ class RuntimeAccountServiceController {
       installationKind: account.installationKind,
       homeKind: account.homeKind,
       isDefault: account.isDefault,
-      sharedAgentCount: profiles.reduce(
-        (count, profile) => count + Number(profile.runtimeAccountId === account.id),
-        0,
-      ),
+      sharedAgentCount: new Set(profiles.filter(profile => profile.runtimeAccountId === account.id)
+        .map(profile => profile.id)).size,
       admission: {
         generation: admission.generation,
         active: admission.active,
@@ -274,37 +199,6 @@ class RuntimeAccountServiceController {
       );
     }
     return account;
-  }
-
-  #inventory(accounts, profiles) {
-    const now = this.now();
-    if (!Number.isSafeInteger(now) || now < 0) {
-      throw controllerError("RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID", "Inventory clock is invalid");
-    }
-    const signature = inventorySignature(accounts, profiles);
-    const cached = this.inventoryCache;
-    if (this.inventoryCacheMs > 0 && cached && cached.signature === signature
-      && now >= cached.cachedAt && now - cached.cachedAt < this.inventoryCacheMs) {
-      return cached.manifest;
-    }
-    const manifest = this.legacyRuntimeHomeStore.refresh({ accounts, profiles });
-    this.inventoryCache = { signature, cachedAt: now, manifest };
-    return manifest;
-  }
-
-  #backupInventory() {
-    const now = this.now();
-    if (!Number.isSafeInteger(now) || now < 0) {
-      throw controllerError("RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID", "Inventory clock is invalid");
-    }
-    const cached = this.backupInventoryCache;
-    if (this.inventoryCacheMs > 0 && cached && now >= cached.cachedAt
-      && now - cached.cachedAt < this.inventoryCacheMs) {
-      return cached.manifest;
-    }
-    const manifest = this.runtimeBackupStore.refresh();
-    this.backupInventoryCache = { cachedAt: now, manifest };
-    return manifest;
   }
 
   async handle(method, input) {
@@ -336,41 +230,7 @@ class RuntimeAccountServiceController {
       result = await this.accountAuthManager.logout(params);
     } else if (method === "runtime.account.storage.read") {
       const account = this.#account(params.runtimeAccountId, accounts);
-      const manifest = account.kind === "shoggoth-managed"
-        ? this.#inventory(accounts, profiles) : { entries: [] };
-      result = await this.readStorage(account, manifest);
-    } else if (method === "runtime.account.legacyHomes.list") {
-      if (params.runtimeAccountId !== null) this.#account(params.runtimeAccountId, accounts);
-      const manifest = this.#inventory(accounts, profiles);
-      const homes = manifest.entries
-        .filter((entry) => params.runtimeAccountId === null
-          || entry.runtimeAccountId === params.runtimeAccountId)
-        .map(projectLegacyHome)
-        .sort((left, right) => left.id.localeCompare(right.id, "en"));
-      const page = pageById(homes, params.cursor, params.limit);
-      result = { homes: page.page, nextCursor: page.nextCursor, hasMore: page.hasMore };
-    } else if (method === "runtime.account.backups.list") {
-      const backups = this.#backupInventory().entries
-        .map(projectBackup)
-        .sort((left, right) => left.id.localeCompare(right.id, "en"));
-      const page = pageById(backups, params.cursor, params.limit);
-      result = { backups: page.page, nextCursor: page.nextCursor, hasMore: page.hasMore };
-    } else if (method === "runtime.account.legacyHomes.cleanup.prepare") {
-      result = await this.runtimeStorageCleanup.prepare(params);
-    } else if (method === "runtime.account.legacyHomes.cleanup.commit") {
-      try {
-        result = await this.runtimeStorageCleanup.commit(params);
-      } finally {
-        this.inventoryCache = null;
-      }
-    } else if (method === "runtime.account.backups.cleanup.prepare") {
-      result = await this.runtimeBackupCleanup.prepare(params);
-    } else if (method === "runtime.account.backups.cleanup.commit") {
-      try {
-        result = await this.runtimeBackupCleanup.commit(params);
-      } finally {
-        this.backupInventoryCache = null;
-      }
+      result = await this.readStorage(account);
     } else {
       throw controllerError("INVALID_PARAMS", "Unknown RuntimeAccount Service method");
     }
@@ -383,9 +243,6 @@ function createRuntimeAccountServiceController(options = {}) {
 }
 
 module.exports = {
-  DEFAULT_INVENTORY_CACHE_MS,
   RuntimeAccountServiceController,
   createRuntimeAccountServiceController,
-  projectRuntimeBackup: projectBackup,
-  projectLegacyRuntimeHome: projectLegacyHome,
 };

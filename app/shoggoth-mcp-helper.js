@@ -30,7 +30,6 @@ const {
 } = require("./agent-service/interactive-timeouts");
 const {
   resolveCanonicalServicePaths,
-  resolveServicePaths,
 } = require("./agent-service/paths");
 const { serviceError } = require("./agent-service/security");
 const {
@@ -208,7 +207,7 @@ function validateSession(session, binding) {
 }
 
 async function authenticateMcpSession(options = {}) {
-  const paths = options.paths || resolveServicePaths();
+  const paths = options.paths || resolveCanonicalServicePaths();
   const runtimeProfileId = options.runtimeProfileId;
   const runtimeAccountId = options.runtimeAccountId;
   if (!validRuntimeProfileId(runtimeProfileId) || !validRuntimeAccountId(runtimeAccountId)) {
@@ -812,11 +811,12 @@ function createMcpStdioHandler(options = {}) {
   }
   const allowedTools = new Set(toolDefinitions.map((definition) => definition.name));
   const toolPages = toolListPages(toolDefinitions);
-  const paths = options.paths || resolveServicePaths();
+  const paths = options.paths || resolveCanonicalServicePaths();
   const serviceVersion = typeof options.serviceVersion === "string" ? options.serviceVersion : "0.0.0";
   const refreshSession = options.refreshSession || null;
   const now = options.now || Date.now;
   const randomUUID = options.randomUUID || crypto.randomUUID;
+  const bindRuntimeCalls = options.bindRuntimeCalls === true;
   const sessionRefreshSkewMs = options.sessionRefreshSkewMs ?? MCP_SESSION_REFRESH_SKEW_MS;
   const refreshTimeoutMs = options.refreshTimeoutMs ?? MCP_SESSION_REFRESH_TIMEOUT_MS;
   if (!Number.isSafeInteger(sessionRefreshSkewMs) || sessionRefreshSkewMs < 0
@@ -881,17 +881,31 @@ function createMcpStdioHandler(options = {}) {
     },
   }, { timeoutMs: MCP_TOOL_SERVICE_TIMEOUT_MS });
 
-  const invokeTool = async (name, args, confirmed = false) => {
+  const invokeTool = async (name, args, confirmed = false, context = {}) => {
     let callId;
     try { callId = randomUUID(); } catch {
       throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
     }
     if (!UUID_PATTERN.test(callId)) throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
     const refreshed = await refreshIfExpiring();
+    const bind = async () => { if (bindRuntimeCalls) {
+      if (!supportsElicitation || typeof context.requestClient !== "function") {
+        throw helperError("MCP_SESSION_INVALID", "mcp_session_invalid");
+      }
+      const response = await context.requestClient("elicitation/create",
+        require("./agent-service/runtime-mcp-call-binding").bindingElicitation({
+          callId, name, arguments: args, confirmation: confirmed, sessionToken,
+        }));
+      if (response?.action !== "accept" || !exactObject(response.content, [])) {
+        throw helperError("MCP_SESSION_INVALID", "mcp_session_invalid");
+      }
+    } };
+    await bind();
     try { return await requestTool(name, args, callId, confirmed); }
     catch (error) {
       if (dataErrorCode(error) !== "MCP_SESSION_INVALID" || refreshed || !refreshSession) throw error;
       await refresh();
+      await bind();
       return requestTool(name, args, callId, confirmed);
     }
   };
@@ -976,7 +990,7 @@ function createMcpStdioHandler(options = {}) {
       let nativeAgent = null;
       try {
         if (["computer_session_open", "computer_session_resume"].includes(message.params.name)) {
-          const state = cloneMcpServiceResult(await invokeTool("computer_status", {}));
+          const state = cloneMcpServiceResult(await invokeTool("computer_status", {}, false, context));
           if (state?.available !== true) {
             const reason = Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, state?.reason || "")
               ? state.reason : "COMPUTER_DRIVER_UNAVAILABLE";
@@ -993,7 +1007,7 @@ function createMcpStdioHandler(options = {}) {
         if (["native_agent_update", "native_agent_archive"].includes(message.params.name)) {
           const result = cloneMcpServiceResult(await invokeTool("native_agent_get", {
             backendId: toolArguments.backendId, agentId: toolArguments.agentId,
-          }));
+          }, false, context));
           nativeAgent = result?.agent;
           if (!nativeAgent || nativeAgent.backendId !== toolArguments.backendId
             || nativeAgent.agentId !== toolArguments.agentId || typeof nativeAgent.name !== "string") {
@@ -1038,7 +1052,7 @@ function createMcpStdioHandler(options = {}) {
         }
       }
       try {
-        const rawResult = await invokeTool(message.params.name, toolArguments, confirmed);
+        const rawResult = await invokeTool(message.params.name, toolArguments, confirmed, context);
         const result = cloneMcpServiceResult(rawResult);
         if (message.params.name === "computer_snapshot" && result?.image?.thumbnail) {
           const thumbnail = result.image.thumbnail;
@@ -1353,7 +1367,7 @@ async function startShoggothMcpHelper(options = {}) {
       });
       return;
     }
-    const defaultPaths = options.paths || resolveServicePaths();
+    const defaultPaths = options.paths || resolveCanonicalServicePaths();
     const canonicalPaths = options.runtimeMcpContext
       ? resolveCanonicalServicePaths()
       : defaultPaths;
@@ -1448,6 +1462,7 @@ async function startShoggothMcpHelper(options = {}) {
       sessionToken: session.token,
       sessionExpiresAt: session.expiresAt,
       serviceVersion,
+      bindRuntimeCalls: true,
       requestService: options.requestService || defaultRequestService,
       refreshSession: loadSession,
       now: options.now,

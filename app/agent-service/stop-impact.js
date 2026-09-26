@@ -25,7 +25,7 @@ function createStopImpact({ runs, instanceNonce, profileFor, titleFor }) {
   const revision = createHash("sha256").update(JSON.stringify([
     instanceNonce,
     active.map((run) => [run.id, run.profileId, run.source, run.sourceId,
-      run.status, run.waitingRequestId, run.runtimeTurnRef ?? run.codexTurnId]),
+      run.status, run.waitingRequestId, run.runtimeTurnRef]),
   ])).digest("hex");
   return {
     availability: "available",

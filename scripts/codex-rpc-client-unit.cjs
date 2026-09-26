@@ -210,6 +210,21 @@ async function testMalformedTailOversizeAndStreamTermination() {
   }
 }
 
+async function testLargeBoundedFramesRoundTripWithoutTheOldTwoMiBQueueCap() {
+  const child = new FakeChild();
+  const lines = readLines(child.stdin);
+  const rpc = new CodexJsonlRpcClient(child, { requestTimeoutMs: 3000 });
+  try {
+    const body = "quoted \\\" 中文\n".repeat(200000);
+    const pending = rpc.request("fixture/large", { body });
+    await delay(0);
+    assert.ok(Buffer.byteLength(JSON.stringify(lines[0])) > 2 * 1024 * 1024);
+    assert.equal(lines[0].params.body, body);
+    child.send({ id: lines[0].id, result: { body } });
+    assert.equal((await pending).body, body);
+  } finally { await rpc.terminate(); }
+}
+
 async function testStdoutUsesFatalUtf8DecodingAcrossChunks() {
   {
     const child = new FakeChild();
@@ -478,6 +493,7 @@ async function main() {
     testServerRequestHandlerCanWaitWithoutDeadline,
     testAbortTimeoutAndWaiters,
     testMalformedTailOversizeAndStreamTermination,
+    testLargeBoundedFramesRoundTripWithoutTheOldTwoMiBQueueCap,
     testStdoutUsesFatalUtf8DecodingAcrossChunks,
     testStderrRingAndWriteFailuresAreBounded,
     testDynamicSecretRegistrationRedactsExistingAndFutureDiagnostics,

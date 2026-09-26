@@ -54,7 +54,7 @@ function historyType(message) {
 function uniqueRunByTurn(runs) {
   const byTurn = new Map();
   for (const run of runs) {
-    const turnId = run?.runtimeTurnRef?.turnId ?? run?.codexTurnId;
+    const turnId = run?.runtimeTurnRef?.turnId;
     if (typeof turnId !== "string" || turnId.length === 0) continue;
     const existing = byTurn.get(turnId);
     if (existing === undefined) byTurn.set(turnId, run.id);

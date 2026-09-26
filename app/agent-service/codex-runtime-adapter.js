@@ -9,6 +9,7 @@ const { serviceError } = require("./security");
 const { runtimeStageError } = require("./runtime-stage-error");
 const { normalizeRuntimeCommands } = require("./runtime-commands");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
+const { codexRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
 
 const CODEX_COMMANDS = normalizeRuntimeCommands([
   { name: "compact", description: "Compact the current Codex conversation" },
@@ -42,6 +43,9 @@ const CODEX_CAPABILITIES = runtimeCapabilities(Object.fromEntries([
   "account.logout",
   "events",
   "serverRequests",
+  "context.usage.exact",
+  "context.compact.native",
+  "context.compact.auto",
 ].map((key) => [key, true])));
 
 function adapterError(code, message) {
@@ -95,12 +99,28 @@ class CodexRuntimeHandle {
 
   get terminated() { return this.host.terminated; }
 
+  assertExecutionProviderCurrent() { this.host.assertExecutionProviderCurrent?.(); }
+
   get registeredSecrets() {
     return Array.isArray(this.host.registeredSecrets) ? [...this.host.registeredSecrets] : [];
   }
 
   subscribe(listener) {
-    return this.host.subscribe((event) => listener(mapEvent(event)));
+    return this.host.subscribe((event) => {
+      const mapped = mapEvent(event);
+      if (mapped.known === true && typeof mapped.sessionId === "string" && mapped.sessionId.length > 0) {
+        if (mapped.type === "usage") listener({ known: true, type: "context_usage",
+          sessionId: mapped.sessionId, ...(mapped.turnId ? { turnId: mapped.turnId } : {}),
+          contextUsage: codexRuntimeContextUsage(mapped.sessionId, mapped) });
+        if (mapped.type === "context_compacted") {
+          listener({ known: true, type: "context_compacted", sessionId: mapped.sessionId,
+            ...(mapped.turnId ? { turnId: mapped.turnId } : {}),
+            contextUsage: unknownRuntimeContextUsage(mapped.sessionId) });
+          return;
+        }
+      }
+      listener(mapped);
+    });
   }
 
   subscribeAccountAuth(listener) {

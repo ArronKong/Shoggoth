@@ -7,8 +7,8 @@ const { serviceError } = require("./security");
 
 const DEFAULT_CHALLENGE_TTL_MS = 30_000;
 const DEFAULT_SESSION_TTL_MS = 5 * 60_000;
-const DEFAULT_MAX_CHALLENGES = 128;
-const DEFAULT_MAX_SESSIONS = 128;
+const DEFAULT_MAX_CHALLENGES = 256;
+const DEFAULT_MAX_SESSIONS = 256;
 const MCP_CHALLENGE_DOMAIN = "shoggoth-mcp-auth-challenge-v2";
 
 function fixedError(code, message) {
@@ -135,6 +135,7 @@ class McpSessionManager {
   #sessionTtlMs;
   #maxChallenges;
   #maxSessions;
+  #concurrentHelperSessions;
   #challenges = new Map();
   #sessions = new Map();
   #profileSessionDigests = new Map();
@@ -160,6 +161,10 @@ class McpSessionManager {
         options.maxChallenges, DEFAULT_MAX_CHALLENGES, 4096,
       );
       this.#maxSessions = positiveBoundedInteger(options.maxSessions, DEFAULT_MAX_SESSIONS, 4096);
+      if (options.concurrentHelperSessions !== undefined && typeof options.concurrentHelperSessions !== "boolean") {
+        throw fixedError("MCP_AUTH_REQUEST_INVALID", "mcp_auth_request_invalid");
+      }
+      this.#concurrentHelperSessions = options.concurrentHelperSessions === true;
     } catch (error) {
       this.#secret.fill(0);
       throw error;
@@ -238,7 +243,7 @@ class McpSessionManager {
     return this.#issueSession({
       runtimeProfileId: challenge.runtimeProfileId,
       runtimeAccountId: challenge.runtimeAccountId,
-    }, now, authFailed);
+    }, now, authFailed, !this.#concurrentHelperSessions);
   }
 
   issueBridgeSession(binding) {
@@ -247,7 +252,7 @@ class McpSessionManager {
       || !validRuntimeAccountId(binding.runtimeAccountId)) throw authFailed();
     const now = this.#safeNow();
     this.#purgeExpired(now);
-    return this.#issueSession(binding, now, authFailed);
+    return this.#issueSession(binding, now, authFailed, false);
   }
 
   revokeSession(request) {
@@ -263,10 +268,11 @@ class McpSessionManager {
     return true;
   }
 
-  #issueSession(binding, now, errorFactory) {
+  #issueSession(binding, now, errorFactory, exclusiveProfileSession = true) {
     const { runtimeProfileId, runtimeAccountId } = binding;
     const profile = this.#resolveUniqueEnabledProfile(binding, errorFactory);
-    const previousDigest = this.#profileSessionDigests.get(runtimeProfileId) || null;
+    const previousDigest = exclusiveProfileSession
+      ? this.#profileSessionDigests.get(runtimeProfileId) || null : null;
     const retainedCount = this.#sessions.size - (previousDigest && this.#sessions.has(previousDigest) ? 1 : 0);
     if (retainedCount >= this.#maxSessions) throw authBusy();
 
@@ -282,7 +288,7 @@ class McpSessionManager {
       expiresAt: now + this.#sessionTtlMs,
     };
     this.#sessions.set(digest, session);
-    this.#profileSessionDigests.set(runtimeProfileId, digest);
+    if (exclusiveProfileSession) this.#profileSessionDigests.set(runtimeProfileId, digest);
     return { token, ...session };
   }
 
@@ -323,7 +329,7 @@ class McpSessionManager {
 
   #resolveUniqueEnabledProfile(binding, errorFactory) {
     try {
-      const profiles = this.#profileStore.listAgentProfiles();
+      const profiles = require("./agent-runtime-profile-views").agentRuntimeProfileViews(this.#profileStore);
       if (!Array.isArray(profiles)) throw new Error("invalid profiles");
       const matches = profiles.filter((candidate) => candidate && candidate.enabled === true
         && candidate.runtimeProfileId === binding.runtimeProfileId

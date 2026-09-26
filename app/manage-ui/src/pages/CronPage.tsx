@@ -405,7 +405,8 @@ export default function CronPage() {
     if (openedNotificationJobId.current === identity) return;
     openedNotificationJobId.current = identity;
     const notificationJob = jobs.find((job) =>
-      job.id === notificationJobId && (!notificationBackendId || job.backendId === notificationBackendId));
+      job.id === notificationJobId
+      && (!notificationBackendId || job.backendId === notificationBackendId));
     if (notificationJob) {
       void openView(notificationJob);
       return;

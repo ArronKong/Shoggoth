@@ -276,7 +276,7 @@ test("两个共享内部 RuntimeAccount 的非默认 Profile 独立首配、轮�
 
     const unauthorized = value.productStore.putAgentProfile({
       ...profile("profile-native-codex", "runtime-native-codex", null),
-      backendId: "codex",
+      backendId: "shoggoth",
       runtimeAccountId: "native-codex-default-v1",
     });
     await assert.rejects(
@@ -825,7 +825,7 @@ test("OpenAI credential 加密轮换与清除不获取 Host，不调用 account 
   }
 });
 
-test("OpenAI set/clear 只允许绑定目标 openai provider 的唯一 runtimeProfile", async () => {
+test("Provider secret API 拒绝旧版 runtimeProfileId 参数且不获取 Host", async () => {
   const value = fixture();
   const calls = [];
   value.service = new ProviderService({
@@ -861,7 +861,7 @@ test("OpenAI set/clear 只允许绑定目标 openai provider 的唯一 runtimePr
         runtimeProfileId: "runtime-wrong-provider",
       }),
     ]) {
-      await assert.rejects(action(), (error) => error.code === "PROVIDER_RUNTIME_PROFILE_MISMATCH");
+      await assert.rejects(action(), (error) => error.code === "PROVIDER_SECRET_PARAMS_INVALID");
     }
     assert.deepEqual(calls, []);
   } finally {

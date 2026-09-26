@@ -4,6 +4,10 @@ const crypto = require("node:crypto");
 const { OPENAI_API_KEY_ENV } = require("./codex-runtime-config");
 const { assertRuntimeProfileId, runtimeError } = require("./codex-runtime-paths");
 const { validRuntimeAccountId } = require("./runtime-adapter");
+const {
+  captureExecutionProviderRoute, assertExecutionProviderRouteCurrent,
+  validateFrozenExecutionProviderRoute,
+} = require("./execution-provider-route");
 
 const AWS_CREDENTIAL_CHAIN_ENV_KEYS = Object.freeze([
   "AWS_ACCESS_KEY_ID",
@@ -101,44 +105,65 @@ class ProviderRuntimeBridge {
   async prepareRuntime({
     runtimeProfileId,
     runtimeAccountId,
-    codexHome,
     configurationMode = "overlay",
+    executionContract = null,
   }) {
     assertRuntimeProfileId(runtimeProfileId);
     if (!validRuntimeAccountId(runtimeAccountId)) {
       throw bridgeError("RUNTIME_ACCOUNT_INVALID", "Runtime account is invalid");
     }
-    if (!["persistent", "overlay"].includes(configurationMode)) {
+    if (configurationMode !== "overlay") {
       throw bridgeError("CODEX_RUNTIME_CONFIG_INVALID", "Codex runtime configuration mode is invalid");
     }
-    const profiles = this.productStore.listAgentProfiles()
-      .filter((profile) => profile.runtimeProfileId === runtimeProfileId
-        && profile.runtimeAccountId === runtimeAccountId);
-    if (profiles.length === 0) {
-      throw bridgeError("RUNTIME_PROFILE_NOT_FOUND", "Runtime profile was not found");
+    let executionProviderRoute;
+    if (executionContract !== null) {
+      executionProviderRoute = validateFrozenExecutionProviderRoute(executionContract);
+      if (executionContract.runtimeProfileId !== runtimeProfileId
+        || executionContract.runtimeAccountId !== runtimeAccountId) {
+        throw bridgeError("EXECUTION_CONTRACT_STALE", "Runtime binding no longer matches the execution contract");
+      }
+    } else {
+      // Management/model-discovery callers have no WorkRun contract. Freeze
+      // once at entry; all later work uses the same route and revision fence.
+      const profiles = require("./agent-runtime-profile-views").agentRuntimeProfileViews(this.productStore)
+        .filter((profile) => profile.runtimeProfileId === runtimeProfileId
+          && profile.runtimeAccountId === runtimeAccountId);
+      if (profiles.length === 0) {
+        throw bridgeError("RUNTIME_PROFILE_NOT_FOUND", "Runtime profile was not found");
+      }
+      if (profiles.length !== 1) {
+        throw bridgeError("RUNTIME_PROFILE_AMBIGUOUS", "Runtime profile identity is ambiguous");
+      }
+      const profile = profiles[0];
+      if (!profile.enabled) throw bridgeError("RUNTIME_PROFILE_DISABLED", "Runtime profile is disabled");
+      const provider = profile.providerRef === null ? null : this.productStore.getModelProvider(profile.providerRef);
+      if (profile.providerRef !== null && !provider) throw bridgeError("MODEL_PROVIDER_NOT_FOUND", "ModelProvider was not found");
+      if (provider?.credentialRef !== null && provider?.credentialRef !== undefined
+        && !this.secretStore.listMetadata().some((entry) => entry.credentialRef === provider.credentialRef)) {
+        throw bridgeError("credentials_missing", "credentials_missing");
+      }
+      executionProviderRoute = captureExecutionProviderRoute({
+        productStore: this.productStore, secretStore: this.secretStore, profile,
+      });
     }
-    if (profiles.length !== 1) {
-      throw bridgeError("RUNTIME_PROFILE_AMBIGUOUS", "Runtime profile identity is ambiguous");
-    }
-    const profile = profiles[0];
-    if (!profile.enabled) throw bridgeError("RUNTIME_PROFILE_DISABLED", "Runtime profile is disabled");
-    if (profile.providerRef === null) {
-      const configured = configurationMode === "overlay"
-        ? this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig: null })
-        // Explicit legacy/test compatibility only. RuntimeAccountResolver always
-        // selects overlay mode, so production runtime acquisition cannot write a
-        // Profile-specific config into a CLI Home.
-        : this.configWriter.write({
-          runtimeProfileId, runtimeAccountId, codexHome, runtimeConfig: null,
-        });
+    const assertCurrent = () => assertExecutionProviderRouteCurrent(executionProviderRoute, {
+      productStore: this.productStore, secretStore: this.secretStore,
+    });
+    assertCurrent();
+    const route = executionProviderRoute.provider;
+    if (route.providerRef === null) {
+      const configured = this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig: null });
+      assertCurrent();
       return Object.freeze({
         spawnEnv: Object.freeze({}),
         registeredSecrets: Object.freeze([]),
         runtimeConfig: null,
         configArgs: configured.args || Object.freeze([]),
+        assertCurrent,
+        executionProviderRoute,
       });
     }
-    const provider = this.productStore.getModelProvider(profile.providerRef);
+    const provider = this.productStore.getModelProvider(route.providerRef);
     if (!provider) throw bridgeError("MODEL_PROVIDER_NOT_FOUND", "ModelProvider was not found");
     if (provider.kind === "openai-api-key" && provider.credentialRef === null) {
       throw bridgeError("credentials_missing", "credentials_missing");
@@ -146,12 +171,14 @@ class ProviderRuntimeBridge {
     let plaintext = null;
     let credentialEnv = null;
     try {
-      if (provider.credentialRef !== null) {
+      if (route.credentialRef !== null) {
         const metadata = this.secretStore.listMetadata()
-          .find((entry) => entry.credentialRef === provider.credentialRef);
+          .find((entry) => entry.credentialRef === route.credentialRef);
         if (!metadata) throw bridgeError("credentials_missing", "credentials_missing");
         if (metadata.kind !== provider.kind) throw bridgeError("credentials_mismatch", "credentials_mismatch");
-        plaintext = await this.secretStore.get(provider.credentialRef);
+        assertCurrent();
+        plaintext = await this.secretStore.get(route.credentialRef);
+        assertCurrent();
         if (typeof plaintext !== "string" || plaintext.length === 0) {
           throw bridgeError("credentials_missing", "credentials_missing");
         }
@@ -163,26 +190,27 @@ class ProviderRuntimeBridge {
           kind: provider.kind,
           name: provider.name,
           baseUrl: provider.baseUrl,
-          model: provider.kind === "custom-responses" ? profile.defaultModel ?? provider.model : provider.model,
+          model: route.modelRef,
           headers: provider.headers,
           awsRegion: provider.awsRegion,
           awsProfile: provider.awsProfile,
           credentialEnv,
         },
       };
-      const configured = configurationMode === "overlay"
-        ? this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig })
-        : this.configWriter.write({ runtimeProfileId, runtimeAccountId, codexHome, runtimeConfig });
+      const configured = this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig });
       let spawnEnv = plaintext === null ? {} : { [credentialEnv]: plaintext };
       let registeredSecrets = plaintext === null ? [] : [plaintext];
       if (provider.kind === "amazon-bedrock") {
         ({ spawnEnv, registeredSecrets } = bedrockSpawnEnvironment(this.parentEnv, provider));
       }
+      assertCurrent();
       return Object.freeze({
         spawnEnv: Object.freeze(spawnEnv),
         registeredSecrets: Object.freeze(registeredSecrets),
         runtimeConfig,
         configArgs: configured.args || Object.freeze([]),
+        assertCurrent,
+        executionProviderRoute,
       });
     } finally {
       plaintext = null;

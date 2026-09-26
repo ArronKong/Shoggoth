@@ -1,0 +1,3 @@
+#!/bin/sh
+# Package parsing must never execute this fixture. Runtime integration is a later phase.
+exit 87

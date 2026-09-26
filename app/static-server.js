@@ -20,9 +20,9 @@ const {
   BG_VIDEO_EXTS: IMMERSIVE_BG_VIDEO_EXTS,
   BG_IMAGE_EXTS: IMMERSIVE_BG_IMAGE_EXTS,
   resolveDesktopAssetPaths, resolveDesktopAssetFile, validAssetName,
-  resolveBuiltinAgentAvatarFile,
   ensureAssetDirectory, migrateLegacyDesktopAssets,
 } = require("./desktop-assets");
+const { createDefaultAgentAvatarPool } = require("./default-agent-avatar-pool");
 const { scanInstalledClis, resolveCliVersion, resolveCliInfo, CLI_CATEGORIES } = require("./cli-scanner");
 const { detectOpenclawHost, startOpenclawGateway } = require("./openclaw-host");
 const { browseOpenclawGateways } = require("./core/mdns-browser");
@@ -33,6 +33,12 @@ const { ModelChangeError } = require("./core/model-change-validation");
 const { ModelChangeJournalError } = require("./core/model-change-journal");
 const { HermesCatalogUnavailableError } = require("./core/hermes-backend");
 const { WorkAdmissionError } = require("./core/work-admission-gate");
+const { PluginInstallSelection } = require("./core/plugin-install-selection");
+const { BundledPluginCatalog, bundledRoot } = require("./core/bundled-plugin-catalog");
+const { createNativeRuntimeConfigController } = require("./core/native-runtime-config-controller");
+const { NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES } = require("./agent-service/native-runtime-config-protocol");
+const { AGENT_BINDING_PUBLIC_MESSAGES, validateAgentBindingParams } = require("./agent-service/agent-runtime-binding-protocol");
+const { SESSION_RUNTIME_PUBLIC_MESSAGES, validateSessionRuntimeParams } = require("./agent-service/session-runtime-protocol");
 const {
   projectWidgetResourceResult,
   projectStandingGrantListForBrowser,
@@ -265,42 +271,10 @@ function contentTypeFor(filePath) {
   return CONTENT_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream";
 }
 
-// Agent avatars. The gateway returns avatar URLs as `/avatar/<agentId>`, but
-// the page origin is THIS loopback server (not the gateway), so those requests
-// land here and 404 by default — leaving a broken <img> that the browser fills
-// with its alt text (the agent name). Serve the real avatar files so the
-// pictures show and the alt-text name disappears.
-// Paths are scoped to each server's Shoggoth userDataRoot, injected by Electron.
-const DEFAULT_AVATAR_TEXTURE_DIR = path.join(__dirname, "manage-ui", "src", "assets", "avatar-backgrounds");
-const defaultAvatarTextures = new Map();
-
-function defaultAgentAvatarSvg(agentId) {
-  // Keep the seeded choice aligned with manage-ui/src/lib/avatar-background.ts.
-  let hash = 2166136261;
-  for (const char of agentId || "?") {
-    hash = Math.imul(hash ^ char.codePointAt(0), 16777619) >>> 0;
-  }
-  const texture = `texture-${String(hash % 17 + 1).padStart(2, "0")}.webp`;
-  let image = defaultAvatarTextures.get(texture);
-  if (image === undefined) {
-    try { image = fs.readFileSync(path.join(DEFAULT_AVATAR_TEXTURE_DIR, texture)).toString("base64"); }
-    catch { image = ""; } // A missing packaged asset must not terminate the HTTP server.
-    defaultAvatarTextures.set(texture, image);
-  }
-  const base = agentId.startsWith("hermes-") ? agentId.slice("hermes-".length) : agentId;
-  const letter = (Array.from(base)[0] || "?").toUpperCase()
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  // Keep the source square; each view owns its crop (agent cards vs. round avatars).
-  const background = image
-    ? `<image width="40" height="40" preserveAspectRatio="xMidYMid slice" href="data:image/webp;base64,${image}"/>`
-    : '<rect width="40" height="40" fill="#000000"/>';
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">${background}<text x="20" y="27" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="18" font-weight="600" fill="#ffffff" text-anchor="middle">${letter}</text></svg>`;
-}
-
 // Map a single-segment agent id to its avatar file, trying known image
 // extensions. New assets win across extensions; legacy reads keep avatars visible
 // if migration is temporarily blocked (for example, by a full disk).
-function resolveAgentAvatarFile(agentId, assetPaths) {
+function resolveCustomAgentAvatarFile(agentId, assetPaths) {
   if (!validAssetName(agentId)) return null;
   for (const directory of [assetPaths.avatarDir, assetPaths.legacyAvatarDir]) {
     for (const ext of AGENT_AVATAR_EXTS) {
@@ -308,7 +282,16 @@ function resolveAgentAvatarFile(agentId, assetPaths) {
       if (candidate) return candidate;
     }
   }
-  return resolveBuiltinAgentAvatarFile(agentId);
+  return null;
+}
+
+function resolveAgentAvatarFile(agentId, assetPaths, avatarPool) {
+  const custom = resolveCustomAgentAvatarFile(agentId, assetPaths);
+  if (custom) {
+    avatarPool.release(agentId);
+    return custom;
+  }
+  return avatarPool.select(agentId);
 }
 
 // 沉浸模式背景素材（用户自定义）：Shoggoth userDataRoot/immersive-bg/<state>.<ext>。
@@ -428,7 +411,7 @@ function readBinaryBody(req, maxBytes) {
 // PUT/POST /avatar/<id>: store a (client-downscaled) PNG as the agent's avatar,
 // replacing any prior file. Deletes other-extension variants so the GET — which
 // tries .png first — can never serve a stale image.
-async function handleAvatarUpload(req, res, agentId, avatarDir) {
+async function handleAvatarUpload(req, res, agentId, avatarDir, onSaved = () => {}) {
   const writePath = avatarWritePath(agentId, avatarDir);
   if (!writePath) {
     return sendJson(res, 400, { error: "bad agent id" });
@@ -458,6 +441,7 @@ async function handleAvatarUpload(req, res, agentId, avatarDir) {
   } finally {
     try { fs.rmSync(temporary, { force: true }); } catch { /* upload failure already reported */ }
   }
+  onSaved();
   return sendJson(res, 200, { ok: true });
 }
 
@@ -951,6 +935,16 @@ async function resolveResourceBackend(registry, kind, id) {
 //   GET    /__api/usage?backend=&range=          daily token/cost series (fast)
 //   GET    /__api/usage/breakdown?backend=&range= by-model/by-agent rankings (slow)
 //   GET    /__api/skills?backend=                 skill list (per-backend tab, read-only)
+//   GET    /__api/plugins?backend=&cursor=&limit=&catalogRevision=  bounded read-only catalog
+//   POST   /__api/plugins/preview             trusted host picker, no package code execution
+//   POST   /__api/plugins/install             one-shot selected source + digest/revision fence
+//   GET    /__api/plugins/operations?operationId=  durable operation receipt
+//   POST   /__api/plugins/state               candidate installation desired state
+//   GET/POST /__api/plugins/skill-bindings     candidate Agent Skill selection
+//   GET    /__api/plugins/mcp-status         sanitized candidate connection/Grant counts
+//   GET    /__api/plugins/mcp-tools          current catalog and saved Grant status
+//   POST   /__api/plugins/mcp-grants/revoke  revision-fenced permission narrowing
+//   POST   /__api/plugins/mcp-grants/revoke-all  emergency binding-wide revocation
 //   GET    /__api/skills/usage                    per-backend: which skills agents actually loaded (registry merge)
 //   GET    /__api/tasks/federated?project=        unified project board across backends
 //   POST   /__api/tasks/federated                 create, routed by composite Agent id
@@ -1008,6 +1002,10 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     modelChangeCoordinator,
     workAdmissionGate,
     cliExecutionGate,
+    nativeRuntimeConfigController,
+    avatarPool,
+    pluginInstallSelection,
+    bundledPluginCatalog,
   } = deps;
   const method = req.method || "GET";
   let rawPath = pathname;
@@ -1127,68 +1125,6 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           return sendJson(res, 503, {
             error: "Shoggoth runtime accounts unavailable",
             code: safeShoggothRuntimeAccountCode(error, "RUNTIME_ACCOUNT_UNAVAILABLE"),
-          });
-        }
-      }
-      if (segs.length === 3 && segs[1] === "runtime-accounts"
-        && segs[2] === "legacy-homes" && method === "GET") {
-        try {
-          return sendJson(res, 200, await productHost.listLegacyRuntimeHomes({
-            runtimeAccountId: null,
-          }));
-        } catch (error) {
-          return sendJson(res, 503, {
-            error: "Shoggoth legacy runtime homes unavailable",
-            code: safeShoggothRuntimeAccountCode(error, "RUNTIME_ACCOUNT_STORAGE_UNAVAILABLE"),
-          });
-        }
-      }
-      if (segs.length === 5 && segs[1] === "runtime-accounts"
-        && segs[2] === "legacy-homes" && segs[3] === "cleanup"
-        && ["prepare", "commit"].includes(segs[4]) && method === "POST") {
-        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-        try {
-          const body = await readJsonBody(req);
-          const field = segs[4] === "prepare" ? "entryId" : "planId";
-          if (!exactJsonObject(body, [field])) throw new Error("invalid cleanup body");
-          const result = segs[4] === "prepare"
-            ? await productHost.prepareLegacyRuntimeHomeCleanup({ entryId: body.entryId })
-            : await productHost.commitLegacyRuntimeHomeCleanup({ planId: body.planId });
-          return sendJson(res, 200, result);
-        } catch (error) {
-          return sendJson(res, 409, {
-            error: "Shoggoth legacy runtime cleanup rejected",
-            code: safeShoggothRuntimeAccountCode(error, "RUNTIME_ACCOUNT_CLEANUP_REJECTED"),
-          });
-        }
-      }
-      if (segs.length === 3 && segs[1] === "runtime-accounts"
-        && segs[2] === "backups" && method === "GET") {
-        try {
-          return sendJson(res, 200, await productHost.listRuntimeBackups());
-        } catch (error) {
-          return sendJson(res, 503, {
-            error: "Shoggoth runtime backups unavailable",
-            code: safeShoggothRuntimeAccountCode(error, "RUNTIME_ACCOUNT_STORAGE_UNAVAILABLE"),
-          });
-        }
-      }
-      if (segs.length === 5 && segs[1] === "runtime-accounts"
-        && segs[2] === "backups" && segs[3] === "cleanup"
-        && ["prepare", "commit"].includes(segs[4]) && method === "POST") {
-        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-        try {
-          const body = await readJsonBody(req);
-          const field = segs[4] === "prepare" ? "entryId" : "planId";
-          if (!exactJsonObject(body, [field])) throw new Error("invalid backup cleanup body");
-          const result = segs[4] === "prepare"
-            ? await productHost.prepareRuntimeBackupCleanup({ entryId: body.entryId })
-            : await productHost.commitRuntimeBackupCleanup({ planId: body.planId });
-          return sendJson(res, 200, result);
-        } catch (error) {
-          return sendJson(res, 409, {
-            error: "Shoggoth runtime backup cleanup rejected",
-            code: safeShoggothRuntimeAccountCode(error, "RUNTIME_ACCOUNT_CLEANUP_REJECTED"),
           });
         }
       }
@@ -1464,6 +1400,28 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       return sendJson(res, 200, { gateways: await browseOpenclawGateways() });
     }
 
+    if (segs[0] === "runtime-status" && segs.length === 1) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      return sendJson(res, 200, { runtimes: await registry.getRuntimeStatuses() });
+    }
+
+    if (segs[0] === "native-capacity" && segs.length === 1) {
+      if (!nativeRuntimeConfigController) return sendJson(res, 501, { error: "Native capacity configuration unavailable" });
+      if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+      if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      try {
+        const result = method === "GET" ? await nativeRuntimeConfigController.read()
+          : await nativeRuntimeConfigController.update(await readJsonBody(req));
+        return sendJson(res, 200, result);
+      } catch (error) {
+        const code = Object.hasOwn(NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES, error?.code)
+          ? error.code : "NATIVE_RUNTIME_CONFIG_UNAVAILABLE";
+        return sendJson(res, code === "NATIVE_RUNTIME_CONFIG_INVALID" ? 400 : 409, {
+          code, error: NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES[code],
+        });
+      }
+    }
+
     // App configuration (the 设置 page): read/update gateway URL, token, locale,
     // and the Hermes connection mode (local-spawn vs remote dashboards).
     if (segs[0] === "config" && segs.length === 1) {
@@ -1478,7 +1436,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         // 它打开那一刻的旧值，放行会把用户刚拖出来的尺寸覆盖回去。
         // The shortcut is committed by trusted desktop IPC only, after the OS
         // accepts the new binding. A stale Settings form must not revert it.
-        const { windowBounds: _ignoredWindowBounds, inspirationShortcut: _ignoredInspirationShortcut, ...writable } = body;
+        const { windowBounds: _ignoredWindowBounds, inspirationShortcut: _ignoredInspirationShortcut,
+          nativeConcurrency: _ignoredNativeConcurrency, runtimeFrameworkFlags: _ignoredRuntimeFlags, ...writable } = body;
         if (Array.isArray(writable.disabledBackends) && registry) {
           const disabled = new Set(writable.disabledBackends
             .filter((id) => typeof id === "string").map((id) => id.trim()));
@@ -2140,6 +2099,469 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 200, { series: await registry.getUsageSeries(backendId, range || "all") });
     }
+    if (segs[0] === "plugins" && segs.length === 2
+      && segs[1] === "operations") {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const params = requestUrl?.searchParams;
+      const operationId = params?.get("operationId");
+      if (!params || [...params.keys()].some((key) => key !== "operationId"
+        || params.getAll(key).length !== 1)
+        || typeof operationId !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(operationId)) {
+        return sendJson(res, 400, { error: "invalid operationId" });
+      }
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      return sendJson(res, 200, await backend.getPluginOperation(operationId));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "state") {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const body = await readJsonBody(req);
+      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== 4
+        || !["installationId", "desiredState", "expectedRevision", "operationId"]
+          .every((key) => Object.hasOwn(body, key))
+        || typeof body.installationId !== "string" || !id.test(body.installationId)
+        || !["enabled", "disabled"].includes(body.desiredState)
+        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
+        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
+        return sendJson(res, 400, { error: "invalid plugin state request" });
+      }
+      return sendJson(res, 200, await backend.setPluginInstallationState(body));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "skill-bindings") {
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      if (method === "GET") {
+        const params = requestUrl?.searchParams;
+        const agentId = params?.get("agentId");
+        if (!params || [...params.keys()].some((key) => key !== "agentId"
+          || params.getAll(key).length !== 1)
+          || typeof agentId !== "string" || !id.test(agentId)) {
+          return sendJson(res, 400, { error: "invalid plugin Agent" });
+        }
+        return sendJson(res, 200, await backend.getPluginSkillBindings(agentId));
+      }
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== 6
+        || !["agentId", "installationId", "componentId", "enabled",
+          "expectedRevision", "operationId"].every((key) => Object.hasOwn(body, key))
+        || typeof body.agentId !== "string" || !id.test(body.agentId)
+        || typeof body.installationId !== "string" || !id.test(body.installationId)
+        || typeof body.componentId !== "string" || !/^[a-f0-9]{64}$/u.test(body.componentId)
+        || typeof body.enabled !== "boolean"
+        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0
+        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
+        return sendJson(res, 400, { error: "invalid plugin Skill binding request" });
+      }
+      return sendJson(res, 200, await backend.setPluginSkillBinding(body));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "mcp-status") {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const params = requestUrl?.searchParams;
+      const agentId = params?.get("agentId");
+      const installationId = params?.get("installationId");
+      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      if (!params || [...params.keys()].some((key) =>
+        !["agentId", "installationId"].includes(key)
+          || params.getAll(key).length !== 1)
+        || typeof agentId !== "string" || !id.test(agentId)
+        || typeof installationId !== "string" || !id.test(installationId)) {
+        return sendJson(res, 400, { error: "invalid plugin MCP status query" });
+      }
+      return sendJson(res, 200, await backend.getPluginMcpStatus(agentId, installationId));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "mcp-tools") {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const params = requestUrl?.searchParams;
+      const agentId = params?.get("agentId");
+      const bindingId = params?.get("bindingId");
+      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      if (!params || [...params.keys()].some((key) =>
+        !["agentId", "bindingId"].includes(key)
+          || params.getAll(key).length !== 1)
+        || typeof agentId !== "string" || !id.test(agentId)
+        || typeof bindingId !== "string" || !id.test(bindingId)) {
+        return sendJson(res, 400, { error: "invalid plugin MCP tools query" });
+      }
+      return sendJson(res, 200, await backend.getPluginMcpTools(agentId, bindingId));
+    }
+    if (segs[0] === "plugins" && segs.length === 3
+      && segs[1] === "mcp-grants" && segs[2] === "revoke") {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const body = await readJsonBody(req);
+      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      const toolId = /^plugin:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}$/u;
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== 5
+        || !["agentId", "bindingId", "toolIdentity", "expectedRevision",
+          "operationId"].every((key) => Object.hasOwn(body, key))
+        || typeof body.agentId !== "string" || !id.test(body.agentId)
+        || typeof body.bindingId !== "string" || !id.test(body.bindingId)
+        || typeof body.toolIdentity !== "string" || !toolId.test(body.toolIdentity)
+        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
+        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
+        return sendJson(res, 400, { error: "invalid plugin MCP grant revocation" });
+      }
+      return sendJson(res, 200, await backend.revokePluginMcpGrant(body));
+    }
+    if (segs[0] === "plugins" && segs.length === 3
+      && segs[1] === "mcp-grants" && segs[2] === "revoke-all") {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const body = await readJsonBody(req);
+      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== 4
+        || !["agentId", "bindingId", "expectedRevision", "operationId"]
+          .every((key) => Object.hasOwn(body, key))
+        || typeof body.agentId !== "string" || !id.test(body.agentId)
+        || typeof body.bindingId !== "string" || !id.test(body.bindingId)
+        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
+        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
+        return sendJson(res, 400, { error: "invalid plugin MCP bulk revocation" });
+      }
+      return sendJson(res, 200, await backend.revokeAllPluginMcpGrants(body));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && ["disconnect", "disconnect-operation"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req), id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      const fields = segs[1] === "disconnect" ? ["agentId", "bindingId", "expectedRevision", "operationId"] : ["agentId", "operationId"];
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== fields.length
+        || !fields.every(key => Object.hasOwn(body, key)) || typeof body.agentId !== "string" || !id.test(body.agentId)
+        || typeof body.operationId !== "string" || !id.test(body.operationId)
+        || (segs[1] === "disconnect" && (typeof body.bindingId !== "string" || !id.test(body.bindingId)
+          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1))) {
+        return sendJson(res, 400, { error: "Invalid plugin disconnect request" });
+      }
+      const backend = registry.route(body.agentId);
+      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
+      if (segs[1] === "disconnect-operation") return sendJson(res, 200,
+        await backend.getPluginDisconnectOperation(body.agentId, body.operationId));
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const prepared = await backend.preparePluginDisconnect(body);
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally { if (!approved) await backend.commitPluginDisconnect({ challenge: prepared.challenge, approved: false }); }
+      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
+      return sendJson(res, 200, await backend.commitPluginDisconnect({ challenge: prepared.challenge, approved: true }));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && ["rollback-list", "rollback-change", "rollback-operation"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const common = ["action", "installationId", "expectedRevision", "operationId"];
+      const fields = segs[1] === "rollback-list" ? ["installationId"]
+        : segs[1] === "rollback-operation" ? ["installationId", "operationId"]
+          : body?.action === "code" ? [...common, "targetDigest"]
+            : body?.action === "restore" ? [...common, "snapshotId", "snapshotDigest"] : common;
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== fields.length
+        || !fields.every(key => Object.hasOwn(body, key))) return sendJson(res, 400, { error: "Invalid rollback request" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      if (segs[1] === "rollback-list") return sendJson(res, 200, await backend.listPluginRollback(body));
+      if (segs[1] === "rollback-operation") return sendJson(res, 200, await backend.getPluginRollbackOperation(body));
+      if (typeof hostOps?.confirmPluginCapability !== "function") return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      const prepared = await backend.preparePluginRollback(body);
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally { if (!approved) await backend.commitPluginRollback({ challenge: prepared.challenge, approved: false }); }
+      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
+      return sendJson(res, 200, await backend.commitPluginRollback({ challenge: prepared.challenge, approved: true }));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && ["dependency-status", "dependency-change", "dependency-operation"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const fields = segs[1] === "dependency-operation" ? ["operationId"] : segs[1] === "dependency-status" ? ["installationId", "componentId"]
+        : ["action", "installationId", "componentId", "expectedRevision", "operationId"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid plugin dependency request" });
+      }
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      if (segs[1] === "dependency-operation") return sendJson(res, 200, await backend.getPluginDependencyOperation(body.operationId));
+      if (segs[1] === "dependency-status") return sendJson(res, 200, await backend.getPluginDependencyStatus(body));
+      if (!["prepare", "revoke"].includes(body.action)) return sendJson(res, 400, { error: "Invalid dependency action" });
+      if (typeof hostOps?.selectPluginDependency !== "function" || typeof hostOps.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native dependency preparation unavailable" });
+      }
+      const executablePath = body.action === "prepare" ? await hostOps.selectPluginDependency() : null;
+      if (body.action === "prepare" && executablePath === null) return sendJson(res, 200, { canceled: true, receipt: null });
+      const prepared = await backend.previewPluginDependency({ ...body, ...(body.action === "prepare" ? { executablePath } : {}) });
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally { if (!approved) await backend.commitPluginDependency({ challenge: prepared.challenge, approved: false }); }
+      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
+      return sendJson(res, 200, await backend.commitPluginDependency({ challenge: prepared.challenge, approved: true }));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && ["oauth-connect", "oauth-status", "oauth-cancel"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const fields = segs[1] === "oauth-connect"
+        ? ["agentId", "installationId", "componentId", "expectedRevision", "operationId"] : ["agentId", "flowId"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
+        || typeof body.agentId !== "string" || body.agentId.length > 256) {
+        return sendJson(res, 400, { error: "Invalid plugin OAuth request" });
+      }
+      const backend = registry.route(body.agentId);
+      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
+      if (segs[1] !== "oauth-connect") return sendJson(res, 200, segs[1] === "oauth-status"
+        ? await backend.getPluginOAuthStatus(body.agentId, body.flowId)
+        : await backend.cancelPluginOAuth(body.agentId, body.flowId));
+      if (typeof hostOps?.confirmPluginCapability !== "function" || typeof hostOps.openExternal !== "function") {
+        return sendJson(res, 501, { error: "Native authorization unavailable" });
+      }
+      const prepared = await backend.preparePluginOAuth(body);
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally { if (!approved) await backend.commitPluginOAuth({ challenge: prepared.challenge, approved: false }); }
+      if (!approved) return sendJson(res, 200, { canceled: true, flow: null });
+      const result = await backend.commitPluginOAuth({ challenge: prepared.challenge, approved: true });
+      try { if (await hostOps.openExternal(result.flow.authorizationUrl) === false) throw new Error("Authorization browser unavailable"); }
+      catch {
+        await backend.cancelPluginOAuth(body.agentId, result.flow.flowId);
+        throw Object.assign(new Error("Unable to open authorization browser"), { code: "PLUGIN_OAUTH_BROWSER_FAILED" });
+      }
+      // Browser code never handles the authorization URL, state, code or token.
+      return sendJson(res, 200, { canceled: false, flow: { flowId: result.flow.flowId,
+        status: result.flow.status, expiresAt: result.flow.expiresAt } });
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "app-open") {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 3
+        || !["backendId", "sessionKey", "callId"].every(key => typeof body[key] === "string")
+        || body.backendId.length > 128 || body.sessionKey.length > 512
+        || !/^runtime-[a-f0-9]{64}$/u.test(body.callId)) return sendJson(res, 400, { error: "Invalid App reference" });
+      const backend = getActiveBackend(registry, body.backendId);
+      if (!backend) return sendJson(res, 404, { error: "Backend unavailable" });
+      if (typeof hostOps?.openPluginApp !== "function" || typeof hostOps.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native App window unavailable" });
+      }
+      const prepared = await backend.preparePluginApp(body.sessionKey, body.callId);
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally { if (!approved) await backend.commitPluginApp({ challenge: prepared.challenge, approved: false }); }
+      if (!approved) return sendJson(res, 200, { opened: false });
+      const hostOrigin = new URL(req.headers.origin).origin;
+      const result = await hostOps.openPluginApp({
+        create: ({ sandboxOrigin, sourceId }) => backend.commitPluginApp({ challenge: prepared.challenge,
+          approved: true, hostOrigin, sandboxOrigin, sourceId }),
+        readChunk: (transport, index) => backend.readPluginAppChunk(transport, index),
+        message: (transport, message) => backend.messagePluginApp(transport, message),
+        close: transport => backend.closePluginApp(transport),
+      });
+      return sendJson(res, 200, { opened: result.opened === true });
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external") {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const query = new URL(req.url, "http://127.0.0.1").searchParams;
+      if ([...query.keys()].some(key => !["backend", "cursor", "catalogRevision", "agentId"].includes(key))) {
+        return sendJson(res, 400, { error: "invalid external plugin query" });
+      }
+      const backend = query.get("backend");
+      if (!backend) {
+        if (query.size) return sendJson(res, 400, { error: "backend required" });
+        return sendJson(res, 200, { backends: await registry.listExternalPluginCatalogs() });
+      }
+      const input = Object.fromEntries([...query].filter(([key]) => key !== "backend"));
+      try { return sendJson(res, 200, await registry.getExternalPluginCatalog(backend, input)); }
+      catch (error) { return sendJson(res, error.code === "PLUGIN_EXTERNAL_CATALOG_CHANGED" ? 409 : 400,
+        { error: "External plugin catalog changed or query invalid", code: error.code }); }
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && ["uninstall-preview", "uninstall"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const fields = segs[1] === "uninstall" ? ["installationId", "expectedRevision", "operationId"]
+        : ["installationId", "expectedRevision"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "invalid plugin uninstall request" });
+      }
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      return sendJson(res, 200, segs[1] === "uninstall" ? await backend.uninstallPlugin(body)
+        : await backend.previewPluginUninstall(body));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && ["mcp-consent", "mcp-discover"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const fields = segs[1] === "mcp-discover" ? ["agentId", "bindingId"]
+        : body?.action === "connect" ? ["action", "agentId", "installationId", "componentId", "expectedRevision", "operationId"]
+          : ["action", "agentId", "bindingId", "toolIdentity", "contractDigest", "catalogRevision", "approvalMode", "expectedRevision", "operationId"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
+        || typeof body.agentId !== "string" || body.agentId.length > 256) {
+        return sendJson(res, 400, { error: "invalid plugin consent request" });
+      }
+      const backend = registry.route(body.agentId);
+      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
+      if (segs[1] === "mcp-discover") {
+        return sendJson(res, 200, await backend.discoverPluginMcpTools(body.agentId, body.bindingId));
+      }
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native plugin confirmation unavailable" });
+      }
+      const prepared = await backend.preparePluginMcpConsent(body);
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally {
+        // Keep the challenge out of browser DTOs, including cancellation/errors.
+        if (!approved) await backend.commitPluginMcpConsent({ challenge: prepared.challenge, approved: false });
+      }
+      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
+      return sendJson(res, 200, await backend.commitPluginMcpConsent({ challenge: prepared.challenge, approved: true }));
+    }
+    if (segs[0] === "plugins" && segs[1] === "bundled" && segs.length === 2) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend?.listBundledPlugins) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      return sendJson(res, 200, await backend.listBundledPlugins());
+    }
+    if (segs[0] === "plugins" && segs[1] === "bundled-icon" && segs.length === 3) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      let icon;
+      try { icon = bundledPluginCatalog?.readIcon(segs[2]); }
+      catch { return sendJson(res, 409, { error: "Bundled plugin icon changed" }); }
+      if (!icon) return sendJson(res, 404, { error: "Bundled plugin icon unavailable" });
+      res.writeHead(200, { "Content-Type": icon.mimeType, "Content-Length": icon.bytes.length,
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600",
+        "Cross-Origin-Resource-Policy": "same-origin", "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:" });
+      return res.end(icon.bytes);
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["preview", "git-preview", "bundled-preview", "install"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) {
+        return sendJson(res, 403, { error: "Forbidden" });
+      }
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const body = await readJsonBody(req);
+      if (segs[1] === "bundled-preview") {
+        if (!exactJsonObject(body, ["packageId"])
+          || typeof body.packageId !== "string"
+          || !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(body.packageId)
+          || !bundledPluginCatalog?.get(body.packageId)) {
+          return sendJson(res, 400, { error: "Invalid bundled plugin" });
+        }
+        const source = { kind: "bundled", packageId: body.packageId };
+        const preview = await backend.previewPluginInstall(source);
+        return sendJson(res, 200, { canceled: false, preview,
+          selectionHandle: preview.installable ? pluginInstallSelection.create(source, preview) : null });
+      }
+      if (segs[1] === "git-preview") {
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 3
+          || !["repositoryUrl", "commit", "subdir"].every(key => Object.hasOwn(body, key))
+          || typeof body.repositoryUrl !== "string" || body.repositoryUrl.length > 2048
+          || typeof body.commit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(body.commit)
+          || (body.subdir !== null && (typeof body.subdir !== "string" || body.subdir.length > 512))) {
+          return sendJson(res, 400, { error: "Invalid fixed Git source" });
+        }
+        let url;
+        try { url = new URL(body.repositoryUrl); } catch { return sendJson(res, 400, { error: "Invalid repository URL" }); }
+        if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash
+          || (body.subdir !== null && body.subdir !== "." && (!body.subdir || body.subdir.startsWith("-")
+            || body.subdir.includes("\\") || body.subdir.split("/").some(part => !part || part === "." || part === "..")))) {
+          return sendJson(res, 400, { error: "Invalid repository URL or subdirectory" });
+        }
+        if (typeof hostOps?.confirmPluginCapability !== "function") return sendJson(res, 501, { error: "Native confirmation unavailable" });
+        if (await hostOps.confirmPluginCapability({ action: "remote-git", repositoryUrl: url.href,
+          commit: body.commit, subdir: body.subdir }) !== true) return sendJson(res, 200, { canceled: true });
+        const source = { kind: "remote-git", repositoryUrl: url.href, commit: body.commit, subdir: body.subdir };
+        const preview = await backend.previewPluginInstall(source);
+        return sendJson(res, 200, { canceled: false, preview,
+          selectionHandle: preview.installable ? pluginInstallSelection.create(source, preview) : null });
+      }
+      if (segs[1] === "preview") {
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || Object.keys(body).length !== 0) {
+          return sendJson(res, 400, { error: "invalid plugin preview request" });
+        }
+        if (typeof hostOps?.selectPluginPackage !== "function") {
+          return sendJson(res, 501, { error: "Plugin package picker unavailable" });
+        }
+        const selected = await hostOps.selectPluginPackage();
+        if (!selected) return sendJson(res, 200, { canceled: true });
+        const source = typeof selected === "string" ? { kind: "directory", path: selected } : selected;
+        const preview = await backend.previewPluginInstall(source);
+        const selectionHandle = preview.installable
+          ? pluginInstallSelection.create(source, preview) : null;
+        return sendJson(res, 200, { canceled: false, preview, selectionHandle });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== 4
+        || !["selectionHandle", "previewDigest", "operationId", "expectedRevision"]
+          .every((key) => Object.hasOwn(body, key))
+        || typeof body.operationId !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.operationId)) {
+        return sendJson(res, 400, { error: "invalid plugin install request" });
+      }
+      let source;
+      try {
+        source = pluginInstallSelection.claim(body.selectionHandle,
+          body.previewDigest, body.expectedRevision);
+      } catch {
+        return sendJson(res, 409, { error: "Plugin selection expired",
+          code: "PLUGIN_SELECTION_INVALID" });
+      }
+      return sendJson(res, 200, await backend.installPlugin({ source,
+        previewDigest: body.previewDigest, operationId: body.operationId,
+        expectedRevision: body.expectedRevision }));
+    }
+    if (segs[0] === "plugins" && segs.length === 1) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const params = requestUrl?.searchParams;
+      const allowed = new Set(["backend", "cursor", "limit", "catalogRevision"]);
+      if (!params || [...params.keys()].some((key) => !allowed.has(key)
+        || params.getAll(key).length !== 1)) {
+        return sendJson(res, 400, { error: "invalid plugin query" });
+      }
+      const backendId = params.get("backend") ?? "shoggoth";
+      const cursorText = params.get("cursor") ?? "0";
+      const limitText = params.get("limit") ?? "20";
+      const catalogRevision = params.get("catalogRevision");
+      if (!/^[a-z][a-z0-9-]{0,63}$/u.test(backendId)
+        || !/^(?:0|[1-9][0-9]*)$/u.test(cursorText)
+        || !/^[1-9][0-9]*$/u.test(limitText)
+        || !Number.isSafeInteger(Number(cursorText))
+        || Number(limitText) > 20
+        || (catalogRevision !== null && !/^[a-f0-9]{64}$/u.test(catalogRevision))
+        || (Number(cursorText) === 0 ? catalogRevision !== null : catalogRevision === null)) {
+        return sendJson(res, 400, { error: "invalid plugin query" });
+      }
+      return sendJson(res, 200, { page: await registry.getPluginCapabilitiesPage(
+        backendId, { cursor: Number(cursorText), limit: Number(limitText), catalogRevision },
+      ) });
+    }
     // Per-backend aggregate: which skills have agents actually loaded. Same
     // merge/fail-soft shape as GET /__api/cli/usage; the page joins it against
     // GET /__api/skills. Must precede the `segs.length === 1` skills route.
@@ -2678,19 +3100,121 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           if (!backend) return sendJson(res, 400, { error: `unknown backend ${backendId}` });
           const spec = await readJsonBody(req);
           if (!spec) return sendJson(res, 400, { error: "invalid JSON body" });
-          return sendJson(res, 200, { result: await backend.createAgent(spec) });
+          const result = await backend.createAgent(spec);
+          const createdId = result?.id || result?.agentId
+            || (backendId === "hermes" ? backend.agents?.find((agent) => agent.name === result?.name)?.id : null);
+          if (typeof createdId === "string") avatarPool?.select(createdId);
+          return sendJson(res, 200, { result });
         }
         return sendJson(res, 405, { error: "method not allowed" });
       }
       if (!backend) return sendJson(res, 400, { error: `unknown backend ${backendId}` });
       const id = segs[1]; // agent ids are [a-z0-9-]; safe as a path segment
+      if (segs[2] === "runtime-models" && segs.length === 3) {
+        if (backend.getBackendDescriptor?.().surfaces?.sessionRuntimeSwitch !== true) return sendJson(res, 501, { error: "Runtime model selection unavailable" });
+        if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+        if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        try {
+          const key = url.searchParams.get("sessionKey");
+          if (typeof key !== "string" || !key || key.length > 1024) throw Object.assign(Error("Invalid session"), { code: "INVALID_PARAMS" });
+          const body = method === "GET" ? {} : await readJsonBody(req);
+          if (!body || Object.hasOwn(body, "profileId") || Object.hasOwn(body, "sessionKey")) throw Object.assign(Error("Invalid input"), { code: "INVALID_PARAMS" });
+          validateSessionRuntimeParams(method === "GET" ? "chat.session.runtime.state" : "chat.session.runtime.model.set", {
+            ...body, profileId: "rest", sessionKey: key.split(":").at(-1),
+          });
+          return sendJson(res, 200, method === "GET" ? await backend.getSessionRuntimeModels(id, key) : await backend.selectSessionRuntimeModel(id, key, body));
+        } catch (error) {
+          const messages = { ...AGENT_BINDING_PUBLIC_MESSAGES, ...SESSION_RUNTIME_PUBLIC_MESSAGES,
+            NATIVE_RUNTIME_DISABLED: "该运行环境已停用，请先恢复连接" };
+          const code = Object.hasOwn(messages, error?.code) ? error.code : "SESSION_RUNTIME_UNAVAILABLE";
+          return sendJson(res, code === "INVALID_PARAMS" ? 400 : 409, { code, error: messages[code] });
+        }
+      }
+      if (segs[2] === "session-runtime" && segs.length === 3) {
+        if (backend.getBackendDescriptor?.().surfaces?.sessionRuntimeSwitch !== true) return sendJson(res, 501, { error: "Session Runtime switching unavailable" });
+        if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+        if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        try {
+          const key = url.searchParams.get("sessionKey");
+          if (typeof key !== "string" || !key || key.length > 1024) throw Object.assign(Error("Invalid session"), { code: "INVALID_PARAMS" });
+          const body = method === "GET" ? {} : await readJsonBody(req);
+          if (!body || Object.hasOwn(body, "profileId") || Object.hasOwn(body, "sessionKey")) throw Object.assign(Error("Invalid input"), { code: "INVALID_PARAMS" });
+          validateSessionRuntimeParams(method === "GET" ? "chat.session.runtime.get" : "chat.session.runtime.switch", {
+            ...body, profileId: "rest", sessionKey: key.split(":").at(-1),
+          });
+          return sendJson(res, 200, method === "GET" ? await backend.getSessionRuntime(id, key) : await backend.switchSessionRuntime(id, key, body));
+        } catch (error) {
+          const messages = { ...AGENT_BINDING_PUBLIC_MESSAGES, ...SESSION_RUNTIME_PUBLIC_MESSAGES,
+            NATIVE_RUNTIME_DISABLED: "该运行环境已停用，请先恢复连接" };
+          const code = Object.hasOwn(messages, error?.code) ? error.code : "SESSION_RUNTIME_UNAVAILABLE";
+          return sendJson(res, code === "INVALID_PARAMS" ? 400 : 409, { code, error: messages[code] });
+        }
+      }
+      if (segs[2] === "context" && segs.length === 3) {
+        if (backend.getBackendDescriptor?.().surfaces?.runtimeBindings !== true) return sendJson(res, 501, { error: "Product context unavailable" });
+        if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        const protocol = require("./agent-service/product-context-protocol");
+        try {
+          const key = url.searchParams.get("sessionKey"), body = await readJsonBody(req);
+          if (!body || Object.keys(body).join() !== "operationId" || typeof key !== "string" || key.length > 1024) throw Object.assign(Error(), { code: "PRODUCT_CONTEXT_INVALID" });
+          protocol.validateParams("chat.context.compact", { profileId: "rest", sessionKey: key.split(":").at(-1), operationId: body.operationId });
+          return sendJson(res, 200, await backend.compactConversation(id, key, body.operationId));
+        } catch (error) {
+          const code = Object.hasOwn(protocol.MESSAGES, error?.code) ? error.code : "PRODUCT_CONTEXT_FAILED";
+          return sendJson(res, 409, { code, error: protocol.MESSAGES[code] });
+        }
+      }
+      if (segs[2] === "runtime-policy" && segs.length === 3) {
+        if (backend.getBackendDescriptor?.().surfaces?.runtimeBindings !== true) return sendJson(res, 501, { error: "Runtime policy unavailable" });
+        if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+        if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        const protocol = require("./agent-service/runtime-selection-policy");
+        try {
+          const policy = method === "PUT" ? protocol.validateRuntimeSelectionPolicy(await readJsonBody(req)) : null;
+          return sendJson(res, 200, method === "PUT" ? await backend.setAgentRuntimePolicy(id, policy) : await backend.getAgentRuntimePolicy(id));
+        } catch (error) {
+          const code = Object.hasOwn(protocol.RUNTIME_POLICY_MESSAGES, error?.code) ? error.code : "RUNTIME_SELECTION_POLICY_UNAVAILABLE";
+          return sendJson(res, code === "RUNTIME_SELECTION_POLICY_INVALID" ? 400 : 409, { code, error: protocol.RUNTIME_POLICY_MESSAGES[code] });
+        }
+      }
+      if (segs[2] === "runtime-bindings") {
+        if (backend.getBackendDescriptor?.().surfaces?.runtimeBindings !== true) return sendJson(res, 501, { error: "Runtime bindings unavailable" });
+        const bindingId = segs[3];
+        const action = segs.length === 3 ? (method === "GET" ? "list" : method === "POST" ? "add" : null)
+          : segs.length === 4 ? (method === "PATCH" ? "update" : method === "DELETE" ? "remove" : null)
+            : segs.length === 5 && segs[4] === "default" && method === "POST" ? "setDefault" : null;
+        if (!action) return sendJson(res, 405, { error: "method not allowed" });
+        if (action !== "list" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        try {
+          const body = action === "list" ? {} : await readJsonBody(req);
+          if (!body || Object.hasOwn(body, "profileId") || Object.hasOwn(body, "bindingId")) {
+            throw Object.assign(new Error("Invalid binding input"), { code: "AGENT_BINDING_INVALID" });
+          }
+          const input = validateAgentBindingParams(`agent.binding.${action}`, {
+            ...body, profileId: "rest", ...(bindingId ? { bindingId } : {}),
+          });
+          const result = action === "list" ? await backend.getAgentRuntimeBindings(id)
+            : action === "add" ? await backend.addAgentRuntimeBinding(id, input.spec, { operationId: input.operationId, revision: input.revision })
+              : action === "update" ? await backend.updateAgentRuntimeBinding(id, bindingId, input.patch, { revision: input.revision })
+                : action === "remove" ? await backend.removeAgentRuntimeBinding(id, bindingId, { revision: input.revision })
+                  : await backend.setAgentDefaultBinding(id, bindingId, { revision: input.revision });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          const code = Object.hasOwn(AGENT_BINDING_PUBLIC_MESSAGES, error?.code) ? error.code : "AGENT_BINDING_UNAVAILABLE";
+          return sendJson(res, code === "AGENT_BINDING_INVALID" ? 400 : code === "AGENT_BINDING_NOT_FOUND" ? 404 : 409,
+            { code, error: AGENT_BINDING_PUBLIC_MESSAGES[code] });
+        }
+      }
       // item: detail / update / delete
       if (segs.length === 2) {
         if (method === "GET") return sendJson(res, 200, { agent: await backend.getAgent(id) });
         if (method === "PUT") {
           const patch = await readJsonBody(req);
           if (!patch) return sendJson(res, 400, { error: "invalid JSON body" });
-          return sendJson(res, 200, { result: await backend.updateAgent(id, patch) });
+          const result = await backend.updateAgent(id, patch);
+          if (typeof result?.id === "string") avatarPool?.move(id, result.id);
+          return sendJson(res, 200, { result });
         }
         if (method === "DELETE") {
           const expectedUpdatedAtValue = url.searchParams.get("expectedUpdatedAt");
@@ -2701,6 +3225,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
               ? undefined : Number(expectedUpdatedAtValue),
             createdAt: createdAtValue === null ? undefined : Number(createdAtValue),
           });
+          // Native deletion archives a restorable identity; external deletions remove it.
+          if (backendId !== "shoggoth") avatarPool?.release(id);
           return sendJson(res, 200, { ok: true });
         }
         return sendJson(res, 405, { error: "method not allowed" });
@@ -3127,6 +3653,33 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
   } catch (err) {
     // 参数/路径边界错误保持客户端 400；请求体溢出用 413，其余运行时故障保持 500。
     const trusted = trustedApiError(err);
+    const pluginStatus = segs[0] === "plugins" && method === "POST"
+      ? ({ REVISION_CONFLICT: 409, PACKAGE_CHANGED: 409,
+        ACTIVATION_DEFERRED: 409, PLUGIN_CONNECTION_CLOSE_FAILED: 409,
+        PLUGIN_UPDATE_REQUIRES_DISABLE: 409,
+        PLUGIN_UNINSTALL_REQUIRES_DISABLE: 409, PLUGIN_UNINSTALL_IN_FLIGHT: 409,
+        PLUGIN_CONSENT_EXPIRED: 409, TOOL_CONTRACT_CHANGED: 409,
+        CONNECTION_IDENTITY_CHANGED: 409, CONNECTION_AUTH_REQUIRED: 409,
+        DEPENDENCY_MISSING: 409, DEPENDENCY_PREPARATION_REQUIRED: 409,
+        DEPENDENCY_REQUIRES_DISABLE: 409, DEPENDENCY_CHANGED: 409,
+        DEPENDENCY_EXECUTABLE_INVALID: 400, DEPENDENCY_ARGUMENTS_UNSUPPORTED: 400,
+        DEPENDENCY_ENV_UNSUPPORTED: 400, DEPENDENCY_INTERPRETER_UNSUPPORTED: 400,
+        DEPENDENCY_PROBE_FAILED: 409, DEPENDENCY_REGISTRY_INVALID: 409,
+        DEPENDENCY_CONFIRMATION_REQUIRED: 403, DEPENDENCY_REGISTRY_LIMIT: 429,
+        PLUGIN_OAUTH_PROVIDER_UNSUPPORTED: 409, PLUGIN_OAUTH_FLOW_NOT_FOUND: 404,
+        PLUGIN_OAUTH_BROWSER_FAILED: 503, PLUGIN_OPERATION_OUTCOME_UNKNOWN: 409,
+        GIT_SOURCE_INVALID: 400, GIT_REMOTE_CANCELLED: 409, GIT_REMOTE_FAILED: 409,
+        GIT_REMOTE_TIMEOUT: 504, GIT_REMOTE_TOO_LARGE: 413, GIT_REMOTE_LOG_LIMIT: 413,
+        GIT_REMOTE_LIMIT: 429, GIT_REMOTE_EXIT_UNKNOWN: 503,
+        LEGACY_SOURCE_OVERLAP: 400, MCP_APP_AUTHORITY_INVALID: 409,
+        MCP_APP_AUTHORITY_REVOKED: 409, MCP_APP_SESSION_EXPIRED: 409,
+        MCP_APP_RESOURCE_FORBIDDEN: 409, MCP_APP_RESOURCE_INVALID: 409,
+        MCP_APP_LIMIT: 409, MCP_APP_UNSUPPORTED: 409,
+        PLUGIN_COMPONENT_REVISION_CHANGED: 409, PLUGIN_COMPONENT_INACTIVE: 409,
+        PLUGIN_REQUEST_INVALID: 400, PLUGIN_OPERATION_INVALID: 400,
+        PLUGIN_BINDING_INVALID: 400, PLUGIN_GRANT_INVALID: 400,
+        PLUGIN_INSTALLATION_INVALID: 404 })[err?.code]
+      : null;
     const modelChangeError = err instanceof ModelChangeError || err instanceof ModelChangeJournalError;
     const admissionError = err instanceof WorkAdmissionError
       && err.code === "gateway_draining"
@@ -3137,6 +3690,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     const status =
       modelChangeStatus ||
       (admissionError ? 409 : null) ||
+      pluginStatus ||
       trusted?.status ||
       (err instanceof ModelValidationError || isInvalidAgentIdError(err)
         ? 400
@@ -3153,6 +3707,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         ...(safeDetails && Object.keys(safeDetails).length > 0 ? { details: safeDetails } : {}),
       } : {}),
       ...(trusted ? { code: trusted.code } : {}),
+      ...(pluginStatus ? { code: err.code } : {}),
       ...(admissionError ? { code: err.code } : {}),
     });
   }
@@ -3245,9 +3800,14 @@ function startStaticServer(
     workAdmissionGate,
     homeDir = os.homedir(),
     userDataRoot,
+    packaged = false,
+    resourcesPath = process.resourcesPath,
   } = {},
 ) {
   const assetPaths = resolveDesktopAssetPaths({ homeDir, userDataRoot });
+  const avatarPool = createDefaultAgentAvatarPool(assetPaths, {
+    hasCustomAvatar: (agentId) => Boolean(resolveCustomAgentAvatarFile(agentId, assetPaths)),
+  });
   let assetsMigrated = false;
   function prepareDesktopAssets() {
     if (assetsMigrated) return;
@@ -3255,6 +3815,8 @@ function startStaticServer(
     assetsMigrated = true;
   }
   const cliExecutionGate = createCliExecutionGate();
+  const pluginInstallSelection = new PluginInstallSelection();
+  const bundledPluginCatalog = new BundledPluginCatalog(bundledRoot({ packaged, resourcesPath }));
   const attachmentOpener = typeof hostOps?.openPath === "function"
     ? createChatAttachmentOpener((file) => hostOps.openPath(file)) : null;
   const apiDeps = {
@@ -3266,6 +3828,11 @@ function startStaticServer(
     modelChangeCoordinator,
     workAdmissionGate,
     cliExecutionGate,
+    avatarPool,
+    pluginInstallSelection,
+    bundledPluginCatalog,
+    nativeRuntimeConfigController: configStore && typeof configStore.writeNativeRuntimeConfig === "function"
+      ? createNativeRuntimeConfigController({ configStore, registry }) : null,
   };
   const server = http.createServer((req, res) => {
     const rawTarget = typeof req.url === "string" ? req.url : "/";
@@ -3418,25 +3985,11 @@ function startStaticServer(
       prepareDesktopAssets();
       const agentId = pathname.slice("/avatar/".length);
       if (req.method === "PUT" || req.method === "POST") {
-        handleAvatarUpload(req, res, agentId, assetPaths.avatarDir);
+        handleAvatarUpload(req, res, agentId, assetPaths.avatarDir, () => avatarPool.release(agentId));
         return;
       }
-      const avatarPath = resolveAgentAvatarFile(agentId, assetPaths);
+      const avatarPath = resolveAgentAvatarFile(agentId, assetPaths, avatarPool);
       if (!avatarPath) {
-        // No on-disk avatar (Hermes synthetic agents, or an OpenClaw agent that
-        // never got one) — synthesize a textured initial SVG so the UI gets a
-        // 200 instead of spamming 404s in the console for every render. The id
-        // guards mirror resolveAgentAvatarFile's (reject traversal-ish ids).
-        if (validAssetName(agentId)) {
-          const svg = defaultAgentAvatarSvg(agentId);
-          res.writeHead(200, {
-            "Content-Type": "image/svg+xml; charset=utf-8",
-            "Content-Length": Buffer.byteLength(svg),
-            "Cache-Control": "no-cache",
-          });
-          res.end(svg);
-          return;
-        }
         res.writeHead(404);
         res.end("Not Found");
         return;

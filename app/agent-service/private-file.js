@@ -158,6 +158,17 @@ function atomicWritePrivateFile(target, value, options = {}) {
   }
   const existing = statIfExists(fileSystem, target);
   if (existing) validatePrivateStat(existing, target);
+  // Optional CAS for a caller that read and validated an encrypted container
+  // before a slow external operation. The subsequent backup pins this inode.
+  const assertExpectedIdentity = (stat) => {
+    if (options.expectedIdentity && (!stat
+      || ["dev", "ino", "size", "mtimeMs"].some((field) => (
+        stat[field] !== options.expectedIdentity[field]
+      )))) {
+      throw serviceError("PRIVATE_FILE_COMPARE_FAILED", "私有文件在提交前已变化");
+    }
+  };
+  assertExpectedIdentity(existing);
   const existingTemp = statIfExists(fileSystem, tempPath);
   if (existingTemp) {
     validatePrivateStat(existingTemp, tempPath);
@@ -224,6 +235,7 @@ function atomicWritePrivateFile(target, value, options = {}) {
         || linkedTarget.nlink !== 2) {
         throw serviceError("UNSAFE_PATH", `私有文件 backup 建立时 identity 变化: ${target}`);
       }
+      assertExpectedIdentity(linkedTarget);
     }
     fileSystem.renameSync(tempPath, target);
     renamed = true;

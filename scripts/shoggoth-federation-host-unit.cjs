@@ -228,7 +228,7 @@ test("backend.status 同时返回原生后端真实连接和断开状态，写�
   const originalStatus = fixture.registry.getStatus;
   fixture.registry.getStatus = async () => [...await originalStatus(),
     { id: "shoggoth", name: "Shoggoth", connected: true },
-    { id: "deepseek-harness", name: "DeepSeek Harness", connected: true },
+    { id: "deepseek-harness", name: "DeepSeek", connected: true },
     { id: "codex", name: "Codex", connected: true, disabled: true,
       info: { error: "fixture-private-canary" } },
   ];

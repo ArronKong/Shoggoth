@@ -41,7 +41,7 @@ class AgentHarnessServiceController {
       [options.productStore, ["getAgentProfile"], "ProductStore"],
       [options.definitionStore, ["get", "history", "readRevision", "update", "restore", "previewImport", "import", "readGeneratedView"], "AgentDefinitionStore"],
       [options.memoryStore, ["getRevision", "list"], "MemoryStore"],
-      [options.memoryEngine, ["propose", "confirm", "update", "delete"], "MemoryEngine"],
+      [options.memoryEngine, ["propose", "update", "delete"], "MemoryEngine"],
       [options.chatSessionStore, ["listSessions"], "ChatSessionStore"],
       [options.transcriptStore, ["listEvents", "getRevision", "setContextExcluded"], "TranscriptStore"],
       [options.toolRegistry, ["list"], "ToolRegistry"],
@@ -58,7 +58,7 @@ class AgentHarnessServiceController {
     this.toolRegistry = options.toolRegistry;
     this.permissionEngine = options.permissionEngine;
     this.skillStore = options.skillStore || null;
-    if (this.skillStore && ["list", "setProfileSkill", "installFromDirectory", "uninstall", "preview", "usage"]
+    if (this.skillStore && ["list", "setProfileSkill", "setGlobalSkill", "installFromDirectory", "uninstall", "preview", "usage"]
       .some((method) => typeof this.skillStore[method] !== "function")) {
       throw new TypeError("NativeSkillStore dependency is invalid");
     }
@@ -200,10 +200,9 @@ class AgentHarnessServiceController {
       });
       return { revision: this.memoryStore.getRevision(params.profileId), item };
     }
-    if (["harness.memory.confirm", "harness.memory.update", "harness.memory.delete"].includes(method)) {
+    if (["harness.memory.update", "harness.memory.delete"].includes(method)) {
       this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
-      const value = method.endsWith("confirm") ? this.memoryEngine.confirm(params)
-        : method.endsWith("delete") ? this.memoryEngine.delete(params)
+      const value = method.endsWith("delete") ? this.memoryEngine.delete(params)
           : this.memoryEngine.update({ ...params, sourceRef: "user-edit:agent-settings" });
       return { revision: this.memoryStore.getRevision(params.profileId), item: value };
     }
@@ -257,6 +256,7 @@ class AgentHarnessServiceController {
         sourcePath: params.sourcePath,
         operationId: params.operationId,
         expectedRevision: params.expectedRevision,
+        globalEnabled: true,
       });
       return { registryRevision: value.revision, skill: value.package };
     }
@@ -265,12 +265,19 @@ class AgentHarnessServiceController {
       return { registryRevision: value.revision, skill: value.removed };
     }
     if (method === "harness.skills.enable") {
+      if (params.source !== "builtin") {
+        throw harnessError("INVALID_PARAMS", "用户安装的 Skill 只能全局启停");
+      }
       const value = this.skillStore.setProfileSkill(params);
       // Skill packages stay in the content-addressed Skill Store. The Context
       // Compiler and authorized MCP tools inject the selected Profile view at
       // run time; materializing into a Runtime Home would duplicate packages
       // and leak one Profile's selection through a shared account Home.
       return { profileRevision: value.revision, skill: value.skill };
+    }
+    if (method === "harness.skills.global.set") {
+      const value = this.skillStore.setGlobalSkill(params);
+      return { registryRevision: value.revision, skill: value.skill };
     }
     if (method === "harness.skills.usage") return this.skillStore.usage(params.profileId);
     if (method === "harness.computer.status") {

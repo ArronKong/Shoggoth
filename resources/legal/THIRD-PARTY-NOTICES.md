@@ -17,6 +17,8 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | @floating-ui/dom | 1.7.6 | MIT | [LICENSE](licenses/npm/_floating-ui_dom@1.7.6/LICENSE) |
 | @floating-ui/react-dom | 2.1.8 | MIT | [LICENSE](licenses/npm/_floating-ui_react-dom@2.1.8/LICENSE) |
 | @floating-ui/utils | 0.2.11 | MIT | [LICENSE](licenses/npm/_floating-ui_utils@0.2.11/LICENSE) |
+| @modelcontextprotocol/client | 2.1.0 | MIT | [LICENSE](licenses/npm/_modelcontextprotocol_client@2.1.0/LICENSE) |
+| @modelcontextprotocol/core | 2.1.0 | MIT | [LICENSE](licenses/npm/_modelcontextprotocol_core@2.1.0/LICENSE) |
 | @trycua/cua-driver-darwin-arm64 | 0.22.0 | MIT AND MPL-2.0 | [CUA-LICENSE.md](CUA-LICENSE.md), [CUA-NOTICE.md](CUA-NOTICE.md), [MPL-2.0.txt](MPL-2.0.txt) |
 | @trycua/cua-driver-darwin-x64 | 0.22.0 | MIT AND MPL-2.0 | [CUA-LICENSE.md](CUA-LICENSE.md), [CUA-NOTICE.md](CUA-NOTICE.md), [MPL-2.0.txt](MPL-2.0.txt) |
 | @trycua/cua-driver | 0.22.0 | MIT | [CUA-LICENSE.md](CUA-LICENSE.md), [CUA-NOTICE.md](CUA-NOTICE.md), [MPL-2.0.txt](MPL-2.0.txt) |
@@ -31,26 +33,36 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | @ubjs/node-darwin-x64 | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
 | @ubjs/node | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
 | @xterm/headless | 6.0.0 | MIT | [XTERM-LICENSE.txt](XTERM-LICENSE.txt) |
+| ajv | 8.20.0 | MIT | [LICENSE](licenses/npm/ajv@8.20.0/LICENSE) |
 | animejs | 4.4.1 | MIT | [LICENSE.md](licenses/npm/animejs@4.4.1/LICENSE.md) |
 | argparse | 2.0.1 | Python-2.0 | [LICENSE](licenses/npm/argparse@2.0.1/LICENSE) |
 | better-sqlite3 | 13.0.3 | MIT | [LICENSE](licenses/npm/better-sqlite3@13.0.3/LICENSE) |
 | builder-util-runtime | 9.7.0 | MIT | [LICENSE](licenses/npm/builder-util-runtime@9.7.0/LICENSE) |
 | cookie | 1.1.1 | MIT | [LICENSE](licenses/npm/cookie@1.1.1/LICENSE) |
 | cron-parser | 5.4.0 | MIT | [LICENSE](licenses/npm/cron-parser@5.4.0/LICENSE) |
+| cross-spawn | 7.0.6 | MIT | [LICENSE](licenses/npm/cross-spawn@7.0.6/LICENSE) |
 | csstype | 3.2.3 | MIT | [LICENSE](licenses/npm/csstype@3.2.3/LICENSE) |
 | debug | 4.4.3 | MIT | [LICENSE](licenses/npm/debug@4.4.3/LICENSE) |
 | dompurify | 3.4.15 | Apache-2.0 | [LICENSE](licenses/npm/dompurify@3.4.15/LICENSE), [LICENSE-MPL](licenses/npm/dompurify@3.4.15/LICENSE-MPL) |
 | electron-updater | 6.8.9 | MIT | [LICENSE](licenses/npm/electron-updater@6.8.9/LICENSE) |
 | electron | 44.4.2 | MIT | [LICENSE](licenses/npm/electron@44.4.2/LICENSE) |
 | entities | 4.5.0 | BSD-2-Clause | [LICENSE](licenses/npm/entities@4.5.0/LICENSE) |
+| eventsource-parser | 3.1.1 | MIT | [LICENSE](licenses/npm/eventsource-parser@3.1.1/LICENSE) |
+| eventsource | 3.0.7 | MIT | [LICENSE](licenses/npm/eventsource@3.0.7/LICENSE) |
+| fast-deep-equal | 3.1.3 | MIT | [LICENSE](licenses/npm/fast-deep-equal@3.1.3/LICENSE) |
+| fast-uri | 3.1.8 | BSD-3-Clause | [LICENSE](licenses/npm/fast-uri@3.1.8/LICENSE) |
 | fflate | 0.8.3 | MIT | [LICENSE](licenses/npm/fflate@0.8.3/LICENSE) |
 | fs-extra | 10.1.0 | MIT | [LICENSE](licenses/npm/fs-extra@10.1.0/LICENSE) |
 | graceful-fs | 4.2.11 | ISC | [LICENSE](licenses/npm/graceful-fs@4.2.11/LICENSE) |
 | highlight.js | 11.11.1 | BSD-3-Clause | [LICENSE](licenses/npm/highlight.js@11.11.1/LICENSE) |
 | html-parse-stringify | 3.0.1 | MIT | [HTML-PARSE-STRINGIFY.txt](licenses/source/HTML-PARSE-STRINGIFY.txt) |
 | i18next | 26.3.0 | MIT | [LICENSE](licenses/npm/i18next@26.3.0/LICENSE) |
+| isexe | 2.0.0 | ISC | [LICENSE](licenses/npm/isexe@2.0.0/LICENSE) |
+| jose | 6.2.12 | MIT | [LICENSE.md](licenses/npm/jose@6.2.12/LICENSE.md) |
 | js-tokens | 4.0.0 | MIT | [LICENSE](licenses/npm/js-tokens@4.0.0/LICENSE) |
 | js-yaml | 4.3.2 | MIT | [LICENSE](licenses/npm/js-yaml@4.3.2/LICENSE) |
+| js-yaml | 5.4.2 | MIT | [LICENSE](licenses/npm/js-yaml@5.4.2/LICENSE) |
+| json-schema-traverse | 1.0.0 | MIT | [LICENSE](licenses/npm/json-schema-traverse@1.0.0/LICENSE) |
 | jsonfile | 6.2.1 | MIT | [LICENSE](licenses/npm/jsonfile@6.2.1/LICENSE) |
 | lazy-val | 1.0.5 | MIT | [LAZY-VAL.txt](licenses/overrides/LAZY-VAL.txt) |
 | linkify-it | 5.0.2 | MIT | [LICENSE](licenses/npm/linkify-it@5.0.2/LICENSE) |
@@ -66,18 +78,23 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | node-addon-api | 7.1.1 | MIT | [LICENSE.md](licenses/npm/node-addon-api@7.1.1/LICENSE.md) |
 | node-addon-api | 8.9.2 | MIT | [LICENSE.md](licenses/npm/node-addon-api@8.9.2/LICENSE.md) |
 | node-pty | 1.1.0 | MIT | [LICENSE](licenses/npm/node-pty@1.1.0/LICENSE) |
+| path-key | 3.1.1 | MIT | [license](licenses/npm/path-key@3.1.1/license) |
 | pinyin-pro | 3.29.3 | MIT | [LICENSE](licenses/npm/pinyin-pro@3.29.3/LICENSE) |
+| pkce-challenge | 5.0.1 | MIT | [LICENSE](licenses/npm/pkce-challenge@5.0.1/LICENSE) |
 | punycode.js | 2.3.1 | MIT | [LICENSE-MIT.txt](licenses/npm/punycode.js@2.3.1/LICENSE-MIT.txt) |
 | react-dom | 18.3.1 | MIT | [LICENSE](licenses/npm/react-dom@18.3.1/LICENSE) |
 | react-i18next | 17.0.8 | MIT | [LICENSE](licenses/npm/react-i18next@17.0.8/LICENSE) |
 | react-router-dom | 7.18.4 | MIT | [LICENSE.md](licenses/npm/react-router-dom@7.18.4/LICENSE.md) |
 | react-router | 7.18.4 | MIT | [LICENSE.md](licenses/npm/react-router@7.18.4/LICENSE.md) |
 | react | 18.3.1 | MIT | [LICENSE](licenses/npm/react@18.3.1/LICENSE) |
+| require-from-string | 2.0.2 | MIT | [license](licenses/npm/require-from-string@2.0.2/license) |
 | reselect | 5.2.0 | MIT | [LICENSE](licenses/npm/reselect@5.2.0/LICENSE) |
 | sax | 1.6.1 | BlueOak-1.0.0 | [LICENSE.md](licenses/npm/sax@1.6.1/LICENSE.md) |
 | scheduler | 0.23.2 | MIT | [LICENSE](licenses/npm/scheduler@0.23.2/LICENSE) |
 | semver | 7.7.4 | ISC | [LICENSE](licenses/npm/semver@7.7.4/LICENSE) |
 | set-cookie-parser | 2.7.2 | MIT | [LICENSE](licenses/npm/set-cookie-parser@2.7.2/LICENSE) |
+| shebang-command | 2.0.0 | MIT | [license](licenses/npm/shebang-command@2.0.0/license) |
+| shebang-regex | 3.0.0 | MIT | [license](licenses/npm/shebang-regex@3.0.0/license) |
 | three | 0.185.0 | MIT | [LICENSE](licenses/npm/three@0.185.0/LICENSE) |
 | tiny-typed-emitter | 2.1.0 | MIT | [LICENSE](licenses/npm/tiny-typed-emitter@2.1.0/LICENSE) |
 | typescript | 5.9.3 | Apache-2.0 | [LICENSE.txt](licenses/npm/typescript@5.9.3/LICENSE.txt) |
@@ -85,7 +102,9 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | universalify | 2.0.1 | MIT | [LICENSE](licenses/npm/universalify@2.0.1/LICENSE) |
 | use-sync-external-store | 1.6.0 | MIT | [LICENSE](licenses/npm/use-sync-external-store@1.6.0/LICENSE) |
 | void-elements | 3.1.0 | MIT | [LICENSE](licenses/npm/void-elements@3.1.0/LICENSE) |
+| which | 2.0.2 | ISC | [LICENSE](licenses/npm/which@2.0.2/LICENSE) |
 | ws | 8.21.0 | MIT | [LICENSE](licenses/npm/ws@8.21.0/LICENSE) |
+| zod | 4.6.5 | MIT | [LICENSE](licenses/npm/zod@4.6.5/LICENSE) |
 
 ## Copied source, fonts and bundled programs
 

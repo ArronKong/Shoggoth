@@ -160,6 +160,16 @@ test("Runtime 认证状态统一归一化，且不泄漏 Runtime 原始响应", 
   }), { status: "authenticated" });
   assert.deepEqual(await readRuntimeAuthenticationState({}), { status: "unsupported" });
 
+  const deferred = { authenticationState(options) {
+    assert.equal(typeof options.allowDeferred, "boolean");
+    return { verificationDeferred: true, privateDetail: "must not escape" };
+  } };
+  assert.deepEqual(await readRuntimeAuthenticationState(deferred, { allowDeferred: true }), { status: "unverified" });
+  await assert.rejects(() => readRuntimeAuthenticationState(deferred), { code: "RUNTIME_AUTH_STATUS_INVALID" });
+  assert.deepEqual(await readRuntimeAuthenticationState({ authenticationState() {
+    return { authenticated: false, credentialPresent: false };
+  } }, { allowDeferred: true }), { status: "unauthenticated" }, "known missing credentials still block execution");
+
   await assert.rejects(
     () => readRuntimeAuthenticationState({
       async accountRead() {

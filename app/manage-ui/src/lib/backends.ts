@@ -61,57 +61,9 @@ export const FALLBACK_BACKEND_DESCRIPTORS: readonly BackendDescriptor[] = ([
     id: "shoggoth",
     name: "Shoggoth",
     connectionMode: "builtin-service",
-    disconnectable: true,
+    disconnectable: false,
     agentLifecycle: agentLifecycle("builtin-service"),
-    surfaces: allSurfaces("builtin-service", { kind: "native" }, { kind: "native" }),
-  },
-  {
-    id: "codex",
-    name: "Codex",
-    connectionMode: "native-runtime",
-    disconnectable: true,
-    agentLifecycle: agentLifecycle("native-runtime"),
-    surfaces: allSurfaces("native-runtime", { kind: "native" }, { kind: "native" }),
-  },
-  {
-    id: "grok-build",
-    name: "Grok",
-    connectionMode: "native-runtime",
-    disconnectable: true,
-    agentLifecycle: agentLifecycle("native-runtime"),
-    surfaces: allSurfaces("native-runtime", { kind: "native" }, { kind: "native" }),
-  },
-  {
-    id: "antigravity",
-    name: "Antigravity",
-    connectionMode: "native-runtime",
-    disconnectable: true,
-    agentLifecycle: agentLifecycle("native-runtime"),
-    surfaces: allSurfaces("native-runtime", { kind: "native" }, { kind: "native" }),
-  },
-  {
-    id: "pi",
-    name: "Pi",
-    connectionMode: "native-runtime",
-    disconnectable: true,
-    agentLifecycle: agentLifecycle("native-runtime"),
-    surfaces: allSurfaces("native-runtime", { kind: "native" }, { kind: "native" }),
-  },
-  {
-    id: "claude-code",
-    name: "Claude Code",
-    connectionMode: "native-runtime",
-    disconnectable: true,
-    agentLifecycle: agentLifecycle("native-runtime"),
-    surfaces: allSurfaces("native-runtime", { kind: "native" }, { kind: "native" }),
-  },
-  {
-    id: "deepseek-harness",
-    name: "DeepSeek Harness",
-    connectionMode: "native-runtime",
-    disconnectable: true,
-    agentLifecycle: agentLifecycle("native-runtime"),
-    surfaces: allSurfaces("native-runtime", { kind: "native" }, { kind: "native" }),
+    surfaces: { ...allSurfaces("builtin-service", { kind: "native" }, { kind: "native" }), nativeCapacity: true, runtimeBindings: true, runtimeStatus: true, sessionRuntimeSwitch: true, runtimeUsage: true },
   },
 ] as const).filter(isAvailableBackend);
 
@@ -230,13 +182,21 @@ export function useEnabledBackends(surface?: BackendSurface): BackendId[] {
   );
 }
 
+export function resolveBackendAlias(id: string, descriptors: readonly BackendDescriptor[]): string {
+  return descriptors.find((entry) => entry.id === id || entry.aliases?.includes(id))?.id
+    ?? FALLBACK_BACKEND_DESCRIPTORS.find((entry) => entry.aliases?.includes(id))?.id ?? id;
+}
+
 export function useBackendState(
   key: string,
   initial?: BackendId,
   options?: { surface?: BackendSurface },
 ): [BackendId, (id: BackendId) => void, BackendId[]] {
   const available = useEnabledBackends(options?.surface);
+  const catalog = useBackendCatalog(options?.surface);
   const [selected, setSelected] = useStickyState<BackendId>(`backend.${key}`, "openclaw", initial);
-  const backend = available.includes(selected) ? selected : (available[0] ?? "openclaw");
-  return [backend, setSelected, available];
+  const resolved = resolveBackendAlias(selected, catalog);
+  const backend = available.includes(resolved) ? resolved
+    : resolved !== selected ? resolved : (available[0] ?? "openclaw");
+  return [backend, (id) => setSelected(resolveBackendAlias(id, catalog)), available];
 }

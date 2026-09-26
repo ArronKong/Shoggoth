@@ -12,6 +12,11 @@
 //   已封存前缀切片,把累积流还原成真实交错的分段。
 // - 输出截断与 ChatPage formatToolOutput 同为 4000 字。
 
+// Display-only identifier; opening it revalidates its call and Grants.
+export function validPluginAppCallId(value: unknown): string | undefined {
+  return typeof value === "string" && /^runtime-[a-f0-9]{64}$/.test(value) ? value : undefined;
+}
+
 export type TurnEvent =
   | { kind: "user"; text: string } // 合成:开启本回合的用户消息
   | { kind: "delta"; text: string } // 全量累积的回答文本
@@ -24,6 +29,7 @@ export type TurnEvent =
       args?: unknown;
       phase: "start" | "update" | "result";
       result?: unknown;
+      pluginAppCallId?: string;
       partialResult?: unknown; // OpenClaw update 相的流式输出
       isError?: boolean;
       durationS?: number; // Hermes tool.complete 的耗时
@@ -66,6 +72,7 @@ export interface TurnStep {
   args?: unknown; // 只写一次(对齐 ChatPage:2420)
   output?: string; // capText 处理后的最新 partial/最终结果
   outputTruncated?: boolean;
+  pluginAppCallId?: string;
   isError?: boolean;
   diff?: { path: string; oldText: string; newText: string };
   diffText?: string;
@@ -406,6 +413,7 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
         }
       }
       if (ev.phase === "result") {
+        patch.pluginAppCallId = validPluginAppCallId(ev.pluginAppCallId);
         if (ev.result !== undefined) {
           const capped = capText(ev.result);
           patch.output = capped.text;
@@ -532,6 +540,7 @@ export interface TimelinePartLike {
   toolName?: string;
   toolArgs?: unknown;
   toolCallId?: string;
+  pluginAppCallId?: string;
   isError?: boolean;
   durationS?: number;
   diff?: { path: string; oldText: string; newText: string };
@@ -587,6 +596,7 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
       if (st.args === undefined && p.toolArgs !== undefined) st.args = p.toolArgs;
       const capped = capText(p.text ?? "");
       st.output = capped.text;
+      st.pluginAppCallId = validPluginAppCallId(p.pluginAppCallId);
       st.outputTruncated = capped.truncated;
       st.isError = p.isError === true || /"status"\s*:\s*"error"/.test(capped.text);
       st.status = st.isError ? "error" : "ok";

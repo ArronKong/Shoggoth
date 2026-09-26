@@ -895,12 +895,19 @@ test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () 
   let authCalls = 0;
   const profileTokens = [];
   const output = new EventEmitter();
+  const input = new PassThrough();
   let written = "";
   output.write = (frame) => {
     written += frame;
+    const message = JSON.parse(String(frame));
+    if (message.method === "elicitation/create") {
+      assert.equal(message.params.message, "Shoggoth internal Runtime call binding v1");
+      assert.equal(message.params._meta["shoggoth/runtime-call-binding"].name, "profile_get");
+      input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { action: "accept", content: {} } })}\n`);
+    } else if (message.id === 2) input.end();
     return true;
   };
-  await startShoggothMcpHelper({
+  const running = startShoggothMcpHelper({
     runtimeProfileId: "runtime-a",
     runtimeAccountId: "runtime-a-account",
     serviceVersion: "0.0.test",
@@ -920,18 +927,13 @@ test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () 
     },
     safeStorage: {},
     electronApp: { whenReady: async () => {}, quit: () => {} },
-    input: Readable.from([
-      `${JSON.stringify(initialize())}\n`,
-      `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 2,
-        method: "tools/call",
-        params: { name: "profile_get", arguments: {} },
-      })}\n`,
-    ]),
+    input,
     output,
   });
-  const responses = written.trim().split("\n").map((line) => JSON.parse(line));
+  input.write(`${JSON.stringify(initialize(1, { capabilities: { elicitation: {} } }))}\n`);
+  input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "profile_get", arguments: {} } })}\n`);
+  await running;
+  const responses = written.trim().split("\n").map((line) => JSON.parse(line)).filter(value => !value.method);
   assert.equal(responses[1].result.isError, false);
   assert.equal(authCalls, 2);
   assert.deepEqual(profileTokens, [token(0x62)]);
@@ -1076,7 +1078,7 @@ test("本地助理修改和归档确认展示已核对目标，拒绝时不写�
         requestService: async (_paths, request) => {
           calls.push(request);
           if (request.params.name === "native_agent_get") return { agent: {
-            backendId: "codex", agentId: "target-agent", name: "星帆", updatedAt: 2,
+            backendId: "shoggoth", agentId: "target-agent", name: "星帆", updatedAt: 2,
             state: "active", isDefault: false,
           } };
           assert.equal(request.params.name, tool);
@@ -1087,7 +1089,7 @@ test("本地助理修改和归档确认展示已核对目标，拒绝时不写�
       await handler(initialize(1, { capabilities: { elicitation: {} } }));
       let prompts = 0;
       const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
-        name: tool, arguments: { backendId: "codex", agentId: "target-agent", source: "chat", sourceId: "s",
+        name: tool, arguments: { backendId: "shoggoth", agentId: "target-agent", source: "chat", sourceId: "s",
           expectedUpdatedAt: 2, ...(tool === "native_agent_update" ? { name: "新名字", workspace: null } : {}) },
       } }, { requestClient: async (_method, params) => {
         prompts += 1;

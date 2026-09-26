@@ -24,16 +24,6 @@ const {
 } = require("./product-store");
 const { WORK_RUN_STATUSES } = require("./work-run");
 
-const LEGACY_WORK_RUN_FIELDS = Object.freeze([
-  "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace", "status",
-  "codexThreadId", "codexTurnId", "eventSeq", "waitingRequestId", "startedAt",
-  "finishedAt", "resultSummary", "errorCode", "retryOf",
-]);
-const CONTEXTUAL_LEGACY_WORK_RUN_FIELDS = Object.freeze([
-  ...LEGACY_WORK_RUN_FIELDS,
-  "contextSnapshotId",
-]);
-
 const MAX_CONTENT_PREVIEW_BYTES = 512;
 const MAX_CONTENT_READ_BYTES = 32 * 1024;
 const MAX_QUERY_POSITION_BYTES = 256;
@@ -713,13 +703,10 @@ function validateCardRunLink(value) {
 }
 
 function validateRun(value, expectedSource = null) {
-  const current = exactObject(value, WORK_RUN_FIELDS);
-  const legacy = exactObject(value, LEGACY_WORK_RUN_FIELDS)
-    || exactObject(value, CONTEXTUAL_LEGACY_WORK_RUN_FIELDS);
-  if (!current && !legacy) failResponse();
+  if (!exactObject(value, WORK_RUN_FIELDS)) failResponse();
   let run;
   try {
-    run = current ? validateWorkRun(cloneCanonical(value)) : cloneCanonical(value);
+    run = validateWorkRun(cloneCanonical(value));
     run = validateChatServiceResult("run.get", { run }).run;
   } catch {
     failResponse();
@@ -737,6 +724,11 @@ function validateRunListBinding(run, params, sourceIdField) {
 }
 
 function validateKanbanRunItem(value, params) {
+  if (Object.hasOwn(value || {}, "sessionKey")) {
+    const { sessionKey, ...run } = value;
+    if (!validUuid(sessionKey)) failResponse();
+    return { ...validateKanbanRunItem(run, params), sessionKey };
+  }
   return validateRunListBinding(validateRun(value, "kanban"), params, "cardId");
 }
 

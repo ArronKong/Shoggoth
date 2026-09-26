@@ -27,6 +27,9 @@ const {
   createLocalFileSafeStorage,
   isLocalFileCiphertext,
 } = require("./agent-service/local-file-safe-storage");
+const {
+  assertMcpAuthSourceUnchanged, clearSource, readMcpAuthMigrationSource,
+} = require("./agent-service/mcp-auth-legacy-migration");
 
 // 后台 Service/MCP 使用独立 profile，也必须使用独立的 Keychain service name。
 // 若沿用 UI 的 `Shoggoth Safe Storage`，旧开发签名或旧 ACL 会让一次性 worker
@@ -296,7 +299,42 @@ function assertEncryptionAvailable(safeStorage) {
   }
 }
 
-async function performWorkerOperation({ gate, request, payload = Buffer.alloc(0), safeStorage, fs: fileSystem }) {
+async function performWorkerOperation({ gate, request, payload = Buffer.alloc(0), safeStorage,
+  localSafeStorage, fs: fileSystem }) {
+  if (request.operation === "service.rewrapLegacyMcpAuth") {
+    let source, store, secret, encrypted, verified;
+    try {
+      if (gate.callerRole !== "agent-service" || request.payloadBytes !== 0 || payload.length !== 0) {
+        throw cryptoError();
+      }
+      assertEncryptionAvailable(safeStorage);
+      assertEncryptionAvailable(localSafeStorage);
+      source = readMcpAuthMigrationSource(request.paths, fileSystem);
+      if (source.format !== "legacy-v10") throw cryptoError();
+      store = new McpAuthSecretStore({
+        paths: request.paths, access: "helper", safeStorage, fs: fileSystem,
+      }).open();
+      secret = store.readForHelper();
+      encrypted = localSafeStorage.encryptString(secret.toString("base64url"));
+      if (!isLocalFileCiphertext(encrypted)) throw cryptoError();
+      const { decodeMcpAuthSecretPlaintext } = require("./agent-service/mcp-auth-secret-store");
+      verified = decodeMcpAuthSecretPlaintext(localSafeStorage.decryptString(encrypted));
+      if (!require("node:crypto").timingSafeEqual(secret, verified)) throw cryptoError();
+      assertMcpAuthSourceUnchanged(request.paths, source, fileSystem);
+      // Only ciphertext leaves the one-shot worker. Both the legacy secret and
+      // the existing local master key stay inside this controlled process.
+      return encodeWorkerResponse({ gate, payload: encrypted, ok: true });
+    } catch {
+      return encodeWorkerResponse({ gate, ok: false });
+    } finally {
+      payload.fill(0);
+      clearSource(source);
+      secret?.fill(0);
+      verified?.fill(0);
+      encrypted?.fill(0);
+      store?.close();
+    }
+  }
   if (["safeStorage.encrypt", "safeStorage.decrypt"].includes(request.operation)) {
     let result = null;
     let plaintext = null;
@@ -356,16 +394,23 @@ async function startMcpCryptoWorker(options = {}) {
       || (typeof electronApp.getAppPath === "function" ? electronApp.getAppPath() : undefined),
   });
   const usesLocalFileCrypto = isLocalFileCryptoAppIdentity(identity);
-  // Developer ID 包仍使用系统 safeStorage。Chromium 在第一次取得 safeStorage
-  // 对象时就会固定 Keychain service name，因此必须先改名。本地稳定签名与经过
-  // 完整 bundle/CDHash/父进程校验的 ad-hoc 包都改走私有文件主密钥。
-  if (!usesLocalFileCrypto && typeof electronApp.setName === "function") {
-    electronApp.setName(keychainServiceNameForIdentity(identity));
+  // Electron fixes the macOS Keychain service/account during main-loop setup,
+  // before ready and independently of the first safeStorage getter. Name this
+  // controlled worker before awaiting stdin. Naming alone never accesses the
+  // Keychain; ordinary local operations still use only the private file key.
+  if (typeof electronApp.setName === "function") {
+    electronApp.setName(usesLocalFileCrypto
+      ? SHOGGOTH_AGENT_SERVICE_NAME : keychainServiceNameForIdentity(identity));
   }
   const decodedRequest = options.request
     ? { request: validateWorkerRequest(options.request, gate), payload: options.payload || Buffer.alloc(0) }
     : await readWorkerRequest(options.input || process.stdin, gate);
   const { request, payload } = decodedRequest;
+  const rewrapLegacy = request.operation === "service.rewrapLegacyMcpAuth";
+  if (rewrapLegacy && (!usesLocalFileCrypto || gate.callerRole !== "agent-service")) {
+    payload.fill(0);
+    throw cryptoError();
+  }
   const cryptoProfileDir = path.join(request.paths.profileDir, "mcp-crypto-worker");
   const cryptoSessionDir = path.join(cryptoProfileDir, "session");
   const cryptoCacheDir = path.join(request.paths.cacheDir, "mcp-crypto-worker");
@@ -384,10 +429,9 @@ async function startMcpCryptoWorker(options = {}) {
   electronApp.setPath("sessionData", cryptoSessionDir);
   electronApp.setPath("cache", cryptoCacheDir);
   await electronApp.whenReady();
-  // 只有真正依赖系统钥匙串的 Developer ID 包才允许触发可见授权。本地稳定
-  // 签名与严格 ad-hoc 包都使用 stateDir 下的私有文件主密钥，绝不能再触碰
-  // Electron safeStorage 或唤起 SecurityAgent。
-  if (!usesLocalFileCrypto) {
+  // 普通本地 crypto 永不接触 Keychain。只有 Developer ID 包与显式、仅一次
+  // 的旧凭据迁移可以触发系统授权；迁移完成后本地启动仍只读私有文件主密钥。
+  if (!usesLocalFileCrypto || rewrapLegacy) {
     if (typeof electronApp.setActivationPolicy === "function") {
       // Accessory permits a genuine Keychain authorization dialog without
       // adding a one-shot worker to the Dock or stealing focus on every read.
@@ -401,24 +445,38 @@ async function startMcpCryptoWorker(options = {}) {
     await new Promise((resolve) => setTimeout(resolve, testStallMs));
   }
   let safeStorage = null;
+  let localSafeStorage = null;
   try {
-    safeStorage = cryptoStorageForIdentity(identity, {
-      paths: request.paths,
-      electron,
-      safeStorage: options.safeStorage,
-      createLocalFileSafeStorage: options.createLocalFileSafeStorage,
-      fs: options.mcpAuthFs,
-      randomBytes: options.localCryptoRandomBytes,
-      readOnly: request.operation === "helper.read",
-    });
+    if (rewrapLegacy) {
+      // This explicit service-only recovery is the sole local-build exception:
+      // never create a replacement key and never choose Keychain at startup.
+      localSafeStorage = (options.createLocalFileSafeStorage || createLocalFileSafeStorage)({
+        paths: request.paths, fs: options.mcpAuthFs, readOnly: true,
+      });
+      const source = readMcpAuthMigrationSource(request.paths, options.mcpAuthFs);
+      try { if (source.format !== "legacy-v10") throw cryptoError(); }
+      finally { clearSource(source); }
+      safeStorage = options.safeStorage || electron.safeStorage;
+    } else {
+      safeStorage = cryptoStorageForIdentity(identity, {
+        paths: request.paths,
+        electron,
+        safeStorage: options.safeStorage,
+        createLocalFileSafeStorage: options.createLocalFileSafeStorage,
+        fs: options.mcpAuthFs,
+        randomBytes: options.localCryptoRandomBytes,
+        readOnly: request.operation === "helper.read",
+      });
+    }
     const frame = await performWorkerOperation({
-      gate, request, payload, safeStorage, fs: options.mcpAuthFs,
+      gate, request, payload, safeStorage, localSafeStorage, fs: options.mcpAuthFs,
     });
     const exitCode = frame[0] === 0 ? 0 : 1;
     await writeFrame(options.output || process.stdout, frame);
     if (typeof electronApp.exit === "function") electronApp.exit(exitCode);
     else electronApp.quit();
   } finally {
+    localSafeStorage?.close();
     if (typeof safeStorage?.close === "function") safeStorage.close();
   }
 }

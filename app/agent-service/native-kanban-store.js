@@ -14,9 +14,6 @@ const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
 
 const NATIVE_KANBAN_STORE_VERSION = 4;
-const PREVIOUS_NATIVE_KANBAN_STORE_VERSION = 3;
-const INTEGRITY_NATIVE_KANBAN_STORE_VERSION = 2;
-const LEGACY_NATIVE_KANBAN_STORE_VERSION = 1;
 const MAX_NATIVE_KANBAN_STORE_BYTES = 64 * 1024 * 1024;
 const IDEMPOTENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_OPERATION_FUTURE_SKEW_MS = 5 * 60 * 1000;
@@ -55,7 +52,6 @@ const CARD_FIELDS = Object.freeze([
   "id", "boardId", "profileId", "title", "body", "status", "position",
   "archivedAt", "completionRequest", "completion", "createdAt", "updatedAt",
 ]);
-const PREVIOUS_CARD_FIELDS = Object.freeze(CARD_FIELDS.filter((field) => field !== "archivedAt"));
 const COMMENT_FIELDS = Object.freeze([
   "id", "cardId", "authorType", "authorId", "body", "createdAt",
 ]);
@@ -75,17 +71,13 @@ const PROPOSED_WORK_RUN_FIELDS = Object.freeze([
 const AUDIT_FIELDS = Object.freeze([
   "id", "cardId", "kind", "actorId", "runId", "note", "createdAt",
 ]);
-const LEGACY_OPERATION_FIELDS = Object.freeze([
+const OPERATION_CORE_FIELDS = Object.freeze([
   "operationId", "kind", "fingerprint", "createdAt", "resultType", "resultId", "result",
 ]);
-const OPERATION_FIELDS = Object.freeze([...LEGACY_OPERATION_FIELDS, "integrity"]);
+const OPERATION_FIELDS = Object.freeze([...OPERATION_CORE_FIELDS, "integrity"]);
 const CONTAINER_FIELDS = Object.freeze([
   "version", "revision", "clockHighWaterMs", "idempotencyFloorMs", "boards", "cards", "comments",
   "attachments", "artifacts", "cardRunLinks", "auditEvents", "operations",
-]);
-const LEGACY_CONTAINER_FIELDS = Object.freeze([
-  "version", "revision", "boards", "cards", "comments", "attachments", "artifacts",
-  "cardRunLinks", "auditEvents", "operations",
 ]);
 const RESULT_MAPS = Object.freeze({
   board: "boards",
@@ -168,7 +160,7 @@ function fingerprintOperation(kind, input) {
 }
 
 function operationIntegrity(value) {
-  const payload = Object.fromEntries(LEGACY_OPERATION_FIELDS.map((field) => [field, value[field]]));
+  const payload = Object.fromEntries(OPERATION_CORE_FIELDS.map((field) => [field, value[field]]));
   return crypto.createHash("sha256").update(canonicalJson(payload)).digest("hex");
 }
 
@@ -230,12 +222,6 @@ function normalizeCard(value, corrupt = false) {
   return { ...Object.fromEntries(CARD_FIELDS.map((field) => [field, value[field]])), completionRequest, completion };
 }
 
-function normalizePreviousCard(value, corrupt = false) {
-  if (!exactObject(value, PREVIOUS_CARD_FIELDS)) throw normalizationError(corrupt, "card");
-  const normalized = normalizeCard({ ...value, archivedAt: null }, corrupt);
-  return Object.fromEntries(PREVIOUS_CARD_FIELDS.map((field) => [field, normalized[field]]));
-}
-
 function normalizeComment(value, corrupt = false) {
   if (!exactObject(value, COMMENT_FIELDS) || !UUID_PATTERN.test(value.id)
     || !UUID_PATTERN.test(value.cardId) || !["human", "agent", "product"].includes(value.authorType)
@@ -287,19 +273,19 @@ function normalizeAudit(value, corrupt = false) {
   return Object.fromEntries(AUDIT_FIELDS.map((field) => [field, value[field]]));
 }
 
-function normalizeOperationShape(value, corrupt = false, legacy = false, cardNormalizer = normalizeCard) {
-  const fields = legacy ? LEGACY_OPERATION_FIELDS : OPERATION_FIELDS;
+function normalizeOperationShape(value, corrupt = false) {
+  const fields = OPERATION_FIELDS;
   if (!exactObject(value, fields) || !validOpaqueId(value.operationId)
     || !validOpaqueId(value.kind, 64) || !SHA256_PATTERN.test(value.fingerprint)
     || !validTimestamp(value.createdAt) || !own(RESULT_MAPS, value.resultType)
     || !UUID_PATTERN.test(value.resultId)
-    || (!legacy && !SHA256_PATTERN.test(value.integrity))) {
+    || !SHA256_PATTERN.test(value.integrity)) {
     throw normalizationError(corrupt, "operation");
   }
   let result;
   try {
     if (value.resultType === "board") result = normalizeBoard(value.result, corrupt);
-    else if (value.resultType === "card") result = cardNormalizer(value.result, corrupt);
+    else if (value.resultType === "card") result = normalizeCard(value.result, corrupt);
     else if (value.resultType === "comment") result = normalizeComment(value.result, corrupt);
     else if (value.resultType === "attachment") result = normalizeAttachment(value.result, corrupt);
     else if (value.resultType === "artifact") result = normalizeArtifact(value.result, corrupt);
@@ -309,24 +295,16 @@ function normalizeOperationShape(value, corrupt = false, legacy = false, cardNor
   }
   if (result.id !== value.resultId) throw normalizationError(corrupt, "operation");
   const core = {
-    ...Object.fromEntries(LEGACY_OPERATION_FIELDS.map((field) => [field, value[field]])),
+    ...Object.fromEntries(OPERATION_CORE_FIELDS.map((field) => [field, value[field]])),
     result,
   };
   const integrity = operationIntegrity(core);
-  if (!legacy && value.integrity !== integrity) throw normalizationError(corrupt, "operation");
+  if (value.integrity !== integrity) throw normalizationError(corrupt, "operation");
   return { ...core, integrity };
 }
 
 function normalizeOperation(value, corrupt = false) {
-  return normalizeOperationShape(value, corrupt, false);
-}
-
-function normalizeLegacyOperation(value, corrupt = false) {
-  return normalizeOperationShape(value, corrupt, true, normalizePreviousCard);
-}
-
-function normalizePreviousOperation(value, corrupt = false) {
-  return normalizeOperationShape(value, corrupt, false, normalizePreviousCard);
+  return normalizeOperationShape(value, corrupt);
 }
 
 function normalizeMap(value, limit, normalize, label) {
@@ -491,68 +469,6 @@ function validateContainer(value) {
   return validateContainerShape(value, NATIVE_KANBAN_STORE_VERSION);
 }
 
-function migratePreviousContainer(value, version, operationNormalizer) {
-  const provisional = validateContainerShape(
-    value, version, operationNormalizer, normalizePreviousCard,
-  );
-  const cards = Object.fromEntries(Object.entries(provisional.cards).map(([id, card]) => [id, {
-    ...card,
-    archivedAt: null,
-  }]));
-  const operations = Object.fromEntries(Object.entries(provisional.operations).map(([id, operation]) => {
-    const core = operation.resultType === "card"
-      ? { ...operation, result: { ...operation.result, archivedAt: null } }
-      : operation;
-    return [id, { ...core, integrity: operationIntegrity(core) }];
-  }));
-  return validateContainer({
-    ...provisional,
-    version: NATIVE_KANBAN_STORE_VERSION,
-    revision: provisional.revision + 1,
-    cards,
-    operations,
-  });
-}
-
-function migrateV3Container(value) {
-  return migratePreviousContainer(
-    value, PREVIOUS_NATIVE_KANBAN_STORE_VERSION, normalizePreviousOperation,
-  );
-}
-
-function migrateV2Container(value) {
-  return migratePreviousContainer(
-    value, INTEGRITY_NATIVE_KANBAN_STORE_VERSION, normalizeLegacyOperation,
-  );
-}
-
-function migrateV1Container(value, trustedTime) {
-  if (value?.version !== LEGACY_NATIVE_KANBAN_STORE_VERSION
-    || (!exactObject(value, CONTAINER_FIELDS) && !exactObject(value, LEGACY_CONTAINER_FIELDS))) {
-    throw kanbanError("KANBAN_STORE_CORRUPT", "Native Kanban v1 容器损坏");
-  }
-  const transitional = exactObject(value, CONTAINER_FIELDS);
-  const provisional = validateContainerShape({
-    ...value,
-    clockHighWaterMs: transitional ? value.clockHighWaterMs : trustedTime,
-    idempotencyFloorMs: transitional ? value.idempotencyFloorMs : 0,
-  }, LEGACY_NATIVE_KANBAN_STORE_VERSION, normalizeLegacyOperation, normalizePreviousCard);
-  const clockHighWaterMs = Math.max(provisional.clockHighWaterMs, trustedTime);
-  const idempotencyFloorMs = Math.max(
-    provisional.idempotencyFloorMs,
-    Math.max(0, clockHighWaterMs - IDEMPOTENCY_WINDOW_MS),
-  );
-  return migratePreviousContainer({
-    ...provisional,
-    version: LEGACY_NATIVE_KANBAN_STORE_VERSION,
-    revision: provisional.revision + 1,
-    clockHighWaterMs,
-    idempotencyFloorMs,
-    operations: Object.fromEntries(Object.entries(provisional.operations)
-      .filter(([, operation]) => operation.createdAt >= idempotencyFloorMs)),
-  }, LEGACY_NATIVE_KANBAN_STORE_VERSION, normalizePreviousOperation);
-}
-
 function assertNoSensitive(value, matcher, location = "payload", seen = new Set()) {
   if (typeof value === "string") {
     if (matcher) {
@@ -660,12 +576,11 @@ class NativeKanbanStore {
       const parsed = stat ? this.#parse(readPrivateFile(this.filePath, {
         fs: this.fs,
         maxBytes: MAX_NATIVE_KANBAN_STORE_BYTES,
-      }), openTime) : { container: this.#emptyContainer(), migrated: false };
-      this.container = parsed.container;
+      })) : this.#emptyContainer();
+      this.container = parsed;
       assertNoSensitive(this.container, this.isSensitiveValue);
       this.#assertExternalReferences(this.container);
       this.commitUncertain = false;
-      if (parsed.migrated) this.container = this.#write(this.container);
       this.#refreshWindow(openTime, Boolean(stat));
       this.writerLease = lease;
       this.cleanupPending = false;
@@ -1545,19 +1460,10 @@ class NativeKanbanStore {
     this.container = persist ? this.#write(candidate) : validateContainer(candidate);
   }
 
-  #parse(bytes, trustedTime) {
+  #parse(bytes) {
     try {
       const value = JSON.parse(bytes.toString("utf8"));
-      if (value?.version === LEGACY_NATIVE_KANBAN_STORE_VERSION) {
-        return { container: migrateV1Container(value, trustedTime), migrated: true };
-      }
-      if (value?.version === PREVIOUS_NATIVE_KANBAN_STORE_VERSION) {
-        return { container: migrateV3Container(value), migrated: true };
-      }
-      if (value?.version === INTEGRITY_NATIVE_KANBAN_STORE_VERSION) {
-        return { container: migrateV2Container(value), migrated: true };
-      }
-      return { container: validateContainer(value), migrated: false };
+      return validateContainer(value);
     } catch (error) {
       if (error?.code === "KANBAN_STORE_CORRUPT") throw error;
       if (String(error?.code || "").startsWith("UNSAFE_")) throw error;
@@ -1658,12 +1564,10 @@ module.exports = {
   CARD_STATUSES,
   DEFAULT_CAPACITIES,
   IDEMPOTENCY_WINDOW_MS,
-  LEGACY_NATIVE_KANBAN_STORE_VERSION,
   LEGAL_STATUS_TRANSITIONS,
   MAX_NATIVE_KANBAN_STORE_BYTES,
   MAX_OPERATION_FUTURE_SKEW_MS,
   NATIVE_KANBAN_STORE_VERSION,
-  PREVIOUS_NATIVE_KANBAN_STORE_VERSION,
   NativeKanbanStore,
   fingerprintOperation,
   validateContainer,

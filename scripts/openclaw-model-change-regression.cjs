@@ -2524,6 +2524,67 @@ test("create/update/delete/update-provider 使用独立阶段，不误走 rename
   }
 });
 
+test("create 补交凭证兼容旧 full journal 的 Session/Cron fingerprints", async () => {
+  for (const status of ["needs_secret", "partial"]) {
+    const harness = createModelChangeHarness();
+    const adapter = createOpenClawModelChange({ backend: harness.backend, runtimeApply: harness.runtimeApply });
+    const spec = {
+      kind: "create", providerMode: "new", providerKey: "beta", sourceModelId: null,
+      baseUrl: "https://endpoint.example.test/v1", model: { id: "created" },
+    };
+    const preview = await adapter.preview(spec);
+    assert.deepEqual(preview.blockers, []);
+    const { context, events } = createModelChangeContext(`legacy-create-${status}`);
+    context.journalEntry = {
+      mode: "full", status, secretStep: "pending",
+      fingerprints: {
+        ...preview.fingerprints,
+        sessions: "legacy-session-metadata",
+        cron: "legacy-cron-metadata",
+      },
+    };
+    const result = await adapter.apply(spec, context, { apiKey: "fake-test-key" });
+    assert.equal(result.status, "applied", status);
+    assert.equal(harness.state.patchCalls.length, 1, status);
+    assert.equal(harness.state.config.models.providers.beta.models[0].id, "created", status);
+    assert.equal(harness.state.config.models.providers.beta.apiKey, "fake-test-key", status);
+    assert.deepEqual(harness.state.referenceWrites, [], status);
+    assert.ok(events.some((event) => Array.isArray(event) && event[0] === "committed"), status);
+  }
+});
+
+test("create 旧 full journal 仍拒绝真实配置变化和 scanner 版本变化", async () => {
+  for (const drift of ["config", "scannerVersion"]) {
+    const harness = createModelChangeHarness();
+    const adapter = createOpenClawModelChange({ backend: harness.backend, runtimeApply: harness.runtimeApply });
+    const spec = {
+      kind: "create", providerMode: "new", providerKey: "beta", sourceModelId: null,
+      baseUrl: "https://endpoint.example.test/v1", model: { id: "created" },
+    };
+    const preview = await adapter.preview(spec);
+    const { context } = createModelChangeContext(`legacy-create-drift-${drift}`);
+    context.journalEntry = {
+      mode: "full", status: "needs_secret", secretStep: "pending",
+      fingerprints: {
+        ...preview.fingerprints,
+        sessions: "legacy-session-metadata",
+        cron: "legacy-cron-metadata",
+      },
+    };
+    if (drift === "config") {
+      harness.state.config.models.providers.alpha.models[0].name = "Concurrent edit";
+      harness.state.hash = "concurrently-changed-config";
+    } else {
+      context.journalEntry.fingerprints.scannerVersion += 1;
+    }
+    const result = await adapter.apply(spec, context, { apiKey: "fake-test-key" });
+    assert.equal(result.status, "blocked", drift);
+    assert.equal(result.code, "reference_fingerprint_changed", drift);
+    assert.equal(harness.state.patchCalls.length, 0, drift);
+    assert.equal(harness.state.runtimeAcquires, 0, drift);
+  }
+});
+
 test("delete-model/provider 只清理精确 stale settings key 并保留其它 alias/wildcard", async () => {
   const modelHarness = createModelChangeHarness({
     config: {

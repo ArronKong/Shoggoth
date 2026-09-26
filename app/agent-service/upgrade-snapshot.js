@@ -18,9 +18,6 @@ const UPGRADE_SNAPSHOT_VERSION = 2;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
-const LEGACY_COMPONENTS_V1 = Object.freeze([
-  "product", "definition", "memory", "transcript", "toolPolicy", "skill", "browser", "runtimeHome",
-]);
 const COMPONENTS = Object.freeze([
   "product", "definition", "memory", "transcript", "toolPolicy", "skill", "browser", "computer",
   "runtimeHome",
@@ -47,20 +44,9 @@ function componentFor(relativePath) {
   if (relativePath.startsWith("skills/") || /^agents\/[^/]+\/skills\//u.test(relativePath)) return "skill";
   if (relativePath.startsWith("browser/")) return "browser";
   if (relativePath.startsWith("computer/")) return "computer";
-  // Keep this legacy grouping stable: existing v1/v2 generation manifests are
-  // verified by rebuilding these component digests. New account-scoped files
-  // remain covered by the authority backup root digest even when they do not
-  // belong to this historical diagnostic bucket.
-  if (relativePath.startsWith("codex/") || relativePath.startsWith("antigravity/")
-    || relativePath.startsWith("pi/")
-    || relativePath.startsWith("claude-code/")
-    || relativePath.startsWith("deepseek-harness/")
-    || relativePath.startsWith("runtime-ledgers/antigravity/")
-    || relativePath.startsWith("runtime-ledgers/pi/")
-    || relativePath.startsWith("runtime-ledgers/claude-code/")
-    || relativePath.startsWith("runtime-ledgers/deepseek-harness/")) {
-    return "runtimeHome";
-  }
+  if (relativePath.startsWith("runtime-accounts/")
+    || relativePath.startsWith("runtime-integration/")
+    || relativePath.startsWith("runtime-ledgers/")) return "runtimeHome";
   return null;
 }
 function buildComponents(authorityManifest, componentNames = COMPONENTS) {
@@ -92,11 +78,11 @@ function manifestBody(manifest) {
   };
 }
 function validateManifest(value, expected, authorityManifest) {
-  const componentNames = value?.schemaVersion === 1 ? LEGACY_COMPONENTS_V1 : COMPONENTS;
+  const componentNames = COMPONENTS;
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype
     || Object.keys(value).join(",") !== "schemaVersion,generationId,backupId,createdAt,authorityRootDigest,components,checksum"
-    || ![1, UPGRADE_SNAPSHOT_VERSION].includes(value.schemaVersion)
+    || value.schemaVersion !== UPGRADE_SNAPSHOT_VERSION
     || value.generationId !== expected.generationId || value.backupId !== expected.backupId
     || !Number.isSafeInteger(value.createdAt) || value.createdAt < 0
     || value.authorityRootDigest !== authorityManifest.rootDigest
@@ -177,7 +163,6 @@ function createUpgradeSnapshot(options = {}) {
 
 module.exports = {
   COMPONENTS,
-  LEGACY_COMPONENTS_V1,
   UPGRADE_SNAPSHOT_VERSION,
   createUpgradeSnapshot,
   verifyUpgradeSnapshot,

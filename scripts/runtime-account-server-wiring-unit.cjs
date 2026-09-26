@@ -27,13 +27,21 @@ productStore.getRuntimeAccount = (runtimeAccountId) => (
   runtimeAccountId === sentinel.id ? sentinel
     : runtimeAccountId === unusedSentinel.id ? unusedSentinel : null
 );
-productStore.listAgentProfiles = () => [{
+const profiles = [{
   id: "0000-archived-profile",
   runtime: "codex",
   runtimeProfileId: "archived-runtime-profile",
   runtimeAccountId: sentinel.id,
   isDefault: false,
   enabled: false,
+}, {
+  id: "8888-default-custom-provider-profile",
+  runtime: "codex",
+  runtimeProfileId: "custom-provider-runtime-profile",
+  runtimeAccountId: sentinel.id,
+  isDefault: true,
+  enabled: true,
+  providerRef: "custom-responses-provider",
 }, {
   id: "ffff-enabled-profile",
   runtime: "codex",
@@ -42,6 +50,12 @@ productStore.listAgentProfiles = () => [{
   isDefault: false,
   enabled: true,
 }];
+productStore.listAgentProfiles = () => profiles;
+productStore.getAgentRuntimeBindings = (profileId) => ({ bindings: profiles
+  .filter((profile) => profile.id === profileId)
+  .map((profile) => ({ id: `${profile.id}-binding`, runtime: profile.runtime,
+    runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId,
+    enabled: true })) });
 
 const service = createAgentService({
   paths,
@@ -62,9 +76,10 @@ try {
     service.antigravityRuntimePool,
     service.piRuntimePool,
     service.claudeCodeRuntimePool,
+    service.openCodeRuntimePool,
     service.deepSeekHarnessRuntimePool,
   ];
-  assert.equal(pools.length, 6);
+  assert.equal(pools.length, 7);
   for (const pool of pools) {
     assert.strictEqual(pool.runtimeAccountLookup(sentinel.id), sentinel);
     assert.strictEqual(pool.options.parentEnv, parentEnv);
@@ -85,21 +100,25 @@ try {
       runtimeProfileId: "enabled-runtime-profile",
       runtimeAccountId: sentinel.id,
     },
-    "account auth must prefer an enabled sibling over a lexically earlier archived Profile",
+    "account auth must prefer an enabled sibling without a Profile provider override over "
+      + "the default custom-provider Profile and a lexically earlier archived Profile",
   );
   assert.throws(
     () => service.accountAuthManager.resolveRuntimeAccountBinding(unusedSentinel.id),
     (error) => error?.code === "AUTH_ACCOUNT_BINDING_INVALID",
     "an account without Profiles remains unavailable to account auth",
   );
-  assert.ok(service.runtimeAccountMigrationOrchestrator);
   assert.ok(service.runtimeSessionOwnershipStore);
-  assert.ok(service.runtimeBackupStore);
-  assert.ok(service.runtimeBackupCleanup);
+  assert.equal(Object.hasOwn(service, "runtimeAccountMigrationOrchestrator"), false,
+    "current-only authority must not expose legacy migration");
+  assert.equal(Object.hasOwn(service, "runtimeBackupStore"), false,
+    "current-only authority must not expose legacy backup migration");
+  assert.equal(Object.hasOwn(service, "runtimeBackupCleanup"), false,
+    "current-only authority must not expose legacy backup cleanup");
   assert.equal(Object.hasOwn(service, "nativeSkillProjector"), false,
     "legacy per-Profile Skill projection must not be exposed by production service wiring");
   for (const runtime of [
-    "codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness",
+    "codex", "grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness",
   ]) {
     assert.equal(fs.existsSync(path.join(paths.stateDir, runtime)), false,
       `constructing the service must not prepare the legacy ${runtime} Profile-Home root`);

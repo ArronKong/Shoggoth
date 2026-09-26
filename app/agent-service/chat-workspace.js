@@ -10,9 +10,8 @@ function isImplicitChatWorkspace(paths, profile, workspace) {
   if (profile.defaultCwd !== null || !paths.defaultWorkspaceDir || typeof workspace !== "string") return false;
   const root = path.resolve(paths.defaultWorkspaceDir, profile.id);
   const relative = path.relative(root, path.resolve(workspace));
-  // Empty is the legacy generated profile directory. Only an exact generated
-  // session directory is implicit; its subdirectories can be explicit projects.
-  return relative === "" || /^sessions\/[a-f0-9]{64}$/u.test(relative);
+  // Only an exact generated session directory is implicit.
+  return /^sessions\/[a-f0-9]{64}$/u.test(relative);
 }
 
 module.exports = { managedChatWorkspace, isImplicitChatWorkspace };

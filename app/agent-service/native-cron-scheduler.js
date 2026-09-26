@@ -200,18 +200,6 @@ function canonicalWorkspace(workspace) {
   }
 }
 
-function parseOccurrenceKey(value) {
-  if (typeof value !== "string") return null;
-  const separator = value.lastIndexOf(":");
-  if (separator <= 0) return null;
-  const jobId = value.slice(0, separator);
-  const rawScheduledAt = value.slice(separator + 1);
-  const scheduledAt = Number(rawScheduledAt);
-  return UUID_PATTERN.test(jobId) && validTimestamp(scheduledAt)
-    && String(scheduledAt) === rawScheduledAt
-    ? { jobId, scheduledAt } : null;
-}
-
 function describeCronRun(run) {
   const values = {};
   for (const field of [
@@ -248,10 +236,7 @@ function describeCronRun(run) {
     return Object.freeze({ kind: "schedule", createdAt: occurrence.scheduledAt });
   }
 
-  const legacy = parseOccurrenceKey(values.idempotencyKey);
-  if (!legacy || !TERMINAL_WORK_RUN_STATUSES.has(values.status)
-    || values.retryOf !== null || legacy.jobId !== values.sourceId) return null;
-  return Object.freeze({ kind: "schedule", createdAt: legacy.scheduledAt });
+  return null;
 }
 
 function occurrenceSemanticKey(jobId, scheduledAt) {
@@ -652,7 +637,7 @@ class NativeCronScheduler {
             this.#assertOccurrenceExecutionBinding(run, occurrence, frozenJob(job));
           } else {
             throw schedulerError(
-              "CRON_RUN_CORRUPT", "Legacy Cron occurrence 缺少冻结 execution contract",
+              "CRON_RUN_CORRUPT", "Cron occurrence 缺少冻结 execution contract",
             );
           }
         }
@@ -921,7 +906,7 @@ class NativeCronScheduler {
       }
       const occurrenceIntent = parseOccurrenceIntentKey(run.idempotencyKey);
       if (occurrenceIntent) occurrenceIntentByRunId.set(run.id, occurrenceIntent);
-      const occurrence = occurrenceIntent || (!intent && parseOccurrenceKey(run.idempotencyKey));
+      const occurrence = occurrenceIntent;
       if (occurrence) {
         occurrenceByRunId.set(run.id, occurrence);
         const semanticKey = occurrenceSemanticKey(run.sourceId, occurrence.scheduledAt);
@@ -987,8 +972,7 @@ class NativeCronScheduler {
 
   #assertOccurrenceBinding(run, frozen, scheduledAt) {
     const job = frozen.job;
-    const occurrence = parseOccurrenceIntentKey(run?.idempotencyKey)
-      || parseOccurrenceKey(run?.idempotencyKey);
+    const occurrence = parseOccurrenceIntentKey(run?.idempotencyKey);
     if (run?.source !== "cron" || run.sourceId !== job.id
       || occurrence?.scheduledAt !== scheduledAt
       || run.profileId !== job.profileId || run.workspace !== job.workspace
@@ -1003,10 +987,7 @@ class NativeCronScheduler {
 
   #assertOccurrenceBaseBinding(run, occurrence) {
     const jobMatches = occurrence?.version === 2
-      ? occurrence.baseFingerprint === occurrenceBaseFingerprint(
-        run?.sourceId, occurrence.scheduledAt,
-      )
-      : run?.sourceId === occurrence?.jobId;
+      && occurrence.baseFingerprint === occurrenceBaseFingerprint(run?.sourceId, occurrence.scheduledAt);
     if (!occurrence || run?.source !== "cron" || !UUID_PATTERN.test(run.sourceId)
       || !jobMatches || run.retryOf !== null) {
       throw schedulerError("CRON_RUN_CORRUPT", "Cron WorkRun occurrence base 绑定损坏");
@@ -1469,5 +1450,4 @@ module.exports = {
   describeCronRun,
   dueOccurrences,
   occurrenceKey,
-  parseOccurrenceKey,
 };

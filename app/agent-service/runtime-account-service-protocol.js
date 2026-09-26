@@ -10,23 +10,10 @@ const RUNTIME_ACCOUNT_SERVICE_METHODS = Object.freeze([
   "runtime.account.login.cancel",
   "runtime.account.logout",
   "runtime.account.storage.read",
-  "runtime.account.legacyHomes.list",
-  "runtime.account.legacyHomes.cleanup.prepare",
-  "runtime.account.legacyHomes.cleanup.commit",
-  "runtime.account.backups.list",
-  "runtime.account.backups.cleanup.prepare",
-  "runtime.account.backups.cleanup.commit",
 ]);
 const RUNTIME_ACCOUNT_SERVICE_METHOD_SET = new Set(RUNTIME_ACCOUNT_SERVICE_METHODS);
 const RUNTIME_SET = new Set(RUNTIME_ACCOUNT_RUNTIMES);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const ENTRY_ID_PATTERN = /^legacy-home-[a-f0-9]{64}-v1$/u;
-const BACKUP_ENTRY_ID_PATTERN = /^runtime-backup-[a-f0-9]{64}-v1$/u;
-const PLAN_ID_PATTERN = /^[a-f0-9]{64}$/u;
-const BACKUP_CATEGORY_SET = new Set([
-  "native-runtime-import", "runtime-schema-history", "runtime-schema-current",
-  "native-capabilities", "memory-migration", "permission-policy", "staging", "unknown",
-]);
 const AUTH_STATUSES = new Set([
   "starting", "waiting", "succeeded", "failed", "canceling", "canceled",
   "timed_out", "interrupted", "unknown",
@@ -39,26 +26,6 @@ const PUBLIC_MESSAGES = Object.freeze({
   RUNTIME_ACCOUNT_AUTH_UNSUPPORTED: "此运行环境不支持在 Shoggoth Service 内登录或退出",
   RUNTIME_ACCOUNT_HOME_INVALID: "运行环境目录不安全",
   RUNTIME_ACCOUNT_HOME_MISSING: "运行环境目录不存在",
-  RUNTIME_STORAGE_CANDIDATE_NOT_RECLAIMABLE: "旧运行环境已不存在或不可清理",
-  RUNTIME_STORAGE_CANDIDATE_IN_USE: "旧运行环境仍在使用中",
-  RUNTIME_STORAGE_CANDIDATE_CHANGED: "旧运行环境已发生变化，请重新检查",
-  RUNTIME_STORAGE_PLAN_NOT_FOUND: "清理计划不存在或已使用",
-  RUNTIME_STORAGE_PLAN_EXPIRED: "清理计划已过期，请重新确认",
-  RUNTIME_STORAGE_SCAN_INCOMPLETE: "目录统计未完成，暂不能安全清理",
-  RUNTIME_STORAGE_CLEANUP_NOT_READY: "服务或数据迁移尚未进入可安全清理状态",
-  RUNTIME_STORAGE_DELETE_FAILED: "旧运行环境已隔离，但删除未完成",
-  RUNTIME_STORAGE_CLEANUP_COMMITTED_AUDIT_FAILED: "旧运行环境已删除，但审计写入失败",
-  RUNTIME_STORAGE_CLEANUP_COMMITTED_REFRESH_FAILED: "旧运行环境已删除，但清单刷新失败",
-  RUNTIME_BACKUP_CANDIDATE_NOT_RECLAIMABLE: "历史备份已不存在、被保留或不可清理",
-  RUNTIME_BACKUP_CANDIDATE_IN_USE: "历史备份仍在使用中",
-  RUNTIME_BACKUP_CANDIDATE_CHANGED: "历史备份已发生变化，请重新检查",
-  RUNTIME_BACKUP_CLEANUP_NOT_READY: "服务或数据迁移尚未进入可安全清理状态",
-  RUNTIME_BACKUP_PLAN_NOT_FOUND: "备份清理计划不存在或已使用",
-  RUNTIME_BACKUP_PLAN_EXPIRED: "备份清理计划已过期，请重新确认",
-  RUNTIME_BACKUP_SCAN_INCOMPLETE: "备份目录统计未完成，暂不能安全清理",
-  RUNTIME_BACKUP_DELETE_FAILED: "历史备份已隔离，但删除未完成",
-  RUNTIME_BACKUP_CLEANUP_COMMITTED_AUDIT_FAILED: "历史备份已删除，但审计写入失败",
-  RUNTIME_BACKUP_CLEANUP_COMMITTED_REFRESH_FAILED: "历史备份已删除，但清单刷新失败",
   AUTH_LOGIN_IN_PROGRESS: "登录已在进行中",
   AUTH_LOGIN_NOT_FOUND: "登录请求不存在",
   AUTH_LOGIN_NOT_ACTIVE: "登录请求已结束",
@@ -131,8 +98,6 @@ function validatePageParams(params, includeAccount) {
 function validateRuntimeAccountServiceParams(method, params) {
   if (!RUNTIME_ACCOUNT_SERVICE_METHOD_SET.has(method)) throw protocolError("INVALID_PARAMS");
   if (method === "runtime.account.list") return validatePageParams(params, false);
-  if (method === "runtime.account.legacyHomes.list") return validatePageParams(params, true);
-  if (method === "runtime.account.backups.list") return validatePageParams(params, false);
   if ([
     "runtime.account.read", "runtime.account.auth.read", "runtime.account.logout",
     "runtime.account.storage.read",
@@ -157,12 +122,7 @@ function validateRuntimeAccountServiceParams(method, params) {
     }
     return cloneObject(params);
   }
-  const field = method.endsWith(".prepare") ? "entryId" : "planId";
-  const pattern = field === "planId" ? PLAN_ID_PATTERN
-    : method.includes(".backups.") ? BACKUP_ENTRY_ID_PATTERN : ENTRY_ID_PATTERN;
-  if (!exactObject(params, [field]) || typeof params[field] !== "string"
-    || !pattern.test(params[field])) throw protocolError("INVALID_PARAMS");
-  return cloneObject(params);
+  throw protocolError("INVALID_PARAMS");
 }
 
 function validateAdmission(value) {
@@ -180,7 +140,7 @@ function validateAccount(value) {
   if (!exactObject(value, [
     "id", "runtime", "kind", "installationKind", "homeKind", "isDefault",
     "sharedAgentCount", "admission",
-  ]) || !validId(value.id) || !RUNTIME_SET.has(value.runtime)
+  ]) || !validId(value.id) || !require("./runtime-adapter").validRuntime(value.runtime)
     || !["native-user", "shoggoth-managed"].includes(value.kind)
     || !["system", "bundled"].includes(value.installationKind)
     || !["system-default", "managed-shared"].includes(value.homeKind)
@@ -194,7 +154,7 @@ function validateStorage(value) {
     "runtimeAccountId", "scope", "available", "bytes", "files", "dirs",
     "symlinks", "incomplete", "limitReason",
   ]) || !validId(value.runtimeAccountId)
-    || !["native-system", "managed-account", "managed-legacy"].includes(value.scope)
+    || !["native-system", "managed-account"].includes(value.scope)
     || typeof value.available !== "boolean" || !validInteger(value.bytes)
     || !validInteger(value.files) || !validInteger(value.dirs)
     || !validInteger(value.symlinks) || typeof value.incomplete !== "boolean"
@@ -203,42 +163,6 @@ function validateStorage(value) {
     || value.incomplete !== (value.limitReason !== null)
     || (!value.available && (value.bytes !== 0 || value.files !== 0 || value.dirs !== 0
       || value.symlinks !== 0 || value.incomplete))) {
-    throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
-  }
-  return cloneObject(value);
-}
-
-function validateLegacyHome(value) {
-  if (!exactObject(value, [
-    "id", "runtime", "runtimeAccountId", "accountKind", "role",
-    "affectedAgentCount", "bytes", "files", "dirs", "symlinks", "incomplete",
-    "lastModifiedAt",
-  ]) || typeof value.id !== "string" || !ENTRY_ID_PATTERN.test(value.id)
-    || !RUNTIME_SET.has(value.runtime) || !validId(value.runtimeAccountId)
-    || !["native-user", "shoggoth-managed"].includes(value.accountKind)
-    || !["canonical", "reclaimable"].includes(value.role)
-    || !validInteger(value.affectedAgentCount) || value.affectedAgentCount < 1
-    || value.affectedAgentCount > 10_000
-    || !validInteger(value.bytes) || !validInteger(value.files) || !validInteger(value.dirs)
-    || !validInteger(value.symlinks) || typeof value.incomplete !== "boolean"
-    || !validInteger(value.lastModifiedAt)) {
-    throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
-  }
-  return cloneObject(value);
-}
-
-function validateBackup(value) {
-  if (!exactObject(value, [
-    "id", "category", "role", "bytes", "files", "dirs", "symlinks", "incomplete",
-    "lastModifiedAt",
-  ]) || typeof value.id !== "string" || !BACKUP_ENTRY_ID_PATTERN.test(value.id)
-    || !BACKUP_CATEGORY_SET.has(value.category)
-    || !["retained", "reclaimable"].includes(value.role)
-    || !validInteger(value.bytes) || !validInteger(value.files) || !validInteger(value.dirs)
-    || !validInteger(value.symlinks) || typeof value.incomplete !== "boolean"
-    || !validInteger(value.lastModifiedAt)
-    || (["runtime-schema-current", "unknown"].includes(value.category)
-      && value.role !== "retained")) {
     throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
   }
   return cloneObject(value);
@@ -337,64 +261,6 @@ function validateLoginStart(result) {
   return cloneObject(result);
 }
 
-function validateCleanupPlan(result) {
-  if (!exactObject(result, [
-    "planId", "entryId", "runtime", "runtimeAccountId", "affectedAgentCount",
-    "bytes", "files", "dirs", "symlinks", "expiresAt",
-  ]) || typeof result.planId !== "string" || !PLAN_ID_PATTERN.test(result.planId)
-    || typeof result.entryId !== "string" || !ENTRY_ID_PATTERN.test(result.entryId)
-    || !RUNTIME_SET.has(result.runtime) || !validId(result.runtimeAccountId)
-    || !validInteger(result.affectedAgentCount) || result.affectedAgentCount < 1
-    || !validInteger(result.bytes)
-    || !validInteger(result.files) || !validInteger(result.dirs)
-    || !validInteger(result.symlinks) || !validInteger(result.expiresAt)) {
-    throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
-  }
-  return cloneObject(result);
-}
-
-function validateCleanupResult(result) {
-  if (!exactObject(result, [
-    "entryId", "runtime", "runtimeAccountId", "bytesReleased", "filesRemoved",
-    "dirsRemoved", "symlinksRemoved", "deletedAt",
-  ]) || typeof result.entryId !== "string" || !ENTRY_ID_PATTERN.test(result.entryId)
-    || !RUNTIME_SET.has(result.runtime) || !validId(result.runtimeAccountId)
-    || !validInteger(result.bytesReleased) || !validInteger(result.filesRemoved)
-    || !validInteger(result.dirsRemoved) || !validInteger(result.symlinksRemoved)
-    || !validInteger(result.deletedAt)) throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
-  return cloneObject(result);
-}
-
-function validateBackupCleanupPlan(result) {
-  if (!exactObject(result, [
-    "planId", "entryId", "category", "bytes", "files", "dirs", "symlinks", "expiresAt",
-  ]) || typeof result.planId !== "string" || !PLAN_ID_PATTERN.test(result.planId)
-    || typeof result.entryId !== "string" || !BACKUP_ENTRY_ID_PATTERN.test(result.entryId)
-    || !BACKUP_CATEGORY_SET.has(result.category)
-    || ["runtime-schema-current", "unknown"].includes(result.category)
-    || !validInteger(result.bytes) || !validInteger(result.files)
-    || !validInteger(result.dirs) || !validInteger(result.symlinks)
-    || !validInteger(result.expiresAt)) {
-    throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
-  }
-  return cloneObject(result);
-}
-
-function validateBackupCleanupResult(result) {
-  if (!exactObject(result, [
-    "entryId", "category", "bytesReleased", "filesRemoved", "dirsRemoved",
-    "symlinksRemoved", "deletedAt",
-  ]) || typeof result.entryId !== "string" || !BACKUP_ENTRY_ID_PATTERN.test(result.entryId)
-    || !BACKUP_CATEGORY_SET.has(result.category)
-    || ["runtime-schema-current", "unknown"].includes(result.category)
-    || !validInteger(result.bytesReleased) || !validInteger(result.filesRemoved)
-    || !validInteger(result.dirsRemoved) || !validInteger(result.symlinksRemoved)
-    || !validInteger(result.deletedAt)) {
-    throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
-  }
-  return cloneObject(result);
-}
-
 function validateRuntimeAccountServiceResult(method, result) {
   if (method === "runtime.account.list") return validatePage(result, "accounts", validateAccount);
   if (method === "runtime.account.read") {
@@ -417,24 +283,6 @@ function validateRuntimeAccountServiceResult(method, result) {
     return { loggedOut: true };
   }
   if (method === "runtime.account.storage.read") return validateStorage(result);
-  if (method === "runtime.account.legacyHomes.list") {
-    return validatePage(result, "homes", validateLegacyHome);
-  }
-  if (method === "runtime.account.backups.list") {
-    return validatePage(result, "backups", validateBackup);
-  }
-  if (method === "runtime.account.legacyHomes.cleanup.prepare") {
-    return validateCleanupPlan(result);
-  }
-  if (method === "runtime.account.legacyHomes.cleanup.commit") {
-    return validateCleanupResult(result);
-  }
-  if (method === "runtime.account.backups.cleanup.prepare") {
-    return validateBackupCleanupPlan(result);
-  }
-  if (method === "runtime.account.backups.cleanup.commit") {
-    return validateBackupCleanupResult(result);
-  }
   throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
 }
 

@@ -260,7 +260,7 @@ function assertDescribeCronRunContract() {
   )), { kind: "retry", createdAt: 140_000 });
   assert.deepEqual(describeCronRun(run(`${jobId}:150000`, {
     status: "completed",
-  })), { kind: "schedule", createdAt: 150_000 });
+  })), null);
   const badHash = "a".repeat(64);
   const base = {
     source: "cron", sourceId: jobId, profileId: DEFAULT_AGENT_PROFILE_ID,
@@ -669,8 +669,8 @@ test("retry 创建新 WorkRun 并精确保留 retryOf，旧 Run 结果不被覆�
   assert.notEqual(retry.id, prior.id);
   assert.equal(retry.retryOf, prior.id);
   assert.match(retry.idempotencyKey, /^shoggoth:cron:v2:retry:/u);
-  assert.equal(retry.codexThreadId, null);
-  assert.equal(retry.codexTurnId, null);
+  assert.equal(retry.runtimeSessionRef, null);
+  assert.equal(retry.runtimeTurnRef, null);
   const preservedPrior = ctx.dispatcher.getRun(prior.id);
   assert.equal(preservedPrior.runtimeSessionRef.sessionId, "thread-prior");
   assert.equal(preservedPrior.runtimeTurnRef.turnId, "turn-prior");
@@ -1189,7 +1189,7 @@ test("retry recovery 用 per-job order/id index 保持线性扫描", async () =>
       id: priorId,
       source: "cron",
       sourceId: jobId,
-      idempotencyKey: `${jobId}:60000`,
+      idempotencyKey: testOccurrenceIntentKey(job, 60000),
       profileId: DEFAULT_AGENT_PROFILE_ID,
       workspace: null,
       retryOf: null,
@@ -2377,7 +2377,7 @@ test("terminal occurrence 已完成但 Job 未推进时只对账 nextRunAt，绝
   const job = createEveryJob(ctx, { operationId: "create-terminal-cut" });
   const run = ctx.dispatcher.enqueue({
     id: uuidFactory(1_050)(), source: "cron", sourceId: job.id,
-    idempotencyKey: `${job.id}:${tickAt(1)}`, profileId: job.profileId,
+    idempotencyKey: testOccurrenceIntentKey(job, tickAt(1)), profileId: job.profileId,
     workspace: job.workspace, retryOf: null,
   });
   ctx.dispatcher.admit(run.id, { onBusy: "queue" });
@@ -2399,7 +2399,7 @@ test("已删除 Job 的 queued Cron Run 收敛为 canceled 而不 poison 全局"
   const job = createEveryJob(ctx, { operationId: "create-deleted-queued" });
   const run = ctx.dispatcher.enqueue({
     id: uuidFactory(1_060)(), source: "cron", sourceId: job.id,
-    idempotencyKey: `${job.id}:${tickAt(1)}`, profileId: job.profileId,
+    idempotencyKey: testOccurrenceIntentKey(job, tickAt(1)), profileId: job.profileId,
     workspace: job.workspace, retryOf: null,
   });
   ctx.cronStore.deleteJob({
@@ -2444,7 +2444,7 @@ test("已删除 Job 的 active Cron Run 收敛为 interrupted 而不调用 execu
   const job = createEveryJob(ctx, { operationId: "create-deleted-active" });
   const run = ctx.dispatcher.enqueue({
     id: uuidFactory(1_070)(), source: "cron", sourceId: job.id,
-    idempotencyKey: `${job.id}:${tickAt(1)}`, profileId: job.profileId,
+    idempotencyKey: testOccurrenceIntentKey(job, tickAt(1)), profileId: job.profileId,
     workspace: job.workspace, retryOf: null,
   });
   ctx.dispatcher.admit(run.id, { onBusy: "queue" });

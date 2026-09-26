@@ -812,7 +812,7 @@ class ModelChangeCoordinator {
         // 重试则以持久状态为真值，因为前一轮写入本来就可能已经改变存储指纹。
         const resumesJournal = Boolean(lockedExisting && isNonTerminalStatus(lockedExisting.existing.status));
         if (!resumesJournal && stableJson(currentPreview.fingerprints) !== stableJson(payload.fingerprints)) {
-          throw new ModelChangeError("preview_stale", "配置已变化，请重新预检", { status: 409 });
+          throw new ModelChangeError("preview_stale", "配置已变化，请重新预检", { status: 409, stage: "preflight" });
         }
         // 任何入口（新 PUT、兼容 POST、config-only journal 的续提）在锁内统一决定
         // 是否降级：blocker 全部落在 backend 自报的 bypass 集合内且 kind 允许时走

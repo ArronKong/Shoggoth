@@ -1,5 +1,4 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { agentAvatarStyle } from "../lib/avatar-background";
 import styles from "./AgentAvatar.module.css";
 
 type AgentAvatarProps = {
@@ -19,7 +18,7 @@ export default function AgentAvatar(props: AgentAvatarProps) {
   return <AvatarImage key={src} {...props} src={src} />;
 }
 
-function AvatarImage({ agentId, name, fallback, className, loading, src }: AgentAvatarProps & { src: string }) {
+function AvatarImage({ className, loading, src }: AgentAvatarProps & { src: string }) {
   const [state, setState] = useState<"loading" | "loaded" | "fallback">(src ? "loading" : "fallback");
   const imageRef = useRef<HTMLImageElement>(null);
   useLayoutEffect(() => {
@@ -27,14 +26,12 @@ function AvatarImage({ agentId, name, fallback, className, loading, src }: Agent
     const image = imageRef.current;
     if (image?.complete) setState(image.naturalWidth > 0 ? "loaded" : "fallback");
   }, []);
-  const initial = fallback?.trim() || Array.from((name || agentId || "?").trim())[0]?.toUpperCase() || "?";
   const loaded = state === "loaded";
   return (
     <span
       className={`${styles.avatar}${className ? ` ${className}` : ""}`}
       data-avatar-state={state}
-      data-initial={loaded ? undefined : initial}
-      style={{ ...agentAvatarStyle(agentId), background: loaded ? "transparent" : undefined }}
+      style={{ background: loaded ? "transparent" : undefined }}
       aria-hidden="true"
     >
       {src && state !== "fallback" && (

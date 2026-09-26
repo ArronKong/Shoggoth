@@ -49,17 +49,23 @@ function runFakeMcp() {
 
 if (process.argv[2] === "--fake-mcp") {
   runFakeMcp();
+} else if (process.argv[2] === "--fail-mcp") {
+  fs.writeFileSync(process.argv[3], "started\n", { mode: 0o600 });
+  process.stderr.write("fixture MCP credentials unavailable\n");
+  process.exitCode = 1;
 } else {
-  await runSmoke();
+  if (process.argv[2] !== "--control-only") await runSmoke();
+  await runSmoke({ controlOnly: true });
+  await runSmoke({ executionMcpUnavailable: true });
 }
 
-async function runSmoke() {
+async function runSmoke({ controlOnly = false, executionMcpUnavailable = false } = {}) {
   let binaryPath;
   try {
     binaryPath = resolveDeepSeekHarnessBinary({ parentEnv: process.env });
   } catch (error) {
     if (process.env.REQUIRE_DSH === "1") throw error;
-    console.log("SKIP DeepSeek Harness official smoke: official dsh is not installed");
+    console.log("SKIP DeepSeek official smoke: official dsh is not installed");
     return;
   }
   const launch = resolveDeepSeekHarnessLaunch(binaryPath, { parentEnv: process.env });
@@ -73,11 +79,14 @@ async function runSmoke() {
   });
   fs.writeFileSync(path.join(home, ".credentials.yaml"),
     "version: 1\nrefs:\n  DEEPSEEK_API_KEY: smoke-only\n", { mode: 0o600 });
+  const mcpStartedPath = path.join(trustedRoot, "failed-mcp-started");
   const mcpConfig = {
     transport: "stdio",
     serverName: "shoggoth",
     command: process.execPath,
-    args: [SCRIPT_PATH, "--fake-mcp"],
+    args: controlOnly || executionMcpUnavailable
+      ? [SCRIPT_PATH, "--fail-mcp", mcpStartedPath]
+      : [SCRIPT_PATH, "--fake-mcp"],
     env: {},
     cwd: workspace,
     toolCallTimeoutMs: 5_000,
@@ -93,6 +102,8 @@ async function runSmoke() {
       DSH_PERMISSION_MODE: DEFAULT_DEEPSEEK_HARNESS_PERMISSION_POLICY.sandbox,
       SHOGGOTH_DSH_APPROVAL_POLICY:
         DEFAULT_DEEPSEEK_HARNESS_PERMISSION_POLICY.approvalPolicy === "never" ? "never" : "ask",
+      SHOGGOTH_DSH_CONTROL_INSTANCE: controlOnly ? "1" : "0",
+      SHOGGOTH_DSH_ENTRYPOINT: launch.argsPrefix[0] || "",
       SHOGGOTH_DSH_MCP_CONFIG: JSON.stringify(mcpConfig),
       DSH_TELEMETRY_DISABLED: "1",
       DO_NOT_TRACK: "1",
@@ -160,6 +171,17 @@ async function runSmoke() {
     child.kill("SIGKILL");
   }, 30_000);
   try {
+    if (executionMcpUnavailable) {
+      await ready.catch(() => {});
+      const result = await closed;
+      assert.equal(fs.existsSync(mcpStartedPath), true, "execution must start its MCP helper");
+      assert.equal(result.signal, null, "execution must fail naturally without timeout or a kill signal");
+      assert.equal(Number.isInteger(result.code) && result.code > 0, true,
+        "execution must fail when its required MCP helper exits");
+      assert.match(stderr, /fixture MCP credentials unavailable/u);
+      console.log("PASS official dsh execution: unavailable required MCP still fails startup");
+      return;
+    }
     await ready;
     const catalog = await request("models/list");
     assert.equal(catalog.models.some((model) => (
@@ -172,6 +194,15 @@ async function runSmoke() {
     assert.equal(commands.commands.some((command) => command.name === "goal"), true);
     assert.equal(commands.commands.some((command) => command.name === "compact"), true);
     assert.equal(events.length, 0, "draft command discovery cannot start a turn");
+    if (controlOnly) {
+      await request("shutdown");
+      child.stdin.end();
+      const result = await closed;
+      assert.equal(result.code, 0, stderr);
+      assert.equal(fs.existsSync(mcpStartedPath), false, "control must not start its MCP helper");
+      console.log("PASS official dsh control discovery: models/auth/commands survive unavailable MCP without starting a session");
+      return;
+    }
     const remoteSessionId = crypto.randomUUID();
     await request("session/start", {
       remoteSessionId,

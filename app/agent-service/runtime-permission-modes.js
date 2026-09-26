@@ -33,6 +33,9 @@ const MODE_CATALOGS = Object.freeze({
     Object.freeze({ id: "plan", label: "Plan", description: "Plan and inspect without editing files.", risk: "safe" }),
     Object.freeze({ id: "bypassPermissions", label: "Bypass", description: "Bypass all permission checks.", risk: "danger", requiresConfirmation: true }),
   ]),
+  opencode: Object.freeze([
+    Object.freeze({ id: "ask", label: "Ask", description: "Ask before OpenCode tool actions.", risk: "standard" }),
+  ]),
   "deepseek-harness": Object.freeze([
     Object.freeze({ id: "workspace-write", label: "Workspace", description: "Allow workspace changes and ask before broader access.", risk: "standard" }),
     Object.freeze({ id: "danger-full-access", label: "Full access", description: "Run without approval or sandbox restrictions.", risk: "danger", requiresConfirmation: true }),
@@ -60,6 +63,7 @@ function defaultRuntimePermissionMode(runtime, permissionPolicy = {}) {
     if (sandbox === "danger-full-access" && approval === "never") return "bypassPermissions";
     return approval === "never" ? "acceptEdits" : "default";
   }
+  if (runtime === "opencode") return "ask";
   if (runtime === "deepseek-harness") {
     return sandbox === "danger-full-access" ? "danger-full-access" : "workspace-write";
   }
@@ -131,6 +135,10 @@ function resolveRuntimePermissionMode(runtime, requestedMode, profilePermissionP
     return mode === "danger-full-access"
       ? Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("never", "danger-full-access") })
       : Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("on-request", "workspace-write") });
+  }
+  if (runtime === "opencode") {
+    return Object.freeze({ mode: "ask", nativeMode: "ask",
+      permissionPolicy: policy("on-request", "danger-full-access") });
   }
   if (mode === "read-only") return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("on-request", "read-only") });
   if (mode === "full") return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("never", "danger-full-access") });

@@ -14,7 +14,6 @@ const AGENT_HARNESS_METHODS = Object.freeze([
   "harness.definition.import.commit",
   "harness.memory.list",
   "harness.memory.create",
-  "harness.memory.confirm",
   "harness.memory.update",
   "harness.memory.delete",
   "harness.transcript.sessions",
@@ -27,6 +26,7 @@ const AGENT_HARNESS_METHODS = Object.freeze([
   "harness.skills.install",
   "harness.skills.uninstall",
   "harness.skills.enable",
+  "harness.skills.global.set",
   "harness.skills.usage",
   "harness.computer.status",
 ]);
@@ -185,9 +185,10 @@ function validateAgentHarnessParams(method, params) {
     valid = exact(params, ["profileId", "skillId", "source", "version", "expectedRevision"])
       && id(params.skillId) && params.source === "user" && text(params.version, 128, false)
       && integer(params.expectedRevision, 1);
-  } else if (method === "harness.skills.enable") {
+  } else if (method === "harness.skills.enable" || method === "harness.skills.global.set") {
     valid = exact(params, ["profileId", "skillId", "source", "version", "enabled", "expectedRevision"])
-      && id(params.skillId) && ["builtin", "user"].includes(params.source)
+      && id(params.skillId) && (method === "harness.skills.global.set"
+        ? params.source === "user" : params.source === "builtin")
       && text(params.version, 128, false) && typeof params.enabled === "boolean"
       && integer(params.expectedRevision, 1);
   } else if (method === "harness.transcript.sessions") {
@@ -220,7 +221,7 @@ function validateAgentHarnessParams(method, params) {
     valid = exact(params, ["profileId", "content", "scope", "expectedRevision"])
       && text(params.content, 8 * 1024, false) && params.content.trim().length > 0
       && ["user", "agent"].includes(params.scope) && integer(params.expectedRevision, 0);
-  } else if (method === "harness.memory.confirm" || method === "harness.memory.delete") {
+  } else if (method === "harness.memory.delete") {
     valid = exact(params, ["profileId", "id", "expectedRevision"])
       && id(params.id) && integer(params.expectedRevision, 0);
   } else if (method === "harness.memory.update") {
@@ -272,7 +273,7 @@ function validateAgentHarnessResult(method, result) {
         && typeof change.changed === "boolean" && hash(change.beforeHash) && hash(change.afterHash));
   } else if (method === "harness.memory.list") {
     valid = validPage(result, validMemoryItem, true);
-  } else if (["harness.memory.create", "harness.memory.confirm", "harness.memory.update", "harness.memory.delete"].includes(method)) {
+  } else if (["harness.memory.create", "harness.memory.update", "harness.memory.delete"].includes(method)) {
     valid = integer(result.revision) && (method === "harness.memory.create"
       ? validMemoryItem(result.item) && result.item.status === "active"
       : result.item === null || validMemoryItem(result.item));
@@ -298,6 +299,8 @@ function validateAgentHarnessResult(method, result) {
     valid = integer(result.registryRevision, 1) && validSkill(result.skill);
   } else if (method === "harness.skills.enable") {
     valid = integer(result.profileRevision, 1) && validSkill(result.skill);
+  } else if (method === "harness.skills.global.set") {
+    valid = integer(result.registryRevision, 1) && validSkill(result.skill);
   } else if (method === "harness.skills.usage") {
     valid = result.supported === true && own(result.skills)
       && Object.entries(result.skills).every(([name, agents]) => (

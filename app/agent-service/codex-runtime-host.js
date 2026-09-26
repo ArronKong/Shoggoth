@@ -263,6 +263,7 @@ class CodexRuntimeHost {
         runtimeAccountId: this.runtimeAccountId,
         codexHome,
         configurationMode: this.runtimeEnvironment.configurationMode,
+        executionContract: this.options.executionContract,
       })
       : null;
     this._assertStartupCurrent(generation);
@@ -303,6 +304,8 @@ class CodexRuntimeHost {
       throw runtimeError("CODEX_RUNTIME_PREPARE_INVALID", "Codex app-server launch is invalid");
     }
     launchArgs.splice(commandIndex, 0, ...(prepared?.configArgs || []));
+    prepared?.assertCurrent?.();
+    this.assertExecutionProviderCurrent = prepared?.assertCurrent || (() => {});
     const child = this.spawnProcess(this.runtimeEnvironment.binaryPath, launchArgs, {
       cwd: runtimeCwd,
       detached: process.platform !== "win32",

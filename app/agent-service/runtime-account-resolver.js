@@ -11,7 +11,6 @@ const {
 } = require("./runtime-account");
 const {
   CODEX_APP_SERVER_ARGS,
-  prepareCodexHome,
   prepareCodexRuntimeAccountHome,
   resolveCodexRuntimeLayout,
   resolveCodexSystemBinary,
@@ -23,13 +22,10 @@ const {
 } = require("./antigravity-runtime-paths");
 const { resolvePiBinary } = require("./pi-runtime-paths");
 const { resolveClaudeCodeBinary } = require("./claude-code-runtime-paths");
+const { resolveOpenCodeBinary } = require("./opencode-runtime-paths");
 const { resolveDeepSeekHarnessBinary } = require("./deepseek-harness-runtime-paths");
 const { serviceError } = require("./security");
 
-// Keep this exact value aligned with ProductStore.DEFAULT_RUNTIME_PROFILE_ID.
-// Importing ProductStore here would introduce a resolver/store dependency cycle.
-const LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID =
-  "shoggoth-f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4";
 const DEFAULT_ACCOUNT_BY_ID = new Map(
   DEFAULT_RUNTIME_ACCOUNTS.map((account) => [account.id, account]),
 );
@@ -39,6 +35,7 @@ const NATIVE_HOME = Object.freeze({
   antigravity: Object.freeze({ env: null, segments: Object.freeze([".gemini"]) }),
   pi: Object.freeze({ env: "PI_CODING_AGENT_DIR", segments: Object.freeze([".pi", "agent"]) }),
   "claude-code": Object.freeze({ env: "CLAUDE_CONFIG_DIR", segments: Object.freeze([".claude"]) }),
+  opencode: Object.freeze({ env: "XDG_DATA_HOME", segments: Object.freeze([".local", "share"]) }),
   "deepseek-harness": Object.freeze({ env: "DSH_HOME", segments: Object.freeze([".dsh"]) }),
 });
 
@@ -70,7 +67,6 @@ function assertRuntimeHomesSeparated(left, right, label) {
 
 function internalCodexHomePaths(paths) {
   return Object.freeze([
-    path.join(paths.stateDir, "codex", LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID),
     path.join(
       paths.runtimeAccountsDir || path.join(paths.stateDir, "runtime-accounts"),
       "codex",
@@ -169,6 +165,18 @@ function resolveNativeHome(fileSystem, parentEnv, userHome, runtime) {
   );
 }
 
+function resolveOpenCodeConfigHome(fileSystem, parentEnv, userHome) {
+  const explicit = parentEnv.XDG_CONFIG_HOME;
+  if (explicit !== undefined && (typeof explicit !== "string" || explicit.length === 0
+    || explicit.includes("\0") || !path.isAbsolute(explicit))) {
+    throw resolverError("RUNTIME_ACCOUNT_HOME_INVALID", "XDG_CONFIG_HOME must be an absolute path");
+  }
+  const requested = path.resolve(explicit || path.join(userHome, ".config"));
+  return ownedCanonicalDirectory(fileSystem, requested, "RUNTIME_ACCOUNT_HOME_INVALID",
+    "OpenCode config Home") || canonicalMissingPath(fileSystem, requested,
+    "RUNTIME_ACCOUNT_HOME_INVALID", "OpenCode config Home");
+}
+
 function frozenEnvironment(value) {
   return Object.freeze({
     runtime: value.runtime,
@@ -179,6 +187,7 @@ function frozenEnvironment(value) {
     strategy: value.strategy,
     home: value.home,
     nativeHome: value.nativeHome,
+    configSourceHome: value.configSourceHome || null,
     integrationRoot: value.integrationRoot,
     binaryPath: value.binaryPath,
     launchArgs: Object.freeze([...(value.launchArgs || [])]),
@@ -195,6 +204,7 @@ function validateResolvedEnvironment(environment, bindingValue) {
     antigravity: "HOME",
     pi: "PI_CODING_AGENT_DIR",
     "claude-code": "CLAUDE_CONFIG_DIR",
+    opencode: "XDG_DATA_HOME",
     "deepseek-harness": "DSH_HOME",
   }[binding.runtime];
   const configurationMode = binding.runtime === "codex" ? "overlay"
@@ -213,6 +223,9 @@ function validateResolvedEnvironment(environment, bindingValue) {
     || !path.isAbsolute(environment.spawnEnv.HOME)
     || typeof environment.spawnEnv[homeEnvKey] !== "string"
     || !path.isAbsolute(environment.spawnEnv[homeEnvKey])
+    || (binding.runtime === "opencode"
+      && (typeof environment.configSourceHome !== "string"
+        || !path.isAbsolute(environment.configSourceHome)))
     || environment.configurationMode !== configurationMode) {
     throw resolverError(
       "RUNTIME_ACCOUNT_ENVIRONMENT_INVALID",
@@ -276,47 +289,9 @@ class RuntimeAccountResolver {
         return null;
       }
     })();
-    if (account.id === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID) {
-      const [legacyHome, accountHome] = internalCodexHomePaths(this.paths);
-      if (nativeCodexHome !== null) {
-        assertRuntimeHomesSeparated(nativeCodexHome, legacyHome, "Native and bundled Codex Homes");
-        assertRuntimeHomesSeparated(nativeCodexHome, accountHome, "Native and bundled Codex Homes");
-      }
-      const legacyExists = ownedCanonicalDirectory(
-        this.fs,
-        legacyHome,
-        "CODEX_ACCOUNT_HOME_CONFLICT",
-        "Legacy internal Codex Home",
-      ) !== null;
-      const accountExists = ownedCanonicalDirectory(
-        this.fs,
-        accountHome,
-        "CODEX_ACCOUNT_HOME_CONFLICT",
-        "Internal Codex account Home",
-      ) !== null;
-      if (legacyExists && accountExists) {
-        throw resolverError(
-          "CODEX_ACCOUNT_HOME_CONFLICT",
-          "Both legacy and account-scoped internal Codex Homes exist",
-        );
-      }
-      home = legacyExists
-        ? prepareCodexHome(this.paths, LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID)
-        : prepareCodexRuntimeAccountHome(this.paths, account.id);
-    } else {
-      // A RuntimeAccount may be referenced by many Profiles. Its writable Home
-      // therefore cannot depend on whichever Profile happened to resolve first.
-      const accountHome = path.join(
-        this.paths.runtimeAccountsDir || path.join(this.paths.stateDir, "runtime-accounts"),
-        "codex",
-        account.id,
-        "home",
-      );
-      if (nativeCodexHome !== null) {
-        assertRuntimeHomesSeparated(nativeCodexHome, accountHome, "Native and managed Codex Homes");
-      }
-      home = prepareCodexRuntimeAccountHome(this.paths, account.id);
-    }
+    const accountHome = path.join(this.paths.runtimeAccountsDir, "codex", account.id, "home");
+    if (nativeCodexHome !== null) assertRuntimeHomesSeparated(nativeCodexHome, accountHome, "Native and managed Codex Homes");
+    home = prepareCodexRuntimeAccountHome(this.paths, account.id);
     const layout = resolveCodexRuntimeLayout({
       repoRoot: options.repoRoot ?? this.repoRoot,
       packaged: options.packaged ?? this.packaged,
@@ -353,6 +328,7 @@ class RuntimeAccountResolver {
     let binaryPath;
     let home = nativeHome;
     let integrationRoot = null;
+    let configSourceHome = null;
     let strategy = "native";
     let spawnEnv;
     if (runtime === "codex") {
@@ -395,12 +371,16 @@ class RuntimeAccountResolver {
     } else if (runtime === "claude-code") {
       binaryPath = resolveClaudeCodeBinary(binaryOptions);
       spawnEnv = { HOME: this.userHome, CLAUDE_CONFIG_DIR: nativeHome };
+    } else if (runtime === "opencode") {
+      binaryPath = resolveOpenCodeBinary(binaryOptions);
+      configSourceHome = resolveOpenCodeConfigHome(this.fs, this.parentEnv, this.userHome);
+      spawnEnv = { HOME: this.userHome, XDG_DATA_HOME: nativeHome };
     } else if (runtime === "deepseek-harness") {
       binaryPath = resolveDeepSeekHarnessBinary(binaryOptions);
       if (!this.paths) {
         throw resolverError(
           "RUNTIME_ACCOUNT_PATHS_REQUIRED",
-          "DeepSeek Harness integration paths are required",
+          "DeepSeek integration paths are required",
         );
       }
       integrationRoot = runtimeAccountIntegrationRoot(
@@ -411,7 +391,7 @@ class RuntimeAccountResolver {
       assertRuntimeHomesSeparated(
         nativeHome,
         integrationRoot,
-        "Native DeepSeek Harness and Shoggoth integration Homes",
+        "Native DeepSeek and Shoggoth integration Homes",
       );
       strategy = "native-with-account-integration";
       spawnEnv = { HOME: this.userHome, DSH_HOME: nativeHome };
@@ -427,6 +407,7 @@ class RuntimeAccountResolver {
       strategy,
       home,
       nativeHome,
+      configSourceHome,
       integrationRoot,
       binaryPath,
       launchArgs: runtime === "codex" ? CODEX_APP_SERVER_ARGS : [],
@@ -441,7 +422,6 @@ class RuntimeAccountResolver {
 module.exports = {
   assertRuntimeHomesSeparated,
   resolveUserHome,
-  LEGACY_DEFAULT_SHOGGOTH_RUNTIME_PROFILE_ID,
   RuntimeAccountResolver,
   defaultRuntimeAccountLookup,
   internalCodexHomePaths,

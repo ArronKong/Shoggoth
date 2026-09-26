@@ -16,7 +16,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
@@ -286,6 +286,7 @@ function isLoopbackGatewayUrl(url) {
 }
 
 let localTokenCache = null;
+const localTokenReveals = new Map();
 
 function resolveOpenclawBinForTokenReveal(injected) {
   if (injected) return injected;
@@ -327,7 +328,7 @@ function gatewayTokenRevealProgram(bin) {
     const dist = path.join(path.dirname(entry), "dist");
     const authModule = fs
       .readdirSync(dist)
-      .find((name) => /^gateway-auth-token-.*\.js$/.test(name));
+      .find((name) => /^gateway-auth-token-.*\.m?js$/.test(name));
     if (authModule) {
       authModuleUrl = pathToFileURL(path.join(dist, authModule)).href;
     }
@@ -350,20 +351,18 @@ function gatewayTokenRevealProgram(bin) {
     + `.catch(${fallback})${reportFailure}`;
 }
 
-function revealLocalGatewayToken(configPath, { openclawBin, spawnSyncImpl = spawnSync, platform } = {}) {
-  if ((platform ?? process.platform) !== "darwin") return undefined;
+function tokenRevealInvocation(configPath, openclawBin) {
   const bin = resolveOpenclawBinForTokenReveal(openclawBin);
-  if (!bin) return undefined;
+  if (!bin) return null;
   const extraPath = [
     path.dirname(bin),
     "/opt/homebrew/bin",
     "/opt/homebrew/opt/node@22/bin",
     "/usr/local/bin",
   ];
-  const result = spawnSyncImpl(
-    "/usr/bin/env",
-    ["node", "-e", gatewayTokenRevealProgram(bin)],
-    {
+  return {
+    command: "/usr/bin/env", args: ["node", "-e", gatewayTokenRevealProgram(bin)],
+    options: {
       encoding: "utf8",
       timeout: TOKEN_REVEAL_TIMEOUT_MS,
       maxBuffer: TOKEN_REVEAL_MAX_BYTES,
@@ -373,18 +372,76 @@ function revealLocalGatewayToken(configPath, { openclawBin, spawnSyncImpl = spaw
         PATH: [...extraPath, process.env.PATH || ""].join(":"),
       },
     },
-  );
+  };
+}
+
+function revealLocalGatewayToken(configPath, { openclawBin, spawnSyncImpl = spawnSync, platform } = {}) {
+  if ((platform ?? process.platform) !== "darwin") return undefined;
+  const invocation = tokenRevealInvocation(configPath, openclawBin);
+  if (!invocation) return undefined;
+  const result = spawnSyncImpl(invocation.command, invocation.args, invocation.options);
   if (result.error || result.status !== 0) return undefined;
+  return parseRevealedToken(result.stdout);
+}
+
+function parseRevealedToken(stdout) {
   // Accept one opaque token-shaped line and reject diagnostic/banner output.
   // The value stays in process memory only.
   // eslint-disable-next-line no-control-regex
-  const lines = String(result.stdout || "")
+  const lines = String(stdout || "")
     .replace(/\x1b\[[0-9;]*m/g, "")
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => /^[-A-Za-z0-9._~+/=]{16,1024}$/.test(line));
   return lines.length === 1 ? lines[0] : undefined;
+}
+
+function revealLocalGatewayTokenAsync(configPath, { openclawBin, spawnImpl = spawn, platform } = {}) {
+  if ((platform ?? process.platform) !== "darwin") return Promise.resolve(undefined);
+  const invocation = tokenRevealInvocation(configPath, openclawBin);
+  if (!invocation) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    let child;
+    let stdout = "";
+    let outputBytes = 0;
+    let invalid = false;
+    let settled = false;
+    let timer;
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(!invalid && code === 0 ? parseRevealedToken(stdout) : undefined);
+    };
+    const killOwned = () => {
+      invalid = true;
+      // A CLI compatibility fallback may have children. This freshly spawned
+      // group is owned by this reveal only; never signal an existing Gateway.
+      try {
+        if (process.platform !== "win32" && child?.pid) process.kill(-child.pid, "SIGKILL");
+        else child?.kill("SIGKILL");
+      } catch { try { child?.kill("SIGKILL"); } catch { /* already exited */ } }
+    };
+    try {
+      const { timeout, maxBuffer, encoding, ...options } = invocation.options;
+      child = spawnImpl(invocation.command, invocation.args, {
+        ...options, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
+      });
+      timer = setTimeout(killOwned, timeout);
+      child.stdout?.on("data", (chunk) => {
+        outputBytes += Buffer.byteLength(chunk);
+        if (outputBytes > maxBuffer) { killOwned(); return; }
+        stdout += chunk.toString("utf8");
+      });
+      child.stderr?.on("data", (chunk) => {
+        outputBytes += Buffer.byteLength(chunk);
+        if (outputBytes > maxBuffer) killOwned();
+      });
+      child.once("error", () => { invalid = true; finish(null); });
+      child.once("close", finish);
+    } catch { invalid = true; finish(null); }
+  });
 }
 
 // 仅 loopback 网关时读本机 openclaw 配置里的 gateway token(首启零输入的关键;
@@ -402,14 +459,17 @@ function readLocalGatewayToken(configPath, options = {}) {
     }
     const stat = fs.statSync(configPath);
     const cacheKey = `${configPath}\0${stat.mtimeMs}\0${stat.size}`;
-    const now = typeof options.now === "number" ? options.now : Date.now();
-    if (localTokenCache?.key === cacheKey && now - localTokenCache.at < localTokenCache.ttl) {
+    const now = () => typeof options.now === "function" ? options.now()
+      : typeof options.now === "number" ? options.now : Date.now();
+    if (localTokenCache?.key === cacheKey && now() - localTokenCache.at < localTokenCache.ttl) {
       return localTokenCache.value;
     }
     const value = revealLocalGatewayToken(configPath, options);
     localTokenCache = {
       key: cacheKey,
-      at: now,
+      // A slow resolver may spend the full 10s timeout here. Starting the TTL
+      // before it runs would make a 1s miss expire before the caller receives it.
+      at: now(),
       ttl: value ? LOCAL_TOKEN_CACHE_OK_MS : LOCAL_TOKEN_CACHE_MISS_MS,
       value,
     };
@@ -417,6 +477,27 @@ function readLocalGatewayToken(configPath, options = {}) {
   } catch {
     return undefined;
   }
+}
+
+async function readLocalGatewayTokenAsync(configPath, options = {}) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const token = cfg?.gateway?.auth?.token;
+    if (typeof token === "string" && token.trim()) return token.trim();
+    if (!token || typeof token !== "object" || typeof token.source !== "string" || typeof token.id !== "string") return undefined;
+    const stat = fs.statSync(configPath);
+    const key = `${configPath}\0${stat.mtimeMs}\0${stat.size}`;
+    const now = () => typeof options.now === "function" ? options.now()
+      : typeof options.now === "number" ? options.now : Date.now();
+    if (localTokenCache?.key === key && now() - localTokenCache.at < localTokenCache.ttl) return localTokenCache.value;
+    if (localTokenReveals.has(key)) return await localTokenReveals.get(key);
+    const pending = revealLocalGatewayTokenAsync(configPath, options).then((value) => {
+      localTokenCache = { key, at: now(), ttl: value ? LOCAL_TOKEN_CACHE_OK_MS : LOCAL_TOKEN_CACHE_MISS_MS, value };
+      return value;
+    });
+    localTokenReveals.set(key, pending);
+    try { return await pending; } finally { localTokenReveals.delete(key); }
+  } catch { return undefined; }
 }
 
 /**
@@ -442,12 +523,24 @@ function createAuthResolver({
   function resolveConnectAuth(gatewayUrl) {
     const url = (gatewayUrl || "").trim() || configuredGatewayUrl();
     const cfg = getConfig ? getConfig() : {};
-    const operator = loadOperatorAuth(operatorIdentityDir);
     const configToken = typeof cfg?.token === "string" && cfg.token.trim() ? cfg.token.trim() : undefined;
     // loopback 时本机 gateway.auth.token(真共享密钥,按请求授满 scopes)排在 CLI 的
     // operator token 之前:后者会被 `gateway status` 等探测型连接悄悄轮换收窄成
     // read-only(R125 实测),拿它连本机网关会丢写权限。
     const sharedToken = configToken ?? (isLoopbackGatewayUrl(url) ? readLocalGatewayToken(localGatewayConfigPath) : undefined);
+    return authWithSharedToken(url, sharedToken);
+  }
+
+  async function resolveConnectAuthAsync(gatewayUrl) {
+    const url = (gatewayUrl || "").trim() || configuredGatewayUrl();
+    const cfg = getConfig ? getConfig() : {};
+    const configToken = typeof cfg?.token === "string" && cfg.token.trim() ? cfg.token.trim() : undefined;
+    const sharedToken = configToken ?? (isLoopbackGatewayUrl(url) ? await readLocalGatewayTokenAsync(localGatewayConfigPath) : undefined);
+    return authWithSharedToken(url, sharedToken);
+  }
+
+  function authWithSharedToken(url, sharedToken) {
+    const operator = loadOperatorAuth(operatorIdentityDir);
     // 有真共享密钥时用 app 自己的身份,不复用 CLI 身份(R126):CLI 设备在网关里
     // 带着旧审批基线(常被探测收窄),满额请求会触发"scope 升级审批"卡人工;
     // 全新身份 + token 走网关自动注册,基线即所请求,零审批(S1 live 实测)。
@@ -489,7 +582,7 @@ function createAuthResolver({
     store.clearDeviceToken(url);
   }
 
-  return { resolveConnectAuth, storeDeviceToken, clearDeviceToken };
+  return { getGatewayUrl: configuredGatewayUrl, resolveConnectAuth, resolveConnectAuthAsync, storeDeviceToken, clearDeviceToken };
 }
 
 // 网关 unauthorized 文案/网络错误 → 结构化原因(UI 梯子与设置页共用)。
@@ -522,4 +615,5 @@ module.exports = {
   createAuthResolver,
   classifyAuthError,
   readLocalGatewayToken,
+  readLocalGatewayTokenAsync,
 };

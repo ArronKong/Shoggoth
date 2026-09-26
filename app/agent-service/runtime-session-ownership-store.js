@@ -14,10 +14,9 @@ const { runtimeBinding } = require("./runtime-adapter");
 const { serviceError } = require("./security");
 const { canonicalWorkspace } = require("./work-run");
 
-const OWNERSHIP_VERSION = 1;
+const OWNERSHIP_VERSION = 2;
 const MAX_OWNERSHIP_BYTES = 8 * 1024 * 1024;
 const MAX_OWNERSHIP_RECORDS = 20_000;
-const MAX_LEGACY_MIGRATIONS = MAX_OWNERSHIP_RECORDS;
 const OWNERSHIP_STATUSES = new Set(["active", "archived", "deleted"]);
 const RECORD_FIELDS = Object.freeze([
   "runtimeAccountId",
@@ -30,19 +29,8 @@ const RECORD_FIELDS = Object.freeze([
   "createdAt",
   "lastSeenAt",
 ]);
-const LEGACY_MIGRATION_FIELDS = Object.freeze([
-  "migrationId",
-  "sessionKey",
-  "chatSessionId",
-  "profileId",
-  "legacyHomeId",
-  "legacyRuntimeSessionId",
-  "transcriptRevision",
-  "migratedAt",
-]);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const LEGACY_HOME_ID_PATTERN = /^legacy-home-[a-f0-9]{64}-v1$/u;
 
 function ownershipError(code, message) {
   return serviceError(code, message);
@@ -113,30 +101,6 @@ function normalizeRecord(input, corrupt = false) {
   };
 }
 
-function normalizeLegacyMigration(input, corrupt = false) {
-  const fail = () => {
-    throw ownershipError(
-      corrupt ? "RUNTIME_SESSION_OWNERSHIP_CORRUPT" : "RUNTIME_SESSION_MIGRATION_INVALID",
-      "Runtime session migration marker is invalid",
-    );
-  };
-  if (!exactObject(input, LEGACY_MIGRATION_FIELDS)
-    || typeof input.migrationId !== "string" || !SHA256_PATTERN.test(input.migrationId)
-    || typeof input.sessionKey !== "string" || !UUID_PATTERN.test(input.sessionKey)
-    || typeof input.chatSessionId !== "string" || !UUID_PATTERN.test(input.chatSessionId)
-    || !validOpaqueId(input.profileId, 128)
-    || typeof input.legacyHomeId !== "string"
-    || !LEGACY_HOME_ID_PATTERN.test(input.legacyHomeId)
-    || !validOpaqueId(input.legacyRuntimeSessionId)
-    || !Number.isSafeInteger(input.transcriptRevision) || input.transcriptRevision < 1
-    || !Number.isSafeInteger(input.migratedAt) || input.migratedAt < 0) {
-    fail();
-  }
-  return Object.fromEntries(
-    LEGACY_MIGRATION_FIELDS.map((field) => [field, input[field]]),
-  );
-}
-
 function ownershipKey(runtimeAccountId, sessionId) {
   return crypto.createHash("sha256")
     .update(JSON.stringify([runtimeAccountId, sessionId]), "utf8")
@@ -160,16 +124,13 @@ function sameIdentity(left, right) {
 }
 
 function validateContainer(value) {
-  if (!exactObject(value, ["version", "revision", "records", "legacyMigrations"])
+  if (!exactObject(value, ["version", "revision", "records"])
     || value.version !== OWNERSHIP_VERSION
     || !Number.isSafeInteger(value.revision) || value.revision < 0
     || !value.records || typeof value.records !== "object" || Array.isArray(value.records)
     || Object.getPrototypeOf(value.records) !== Object.prototype
     || Object.keys(value.records).length > MAX_OWNERSHIP_RECORDS
-    || !value.legacyMigrations || typeof value.legacyMigrations !== "object"
-    || Array.isArray(value.legacyMigrations)
-    || Object.getPrototypeOf(value.legacyMigrations) !== Object.prototype
-    || Object.keys(value.legacyMigrations).length > MAX_LEGACY_MIGRATIONS) {
+  ) {
     throw ownershipError(
       "RUNTIME_SESSION_OWNERSHIP_CORRUPT",
       "Runtime session ownership store is corrupt",
@@ -186,25 +147,10 @@ function validateContainer(value) {
     }
     records[key] = record;
   }
-  const legacyMigrations = {};
-  for (const [key, raw] of Object.entries(value.legacyMigrations)) {
-    const migration = normalizeLegacyMigration(raw, true);
-    const record = records[key];
-    if (!record || record.status !== "deleted"
-      || migration.profileId !== record.profileId
-      || migration.legacyRuntimeSessionId !== record.sessionId) {
-      throw ownershipError(
-        "RUNTIME_SESSION_OWNERSHIP_CORRUPT",
-        "Runtime session migration marker does not match its ownership record",
-      );
-    }
-    legacyMigrations[key] = migration;
-  }
   return {
     version: OWNERSHIP_VERSION,
     revision: value.revision,
     records,
-    legacyMigrations,
   };
 }
 
@@ -230,7 +176,7 @@ class RuntimeSessionOwnershipStore {
       version: OWNERSHIP_VERSION,
       revision: 0,
       records: {},
-      legacyMigrations: {},
+
     };
   }
 
@@ -255,7 +201,7 @@ class RuntimeSessionOwnershipStore {
         version: OWNERSHIP_VERSION,
         revision: 0,
         records: {},
-        legacyMigrations: {},
+
       };
     this.commitUncertain = recovery === "uncertain";
     this.opened = true;
@@ -272,9 +218,7 @@ class RuntimeSessionOwnershipStore {
     if (!validOpaqueId(profileId, 128)) throw ownershipError("RUNTIME_SESSION_OWNERSHIP_INVALID", "Profile 无效");
     const records = Object.fromEntries(Object.entries(this.container.records)
       .filter(([, record]) => record.profileId !== profileId));
-    const legacyMigrations = Object.fromEntries(Object.entries(this.container.legacyMigrations)
-      .filter(([, record]) => record.profileId !== profileId));
-    this.#persist({ ...this.container, revision: this.container.revision + 1, records, legacyMigrations });
+    this.#persist({ ...this.container, revision: this.container.revision + 1, records });
   }
 
   claim(input) {
@@ -342,92 +286,6 @@ class RuntimeSessionOwnershipStore {
       );
     }
     return clone(record);
-  }
-
-  readLegacyMigration(input) {
-    this.#assertOpen();
-    const record = this.readRecord(input);
-    if (!record) return null;
-    const binding = runtimeBinding(input.binding);
-    return clone(this.container.legacyMigrations[
-      ownershipKey(binding.runtimeAccountId, input.sessionId)
-    ] || null);
-  }
-
-  recordLegacyMigration(input) {
-    this.#assertOpen();
-    if (!exactObject(input, [
-      "binding", "sessionId", "profileId", "workspace", "createdAt", "lastSeenAt",
-      "migrationId", "sessionKey", "chatSessionId", "legacyHomeId", "transcriptRevision",
-    ])) {
-      throw ownershipError(
-        "RUNTIME_SESSION_MIGRATION_INVALID",
-        "Runtime session migration input is invalid",
-      );
-    }
-    const binding = runtimeBinding(input.binding);
-    const migratedAt = this.#timestamp(this.now());
-    const candidate = normalizeRecord({
-      ...binding,
-      sessionId: input.sessionId,
-      profileId: input.profileId,
-      workspace: input.workspace,
-      status: "deleted",
-      createdAt: input.createdAt,
-      lastSeenAt: Math.max(input.lastSeenAt, migratedAt),
-    });
-    const key = ownershipKey(binding.runtimeAccountId, candidate.sessionId);
-    const existingRecord = this.container.records[key] || null;
-    if (existingRecord && !sameIdentity(existingRecord, candidate)) {
-      throw ownershipError(
-        "RUNTIME_SESSION_OWNERSHIP_CONFLICT",
-        "Runtime session is already owned by another Agent",
-      );
-    }
-    const migration = normalizeLegacyMigration({
-      migrationId: input.migrationId,
-      sessionKey: input.sessionKey,
-      chatSessionId: input.chatSessionId,
-      profileId: input.profileId,
-      legacyHomeId: input.legacyHomeId,
-      legacyRuntimeSessionId: input.sessionId,
-      transcriptRevision: input.transcriptRevision,
-      migratedAt,
-    });
-    const existingMigration = this.container.legacyMigrations[key] || null;
-    if (existingMigration) {
-      const sameLineage = LEGACY_MIGRATION_FIELDS
-        .filter((field) => field !== "migratedAt")
-        .every((field) => existingMigration[field] === migration[field]);
-      if (!sameLineage || existingRecord?.status !== "deleted") {
-        throw ownershipError(
-          "RUNTIME_SESSION_MIGRATION_CONFLICT",
-          "Runtime session migration marker conflicts with its existing lineage",
-        );
-      }
-      return clone(existingMigration);
-    }
-    if (!existingRecord && Object.keys(this.container.records).length >= MAX_OWNERSHIP_RECORDS) {
-      throw ownershipError(
-        "RUNTIME_SESSION_OWNERSHIP_CAPACITY",
-        "Runtime session ownership capacity is exceeded",
-      );
-    }
-    if (Object.keys(this.container.legacyMigrations).length >= MAX_LEGACY_MIGRATIONS) {
-      throw ownershipError(
-        "RUNTIME_SESSION_OWNERSHIP_CAPACITY",
-        "Runtime session migration marker capacity is exceeded",
-      );
-    }
-    const deletedRecord = existingRecord
-      ? {
-        ...existingRecord,
-        status: "deleted",
-        lastSeenAt: Math.max(existingRecord.lastSeenAt, migratedAt),
-      }
-      : candidate;
-    this.#commitLegacyMigration(key, deletedRecord, migration);
-    return clone(migration);
   }
 
   #ownedRecord(input, includeDeleted = false) {
@@ -516,17 +374,7 @@ class RuntimeSessionOwnershipStore {
       version: OWNERSHIP_VERSION,
       revision: this.container.revision + 1,
       records: { ...this.container.records, [key]: record },
-      legacyMigrations: this.container.legacyMigrations,
-    };
-    this.#persist(candidate);
-  }
 
-  #commitLegacyMigration(key, record, migration) {
-    const candidate = {
-      version: OWNERSHIP_VERSION,
-      revision: this.container.revision + 1,
-      records: { ...this.container.records, [key]: record },
-      legacyMigrations: { ...this.container.legacyMigrations, [key]: migration },
     };
     this.#persist(candidate);
   }
@@ -590,11 +438,9 @@ class RuntimeSessionOwnershipStore {
 
 module.exports = {
   MAX_OWNERSHIP_BYTES,
-  MAX_LEGACY_MIGRATIONS,
   OWNERSHIP_STATUSES,
   OWNERSHIP_VERSION,
   RuntimeSessionOwnershipStore,
-  normalizeLegacyMigration,
   normalizeRecord,
   ownershipKey,
   validateContainer,

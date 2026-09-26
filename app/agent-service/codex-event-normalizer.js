@@ -303,14 +303,23 @@ function normalizeCodexEvent(message, rawOptions = {}) {
       return known("plan", { itemId: safeId(item.id, options), text: item.text ?? "" });
     }
     if (item?.type === "agentMessage") {
-      return known("text", { itemId: safeId(item.id, options), text: item.text ?? "" });
+      const full = require("./context-tool-content").contextToolContent({ text: item.text ?? "" }, options.registeredSecrets);
+      return { ...known("text", {
+        itemId: safeId(item.id, options),
+        text: item.text ?? "",
+        // A completed commentary item seals the live bubble before the next
+        // answer streams. Dropping this phase concatenates both until history
+        // reloads on turn completion and suddenly splits the visible reply.
+        ...(method === "item/completed" && ["commentary", "final_answer"].includes(item.phase)
+          ? { phase: item.phase } : {}),
+      }), ...(full.contextTool ? { contextText: full.contextTool.text } : { contextIncomplete: true }) };
     }
     if (item && TOOL_ITEM_TYPES.has(item.type)) {
-      return known(method === "item/started" ? "tool_start" : "tool_result", {
+      return { ...known(method === "item/started" ? "tool_start" : "tool_result", {
         itemId: safeId(item.id, options),
         toolCallId: safeId(item.id, options),
         tool: toolDescriptor(item),
-      });
+      }), ...require("./context-tool-content").contextToolContent(toolDescriptor(item), options.registeredSecrets) };
     }
   }
   if (TOOL_UPDATE_METHODS.has(method)) {
@@ -371,8 +380,12 @@ function normalizeCodexEvent(message, rawOptions = {}) {
     return known("usage", {
       responseId,
       usage: responseId === undefined ? null : usage,
+      contextUsedTokens: usage?.totalTokens ?? null,
+      modelContextWindow: Number.isSafeInteger(params.tokenUsage?.modelContextWindow)
+        && params.tokenUsage.modelContextWindow > 0 ? params.tokenUsage.modelContextWindow : null,
     });
   }
+  if (method === "thread/compacted") return known("context_compacted");
   if (method === "rawResponse/completed") {
     // 该通知在 Codex 协议中明确标记为 internal-only。保留安全诊断摘要，
     // 但只用公开的 thread/tokenUsage/updated 写入统计，避免两种事件重复计量。

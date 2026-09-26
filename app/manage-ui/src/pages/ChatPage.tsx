@@ -1,7 +1,12 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { validPluginAppCallId } from "../lib/turnTimeline";
 import { ChatRunWait, chatRunWaitState, type ChatRunWaitState } from "../components/ChatRunWait";
+import ChatContextUsage from "../components/ChatContextUsage";
+import { useSessionRuntimeModels } from "../lib/useSessionRuntimeModels";
+import type { RuntimeContextUsage, RuntimeContextCapabilities, ProductContextState } from "../types";
+import { compactConversation } from "../api/client";
 import { setInspirationChatSession } from "../lib/inspiration-navigation";
 import { toSanitizedMarkdownHtml, formatReasoningMarkdown } from "../lib/markdown";
 import ChatMarkdown from "../components/ChatMarkdown";
@@ -75,7 +80,6 @@ import ChatPromptCard, {
   type ChatPromptResponse,
 } from "./ChatPromptCard";
 import ChatWidget from "../components/ChatWidget";
-import { Select, Option } from "../components/Field";
 import Modal from "../components/Modal";
 import { useConfirm } from "../components/ui";
 import SessionAdvancedModal from "./chat-session-advanced/SessionAdvancedModal";
@@ -122,10 +126,11 @@ import {
 import { useRegisterPageRefresh } from "../lib/page-refresh";
 import ImmersiveChat, { type ImmersiveMessage } from "./immersive/ImmersiveChat";
 import ChatPermissionMenu from "./ChatPermissionMenu";
+import ChatThinkFastMenu from "./ChatThinkFastMenu";
 import { localizePermissionMode } from "../lib/permissionModeText";
 import type { ImmersivePhase } from "./immersive/immersiveBg";
 import type { ImmersiveLiveStatus, ImmersiveLiveTool } from "./immersive/ImmersiveStatusLine";
-import { IconSend, IconClip, IconAttachmentFolder, IconSearch, IconClock, IconArchive, IconMic, IconFast, IconStop, IconPencil } from "./chatIcons";
+import { IconSend, IconClip, IconAttachmentFolder, IconSearch, IconClock, IconArchive, IconMic, IconStop, IconPencil } from "./chatIcons";
 import "./ChatPage.css";
 import type {
   ChatCanvasWidgetPart,
@@ -176,6 +181,8 @@ export const createChatSendController = createSendController;
 
 // 暂时隐藏普通/沉浸聊天共用菜单的分叉入口，保留底层能力。
 const SHOW_SESSION_FORK = false;
+// 隐藏上下文状态和手动压缩入口，自动压缩继续由 Service 管理。
+const SHOW_CHAT_CONTEXT_USAGE = false;
 
 // Native React chat over the loopback /__chatws broker. The broker auto-performs
 // the device-auth handshake against the federating proxy, so here we just speak
@@ -219,6 +226,9 @@ interface SessionRow {
   totalTokens?: number;
   totalTokensFresh?: boolean;
   contextTokens?: number;
+  contextUsage?: RuntimeContextUsage | null;
+  contextCapabilities?: RuntimeContextCapabilities;
+  productContext?: ProductContextState;
   status?: string;
   hasActiveRun?: boolean;
   permissionMode?: string;
@@ -509,6 +519,7 @@ interface Part {
   promptEntry?: ChatPromptEntry; // prompt part: blocking agent request card
   toolName?: string;
   toolArgs?: unknown; // toolCall arguments → rendered into the card title (url/query/…)
+  pluginAppCallId?: string;
   isError?: boolean; // toolResult: the tool failed (→ "Tool error …" red card)
   steps?: TurnStep[]; // timeline part(R339): 回合过程步骤(吸收自 thinking/toolCall/toolResult/plan)
 }
@@ -1168,6 +1179,7 @@ function normalize(raw: any): ChatMsg {
           toolArgs: toolResultBlockArgs(b),
           isError: b?.is_error === true || raw?.isError === true,
           durationS: toolResultBlockDuration(b),
+          pluginAppCallId: validPluginAppCallId(b?.pluginAppCallId),
         }))
       : [{ type: "toolResult", text: contentToText(raw?.content), toolName: raw?.toolName, isError: raw?.isError === true }];
     return base;
@@ -1180,7 +1192,7 @@ function normalize(raw: any): ChatMsg {
   const content = raw?.content;
   if (Array.isArray(content)) {
     for (const c of content) {
-      const cc = c as { type?: string; text?: string; thinking?: string; toolName?: string; name?: string; arguments?: unknown; args?: unknown; input?: unknown; is_error?: boolean; durationS?: unknown; planEntries?: unknown };
+      const cc = c as { type?: string; text?: string; thinking?: string; toolName?: string; name?: string; arguments?: unknown; args?: unknown; input?: unknown; is_error?: boolean; durationS?: unknown; planEntries?: unknown; pluginAppCallId?: unknown };
       if (cc?.type === "thinking") base.parts.push({ type: "thinking", text: cc.thinking ?? "" });
       else if (cc?.type === "plan") {
         const planEntries = planEntriesFromBlock(cc);
@@ -1200,6 +1212,7 @@ function normalize(raw: any): ChatMsg {
         toolArgs: toolResultBlockArgs(cc),
         isError: cc.is_error === true,
         durationS: toolResultBlockDuration(cc),
+        pluginAppCallId: validPluginAppCallId(cc.pluginAppCallId),
       });
       else if (typeof cc?.text === "string") base.parts.push({ type: "text", text: cc.text });
     }
@@ -1241,6 +1254,7 @@ interface ToolEntry {
   name: string;
   args?: unknown; // call arguments (from the `start` phase) → rendered in the card title
   output?: string; // set once a partial/final result arrives → card flips to a result card
+  pluginAppCallId?: string;
   isError?: boolean; // the tool failed
   diff?: { path: string; oldText: string; newText: string }; // write/patch file-edit diff
   diffText?: string; // unified diff text (Hermes gateway inline_diff)
@@ -1300,12 +1314,13 @@ function formatToolResultSummary(text?: string): string | null {
 }
 function toolEntryToPart(e: ToolEntry): Part {
   const base: Part =
-    e.output != null
+    e.output != null || e.pluginAppCallId != null
       ? { type: "toolResult", toolName: e.name, text: e.output, isError: e.isError }
       : { type: "toolCall", toolName: e.name, toolArgs: e.args };
   if (e.diff) base.diff = e.diff;
   if (e.diffText) base.diffText = e.diffText;
   if (e.durationS != null) base.durationS = e.durationS;
+  if (e.pluginAppCallId) base.pluginAppCallId = e.pluginAppCallId;
   return base;
 }
 function lastText(parts: Part[]): string {
@@ -1372,7 +1387,7 @@ function applyToolStream(prev: ChatMsg[], tools: ToolEntry[], thinking = "", pla
   }
   return [...out, { role: "assistant", parts: composePendingParts(tools, "", thinking, plan, prompts), pending: true }];
 }
-function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?: string): ChatMsg[] {
+function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?: string, preserveLiveProcess = false): ChatMsg[] {
   // Normalize the completed turn the SAME way loadHistory does, so a streamed reply
   // renders identically to a reloaded one. The old path flattened content via
   // contentToText into a single text part, which dropped the thinking/text split:
@@ -1415,10 +1430,16 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?
         };
         return out;
       }
+      const finalParts = norm.parts.length ? norm.parts : out[i].parts;
+      const isProcess = (part: Part) => ["thinking", "toolCall", "toolResult", "plan", "timeline"].includes(part.type);
+      // Text-only final frames arrive before the canonical history. Keep the
+      // live process here so its row does not disappear and then reappear when
+      // that history arrives. A structured final already owns its process.
+      const liveProcess = preserveLiveProcess && !finalParts.some(isProcess) ? out[i].parts.filter(isProcess) : [];
       out[i] = {
         ...norm,
         // if the final frame carried nothing renderable, keep what streamed in
-        parts: norm.parts.length ? norm.parts : out[i].parts,
+        parts: [...liveProcess, ...finalParts],
         model: norm.model ?? out[i].model,
         provider: norm.provider ?? out[i].provider,
         usage: norm.usage ?? out[i].usage,
@@ -2454,9 +2475,16 @@ function ChatPageApp() {
   // management cache so switching agents cannot reuse another agent's choices.
   const openClawModelCacheRef = useRef<Map<string, UnifiedModel[]>>(new Map());
   const refreshActiveModelsRef = useRef<(() => Promise<void>) | null>(null);
+  const runtimeModelsBackend = activeKey ? backendOfSession(activeKey) : "";
+  const usesRuntimeModelPicker = chatBackendDescriptors.get(runtimeModelsBackend)?.surfaces.sessionRuntimeSwitch === true;
+  const runtimeModels = useSessionRuntimeModels(runtimeModelsBackend, activeKey ? agentOf(activeKey) : "",
+    activeKey, usesRuntimeModelPicker, connected);
+  const runtimeModelsRef = useRef({ key: activeKey, data: runtimeModels.data });
+  runtimeModelsRef.current = { key: activeKey, data: runtimeModels.data };
   const refreshModelMenu = useCallback(() => {
-    void refreshActiveModelsRef.current?.().catch(() => {});
-  }, []);
+    if (usesRuntimeModelPicker) void runtimeModels.refresh();
+    else void refreshActiveModelsRef.current?.().catch(() => {});
+  }, [usesRuntimeModelPicker, runtimeModels.refresh]);
   // Learned xhigh support keyed by `provider:model` (see the probe effect below).
   const [xhighOk, setXhighOk] = useState<Record<string, boolean>>({});
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -2473,6 +2501,8 @@ function ChatPageApp() {
   const [chatCaps, setChatCaps] = useState<Record<string, ChatCapabilities>>({});
   const chatCapsRef = useRef(chatCaps);
   chatCapsRef.current = chatCaps;
+  const capabilitiesForSession = useCallback((key: string) => runtimeModelsRef.current.key === key && runtimeModelsRef.current.data
+    ? runtimeModelsRef.current.data.capabilities : chatCapsRef.current[agentOf(key)], []);
   // 服务端斜杠目录按 session 隔离：Grok/Claude 的目录可能由当前工作区、skills
   // 与会话状态动态决定，不能按 agentId 跨会话复用。
   const [slashCatalogStore] = useState(() => new SlashCatalogStore(listSlashCommands));
@@ -2916,7 +2946,7 @@ function ChatPageApp() {
     setPinnedOnly(false);
     setPinNavIndex(0);
     setQuote(null);
-    if (!supportsBackendAttachments(backendOfSession(key), chatCapsRef.current[agentOf(key)])) {
+    if (!supportsBackendAttachments(backendOfSession(key), capabilitiesForSession(key))) {
       setComposerAttachments([]);
     }
     setMenu(null);
@@ -3255,7 +3285,7 @@ function ChatPageApp() {
       // 同一个 id 可能横跨多个 provider（如 deepseek-v4-flash 同时在 deepseek/xiaomi/
       // volcengine）。优先使用 Agent 能力声明的 scope/provider，再使用菜单里
       // 用户实际点中的 provider；只有候选唯一时才自动继承。
-      const modelCaps = chatCapsRef.current[agentOf(key)];
+      const modelCaps = capabilitiesForSession(key);
       const scopedProvider = modelCaps?.modelProvider;
       const requestedProvider = pickedProvider
         && (!scopedProvider || pickedProvider === scopedProvider)
@@ -3288,14 +3318,6 @@ function ChatPageApp() {
   // Use persisted session settings when available, with a transient fallback
   // for backends that do not echo fastMode. Only reflect successful changes.
   const [fastByKey, setFastByKey] = useState<Record<string, boolean>>({});
-  const toggleFast = useCallback(async () => {
-    const key = activeKeyRef.current;
-    if (!key) return;
-    const previous = sessionsRef.current.find(row => row.key === key)?.fastMode ?? fastByKey[key] ?? false;
-    if (await patchSession({ fastMode: !previous }, "fast")) {
-      setFastByKey((m) => ({ ...m, [key]: !previous }));
-    }
-  }, [fastByKey, patchSession]);
 
   useEffect(() => {
     // Connection lifecycle: auto-reconnect with a flat 3s backoff. A dropped
@@ -3478,6 +3500,14 @@ function ChatPageApp() {
         window.dispatchEvent(new CustomEvent("shoggoth:surface-changed", {
           detail: { surface: "kanban", event: f.event, payload: f.payload },
         }));
+        return;
+      }
+      if (f.type === "event" && f.event === "sessions.changed") {
+        if (sessionsRefreshTimerRef.current) clearTimeout(sessionsRefreshTimerRef.current);
+        sessionsRefreshTimerRef.current = setTimeout(() => {
+          sessionsRefreshTimerRef.current = null;
+          void refreshSessions().catch(() => {});
+        }, 150);
         return;
       }
       if (f.type === "event" && f.event === "agents.changed") {
@@ -3723,6 +3753,7 @@ function ChatPageApp() {
               prev,
               p.message,
               wasSteered ? projectedFinal.visible : undefined,
+              true,
             ));
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
             setSending(false);
@@ -3833,6 +3864,7 @@ function ChatPageApp() {
           if (typeof d.durationS === "number" && d.durationS > 0) entry.durationS = d.durationS; // Hermes tool runtime
           if (d.phase === "result" && d.result !== undefined) entry.output = formatToolOutput(d.result);
           else if (d.phase === "update" && d.partialResult !== undefined) entry.output = formatToolOutput(d.partialResult);
+          if (d.phase === "result") entry.pluginAppCallId = validPluginAppCallId(d.pluginAppCallId);
           if (d.isError === true || (entry.output && /"status"\s*:\s*"error"/.test(entry.output))) entry.isError = true;
           liveToolsRef.current.set(sk, arr);
           // R339 直播时间线:同一事件并行喂 reducer(字段与钩子契约同名直传)。
@@ -3843,6 +3875,7 @@ function ChatPageApp() {
             args: d.args,
             phase: d.phase === "result" ? "result" : d.phase === "update" ? "update" : "start",
             result: d.result,
+            pluginAppCallId: validPluginAppCallId(d.pluginAppCallId),
             partialResult: d.partialResult,
             isError: d.isError === true ? true : undefined,
             durationS: typeof d.durationS === "number" ? d.durationS : undefined,
@@ -4318,7 +4351,7 @@ function ChatPageApp() {
   // OpenClaw 官方聊天面读取当前 agent 的 configured catalog；管理页才读取全量 all。
   // 其它后端继续消费 backend-scoped revision store，保持既有模型目录与缓存语义。
   useEffect(() => {
-    if (!activeModelsBackend) return;
+    if (!activeModelsBackend || usesRuntimeModelPicker) return;
     const backend = activeModelsBackend;
     let active = true;
     setModelsError(false);
@@ -4393,7 +4426,7 @@ function ChatPageApp() {
       unsubscribe();
       if (refreshActiveModelsRef.current === refreshModels) refreshActiveModelsRef.current = null;
     };
-  }, [activeModelsAgentId, activeModelsBackend, connected, send]);
+  }, [activeModelsAgentId, activeModelsBackend, usesRuntimeModelPicker, connected, send]);
 
   const openSession = useCallback((key: string) => {
     if (pendingSearchJumpKeyRef.current && pendingSearchJumpKeyRef.current !== key) {
@@ -4444,14 +4477,16 @@ function ChatPageApp() {
     if (routerLocation.pathname !== "/chat") return;
     const params = new URLSearchParams(routerLocation.search);
     const key = params.get("session");
-    const deepLinkBackend = params.get("backend")?.trim() || "";
+    const rawDeepLinkBackend = params.get("backend")?.trim() || "";
+    const deepLinkBackend = rawDeepLinkBackend;
     if (!key) return;
     // StrictMode 会重放同一 location 的 effect；ref 在首次执行中同步落闸，避免第二次
     // openSession 清掉刚设置的 quote。新导航即便 URL 相同也有新的 location.key。
     const locationIdentity = `${routerLocation.key}:${routerLocation.search}`;
     if (handledSessionLocationRef.current === locationIdentity) return;
     handledSessionLocationRef.current = locationIdentity;
-    const handoff = consumeCronChatHandoff(deepLinkBackend || backendOfSession(key), key);
+    const handoff = consumeCronChatHandoff(rawDeepLinkBackend || backendOfSession(key), key)
+      || (deepLinkBackend !== rawDeepLinkBackend ? consumeCronChatHandoff(deepLinkBackend, key) : null);
     routerNavigate("/chat", { replace: true });
     // 深链多半指向**刚刚**建出来的会话（工作板点「运行」→ 后端在网关新建 per-card
     // subagent 会话 → 立刻跳过来），它还不在 sessions 里。而面板挂在
@@ -4572,12 +4607,12 @@ function ChatPageApp() {
   const formatPayloadSize = (bytes: number) => bytes < 1024 * 1024
     ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const maxPayloadForSession = (key: string) => {
-    const caps = chatCapsRef.current[agentOf(key)];
+    const caps = capabilitiesForSession(key);
     return (caps?.gatewayPolicy ? gatewayContractRef.current?.policy.maxPayload : undefined)
       ?? caps?.maxPayloadBytes;
   };
   const inspectChatSendPayload = (key: string, text: string, atts: readonly ChatAttachment[]) => {
-    const maxPromptBytes = chatCapsRef.current[agentOf(key)]?.maxPromptBytes;
+    const maxPromptBytes = capabilitiesForSession(key)?.maxPromptBytes;
     const promptBytes = new TextEncoder().encode(JSON.stringify(text)).byteLength;
     if (maxPromptBytes && promptBytes > maxPromptBytes) {
       return { allowed: false, payloadBytes: promptBytes, maxPayload: maxPromptBytes };
@@ -4590,7 +4625,7 @@ function ChatPageApp() {
     );
   };
   const inspectChatSteerPayload = (key: string, text: string) => {
-    const maxPromptBytes = chatCapsRef.current[agentOf(key)]?.maxPromptBytes;
+    const maxPromptBytes = capabilitiesForSession(key)?.maxPromptBytes;
     const promptBytes = new TextEncoder().encode(JSON.stringify(text)).byteLength;
     if (maxPromptBytes && promptBytes > maxPromptBytes) {
       return { allowed: false, payloadBytes: promptBytes, maxPayload: maxPromptBytes };
@@ -5199,7 +5234,7 @@ function ChatPageApp() {
         }
         if (nativeAgent) {
           if (!canSteerActiveChat(
-            chatCapsRef.current[agentOf(key)],
+            capabilitiesForSession(key),
             runStatusBySessionRef.current.get(key),
             0,
           )) {
@@ -5395,7 +5430,7 @@ function ChatPageApp() {
     // 第一条可执行逻辑就是 readiness 门禁：拒绝时草稿、引用、附件、历史和队列均不动。
     if (!sendController.composerButton(key, () => true)) return;
     if (attachments.length && key
-      && !supportsBackendAttachments(backendOfSession(key), chatCapsRef.current[agentOf(key)])) {
+      && !supportsBackendAttachments(backendOfSession(key), capabilitiesForSession(key))) {
       const name = attachments[0]?.name ?? "";
       setComposerAttachments([]);
       setToast({ text: t("chat.attachKindUnsupported", { name }), kind: "error" });
@@ -5410,7 +5445,7 @@ function ChatPageApp() {
     const backendId = backendOfSession(key);
     const hasServerSlashSurface = supportsBackendSlash(
       backendId,
-      chatCapsRef.current[agentOf(key)],
+      capabilitiesForSession(key),
     ) || chatBackendDescriptors.get(backendId)?.surfaces.agentHarness === true;
     const recoverySlashPool = recoverySlashCommandsForBackend(
       hasServerSlashSurface,
@@ -5490,7 +5525,7 @@ function ChatPageApp() {
     const prefix = q ? `${q.text.split("\n").map((l) => `> ${l}`).join("\n")}\n\n` : "";
     const outgoing = prefix && !text.startsWith(prefix) ? `${prefix}${text}` : text;
     const shouldSteer = inFlight && canSteerActiveChat(
-      chatCapsRef.current[agentOf(key)],
+      capabilitiesForSession(key),
       runStatusBySessionRef.current.get(key),
       atts.length,
     );
@@ -6061,14 +6096,14 @@ function ChatPageApp() {
   const activeBackendDescriptor = chatBackendDescriptors.get(activeBackend);
   // Negotiated transport limits already arrive through the generic capability;
   // the composer never branches on a concrete backend to apply them.
-  const activeCaps: ChatCapabilities | undefined = activeKey ? chatCaps[agentOf(activeKey)] : undefined;
+  const activeCaps: ChatCapabilities | undefined = runtimeModels.data?.capabilities ?? (activeKey ? chatCaps[agentOf(activeKey)] : undefined);
   const selectableModels = useMemo(
-    () => activeCaps?.modelScope
+    () => usesRuntimeModelPicker ? runtimeModels.data?.models ?? [] : activeCaps?.modelScope
       ? models.filter((model) => model.modelScopes?.includes(activeCaps.modelScope!))
       : activeCaps?.modelProvider
         ? models.filter((model) => model.provider === activeCaps.modelProvider)
         : models,
-    [activeCaps?.modelProvider, activeCaps?.modelScope, models],
+    [usesRuntimeModelPicker, runtimeModels.data?.models, activeCaps?.modelProvider, activeCaps?.modelScope, models],
   );
   // Capability discovery gates uploads, including native Service media chunks.
   const supportsActiveAttachments = supportsBackendAttachments(activeBackend, activeCaps);
@@ -6079,7 +6114,7 @@ function ChatPageApp() {
       : "image/*";
   const addFile = (file: File) => {
     const targetKey = activeKeyRef.current;
-    const caps = activeKeyRef.current ? chatCapsRef.current[agentOf(activeKeyRef.current)] : undefined;
+    const caps = activeKeyRef.current ? capabilitiesForSession(activeKeyRef.current) : undefined;
     const backend = activeKeyRef.current ? backendOfSession(activeKeyRef.current) : "openclaw";
     const atts = caps?.attachments ?? (supportsBackendAttachments(backend, undefined) ? { image: {} } : {});
     const kind: ChatAttachment["kind"] = file.type.startsWith("image/")
@@ -6198,10 +6233,10 @@ function ChatPageApp() {
   useEffect(() => {
     const key = activeKey;
     const ag = key ? agentOf(key) : "";
-    const caps = ag ? chatCaps[ag] : undefined;
+    const caps = key ? capabilitiesForSession(key) : undefined;
     if (!key || !ag || !caps?.slash || caps.notReady) return;
     void slashCatalogStore.load(ag, backendOfKnownAgent(ag), key);
-  }, [activeKey, slashCatalogSessionUpdatedAt, chatCaps, capsEpoch, slashCatalogStore]);
+  }, [activeKey, slashCatalogSessionUpdatedAt, chatCaps, runtimeModels.data?.selection.bindingId, capsEpoch, slashCatalogStore]);
 
   useEffect(() => {
     const value = inputRef.current;
@@ -6748,7 +6783,16 @@ function ChatPageApp() {
   }, [openLocalFile]);
 
   const nativeModelSelectionDisabled = activeBackendDescriptor?.surfaces.agentHarness === true
-    && activeRunInFlight;
+    && (activeRunInFlight || runtimeModels.pending || !connected);
+  const selectComposerModel = async (id: string, provider?: string, bindingId?: string) => {
+    if (!usesRuntimeModelPicker) { await changeModel(id, provider); return; }
+    if (!active || !bindingId || nativeModelSelectionDisabled) return;
+    const key = active.key;
+    if (await runtimeModels.select(id, bindingId, active.permissionMode ?? null)) {
+      if (activeKeyRef.current === key) setPickedModel(null);
+      await refreshSessions();
+    }
+  };
   const permissionOptions = (activeCaps?.permissions?.options ?? []).map((option) => localizePermissionMode(option, t));
   const activePermissionMode = active?.permissionMode
     || activeCaps?.permissions?.defaultMode
@@ -6794,7 +6838,11 @@ function ChatPageApp() {
     [active?.model, activeCaps?.modelScope, selectableModels],
   );
   // 优先级：用户刚手动选的 > 最近回答的实际模型 > 会话配置模型 > 原生运行时默认模型。
-  const displayModel = pickedModel ?? lastAssistantModel ?? active?.model ?? inheritedRuntimeDefault?.id ?? "";
+  const selectedRuntimeModel = runtimeModels.data?.models.find(model => model.bindingId === runtimeModels.data?.selection.bindingId
+    && (runtimeModels.data.selection.model ? model.id === runtimeModels.data.selection.model : model.isDefault));
+  const displayModel = usesRuntimeModelPicker
+    ? runtimeModels.data?.selection.model ?? selectedRuntimeModel?.id ?? active?.model ?? ""
+    : pickedModel ?? lastAssistantModel ?? active?.model ?? inheritedRuntimeDefault?.id ?? "";
   const displayModelProvider = active?.modelProvider ?? inheritedRuntimeDefault?.provider;
   // 新回答回来后让位给实际模型；切换会话时重置手动选择。
   useEffect(() => {
@@ -7212,11 +7260,11 @@ function ChatPageApp() {
   // per-model gateway decision with no read RPC, so it's probed + cached at runtime
   // (lib/thinkingCapability). Scoped to OpenClaw — Hermes rejects sessions.patch.
   const activeModelInfo = useMemo(
-    () => selectableModels.find((m) => m.id === (active?.model ?? inheritedRuntimeDefault?.id)),
-    [active?.model, inheritedRuntimeDefault?.id, selectableModels],
+    () => usesRuntimeModelPicker ? selectedRuntimeModel : selectableModels.find((m) => m.id === (active?.model ?? inheritedRuntimeDefault?.id)),
+    [usesRuntimeModelPicker, selectedRuntimeModel, active?.model, inheritedRuntimeDefault?.id, selectableModels],
   );
-  const activeThinkingOptions = active?.thinkingOptions ?? activeModelInfo?.thinkingOptions;
-  const activeThinkingDefault = active?.thinkingDefault ?? activeModelInfo?.thinkingDefault;
+  const activeThinkingOptions = usesRuntimeModelPicker ? activeModelInfo?.thinkingOptions : active?.thinkingOptions ?? activeModelInfo?.thinkingOptions;
+  const activeThinkingDefault = usesRuntimeModelPicker ? activeModelInfo?.thinkingDefault : active?.thinkingDefault ?? activeModelInfo?.thinkingDefault;
   const activeIsReasoning = activeModelInfo?.reasoning === true;
   // ⚡ 显示门槛（能力驱动，无后端特判）：目录声明 fast 能力（Hermes capabilities.fast）
   // 直接开；能力未知（OpenClaw 不带该字段）沿用旧口径 reasoning 模型才显示；
@@ -8076,7 +8124,7 @@ function ChatPageApp() {
               <div className="chat-header__id">
                 <div className="chat-header__name">{sessionName(active)}</div>
                 <div className="chat-header__statusline">
-                {activeRunInFlight && runWaitBySession[active.key] && (
+                {activeRunInFlight && runWaitBySession[active.key]?.kind === "queued" && (
                   <ChatRunWait state={runWaitBySession[active.key]} compact />
                 )}
                 {(activeHeaderStatus === "reconnecting" || activeHeaderStatus === "offline") && (
@@ -8095,6 +8143,17 @@ function ChatPageApp() {
                   <div className="chat-header__meta" title={sessionSub(active)}>{friendlySessionLabel(active, t)}</div>
                 )}
                 </div>
+                {SHOW_CHAT_CONTEXT_USAGE && active.contextCapabilities && <ChatContextUsage usage={active.contextUsage ?? null}
+                  capabilities={active.contextCapabilities} product={active.productContext} busy={!connected || activeRunInFlight}
+                  onCompact={async () => {
+                    if (active.productContext?.automatic !== "enabled" || !activeAgentId || !activeKey) { void sendChatMessage("/compact", [], true); return; }
+                    try {
+                      const result = await compactConversation(activeBackend, activeAgentId, activeKey, `summary-${crypto.randomUUID()}`);
+                      setToast({ kind: result.status === "unchanged" ? "success" : "pending", text: t(result.status === "unchanged" ? "chat.productContextUnchanged" : "chat.productContextPending") });
+                      await refreshSessions();
+                    } catch (error) { setToast({ kind: "error", text: error instanceof Error ? error.message : String(error) }); }
+                  }} />}
+
               </div>
               {/* tool actions (Figma layout; wired to real features) */}
               <div className="chat-header__tools">
@@ -8452,6 +8511,7 @@ function ChatPageApp() {
                             <TurnProcess
                               key={`${groupRenderKey}:live-trajectory`}
                               steps={groupLiveSteps}
+                              pluginConversation={activeKey && activeBackend ? { backendId: activeBackend, sessionKey: activeKey } : undefined}
                               live
                               defaultOpen
                               onOpenLargeView={() => setTimelineModal({ steps: groupLiveSteps, ts: liveMessage?.ts ?? g.ts })}
@@ -8507,13 +8567,18 @@ function ChatPageApp() {
                                   )}
                                 </div>
                               ) : null}
+                              {m === liveMessage && activeRunInFlight && activeKey && runWaitBySession[activeKey]?.kind === "retrying" && (
+                                <div className="chat-bubble is-error" data-testid="chat-retry-status">
+                                  <ChatRunWait state={runWaitBySession[activeKey]} />
+                                </div>
+                              )}
                               {keyedParts.map(({ item: p, key: k }, pi) => {
                               if (p.type === "timeline") {
                                 // R355:开关语义=整个 Agent Trajectory 的显示/隐藏(用户定案)。
                                 // 关 → 连摘要行都不渲染;开 → 摘要行+可展开,时间线含完整过程
                                 // (思考+工具,不再单独过滤思考步)。
                                 if (!showTraj || !p.steps?.length) return null;
-                                return <TurnProcess key={k} steps={p.steps} onOpenLargeView={() => setTimelineModal({ steps: p.steps!, ts: m.ts })} />;
+                                return <TurnProcess key={k} steps={p.steps} pluginConversation={activeKey && activeBackend ? { backendId: activeBackend, sessionKey: activeKey } : undefined} onOpenLargeView={() => setTimelineModal({ steps: p.steps!, ts: m.ts })} />;
                               }
                               if (p.type === "canvas") {
                                 return (
@@ -8655,8 +8720,8 @@ function ChatPageApp() {
                               // the cursor trailing the rendered HTML.
                               if (m.pending) {
                                 return (
-                                  <div key={k} className="chat-bubble" data-qp={pi}>
-                                    {!p.text?.trim() && activeKey && runWaitBySession[activeKey] && (
+                                  <div key={k} className="chat-bubble is-streaming" data-qp={pi}>
+                                    {!p.text?.trim() && activeKey && runWaitBySession[activeKey]?.kind === "queued" && (
                                       <ChatRunWait state={runWaitBySession[activeKey]} />
                                     )}
                                     {p.text?.trim() ? (
@@ -8882,6 +8947,7 @@ function ChatPageApp() {
 
             <div
               className="chat-composer"
+              data-chat-composer
               onDrop={supportsActiveAttachments ? onDropFiles : undefined}
               onDragOver={supportsActiveAttachments ? (e) => e.preventDefault() : undefined}
             >
@@ -8987,56 +9053,61 @@ function ChatPageApp() {
                 <div className="chat-composer__left">
                   <span className={listLive ? undefined : "is-stale"}>
                     <ChatModelMenu
-                      models={selectableModels}
+                      models={usesRuntimeModelPicker ? selectableModels.map(model => ({ ...model, disabled: !runtimeModels.data?.selection.canSwitch
+                        && (model as import("../types").SessionRuntimeModel).bindingId !== runtimeModels.data?.selection.bindingId })) : selectableModels}
                       activeModel={displayModel}
                       activeProvider={displayModelProvider}
-                      onSelect={(id, provider) => changeModel(id, provider)}
-                      loading={modelsLoading}
-                      loadError={modelsError}
+                      activeBindingId={runtimeModels.data?.selection.bindingId}
+                      runtimeGroups={usesRuntimeModelPicker ? runtimeModels.data?.runtimes ?? [] : undefined}
+                      onSelect={selectComposerModel}
+                      loading={usesRuntimeModelPicker ? runtimeModels.loading : modelsLoading}
+                      loadError={usesRuntimeModelPicker ? runtimeModels.error : modelsError}
                       onRefresh={refreshModelMenu}
                       disabled={nativeModelSelectionDisabled}
                     />
                   </span>
-                  {(activeThinkingOptions?.length || activeThinkingDefault) && (
-                    <Select
-                      triggerClassName="chat-pill chat-pill--select chat-pill--think"
-                      popupClassName="chat-composer-select-menu"
+                  {(activeThinkingOptions?.length || activeThinkingDefault || activeFastCapable) && (
+                    <ChatThinkFastMenu
+                      levels={
+                        (activeThinkingOptions?.length || activeThinkingDefault)
+                          ? [
+                              "",
+                              ...(activeThinkingOptions ?? [
+                                "off",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                ...(xhighSupported ? ["xhigh"] : []),
+                                "adaptive",
+                              ]),
+                            ]
+                          : []
+                      }
                       value={active.thinkingLevel ?? ""}
-                      onChange={(value) => { void patchSession({ thinkingLevel: value || null }, t("chat.labelThinking")); }}
-                      title={t("chat.switchThinking")}
+                      defaultValue={activeThinkingDefault}
+                      defaultLabel={activeThinkingDefault
+                        ? t("chat.thinkingInherited", { level: thinkLabel(activeThinkingDefault) })
+                        : t("chat.defaultLevel")}
+                      levelLabel={thinkLabel}
+                      fastCapable={!!activeFastCapable}
+                      fastOn={!!(active.fastMode ?? (activeKey ? fastByKey[activeKey] : false))}
                       disabled={activeRunInFlight}
-                      side="top"
-                      hideIcon
-                    >
-                      <Option value="">{activeThinkingDefault
-                        ? t("chat.thinkingInherited", { level: thinkLabel(activeThinkingDefault) }) : t("chat.defaultLevel")}</Option>
-                      {(activeThinkingOptions ?? [
-                        "off",
-                        "minimal",
-                        "low",
-                        "medium",
-                        "high",
-                        ...(xhighSupported ? ["xhigh"] : []),
-                        "adaptive",
-                      ]).map((lvl) => (
-                        <Option key={lvl} value={lvl}>
-                          {thinkLabel(lvl)}
-                        </Option>
-                      ))}
-                    </Select>
-                  )}
-                  {activeFastCapable && (
-                    <button
-                      type="button"
-                      className={(active.fastMode ?? (activeKey ? fastByKey[activeKey] : false)) ? "chat-pill chat-pill--ghost chat-pill--fast is-active" : "chat-pill chat-pill--ghost chat-pill--fast"}
-                      title={t("chat.fastHint")}
-                      aria-pressed={active.fastMode ?? (activeKey ? fastByKey[activeKey] : false)}
-                      onClick={toggleFast}
-                      disabled={activeRunInFlight}
-                    >
-                      <IconFast />
-                      <span>{t("chat.fastLabel")}</span>
-                    </button>
+                      onChangeThinking={(level) => {
+                        void patchSession({ thinkingLevel: level || null }, t("chat.labelThinking"));
+                      }}
+                      onChangeFast={(next) => {
+                        const key = activeKeyRef.current;
+                        if (!key) return;
+                        const previous = sessionsRef.current.find((row) => row.key === key)?.fastMode ?? fastByKey[key] ?? false;
+                        if (next === previous) return;
+                        void (async () => {
+                          if (await patchSession({ fastMode: next }, "fast")) {
+                            setFastByKey((m) => ({ ...m, [key]: next }));
+                          }
+                        })();
+                      }}
+                    />
                   )}
                   <ChatPermissionMenu
                     options={permissionOptions}
@@ -9233,6 +9304,7 @@ function ChatPageApp() {
           clearQuote={() => setQuote(null)}
           sessionTitle={active ? sessionName(active) : ""}
           sessionMeta={active ? friendlySessionLabel(active, t) : ""}
+
           liveStatusKind={active ? statusOf(active.key) : "offline"}
           activeAgentId={activeKey ? agentOf(activeKey) : null}
           activeBackendId={activeBackend}
@@ -9248,12 +9320,15 @@ function ChatPageApp() {
           lightboxOpen={!!lightbox}
           onRespondPrompt={respondPrompt}
           messages={immersiveMessages}
-          models={selectableModels}
+          models={usesRuntimeModelPicker ? selectableModels.map(model => ({ ...model, disabled: !runtimeModels.data?.selection.canSwitch
+                        && (model as import("../types").SessionRuntimeModel).bindingId !== runtimeModels.data?.selection.bindingId })) : selectableModels}
           displayModel={displayModel}
-          changeModel={changeModel}
+          changeModel={selectComposerModel}
+          activeBindingId={runtimeModels.data?.selection.bindingId}
+          runtimeGroups={usesRuntimeModelPicker ? runtimeModels.data?.runtimes ?? [] : undefined}
           activeModelProvider={displayModelProvider}
-          modelsLoading={modelsLoading}
-          modelsError={modelsError}
+          modelsLoading={usesRuntimeModelPicker ? runtimeModels.loading : modelsLoading}
+          modelsError={usesRuntimeModelPicker ? runtimeModels.error : modelsError}
           refreshModels={refreshModelMenu}
           modelSelectionDisabled={nativeModelSelectionDisabled}
           permissionOptions={permissionOptions}

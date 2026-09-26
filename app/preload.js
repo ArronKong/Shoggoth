@@ -125,6 +125,10 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
   readClipboardFiles: () => ipcRenderer.invoke("shoggoth:chat:clipboard-files"),
   requestMicrophoneAccess: () => ipcRenderer.invoke("shoggoth:microphone:request"),
   getMicrophoneAccessStatus: () => ipcRenderer.invoke("shoggoth:microphone:status"),
+  ...(process.platform === "darwin" ? { typewriterSound: {
+    start: () => ipcRenderer.send("shoggoth:typewriter-sound:start"),
+    stop: () => ipcRenderer.send("shoggoth:typewriter-sound:stop"),
+  } } : {}),
   desktopInspiration: {
     getPreferences: () => ipcRenderer.invoke("shoggoth:desktop-inspiration:preferences"),
     captureShortcut: value => ipcRenderer.invoke("shoggoth:desktop-inspiration:capture-shortcut", value),
