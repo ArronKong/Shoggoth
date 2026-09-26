@@ -5,10 +5,19 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     env:
       SHOGGOTH_CODESIGN_MODE: adhoc
@@ -35,36 +44,67 @@ jobs:
           test -s node_modules/electron/dist/LICENSE
           test -s node_modules/electron/dist/LICENSES.chromium.html
 
-      - name: Build and check both architectures
+      - name: Build and check native architecture
         run: |
           npm run build:manage
           npm run prepare:runtimes
           npm run release:metadata
           npm run licenses:check
-          npx electron-builder --mac --publish never
-          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike
+          npx electron-builder --mac --${{ matrix.arch }} --publish never
+          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-${{ matrix.arch }}
 
       - name: Create and verify internal DMGs
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p 'require("./package.json").version')"
-          for ARCH in arm64 x64; do
-            node scripts/create-macos-dmg.mjs --arch "$ARCH" --distribution internal
-            hdiutil verify "dist/Shoggoth-${VERSION}-${ARCH}.dmg"
-          done
-          (
-            cd dist
-            shasum -a 256 \
-              "Shoggoth-${VERSION}-arm64.dmg" \
-              "Shoggoth-${VERSION}-x64.dmg" > SHA256SUMS.txt
-            shasum -a 256 -c SHA256SUMS.txt
-          )
+          node scripts/create-macos-dmg.mjs --arch "${{ matrix.arch }}" --distribution internal
+          hdiutil verify "dist/Shoggoth-${VERSION}-${{ matrix.arch }}.dmg"
 
       - name: Upload checked preview images
         uses: actions/upload-artifact@v4
         with:
-          name: Shoggoth-${{ github.sha }}-internal-DMG
+          name: Shoggoth-${{ github.sha }}-${{ matrix.arch }}-internal-DMG
+          path: dist/Shoggoth-*-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Shoggoth-${{ github.sha }}-*-internal-DMG
+          path: dist
+          merge-multiple: true
+
+      - name: Verify both images and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./package.json").version')"
+          test -s "dist/Shoggoth-${VERSION}-arm64.dmg"
+          test -s "dist/Shoggoth-${VERSION}-x64.dmg"
+          (
+            cd dist
+            sha256sum \
+              "Shoggoth-${VERSION}-arm64.dmg" \
+              "Shoggoth-${VERSION}-x64.dmg" > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+
+      - name: Upload paired DMGs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shoggoth-${{ github.sha }}-internal-DMGs
           path: |
             dist/Shoggoth-*-arm64.dmg
             dist/Shoggoth-*-x64.dmg

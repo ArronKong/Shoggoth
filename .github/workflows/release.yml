@@ -159,7 +159,7 @@ jobs:
       - name: Verify signed packages and updater metadata
         run: |
           node scripts/verify-app-update-release.mjs
-          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike
+          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-arm64
           VERSION="$(node -p 'require("./package.json").version')"
           (cd dist && shasum -a 256 -c SHA256SUMS.txt)
           for ARCH in arm64 x64; do
@@ -178,9 +178,6 @@ jobs:
           done
           gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -x true
 
-      - name: Publish verified release
-        run: gh release edit "$RELEASE_TAG" --draft=false --latest --verify-tag
-
       - name: Remove temporary signing keychain
         if: always()
         shell: bash
@@ -189,3 +186,43 @@ jobs:
             security delete-keychain "$SHOGGOTH_RELEASE_KEYCHAIN" || true
           fi
           rm -f "$RUNNER_TEMP"/shoggoth-release.p12 "$RUNNER_TEMP"/AuthKey_*.p8
+
+  verify-x64-and-publish:
+    needs: macos-release
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      SHOGGOTH_EXPECT_NOTARIZED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+
+      - name: Prepare exact source and Intel runtime
+        run: |
+          npm ci --ignore-scripts
+          npm run prepare:runtimes
+
+      - name: Download and verify notarized Intel assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./package.json").version')"
+          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -x true
+          mkdir -p dist/mac
+          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-mac.zip" --dir dist
+          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-x64.dmg" --dir dist
+          ditto -x -k "dist/Shoggoth-${VERSION}-mac.zip" dist/mac
+          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-x64
+          hdiutil verify "dist/Shoggoth-${VERSION}-x64.dmg"
+          xcrun stapler validate "dist/Shoggoth-${VERSION}-x64.dmg"
+
+      - name: Publish verified release
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest --verify-tag
