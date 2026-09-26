@@ -73,6 +73,12 @@ jobs:
           npm ci --ignore-scripts
           npm --prefix app/manage-ui ci --ignore-scripts
 
+      - name: Restore Electron license files
+        run: |
+          node node_modules/electron/install.js
+          test -s node_modules/electron/dist/LICENSE
+          test -s node_modules/electron/dist/LICENSES.chromium.html
+
       - name: Run update, signing, and UI contracts
         run: |
           npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json

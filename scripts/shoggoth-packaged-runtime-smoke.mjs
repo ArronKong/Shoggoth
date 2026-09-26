@@ -250,7 +250,7 @@ async function verifyPackagedService(appPath) {
       const ipc = (method, params) => requestService(paths, { id: crypto.randomUUID(),
         token: readClientToken(paths), version: PROTOCOL_VERSION, method, params });
       (async () => {
-        assert.equal(PROTOCOL_VERSION, 10, "packaged Service v10 exact DTO contract is required");
+        assert.equal(PROTOCOL_VERSION, 11, "packaged Service v11 exact DTO contract is required");
         assert.equal(STORE_SCHEMA_VERSION, 15, "packaged current Product15 reader is required");
         assert.equal(CHAT_SESSION_STORE_VERSION, 8, "packaged Chat8 reader is required");
         assert.equal(TOKEN_USAGE_STORE_VERSION, 2, "packaged usage attribution reader is required");
