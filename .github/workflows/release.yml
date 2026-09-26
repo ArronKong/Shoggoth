@@ -21,7 +21,7 @@ concurrency:
 jobs:
   macos-release:
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
@@ -120,10 +120,56 @@ jobs:
           npm run licenses:check
           npx electron-builder --mac --publish always
 
+      - name: Create, notarize, and upload architecture-specific DMGs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./package.json").version')"
+          for ARCH in arm64 x64; do
+            node scripts/create-macos-dmg.mjs --arch "$ARCH" --distribution official
+            DMG="dist/Shoggoth-${VERSION}-${ARCH}.dmg"
+            xcrun notarytool submit "$DMG" \
+              --keychain-profile "$SHOGGOTH_NOTARY_KEYCHAIN_PROFILE" \
+              --keychain "$SHOGGOTH_NOTARY_KEYCHAIN" \
+              --wait --output-format json > "$RUNNER_TEMP/shoggoth-dmg-${ARCH}-notary.json"
+            node -e 'const fs=require("node:fs"); const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(r.status!=="Accepted") process.exit(1)' \
+              "$RUNNER_TEMP/shoggoth-dmg-${ARCH}-notary.json"
+            xcrun stapler staple "$DMG"
+            xcrun stapler validate "$DMG"
+          done
+          (
+            cd dist
+            shasum -a 256 \
+              "Shoggoth-${VERSION}-arm64-mac.zip" \
+              "Shoggoth-${VERSION}-mac.zip" \
+              "Shoggoth-${VERSION}-arm64.dmg" \
+              "Shoggoth-${VERSION}-x64.dmg" > SHA256SUMS.txt
+          )
+          gh release upload "$RELEASE_TAG" \
+            "dist/Shoggoth-${VERSION}-arm64.dmg" \
+            "dist/Shoggoth-${VERSION}-x64.dmg" \
+            dist/SHA256SUMS.txt --clobber
+
       - name: Verify signed packages and updater metadata
         run: |
           node scripts/verify-app-update-release.mjs
           node scripts/shoggoth-packaged-runtime-smoke.mjs --spike
+          VERSION="$(node -p 'require("./package.json").version')"
+          (cd dist && shasum -a 256 -c SHA256SUMS.txt)
+          for ARCH in arm64 x64; do
+            DMG="dist/Shoggoth-${VERSION}-${ARCH}.dmg"
+            hdiutil verify "$DMG"
+            xcrun stapler validate "$DMG"
+          done
+          ASSETS="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          for NAME in \
+            "Shoggoth-${VERSION}-arm64-mac.zip" \
+            "Shoggoth-${VERSION}-mac.zip" \
+            "Shoggoth-${VERSION}-arm64.dmg" \
+            "Shoggoth-${VERSION}-x64.dmg" \
+            latest-mac.yml SHA256SUMS.txt; do
+            printf '%s\n' "$ASSETS" | grep -Fx "$NAME"
+          done
           gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -x true
 
       - name: Publish verified release
