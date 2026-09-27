@@ -15,6 +15,8 @@ export default function InspirationActivity({ ideaId, execution }: { ideaId: str
   const { activity, error, live, retry } = useInspirationActivity(ideaId, execution);
   const [opening, setOpening] = useState<string | null>(null);
   const steps = useMemo(() => stepsFromParts(activity?.trajectory.parts || [], { live, includeText: true }), [activity, live]);
+  // A finished round leads with its result: its trajectory starts folded, and an empty one stays out of the way.
+  const unrecorded = Boolean(activity && !live && !error && !steps.length && !activity.trajectory.reason);
   const open = async (file: string) => {
     if (opening) return;
     setOpening(file);
@@ -23,8 +25,8 @@ export default function InspirationActivity({ ideaId, execution }: { ideaId: str
     finally { setOpening(null); }
   };
   return <div className={styles.activity} data-inspiration-run={execution.runId}>
-    <section aria-label={t('turnLab.processLabel')}>
-      {steps.length ? <TurnProcess steps={steps} live={live} defaultOpen /> : <div className={styles.trajectoryEmpty}>
+    {!unrecorded && <section aria-label={t('turnLab.processLabel')}>
+      {steps.length ? <TurnProcess steps={steps} live={live} defaultOpen={live} /> : <div className={styles.trajectoryEmpty}>
         <span className={styles.trajectoryLabel}><IconTrajectory />{t('turnLab.processLabel')}</span>
         <p className={styles.meta} role="status">{t(error ? 'inspiration.activityUnavailable'
           : !activity ? 'common.loading' : live && (!activity.trajectory.reason || activity.trajectory.reason === 'preparing')
@@ -33,7 +35,7 @@ export default function InspirationActivity({ ideaId, execution }: { ideaId: str
       {activity?.trajectory.truncated && <p className={styles.meta}>{t('inspiration.trajectoryTruncated')}</p>}
       {error && steps.length > 0 && <p className={styles.meta} role="status">{t('inspiration.activityUnavailable')}</p>}
       {error && <button className={styles.textAction} onClick={retry}>{t('common.retry')}</button>}
-    </section>
+    </section>}
     {Boolean(activity?.artifacts.items.length) && <section aria-label={t('inspiration.artifacts')} className={styles.artifacts}>
       <div className={styles.sectionHeading}><h3>{t('inspiration.artifacts')}</h3>
         <span className={styles.meta}>{t('inspiration.artifactOpenHint')}</span></div>

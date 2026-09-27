@@ -40,6 +40,7 @@ const stubs = {
   '../components/Field': { Field: host('label'), TextArea: host('textarea'), TextInput: host('input'),
     Select: host('select'), Option: host('option') },
   '../components/ui': { useConfirm: () => async () => true, useToast: () => ({ error: assert.fail, success() {} }) },
+  '../components/AgentAvatar': host('span'),
   '../lib/usePageCache': { usePageCache: (key) => ({ refresh, data: key === 'inspiration-agents' ? { agents: roster }
     : { idea, history: { executions: idea.latestExecution ? [idea.latestExecution] : [], nextCursor: null } } }) },
   '../lib/page-refresh': { useRegisterPageLoading() {}, useRegisterPageRefresh() {} },
