@@ -5,6 +5,7 @@ import { PageHead } from '../components/PageHead';
 import FilterTabs from '../components/FilterTabs';
 import SearchCapsule from '../components/SearchCapsule';
 import Modal from '../components/Modal';
+import AgentAvatarView from '../components/AgentAvatar';
 import { Field, TextArea, TextInput, Select, Option } from '../components/Field';
 import { useConfirm, useToast } from '../components/ui';
 import { usePageCache } from '../lib/usePageCache';
@@ -414,7 +415,9 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
           {failure && <p className={styles.runFailure}><span className={styles.runFailureMark} aria-hidden="true">!</span>
             <span className={styles.runFailureText}>{failure.reason && <span>{failure.reason}</span>}{failure.code && <code>{failure.code}</code>}</span></p>}
           <div className={styles.panelFoot}>
-            <span className={styles.panelMeta}>{agentName(latest)} · {when(latest.createdAt)}</span>
+            <span className={styles.panelMeta}>
+              <AgentAvatarView agentId={latest.agentId} name={agentName(latest)} className={styles.panelAvatar} />{agentName(latest)} · {when(latest.createdAt)}
+            </span>
             {idea.status === 'completed' && <button className={styles.acceptAction} disabled={busy} aria-pressed={Boolean(idea.acceptedAt)}
               onClick={() => { void act(['accept', idea.revision], (operationId) => updateInspiration(id,
                 { operationId, expectedRevision: idea.revision, patch: { accepted: !idea.acceptedAt } })); }}>
@@ -432,7 +435,11 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
             <Select value={chosen ? `${chosen.backendId}/${chosen.id}` : ''} disabled={busy} onChange={setAgent}>
               {!chosen && <Option value="" disabled>{t('inspiration.noAgent')}</Option>}
               {candidates.map((value) => <Option key={`${value.backendId}/${value.id}`} value={`${value.backendId}/${value.id}`} disabled={!value.capabilities.execute}>
-                {value.name} · {value.backendName}{value.capabilities.execute ? '' : ` · ${t(value.capabilities.reason === 'backend-unavailable' ? 'inspiration.unavailable' : 'inspiration.unsupported')}`}
+                <span className={styles.agentChoice}>
+                  <AgentAvatarView agentId={value.id} name={value.name} className={styles.agentChoiceAvatar} />
+                  <span className={styles.agentChoiceName}>{value.name}<span> · {value.backendName}{value.capabilities.execute ? ''
+                    : ` · ${t(value.capabilities.reason === 'backend-unavailable' ? 'inspiration.unavailable' : 'inspiration.unsupported')}`}</span></span>
+                </span>
               </Option>)}
             </Select>
           </Field></div>

@@ -200,7 +200,8 @@
 .runFailureText { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; min-height: 20px; }
 .runFailure code { padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ui-error) 9%, transparent); font: 11px/18px var(--mono); }
 .panelFoot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding-top: 12px; border-top: 1px solid color-mix(in srgb, var(--tone) 14%, transparent); }
-.panelMeta { min-width: 0; font-size: 12px; line-height: 18px; color: var(--ui-text-2); overflow-wrap: anywhere; }
+.panelMeta { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--ui-text-2); overflow-wrap: anywhere; }
+.panelAvatar { width: 18px; height: 18px; }
 .statePanel .attention { padding: 0; border-radius: 0; background: transparent; }
 .statePanel .command { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--ui-text-1) 5%, transparent); font-family: var(--mono); }
 /* The shared prompt card is drawn light-only; inside the tinted panel it follows the page theme and the panel's tone. */
@@ -243,6 +244,11 @@
 .agentField :global(.field) { flex-direction: row; align-items: center; gap: 12px; }
 .agentField :global(.field-label) { flex: none; }
 .agentField :global([role=combobox]) { flex: 1; min-width: 0; background: var(--detail-sheet); }
+.agentField :global([role=combobox]):has(.agentChoice) { padding-left: 9px; }
+.agentChoice { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agentChoiceAvatar { width: 22px; height: 22px; }
+.agentChoiceName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agentChoiceName > span { color: var(--ui-text-2); }
 .composerNote { margin: 0; font-size: 12px; line-height: 18px; color: var(--ui-text-2); }
 .workspaceDisclosure > summary { display: flex; align-items: center; gap: 4px; width: fit-content; min-height: 28px; font-size: 13px; color: var(--ui-text-2); cursor: pointer; list-style: none; }
 .workspaceDisclosure > summary svg { width: 16px; height: 16px; transform: rotate(-90deg); transition: transform 160ms ease; }
