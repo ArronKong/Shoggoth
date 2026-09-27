@@ -7,10 +7,13 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
   onToggle: (runtime: RuntimeStatus) => void;
 }) {
   const { t } = useTranslation();
-  return <section className="settings-section" id="settings-local-runtimes">
-    <header className="settings-section-head">
-      <h3 className="settings-h">{t("settings.localRuntimes")}</h3>
-      <p className="settings-sech">{t("settings.localRuntimeStatusHint")}</p>
+  const ready = runtimes.filter((runtime) => runtime.releaseEnabled && runtime.enabled
+    && runtime.installation === "available" && runtime.serviceConnected).length;
+  // Rendered inside the Shoggoth backend card, below its background service.
+  return <section className="settings-subsection" id="settings-local-runtimes">
+    <header className="settings-subsection-head">
+      <div><h5>{t("settings.localRuntimes")}</h5><p>{t("settings.localRuntimeStatusHint")}</p></div>
+      {runtimes.length > 0 && !error && <span className="settings-subsection-meta">{ready} / {runtimes.length}</span>}
     </header>
     {loading && !runtimes.length ? <p className="ui-hint">{t("common.loading")}</p>
       : error || !runtimes.length ? <p className="ui-hint" role="status">{t("settings.localRuntimeStatusFailed")}</p>
@@ -22,8 +25,8 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
           data-runtime={runtime.runtime}>
           <div className="settings-backend-row">
             <BackendMark id={runtime.runtime} name={runtime.name} />
-            <div className="settings-backend-copy"><h4>{runtime.name}</h4><p>{t("settings.modeNative")}</p></div>
-            <div className="settings-backend-state"><span className={`settings-health ${status === "runtimeReady" ? "is-healthy" : ""}`}><i />{t(`settings.${status}`)}</span></div>
+            <div className="settings-backend-copy"><h4>{runtime.name}</h4></div>
+            <div className="settings-backend-state"><span className={`settings-health ${status === "runtimeReady" ? "is-healthy" : status === "backendDisabled" || status === "runtimeReleaseDisabled" ? "" : "is-down"}`}><i />{t(`settings.${status}`)}</span></div>
             <div className="settings-backend-actions">
               {runtime.releaseEnabled && <button className="ui-cbtn ui-cbtn--sm" disabled={busy} onClick={() => onToggle(runtime)}>
                 {t(runtime.enabled ? "settings.disconnect" : "settings.reconnect")}

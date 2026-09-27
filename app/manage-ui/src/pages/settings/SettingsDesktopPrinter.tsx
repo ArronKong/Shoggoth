@@ -52,31 +52,30 @@ export default function SettingsDesktopPrinter({ disabled }: { disabled: boolean
     } catch { if (mounted.current) setMessage('saveFailed'); }
     finally { operation.current = false; if (mounted.current) setBusy(false); }
   };
-  return <section className="settings-section" id="settings-desktop-printer">
-    <header className="settings-section-head"><h3 className="settings-h">{t('settings.desktopPrinter.title')}</h3>
-      <p className="settings-sech">{t('settings.desktopPrinter.description')}</p></header>
-    <div className="settings-card">
-      <div className="settings-shortcut-row">
-        <span>{t('settings.desktopPrinter.shortcut')}</span>
-        <button type="button" className="ui-cbtn settings-shortcut" disabled={disabled || !host?.setShortcut} aria-busy={busy || undefined}
-          aria-label={t(capturing ? 'settings.desktopPrinter.recording' : 'settings.desktopPrinter.change')}
-          data-shortcut-capturing={capturing || undefined} onClick={() => { void begin(); }} onBlur={() => { if (capture.current) endCapture(); }}
-          onKeyDown={event => {
-            if (!capture.current) return;
-            event.preventDefault(); event.stopPropagation();
-            if (event.key === 'Escape') { endCapture(); return; }
-            if (event.repeat || event.nativeEvent.isComposing) return;
-            const accelerator = shortcutFromKeyboard(event);
-            if (accelerator) void apply(accelerator);
-          }}>
-          {capturing ? t('settings.desktopPrinter.recording') : <kbd>{displayShortcut(state.accelerator)}</kbd>}
-        </button>
-        <button type="button" className="btn-subtle" disabled={disabled || busy || !host?.setShortcut || state.accelerator === 'Alt+S'}
-          onClick={() => { void apply('Alt+S'); }}>{t('settings.desktopPrinter.reset')}</button>
-      </div>
+  return <div className="settings-list-row settings-list-row--split" id="settings-desktop-printer">
+    <div className="settings-list-copy">
+      <h4>{t('settings.desktopPrinter.title')}</h4>
+      <p>{t('settings.desktopPrinter.description')}</p>
       <p className="ui-hint" role="status">{!host?.setShortcut ? t('settings.desktopPrinter.appOnly')
         : message ? t(`settings.desktopPrinter.${message}`) : !state.registered && !capturing ? t('settings.desktopPrinter.unavailable')
           : t('settings.desktopPrinter.hint')}</p>
     </div>
-  </section>;
+    <div className="settings-shortcut-row">
+      <button type="button" className="ui-cbtn settings-shortcut" disabled={disabled || !host?.setShortcut} aria-busy={busy || undefined}
+        aria-label={t(capturing ? 'settings.desktopPrinter.recording' : 'settings.desktopPrinter.change')}
+        data-shortcut-capturing={capturing || undefined} onClick={() => { void begin(); }} onBlur={() => { if (capture.current) endCapture(); }}
+        onKeyDown={event => {
+          if (!capture.current) return;
+          event.preventDefault(); event.stopPropagation();
+          if (event.key === 'Escape') { endCapture(); return; }
+          if (event.repeat || event.nativeEvent.isComposing) return;
+          const accelerator = shortcutFromKeyboard(event);
+          if (accelerator) void apply(accelerator);
+        }}>
+        {capturing ? t('settings.desktopPrinter.recording') : <kbd>{displayShortcut(state.accelerator)}</kbd>}
+      </button>
+      <button type="button" className="btn-subtle" disabled={disabled || busy || !host?.setShortcut || state.accelerator === 'Alt+S'}
+        onClick={() => { void apply('Alt+S'); }}>{t('settings.desktopPrinter.reset')}</button>
+    </div>
+  </div>;
 }

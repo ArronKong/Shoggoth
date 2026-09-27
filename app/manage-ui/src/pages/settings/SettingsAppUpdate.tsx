@@ -73,33 +73,28 @@ export default function SettingsAppUpdate() {
     : null;
 
   return (
-    <section className="settings-section" id="settings-app-update">
-      <header className="settings-section-head">
-        <h3 className="settings-h">{t("settings.appUpdate.title")}</h3>
-        <p className="settings-sech">{t("settings.appUpdate.description")}</p>
-      </header>
-      <div className="settings-card settings-app-update-card">
-        <div className="settings-app-update-copy">
-          <div>
-            <span className="settings-app-update-label">{t("settings.appUpdate.currentVersion")}</span>
-            <strong>{state?.currentVersion || "—"}</strong>
-          </div>
-          <p role="status" aria-live="polite">{statusText}</p>
-          {progress !== null && (
-            <progress value={progress} max={100} aria-label={t("settings.appUpdate.downloadProgress")} />
-          )}
-        </div>
-        <div className="settings-app-update-actions">
-          {state?.canInstall && (
-            <button type="button" className="ui-cbtn ui-cbtn--sm ui-cbtn--gold" disabled={actionPending} onClick={() => void install()}>
-              {t("settings.appUpdate.restart")}
-            </button>
-          )}
-          <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={actionPending || !state?.canCheck} onClick={() => void runCheck()}>
-            {t("settings.appUpdate.check")}
-          </button>
-        </div>
+    <div className="settings-list-row settings-list-row--split settings-app-update-card" id="settings-app-update">
+      <div className="settings-list-copy settings-app-update-copy">
+        <h4>
+          {t("settings.appUpdate.title")}
+          <span className="settings-app-update-version mono" aria-label={t("settings.appUpdate.currentVersion")}>{state?.currentVersion || "—"}</span>
+        </h4>
+        <p>{t("settings.appUpdate.description")}</p>
+        <p className="ui-hint" role="status" aria-live="polite">{statusText}</p>
+        {progress !== null && (
+          <progress value={progress} max={100} aria-label={t("settings.appUpdate.downloadProgress")} />
+        )}
       </div>
-    </section>
+      <div className="settings-app-update-actions">
+        {state?.canInstall && (
+          <button type="button" className="ui-cbtn ui-cbtn--sm ui-cbtn--gold" disabled={actionPending} onClick={() => void install()}>
+            {t("settings.appUpdate.restart")}
+          </button>
+        )}
+        <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={actionPending || !state?.canCheck} onClick={() => void runCheck()}>
+          {t("settings.appUpdate.check")}
+        </button>
+      </div>
+    </div>
   );
 }

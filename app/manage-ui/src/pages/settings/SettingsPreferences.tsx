@@ -21,36 +21,31 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
   const toast = useToast();
   return (
     <div className="settings-preferences">
-      {/* Common preferences stay together and are visible on first entry. */}
-      <div className="settings-preferences-main">
-      <section className="settings-section" id="settings-appearance">
-        <header className="settings-section-head">
-          <h3 className="settings-h">{t("settings.appearanceSection")}</h3>
-          <p className="settings-sech">{t("settings.appearanceSectionDesc")}</p>
-        </header>
-        <div className="settings-card">
-          <div className="settings-prefs-row">
-            {SHOW_THEME_PICKER && (
-              <ThemePicker
-                value={cfg.theme}
-                disabled={disabled || !themeLoaded}
-                onChange={(theme) => onChange({ theme })}
-              />
-            )}
-            <Field label={t("settings.langLabel")} hint={t("settings.langHint")}>
-              <Select disabled={disabled} value={cfg.locale} onChange={(v) => onChange({ locale: v })}>
-                <Option value="">{t("settings.langAuto")}</Option>
-                <Option value="zh-CN">简体中文</Option>
-                <Option value="en">English</Option>
-              </Select>
-            </Field>
+      {/* Everyday preferences share one grouped card: one row per setting. */}
+      <section className="settings-section settings-preferences-main" aria-label={t("settings.category.general")}>
+        <div className="settings-card settings-list-card">
+          <div className="settings-list-row" id="settings-appearance">
+            <div className="settings-prefs-row">
+              {SHOW_THEME_PICKER && (
+                <ThemePicker
+                  value={cfg.theme}
+                  disabled={disabled || !themeLoaded}
+                  onChange={(theme) => onChange({ theme })}
+                />
+              )}
+              <Field label={t("settings.langLabel")} hint={t("settings.langHint")}>
+                <Select disabled={disabled} value={cfg.locale} onChange={(v) => onChange({ locale: v })}>
+                  <Option value="">{t("settings.langAuto")}</Option>
+                  <Option value="zh-CN">简体中文</Option>
+                  <Option value="en">English</Option>
+                </Select>
+              </Field>
+            </div>
           </div>
+          <SettingsDesktopPrinter disabled={disabled} />
+          <SettingsAppUpdate />
         </div>
       </section>
-
-      <SettingsDesktopPrinter disabled={disabled} />
-      <SettingsAppUpdate />
-      </div>
 
       {/* Notifications — native macOS desktop notifications, per category */}
       <section className="settings-section" id="settings-notif">
