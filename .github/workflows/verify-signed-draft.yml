@@ -39,11 +39,45 @@ jobs:
           set -euo pipefail
           VERSION="$(node -p 'require("./package.json").version')"
           test "$RELEASE_TAG" = "v$VERSION"
-          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
           mkdir -p dist/mac
-          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-mac.zip" --dir dist
-          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-x64.dmg" --dir dist
-          gh release download "$RELEASE_TAG" --pattern SHA256SUMS.txt --dir dist
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { createHash } from 'node:crypto';
+          import { createReadStream, createWriteStream, statSync } from 'node:fs';
+          import { pipeline } from 'node:stream/promises';
+          import { Readable } from 'node:stream';
+
+          const version = JSON.parse((await import('node:fs')).readFileSync('package.json', 'utf8')).version;
+          const base = `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}`;
+          const headers = {
+            Authorization: `Bearer ${process.env.GH_TOKEN}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          };
+          const listResponse = await fetch(`${base}/releases?per_page=100`, { headers });
+          assert.equal(listResponse.status, 200, 'Cannot list releases with workflow token');
+          const releases = await listResponse.json();
+          const release = releases.find(item => item.tag_name === process.env.RELEASE_TAG && item.draft);
+          assert.ok(release, 'Draft release is not visible to the workflow token');
+          for (const name of [`Shoggoth-${version}-mac.zip`, `Shoggoth-${version}-x64.dmg`, 'SHA256SUMS.txt']) {
+            const asset = release.assets.find(item => item.name === name);
+            assert.ok(asset, `Missing draft asset: ${name}`);
+            const response = await fetch(`${base}/releases/assets/${asset.id}`, {
+              headers: { ...headers, Accept: 'application/octet-stream' },
+            });
+            assert.equal(response.status, 200, `Cannot download draft asset: ${name}`);
+            assert.ok(response.body && !response.headers.get('content-type')?.includes('json'));
+            const destination = `dist/${name}`;
+            await pipeline(Readable.fromWeb(response.body), createWriteStream(destination));
+            assert.equal(statSync(destination).size, asset.size, `Size mismatch: ${name}`);
+            if (asset.digest) {
+              const hash = createHash('sha256');
+              for await (const chunk of createReadStream(destination)) hash.update(chunk);
+              assert.equal(`sha256:${hash.digest('hex')}`, asset.digest, `SHA256 mismatch: ${name}`);
+            }
+            console.log(`Verified draft asset: ${name}`);
+          }
+          NODE
           (
             cd dist
             grep -F "  Shoggoth-${VERSION}-mac.zip" SHA256SUMS.txt | shasum -a 256 -c -
