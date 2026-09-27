@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   AppConfig,
@@ -43,9 +43,8 @@ import {
 import { setDebugEnabled, useDebugEnabled } from "../components/debug/store";
 import { PageHead } from "../components/PageHead";
 import SettingsPreferences from "./settings/SettingsPreferences";
-import BackendOverview from "./settings/BackendOverview";
+import BackendOverview, { BackendMark } from "./settings/BackendOverview";
 import ServiceSettings from "./settings/ServiceSettings";
-import NativeCapacityCard from "./settings/NativeCapacityCard";
 import RuntimeStatusList from "./settings/RuntimeStatusList";
 import BackgroundStopDialog from "./settings/BackgroundStopDialog";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
@@ -53,6 +52,7 @@ import { applyDisabledBackends, useBackendCatalog } from "../lib/backends";
 import "./SettingsPage.css";
 import "./settings/SettingsLayout.css";
 import "./settings/SettingsOperations.css";
+import "./settings/SettingsCards.css";
 
 const SHOGGOTH_POST_START_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
 // Keep writes ordered even when Settings is left and reopened before a response.
@@ -953,6 +953,229 @@ export default function SettingsPage() {
 
   const gatewayUrlError = !REMOTE_CONNECTIONS_ENABLED && !loading && !configFailed && !isLocalGatewayUrl(cfg.gatewayUrl)
     ? t("settings.localGatewayUrlRequired") : null;
+  const openclawBackend = backends.find((b) => b.id === "openclaw");
+  const openclawNeedsAttention = !!gatewayUrlError
+    || (!!openclawBackend && !openclawBackend.disabled && !openclawBackend.connected && !openclawBackend.info.starting);
+  // Open the gateway editor when it needs attention; otherwise the user's own
+  // open/closed choice is left alone (the <details> element stays uncontrolled).
+  const gatewayEditorRef = useRef<HTMLDetailsElement | null>(null);
+  useEffect(() => {
+    if (openclawNeedsAttention && gatewayEditorRef.current) gatewayEditorRef.current.open = true;
+  }, [openclawNeedsAttention]);
+  const isBuiltinBackend = (b: Pick<BackendStatus, "id" | "info">) =>
+    (backendDescriptors.get(b.id)?.connectionMode || b.info.connectionMode) === "builtin-service";
+  const hasOpenclawCard = !!openclawBackend;
+  const hasShoggothCard = backends.some(isBuiltinBackend);
+  const hasHermesCard = backends.some((b) => b.id === "hermes");
+
+  // OpenClaw gateway address and authentication, shown inside the OpenClaw card.
+  const renderOpenclawGateway = () => (
+    <details className="settings-subsection settings-disclosure" id="settings-openclaw" ref={gatewayEditorRef}>
+      <summary className="settings-disclosure-summary">
+        <div className="settings-subsection-head">
+          <div><h5>{t("settings.openclawGateway")}</h5><p>{t("settings.openclawGatewayDesc")}</p></div>
+        </div>
+        <dl className="settings-kv">
+          <div><dt>{t("settings.gatewayUrl")}</dt><dd className="mono" title={cfg.gatewayUrl}>{cfg.gatewayUrl || "—"}</dd></div>
+          <div><dt>{t("settings.gatewayAuth")}</dt><dd>{t(cfg.token ? "settings.gatewayAuthToken" : "settings.deviceIdentity")}</dd></div>
+        </dl>
+        <span className="settings-disclosure-action" aria-hidden="true">
+          <span className="settings-disclosure-edit">{t("common.edit")}</span>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m5 6 3 3 3-3" /></svg>
+        </span>
+      </summary>
+      <div className="settings-disclosure-body">
+      <Field label={t("settings.gatewayUrl")} hint={t("settings.gatewayUrlHint")}
+        error={gatewayUrlError} errorId="settings-gateway-url-error">
+        <TextInput
+          id="settings-gateway-url"
+          className="field-input field-mono"
+          aria-invalid={!!gatewayUrlError}
+          aria-describedby={gatewayUrlError ? "settings-gateway-url-error" : undefined}
+          disabled={loading || configFailed}
+          value={cfg.gatewayUrl}
+          onBlur={flushConnectionChanges}
+          onChange={(e) => {
+            invalidateTest("openclaw");
+            changeSettings({ gatewayUrl: e.target.value }, true);
+          }}
+          placeholder="ws://127.0.0.1:18792"
+        />
+      </Field>
+      <Field label="Token" hint={t("settings.tokenHint")}>
+        <TextInput
+          type="password"
+          className="field-input field-mono"
+          disabled={loading || configFailed}
+          value={cfg.token}
+          onBlur={flushConnectionChanges}
+          onChange={(e) => {
+            invalidateTest("openclaw");
+            changeSettings({ token: e.target.value }, true);
+          }}
+          autoComplete="off"
+        />
+      </Field>
+      <div className="settings-actions">
+        <button
+          className="ui-cbtn ui-cbtn--sm"
+          disabled={loading || configFailed || !!gatewayUrlError}
+          onClick={() => runTest("openclaw", { backend: "openclaw", gatewayUrl: cfg.gatewayUrl })}
+        >
+          {t("common.test")}
+        </button>
+        {renderTest("openclaw")}
+      </div>
+      {/* LAN 发现开关(S3):managed=false=无白名单默认已开(只读);写后重启网关生效 */}
+      {REMOTE_CONNECTIONS_ENABLED && lan?.supported &&
+        (lan.managed ? (
+          <div className="settings-actions">
+            <Switch
+              checked={!!lan.enabled}
+              onChange={(v) => {
+                if (!lanBusy) void onToggleLan(v);
+              }}
+              label={t("settings.lanDiscovery")}
+            />
+            <span className="ui-hint">{t("settings.lanDiscoveryHint")}</span>
+          </div>
+        ) : (
+          <p className="ui-hint">{t("settings.lanDefaultOn")}</p>
+        ))}
+      {REMOTE_CONNECTIONS_ENABLED && <p className="ui-hint">
+        {t("settings.tunnelNote1")}
+        <span className="mono"> ssh -L 18792:127.0.0.1:18792 user@host</span>
+        {t("settings.tunnelNote2")}
+        <span className="mono"> ws://127.0.0.1:18792</span>
+        {t("settings.tunnelNote3")}
+      </p>}
+      </div>
+    </details>
+  );
+
+  // Remote Hermes dashboards (only when remote connections are released).
+  const renderHermesRemotes = () => (
+    <details className="settings-subsection settings-disclosure" id="settings-hermes">
+      <summary className="settings-disclosure-summary">
+        <div className="settings-subsection-head">
+          <div><h5>{t("settings.hermesConn")}</h5><p>{t("settings.hermesConnDesc")}</p></div>
+        </div>
+        <span className="settings-disclosure-action" aria-hidden="true">
+          <span className="settings-disclosure-edit">{t("common.edit")}</span>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m5 6 3 3 3-3" /></svg>
+        </span>
+      </summary>
+      <div className="settings-disclosure-body">
+      {validateRemotes() && (
+        <div className="error" role="alert">{validateRemotes()}</div>
+      )}
+      <Switch
+        checked={cfg.hermesMode === "remote"}
+        disabled={loading || configFailed}
+        onChange={(v) => changeSettings({ hermesMode: v ? "remote" : "local" }, true)}
+        label={cfg.hermesMode === "remote" ? t("settings.hermesRemoteMode") : t("settings.hermesLocalMode")}
+      />
+      {cfg.hermesMode === "remote" && (
+        <div className="remotes">
+          {cfg.hermesRemotes.length === 0 && <p className="muted">{t("settings.noRemotes")}</p>}
+          {cfg.hermesRemotes.map((r, i) => {
+            const uid = remoteUids[i] ?? String(i);
+            const testKey = `hermes-${uid}`;
+            return (
+              <div key={uid} className="remote-row">
+                <div className="field-row">
+                  <Field label={t("common.profile")}>
+                    <TextInput
+                      value={r.profile}
+                      onChange={(e) => setRemote(i, { profile: e.target.value })}
+                      placeholder="default"
+                    />
+                  </Field>
+                  <Field label={t("settings.remoteDashboardUrl")}>
+                    <TextInput
+                      className="field-input field-mono"
+                      value={r.baseUrl}
+                      onChange={(e) => setRemote(i, { baseUrl: e.target.value })}
+                      placeholder="http://host:9119"
+                    />
+                  </Field>
+                </div>
+                <Field label="Token" hint={t("settings.remoteTokenHint")}>
+                  <TextInput
+                    type="password"
+                    className="field-input field-mono"
+                    value={r.token || ""}
+                    onChange={(e) => setRemote(i, { token: e.target.value })}
+                    autoComplete="off"
+                  />
+                </Field>
+                <div className="settings-actions">
+                  <button
+                    className="ui-cbtn ui-cbtn--sm"
+                    onClick={() => {
+                      // Empty URL → the backend would silently probe the LOCAL
+                      // default dashboard and could report a misleading ✓. Refuse.
+                      if (!r.baseUrl.trim()) {
+                        setTests((prev) => ({
+                          ...prev,
+                          [testKey]: { ok: false, error: t("settings.remoteUrlRequired", { n: i + 1 }) },
+                        }));
+                        return;
+                      }
+                      runTest(testKey, { backend: "hermes", baseUrl: r.baseUrl, token: r.token });
+                    }}
+                  >
+                    {t("common.test")}
+                  </button>
+                  {renderTest(testKey)}
+                  <button className="ui-cbtn ui-cbtn--sm ui-cbtn--danger" onClick={() => removeRemote(i)}>
+                    {t("common.remove")}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          <button className="ui-cbtn ui-cbtn--sm" onClick={addRemote}>{t("settings.addRemote")}</button>
+        </div>
+      )}
+      </div>
+    </details>
+  );
+
+  // Local CLIs run through the built-in Shoggoth backend, so they live in its card.
+  const showRuntimeStatus = backendCatalog.some((descriptor) => descriptor.surfaces.runtimeStatus === true);
+  const renderShoggothBody = () => showRuntimeStatus ? <RuntimeStatusList
+    runtimes={runtimes.map((runtime) => ({ ...runtime,
+      enabled: loading || configFailed ? runtime.enabled : !cfg.disabledBackends.includes(runtime.runtime) }))}
+    loading={runtimesLoading} error={runtimesError} busy={loading || saving || togglingBackend || configFailed}
+    onToggle={(runtime) => void toggleRuntimeConnection(runtime)} /> : null;
+
+  // Every connection relies on the background service; show which ones do.
+  const serviceDependents = backends.filter((b) => !b.disabled
+    && (backendDescriptors.get(b.id)?.connectionMode || b.info.connectionMode) !== "native-runtime");
+  const dependentChips = serviceDependents.length > 0 ? <ul className="settings-service-dependent-list">
+    {serviceDependents.map((b) => <li key={b.id} className={b.connected ? "is-connected" : ""}>
+      <BackendMark id={b.id} name={b.name} />{b.name}
+    </li>)}
+  </ul> : undefined;
+
+  const renderBackendBody = (b: BackendStatus) => {
+    if (b.id === "openclaw") return renderOpenclawGateway();
+    if (REMOTE_CONNECTIONS_ENABLED && b.id === "hermes") return renderHermesRemotes();
+    if (isBuiltinBackend(b)) return renderShoggothBody();
+    return null;
+  };
+
+  // Until (or unless) status reports a backend, its settings still need a home.
+  const renderFallbackCard = (id: string, name: string, body: ReactNode) => (
+    <section className="settings-backend-fallback" key={`fallback:${id}`}>
+      <div className="settings-backend-row">
+        <BackendMark id={id} name={name} />
+        <div className="settings-backend-copy"><h4>{name}</h4></div>
+      </div>
+      <div className="settings-backend-body">{body}</div>
+    </section>
+  );
 
   return (
     <div className="page management-page settings-page">
@@ -973,6 +1196,19 @@ export default function SettingsPage() {
 
       <div className="settings-stack">
         <div className="settings-group" id="settings-connections">
+        {/* The background service sits above the connections that depend on it. */}
+        <section className="settings-section" id="settings-service">
+          <header className="settings-section-head">
+            <h3 className="settings-h">{t("settings.serviceSubsection")}</h3>
+            <p className="settings-sech">{t("settings.serviceSharedDesc")}</p>
+          </header>
+          <ServiceSettings
+            status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
+            onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
+            dependents={dependentChips}
+          />
+        </section>
+
         <BackendOverview
           backends={backends} descriptors={backendDescriptors} versions={versionsById} loading={loading || saving || togglingBackend}
           attention={(id) => {
@@ -980,23 +1216,13 @@ export default function SettingsPage() {
             return !!status && (status.running || status.ok === false || isActionableUpdatePhase(status));
           }}
           renderDetails={(b) => <>{renderBackendVersion(versionsById.get(b.id), b)}{renderStandingGrants(b)}</>}
+          renderBody={renderBackendBody}
           isDisconnectable={isDisconnectable} enabledCount={enabledCount} configFailed={configFailed}
           onToggle={(b) => void toggleBackendConnection(b)}
-          onConfigure={(id) => {
-            if (id === "openclaw" || (REMOTE_CONNECTIONS_ENABLED && id === "hermes")) {
-              const target = document.getElementById(`settings-${id}`);
-              if (target instanceof HTMLDetailsElement) target.open = true;
-              target?.scrollIntoView({ block: "start" });
-              target?.querySelector<HTMLElement>("input, [role='switch']")?.focus({ preventScroll: true });
-            }
-          }}
         />
-
-        {backendCatalog.some((descriptor) => descriptor.surfaces.runtimeStatus === true) && <RuntimeStatusList
-          runtimes={runtimes.map((runtime) => ({ ...runtime,
-            enabled: loading || configFailed ? runtime.enabled : !cfg.disabledBackends.includes(runtime.runtime) }))}
-          loading={runtimesLoading} error={runtimesError} busy={loading || saving || togglingBackend || configFailed}
-          onToggle={(runtime) => void toggleRuntimeConnection(runtime)} />}
+        {REMOTE_CONNECTIONS_ENABLED && !hasHermesCard && renderFallbackCard("hermes", "Hermes", renderHermesRemotes())}
+        {!hasOpenclawCard && renderFallbackCard("openclaw", "OpenClaw", renderOpenclawGateway())}
+        {!hasShoggothCard && showRuntimeStatus && renderFallbackCard("shoggoth", "Shoggoth", renderShoggothBody())}
 
         {backendCatalog.filter((descriptor) => descriptor.aliases?.length).flatMap((descriptor) =>
           [descriptor.id, ...(descriptor.surfaces.runtimeStatus ? [] : descriptor.aliases!)].filter((id) => cfg.disabledBackends.includes(id)).map((id) => (
@@ -1006,14 +1232,15 @@ export default function SettingsPage() {
                 onClick={() => void applyBackendConnection({ id, name: id }, false)}>{t("settings.reconnect")}</button>
             </div>
           ))) }
-        <ServiceSettings
-          status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
-          onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
-        />
-        {backendCatalog.some((descriptor) => descriptor.surfaces.nativeCapacity === true) && <NativeCapacityCard />}
         </div>
+
         <div className="settings-group" id="settings-general">
+          <header className="settings-section-head">
+            <h3 className="settings-h">{t("settings.category.general")}</h3>
+            <p className="settings-sech">{t("settings.generalDesc")}</p>
+          </header>
           <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} />
+          {/* Developer-only switches; hidden in release builds, so they stay last and collapsed. */}
           <details className="settings-advanced" id="settings-debug">
             <summary className="settings-advanced-summary">
               <div><h3 className="settings-h">{t("debug.section")}</h3><p className="settings-sech">{t("settings.debugSectionDesc")}</p></div>
@@ -1031,166 +1258,6 @@ export default function SettingsPage() {
               {debugOn && <p className="ui-hint" role="status">{t("debug.toggleHint")}</p>}
             </div>
           </details>
-        </div>
-
-        <div className="settings-group">
-        <div className="settings-connection-tools">
-        {/* OpenClaw connection */}
-        <details className="settings-section settings-connection-editor" id="settings-openclaw">
-          <summary className="settings-section-head">
-            <h3 className="settings-h">{t("settings.openclawGateway")}</h3>
-            <p className="settings-sech">{t("settings.openclawGatewayDesc")}</p>
-          </summary>
-          <div className="settings-card">
-            <Field label={t("settings.gatewayUrl")} hint={t("settings.gatewayUrlHint")}
-              error={gatewayUrlError} errorId="settings-gateway-url-error">
-              <TextInput
-                id="settings-gateway-url"
-                className="field-input field-mono"
-                aria-invalid={!!gatewayUrlError}
-                aria-describedby={gatewayUrlError ? "settings-gateway-url-error" : undefined}
-                disabled={loading || configFailed}
-                value={cfg.gatewayUrl}
-                onBlur={flushConnectionChanges}
-                onChange={(e) => {
-                  invalidateTest("openclaw");
-                  changeSettings({ gatewayUrl: e.target.value }, true);
-                }}
-                placeholder="ws://127.0.0.1:18792"
-              />
-            </Field>
-            <Field label="Token" hint={t("settings.tokenHint")}>
-              <TextInput
-                type="password"
-                className="field-input field-mono"
-                disabled={loading || configFailed}
-                value={cfg.token}
-                onBlur={flushConnectionChanges}
-                onChange={(e) => {
-                  invalidateTest("openclaw");
-                  changeSettings({ token: e.target.value }, true);
-                }}
-                autoComplete="off"
-              />
-            </Field>
-            <div className="settings-actions">
-              <button
-                className="ui-cbtn ui-cbtn--sm"
-                disabled={loading || configFailed || !!gatewayUrlError}
-                onClick={() => runTest("openclaw", { backend: "openclaw", gatewayUrl: cfg.gatewayUrl })}
-              >
-                {t("common.test")}
-              </button>
-              {renderTest("openclaw")}
-            </div>
-            {/* LAN 发现开关(S3):managed=false=无白名单默认已开(只读);写后重启网关生效 */}
-            {REMOTE_CONNECTIONS_ENABLED && lan?.supported &&
-              (lan.managed ? (
-                <div className="settings-actions">
-                  <Switch
-                    checked={!!lan.enabled}
-                    onChange={(v) => {
-                      if (!lanBusy) void onToggleLan(v);
-                    }}
-                    label={t("settings.lanDiscovery")}
-                  />
-                  <span className="ui-hint">{t("settings.lanDiscoveryHint")}</span>
-                </div>
-              ) : (
-                <p className="ui-hint">{t("settings.lanDefaultOn")}</p>
-              ))}
-            {REMOTE_CONNECTIONS_ENABLED && <p className="ui-hint">
-              {t("settings.tunnelNote1")}
-              <span className="mono"> ssh -L 18792:127.0.0.1:18792 user@host</span>
-              {t("settings.tunnelNote2")}
-              <span className="mono"> ws://127.0.0.1:18792</span>
-              {t("settings.tunnelNote3")}
-            </p>}
-          </div>
-        </details>
-
-        {/* Local Hermes is managed automatically; only remote connections need an editor. */}
-        {REMOTE_CONNECTIONS_ENABLED && <details className="settings-section settings-connection-editor" id="settings-hermes">
-          <summary className="settings-section-head">
-            <h3 className="settings-h">{t("settings.hermesConn")}</h3>
-            <p className="settings-sech">{t("settings.hermesConnDesc")}</p>
-          </summary>
-          <div className="settings-card">
-            {validateRemotes() && (
-              <div className="error" role="alert">{validateRemotes()}</div>
-            )}
-            <Switch
-              checked={cfg.hermesMode === "remote"}
-              disabled={loading || configFailed}
-              onChange={(v) => changeSettings({ hermesMode: v ? "remote" : "local" }, true)}
-              label={cfg.hermesMode === "remote" ? t("settings.hermesRemoteMode") : t("settings.hermesLocalMode")}
-            />
-            {cfg.hermesMode === "remote" && (
-              <div className="remotes">
-                {cfg.hermesRemotes.length === 0 && <p className="muted">{t("settings.noRemotes")}</p>}
-                {cfg.hermesRemotes.map((r, i) => {
-                  const uid = remoteUids[i] ?? String(i);
-                  const testKey = `hermes-${uid}`;
-                  return (
-                    <div key={uid} className="remote-row">
-                      <div className="field-row">
-                        <Field label={t("common.profile")}>
-                          <TextInput
-                            value={r.profile}
-                            onChange={(e) => setRemote(i, { profile: e.target.value })}
-                            placeholder="default"
-                          />
-                        </Field>
-                        <Field label={t("settings.remoteDashboardUrl")}>
-                          <TextInput
-                            className="field-input field-mono"
-                            value={r.baseUrl}
-                            onChange={(e) => setRemote(i, { baseUrl: e.target.value })}
-                            placeholder="http://host:9119"
-                          />
-                        </Field>
-                      </div>
-                      <Field label="Token" hint={t("settings.remoteTokenHint")}>
-                        <TextInput
-                          type="password"
-                          className="field-input field-mono"
-                          value={r.token || ""}
-                          onChange={(e) => setRemote(i, { token: e.target.value })}
-                          autoComplete="off"
-                        />
-                      </Field>
-                      <div className="settings-actions">
-                        <button
-                          className="ui-cbtn ui-cbtn--sm"
-                          onClick={() => {
-                            // Empty URL → the backend would silently probe the LOCAL
-                            // default dashboard and could report a misleading ✓. Refuse.
-                            if (!r.baseUrl.trim()) {
-                              setTests((prev) => ({
-                                ...prev,
-                                [testKey]: { ok: false, error: t("settings.remoteUrlRequired", { n: i + 1 }) },
-                              }));
-                              return;
-                            }
-                            runTest(testKey, { backend: "hermes", baseUrl: r.baseUrl, token: r.token });
-                          }}
-                        >
-                          {t("common.test")}
-                        </button>
-                        {renderTest(testKey)}
-                        <button className="ui-cbtn ui-cbtn--sm ui-cbtn--danger" onClick={() => removeRemote(i)}>
-                          {t("common.remove")}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-                <button className="ui-cbtn ui-cbtn--sm" onClick={addRemote}>{t("settings.addRemote")}</button>
-              </div>
-            )}
-          </div>
-        </details>}
-        </div>
         </div>
       </div>
 

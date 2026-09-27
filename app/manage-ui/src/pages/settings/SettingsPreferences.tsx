@@ -6,6 +6,7 @@ import { fireNotification } from "../../lib/notify";
 import ThemePicker from "./ThemePicker";
 import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
 import SettingsAppUpdate from "./SettingsAppUpdate";
+import { SettingsIcon } from "./SettingsIcons";
 
 // Keep the theme preference and picker implementation available for a later
 // re-enable, but do not expose theme switching in Settings for now.
@@ -21,36 +22,32 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
   const toast = useToast();
   return (
     <div className="settings-preferences">
-      {/* Common preferences stay together and are visible on first entry. */}
-      <div className="settings-preferences-main">
-      <section className="settings-section" id="settings-appearance">
-        <header className="settings-section-head">
-          <h3 className="settings-h">{t("settings.appearanceSection")}</h3>
-          <p className="settings-sech">{t("settings.appearanceSectionDesc")}</p>
-        </header>
-        <div className="settings-card">
-          <div className="settings-prefs-row">
-            {SHOW_THEME_PICKER && (
-              <ThemePicker
-                value={cfg.theme}
-                disabled={disabled || !themeLoaded}
-                onChange={(theme) => onChange({ theme })}
-              />
-            )}
-            <Field label={t("settings.langLabel")} hint={t("settings.langHint")}>
-              <Select disabled={disabled} value={cfg.locale} onChange={(v) => onChange({ locale: v })}>
-                <Option value="">{t("settings.langAuto")}</Option>
-                <Option value="zh-CN">简体中文</Option>
-                <Option value="en">English</Option>
-              </Select>
-            </Field>
+      {/* Everyday preferences share one grouped card: one row per setting. */}
+      <section className="settings-section settings-preferences-main" aria-label={t("settings.category.general")}>
+        <div className="settings-card settings-list-card">
+          <div className="settings-list-row settings-list-row--icon" id="settings-appearance">
+            <SettingsIcon name="language" />
+            <div className="settings-prefs-row">
+              {SHOW_THEME_PICKER && (
+                <ThemePicker
+                  value={cfg.theme}
+                  disabled={disabled || !themeLoaded}
+                  onChange={(theme) => onChange({ theme })}
+                />
+              )}
+              <Field label={t("settings.langLabel")} hint={t("settings.langHint")}>
+                <Select disabled={disabled} value={cfg.locale} onChange={(v) => onChange({ locale: v })}>
+                  <Option value="">{t("settings.langAuto")}</Option>
+                  <Option value="zh-CN">简体中文</Option>
+                  <Option value="en">English</Option>
+                </Select>
+              </Field>
+            </div>
           </div>
+          <SettingsDesktopPrinter disabled={disabled} />
+          <SettingsAppUpdate />
         </div>
       </section>
-
-      <SettingsDesktopPrinter disabled={disabled} />
-      <SettingsAppUpdate />
-      </div>
 
       {/* Notifications — native macOS desktop notifications, per category */}
       <section className="settings-section" id="settings-notif">
@@ -65,7 +62,7 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
                 disabled={disabled}
                 checked={cfg.notifications.chat}
                 onChange={(v) => onChange({ notifications: { ...cfg.notifications, chat: v } })}
-                label={<span className="settings-notification-copy"><span>{t("settings.notifChat")}</span><small>{t("settings.notifChatDesc")}</small></span>}
+                label={<span className="settings-notification-label"><SettingsIcon name="chat" /><span className="settings-notification-copy"><span>{t("settings.notifChat")}</span><small>{t("settings.notifChatDesc")}</small></span></span>}
               />
             </div>
             <div className="settings-switch-row">
@@ -73,7 +70,7 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
                 disabled={disabled}
                 checked={cfg.notifications.cron}
                 onChange={(v) => onChange({ notifications: { ...cfg.notifications, cron: v } })}
-                label={<span className="settings-notification-copy"><span>{t("settings.notifCron")}</span><small>{t("settings.notifCronDesc")}</small></span>}
+                label={<span className="settings-notification-label"><SettingsIcon name="schedule" /><span className="settings-notification-copy"><span>{t("settings.notifCron")}</span><small>{t("settings.notifCronDesc")}</small></span></span>}
               />
             </div>
             <div className="settings-switch-row">
@@ -81,7 +78,7 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
                 disabled={disabled}
                 checked={cfg.notifications.task}
                 onChange={(v) => onChange({ notifications: { ...cfg.notifications, task: v } })}
-                label={<span className="settings-notification-copy"><span>{t("settings.notifTask")}</span><small>{t("settings.notifTaskDesc")}</small></span>}
+                label={<span className="settings-notification-label"><SettingsIcon name="task" /><span className="settings-notification-copy"><span>{t("settings.notifTask")}</span><small>{t("settings.notifTaskDesc")}</small></span></span>}
               />
             </div>
           </div>
