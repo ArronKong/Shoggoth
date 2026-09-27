@@ -64,6 +64,8 @@ jobs:
           for value in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID SHOGGOTH_CODESIGN_IDENTITY; do
             test -n "${!value:-}" || { echo "Release secret missing: $value" >&2; exit 1; }
           done
+          npm run export:source -- "$RUNNER_TEMP/shoggoth-release-source"
+          node scripts/check-release-private-keys.cjs "$RUNNER_TEMP/shoggoth-release-source"
 
       - name: Install locked dependencies
         run: |
@@ -81,6 +83,7 @@ jobs:
           npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json
           node scripts/desktop-app-update-unit.cjs
           node scripts/app-update-release-contract-unit.cjs
+          node scripts/check-release-private-keys-unit.cjs
           node scripts/adhoc-sign-unit.cjs
           node scripts/notarize-unit.cjs
           npm audit --audit-level=moderate

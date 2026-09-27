@@ -164,6 +164,10 @@ function shouldSignMachO({ mode, valid, teamId }) {
 exports.default = function adhocSign(context) {
   if (context.electronPlatformName !== "darwin") return;
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
+  // afterPack runs after app.asar and extraResources are copied, before any
+  // codesign call. A finding stops signing, notarization and artifact upload.
+  const { fileCount } = require("./check-release-private-keys.cjs").scanDirectory(appPath);
+  console.log(`  • private-key check passed before signing (${fileCount} files)`);
   verifyPackagedSqlite(appPath);
   require("./prepare-native-terminal.cjs").verifyPackagedNativeTerminal(appPath);
   const entitlementsPath = path.resolve(__dirname, "..", "build", "entitlements.mac.plist");

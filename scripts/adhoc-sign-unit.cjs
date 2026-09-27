@@ -173,4 +173,17 @@ assert.equal(
   "electron-builder 必须禁用自动证书发现，签名只允许由 afterPack 完成",
 );
 
+const blockedApp = path.join(__dirname, ".adhoc-sign-blocked-fixture", "Shoggoth.app");
+try {
+  fs.mkdirSync(path.join(blockedApp, "Contents", "Resources"), { recursive: true });
+  fs.writeFileSync(path.join(blockedApp, "Contents", "Resources", "signing.p12"), "fixture");
+  assert.throws(() => require("./adhoc-sign.cjs").default({
+    electronPlatformName: "darwin",
+    appOutDir: path.dirname(blockedApp),
+    packager: { appInfo: { productFilename: "Shoggoth" } },
+  }), /PRIVATE_KEY_MATERIAL_FOUND/u, "packaged App must be blocked before any signing command");
+} finally {
+  fs.rmSync(path.dirname(blockedApp), { recursive: true, force: true });
+}
+
 console.log("Ad-hoc/local/Developer ID signing unit: PASS (including vendor verification failure)");
