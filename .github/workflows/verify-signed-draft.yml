@@ -1,0 +1,74 @@
+name: Verify notarized macOS draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Draft release tag matching package.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      SHOGGOTH_EXPECT_TEAM_ID: MK3JHXWR7H
+      SHOGGOTH_EXPECT_NOTARIZED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+
+      - name: Install dependencies and pinned runtimes
+        run: |
+          npm ci --ignore-scripts
+          npm run prepare:runtimes
+
+      - name: Download exact draft assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./package.json").version')"
+          test "$RELEASE_TAG" = "v$VERSION"
+          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
+          mkdir -p dist/mac
+          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-mac.zip" --dir dist
+          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-x64.dmg" --dir dist
+          gh release download "$RELEASE_TAG" --pattern SHA256SUMS.txt --dir dist
+          (
+            cd dist
+            grep -F "  Shoggoth-${VERSION}-mac.zip" SHA256SUMS.txt | shasum -a 256 -c -
+            grep -F "  Shoggoth-${VERSION}-x64.dmg" SHA256SUMS.txt | shasum -a 256 -c -
+          )
+          ditto -x -k "dist/Shoggoth-${VERSION}-mac.zip" dist/mac
+
+      - name: Verify Intel App and DMG on Intel hardware
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./package.json").version')"
+          APP="dist/mac/Shoggoth.app"
+          DMG="dist/Shoggoth-${VERSION}-x64.dmg"
+          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-x64
+          hdiutil verify "$DMG"
+          xcrun stapler validate "$DMG"
+          MOUNT="$RUNNER_TEMP/shoggoth-x64-dmg"
+          mkdir -p "$MOUNT"
+          trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true' EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$DMG"
+          test "$(lipo -archs "$MOUNT/Shoggoth.app/Contents/MacOS/Shoggoth")" = x86_64
+          codesign --verify --deep --strict "$MOUNT/Shoggoth.app"
+          codesign -dv --verbose=4 "$MOUNT/Shoggoth.app" 2>&1 |
+            grep -Fx "TeamIdentifier=$SHOGGOTH_EXPECT_TEAM_ID"
+          xcrun stapler validate "$MOUNT/Shoggoth.app"
+          spctl --assess --type execute --verbose=4 "$MOUNT/Shoggoth.app"
+          cmp "$APP/Contents/Resources/app.asar" "$MOUNT/Shoggoth.app/Contents/Resources/app.asar"
