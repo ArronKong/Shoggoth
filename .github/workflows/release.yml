@@ -1,9 +1,6 @@
 name: Signed macOS release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -23,7 +20,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 180
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
       SHOGGOTH_CODESIGN_MODE: developer-id
       SHOGGOTH_CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -33,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -192,13 +189,13 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 120
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
       SHOGGOTH_EXPECT_NOTARIZED: "1"
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ inputs.tag }}
 
       - uses: actions/setup-node@v4
         with:

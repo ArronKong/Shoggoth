@@ -20,6 +20,8 @@ assert.ok(builder.mac.target.some((target) => target.target === "zip"
   && target.arch.includes("arm64") && target.arch.includes("x64")));
 
 const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
+assert.deepEqual(Object.keys(yaml.load(workflow).on), ["workflow_dispatch"],
+  "signed release must require a deliberate manual trigger");
 for (const contract of [
   /REPOSITORY_VISIBILITY[\s\S]*"public"/u,
   /SHOGGOTH_CODESIGN_MODE:\s*developer-id/u,

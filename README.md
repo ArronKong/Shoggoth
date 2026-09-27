@@ -51,28 +51,34 @@ on a clean Mac account.
 Official builds check the public [GitHub Releases](https://github.com/ArronKong/Shoggoth/releases)
 feed after launch and every six hours. A release must contain both macOS ZIPs
 and `latest-mac.yml`; source archives alone cannot update the installed app.
-Development, ad-hoc and local-signing builds deliberately keep the production
+Development, ad-hoc and internal preview builds deliberately keep the production
 update channel disabled.
 
-The `Signed macOS release` workflow builds both architectures, signs with a
-Developer ID Application certificate, notarizes and staples each app, verifies
-the ZIPs and update metadata, and keeps the GitHub Release as a draft until all
-checks pass. The repository must be public and these Actions secrets must be set:
+Follow the [release checklist](RELEASING.md) for every source update and signed
+macOS release. It requires a fresh source export, a manual review of the complete
+`public-source` tree for private or unnecessary files, license and CI checks,
+Developer ID signing and notarization of both architectures, and verification
+of a draft Release before publication. The current release path uses local
+signing credentials and a native Intel runner to verify the draft.
+
+The `Signed macOS release` GitHub Actions workflow is manual-only. It is an
+optional path after end-to-end validation; the public repository must have
+these Actions secrets before it can run:
 
 - `MACOS_CERTIFICATE_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGNING_IDENTITY`
 - `APPLE_API_KEY_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, `APPLE_TEAM_ID`
 
-Create and push a tag matching `package.json`, for example `v0.8.125`, to run
-the workflow. The first updater-capable signed build must be installed manually;
-later signed releases can update it in place.
+Pushing a version tag does not automatically build or publish a release. The
+first updater-capable signed build must be installed manually; later signed
+releases can update it in place.
 
-For a first source publication, run `npm run export:source -- /absolute/path/to/an-empty-directory`.
+For each source update, run `npm run export:source -- /absolute/path/to/an-empty-directory`.
 The export excludes internal development notes and Git history. It also omits
 the third-party bundled plugin packages until their redistribution terms have
 been reviewed; the source build shows an empty built-in plugin catalog. Other
 plugin installation paths remain available. Its file-hash
 manifest is written beside the directory as `<directory>.manifest.json` for local
-verification. Review and scan the exported source before creating a public repo.
+verification. Review and scan every export before updating the public repository.
 
 ## Integrations and data
 

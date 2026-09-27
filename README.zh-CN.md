@@ -63,14 +63,16 @@ npm run dist
 
 ## 正式发布与自动更新
 
-正式构建会在启动后及每六小时检查一次公开的 [GitHub Releases](https://github.com/ArronKong/Shoggoth/releases)。每个版本必须同时上传 Apple Silicon、Intel 两个 macOS ZIP 和 `latest-mac.yml`；只上传源码压缩包不能更新已安装的 App。开发版、ad-hoc 和本地签名包不会连接正式更新通道。
+正式构建会在启动后及每六小时检查一次公开的 [GitHub Releases](https://github.com/ArronKong/Shoggoth/releases)。每个版本必须同时上传 Apple Silicon、Intel 两个 macOS ZIP 和 `latest-mac.yml`；只上传源码压缩包不能更新已安装的 App。开发版、ad-hoc 和内部预览包不会连接正式更新通道。
 
-`Signed macOS release` 工作流会构建双架构版本，用 Developer ID Application 证书签名，完成 Apple 公证与 stapling，验证 ZIP 和更新元数据，并在全部检查通过前把 GitHub Release 保持为草稿。仓库必须公开，并在 GitHub Actions 中配置以下 Secrets：
+每次更新源码和发布正式安装包，都要执行[发布检查清单](RELEASING.md)：从新目录导出源码，人工审核 `public-source` 的完整文件树及隐私、许可证和 CI 检查，完成两个架构的 Developer ID 签名与公证，并在草稿 Release 中验收后公开。目前正式发布使用本机签名凭据，草稿还需经原生 Intel runner 验收。
+
+`Signed macOS release` GitHub Actions 工作流仅供手动触发；完整端到端实测通过后才能作为另一条正式发布路径。公开仓库需先配置以下 Secrets：
 
 - `MACOS_CERTIFICATE_BASE64`、`MACOS_CERTIFICATE_PASSWORD`、`MACOS_SIGNING_IDENTITY`
 - `APPLE_API_KEY_BASE64`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER`、`APPLE_TEAM_ID`
 
-创建并推送与 `package.json` 一致的标签（例如 `v0.8.125`）即可触发发布。第一个带自动更新能力的正式签名版本仍需手动安装；后续正式签名版本才可以原位自动更新。
+推送版本标签不会自动打包或发布。第一个带自动更新能力的正式签名版本仍需手动安装；后续正式签名版本才可以原位自动更新。
 
 ## 后端连接与数据
 
@@ -117,13 +119,13 @@ node_modules/.bin/electron scripts/ui-security-electron-smoke.cjs
 
 ## 导出用于发布的源码
 
-首次准备公开源码时，可以导出到一个空目录：
+每次更新公开源码时，都要导出到一个新的空目录：
 
 ```sh
 npm run export:source -- /absolute/path/to/an-empty-directory
 ```
 
-导出会排除内部开发记录与原仓库的 Git 历史。由于部分第三方内置插件尚未核实再分发许可，公开源码暂不包含这些插件包，源码构建中的内置插件目录为空；其他插件安装方式仍可使用。文件哈希清单保存在导出目录旁边，名称为 `<directory>.manifest.json`，用于本地核对。创建公开仓库前，应先检查并扫描导出的内容。
+导出会排除内部开发记录与原仓库的 Git 历史。由于部分第三方内置插件尚未核实再分发许可，公开源码暂不包含这些插件包，源码构建中的内置插件目录为空；其他插件安装方式仍可使用。文件哈希清单保存在导出目录旁边，名称为 `<directory>.manifest.json`，用于本地核对。每次更新公开仓库前，都要检查并扫描导出的内容。
 
 ## 许可证
 
