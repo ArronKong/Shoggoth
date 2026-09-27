@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { SettingsIcon } from './SettingsIcons';
 import { desktopInspirationBridge, type DesktopShortcutState } from '../../lib/desktop-inspiration';
 
 export function shortcutFromKeyboard(event: Pick<KeyboardEvent, 'code' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>): string | null {
@@ -52,7 +53,8 @@ export default function SettingsDesktopPrinter({ disabled }: { disabled: boolean
     } catch { if (mounted.current) setMessage('saveFailed'); }
     finally { operation.current = false; if (mounted.current) setBusy(false); }
   };
-  return <div className="settings-list-row settings-list-row--split" id="settings-desktop-printer">
+  return <div className="settings-list-row settings-list-row--split settings-list-row--icon" id="settings-desktop-printer">
+    <SettingsIcon name="shortcut" />
     <div className="settings-list-copy">
       <h4>{t('settings.desktopPrinter.title')}</h4>
       <p>{t('settings.desktopPrinter.description')}</p>
@@ -74,7 +76,7 @@ export default function SettingsDesktopPrinter({ disabled }: { disabled: boolean
         }}>
         {capturing ? t('settings.desktopPrinter.recording') : <kbd>{displayShortcut(state.accelerator)}</kbd>}
       </button>
-      <button type="button" className="btn-subtle" disabled={disabled || busy || !host?.setShortcut || state.accelerator === 'Alt+S'}
+      <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={disabled || busy || !host?.setShortcut || state.accelerator === 'Alt+S'}
         onClick={() => { void apply('Alt+S'); }}>{t('settings.desktopPrinter.reset')}</button>
     </div>
   </div>;

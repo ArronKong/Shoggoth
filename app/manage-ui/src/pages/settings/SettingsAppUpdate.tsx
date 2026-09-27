@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { appUpdateBridge, type AppUpdateState } from "../../lib/appUpdate";
+import { SettingsIcon } from "./SettingsIcons";
 
 const fallbackState: AppUpdateState = {
   supported: false,
@@ -73,7 +74,8 @@ export default function SettingsAppUpdate() {
     : null;
 
   return (
-    <div className="settings-list-row settings-list-row--split settings-app-update-card" id="settings-app-update">
+    <div className="settings-list-row settings-list-row--split settings-list-row--icon settings-app-update-card" id="settings-app-update">
+      <SettingsIcon name="update" />
       <div className="settings-list-copy settings-app-update-copy">
         <h4>
           {t("settings.appUpdate.title")}

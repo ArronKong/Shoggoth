@@ -1,47 +1,184 @@
-/* Settings redesign: one full-width card per backend. Each card carries the
-   settings that belong to that backend (OpenClaw gateway, Shoggoth background
-   service and local CLIs), so users never hunt for them further down the page.
-   Loaded after SettingsPage.css / SettingsLayout.css and overrides their older
-   three-column card grid. */
+/* Settings redesign. Page order follows how the pieces depend on each other:
+   the background service every connection shares, then one full-width card per
+   backend that also holds that backend's own settings (OpenClaw gateway,
+   Shoggoth's local CLIs), then everyday preferences, and developer switches
+   folded last. Loaded after SettingsPage.css / SettingsLayout.css and
+   overrides their older three-column card grid. */
 
 .management-page.settings-page {
-  --settings-inset: color-mix(in srgb, var(--ui-surface-2) 70%, var(--ui-surface-1));
+  --settings-inset: color-mix(in srgb, var(--ui-surface-2) 72%, var(--ui-surface-1));
+  --settings-tile: var(--ui-surface-1);
+  --settings-ok-tint: color-mix(in srgb, var(--ui-success) 11%, var(--ui-surface-1));
+  --settings-warn-tint: color-mix(in srgb, var(--ui-warning) 12%, var(--ui-surface-1));
 }
 
-.management-page.settings-page .settings-stack { gap: 48px; }
-.management-page.settings-page .settings-group { gap: 16px; }
-.management-page.settings-page #settings-conn { gap: 16px; }
+.management-page.settings-page .settings-stack { gap: 44px; max-width: 1040px; }
+.management-page.settings-page .settings-group { gap: 36px; }
+/* 通用 heads its own card like every other section; its later sections keep the group rhythm. */
+.management-page.settings-page #settings-general { gap: 14px; }
+.management-page.settings-page #settings-general > .settings-preferences { gap: 36px; }
+.management-page.settings-page #settings-general > .settings-advanced { margin-top: 22px; }
+.management-page.settings-page .settings-section { gap: 14px; }
+.management-page.settings-page .settings-section-head { gap: 4px; }
+.management-page.settings-page .settings-section-head.settings-heading-row { align-items: flex-end; }
 
-/* ── Backend cards ─────────────────────────────────────────────────────── */
+/* ── Status pill (shared) ───────────────────────────────────────────── */
 
-.management-page.settings-page .settings-backend-stack {
+.management-page.settings-page .settings-health {
+  padding: 3px 10px 3px 9px;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  font-size: 12px;
+  line-height: 18px;
+}
+.management-page.settings-page .settings-health.is-healthy { background: var(--settings-ok-tint); }
+.management-page.settings-page .settings-health.is-down { color: var(--ui-warning); background: var(--settings-warn-tint); }
+.management-page.settings-page .settings-health.is-pending i { animation: settings-pulse 1.2s ease-in-out infinite; }
+@keyframes settings-pulse { 50% { opacity: 0.3; } }
+
+/* ── Background service ─────────────────────────────────────────────── */
+
+.management-page.settings-page .settings-service-hero {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
   min-width: 0;
+  padding: 24px;
+  border-radius: 24px;
+  background: var(--ui-surface-1);
+  box-shadow: var(--ui-shadow-card);
+  scroll-margin-top: 80px;
 }
+.management-page.settings-page .settings-service-hero--ready {
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--ui-success) 8%, transparent) 0%, transparent 48%),
+    var(--ui-surface-1);
+}
+.management-page.settings-page .settings-service-hero--attention {
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--ui-warning) 9%, transparent) 0%, transparent 48%),
+    var(--ui-surface-1);
+}
+.management-page.settings-page .settings-service-hero:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
+
+.management-page.settings-page .settings-service-hero .settings-service-top { display: flex; align-items: center; gap: 16px; }
+.management-page.settings-page .settings-service-hero .settings-service-icon {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
+}
+.management-page.settings-page .settings-service-hero .settings-service-icon.is-healthy { background: var(--settings-ok-tint); color: var(--ui-success); }
+.management-page.settings-page .settings-service-hero .settings-service-icon.is-healthy::after {
+  content: "";
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--ui-surface-1);
+  border-radius: 50%;
+  background: var(--ui-success);
+}
+.management-page.settings-page .settings-service-hero--attention .settings-service-icon { background: var(--settings-warn-tint); color: var(--ui-warning); }
+.management-page.settings-page .settings-service-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.management-page.settings-page .settings-service-hero .settings-service-copy h4 { margin: 0; font-size: 18px; line-height: 26px; font-weight: 500; }
+.management-page.settings-page .settings-service-hero .settings-service-copy p { margin: 2px 0 0; color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; }
+.management-page.settings-page .settings-service-version {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  color: var(--settings-muted-surface-2);
+  font-size: 11px;
+  line-height: 18px;
+}
+.management-page.settings-page .settings-service-hero .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+
+.management-page.settings-page .settings-service-hero .settings-service-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.management-page.settings-page .settings-service-hero .settings-service-facts > div,
+.management-page.settings-page .settings-service-hero .settings-service-facts > div:first-child {
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--settings-inset);
+}
+.management-page.settings-page .settings-service-hero .settings-service-facts dt { color: var(--settings-muted-surface-2); font-size: 12px; line-height: 18px; }
+.management-page.settings-page .settings-service-hero .settings-service-facts dd { display: flex; align-items: center; gap: 7px; margin: 4px 0 0; font-size: 14px; line-height: 20px; }
+.management-page.settings-page .settings-service-hero .settings-service-facts dd::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--settings-muted-surface-2);
+}
+.management-page.settings-page .settings-service-hero .settings-service-facts .is-ok dd::before { background: var(--ui-success); }
+.management-page.settings-page .settings-service-hero .settings-service-facts .is-warn dd::before { background: var(--ui-warning); }
+.management-page.settings-page .settings-service-hero .ui-hint { margin: 0; }
+.management-page.settings-page .settings-service-hero .ui-hint.status-error { color: var(--ui-error); }
+
+.management-page.settings-page .settings-service-hero .settings-service-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ui-hairline);
+}
+.management-page.settings-page .settings-service-dependents { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.management-page.settings-page .settings-service-dependents > span { color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; }
+.management-page.settings-page .settings-service-dependent-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.management-page.settings-page .settings-service-dependent-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 4px;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+  font-size: 12px;
+  line-height: 18px;
+}
+.management-page.settings-page .settings-service-dependent-list .settings-backend-mark {
+  --backend-tab-icon-size: 13px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--ui-surface-1);
+}
+.management-page.settings-page .settings-service-hero .settings-service-bottom p { flex: 1 1 220px; margin: 0; color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; text-align: right; }
+
+/* ── Backend cards ──────────────────────────────────────────────────── */
+
+.management-page.settings-page #settings-conn { gap: 14px; }
+.management-page.settings-page .settings-backend-stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
 .management-page.settings-page .settings-backend--card,
 .management-page.settings-page .settings-backend-fallback {
   min-width: 0;
-  padding: 22px 24px 0;
+  padding: 20px 24px 22px;
   border-radius: 24px;
   background: var(--ui-surface-1);
   box-shadow: var(--ui-shadow-card);
 }
 
-.management-page.settings-page .settings-backend-fallback { padding-bottom: 22px; }
-
-/* Header: mark · name + mode · status pill */
 .management-page.settings-page .settings-backend--card .settings-backend-row,
 .management-page.settings-page .settings-backend-fallback .settings-backend-row {
   display: flex;
   align-items: center;
   gap: 14px;
 }
-
-.management-page.settings-page .settings-backend--card .settings-backend-copy { display: block; flex: 1; }
-.management-page.settings-page .settings-backend--card .settings-backend-copy h4 { font-size: 16px; }
 .management-page.settings-page .settings-backend--card .settings-backend-mark,
 .management-page.settings-page .settings-backend-fallback .settings-backend-mark {
   --backend-tab-icon-size: 24px;
@@ -50,84 +187,65 @@
   height: 44px;
   border-radius: 14px;
 }
+.management-page.settings-page .settings-backend--card .settings-backend-copy { display: block; flex: 1; }
+.management-page.settings-page .settings-backend-title { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
+.management-page.settings-page .settings-backend--card .settings-backend-copy h4,
+.management-page.settings-page .settings-backend-fallback .settings-backend-copy h4 { font-size: 16px; line-height: 24px; }
+.management-page.settings-page .settings-backend--card .settings-backend-actions { flex-wrap: nowrap; padding: 0; }
 
-.management-page.settings-page .settings-health {
-  padding: 4px 10px 4px 9px;
+.management-page.settings-page .settings-backend--card .settings-detail-toggle {
+  gap: 2px;
+  width: auto;
+  height: 32px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 8px 0 12px;
   border-radius: 999px;
-  background: var(--ui-surface-2);
-  line-height: 16px;
+  color: var(--settings-muted-surface-1);
+  font-size: 12px;
 }
-.management-page.settings-page .settings-health.is-healthy { background: color-mix(in srgb, var(--ui-success) 10%, var(--ui-surface-1)); }
-.management-page.settings-page .settings-health.is-down { color: var(--ui-warning); background: color-mix(in srgb, var(--ui-warning) 10%, var(--ui-surface-1)); }
-.management-page.settings-page .settings-health.is-pending i { animation: settings-pulse 1.2s ease-in-out infinite; }
-@keyframes settings-pulse { 50% { opacity: 0.3; } }
-@media (prefers-reduced-motion: reduce) {
-  .management-page.settings-page .settings-health.is-pending i { animation: none; }
-}
+.management-page.settings-page .settings-backend--card .settings-detail-toggle:hover { color: var(--ui-text-1); }
+.management-page.settings-page .settings-backend--card .settings-detail-toggle[aria-expanded="true"] { background: var(--ui-surface-2); color: var(--ui-text-1); }
 
-/* Facts under the name, aligned with the text column */
+/* Facts, aligned with the name column */
 .management-page.settings-page .settings-backend--card .settings-backend-meta {
+  align-items: center;
   gap: 6px;
   margin: 12px 0 0 58px;
 }
 .management-page.settings-page .settings-backend--card .settings-backend-meta > span {
-  padding: 2px 8px;
-  border-radius: 6px;
+  padding: 2px 9px;
+  border-radius: 8px;
   background: var(--ui-surface-2);
   color: var(--settings-muted-surface-2);
   line-height: 18px;
 }
-.management-page.settings-page .settings-backend--card .settings-backend-meta .mono { flex-basis: auto; }
-.management-page.settings-page .settings-backend--card .settings-backend-notice { margin-left: 58px; }
+.management-page.settings-page .settings-backend--card .settings-backend-meta .mono { flex-basis: auto; font-size: 11px; }
+.management-page.settings-page .settings-backend--card .settings-backend-notice { margin: 10px 0 0 58px; }
 
 .management-page.settings-page .settings-update-link {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin: 12px 0 0 58px;
-  padding: 4px 10px;
+  padding: 2px 10px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--ui-warning) 10%, var(--ui-surface-1));
-  line-height: 16px;
+  background: var(--settings-warn-tint);
+  line-height: 18px;
 }
 .management-page.settings-page .settings-update-link i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.management-page.settings-page .settings-update-link:hover { background: color-mix(in srgb, var(--ui-warning) 16%, var(--ui-surface-1)); }
+.management-page.settings-page .settings-update-link:hover { background: color-mix(in srgb, var(--ui-warning) 18%, var(--ui-surface-1)); }
 
-/* Settings owned by the backend */
-.management-page.settings-page .settings-backend-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 20px;
-}
-
-/* Footer: connection action on the left, versions & diagnostics on the right */
-.management-page.settings-page .settings-backend-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 60px;
-  margin-top: 18px;
-  padding: 12px 0;
-  border-top: 1px solid var(--ui-hairline);
-}
-.management-page.settings-page .settings-backend--card .settings-backend-actions { padding: 0; }
-.management-page.settings-page .settings-backend--card .settings-detail-toggle {
-  gap: 4px;
-  width: auto;
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding: 0 8px 0 12px;
-  border-radius: 999px;
-  font-size: 12px;
-}
 .management-page.settings-page .settings-backend--card .settings-backend-details {
-  margin-top: 0;
-  padding: 16px 0 20px;
+  margin: 14px 0 0;
+  padding: 16px 18px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--settings-inset);
 }
 
-/* ── Sub-sections inside a card ────────────────────────────────────────── */
+.management-page.settings-page .settings-backend-body { display: flex; flex-direction: column; gap: 12px; margin-top: 18px; }
+
+/* ── Inset sections inside a card ──────────────────────────────────── */
 
 .management-page.settings-page .settings-subsection {
   display: flex;
@@ -139,31 +257,13 @@
   background: var(--settings-inset);
   scroll-margin-top: 80px;
 }
-
-.management-page.settings-page .settings-subsection-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-}
+.management-page.settings-page .settings-subsection-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
 .management-page.settings-page .settings-subsection-head > div { min-width: 0; }
-.management-page.settings-page .settings-subsection-head h5 {
-  margin: 0;
-  color: var(--ui-text-1);
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 500;
-}
-.management-page.settings-page .settings-subsection-head p {
-  margin: 2px 0 0;
-  color: var(--settings-muted-surface-2);
-  font-size: 12px;
-  line-height: 18px;
-}
+.management-page.settings-page .settings-subsection-head h5 { margin: 0; color: var(--ui-text-1); font-size: 14px; line-height: 20px; font-weight: 500; }
+.management-page.settings-page .settings-subsection-head p { margin: 2px 0 0; color: var(--settings-muted-surface-2); font-size: 12px; line-height: 18px; }
 .management-page.settings-page .settings-subsection-meta {
   flex-shrink: 0;
-  padding: 2px 8px;
+  padding: 2px 10px;
   border-radius: 999px;
   background: var(--ui-surface-1);
   color: var(--settings-muted-surface-1);
@@ -171,15 +271,14 @@
   line-height: 18px;
 }
 .management-page.settings-page .settings-subsection .ui-hint { margin: 0; color: var(--settings-muted-surface-2); }
-.management-page.settings-page .settings-subsection .ui-hint.status-error { color: var(--ui-error); }
 
-/* Collapsible editor: a read-only summary until the user chooses to edit */
+/* Gateway editor: a read-only summary until the user chooses to edit */
 .management-page.settings-page .settings-disclosure { gap: 0; }
 .management-page.settings-page .settings-disclosure-summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
-  gap: 12px 16px;
+  gap: 14px 16px;
   list-style: none;
   cursor: pointer;
 }
@@ -191,28 +290,29 @@
 .management-page.settings-page .settings-disclosure-action {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 28px;
+  gap: 2px;
+  height: 30px;
   padding: 0 8px 0 12px;
   border-radius: 999px;
   background: var(--ui-surface-1);
-  color: var(--ui-text-2);
+  color: var(--ui-text-1);
   font-size: 12px;
+  box-shadow: 0 1px 0 var(--ui-hairline);
 }
-.management-page.settings-page .settings-disclosure-summary:hover .settings-disclosure-action { color: var(--ui-text-1); }
+.management-page.settings-page .settings-disclosure-summary:hover .settings-disclosure-action { background: var(--ui-surface-2); }
 .management-page.settings-page .settings-disclosure[open] .settings-disclosure-action svg { transform: rotate(180deg); }
 .management-page.settings-page .settings-disclosure[open] .settings-disclosure-edit,
 .management-page.settings-page .settings-disclosure[open] .settings-kv { display: none; }
-.management-page.settings-page .settings-disclosure[open] .settings-disclosure-action { padding: 0 6px; }
+.management-page.settings-page .settings-disclosure[open] .settings-disclosure-action { width: 30px; padding: 0; justify-content: center; }
 
 .management-page.settings-page .settings-kv {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 10px;
   margin: 0;
 }
-.management-page.settings-page .settings-kv > div { min-width: 0; }
-.management-page.settings-page .settings-kv dt { color: var(--settings-muted-surface-2); font-size: 12px; line-height: 18px; }
+.management-page.settings-page .settings-kv > div { min-width: 0; padding: 10px 14px; border-radius: 12px; background: var(--settings-tile); }
+.management-page.settings-page .settings-kv dt { color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; }
 .management-page.settings-page .settings-kv dd {
   margin: 2px 0 0;
   overflow: hidden;
@@ -234,74 +334,57 @@
 }
 .management-page.settings-page .settings-disclosure-body > :not(.field) { grid-column: 1 / -1; }
 .management-page.settings-page .settings-disclosure-body > .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.management-page.settings-page .settings-disclosure-body .field-label,
+.management-page.settings-page .settings-disclosure-body .field-label { color: var(--ui-text-1); }
 .management-page.settings-page .settings-disclosure-body .field-hint { color: var(--settings-muted-surface-2); }
 .management-page.settings-page .settings-disclosure-body :is(.field-input, .field-textarea) { width: 100%; max-width: 100%; background: var(--ui-surface-1); }
 .management-page.settings-page .settings-disclosure-body .settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0; }
 
-/* Shoggoth background service */
-.management-page.settings-page .settings-service .settings-service-card { display: flex; flex-direction: column; gap: 14px; }
-.management-page.settings-page .settings-service .settings-service-top { gap: 12px; }
-.management-page.settings-page .settings-service .settings-service-icon { width: 40px; height: 40px; border-radius: 12px; background: var(--ui-surface-1); }
-.management-page.settings-page .settings-service .settings-service-icon.is-healthy { background: color-mix(in srgb, var(--ui-success) 10%, var(--ui-surface-1)); }
-.management-page.settings-page .settings-service .settings-service-copy h4 { font-size: 15px; line-height: 22px; }
-.management-page.settings-page .settings-service .settings-service-copy p { color: var(--settings-muted-surface-2); }
-.management-page.settings-page .settings-service .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
-.management-page.settings-page .settings-service .settings-service-facts {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
+/* Local CLIs: a grid of tiles (icon · name and status · action) */
+.management-page.settings-page .settings-cli-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
 }
-.management-page.settings-page .settings-service .settings-service-facts > div,
-.management-page.settings-page .settings-service .settings-service-facts > div:first-child {
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--ui-surface-1);
-}
-.management-page.settings-page .settings-service .settings-service-facts dt { color: var(--settings-muted-surface-1); }
-.management-page.settings-page .settings-service .settings-service-facts dd { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-.management-page.settings-page .settings-service .settings-service-facts dd::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  border-radius: 50%;
-  background: var(--settings-muted-surface-1);
-}
-.management-page.settings-page .settings-service .settings-service-facts .is-ok dd::before { background: var(--ui-success); }
-.management-page.settings-page .settings-service .settings-service-facts .is-warn dd::before { background: var(--ui-warning); }
-
-/* Local CLIs */
-.management-page.settings-page #settings-local-runtimes .settings-native-list {
-  border-radius: 14px;
-  background: var(--ui-surface-1);
-  box-shadow: none;
-}
-.management-page.settings-page #settings-local-runtimes .settings-backend--local { padding: 10px 12px 10px 14px; }
-.management-page.settings-page #settings-local-runtimes .settings-backend--local:first-child { border-top: 0; }
-.management-page.settings-page #settings-local-runtimes .settings-backend-mark {
-  --backend-tab-icon-size: 18px;
-  flex-basis: 32px;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-}
-.management-page.settings-page #settings-local-runtimes .settings-backend-copy h4 { font-size: 14px; line-height: 20px; }
-
-/* ── General preferences: one grouped card, one row per setting ───────── */
-
-.management-page.settings-page .settings-list-card { gap: 0; padding-block: 4px; }
-.management-page.settings-page .settings-list-row { padding: 20px 0; border-top: 1px solid var(--ui-hairline); }
-.management-page.settings-page .settings-list-row:first-child { border-top: 0; }
-.management-page.settings-page .settings-list-row--split {
+.management-page.settings-page .settings-cli-tile {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 12px 12px 14px;
+  border-radius: 16px;
+  background: var(--settings-tile);
 }
+.management-page.settings-page .settings-cli-tile .settings-backend-mark {
+  --backend-tab-icon-size: 18px;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+}
+.management-page.settings-page .settings-cli-tile-copy { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; align-items: flex-start; gap: 4px; }
+.management-page.settings-page .settings-cli-tile h6 {
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.management-page.settings-page .settings-cli-tile .settings-health { max-width: 100%; padding: 1px 8px 1px 7px; font-size: 11px; white-space: normal; }
+.management-page.settings-page .settings-cli-tile > button { flex: 0 0 auto; }
+.management-page.settings-page .settings-cli-tile.is-off :is(.settings-backend-mark, h6) { opacity: 0.55; }
+
+/* ── General preferences: one grouped card, one row per setting ───── */
+
+.management-page.settings-page .settings-list-card { gap: 0; padding-block: 6px; }
+.management-page.settings-page .settings-list-row { padding: 18px 0; border-top: 1px solid var(--ui-hairline); }
+.management-page.settings-page .settings-list-row:first-child { border-top: 0; }
+.management-page.settings-page .settings-list-row--icon { display: flex; align-items: center; gap: 16px; }
+.management-page.settings-page .settings-list-row--icon > .settings-prefs-row { flex: 1 1 auto; min-width: 0; }
+.management-page.settings-page .settings-list-row--split { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .management-page.settings-page .settings-list-copy { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; gap: 4px; }
 .management-page.settings-page .settings-list-copy h4 {
   display: flex;
@@ -314,44 +397,68 @@
   font-weight: 400;
 }
 .management-page.settings-page .settings-list-copy p { margin: 0; color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; }
-.management-page.settings-page .settings-list-copy .ui-hint { opacity: 0.85; }
+.management-page.settings-page .settings-list-copy .ui-hint { color: var(--settings-muted-surface-1); opacity: 0.8; }
 .management-page.settings-page .settings-app-update-version {
   padding: 1px 8px;
   border-radius: 999px;
   background: var(--ui-surface-2);
   color: var(--settings-muted-surface-2);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 18px;
 }
 .management-page.settings-page .settings-list-row .settings-shortcut-row { flex: 0 0 auto; gap: 8px; }
-.management-page.settings-page .settings-list-row .settings-shortcut-row > button { min-height: 32px; height: 32px; padding: 0 14px; font-size: 12px; }
-.management-page.settings-page #settings-notif .settings-h { font-size: 15px; line-height: 22px; }
+.management-page.settings-page .settings-list-row .settings-shortcut-row > button { height: 32px; min-height: 32px; padding: 0 14px; font-size: 12px; }
 
-@container settings (max-width: 640px) {
-  .management-page.settings-page .settings-disclosure-body { grid-template-columns: minmax(0, 1fr); }
-  .management-page.settings-page .settings-service .settings-service-top { flex-wrap: wrap; }
-  .management-page.settings-page .settings-service .settings-service-top .settings-actions { width: 100%; padding-left: 52px; }
-  .management-page.settings-page #settings-local-runtimes .settings-backend--local .settings-backend-row {
-    display: grid;
-    grid-template-columns: 32px minmax(0, 1fr) auto;
-    gap: 2px 10px;
-  }
-  .management-page.settings-page #settings-local-runtimes .settings-backend-mark { grid-row: 1 / 3; }
-  .management-page.settings-page #settings-local-runtimes .settings-backend-copy { grid-column: 2; grid-row: 1; }
-  .management-page.settings-page #settings-local-runtimes .settings-backend-state { grid-column: 2; grid-row: 2; align-items: flex-start; }
-  .management-page.settings-page #settings-local-runtimes .settings-backend-actions { grid-column: 3; grid-row: 1 / 3; }
+/* Row icons, shared by preferences and notifications */
+.management-page.settings-page .settings-row-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+}
+.management-page.settings-page .settings-row-icon svg { display: block; }
+.management-page.settings-page .settings-notification-label { display: flex; align-items: center; gap: 16px; }
+
+/* Developer switches: quiet, last */
+.management-page.settings-page .settings-advanced-summary .settings-h { color: var(--settings-muted-surface-1); }
+
+@container settings (max-width: 720px) {
+  .management-page.settings-page .settings-service-hero .settings-service-top { flex-wrap: wrap; }
+  .management-page.settings-page .settings-service-hero .settings-service-copy { flex: 1 1 calc(100% - 68px); }
+  .management-page.settings-page .settings-service-hero .settings-service-top .settings-actions { width: 100%; padding-left: 68px; }
+  .management-page.settings-page .settings-service-hero .settings-service-bottom p { text-align: left; }
+  .management-page.settings-page .settings-backend--card .settings-backend-row { flex-wrap: wrap; }
+  .management-page.settings-page .settings-backend--card .settings-backend-copy { flex: 1 1 calc(100% - 58px); }
+  .management-page.settings-page .settings-backend--card .settings-backend-actions { width: 100%; padding-left: 58px; justify-content: space-between; }
+  .management-page.settings-page .settings-backend--card .settings-detail-toggle { order: 2; }
+  .management-page.settings-page .settings-disclosure-body,
+  .management-page.settings-page .settings-kv { grid-template-columns: minmax(0, 1fr); }
 }
 
 @container settings (max-width: 540px) {
+  .management-page.settings-page .settings-service-hero,
   .management-page.settings-page .settings-backend--card,
-  .management-page.settings-page .settings-backend-fallback { padding: 18px 18px 0; }
-  .management-page.settings-page .settings-backend-fallback { padding-bottom: 18px; }
+  .management-page.settings-page .settings-backend-fallback { padding: 18px; }
+  .management-page.settings-page .settings-service-hero .settings-service-facts { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .management-page.settings-page .settings-service-hero .settings-service-top .settings-actions,
+  .management-page.settings-page .settings-backend--card .settings-backend-actions { padding-left: 0; }
   .management-page.settings-page .settings-backend--card .settings-backend-meta,
-  .management-page.settings-page .settings-backend--card .settings-backend-notice,
-  .management-page.settings-page .settings-update-link { margin-left: 0; }
+  .management-page.settings-page .settings-backend--card .settings-backend-notice { margin-left: 0; }
   .management-page.settings-page .settings-subsection { padding: 16px; }
-  .management-page.settings-page .settings-service .settings-service-facts { grid-template-columns: minmax(0, 1fr); }
-  .management-page.settings-page .settings-service .settings-service-top .settings-actions { padding-left: 0; }
-  .management-page.settings-page .settings-list-row--split { flex-direction: column; align-items: stretch; gap: 12px; }
+  .management-page.settings-page .settings-list-row--icon { align-items: flex-start; }
+  .management-page.settings-page .settings-list-row--split.settings-list-row--icon {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 12px 16px;
+  }
+  .management-page.settings-page .settings-list-row--split.settings-list-row--icon > :last-child { grid-column: 2; justify-content: flex-start; }
   .management-page.settings-page .settings-app-update-actions { justify-content: flex-start; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .management-page.settings-page .settings-health.is-pending i { animation: none; }
 }

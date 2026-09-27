@@ -1142,20 +1142,22 @@ export default function SettingsPage() {
     </details>
   );
 
-  // Background service and local CLIs belong to the built-in Shoggoth backend.
-  const renderShoggothBody = () => (
-    <>
-      <ServiceSettings
-        status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
-        onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
-      />
-      {backendCatalog.some((descriptor) => descriptor.surfaces.runtimeStatus === true) && <RuntimeStatusList
-        runtimes={runtimes.map((runtime) => ({ ...runtime,
-          enabled: loading || configFailed ? runtime.enabled : !cfg.disabledBackends.includes(runtime.runtime) }))}
-        loading={runtimesLoading} error={runtimesError} busy={loading || saving || togglingBackend || configFailed}
-        onToggle={(runtime) => void toggleRuntimeConnection(runtime)} />}
-    </>
-  );
+  // Local CLIs run through the built-in Shoggoth backend, so they live in its card.
+  const showRuntimeStatus = backendCatalog.some((descriptor) => descriptor.surfaces.runtimeStatus === true);
+  const renderShoggothBody = () => showRuntimeStatus ? <RuntimeStatusList
+    runtimes={runtimes.map((runtime) => ({ ...runtime,
+      enabled: loading || configFailed ? runtime.enabled : !cfg.disabledBackends.includes(runtime.runtime) }))}
+    loading={runtimesLoading} error={runtimesError} busy={loading || saving || togglingBackend || configFailed}
+    onToggle={(runtime) => void toggleRuntimeConnection(runtime)} /> : null;
+
+  // Every connection relies on the background service; show which ones do.
+  const serviceDependents = backends.filter((b) => !b.disabled
+    && (backendDescriptors.get(b.id)?.connectionMode || b.info.connectionMode) !== "native-runtime");
+  const dependentChips = serviceDependents.length > 0 ? <ul className="settings-service-dependent-list">
+    {serviceDependents.map((b) => <li key={b.id} className={b.connected ? "is-connected" : ""}>
+      <BackendMark id={b.id} name={b.name} />{b.name}
+    </li>)}
+  </ul> : undefined;
 
   const renderBackendBody = (b: BackendStatus) => {
     if (b.id === "openclaw") return renderOpenclawGateway();
@@ -1194,6 +1196,19 @@ export default function SettingsPage() {
 
       <div className="settings-stack">
         <div className="settings-group" id="settings-connections">
+        {/* The background service sits above the connections that depend on it. */}
+        <section className="settings-section" id="settings-service">
+          <header className="settings-section-head">
+            <h3 className="settings-h">{t("settings.serviceSubsection")}</h3>
+            <p className="settings-sech">{t("settings.serviceSharedDesc")}</p>
+          </header>
+          <ServiceSettings
+            status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
+            onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
+            dependents={dependentChips}
+          />
+        </section>
+
         <BackendOverview
           backends={backends} descriptors={backendDescriptors} versions={versionsById} loading={loading || saving || togglingBackend}
           attention={(id) => {
@@ -1207,7 +1222,7 @@ export default function SettingsPage() {
         />
         {REMOTE_CONNECTIONS_ENABLED && !hasHermesCard && renderFallbackCard("hermes", "Hermes", renderHermesRemotes())}
         {!hasOpenclawCard && renderFallbackCard("openclaw", "OpenClaw", renderOpenclawGateway())}
-        {!hasShoggothCard && renderFallbackCard("shoggoth", "Shoggoth", renderShoggothBody())}
+        {!hasShoggothCard && showRuntimeStatus && renderFallbackCard("shoggoth", "Shoggoth", renderShoggothBody())}
 
         {backendCatalog.filter((descriptor) => descriptor.aliases?.length).flatMap((descriptor) =>
           [descriptor.id, ...(descriptor.surfaces.runtimeStatus ? [] : descriptor.aliases!)].filter((id) => cfg.disabledBackends.includes(id)).map((id) => (
