@@ -7,21 +7,26 @@ on:
         description: Draft release tag matching package.json
         required: true
         type: string
+      release_id:
+        description: Numeric ID of the draft release
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   intel:
     runs-on: macos-15-intel
     timeout-minutes: 120
     env:
-      GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
       SHOGGOTH_EXPECT_TEAM_ID: MK3JHXWR7H
       SHOGGOTH_EXPECT_NOTARIZED: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -35,6 +40,9 @@ jobs:
 
       - name: Download exact draft assets
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
         run: |
           set -euo pipefail
           VERSION="$(node -p 'require("./package.json").version')"
@@ -57,8 +65,15 @@ jobs:
           const listResponse = await fetch(`${base}/releases?per_page=100`, { headers });
           assert.equal(listResponse.status, 200, 'Cannot list releases with workflow token');
           const releases = await listResponse.json();
-          const release = releases.find(item => item.tag_name === process.env.RELEASE_TAG && item.draft);
+          let release = releases.find(item => item.id === Number(process.env.RELEASE_ID));
+          if (!release) {
+            const getResponse = await fetch(`${base}/releases/${process.env.RELEASE_ID}`, { headers });
+            assert.equal(getResponse.status, 200, 'Cannot get draft release by ID with workflow token');
+            release = await getResponse.json();
+          }
           assert.ok(release, 'Draft release is not visible to the workflow token');
+          assert.equal(release.tag_name, process.env.RELEASE_TAG, 'Release ID does not match requested tag');
+          assert.equal(release.draft, true, 'Release is already published');
           for (const name of [`Shoggoth-${version}-mac.zip`, `Shoggoth-${version}-x64.dmg`, 'SHA256SUMS.txt']) {
             const asset = release.assets.find(item => item.name === name);
             assert.ok(asset, `Missing draft asset: ${name}`);
