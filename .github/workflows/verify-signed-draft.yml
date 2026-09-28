@@ -105,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(node -p 'require("./package.json").version')"
-          APP="dist/mac/Shoggoth.app"
+          APP="$GITHUB_WORKSPACE/dist/mac/Shoggoth.app"
           DMG="dist/Shoggoth-${VERSION}-x64.dmg"
           node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-x64
           node scripts/shoggoth-memory-e5-packaged.cjs --app "$APP" --output "$RUNNER_TEMP/e5-intel-result.json"
