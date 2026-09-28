@@ -70,7 +70,35 @@ function buildOpenClawUpdaterCommand(operation, options = {}) {
     }
     args.push("--url", gatewayUrl);
   }
+  const gatewayPort = options.gatewayPort;
+  if (gatewayPort !== undefined) {
+    if (operation !== "gateway_status") {
+      throw new Error("gatewayPort is only valid for gateway_status");
+    }
+    if (gatewayUrl) throw new Error("gatewayPort cannot be combined with gatewayUrl");
+    if (!Number.isInteger(gatewayPort) || gatewayPort <= 0 || gatewayPort > 65535) {
+      throw new Error(`invalid gatewayPort: ${gatewayPort}`);
+    }
+    args.push("--port", String(gatewayPort));
+  }
   return { cmd, args };
+}
+
+// The updater only runs against a local Gateway (the backend gates remote URLs),
+// so verification selects it by port. `gateway status --url` makes the CLI drop
+// the configured gateway credentials ("gateway url override requires explicit
+// credentials"), which fails the RPC probe on every token-auth install.
+// `--port` keeps the CLI config's auth and TLS. No explicit port → let the CLI
+// resolve its own configured target.
+function localGatewayPortOf(gatewayUrl) {
+  const raw = nonBlank(gatewayUrl);
+  if (!raw) return undefined;
+  try {
+    const port = Number(new URL(raw).port);
+    return Number.isInteger(port) && port > 0 ? port : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Parse machine output without ever treating stderr progress as JSON. */
@@ -503,7 +531,7 @@ class OpenClawUpdateController {
       bin: this._bin,
       acceptCapabilities: options.acceptCapabilities === true,
       ...(operation === "gateway_status" && this._getGatewayUrl
-        ? { gatewayUrl: this._getGatewayUrl() }
+        ? { gatewayPort: localGatewayPortOf(this._getGatewayUrl()) }
         : {}),
     });
     return new Promise((resolve) => {

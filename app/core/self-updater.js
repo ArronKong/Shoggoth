@@ -28,18 +28,27 @@ function pidAlive(pid) {
 class SelfUpdater {
   /**
    * @param {{ command: () => {cmd: string, args: string[]},
+   *           onBeforeRun?: () => Promise<void>|void,
    *           onSuccess?: (state: object) => Promise<void>|void,
+   *           onFailure?: (state: object) => Promise<void>|void,
    *           statePath?: string }} spec
    *   command   — 惰性解析要执行的命令（bin 可能随配置变）。
+   *   onBeforeRun — 可选：更新命令启动前的准备（停掉本地服务进程）。在 running
+   *               生命周期内执行；抛错=不启动更新命令，终态 ok=false 并记
+   *               preUpdateError，随后照常走 onFailure 收尾。
    *   onSuccess — 更新命令成功后的收尾（重启本地服务 / 健康检查），收到本轮
    *               状态快照。抛错=收尾失败，终态判 ok=false 并记入
    *               postUpdateError（更新命令成功但服务没起来，对用户就是失败）。
+   *   onFailure — 可选：更新失败后的尽力收尾（把 onBeforeRun 停掉的服务拉回来）。
+   *               抛错只记 recoveryError，不改变失败结论（也不盖住失败原因）。
    *   statePath — 可选：终态落盘到这个 json，app 重启后 status() 仍能报告
    *               上次结果（更新失败的原因不能随进程退出蒸发）。
    */
-  constructor({ command, onSuccess, statePath } = {}) {
+  constructor({ command, onBeforeRun, onSuccess, onFailure, statePath } = {}) {
     this._command = command;
+    this._onBeforeRun = onBeforeRun;
     this._onSuccess = onSuccess;
+    this._onFailure = onFailure;
     this._statePath = statePath || null;
     this._state = this._loadPersisted();
   }
@@ -131,6 +140,23 @@ class SelfUpdater {
     // 触发 append；写 this._state 就会把下一轮的 logTail 覆盖成旧日志。
     const state = { running: true, startedAt, command: [cmd, ...args].join(" ") };
     this._state = state;
+    if (!this._onBeforeRun) {
+      this._spawn(state, cmd, args);
+      return this.status();
+    }
+    // 准备阶段（停本地服务）是异步的：先以 running 态落盘占住单飞锁，准备完再
+    // spawn。此时还没有 pid，app 若在这一窗口退出，下次启动按「已中断」处理。
+    this._persist(state);
+    Promise.resolve()
+      .then(this._onBeforeRun)
+      .then(
+        () => this._spawn(state, cmd, args),
+        (err) => this._settle(state, { ok: false, preUpdateError: err?.message || String(err) }),
+      );
+    return this.status();
+  }
+
+  _spawn(state, cmd, args) {
     let tail = "";
     const append = (chunk) => {
       tail = (tail + String(chunk)).slice(-LOG_TAIL_MAX);
@@ -142,15 +168,8 @@ class SelfUpdater {
       // detached：让子进程自成进程组，兜底超时才杀得掉整棵树（见下）。
       proc = spawn(cmd, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     } catch (err) {
-      this._state = {
-        running: false,
-        startedAt,
-        finishedAt: Date.now(),
-        ok: false,
-        error: err?.message || String(err),
-      };
-      this._persist(this._state);
-      return this.status();
+      this._settle(state, { ok: false, error: err?.message || String(err) });
+      return;
     }
     // running 态连 pid 一起落盘：detached 子进程活得过 app 退出，下次启动靠
     // pid 探活区分「更新还在跑」和「上次被中断」。
@@ -173,22 +192,7 @@ class SelfUpdater {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      const done = (extra) => {
-        Object.assign(state, { running: false, finishedAt: Date.now(), ...patch, ...extra });
-        this._persist(state);
-      };
-      if (patch.ok && this._onSuccess) {
-        // 收尾（重启本地服务 / 健康检查）也算在 running 生命周期内：轮询端
-        // 看到 running=false 即终态，不会在服务还在重启时提前报「完成」。
-        // 收尾失败 = 更新后服务没起来，对用户就是更新失败 → ok 翻成 false，
-        // 原因记 postUpdateError（exitCode 仍是 0，前端据此细分文案）。
-        Promise.resolve(state)
-          .then(this._onSuccess)
-          .then(() => done())
-          .catch((err) => done({ ok: false, postUpdateError: err?.message || String(err) }));
-      } else {
-        done();
-      }
+      this._settle(state, patch);
     };
     proc.on("error", (err) => finish({ ok: false, error: err?.message || String(err) }));
     proc.on("exit", (code, signal) =>
@@ -198,7 +202,31 @@ class SelfUpdater {
         ...(signal ? { error: `terminated by ${signal}` } : {}),
       }),
     );
-    return this.status();
+  }
+
+  // 终态收尾。收尾（重启本地服务 / 健康检查）也算在 running 生命周期内：轮询端
+  // 看到 running=false 即终态，不会在服务还在重启时提前报「完成」。
+  _settle(state, patch) {
+    const done = (extra) => {
+      Object.assign(state, { running: false, finishedAt: Date.now(), ...patch, ...extra });
+      this._persist(state);
+    };
+    if (patch.ok && this._onSuccess) {
+      // 收尾失败 = 更新后服务没起来，对用户就是更新失败 → ok 翻成 false，
+      // 原因记 postUpdateError（exitCode 仍是 0，前端据此细分文案）。
+      Promise.resolve(state)
+        .then(this._onSuccess)
+        .then(() => done())
+        .catch((err) => done({ ok: false, postUpdateError: err?.message || String(err) }));
+    } else if (!patch.ok && this._onFailure) {
+      // 失败也要把准备阶段停掉的服务拉回来，否则一次失败的更新会让后端一直断开。
+      Promise.resolve(state)
+        .then(this._onFailure)
+        .then(() => done())
+        .catch((err) => done({ recoveryError: err?.message || String(err) }));
+    } else {
+      done();
+    }
   }
 }
 
