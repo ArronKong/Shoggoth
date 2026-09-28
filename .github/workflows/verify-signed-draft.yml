@@ -95,8 +95,8 @@ jobs:
           NODE
           (
             cd dist
-            grep -F "  Shoggoth-${VERSION}-mac.zip" SHA256SUMS.txt | shasum -a 256 -c -
-            grep -F "  Shoggoth-${VERSION}-x64.dmg" SHA256SUMS.txt | shasum -a 256 -c -
+            awk -v name="Shoggoth-${VERSION}-mac.zip" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
+            awk -v name="Shoggoth-${VERSION}-x64.dmg" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
           )
           ditto -x -k "dist/Shoggoth-${VERSION}-mac.zip" dist/mac
 
