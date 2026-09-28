@@ -60,9 +60,21 @@ const scratch = mkdtempSync(path.join(os.tmpdir(), "shoggoth-dmg-"));
 try {
   const payload = path.join(scratch, "payload");
   mkdirSync(payload);
-  execFileSync("/usr/bin/ditto", [app, path.join(payload, "Shoggoth.app")], {
+  const payloadApp = path.join(payload, "Shoggoth.app");
+  // On APFS, clone the signed bundle without allocating a second full App.
+  // Preserve permissions, symlinks and extended attributes, then verify the
+  // copied signature and ticket before using it as the DMG input.
+  execFileSync("/bin/cp", ["-cRp", app, payloadApp], {
     stdio: "inherit", timeout: 15 * 60_000,
   });
+  execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", payloadApp], {
+    stdio: "inherit", timeout: 180_000,
+  });
+  if (distribution === "official") {
+    execFileSync("/usr/bin/xcrun", ["stapler", "validate", payloadApp], {
+      stdio: "inherit", timeout: 60_000,
+    });
+  }
   symlinkSync("/Applications", path.join(payload, "Applications"));
   const temporaryDmg = path.join(scratch, dmgName);
   execFileSync("/usr/bin/hdiutil", [
