@@ -834,6 +834,7 @@ async function verifySourceContract(onlyArch = null) {
     await verifyPackage(path.join(REPO_ROOT, ".vendor", "codex", expected.arch, "package"), expected);
   }
   verifyJsonlFailureContract();
+  await verifyOwnedProcessGroupCleanup();
   await verifyZipFailureContract();
 }
 
@@ -1001,8 +1002,11 @@ async function verifyPackagedAppServer(runtimePath, scratchPath) {
   const child = spawn(runtimePath, ["app-server", "--stdio"], {
     cwd: REPO_ROOT,
     env: { CODEX_HOME: codexHome, HOME: scratchPath, PATH: process.env.PATH ?? "", TMPDIR: scratchPath },
+    // Own a separate group so background plugin clones cannot outlive this probe.
+    detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const childClosed = new Promise((resolve) => child.once("close", () => resolve(true)));
   const rpc = new JsonlClient(child);
   monitorAppServerStderr(child, rpc);
   try {
@@ -1017,20 +1021,73 @@ async function verifyPackagedAppServer(runtimePath, scratchPath) {
     const thread = await rpc.request("thread/start", { cwd: REPO_ROOT, approvalPolicy: "never", sandbox: "read-only", ephemeral: true });
     assert.equal(typeof thread?.thread?.id, "string");
   } finally {
-    child.stdin.end();
-    let closed = await Promise.race([
-      new Promise((resolve) => child.once("close", () => resolve(true))),
-      delay(2_000).then(() => false),
-    ]);
-    if (!closed) {
-      child.kill("SIGKILL");
-      closed = await Promise.race([
-        new Promise((resolve) => child.once("close", () => resolve(true))),
-        delay(2_000).then(() => false),
-      ]);
+    try {
+      child.stdin.end();
+      let closed = await Promise.race([childClosed, delay(2_000).then(() => false)]);
+      if (!closed) {
+        child.kill("SIGKILL");
+        closed = await Promise.race([
+          childClosed,
+          delay(2_000).then(() => false),
+        ]);
+      }
+      assert.equal(closed, true, "packaged app-server did not close");
+      assertPackagedRpcClean(rpc);
+    } finally {
+      await stopOwnedProcessGroup(child.pid);
     }
-    assert.equal(closed, true, "packaged app-server did not close");
-    assertPackagedRpcClean(rpc);
+  }
+}
+
+async function stopOwnedProcessGroup(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "invalid owned process group");
+  const signal = (value) => {
+    try { process.kill(-pid, value); return true; }
+    catch (error) { if (error.code === "ESRCH") return false; throw error; }
+  };
+  for (const value of ["SIGTERM", "SIGKILL"]) {
+    if (!signal(value)) return;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await delay(50);
+      if (!signal(0)) return;
+    }
+  }
+  throw new Error("owned app-server process group did not stop");
+}
+
+async function verifyOwnedProcessGroupCleanup() {
+  const scratchPath = await mkdtemp(path.join(tmpdir(), "shoggoth-process-group-"));
+  const heartbeat = path.join(scratchPath, "heartbeat");
+  const program = `
+    const fs = require("node:fs"), { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", 'const fs=require("node:fs"); const write=()=>fs.writeFileSync(process.argv[1],String(Date.now())); write(); setInterval(write,10);', process.argv[1]], { stdio: "ignore" });
+    const ready = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(ready); process.stdout.write("ready"); } }, 10);
+    process.stdin.resume();
+    process.stdin.once("end", () => process.exit(0));
+  `;
+  const child = spawn(process.execPath, ["-e", program, heartbeat], {
+    detached: true, stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/bin:/bin" },
+  });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("process-group fixture did not start")), 5_000);
+      child.once("error", (error) => { clearTimeout(timer); reject(error); });
+      child.stdout.once("data", () => { clearTimeout(timer); resolve(); });
+    });
+    child.stdin.end();
+    assert.equal(await Promise.race([closed, delay(2_000).then(() => "timeout")]), 0);
+    const before = await readFile(heartbeat, "utf8");
+    await delay(50);
+    assert.notEqual(await readFile(heartbeat, "utf8"), before, "fixture must reproduce a surviving writer");
+    await stopOwnedProcessGroup(child.pid);
+    await rm(scratchPath, { recursive: true, force: true });
+    await delay(50);
+    await assert.rejects(access(heartbeat), { code: "ENOENT" });
+    await assert.rejects(stopOwnedProcessGroup(0), /invalid owned process group/u);
+  } finally {
+    await stopOwnedProcessGroup(child.pid);
+    await rm(scratchPath, { recursive: true, force: true });
   }
 }
 
