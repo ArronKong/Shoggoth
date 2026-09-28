@@ -1093,7 +1093,10 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   const bundledRoot = path.join(appPath, "Contents", "Resources", "bundled-plugins");
   const { BundledPluginCatalog } = require("../app/core/bundled-plugin-catalog.js");
   const bundledCatalog = new BundledPluginCatalog(bundledRoot);
-  assert.equal(bundledCatalog.entries.size, 62, "packaged bundled plugin catalog is incomplete");
+  const sourceCatalog = new BundledPluginCatalog(path.join(REPO_ROOT, "resources", "bundled-plugins"));
+  assert.equal(bundledCatalog.batchDigest, sourceCatalog.batchDigest, "packaged bundled plugin batch differs from source");
+  assert.deepEqual([...bundledCatalog.entries.values()], [...sourceCatalog.entries.values()],
+    "packaged bundled plugin catalog differs from the reviewed source");
   for (const item of bundledCatalog.entries.values()) bundledCatalog.assertCurrent(item.id);
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: bundled-plugin-integrity`);
   const electronExecutable = path.join(appPath, "Contents", "MacOS", "Shoggoth");
