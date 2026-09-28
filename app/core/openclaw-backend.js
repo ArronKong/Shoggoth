@@ -3822,6 +3822,15 @@ class OpenClawBackend extends AgentBackend {
 
   /** Send an RPC request on the live socket. */
   request(method, params, timeoutMs = REQUEST_TIMEOUT_MS, observer = null) {
+    // Chat selection has no trusted dispatch receipt -> execution run mapping
+    // in this Gateway contract. Reject direct backend callers as well as the
+    // Proxy route, before a frame can leave this process.
+    if (method === "chat.send" && params
+      && Object.prototype.hasOwnProperty.call(params, "pluginSelection")) {
+      const error = new Error("OpenClaw 尚无法将插件选择绑定到本次真实执行回合");
+      error.code = "PLUGIN_SELECTION_UNAVAILABLE";
+      return Promise.reject(error);
+    }
     const ws = this._ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       try { observer?.onClose?.(); } catch { /* observer is isolated from RPC */ }

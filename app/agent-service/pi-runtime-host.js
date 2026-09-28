@@ -17,7 +17,7 @@ const { safeSnapshot } = require("./codex-event-snapshot");
 const { PiRpcProcess } = require("./pi-rpc-process");
 const { PiRuntimeLedger, emptyPiUsage } = require("./pi-runtime-ledger");
 const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
-const { classifyProviderLimit } = require("./runtime-provider-errors");
+const { classifyProviderFailure } = require("./runtime-provider-errors");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const PI_RPC_COMMANDS = normalizeRuntimeCommands([
   { name: "compact", description: "Compact conversation context", args: "[instructions]" },
@@ -1145,10 +1145,9 @@ class PiRuntimeHost {
       const last = assistants[assistants.length - 1] || null;
       const status = active.interruptRequested || last?.stopReason === "aborted"
         ? "interrupted" : last?.stopReason === "error" ? "failed" : "completed";
-      // A limit message may mention the key or account it applies to; it is
-      // not an authentication failure and must not invalidate the login.
-      const providerLimit = status === "failed" ? classifyProviderLimit(last?.errorMessage) : null;
-      const authenticationFailed = status === "failed" && providerLimit === null
+      // Model, settings and limit errors must not invalidate a valid login.
+      const providerFailure = status === "failed" ? classifyProviderFailure(last?.errorMessage) : null;
+      const authenticationFailed = status === "failed" && providerFailure === null
         && typeof last?.errorMessage === "string" && AUTH_ERROR_PATTERN.test(last.errorMessage);
       const accountBlocked = authenticationFailed
         && /\b(?:user )?account (?:is )?(?:blocked|suspended|deactivated)\b/iu.test(last.errorMessage);
@@ -1162,7 +1161,7 @@ class PiRuntimeHost {
       this._finishActive(active, {
         status,
         errorCode: status === "failed" ? (accountBlocked ? "RUNTIME_ACCOUNT_BLOCKED"
-          : authenticationFailed ? "AUTH_REQUIRED" : providerLimit ?? "PI_TURN_FAILED") : null,
+          : authenticationFailed ? "AUTH_REQUIRED" : providerFailure ?? "PI_TURN_FAILED") : null,
         texts,
         usage,
         responseId: responseIdFor(active, assistants),

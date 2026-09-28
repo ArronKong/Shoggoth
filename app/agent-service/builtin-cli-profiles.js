@@ -90,17 +90,19 @@ function createProfile(spec) {
   };
 }
 
-function ensureBuiltinCliAgentProfiles(productStore) {
+function ensureBuiltinCliAgentProfiles(productStore, installedRuntimeAccountIds) {
   if (!productStore || typeof productStore.getAgentProfile !== "function"
     || typeof productStore.listAgentProfiles !== "function"
-    || typeof productStore.putAgentProfile !== "function") {
-    throw new TypeError("ProductStore must provide profile listing, lookup, and mutation");
+    || typeof productStore.putAgentProfile !== "function"
+    || !(installedRuntimeAccountIds instanceof Set)) {
+    throw new TypeError("ProductStore and installed RuntimeAccount IDs are required");
   }
   // Preflight every fixed identity before writing any profile. A conflict in a
   // later built-in must not leave an earlier one partially bootstrapped.
   const profiles = productStore.listAgentProfiles();
   for (const spec of BUILTIN_CLI_AGENT_PROFILES) {
     const existing = productStore.getAgentProfile(spec.id);
+    if (!existing && !installedRuntimeAccountIds.has(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[spec.runtime])) continue;
     if (existing) {
       if (!identityMatches(existing, spec)) {
         throw serviceError(
@@ -132,6 +134,7 @@ function ensureBuiltinCliAgentProfiles(productStore) {
       }
       continue;
     }
+    if (!installedRuntimeAccountIds.has(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[spec.runtime])) continue;
     created.push(productStore.putAgentProfile(createProfile(spec)));
   }
   return created;

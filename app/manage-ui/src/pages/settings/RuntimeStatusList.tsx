@@ -18,8 +18,8 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
     {loading && !runtimes.length ? <p className="ui-hint">{t("common.loading")}</p>
       : error || !runtimes.length ? <p className="ui-hint" role="status">{t("settings.localRuntimeStatusFailed")}</p>
       : <div className="settings-cli-grid">{runtimes.map(runtime => {
-        const status = !runtime.releaseEnabled ? "runtimeReleaseDisabled" : !runtime.enabled ? "backendDisabled"
-          : runtime.installation !== "available" ? "runtimeUnavailable"
+        const status = !runtime.releaseEnabled ? "runtimeReleaseDisabled" : runtime.installation !== "available" ? "runtimeUnavailable"
+          : !runtime.enabled ? "backendDisabled"
           : !runtime.serviceConnected ? "runtimeServiceOffline" : "runtimeReady";
         const tone = status === "runtimeReady" ? "is-healthy" : status === "backendDisabled" || status === "runtimeReleaseDisabled" ? "is-off" : "is-down";
         return <article className={`settings-cli-tile ${tone}`} key={`${runtime.backendId}:${runtime.runtimeAccountId}`}
@@ -29,7 +29,7 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
             <h6>{runtime.name}</h6>
             <span className={`settings-health ${tone === "is-off" ? "" : tone}`}><i />{t(`settings.${status}`)}</span>
           </div>
-          {runtime.releaseEnabled && <button className="ui-cbtn ui-cbtn--sm" disabled={busy} onClick={() => onToggle(runtime)}>
+          {runtime.releaseEnabled && runtime.installation === "available" && <button className="ui-cbtn ui-cbtn--sm" disabled={busy} onClick={() => onToggle(runtime)}>
             {t(runtime.enabled ? "settings.disconnect" : "settings.reconnect")}
           </button>}
         </article>;

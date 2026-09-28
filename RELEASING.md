@@ -7,7 +7,7 @@
 ## 1. 冻结本次源码
 
 1. 确定版本号、待发布的开发提交、工作区改动和发行说明。只纳入本次版本的改动；其他任务的未提交工作须隔离。记录公开仓库当前 `main`、拟发布的源码提交和导出清单。
-2. 从开发目录导出到**新的空目录**：`npm run export:source -- /absolute/path/to/new-empty-directory`。脚本会在目录旁生成 `<directory>.manifest.json`，记录文件名、权限、大小和 SHA-256。它不会覆盖已有 `output/public-source`，也不会自动识别夹在允许文件中的隐私内容。
+2. 从开发目录导出到**新的空目录**：`npm run export:source -- /absolute/path/to/new-empty-directory`。脚本会在目录旁生成 `<directory>.manifest.json`，记录文件名、权限、大小和 SHA-256。导出会同时清空未完成再分发审核的插件目录清单，并移除构建配置中对这些未导出文件的单独复制项。它不会覆盖已有 `output/public-source`，也不会自动识别夹在允许文件中的隐私内容。
 3. 对照清单逐项比较新导出与 `output/public-source` 的完整文件列表和内容。确认增加、删除和修改都有来源与用途；不能只看 Git 的文本 diff。`resources/bundled-plugins/packages/` 在再分发权利完成审核前不得进入公开导出。
 
 ## 2. 推送前审核 `public-source`：必须通过

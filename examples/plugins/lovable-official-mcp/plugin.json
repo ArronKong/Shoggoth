@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "lovable-official-mcp",
+  "version": "0.1.0",
+  "description": "Independent connection candidate for Lovable's official remote MCP server.",
+  "author": { "name": "Shoggoth contributors" },
+  "homepage": "https://docs.lovable.dev/integrations/lovable-mcp-server",
+  "license": "Apache-2.0",
+  "extensions": {
+    "shoggoth": {
+      "mcpOAuthResources": {
+        "lovable-official": "https://mcp.lovable.dev"
+      }
+    }
+  }
+}

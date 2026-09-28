@@ -38,7 +38,8 @@ function componentFor(relativePath) {
     || relativePath.startsWith("kanban/")
     || relativePath.startsWith("cron/")) return "product";
   if (/^agents\/[^/]+\/(?:manifest\.json|definition\/|generated\/|proposals\/)/u.test(relativePath)) return "definition";
-  if (/^agents\/[^/]+\/memory\//u.test(relativePath)) return "memory";
+  if (relativePath.startsWith("agents/.recall-policy-installations/")) return "memory";
+  if (/^agents\/[^/]+\/(?:memory\/|recall-policy-installed\.json$)/u.test(relativePath)) return "memory";
   if (/^agents\/[^/]+\/transcripts\//u.test(relativePath)) return "transcript";
   if (relativePath === "tool-permissions.json") return "toolPolicy";
   if (relativePath.startsWith("skills/") || /^agents\/[^/]+\/skills\//u.test(relativePath)) return "skill";

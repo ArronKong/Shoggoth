@@ -2,12 +2,20 @@
 
 // Run on a fresh public-source export before pushing, and on the assembled App
 // from electron-builder's afterPack hook before any signing or publication.
-const { createPrivateKey } = require("node:crypto");
+const { createHash, createPrivateKey } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
 const PRIVATE_KEY_BLOCK = /-----BEGIN ((?:(?:ENCRYPTED|RSA|EC|DSA|OPENSSH) )?PRIVATE KEY)-----([\s\S]{0,131072}?)-----END \1-----/gu;
 const PRIVATE_KEY_FILE = /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.npmrc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]+\.(?:p8|p12|pfx|key|kdbx|keychain-db))$/iu;
+// The bundled product-design catalog includes a fixed, credential-free npm
+// template. Its package digest requires the file, so permit only these exact
+// bytes at this exact App resource path; changed or relocated .npmrc files
+// remain blocked by the normal credential-file rule.
+const SAFE_BUNDLED_NPMRC = Object.freeze({
+  path: "Contents/Resources/bundled-plugins/packages/product-design/templates/prototype/.npmrc",
+  sha256: "37ae29f49cb719e0a2fbdef151dcfac3062390219ef54e2a5586e89303bd8648",
+});
 
 function hasPrivateJwk(value, depth = 0) {
   if (!value || typeof value !== "object" || depth > 32) return false;
@@ -31,7 +39,9 @@ function isPrivateKeyBlock(block, body) {
 
 function inspectFile(name, bytes, findings) {
   const normalizedName = name.split(path.sep).join("/");
-  if (PRIVATE_KEY_FILE.test(normalizedName)) {
+  const safeBundledTemplate = normalizedName === SAFE_BUNDLED_NPMRC.path
+    && createHash("sha256").update(bytes).digest("hex") === SAFE_BUNDLED_NPMRC.sha256;
+  if (PRIVATE_KEY_FILE.test(normalizedName) && !safeBundledTemplate) {
     findings.push({ path: name, reason: "credential file name" });
   }
   const text = bytes.toString("latin1");

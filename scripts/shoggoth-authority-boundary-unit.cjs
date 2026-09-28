@@ -73,6 +73,34 @@ test("插件账本和密文容器各自持有 Connection 与凭据权威", () =>
     ["credentialRef", "kind", "ciphertext"]);
 });
 
+test("外部插件审批双库属于派生审计并由 authority 备份保留", () => {
+  const audit = DATA_AUTHORITY_MANIFEST.stores.externalPluginAudit;
+  assert.equal(audit.schemaVersion, 4);
+  assert.equal(audit.journalSchemaVersion, 1);
+  assert.equal(audit.backupRequired, true);
+  assert.deepEqual(audit.pathRules, [
+    "stateDir/plugins/external-provenance.sqlite",
+    "stateDir/plugins/external-approval-journal.sqlite",
+  ]);
+  assert.deepEqual(audit.records.ExternalPluginCallAudit.derived, [
+    "callId", "backendId", "instanceId", "agentId", "sessionId", "runId", "taskId",
+    "turnId", "toolCallId", "bindingId", "installationId", "componentId", "connectionId",
+    "toolIdentity", "toolName", "status", "cancelRequested", "resultDigest", "resultBytes",
+    "errorCode", "approvalRequestId", "approvalOutcome", "approvalUpdatedAt",
+    "approvalRequired", "approvalJournalGate", "createdAt", "updatedAt",
+  ]);
+  assert.deepEqual(audit.records.ExternalPluginApprovalJournalEvent.derived,
+    ["callId", "requestId", "outcome", "updatedAt"]);
+  for (const record of Object.values(audit.records)) {
+    assert.deepEqual(record.authority, []);
+    assert.deepEqual(record.runtimeCache, []);
+    assert.deepEqual(record.uiCache, []);
+  }
+  assert.equal(DATA_AUTHORITY_MANIFEST.stores.plugins.pathRules
+    .some(rule => audit.pathRules.includes(rule)), false);
+  assert.match(audit.recovery, /neither file authorizes tool execution/u);
+});
+
 test("Product15、Chat8、Usage2 与权威清单版本一致", () => {
   assert.equal(DATA_AUTHORITY_MANIFEST.stores.product.schemaVersion, STORE_SCHEMA_VERSION);
   assert.equal(DATA_AUTHORITY_MANIFEST.stores.chatSession.schemaVersion, CHAT_SESSION_STORE_VERSION);

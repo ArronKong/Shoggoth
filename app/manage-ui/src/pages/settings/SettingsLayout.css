@@ -138,22 +138,13 @@
 }
 
 .management-page.settings-page .settings-notification-footer {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px 20px;
   padding-top: 20px;
   margin-top: 4px;
   border-top: 1px solid var(--ui-hairline);
 }
 
 .management-page.settings-page .settings-notification-footer .ui-hint {
-  flex: 1 1 200px;
   margin: 0;
-}
-
-.management-page.settings-page .settings-notification-footer button {
-  flex-shrink: 0;
 }
 
 /* Infrequent developer tools stay collapsed until needed. */
@@ -196,7 +187,6 @@
   .management-page.settings-page > .page-head { gap: 16px; }
   .management-page.settings-page .page-head-actions { width: 100%; justify-content: space-between; }
   .management-page.settings-page .settings-preferences .settings-prefs-row > .field { display: flex; gap: 8px; align-items: stretch; }
-  .management-page.settings-page .settings-notification-footer { align-items: flex-start; }
   .management-page.settings-page .settings-app-update-card { align-items: stretch; flex-direction: column; }
   .management-page.settings-page .settings-app-update-actions { justify-content: flex-start; }
   .management-page.settings-page .settings-advanced-summary { gap: 10px; }

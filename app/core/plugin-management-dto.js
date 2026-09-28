@@ -47,9 +47,17 @@ function mcpStatus(value) {
     || !id(value.installationId) || !id(value.profileId)
     || !Array.isArray(value.items) || value.items.length > 256) invalid();
   const items = value.items.map((item) => {
-    if (!exact(item, ["componentId", "connections", "binding"])
+    if (!exact(item, ["componentId", "connections", "accounts", "binding"])
       || !digest(item.componentId)
-      || !exact(item.connections, ["pending", "verified", "disconnected"])) invalid();
+      || !exact(item.connections, ["pending", "verified", "disconnected"])
+      || !Array.isArray(item.accounts) || item.accounts.length > 256) invalid();
+    const accounts = item.accounts.map(account => {
+      if (!exact(account, ["connectionId", "label"])
+        || !id(account.connectionId) || !text(account.label, 128)
+        || account.label.length === 0) invalid();
+      return { ...account };
+    });
+    if (new Set(accounts.map(account => account.connectionId)).size !== accounts.length) invalid();
     for (const count of Object.values(item.connections)) {
       if (!Number.isSafeInteger(count) || count < 0) invalid();
     }
@@ -70,22 +78,56 @@ function mcpStatus(value) {
         connectionState: current.connectionState,
         grants: { allow: current.grants.allow, deny: current.grants.deny } };
     }
-    return { componentId: item.componentId, connections: { ...item.connections },
+    return { componentId: item.componentId, connections: { ...item.connections }, accounts,
       binding: selected };
   });
   return { installationId: value.installationId, profileId: value.profileId, items };
 }
 function mcpTools(value) {
-  if (!exact(value, ["profileId", "bindingId", "available", "catalogRevision",
-    "items"])
+  const fields = ["profileId", "bindingId", "available", "catalogRevision", "items",
+    ...(Object.hasOwn(value || {}, "portableCapabilities") ? ["portableCapabilities"] : []),
+    ...(Object.hasOwn(value || {}, "referenceCoverage") ? ["referenceCoverage"] : [])];
+  if (!exact(value, fields)
     || !id(value.profileId) || !id(value.bindingId)
     || typeof value.available !== "boolean"
     || (value.available ? !UUID.test(value.catalogRevision)
       : value.catalogRevision !== null)
     || !Array.isArray(value.items) || value.items.length > 256
     || (!value.available && value.items.length !== 0)) invalid();
+  let portableCapabilities;
+  if (Object.hasOwn(value, "portableCapabilities")) {
+    if (!value.available || !Array.isArray(value.portableCapabilities)
+      || value.portableCapabilities.length < 1 || value.portableCapabilities.length > 16) invalid();
+    const names = new Set(value.items.map(item => item.name));
+    portableCapabilities = value.portableCapabilities.map(item => {
+      if (!exact(item, ["id", "toolName"])
+        || !/^[a-z][a-z0-9-]{0,63}$/u.test(item.id)
+        || !text(item.toolName, 128) || !names.has(item.toolName)) invalid();
+      return { id: item.id, toolName: item.toolName };
+    });
+    if (new Set(portableCapabilities.map(item => item.id)).size !== portableCapabilities.length) invalid();
+  }
+  let referenceCoverage;
+  if (Object.hasOwn(value, "referenceCoverage")) {
+    const coverage = value.referenceCoverage;
+    if (!portableCapabilities || !exact(coverage, ["packageId", "referenceName", "managedAppId",
+      "relationship", "equivalence", "operations"])
+      || coverage.packageId !== "github" || coverage.referenceName !== "github"
+      || coverage.managedAppId !== "connector_76869538009648d5b282a4bb21c3d157"
+      || coverage.relationship !== "functional-overlap" || coverage.equivalence !== "unverified"
+      || !Array.isArray(coverage.operations)
+      || coverage.operations.length !== portableCapabilities.length
+      || coverage.operations.some((item, index) => !exact(item, ["id", "toolName"])
+        || item.id !== portableCapabilities[index].id
+        || item.toolName !== portableCapabilities[index].toolName)) invalid();
+    referenceCoverage = { packageId: coverage.packageId, referenceName: coverage.referenceName,
+      managedAppId: coverage.managedAppId, relationship: coverage.relationship,
+      equivalence: coverage.equivalence, operations: portableCapabilities };
+  }
   return { profileId: value.profileId, bindingId: value.bindingId,
     available: value.available, catalogRevision: value.catalogRevision,
+    ...(portableCapabilities ? { portableCapabilities } : {}),
+    ...(referenceCoverage ? { referenceCoverage } : {}),
     items: value.items.map((item) => {
       if (!exact(item, ["toolIdentity", "name", "contractDigest", "savedGrant"])
         || typeof item.toolIdentity !== "string" || !TOOL_ID.test(item.toolIdentity)

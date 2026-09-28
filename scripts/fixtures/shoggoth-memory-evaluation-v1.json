@@ -1,0 +1,201 @@
+{
+  "version": 1,
+  "description": "Frozen synthetic native-Agent memory evaluation. No user data.",
+  "memoryItems": [
+    { "id": "m-chinese-answer", "content": "用户偏好中文回答，尤其是技术讨论。" },
+    { "id": "m-build", "content": "晨舟项目的构建号是 QK-4827。" },
+    { "id": "m-review", "content": "用户每周五下午进行项目复盘。" },
+    { "id": "m-no-sunday", "content": "用户不希望在周日收到项目提醒。" },
+    { "id": "m-office", "content": "旧办公地点已迁出海淀，当前办公地点是望京。" },
+    { "id": "m-firebird", "content": "火羽会议的纪要保存三个月。" },
+    { "id": "m-dark", "content": "用户首选深色主题。" },
+    { "id": "m-cat", "content": "用户的猫叫豆包。" },
+    { "id": "m-trip", "content": "用户打算在六月去京都旅行。" },
+    { "id": "m-answer-style", "content": "用户偏好回答先给结论，再列证据。" },
+    { "id": "m-local", "content": "Shoggoth 原生 Agent 运行在本机。" },
+    { "id": "m-logs", "content": "项目所有日志采用 JSONL 格式。" },
+    { "id": "m-ui-language", "content": "用户偏好中文界面，但文档使用英文。" },
+    { "id": "m-other-build", "content": "另一流程的构建号是 QK-4828。" },
+    { "id": "m-backup", "content": "用户每周五上午检查备份。" }
+  ],
+  "memoryQueries": {
+    "A": [
+      { "id": "A01", "query": "中文回答", "relevant": ["m-chinese-answer"], "probe": "ordinary lexical" },
+      { "id": "A02", "query": "晨舟", "relevant": ["m-build"], "probe": "Chinese two characters" },
+      { "id": "A03", "query": "QK-4827", "relevant": ["m-build"], "probe": "exact identifier" },
+      { "id": "A04", "query": "周五下午复盘", "relevant": ["m-review"], "probe": "time-qualified correction distractor" },
+      { "id": "A05", "query": "周日提醒", "relevant": ["m-no-sunday"], "probe": "negated fact" },
+      { "id": "A06", "query": "望京", "relevant": ["m-office"], "probe": "current location" },
+      { "id": "A07", "query": "火羽", "relevant": ["m-firebird"], "probe": "rare two-character term" },
+      { "id": "A08", "query": "JSONL", "relevant": ["m-logs"], "probe": "exact format" }
+    ],
+    "B": [
+      { "id": "B01", "query": "那个常用的暗色外观设置", "relevant": ["m-dark"], "probe": "paraphrase" },
+      { "id": "B02", "query": "每逢星期五傍晚回顾进展的安排", "relevant": ["m-review"], "probe": "paraphrase of day and task" },
+      { "id": "B03", "query": "家里那只宠物的名字", "relevant": ["m-cat"], "probe": "indirect reference" },
+      { "id": "B04", "query": "下个月去日本古都的计划", "relevant": ["m-trip"], "probe": "indirect place" },
+      { "id": "B05", "query": "答复应该直奔结果并附上依据", "relevant": ["m-answer-style"], "probe": "synonyms" },
+      { "id": "B06", "query": "为本地助手选的执行位置", "relevant": ["m-local"], "probe": "synonyms" }
+    ]
+  },
+  "conversation": {
+    "callerSessionKey": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+    "sessions": [
+      {
+        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        "sessionKey": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-current", "source": "chat", "status": "running" },
+        "events": [{ "id": "ev-current", "kind": "user", "text": "请帮我检索之前的对话。" }]
+      },
+      {
+        "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+        "sessionKey": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-history-1", "source": "chat", "status": "completed" },
+        "events": [
+          { "id": "ev-build", "kind": "user", "text": "晨舟项目的构建号是 QK-4827。" },
+          { "id": "ev-rabbit", "kind": "user", "text": "玄兔是这次迭代的暗号。" },
+          { "id": "ev-supplier", "kind": "user", "text": "我们在周四讨论供应商验收。" },
+          { "id": "ev-tool", "kind": "tool_result", "text": "工具秘密索引词。" },
+          { "id": "ev-excluded", "kind": "user", "text": "隐藏片段索引词。", "contextExcluded": true }
+        ]
+      },
+      {
+        "id": "cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
+        "sessionKey": "cccccccc-cccc-4ccc-8ccc-ccccccccccc2",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "archived",
+        "run": { "id": "run-history-2", "source": "chat", "status": "completed" },
+        "events": [
+          { "id": "ev-budget", "kind": "user", "text": "预算上限是 4800 元。" },
+          { "id": "ev-may", "kind": "user", "text": "五月十四日开始灰度测试。" },
+          { "id": "ev-interface", "kind": "assistant", "text": "接口代号 RX-9471 已记录。" },
+          { "id": "ev-owner", "kind": "user", "text": "文档由林杉维护。" }
+        ]
+      },
+      {
+        "id": "dddddddd-dddd-4ddd-8ddd-ddddddddddd1",
+        "sessionKey": "dddddddd-dddd-4ddd-8ddd-ddddddddddd2",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-inspiration", "source": "inspiration", "sourceId": "idea-direct-chat", "inputSource": "chat", "status": "completed" },
+        "events": [
+          { "id": "ev-color", "kind": "user", "text": "设计稿用雾蓝作为主色。" },
+          { "id": "ev-list", "kind": "user", "text": "回访清单放在抽屉三。" },
+          { "id": "ev-demo", "kind": "assistant", "text": "演示时间定在上午九点。" }
+        ]
+      },
+      {
+        "id": "66666666-6666-4666-8666-666666666661",
+        "sessionKey": "66666666-6666-4666-8666-666666666662",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-forgotten", "source": "chat", "status": "completed" },
+        "events": [{ "id": "ev-forgotten", "kind": "user", "text": "葡萄船期是下周三。", "revoked": true }]
+      },
+      {
+        "id": "77777777-7777-4777-8777-777777777771",
+        "sessionKey": "77777777-7777-4777-8777-777777777772",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-growth", "source": "inspiration", "sourceId": "idea-growth", "status": "completed" },
+        "events": [{ "id": "ev-growth", "kind": "user", "text": "成长作业索引词。" }]
+      },
+      {
+        "id": "88888888-8888-4888-8888-888888888881",
+        "sessionKey": "88888888-8888-4888-8888-888888888882",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-card", "source": "inspiration", "sourceId": "idea-card", "inputSource": "card", "status": "completed" },
+        "events": [{ "id": "ev-card", "kind": "user", "text": "普通卡片索引词。" }]
+      },
+      {
+        "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1",
+        "sessionKey": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2",
+        "profileId": "profile-2",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-other-profile", "source": "chat", "status": "completed" },
+        "events": [{ "id": "ev-other-profile", "kind": "user", "text": "隔离资料甲只在别的 Profile。" }]
+      },
+      {
+        "id": "ffffffff-ffff-4fff-8fff-fffffffffff1",
+        "sessionKey": "ffffffff-ffff-4fff-8fff-fffffffffff2",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-b",
+        "status": "ready",
+        "run": { "id": "run-other-workspace", "source": "chat", "status": "completed" },
+        "events": [{ "id": "ev-other-workspace", "kind": "user", "text": "隔离资料乙只在别的工作区。" }]
+      },
+      {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "sessionKey": "11111111-1111-4111-8111-111111111112",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "delete_pending",
+        "run": { "id": "run-delete-pending", "source": "chat", "status": "completed" },
+        "events": [{ "id": "ev-delete-pending", "kind": "user", "text": "删除等待索引词。" }]
+      },
+      {
+        "id": "22222222-2222-4222-8222-222222222221",
+        "sessionKey": "22222222-2222-4222-8222-222222222222",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-cron", "source": "cron", "status": "completed" },
+        "events": [{ "id": "ev-cron", "kind": "user", "text": "定时记录索引词。" }]
+      },
+      {
+        "id": "33333333-3333-4333-8333-333333333331",
+        "sessionKey": "33333333-3333-4333-8333-333333333332",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-federation", "source": "chat", "status": "completed", "idempotencyKey": "shoggoth:chat-send:federation-send-fixture" },
+        "events": [{ "id": "ev-federation", "kind": "user", "text": "联邦对话索引词。" }]
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444441",
+        "sessionKey": "44444444-4444-4444-8444-444444444442",
+        "profileId": "profile-1",
+        "workspace": "/synthetic/project-a",
+        "status": "ready",
+        "run": { "id": "run-unknown", "source": "unknown", "status": "completed" },
+        "events": [{ "id": "ev-unknown", "kind": "user", "text": "未知来源索引词。" }]
+      }
+    ],
+    "queries": [
+      { "id": "C01", "query": "晨舟", "relevant": ["ev-build"], "probe": "cross-session Chinese two characters" },
+      { "id": "C02", "query": "玄兔", "relevant": ["ev-rabbit"], "probe": "rare Chinese two characters" },
+      { "id": "C03", "query": "供应商验收", "relevant": ["ev-supplier"], "probe": "cross-session original text" },
+      { "id": "C04", "query": "4800", "relevant": ["ev-budget"], "probe": "archived session numeric exact" },
+      { "id": "C05", "query": "五月十四日", "relevant": ["ev-may"], "probe": "archived session date" },
+      { "id": "C06", "query": "RX-9471", "relevant": ["ev-interface"], "probe": "assistant text, not user fact" },
+      { "id": "C07", "query": "林杉", "relevant": ["ev-owner"], "probe": "rare Chinese two characters" },
+      { "id": "C08", "query": "雾蓝", "relevant": ["ev-color"], "probe": "inspiration user event" },
+      { "id": "C09", "query": "抽屉三", "relevant": ["ev-list"], "probe": "inspiration original text" },
+      { "id": "C10", "query": "上午九点", "relevant": ["ev-demo"], "probe": "inspiration assistant text" },
+      { "id": "C11", "query": "葡萄船期", "relevant": [], "forbidden": ["ev-forgotten"], "probe": "revoked source" },
+      { "id": "C12", "query": "工具秘密索引词", "relevant": [], "forbidden": ["ev-tool"], "probe": "tool result" },
+      { "id": "C13", "query": "隐藏片段索引词", "relevant": [], "forbidden": ["ev-excluded"], "probe": "contextExcluded" },
+      { "id": "C14", "query": "隔离资料甲", "relevant": [], "forbidden": ["ev-other-profile"], "probe": "other Profile" },
+      { "id": "C15", "query": "隔离资料乙", "relevant": [], "forbidden": ["ev-other-workspace"], "probe": "other workspace" },
+      { "id": "C16", "query": "删除等待索引词", "relevant": [], "forbidden": ["ev-delete-pending"], "probe": "delete_pending session" },
+      { "id": "C17", "query": "定时记录索引词", "relevant": [], "forbidden": ["ev-cron"], "probe": "Cron origin" },
+      { "id": "C18", "query": "联邦对话索引词", "relevant": [], "forbidden": ["ev-federation"], "probe": "federation origin" },
+      { "id": "C19", "query": "未知来源索引词", "relevant": [], "forbidden": ["ev-unknown"], "probe": "unverifiable origin" },
+      { "id": "C20", "query": "成长作业索引词", "relevant": [], "forbidden": ["ev-growth"], "probe": "Inspiration origin missing inputSource" },
+      { "id": "C21", "query": "普通卡片索引词", "relevant": [], "forbidden": ["ev-card"], "probe": "Inspiration origin is card rather than chat" }
+    ]
+  }
+}

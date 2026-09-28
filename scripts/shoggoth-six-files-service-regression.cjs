@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-// Production stores, IPC, MCP authentication, runtime adapters and Backend reads.
+// Production stores, IPC, product tools, runtime adapters and Backend reads.
 // Only the external model processes are replaced; all data lives in a temporary root.
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
@@ -11,7 +11,6 @@ const path = require("node:path");
 const { createAgentService, PROTOCOL_VERSION } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { requestService, readClientToken } = require("../app/agent-service/client");
-const { authenticateMcpSession } = require("../app/shoggoth-mcp-helper");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 
 const FILES = ["IDENTITY", "SOUL", "USER", "AGENTS", "TOOLS", "MEMORY"];
@@ -118,11 +117,12 @@ async function verifySixFiles() {
     profileRoot: path.join(root, "profiles"), cacheRoot: path.join(root, "cache") });
   const pool = runtimePool();
   const create = () => createAgentService({ paths, safeStorage, builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: ["native-codex-default-v1", "native-grok-build-default-v1",
+      "native-antigravity-default-v1", "native-pi-default-v1", "native-deepseek-harness-default-v1"],
     version: "six-files-regression", runtimePool: pool, grokBuildRuntimePool: pool,
     antigravityRuntimePool: pool, piRuntimePool: pool, deepSeekHarnessRuntimePool: pool });
   let service = create();
   const backends = [];
-  const authorizations = [];
   const report = [];
   const ipc = (method, params) => requestService(paths, { version: PROTOCOL_VERSION,
     token: readClientToken(paths), id: uuid(), method, params });
@@ -134,9 +134,6 @@ async function verifySixFiles() {
     const remembered = [];
     for (const profile of profiles) {
       console.log(`CHECK ${profile.name}: read and mutate six files`);
-      const auth = await authenticateMcpSession({ paths, safeStorage,
-        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
-      authorizations.push(auth);
       const backend = new ShoggothBackend({ paths, id: profile.backendId, name: profile.name,
         readinessTimeoutMs: 5000, readinessIntervalMs: 20,
         requestService: async (...args) => {
@@ -158,12 +155,12 @@ async function verifySixFiles() {
       assert.equal(tools.revision, service.toolRegistry.revision);
       assert.equal(tools.content, service.toolRegistry.toolsMarkdown());
 
-      const call = (run, name, args, callId = uuid()) => requestService(paths, {
-        version: PROTOCOL_VERSION, method: "mcp.tool.call", params: {
-          runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId,
-          sessionToken: auth.token, callId, name, arguments: { source: run.source, sourceId: run.sourceId, ...args },
-        },
-      });
+      // The direct MCP socket now requires a Runtime-issued per-call binding.
+      // This fixture checks the product tool behavior with its authoritative
+      // Run arguments; dedicated MCP bridge tests exercise socket attestation.
+      const call = (run, name, args, callId = uuid()) => service.mcpProductToolController.handle(
+        name, { source: run.source, sourceId: run.sourceId, ...args },
+        { profileId: profile.id, callId });
       const session = service.chatSessionStore.listSessions().find((item) => item.profileId === profile.id);
       assert.ok(session, `${profile.name} must have its own session`);
       assert.notEqual(session.id, session.sessionKey);
@@ -176,13 +173,13 @@ async function verifySixFiles() {
       };
       const abort = (run) => ipc("chat.abort", { operationId: uuid(), sessionKey: session.sessionKey,
         runId: run.id, createdAt: Date.now() });
-      const nickname = `称呼-${profile.backendId}`;
-      const agentFact = `长期事实-${profile.backendId}`;
+      const nickname = `称呼-${profile.id}`;
+      const agentFact = `长期事实-${profile.id}`;
       const newName = `${profile.name} 测试`;
       const run = await send(`以后叫我 ${nickname}。记住 ${agentFact}。以后你叫 ${newName}，语气温和，先查证再回答。`);
       const frozen = service.contextSnapshotStore.get(profile.id, run.contextSnapshotId);
       assert.ok(frozen.blocks.some((block) => block.id === "first-conversation"));
-      const empty = await call(run, "memory_search", { query: nickname, includeCandidates: true });
+      const empty = await call(run, "memory_search", { query: nickname });
       assert.equal(empty.revision, 0);
       assert.deepEqual(empty.items, []);
       const saveArgs = { expectedRevision: empty.revision, content: `用户要求称呼为 ${nickname}`,
@@ -206,7 +203,7 @@ async function verifySixFiles() {
         assert.equal(before.truncated, false);
         const oldText = kind === "IDENTITY" ? `- Name: ${profile.name}` : before.content;
         const newText = kind === "IDENTITY" ? `- Name: ${newName}`
-          : `${before.content}\n${kind === "SOUL" ? "温和" : "先查证再回答"}-${profile.backendId}\n`;
+          : `${before.content}\n${kind === "SOUL" ? "温和" : "先查证再回答"}-${profile.id}\n`;
         const args = { kind, expectedRevision: before.revision, oldText, newText,
           sourceQuote: kind === "IDENTITY" ? `以后你叫 ${newName}` : kind === "SOUL" ? "语气温和" : "先查证再回答",
           ...(kind === "IDENTITY" ? { newName } : {}) };
@@ -222,7 +219,7 @@ async function verifySixFiles() {
           content: "overwrite generated data", reason: "negative test" }),
         (error) => error.code === "DEFINITION_WRITE_FORBIDDEN");
       }
-      const manualContent = `界面手动记忆-${profile.backendId}`;
+      const manualContent = `界面手动记忆-${profile.id}`;
       const manual = await backend.mutateAgentMemory(profile.agentId, "create", {
         content: manualContent, scope: "agent", expectedRevision: fact.revision,
       });
@@ -232,7 +229,8 @@ async function verifySixFiles() {
         id: manual.item.id, content: editedManualContent, confidence: 1,
         validUntil: null, expectedRevision: manual.revision,
       });
-      assert.equal(edited.item.id, manual.item.id);
+      assert.notEqual(edited.item.id, manual.item.id);
+      assert.equal(edited.item.supersedes, manual.item.id);
       assert.ok((await backend.getAgentFile(profile.agentId, "MEMORY.md")).content.includes(editedManualContent));
       const toolState = await ipc("harness.tools.list", { profileId: profile.id });
       await ipc("harness.tools.permission.set", { profileId: profile.id, toolName: "memory_save",
@@ -246,14 +244,14 @@ async function verifySixFiles() {
       const next = await send(`查询 ${agentFact} 和界面手动记忆，并用现在的名字介绍自己。`);
       const snapshot = service.contextSnapshotStore.get(profile.id, next.contextSnapshotId);
       assert.equal(snapshot.blocks.some((block) => block.id === "first-conversation"), false);
-      for (const text of [`- Name: ${newName}`, `温和-${profile.backendId}`, `先查证再回答-${profile.backendId}`]) {
+      for (const text of [`- Name: ${newName}`, `温和-${profile.id}`, `先查证再回答-${profile.id}`]) {
         assert.ok(snapshot.developerInstructions.includes(text));
       }
       assert.ok(snapshot.dynamicContext.includes(nickname) && snapshot.dynamicContext.includes(agentFact));
       assert.ok(snapshot.dynamicContext.includes(editedManualContent), "Manual UI edits must reach the next model turn");
       for (const other of profiles.filter((item) => item.id !== profile.id)) {
-        assert.equal(snapshot.dynamicContext.includes(`称呼-${other.backendId}`), false);
-        assert.equal(snapshot.dynamicContext.includes(`长期事实-${other.backendId}`), false);
+        assert.equal(snapshot.dynamicContext.includes(`称呼-${other.id}`), false);
+        assert.equal(snapshot.dynamicContext.includes(`长期事实-${other.id}`), false);
       }
       const host = pool.get(profile, { workspace: session.workspace });
       assert.ok(host.calls.resume.length > 0, "Continue the existing runtime session");
@@ -274,10 +272,9 @@ async function verifySixFiles() {
       report.push({ backend: profile.backendId, name: profile.name, files: FILES.map((kind) => `${kind}.md`),
         fileReads: "passed", memoryWrite: "passed", manualMemoryEdit: "passed", conversationalEdit: "passed", profileRename: "passed",
         nextTurnDelivery: "passed", permissions: "passed", isolation: "passed" });
-      console.log(`PASS ${profile.name}: six files, authenticated writes, rename, same-session delivery, isolation and permissions`);
+      console.log(`PASS ${profile.name}: six files, bound product writes, rename, same-session delivery, isolation and permissions`);
       await backend.stop();
     }
-    for (const auth of authorizations) auth.close?.();
     await service.stop();
     service = create();
     await service.start();
@@ -291,7 +288,6 @@ async function verifySixFiles() {
     console.log("PASS restart preserves all 36 files, six Profile names and per-Agent permissions");
     return report;
   } finally {
-    for (const auth of authorizations) auth.close?.();
     for (const backend of backends) await backend.stop();
     await service.stop();
     fs.rmSync(root, { recursive: true, force: true });

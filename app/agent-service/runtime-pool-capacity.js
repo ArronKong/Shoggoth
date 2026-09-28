@@ -7,7 +7,7 @@ const HARD_MAX_HOSTS = 128;
 const OPERATIONS = Object.freeze([
   "authenticationState", "modelsList", "sessionList", "sessionStart", "sessionResume",
   "sessionRead", "sessionRename", "sessionArchive", "sessionUnarchive", "sessionDelete",
-  "turnStart", "turnSteer", "turnInterrupt", "commandsList", "commandExecute",
+  "turnStart", "turnSteer", "turnInterrupt", "commandsList", "commandExecute", "generateModelOnly",
   // Background catalog refresh and incoming server requests can outlive callers.
   "_runControl", "_readModelCatalog", "_onServerRequest",
 ]);

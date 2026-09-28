@@ -48,7 +48,7 @@ const { startStaticServer } = require("../app/static-server");
     };
     const first = await request("native-capacity");
     assert.equal(first.status, 200);
-    assert.deepEqual(first.body, { revision: 0, maxActive: 100, startupConcurrency: 8,
+    assert.deepEqual(first.body, { revision: 0, maxActive: 32, startupConcurrency: 8,
       enabled: true, active: 7, queued: 2, byReason: [{ reason: "SESSION_LOCKED", count: 2 }] });
     const update = { expectedRevision: 0, maxActive: 75, startupConcurrency: 6, enabled: true };
     assert.equal((await request("native-capacity", update, null)).status, 403);

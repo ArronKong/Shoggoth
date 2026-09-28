@@ -6,6 +6,7 @@ const { serviceError } = require("./security");
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SCOPE = /^[\x21\x23-\x5B\x5D-\x7E]{1,256}$/u;
+const LOOPBACK_REDIRECT = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/oauth\/callback$/u;
 const fail = (code = "PLUGIN_OAUTH_PROVIDER_UNSUPPORTED") => {
   throw serviceError(code, "HTTP OAuth 服务未受信、配置不完整或认证请求无效");
 };
@@ -29,6 +30,14 @@ class PluginOAuthProviderRegistry {
         if (parsed.search) fail();
         return parsed.href;
       };
+      // RFC 8707 resource indicators are strings. A pathless origin is a
+      // distinct indicator from its URL-serialized root path ("/"). Keep the
+      // provider's exact pathless spelling when it is already canonical.
+      const audience = raw => {
+        const parsed = endpointOf(raw, value.allowLoopback === true);
+        if (parsed.search) fail();
+        return raw === parsed.origin ? raw : parsed.href;
+      };
       if (!value || typeof value.id !== "string" || !ID.test(value.id) || typeof value.name !== "string" || !value.name
         || Buffer.byteLength(value.name) > 256 || typeof value.clientId !== "string"
         || !value.clientId || value.clientId.length > 512 || /[\x00-\x20\x7f]/u.test(value.clientId)
@@ -38,13 +47,22 @@ class PluginOAuthProviderRegistry {
         || typeof value.verifyPrincipal !== "function"
         || !Array.isArray(value.metadataUrls) || value.metadataUrls.length > 16
         || !Array.isArray(value.identityUrls || []) || (value.identityUrls || []).length > 8) fail();
+      let redirectUrl = null;
+      if (value.redirectUrl !== undefined && value.redirectUrl !== null) {
+        const match = typeof value.redirectUrl === "string" && LOOPBACK_REDIRECT.exec(value.redirectUrl);
+        if (!match || Number(match[1]) < 1024 || Number(match[1]) > 65535
+          || new URL(value.redirectUrl).href !== value.redirectUrl) fail();
+        redirectUrl = value.redirectUrl;
+      }
       const provider = Object.freeze({ id: value.id, name: value.name,
-        serverUrl: url(value.serverUrl), issuer: url(value.issuer), audience: url(value.audience || value.serverUrl),
+        serverUrl: url(value.serverUrl), issuer: url(value.issuer),
+        audience: value.audience ? audience(value.audience) : url(value.serverUrl),
         authorizationEndpoint: url(value.authorizationEndpoint), tokenEndpoint: url(value.tokenEndpoint),
         clientId: value.clientId, scopes: Object.freeze([...value.scopes]),
         metadataUrls: Object.freeze(value.metadataUrls.map(url)),
         identityUrls: Object.freeze((value.identityUrls || []).map(url)),
-        verifyPrincipal: value.verifyPrincipal, allowLoopback: value.allowLoopback === true });
+        verifyPrincipal: value.verifyPrincipal, allowLoopback: value.allowLoopback === true,
+        redirectUrl });
       if (this.#providers.has(provider.serverUrl)) fail();
       this.#providers.set(provider.serverUrl, provider);
     }

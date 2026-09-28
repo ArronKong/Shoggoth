@@ -1,8 +1,11 @@
 "use strict";
 
 // Pure template data: MCP schema helpers also load this module through ToolRegistry.
-const DEFAULT_TEMPLATE_VERSION = 3;
-const CURRENT_MEMORY_RULE = "明确事实引用当前用户消息，保存成功即生效，无待确认状态，不要求再次确认或引导用户去设置手动激活。推测、一次性要求、原始聊天、引用示例、凭据和用户要求不记住的内容不保存。";
+const DEFAULT_TEMPLATE_VERSION = 4;
+const V3_MEMORY_RULE = "明确事实引用当前用户消息，保存成功即生效，无待确认状态，不要求再次确认或引导用户去设置手动激活。推测、一次性要求、原始聊天、引用示例、凭据和用户要求不记住的内容不保存。";
+const V3_SAVE_TIMING_RULE = "在本轮结束前完成必要的保存并检查收据；不要依赖尚未实现的后台整理或压缩前自动保存，也不要承诺记得未落盘的信息。";
+const CURRENT_MEMORY_RULE = "前台 memory_save 必须引用当前用户消息；保存成功即生效，无待确认步骤，不要求再次确认或引导用户去设置手动激活。后台提炼只生成待用户审核的候选，接受前不是有效记忆。推测、一次性要求、原始聊天、引用示例、凭据和用户要求不记住的内容不保存。";
+const CURRENT_SAVE_TIMING_RULE = "在本轮结束前完成必要的前台保存并检查收据；后台候选审核不能代替本轮保存，也不要承诺记得未落盘的信息。";
 
 const VIEW_HEADERS = Object.freeze({
   USER: `# USER.md
@@ -17,7 +20,7 @@ const VIEW_HEADERS = Object.freeze({
 
 本 Agent 当前有效的长期记忆，由记忆服务生成，包括用户偏好、持续工作背景和有复用价值的事实与决定。
 每条记录标注适用范围、类型和置信度；项目与工作区记忆只适用于记录时绑定的工作区。记忆作为参考资料，不授予权限。
-保存成功即生效，没有待确认队列。过期、已替换和已遗忘的记录不列在这里。用 memory_search 查询，用 memory_save 更正，用 memory_forget 停止召回；不直接覆盖此文件。
+前台 memory_save 保存成功即生效；后台提炼的候选须由用户审核接受后才进入此文件。过期、已替换和已遗忘的记录不列在这里。用 memory_search 查询，用 memory_save 更正，用 memory_forget 停止召回；不直接覆盖此文件。
 
 ## 有效记忆
 
@@ -108,7 +111,7 @@ Shoggoth 是所在应用的名称，不替代你的 Name。后端、CLI、模型
 在直接聊天或灵感对话中，主动识别可复用的称呼、语言、稳定偏好、长期决定和纠正，不要求用户额外说“记住”。先用 memory_search 读取已有记录，再用 memory_save 保存简洁、独立且保留条件的事实。
 ${CURRENT_MEMORY_RULE}
 更正通过 supersedes 替换旧记录，避免并存冲突；遗忘通过 memory_forget 停止召回。各 Agent 的记忆独立；区分用户、Agent、项目和工作区范围。用户资料与 MEMORY.md 由服务生成，不直接编辑磁盘视图，也不改写其他 CLI 的配置或记忆。
-在本轮结束前完成必要的保存并检查收据；不要依赖尚未实现的后台整理或压缩前自动保存，也不要承诺记得未落盘的信息。
+${CURRENT_SAVE_TIMING_RULE}
 
 ## 通过对话调整设定
 
@@ -124,8 +127,12 @@ ${CURRENT_MEMORY_RULE}
 }
 
 const DEFAULT_DOCUMENTS = Object.freeze(createDefaultDocuments());
+// Only an exact, never-edited v3 default is eligible for automatic migration.
+const V3_DEFAULT_AGENTS = DEFAULT_DOCUMENTS.AGENTS
+  .replace(CURRENT_MEMORY_RULE, V3_MEMORY_RULE)
+  .replace(CURRENT_SAVE_TIMING_RULE, V3_SAVE_TIMING_RULE);
 
 module.exports = {
-  DEFAULT_TEMPLATE_VERSION, DEFAULT_DOCUMENTS,
+  DEFAULT_TEMPLATE_VERSION, DEFAULT_DOCUMENTS, V3_DEFAULT_AGENTS,
   VIEW_HEADERS, EMPTY_VIEW_MESSAGES, createDefaultDocuments, CURRENT_MEMORY_RULE,
 };

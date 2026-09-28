@@ -1704,7 +1704,8 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
   const { service, paths } = fixtureValue;
   await service.start();
   try {
-    ensureBuiltinCliAgentProfiles(service.productStore);
+    ensureBuiltinCliAgentProfiles(service.productStore, new Set(Object.values(
+      require("../app/agent-service/runtime-account").DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME)));
     service.tokenUsageStore.record({
       runId: "fixture-run-usage", runtime: "codex",
       runtimeAccountId: service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).runtimeAccountId,

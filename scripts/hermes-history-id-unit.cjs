@@ -63,6 +63,11 @@ async function testFetchHistoricalPreservesDashboardId() {
           { id: 9, role: "system", content: "filtered out" },
           { id: 10, role: "assistant", content: [{ type: "text", text: "structured" }] },
           { id: 11, role: "user", content: federatedPrompt },
+          { id: 12, role: "assistant", content: "",
+            tool_calls: [{ id: "hermes-tool-12", function: {
+              name: "shoggoth_plugin_call", arguments: "{}" } }] },
+          { id: 13, role: "tool", content: "fixture result",
+            tool_name: "shoggoth_plugin_call", tool_call_id: "hermes-tool-12" },
         ],
       }));
     } else {
@@ -78,13 +83,17 @@ async function testFetchHistoricalPreservesDashboardId() {
     be.dashboards.set("default", { baseUrl: `http://127.0.0.1:${port}`, token: "x" });
 
     const fetched = await be._fetchHistoricalMessages("agent:hermes-default:abc-uuid");
-    assert.equal(fetched.length, 4, "non user/assistant roles filtered");
+    assert.equal(fetched.length, 6, "system role filtered, tool result retained");
     assert.equal(fetched[0].id, "hermes-msg-7", "real autoincrement id mapped");
     assert.equal(fetched[1].id, "hermes-msg-8", "real autoincrement id mapped");
     assert.equal(fetched[2].id, "hermes-msg-10", "id kept even for structured content");
     assert.equal(typeof fetched[2].content[0].text, "string", "structured content stringified");
     assert.deepEqual(fetched[3].provenance, provenance,
       "canonical Hermes history restores federation provenance from its durable marker");
+    assert.equal(fetched[4].content[0].id, "hermes-tool-12",
+      "host tool call id survives dashboard history mapping");
+    assert.equal(fetched[5].toolCallId, "hermes-tool-12",
+      "tool result carries the same host call id");
 
     // End-to-end: a fresh session seeds from the dashboard → all real ids, no local stamps.
     const hg = await be.getHistory("agent:hermes-default:abc-uuid");

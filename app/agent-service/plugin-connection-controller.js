@@ -11,6 +11,7 @@ const fail = (code = "PLUGIN_REQUEST_INVALID") => { throw serviceError(code, "�
 
 class PluginConnectionController {
   #pending = new Map();
+  #selectPending = new Map();
   #cleanup = new Map();
   constructor({ store, productStore, drainConnection, cancelStaleOAuth, invalidateConnection,
     now = Date.now, onPhase = null } = {}) {
@@ -64,6 +65,82 @@ class PluginConnectionController {
       ? "所有助理" : context.profile.name, package: context.releaseName,
       capability: context.componentName, affectedBindings: context.bindings.length,
       credentialDisposition: context.connection.credentialRef ? "retained_encrypted_unusable" : "none" };
+  }
+  #selectRequest(input) {
+    if (!exact(input, ["profileId", "bindingId", "connectionId", "expectedRevision", "operationId"])
+      || !["profileId", "bindingId", "connectionId", "operationId"].every(key => id(input[key]))
+      || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) fail();
+    return { ...input };
+  }
+  #selectContext(input) {
+    const profile = this.productStore.getAgentProfile(input.profileId);
+    const binding = this.store.getBinding(input.bindingId);
+    if (!profile?.enabled || !binding || binding.subjectKind !== "global"
+      || binding.subjectId !== "all-agents" || binding.componentKind !== "mcp-server"
+      || binding.revision !== input.expectedRevision) fail("REVISION_CONFLICT");
+    if (binding.connectionId === input.connectionId) fail("PLUGIN_CONNECTION_INVALID");
+    const current = this.store.getConnection(binding.connectionId);
+    const target = this.store.getConnection(input.connectionId);
+    const installation = this.store.getInstallation(binding.installationId);
+    const release = installation && this.store.getRelease(installation.sourceIdentity, installation.releaseDigest);
+    if (!current || !target || !installation || installation.desiredState !== "enabled"
+      || this.store.hasPendingInstallationDisable(binding.installationId)
+      || current.installationId !== binding.installationId || target.installationId !== binding.installationId
+      || current.componentId !== binding.componentId || target.componentId !== binding.componentId
+      || current.endpointIdentity !== target.endpointIdentity
+      || target.state !== "ready" || !target.principalIdentity || target.authRevision < 1
+      || !release?.components?.mcpServers?.some(item =>
+        componentId(binding.installationId, "mcp-server", item.name) === binding.componentId)) {
+      fail("PLUGIN_CONNECTION_INVALID");
+    }
+    const server = release.components.mcpServers.find(item =>
+      componentId(binding.installationId, "mcp-server", item.name) === binding.componentId);
+    return { authorityIncarnation: this.store.getAuthorityIncarnation(), profileId: profile.id,
+      binding, current, target, installation, packageName: release.name,
+      componentName: server.name, grantCounts: this.store.getGrantCountsForBinding(binding.bindingId) };
+  }
+  selectPrepare(raw) {
+    const input = this.#selectRequest(raw);
+    if (this.store.getOperation(input.operationId)) fail("REVISION_CONFLICT");
+    for (const [key, pending] of this.#selectPending) {
+      if (pending.expiresAt <= this.now()) this.#selectPending.delete(key);
+    }
+    if (this.#selectPending.size >= 32) fail("PLUGIN_CONSENT_BUSY");
+    const context = this.#selectContext(input);
+    const challenge = crypto.randomUUID(), expiresAt = this.now() + 120_000;
+    this.#selectPending.set(challenge, { input, fence: digest(context), expiresAt });
+    return { challenge, expiresAt, summary: { action: "mcp-account-select",
+      agent: "所有助理", package: context.packageName, capability: context.componentName,
+      account: /^github:[1-9][0-9]{0,19}$/u.test(context.target.principalIdentity)
+        ? `GitHub #${context.target.principalIdentity.slice(7)}`
+        : `连接 ${context.target.connectionId.slice(0, 8)}`,
+      grantsRevoked: context.grantCounts.allow } };
+  }
+  selectCommit(input) {
+    if (!exact(input, ["challenge", "approved"])
+      || !id(input.challenge) || typeof input.approved !== "boolean") fail();
+    const pending = this.#selectPending.get(input.challenge);
+    this.#selectPending.delete(input.challenge);
+    if (!pending || pending.expiresAt <= this.now()) fail("PLUGIN_CONSENT_EXPIRED");
+    if (!input.approved) return { canceled: true, receipt: null };
+    const context = this.#selectContext(pending.input);
+    if (digest(context) !== pending.fence || this.store.getOperation(pending.input.operationId)) {
+      fail("REVISION_CONFLICT");
+    }
+    const result = this.store.performManagementOperation({
+      operationId: pending.input.operationId, kind: "mcp-connect",
+      fingerprint: digest(["mcp-account-select", context.authorityIncarnation, pending.input,
+        context.target.authRevision]),
+      apply: () => {
+        let binding = this.store.setMcpBindingConnection({ bindingId: context.binding.bindingId,
+          connectionId: context.target.connectionId, expectedRevision: context.binding.revision });
+        binding = this.store.setBindingEnabled({ bindingId: binding.bindingId,
+          enabled: true, expectedRevision: binding.revision });
+        return { kind: "mcp-connect", profileId: pending.input.profileId,
+          bindingId: binding.bindingId, toolIdentity: null, revision: binding.revision };
+      },
+    });
+    return { canceled: false, receipt: result.result };
   }
   prepare(raw) {
     const input = this.#request(raw), existing = this.#existing(input);
@@ -134,6 +211,6 @@ class PluginConnectionController {
       receipt: operation && !unknown ? this.#receipt(operation.result) : null,
       reasonCode: unknown ? "PLUGIN_RESTORE_RECONCILIATION_REQUIRED" : null };
   }
-  clear() { this.#pending.clear(); this.#cleanup.clear(); }
+  clear() { this.#pending.clear(); this.#selectPending.clear(); this.#cleanup.clear(); }
 }
 module.exports = { PluginConnectionController };

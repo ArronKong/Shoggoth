@@ -37,6 +37,7 @@ export default function SettingsAppUpdate() {
 
   const statusText = useMemo(() => {
     if (!state) return t("settings.appUpdate.loading");
+    if (!state.supported && state.reason === "desktop-only") return null;
     if (!state.supported) return t(`settings.appUpdate.unsupported.${state.reason || "unknown"}`, {
       defaultValue: t("settings.appUpdate.unsupported.unknown"),
     });
@@ -82,7 +83,7 @@ export default function SettingsAppUpdate() {
           <span className="settings-app-update-version mono" aria-label={t("settings.appUpdate.currentVersion")}>{state?.currentVersion || "—"}</span>
         </h4>
         <p>{t("settings.appUpdate.description")}</p>
-        <p className="ui-hint" role="status" aria-live="polite">{statusText}</p>
+        {statusText && <p className="ui-hint" role="status" aria-live="polite">{statusText}</p>}
         {progress !== null && (
           <progress value={progress} max={100} aria-label={t("settings.appUpdate.downloadProgress")} />
         )}

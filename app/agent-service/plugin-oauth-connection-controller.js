@@ -38,6 +38,8 @@ class PluginOAuthConnectionController {
     if (context.installation.revision !== input.expectedRevision) fail("REVISION_CONFLICT");
     if (context.component.transport !== "streamable-http") fail("PLUGIN_OAUTH_PROVIDER_UNSUPPORTED");
     const provider = this.providers.forEndpoint(new URL(context.component.spec.url).href);
+    if (context.component.oauthResource
+      && provider.audience !== context.component.oauthResource) fail("PLUGIN_OAUTH_PROVIDER_UNSUPPORTED");
     const binding = this.store.listGlobalBindings().find(item =>
       item.installationId === input.installationId && item.componentId === input.componentId) || null;
     return { profile, ...context, binding, provider };
@@ -47,7 +49,9 @@ class PluginOAuthConnectionController {
     return digest({ profile: context.profile, installation: context.installation,
       descriptor: context.component.descriptorDigest, binding: context.binding,
       providerId: context.provider.id, scopes: context.provider.scopes,
-      endpoint: context.provider.serverUrl, clientId: context.provider.clientId });
+      endpoint: context.provider.serverUrl, issuer: context.provider.issuer,
+      audience: context.provider.audience, clientId: context.provider.clientId,
+      redirectUrl: context.provider.redirectUrl });
   }
 
   prepare(input) {
@@ -104,13 +108,9 @@ class PluginOAuthConnectionController {
     flow.startFinished = new Promise(resolve => { finishStart = resolve; });
     this.#flows.set(flowId, flow);
     try {
-      // Reconnect immediately narrows this Profile's binding, including queued
-      // calls. Other Profiles sharing the old Connection keep their authority.
-      if (context.binding) {
-        this.store.revokeAllGrants({ bindingId: context.binding.bindingId, expectedRevision: context.binding.revision });
-        this.store.setBindingEnabled({ bindingId: context.binding.bindingId, enabled: false,
-          expectedRevision: context.binding.revision });
-      }
+      // A pending login does not change the existing shared account. The
+      // verified replacement is switched and its old grants revoked atomically
+      // by setMcpBindingConnection inside the final management transaction.
       flow.fence = this.#fence(this.#context(flow.input));
       this.store.createConnection({ connectionId, installationId: flow.input.installationId,
         componentId: flow.input.componentId, endpointIdentity: flow.provider.serverUrl,
@@ -133,12 +133,15 @@ class PluginOAuthConnectionController {
         const onAbort = () => reject(serviceError("CONNECTION_AUTH_REQUIRED", "OAuth 连接已取消"));
         flow.abort.signal.addEventListener("abort", onAbort, { once: true });
         flow.server.once("error", reject);
-        flow.server.listen({ port: 0, host: "127.0.0.1", signal: flow.abort.signal }, () => {
+        const port = flow.provider.redirectUrl
+          ? Number(new URL(flow.provider.redirectUrl).port) : 0;
+        flow.server.listen({ port, host: "127.0.0.1", signal: flow.abort.signal }, () => {
           flow.abort.signal.removeEventListener("abort", onAbort); resolve();
         });
       });
       this.#assert(flow);
       const redirectUrl = `http://127.0.0.1:${flow.server.address().port}/oauth/callback`;
+      if (flow.provider.redirectUrl && redirectUrl !== flow.provider.redirectUrl) fail("CONNECTION_AUTH_REQUIRED");
       flow.redirectUrl = redirectUrl;
       const started = await flow.oauth.start({ connectionId, serverUrl: flow.provider.serverUrl, redirectUrl,
         clientId: flow.provider.clientId, scope: flow.provider.scopes.join(" "), allowLoopback: true });

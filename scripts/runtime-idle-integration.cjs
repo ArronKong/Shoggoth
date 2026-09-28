@@ -72,7 +72,8 @@ async function until(check) {
     async stopAll() { for (const host of hosts.values()) host.finish(); hosts.clear(); },
   };
   const service = createAgentService({
-    paths, version: "idle-integration", builtinCliProfiles: true, runtimeIdleTimeoutMs: 100,
+    paths, version: "idle-integration", builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: ["native-deepseek-harness-default-v1"], runtimeIdleTimeoutMs: 100,
     safeStorage: { isEncryptionAvailable: () => true, encryptString: (v) => Buffer.from(v), decryptString: (v) => Buffer.from(v).toString() },
     deepSeekHarnessRuntimePool: pool,
   });

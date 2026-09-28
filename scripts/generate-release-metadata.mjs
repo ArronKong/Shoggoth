@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectThirdPartyLicenses } from "./third-party-licenses.mjs";
+import { createRequire } from "node:module";
+const { E5_MODEL } = createRequire(import.meta.url)("../app/agent-service/e5-model-contract.js");
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
@@ -72,6 +74,19 @@ const mcpClientDependencyRefs = [
   addNpm("zod", "node_modules/zod"),
 ];
 const cronRef = addNpm("cron-parser", "node_modules/cron-parser");
+const e5Runtime = JSON.parse(fs.readFileSync(path.join(repoRoot, "build/e5-runtime-manifest.json")));
+const e5RuntimeRef = addNpm("onnxruntime-node", "node_modules/onnxruntime-node", [
+  { name: "shoggoth:role", value: "offline-native-memory-inference" },
+  { name: "shoggoth:pre-signing-native-assets", value: JSON.stringify(e5Runtime.architectures) },
+]);
+const e5CommonRef = addNpm("onnxruntime-common", "node_modules/onnxruntime-common");
+const e5TokenizerRef = addNpm("@huggingface/tokenizers", "node_modules/@huggingface/tokenizers");
+const e5Ref = `pkg:generic/multilingual-e5-small@${E5_MODEL.revision}`;
+components.set(e5Ref, { type: "data", name: E5_MODEL.modelId, version: E5_MODEL.revision,
+  "bom-ref": e5Ref, purl: e5Ref, licenses: licenses(E5_MODEL.license),
+  hashes: [{ alg: "SHA-256", content: E5_MODEL.files.find(file => file.name === E5_MODEL.weight).sha256 }],
+  externalReferences: [{ type: "distribution", url: `https://huggingface.co/${E5_MODEL.modelId}/tree/${E5_MODEL.revision}` }],
+  properties: [{ name: "shoggoth:model-contract", value: JSON.stringify(E5_MODEL) }] });
 const sqlite = JSON.parse(fs.readFileSync(path.join(repoRoot, "build/inspiration-sqlite-manifest.json")));
 const sqliteRef = addNpm("better-sqlite3", "node_modules/better-sqlite3", [
   { name: "shoggoth:role", value: "inspiration-storage" },
@@ -185,11 +200,13 @@ const bom = {
   components: [...components.values()].sort((left, right) => left["bom-ref"].localeCompare(right["bom-ref"])),
   dependencies: [
     { ref: rootRef, dependsOn: [
-      electronRef, wsRef, ptyRef, xtermRef, fflateRef, mcpClientRef, cronRef, sqliteRef, cuaSdkRef, cuaBinaryRef, ...codexRefs, ...inventoryRefs,
+      electronRef, wsRef, ptyRef, xtermRef, fflateRef, mcpClientRef, cronRef, sqliteRef, cuaSdkRef, cuaBinaryRef,
+      e5Ref, e5RuntimeRef, e5TokenizerRef, ...codexRefs, ...inventoryRefs,
     ].filter((ref, index, refs) => refs.indexOf(ref) === index).sort() },
     { ref: mcpClientRef, dependsOn: [mcpCoreRef, ...mcpClientDependencyRefs].sort() },
     { ref: mcpCoreRef, dependsOn: [mcpClientDependencyRefs.at(-1)] },
     { ref: cronRef, dependsOn: [luxonRef] },
+    { ref: e5RuntimeRef, dependsOn: [e5CommonRef] },
     { ref: cuaSdkRef, dependsOn: [ubjsCoreRef, ubjsNodeRef, ...nativeRefs].sort() },
     { ref: ubjsNodeRef, dependsOn: nativeRefs.filter((ref) => ref.includes("%40ubjs/")) },
   ],

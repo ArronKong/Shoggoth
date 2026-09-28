@@ -2237,7 +2237,6 @@
 .chat-verification-banner button:disabled { opacity: 0.5; cursor: default; }
 .chat-verification-banner button:hover:not(:disabled) { background: var(--skin-glass-pill); }
 .chat-verification-banner button:focus { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
-
 /* toast inline action (撤销 etc.) — parent toast is pointer-events:none */
 .chat-toast__act {
   flex: none;

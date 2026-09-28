@@ -17,7 +17,7 @@ const MAX_CREDENTIALS = 1024;
 const MAX_PLAINTEXT_BYTES = 64 * 1024;
 const CUSTOM_PROVIDER_SECRET_KINDS = new Set([
   "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses", "runtime-worker-token",
-  "mcp-oauth", "mcp-bearer",
+  "mcp-oauth", "mcp-bearer", "microsoft-graph-oauth",
 ]);
 
 function secretError(code, message = code) {

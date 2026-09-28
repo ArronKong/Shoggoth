@@ -85,6 +85,13 @@
   min-width: 0;
   padding: 2px 0;
 }
+.externalCallOutcome {
+  margin: 1px 0 5px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ui-text-2);
+  overflow-wrap: anywhere;
+}
 .head {
   display: flex;
   align-items: center;
@@ -149,6 +156,10 @@
 .chip[data-st="ok"] {
   background: light-dark(rgba(31, 181, 86, 0.1), rgba(52, 211, 153, 0.14));
   color: light-dark(#1fb556, #34d399);
+}
+.chip[data-external-plugin="1"][data-st="ok"] {
+  background: var(--ui-surface-2);
+  color: var(--ui-text-2);
 }
 .chip[data-st="error"] {
   background: light-dark(rgba(193, 39, 39, 0.1), rgba(248, 113, 113, 0.14));

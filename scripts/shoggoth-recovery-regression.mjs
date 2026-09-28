@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,7 +11,7 @@ const { AgentDefinitionStore } = require("../app/agent-service/agent-definition-
 const { restoreAuthorityBackup } = require("../app/agent-service/authority-backup");
 const { ClaudeCodeRuntimeLedger } = require("../app/agent-service/claude-code-runtime-ledger");
 const { prepareClaudeCodeHome } = require("../app/agent-service/claude-code-runtime-paths");
-const { prepareCodexHome } = require("../app/agent-service/codex-runtime-paths");
+const { prepareCodexRuntimeAccountHome } = require("../app/agent-service/codex-runtime-paths");
 const { DeepSeekHarnessRuntimeLedger } = require("../app/agent-service/deepseek-harness-runtime-ledger");
 const { prepareDeepSeekHarnessHome } = require("../app/agent-service/deepseek-harness-runtime-paths");
 const { MemoryEngine } = require("../app/agent-service/memory-engine");
@@ -28,18 +27,9 @@ const {
 const { TranscriptStore } = require("../app/agent-service/transcript-store");
 const {
   COMPONENTS,
-  LEGACY_COMPONENTS_V1,
   createUpgradeSnapshot,
   verifyUpgradeSnapshot,
 } = require("../app/agent-service/upgrade-snapshot");
-
-function stable(value) {
-  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
 
 function buildAuthorityFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-upgrade-recovery-"));
@@ -146,7 +136,8 @@ function buildAuthorityFixture() {
   const computerArtifact = path.join(paths.computerArtifactsDir, "upgrade-profile", "snapshot.txt");
   fs.mkdirSync(path.dirname(computerArtifact), { recursive: true, mode: 0o700 });
   fs.writeFileSync(computerArtifact, "UPGRADE_COMPUTER_SENTINEL\n", { mode: 0o600 });
-  const runtimeHome = prepareCodexHome(paths, profile.runtimeProfileId);
+  const runtimeAccountId = "upgrade-managed-codex-account";
+  const runtimeHome = prepareCodexRuntimeAccountHome(paths, runtimeAccountId);
   fs.writeFileSync(path.join(runtimeHome, "auth.json"), "UPGRADE_MANAGED_AUTH_SENTINEL\n", { mode: 0o600 });
   fs.writeFileSync(path.join(runtimeHome, "config.toml"), "UPGRADE_MANAGED_CONFIG_SENTINEL\n", { mode: 0o600 });
   fs.writeFileSync(path.join(runtimeHome, "thread-fixture.jsonl"), "UPGRADE_RUNTIME_HOME_SENTINEL\n", { mode: 0o600 });
@@ -213,6 +204,7 @@ function buildAuthorityFixture() {
     profile,
     toolName,
     runtimeHome,
+    runtimeAccountId,
     builtinRoot,
     claudeCodeRuntimeProfileId,
     claudeCodeWorkspaceShardId,
@@ -261,13 +253,13 @@ function verifyRestoredAuthority(root, stateDir, source) {
       paths.computerArtifactsDir, "upgrade-profile", "snapshot.txt",
     ), "utf8"), "UPGRADE_COMPUTER_SENTINEL\n");
     assert.equal(fs.readFileSync(path.join(
-      paths.stateDir, "codex", source.profile.runtimeProfileId, "auth.json",
+      paths.runtimeAccountsDir, "codex", source.runtimeAccountId, "home", "auth.json",
     ), "utf8"), "UPGRADE_MANAGED_AUTH_SENTINEL\n");
     assert.equal(fs.readFileSync(path.join(
-      paths.stateDir, "codex", source.profile.runtimeProfileId, "config.toml",
+      paths.runtimeAccountsDir, "codex", source.runtimeAccountId, "home", "config.toml",
     ), "utf8"), "UPGRADE_MANAGED_CONFIG_SENTINEL\n");
     assert.equal(fs.existsSync(path.join(
-      paths.stateDir, "codex", source.profile.runtimeProfileId, "thread-fixture.jsonl",
+      paths.runtimeAccountsDir, "codex", source.runtimeAccountId, "home", "thread-fixture.jsonl",
     )), false);
     assert.equal(fs.existsSync(path.join(
       paths.stateDir, "claude-code", source.claudeCodeRuntimeProfileId,
@@ -318,8 +310,9 @@ try {
     assert.equal(snapshot.manifest.components[component].files.length > 0, true, component);
   }
   const runtimeHomeFiles = snapshot.manifest.components.runtimeHome.files.map((entry) => entry.path);
-  assert.equal(runtimeHomeFiles.some((entry) => entry.endsWith("/auth.json")), true);
-  assert.equal(runtimeHomeFiles.some((entry) => entry.endsWith("/config.toml")), true);
+  assert.equal(runtimeHomeFiles.includes(`runtime-accounts/codex/${fixture.runtimeAccountId}/home/auth.json`), true);
+  assert.equal(runtimeHomeFiles.includes(`runtime-accounts/codex/${fixture.runtimeAccountId}/home/config.toml`), true);
+  assert.equal(runtimeHomeFiles.some((entry) => entry.endsWith("/thread-fixture.jsonl")), false);
   assert.equal(runtimeHomeFiles.some((entry) => entry.startsWith("claude-code/")), false);
   assert.equal(runtimeHomeFiles.some((entry) => entry.startsWith("runtime-ledgers/claude-code/")), true);
   assert.equal(runtimeHomeFiles.some((entry) => entry.startsWith("deepseek-harness/")), false);
@@ -336,27 +329,6 @@ try {
   });
   verifyRestoredAuthority(fixture.root, restoredState, fixture);
   console.log("PASS 同代 manifest 覆盖产品 authority、Runtime ledger 与 managed Codex 最小凭据配置");
-
-  const legacySnapshot = createUpgradeSnapshot({
-    paths: fixture.paths,
-    generationId: "legacy-v1",
-    now: () => 2500,
-  });
-  const legacyManifest = {
-    ...legacySnapshot.manifest,
-    schemaVersion: 1,
-    components: Object.fromEntries(LEGACY_COMPONENTS_V1.map((name) => (
-      [name, legacySnapshot.manifest.components[name]]
-    ))),
-  };
-  const { checksum: _oldChecksum, ...legacyBody } = legacyManifest;
-  legacyManifest.checksum = crypto.createHash("sha256").update(stable(legacyBody)).digest("hex");
-  fs.writeFileSync(path.join(legacySnapshot.backupPath, "generation.json"),
-    `${JSON.stringify(legacyManifest)}\n`, { mode: 0o600 });
-  assert.equal(verifyUpgradeSnapshot({
-    paths: fixture.paths, generationId: "legacy-v1",
-  }).manifest.schemaVersion, 1);
-  console.log("PASS 新版本仍可验证升级前的 v1 generation manifest");
 
   const crash = new Error("simulated generation manifest crash");
   assert.throws(() => createUpgradeSnapshot({
@@ -386,7 +358,7 @@ try {
     generationId: "release-candidate-1",
   }), (error) => error.code === "UPGRADE_SNAPSHOT_CORRUPT");
   console.log("PASS generation manifest/组件摘要篡改 fail closed，不接受混代恢复");
-  console.log("PASS shoggoth recovery regression (4)");
+  console.log("PASS shoggoth recovery regression (3)");
 } finally {
   fs.rmSync(fixture.root, { recursive: true, force: true });
 }

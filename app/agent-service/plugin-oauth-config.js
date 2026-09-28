@@ -4,9 +4,18 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 const { PluginOAuthProviderRegistry } = require("./plugin-oauth-provider-registry");
+const { validGoogleWorkspaceProvider } = require("./plugin-google-workspace-oauth");
 const exact = (v, keys) => v && Object.getPrototypeOf(v) === Object.prototype
   && Object.keys(v).length === keys.length && keys.every(key => Object.hasOwn(v, key));
 const fail = () => { throw serviceError("PLUGIN_OAUTH_CONFIG_INVALID", "插件认证服务配置无效"); };
+const LOOPBACK_REDIRECT = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/oauth\/callback$/u;
+function privateRedirect(value) {
+  if (typeof value !== "string") fail();
+  const match = LOOPBACK_REDIRECT.exec(value);
+  if (!match || Number(match[1]) < 1024 || Number(match[1]) > 65535
+    || new URL(value).href !== value) fail();
+  return value;
+}
 
 // This private, user-managed file is outside every installed package. It only
 // selects data for a built-in identity probe; it cannot load code or credentials.
@@ -31,15 +40,18 @@ function loadPluginOAuthProviders(paths) {
     if (!exact(config, ["version", "providers"]) || config.version !== 1
       || !Array.isArray(config.providers) || config.providers.length > 32) fail();
     const providers = config.providers.map(item => {
-      if (!exact(item, ["id", "name", "serverUrl", "issuer", "audience", "authorizationEndpoint",
-        "tokenEndpoint", "clientId", "scopes", "metadataUrls", "identity"])
+      const keys = ["id", "name", "serverUrl", "issuer", "audience", "authorizationEndpoint",
+        "tokenEndpoint", "clientId", "scopes", "metadataUrls", "identity"];
+      if (!(exact(item, keys) || exact(item, [...keys, "redirectUrl"]))
         || !exact(item.identity, ["url", "subjectField"])
-        || !["sub", "id"].includes(item.identity.subjectField)) fail();
+        || !["sub", "id"].includes(item.identity.subjectField)
+        || !validGoogleWorkspaceProvider(item)) fail();
+      const redirectUrl = item.redirectUrl === undefined ? null : privateRedirect(item.redirectUrl);
       const identityUrl = new URL(item.identity.url);
       if (identityUrl.protocol !== "https:" || identityUrl.username || identityUrl.password
         || identityUrl.hash || identityUrl.search) fail();
       const subjectField = item.identity.subjectField;
-      return { ...item, identityUrls: [identityUrl.href],
+      return { ...item, redirectUrl, identityUrls: [identityUrl.href],
         verifyPrincipal: async ({ accessToken, issuer, fetchImpl }) => {
           const response = await fetchImpl(identityUrl.href, { headers: {
             Authorization: `Bearer ${accessToken}`, Accept: "application/json" } });

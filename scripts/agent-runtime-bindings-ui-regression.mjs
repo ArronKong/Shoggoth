@@ -45,6 +45,7 @@ app.whenReady().then(async()=>{
       w.webContents.executeJavaScript("window.runBindingFixture()",true),
       new Promise((_resolve,reject)=>{deadline=setTimeout(()=>reject(Error("capacity fixture deadline")),15000);})
     ]).finally(()=>clearTimeout(deadline));
+    const onboarding=await w.webContents.executeJavaScript("window.checkOnboardingRuntime()",true);
     const geometry=[];
     for(const width of [1100,390]) {
       w.setContentSize(width,950);
@@ -52,7 +53,7 @@ app.whenReady().then(async()=>{
     }
     assert.equal(result.writes,7);
     ${screenshot ? `require("node:fs").writeFileSync(${JSON.stringify(path.resolve(screenshot))},(await w.webContents.capturePage()).toPNG());` : ""}
-    console.log(JSON.stringify({...result,geometry,verified:true}));
+    console.log(JSON.stringify({...result,onboarding,geometry,verified:true}));
     passed=true;
   } catch(error) {console.error(error);}
   finally {w.destroy();app.exit(passed?0:1);}

@@ -2,12 +2,14 @@ import AgentAvatarView from "../components/AgentAvatar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
-import type { UnifiedSkill } from "../types";
+import type { NativeSkillPage, UnifiedSkill } from "../types";
 import {
+  ApiError,
   getSkillUsage,
   installSkill,
   listAgents,
   listSkills,
+  listSkillsPage,
   previewSkill,
   uninstallSkill,
   updateSkill,
@@ -23,6 +25,7 @@ import { Field, Option, Select, Switch, TextArea, TextInput } from "../component
 import { useConfirm, useToast } from "../components/ui";
 import { toSanitizedMarkdownHtml } from "../lib/markdown";
 import { skillIdentity } from "../lib/skillIdentity";
+import StandaloneMcpRepair from "./StandaloneMcpRepair";
 
 const EMPTY_USAGE = {
   usage: new Map<string, number>(),
@@ -30,6 +33,21 @@ const EMPTY_USAGE = {
   usageSupported: false,
   scanLimit: undefined as number | undefined,
 };
+const SKILLS_PER_PAGE = 100;
+
+function boundedSkillQuery(input: string): string {
+  const encoder = new TextEncoder();
+  let output = "";
+  let bytes = 0;
+  for (const character of input) {
+    if (/[\x00-\x1f\x7f]/u.test(character)) continue;
+    const size = encoder.encode(character).length;
+    if (bytes + size > 256) break;
+    output += character;
+    bytes += size;
+  }
+  return output;
+}
 
 function parseEnv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -52,6 +70,15 @@ export default function SkillsPage() {
   // 「只看启用」的原生 checkbox 换成三态筛选胶囊（全部/已启用/已停用）。
   const [status, setStatus] = useStickyState<"" | "on" | "off">("skills.status", "");
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  const [nativeReload, setNativeReload] = useState(0);
+  const nativeRevision = useRef<string | null>(null);
+  const [nativePageState, setNativePageState] = useState<{ key: string; page: NativeSkillPage } | null>(null);
+  const [nativeErrorState, setNativeErrorState] = useState<{ key: string; error: string } | null>(null);
+  const skillMainRef = useRef<HTMLDivElement>(null);
+  const skillDetailRef = useRef<HTMLElement>(null);
+  const detailOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const focusFirstSkillAfterPage = useRef(false);
   const [busy, setBusy] = useState<string | null>(null);
 
   // 保存完整安装身份，刷新后重新解析当前快照；同名版本与不同 Agent 不共享选中态。
@@ -80,21 +107,70 @@ export default function SkillsPage() {
     if (isNativeSkills && activeAgent && activeAgent !== selectedAgent) setSelectedAgent(activeAgent);
   }, [activeAgent, isNativeSkills, selectedAgent]);
 
-  const { data: skillsData, loading, error, refresh } = usePageCache(
+  const { data: skillsData, loading: externalLoading, error: externalError,
+    refresh: refreshExternal } = usePageCache(
     `skills:${backend}:${activeAgent || "default"}`,
-    () => isNativeSkills && !activeAgent ? Promise.resolve([]) : listSkills(backend, activeAgent),
+    () => isNativeSkills ? Promise.resolve([]) : listSkills(backend, activeAgent),
   );
-  const skills = skillsData ?? [];
+  const nativeKey = JSON.stringify([backend, activeAgent, query, status, page, nativeReload]);
+  useEffect(() => {
+    if (!isNativeSkills || !activeAgent) return;
+    let current = true;
+    setNativeErrorState(null);
+    void listSkillsPage(backend, activeAgent, { query, status, pageIndex: page,
+      limit: SKILLS_PER_PAGE, expectedRevision: page === 0 ? null : nativeRevision.current })
+      .then((value) => {
+        if (!current) return;
+        nativeRevision.current = value.queryRevision;
+        setNativePageState({ key: nativeKey, page: value });
+      })
+      .catch((error) => {
+        if (!current) return;
+        if (error instanceof ApiError && error.status === 409 && page > 0) {
+          nativeRevision.current = null;
+          setPage(0);
+          setNativeReload(value => value + 1);
+          return;
+        }
+        setNativeErrorState({ key: nativeKey,
+          error: error instanceof Error ? error.message : String(error) });
+      });
+    return () => { current = false; };
+  }, [activeAgent, backend, isNativeSkills, nativeKey, page, query, status]);
+  const nativePage = nativePageState?.key === nativeKey ? nativePageState.page : null;
+  const skills = isNativeSkills ? nativePage?.skills ?? [] : skillsData ?? [];
+  const nativeError = nativeErrorState?.key === nativeKey ? nativeErrorState.error : null;
+  const loading = isNativeSkills ? Boolean(activeAgent) && !nativePage && !nativeError : externalLoading;
+  const error = isNativeSkills ? nativeError : externalError;
+  const refresh = async () => {
+    if (isNativeSkills) {
+      nativeRevision.current = null;
+      setPage(0);
+      setNativeReload(value => value + 1);
+    } else await refreshExternal();
+  };
 
   // 「哪个 agent 加载过哪个 skill」叠加层。一次拉全后端（形状同 CLI 页的
   // cli:usage），切 tab 不必重拉；失败静默——叠加层可有可无，不该把页面拖进错误态。
-  const { data: usageData, refresh: refreshUsage } = usePageCache("skills:usage", () => getSkillUsage());
-  const usageLoaded = usageData != null;
+  const { data: usageData, refresh: refreshUsage } = usePageCache(
+    `skills:usage:${isNativeSkills ? "native" : "external"}`,
+    () => isNativeSkills ? Promise.resolve([]) : getSkillUsage());
+  const usageLoaded = isNativeSkills || usageData != null;
   // 导航栏刷新要连「agent 使用次数」叠加层一起重拉——本页默认按使用次数排序，
   // 只刷 skills:${backend} 会让整页看起来毫无反应（R371）。
   useRegisterPageRefresh("/skills", () => Promise.all([refresh(), refreshUsage(), refreshAgents()]));
   useRegisterPageLoading("/skills", loading);
   const { usage, usageByAgent, usageSupported, scanLimit } = useMemo(() => {
+    if (isNativeSkills) {
+      const counts = new Map<string, number>();
+      const byAgent = new Map<string, Map<string, number>>();
+      for (const skill of nativePage?.skills ?? []) {
+        counts.set(skill.name, skill.usageCount ?? 0);
+        byAgent.set(skill.name, new Map(Object.entries(skill.usageAgents ?? {})));
+      }
+      return { usage: counts, usageByAgent: byAgent,
+        usageSupported: nativePage?.usageSupported ?? false, scanLimit: undefined };
+    }
     const row = (usageData ?? []).find((b) => b.backend === backend);
     if (!row || !row.supported) return EMPTY_USAGE;
     const total = new Map<string, number>();
@@ -110,17 +186,21 @@ export default function SkillsPage() {
       byAgent.set(name, agentMap);
     }
     return { usage: total, usageByAgent: byAgent, usageSupported: true, scanLimit: row.scanLimit };
-  }, [usageData, backend]);
+  }, [usageData, backend, isNativeSkills, nativePage]);
 
-  const enabledCount = useMemo(() => skills.filter((s) => s.enabled).length, [skills]);
+  const totalCount = isNativeSkills ? nativePage?.total ?? 0 : skills.length;
+  const enabledCount = isNativeSkills ? nativePage?.enabledCount ?? 0
+    : skills.filter((s) => s.enabled).length;
   const usedCount = useMemo(
-    () => skills.reduce((n, s) => ((usage.get(s.name) || 0) > 0 ? n + 1 : n), 0),
-    [skills, usage],
+    () => isNativeSkills ? nativePage?.usedCount ?? 0
+      : skills.reduce((n, s) => ((usage.get(s.name) || 0) > 0 ? n + 1 : n), 0),
+    [isNativeSkills, nativePage, skills, usage],
   );
 
   // 扁平一张网格（不再按分类分组）：先按 agent 使用次数倒序，同次数再按名字。
   // usage 到位前全是 0，等价于字母序——叠加层到达后自动重排。
   const shown = useMemo(() => {
+    if (isNativeSkills) return skills;
     const q = query.trim().toLowerCase();
     const res = skills.filter((s) => {
       if (status === "on" && !s.enabled) return false;
@@ -137,7 +217,25 @@ export default function SkillsPage() {
       if (d) return d;
       return a.name.localeCompare(b.name);
     });
-  }, [skills, status, query, usage]);
+  }, [skills, status, query, usage, isNativeSkills]);
+  const matchedCount = isNativeSkills ? nativePage?.matchCount ?? 0 : shown.length;
+  const pageCount = isNativeSkills ? nativePage?.pageCount ?? 1
+    : Math.max(1, Math.ceil(shown.length / SKILLS_PER_PAGE));
+  const currentPage = isNativeSkills ? page : Math.min(page, pageCount - 1);
+  const pageSkills = isNativeSkills ? shown : shown.slice(currentPage * SKILLS_PER_PAGE,
+    (currentPage + 1) * SKILLS_PER_PAGE);
+  useEffect(() => {
+    if (!focusFirstSkillAfterPage.current || loading) return;
+    focusFirstSkillAfterPage.current = false;
+    skillMainRef.current?.scrollTo({ top: 0 });
+    skillMainRef.current?.querySelector<HTMLButtonElement>(".skill-card-open")
+      ?.focus({ preventScroll: true });
+  }, [currentPage, loading, nativePage]);
+  const changePage = (next: number) => {
+    focusFirstSkillAfterPage.current = true;
+    setSelectedIdentity(null);
+    setPage(next);
+  };
 
   const selected = useMemo(
     () => (selectedIdentity ? skills.find((s) => skillIdentity(s) === selectedIdentity) || null : null),
@@ -200,11 +298,29 @@ export default function SkillsPage() {
     }
   };
 
-  const openDetail = (s: UnifiedSkill) => {
+  const openDetail = (s: UnifiedSkill, opener?: HTMLButtonElement) => {
+    detailOpenerRef.current = opener ?? null;
     setSelectedIdentity(skillIdentity(s));
     setApiKey("");
     setEnvText("");
   };
+  const closeDetail = () => {
+    setSelectedIdentity(null);
+    const opener = detailOpenerRef.current;
+    detailOpenerRef.current = null;
+    if (typeof window !== "undefined") window.requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus();
+    });
+  };
+  useEffect(() => {
+    if (!selectedIdentity || typeof window === "undefined"
+      || !window.matchMedia?.("(max-width: 900px)").matches) return;
+    const detail = skillDetailRef.current;
+    // The page itself owns scrolling at narrow widths. Returning it to the
+    // top keeps the detail heading and close control visible below the toolbar.
+    detail?.closest<HTMLElement>(".skills-page")?.scrollTo({ top: 0 });
+    detail?.querySelector<HTMLButtonElement>(".skill-detail-x")?.focus({ preventScroll: true });
+  }, [selectedIdentity]);
 
   const installNative = async () => {
     setPackageBusy(true);
@@ -254,11 +370,11 @@ export default function SkillsPage() {
     loading && skills.length === 0
       ? t("common.loading")
       : usageSupported
-        ? t("skills.statLineUsage", { total: skills.length, enabled: enabledCount, used: usedCount })
+        ? t("skills.statLineUsage", { total: totalCount, enabled: enabledCount, used: usedCount })
         : t("skills.statLine", {
-            total: skills.length,
+            total: totalCount,
             enabled: enabledCount,
-            disabled: skills.length - enabledCount,
+            disabled: totalCount - enabledCount,
           });
 
   const saveConfig = async () => {
@@ -293,15 +409,18 @@ export default function SkillsPage() {
         actions={
           <SearchCapsule
             value={query}
-            onChange={setQuery}
+            onChange={(value) => { focusFirstSkillAfterPage.current = false;
+              setQuery(boundedSkillQuery(value)); setPage(0); setSelectedIdentity(null); }}
             placeholder={t("skills.searchPlaceholder")}
           />
         }
       />
       <div className="ui-toolbar">
-        <BackendTabs value={backend} onChange={setBackend} surface="skills" />
+        <BackendTabs value={backend} onChange={(value) => { focusFirstSkillAfterPage.current = false;
+          setBackend(value); setPage(0); setSelectedIdentity(null); }} surface="skills" />
         {isNativeSkills && nativeAgents.length > 0 && (
-          <Select value={activeAgent || ""} onChange={setSelectedAgent}>
+          <Select value={activeAgent || ""} onChange={(value) => { focusFirstSkillAfterPage.current = false;
+            setSelectedAgent(value); setPage(0); setSelectedIdentity(null); }}>
             {nativeAgents.map((agent) => <Option key={agent.id} value={agent.id}>{agent.name}</Option>)}
           </Select>
         )}
@@ -312,7 +431,8 @@ export default function SkillsPage() {
         )}
         <FilterTabs
           value={status}
-          onChange={(v) => setStatus(v as "" | "on" | "off")}
+          onChange={(v) => { focusFirstSkillAfterPage.current = false;
+            setStatus(v as "" | "on" | "off"); setPage(0); setSelectedIdentity(null); }}
           ariaLabel={t("skills.filterAria")}
           items={[
             { value: "", label: t("skills.filterAll") },
@@ -322,21 +442,23 @@ export default function SkillsPage() {
         />
       </div>
 
+      {isNativeSkills && activeAgent && <StandaloneMcpRepair key={activeAgent} agentId={activeAgent} />}
+
       {error && <div className="error">{t("skills.errorPrefix", { msg: error })}</div>}
-      {!loading && !error && skills.length === 0 && (
+      {!loading && !error && totalCount === 0 && (
         <p className="muted">{t("skills.empty")}</p>
       )}
-      {!loading && !error && skills.length > 0 && shown.length === 0 && (
+      {!loading && !error && totalCount > 0 && matchedCount === 0 && (
         <div className="ui-empty">{t("skills.noMatch")}</div>
       )}
 
       {/* 主区 + 右侧详情，结构同 CLI 页的 .cli-body 双栏；列数交给 auto-fill，
           详情展开吃掉 401px 后网格自己减列（与 CLI 同一套规则，别加 split 类）。 */}
       <div className="skill-body">
-        <div className="skill-main-content">
+        <div className="skill-main-content" ref={skillMainRef}>
           {!loading && shown.length > 0 && (
             <div className="skill-grid">
-              {shown.map((s) => {
+              {pageSkills.map((s) => {
                 const used = usage.get(s.name) || 0;
                 const identity = skillIdentity(s);
                 const isSel = selectedIdentity === identity;
@@ -350,7 +472,7 @@ export default function SkillsPage() {
                       type="button"
                       className="skill-card-open"
                       aria-label={s.version ? `${s.name} v${s.version} · ${s.source}` : s.name}
-                      onClick={() => openDetail(s)}
+                      onClick={(event) => openDetail(s, event?.currentTarget)}
                     />
                     <div className="skill-card-top">
                       <span className="skill-emoji" aria-hidden="true">
@@ -386,14 +508,29 @@ export default function SkillsPage() {
               })}
             </div>
           )}
+          {!loading && pageCount > 1 && (
+            <nav className="skill-pagination" aria-label={t("skills.paginationAria")}>
+              <button className="btn-secondary" type="button"
+                disabled={currentPage === 0} onClick={() => changePage(currentPage - 1)}>
+                {t("skills.previousPage")}
+              </button>
+              <span aria-live="polite">{t("skills.pageStatus", {
+                page: currentPage + 1, pages: pageCount, total: matchedCount,
+              })}</span>
+              <button className="btn-secondary" type="button"
+                disabled={currentPage >= pageCount - 1} onClick={() => changePage(currentPage + 1)}>
+                {t("skills.nextPage")}
+              </button>
+            </nav>
+          )}
         </div>
 
         {selected && (
-          <aside className="skill-detail">
+          <aside className="skill-detail" ref={skillDetailRef}>
             <div className="skill-detail-head">
               <button
                 className="skill-detail-x"
-                onClick={() => setSelectedIdentity(null)}
+                onClick={closeDetail}
                 aria-label={t("common.close")}
               >
                 ✕

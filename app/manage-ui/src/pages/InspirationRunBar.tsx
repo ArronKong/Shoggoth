@@ -59,6 +59,7 @@ export default function InspirationRunBar({ ideaId, execution, agent, attention,
   const elapsed = seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
   const panelId = `inspiration-attention-${execution.id}`;
   return <div ref={element} className={styles.root} data-inspiration-run-bar data-tone={tone} data-expanded={expanded}
+    data-input={needsAttention && waitingForInput || undefined}
     data-card-interactive onPointerEnter={event => { if (event.pointerType === 'mouse') setHovered(true); }}
     onPointerLeave={() => setHovered(false)}
     onFocus={event => { if (event.target.matches(':focus-visible')) setFocused(true); }}

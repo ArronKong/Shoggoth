@@ -4,6 +4,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const yaml = createRequire(import.meta.url)('js-yaml');
 
 const root = path.resolve(import.meta.dirname, '..');
 const privateDirectories = new Set(['docs', 'tasks', '.preview-specs', '.superpowers', '.vscode']);
@@ -31,6 +34,17 @@ export function isPublicSourcePath(relative) {
     && !relative.split('/').includes('.DS_Store');
 }
 
+export function publicSourceBytes(relative, sourceBytes) {
+  if (relative === bundledCatalog) return emptyBundledCatalog;
+  if (relative !== 'electron-builder.yml') return sourceBytes;
+  const config = yaml.load(sourceBytes.toString('utf8'));
+  const retained = config.extraResources.filter(item =>
+    typeof item.from !== 'string' || !item.from.startsWith(bundledPackages));
+  if (retained.length === config.extraResources.length) return sourceBytes;
+  config.extraResources = retained;
+  return Buffer.from(yaml.dump(config, { lineWidth: -1, noRefs: true }));
+}
+
 // Export the working source without private notes, user data or Git history.
 export function exportPublicSource(destinationPath = path.join(root, 'output/public-source')) {
   const destination = path.resolve(destinationPath);
@@ -47,8 +61,9 @@ export function exportPublicSource(destinationPath = path.join(root, 'output/pub
     if (source === destination || source.startsWith(`${destination}${path.sep}`)) throw new Error('Destination is part of the source inventory');
     const stat = fs.lstatSync(source);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Review non-regular source before exporting: ${relative}`);
-    const transformed = relative === bundledCatalog;
-    const bytes = transformed ? emptyBundledCatalog : fs.readFileSync(source);
+    const sourceBytes = fs.readFileSync(source);
+    const bytes = publicSourceBytes(relative, sourceBytes);
+    const transformed = !bytes.equals(sourceBytes);
     entries.push({ path: relative, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), mode: stat.mode & 0o777,
       ...(transformed ? { redaction: 'bundled packages omitted pending redistribution review' } : {}) });
   }
@@ -56,8 +71,7 @@ export function exportPublicSource(destinationPath = path.join(root, 'output/pub
   for (const entry of entries) {
     const target = path.join(destination, entry.path);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (entry.path === bundledCatalog) fs.writeFileSync(target, emptyBundledCatalog);
-    else fs.copyFileSync(path.join(root, entry.path), target);
+    fs.writeFileSync(target, publicSourceBytes(entry.path, fs.readFileSync(path.join(root, entry.path))));
     fs.chmodSync(target, entry.mode);
     if (crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex') !== entry.sha256) throw new Error(`Source changed during export: ${entry.path}; create a new export`);
   }

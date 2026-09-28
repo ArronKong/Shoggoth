@@ -7450,6 +7450,7 @@ class HermesBackend extends AgentBackend {
         out.push({
           role: "toolResult",
           id,
+          toolCallId: typeof msg.tool_call_id === "string" ? msg.tool_call_id : undefined,
           toolName: typeof msg.tool_name === "string" && msg.tool_name ? msg.tool_name : undefined,
           content: [{ type: "text", text }],
           ...(ts != null ? { timestamp: ts } : {}),
@@ -7472,7 +7473,8 @@ class HermesBackend extends AgentBackend {
         if (typeof args === "string" && args.trim()) {
           try { args = JSON.parse(args); } catch { /* keep the raw string */ }
         }
-        parts.push({ type: "toolCall", toolName: name, arguments: args });
+        parts.push({ type: "toolCall", id: typeof tc?.id === "string" ? tc.id : undefined,
+          toolName: name, arguments: args });
       }
       const text = textOf(msg.content);
       if (text.trim()) parts.push({ type: "text", text });
@@ -7640,6 +7642,15 @@ class HermesBackend extends AgentBackend {
   }
 
   sendMessage(sessionKey, message, idempotencyKey, hooks = {}, opts = {}) {
+    // A direct backend caller must not bypass the Proxy's external-selection
+    // admission guard. Hermes' prompt.submit cannot bind a dispatch receipt to
+    // its eventual task/turn, so silently ignoring this field would send a
+    // message with a capability choice that was never applied.
+    if (opts && Object.prototype.hasOwnProperty.call(opts, "pluginSelection")) {
+      const error = new Error("Hermes 尚无法将插件选择绑定到本次真实执行回合");
+      error.code = "PLUGIN_SELECTION_UNAVAILABLE";
+      return Promise.reject(error);
+    }
     if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
       return this._enqueueMessage(sessionKey, message, undefined, hooks, opts);
     }

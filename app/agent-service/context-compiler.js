@@ -1,7 +1,8 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { hasSecret } = require("./memory-engine");
+const { hasSecret, hotPriorityFlags, lexicalTerms } = require("./memory-engine");
+const { HistoricalMemoryAnnotations } = require("./historical-memory-annotations");
 const { shoggothProductDeveloperInstructions } = require("./product-capability-manifest");
 const { serviceError } = require("./security");
 const { estimateContextTokens } = require("./conversation-context-budget");
@@ -17,6 +18,15 @@ const DEFAULT_BUDGETS = Object.freeze({
   skills: 24 * 1024,
 });
 const MAX_TOTAL_CONTEXT_BYTES = 96 * 1024;
+const MAX_HOT_MEMORY_CANDIDATES = 100;
+const HOT_MEMORY_SCAN_BYTES = 128 * 1024;
+const HOT_MEMORY_SCOPE_LIMITS = Object.freeze({
+  user: Object.freeze({ count: 40, bytes: 40 * 1024 }),
+  agent: Object.freeze({ count: 20, bytes: 20 * 1024 }),
+  project: Object.freeze({ count: 20, bytes: 32 * 1024 }),
+  workspace: Object.freeze({ count: 20, bytes: 32 * 1024 }),
+});
+const HOT_MEMORY_DURABLE_RESERVE = Object.freeze({ user: 4, agent: 2, project: 4, workspace: 4 });
 const DEFINITION_DOCUMENT_KINDS = Object.freeze({
   rules: "AGENTS", identity: "IDENTITY", soul: "SOUL",
 });
@@ -67,6 +77,152 @@ function untrusted(label, content) {
     `END UNTRUSTED ${label} DATA`,
   ].join("\n");
 }
+function hotMemoryRank(item, queryTerms) {
+  const terms = lexicalTerms(item.content);
+  const matched = [...queryTerms].filter((term) => terms.has(term)).length;
+  const reasons = [];
+  let priority = (Number.isFinite(item.score) ? item.score : 0) * 10;
+  const lexicalMatch = matched / Math.max(1, queryTerms.size);
+  const semanticMatch = Number.isFinite(item.semanticScore) ? item.semanticScore : 0;
+  if (matched > 0 || semanticMatch > 0) {
+    priority += 100 * Math.max(lexicalMatch, semanticMatch); reasons.push("query_match");
+    if (semanticMatch > lexicalMatch) reasons.push("semantic_match");
+  }
+  const signals = hotPriorityFlags(item);
+  if (signals & 4) {
+    priority += 80; reasons.push("stable_preference");
+  }
+  if (signals & 2) {
+    priority += 55; reasons.push("current_agreement");
+  }
+  if (signals & 1) {
+    priority += 30; reasons.push("current_workspace");
+  }
+  if (reasons.length === 0) reasons.push("confidence_recency");
+  return { item, priority, reasons,
+    priorityFact: reasons.includes("stable_preference") || reasons.includes("current_agreement") };
+}
+function compareHotMemoryRank(left, right) {
+  return right.priority - left.priority
+    || (right.item.updatedAt ?? 0) - (left.item.updatedAt ?? 0)
+    || left.item.id.localeCompare(right.item.id);
+}
+function reserveDurableHotMemory(ranked) {
+  const reserved = [];
+  const counts = new Map();
+  const ids = new Set();
+  const add = (entry) => {
+    if (ids.has(entry.item.id)) return;
+    reserved.push(entry);
+    ids.add(entry.item.id);
+    if (entry.reasons.includes("stable_preference") || entry.reasons.includes("current_agreement")) {
+      const scope = entry.item.scope;
+      counts.set(scope, (counts.get(scope) ?? 0) + 1);
+    }
+  };
+  // Reserve the best direct match first. A few large unrelated agreements can
+  // otherwise fill the block before the fact requested by this Run is reached.
+  const durableScopes = new Set();
+  const bestMatch = ranked.find((entry) => entry.reasons.includes("query_match"));
+  if (bestMatch) {
+    add(bestMatch);
+    if (bestMatch.reasons.includes("stable_preference")
+      || bestMatch.reasons.includes("current_agreement")) durableScopes.add(bestMatch.item.scope);
+  }
+  // Give each scope one durable fact before spending the remaining budget on
+  // other matches. The later pass retains the existing per-scope reserves.
+  for (const entry of ranked) {
+    if (!entry.reasons.includes("stable_preference") && !entry.reasons.includes("current_agreement")) continue;
+    const scope = entry.item.scope;
+    if (durableScopes.has(scope) || (counts.get(scope) ?? 0) >= (HOT_MEMORY_DURABLE_RESERVE[scope] ?? 0)) continue;
+    add(entry);
+    durableScopes.add(scope);
+  }
+  for (const entry of ranked) {
+    if (entry.reasons.includes("query_match")) add(entry);
+  }
+  for (const entry of ranked) {
+    if (!entry.reasons.includes("stable_preference") && !entry.reasons.includes("current_agreement")) continue;
+    const scope = entry.item.scope;
+    if ((counts.get(scope) ?? 0) >= (HOT_MEMORY_DURABLE_RESERVE[scope] ?? 0)) continue;
+    add(entry);
+  }
+  return [...reserved, ...ranked.filter((entry) => !ids.has(entry.item.id))];
+}
+function selectHotMemory(items, { query, budget, label, format, more, searchTruncated = false,
+  hotDurableEligibleCount = null }) {
+  const queryTerms = lexicalTerms(query || "");
+  const ranked = items.map((item) => hotMemoryRank(item, queryTerms))
+    .sort(compareHotMemoryRank);
+  const ordered = reserveDurableHotMemory(ranked);
+  const wrapperBytes = Buffer.byteLength(untrusted(label, ""), "utf8");
+  const footer = `\n${more}`;
+  const reserve = ranked.length || searchTruncated ? Buffer.byteLength(footer, "utf8") : 0;
+  let used = wrapperBytes;
+  const selected = [];
+  const lines = [];
+  for (const entry of ordered) {
+    const line = format(entry.item);
+    const lineBytes = Buffer.byteLength(line, "utf8") + (lines.length ? 1 : 0);
+    if (used + lineBytes + reserve > budget) continue;
+    selected.push(entry); lines.push(line); used += lineBytes;
+  }
+  const truncated = searchTruncated || selected.length < ranked.length;
+  const content = lines.length
+    ? untrusted(label, lines.join("\n") + (truncated ? footer : ""))
+    : truncated && wrapperBytes + reserve <= budget ? untrusted(label, more) : "";
+  // An older or alternate search implementation may omit the uncapped count.
+  // In that case the denominator is unknown; the bounded candidate list is
+  // never a valid substitute for coverage.
+  const priorityCandidates = hotDurableEligibleCount;
+  const prioritySelected = new Set(selected.filter((entry) => entry.priorityFact)
+    .map((entry) => entry.item.id)).size;
+  return { content, selectedItems: selected.map((entry) => entry.item), truncated,
+    report: { budgetBytes: budget, actualBytes: Buffer.byteLength(content, "utf8"),
+      // Providers report input usage for a whole response, not for this block.
+      // Keep the block estimate distinct from the Run's measured usage.
+      estimatedTokens: estimateContextTokens(content), tokenMeasurement: "estimated",
+      candidateCount: ranked.length,
+      selectedCount: selected.length, searchTruncated, priorityCandidates, prioritySelected,
+      priorityCoverage: priorityCandidates === null || priorityCandidates === 0 ? null
+        : Number((prioritySelected / priorityCandidates).toFixed(4)),
+      priorityMetric: "heuristic_preference_or_agreement",
+      sorting: selected.slice(0, 24).map((entry) => ({ id: entry.item.id,
+        score: Number(entry.priority.toFixed(4)), reasons: entry.reasons })) } };
+}
+function mergeHotCandidates(first, second, scope, query) {
+  const byId = new Map();
+  for (const candidate of [...first.items, ...second.items]) {
+    if (scope === "user" ? candidate.scope !== "user" : candidate.scope === "user") continue;
+    const prior = byId.get(candidate.id);
+    if (!prior || (candidate.score ?? 0) > (prior.score ?? 0)) byId.set(candidate.id, candidate);
+  }
+  // The relevant search can return up to 100 records from one scope. Apply
+  // the same scope and byte caps after merging, before the final context
+  // budget, or weak query overlaps can flood the prompt with episodic notes.
+  const queryTerms = lexicalTerms(query || "");
+  const ranked = [...byId.values()].map((item) => hotMemoryRank(item, queryTerms))
+    .sort(compareHotMemoryRank);
+  const ordered = reserveDurableHotMemory(ranked);
+  const items = [];
+  const counts = new Map();
+  const scopeBytes = new Map();
+  let totalBytes = 0;
+  for (const { item } of ordered) {
+    const limit = HOT_MEMORY_SCOPE_LIMITS[item.scope];
+    if (!limit || (counts.get(item.scope) ?? 0) >= limit.count) continue;
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8");
+    if ((scopeBytes.get(item.scope) ?? 0) + bytes > limit.bytes
+      || totalBytes + bytes > HOT_MEMORY_SCAN_BYTES
+      || items.length >= MAX_HOT_MEMORY_CANDIDATES) continue;
+    items.push(item);
+    counts.set(item.scope, (counts.get(item.scope) ?? 0) + 1);
+    scopeBytes.set(item.scope, (scopeBytes.get(item.scope) ?? 0) + bytes);
+    totalBytes += bytes;
+  }
+  return { items, revision: second.revision,
+    truncated: first.truncated || second.truncated || items.length < ranked.length };
+}
 function enabledSkillInstructions(skill, content) {
   return [
     `BEGIN ENABLED SKILL INSTRUCTIONS name=${JSON.stringify(skill.name)} version=${JSON.stringify(skill.version)} hash=${skill.contentHash}`,
@@ -99,20 +255,34 @@ function definitionInstructions(item, profile, manifest) {
     `END SHOGGOTH AGENT DEFINITION file=${JSON.stringify(file)}`,
   ].join("\n");
 }
-function eventText(event) {
+function eventText(event, historicalView = null, sourceSeq = () => null) {
   const text = event?.content?.text;
   const attachments = event?.content?.attachments;
   if ((typeof text !== "string" || text.length === 0) && !attachments?.length) return null;
+  const source = historicalView?.forEvent(event);
+  const echo = historicalView?.forAssistant(event, sourceSeq);
+  const status = source
+    ? `\n[HISTORICAL MEMORY STATUS eventId=${event.id}; refs=${JSON.stringify(source.refs)}; total=${source.total}; truncated=${source.truncated}; ${source.note}]`
+    : echo
+      ? `\n[HISTORICAL ASSISTANT NOTICE eventId=${event.id}; kind=${echo.kind}; refs=${JSON.stringify(echo.refs)}; total=${echo.total}; truncated=${echo.truncated}; ${echo.note}]`
+      : "";
+  // Keep the product-generated status after the original text. If the oldest
+  // event is clipped from the left to fit a prompt, its warning survives with
+  // any retained suffix instead of leaving an unlabeled stale fact behind.
   return `${event.kind.toUpperCase()}: ${text || ""}${attachments?.length
-    ? `\nATTACHMENT REFERENCES (contents require reading): ${JSON.stringify(attachments)}` : ""}`;
+    ? `\nATTACHMENT REFERENCES (contents require reading): ${JSON.stringify(attachments)}` : ""}${status}`;
 }
 
-function recentDialogue(events, { budget, tokenBudget = null, characterBudget = Infinity, operationId = null, resolveEvent = event => event }) {
+function recentDialogue(events, { budget, tokenBudget = null, characterBudget = Infinity,
+  operationId = null, resolveEvent = event => event, historicalView = null,
+  historicalSourceSeq = () => null, allEventsHistorical = false }) {
   // The current prompt is a separate turn input. Cut at its identity rather
   // than blindly dropping the last event (which may be a tool or a queued turn).
-  let boundary = operationId === null ? -1 : events.findIndex((event) => event.kind === "user"
-    && event.content?.operationId === operationId);
-  if (boundary < 0) boundary = operationId === null ? events.findLastIndex((event) => event.kind === "user") : events.length;
+  let boundary = allEventsHistorical ? events.length : operationId === null ? -1
+    : events.findIndex((event) => event.kind === "user"
+      && event.content?.operationId === operationId);
+  if (boundary < 0) boundary = operationId === null
+    ? events.findLastIndex((event) => event.kind === "user") : events.length;
   const dialogue = events.slice(0, boundary < 0 ? events.length : boundary)
     .filter((event) => !event.contextExcluded && (tokenBudget === null ? ["user", "assistant"]
       : ["user", "assistant", "tool_call", "tool_result"]).includes(event.kind))
@@ -126,7 +296,8 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
   let transportLimited = false;
   for (let index = dialogue.length - 1; index >= 0; index--) {
     const event = resolveEvent(dialogue[index]);
-    const text = eventText(event) || (tokenBudget !== null && ["tool_call", "tool_result"].includes(event.kind)
+    const text = eventText(event, historicalView, historicalSourceSeq)
+      || (tokenBudget !== null && ["tool_call", "tool_result"].includes(event.kind)
       ? `${event.kind.toUpperCase()}: ${JSON.stringify(event.content)}` : null);
     if (text === null || hasSecret(text)) continue;
     const separator = selected.length ? 1 : 0;
@@ -180,6 +351,8 @@ class ContextCompiler {
     this.definitionStore = options.definitionStore;
     this.memoryEngine = options.memoryEngine;
     this.memoryStore = options.memoryStore;
+    this.historicalMemory = new HistoricalMemoryAnnotations({ memoryStore: options.memoryStore,
+      recallPolicy: options.memoryEngine.recallPolicy, now: options.now || Date.now });
     this.transcriptStore = options.transcriptStore;
     this.toolRegistry = options.toolRegistry;
     this.permissionEngine = options.permissionEngine || null;
@@ -193,6 +366,20 @@ class ContextCompiler {
     this.checkpointStore = options.checkpointStore || null;
     this.now = options.now || Date.now;
     this.budgets = { ...DEFAULT_BUDGETS, ...(options.budgets || {}) };
+    this.semanticSearch = options.semanticSearch || null;
+    this.preparedRelated = new Map();
+  }
+  _relatedKey(input) {
+    return JSON.stringify([input.profile.id, input.run.id, input.run.workspace, input.query]);
+  }
+  async prepareRelated(input) {
+    if (!this.semanticSearch || input.run.source !== "chat" || !input.query?.trim()
+      || /^shoggoth:chat-send:federation-(?:send|message)-/u.test(input.run.idempotencyKey || "")) return;
+    const value = await this.semanticSearch.memoryCandidates({ profileId: input.profile.id,
+      workspace: input.run.workspace, query: input.query,
+      scopes: ["user", "agent", "project", "workspace"], maxSensitivity: "private" }, 150);
+    this.preparedRelated.set(this._relatedKey(input), value);
+    while (this.preparedRelated.size > 32) this.preparedRelated.delete(this.preparedRelated.keys().next().value);
   }
   compile(input) {
     const tokenBudget = input.contextLifecycleV1 === true ? input.transcriptTokenBudget ?? null : null;
@@ -215,22 +402,35 @@ class ContextCompiler {
     const directUserChat = input.run.source === "chat"
       && !/^shoggoth:chat-send:federation-(?:send|message)-/u.test(input.run.idempotencyKey || "");
     const maxMemorySensitivity = directUserChat ? "private" : "normal";
-    const userProfile = this.memoryEngine.search({
-      profileId: input.profile.id, query: "", scopes: ["user"], maxSensitivity: maxMemorySensitivity,
-      limit: 24, maxBytes: this.budgets.user,
+    const prepared = this.preparedRelated.get(this._relatedKey(input));
+    this.preparedRelated.delete(this._relatedKey(input));
+    const semanticCandidates = prepared && prepared.stamp === this.memoryEngine.semanticStamp?.(input.profile.id)
+      && directUserChat ? prepared.candidates : undefined;
+    const stable = this.memoryEngine.search({
+      profileId: input.profile.id, query: "",
+      scopes: ["user", "agent", "project", "workspace"],
+      workspace: input.run.workspace, maxSensitivity: maxMemorySensitivity,
+      hotPriority: true,
+      scopeLimits: HOT_MEMORY_SCOPE_LIMITS,
+      limit: MAX_HOT_MEMORY_CANDIDATES, maxBytes: HOT_MEMORY_SCAN_BYTES,
     });
-    const memory = this.memoryEngine.search({
+    const related = input.query?.trim() ? this.memoryEngine.search({
       profileId: input.profile.id,
       query: input.query || "",
-      scopes: ["agent", "project", "workspace"],
+      scopes: ["user", "agent", "project", "workspace"],
       workspace: input.run.workspace,
       maxSensitivity: maxMemorySensitivity,
-      limit: 24,
-      maxBytes: this.budgets.memory,
-    });
+      limit: MAX_HOT_MEMORY_CANDIDATES,
+      maxBytes: HOT_MEMORY_SCAN_BYTES,
+      ...(semanticCandidates ? { semanticCandidates } : {}),
+    }) : stable;
+    const userProfile = mergeHotCandidates(stable, related, "user", input.query);
+    const memory = mergeHotCandidates(stable, related, "memory", input.query);
+    const recall = this.memoryEngine.recallPolicy.snapshot(input.profile.id);
     let transcriptRevision = null;
     let transcriptText = "";
     let recentTranscript = null;
+    let legacyHistoricalTranscript = null;
     let transcriptEvents = null;
     let checkpoint = null;
     let allContextEvents = null;
@@ -238,6 +438,8 @@ class ContextCompiler {
     const resolvedSizes = new Map();
     let resolvedBytes = 0;
     let attachmentUnavailable = false;
+    let historicalView = null;
+    let historicalSourceSeq = () => null;
     const resolveEvent = event => {
       if (!resolvedEvents.has(event.id)) {
         let resolved = this.transcriptStore.contextEvent?.(input.profile.id, input.transcriptSessionId, event) ?? event;
@@ -274,27 +476,75 @@ class ContextCompiler {
           "Chat Context 缺少显式 Transcript session binding",
         );
       }
-      const allEvents = this.transcriptStore.listEvents(input.profile.id, input.transcriptSessionId);
+      const allEvents = this.transcriptStore.listEvents(input.profile.id, input.transcriptSessionId)
+        .filter((event) => {
+          // Tool payloads can carry the withdrawn fact in nested arguments or
+          // results even when content.text is absent. Until they have field
+          // provenance, no tool event is safe to replay after a revocation.
+          if (recall.hasRevocations && ["tool_call", "tool_result"].includes(event.kind)) return false;
+          // Include contextRef text in the check. A missing or unreadable backing
+          // body cannot be assumed safe after an explicit forget.
+          try {
+            const resolved = event.content?.contextRef
+              ? this.transcriptStore.contextEvent(input.profile.id, input.transcriptSessionId, event) : event;
+            // Attachment references include user-controlled filenames and
+            // metadata that the recall policy cannot attribute to a claim.
+            if (recall.hasRevocations && resolved.content?.attachments?.length) return false;
+            return recall.isEventVisible(resolved);
+          } catch (error) {
+            // An already revoked source may be omitted without reading its
+            // backing body. A visible event with damaged original content
+            // must stop projection instead of silently losing history.
+            if (!recall.isEventVisible(event)) return false;
+            throw error;
+          }
+        });
       allContextEvents = allEvents;
       transcriptEvents = allContextEvents;
-      if (input.contextLifecycleV1 === true && this.checkpointStore) {
+      historicalView = this.historicalMemory.view(input.profile.id);
+      const eventSeqs = new Map(allEvents.filter((event) => event.kind === "user")
+        .map((event) => [event.id, { runId: event.runId, seq: event.seq }]));
+      historicalSourceSeq = (sourceEventId, runId) => {
+        const source = eventSeqs.get(sourceEventId);
+        return source?.runId === runId ? source.seq : null;
+      };
+      // Existing checkpoints summarize a prefix without per-fact provenance.
+      // After a revocation, only verified source events may form history.
+      if (!recall.hasRevocations && input.contextLifecycleV1 === true && this.checkpointStore) {
         checkpoint = (this.checkpointStore.portable ?? this.checkpointStore.compatible).call(this.checkpointStore,
           input.profile.id, input.transcriptSessionId, allEvents);
         if (checkpoint) transcriptEvents = allContextEvents.filter(event => event.seq > checkpoint.coveredThroughSeq);
       }
       const events = allEvents.filter((event) => !event.contextExcluded).slice(-25, -1);
+      const hasHistoricalContext = historicalView.hasHistorical && events.some((event) => (
+        historicalView.forEvent(event)
+          || historicalView.forAssistant(event, historicalSourceSeq)));
       transcriptRevision = this.transcriptStore.getRevision(
         input.profile.id,
         input.transcriptSessionId,
       );
-      transcriptText = events.map(eventText).filter(Boolean).filter((text) => !hasSecret(text)).join("\n");
-      if (input.contextLifecycleV1 === true) {
+      if (input.contextLifecycleV1 === true || recall.hasRevocations) {
+        // A revoked Profile cannot use a checkpoint without per-fact sources.
+        // The legacy context path used to take only the last 24 messages and
+        // silently mark that projection complete. Rebuild from the full safe
+        // history so a fresh native thread either receives every visible
+        // message or reports that compaction is required.
         const budget = transcriptBytes;
         if (!Number.isSafeInteger(budget) || budget < 0 || budget > (tokenBudget === null ? 48 * 1024 : transport.contextBytes)) {
           throw contextError("CONTEXT_BUDGET_INVALID", "最近对话预算无效");
         }
         recentTranscript = recentDialogue(transcriptEvents, { budget, tokenBudget, resolveEvent,
+          historicalView, historicalSourceSeq,
           characterBudget: transport.requestCharacters ?? Infinity, operationId: input.currentOperationId ?? null });
+      } else if (hasHistoricalContext) {
+        // Legacy native Runs deliberately keep only their existing last-24
+        // projection. Mark historical facts inside that projection without
+        // turning a correction into a new full-history admission gate.
+        legacyHistoricalTranscript = recentDialogue(events, { budget: this.budgets.transcript,
+          resolveEvent, historicalView, historicalSourceSeq, allEventsHistorical: true });
+      } else {
+        transcriptText = events.map((event) => eventText(event))
+          .filter(Boolean).filter((text) => !hasSecret(text)).join("\n");
       }
     }
     const permissionRevision = this.permissionEngine?.revision ?? 1;
@@ -329,13 +579,20 @@ class ContextCompiler {
     const skillCatalogText = skillCatalogItems.length > 0 ? JSON.stringify({
       instruction: "Use skill_catalog with a task-specific query to find up to 5 enabled Skills, then skill_read only for a clear match at the returned contentHash. Refine the query or use the returned cursor for more results. Never choose a Skill merely because it is the only result. A filesystem SKILL.md path is external and must not be substituted with a different Shoggoth native Skill.",
     }) : "";
-    const userMemoryText = userProfile.items
-      .map((item) => `[${item.id}; confidence=${item.confidence}] ${item.content}`).join("\n")
-      + (userProfile.truncated ? "\nAdditional user memories are available through memory_search." : "");
-    const agentMemoryText = memory.items.filter((item) => item.scope !== "user")
-      .map((item) => (
-        `[${item.id}; ${item.scope}; confidence=${item.confidence}] ${item.content}`
-      )).join("\n") + (memory.truncated ? "\nAdditional memories are available through memory_search." : "");
+    const hotUser = selectHotMemory(userProfile.items, { query: input.query,
+      budget: this.budgets.user, label: "RELEVANT USER PROFILE",
+      format: (item) => `[${item.id}; confidence=${item.confidence}] ${item.content}`,
+      more: "Additional user memories are available through memory_search.",
+      searchTruncated: userProfile.truncated,
+      hotDurableEligibleCount: stable.hotDurableEligibleByScope?.user ?? null });
+    const hotMemory = selectHotMemory(memory.items.filter((item) => item.scope !== "user"), {
+      query: input.query, budget: this.budgets.memory, label: "RELEVANT MEMORY",
+      format: (item) => `[${item.id}; ${item.scope}; confidence=${item.confidence}] ${item.content}`,
+      more: "Additional memories are available through memory_search.",
+      searchTruncated: memory.truncated,
+      hotDurableEligibleCount: stable.hotDurableEligibleByScope
+        ? stable.hotDurableEligibleByScope.agent + stable.hotDurableEligibleByScope.project
+          + stable.hotDurableEligibleByScope.workspace : null });
     const trustedRun = JSON.stringify({
       runId: input.run.id,
       source: input.run.source,
@@ -407,14 +664,14 @@ class ContextCompiler {
       block({
         id: "user", kind: "user", trust: "user-data", priority: 500, safe: false,
         sourceRevision: this.memoryStore.getRevision(input.profile.id),
-        content: userMemoryText ? untrusted("RELEVANT USER PROFILE", userMemoryText) : "",
+        content: hotUser.content, truncated: hotUser.truncated,
       }, this.budgets.user),
       block({
         id: "memory", kind: "memory", trust: "retrieved-data", priority: 400, safe: false,
         sourceRevision: memory.revision,
-        content: agentMemoryText ? untrusted("RELEVANT MEMORY", agentMemoryText) : "",
+        content: hotMemory.content, truncated: hotMemory.truncated,
       }, this.budgets.memory),
-      ...(input.handoffSeed ? [block({
+      ...(input.handoffSeed && !recall.hasRevocations ? [block({
         id: "runtime-handoff", kind: "handoff", trust: "conversation-data", priority: 350, safe: false,
         sourceRevision: transcriptRevision, content: input.handoffSeed,
       }, 10 * 1024)] : []),
@@ -429,9 +686,10 @@ class ContextCompiler {
       block({
         id: "transcript", kind: "transcript", trust: "conversation-data", priority: 300, safe: false,
         sourceRevision: transcriptRevision,
-        content: recentTranscript?.content ?? (transcriptText ? untrusted("PRIOR TRANSCRIPT", transcriptText) : ""),
-        truncated: recentTranscript?.truncated,
-      }, recentTranscript === null ? this.budgets.transcript : null),
+        content: recentTranscript?.content ?? legacyHistoricalTranscript?.content
+          ?? (transcriptText ? untrusted("PRIOR TRANSCRIPT", transcriptText) : ""),
+        truncated: recentTranscript?.truncated ?? legacyHistoricalTranscript?.truncated,
+      }, recentTranscript === null && legacyHistoricalTranscript === null ? this.budgets.transcript : null),
     ];
     const deduped = [];
     const seen = new Set();
@@ -501,7 +759,9 @@ class ContextCompiler {
             const restored = recentDialogue(candidateEvents, { budget: Math.max(0, transport.contextBytes
               - Buffer.byteLength(candidateDynamic) - 2), tokenBudget: fullBudget
                 ? Math.max(0, fullBudget.limitTokens - fullBudget.estimatedTokens) : tokenBudget,
-              characterBudget: historyCharacters(candidateDynamic), resolveEvent, operationId: input.currentOperationId ?? null });
+              characterBudget: historyCharacters(candidateDynamic), resolveEvent,
+              historicalView, historicalSourceSeq,
+              operationId: input.currentOperationId ?? null });
             if (restored.truncated) continue;
             const index = deduped.findIndex(item => item.kind === "checkpoint");
             if (candidate) deduped[index] = block({ ...deduped[index], sourceRevision: candidate.contentHash, content: candidateContent });
@@ -517,7 +777,9 @@ class ContextCompiler {
           - (otherDynamic.length > 0 ? 2 : 0)));
         if (tokenBudget !== null || deduped[transcriptIndex].byteLength > available) {
           const resized = recentDialogue(transcriptEvents, {
-            budget: available, tokenBudget: historyTokens, characterBudget: historyCharacters(otherDynamic), resolveEvent, operationId: input.currentOperationId ?? null,
+            budget: available, tokenBudget: historyTokens, characterBudget: historyCharacters(otherDynamic),
+            resolveEvent, historicalView, historicalSourceSeq,
+            operationId: input.currentOperationId ?? null,
           });
           historyTruncated = resized.truncated;
           transportLimited = resized.transportLimited;
@@ -529,9 +791,26 @@ class ContextCompiler {
         }
       }
     }
+    if (recall.hasRevocations && input.freshSession !== false && historyTruncated) {
+      throw contextError("CONTEXT_COMPACTION_REQUIRED",
+        "撤回后可见原话超过当前上下文预算，无法安全恢复完整会话");
+    }
     const dynamicContext = deduped.filter((item) => (
       ["skill-catalog", "user", "memory", "transcript", "handoff", "checkpoint"].includes(item.kind)
     )).sort((a, b) => b.priority - a.priority).map((item) => item.content).join("\n\n");
+    // Count only durable IDs whose complete selected block actually survived
+    // the final projection. The search denominator is measured before caps.
+    const injectedMemoryItems = (id, selected) => deduped.some((item) => item.id === id
+      && item.content === selected.content) ? selected.selectedItems : [];
+    const injectedUserItems = injectedMemoryItems("user", hotUser);
+    const injectedOtherItems = injectedMemoryItems("memory", hotMemory);
+    const withInjectedCoverage = (report, items) => {
+      const prioritySelected = new Set(items.filter((item) => (hotPriorityFlags(item) & 6) !== 0)
+        .map((item) => item.id)).size;
+      return { ...report, prioritySelected,
+        priorityCoverage: report.priorityCandidates === null || report.priorityCandidates === 0 ? null
+          : Number((prioritySelected / report.priorityCandidates).toFixed(4)) };
+    };
     const dynamicContextWithoutTranscript = deduped.filter((item) => (
       ["skill-catalog", "user", "memory"].includes(item.kind)
     )).sort((a, b) => b.priority - a.priority).map((item) => item.content).join("\n\n");
@@ -584,7 +863,9 @@ class ContextCompiler {
             || attachmentUnavailable ? "partial" : "available",
           windowSource: input.requestBudget.source } } : {}),
         truncatedBlocks: deduped.filter((item) => item.truncated).map((item) => item.id),
-        memoryMatches: [...userProfile.items, ...memory.items].map((item) => item.id),
+        memoryMatches: [...injectedUserItems, ...injectedOtherItems].map((item) => item.id),
+        hotMemory: { user: withInjectedCoverage(hotUser.report, injectedUserItems),
+          memory: withInjectedCoverage(hotMemory.report, injectedOtherItems) },
         selectedSkillRefs: selectedSkills.map((skill) => ({
           id: skill.id,
           name: skill.name,

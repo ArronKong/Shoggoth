@@ -1013,6 +1013,53 @@ export interface UnifiedSkill {
   registryRevision?: string;
   registryVersion?: number;
   profileRevision?: number;
+  usageCount?: number;
+  usageAgents?: Record<string, number>;
+}
+
+export interface NativeSkillPage {
+  supported: true;
+  skills: UnifiedSkill[];
+  registryRevision: string;
+  registryVersion: number;
+  profileRevision: number;
+  queryRevision: string;
+  pageIndex: number;
+  pageCount: number;
+  total: number;
+  enabledCount: number;
+  usedCount: number;
+  usageSupported: boolean;
+  matchCount: number;
+}
+
+export interface DisabledStandaloneMcpPage {
+  revision: number;
+  totalDisabled: number;
+  items: Array<{
+    id: string;
+    name: string;
+    commandLabel: string;
+    cwdLabel: string;
+    argCount: number;
+    updatedAt: number;
+  }>;
+  nextCursor: number;
+  hasMore: boolean;
+}
+
+export interface StandaloneMcpRebindResult {
+  revision: number;
+  id: string;
+  enabled: false;
+  activationToken: string;
+}
+
+export interface StandaloneMcpActivateResult {
+  revision: number;
+  id: string;
+  enabled: true;
+  toolCount: number;
 }
 
 // "哪个 agent 把哪个 skill 读进过上下文"（见 backend getSkillUsage()）。形状与
@@ -1849,6 +1896,67 @@ export interface AgentMemoryPage {
   items: AgentMemoryItem[];
   nextCursor: number;
   hasMore: boolean;
+  recallPolicy?: { ready: boolean; revision: number | null; indexPending: boolean; code: string | null };
+}
+export interface AgentMemoryExplanation {
+  item: AgentMemoryItem;
+  withdrawalReason?: "forgotten" | "user_deleted" | "expired" | "legacy_unknown" | "unavailable" | null;
+  evidence: {
+    status: "verified_quote" | "related_message" | "verified_origin" | "legacy_unverified" | "unavailable";
+    origin?: "conversation" | "ui_create" | "ui_edit" | "import";
+    reason?: string;
+    memoryRevision?: number;
+    sessionId?: string;
+    eventId?: string;
+    quote?: string | null;
+    quoteStartUtf16?: number;
+    quoteEndUtf16?: number;
+    occurredAt?: number;
+    importFile?: { name: string | null; sha256: string };
+  };
+}
+export interface AgentMemoryCandidate {
+  id: string;
+  profileId: string;
+  content: string;
+  scope: "user" | "project" | "workspace";
+  sensitivity: "normal" | "private";
+  source: {
+    sessionId: string;
+    eventId: string;
+    runId: string;
+    seq: number;
+    contentHash: string;
+    quoteHash: string;
+    quoteStart: number;
+    quoteLength: number;
+    workspace: string | null;
+  };
+  status: "pending" | "accepted" | "rejected";
+  createdAt: number;
+  updatedAt: number;
+  acceptedMemoryId: string | null;
+}
+export interface AgentMemoryCandidatePage {
+  revision: number;
+  items: AgentMemoryCandidate[];
+  nextCursor: number | null;
+  hasMore: boolean;
+  usage: { day: string | null; calls: number; inputTokens: number; outputTokens: number };
+}
+export interface AgentMemoryCandidateReviewResult {
+  revision: number;
+  candidate: AgentMemoryCandidate;
+  memoryItem?: AgentMemoryItem;
+  memoryRevision?: number;
+  viewStatus?: unknown;
+}
+export interface AgentMemoryCandidateBatchResult {
+  revision: number;
+  acceptedCandidateIds: string[];
+  acceptedMemoryIds: string[];
+  memoryRevision: number;
+  viewStatus: unknown;
 }
 export interface AgentTranscriptSession {
   id: string;
@@ -1868,6 +1976,7 @@ export interface AgentTranscriptSessionPage {
 }
 export interface AgentTranscriptEvent {
   id: string;
+  runId: string | null;
   seq: number;
   kind: string;
   content: { text?: string; [key: string]: unknown };
@@ -2542,7 +2651,7 @@ export interface AgentRuntimeBindingsSnapshot {
   defaultBindingId: string;
   revision: number;
   canAdd: boolean;
-  availability?: Array<{ bindingId: string; available: boolean; reason: "runtime-unavailable" | "runtime-disabled" | null }>;
+  availability?: Array<{ bindingId: string; available: boolean; reason: "runtime-unavailable" | "runtime-disabled" | "runtime-not-installed" | null }>;
 }
 export type AgentRuntimeBindingSpec = Pick<AgentRuntimeBinding, "runtime" | "runtimeAccountId">
   & Partial<Pick<AgentRuntimeBinding, "label" | "enabled">>;
@@ -2569,7 +2678,7 @@ export interface SessionRuntimeModel extends UnifiedModel {
 export interface SessionRuntimeModels {
   selection: SessionRuntimeSnapshot;
   models: SessionRuntimeModel[];
-  runtimes: Array<{ runtime: string; name: string; available: boolean; capabilities: ChatCapabilities }>;
+  runtimes: Array<{ runtime: string; bindingId?: string; name: string; available: boolean; capabilities: ChatCapabilities }>;
   capabilities: ChatCapabilities;
 }
 

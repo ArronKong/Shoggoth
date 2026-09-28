@@ -1,9 +1,7 @@
-/* Settings redesign. Page order follows how the pieces depend on each other:
-   the background service every connection shares, then one full-width card per
-   backend that also holds that backend's own settings (OpenClaw gateway,
-   Shoggoth's local CLIs), then everyday preferences, and developer switches
-   folded last. Loaded after SettingsPage.css / SettingsLayout.css and
-   overrides their older three-column card grid. */
+/* Settings redesign. Connections and their full-width backend cards come
+   first, followed by the shared background service, everyday preferences,
+   and developer switches folded last. Loaded after SettingsPage.css /
+   SettingsLayout.css and overrides their older three-column card grid. */
 
 .management-page.settings-page {
   --settings-inset: color-mix(in srgb, var(--ui-surface-2) 72%, var(--ui-surface-1));
@@ -12,7 +10,7 @@
   --settings-warn-tint: color-mix(in srgb, var(--ui-warning) 12%, var(--ui-surface-1));
 }
 
-.management-page.settings-page .settings-stack { gap: 44px; max-width: 1040px; }
+.management-page.settings-page .settings-stack { gap: 44px; }
 .management-page.settings-page .settings-group { gap: 36px; }
 /* 通用 heads its own card like every other section; its later sections keep the group rhythm. */
 .management-page.settings-page #settings-general { gap: 14px; }
@@ -421,6 +419,9 @@
   color: var(--ui-text-1);
 }
 .management-page.settings-page .settings-row-icon svg { display: block; }
+.management-page.settings-page .settings-row-icon .settings-chat-icon { width: 40px; height: 40px; }
+.management-page.settings-page .settings-chat-icon g { stroke: currentColor; stroke-width: 1.6; }
+.management-page.settings-page .settings-chat-icon .ni-dot { stroke-width: 3.2; }
 .management-page.settings-page .settings-notification-label { display: flex; align-items: center; gap: 16px; }
 
 /* Developer switches: quiet, last */

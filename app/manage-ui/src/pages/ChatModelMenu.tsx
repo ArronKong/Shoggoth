@@ -48,7 +48,7 @@ export default function ChatModelMenu({
   activeModel: string;
   activeProvider?: string;
   activeBindingId?: string;
-  runtimeGroups?: Array<{ runtime: string; name: string; available: boolean }>;
+  runtimeGroups?: Array<{ runtime: string; bindingId?: string; name: string; available: boolean }>;
   onSelect: (id: string, provider?: string, bindingId?: string) => void;
   disabled?: boolean;
   loading?: boolean;
@@ -210,14 +210,15 @@ export default function ChatModelMenu({
   // Tab 行用的 provider 全集：取自全部模型（不随搜索词变化，避免打字时 Tab 抖动）。
   // 顺序与分组一致——字母序、「其他」殿后。
   const providers = useMemo(() => {
-    if (runtimeGroups) return runtimeGroups.map(group => group.runtime);
+    if (runtimeGroups) return runtimeGroups.map(group => group.bindingId || group.runtime);
     const set = new Set<string>();
     for (const m of models) set.add((m.provider || "").trim() || OTHER);
     return [...set].sort((a, b) => (a === OTHER ? 1 : b === OTHER ? -1 : a.localeCompare(b)));
   }, [models, OTHER, runtimeGroups]);
-  const groupName = (id: string) => runtimeGroups?.find(group => group.runtime === id)?.name || id;
+  const groupName = (id: string) => runtimeGroups?.find(group => (group.bindingId || group.runtime) === id)?.name || id;
   // 只点名失败的 Runtime：一个分组失败不应让其它已加载的分组看起来也失败了。
-  const failedGroups = runtimeGroups?.filter(group => !group.available && (!providerFilter || group.runtime === providerFilter)) ?? [];
+  const failedGroups = runtimeGroups?.filter(group => !group.available
+    && (!providerFilter || (group.bindingId || group.runtime) === providerFilter)) ?? [];
   const catalogFailed = loadError || failedGroups.length > 0;
 
   const groups = useMemo(() => {
@@ -225,7 +226,7 @@ export default function ChatModelMenu({
     const byProv = new Map<string, ModelMenuChoice[]>();
     for (const m of models) {
       if (q && !`${m.name} ${m.id} ${m.runtimeName || ""}`.toLowerCase().includes(q)) continue;
-      const key = (runtimeGroups ? m.runtime : m.provider)?.trim() || OTHER;
+      const key = (runtimeGroups ? m.bindingId || m.runtime : m.provider)?.trim() || OTHER;
       // provider Tab 筛选与搜索框叠加：选中某 provider 时只留该组。
       if (providerFilter && key !== providerFilter) continue;
       const bucket = byProv.get(key);

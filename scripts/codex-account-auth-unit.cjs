@@ -1208,7 +1208,8 @@ test("Service 默认 auth invalidator 会停止共享 RuntimeAccount 且不波�
   service.accountAuthStateStore.open();
   service.accountAuthManager.open();
   try {
-    ensureBuiltinCliAgentProfiles(productStore);
+    ensureBuiltinCliAgentProfiles(productStore, new Set(Object.values(
+      require("../app/agent-service/runtime-account").DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME)));
     const defaultProfile = productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
     const nativeCodexProfile = productStore.listAgentProfiles()
       .find((profile) => profile.backendId === "codex");

@@ -42,6 +42,26 @@ withCopy((root) => {
 });
 
 withCopy((root) => {
+  const resource = "https://fixture.example/";
+  writeJson(path.join(root, "plugin.json"), { ...originalManifest,
+    extensions: { shoggoth: { mcpOAuthResources: { "remote-issues": resource } } } });
+  const mcp = { ...originalMcp, mcpServers: { ...originalMcp.mcpServers,
+    "remote-issues": { type: "streamable-http", url: "https://fixture.example/mcp" } } };
+  writeJson(path.join(root, "mcp.json"), mcp);
+  const preview = previewPluginDirectory(root);
+  const marked = preview.mcpServers.find(item => item.name === "remote-issues");
+  assert.ok(marked);
+  const { readPluginMcpServer } = require("../app/agent-service/plugin-package-parser");
+  assert.equal(readPluginMcpServer(fs.realpathSync(root), "remote-issues").oauthResource, resource);
+  writeJson(path.join(root, "plugin.json"), { ...originalManifest,
+    extensions: { shoggoth: { mcpOAuthResources: { "remote-issues": "https://evil.invalid/" } } } });
+  assert.throws(() => previewPluginDirectory(root), { code: "PACKAGE_INVALID" });
+  writeJson(path.join(root, "plugin.json"), { ...originalManifest,
+    extensions: { shoggoth: { mcpOAuthResources: { "remote-issues": resource }, extra: true } } });
+  assert.throws(() => previewPluginDirectory(root), { code: "PACKAGE_INVALID" });
+});
+
+withCopy((root) => {
   writeJson(path.join(root, "plugin.json"), { ...originalManifest, name: "Bad--Name" });
   assert.throws(() => previewPluginDirectory(root), (error) => error.code === "PACKAGE_INVALID");
 });

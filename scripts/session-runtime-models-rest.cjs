@@ -55,9 +55,11 @@ async function run() {
     assert.equal(catalog.status, 200, JSON.stringify(catalog.body));
     assert.equal(catalog.body.selection.canSwitch, true, "fresh App must allow cross-Runtime selection");
     assert.deepEqual(new Set(catalog.body.runtimes.map(runtime => runtime.runtime)), new Set(["codex", "pi", "opencode", "deepseek-harness"]));
-    assert.equal(catalog.body.models.length, 8, JSON.stringify(catalog.body));
-    assert.equal(catalog.body.models.filter(model => model.id === "fixture-model").length, 4);
-    assert.equal(new Set(catalog.body.models.map(model => `${model.bindingId}:${model.id}`)).size, 8);
+    assert.deepEqual(catalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
+      .map(runtime => runtime.name), ["Codex Harness", "Codex CLI"]);
+    assert.equal(catalog.body.models.length, 10, JSON.stringify(catalog.body));
+    assert.equal(catalog.body.models.filter(model => model.id === "fixture-model").length, 5);
+    assert.equal(new Set(catalog.body.models.map(model => `${model.bindingId}:${model.id}`)).size, 10);
     assert.equal(catalog.body.runtimes.find(runtime => runtime.runtime === "deepseek-harness").name, "DeepSeek");
     await request();
     assert.deepEqual(f.service.productStore.getAgentRuntimeBindings(f.profile.id), initialBindings, "repeat reads do not create duplicate bindings");
@@ -98,6 +100,18 @@ async function run() {
     assert.ok(events.some(event => event.content?.text === "Keep this conversation"));
     assert.ok(events.some(event => event.content?.text === "Answer after selection"));
     assert.equal(f.service.chatSessionStore.listPendingRuntimeSwitches().length, 0);
+    backend.runtimeCliAuth.delete("native-codex-default-v1");
+    catalog = await request();
+    assert.equal(catalog.status, 200, JSON.stringify(catalog.body));
+    assert.deepEqual(catalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
+      .map(runtime => runtime.name), ["Codex Harness"],
+    "Shoggoth's bundled Codex remains available without the system Codex CLI");
+    const nativeCodex = initialBindings.bindings.find(binding => binding.runtimeAccountId === "native-codex-default-v1");
+    assert.equal((await request({ bindingId: nativeCodex.id, model: "codex-only",
+      revision: catalog.body.selection.revision, acceptAdjustments: true })).body.code, "RUNTIME_NOT_INSTALLED");
+    const managedCodex = await request({ bindingId: initialDefault, model: "codex-only",
+      revision: catalog.body.selection.revision, acceptAdjustments: true });
+    assert.equal(managedCodex.status, 200, JSON.stringify(managedCodex.body));
     console.log("PASS Runtime model REST: automatic binding, CLI catalogs, duplicate IDs, atomic selection, native-session renewal, busy/CAS/origin/ownership gates and unchanged Agent default.");
   } finally { if (server) await server.close(); await f.close(); }
 }

@@ -105,7 +105,7 @@ export interface ImmersiveBundle {
   displayModel: string;
   changeModel: (id: string, provider?: string, bindingId?: string) => void;
   activeBindingId?: string;
-  runtimeGroups?: Array<{ runtime: string; name: string; available: boolean }>;
+  runtimeGroups?: Array<{ runtime: string; bindingId?: string; name: string; available: boolean }>;
   activeModelProvider?: string;
   modelsLoading?: boolean;
   modelsError?: boolean;

@@ -6,7 +6,8 @@ const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
 const { BUILTIN_CLI_AGENT_PROFILES } = require("../app/agent-service/builtin-cli-profiles");
 const { defaultAgentProfile } = require("../app/agent-service/product-store");
 const { isRuntimeAvailable } = require("../app/runtime-availability");
-const { DEFAULT_TEMPLATE_VERSION, DEFAULT_DOCUMENTS, LEGACY_DEFAULT_DOCUMENTS,
+const { DEFAULT_TEMPLATE_VERSION, DEFAULT_DOCUMENTS,
+  V3_DEFAULT_AGENTS,
   VIEW_HEADERS, EMPTY_VIEW_MESSAGES, createDefaultDocuments } = require("../app/agent-service/agent-definition-defaults");
 const { DEFAULT_TOOL_REGISTRY } = require("../app/agent-service/mcp-product-tool-controller");
 const NATIVE_PROFILES = [defaultAgentProfile(500), ...BUILTIN_CLI_AGENT_PROFILES];
@@ -16,17 +17,57 @@ function fixture(t) {
   t.after(() => value.cleanup());
   return value;
 }
-function legacy(f, id) {
-  // Seed exactly the old on-disk bootstrap contract, without running v2 ensureProfile.
+function v3Default(f, id) {
   return f.definitions._commit({ profileId: id, expectedRevision: 0,
-    documents: { ...LEGACY_DEFAULT_DOCUMENTS }, actor: "bootstrap", reason: "default-profile", createdAt: 500 });
+    documents: { ...createDefaultDocuments("Current"), AGENTS: V3_DEFAULT_AGENTS },
+    actor: "bootstrap", reason: "default-profile:v3", createdAt: 500 });
 }
 function update(f, id, documents, actor = "user") {
   return f.definitions.update({ profileId: id, expectedRevision: f.definitions.get(id).manifest.revision,
     actor, documents });
 }
 
-test("all native identities use their Profile name and inject complete v2 defaults", (t) => {
+test("untouched v3 AGENTS upgrades once while preserving its saved revision", (t) => {
+  const f = fixture(t);
+  const id = "v3-memory-default";
+  const old = v3Default(f, id);
+  assert.match(old.documents.AGENTS, /尚未实现的后台整理/u);
+  const upgraded = f.definitions.ensureProfile({ profileId: id, profileName: "Current" });
+  assert.equal(upgraded.manifest.revision, old.manifest.revision + 1);
+  assert.equal(upgraded.manifest.reason, `default-template:v${DEFAULT_TEMPLATE_VERSION}`);
+  assert.equal(upgraded.documents.AGENTS, DEFAULT_DOCUMENTS.AGENTS);
+  assert.match(upgraded.documents.AGENTS, /后台提炼只生成待用户审核的候选/u);
+  assert.deepEqual(f.definitions.readRevision(id, old.manifest.revision).documents, old.documents);
+  assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: "Current" }), upgraded);
+});
+
+test("edited, imported or restored v3 AGENTS keeps the user's exact text", (t) => {
+  const f = fixture(t);
+  for (const id of ["v3-user-edit", "v3-edited-back", "v3-empty", "v3-imported", "v3-restored"]) {
+    v3Default(f, id);
+    if (id === "v3-user-edit") update(f, id, { AGENTS: "# AGENTS.md\n\n用户自定义记忆规则。\n" });
+    if (id === "v3-edited-back") {
+      update(f, id, { AGENTS: "# AGENTS.md\n\n临时自定义规则。\n" });
+      update(f, id, { AGENTS: V3_DEFAULT_AGENTS });
+    }
+    if (id === "v3-empty") update(f, id, { AGENTS: "" });
+    if (id === "v3-imported") update(f, id, { AGENTS: V3_DEFAULT_AGENTS }, "import");
+    if (id === "v3-restored") update(f, id, { AGENTS: V3_DEFAULT_AGENTS }, "restore");
+    const current = f.definitions.get(id);
+    assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: "Current" }), current);
+  }
+});
+
+test("generated MEMORY view distinguishes immediate saves from review candidates", (t) => {
+  const f = fixture(t);
+  f.memoryEngine.rebuildViews("profile-1");
+  const view = f.definitions.readGeneratedView("profile-1", "MEMORY").content;
+  assert.match(view, /前台 memory_save 保存成功即生效/u);
+  assert.match(view, /后台提炼的候选须由用户审核接受后/u);
+  assert.doesNotMatch(view, /没有待确认队列/u);
+});
+
+test("all native identities use their Profile name and inject complete defaults", (t) => {
   const f = fixture(t);
   assert.deepEqual(NATIVE_PROFILES.filter((profile) => isRuntimeAvailable(profile.runtime))
     .map(({ name }) => name), ["Shoggoth", "Codex", "Grok", "Antigravity", "Pi", "OpenCode", "DeepSeek"]);
@@ -144,79 +185,41 @@ test("six backends keep customized names, definitions and user memories separate
   assert.match(definition.documents.IDENTITY, /^- Name: 小码$/mu);
   const snapshot = f.compiler.compile({ profile: { ...f.profile, ...named },
     run: { ...f.run, profileId: named.id }, transcriptSessionId: f.transcriptSessionId, query: "你叫什么" });
-  assert.match(snapshot.developerInstructions, /"name":"小码","backendId":"codex","runtime":"codex"/u);
+  const identity = JSON.parse(snapshot.developerInstructions.match(
+    /^Active Agent Profile identity .*?: (.+)$/mu,
+  )[1]);
+  assert.deepEqual(identity, { name: named.name, backendId: named.backendId, runtime: named.runtime });
 });
 
-test("untouched legacy defaults upgrade once, preserve history and keep frozen context", (t) => {
+test("v3 AGENTS upgrade preserves customized definitions and recorded profile facts", (t) => {
   const f = fixture(t);
-  const id = "legacy-clean";
-  legacy(f, id);
-  assert.deepEqual(f.definitions.ensureProfile({ profileId: id }).documents, LEGACY_DEFAULT_DOCUMENTS,
-    "an old caller without the authoritative Profile name must not invent a name during migration");
-  const profile = { ...f.profile, id, name: "旧 Agent 的当前名字" };
-  const snapshot = f.compiler.compile({ profile, run: { ...f.run, profileId: id },
-    transcriptSessionId: f.transcriptSessionId, query: "你的设定" });
-  const upgraded = f.definitions.ensureProfile({ profileId: id, profileName: profile.name });
-  assert.equal(upgraded.manifest.revision, 2);
-  assert.equal(upgraded.manifest.reason, `default-template:v${DEFAULT_TEMPLATE_VERSION}`);
-  assert.deepEqual(upgraded.documents, createDefaultDocuments(profile.name));
-  assert.deepEqual(f.definitions.readRevision(id, 1).documents, LEGACY_DEFAULT_DOCUMENTS);
-  assert.deepEqual(f.snapshots.get(id, snapshot.id), snapshot);
-  assert.ok(snapshot.developerInstructions.includes(LEGACY_DEFAULT_DOCUMENTS.SOUL));
-  f.definitions.close(); f.definitions.open();
-  assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: profile.name }), upgraded);
-});
-
-test("upgrade only untouched files and preserve customized definitions and recorded profile facts", (t) => {
-  const f = fixture(t);
-  const id = "legacy-custom";
-  legacy(f, id);
+  const id = "v3-custom";
+  const old = v3Default(f, id);
   update(f, id, { SOUL: "用户定制的人设，请逐字保留。" });
-  update(f, id, { USER: "# User\n\n- 现有用户资料。\n" }, "memory-engine");
-  const upgraded = f.definitions.ensureProfile({ profileId: id, profileName: "Custom" });
+  update(f, id, { USER: "# USER.md\n\n- 现有用户资料。\n" }, "memory-engine");
+  const upgraded = f.definitions.ensureProfile({ profileId: id, profileName: "Current" });
   assert.equal(upgraded.manifest.revision, 4);
   assert.equal(upgraded.documents.SOUL, "用户定制的人设，请逐字保留。");
-  assert.equal(upgraded.documents.USER, "# User\n\n- 现有用户资料。\n");
+  assert.equal(upgraded.documents.USER, "# USER.md\n\n- 现有用户资料。\n");
   assert.equal(upgraded.documents.AGENTS, DEFAULT_DOCUMENTS.AGENTS);
-  assert.match(upgraded.documents.IDENTITY, /^- Name: Custom$/mu);
-  assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: "Custom" }), upgraded);
-});
-
-test("edited-back, empty, imported and deliberately restored definitions keep user intent", (t) => {
-  const f = fixture(t);
-  const id = "legacy-edited-back";
-  legacy(f, id);
-  update(f, id, { SOUL: "temporary custom text", AGENTS: "" });
-  update(f, id, { SOUL: LEGACY_DEFAULT_DOCUMENTS.SOUL });
-  const upgraded = f.definitions.ensureProfile({ profileId: id, profileName: "Custom" });
-  assert.equal(upgraded.documents.SOUL, LEGACY_DEFAULT_DOCUMENTS.SOUL);
-  assert.equal(upgraded.documents.AGENTS, "");
-  assert.match(upgraded.documents.IDENTITY, /^- Name: Custom$/mu);
-  for (const actor of ["import", "restore"]) {
-    const profileId = `legacy-${actor}`;
-    legacy(f, profileId);
-    const chosen = update(f, profileId, { ...LEGACY_DEFAULT_DOCUMENTS }, actor);
-    assert.deepEqual(f.definitions.ensureProfile({ profileId, profileName: "Keep" }), chosen);
-  }
-  const restoreId = "legacy-upgrade-restore";
-  legacy(f, restoreId);
-  f.definitions.ensureProfile({ profileId: restoreId, profileName: "Keep" });
-  const restored = f.definitions.restore({ profileId: restoreId, revision: 1, expectedRevision: 2 });
-  assert.deepEqual(f.definitions.ensureProfile({ profileId: restoreId, profileName: "Keep" }), restored);
+  assert.deepEqual(f.definitions.readRevision(id, old.manifest.revision).documents, old.documents);
+  assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: "Current" }), upgraded);
 });
 
 for (const checkpoint of ["revision-ready", "revision-installed", "manifest-committed"]) {
-  test(`default upgrade recovers atomically after ${checkpoint}`, (t) => {
+  test(`v3 AGENTS upgrade recovers atomically after ${checkpoint}`, (t) => {
     const f = fixture(t);
-    const id = "legacy-crash";
-    legacy(f, id);
+    const id = `v3-crash-${checkpoint}`;
+    const old = v3Default(f, id);
     f.definitions.faultInjector = (point) => { if (point === checkpoint) throw new Error("simulated crash"); };
     assert.throws(() => f.definitions.ensureProfile({ profileId: id, profileName: "恢复后的名字" }), /simulated crash/u);
     f.definitions.close(); f.definitions.faultInjector = null; f.definitions.open();
     const recovered = f.definitions.ensureProfile({ profileId: id, profileName: "恢复后的名字" });
     assert.equal(recovered.manifest.revision, 2);
-    assert.deepEqual(recovered.documents, createDefaultDocuments("恢复后的名字"));
-    assert.deepEqual(f.definitions.readRevision(id, 1).documents, LEGACY_DEFAULT_DOCUMENTS);
+    assert.equal(recovered.manifest.reason, `default-template:v${DEFAULT_TEMPLATE_VERSION}`);
+    assert.deepEqual(recovered.documents, { ...old.documents, AGENTS: DEFAULT_DOCUMENTS.AGENTS });
+    assert.deepEqual(f.definitions.readRevision(id, 1).documents, old.documents);
+    assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: "恢复后的名字" }), recovered);
   });
 }
 

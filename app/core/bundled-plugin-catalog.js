@@ -7,6 +7,23 @@ const path = require("node:path");
 const ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+const MIXPANEL_SETUP_REFERENCES = Object.freeze([
+  { link: "../mixpanelyst/references/analytical-frameworks.md",
+    target: "skills/mixpanelyst/references/analytical-frameworks.md" },
+  { link: "../mixpanelyst/references/python-api.md",
+    target: "skills/mixpanelyst/references/python-api.md" },
+]);
+
+function sourceWarnings(packagePath, item) {
+  if (item.id !== "mixpanel-headless") return [];
+  const source = "skills/setup/SKILL.md";
+  const text = fs.readFileSync(path.join(packagePath, source), "utf8");
+  const targets = MIXPANEL_SETUP_REFERENCES.filter(reference =>
+    text.includes(`](${reference.link})`)
+      && !fs.existsSync(path.join(packagePath, reference.target)))
+    .map(reference => reference.target);
+  return targets.length ? [{ code: "MISSING_OPTIONAL_LOCAL_REFERENCES", source, targets }] : [];
+}
 
 function scanPackage(root) {
   const files = [];
@@ -72,6 +89,12 @@ class BundledPluginCatalog {
         || item.details.mcpServers.length !== item.converted.mcp
         || item.details.mcpServers.some(server => typeof server?.name !== "string"
           || server.name.length > 128 || !["stdio", "streamable-http"].includes(server.type))
+        || !Array.isArray(item.details.connectionWarnings)
+        || item.details.connectionWarnings.length > item.converted.mcp
+        || item.details.connectionWarnings.some(warning => !warning
+          || typeof warning.name !== "string" || warning.name.length > 128
+          || warning.reasonCode !== "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED"
+          || !item.details.mcpServers.some(server => server.name === warning.name))
         || !Array.isArray(item.details.apps) || item.details.apps.length !== item.components.apps
         || item.details.apps.some(app => typeof app !== "string" || app.length > 128)) {
         throw new Error("Bundled plugin catalog item invalid");
@@ -112,11 +135,15 @@ class BundledPluginCatalog {
   detail(id) {
     const item = this.get(id);
     if (!item) return null;
+    // The frozen Mixpanel setup guide links to two optional local readings
+    // that were absent from the supplied source. Show the exact source gap
+    // without modifying the frozen package or treating import as business proof.
+    if (id === "mixpanel-headless") this.assertCurrent(id);
     return { id: item.id, displayName: item.displayName, shortDescription: item.shortDescription,
       category: item.category, version: item.version, iconAvailable: item.icon !== null,
       license: item.license, components: item.components, converted: item.converted,
       unconvertedMcp: item.unconvertedMcp, importStatus: item.importStatus,
-      ...item.details };
+      ...item.details, sourceWarnings: sourceWarnings(this.packagePath(id), item) };
   }
 
   packagePath(id) {

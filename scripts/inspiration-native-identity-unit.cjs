@@ -14,11 +14,18 @@ const { PROTOCOL_VERSION } = require("../app/agent-service/server");
 const { authenticateMcpSession } = require("../app/shoggoth-mcp-helper");
 const { NATIVE_BACKEND_ID } = require("../app/agent-service/native-backend-identity");
 const { isRuntimeAvailable } = require("../app/runtime-availability");
+const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
 
 test("Inspiration resolves native Agent identity through REST and authenticated Service IPC", async t => {
   const f = await openHandoffFixture({ builtinCliProfiles: true });
   const backend = new ShoggothBackend({ paths: f.paths, pollIntervalMs: 15,
-    readinessIntervalMs: 10, readinessTimeoutMs: 5000 });
+    readinessIntervalMs: 10, readinessTimeoutMs: 5000,
+    runtimeCliAuth: DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user")
+      .map(account => ({ runtime: account.runtime, runtimeAccountId: account.id,
+        name: account.runtime, binaryPath: path.join(f.root, "fixture-cli"),
+        accountHome: f.root, processHome: f.root, homeEnv: null,
+        accountKind: account.kind, credentialProbe: "runtime", credentialFile: null,
+        loginArgs: [], logoutArgs: [], docsUrl: "https://example.invalid/" })) });
   const registry = new BackendRegistry();
   registry.register(backend);
   registry.setInspirationOwner(backend);

@@ -41,6 +41,9 @@ async function main() {
     requiredScopes: ["issues:read"] });
   assert.equal((await providerA()).accessToken, "fixture-token-a");
   assert.equal((await providerB()).accessToken, "fixture-token-b");
+  await assert.rejects(auth.credentialProvider({ connectionId: "connection-a",
+    principalIdentity: "account-a", authRevision: 1, endpointIdentity,
+    audience: "other-resource" })(), { code: "CONNECTION_IDENTITY_CHANGED" });
 
   credentials.set("connection-a", { ...credentials.get("connection-a"),
     expiresAt: now + 20_000 });

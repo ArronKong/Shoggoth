@@ -73,6 +73,30 @@
   .librarySearch,
   .libraryCategory { flex: 1 1 100%; max-width: none; }
 }
+.bundledGroups { display: grid; gap: 28px; }
+.bundledGroup { min-width: 0; }
+.bundledGroupHeading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ui-hairline);
+}
+.bundledGroupHeading h2 {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: clamp(15px, 1.5vw, 18px);
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.bundledGroupHeading span {
+  color: var(--ui-text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
 .bundledGrid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 245px), 1fr));
@@ -310,6 +334,39 @@
   justify-self: start;
   margin-top: 4px;
 }
+
+.accountChoices {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: 4px 0;
+}
+
+.accountChoices > span { flex-basis: 100%; }
+
+.externalActivity { display: grid; gap: 16px; max-width: 920px; margin-top: 16px; }
+.externalApprovalList { display: grid; gap: 12px; list-style: none; padding: 0; margin: 12px 0; }
+.externalApprovalList li { display: grid; gap: 6px; min-width: 0; padding: 12px;
+  border: 1px solid var(--ui-hairline); border-radius: 12px; }
+.externalApprovalList strong { font-size: 13px; color: var(--ui-text-1); }
+.externalApprovalList span, .externalApprovalList small { font-size: 11px; color: var(--ui-text-2);
+  overflow-wrap: anywhere; }
+.externalApprovalList details { min-width: 0; }
+.externalApprovalList pre { max-height: 240px; overflow: auto; white-space: pre-wrap;
+  overflow-wrap: anywhere; direction: ltr; unicode-bidi: isolate; min-width: 0; max-width: 100%;
+  box-sizing: border-box; padding: 10px; border-radius: 8px; background: var(--ui-surface-2); }
+.externalApprovalActions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.externalHostFilter { display: grid; gap: 6px; max-width: 240px; font-size: 12px; color: var(--ui-text-2); }
+.externalHostFilter select { min-width: 0; padding: 8px 10px; border: 1px solid var(--ui-hairline);
+  border-radius: 8px; background: var(--ui-surface-1); color: var(--ui-text-1); font: inherit; }
+.externalCallList { display: grid; gap: 0; list-style: none; padding: 0; margin: 12px 0; }
+.externalCallList li { display: grid; gap: 3px; min-width: 0; padding: 10px 0;
+  border-top: 1px solid var(--ui-hairline); overflow-wrap: anywhere; }
+.externalCallList strong { font-size: 12px; color: var(--ui-text-1); }
+.externalCallList span, .externalCallList small { font-size: 11px; color: var(--ui-text-2); }
+.externalCallList details { min-width: 0; margin-top: 4px; font-size: 11px; color: var(--ui-text-2); }
+.externalCallList details small { display: block; overflow-wrap: anywhere; margin-top: 3px; }
 
 .mcpTools {
   min-width: 0;

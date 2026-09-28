@@ -21,6 +21,7 @@ const { scanInstalledClis, resolveCliVersion } = require("./cli-scanner");
 const { startProxyGateway } = require("./core/proxy-gateway");
 const { HermesBackend } = require("./core/hermes-backend");
 const { ShoggothBackend } = require("./core/shoggoth-backend");
+const { escapeInvisibleJsonCharacters } = require("./core/plugin-approval-display");
 const { BackendRegistry } = require("./core/backend-registry");
 const { OpenClawBackend, resolveOpenclawBin } = require("./core/openclaw-backend");
 const { getBootstrappedDesktopPaths } = require("./desktop-data-bootstrap");
@@ -32,6 +33,7 @@ const { createProductHostController } = require("./product-host-controller");
 const { createFederationHostServer } = require("./federation-host-server");
 const { ExternalInspirationRunner } = require("./external-inspiration-runner");
 const { createFederationMcpRegistrar } = require("./federation-mcp-registrar");
+const { createExternalPluginAdapterRegistrar } = require("./external-plugin-adapter-registrar");
 const {
   createFederatedAgentTaskRunner,
   runFederatedAgentViaBroker,
@@ -396,6 +398,24 @@ const hostOps = {
     const cleanPath = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 4096);
     const connect = summary.action === "connect";
     const oauth = summary.action === "oauth-connect";
+    if (summary.action === "external-plugin-call") {
+      const command = escapeInvisibleJsonCharacters(summary.command);
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "外部助理插件逐次审批",
+        message: "允许此工具只调用一次？",
+        detail: `来源：${clean(summary.backendId)} · ${clean(summary.agentId)}\n会话：${clean(summary.sessionId)}\n回合：${clean(summary.runId || summary.taskId)}${summary.turnId ? ` / ${clean(summary.turnId)}` : ""}\n工具调用：${clean(summary.toolCallId)}\n能力包：${clean(summary.packageName)}\n工具：${clean(summary.toolName)}\n账号连接：${clean(summary.connectionId)}（修订 ${summary.connectionAuthRevision}）\n参数 SHA-256：${clean(summary.argumentDigest)}\n\n完整参数：\n${command}\n\n仅批准此来源、会话、调用与参数。停用、撤权或账号切换会使批准失效。`,
+        buttons: ["拒绝", "允许一次"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "mcp-account-select") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "切换插件账号", message: "让所有助理改用这个插件账号？",
+        detail: `能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n目标账号：${clean(summary.account)}\n\n切换会撤销当前账号在此组件的 ${summary.grantsRevoked} 项工具授权。现有调用不会改用新账号；切换后需要为新账号重新发现并授权工具。`,
+        buttons: ["取消", "切换账号"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
     if (summary.action === "bearer-connect") {
       const result = await dialog.showMessageBox(mainWindow || undefined, {
         type: "warning", title: "连接 GitHub 插件账号", message: "验证并保存 GitHub 令牌？",
@@ -883,12 +903,9 @@ ipcMain.handle("openclaw:notify", (_event, opts) => {
   const category = typeof o.category === "string" ? o.category : "";
   if (!["chat", "cron", "task"].includes(category)) return false;
   if (!Notification.isSupported()) return false;
-  // force = the 设置 page "test notification" button: an explicit user action, so
-  // bypass both the per-category toggle and the focus suppression below.
-  const force = o.force === true;
   const prefs = readConfig().notifications || {};
-  if (!force && !prefs[category]) return false; // category toggled off
-  if (!force && mainWindow && mainWindow.isFocused()) return false; // foreground → don't interrupt
+  if (!prefs[category]) return false; // category toggled off
+  if (mainWindow && mainWindow.isFocused()) return false; // foreground → don't interrupt
   const title = typeof o.title === "string" && o.title ? o.title : "OpenClaw";
   const body = typeof o.body === "string" ? o.body : "";
   const note = new Notification({ title, body });
@@ -1001,6 +1018,15 @@ if (!gotLock) {
       hermesBin: hermesBackend.bin,
       getHermesMode: () => readConfig().hermesMode,
     });
+    const externalPluginAdapterRegistrar = createExternalPluginAdapterRegistrar({
+      paths: shoggothServicePaths,
+      resourcesRoot: app.isPackaged ? path.join(process.resourcesPath, "external-plugin-adapters")
+        : path.join(__dirname, "..", "resources", "external-plugin-adapters"),
+      packaged: app.isPackaged,
+      openclawBin: resolveOpenclawBin(),
+      hermesBin: hermesBackend.bin,
+      getHermesMode: () => readConfig().hermesMode,
+    });
     // Authentication and CLI commands are keyed by RuntimeAccount, never by
     // Agent/Profile. Native accounts point at the user's existing CLI Home;
     // resolving this catalog performs no import, copy, pnpm install, or mkdir.
@@ -1027,6 +1053,7 @@ if (!gotLock) {
       homeDir: os.userInfo().homedir,
       servicePaths: shoggothServicePaths,
       serviceVersion: APP_VERSION,
+      runtimePath: process.env.PATH,
     });
     const hostCanReload = () => !hostStopping && startupGeneration === hostGeneration;
     const reloadNativeBackends = async (stillCurrent = () => true) => {
@@ -1204,8 +1231,16 @@ if (!gotLock) {
       // 健康采样在后端预热/恢复尝试后开跑；registry.stop() 时清理定时器。
       .finally(() => {
         registry.startDashboardHealthSampler();
-        void federationMcpRegistrar.reconcile()
-          .catch(() => console.error("[federation] silent MCP registration incomplete"));
+        void (async () => {
+          try { await federationMcpRegistrar.reconcile(); }
+          catch { console.error("[federation] silent MCP registration incomplete"); }
+          try {
+            const adapters = await externalPluginAdapterRegistrar.reconcile();
+            if (Object.keys(adapters.errors || {}).length) {
+              console.error("[federation] shared plugin adapter registration incomplete");
+            }
+          } catch { console.error("[federation] shared plugin adapter registration incomplete"); }
+        })();
       });
 
     buildMenu();

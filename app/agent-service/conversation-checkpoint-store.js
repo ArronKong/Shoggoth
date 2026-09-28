@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const path = require("node:path");
+const { HistoricalMemoryAnnotations } = require("./historical-memory-annotations");
 const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 const { hasSecret } = require("./memory-engine");
@@ -15,6 +16,8 @@ const SUMMARY_FIELDS = Object.freeze([
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const validId = value => typeof value === "string" && ID.test(value);
+const validNativeSessionId = value => typeof value === "string" && value.length > 0
+  && value.length <= 512 && value.isWellFormed() && !value.includes("\0");
 const sha256 = value => crypto.createHash("sha256").update(value).digest("hex");
 function stable(value) {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -81,14 +84,133 @@ function validateCheckpoint(record) {
 }
 
 class ConversationCheckpointStore {
-  constructor({ paths, transcriptStore, now = Date.now }) {
+  constructor({ paths, transcriptStore, memoryStore = null, recallPolicy = null, now = Date.now }) {
     if (!paths?.agentsDir || !paths?.trustedRoot || !transcriptStore?.listEvents || !transcriptStore?.getRevision) {
       throw new TypeError("ConversationCheckpointStore needs Service paths and TranscriptStore");
     }
-    this.paths = paths; this.transcriptStore = transcriptStore; this.now = now; this.opened = false;
+    if (memoryStore !== null && (!memoryStore.getRevision || !memoryStore.list)) {
+      throw new TypeError("ConversationCheckpointStore needs MemoryStore revision and list");
+    }
+    if (recallPolicy !== null && (!recallPolicy.getRevision || !recallPolicy.hasRevocations)) {
+      throw new TypeError("ConversationCheckpointStore needs RecallPolicy revision and revocation status");
+    }
+    this.paths = paths; this.transcriptStore = transcriptStore; this.memoryStore = memoryStore;
+    this.recallPolicy = recallPolicy;
+    this.historicalMemory = memoryStore && recallPolicy?.getMemoryReason
+      ? new HistoricalMemoryAnnotations({ memoryStore, recallPolicy, now }) : null;
+    this.now = now; this.opened = false; this.memoryStates = new Map();
   }
   open() { ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot); this.opened = true; }
-  close() { this.opened = false; }
+  close() { this.opened = false; this.memoryStates.clear(); this.historicalMemory?.clear(); }
+  hasRevocations(profileId) { return this.recallPolicy?.hasRevocations(profileId) === true; }
+  hasHistoricalSource(profileId, events, { fromSeq = 0, throughSeq = Infinity } = {}) {
+    if (!this.historicalMemory) return false;
+    const view = this.historicalMemory.view(profileId);
+    if (!view.hasHistorical) return false;
+    const userSeqs = new Map(events.filter((event) => event.kind === "user")
+      .map((event) => [event.id, { runId: event.runId, seq: event.seq }]));
+    const sourceSeq = (eventId, runId) => {
+      const source = userSeqs.get(eventId);
+      return source?.runId === runId ? source.seq : null;
+    };
+    return events.some((event) => event.seq > fromSeq && event.seq <= throughSeq
+      && !event.contextExcluded && ["user", "assistant"].includes(event.kind)
+      && (view.forEvent(event) || view.forAssistant(event, sourceSeq)));
+  }
+  memoryState(profileId) {
+    if (!this.memoryStore) return { revision: null, freshUntil: null };
+    const revision = this.memoryStore.getRevision(profileId);
+    const cached = this.memoryStates.get(profileId);
+    if (cached?.revision === revision
+      && (cached.freshUntil === null || this.now() < cached.freshUntil)) return cached;
+    const now = this.now();
+    let freshUntil = null;
+    for (const item of this.memoryStore.list(profileId, { status: "active" })) {
+      if (item.validUntil !== null && item.validUntil > now) freshUntil = freshUntil === null
+        ? item.validUntil : Math.min(freshUntil, item.validUntil);
+    }
+    const state = { revision, freshUntil };
+    this.memoryStates.set(profileId, state);
+    return state;
+  }
+  #memoryCompatible(profileId, record) {
+    // Compaction has no per-fact provenance, so any revocation invalidates a
+    // summary and prevents it from carrying a forgotten utterance forward.
+    if (this.hasRevocations(profileId)) return false;
+    if (!this.memoryStore) return true;
+    const current = this.memoryState(profileId);
+    if (current.freshUntil !== null && this.now() >= current.freshUntil) return false;
+    const file = this.#memoryAnchorFile(profileId, record.sessionId, record.id);
+    if (!lstatIfExists(file)) return false;
+    let anchor;
+    try { anchor = JSON.parse(readPrivateFile(file, { maxBytes: 4096 })); }
+    catch { fail("CHECKPOINT_STORE_CORRUPT"); }
+    const { checksum: anchorChecksum, ...anchorBody } = anchor || {};
+    if (!exact(anchor, ["version", "profileId", "checkpointId", "memoryRevision",
+      "memoryFreshUntil", "checksum"])
+      || anchor.version !== 1 || anchor.profileId !== profileId
+      || anchor.checkpointId !== record.id || anchor.memoryRevision !== current.revision
+      || anchor.memoryFreshUntil !== current.freshUntil
+      || anchorChecksum !== sha256(stable(anchorBody))) return false;
+    return true;
+  }
+  #memoryAnchorFile(profileId, sessionId, checkpointId) {
+    return path.join(path.dirname(this.#file(profileId, sessionId)), `${checkpointId}.memory-anchor.json`);
+  }
+  #nativeMemoryAnchorFile(profileId, sessionId) {
+    return path.join(path.dirname(this.#file(profileId, sessionId)), `${sha256(sessionId)}.native-memory-anchor.json`);
+  }
+  nativeMemoryVersion(profileId) {
+    // A native Runtime retains its own conversation history. This version is
+    // independent of product checkpoints, which may never have existed.
+    if (!this.memoryStore || !this.recallPolicy) return null;
+    const memory = this.memoryState(profileId);
+    return { memoryRevision: memory.revision, memoryFreshUntil: memory.freshUntil,
+      policyRevision: this.recallPolicy.getRevision(profileId) };
+  }
+  #nativeMemoryAnchor(profileId, sessionId) {
+    const file = this.#nativeMemoryAnchorFile(profileId, sessionId);
+    if (recoverInterruptedPrivateFile(file, { trustedRoot: this.paths.trustedRoot }) === "uncertain") {
+      fail("CHECKPOINT_COMMIT_UNCERTAIN");
+    }
+    if (!lstatIfExists(file)) return null;
+    let anchor;
+    try { anchor = JSON.parse(readPrivateFile(file, { maxBytes: 4096 })); }
+    catch { fail("CHECKPOINT_STORE_CORRUPT"); }
+    const { checksum, ...body } = anchor || {};
+    if (!exact(anchor, ["version", "profileId", "sessionId", "nativeSessionId", "bindingId",
+      "memoryRevision", "memoryFreshUntil", "policyRevision", "checksum"])
+      || anchor.version !== 1 || anchor.profileId !== profileId || anchor.sessionId !== sessionId
+      || !validNativeSessionId(anchor.nativeSessionId) || !validId(anchor.bindingId)
+      || !Number.isSafeInteger(anchor.memoryRevision) || anchor.memoryRevision < 0
+      || !(anchor.memoryFreshUntil === null || Number.isSafeInteger(anchor.memoryFreshUntil)
+        && anchor.memoryFreshUntil >= 0)
+      || !Number.isSafeInteger(anchor.policyRevision) || anchor.policyRevision < 1
+      || !HASH.test(checksum) || sha256(stable(body)) !== checksum) fail("CHECKPOINT_STORE_CORRUPT");
+    return anchor;
+  }
+  nativeSessionStale(profileId, sessionId, nativeSessionId, bindingId) {
+    if (!nativeSessionId || !this.memoryStore || !this.recallPolicy) return false;
+    const anchor = this.#nativeMemoryAnchor(profileId, sessionId);
+    const current = this.nativeMemoryVersion(profileId);
+    return !anchor || anchor.nativeSessionId !== nativeSessionId || anchor.bindingId !== bindingId
+      || anchor.memoryRevision !== current.memoryRevision
+      || anchor.memoryFreshUntil !== current.memoryFreshUntil
+      || anchor.policyRevision !== current.policyRevision;
+  }
+  recordNativeSession(profileId, sessionId, nativeSessionId, bindingId, expected) {
+    if (!this.memoryStore || !this.recallPolicy) return false;
+    if (!validNativeSessionId(nativeSessionId) || !validId(bindingId)) fail();
+    const current = this.nativeMemoryVersion(profileId);
+    if (!expected || expected.memoryRevision !== current.memoryRevision
+      || expected.memoryFreshUntil !== current.memoryFreshUntil
+      || expected.policyRevision !== current.policyRevision) return false;
+    const body = { version: 1, profileId, sessionId, nativeSessionId, bindingId, ...current };
+    const anchor = { ...body, checksum: sha256(stable(body)) };
+    atomicWritePrivateFile(this.#nativeMemoryAnchorFile(profileId, sessionId), `${stable(anchor)}\n`,
+      { trustedRoot: this.paths.trustedRoot });
+    return true;
+  }
   #file(profileId, sessionId) {
     if (!this.opened) fail("CHECKPOINT_STORE_CLOSED");
     if (typeof profileId !== "string" || !ID.test(profileId) || typeof sessionId !== "string" || !ID.test(sessionId)) fail();
@@ -108,8 +230,10 @@ class ConversationCheckpointStore {
   }
   compatible(profileId, sessionId, events = this.transcriptStore.listEvents(profileId, sessionId)) {
     const record = this.get(profileId, sessionId);
-    if (!record) return null;
-    try { return coveredTranscript(events, record.partial?.seq ?? record.coveredThroughSeq).hash === record.coveredHash ? record : null; }
+    if (!record || !this.#memoryCompatible(profileId, record)) return null;
+    const throughSeq = record.partial?.seq ?? record.coveredThroughSeq;
+    if (this.hasHistoricalSource(profileId, events, { throughSeq })) return null;
+    try { return coveredTranscript(events, throughSeq).hash === record.coveredHash ? record : null; }
     catch { return null; }
   }
   generations(profileId, sessionId, events = this.transcriptStore.listEvents(profileId, sessionId)) {
@@ -122,6 +246,7 @@ class ConversationCheckpointStore {
       if (!lstatIfExists(file)) break;
       const previous = validateCheckpoint(JSON.parse(readPrivateFile(file, { maxBytes: MAX_CHECKPOINT_BYTES })));
       if (previous.id !== record.previousId || previous.profileId !== profileId || previous.sessionId !== sessionId
+        || !this.#memoryCompatible(profileId, previous)
         || coveredTranscript(events, previous.partial?.seq ?? previous.coveredThroughSeq).hash !== previous.coveredHash) break;
       record = previous;
     }
@@ -135,22 +260,42 @@ class ConversationCheckpointStore {
     if (!checkpoint || this.compatible(profileId, sessionId)) return null;
     const events = this.transcriptStore.listEvents(profileId, sessionId);
     const coverageHash = coveredTranscript(events, checkpoint.partial?.seq ?? checkpoint.coveredThroughSeq).hash;
-    const file = `${this.#file(profileId, sessionId)}.invalidation`;
+    const guarded = Boolean(this.memoryStore || this.recallPolicy);
+    const memory = this.memoryState(profileId);
+    const policyRevision = this.recallPolicy?.getRevision(profileId) ?? null;
+    const file = `${this.#file(profileId, sessionId)}.${guarded ? "memory-invalidation" : "invalidation"}`;
     if (recoverInterruptedPrivateFile(file, { trustedRoot: this.paths.trustedRoot }) === "uncertain") fail("CHECKPOINT_COMMIT_UNCERTAIN");
     if (lstatIfExists(file)) {
       const saved = JSON.parse(readPrivateFile(file, { maxBytes: 4096 }));
-      if (!saved || Object.keys(saved).sort().join() !== "bindingId,checkpointId,coverageHash,nativeSessionId,version"
-        || saved.version !== 1 || typeof saved.nativeSessionId !== "string" || typeof saved.bindingId !== "string") fail("CHECKPOINT_STORE_CORRUPT");
-      if (saved.checkpointId === checkpoint.id && saved.coverageHash === coverageHash) return saved;
+      if (!exact(saved, guarded ? ["version", "checkpointId", "coverageHash", "nativeSessionId", "bindingId",
+        "memoryRevision", "memoryFreshUntil", "policyRevision"]
+        : ["version", "checkpointId", "coverageHash", "nativeSessionId", "bindingId"])
+        || saved.version !== (guarded ? 2 : 1)
+        || typeof saved.nativeSessionId !== "string" || typeof saved.bindingId !== "string") fail("CHECKPOINT_STORE_CORRUPT");
+      if (saved.checkpointId === checkpoint.id && saved.coverageHash === coverageHash
+        && (!guarded || (saved.memoryRevision === memory.revision
+          && saved.memoryFreshUntil === memory.freshUntil
+          && saved.policyRevision === policyRevision))) return saved;
     }
     if (!nativeSessionId) return null;
-    const record = { version: 1, checkpointId: checkpoint.id, coverageHash, nativeSessionId, bindingId };
+    const record = { version: guarded ? 2 : 1, checkpointId: checkpoint.id, coverageHash,
+      nativeSessionId, bindingId,
+      ...(guarded ? { memoryRevision: memory.revision,
+        memoryFreshUntil: memory.freshUntil, policyRevision } : {}) };
     atomicWritePrivateFile(file, `${JSON.stringify(record)}\n`, { trustedRoot: this.paths.trustedRoot });
     return record;
   }
-  commit({ profileId, sessionId, expectedRevision, throughSeq, coveredHash, previousId = null, partial = null, summary, provenance }) {
+  commit({ profileId, sessionId, expectedRevision, expectedMemoryRevision = null,
+    expectedMemoryFreshUntil = null, throughSeq, coveredHash, previousId = null,
+    partial = null, summary, provenance }) {
     const file = this.#file(profileId, sessionId);
+    if (this.hasRevocations(profileId)) fail("CHECKPOINT_STALE");
+    const memory = this.memoryState(profileId);
+    if (this.memoryStore && (expectedMemoryRevision !== memory.revision
+      || expectedMemoryFreshUntil !== memory.freshUntil)) fail("CHECKPOINT_STALE");
     const events = this.transcriptStore.listEvents(profileId, sessionId);
+    if (this.hasHistoricalSource(profileId, events,
+      { throughSeq: partial?.seq ?? throughSeq })) fail("CHECKPOINT_STALE");
     const current = this.compatible(profileId, sessionId, events);
     if (current?.coveredThroughSeq === throughSeq && current.coveredHash === coveredHash
       && stable(current.partial ?? null) === stable(partial)
@@ -175,6 +320,18 @@ class ConversationCheckpointStore {
     // Immutable generations remain available for audit/restore even after the
     // latest pointer advances. An interrupted pointer commit cannot erase one.
     if (!lstatIfExists(historyFile)) atomicWritePrivateFile(historyFile, `${stable(record)}\n`, { trustedRoot: this.paths.trustedRoot });
+    if (this.memoryStore) {
+      const anchorFile = this.#memoryAnchorFile(profileId, sessionId, record.id);
+      const anchor = { version: 1, profileId, checkpointId: record.id,
+        memoryRevision: memory.revision, memoryFreshUntil: memory.freshUntil };
+      anchor.checksum = sha256(stable(anchor));
+      if (lstatIfExists(anchorFile)) {
+        let saved;
+        try { saved = JSON.parse(readPrivateFile(anchorFile, { maxBytes: 4096 })); }
+        catch { fail("CHECKPOINT_STORE_CORRUPT"); }
+        if (stable(saved) !== stable(anchor)) fail("CHECKPOINT_STALE");
+      } else atomicWritePrivateFile(anchorFile, `${stable(anchor)}\n`, { trustedRoot: this.paths.trustedRoot });
+    }
     atomicWritePrivateFile(file, `${stable(record)}\n`, { trustedRoot: this.paths.trustedRoot });
     return record;
   }

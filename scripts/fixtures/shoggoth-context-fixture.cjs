@@ -52,6 +52,7 @@ function contextFixture(options = {}) {
     snapshotStore: snapshots,
     now,
     budgets: options.budgets,
+    semanticSearch: options.semanticSearch,
   });
   const profile = {
     id: "profile-1",

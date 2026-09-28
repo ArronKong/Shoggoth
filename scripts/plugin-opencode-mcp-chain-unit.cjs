@@ -37,7 +37,8 @@ async function main() {
     },
   });
   const service = createAgentService({ paths, runtimeMcpGateIssuer: issuer, openCodeRuntimePool: pool,
-    builtinCliProfiles: true, version: "offline-opencode-chain", parentEnv: {},
+    builtinCliProfiles: true, builtinCliInstalledAccountIds: ["native-opencode-default-v1"],
+    version: "offline-opencode-chain", parentEnv: {},
     safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
       decryptString: value => value.toString() } });
   try {

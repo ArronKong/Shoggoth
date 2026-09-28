@@ -50,7 +50,7 @@ const {
   validateAgentLifecycleResult,
 } = require("../agent-service/agent-lifecycle-service-protocol");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../agent-service/product-store");
-const { DEFAULT_RUNTIME_ACCOUNTS } = require("../agent-service/runtime-account");
+const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../agent-service/runtime-account");
 const { BUILTIN_CLI_AGENT_PROFILES } = require("../agent-service/builtin-cli-profiles");
 const {
   defaultRuntimePermissionMode,
@@ -74,6 +74,8 @@ const {
 } = require("../agent-service/token-usage-protocol");
 const { collectSessionOutputArtifacts } = require("./session-output-artifacts");
 const { validatePluginManagementResult } = require("./plugin-management-dto");
+const { validateExternalPluginAuditPage } = require("./plugin-external-audit-dto");
+const { validateExternalPluginApprovalResult } = require("./plugin-external-approval-dto");
 const { validatePluginAppResult } = require("./plugin-app-dto");
 
 const SERVICE_TIMEOUT_MS = 5_000;
@@ -185,14 +187,15 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   RUNTIME_RATE_LIMITED: "模型服务限流，本次回复未完成。请稍后重试，或更换模型",
   RUNTIME_SPENDING_LIMIT_REACHED: "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试",
   RUNTIME_ACCOUNT_BLOCKED: "模型服务商返回账号受限（account blocked），请前往服务商检查账号状态；解除限制或更换可用账号后重试",
-  RUNTIME_UPSTREAM_UNAVAILABLE: "Agent 上游服务暂时不可用，请稍后重试",
+  RUNTIME_UPSTREAM_UNAVAILABLE: "模型服务暂时满载或不可用，请稍后重试，或选择其他可用模型",
   RUNTIME_SESSION_BUSY: "此原生会话仍有任务在执行，请等待任务结束或取消后再发送",
   RUNTIME_SESSION_ACCEPTANCE_UNKNOWN: "未能确认原生会话是否创建成功，已暂停自动重试以避免重复创建；请先检查 CLI 的会话记录",
   RUNTIME_TURN_ACCEPTANCE_UNKNOWN: "未能确认 CLI 是否已接受本次任务，已暂停自动重试以避免重复执行；请先检查原生会话的执行结果",
   RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED: "原生会话历史不足以确认任务执行状态，已暂停恢复以避免重复执行",
   RUNTIME_MODEL_CATALOG_UNAVAILABLE: "暂时无法读取当前账号的模型列表，请检查 CLI 登录和网络后重试",
   RUNTIME_MODEL_CATALOG_INVALID: "CLI 返回的模型列表无法识别，请检查 CLI 与 App 的版本兼容性",
-  RUNTIME_MODEL_UNAVAILABLE: "当前账号无法使用所选模型，请检查登录状态或选择可用模型",
+  RUNTIME_MODEL_UNAVAILABLE: "当前账号或登录方式不支持所选模型，请选择其他可用模型",
+  RUNTIME_MODEL_SETTINGS_INVALID: "所选模型不支持当前推理档位或服务档位，请调整会话模型设置后重试",
   GROK_ACP_OUTBOUND_FRAME_TOO_LARGE: "消息或附件超过 Grok CLI 的传输大小限制，本次消息未发送；请缩小附件或减少内容后重试",
   GROK_ACP_REQUEST_TIMEOUT: "Grok CLI 响应超时，未自动重放；请检查原生会话结果后决定是否重试",
   GROK_ACP_WRITE_FAILED: "写入 Grok CLI 时连接中断，尚无法确认完整执行结果；请检查原生会话记录",
@@ -216,7 +219,7 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   CODEX_RUNTIME_VERSION_MISMATCH: "Codex CLI 版本与当前 App 不兼容，请检查 CLI 与 App 版本",
   CODEX_RUNTIME_VERSION_PROBE_FAILED: "无法读取 Codex CLI 版本，请检查本机安装与执行权限",
   CODEX_SCHEMA_ERROR: "Codex 协议校验失败，请检查 CLI 与 App 的版本兼容性",
-  RUNTIME_TURN_FAILED: "Agent 本次任务执行失败，请重试；若持续失败，请在「设置」中检查登录状态",
+  RUNTIME_TURN_FAILED: "Agent 本次任务执行失败，请查看原生会话的错误原因后决定是否重试",
   RUNTIME_TURN_OUTCOME_UNKNOWN: "原生 CLI 尚未确认本次任务的最终结果，已停止等待；请先检查原生会话记录，避免重复执行",
   RUNTIME_START_FAILED: "启动 Agent Runtime 失败，请重试；若持续失败，请检查 CLI 安装与登录状态",
   RUNTIME_START_RUNTIME_ACQUIRE_FAILED: "获取 Agent Runtime 失败，请重试",
@@ -227,7 +230,7 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   RUNTIME_START_SESSION_START_OR_RESUME_FAILED: "创建或恢复 Agent 会话失败，请重试",
   RUNTIME_START_TURN_START_FAILED: "发送本次任务失败；为避免重复执行，未自动重放",
   CODEX_START_FAILED: "启动 Codex Runtime 失败，请重试",
-  CODEX_TURN_FAILED: "Codex 本次任务执行失败，请重试；若持续失败，请在「设置」中检查登录状态",
+  CODEX_TURN_FAILED: "Codex 本次任务执行失败，请查看原生会话的错误原因后决定是否重试",
   CODEX_START_RUNTIME_ACQUIRE_FAILED: "获取 Agent Runtime 失败，请重试",
   CODEX_START_PROCESS_SPAWN_FAILED: "启动 Codex 进程失败，请重试或检查安装完整性",
   CODEX_START_BOOTSTRAP_ROLE_FAILED: "启动 Shoggoth Helper 失败，请重试或重启 App",
@@ -241,8 +244,10 @@ const CHAT_REQUEST_MESSAGES = Object.freeze({
   ...require("../agent-service/runtime-selection-policy").RUNTIME_POLICY_MESSAGES,
   ...SESSION_RUNTIME_PUBLIC_MESSAGES,
   NATIVE_RUNTIME_DISABLED: "该运行环境已停用，请在设置中恢复后再执行任务",
+  RUNTIME_NOT_INSTALLED: "该本机 CLI 尚未安装或不可执行，请先安装后再连接",
   ...AGENT_BINDING_PUBLIC_MESSAGES,
   ...NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES,
+  MEMORY_CANDIDATE_COMMIT_UNCERTAIN: AGENT_HARNESS_PUBLIC_MESSAGES.MEMORY_CANDIDATE_COMMIT_UNCERTAIN,
   CUSTOM_ENDPOINT_REJECTED: "端点操作失败，请检查配置、当前任务和本机 Service 后重试。",
   ...INSPIRATION_PUBLIC_MESSAGES,
   RUNTIME_AUTH_REQUIRED: CHAT_PUBLIC_MESSAGES.RUNTIME_AUTH_REQUIRED,
@@ -261,6 +266,7 @@ const PUBLIC_SERVICE_ERROR_CODES = new Set([
   ...Object.keys(require("../agent-service/runtime-selection-policy").RUNTIME_POLICY_MESSAGES),
   ...Object.keys(SESSION_RUNTIME_PUBLIC_MESSAGES),
   "NATIVE_RUNTIME_DISABLED",
+  "RUNTIME_NOT_INSTALLED",
   ...Object.keys(AGENT_BINDING_PUBLIC_MESSAGES),
   ...Object.keys(NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES),
   "CUSTOM_ENDPOINT_REJECTED",
@@ -938,6 +944,10 @@ function validateServiceResult(method, value, params) {
     if (method === "plugins.capabilities.list") {
       return validatePluginCatalogPage(value, params);
     }
+    if (method === "plugins.external.calls.list") return validateExternalPluginAuditPage(value);
+    if (method.startsWith("plugins.external.approvals.")) {
+      return validateExternalPluginApprovalResult(method, value);
+    }
     if (method === "plugins.bundled.list") return validateBundledPluginList(value);
     if (method.startsWith("plugins.apps.")) return validatePluginAppResult(method, value);
     if (method.startsWith("plugins.oauth.")) return require("./plugin-oauth-dto").validatePluginOAuthResult(method, value);
@@ -963,7 +973,7 @@ function validateServiceResult(method, value, params) {
       return validateProfileServiceResult(method, value);
     }
     if (AGENT_HARNESS_METHOD_SET.has(method)) {
-      return validateAgentHarnessResult(method, value);
+      return validateAgentHarnessResult(method, value, params);
     }
     if (method === "usage.series") return validateUsageSeries(value);
     if (method === "usage.breakdown") return validateUsageBreakdown(value);
@@ -1339,18 +1349,27 @@ class ShoggothBackend extends AgentBackend {
   _bindingAvailability(agentId, runtime, runtimeAccountId) {
     let disabled;
     try { disabled = this._getDisabledBackendIds?.() || []; } catch { disabled = []; }
+    const account = DEFAULT_RUNTIME_ACCOUNTS.find((entry) => entry.id === runtimeAccountId);
     return !isRuntimeAvailable(runtime) ? { available: false, reason: "runtime-unavailable" }
       : isNativeBindingDisabled(agentId, runtime, disabled, runtimeAccountId) ? { available: false, reason: "runtime-disabled" }
+        : account?.kind === "native-user" && !this.runtimeCliAuth.get(runtimeAccountId)?.binaryPath
+          ? { available: false, reason: "runtime-not-installed" }
         : { available: true, reason: null };
   }
 
   _assertRuntimeEnabled(profile, runtime = profile.runtime) {
-    if (!this._bindingAvailability(profile.agentId, runtime, profile.runtimeAccountId).available) throw safeError(null, "NATIVE_RUNTIME_DISABLED");
+    const availability = this._bindingAvailability(profile.agentId, runtime, profile.runtimeAccountId);
+    if (!availability.available) throw safeError(null,
+      availability.reason === "runtime-not-installed" ? "RUNTIME_NOT_INSTALLED" : "NATIVE_RUNTIME_DISABLED");
+  }
+
+  async _refreshRuntimeCliAuth() {
+    if (this.getRuntimeCliAuth) this.runtimeCliAuth = normalizeRuntimeCliAuth(await this.getRuntimeCliAuth());
+    return this.runtimeCliAuth;
   }
 
   async _connectedCliAccounts() {
-    const descriptors = this.getRuntimeCliAuth
-      ? normalizeRuntimeCliAuth(await this.getRuntimeCliAuth()) : this.runtimeCliAuth;
+    const descriptors = await this._refreshRuntimeCliAuth();
     return DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user"
       && descriptors.get(account.id)?.binaryPath
       && this._bindingAvailability("", account.runtime, account.id).available).map(account => account.id);
@@ -1381,8 +1400,7 @@ class ShoggothBackend extends AgentBackend {
   async getRuntimeStatuses() {
     // Resolve the executables again on an explicit settings refresh so a newly
     // installed CLI is visible without restarting. Do not launch auth probes.
-    const descriptors = this.getRuntimeCliAuth
-      ? normalizeRuntimeCliAuth(await this.getRuntimeCliAuth()) : this.runtimeCliAuth;
+    const descriptors = await this._refreshRuntimeCliAuth();
     const serviceConnected = await this.getStatus().then(status => status.connected === true, () => false);
     let disabled = [];
     try { disabled = this._getDisabledBackendIds?.() || []; } catch { /* configuration unavailable */ }
@@ -1427,7 +1445,8 @@ class ShoggothBackend extends AgentBackend {
           state: "started",
           agents: this._agents.length,
           sessions: this._rows.length,
-          readyAgentIds: this._statusUncertain ? [] : this._agents.map((agent) => agent.id),
+          readyAgentIds: this._statusUncertain ? [] : this._agents.filter((agent) =>
+            this._bindingAvailability(agent.id, agent.runtime, agent.runtimeAccountId).available).map((agent) => agent.id),
           ...(this._statusUncertain ? { cacheStale: true } : {}),
         },
       };
@@ -1511,6 +1530,10 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async getStatus() {
+    if (this._state === "started") {
+      try { await this._refreshRuntimeCliAuth(); }
+      catch { this.runtimeCliAuth = new Map(); }
+    }
     if (this._state === "started") {
       const generation = this._generation;
       const ready = await this._refreshStartedStatus(generation);
@@ -2103,16 +2126,17 @@ class ShoggothBackend extends AgentBackend {
     const bindings = await this.getAgentRuntimeBindings(id);
     const selection = await this._sessionRuntimeRequest("chat.session.runtime.state", id, key);
     const accounts = new Set(await this._connectedCliAccounts());
-    const connectedRuntimes = new Set(DEFAULT_RUNTIME_ACCOUNTS.filter(account => accounts.has(account.id)).map(account => account.runtime));
+    accounts.add(SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
     const names = new Map(require("../runtime-cli-auth").AUTH_SPECS.map(spec => [spec.runtimeAccountId, spec.name]));
     const candidates = bindings.bindings.filter(binding => binding.enabled
       && this._bindingAvailability(id, binding.runtime, binding.runtimeAccountId).available
-      && connectedRuntimes.has(binding.runtime));
+      && accounts.has(binding.runtimeAccountId));
     // Prefer the conversation's existing Binding for duplicate runtime/accounts;
     // historical Binding rows remain durable but never create duplicate options.
     candidates.sort((a, b) => Number(b.id === selection.bindingId) - Number(a.id === selection.bindingId)
       || Number(b.id === bindings.defaultBindingId) - Number(a.id === bindings.defaultBindingId));
-    const unique = candidates.filter((binding, index) => candidates.findIndex(entry => entry.runtime === binding.runtime) === index);
+    const unique = candidates.filter((binding, index) => candidates.findIndex(entry =>
+      entry.runtimeAccountId === binding.runtimeAccountId) === index);
     unique.sort((a, b) => DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === a.runtime)
       - DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === b.runtime));
     const groups = await mapBounded(unique, 3, async binding => {
@@ -2121,14 +2145,14 @@ class ShoggothBackend extends AgentBackend {
       try {
         const models = await this._page("profile.binding.models.list", { profileId: profile.id, bindingId: binding.id }, "models",
           { maxBytes: MAX_HISTORY_BYTES, maxItems: 512 });
-        return { runtime: binding.runtime, name: runtimeName, available: true, capabilities, models: models.map(model => ({
+        return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: true, capabilities, models: models.map(model => ({
           id: model.id, name: model.displayName, backendId: this.id, provider: binding.runtime === "codex" ? profile.providerRef || binding.runtime : binding.runtime,
           runtime: binding.runtime, runtimeName, bindingId: binding.id, isDefault: model.isDefault,
           ...(model.capabilities ? { thinkingOptions: model.capabilities.thinkingOptions,
             thinkingDefault: model.capabilities.thinkingDefault, reasoning: model.capabilities.thinkingOptions.length > 0,
             fast: model.capabilities.fastTier !== null } : {}),
         })) };
-      } catch { return { runtime: binding.runtime, name: runtimeName, available: false, capabilities, models: [] }; }
+      } catch { return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: false, capabilities, models: [] }; }
     });
     const currentBinding = bindings.bindings.find(binding => binding.id === selection.bindingId);
     return { selection, models: groups.flatMap(group => group.models),
@@ -2145,10 +2169,6 @@ class ShoggothBackend extends AgentBackend {
     const binding = bindings.bindings.find(entry => entry.id === input.bindingId);
     if (!binding) throw safeError(null, "AGENT_BINDING_NOT_FOUND");
     this._assertRuntimeEnabled({ agentId: id, ...binding });
-    const accounts = await this._connectedCliAccounts();
-    if (!DEFAULT_RUNTIME_ACCOUNTS.some(account => accounts.includes(account.id) && account.runtime === binding.runtime)) {
-      throw safeError(null, "RUNTIME_NOT_INSTALLED");
-    }
     return this._sessionRuntimeRequest("chat.session.runtime.model.set", id, key, input);
   }
   async switchSessionRuntime(id, key, input) {
@@ -2163,9 +2183,6 @@ class ShoggothBackend extends AgentBackend {
   }
 
   _assertSessionRuntimeEnabled(target) {
-    let disabled;
-    try { disabled = this._getDisabledBackendIds?.() || []; } catch { disabled = []; }
-    if (!disabled.length) return;
     return (async () => {
       const sessionRuntime = await this._call("chat.session.runtime.get", { profileId: target.profile.id, sessionKey: target.sessionKey });
       const bindings = await this.getAgentRuntimeBindings(target.profile.agentId);
@@ -2253,6 +2270,31 @@ class ShoggothBackend extends AgentBackend {
     };
   }
 
+  async explainAgentMemory(id, memoryId) {
+    const profile = this._profileForManagedAgent(id);
+    return this._call("harness.memory.explain", { profileId: profile.id, id: memoryId });
+  }
+
+  async listAgentMemoryCandidates(id, options = {}) {
+    const profile = this._profileForManagedAgent(id);
+    return {
+      supported: true,
+      ...(await this._call("harness.memory.candidates.list", {
+        profileId: profile.id, status: options.status || "pending",
+        cursor: options.cursor || 0, limit: options.limit || 50,
+        expectedRevision: options.expectedRevision ?? null,
+      })),
+    };
+  }
+
+  async mutateAgentMemoryCandidate(id, action, input) {
+    const profile = this._profileForManagedAgent(id);
+    if (!["accept", "acceptMany", "reject"].includes(action)) throw safeError(null, "INVALID_PARAMS");
+    return this._call(`harness.memory.candidates.${action}`, {
+      ...input, profileId: profile.id,
+    });
+  }
+
   async mutateAgentMemory(id, action, input) {
     const profile = this._profileForManagedAgent(id);
     if (!["create", "confirm", "update", "delete"].includes(action)) throw safeError(null, "INVALID_PARAMS");
@@ -2325,6 +2367,56 @@ class ShoggothBackend extends AgentBackend {
     }
   }
 
+  async getPluginExternalCalls({ backendId = null, agentId = null, sessionId = null,
+    toolCallId = null, cursor = null, limit = 10 } = {}) {
+    if (backendId !== null && !["openclaw", "hermes"].includes(backendId)) {
+      throw safeError(null, "INVALID_PARAMS");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20
+      || (cursor !== null && (!exactObject(cursor, ["createdAt", "callId"])
+        || !Number.isSafeInteger(cursor.createdAt) || cursor.createdAt < 0
+        || typeof cursor.callId !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(cursor.callId)))) {
+      throw safeError(null, "INVALID_PARAMS");
+    }
+    const scoped = agentId !== null || sessionId !== null || toolCallId !== null;
+    const opaque = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+    if (scoped && (backendId === null || ![agentId, sessionId, toolCallId].every(value =>
+      typeof value === "string" && opaque.test(value))
+      || Buffer.byteLength(agentId, "utf8") > 128
+      || Buffer.byteLength(sessionId, "utf8") > 256
+      || Buffer.byteLength(toolCallId, "utf8") > 256)) throw safeError(null, "INVALID_PARAMS");
+    return this._call("plugins.external.calls.list", {
+      backendId, agentId, sessionId, toolCallId, cursor, limit });
+  }
+
+  async getExternalPluginApprovals({ backendId = null, cursor = null, limit = 2 } = {}) {
+    if (backendId !== null && !["openclaw", "hermes"].includes(backendId)) {
+      throw safeError(null, "INVALID_PARAMS");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 2
+      || (cursor !== null && (!exactObject(cursor, ["offset", "revision"])
+        || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0
+        || !Number.isSafeInteger(cursor.revision) || cursor.revision < 1))) {
+      throw safeError(null, "INVALID_PARAMS");
+    }
+    return this._call("plugins.external.approvals.list", { backendId, cursor, limit });
+  }
+
+  async prepareExternalPluginApproval({ requestId, operationId, decision }) {
+    const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+    if (!id.test(requestId) || !id.test(operationId) || !["once", "deny"].includes(decision)) {
+      throw safeError(null, "INVALID_PARAMS");
+    }
+    return this._call("plugins.external.approvals.prepare", { requestId, operationId, decision });
+  }
+
+  async commitExternalPluginApproval({ challenge, approved }) {
+    if (typeof challenge !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(challenge)
+      || typeof approved !== "boolean") throw safeError(null, "INVALID_PARAMS");
+    return this._call("plugins.external.approvals.commit", { challenge, approved });
+  }
+
   async previewPluginInstall(source) {
     return this._call("plugins.install.preview", { source });
   }
@@ -2373,6 +2465,15 @@ class ShoggothBackend extends AgentBackend {
     return this._call("plugins.connections.prepare", { ...request, profileId: profile.id });
   }
   async commitPluginDisconnect(input) { return this._call("plugins.connections.commit", input); }
+  async preparePluginAccountSelection(input) {
+    const profile = this._profilesByAgent.get(input.agentId);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    const { agentId, ...request } = input;
+    return this._call("plugins.connections.selectPrepare", { ...request, profileId: profile.id });
+  }
+  async commitPluginAccountSelection(input) {
+    return this._call("plugins.connections.selectCommit", input);
+  }
   async getPluginDisconnectOperation(agentId, operationId) {
     const profile = this._profilesByAgent.get(agentId);
     if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
@@ -2521,6 +2622,40 @@ class ShoggothBackend extends AgentBackend {
       registryVersion: value.registryVersion,
       profileRevision: value.profileRevision,
     }));
+  }
+
+  async getSkillsPage(options = {}) {
+    const profile = this._profileForSkills(options);
+    const result = await this._call("harness.skills.query", {
+      profileId: profile.id,
+      query: options.query ?? "",
+      status: options.status ?? "",
+      pageIndex: options.pageIndex ?? 0,
+      limit: options.limit ?? 100,
+      expectedRevision: options.expectedRevision ?? null,
+    });
+    const { items, ...page } = result;
+    return { supported: true, ...page, skills: items };
+  }
+
+  async getDisabledStandaloneMcpPage(options = {}) {
+    const profile = this._profileForSkills(options);
+    return this._call("harness.mcp.list", { profileId: profile.id,
+      cursor: options.cursor ?? 0, limit: options.limit ?? 20 });
+  }
+
+  async rebindStandaloneMcp(options = {}) {
+    const profile = this._profileForSkills(options);
+    return this._call("harness.mcp.rebind", { profileId: profile.id,
+      id: options.id, expectedRevision: options.expectedRevision,
+      command: options.command, cwd: options.cwd, args: options.args });
+  }
+
+  async activateStandaloneMcp(options = {}) {
+    const profile = this._profileForSkills(options);
+    return this._call("harness.mcp.activate", { profileId: profile.id,
+      id: options.id, expectedRevision: options.expectedRevision,
+      activationToken: options.activationToken });
   }
 
   _resolveNativeSkill(items, name, identity = {}) {
@@ -5345,17 +5480,21 @@ class ShoggothBackend extends AgentBackend {
     const profile = this._profilesByAgent.get(agentId);
     if (!profile) throw safeError(null, "BACKEND_NOT_READY");
     let workspace = options?.workspace;
-    if (workspace === undefined && typeof options?.parentSessionKey === "string") {
-      const parent = this._sessionTarget(options.parentSessionKey);
+    let parent = null;
+    if (options?.parentSessionKey !== undefined) {
+      parent = this._sessionTarget(options.parentSessionKey);
       if (parent.agentId !== agentId) throw safeError(null, "CHAT_SESSION_INVALID");
-      workspace = parent.session.workspace;
-      if (isImplicitChatWorkspace(this.paths, profile, workspace)) workspace = null;
+      if (workspace === undefined) {
+        workspace = parent.session.workspace;
+        if (isImplicitChatWorkspace(this.paths, profile, workspace)) workspace = null;
+      }
     }
     const result = await this._call("chat.session.create", {
       operationId: `create-${this.randomUUID()}`,
       profileId: profile.id,
       workspace: workspace ?? null,
       createdAt: this.now(),
+      ...(parent ? { parentSessionKey: parent.sessionKey } : {}),
     });
     if (result.session.profileId !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
     this._upsertSession(profile, result.session);

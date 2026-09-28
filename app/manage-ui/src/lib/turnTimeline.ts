@@ -60,6 +60,7 @@ export type ToolCategory = "gather" | "read" | "execute" | "message" | "workboar
 
 export interface TurnStep {
   id: string;
+  toolCallId?: string; // exact host call identity; never infer from tool name/position
   kind: StepKind;
   status: StepStatus;
   startTs: number; // 该步首个事件的客户端时钟(剧本里是虚拟时钟)
@@ -383,6 +384,7 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
           ...steps,
           {
             id,
+            toolCallId: ev.toolCallId,
             kind: "tool",
             status: "running",
             startTs: ts,
@@ -568,6 +570,7 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
       const name = p.toolName?.trim() || "tool";
       const st: TurnStep = {
         id: `h${n++}`,
+        toolCallId: p.toolCallId,
         kind: "tool",
         status: "running",
         startTs: ts,
@@ -586,7 +589,7 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
       if (st) { const index = open.indexOf(st); if (index >= 0) open.splice(index, 1); }
       if (!st) {
         const name = p.toolName?.trim() || "tool";
-        st = { id: `h${n++}`, kind: "tool", status: "running", startTs: ts, toolName: name, canonicalName: canonicalToolName(name), category: categorizeTool(name) };
+        st = { id: `h${n++}`, toolCallId: p.toolCallId, kind: "tool", status: "running", startTs: ts, toolName: name, canonicalName: canonicalToolName(name), category: categorizeTool(name) };
         steps.push(st);
       } else if (p.toolName?.trim() && st.toolName === "tool") {
         st.toolName = p.toolName;

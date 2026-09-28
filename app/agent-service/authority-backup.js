@@ -9,6 +9,8 @@ const {
   lstatIfExists,
   serviceError,
 } = require("./security");
+const { validateCanonicalOwnedDirectory } = require("./runtime-storage-inspector");
+const { readPrivateFile, validatePrivateStat } = require("./private-file");
 
 const BACKUP_SCHEMA_VERSION = 1;
 const MAX_BACKUP_MANIFEST_BYTES = 16 * 1024 * 1024;
@@ -28,6 +30,7 @@ const RETIRED_RUNTIME_HOME_ROOTS = new Set([
 ]);
 const MANAGED_CODEX_BACKUP_FILES = new Set(["auth.json", "config.toml", ".shoggoth-native-auth.json"]);
 const OPAQUE_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const RECALL_PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 
 function backupError(code, message) {
   return serviceError(code, message);
@@ -115,7 +118,9 @@ function portablePath(relativePath) {
 function minimalAuthorityPathDisposition(relativePath) {
   const parts = relativePath.split(path.sep);
   const [root] = parts;
-  if (root === "plugins" && parts[1] === "staging") return "exclude";
+  if (root === "agents" && parts.length === 3
+    && /^native-memory-semantic\.sqlite(?:-(?:wal|shm|journal))?$/u.test(parts[2])) return "exclude";
+  if ((root === "plugins" || root === "skills") && parts[1] === "staging") return "exclude";
   if (root === "runtime-integration") return "exclude";
   if (["legacy-runtime-homes", "native-runtime-imports"].includes(root)
     || RETIRED_RUNTIME_HOME_ROOTS.has(root)) return "exclude";
@@ -593,8 +598,365 @@ function verifyAuthorityBackup(options) {
   return verifyBackup(options);
 }
 
+function recallPolicyProfileIds(stateRoot, trustedRoot) {
+  const agentsDir = path.join(stateRoot, "agents");
+  if (!lstatIfExists(agentsDir)) return new Set();
+  validateCanonicalOwnedDirectory(agentsDir, { trustedRoot });
+  const ids = new Set();
+  const installationDir = path.join(agentsDir, ".recall-policy-installations");
+  if (lstatIfExists(installationDir)) {
+    validateCanonicalOwnedDirectory(installationDir, { trustedRoot });
+    for (const name of fs.readdirSync(installationDir)) {
+      if (!name.endsWith(".json") || !RECALL_PROFILE_ID_PATTERN.test(name.slice(0, -5))) {
+        throw backupError("BACKUP_RECALL_POLICY_UNSAFE", "撤回账本安装目录包含未识别的文件");
+      }
+      ids.add(name.slice(0, -5));
+    }
+  }
+  for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+    if (!RECALL_PROFILE_ID_PATTERN.test(entry.name)) continue;
+    const profileDir = path.join(agentsDir, entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw backupError("BACKUP_RECALL_POLICY_UNSAFE", "撤回账本 Profile 目录不安全");
+    }
+    const memoryDir = path.join(profileDir, "memory");
+    if (lstatIfExists(path.join(profileDir, "recall-policy-installed.json"))
+      || lstatIfExists(path.join(memoryDir, "recall-policy.jsonl"))
+      || lstatIfExists(path.join(memoryDir, "recall-policy.seal.json"))) ids.add(entry.name);
+  }
+  return ids;
+}
+
+function readRecallPolicyForRestore(stateRoot, trustedRoot, profileId) {
+  const { RecallPolicyStore } = require("./recall-policy-store");
+  const store = new RecallPolicyStore({ paths: { agentsDir: path.join(stateRoot, "agents"), trustedRoot },
+    memoryStore: null });
+  const targets = store._paths(profileId);
+  const state = store._read(profileId, targets);
+  return { targets, state, checksums: state.records.map((record) => record.checksum),
+    identities: [state.identity, state.sealIdentity, state.markerIdentity, state.installationIdentity] };
+}
+
+function stableMemoryJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableMemoryJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableMemoryJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function readMemoryJournalForRestore(stateRoot, profileId) {
+  const target = path.join(stateRoot, "agents", profileId, "memory", "events.jsonl");
+  const stat = lstatIfExists(target);
+  if (!stat) return null;
+  validatePrivateStat(stat, target);
+  const bytes = readPrivateFile(target, { maxBytes: 256 * 1024 * 1024 });
+  if (bytes.length && bytes.at(-1) !== 0x0a) {
+    throw backupError("BACKUP_MEMORY_UNSAFE", "主记忆 journal 尾部不完整");
+  }
+  const { validateMemoryItem } = require("./memory-store");
+  const items = new Map();
+  const proofs = new Map();
+  const lines = bytes.length ? bytes.toString("utf8").slice(0, -1).split("\n") : [];
+  for (let index = 0; index < lines.length; index += 1) {
+    let record;
+    try { record = JSON.parse(lines[index]); }
+    catch { throw backupError("BACKUP_MEMORY_UNSAFE", "主记忆 journal 无效"); }
+    const { checksum, ...body } = record || {};
+    if (record?.schemaVersion !== 1 || record.seq !== index + 1 || record.type !== "memory.batch"
+      || Object.keys(record).length !== 5 || !Array.isArray(record.items)
+      || record.items.length < 1 || record.items.length > 128
+      || !SHA256_PATTERN.test(checksum)
+      || crypto.createHash("sha256").update(stableMemoryJson(body)).digest("hex") !== checksum) {
+      throw backupError("BACKUP_MEMORY_UNSAFE", "主记忆 journal 校验失败");
+    }
+    for (const raw of record.items) {
+      let item;
+      try { item = validateMemoryItem(raw, profileId); }
+      catch { throw backupError("BACKUP_MEMORY_UNSAFE", "主记忆 journal item 无效"); }
+      items.set(item.id, item);
+      proofs.set(item.id, { seq: record.seq, checksum });
+    }
+  }
+  return { target, digest: crypto.createHash("sha256").update(bytes).digest("hex"), items, proofs };
+}
+
+function originalSourceRefs(item) {
+  return item.sourceRefs.filter((ref) => !/^(?:workspace:|user-edit:|codex-memory:)/u.test(ref));
+}
+
+function assertRestoredActiveMemoryDoesNotWiden(sourceItem, backupItem) {
+  const sensitivityRank = { normal: 0, private: 1, restricted: 2 };
+  const sourceRefs = [...sourceItem.sourceRefs].sort();
+  const backupRefs = [...backupItem.sourceRefs].sort();
+  if (sourceItem.content !== backupItem.content || sourceItem.scope !== backupItem.scope
+    || sourceItem.type !== backupItem.type || JSON.stringify(sourceRefs) !== JSON.stringify(backupRefs)
+    || backupItem.validFrom < sourceItem.validFrom
+    || (sourceItem.validUntil !== null
+      && (backupItem.validUntil === null || backupItem.validUntil > sourceItem.validUntil))
+    || sensitivityRank[backupItem.sensitivity] < sensitivityRank[sourceItem.sensitivity]) {
+    throw backupError("BACKUP_MEMORY_DIVERGED", "备份将放宽当前记忆的来源、有效期或敏感度");
+  }
+}
+
+function assertRestoredMemoryDoesNotReviveSource(stateRoot, stagingRoot, sourcePolicies, trustedRoot) {
+  const agentsDir = path.join(stateRoot, "agents");
+  if (!lstatIfExists(agentsDir)) return [];
+  validateCanonicalOwnedDirectory(agentsDir, { trustedRoot });
+  const checked = [];
+  const { hashContent } = require("./recall-policy-store");
+  for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+    if (!RECALL_PROFILE_ID_PATTERN.test(entry.name) || !entry.isDirectory()) continue;
+    const profileId = entry.name;
+    const source = readMemoryJournalForRestore(stateRoot, profileId);
+    const backup = readMemoryJournalForRestore(stagingRoot, profileId);
+    if (!source) {
+      if (backup?.items.size) {
+        throw backupError("BACKUP_MEMORY_DIVERGED", "备份将恢复当前源没有的主记忆 journal");
+      }
+      continue;
+    }
+    checked.push({ profileId, target: source.target, digest: source.digest });
+    if (!backup || source.digest === backup.digest) continue;
+    const policy = sourcePolicies.get(profileId)?.state;
+    for (const [id, backupItem] of backup.items) {
+      const sourceItem = source.items.get(id);
+      if (!sourceItem) {
+        if (backupItem.status === "active") {
+          throw backupError("BACKUP_MEMORY_DIVERGED", "备份将复活当前源不存在的 active 记忆");
+        }
+        continue;
+      }
+      if (!["active", "deleted"].includes(sourceItem.status) && backupItem.status === "active") {
+        throw backupError("BACKUP_MEMORY_DIVERGED", "备份将恢复当前未激活的旧记忆");
+      }
+      if (sourceItem.status === "active" && backupItem.status === "active") {
+        assertRestoredActiveMemoryDoesNotWiden(sourceItem, backupItem);
+      }
+      if (sourceItem.status !== "deleted") continue;
+      const sourceProof = source.proofs.get(id);
+      const backupProof = backup.proofs.get(id);
+      if (backupItem.status === "deleted"
+        && sourceProof.seq === backupProof.seq && sourceProof.checksum === backupProof.checksum) continue;
+      const sourceHash = hashContent(sourceItem.content);
+      const matching = (policy?.byMemory.get(id) || []).filter((record) => (
+        record.memoryId === id && record.contentHash === sourceHash
+        || record.related?.some((related) => related.memoryId === id && related.contentHash === sourceHash)));
+      const suppressed = matching.some((record) => ["forgotten", "user_deleted", "legacy_unknown"].includes(record.reason));
+      if (suppressed && originalSourceRefs(backupItem).some((ref) => !policy.suppressedRefs.has(ref))) {
+        throw backupError("BACKUP_RECALL_POLICY_UNCOVERED_SOURCE",
+          "备份含当前撤回账本未覆盖的原话来源，不能恢复旧快照");
+      }
+      const expired = matching.some((record) => {
+        if (record.reason !== "expired") return false;
+        const proof = policy.expiryCommits.get(record.operationId);
+        return proof?.primarySeq === sourceProof.seq && proof.primaryChecksum === sourceProof.checksum;
+      });
+      if (!suppressed && expired && backupItem.status === "active") {
+        assertRestoredActiveMemoryDoesNotWiden(sourceItem, backupItem);
+      }
+      if (!suppressed && !expired) {
+        throw backupError("BACKUP_RECALL_POLICY_UNCOVERED_DELETION",
+          "当前源存在未纳入撤回账本的删除，不能恢复旧快照");
+      }
+    }
+  }
+  return checked;
+}
+
+function reconcileRestoredMemory(stagingRoot, trustedRoot) {
+  // Make revocations durable in the primary journal before publication. An
+  // older App ignores the policy ledger and would otherwise read old active
+  // items until the newer App first opened the restored state.
+  const { resolveServicePaths } = require("./paths");
+  const { MemoryStore } = require("./memory-store");
+  const { RecallPolicyStore, normalizeContent } = require("./recall-policy-store");
+  const canonicalRoot = fs.realpathSync(trustedRoot);
+  const canonicalStaging = path.join(canonicalRoot, path.relative(trustedRoot, stagingRoot));
+  const paths = resolveServicePaths({ stateRoot: canonicalStaging, trustedRoot: canonicalRoot });
+  const profileIds = recallPolicyProfileIds(canonicalStaging, canonicalRoot);
+  const agentsDir = path.join(canonicalStaging, "agents");
+  if (lstatIfExists(agentsDir)) {
+    for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+      if (RECALL_PROFILE_ID_PATTERN.test(entry.name)
+        && lstatIfExists(path.join(agentsDir, entry.name, "memory", "events.jsonl"))) {
+        profileIds.add(entry.name);
+      }
+    }
+  }
+  const memoryStore = new MemoryStore({ paths });
+  const policyStore = new RecallPolicyStore({ paths, memoryStore });
+  memoryStore.open();
+  try {
+    policyStore.open();
+    const orderedProfiles = [...profileIds].sort();
+    for (const profileId of orderedProfiles) policyStore.assertReady(profileId);
+    let deleted = 0;
+    for (const profileId of orderedProfiles) {
+      const state = policyStore.assertReady(profileId);
+      const hidden = [];
+      for (const item of memoryStore.list(profileId, { status: "active" })) {
+        const visible = policyStore.isMemoryVisible(profileId, item);
+        if (visible && state.contentCutoffs.has(normalizeContent(item.content))) {
+          // The staging reconciliation has no verified live user source with
+          // which to prove an apparent reauthorization. Refuse the restore.
+          throw backupError("BACKUP_RECALL_POLICY_UNVERIFIED_SOURCE",
+            "恢复副本的同内容新来源不可验证");
+        }
+        if (!visible) hidden.push({ ...item, status: "deleted",
+          updatedAt: Math.max(item.updatedAt, Date.now()) });
+      }
+      for (let offset = 0; offset < hidden.length; offset += 128) {
+        memoryStore.upsertMany(hidden.slice(offset, offset + 128));
+      }
+      deleted += hidden.length;
+    }
+    if (deleted > 0) {
+      // The newly deleted siblings gain conservative legacy reasons. Their
+      // source refs can hide further memories; never publish such an active
+      // item without another complete policy reconciliation.
+      policyStore.close();
+      policyStore.open();
+      for (const profileId of orderedProfiles) {
+        const state = policyStore.assertReady(profileId);
+        for (const item of memoryStore.list(profileId, { status: "active" })) {
+          if (!policyStore.isMemoryVisible(profileId, item)
+            || state.contentCutoffs.has(normalizeContent(item.content))) {
+            throw backupError("BACKUP_RECALL_POLICY_RECONCILE_UNSAFE",
+              "恢复副本仍含撤回策略隐藏的 active 记忆");
+          }
+        }
+      }
+    }
+  } finally {
+    policyStore.close();
+    memoryStore.close();
+  }
+}
+
+function sameRecallPolicy(left, right) {
+  return JSON.stringify(left.checksums) === JSON.stringify(right.checksums)
+    && JSON.stringify(left.identities) === JSON.stringify(right.identities);
+}
+
+function restoreRecallPolicyHighWater(paths, staging) {
+  // The old snapshot may predate a forget. A second copy of the current
+  // verified ledger in the staging directory retains the later suppression.
+  // Divergent journals cannot be safely merged and therefore abort restore.
+  const trustedRoot = fs.realpathSync(paths.trustedRoot);
+  const sourceRoot = path.join(trustedRoot, path.relative(paths.trustedRoot, paths.stateDir));
+  const stagingRoot = path.join(trustedRoot, path.relative(paths.trustedRoot, staging));
+  const sourceIds = recallPolicyProfileIds(sourceRoot, trustedRoot);
+  const backupIds = recallPolicyProfileIds(stagingRoot, trustedRoot);
+  const sourceInstallationDirectory = lstatIfExists(path.join(sourceRoot, "agents",
+    ".recall-policy-installations"));
+  const sourceBefore = new Map();
+  const restored = [];
+  for (const profileId of [...new Set([...sourceIds, ...backupIds])].sort()) {
+    let source = null;
+    let backup = null;
+    try {
+      if (sourceIds.has(profileId)) source = readRecallPolicyForRestore(sourceRoot,
+        trustedRoot, profileId);
+      if (backupIds.has(profileId)) backup = readRecallPolicyForRestore(stagingRoot,
+        trustedRoot, profileId);
+    } catch (cause) {
+      const error = backupError("BACKUP_RECALL_POLICY_UNSAFE", "源或备份的撤回账本不可验证");
+      error.cause = cause;
+      throw error;
+    }
+    if (backup && !source && sourceInstallationDirectory) {
+      // A Profile removed after this backup may have had its installation
+      // anchor deliberately purged. Restoring its old ledger would recreate
+      // revoked data with no current Profile to reconcile against.
+      throw backupError("BACKUP_RECALL_POLICY_MISSING", "备份中的 Profile 不在当前撤回账本中");
+    }
+    if (source) sourceBefore.set(profileId, source);
+    if (source && backup) {
+      const common = Math.min(source.checksums.length, backup.checksums.length);
+      if (source.checksums.slice(0, common).some((hash, index) => hash !== backup.checksums[index])) {
+        throw backupError("BACKUP_RECALL_POLICY_DIVERGED", "源与备份的撤回账本已分叉");
+      }
+    }
+    if (!source || (backup && backup.checksums.length >= source.checksums.length)) continue;
+    const targets = {
+      dir: path.join(stagingRoot, "agents", profileId, "memory"),
+      installationDir: path.join(stagingRoot, "agents", ".recall-policy-installations"),
+      log: path.join(stagingRoot, "agents", profileId, "memory", "recall-policy.jsonl"),
+      seal: path.join(stagingRoot, "agents", profileId, "memory", "recall-policy.seal.json"),
+      marker: path.join(stagingRoot, "agents", profileId, "recall-policy-installed.json"),
+      installation: path.join(stagingRoot, "agents", ".recall-policy-installations", `${profileId}.json`),
+    };
+    ensurePrivateDirectoryTree(targets.dir, trustedRoot);
+    ensurePrivateDirectoryTree(targets.installationDir, trustedRoot);
+    for (const key of ["log", "seal", "marker", "installation"]) {
+      if (lstatIfExists(targets[key])) fs.unlinkSync(targets[key]);
+      copyAuthorityFile(source.targets[key], targets[key], path.relative(sourceRoot, source.targets[key]),
+        fs.lstatSync(source.targets[key]));
+    }
+    let copied;
+    try { copied = readRecallPolicyForRestore(stagingRoot, trustedRoot, profileId); }
+    catch (cause) {
+      const error = backupError("BACKUP_RECALL_POLICY_UNSAFE", "恢复后的撤回账本不可验证");
+      error.cause = cause;
+      throw error;
+    }
+    if (JSON.stringify(copied.checksums) !== JSON.stringify(source.checksums)) {
+      throw backupError("BACKUP_RECALL_POLICY_UNSAFE", "恢复后的撤回账本与当前源不一致");
+    }
+    restored.push({ profileId, headSeq: source.checksums.length,
+      headChecksum: source.checksums.at(-1) });
+  }
+  const sourceMemoryBefore = assertRestoredMemoryDoesNotReviveSource(sourceRoot, stagingRoot,
+    sourceBefore, trustedRoot);
+  const verifySourceUnchanged = () => {
+    for (const [profileId, before] of sourceBefore) {
+      let after;
+      try { after = readRecallPolicyForRestore(sourceRoot, trustedRoot, profileId); }
+      catch { throw backupError("BACKUP_SOURCE_CHANGED", "恢复期间当前撤回账本不可读取"); }
+      if (!sameRecallPolicy(before, after)) {
+        throw backupError("BACKUP_SOURCE_CHANGED", "恢复期间当前撤回账本发生变化");
+      }
+    }
+    for (const source of sourceMemoryBefore) {
+      if (!lstatIfExists(source.target) || sha256File(source.target) !== source.digest) {
+        throw backupError("BACKUP_SOURCE_CHANGED", "恢复期间当前主记忆 journal 发生变化");
+      }
+    }
+  };
+  return { restored, verifySourceUnchanged };
+}
+
+function invalidateRestoredNativeMemoryAnchors(staging, trustedRoot) {
+  const canonicalRoot = fs.realpathSync(trustedRoot);
+  const stagingRoot = path.join(canonicalRoot, path.relative(trustedRoot, staging));
+  const agentsDir = path.join(stagingRoot, "agents");
+  if (!lstatIfExists(agentsDir)) return 0;
+  validateCanonicalOwnedDirectory(agentsDir, { trustedRoot: canonicalRoot });
+  let removed = 0;
+  for (const profile of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+    if (!RECALL_PROFILE_ID_PATTERN.test(profile.name)) continue;
+    if (!profile.isDirectory() || profile.isSymbolicLink()) {
+      throw backupError("BACKUP_RESTORE_UNSAFE", "恢复副本中的 Profile 目录不安全");
+    }
+    const checkpointDir = path.join(agentsDir, profile.name, "conversation-checkpoints");
+    if (!lstatIfExists(checkpointDir)) continue;
+    validateCanonicalOwnedDirectory(checkpointDir, { trustedRoot: canonicalRoot });
+    for (const name of fs.readdirSync(checkpointDir)) {
+      if (!name.endsWith(".native-memory-anchor.json")) continue;
+      const target = path.join(checkpointDir, name);
+      validatePrivateStat(fs.lstatSync(target), target);
+      fs.unlinkSync(target);
+      removed += 1;
+    }
+    fsyncDirectory(checkpointDir);
+  }
+  return removed;
+}
+
 function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
   const verified = verifyAuthorityBackup({ paths, backupId });
+  assertServiceStopped(paths);
   const hasPluginCatalog = verified.manifest.entries.some(entry => entry.type === "file"
     && entry.path === "plugins/catalog.sqlite");
   let pluginBarrier = null;
@@ -652,7 +1014,15 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
         }
       }
     }
+    const recallRestore = restoreRecallPolicyHighWater(paths, staging);
+    reconcileRestoredMemory(staging, paths.trustedRoot);
+    // Runtime Home is not rolled back with authority snapshots. An old anchor
+    // can match old MemoryStore/Policy bytes while its native session has since
+    // seen newer content. Missing anchors force a fresh native session.
+    const nativeMemoryAnchorsInvalidated = invalidateRestoredNativeMemoryAnchors(staging,
+      paths.trustedRoot);
     let pluginRestore = null;
+    let nativeMcpRestore = null;
     if (hasPluginCatalog) {
       assertPluginSourceUnchanged();
       const { resolveServicePaths } = require("./paths");
@@ -665,17 +1035,31 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       fsyncFile(restoredPaths.pluginCatalogPath);
       pluginRestore.catalogDigest = sha256File(restoredPaths.pluginCatalogPath);
     }
+    if (verified.manifest.entries.some(entry => entry.type === "file"
+      && entry.path === "mcp-servers/registry.json")) {
+      const { resolveServicePaths } = require("./paths");
+      const { quarantineNativeMcpRegistryForRestore } = require("./native-mcp-store");
+      const restoredPaths = resolveServicePaths({ stateRoot: staging, trustedRoot: paths.trustedRoot });
+      nativeMcpRestore = quarantineNativeMcpRegistryForRestore({ paths: restoredPaths });
+      fsyncFile(restoredPaths.nativeMcpRegistryPath);
+    }
     fsyncDirectoryTree(staging);
     for (const [target, mode] of directoryModes.reverse()) fs.chmodSync(target, mode);
     fsyncDirectory(staging);
     assertPluginSourceUnchanged();
+    assertServiceStopped(paths);
+    recallRestore.verifySourceUnchanged();
     fs.renameSync(staging, destination);
     fsyncDirectory(parent);
     return Object.freeze({
       destinationStateDir: destination,
       backupId,
       rootDigest: verified.manifest.rootDigest,
+      recallRestore: Object.freeze({ overlaidProfiles: recallRestore.restored,
+        digest: crypto.createHash("sha256").update(JSON.stringify(recallRestore.restored)).digest("hex") }),
+      nativeMemoryAnchorsInvalidated,
       ...(pluginRestore ? { pluginRestore } : {}),
+      ...(nativeMcpRestore ? { nativeMcpRestore } : {}),
     });
   } catch (error) {
     cleanupStaging(staging);

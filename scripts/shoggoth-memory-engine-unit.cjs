@@ -27,15 +27,7 @@ try {
   assert.equal(value.store.get("profile-1", explicit.id).status, "superseded");
   assert.equal(value.store.get("profile-1", replacement.id).supersedes, explicit.id);
 
-  const extracted = value.engine.extractTranscript({
-    profileId: "profile-1",
-    events: [{
-      id: "event-remember", kind: "user", contextExcluded: false,
-      content: { text: "请记住：我每周五做项目复盘" },
-    }],
-  });
-  assert.equal(extracted.length, 1);
-  assert.equal(extracted[0].status, "active");
+  assert.equal(typeof value.engine.extractTranscript, "undefined");
 
   const deleted = value.engine.delete({ profileId: "profile-1", id: replacement.id });
   assert.equal(deleted.status, "deleted");

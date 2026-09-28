@@ -20,7 +20,8 @@ export default function TurnProcess({
   live?: boolean;
   defaultOpen?: boolean;
   onOpenLargeView?: () => void;
-  pluginConversation?: { backendId: string; sessionKey: string };
+  pluginConversation?: { backendId: string; sessionKey: string;
+    agentId?: string; sessionId?: string; duplicateToolCallIds?: ReadonlySet<string> };
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(!!defaultOpen);

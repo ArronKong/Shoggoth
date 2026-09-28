@@ -1,6 +1,9 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import AgentRuntimeBindings from "../../app/manage-ui/src/components/AgentRuntimeBindings";
+import AgentDefaultRuntime from "../../app/manage-ui/src/components/AgentDefaultRuntime";
+import RuntimeStatusList from "../../app/manage-ui/src/pages/settings/RuntimeStatusList";
+import ChatModelMenu from "../../app/manage-ui/src/pages/ChatModelMenu";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import { applyConfiguredLocale } from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
@@ -11,9 +14,24 @@ const second = "22222222-2222-8222-8222-222222222222";
 const makeBinding = (id: string, runtime: string) => ({ id, profileId: "profile-one", runtime,
   runtimeProfileId: `runtime-${id}`, runtimeAccountId: `account-${runtime}`, label: null, enabled: true, revision: 1, createdAt: 1, updatedAt: 1 });
 let snapshot = { bindings: [makeBinding(first, "codex"), makeBinding(second, "pi")], defaultBindingId: first, revision: 1, canAdd: false };
+const bundledCodex = { ...makeBinding(first, "codex"), runtimeAccountId: "shoggoth-internal-codex-default-v1" };
+const nativeCodex = { ...makeBinding(second, "codex"), runtimeAccountId: "native-codex-default-v1" };
+const defaultSnapshot = { bindings: [bundledCodex, nativeCodex], defaultBindingId: first, revision: 1,
+  canAdd: false, availability: [
+    { bindingId: first, available: true, reason: null },
+    { bindingId: second, available: true, reason: null },
+  ] };
+const runtimeStatuses = [
+  { backendId: "shoggoth", runtime: "codex", name: "Codex CLI", runtimeAccountId: "native-codex-default-v1",
+    enabled: true, releaseEnabled: true, installation: "available" as const, serviceConnected: true },
+  { backendId: "shoggoth", runtime: "pi", name: "Pi", runtimeAccountId: "native-pi-default-v1",
+    enabled: false, releaseEnabled: true, installation: "unavailable" as const, serviceConnected: true },
+];
 state.writes = [];
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 state.fetch = async (input: string, init?: RequestInit) => {
+  if (String(input).includes("/__api/runtime-status")) return Response.json({ runtimes: runtimeStatuses });
+  if (String(input).includes("default-agent")) return Response.json(defaultSnapshot);
   if (String(input).includes("runtime-policy")) return Response.json({ version: 1, revision: 0, mode: "fixed", allowedBindingIds: [], preferredBindingIds: [], affinity: true, weights: {}, compactionBindingId: null });
   if (String(input).includes("runtime-accounts")) return Response.json({ accounts: [{ id: "account-codex", runtime: "codex" }, { id: "account-pi", runtime: "pi" }], backups: [] });
   if (!init?.method) return Response.json(snapshot);
@@ -41,6 +59,16 @@ function Fixture() {
   const [version, setVersion] = useState(0); state.reload = () => setVersion((value) => value + 1);
   return <UiProvider><main className="page management-page" style={{ maxWidth: 1000, margin: "auto" }}>
     <AgentRuntimeBindings key={version} backend="fixture-native" agentId={`agent-${version}`} />
+    <AgentDefaultRuntime backend="fixture-native" agentId="default-agent" onChanged={() => {}} />
+    <RuntimeStatusList runtimes={runtimeStatuses} loading={false} error={false} busy={false} onToggle={() => {}} />
+    <ChatModelMenu models={[
+      { id: "gpt-fixture", name: "GPT Fixture", runtime: "codex", runtimeName: "Codex Harness", bindingId: first },
+      { id: "gpt-fixture", name: "GPT Fixture", runtime: "codex", runtimeName: "Codex CLI", bindingId: second },
+    ]} activeModel="gpt-fixture" activeBindingId={first} onSelect={(_id, _provider, bindingId) => { state.modelBinding = bindingId; }}
+    runtimeGroups={[
+      { runtime: "codex", bindingId: first, name: "Codex Harness", available: true },
+      { runtime: "codex", bindingId: second, name: "Codex CLI", available: true },
+    ]} />
   </main></UiProvider>;
 }
 await applyConfiguredLocale("zh-CN");
@@ -83,4 +111,26 @@ state.checkBindingGeometry = async (theme: string) => {
   const control = row(first).querySelector<HTMLButtonElement>("button")!; control.focus();
   check(document.activeElement === control, "keyboard focus");
   return { width: innerWidth, theme, overflow: false };
+};
+state.checkOnboardingRuntime = async () => {
+  await wait(() => !!document.querySelector('[data-runtime="pi"]')
+    && !!document.querySelector('button[title="默认 Runtime"]'), "runtime UI load");
+  const missing = document.querySelector<HTMLElement>('[data-runtime="pi"]')!;
+  check(missing.textContent?.includes("未安装 CLI"), "missing CLI must show installation hint");
+  check(!missing.querySelector("button"), "missing CLI cannot reconnect");
+  const trigger = document.querySelector<HTMLButtonElement>('button[title="默认 Runtime"]')!;
+  check(trigger.textContent?.includes("Codex Harness"), "bundled default is labeled Codex Harness");
+  trigger.click();
+  await wait(() => [...document.querySelectorAll('[role="option"]')].some(option =>
+    option.textContent?.includes("Codex CLI（本机安装）")), "separate native Codex option");
+  const names = [...document.querySelectorAll('[role="option"]')].map(option => option.textContent?.trim());
+  check(names.some(name => name?.includes("Codex Harness（Shoggoth 内置）")), "bundled option stays distinct");
+  check(names.some(name => name?.includes("Codex CLI（本机安装）")), "native CLI option stays distinct");
+  document.querySelector<HTMLButtonElement>(".chat-pill--model")!.click();
+  await wait(() => document.querySelectorAll(".model-menu__label").length === 2, "separate Codex model groups");
+  const groups = [...document.querySelectorAll(".model-menu__label")].map(entry => entry.textContent?.trim());
+  check(groups.join("|") === "Codex Harness|Codex CLI", "model menu groups are account-scoped");
+  document.querySelectorAll<HTMLButtonElement>(".model-menu__item")[1].click();
+  check(state.modelBinding === second, "native Codex model retains its own binding ID");
+  return { missingCliBlocked: true, harnessAndCliDistinct: true, modelGroupsDistinct: true };
 };

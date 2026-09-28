@@ -33,6 +33,8 @@ type AgentState = { connected: boolean; discovered: boolean; disconnected?: bool
 const agentState: Record<string, AgentState> = {};
 let revision = 1, catalogRevision = 1, enabled = true, removed = false;
 let showGitHub = false, githubConnected = false, bearerMode: "cancel" | "ready" = "cancel";
+let githubAccounts = 0, githubSelected = "github-connection", githubBindingRevision = 1;
+let githubCompatibleTools = true;
 let deepLinkPagination = false;
 let consentCancelNext = true, uninstallDeferred = true;
 let delayedTools: { agent: string; resolve: (() => void) | null } | null = null;
@@ -41,6 +43,10 @@ const writes: Array<{ route: string; body: any; canceled?: boolean }> = [];
 scope.fixtureWrites = writes;
 const reads: string[] = [];
 let externalMode = "ready";
+let externalApprovalPending = false;
+let externalApprovalTestRow = false, externalApprovalDecisionFails = false;
+const externalApprovalCommand = JSON.stringify({ destination: "fixture-project", value: "approved",
+  note: `left\u202eright\u0085\u2066\u2028${"x".repeat(180)}` });
 let delayedExternal: { backend: string; cursor: string; resolve: (() => void) | null } | null = null;
 function externalCatalog(backend: string, cursor: string | null) {
   const items = backend === "hermes" ? Array.from({ length: 60 }, (_, index) => ({
@@ -74,13 +80,24 @@ const bundleUpdatePreview = { sourceKind: "bundled", previewDigest: "b".repeat(6
   specVersion: "2026-09-25", name: "Fixture Update", declaredVersion: "2.0.0", installable: true,
   components: { skills: [{ name: "updated-review", description: "Updated fixture skill",
     descriptorDigest: "c".repeat(64) }], mcpServers: [] }, diagnostics: [] };
+const googleBundledPreview = { sourceKind: "bundled", previewDigest: "d".repeat(64), expectedRevision: 0,
+  specVersion: "2026-09-25", name: "Gmail", declaredVersion: "1.0.0", installable: true,
+  components: { skills: [], mcpServers: [{ name: "gmail", type: "streamable-http",
+    descriptorDigest: "f".repeat(64) }] },
+  diagnostics: [{ scope: "mcp-server", name: "gmail",
+    reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }] };
 let rollbackDigest = "8".repeat(64), rollbackLostResponse = false, rollbackHasSnapshot = true;
+let googlePreviewInstallCount = 0;
 let rollbackPending: Array<{ operationId: string; action: string; phase: string; state: string | null }> = [];
 const rollbackReceipts = new Map<string, any>();
 const rollbackSnapshot = { snapshotId: "5".repeat(64), snapshotDigest: "6".repeat(64), releaseDigest: "7".repeat(64), byteLength: 128, createdAt: 1_800_000_000_000 };
 function seed(visual = false) {
   revision = 1; catalogRevision++; enabled = true; removed = false;
   showGitHub = false; githubConnected = false; bearerMode = "cancel";
+  githubCompatibleTools = true;
+  externalApprovalPending = false;
+  externalApprovalTestRow = false; externalApprovalDecisionFails = false;
+  githubAccounts = 0; githubSelected = "github-connection"; githubBindingRevision = 1;
   agentState[a] = { connected: visual, discovered: visual, grants: {} };
   agentState[b] = { connected: true, discovered: true, grants: {} };
   oauthAgents[a] = false; oauthAgents[b] = false; oauthFlows.clear(); oauthMode = "pending";
@@ -185,9 +202,10 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     return response({ canceled: false, preview: gitPreview, selectionHandle: "fixture-git-selection" });
   }
   if (route === "/__api/plugins/bundled-preview") {
-    check(body.packageId === "fixture-update", "bundled update previews the exact package");
-    return response({ canceled: false, preview: bundleUpdatePreview,
-      selectionHandle: "fixture-bundled-update" });
+    check(["fixture-update", "gmail"].includes(body.packageId), "bundled preview pins the exact package");
+    return response({ canceled: false,
+      preview: body.packageId === "gmail" ? googleBundledPreview : bundleUpdatePreview,
+      selectionHandle: body.packageId === "gmail" ? "fixture-google-preview" : "fixture-bundled-update" });
   }
   if (route.startsWith("/__api/plugins/bundled/") && !mutation) {
     const id = decodeURIComponent(route.slice("/__api/plugins/bundled/".length));
@@ -195,7 +213,8 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       developerName: "Fixture Studio", websiteURL: "https://example.invalid/plugins",
       license: "MIT", prompts: ["Summarize a design and prepare an implementation plan"],
       mcpServers: [] as Array<{ name: string; type: string }>, apps: [] as string[],
-      unconvertedMcp: [] as Array<{ name: string; reasonCode: string }> };
+      unconvertedMcp: [] as Array<{ name: string; reasonCode: string }>,
+      connectionWarnings: [] as Array<{ name: string; reasonCode: string }>, sourceWarnings: [] };
     if (id === "fixture-skill") return response({ detail: { ...base,
       displayName: "Fixture Skill", shortDescription: "A bundled skill that requires a click before installation",
       longDescription: "A detailed bundled plugin description, available before installation.",
@@ -203,7 +222,11 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       importStatus: "previewable", skills: Array.from({ length: 12 }, (_, index) => ({
         name: index === 0 ? "fixture-design" : `fixture-design-${index + 1}`,
         description: `Creates a design implementation plan from selected screen ${index + 1}, using the project's component library and handoff notes.`,
-      })) } });
+      })), sourceWarnings: [{ code: "MISSING_OPTIONAL_LOCAL_REFERENCES",
+        source: "skills/setup/SKILL.md", targets: [
+          "skills/mixpanelyst/references/analytical-frameworks.md",
+          "skills/mixpanelyst/references/python-api.md",
+        ] }] } });
     if (id === "fixture-connector") return response({ detail: { ...base,
       displayName: "Fixture Connector", shortDescription: "A connector awaiting its Service adapter",
       longDescription: "A source connector awaiting a Shoggoth adapter.", category: "Productivity",
@@ -215,6 +238,13 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       longDescription: "An installed bundled package with a newer version in this App.", version: "2.0.0",
       components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 }, converted: { skills: 1, mcp: 0 },
       importStatus: "previewable", skills: [{ name: "updated-review", description: "Reviews the current version." }] } });
+    if (id === "gmail") return response({ detail: { ...base,
+      displayName: "Gmail", shortDescription: "A fixed Google MCP endpoint needing separate login",
+      longDescription: "The frozen Gmail endpoint can be installed as a distinct Shoggoth Desktop OAuth candidate.",
+      components: { skills: 0, allSkillFiles: 0, apps: 1, mcp: 1 }, converted: { skills: 0, mcp: 1 },
+      importStatus: "previewable", skills: [], apps: ["gmail"], prompts: [],
+      mcpServers: [{ name: "gmail", type: "streamable-http" }],
+      connectionWarnings: [{ name: "gmail", reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }] } });
     return response({ error: "not found" }, 404);
   }
   if (route === "/__api/plugins/install") {
@@ -276,6 +306,21 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       version: "2.0.0", iconAvailable: false, components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 },
       converted: { skills: 1, mcp: 0 }, unconvertedMcp: [],
       importStatus: "previewable", installationState: "enabled", installedReleaseDigest: "a".repeat(64) },
+    { id: "gmail", installationId: "d".repeat(64), displayName: "Gmail",
+      shortDescription: "A fixed Google MCP endpoint needing separate login", category: "Communication",
+      version: "1.0.0", iconAvailable: false, components: { skills: 0, allSkillFiles: 0, apps: 1, mcp: 1 },
+      converted: { skills: 0, mcp: 1 }, unconvertedMcp: [],
+      importStatus: "previewable", installationState: "not-installed", installedReleaseDigest: null },
+    { id: "fixture-creative", installationId: "f".repeat(64), displayName: "Fixture Creative",
+      shortDescription: "A design workflow", category: "Creativity",
+      version: "1.0.0", iconAvailable: false, components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 },
+      converted: { skills: 1, mcp: 0 }, unconvertedMcp: [],
+      importStatus: "previewable", installationState: "not-installed", installedReleaseDigest: null },
+    { id: "fixture-research", installationId: "1".repeat(64), displayName: "Fixture Research",
+      shortDescription: "A research workflow", category: "Education & Research",
+      version: "1.0.0", iconAvailable: false, components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 },
+      converted: { skills: 1, mcp: 0 }, unconvertedMcp: [],
+      importStatus: "previewable", installationState: "not-installed", installedReleaseDigest: null },
   ] });
   if (route === "/__api/plugins") {
     if (deepLinkPagination) {
@@ -289,6 +334,60 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
           components: [{ componentId: "f".repeat(64), kind: "skill", title: "deep-skill", state: "ready" }] }] } });
     }
     return response({ page: catalog() });
+  }
+  if (route === "/__api/plugins/external-calls") {
+    const host = url.searchParams.get("backendId");
+    check(["all", "openclaw", "hermes"].includes(host || "")
+      && url.searchParams.get("limit") === "10", "external call history uses a bounded read");
+    const records = [
+      { callId: "fixture-external-call-1", backendId: "openclaw", status: "confirmed",
+        toolName: "search_issues", agentId: "fixture-openclaw-agent", approvalOutcome: "approved" },
+      { callId: "fixture-external-call-2", backendId: "hermes", status: "outcome_unknown",
+        toolName: "create_issue", agentId: "fixture-hermes-agent", approvalOutcome: "approved" },
+      { callId: "fixture-external-call-3", backendId: "hermes", status: "rejected_before_send",
+        toolName: "deny_issue", agentId: "fixture-hermes-agent", approvalOutcome: "denied" },
+      { callId: "fixture-external-call-4", backendId: "openclaw", status: "rejected_before_send",
+        toolName: "expired_issue", agentId: "fixture-openclaw-agent", approvalOutcome: "expired" },
+      { callId: "fixture-external-call-5", backendId: "hermes", status: "canceled_before_send",
+        toolName: "withdrawn_issue", agentId: "fixture-hermes-agent", approvalOutcome: "withdrawn" },
+      ...(externalApprovalTestRow ? [{ callId: "fixture-external-call", backendId: "openclaw",
+        status: externalApprovalPending ? "pending" : "confirmed", toolName: "write_issue",
+        agentId: "fixture-openclaw-agent", approvalOutcome: externalApprovalPending ? null : "approved" }] : []),
+    ].filter(item => host === "all" || item.backendId === host)
+      .map(item => ({ ...item, instanceId: `fixture-${item.backendId}-instance`,
+        sessionId: `fixture-session-${item.callId}`,
+        runId: item.backendId === "openclaw" ? `fixture-run-${item.callId}` : null,
+        taskId: item.backendId === "hermes" ? `fixture-task-${item.callId}` : null,
+        turnId: item.backendId === "hermes" ? `fixture-turn-${item.callId}` : null,
+        toolCallId: `fixture-tool-${item.callId}`,
+        bindingId: "fixture-binding", installationId, componentId,
+        connectionId: "fixture-connection", toolIdentity: toolIdentity(a, 0),
+        cancelRequested: false, resultDigest: null, resultBytes: null, errorCode: null,
+        approvalRequestId: item.approvalOutcome === null ? null
+          : item.callId === "fixture-external-call" ? "fixture-approval" : `fixture-approval-${item.callId}`,
+        approvalUpdatedAt: item.approvalOutcome === null ? null : 1_800_000_000_001,
+        createdAt: 1_800_000_000_000, updatedAt: 1_800_000_000_001 }));
+    return response({ items: records, nextCursor: null });
+  }
+  if (route === "/__api/plugins/external-approvals") {
+    if (mutation) {
+      check(body?.requestId === "fixture-approval"
+        && body?.decision === (externalApprovalDecisionFails ? "deny" : "once"),
+        "external approval responds only to the exact pending request");
+      if (externalApprovalDecisionFails) return response({ error: "simulated approval failure" }, 500);
+      externalApprovalPending = false;
+      return response({ approved: true, requestId: "fixture-approval" });
+    }
+    check(url.searchParams.get("limit") === "2", "external approvals use bounded pages");
+    return response({ items: externalApprovalPending ? [{
+      requestId: "fixture-approval", backendId: "openclaw", instanceId: "fixture-instance",
+      agentId: "fixture-openclaw-agent", sessionId: "fixture-session", runId: "fixture-run",
+      taskId: null, turnId: null, toolCallId: "fixture-call", callId: "fixture-external-call",
+      bindingId: "fixture-binding", connectionId: "fixture-connection",
+      connectionAuthRevision: 1, packageName: "Project assistant", toolName: "write_issue",
+      command: externalApprovalCommand,
+      argumentDigest: "a".repeat(64), expiresAt: Date.now() + 60_000,
+    }] : [], nextCursor: null });
   }
   if (route === "/__api/plugins/external") {
     const backend = url.searchParams.get("backend"), cursor = url.searchParams.get("cursor");
@@ -312,23 +411,48 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (url.searchParams.get("installationId") === githubInstallationId) {
       return response({ installationId: githubInstallationId, profileId: target(agent).profileId,
         items: [{ componentId: githubComponentId,
-          connections: { pending: 0, verified: githubConnected ? 1 : 0, disconnected: 0 },
-          binding: githubConnected ? { bindingId: "github-global-binding", connectionId: "github-connection",
-            enabled: true, revision: 1, connectionState: "ready", grants: { allow: 0, deny: 0 } } : null }] });
+          connections: { pending: 0, verified: githubAccounts, disconnected: 0 },
+          accounts: Array.from({ length: githubAccounts }, (_, index) => ({
+            connectionId: index === 0 ? "github-connection" : `github-connection-${index + 1}`,
+            label: `GitHub #${index + 42}` })),
+          binding: githubConnected ? { bindingId: "github-global-binding", connectionId: githubSelected,
+            enabled: true, revision: githubBindingRevision, connectionState: "ready", grants: { allow: 0, deny: 0 } } : null }] });
     }
     const state = agentState[agent];
     const grants = Object.values(state.grants);
     return response({ installationId, profileId: target(agent).profileId, items: [{ componentId,
       connections: { pending: 0, verified: state.connected ? 1 : 0, disconnected: 0 },
+      accounts: state.connected ? [{ connectionId: `connection-${agent}`, label: `连接 ${agent}` }] : [],
       binding: state.connected || state.disconnected ? { bindingId: target(agent).bindingId, connectionId: `connection-${agent}`, enabled: enabled && state.connected,
         revision: state.bindingRevision || 1, connectionState: state.connected ? "ready" : "disconnected", grants: { allow: grants.filter(item => item.effect === "allow").length,
           deny: grants.filter(item => item.effect === "deny").length } } : null },
       { componentId: httpComponentId, connections: { pending: 0, verified: oauthAgents[agent] ? 1 : 0, disconnected: 0 },
+        accounts: oauthAgents[agent] ? [{ connectionId: `oauth-connection-${agent}`, label: `连接 ${agent}` }] : [],
         binding: oauthAgents[agent] ? { bindingId: `oauth-binding-${agent}`, connectionId: `oauth-connection-${agent}`,
           enabled, revision: 1, connectionState: "ready", grants: { allow: 0, deny: 0 } } : null }] });
   }
   if (route === "/__api/plugins/mcp-tools") {
     const agent = url.searchParams.get("agentId")!;
+    if (url.searchParams.get("bindingId") === "github-global-binding") {
+      const githubTools = ["get_file_contents", "create_or_update_file"].map((name, index) => ({
+        toolIdentity: `plugin:${githubInstallationId}:${githubComponentId}:${githubSelected}:${String(index + 1).repeat(64)}`,
+        name, contractDigest: String(index + 3).repeat(64), savedGrant: null,
+      }));
+      return response({ profileId: target(agent).profileId, bindingId: "github-global-binding",
+        available: true, catalogRevision: "github-tools-1", items: githubTools,
+        ...(githubCompatibleTools ? { portableCapabilities: [
+          { id: "repository-file-read", toolName: "get_file_contents" },
+          { id: "repository-file-write", toolName: "create_or_update_file" },
+        ], referenceCoverage: {
+          packageId: "github", referenceName: "github",
+          managedAppId: "connector_76869538009648d5b282a4bb21c3d157",
+          relationship: "functional-overlap", equivalence: "unverified",
+          operations: [
+            { id: "repository-file-read", toolName: "get_file_contents" },
+            { id: "repository-file-write", toolName: "create_or_update_file" },
+          ],
+        } } : {}) });
+    }
     const result = structuredClone(toolPage(agent));
     if (delayedTools?.agent === agent) await new Promise<void>(resolve => { delayedTools!.resolve = resolve; });
     return response(result);
@@ -338,9 +462,22 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       && body.componentId === githubComponentId && body.expectedRevision === 1
       && body.accessToken === "github_pat_fixture_ui", "GitHub UI submits only the selected package and typed token");
     if (bearerMode === "cancel") return response({ canceled: true, receipt: null });
-    githubConnected = true; catalogRevision++;
+    githubConnected = true; githubAccounts++;
+    githubSelected = githubAccounts === 1 ? "github-connection" : `github-connection-${githubAccounts}`;
+    githubBindingRevision = githubAccounts;
+    catalogRevision++;
     return response({ canceled: false, receipt: { kind: "mcp-connect", profileId: target(a).profileId,
-      bindingId: "github-global-binding", toolIdentity: null, revision: 1 } });
+      bindingId: "github-global-binding", toolIdentity: null, revision: githubBindingRevision } });
+  }
+  if (route === "/__api/plugins/account-select") {
+    check(body.agentId === a && body.bindingId === "github-global-binding"
+      && body.expectedRevision === githubBindingRevision && body.connectionId === "github-connection"
+      && githubAccounts === 2, "account selection pins exact binding revision and saved connection");
+    githubSelected = body.connectionId; githubBindingRevision += 2; catalogRevision++;
+    const result = { kind: "mcp-connect", profileId: target(a).profileId,
+      bindingId: "github-global-binding", toolIdentity: null, revision: githubBindingRevision };
+    receipt(body.operationId, "mcp-connect", result);
+    return response({ canceled: false, receipt: result });
   }
   if (route === "/__api/plugins/mcp-discover") {
     check(body.bindingId === target(body.agentId).bindingId, "discovery must use selected Agent binding");
@@ -436,12 +573,29 @@ scope.preparePluginKeyboard = async () => {
     "bundled installation does not show an Agent selector");
   check(document.body.textContent!.includes("已转换 12 / 12 个技能"),
     "bundled card distinguishes converted Skills from source declarations");
+  const groups = [...document.querySelectorAll<HTMLElement>("[data-plugin-group]")];
+  check(groups.map(group => group.dataset.pluginGroup).join(",")
+    === "creative,development,collaboration,research", "bundled cards follow the four requested groups");
+  check(groups.map(group => group.querySelectorAll("article").length).join(",") === "1,2,2,1",
+    "group headings show the correct cards without losing any plugins");
   const category = document.querySelector<HTMLSelectElement>("#plugin-library-category")!;
-  check(category.options.length === 3, "bundled categories are selectable");
-  category.value = "Productivity"; category.dispatchEvent(new Event("change", { bubbles: true }));
-  await wait(() => document.querySelectorAll("article").length === 1, "category narrows bundled cards");
+  check(category.options.length === 5, "the four bundled groups are selectable");
+  category.value = "collaboration"; category.dispatchEvent(new Event("change", { bubbles: true }));
+  await wait(() => document.querySelectorAll("article").length === 2,
+    "category combines productivity and communication plugins");
+  check(document.querySelectorAll("[data-plugin-group]").length === 1,
+    "category filter hides unrelated group headings");
   category.value = ""; category.dispatchEvent(new Event("change", { bubbles: true }));
-  await wait(() => document.querySelectorAll("article").length === 3, "all categories restores bundled cards");
+  await wait(() => document.querySelectorAll("article").length === 6, "all categories restores bundled cards");
+  const search = document.querySelector<HTMLInputElement>("#plugin-library-search")!;
+  const setSearch = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  setSearch.call(search, "科研"); search.dispatchEvent(new Event("input", { bubbles: true }));
+  await wait(() => document.querySelectorAll("article").length === 1,
+    "translated group name is searchable");
+  check(document.querySelector<HTMLElement>("[data-plugin-group]")?.dataset.pluginGroup === "research",
+    "search retains the matching group heading");
+  setSearch.call(search, ""); search.dispatchEvent(new Event("input", { bubbles: true }));
+  await wait(() => document.querySelectorAll("article").length === 6, "clearing search restores bundled cards");
   await click("已安装");
   await wait(() => document.body.textContent!.includes("这些技能随能力包的全局启用状态生效"),
     "installed package Skills show global availability");
@@ -541,7 +695,7 @@ scope.runPluginBearerFixture = async () => {
   await click("连接 GitHub 账号");
   const field = document.querySelector<HTMLInputElement>(`#plugin-bearer-${githubComponentId}`)!;
   check(field?.type === "password" && field.autocomplete === "off", "GitHub token is a private input");
-  field.value = "github_pat_fixture_ui";
+  document.querySelector<HTMLInputElement>(`#plugin-bearer-${githubComponentId}`)!.value = "github_pat_fixture_ui";
   await click("验证并连接");
   await wait(() => !button("验证并连接")?.disabled, "canceled native confirmation settles");
   check(field.value === "" && !githubConnected, "canceled confirmation clears input without connecting");
@@ -558,9 +712,131 @@ scope.runPluginBearerFixture = async () => {
   const content = document.querySelector<HTMLElement>("main.content")!;
   check(rect.left >= 0 && rect.right <= innerWidth && content.scrollWidth <= content.clientWidth + 1,
     "GitHub account form fits narrow viewport without horizontal overflow");
+  document.querySelector<HTMLInputElement>(`#plugin-bearer-${githubComponentId}`)!.value = "github_pat_fixture_ui";
+  await click("验证并连接");
+  await wait(() => !!button("切换至 GitHub #42"), "previous verified account remains selectable");
+  await click("切换至 GitHub #42");
+  await wait(() => document.body.innerText.includes("当前公共账号：GitHub #42"),
+    "account switch refreshes the shared selected identity");
+  check(githubSelected === "github-connection" && !document.body.innerText.includes("github_pat_fixture_ui"),
+    "account switch uses only the saved connection and never renders the token");
+  const githubPackage = [...document.querySelectorAll<HTMLLIElement>("li")].find(item =>
+    item.querySelector(":scope > div > strong")?.textContent === "github");
+  const githubToolButton = (label: string) => [...(githubPackage?.querySelectorAll<HTMLButtonElement>("button") || [])]
+    .find(item => item.textContent === label);
+  check(!!githubPackage && !!githubToolButton("查看工具授权"), "GitHub management card exposes live tool authorization");
+  githubToolButton("查看工具授权")!.click();
+  await wait(() => githubPackage.textContent?.includes("实时目录操作与冻结的 GitHub 托管引用有功能交集")
+    && githubPackage.textContent?.includes("读取仓库文件、写入仓库文件"),
+  "verified GitHub MCP file operations appear");
+  check(githubPackage.textContent?.includes("尚未证明等价"),
+    "independent MCP operations do not claim managed connector equivalence");
+  githubToolButton("收起工具授权")!.click(); await pause();
+  githubCompatibleTools = false;
+  githubToolButton("查看工具授权")!.click();
+  await wait(() => githubPackage.textContent?.includes("暂未发现兼容的仓库文件或 Issue 操作"),
+    "changed or missing capability profile cannot claim compatible operations");
+  check(!githubPackage.textContent?.includes("读取、写入"),
+    "tool names alone do not imply a verified read-write capability");
+  check(!githubPackage.textContent?.includes("实时目录操作与冻结的 GitHub 托管引用有功能交集"),
+    "an empty capability profile must not claim managed-reference overlap");
   check(scope.fixtureErrors.length === 0, `no GitHub page errors: ${scope.fixtureErrors}`);
   return { passwordInput: true, canceledClearsInput: true, connectedRefresh: true,
-    tokenNotRendered: true, width: innerWidth, horizontalOverflow: false };
+    tokenNotRendered: true, accountSwitch: true, verifiedMcpOperations: true,
+    changedContractNotClaimed: true, width: innerWidth, horizontalOverflow: false };
+};
+scope.runPluginExternalActivityFixture = async () => {
+  seed(); externalApprovalPending = true; externalApprovalTestRow = true;
+  scope.remountPlugins(); await selectHost("Shoggoth");
+  await click("已安装");
+  await wait(() => document.body.innerText.includes("search_issues")
+    && document.body.innerText.includes("create_issue"), "actual external calls are rendered");
+  const panel = document.querySelector<HTMLElement>('[aria-labelledby="plugins-external-calls-heading"]')!;
+  check(panel.innerText.includes("已完成") && panel.innerText.includes("结果待核对")
+    && panel.innerText.includes("已允许一次") && panel.innerText.includes("已拒绝")
+    && panel.innerText.includes("审批超时") && panel.innerText.includes("请求已撤回")
+    && !panel.innerText.includes("fixture-tool-fixture-external-call"),
+  "approval decision and tool outcome are separate, while call identity starts collapsed");
+  const uncertainApproved = [...panel.querySelectorAll<HTMLLIElement>("li")]
+    .find(item => item.textContent?.includes("create_issue"))!;
+  check(uncertainApproved.innerText.includes("已允许一次")
+    && uncertainApproved.innerText.includes("结果待核对"),
+  "an allowed call can still have an unknown tool outcome");
+  const identityDetails = uncertainApproved.querySelector("details")!;
+  identityDetails.open = true;
+  check(identityDetails.innerText.includes("fixture-session-fixture-external-call-2")
+    && identityDetails.innerText.includes("fixture-task-fixture-external-call-2")
+    && identityDetails.innerText.includes("fixture-turn-fixture-external-call-2")
+    && identityDetails.innerText.includes("fixture-tool-fixture-external-call-2")
+    && identityDetails.innerText.includes("fixture-external-call-2"),
+  "read-only audit shows exact host session, turn, tool and Service call identities");
+  check(!writes.some(item => item.route === "/__api/plugins/external-calls"),
+    "external call activity is a read-only panel");
+  const pendingCall = [...panel.querySelectorAll<HTMLLIElement>("li")]
+    .find(item => item.textContent?.includes("write_issue"))!;
+  check(pendingCall.innerText.includes("执行中") && !pendingCall.innerText.includes("已允许一次"),
+    "pending external call has no approval outcome before a decision");
+  await wait(() => document.body.innerText.includes("write_issue")
+    && document.body.innerText.includes("fixture-project"), "external approval shows full arguments");
+  const command = document.querySelector<HTMLElement>('#plugins-external-approvals pre')!;
+  check(command.textContent!.includes("left\\u202eright\\u0085\\u2066\\u2028")
+    && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(command.textContent!)
+    && command.textContent!.includes('"value":"approved"')
+    && command.getAttribute("dir") === "ltr"
+    && !!command.getAttribute("aria-label"),
+  "external approval arguments visibly escape bidi and control characters");
+  const callReadsBeforeApproval = reads.filter(item => item.startsWith("/__api/plugins/external-calls?")).length;
+  const approvalReadsBeforeApproval = reads.filter(item => item.startsWith("/__api/plugins/external-approvals?")).length;
+  await click("允许一次");
+  await wait(() => !externalApprovalPending, "external approval action reaches exact request");
+  await wait(() => reads.filter(item => item.startsWith("/__api/plugins/external-calls?")).length
+    > callReadsBeforeApproval && reads.filter(item => item.startsWith("/__api/plugins/external-approvals?")).length
+    > approvalReadsBeforeApproval && [...panel.querySelectorAll<HTMLLIElement>("li")]
+      .some(item => item.textContent?.includes("write_issue") && item.innerText.includes("已完成")
+        && item.innerText.includes("已允许一次")),
+  "approval success reloads pending requests and associated call outcome");
+  const approvalWrite = writes.filter(item => item.route === "/__api/plugins/external-approvals");
+  check(approvalWrite.length === 1 && approvalWrite[0].body.decision === "once"
+    && approvalWrite[0].body.requestId === "fixture-approval"
+    && !Object.hasOwn(approvalWrite[0].body, "command"),
+  "renderer only sends request identity and decision, never replacement arguments");
+  externalApprovalPending = true; externalApprovalDecisionFails = true;
+  scope.remountPlugins(); await selectHost("Shoggoth"); await click("已安装");
+  await wait(() => document.body.innerText.includes("write_issue")
+    && !!document.querySelector<HTMLElement>("#plugins-external-approvals pre"),
+  "failed decision fixture restores pending approval");
+  const callReadsBeforeFailure = reads.filter(item => item.startsWith("/__api/plugins/external-calls?")).length;
+  const approvalReadsBeforeFailure = reads.filter(item => item.startsWith("/__api/plugins/external-approvals?")).length;
+  await click("拒绝");
+  await wait(() => writes.some(item => item.route === "/__api/plugins/external-approvals"
+    && item.body.decision === "deny"), "failed decision reaches the exact request");
+  await wait(() => reads.filter(item => item.startsWith("/__api/plugins/external-calls?")).length
+    > callReadsBeforeFailure && reads.filter(item => item.startsWith("/__api/plugins/external-approvals?")).length
+    > approvalReadsBeforeFailure,
+  "approval failure reloads pending requests and associated call history");
+  check(externalApprovalPending && document.body.innerText.includes("write_issue"),
+    "failed decision keeps the approval pending");
+  return { confirmedCall: true, unknownOutcome: true, readOnly: true,
+    fullApprovalArguments: true, escapedInvisibleArguments: true, exactApprovalRequest: true,
+    refreshedAfterDecision: true, refreshedAfterFailure: true };
+};
+scope.preparePluginExternalApprovalCapture = async () => {
+  seed(); externalApprovalPending = true; scope.remountPlugins(); await selectHost("Shoggoth");
+  await click("已安装");
+  await wait(() => !!document.querySelector<HTMLElement>('[aria-labelledby="plugins-external-approvals-heading"] pre'),
+    "pending external approval card renders");
+  document.querySelector<HTMLElement>('[aria-labelledby="plugins-external-approvals-heading"]')!
+    .scrollIntoView({ block: "start" });
+  await pause(100);
+  const content = document.querySelector<HTMLElement>("main.content")!;
+  const command = document.querySelector<HTMLElement>("#plugins-external-approvals pre")!;
+  check(content.scrollWidth <= content.clientWidth + 1
+    && command.scrollWidth <= command.clientWidth + 1
+    && getComputedStyle(command).direction === "ltr"
+    && command.textContent!.includes("\\u202e"),
+  "external approval card escapes bidi and fits narrow viewport");
+  return { width: innerWidth, detail: "external-approval", fullArguments: true,
+    horizontalOverflow: false };
 };
 scope.runPluginDependencyFixture = async () => {
   seed(); dependencySupported = true;
@@ -800,7 +1076,7 @@ scope.prepareBundledCapture = async (theme: string) => {
   await selectHost("Shoggoth");
   document.documentElement.dataset.theme = theme;
   await click("可安装");
-  await wait(() => document.querySelectorAll("article").length === 3, "bundled cards rendered");
+  await wait(() => document.querySelectorAll("article").length === 6, "bundled cards rendered");
   const installCount = writes.filter(item => item.route === "/__api/plugins/install").length;
   await openDetail("Fixture Update");
   await wait(() => document.querySelector<HTMLDialogElement>("dialog[open]")?.textContent?.includes("newer version"),
@@ -817,7 +1093,7 @@ scope.prepareBundledCapture = async (theme: string) => {
   check(writes.filter(item => item.route === "/__api/plugins/install").length === installCount,
     "version check never silently installs the bundled update");
   await click("可安装");
-  await wait(() => document.querySelectorAll("article").length === 3, "bundled cards restored");
+  await wait(() => document.querySelectorAll("article").length === 6, "bundled cards restored");
   const content = document.querySelector<HTMLElement>("main.content")!;
   content.scrollTop = 0;
   const overflowing = [...document.querySelectorAll<HTMLElement>("article,button,input,[role=tablist]")]
@@ -827,7 +1103,7 @@ scope.prepareBundledCapture = async (theme: string) => {
     `bundled library overflows at ${innerWidth}px`);
   check(button("查看并安装")?.disabled === false && button("适配中")?.disabled === true,
     "ready and pending bundle actions remain distinct");
-  return { width: innerWidth, theme, view: "bundled", cards: 3,
+  return { width: innerWidth, theme, view: "bundled", cards: 6,
     updateRequiresDisable: true, horizontalOverflow: false };
 };
 scope.prepareBundledDetailCapture = async () => {
@@ -838,6 +1114,10 @@ scope.prepareBundledDetailCapture = async () => {
   const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
   check(dialog.textContent!.includes("fixture-design") && dialog.textContent!.includes("Fixture Studio")
     && dialog.textContent!.includes("Summarize a design"), "details show source Skills, developer and example uses");
+  check(dialog.textContent!.includes("来源包参考文档缺失")
+    && dialog.textContent!.includes("skills/mixpanelyst/references/analytical-frameworks.md")
+    && dialog.textContent!.includes("skills/mixpanelyst/references/python-api.md"),
+  "missing source references are disclosed in the plugin detail before installation");
   check(reads.some(item => item.startsWith("/__api/plugins/bundled/fixture-skill?")), "detail fetched on card click");
   check(writes.length === before, "opening details does not install or authorize anything");
   check(document.activeElement === dialog.querySelector('[aria-label="关闭插件详情"]'), "modal focus moves to close control");
@@ -848,6 +1128,58 @@ scope.prepareBundledDetailCapture = async () => {
   check(!scroll || scroll.scrollWidth <= scroll.clientWidth + 1, "detail content has no horizontal overflow");
   return { width: innerWidth, detail: "skill", readOnly: true, horizontalOverflow: false };
 };
+scope.prepareGoogleBundledDetailCapture = async () => {
+  googlePreviewInstallCount = writes.filter(item => item.route === "/__api/plugins/install").length;
+  await selectHost("Shoggoth");
+  await click("可安装");
+  await openDetail("Gmail");
+  await wait(() => document.querySelector<HTMLDialogElement>("dialog[open]")?.textContent
+    ?.includes("Google MCP 需单独授权"), "Google Desktop OAuth warning loaded before installation");
+  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  check(dialog.textContent!.includes("不沿用来源包的占位客户端、密钥、12798 回调或整组权限"),
+    "detail explicitly discloses non-equivalent frozen authentication");
+  check(dialog.textContent!.includes("安装本身不会连接账号"),
+    "detail distinguishes installation from account connection");
+  const rect = dialog.getBoundingClientRect();
+  const scroll = dialog.querySelector<HTMLElement>('[class*="scroll"]')!;
+  check(rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
+    "Google detail fits viewport");
+  check(scroll.scrollWidth <= scroll.clientWidth + 1, "Google detail has no horizontal overflow");
+  return { width: innerWidth, detail: "google", warning: true,
+    left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
+    scrollWidth: scroll.scrollWidth, clientWidth: scroll.clientWidth };
+};
+scope.prepareGoogleBundledPreviewCapture = async () => {
+  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  const preview = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+    .find(item => item.textContent === "查看安装预览");
+  check(preview && !preview.disabled, "Google install preview remains available");
+  preview!.click();
+  await wait(() => !document.querySelector("dialog[open]")
+    && document.querySelector('[class*="previewPanel"]')?.textContent
+      ?.includes("此组件仅转换固定的 Google MCP 端点"),
+    "Google non-equivalent authentication warning appears in installation preview");
+  const panel = document.querySelector<HTMLElement>('[class*="previewPanel"]')!;
+  panel.scrollIntoView({ block: "center" });
+  const content = document.querySelector<HTMLElement>("main.content")!;
+  check(content.scrollWidth <= content.clientWidth + 1,
+    "Google install preview has no horizontal overflow");
+  check(writes.filter(item => item.route === "/__api/plugins/install").length === googlePreviewInstallCount,
+    "Google detail and preview never install or authorize by themselves");
+  const rect = panel.getBoundingClientRect();
+  return { width: innerWidth, preview: "google", warning: true,
+    left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
+    scrollWidth: content.scrollWidth, clientWidth: content.clientWidth };
+};
+scope.closeGoogleBundledPreview = async () => {
+  const panel = document.querySelector<HTMLElement>('[class*="previewPanel"]')!;
+  const cancel = [...panel.querySelectorAll<HTMLButtonElement>("button")]
+    .find(item => item.textContent === "取消");
+  check(cancel, "Google preview has a cancel action");
+  cancel!.click();
+  await wait(() => !document.querySelector('[class*="previewPanel"]'),
+    "Google preview closes without installation");
+};
 scope.checkBundledDetailClosed = async () => {
   await wait(() => !document.querySelector("dialog[open]"), "Escape closes bundled details");
   check(document.activeElement === detailButton("Fixture Skill"), "detail close restores card focus");
@@ -856,7 +1188,8 @@ scope.checkBundledDetailClosed = async () => {
 scope.expandBundledSkills = async () => {
   await click("查看全部 12 个技能");
   const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
-  check(dialog.querySelectorAll("li").length === 12, "all Skills expand in the detail dialog");
+  check(dialog.querySelectorAll('[class*="componentList"] li').length === 12,
+    "all Skills expand in the detail dialog");
   const scroll = dialog.querySelector<HTMLElement>('[class*="scroll"]')!;
   scroll.scrollTop = scroll.scrollHeight;
   check(scroll.scrollTop > 0, "long Skill details scroll inside the dialog");

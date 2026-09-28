@@ -1,15 +1,55 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const path = require("node:path");
 const { DOCUMENT_KINDS, DEFINITION_EXPORT_FORMAT } = require("./agent-definition-store");
+const { assertValidDownstreamMcpTools } = require("./mcp-product-tool-controller");
 const { hasSecret } = require("./memory-engine");
 const { serviceError } = require("./security");
+const { querySkillManagementCatalog } = require("./skill-management-query");
 
 const GENERATED = new Set(["TOOLS", "MEMORY"]);
 const IMPORT_TTL_MS = 15 * 60 * 1000;
 const PAGE_BYTES = 44 * 1024;
+const REVIEWED_MEMORY_ID = /^reviewed-mc-[a-f0-9]{64}$/u;
 
 function harnessError(code, message) { return serviceError(code, message); }
+function reviewItemVisible(engine, profileId, item) {
+  if (!REVIEWED_MEMORY_ID.test(item.id)) return true;
+  // A durable candidate batch may precede its accepted receipt and active
+  // promotion. Hide that intermediate record from the ordinary memory UI.
+  if (item.status === "candidate") return false;
+  // A withdrawn or superseded claim remains available through the user's
+  // explicit audit UI even after its source is no longer Agent-visible. The
+  // accepted review receipt is still required to exclude orphaned writes.
+  if (["deleted", "superseded"].includes(item.status)) {
+    return engine.isReviewReceipted?.(profileId, item) === true;
+  }
+  return engine.isReviewCommitted?.(profileId, item) === true;
+}
+function validProbeTools(tools) {
+  if (!Array.isArray(tools) || tools.length > 256) return false;
+  // Activation and the model-facing mcp_server_tools path must agree on the
+  // downstream contract (including description type and size).
+  try { assertValidDownstreamMcpTools(tools); }
+  catch { return false; }
+  const names = new Set();
+  let bytes = 0;
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)
+      || typeof tool.name !== "string" || !tool.name.isWellFormed()
+      || !tool.name || /[\x00-\x1f\x7f]/u.test(tool.name)
+      || Buffer.byteLength(tool.name, "utf8") > 128 || names.has(tool.name)
+      || !tool.inputSchema || typeof tool.inputSchema !== "object"
+      || Array.isArray(tool.inputSchema)
+      || Object.getPrototypeOf(tool.inputSchema) !== Object.prototype) return false;
+    names.add(tool.name);
+    try { bytes += Buffer.byteLength(JSON.stringify(tool), "utf8"); }
+    catch { return false; }
+    if (bytes > 256 * 1024) return false;
+  }
+  return true;
+}
 function page(items, cursor, limit) {
   const output = [];
   let bytes = 0;
@@ -40,7 +80,7 @@ class AgentHarnessServiceController {
     for (const [value, methods, label] of [
       [options.productStore, ["getAgentProfile"], "ProductStore"],
       [options.definitionStore, ["get", "history", "readRevision", "update", "restore", "previewImport", "import", "readGeneratedView"], "AgentDefinitionStore"],
-      [options.memoryStore, ["getRevision", "list"], "MemoryStore"],
+      [options.memoryStore, ["get", "getRevision", "list"], "MemoryStore"],
       [options.memoryEngine, ["propose", "update", "delete"], "MemoryEngine"],
       [options.chatSessionStore, ["listSessions"], "ChatSessionStore"],
       [options.transcriptStore, ["listEvents", "getRevision", "setContextExcluded"], "TranscriptStore"],
@@ -53,6 +93,12 @@ class AgentHarnessServiceController {
     this.definitionStore = options.definitionStore;
     this.memoryStore = options.memoryStore;
     this.memoryEngine = options.memoryEngine;
+    this.memoryProvenanceService = options.memoryProvenanceService || null;
+    this.memoryCandidateService = options.memoryCandidateService || null;
+    if (this.memoryCandidateService && ["list", "accept", "acceptMany", "reject"].some(
+      (method) => typeof this.memoryCandidateService[method] !== "function")) {
+      throw new TypeError("MemoryCandidateService dependency is invalid");
+    }
     this.chatSessionStore = options.chatSessionStore;
     this.transcriptStore = options.transcriptStore;
     this.toolRegistry = options.toolRegistry;
@@ -62,6 +108,17 @@ class AgentHarnessServiceController {
       .some((method) => typeof this.skillStore[method] !== "function")) {
       throw new TypeError("NativeSkillStore dependency is invalid");
     }
+    this.nativeMcpStore = options.nativeMcpStore || null;
+    this.nativeMcpClientManager = options.nativeMcpClientManager || null;
+    if (this.nativeMcpStore && ["list", "get", "prepare", "register"].some(
+      (method) => typeof this.nativeMcpStore[method] !== "function")) {
+      throw new TypeError("NativeMcpStore dependency is invalid");
+    }
+    if (this.nativeMcpClientManager && ["probe", "closeServer"].some(
+      (method) => typeof this.nativeMcpClientManager[method] !== "function")) {
+      throw new TypeError("NativeMcpClientManager dependency is invalid");
+    }
+    this.mcpActivationTokens = new Map();
     this.computerUseController = options.computerUseController || null;
     if (this.computerUseController && ["status", "list", "closeForProfile"]
       .some((method) => typeof this.computerUseController[method] !== "function")) {
@@ -111,8 +168,69 @@ class AgentHarnessServiceController {
     if (method.startsWith("harness.skills.") && !this.skillStore) {
       throw harnessError("HARNESS_SERVICE_CLOSED", "Skill management is unavailable");
     }
+    if (method.startsWith("harness.mcp.")
+      && (!this.nativeMcpStore || !this.nativeMcpClientManager)) {
+      throw harnessError("HARNESS_SERVICE_CLOSED", "MCP management is unavailable");
+    }
     if (method.startsWith("harness.computer.") && !this.computerUseController) {
       throw harnessError("HARNESS_SERVICE_CLOSED", "Computer Use management is unavailable");
+    }
+    if (method === "harness.mcp.list") {
+      const value = this.nativeMcpStore.list();
+      const disabled = value.servers.filter((server) => !server.enabled);
+      const items = disabled.slice(params.cursor, params.cursor + params.limit).map((server) => ({
+        id: server.id, name: server.name,
+        commandLabel: (path.basename(server.command) || "(root)").slice(0, 128),
+        cwdLabel: (path.basename(server.cwd) || "(root)").slice(0, 128),
+        argCount: server.args.length, updatedAt: server.updatedAt,
+      }));
+      const nextCursor = params.cursor + items.length;
+      return { revision: value.revision, totalDisabled: disabled.length, items,
+        nextCursor, hasMore: nextCursor < disabled.length };
+    }
+    if (method === "harness.mcp.rebind") {
+      if (this.nativeMcpStore.revision !== params.expectedRevision) {
+        throw harnessError("MCP_REGISTRY_REVISION_CONFLICT", "MCP Registry revision 已变化");
+      }
+      const current = this.nativeMcpStore.get(params.id);
+      if (!current) throw harnessError("MCP_SERVER_NOT_FOUND", "MCP Server 不存在");
+      if (current.enabled) throw harnessError("MCP_SERVER_ALREADY_ENABLED", "MCP Server 已启用");
+      const server = this.nativeMcpStore.prepare({ id: current.id, name: current.name,
+        command: params.command, args: params.args, cwd: params.cwd, enabled: false });
+      return (async () => {
+        await this.nativeMcpClientManager.closeServer(current.id);
+        const value = this.nativeMcpStore.register({ expectedRevision: params.expectedRevision, server });
+        const activationToken = crypto.randomUUID();
+        this.mcpActivationTokens.set(current.id, { revision: value.revision, activationToken });
+        return { revision: value.revision, id: current.id, enabled: false, activationToken };
+      })();
+    }
+    if (method === "harness.mcp.activate") {
+      if (this.nativeMcpStore.revision !== params.expectedRevision) {
+        throw harnessError("MCP_REGISTRY_REVISION_CONFLICT", "MCP Registry revision 已变化");
+      }
+      const pending = this.mcpActivationTokens.get(params.id);
+      if (!pending || pending.revision !== params.expectedRevision
+        || pending.activationToken !== params.activationToken) {
+        throw harnessError("MCP_REBIND_REQUIRED", "请重新设置 MCP 启动路径后再启用");
+      }
+      const current = this.nativeMcpStore.get(params.id);
+      if (!current) throw harnessError("MCP_SERVER_NOT_FOUND", "MCP Server 不存在");
+      if (current.enabled) throw harnessError("MCP_SERVER_ALREADY_ENABLED", "MCP Server 已启用");
+      const server = this.nativeMcpStore.prepare({ id: current.id, name: current.name,
+        command: current.command, args: current.args, cwd: current.cwd, enabled: true });
+      return (async () => {
+        let tools;
+        try { tools = await this.nativeMcpClientManager.probe(server); }
+        catch { throw harnessError("MCP_SERVER_PROBE_FAILED", "MCP Server 探测失败"); }
+        if (!validProbeTools(tools)) {
+          throw harnessError("MCP_SERVER_PROBE_FAILED", "MCP Server 工具清单无效");
+        }
+        await this.nativeMcpClientManager.closeServer(current.id);
+        const value = this.nativeMcpStore.register({ expectedRevision: params.expectedRevision, server });
+        this.mcpActivationTokens.delete(current.id);
+        return { revision: value.revision, id: current.id, enabled: true, toolCount: tools.length };
+      })();
     }
     if (method === "harness.definition.meta") {
       const current = this.definitionStore.get(params.profileId);
@@ -128,6 +246,12 @@ class AgentHarnessServiceController {
       };
     }
     if (method === "harness.definition.read") {
+      if (params.kind === "MEMORY" || (params.kind === "USER" && params.revision === null)) {
+        // These are projections of live memory. A failed post-commit rebuild can
+        // leave an older file on disk, so refresh against the current recall
+        // policy before an ordinary file read and fail closed on any error.
+        this.memoryEngine.rebuildViews(params.profileId);
+      }
       if (GENERATED.has(params.kind)) {
         const view = this.definitionStore.readGeneratedView(params.profileId, params.kind);
         return { kind: params.kind, revision: view?.revision ?? null, content: view?.content ?? "", readOnly: true };
@@ -186,24 +310,94 @@ class AgentHarnessServiceController {
       return { current: summary(value.manifest) };
     }
     if (method === "harness.memory.list") {
+      let recallPolicy;
+      try {
+        recallPolicy = this.memoryEngine.recallPolicy.getStatus(params.profileId);
+      } catch (error) {
+        recallPolicy = { ready: false, revision: null, indexPending: true,
+          code: error.code || "RECALL_POLICY_UNAVAILABLE" };
+      }
       const all = this.memoryStore.list(params.profileId, {
         ...(params.status ? { status: params.status } : {}),
         ...(params.scope ? { scope: params.scope } : {}),
+      }).filter((item) => {
+        if (!reviewItemVisible(this.memoryEngine, params.profileId, item)) return false;
+        if (item.status !== "active") return true;
+        // A live sibling may share a forgotten source or fact even though its
+        // primary MemoryStore status is still active. Do not show it as current.
+        try { return this.memoryEngine.recallPolicy.isMemoryVisible(params.profileId, item); }
+        catch { return false; }
       });
-      return { revision: this.memoryStore.getRevision(params.profileId), ...page(all, params.cursor, params.limit) };
+      return { revision: this.memoryStore.getRevision(params.profileId), recallPolicy,
+        ...page(all, params.cursor, params.limit) };
+    }
+    if (method === "harness.memory.explain") {
+      const current = this.memoryStore.get(params.profileId, params.id);
+      if (current && !reviewItemVisible(this.memoryEngine, params.profileId, current)) {
+        throw harnessError("MEMORY_NOT_FOUND", "记忆尚未完成审核回执");
+      }
+      if (this.memoryProvenanceService) {
+        return this.memoryProvenanceService.explain({ profileId: params.profileId,
+          id: params.id, viewer: "user" });
+      }
+      const item = this.memoryStore.get(params.profileId, params.id);
+      if (!item) throw harnessError("MEMORY_NOT_FOUND", "记忆不存在");
+      return { item, evidence: { status: "unavailable", reason: "provenance_store_unavailable" } };
+    }
+    if (method === "harness.memory.candidates.list") {
+      if (!this.memoryCandidateService) throw harnessError("MEMORY_CANDIDATE_UNAVAILABLE", "候选审核不可用");
+      return this.memoryCandidateService.list({ profileId: params.profileId,
+        status: params.status, cursor: params.cursor, limit: params.limit,
+        expectedRevision: params.expectedRevision });
+    }
+    if (method === "harness.memory.candidates.accept") {
+      if (!this.memoryCandidateService) throw harnessError("MEMORY_CANDIDATE_UNAVAILABLE", "候选审核不可用");
+      return this.memoryCandidateService.accept(params);
+    }
+    if (method === "harness.memory.candidates.acceptMany") {
+      if (!this.memoryCandidateService) throw harnessError("MEMORY_CANDIDATE_UNAVAILABLE", "候选审核不可用");
+      return this.memoryCandidateService.acceptMany(params);
+    }
+    if (method === "harness.memory.candidates.reject") {
+      if (!this.memoryCandidateService) throw harnessError("MEMORY_CANDIDATE_UNAVAILABLE", "候选审核不可用");
+      return this.memoryCandidateService.reject(params);
     }
     if (method === "harness.memory.create") {
       this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+      const sourceRef = `user-edit:${crypto.randomUUID()}`;
       const item = this.memoryEngine.propose({
         profileId: params.profileId, content: params.content, scope: params.scope,
-        type: "semantic", classification: "explicit", sourceRefs: [`user-edit:${crypto.randomUUID()}`],
+        type: "semantic", classification: "explicit", sourceRefs: [sourceRef],
       });
+      // A same-content create may return an existing memory. Its original
+      // source must not be relabeled as a new UI write.
+      if (item.sourceRefs.includes(sourceRef)) {
+        try { this.memoryProvenanceService?.recordUiWrite({ profileId: params.profileId,
+          item, operationId: `ui-create-${item.id}`, origin: "ui_create" }); } catch {}
+      }
       return { revision: this.memoryStore.getRevision(params.profileId), item };
     }
-    if (["harness.memory.update", "harness.memory.delete"].includes(method)) {
+    if (method === "harness.memory.update") {
       this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
-      const value = method.endsWith("delete") ? this.memoryEngine.delete(params)
-          : this.memoryEngine.update({ ...params, sourceRef: "user-edit:agent-settings" });
+      const previous = this.memoryStore.get(params.profileId, params.id);
+      if (!previous || previous.status !== "active") throw harnessError("MEMORY_NOT_FOUND", "记忆不存在");
+      const sourceRef = `user-edit:${crypto.randomUUID()}`;
+      const sourceRefs = [sourceRef,
+        ...previous.sourceRefs.filter((ref) => ref.startsWith("workspace:"))];
+      const item = this.memoryEngine.propose({ profileId: params.profileId,
+        scope: previous.scope, type: previous.type, content: params.content,
+        sourceRefs, classification: "explicit", sensitivity: previous.sensitivity,
+        confidence: params.confidence, validUntil: params.validUntil,
+        supersedes: previous.id });
+      if (item.supersedes === previous.id && item.sourceRefs.includes(sourceRef)) {
+        try { this.memoryProvenanceService?.recordUiWrite({ profileId: params.profileId,
+          item, operationId: `ui-edit-${item.id}`, origin: "ui_edit" }); } catch {}
+      }
+      return { revision: this.memoryStore.getRevision(params.profileId), item };
+    }
+    if (method === "harness.memory.delete") {
+      this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+      const value = this.memoryEngine.delete({ ...params, reason: "user_deleted" });
       return { revision: this.memoryStore.getRevision(params.profileId), item: value };
     }
     if (method === "harness.transcript.sessions") {
@@ -232,6 +426,49 @@ class AgentHarnessServiceController {
         profileRevision: value.profileRevision,
         ...page(value.items, params.cursor, params.limit),
       };
+    }
+    if (method === "harness.skills.query") {
+      const profile = this._profile(params.profileId);
+      const value = this.skillStore.list(params.profileId);
+      const usage = new Map();
+      const usageAgents = new Map();
+      usage.supported = true;
+      try {
+        for (const agent of this.productStore.listAgentProfiles()) {
+          if (!agent.enabled || agent.backendId !== "shoggoth") continue;
+          const result = this.skillStore.usage(agent.id);
+          if (result.supported !== true) throw harnessError("SKILL_USAGE_CORRUPT", "Skill usage unavailable");
+          for (const [name, agents] of Object.entries(result.skills)) {
+            const count = agents[agent.id] || 0;
+            if (count > 0) {
+              usage.set(name, (usage.get(name) || 0) + count);
+              if (!usageAgents.has(name)) usageAgents.set(name, {});
+              usageAgents.get(name)[agent.agentId] = count;
+            }
+          }
+        }
+      } catch {
+        // Usage is optional decoration. Never sort by a partial aggregate.
+        usage.clear();
+        usageAgents.clear();
+        usage.supported = false;
+      }
+      const items = value.items.map(skill => ({
+        ...skill,
+        backendId: "shoggoth",
+        category: skill.source === "builtin" ? "Shoggoth built-in" : "Shoggoth native",
+        emoji: "🧩",
+        profileId: profile.id,
+        agentId: profile.agentId,
+        registryRevision: value.registryRevision,
+        registryVersion: value.registryVersion,
+        profileRevision: value.profileRevision,
+        usageCount: usage.get(skill.name) || 0,
+        usageAgents: usageAgents.get(skill.name) || {},
+      }));
+      return querySkillManagementCatalog({ catalog: { ...value, items }, usage,
+        query: params.query, status: params.status, pageIndex: params.pageIndex,
+        limit: params.limit, expectedRevision: params.expectedRevision });
     }
     if (method === "harness.skills.preview") {
       const skill = this.skillStore.preview(params);

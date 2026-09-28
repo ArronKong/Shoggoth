@@ -1028,6 +1028,16 @@ class PluginStore {
     }
     return counts;
   }
+  listReadyConnectionsForComponent(installationId, selectedComponentId) {
+    if (!ID_PATTERN.test(installationId) || !HASH_PATTERN.test(selectedComponentId)) {
+      throw error("PLUGIN_CONNECTION_INVALID", "连接组件参数无效");
+    }
+    const rows = this._db().prepare(`SELECT * FROM connections
+      WHERE installation_id = ? AND component_id = ? AND state = 'ready'
+      ORDER BY id LIMIT 257`).all(installationId, selectedComponentId);
+    if (rows.length > 256) throw error("PLUGIN_CONNECTION_LIMIT", "已验证账号超出管理页容量");
+    return rows.map(publicConnection);
+  }
   // Trusted Service code may resolve the opaque secret reference. Management
   // DTOs continue to use getConnection(), which never exposes this field.
   getConnectionAuth(connectionId) {

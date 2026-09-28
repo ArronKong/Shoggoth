@@ -31,6 +31,9 @@ export default function AgentRuntimeBindings({ backend, agentId, onChanged }: {
   const snapshot = cache.data;
   const visibleBindings = snapshot?.bindings.filter((binding) => isVisibleRuntime(binding.runtime)) ?? [];
   const knownAccounts = accounts.data?.accounts ?? [];
+  const bindingName = (binding: AgentRuntimeBinding) => binding.label
+    || (binding.runtimeAccountId === "shoggoth-internal-codex-default-v1" ? t("agents.codexHarnessRuntime")
+      : binding.runtimeAccountId === "native-codex-default-v1" ? t("agents.codexCliRuntime") : binding.runtime);
   const blocked = pending || cache.loading || !!cache.error;
   const mutate = async (action: () => Promise<AgentRuntimeBindingMutation>, after?: () => void) => {
     if (pendingRef.current) return;
@@ -77,7 +80,7 @@ export default function AgentRuntimeBindings({ backend, agentId, onChanged }: {
         const matchingAccounts = knownAccounts.filter((entry) => entry.runtime === binding.runtime);
         const availability = snapshot.availability?.find((entry) => entry.bindingId === binding.id);
         return <li key={binding.id} className={styles.item} data-binding-id={binding.id}>
-          <div className={styles.identity}><strong>{binding.label || binding.runtime}</strong><span className={styles.tag}>{binding.runtime}</span>
+          <div className={styles.identity}><strong>{bindingName(binding)}</strong><span className={styles.tag}>{binding.runtime}</span>
             {isDefault && <span className={styles.tag}>{t("agents.default")}</span>}</div>
           <div className={styles.account}><span>{t("agents.bindingAccount")}</span>
             <Select value={binding.runtimeAccountId} disabled={blocked || !!accounts.error || !matchingAccounts.length}
@@ -91,7 +94,8 @@ export default function AgentRuntimeBindings({ backend, agentId, onChanged }: {
           </div>
           {!binding.enabled && <p className="ui-hint">{t("agents.bindingDisabled")}</p>}
           {availability?.available === false && <p className={styles.error}>{t(availability.reason === "runtime-disabled"
-            ? "agents.bindingRuntimeDisabled" : "agents.bindingRuntimeUnavailable")}</p>}
+            ? "agents.bindingRuntimeDisabled" : availability.reason === "runtime-not-installed"
+              ? "agents.sessionRuntimeNotInstalled" : "agents.bindingRuntimeUnavailable")}</p>}
           {accounts.data && !account && <p className={styles.error}>{t("agents.bindingAccountMissing")}</p>}
           {editing === binding.id && <div className={styles.editor}>
             <TextInput aria-label={t("agents.bindingLabel")} value={editLabel} maxLength={256} disabled={blocked} onChange={(event) => setEditLabel(event.target.value)} />

@@ -49,9 +49,18 @@ const { scanDirectory } = require("./check-release-private-keys.cjs");
 
     const app = path.join(scratch, "Shoggoth.app", "Contents", "Resources");
     fs.mkdirSync(app, { recursive: true });
+    const template = path.join(app, "bundled-plugins", "packages", "product-design",
+      "templates", "prototype", ".npmrc");
+    fs.mkdirSync(path.dirname(template), { recursive: true });
+    const safeTemplate = "cache=.npm-cache\nfund=false\naudit=false\n";
+    fs.writeFileSync(template, safeTemplate);
     const archive = path.join(app, "app.asar");
     await asar.createPackage(source, archive);
-    assert.equal(scanDirectory(path.join(scratch, "Shoggoth.app")).fileCount, 2);
+    assert.equal(scanDirectory(path.join(scratch, "Shoggoth.app")).fileCount, 3);
+    fs.appendFileSync(template, "# changed\n");
+    assert.throws(() => scanDirectory(path.join(scratch, "Shoggoth.app")),
+      /PRIVATE_KEY_MATERIAL_FOUND.*prototype\/\.npmrc.*credential file name/u);
+    fs.writeFileSync(template, safeTemplate);
     fs.writeFileSync(leaked, pem);
     const blockedApp = path.join(scratch, "Blocked.app", "Contents", "Resources");
     fs.mkdirSync(blockedApp, { recursive: true });

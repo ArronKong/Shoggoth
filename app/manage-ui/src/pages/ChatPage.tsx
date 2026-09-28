@@ -207,6 +207,7 @@ interface SessionRow {
   kind?: string;
   source?: string;
   key: string;
+  sessionId?: string; // host-owned physical id; never derive from the routing key
   backendId?: string;
   displayName?: string;
   label?: string;
@@ -519,6 +520,7 @@ interface Part {
   durationS?: number; // tool runtime seconds (Hermes gateway tool.complete)
   promptEntry?: ChatPromptEntry; // prompt part: blocking agent request card
   toolName?: string;
+  toolCallId?: string;
   toolArgs?: unknown; // toolCall arguments → rendered into the card title (url/query/…)
   pluginAppCallId?: string;
   isError?: boolean; // toolResult: the tool failed (→ "Tool error …" red card)
@@ -1238,12 +1240,16 @@ function normalize(raw: any): ChatMsg {
           type: "toolResult" as const,
           text: toolResultBlockText(b),
           toolName: typeof b?.name === "string" ? b.name : raw?.toolName,
+          toolCallId: typeof b?.toolCallId === "string" ? b.toolCallId
+            : typeof raw?.toolCallId === "string" ? raw.toolCallId : undefined,
           toolArgs: toolResultBlockArgs(b),
           isError: b?.is_error === true || raw?.isError === true,
           durationS: toolResultBlockDuration(b),
           pluginAppCallId: validPluginAppCallId(b?.pluginAppCallId),
         }))
-      : [{ type: "toolResult", text: contentToText(raw?.content), toolName: raw?.toolName, isError: raw?.isError === true }];
+      : [{ type: "toolResult", text: contentToText(raw?.content), toolName: raw?.toolName,
+          toolCallId: typeof raw?.toolCallId === "string" ? raw.toolCallId : undefined,
+          isError: raw?.isError === true }];
     return base;
   }
   if (role === "user" || role === "system") {
@@ -1254,7 +1260,7 @@ function normalize(raw: any): ChatMsg {
   const content = raw?.content;
   if (Array.isArray(content)) {
     for (const c of content) {
-      const cc = c as { type?: string; text?: string; thinking?: string; toolName?: string; name?: string; arguments?: unknown; args?: unknown; input?: unknown; is_error?: boolean; durationS?: unknown; planEntries?: unknown; pluginAppCallId?: unknown };
+      const cc = c as { type?: string; id?: unknown; toolCallId?: unknown; text?: string; thinking?: string; toolName?: string; name?: string; arguments?: unknown; args?: unknown; input?: unknown; is_error?: boolean; durationS?: unknown; planEntries?: unknown; pluginAppCallId?: unknown };
       if (cc?.type === "thinking") base.parts.push({ type: "thinking", text: cc.thinking ?? "" });
       else if (cc?.type === "plan") {
         const planEntries = planEntriesFromBlock(cc);
@@ -1265,12 +1271,16 @@ function normalize(raw: any): ChatMsg {
         base.parts.push(widget ?? { type: "canvas" });
       }
       // 工具调用块名三方言：pi-ai "toolCall"、claude-cli "toolcall"、Anthropic 标准 "tool_use"。
-      else if (cc?.type === "toolCall" || cc?.type === "toolcall" || cc?.type === "tool_use") base.parts.push({ type: "toolCall", toolName: cc.toolName ?? cc.name ?? "tool", toolArgs: cc.arguments ?? cc.args ?? cc.input });
+      else if (cc?.type === "toolCall" || cc?.type === "toolcall" || cc?.type === "tool_use") base.parts.push({
+        type: "toolCall", toolName: cc.toolName ?? cc.name ?? "tool",
+        toolCallId: typeof cc.id === "string" ? cc.id : typeof cc.toolCallId === "string" ? cc.toolCallId : undefined,
+        toolArgs: cc.arguments ?? cc.args ?? cc.input });
       // claude-cli 通道把串行工具的结果直接嵌进 assistant 消息（pi-ai 是独立 toolResult 消息）。
       else if (isToolResultBlock(cc)) base.parts.push({
         type: "toolResult",
         text: toolResultBlockText(cc),
         toolName: typeof cc.name === "string" ? cc.name : undefined,
+        toolCallId: typeof cc.toolCallId === "string" ? cc.toolCallId : undefined,
         toolArgs: toolResultBlockArgs(cc),
         isError: cc.is_error === true,
         durationS: toolResultBlockDuration(cc),
@@ -1379,6 +1389,7 @@ function toolEntryToPart(e: ToolEntry): Part {
     e.output != null || e.pluginAppCallId != null
       ? { type: "toolResult", toolName: e.name, text: e.output, isError: e.isError }
       : { type: "toolCall", toolName: e.name, toolArgs: e.args };
+  base.toolCallId = e.id;
   if (e.diff) base.diff = e.diff;
   if (e.diffText) base.diffText = e.diffText;
   if (e.durationS != null) base.durationS = e.durationS;
@@ -2463,8 +2474,20 @@ function ChatPageApp() {
   }, [pluginSelections]);
   const pluginSelectionsRef = useRef(pluginSelections);
   pluginSelectionsRef.current = pluginSelections;
-  const pluginGenerationRef = useRef<Map<string, number>>(new Map());
+  // A one-shot choice restored from localStorage is already a real draft.
+  // Give it a generation before the first submit; otherwise the visible chip
+  // would be silently omitted from chat.send until the user toggled it again.
+  const pluginGenerationRef = useRef<Map<string, number>>(new Map(
+    Object.entries(pluginSelections).filter(([, selected]) => selected.length > 0)
+      .map(([key]) => [key, 1]),
+  ));
   const pluginReservationRef = useRef<Map<string, number>>(new Map());
+  const pluginValidityRef = useRef<Map<string, { backendId: string; selection: string;
+    valid: boolean | null }>>(new Map());
+  const onPluginSelectionValidity = useCallback((key: string, backendId: string,
+    selection: ChatPluginSelection[], valid: boolean | null) => {
+    pluginValidityRef.current.set(key, { backendId, selection: JSON.stringify(selection), valid });
+  }, []);
   const pendingPluginSendRef = useRef<Map<string, { key: string; generation: number; text: string;
     atts: ChatAttachment[]; selection: ChatPluginSelection[] }>>(new Map());
   const setPluginSelectionFor = (key: string, selection: ChatPluginSelection[]) => {
@@ -5753,10 +5776,22 @@ function ChatPageApp() {
     const q = quote && quote.key === key ? quote : null;
     const prefix = q ? `${q.text.split("\n").map((l) => `> ${l}`).join("\n")}\n\n` : "";
     const outgoing = prefix && !text.startsWith(prefix) ? `${prefix}${text}` : text;
+    const selectedDraft = pluginSelectionsRef.current[key];
     const selectionGeneration = pluginGenerationRef.current.get(key);
+    if (selectedDraft?.length && selectionGeneration === undefined) {
+      setToast({ text: t("chat.pluginSelectionStale"), kind: "error" });
+      return;
+    }
+    const knownValidity = pluginValidityRef.current.get(key);
+    if (selectedDraft?.length && knownValidity?.backendId === backendOfSession(key)
+      && knownValidity.selection === JSON.stringify(selectedDraft)
+      && knownValidity.valid === false) {
+      setToast({ text: t("chat.pluginSelectionStale"), kind: "error" });
+      return;
+    }
     const selectedPlugins = selectionGeneration !== undefined
       && pluginReservationRef.current.get(key) !== selectionGeneration
-      ? pluginSelectionsRef.current[key]?.slice() : undefined;
+      ? selectedDraft?.slice() : undefined;
     const shouldSteer = inFlight && canSteerActiveChat(
       capabilitiesForSession(key),
       runStatusBySessionRef.current.get(key),
@@ -6327,6 +6362,24 @@ function ChatPageApp() {
   // pdf / arbitrary file only where the backend's transport can deliver them.
   // Oversized files are refused up-front with backend-declared limits.
   const activeBackend = activeKey ? backendOfSession(activeKey) : "openclaw";
+  const duplicateToolCallIds = useMemo(() => {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const message of messages) for (const part of message.parts) {
+      if (part.type !== "toolCall" || !part.toolCallId) continue;
+      if (seen.has(part.toolCallId)) duplicates.add(part.toolCallId);
+      else seen.add(part.toolCallId);
+    }
+    return duplicates;
+  }, [messages]);
+  const activePluginConversation = activeKey ? {
+    backendId: activeBackend,
+    sessionKey: activeKey,
+    agentId: agentOf(activeKey),
+    sessionId: listLive && !degradedBackendsRef.current.has(activeBackend)
+      ? sessions.find(row => row.key === activeKey)?.sessionId : undefined,
+    duplicateToolCallIds,
+  } : undefined;
   const activeBackendDescriptor = chatBackendDescriptors.get(activeBackend);
   // Negotiated transport limits already arrive through the generic capability;
   // the composer never branches on a concrete backend to apply them.
@@ -8759,7 +8812,7 @@ function ChatPageApp() {
                             <TurnProcess
                               key={`${groupRenderKey}:live-trajectory`}
                               steps={groupLiveSteps}
-                              pluginConversation={activeKey && activeBackend ? { backendId: activeBackend, sessionKey: activeKey } : undefined}
+                              pluginConversation={activePluginConversation}
                               live
                               defaultOpen
                               onOpenLargeView={() => setTimelineModal({ steps: groupLiveSteps, ts: liveMessage?.ts ?? g.ts })}
@@ -8833,7 +8886,7 @@ function ChatPageApp() {
                                 // 关 → 连摘要行都不渲染;开 → 摘要行+可展开,时间线含完整过程
                                 // (思考+工具,不再单独过滤思考步)。
                                 if (!showTraj || !p.steps?.length) return null;
-                                return <TurnProcess key={k} steps={p.steps} pluginConversation={activeKey && activeBackend ? { backendId: activeBackend, sessionKey: activeKey } : undefined} onOpenLargeView={() => setTimelineModal({ steps: p.steps!, ts: m.ts })} />;
+                                return <TurnProcess key={k} steps={p.steps} pluginConversation={activePluginConversation} onOpenLargeView={() => setTimelineModal({ steps: p.steps!, ts: m.ts })} />;
                               }
                               if (p.type === "canvas") {
                                 return (
@@ -9309,6 +9362,7 @@ function ChatPageApp() {
                 backendId={activeBackend}
                 selected={activeKey ? pluginSelections[activeKey] ?? [] : []}
                 onChange={(selection) => { if (activeKey) setPluginSelectionFor(activeKey, selection); }}
+                onSelectionValidity={onPluginSelectionValidity}
                 onBrowse={browsePlugins}
               />}
               <div className="chat-composer__bar">
@@ -9565,6 +9619,7 @@ function ChatPageApp() {
             backendId={activeBackend}
             selected={activeKey ? pluginSelections[activeKey] ?? [] : []}
             onChange={(selection) => { if (activeKey) setPluginSelectionFor(activeKey, selection); }}
+            onSelectionValidity={onPluginSelectionValidity}
             onBrowse={browsePlugins}
           />}
           attachments={attachments}
@@ -9613,7 +9668,7 @@ function ChatPageApp() {
           onAttachClick={() => fileInputRef.current?.click()}
           supportsAttachments={supportsActiveAttachments}
         />
-      )}
+    )}
     </>
   );
 }

@@ -485,6 +485,9 @@ class AgentBackend {
    */
   async getSkills(_opts = {}) { return []; }
 
+  /** Bounded management page. Legacy backends retain getSkills(). */
+  async getSkillsPage(_opts = {}) { return { supported: false, reasonCode: "SKILL_PAGE_UNSUPPORTED" }; }
+
   /**
    * Return this backend's kanban board for the tasks page:
    * { columns: [{ id, name, tasks: [UnifiedTask...] }], capabilities? }.
@@ -1272,13 +1275,21 @@ class AgentBackend {
     return { supported: false, reasonCode: "PLUGIN_UNSUPPORTED",
       catalogRevision: null, items: [], nextCursor: null };
   }
+  /** Shoggoth-owned external tool calls and pending approvals; other backends have no authority. */
+  async getPluginExternalCalls(_query = {}) { throw new Error(`${this.id}: external plugin calls not supported`); }
+  async getExternalPluginApprovals(_query = {}) { throw new Error(`${this.id}: external plugin approvals not supported`); }
+  async prepareExternalPluginApproval(_input) { throw new Error(`${this.id}: external plugin approvals not supported`); }
+  async commitExternalPluginApproval(_input) { throw new Error(`${this.id}: external plugin approvals not supported`); }
   async previewPluginInstall(_source) { throw new Error(`${this.id}: plugin install not supported`); }
+  async listBundledPlugins() { throw new Error(`${this.id}: bundled plugins not supported`); }
   async previewPluginUninstall(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
   async uninstallPlugin(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
   async preparePluginMcpConsent(_input) { throw new Error(`${this.id}: plugin consent not supported`); }
   async preparePluginOAuth(_input) { throw new Error(`${this.id}: plugin OAuth not supported`); }
   async preparePluginDisconnect(_input) { throw new Error(`${this.id}: plugin disconnect not supported`); }
   async commitPluginDisconnect(_input) { throw new Error(`${this.id}: plugin disconnect not supported`); }
+  async preparePluginAccountSelection(_input) { throw new Error(`${this.id}: plugin account selection not supported`); }
+  async commitPluginAccountSelection(_input) { throw new Error(`${this.id}: plugin account selection not supported`); }
   async getPluginDisconnectOperation(_agentId, _operationId) { throw new Error(`${this.id}: plugin disconnect not supported`); }
   async previewPluginDependency(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
   async commitPluginDependency(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
@@ -1839,6 +1850,13 @@ class AgentBackend {
     throw new Error(`${this.id}: importAgentDefinition() not supported`);
   }
   async listAgentMemories(_id, _opts) { return { supported: false, reason: "unsupported", items: [] }; }
+  async listAgentMemoryCandidates(_id, _opts) {
+    return { supported: false, reason: "unsupported", revision: 0, items: [],
+      nextCursor: 0, hasMore: false, usage: { day: null, calls: 0, inputTokens: 0, outputTokens: 0 } };
+  }
+  async mutateAgentMemoryCandidate(_id, _action, _input) {
+    throw new Error(`${this.id}: mutateAgentMemoryCandidate() not supported`);
+  }
   async mutateAgentMemory(_id, _action, _input) {
     throw new Error(`${this.id}: mutateAgentMemory() not supported`);
   }

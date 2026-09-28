@@ -38,6 +38,9 @@
   color: #fff; font-family: inherit;
 }
 .expansion :global(.chat-prompt__content) > * { flex-shrink: 0; }
+.root[data-input=true] .expansion :global(.chat-prompt__content) {
+  gap: 2px; padding-bottom: 6px;
+}
 .expansion :global(.chat-prompt__head) { margin: 0; }
 .expansion :global(.chat-prompt__badge) { padding: 0; color: #fff; background: transparent; }
 .expansion :global(.chat-prompt__q), .expansion :global(.chat-prompt__summary) :is(dt, dd),
@@ -52,5 +55,5 @@
 }
 .expansion :global(.chat-prompt__btn):hover:not(:disabled) { color: var(--note-ink); background: #0000000a; }
 .expansion :global(.chat-prompt__status) { color: var(--note-ink); white-space: nowrap; }
-.expansion[data-approval=false] { padding: 0 16px; border-radius: 0 0 16px 16px; background: var(--run-color); }
+.expansion[data-approval=false] { overflow: visible; }
 @media (prefers-reduced-motion: reduce) { .root::before { transition: none; } }

@@ -1,0 +1,4566 @@
+{
+  "version": 1,
+  "description": "Frozen authored synthetic bilingual short-memory comparison. All people, facts and projects are fictional. No user data. Created before candidate scoring.",
+  "evaluationContract": {
+    "families": 24,
+    "groups": [
+      "zh-zh",
+      "en-en",
+      "zh-en",
+      "en-zh",
+      "mixed"
+    ],
+    "crossLanguageOnly": true,
+    "mixedCorpus": "one language per record: zh at even record positions, en at odd positions",
+    "relevantPerQuery": 1,
+    "rankingDepth": 10,
+    "qualityEncoding": "single record and single query to avoid dynamic-quantization batch coupling",
+    "fusion": {
+      "rrfK": 60,
+      "lexicalWeight": 1,
+      "vectorWeight": 1,
+      "candidates": "lexical top5 union vector top5",
+      "tieBreak": "frozen record order"
+    }
+  },
+  "records": [
+    {
+      "id": "m-theme",
+      "family": "theme",
+      "role": "target",
+      "zh": "我的界面默认采用深色主题。",
+      "en": "My interface uses a dark theme by default."
+    },
+    {
+      "id": "d-theme-1",
+      "family": "theme",
+      "role": "distractor",
+      "zh": "林杉的界面默认采用浅色主题。",
+      "en": "Lin Shan uses a light interface theme by default."
+    },
+    {
+      "id": "d-theme-2",
+      "family": "theme",
+      "role": "distractor",
+      "zh": "我在演示幻灯片里使用浅色底图。",
+      "en": "I use a light background in presentation slides."
+    },
+    {
+      "id": "d-theme-3",
+      "family": "theme",
+      "role": "distractor",
+      "zh": "晨舟网站跟随访客系统切换明暗主题。",
+      "en": "The MorningBoat website follows each visitor’s system appearance."
+    },
+    {
+      "id": "m-answer-style",
+      "family": "answer-style",
+      "role": "target",
+      "zh": "技术问题的回答先给结论，再列证据。",
+      "en": "Answers to technical questions should state the conclusion first, then list the evidence."
+    },
+    {
+      "id": "d-answer-style-1",
+      "family": "answer-style",
+      "role": "distractor",
+      "zh": "写旅行日记时先描绘环境，再记录感受。",
+      "en": "Travel diaries describe the surroundings before recording feelings."
+    },
+    {
+      "id": "d-answer-style-2",
+      "family": "answer-style",
+      "role": "distractor",
+      "zh": "晨舟的故障报告先列时间线，再给结论。",
+      "en": "MorningBoat incident reports put the timeline before the conclusion."
+    },
+    {
+      "id": "d-answer-style-3",
+      "family": "answer-style",
+      "role": "distractor",
+      "zh": "林杉希望技术回答只给简短结论。",
+      "en": "Lin Shan wants technical replies to contain only a brief conclusion."
+    },
+    {
+      "id": "m-pet",
+      "family": "pet",
+      "role": "target",
+      "zh": "我养的猫名字叫豆包。",
+      "en": "My cat is named Doubao."
+    },
+    {
+      "id": "d-pet-1",
+      "family": "pet",
+      "role": "distractor",
+      "zh": "林杉的猫叫汤圆。",
+      "en": "Lin Shan’s cat is named Tangyuan."
+    },
+    {
+      "id": "d-pet-2",
+      "family": "pet",
+      "role": "distractor",
+      "zh": "我的狗名字叫奶糖。",
+      "en": "My dog is named Candy."
+    },
+    {
+      "id": "d-pet-3",
+      "family": "pet",
+      "role": "distractor",
+      "zh": "豆包是晨舟项目的机器人代号。",
+      "en": "Doubao is the codename of the MorningBoat project’s robot."
+    },
+    {
+      "id": "m-trip",
+      "family": "trip",
+      "role": "target",
+      "zh": "我计划六月去京都旅行。",
+      "en": "I plan to travel to Kyoto in June."
+    },
+    {
+      "id": "d-trip-1",
+      "family": "trip",
+      "role": "distractor",
+      "zh": "林杉计划五月去京都旅行。",
+      "en": "Lin Shan plans to visit Kyoto in May."
+    },
+    {
+      "id": "d-trip-2",
+      "family": "trip",
+      "role": "distractor",
+      "zh": "我去年十一月去过大阪。",
+      "en": "I visited Osaka last November."
+    },
+    {
+      "id": "d-trip-3",
+      "family": "trip",
+      "role": "distractor",
+      "zh": "晨舟团队六月去东京参加展会。",
+      "en": "The MorningBoat team attends an exhibition in Tokyo in June."
+    },
+    {
+      "id": "m-agent-location",
+      "family": "agent-location",
+      "role": "target",
+      "zh": "我的 Shoggoth 原生 Agent 在本机运行。",
+      "en": "My native Shoggoth agent runs on my local computer."
+    },
+    {
+      "id": "d-agent-location-1",
+      "family": "agent-location",
+      "role": "distractor",
+      "zh": "晨舟网站的客服机器人在云端运行。",
+      "en": "The MorningBoat website’s support bot runs in the cloud."
+    },
+    {
+      "id": "d-agent-location-2",
+      "family": "agent-location",
+      "role": "distractor",
+      "zh": "林杉的 Shoggoth 原生 Agent 放在远程服务器。",
+      "en": "Lin Shan’s native Shoggoth agent runs on a remote server."
+    },
+    {
+      "id": "d-agent-location-3",
+      "family": "agent-location",
+      "role": "distractor",
+      "zh": "我的数据备份存放在网络硬盘。",
+      "en": "My data backups are stored on network attached storage."
+    },
+    {
+      "id": "m-review",
+      "family": "review",
+      "role": "target",
+      "zh": "我每周五下午复盘项目进展。",
+      "en": "I review project progress every Friday afternoon."
+    },
+    {
+      "id": "d-review-1",
+      "family": "review",
+      "role": "distractor",
+      "zh": "周禾每周五上午检查备份。",
+      "en": "Zhou He inspects backups every Friday morning."
+    },
+    {
+      "id": "d-review-2",
+      "family": "review",
+      "role": "distractor",
+      "zh": "林杉每周三下午复盘项目。",
+      "en": "Lin Shan reviews the project every Wednesday afternoon."
+    },
+    {
+      "id": "d-review-3",
+      "family": "review",
+      "role": "distractor",
+      "zh": "晨舟周一上午安排需求讨论。",
+      "en": "MorningBoat schedules requirements discussions on Monday mornings."
+    },
+    {
+      "id": "m-no-sunday",
+      "family": "no-sunday",
+      "role": "target",
+      "zh": "我不希望在周日收到项目提醒。",
+      "en": "I do not want project reminders on Sundays."
+    },
+    {
+      "id": "d-no-sunday-1",
+      "family": "no-sunday",
+      "role": "distractor",
+      "zh": "林杉希望周日收到项目提醒。",
+      "en": "Lin Shan wants project reminders on Sundays."
+    },
+    {
+      "id": "d-no-sunday-2",
+      "family": "no-sunday",
+      "role": "distractor",
+      "zh": "我希望周六收到项目提醒。",
+      "en": "I want project reminders on Saturdays."
+    },
+    {
+      "id": "d-no-sunday-3",
+      "family": "no-sunday",
+      "role": "distractor",
+      "zh": "晨舟客户要求周日发送备份报告。",
+      "en": "A MorningBoat client requests backup reports on Sundays."
+    },
+    {
+      "id": "m-office",
+      "family": "office",
+      "role": "target",
+      "zh": "我的办公地点已经从海淀搬到望京，现在在望京办公。",
+      "en": "My office has moved from Haidian to Wangjing; I now work in Wangjing."
+    },
+    {
+      "id": "d-office-1",
+      "family": "office",
+      "role": "distractor",
+      "zh": "林杉目前仍在海淀办公。",
+      "en": "Lin Shan still works in Haidian."
+    },
+    {
+      "id": "d-office-2",
+      "family": "office",
+      "role": "distractor",
+      "zh": "晨舟仓库位于望京，办公室位于西直门。",
+      "en": "MorningBoat’s warehouse is in Wangjing and its office is in Xizhimen."
+    },
+    {
+      "id": "d-office-3",
+      "family": "office",
+      "role": "distractor",
+      "zh": "我的旧办公地点在海淀时使用蓝色门牌。",
+      "en": "My former office in Haidian used a blue door plate."
+    },
+    {
+      "id": "m-build-id",
+      "family": "build-id",
+      "role": "target",
+      "zh": "晨舟项目当前构建号是 QK-4827。",
+      "en": "The current build identifier for MorningBoat is QK-4827."
+    },
+    {
+      "id": "d-build-id-1",
+      "family": "build-id",
+      "role": "distractor",
+      "zh": "另一流程的构建号是 QK-4828。",
+      "en": "The other pipeline’s build identifier is QK-4828."
+    },
+    {
+      "id": "d-build-id-2",
+      "family": "build-id",
+      "role": "distractor",
+      "zh": "晨舟项目上一轮构建号是 QK-4807。",
+      "en": "MorningBoat’s previous build identifier was QK-4807."
+    },
+    {
+      "id": "d-build-id-3",
+      "family": "build-id",
+      "role": "distractor",
+      "zh": "火羽项目当前构建号是 QK-4927。",
+      "en": "The current build identifier for Firebird is QK-4927."
+    },
+    {
+      "id": "m-logs",
+      "family": "logs",
+      "role": "target",
+      "zh": "晨舟项目的日志统一保存为 JSONL 格式。",
+      "en": "All MorningBoat project logs are stored in JSONL format."
+    },
+    {
+      "id": "d-logs-1",
+      "family": "logs",
+      "role": "distractor",
+      "zh": "晨舟项目的配置采用 YAML 格式。",
+      "en": "MorningBoat configuration uses YAML format."
+    },
+    {
+      "id": "d-logs-2",
+      "family": "logs",
+      "role": "distractor",
+      "zh": "火羽项目的日志使用纯文本。",
+      "en": "Firebird project logs use plain text."
+    },
+    {
+      "id": "d-logs-3",
+      "family": "logs",
+      "role": "distractor",
+      "zh": "林杉把日志转换为 CSV 供表格分析。",
+      "en": "Lin Shan converts logs to CSV for spreadsheet analysis."
+    },
+    {
+      "id": "m-minutes",
+      "family": "minutes",
+      "role": "target",
+      "zh": "火羽会议纪要保留三个月。",
+      "en": "Firebird meeting minutes are retained for three months."
+    },
+    {
+      "id": "d-minutes-1",
+      "family": "minutes",
+      "role": "distractor",
+      "zh": "晨舟会议纪要保留十二个月。",
+      "en": "MorningBoat meeting minutes are retained for twelve months."
+    },
+    {
+      "id": "d-minutes-2",
+      "family": "minutes",
+      "role": "distractor",
+      "zh": "火羽项目的调试日志保留三天。",
+      "en": "Firebird debugging logs are retained for three days."
+    },
+    {
+      "id": "d-minutes-3",
+      "family": "minutes",
+      "role": "distractor",
+      "zh": "林杉的会议录音保留一个月。",
+      "en": "Lin Shan keeps meeting recordings for one month."
+    },
+    {
+      "id": "m-budget",
+      "family": "budget",
+      "role": "target",
+      "zh": "我的本次采购预算上限是 4800 元。",
+      "en": "My spending limit for this purchase is 4800 yuan."
+    },
+    {
+      "id": "d-budget-1",
+      "family": "budget",
+      "role": "distractor",
+      "zh": "林杉本次采购预算为 8400 元。",
+      "en": "Lin Shan’s purchase budget is 8400 yuan."
+    },
+    {
+      "id": "d-budget-2",
+      "family": "budget",
+      "role": "distractor",
+      "zh": "我的上一次采购共花了 480 元。",
+      "en": "My previous purchase cost 480 yuan."
+    },
+    {
+      "id": "d-budget-3",
+      "family": "budget",
+      "role": "distractor",
+      "zh": "晨舟年度设备预算是 48000 元。",
+      "en": "MorningBoat’s annual equipment budget is 48000 yuan."
+    },
+    {
+      "id": "m-language",
+      "family": "language",
+      "role": "target",
+      "zh": "我的软件界面用中文，项目文档用英文。",
+      "en": "My software interface is in Chinese and project documentation is in English."
+    },
+    {
+      "id": "d-language-1",
+      "family": "language",
+      "role": "distractor",
+      "zh": "林杉的软件界面与文档都用英文。",
+      "en": "Lin Shan uses English for both the interface and documentation."
+    },
+    {
+      "id": "d-language-2",
+      "family": "language",
+      "role": "distractor",
+      "zh": "晨舟客户的界面用日文，合同用中文。",
+      "en": "A MorningBoat client uses a Japanese interface and Chinese contracts."
+    },
+    {
+      "id": "d-language-3",
+      "family": "language",
+      "role": "distractor",
+      "zh": "我的法语学习笔记只用法语。",
+      "en": "My French study notes are written only in French."
+    },
+    {
+      "id": "m-local-data",
+      "family": "local-data",
+      "role": "target",
+      "zh": "我的私人记忆只保存在本机，不上传到云端。",
+      "en": "My private memories are stored only on my computer and are not uploaded to the cloud."
+    },
+    {
+      "id": "d-local-data-1",
+      "family": "local-data",
+      "role": "distractor",
+      "zh": "晨舟公开产品文档上传到云端。",
+      "en": "MorningBoat’s public product documentation is uploaded to the cloud."
+    },
+    {
+      "id": "d-local-data-2",
+      "family": "local-data",
+      "role": "distractor",
+      "zh": "林杉选择在云端同步私人记忆。",
+      "en": "Lin Shan chooses to sync private memories to the cloud."
+    },
+    {
+      "id": "d-local-data-3",
+      "family": "local-data",
+      "role": "distractor",
+      "zh": "我的公开作品集允许上传网站。",
+      "en": "My public portfolio may be uploaded to a website."
+    },
+    {
+      "id": "m-reminder-time",
+      "family": "reminder-time",
+      "role": "target",
+      "zh": "我的账单提醒安排在每周二上午九点。",
+      "en": "My bill reminders are scheduled for Tuesdays at nine in the morning."
+    },
+    {
+      "id": "d-reminder-time-1",
+      "family": "reminder-time",
+      "role": "distractor",
+      "zh": "林杉的账单提醒安排在周四晚上九点。",
+      "en": "Lin Shan’s bill reminders occur on Thursdays at nine in the evening."
+    },
+    {
+      "id": "d-reminder-time-2",
+      "family": "reminder-time",
+      "role": "distractor",
+      "zh": "我周二晚上九点参加网络课程。",
+      "en": "I attend an online course on Tuesdays at nine in the evening."
+    },
+    {
+      "id": "d-reminder-time-3",
+      "family": "reminder-time",
+      "role": "distractor",
+      "zh": "晨舟在周二上午十点发送服务器报告。",
+      "en": "MorningBoat sends server reports on Tuesdays at ten in the morning."
+    },
+    {
+      "id": "m-food",
+      "family": "food",
+      "role": "target",
+      "zh": "旅行订餐时，我优先选择素食餐厅。",
+      "en": "When arranging meals during travel, I prefer vegetarian restaurants."
+    },
+    {
+      "id": "d-food-1",
+      "family": "food",
+      "role": "distractor",
+      "zh": "林杉旅行时优先选择海鲜餐厅。",
+      "en": "Lin Shan prefers seafood restaurants when travelling."
+    },
+    {
+      "id": "d-food-2",
+      "family": "food",
+      "role": "distractor",
+      "zh": "我的早餐通常在家里准备。",
+      "en": "I usually prepare breakfast at home."
+    },
+    {
+      "id": "d-food-3",
+      "family": "food",
+      "role": "distractor",
+      "zh": "晨舟团建的餐厅提供烧烤套餐。",
+      "en": "The restaurant for MorningBoat’s team outing offers barbecue meals."
+    },
+    {
+      "id": "m-backup",
+      "family": "backup",
+      "role": "target",
+      "zh": "我每周五上午检查数据备份是否完成。",
+      "en": "Every Friday morning I check that data backups have completed."
+    },
+    {
+      "id": "d-backup-1",
+      "family": "backup",
+      "role": "distractor",
+      "zh": "周禾每周五下午复盘项目进展。",
+      "en": "Zhou He reviews project progress on Friday afternoons."
+    },
+    {
+      "id": "d-backup-2",
+      "family": "backup",
+      "role": "distractor",
+      "zh": "林杉每周日晚上检查数据备份。",
+      "en": "Lin Shan checks data backups on Sunday evenings."
+    },
+    {
+      "id": "d-backup-3",
+      "family": "backup",
+      "role": "distractor",
+      "zh": "晨舟数据库每日凌晨自动备份。",
+      "en": "The MorningBoat database is backed up automatically before dawn each day."
+    },
+    {
+      "id": "m-doc-owner",
+      "family": "doc-owner",
+      "role": "target",
+      "zh": "火羽项目的文档由林杉负责维护。",
+      "en": "Lin Shan is responsible for maintaining the Firebird project documentation."
+    },
+    {
+      "id": "d-doc-owner-1",
+      "family": "doc-owner",
+      "role": "distractor",
+      "zh": "晨舟文档由周禾维护。",
+      "en": "Zhou He maintains the MorningBoat documentation."
+    },
+    {
+      "id": "d-doc-owner-2",
+      "family": "doc-owner",
+      "role": "distractor",
+      "zh": "火羽测试脚本由周禾维护。",
+      "en": "Zhou He maintains Firebird’s test scripts."
+    },
+    {
+      "id": "d-doc-owner-3",
+      "family": "doc-owner",
+      "role": "distractor",
+      "zh": "林杉负责晨舟的财务报表。",
+      "en": "Lin Shan is responsible for MorningBoat’s financial statements."
+    },
+    {
+      "id": "m-color",
+      "family": "color",
+      "role": "target",
+      "zh": "火羽设计稿的主色为雾蓝。",
+      "en": "The main color of the Firebird design is mist blue."
+    },
+    {
+      "id": "d-color-1",
+      "family": "color",
+      "role": "distractor",
+      "zh": "晨舟设计稿的主色为橙色。",
+      "en": "The primary color of the MorningBoat design is orange."
+    },
+    {
+      "id": "d-color-2",
+      "family": "color",
+      "role": "distractor",
+      "zh": "火羽的错误提示使用红色。",
+      "en": "Firebird error alerts use red."
+    },
+    {
+      "id": "d-color-3",
+      "family": "color",
+      "role": "distractor",
+      "zh": "林杉名片的背景是雾蓝。",
+      "en": "Lin Shan’s business card has a mist blue background."
+    },
+    {
+      "id": "m-pilot-date",
+      "family": "pilot-date",
+      "role": "target",
+      "zh": "火羽项目五月十四日开始灰度测试。",
+      "en": "The Firebird project begins its pilot rollout on May 14."
+    },
+    {
+      "id": "d-pilot-date-1",
+      "family": "pilot-date",
+      "role": "distractor",
+      "zh": "晨舟项目五月四日开始灰度测试。",
+      "en": "The MorningBoat project begins its pilot rollout on May 4."
+    },
+    {
+      "id": "d-pilot-date-2",
+      "family": "pilot-date",
+      "role": "distractor",
+      "zh": "火羽项目六月十四日结束验收。",
+      "en": "The Firebird project finishes acceptance on June 14."
+    },
+    {
+      "id": "d-pilot-date-3",
+      "family": "pilot-date",
+      "role": "distractor",
+      "zh": "林杉五月十四日提交财务报表。",
+      "en": "Lin Shan submits financial reports on May 14."
+    },
+    {
+      "id": "m-latency",
+      "family": "latency",
+      "role": "target",
+      "zh": "晨舟搜索接口的验收要求是 P95 延迟低于 200 毫秒。",
+      "en": "The MorningBoat search endpoint must have P95 latency below 200 milliseconds for acceptance."
+    },
+    {
+      "id": "d-latency-1",
+      "family": "latency",
+      "role": "distractor",
+      "zh": "火羽搜索接口允许 P95 延迟低于 800 毫秒。",
+      "en": "Firebird search permits P95 latency below 800 milliseconds."
+    },
+    {
+      "id": "d-latency-2",
+      "family": "latency",
+      "role": "distractor",
+      "zh": "晨舟上传接口的吞吐要求为每秒 200 请求。",
+      "en": "MorningBoat uploads require throughput of 200 requests per second."
+    },
+    {
+      "id": "d-latency-3",
+      "family": "latency",
+      "role": "distractor",
+      "zh": "林杉用 20 毫秒作为缓存命中目标。",
+      "en": "Lin Shan uses 20 milliseconds as the cache-hit target."
+    },
+    {
+      "id": "m-quiet",
+      "family": "quiet",
+      "role": "target",
+      "zh": "我晚上十点到次日早上八点静音普通通知，紧急故障告警除外。",
+      "en": "I mute ordinary notifications from ten at night until eight the next morning, except urgent failure alerts."
+    },
+    {
+      "id": "d-quiet-1",
+      "family": "quiet",
+      "role": "distractor",
+      "zh": "林杉晚上八点到次日早上六点静音所有通知。",
+      "en": "Lin Shan mutes all notifications from eight at night until six the next morning."
+    },
+    {
+      "id": "d-quiet-2",
+      "family": "quiet",
+      "role": "distractor",
+      "zh": "晨舟周末照常发送普通通知。",
+      "en": "MorningBoat sends ordinary notifications as usual on weekends."
+    },
+    {
+      "id": "d-quiet-3",
+      "family": "quiet",
+      "role": "distractor",
+      "zh": "我晚上十点前需要完成账单记录。",
+      "en": "I need to finish recording bills before ten at night."
+    },
+    {
+      "id": "m-storage",
+      "family": "storage",
+      "role": "target",
+      "zh": "晨舟的会话索引采用启用 WAL 的 SQLite 数据库。",
+      "en": "MorningBoat’s conversation index uses SQLite with WAL enabled."
+    },
+    {
+      "id": "d-storage-1",
+      "family": "storage",
+      "role": "distractor",
+      "zh": "火羽的统计数据存放在 PostgreSQL。",
+      "en": "Firebird stores analytics in PostgreSQL."
+    },
+    {
+      "id": "d-storage-2",
+      "family": "storage",
+      "role": "distractor",
+      "zh": "紫杉项目的原始日志采用 JSONL 文件。",
+      "en": "The Yew project’s raw logs use JSONL files."
+    },
+    {
+      "id": "d-storage-3",
+      "family": "storage",
+      "role": "distractor",
+      "zh": "林杉测试 SQLite 的 rollback journal 模式。",
+      "en": "Lin Shan tests SQLite rollback journal mode."
+    },
+    {
+      "id": "m-learning",
+      "family": "learning",
+      "role": "target",
+      "zh": "我学习 Python 时喜欢先看可运行的例子，再读概念说明。",
+      "en": "When learning Python, I prefer a runnable example before a conceptual explanation."
+    },
+    {
+      "id": "d-learning-1",
+      "family": "learning",
+      "role": "distractor",
+      "zh": "林杉学 Python 时先读完整理论。",
+      "en": "Lin Shan reads the full theory first when learning Python."
+    },
+    {
+      "id": "d-learning-2",
+      "family": "learning",
+      "role": "distractor",
+      "zh": "我读历史书时按年代顺序阅读。",
+      "en": "I read history books in chronological order."
+    },
+    {
+      "id": "d-learning-3",
+      "family": "learning",
+      "role": "distractor",
+      "zh": "晨舟的接口文档先列协议定义，再给例子。",
+      "en": "MorningBoat API documents present protocol definitions before examples."
+    },
+    {
+      "id": "b-asset-0",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C00 的货架存放 11 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C00 stores 11 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-0",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L00 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L00 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-0",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G00 的花园种植 3 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G00 contains 3 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-1",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C01 的货架存放 12 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C01 stores 12 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-1",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L01 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L01 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-1",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G01 的花园种植 4 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G01 contains 4 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-2",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C02 的货架存放 13 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C02 stores 13 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-2",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L02 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L02 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-2",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G02 的花园种植 5 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G02 contains 5 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-3",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C03 的货架存放 14 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C03 stores 14 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-3",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L03 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L03 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-3",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G03 的花园种植 6 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G03 contains 6 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-4",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C04 的货架存放 15 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C04 stores 15 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-4",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L04 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L04 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-4",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G04 的花园种植 7 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G04 contains 7 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-5",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C05 的货架存放 16 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C05 stores 16 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-5",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L05 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L05 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-5",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G05 的花园种植 8 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G05 contains 8 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-6",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C06 的货架存放 17 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C06 stores 17 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-6",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L06 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L06 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-6",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G06 的花园种植 9 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G06 contains 9 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-7",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C07 的货架存放 18 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C07 stores 18 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-7",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L07 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L07 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-7",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G07 的花园种植 10 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G07 contains 10 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-8",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C08 的货架存放 19 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C08 stores 19 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-8",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L08 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L08 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-8",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G08 的花园种植 11 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G08 contains 11 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-9",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C09 的货架存放 20 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C09 stores 20 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-9",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L09 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L09 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-9",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G09 的花园种植 12 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G09 contains 12 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-10",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C10 的货架存放 21 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C10 stores 21 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-10",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L10 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L10 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-10",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G10 的花园种植 13 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G10 contains 13 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-11",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C11 的货架存放 22 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C11 stores 22 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-11",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L11 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L11 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-11",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G11 的花园种植 14 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G11 contains 14 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-12",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C12 的货架存放 23 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C12 stores 23 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-12",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L12 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L12 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-12",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G12 的花园种植 15 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G12 contains 15 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-13",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C13 的货架存放 24 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C13 stores 24 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-13",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L13 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L13 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-13",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G13 的花园种植 16 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G13 contains 16 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-14",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C14 的货架存放 25 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C14 stores 25 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-14",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L14 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L14 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-14",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G14 的花园种植 17 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G14 contains 17 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-15",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C15 的货架存放 26 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C15 stores 26 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-15",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L15 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L15 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-15",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G15 的花园种植 18 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G15 contains 18 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-16",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C16 的货架存放 27 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C16 stores 27 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-16",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L16 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L16 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-16",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G16 的花园种植 19 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G16 contains 19 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-17",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C17 的货架存放 28 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C17 stores 28 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-17",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L17 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L17 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-17",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G17 的花园种植 20 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G17 contains 20 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-18",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C18 的货架存放 29 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C18 stores 29 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-18",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L18 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L18 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-18",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G18 的花园种植 21 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G18 contains 21 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-19",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C19 的货架存放 30 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C19 stores 30 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-19",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L19 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L19 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-19",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G19 的花园种植 22 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G19 contains 22 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-20",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C20 的货架存放 31 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C20 stores 31 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-20",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L20 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L20 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-20",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G20 的花园种植 23 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G20 contains 23 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-21",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C21 的货架存放 32 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C21 stores 32 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-21",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L21 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L21 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-21",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G21 的花园种植 24 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G21 contains 24 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-22",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C22 的货架存放 33 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C22 stores 33 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-22",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L22 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L22 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-22",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G22 的花园种植 25 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G22 contains 25 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-23",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C23 的货架存放 34 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C23 stores 34 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-23",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L23 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L23 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-23",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G23 的花园种植 26 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G23 contains 26 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-24",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C24 的货架存放 35 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C24 stores 35 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-24",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L24 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L24 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-24",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G24 的花园种植 27 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G24 contains 27 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-25",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C25 的货架存放 36 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C25 stores 36 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-25",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L25 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L25 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-25",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G25 的花园种植 28 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G25 contains 28 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-26",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C26 的货架存放 37 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C26 stores 37 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-26",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L26 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L26 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-26",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G26 的花园种植 29 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G26 contains 29 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-27",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C27 的货架存放 38 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C27 stores 38 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-27",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L27 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L27 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-27",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G27 的花园种植 30 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G27 contains 30 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-28",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C28 的货架存放 39 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C28 stores 39 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-28",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L28 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L28 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-28",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G28 的花园种植 31 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G28 contains 31 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-29",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C29 的货架存放 40 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C29 stores 40 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-29",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L29 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L29 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-29",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G29 的花园种植 32 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G29 contains 32 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-30",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C30 的货架存放 41 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C30 stores 41 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-30",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L30 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L30 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-30",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G30 的花园种植 33 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G30 contains 33 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-31",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C31 的货架存放 42 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C31 stores 42 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-31",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L31 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L31 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-31",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G31 的花园种植 34 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G31 contains 34 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-32",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C32 的货架存放 43 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C32 stores 43 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-32",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L32 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L32 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-32",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G32 的花园种植 35 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G32 contains 35 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-33",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C33 的货架存放 44 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C33 stores 44 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-33",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L33 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L33 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-33",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G33 的花园种植 36 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G33 contains 36 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-34",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C34 的货架存放 45 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C34 stores 45 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-34",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L34 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L34 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-34",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G34 的花园种植 37 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G34 contains 37 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-35",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C35 的货架存放 46 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C35 stores 46 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-35",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L35 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L35 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-35",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G35 的花园种植 38 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G35 contains 38 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-36",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C36 的货架存放 47 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C36 stores 47 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-36",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L36 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L36 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-36",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G36 的花园种植 39 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G36 contains 39 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-37",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C37 的货架存放 48 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C37 stores 48 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-37",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L37 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L37 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-37",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G37 的花园种植 40 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G37 contains 40 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-38",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C38 的货架存放 49 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C38 stores 49 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-38",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L38 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L38 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-38",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G38 的花园种植 41 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G38 contains 41 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    },
+    {
+      "id": "b-asset-39",
+      "family": "background",
+      "role": "background",
+      "zh": "测试仓库 C39 的货架存放 50 个白色零件盒，每个箱子贴绿色标签。",
+      "en": "Test warehouse C39 stores 50 white parts boxes on shelves; each box has a green label."
+    },
+    {
+      "id": "b-lab-39",
+      "family": "background",
+      "role": "background",
+      "zh": "实验室 L39 周四下午校准湿度传感器，并把测量值记录在纸质表格。",
+      "en": "Laboratory L39 calibrates humidity sensors on Thursday afternoons and records measurements on paper forms."
+    },
+    {
+      "id": "b-garden-39",
+      "family": "background",
+      "role": "background",
+      "zh": "园区 G39 的花园种植 42 棵银杏树，春季每两周检查灌溉设备。",
+      "en": "The garden at site G39 contains 42 ginkgo trees; irrigation equipment is checked every two weeks in spring."
+    }
+  ],
+  "queries": [
+    {
+      "id": "zh-zh-theme-1",
+      "family": "theme",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "平时我选哪种明暗外观？",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-zh-theme-2",
+      "family": "theme",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我习惯用的暗色界面设置是什么？",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-en-theme-1",
+      "family": "theme",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Which appearance do I normally choose for my interface?",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-en-theme-2",
+      "family": "theme",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is my usual dark interface setting?",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-en-theme-1",
+      "family": "theme",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "平时我选哪种明暗外观？",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-en-theme-2",
+      "family": "theme",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我习惯用的暗色界面设置是什么？",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-zh-theme-1",
+      "family": "theme",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Which appearance do I normally choose for my interface?",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-zh-theme-2",
+      "family": "theme",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is my usual dark interface setting?",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "mixed-theme",
+      "family": "theme",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我平时用的 default theme 是哪种？",
+      "relevant": [
+        "m-theme"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-zh-answer-style-1",
+      "family": "answer-style",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "技术答复的结果和依据该按什么顺序？",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-zh-answer-style-2",
+      "family": "answer-style",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "解释技术问题时应该怎样开头和展开？",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-en-answer-style-1",
+      "family": "answer-style",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "In what order should a technical answer present its result and support?",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-en-answer-style-2",
+      "family": "answer-style",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "How should an explanation of a technical issue start and continue?",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-en-answer-style-1",
+      "family": "answer-style",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "技术答复的结果和依据该按什么顺序？",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-en-answer-style-2",
+      "family": "answer-style",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "解释技术问题时应该怎样开头和展开？",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-zh-answer-style-1",
+      "family": "answer-style",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "In what order should a technical answer present its result and support?",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-zh-answer-style-2",
+      "family": "answer-style",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "How should an explanation of a technical issue start and continue?",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "mixed-answer-style",
+      "family": "answer-style",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "技术回答要先给 conclusion 还是 evidence？",
+      "relevant": [
+        "m-answer-style"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-zh-pet-1",
+      "family": "pet",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "家里那只猫怎么称呼？",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-zh-pet-2",
+      "family": "pet",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我的猫叫什么名字？",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-en-pet-1",
+      "family": "pet",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What do I call the cat at home?",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-en-pet-2",
+      "family": "pet",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is the name of my cat?",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-en-pet-1",
+      "family": "pet",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "家里那只猫怎么称呼？",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-en-pet-2",
+      "family": "pet",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我的猫叫什么名字？",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-zh-pet-1",
+      "family": "pet",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What do I call the cat at home?",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-zh-pet-2",
+      "family": "pet",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is the name of my cat?",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "mixed-pet",
+      "family": "pet",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 pet cat 叫什么？",
+      "relevant": [
+        "m-pet"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-zh-trip-1",
+      "family": "trip",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我打算哪月去那座日本古都游玩？",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-zh-trip-2",
+      "family": "trip",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "去京都的行程安排在哪个月？",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-en-trip-1",
+      "family": "trip",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "When do I intend to visit the old Japanese capital?",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-en-trip-2",
+      "family": "trip",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "In which month is my Kyoto holiday planned?",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-en-trip-1",
+      "family": "trip",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我打算哪月去那座日本古都游玩？",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-en-trip-2",
+      "family": "trip",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "去京都的行程安排在哪个月？",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-zh-trip-1",
+      "family": "trip",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "When do I intend to visit the old Japanese capital?",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "en-zh-trip-2",
+      "family": "trip",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "In which month is my Kyoto holiday planned?",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "mixed-trip",
+      "family": "trip",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 Kyoto trip 安排在几月？",
+      "relevant": [
+        "m-trip"
+      ],
+      "tags": [
+        "indirect-reference"
+      ]
+    },
+    {
+      "id": "zh-zh-agent-location-1",
+      "family": "agent-location",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我的原生助手在哪台设备执行任务？",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-zh-agent-location-2",
+      "family": "agent-location",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "本地助手的计算放在什么地方？",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-en-agent-location-1",
+      "family": "agent-location",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Where does my native assistant execute its tasks?",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-en-agent-location-2",
+      "family": "agent-location",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Where does computation for my own assistant take place?",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-en-agent-location-1",
+      "family": "agent-location",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我的原生助手在哪台设备执行任务？",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-en-agent-location-2",
+      "family": "agent-location",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "本地助手的计算放在什么地方？",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-zh-agent-location-1",
+      "family": "agent-location",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Where does my native assistant execute its tasks?",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "en-zh-agent-location-2",
+      "family": "agent-location",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Where does computation for my own assistant take place?",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "mixed-agent-location",
+      "family": "agent-location",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 native Agent 在 local 还是 cloud 运行？",
+      "relevant": [
+        "m-agent-location"
+      ],
+      "tags": [
+        "paraphrase"
+      ]
+    },
+    {
+      "id": "zh-zh-review-1",
+      "family": "review",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我每逢星期几的下午回顾项目？",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-zh-review-2",
+      "family": "review",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "每周总结进展的固定时段是什么？",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-en-review-1",
+      "family": "review",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "On which afternoon do I look back over the project?",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-en-review-2",
+      "family": "review",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is my regular weekly slot for reviewing progress?",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-en-review-1",
+      "family": "review",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我每逢星期几的下午回顾项目？",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-en-review-2",
+      "family": "review",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "每周总结进展的固定时段是什么？",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-zh-review-1",
+      "family": "review",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "On which afternoon do I look back over the project?",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-zh-review-2",
+      "family": "review",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is my regular weekly slot for reviewing progress?",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "mixed-review",
+      "family": "review",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 weekly review 定在什么时候？",
+      "relevant": [
+        "m-review"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-zh-no-sunday-1",
+      "family": "no-sunday",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "一周中哪天不要给我发项目通知？",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-zh-no-sunday-2",
+      "family": "no-sunday",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我明确要求星期日避免什么通知？",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-en-no-sunday-1",
+      "family": "no-sunday",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "On which day should you avoid sending me project reminders?",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-en-no-sunday-2",
+      "family": "no-sunday",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What notification do I explicitly not want on Sundays?",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-en-no-sunday-1",
+      "family": "no-sunday",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "一周中哪天不要给我发项目通知？",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-en-no-sunday-2",
+      "family": "no-sunday",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我明确要求星期日避免什么通知？",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-zh-no-sunday-1",
+      "family": "no-sunday",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "On which day should you avoid sending me project reminders?",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-zh-no-sunday-2",
+      "family": "no-sunday",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What notification do I explicitly not want on Sundays?",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "mixed-no-sunday",
+      "family": "no-sunday",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 Sunday project reminder 偏好是什么？",
+      "relevant": [
+        "m-no-sunday"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-zh-office-1",
+      "family": "office",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "搬迁后我现在在哪里上班？",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "zh-zh-office-2",
+      "family": "office",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我目前办公的地区，不是以前的地点，是哪里？",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "en-en-office-1",
+      "family": "office",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Where do I work now after the move?",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "en-en-office-2",
+      "family": "office",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is my current office district rather than the previous one?",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "zh-en-office-1",
+      "family": "office",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "搬迁后我现在在哪里上班？",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "zh-en-office-2",
+      "family": "office",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我目前办公的地区，不是以前的地点，是哪里？",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "en-zh-office-1",
+      "family": "office",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Where do I work now after the move?",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "en-zh-office-2",
+      "family": "office",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is my current office district rather than the previous one?",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "mixed-office",
+      "family": "office",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "搬家后我的 current office 在哪？",
+      "relevant": [
+        "m-office"
+      ],
+      "tags": [
+        "correction"
+      ]
+    },
+    {
+      "id": "zh-zh-build-id-1",
+      "family": "build-id",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "晨舟现在的构建标识是什么？",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "zh-zh-build-id-2",
+      "family": "build-id",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "QK-4827 属于哪个项目的当前构建？",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "en-en-build-id-1",
+      "family": "build-id",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is MorningBoat’s current build identifier?",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "en-en-build-id-2",
+      "family": "build-id",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Which project’s current build has identifier QK-4827?",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "zh-en-build-id-1",
+      "family": "build-id",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "晨舟现在的构建标识是什么？",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "zh-en-build-id-2",
+      "family": "build-id",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "QK-4827 属于哪个项目的当前构建？",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "en-zh-build-id-1",
+      "family": "build-id",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is MorningBoat’s current build identifier?",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "en-zh-build-id-2",
+      "family": "build-id",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Which project’s current build has identifier QK-4827?",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "mixed-build-id",
+      "family": "build-id",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "MorningBoat 的 build ID 是什么？",
+      "relevant": [
+        "m-build-id"
+      ],
+      "tags": [
+        "exact-identifier"
+      ]
+    },
+    {
+      "id": "zh-zh-logs-1",
+      "family": "logs",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "晨舟的运行记录采用哪种文件格式？",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "zh-zh-logs-2",
+      "family": "logs",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "晨舟日志是一行一条的哪种结构化格式？",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "en-en-logs-1",
+      "family": "logs",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What file format does MorningBoat use for run records?",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "en-en-logs-2",
+      "family": "logs",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Which structured one-record-per-line format is used for MorningBoat logs?",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "zh-en-logs-1",
+      "family": "logs",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "晨舟的运行记录采用哪种文件格式？",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "zh-en-logs-2",
+      "family": "logs",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "晨舟日志是一行一条的哪种结构化格式？",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "en-zh-logs-1",
+      "family": "logs",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What file format does MorningBoat use for run records?",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "en-zh-logs-2",
+      "family": "logs",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Which structured one-record-per-line format is used for MorningBoat logs?",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "mixed-logs",
+      "family": "logs",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "晨舟的 log format 是哪种？",
+      "relevant": [
+        "m-logs"
+      ],
+      "tags": [
+        "exact-format"
+      ]
+    },
+    {
+      "id": "zh-zh-minutes-1",
+      "family": "minutes",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "火羽的会议记录需要留多久？",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "zh-zh-minutes-2",
+      "family": "minutes",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "火羽会议笔记在清理前能保存多长时间？",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "en-en-minutes-1",
+      "family": "minutes",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "How long should Firebird’s meeting records be kept?",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "en-en-minutes-2",
+      "family": "minutes",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "For how long can Firebird meeting notes remain before cleanup?",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "zh-en-minutes-1",
+      "family": "minutes",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "火羽的会议记录需要留多久？",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "zh-en-minutes-2",
+      "family": "minutes",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "火羽会议笔记在清理前能保存多长时间？",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "en-zh-minutes-1",
+      "family": "minutes",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "How long should Firebird’s meeting records be kept?",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "en-zh-minutes-2",
+      "family": "minutes",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "For how long can Firebird meeting notes remain before cleanup?",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "mixed-minutes",
+      "family": "minutes",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "火羽 meeting notes 的 retention 是多久？",
+      "relevant": [
+        "m-minutes"
+      ],
+      "tags": [
+        "retention"
+      ]
+    },
+    {
+      "id": "zh-zh-budget-1",
+      "family": "budget",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "这次购买最多能花多少人民币？",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-zh-budget-2",
+      "family": "budget",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我本次采购不能超过的金额是多少？",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-en-budget-1",
+      "family": "budget",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "How many yuan may I spend at most on this purchase?",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-en-budget-2",
+      "family": "budget",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What amount must my current purchase stay within?",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-en-budget-1",
+      "family": "budget",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "这次购买最多能花多少人民币？",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-en-budget-2",
+      "family": "budget",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我本次采购不能超过的金额是多少？",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-zh-budget-1",
+      "family": "budget",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "How many yuan may I spend at most on this purchase?",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-zh-budget-2",
+      "family": "budget",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What amount must my current purchase stay within?",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "mixed-budget",
+      "family": "budget",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我这次 purchase 的 budget cap 是多少？",
+      "relevant": [
+        "m-budget"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-zh-language-1",
+      "family": "language",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我对界面与文档分别选什么语言？",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-zh-language-2",
+      "family": "language",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "按钮文字和项目说明的语言偏好是什么？",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-en-language-1",
+      "family": "language",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Which languages do I choose for the interface and the documentation?",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-en-language-2",
+      "family": "language",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What languages do I prefer for button labels and project write-ups?",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-en-language-1",
+      "family": "language",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我对界面与文档分别选什么语言？",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-en-language-2",
+      "family": "language",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "按钮文字和项目说明的语言偏好是什么？",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-zh-language-1",
+      "family": "language",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Which languages do I choose for the interface and the documentation?",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-zh-language-2",
+      "family": "language",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What languages do I prefer for button labels and project write-ups?",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "mixed-language",
+      "family": "language",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 UI 和 docs 分别用什么语言？",
+      "relevant": [
+        "m-language"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-zh-local-data-1",
+      "family": "local-data",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我的个人记忆数据可以传到远程服务吗？",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-zh-local-data-2",
+      "family": "local-data",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我要求私密记忆在什么地方保存？",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-en-local-data-1",
+      "family": "local-data",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "May my personal memory data be sent to a remote service?",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-en-local-data-2",
+      "family": "local-data",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Where do I require private memory records to be stored?",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-en-local-data-1",
+      "family": "local-data",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我的个人记忆数据可以传到远程服务吗？",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-en-local-data-2",
+      "family": "local-data",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我要求私密记忆在什么地方保存？",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-zh-local-data-1",
+      "family": "local-data",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "May my personal memory data be sent to a remote service?",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-zh-local-data-2",
+      "family": "local-data",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Where do I require private memory records to be stored?",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "mixed-local-data",
+      "family": "local-data",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 private memory 允许 cloud upload 吗？",
+      "relevant": [
+        "m-local-data"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-zh-reminder-time-1",
+      "family": "reminder-time",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "提醒我处理账单的固定时间是什么？",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-zh-reminder-time-2",
+      "family": "reminder-time",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "账单提示定在星期几几点？",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-en-reminder-time-1",
+      "family": "reminder-time",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is the scheduled time for reminding me to handle bills?",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-en-reminder-time-2",
+      "family": "reminder-time",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "On which day and at what hour are my bill alerts set?",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-en-reminder-time-1",
+      "family": "reminder-time",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "提醒我处理账单的固定时间是什么？",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-en-reminder-time-2",
+      "family": "reminder-time",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "账单提示定在星期几几点？",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-zh-reminder-time-1",
+      "family": "reminder-time",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is the scheduled time for reminding me to handle bills?",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-zh-reminder-time-2",
+      "family": "reminder-time",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "On which day and at what hour are my bill alerts set?",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "mixed-reminder-time",
+      "family": "reminder-time",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 bill reminder 定在什么时候？",
+      "relevant": [
+        "m-reminder-time"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-zh-food-1",
+      "family": "food",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "出门旅游为我选餐馆要优先什么类型？",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-zh-food-2",
+      "family": "food",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我在旅途中的餐厅偏好是什么？",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-en-food-1",
+      "family": "food",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What type of restaurant should be preferred for me while travelling?",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-en-food-2",
+      "family": "food",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is my preference for restaurants on a trip?",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-en-food-1",
+      "family": "food",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "出门旅游为我选餐馆要优先什么类型？",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-en-food-2",
+      "family": "food",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我在旅途中的餐厅偏好是什么？",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-zh-food-1",
+      "family": "food",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What type of restaurant should be preferred for me while travelling?",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-zh-food-2",
+      "family": "food",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is my preference for restaurants on a trip?",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "mixed-food",
+      "family": "food",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 travel dining preference 是什么？",
+      "relevant": [
+        "m-food"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-zh-backup-1",
+      "family": "backup",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我什么时候核查备份成功了没有？",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-zh-backup-2",
+      "family": "backup",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "每周备份检查定在什么时段？",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-en-backup-1",
+      "family": "backup",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "When do I verify that the backups succeeded?",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-en-backup-2",
+      "family": "backup",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What weekly time slot is used for my backup checks?",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-en-backup-1",
+      "family": "backup",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我什么时候核查备份成功了没有？",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-en-backup-2",
+      "family": "backup",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "每周备份检查定在什么时段？",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-zh-backup-1",
+      "family": "backup",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "When do I verify that the backups succeeded?",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "en-zh-backup-2",
+      "family": "backup",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What weekly time slot is used for my backup checks?",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "mixed-backup",
+      "family": "backup",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 backup check 在星期几什么时候？",
+      "relevant": [
+        "m-backup"
+      ],
+      "tags": [
+        "time-qualified"
+      ]
+    },
+    {
+      "id": "zh-zh-doc-owner-1",
+      "family": "doc-owner",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "谁负责更新火羽的项目说明？",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-zh-doc-owner-2",
+      "family": "doc-owner",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "火羽文档的维护负责人是哪位？",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-en-doc-owner-1",
+      "family": "doc-owner",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Who is responsible for updating Firebird’s project write-ups?",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-en-doc-owner-2",
+      "family": "doc-owner",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Who maintains the Firebird documentation?",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-en-doc-owner-1",
+      "family": "doc-owner",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "谁负责更新火羽的项目说明？",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-en-doc-owner-2",
+      "family": "doc-owner",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "火羽文档的维护负责人是哪位？",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-zh-doc-owner-1",
+      "family": "doc-owner",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Who is responsible for updating Firebird’s project write-ups?",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-zh-doc-owner-2",
+      "family": "doc-owner",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Who maintains the Firebird documentation?",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "mixed-doc-owner",
+      "family": "doc-owner",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "火羽 docs 的 owner 是谁？",
+      "relevant": [
+        "m-doc-owner"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-zh-color-1",
+      "family": "color",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "火羽视觉方案主要用哪种颜色？",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-zh-color-2",
+      "family": "color",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "火羽设计的主色调是什么？",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-en-color-1",
+      "family": "color",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Which color dominates the Firebird visual design?",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-en-color-2",
+      "family": "color",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is the primary color of the Firebird design?",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-en-color-1",
+      "family": "color",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "火羽视觉方案主要用哪种颜色？",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-en-color-2",
+      "family": "color",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "火羽设计的主色调是什么？",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-zh-color-1",
+      "family": "color",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Which color dominates the Firebird visual design?",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "en-zh-color-2",
+      "family": "color",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is the primary color of the Firebird design?",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "mixed-color",
+      "family": "color",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "火羽 design 的 primary color 是什么？",
+      "relevant": [
+        "m-color"
+      ],
+      "tags": [
+        "entity"
+      ]
+    },
+    {
+      "id": "zh-zh-pilot-date-1",
+      "family": "pilot-date",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "火羽小范围试运行从哪一天开始？",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-zh-pilot-date-2",
+      "family": "pilot-date",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "火羽灰度验证的起始日期是什么？",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-en-pilot-date-1",
+      "family": "pilot-date",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "On what date does Firebird’s limited trial deployment start?",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-en-pilot-date-2",
+      "family": "pilot-date",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is the starting date of the Firebird pilot rollout?",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-en-pilot-date-1",
+      "family": "pilot-date",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "火羽小范围试运行从哪一天开始？",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-en-pilot-date-2",
+      "family": "pilot-date",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "火羽灰度验证的起始日期是什么？",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-zh-pilot-date-1",
+      "family": "pilot-date",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "On what date does Firebird’s limited trial deployment start?",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-zh-pilot-date-2",
+      "family": "pilot-date",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is the starting date of the Firebird pilot rollout?",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "mixed-pilot-date",
+      "family": "pilot-date",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "火羽 pilot rollout 几月几日开始？",
+      "relevant": [
+        "m-pilot-date"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-zh-latency-1",
+      "family": "latency",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "晨舟检索接口的尾部延迟验收上限是多少？",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-zh-latency-2",
+      "family": "latency",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "晨舟搜索的百分之九十五延时要满足什么要求？",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-en-latency-1",
+      "family": "latency",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is the acceptance limit on tail latency for MorningBoat search?",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-en-latency-2",
+      "family": "latency",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What must the 95th percentile search latency satisfy for MorningBoat?",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-en-latency-1",
+      "family": "latency",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "晨舟检索接口的尾部延迟验收上限是多少？",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-en-latency-2",
+      "family": "latency",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "晨舟搜索的百分之九十五延时要满足什么要求？",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-zh-latency-1",
+      "family": "latency",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is the acceptance limit on tail latency for MorningBoat search?",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "en-zh-latency-2",
+      "family": "latency",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What must the 95th percentile search latency satisfy for MorningBoat?",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "mixed-latency",
+      "family": "latency",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "晨舟 search 的 P95 latency 门槛是多少？",
+      "relevant": [
+        "m-latency"
+      ],
+      "tags": [
+        "numeric"
+      ]
+    },
+    {
+      "id": "zh-zh-quiet-1",
+      "family": "quiet",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我的夜间免打扰时段及例外是什么？",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-zh-quiet-2",
+      "family": "quiet",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "哪些通知可以在我睡眠静音期间发出？",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-en-quiet-1",
+      "family": "quiet",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What is my overnight quiet period and its exception?",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-en-quiet-2",
+      "family": "quiet",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Which notifications may be sent during my sleeping-time mute period?",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-en-quiet-1",
+      "family": "quiet",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我的夜间免打扰时段及例外是什么？",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-en-quiet-2",
+      "family": "quiet",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "哪些通知可以在我睡眠静音期间发出？",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-zh-quiet-1",
+      "family": "quiet",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What is my overnight quiet period and its exception?",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "en-zh-quiet-2",
+      "family": "quiet",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Which notifications may be sent during my sleeping-time mute period?",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "mixed-quiet",
+      "family": "quiet",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "我的 quiet hours 里什么 alerts 可以例外？",
+      "relevant": [
+        "m-quiet"
+      ],
+      "tags": [
+        "negation"
+      ]
+    },
+    {
+      "id": "zh-zh-storage-1",
+      "family": "storage",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "晨舟为聊天检索索引选的数据库和日志模式是什么？",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "zh-zh-storage-2",
+      "family": "storage",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "晨舟会话索引用什么存储引擎？",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "en-en-storage-1",
+      "family": "storage",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What database and logging mode are used for MorningBoat’s chat search index?",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "en-en-storage-2",
+      "family": "storage",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "Which storage engine holds MorningBoat’s conversation index?",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "zh-en-storage-1",
+      "family": "storage",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "晨舟为聊天检索索引选的数据库和日志模式是什么？",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "zh-en-storage-2",
+      "family": "storage",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "晨舟会话索引用什么存储引擎？",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "en-zh-storage-1",
+      "family": "storage",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What database and logging mode are used for MorningBoat’s chat search index?",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "en-zh-storage-2",
+      "family": "storage",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "Which storage engine holds MorningBoat’s conversation index?",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "mixed-storage",
+      "family": "storage",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "晨舟 conversation index 用哪种 database？",
+      "relevant": [
+        "m-storage"
+      ],
+      "tags": [
+        "technical"
+      ]
+    },
+    {
+      "id": "zh-zh-learning-1",
+      "family": "learning",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "教我 Python 时先展示什么比较合适？",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-zh-learning-2",
+      "family": "learning",
+      "group": "zh-zh",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "zh",
+      "query": "我对 Python 教学的示例与概念顺序有什么偏好？",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-en-learning-1",
+      "family": "learning",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What should be shown to me first when teaching Python?",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-en-learning-2",
+      "family": "learning",
+      "group": "en-en",
+      "sourceLanguage": "en",
+      "corpusLanguage": "en",
+      "query": "What order do I prefer for examples and concepts in Python lessons?",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-en-learning-1",
+      "family": "learning",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "教我 Python 时先展示什么比较合适？",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "zh-en-learning-2",
+      "family": "learning",
+      "group": "zh-en",
+      "sourceLanguage": "zh",
+      "corpusLanguage": "en",
+      "query": "我对 Python 教学的示例与概念顺序有什么偏好？",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-zh-learning-1",
+      "family": "learning",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What should be shown to me first when teaching Python?",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "en-zh-learning-2",
+      "family": "learning",
+      "group": "en-zh",
+      "sourceLanguage": "en",
+      "corpusLanguage": "zh",
+      "query": "What order do I prefer for examples and concepts in Python lessons?",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    },
+    {
+      "id": "mixed-learning",
+      "family": "learning",
+      "group": "mixed",
+      "sourceLanguage": "mixed",
+      "corpusLanguage": "mixed",
+      "query": "给我讲 Python 要先给 runnable example 还是 theory？",
+      "relevant": [
+        "m-learning"
+      ],
+      "tags": [
+        "preference"
+      ]
+    }
+  ]
+}

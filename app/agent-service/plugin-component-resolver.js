@@ -12,6 +12,19 @@ const { serviceError } = require("./security");
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_SKILL_BYTES = 256 * 1024;
 
+function skillFileParts(relativePath) {
+  if (typeof relativePath !== "string" || !relativePath.isWellFormed()
+    || Buffer.byteLength(relativePath, "utf8") > 1024 || relativePath.includes("\\")) {
+    fail("PLUGIN_COMPONENT_INVALID", "插件 Skill 附属文件路径无效");
+  }
+  const parts = relativePath.split("/");
+  if (parts.length > 12 || relativePath === "SKILL.md"
+    || parts.some(part => !part || part === "." || part === ".." || part.includes("\0"))) {
+    fail("PLUGIN_COMPONENT_INVALID", "插件 Skill 附属文件路径越界");
+  }
+  return parts;
+}
+
 function fail(code, message) { throw serviceError(code, message); }
 function sha256(bytes) { return crypto.createHash("sha256").update(bytes).digest("hex"); }
 
@@ -140,6 +153,29 @@ class PluginComponentResolver {
       descriptorDigest, name: component.name, description: component.description, content });
   }
 
+  inspectSkillFile(input, relativePath) {
+    const parts = skillFileParts(relativePath);
+    const { root, component, sourceIdentity } = this._current(input, "skill");
+    const skillRoot = path.join(root, "skills", component.name);
+    const target = path.join(skillRoot, ...parts);
+    let content;
+    let fileHash;
+    try {
+      const canonical = fs.realpathSync(target);
+      if (!canonical.startsWith(skillRoot + path.sep)) {
+        fail("PACKAGE_CHANGED", "插件 Skill 附属文件路径已变化");
+      }
+      ({ content, descriptorDigest: fileHash } = readOwnedSkill(target));
+    } catch (error) {
+      if (["PACKAGE_CHANGED", "SKILL_SECRET_REJECTED"].includes(error?.code)) throw error;
+      fail("PACKAGE_CHANGED", "插件 Skill 附属文件无法读取");
+    }
+    this._verifyPackage(root, input.releaseDigest, sourceIdentity);
+    return Object.freeze({ source: "plugin", installationId: input.installationId,
+      releaseDigest: input.releaseDigest, componentId: input.componentId,
+      name: component.name, relativePath, fileHash, content });
+  }
+
   listEnabledSkillDescriptors(profileId) {
     const selected = [];
     // Package installation is global regardless of its source. Skill bindings
@@ -193,7 +229,8 @@ class PluginComponentResolver {
     return Object.freeze({ source: "plugin", installationId: input.installationId,
       releaseDigest: input.releaseDigest, componentId: input.componentId,
       descriptorDigest: server.descriptorDigest, name: component.name,
-      transport: server.type, spec: server.spec });
+      transport: server.type, spec: server.spec,
+      oauthResource: server.oauthResource });
   }
 }
 

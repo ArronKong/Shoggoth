@@ -108,6 +108,7 @@ jobs:
           APP="dist/mac/Shoggoth.app"
           DMG="dist/Shoggoth-${VERSION}-x64.dmg"
           node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-x64
+          node scripts/shoggoth-memory-e5-packaged.cjs --app "$APP" --output "$RUNNER_TEMP/e5-intel-result.json"
           hdiutil verify "$DMG"
           xcrun stapler validate "$DMG"
           MOUNT="$RUNNER_TEMP/shoggoth-x64-dmg"

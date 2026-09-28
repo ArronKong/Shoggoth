@@ -11,10 +11,29 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-skills-ui-"));
 const output = path.join(temporary, "test.cjs");
 const mocks = {
   "../api/client": `
+    export class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
     export const getSkillUsage = async () => [];
     export const installSkill = async () => ({ canceled: true });
     export const listAgents = async () => [];
     export const listSkills = async () => [];
+    export const listDisabledStandaloneMcp = async () => ({ revision: 1, totalDisabled: 0,
+      items: [], nextCursor: 0, hasMore: false });
+    export const rebindStandaloneMcp = async () => { throw new Error('not expected'); };
+    export const activateStandaloneMcp = async () => { throw new Error('not expected'); };
+    export const listSkillsPage = async (backend, agentId, options) => {
+      globalThis.calls.push({ method: 'page', backend, agentId, options });
+      const revision = String(globalThis.skills.length) + '-' + globalThis.skills.map(skill => Number(skill.enabled)).join('');
+      if (options.pageIndex > 0 && options.expectedRevision !== revision) throw new ApiError('changed', 409);
+      const filtered = globalThis.skills.filter(skill => (!options.status || (options.status === 'on') === skill.enabled)
+        && (!options.query || skill.name.includes(options.query) || skill.description.includes(options.query)));
+      const pageSize = Math.min(options.limit, 73);
+      return { supported: true, skills: filtered.slice(options.pageIndex * pageSize, (options.pageIndex + 1) * pageSize),
+        registryRevision: 'a'.repeat(64), registryVersion: 2, profileRevision: 1,
+        queryRevision: revision, pageIndex: options.pageIndex,
+        pageCount: Math.max(1, Math.ceil(filtered.length / pageSize)), total: globalThis.skills.length,
+        enabledCount: globalThis.skills.filter(skill => skill.enabled).length,
+        usedCount: 0, usageSupported: true, matchCount: filtered.length };
+    };
     export const previewSkill = async (backend, skill, agent) => {
       globalThis.calls.push({ method: 'preview', backend, skill, agent });
       return { content: 'Instructions ' + skill.version };
@@ -35,7 +54,7 @@ const mocks = {
     export function usePageCache(key) {
       const [, force] = useState(0);
       return { data: key.startsWith('skills:agents:') ? [{ id: 'agent-a', name: 'Agent A' }]
-        : key === 'skills:usage' ? [] : globalThis.skills,
+        : key.startsWith('skills:usage:') ? [] : globalThis.skills,
         loading: false, error: null, refresh: async () => force(n => n + 1) };
     }
   `,
@@ -62,10 +81,10 @@ const mocks = {
     export const useConfirm = () => confirm;
   `,
   "../lib/markdown": "export const toSanitizedMarkdownHtml = value => value;",
-  "../components/PageHead": "export const PageHead = () => null;",
+  "../components/PageHead": "export const PageHead = ({actions}) => <header>{actions}</header>;",
   "../components/BackendTabs": "export default function BackendTabs() { return null; }",
   "../components/FilterTabs": "export default function FilterTabs() { return null; }",
-  "../components/SearchCapsule": "export default function SearchCapsule() { return null; }",
+  "../components/SearchCapsule": "export default function SearchCapsule(props) { return <search-fixture {...props} />; }",
   "react-i18next": `
     import en from ${JSON.stringify(path.join(ui, "src/i18n/locales/en.ts"))};
     const t = (key, vars = {}) => key.split('.').reduce((value, part) => value?.[part], en)
@@ -122,6 +141,49 @@ try {
         assert.deepEqual(globalThis.skills.map(skill => skill.version), ['1.0.0']);
         await act(async () => renderer.unmount());
 
+        globalThis.skills = Array.from({ length: 5000 }, (_, index) => ({
+          backendId: 'native-fixture', agentId: 'agent-a', id: 'scale-' + String(index).padStart(4, '0'),
+          name: 'scale-' + String(index).padStart(4, '0'), version: '1.0.0', source: 'user',
+          description: 'Skill at ' + index, enabled: true, profileRevision: 1, registryVersion: 2,
+        }));
+        globalThis.pageFocus = [];
+        await act(async () => { renderer = TestRenderer.create(<SkillsPage />, { createNodeMock(element) {
+          if (element.props.className !== 'skill-main-content') return null;
+          return {
+            scrollTo(options) { globalThis.pageFocus.push({ action: 'scroll', top: options.top }); },
+            querySelector(selector) {
+              const first = renderer.root.findAllByProps({ className: 'skill-card-open' })[0];
+              return { focus(options) { globalThis.pageFocus.push({ action: 'focus', selector,
+                label: first.props['aria-label'], preventScroll: options.preventScroll }); } };
+            },
+          };
+        } }); });
+        assert.equal(cards().length, 73, 'server byte boundaries must bound mounted cards');
+        assert.deepEqual(globalThis.pageFocus, [], 'initial render must not steal keyboard focus');
+        const pageNav = () => renderer.root.findByType('nav');
+        assert.match(pageNav().findByType('span').children.join(''), /Page 1 of 69/);
+        await act(async () => pageNav().findAllByType('button')[1].props.onClick());
+        assert.equal(cards().length, 73);
+        assert.match(cards()[0].props.title, /scale-0073/);
+        assert.deepEqual(globalThis.pageFocus, [
+          { action: 'scroll', top: 0 },
+          { action: 'focus', selector: '.skill-card-open',
+            label: 'scale-0073 v1.0.0 · user', preventScroll: true },
+        ], 'pagination must show and focus the first card on the new page');
+        assert.equal(globalThis.calls.findLast(call => call.method === 'page').options.pageIndex, 1);
+        globalThis.skills[0] = { ...globalThis.skills[0], enabled: false };
+        await act(async () => pageNav().findAllByType('button')[1].props.onClick());
+        assert.match(pageNav().findByType('span').children.join(''), /Page 1 of 69/,
+          'stale revision must restart at the first page');
+        assert.equal(globalThis.calls.findLast(call => call.method === 'page').options.pageIndex, 0);
+        assert.equal(cards()[0].props.title, 'scale-0000');
+        await act(async () => renderer.root.findByType('search-fixture').props.onChange('scale-4999'));
+        assert.equal(cards().length, 1, 'search must include items outside the mounted page');
+        assert.equal(cards()[0].props.title, 'scale-4999');
+        assert.equal(renderer.root.findAllByType('nav').length, 0);
+        assert.equal(globalThis.pageFocus.length, 4, 'search reset must not steal focus');
+        await act(async () => renderer.unmount());
+
         const requests = [];
         globalThis.fetch = async (url, init) => { requests.push({ url, init }); return { ok: true, text: async () => JSON.stringify({ preview: { content: 'test' } }) }; };
         await previewSkill('native-fixture', newer, 'agent-a');
@@ -141,7 +203,7 @@ try {
             assert.equal(dictionary.models[key], undefined, 'Skill text must live in its own namespace');
           }
         }
-        console.log('PASS Skills React selection, preview, enable, uninstall, transport identity and bilingual labels');
+        console.log('PASS Skills React selection, preview, enable, uninstall, 5k pagination/search, transport identity and bilingual labels');
       }
       export default main();
     ` },
@@ -153,7 +215,8 @@ try {
         if (/^(react|react-test-renderer)(\/|$)/.test(args.path)) {
           return { path: require.resolve(args.path), external: true };
         }
-        if (Object.hasOwn(mocks, args.path) && (args.importer.endsWith("SkillsPage.tsx") || args.path === "react-i18next")) {
+        if (Object.hasOwn(mocks, args.path) && (args.importer.endsWith("SkillsPage.tsx")
+          || args.importer.endsWith("StandaloneMcpRepair.tsx") || args.path === "react-i18next")) {
           return { path: args.path, namespace: "skills-mock" };
         }
       });

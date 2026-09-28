@@ -942,7 +942,9 @@ function startProxyGateway({
           message,
           runId,
           hooks,
-          { attachments, inputProvenance, pluginSelection, signal: controller.signal,
+          { attachments, inputProvenance,
+            ...(pluginSelection === undefined ? {} : { pluginSelection }),
+            signal: controller.signal,
             onAccepted: hooks.accepted },
         );
       }).catch((error) => {
@@ -1353,8 +1355,19 @@ function startProxyGateway({
             return; // never forward a foreign frame upstream
           }
         }
-        if (frame.method === "chat.send" && frame.params
-          && Object.prototype.hasOwnProperty.call(frame.params, "pluginSelection")) {
+        const hasPluginSelection = frame.params
+          && Object.prototype.hasOwnProperty.call(frame.params, "pluginSelection");
+        // A selection is admitted with a new chat.send only. In particular,
+        // steer and prompt responses may resume an already-running turn; an
+        // unknown field must not silently become authority for that turn.
+        if (hasPluginSelection && (frame.method === "chat.steer" || frame.method === "chat.respond")) {
+          if (!authed) { denyUnauthed(frame.id); return; }
+          sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+            error: { code: "PLUGIN_SELECTION_UNAVAILABLE",
+              message: "插件选择仅能随新消息发送，追加消息或回应不能更改本回合授权" } }));
+          return;
+        }
+        if (frame.method === "chat.send" && hasPluginSelection) {
           if (!authed) { denyUnauthed(frame.id); return; }
           const owner = registry?.route(agentIdFromSessionKey(frame.params.sessionKey));
           if (owner?.id !== "shoggoth") {

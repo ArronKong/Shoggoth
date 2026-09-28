@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "gmail": {
+      "type": "streamable-http",
+      "url": "https://gmailmcp.googleapis.com/mcp/v1"
+    },
+    "google-calendar": {
+      "type": "streamable-http",
+      "url": "https://calendarmcp.googleapis.com/mcp/v1"
+    },
+    "google-drive": {
+      "type": "streamable-http",
+      "url": "https://drivemcp.googleapis.com/mcp/v1"
+    }
+  }
+}

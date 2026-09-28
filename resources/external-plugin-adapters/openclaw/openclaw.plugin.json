@@ -1,0 +1,11 @@
+{
+  "id": "shoggoth-shared-capabilities",
+  "name": "Shoggoth Shared Capabilities",
+  "description": "Discover and invoke user-installed Shoggoth capabilities through a per-call Service lease.",
+  "version": "0.1.0",
+  "activation": { "onStartup": true },
+  "contracts": {
+    "tools": ["shoggoth_capability_search", "shoggoth_skill_read", "shoggoth_skill_file_read", "shoggoth_plugin_call"]
+  },
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

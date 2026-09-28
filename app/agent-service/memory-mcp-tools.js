@@ -10,6 +10,14 @@ const nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });
 const DEFINITIONS = [
   ["memory_search", object({ ...source, query: { type: "string", maxLength: 1024 },
     includeCandidates: { type: "boolean" } }, ["source", "sourceId", "query"])],
+  ["memory_get", object({ ...source, id })],
+  ["memory_explain", object({ ...source, id })],
+  ["conversation_search", object({ ...source, query: text(1024),
+    sessionId: id, limit: { type: "integer", minimum: 1, maximum: 10 } },
+  ["source", "sourceId", "query"])],
+  ["conversation_get", object({ ...source, sessionId: id, eventId: id,
+    window: { type: "integer", minimum: 0, maximum: 3 } },
+  ["source", "sourceId", "sessionId", "eventId"])],
   ["memory_save", object({ ...source, expectedRevision: revision, content: text(2048),
     scope: { type: "string", enum: ["user", "agent", "project", "workspace"] },
     classification: { type: "string", enum: ["explicit"] },
@@ -32,7 +40,8 @@ function matches(value, schema) {
     && Buffer.byteLength(value, "utf8") <= (schema.maxLength ?? Infinity)
     && (!schema.enum || schema.enum.includes(value))
     && (!schema.pattern || new RegExp(schema.pattern, "u").test(value));
-  if (schema.type === "integer") return Number.isSafeInteger(value) && value >= schema.minimum;
+  if (schema.type === "integer") return Number.isSafeInteger(value)
+    && value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity);
   if (schema.type === "boolean") return typeof value === "boolean";
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype) return false;
@@ -46,6 +55,9 @@ function isMemoryMcpTool(name) { return BY_NAME.has(name); }
 function validateMemoryMcpArguments(name, args) {
   const schema = BY_NAME.get(name);
   return Boolean(schema && matches(args, schema)
+    // Pending background suggestions are human-review only. Preserve callers
+    // that explicitly send false, but never silently ignore a true request.
+    && (name !== "memory_search" || args.includeCandidates !== true)
     && (name !== "memory_save" || args.classification !== "explicit" || args.sourceQuote?.trim()));
 }
 

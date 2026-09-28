@@ -91,6 +91,7 @@ class MemoryStore {
     this.opened = false;
     this.profiles = new Map();
     this.poisonError = null;
+    this.uncertainProfiles = new Map();
   }
 
   _assertOpen(write = false) {
@@ -105,11 +106,12 @@ class MemoryStore {
   open() {
     if (this.opened) return;
     ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
-    this.profiles.clear(); this.poisonError = null; this.opened = true;
+    this.profiles.clear(); this.poisonError = null; this.uncertainProfiles.clear(); this.opened = true;
   }
-  close() { this.profiles.clear(); this.poisonError = null; this.opened = false; }
+  close() { this.profiles.clear(); this.poisonError = null; this.uncertainProfiles.clear(); this.opened = false; }
   forgetProfile(profileId) { this._assertOpen(); this.profiles.delete(profileId); }
-  _empty(profileId) { return { profileId, revision: 0, items: new Map() }; }
+  _empty(profileId) { return { profileId, revision: 0, items: new Map(), contentRevisions: new Map(),
+    contentChangedIds: new Set(), itemWriteProofs: new Map() }; }
   _snapshot(state) {
     const snapshot = {
       schemaVersion: MEMORY_SCHEMA_VERSION,
@@ -143,6 +145,8 @@ class MemoryStore {
   _load(profileId) {
     this._assertOpen();
     assertId(profileId, "profileId");
+    const uncertain = this.uncertainProfiles.get(profileId);
+    if (uncertain) throw uncertain;
     if (this.profiles.has(profileId)) return this.profiles.get(profileId);
     const targets = this._paths(profileId);
     ensurePrivateDirectoryTree(targets.dir, this.paths.trustedRoot);
@@ -167,6 +171,10 @@ class MemoryStore {
         const item = validateMemoryItem(raw, profileId);
         if (seen.has(item.id)) throw memoryError("MEMORY_LOG_CORRUPT", "Memory journal batch id 重复");
         seen.add(item.id);
+        const previous = state.items.get(item.id);
+        if (previous?.content !== item.content) state.contentRevisions.set(item.id, record.seq);
+        if (previous && previous.content !== item.content) state.contentChangedIds.add(item.id);
+        state.itemWriteProofs.set(item.id, { seq: record.seq, checksum: record.checksum });
         state.items.set(item.id, item);
       }
       state.revision = record.seq;
@@ -200,6 +208,17 @@ class MemoryStore {
     const item = this._load(profileId).items.get(assertId(id, "memory.id"));
     return item ? structuredClone(item) : null;
   }
+  getContentRevision(profileId, id, expectedContentHash = null) {
+    const state = this._load(profileId);
+    const item = state.items.get(assertId(id, "memory.id"));
+    if (!item || (expectedContentHash !== null && sha256(item.content) !== expectedContentHash)) return null;
+    return state.contentRevisions.get(id) ?? null;
+  }
+  getItemWriteProof(profileId, id) {
+    const state = this._load(profileId);
+    const proof = state.itemWriteProofs.get(assertId(id, "memory.id"));
+    return proof ? { ...proof } : null;
+  }
   list(profileId, filter = {}) {
     return [...this._load(profileId).items.values()]
       .filter((item) => !filter.status || item.status === filter.status)
@@ -208,10 +227,32 @@ class MemoryStore {
       .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
       .map((item) => structuredClone(item));
   }
+  // Historical transcript labels need only source-bound versions whose status
+  // may be obsolete. Avoid cloning and sorting the entire active memory table
+  // on the first Run after every save or expiry.
+  listHistoricalSourceItems(profileId) {
+    const rows = [];
+    const state = this._load(profileId);
+    for (const item of state.items.values()) {
+      if (item.sourceRefs.length < 2 || !(item.status === "superseded"
+        || item.status === "deleted"
+        || item.status === "active" && item.validUntil !== null)) continue;
+      if (item.sourceRefs.slice(0, 2).some((ref) => /^(?:user-edit:|codex-memory:|workspace:)/u.test(ref))) continue;
+      // Older App versions edited a MemoryItem in place while preserving its
+      // original event/Run refs. Retain this possible historical binding for
+      // safe compaction decisions, but expose its uncertain attribution.
+      const sourceBindingVerified = !state.contentChangedIds.has(item.id)
+        && !item.sourceRefs.some((ref) => ref.startsWith("user-edit:"));
+      rows.push({ id: item.id, profileId: item.profileId, status: item.status,
+        content: item.content, validUntil: item.validUntil,
+        sourceRefs: item.sourceRefs.slice(0, 2), sourceBindingVerified });
+    }
+    return rows;
+  }
   upsert(item) {
     return this.upsertMany([item])[0];
   }
-  upsertMany(items) {
+  upsertMany(items, { expectedRevision = null } = {}) {
     this._assertOpen(true);
     if (!Array.isArray(items) || items.length === 0 || items.length > 128) {
       throw memoryError("MEMORY_INVALID", "Memory batch 无效");
@@ -223,6 +264,10 @@ class MemoryStore {
       throw memoryError("MEMORY_INVALID", "Memory batch profile/id 冲突");
     }
     const state = this._load(profileId);
+    if (expectedRevision !== null && (!Number.isSafeInteger(expectedRevision)
+      || expectedRevision < 0 || state.revision !== expectedRevision)) {
+      throw memoryError("MEMORY_REVISION_CONFLICT", "Memory revision 已变化");
+    }
     const changed = canonical.filter((item) => stableJson(state.items.get(item.id)) !== stableJson(item));
     if (changed.length === 0) return canonical.map((item) => structuredClone(item));
     const additions = changed.filter((item) => !state.items.has(item.id)).length;
@@ -239,14 +284,39 @@ class MemoryStore {
     const size = lstatIfExists(targets.log)?.size || 0;
     if (size + Buffer.byteLength(line, "utf8") > this.maxLogBytes) throw memoryError("MEMORY_LOG_TOO_LARGE", "Memory journal 超限");
     let fd;
+    let appendError = null;
     try {
       fd = this.fs.openSync(targets.log, this.fs.constants.O_CREAT | this.fs.constants.O_APPEND
         | this.fs.constants.O_WRONLY | (this.fs.constants.O_NOFOLLOW || 0), 0o600);
       validatePrivateStat(this.fs.fstatSync(fd), targets.log);
       this.fs.fchmodSync(fd, 0o600);
       writeFully(this.fs, fd, line, "MEMORY_WRITE_FAILED"); this.fs.fsyncSync(fd);
-    } finally { if (fd !== undefined) this.fs.closeSync(fd); }
-    for (const item of changed) state.items.set(item.id, item);
+    } catch (cause) { appendError = cause; }
+    finally {
+      if (fd !== undefined) {
+        try { this.fs.closeSync(fd); }
+        catch (cause) { appendError ??= cause; }
+      }
+    }
+    if (appendError) {
+      if (fd === undefined) throw appendError;
+      // Once the journal was opened, a failed write/fsync/close cannot prove
+      // whether a complete row committed. Never reuse the cached revision to
+      // append another row with the same sequence number in this process.
+      const error = memoryError("MEMORY_COMMIT_UNCERTAIN", "Memory journal 提交结果不确定");
+      error.cause = appendError; error.committedUncertain = true;
+      this.profiles.delete(profileId);
+      this.uncertainProfiles.set(profileId, error);
+      this.poisonError = error;
+      throw error;
+    }
+    for (const item of changed) {
+      const previous = state.items.get(item.id);
+      if (previous?.content !== item.content) state.contentRevisions.set(item.id, record.seq);
+      if (previous && previous.content !== item.content) state.contentChangedIds.add(item.id);
+      state.itemWriteProofs.set(item.id, { seq: record.seq, checksum: record.checksum });
+      state.items.set(item.id, item);
+    }
     state.revision = record.seq;
     try { this._writeSnapshot(state); } catch (cause) {
       const error = memoryError("MEMORY_COMMIT_UNCERTAIN", "Memory journal 已同步但 snapshot 提交不确定");

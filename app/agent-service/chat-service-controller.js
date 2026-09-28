@@ -1012,6 +1012,7 @@ function createChatServiceController(options = {}) {
         workspace: resolveProfileWorkspace({ paths: options.paths, profile, requested: params.workspace,
             sessionOperationId: params.operationId }),
         createdAt: params.createdAt,
+        ...(params.parentSessionKey ? { parentSessionKey: params.parentSessionKey } : {}),
       });
       if (transcriptStore) transcriptStore.ensureSession({
         profileId: session.profileId,

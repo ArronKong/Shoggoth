@@ -12,6 +12,9 @@ const { resolveServicePaths } = require(path.join(ROOT, "app", "agent-service", 
 const {
   BUILTIN_CLI_AGENT_PROFILES,
 } = require(path.join(ROOT, "app", "agent-service", "builtin-cli-profiles.js"));
+const { DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME } = require(path.join(ROOT, "app", "agent-service", "runtime-account.js"));
+const FIXTURE_INSTALLED_ACCOUNT_IDS = BUILTIN_CLI_AGENT_PROFILES.map((spec) =>
+  DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[spec.runtime]);
 const {
   domainOperationId,
 } = require(path.join(ROOT, "app", "agent-service", "domain-work-run-executor.js"));
@@ -168,6 +171,7 @@ async function main() {
       decryptString: (value) => Buffer.from(value).toString("utf8"),
     },
     builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: FIXTURE_INSTALLED_ACCOUNT_IDS,
     runtimePool: codexPool,
     grokBuildRuntimePool,
     claudeCodeRuntimePool: grokBuildRuntimePool,
@@ -456,7 +460,8 @@ async function main() {
 async function disabledClaudeRelease() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-disabled-claude-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
-  let service = createAgentService({ paths, version: "disabled-claude-proof", builtinCliProfiles: true });
+  let service = createAgentService({ paths, version: "disabled-claude-proof", builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: FIXTURE_INSTALLED_ACCOUNT_IDS });
   try {
     await service.start();
     assert.equal(service.productStore.listAgentProfiles().length, 7);
@@ -481,7 +486,8 @@ async function disabledClaudeRelease() {
     assert.equal(run.status, "skipped");
     assert.equal(run.resultSummary, "CRON_TARGET_DISABLED");
     await service.stop();
-    service = createAgentService({ paths, version: "disabled-claude-proof", builtinCliProfiles: true });
+    service = createAgentService({ paths, version: "disabled-claude-proof", builtinCliProfiles: true,
+      builtinCliInstalledAccountIds: FIXTURE_INSTALLED_ACCOUNT_IDS });
     await service.start();
     assert.deepEqual(service.productStore.getAgentProfile(saved.id), saved);
     assert.equal(service.nativeCronStore.getJob(job.id).id, job.id);

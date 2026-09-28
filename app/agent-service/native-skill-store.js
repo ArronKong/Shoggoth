@@ -6,7 +6,7 @@ const path = require("node:path");
 const { TextDecoder } = require("node:util");
 const { hasSecret } = require("./memory-engine");
 const { extractSkillZip } = require("./native-skill-archive");
-const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
+const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile } = require("./private-file");
 const {
   ensurePrivateDirectoryTree,
   lstatIfExists,
@@ -20,6 +20,7 @@ const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_PACKAGE_DEPTH = 8;
 const MAX_REGISTRY_BYTES = 4 * 1024 * 1024;
+const MAX_INSTALL_BATCH = 64;
 const MAX_SKILL_INSTRUCTION_BYTES = 256 * 1024;
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const VERSION_PATTERN = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/u;
@@ -306,6 +307,7 @@ class NativeSkillStore {
     this.profileExists = options.profileExists || (() => true);
     this.now = options.now || Date.now;
     this.opened = false;
+    this.commitUncertain = false;
     this.registry = null;
     this.builtins = [];
     this.profileManifests = new Map();
@@ -323,6 +325,9 @@ class NativeSkillStore {
   }
   _assertOpen() {
     if (!this.opened) throw skillError("SKILL_STORE_CLOSED", "Skill Store 未打开");
+    if (this.commitUncertain) {
+      throw skillError("SKILL_REGISTRY_COMMIT_UNCERTAIN", "Skill Registry 上次提交状态不确定，须重新打开并校验");
+    }
   }
   _profilePath(profileId) {
     if (!ID_PATTERN.test(profileId)) throw skillError("SKILL_PROFILE_INVALID", "Skill Profile id 无效");
@@ -446,6 +451,12 @@ class NativeSkillStore {
     ensurePrivateDirectoryTree(this.paths.skillStagingDir, this.paths.trustedRoot);
     ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
     this.builtins = this._scanBuiltins();
+    const recovery = recoverInterruptedPrivateFile(this.paths.skillRegistryPath, {
+      trustedRoot: this.paths.trustedRoot,
+    });
+    if (recovery === "uncertain") {
+      throw skillError("SKILL_REGISTRY_COMMIT_UNCERTAIN", "Skill Registry 上次提交状态不确定");
+    }
     if (!lstatIfExists(this.paths.skillRegistryPath)) {
       const created = { schemaVersion: SKILL_REGISTRY_SCHEMA_VERSION, revision: 1, updatedAt: this.now(), packages: [] };
       atomicWritePrivateFile(this.paths.skillRegistryPath, `${JSON.stringify(created)}\n`, {
@@ -460,6 +471,7 @@ class NativeSkillStore {
     } catch { throw skillError("SKILL_REGISTRY_CORRUPT", "Skill Registry 无法读取"); }
     this.registry = this._validateRegistry(parsed);
     this._cleanupOrphanPackages();
+    this.commitUncertain = false;
     this.opened = true;
     try {
       for (const profileId of profileIds) this._loadProfile(profileId);
@@ -471,6 +483,7 @@ class NativeSkillStore {
   }
   close() {
     this.opened = false;
+    this.commitUncertain = false;
     this.registry = null;
     this.builtins = [];
     this.profileManifests.clear();
@@ -498,10 +511,24 @@ class NativeSkillStore {
       updatedAt: this.now(),
       packages: packages.map((item) => structuredClone(item)),
     };
-    atomicWritePrivateFile(this.paths.skillRegistryPath, `${JSON.stringify(next)}\n`, {
-      trustedRoot: this.paths.trustedRoot,
-    });
-    this.registry = this._validateRegistry(next);
+    // A failed package validation must leave both the durable revision and the
+    // in-memory revision unchanged. In particular, an older package may have
+    // been altered since open() even when this commit only adds a new package.
+    const serialized = `${JSON.stringify(next)}\n`;
+    if (Buffer.byteLength(serialized, "utf8") > MAX_REGISTRY_BYTES) {
+      throw skillError("SKILL_REGISTRY_TOO_LARGE", "Skill Registry 超过容量上限");
+    }
+    const validated = this._validateRegistry(next);
+    try {
+      atomicWritePrivateFile(this.paths.skillRegistryPath, serialized, {
+        trustedRoot: this.paths.trustedRoot,
+      });
+    } catch (error) {
+      if (error?.committed) this.registry = validated;
+      if (error?.committedUncertain) this.commitUncertain = true;
+      throw error;
+    }
+    this.registry = validated;
     return this.registry.revision;
   }
   installFromDirectory(input) {
@@ -568,6 +595,133 @@ class NativeSkillStore {
       return { revision, package: publicPackage(record) };
     } finally {
       if (prepared.extracted && lstatIfExists(prepared.extracted)) safeRemoveTree(prepared.extracted);
+    }
+  }
+  // A caller that intentionally installs many independent Skills can amortize
+  // the full-package integrity scan and durable Registry rewrite. This is an
+  // explicit transaction: existing single-item revision/CAS semantics do not
+  // change, and no more than MAX_INSTALL_BATCH sources are processed at once.
+  installBatchFromDirectories(input) {
+    this._assertOpen();
+    if (!input || !safeText(input.operationId, 128) || !ID_PATTERN.test(input.operationId)
+      || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== this.registry.revision) {
+      if (input?.expectedRevision !== this.registry.revision) {
+        throw skillError("SKILL_REGISTRY_REVISION_CONFLICT", "Skill Registry revision 已变化");
+      }
+      throw skillError("SKILL_INSTALL_INVALID", "批量 Skill 安装参数无效");
+    }
+    if (!Array.isArray(input.items) || input.items.length < 1
+      || input.items.length > MAX_INSTALL_BATCH
+      || input.items.some((item) => !own(item) || !safeText(item.sourcePath, 4096)
+        || Object.keys(item).some((key) => !["sourcePath", "globalEnabled"].includes(key))
+        || (item.globalEnabled !== undefined && typeof item.globalEnabled !== "boolean"))) {
+      throw skillError("SKILL_INSTALL_INVALID", "批量 Skill 安装数量或条目无效");
+    }
+    const sources = input.items.map((item) => path.resolve(item.sourcePath));
+    if (new Set(sources).size !== sources.length) {
+      throw skillError("SKILL_BATCH_DUPLICATE", "批量 Skill 安装包含重复来源");
+    }
+    const keyOf = (record) => `${record.id}\0${record.version}`;
+    const nextByKey = new Map(this.registry.packages.map((record) => [keyOf(record), record]));
+    const seen = new Set();
+    const requestedGlobal = new Map();
+    const requested = [];
+    const createdTargets = [];
+    let changed = false;
+    try {
+      for (const item of input.items) {
+        const prepared = prepareInstallSource(item.sourcePath, this.paths.skillStagingDir);
+        try {
+          const { scan } = prepared;
+          const globalEnabled = item.globalEnabled === true;
+          const record = this._recordFromScan(scan, "user", globalEnabled);
+          const key = keyOf(record);
+          if (seen.has(key)) {
+            throw skillError("SKILL_BATCH_DUPLICATE", "批量 Skill 安装包含重复版本");
+          }
+          seen.add(key);
+          if (globalEnabled) {
+            const priorVersion = requestedGlobal.get(record.id);
+            if (priorVersion && priorVersion !== record.version) {
+              throw skillError("SKILL_BATCH_GLOBAL_CONFLICT", "同一 Skill 不能同时全局启用多个版本");
+            }
+            requestedGlobal.set(record.id, record.version);
+          }
+          const existing = nextByKey.get(key);
+          if (existing && existing.contentHash !== record.contentHash) {
+            throw skillError("SKILL_VERSION_CONFLICT", "同一 Skill 版本内容冲突");
+          }
+          if (!existing) {
+            const idRoot = path.join(this.paths.skillPackagesDir, record.id);
+            ensurePrivateDirectoryTree(idRoot, this.paths.trustedRoot);
+            const destination = path.join(idRoot, record.version);
+            const staging = path.join(this.paths.skillStagingDir,
+              `${record.id}-${record.version}-${crypto.randomBytes(8).toString("hex")}`);
+            if (lstatIfExists(destination)) {
+              const recovered = this._recordFromScan(scanPackage(destination), "user", globalEnabled);
+              if (recovered.contentHash !== record.contentHash) {
+                throw skillError("SKILL_VERSION_CONFLICT", "Skill 目标版本目录已存在且内容不同");
+              }
+            } else {
+              try {
+                materializePackage(scan, staging);
+                const staged = fs.lstatSync(staging);
+                fs.renameSync(staging, destination);
+                createdTargets.push({ destination, idRoot, dev: staged.dev, ino: staged.ino });
+                fsyncDirectory(idRoot);
+              } finally {
+                if (lstatIfExists(staging)) safeRemoveTree(staging);
+              }
+            }
+            nextByKey.set(key, record);
+            changed = true;
+          }
+          if (globalEnabled) {
+            for (const [otherKey, other] of nextByKey) {
+              if (other.id === record.id && other.version !== record.version && other.globalEnabled) {
+                nextByKey.set(otherKey, Object.freeze({ ...other, globalEnabled: false }));
+                changed = true;
+              }
+            }
+            const selected = nextByKey.get(key);
+            if (!selected.globalEnabled) {
+              nextByKey.set(key, Object.freeze({ ...selected, globalEnabled: true }));
+              changed = true;
+            }
+          }
+          requested.push(key);
+        } finally {
+          if (prepared.extracted && lstatIfExists(prepared.extracted)) safeRemoveTree(prepared.extracted);
+        }
+      }
+      const revision = changed ? this._commitRegistry([...nextByKey.values()].sort((left, right) => (
+        left.id.localeCompare(right.id) || left.version.localeCompare(right.version)
+      ))) : this.registry.revision;
+      return { revision, packages: requested.map((key) => publicPackage(nextByKey.get(key))) };
+    } catch (error) {
+      // Atomic Registry writes may report a committed or uncertain result. Keep
+      // their package directories intact so startup validation can reconcile
+      // the durable Registry; only a definite pre-commit failure is rolled back.
+      if (error?.committed || error?.committedUncertain) throw error;
+      const rollbackErrors = [];
+      for (const target of createdTargets.reverse()) {
+        try {
+          const stat = lstatIfExists(target.destination);
+          if (!stat) continue;
+          if (!stat.isDirectory() || stat.isSymbolicLink()
+            || stat.dev !== target.dev || stat.ino !== target.ino) {
+            throw skillError("SKILL_BATCH_ROLLBACK_UNSAFE", "批量 Skill 目标身份已变化，拒绝清理");
+          }
+          safeRemoveTree(target.destination);
+          fsyncDirectory(target.idRoot);
+        } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+      }
+      if (rollbackErrors.length > 0) {
+        const combined = new AggregateError([error, ...rollbackErrors], "批量 Skill 安装回滚失败");
+        combined.code = "SKILL_BATCH_ROLLBACK_FAILED";
+        throw combined;
+      }
+      throw error;
     }
   }
   installGlobalFromDirectory(input) {
@@ -701,6 +855,72 @@ class NativeSkillStore {
         return publicPackage(record, enabled);
       }),
     };
+  }
+  // External host adapters never inherit a native Profile's legacy selection.
+  // Only an explicitly installed and globally enabled user Skill is projected.
+  listGlobalEnabled() {
+    this._assertOpen();
+    return this.registry.packages.filter(record => record.globalEnabled).map(record => Object.freeze({
+      id: record.id, name: record.name, version: record.version,
+      description: record.description, contentHash: record.contentHash,
+      registryRevision: this.registry.revision,
+      requiredTools: [...record.requiredTools],
+      requiredRuntimeCapabilities: [...record.requiredRuntimeCapabilities],
+    }));
+  }
+  readGlobalEnabled({ skillId, version, contentHash, registryRevision } = {}) {
+    this._assertOpen();
+    if (!ID_PATTERN.test(skillId || "") || !VERSION_PATTERN.test(version || "")
+      || !HASH_PATTERN.test(contentHash || "")
+      || registryRevision !== this.registry.revision) {
+      throw skillError("SKILL_REVISION_CHANGED", "全局 Skill 已变化");
+    }
+    const record = this.registry.packages.find(item => item.globalEnabled
+      && item.id === skillId && item.version === version && item.contentHash === contentHash);
+    if (!record) throw skillError("SKILL_NOT_ENABLED", "全局 Skill 未启用");
+    const root = this._packageRoot(record);
+    const scanned = scanPackage(root);
+    if (scanned.contentHash !== contentHash) {
+      throw skillError("SKILL_PACKAGE_CHANGED", "全局 Skill 文件已变化");
+    }
+    const bytes = readStableOwnedFile(path.join(root, "SKILL.md"));
+    const content = decodeText(bytes, "SKILL.md", true);
+    if (sha256(bytes) !== record.files.find(file => file.path === "SKILL.md")?.sha256
+      || hasSecret(content)) {
+      throw skillError("SKILL_PACKAGE_CHANGED", "全局 Skill 内容校验失败");
+    }
+    return { name: record.name, contentHash, content };
+  }
+  readGlobalEnabledFile({ skillId, version, contentHash, registryRevision, relativePath } = {}) {
+    this._assertOpen();
+    if (!ID_PATTERN.test(skillId || "") || !VERSION_PATTERN.test(version || "")
+      || !HASH_PATTERN.test(contentHash || "")
+      || registryRevision !== this.registry.revision) {
+      throw skillError("SKILL_REVISION_CHANGED", "全局 Skill 已变化");
+    }
+    if (typeof relativePath !== "string" || relativePath.includes("\\")
+      || !["references", "scripts", "assets"].includes(relativePath.split("/")[0])) {
+      throw skillError("SKILL_PATH_INVALID", "Skill 附属文件路径无效");
+    }
+    const parts = validateRelativePath(relativePath);
+    if (parts.length < 2) throw skillError("SKILL_PATH_INVALID", "Skill 附属文件路径无效");
+    const record = this.registry.packages.find(item => item.globalEnabled
+      && item.id === skillId && item.version === version && item.contentHash === contentHash);
+    if (!record) throw skillError("SKILL_NOT_ENABLED", "全局 Skill 未启用");
+    const expected = record.files.find(file => file.path === relativePath);
+    if (!expected || expected.size > MAX_SKILL_INSTRUCTION_BYTES) {
+      throw skillError("SKILL_PATH_INVALID", "Skill 附属文件不存在或超过读取上限");
+    }
+    const root = this._packageRoot(record);
+    if (scanPackage(root).contentHash !== contentHash) {
+      throw skillError("SKILL_PACKAGE_CHANGED", "全局 Skill 文件已变化");
+    }
+    const bytes = readStableOwnedFile(path.join(root, ...parts));
+    const content = decodeText(bytes, relativePath, true);
+    if (sha256(bytes) !== expected.sha256 || hasSecret(content)) {
+      throw skillError("SKILL_PACKAGE_CHANGED", "全局 Skill 附属文件校验失败");
+    }
+    return { name: record.name, contentHash, relativePath, fileHash: expected.sha256, content };
   }
   _eligibility(record, options) {
     const available = new Set(options.availableTools || []);
@@ -837,6 +1057,7 @@ class NativeSkillStore {
 }
 
 module.exports = {
+  MAX_INSTALL_BATCH,
   MAX_FILE_BYTES,
   MAX_PACKAGE_BYTES,
   MAX_PACKAGE_DEPTH,

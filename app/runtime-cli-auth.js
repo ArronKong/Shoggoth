@@ -44,7 +44,7 @@ const NATIVE_HOME_SEGMENTS = Object.freeze({
 const AUTH_SPECS = Object.freeze([
   Object.freeze({
     runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
-    name: "Codex",
+    name: "Codex Harness",
     homeEnv: "CODEX_HOME",
     credentialFile: "auth.json",
     credentialProbe: "file",
@@ -56,7 +56,7 @@ const AUTH_SPECS = Object.freeze([
   }),
   Object.freeze({
     runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
-    name: "Codex",
+    name: "Codex CLI",
     homeEnv: "CODEX_HOME",
     credentialFile: "auth.json",
     credentialProbe: "file",
@@ -260,8 +260,11 @@ function createRuntimeCliAuth(options = {}) {
       ...(options.binaryResolvers || {}),
     },
   };
-  return AUTH_SPECS.filter((spec) => require("./runtime-availability")
-    .isRuntimeAvailable(ACCOUNT_BY_ID.get(spec.runtimeAccountId).runtime)).map((spec) => {
+  return AUTH_SPECS.filter((spec) => {
+    const account = ACCOUNT_BY_ID.get(spec.runtimeAccountId);
+    return (!options.nativeOnly || account.kind === "native-user")
+      && require("./runtime-availability").isRuntimeAvailable(account.runtime);
+  }).map((spec) => {
     const account = ACCOUNT_BY_ID.get(spec.runtimeAccountId);
     const accountHome = resolveAccountHome(spec, account, context);
     const authorityConflict = authorityConflictReason(account, context);

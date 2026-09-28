@@ -33,6 +33,7 @@ async function main() {
   const service = createAgentService({ paths, runtimeMcpGateIssuer: issuer,
     runtimeStorageHomedir: () => root, parentEnv: process.env,
     version: "opencode-mcp-contract-smoke", builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: ["native-opencode-default-v1"],
     safeStorage: { isEncryptionAvailable: () => true,
       encryptString: value => Buffer.from(value),
       decryptString: value => Buffer.from(value).toString("utf8") } });

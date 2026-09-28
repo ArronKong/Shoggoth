@@ -1,0 +1,12 @@
+name: shoggoth_shared_capabilities
+version: 0.1.0
+description: Discover and invoke installed Shoggoth capabilities through a per-call Service lease.
+author: Shoggoth
+kind: standalone
+provides_tools:
+  - shoggoth_capability_search
+  - shoggoth_skill_read
+  - shoggoth_skill_file_read
+  - shoggoth_plugin_call
+provides_middleware:
+  - tool_execution

@@ -26,6 +26,17 @@ async function main() {
       { code: "PLUGIN_OAUTH_PROVIDER_UNSUPPORTED" });
     write(valid);
     assert.equal(loadPluginOAuthProviders(paths).length, 1);
+    const fixed = "http://127.0.0.1:49152/oauth/callback";
+    write({ version: 1, providers: [{ ...provider(), redirectUrl: fixed }] });
+    assert.equal(loadPluginOAuthProviders(paths)[0].redirectUrl, fixed);
+    for (const redirectUrl of ["http://localhost:49152/oauth/callback",
+      "http://127.0.0.1:049152/oauth/callback",
+      "http://127.0.0.1:80/oauth/callback", "http://127.0.0.1:65536/oauth/callback",
+      "http://127.0.0.1:49152/other", "http://127.0.0.1:49152/oauth/callback?next=evil",
+      "https://127.0.0.1:49152/oauth/callback", "http://127.0.0.2:49152/oauth/callback"]) {
+      invalid({ version: 1, providers: [{ ...provider(), redirectUrl }] });
+    }
+    write(valid);
     fs.chmodSync(file, 0o644);
     assert.throws(() => loadPluginOAuthProviders(paths), { code: "PLUGIN_OAUTH_CONFIG_INVALID" });
     fs.chmodSync(file, 0o600); fs.chmodSync(paths.pluginsDir, 0o755);
@@ -53,6 +64,9 @@ async function main() {
 
     write({ version: 1, providers: [provider(), provider("second", "https://second.example")] });
     const loaded = loadPluginOAuthProviders(paths);
+    assert.throws(() => new PluginOAuthProviderRegistry({ providers: [{ ...loaded[0],
+      redirectUrl: "http://127.0.0.1:049152/oauth/callback" }] }),
+    { code: "PLUGIN_OAUTH_PROVIDER_UNSUPPORTED" }, "programmatic providers reject noncanonical registered callbacks");
     let subject = "private-subject";
     let status = 200;
     let requests = 0;

@@ -15,6 +15,14 @@ const source = fs.readFileSync(componentPath, 'utf8');
 const compiled = ts.transpileModule(source, { fileName: componentPath, compilerOptions: {
   esModuleInterop: true, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
 } }).outputText;
+const localePath = path.join(root, 'app/manage-ui/src/i18n/locales/zh-CN.ts');
+const localeModule = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(localePath, 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText, { module: localeModule, exports: localeModule.exports });
+const errorLabels = localeModule.exports.default.inspiration.growth.errors;
+const errorKeyPrefix = 'inspiration.growth.errors.';
+const errorLabel = (key) => key.startsWith(errorKeyPrefix) ? errorLabels[key.slice(errorKeyPrefix.length)] : undefined;
 const execution = { exports: {} };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'app/manage-ui/src/pages/inspiration-execution.ts'), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -28,13 +36,15 @@ let roster;
 let refreshes = 0;
 const starts = [];
 const cancellations = [];
+const updates = [];
 const refresh = async () => { refreshes++; };
 const host = (type) => (props) => React.createElement(type, props, props.children);
 const stubs = {
   './InspirationMedia': { __esModule: true, default: props => React.createElement('div', { ...props, 'data-media-editor': true }, React.createElement('textarea', { ...props.inputProps, value: props.body, disabled: props.disabled, onChange: event => props.onChange(previous => ({ ...previous, body: event.target.value })) })), InspirationMediaPreview: host('aside') },
   './inspiration-media': {},
   './inspiration-draft': { draftBytes: value => Buffer.byteLength(JSON.stringify(value), 'utf8') },
-  'react-i18next': { useTranslation: () => ({ t: (key) => key }) },
+  'react-i18next': { useTranslation: () => ({ t: (key) => errorLabel(key) || key,
+    i18n: { exists: (key) => Boolean(errorLabel(key)) } }) },
   'react-router-dom': { Link: host('a'), useSearchParams: () => [new URLSearchParams(), () => {}] },
   '../components/Modal': (props) => React.createElement('dialog', {}, props.title, props.children, props.footer),
   '../components/Field': { Field: host('label'), TextArea: host('textarea'), TextInput: host('input'),
@@ -50,6 +60,7 @@ const stubs = {
   '../api/client': {
     startInspiration: async (id, input) => { starts.push({ id, input }); },
     cancelInspiration: async (id, input) => { cancellations.push({ id, input }); },
+    updateInspiration: async (id, input) => { updates.push({ id, input }); Object.assign(idea, input.patch); idea.revision++; },
   },
   './InspirationStatusIcon': { default: host('i'), inspirationGrowthStage: () => 0, __esModule: true },
   './InspirationActionIcon': host('i'),
@@ -82,11 +93,11 @@ const { IdeaDetail } = mod.exports;
 const textOf = (node) => typeof node === 'string' ? node : Array.isArray(node)
   ? node.map(textOf).join('') : node?.children ? textOf(node.children) : '';
 const button = (renderer, label) => renderer.root.findAllByType('button').find((value) => textOf(value) === label);
-const render = (status = 'completed') => {
-  idea = { id: 'idea', body: 'Original idea', revision: 2, favorite: false, archivedAt: null, acceptedAt: null,
+const render = (status = 'completed', errorCode = null, title = null) => {
+  idea = { id: 'idea', body: 'Original idea', title, revision: 2, favorite: false, archivedAt: null, acceptedAt: null,
     createdAt: 1, status, latestExecution: { id: 'execution', ideaId: 'idea', runId: 'run', backendId: 'shoggoth',
       agentId: 'shoggoth-agent', profileId: 'profile', workspace: '/fixture/native', createdAt: 1,
-      sessionKey: 'session', status, attention: null } };
+      sessionKey: 'session', status, attention: null, errorCode } };
   roster = structuredClone(agents);
   let renderer;
   act(() => { renderer = create(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })); });
@@ -142,9 +153,44 @@ for (const backendId of ['openclaw', 'hermes']) {
   const renderer = render('canceled');
   assert.ok(textOf(renderer.toJSON()).includes('inspiration.status.failed'), 'Manual stops use the failed status in details');
   assert.ok(!textOf(renderer.toJSON()).includes('inspiration.status.canceled'));
-  assert.ok(textOf(renderer.toJSON()).includes('inspiration.growth.errors.INSPIRATION_CANCELED'), 'The stop reason remains visible');
+  assert.ok(textOf(renderer.toJSON()).includes(errorLabels.INSPIRATION_CANCELED), 'The stop reason remains visible');
   assert.equal(button(renderer, 'inspiration.continue').props.disabled, false);
   assert.equal(button(renderer, 'inspiration.stop'), undefined);
   act(() => renderer.unmount());
 }
-console.log('PASS Inspiration UI: external routes, workspace isolation, native continuation, offline guard, unknown recovery and stopped failure details');
+{
+  const renderer = render('interrupted', 'DEMO_SERVICE_RESTARTED');
+  const paragraphs = renderer.root.findAllByType('p').map((value) => textOf(value));
+  const primary = paragraphs.find((value) => value.startsWith('!') && value.includes('执行服务重启'));
+  assert.ok(primary?.includes('请先查看会话中的进度'));
+  assert.ok(!primary.includes('DEMO_SERVICE_RESTARTED'), 'Known codes should not replace the explanation in the main panel');
+  assert.ok(paragraphs.some((value) => value.includes('DEMO_SERVICE_RESTARTED')), 'The expandable history keeps the diagnostic code');
+  assert.equal(errorLabels.SERVICE_RESTARTED, errorLabels.DEMO_SERVICE_RESTARTED);
+  act(() => renderer.unmount());
+}
+{
+  const renderer = render('interrupted', 'UNMAPPED_SERVICE_CODE');
+  assert.ok(textOf(renderer.toJSON()).includes('UNMAPPED_SERVICE_CODE'), 'Unknown codes stay visible for diagnosis');
+  act(() => renderer.unmount());
+}
+{
+  const renderer = render('completed');
+  assert.equal(textOf(renderer.toJSON()).split('Original idea').length - 1, 1,
+    'A titleless note should show its text only in the original content, not repeat it in the dialog heading');
+  act(() => renderer.unmount());
+}
+{
+  const renderer = render('completed', null, 'Legacy title');
+  assert.ok(textOf(renderer.toJSON()).includes('Legacy title'), 'Existing titles remain visible in the dialog heading');
+  await click(button(renderer, 'inspiration.edit'));
+  assert.equal(renderer.root.findAllByType('input').length, 0, 'Editing a note should expose no separate title field');
+  assert.equal(renderer.root.findAllByType('textarea').length, 1, 'The note body remains the single text editor');
+  assert.ok(!textOf(renderer.toJSON()).includes('inspiration.optionalTitle'));
+  act(() => renderer.root.findByType('textarea').props.onChange({ target: { value: 'Updated note' } }));
+  await click(button(renderer, 'inspiration.saveEdit'));
+  assert.equal(updates.at(-1).input.patch.body, 'Updated note');
+  assert.equal(Object.hasOwn(updates.at(-1).input.patch, 'title'), false, 'Editing text must preserve an existing legacy title');
+  assert.equal(idea.title, 'Legacy title');
+  act(() => renderer.unmount());
+}
+console.log('PASS Inspiration UI: external routes, workspace isolation, native continuation, offline guard, stopped failures and titleless note details');

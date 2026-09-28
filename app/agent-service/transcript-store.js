@@ -41,6 +41,12 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+const INDEX_CHAIN_SEED = sha256("shoggoth-transcript-index-v1");
+
+function fileIdentity(stat) {
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+}
+
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -191,6 +197,7 @@ class TranscriptStore {
     this.maxLogBytes = options.maxLogBytes ?? MAX_LOG_BYTES;
     this.opened = false;
     this.sessions = new Map();
+    this.changeRevisions = new Map();
     this.poisonError = null;
   }
 
@@ -212,25 +219,61 @@ class TranscriptStore {
     return { dir, log: path.join(dir, "events.jsonl"), manifest: path.join(dir, "manifest.json") };
   }
 
+  _fileIdentity(target) {
+    const stat = lstatIfExists(target);
+    return stat ? fileIdentity(validatePrivateStat(stat, target)) : null;
+  }
+
+  _assertCachedFilesCurrent(state) {
+    // In-memory events are only a cache of the private journal. A removed or
+    // modified journal must not keep supplying supposedly verified user text
+    // to conversation recall, candidate review, or memory_explain.
+    const targets = this._paths(state.profileId, state.sessionId);
+    if (this._fileIdentity(targets.log) !== state.journalIdentity
+      || this._fileIdentity(targets.manifest) !== state.manifestIdentity) {
+      throw transcriptError("TRANSCRIPT_SOURCE_CHANGED", "Transcript 原始记录在运行中发生变化");
+    }
+  }
+
   open() {
     if (this.opened) return;
     ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
     this.sessions.clear();
+    this.changeRevisions.clear();
     this.poisonError = null;
     this.opened = true;
   }
 
   close() {
     this.sessions.clear();
+    this.changeRevisions.clear();
     this.poisonError = null;
     this.opened = false;
   }
 
   forgetProfile(profileId) {
     this._assertOpen();
+    this._bumpChangeRevision(profileId);
     for (const [key, session] of this.sessions) {
       if (session.profileId === profileId) this.sessions.delete(key);
     }
+  }
+
+  getChangeRevision(profileId) {
+    this._assertOpen();
+    assertId(profileId, "profileId");
+    return this.changeRevisions.get(profileId) || 0;
+  }
+
+  assertJournalCurrent(profileId, sessionId) {
+    // A caller may resolve a separate context-content object after obtaining
+    // an event. Recheck the cached journal immediately before returning that
+    // event as verified evidence; this costs metadata reads, not a replay.
+    this._load(profileId, sessionId);
+  }
+
+  _bumpChangeRevision(profileId) {
+    this.changeRevisions.set(profileId, (this.changeRevisions.get(profileId) || 0) + 1);
   }
 
   _emptyState(profileId, sessionId) {
@@ -241,6 +284,8 @@ class TranscriptStore {
       lastEventSeq: 0,
       events: [],
       byId: new Map(),
+      visibleUserEventsByRun: new Map(),
+      indexDigests: [INDEX_CHAIN_SEED],
     };
   }
 
@@ -282,6 +327,7 @@ class TranscriptStore {
       state.events.push(event);
       state.byId.set(event.id, event);
       state.lastEventSeq = event.seq;
+      this._updateVisibleUserRun(state, event, 1);
     } else {
       if (!exactKeys(record.payload, ["eventId", "contextExcluded"])
         || !ID_PATTERN.test(record.payload.eventId)
@@ -290,9 +336,25 @@ class TranscriptStore {
       }
       const event = state.byId.get(record.payload.eventId);
       if (!event) throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript context event 不存在");
+      this._updateVisibleUserRun(state, event, -1);
       event.contextExcluded = record.payload.contextExcluded;
+      this._updateVisibleUserRun(state, event, 1);
     }
+    // A hash chain over validated journal records lets a derived index prove
+    // that its old prefix is still present before taking the append fast path.
+    // This also detects a same-revision backup restore, even when a copy
+    // overwrites the original journal inode and appends more records later.
+    state.indexDigests.push(sha256(`${state.indexDigests.at(-1)}:${record.checksum}`));
     state.revision = record.seq;
+  }
+
+  _updateVisibleUserRun(state, event, delta) {
+    if (!event.runId || event.kind !== "user" || event.contextExcluded
+      || typeof event.content?.text !== "string") return;
+    const count = (state.visibleUserEventsByRun.get(event.runId) || 0) + delta;
+    if (count < 0) throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript user Run 计数无效");
+    if (count === 0) state.visibleUserEventsByRun.delete(event.runId);
+    else state.visibleUserEventsByRun.set(event.runId, count);
   }
 
   _repairPartialTail(target) {
@@ -346,7 +408,11 @@ class TranscriptStore {
   _load(profileId, sessionId) {
     this._assertOpen();
     const key = this._sessionKey(profileId, sessionId);
-    if (this.sessions.has(key)) return this.sessions.get(key);
+    const cached = this.sessions.get(key);
+    if (cached) {
+      this._assertCachedFilesCurrent(cached);
+      return cached;
+    }
     const targets = this._paths(profileId, sessionId);
     ensurePrivateDirectoryTree(targets.dir, this.paths.trustedRoot);
     const state = this._emptyState(profileId, sessionId);
@@ -375,6 +441,8 @@ class TranscriptStore {
       manifestCurrent = this._validateManifest(value, state);
     }
     if (!manifestCurrent) this._writeManifest(state);
+    state.journalIdentity = this._fileIdentity(targets.log);
+    state.manifestIdentity = this._fileIdentity(targets.manifest);
     this.sessions.set(key, state);
     return state;
   }
@@ -404,21 +472,46 @@ class TranscriptStore {
     const flags = this.fs.constants.O_CREAT | this.fs.constants.O_APPEND
       | this.fs.constants.O_WRONLY | noFollow;
     let fd;
+    let failure = null;
+    let writeAttempted = false;
     try {
       fd = this.fs.openSync(targets.log, flags, 0o600);
       const stat = validatePrivateStat(this.fs.fstatSync(fd), targets.log);
       if ((stat.mode & 0o077) !== 0) this.fs.fchmodSync(fd, 0o600);
+      writeAttempted = true;
       writeFully(this.fs, fd, line, "TRANSCRIPT_WRITE_FAILED");
       this.fs.fsyncSync(fd);
     } catch (error) {
-      if (error?.code === "ELOOP") {
+      failure = error;
+    } finally {
+      if (fd !== undefined) {
+        try { this.fs.closeSync(fd); }
+        catch (error) { failure ||= error; writeAttempted = true; }
+      }
+    }
+    if (failure) {
+      if (writeAttempted) {
+        // The complete record may already be durable despite a write, fsync,
+        // or close error. Do not retry at the same seq in this process; a cold
+        // journal replay determines whether the record actually committed.
+        const uncertain = transcriptError("TRANSCRIPT_COMMIT_UNCERTAIN",
+          "Transcript journal 写入结果不确定，需重启后核实原事件");
+        uncertain.cause = failure;
+        uncertain.committedUncertain = true;
+        this.poisonError = uncertain;
+        throw uncertain;
+      }
+      if (failure.code === "ELOOP") {
         throw transcriptError("UNSAFE_SYMLINK", "拒绝 Transcript journal symlink");
       }
-      throw error;
-    } finally { if (fd !== undefined) this.fs.closeSync(fd); }
+      throw failure;
+    }
     this._validateRecord(record, state.revision + 1, state);
+    this._bumpChangeRevision(state.profileId);
     try {
       this._writeManifest(state);
+      state.journalIdentity = this._fileIdentity(targets.log);
+      state.manifestIdentity = this._fileIdentity(targets.manifest);
     } catch (cause) {
       const error = transcriptError(
         "TRANSCRIPT_COMMIT_UNCERTAIN",
@@ -508,6 +601,44 @@ class TranscriptStore {
         && (options.afterSeq === undefined || event.seq > options.afterSeq)
         && (options.throughSeq === undefined || event.seq <= options.throughSeq))
       .map((event) => structuredClone(event));
+  }
+
+  listEventsPage(profileId, sessionId, afterSeq = 0, limit = 256) {
+    this._assertOpen();
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 512) {
+      throw transcriptError("TRANSCRIPT_EVENT_INVALID", "Transcript page 范围无效");
+    }
+    // Append-only event seq remains dense even when context flags change.
+    return this._load(profileId, sessionId).events.slice(afterSeq, afterSeq + limit)
+      .map((event) => structuredClone(event));
+  }
+
+  getEvent(profileId, sessionId, eventId) {
+    this._assertOpen();
+    assertId(eventId, "eventId");
+    const event = this._load(profileId, sessionId).byId.get(eventId);
+    return event ? structuredClone(event) : null;
+  }
+
+  hasUserEventForRun(profileId, sessionId, runId) {
+    this._assertOpen();
+    assertId(runId, "runId");
+    return this._load(profileId, sessionId).visibleUserEventsByRun.has(runId);
+  }
+
+  listEventWindow(profileId, sessionId, eventId, radius = 0) {
+    this._assertOpen();
+    assertId(eventId, "eventId");
+    if (!Number.isSafeInteger(radius) || radius < 0 || radius > 3) {
+      throw transcriptError("TRANSCRIPT_EVENT_INVALID", "事件窗口无效");
+    }
+    const state = this._load(profileId, sessionId);
+    const event = state.byId.get(eventId);
+    if (!event) return null;
+    const index = event.seq - 1;
+    return state.events.slice(Math.max(0, index - radius), index + radius + 1)
+      .map((item) => structuredClone(item));
   }
 
   saveContextContent(profileId, sessionId, content) {
@@ -605,6 +736,24 @@ class TranscriptStore {
 
   getRevision(profileId, sessionId) {
     return this._load(profileId, sessionId).revision;
+  }
+
+  getIndexSnapshot(profileId, sessionId) {
+    const state = this._load(profileId, sessionId);
+    return { revision: state.revision, lastSeq: state.lastEventSeq,
+      sourceIdentity: state.indexDigests[state.revision] };
+  }
+
+  getIndexPrefixDigest(profileId, sessionId, revision) {
+    const state = this._load(profileId, sessionId);
+    if (!Number.isSafeInteger(revision) || revision < 0 || revision > state.revision) {
+      throw transcriptError("TRANSCRIPT_EVENT_INVALID", "Transcript 索引前缀范围无效");
+    }
+    return state.indexDigests[revision];
+  }
+
+  getLastEventSeq(profileId, sessionId) {
+    return this._load(profileId, sessionId).lastEventSeq;
   }
 
   importHistoryItems(input) {

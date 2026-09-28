@@ -34,6 +34,10 @@ import type {
   OAuthProvidersSnapshot,
   OAuthStartSession,
   UnifiedSkill,
+  NativeSkillPage,
+  DisabledStandaloneMcpPage,
+  StandaloneMcpRebindResult,
+  StandaloneMcpActivateResult,
   BackendSkillUsage,
   UsageSeries,
   UsageBreakdown,
@@ -1108,6 +1112,12 @@ export function connectPluginBearer(input: { agentId: string; installationId: st
       toolIdentity: null; revision: number } | null }> {
   return jsonFetch("/__api/plugins/bearer-connect", { method: "POST", body: JSON.stringify(input) });
 }
+export function selectPluginAccount(input: { agentId: string; bindingId: string;
+  connectionId: string; expectedRevision: number; operationId: string }): Promise<{
+    canceled: boolean; receipt: { kind: "mcp-connect"; profileId: string; bindingId: string;
+      toolIdentity: null; revision: number } | null }> {
+  return jsonFetch("/__api/plugins/account-select", { method: "POST", body: JSON.stringify(input) });
+}
 export function getPluginOAuthFlow(agentId: string, flowId: string, cancel = false): Promise<PluginOAuthFlow> {
   return jsonFetch(`/__api/plugins/oauth-${cancel ? "cancel" : "status"}`, {
     method: "POST", body: JSON.stringify({ agentId, flowId }) });
@@ -1195,8 +1205,11 @@ export interface BundledPluginDetail {
   unconvertedMcp: BundledPluginItem["unconvertedMcp"];
   importStatus: BundledPluginItem["importStatus"];
   prompts: string[];
+  sourceWarnings: Array<{ code: "MISSING_OPTIONAL_LOCAL_REFERENCES";
+    source: string; targets: string[] }>;
   skills: Array<{ name: string; description: string }>;
   mcpServers: Array<{ name: string; type: "stdio" | "streamable-http" }>;
+  connectionWarnings: Array<{ name: string; reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }>;
   apps: string[];
 }
 
@@ -1233,6 +1246,7 @@ export interface PluginMcpStatus {
   items: Array<{
     componentId: string;
     connections: { pending: number; verified: number; disconnected: number };
+    accounts: Array<{ connectionId: string; label: string }>;
     binding: null | { bindingId: string; connectionId: string; enabled: boolean;
       revision: number; connectionState: "pending" | "ready" | "disconnected" | null;
       grants: { allow: number; deny: number } };
@@ -1245,11 +1259,70 @@ export function getPluginMcpStatus(agentId: string,
   return jsonFetch(`/__api/plugins/mcp-status?${qs.toString()}`);
 }
 
+export interface PluginExternalCall {
+  callId: string; backendId: "openclaw" | "hermes"; instanceId: string;
+  agentId: string; sessionId: string; runId: string | null; taskId: string | null;
+  turnId: string | null; toolCallId: string; bindingId: string; installationId: string;
+  componentId: string; connectionId: string; toolIdentity: string; toolName: string;
+  status: "pending" | "confirmed" | "rejected_before_send" | "canceled_before_send"
+    | "outcome_unknown" | "canceled_outcome_unknown";
+  cancelRequested: boolean; resultDigest: string | null; resultBytes: number | null;
+  errorCode: string | null; approvalRequestId: string | null;
+  approvalOutcome: "approved" | "denied" | "expired" | "withdrawn" | null;
+  approvalUpdatedAt: number | null; createdAt: number; updatedAt: number;
+}
+export interface PluginExternalCallsPage {
+  items: PluginExternalCall[];
+  nextCursor: { createdAt: number; callId: string } | null;
+}
+export function getPluginExternalCalls(backendId: "all" | "openclaw" | "hermes" = "all",
+  cursor: PluginExternalCallsPage["nextCursor"] = null, limit = 10): Promise<PluginExternalCallsPage> {
+  const qs = new URLSearchParams({ backendId, limit: String(limit) });
+  if (cursor) { qs.set("cursorCreatedAt", String(cursor.createdAt)); qs.set("cursorCallId", cursor.callId); }
+  return jsonFetch(`/__api/plugins/external-calls?${qs.toString()}`);
+}
+
+/** A tool card may claim an approval only when its trusted host identity has one audit row. */
+export function getPluginExternalCallForTool(input: {
+  backendId: "openclaw" | "hermes"; agentId: string; sessionId: string; toolCallId: string;
+}): Promise<PluginExternalCallsPage> {
+  const qs = new URLSearchParams({ ...input, limit: "1" });
+  return jsonFetch(`/__api/plugins/external-calls?${qs.toString()}`);
+}
+
+export interface PluginExternalApproval {
+  requestId: string; backendId: "openclaw" | "hermes"; instanceId: string;
+  agentId: string; sessionId: string; runId: string | null; taskId: string | null;
+  turnId: string | null; toolCallId: string; callId: string; bindingId: string;
+  connectionId: string; connectionAuthRevision: number; packageName: string;
+  toolName: string; command: string; argumentDigest: string; expiresAt: number;
+}
+export interface PluginExternalApprovalPage {
+  items: PluginExternalApproval[];
+  nextCursor: { offset: number; revision: number } | null;
+}
+export function getExternalPluginApprovals(backendId: "all" | "openclaw" | "hermes" = "all",
+  cursor: PluginExternalApprovalPage["nextCursor"] = null): Promise<PluginExternalApprovalPage> {
+  const query = new URLSearchParams({ backendId, limit: "2" });
+  if (cursor) { query.set("cursorOffset", String(cursor.offset));
+    query.set("cursorRevision", String(cursor.revision)); }
+  return jsonFetch(`/__api/plugins/external-approvals?${query}`);
+}
+export function respondExternalPluginApproval(requestId: string, decision: "once" | "deny"):
+  Promise<{ approved: boolean; requestId: string }> {
+  return jsonFetch("/__api/plugins/external-approvals", { method: "POST",
+    body: JSON.stringify({ requestId, operationId: crypto.randomUUID(), decision }) });
+}
+
 export interface PluginMcpTools {
   profileId: string;
   bindingId: string;
   available: boolean;
   catalogRevision: string | null;
+  portableCapabilities?: Array<{ id: string; toolName: string }>;
+  referenceCoverage?: { packageId: "github"; referenceName: "github";
+    managedAppId: string; relationship: "functional-overlap"; equivalence: "unverified";
+    operations: Array<{ id: string; toolName: string }> };
   items: Array<{ toolIdentity: string; name: string; contractDigest: string;
     savedGrant: null | { effect: "allow" | "deny";
       approvalMode: "always" | "each-call"; revision: number;
@@ -1333,6 +1406,43 @@ export async function listSkills(backend: string, agentId?: string): Promise<Uni
     `/__api/skills?${qs.toString()}`,
   );
   return skills || [];
+}
+
+export async function listSkillsPage(backend: string, agentId: string, options: {
+  query: string; status: "" | "on" | "off"; pageIndex: number; limit: number;
+  expectedRevision: string | null;
+}): Promise<NativeSkillPage> {
+  const qs = new URLSearchParams({ backend, agentId, paged: "1",
+    query: options.query, status: options.status, page: String(options.pageIndex),
+    limit: String(options.limit) });
+  if (options.expectedRevision) qs.set("revision", options.expectedRevision);
+  const { page } = await jsonFetch<{ page: NativeSkillPage }>(`/__api/skills?${qs.toString()}`);
+  if (!page || page.supported !== true) throw new Error("Skill 分页暂不可用");
+  return page;
+}
+
+export async function listDisabledStandaloneMcp(agentId: string, cursor = 0): Promise<DisabledStandaloneMcpPage> {
+  const qs = new URLSearchParams({ agentId, cursor: String(cursor), limit: "20" });
+  const { page } = await jsonFetch<{ page: DisabledStandaloneMcpPage }>(`/__api/mcp/standalone?${qs.toString()}`);
+  return page;
+}
+
+export async function rebindStandaloneMcp(input: { agentId: string; id: string; expectedRevision: number;
+  command: string; cwd: string; args: string[] }): Promise<StandaloneMcpRebindResult> {
+  const { result } = await jsonFetch<{ result: StandaloneMcpRebindResult }>("/__api/mcp/standalone", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "rebind", ...input }),
+  });
+  return result;
+}
+
+export async function activateStandaloneMcp(input: { agentId: string; id: string; expectedRevision: number;
+  activationToken: string }): Promise<StandaloneMcpActivateResult> {
+  const { result } = await jsonFetch<{ result: StandaloneMcpActivateResult }>("/__api/mcp/standalone", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "activate", ...input }),
+  });
+  return result;
 }
 
 // Per-backend "which skills have agents actually loaded" aggregate (local
@@ -2070,6 +2180,49 @@ export async function listAgentMemories(
     agentUrl(backend, id, "/memories") + query,
   );
   return memories;
+}
+export async function explainAgentMemory(backend: string, id: string, memoryId: string): Promise<import("../types").AgentMemoryExplanation> {
+  const { explanation } = await jsonFetch<{ explanation: import("../types").AgentMemoryExplanation }>(
+    agentUrl(backend, id, "/memory-explain") + `&memoryId=${encodeURIComponent(memoryId)}`,
+  );
+  return explanation;
+}
+export async function listAgentMemoryCandidates(
+  backend: string, id: string, status: "pending" | "accepted" | "rejected" | "all" = "pending",
+  cursor = 0, limit = 50, expectedRevision?: number,
+): Promise<import("../types").AgentMemoryCandidatePage> {
+  const { candidates } = await jsonFetch<{ candidates: import("../types").AgentMemoryCandidatePage }>(
+    agentUrl(backend, id, "/memory-candidates")
+      + `&status=${encodeURIComponent(status)}&cursor=${cursor}&limit=${limit}`
+      + (expectedRevision === undefined ? "" : `&expectedRevision=${expectedRevision}`),
+  );
+  return candidates;
+}
+export async function reviewAgentMemoryCandidate(
+  backend: string, id: string, action: "accept" | "reject", candidateId: string,
+  expectedRevision: number, expectedMemoryRevision?: number,
+): Promise<import("../types").AgentMemoryCandidateReviewResult> {
+  const { result } = await jsonFetch<{ result: import("../types").AgentMemoryCandidateReviewResult }>(
+    agentUrl(backend, id, "/memory-candidates"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, candidateId, expectedRevision,
+        ...(action === "accept" ? { expectedMemoryRevision } : {}) }),
+    },
+  );
+  return result;
+}
+export async function acceptAgentMemoryCandidates(
+  backend: string, id: string, candidateIds: string[],
+  expectedRevision: number, expectedMemoryRevision: number,
+): Promise<import("../types").AgentMemoryCandidateBatchResult> {
+  const { result } = await jsonFetch<{ result: import("../types").AgentMemoryCandidateBatchResult }>(
+    agentUrl(backend, id, "/memory-candidates"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "acceptMany", candidateIds,
+        expectedRevision, expectedMemoryRevision }),
+    },
+  );
+  return result;
 }
 export async function mutateAgentMemory(
   backend: string, id: string, action: "create" | "confirm" | "update" | "delete", input: Record<string, unknown>,

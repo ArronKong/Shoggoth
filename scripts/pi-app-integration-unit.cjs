@@ -266,6 +266,7 @@ async function main() {
       decryptString: (value) => Buffer.from(value).toString("utf8"),
     },
     builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: [NATIVE_PI_RUNTIME_ACCOUNT_ID],
     runtimePool: lazyPool("Codex"),
     grokBuildRuntimePool: lazyPool("Grok"),
     antigravityRuntimePool: lazyPool("Antigravity"),

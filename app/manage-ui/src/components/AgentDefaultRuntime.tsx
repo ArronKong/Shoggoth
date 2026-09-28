@@ -20,11 +20,18 @@ export default function AgentDefaultRuntime({ backend, agentId, onChanged }: {
   const connected = status.data?.filter(runtime => runtime.enabled && runtime.releaseEnabled && runtime.installation === "available") || [];
   const bindings = snapshot?.bindings.filter(binding => isVisibleRuntime(binding.runtime)
     && (binding.id === snapshot.defaultBindingId || (binding.enabled
-    && connected.some(runtime => runtime.runtime === binding.runtime)
+    && (binding.runtimeAccountId === "shoggoth-internal-codex-default-v1"
+      || connected.some(runtime => runtime.runtimeAccountId === binding.runtimeAccountId))
     && snapshot.availability?.find(entry => entry.bindingId === binding.id)?.available !== false))) || [];
   bindings.sort((a, b) => Number(b.id === snapshot?.defaultBindingId) - Number(a.id === snapshot?.defaultBindingId));
-  const choices = bindings.filter((binding, index) => bindings.findIndex(other => other.runtime === binding.runtime) === index);
+  const choices = bindings.filter((binding, index) => bindings.findIndex(other =>
+    other.runtimeAccountId === binding.runtimeAccountId) === index);
   const visibleDefaultBindingId = choices.find((binding) => binding.id === snapshot?.defaultBindingId)?.id ?? "";
+  const runtimeName = (binding: typeof choices[number]) => binding.label
+    || (binding.runtimeAccountId === "shoggoth-internal-codex-default-v1" ? t("agents.codexHarnessRuntime")
+      : binding.runtimeAccountId === "native-codex-default-v1" ? t("agents.codexCliRuntime")
+        : status.data?.find(runtime => runtime.runtimeAccountId === binding.runtimeAccountId)?.name
+          || binding.runtimeAccountId);
   const select = async (bindingId: string) => {
     if (!snapshot || pendingRef.current || bindingId === snapshot.defaultBindingId) return;
     pendingRef.current = true; setPending(true);
@@ -42,10 +49,12 @@ export default function AgentDefaultRuntime({ backend, agentId, onChanged }: {
         disabled={pending || cache.loading || status.loading || !!cache.error || !!status.error}
         onChange={bindingId => void select(bindingId)}>
         {choices.map(binding => <Option key={binding.id} value={binding.id}>
-          {status.data?.find(runtime => runtime.runtime === binding.runtime)?.name || binding.runtime}
+          {runtimeName(binding)}
         </Option>)}
       </Select>
     </Field>
+    {snapshot?.availability?.some(entry => entry.bindingId === snapshot.defaultBindingId
+      && entry.reason === "runtime-not-installed") && <p className={styles.error} role="status">{t("agents.sessionRuntimeNotInstalled")}</p>}
     {(cache.error || status.error) && <p className={styles.error} role="alert">{t("agents.sessionRuntimeLoadFailed")} <button
       className="ui-cbtn ui-cbtn--sm" onClick={() => { void cache.refresh(); void status.refresh(); }}>{t("settings.retry")}</button></p>}
   </section>;

@@ -421,6 +421,10 @@ test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定�
   const source = { source: "chat", sourceId: "current-user-conversation" };
   const calls = [
     ["memory_search", { ...source, query: "" }],
+    ["memory_get", { ...source, id: "memory-1" }],
+    ["memory_explain", { ...source, id: "memory-1" }],
+    ["conversation_search", { ...source, query: "阿棠" }],
+    ["conversation_get", { ...source, sessionId: "session-1", eventId: "event-1" }],
     ["memory_save", { ...source, expectedRevision: 0, content: "使用中文", scope: "user",
       classification: "explicit", sourceQuote: "使用中文" }],
     ["memory_forget", { ...source, id: "memory-1", expectedRevision: 1, sourceQuote: "忘记它" }],
@@ -448,9 +452,9 @@ test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定�
   }
 });
 
-test("固定 95 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 95);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 95);
+test("固定 99 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 99);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 99);
   for (const required of [
     "app_capabilities", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
     "cron_create", "cron_delete", "backend_status", "external_cron_list",
@@ -463,7 +467,8 @@ test("固定 95 个模型可见产品工具及 strict object schemas，不暴露
     "computer_click", "computer_type", "computer_key",
     "inspiration_list", "inspiration_get", "inspiration_create", "inspiration_update", "inspiration_delete",
     "inspiration_start", "inspiration_executions", "inspiration_cancel", "inspiration_growth_get", "inspiration_growth_set",
-    "memory_search", "memory_save", "memory_forget",
+    "memory_search", "memory_get", "memory_explain", "conversation_search", "conversation_get",
+    "memory_save", "memory_forget",
     "agent_definition_read", "agent_definition_update",
     "native_agent_create", "native_agent_get", "native_agent_update", "native_agent_archive",
   ]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(required), true, required);
@@ -666,7 +671,7 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 95);
+  assert.equal(capabilities.capabilities.length, 99);
   assert.equal(capabilities.capabilities.some((item) => item.tool === "cron_create"), true);
   assert.equal(capabilities.capabilities.some((item) => item.domain === "browser"), false);
   assert.equal(capabilities.lifecycle.nativeWhenAppQuit, true);
@@ -813,9 +818,10 @@ test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 A
     id: "fetch", name: "Fetch", command: "/Users/fixture/work/fetch",
     args: ["-m", "mcp_server_fetch"], cwd: "/Users/fixture/work", enabled: true,
   };
+  let listedServers = [];
   const nativeMcpStore = {
     prepare(value) { extensionCalls.push(["prepare", structuredClone(value)]); return { ...value }; },
-    list() { return { revision: 1, servers: [] }; },
+    list() { return { revision: 1, servers: listedServers }; },
     get() { return null; },
     register(value) {
       extensionCalls.push(["register", structuredClone(value)]);
@@ -873,6 +879,21 @@ test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 A
   assert.deepEqual(await fixture.controller.handle("mcp_server_list", {}, external), {
     revision: 1, servers: [],
   });
+
+  const restored = { id: "restored", name: "Restored", enabled: false,
+    command: "/Users/old-machine/private/fixture-mcp", args: ["--stale-private-arg"],
+    cwd: "/Users/old-machine/private", createdAt: 10, updatedAt: 20 };
+  listedServers = [server, restored];
+  for (const caller of [authorityFor("8"), { ...authorityFor("9"), federationClient: "hermes" }]) {
+    const visible = await fixture.controller.handle("mcp_server_list", {}, caller);
+    assert.deepEqual(visible.servers[0], server,
+      "an active server retains the existing model-facing tool contract");
+    assert.deepEqual(visible.servers[1], { id: "restored", name: "Restored",
+      enabled: false, createdAt: 10, updatedAt: 20 });
+    assert.equal(JSON.stringify(visible).includes("old-machine"), false);
+    assert.equal(JSON.stringify(visible).includes("stale-private-arg"), false,
+      "a restored MCP argument must not enter native or federated model context");
+  }
 
   let hostileRegistered = false;
   const hostile = makeFixture({

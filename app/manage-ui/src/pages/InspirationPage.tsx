@@ -164,6 +164,7 @@ function Attention({ ideaId, execution, onChange, compact = false }: {
   return <div className={compact ? styles.compactAttention : styles.attention} data-active={attention.active} data-card-interactive>
     {attention.active ? <ChatPromptCard key={attention.request.requestId}
       compactApproval={compact}
+      compactInput={compact}
       draftKey={`inspiration:${execution.runId}:${attention.request.requestId}`}
       entry={{ ...attention.request, id: attention.request.requestId }} onRespond={(_entry, data) => respond(data)} />
       : <><strong>{t('inspiration.expired')}</strong><p>{attention.request.message}</p>
@@ -268,7 +269,7 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
     return { idea: value.idea, history };
   });
   const roster = usePageCache('inspiration-agents', getInspirationAgents);
-  const [edit, setEdit] = useState<{ body: string; title: string; revision: number; attachments: InspirationAttachment[] } | null>(null);
+  const [edit, setEdit] = useState<{ body: string; revision: number; attachments: InspirationAttachment[] } | null>(null);
   const [mediaBusy, setMediaBusy] = useState(false);
   const [agent, setAgent] = useState('');
   const [instruction, setInstruction] = useState('');
@@ -281,7 +282,7 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
   const [loadedMore, setLoadedMore] = useState(false);
   const [expandedRuns, setExpandedRuns] = useState<Set<string>>(() => new Set());
   const idea = detail.data?.idea;
-  const dirty = Boolean(edit && (edit.body !== idea?.body || edit.title !== (idea?.title || '')
+  const dirty = Boolean(edit && (edit.body !== idea?.body
     || JSON.stringify(edit.attachments) !== JSON.stringify(idea?.attachments || []))) || instruction.trim().length > 0;
   useNavigationGuard({ dirty, busy: busy || mediaBusy, onDiscard: onClose });
   useVisibleRefresh(detail.refresh);
@@ -325,20 +326,20 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
   const tone = detailToneOf(displayStatus, archived);
   const locale = i18n?.resolvedLanguage || i18n?.language;
   const when = (time: number) => new Date(time).toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  // Known service codes read as a sentence; any other code stays visible verbatim for support, and
-  // needs no generic sentence of its own while the panel's hint already says the round did not finish.
+  // Explain known service codes in the current language; keep unknown codes visible for support.
   const failureOf = (execution: InspirationExecution, hinted: boolean) => {
     if (execution.status === 'canceled') return { reason: t('inspiration.growth.errors.INSPIRATION_CANCELED'), code: null };
     if (!execution.errorCode) return null;
     const known = `inspiration.growth.errors.${execution.errorCode}`;
-    return { reason: i18n?.exists?.(known) ? t(known) : hinted ? null : t('inspiration.runError'), code: execution.errorCode };
+    const reason = i18n?.exists?.(known) ? t(known) : null;
+    return { reason: reason || (hinted ? null : t('inspiration.runError')), code: reason ? null : execution.errorCode };
   };
   const failure = latest ? failureOf(latest, !latest.attention && !latest.resultSummary) : null;
   return <Modal open={open} onOpenChangeComplete={onOpenChangeComplete} className={styles.detailModal} width={920}
     title={idea ? <span className={styles.detailTitle} data-tone={tone}>
       <GrowthTrack idea={idea} status={displayStatus} label={t(archived ? 'inspiration.filters.archived'
         : idea.acceptedAt ? 'inspiration.accepted' : `inspiration.status.${displayStatus}`)} />
-      <span className={styles.detailHeading}>{titleOf(idea)}</span>
+      {idea.title && <span className={styles.detailHeading}>{idea.title}</span>}
     </span> : t('inspiration.title')}
     onClose={() => { void close(); }} dismissible={!busy && !mediaBusy}
     footer={idea && <div className={styles.detailFooter}>
@@ -355,9 +356,9 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
       <div className={styles.detailPrimary}>
         {edit ? <>
           <button className="btn-subtle" disabled={busy || mediaBusy} onClick={() => setEdit(null)}>{t('common.cancel')}</button>
-          <button className="btn-primary" disabled={busy || mediaBusy || (!edit.body.trim() && !edit.attachments.length) || bytes(edit.body) > 16 * 1024 || bytes(edit.title) > 512 || edit.revision !== idea.revision}
+          <button className="btn-primary" disabled={busy || mediaBusy || (!edit.body.trim() && !edit.attachments.length) || bytes(edit.body) > 16 * 1024 || edit.revision !== idea.revision}
             onClick={() => { void act(['edit', edit], (operationId) => updateInspiration(id, { operationId, expectedRevision: edit.revision,
-              patch: { body: edit.body, title: edit.title.trim() || null, attachments: edit.attachments } }), () => setEdit(null)); }}>{t('inspiration.saveEdit')}</button>
+              patch: { body: edit.body, attachments: edit.attachments } }), () => setEdit(null)); }}>{t('inspiration.saveEdit')}</button>
         </> : running && idea.latestExecution ? <>
           {idea.status === 'unknown' && <button className="btn-secondary" disabled={busy}
             onClick={() => { void act(['refresh', idea.latestExecution?.runId], roster.refresh); }}>{t('inspiration.checkStatus')}</button>}
@@ -386,11 +387,10 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
         <section className={`${paperStyles.surface} ${styles.notePaper}`} data-paper={paperToneOf(idea)} aria-label={t('inspiration.original')}>
           <div className={styles.noteHead}>
             <h3>{t('inspiration.original')}</h3>
-            {!edit && <button type="button" className={styles.noteEdit} disabled={busy} onClick={() => setEdit({ body: idea.body, title: idea.title || '', revision: idea.revision, attachments: idea.attachments || [] })}>
+            {!edit && <button type="button" className={styles.noteEdit} disabled={busy} onClick={() => setEdit({ body: idea.body, revision: idea.revision, attachments: idea.attachments || [] })}>
               <InspirationActionIcon name="edit" />{t('inspiration.edit')}</button>}
           </div>
           {edit ? <div className={styles.editFields}>
-            <Field label={t('inspiration.optionalTitle')}><TextInput className={`field-input ${paperStyles.typeface}`} value={edit.title} disabled={busy} maxLength={160} onChange={(event) => setEdit({ ...edit, title: event.target.value })} /></Field>
             <InspirationMediaEditor body={edit.body} attachments={edit.attachments} disabled={busy} onBusyChange={setMediaBusy}
               onChange={update => setEdit(previous => previous ? { ...previous, ...update(previous) } : null)}
               inputProps={{ rows: 7, 'aria-label': t('inspiration.original') }} />
@@ -466,7 +466,7 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
               </summary>
               <div className={styles.runBody}>
                 {execution.resultSummary && <div className={styles.markdown} dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(execution.resultSummary) }} />}
-                {execution.errorCode && <p className={styles.error}>{t('inspiration.runError')} · {execution.errorCode}</p>}
+                {execution.errorCode && <p className={styles.error}>{failureOf(execution, false)?.reason} · <code>{execution.errorCode}</code></p>}
                 <SessionLink execution={execution} />
                 {execution.runId !== latest?.runId && expandedRuns.has(execution.id)
                   && <InspirationActivity key={execution.runId} ideaId={id} execution={execution} />}

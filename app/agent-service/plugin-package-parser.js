@@ -166,6 +166,7 @@ function validateManifest(root, diagnostics) {
   if (!own(source)) fail("PACKAGE_INVALID", "plugin.json 必须是对象");
   if (source.$schema !== manifestSchema.$id) fail("FORMAT_UNSUPPORTED", "插件标准版本不受支持");
   const normalized = { ...source };
+  let oauthResources = {};
   const allowed = new Set(Object.keys(manifestSchema.properties));
   for (const key of Object.keys(normalized)) {
     if (!allowed.has(key)) {
@@ -176,14 +177,27 @@ function validateManifest(root, diagnostics) {
   if (Object.hasOwn(normalized, "extensions")) {
     if (!own(normalized.extensions)) {
       diagnostics.push({ scope: "manifest", name: "extensions", reasonCode: "INVALID_EXTENSION_IGNORED" });
+    } else if (Object.hasOwn(normalized.extensions, "shoggoth")) {
+      const extension = normalized.extensions.shoggoth;
+      if (!own(extension) || Object.keys(extension).length !== 1
+        || !own(extension.mcpOAuthResources)
+        || Object.keys(extension.mcpOAuthResources).length > 32
+        || Object.entries(extension.mcpOAuthResources).some(([name, resource]) =>
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(name)
+          || ["__proto__", "constructor", "prototype"].includes(name)
+          || typeof resource !== "string" || Buffer.byteLength(resource) > 2048)) {
+        fail("PACKAGE_INVALID", "插件 OAuth 资源声明无效");
+      }
+      oauthResources = extension.mcpOAuthResources;
     }
-    // No Shoggoth extension namespace is implemented yet. Other namespaces are opaque.
+    // Foreign namespaces remain opaque. Only this narrowing OAuth resource
+    // declaration is interpreted; package metadata never registers a provider.
     delete normalized.extensions;
   }
   if (!validateManifestSchema(normalized)) {
     fail("PACKAGE_INVALID", `plugin.json 字段无效: ${validateManifestSchema.errors[0]?.instancePath || "root"}`);
   }
-  return normalized;
+  return { manifest: normalized, oauthResources };
 }
 function parseSkill(target, directoryName) {
   const bytes = bytesOf(target, MAX_FILE_BYTES);
@@ -270,26 +284,46 @@ function validateHttp(record) {
   }
   return true;
 }
-function discoverMcp(root, diagnostics) {
+function discoverMcp(root, diagnostics, oauthResources = {}) {
   const file = fixedPath(root, "mcp.json", "file");
-  if (file.status === "missing") return [];
+  if (file.status === "missing") {
+    if (Object.keys(oauthResources).length) fail("PACKAGE_INVALID", "插件 OAuth 资源缺少 MCP 声明");
+    return [];
+  }
   if (file.status !== "valid") {
+    if (Object.keys(oauthResources).length) fail("PACKAGE_INVALID", "插件 OAuth 资源缺少有效 MCP 声明");
     diagnostics.push({ scope: "mcp", reasonCode: "COMPONENT_INVALID" });
     return [];
   }
   let config;
   try { config = parseJsonFile(file.path); }
   catch {
+    if (Object.keys(oauthResources).length) fail("PACKAGE_INVALID", "插件 OAuth 资源缺少有效 MCP 声明");
     diagnostics.push({ scope: "mcp", reasonCode: "COMPONENT_INVALID" });
     return [];
   }
   if (config?.$schema !== mcpSchema.$id) {
+    if (Object.keys(oauthResources).length) fail("PACKAGE_INVALID", "插件 OAuth 资源缺少有效 MCP 声明");
     diagnostics.push({ scope: "mcp", reasonCode: "FORMAT_UNSUPPORTED" });
     return [];
   }
   if (!validateMcpTop(config)) {
+    if (Object.keys(oauthResources).length) fail("PACKAGE_INVALID", "插件 OAuth 资源缺少有效 MCP 声明");
     diagnostics.push({ scope: "mcp", reasonCode: "COMPONENT_INVALID" });
     return [];
+  }
+  for (const [name, rawResource] of Object.entries(oauthResources)) {
+    const record = config.mcpServers[name];
+    let resource;
+    let endpoint;
+    try { resource = new URL(rawResource); endpoint = new URL(record?.url); }
+    catch { fail("PACKAGE_INVALID", "插件 OAuth 资源与 MCP 端点不匹配"); }
+    if (record?.type !== "streamable-http" || resource.protocol !== "https:"
+      || endpoint.protocol !== "https:" || resource.origin !== endpoint.origin
+      || resource.username || resource.password || resource.search || resource.hash
+      || (rawResource !== resource.href && rawResource !== resource.origin)) {
+      fail("PACKAGE_INVALID", "插件 OAuth 资源与 MCP 端点不匹配");
+    }
   }
   const servers = [];
   for (const [name, record] of Object.entries(config.mcpServers)) {
@@ -304,10 +338,13 @@ function discoverMcp(root, diagnostics) {
       }
     } else if (!validateHttp(record)) reasonCode = "COMPONENT_INVALID";
     if (reasonCode) {
+      if (Object.hasOwn(oauthResources, name)) fail("PACKAGE_INVALID", "插件 OAuth 资源对应的 MCP 组件无效");
       diagnostics.push({ scope: "mcp-server", name, reasonCode });
       continue;
     }
-    servers.push({ name, type: record.type, descriptorDigest: hash(canonical(record)) });
+    const oauthResource = oauthResources[name] || null;
+    servers.push({ name, type: record.type,
+      descriptorDigest: hash(canonical(oauthResource === null ? record : { record, oauthResource })) });
   }
   return servers;
 }
@@ -315,12 +352,15 @@ function readPluginMcpServer(root, name) {
   const file = fixedPath(root, "mcp.json", "file");
   if (file.status !== "valid") fail("PACKAGE_CHANGED", "插件 MCP 配置已消失或变为不安全路径");
   const config = parseJsonFile(file.path);
-  const server = discoverMcp(root, []).find((item) => item.name === name);
+  const { oauthResources } = validateManifest(root, []);
+  const server = discoverMcp(root, [], oauthResources).find((item) => item.name === name);
   const record = config?.mcpServers?.[name];
-  if (!server || !own(record) || server.descriptorDigest !== hash(canonical(record))) {
+  const oauthResource = oauthResources[name] || null;
+  if (!server || !own(record) || server.descriptorDigest !== hash(canonical(
+    oauthResource === null ? record : { record, oauthResource }))) {
     fail("PACKAGE_CHANGED", "插件 MCP 组件内容已变化");
   }
-  return { ...server, spec: structuredClone(record) };
+  return { ...server, spec: structuredClone(record), oauthResource };
 }
 function previewPluginDirectory(directory, { trustedBundled = false } = {}) {
   const root = path.resolve(directory);
@@ -330,14 +370,14 @@ function previewPluginDirectory(directory, { trustedBundled = false } = {}) {
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail("PACKAGE_INVALID", "插件根目录无效");
   const resolvedRoot = fs.realpathSync(root);
   const diagnostics = [];
-  const manifest = validateManifest(resolvedRoot, diagnostics);
+  const { manifest, oauthResources } = validateManifest(resolvedRoot, diagnostics);
   const { files, unsafe } = scanFiles(resolvedRoot,
     trustedBundled ? BUNDLED_LIMITS : DEFAULT_LIMITS);
   for (const relative of unsafe) {
     diagnostics.push({ scope: "path", name: relative, reasonCode: "PACKAGE_PATH_INVALID" });
   }
   const skills = discoverSkills(resolvedRoot, diagnostics);
-  const mcpServers = discoverMcp(resolvedRoot, diagnostics);
+  const mcpServers = discoverMcp(resolvedRoot, diagnostics, oauthResources);
   const contentDigest = hash(canonical(files));
   return Object.freeze({
     specVersion: SCHEMA_VERSION,

@@ -307,8 +307,11 @@ function validateChatServiceParams(method, params) {
     validatePageParams(params, ["profileId", "cursor", "limit", "includeArchived"],
       (value) => validOpaqueId(value.profileId) && typeof value.includeArchived === "boolean");
   } else if (method === "chat.session.create") {
-    if (!validateOperationBase(params, ["operationId", "profileId", "workspace", "createdAt"])
-      || !validOpaqueId(params.profileId) || !validString(params.workspace, 4096, true)) failParams();
+    const hasParent = Object.hasOwn(params || {}, "parentSessionKey");
+    if (!validateOperationBase(params, ["operationId", "profileId", "workspace", "createdAt",
+      ...(hasParent ? ["parentSessionKey"] : [])])
+      || !validOpaqueId(params.profileId) || !validString(params.workspace, 4096, true)
+      || (hasParent && !validUuid(params.parentSessionKey))) failParams();
   } else if (method === "chat.session.model.set") {
     if (!exactObject(params, ["sessionKey", "model"])
       || !validUuid(params.sessionKey) || !validString(params.model, 512)) failParams();

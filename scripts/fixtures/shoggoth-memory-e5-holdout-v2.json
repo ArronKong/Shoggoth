@@ -1,0 +1,384 @@
+{
+  "version": 2,
+  "description": "New synthetic topics frozen after the v1 diagnostic exposed language bias and the ranking rule was fixed. Never used for rule selection. All facts fictional, no user data.",
+  "records": [
+    {
+      "id": "v2-fountain",
+      "text": "我用钢笔的笔尖是细尖，日常灌蓝黑墨水。"
+    },
+    {
+      "id": "v2-bonsai",
+      "text": "盆景的枯枝在三月修剪，枝剪每次使用后擦干。"
+    },
+    {
+      "id": "v2-tent",
+      "text": "我的双人帐篷采用尼龙外帐，重量为两点三公斤。"
+    },
+    {
+      "id": "v2-airtank",
+      "text": "潜水气瓶容积是十二升，瓶身标记为 DC-7214。"
+    },
+    {
+      "id": "v2-bass",
+      "text": "我用四弦电贝司，最低的弦调成 E 音。"
+    },
+    {
+      "id": "v2-kite",
+      "text": "手工风筝的骨架用竹条，蒙面采用油纸。"
+    },
+    {
+      "id": "v2-racquet",
+      "text": "羽毛球拍的握把尺寸是 G5，穿线张力为二十四磅。"
+    },
+    {
+      "id": "v2-bees",
+      "text": "蜂箱里装十片巢框，冬天使用稻草盖保温。"
+    },
+    {
+      "id": "v2-grinder",
+      "text": "My manual coffee grinder uses ceramic burrs and is set coarse for French press."
+    },
+    {
+      "id": "v2-hammock",
+      "text": "My hammock is woven from cotton and hangs between two oak trees."
+    },
+    {
+      "id": "v2-sax",
+      "text": "I use a tenor saxophone with a strength 2.5 reed."
+    },
+    {
+      "id": "v2-pendulum",
+      "text": "The grandfather clock pendulum is adjusted every month and uses a brass bob."
+    },
+    {
+      "id": "v2-glider",
+      "text": "My model glider has a wingspan of 1.8 meters and a balsa wood body."
+    },
+    {
+      "id": "v2-snowshoe",
+      "text": "My snowshoes have aluminum frames and synthetic decking."
+    },
+    {
+      "id": "v2-loupe",
+      "text": "I inspect minerals using a ten-power loupe with a twenty millimeter lens."
+    },
+    {
+      "id": "v2-oboe",
+      "text": "My oboe is made of grenadilla wood and the case is labeled OB-9306."
+    }
+  ],
+  "queries": [
+    {
+      "query": "日常书写的钢笔尖规格和墨水颜色？",
+      "relevant": [
+        "v2-fountain"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What nib size and ink color do I use in my fountain pen?",
+      "relevant": [
+        "v2-fountain"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "盆景何时剪枯枝，剪刀怎么保养？",
+      "relevant": [
+        "v2-bonsai"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "When do I prune dead bonsai branches and maintain the shears?",
+      "relevant": [
+        "v2-bonsai"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "两人露营住的帐篷材质和重量？",
+      "relevant": [
+        "v2-tent"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What material and weight are my two-person camping tent?",
+      "relevant": [
+        "v2-tent"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "水下呼吸气瓶的容量与编号是什么？",
+      "relevant": [
+        "v2-airtank"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What capacity and identifier are on my scuba cylinder?",
+      "relevant": [
+        "v2-airtank"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "电低音吉他的弦数和最低音高？",
+      "relevant": [
+        "v2-bass"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How many strings and what lowest note does my electric bass use?",
+      "relevant": [
+        "v2-bass"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "自制风筝的支架与覆盖材料？",
+      "relevant": [
+        "v2-kite"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "Which frame and covering materials do I use for homemade kites?",
+      "relevant": [
+        "v2-kite"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "打羽毛球的拍子握把和拉线磅数？",
+      "relevant": [
+        "v2-racquet"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What grip size and string tension are on my badminton racket?",
+      "relevant": [
+        "v2-racquet"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "养蜂的箱子有多少巢框，冬季盖什么？",
+      "relevant": [
+        "v2-bees"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How many frames and what winter cover are in my beehive?",
+      "relevant": [
+        "v2-bees"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "手摇咖啡磨豆机的磨芯材质和压滤壶研磨粗细？",
+      "relevant": [
+        "v2-grinder"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What burr material and grind setting do I use for French press?",
+      "relevant": [
+        "v2-grinder"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "吊床是什么织物，挂在哪种树之间？",
+      "relevant": [
+        "v2-hammock"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What fabric and supporting trees are used for my hammock?",
+      "relevant": [
+        "v2-hammock"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "我用哪个种类的萨克斯和多硬的哨片？",
+      "relevant": [
+        "v2-sax"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What saxophone type and reed strength do I use?",
+      "relevant": [
+        "v2-sax"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "落地钟钟摆的调校频率与摆锤金属？",
+      "relevant": [
+        "v2-pendulum"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How often is my clock pendulum adjusted and what is its bob made of?",
+      "relevant": [
+        "v2-pendulum"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "模型滑翔机的翼展和机身材料？",
+      "relevant": [
+        "v2-glider"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What wingspan and body material does my model glider have?",
+      "relevant": [
+        "v2-glider"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "雪地行走的雪鞋骨架与承托面材质？",
+      "relevant": [
+        "v2-snowshoe"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What frame and decking materials are in my snowshoes?",
+      "relevant": [
+        "v2-snowshoe"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "看矿石的放大镜倍率和镜片直径？",
+      "relevant": [
+        "v2-loupe"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What magnification and lens diameter do I use to inspect minerals?",
+      "relevant": [
+        "v2-loupe"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "我的双簧管木材和盒子标签号？",
+      "relevant": [
+        "v2-oboe"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "Which wood and case label identify my oboe?",
+      "relevant": [
+        "v2-oboe"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "\"DC-7214\"",
+      "relevant": [
+        "v2-airtank"
+      ],
+      "group": "literal"
+    },
+    {
+      "query": "DC-7214",
+      "relevant": [
+        "v2-airtank"
+      ],
+      "group": "literal"
+    },
+    {
+      "query": "\"OB-9306\"",
+      "relevant": [
+        "v2-oboe"
+      ],
+      "group": "literal"
+    },
+    {
+      "query": "OB-9306",
+      "relevant": [
+        "v2-oboe"
+      ],
+      "group": "literal"
+    },
+    {
+      "query": "我岳母的姓名是什么？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我的停车位号码是多少？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我电脑的开机密码是什么？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我爷爷退休前做什么工作？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我的水费账户编号是什么？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我读过哪所小学？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "Which hospital issued my birth certificate?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "What is my monthly rent?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "Who is my tax adviser?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "What is my train ticket reservation number?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "Which hotel am I staying in tomorrow?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "What is my current credit card balance?",
+      "relevant": [],
+      "group": "unanswerable"
+    }
+  ]
+}

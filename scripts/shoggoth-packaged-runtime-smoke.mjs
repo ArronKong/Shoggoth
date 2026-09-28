@@ -113,7 +113,10 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
   try {
     const probe = await runCaptured(electronExecutable, ["-e", `
       "use strict";
+      const assert = require("node:assert/strict");
       const { execFileSync } = require("node:child_process");
+      const fs = require("node:fs");
+      const path = require("node:path");
       (async () => {
         const relay = require(${JSON.stringify(relayPath)});
         const agentService = require(${JSON.stringify(agentServicePath)});
@@ -122,6 +125,21 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
         const { resolveServicePaths } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/paths.js"))});
         const { createRuntimeCliAuth } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/runtime-cli-auth.js"))});
         const { normalizeConfig, projectNativeRuntimeConfig } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/core/config-store.js"))});
+        const { lexicalTerms } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/conversation-recall-index.js"))});
+        const { DatabaseSync } = require("node:sqlite");
+        const sqlitePath = path.join(${JSON.stringify(scratchPath)}, "recall-fts-smoke.sqlite");
+        const terms = lexicalTerms("蓝色番茄");
+        assert.deepEqual(lexicalTerms("蓝色"), ["蓝色"]);
+        let sqlite = new DatabaseSync(sqlitePath);
+        sqlite.exec("CREATE VIRTUAL TABLE recall_fts USING fts5(search_terms, tokenize='unicode61')");
+        sqlite.prepare("INSERT INTO recall_fts(search_terms) VALUES (?)").run(terms.join(" "));
+        sqlite.close();
+        sqlite = new DatabaseSync(sqlitePath);
+        const match = sqlite.prepare("SELECT search_terms FROM recall_fts WHERE recall_fts MATCH ?")
+          .get('"蓝色"');
+        assert.equal(match?.search_terms, terms.join(" "));
+        sqlite.close();
+        fs.unlinkSync(sqlitePath);
         const authCatalog = createRuntimeCliAuth({
           paths: resolveServicePaths({ homeDir: ${JSON.stringify(scratchPath)} }),
           homedir: ${JSON.stringify(scratchPath)}, parentEnv: {},
@@ -149,6 +167,7 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
           resourcesPath: process.resourcesPath,
           nodeVersion: process.versions.node,
           electronVersion: process.versions.electron,
+          sqliteFtsChineseBigram: Boolean(match),
           bootstrapResolved: require.resolve(${JSON.stringify(bootstrapPath)}),
           relayResolved: require.resolve(${JSON.stringify(relayPath)}),
           relayStartType: typeof relay.startRuntimeMcpRelay,
@@ -190,6 +209,8 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
     assert.equal(result.resourcesPath, resourcesPath);
     assert.match(result.nodeVersion, /^\d+\.\d+\.\d+$/u);
     assert.match(result.electronVersion, /^\d+\.\d+\.\d+$/u);
+    assert.equal(result.sqliteFtsChineseBigram, true,
+      "packaged Electron node:sqlite must persist and query Chinese FTS5 bigrams");
     assert.equal(result.bootstrapResolved, bootstrapPath);
     assert.equal(result.relayResolved, relayPath);
     assert.equal(result.relayStartType, "function");
@@ -200,7 +221,7 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
     assert.equal(result.pluginMcpClientResolved, pluginMcpClientPath);
     assert.equal(result.pluginMcpClientType, "function",
       "packaged plugin MCP client and its transitive SDK modules must load");
-    assert.deepEqual(result.initialRuntimeConfig, { revision: 0, maxActive: 100, startupConcurrency: 8,
+    assert.deepEqual(result.initialRuntimeConfig, { revision: 0, maxActive: 32, startupConcurrency: 8,
       flags: { runtimeAdmissionV1: true, runtimeContextLifecycleV1: true,
         runtimeMultiBinding: true, runtimeConversationHandoff: true } },
     "fresh packaged App must enable the shipped Runtime switching and lifecycle features");
@@ -247,8 +268,27 @@ async function verifyPackagedService(appPath) {
       // Synthetic data only. Never unlock the real user's keychain or launch a model.
       const safeStorage = { isEncryptionAvailable: () => true,
         encryptString: value => Buffer.from(value), decryptString: value => Buffer.from(value).toString() };
-      const ipc = (method, params) => requestService(paths, { id: crypto.randomUUID(),
-        token: readClientToken(paths), version: PROTOCOL_VERSION, method, params });
+      const ipc = async (method, params) => {
+        const startedAt = performance.now();
+        // Match the actual facade's 5s ordinary/30s local plugin deadlines,
+        // rather than the low-level client's 2s convenience default. This
+        // persistence probe separately bounds cold readiness at 10s; it is
+        // not an assertion of the GUI's 1s status probe/retry latency.
+        const timeoutMs = method === "service.status" ? 10_000
+          : ["plugins.install.preview", "plugins.install", "plugins.installations.set"].includes(method)
+            ? 30_000 : 5_000;
+        try {
+          const result = await requestService(paths, { id: crypto.randomUUID(),
+            token: readClientToken(paths), version: PROTOCOL_VERSION, method, params }, { timeoutMs });
+          const elapsedMs = Math.round(performance.now() - startedAt);
+          if (elapsedMs >= 2_000) process.stdout.write("SLOW_IPC " + method + " " + elapsedMs + "ms\\n");
+          return result;
+        } catch (error) {
+          error.message = "IPC " + method + " failed after "
+            + Math.round(performance.now() - startedAt) + "ms: " + error.message;
+          throw error;
+        }
+      };
       (async () => {
         assert.equal(PROTOCOL_VERSION, 11, "packaged Service v11 exact DTO contract is required");
         assert.equal(STORE_SCHEMA_VERSION, 15, "packaged current Product15 reader is required");
@@ -262,6 +302,13 @@ async function verifyPackagedService(appPath) {
         let idea;
         let pluginInstallation;
         let pluginAuthority;
+        let packagedMemoryId;
+        let packagedUiMemoryId;
+        const sourceEventId = "packaged-memory-source-user";
+        const sourceRunId = "packaged-memory-source-run";
+        const sourceText = "Please remember: Packaged memory survives restart";
+        const memoryList = status => ipc("harness.memory.list", {
+          profileId, status, scope: null, cursor: 0, limit: 20 });
         const pluginSourcePath = path.join(root, "plugin-source");
         fs.mkdirSync(path.join(pluginSourcePath, "skills/fixture"), { recursive: true });
         fs.writeFileSync(path.join(pluginSourcePath, "plugin.json"), JSON.stringify({
@@ -277,7 +324,7 @@ async function verifyPackagedService(appPath) {
           { data: image, attachment: { id: crypto.randomUUID(), name: "packaged-note.png", mimeType: "image/png", size: image.length } },
           { data: voice, attachment: { id: crypto.randomUUID(), name: "packaged-voice.wav", mimeType: "audio/wav", size: voice.length } },
         ];
-        for (let generation = 0; generation < 2; generation++) {
+        for (let generation = 0; generation < 3; generation++) {
           const service = createAgentService({ paths, safeStorage, prewarmMcpAuth: true,
             packaged: true, resourcesPath: ${JSON.stringify(resourcesPath)}, parentEnv: {},
             runtimeStorageHomedir: root, version: "packaged-service-smoke" });
@@ -340,6 +387,30 @@ async function verifyPackagedService(appPath) {
               assert.deepEqual(session.retiredRuntimeSessions, []);
               service.transcriptStore.appendEvent({ profileId, sessionId: session.id,
                 id: "packaged-chat-event", kind: "user", content: { text: "Packaged chat history survives restart" } });
+              // These synthetic events have no WorkRun. They exercise the
+              // packaged recall policy only; source-level Service regression
+              // covers actual conversation_search/get eligibility and results.
+              service.transcriptStore.appendEvent({ profileId, sessionId: session.id,
+                id: sourceEventId, runId: sourceRunId, kind: "user", content: { text: sourceText } });
+              service.transcriptStore.appendEvent({ profileId, sessionId: session.id,
+                id: "packaged-memory-source-echo", runId: sourceRunId, kind: "assistant",
+                content: { text: "I heard: Packaged memory survives restart" } });
+              const remembered = service.memoryEngine.propose({
+                id: "packaged-memory-persistence", profileId, scope: "user", type: "semantic",
+                content: "Packaged memory survives restart", sensitivity: "normal",
+                sourceRefs: [sourceEventId, sourceRunId], classification: "explicit",
+              });
+              packagedMemoryId = remembered.id;
+              assert.equal(service.memoryEngine.search({ profileId, query: "Packaged memory" })
+                .items.some(item => item.id === packagedMemoryId), true);
+              const uiCreated = await ipc("harness.memory.create", { profileId,
+                content: "Packaged UI memory persists through Service restart", scope: "user",
+                expectedRevision: service.memoryStore.getRevision(profileId) });
+              packagedUiMemoryId = uiCreated.item.id;
+              assert.equal(uiCreated.item.status, "active");
+              assert.equal((await ipc("harness.memory.explain", { profileId,
+                id: packagedUiMemoryId })).evidence.origin, "ui_create");
+              assert.equal((await memoryList("active")).items.some(item => item.id === packagedUiMemoryId), true);
               for (const item of media) {
                 for (let offset = 0; offset < item.data.length; offset += CHUNK_BYTES) {
                   await ipc("inspiration.media.write", { attachment: item.attachment, offset,
@@ -360,6 +431,53 @@ async function verifyPackagedService(appPath) {
             assert.ok(JSON.stringify(transcript).includes("Packaged chat history survives restart"));
             const history = await ipc("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 10 });
             assert.ok(JSON.stringify(history.messages).includes("Packaged chat history survives restart"));
+            if (generation === 1) {
+              assert.equal(service.memoryEngine.search({ profileId, query: "Packaged memory" })
+                .items.some(item => item.id === packagedMemoryId), true,
+                "packaged memory must survive Service restart");
+              assert.equal((await memoryList("active")).items.some(item => item.id === packagedUiMemoryId), true,
+                "UI-created memory must survive Service restart through the product IPC path");
+              const sourceEvents = await ipc("harness.transcript.events", {
+                profileId, sessionId: session.id, cursor: 0, limit: 20 });
+              const sourceEvent = sourceEvents.items.find(item => item.id === sourceEventId);
+              const sourceEcho = sourceEvents.items.find(item => item.id === "packaged-memory-source-echo");
+              assert.equal(sourceEvent?.content?.text, sourceText);
+              assert.ok(sourceEcho);
+              assert.equal(service.memoryEngine.recallPolicy.isEventVisible(profileId, sourceEvent), true);
+              const uiDeleted = await ipc("harness.memory.delete", { profileId,
+                id: packagedUiMemoryId, expectedRevision: service.memoryStore.getRevision(profileId) });
+              assert.equal(uiDeleted.item.status, "deleted");
+              service.memoryEngine.delete({ profileId, id: packagedMemoryId,
+                reason: "forgotten", operationId: "packaged-memory-forget" });
+              assert.equal(service.memoryEngine.recallPolicy.isEventVisible(profileId, sourceEvent), false,
+                "forget must revoke the original user transcript source");
+              assert.equal(service.memoryEngine.recallPolicy.isEventVisible(profileId, sourceEcho), false,
+                "forget must also revoke an assistant echo from the same source Run");
+            }
+            if (generation === 2) {
+              assert.equal(service.memoryEngine.search({ profileId, query: "Packaged memory" })
+                .items.some(item => item.id === packagedMemoryId), false,
+                "forgotten packaged memory must stay hidden after restart");
+              const audit = await ipc("harness.memory.explain", { profileId, id: packagedMemoryId });
+              assert.equal(audit.item.status, "deleted");
+              assert.equal(audit.withdrawalReason, "forgotten");
+              const uiAudit = await ipc("harness.memory.explain", { profileId, id: packagedUiMemoryId });
+              assert.equal(uiAudit.item.status, "deleted");
+              assert.equal(uiAudit.withdrawalReason, "user_deleted");
+              assert.equal(uiAudit.evidence.origin, "ui_create");
+              assert.equal((await memoryList("active")).items.some(item => item.id === packagedUiMemoryId), false);
+              const sourceEvents = await ipc("harness.transcript.events", {
+                profileId, sessionId: session.id, cursor: 0, limit: 20 });
+              const sourceEvent = sourceEvents.items.find(item => item.id === sourceEventId);
+              const sourceEcho = sourceEvents.items.find(item => item.id === "packaged-memory-source-echo");
+              assert.equal(sourceEvent?.content?.text, sourceText,
+                "user audit retains the original transcript after forgetting");
+              assert.ok(sourceEcho);
+              assert.equal(service.memoryEngine.recallPolicy.isEventVisible(profileId, sourceEvent), false,
+                "forgotten source remains unavailable to Agent recall after restart");
+              assert.equal(service.memoryEngine.recallPolicy.isEventVisible(profileId, sourceEcho), false,
+                "forgotten assistant echo remains unavailable after restart");
+            }
             const saved = await ipc("inspiration.get", { id: idea.id });
             assert.equal(saved.idea.body, idea.body);
             assert.deepEqual(saved.idea.attachments, media.map(item => item.attachment));
@@ -384,6 +502,9 @@ async function verifyPackagedService(appPath) {
     });
     assert.equal(probe.code, 0, `packaged Agent Service startup/persistence failed: ${probe.stderr}`);
     assert.ok(probe.stdout.includes("PACKAGED_SERVICE_PERSISTENCE_OK"));
+    for (const line of probe.stdout.split("\n")) {
+      if (line.startsWith("SLOW_IPC ")) console.log(`[shoggoth-packaged-runtime-smoke] ${line}`);
+    }
   } finally {
     await rm(scratchPath, { recursive: true, force: true });
   }
@@ -969,6 +1090,12 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: package`);
   const appStat = await lstat(appPath);
   assert.equal(appStat.isDirectory(), true, `${appPath} must exist`);
+  const bundledRoot = path.join(appPath, "Contents", "Resources", "bundled-plugins");
+  const { BundledPluginCatalog } = require("../app/core/bundled-plugin-catalog.js");
+  const bundledCatalog = new BundledPluginCatalog(bundledRoot);
+  assert.equal(bundledCatalog.entries.size, 62, "packaged bundled plugin catalog is incomplete");
+  for (const item of bundledCatalog.entries.values()) bundledCatalog.assertCurrent(item.id);
+  console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: bundled-plugin-integrity`);
   const electronExecutable = path.join(appPath, "Contents", "MacOS", "Shoggoth");
   require("./adhoc-sign.cjs").verifyPackagedSqlite(appPath);
   await verifyPackagedRunAsNode(appPath, electronExecutable);
@@ -1204,6 +1331,14 @@ async function verifyPackagedSpike(onlyArch = null) {
 
 const requestedArch = ["--spike-arm64", "--app-arm64"].includes(process.argv[2]) ? "arm64"
   : process.argv[2] === "--spike-x64" ? "x64" : null;
+if (process.argv[2] === "--run-as-node-app") {
+  if (process.argv.length !== 4 || !path.isAbsolute(process.argv[3])) {
+    throw new Error("--run-as-node-app requires one absolute App path");
+  }
+  await verifyPackagedRunAsNode(process.argv[3], path.join(process.argv[3], "Contents", "MacOS", "Shoggoth"));
+  console.log("[shoggoth-packaged-runtime-smoke] PASS packaged Electron node:sqlite FTS5 and RunAsNode");
+  process.exit(0);
+}
 if (process.argv[2] === "--service-app") {
   if (process.argv.length !== 4 || !path.isAbsolute(process.argv[3])) {
     throw new Error("--service-app requires one absolute App path");

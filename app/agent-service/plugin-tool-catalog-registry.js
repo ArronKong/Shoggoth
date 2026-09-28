@@ -3,6 +3,8 @@
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 const { buildPluginToolCatalog } = require("./plugin-tool-contract");
+const { verifiedMcpCapabilities, managedReferenceCoverage } =
+  require("./plugin-verified-mcp-capabilities");
 
 const HASH = /^[a-f0-9]{64}$/u;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -32,9 +34,13 @@ class PluginToolCatalogRegistry {
     const marker = { phase: "refreshing" };
     this.#slots.set(connectionId, marker);
     try {
+      const tools = await client.listTools();
       const catalog = buildPluginToolCatalog({ installationId, componentId,
-        connectionId, tools: await client.listTools() });
+        connectionId, tools });
       if (this.#slots.get(connectionId) !== marker) fail();
+      const portableCapabilities = Object.freeze(verifiedMcpCapabilities({
+        installation, connection, tools }));
+      const referenceCoverage = managedReferenceCoverage({ installation, connection, tools });
       const catalogRevision = crypto.randomUUID();
       const entries = Object.freeze(catalog.entries.map((entry) => Object.freeze({
         ...entry, catalogRevision,
@@ -43,11 +49,12 @@ class PluginToolCatalogRegistry {
         phase: "ready", installationId, releaseDigest, componentId,
         connectionId, principalIdentity: connection.principalIdentity,
         authRevision: connection.authRevision, endpointIdentity: connection.endpointIdentity,
-        catalogRevision,
+        catalogRevision, portableCapabilities, referenceCoverage,
         entries: new Map(entries.map((entry) => [entry.toolIdentity, entry])),
       });
       return Object.freeze({ catalogRevision, generationDigest: catalog.generationDigest,
-        entries });
+        entries, ...(portableCapabilities.length ? { portableCapabilities } : {}),
+        ...(referenceCoverage ? { referenceCoverage } : {}) });
     } catch (error) {
       if (this.#slots.get(connectionId) === marker) this.#slots.delete(connectionId);
       throw error;
@@ -78,7 +85,10 @@ class PluginToolCatalogRegistry {
     const slot = this.#currentSlot({ installation, binding, connection });
     if (!slot) return null;
     return Object.freeze({ catalogRevision: slot.catalogRevision,
-      entries: Object.freeze([...slot.entries.values()]) });
+      entries: Object.freeze([...slot.entries.values()]),
+      ...(slot.portableCapabilities.length
+        ? { portableCapabilities: slot.portableCapabilities } : {}),
+      ...(slot.referenceCoverage ? { referenceCoverage: slot.referenceCoverage } : {}) });
   }
 
   invalidate(connectionId) {

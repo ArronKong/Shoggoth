@@ -158,17 +158,37 @@ class PermissionEngine {
       || typeof contractDigest !== "string" || !/^[a-f0-9]{64}$/u.test(contractDigest)
       || typeof argumentDigest !== "string" || !/^[a-f0-9]{64}$/u.test(argumentDigest)
       || !Number.isSafeInteger(now) || now < 0) deny();
+    const external = authority.kind === "external-agent";
     const bindingApplies = binding.subjectKind === "global"
       ? binding.subjectId === "all-agents"
-      : binding.subjectKind === "native-profile" && binding.subjectId === authority.profileId;
-    if (authority.kind !== "native-profile"
+      : !external && binding.subjectKind === "native-profile"
+        && binding.subjectId === authority.profileId;
+    if (!bindingApplies) deny();
+    if (external) {
+      if (!["openclaw", "hermes"].includes(authority.backendId)
+        || typeof authority.agentId !== "string" || !authority.agentId
+        || typeof authority.instanceId !== "string" || !authority.instanceId
+        || execution.kind !== "external-call"
+        || execution.backendId !== authority.backendId
+        || execution.agentId !== authority.agentId
+        || execution.instanceId !== authority.instanceId
+        || typeof execution.runKey !== "string" || !execution.runKey
+        || envelope.runId !== execution.runKey) deny();
+    } else if (authority.kind !== "native-profile"
       || authority.profile?.id !== authority.profileId || authority.profile.enabled !== true
-      || !bindingApplies || execution.profileId !== authority.profileId) deny();
+      || execution.profileId !== authority.profileId) deny();
     // Product-level deny, disabled tool, Profile, Run and confirmation rules
     // remain upper bounds. A plugin Grant cannot widen them.
-    const product = this.authorize({ name: "mcp_server_call", profileId: authority.profileId,
-      profile: authority.profile, confirmed: authority.confirmed === true,
-      run: execution.run || null, workspace: execution.workspace });
+    const product = external
+      ? (() => {
+        const tool = this.toolRegistry.get("mcp_server_call");
+        if (!tool?.enabled || ["confirm", "destructive"].includes(tool.risk)) deny();
+        return { toolRevision: this.toolRegistry.revision,
+          permissionRevision: this.revision };
+      })()
+      : this.authorize({ name: "mcp_server_call", profileId: authority.profileId,
+        profile: authority.profile, confirmed: authority.confirmed === true,
+        run: execution.run || null, workspace: execution.workspace });
     if (installation.installationId !== binding.installationId
       || installation.desiredState !== "enabled" || binding.enabled !== true
       || connection.connectionId !== binding.connectionId
@@ -197,6 +217,8 @@ class PermissionEngine {
       || envelope.contractDigest !== contractDigest) deny("TOOL_CONTRACT_CHANGED");
     if (execution.kind === "native-run") {
       if (!execution.run || envelope.runId !== execution.run.id) deny();
+    } else if (execution.kind === "external-call") {
+      if (!external) deny();
     } else if (execution.kind === "user-interaction") {
       if (authority.managementTicket !== execution.managementTicket
         || !authority.managementTicket || authority.managementTicketVerified !== true) deny();
@@ -208,6 +230,7 @@ class PermissionEngine {
         || approval.principalIdentity !== connection.principalIdentity
         || approval.toolIdentity !== toolIdentity
         || (execution.kind === "native-run" && approval.runId !== execution.run.id)
+        || (execution.kind === "external-call" && approval.runId !== execution.runKey)
         || approval.contractDigest !== contractDigest
         || approval.argumentDigest !== argumentDigest
         || !Number.isSafeInteger(approval.expiresAt)

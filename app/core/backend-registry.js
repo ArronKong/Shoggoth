@@ -931,6 +931,13 @@ class BackendRegistry extends EventEmitter {
     }
   }
 
+  /** Revisioned server-side native Skill page; failures must reach the caller. */
+  async getSkillsPage(backendId, opts = {}) {
+    const backend = this._activeGet(backendId);
+    if (!backend) return { supported: false, reasonCode: "BACKEND_UNAVAILABLE" };
+    return backend.getSkillsPage(opts);
+  }
+
   /** Read-only plugin catalog page for one backend. */
   async getExternalPluginCatalog(backendId, query = {}) {
     const backend = this._activeGet(backendId);

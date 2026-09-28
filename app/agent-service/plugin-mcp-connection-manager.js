@@ -76,10 +76,11 @@ class PluginMcpConnectionManager {
       throw serviceError("CONNECTION_IDENTITY_CHANGED", "MCP 端点已变化");
     }
     const providerKey = JSON.stringify([live.connectionId, live.authRevision,
-      live.principalIdentity, live.endpointIdentity]);
+      live.principalIdentity, live.endpointIdentity, current.component.oauthResource]);
     let credentialProvider = this.providers.get(providerKey);
     if (!credentialProvider) {
-      credentialProvider = this.auth.credentialProvider(live);
+      credentialProvider = this.auth.credentialProvider({ ...live,
+        audience: current.component.oauthResource });
       for (const key of this.providers.keys()) {
         if (JSON.parse(key)[0] === live.connectionId) this.providers.delete(key);
       }

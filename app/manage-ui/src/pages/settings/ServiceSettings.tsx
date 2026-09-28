@@ -5,8 +5,8 @@ import type { ShoggothProductStatus } from "../../types";
 type ServiceAction = "install" | "start" | "stop" | "repair";
 
 // The background service is shared by every connection (tasks, schedules and
-// cross-agent collaboration for OpenClaw and Hermes run through it), so it is
-// rendered as its own card above the backend cards rather than inside one.
+// cross-agent collaboration for OpenClaw and Hermes run through it), so it
+// stays in its own card after the backend connections.
 export default function ServiceSettings({ status, error, busy, onRetry, onAction, dependents }: {
   status: ShoggothProductStatus | null;
   error: boolean;

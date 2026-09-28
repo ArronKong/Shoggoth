@@ -58,9 +58,9 @@ export default function SettingsDesktopPrinter({ disabled }: { disabled: boolean
     <div className="settings-list-copy">
       <h4>{t('settings.desktopPrinter.title')}</h4>
       <p>{t('settings.desktopPrinter.description')}</p>
-      <p className="ui-hint" role="status">{!host?.setShortcut ? t('settings.desktopPrinter.appOnly')
-        : message ? t(`settings.desktopPrinter.${message}`) : !state.registered && !capturing ? t('settings.desktopPrinter.unavailable')
-          : t('settings.desktopPrinter.hint')}</p>
+      {host?.setShortcut && <p className="ui-hint" role="status">{message ? t(`settings.desktopPrinter.${message}`)
+        : !state.registered && !capturing ? t('settings.desktopPrinter.unavailable')
+          : t('settings.desktopPrinter.hint')}</p>}
     </div>
     <div className="settings-shortcut-row">
       <button type="button" className="ui-cbtn settings-shortcut" disabled={disabled || !host?.setShortcut} aria-busy={busy || undefined}

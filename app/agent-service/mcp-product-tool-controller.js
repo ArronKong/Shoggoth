@@ -61,6 +61,13 @@ const DURABLE_WRITE_TOOL_NAMES = new Set([
   "external_agent_file_write", "external_agent_run",
   "federation_agent_run", "federation_agent_message", "federation_task_cancel",
 ]);
+// These reads depend on mutable memory, transcript, and recall-policy state.
+// An exact callId replay must recheck current visibility after a forget.
+const MEMORY_READ_TOOL_NAMES = new Set(["memory_search", "memory_get", "memory_explain"]);
+const CONVERSATION_READ_TOOL_NAMES = new Set(["conversation_search", "conversation_get"]);
+const REVOCABLE_READ_TOOL_NAMES = new Set([
+  ...MEMORY_READ_TOOL_NAMES, ...CONVERSATION_READ_TOOL_NAMES,
+]);
 const ACTIVE_RUN_STATUSES = new Set(["starting", "running", "waiting_approval", "waiting_input"]);
 const WORK_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
@@ -2019,7 +2026,9 @@ class McpProductToolController {
     }
     if (options.inspirationService !== undefined) requireMethods(options.inspirationService, ["handle"], "InspirationService");
     if (options.conversationMemoryService !== undefined) requireMethods(options.conversationMemoryService,
-      ["bind", "search", "write"], "ConversationMemoryService");
+      ["bind", "search", "get", "explain", "write"], "ConversationMemoryService");
+    if (options.conversationRecallService !== undefined) requireMethods(options.conversationRecallService,
+      ["search", "get", "assertCaller"], "ConversationRecallService");
     if (options.conversationDefinitionService !== undefined) requireMethods(options.conversationDefinitionService,
       ["bind", "read", "update"], "ConversationDefinitionService");
     if (options.agentLifecycleService !== undefined) requireMethods(options.agentLifecycleService,
@@ -2058,6 +2067,7 @@ class McpProductToolController {
     this.pluginRuntimeToolService = options.pluginRuntimeToolService || null;
     this.inspirationService = options.inspirationService || null;
     this.conversationMemoryService = options.conversationMemoryService || null;
+    this.conversationRecallService = options.conversationRecallService || null;
     this.conversationDefinitionService = options.conversationDefinitionService || null;
     this.agentLifecycleService = options.agentLifecycleService || null;
     this.systemHostController = options.systemHostController || null;
@@ -2108,14 +2118,90 @@ class McpProductToolController {
         confirmed: authority.confirmation === true,
       });
       const fingerprint = fingerprintMcpToolCall(name, rawArgs);
+      const readPolicy = REVOCABLE_READ_TOOL_NAMES.has(name)
+        ? this.conversationMemoryService?.engine?.recallPolicy || this.conversationRecallService?.policy
+        : null;
+      if (REVOCABLE_READ_TOOL_NAMES.has(name) && typeof readPolicy?.getRevision !== "function") {
+        throw toolError("MCP_TOOL_UNAVAILABLE");
+      }
+      const readPolicyRevision = readPolicy?.getRevision(authority.profileId);
+      const readMemoryStore = MEMORY_READ_TOOL_NAMES.has(name)
+        ? this.conversationMemoryService?.store : null;
+      if (MEMORY_READ_TOOL_NAMES.has(name) && typeof readMemoryStore?.getRevision !== "function") {
+        throw toolError("MCP_TOOL_UNAVAILABLE");
+      }
+      const readMemoryRevision = readMemoryStore?.getRevision(authority.profileId);
+      // memory_explain may include a verified transcript quote, so its result
+      // also depends on the source session and event remaining visible.
+      const readConversationRevision = (CONVERSATION_READ_TOOL_NAMES.has(name)
+        || name === "memory_explain")
+        ? this.conversationRecallService?.getVisibilityRevision?.(authority.profileId) ?? null
+        : null;
+      const provenance = name === "memory_explain"
+        ? this.conversationMemoryService?.provenance : null;
+      if (provenance && typeof provenance.getEvidenceRevision !== "function") {
+        throw toolError("MCP_TOOL_UNAVAILABLE");
+      }
+      const readEvidenceRevision = provenance?.getEvidenceRevision?.(
+        authority.profileId, rawArgs.id) ?? null;
+      if (provenance && (typeof readEvidenceRevision !== "string" || !readEvidenceRevision)) {
+        throw toolError("MCP_TOOL_UNAVAILABLE");
+      }
+      const readVisibilityKey = readPolicy
+        ? canonicalJson([readPolicyRevision, readMemoryRevision ?? null,
+          readConversationRevision, readEvidenceRevision]) : null;
       let result;
       if (DURABLE_WRITE_TOOL_NAMES.has(name)) {
+        let memoryBinding = null;
+        let memoryWorkspace = null;
+        if (name === "memory_save" || name === "memory_forget") {
+          this.#requireProfile(authority.profileId);
+          this.#assertSecretSafe(JSON.stringify(rawArgs));
+          const run = await this.#currentInteractiveRun(rawArgs, authority);
+          memoryBinding = this.conversationMemoryService.bind(name, rawArgs, run);
+          memoryWorkspace = run.workspace;
+        }
         // 已登记调用的 durable owner/binding 先于可变 Profile/Card 状态；否则响应丢失后
         // Profile 被禁用或实体被删除会破坏 exact replay / pending 对账。
-        result = await this.#handleDurable(name, rawArgs, authority, fingerprint);
+        result = await this.#handleDurable(name, rawArgs, authority, fingerprint, memoryBinding);
+        if (name === "memory_save" || name === "memory_forget") {
+          if (typeof this.conversationMemoryService?.revalidateWriteResult !== "function") {
+            throw toolError("MCP_TOOL_UNAVAILABLE");
+          }
+          result = this.conversationMemoryService.revalidateWriteResult(
+            authority.profileId, result, memoryWorkspace);
+        }
       } else {
         this.#requireProfile(authority.profileId);
-        result = await this.#handleEphemeral(name, rawArgs, authority, fingerprint);
+        result = await this.#handleEphemeral(name, rawArgs, authority, fingerprint, readVisibilityKey);
+      }
+      if (readPolicy && readPolicy.getRevision(authority.profileId) !== readPolicyRevision) {
+        throw toolError("MCP_TOOL_STATE_CONFLICT");
+      }
+      if (readMemoryStore && readMemoryStore.getRevision(authority.profileId) !== readMemoryRevision) {
+        throw toolError("MCP_TOOL_STATE_CONFLICT");
+      }
+      if (readConversationRevision !== null && this.conversationRecallService
+        .getVisibilityRevision(authority.profileId) !== readConversationRevision) {
+        throw toolError("MCP_TOOL_STATE_CONFLICT");
+      }
+      if (readEvidenceRevision !== null && provenance.getEvidenceRevision(
+        authority.profileId, rawArgs.id) !== readEvidenceRevision) {
+        throw toolError("MCP_TOOL_STATE_CONFLICT");
+      }
+      if (readMemoryStore) {
+        const items = name === "memory_search" ? result?.items : [result?.item];
+        const engine = this.conversationMemoryService?.engine;
+        const now = engine?.now?.() ?? this.now();
+        if (typeof engine?.isReviewCommitted !== "function"
+          || !Array.isArray(items) || !Number.isSafeInteger(now)
+          || items.some((item) => !item || item.status !== "active"
+            || (item.validFrom !== undefined && item.validFrom > now)
+            || (item.validUntil !== undefined && item.validUntil !== null
+              && item.validUntil <= now)
+            || !engine.isReviewCommitted(authority.profileId, item))) {
+          throw toolError("MCP_TOOL_STATE_CONFLICT");
+        }
       }
       let safe = safeJsonClone(result);
       this.executionContext.getStore()?.assertCurrent();
@@ -2136,7 +2222,24 @@ class McpProductToolController {
     }
   }
 
-  #handleEphemeral(name, args, authority, fingerprint) {
+  async #routeEphemeral(name, args, authority) {
+    const result = await this.#route(name, args, authority, null);
+    if (CONVERSATION_READ_TOOL_NAMES.has(name)) {
+      if (typeof this.conversationRecallService?.assertResultCurrent === "function") {
+        const run = await this.#currentInteractiveRun(args, authority);
+        this.conversationRecallService.assertResultCurrent({ name, profileId: authority.profileId,
+          args, run, result });
+      } else {
+        // Legacy/test service adapters still need a current read before an
+        // in-flight result is shared by callers with the same callId.
+        const current = await this.#route(name, args, authority, null);
+        if (canonicalJson(current) !== canonicalJson(result)) throw toolError("MCP_TOOL_STATE_CONFLICT");
+      }
+    }
+    return result;
+  }
+
+  #handleEphemeral(name, args, authority, fingerprint, policyRevision = null) {
     const durable = this.productStore.lookupMcpToolCall({
       profileId: authority.profileId, callId: authority.callId, name, fingerprint,
     });
@@ -2147,6 +2250,14 @@ class McpProductToolController {
       if (existing.name !== name || existing.fingerprint !== fingerprint) {
         throw toolError("MCP_TOOL_STATE_CONFLICT");
       }
+      if (REVOCABLE_READ_TOOL_NAMES.has(name)
+        && (existing.settled || existing.policyRevision !== policyRevision)) {
+        existing.settled = false;
+        existing.policyRevision = policyRevision;
+        const next = Promise.resolve().then(() => this.#routeEphemeral(name, args, authority))
+          .finally(() => { if (existing.promise === next) existing.settled = true; });
+        existing.promise = next;
+      }
       return existing.promise;
     }
     if (this.ephemeralCalls.size >= 4096) {
@@ -2154,23 +2265,27 @@ class McpProductToolController {
       if (!evictable) throw toolError("MCP_TOOL_CAPACITY");
       this.ephemeralCalls.delete(evictable[0]);
     }
-    const record = { name, fingerprint, promise: null, settled: false };
-    record.promise = Promise.resolve().then(() => this.#route(name, args, authority, null))
-      .finally(() => { record.settled = true; });
+    const record = { name, fingerprint, policyRevision, promise: null, settled: false };
+    const first = Promise.resolve().then(() => this.#routeEphemeral(name, args, authority))
+      .finally(() => { if (record.promise === first) record.settled = true; });
+    record.promise = first;
     this.ephemeralCalls.set(key, record);
     return record.promise;
   }
 
-  async #handleDurable(name, args, authority, fingerprint) {
+  async #handleDurable(name, args, authority, fingerprint, memoryBinding = null) {
     if (this.ephemeralCalls.has(`${authority.profileId}\0${authority.callId}`)) {
       throw toolError("MCP_TOOL_STATE_CONFLICT");
     }
     const lookup = { profileId: authority.profileId, callId: authority.callId, name, fingerprint };
     let call = this.productStore.lookupMcpToolCall(lookup);
+    if (call && memoryBinding && canonicalJson(call.binding) !== canonicalJson(memoryBinding)) {
+      throw toolError("MCP_TOOL_FORBIDDEN");
+    }
     if (call?.status === "completed") return this.#replayOutcome(call.result);
     if (call === null) {
       this.#requireProfile(authority.profileId);
-      const binding = await this.#preflightDurable(name, args, authority);
+      const binding = memoryBinding || await this.#preflightDurable(name, args, authority);
       this.executionContext.getStore()?.assertCurrent();
       let createdAt;
       try { createdAt = this.now(); } catch { throw toolError("MCP_TOOL_UNAVAILABLE"); }
@@ -2178,6 +2293,9 @@ class McpProductToolController {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
       call = this.productStore.beginMcpToolCall({ ...lookup, binding, createdAt });
+      if (memoryBinding && canonicalJson(call.binding) !== canonicalJson(memoryBinding)) {
+        throw toolError("MCP_TOOL_FORBIDDEN");
+      }
       if (call.status === "completed") return this.#replayOutcome(call.result);
     }
     try {
@@ -2283,6 +2401,10 @@ class McpProductToolController {
     if (!ownDataObject(context) || context.profileId !== authority.profileId
       || context.source !== args.source || context.sourceId !== args.sourceId
       || !validOpaqueId(context.runId)) throw toolError("MCP_TOOL_NOT_FOUND");
+    const scopedRunId = this.executionContext.getStore()?.runId;
+    if (scopedRunId !== undefined && scopedRunId !== context.runId) {
+      throw toolError("MCP_TOOL_FORBIDDEN");
+    }
     const run = this.#requireRun(context.runId, authority.profileId);
     if (!ACTIVE_RUN_STATUSES.has(run.status)) throw toolError("MCP_TOOL_STATE_CONFLICT");
     return run;
@@ -2577,12 +2699,36 @@ class McpProductToolController {
       return this.conversationDefinitionService.update(authority.profileId, args, call);
     }
     if (isMemoryMcpTool(name)) {
+      if (name === "conversation_search" || name === "conversation_get") {
+        if (!this.conversationRecallService) throw toolError("MCP_TOOL_UNAVAILABLE");
+        this.#assertSecretSafe(JSON.stringify(args));
+        const run = await this.#currentInteractiveRun(args, authority);
+        const result = name === "conversation_search"
+          ? await (this.conversationRecallService.searchWithSemantic
+            ? this.conversationRecallService.searchWithSemantic({ profileId: authority.profileId, args, run })
+            : this.conversationRecallService.search({ profileId: authority.profileId, args, run }))
+          : this.conversationRecallService.get({ profileId: authority.profileId, args, run });
+        this.#assertSecretSafe(JSON.stringify(result));
+        return result;
+      }
       if (!this.conversationMemoryService) throw toolError("MCP_TOOL_UNAVAILABLE");
       this.#assertSecretSafe(JSON.stringify(args));
+      if (name === "memory_get" || name === "memory_explain") {
+        if (!this.conversationRecallService) throw toolError("MCP_TOOL_UNAVAILABLE");
+        const run = await this.#currentInteractiveRun(args, authority);
+        this.conversationRecallService.assertCaller({ profileId: authority.profileId, run });
+        const result = name === "memory_get"
+          ? this.conversationMemoryService.get(authority.profileId, args.id, run)
+          : this.conversationMemoryService.explain(authority.profileId, args.id, run);
+        this.#assertSecretSafe(JSON.stringify(result));
+        return result;
+      }
       if (name === "memory_search") {
         const run = await this.#currentInteractiveRun(args, authority);
         this.conversationMemoryService.bind(name, args, run);
-        return this.conversationMemoryService.search(authority.profileId, args, run);
+        return this.conversationMemoryService.searchWithSemantic
+          ? this.conversationMemoryService.searchWithSemantic(authority.profileId, args, run)
+          : this.conversationMemoryService.search(authority.profileId, args, run);
       }
       return this.conversationMemoryService.write(name, authority.profileId, args, call);
     }
@@ -2706,7 +2852,16 @@ class McpProductToolController {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
       if (name === "mcp_server_list") {
-        const result = safeJsonClone(this.nativeMcpStore.list());
+        // A disabled registration may be an inert record restored from another
+        // machine. Its old command, workspace and arguments are needed by the
+        // Service for repair, but must not enter an Agent's model context.
+        const native = this.nativeMcpStore.list();
+        const result = safeJsonClone({ revision: native.revision,
+          servers: native.servers.map((server) => server.enabled !== false ? server : {
+            id: server.id, name: server.name, enabled: false,
+            ...(server.createdAt === undefined ? {} : { createdAt: server.createdAt }),
+            ...(server.updatedAt === undefined ? {} : { updatedAt: server.updatedAt }),
+          }) });
         if (this.pluginRuntimeToolService && !authority.federationClient
           && this.executionContext.getStore()?.runId) {
           result.servers.push(...safeJsonClone(this.pluginRuntimeToolService.listServers(
@@ -3630,6 +3785,7 @@ module.exports = {
   MCP_PRODUCT_TOOL_NAMES,
   PUBLIC_MESSAGES,
   McpProductToolController,
+  assertValidDownstreamMcpTools,
   fingerprintMcpToolCall,
   isNativeOnlyMcpTool,
   sanitizeMcpProfile: sanitizeProfile,

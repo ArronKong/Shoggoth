@@ -4037,6 +4037,20 @@ test("LaunchAgent 将 macOS 静态代理投影为大小写兼容的无凭据环�
   assert.doesNotMatch(plist, /&lt;local&gt;/);
 });
 
+test("LaunchAgent 将 GUI 发现的 CLI PATH 传给常驻 Service", async () => {
+  const plist = buildLaunchAgentPlist({
+    executablePath: "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth",
+    bootstrapPath: "/Applications/Shoggoth.app/Contents/Resources/app.asar/app/bootstrap.js",
+    runtimePath: "/Users/test/custom&tools/bin:/usr/bin:relative:/Users/test/bad\npath",
+  });
+  assert.match(plist, /<key>PATH<\/key>\s*<string>\/Users\/test\/custom&amp;tools\/bin:\/usr\/bin<\/string>/);
+  assert.doesNotMatch(plist, /relative|bad\npath/u);
+  const { controller } = launchFixture({ runtimePath: "/Users/test/custom/bin:/usr/bin" });
+  await controller.install();
+  assert.match(fs.readFileSync(controller.paths.plistPath, "utf8"),
+    /<key>PATH<\/key>\s*<string>\/Users\/test\/custom\/bin:\/usr\/bin<\/string>/);
+});
+
 test("LaunchAgent 拒绝把带凭据、冲突或控制字符的代理写入 plist", () => {
   for (const proxyEnvironment of [
     { HTTPS_PROXY: "http://user:secret@127.0.0.1:7897" },

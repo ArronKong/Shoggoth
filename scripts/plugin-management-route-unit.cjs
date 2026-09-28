@@ -16,6 +16,11 @@ async function main() {
   let bindingWrites = 0;
   let grantRevocations = 0;
   let bulkGrantRevocations = 0;
+  let externalCallReads = 0;
+  let externalApprovalReads = 0;
+  let externalApprovalPrepares = 0;
+  let externalApprovalCommits = 0;
+  let nativeApprovalConfirms = 0;
   try {
     const selectedPath = path.join(root, "selected-plugin");
     const preview = { sourceKind: "directory", previewDigest: "b".repeat(64),
@@ -23,7 +28,14 @@ async function main() {
       declaredVersion: null, installable: true,
       components: { skills: [], mcpServers: [] }, diagnostics: [] };
     server = await startStaticServer(0, { homeDir: root, userDataRoot: root,
-      hostOps: { selectPluginPackage: async () => selectedPath },
+      hostOps: { selectPluginPackage: async () => selectedPath,
+        confirmPluginCapability: async summary => {
+          nativeApprovalConfirms += 1;
+          assert.equal(summary.action, "external-plugin-call");
+          assert.deepEqual(JSON.parse(summary.command), { destination: "fixture" });
+          assert.equal(summary.sessionId, "session-a");
+          return true;
+        } },
       registry: {
         backends: new Map([["shoggoth", {
           async previewPluginInstall(source) {
@@ -65,6 +77,38 @@ async function main() {
             assert.equal(agentId, "fixture-agent");
             assert.equal(installationId, "fixture-installation");
             return { profileId: "fixture-profile", installationId, items: [] };
+          },
+          async getPluginExternalCalls(query) {
+            externalCallReads += 1;
+            if (query.toolCallId !== null) {
+              assert.deepEqual(query, { backendId: "openclaw", agentId: "fixture-agent",
+                sessionId: "fixture-session", toolCallId: "fixture-tool", cursor: null, limit: 1 });
+            } else {
+              assert.deepEqual(query, { backendId: null, agentId: null, sessionId: null,
+                toolCallId: null, cursor: null, limit: 10 });
+            }
+            return { items: [{ callId: "fixture-external-call", backendId: "openclaw",
+              toolName: "search_issues", status: "confirmed" }], nextCursor: null };
+          },
+          async getExternalPluginApprovals(query) {
+            externalApprovalReads += 1;
+            assert.deepEqual(query, { backendId: null, cursor: null, limit: 2 });
+            return { items: [{ requestId: "request-a", backendId: "openclaw",
+              sessionId: "session-a", toolName: "write", command: '{"destination":"fixture"}' }],
+              nextCursor: null };
+          },
+          async prepareExternalPluginApproval(input) {
+            externalApprovalPrepares += 1;
+            assert.equal(input.requestId, "request-a");
+            assert.equal(input.decision, "once");
+            return { completed: false, approved: null, challenge: "secret-challenge",
+              summary: { action: "external-plugin-call", sessionId: "session-a",
+                command: '{"destination":"fixture"}' } };
+          },
+          async commitExternalPluginApproval(input) {
+            externalApprovalCommits += 1;
+            assert.equal(input.challenge, "secret-challenge");
+            return { approved: input.approved, requestId: "request-a" };
           },
           async getPluginMcpTools(agentId, bindingId) {
             assert.equal(agentId, "fixture-agent");
@@ -132,7 +176,16 @@ async function main() {
     assert.equal(figma.displayName, "Figma");
     assert.equal(figma.skills.length, 12);
     assert.deepEqual(figma.apps, ["figma"]);
-    assert.equal(figma.unconvertedMcp[0].reasonCode, "LEGACY_MCP_FIELD_UNSUPPORTED");
+    assert.deepEqual(figma.unconvertedMcp, []);
+    assert.deepEqual(figma.mcpServers.map(server => server.name), ["figma"]);
+    const mixpanelResponse = await fetch(`${server.url}/__api/plugins/bundled/mixpanel-headless`);
+    assert.equal(mixpanelResponse.status, 200);
+    const mixpanel = (await mixpanelResponse.json()).detail;
+    assert.equal(mixpanel.sourceWarnings[0].code, "MISSING_OPTIONAL_LOCAL_REFERENCES");
+    assert.deepEqual(mixpanel.sourceWarnings[0].targets, [
+      "skills/mixpanelyst/references/analytical-frameworks.md",
+      "skills/mixpanelyst/references/python-api.md",
+    ]);
     assert.equal((await fetch(`${server.url}/__api/plugins/bundled/missing-bundle`)).status, 404);
     assert.equal((await fetch(`${server.url}/__api/plugins/bundled/figma`, { method: "POST" })).status, 405);
     assert.equal(previews + installs, 0, "reading details must not preview or install a plugin");
@@ -215,6 +268,44 @@ async function main() {
     const mcpStatus = await fetch(`${server.url}/__api/plugins/mcp-status?agentId=fixture-agent&installationId=fixture-installation`);
     assert.deepEqual(await mcpStatus.json(), { profileId: "fixture-profile",
       installationId: "fixture-installation", items: [] });
+    const externalCalls = await fetch(`${server.url}/__api/plugins/external-calls?backendId=all&limit=10`);
+    assert.equal(externalCalls.status, 200);
+    assert.equal((await externalCalls.json()).items[0].toolName, "search_issues");
+    const scopedCalls = await fetch(`${server.url}/__api/plugins/external-calls?backendId=openclaw&agentId=fixture-agent&sessionId=fixture-session&toolCallId=fixture-tool&limit=1`);
+    assert.equal(scopedCalls.status, 200);
+    assert.equal((await scopedCalls.json()).items[0].callId, "fixture-external-call");
+    for (const query of ["backendId=all&limit=21", "backendId=unknown&limit=10",
+      "backendId=all&limit=10&secret=1", "backendId=all&limit=10&cursorCreatedAt=1",
+      "backendId=all&limit=10&cursorCreatedAt=-1&cursorCallId=abc",
+      "backendId=all&agentId=fixture-agent&sessionId=fixture-session&toolCallId=fixture-tool",
+      "backendId=openclaw&agentId=fixture-agent&sessionId=fixture-session",
+      "backendId=openclaw&agentId=fixture-agent&sessionId=wrong/session&toolCallId=fixture-tool",
+      "backendId=openclaw&agentId=fixture-agent&sessionId=fixture-session&toolCallId=fixture-tool&toolCallId=other"]) {
+      assert.equal((await fetch(`${server.url}/__api/plugins/external-calls?${query}`)).status, 400, query);
+    }
+    assert.equal((await fetch(`${server.url}/__api/plugins/external-calls`, { method: "POST" })).status, 405);
+    assert.equal(externalCallReads, 2, "invalid call-history queries never reach the Backend");
+    const pendingApprovals = await fetch(`${server.url}/__api/plugins/external-approvals?backendId=all`);
+    assert.equal(pendingApprovals.status, 200);
+    assert.equal((await pendingApprovals.json()).items[0].requestId, "request-a");
+    for (const query of ["backendId=unknown", "backendId=all&limit=3",
+      "backendId=all&cursorOffset=2", "backendId=all&cursorOffset=-1&cursorRevision=1",
+      "backendId=all&secret=1"]) {
+      assert.equal((await fetch(`${server.url}/__api/plugins/external-approvals?${query}`)).status,
+        400, query);
+    }
+    const approvalBody = { requestId: "request-a", operationId: "operation-a", decision: "once" };
+    const postApproval = (input, origin = true) => fetch(`${server.url}/__api/plugins/external-approvals`, {
+      method: "POST", headers: { ...(origin ? { Origin: server.url } : {}),
+        "Content-Type": "application/json" }, body: JSON.stringify(input),
+    });
+    assert.equal((await postApproval(approvalBody, false)).status, 403);
+    assert.equal((await postApproval({ ...approvalBody, command: "forged" })).status, 400);
+    assert.equal((await postApproval(approvalBody)).status, 200);
+    assert.equal(externalApprovalReads, 1);
+    assert.equal(externalApprovalPrepares, 1);
+    assert.equal(externalApprovalCommits, 1);
+    assert.equal(nativeApprovalConfirms, 1);
     for (const query of ["agentId=fixture-agent",
       "agentId=fixture-agent&installationId=fixture-installation&includeSecrets=1",
       "agentId=fixture-agent&agentId=fixture-agent&installationId=fixture-installation"]) {

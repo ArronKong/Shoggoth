@@ -22,6 +22,10 @@ async function startPreview(port = 61805, { liveTrajectory = false } = {}) {
   } } });
   try {
     const service = f.service;
+    // The preview keeps more than two simulated rounds live at once.
+    const admission = service.nativeRuntimeConfig.read();
+    service.nativeRuntimeConfig.apply({ ...admission, revision: admission.revision + 1,
+      maxActive: 16, flags: { ...admission.flags, runtimeAdmissionV1: true } });
     const store = service.inspirationStore;
     const dispatcher = service.workDispatcher;
     const profile = service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);

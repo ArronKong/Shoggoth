@@ -311,6 +311,63 @@ async function main() {
     assert.equal(service.agentArchiveRetention.entries[interruptedFiles.id], undefined);
     console.log("PASS file cleanup resumes after the Profile has already been removed");
 
+    const interruptedAnchor = await create("Finish recall-policy anchor after restart");
+    service.memoryEngine.recallPolicy.assertReady(interruptedAnchor.id);
+    service.memoryEngine.recallPolicy.assertReady(b.id);
+    const anchor = (profile) => path.join(paths.agentsDir,
+      ".recall-policy-installations", `${profile.id}.json`);
+    assert.ok(fs.existsSync(anchor(interruptedAnchor)));
+    assert.ok(fs.existsSync(anchor(b)));
+    await archive(interruptedAnchor);
+    time = service.agentArchiveRetention.entries[interruptedAnchor.id].deleteAfter;
+    service.memoryEngine.recallPolicy.forgetProfile = () => {
+      throw new Error("injected recall-policy anchor cleanup failure");
+    };
+    await assert.rejects(sweep, /injected recall-policy anchor cleanup failure/u);
+    assert.equal(service.productStore.getAgentProfile(interruptedAnchor.id), null);
+    assert.equal(service.agentArchiveRetention.entries[interruptedAnchor.id].phase, "purging");
+    assert.ok(fs.existsSync(anchor(interruptedAnchor)), "failed finalizer leaves an outside-Profile anchor");
+    await service.stop();
+    await start();
+    assert.equal(fs.existsSync(anchor(interruptedAnchor)), false,
+      "startup resumes anchor cleanup before dropping the journal");
+    assert.equal(fs.existsSync(dir(interruptedAnchor)), false);
+    assert.equal(service.agentArchiveRetention.entries[interruptedAnchor.id], undefined);
+    assert.ok(fs.existsSync(anchor(b)), "another Agent's anchor remains intact");
+    console.log("PASS orphan recall-policy anchor resumes after Product deletion and restart");
+
+    const interruptedFsync = await create("Retry anchor directory fsync");
+    service.memoryEngine.recallPolicy.assertReady(interruptedFsync.id);
+    service.memoryEngine.searchViews.set(interruptedFsync.id,
+      { documents: [{ item: { content: "private in-process memory" } }] });
+    service.memoryEngine.viewsStale.add(interruptedFsync.id);
+    const savedAnchor = fs.readFileSync(anchor(interruptedFsync));
+    await archive(interruptedFsync);
+    time = service.agentArchiveRetention.entries[interruptedFsync.id].deleteAfter;
+    const policy = service.memoryEngine.recallPolicy;
+    const originalFs = policy.fs;
+    policy.fs = Object.assign(Object.create(originalFs), {
+      fsyncSync(fd) {
+        if (fs.fstatSync(fd).isDirectory()) throw new Error("injected anchor directory fsync failure");
+        return originalFs.fsyncSync(fd);
+      },
+    });
+    try {
+      await assert.rejects(sweep, /injected anchor directory fsync failure/u);
+    } finally { policy.fs = originalFs; }
+    assert.equal(fs.existsSync(anchor(interruptedFsync)), false);
+    assert.equal(service.agentArchiveRetention.entries[interruptedFsync.id].phase, "purging");
+    assert.equal(service.memoryEngine.searchViews.has(interruptedFsync.id), false);
+    assert.equal(service.memoryEngine.viewsStale.has(interruptedFsync.id), false);
+    // Model a crash where the unfsynced unlink was lost before the next boot.
+    fs.writeFileSync(anchor(interruptedFsync), savedAnchor, { mode: 0o600 });
+    await service.stop();
+    await start();
+    assert.equal(fs.existsSync(anchor(interruptedFsync)), false);
+    assert.equal(service.agentArchiveRetention.entries[interruptedFsync.id], undefined);
+    assert.ok(fs.existsSync(anchor(b)));
+    console.log("PASS uncommitted anchor unlink retries after restart");
+
     const legacy = await create("Existing archive");
     await archive(legacy);
     service.agentArchiveRetention.cancel(legacy.id); // Simulate an archive made before retention existed.

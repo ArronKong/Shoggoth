@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getAgentRuntimeBindings, getSessionRuntime, switchSessionRuntime } from "../api/client";
+import type { AgentRuntimeBinding } from "../types";
 import { usePageCache } from "../lib/usePageCache";
 import { sessionRuntimeSupportKey } from "../lib/sessionRuntimeSupport";
 import { useConfirm, useToast } from "./ui";
@@ -33,6 +34,11 @@ export default function SessionRuntimeControl({ backend, agentId, sessionKey, bu
     wasBusy.current = busy;
   }, [busy, cache.refresh]);
   const current = cache.data?.session;
+  const bindingName = (binding: AgentRuntimeBinding | undefined) => binding?.label
+    || (binding?.runtimeAccountId === "shoggoth-internal-codex-default-v1" ? t("agents.codexHarnessRuntime")
+      : binding?.runtimeAccountId === "native-codex-default-v1" ? t("agents.codexCliRuntime")
+        : binding?.runtime || t("agents.sessionRuntimeUnknownBinding"));
+  const selectedBinding = cache.data?.bindings.bindings.find(binding => binding.id === current?.bindingId);
   const blocked = busy || !connected || pending || cache.loading || !!cache.error;
   const unsupported = (code: string) => t(sessionRuntimeSupportKey(code) ?? "agents.sessionRuntimeFactsUnknown");
   const choose = async (bindingId: string) => {
@@ -71,7 +77,7 @@ export default function SessionRuntimeControl({ backend, agentId, sessionKey, bu
       aria-expanded={open} aria-label={t("agents.sessionRuntimeSwitch")}
       onClick={() => { setManaging(false); setOpen(true); void cache.refresh(); }}>
       <span>{t("agents.sessionRuntimeSwitch")}</span>
-      {current && <span className={styles.model}>{current.runtime}</span>}
+      {current && <span className={styles.model}>{bindingName(selectedBinding)}</span>}
       <span aria-hidden="true">⌄</span>
     </button>
     <Modal open={open} onClose={() => setOpen(false)} dismissible={!pending} width={560}
@@ -94,12 +100,13 @@ export default function SessionRuntimeControl({ backend, agentId, sessionKey, bu
           const binding = cache.data?.bindings.bindings.find((entry) => entry.id === candidate.bindingId);
           const availability = cache.data?.bindings.availability?.find((entry) => entry.bindingId === candidate.bindingId);
           const selected = candidate.bindingId === current.bindingId;
-          const reason = availability?.available === false ? t(availability.reason === "runtime-disabled" ? "agents.bindingRuntimeDisabled" : "agents.bindingRuntimeUnavailable")
+          const reason = availability?.available === false ? t(availability.reason === "runtime-disabled" ? "agents.bindingRuntimeDisabled"
+            : availability.reason === "runtime-not-installed" ? "agents.sessionRuntimeNotInstalled" : "agents.bindingRuntimeUnavailable")
             : candidate.support.supported ? null : unsupported(candidate.support.code);
           return <li key={candidate.bindingId}>
             <button className={styles.option} type="button" aria-pressed={selected}
               disabled={blocked || !current.canSwitch || selected || !!reason || !binding} onClick={() => void choose(candidate.bindingId)}>
-              <span>{binding?.label || binding?.runtime || t("agents.sessionRuntimeUnknownBinding")}{selected && <span className={styles.current}>{t("agents.sessionRuntimeCurrent")}</span>}</span>
+              <span>{bindingName(binding)}{selected && <span className={styles.current}>{t("agents.sessionRuntimeCurrent")}</span>}</span>
               {binding?.label && <small>{binding.runtime}</small>}{reason && <small>{reason}</small>}
             </button>
           </li>;

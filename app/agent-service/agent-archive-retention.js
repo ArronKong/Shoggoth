@@ -184,6 +184,10 @@ class AgentArchiveRetention {
         this.cancel(entry.profileId);
         continue;
       }
+      // The Product Store deletion can commit before later per-Profile cleanup
+      // finishes. Keep the journal until these idempotent finalizers have run,
+      // including on restart when the Profile itself is already gone.
+      this.options.finalizePurge?.(entry.profileId);
       this._removeFiles(entry);
       this.cancel(entry.profileId);
     }

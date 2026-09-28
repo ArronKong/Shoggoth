@@ -46,7 +46,7 @@ const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 // 窗口尺寸：默认值与下限都住在这里（schema 唯一源），main.js 直接消费这两个常量。
 const DEFAULT_WINDOW_BOUNDS = { width: 1728, height: 1117 };
 const MIN_WINDOW_BOUNDS = { width: 720, height: 560 };
-const DEFAULT_NATIVE_CONCURRENCY = Object.freeze({ maxActive: 100, startupConcurrency: 8, revision: 0 });
+const DEFAULT_NATIVE_CONCURRENCY = Object.freeze({ maxActive: 32, startupConcurrency: 8, revision: 0 });
 // These features are part of the current unpublished App baseline. Low-level
 // Service defaults remain disabled until Core supplies its authenticated config.
 // Preserve explicit saved choices and keep invalid configuration fail-closed.
@@ -66,11 +66,21 @@ function projectNativeRuntimeConfig(config) {
 
 function normalizeNativeRuntimeConfig(parsed) {
   try {
-    return validateNativeRuntimeConfigProjection({
+    const projection = validateNativeRuntimeConfigProjection({
       ...(parsed.nativeConcurrency === undefined ? DEFAULT_NATIVE_CONCURRENCY : parsed.nativeConcurrency),
       flags: parsed.runtimeFrameworkFlags === undefined
         ? DEFAULT_NATIVE_RUNTIME_FLAGS : resolveRuntimeFrameworkFlags(parsed.runtimeFrameworkFlags),
     });
+    // Revision zero means the old 100/8 product default was never edited.
+    // Move that default to the new policy with a newer revision so a running
+    // Service can accept the changed projection. Explicit saved edits remain.
+    if (parsed.nativeConcurrency !== undefined && projection.revision === 0
+      && projection.maxActive === 100 && projection.startupConcurrency === 8) {
+      return validateNativeRuntimeConfigProjection({ ...projection, revision: 1,
+        maxActive: DEFAULT_NATIVE_CONCURRENCY.maxActive,
+        flags: { ...projection.flags, runtimeAdmissionV1: true } });
+    }
+    return projection;
   } catch {
     // Invalid persisted capacity must not turn a corrupt value into an enabled
     // higher limit. Retain safe defaults with every experimental path disabled.
@@ -126,13 +136,15 @@ function sanitizeDisabledBackends(raw) {
   return out;
 }
 
-// All categories default on. Keep explicit saved choices, including false.
+// All categories default on. The task and cron notification switches are now
+// one setting; an old disabled choice in either category keeps both disabled.
 function sanitizeNotifications(raw) {
   const n = raw && typeof raw === "object" ? raw : {};
+  const taskAndCron = n.cron !== false && n.task !== false;
   return {
     chat: typeof n.chat === "boolean" ? n.chat : true,
-    cron: typeof n.cron === "boolean" ? n.cron : true,
-    task: typeof n.task === "boolean" ? n.task : true,
+    cron: taskAndCron,
+    task: taskAndCron,
   };
 }
 

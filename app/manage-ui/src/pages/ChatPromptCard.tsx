@@ -106,10 +106,12 @@ export default function ChatPromptCard({
   onRespond,
   draftKey,
   compactApproval = false,
+  compactInput = false,
 }: {
   entry: ChatPromptEntry;
   draftKey?: string;
   compactApproval?: boolean;
+  compactInput?: boolean;
   onRespond: (entry: ChatPromptEntry, data: ChatPromptResponse) => void | Promise<void>;
 }) {
   const { t } = useTranslation();
@@ -389,8 +391,28 @@ export default function ChatPromptCard({
       ? { action: "submit", answers: submitted }
       : { answers: submitted });
   };
-  return (
-    <div className="chat-prompt chat-prompt--input">
+  const compactQuestion = compactInput && canonical && questions.length > 0;
+  const questionActions = <div className={`chat-prompt__row${compactQuestion ? " chat-prompt__actions" : ""}`}>
+    <button
+      type="button"
+      className="chat-prompt__btn is-primary"
+      disabled={submitting || !multiAnswerReady}
+      onClick={submitAnswers}
+    >
+      {t("chat.promptSubmit")}
+    </button>
+    {canonical ? (
+      <button
+        type="button"
+        className="chat-prompt__btn is-deny"
+        disabled={submitting}
+        onClick={() => { void respond({ action: "cancel", answers: {} }); }}
+      >
+        {t("common.cancel")}
+      </button>
+    ) : null}
+  </div>;
+  const inputContent = <>
       <div className="chat-prompt__head">
         <span className="chat-prompt__badge">{heading}</span>
         {legacy?.description ? <span className="chat-prompt__desc">{legacy.description}</span> : null}
@@ -453,26 +475,7 @@ export default function ChatPromptCard({
                   </label>
                 );
               })}
-              <div className="chat-prompt__row">
-                <button
-                  type="button"
-                  className="chat-prompt__btn is-primary"
-                  disabled={submitting || !multiAnswerReady}
-                  onClick={submitAnswers}
-                >
-                  {t("chat.promptSubmit")}
-                </button>
-                {canonical ? (
-                  <button
-                    type="button"
-                    className="chat-prompt__btn is-deny"
-                    disabled={submitting}
-                    onClick={() => { void respond({ action: "cancel", answers: {} }); }}
-                  >
-                    {t("common.cancel")}
-                  </button>
-                ) : null}
-              </div>
+              {!compactQuestion && questionActions}
             </div>
           ) : needsInput ? (
             <div className="chat-prompt__row">
@@ -498,6 +501,11 @@ export default function ChatPromptCard({
             </div>
           ) : null}
       </>
+  </>;
+  return (
+    <div className="chat-prompt chat-prompt--input">
+      {compactQuestion ? <div className="chat-prompt__content">{inputContent}</div> : inputContent}
+      {compactQuestion && questionActions}
     </div>
   );
 }

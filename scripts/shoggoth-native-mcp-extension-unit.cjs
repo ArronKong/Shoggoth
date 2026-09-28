@@ -86,6 +86,18 @@ function fixture() {
       args: ["-c", "echo unsafe"], cwd: value.workspace, enabled: true,
     }), (error) => error?.code === "MCP_SERVER_COMMAND_FORBIDDEN");
 
+    const externalWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-mcp-external-"));
+    try {
+      const linkedWorkspace = path.join(value.root, "linked-workspace");
+      fs.symlinkSync(externalWorkspace, linkedWorkspace, "dir");
+      assert.throws(() => value.store.prepare({
+        id: "escaped-cwd", name: "Escaped cwd", command: value.command,
+        args: [], cwd: linkedWorkspace, enabled: true,
+      }), (error) => error?.code === "MCP_SERVER_PATH_INVALID");
+    } finally {
+      fs.rmSync(externalWorkspace, { recursive: true, force: true });
+    }
+
     assert.deepEqual(safeEnvironment({
       HOME: value.root, PATH: "/usr/bin", OPENAI_API_KEY: "secret", CUSTOM_TOKEN: "secret",
     }), { HOME: value.root, PATH: "/usr/bin" });

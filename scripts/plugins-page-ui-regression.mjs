@@ -116,13 +116,24 @@ app.whenReady().then(async()=>{
             const external=path.join(outputDir,'plugins-'+width+'-'+theme+'-'+host.toLowerCase()+'.png');
             fs.writeFileSync(external,(await w.webContents.capturePage()).toPNG()); screenshots.push(external);
           }
+          geometry.push(await w.webContents.executeJavaScript('window.prepareGoogleBundledDetailCapture()',true));
+          const googleDetail=path.join(outputDir,'plugins-'+width+'-'+theme+'-google-detail.png');
+          fs.writeFileSync(googleDetail,(await w.webContents.capturePage()).toPNG()); screenshots.push(googleDetail);
+          geometry.push(await w.webContents.executeJavaScript('window.prepareGoogleBundledPreviewCapture()',true));
+          const googlePreview=path.join(outputDir,'plugins-'+width+'-'+theme+'-google-preview.png');
+          fs.writeFileSync(googlePreview,(await w.webContents.capturePage()).toPNG()); screenshots.push(googlePreview);
+          await w.webContents.executeJavaScript('window.closeGoogleBundledPreview()',true);
         }
       }
       const bearer=await w.webContents.executeJavaScript('window.runPluginBearerFixture()',true);
       const bearerScreenshot=path.join(outputDir,'plugins-390-github-account.png');
       fs.writeFileSync(bearerScreenshot,(await w.webContents.capturePage()).toPNG()); screenshots.push(bearerScreenshot);
+      const externalActivity=await w.webContents.executeJavaScript('window.runPluginExternalActivityFixture()',true);
+      geometry.push(await w.webContents.executeJavaScript('window.preparePluginExternalApprovalCapture()',true));
+      const approvalScreenshot=path.join(outputDir,'plugins-390-dark-external-approval.png');
+      fs.writeFileSync(approvalScreenshot,(await w.webContents.capturePage()).toPNG()); screenshots.push(approvalScreenshot);
       const bundledManagement=await w.webContents.executeJavaScript('window.runBundledManageFixture()',true);
-      const report={...result,oauth,bearer,dependency,disconnect,defaultPlugins,git,rollback,keyboard,hostKeyboard,hostTabs,bundledManagement,geometry,screenshots,verified:true};
+      const report={...result,oauth,bearer,externalActivity,dependency,disconnect,defaultPlugins,git,rollback,keyboard,hostKeyboard,hostTabs,bundledManagement,geometry,screenshots,verified:true};
       fs.writeFileSync(path.join(outputDir,"report.json"),JSON.stringify(report,null,2)+"\\n");
       console.log(JSON.stringify(report)); passed=true;
     })(),new Promise((_resolve,reject)=>{timeout=setTimeout(()=>reject(Error("Plugins page fixture deadline")),45000);})]);

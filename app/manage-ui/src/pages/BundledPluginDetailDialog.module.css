@@ -66,6 +66,11 @@
 .state[data-state="enabled"] { background: color-mix(in srgb, var(--ui-success) 12%, var(--ui-surface-1)); color: var(--ui-success); }
 .description { margin: 25px 34px 0; color: var(--ui-text-1); font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
 .adapterNotice { margin: 18px 34px 0; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--ui-focus) 25%, var(--ui-hairline)); border-radius: 10px; background: color-mix(in srgb, var(--ui-focus) 6%, var(--ui-surface-1)); color: var(--ui-text-2); font-size: 12px; line-height: 1.55; }
+.sourceNotice { margin: 18px 34px 0; padding: 12px 14px; border: 1px solid var(--ui-hairline); border-radius: 10px; background: var(--ui-surface-2); color: var(--ui-text-2); font-size: 12px; line-height: 1.55; }
+.sourceNotice strong { color: var(--ui-text-1); font-weight: 600; }
+.sourceNotice p { margin: 6px 0 0; }
+.sourceNotice ul { margin: 7px 0; padding-left: 19px; }
+.sourceNotice code { font-size: 11px; overflow-wrap: anywhere; }
 .promptPanel {
   display: grid;
   gap: 0;
@@ -98,7 +103,7 @@
 .infoGrid { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(0, 2fr); gap: 10px 16px; margin: 16px 0 34px; font-size: 12px; line-height: 1.45; }
 .infoGrid dt { color: var(--ui-text-2); }
 .infoGrid dd { min-width: 0; margin: 0; color: var(--ui-text-1); overflow-wrap: anywhere; }
-.footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 73px; box-sizing: border-box; padding: 15px 34px; border-top: 1px solid var(--ui-hairline); background: var(--ui-surface-1); }
+.footer { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 14px; min-height: 73px; box-sizing: border-box; padding: 15px 34px; border-top: 1px solid var(--ui-hairline); background: var(--ui-surface-1); }
 .footer > span { flex: 1 1 200px; max-width: 440px; color: var(--ui-text-2); font-size: 11px; line-height: 1.4; }
 .footerActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .footer button { flex: none; }
@@ -115,6 +120,7 @@
   .statusLine { padding: 16px 20px 0; }
   .description { margin: 22px 20px 0; }
   .adapterNotice { margin: 16px 20px 0; }
+  .sourceNotice { margin: 16px 20px 0; }
   .promptPanel { margin: 22px 20px 0; padding: 14px 15px 6px; }
   .section { margin: 28px 20px 0; padding-top: 19px; }
   .componentList li { grid-template-columns: 20px minmax(0, 1fr); gap: 8px; }

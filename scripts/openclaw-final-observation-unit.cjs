@@ -124,3 +124,20 @@ test("ordinary RPC behavior stays one-response and observer exceptions stay isol
   assert.doesNotThrow(() => receive(final()));
   assert.equal(backend._finalObservers.size, 0);
 });
+
+test("direct OpenClaw chat RPC rejects unsupported plugin selection before sending a frame", async t => {
+  const { backend, sent, receive } = fixture();
+  t.after(() => backend.stop());
+  for (const selection of [[], [{ installationId: "plugin-one", revision: 1 }]]) {
+    await assert.rejects(
+      backend.request("chat.send", { ...PARAMS, pluginSelection: selection }),
+      error => error?.code === "PLUGIN_SELECTION_UNAVAILABLE",
+    );
+  }
+  assert.equal(sent.length, 0);
+  assert.equal(backend._pending.size, 0);
+  const ordinary = backend.request("chat.send", PARAMS);
+  assert.equal(sent.length, 1);
+  receive({ runId: PARAMS.idempotencyKey, status: "started" });
+  assert.equal((await ordinary).status, "started");
+});

@@ -1,6 +1,15 @@
 {
   "components": [
     {
+      "name": "Multilingual E5-small bundled embedding model",
+      "license": "MIT",
+      "source": "https://huggingface.co/intfloat/multilingual-e5-small",
+      "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3; fixed qint8 ONNX and tokenizer assets",
+      "localFiles": ["app/agent-service/e5-model-contract.js", "scripts/fetch-e5-model.mjs"],
+      "licenseFiles": ["E5-MODEL-NOTICE.txt"],
+      "notes": "Unmodified publisher assets; all eight assets are SHA-256 pinned and verified before local inference."
+    },
+    {
       "name": "OpenClaw Control UI",
       "license": "MIT",
       "source": "https://github.com/openclaw/openclaw/tree/v2026.8.1",
@@ -170,6 +179,12 @@
     }
   ],
   "npmOverrides": [
+    {
+      "names": ["onnxruntime-node", "onnxruntime-common"],
+      "version": "1.22.0",
+      "licenseFiles": ["ONNX-RUNTIME-LICENSE.txt"],
+      "source": "https://github.com/microsoft/onnxruntime/blob/v1.22.0/LICENSE"
+    },
     {
       "names": [
         "@trycua/cua-driver",

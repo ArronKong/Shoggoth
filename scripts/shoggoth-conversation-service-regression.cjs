@@ -35,18 +35,33 @@ async function verifyConversationService(f) {
   assert.equal((await emptyResponse.json()).file.revision, 0);
   console.log("PASS empty MEMORY.md through Service IPC and the UI REST endpoint");
 
-  const send = async (prompt) => {
-    const result = await f.ipc("chat.send", { operationId: id(), sessionKey: session.sessionKey,
+  const send = async (prompt, target = session) => {
+    const result = await f.ipc("chat.send", { operationId: id(), sessionKey: target.sessionKey,
       prompt, createdAt: Date.now() });
     return activeRun(f, result.run.id);
   };
-  const abort = (run) => f.ipc("chat.abort", { operationId: id(), sessionKey: session.sessionKey,
-    runId: run.id, createdAt: Date.now() });
+  const abort = async (run, target = session) => {
+    try {
+      return await f.ipc("chat.abort", { operationId: id(), sessionKey: target.sessionKey,
+        runId: run.id, createdAt: Date.now() });
+    } catch (error) {
+      if (error.code !== "RUN_REQUEST_STATE_CONFLICT") throw error;
+      // The fake Runtime can finish after the tool assertion but before the
+      // cleanup abort. Accept only an observed terminal Run, never an active
+      // Run whose control request genuinely failed.
+      const latest = service.workRunCoordinator.getRun(run.id);
+      if (["completed", "canceled", "interrupted"].includes(latest?.status)) return { run: latest };
+      throw error;
+    }
+  };
   // The production Service constructs the tool controller and both conversation services.
   const call = (run, name, args) => service.mcpProductToolController.handle(name,
     { source: run.source, sourceId: run.sourceId, ...args }, { profileId: profile.id, callId: id() });
   const run = await send("以后叫我 Arron");
-  const empty = await call(run, "memory_search", { query: "用户偏好的称呼 Arron", includeCandidates: true });
+  await assert.rejects(() => call(run, "memory_search", {
+    query: "用户偏好的称呼 Arron", includeCandidates: true,
+  }), (error) => error.code === "MCP_TOOL_INVALID_ARGUMENTS");
+  const empty = await call(run, "memory_search", { query: "用户偏好的称呼 Arron" });
   assert.equal(empty.revision, 0);
   assert.deepEqual(empty.items, []);
   const saved = await call(run, "memory_save", { expectedRevision: empty.revision,
@@ -55,6 +70,13 @@ async function verifyConversationService(f) {
   const sourceEvent = service.transcriptStore.listEvents(profile.id, session.id)
     .find((event) => event.runId === run.id && event.kind === "user");
   assert.deepEqual(saved.item.sourceRefs, [sourceEvent.id, run.id]);
+  assert.equal((await call(run, "memory_get", { id: saved.item.id })).item.content,
+    "用户希望被称呼为 Arron");
+  const explanation = await call(run, "memory_explain", { id: saved.item.id });
+  assert.equal(explanation.evidence.status, "verified_quote");
+  assert.equal(explanation.evidence.quote, "以后叫我 Arron");
+  assert.equal(explanation.evidence.sessionId, session.id);
+  assert.equal(explanation.evidence.eventId, sourceEvent.id);
   for (const kind of ["MEMORY", "USER"]) assert.match((await readFile(kind)).content, /Arron/u);
   assert.match((await (await fetch(fileUrl)).json()).file.content, /Arron/u);
   await assert.rejects(() => call(run, "memory_search", { query: "", sourceId: session.id }),
@@ -95,12 +117,79 @@ async function verifyConversationService(f) {
   const boundKey = service.workRunCoordinator.getRunSessionKey(inspirationRun);
   assert.notEqual(boundKey, inspirationRun.sourceId);
   assert.notEqual(service.chatSessionStore.getSession(boundKey).id, boundKey);
-  const found = await call(inspirationRun, "memory_search", { query: "Arron" });
+  await assert.rejects(() => call(inspirationRun, "memory_search", { query: "Arron" }),
+    (error) => error.code === "MCP_TOOL_FORBIDDEN", "idea-card execution is not a direct user chat");
+  await abort(inspirationRun, { sessionKey: boundKey });
+  const continued = await f.ipc("chat.send", { operationId: id(), sessionKey: boundKey,
+    prompt: "以后回答简洁一些", createdAt: Date.now() });
+  const directRun = await activeRun(f, continued.run.id);
+  assert.equal(service.inspirationStore.executionForRun(directRun.id).inputSource, "chat");
+  const found = await call(directRun, "memory_search", { query: "Arron" });
   assert.ok(found.items.some((item) => item.id === saved.item.id));
-  const preference = await call(inspirationRun, "memory_save", { expectedRevision: found.revision,
-    content: "用户偏好简洁回答", scope: "user", classification: "explicit", sourceQuote: "记住我偏好简洁回答" });
+  const preference = await call(directRun, "memory_save", { expectedRevision: found.revision,
+    content: "用户偏好简洁回答", scope: "user", classification: "explicit", sourceQuote: "以后回答简洁一些" });
   assert.equal(preference.saved, true);
-  console.log("PASS Inspiration resolves its own bound chat session before recording memory");
+  console.log("PASS Inspiration card denied; direct chat-origin continuation may read and save memory");
+  await abort(directRun, { sessionKey: boundKey });
+
+  const createChat = () => service.chatSessionStore.createSession({ profileId: profile.id,
+    workspace: session.workspace, operationId: id(), createdAt: Date.now() });
+  const lookupSession = createChat();
+  assert.notEqual(lookupSession.id, session.id);
+  const lookupRun = await send("请检索上一段对话中的称呼原话。", lookupSession);
+  const searchArgs = { query: "以后叫我 Arron", sessionId: session.id, limit: 10 };
+  const searchWhenReady = async (run) => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      let result;
+      try { result = await call(run, "conversation_search", searchArgs); }
+      catch (error) {
+        // Real inference yields to transcript writes. A rejected stale read
+        // must be retried with the current source revision, never reused.
+        if (error.code !== "MCP_TOOL_STATE_CONFLICT" || Date.now() >= deadline) throw error;
+        continue;
+      }
+      if (result.status !== "rebuilding") return result;
+      if (Date.now() >= deadline) throw new Error("conversation index did not become ready");
+      // A completed build may have been invalidated by the concurrent Run
+      // append; the next search starts its replacement build.
+      await service.conversationRecallService.whenIndexReady(profile.id);
+    }
+  };
+  const original = await searchWhenReady(lookupRun);
+  assert.equal(original.status, "ready");
+  assert.ok(original.results.some((item) => item.sessionId === session.id
+    && item.eventId === sourceEvent.id && item.kind === "user"
+    && item.snippet.includes("以后叫我 Arron")),
+  "cross-session search must find the verified original user event");
+  const originalGet = await call(lookupRun, "conversation_get", {
+    sessionId: session.id, eventId: sourceEvent.id, window: 0 });
+  assert.deepEqual(originalGet.events.map((item) => item.text), ["以后叫我 Arron"]);
+  await abort(lookupRun, lookupSession);
+
+  const forgetQuote = "请忘记 Arron 这个称呼偏好";
+  const forgetRun = await send(`${forgetQuote}。`, lookupSession);
+  const forgotten = await call(forgetRun, "memory_forget", { id: saved.item.id,
+    expectedRevision: service.memoryStore.getRevision(profile.id), sourceQuote: forgetQuote });
+  assert.equal(forgotten.item.status, "deleted");
+  assert.equal(forgotten.saved, false);
+  assert.equal((await f.ipc("harness.memory.explain", { profileId: profile.id,
+    id: saved.item.id })).withdrawalReason, "forgotten");
+  await abort(forgetRun, lookupSession);
+
+  const afterSession = createChat();
+  const afterRun = await send("请复查已撤回称呼的旧原话是否仍可见。", afterSession);
+  const after = await searchWhenReady(afterRun);
+  assert.equal(after.status, "ready");
+  assert.ok(!after.results.some(row => row.eventId === sourceEvent.id
+    || row.snippet.includes("以后叫我 Arron")), "forgotten original must not be returned across sessions");
+  await assert.rejects(() => call(afterRun, "conversation_get", {
+    sessionId: session.id, eventId: sourceEvent.id, window: 0 }),
+  (error) => error.code === "MCP_TOOL_NOT_FOUND");
+  assert.equal((await call(afterRun, "memory_search", { query: "Arron" })).items
+    .some((item) => item.id === saved.item.id), false);
+  await abort(afterRun, afterSession);
+  console.log("PASS verified cross-session conversation search/get, then memory_forget revokes old source");
 }
 
 module.exports = { verifyConversationService };

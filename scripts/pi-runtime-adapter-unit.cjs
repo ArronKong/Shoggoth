@@ -1181,6 +1181,10 @@ test("Pi surfaces provider authentication errors without locking the conversatio
       ["429 rate limit exceeded", "RUNTIME_RATE_LIMITED"],
       ["Rate limit reached for this API key, please retry later", "RUNTIME_RATE_LIMITED"],
       ["insufficient_quota: You exceeded your current quota", "RUNTIME_QUOTA_EXHAUSTED"],
+      ["The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.", "RUNTIME_MODEL_UNAVAILABLE"],
+      ["The model `gpt-5.5` does not exist or you do not have access to it.", "RUNTIME_MODEL_UNAVAILABLE"],
+      ['Unsupported reasoning effort: max is not supported for this model', "RUNTIME_MODEL_SETTINGS_INVALID"],
+      ["server_overloaded: Selected model is at capacity", "RUNTIME_UPSTREAM_UNAVAILABLE"],
       ["Unexpected provider error", "PI_TURN_FAILED"],
       [null, undefined],
     ].entries()) {
@@ -1195,6 +1199,25 @@ test("Pi surfaces provider authentication errors without locking the conversatio
       if (["AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(expectedCode)) assert.equal(runtime.host.profileState.auth, null);
       else assert.notEqual(runtime.host.profileState.auth, null, "a provider limit must not invalidate the login");
     }
+    await value.adapter.stopAll();
+  } finally { value.cleanup(); }
+});
+
+test("a read-only model worker is isolated from a warm writable chat Runtime", async () => {
+  const value = rpcFixture({});
+  try {
+    const warm = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+      permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" } });
+    const operationId = "memory-extraction-isolated-worker";
+    const worker = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+      permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+      executionContract: { runId: operationId, source: "memory_extraction" } });
+    assert.notEqual(worker.host, warm.host);
+    assert.equal(worker.host.mcpExecutionRunId, operationId);
+    assert.equal(worker.host.permissionPolicy.sandbox, "read-only");
+    assert.equal(warm.host.permissionPolicy.sandbox, "workspace-write");
+    assert.equal(await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+      permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" } }), warm);
     await value.adapter.stopAll();
   } finally { value.cleanup(); }
 });

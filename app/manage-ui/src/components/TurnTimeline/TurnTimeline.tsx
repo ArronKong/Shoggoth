@@ -8,6 +8,7 @@ import { TrajChevron, TrajGlyphExec, TrajGlyphRead, TrajGlyphThinking, TrajGlyph
 import styles from "./TurnTimeline.module.css";
 import { PluginAppCard, pluginAppCallReference } from "../PluginAppCard";
 import { validPluginAppCallId } from "../../lib/turnTimeline";
+import ExternalPluginCallOutcome from "./ExternalPluginCallOutcome";
 
 export interface TurnTimelineProps {
   steps: TurnStep[];
@@ -17,7 +18,8 @@ export interface TurnTimelineProps {
   onUserScrollAway?: () => void;
   emptyHint?: ReactNode;
   className?: string;
-  pluginConversation?: { backendId: string; sessionKey: string };
+  pluginConversation?: { backendId: string; sessionKey: string;
+    agentId?: string; sessionId?: string; duplicateToolCallIds?: ReadonlySet<string> };
 }
 
 const ENTER_KEYFRAMES: Keyframe[] = [
@@ -104,6 +106,16 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
   const followedAutoRef = useRef(false);
 
   const relations = useMemo(() => deriveRelations(steps), [steps]);
+  const duplicateStepCallIds = useMemo(() => {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const step of steps) {
+      if (step.kind !== "tool" || !step.toolCallId) continue;
+      if (seen.has(step.toolCallId)) duplicates.add(step.toolCallId);
+      else seen.add(step.toolCallId);
+    }
+    return duplicates;
+  }, [steps]);
 
   // 重播/换剧本(steps 变短)时重置进入动画与展开状态。
   if (steps.length < prevLenRef.current) {
@@ -152,6 +164,10 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
   }, [onUserScrollAway]);
 
   const chipLabel = (s: TurnStep): string => {
+    if (s.kind === "tool" && s.toolName === "shoggoth_plugin_call" && s.status === "ok") {
+      // The host wrapper ended; Service audit may still have an unknown remote result.
+      return t("plugins.externalHostToolEnded");
+    }
     if (s.kind === "prompt") {
       if (s.promptOutcome === "answered") return t("turnLab.promptAnswered", { choice: s.promptChoice ?? "" });
       if (s.promptOutcome === "expired") return t("turnLab.promptExpired");
@@ -325,9 +341,21 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                     <span className={styles.updates}>{t("turnLab.updates", { count: s.updateCount })}</span>
                   ) : null}
                   <span className={styles.dur}>{s.kind === "tool" ? (showDurations ? formatDuration(s.durationS) : "—") : ""}</span>
-                  <span className={styles.chip} data-st={s.kind === "prompt" && s.promptOutcome === "expired" ? "aborted" : s.status}>{chipLabel(s)}</span>
+                  <span className={styles.chip} data-st={s.kind === "prompt" && s.promptOutcome === "expired" ? "aborted" : s.status}
+                    data-external-plugin={s.kind === "tool" && s.toolName === "shoggoth_plugin_call" ? "1" : undefined}>{chipLabel(s)}</span>
                   <span className={styles.chev} data-show={expandable ? "1" : undefined} data-open={isOpen ? "1" : undefined}><TrajChevron /></span>
                 </button>
+                {s.kind === "tool" && s.toolName === "shoggoth_plugin_call"
+                  && s.toolCallId && pluginConversation?.agentId && pluginConversation.sessionId
+                  && !pluginConversation.duplicateToolCallIds?.has(s.toolCallId)
+                  && !duplicateStepCallIds.has(s.toolCallId)
+                  && (pluginConversation.backendId === "openclaw" || pluginConversation.backendId === "hermes")
+                  ? <ExternalPluginCallOutcome identity={{
+                      backendId: pluginConversation.backendId,
+                      agentId: pluginConversation.agentId,
+                      sessionId: pluginConversation.sessionId,
+                      toolCallId: s.toolCallId,
+                    }} running={running} /> : null}
                 <div className={styles.bodyClip} data-open={isOpen ? "1" : undefined}>
                   <div className={styles.bodyInner}>{isOpen ? <div className={styles.body}>{bodyFor(s)}</div> : <div className={styles.body} />}</div>
                 </div>

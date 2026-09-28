@@ -54,7 +54,7 @@ async function main() {
     durationMs: Math.round(performance.now() - started), samples: capacity.length,
     maxMs: sorted.at(-1), p95Ms: sorted[Math.floor(sorted.length * 0.95)], capacity, statuses };
   fs.writeFileSync(output, JSON.stringify(receipt, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-  assert.ok(capacity.length >= 30 && capacity.every(row => !row.failed && row.enabled && row.maxActive === 100));
+  assert.ok(capacity.length >= 30 && capacity.every(row => !row.failed && row.enabled && row.maxActive === 32));
   assert.ok(receipt.maxMs < 1000, "native control requests must stay responsive during auth refresh");
   assert.ok(statuses.length >= 3 && statuses.every(row => !row.failed));
   const last = statuses.at(-1).backends;

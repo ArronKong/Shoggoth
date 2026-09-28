@@ -45,6 +45,9 @@ function validateSocketStat(stat, target) {
 }
 
 function requestService(paths, request, options = {}) {
+  if (options.signal?.aborted) {
+    return Promise.reject(serviceError("REQUEST_ABORTED", "Service 请求已取消"));
+  }
   try {
     assertPrivateDirectory(paths.runtimeDir);
   } catch (error) {
@@ -75,13 +78,17 @@ function requestService(paths, request, options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       socket.destroy();
       if (error) reject(error);
       else resolve(value);
     };
+    const onAbort = () => finish(serviceError("REQUEST_ABORTED", "Service 请求已取消"));
     const timer = setTimeout(() => {
       finish(serviceError("REQUEST_TIMEOUT", `Service 请求在 ${timeoutMs}ms 内未响应`));
     }, timeoutMs);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) { onAbort(); return; }
 
     socket.on("connect", () => {
       const current = lstatIfExists(paths.socketPath);

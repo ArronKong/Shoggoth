@@ -489,9 +489,12 @@ class ChatSessionStore {
   createSession(input) {
     this.#assertOpen();
     if (!exactObject(input, ["operationId", "profileId", "workspace", "createdAt",
-      ...(Object.hasOwn(input || {}, "defaultBindingId") ? ["defaultBindingId"] : [])])
+      ...(Object.hasOwn(input || {}, "defaultBindingId") ? ["defaultBindingId"] : []),
+      ...(Object.hasOwn(input || {}, "parentSessionKey") ? ["parentSessionKey"] : [])])
       || !validOpaqueId(input.operationId) || !validOpaqueId(input.profileId)
       || !validNullableText(input.workspace, 4096)
+      || (Object.hasOwn(input, "parentSessionKey") && (typeof input.parentSessionKey !== "string"
+        || !UUID_PATTERN.test(input.parentSessionKey)))
       || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0) {
       throw chatSessionError("CHAT_SESSION_INVALID", "createSession 输入无效");
     }
@@ -521,16 +524,24 @@ class ChatSessionStore {
       >= MAX_ACTIVE_CREATE_OPERATIONS) {
       throw chatSessionError("CHAT_SESSION_CAPACITY", "ChatSession create operation 容量已满");
     }
+    // Copy the parent's current selection as creation defaults, just like the
+    // Agent's default Binding. A replay returns the already-created snapshot.
+    const parent = input.parentSessionKey ? this.container.sessions[input.parentSessionKey] : null;
+    if (input.parentSessionKey && (!parent || parent.profileId !== input.profileId
+      || parent.status === "delete_pending")) {
+      throw chatSessionError("CHAT_SESSION_INVALID", "新会话的来源会话不可用");
+    }
     const session = normalizeSession({
       id: this.randomUUID(),
       sessionKey: this.randomUUID(),
       profileId: input.profileId,
       runtimeSessionId: null,
-      runtimeBindingId: this.#resolveBinding(input.profileId, input.defaultBindingId)?.id ?? null,
+      runtimeBindingId: this.#resolveBinding(input.profileId, parent?.runtimeBindingId ?? input.defaultBindingId)?.id ?? null,
       retiredRuntimeSessions: [], revision: 1,
       workspace: input.workspace,
       title: null,
-      modelOverride: null,
+      modelOverride: parent?.modelOverride ?? null,
+      ...(parent?.modelSettings ? { modelSettings: clone(parent.modelSettings) } : {}),
       permissionMode: null,
       status: "draft",
       createdAt: time,
@@ -692,7 +703,7 @@ class ChatSessionStore {
         return this.getSession(sessionKey);
       }
       const updated = normalizeSession({ ...session, modelOverride: input.model, revision: session.revision + 1,
-        ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}),
+        modelSettings: { thinkingLevel: null, serviceTier: null },
         ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
         updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
       this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
@@ -713,7 +724,7 @@ class ChatSessionStore {
       ...(input.clearModelOverride ? { modelOverride: null,
         ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}) } : {}),
       ...(input.model !== undefined ? { modelOverride: input.model,
-        ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}) } : {}),
+        modelSettings: { thinkingLevel: null, serviceTier: null } } : {}),
       ...(input.permissionMode !== undefined ? {permissionMode: input.permissionMode} : {}),
     });
     const bindingOperations = { ...this.container.bindingOperations }; delete bindingOperations[sessionKey];
@@ -755,7 +766,7 @@ class ChatSessionStore {
     const updated = normalizeSession({
       ...session,
       modelOverride: model,
-      ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}),
+      modelSettings: { thinkingLevel: null, serviceTier: null },
       updatedAt: Math.max(time, session.updatedAt),
     });
     const candidate = {
@@ -824,6 +835,11 @@ class ChatSessionStore {
   listSessions() {
     this.#assertOpen();
     return Object.values(this.container.sessions).map(clone);
+  }
+
+  getRevision() {
+    this.#assertOpen();
+    return this.container.revision;
   }
 
   purgeProfile(profileId) {

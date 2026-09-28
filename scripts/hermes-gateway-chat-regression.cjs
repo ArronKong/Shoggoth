@@ -801,6 +801,35 @@ async function main() {
     await be.stop();
   }
 
+  // — 场景 9d：即使绕过 Proxy 直接调 HermesBackend，未绑定的手选也
+  // 必须在排队和保留幂等键之前失败；同 key 仍可发送普通消息。
+  {
+    const be = makeBackend(gw.port);
+    let dispatched = 0;
+    be._sendMessageInner = async (_session, _message, _key, hooks) => {
+      dispatched += 1;
+      hooks.final?.("ordinary", false);
+    };
+    const sessionKey = "agent:hermes-t:main";
+    const rejectedKey = "selected-then-ordinary";
+    for (const selection of [[], [{ installationId: "plugin-one", revision: 1 }]]) {
+      let error;
+      try {
+        await be.sendMessage(sessionKey, "hello", rejectedKey, collectHooks().hooks,
+          { pluginSelection: selection });
+      } catch (caught) { error = caught; }
+      check("S9d: backend 直接手选在执行前拒绝", error?.code === "PLUGIN_SELECTION_UNAVAILABLE"
+        && dispatched === 0 && be.sendQueues.size === 0 && be._idempotentSends.size === 0,
+      JSON.stringify({ code: error?.code, dispatched, queues: be.sendQueues.size,
+        idempotent: be._idempotentSends.size }));
+    }
+    const ordinary = collectHooks();
+    await be.sendMessage(sessionKey, "hello", rejectedKey, ordinary.hooks, {});
+    check("S9d: 被拒绝的手选未占用普通发送的幂等键",
+      dispatched === 1 && ordinary.log.finals[0]?.t === "ordinary");
+    await be.stop();
+  }
+
   // — 场景 10：idempotencyKey 在 Hermes 实例内跨调用去重；并发重复共享
   // 同一轮事件，已完成重复重放终态，不同 key / 无 key 保持原语义。
   {

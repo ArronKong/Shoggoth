@@ -125,11 +125,23 @@ async function main() {
       verifyPrincipal: input => providers.verifyPrincipal(input), refreshTokens: input => providers.refreshTokens(input),
       invalidateToolCatalog: id => { invalidated.push(id); }, now: () => now });
     const manager = new PluginMcpConnectionManager({ store, resolver: new PluginComponentResolver({ store }) });
+    const component = manager.component.bind(manager);
+    manager.component = (...args) => {
+      const context = component(...args);
+      return { ...context, component: { ...context.component,
+        oauthResource: `${fixture.base}/mcp` } };
+    };
     controller = new PluginOAuthConnectionController({ store, productStore, manager, providers, vault,
       now: () => now, lifetimeMs: 5000 });
     const input = { profileId: profile.id, installationId: installation.installationId,
       componentId: componentId(installation.installationId, "mcp-server", "remote-issues"),
       expectedRevision: installation.revision, operationId: "oauth-connect-a" };
+    const wrongAudience = new PluginOAuthConnectionController({ store, productStore, manager,
+      providers: { forEndpoint: endpoint => ({ ...providers.forEndpoint(endpoint),
+        audience: `${fixture.base}/wrong` }), fetchFor: endpoint => providers.fetchFor(endpoint) },
+      vault, now: () => now, lifetimeMs: 5000 });
+    assert.throws(() => wrongAudience.prepare(input), { code: "PLUGIN_OAUTH_PROVIDER_UNSUPPORTED" });
+    await wrongAudience.close();
     const current = flow => controller.status({ profileId: profile.id, flowId: flow.flowId });
     const prepare = operationId => controller.prepare({ ...input, operationId });
     const begin = async operationId => (await controller.commit({ challenge: prepare(operationId).challenge, approved: true })).flow;
@@ -177,6 +189,22 @@ async function main() {
     await assert.rejects(fetch(correct), TypeError);
     const auth = new PluginConnectionAuth({ getConnection: id => store.getConnection(id),
       readCredential: id => vault.readCredential(id), refreshCredential: value => vault.refreshCredential(value), now: () => now });
+    manager.auth = auth;
+    manager.pool = { async acquireHttp(options) {
+      assert.equal(options.url, `${fixture.base}/mcp`);
+      assert.match((await options.credentialProvider()).accessToken, /^fixture-access-/u);
+      return { async release() {} };
+    } };
+    await (await manager.acquire({ installation, binding, connection: firstConnection })).release();
+    const originalComponent = manager.component;
+    manager.component = (...args) => {
+      const context = originalComponent(...args);
+      return { ...context, component: { ...context.component,
+        oauthResource: `${fixture.base}/wrong` } };
+    };
+    await assert.rejects(manager.acquire({ installation, binding, connection: firstConnection }),
+      { code: "CONNECTION_IDENTITY_CHANGED" });
+    manager.component = originalComponent;
     now += 95_000;
     const credential = await auth.credentialProvider(firstConnection)();
     assert.match(credential.accessToken, /^fixture-access-/u);
@@ -188,21 +216,27 @@ async function main() {
     const toolIdentity = `plugin:${input.installationId}:${input.componentId}:${binding.connectionId}:${"a".repeat(64)}`;
     store.setGrant({ grantId: "old-http-grant", bindingId: binding.bindingId, toolIdentity,
       contractDigest: "b".repeat(64), effect: "allow", approvalMode: "always", expectedRevision: 0 });
+    const oldBinding = binding;
     const reconnect = await begin("oauth-reconnect-b");
-    assert.equal(store.getGrant(binding.bindingId, toolIdentity).effect, "deny");
-    assert.equal(store.getBinding(binding.bindingId).enabled, false);
+    assert.equal(store.getGrant(binding.bindingId, toolIdentity).effect, "allow");
+    assert.equal(store.getBinding(binding.bindingId).enabled, true);
+    assert.equal(store.getBinding(binding.bindingId).connectionId, firstConnection.connectionId);
+    await (await manager.acquire({ installation, binding: oldBinding, connection: firstConnection })).release();
     assert.equal((await fetch(callback(reconnect, "code-b", "account-b"))).status, 200);
     binding = store.getBinding(binding.bindingId);
     assert.notEqual(binding.connectionId, firstConnection.connectionId);
     assert.equal(store.getConnection(binding.connectionId).principalIdentity, "account-b");
     assert.equal(store.getGrant(binding.bindingId, toolIdentity).effect, "deny");
     assert.equal(binding.enabled, true);
+    await assert.rejects(manager.acquire({ installation, binding: oldBinding, connection: firstConnection }),
+      { code: "CONNECTION_IDENTITY_CHANGED" });
 
     const canceled = await begin("oauth-cancel");
     const canceledCallback = callback(canceled, "cancel-code");
     assert.equal(controller.cancel({ profileId: profile.id, flowId: canceled.flowId }).status, "canceled");
     await assert.rejects(fetch(canceledCallback), TypeError);
-    assert.equal(store.getBinding(binding.bindingId).enabled, false);
+    assert.equal(store.getBinding(binding.bindingId).enabled, true);
+    assert.equal(store.getBinding(binding.bindingId).connectionId, binding.connectionId);
     const expired = await begin("oauth-expire");
     now += 5001;
     assert.equal(current(expired).status, "expired");
@@ -230,7 +264,7 @@ async function main() {
     release();
     assert.equal((await responsePromise).status, 400);
     assert.equal(current(race).status, "canceled");
-    assert.equal(store.getBinding(binding.bindingId).enabled, false, "canceled token exchange cannot restore old authority");
+    assert.equal(store.getBinding(binding.bindingId).enabled, true, "canceled token exchange preserves the verified old account");
     assert.equal(store.getOperation("oauth-cancel-exchange"), null);
     fixture.state.tokenWait = null;
     let releaseVerification;
@@ -245,17 +279,17 @@ async function main() {
     assert.equal((await verificationResponse).status, 400);
     assert.equal(current(verifyRace).status, "canceled");
     assert.equal(store.getOperation("oauth-cancel-verification"), null);
-    assert.equal(store.getBinding(binding.bindingId).enabled, false);
+    assert.equal(store.getBinding(binding.bindingId).enabled, true);
     fixture.state.verifyWait = null;
     assert.equal(store.getConnectionCountsForComponent(input.installationId, input.componentId).pending, 0);
-    // Disconnect an already-disabled old binding while reconnect is verifying:
-    // the binding must advance again or that pending login could late-bind.
+    // An explicit disconnect while reconnect is verifying must advance the
+    // binding and prevent that pending login from late-binding.
     let finishDisconnectVerification, enteredDisconnectVerification;
     const disconnectVerificationReached = new Promise(resolve => { enteredDisconnectVerification = resolve; });
     fixture.state.verifyWait = () => { enteredDisconnectVerification(); return new Promise(resolve => { finishDisconnectVerification = resolve; }); };
     const disconnectRace = await begin("oauth-disconnect-race");
     const beforeDisconnect = store.getBinding(binding.bindingId);
-    assert.equal(beforeDisconnect.enabled, false);
+    assert.equal(beforeDisconnect.enabled, true);
     const oldConnection = store.getConnectionAuth(beforeDisconnect.connectionId);
     const retainedSecret = await secrets.get(oldConnection.credentialRef);
     const disconnectResponse = fetch(callback(disconnectRace, "disconnect-race-code"));

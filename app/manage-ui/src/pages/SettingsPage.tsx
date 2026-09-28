@@ -660,7 +660,8 @@ export default function SettingsPage() {
   };
 
   const toggleRuntimeConnection = async (runtime: RuntimeStatus) => {
-    if (loading || configFailed || saving || backendConnectionBusy.current || !runtime.releaseEnabled) return;
+    if (loading || configFailed || saving || backendConnectionBusy.current
+      || !runtime.releaseEnabled || runtime.installation !== "available") return;
     if (runtime.enabled && !await confirm({
       title: t("settings.disconnectConfirmTitle", { name: runtime.name }),
       message: t("settings.disconnectNativeConfirmMessage", { name: runtime.name }),
@@ -1196,19 +1197,6 @@ export default function SettingsPage() {
 
       <div className="settings-stack">
         <div className="settings-group" id="settings-connections">
-        {/* The background service sits above the connections that depend on it. */}
-        <section className="settings-section" id="settings-service">
-          <header className="settings-section-head">
-            <h3 className="settings-h">{t("settings.serviceSubsection")}</h3>
-            <p className="settings-sech">{t("settings.serviceSharedDesc")}</p>
-          </header>
-          <ServiceSettings
-            status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
-            onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
-            dependents={dependentChips}
-          />
-        </section>
-
         <BackendOverview
           backends={backends} descriptors={backendDescriptors} versions={versionsById} loading={loading || saving || togglingBackend}
           attention={(id) => {
@@ -1232,6 +1220,18 @@ export default function SettingsPage() {
                 onClick={() => void applyBackendConnection({ id, name: id }, false)}>{t("settings.reconnect")}</button>
             </div>
           ))) }
+
+        <section className="settings-section" id="settings-service">
+          <header className="settings-section-head">
+            <h3 className="settings-h">{t("settings.serviceSubsection")}</h3>
+            <p className="settings-sech">{t("settings.serviceSharedDesc")}</p>
+          </header>
+          <ServiceSettings
+            status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
+            onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
+            dependents={dependentChips}
+          />
+        </section>
         </div>
 
         <div className="settings-group" id="settings-general">

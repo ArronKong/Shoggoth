@@ -1,0 +1,428 @@
+{
+  "version": 1,
+  "description": "Frozen synthetic holdout before scoring. Twenty new household/hobby topics, bilingual paraphrases and twelve unknown questions. Not used to choose cutoff or ranking. No user data.",
+  "records": [
+    {
+      "id": "h-aquarium",
+      "text": "家里的水族箱只养淡水鱼，每周六换三分之一的水。"
+    },
+    {
+      "id": "h-flour",
+      "text": "做面包时我使用黑麦粉，发酵需要十二小时。"
+    },
+    {
+      "id": "h-binoculars",
+      "text": "观鸟望远镜是八倍放大，口径四十二毫米。"
+    },
+    {
+      "id": "h-vinyl",
+      "text": "唱片机的针压设为两克，唱片转速是每分钟三十三转。"
+    },
+    {
+      "id": "h-compost",
+      "text": "堆肥箱放在阳台，厨房果皮和落叶混合后放进去。"
+    },
+    {
+      "id": "h-piano",
+      "text": "练钢琴先做十分钟音阶练习，再弹肖邦的作品。"
+    },
+    {
+      "id": "h-telescope",
+      "text": "我的天文望远镜用一百五十毫米口径的反射镜。"
+    },
+    {
+      "id": "h-wool",
+      "text": "羊毛围巾只能用冷水手洗，并平铺晾干。"
+    },
+    {
+      "id": "h-cactus",
+      "text": "仙人掌每月浇水一次，冬季停止施肥。"
+    },
+    {
+      "id": "h-pottery",
+      "text": "制作陶器用红陶土，窑炉最高温度为一千零八十摄氏度。"
+    },
+    {
+      "id": "h-quilt",
+      "text": "My handmade quilt uses cotton batting and a diamond stitching pattern."
+    },
+    {
+      "id": "h-camera",
+      "text": "My film camera is loaded with ISO 400 black-and-white film."
+    },
+    {
+      "id": "h-maple",
+      "text": "I tap the maple tree only when nights freeze and daytime temperatures rise above zero."
+    },
+    {
+      "id": "h-chess",
+      "text": "My preferred chess opening as White is the Queen's Gambit."
+    },
+    {
+      "id": "h-kayak",
+      "text": "The kayak paddle is 220 centimeters long and uses a low-angle blade."
+    },
+    {
+      "id": "h-sewing",
+      "text": "I sew denim with a size 100 needle and polyester thread."
+    },
+    {
+      "id": "h-origami",
+      "text": "For origami cranes I cut square paper with sides of fifteen centimeters."
+    },
+    {
+      "id": "h-sourdough",
+      "text": "My sourdough starter is fed twice daily with equal weights of water and flour."
+    },
+    {
+      "id": "h-trumpet",
+      "text": "I clean the trumpet valves with lukewarm water and never use abrasive brushes."
+    },
+    {
+      "id": "h-jigsaw",
+      "text": "My jigsaw puzzle has two thousand pieces and depicts a mountain waterfall."
+    }
+  ],
+  "queries": [
+    {
+      "query": "鱼缸多久更换多少水？",
+      "relevant": [
+        "h-aquarium"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How often do I change the aquarium water?",
+      "relevant": [
+        "h-aquarium"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "面包用哪种谷物粉，发多久？",
+      "relevant": [
+        "h-flour"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "Which flour and fermentation duration do I use for bread?",
+      "relevant": [
+        "h-flour"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "观察野鸟的光学设备参数是什么？",
+      "relevant": [
+        "h-binoculars"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What magnification and diameter are my birdwatching binoculars?",
+      "relevant": [
+        "h-binoculars"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "播放黑胶唱片的针头力度和旋转速度？",
+      "relevant": [
+        "h-vinyl"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What tracking force and speed do I use for vinyl playback?",
+      "relevant": [
+        "h-vinyl"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "厨余有机物在哪处理，混什么？",
+      "relevant": [
+        "h-compost"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "Where do I compost fruit peels and what do I mix in?",
+      "relevant": [
+        "h-compost"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "我练琴的热身顺序是什么？",
+      "relevant": [
+        "h-piano"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How do I warm up before playing Chopin?",
+      "relevant": [
+        "h-piano"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "观测星空的设备镜面多大，采用什么结构？",
+      "relevant": [
+        "h-telescope"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What optical design and aperture is my astronomy telescope?",
+      "relevant": [
+        "h-telescope"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "毛织围巾怎么清洁和干燥？",
+      "relevant": [
+        "h-wool"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How should my wool scarf be washed and dried?",
+      "relevant": [
+        "h-wool"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "带刺盆栽的浇灌与冬天养护规则？",
+      "relevant": [
+        "h-cactus"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How often do I water the cactus and fertilize in winter?",
+      "relevant": [
+        "h-cactus"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "烧制陶制品的原料与峰值炉温？",
+      "relevant": [
+        "h-pottery"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What clay and peak kiln temperature do I use for pottery?",
+      "relevant": [
+        "h-pottery"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "我的手工被子用什么填充和绗缝图案？",
+      "relevant": [
+        "h-quilt"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What filling and stitch design are in my quilt?",
+      "relevant": [
+        "h-quilt"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "胶片相机里装的感光度和颜色类型？",
+      "relevant": [
+        "h-camera"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "Which film sensitivity and color type is loaded in my camera?",
+      "relevant": [
+        "h-camera"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "什么时候能采集枫树的汁液？",
+      "relevant": [
+        "h-maple"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What temperatures are required for tapping maple sap?",
+      "relevant": [
+        "h-maple"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "我执白棋习惯哪种开局？",
+      "relevant": [
+        "h-chess"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "Which opening do I normally play with the white pieces?",
+      "relevant": [
+        "h-chess"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "皮划艇划桨的长度和桨叶类型是什么？",
+      "relevant": [
+        "h-kayak"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How long is my kayak paddle and what blade style does it use?",
+      "relevant": [
+        "h-kayak"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "缝牛仔布时针号和线材是什么？",
+      "relevant": [
+        "h-sewing"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "Which needle and thread do I use when sewing jeans?",
+      "relevant": [
+        "h-sewing"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "折千纸鹤的纸张形状与尺寸？",
+      "relevant": [
+        "h-origami"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What shape and size of paper do I use to fold cranes?",
+      "relevant": [
+        "h-origami"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "酸种每天喂几次，水粉比例多少？",
+      "relevant": [
+        "h-sourdough"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How frequently and at what ratio is my sourdough starter fed?",
+      "relevant": [
+        "h-sourdough"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "小号活塞怎么清洗，哪种工具不能用？",
+      "relevant": [
+        "h-trumpet"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "How do I clean trumpet valves and which brushes are forbidden?",
+      "relevant": [
+        "h-trumpet"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "我正在拼的拼图有多少块，图案是什么？",
+      "relevant": [
+        "h-jigsaw"
+      ],
+      "group": "zh-paraphrase"
+    },
+    {
+      "query": "What is the piece count and scene of my puzzle?",
+      "relevant": [
+        "h-jigsaw"
+      ],
+      "group": "en-paraphrase"
+    },
+    {
+      "query": "我的医保报销比例是多少？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我父亲的生日是哪天？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "谁是我小学的数学老师？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我们公司第三季度营业收入是多少？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我的护照什么时候过期？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "我应该购买哪只基金？",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "What is my airline loyalty membership number?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "Who won the school election last year?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "What password do I use for the wireless router?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "When is my car insurance renewal due?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "Which university accepted my application?",
+      "relevant": [],
+      "group": "unanswerable"
+    },
+    {
+      "query": "What is the refund policy for my recent hotel booking?",
+      "relevant": [],
+      "group": "unanswerable"
+    }
+  ]
+}

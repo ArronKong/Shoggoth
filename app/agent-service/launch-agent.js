@@ -54,6 +54,14 @@ function normalizeLaunchAgentProxyEnvironment(value = {}) {
   return normalizeProxyEnvironment(value, proxyError);
 }
 
+function normalizeLaunchAgentRuntimePath(value) {
+  if (typeof value !== "string" || !value.isWellFormed()) return null;
+  const entries = [...new Set(value.split(path.delimiter).filter((entry) =>
+    path.isAbsolute(entry) && !/[\x00-\x1f\x7f]/u.test(entry)))];
+  const normalized = entries.join(path.delimiter);
+  return normalized && Buffer.byteLength(normalized, "utf8") <= 32 * 1024 ? normalized : null;
+}
+
 function parseMacSystemProxyOutput(output) {
   if (Buffer.isBuffer(output)) output = output.toString("utf8");
   if (typeof output !== "string" || !output.isWellFormed()
@@ -125,6 +133,7 @@ function buildLaunchAgentPlist(config) {
     .map((value) => `      <string>${xmlEscape(value)}</string>`)
     .join("\n");
   const proxyEnvironment = normalizeLaunchAgentProxyEnvironment(config.proxyEnvironment || {});
+  const runtimePath = normalizeLaunchAgentRuntimePath(config.runtimePath);
   const proxyStrings = Object.entries(proxyEnvironment)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `    <key>${key}</key>\n    <string>${xmlEscape(value)}</string>`)
@@ -150,6 +159,7 @@ ${strings}
     <string>${LAUNCH_AGENT_LABEL}</string>
     <key>SHOGGOTH_BOOTSTRAP_PATH</key>
     <string>${xmlEscape(config.bootstrapPath)}</string>
+${runtimePath ? `    <key>PATH</key>\n    <string>${xmlEscape(runtimePath)}</string>\n` : ""}
 ${proxyStrings ? `${proxyStrings}\n` : ""}  </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -279,6 +289,7 @@ function createLaunchAgentController(options = {}) {
     });
     return {
       ...stablePaths,
+      runtimePath: options.runtimePath,
       proxyEnvironment: normalizeLaunchAgentProxyEnvironment(resolveProxyEnvironment()),
     };
   }

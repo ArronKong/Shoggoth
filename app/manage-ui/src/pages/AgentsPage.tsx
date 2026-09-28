@@ -1606,7 +1606,9 @@ export default function AgentsPage() {
                             ? "agents.nativeRuntimeEnvironment"
                             : "agents.shoggothRuntimeEnvironment",
                           {
-                            runtime: detail.runtime || detail.provider || "CLI",
+                            runtime: detail.runtime === "codex"
+                              ? detail.environmentKind === "native-user" ? "Codex CLI" : "Codex Harness"
+                              : detail.runtime || detail.provider || "CLI",
                             count: detail.sharedAgentCount || 1,
                           },
                         )}

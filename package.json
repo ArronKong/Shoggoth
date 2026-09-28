@@ -1,7 +1,7 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.150",
+  "version": "0.8.151",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "Apache-2.0",
@@ -11,30 +11,34 @@
   },
   "main": "app/bootstrap.js",
   "scripts": {
-    "test:plugins:bundled": "node scripts/plugin-bundled-install-unit.cjs && node scripts/plugin-bearer-management-unit.cjs",
-    "test:plugins": "node scripts/plugin-package-parser-unit.cjs && node scripts/plugin-package-installer-unit.cjs && node scripts/plugin-component-resolver-unit.cjs && node scripts/plugin-skill-facade-unit.cjs && node scripts/plugin-mcp-launch-planner-unit.cjs && node scripts/plugin-capability-policy-unit.cjs && node scripts/plugin-capability-store-unit.cjs && node scripts/plugin-agent-lifecycle-revoke-unit.cjs && node scripts/plugin-connection-auth-unit.cjs && node scripts/plugin-credential-vault-unit.cjs && node scripts/plugin-oauth-session-unit.cjs && node scripts/plugin-mcp-sdk-unit.cjs && node scripts/plugin-tool-contract-unit.cjs && node scripts/plugin-tool-catalog-registry-unit.cjs && node scripts/plugin-data-scope-lease-unit.cjs && node scripts/plugin-mcp-connection-pool-unit.cjs && node scripts/plugin-current-format-unit.cjs && node scripts/plugin-service-candidate-unit.cjs && node scripts/plugin-management-route-unit.cjs && node scripts/plugin-local-workflow-unit.cjs && node scripts/plugin-uninstall-unit.cjs && node scripts/plugin-runtime-tool-service-unit.cjs && node scripts/plugin-runtime-coordinator-unit.cjs && node scripts/plugin-call-approval-unit.cjs && node scripts/plugin-mcp-consent-unit.cjs && node scripts/plugin-consent-route-unit.cjs && node scripts/plugin-external-catalog-unit.cjs && node scripts/plugin-legacy-content-adapter-unit.cjs && node scripts/plugin-legacy-source-unit.cjs && node scripts/plugin-app-session-unit.cjs && node scripts/plugin-app-resource-unit.cjs && node scripts/plugin-app-controller-unit.cjs && node scripts/plugin-app-host-unit.cjs && node scripts/plugin-management-service-flow-unit.cjs && node scripts/plugin-authority-restore-unit.cjs && node scripts/plugin-oauth-config-unit.cjs && node scripts/plugin-oauth-connection-controller-unit.cjs && node scripts/plugin-oauth-management-unit.cjs && node scripts/plugin-bearer-management-unit.cjs && node scripts/plugin-dependency-registry-unit.cjs && node scripts/plugin-dependency-management-unit.cjs && node scripts/plugin-remote-git-fetcher-unit.cjs && node scripts/plugin-local-notes-example-smoke.cjs && node scripts/plugin-data-rollback-unit.cjs && node scripts/plugin-connection-controller-unit.cjs && node scripts/service-maintenance-unit.cjs && node scripts/plugin-rollback-management-unit.cjs && node scripts/plugin-disconnect-management-unit.cjs && node scripts/runtime-mcp-call-binding-unit.cjs && node scripts/plugin-opencode-mcp-chain-unit.cjs && node scripts/plugin-runtime-catalog-pagination-unit.cjs && node scripts/plugin-app-reference-projection-unit.cjs",
+    "test:plugins:bundled": "node scripts/plugin-bundled-resource-filter-unit.cjs && node scripts/plugin-bundled-install-unit.cjs && node scripts/plugin-bearer-management-unit.cjs && node scripts/plugin-airtable-oauth-management-unit.cjs && node scripts/plugin-shopify-oauth-management-unit.cjs && node scripts/plugin-outlook-calendar-graph-unit.cjs && node scripts/plugin-lovable-official-mcp-unit.cjs && node scripts/plugin-verified-mcp-capabilities-unit.cjs && node scripts/plugin-managed-connector-audit-unit.cjs && node scripts/plugin-bundled-skill-dependency-inventory-unit.cjs && node scripts/plugin-codex-security-host-boundary-unit.cjs && node scripts/plugin-bundled-license-evidence.mjs --check",
+    "test:plugins": "node scripts/plugin-package-parser-unit.cjs && node scripts/plugin-package-installer-unit.cjs && node scripts/plugin-component-resolver-unit.cjs && node scripts/plugin-skill-facade-unit.cjs && node scripts/plugin-mcp-launch-planner-unit.cjs && node scripts/plugin-capability-policy-unit.cjs && node scripts/plugin-capability-store-unit.cjs && node scripts/plugin-agent-lifecycle-revoke-unit.cjs && node scripts/plugin-connection-auth-unit.cjs && node scripts/plugin-credential-vault-unit.cjs && node scripts/plugin-oauth-session-unit.cjs && node scripts/plugin-mcp-sdk-unit.cjs && node scripts/plugin-tool-contract-unit.cjs && node scripts/plugin-tool-catalog-registry-unit.cjs && node scripts/plugin-data-scope-lease-unit.cjs && node scripts/plugin-mcp-connection-pool-unit.cjs && node scripts/plugin-current-format-unit.cjs && node scripts/plugin-service-candidate-unit.cjs && node scripts/plugin-management-route-unit.cjs && node scripts/plugin-local-workflow-unit.cjs && node scripts/plugin-uninstall-unit.cjs && node scripts/plugin-runtime-tool-service-unit.cjs && node scripts/plugin-runtime-coordinator-unit.cjs && node scripts/plugin-call-approval-unit.cjs && node scripts/plugin-mcp-consent-unit.cjs && node scripts/plugin-consent-route-unit.cjs && node scripts/plugin-external-catalog-unit.cjs && node scripts/plugin-legacy-content-adapter-unit.cjs && node scripts/plugin-legacy-source-unit.cjs && node scripts/plugin-app-session-unit.cjs && node scripts/plugin-app-resource-unit.cjs && node scripts/plugin-app-controller-unit.cjs && node scripts/plugin-app-host-unit.cjs && node scripts/plugin-management-service-flow-unit.cjs && node scripts/plugin-authority-restore-unit.cjs && node scripts/plugin-shared-authority-backup-fixture.cjs && node scripts/shoggoth-standalone-mcp-rebind-unit.cjs && node scripts/shoggoth-skill-management-query-unit.cjs && node scripts/plugin-oauth-config-unit.cjs && node scripts/plugin-google-workspace-oauth-unit.cjs && node scripts/plugin-oauth-connection-controller-unit.cjs && node scripts/plugin-oauth-management-unit.cjs && node scripts/plugin-bearer-management-unit.cjs && node scripts/plugin-dependency-registry-unit.cjs && node scripts/plugin-dependency-management-unit.cjs && node scripts/plugin-remote-git-fetcher-unit.cjs && node scripts/plugin-local-notes-example-smoke.cjs && node scripts/plugin-data-rollback-unit.cjs && node scripts/plugin-connection-controller-unit.cjs && node scripts/service-maintenance-unit.cjs && node scripts/plugin-rollback-management-unit.cjs && node scripts/plugin-disconnect-management-unit.cjs && node scripts/runtime-mcp-call-binding-unit.cjs && node scripts/plugin-opencode-mcp-chain-unit.cjs && node scripts/plugin-runtime-catalog-pagination-unit.cjs && node scripts/plugin-app-reference-projection-unit.cjs",
     "test:runtime-baseline": "node scripts/runtime-framework-v2-baseline-unit.cjs",
     "postinstall": "node scripts/prepare-native-terminal.cjs",
     "build:manage": "npm --prefix app/manage-ui run build && node scripts/manage-bundle-budget-regression.mjs",
     "fetch:cua": "node scripts/fetch-cua-driver.mjs",
     "fetch:sqlite": "node scripts/fetch-inspiration-sqlite.mjs",
+    "fetch:e5": "node scripts/fetch-e5-model.mjs && node scripts/prepare-e5-runtime.mjs",
     "release:metadata": "node scripts/generate-release-metadata.mjs",
     "start": "electron .",
     "start:dev": "UI_DEV_URL=http://127.0.0.1:5173 electron .",
     "dist": "npm run build:manage && npm run prepare:runtimes && npm run release:metadata && electron-builder --mac",
     "watch:dist": "node scripts/watch-and-dist.mjs",
     "fetch:codex": "node scripts/fetch-codex-runtime.mjs --platform all",
-    "prepare:runtimes": "npm run fetch:codex && npm run fetch:cua && npm run fetch:sqlite",
+    "prepare:runtimes": "npm run fetch:codex && npm run fetch:cua && npm run fetch:sqlite && npm run fetch:e5",
     "licenses:check": "node scripts/generate-release-metadata.mjs --check",
     "export:source": "node scripts/export-public-source.mjs",
-    "test:plugins:ui": "node scripts/plugins-page-ui-regression.mjs",
+    "test:plugins:ui": "node scripts/plugins-page-ui-regression.mjs && node scripts/plugin-mixpanel-detail-ui-regression.mjs && node scripts/skills-scale-ui-regression.mjs",
     "test:plugins:apps": "node scripts/plugin-app-host-electron-smoke.cjs",
     "test:plugins:codex": "node scripts/codex-runtime-mcp-binding-regression.cjs",
     "test:plugins:performance": "node scripts/plugin-performance-baseline.cjs",
-    "test:plugins:chat": "node scripts/plugin-chat-selection-unit.cjs && node scripts/plugin-app-reference-ui-regression.mjs && node scripts/chat-plugin-picker-ui-regression.mjs",
-    "test:plugins:startup": "node scripts/plugin-default-startup-electron.cjs"
+    "test:plugins:chat": "node scripts/plugin-chat-selection-unit.cjs && node scripts/plugin-app-reference-ui-regression.mjs && node scripts/chat-plugin-picker-ui-regression.mjs && node scripts/chat-plugin-restored-selection-ui.mjs && node scripts/chat-external-approval-ui-regression.mjs && node scripts/chat-external-approval-page-ui.mjs",
+    "test:plugins:startup": "node scripts/plugin-default-startup-electron.cjs",
+    "test:plugins:external": "node scripts/plugin-external-call-scope-unit.cjs && node scripts/hermes-history-id-unit.cjs && node scripts/plugin-external-lease-unit.cjs && node scripts/plugin-external-approval-unit.cjs && node scripts/plugin-external-approval-audit-migration-unit.cjs && node scripts/plugin-external-approval-journal-unit.cjs && node scripts/plugin-external-adapter-registrar-unit.cjs && node scripts/plugin-openclaw-adapter-unit.mjs && python3 scripts/plugin-hermes-adapter-unit.py",
+    "test:plugins:external:host": "node scripts/plugin-external-service-flow-unit.cjs && node scripts/plugin-external-adapter-host-fixture.cjs && node scripts/plugin-three-host-shared-service-fixture.cjs && node scripts/plugin-three-host-oauth-account-fixture.cjs && node scripts/plugin-openclaw-real-host-run-fixture.cjs && node scripts/plugin-hermes-real-host-run-fixture.cjs && node scripts/plugin-external-approval-page-service-fixture.cjs && node scripts/plugin-frozen-skill-business-fixture.cjs && node scripts/plugin-frozen-skill-breadth-fixture.cjs"
   },
   "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
     "@modelcontextprotocol/client": "2.1.0",
     "@trycua/cua-driver": "0.22.0",
     "@xterm/headless": "6.0.0",
@@ -45,6 +49,7 @@
     "fflate": "0.8.3",
     "js-yaml": "5.4.2",
     "node-pty": "1.1.0",
+    "onnxruntime-node": "1.22.0",
     "pinyin-pro": "^3.29.3",
     "ws": "^8.21.0"
   },
@@ -56,5 +61,10 @@
   },
   "engines": {
     "node": ">=22.22.3"
+  },
+  "overrides": {
+    "onnxruntime-node": {
+      "adm-zip": "0.6.1"
+    }
   }
 }

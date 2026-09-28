@@ -12,7 +12,7 @@ const {
   lstatIfExists,
   serviceError,
 } = require("./security");
-const { DEFAULT_DOCUMENTS, DEFAULT_TEMPLATE_VERSION,
+const { DEFAULT_DOCUMENTS, DEFAULT_TEMPLATE_VERSION, V3_DEFAULT_AGENTS,
   createDefaultDocuments } = require("./agent-definition-defaults");
 const { BUILTIN_CLI_AGENT_PROFILES } = require("./builtin-cli-profiles");
 
@@ -278,6 +278,20 @@ class AgentDefinitionStore {
             documents: { IDENTITY: current.documents.IDENTITY.replace(/^- Name: DeepSeek Harness$/mu,
               `- Name: ${DEEPSEEK_BUILTIN_PROFILE.name}`) },
             actor: "bootstrap", reason: "builtin-deepseek-name" });
+        }
+      }
+      if (current.documents.AGENTS === V3_DEFAULT_AGENTS) {
+        const defaultHash = sha256(V3_DEFAULT_AGENTS);
+        // A matching current body alone is insufficient: the user may have
+        // edited and later restored the old default intentionally.
+        const untouched = this.history(profileId).every((revision) => (
+          revision.documents.AGENTS.contentHash === defaultHash
+          && !["import", "restore"].includes(revision.actor)
+        ));
+        if (untouched) {
+          return this._commit({ profileId, expectedRevision: current.manifest.revision,
+            documents: { AGENTS: defaults.AGENTS }, actor: "bootstrap",
+            reason: `default-template:v${DEFAULT_TEMPLATE_VERSION}` });
         }
       }
       return current;

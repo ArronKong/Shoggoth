@@ -39,9 +39,9 @@ function fixture() {
 }
 const change = (expectedRevision = 0, maxActive = 50) => ({ expectedRevision, maxActive, startupConcurrency: 8, enabled: true });
 
-test("fresh App persistence is 100/8 with all shipped Runtime features enabled", () => {
+test("fresh App persistence is 32/8 with all shipped Runtime features enabled", () => {
   const { store } = fixture();
-  assert.deepEqual(store.read().nativeConcurrency, { maxActive: 100, startupConcurrency: 8, revision: 0 });
+  assert.deepEqual(store.read().nativeConcurrency, { maxActive: 32, startupConcurrency: 8, revision: 0 });
   const current = projectNativeRuntimeConfig(store.read());
   assert.equal(Object.keys(current.flags).length, 4);
   assert.ok(Object.values(current.flags).every((value) => value === true));
@@ -51,6 +51,33 @@ test("fresh App persistence is 100/8 with all shipped Runtime features enabled",
   assert.equal(saved.token, "unrelated-fixture-token");
   assert.equal(saved.locale, "en");
   assert.ok(Object.isFrozen(projectNativeRuntimeConfig(saved).flags));
+});
+
+test("old untouched 100/8 defaults migrate once; explicit saved choices stay intact", () => {
+  const configPath = path.join(temp, `config-${++serial}.json`);
+  const flags = projectNativeRuntimeConfig(normalizeConfig({})).flags;
+  fs.writeFileSync(configPath, JSON.stringify({ token: "preserved", nativeConcurrency: {
+    revision: 0, maxActive: 100, startupConcurrency: 8 }, runtimeFrameworkFlags: flags }));
+  const store = createConfigStore(configPath);
+  assert.deepEqual(store.read().nativeConcurrency, { revision: 1, maxActive: 32, startupConcurrency: 8 });
+  assert.equal(store.read().runtimeFrameworkFlags.runtimeAdmissionV1, true);
+  assert.equal(store.read().token, "preserved");
+  const saved = store.write({ locale: "en" });
+  assert.equal(saved.nativeConcurrency.revision, 1, "migration persists at the next ordinary config write");
+  assert.equal(JSON.parse(fs.readFileSync(configPath)).nativeConcurrency.maxActive, 32);
+  store.writeNativeRuntimeConfig({ expectedRevision: 1, maxActive: 12, startupConcurrency: 3,
+    flags: { ...flags, runtimeAdmissionV1: false } });
+  const reopened = createConfigStore(configPath);
+  assert.deepEqual(reopened.read().nativeConcurrency, { revision: 2, maxActive: 12, startupConcurrency: 3 });
+  assert.equal(reopened.read().runtimeFrameworkFlags.runtimeAdmissionV1, false);
+
+  const olderPath = path.join(temp, `config-${++serial}.json`);
+  fs.writeFileSync(olderPath, JSON.stringify({ nativeConcurrency: {
+    revision: 0, maxActive: 100, startupConcurrency: 8 },
+    runtimeFrameworkFlags: { ...flags, runtimeAdmissionV1: false } }));
+  const older = createConfigStore(olderPath).read();
+  assert.deepEqual(older.nativeConcurrency, { revision: 1, maxActive: 32, startupConcurrency: 8 });
+  assert.equal(older.runtimeFrameworkFlags.runtimeAdmissionV1, true);
 });
 
 test("first-run ensure persists enabled features while explicit disabled choices survive restart", () => {
@@ -67,7 +94,7 @@ test("first-run ensure persists enabled features while explicit disabled choices
 test("invalid persisted capacity fails closed and keeps its recoverable revision", () => {
   const normal = normalizeConfig({ nativeConcurrency: { maxActive: 0, startupConcurrency: 8, revision: 10 },
     runtimeFrameworkFlags: { runtimeAdmissionV1: true } });
-  assert.equal(normal.nativeConcurrency.maxActive, 100);
+  assert.equal(normal.nativeConcurrency.maxActive, 32);
   assert.equal(normal.nativeConcurrency.revision, 10);
   assert.equal(normal.runtimeFrameworkFlags.runtimeAdmissionV1, false);
 });
@@ -141,8 +168,8 @@ test("lost apply response compensates both core and Service with a newer revisio
   f.fail(1);
   await assert.rejects(() => f.controller.update(change()), { code: "NATIVE_RUNTIME_CONFIG_APPLY_FAILED" });
   assert.deepEqual(f.calls.map((entry) => entry.revision), [1, 2]);
-  assert.equal(f.store.read().nativeConcurrency.maxActive, 100);
-  assert.equal(f.applied().maxActive, 100);
+  assert.equal(f.store.read().nativeConcurrency.maxActive, 32);
+  assert.equal(f.applied().maxActive, 32);
   assert.equal(f.applied().flags.runtimeAdmissionV1, true);
   assert.equal(f.store.read().token, "unrelated-fixture-token");
 });
@@ -153,7 +180,7 @@ test("a stale capacity response cannot claim a configuration was applied", async
   f.registry.getNativeCapacity = async () => ({ ...await readCapacity(), revision: 0 });
   await assert.rejects(() => f.controller.update(change()), { code: "NATIVE_RUNTIME_CONFIG_APPLY_FAILED" });
   assert.deepEqual(f.calls.map((entry) => entry.revision), [1, 2]);
-  assert.equal(f.store.read().nativeConcurrency.maxActive, 100);
+  assert.equal(f.store.read().nativeConcurrency.maxActive, 32);
 });
 
 test("unconfirmed compensation stays explicit and reconnect applies the core authority", async () => {
@@ -161,7 +188,7 @@ test("unconfirmed compensation stays explicit and reconnect applies the core aut
   f.fail(2);
   await assert.rejects(() => f.controller.update(change()), { code: "NATIVE_RUNTIME_CONFIG_ROLLBACK_PENDING" });
   const refreshed = await f.controller.read();
-  assert.equal(refreshed.maxActive, 100);
+  assert.equal(refreshed.maxActive, 32);
   assert.equal(refreshed.revision, 2);
   assert.equal(refreshed.enabled, true);
 });

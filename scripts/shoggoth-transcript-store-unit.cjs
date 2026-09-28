@@ -75,7 +75,45 @@ test("append fsync 后跨重启保留单调 seq/revision", () => {
   } finally { value.cleanup(); }
 });
 
-test("新 Transcript ref 必须携带账号，旧 journal ref 仍可只读", () => {
+test("journal fsync uncertain poisons writes until cold replay resolves the event", () => {
+  let failAfterDurableFsync = false;
+  const injectedFs = new Proxy(fs, { get(target, key) {
+    if (key !== "fsyncSync") return Reflect.get(target, key);
+    return (fd) => {
+      target.fsyncSync(fd);
+      if (failAfterDurableFsync) {
+        failAfterDurableFsync = false;
+        throw new Error("injected post-durable journal fsync failure");
+      }
+    };
+  } });
+  const value = fixture({ fs: injectedFs });
+  try {
+    let store = value.create();
+    store.open();
+    append(store, { id: "first", text: "first" });
+    const firstDigest = store.getIndexSnapshot("profile-1", "session-1").sourceIdentity;
+    failAfterDurableFsync = true;
+    assert.throws(() => append(store, { id: "uncertain", text: "uncertain" }),
+      (error) => error.code === "TRANSCRIPT_COMMIT_UNCERTAIN"
+        && error.committedUncertain === true);
+    assert.throws(() => append(store, { id: "no-retry", text: "must not duplicate seq" }),
+      (error) => error.code === "TRANSCRIPT_COMMIT_UNCERTAIN");
+    store.close();
+
+    store = value.create();
+    store.open();
+    assert.deepEqual(store.listEvents("profile-1", "session-1").map((event) => event.id),
+      ["first", "uncertain"], "cold replay recovers the complete durable record");
+    const restored = store.getIndexSnapshot("profile-1", "session-1");
+    assert.equal(restored.revision, 2);
+    assert.equal(store.getIndexPrefixDigest("profile-1", "session-1", 1), firstDigest);
+    assert.notEqual(restored.sourceIdentity, firstDigest);
+    assert.equal(append(store, { id: "after-replay", text: "third" }).seq, 3);
+  } finally { value.cleanup(); }
+});
+
+test("Transcript ref 必须携带账号，旧 journal ref 即使校验和有效也拒绝", () => {
   const value = fixture();
   try {
     let store = value.create();
@@ -106,19 +144,21 @@ test("新 Transcript ref 必须携带账号，旧 journal ref 仍可只读", () 
       value.paths.agentsDir, "profile-1", "transcripts", "session-1", "events.jsonl",
     );
     const record = JSON.parse(fs.readFileSync(log, "utf8").trim());
+    const currentRecord = structuredClone(record);
     delete record.payload.runtimeRef.runtimeAccountId;
     record.checksum = checksumRecord(record);
     fs.writeFileSync(log, `${stableJson(record)}\n`, { mode: 0o600 });
 
     store = value.create();
     store.open();
-    const legacy = store.listEvents("profile-1", "session-1")[0];
-    assert.deepEqual(legacy.runtimeRef, {
-      runtime: "codex",
-      runtimeProfileId: "runtime-profile-1",
-      sessionId: "runtime-session-1",
-      turnId: "runtime-turn-1",
-    });
+    assert.throws(() => store.listEvents("profile-1", "session-1"),
+      (error) => error.code === "TRANSCRIPT_EVENT_INVALID");
+    store.close();
+
+    fs.writeFileSync(log, `${stableJson(currentRecord)}\n`, { mode: 0o600 });
+    store = value.create();
+    store.open();
+    assert.deepEqual(store.listEvents("profile-1", "session-1")[0].runtimeRef, runtimeRef);
   } finally { value.cleanup(); }
 });
 
@@ -175,6 +215,42 @@ test("event id 幂等重放返回原事件，输入变化 fail closed", () => {
     assert.equal(store.listEvents("profile-1", "session-1").length, 1);
     assert.throws(() => append(store, { ...input, text: "changed" }),
       (error) => error.code === "TRANSCRIPT_EVENT_CONFLICT");
+  } finally { value.cleanup(); }
+});
+
+test("运行中原始 journal 丢失或等长篡改时不再读取缓存事件", () => {
+  const value = fixture();
+  try {
+    const store = value.create();
+    store.open();
+    const event = append(store, { id: "cached-source", text: "用户原话" });
+    const log = path.join(value.paths.agentsDir, "profile-1", "transcripts", "session-1", "events.jsonl");
+    const original = fs.readFileSync(log);
+    let replays = 0;
+    const repairTail = store._repairPartialTail.bind(store);
+    store._repairPartialTail = (...args) => { replays += 1; return repairTail(...args); };
+    assert.equal(store.getEvent("profile-1", "session-1", event.id).content.text, "用户原话");
+    assert.equal(store.listEventsPage("profile-1", "session-1", 0, 1).length, 1);
+    assert.equal(replays, 0, "正常缓存读取不应重新加载整份 journal");
+    fs.unlinkSync(log);
+    for (const read of [
+      () => store.getEvent("profile-1", "session-1", event.id),
+      () => store.listEvents("profile-1", "session-1"),
+      () => store.listEventsPage("profile-1", "session-1", 0, 1),
+      () => store.hasUserEventForRun("profile-1", "session-1", "run-1"),
+      () => append(store, { id: "after-loss", text: "不应追加" }),
+    ]) assert.throws(read, (error) => error.code === "TRANSCRIPT_SOURCE_CHANGED");
+    assert.equal(fs.existsSync(log), false, "缓存失效时不能重新创建缺失的 journal");
+    fs.writeFileSync(log, original, { mode: 0o600 });
+    store.close(); store.open();
+    assert.equal(store.getEvent("profile-1", "session-1", event.id).content.text, "用户原话");
+    const corrupt = Buffer.from(original);
+    const offset = corrupt.indexOf(Buffer.from("event.append"));
+    assert.ok(offset >= 0);
+    corrupt[offset] = 0x78;
+    fs.writeFileSync(log, corrupt, { mode: 0o600 });
+    assert.throws(() => store.getEvent("profile-1", "session-1", event.id),
+      (error) => error.code === "TRANSCRIPT_SOURCE_CHANGED");
   } finally { value.cleanup(); }
 });
 

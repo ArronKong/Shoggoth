@@ -218,4 +218,22 @@ assert.equal(submissions, 1, 'compact approval keeps the shared duplicate-submit
 assert.ok(renderer.root.findAllByType('button').every(button => button.props.disabled));
 await act(async () => settle());
 act(() => renderer.unmount());
+const inputEntry = { id: 'input', version: 1, requestId: 'input', runId: 'run', kind: 'user_input',
+  title: 'Need input', message: 'Which coffee first?', approvalChoices: [], fields: [{
+    id: 'coffee', type: 'choice', label: 'Priority', description: '', required: true, secret: false,
+    options: [{ label: 'handbrew', value: 'handbrew' }, { label: 'espresso', value: 'espresso' }],
+  }] };
+let inputResponse;
+act(() => { renderer = create(React.createElement(ChatPromptCard, { entry: inputEntry, compactInput: true,
+  onRespond: (_prompt, response) => { inputResponse = response; } })); });
+const content = renderer.root.findByProps({ className: 'chat-prompt__content' });
+const actions = renderer.root.findByProps({ className: 'chat-prompt__row chat-prompt__actions' });
+assert.ok(visibleText(content).includes('handbrew') && visibleText(content).includes('espresso'));
+assert.ok(!visibleText(content).includes('chat.promptSubmit'), 'answer options stay in the colored content');
+assert.ok(visibleText(actions).includes('chat.promptSubmit') && visibleText(actions).includes('common.cancel'),
+  'submit and cancel sit outside the colored content');
+act(() => content.findAllByType('button').find(button => visibleText(button) === 'handbrew').props.onClick());
+await act(async () => actions.findAllByType('button')[0].props.onClick());
+assert.deepEqual(JSON.parse(JSON.stringify(inputResponse)), { action: 'submit', answers: { coffee: 'handbrew' } });
+act(() => renderer.unmount());
 console.log('PASS rooting card: trajectory events, burst coalescing, shared observers, exact-run isolation, viewport cleanup, approval content parity and submission guard');

@@ -1006,6 +1006,107 @@ header.page-head {
 /* Skills（R359 改版）：去分类、扁平一张网格 + 右侧常驻详情，卡片与详情栏的尺寸
    规格照 CLI 页（styles.css 的 .cli-body/.cli-grid/.cli-card/.cli-drawer 段）。
    两页的类名各自独立——CLI 页调版式时不该顺带改这里。停用状态依靠表面而非整行透明。 */
+.management-page.skills-page .standalone-mcp-repair {
+  flex: 0 1 auto;
+  max-height: min(52vh, 520px);
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 18px;
+  background: var(--ui-surface-1);
+}
+
+.management-page.skills-page .standalone-mcp-head,
+.management-page.skills-page .standalone-mcp-actions,
+.management-page.skills-page .standalone-mcp-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.management-page.skills-page .standalone-mcp-head h2,
+.management-page.skills-page .standalone-mcp-editor h3 {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.management-page.skills-page .standalone-mcp-head p,
+.management-page.skills-page .standalone-mcp-editor p {
+  margin: 6px 0 0;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.management-page.skills-page .standalone-mcp-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.management-page.skills-page .standalone-mcp-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 12px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+  cursor: pointer;
+}
+
+.management-page.skills-page .standalone-mcp-item.is-selected {
+  border-color: var(--ui-focus);
+}
+
+.management-page.skills-page .standalone-mcp-item strong,
+.management-page.skills-page .standalone-mcp-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-page.skills-page .standalone-mcp-item span {
+  color: var(--ui-text-2);
+  font-size: 11px;
+}
+
+.management-page.skills-page .standalone-mcp-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-hairline);
+}
+
+.management-page.skills-page .standalone-mcp-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.management-page.skills-page .standalone-mcp-fields > :last-child {
+  grid-column: 1 / -1;
+}
+
+.management-page.skills-page .standalone-mcp-pagination {
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+@media (max-width: 600px) {
+  .management-page.skills-page .standalone-mcp-fields { grid-template-columns: minmax(0, 1fr); }
+}
+
 .management-page.skills-page .skill-body {
   display: flex;
   gap: 16px;
@@ -1032,6 +1133,16 @@ header.page-head {
   gap: 16px;
   align-content: start;
   min-width: 0;
+}
+
+.management-page.skills-page .skill-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px 4px 8px;
+  color: var(--ui-text-2);
+  font-size: 13px;
 }
 
 /* 尺寸同 `.cli-card`：min-height 94 + 纯横向内边距 + 居中，不给竖向 padding。 */
@@ -1412,9 +1523,13 @@ header.page-head {
   }
 
   .management-page.skills-page .skill-detail {
+    /* A paged grid can contain 100 cards. Keep the opened detail ahead of it
+       on narrow windows, with its own bounded scroll area. */
+    order: -1;
     flex: 0 0 auto;
     width: 100%;
     max-width: none;
+    max-height: min(75vh, 720px);
   }
 }
 

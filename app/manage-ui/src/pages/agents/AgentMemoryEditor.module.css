@@ -26,7 +26,7 @@
 .text:focus { outline: 1px solid var(--ui-text-1); outline-offset: 1px; }
 .actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
 .actions select { margin-right: auto; max-width: 100%; }
-.actions button, .actions select, .more, .error button {
+.actions button, .actions select, .more, .error button, .detail button, .candidateHeading button {
   padding: 7px 16px;
   border: 1px solid var(--ui-hairline);
   border-radius: 16px;
@@ -36,6 +36,20 @@
   font-size: 13px;
   cursor: pointer;
 }
-.actions button:disabled, .more:disabled { opacity: .4; cursor: default; }
+.actions button:disabled, .more:disabled, .candidateHeading button:disabled { opacity: .4; cursor: default; }
 .more { display: block; margin: 20px auto 0; }
 .error { margin-bottom: 16px; color: var(--danger, #b53232); font-size: 13px; overflow-wrap: anywhere; }
+.detail { margin: 18px 0; padding: 14px; border: 1px solid var(--ui-hairline); border-radius: 12px; font-size: 13px; overflow-wrap: anywhere; }
+.detail p { margin: 0 0 10px; }
+.detail blockquote { margin: 8px 0 12px; padding-left: 12px; border-left: 2px solid var(--ui-hairline); white-space: pre-wrap; }
+.candidates { margin: 20px 0 24px; padding: 16px; border: 1px solid var(--ui-hairline); border-radius: 14px; }
+.candidateHeading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.candidateHeadingActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.candidateHeading h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.candidateHeading .hint { margin-bottom: 8px; }
+.candidateUsage, .candidateSource { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.candidateUsage { margin: 0 0 8px; }
+.candidate { padding: 14px 0; border-top: 1px solid var(--ui-hairline); }
+.candidateContent { margin: 0 0 10px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.candidateSource { margin: 0; }
+.sourcePreview { margin: 12px 0 0; padding: 10px 12px; border-left: 2px solid var(--ui-hairline); background: var(--ui-surface-1); border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }

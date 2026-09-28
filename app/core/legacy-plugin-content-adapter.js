@@ -20,6 +20,17 @@ const SKILL_NAME = /^(?!.*--)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u;
 const STANDARD_SKILL_FIELDS = new Set(["name", "description", "license", "compatibility", "metadata"]);
 const LEGACY_CONTROL_FILES = new Set([".mcp.json", ".app.json", ".lsp.json", "settings.json",
   ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]);
+// Only these exact frozen declarations may become Shoggoth-owned Desktop OAuth
+// candidates. Their original callback, client secret placeholders and union of
+// scopes are not carried over or represented as equivalent authorization.
+const FROZEN_GOOGLE_MCP = Object.freeze({
+  gmail: Object.freeze({ endpoint: "https://gmailmcp.googleapis.com/mcp/v1",
+    declarationDigest: "bbf8ab405f1163ff1d94333011a30e2abe5be80d484418cd0b77181584fc24e7" }),
+  "google-calendar": Object.freeze({ endpoint: "https://calendarmcp.googleapis.com/mcp/v1",
+    declarationDigest: "7a670a2ad93f430d176698941ad136c1286d502f26079f8661a3fb44dcae0cb0" }),
+  "google-drive": Object.freeze({ endpoint: "https://drivemcp.googleapis.com/mcp/v1",
+    declarationDigest: "5e231b20fa17af688c689de0bda6905ea5225cf8e34d4e9627fad9c03e73919f" }),
+});
 const ajv = new Ajv2020({ strict: true });
 const validateManifest = ajv.compile(manifestSchema);
 const validateMcp = ajv.compile(mcpSchema);
@@ -163,8 +174,14 @@ function stringMap(value, format, type) {
   }
   return result;
 }
-function mcpEntry(value, format, files, diagnostics, name, bundledGithub = false) {
+function mcpEntry(value, format, files, diagnostics, name, bundledGithub = false,
+  bundledCodex = false, bundledOAuthPackage = null, bundledCodexSecurity = false) {
   if (!own(value)) fail("LEGACY_MCP_ENTRY_INVALID");
+  // Removing host-only fields must not turn this frozen, thread-owned scan
+  // service into an ordinary stdio MCP candidate.
+  if (bundledCodexSecurity && name === "codex-security") {
+    fail("LEGACY_MCP_FIELD_UNSUPPORTED");
+  }
   // The pinned GitHub bundle declares a host environment variable for its PAT.
   // Import only its fixed endpoint; Shoggoth connects it through a separate
   // encrypted, user-approved account flow and never reads that environment.
@@ -176,11 +193,63 @@ function mcpEntry(value, format, files, diagnostics, name, bundledGithub = false
     value = { type: value.type, url: value.url };
     diagnostics.push({ scope: "mcp-server", name, reasonCode: "CODEX_BEARER_CONNECTION_REQUIRED" });
   }
+  let oauthResource = null;
+  // The pinned declarations contain public-client placeholders, not usable
+  // authority. A registered client and verified identity remain Service-owned.
+  const managedAirtableOAuth = bundledOAuthPackage === "airtable" && name === "airtable"
+    && Object.keys(value).sort().join(",") === "oauth,type,url"
+    && value.type === "http" && value.url === "https://mcp.airtable.com/mcp"
+    && own(value.oauth) && Object.keys(value.oauth).join(",") === "client_id"
+    && value.oauth.client_id === "<AIRTABLE_PUBLIC_CLIENT_ID>";
+  const managedShopifyOAuth = bundledOAuthPackage === "shopify" && name === "shopify"
+    && Object.keys(value).sort().join(",") === "oauth,oauth_resource,type,url"
+    && value.type === "http" && value.url === "https://setup.shopify.com/mcp"
+    && value.oauth_resource === value.url
+    && own(value.oauth) && Object.keys(value.oauth).join(",") === "client_id"
+    && value.oauth.client_id === "<SHOPIFY_PUBLIC_CLIENT_ID>";
+  const google = FROZEN_GOOGLE_MCP[bundledOAuthPackage];
+  const managedGoogleDesktopOAuth = google && name === bundledOAuthPackage
+    && value.type === "http" && value.url === google.endpoint
+    && files.has(".mcp.json") && digest(files.get(".mcp.json").bytes) === google.declarationDigest
+    && (() => {
+      try {
+        const pinned = JSON.parse(decoder.decode(files.get(".mcp.json").bytes));
+        return canonical(pinned.mcpServers?.[name]) === canonical(value);
+      } catch { return false; }
+    })();
+  if (managedAirtableOAuth || managedShopifyOAuth || managedGoogleDesktopOAuth) {
+    oauthResource = value.url;
+    value = { type: value.type, url: value.url };
+    diagnostics.push({ scope: "mcp-server", name,
+      reasonCode: managedGoogleDesktopOAuth ? "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED"
+        : "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED" });
+  }
+  if (bundledCodex && value.type === "http" && Object.hasOwn(value, "oauth_resource")) {
+    const rawResource = normalizedValue(value.oauth_resource, format);
+    let resource;
+    let endpoint;
+    try { resource = new URL(rawResource); endpoint = new URL(value.url); }
+    catch { fail("LEGACY_MCP_ENTRY_INVALID"); }
+    if (resource.protocol !== "https:" || endpoint.protocol !== "https:"
+      || resource.origin !== endpoint.origin || resource.username || resource.password
+      || resource.search || resource.hash || Buffer.byteLength(rawResource) > 2048) {
+      fail("LEGACY_MCP_ENTRY_INVALID");
+    }
+    oauthResource = resource.href;
+    value = { ...value };
+    delete value.oauth_resource;
+  }
   const type = value.type === undefined && typeof value.command === "string" ? "stdio" : value.type;
   const presentation = format === "codex-plugin" ? ["note", "title", "description", "icons"] : [];
   const fields = type === "stdio" ? ["type", "command", "args", "env", "cwd"]
     : type === "http" ? ["type", "url", "headers", "_meta"] : null;
   if (!fields) fail("LEGACY_TRANSPORT_UNSUPPORTED");
+  // OAuth client identity, requested scopes, redirect port, inherited host
+  // environment and timeout limits are execution constraints. The standard
+  // package/parser currently has no contract for carrying all of them into
+  // Shoggoth's independently registered provider or bounded MCP launcher.
+  // Keep these entries unconverted; treating them as presentation metadata
+  // would silently change the source's authorization or execution boundary.
   if (Object.keys(value).some((field) => !fields.includes(field) && !presentation.includes(field))) {
     fail("LEGACY_MCP_FIELD_UNSUPPORTED");
   }
@@ -236,7 +305,9 @@ function mcpEntry(value, format, files, diagnostics, name, bundledGithub = false
       reasonCode: "LEGACY_PRESENTATION_METADATA_OMITTED" });
   }
   if (!validateMcp({ $schema: mcpSchema.$id, mcpServers: { [name]: result } })) fail("LEGACY_MCP_ENTRY_INVALID");
-  return result;
+  if (oauthResource !== null) diagnostics.push({ scope: "mcp-server", name,
+    reasonCode: "CODEX_OAUTH_RESOURCE_CONNECTION_REQUIRED" });
+  return { spec: result, oauthResource };
 }
 
 function convertLegacyPluginContents(input) {
@@ -294,6 +365,7 @@ function convertLegacyPluginContents(input) {
     }
   }
   const mcpServers = {};
+  const mcpOAuthResources = {};
   if (selected.has("mcp-servers")) {
     const sources = [];
     if (files.has(".mcp.json")) {
@@ -317,12 +389,19 @@ function convertLegacyPluginContents(input) {
     if (merged.size > 256) fail("LEGACY_MCP_CONFIG_INVALID");
     for (const [name, value] of merged) {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(name)
-        || ["constructor", "prototype"].includes(name)) {
+        || ["__proto__", "constructor", "prototype"].includes(name)) {
         diagnostics.push({ scope: "mcp-server", reasonCode: "LEGACY_MCP_NAME_UNREPRESENTABLE" });
         continue;
       }
-      try { mcpServers[name] = mcpEntry(value, input.format, files, diagnostics, name,
-        bundledCodex && manifest.name === "github"); }
+      try {
+        const converted = mcpEntry(value, input.format, files, diagnostics, name,
+          bundledCodex && manifest.name === "github", bundledCodex,
+          bundledCodex && ["airtable", "shopify", "gmail", "google-calendar", "google-drive"]
+            .includes(manifest.name) ? manifest.name : null,
+          manifest.name === "codex-security" && value?.command === "./scripts/launch_codex_security_mcp");
+        mcpServers[name] = converted.spec;
+        if (converted.oauthResource !== null) mcpOAuthResources[name] = converted.oauthResource;
+      }
       catch (error) { diagnostics.push({ scope: "mcp-server", name, reasonCode: error.code || "LEGACY_MCP_ENTRY_INVALID" }); }
     }
   }
@@ -340,6 +419,9 @@ function convertLegacyPluginContents(input) {
       delete mcpServers[name];
       diagnostics.push({ scope: "mcp-server", name, reasonCode: "LEGACY_MCP_DEPENDENCY_NOT_IMPORTED" });
     }
+  }
+  if (Object.keys(mcpOAuthResources).length) {
+    manifest.extensions = { shoggoth: { mcpOAuthResources } };
   }
   const generatedFiles = [{ path: "plugin.json", content: `${JSON.stringify(manifest, null, 2)}\n`, executable: false },
     ...normalizedSkillFiles];

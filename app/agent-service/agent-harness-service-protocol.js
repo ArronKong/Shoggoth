@@ -2,6 +2,7 @@
 
 const { serviceError } = require("./security");
 const { validateMemoryItem } = require("./memory-store");
+const { validCandidate } = require("./memory-candidate-store");
 const { validateEvent } = require("./transcript-store");
 
 const AGENT_HARNESS_METHODS = Object.freeze([
@@ -13,6 +14,11 @@ const AGENT_HARNESS_METHODS = Object.freeze([
   "harness.definition.import.preview",
   "harness.definition.import.commit",
   "harness.memory.list",
+  "harness.memory.explain",
+  "harness.memory.candidates.list",
+  "harness.memory.candidates.accept",
+  "harness.memory.candidates.acceptMany",
+  "harness.memory.candidates.reject",
   "harness.memory.create",
   "harness.memory.update",
   "harness.memory.delete",
@@ -22,12 +28,16 @@ const AGENT_HARNESS_METHODS = Object.freeze([
   "harness.tools.list",
   "harness.tools.permission.set",
   "harness.skills.list",
+  "harness.skills.query",
   "harness.skills.preview",
   "harness.skills.install",
   "harness.skills.uninstall",
   "harness.skills.enable",
   "harness.skills.global.set",
   "harness.skills.usage",
+  "harness.mcp.list",
+  "harness.mcp.rebind",
+  "harness.mcp.activate",
   "harness.computer.status",
 ]);
 const METHOD_SET = new Set(AGENT_HARNESS_METHODS);
@@ -47,6 +57,18 @@ const PUBLIC_MESSAGES = Object.freeze({
   MEMORY_NOT_FOUND: "记忆不存在",
   MEMORY_SECRET_REJECTED: "记忆拒绝保存敏感信息",
   MEMORY_INVALID: "记忆内容无效，请填写不超过 8 KB 的有效文本",
+  MEMORY_COMMIT_UNCERTAIN: "记忆写入结果不确定；请重启 Shoggoth 后核对记忆状态，确认前不要重试",
+  MEMORY_CANDIDATE_UNAVAILABLE: "候选审核暂不可用",
+  MEMORY_CANDIDATE_CORRUPT: "候选审核数据需要修复",
+  MEMORY_CANDIDATE_INVALID: "候选审核参数无效",
+  MEMORY_CANDIDATE_NOT_FOUND: "候选不存在或已处理",
+  MEMORY_CANDIDATE_SOURCE_UNAVAILABLE: "候选来源已不可用，请重新审阅",
+  MEMORY_CANDIDATE_CONFLICT: "候选与当前记忆冲突，请重新审阅",
+  MEMORY_CANDIDATE_REVISION_CONFLICT: "候选列表已变化，请刷新后重试",
+  MEMORY_CANDIDATE_CAPACITY: "候选队列已满",
+  MEMORY_CANDIDATE_COMMIT_UNCERTAIN: "记忆可能已写入，但审核回执未确认；请重新加载核对后再操作",
+  MEMORY_REVISION_CONFLICT: "记忆已变化，请刷新后重试",
+  TRANSCRIPT_COMMIT_UNCERTAIN: "会话记录写入结果不确定；请重启 Shoggoth 后核对会话状态，确认前不要重试",
   TOOL_PERMISSION_REVISION_CONFLICT: "工具权限已被其他窗口更新",
   SKILL_REGISTRY_REVISION_CONFLICT: "Skill 列表已变化，请刷新后重试",
   SKILL_PROFILE_REVISION_CONFLICT: "Agent 的 Skill 配置已变化，请刷新后重试",
@@ -61,6 +83,14 @@ const PUBLIC_MESSAGES = Object.freeze({
   SKILL_INELIGIBLE: "当前 Agent 的工具或 Runtime 能力不满足该 Skill 的依赖",
   SKILL_SECRET_REJECTED: "Skill 包包含敏感信息，已拒绝安装",
   SKILL_VERSION_CONFLICT: "同一 Skill 版本的内容冲突",
+  MCP_REGISTRY_REVISION_CONFLICT: "MCP 列表已变化，请刷新后重试",
+  MCP_SERVER_NOT_FOUND: "MCP Server 不存在",
+  MCP_SERVER_ALREADY_ENABLED: "MCP Server 已启用",
+  MCP_SERVER_INVALID: "MCP Server 配置无效",
+  MCP_SERVER_PATH_INVALID: "MCP 启动路径或工作目录不受信任",
+  MCP_SERVER_COMMAND_FORBIDDEN: "MCP 启动命令不允许使用",
+  MCP_SERVER_PROBE_FAILED: "MCP Server 探测失败，仍保持停用",
+  MCP_REBIND_REQUIRED: "请重新设置 MCP 启动路径后再启用",
   SKILL_PROJECTION_COLLISION: "Codex Skill 投影目录已被其他来源占用",
   SKILL_PROJECTION_INVALID: "Skill 无法安全投影到 Codex Runtime",
   TRANSCRIPT_EVENT_NOT_FOUND: "会话事件不存在",
@@ -109,6 +139,49 @@ function validPage(value, itemValidator, withRevision = false) {
 }
 function validMemoryItem(value) {
   try { validateMemoryItem(value); return true; } catch { return false; }
+}
+function validReviewCandidate(value) {
+  return id(value?.profileId) && validCandidate(value, value.profileId);
+}
+function validCandidateUsage(value) {
+  return exact(value, ["day", "calls", "inputTokens", "outputTokens"])
+    && (value.day === null || /^\d{4}-\d{2}-\d{2}$/u.test(value.day))
+    && [value.calls, value.inputTokens, value.outputTokens].every((count) => integer(count));
+}
+function validMemoryEvidence(value) {
+  if (!(own(value) && ["verified_quote", "related_message", "verified_origin",
+    "legacy_unverified", "unavailable"].includes(value.status)
+    && (value.origin === undefined || ["conversation", "ui_create", "ui_edit", "import"].includes(value.origin))
+    && (value.reason === undefined || text(value.reason, 128, false))
+    && (value.memoryRevision === undefined || integer(value.memoryRevision, 1))
+    && (value.sessionId === undefined || id(value.sessionId))
+    && (value.eventId === undefined || id(value.eventId))
+    && (value.quote === undefined || value.quote === null || text(value.quote, 2048, false))
+    && (value.quoteStartUtf16 === undefined || integer(value.quoteStartUtf16))
+    && (value.quoteEndUtf16 === undefined || integer(value.quoteEndUtf16))
+    && (value.occurredAt === undefined || integer(value.occurredAt))
+    && (value.importFile === undefined || (exact(value.importFile, ["name", "sha256"])
+      && (value.importFile.name === null || (text(value.importFile.name, 255, false)
+        && /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,127}\.(?:md|txt|json)$/iu.test(value.importFile.name)
+        && !value.importFile.name.includes("..")))
+      && hash(value.importFile.sha256))))) return false;
+  if (value.status === "verified_quote") {
+    return value.origin === "conversation" && integer(value.memoryRevision, 1)
+      && id(value.sessionId) && id(value.eventId)
+      && text(value.quote, 2048, false) && integer(value.quoteStartUtf16)
+      && integer(value.quoteEndUtf16, value.quoteStartUtf16 + 1)
+      && integer(value.occurredAt);
+  }
+  if (value.status === "related_message") {
+    return value.origin === "conversation" && integer(value.memoryRevision, 1)
+      && id(value.sessionId) && id(value.eventId) && value.quote === null;
+  }
+  if (value.status === "verified_origin") {
+    return ["ui_create", "ui_edit", "import"].includes(value.origin)
+      && integer(value.memoryRevision, 1) && value.quote === null
+      && (value.origin === "import" ? value.importFile !== undefined : value.importFile === undefined);
+  }
+  return text(value.reason, 128, false);
 }
 function validTranscriptEvent(value) {
   try { validateEvent(value); return true; } catch { return false; }
@@ -172,6 +245,12 @@ function validateAgentHarnessParams(method, params) {
   } else if (method === "harness.skills.list") {
     valid = exact(params, ["profileId", "cursor", "limit"])
       && integer(params.cursor, 0) && integer(params.limit, 1, 100);
+  } else if (method === "harness.skills.query") {
+    valid = exact(params, ["profileId", "query", "status", "pageIndex", "limit", "expectedRevision"])
+      && text(params.query, 256) && !/[\x00-\x1f\x7f]/u.test(params.query)
+      && ["", "on", "off"].includes(params.status)
+      && integer(params.pageIndex, 0, 100_000) && integer(params.limit, 1, 100)
+      && (params.expectedRevision === null || hash(params.expectedRevision));
   } else if (method === "harness.skills.preview") {
     valid = exact(params, ["profileId", "skillId", "source", "version", "cursor", "maxBytes"])
       && id(params.skillId) && ["builtin", "user"].includes(params.source)
@@ -191,6 +270,21 @@ function validateAgentHarnessParams(method, params) {
         ? params.source === "user" : params.source === "builtin")
       && text(params.version, 128, false) && typeof params.enabled === "boolean"
       && integer(params.expectedRevision, 1);
+  } else if (method === "harness.mcp.list") {
+    valid = exact(params, ["profileId", "cursor", "limit"])
+      && integer(params.cursor, 0, 64) && integer(params.limit, 1, 20);
+  } else if (method === "harness.mcp.rebind") {
+    valid = exact(params, ["profileId", "id", "expectedRevision", "command", "cwd", "args"])
+      && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(params.id)
+      && integer(params.expectedRevision, 1)
+      && text(params.command, 4096, false) && text(params.cwd, 4096, false)
+      && Array.isArray(params.args) && params.args.length <= 64
+      && params.args.every((arg) => text(arg, 4096));
+  } else if (method === "harness.mcp.activate") {
+    valid = exact(params, ["profileId", "id", "expectedRevision", "activationToken"])
+      && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(params.id)
+      && integer(params.expectedRevision, 1)
+      && /^[a-f0-9-]{36}$/u.test(params.activationToken);
   } else if (method === "harness.transcript.sessions") {
     valid = exact(params, ["profileId", "cursor", "limit"])
       && integer(params.cursor, 0) && integer(params.limit, 1, 100);
@@ -217,6 +311,26 @@ function validateAgentHarnessParams(method, params) {
       && (params.status === null || ["candidate", "active", "superseded", "deleted"].includes(params.status))
       && (params.scope === null || ["user", "agent", "project", "workspace"].includes(params.scope))
       && integer(params.cursor, 0) && integer(params.limit, 1, 100);
+  } else if (method === "harness.memory.explain") {
+    valid = exact(params, ["profileId", "id"]) && id(params.id);
+  } else if (method === "harness.memory.candidates.list") {
+    valid = exact(params, ["profileId", "status", "cursor", "limit", "expectedRevision"])
+      && ["pending", "accepted", "rejected", "all"].includes(params.status)
+      && integer(params.cursor) && integer(params.limit, 1, 100)
+      && (params.expectedRevision === null || integer(params.expectedRevision));
+  } else if (method === "harness.memory.candidates.accept") {
+    valid = exact(params, ["profileId", "candidateId", "expectedRevision", "expectedMemoryRevision"])
+      && id(params.candidateId) && integer(params.expectedRevision)
+      && integer(params.expectedMemoryRevision);
+  } else if (method === "harness.memory.candidates.acceptMany") {
+    valid = exact(params, ["profileId", "candidateIds", "expectedRevision", "expectedMemoryRevision"])
+      && Array.isArray(params.candidateIds) && params.candidateIds.length >= 1
+      && params.candidateIds.length <= 50 && params.candidateIds.every(id)
+      && new Set(params.candidateIds).size === params.candidateIds.length
+      && integer(params.expectedRevision) && integer(params.expectedMemoryRevision);
+  } else if (method === "harness.memory.candidates.reject") {
+    valid = exact(params, ["profileId", "candidateId", "expectedRevision"])
+      && id(params.candidateId) && integer(params.expectedRevision);
   } else if (method === "harness.memory.create") {
     valid = exact(params, ["profileId", "content", "scope", "expectedRevision"])
       && text(params.content, 8 * 1024, false) && params.content.trim().length > 0
@@ -247,7 +361,7 @@ function validateAgentHarnessParams(method, params) {
   return structuredClone(params);
 }
 
-function validateAgentHarnessResult(method, result) {
+function validateAgentHarnessResult(method, result, params = null) {
   if (!METHOD_SET.has(method) || !own(result)) throw protocolError("HARNESS_RESPONSE_INVALID");
   let encoded;
   try { encoded = JSON.stringify(result); } catch { throw protocolError("HARNESS_RESPONSE_INVALID"); }
@@ -273,6 +387,42 @@ function validateAgentHarnessResult(method, result) {
         && typeof change.changed === "boolean" && hash(change.beforeHash) && hash(change.afterHash));
   } else if (method === "harness.memory.list") {
     valid = validPage(result, validMemoryItem, true);
+  } else if (method === "harness.memory.explain") {
+    valid = own(result) && validMemoryItem(result.item) && validMemoryEvidence(result.evidence);
+  } else if (method === "harness.memory.candidates.list") {
+    valid = own(result) && integer(result.revision) && Array.isArray(result.items)
+      && result.items.length <= 100 && result.items.every(validReviewCandidate)
+      && validCandidateUsage(result.usage)
+      && (result.nextCursor === null || integer(result.nextCursor))
+      && typeof result.hasMore === "boolean";
+  } else if (method === "harness.memory.candidates.accept") {
+    valid = own(result) && integer(result.revision) && validReviewCandidate(result.candidate)
+      && result.candidate.status === "accepted" && validMemoryItem(result.memoryItem)
+      && result.memoryItem.status === "active"
+      && result.candidate.acceptedMemoryId === result.memoryItem.id
+      && integer(result.memoryRevision) && own(result.viewStatus)
+      && (!params || (result.candidate.id === params.candidateId
+        && result.candidate.profileId === params.profileId
+        && result.memoryItem.id === `reviewed-${params.candidateId}`
+        && result.memoryItem.profileId === params.profileId));
+  } else if (method === "harness.memory.candidates.acceptMany") {
+    valid = own(result) && integer(result.revision)
+      && Array.isArray(result.acceptedCandidateIds) && result.acceptedCandidateIds.length >= 1
+      && result.acceptedCandidateIds.length <= 50 && result.acceptedCandidateIds.every(id)
+      && new Set(result.acceptedCandidateIds).size === result.acceptedCandidateIds.length
+      && Array.isArray(result.acceptedMemoryIds)
+      && result.acceptedMemoryIds.length === result.acceptedCandidateIds.length
+      && result.acceptedMemoryIds.every(id)
+      && new Set(result.acceptedMemoryIds).size === result.acceptedMemoryIds.length
+      && integer(result.memoryRevision) && own(result.viewStatus)
+      && (!params || (result.acceptedCandidateIds.length === params.candidateIds.length
+        && result.acceptedCandidateIds.every((id, index) => id === params.candidateIds[index]
+          && result.acceptedMemoryIds[index] === `reviewed-${id}`)));
+  } else if (method === "harness.memory.candidates.reject") {
+    valid = own(result) && integer(result.revision) && validReviewCandidate(result.candidate)
+      && result.candidate.status === "rejected"
+      && (!params || (result.candidate.id === params.candidateId
+        && result.candidate.profileId === params.profileId));
   } else if (["harness.memory.create", "harness.memory.update", "harness.memory.delete"].includes(method)) {
     valid = integer(result.revision) && (method === "harness.memory.create"
       ? validMemoryItem(result.item) && result.item.status === "active"
@@ -292,6 +442,24 @@ function validateAgentHarnessResult(method, result) {
     valid = hash(result.registryRevision) && integer(result.registryVersion, 1)
       && integer(result.profileRevision, 1)
       && validPage(result, validSkill);
+  } else if (method === "harness.skills.query") {
+    valid = hash(result.registryRevision) && integer(result.registryVersion, 1)
+      && integer(result.profileRevision, 1) && hash(result.queryRevision)
+      && integer(result.pageIndex, 0, 100_000) && integer(result.pageCount, 1)
+      && result.pageIndex < result.pageCount && integer(result.total)
+      && integer(result.enabledCount, 0, result.total)
+      && integer(result.usedCount, 0, result.total)
+      && typeof result.usageSupported === "boolean"
+      && integer(result.matchCount, 0, result.total)
+      && Array.isArray(result.items) && result.items.length <= 100
+      && result.items.every(item => validSkill(item)
+        && item.backendId === "shoggoth" && id(item.profileId) && id(item.agentId)
+        && text(item.category, 128) && text(item.emoji, 16)
+        && item.registryRevision === result.registryRevision
+        && item.registryVersion === result.registryVersion
+        && item.profileRevision === result.profileRevision
+        && integer(item.usageCount) && own(item.usageAgents)
+        && Object.entries(item.usageAgents).every(([agentId, count]) => id(agentId) && integer(count, 1)));
   } else if (method === "harness.skills.preview") {
     valid = validSkill(result.skill) && text(result.content, 32 * 1024, false)
       && integer(result.nextCursor, 0) && typeof result.hasMore === "boolean";
@@ -307,6 +475,21 @@ function validateAgentHarnessResult(method, result) {
         /^[a-z0-9][a-z0-9-]{0,63}$/u.test(name) && own(agents)
         && Object.entries(agents).every(([agent, count]) => id(agent) && integer(count, 1))
       ));
+  } else if (method === "harness.mcp.list") {
+    valid = integer(result.revision, 1) && integer(result.totalDisabled, 0, 64)
+      && Array.isArray(result.items) && result.items.length <= 20
+      && result.items.every((item) => own(item)
+        && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(item.id)
+        && text(item.name, 256, false) && text(item.commandLabel, 128, false)
+        && text(item.cwdLabel, 128, false) && integer(item.argCount, 0, 64)
+        && integer(item.updatedAt))
+      && integer(result.nextCursor, 0, 64) && typeof result.hasMore === "boolean";
+  } else if (method === "harness.mcp.rebind") {
+    valid = integer(result.revision, 1) && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(result.id)
+      && result.enabled === false && /^[a-f0-9-]{36}$/u.test(result.activationToken);
+  } else if (method === "harness.mcp.activate") {
+    valid = integer(result.revision, 1) && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(result.id)
+      && result.enabled === true && integer(result.toolCount);
   } else if (method === "harness.computer.status") {
     valid = validComputerStatus(result);
   }

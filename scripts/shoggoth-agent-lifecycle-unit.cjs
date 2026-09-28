@@ -275,6 +275,8 @@ async function testServiceResourceWiringAndRestart() {
   });
   let service = createAgentService({
     paths, version: "agent-lifecycle-integration", builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: require("../app/agent-service/runtime-account").DEFAULT_RUNTIME_ACCOUNTS
+      .filter(account => account.kind === "native-user").map(account => account.id),
   });
   const created = [];
   try {
@@ -352,6 +354,8 @@ async function testServiceResourceWiringAndRestart() {
 
     service = createAgentService({
       paths, version: "agent-lifecycle-integration-restart", builtinCliProfiles: true,
+      builtinCliInstalledAccountIds: require("../app/agent-service/runtime-account").DEFAULT_RUNTIME_ACCOUNTS
+        .filter(account => account.kind === "native-user").map(account => account.id),
     });
     await service.start();
     token = readClientToken(paths);

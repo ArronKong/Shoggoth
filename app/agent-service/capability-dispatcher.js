@@ -48,8 +48,10 @@ class CapabilityDispatcher {
 
   #approvalFingerprint({ callId, authority, execution, envelope, bindingId,
     toolIdentity, downstreamToolName, contractDigest, arguments: args }) {
-    return digest({ callId, profileId: authority?.profileId, executionKind: execution?.kind,
-      runId: execution?.run?.id, envelope, bindingId, toolIdentity,
+    return digest({ callId, profileId: authority?.profileId,
+      backendId: authority?.backendId, agentId: authority?.agentId,
+      instanceId: authority?.instanceId, executionKind: execution?.kind,
+      runId: execution?.run?.id || execution?.runKey, envelope, bindingId, toolIdentity,
       downstreamToolName, contractDigest, argumentDigest: digest(args) });
   }
 
@@ -67,13 +69,15 @@ class CapabilityDispatcher {
       fail("CAPABILITY_FORBIDDEN", "调用审批收据不可用");
     }
     const records = this.#store.getCapabilityRecords(bindingId, toolIdentity);
-    if (records?.grant?.approvalMode !== "each-call" || execution?.kind !== "native-run") {
+    if (records?.grant?.approvalMode !== "each-call"
+      || !["native-run", "external-call"].includes(execution?.kind)) {
       fail("CAPABILITY_FORBIDDEN", "调用不需要或不能接受逐次审批");
     }
     this.#assertToolContract(records, toolIdentity, downstreamToolName, contractDigest);
     const approval = Object.freeze({ bindingId, connectionId: records.connection.connectionId,
       principalIdentity: records.connection.principalIdentity, toolIdentity, contractDigest,
-      runId: execution.run?.id, argumentDigest: digest(args),
+      runId: execution.kind === "external-call" ? execution.runKey : execution.run?.id,
+      argumentDigest: digest(args),
       expiresAt: now + TICKET_LIFETIME_MS, consumed: false });
     this.#policy.authorizeCapability({ ...records, authority,
       execution: { ...execution, approval }, envelope, toolIdentity,
@@ -126,7 +130,8 @@ class CapabilityDispatcher {
     const frozenExecution = frozenCopy(authorizedExecution);
     const frozenEnvelope = frozenCopy(envelope);
     const runRef = execution.kind === "native-run" ? execution.run?.id
-      : (typeof execution.managementTicket === "string"
+      : execution.kind === "external-call" ? execution.runKey
+        : (typeof execution.managementTicket === "string"
         ? `ui-${crypto.createHash("sha256").update(execution.managementTicket).digest("hex")}`
         : null);
     this.#store.beginCapabilityCall({ callId, runRef, bindingId,

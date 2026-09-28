@@ -809,6 +809,7 @@ function fixture(options = {}) {
     getCapabilityPolicyRevision: options.getCapabilityPolicyRevision,
     ...(options.runExecutionStore ? { runExecutionStore: options.runExecutionStore } : {}),
     ...(options.transcriptStore ? { transcriptStore: options.transcriptStore } : {}),
+    verifyMemoryExtractionSource: options.verifyMemoryExtractionSource || (() => true),
     chatSessionStore: sessions,
     inbox,
     ...(options.runtimeManager ? { runtimeManager: options.runtimeManager } : { runtimePool }),
@@ -2580,7 +2581,7 @@ test("canonical turn status 映射 failed/interrupted/canceled 并各自只发�
   }
 });
 
-test("terminal failed turn 只从结构化错误映射认证和额度状态，不泄露 Runtime message", async () => {
+test("terminal failed turn 映射已知服务错误而不泄露 Runtime message", async () => {
   for (const [name, failure, expectedCode = "RUNTIME_AUTH_REQUIRED"] of [
     ["codex", {
       error: {
@@ -2592,6 +2593,13 @@ test("terminal failed turn 只从结构化错误映射认证和额度状态，�
     ["grok", { errorCode: "AUTH_REQUIRED" }],
     ["codex-quota", { error: { codexErrorInfo: "usageLimitExceeded",
       message: "private upstream details" } }, "RUNTIME_QUOTA_EXHAUSTED"],
+    ["codex-busy", { error: { codexErrorInfo: "serverOverloaded",
+      message: "private upstream details" } }, "RUNTIME_UPSTREAM_UNAVAILABLE"],
+    ["codex-model", { error: { codexErrorInfo: "other",
+      message: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account. private upstream details" } }, "RUNTIME_MODEL_UNAVAILABLE"],
+    ["codex-effort", { error: { codexErrorInfo: "other",
+      message: JSON.stringify({ error: { code: "unsupported_value", param: "reasoning.effort",
+        message: "Unsupported value: 'max' is not supported with the 'gpt-5.5' model. private upstream details" } }) } }, "RUNTIME_MODEL_SETTINGS_INVALID"],
   ]) {
     const value = await openFixture({
       sessionStatus: "ready",
@@ -3348,6 +3356,79 @@ test("准入冻结 ContextSnapshot，WorkRun 持久绑定且 Codex 分离 develo
   ].join("\n"));
   assert.equal(value.host.lastThreadStartParams.developerInstructions.includes("remembered preference"), false);
   await value.coordinator.close();
+});
+
+test("候选记忆来源在 Runtime 获取期间失效时不得发送已冻结的上下文", async () => {
+  const gate = deferred();
+  const reviewedId = `reviewed-mc-${"a".repeat(64)}`;
+  const item = { id: reviewedId, profileId: PROFILE_ID, status: "active" };
+  let sourceCurrent = true;
+  const value = await openFixture({ runtimeGate: gate,
+    contextCompiler: {
+      memoryStore: { get: (profileId, id) => profileId === PROFILE_ID && id === reviewedId ? item : null },
+      memoryEngine: { isReviewCommitted: () => sourceCurrent },
+      compile: () => ({ id: `ctx-${"b".repeat(64)}`,
+        developerInstructions: "trusted policy", dynamicContext: `reviewed memory ${reviewedId}`,
+        report: { memoryMatches: [reviewedId] } }),
+    },
+  });
+  try {
+    const ack = await value.coordinator.send({ operationId: "reviewed-source-lost",
+      sessionKey: SESSION_KEY, prompt: "继续" });
+    while (!value.log.includes("runtimePool.get")) await new Promise((resolve) => setImmediate(resolve));
+    sourceCurrent = false;
+    gate.resolve();
+    await value.coordinator.waitForIdle(ack.run.id);
+    const terminal = value.dispatcher.getRun(ack.run.id);
+    assert.equal(terminal.status, "failed");
+    assert.equal(terminal.errorCode, "CONTEXT_SOURCE_STALE");
+    assert.equal(value.host.turnStartCalls, 0);
+  } finally {
+    gate.resolve();
+    await value.coordinator.close();
+  }
+});
+
+test("semantic preparation yields before admission; cancellation cannot start a late native turn", async () => {
+  const gate = deferred(), entered = deferred();
+  let compileCalls = 0;
+  const value = await openFixture({ contextCompiler: {
+    semanticSearch: {},
+    async prepareRelated() { entered.resolve(); await gate.promise; },
+    compile() { compileCalls++; throw new Error("Canceled run must not compile"); },
+  } });
+  try {
+    const sending = value.coordinator.send({ operationId: "cancel-semantic-preparation",
+      sessionKey: SESSION_KEY, prompt: "lookup while canceled" });
+    await entered.promise;
+    const run = [...value.dispatcher.runs.values()].find(row => row.status === "queued");
+    assert.ok(run);
+    await value.coordinator.abort({ operationId: "abort-preparation", sessionKey: SESSION_KEY, runId: run.id });
+    gate.resolve();
+    const ack = await sending;
+    assert.equal(value.dispatcher.getRun(ack.run.id).status, "canceled");
+    assert.equal(compileCalls, 0); assert.equal(value.host.turnStartCalls, 0);
+  } finally { gate.resolve(); await value.coordinator.close(); }
+});
+
+test("semantic preparation preserves the lifecycle fence on service close", async () => {
+  const gate = deferred(), entered = deferred();
+  let compileCalls = 0;
+  const value = await openFixture({ contextCompiler: {
+    semanticSearch: {},
+    async prepareRelated() { entered.resolve(); await gate.promise; },
+    compile() { compileCalls++; throw new Error("Closed service must not compile"); },
+  } });
+  const sending = value.coordinator.send({ operationId: "close-semantic-preparation",
+    sessionKey: SESSION_KEY, prompt: "lookup during service close" });
+  sending.catch(() => {});
+  try {
+    await entered.promise;
+    const closing = value.coordinator.close();
+    gate.resolve(); await closing;
+    await assert.rejects(sending, { code: "WORK_RUN_COORDINATOR_CLOSING" });
+    assert.equal(compileCalls, 0); assert.equal(value.host.turnStartCalls, 0);
+  } finally { gate.resolve(); await value.coordinator.close(); }
 });
 
 test("迁移后 detached ChatSession 无 Transcript 证明时 fail closed 且不创建远端会话", async () => {
@@ -4231,11 +4312,14 @@ test("ready session 先 resume，再读 full history，并携 clientUserMessageI
     modelOverride: "gpt-5.6-terra",
     threads: [{ id: "thread-existing", threadSource: null, turns: [] }],
   });
+  value.host.modelList = async () => ({ data: [{ model: "gpt-5.6-terra", isDefault: false,
+    defaultReasoningEffort: "medium" }], nextCursor: null });
   await sendAndDrain(value, { operationId: "resume-operation" });
   assert.equal(value.host.resumeCalls, 1);
   assert.ok(value.log.indexOf("host.threadResume") < value.log.indexOf("host.threadRead"));
   assert.equal(value.host.lastResumeParams.model, "gpt-5.6-terra");
   assert.equal(value.host.lastTurnStartParams.model, "gpt-5.6-terra");
+  assert.equal(value.host.lastTurnStartParams.effort, "medium", "legacy sessions must not silently inherit an incompatible CLI effort");
   const run = value.coordinator.listRuns({ source: "chat", sourceId: SESSION_KEY })[0];
   assert.deepEqual(value.coordinator.getRuntimeContextForSource(PROFILE_ID, "chat", SESSION_KEY), {
     runId: run.id,
@@ -6072,7 +6156,11 @@ test("prompt timeout 有界 settle/interrupt，并 durable 收敛 interrupted �
     turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: "timeout me",
-    requestedSchema: { type: "object", properties: {}, required: [] },
+    requestedSchema: {
+      type: "object",
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+    },
   }, "raw-timeout");
   serverResponse.catch(() => {});
   while (value.coordinator.getRun(run.id).status !== "waiting_input") {

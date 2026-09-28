@@ -7,6 +7,7 @@ import { ApiError, getPluginCatalogPage, getPluginMcpStatus, getPluginMcpTools,
   requestPluginMcpConsent, discoverPluginMcpTools, previewPluginUninstall, uninstallPlugin,
   installSelectedPlugin, listAgents, revokeAllPluginMcpGrants,
   revokePluginMcpGrant, selectPluginPackage, selectRemotePluginPackage,
+  selectPluginAccount,
   setPluginInstallationState,
   type PluginCatalogItem, type PluginCatalogPage, type PluginInstallPreview,
   type PluginMcpStatus, type PluginMcpTools, type PluginOperationReceipt,
@@ -23,6 +24,7 @@ import { PluginBearerConnect } from "./PluginBearerConnect";
 import { PluginDependencyControl } from "./PluginDependencyControl";
 import { PluginRollbackControl } from "./PluginRollbackControl";
 import { PluginConnectionControl } from "./PluginConnectionControl";
+import { PluginExternalActivity } from "./PluginExternalActivity";
 import { BundledPluginDetailDialog } from "./BundledPluginDetailDialog";
 
 const PENDING_INSTALL_KEY = "shoggoth.plugin.pending-install.v1";
@@ -30,6 +32,18 @@ const PENDING_MANAGEMENT_KEY = "shoggoth.plugin.pending-management.v1";
 const LIBRARY_VIEW_KEY = "shoggoth.plugin.library-view.v1";
 const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const INSTALLATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const BUNDLED_GROUPS = [
+  { id: "creative", label: "plugins.bundledGroupCreative", categories: ["Creativity"] },
+  { id: "development", label: "plugins.bundledGroupDevelopment", categories: ["Developer Tools"] },
+  { id: "collaboration", label: "plugins.bundledGroupCollaboration",
+    categories: ["Productivity", "Communication", "Business & Operations"] },
+  { id: "research", label: "plugins.bundledGroupResearch",
+    categories: ["Scientific Research", "Education & Research", "Data & Analytics", "Finance", "Security"] },
+  { id: "other", label: "plugins.bundledGroupOther", categories: [] },
+] as const;
+function bundledGroupId(category: string): string {
+  return BUNDLED_GROUPS.find(group => (group.categories as readonly string[]).includes(category))?.id || "other";
+}
 type PendingManagement = { operationId: string;
   kind: "installation-state" | "skill-binding-set" | "grant-revoke"
     | "grants-revoke-all" | "mcp-connect" | "grant-allow" | "uninstall";
@@ -130,12 +144,13 @@ export default function PluginsPage() {
   const location = useLocation();
   const requestedId = new URLSearchParams(location.search).get("installationId");
   const targetInstallationId = requestedId && INSTALLATION_ID.test(requestedId) ? requestedId : null;
+  const focusApprovals = new URLSearchParams(location.search).get("focus") === "approvals";
   const [backend, setBackend] = useBackendState("plugins");
   const backends = useBackendCatalog();
   const backendName = backends.find(item => item.id === backend)?.name || backend;
   useEffect(() => {
-    if (targetInstallationId) setBackend("shoggoth");
-  }, [targetInstallationId]);
+    if (targetInstallationId || focusApprovals) setBackend("shoggoth");
+  }, [targetInstallationId, focusApprovals]);
   return <div className={`page management-page ${styles.page}`}>
     <PageHead title={t("plugins.title")} subtitle={t("plugins.subtitle")} />
     <div className="ui-toolbar">
@@ -143,13 +158,16 @@ export default function PluginsPage() {
     </div>
     {/* Keep pending consent, connection and install receipts mounted across tabs. */}
     <div hidden={backend !== "shoggoth"} data-plugin-host="shoggoth">
-      <NativePluginsPanel targetInstallationId={targetInstallationId} />
+      <NativePluginsPanel targetInstallationId={targetInstallationId}
+        focusApprovals={focusApprovals} active={backend === "shoggoth"} />
     </div>
     {backend !== "shoggoth" && <ExternalPluginsPanel key={backend} backend={backend} backendName={backendName} />}
   </div>;
 }
 
-function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: string | null }) {
+function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
+  targetInstallationId: string | null; focusApprovals: boolean; active: boolean;
+}) {
   const mcpStatusAgentId = useRef("");
   const { t } = useTranslation();
   const navigate = useNavigationRequest();
@@ -161,7 +179,7 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
   const targetItemRef = useRef<HTMLLIElement | null>(null);
   const [managementTarget, setManagementTarget] = useState(targetInstallationId);
   const [libraryView, setLibraryView] = useState<"available" | "installed">(() => {
-    if (targetInstallationId) return "installed";
+    if (targetInstallationId || focusApprovals) return "installed";
     try { return localStorage.getItem(LIBRARY_VIEW_KEY) === "installed" ? "installed" : "available"; }
     catch { return "available"; }
   });
@@ -214,6 +232,15 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
     setManagementTarget(targetInstallationId);
     if (targetInstallationId) setLibraryView("installed");
   }, [targetInstallationId]);
+  useEffect(() => {
+    if (!focusApprovals) return;
+    setLibraryView("installed");
+    if (!active || libraryView !== "installed") return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById("plugins-external-approvals")?.scrollIntoView({ block: "start" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusApprovals, active, libraryView]);
 
   useEffect(() => {
     if (libraryView !== "installed" || !targetItemRef.current) return;
@@ -490,6 +517,15 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
     });
   };
 
+  const selectAccount = async (bindingId: string, connectionId: string, expectedRevision: number) => {
+    if (!selectedAgentId) return;
+    await runManagement("mcp-connect", async operationId => {
+      const result = await selectPluginAccount({ agentId: selectedAgentId,
+        bindingId, connectionId, expectedRevision, operationId });
+      return result.canceled ? { canceled: true } : getPluginOperation(operationId);
+    });
+  };
+
   const inspectUninstall = async (item: PluginCatalogItem) => {
     try {
       setUninstallPreview(await previewPluginUninstall({ installationId: item.installationId,
@@ -628,11 +664,17 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
     }
   };
 
-  const bundledCategories = [...new Set(bundled.map(item => item.category))]
-    .sort((left, right) => left.localeCompare(right));
-  const visibleBundled = bundled.filter(item => (!libraryCategory || item.category === libraryCategory)
-    && `${item.displayName} ${item.shortDescription} ${item.category}`
-      .toLocaleLowerCase().includes(libraryQuery.trim().toLocaleLowerCase()));
+  const normalizedLibraryQuery = libraryQuery.trim().toLocaleLowerCase();
+  const bundledGroups = BUNDLED_GROUPS.map(group => {
+    const items = bundled.filter(item => bundledGroupId(item.category) === group.id);
+    const label = t(group.label);
+    return { id: group.id, label, items, visible: items.filter(item =>
+      (!libraryCategory || libraryCategory === group.id)
+      && `${item.displayName} ${item.shortDescription} ${item.category} ${label}`
+        .toLocaleLowerCase().includes(normalizedLibraryQuery))
+      .sort((left, right) => left.displayName.localeCompare(right.displayName, "en")) };
+  }).filter(group => group.items.length > 0);
+  const visibleBundledCount = bundledGroups.reduce((count, group) => count + group.visible.length, 0);
 
   return <>
       <div className={styles.libraryTabs} role="tablist" aria-label={t("plugins.libraryTabsLabel")}
@@ -664,51 +706,65 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
             <select id="plugin-library-category" value={libraryCategory}
               onChange={event => setLibraryCategory(event.target.value)}>
               <option value="">{t("plugins.allCategories")}</option>
-              {bundledCategories.map(category => <option key={category} value={category}>{category}</option>)}
+              {bundledGroups.map(group => <option key={group.id} value={group.id}>
+                {group.label} ({group.items.length})
+              </option>)}
             </select>
           </label>
         </div>
         {bundledError && <p role="status">{t("plugins.bundledUnavailable")}</p>}
-        {!bundledError && bundled.length > 0 && visibleBundled.length === 0
+        {!bundledError && bundled.length > 0 && visibleBundledCount === 0
           && <p className={styles.libraryEmpty} role="status">{t("plugins.libraryNoResults")}</p>}
-        <div className={styles.bundledGrid}>
-          {visibleBundled.map(item => <article className={styles.bundledCard} key={item.id}>
-            <button className={styles.bundledCardOpen} type="button"
-              aria-label={t("plugins.detailOpen", { name: item.displayName })}
-              onClick={event => { detailOpener.current = event.currentTarget; setDetailItem(item); }}>
-              <div className={styles.bundledCardTop}>
-                {item.iconAvailable
-                  ? <img className={styles.bundledIcon} src={`/__api/plugins/bundled-icon/${item.id}`}
-                    alt="" loading="lazy" />
-                  : <span className={styles.bundledIconFallback} aria-hidden="true" />}
-                <div className={styles.bundledTitle}><strong>{item.displayName}</strong><span>{item.category}</span></div>
+        <div className={styles.bundledGroups}>
+          {bundledGroups.filter(group => group.visible.length > 0).map(group =>
+            <section className={styles.bundledGroup} key={group.id} data-plugin-group={group.id}
+              aria-labelledby={`plugin-group-${group.id}`}>
+              <div className={styles.bundledGroupHeading}>
+                <h2 id={`plugin-group-${group.id}`}>{group.label}</h2>
+                <span aria-label={t("plugins.bundledGroupCount", { count: group.visible.length })}>
+                  {group.visible.length}
+                </span>
               </div>
-              <p>{item.shortDescription}</p>
-              <div className={styles.bundledMeta}>
-                {item.components.skills > 0 && item.converted && <span>{t("plugins.bundledSkillCoverage", {
-                  converted: item.converted.skills, total: item.components.skills })}</span>}
-                {item.components.mcp > 0 && item.converted && <span>{t("plugins.bundledMcpCoverage", {
-                  converted: item.converted.mcp, total: item.components.mcp })}</span>}
-                {item.components.apps > 0 && <span>{t("plugins.bundledConnectorPending", {
-                  count: item.components.apps })}</span>}
+              <div className={styles.bundledGrid}>
+                {group.visible.map(item => <article className={styles.bundledCard} key={item.id}>
+                  <button className={styles.bundledCardOpen} type="button"
+                    aria-label={t("plugins.detailOpen", { name: item.displayName })}
+                    onClick={event => { detailOpener.current = event.currentTarget; setDetailItem(item); }}>
+                    <div className={styles.bundledCardTop}>
+                      {item.iconAvailable
+                        ? <img className={styles.bundledIcon} src={`/__api/plugins/bundled-icon/${item.id}`}
+                          alt="" loading="lazy" />
+                        : <span className={styles.bundledIconFallback} aria-hidden="true" />}
+                      <div className={styles.bundledTitle}><strong>{item.displayName}</strong><span>{item.category}</span></div>
+                    </div>
+                    <p>{item.shortDescription}</p>
+                    <div className={styles.bundledMeta}>
+                      {item.components.skills > 0 && item.converted && <span>{t("plugins.bundledSkillCoverage", {
+                        converted: item.converted.skills, total: item.components.skills })}</span>}
+                      {item.components.mcp > 0 && item.converted && <span>{t("plugins.bundledMcpCoverage", {
+                        converted: item.converted.mcp, total: item.components.mcp })}</span>}
+                      {item.components.apps > 0 && <span>{t("plugins.bundledConnectorPending", {
+                        count: item.components.apps })}</span>}
+                    </div>
+                    <span className={styles.bundledCardHint}>{t("plugins.detailView")}
+                      <span aria-hidden="true"> ↗</span></span>
+                  </button>
+                  <div className={styles.bundledCardBottom}>
+                    <span>{item.installationState === "not-installed"
+                      ? t("plugins.notInstalled") : item.installationState === "enabled"
+                        ? t("plugins.desiredEnabled") : t("plugins.disabled")}</span>
+                    <button className="btn-secondary" type="button"
+                      disabled={item.importStatus !== "previewable" || previewing || installing
+                        || installNotice === "unknown" || managementPending !== null}
+                      onClick={() => void chooseBundled(item.id)}>
+                      {item.importStatus !== "previewable" ? t("plugins.adapterPending")
+                        : item.installationState !== "not-installed" ? t("plugins.checkBundledUpdate")
+                          : t("plugins.installBundled")}
+                    </button>
+                  </div>
+                </article>)}
               </div>
-              <span className={styles.bundledCardHint}>{t("plugins.detailView")}
-                <span aria-hidden="true"> ↗</span></span>
-            </button>
-            <div className={styles.bundledCardBottom}>
-              <span>{item.installationState === "not-installed"
-                ? t("plugins.notInstalled") : item.installationState === "enabled"
-                  ? t("plugins.desiredEnabled") : t("plugins.disabled")}</span>
-              <button className="btn-secondary" type="button"
-                disabled={item.importStatus !== "previewable" || previewing || installing
-                  || installNotice === "unknown" || managementPending !== null}
-                onClick={() => void chooseBundled(item.id)}>
-                {item.importStatus !== "previewable" ? t("plugins.adapterPending")
-                  : item.installationState !== "not-installed" ? t("plugins.checkBundledUpdate")
-                    : t("plugins.installBundled")}
-              </button>
-            </div>
-          </article>)}
+            </section>)}
         </div>
       </section>}
       {detailItem && <BundledPluginDetailDialog key={detailItem.id} item={detailItem}
@@ -789,7 +845,10 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
               <ul className={styles.diagnosticList}>
                 {selection.preview.diagnostics.map((item, index) => <li key={`${index}-${item.reasonCode}`}>
                   {item.name ? `${item.scope} · ${item.name}` : item.scope}
-                  {` · ${item.reasonCode}`}
+                  {` · ${item.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"
+                    ? t("plugins.oauthClientRegistrationRequired")
+                    : item.reasonCode === "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED"
+                      ? t("plugins.googleDesktopOAuthRequired") : item.reasonCode}`}
                 </li>)}
               </ul>
             </>}
@@ -925,6 +984,20 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
                                   ? "plugins.mcpSelectedVerified"
                                   : "plugins.mcpSelectedUnverified")}`
                             : t("plugins.mcpUnbound")}</span>}
+                          {current?.binding && current.accounts.length > 0 && <div className={styles.accountChoices}>
+                            <span>{t("plugins.selectedAccount", { account:
+                              current.accounts.find(account => account.connectionId === current.binding!.connectionId)?.label
+                                || t("plugins.mcpSelectedUnverified") })}</span>
+                            {current.accounts.filter(account => account.connectionId !== current.binding!.connectionId)
+                              .map(account => <button className="btn-secondary" type="button"
+                                key={account.connectionId}
+                                disabled={managementPending !== null || installing || previewing
+                                  || item.desiredState !== "enabled"}
+                                onClick={() => void selectAccount(current.binding!.bindingId,
+                                  account.connectionId, current.binding!.revision)}>
+                                {t("plugins.selectAccount", { account: account.label })}
+                              </button>)}
+                          </div>}
                           {component.transport === "stdio" && (!current?.binding?.enabled
                             || current.binding.connectionState !== "ready") && <button className="btn-secondary" type="button"
                             disabled={item.desiredState !== "enabled" || managementPending !== null || installing || previewing}
@@ -978,6 +1051,22 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
                                 {t("plugins.mcpCatalogNotReady")}</span>}
                               {mcpTools?.available && mcpTools.items.length === 0 && <span>
                                 {t("plugins.mcpNoTools")}</span>}
+                              {mcpTools?.available && item.sourceKind === "bundled"
+                                && item.packageName === "github" && component.title === "github"
+                                && <p className={styles.packageMeta}>
+                                  {mcpTools.referenceCoverage?.operations.length
+                                    ? <>{t("plugins.githubMcpPortableScope")}{" "}
+                                      {mcpTools.referenceCoverage.operations.map(capability =>
+                                        capability.id === "repository-file-read"
+                                          ? t("plugins.githubMcpFileRead")
+                                          : capability.id === "repository-file-write"
+                                            ? t("plugins.githubMcpFileWrite")
+                                            : capability.id === "repository-issue-read"
+                                              ? t("plugins.githubMcpIssueRead")
+                                              : capability.id === "repository-issue-comment"
+                                                ? t("plugins.githubMcpIssueComment") : capability.id).join("、")}</>
+                                    : t("plugins.githubMcpNoFileOperations")}
+                                </p>}
                               {mcpTools?.available && mcpTools.items.length > 0 &&
                                 <ul className={styles.mcpToolList}>
                                   {mcpTools.items.map((tool) => <li key={tool.toolIdentity}>
@@ -1038,5 +1127,6 @@ function NativePluginsPanel({ targetInstallationId }: { targetInstallationId: st
           )}
         </section>
       </div>
+      <PluginExternalActivity active={active && libraryView === "installed"} />
   </>;
 }

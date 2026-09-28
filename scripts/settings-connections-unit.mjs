@@ -10,7 +10,7 @@ const React = require("react");
 const { create, act } = require("react-test-renderer");
 const ts = require("typescript");
 const releasePolicy = JSON.parse(fs.readFileSync(path.join(root, "app/release-policy.json"), "utf8"));
-const ids = ["openclaw", "hermes", "shoggoth", "codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]
+const ids = ["openclaw", "hermes", "shoggoth"]
   .filter(id => !releasePolicy.disabledRuntimes.includes(id));
 let disabledBackends = [];
 const api = {
@@ -35,7 +35,9 @@ const loadBackends = () => load("app/manage-ui/src/lib/backends.ts", {
 });
 const { FALLBACK_BACKEND_DESCRIPTORS } = loadBackends();
 assert.deepEqual(Array.from(FALLBACK_BACKEND_DESCRIPTORS, d => d.id), ids);
-assert.ok(FALLBACK_BACKEND_DESCRIPTORS.every(d => d.disconnectable));
+const toggleIds = Array.from(FALLBACK_BACKEND_DESCRIPTORS.filter(d => d.disconnectable), d => d.id);
+assert.deepEqual(toggleIds, ["openclaw", "hermes"].filter(id => ids.includes(id)));
+assert.equal(FALLBACK_BACKEND_DESCRIPTORS.find(d => d.id === "shoggoth")?.disconnectable, false);
 const Overview = load("app/manage-ui/src/pages/settings/BackendOverview.tsx", {
   "react-i18next": { useTranslation: () => ({ t: key => key }) },
   "../../lib/connectionOptions": { REMOTE_CONNECTIONS_ENABLED: false },
@@ -59,33 +61,41 @@ const row = (renderer, id) => renderer.root.findAllByType("article")
   .find(node => node.findByType("h4").children.join("") === id);
 const toggle = (renderer, id) => row(renderer, id).findAllByType("button")
   .find(node => ["settings.disconnect", "settings.reconnect"].includes(node.children.join("")));
-for (const remaining of ids) {
-  disabledBackends = ids.filter(id => id !== remaining);
-  const renderer = await render(disabledBackends);
-  assert.equal(toggle(renderer, remaining).props.disabled, true, `protect last connection ${remaining}`);
-  assert.equal(toggle(renderer, remaining).props.title, "settings.disconnectLastHint");
-  for (const id of disabledBackends) {
-    assert.equal(toggle(renderer, id).children.join(""), "settings.reconnect");
-    assert.equal(toggle(renderer, id).props.disabled, false, `allow ${id} to reconnect`);
+// The guard follows the enabled count supplied by Settings; the built-in
+// Shoggoth service itself does not expose a disconnect button.
+{
+  const renderer = await render([], { enabledCount: 1 });
+  for (const id of toggleIds) {
+    assert.equal(toggle(renderer, id).props.disabled, true, `protect last connection ${id}`);
+    assert.equal(toggle(renderer, id).props.title, "settings.disconnectLastHint");
   }
+  assert.equal(toggle(renderer, "shoggoth"), undefined);
+  await act(async () => renderer.unmount());
+}
+for (const disconnected of toggleIds) {
+  disabledBackends = [disconnected];
+  const renderer = await render(disabledBackends, { enabledCount: 1 });
+  assert.equal(toggle(renderer, disconnected).children.join(""), "settings.reconnect");
+  assert.equal(toggle(renderer, disconnected).props.disabled, false, `allow ${disconnected} to reconnect`);
   await act(async () => renderer.unmount());
 
   const { useEnabledBackends } = loadBackends();
   function Enabled() { return React.createElement("output", { ids: useEnabledBackends("chat") }); }
   let enabled;
   await act(async () => { enabled = create(React.createElement(Enabled)); });
-  assert.deepEqual(Array.from(enabled.root.findByType("output").props.ids), [remaining],
-    "native and external backend switches must follow the saved disabled list");
+  assert.deepEqual(Array.from(enabled.root.findByType("output").props.ids),
+    ids.filter(id => id !== disconnected), "external switches must update mounted backend selectors");
   await act(async () => enabled.unmount());
 }
 for (const disabled of [[], ["hermes"], ["openclaw"], ["openclaw", "hermes"]]) {
   const renderer = await render(disabled);
-  for (const id of ids) assert.equal(toggle(renderer, id).props.disabled, false);
+  for (const id of toggleIds) assert.equal(toggle(renderer, id).props.disabled, false);
+  assert.equal(toggle(renderer, "shoggoth"), undefined);
   await act(async () => renderer.unmount());
 }
 for (const blocked of [{ loading: true }, { configFailed: true }]) {
   const renderer = await render([], blocked);
-  for (const id of ids) {
+  for (const id of toggleIds) {
     assert.equal(toggle(renderer, id).props.disabled, true);
     assert.equal(toggle(renderer, id).props.title, undefined, "loading/error is not a last-connection warning");
   }
@@ -99,9 +109,8 @@ disabledBackends = [];
   function Enabled() { return React.createElement("output", { ids: useEnabledBackends("chat") }); }
   let mounted, later;
   await act(async () => { mounted = create(React.createElement(Enabled)); });
-  await act(async () => applyDisabledBackends(["openclaw", "hermes", "codex"]));
-  assert.deepEqual(Array.from(mounted.root.findByType("output").props.ids),
-    ids.filter(id => !["openclaw", "hermes", "codex"].includes(id)));
+  await act(async () => applyDisabledBackends(["openclaw", "hermes"]));
+  assert.deepEqual(Array.from(mounted.root.findByType("output").props.ids), ["shoggoth"]);
   await act(async () => { later = create(React.createElement(Enabled)); });
   assert.deepEqual(Array.from(later.root.findByType("output").props.ids), Array.from(mounted.root.findByType("output").props.ids));
   await act(async () => applyDisabledBackends([]));
@@ -120,10 +129,10 @@ disabledBackends = [];
   function Enabled() { return React.createElement("output", { ids: useEnabledBackends() }); }
   let renderer;
   await act(async () => { renderer = create(React.createElement(Enabled)); });
-  await act(async () => applyDisabledBackends(["shoggoth", "codex"]));
+  await act(async () => applyDisabledBackends(["openclaw"]));
   await act(async () => resolveConfig({ disabledBackends: [] }));
   assert.deepEqual(Array.from(renderer.root.findByType("output").props.ids),
-    ids.filter(id => !["shoggoth", "codex"].includes(id)), "an old config request must not undo a saved disconnect");
+    ids.filter(id => id !== "openclaw"), "an old config request must not undo a saved disconnect");
   await act(async () => renderer.unmount());
 }
 
@@ -144,7 +153,7 @@ const context = vm.createContext({ configStore: { read: () => config }, appliedC
   mainWindow: { webContents: { reload: () => calls.push(["window", "reload"]) } }, console,
 });
 vm.runInContext(functions, context);
-for (const id of ids) {
+for (const id of toggleIds) {
   config = { ...config, disabledBackends: [id] };
   calls.length = 0;
   await context.applyConfigChange();
@@ -164,4 +173,4 @@ config = { ...config, hermesMode: "remote" };
 calls.length = 0;
 await context.applyConfigChange();
 assert.deepEqual(calls, [["hermes", "reconfigure"]]);
-console.log(`PASS settings: all ${ids.length} released connection controls, final connection guard, reconnect, backend filtering and live endpoint changes`);
+console.log(`PASS settings: ${toggleIds.length} disconnectable backend controls, built-in service protection, final connection guard, reconnect, backend filtering and live endpoint changes`);

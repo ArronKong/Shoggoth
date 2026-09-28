@@ -60,7 +60,7 @@ function DashboardIcon({ className }: IconProps) {
 }
 
 // 聊天：气泡不动，里面三个点依次跳（经典 typing indicator）。
-function ChatIcon({ className }: IconProps) {
+export function ChatIcon({ className }: IconProps) {
   return (
     <Frame className={className}>
       <path d="M12 19C12 15.6863 14.6863 13 18 13H22C25.3137 13 28 15.6863 28 19V21C28 24.3137 25.3137 27 22 27H12V19Z" />

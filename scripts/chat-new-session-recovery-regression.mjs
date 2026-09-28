@@ -56,7 +56,7 @@ assert.equal(recoverySlashCommandsForBackend(true).length, 0,
   "slash worker 可用时不需要额外恢复命令池");
 assert.equal(
   JSON.stringify(nativeLocalSlashCommands().map((command) => command.name)),
-  JSON.stringify(["stop", "new", "clear", "model", "models", "status", "usage", "help", "commands"]),
+  JSON.stringify(["stop", "new", "clear", "model", "models", "status", "usage", "help", "commands", "steer"]),
   "原生 Agent 菜单只公开共享 UI/RPC 已真正实现的命令",
 );
 assert.deepEqual(
@@ -94,7 +94,7 @@ assert.match(
 );
 assert.match(
   pageSource,
-  /const slashCatalogSessionUpdatedAt =[\s\S]{0,1800}\[activeKey, slashCatalogSessionUpdatedAt, chatCaps, capsEpoch, slashCatalogStore\][\s\S]{0,300}value\.startsWith\("\/"\)[\s\S]{0,100}updateSlashMenu\(value\)/,
+  /const slashCatalogSessionUpdatedAt =[\s\S]{0,1800}\[activeKey, slashCatalogSessionUpdatedAt, chatCaps, runtimeModels\.data\?\.selection\.bindingId, capsEpoch, slashCatalogStore\][\s\S]{0,300}value\.startsWith\("\/"\)[\s\S]{0,100}updateSlashMenu\(value\)/,
   "Runtime 命令目录返回或重试后必须即时刷新已打开的 slash 菜单",
 );
 assert.doesNotMatch(
@@ -129,8 +129,8 @@ assert.match(
 );
 assert.match(
   backendSource,
-  /async createSession\(agentId, options = \{\}\)[\s\S]{0,500}workspace === undefined[\s\S]{0,300}_sessionTarget\(options\.parentSessionKey\)[\s\S]{0,300}parent\.session\.workspace/,
-  "Shoggoth 后端必须在裸 /new 时继承父会话工作区",
+  /async createSession\(agentId, options = \{\}\)[\s\S]{0,500}_sessionTarget\(options\.parentSessionKey\)[\s\S]{0,300}workspace === undefined[\s\S]{0,200}parent\.session\.workspace/,
+  "Shoggoth 后端必须先校验来源会话，再在裸 /new 时继承工作区",
 );
 assert.match(
   pageSource,

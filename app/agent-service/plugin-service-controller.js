@@ -16,6 +16,7 @@ const METHODS = Object.freeze(["plugins.bundled.list", "plugins.capabilities.lis
   "plugins.bearer.prepare", "plugins.bearer.commit",
   "plugins.dependencies.preview", "plugins.dependencies.commit", "plugins.dependencies.status", "plugins.dependencies.operation",
   "plugins.connections.prepare", "plugins.connections.commit", "plugins.connections.operation",
+  "plugins.connections.selectPrepare", "plugins.connections.selectCommit",
   "plugins.rollback.list", "plugins.rollback.prepare", "plugins.rollback.commit", "plugins.rollback.operation",
   "plugins.operations.get"]);
 const DIGEST = /^[a-f0-9]{64}$/u;
@@ -167,6 +168,7 @@ class PluginServiceController {
       || typeof store?.beginInstallationDisable !== "function"
       || typeof store?.hasPendingInstallationDisable !== "function"
       || typeof store?.getConnectionCountsForComponent !== "function"
+      || typeof store?.listReadyConnectionsForComponent !== "function"
       || typeof store?.getGrantCountsForBinding !== "function"
       || typeof store?.getGrant !== "function"
       || typeof store?.listGlobalBindings !== "function"
@@ -435,6 +437,11 @@ class PluginServiceController {
           : { allow: 0, deny: 0 };
         return { componentId: id,
           connections: this.store.getConnectionCountsForComponent(params.installationId, id),
+          accounts: this.store.listReadyConnectionsForComponent(params.installationId, id)
+            .map(connection => ({ connectionId: connection.connectionId,
+              label: /^github:[1-9][0-9]{0,19}$/u.test(connection.principalIdentity || "")
+                ? `GitHub #${connection.principalIdentity.slice(7)}`
+                : `连接 ${connection.connectionId.slice(0, 8)}` })),
           binding: binding ? { bindingId: binding.bindingId,
             connectionId: binding.connectionId, enabled: binding.enabled,
             revision: binding.revision,
@@ -472,6 +479,10 @@ class PluginServiceController {
       if (!snapshot) return unavailable;
       return bounded({ profileId: params.profileId, bindingId: binding.bindingId,
         available: true, catalogRevision: snapshot.catalogRevision,
+        ...(snapshot.portableCapabilities?.length
+          ? { portableCapabilities: snapshot.portableCapabilities } : {}),
+        ...(snapshot.referenceCoverage
+          ? { referenceCoverage: snapshot.referenceCoverage } : {}),
         items: snapshot.entries.map((item) => {
           const grant = this.store.getGrant(binding.bindingId, item.toolIdentity);
           return { toolIdentity: item.toolIdentity, name: item.downstreamName,

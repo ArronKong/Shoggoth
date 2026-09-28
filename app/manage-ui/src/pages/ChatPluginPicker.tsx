@@ -16,12 +16,15 @@ function readRecent(): string[] {
   } catch { return []; }
 }
 
-export default function ChatPluginPicker({ sessionKey, backendId, selected, onChange, onBrowse }: {
+export default function ChatPluginPicker({ sessionKey, backendId, selected, onChange, onBrowse,
+  onSelectionValidity }: {
   sessionKey: string | null;
   backendId: string;
   selected: ChatPluginSelection[];
   onChange: (next: ChatPluginSelection[]) => void;
   onBrowse: (installationId?: string) => void;
+  onSelectionValidity?: (key: string, backend: string,
+    selection: ChatPluginSelection[], valid: boolean | null) => void;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -30,7 +33,7 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
   const [icons, setIcons] = useState<Map<string, string>>(new Map());
   const [adapterGaps, setAdapterGaps] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
-  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [catalogKey, setCatalogKey] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const [limitReached, setLimitReached] = useState(false);
   const [recent, setRecent] = useState(readRecent);
@@ -61,7 +64,7 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
         const bundled = await getBundledPlugins().catch(() => null);
         if (canceled) return;
         setItems(all);
-        setCatalogLoaded(true);
+        setCatalogKey(`${backendId}\0${sessionKey}`);
         setIcons(new Map((bundled?.items ?? []).filter(item => item.iconAvailable)
           .map(item => [item.installationId, item.id])));
         setAdapterGaps(new Set((bundled?.items ?? []).filter(item =>
@@ -93,10 +96,15 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
     return (ai < 0 ? 1000 : ai) - (bi < 0 ? 1000 : bi);
   }), [items, query, recent]);
   const byId = useMemo(() => new Map(items.map(item => [item.installationId, item])), [items]);
-  const staleSelection = catalogLoaded && !loading && !error && selected.some(value => {
+  const catalogCurrent = catalogKey === `${backendId}\0${sessionKey}` && !loading && !error;
+  const staleSelection = catalogCurrent && selected.some(value => {
     const item = byId.get(value.installationId);
     return !item || item.revision !== value.revision || !ready(item);
   });
+  useEffect(() => {
+    if (sessionKey) onSelectionValidity?.(sessionKey, backendId, selected,
+      selected.length && catalogCurrent ? !staleSelection : null);
+  }, [sessionKey, backendId, selected, catalogCurrent, staleSelection, onSelectionValidity]);
   const close = () => { setOpen(false); triggerRef.current?.focus(); };
   const toggle = (item: PluginCatalogItem) => {
     if (!ready(item)) return;

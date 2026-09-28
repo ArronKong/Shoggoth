@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const {
   createMcpStdioHandler,
@@ -35,6 +36,7 @@ const { RuntimeAdapterRegistry } = require("./runtime-adapter-registry");
 const { validRuntimeAccountId } = require("./runtime-adapter");
 const { RuntimeMcpGateIssuer } = require("./runtime-mcp-gate");
 const { ensureBuiltinCliAgentProfiles } = require("./builtin-cli-profiles");
+const { createRuntimeCliAuth } = require("../runtime-cli-auth");
 const { CodexRuntimeConfigWriter } = require("./codex-runtime-config");
 const { EncryptedSecretStore } = require("./encrypted-secret-store");
 const { RunExecutionStore } = require("./run-execution-store");
@@ -70,7 +72,13 @@ const { AgentDefinitionStore } = require("./agent-definition-store");
 const { TranscriptStore } = require("./transcript-store");
 const { MemoryStore } = require("./memory-store");
 const { MemoryEngine } = require("./memory-engine");
+const { MemoryProvenanceStore } = require("./memory-provenance-store");
+const { MemoryProvenanceService } = require("./memory-provenance-service");
+const { MemoryCandidateStore } = require("./memory-candidate-store");
+const { MemoryCandidateService } = require("./memory-candidate-service");
 const { ConversationMemoryService } = require("./conversation-memory-service");
+const { ConversationRecallService } = require("./conversation-recall-service");
+const { NativeMemorySemanticService } = require("./native-memory-semantic-service");
 const { ConversationDefinitionService } = require("./conversation-definition-service");
 const { ContextSnapshotStore } = require("./context-snapshot-store");
 const { ContextCompiler } = require("./context-compiler");
@@ -102,6 +110,11 @@ const { PluginConnectionAuth } = require("./plugin-connection-auth");
 const { PluginMcpConnectionManager } = require("./plugin-mcp-connection-manager");
 const { PluginMcpConsent } = require("./plugin-mcp-consent");
 const { PluginRuntimeToolService } = require("./plugin-runtime-tool-service");
+const { ExternalPluginLeaseManager } = require("./external-plugin-lease");
+const { ExternalPluginToolService } = require("./external-plugin-tool-service");
+const { ExternalPluginProvenance } = require("./external-plugin-provenance");
+const { ExternalPluginApprovalBroker } = require("./external-plugin-approval-broker");
+const { authorizeAdapter: authorizeExternalPluginAdapter } = require("./external-plugin-adapter-auth");
 const { PluginAppController } = require("./plugin-app-controller");
 const { SystemHostController } = require("./system-host-controller");
 const { ComputerUseController } = require("./computer-use-controller");
@@ -220,10 +233,17 @@ const DOMAIN_RUNTIME_FATAL_REASON = "runtime_fatal";
 const MCP_SERVICE_METHODS = new Set([
   "mcp.runtime.bridge.open", "mcp.runtime.gate.consume", "mcp.auth.challenge", "mcp.auth.exchange",
   "mcp.federation.open", "mcp.profile.get", "mcp.tool.call",
+  "plugin.external.open", "plugin.external.search", "plugin.external.skill.read",
+  "plugin.external.skill.file.read",
+  "plugin.external.call", "plugin.external.cancel",
 ]);
 const PLUGIN_PUBLIC_MESSAGES = Object.freeze({
   PLUGIN_REQUEST_INVALID: "插件管理参数无效",
   PLUGIN_RESPONSE_TOO_LARGE: "插件管理响应超出容量上限",
+  EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE: "外部插件调用记录不可用",
+  CAPABILITY_FORBIDDEN: "插件调用已拒绝或授权失效",
+  GRANT_REVOKED: "插件工具授权已撤销",
+  MCP_TOOL_CAPACITY: "逐次审批参数超过完整展示上限",
   REVISION_CONFLICT: "插件目录或安装版本已变化，请重新读取",
   PACKAGE_CHANGED: "插件与预览不一致，请重新预览",
   PACKAGE_INVALID: "插件包无效",
@@ -297,6 +317,11 @@ const MCP_PUBLIC_ERROR_CODES = new Set([
   "MCP_AUTH_FAILED",
   "MCP_AUTH_REQUEST_INVALID",
   "MCP_SESSION_INVALID",
+  "EXTERNAL_PLUGIN_LEASE_INVALID", "EXTERNAL_PLUGIN_LEASE_BUSY",
+  "EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE",
+  "CAPABILITY_FORBIDDEN", "GRANT_REVOKED", "TOOL_CONTRACT_CHANGED",
+  "CATALOG_REVISION_CHANGED",
+  "CALL_ALREADY_RECORDED", "PLUGIN_RUNTIME_CAPACITY",
   ...Object.keys(MCP_TOOL_PUBLIC_MESSAGES),
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -688,6 +713,29 @@ function stableJsonContainsMatchedString(value, matches) {
     }
   }
   return false;
+}
+
+function isNativeFederationChatRun(run) {
+  return run?.source === "chat" && typeof run.idempotencyKey === "string"
+    && /^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey);
+}
+
+function candidateSessionForCompletedRun(run, payload, chatSessionStore, inspirationStore) {
+  if (payload?.status !== "completed" || !["chat", "inspiration"].includes(run?.source)
+    || isNativeFederationChatRun(run)) return null;
+  let sessionKey = run.sourceId;
+  if (run.source === "inspiration") {
+    let origin;
+    try { origin = inspirationStore.executionForRun(run.id); } catch { return null; }
+    if (origin?.runId !== run.id || origin.profileId !== run.profileId
+      || origin.workspace !== run.workspace || origin.ideaId !== run.sourceId
+      || origin.inputSource !== "chat") return null;
+    sessionKey = origin.sessionKey;
+  }
+  let session;
+  try { session = sessionKey && chatSessionStore.getSession(sessionKey); } catch { return null; }
+  return session && session.profileId === run.profileId && session.workspace === run.workspace
+    && ["ready", "archived"].includes(session.status) ? session : null;
 }
 
 function createAgentService(options) {
@@ -1309,12 +1357,38 @@ function createAgentService(options) {
     paths,
     fs: options.memoryFs,
   });
+  const memoryCandidateStore = options.memoryCandidateStore || new MemoryCandidateStore({
+    paths, now: options.now,
+  });
   const memoryEngine = options.memoryEngine || new MemoryEngine({
     store: memoryStore,
     definitionStore: agentDefinitionStore,
+    transcriptStore,
+    chatSessionStore,
+    strictSourceResolution: true,
     now: options.now,
     randomUUID: options.randomUUID,
   });
+  memoryEngine.setReviewReceiptStore?.(memoryCandidateStore);
+  const memoryProvenanceStore = options.memoryProvenanceStore || new MemoryProvenanceStore({
+    paths, now: options.now,
+  });
+  const memoryProvenanceService = options.memoryProvenanceService || new MemoryProvenanceService({
+    store: memoryProvenanceStore, memoryStore, transcriptStore, chatSessionStore,
+    recallPolicy: memoryEngine.recallPolicy, now: options.now,
+    getRun: (runId) => workDispatcher.getRun(runId),
+    getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
+    getInspirationOrigin: (run) => inspirationStore.executionForRun(run.id),
+  });
+  memoryEngine.setProvenanceService?.(memoryProvenanceService);
+  let memoryCandidateService = options.memoryCandidateService || null;
+  const candidateReview = Object.fromEntries(["list", "accept", "acceptMany", "reject"].map((method) => [method,
+    (input) => {
+      if (!memoryCandidateService || typeof memoryCandidateService[method] !== "function") {
+        throw serviceError("MEMORY_CANDIDATE_UNAVAILABLE", "候选审核暂不可用");
+      }
+      return memoryCandidateService[method](input);
+    }]));
   const toolRegistry = options.toolRegistry || DEFAULT_TOOL_REGISTRY;
   const permissionEngine = options.permissionEngine || new PermissionEngine({
     toolRegistry,
@@ -1388,6 +1462,36 @@ function createAgentService(options) {
     requestElicitation: input => workRunCoordinator.requestPluginMcpElicitation(input),
     recordAppCall: input => pluginAppController.recordCall(input),
   }) : null;
+  const externalPluginLeaseManager = pluginStore ? new ExternalPluginLeaseManager({
+    authorizeAdapter: async (backendId, token, identity) => {
+      if (!authorizeExternalPluginAdapter(paths, backendId, token)) return false;
+      try {
+        const agent = options.externalPluginAgentVerifier
+          ? await options.externalPluginAgentVerifier(identity)
+          : (await federationHostClient.request("agent.get", {
+            backendId, agentId: identity.agentId })).agent;
+        return agent?.id === identity.agentId && agent?.backendId === backendId;
+      } catch { return false; }
+    },
+    now: options.now,
+    randomBytes: options.externalPluginLeaseRandomBytes,
+  }) : null;
+  const externalPluginProvenance = pluginStore ? new ExternalPluginProvenance({
+    paths, store: pluginStore, now: options.now,
+  }) : null;
+  const externalPluginApprovalBroker = pluginStore ? new ExternalPluginApprovalBroker({
+    now: options.now,
+  }) : null;
+  const externalPluginToolService = pluginStore ? new ExternalPluginToolService({
+    store: pluginStore, resolver: pluginComponentResolver,
+    toolCatalogRegistry: pluginToolCatalogRegistry,
+    capabilityDispatcher: pluginCapabilityDispatcher,
+    acquireConnection: records => pluginMcpConnectionManager.acquire(records),
+    leaseManager: externalPluginLeaseManager,
+    provenance: externalPluginProvenance,
+    approvalBroker: externalPluginApprovalBroker,
+    getNativeSkillStore: () => nativeSkillStore,
+  }) : null;
   const pluginAppController = pluginStore ? new PluginAppController({
     store: pluginStore, productStore, getRun: id => workDispatcher.getRun(id),
     getConversation: run => {
@@ -1458,14 +1562,19 @@ function createAgentService(options) {
     fs: options.contextSnapshotFs,
   });
   const conversationCheckpointStore = options.conversationCheckpointStore
-    || new (require("./conversation-checkpoint-store").ConversationCheckpointStore)({ paths, transcriptStore, now: options.now });
+    || new (require("./conversation-checkpoint-store").ConversationCheckpointStore)({
+      paths, transcriptStore, memoryStore, recallPolicy: memoryEngine.recallPolicy, now: options.now });
   const runtimeSelectionPolicyStore = options.runtimeSelectionPolicyStore
     || new (require("./runtime-selection-policy").RuntimeSelectionPolicyStore)({ paths, productStore });
   const sourceConversationStore = options.sourceConversationStore
     || new (require("./source-conversation-policy").SourceConversationStore)({ paths, chatSessionStore, now: options.now });
+  const nativeMemorySemanticService = options.nativeMemorySemanticService || new NativeMemorySemanticService({
+    paths, memoryEngine });
+  memoryEngine.setSemanticSearchService?.(nativeMemorySemanticService);
   const contextCompiler = options.contextCompiler || new ContextCompiler({
     definitionStore: agentDefinitionStore,
     memoryEngine,
+    semanticSearch: nativeMemorySemanticService,
     memoryStore,
     transcriptStore,
     toolRegistry,
@@ -1492,7 +1601,7 @@ function createAgentService(options) {
   const harnessDependencies = [
     [productStore, ["getAgentProfile"]],
     [agentDefinitionStore, ["get", "history", "readRevision", "update", "restore", "previewImport", "import", "readGeneratedView"]],
-    [memoryStore, ["getRevision", "list"]],
+    [memoryStore, ["get", "getRevision", "list"]],
     [memoryEngine, ["propose", "update", "delete"]],
     [chatSessionStore, ["listSessions"]],
     [transcriptStore, ["listEvents", "getRevision", "setContextExcluded"]],
@@ -1508,11 +1617,15 @@ function createAgentService(options) {
         definitionStore: agentDefinitionStore,
         memoryStore,
         memoryEngine,
+        memoryProvenanceService,
+        memoryCandidateService: candidateReview,
         chatSessionStore,
         transcriptStore,
         toolRegistry,
         permissionEngine,
         skillStore: nativeSkillStore,
+        nativeMcpStore,
+        nativeMcpClientManager,
         computerUseController,
         now: options.now,
       })
@@ -1566,10 +1679,21 @@ function createAgentService(options) {
         pluginStore?.purgeProfileBindings(profile.id);
         for (const store of retentionStores) store.purgeProfile(profile.id);
         productStore.purgeArchivedProfile(profile.id);
-        transcriptStore.forgetProfile(profile.id);
-        memoryStore.forgetProfile(profile.id);
-        nativeSkillStore.profileManifests?.delete(profile.id);
-        eventBuffer.append("agent.profile.changed", { profileId: profile.id, backendId: profile.backendId });
+      },
+      finalizePurge(profileId) {
+        // Called after Product deletion and again for a journaled partial purge
+        // whose Profile is missing on restart. The recall-policy installation
+        // anchor lives outside the Profile directory and must be finalized
+        // before retention drops its recovery journal.
+        transcriptStore.forgetProfile(profileId);
+        memoryStore.forgetProfile(profileId);
+        memoryEngine.forgetProfile(profileId);
+        memoryEngine.recallPolicy.forgetProfile(profileId);
+        memoryProvenanceStore.forgetProfile(profileId);
+        conversationRecallService.forgetProfile(profileId);
+        nativeSkillStore.profileManifests?.delete(profileId);
+        eventBuffer.append("agent.profile.changed", { profileId,
+          backendId: "shoggoth" });
       },
     }) : null;
   const agentLifecycleServiceController = options.agentLifecycleServiceController
@@ -1619,6 +1743,37 @@ function createAgentService(options) {
     ))) {
     throw new TypeError("Agent Lifecycle Service Controller 必须提供 open/close/handle");
   }
+  const MEMORY_CANDIDATE_BACKLOG_INTERVAL_MS = 5 * 60_000;
+  let memoryCandidateBacklogTimer = null;
+  let memoryCandidateAbortController = null;
+  const scheduleMemoryCandidateBacklog = (delayMs) => {
+    if (lifecycleState !== "started" || memoryCandidateBacklogTimer
+      || typeof memoryCandidateService?.processBacklog !== "function") return;
+    memoryCandidateBacklogTimer = setTimeout(() => {
+      memoryCandidateBacklogTimer = null;
+      if (lifecycleState !== "started" || !memoryCandidateAbortController) return;
+      const controller = memoryCandidateAbortController;
+      Promise.resolve(memoryCandidateService.processBacklog({ signal: controller.signal }))
+        .then((result) => {
+          if (result?.failed > 0) {
+            console.error("[agent-service] memory candidate backlog deferred:",
+              JSON.stringify({ failed: result.failed, failures: result.failures }));
+          }
+        })
+        .catch((error) => {
+          const code = typeof error?.code === "string"
+            && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(error.code)
+            ? error.code : "MEMORY_CANDIDATE_BACKLOG_FAILED";
+          console.error(`[agent-service] memory candidate backlog failed: ${code}`);
+        })
+        .finally(() => {
+          if (lifecycleState === "started" && memoryCandidateAbortController === controller) {
+            scheduleMemoryCandidateBacklog(MEMORY_CANDIDATE_BACKLOG_INTERVAL_MS);
+          }
+        });
+    }, delayMs);
+    memoryCandidateBacklogTimer.unref?.();
+  };
   const queueMemoryConsolidation = (run, payload) => {
     if (!["chat", "inspiration"].includes(run?.source) || payload?.status !== "completed") return;
     setImmediate(() => {
@@ -1628,9 +1783,6 @@ function createAgentService(options) {
       try { memoryEngine.consolidate(run.profileId); } catch {}
     });
   };
-  const isNativeFederationChatRun = (run) => run?.source === "chat"
-    && typeof run.idempotencyKey === "string"
-    && /^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey);
   const synchronizedSessionKey = (run) => run?.source === "inspiration"
     ? inspirationStore.executionForRun(run.id)?.sessionKey ?? null
     : run?.source === "cron" ? workRunCoordinator.getRunSessionKey(run)
@@ -1696,6 +1848,23 @@ function createAgentService(options) {
   };
   const handleRunTerminal = (run, payload) => {
     queueMemoryConsolidation(run, payload);
+    if (payload?.status === "completed" && ["chat", "inspiration"].includes(run?.source)
+      && !isNativeFederationChatRun(run)) {
+      // A completed direct user conversation is an extraction trigger, not consent to make
+      // durable memory. The bounded worker can only populate the review queue.
+      setImmediate(() => {
+        if (lifecycleState !== "started") return;
+        const session = candidateSessionForCompletedRun(run, payload,
+          chatSessionStore, inspirationStore);
+        if (!session) return;
+        try {
+          Promise.resolve(memoryCandidateService.processSession({
+            profileId: run.profileId, sessionId: session.id,
+            ...(memoryCandidateAbortController ? { signal: memoryCandidateAbortController.signal } : {}),
+          })).catch(() => {});
+        } catch {}
+      });
+    }
     publishFederationTerminal(run, payload);
     if (run?.source === "inspiration") inspirationService.onRunTerminal(run);
     setImmediate(() => {
@@ -1745,6 +1914,25 @@ function createAgentService(options) {
     productMcpApprovalPolicy,
     onRunInteraction: handleRunInteraction,
     onRunTerminal: handleRunTerminal,
+    onTranscriptCommitted: (_event, run) => {
+      conversationRecallService.scheduleWarm(run.profileId);
+    },
+    verifyMemoryExtractionSource: ({ profileId, sessionId, events }) => {
+      // Candidate prompts are frozen before a Runtime is acquired. A forget,
+      // context exclusion or journal replacement during that wait must stop
+      // the model call, not merely discard its eventual candidate output.
+      try {
+        return events.every(({ eventId, text }) => {
+          const raw = transcriptStore.getEvent(profileId, sessionId, eventId);
+          if (!raw || raw.kind !== "user" || !Number.isSafeInteger(raw.seq)) return false;
+          const page = conversationRecallService.scanEligibleSession({ profileId, sessionId,
+            afterSeq: raw.seq - 1, limit: 1, completedOnly: true });
+          return page.events.some((current) => current.eventId === eventId
+            && current.seq === raw.seq && current.kind === "user" && current.text === text
+            && conversationRecallService.assertCandidateSourceCurrent(profileId, current));
+        });
+      } catch { return false; }
+    },
     onRuntimeContextChanged: (payload) => eventBuffer.append("runtime.context.updated", payload),
     runtimeSelectionPolicyStore,
     getCapabilityPolicyRevision: profileId => {
@@ -1793,6 +1981,30 @@ function createAgentService(options) {
     getRuntimeContext: (session) => coordinator.getRuntimeContext?.(session),
   });
   let workRunCoordinator = options.workRunCoordinator || createDefaultWorkRunCoordinator();
+  const conversationRecallService = options.conversationRecallService || new ConversationRecallService({
+    paths, transcriptStore, chatSessionStore, workDispatcher, memoryStore,
+    getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
+    recallPolicy: memoryEngine.recallPolicy,
+    semanticSearch: nativeMemorySemanticService,
+    getInspirationOrigin: (run) => inspirationStore.executionForRun(run.id),
+  });
+  if (!memoryCandidateService) {
+    memoryCandidateService = new MemoryCandidateService({
+      candidateStore: memoryCandidateStore, memoryEngine, memoryStore,
+      conversationRecallService, chatSessionStore,
+      provenanceService: memoryProvenanceService,
+      extractCandidates: (input) => workRunCoordinator.extractMemoryCandidatesModelOnly(input),
+      isProfileEligible: (profileId) => productStore.getAgentProfile(profileId)?.enabled === true,
+      getProfileGeneration: (profileId) => productStore.getAgentProfile(profileId)?.updatedAt ?? null,
+      now: options.now,
+    });
+  }
+  memoryEngine.recallPolicy?.setOnChange?.((profileId) => {
+    nativeMemorySemanticService.invalidateProfile(profileId);
+    conversationRecallService.refreshProfile(profileId);
+    nativeMemorySemanticService.scheduleMemory(profileId);
+    conversationRecallService.scheduleWarm(profileId);
+  });
   const sessionRuntimeController = require("./session-runtime-controller").createSessionRuntimeController({
     productStore, chatSessionStore, transcriptStore, getCoordinator: () => workRunCoordinator, facts: runtimeSupportFacts,
     policyStore: runtimeSelectionPolicyStore,
@@ -1896,6 +2108,7 @@ function createAgentService(options) {
   let mcpAuthMigration = null;
   let storeOpened = false;
   let pluginStoreOpened = false;
+  let externalPluginProvenanceOpened = false;
   let tokenUsageStoreOpened = false;
   let secretStoreOpened = false;
   let mcpCryptoBrokerOpened = false;
@@ -1914,6 +2127,7 @@ function createAgentService(options) {
   let transcriptStoreOpened = false;
   let memoryStoreOpened = false;
   let memoryEngineOpened = false;
+  let memoryProvenanceStoreOpened = false;
   let permissionEngineOpened = false;
   let nativeSkillStoreOpened = false;
   let nativeMcpStoreOpened = false;
@@ -2025,8 +2239,12 @@ function createAgentService(options) {
       pluginRuntimeToolService,
       conversationMemoryService: new ConversationMemoryService({
         memoryEngine, memoryStore, transcriptStore, chatSessionStore,
+        memoryProvenanceService,
+        semanticSearch: nativeMemorySemanticService,
         getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
+        getInspirationOrigin: (run) => inspirationStore.executionForRun(run.id),
       }),
+      conversationRecallService,
       conversationDefinitionService: new ConversationDefinitionService({
         definitionStore: agentDefinitionStore, productStore, transcriptStore, chatSessionStore,
         agentLifecycleService: agentLifecycleServiceController,
@@ -2415,6 +2633,15 @@ function createAgentService(options) {
       MCP_AUTH_FAILED: "mcp_auth_failed",
       MCP_AUTH_REQUEST_INVALID: "mcp_auth_request_invalid",
       MCP_SESSION_INVALID: "mcp_session_invalid",
+      EXTERNAL_PLUGIN_LEASE_INVALID: "external_plugin_lease_invalid",
+      EXTERNAL_PLUGIN_LEASE_BUSY: "external_plugin_lease_busy",
+      EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE: "external_plugin_audit_unavailable",
+      CAPABILITY_FORBIDDEN: "capability_forbidden",
+      GRANT_REVOKED: "grant_revoked",
+      TOOL_CONTRACT_CHANGED: "tool_contract_changed",
+      CATALOG_REVISION_CHANGED: "catalog_revision_changed",
+      CALL_ALREADY_RECORDED: "call_already_recorded",
+      PLUGIN_RUNTIME_CAPACITY: "plugin_runtime_capacity",
       ...MCP_TOOL_PUBLIC_MESSAGES,
     };
     errorResponse(socket, id, code, messages[code] || "mcp_auth_failed");
@@ -2527,6 +2754,56 @@ function createAgentService(options) {
           throw serviceError("MCP_AUTH_REQUEST_INVALID", "mcp_auth_request_invalid");
         }
         result = federationMcpSessionManager.issue(request.params);
+      } else if (request.method.startsWith("plugin.external.")) {
+        if (lifecycleState !== "started" || !externalPluginToolService) {
+          throw serviceError("SERVICE_UNAVAILABLE", "service_unavailable");
+        }
+        const params = request.params;
+        const fields = request.method === "plugin.external.open"
+          ? ["credentialToken", "identity"]
+          : request.method === "plugin.external.search"
+            ? ["token", "identity", "query", "cursor", "limit", "revision"]
+            : request.method === "plugin.external.skill.read"
+              ? ["token", "identity", "skillId", "cursor"]
+              : request.method === "plugin.external.skill.file.read"
+                ? ["token", "identity", "skillId", "relativePath", "cursor"]
+              : request.method === "plugin.external.call"
+                ? ["token", "identity", "serverId", "toolName", "arguments"]
+                : ["token", "identity"];
+        if (!exactObject(params, fields)
+          && !(request.method === "plugin.external.search"
+            && exactObject(params, ["token", "identity", "query", "cursor", "limit"]))) {
+          throw serviceError("MCP_AUTH_REQUEST_INVALID", "mcp_auth_request_invalid");
+        }
+        if (request.method === "plugin.external.open") result = await externalPluginToolService.open(params);
+        else if (request.method === "plugin.external.search") result = await externalPluginToolService.search(params);
+        else if (request.method === "plugin.external.skill.read") result = await externalPluginToolService.readSkill(params);
+        else if (request.method === "plugin.external.skill.file.read") result = await externalPluginToolService.readSkillFile(params);
+        else if (request.method === "plugin.external.call") {
+          let finished = false;
+          let disconnected = false;
+          // The one-shot socket uses allowHalfOpen. Once a complete JSONL frame
+          // is parsed, acceptSocket marks it terminal and its generic `end`
+          // handler intentionally leaves the readable half alone. A vanished
+          // adapter can therefore emit `end` without `close` until this call
+          // finishes. Treat either event as cancellation for this long call.
+          const onDisconnect = () => {
+            if (!finished && !disconnected) {
+              disconnected = true;
+              try { externalPluginToolService.cancel(params); } catch { /* Already settled or revoked. */ }
+            }
+          };
+          socket.once("end", onDisconnect);
+          socket.once("close", onDisconnect);
+          if (socket.readableEnded || socket.destroyed) onDisconnect();
+          try { result = await externalPluginToolService.call(params); }
+          finally {
+            finished = true;
+            socket.off("end", onDisconnect);
+            socket.off("close", onDisconnect);
+          }
+        }
+        else { externalPluginToolService.cancel(params); result = { canceled: true }; }
       } else if (request.method === "mcp.auth.challenge") {
         const manager = await ensureMcpSessionManager();
         result = manager.issueChallenge(request.params);
@@ -2829,6 +3106,43 @@ function createAgentService(options) {
       }
       const afterSeq = hasCursor ? rawCursor : 0;
       result = eventBuffer.page(afterSeq, id);
+    } else if (request.method === "plugins.external.calls.list") {
+      try {
+        if (!exactObject(request, [...baseFields, "params"])
+          || (!exactObject(request.params, ["backendId", "cursor", "limit"])
+            && !exactObject(request.params, ["backendId", "agentId", "sessionId",
+              "toolCallId", "cursor", "limit"]))) {
+          throw serviceError("PLUGIN_REQUEST_INVALID", "插件调用记录查询参数无效");
+        }
+        result = externalPluginProvenance.list(request.params);
+      } catch (error) {
+        const code = error?.code === "PLUGIN_REQUEST_INVALID"
+          ? "PLUGIN_REQUEST_INVALID" : "EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE";
+        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
+        return;
+      }
+    } else if (typeof request.method === "string"
+      && request.method.startsWith("plugins.external.approvals.")) {
+      try {
+        if (!externalPluginApprovalBroker || !exactObject(request, [...baseFields, "params"])) {
+          throw serviceError("PLUGIN_REQUEST_INVALID", "外部插件审批请求无效");
+        }
+        if (request.method === "plugins.external.approvals.list"
+          && exactObject(request.params, ["backendId", "cursor", "limit"])) {
+          result = externalPluginApprovalBroker.list(request.params);
+        } else if (request.method === "plugins.external.approvals.prepare"
+          && exactObject(request.params, ["requestId", "operationId", "decision"])) {
+          result = externalPluginApprovalBroker.prepare(request.params);
+        } else if (request.method === "plugins.external.approvals.commit"
+          && exactObject(request.params, ["challenge", "approved"])) {
+          result = externalPluginApprovalBroker.commit(request.params);
+        } else throw serviceError("PLUGIN_REQUEST_INVALID", "外部插件审批请求无效");
+      } catch (error) {
+        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
+          ? error.code : "PLUGIN_REQUEST_INVALID";
+        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
+        return;
+      }
     } else if (PLUGIN_SERVICE_METHOD_SET.has(request.method)) {
       if (!pluginServiceController) {
         errorResponse(socket, id, "PLUGIN_UNAVAILABLE", "插件管理服务不可用");
@@ -3068,7 +3382,7 @@ function createAgentService(options) {
         }
         const params = validateAgentHarnessParams(request.method, request.params);
         result = await agentHarnessServiceController.handle(request.method, params);
-        result = validateAgentHarnessResult(request.method, result);
+        result = validateAgentHarnessResult(request.method, result, params);
       } catch (error) {
         const mapped = mapAgentHarnessError(error);
         errorResponse(socket, id, mapped.code, mapped.message);
@@ -3318,6 +3632,12 @@ function createAgentService(options) {
     transcriptStore,
     memoryStore,
     memoryEngine,
+    memoryProvenanceStore,
+    memoryProvenanceService,
+    memoryCandidateStore,
+    memoryCandidateService,
+    conversationRecallService,
+    nativeMemorySemanticService,
     nativeSkillStore,
     runtimeSkillStore,
     nativeMcpStore,
@@ -3334,6 +3654,9 @@ function createAgentService(options) {
     pluginRollbackController,
     pluginConnectionController,
     pluginRuntimeToolService,
+    externalPluginToolService,
+    externalPluginProvenance,
+    externalPluginApprovalBroker,
     pluginMcpConnectionManager,
     pluginCredentialVault,
     pluginConnectionAuth,
@@ -3461,6 +3784,15 @@ function createAgentService(options) {
           if (pluginStore) {
             pluginStoreOpened = true;
             pluginStore.open();
+            // This database is a derived audit view, not product authority.
+            // Keep native chat and plugin management available if it cannot
+            // open; external tool egress will fail closed at audit begin().
+            try {
+              externalPluginProvenance.open();
+              externalPluginProvenanceOpened = true;
+            } catch {
+              console.error("[agent-service] external plugin audit isolated: unavailable");
+            }
             // A crash can leave ProductStore disabled while the separate
             // plugin transaction has not yet run. Fence it before IPC opens.
             for (const profile of productStore.listAgentProfiles()) {
@@ -3477,7 +3809,13 @@ function createAgentService(options) {
           nativeRuntimeConfig.open();
           assertStartGeneration(generation);
           if (options.builtinCliProfiles === true) {
-            ensureBuiltinCliAgentProfiles(productStore);
+            const installedAccounts = options.builtinCliInstalledAccountIds === undefined
+              ? createRuntimeCliAuth({ paths, parentEnv: options.parentEnv || process.env,
+                homedir: options.runtimeStorageHomedir || os.homedir,
+                nativeOnly: true }).filter((entry) => entry.binaryPath !== null)
+                .map((entry) => entry.runtimeAccountId)
+              : options.builtinCliInstalledAccountIds;
+            ensureBuiltinCliAgentProfiles(productStore, new Set(installedAccounts));
           }
           await reconcileProviderCredentialSecrets({ productStore, secretStore });
           assertStartGeneration(generation);
@@ -3522,6 +3860,8 @@ function createAgentService(options) {
           assertStartGeneration(generation);
           memoryStoreOpened = true;
           await memoryStore.open();
+          memoryProvenanceStoreOpened = true;
+          await memoryProvenanceStore.open();
           memoryEngineOpened = true;
           const memoryProfiles = productStore.listAgentProfiles();
           await memoryEngine.open(memoryProfiles.map((profile) => profile.id));
@@ -3623,6 +3963,34 @@ function createAgentService(options) {
           for (const session of chatSessionStore.listSessions()) {
             transcriptStore.ensureSession({ profileId: session.profileId, sessionId: session.id });
           }
+          // An accepted review receipt can survive a crash before its staged
+          // MemoryStore items become active. Recover after session/transcript
+          // stores open so every source is verified before promotion.
+          if (typeof memoryCandidateService?.recoverProfile === "function") {
+            // Startup may have just resumed a journaled archive purge. Do not
+            // recreate that removed Profile's candidate directory from the
+            // pre-purge list captured for MemoryEngine.open().
+            for (const profile of productStore.listAgentProfiles()) {
+              try { memoryCandidateService.recoverProfile(profile.id); }
+              catch (error) {
+                // A broken optional review queue leaves reviewed items hidden.
+                // Primary MemoryStore failures still fail service startup.
+                if (!["MEMORY_CANDIDATE_UNAVAILABLE", "MEMORY_CANDIDATE_CORRUPT"].includes(error?.code)) {
+                  throw error;
+                }
+              }
+            }
+          }
+          // On first open, session evidence is not yet readable. A Profile
+          // with a previously forgotten and then reauthorized fact may have
+          // deferred generated-view rebuilding until this point.
+          for (const profile of productStore.listAgentProfiles()) {
+            if (!memoryEngine.viewStatus(profile.id).stale) continue;
+            try { memoryEngine.rebuildViews(profile.id); }
+            catch (error) {
+              if (error?.code !== "RECALL_POLICY_UNAVAILABLE") throw error;
+            }
+          }
           assertStartGeneration(generation);
           pendingCommandInboxOpened = true;
           await pendingCommandInbox.open();
@@ -3715,6 +4083,18 @@ function createAgentService(options) {
           if (typeof options.onServerReady === "function") options.onServerReady(server);
           assertStartGeneration(generation);
           lifecycleState = "started";
+          // Model validation and indexing run off the launch/admission path.
+          void nativeMemorySemanticService.start().catch(() => {});
+          memoryCandidateAbortController = new AbortController();
+          // Recover terminal callbacks lost at a crash, and page tails that
+          // exceeded the previous bounded extraction wake.
+          scheduleMemoryCandidateBacklog(15_000);
+          for (const profile of productStore.listAgentProfiles()) {
+            if (profile.enabled) {
+              nativeMemorySemanticService.scheduleMemory(profile.id);
+              conversationRecallService.scheduleWarm(profile.id);
+            }
+          }
           if (typeof agentLifecycleServiceController.runMaintenance === "function") {
             agentArchiveRetention?.start(
               (action) => agentLifecycleServiceController.runMaintenance(action),
@@ -3790,7 +4170,7 @@ function createAgentService(options) {
       if (lifecycleState === "stopping" || lifecycleState === "stop_failed") return stopping;
       const ownsInstance = server !== null || lockFd !== null
         || ownedSocketIdentity !== null || ownedLockIdentity !== null || storeOpened
-        || pluginStoreOpened
+        || pluginStoreOpened || externalPluginProvenanceOpened
         || bridgeSockets.size > 0
         || secretStoreOpened || mcpCryptoBrokerOpened || mcpSessionManager
         || providerRuntimeOpened || providerServiceOpened || accountAuthStateOpened
@@ -3840,6 +4220,10 @@ function createAgentService(options) {
 
   async function cleanupService(stopOptions = {}) {
     const errors = [];
+    if (memoryCandidateBacklogTimer) clearTimeout(memoryCandidateBacklogTimer);
+    memoryCandidateBacklogTimer = null;
+    memoryCandidateAbortController?.abort();
+    memoryCandidateAbortController = null;
     if (agentArchiveRetention?.opened) {
       try { await agentArchiveRetention.close(); } catch (error) { errors.push(error); }
     }
@@ -3992,6 +4376,12 @@ function createAgentService(options) {
       inspirationStoreOpened = false;
       try { inspirationStore.close(); } catch (error) { errors.push(error); }
     }
+    try { conversationRecallService.close(); } catch (error) { errors.push(error); }
+    try { await nativeMemorySemanticService.close(); } catch (error) { errors.push(error); }
+    if (memoryProvenanceStoreOpened) {
+      memoryProvenanceStoreOpened = false;
+      try { memoryProvenanceStore.close(); } catch (error) { errors.push(error); }
+    }
     if (conversationCheckpointStoreOpened) {
       conversationCheckpointStoreOpened = false;
       try { await conversationCheckpointStore.close(); } catch (error) { errors.push(error); }
@@ -4050,6 +4440,8 @@ function createAgentService(options) {
       pluginMcpConsent?.clear();
       pluginAppController?.clear();
       pluginRuntimeToolService?.clear();
+      externalPluginToolService?.clear();
+      externalPluginApprovalBroker?.clear();
       pluginMcpConnectionManager?.clear();
       try { await pluginMcpConnectionPool.close(); } catch (error) { errors.push(error); }
     }
@@ -4077,6 +4469,10 @@ function createAgentService(options) {
       try { await computerUseController.close(); } catch (error) { errors.push(error); }
     }
     if (pluginStoreOpened) {
+      if (externalPluginProvenanceOpened) {
+        externalPluginProvenanceOpened = false;
+        try { externalPluginProvenance.close(); } catch (error) { errors.push(error); }
+      }
       pluginStoreOpened = false;
       try { pluginStore.close(); } catch (error) { errors.push(error); }
     }
@@ -4144,5 +4540,6 @@ module.exports = {
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
   attachAcceptedSocketErrorGuard,
+  candidateSessionForCompletedRun,
   createAgentService,
 };

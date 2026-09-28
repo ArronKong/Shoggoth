@@ -22,7 +22,6 @@ export interface NotifyPayload {
   body: string;
   // Strings retain existing chat / inspiration and legacy cron click targets.
   target?: NotifyTarget | null;
-  force?: boolean; // 设置 test button: bypass focus + toggle gating
 }
 
 export interface OpenTargetPayload {
@@ -114,8 +113,7 @@ export async function fireNotification(p: NotifyPayload, opts?: { onClick?: () =
   }
   // Dev / web fallback.
   if (typeof Notification === "undefined") return false;
-  if (!p.force && typeof document !== "undefined" && document.hasFocus()) return false;
-  // 创建成功才向调用方报告 true，设置页据此给出可见反馈。
+  if (typeof document !== "undefined" && document.hasFocus()) return false;
   const show = (): boolean => {
     try {
       const n = new Notification(p.title, { body: p.body });

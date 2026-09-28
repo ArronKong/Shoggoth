@@ -98,6 +98,20 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
               : detail.converted.skills > 0 ? "plugins.detailAccountPendingWithSkills"
                 : "plugins.detailAccountPending")}
           </p>}
+        {detail.connectionWarnings.map(warning => <aside key={warning.name}
+          className={styles.sourceNotice} role="status">
+          <strong>{t("plugins.googleDesktopOAuthWarningTitle")}</strong>
+          <p>{t("plugins.googleDesktopOAuthRequired")}</p>
+        </aside>)}
+        {detail.sourceWarnings?.map(warning => <aside key={`${warning.code}-${warning.source}`}
+          className={styles.sourceNotice} role="status">
+          <strong>{t("plugins.detailSourceWarningTitle")}</strong>
+          <p>{t("plugins.detailSourceMissingReferences", {
+            source: warning.source, count: warning.targets.length,
+          })}</p>
+          <ul>{warning.targets.map(target => <li key={target}><code>{target}</code></li>)}</ul>
+          <p>{t("plugins.detailSourceMissingImpact")}</p>
+        </aside>)}
         {item.importStatus === "previewable" && detail.prompts.length > 0 && <section className={styles.promptPanel}
           aria-label={t("plugins.detailExamples")}>
           <span className={styles.panelLabel}>{t("plugins.detailExamples")}</span>

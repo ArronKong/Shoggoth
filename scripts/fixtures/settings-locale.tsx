@@ -74,6 +74,17 @@ state.fetch = async (input: unknown, init?: RequestInit) => {
       disabled: config.disabledBackends.includes(backend.id),
       info: { connectionMode: backend.connectionMode, agents: 1 },
     })) };
+  } else if (connections && url.pathname === "/__api/shoggoth/status") {
+    payload = { service: { healthy: true, serviceVersion: "0.8.151",
+      domainAvailability: { kanban: true, cron: true }, pendingCommandsLocked: false,
+      mcpCredentialsLocked: false }, background: { supported: true, installed: true,
+      enabled: true, loaded: true, needsRepair: false } };
+  } else if (connections && url.pathname === "/__api/runtime-status") {
+    payload = { runtimes: ["Codex", "Pi", "Antigravity"].map((name) => ({
+      backendId: "shoggoth", runtime: name.toLowerCase(), name,
+      runtimeAccountId: `fixture-${name.toLowerCase()}`, enabled: true,
+      releaseEnabled: true, installation: "available", serviceConnected: true,
+    })) };
   } else if (["/__api/backends", "/__api/status", "/__api/versions", "/__api/self-updates"].includes(url.pathname)) {
     payload = { backends: [], versions: [], updates: [] };
   } else {
@@ -142,6 +153,13 @@ state.checkLocale = async (locale: string, title: string, configuredLocale = loc
   check(i18n.language === locale && document.documentElement.lang === locale, "active locale and html lang must agree");
   check(document.querySelector("#persistent-label")?.textContent === title, "already-mounted components must translate");
   check(document.querySelector("#persistent-markdown .code-block-copy__idle")?.textContent === (locale === "en" ? "Copy" : "复制"), "cached Markdown controls must translate");
+  const notificationText = document.querySelector("#settings-notif")?.textContent || "";
+  check(notificationText.includes(locale === "en" ? "Task and inspiration notifications" : "任务和灵感通知"), "merged notification label must translate");
+  check(notificationText.includes(locale === "en" ? "Get notified when a task or inspiration changes status." : "任务或灵感状态发生变化时通知你。"), "merged notification description must translate");
+  check(!notificationText.includes(locale === "en" ? "Scheduled job runs" : "定时任务运行"), "scheduled jobs must not have a separate switch");
+  check(!document.querySelector("#settings-notif .settings-notification-footer button"), "test notification button must stay absent");
+  check(!document.body.textContent?.includes(locale === "en" ? "Change this shortcut in the Shoggoth desktop app settings." : "请在 Shoggoth 桌面 App 的设置中更改快捷键。"), "desktop-only shortcut guidance must stay absent");
+  check(!document.body.textContent?.includes(locale === "en" ? "Update controls are available in the Shoggoth desktop app." : "请在 Shoggoth 桌面 App 中使用更新功能。"), "desktop-only update guidance must stay absent");
   check(noSaveActions(), "settings must have no manual save or discard actions");
 };
 state.runFixture = async () => {
@@ -150,6 +168,8 @@ state.runFixture = async () => {
   check(noSaveActions(), "no save buttons on first load");
   check(!document.querySelector(".settings-save-state"), "no automatic-save hint in the page header");
   check(!document.querySelector('input[name="settings-theme"]'), "theme picker must stay hidden");
+  check([...document.querySelectorAll<HTMLButtonElement>("#settings-notif [role=switch]")]
+    .map(node => node.getAttribute("aria-checked")).join() === "true,true", "new notification settings default to on");
   await state.chooseLocale("English");
   await state.checkLocale("en", "Settings");
   check(config.locale === "en" && localStorage.getItem("openclaw.i18n.locale") === "en", "English saves and seeds the boot cache");
@@ -172,12 +192,13 @@ state.runFixture = async () => {
   // Slow disk/network responses must not disable or overwrite later switches.
   state.saveDelay = 120;
   const switches = () => [...document.querySelectorAll<HTMLButtonElement>("#settings-notif [role=switch]")];
+  check(switches().length === 2, "notifications expose only chat and the shared task/inspiration switch");
   const beforeRapid = state.fixtureWrites;
-  for (const index of [0, 1, 0, 2]) { switches()[index].click(); await pause(10); }
-  await wait(() => state.fixtureWrites === beforeRapid + 4, "queued preference writes");
+  for (const index of [0, 1, 0]) { switches()[index].click(); await pause(10); }
+  await wait(() => state.fixtureWrites === beforeRapid + 3, "queued preference writes");
   await pause(30);
   check(JSON.stringify(config.notifications) === JSON.stringify({ chat: true, cron: false, task: false }), "all rapid notification choices must persist, including a reversal");
-  check(switches().map(node => node.getAttribute("aria-checked")).join() === "true,false,false", "old responses must not revert visible choices");
+  check(switches().map(node => node.getAttribute("aria-checked")).join() === "true,false", "old responses must not revert visible choices");
   check(state.maxActiveWrites === 1, "preference requests must be serialized");
 
   // A failed earlier request must not roll back a later edit of the same control.
@@ -200,8 +221,8 @@ state.runFixture = async () => {
   check(state.fixtureWrites === beforeText + 1 && editor.open, "endpoint saves once and preserves its expanded editor");
   editInput(input, "ws://"); await pause(550);
   check(config.gatewayUrl === "ws://127.0.0.1:3" && input.getAttribute("aria-invalid") === "true", "invalid endpoint must not overwrite the working connection");
-  switches()[2].click();
-  await wait(() => config.notifications.task, "preferences save despite incomplete endpoint");
+  switches()[1].click();
+  await wait(() => config.notifications.task && config.notifications.cron, "both merged notification categories save despite incomplete endpoint");
   check(config.gatewayUrl === "ws://127.0.0.1:3", "preference patch must exclude invalid endpoint");
 
   // Leaving immediately flushes a valid pending text edit and finishes queued writes.
@@ -231,6 +252,11 @@ state.runFixture = async () => {
 state.runConnectionsFixture = async () => {
   await wait(() => state.fixtureReady() && document.querySelectorAll(".settings-backend").length === FALLBACK_BACKEND_DESCRIPTORS.length, "all connections ready");
   check(!document.querySelector('.settings-page [role="tablist"], .settings-page [role="tabpanel"]'), "settings must not require category tabs");
+  await wait(() => document.querySelector("#settings-shoggoth.settings-service-hero--ready"), "shared service card ready");
+  await wait(() => document.querySelectorAll("#settings-local-runtimes .settings-cli-tile").length === 3, "local CLI tiles ready");
+  check(document.getElementById("settings-conn")?.nextElementSibling?.id === "settings-service",
+    "connections must precede the background service");
+  check(!document.getElementById("settings-native-capacity"), "native capacity must not appear in Settings");
   const groupsVisible = () => ["settings-general", "settings-connections"].every((id) => document.getElementById(id)!.getBoundingClientRect().height > 0);
   check(groupsVisible(), "preferences and connections must be displayed together");
   const heading = document.querySelector("h1");
@@ -282,9 +308,11 @@ state.runConnectionsFixture = async () => {
     }
     retained();
   };
-  for (const id of ["openclaw", "hermes", "codex", "shoggoth"]) await toggle(id, true);
-  await toggle("codex", false);
-  await toggle("shoggoth", false, true);
+  check(!row("shoggoth").querySelector(".settings-backend-row .settings-backend-actions .ui-cbtn"),
+    "Shoggoth cannot be disconnected from its backend card");
+  for (const id of ["openclaw", "hermes"]) await toggle(id, true);
+  await toggle("hermes", false);
+  await toggle("openclaw", false, true);
   await pause(900);
   retained();
   editInput(input, "ws://127.0.0.1:9");

@@ -19,6 +19,7 @@ const {
 const { CodexRuntimeAdapter } = require("./codex-runtime-adapter");
 const { RuntimeMcpCallBindings, parseBindingElicitation } = require("./runtime-mcp-call-binding");
 const { runtimeCommandUsesReservedHostCapability } = require("./runtime-host-command-policy");
+const { classifyProviderFailure } = require("./runtime-provider-errors");
 const { startManualCompaction } = require("./runtime-manual-compaction");
 const {
   STARTUP_STAGES,
@@ -72,6 +73,7 @@ const MAX_PROMPT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_PENDING_REQUESTS = 100;
 const MAX_SESSION_APPROVAL_SCOPES = 256;
 const MAX_DOMAIN_EXECUTIONS = 8_192;
+const MAX_MEMORY_EXTRACTION_TASKS = 8;
 const MAX_DOMAIN_PROMPT_BYTES = 1024 * 1024;
 const MAX_THREAD_SOURCE_BYTES = 256;
 const MAX_TRUSTED_ACCOUNT_BACKOFF_MS = 366 * 24 * 60 * 60 * 1_000;
@@ -131,6 +133,7 @@ const PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES = new Set([
   "RUNTIME_MODEL_CATALOG_UNAVAILABLE",
   "RUNTIME_MODEL_CATALOG_INVALID",
   "RUNTIME_MODEL_UNAVAILABLE",
+  "RUNTIME_MODEL_SETTINGS_INVALID",
   "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE",
   "GROK_ACP_REQUEST_TIMEOUT",
   "GROK_ACP_WRITE_FAILED",
@@ -166,6 +169,7 @@ const SAFE_RUNTIME_CAUSE_CODES = new Map([
     "GROK_ACP_PROCESS_EXITED"].map((code) => [code, "RUNTIME_CONNECTION_LOST"]),
 ]);
 const START_OPERATIONAL_ERROR_CODES = new Set([
+  "CONTEXT_SOURCE_STALE",
   "EXECUTION_CONTRACT_STALE",
   "EXECUTION_BINDING_UNAVAILABLE",
   "AUTH_REQUIRED",
@@ -236,6 +240,7 @@ function publicStartErrorCode(error) {
   const operationalCode = publicRuntimeOperationalErrorCode(error);
   if (operationalCode) return operationalCode;
   const code = ownDataErrorCode(error);
+  if (code === "CONTEXT_SOURCE_STALE") return code;
   return runtimeStageFromError(error) ? code : "RUNTIME_START_FAILED";
 }
 
@@ -245,8 +250,11 @@ function failedTurnErrorCode(turn, fallback = "RUNTIME_TURN_FAILED") {
     return RUNTIME_AUTH_REQUIRED_CODE;
   }
   if (turn?.error?.codexErrorInfo === "usageLimitExceeded") return "RUNTIME_QUOTA_EXHAUSTED";
+  if (turn?.error?.codexErrorInfo === "serverOverloaded") return "RUNTIME_UPSTREAM_UNAVAILABLE";
   if (PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES.has(turn?.errorCode)) return turn.errorCode;
   if (SAFE_RUNTIME_CAUSE_CODES.has(turn?.errorCode)) return SAFE_RUNTIME_CAUSE_CODES.get(turn.errorCode);
+  const providerFailure = classifyProviderFailure(turn?.error?.message, turn?.error?.additionalDetails);
+  if (providerFailure) return providerFailure;
   return fallback;
 }
 
@@ -629,6 +637,10 @@ class WorkRunCoordinator {
     if (options.onTranscriptCommitted !== undefined && typeof options.onTranscriptCommitted !== "function") {
       throw coordinatorError("WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED", "onTranscriptCommitted 必须是函数");
     }
+    if (options.verifyMemoryExtractionSource !== undefined
+      && typeof options.verifyMemoryExtractionSource !== "function") {
+      throw coordinatorError("WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED", "记忆提炼来源校验器必须是函数");
+    }
     if (options.onRunTerminal !== undefined && typeof options.onRunTerminal !== "function") {
       throw coordinatorError("WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED", "onRunTerminal 必须是函数");
     }
@@ -790,6 +802,7 @@ class WorkRunCoordinator {
     this.productStore = options.productStore;
     this.usageStore = options.usageStore || null;
     this.transcriptStore = options.transcriptStore || null;
+    this.verifyMemoryExtractionSource = options.verifyMemoryExtractionSource || null;
     this.contextCompiler = options.contextCompiler || null;
     this.conversationCheckpointStore = options.conversationCheckpointStore || null;
     this.sourceConversationStore = options.sourceConversationStore || null;
@@ -891,6 +904,7 @@ class WorkRunCoordinator {
     this.recoveringRuns = new Set();
     this.runAccountAdmissions = new Map();
     this.domainCommands = new Map();
+    this.memoryExtractionTasks = new Map();
     this.runHostAssignments = new Map();
     this.runPerformance = new Map();
     this.hostObservers = new Map();
@@ -933,6 +947,8 @@ class WorkRunCoordinator {
         this.runExecutionContracts.clear();
         this.recoveringRuns.clear();
         this.domainCommands.clear();
+        for (const task of this.memoryExtractionTasks.values()) task.controller.abort();
+        this.memoryExtractionTasks.clear();
         this.runHostAssignments.clear();
         this.runPerformance.clear();
         this.#cancelTerminalRetryWaiters();
@@ -976,6 +992,7 @@ class WorkRunCoordinator {
     this.contextRecoveryLimits.clear();
     this.contextHandoffs.clear();
     for (const controller of this.startupControllers.values()) controller.abort();
+    for (const task of this.memoryExtractionTasks.values()) task.controller.abort();
     this.lifecycleGeneration += 1;
     this.#cancelTerminalRetryWaiters();
     this.#cancelAllPendingRequests();
@@ -988,6 +1005,7 @@ class WorkRunCoordinator {
         const tails = [...this.runTails.values()];
         await Promise.allSettled(tails);
       }
+      await Promise.allSettled([...this.memoryExtractionTasks.values()].map((task) => task.promise));
       const admissionReleaseErrors = this.#releaseAllRuntimeAccountAdmissions();
       this.state = "closed";
       this.runTails.clear();
@@ -997,6 +1015,7 @@ class WorkRunCoordinator {
       this.runExecutionContracts.clear();
       this.recoveringRuns.clear();
       this.domainCommands.clear();
+      this.memoryExtractionTasks.clear();
       this.runHostAssignments.clear();
       this.runPerformance.clear();
       for (const observer of this.hostObservers.values()) {
@@ -1231,17 +1250,25 @@ class WorkRunCoordinator {
     return renewed;
   }
 
-  #refreshCheckpointSession(session) {
-    const invalidation = this.conversationCheckpointStore.invalidation?.(session.profileId, session.id,
-      runtimeSessionIdOf(session), session.runtimeBindingId);
-    if (invalidation && invalidation.nativeSessionId === runtimeSessionIdOf(session)
-      && invalidation.bindingId === session.runtimeBindingId
+  #refreshCheckpointSession(session, { checkpoint = true } = {}) {
+    const invalidation = checkpoint ? this.conversationCheckpointStore.invalidation?.(session.profileId, session.id,
+      runtimeSessionIdOf(session), session.runtimeBindingId) : null;
+    // Native history may contain a fact that has since been corrected or
+    // withdrawn even when no product checkpoint has ever been produced.
+    const nativeMemoryStale = this.conversationCheckpointStore.nativeSessionStale?.(
+      session.profileId, session.id, runtimeSessionIdOf(session), session.runtimeBindingId) === true;
+    if (((invalidation && invalidation.nativeSessionId === runtimeSessionIdOf(session)
+      && invalidation.bindingId === session.runtimeBindingId) || nativeMemoryStale)
       && !this.listSessionRuns(session.sessionKey).some(run => ACTIVE_RUN_STATES.has(run.status))) {
+      if (!session.runtimeBindingId) {
+        throw coordinatorError("CONTEXT_NATIVE_SESSION_UNBOUND", "旧 native session 缺少可核实的 Runtime Binding");
+      }
       session = this.chatSessionStore.switchRuntime(session.sessionKey, { bindingId: session.runtimeBindingId,
         revision: session.revision, clearModelOverride: false, permissionMode: session.permissionMode ?? null });
       this.onConversationRenewed({ profileId: session.profileId, sessionKey: session.sessionKey });
     }
-    return this.#renewFromCheckpoint(session, this.conversationCheckpointStore.compatible(session.profileId, session.id));
+    return checkpoint ? this.#renewFromCheckpoint(session,
+      this.conversationCheckpointStore.compatible(session.profileId, session.id)) : session;
   }
 
   async compactConversation({ sessionKey, operationId }) {
@@ -1254,6 +1281,174 @@ class WorkRunCoordinator {
     const run = await this.#prepareConversationCompaction(session, { force: true, operationId });
     return { runId: run?.id ?? null, status: !run ? "unchanged" : run.status === "starting" ? "running"
       : ["queued", "running", "completed"].includes(run.status) ? run.status : "failed" };
+  }
+
+  extractMemoryCandidatesModelOnly(input) {
+    this.#assertOpen();
+    const fields = ["profileId", "sessionId", "sessionKey", "workspace", "operationId",
+      "prompt", "events", "toolFree", "maxOutputBytes", "timeoutMs", "extractorVersion",
+      ...(input?.signal === undefined ? [] : ["signal"])];
+    if (!exactObject(input, fields)
+      || !validOpaqueId(input.profileId) || !validOpaqueId(input.sessionId)
+      || !validOpaqueId(input.sessionKey) || !validOpaqueId(input.operationId, 256)
+      || !validOpaqueId(input.extractorVersion)
+      || !((input.workspace === null) || typeof input.workspace === "string"
+        && input.workspace.length > 0 && input.workspace.isWellFormed() && !input.workspace.includes("\0"))
+      || typeof input.prompt !== "string" || !input.prompt.isWellFormed()
+      || input.prompt.includes("\0") || Buffer.byteLength(input.prompt, "utf8") > 128 * 1024
+      || !input.prompt.length || input.toolFree !== true
+      || !Array.isArray(input.events) || input.events.length < 1 || input.events.length > 16
+      || input.events.some((event) => !exactObject(event, ["eventId", "text"])
+        || !validOpaqueId(event.eventId, 256) || typeof event.text !== "string"
+        || !event.text.isWellFormed() || event.text.includes("\0")
+        || Buffer.byteLength(event.text, "utf8") > 4096)
+      || !Number.isSafeInteger(input.maxOutputBytes) || input.maxOutputBytes < 1
+      || input.maxOutputBytes > 16 * 1024
+      || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1
+      || input.timeoutMs > 180_000
+      || (input.signal !== undefined && !(input.signal instanceof AbortSignal))) {
+      throw coordinatorError("MEMORY_EXTRACTION_INVALID", "后台记忆提炼模型调用无效");
+    }
+    const session = this.chatSessionStore.getSession(input.sessionKey);
+    if (!session || session.id !== input.sessionId || session.profileId !== input.profileId
+      || session.workspace !== input.workspace || !["ready", "archived"].includes(session.status)) {
+      throw coordinatorError("MEMORY_EXTRACTION_SOURCE_UNAVAILABLE", "后台记忆提炼会话不可用");
+    }
+    this.#assertMemoryExtractionSourceCurrent(input);
+    const profile = this.#summaryProfile(session);
+    if (!profile?.enabled || !this.runtimeManager.canGenerateModelOnly?.(profile.runtime)) {
+      throw coordinatorError("MODEL_ONLY_UNSUPPORTED", "未配置经验证的无工具模型 Runtime");
+    }
+    if (this.memoryExtractionTasks.has(input.operationId)) {
+      throw coordinatorError("MEMORY_EXTRACTION_CONFLICT", "模型调用 operationId 已在执行");
+    }
+    if (this.memoryExtractionTasks.size >= MAX_MEMORY_EXTRACTION_TASKS) {
+      throw coordinatorError("MEMORY_EXTRACTION_BUSY", "后台记忆提炼并发已满");
+    }
+    const task = { controller: new AbortController(), lifecycle: this.lifecycleGeneration, promise: null };
+    const promise = Promise.resolve().then(() => this.#runMemoryExtractionModelOnly(input, session, profile, task))
+      .finally(() => {
+        if (this.memoryExtractionTasks.get(input.operationId) === task) this.memoryExtractionTasks.delete(input.operationId);
+      });
+    promise.catch(() => {});
+    task.promise = promise;
+    this.memoryExtractionTasks.set(input.operationId, task);
+    return promise;
+  }
+
+  cancelMemoryExtraction(operationId) {
+    this.#assertOpen();
+    if (!validOpaqueId(operationId, 256)) throw coordinatorError("MEMORY_EXTRACTION_INVALID", "operationId 无效");
+    const task = this.memoryExtractionTasks.get(operationId);
+    if (!task) return { canceled: false, operationId };
+    task.controller.abort();
+    return { canceled: true, operationId };
+  }
+
+  #assertMemoryExtractionSourceCurrent(input) {
+    if (!this.verifyMemoryExtractionSource) {
+      throw coordinatorError("MEMORY_EXTRACTION_SOURCE_UNAVAILABLE", "后台记忆提炼缺少来源校验器");
+    }
+    let current = false;
+    try {
+      current = this.verifyMemoryExtractionSource({ profileId: input.profileId,
+        sessionId: input.sessionId, events: input.events }) === true;
+    } catch { /* An unreadable journal or revocation ledger is never current. */ }
+    if (!current) {
+      throw coordinatorError("MEMORY_EXTRACTION_SOURCE_UNAVAILABLE", "后台记忆提炼原话已失效");
+    }
+  }
+
+  async #runMemoryExtractionModelOnly(input, session, profile, task) {
+    const binding = runtimeBinding({ runtime: profile.runtime,
+      runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
+    const bindingId = profile.selectedBindingId ?? profile.defaultBindingId ?? session.runtimeBindingId ?? null;
+    // The current binding can reuse the model the user selected for this
+    // conversation. A different fallback binding keeps its own model identity.
+    const selectedModel = bindingId === session.runtimeBindingId
+      ? session.modelOverride ?? profile.defaultModel ?? null : profile.defaultModel ?? null;
+    const providerRoute = this.captureExecutionProviderRoute?.(profile, selectedModel) ?? null;
+    const fence = () => {
+      this.#fenceLifecycle(task.lifecycle);
+      if (task.controller.signal.aborted) {
+        throw coordinatorError("MODEL_ONLY_CANCELED", "后台记忆提炼已取消");
+      }
+      const currentSession = this.chatSessionStore.getSession(input.sessionKey);
+      const current = currentSession && this.#summaryProfile(currentSession);
+      const currentModel = bindingId === currentSession?.runtimeBindingId
+        ? currentSession.modelOverride ?? current?.defaultModel ?? null : current?.defaultModel ?? null;
+      if (!currentSession || currentSession.id !== session.id || currentSession.profileId !== session.profileId
+        || currentSession.workspace !== session.workspace || !["ready", "archived"].includes(currentSession.status)
+        || !current?.enabled || current.runtime !== profile.runtime
+        || current.runtimeProfileId !== profile.runtimeProfileId
+        || current.runtimeAccountId !== profile.runtimeAccountId
+        || (current.selectedBindingId ?? current.defaultBindingId ?? currentSession.runtimeBindingId ?? null) !== bindingId
+        || currentModel !== selectedModel) {
+        throw coordinatorError("MEMORY_EXTRACTION_BINDING_STALE", "后台记忆提炼运行环境已变化");
+      }
+      if (admission) this.runtimeAccountAdmission.assertGeneration(admission);
+      if (providerRoute) this.assertExecutionProviderRouteCurrent?.(providerRoute);
+    };
+    let admission = null;
+    let holdAdmission = false;
+    let timer;
+    const onAbort = () => task.controller.abort();
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+    if (input.signal?.aborted) task.controller.abort();
+    timer = setTimeout(() => task.controller.abort(), input.timeoutMs);
+    timer.unref?.();
+    try {
+      fence();
+      if (this.runtimeAccountAdmission) {
+        const attempt = this.runtimeAccountAdmission.admit({ runtimeAccountId: binding.runtimeAccountId,
+          runId: input.operationId });
+        if (attempt.disposition !== "started") {
+          throw coordinatorError(attempt.reason || "MEMORY_EXTRACTION_ACCOUNT_BUSY",
+            "后台记忆提炼等待 Runtime 账户可用");
+        }
+        admission = { ...attempt, runtimeAccountId: binding.runtimeAccountId };
+      }
+      fence();
+      const host = await this.runtimeManager.acquire(binding, { workspace: session.workspace,
+        permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+        executionContract: { runId: input.operationId, source: "memory_extraction", profileId: input.profileId,
+          runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
+          runtimeAccountId: binding.runtimeAccountId, workspace: session.workspace,
+          permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+          developerInstructions: "Extract review-only memory candidates without tools or side effects." } });
+      fence();
+      if (host.capabilities?.["model.generate.toolFree"] !== true
+        || typeof host.generateModelOnly !== "function") {
+        throw coordinatorError("MODEL_ONLY_UNSUPPORTED", "Runtime 未声明经验证的无工具模型能力");
+      }
+      host.assertExecutionProviderCurrent?.();
+      // Runtime acquisition may wait while a user forgets the source. Check
+      // the exact frozen user events immediately before sending the prompt.
+      this.#assertMemoryExtractionSourceCurrent(input);
+      const output = await host.generateModelOnly({ prompt: input.prompt, model: selectedModel,
+        operationId: input.operationId, signal: task.controller.signal });
+      fence();
+      host.assertExecutionProviderCurrent?.();
+      if (!output || typeof output.text !== "string" || !output.text.isWellFormed()
+        || output.text.includes("\0") || Buffer.byteLength(output.text, "utf8") > input.maxOutputBytes) {
+        throw coordinatorError("MEMORY_CANDIDATE_MODEL_INVALID", "后台记忆提炼输出超过上限或无效");
+      }
+      return { text: output.text, usage: output.usage ?? null,
+        model: output.model ?? selectedModel,
+        provider: output.provider ?? null, runtime: binding.runtime,
+        runtimeAccountId: binding.runtimeAccountId };
+    } catch (error) {
+      if (error?.code === "RUNTIME_STOP_UNCONFIRMED") {
+        holdAdmission = true;
+        this.#poison(error);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+      if (admission && !holdAdmission) this.runtimeAccountAdmission.release({
+        runtimeAccountId: binding.runtimeAccountId, runId: input.operationId });
+    }
   }
 
   #runtimeContextKey(session, resolvedProfile = null) {
@@ -1758,7 +1953,7 @@ class WorkRunCoordinator {
         if (command.state === "dispatching") {
           await this.inbox.transition(command.operationId, "pending");
         }
-        const admission = this.#admit(run.id, session.profileId);
+        const admission = await this.#admitPrepared(run.id, session.profileId);
         if (admission.disposition === "rejected") {
           await this.#rejectAccountAdmission(run, admission.reason, lifecycle);
           continue;
@@ -1999,7 +2194,7 @@ class WorkRunCoordinator {
       createdAt: this.now(), plan });
     this.domainCommands.set(id, command);
     this.#streamFor(id);
-    const admission = this.#admit(id, profile.id);
+    const admission = await this.#admitPrepared(id, profile.id);
     if (admission.disposition === "started") this.#schedule(id);
     else if (admission.disposition === "rejected") await this.#rejectAccountAdmission(run, admission.reason, this.lifecycleGeneration);
     return this.dispatcher.getRun(id);
@@ -2113,7 +2308,7 @@ class WorkRunCoordinator {
     let disposition = run.status === "queued" ? "queued" : "started";
     let reason = null;
     if (run.status === "queued") {
-      const admission = this.#admit(run.id, session.profileId);
+      const admission = await this.#admitPrepared(run.id, session.profileId);
       if (admission.disposition === "rejected") {
         return this.#rejectAccountAdmission(run, admission.reason, this.lifecycleGeneration);
       }
@@ -2231,7 +2426,7 @@ class WorkRunCoordinator {
     let disposition = run.status === "queued" ? "queued" : "started";
     let reason = null;
     if (run.status === "queued") {
-      const admission = this.#admit(run.id, run.profileId);
+      const admission = await this.#admitPrepared(run.id, run.profileId);
       if (admission.disposition === "rejected") {
         return this.#rejectAccountAdmission(run, admission.reason, this.lifecycleGeneration);
       }
@@ -2297,7 +2492,7 @@ class WorkRunCoordinator {
     this.#assertOpen();
     if (this.listRuns().some(run => ACTIVE_RUN_STATES.has(run.status))
       || this.pendingSessionSends.size || this.startupControllers.size
-      || this.manualCompactions.size) {
+      || this.manualCompactions.size || this.memoryExtractionTasks.size) {
       throw coordinatorError("SERVICE_MAINTENANCE_BUSY", "正在执行任务，暂时无法切换数据目录");
     }
     this.admissionsQuiesced = true;
@@ -4149,6 +4344,22 @@ class WorkRunCoordinator {
     });
   }
 
+  async #admitPrepared(runId, profileId, lifecycle = this.lifecycleGeneration) {
+    const run = this.dispatcher.getRun(runId);
+    const profile = this.productStore.getAgentProfile(profileId);
+    if (run && profile && this.contextCompiler?.semanticSearch && run.source === "chat") {
+      try { await this.contextCompiler.prepareRelated({ profile, run,
+        query: this.#commandForRun(run)?.command?.prompt || run.sourceId }); } catch {}
+    }
+    this.#fenceLifecycle(lifecycle);
+    // Another drain or cancellation may finish while inference yields. Only
+    // the still-queued run can cross the synchronous durable admission gate.
+    const current = this.dispatcher.getRun(runId);
+    if (current && current.status !== "queued") return { disposition: "queued",
+      reason: "ADMISSION_ALREADY_OBSERVED", run: current };
+    return this.#admit(runId, profileId, lifecycle);
+  }
+
   #admit(runId, profileId, lifecycle = null) {
     if (this.admissionsQuiesced) {
       return this.#queuedAdmission(this.dispatcher.getRun(runId), "SERVICE_QUIESCED");
@@ -4165,10 +4376,15 @@ class WorkRunCoordinator {
     if (sessionRuns.some(candidate => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status))) {
       return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
     }
-    if (run.source !== "compaction" && sessionKey && this.conversationCheckpointStore
-      && this.getNativeRuntimeConfig()?.flags?.runtimeContextLifecycleV1) {
+    if (run.source !== "compaction" && sessionKey && this.conversationCheckpointStore) {
       const session = this.chatSessionStore.getSession(sessionKey);
-      if (session) this.#refreshCheckpointSession(session);
+      try { if (session) this.#refreshCheckpointSession(session, {
+        checkpoint: this.getNativeRuntimeConfig()?.flags?.runtimeContextLifecycleV1 === true,
+      }); }
+      catch (error) {
+        if (/^CONTEXT_/u.test(error?.code || "")) return { disposition: "rejected", reason: error.code, run };
+        throw error;
+      }
     }
     let executionContract;
     try { executionContract = this.#executionContract(profile, run); }
@@ -4324,6 +4540,11 @@ class WorkRunCoordinator {
       sessionModelOverride = session.modelOverride ?? null;
       sessionPermissionMode = session.permissionMode ?? null;
       modelSettings = session.modelSettings;
+      // Older sessions with a selected Codex model did not persist defaults.
+      // Resolve its advertised effort instead of silently reusing CLI max.
+      if (!modelSettings && profile.runtime === "codex" && sessionModelOverride !== null) {
+        modelSettings = { thinkingLevel: null, serviceTier: null };
+      }
       transcriptSessionId = session.id;
       defaultModel = sessionModelOverride ?? defaultModel;
     }
@@ -4363,6 +4584,8 @@ class WorkRunCoordinator {
     const currentAttachments = command?.attachments?.length && boundSessionKey
       ? prepareChatAttachments(this.getMediaStore(), command.attachments, boundSessionKey) : command?.attachments ?? [];
     const currentPrompt = attachmentPrompt(command?.prompt ?? "", currentAttachments);
+    const nativeMemoryVersion = run.source === "compaction" ? null
+      : this.conversationCheckpointStore?.nativeMemoryVersion?.(profile.id) ?? null;
     const snapshot = this.contextCompiler && run.source !== "compaction" ? this.contextCompiler.compile({
       profile,
       run,
@@ -4383,6 +4606,10 @@ class WorkRunCoordinator {
       } : {}),
       ...(handoff ? { handoffSeed } : {}),
     }) : null;
+    if (nativeMemoryVersion && JSON.stringify(nativeMemoryVersion)
+      !== JSON.stringify(this.conversationCheckpointStore.nativeMemoryVersion(profile.id))) {
+      throw coordinatorError("CONTEXT_SOURCE_STALE", "记忆或撤回状态在构建上下文期间变化");
+    }
     return Object.freeze({
       runId: run.id,
       profileId: run.profileId,
@@ -4403,6 +4630,7 @@ class WorkRunCoordinator {
       contextSnapshotId: snapshot?.id ?? null,
       contextRequest: snapshot?.report?.request ?? null,
       contextFresh: boundSession ? runtimeSessionIdOf(boundSession) === null : true,
+      nativeMemoryVersion,
       toolRegistryRevision: snapshot?.revisions?.tools ?? null,
       toolPermissionRevision: snapshot?.revisions?.permission ?? null,
       developerInstructions: snapshot?.developerInstructions
@@ -4415,6 +4643,9 @@ class WorkRunCoordinator {
         })),
       dynamicContext: snapshot?.dynamicContext ?? handoffSeed ?? null,
       dynamicContextWithoutTranscript: snapshot?.dynamicContextWithoutTranscript ?? null,
+      reviewedMemoryIds: Object.freeze(Array.isArray(snapshot?.report?.memoryMatches)
+        ? [...new Set(snapshot.report.memoryMatches.filter((id) =>
+          typeof id === "string" && /^reviewed-mc-[a-f0-9]{64}$/u.test(id)))] : []),
       contextLifecycleV1,
       permissionMode: resolvedPermission.mode,
       nativePermissionMode: resolvedPermission.nativeMode,
@@ -4784,6 +5015,17 @@ class WorkRunCoordinator {
     this.#streamFor(run.id).append("status", { status: "running" });
     let errorCode = null, summary = null;
     try {
+      // The prompt was frozen when the compaction Run was planned. A forget,
+      // correction or newly appended source may have landed while it waited
+      // for a model-only Runtime; reject before sending old source text.
+      const currentMemory = this.conversationCheckpointStore.memoryState(run.profileId);
+      if (this.conversationCheckpointStore.hasRevocations(run.profileId)
+        || currentMemory.revision !== command.plan.expectedMemoryRevision
+        || currentMemory.freshUntil !== command.plan.expectedMemoryFreshUntil
+        || this.transcriptStore.getRevision(run.profileId, command.plan.sessionId)
+          !== command.plan.expectedRevision) {
+        throw coordinatorError("CHECKPOINT_STALE", "摘要原文或记忆状态已变化");
+      }
       const output = await host.generateModelOnly({ prompt: command.prompt, model: contract.defaultModel,
         operationId: command.operationId, signal: token.controller.signal });
       this.#fenceRuntimeAccount(token);
@@ -4840,7 +5082,7 @@ class WorkRunCoordinator {
       if (commandRecord.kind === "chat" && command.state === "dispatching") {
         command = await this.inbox.transition(operationId, "pending");
       }
-      const admission = this.#admit(run.id, run.profileId);
+      const admission = await this.#admitPrepared(run.id, run.profileId);
       if (admission.disposition === "rejected") {
         await this.#rejectAccountAdmission(run, admission.reason, token.lifecycle);
         return;
@@ -5013,6 +5255,14 @@ class WorkRunCoordinator {
     const { threadId, fresh } = threadBinding;
     this.#fence(token);
     if (manualCompact && host.capabilities?.["context.compact.native"] === true) {
+      // Native /compact summarizes a transcript without claim provenance. The
+      // same historical-source gate must apply before either Codex or Pi sends
+      // that command, including a user-forced compaction.
+      if (this.conversationCheckpointStore?.hasHistoricalSource?.(run.profileId,
+        this.transcriptStore.listEvents(run.profileId, executionSession.id))) {
+        throw coordinatorError("CONTEXT_COMPACTION_REQUIRED",
+          "当前会话含已替代或过期记忆的原话，无法安全摘要");
+      }
       if (binding.runtime === "codex") {
         await this.#driveManualCompaction(runId, token, host, threadId, binding, command, executionSession, productSessionKey);
         return;
@@ -5359,7 +5609,7 @@ class WorkRunCoordinator {
       this.#fenceLifecycle(lifecycle);
       // Another terminal or the retry timer can drain while inbox I/O yields.
       if (this.dispatcher.getRun(candidate.id)?.status !== "queued") continue;
-      const admission = this.#admit(candidate.id, candidate.profileId, lifecycle);
+      const admission = await this.#admitPrepared(candidate.id, candidate.profileId, lifecycle);
       if (admission.disposition === "rejected") {
         await this.#rejectAccountAdmission(candidate, admission.reason, lifecycle);
         continue;
@@ -5955,6 +6205,21 @@ class WorkRunCoordinator {
       assertHistoryCanProveAbsence(thread);
     }
 
+    // The primary Memory/recall revisions do not change if a reviewed
+    // candidate's source session or journal disappears while a Runtime is
+    // being acquired. No await occurs between this check and turnStart.
+    for (const id of profile.reviewedMemoryIds || []) {
+      let current = false;
+      try {
+        const item = this.contextCompiler?.memoryStore?.get(profile.profileId, id);
+        current = item?.status === "active"
+          && this.contextCompiler?.memoryEngine?.isReviewCommitted(profile.profileId, item) === true;
+      } catch { /* An unreadable source or receipt cannot justify sending. */ }
+      if (!current) {
+        throw coordinatorError("CONTEXT_SOURCE_STALE", "候选记忆的原话在发送前已失效");
+      }
+    }
+
     let response;
     const turnStartedAt = this.now();
     const performance = this.#performanceFor(token.runId);
@@ -5966,7 +6231,24 @@ class WorkRunCoordinator {
       response = await this.#runtimeStageCall(
         "turn_start",
         token,
-        () => host.turnStart(this.#turnStartParams(threadId, profile, session, command, fresh)),
+        () => {
+          const expected = profile.nativeMemoryVersion;
+          if (expected && JSON.stringify(expected) !== JSON.stringify(
+            this.conversationCheckpointStore?.nativeMemoryVersion?.(profile.profileId))) {
+            throw coordinatorError("CONTEXT_SOURCE_STALE", "记忆或撤回状态在发送前变化");
+          }
+          if (expected && profile.contextFresh && profile.transcriptSessionId) {
+            // Persist the native version before giving a turn to the model. A
+            // full disk or uncertain write must fail before remote acceptance;
+            // post-accept failure would repeatedly retire live sessions.
+            const anchored = this.conversationCheckpointStore?.recordNativeSession?.(
+              profile.profileId, profile.transcriptSessionId, threadId, profile.bindingId, expected);
+            if (anchored !== true) {
+              throw coordinatorError("CONTEXT_SOURCE_STALE", "native session 的记忆版本无法持久确认");
+            }
+          }
+          return host.turnStart(this.#turnStartParams(threadId, profile, session, command, fresh));
+        },
       );
       this.#appendPerformanceStage(token.runId, "turn_start", turnStartedAt, "success");
       this.#fence(token);

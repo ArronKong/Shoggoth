@@ -9,7 +9,7 @@ const assert = require("node:assert/strict");
 const WebSocket = require("ws");
 
 async function main() {
-  const [port, output, enabled = "false"] = process.argv.slice(2);
+  const [port, output, enabled = "true"] = process.argv.slice(2);
   assert.match(port || "", /^\d{4,5}$/u);
   assert.ok(path.isAbsolute(output || ""));
   assert.ok(["true", "false"].includes(enabled));
@@ -67,32 +67,37 @@ async function main() {
     assert.ok(result.nativeAgentCount > 0);
     assert.ok(result.rootRendered);
     assert.equal(result.capacity.enabled, enabled === "true");
-    if (enabled === "true") { assert.equal(result.capacity.maxActive, 100); assert.equal(result.capacity.startupConcurrency, 8); }
+    if (enabled === "true") { assert.equal(result.capacity.maxActive, 32); assert.equal(result.capacity.startupConcurrency, 8); }
     await evaluate(`(() => { if (location.hash !== '#/settings') {
       location.hash = '#/settings'; }
       return true; })()`);
     let settings;
     for (let i = 0; i < 50; i++) {
-      settings = await evaluate(`(() => ({
-        hasRuntimeCapacity: /原生.*并发|Native runtime|Native capacity/i.test(document.body.innerText),
-        has100: document.body.innerText.includes('100') || [...document.querySelectorAll('input')].some(input => input.value === '100'),
-        enabled: document.querySelector('#settings-native-capacity [role="switch"]')?.getAttribute('aria-checked'),
-        limits: [...document.querySelectorAll('#settings-native-capacity input[type="number"]')].map(input => input.value),
-        horizontalOverflow: document.documentElement.scrollWidth > innerWidth + 1,
-      }))()`);
-      if (settings.hasRuntimeCapacity && settings.limits.length === 2) break;
+      settings = await evaluate(`(() => {
+        const connections = document.querySelector('#settings-conn');
+        const service = document.querySelector('#settings-service');
+        return {
+          connectionsVisible: !!connections?.getBoundingClientRect().height,
+          serviceVisible: !!service?.getBoundingClientRect().height,
+          connectionsBeforeService: !!(connections && service
+            && (connections.compareDocumentPosition(service) & Node.DOCUMENT_POSITION_FOLLOWING)),
+          nativeCapacityVisible: !!document.querySelector('#settings-native-capacity'),
+          horizontalOverflow: document.documentElement.scrollWidth > innerWidth + 1,
+        };
+      })()`);
+      if (settings.connectionsVisible && settings.serviceVisible) break;
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     result.settings = settings;
-    assert.ok(settings.hasRuntimeCapacity, "capacity UI must render in installed Settings");
+    assert.ok(settings.connectionsVisible && settings.serviceVisible, "connection and service cards must render in installed Settings");
+    assert.equal(settings.connectionsBeforeService, true);
+    assert.equal(settings.nativeCapacityVisible, false, "native capacity controls must stay out of Settings");
     assert.equal(settings.horizontalOverflow, false);
-    assert.equal(settings.enabled, enabled);
-    if (enabled === "true") assert.deepEqual(settings.limits, ["100", "8"]);
     const screenshotReady = await evaluate(`(async () => {
-      const control = document.querySelector('#settings-native-capacity');
-      control?.scrollIntoView({ block: 'center' });
+      const section = document.querySelector('#settings-conn');
+      section?.scrollIntoView({ block: 'start' });
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      return !!control?.isConnected && location.hash === '#/settings';
+      return !!section?.isConnected && location.hash === '#/settings';
     })()`);
     assert.ok(screenshotReady, "Settings changed during audit; retain DOM checks and retry screenshot later");
     const screenshot = await call("Page.captureScreenshot", { format: "png" });

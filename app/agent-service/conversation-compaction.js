@@ -13,7 +13,12 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   force = false, freshSession = false, budget = conversationContextBudget(null), usage = null, targetThroughSeq = null,
   maxSourceBytes = MAX_SOURCE_BYTES, maxSourceTokens = Infinity, requestPlan = null,
   currentOperationId = null, transportBytes = contextTransportLimits().contextBytes }) {
+  // A checkpoint can carry statements without event-level provenance. Until
+  // compaction has a revocation-aware source and summary format, do not send
+  // any of this Profile's history to the model after a forget or UI deletion.
+  if (checkpointStore.hasRevocations?.(profileId)) return null;
   const events = transcriptStore.listEvents(profileId, sessionId);
+  const memory = checkpointStore.memoryState?.(profileId) ?? { revision: null, freshUntil: null };
   const previous = checkpointStore.compatible(profileId, sessionId, events);
   const pending = events.filter(event => event.seq > (previous?.coveredThroughSeq ?? 0)
     && !(event.kind === "user" && currentOperationId && event.content?.operationId === currentOperationId));
@@ -95,8 +100,17 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
     if (visible(event)) source.push(project(event));
   }
   if (!source.length) return null;
+  // A checkpoint has no per-claim provenance. Once a source memory version is
+  // superseded or expires, summarizing its original event or a same-Run echo
+  // could turn that historical statement into a current fact. Keep the source
+  // as annotated transcript history instead of sending it for compaction.
+  if (checkpointStore.hasHistoricalSource?.(profileId, events, {
+    fromSeq: previous?.coveredThroughSeq ?? 0,
+    throughSeq: partial?.seq ?? throughSeq,
+  })) return null;
   const schema = Object.fromEntries(SUMMARY_FIELDS.map(field => [field, ["concise factual statement"]]));
   return Object.freeze({ profileId, sessionId, expectedRevision: transcriptStore.getRevision(profileId, sessionId),
+    expectedMemoryRevision: memory.revision, expectedMemoryFreshUntil: memory.freshUntil,
     throughSeq, partial, windowTokens: budget.tokens, targetThroughSeq: target,
     coveredHash: coveredTranscript(events, partial?.seq ?? throughSeq).hash, previousId: previous?.id ?? null,
     prompt: [

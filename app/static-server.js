@@ -942,6 +942,8 @@ async function resolveResourceBackend(registry, kind, id) {
 //   POST   /__api/plugins/state               candidate installation desired state
 //   GET/POST /__api/plugins/skill-bindings     candidate Agent Skill selection
 //   GET    /__api/plugins/mcp-status         sanitized candidate connection/Grant counts
+//   GET    /__api/plugins/external-calls     bounded external plugin execution receipts
+//   GET/POST /__api/plugins/external-approvals   pending calls and native-confirmed decision
 //   GET    /__api/plugins/mcp-tools          current catalog and saved Grant status
 //   POST   /__api/plugins/mcp-grants/revoke  revision-fenced permission narrowing
 //   POST   /__api/plugins/mcp-grants/revoke-all  emergency binding-wide revocation
@@ -2181,6 +2183,95 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 200, await backend.getPluginMcpStatus(agentId, installationId));
     }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external-calls") {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      const params = requestUrl?.searchParams;
+      const keys = ["backendId", "agentId", "sessionId", "toolCallId",
+        "limit", "cursorCreatedAt", "cursorCallId"];
+      if (!params || [...params.keys()].some(key => !keys.includes(key) || params.getAll(key).length !== 1)) {
+        return sendJson(res, 400, { error: "Invalid plugin call history query" });
+      }
+      const backendId = params.get("backendId") || "all", limit = Number(params.get("limit") || "10");
+      const agentId = params.get("agentId"), sessionId = params.get("sessionId");
+      const toolCallId = params.get("toolCallId");
+      const scoped = agentId !== null || sessionId !== null || toolCallId !== null;
+      const opaque = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+      const rawTime = params.get("cursorCreatedAt"), rawCallId = params.get("cursorCallId");
+      const cursor = rawTime === null && rawCallId === null ? null
+        : rawTime !== null && rawCallId !== null && /^[0-9]{1,16}$/u.test(rawTime)
+          && Number.isSafeInteger(Number(rawTime)) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(rawCallId)
+          ? { createdAt: Number(rawTime), callId: rawCallId } : undefined;
+      if (!["all", "openclaw", "hermes"].includes(backendId)
+        || !Number.isSafeInteger(limit) || limit < 1 || limit > 20 || cursor === undefined
+        || (scoped && (backendId === "all"
+          || ![agentId, sessionId, toolCallId].every(value =>
+            typeof value === "string" && opaque.test(value))
+          || Buffer.byteLength(agentId, "utf8") > 128
+          || Buffer.byteLength(sessionId, "utf8") > 256
+          || Buffer.byteLength(toolCallId, "utf8") > 256))) {
+        return sendJson(res, 400, { error: "Invalid plugin call history query" });
+      }
+      return sendJson(res, 200, await backend.getPluginExternalCalls({
+        backendId: backendId === "all" ? null : backendId,
+        agentId, sessionId, toolCallId, cursor, limit }));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external-approvals") {
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      if (method === "GET") {
+        const params = requestUrl?.searchParams;
+        const keys = ["backendId", "limit", "cursorOffset", "cursorRevision"];
+        if (!params || [...params.keys()].some(key => !keys.includes(key)
+          || params.getAll(key).length !== 1)) {
+          return sendJson(res, 400, { error: "Invalid external approval query" });
+        }
+        const backendId = params.get("backendId") || "all";
+        const rawLimit = params.get("limit") || "2";
+        const rawOffset = params.get("cursorOffset"), rawRevision = params.get("cursorRevision");
+        const cursor = rawOffset === null && rawRevision === null ? null
+          : rawOffset !== null && rawRevision !== null && /^[0-9]{1,3}$/u.test(rawOffset)
+            && /^[0-9]{1,12}$/u.test(rawRevision)
+            ? { offset: Number(rawOffset), revision: Number(rawRevision) } : undefined;
+        if (!["all", "openclaw", "hermes"].includes(backendId)
+          || !/^[1-2]$/u.test(rawLimit) || cursor === undefined) {
+          return sendJson(res, 400, { error: "Invalid external approval query" });
+        }
+        return sendJson(res, 200, await backend.getExternalPluginApprovals({
+          backendId: backendId === "all" ? null : backendId, cursor,
+          limit: Number(rawLimit) }));
+      }
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+      if (!body || Object.getPrototypeOf(body) !== Object.prototype
+        || Object.keys(body).length !== 3
+        || !["requestId", "operationId", "decision"].every(key => Object.hasOwn(body, key))
+        || !id.test(body.requestId) || !id.test(body.operationId)
+        || !["once", "deny"].includes(body.decision)) {
+        return sendJson(res, 400, { error: "Invalid external approval response" });
+      }
+      const prepared = await backend.prepareExternalPluginApproval(body);
+      if (prepared.completed) return sendJson(res, 200, {
+        approved: prepared.approved, requestId: body.requestId });
+      let approved = false;
+      try {
+        if (body.decision === "once") {
+          if (typeof hostOps?.confirmPluginCapability !== "function") {
+            return sendJson(res, 501, { error: "Native confirmation unavailable" });
+          }
+          approved = await hostOps.confirmPluginCapability(prepared.summary) === true;
+        }
+      } finally {
+        if (!approved) await backend.commitExternalPluginApproval({
+          challenge: prepared.challenge, approved: false });
+      }
+      if (!approved) return sendJson(res, 200, { approved: false, requestId: body.requestId });
+      return sendJson(res, 200, await backend.commitExternalPluginApproval({
+        challenge: prepared.challenge, approved: true }));
+    }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "mcp-tools") {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
       const backend = getActiveBackend(registry, "shoggoth");
@@ -2265,6 +2356,32 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       finally { if (!approved) await backend.commitPluginDisconnect({ challenge: prepared.challenge, approved: false }); }
       if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
       return sendJson(res, 200, await backend.commitPluginDisconnect({ challenge: prepared.challenge, approved: true }));
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "account-select") {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req), id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+      const fields = ["agentId", "bindingId", "connectionId", "expectedRevision", "operationId"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
+        || !["agentId", "bindingId", "connectionId", "operationId"].every(key =>
+          typeof body[key] === "string" && id.test(body[key]))
+        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) {
+        return sendJson(res, 400, { error: "Invalid plugin account selection" });
+      }
+      const backend = registry.route(body.agentId);
+      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const prepared = await backend.preparePluginAccountSelection(body);
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally { if (!approved) await backend.commitPluginAccountSelection({
+        challenge: prepared.challenge, approved: false }); }
+      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
+      return sendJson(res, 200, await backend.commitPluginAccountSelection({
+        challenge: prepared.challenge, approved: true }));
     }
     if (segs[0] === "plugins" && segs.length === 2 && ["rollback-list", "rollback-change", "rollback-operation"].includes(segs[1])) {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
@@ -2595,6 +2712,63 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         backendId, { cursor: Number(cursorText), limit: Number(limitText), catalogRevision },
       ) });
     }
+    // Disabled standalone Native MCP registrations stay visible after a
+    // machine restore. Browser projection omits old absolute paths and args;
+    // rebind only saves a disabled, validated replacement. Activation is a
+    // separate explicit revision-pinned Service probe.
+    if (segs[0] === "mcp" && segs[1] === "standalone" && segs.length === 2) {
+      const backend = getActiveBackend(registry, "shoggoth");
+      if (!backend || typeof backend.getDisabledStandaloneMcpPage !== "function") {
+        return sendJson(res, 501, { error: "Standalone MCP management unavailable" });
+      }
+      const validAgent = (agentId) => typeof agentId === "string"
+        && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(agentId);
+      const errors = {
+        INVALID_PARAMS: 400, MCP_SERVER_INVALID: 400, MCP_SERVER_PATH_INVALID: 400,
+        MCP_SERVER_COMMAND_FORBIDDEN: 400, MCP_SERVER_NOT_FOUND: 404,
+        MCP_SERVER_ALREADY_ENABLED: 409, MCP_REGISTRY_REVISION_CONFLICT: 409,
+        MCP_REBIND_REQUIRED: 409, MCP_SERVER_PROBE_FAILED: 409,
+        AGENT_NOT_FOUND: 404, HARNESS_PROFILE_NOT_FOUND: 404, HARNESS_SERVICE_CLOSED: 503,
+      };
+      try {
+        if (method === "GET") {
+          const url = new URL(req.url, "http://127.0.0.1");
+          const params = url.searchParams;
+          const agentId = params.get("agentId"), cursor = params.get("cursor") ?? "0";
+          const limit = params.get("limit") ?? "20";
+          if ([...params.keys()].some((key) => !["agentId", "cursor", "limit"].includes(key)
+            || params.getAll(key).length !== 1)
+            || !validAgent(agentId) || !/^(?:0|[1-9][0-9]*)$/u.test(cursor)
+            || !/^[1-9][0-9]*$/u.test(limit) || Number(cursor) > 64 || Number(limit) > 20) {
+            return sendJson(res, 400, { error: "invalid standalone MCP query", code: "INVALID_PARAMS" });
+          }
+          return sendJson(res, 200, { page: await backend.getDisabledStandaloneMcpPage({ agentId,
+            cursor: Number(cursor), limit: Number(limit) }) });
+        }
+        if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+        const body = await readJsonBody(req);
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || !validAgent(body.agentId) || !["rebind", "activate"].includes(body.action)
+          || !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(body.id)
+          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) {
+          return sendJson(res, 400, { error: "invalid standalone MCP request", code: "INVALID_PARAMS" });
+        }
+        if (body.action === "rebind") {
+          if (Object.keys(body).sort().join(",") !== "action,agentId,args,command,cwd,expectedRevision,id") {
+            return sendJson(res, 400, { error: "invalid standalone MCP request", code: "INVALID_PARAMS" });
+          }
+          return sendJson(res, 200, { result: await backend.rebindStandaloneMcp(body) });
+        }
+        if (Object.keys(body).sort().join(",") !== "action,activationToken,agentId,expectedRevision,id") {
+          return sendJson(res, 400, { error: "invalid standalone MCP request", code: "INVALID_PARAMS" });
+        }
+        return sendJson(res, 200, { result: await backend.activateStandaloneMcp(body) });
+      } catch (error) {
+        const code = Object.hasOwn(errors, error?.code) ? error.code : "HARNESS_SERVICE_CLOSED";
+        return sendJson(res, errors[code] || 503, { error: code === "HARNESS_SERVICE_CLOSED"
+          ? "Standalone MCP management unavailable" : error.message, code });
+      }
+    }
     // Per-backend aggregate: which skills have agents actually loaded. Same
     // merge/fail-soft shape as GET /__api/cli/usage; the page joins it against
     // GET /__api/skills. Must precede the `segs.length === 1` skills route.
@@ -2651,6 +2825,40 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         const agentId = url.searchParams.get("agentId") || undefined;
         if (hasAgentScopedSkills(backend) && !agentId) {
           return sendJson(res, 400, { error: "missing agentId", code: "SKILL_AGENT_ID_REQUIRED" });
+        }
+        if (url.searchParams.has("paged")) {
+          const params = url.searchParams;
+          const allowed = new Set(["backend", "agentId", "paged", "page", "limit", "query", "status", "revision"]);
+          const pageText = params.get("page") ?? "0";
+          const limitText = params.get("limit") ?? "100";
+          const query = params.get("query") ?? "";
+          const status = params.get("status") ?? "";
+          const revision = params.get("revision");
+          if ([...params.keys()].some(key => !allowed.has(key) || params.getAll(key).length !== 1)
+            || params.get("paged") !== "1"
+            || !/^[a-z][a-z0-9-]{0,63}$/u.test(backendId)
+            || (agentId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(agentId))
+            || !/^(?:0|[1-9][0-9]*)$/u.test(pageText) || Number(pageText) > 100_000
+            || !/^[1-9][0-9]*$/u.test(limitText) || Number(limitText) > 100
+            || Buffer.byteLength(query, "utf8") > 256 || /[\x00-\x1f\x7f]/u.test(query)
+            || !["", "on", "off"].includes(status)
+            || (revision !== null && !/^[a-f0-9]{64}$/u.test(revision))
+            || (Number(pageText) === 0 ? revision !== null : revision === null)) {
+            return sendJson(res, 400, { error: "invalid skill page query", code: "INVALID_PARAMS" });
+          }
+          try {
+            const page = await registry.getSkillsPage(backendId, { agentId, query, status,
+              pageIndex: Number(pageText), limit: Number(limitText), expectedRevision: revision });
+            if (page.supported !== true) return sendJson(res, 501, page);
+            return sendJson(res, 200, { page });
+          } catch (error) {
+            const code = error?.code;
+            if (code === "HARNESS_REVISION_CONFLICT") return sendJson(res, 409,
+              { error: "Skill 列表已变化，请刷新后重试", code });
+            if (code === "INVALID_PARAMS") return sendJson(res, 400,
+              { error: "invalid skill page query", code });
+            throw error;
+          }
         }
         return sendJson(res, 200, { skills: await registry.listSkills(backendId, {
           agentId,
@@ -3314,16 +3522,44 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (segs.length === 3 && segs[2] === "memories") {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
         return sendJson(res, 200, { memories: await backend.listAgentMemories(id, {
-          status: url.searchParams.get("status") || undefined,
+          status: url.searchParams.get("status") || "active",
           scope: url.searchParams.get("scope") || undefined,
           cursor: Number(url.searchParams.get("cursor")) || 0,
           limit: Number(url.searchParams.get("limit")) || 50,
         }) });
       }
+      if (segs.length === 3 && segs[2] === "memory-explain") {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        return sendJson(res, 200, { explanation: await backend.explainAgentMemory(
+          id, url.searchParams.get("memoryId") || "",
+        ) });
+      }
+      if (segs.length === 3 && segs[2] === "memory-candidates") {
+        if (method === "GET") {
+          return sendJson(res, 200, { candidates: await backend.listAgentMemoryCandidates(id, {
+            status: url.searchParams.get("status") || "pending",
+            cursor: Number(url.searchParams.get("cursor")) || 0,
+            limit: Number(url.searchParams.get("limit")) || 50,
+            expectedRevision: url.searchParams.has("expectedRevision")
+              ? Number(url.searchParams.get("expectedRevision")) : null,
+          }) });
+        }
+        if (method === "POST") {
+          if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+          const body = await readJsonBody(req);
+          if (!body || !["accept", "acceptMany", "reject"].includes(body.action)) {
+            return sendJson(res, 400, { error: "invalid candidate action" });
+          }
+          const { action, ...input } = body;
+          return sendJson(res, 200, { result: await backend.mutateAgentMemoryCandidate(id, action, input) });
+        }
+        return sendJson(res, 405, { error: "method not allowed" });
+      }
       if (segs.length === 3 && segs[2] === "memory") {
         if (!["POST", "PUT", "DELETE"].includes(method)) {
           return sendJson(res, 405, { error: "method not allowed" });
         }
+        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
         const body = await readJsonBody(req);
         if (!body) return sendJson(res, 400, { error: "invalid JSON body" });
         const { action: requestedAction, ...input } = body;

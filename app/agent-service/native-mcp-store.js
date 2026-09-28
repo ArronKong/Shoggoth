@@ -92,8 +92,7 @@ class NativeMcpStore {
     }
   }
 
-  prepare(input) {
-    this._assertOpen();
+  _prepare(input, { allowInertPath = false } = {}) {
     const fields = ["id", "name", "command", "args", "cwd", "enabled"];
     if (!exact(input, fields) || !ID_PATTERN.test(input.id) || !safeText(input.name, 256)
       || !safeText(input.command, 4096) || !path.isAbsolute(input.command)
@@ -105,15 +104,24 @@ class NativeMcpStore {
     }
     const command = path.resolve(input.command);
     const cwd = path.resolve(input.cwd);
-    if (!inside(this.paths.trustedRoot, cwd)) {
-      throw mcpError("MCP_SERVER_PATH_INVALID", "MCP 工作目录必须位于当前用户的受信目录");
+    if (!allowInertPath) {
+      if (!inside(this.paths.trustedRoot, cwd)) {
+        throw mcpError("MCP_SERVER_PATH_INVALID", "MCP 工作目录必须位于当前用户的受信目录");
+      }
+      let cwdStat;
+      let cwdReal;
+      try {
+        cwdStat = this.fs.statSync(cwd);
+        cwdReal = this.fs.realpathSync(cwd);
+      } catch {
+        throw mcpError("MCP_SERVER_PATH_INVALID", "MCP 工作目录不存在");
+      }
+      if (!cwdStat.isDirectory()) throw mcpError("MCP_SERVER_PATH_INVALID", "MCP 工作目录不是目录");
+      if (!inside(this.trustedRootReal, cwdReal)) {
+        throw mcpError("MCP_SERVER_PATH_INVALID", "MCP 工作目录解析到受信目录之外");
+      }
+      this._validateExecutable(command, input.args);
     }
-    let cwdStat;
-    try { cwdStat = this.fs.statSync(cwd); } catch {
-      throw mcpError("MCP_SERVER_PATH_INVALID", "MCP 工作目录不存在");
-    }
-    if (!cwdStat.isDirectory()) throw mcpError("MCP_SERVER_PATH_INVALID", "MCP 工作目录不是目录");
-    this._validateExecutable(command, input.args);
     return Object.freeze({
       id: input.id,
       name: input.name.normalize("NFKC").trim(),
@@ -124,7 +132,12 @@ class NativeMcpStore {
     });
   }
 
-  _validateRegistry(value) {
+  prepare(input) {
+    this._assertOpen();
+    return this._prepare(input);
+  }
+
+  _validateRegistry(value, { inertAll = false } = {}) {
     if (!exact(value, ["schemaVersion", "revision", "updatedAt", "servers"])
       || value.schemaVersion !== SCHEMA_VERSION
       || !Number.isSafeInteger(value.revision) || value.revision < 1
@@ -139,10 +152,13 @@ class NativeMcpStore {
         || !Number.isSafeInteger(record.updatedAt) || record.updatedAt < record.createdAt) {
         throw mcpError("MCP_REGISTRY_CORRUPT", "MCP Registry Server 无效");
       }
-      const prepared = this.prepare({
+      // A restored, disabled registration may refer to a path on another
+      // computer. It remains visible for repair, but register() must validate
+      // the new executable and workspace before it can be enabled again.
+      const prepared = this._prepare({
         id: record.id, name: record.name, command: record.command, args: record.args,
         cwd: record.cwd, enabled: record.enabled,
-      });
+      }, { allowInertPath: inertAll || !record.enabled });
       ids.add(record.id);
       return Object.freeze({ ...prepared, args: Object.freeze([...prepared.args]),
         createdAt: record.createdAt, updatedAt: record.updatedAt });
@@ -228,4 +244,35 @@ class NativeMcpStore {
   }
 }
 
-module.exports = { NativeMcpStore };
+function quarantineNativeMcpRegistryForRestore({ paths, now = Date.now } = {}) {
+  if (!paths?.nativeMcpRegistryPath || !lstatIfExists(paths.nativeMcpRegistryPath)) return null;
+  const store = new NativeMcpStore({ paths, now });
+  let current;
+  try {
+    current = JSON.parse(readPrivateFile(paths.nativeMcpRegistryPath,
+      { maxBytes: MAX_REGISTRY_BYTES }).toString("utf8"));
+  } catch (error) {
+    if (error?.code) throw error;
+    throw mcpError("MCP_REGISTRY_CORRUPT", "MCP Registry 无法读取");
+  }
+  // Validate every field even when the source machine's paths cannot be
+  // resolved on this host. No old executable is started during restore.
+  const verified = store._validateRegistry(current, { inertAll: true });
+  const disabled = verified.servers.filter((server) => server.enabled).length;
+  if (disabled === 0) return Object.freeze({ disabled: 0, retained: verified.servers.length });
+  const updatedAt = now();
+  const next = {
+    schemaVersion: SCHEMA_VERSION,
+    revision: verified.revision + 1,
+    updatedAt,
+    servers: verified.servers.map((server) => ({ ...server, args: [...server.args],
+      enabled: false, updatedAt })),
+  };
+  store._validateRegistry(next);
+  atomicWritePrivateFile(paths.nativeMcpRegistryPath, `${JSON.stringify(next)}\n`, {
+    trustedRoot: paths.trustedRoot,
+  });
+  return Object.freeze({ disabled, retained: verified.servers.length });
+}
+
+module.exports = { NativeMcpStore, quarantineNativeMcpRegistryForRestore };

@@ -35,6 +35,21 @@ function validatePluginConnectionResult(method, value) {
       || (value.phase === "completed" && value.receipt === null)
       || (value.phase === "outcome_unknown" && value.receipt !== null)) fail();
     if (value.receipt !== null) receipt(value.receipt);
+  } else if (method === "plugins.connections.selectPrepare") {
+    if (!exact(value, ["challenge", "expiresAt", "summary"])
+      || !id(value.challenge) || !positive(value.expiresAt)
+      || !exact(value.summary, ["action", "agent", "package", "capability", "account", "grantsRevoked"])
+      || value.summary.action !== "mcp-account-select"
+      || !["agent", "package", "capability", "account"].every(key => text(value.summary[key]))
+      || !Number.isSafeInteger(value.summary.grantsRevoked)
+      || value.summary.grantsRevoked < 0 || value.summary.grantsRevoked > 1_000_000) fail();
+  } else if (method === "plugins.connections.selectCommit") {
+    if (!exact(value, ["canceled", "receipt"]) || typeof value.canceled !== "boolean") fail();
+    if (value.canceled) { if (value.receipt !== null) fail(); }
+    else if (!exact(value.receipt, ["kind", "profileId", "bindingId", "toolIdentity", "revision"])
+      || value.receipt.kind !== "mcp-connect" || !id(value.receipt.profileId)
+      || !id(value.receipt.bindingId) || value.receipt.toolIdentity !== null
+      || !positive(value.receipt.revision)) fail();
   } else fail();
   return structuredClone(value);
 }

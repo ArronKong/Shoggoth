@@ -311,13 +311,15 @@ const registry = new BackendRegistry();
 registry.register(new MockChatBackend());
 registry.register(new AsyncChatBackend());
 let idempotentExecutions = 0;
+const idempotentOptions = [];
 const idempotentBackend = new HermesBackend({
   getConfig: () => ({ hermesMode: "local", hermesRemotes: [] }),
 });
 idempotentBackend.profileById.set("hermes-idem", "idem");
 idempotentBackend.agents = [{ id: "hermes-idem", name: "idem" }];
-idempotentBackend._sendMessageInner = async (_sessionKey, _message, _key, hooks) => {
+idempotentBackend._sendMessageInner = async (_sessionKey, _message, _key, hooks, opts) => {
   idempotentExecutions += 1;
+  idempotentOptions.push(opts);
   await new Promise((resolve) => setTimeout(resolve, 20));
   hooks.final?.("once", false);
 };
@@ -904,14 +906,43 @@ try {
       && selectedAccepted.payload.sessionKey === "agent:shoggoth-default:real-default"
       && JSON.stringify(shoggothSendRecords.at(-1)?.pluginSelection) === JSON.stringify(selected));
   shoggothSendRecords.at(-1)?.emitFinal?.("done");
-  send({ type: "req", id: "foreign-plugin-send", method: "chat.send", params: {
+  const foreignCallsBeforeSelection = sendCalls.length;
+  send({ type: "req", id: "hermes-plugin-send", method: "chat.send", params: {
     sessionKey: "agent:hermes-default:main", message: "use plugin",
     idempotencyKey: "foreign-plugin-run", pluginSelection: selected,
   } });
-  const foreignPluginResponse = await waitFor(f => f.type === "res" && f.id === "foreign-plugin-send", "selected foreign response");
-  check("external host rejects unsupported selection before executing or forwarding",
-    foreignPluginResponse.ok === false && foreignPluginResponse.error?.code === "PLUGIN_SELECTION_UNAVAILABLE"
+  send2({ type: "req", id: "openclaw-plugin-send", method: "chat.send", params: {
+    sessionKey: "agent:main:main", message: "use plugin",
+    idempotencyKey: "foreign-plugin-run", pluginSelection: selected,
+  } });
+  const [hermesPluginResponse, openclawPluginResponse] = await Promise.all([
+    waitFor(f => f.type === "res" && f.id === "hermes-plugin-send", "selected Hermes response"),
+    waitFor2(f => f.type === "res" && f.id === "openclaw-plugin-send", "selected OpenClaw response"),
+  ]);
+  check("concurrent external selections reject before either host executes or forwards",
+    [hermesPluginResponse, openclawPluginResponse].every(response =>
+      response.ok === false && response.error?.code === "PLUGIN_SELECTION_UNAVAILABLE")
+      && sendCalls.length === foreignCallsBeforeSelection
       && upstreamReceived.filter(f => f.method === "chat.send").length === sendUpstreamBefore);
+  send({ type: "req", id: "hermes-after-plugin-reject", method: "chat.send", params: {
+    sessionKey: "agent:hermes-default:main", message: "ordinary after reject",
+    idempotencyKey: "foreign-plugin-run",
+  } });
+  send2({ type: "req", id: "openclaw-after-plugin-reject", method: "chat.send", params: {
+    sessionKey: "agent:main:main", message: "ordinary after reject",
+    idempotencyKey: "foreign-plugin-run",
+  } });
+  const [hermesAfterReject, openclawAfterReject] = await Promise.all([
+    waitFor(f => f.type === "res" && f.id === "hermes-after-plugin-reject", "Hermes after selection reject"),
+    waitFor2(f => f.type === "res" && f.id === "openclaw-after-plugin-reject", "OpenClaw after selection reject"),
+  ]);
+  await waitFor(f => f.type === "event" && f.event === "chat"
+    && f.payload?.state === "final" && f.payload?.runId === "foreign-plugin-run",
+  "Hermes ordinary final after selection reject");
+  check("rejected selection reserves no external dispatch or idempotency key",
+    hermesAfterReject.ok === true && openclawAfterReject.ok === true
+      && sendCalls.at(-1)?.message === "ordinary after reject"
+      && upstreamReceived.filter(f => f.method === "chat.send").length === sendUpstreamBefore + 1);
 
   // 2b. 真实 Hermes 幂等层会把同一终态回调给两个调用者；proxy 必须只做一次
   // 全局 broadcast，否则两个 socket 都会收到两份 final。
@@ -939,13 +970,15 @@ try {
   const finalCount = (frames) => frames.filter((f) => f.type === "event" && f.event === "chat"
     && f.payload?.state === "final" && f.payload?.runId === "shared-key").length;
   check("cross-socket idempotency executes once", idempotentExecutions === 1);
+  check("ordinary external dispatch has no implicit plugin selection",
+    idempotentOptions.length === 1 && !Object.hasOwn(idempotentOptions[0], "pluginSelection"));
   check("cross-socket idempotent final reaches each client exactly once",
     finalCount(clientFrames) === 1 && finalCount(client2Frames) === 1);
 
   // 3. real chat.send still passes through.
   send({ type: "req", id: "s2", method: "chat.send", params: { sessionKey: "agent:main:main", message: "yo", runId: "run-real" } });
   await waitFor((f) => f.type === "res" && f.id === "s2", "real chat.send res");
-  check("real chat.send forwarded upstream", upstreamReceived.filter((f) => f.method === "chat.send").length === sendUpstreamBefore + 1);
+  check("real chat.send forwarded upstream", upstreamReceived.filter((f) => f.method === "chat.send").length === sendUpstreamBefore + 2);
 
   // 4. 模型切换进入 drain 后，所有已声明的 OpenClaw 启动型 RPC 都必须在
   // 本地失败，不能漏到上游；Hermes 自有 chat.send 不受 OpenClaw drain 影响。
@@ -1177,6 +1210,46 @@ try {
         && invalidAnswers.error?.code === "BACKEND_ERROR"
         && promptResponses.length === responseCount,
     );
+
+    const selected = [{ installationId: "fixture-installed", revision: 2 }];
+    const nativeSteersBeforeSelection = shoggothSteerCalls.length;
+    const foreignMutationsBeforeSelection = sessionMutationCalls.length;
+    const promptResponsesBeforeSelection = promptResponses.length;
+    const upstreamBeforeSelection = upstreamReceived.length;
+    send({ type: "req", id: "steer-native-selected", method: "chat.steer", params: {
+      sessionKey: "agent:shoggoth-default:real-default", message: "expand this turn",
+      pluginSelection: selected,
+    } });
+    send({ type: "req", id: "steer-hermes-selected", method: "chat.steer", params: {
+      sessionKey: "agent:hermes-default:hist-1", message: "expand this turn",
+      pluginSelection: [],
+    } });
+    send2({ type: "req", id: "steer-openclaw-selected", method: "chat.steer", params: {
+      sessionKey: "agent:main:main", message: "expand this turn",
+      pluginSelection: selected,
+    } });
+    send2({ type: "req", id: "respond-openclaw-selected", method: "chat.respond", params: {
+      sessionKey: "agent:main:main", kind: "clarify", requestId: "input-2",
+      pluginSelection: selected,
+    } });
+    send({ type: "req", id: "respond-hermes-selected", method: "chat.respond", params: {
+      sessionKey: "agent:hermes-default:hist-1", kind: "clarify", requestId: "input-2",
+      pluginSelection: selected,
+    } });
+    const selectionResponses = await Promise.all([
+      waitFor(f => f.type === "res" && f.id === "steer-native-selected", "selected native steer"),
+      waitFor(f => f.type === "res" && f.id === "steer-hermes-selected", "selected Hermes steer"),
+      waitFor2(f => f.type === "res" && f.id === "steer-openclaw-selected", "selected OpenClaw steer"),
+      waitFor2(f => f.type === "res" && f.id === "respond-openclaw-selected", "selected OpenClaw response"),
+      waitFor(f => f.type === "res" && f.id === "respond-hermes-selected", "selected Hermes response"),
+    ]);
+    check("selection on steer/respond fails closed before every host dispatch",
+      selectionResponses.every(response => response.ok === false
+        && response.error?.code === "PLUGIN_SELECTION_UNAVAILABLE")
+        && shoggothSteerCalls.length === nativeSteersBeforeSelection
+        && sessionMutationCalls.length === foreignMutationsBeforeSelection
+        && promptResponses.length === promptResponsesBeforeSelection
+        && upstreamReceived.length === upstreamBeforeSelection);
 
     // CRUD routing remains backend-generic; none of these writes may reach
     // OpenClaw merely because this backend is not OpenClaw.

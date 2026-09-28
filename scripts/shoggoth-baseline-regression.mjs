@@ -43,12 +43,10 @@ function sha256(target) {
   return crypto.createHash("sha256").update(fs.readFileSync(target)).digest("hex");
 }
 
-function seedLegacyAuthority(paths) {
-  writePrivate(paths.stateSnapshotPath, "legacy-product-snapshot\n");
-  writePrivate(paths.eventLogPath, "legacy-product-event\n");
-  writePrivate(path.join(paths.stateDir, "chat-sessions.json"), "legacy-chat-session\n");
-  writePrivate(path.join(paths.stateDir, "native-kanban.json"), "legacy-kanban\n");
-  writePrivate(path.join(paths.stateDir, "native-cron.json"), "legacy-cron\n");
+function seedAuthority(paths) {
+  writePrivate(paths.stateSnapshotPath, "product-snapshot\n");
+  writePrivate(paths.eventLogPath, "product-event\n");
+  writePrivate(path.join(paths.stateDir, "chat-sessions.json"), "chat-session\n");
   writePrivate(
     path.join(paths.stateDir, "codex", "profile-a", "sessions", "thread-1.jsonl"),
     "legacy-codex-transcript\n",
@@ -59,12 +57,16 @@ function seedLegacyAuthority(paths) {
   );
   writePrivate(
     path.join(paths.stateDir, "codex", "profile-a", "auth.json"),
-    "legacy-managed-auth\n",
+    "retired-profile-auth\n",
   );
   writePrivate(
     path.join(paths.stateDir, "codex", "profile-a", "config.toml"),
-    "legacy-managed-config\n",
+    "retired-profile-config\n",
   );
+  const managedHome = path.join(paths.runtimeAccountsDir, "codex", "managed-account-a", "home");
+  writePrivate(path.join(managedHome, "auth.json"), "account-managed-auth\n");
+  writePrivate(path.join(managedHome, "config.toml"), "account-managed-config\n");
+  writePrivate(path.join(managedHome, "sessions", "thread.jsonl"), "runtime-session\n");
   fs.chmodSync(path.join(paths.stateDir, "codex", "profile-a", "memories"), 0o500);
   fs.chmodSync(
     path.join(paths.stateDir, "codex", "profile-a", "memories", "memory-1.md"),
@@ -74,7 +76,7 @@ function seedLegacyAuthority(paths) {
 
 test("离线备份只保留 Shoggoth authority 与 managed Codex 小文件白名单", () => {
   const { root, paths } = fixture();
-  seedLegacyAuthority(paths);
+  seedAuthority(paths);
   const runtimeTmp = path.join(paths.stateDir, "codex", "profile-a", "tmp", "arg0");
   fs.mkdirSync(runtimeTmp, { recursive: true, mode: 0o700 });
   fs.symlinkSync(
@@ -82,7 +84,7 @@ test("离线备份只保留 Shoggoth authority 与 managed Codex 小文件白名
     path.join(runtimeTmp, "apply_patch"),
   );
   writePrivate(
-    path.join(paths.nativeRuntimeImportStagingDir, "abandoned", "payload", "config.toml"),
+    path.join(paths.stateDir, "native-runtime-imports", "staging", "abandoned", "payload", "config.toml"),
     "staged-runtime-import\n",
   );
   const antigravityRoot = path.join(
@@ -104,12 +106,6 @@ test("离线备份只保留 Shoggoth authority 与 managed Codex 小文件白名
   const pnpmProjects = path.join(grokRoot, "Library", "pnpm", "store", "v11", "projects");
   fs.mkdirSync(pnpmProjects, { recursive: true, mode: 0o700 });
   fs.symlinkSync(projectedDependency, path.join(pnpmProjects, "project"));
-  const accountHome = path.join(
-    paths.runtimeAccountsDir, "codex", "managed-account-a", "home",
-  );
-  writePrivate(path.join(accountHome, "auth.json"), "account-managed-auth\n");
-  writePrivate(path.join(accountHome, "config.toml"), "account-managed-config\n");
-  writePrivate(path.join(accountHome, "sessions", "thread.jsonl"), "runtime-session\n");
   writePrivate(
     path.join(paths.runtimeIntegrationDir, "antigravity", "account-a", "large-cache.bin"),
     Buffer.alloc(1024 * 1024),
@@ -129,8 +125,8 @@ test("离线备份只保留 Shoggoth authority 与 managed Codex 小文件白名
     .map((entry) => entry.path);
   assert.equal(files.includes("state.snapshot.json"), true);
   assert.equal(files.includes("chat-sessions.json"), true);
-  assert.equal(files.includes("codex/profile-a/auth.json"), true);
-  assert.equal(files.includes("codex/profile-a/config.toml"), true);
+  assert.equal(files.includes("codex/profile-a/auth.json"), false);
+  assert.equal(files.includes("codex/profile-a/config.toml"), false);
   assert.equal(files.includes("runtime-accounts/codex/managed-account-a/home/auth.json"), true);
   assert.equal(files.includes("runtime-accounts/codex/managed-account-a/home/config.toml"), true);
   assert.equal(files.includes("codex/profile-a/sessions/thread-1.jsonl"), false);
@@ -171,7 +167,7 @@ test("离线备份只保留 Shoggoth authority 与 managed Codex 小文件白名
 
 test("备份可验证恢复到新的空目录，且不受源数据后续修改影响", () => {
   const { root, paths } = fixture();
-  seedLegacyAuthority(paths);
+  seedAuthority(paths);
   const expected = sha256(path.join(paths.stateDir, "chat-sessions.json"));
   createAuthorityBackup({ paths, backupId: "restore-fixture" });
   writePrivate(path.join(paths.stateDir, "chat-sessions.json"), "newer-data\n");
@@ -184,11 +180,14 @@ test("备份可验证恢复到新的空目录，且不受源数据后续修改�
   assert.equal(restored.destinationStateDir, destinationStateDir);
   assert.equal(sha256(path.join(destinationStateDir, "chat-sessions.json")), expected);
   assert.equal(fs.readFileSync(path.join(
-    destinationStateDir, "codex", "profile-a", "auth.json",
-  ), "utf8"), "legacy-managed-auth\n");
+    destinationStateDir, "runtime-accounts", "codex", "managed-account-a", "home", "auth.json",
+  ), "utf8"), "account-managed-auth\n");
   assert.equal(fs.readFileSync(path.join(
-    destinationStateDir, "codex", "profile-a", "config.toml",
-  ), "utf8"), "legacy-managed-config\n");
+    destinationStateDir, "runtime-accounts", "codex", "managed-account-a", "home", "config.toml",
+  ), "utf8"), "account-managed-config\n");
+  assert.equal(fs.existsSync(path.join(destinationStateDir, "codex")), false);
+  assert.equal(fs.existsSync(path.join(destinationStateDir, "runtime-accounts", "codex",
+    "managed-account-a", "home", "sessions")), false);
   assert.equal(fs.existsSync(path.join(
     destinationStateDir, "codex", "profile-a", "sessions",
   )), false);
@@ -207,7 +206,7 @@ test("备份可验证恢复到新的空目录，且不受源数据后续修改�
 
 test("在线 Service、symlink 或损坏 payload 均 fail closed", () => {
   const active = fixture();
-  seedLegacyAuthority(active.paths);
+  seedAuthority(active.paths);
   fs.mkdirSync(active.paths.runtimeDir, { recursive: true, mode: 0o700 });
   writePrivate(active.paths.lockPath, "active\n");
   assert.throws(
@@ -216,7 +215,7 @@ test("在线 Service、symlink 或损坏 payload 均 fail closed", () => {
   );
 
   const linked = fixture();
-  seedLegacyAuthority(linked.paths);
+  seedAuthority(linked.paths);
   const victim = path.join(linked.root, "victim.txt");
   writePrivate(victim, "victim\n");
   fs.symlinkSync(victim, path.join(linked.paths.stateDir, "unsafe-link"));
@@ -226,7 +225,7 @@ test("在线 Service、symlink 或损坏 payload 均 fail closed", () => {
   );
 
   const corrupt = fixture();
-  seedLegacyAuthority(corrupt.paths);
+  seedAuthority(corrupt.paths);
   const created = createAuthorityBackup({ paths: corrupt.paths, backupId: "corrupt-backup" });
   writePrivate(path.join(created.backupPath, "payload", "chat-sessions.json"), "tampered\n");
   assert.throws(
@@ -237,7 +236,7 @@ test("在线 Service、symlink 或损坏 payload 均 fail closed", () => {
 
 test("备份流程不读取或改写 OpenClaw/Hermes 外部 authority", () => {
   const { root, paths } = fixture();
-  seedLegacyAuthority(paths);
+  seedAuthority(paths);
   const openclaw = path.join(root, ".openclaw", "marker.json");
   const hermes = path.join(root, ".hermes", "marker.json");
   writePrivate(openclaw, "openclaw-authority\n");

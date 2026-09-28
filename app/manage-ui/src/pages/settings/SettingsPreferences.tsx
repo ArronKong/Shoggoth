@@ -1,8 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { AppConfig } from "../../types";
 import { Field, Option, Select, Switch } from "../../components/Field";
-import { useToast } from "../../components/ui";
-import { fireNotification } from "../../lib/notify";
 import ThemePicker from "./ThemePicker";
 import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
 import SettingsAppUpdate from "./SettingsAppUpdate";
@@ -19,7 +17,6 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
   themeLoaded: boolean;
 }) {
   const { t } = useTranslation();
-  const toast = useToast();
   return (
     <div className="settings-preferences">
       {/* Everyday preferences share one grouped card: one row per setting. */}
@@ -49,7 +46,7 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
         </div>
       </section>
 
-      {/* Notifications — native macOS desktop notifications, per category */}
+      {/* Notifications — native macOS desktop notifications. */}
       <section className="settings-section" id="settings-notif">
         <header className="settings-section-head">
           <h3 className="settings-h">{t("settings.notifSection")}</h3>
@@ -68,32 +65,14 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
             <div className="settings-switch-row">
               <Switch
                 disabled={disabled}
-                checked={cfg.notifications.cron}
-                onChange={(v) => onChange({ notifications: { ...cfg.notifications, cron: v } })}
-                label={<span className="settings-notification-label"><SettingsIcon name="schedule" /><span className="settings-notification-copy"><span>{t("settings.notifCron")}</span><small>{t("settings.notifCronDesc")}</small></span></span>}
-              />
-            </div>
-            <div className="settings-switch-row">
-              <Switch
-                disabled={disabled}
-                checked={cfg.notifications.task}
-                onChange={(v) => onChange({ notifications: { ...cfg.notifications, task: v } })}
+                checked={cfg.notifications.cron && cfg.notifications.task}
+                onChange={(v) => onChange({ notifications: { ...cfg.notifications, cron: v, task: v } })}
                 label={<span className="settings-notification-label"><SettingsIcon name="task" /><span className="settings-notification-copy"><span>{t("settings.notifTask")}</span><small>{t("settings.notifTaskDesc")}</small></span></span>}
               />
             </div>
           </div>
           <div className="settings-notification-footer">
             <p className="ui-hint">{t("settings.notifHint")}</p>
-            <button
-              className="ui-cbtn ui-cbtn--sm"
-              onClick={async () => {
-                const sent = await fireNotification({ category: "chat", title: t("notif.testTitle"), body: t("notif.testBody"), force: true });
-                if (sent) toast.success(t("settings.notifTestOk"));
-                else toast.error(t("settings.notifTestFailed"));
-              }}
-            >
-              {t("settings.notifTest")}
-            </button>
           </div>
         </div>
       </section>

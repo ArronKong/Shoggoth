@@ -10,7 +10,8 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 const { resolveServicePaths } = require(path.join(ROOT, "app/agent-service/paths.js"));
-const { NativeSkillStore } = require(path.join(ROOT, "app/agent-service/native-skill-store.js"));
+const { MAX_INSTALL_BATCH, NativeSkillStore } = require(path.join(
+  ROOT, "app/agent-service/native-skill-store.js"));
 
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
@@ -169,6 +170,306 @@ test("安装原生包后 registry 成为唯一真源，重启仍可验证", () =
     value.store.close();
     value.store.open(["profile-a", "profile-b"]);
     assert.equal(value.store.list("profile-a").items[0].contentHash, installed.package.contentHash);
+  } finally { value.cleanup(); }
+});
+
+test("提交前完整校验旧包，篡改导致失败时磁盘和内存 Registry 均不前进", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    value.store.installFromDirectory({ sourcePath: packageDir(value.root, { name: "precommit-old" }),
+      expectedRevision: 1, operationId: "install-precommit-old" });
+    const before = fs.readFileSync(value.paths.skillRegistryPath);
+    const oldPath = path.join(value.paths.skillPackagesDir, "precommit-old", "1.0.0", "SKILL.md");
+    const original = fs.readFileSync(oldPath);
+    fs.appendFileSync(oldPath, "\nchanged after install\n");
+    assert.throws(() => value.store.installFromDirectory({
+      sourcePath: packageDir(value.root, { name: "precommit-new" }),
+      expectedRevision: 2, operationId: "install-precommit-new",
+    }), { code: "SKILL_REGISTRY_CORRUPT" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), before);
+    assert.equal(value.store.revision, 2);
+    fs.writeFileSync(oldPath, original);
+    value.store.close();
+    value.store.open(["profile-a"]);
+    assert.deepEqual(value.store.list("profile-a").items.map((item) => item.name), ["precommit-old"]);
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "precommit-new", "1.0.0")), false,
+      "uncommitted package must be removed by startup orphan recovery");
+  } finally { value.cleanup(); }
+});
+
+test("Registry 已提交但 backup 清理失败时内存 revision 跟随已提交结果", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    value.store.installFromDirectory({ sourcePath: packageDir(value.root, { name: "commit-first" }),
+      expectedRevision: 1, operationId: "install-commit-first" });
+    const originalUnlink = fs.unlinkSync;
+    fs.unlinkSync = function failBackupCleanup(target, ...args) {
+      if (String(target).startsWith(`${value.paths.skillRegistryPath}.backup-`)) {
+        throw Object.assign(new Error("injected backup cleanup failure"), { code: "EIO" });
+      }
+      return originalUnlink.call(this, target, ...args);
+    };
+    try {
+      assert.throws(() => value.store.installBatchFromDirectories({
+        items: [
+          { sourcePath: packageDir(value.root, { name: "commit-second" }) },
+          { sourcePath: packageDir(value.root, { name: "commit-third" }) },
+        ],
+        expectedRevision: 2, operationId: "install-commit-second",
+      }), (error) => error.committed === true
+        && error.code === "PRIVATE_FILE_COMMITTED_WITH_CLEANUP_FAILURE");
+    } finally { fs.unlinkSync = originalUnlink; }
+    assert.equal(JSON.parse(fs.readFileSync(value.paths.skillRegistryPath, "utf8")).revision, 3);
+    assert.equal(value.store.revision, 3, "an acknowledged commit must update in-memory CAS state");
+    assert.deepEqual(value.store.list("profile-a").items.map((item) => item.name),
+      ["commit-first", "commit-second", "commit-third"]);
+    assert.throws(() => value.store.installFromDirectory({
+      sourcePath: packageDir(value.root, { name: "commit-stale" }),
+      expectedRevision: 2, operationId: "install-commit-stale",
+    }), { code: "SKILL_REGISTRY_REVISION_CONFLICT" });
+  } finally { value.cleanup(); }
+});
+
+test("Registry 提交状态不确定后停用 Store，并拒绝带歧义证据的重启", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    value.store.installFromDirectory({ sourcePath: packageDir(value.root, { name: "uncertain-first" }),
+      expectedRevision: 1, operationId: "install-uncertain-first" });
+    const originalRename = fs.renameSync;
+    const originalFsync = fs.fsyncSync;
+    let registryRenamed = false;
+    fs.renameSync = function failRollback(from, target, ...args) {
+      if (from === `${value.paths.skillRegistryPath}.tmp` && target === value.paths.skillRegistryPath) {
+        const result = originalRename.call(this, from, target, ...args);
+        registryRenamed = true;
+        return result;
+      }
+      if (registryRenamed && String(from).startsWith(`${value.paths.skillRegistryPath}.backup-`)
+        && target === value.paths.skillRegistryPath) {
+        throw Object.assign(new Error("injected rollback failure"), { code: "EIO" });
+      }
+      return originalRename.call(this, from, target, ...args);
+    };
+    fs.fsyncSync = function failRegistryParentSync(fd, ...args) {
+      if (registryRenamed && fs.fstatSync(fd).isDirectory()) {
+        throw Object.assign(new Error("injected Registry parent fsync failure"), { code: "EIO" });
+      }
+      return originalFsync.call(this, fd, ...args);
+    };
+    try {
+      assert.throws(() => value.store.installBatchFromDirectories({
+        items: [{ sourcePath: packageDir(value.root, { name: "uncertain-second" }) }],
+        expectedRevision: 2, operationId: "install-uncertain-second",
+      }), (error) => error.committedUncertain === true
+        && error.code === "PRIVATE_FILE_COMMIT_UNCERTAIN");
+    } finally {
+      fs.renameSync = originalRename;
+      fs.fsyncSync = originalFsync;
+    }
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "uncertain-second", "1.0.0")), true,
+      "uncertain durable Registry may reference the newly materialized batch target");
+    assert.throws(() => value.store.list("profile-a"), { code: "SKILL_REGISTRY_COMMIT_UNCERTAIN" });
+    assert.throws(() => value.store.revision, { code: "SKILL_REGISTRY_COMMIT_UNCERTAIN" });
+    value.store.close();
+    assert.throws(() => value.store.open(["profile-a"]), { code: "SKILL_REGISTRY_COMMIT_UNCERTAIN" });
+  } finally { value.cleanup(); }
+});
+
+test("有界批量安装仅提交一次且重启后全部可读，全局版本保持唯一", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const firstSource = packageDir(value.root, { name: "batch-shared", version: "1.0.0" });
+    value.store.installFromDirectory({ sourcePath: firstSource,
+      expectedRevision: 1, operationId: "install-batch-shared-v1", globalEnabled: true });
+    const sources = [
+      packageDir(value.root, { name: "batch-shared", version: "1.1.0" }),
+      packageDir(value.root, { name: "batch-second" }),
+      packageDir(value.root, { name: "batch-third" }),
+    ];
+    const oldPath = path.join(value.paths.skillPackagesDir, "batch-shared", "1.0.0", "SKILL.md");
+    const originalRead = fs.readFileSync;
+    let oldPackageReads = 0;
+    fs.readFileSync = function countedRead(target, ...args) {
+      if (target === oldPath) oldPackageReads += 1;
+      return originalRead.call(this, target, ...args);
+    };
+    let installed;
+    try {
+      installed = value.store.installBatchFromDirectories({
+        operationId: "batch-install-three", expectedRevision: 2,
+        items: sources.map((sourcePath) => ({ sourcePath, globalEnabled: true })),
+      });
+    } finally { fs.readFileSync = originalRead; }
+    assert.equal(installed.revision, 3, "one batch advances the Registry once");
+    assert.equal(installed.packages.length, 3);
+    assert.equal(oldPackageReads, 1, "old installed package is fully rescanned once per batch");
+    const current = value.store.list("profile-a").items;
+    assert.equal(current.length, 4);
+    assert.equal(current.find((item) => item.name === "batch-shared" && item.version === "1.0.0")
+      .globalEnabled, false);
+    assert.equal(current.find((item) => item.name === "batch-shared" && item.version === "1.1.0")
+      .globalEnabled, true);
+    value.store.close();
+    value.store.open(["profile-a"]);
+    for (const name of ["batch-shared", "batch-second", "batch-third"]) {
+      assert.match(value.store.read({ profileId: "profile-a", name }).content, /Inspect the requested change/u);
+    }
+    assert.equal(value.store.registry.packages.length, 4);
+  } finally { value.cleanup(); }
+});
+
+test("批量上限、重复版本和旧包篡改均在提交前拒绝，重启清理孤儿", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const source = packageDir(value.root, { name: "batch-first" });
+    const beforeEmpty = fs.readFileSync(value.paths.skillRegistryPath);
+    assert.throws(() => value.store.installBatchFromDirectories({
+      operationId: "batch-too-many", expectedRevision: 1,
+      items: Array.from({ length: MAX_INSTALL_BATCH + 1 }, () => ({ sourcePath: source })),
+    }), { code: "SKILL_INSTALL_INVALID" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), beforeEmpty);
+    assert.throws(() => value.store.installBatchFromDirectories({
+      operationId: "batch-duplicate", expectedRevision: 1,
+      items: [{ sourcePath: source }, { sourcePath: source }],
+    }), { code: "SKILL_BATCH_DUPLICATE" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), beforeEmpty);
+    const duplicateManifest = packageDir(value.root, { name: "batch-first" });
+    assert.throws(() => value.store.installBatchFromDirectories({
+      operationId: "batch-duplicate-version", expectedRevision: 1,
+      items: [{ sourcePath: source }, { sourcePath: duplicateManifest }],
+    }), { code: "SKILL_BATCH_DUPLICATE" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), beforeEmpty);
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "batch-first", "1.0.0")), false,
+      "a definite batch failure removes the exact newly materialized target immediately");
+    value.store.close();
+    value.store.open(["profile-a"]);
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "batch-first", "1.0.0")), false);
+    value.store.installFromDirectory({ sourcePath: source,
+      expectedRevision: 1, operationId: "install-batch-first" });
+    const beforeTamper = fs.readFileSync(value.paths.skillRegistryPath);
+    const installedPath = path.join(value.paths.skillPackagesDir, "batch-first", "1.0.0", "SKILL.md");
+    const original = fs.readFileSync(installedPath);
+    fs.appendFileSync(installedPath, "\ntampered\n");
+    assert.throws(() => value.store.installBatchFromDirectories({
+      operationId: "batch-tampered-old", expectedRevision: 2,
+      items: [{ sourcePath: packageDir(value.root, { name: "batch-after-tamper" }) }],
+    }), { code: "SKILL_REGISTRY_CORRUPT" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), beforeTamper);
+    assert.equal(value.store.revision, 2);
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "batch-after-tamper", "1.0.0")), false);
+    fs.writeFileSync(installedPath, original);
+    value.store.close();
+    value.store.open(["profile-a"]);
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "batch-after-tamper", "1.0.0")), false);
+  } finally { value.cleanup(); }
+});
+
+test("批量中的既有同摘要版本保持幂等，显式全局提升只提交一次", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const source = packageDir(value.root, { name: "batch-existing" });
+    value.store.installFromDirectory({ sourcePath: source,
+      expectedRevision: 1, operationId: "install-batch-existing" });
+    const before = fs.readFileSync(value.paths.skillRegistryPath);
+    const unchanged = value.store.installBatchFromDirectories({
+      operationId: "batch-existing-again", expectedRevision: 2,
+      items: [{ sourcePath: source }],
+    });
+    assert.equal(unchanged.revision, 2);
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), before);
+    const promoted = value.store.installBatchFromDirectories({
+      operationId: "batch-existing-promote", expectedRevision: 2,
+      items: [{ sourcePath: source, globalEnabled: true }],
+    });
+    assert.equal(promoted.revision, 3);
+    assert.equal(value.store.listGlobalEnabled()[0].name, "batch-existing");
+    const changedSource = packageDir(value.root, { name: "batch-existing", content: "# Changed\n" });
+    const promotedRegistry = fs.readFileSync(value.paths.skillRegistryPath);
+    assert.throws(() => value.store.installBatchFromDirectories({
+      operationId: "batch-existing-conflict", expectedRevision: 3,
+      items: [{ sourcePath: changedSource }],
+    }), { code: "SKILL_VERSION_CONFLICT" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), promotedRegistry);
+  } finally { value.cleanup(); }
+});
+
+test("批量 Registry 原子写入未提交时立即清理本批目标，旧 revision 可继续使用", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const before = fs.readFileSync(value.paths.skillRegistryPath);
+    const first = packageDir(value.root, { name: "batch-write-first" });
+    const second = packageDir(value.root, { name: "batch-write-second" });
+    const originalRename = fs.renameSync;
+    fs.renameSync = function failRegistryRename(from, target, ...args) {
+      if (from === `${value.paths.skillRegistryPath}.tmp` && target === value.paths.skillRegistryPath) {
+        throw Object.assign(new Error("injected Registry rename failure"), { code: "EIO" });
+      }
+      return originalRename.call(this, from, target, ...args);
+    };
+    try {
+      assert.throws(() => value.store.installBatchFromDirectories({
+        operationId: "batch-write-failed", expectedRevision: 1,
+        items: [{ sourcePath: first }, { sourcePath: second }],
+      }), { code: "EIO" });
+    } finally { fs.renameSync = originalRename; }
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), before);
+    assert.equal(value.store.revision, 1);
+    for (const name of ["batch-write-first", "batch-write-second"]) {
+      assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, name, "1.0.0")), false);
+    }
+    const retry = value.store.installBatchFromDirectories({
+      operationId: "batch-write-retry", expectedRevision: 1,
+      items: [{ sourcePath: first }, { sourcePath: second }],
+    });
+    assert.equal(retry.revision, 2);
+  } finally { value.cleanup(); }
+});
+
+test("Registry 超过重启读取上限时拒绝提交并保留旧文件", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    value.store.installFromDirectory({
+      sourcePath: packageDir(value.root, { name: "registry-capacity-base" }),
+      expectedRevision: 1, operationId: "install-registry-capacity-base",
+    });
+    const before = fs.readFileSync(value.paths.skillRegistryPath);
+    const template = value.store.registry.packages[0];
+    const tooLarge = Array.from({ length: 1_300 }, (_, index) => ({
+      ...template, id: `registry-capacity-${index}`, description: "x".repeat(4_096),
+    }));
+    assert.throws(() => value.store._commitRegistry(tooLarge), { code: "SKILL_REGISTRY_TOO_LARGE" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), before);
+    assert.equal(value.store.revision, 2);
+    value.store.close();
+    value.store.open(["profile-a"]);
+    assert.equal(value.store.list("profile-a").items.length, 1);
+  } finally { value.cleanup(); }
+});
+
+test("批量不能同时全局启用同一 Skill 的两个版本，并立即回滚新目录", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const first = packageDir(value.root, { name: "batch-versions", version: "1.0.0" });
+    const second = packageDir(value.root, { name: "batch-versions", version: "1.1.0" });
+    const before = fs.readFileSync(value.paths.skillRegistryPath);
+    assert.throws(() => value.store.installBatchFromDirectories({
+      operationId: "batch-two-global-versions", expectedRevision: 1,
+      items: [{ sourcePath: first, globalEnabled: true },
+        { sourcePath: second, globalEnabled: true }],
+    }), { code: "SKILL_BATCH_GLOBAL_CONFLICT" });
+    assert.deepEqual(fs.readFileSync(value.paths.skillRegistryPath), before);
+    assert.equal(value.store.revision, 1);
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "batch-versions", "1.0.0")), false);
+    assert.equal(fs.existsSync(path.join(value.paths.skillPackagesDir, "batch-versions", "1.1.0")), false);
   } finally { value.cleanup(); }
 });
 
@@ -453,6 +754,69 @@ test("全局安装启用所有现有 Profile，后建 Profile 自动继承且普
     assert.equal(byName.get("shared-fetch").enabled, true);
     assert.equal(byName.get("shared-fetch").version, "1.1.0");
     assert.equal(byName.get("local-only").enabled, false);
+  } finally { value.cleanup(); }
+});
+
+test("外部宿主只读取全局安装的独立 Skill，撤权和文件变化立即拒绝", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const globalSource = packageDir(value.root, { name: "external-global" });
+    fs.mkdirSync(path.join(globalSource, "references"), { mode: 0o700 });
+    fs.writeFileSync(path.join(globalSource, "references", "guide.md"), "Reference fixture\n");
+    const global = value.store.installFromDirectory({
+      sourcePath: globalSource,
+      expectedRevision: value.store.revision, operationId: "install-external-global",
+      globalEnabled: true,
+    });
+    value.store.installFromDirectory({
+      sourcePath: packageDir(value.root, { name: "profile-only" }),
+      expectedRevision: value.store.revision, operationId: "install-profile-only",
+    });
+    const [descriptor] = value.store.listGlobalEnabled();
+    assert.equal(descriptor.name, "external-global");
+    assert.match(value.store.readGlobalEnabled({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision }).content, /Inspect the requested change/u);
+    assert.equal(value.store.readGlobalEnabledFile({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision,
+      relativePath: "references/guide.md" }).content, "Reference fixture\n");
+    const installedReference = path.join(value.paths.skillPackagesDir, descriptor.id,
+      descriptor.version, "references", "guide.md");
+    const originalReference = fs.readFileSync(installedReference);
+    fs.appendFileSync(installedReference, "changed\n");
+    assert.throws(() => value.store.readGlobalEnabledFile({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision,
+      relativePath: "references/guide.md" }), { code: "SKILL_PACKAGE_CHANGED" });
+    fs.writeFileSync(installedReference, originalReference);
+    assert.throws(() => value.store.readGlobalEnabledFile({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision,
+      relativePath: "references/../../skill.json" }), { code: "SKILL_PATH_INVALID" });
+    assert.throws(() => value.store.readGlobalEnabledFile({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision,
+      relativePath: "skill.json" }), { code: "SKILL_PATH_INVALID" });
+    assert.throws(() => value.store.readGlobalEnabled({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision - 1 }), { code: "SKILL_REVISION_CHANGED" });
+    const skillPath = path.join(value.paths.skillPackagesDir, descriptor.id,
+      descriptor.version, "SKILL.md");
+    const originalContent = fs.readFileSync(skillPath);
+    fs.appendFileSync(skillPath, "\nchanged after install\n");
+    assert.throws(() => value.store.readGlobalEnabled({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision }), { code: "SKILL_PACKAGE_CHANGED" });
+    fs.writeFileSync(skillPath, originalContent);
+    value.store.setGlobalSkill({ skillId: global.package.id,
+      version: global.package.version, source: "user", enabled: false,
+      expectedRevision: value.store.revision });
+    assert.deepEqual(value.store.listGlobalEnabled(), []);
+    assert.throws(() => value.store.readGlobalEnabled({ skillId: descriptor.id,
+      version: descriptor.version, contentHash: descriptor.contentHash,
+      registryRevision: descriptor.registryRevision }), { code: "SKILL_REVISION_CHANGED" });
   } finally { value.cleanup(); }
 });
 

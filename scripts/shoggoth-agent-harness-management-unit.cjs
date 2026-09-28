@@ -10,16 +10,41 @@ const { AgentHarnessServiceController } = require(path.join(
   ROOT, "app", "agent-service", "agent-harness-service-controller.js",
 ));
 const {
+  mapAgentHarnessError,
   validateAgentHarnessParams,
   validateAgentHarnessResult,
 } = require(path.join(ROOT, "app", "agent-service", "agent-harness-service-protocol.js"));
 const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
+const { MemoryProvenanceStore } = require("../app/agent-service/memory-provenance-store");
+const { MemoryProvenanceService } = require("../app/agent-service/memory-provenance-service");
 const { NativeSkillStore } = require(path.join(
   ROOT, "app", "agent-service", "native-skill-store.js",
 ));
 
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
+
+test("Memory journal uncertain commit maps to actionable public Harness error", () => {
+  const error = Object.assign(new Error("private journal path and write failure"), {
+    code: "MEMORY_COMMIT_UNCERTAIN",
+    cause: new Error("private fsync diagnostics"),
+  });
+  const mapped = mapAgentHarnessError(error);
+  assert.equal(mapped.code, "MEMORY_COMMIT_UNCERTAIN");
+  assert.match(mapped.message, /重启 Shoggoth.*核对记忆状态.*不要重试/u);
+  assert.equal(JSON.stringify(mapped).includes("private"), false);
+});
+
+test("Transcript journal uncertain commit maps to actionable public Harness error", () => {
+  const error = Object.assign(new Error("private transcript journal diagnostics"), {
+    code: "TRANSCRIPT_COMMIT_UNCERTAIN",
+    cause: new Error("private fsync diagnostics"),
+  });
+  const mapped = mapAgentHarnessError(error);
+  assert.equal(mapped.code, "TRANSCRIPT_COMMIT_UNCERTAIN");
+  assert.match(mapped.message, /重启 Shoggoth.*核对会话状态.*不要重试/u);
+  assert.equal(JSON.stringify(mapped).includes("private"), false);
+});
 
 function fixture(options = {}) {
   const value = contextFixture({ transcriptSessionId: "session-1" });
@@ -188,6 +213,85 @@ test("Memory/Transcript/Tool mutations 都以实时 revision 防止旧窗口覆�
   } finally { value.cleanup(); }
 });
 
+test("撤回同源一条记忆后，普通 active 列表隐藏其余同源记忆", () => {
+  const value = fixture();
+  try {
+    const sourceRefs = ["event-1", "run-1"];
+    const forgotten = value.memoryEngine.propose({ profileId: "profile-1",
+      classification: "explicit", scope: "user", type: "semantic",
+      content: "用户每周五复盘", sourceRefs });
+    const sibling = value.memoryEngine.propose({ profileId: "profile-1",
+      classification: "explicit", scope: "user", type: "semantic",
+      content: "用户偏好简短复盘", sourceRefs });
+    value.memoryEngine.delete({ profileId: "profile-1", id: forgotten.id, reason: "user_deleted" });
+    assert.equal(value.memoryStore.get("profile-1", sibling.id).status, "active");
+    assert.equal(value.memoryEngine.recallPolicy.isMemoryVisible("profile-1",
+      value.memoryStore.get("profile-1", sibling.id)), false);
+    const active = value.controller.handle("harness.memory.list", {
+      profileId: "profile-1", status: "active", scope: null, cursor: 0, limit: 50,
+    });
+    assert.deepEqual(active.items, []);
+    const audit = value.controller.handle("harness.memory.list", {
+      profileId: "profile-1", status: "deleted", scope: null, cursor: 0, limit: 50,
+    });
+    assert.equal(audit.items.some((item) => item.id === forgotten.id), true);
+  } finally { value.cleanup(); }
+});
+
+test("已接受候选遗忘后仍可在用户审计查看原因，缺失审核回执的记录仍隐藏", () => {
+  const value = fixture();
+  const provenanceStore = new MemoryProvenanceStore({ paths: value.paths });
+  provenanceStore.open();
+  try {
+    const profileId = "profile-1";
+    const candidateId = `mc-${"a".repeat(64)}`;
+    const memoryId = `reviewed-${candidateId}`;
+    const source = { eventId: "event-reviewed", runId: "run-reviewed", workspace: null };
+    const item = value.memoryEngine.propose({ profileId, id: memoryId,
+      classification: "imported", scope: "user", type: "semantic",
+      content: "用户每周五复盘项目", sourceRefs: [source.eventId, source.runId] });
+    const list = (status) => value.controller.handle("harness.memory.list", {
+      profileId, status, scope: null, cursor: 0, limit: 50,
+    });
+    assert.equal(list("active").items.some((entry) => entry.id === memoryId), false,
+      "a primary-store write without an accepted receipt cannot appear in the memory UI");
+    const candidate = { id: candidateId, profileId, status: "accepted",
+      acceptedMemoryId: memoryId, content: item.content, scope: item.scope,
+      sensitivity: item.sensitivity, source };
+    value.memoryEngine.setReviewReceiptStore({ get: () => ({ candidates: { [candidateId]: candidate } }) });
+    value.memoryEngine.setReviewSourceVerifier((_profileId, review) =>
+      value.memoryEngine.recallPolicy.isSourceVisible(profileId,
+        [review.source.eventId, review.source.runId]));
+    assert.equal(list("active").items.some((entry) => entry.id === memoryId), true);
+
+    value.controller.memoryProvenanceService = new MemoryProvenanceService({
+      store: provenanceStore, memoryStore: value.memoryStore,
+      transcriptStore: value.transcripts, chatSessionStore: { listSessions: () => [] },
+      recallPolicy: value.memoryEngine.recallPolicy,
+    });
+    value.memoryEngine.delete({ profileId, id: memoryId, reason: "forgotten" });
+    const deleted = value.memoryStore.get(profileId, memoryId);
+    assert.equal(value.memoryEngine.isReviewCommitted(profileId, deleted), false,
+      "the source must remain unavailable to Agent reads");
+    assert.equal(list("active").items.some((entry) => entry.id === memoryId), false);
+    assert.equal(list("deleted").items.some((entry) => entry.id === memoryId), true);
+    const audit = value.controller.handle("harness.memory.explain", { profileId, id: memoryId });
+    assert.equal(audit.item.status, "deleted");
+    assert.equal(audit.withdrawalReason, "forgotten");
+
+    const orphanId = `reviewed-mc-${"b".repeat(64)}`;
+    value.memoryEngine.propose({ profileId, id: orphanId,
+      classification: "imported", scope: "user", type: "semantic",
+      content: "用户偏好小段落", sourceRefs: ["event-orphan", "run-orphan"] });
+    value.memoryEngine.delete({ profileId, id: orphanId, reason: "user_deleted" });
+    assert.equal(list("deleted").items.some((entry) => entry.id === orphanId), false,
+      "a deleted primary-store write without a review receipt remains hidden");
+    assert.throws(() => value.controller.handle("harness.memory.explain", {
+      profileId, id: orphanId,
+    }), (error) => error.code === "MEMORY_NOT_FOUND");
+  } finally { provenanceStore.close(); value.cleanup(); }
+});
+
 test("拒绝任一 Computer Use 工具会立即关闭该 Profile 的活动会话", async () => {
   const closedProfiles = [];
   const value = fixture({
@@ -243,6 +347,29 @@ test("Harness protocol 严格拒绝未知字段并限制单帧结果", () => {
   assert.throws(() => validateAgentHarnessParams("harness.memory.list", {
     profileId: "profile-1", status: null, scope: null, cursor: 0, limit: 50, extra: true,
   }), (error) => error.code === "INVALID_PARAMS");
+  assert.deepEqual(validateAgentHarnessParams("harness.memory.candidates.list", {
+    profileId: "profile-1", status: "pending", cursor: 0, limit: 16, expectedRevision: null,
+  }), { profileId: "profile-1", status: "pending", cursor: 0, limit: 16, expectedRevision: null });
+  assert.throws(() => validateAgentHarnessParams("harness.memory.candidates.accept", {
+    profileId: "profile-1", candidateId: "mc-1", expectedRevision: 2,
+  }), (error) => error.code === "INVALID_PARAMS");
+  assert.deepEqual(validateAgentHarnessParams("harness.memory.candidates.acceptMany", {
+    profileId: "profile-1", candidateIds: ["mc-1", "mc-2"],
+    expectedRevision: 2, expectedMemoryRevision: 4,
+  }).candidateIds, ["mc-1", "mc-2"]);
+  assert.throws(() => validateAgentHarnessParams("harness.memory.candidates.acceptMany", {
+    profileId: "profile-1", candidateIds: ["mc-1", "mc-1"],
+    expectedRevision: 2, expectedMemoryRevision: 4,
+  }), (error) => error.code === "INVALID_PARAMS");
+  assert.deepEqual(validateAgentHarnessResult("harness.memory.candidates.acceptMany", {
+    revision: 3, acceptedCandidateIds: ["mc-1", "mc-2"],
+    acceptedMemoryIds: ["reviewed-mc-1", "reviewed-mc-2"],
+    memoryRevision: 5, viewStatus: { stale: false, revision: 5 },
+  }).acceptedCandidateIds, ["mc-1", "mc-2"]);
+  assert.throws(() => validateAgentHarnessResult("harness.memory.candidates.acceptMany", {
+    revision: 3, acceptedCandidateIds: ["mc-1"], acceptedMemoryIds: [],
+    memoryRevision: 5, viewStatus: { stale: false, revision: 5 },
+  }), (error) => error.code === "HARNESS_RESPONSE_INVALID");
   assert.throws(() => validateAgentHarnessResult("harness.definition.read", {
     content: "x".repeat(60 * 1024),
   }), (error) => error.code === "HARNESS_RESPONSE_TOO_LARGE");
@@ -260,6 +387,71 @@ test("Harness protocol 严格拒绝未知字段并限制单帧结果", () => {
   const { reason, ...ambiguousReady } = unavailableComputer;
   assert.throws(() => validateAgentHarnessResult("harness.computer.status", { ...ambiguousReady, available: true }),
     (error) => error.code === "HARNESS_RESPONSE_INVALID");
+});
+
+test("候选审核回执必须对应请求的 Profile、候选 ID 与 reviewed 记忆 ID", () => {
+  const profileId = "profile-1";
+  const candidateId = "mc-1";
+  const source = { sessionId: "session-1", eventId: "event-1", runId: "run-1", seq: 1,
+    contentHash: "a".repeat(64), quoteHash: "b".repeat(64),
+    quoteStart: 0, quoteLength: 2, workspace: null };
+  const candidate = { id: candidateId, profileId, content: "用户偏好简短答复", scope: "user",
+    sensitivity: "normal", source, status: "accepted", createdAt: 1, updatedAt: 2,
+    acceptedMemoryId: `reviewed-${candidateId}` };
+  const memoryItem = { id: `reviewed-${candidateId}`, profileId, scope: "user",
+    type: "semantic", content: candidate.content, sourceRefs: [source.eventId, source.runId],
+    confidence: 0.5, sensitivity: "normal", status: "active", validFrom: 1,
+    validUntil: null, supersedes: null, createdAt: 1, updatedAt: 2 };
+  const accepted = { revision: 2, candidate, memoryItem, memoryRevision: 3,
+    viewStatus: { stale: false, revision: 3 } };
+  const acceptParams = { profileId, candidateId, expectedRevision: 1, expectedMemoryRevision: 1 };
+  const check = (method, result, params, valid = true) => {
+    if (valid) assert.deepEqual(validateAgentHarnessResult(method, result, params), result);
+    else assert.throws(() => validateAgentHarnessResult(method, result, params),
+      (error) => error.code === "HARNESS_RESPONSE_INVALID");
+  };
+  check("harness.memory.candidates.accept", accepted, acceptParams);
+  check("harness.memory.candidates.accept", { ...accepted,
+    candidate: { ...candidate, id: "mc-other" } }, acceptParams, false);
+  check("harness.memory.candidates.accept", { ...accepted,
+    candidate: { ...candidate, profileId: "profile-other" } }, acceptParams, false);
+  check("harness.memory.candidates.accept", { ...accepted,
+    memoryItem: { ...memoryItem, id: "reviewed-mc-other" } }, acceptParams, false);
+  check("harness.memory.candidates.accept", { ...accepted,
+    memoryItem: { ...memoryItem, status: "candidate" } }, acceptParams, false);
+  const rejected = { revision: 2, candidate: { ...candidate,
+    status: "rejected", acceptedMemoryId: null } };
+  const rejectParams = { profileId, candidateId, expectedRevision: 1 };
+  check("harness.memory.candidates.reject", rejected, rejectParams);
+  check("harness.memory.candidates.reject", { ...rejected,
+    candidate: { ...rejected.candidate, id: "mc-other" } }, rejectParams, false);
+  check("harness.memory.candidates.reject", { ...rejected,
+    candidate: { ...rejected.candidate, profileId: "profile-other" } }, rejectParams, false);
+  const batchParams = { profileId, candidateIds: ["mc-1", "mc-2"],
+    expectedRevision: 1, expectedMemoryRevision: 1 };
+  const batch = { revision: 2, acceptedCandidateIds: ["mc-1", "mc-2"],
+    acceptedMemoryIds: ["reviewed-mc-1", "reviewed-mc-2"], memoryRevision: 3,
+    viewStatus: { stale: false, revision: 3 } };
+  check("harness.memory.candidates.acceptMany", batch, batchParams);
+  check("harness.memory.candidates.acceptMany", { ...batch,
+    acceptedCandidateIds: ["mc-2", "mc-1"] }, batchParams, false);
+  check("harness.memory.candidates.acceptMany", { ...batch,
+    acceptedMemoryIds: ["reviewed-mc-1", "reviewed-mc-other"] }, batchParams, false);
+});
+
+test("来源解释不能把缺少原话的响应标成已验证", () => {
+  const value = fixture();
+  try {
+    const item = value.memoryEngine.propose({ profileId: "profile-1", classification: "explicit",
+      scope: "user", type: "semantic", content: "用户喜欢中文答复", sourceRefs: ["user-request"] });
+    assert.throws(() => validateAgentHarnessResult("harness.memory.explain", {
+      item, evidence: { status: "verified_quote", origin: "conversation", memoryRevision: 1,
+        sessionId: "session-1", eventId: "event-1" },
+    }), (error) => error.code === "HARNESS_RESPONSE_INVALID");
+    assert.equal(validateAgentHarnessResult("harness.memory.explain", {
+      item, evidence: { status: "legacy_unverified", reason: "no_verified_provenance" },
+    }).evidence.status, "legacy_unverified");
+  } finally { value.cleanup(); }
 });
 
 test("Memory 与 Transcript 管理结果按 cursor 分页且保留稳定 revision", () => {

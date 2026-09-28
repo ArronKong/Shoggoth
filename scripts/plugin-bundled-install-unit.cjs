@@ -43,12 +43,33 @@ function main() {
   assert.ok(figmaDetail.longDescription.includes("Code Connect"));
   assert.equal(figmaDetail.skills.length, 12);
   assert.deepEqual(figmaDetail.apps, ["figma"]);
-  assert.deepEqual(figmaDetail.unconvertedMcp, [{ name: "figma",
-    reasonCode: "LEGACY_MCP_FIELD_UNSUPPORTED" }]);
-  assert.equal(items.reduce((total, item) => total + item.unconvertedMcp.length, 0), 11);
+  assert.deepEqual(figmaDetail.unconvertedMcp, []);
+  assert.equal(figmaDetail.mcpServers.length, 1);
+  assert.deepEqual(figmaDetail.sourceWarnings, []);
+  assert.deepEqual(catalog.detail("mixpanel-headless").sourceWarnings, [{
+    code: "MISSING_OPTIONAL_LOCAL_REFERENCES",
+    source: "skills/setup/SKILL.md",
+    targets: [
+      "skills/mixpanelyst/references/analytical-frameworks.md",
+      "skills/mixpanelyst/references/python-api.md",
+    ],
+  }], "the frozen source gap is visible without disabling import or inventing files");
+  assert.equal(catalog.get("mixpanel-headless").importStatus, "previewable");
+  assert.equal(items.reduce((total, item) => total + item.unconvertedMcp.length, 0), 3);
+  assert.deepEqual(catalog.get("airtable").unconvertedMcp, []);
+  assert.equal(catalog.get("airtable").converted.mcp, 1);
+  assert.deepEqual(catalog.get("shopify").unconvertedMcp, []);
+  assert.equal(catalog.get("shopify").converted.mcp, 1);
   assert.deepEqual(catalog.get("github").unconvertedMcp, []);
   assert.equal(catalog.get("github").converted.mcp, 1);
-  for (const packageId of ["cloudflare", "creative-production", "data-analytics", "openai-developers"]) {
+  for (const packageId of ["gmail", "google-calendar", "google-drive"]) {
+    assert.equal(catalog.get(packageId).converted.mcp, 1);
+    assert.deepEqual(catalog.get(packageId).unconvertedMcp, []);
+    assert.deepEqual(catalog.detail(packageId).connectionWarnings,
+      [{ name: packageId, reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }]);
+  }
+  for (const packageId of ["cloudflare", "creative-production", "data-analytics",
+    "openai-developers", "figma", "linear", "notion"]) {
     assert.equal(catalog.get(packageId).converted.mcp, 1,
       `${packageId} must retain its representable MCP declaration`);
     assert.deepEqual(catalog.get(packageId).unconvertedMcp, []);
@@ -103,11 +124,26 @@ function main() {
       `${item.id} catalog must explain every unconverted MCP declaration`);
       previewablePackages += 1;
     }
-    assert.equal(previewablePackages, 53);
+    assert.equal(previewablePackages, 56);
     assert.equal(discoveredSkills, 502);
-    assert.equal(convertedMcp, 20);
+    assert.equal(convertedMcp, 28);
+    for (const packageId of ["figma", "linear", "notion"]) {
+      assert.ok(installer.previewBundled(packageId).diagnostics.some(issue =>
+        issue.reasonCode === "CODEX_OAUTH_RESOURCE_CONNECTION_REQUIRED"),
+      `${packageId} requires a trusted OAuth provider with the declared resource audience`);
+    }
     assert.ok(installer.previewBundled("github").diagnostics.some(issue =>
       issue.reasonCode === "CODEX_BEARER_CONNECTION_REQUIRED"));
+    assert.ok(installer.previewBundled("airtable").diagnostics.some(issue =>
+      issue.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"));
+    assert.ok(installer.previewBundled("shopify").diagnostics.some(issue =>
+      issue.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"));
+    for (const packageId of ["gmail", "google-calendar", "google-drive"]) {
+      const googlePreview = installer.previewBundled(packageId);
+      assert.ok(googlePreview.diagnostics.some(issue => issue.name === packageId
+        && issue.reasonCode === "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED"));
+      assert.equal(JSON.stringify(googlePreview).includes("12798"), false);
+    }
     for (const packageId of ["cloudflare", "data-analytics"]) {
       assert.ok(installer.previewBundled(packageId).diagnostics.some(issue =>
         issue.reasonCode === "LEGACY_PRESENTATION_METADATA_OMITTED"),

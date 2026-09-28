@@ -28,7 +28,7 @@ import {
 //  - cron  → polled: listCronJobs(), notify when a job's lastRunAt advances.
 //  - task  → polled: backend boards and Inspiration, notify on new items / state changes.
 //
-// All categories default on; cron/task poll only while their toggle is on. Suppression (don't
+// All categories default on; cron/task share one toggle. Suppression (don't
 // notify while the window is focused) + the authoritative toggle check live in
 // the Electron main process; the Web fallback re-checks focus itself.
 
@@ -112,7 +112,9 @@ export default function Notifier() {
       return getConfig()
         .then((c) => {
           if (!alive || request !== sequence) return;
-          const next = { ...DEFAULT_PREFS, ...c.notifications };
+          const saved = { ...DEFAULT_PREFS, ...c.notifications };
+          const taskAndCron = saved.cron !== false && saved.task !== false;
+          const next = { ...saved, cron: taskAndCron, task: taskAndCron };
           if ((Object.keys(DEFAULT_PREFS) as Array<keyof NotificationPrefs>).some(key => next[key] !== prefsRef.current[key])) {
             prefsGeneration.current += 1;
           }

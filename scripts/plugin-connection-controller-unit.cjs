@@ -117,3 +117,60 @@ test("old cleanup cannot affect a new identity and restored receipts cannot repl
   assert.equal(value.phase, "outcome_unknown"); assert.equal(value.receipt, null);
   assert.throws(() => f.controller.prepare(f.input), { code: "PLUGIN_OPERATION_OUTCOME_UNKNOWN" });
 }));
+
+test("shared account selection is confirmed, component-bound, and never carries an old Grant", async () => fixture(async f => {
+  let binding = f.store.createGlobalBinding({ bindingId: "shared-account-binding",
+    installationId: f.bindings[0].installationId, componentId: f.bindings[0].componentId,
+    connectionId: f.connections[0].connectionId });
+  binding = f.store.setBindingEnabled({ bindingId: binding.bindingId, enabled: true,
+    expectedRevision: binding.revision });
+  const oldTool = `plugin:${binding.installationId}:${binding.componentId}:${f.connections[0].connectionId}:${"c".repeat(64)}`;
+  f.store.setGrant({ grantId: "shared-account-grant", bindingId: binding.bindingId,
+    toolIdentity: oldTool, contractDigest: "d".repeat(64), effect: "allow",
+    approvalMode: "always", expectedRevision: 0 });
+  const request = { profileId: f.profiles[0].id, bindingId: binding.bindingId,
+    connectionId: f.connections[1].connectionId, expectedRevision: binding.revision,
+    operationId: "account-select-b" };
+  const prepared = f.controller.selectPrepare(request);
+  validate("plugins.connections.selectPrepare", prepared);
+  assert.equal(prepared.summary.grantsRevoked, 1);
+  assert.deepEqual(f.controller.selectCommit({ challenge: prepared.challenge, approved: false }),
+    { canceled: true, receipt: null });
+  assert.equal(f.store.getBinding(binding.bindingId).connectionId, f.connections[0].connectionId);
+  assert.throws(() => f.controller.selectPrepare({ ...request, extra: true }), { code: "PLUGIN_REQUEST_INVALID" });
+  const localComponent = componentId(binding.installationId, "mcp-server", "local-issues");
+  f.store.createConnection({ connectionId: "unrelated-component-account", installationId: binding.installationId,
+    componentId: localComponent, endpointIdentity: "stdio:fixture" });
+  f.store.setConnectionIdentity({ connectionId: "unrelated-component-account",
+    principalIdentity: "other", state: "ready", expectedRevision: 1 });
+  assert.throws(() => f.controller.selectPrepare({ ...request,
+    connectionId: "unrelated-component-account" }), { code: "PLUGIN_CONNECTION_INVALID" });
+  const committed = f.controller.selectCommit({
+    challenge: f.controller.selectPrepare(request).challenge, approved: true });
+  validate("plugins.connections.selectCommit", committed);
+  assert.equal(f.store.getBinding(binding.bindingId).connectionId, f.connections[1].connectionId);
+  assert.equal(f.store.getBinding(binding.bindingId).enabled, true);
+  assert.equal(f.store.getGrant(binding.bindingId, oldTool).effect, "deny");
+  assert.equal(f.store.getOperation(request.operationId).phase, "completed");
+  const back = f.store.getBinding(binding.bindingId);
+  const backRequest = { ...request, connectionId: f.connections[0].connectionId,
+    expectedRevision: back.revision, operationId: "account-select-a" };
+  f.controller.selectCommit({ challenge: f.controller.selectPrepare(backRequest).challenge, approved: true });
+  assert.equal(f.store.getGrant(binding.bindingId, oldTool).effect, "deny");
+}));
+
+test("account selection rejects changed target identity after native confirmation", async () => fixture(async f => {
+  const binding = f.store.createGlobalBinding({ bindingId: "shared-account-binding",
+    installationId: f.bindings[0].installationId, componentId: f.bindings[0].componentId,
+    connectionId: f.connections[0].connectionId });
+  const request = { profileId: f.profiles[0].id, bindingId: binding.bindingId,
+    connectionId: f.connections[1].connectionId, expectedRevision: binding.revision,
+    operationId: "account-select-stale" };
+  const prepared = f.controller.selectPrepare(request);
+  f.store.setConnectionIdentity({ connectionId: f.connections[1].connectionId,
+    principalIdentity: "changed-account", state: "ready", expectedRevision: f.connections[1].revision });
+  assert.throws(() => f.controller.selectCommit({ challenge: prepared.challenge, approved: true }),
+    { code: "REVISION_CONFLICT" });
+  assert.equal(f.store.getBinding(binding.bindingId).connectionId, f.connections[0].connectionId);
+  assert.equal(f.store.getOperation(request.operationId), null);
+}));

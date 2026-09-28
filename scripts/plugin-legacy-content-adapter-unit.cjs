@@ -106,6 +106,198 @@ test("only the pinned bundled GitHub bearer declaration becomes a managed MCP en
   }
 });
 
+test("only the frozen Airtable placeholder becomes a user-registered OAuth candidate", () => {
+  const input = fixture("codex-plugin", { name: "airtable" });
+  input.bundledCodex = true;
+  const declaration = { type: "http", url: "https://mcp.airtable.com/mcp",
+    oauth: { client_id: "<AIRTABLE_PUBLIC_CLIENT_ID>" } };
+  replaceConfig(input, { airtable: declaration });
+  const converted = convertLegacyPluginContents(input);
+  assert.deepEqual(generatedMcp(converted).airtable,
+    { type: "streamable-http", url: declaration.url });
+  const manifest = JSON.parse(converted.generatedFiles.find(file => file.path === "plugin.json").content);
+  assert.equal(manifest.extensions.shoggoth.mcpOAuthResources.airtable, declaration.url);
+  assert.ok(converted.diagnostics.some(item => item.name === "airtable"
+    && item.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"));
+  assert.equal(JSON.stringify(converted).includes(declaration.oauth.client_id), false);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-airtable-"));
+  try {
+    materialize(input, converted, root);
+    const preview = previewPluginDirectory(root);
+    assert.equal(preview.mcpServers.length, 1);
+    assert.equal(readPluginMcpServer(preview.root, "airtable").oauthResource, declaration.url);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  assert.equal(generatedMcp(convertLegacyPluginContents({ ...input, bundledCodex: false })).airtable, undefined);
+  for (const changed of [
+    { ...declaration, url: "https://evil.example/mcp" },
+    { ...declaration, oauth: { client_id: "third-party-client" } },
+    { ...declaration, oauth: { ...declaration.oauth, client_secret: "secret" } },
+    { ...declaration, scopes: ["data.records:write"] },
+  ]) {
+    replaceConfig(input, { airtable: changed });
+    const result = convertLegacyPluginContents(input);
+    assert.equal(generatedMcp(result).airtable, undefined);
+    assert.ok(result.diagnostics.some(item => item.name === "airtable"
+      && item.reasonCode === "LEGACY_MCP_FIELD_UNSUPPORTED"));
+  }
+});
+
+test("only the frozen Shopify endpoint and resource become a user-registered OAuth candidate", () => {
+  const input = fixture("codex-plugin", { name: "shopify" });
+  input.bundledCodex = true;
+  const declaration = { type: "http", url: "https://setup.shopify.com/mcp",
+    oauth: { client_id: "<SHOPIFY_PUBLIC_CLIENT_ID>" },
+    oauth_resource: "https://setup.shopify.com/mcp" };
+  replaceConfig(input, { shopify: declaration });
+  const converted = convertLegacyPluginContents(input);
+  assert.deepEqual(generatedMcp(converted).shopify,
+    { type: "streamable-http", url: declaration.url });
+  const manifest = JSON.parse(converted.generatedFiles.find(file => file.path === "plugin.json").content);
+  assert.equal(manifest.extensions.shoggoth.mcpOAuthResources.shopify, declaration.oauth_resource);
+  assert.ok(converted.diagnostics.some(item => item.name === "shopify"
+    && item.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"));
+  assert.equal(JSON.stringify(converted).includes(declaration.oauth.client_id), false);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-shopify-"));
+  try {
+    materialize(input, converted, root);
+    const preview = previewPluginDirectory(root);
+    assert.equal(preview.mcpServers.length, 1);
+    assert.equal(readPluginMcpServer(preview.root, "shopify").oauthResource, declaration.oauth_resource);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  assert.equal(generatedMcp(convertLegacyPluginContents({ ...input, bundledCodex: false })).shopify, undefined);
+  for (const changed of [
+    { ...declaration, url: "https://example.invalid/mcp" },
+    { ...declaration, oauth_resource: "https://setup.shopify.com/other" },
+    { ...declaration, oauth: { client_id: "third-party-client" } },
+    { ...declaration, oauth: { ...declaration.oauth, client_secret: "secret" } },
+    { ...declaration, scopes: ["orders:read"] },
+  ]) {
+    replaceConfig(input, { shopify: changed });
+    const result = convertLegacyPluginContents(input);
+    assert.equal(generatedMcp(result).shopify, undefined);
+    assert.ok(result.diagnostics.some(item => item.name === "shopify"
+      && ["LEGACY_MCP_FIELD_UNSUPPORTED", "LEGACY_MCP_ENTRY_INVALID"].includes(item.reasonCode)));
+  }
+});
+
+test("bundled OAuth resource declarations become constrained candidates, never host credentials", () => {
+  for (const [name, endpoint, resource] of [
+    ["figma", "https://mcp.figma.com/mcp", "https://mcp.figma.com/mcp"],
+    ["linear", "https://mcp.linear.app/mcp", "https://mcp.linear.app/mcp"],
+    ["notion", "https://mcp.notion.com/mcp", "https://mcp.notion.com"],
+  ]) {
+    const input = fixture("codex-plugin", { name });
+    input.bundledCodex = true;
+    replaceConfig(input, { [name]: { type: "http", url: endpoint, oauth_resource: resource } });
+    const result = convertLegacyPluginContents(input);
+    assert.deepEqual(generatedMcp(result)[name], { type: "streamable-http", url: endpoint });
+    const manifest = JSON.parse(result.generatedFiles.find(file => file.path === "plugin.json").content);
+    assert.equal(manifest.extensions.shoggoth.mcpOAuthResources[name], new URL(resource).href);
+    assert.ok(result.diagnostics.some(item => item.name === name
+      && item.reasonCode === "CODEX_OAUTH_RESOURCE_CONNECTION_REQUIRED"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-oauth-resource-"));
+    try {
+      materialize(input, result, root);
+      const preview = previewPluginDirectory(root);
+      assert.equal(preview.mcpServers.length, 1);
+      assert.equal(readPluginMcpServer(preview.root, name).oauthResource, new URL(resource).href);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    assert.equal(generatedMcp(convertLegacyPluginContents({ ...input, bundledCodex: false }))[name], undefined);
+  }
+  for (const resource of ["https://evil.invalid/mcp", "http://mcp.figma.com/mcp",
+    "https://mcp.figma.com/mcp?audience=other", "https://user@mcp.figma.com/mcp"]) {
+    const input = fixture("codex-plugin", { name: "figma" });
+    input.bundledCodex = true;
+    replaceConfig(input, { figma: { type: "http", url: "https://mcp.figma.com/mcp",
+      oauth_resource: resource } });
+    const result = convertLegacyPluginContents(input);
+    assert.equal(generatedMcp(result).figma, undefined);
+  }
+});
+
+test("only byte-pinned Google declarations become distinct Desktop OAuth candidates", () => {
+  for (const name of ["gmail", "google-calendar", "google-drive"]) {
+    const packageRoot = path.join(__dirname, "../resources/bundled-plugins/packages", name);
+    const manifest = fs.readFileSync(path.join(packageRoot, ".codex-plugin/plugin.json"));
+    const original = fs.readFileSync(path.join(packageRoot, ".mcp.json"));
+    const source = { format: "codex-plugin", bundledCodex: true, components: ["mcp-servers"], files: [
+      { path: ".codex-plugin/plugin.json", content: manifest },
+      { path: ".mcp.json", content: original },
+    ] };
+    const declaration = JSON.parse(original).mcpServers[name];
+    const converted = convertLegacyPluginContents(source);
+    assert.deepEqual(generatedMcp(converted)[name],
+      { type: "streamable-http", url: declaration.url });
+    const output = JSON.parse(converted.generatedFiles.find(file => file.path === "plugin.json").content);
+    assert.equal(output.extensions.shoggoth.mcpOAuthResources[name], declaration.url);
+    assert.ok(converted.diagnostics.some(issue => issue.name === name
+      && issue.reasonCode === "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED"));
+    for (const value of [declaration.oauth.client_id, declaration.oauth.client_secret,
+      "12798", ...declaration.scopes]) {
+      assert.equal(JSON.stringify(converted.generatedFiles).includes(String(value)), false);
+    }
+    assert.equal(generatedMcp(convertLegacyPluginContents({ ...source,
+      bundledCodex: false }))[name], undefined);
+    for (const tamper of [
+      value => { value.url = "https://other.example/mcp"; },
+      value => { value.oauth.callback_port = 12799; },
+      value => { value.oauth.client_id = "other-client"; },
+      value => { value.oauth.client_secret = "actual-secret"; },
+      value => { value.scopes.pop(); },
+      value => { value.headers = { "X-Other": "1" }; },
+    ]) {
+      const copy = JSON.parse(original);
+      tamper(copy.mcpServers[name]);
+      source.files[1] = { path: ".mcp.json", content: JSON.stringify(copy) };
+      const rejected = convertLegacyPluginContents(source);
+      assert.equal(generatedMcp(rejected)[name], undefined);
+      assert.ok(rejected.diagnostics.some(issue => issue.name === name
+        && issue.reasonCode === "LEGACY_MCP_FIELD_UNSUPPORTED"));
+    }
+  }
+});
+
+test("remaining Slack, Zoom and Codex Security host declarations stay blocked", () => {
+  const blocked = [
+    { packageId: "slack", name: "slack", fields: ["oauth"],
+      clientId: "11843774967.11905492103734" },
+    { packageId: "zoom", name: "zoom", fields: ["oauth"] },
+    { packageId: "codex-security", name: "codex-security",
+      fields: ["env_vars", "startup_timeout_sec", "tool_timeout_sec"] },
+  ];
+  for (const item of blocked) {
+    const source = JSON.parse(fs.readFileSync(path.join(__dirname,
+      "../resources/bundled-plugins/packages", item.packageId, ".mcp.json"), "utf8"));
+    const declaration = source.mcpServers[item.name];
+    assert(declaration, `${item.packageId} frozen MCP declaration is missing`);
+    for (const field of item.fields) {
+      assert(Object.hasOwn(declaration, field), `${item.packageId} lost source ${field}`);
+    }
+    if (item.scopes) assert.equal(declaration.scopes.length, item.scopes);
+    if (item.callbackPort) assert.equal(declaration.oauth.callback_port, item.callbackPort);
+    if (item.confidentialClient) assert.match(declaration.oauth.client_secret, /^<[^>]+>$/u);
+    if (item.clientId) assert.equal(declaration.oauth.client_id, item.clientId);
+    if (item.packageId === "codex-security") {
+      assert(declaration.env_vars.includes("CODEX_HOME"));
+      assert(declaration.env_vars.includes("OPENAI_API_KEY"));
+      assert.equal(declaration.tool_timeout_sec, 349200);
+    }
+    const input = replaceConfig(fixture("codex-plugin", { name: item.packageId }),
+      { [item.name]: declaration });
+    input.components = ["mcp-servers"];
+    input.bundledCodex = true;
+    const result = convertLegacyPluginContents(input);
+    assert.equal(result.installable, false, `${item.packageId} must not appear ready to install`);
+    assert.deepEqual(result.mcpServers, []);
+    assert.deepEqual(generatedMcp(result), {});
+    assert.ok(result.diagnostics.some(entry => entry.name === item.name
+      && entry.reasonCode === "LEGACY_MCP_FIELD_UNSUPPORTED"),
+    `${item.packageId} must retain an explicit unsupported-field diagnostic`);
+    assert.equal(result.retainedPaths.includes(".mcp.json"), false,
+      `${item.packageId} source auth or host fields must not be imported inertly`);
+  }
+});
+
 test("Codex package-root cwd and presentation-only MCP fields convert without importing host data", () => {
   const input = replaceConfig(fixture("codex-plugin"), {
     local: { command: "node", args: ["./mcp/server.mjs"], cwd: ".",

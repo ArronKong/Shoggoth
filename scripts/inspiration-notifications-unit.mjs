@@ -19,7 +19,10 @@ const { sanitizeNotifications, normalizeConfig } = require(path.join(root, 'app/
 const allOn = { chat: true, cron: true, task: true };
 assert.deepEqual(sanitizeNotifications(undefined), allOn);
 assert.deepEqual(sanitizeNotifications({ chat: null, cron: 'false', task: 0 }), allOn);
-assert.deepEqual(sanitizeNotifications({ task: false }), { ...allOn, task: false });
+assert.deepEqual(sanitizeNotifications({ task: false }), { chat: true, cron: false, task: false },
+  'An old task-only disabled choice keeps the merged category off');
+assert.deepEqual(sanitizeNotifications({ cron: false }), { chat: true, cron: false, task: false },
+  'An old cron-only disabled choice keeps the merged category off');
 assert.deepEqual(normalizeConfig({ notifications: { chat: false, cron: false, task: false } }).notifications,
   { chat: false, cron: false, task: false }, 'Existing explicit choices survive normalization');
 
@@ -204,9 +207,11 @@ await poll();
 assert.equal(notices.length, 2);
 await save({ notifications: { ...allOn, task: false } });
 const beforeDisabled = listCalls;
+const beforeDisabledCron = cronCalls;
 current.latestExecution.status = 'completed';
 await poll();
 assert.equal(listCalls, beforeDisabled);
+assert.equal(cronCalls, beforeDisabledCron, 'The merged switch also stops cron polling for an old task-only disabled choice');
 assert.equal(notices.length, 2);
 
 cronJobs = [{ id: 'job:with & punctuation', backendId: 'openclaw', name: 'Scheduled task', lastRunAt: 100 }];

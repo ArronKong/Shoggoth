@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "google-workspace-mcp",
+  "version": "0.1.0",
+  "description": "Three independent Google Workspace MCP endpoints requiring private user-owned OAuth registration"
+}

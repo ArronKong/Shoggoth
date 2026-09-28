@@ -47,7 +47,7 @@ check(
 );
 check(
   "BUG-027 Skills 两处 switch 都包含技能名",
-  (source.skills.match(/ariaLabel=\{`\$\{t\("skills\.enabledLabel"\)\}: \$\{[^}]+\.name\}`\}/g) || []).length >= 2,
+  (source.skills.match(/ariaLabel=\{`\$\{t\("skills\.enabledLabel"\)\}: \$\{(?:s|selected)\.name\}/g) || []).length >= 2,
 );
 check(
   "BUG-028 Glass range 与可见标题显式关联",

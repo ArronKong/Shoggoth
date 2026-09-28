@@ -68,6 +68,8 @@ async function openHandoffFixture({ root: existingRoot, transport: existingTrans
   const facts = { read: async () => ({ installed: true, releaseEnabled: true, authenticated: true,
     models: ["fixture-model"], attachmentKinds: [], permissionEnforcementProven: true }) };
   const service = createAgentService({ paths, runtimeManager: manager, version: "handoff-fixture", builtinCliProfiles,
+    builtinCliInstalledAccountIds: builtinCliProfiles ? DEFAULT_RUNTIME_ACCOUNTS
+      .filter(account => account.kind === "native-user").map(account => account.id) : [],
     runtimeSupportDiscover: facts.read,
     ...(catalogs ? { accountAuthManager: { open: async () => {}, close: async () => {}, read: async () => ({ account: { type: "chatgpt" }, requiresOpenaiAuth: true }) } } : {}),
     safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
