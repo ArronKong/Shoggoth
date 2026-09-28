@@ -1113,19 +1113,25 @@ class HermesBackend extends AgentBackend {
     // 仅在某 Profile 已证明支持 /api/env 后，后续严格目录读取失败才 fail-closed；
     // 从未支持该端点的旧 dashboard 保持稳定无 env 摘要。
     this._envCatalogSupportedProfiles = new Set();
-    // 官方 `hermes update` 只换磁盘上的代码（git pull + 重装依赖）；本地 spawn
-    // 的 dashboard 进程要重启才跑新版本，所以成功后 stop+start 一轮。
+    // 官方 `hermes update` 换完代码后会自己清理仍在跑旧代码的 dashboard：默认
+    // HERMES_HOME 下的「手动」dashboard 被它杀掉并按原 argv 重拉（成了它的进程，
+    // 不再归我们管），其它 profile 的 dashboard 不在它的清理范围内，会被判成
+    // 「旧代码幸存者」→ 整个 update 以 exit 1 收场。所以更新前先停掉我们自己
+    // 拉起的 dashboard，更新后（无论成败）再拉回来。
     // 状态落盘：更新失败的原因不能随 app 重启蒸发。
     this._selfUpdater = new SelfUpdater({
       command: () => ({ cmd: this.bin, args: ["update", "--yes"] }),
       statePath: path.join(os.homedir(), ".shoggoth", "self-update", "hermes.json"),
+      onBeforeRun: () => this._stopLocalForSelfUpdate(),
       onSuccess: async () => {
-        if (this._getConfig().hermesMode === "remote") return;
-        await this.stop();
         // start() 失败返回 false 不抛错（聚合层的 fail-soft 口径）；更新收尾
         // 必须把「服务没回来」上报成失败，否则用户只看到卡片裸连接错。
-        const ok = await this.start();
+        const ok = await this._restartLocalAfterSelfUpdate();
         if (!ok) throw new Error(this.lastError || "hermes dashboard did not come back after update");
+      },
+      onFailure: async () => {
+        const ok = await this._restartLocalAfterSelfUpdate();
+        if (!ok) throw new Error(this.lastError || "hermes dashboard did not come back after the failed update");
       },
     });
   }
@@ -6618,6 +6624,28 @@ class HermesBackend extends AgentBackend {
   getSelfUpdateStatus() {
     if (this._getConfig().hermesMode === "remote") return { supported: false, reason: "remote" };
     return { supported: true, actions: ["update"], status: this._selfUpdater.status() };
+  }
+
+  // 更新前停掉本机 dashboard。自己 spawn 的由 stop() 终止；上次 app 留下、本轮
+  // 复用的（hermesKeepAlive，proc 为 null）stop() 不会动，只在能证明是我们拉起的
+  // 时候终止（同 _reapStaleDashboard 的归属判定），证明不了的留给 hermes update 处理。
+  async _stopLocalForSelfUpdate() {
+    if (this._getConfig().hermesMode === "remote") return;
+    const reused = [...this.dashboards.values()]
+      .filter((dash) => !dash.spawned && Number.isInteger(dash.port))
+      .map((dash) => ({ port: dash.port, profile: dash.profile }));
+    await this.stop();
+    for (const { port, profile } of reused) {
+      await this._reapStaleDashboard(port, profile, "self-update").catch(() => false);
+    }
+  }
+
+  async _restartLocalAfterSelfUpdate() {
+    if (this._getConfig().hermesMode === "remote") return true;
+    // 版本守卫比对的是缓存的 CLI 版本；更新后不作废，就会拿旧版本号去比新 dashboard。
+    this._cliVersionPromise = null;
+    await this.stop();
+    return this.start();
   }
 
   /** Async dispatcher: synthetic "main" → empty seed; historical → fetched from the right dashboard. */

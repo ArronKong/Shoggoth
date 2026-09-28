@@ -161,6 +161,12 @@ const UPDATE_STATUS_AVAILABLE = {
     cmd: "openclaw",
     args: ["gateway", "status", "--json", "--require-rpc", "--url", "ws://127.0.0.1:18792"],
   });
+  assert.deepEqual(buildOpenClawUpdaterCommand("gateway_status", { gatewayPort: 18792 }), {
+    cmd: "openclaw",
+    args: ["gateway", "status", "--json", "--require-rpc", "--port", "18792"],
+  });
+  assert.throws(() => buildOpenClawUpdaterCommand("update", { gatewayPort: 18792 }));
+  assert.throws(() => buildOpenClawUpdaterCommand("gateway_status", { gatewayPort: 0 }));
   for (const operation of ["update", "repair", "update_status", "doctor", "gateway_status"]) {
     assert.equal(buildOpenClawUpdaterCommand(operation).args.includes("--accept-capabilities"), false);
   }
@@ -423,7 +429,10 @@ const UPDATE_STATUS_AVAILABLE = {
   assert.equal(fake.calls.length, 3);
   assert.deepEqual(fake.calls[0].spawnOptions.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(fake.calls[0].spawnOptions.detached, true);
-  assert.deepEqual(fake.calls[1].args.slice(-2), ["--url", "ws://127.0.0.1:18792"]);
+  // `--url` would make the CLI drop configured gateway credentials; select the
+  // local gateway by port so the probe keeps the config auth.
+  assert.deepEqual(fake.calls[1].args.slice(-2), ["--port", "18792"]);
+  assert.equal(fake.calls[1].args.includes("--url"), false);
   const persisted = fs.readFileSync(statePath, "utf8");
   assert.equal(persisted.includes("must-not-persist"), false);
   assert.equal(persisted.includes('"result"'), false);

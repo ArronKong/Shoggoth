@@ -142,6 +142,60 @@ async function waitDone(updater, timeoutMs = 8000) {
 }
 
 fs.rmSync(tmpDir, { recursive: true, force: true });
+const hookDir = fs.mkdtempSync(path.join(os.tmpdir(), "self-updater-hooks-"));
+
+// 8) onBeforeRun 在更新命令之前跑完（停本地服务），失败时 onFailure 仍会收尾。
+{
+  const order = [];
+  const marker = path.join(hookDir, "ran-marker");
+  const u = new SelfUpdater({
+    command: () => ({
+      cmd: process.execPath,
+      args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x'); process.exit(3)`],
+    }),
+    onBeforeRun: async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      order.push(fs.existsSync(marker) ? "before-after-command" : "before");
+    },
+    onSuccess: () => order.push("success"),
+    onFailure: () => order.push("failure"),
+  });
+  const started = u.run();
+  check("onBeforeRun 期间已是 running（占住单飞锁）", started.running === true && u.run().running === true);
+  const s = await waitDone(u);
+  check("onBeforeRun 先于更新命令", order[0] === "before");
+  check("更新失败走 onFailure 而非 onSuccess", order.join(",") === "before,failure" && s.ok === false && s.exitCode === 3);
+}
+
+// 9) onBeforeRun 抛错 → 不执行更新命令，ok=false + preUpdateError，onFailure 仍收尾。
+{
+  const marker = path.join(hookDir, "never-ran");
+  let recovered = false;
+  const u = new SelfUpdater({
+    command: () => ({ cmd: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] }),
+    onBeforeRun: () => { throw new Error("stop failed"); },
+    onFailure: () => { recovered = true; },
+  });
+  u.run();
+  const s = await waitDone(u);
+  await new Promise((r) => setTimeout(r, 200));
+  check("准备失败不跑更新命令", !fs.existsSync(marker));
+  check("准备失败记 preUpdateError", s.ok === false && s.preUpdateError === "stop failed" && recovered);
+}
+
+// 10) onFailure 抛错只记 recoveryError，不盖住失败原因。
+{
+  const u = new SelfUpdater({
+    command: node("process.exit(2)"),
+    onFailure: () => { throw new Error("restart failed"); },
+  });
+  u.run();
+  const s = await waitDone(u);
+  check("onFailure 失败记 recoveryError", s.ok === false && s.exitCode === 2 && s.recoveryError === "restart failed" && !s.postUpdateError);
+}
+
+fs.rmSync(hookDir, { recursive: true, force: true });
+
 for (const r of results) console.log(`${r.ok ? "PASS" : "FAIL"} ${r.name}`);
 const failed = results.filter((r) => !r.ok).length;
 console.log(`RESULT ${results.length - failed}/${results.length} pass`);

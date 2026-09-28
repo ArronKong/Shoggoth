@@ -1989,6 +1989,10 @@ export interface SelfUpdateRun {
   error?: string;
   // 更新命令成功但收尾失败（服务重启/更新后健康检查没过）→ ok=false + 这里存原因。
   postUpdateError?: string;
+  // 更新命令启动前的准备（停本地服务）失败，更新命令没有执行。
+  preUpdateError?: string;
+  // 更新失败后把服务拉回来也失败了（不改变失败结论）。
+  recoveryError?: string;
   // 上次更新进行中 app 退出（落盘状态恢复时合成），结果未知。
   interrupted?: boolean;
   command?: string;

@@ -452,7 +452,7 @@ export default function SettingsPage() {
       } else if (!u.status.ok) {
         // exitCode 0 + postUpdateError = 更新命令成功但服务没回来（健康检查失败）。
         const serviceDown = !!u.status.postUpdateError && u.status.exitCode === 0;
-        const msg = u.status.postUpdateError || u.status.error || `exit ${u.status.exitCode}`;
+        const msg = u.status.postUpdateError || u.status.preUpdateError || u.status.error || `exit ${u.status.exitCode}`;
         toast.error(t(serviceDown ? "settings.updateRestartFailed" : "settings.updateFailed", { name, msg }));
       } else {
         toast.success(t("settings.updateDone", { name }));
@@ -793,7 +793,17 @@ export default function SettingsPage() {
     const canRepair = !!update?.supported && !!update.actions?.includes("repair");
     const failure = !status.running && status.ok === false && !isActionableUpdatePhase(status);
     const at = status.finishedAt ? new Date(status.finishedAt).toLocaleString() : "";
-    const reason = [status.error, status.postUpdateError, status.reason].filter(Boolean).join("; ");
+    const reason = [
+      status.error,
+      status.preUpdateError,
+      status.postUpdateError,
+      status.recoveryError,
+      status.reason,
+      // Hermes 的 SelfUpdater 失败时只有退出码，不带 reason/error。
+      typeof status.exitCode === "number" && status.exitCode !== 0 ? `exit ${status.exitCode}` : "",
+    ].filter(Boolean).join("; ");
+    // OpenClaw 控制器写 progressTail；Hermes 的 SelfUpdater 只写 logTail。
+    const logTail = status.progressTail || status.logTail;
     return (
       <div className={`update-state update-state--${status.phase || "unknown"}`}>
         <div className="status-row">
@@ -812,10 +822,10 @@ export default function SettingsPage() {
             {!status.interrupted && !!reason && <div className="update-failure-reason">{reason}</div>}
           </div>
         )}
-        {!!status.progressTail && (
+        {!!logTail && (
           <details className="update-log" open={status.running}>
             <summary>{t("settings.updateProgressTail")}</summary>
-            <pre>{status.progressTail}</pre>
+            <pre>{logTail}</pre>
           </details>
         )}
         {status.phase === "repair_required" && (
