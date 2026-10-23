@@ -179,7 +179,9 @@ function validateExecution(execution) {
   if (!validInspirationAttention(execution.attention, execution.runId)) invalid("INSPIRATION_RESPONSE_INVALID");
 }
 function validateView(value) {
-  if (!exact(value, attachmentFields(value, paperFields(value, VIEW_FIELDS))) || !uuid(value.id) || !string(value.body, 16 * 1024, Boolean(value.attachments?.length))
+  const fields = own(value || {}, "restoredAt") ? [...VIEW_FIELDS, "restoredAt"] : VIEW_FIELDS;
+  if (!exact(value, attachmentFields(value, paperFields(value, fields))) || !uuid(value.id) || !string(value.body, 16 * 1024, Boolean(value.attachments?.length))
+    || (own(value, "restoredAt") && !at(value.restoredAt))
     || (own(value, "attachments") && !validAttachments(value.attachments))
     || (own(value, "paperTone") && !validInspirationPaperTone(value.paperTone))
     || (value.title !== null && !string(value.title, 512, false))

@@ -12,15 +12,57 @@ const SECRET_PATTERNS = Object.freeze([
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/iu,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
   /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/u,
-  /\b(?:token|api[_-]?key|secret|password|authorization)\s*[:=]\s*[^\s]{8,}/iu,
   /\b\d{6}\b.*(?:验证码|verification code|otp)|(?:验证码|verification code|otp).*\b\d{6}\b/iu,
 ]);
+const ASSIGNED_SECRET = /\b(?:token|api[_-]?key|secret|password|authorization)\s*[:=]\s*([^\r\n]{8,})/giu;
+const ENV_NAME = String.raw`(?:"[^"\r\n]+"|'[^'\r\n]+')`;
+const ENV_LOOKUP = String.raw`(?:os\.environ\[${ENV_NAME}\]|os\.environ\.get\(${ENV_NAME}\)|os\.getenv\(${ENV_NAME}\)|process\.env(?:\.[A-Za-z_][A-Za-z0-9_]*|\[${ENV_NAME}\])|Deno\.env\.get\(${ENV_NAME}\)|System\.getenv\(${ENV_NAME}\)|getenv\(${ENV_NAME}\))`;
+const ENV_REFERENCE = new RegExp(
+  String.raw`^${ENV_LOOKUP}(?:\s*(?:\bor\b|\|\||\?\?)\s*${ENV_LOOKUP})*(?:;)?$`,
+  "u",
+);
+const ARG_REFERENCE = /^(?:argv|process\.argv)\[[A-Za-z_][A-Za-z0-9_]*\];?$/u;
+// The one audited frozen GWAS helper derives this token from a response row.
+// Pin the entire file so a different script cannot use the same expression to
+// conceal an embedded credential through an alias or fallback.
+const GWAS_EFFECT_TOKEN = /^token\s*=\s*str\(effect\[0\]\)$/iu;
+const FROZEN_GWAS_HELPER_SHA256 = "9844fcad187346a045712ef2975691f20028308349c9f772b5c13065248cb543";
+function isAuditedGwasEffectToken(value, match) {
+  return GWAS_EFFECT_TOKEN.test(match[0].trim())
+    && crypto.createHash("sha256").update(value).digest("hex") === FROZEN_GWAS_HELPER_SHA256;
+}
+// A plugin's `${secret:NAME}` reference names a credential and is never a value;
+// documentation placeholders such as `Bearer <token>` cannot carry one either.
+// The assignment pattern consumes the rest of the line, so whatever follows a
+// placeholder is checked again rather than exempted with it.
+const SECRET_REFERENCE_TAIL = /^secret:[A-Z][A-Z0-9_]{0,63}\}/u;
+const PLACEHOLDER_VALUE = /^["'`]?(?:Bearer\s+)?(?:\$\{secret:[A-Z][A-Z0-9_]{0,63}\}|<[A-Za-z][A-Za-z _-]{0,40}>|\*{3,}|x{3,}(?:\.{2,}y{3,})?|X{3,})["'`]?(?=$|[\s,;)，。、；：）])/u;
+function placeholderRest(value, match) {
+  if (value.slice(Math.max(0, match.index - 2), match.index) === "${") {
+    const tail = SECRET_REFERENCE_TAIL.exec(value.slice(match.index));
+    if (tail) return match[0].slice(tail[0].length);
+  }
+  const assigned = match[1].trimStart();
+  const placeholder = PLACEHOLDER_VALUE.exec(assigned);
+  return placeholder ? assigned.slice(placeholder[0].length) : null;
+}
+function isRegexKeyAlternative(value, match) {
+  // `/...token=|.../` matches a query-string key, not an assigned value.
+  // Only skip an empty regex alternative; a literal after `token=` remains
+  // subject to the ordinary secret-assignment check.
+  const lineStart = value.lastIndexOf("\n", match.index) + 1;
+  return /\/\(\?:[^/]*$/u.test(value.slice(lineStart, match.index))
+    && match[1].trimStart().startsWith("|");
+}
 const PII_PATTERNS = Object.freeze([
   /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
   /(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)/u,
 ]);
 const CLASSIFICATIONS = new Set(["explicit", "imported"]);
 const SENSITIVITY_RANK = Object.freeze({ normal: 0, private: 1, restricted: 2 });
+// Facts about the user and their projects are shared by every Agent of the
+// same owner; "agent" scope stays private to the Agent that saved it.
+const SHARED_SCOPES = new Set(["user", "project", "workspace"]);
 const REVIEWED_MEMORY_ID = /^reviewed-(mc-[a-f0-9]{64})$/u;
 
 function engineError(code, message) { return serviceError(code, message); }
@@ -45,18 +87,105 @@ function lexicalTerms(value) {
 }
 const HOT_PREFERENCE_PATTERN = /偏好|喜欢|希望|习惯|称呼|回复风格|prefer|preference|usually|always/iu;
 const HOT_AGREEMENT_PATTERN = /约定|决定|现阶段|必须|规则|agreement|decision|must/iu;
+// Importance the user stated in the fact itself.
+const HOT_IMPORTANCE_PATTERN = /重要|务必|一定要|千万|切记|important|critical|never forget/iu;
 function hotPriorityFlags(item) {
   // This ordering is used only by ContextCompiler's empty-query candidate
   // search. It must happen before the result cap, or an older durable fact can
   // be displaced by newer episodic records before context ranking sees it.
-  return (item.scope === "user" && HOT_PREFERENCE_PATTERN.test(item.content) ? 4 : 0)
+  return (HOT_IMPORTANCE_PATTERN.test(item.content) ? 8 : 0)
+    + (item.scope === "user" && HOT_PREFERENCE_PATTERN.test(item.content) ? 4 : 0)
     + (HOT_AGREEMENT_PATTERN.test(item.content) || item.type === "procedural" ? 2 : 0)
     + (["project", "workspace"].includes(item.scope) ? 1 : 0);
 }
-function hasSecret(value) { return SECRET_PATTERNS.some((pattern) => pattern.test(value)); }
+// A fact that applies only under a stated condition ("写提交信息时，…",
+// "When reviewing …") is recalled when the request matches it, not on every turn.
+const CONDITIONAL_PATTERN = /^(?:用户)?(?:如果|假如|每当|当(?!前).{0,40}?(?:的时候|时))|(?:的时候|时)[，,、]|^(?:the user,?\s+)?(?:when|whenever|if)\b/iu;
+function isConditionalMemory(item) { return CONDITIONAL_PATTERN.test(item.content); }
+const TRUST_RANK = Object.freeze({ owner: 3, system: 2, agent: 1, untrusted: 0 });
+function hasSecret(value) {
+  if (SECRET_PATTERNS.some((pattern) => pattern.test(value))) return true;
+  // A helper that reads an environment variable or a CLI argument does not
+  // embed its runtime value. Keep rejecting literal/fallback assignments while
+  // allowing verified Skill scripts to name external credential inputs.
+  return [...value.matchAll(ASSIGNED_SECRET)].some((match) => {
+    const assigned = match[1].trim();
+    if (isRegexKeyAlternative(value, match) || ENV_REFERENCE.test(assigned) || ARG_REFERENCE.test(assigned)
+      || isAuditedGwasEffectToken(value, match)) return false;
+    const rest = placeholderRest(value, match);
+    return rest === null || hasSecret(rest);
+  });
+}
 function hasPii(value) { return PII_PATTERNS.some((pattern) => pattern.test(value)); }
+// Trust tier of a stored fact, derived only from source refs the Service sets.
+// owner: written or confirmed by the user; system: imported, or consolidated
+// by Shoggoth in the background from the user's own words; agent: saved by an
+// Agent in a direct conversation; untrusted: kept for the user to confirm, and
+// never recalled by Agents, injected or shared.
+const UNTRUSTED_REF_PREFIX = "untrusted:";
+const CONSOLIDATED_REF = "consolidated:auto";
+function memoryTrust(item) {
+  const refs = item.sourceRefs;
+  if (refs.some((ref) => ref.startsWith(UNTRUSTED_REF_PREFIX))) return "untrusted";
+  if (refs.includes(CONSOLIDATED_REF)) return "system";
+  if (REVIEWED_MEMORY_ID.test(item.id) || refs.some((ref) => ref.startsWith("user-edit:"))) return "owner";
+  if (refs.some((ref) => ref.startsWith("codex-memory:"))) return "system";
+  return "agent";
+}
+// An Agent's saved fact must reuse at least one word of the user's quoted
+// message; otherwise the quote does not support it. English words also match
+// by a shared stem of four or more letters ("prefer" ~ "prefers").
+function quoteSupportsContent(quote, content) {
+  const quoted = [...lexicalTerms(quote)];
+  return [...lexicalTerms(content)].some((term) => quoted.some((word) => word === term
+    || (/^[a-z]{4,}$/u.test(word) && /^[a-z]{4,}$/u.test(term) && (word.startsWith(term) || term.startsWith(word)))));
+}
 function workspaceMemoryRef(workspace) {
   return `workspace:${crypto.createHash("sha256").update(workspace || "").digest("hex")}`;
+}
+// A project is the git repository a workspace belongs to, so every worktree
+// and subdirectory of one clone shares its project memory. The key is the
+// repository's common git directory; a directory outside git has none.
+const repositoryKeys = new Map();
+function repositoryKey(workspace) {
+  if (typeof workspace !== "string" || !path.isAbsolute(workspace)) return null;
+  if (repositoryKeys.has(workspace)) return repositoryKeys.get(workspace);
+  let key = null;
+  try {
+    for (let dir = workspace; ; dir = path.dirname(dir)) {
+      const marker = path.join(dir, ".git");
+      const stat = fs.lstatSync(marker, { throwIfNoEntry: false });
+      if (stat?.isDirectory()) { key = fs.realpathSync(marker); break; }
+      if (stat?.isFile()) {
+        const gitdir = /^gitdir:\s*(.+)$/mu.exec(fs.readFileSync(marker, "utf8"))?.[1]?.trim();
+        if (!gitdir) break;
+        const resolved = path.resolve(dir, gitdir);
+        const common = fs.readFileSync(path.join(resolved, "commondir"), { encoding: "utf8", flag: "r" }).trim();
+        key = fs.realpathSync(path.resolve(resolved, common));
+        break;
+      }
+      if (path.dirname(dir) === dir) break;
+    }
+  } catch { key = null; }
+  if (repositoryKeys.size >= 256) repositoryKeys.clear();
+  repositoryKeys.set(workspace, key);
+  return key;
+}
+// Refs a new fact of this scope carries: a project fact also names its
+// repository; a workspace fact stays with its exact directory.
+function workspaceMemoryRefs(workspace, scope) {
+  const key = scope === "project" ? repositoryKey(workspace) : null;
+  return [workspaceMemoryRef(workspace), ...(key ? [workspaceMemoryRef(`git:${key}`)] : [])];
+}
+// A project/workspace fact belongs to the current workspace when it carries
+// the directory's ref or, for older and newer facts alike, its repository's.
+function matchesWorkspace(item, workspace) {
+  return workspaceMemoryRefs(workspace, "project").some((ref) => item.sourceRefs.includes(ref));
+}
+// The same fact held by two Agents: scope, normalized content and workspace.
+function sameFactKey(item) {
+  return JSON.stringify([item.scope, contentHash(item.content),
+    item.sourceRefs.filter((ref) => ref.startsWith("workspace:")).sort()]);
 }
 function boundedView(kind, items, render, maxBytes) {
   const header = VIEW_HEADERS[kind];
@@ -94,6 +223,10 @@ class MemoryEngine {
     this.reviewReceiptStore = options.reviewReceiptStore || null;
     this.reviewSourceVerifier = null;
     this.provenanceService = options.provenanceService || null;
+    // Returns every Agent profile id that shares memory with the others.
+    this.sharedProfiles = typeof options.sharedProfiles === "function" ? options.sharedProfiles : null;
+    this.sharedViews = new Map();
+    this.combinedViews = new Map();
   }
   _assertOpen() { if (!this.opened) throw engineError("MEMORY_ENGINE_CLOSED", "Memory Engine 未打开"); }
   setReviewReceiptStore(store) {
@@ -189,6 +322,8 @@ class MemoryEngine {
     this.opened = false;
     this.viewsStale.clear();
     this.searchViews.clear();
+    this.sharedViews.clear();
+    this.combinedViews.clear();
     this.recallPolicy.close();
   }
   forgetProfile(profileId) {
@@ -196,6 +331,8 @@ class MemoryEngine {
     // running. Drop cached plaintext alongside the Profile's persistent data.
     this.viewsStale.delete(profileId);
     this.searchViews.delete(profileId);
+    this.sharedViews.clear();
+    this.combinedViews.clear();
     this.semanticSearch?.forgetProfile(profileId);
   }
   setSemanticSearchService(service) { this.semanticSearch = service; }
@@ -203,6 +340,11 @@ class MemoryEngine {
     this.searchViews.delete(profileId);
     try { this._rebuildViews(profileId); this.viewsStale.delete(profileId); }
     catch { this.viewsStale.add(profileId); }
+    // Peers' generated USER/MEMORY views include this Agent's shared items.
+    for (const peer of this._peers(profileId)) {
+      try { this._rebuildViews(peer); this.viewsStale.delete(peer); }
+      catch { this.viewsStale.add(peer); }
+    }
     try { this.semanticSearch?.scheduleMemory(profileId); } catch {}
   }
   _activeView(profileId) {
@@ -214,7 +356,8 @@ class MemoryEngine {
     const active = this.store.list(profileId, { status: "active" });
     const hasReviewed = active.some((item) => REVIEWED_MEMORY_ID.test(item.id));
     const reviewState = hasReviewed ? priorReviewState ?? this._reviewState(profileId) : null;
-    const documents = active.filter((item) => this._reviewCommitted(item, reviewState)).map((item) => ({
+    const documents = active.filter((item) => this._reviewCommitted(item, reviewState)
+      && memoryTrust(item) !== "untrusted").map((item) => ({
       item, terms: lexicalTerms(item.content), normalized: normalizeContent(item.content),
     }));
     const postings = new Map();
@@ -228,6 +371,116 @@ class MemoryEngine {
       hasReviewed, documents, postings, positions: new Map(documents.map((entry, index) => [entry.item.id, index])) };
     this.searchViews.set(profileId, view);
     return view;
+  }
+  _peers(profileId) {
+    if (!this.sharedProfiles) return [];
+    let ids;
+    try { ids = this.sharedProfiles(); } catch { return []; }
+    return [...new Set(Array.isArray(ids) ? ids : [])]
+      .filter((id) => typeof id === "string" && id !== profileId).sort();
+  }
+  // Shared-scope active items of the other Agents, each checked against its own
+  // Agent's recall policy and review receipt. The viewer's policy is applied by
+  // callers so content forgotten through this Agent never reappears via a peer.
+  // A damaged peer is skipped; it never breaks this Agent's own memory.
+  _peerEntries(profileId) {
+    const peers = [];
+    for (const home of this._peers(profileId)) {
+      try {
+        const view = this._activeView(home);
+        peers.push({ home, view, key: [home, view.revision, view.reviewChecksum,
+          this.recallPolicy.getRevision(home), this.recallPolicy.getHistoricalVisibilityRevision?.(home) ?? null] });
+      } catch {}
+    }
+    const key = JSON.stringify(peers.map((peer) => peer.key));
+    const cached = this.sharedViews.get(profileId);
+    if (cached?.key === key) return cached.entries;
+    const entries = [];
+    for (const { home, view } of peers) {
+      try {
+        const policy = this.recallPolicy.snapshot(home);
+        const reviewState = view.hasReviewed ? this._reviewState(home) : null;
+        for (const entry of view.documents) {
+          if (SHARED_SCOPES.has(entry.item.scope) && policy.isMemoryVisible(entry.item)
+            && this._reviewSourceCurrent(home, entry.item, reviewState)) entries.push({ ...entry, home });
+        }
+      } catch {}
+    }
+    this.sharedViews.set(profileId, { key, entries });
+    return entries;
+  }
+  // Own active documents first, then peer documents whose scope and content do
+  // not duplicate an earlier one. Peers stay invisible when sharing is off.
+  _visibleDocuments(profileId, policy) {
+    const own = this._activeView(profileId).documents.map((entry) => ({ ...entry, home: profileId }));
+    const seen = new Set(own.map(({ item }) => `${item.scope}\0${contentHash(item.content)}`));
+    const shared = [];
+    for (const entry of this._peerEntries(profileId)) {
+      const key = `${entry.item.scope}\0${contentHash(entry.item.content)}`;
+      if (seen.has(key) || !policy.isForeignMemoryVisible(entry.item)) continue;
+      seen.add(key); shared.push(entry);
+    }
+    return { own, shared };
+  }
+  // Search view over own documents (unchanged indices) plus peers' shared ones.
+  _searchView(profileId, policy) {
+    const own = this._activeView(profileId);
+    if (this._peerEntries(profileId).length === 0) return own;
+    const key = JSON.stringify([own.revision, own.reviewChecksum, this.sharedViews.get(profileId)?.key ?? null,
+      this.recallPolicy.getRevision(profileId), this.recallPolicy.getHistoricalVisibilityRevision?.(profileId) ?? null]);
+    const cached = this.combinedViews.get(profileId);
+    if (cached?.key === key) return cached.view;
+    const { shared } = this._visibleDocuments(profileId, policy);
+    const documents = [...own.documents, ...shared];
+    const postings = new Map();
+    for (let index = 0; index < documents.length; index += 1) {
+      for (const term of documents[index].terms) {
+        if (!postings.has(term)) postings.set(term, []);
+        postings.get(term).push(index);
+      }
+    }
+    const view = { ...own, documents, postings };
+    this.combinedViews.set(profileId, { key, view });
+    return view;
+  }
+  // A peer's shared item as this Agent may read it, or null.
+  findSharedItem(profileId, id) {
+    this._assertOpen();
+    const policy = this.recallPolicy.snapshot(profileId);
+    const entry = this._peerEntries(profileId).find(({ item }) => item.id === id);
+    return entry && policy.isForeignMemoryVisible(entry.item) ? { home: entry.home, item: structuredClone(entry.item) } : null;
+  }
+  // A shared fact this Agent already sees with the same scope, content, expiry
+  // and workspace. Restating it to this Agent must not store a second copy
+  // that would outlive a forget of the first.
+  findSharedDuplicate(profileId, { scope, content, validUntil = null, sourceRefs = [] }) {
+    this._assertOpen();
+    const workspaceRefs = (refs) => JSON.stringify(refs.filter((ref) => ref.startsWith("workspace:")));
+    const hash = contentHash(content), workspace = workspaceRefs(sourceRefs);
+    const { shared } = this._visibleDocuments(profileId, this.recallPolicy.snapshot(profileId));
+    const entry = shared.find(({ item }) => item.scope === scope && item.validUntil === validUntil
+      && contentHash(item.content) === hash && workspaceRefs(item.sourceRefs) === workspace);
+    return entry ? structuredClone(entry.item) : null;
+  }
+  // Recheck of an item already shown to this Agent: its own items need this
+  // Agent's review receipt; another Agent's item must still be shared with it
+  // and still be committed at its home Agent.
+  isRecallCommitted(profileId, item) {
+    if (!item || typeof item.profileId !== "string" || !Array.isArray(item.sourceRefs)
+      || memoryTrust(item) === "untrusted") return false;
+    if (item.profileId === profileId) return this.isReviewCommitted(profileId, item);
+    const shared = this.findSharedItem(profileId, item.id);
+    return shared?.home === item.profileId && shared.item.content === item.content
+      && this.isReviewCommitted(shared.home, shared.item);
+  }
+  listShared(profileId, { limit = 500 } = {}) {
+    this._assertOpen();
+    const { shared } = this._visibleDocuments(profileId, this.recallPolicy.snapshot(profileId));
+    // The editor writes a shared item through its home Agent at that revision.
+    const rows = shared.map(({ item, home }) => ({ item: structuredClone(item), homeProfileId: home,
+      homeRevision: this.store.getRevision(home) }))
+      .sort((a, b) => b.item.updatedAt - a.item.updatedAt || a.item.id.localeCompare(b.item.id));
+    return { items: rows.slice(0, limit), truncated: rows.length > limit };
   }
   semanticStamp(profileId) {
     this._assertOpen(); this.recallPolicy.assertReady(profileId);
@@ -257,9 +510,10 @@ class MemoryEngine {
     if (!this.definitionStore) return;
     const now = this.now();
     const policy = this.recallPolicy.snapshot(profileId);
-    const active = this._activeView(profileId).documents.map((entry) => entry.item)
+    const { own, shared } = this._visibleDocuments(profileId, policy);
+    const active = [...own.map((entry) => entry.item)
       .filter((item) => this._reviewSourceCurrent(profileId, item))
-      .filter((item) => policy.isMemoryVisible(item))
+      .filter((item) => policy.isMemoryVisible(item)), ...shared.map((entry) => entry.item)]
       .filter((item) => item.validFrom <= now && (item.validUntil === null || item.validUntil > now));
     const revision = this.store.getRevision(profileId);
     const maxBytes = this.definitionStore.maxDocumentBytes ?? 32 * 1024;
@@ -307,8 +561,10 @@ class MemoryEngine {
     if (!Object.hasOwn(SENSITIVITY_RANK, sensitivity)) throw engineError("MEMORY_INVALID", "Memory sensitivity 无效");
     if (sensitivity === "restricted") throw engineError("MEMORY_RESTRICTED", "Restricted Memory 不可保存");
     const status = "active";
+    const untrustedInput = (input.sourceRefs || []).some((ref) => ref.startsWith(UNTRUSTED_REF_PREFIX));
     const duplicate = this.store.list(input.profileId).find((item) => (
       item.status === "active" && this.recallPolicy.isMemoryVisible(input.profileId, item)
+      && (untrustedInput || memoryTrust(item) !== "untrusted")
       && this._reviewSourceCurrent(input.profileId, item)
       && item.scope === input.scope && item.type === input.type
       && item.validUntil === (input.validUntil ?? null)
@@ -373,9 +629,11 @@ class MemoryEngine {
     const duplicateKey = (item) => JSON.stringify([item.scope, contentHash(item.content)]);
     const duplicateKeys = new Set(existing.filter((item) => this.recallPolicy.isMemoryVisible(profileId, item))
       .map(duplicateKey));
+    const replaced = new Set();
     for (const proposal of proposals) {
       if (!proposal || proposal.profileId !== profileId || proposal.classification !== "imported"
-        || proposal.type !== "semantic" || proposal.supersedes !== undefined
+        || proposal.type !== "semantic"
+        || (proposal.supersedes !== undefined && proposal.supersedes !== null && typeof proposal.supersedes !== "string")
         || proposal.validFrom !== undefined || proposal.validUntil !== undefined
         || typeof proposal.content !== "string" || !proposal.content.trim()
         || !Array.isArray(proposal.sourceRefs) || proposal.sourceRefs.length === 0
@@ -392,11 +650,22 @@ class MemoryEngine {
       if (!Object.hasOwn(SENSITIVITY_RANK, sensitivity)) throw engineError("MEMORY_INVALID", "Memory sensitivity 无效");
       if (sensitivity === "restricted") throw engineError("MEMORY_RESTRICTED", "Restricted Memory 不可保存");
       if (this.store.get(profileId, proposal.id)) throw engineError("MEMORY_CONFLICT_INVALID", "记忆 ID 已存在");
+      // A consolidated fact may replace one of this Agent's own active facts of
+      // the same scope; activation retires it in the same journal batch.
+      if (proposal.supersedes) {
+        const target = this.store.get(profileId, proposal.supersedes);
+        if (!target || target.status !== "active" || target.scope !== proposal.scope
+          || memoryTrust(target) === "untrusted" || replaced.has(target.id)
+          || !this.recallPolicy.isMemoryVisible(profileId, target)) {
+          throw engineError("MEMORY_CONFLICT_INVALID", "supersedes 目标无效");
+        }
+        replaced.add(target.id);
+      }
       const item = {
         id: proposal.id, profileId, scope: proposal.scope, type: "semantic",
         content: proposal.content.trim(), sourceRefs: [...new Set(proposal.sourceRefs)],
         confidence: 0.5, sensitivity, status: "candidate",
-        validFrom: now, validUntil: null, supersedes: null,
+        validFrom: now, validUntil: null, supersedes: proposal.supersedes || null,
         createdAt: now, updatedAt: now,
       };
       const key = duplicateKey(item);
@@ -463,11 +732,69 @@ class MemoryEngine {
       throw engineError("MEMORY_SOURCE_REVOKED", "候选审核来源或回执已失效");
     }
     const now = this.now();
-    const active = this.store.upsertMany(items.map((item) => ({
+    // A replaced fact is retired in the same journal batch. If it changed in
+    // the meantime, the new fact stands alone and keeps no lineage link, so
+    // forgetting it can never reach the user's later edit of the older fact.
+    const retired = items.flatMap((item) => {
+      const target = item.supersedes ? this.store.get(profileId, item.supersedes) : null;
+      return target?.status === "active" && target.scope === item.scope
+        && this.recallPolicy.isMemoryVisible(profileId, target)
+        ? [{ ...target, status: "superseded", updatedAt: Math.max(target.updatedAt, now) }] : [];
+    });
+    const retiredIds = new Set(retired.map((item) => item.id));
+    const active = this.store.upsertMany([...items.map((item) => ({
       ...item, status: "active", updatedAt: Math.max(item.updatedAt, now),
-    })), { expectedRevision });
+      supersedes: retiredIds.has(item.supersedes) ? item.supersedes : null,
+    })), ...retired], { expectedRevision }).slice(0, items.length);
     this._afterCommit(profileId);
     return active;
+  }
+
+  // Facts imported from another app's memory file. Each item passes the same
+  // checks as an imported propose(); the batch commits once and rebuilds the
+  // generated views once.
+  importBatch({ profileId, items, expectedRevision }) {
+    this._assertOpen();
+    if (!Array.isArray(items) || items.length < 1 || items.length > 128
+      || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0
+      || new Set(items.map((item) => item?.id)).size !== items.length) {
+      throw engineError("MEMORY_INVALID", "导入记忆参数无效");
+    }
+    this.recallPolicy.assertReady(profileId);
+    if (this.store.getRevision(profileId) !== expectedRevision) {
+      throw engineError("MEMORY_REVISION_CONFLICT", "记忆已变化，请重新导入");
+    }
+    const now = this.now();
+    const duplicateKey = (item) => JSON.stringify([item.scope, contentHash(item.content)]);
+    const keys = new Set(this.store.list(profileId, { status: "active" })
+      .filter((item) => this.recallPolicy.isMemoryVisible(profileId, item)).map(duplicateKey));
+    const prepared = items.map((input) => {
+      if (!input || typeof input.id !== "string" || !["user", "agent"].includes(input.scope)
+        || !["semantic", "procedural"].includes(input.type)
+        || typeof input.content !== "string" || !input.content.trim()
+        || !Array.isArray(input.sourceRefs) || input.sourceRefs.length === 0
+        || input.sourceRefs.some((ref) => typeof ref !== "string" || !/^codex-memory:[a-f0-9]{32}$/u.test(ref))) {
+        throw engineError("MEMORY_INVALID", "导入记忆内容无效");
+      }
+      if (!this.recallPolicy.isSourceVisible(profileId, input.sourceRefs)
+        || this.recallPolicy.hasRevokedContent(profileId, input.content)) {
+        throw engineError("MEMORY_SOURCE_REVOKED", "已撤回的内容不能从导入资料重新保存");
+      }
+      if (hasSecret(input.content)) throw engineError("MEMORY_SECRET_REJECTED", "Memory 拒绝保存 secret/验证码");
+      if (this.store.get(profileId, input.id)) throw engineError("MEMORY_CONFLICT_INVALID", "记忆 ID 已存在");
+      const item = {
+        id: input.id, profileId, scope: input.scope, type: input.type,
+        content: input.content.trim(), sourceRefs: [...new Set(input.sourceRefs)], confidence: 0.5,
+        sensitivity: hasPii(input.content) ? "private" : "normal", status: "active",
+        validFrom: now, validUntil: null, supersedes: null, createdAt: now, updatedAt: now,
+      };
+      if (keys.has(duplicateKey(item))) throw engineError("MEMORY_CONFLICT_INVALID", "已有同内容的 active 记忆");
+      keys.add(duplicateKey(item));
+      return item;
+    });
+    const created = this.store.upsertMany(prepared, { expectedRevision });
+    this._afterCommit(profileId);
+    return created;
   }
 
   update(input) {
@@ -532,6 +859,85 @@ class MemoryEngine {
     return this.store.get(input.profileId, item.id);
   }
 
+  // A forgotten user/project/workspace fact is forgotten for every Agent: it is
+  // deleted at its home, and each copy with the same scope, content and
+  // workspace that another Agent holds is deleted at that Agent. A peer that
+  // cannot be read is skipped, as it is when its facts are shared.
+  forgetEverywhere({ profileId, id, reason = "user_deleted", operationId = null, revocationSourceRefs = [] }) {
+    this._assertOpen();
+    const item = this.store.get(profileId, id);
+    if (!item) return null;
+    const deleted = this.delete({ profileId, id, reason, revocationSourceRefs,
+      ...(operationId ? { operationId } : {}) });
+    if (!SHARED_SCOPES.has(item.scope)) return deleted;
+    const key = sameFactKey(item);
+    for (const home of [profileId, ...this._peers(profileId)]) {
+      let copies = [];
+      try { copies = this.store.list(home, { status: "active" }).filter((copy) => sameFactKey(copy) === key); }
+      catch { continue; }
+      for (const copy of copies) {
+        const copyOperation = `forget-copy-${crypto.createHash("sha256")
+          .update(`${operationId ?? id}\0${home}\0${copy.id}`).digest("hex")}`;
+        try { this.delete({ profileId: home, id: copy.id, reason, operationId: copyOperation }); } catch {}
+      }
+    }
+    return deleted;
+  }
+  // Every active fact of this Agent learned from the given transcript events or
+  // Runs, forgotten everywhere. Returns how many facts were forgotten.
+  forgetSources({ profileId, sourceRefs, reason = "user_deleted", operationId }) {
+    this._assertOpen();
+    this.recallPolicy.assertReady(profileId);
+    let forgotten = 0;
+    for (const item of this.store.list(profileId, { status: "active" })
+      .filter((entry) => entry.sourceRefs.some((ref) => sourceRefs.has(ref)))) {
+      if (this.store.get(profileId, item.id)?.status !== "active") continue;
+      this.forgetEverywhere({ profileId, id: item.id, reason,
+        operationId: `forget-source-${crypto.createHash("sha256").update(`${operationId}\0${item.id}`).digest("hex")}` });
+      forgotten++;
+    }
+    return forgotten;
+  }
+  // Undo one background consolidation: the consolidated fact is deleted and the
+  // older fact it replaced, if still retired, becomes active again in the same
+  // journal batch. The replaced fact's own source is not revoked.
+  undoConsolidation({ profileId, id, operationId }) {
+    this._assertOpen();
+    this.recallPolicy.assertReady(profileId);
+    const item = this.store.get(profileId, id);
+    if (!item || item.status !== "active" || !item.sourceRefs.includes(CONSOLIDATED_REF)) {
+      throw engineError("MEMORY_NOT_FOUND", "没有可撤销的整理记录");
+    }
+    const prior = item.supersedes ? this.store.get(profileId, item.supersedes) : null;
+    const restore = prior?.status === "superseded" && prior.scope === item.scope ? prior : null;
+    this.recallPolicy.recordReason({ profileId, item, reason: "user_deleted", operationId });
+    const now = this.now();
+    try {
+      this.store.upsertMany([{ ...item, status: "deleted", updatedAt: Math.max(item.updatedAt, now) },
+        ...(restore ? [{ ...restore, status: "active", updatedAt: Math.max(restore.updatedAt, now) }] : [])]);
+    } catch (error) { this._afterCommit(profileId); throw error; }
+    this._afterCommit(profileId);
+    return { item: this.store.get(profileId, id), restored: restore ? this.store.get(profileId, restore.id) : null };
+  }
+  // Background consolidation never re-learns content forgotten through any
+  // Agent that shares memory with this one.
+  hasRevokedContentAnywhere(profileId, content) {
+    return this.recallPolicy.hasRevokedContent(profileId, content) || this._peers(profileId).some((home) => {
+      try { return this.recallPolicy.hasRevokedContent(home, content); } catch { return false; }
+    });
+  }
+  // Another Agent's shared-scope fact in any status, to settle a write this
+  // Agent made through that Agent.
+  findPeerItem(profileId, id) {
+    for (const home of this._peers(profileId)) {
+      try {
+        const item = this.store.get(home, id);
+        if (item && SHARED_SCOPES.has(item.scope)) return structuredClone(item);
+      } catch {}
+    }
+    return null;
+  }
+
   search(input) {
     this._assertOpen();
     const policy = this.recallPolicy.snapshot(input.profileId);
@@ -559,7 +965,7 @@ class MemoryEngine {
     const statuses = new Set(input.statuses || ["active"]);
     const activeOnly = statuses.size === 1 && statuses.has("active");
     const prioritizeHot = input.hotPriority === true && activeOnly && queryTerms.size === 0;
-    const view = activeOnly ? this._activeView(input.profileId) : null;
+    const view = activeOnly ? this._searchView(input.profileId, policy) : null;
     const reviewState = view?.hasReviewed ? this._reviewState(input.profileId) : null;
     const documents = view ? view.documents : this.store.list(input.profileId)
       .filter((item) => statuses.has(item.status))
@@ -590,7 +996,7 @@ class MemoryEngine {
           .filter(index => index !== undefined) : []))];
     const totalWeight = [...queryTerms].reduce((sum, term) => sum
       + Math.log1p((documents.length + 1) / ((postings.get(term)?.length || 0) + 1)), 0);
-    const workspaceRef = input.workspace === undefined ? null : workspaceMemoryRef(input.workspace);
+    const hasWorkspace = input.workspace !== undefined;
     const normalizedQuery = normalizeContent(input.query || "");
     // The empty-query hot search already visits every eligible active item
     // before result limits. Count durable *signals* here so the context report
@@ -599,14 +1005,17 @@ class MemoryEngine {
     const hotDurableEligibleByScope = prioritizeHot
       ? { user: 0, agent: 0, project: 0, workspace: 0 } : null;
     const scored = candidateIndices.map((index) => documents[index])
-      .filter(({ item }) => policy.isMemoryVisible(item))
-      .filter(({ item }) => this._reviewSourceCurrent(input.profileId, item, reviewState))
+      // Peer entries were already checked against both Agents' policies.
+      .filter(({ item, home }) => (home !== undefined && home !== input.profileId) || policy.isMemoryVisible(item))
+      .filter(({ item, home }) => (home !== undefined && home !== input.profileId)
+        || this._reviewSourceCurrent(input.profileId, item, reviewState))
       .filter(({ item }) => scopes.has(item.scope))
       .filter(({ item }) => SENSITIVITY_RANK[item.sensitivity] <= allowedRank)
       .filter(({ item }) => item.validFrom <= now)
       .filter(({ item }) => item.validUntil === null || item.validUntil > now)
-      .filter(({ item }) => workspaceRef === null || !["project", "workspace"].includes(item.scope)
-        || item.sourceRefs.includes(workspaceRef))
+      .filter(({ item }) => !hasWorkspace || !["project", "workspace"].includes(item.scope)
+        || matchesWorkspace(item, input.workspace))
+      .filter(({ item }) => !prioritizeHot || !isConditionalMemory(item))
       .map(({ item, terms, normalized }) => {
         const overlap = [...queryTerms].filter((term) => terms.has(term));
         const weight = overlap.reduce((sum, term) => sum
@@ -622,8 +1031,11 @@ class MemoryEngine {
           input.query, item.content, lexicalScore, semanticScores.get(item.id), semanticRanks.get(item.id)) : null;
         return { item, score: semantic?.score ?? lexicalScore, ...(semantic || {}), hotPriority };
       })
-      .sort((a, b) => b.hotPriority - a.hotPriority || b.score - a.score
-        || b.item.updatedAt - a.item.updatedAt || a.item.id.localeCompare(b.item.id));
+      // Among equally prioritized hot facts, those the user wrote or confirmed
+      // come before consolidated ones, and those before an Agent's saves.
+      .sort((a, b) => b.hotPriority - a.hotPriority
+        || (prioritizeHot ? TRUST_RANK[memoryTrust(b.item)] - TRUST_RANK[memoryTrust(a.item)] : 0)
+        || b.score - a.score || b.item.updatedAt - a.item.updatedAt || a.item.id.localeCompare(b.item.id));
     const results = [];
     let bytes = 0;
     const usedScopeCounts = new Map();
@@ -725,4 +1137,5 @@ class MemoryEngine {
 }
 
 module.exports = { MemoryEngine, contentHash, hasPii, hasSecret, hotPriorityFlags,
-  lexicalTerms, workspaceMemoryRef };
+  isConditionalMemory, lexicalTerms, matchesWorkspace, memoryTrust, quoteSupportsContent, CONSOLIDATED_REF,
+  UNTRUSTED_REF_PREFIX, workspaceMemoryRef, workspaceMemoryRefs };

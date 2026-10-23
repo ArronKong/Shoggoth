@@ -258,13 +258,16 @@ async function enumerateConfig(rpc, safeSpec) {
   const provider = parsed?.models?.providers?.[safeSpec.providerKey];
   const models = Array.isArray(provider?.models) ? provider.models : [];
   models.forEach((model, index) => {
+    // This definition is already scoped by models.providers[providerKey]. Its
+    // bare ID is not an unqualified Agent/Session reference, even if another
+    // provider defines the same model (common for OpenAI-compatible endpoints).
+    if (typeof model?.id !== "string" || model.id !== safeSpec.sourceModelId) return;
     const path = `models.providers.${safeSpec.providerKey}.models[${index}].id`;
-    const beforeLength = references.length;
-    inspectConfigValue(model?.id, path, matcher, references, blockers, {
+    references.push(makeReference("openclaw.config.v2", "config", path, model.id, safeSpec.model?.id || model.id, {
       replacePath: `models.providers.${safeSpec.providerKey}.models`,
       definition: true,
-    });
-    if (references.length > beforeLength) replacePaths.add(`models.providers.${safeSpec.providerKey}.models`);
+    }));
+    replacePaths.add(`models.providers.${safeSpec.providerKey}.models`);
   });
 
   const defaults = parsed?.agents?.defaults;
@@ -372,6 +375,18 @@ function hasTruncationSignal(page, collectionLength, limit) {
     || page?.nextCursor != null
     || (Number.isFinite(page?.total) && page.total > collectionLength)
     || collectionLength >= limit;
+}
+
+/**
+ * 2026.9.5 sessions.list assigns this top-level timestamp on every read. It is
+ * Gateway sampling time, not the stored row version. Preserve the complete row
+ * for references/conditional writes; omit only a valid sampling timestamp from
+ * the store fingerprint. Other fields and nested timestamps remain significant.
+ */
+function sessionFingerprintRow(row) {
+  if (!Number.isSafeInteger(row.snapshotAt) || row.snapshotAt < 0) return row;
+  const { snapshotAt, ...stored } = row;
+  return stored;
 }
 
 /** 按声明协议完整枚举 Session；任何 shape/位置异常都返回 incomplete。 */
@@ -495,7 +510,7 @@ async function enumerateSessions(rpc, capabilities) {
       count: rows.length,
       pagination: protocol === "offset-v1" ? "offset" : protocol === "cursor-v1" ? "cursor" : "legacy-single",
       endReached,
-      fingerprint: fingerprint(rows),
+      fingerprint: fingerprint(rows.map(sessionFingerprintRow)),
     },
   };
 }
@@ -697,16 +712,17 @@ function hasStoreConcurrency(capabilities, store, references) {
 }
 
 /**
- * 新增只依赖配置；其它变更扫描 config/Session/Cron 三个封闭 store，并返回显式
+ * 不改身份的新增/编辑只依赖配置；删除/改名扫描 config/Session/Cron 三个封闭 store，并返回显式
  * 完整性、内容 fingerprint 与可补偿引用。preview 阶段写调用数始终为 0。
  */
 async function scanOpenClawReferences(rpc, safeSpec) {
   if (!safeSpec || typeof safeSpec !== "object") throw new TypeError("safeSpec 必须是对象");
   const configResult = await enumerateConfig(rpc, safeSpec);
-  // 新增不会迁移或删除已有 Session/Cron 引用。把这些动态行纳入指纹会使无关
+  // 新增、字段编辑不会迁移或删除已有 Session/Cron 引用。把这些动态行纳入指纹会使无关
   // 聊天的 updatedAt/Token 变化触发 preview_stale，甚至在首个配置写入前锁住表单。
   // 仍保留完整配置指纹：Provider/模型冲突与真正的配置变化必须在首写前拦截。
-  if (safeSpec.kind === "create") {
+  if (safeSpec.kind === "create" || safeSpec.kind === "update"
+    || safeSpec.kind === "update-provider" && !safeSpec.patch?.renameTo) {
     return {
       scannerVersion: OPENCLAW_SCANNER_VERSION,
       stores: { config: configResult.meta },
@@ -756,8 +772,12 @@ async function scanOpenClawReferences(rpc, safeSpec) {
     fingerprints: {
       scannerVersion: OPENCLAW_SCANNER_VERSION,
       config: stores.config.fingerprint,
-      sessions: stores.sessions.fingerprint,
-      cron: stores.cron.fingerprint,
+      // 完整枚举仍覆盖所有行；首写只取本次会迁移/删除的引用及完整性证明。
+      // 新增相关引用、相关行版本/内容变化仍会阻断，无关聊天/定时任务活动不会。
+      sessions: fingerprint({ complete: stores.sessions.complete, endReached: stores.sessions.endReached,
+        rows: sessionReferences.map((reference) => sessionFingerprintRow(reference.before)) }),
+      cron: fingerprint({ complete: stores.cron.complete, endReached: stores.cron.endReached,
+        rows: cronReferences.map((reference) => reference.before) }),
     },
   };
 }

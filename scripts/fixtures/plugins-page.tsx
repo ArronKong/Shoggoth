@@ -72,26 +72,43 @@ const disconnectOperations = new Map<string, any>();
 let dependencyState = { installationId, componentId, status: "missing", revision: 0,
   operationId: null as string | null, interpreter: "node", version: null as string | null };
 const oauthKey = (agent: string) => `shoggoth.plugin.oauth.${agent}.${installationId}.${httpComponentId}`;
-const gitInput = { repositoryUrl: "https://example.invalid/team/project-assistant.git", commit: "e".repeat(40), subdir: "plugins/project-assistant" };
-const gitPreview = { sourceKind: "remote-git", previewDigest: "f".repeat(64), expectedRevision: 0,
-  specVersion: "2026-09-25", name: "Fixed Git fixture · 固定提交能力包", declaredVersion: "1.0.0", installable: true,
-  components: { skills: [{ name: "git-project-summary", description: "Fixture skill", descriptorDigest: "e".repeat(64) }], mcpServers: [] }, diagnostics: [] };
+// Quick setup: the HTTP server declares `${secret:PROJECT_TOKEN}` in a header.
+let quickSecret = false, quickStdioReady = false, quickHttpReady = false, quickCancelNext = false, quickCancels = 0;
+let quickRejectNext = false;
+const quickComponents = () => [
+  { componentId, name: "project-issues-and-collaboration-tools", transport: "stdio", target: "node ./server.mjs",
+    interpreter: "node", interpreterReady: quickStdioReady, secrets: [], reason: null,
+    state: quickStdioReady ? "ready" : "activation_required", tools: quickStdioReady ? 3 : null, granted: quickStdioReady ? 3 : 0 },
+  { componentId: httpComponentId, name: "remote-account-issues-and-project-review", transport: "streamable-http",
+    target: "https://issues.example.invalid/mcp", interpreter: null, interpreterReady: null, reason: null,
+    secrets: [{ name: "PROJECT_TOKEN", configured: quickSecret }],
+    state: !quickSecret ? "secret_required" : quickHttpReady ? "ready" : "activation_required",
+    tools: quickHttpReady ? 2 : null, granted: quickHttpReady ? 2 : 0 }];
+const quickSteps = () => {
+  const items = quickComponents();
+  const steps = items.flatMap(item => item.secrets.filter(secret => !secret.configured).map(secret => `provide_secret:${secret.name}`));
+  if (items.some(item => item.state === "activation_required")) steps.push("activate");
+  return steps.length ? steps : ["ready_next_turn"];
+};
+const quickSetup = () => ({ installationId, packageName: "Project Assistant · 项目协作与问题管理能力包", declaredVersion: "1.0.0",
+  releaseDigest: "c".repeat(64), desiredState: enabled ? "enabled" : "disabled", revision, skills: 1,
+  components: quickComponents(), nextSteps: quickSteps() });
+const bundleInstallPreview = { sourceKind: "bundled", previewDigest: "f".repeat(64), expectedRevision: 0,
+  specVersion: "2026-09-25", name: "Fixture Skill", declaredVersion: "1.0.0", installable: true,
+  components: { skills: [{ name: "issue-summary", description: "Fixture skill", descriptorDigest: "e".repeat(64) }], mcpServers: [] }, diagnostics: [] };
 const bundleUpdatePreview = { sourceKind: "bundled", previewDigest: "b".repeat(64), expectedRevision: 3,
   specVersion: "2026-09-25", name: "Fixture Update", declaredVersion: "2.0.0", installable: true,
   components: { skills: [{ name: "updated-review", description: "Updated fixture skill",
     descriptorDigest: "c".repeat(64) }], mcpServers: [] }, diagnostics: [] };
-const googleBundledPreview = { sourceKind: "bundled", previewDigest: "d".repeat(64), expectedRevision: 0,
-  specVersion: "2026-09-25", name: "Gmail", declaredVersion: "1.0.0", installable: true,
-  components: { skills: [], mcpServers: [{ name: "gmail", type: "streamable-http",
-    descriptorDigest: "f".repeat(64) }] },
-  diagnostics: [{ scope: "mcp-server", name: "gmail",
-    reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }] };
+let installFixtureMode: "completed" | "failed" | "unknown" | "lost" = "completed";
+let heldInstall: { resolve: (() => void) | null } | null = null;
+let installedFixtures: any[] = [];
 let rollbackDigest = "8".repeat(64), rollbackLostResponse = false, rollbackHasSnapshot = true;
-let googlePreviewInstallCount = 0;
 let rollbackPending: Array<{ operationId: string; action: string; phase: string; state: string | null }> = [];
 const rollbackReceipts = new Map<string, any>();
 const rollbackSnapshot = { snapshotId: "5".repeat(64), snapshotDigest: "6".repeat(64), releaseDigest: "7".repeat(64), byteLength: 128, createdAt: 1_800_000_000_000 };
 function seed(visual = false) {
+  installedFixtures = []; installFixtureMode = "completed"; heldInstall = null;
   revision = 1; catalogRevision++; enabled = true; removed = false;
   showGitHub = false; githubConnected = false; bearerMode = "cancel";
   githubCompatibleTools = true;
@@ -102,6 +119,8 @@ function seed(visual = false) {
   agentState[b] = { connected: true, discovered: true, grants: {} };
   oauthAgents[a] = false; oauthAgents[b] = false; oauthFlows.clear(); oauthMode = "pending";
   disconnectMode = "cancel"; disconnectOperations.clear();
+  quickSecret = false; quickStdioReady = false; quickHttpReady = false; quickCancelNext = false; quickCancels = 0;
+  quickRejectNext = false;
   if (visual) {
     agentState[a].grants[toolIdentity(a, 0)] = { effect: "allow", approvalMode: "each-call", revision: 1, expired: false, matchesCurrentContract: true };
     agentState[a].grants[toolIdentity(a, 1)] = { effect: "allow", approvalMode: "always", revision: 1, expired: false, matchesCurrentContract: true };
@@ -112,6 +131,7 @@ function seed(visual = false) {
 const toolIdentity = (agent: string, index: number) => `plugin:${installationId}:${componentId}:connection-${agent}:${String(index + 1).repeat(64)}`;
 const toolName = (agent: string, index: number) => `${agent === a ? "A-only" : "B-only"}/${["read-project-issues-and-metadata", "create-project-issue", "list-team-review-assignments"][index]}`;
 function catalog() {
+  if (scope.authoredCatalog) return scope.authoredCatalog;
   return { supported: true, catalogRevision: String(catalogRevision), nextCursor: null,
     items: removed ? [] : [{ installationId, revision, packageName: "Project Assistant · 项目协作与问题管理能力包",
       declaredVersion: "1.0.0", sourceKind: "directory", desiredState: enabled ? "enabled" : "disabled", diagnosticCount: 0,
@@ -119,6 +139,7 @@ function catalog() {
         { componentId: skillId, kind: "skill", title: "issue-summary", state: enabled ? "ready" : "installed_inactive" },
         { componentId: httpComponentId, kind: "mcp-server", transport: "streamable-http",
           title: "remote-account-issues-and-project-review", state: enabled ? "connection_required" : "installed_inactive" }] },
+    ...installedFixtures,
     ...(showGitHub ? [{ installationId: githubInstallationId, revision: 1, packageName: "github",
       declaredVersion: "0.1.11", sourceKind: "bundled", desiredState: "enabled", diagnosticCount: 1,
       components: [{ componentId: githubComponentId, kind: "mcp-server", transport: "streamable-http",
@@ -139,8 +160,20 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const route = url.pathname;
   const body = init?.body ? JSON.parse(String(init.body)) : {};
   const mutation = init?.method && init.method !== "GET";
-  if (mutation) writes.push({ route, body }); else reads.push(`${route}?${url.searchParams}`);
+  const graphStatusRead = route === "/__api/plugins/graph-registration-status";
+  const catalogGmailStatusRead = route === "/__api/plugins/gmail-registration-status" && scope.verifiedBundledCatalog;
+  if (mutation && !graphStatusRead && !catalogGmailStatusRead) writes.push({ route, body });
+  else reads.push(`${route}?${url.searchParams}`);
   const response = (value: unknown, status = 200) => Response.json(value, { status });
+  if (graphStatusRead) {
+    check(init?.method === "POST" && Object.keys(body).length === 0,
+      "Graph registration status uses the read-only POST contract");
+    return response({ configured: false, restartRequired: false });
+  }
+  if (catalogGmailStatusRead) {
+    check(init?.method === "POST" && Object.keys(body).length === 0, "Gmail catalog setup reads its status without configuring a client");
+    return response({ configured: false, restartRequired: false, runtimeAvailable: true, reasonCode: null });
+  }
   if (route === "/__api/backends") return response({ backends: FALLBACK_BACKEND_DESCRIPTORS });
   if (route === "/__api/config") return response({ config: { disabledBackends: [] } });
 
@@ -197,18 +230,16 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (rollbackLostResponse) { rollbackLostResponse = false; return response({ error: "response lost" }, 500); }
     return response({ canceled: false, receipt });
   }
-  if (route === "/__api/plugins/git-preview") {
-    check(JSON.stringify(body) === JSON.stringify(gitInput), "remote Git preview sends exact URL, full SHA and subdir");
-    return response({ canceled: false, preview: gitPreview, selectionHandle: "fixture-git-selection" });
-  }
   if (route === "/__api/plugins/bundled-preview") {
-    check(["fixture-update", "gmail"].includes(body.packageId), "bundled preview pins the exact package");
-    return response({ canceled: false,
-      preview: body.packageId === "gmail" ? googleBundledPreview : bundleUpdatePreview,
-      selectionHandle: body.packageId === "gmail" ? "fixture-google-preview" : "fixture-bundled-update" });
+    if (body.packageId === "fixture-skill") return response({ canceled: false,
+      preview: bundleInstallPreview, selectionHandle: "fixture-bundled-skill" });
+    check(body.packageId === "fixture-update", "bundled preview pins the exact package");
+    return response({ canceled: false, preview: bundleUpdatePreview,
+      selectionHandle: "fixture-bundled-update" });
   }
   if (route.startsWith("/__api/plugins/bundled/") && !mutation) {
     const id = decodeURIComponent(route.slice("/__api/plugins/bundled/".length));
+    if (scope.verifiedBundledDetails?.[id]) return response({ detail: scope.verifiedBundledDetails[id] });
     const base = { id, version: "1.0.0", category: "Developer Tools", iconAvailable: false,
       developerName: "Fixture Studio", websiteURL: "https://example.invalid/plugins",
       license: "MIT", prompts: ["Summarize a design and prepare an implementation plan"],
@@ -239,25 +270,42 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 }, converted: { skills: 1, mcp: 0 },
       importStatus: "previewable", skills: [{ name: "updated-review", description: "Reviews the current version." }] } });
     if (id === "gmail") return response({ detail: { ...base,
-      displayName: "Gmail", shortDescription: "A fixed Google MCP endpoint needing separate login",
-      longDescription: "The frozen Gmail endpoint can be installed as a distinct Shoggoth Desktop OAuth candidate.",
+      displayName: "Gmail", shortDescription: "Local Gmail runtime needs a separate Google account connection",
+      longDescription: "Shoggoth connects Gmail through a Service-owned local gogcli runtime after separate Google account authorization.",
       components: { skills: 0, allSkillFiles: 0, apps: 1, mcp: 1 }, converted: { skills: 0, mcp: 1 },
-      importStatus: "previewable", skills: [], apps: ["gmail"], prompts: [],
+      importStatus: "previewable", localAdapter: "shoggoth-gogcli-gmail-mcp",
+      skills: [], apps: ["gmail"], prompts: [],
       mcpServers: [{ name: "gmail", type: "streamable-http" }],
-      connectionWarnings: [{ name: "gmail", reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }] } });
+      connectionWarnings: [] } });
     return response({ error: "not found" }, 404);
   }
   if (route === "/__api/plugins/install") {
-    check(body.selectionHandle === "fixture-git-selection" && body.previewDigest === gitPreview.previewDigest
-      && body.expectedRevision === 0 && typeof body.operationId === "string", "Git install consumes the opaque selection and CAS");
-    check(Object.keys(body).length === 4, "Git install does not resubmit source fields");
-    const installation = { installationId: "fixed-git-fixture", revision: 1, desiredState: "disabled" };
-    return response({ installation, operation: receipt(body.operationId, "install", installation) });
+    if (body.selectionHandle === "fixture-bundled-skill") {
+      check(body.previewDigest === bundleInstallPreview.previewDigest && body.expectedRevision === 0
+        && Object.keys(body).length === 4, "modal installation consumes only its opaque selection and digest");
+      if (heldInstall) await new Promise<void>(resolve => { heldInstall!.resolve = resolve; });
+      const installation = { installationId: "c".repeat(64),
+        revision: 1, desiredState: "enabled" };
+      const phase = installFixtureMode === "failed" ? "failed" : installFixtureMode === "unknown" ? "created" : "completed";
+      const operation = receipt(body.operationId, "install", phase === "failed"
+        ? { code: "PLUGIN_INSTALL_REJECTED" } : installation, phase);
+      if (phase === "completed") {
+        installedFixtures = [{ ...installation, packageName: "Fixture Skill",
+          declaredVersion: "1.0.0", sourceKind: "bundled", diagnosticCount: 0,
+          components: [{ componentId: skillId, kind: "skill", title: "issue-summary",
+            state: "ready" }] }];
+        catalogRevision++;
+      }
+      if (installFixtureMode === "lost") return response({ error: "response lost after commit" }, 500);
+      return response({ installation, operation });
+    }
+    throw Error("Unexpected installation selection");
   }
   if (route === "/__api/plugins/dependency-status") return dependencySupported ? response(dependencyState)
     : response({ error: "unsupported fixture", code: "DEPENDENCY_INTERPRETER_UNSUPPORTED" }, 409);
   if (route === "/__api/plugins/dependency-change") {
-    check(!enabled, "dependency changes require disabled installation");
+    check(!enabled || (body.action === "prepare" && dependencyState.status === "missing"),
+      "only a first interpreter pin may run while the installation is enabled");
     check(body.expectedRevision === revision, "dependency changes use installation CAS");
     dependencyState = { ...dependencyState, status: body.action === "prepare" ? "ready" : "revoked",
       revision: dependencyState.revision + 1, operationId: body.operationId,
@@ -289,12 +337,15 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     return response(result);
   }
+  if (route === "/__api/plugins/bundled" && scope.verifiedBundledCatalog) return response(scope.verifiedBundledCatalog);
   if (route === "/__api/plugins/bundled") return response({ batchDigest: "9".repeat(64), items: [
     { id: "fixture-skill", installationId: "c".repeat(64), displayName: "Fixture Skill",
       shortDescription: "A bundled skill that requires a click before installation", category: "Developer Tools",
       version: "1.0.0", iconAvailable: false, components: { skills: 12, allSkillFiles: 12, apps: 0, mcp: 0 },
       converted: { skills: 12, mcp: 0 }, unconvertedMcp: [],
-      importStatus: "previewable", installationState: "not-installed", installedReleaseDigest: null },
+      importStatus: "previewable", installationState: installedFixtures.some(item => item.packageName === "Fixture Skill")
+        ? "enabled" : "not-installed", installedReleaseDigest: installedFixtures.some(item => item.packageName === "Fixture Skill")
+          ? bundleInstallPreview.previewDigest : null },
     { id: "fixture-connector", installationId: "e".repeat(64), displayName: "Fixture Connector",
       shortDescription: "A connector awaiting its Service adapter", category: "Productivity",
       version: "1.0.0", iconAvailable: false, components: { skills: 0, allSkillFiles: 0, apps: 1, mcp: 1 },
@@ -305,18 +356,19 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       shortDescription: "An installed package whose bundled version differs", category: "Developer Tools",
       version: "2.0.0", iconAvailable: false, components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 },
       converted: { skills: 1, mcp: 0 }, unconvertedMcp: [],
-      importStatus: "previewable", installationState: "enabled", installedReleaseDigest: "a".repeat(64) },
+      importStatus: "previewable", installationState: removed ? "not-installed" : enabled ? "enabled" : "disabled", installedReleaseDigest: removed ? null : "a".repeat(64) },
     { id: "gmail", installationId: "d".repeat(64), displayName: "Gmail",
-      shortDescription: "A fixed Google MCP endpoint needing separate login", category: "Communication",
+      shortDescription: "Local Gmail runtime needs a separate Google account connection", category: "Communication",
       version: "1.0.0", iconAvailable: false, components: { skills: 0, allSkillFiles: 0, apps: 1, mcp: 1 },
       converted: { skills: 0, mcp: 1 }, unconvertedMcp: [],
+      localAdapter: "shoggoth-gogcli-gmail-mcp",
       importStatus: "previewable", installationState: "not-installed", installedReleaseDigest: null },
-    { id: "fixture-creative", installationId: "f".repeat(64), displayName: "Fixture Creative",
+    { id: "fixture-creative", installationId: "2".repeat(64), displayName: "Fixture Creative",
       shortDescription: "A design workflow", category: "Creativity",
       version: "1.0.0", iconAvailable: false, components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 },
       converted: { skills: 1, mcp: 0 }, unconvertedMcp: [],
       importStatus: "previewable", installationState: "not-installed", installedReleaseDigest: null },
-    { id: "fixture-research", installationId: "1".repeat(64), displayName: "Fixture Research",
+    { id: "fixture-research", installationId: "3".repeat(64), displayName: "Fixture Research",
       shortDescription: "A research workflow", category: "Education & Research",
       version: "1.0.0", iconAvailable: false, components: { skills: 1, allSkillFiles: 1, apps: 0, mcp: 0 },
       converted: { skills: 1, mcp: 0 }, unconvertedMcp: [],
@@ -408,6 +460,13 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (route === "/__api/plugins/skill-bindings") return response({ profileId: target(url.searchParams.get("agentId") || a).profileId, items: [] });
   if (route === "/__api/plugins/mcp-status") {
     const agent = url.searchParams.get("agentId")!;
+    if (scope.authoredCatalog) {
+      const installation = scope.authoredCatalog.items.find((item: any) => item.installationId === url.searchParams.get("installationId"));
+      return response({ installationId: installation.installationId, profileId: target(agent).profileId,
+        items: installation.components.filter((item: any) => item.kind === "mcp-server").map((item: any) => ({
+          componentId: item.componentId, connections: { pending: 0, verified: 0, disconnected: 0 }, accounts: [], binding: null,
+        })) });
+    }
     if (url.searchParams.get("installationId") === githubInstallationId) {
       return response({ installationId: githubInstallationId, profileId: target(agent).profileId,
         items: [{ componentId: githubComponentId,
@@ -536,11 +595,46 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     return response({ uninstall: { installationId, dataRetained: true, credentialsRetained: true },
       operation: receipt(body.operationId, "uninstall", null) });
   }
-  if (route === "/__api/plugins/preview") return response({ canceled: true });
+  if (route === "/__api/plugins/setup" || route === "/__api/plugins/secrets") {
+    const params = mutation ? body : Object.fromEntries(url.searchParams);
+    check(typeof params.agentId === "string" && params.agentId.length > 0, "quick setup is scoped to the selected Agent");
+    if (params.installationId !== installationId) return response(route.endsWith("/setup")
+      ? { installationId: params.installationId, packageName: "other", declaredVersion: null, releaseDigest: "c".repeat(64),
+        desiredState: "enabled", revision: 1, skills: 0, components: [], nextSteps: ["ready_next_turn"] }
+      : { installationId: params.installationId, packageName: "other", items: [] });
+    if (!mutation) return response(route.endsWith("/setup") ? quickSetup() : { installationId,
+      packageName: "Project Assistant", items: [{ name: "PROJECT_TOKEN", configured: quickSecret,
+        destinations: [{ component: "remote-account-issues-and-project-review", kind: "header",
+          key: "Authorization", origin: "https://issues.example.invalid" }] }] });
+    if (quickCancelNext) { quickCancelNext = false; quickCancels++; return response({ canceled: true, result: null }); }
+    if (route.endsWith("/secrets")) {
+      check(Object.keys(body).length === 4 && body.name === "PROJECT_TOKEN"
+        && (body.value === null || (typeof body.value === "string" && body.value.length >= 8)),
+      "credential write names one declared secret and carries one value");
+      quickSecret = body.value !== null; if (!quickSecret) quickHttpReady = false;
+      const rejected = quickRejectNext; quickRejectNext = false;
+      return response({ canceled: false, result: { installationId, name: body.name, configured: quickSecret,
+        components: rejected ? [{ name: "remote-account-issues-and-project-review", state: "connection_failed",
+          reason: "PLUGIN_SECRET_REJECTED" }] : quickComponents().map(item => ({ name: item.name, state: item.state })),
+        nextSteps: quickSteps() } });
+    }
+    check(Object.keys(body).length === 3 && body.expectedRevision === revision, "quick enable pins the current revision");
+    if (!enabled) { enabled = true; revision++; }
+    quickStdioReady = true; quickHttpReady = quickSecret; catalogRevision++;
+    // The Service connects and allows the discovered tools in the same operation.
+    const state = agentState[body.agentId];
+    state.connected = true; state.discovered = true;
+    for (const index of [0, 1, 2]) state.grants[toolIdentity(body.agentId, index)] = { effect: "allow",
+      approvalMode: "always", revision: 1, expired: false, matchesCurrentContract: true };
+    if (quickSecret) oauthAgents[body.agentId] = true;
+    const { components, nextSteps } = quickSetup();
+    return response({ canceled: false, result: { installationId, packageName: "Project Assistant",
+      desiredState: "enabled", components, nextSteps } });
+  }
   throw Error(`Unexpected fixture network request ${init?.method || "GET"} ${route}`);
 };
 function Fixture() {
-  const [key, setKey] = useState(0); scope.remountPlugins = () => setKey(value => value + 1);
+  const [key, setKey] = useState(0); scope.fixtureGeneration = key; scope.remountPlugins = () => setKey(value => value + 1);
   return <MemoryRouter initialEntries={["/plugins"]}><RouteFixtureControl /><UiProvider><NavigationGuardProvider>
     <main className="content" style={{ height: "100vh" }}><PluginsPage key={key} /></main>
   </NavigationGuardProvider></UiProvider></MemoryRouter>;
@@ -555,7 +649,12 @@ createRoot(document.getElementById("root")!).render(<Fixture />);
 const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent === text);
 const click = async (text: string) => { await wait(() => button(text) && !button(text)!.disabled, `button ready: ${text}`); button(text)!.click(); await pause(); };
 const detailButton = (name: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="查看 ${name} 详情"]`);
-const openDetail = async (name: string) => { await wait(() => !!detailButton(name), `detail card: ${name}`); detailButton(name)!.click(); await pause(); };
+const openDetail = async (name: string) => {
+  await wait(() => !!detailButton(name), `detail card: ${name}`);
+  detailButton(name)!.focus(); detailButton(name)!.click();
+  await wait(() => Boolean(installDialog()) && getComputedStyle(installDialog()!).opacity === "1", "detail dialog entered");
+  await pause();
+};
 const toolsVisible = (agent: string) => document.body.textContent!.includes(toolName(agent, 0));
 const hostTab = (name: string) => document.querySelector<HTMLButtonElement>(`[role="tab"][aria-label="${name}"]`);
 const selectHost = async (name: string) => {
@@ -564,40 +663,205 @@ const selectHost = async (name: string) => {
   await wait(() => hostTab(name)!.getAttribute("aria-selected") === "true", `host selected: ${name}`);
   await pause();
 };
+const installDialog = () => document.querySelector<HTMLElement>('[role="dialog"][class*="installDialog"]');
+const dialogBody = () => installDialog()?.querySelector<HTMLElement>(":scope > div");
+const closeInstaller = async () => {
+  if (installDialog()) {
+    installDialog()!.querySelector<HTMLButtonElement>(":scope > header button")!.click();
+    await wait(() => !installDialog(), "plugin dialog closed");
+  }
+};
+const expandManagement = async (id = scope.authoredCatalog?.items[0]?.installationId || installationId) => {
+  if (hostTab("Shoggoth")?.getAttribute("aria-selected") !== "true") return;
+  if (installDialog()?.querySelector('[data-result="unknown"]')) return;
+  if (!installDialog()?.querySelector(`[data-targeted="true"]`)
+    || !installDialog()?.querySelector(`[class*="packageList"]`)?.textContent?.includes(
+      scope.authoredCatalog?.items.find((item: any) => item.installationId === id)?.packageName || (id === githubInstallationId ? "github" : "Project Assistant"))) {
+    await closeInstaller();
+    await wait(() => !!document.querySelector(`[data-installation-id="${id}"] button`), "installed row loaded on the main catalog");
+    document.querySelector<HTMLButtonElement>(`[data-installation-id="${id}"] [data-plugin-action="manage"]`)!.click();
+  }
+  await wait(() => !!installDialog()?.querySelector('[class*="packageList"] li'), "management opens inside the plugin dialog");
+  document.querySelectorAll<HTMLDetailsElement>('[class*="packageDetails"]').forEach(item => { item.open = true; });
+  await pause();
+};
+const remountForManagement = async () => {
+  const generation = scope.fixtureGeneration;
+  scope.remountPlugins();
+  await wait(() => scope.fixtureGeneration !== generation, "page remounted");
+  if (sessionStorage.getItem("shoggoth.plugin.pending-install.v1")) {
+    await wait(() => !!installDialog(), "install recovery remounted");
+    return;
+  }
+  await expandManagement();
+};
+const openLibrary = async () => {
+  await closeInstaller();
+  await wait(() => !!document.querySelector('[class*="bundledLibrary"]'), "plugin catalog is on the main page");
+};
+const openBundledInstallPreview = async () => {
+  await openLibrary();
+  await wait(() => {
+    const plus = document.querySelector<HTMLButtonElement>('[data-plugin-id="fixture-skill"] [data-plugin-action="install"]');
+    return plus && !plus.disabled;
+  }, "uninstalled plugin has a ready list + action");
+  const plus = document.querySelector<HTMLButtonElement>('[data-plugin-id="fixture-skill"] [data-plugin-action="install"]')!;
+  plus.focus(); plus.click();
+  await wait(() => button("安装并启用") && !button("安装并启用")!.disabled, "list + opens installation preview");
+  return plus;
+};
+scope.closePluginInstaller = closeInstaller;
+scope.runPluginDetailInstallEntry = async () => {
+  seed(); await remountForManagement(); await openLibrary();
+  const list = document.querySelector('[class*="bundledLibrary"]');
+  const before = writes.filter(item => item.route === "/__api/plugins/install").length;
+  await openDetail("Fixture Skill");
+  const dialog = installDialog()!;
+  await wait(() => !!dialog.querySelector('[class*="promptPanel"]'), "detail contents ready");
+  const action = dialog.querySelector<HTMLButtonElement>('header [class*="headerActions"] button')!;
+  check(action.textContent === "+ 安装插件" && !action.disabled, "detail installation is visible at the top");
+  action.focus(); action.click();
+  await wait(() => !!button("安装并启用"), "detail installation opens the confirmation step");
+  check(installDialog() === dialog && document.querySelectorAll('[role="dialog"]').length === 1,
+    "detail and installation use the same dialog");
+  check(!dialog.querySelector('[class*="embedded"]') && !!dialog.querySelector('[class*="previewPanel"]'),
+    "the detail action starts the installation flow");
+  check(document.querySelector('[class*="bundledLibrary"]') === list && list?.isConnected,
+    "detail installation keeps the original catalog on the page");
+  check(writes.filter(item => item.route === "/__api/plugins/install").length === before,
+    "detail entry previews without writing before confirmation");
+  await click("返回插件列表"); await wait(() => !installDialog(), "cancel returns to the catalog");
+  check(document.activeElement === detailButton("Fixture Skill"), "cancel restores the detail opener");
+  return { topInstallAction: true, entersInstallation: true, sameDialog: true, originalCatalogRetained: true,
+    noWriteBeforeConfirmation: true, focusRestored: true };
+};
+scope.preparePluginInstallPreview = async () => {
+  await closeInstaller(); await selectHost("Shoggoth"); seed(); await remountForManagement();
+  await openLibrary();
+  const list = document.querySelector('[class*="bundledLibrary"]');
+  const route = document.querySelector(".page.management-page");
+  const before = writes.filter(item => item.route === "/__api/plugins/install").length;
+  check(!installDialog() && list?.querySelectorAll("article").length === 6, "entry shows the entire plugin catalog without a dialog");
+  check(!button("从文件或 Git 安装"), "the file and Git import entry is removed");
+  const plus = await openBundledInstallPreview();
+  check(!installDialog()?.querySelector('[class*="embedded"]'), "list + skips the detail view");
+  check(installDialog()?.contains(document.querySelector('[class*="previewPanel"]')!), "preview stays in the installation dialog");
+  check(document.querySelectorAll('[role="dialog"]').length === 1, "installation uses one dialog throughout");
+  check(list === document.querySelector('[class*="bundledLibrary"]') && route?.isConnected,
+    "opening the installer retains the current page and catalog");
+  check(writes.filter(item => item.route === "/__api/plugins/install").length === before, "preview never installs before confirmation");
+  scope.fixtureInstallList = list; scope.fixtureInstallWrites = before; scope.fixtureInstallOpener = plus;
+  return { singlePage: true, catalogVisibleOnEntry: true, listPlusOpensInstallation: true, catalogOutsideDialog: true,
+    oneDialog: true, noImportEntry: true, previewInDialog: true, noInstallBeforeConfirmation: true };
+};
+scope.startPluginDialogInstallation = async () => {
+  heldInstall = { resolve: null };
+  await click("安装并启用");
+  await wait(() => !!heldInstall?.resolve && Boolean(installDialog()?.textContent?.includes("正在安装")), "installation progress remains in the dialog");
+  check(installDialog()!.querySelector<HTMLButtonElement>(":scope > header button")!.disabled,
+    "close control is disabled while installing");
+  return { progressInDialog: true, closeLocked: true };
+};
+scope.preparePluginInstallFocusTrap = () => {
+  button("安装并启用")!.focus();
+  return { focused: document.activeElement === button("安装并启用") };
+};
+scope.checkPluginInstallFocusTrap = async () => {
+  await wait(() => installDialog()!.contains(document.activeElement), "Tab stays inside the installer");
+  await wait(() => document.activeElement === installDialog()!.querySelector(":scope > header button"),
+    "Tab wraps from the confirmation button to the dialog close control");
+  return { keyboardFocusTrapped: true };
+};
+scope.finishPluginDialogInstallation = async () => {
+  check(Boolean(installDialog()), "Escape cannot close an active installation");
+  heldInstall!.resolve!(); heldInstall = null;
+  await wait(() => installDialog()?.textContent?.includes("安装成功") && Boolean(button("完成")), "installation result stays in the dialog");
+  await wait(() => document.querySelector('[data-plugin-id="fixture-skill"]')?.getAttribute("data-installed") === "true", "successful installation updates the existing plugin row behind the dialog");
+  check(document.querySelector('[class*="bundledLibrary"]') === scope.fixtureInstallList, "the original page catalog stays mounted after installation");
+  check(document.querySelectorAll('[data-plugin-id="fixture-skill"]').length === 1, "installed bundled plugins never get a duplicate row");
+  check(writes.filter(item => item.route === "/__api/plugins/install").length === scope.fixtureInstallWrites + 1,
+    "one confirmation sends exactly one installation request");
+  check(!sessionStorage.getItem("shoggoth.plugin.pending-install.v1"), "confirmed success clears the recovery receipt");
+  return { escapeLocked: true, resultInDialog: true, listRefreshed: true, noPageNavigation: true, oneInstallRequest: true };
+};
+scope.runPluginInstallRecoveryFixture = async () => {
+  await click("完成"); await wait(() => !installDialog(), "Done closes the dialog");
+  check(document.activeElement === scope.fixtureInstallOpener, "Done restores focus to the list + opener");
+  seed(); await remountForManagement(); installFixtureMode = "failed";
+  await openBundledInstallPreview(); await click("安装并启用");
+  await wait(() => installDialog()?.querySelector('[data-result="failed"]'), "a failed receipt is explained inside the dialog");
+  check(!sessionStorage.getItem("shoggoth.plugin.pending-install.v1"), "terminal failure clears the old receipt");
+  await click("重新选择插件");
+  installFixtureMode = "unknown";
+  await openBundledInstallPreview(); await click("安装并启用");
+  await wait(() => installDialog()?.querySelector('[data-result="unknown"]'), "unknown outcome stays in the dialog");
+  const operationId = sessionStorage.getItem("shoggoth.plugin.pending-install.v1")!;
+  const before = writes.filter(item => item.route === "/__api/plugins/install").length;
+  await closeInstaller();
+  check(document.querySelector<HTMLButtonElement>(`[data-installation-id="${installationId}"] [data-plugin-action="manage"]`)!.disabled, "unknown outcome blocks conflicting plugin changes");
+  await remountForManagement();
+  await wait(() => installDialog()?.querySelector('[data-result="unknown"]'), "pending installation reopens its recovery dialog after remount");
+  check(!button("安装并启用"), "unknown outcome offers receipt lookup without duplicate installation");
+  operations.set(operationId, { operationId, kind: "install", phase: "completed",
+    result: { installationId: "c".repeat(64), desiredState: "enabled" } });
+  await click("查询操作结果");
+  await wait(() => installDialog()?.querySelector('[data-result="completed"]'), "original receipt settles the installation");
+  check(writes.filter(item => item.route === "/__api/plugins/install").length === before,
+    "recovery never replays the installation request");
+  await click("继续安装");
+  installFixtureMode = "lost";
+  await openBundledInstallPreview(); await click("安装并启用");
+  await wait(() => installDialog()?.querySelector('[data-result="completed"]'), "lost response is recovered from the durable completed receipt");
+  check(writes.filter(item => item.route === "/__api/plugins/install").length === before + 1,
+    "a lost response also sends only one installation request");
+  await click("完成"); await wait(() => !installDialog(), "recovery returns to the same page");
+  check(scope.fixtureErrors.length === 0, "installation workflow has no renderer errors");
+  return { failureInDialog: true, retryChoosesFreshPreview: true, pendingReceiptSurvivesRemount: true,
+    unknownBlocksConflictingChanges: true, receiptLookupWithoutReplay: true, responseLossRecovered: true, restoresOpenerFocus: true };
+};
+scope.preparePluginListCapture = async (theme: string) => {
+  await closeInstaller(); await selectHost("Shoggoth");
+  document.documentElement.dataset.theme = theme;
+  seed();
+  const generation = scope.fixtureGeneration;
+  scope.remountPlugins();
+  await wait(() => scope.fixtureGeneration !== generation && document.querySelectorAll('[data-plugin-id]').length === 6, "all plugins appear immediately on the page");
+  check(!button("可安装") && !button("已安装"), "available and installed tabs are removed");
+  check(!button("打开技能") && !button("从文件或 Git 安装"), "removed toolbar actions stay absent");
+  check(!document.querySelector('#plugin-library-search, #plugin-library-category'), "search and category filters are removed");
+  check(!installDialog() && !document.getElementById("plugin-git-url"), "plugin entry shows the catalog without any dialog");
+  check(!document.querySelector('[class*="packageDetails"]'), "installed settings are in plugin details");
+  check(document.querySelectorAll('[data-installed="true"]').length === 1, "installed plugin remains in the same catalog");
+  check(document.querySelectorAll('[data-plugin-action="install"]').length === 5, "uninstalled plugins have a list installation action");
+  const backgrounds = [...document.querySelectorAll('article')].map(card => getComputedStyle(card).backgroundColor);
+  check(backgrounds.every(color => color === (theme === "light" ? "rgb(255, 255, 255)" : "rgb(31, 31, 35)")),
+    "every plugin keeps its card background in both themes");
+  const content = document.querySelector<HTMLElement>("main.content")!;
+  content.scrollTop = 0;
+  check(content.scrollWidth <= content.clientWidth + 1, "single catalog has no horizontal overflow");
+  return { width: innerWidth, theme, view: "single-list", catalogVisibleOnEntry: true, noLibraryTabs: true, noToolbarActions: true,
+    noSearchOrCategoryFilters: true, installedInSameList: true,
+    settingsInDialog: true, cardBackgrounds: backgrounds, horizontalOverflow: false };
+};
 scope.preparePluginKeyboard = async () => {
   await selectHost("Shoggoth");
-  await wait(() => !!button("已安装"), "installed library tab available");
+  await wait(() => !!document.querySelector("[data-plugin-id]"), "plugin catalog available on entry");
+  await openLibrary();
   check(document.body.textContent!.includes("Fixture Skill"), "bundled source is browsable before installation");
-  check(button("适配中")?.disabled === true, "connector declaration cannot be installed as a working tool");
+  check(document.querySelector<HTMLButtonElement>('[aria-label="适配中"]')?.disabled === true, "connector declaration cannot be installed as a working tool");
   check(document.querySelector("#plugin-inspect-agent") === null,
     "bundled installation does not show an Agent selector");
-  check(document.body.textContent!.includes("已转换 12 / 12 个技能"),
-    "bundled card distinguishes converted Skills from source declarations");
+  check(!installDialog() && document.querySelectorAll("article").length === 6,
+    "catalog is directly visible without opening an installer");
   const groups = [...document.querySelectorAll<HTMLElement>("[data-plugin-group]")];
   check(groups.map(group => group.dataset.pluginGroup).join(",")
     === "creative,development,collaboration,research", "bundled cards follow the four requested groups");
   check(groups.map(group => group.querySelectorAll("article").length).join(",") === "1,2,2,1",
     "group headings show the correct cards without losing any plugins");
-  const category = document.querySelector<HTMLSelectElement>("#plugin-library-category")!;
-  check(category.options.length === 5, "the four bundled groups are selectable");
-  category.value = "collaboration"; category.dispatchEvent(new Event("change", { bubbles: true }));
-  await wait(() => document.querySelectorAll("article").length === 2,
-    "category combines productivity and communication plugins");
-  check(document.querySelectorAll("[data-plugin-group]").length === 1,
-    "category filter hides unrelated group headings");
-  category.value = ""; category.dispatchEvent(new Event("change", { bubbles: true }));
-  await wait(() => document.querySelectorAll("article").length === 6, "all categories restores bundled cards");
-  const search = document.querySelector<HTMLInputElement>("#plugin-library-search")!;
-  const setSearch = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
-  setSearch.call(search, "科研"); search.dispatchEvent(new Event("input", { bubbles: true }));
-  await wait(() => document.querySelectorAll("article").length === 1,
-    "translated group name is searchable");
-  check(document.querySelector<HTMLElement>("[data-plugin-group]")?.dataset.pluginGroup === "research",
-    "search retains the matching group heading");
-  setSearch.call(search, ""); search.dispatchEvent(new Event("input", { bubbles: true }));
-  await wait(() => document.querySelectorAll("article").length === 6, "clearing search restores bundled cards");
-  await click("已安装");
-  await wait(() => document.body.textContent!.includes("这些技能随能力包的全局启用状态生效"),
+  check(!document.querySelector('#plugin-library-search, #plugin-library-category'), "the catalog has no search or category filter controls");
+  check(!button("打开技能") && !button("从文件或 Git 安装"), "the catalog has no Skills or import toolbar");
+  await closeInstaller(); await expandManagement();
+  await wait(() => document.body.textContent!.includes("这些技能随插件的全局启用状态生效"),
     "installed package Skills show global availability");
   check(!button("为当前助理启用") && !button("为当前助理停用"),
     "installed package Skills do not expose per-agent enable controls");
@@ -645,7 +909,7 @@ scope.runPluginsPageFixture = async () => {
   await click("卸载能力包"); await click("确认卸载并保留数据");
   await wait(() => !!button("继续卸载"), "deferred uninstall offers retry");
   const firstUninstall = writes.filter(item => item.route.endsWith("/uninstall"))[0].body.operationId;
-  await click("继续卸载"); await wait(() => document.body.textContent!.includes("尚未安装能力包"), "uninstall completion rendered");
+  await click("继续卸载"); await wait(() => !document.querySelector(`[data-installation-id="${installationId}"]`), "uninstall completion updates the main plugin row");
   const attempts = writes.filter(item => item.route.endsWith("/uninstall"));
   check(attempts.length === 2 && attempts.every(item => item.body.operationId === firstUninstall), "retry reuses exact durable operation ID");
   check(!sessionStorage.getItem("shoggoth.plugin.pending-management.v1"), "settled operation clears recovery token");
@@ -655,7 +919,7 @@ scope.runPluginsPageFixture = async () => {
     uninstallRetrySameOperation: true, mockedWrites: writes.length };
 };
 scope.runPluginOAuthFixture = async () => {
-  seed(); scope.remountPlugins();
+  seed(); await remountForManagement();
   await wait(() => !!button("连接账号"), "OAuth control mounted");
   oauthMode = "unconfigured";
   await click("连接账号");
@@ -679,7 +943,7 @@ scope.runPluginOAuthFixture = async () => {
 
   await click("重新连接账号");
   await wait(() => !!sessionStorage.getItem(oauthKey(a)), "restart flow pending");
-  oauthFlows.clear(); scope.remountPlugins();
+  oauthFlows.clear(); await remountForManagement();
   await wait(() => !!button("重新连接账号") && !button("重新连接账号")!.disabled
     && !sessionStorage.getItem(oauthKey(a)), "Service restart clears missing flow and permits reconnect");
   check(document.body.textContent!.includes("暂时无法读取或完成连接"), "missing restarted flow is explained");
@@ -690,7 +954,8 @@ scope.runPluginOAuthFixture = async () => {
 };
 scope.runPluginBearerFixture = async () => {
   seed(); showGitHub = true; catalogRevision++;
-  scope.remountPlugins(); await selectHost("Shoggoth");
+  await remountForManagement(); await selectHost("Shoggoth");
+  await closeInstaller(); await expandManagement(githubInstallationId);
   await wait(() => !!button("连接 GitHub 账号"), "bundled GitHub account control appears");
   await click("连接 GitHub 账号");
   const field = document.querySelector<HTMLInputElement>(`#plugin-bearer-${githubComponentId}`)!;
@@ -747,8 +1012,8 @@ scope.runPluginBearerFixture = async () => {
 };
 scope.runPluginExternalActivityFixture = async () => {
   seed(); externalApprovalPending = true; externalApprovalTestRow = true;
-  scope.remountPlugins(); await selectHost("Shoggoth");
-  await click("已安装");
+  await remountForManagement(); await selectHost("Shoggoth");
+  await closeInstaller(); await expandManagement();
   await wait(() => document.body.innerText.includes("search_issues")
     && document.body.innerText.includes("create_issue"), "actual external calls are rendered");
   const panel = document.querySelector<HTMLElement>('[aria-labelledby="plugins-external-calls-heading"]')!;
@@ -801,7 +1066,7 @@ scope.runPluginExternalActivityFixture = async () => {
     && !Object.hasOwn(approvalWrite[0].body, "command"),
   "renderer only sends request identity and decision, never replacement arguments");
   externalApprovalPending = true; externalApprovalDecisionFails = true;
-  scope.remountPlugins(); await selectHost("Shoggoth"); await click("已安装");
+  await remountForManagement(); await selectHost("Shoggoth"); await closeInstaller(); await expandManagement();
   await wait(() => document.body.innerText.includes("write_issue")
     && !!document.querySelector<HTMLElement>("#plugins-external-approvals pre"),
   "failed decision fixture restores pending approval");
@@ -821,8 +1086,8 @@ scope.runPluginExternalActivityFixture = async () => {
     refreshedAfterDecision: true, refreshedAfterFailure: true };
 };
 scope.preparePluginExternalApprovalCapture = async () => {
-  seed(); externalApprovalPending = true; scope.remountPlugins(); await selectHost("Shoggoth");
-  await click("已安装");
+  seed(); externalApprovalPending = true; await remountForManagement(); await selectHost("Shoggoth");
+  await closeInstaller(); await expandManagement();
   await wait(() => !!document.querySelector<HTMLElement>('[aria-labelledby="plugins-external-approvals-heading"] pre'),
     "pending external approval card renders");
   document.querySelector<HTMLElement>('[aria-labelledby="plugins-external-approvals-heading"]')!
@@ -841,10 +1106,15 @@ scope.preparePluginExternalApprovalCapture = async () => {
 scope.runPluginDependencyFixture = async () => {
   seed(); dependencySupported = true;
   dependencyState = { ...dependencyState, status: "missing", revision: 0, version: null, operationId: null };
-  scope.remountPlugins();
+  await remountForManagement();
   await wait(() => !!button("准备解释器"), "dependency control shown");
-  check(button("准备解释器")!.disabled, "enabled package cannot prepare interpreter");
-  await click("停用能力包"); await wait(() => !button("准备解释器")!.disabled, "disabled package can prepare interpreter");
+  check(!button("准备解释器")!.disabled, "enabled package can pin its first interpreter");
+  await click("准备解释器");
+  await wait(() => document.body.textContent!.includes("node 22.22.3") && !!button("撤销解释器登记"), "first pin applied while enabled");
+  check(button("准备解释器")!.disabled && button("撤销解释器登记")!.disabled, "a pinned interpreter changes only after disabling");
+  await click("停用能力包"); await wait(() => !!button("撤销解释器登记") && !button("撤销解释器登记")!.disabled, "disabled package can revoke its pin");
+  await click("撤销解释器登记");
+  await wait(() => !button("撤销解释器登记") && !button("准备解释器")!.disabled, "disabled package can prepare interpreter");
   dependencyLostResponse = true;
   const before = writes.filter(item => item.route.endsWith("dependency-change")).length;
   await click("准备解释器");
@@ -861,10 +1131,10 @@ scope.runPluginDependencyFixture = async () => {
   await wait(() => !!button("准备解释器") && !button("准备解释器")!.disabled,
     "late dependency response cannot leave new revision permanently busy");
   dependencySupported = false;
-  return { disabledFirst: true, prepareLostResponseReconciled: true, noProbeReplay: true, revocation: true, revisionRace: true };
+  return { firstPinWhileEnabled: true, repinRequiresDisable: true, prepareLostResponseReconciled: true, noProbeReplay: true, revocation: true, revisionRace: true };
 };
 scope.runPluginDisconnectFixture = async () => {
-  seed(true); scope.remountPlugins();
+  seed(true); await remountForManagement();
   await wait(() => !!button("断开账号"), "disconnect control mounted");
   await click("断开账号"); check(agentState[a].connected, "native cancel preserves connection");
   disconnectMode = "lost";
@@ -872,21 +1142,21 @@ scope.runPluginDisconnectFixture = async () => {
   await wait(() => document.body.textContent!.includes("账号已断开，工具授权已撤销"), "lost disconnect response recovered by operation ID");
   check(!agentState[a].connected && agentState[b].connected, "disconnect affects selected connection only");
   check(Object.values(agentState[a].grants).every(grant => grant.effect === "deny"), "disconnect grants revoked");
-  seed(true); scope.remountPlugins(); disconnectMode = "pending";
+  seed(true); await remountForManagement(); disconnectMode = "pending";
   await wait(() => !!button("断开账号"), "pending cleanup fixture ready"); await click("断开账号");
   await wait(() => !!button("重试旧连接清理"), "pending cleanup visible");
   const pendingOperation = writes.filter(item => item.route.endsWith("/disconnect")).at(-1)!.body.operationId;
   disconnectMode = "complete"; await click("重试旧连接清理");
   await wait(() => document.body.textContent!.includes("账号已断开，工具授权已撤销"), "cleanup retry settled");
   check(writes.filter(item => item.route.endsWith("/disconnect")).at(-1)!.body.operationId === pendingOperation, "cleanup retry preserves operation ID");
-  seed(true); scope.remountPlugins(); disconnectMode = "complete"; delayedDisconnect = { resolve: null };
+  seed(true); await remountForManagement(); disconnectMode = "complete"; delayedDisconnect = { resolve: null };
   await wait(() => !!button("断开账号"), "late response fixture ready"); await click("断开账号");
   await wait(() => !!delayedDisconnect?.resolve, "disconnect response held");
   const release = delayedDisconnect!.resolve!; delayedDisconnect = null; release();
   await wait(() => document.body.textContent!.includes("账号已断开，工具授权已撤销"), "late disconnect reconciles retained operation");
   const oldRequest = writes.filter(item => item.route.endsWith("/disconnect")).at(-1)!.body;
   sessionStorage.setItem(`shoggoth.plugin.disconnect.${a}.${target(a).bindingId}`, JSON.stringify(oldRequest));
-  agentState[a].connected = true; agentState[a].bindingRevision = 3; scope.remountPlugins();
+  agentState[a].connected = true; agentState[a].bindingRevision = 3; await remountForManagement();
   await wait(() => !!button("断开账号") && !button("断开账号")!.disabled
     && !sessionStorage.getItem(`shoggoth.plugin.disconnect.${a}.${target(a).bindingId}`), "old receipt removed after a new account binding");
   check(!document.body.textContent!.includes("账号已断开，工具授权已撤销"), "historical receipt cannot mislabel newly connected account");
@@ -894,21 +1164,85 @@ scope.runPluginDisconnectFixture = async () => {
   sessionStorage.setItem(`shoggoth.plugin.disconnect.${a}.${target(a).bindingId}`, JSON.stringify(request));
   disconnectOperations.set(request.operationId, { operationId: request.operationId, found: true, phase: "outcome_unknown", receipt: null, reasonCode: "PLUGIN_RESTORE_RECONCILIATION_REQUIRED" });
   const before = writes.filter(item => item.route.endsWith("/disconnect")).length;
-  scope.remountPlugins();
+  await remountForManagement();
   await wait(() => document.body.textContent!.includes("恢复前的断开结果待核对"), "restored unknown operation explained");
   check(button("断开账号")!.disabled && writes.filter(item => item.route.endsWith("/disconnect")).length === before, "unknown disconnect is not replayed");
   return { cancelPreservesConnection: true, responseLossRecovered: true, revokeGrants: true, cleanupSameOperation: true,
     delayedResponseReconciled: true, historicalReceiptCannotMislabelNewAccount: true, restoreReplayBlocked: true };
 };
 scope.runPluginDefaultFixture = async () => {
-  seed(); scope.remountPlugins();
-  await wait(() => !!button("选择本地能力包"), "default plugin management ready");
+  seed(); await remountForManagement();
+  await wait(() => !!button("停用能力包"), "default plugin management ready");
+  check(!button("从文件或 Git 安装"), "the import entry is absent from plugin management");
+  check(!button("选择本地能力包"), "installation sources stay out of the main list");
   check(!button("启用并重新启动") && !button("切回原有环境"), "plugins need no environment switch");
   check(!writes.some(item => item.route.endsWith("/environment")), "no selector requests");
   return { defaultEnabled: true, noEnvironmentSwitch: true };
 };
+const quickPanel = () => document.querySelector<HTMLElement>('section[aria-label="快速设置"]');
+const quickText = () => quickPanel()?.textContent || "";
+const quickField = () => document.querySelector<HTMLInputElement>(`#plugin-secret-${installationId}-PROJECT_TOKEN`);
+const quickValue = "fixture-project-token-0123456789";
+const secretWrites = () => writes.filter(item => item.route === "/__api/plugins/secrets");
+const submitSecret = (value: string) => {
+  const field = quickField()!;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value);
+  field.form!.requestSubmit();
+};
+scope.runPluginQuickSetupFixture = async () => {
+  seed(); await remountForManagement();
+  await click("停用能力包"); await wait(() => !!button("启用能力包"), "installed package starts disabled");
+  await wait(() => quickText().includes("PROJECT_TOKEN · 未配置"), "quick setup lists the declared credential");
+  check(quickText().includes("发往 https://issues.example.invalid 的请求头 Authorization"), "credential destination is explicit");
+  check(quickText().includes("需填写凭据") && quickText().includes("待启用"), "component states rendered");
+  const field = quickField()!;
+  check(field.type === "password" && field.autocomplete === "off" && !field.spellcheck, "credential field is a password input");
+  submitSecret("short");
+  await wait(() => quickText().includes("凭据至少 8 个字符。"), "short value rejected in the page");
+  check(secretWrites().length === 0 && quickField()!.value === "", "short value is cleared and never sent");
+  quickCancelNext = true; submitSecret(quickValue);
+  await wait(() => quickCancels === 1 && !quickField()!.disabled, "canceled native confirmation settled");
+  check(!quickSecret && quickText().includes("PROJECT_TOKEN · 未配置") && quickField()!.value === "",
+    "canceled confirmation stores nothing and keeps no value");
+  quickRejectNext = true; submitSecret("fixture-refused-token-0000");
+  await wait(() => quickText().includes("remote-account-issues-and-project-review 拒绝了当前凭据（401/403），请更新后再试。"),
+    "a refused credential is explained");
+  submitSecret(quickValue);
+  await wait(() => quickText().includes("PROJECT_TOKEN 已保存。") && quickText().includes("PROJECT_TOKEN · 已配置"),
+    "saved credential reported");
+  const sent = secretWrites().at(-1)!.body;
+  check(Object.keys(sent).sort().join() === "agentId,installationId,name,value" && sent.value === quickValue,
+    "value goes only to the Service credential route");
+  check(!document.documentElement.innerHTML.includes(quickValue)
+    && [...document.querySelectorAll("input")].every(input => input.value !== quickValue)
+    && !JSON.stringify({ ...sessionStorage, ...localStorage }).includes(quickValue), "credential value is not retained by the page");
+  check(quickText().includes("待启用") && !quickText().includes("需填写凭据"), "credential unlocks activation");
+  quickCancelNext = true; await click("一键启用");
+  await wait(() => quickCancels === 2 && !!button("一键启用") && !button("一键启用")!.disabled, "canceled quick enable settled");
+  check(!enabled && !quickStdioReady, "canceled quick enable changes nothing");
+  await click("一键启用");
+  await wait(() => quickText().includes("已启用：所有助理从下一条消息起可使用这些工具。")
+    && quickText().includes("已授权 3/3 个工具") && quickText().includes("已授权 2/2 个工具") && !button("一键启用"),
+  "one confirmation enables, connects and authorizes");
+  check(enabled && !!button("停用能力包"), "quick enable also enabled the package");
+  await wait(() => !!button("查看工具授权") && !document.body.textContent!.includes("尚未连接公共账号"),
+    "connection sections reread after quick enable");
+  await pause(300); // the catalog refresh lands and changes the installation revision
+  check(quickText().includes("已启用：所有助理从下一条消息起可使用这些工具。"), "result message survives the revision reload");
+  quickPanel()!.scrollIntoView({ block: "start" }); await pause(80);
+  return { passwordField: true, shortValueLocal: true, cancelStoresNothing: true, valueNotRetained: true,
+    oneConfirmation: true, resultSurvivesRevision: true };
+};
+scope.finishPluginQuickSetupFixture = async () => {
+  await click("清除");
+  await wait(() => quickText().includes("PROJECT_TOKEN 已清除。") && quickText().includes("PROJECT_TOKEN · 未配置")
+    && quickText().includes("需填写凭据"), "cleared credential reported");
+  check(secretWrites().at(-1)!.body.value === null, "clear sends no value");
+  check(scope.fixtureErrors.length === 0, `no page errors: ${scope.fixtureErrors}`);
+  return { cleared: true };
+};
 scope.preparePluginHostKeyboard = async () => {
-  await selectHost("Shoggoth"); hostTab("Shoggoth")!.focus();
+  await closeInstaller(); await selectHost("Shoggoth"); hostTab("Shoggoth")!.focus();
   return { focused: document.activeElement === hostTab("Shoggoth") };
 };
 scope.checkPluginHostKeyboard = async () => {
@@ -925,12 +1259,11 @@ scope.checkPluginHostFocus = () => {
 };
 scope.runPluginHostTabsFixture = async () => {
   const before = writes.length;
-  await selectHost("Shoggoth");
+  await closeInstaller(); await selectHost("Shoggoth");
   check(!document.querySelector("#external-plugins-heading"), "native tab shows no external inventory");
-  await click("从固定 Git 提交添加"); fillGitFields(); await pause();
-  const gitUrl = (document.getElementById("plugin-git-url") as HTMLInputElement).value;
   const native = document.querySelector<HTMLElement>('[data-plugin-host="shoggoth"]')!;
-  await selectHost("Hermes");
+  const list = native.querySelector('[class*="bundledLibrary"]');
+  await closeInstaller(); await selectHost("Hermes");
   await wait(() => document.body.innerText.includes("已读取 50 个插件"), "Hermes first page rendered");
   check(native.hidden && !document.body.innerText.includes("选择本地能力包"), "native controls are hidden on an external host");
   check(!document.body.innerText.includes("OpenClaw browser"), "host inventories remain separate");
@@ -942,9 +1275,10 @@ scope.runPluginHostTabsFixture = async () => {
   check([...panel.querySelectorAll("li strong")].filter(item => item.textContent === "xai · 1.0.0").length === 2, "same-name plugins retain separate rows");
   check(panel.innerText.split("内置").length - 1 === 59, "bundled plugins labeled");
   await selectHost("Shoggoth");
-  check(!native.hidden && (document.getElementById("plugin-git-url") as HTMLInputElement).value === gitUrl,
-    "switching back preserves the native install form");
-  await selectHost("Hermes"); scope.remountPlugins(); await pause(80);
+  check(!native.hidden && list === native.querySelector('[class*="bundledLibrary"]') && list?.isConnected,
+    "switching back preserves the native plugin catalog");
+  check(!installDialog(), "switching hosts does not open an installation dialog");
+  await closeInstaller(); await selectHost("Hermes"); await remountForManagement(); await pause(80);
   check(hostTab("Hermes")!.getAttribute("aria-selected") === "true", "host selection persists across page remounts");
   await selectHost("OpenClaw");
   await wait(() => document.body.innerText.includes("OpenClaw browser"), "OpenClaw inventory rendered");
@@ -965,58 +1299,12 @@ scope.runPluginHostTabsFixture = async () => {
   const readOnlyPosts = new Set(["/__api/plugins/dependency-status", "/__api/plugins/oauth-status",
     "/__api/plugins/rollback-list", "/__api/plugins/rollback-operation", "/__api/plugins/disconnect-operation"]);
   check(writes.slice(before).every(item => readOnlyPosts.has(item.route)), "tab switching and catalog reads cause no plugin mutations");
-  return { separateHosts: true, nativeDraftPreserved: true, stickySelection: true, pagination: 60,
+  return { separateHosts: true, nativeCatalogPreserved: true, stickySelection: true, pagination: 60,
     namesakesPreserved: true, bundledLabels: 59, unknownEnablement: true, lateResponseFenced: true,
     failureNotEmpty: true, retry: true, emptyState: true, readOnly: true };
 };
-function fillGitFields() {
-  for (const [id, value] of [["plugin-git-url", gitInput.repositoryUrl], ["plugin-git-commit", gitInput.commit], ["plugin-git-subdir", gitInput.subdir]]) {
-    const input = document.getElementById(id) as HTMLInputElement;
-    check(input && input.labels?.length === 1, "Git source fields have accessible labels");
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-}
-scope.preparePluginGitKeyboard = async () => {
-  seed(); dependencySupported = false; scope.remountPlugins();
-  await pause(80);
-  await wait(() => !!button("从固定 Git 提交添加"), "Git source entry ready");
-  check(!document.getElementById("plugin-git-url"), "Git form starts collapsed");
-  button("从固定 Git 提交添加")!.focus();
-  return { focused: document.activeElement === button("从固定 Git 提交添加") };
-};
-scope.preparePluginGitSubmit = async () => {
-  await wait(() => !!document.getElementById("plugin-git-url"), "keyboard opens Git form");
-  check(button("从固定 Git 提交添加")!.getAttribute("aria-expanded") === "true", "Git expanded state accessible");
-  fillGitFields(); await pause();
-  const sha = document.getElementById("plugin-git-commit") as HTMLInputElement;
-  const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
-  setValue.call(sha, "main"); sha.dispatchEvent(new Event("input", { bubbles: true })); await pause();
-  check(!sha.checkValidity(), "Git ref name cannot replace full commit SHA");
-  setValue.call(sha, gitInput.commit); sha.dispatchEvent(new Event("input", { bubbles: true })); await pause();
-  check(sha.checkValidity(), "full Git commit is valid");
-  document.getElementById("plugin-git-subdir")!.focus();
-};
-scope.checkPluginGitTab = async () => {
-  await wait(() => document.activeElement === button("获取并预览"),
-    "Git Tab order reaches preview from subdir");
-  if (document.hasFocus()) check(document.activeElement!.matches(":focus-visible"),
-    "Git keyboard focus visibly styled");
-};
-scope.finishPluginGitFixture = async () => {
-  await wait(() => !!button("安装并保持停用") && !button("安装并保持停用")!.disabled, "Git preview rendered after keyboard submit");
-  check(document.body.textContent!.includes(gitPreview.name), "Git preview shows package contents");
-  check(writes.filter(item => item.route.endsWith("git-preview")).length === 1, "Git preview sent once");
-  check(!writes.some(item => item.route.endsWith("/install")), "Git preview does not install or enable");
-  await click("安装并保持停用");
-  await wait(() => writes.some(item => item.route.endsWith("/install")), "Git install receipt settled");
-  check([...operations.values()].some(item => item.kind === "install" && item.result.desiredState === "disabled"), "Git package installs disabled");
-  check(scope.fixtureErrors.length === 0, `no Git page errors: ${scope.fixtureErrors}`);
-  return { collapsedByDefault: true, keyboardOpenAndSubmit: true, accessibleLabels: true,
-    fullCommitRequired: true, previewWithoutInstallation: true, opaqueSelectionInstall: true, installedDisabled: true };
-};
 scope.runPluginRollbackFixture = async () => {
-  seed(); scope.remountPlugins(); await pause(80);
+  seed(); await remountForManagement(); await pause(80);
   await click("数据快照与版本回退");
   await wait(() => !!button("保存数据快照"), "rollback panel ready");
   check(button("保存数据快照")!.disabled, "enabled package cannot snapshot through UI");
@@ -1033,10 +1321,10 @@ scope.runPluginRollbackFixture = async () => {
     "lost data restore response reconciled through receipt");
   check(writes.filter(item => item.route.endsWith("rollback-change")).length === before + 1, "data restore never automatically replays");
   rollbackPending = [{ operationId: "restored-unknown", action: "restore", phase: "outcome_unknown", state: null }];
-  scope.remountPlugins(); await pause(80); await click("数据快照与版本回退");
+  await remountForManagement(); await pause(80); await click("数据快照与版本回退");
   await wait(() => document.body.textContent!.includes("恢复前的操作结果未知"), "unknown operation remains visible after remount");
   check(!button("继续同一维护操作"), "outcome unknown cannot be replayed from UI");
-  seed(); enabled = false; rollbackHasSnapshot = false; scope.remountPlugins(); await pause(80);
+  seed(); enabled = false; rollbackHasSnapshot = false; await remountForManagement(); await pause(80);
   await click("数据快照与版本回退");
   await wait(() => document.body.textContent!.includes("这个旧版本没有可用的数据快照"), "missing target snapshot is explained");
   check(button("回退代码并保持停用")!.disabled, "code rollback cannot strand an installation without a matching data snapshot");
@@ -1045,16 +1333,16 @@ scope.runPluginRollbackFixture = async () => {
 };
 scope.preparePluginCapture = async (theme: string) => {
   await selectHost("Shoggoth");
-  await click("已安装");
+  await closeInstaller(); await expandManagement();
   dependencySupported = true;
   dependencyState = { ...dependencyState, status: "ready", revision: 2, version: "22.22.3", operationId: "capture-prepare" };
-  seed(true); document.documentElement.dataset.theme = theme; scope.remountPlugins();
+  seed(true); document.documentElement.dataset.theme = theme; await remountForManagement();
   await wait(() => !!button("查看工具授权"), "capture page ready");
   await click("查看工具授权"); await wait(() => toolsVisible(a), "capture tools ready"); await pause(80);
   await click("连接账号"); await wait(() => !!button("取消连接"), "capture OAuth pending controls ready");
   await wait(() => document.body.textContent!.includes("node 22.22.3"), "capture pinned interpreter ready");
   check(!document.getElementById("plugin-environment-heading"), "no environment switch in default installation");
-  await click("从固定 Git 提交添加"); fillGitFields(); await pause();
+  check(!document.getElementById("plugin-git-url"), "Git form is absent from the main list");
   await click("数据快照与版本回退"); await wait(() => !!button("保存数据快照"), "capture rollback controls ready");
   const content = document.querySelector<HTMLElement>("main.content")!; content.scrollTop = 0;
   const overflowing = [...document.querySelectorAll<HTMLElement>("main,section,li,select,button,input,form")].filter(element => {
@@ -1064,35 +1352,36 @@ scope.preparePluginCapture = async (theme: string) => {
     `horizontal overflow at ${innerWidth}px`);
   check(overflowing.length === 0, `controls overflow at ${innerWidth}px: ${overflowing.map(item => item.textContent?.slice(0,60))}`);
   check(getComputedStyle(button("每次调用确认")!).visibility !== "hidden", "grant buttons rendered");
-  const scrollable = content.scrollHeight > content.clientHeight;
-  content.scrollTop = content.scrollHeight;
-  check(!scrollable || content.scrollTop > 0, "page can scroll to trailing tool controls");
-  content.scrollTop = 0;
+  const scroll = dialogBody()!;
+  const scrollable = scroll.scrollHeight > scroll.clientHeight;
+  scroll.scrollTop = scroll.scrollHeight;
+  check(!scrollable || scroll.scrollTop > 0, "plugin details can scroll to trailing tool controls");
+  scroll.scrollTop = 0;
   return { width: innerWidth, theme, horizontalOverflow: false, controlsInBounds: true,
     oauthPending: true, dependencyPinned: true, disconnectControl: true, defaultPluginManagement: true,
-    gitForm: true, rollbackPanel: true, scrollable, background: getComputedStyle(document.body).backgroundColor };
+    installationUiInDialog: true, rollbackPanel: true, scrollable, background: getComputedStyle(document.body).backgroundColor };
 };
 scope.prepareBundledCapture = async (theme: string) => {
   await selectHost("Shoggoth");
   document.documentElement.dataset.theme = theme;
-  await click("可安装");
+  await openLibrary();
   await wait(() => document.querySelectorAll("article").length === 6, "bundled cards rendered");
   const installCount = writes.filter(item => item.route === "/__api/plugins/install").length;
   await openDetail("Fixture Update");
-  await wait(() => document.querySelector<HTMLDialogElement>("dialog[open]")?.textContent?.includes("newer version"),
+  await wait(() => installDialog()?.textContent?.includes("newer version"),
     "installed bundle details loaded");
-  const previewButton = [...document.querySelectorAll<HTMLButtonElement>("dialog[open] button")]
+  const previewButton = [...installDialog()!.querySelectorAll<HTMLButtonElement>("button")]
     .find(item => item.textContent === "检查版本");
   check(previewButton && !previewButton.disabled, "detail action opens the existing version preview");
   previewButton!.click();
   await wait(() => document.body.textContent!.includes("App 所带版本与当前安装不同"),
     "different bundled version is explicit before updating");
   await wait(() => document.activeElement?.className.includes("previewPanel"),
-    "installation preview receives focus after leaving the modal");
+    "installation preview receives focus inside the same modal");
   check(button("安装更新")?.disabled === true, "enabled package must drain before updating");
   check(writes.filter(item => item.route === "/__api/plugins/install").length === installCount,
     "version check never silently installs the bundled update");
-  await click("可安装");
+  await openLibrary();
   await wait(() => document.querySelectorAll("article").length === 6, "bundled cards restored");
   const content = document.querySelector<HTMLElement>("main.content")!;
   content.scrollTop = 0;
@@ -1101,7 +1390,8 @@ scope.prepareBundledCapture = async (theme: string) => {
       return rect.width > 0 && (rect.left < -1 || rect.right > innerWidth + 1); });
   check(content.scrollWidth <= content.clientWidth + 1 && overflowing.length === 0,
     `bundled library overflows at ${innerWidth}px`);
-  check(button("查看并安装")?.disabled === false && button("适配中")?.disabled === true,
+  check(document.querySelector<HTMLButtonElement>('[aria-label="安装 Fixture Skill"]')?.disabled === false
+    && document.querySelector<HTMLButtonElement>('[aria-label="适配中"]')?.disabled === true,
     "ready and pending bundle actions remain distinct");
   return { width: innerWidth, theme, view: "bundled", cards: 6,
     updateRequiresDisable: true, horizontalOverflow: false };
@@ -1109,88 +1399,51 @@ scope.prepareBundledCapture = async (theme: string) => {
 scope.prepareBundledDetailCapture = async () => {
   const before = writes.length;
   await openDetail("Fixture Skill");
-  await wait(() => document.querySelector<HTMLDialogElement>("dialog[open]")?.textContent?.includes("A detailed bundled plugin description"),
+  await wait(() => installDialog()?.textContent?.includes("A detailed bundled plugin description"),
     "bundled details load on demand");
-  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  const dialog = installDialog()!;
   check(dialog.textContent!.includes("fixture-design") && dialog.textContent!.includes("Fixture Studio")
     && dialog.textContent!.includes("Summarize a design"), "details show source Skills, developer and example uses");
+  check(dialog.textContent!.includes("许可标识来自插件来源声明"),
+    "manifest license is not presented as redistribution approval");
   check(dialog.textContent!.includes("来源包参考文档缺失")
     && dialog.textContent!.includes("skills/mixpanelyst/references/analytical-frameworks.md")
     && dialog.textContent!.includes("skills/mixpanelyst/references/python-api.md"),
   "missing source references are disclosed in the plugin detail before installation");
   check(reads.some(item => item.startsWith("/__api/plugins/bundled/fixture-skill?")), "detail fetched on card click");
-  check(writes.length === before, "opening details does not install or authorize anything");
-  check(document.activeElement === dialog.querySelector('[aria-label="关闭插件详情"]'), "modal focus moves to close control");
+  // A previously opened OAuth panel can still poll its status while the
+  // unrelated bundled detail loads. Those read-only POST routes are not a
+  // detail-triggered install or authorization mutation.
+  const readOnlyStatus = new Set(["/__api/plugins/oauth-status",
+    "/__api/plugins/dependency-status", "/__api/plugins/rollback-list"]);
+  check(writes.slice(before).every(item => readOnlyStatus.has(item.route)),
+    "opening details does not install or authorize anything");
+  check(dialog.contains(document.activeElement), "detail receives focus inside its own dialog");
+  check(dialog.querySelector<HTMLButtonElement>('header [class*="headerActions"] button')?.textContent === "+ 安装插件", "detail has a visible installation action at the top");
   const rect = dialog.getBoundingClientRect();
   check(rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
     "detail dialog fits viewport");
-  const scroll = dialog.querySelector<HTMLElement>('[class*="scroll"]');
-  check(!scroll || scroll.scrollWidth <= scroll.clientWidth + 1, "detail content has no horizontal overflow");
+  const scroll = dialogBody();
+  check(!scroll || scroll.scrollWidth <= scroll.clientWidth + 1,
+    `detail content has no horizontal overflow: ${JSON.stringify({ client: scroll?.clientWidth,
+      scroll: scroll?.scrollWidth, overflowing: [...(scroll?.querySelectorAll<HTMLElement>("*") || [])]
+        .filter(item => item.getBoundingClientRect().right > scroll!.getBoundingClientRect().left + scroll!.clientWidth + 1
+          || item.scrollWidth > item.clientWidth + 1)
+        .slice(0, 8).map(item => ({ tag: item.tagName, className: item.className,
+          width: item.clientWidth, scroll: item.scrollWidth, right: item.getBoundingClientRect().right })) })}`);
   return { width: innerWidth, detail: "skill", readOnly: true, horizontalOverflow: false };
 };
-scope.prepareGoogleBundledDetailCapture = async () => {
-  googlePreviewInstallCount = writes.filter(item => item.route === "/__api/plugins/install").length;
-  await selectHost("Shoggoth");
-  await click("可安装");
-  await openDetail("Gmail");
-  await wait(() => document.querySelector<HTMLDialogElement>("dialog[open]")?.textContent
-    ?.includes("Google MCP 需单独授权"), "Google Desktop OAuth warning loaded before installation");
-  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
-  check(dialog.textContent!.includes("不沿用来源包的占位客户端、密钥、12798 回调或整组权限"),
-    "detail explicitly discloses non-equivalent frozen authentication");
-  check(dialog.textContent!.includes("安装本身不会连接账号"),
-    "detail distinguishes installation from account connection");
-  const rect = dialog.getBoundingClientRect();
-  const scroll = dialog.querySelector<HTMLElement>('[class*="scroll"]')!;
-  check(rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
-    "Google detail fits viewport");
-  check(scroll.scrollWidth <= scroll.clientWidth + 1, "Google detail has no horizontal overflow");
-  return { width: innerWidth, detail: "google", warning: true,
-    left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
-    scrollWidth: scroll.scrollWidth, clientWidth: scroll.clientWidth };
-};
-scope.prepareGoogleBundledPreviewCapture = async () => {
-  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
-  const preview = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
-    .find(item => item.textContent === "查看安装预览");
-  check(preview && !preview.disabled, "Google install preview remains available");
-  preview!.click();
-  await wait(() => !document.querySelector("dialog[open]")
-    && document.querySelector('[class*="previewPanel"]')?.textContent
-      ?.includes("此组件仅转换固定的 Google MCP 端点"),
-    "Google non-equivalent authentication warning appears in installation preview");
-  const panel = document.querySelector<HTMLElement>('[class*="previewPanel"]')!;
-  panel.scrollIntoView({ block: "center" });
-  const content = document.querySelector<HTMLElement>("main.content")!;
-  check(content.scrollWidth <= content.clientWidth + 1,
-    "Google install preview has no horizontal overflow");
-  check(writes.filter(item => item.route === "/__api/plugins/install").length === googlePreviewInstallCount,
-    "Google detail and preview never install or authorize by themselves");
-  const rect = panel.getBoundingClientRect();
-  return { width: innerWidth, preview: "google", warning: true,
-    left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
-    scrollWidth: content.scrollWidth, clientWidth: content.clientWidth };
-};
-scope.closeGoogleBundledPreview = async () => {
-  const panel = document.querySelector<HTMLElement>('[class*="previewPanel"]')!;
-  const cancel = [...panel.querySelectorAll<HTMLButtonElement>("button")]
-    .find(item => item.textContent === "取消");
-  check(cancel, "Google preview has a cancel action");
-  cancel!.click();
-  await wait(() => !document.querySelector('[class*="previewPanel"]'),
-    "Google preview closes without installation");
-};
 scope.checkBundledDetailClosed = async () => {
-  await wait(() => !document.querySelector("dialog[open]"), "Escape closes bundled details");
-  check(document.activeElement === detailButton("Fixture Skill"), "detail close restores card focus");
+  await wait(() => !installDialog(), "Escape closes the installation dialog");
+  check(document.activeElement === detailButton("Fixture Skill"), "Escape restores focus to the plugin row");
   return true;
 };
 scope.expandBundledSkills = async () => {
   await click("查看全部 12 个技能");
-  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  const dialog = installDialog()!;
   check(dialog.querySelectorAll('[class*="componentList"] li').length === 12,
     "all Skills expand in the detail dialog");
-  const scroll = dialog.querySelector<HTMLElement>('[class*="scroll"]')!;
+  const scroll = dialogBody()!;
   scroll.scrollTop = scroll.scrollHeight;
   check(scroll.scrollTop > 0, "long Skill details scroll inside the dialog");
   const rect = dialog.getBoundingClientRect();
@@ -1199,10 +1452,11 @@ scope.expandBundledSkills = async () => {
   return { detail: "expanded-skills", count: 12, internalScroll: true, horizontalOverflow: false };
 };
 scope.expandBundledGap = async () => {
+  await openLibrary();
   await openDetail("Fixture Connector");
-  await wait(() => document.querySelector<HTMLDialogElement>("dialog[open]")?.textContent?.includes("fixture-api"),
+  await wait(() => installDialog()?.textContent?.includes("fixture-api"),
     "unconverted MCP is visible in details");
-  const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
+  const dialog = installDialog()!;
   check(dialog.textContent!.includes("包含尚未适配的配置字段")
     && dialog.textContent!.includes("fixture-app")
     && dialog.textContent!.includes("目前没有对应的账号连接设置")
@@ -1213,16 +1467,15 @@ scope.expandBundledGap = async () => {
   return { detail: "pending", horizontalOverflow: false };
 };
 scope.runBundledManageFixture = async () => {
-  seed(); scope.remountPlugins(); await selectHost("Shoggoth");
-  await click("可安装");
+  seed(); await remountForManagement(); await selectHost("Shoggoth");
+  await openLibrary();
   await openDetail("Fixture Update");
   await wait(() => !!button("管理已安装插件"), "installed package management entry appears in detail");
   const before = writes.length;
   const statusRoutes = new Set(["/__api/plugins/oauth-status", "/__api/plugins/dependency-status",
     "/__api/plugins/rollback-list", "/__api/plugins/disconnect-operation"]);
   await click("管理已安装插件");
-  await wait(() => button("已安装")?.getAttribute("aria-selected") === "true"
-    && !!document.querySelector<HTMLElement>('[data-targeted="true"]'), "detail opens selected installed package");
+  await wait(() => !!installDialog()?.querySelector<HTMLElement>('[data-targeted="true"]'), "detail opens selected installed package in the same popup");
   const target = document.querySelector<HTMLElement>('[data-targeted="true"]')!;
   check(target.textContent!.includes("Project Assistant") && document.activeElement === target,
     "matching installed package is visible and focused");
@@ -1243,11 +1496,50 @@ scope.runBundledManageFixture = async () => {
   return { detailManagement: true, exactInstallationTarget: true,
     paginatedDeepLink: true, hostSwitch: true, noImplicitWrite: true };
 };
+scope.runDeferredOAuthFixture = async () => {
+  seed();
+  deepLinkPagination = false;
+  const deferred = ["google-calendar", "google-drive", "shopify"];
+  scope.authoredCatalog = { supported: true, catalogRevision: "deferred-oauth", nextCursor: null,
+    items: [...deferred, "Fixture OAuth Control"].map((name, index) => ({
+      installationId: `fixture-oauth-${index}`, revision: 1, packageName: name,
+      declaredVersion: "1.0.0", sourceKind: index < deferred.length ? "bundled" : "directory",
+      desiredState: "enabled", diagnosticCount: 0,
+      components: [{ componentId: String(index + 1).repeat(64), kind: "mcp-server",
+        transport: "streamable-http", title: name, state: "connection_required" }],
+    })) };
+  await remountForManagement(); await selectHost("Shoggoth"); await closeInstaller(); await expandManagement();
+  const before = writes.length;
+  for (let index = 0; index < deferred.length; index++) {
+    await closeInstaller(); await expandManagement(`fixture-oauth-${index}`);
+    await wait(() => !!document.getElementById(`plugin-oauth-deferred-fixture-oauth-${index}`), "deferred OAuth notice renders in plugin details");
+    const reason = document.getElementById(`plugin-oauth-deferred-fixture-oauth-${index}`)!;
+    const item = reason.closest("li");
+    const connect = [...(item?.querySelectorAll("button") || [])].find(button => button.textContent?.includes("连接账号"));
+    check(Boolean(reason.textContent?.trim()) && connect?.disabled === true && connect.getAttribute("aria-describedby") === reason.id,
+      `${deferred[index]} connection is disabled and explains why`);
+    connect?.click();
+  }
+  await closeInstaller(); await expandManagement("fixture-oauth-3");
+  const controlConnect = button("连接账号");
+  check(controlConnect?.disabled === false && !controlConnect.hasAttribute("aria-describedby"), "unrelated OAuth connection remains available");
+  check(writes.length === before, "deferred OAuth buttons do not start a connection");
+  delete scope.authoredCatalog;
+  return { deferred: deferred.length, unrelatedAvailable: true, noImplicitWrite: true };
+};
 scope.closeBundledDetail = async () => {
-  document.querySelector<HTMLButtonElement>('[aria-label="关闭插件详情"]')!.click();
-  await wait(() => !document.querySelector("dialog[open]"), "detail closes");
+  await closeInstaller();
+  await wait(() => document.activeElement?.id.startsWith("plugin-card-"), "close restores focus to the plugin row");
+};
+scope.preparePluginRollbackCapture = async () => {
+  await closeInstaller(); await expandManagement();
+  await click("数据快照与版本回退");
+  await wait(() => !!document.querySelector("select[id^=rollback-code-]"), "rollback details reopened");
+  document.querySelector("select[id^=rollback-code-]")!.parentElement!.scrollIntoView({block:"start"});
+  await pause(80);
 };
 scope.preparePluginExternalCapture = async (theme: string, name: string) => {
+  await closeInstaller();
   document.documentElement.dataset.theme = theme;
   externalMode = "ready"; await selectHost(name);
   await wait(() => document.querySelector('[data-plugin-host]:not([hidden]) li'), "external capture inventory ready");

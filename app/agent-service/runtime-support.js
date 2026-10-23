@@ -3,8 +3,10 @@
 const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
 const { readRuntimeAuthenticationState } = require("./runtime-adapter");
 const { isRuntimeAvailable } = require("../runtime-availability");
+const { isRuntimeIncompatible } = require("./runtime-compatibility");
 
 const RUNTIME_SUPPORT_CODES = Object.freeze(["BINDING_DISABLED", "RUNTIME_NOT_INSTALLED",
+  "RUNTIME_INCOMPATIBLE",
   "RUNTIME_RELEASE_DISABLED", "ACCOUNT_NOT_AUTHENTICATED", "ACCOUNT_AUTH_UNKNOWN",
   "MODEL_ROUTE_UNSUPPORTED", "ATTACHMENT_UNSUPPORTED", "PERMISSION_ENFORCEMENT_UNPROVEN",
   "WORKSPACE_REQUIRED", "RUNTIME_FACTS_UNKNOWN"]);
@@ -14,6 +16,7 @@ const unsupported = code => Object.freeze({ supported: false, code });
 function supports({ binding, facts, requirements = {} }) {
   if (!binding?.enabled) return unsupported("BINDING_DISABLED");
   if (facts?.releaseEnabled === false) return unsupported("RUNTIME_RELEASE_DISABLED");
+  if (facts?.compatible === false) return unsupported("RUNTIME_INCOMPATIBLE");
   if (facts?.installed === false) return unsupported("RUNTIME_NOT_INSTALLED");
   if (facts?.installed !== true) return unsupported("RUNTIME_FACTS_UNKNOWN");
   if (facts.authenticated === false) return unsupported("ACCOUNT_NOT_AUTHENTICATED");
@@ -111,7 +114,8 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
       if (!pending.has(key)) {
         if (pending.size >= maxPending) return base;
         const task = Promise.resolve().then(() => collect(binding, profile)).then(result => ({ ...base, ...result }), error => ({
-          ...base, installed: /(?:BINARY|NOT_INSTALLED|VERSION_UNSUPPORTED|RUNTIME_INVALID)/u.test(error?.code || "")
+          ...base, ...(isRuntimeIncompatible(error) ? { compatible: false } : {}),
+          installed: /(?:BINARY|NOT_INSTALLED|RUNTIME_INVALID)/u.test(error?.code || "")
             ? false : "unknown",
         })).then(facts => {
           cache.delete(key);

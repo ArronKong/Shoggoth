@@ -19,7 +19,7 @@ class OpenCodeHttpClient {
   }
 
   async request(method, route, body, options = {}) {
-    if (!new Set(["GET", "POST", "PATCH", "DELETE"]).has(method)
+    if (!new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]).has(method)
       || typeof route !== "string" || !route.startsWith("/") || route.startsWith("//")
       || route.includes("\0") || route.includes("#")) {
       throw error("OPENCODE_HTTP_ROUTE_INVALID", "OpenCode HTTP route is invalid");

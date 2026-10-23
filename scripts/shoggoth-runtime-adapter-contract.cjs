@@ -21,6 +21,35 @@ const {
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
+test("Codex 动态上下文单独进入 model history，用户消息保持原文，失败不派发", async () => {
+  const calls = [];
+  let fail = false;
+  const host = {
+    async threadInjectItems(params) {
+      calls.push(["context", params]);
+      if (fail) throw new Error("context injection failed");
+      return {};
+    },
+    async turnStart(params) { calls.push(["turn", params]); return { turn: { id: "turn" } }; },
+  };
+  const handle = await new CodexRuntimeAdapter({ runtimePool: { get: async () => host } })
+    .acquire({ runtime: "codex", runtimeProfileId: "profile", runtimeAccountId: "account" });
+  const context = "BEGIN UNTRUSTED MEMORY DATA\nremembered preference\nEND UNTRUSTED MEMORY DATA";
+  const input = { sessionId: "desktop", operationId: "context-turn", prompt: "帮我打开这个文件夹", context };
+  await handle.turnStart(input);
+  assert.deepEqual(calls.map(([kind]) => kind), ["context", "turn"]);
+  assert.deepEqual(calls[0][1], { threadId: "desktop", items: [{ type: "message", role: "user",
+    content: [{ type: "input_text", text: context }] }] });
+  assert.equal(calls[1][1].input[0].text, input.prompt);
+  assert.equal(calls[1][1].clientUserMessageId, input.operationId);
+  calls.length = 0;
+  await handle.turnStart({ ...input, context: "" });
+  assert.deepEqual(calls.map(([kind]) => kind), ["turn"]);
+  calls.length = 0; fail = true;
+  await assert.rejects(() => handle.turnStart(input), /context injection failed/u);
+  assert.deepEqual(calls.map(([kind]) => kind), ["context"]);
+});
+
 test("Codex 旧会话更新指令先于下一轮，注入失败阻止派发，重试不串会话", async () => {
   const calls = [];
   let fail = true;
@@ -188,6 +217,20 @@ test("Runtime 认证状态统一归一化，且不泄漏 Runtime 原始响应", 
     }),
     (error) => error.code === "RUNTIME_AUTH_STATUS_INVALID",
   );
+  const privateError = Object.assign(new Error("private protocol details"), { code: "CODEX_ACCOUNT_PROTOCOL_INVALID" });
+  await assert.rejects(() => readRuntimeAuthenticationState({ async accountRead() { throw privateError; } }), error => {
+    assert.deepEqual(error.cause, { code: "CODEX_ACCOUNT_PROTOCOL_INVALID" });
+    assert.equal(Object.hasOwn(error.cause, "message"), false);
+    assert.equal(JSON.stringify(error).includes("private"), false);
+    return error.code === "RUNTIME_AUTH_STATUS_UNAVAILABLE";
+  });
+  let codeGetterCalls = 0;
+  const unsafeError = Object.defineProperty(new Error("private"), "code", { get() { codeGetterCalls++; return "AUTH_REQUIRED"; } });
+  await assert.rejects(() => readRuntimeAuthenticationState({ async accountRead() { throw unsafeError; } }), error => {
+    assert.equal(error.cause, undefined);
+    assert.equal(codeGetterCalls, 0);
+    return error.code === "RUNTIME_AUTH_STATUS_UNAVAILABLE";
+  });
   await assert.rejects(
     () => readRuntimeAuthenticationState({
       async accountRead() {
@@ -272,6 +315,7 @@ test("Codex Adapter 把通用 session/turn 参数映射到现有 Host，且 refs
       calls.push(["threadList", params]);
       return { data: [{ id: "codex-thread", threadSource: "chat:1", archived: false }], nextCursor: null };
     },
+    async threadInjectItems(params) { calls.push(["threadInjectItems", params]); return {}; },
     async turnStart(params) {
       calls.push(["turnStart", params]);
       return { turn: { id: "codex-turn" } };
@@ -414,16 +458,10 @@ test("Codex Adapter 把通用 session/turn 参数映射到现有 Host，且 refs
   const turnStart = calls.find(([name]) => name === "turnStart")[1];
   assert.deepEqual(turnStart.input, [{
     type: "text",
-    text: [
-      "BEGIN UNTRUSTED MEMORY DATA",
-      "remembered preference",
-      "END UNTRUSTED MEMORY DATA",
-      "",
-      "CURRENT USER REQUEST",
-      "hello",
-    ].join("\n"),
+    text: "hello",
     text_elements: [],
   }]);
+  assert.equal(calls.find(([name]) => name === "threadInjectItems")[1].items[0].role, "user");
   assert.equal(turnStart.threadId, "codex-thread");
   assert.equal(turnStart.clientUserMessageId, "operation-1");
   assert.equal(turnStart.approvalPolicy, "on-request");

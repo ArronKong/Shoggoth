@@ -248,12 +248,32 @@ function lazyPool(label) {
   };
 }
 
+// The one Shoggoth backend lists every visible Agent's models, including the
+// default Agent's Codex runtime. It answers that catalog and nothing else: it
+// has no session or turn methods, so any execution on it fails loudly.
+function catalogOnlyPool() {
+  return {
+    get() {
+      return {
+        terminated: new Promise(() => {}), registeredSecrets: [],
+        subscribe() { return () => {}; }, subscribeAccountAuth() { return () => {}; },
+        registerServerRequestHandler() { return () => {}; },
+        authenticationState: () => ({ authenticated: true, credentialPresent: true }),
+        accountRead: async () => ({ account: { type: "chatgpt" }, requiresOpenaiAuth: false }),
+        async modelList() { return { data: [], nextCursor: null }; },
+      };
+    },
+    stop() { return Promise.resolve(); },
+    stopAll() { return Promise.resolve(); },
+  };
+}
+
 function authority(profileId) {
   return { profileId, callId: crypto.randomUUID(), confirmation: true };
 }
 
 async function main() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-dsh-app-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-dsh-app-")));
   fs.chmodSync(root, 0o700);
   const paths = resolveServicePaths({
     trustedRoot: root,
@@ -283,7 +303,7 @@ async function main() {
     },
     builtinCliProfiles: true,
     builtinCliInstalledAccountIds: [NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID],
-    runtimePool: lazyPool("Codex"),
+    runtimePool: catalogOnlyPool(),
     grokBuildRuntimePool: lazyPool("Grok"),
     antigravityRuntimePool: lazyPool("Antigravity"),
     deepSeekHarnessRuntimePool: runtimePool,
@@ -291,7 +311,7 @@ async function main() {
   });
   const backend = new ShoggothBackend({
     paths,
-    id: "deepseek-harness",
+    id: "shoggoth",
     name: "DeepSeek",
     connectionMode: "native-runtime",
     claimsAgentId: (agentId) => agentId === "shoggoth-deepseek-harness"
@@ -339,6 +359,7 @@ async function main() {
     const descriptor = backend.getBackendDescriptor();
     assert.deepEqual(descriptor.surfaces, {
       chat: true,
+      nativeChatUi: false,
       agents: true,
       models: true,
       skills: true,
@@ -346,10 +367,19 @@ async function main() {
       oauth: true,
       dashboardRuns: true,
       agentHarness: true,
+      nativeCapacity: true,
+      nativeMemoryConfig: true,
+      nativeMemorySharingConfig: true,
+      runtimeBindings: true,
+      runtimeStatus: true,
+      sessionRuntimeSwitch: true,
+      runtimeUsage: true,
       cron: { kind: "native" },
       kanban: { kind: "native" },
     });
-    assert.deepEqual(backend.getAgents().map((agent) => agent.id), [deepSeekHarnessSpec.agentId]);
+    // One Shoggoth backend lists every native agent; the default one runs on Codex.
+    assert.deepEqual(backend.getAgents().map((agent) => agent.runtime === "deepseek-harness" ? agent.id : agent.runtime).sort(),
+      [deepSeekHarnessSpec.agentId, "codex"].sort());
     const chatCapabilities = backend.getChatCapabilities(deepSeekHarnessSpec.agentId);
     assert.deepEqual({ ...chatCapabilities, permissions: undefined }, {
       attachments: {
@@ -360,6 +390,7 @@ async function main() {
       maxAttachmentBytes: 50 * 1024 * 1024,
       maxAttachments: 8,
       maxPromptBytes: 60 * 1024,
+      nativeUiArtifactsV1: false,
       slash: true,
       steer: true,
       modelProvider: "deepseek-harness",
@@ -435,7 +466,7 @@ async function main() {
     assert.equal((await backend.getCronRuns(cron.id)).runs[0].status, "ok");
 
     const dashboard = await backend.getDashboardRunDetail(kanbanRun.id);
-    assert.equal(dashboard.backendId, "deepseek-harness");
+    assert.equal(dashboard.backendId, "shoggoth");
     assert.equal(dashboard.agentId, deepSeekHarnessSpec.agentId);
     assert.equal(dashboard.status, "completed");
     assert.equal(dashboard.events.some((event) => (
@@ -477,9 +508,10 @@ async function main() {
     }, authority(deepSeekHarnessSpec.id));
     assert.match(read.content, /Shoggoth Skill Authoring/u);
 
+    // A new Agent starts on the default Codex runtime; other runtimes are bound to it afterwards.
     const createdAgent = await backend.createAgent({ name: "DeepSeek Reviewer" });
-    assert.match(createdAgent.id, /^deepseek-harness-/u);
-    assert.equal((await backend.getAgent(createdAgent.id)).provider, "deepseek-harness");
+    assert.match(createdAgent.id, /^shoggoth-agent-/u);
+    assert.equal((await backend.getAgent(createdAgent.id)).provider, "codex");
     const createdProfile = service.productStore.listAgentProfiles()
       .find((profile) => profile.agentId === createdAgent.id);
     assert.ok(createdProfile);
@@ -488,8 +520,6 @@ async function main() {
     assert.ok(service.nativeSkillStore.ensureProfile(createdProfile.id));
     assert.equal(service.nativeKanbanStore.listBoards()
       .some((candidate) => candidate.profileId === createdProfile.id), true);
-    const createdHome = path.join(paths.stateDir, "deepseek-harness", createdProfile.runtimeProfileId);
-    assert.equal(fs.existsSync(path.join(createdHome, ".credentials.yaml")), false);
 
     const executionHosts = [...runtimePool.hosts.values()].filter((host) => !host.controlInstance);
     const starts = executionHosts.flatMap((host) => host.calls.sessionStart);
@@ -514,7 +544,7 @@ async function main() {
       error: (message) => authErrors.push(message),
       final: () => assert.fail("authentication failure cannot produce a final answer"),
     });
-    assert.deepEqual(authErrors, ["当前 Agent 登录验证失败，请前往「设置」检查账号状态或重新登录后重试"]);
+    assert.deepEqual(authErrors, ["当前 Agent 登录验证失败，请前往「模型」检查账号状态或重新登录后重试"]);
     const newRuns = service.workDispatcher.listRuns().filter((run) => !previousRuns.has(run.id));
     assert.equal(newRuns.length, 1);
     const failedRun = newRuns[0];

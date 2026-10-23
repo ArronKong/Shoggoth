@@ -7,6 +7,7 @@ const ROOT = path.join(__dirname, "..");
 const {
   BUILTIN_CLI_AGENT_PROFILES,
   ensureBuiltinCliAgentProfiles,
+  planBuiltinCliAgentProfiles,
 } = require(path.join(ROOT, "app", "agent-service", "builtin-cli-profiles"));
 const { DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME } = require(path.join(ROOT, "app", "agent-service", "runtime-account"));
 
@@ -16,9 +17,15 @@ const installedAccounts = new Set(BUILTIN_CLI_AGENT_PROFILES.map((spec) =>
 function fixture(initial = []) {
   const profiles = new Map(initial.map((profile) => [profile.id, structuredClone(profile)]));
   const writes = [];
+  const seeded = new Set();
   return {
     profiles,
     writes,
+    seeded,
+    state: {
+      isSeeded: (id) => seeded.has(id),
+      markSeeded: (ids) => { for (const id of ids) seeded.add(id); },
+    },
     store: {
       listAgentProfiles() { return [...profiles.values()].map((profile) => structuredClone(profile)); },
       getAgentProfile(id) { return structuredClone(profiles.get(id) || null); },
@@ -46,7 +53,7 @@ function test(name, action) {
 
 test("首次启动幂等补建六个可用 CLI AgentProfile", () => {
   const ctx = fixture();
-  const created = ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts);
+  const created = ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
   assert.equal(created.length, 6);
   assert.deepEqual(created.map((profile) => profile.name), [
     "Codex", "Grok", "Antigravity", "Pi", "OpenCode", "DeepSeek",
@@ -61,20 +68,47 @@ test("首次启动幂等补建六个可用 CLI AgentProfile", () => {
   assert.equal(created.every((profile) => profile.enabled && !profile.isDefault), true);
   assert.equal(created.every((profile) => profile.permissionPolicy.approvalPolicy === "on-request"
     && profile.permissionPolicy.sandbox === "danger-full-access"), true);
-  assert.equal(ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts).length, 0);
+  assert.equal(ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state).length, 0);
   assert.equal(ctx.writes.length, 6);
 });
 
 test("全新安装仅连接已安装的 CLI，未安装的 Runtime 不创建 AgentProfile", () => {
   const ctx = fixture();
-  assert.deepEqual(ensureBuiltinCliAgentProfiles(ctx.store, new Set()), []);
+  assert.deepEqual(ensureBuiltinCliAgentProfiles(ctx.store, new Set(), ctx.state), []);
   assert.equal(ctx.profiles.size, 0);
   const codex = DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME.codex;
   const pi = DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME.pi;
-  assert.deepEqual(ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex, pi]))
+  assert.deepEqual(ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex, pi]), ctx.state)
     .map((profile) => profile.runtime), ["codex", "pi"]);
   assert.equal(ctx.profiles.size, 2);
-  assert.equal(ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex, pi])).length, 0);
+  assert.equal(ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex, pi]), ctx.state).length, 0);
+});
+
+test("首次创建钩子只作用于本次自动创建，已有和删除过的内置 Agent 不重复分配", () => {
+  const ctx = fixture();
+  const prepared = [];
+  const options = { beforeCreate(profile) {
+    assert.equal(ctx.profiles.has(profile.id), false, "头像准备先于 Profile 发布");
+    prepared.push(profile.id);
+  } };
+  const codex = DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME.codex;
+  const created = ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex]), ctx.state, options);
+  assert.deepEqual(prepared, created.map(profile => profile.id));
+  ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex]), ctx.state, options);
+  ctx.profiles.delete(created[0].id);
+  ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex]), ctx.state, options);
+  assert.equal(prepared.length, 1, "删除后不会重新调用首次头像分配");
+});
+
+test("首次头像准备失败时不发布 Profile 或消耗创建记录，修复后可以重试", () => {
+  const ctx = fixture();
+  const codex = DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME.codex;
+  assert.throws(() => ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex]), ctx.state, {
+    beforeCreate() { throw new Error("avatar write failed"); },
+  }), /avatar write failed/);
+  assert.equal(ctx.profiles.size, 0);
+  assert.equal(ctx.seeded.size, 0);
+  assert.equal(ensureBuiltinCliAgentProfiles(ctx.store, new Set([codex]), ctx.state).length, 1);
 });
 
 test("已存在的内置 Agent 保留用户可变配置", () => {
@@ -93,7 +127,7 @@ test("已存在的内置 Agent 保留用户可变配置", () => {
     updatedAt: 2,
   };
   const ctx = fixture([existing]);
-  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts);
+  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
   assert.deepEqual(ctx.profiles.get(spec.id), existing);
   assert.equal(ctx.writes.length, 5,
     "只应补建缺失的 Grok、Antigravity、Pi、DeepSeek 与 OpenCode profile");
@@ -107,10 +141,10 @@ test("旧默认名升级为 DeepSeek，保留已有 Agent 配置且重复启动�
     concurrency: { maxActive: 2, maxWorkspaceWrites: 0 },
     isDefault: false, enabled: false, createdAt: 7, updatedAt: 8 };
   const ctx = fixture([existing]);
-  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts);
+  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
   assert.deepEqual(ctx.profiles.get(spec.id), { ...existing, name: "DeepSeek", updatedAt: 9 });
   assert.equal(ctx.writes.filter((item) => item.id === spec.id).length, 1);
-  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts);
+  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
   assert.equal(ctx.writes.filter((item) => item.id === spec.id).length, 1);
 });
 
@@ -118,7 +152,7 @@ test("已自行命名的 DeepSeek Agent 不被默认名升级覆盖", () => {
   const spec = BUILTIN_CLI_AGENT_PROFILES.find((item) => item.runtime === "deepseek-harness");
   const existing = { ...spec, name: "我的助手", isDefault: false, enabled: true };
   const ctx = fixture([existing]);
-  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts);
+  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
   assert.deepEqual(ctx.profiles.get(spec.id), existing);
   assert.equal(ctx.writes.some((item) => item.id === spec.id), false);
 });
@@ -127,7 +161,7 @@ test("稳定 ID 被不同 runtime 占用时 fail closed", () => {
   const spec = BUILTIN_CLI_AGENT_PROFILES[0];
   const ctx = fixture([{ ...spec, runtime: "grok-build", isDefault: false }]);
   assert.throws(
-    () => ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts),
+    () => ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state),
     (error) => error?.code === "BUILTIN_AGENT_PROFILE_CONFLICT",
   );
   assert.equal(ctx.writes.length, 0);
@@ -137,7 +171,7 @@ test("后一个内置 Agent 冲突时不会提前写入前一个缺失 Agent", (
   const grok = BUILTIN_CLI_AGENT_PROFILES[1];
   const ctx = fixture([{ ...grok, runtime: "codex", isDefault: false }]);
   assert.throws(
-    () => ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts),
+    () => ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state),
     (error) => error?.code === "BUILTIN_AGENT_PROFILE_CONFLICT",
   );
   assert.equal(ctx.profiles.has(BUILTIN_CLI_AGENT_PROFILES[0].id), false);
@@ -158,7 +192,7 @@ test("不同 ID 占用内置 agentId 或 Runtime binding 时全量预检零写�
   for (const collision of collisions) {
     const ctx = fixture([collision]);
     assert.throws(
-      () => ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts),
+      () => ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state),
       (error) => error?.code === "BUILTIN_AGENT_PROFILE_CONFLICT",
     );
     assert.equal(ctx.writes.length, 0);
@@ -170,7 +204,50 @@ test("禁用 Claude 时保留既有 profile 和用户设置且不补建", () => 
   const spec = BUILTIN_CLI_AGENT_PROFILES.find((item) => item.runtime === "claude-code");
   const existing = { ...spec, name: "My Claude", isDefault: false, enabled: true, defaultModel: "saved-model" };
   const ctx = fixture([existing]);
-  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts);
+  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
   assert.deepEqual(ctx.profiles.get(spec.id), existing);
   assert.ok(ctx.writes.every((item) => item.runtime !== "claude-code"));
+});
+
+test("每个内置 CLI Agent 只自动创建一次：删除后再连接也不重建", () => {
+  const ctx = fixture();
+  const codex = BUILTIN_CLI_AGENT_PROFILES[0];
+  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
+  assert.equal(ctx.seeded.has(codex.id), true);
+  ctx.profiles.delete(codex.id);
+  assert.deepEqual(ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state), []);
+  assert.equal(ctx.profiles.has(codex.id), false);
+});
+
+test("未安装时既不创建也不记录；之后检测到安装（首次连接）才创建", () => {
+  const ctx = fixture();
+  const grok = BUILTIN_CLI_AGENT_PROFILES[1];
+  ensureBuiltinCliAgentProfiles(ctx.store, new Set(), ctx.state);
+  assert.equal(ctx.seeded.size, 0);
+  const created = ensureBuiltinCliAgentProfiles(ctx.store,
+    new Set([DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[grok.runtime]]), ctx.state);
+  assert.deepEqual(created.map((profile) => profile.id), [grok.id]);
+  assert.equal(ctx.seeded.has(grok.id), true);
+});
+
+test("记录出现前已存在的启用内置 Agent 只补记，不重写", () => {
+  const codex = BUILTIN_CLI_AGENT_PROFILES[0];
+  const existing = { ...codex, name: "My Codex", isDefault: false, enabled: true };
+  const ctx = fixture([existing]);
+  ensureBuiltinCliAgentProfiles(ctx.store, new Set(), ctx.state);
+  assert.equal(ctx.seeded.has(codex.id), true);
+  assert.deepEqual(ctx.profiles.get(codex.id), existing);
+  assert.equal(ctx.writes.length, 0);
+});
+
+test("未记录的停用内置 Agent 交给运行期路径判断，启动路径不碰也不记录", () => {
+  const codex = BUILTIN_CLI_AGENT_PROFILES[0];
+  const existing = { ...codex, isDefault: false, enabled: false };
+  const ctx = fixture([existing]);
+  const plan = planBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
+  assert.deepEqual(plan.pending.map((spec) => spec.id), [codex.id]);
+  assert.equal(plan.build.some((spec) => spec.id === codex.id), false);
+  ensureBuiltinCliAgentProfiles(ctx.store, installedAccounts, ctx.state);
+  assert.equal(ctx.seeded.has(codex.id), false);
+  assert.equal(ctx.profiles.get(codex.id).enabled, false);
 });

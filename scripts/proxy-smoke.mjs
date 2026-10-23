@@ -69,6 +69,9 @@ class DelayedBackend extends AgentBackend {
   getSessionRowsSnapshot() {
     return { rows: this.getSessionRows(), complete: this.readyExtra === true };
   }
+  getAgentsSnapshot() {
+    return { agents: this.getAgents(), complete: this.readyExtra === true };
+  }
   // 模拟本地 backend 在 UI 已连接之后才完成 profile/agent 加载，且**分批**就绪
   // （Hermes 每个 profile 一个 dashboard 进程，各自冷启动数秒）。第一批就绪就
   // 靠 onPartialReady 广播，不等最慢的那批——否则 UI 要空等到全部完成。
@@ -100,7 +103,8 @@ upstreamWss.on("connection", (sock) => {
     if (frame.method === "connect") {
       sock.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { type: "hello-ok", protocol: 1, auth: { role: "operator", scopes: [] } } }));
     } else if (frame.method === "agents.list") {
-      sock.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { defaultId: "main", mainKey: "agent:main", scope: "default", agents: [{ id: "main", name: "Main" }] } }));
+      sock.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: frame.id === "roster-malformed" ? {}
+        : { defaultId: "main", mainKey: "agent:main", scope: "default", agents: [{ id: "main", name: "Main" }] } }));
     } else if (frame.method === "chat.send") {
       sock.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { status: "started" } }));
     } else {
@@ -167,8 +171,15 @@ try {
   check("agents.list injects 'hermes'", ids.includes("hermes"));
   const hermesRow = agentsRes.payload.agents.find((a) => a.id === "hermes");
   check("hermes has display name", hermesRow?.name === "Hermes (demo)");
+  check("injected Agent carries backend ownership", hermesRow?.backendId === "mock-hermes");
+  check("starting backend marks Agent roster incomplete", agentsRes.payload?.degradedBackends?.includes("mock-delayed"));
   check("hermes row carries per-profile model", hermesRow?.model?.primary === "grok-4.3");
   check("hermes row carries per-profile fallbacks", Array.isArray(hermesRow?.model?.fallbacks) && hermesRow.model.fallbacks.length === 2);
+  send({ type: "req", id: "roster-malformed", method: "agents.list", params: {} });
+  const malformedRoster = await waitFor(f => f.id === "roster-malformed", "malformed roster response");
+  check("foreign injection cannot turn malformed upstream roster into confirmed deletion",
+    malformedRoster.payload?.degradedBackends?.includes("openclaw")
+      && malformedRoster.payload?.agents?.some(agent => agent.id === "hermes"));
 
   // 1b. UI 首次拉 sessions 时 delayed backend 尚未 ready。响应必须与 OpenClaw
   // 断线使用同一个完整性标记，聊天页才会保留 localStorage 里的旧 agent 行。
@@ -337,6 +348,18 @@ try {
     check("native cron reply is hidden from unauthenticated sockets",
       !nakedFrames.some((frame) => frame.type === "event" && frame.event === "chat"
         && frame.payload?.runId === "run-native-cron-visible"));
+
+    registry.emit("backend.sessionActivity", {
+      backendId: "mock-hermes", name: "Hermes (demo)", agentIds: ["hermes"],
+      activity: { kind: "federation.chat.terminal", runId: "run-native-cron-silent",
+        sessionKey: "agent:hermes:cron-product-uuid", status: "completed", result: null,
+        errorCode: null, finishedAt: completedAt + 1, notificationCategory: "cron", outputDisposition: "silent" },
+    });
+    const silentFinal = await waitFor(frame => frame.type === "event" && frame.event === "chat"
+      && frame.payload?.runId === "run-native-cron-silent", "silent cron termination");
+    check("silent cron clears running state without fabricating an assistant message",
+      silentFinal.payload.state === "final" && silentFinal.payload.outputDisposition === "silent"
+        && !Object.hasOwn(silentFinal.payload, "message"));
 
     registry.emit("backend.sessionActivity", {
       backendId: "mock-hermes", name: "Hermes (demo)", agentIds: ["hermes"],
@@ -894,6 +917,7 @@ try {
   const dIds = (dAgents.payload?.agents ?? []).map((a) => a.id);
   check("degraded: agents.list serves foreign agents", dIds.includes("hermes"));
   check("degraded: agents.list has no upstream agents", !dIds.includes("main"));
+  check("degraded: Agent roster reports absent upstream", dAgents.payload?.degradedBackends?.includes("openclaw"));
   dSend({ type: "req", id: "d2", method: "chat.send", params: { sessionKey: "agent:hermes:main", message: "hi" } });
   const dHermesSend = await dWait((f) => f.type === "res" && f.id === "d2", "degraded hermes chat.send res");
   check("degraded: foreign chat.send still served", dHermesSend.ok === true && dHermesSend.payload?.status === "started");
@@ -1031,6 +1055,7 @@ try {
   const rIds = (rRestoredAgents.payload?.agents ?? []).map((a) => a.id);
   check("recovery: passthrough restored (upstream agents back)", rIds.includes("main"));
   check("recovery: injection still applied after restore", rIds.includes("hermes"));
+  check("recovery: restored Agent roster is authoritative for upstream", !rRestoredAgents.payload?.degradedBackends?.includes("openclaw"));
   rClient.close();
   await rProxy.close();
   await new Promise((r) => lateWss.close(() => lateHttp.close(r)));

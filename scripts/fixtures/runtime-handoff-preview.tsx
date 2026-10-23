@@ -59,8 +59,10 @@ function Fixture() {
 }
 await applyConfiguredLocale("zh-CN");
 createRoot(document.getElementById("root")!).render(<Fixture />);
+// The default Codex binding is the bundled Harness and is shown by its label.
+const candidateLabel = (runtime: string) => runtime === "codex" ? "Codex Harness（Shoggoth 内置）" : runtime;
 const candidate = (runtime: string) => [...document.querySelectorAll<HTMLButtonElement>("button[aria-pressed]")]
-  .find(button => button.querySelector("span")?.firstChild?.textContent === runtime)!;
+  .find(button => button.querySelector("span")?.firstChild?.textContent === candidateLabel(runtime))!;
 const settled = async () => {
   await wait(() => !scope.fixtureBusy && observedRevision === scope.fixtureState.revision, "runtime snapshot refreshed after native turn");
   await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);

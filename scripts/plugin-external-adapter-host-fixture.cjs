@@ -31,12 +31,14 @@ async function main() {
     const plugin = pluginList.plugins.find(item => item.id === "shoggoth-shared-capabilities");
     assert.equal(plugin?.status, "loaded", JSON.stringify(plugin));
     assert.deepEqual(plugin.toolNames.sort(), ["shoggoth_capability_search",
-      "shoggoth_plugin_call", "shoggoth_skill_file_read", "shoggoth_skill_read"]);
+      "shoggoth_plugin_call", "shoggoth_plugin_resource_read",
+      "shoggoth_skill_file_read", "shoggoth_skill_read"]);
     const alsoAllow = JSON.parse(execFileSync(process.env.SHOGGOTH_TEST_OPENCLAW_BIN || "openclaw",
       ["config", "get", "tools.alsoAllow", "--json"],
       { env, encoding: "utf8", timeout: 15_000 }));
     assert.deepEqual(alsoAllow, ["shoggoth_capability_search", "shoggoth_skill_read",
-      "shoggoth_skill_file_read", "shoggoth_plugin_call"]);
+      "shoggoth_skill_file_read", "shoggoth_plugin_resource_read",
+      "shoggoth_plugin_call"]);
     const hermesList = execFileSync(process.env.SHOGGOTH_TEST_HERMES_BIN || "hermes",
       ["plugins", "list", "--plain", "--no-bundled"],
       { env, encoding: "utf8", timeout: 15_000 });

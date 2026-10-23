@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { readPrivateFile, validatePrivateStat, writeFully } = require("./private-file");
+const { readPrivateFile, validatePrivateStat, validateDirectoryStat, writeFully } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -28,22 +28,31 @@ function stableJson(value) {
 function same(a, b) { return stableJson(a) === stableJson(b); }
 function optionalId(value) { return value === null || (typeof value === "string" && ID.test(value)); }
 function optionalHash(value) { return value === null || (typeof value === "string" && HASH.test(value)); }
-function validImportFile(value) {
+// v3 also pins the cited line range and the excerpt hash. The excerpt text
+// itself stays with the import source, never in this sidecar.
+function validImportFile(value, schemaVersion) {
+  const keys = schemaVersion === 3
+    ? ["name", "fileHash", "sourceRef", "lineStart", "lineEnd", "excerptHash"]
+    : ["name", "fileHash", "sourceRef"];
   return value && typeof value === "object" && !Array.isArray(value)
-    && Object.keys(value).length === 3
-    && ["name", "fileHash", "sourceRef"].every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key))
     && (value.name === null || (typeof value.name === "string"
       && Buffer.byteLength(value.name, "utf8") <= 255
       && SAFE_IMPORT_NAME.test(value.name) && !value.name.includes("..")))
     && typeof value.fileHash === "string" && HASH.test(value.fileHash)
-    && typeof value.sourceRef === "string" && CODEX_SOURCE_REF.test(value.sourceRef);
+    && typeof value.sourceRef === "string" && CODEX_SOURCE_REF.test(value.sourceRef)
+    && (schemaVersion !== 3 || (Number.isSafeInteger(value.lineStart) && value.lineStart >= 1
+      && Number.isSafeInteger(value.lineEnd) && value.lineEnd >= value.lineStart
+      && value.lineEnd - value.lineStart <= 64
+      && typeof value.excerptHash === "string" && HASH.test(value.excerptHash)));
 }
 
 function validateEntry(value, profileId, schemaVersion = 1) {
   const keys = ["operationId", "profileId", "memoryId", "memoryRevision", "contentHash", "origin",
     "runId", "sessionId", "eventId", "eventTextHash", "quoteHash", "quoteStartUtf16",
     "quoteEndUtf16", "observedAt"];
-  if (schemaVersion === 2) keys.push("importFile");
+  if (schemaVersion >= 2) keys.push("importFile");
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))
     || !ID.test(value.operationId) || !ID.test(value.profileId) || value.profileId !== profileId
@@ -52,8 +61,9 @@ function validateEntry(value, profileId, schemaVersion = 1) {
     || !ORIGINS.has(value.origin) || !optionalId(value.runId) || !optionalId(value.sessionId)
     || !optionalId(value.eventId) || !optionalHash(value.eventTextHash)
     || !optionalHash(value.quoteHash) || !Number.isSafeInteger(value.observedAt)
-    || value.observedAt < 0 || ![1, 2].includes(schemaVersion)
-    || (schemaVersion === 2 && (value.origin !== "import" || !validImportFile(value.importFile)))) {
+    || value.observedAt < 0 || ![1, 2, 3].includes(schemaVersion)
+    || (schemaVersion >= 2 && (value.origin !== "import"
+      || !validImportFile(value.importFile, schemaVersion)))) {
     throw error("MEMORY_PROVENANCE_INVALID", "来源记录无效");
   }
   const hasRange = value.quoteStartUtf16 !== null || value.quoteEndUtf16 !== null;
@@ -71,24 +81,29 @@ function validateEntry(value, profileId, schemaVersion = 1) {
 }
 
 class MemoryProvenanceStore {
-  constructor({ paths, fs: fileSystem = fs, now = Date.now, maxLogBytes = MAX_LOG_BYTES }) {
+  constructor({ paths, fs: fileSystem = fs, now = Date.now, maxLogBytes = MAX_LOG_BYTES, readOnly = false }) {
     this.paths = paths;
     this.fs = fileSystem;
     this.now = now;
     this.maxLogBytes = maxLogBytes;
+    this.readOnly = readOnly === true;
+    this.readOnlyDirectoryPins = new Map();
     this.opened = false;
     this.profiles = new Map();
     this.poisonError = null;
   }
   open() {
     if (this.opened) return;
-    ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
+    this.readOnlyDirectoryPins.clear();
+    if (this.readOnly) this._assertReadOnlyDirectory(this.paths.agentsDir);
+    else ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
     this.profiles.clear(); this.poisonError = null; this.opened = true;
   }
-  close() { this.profiles.clear(); this.poisonError = null; this.opened = false; }
+  close() { this.profiles.clear(); this.readOnlyDirectoryPins.clear(); this.poisonError = null; this.opened = false; }
   forgetProfile(profileId) { this.profiles.delete(profileId); }
   _assertOpen(write = false) {
     if (!this.opened) throw error("MEMORY_PROVENANCE_CLOSED", "来源记录未打开");
+    if (write && this.readOnly) throw error("MEMORY_LEGACY_READ_ONLY", "旧来源记录仅供迁移读取");
     if (write && this.poisonError) throw this.poisonError;
   }
   _path(profileId) {
@@ -97,29 +112,74 @@ class MemoryProvenanceStore {
     }
     return path.join(this.paths.agentsDir, profileId, "memory", "provenance.jsonl");
   }
+  _assertReadOnlyDirectory(target) {
+    const root = this.paths.trustedRoot, resolved = path.resolve(target);
+    if (root !== path.resolve(root) || target !== resolved || !resolved.startsWith(root + path.sep)) {
+      throw error("UNSAFE_PATH", "只读来源路径不在规范私有根目录内");
+    }
+    let missing = false;
+    const relative = path.relative(root, resolved);
+    const directories = [root];
+    for (const segment of relative.split(path.sep)) directories.push(path.join(directories.at(-1), segment));
+    for (const directory of directories) {
+      let stat = null;
+      try { stat = this.fs.lstatSync(directory); }
+      catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+      if (!stat) missing = true;
+      else {
+        if (missing) throw error("MEMORY_PROVENANCE_UNAVAILABLE", "只读来源父目录在读取期间出现");
+        validateDirectoryStat(stat, directory);
+        if (this.fs.realpathSync.native(directory) !== directory) throw error("UNSAFE_PATH", "只读来源目录不是规范路径");
+      }
+      if (directory === root && !stat) throw error("UNSAFE_PATH", "只读来源私有根目录缺失");
+      const identity = stat ? `${stat.dev}:${stat.ino}:${stat.uid}:${stat.mode}` : null;
+      if (this.readOnlyDirectoryPins.has(directory) && this.readOnlyDirectoryPins.get(directory) !== identity) {
+        throw error("MEMORY_PROVENANCE_UNAVAILABLE", "只读来源父目录身份发生变化");
+      }
+      this.readOnlyDirectoryPins.set(directory, identity);
+    }
+  }
   _load(profileId) {
     this._assertOpen();
     const target = this._path(profileId);
+    if (this.readOnly) this._assertReadOnlyDirectory(path.dirname(target));
     const cached = this.profiles.get(profileId);
     if (cached) {
       const current = lstatIfExists(target);
       if (!current) {
-        if (cached.identity === null) return cached;
+        if (cached.identity === null) {
+          if (this.readOnly) this._assertReadOnlyDirectory(path.dirname(target));
+          return cached;
+        }
         throw error("MEMORY_PROVENANCE_UNAVAILABLE", "来源日志在运行中丢失");
       }
       const identity = fileIdentity(validatePrivateStat(current, target));
-      if (identity === cached.identity) return cached;
+      if (identity === cached.identity) {
+        if (this.readOnly) this._assertReadOnlyDirectory(path.dirname(target));
+        return cached;
+      }
       this.profiles.delete(profileId);
     }
-    ensurePrivateDirectoryTree(path.dirname(target), this.paths.trustedRoot);
+    if (!this.readOnly) ensurePrivateDirectoryTree(path.dirname(target), this.paths.trustedRoot);
     const state = { entries: [], byOperation: new Map(), identity: null };
     const stat = lstatIfExists(target);
     if (stat) {
       validatePrivateStat(stat, target);
       let expectedIdentity = fileIdentity(stat);
       if (stat.size > this.maxLogBytes) throw error("MEMORY_PROVENANCE_CORRUPT", "来源日志超限");
-      let data = readPrivateFile(target, { fs: this.fs, maxBytes: this.maxLogBytes });
+      const readFileSystem = this.readOnly ? Object.create(this.fs) : this.fs;
+      if (this.readOnly) {
+        readFileSystem.fstatSync = (...args) => {
+          const opened = validatePrivateStat(this.fs.fstatSync(...args), target);
+          if (fileIdentity(opened) !== expectedIdentity) {
+            throw error("MEMORY_PROVENANCE_UNAVAILABLE", "只读来源描述符不属于打开前的日志身份");
+          }
+          return opened;
+        };
+      }
+      let data = readPrivateFile(target, { fs: readFileSystem, maxBytes: this.maxLogBytes });
       if (data.length && data.at(-1) !== 0x0a) {
+        if (this.readOnly) throw error("MEMORY_PROVENANCE_TRANSACTION_UNSETTLED", "只读来源日志含未闭合尾部");
         const newline = data.lastIndexOf(0x0a);
         const size = newline < 0 ? 0 : newline + 1;
         const fd = this.fs.openSync(target, this.fs.constants.O_RDWR | (this.fs.constants.O_NOFOLLOW || 0));
@@ -136,7 +196,7 @@ class MemoryProvenanceStore {
           catch { throw error("MEMORY_PROVENANCE_CORRUPT", "来源日志 JSON 损坏"); }
           const expected = { schemaVersion: record?.schemaVersion, seq: index + 1,
             type: "provenance.add", payload: record?.payload };
-          if (!record || Object.keys(record).length !== 5 || ![1, 2].includes(record.schemaVersion)
+          if (!record || Object.keys(record).length !== 5 || ![1, 2, 3].includes(record.schemaVersion)
             || record.seq !== index + 1 || record.type !== "provenance.add"
             || typeof record.checksum !== "string" || !HASH.test(record.checksum)
             || record.checksum !== hash(stableJson(expected))) {
@@ -156,12 +216,14 @@ class MemoryProvenanceStore {
       }
       state.identity = expectedIdentity;
     }
+    if (this.readOnly) this._assertReadOnlyDirectory(path.dirname(target));
     this.profiles.set(profileId, state);
     return state;
   }
   append(input) {
     this._assertOpen(true);
-    const schemaVersion = Object.hasOwn(input, "importFile") ? 2 : 1;
+    const schemaVersion = !Object.hasOwn(input, "importFile") ? 1
+      : Object.hasOwn(input.importFile ?? {}, "lineStart") ? 3 : 2;
     const entry = validateEntry({ ...input, observedAt: input.observedAt ?? this.now() },
       input.profileId, schemaVersion);
     const state = this._load(entry.profileId);

@@ -24,7 +24,7 @@ const ENTRY_INPUT_FIELDS = new Set([
   "fingerprints", "modelDiff", "providerDiff", "createdProvider", "secretStep",
 ]);
 // full = 完整立即应用(引用迁移+运行态收敛);config-only = 仅写配置,生效由显式 activation 完成。
-const ENTRY_MODES = new Set(["full", "config-only"]);
+const ENTRY_MODES = new Set(["full", "config-only", "native-config"]);
 const STEP_FIELDS = [
   "scannerId", "store", "referenceKey", "stage", "before", "after", "undo", "writeStatus", "readback", "error",
   "startedAt", "finishedAt",
@@ -388,7 +388,7 @@ function createEntry(input = {}, now = Date.now()) {
     backendId: input.backendId,
     providerKey: input.providerKey,
     kind: input.kind,
-    mode: input.mode === "config-only" ? "config-only" : "full",
+    mode: ENTRY_MODES.has(input.mode) ? input.mode : "full",
     source: input.source || null,
     target: input.target,
     fingerprints: input.fingerprints || {},

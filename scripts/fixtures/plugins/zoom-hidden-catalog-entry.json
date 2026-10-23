@@ -1,0 +1,159 @@
+{
+  "id": "zoom",
+  "name": "zoom",
+  "version": "1.0.0",
+  "displayName": "Zoom",
+  "shortDescription": "Smart meeting insights from Zoom",
+  "category": "Communication",
+  "icon": {
+    "path": "assets/logo-dark.jpg",
+    "sha256": "41efa89aafc51c7e09fdfc48e35447df365e72dc67618d28b29613f1b269ab8d",
+    "bytes": 10596,
+    "mimeType": "image/jpeg"
+  },
+  "sourceDigest": "4be5587857786f9841e5f77a8e14a17e6ff8d1f765ec84ba8162557a45a04316",
+  "fileCount": 795,
+  "bytes": 5493050,
+  "components": {
+    "skills": 27,
+    "allSkillFiles": 53,
+    "apps": 1,
+    "mcp": 1
+  },
+  "license": "MIT",
+  "converted": {
+    "skills": 27,
+    "mcp": 1
+  },
+  "unconvertedMcp": [],
+  "details": {
+    "longDescription": "Zoom connects Codex to Zoom meeting context through the Zoom app connector and provides developer workflows for planning, building, debugging, and reviewing Zoom integrations across APIs, SDKs, webhooks, WebSockets, bots, and automation use cases.",
+    "developerName": "Zoom",
+    "websiteURL": "https://zoom.us",
+    "prompts": [
+      "Search my recent Zoom meetings for the discussion about pricing.",
+      "Run /plan-zoom-product for a Zoom integration idea."
+    ],
+    "skills": [
+      {
+        "name": "build-zoom-bot",
+        "description": "Use when building bots."
+      },
+      {
+        "name": "build-zoom-meeting-app",
+        "description": "Use when embedding meetings."
+      },
+      {
+        "name": "choose-zoom-approach",
+        "description": "Use when choosing architecture."
+      },
+      {
+        "name": "cobrowse-sdk",
+        "description": "Use when using Cobrowse."
+      },
+      {
+        "name": "contact-center",
+        "description": "Use when using Contact Center."
+      },
+      {
+        "name": "debug-zoom-integration",
+        "description": "Use when isolating failures."
+      },
+      {
+        "name": "debug-zoom",
+        "description": "Use when debugging issues."
+      },
+      {
+        "name": "general",
+        "description": "Use when comparing products."
+      },
+      {
+        "name": "meeting-sdk",
+        "description": "Use when using Meeting SDK."
+      },
+      {
+        "name": "oauth",
+        "description": "Use when implementing OAuth."
+      },
+      {
+        "name": "phone",
+        "description": "Use when building Phone."
+      },
+      {
+        "name": "plan-zoom-integration",
+        "description": "Use when planning Zoom integrations."
+      },
+      {
+        "name": "plan-zoom-product",
+        "description": "Use when choosing products."
+      },
+      {
+        "name": "probe-sdk",
+        "description": "Use when using Probe SDK."
+      },
+      {
+        "name": "rest-api",
+        "description": "Use when calling REST APIs."
+      },
+      {
+        "name": "rivet-sdk",
+        "description": "Use when using Rivet SDK."
+      },
+      {
+        "name": "rtms",
+        "description": "Use when using RTMS."
+      },
+      {
+        "name": "scribe",
+        "description": "Use when using Scribe."
+      },
+      {
+        "name": "setup-zoom-oauth",
+        "description": "Use when setting up OAuth."
+      },
+      {
+        "name": "start",
+        "description": "Use when starting Zoom work."
+      },
+      {
+        "name": "team-chat",
+        "description": "Use when building Team Chat."
+      },
+      {
+        "name": "ui-toolkit",
+        "description": "Use when using Zoom UI Toolkit."
+      },
+      {
+        "name": "video-sdk",
+        "description": "Use when using Video SDK."
+      },
+      {
+        "name": "virtual-agent",
+        "description": "Use when using Virtual Agent."
+      },
+      {
+        "name": "webhooks",
+        "description": "Use when building Zoom webhooks."
+      },
+      {
+        "name": "websockets",
+        "description": "Use when building Zoom WebSockets."
+      },
+      {
+        "name": "zoom-apps-sdk",
+        "description": "Use when using Apps SDK."
+      }
+    ],
+    "mcpServers": [
+      {
+        "name": "zoom",
+        "type": "streamable-http"
+      }
+    ],
+    "connectionWarnings": [],
+    "apps": [
+      "zoom"
+    ]
+  },
+  "importStatus": "previewable"
+}

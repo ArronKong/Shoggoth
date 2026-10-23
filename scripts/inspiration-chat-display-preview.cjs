@@ -52,7 +52,7 @@ async function main() {
   const close = () => { server?.close(); service.close(); store.close(); fs.rmSync(temp, { recursive: true, force: true }); };
   try {
     await build({ entryPoints: [path.join(root, "scripts/fixtures/inspiration-chat-display.tsx")], bundle: true, format: "esm",
-      define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl" },
+      define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
       outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent" });
     fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><title>灵感聊天展示预览</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
     server = http.createServer(async (req, res) => {

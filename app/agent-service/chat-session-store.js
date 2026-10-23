@@ -91,6 +91,13 @@ function normalizeSession(input, corrupt = false) {
   let fields = SESSION_FIELDS;
   const hasSettings = Object.hasOwn(input || {}, "modelSettings");
   if (hasSettings) fields = [...fields, "modelSettings"];
+  const hasNext = Object.hasOwn(input || {}, "nextRuntimeSelection");
+  if (hasNext) fields = [...fields, "nextRuntimeSelection"];
+  const next = input?.nextRuntimeSelection;
+  if (hasNext && (!exactObject(next, ["bindingId", "model", "permissionMode", "modelSettings"])
+    || !UUID_PATTERN.test(next.bindingId) || !validNullableText(next.model, 512)
+    || next.model === null || !validNullableText(next.permissionMode, 64)
+    || !validModelSettings(next.modelSettings))) fail();
   const runtimeSessionId = input?.runtimeSessionId;
   if (!exactObject(input, fields) || (hasSettings && !validModelSettings(input.modelSettings))
     || !UUID_PATTERN.test(input.id) || !UUID_PATTERN.test(input.sessionKey)
@@ -111,7 +118,7 @@ function normalizeSession(input, corrupt = false) {
       || !validOpaqueId(entry.bindingId) || !validOpaqueId(entry.runtime) || !validOpaqueId(entry.runtimeAccountId)
       || !validNullableText(entry.runtimeSessionId, 512) || entry.runtimeSessionId === null
       || !Number.isSafeInteger(entry.retiredAt) || entry.retiredAt < 0))) fail();
-  return Object.fromEntries([...SESSION_FIELDS, ...(hasSettings ? ["modelSettings"] : [])].map((field) => [
+  return Object.fromEntries(fields.map((field) => [
     field,
     input[field],
   ]));
@@ -377,6 +384,9 @@ function validateContainer(value, { getProfileBinding = null } = {}) {
 }
 
 class ChatSessionStore {
+  // Every write installs a new sessions object, so its identity versions this index.
+  #sessionIndex = null;
+
   constructor(options = {}) {
     if (!options.paths?.stateDir || !options.paths?.trustedRoot) {
       throw chatSessionError("CHAT_SESSION_PATHS_REQUIRED", "ChatSessionStore 需要 Service paths");
@@ -388,6 +398,9 @@ class ChatSessionStore {
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.getProfileBinding = options.getProfileBinding || null;
+    this.onSessionEvent = options.onSessionEvent || null;
+    this.changeSubscriptions = new Set();
+    this.changeGeneration = 0;
     this.acquireWriterLease = options.acquireWriterLease || acquirePrivateWriterLease;
     this.writerLease = null;
     this.cleanupPending = false;
@@ -412,14 +425,32 @@ class ChatSessionStore {
       || this.maxTerminalBindingOperations > MAX_TERMINAL_BINDING_OPERATIONS) {
       throw chatSessionError("CHAT_SESSION_CAPACITY_INVALID", "terminal binding operation 容量配置无效");
     }
+    this.readOnly = options.readOnly === true;
     this.opened = false;
     this.commitUncertain = false;
     this.container = this.#emptyContainer();
     this.cronOriginIndex = null;
   }
 
-  open() {
+  openReadOnly() {
+    if (!this.readOnly) throw chatSessionError("CHAT_SESSION_READ_ONLY_REQUIRED", "只读打开必须显式声明");
     if (this.opened) return this;
+    // Use the original private parser; never acquire a writer lease, recover a
+    // transaction, expire receipts or refresh the durable session window.
+    const stat = statIfExists(this.fs, this.filePath);
+    if (!stat) throw chatSessionError("CHAT_SESSION_SOURCE_MISSING", "只读会话权威缺失");
+    this.container = this.#parse(readPrivateFile(this.filePath, {
+      fs: this.fs, maxBytes: MAX_CHAT_SESSION_STORE_BYTES,
+    }));
+    this.commitUncertain = false;
+    this.opened = true;
+    return this;
+  }
+
+  open() {
+    if (this.readOnly) return this.openReadOnly();
+    if (this.opened) return this;
+    this.changeGeneration += 1;
     preparePrivateParent(this.filePath, this.paths.trustedRoot, this.fs);
     const lease = this.acquireWriterLease({
       lockPath: path.join(this.paths.stateDir, "chat-sessions.writer.lock"),
@@ -466,6 +497,8 @@ class ChatSessionStore {
   }
 
   close() {
+    this.changeGeneration += 1;
+    for (const subscription of this.changeSubscriptions) subscription.unsubscribe();
     const lease = this.writerLease;
     if (lease) {
       try {
@@ -480,6 +513,64 @@ class ChatSessionStore {
     this.opened = false;
   }
 
+  subscribeChanges(listener, { signal } = {}) {
+    if (typeof listener !== "function") throw new TypeError("ChatSession listener 无效");
+    if (signal && (typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function")) {
+      throw new TypeError("ChatSession subscription signal 无效");
+    }
+    const subscription = { listener, unsubscribe: () => {
+      this.changeSubscriptions.delete(subscription);
+      signal?.removeEventListener("abort", subscription.unsubscribe);
+    } };
+    if (signal?.aborted) return subscription.unsubscribe;
+    this.changeSubscriptions.add(subscription);
+    signal?.addEventListener("abort", subscription.unsubscribe, { once: true });
+    return subscription.unsubscribe;
+  }
+
+  #notifyChanges(previous, current) {
+    if (!this.changeSubscriptions.size) return;
+    const identity = session => session ? { sessionId: session.id, profileId: session.profileId, sessionKey: session.sessionKey } : null;
+    const cronBySession = container => {
+      const grouped = new Map();
+      for (const binding of Object.values(container.cronRuns)) {
+        const rows = grouped.get(binding.sessionKey) || [];
+        rows.push(binding); grouped.set(binding.sessionKey, rows);
+      }
+      for (const rows of grouped.values()) rows.sort((left, right) => left.runId.localeCompare(right.runId));
+      return grouped;
+    };
+    const previousCron = cronBySession(previous), currentCron = cronBySession(current);
+    const events = [];
+    for (const sessionKey of new Set([...Object.keys(previous.sessions), ...Object.keys(current.sessions),
+      ...previousCron.keys(), ...currentCron.keys()])) {
+      const before = previous.sessions[sessionKey], after = current.sessions[sessionKey];
+      const changedFields = [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])]
+        .filter(field => JSON.stringify(before?.[field]) !== JSON.stringify(after?.[field]));
+      const beforeCron = previousCron.get(sessionKey) || [], afterCron = currentCron.get(sessionKey) || [];
+      const cronClassificationChanged = JSON.stringify(beforeCron) !== JSON.stringify(afterCron);
+      if (!changedFields.length && !cronClassificationChanged) continue;
+      events.push({ type: "session.changed", revision: current.revision, committed: true,
+        previous: identity(before), current: identity(after),
+        profileIds: [...new Set([before?.profileId, after?.profileId,
+          ...beforeCron.map(binding => binding.profileId), ...afterCron.map(binding => binding.profileId)].filter(Boolean))],
+        changedFields, cronClassificationChanged });
+    }
+    if (!events.length) return;
+    const generation = this.changeGeneration, recipients = [...this.changeSubscriptions];
+    // All callers install the returned candidate synchronously. Notifications
+    // must wait until that installation, including committed cleanup failures.
+    queueMicrotask(() => {
+      if (!this.opened || this.commitUncertain || generation !== this.changeGeneration
+        || this.container.revision < current.revision) return;
+      for (const event of events) for (const subscription of recipients) {
+        if (generation !== this.changeGeneration || !this.opened || this.commitUncertain) return;
+        if (!this.changeSubscriptions.has(subscription)) continue;
+        try { Promise.resolve(subscription.listener(clone(event))).catch(() => {}); } catch {}
+      }
+    });
+  }
+
   getCreateOperation(operationId) {
     this.#assertOpen();
     if (!validOpaqueId(operationId)) throw chatSessionError("CHAT_SESSION_INVALID", "operationId 无效");
@@ -489,10 +580,12 @@ class ChatSessionStore {
   createSession(input) {
     this.#assertOpen();
     if (!exactObject(input, ["operationId", "profileId", "workspace", "createdAt",
+      ...(Object.hasOwn(input || {}, "permissionMode") ? ["permissionMode"] : []),
       ...(Object.hasOwn(input || {}, "defaultBindingId") ? ["defaultBindingId"] : []),
       ...(Object.hasOwn(input || {}, "parentSessionKey") ? ["parentSessionKey"] : [])])
       || !validOpaqueId(input.operationId) || !validOpaqueId(input.profileId)
       || !validNullableText(input.workspace, 4096)
+      || (Object.hasOwn(input, "permissionMode") && !validNullableText(input.permissionMode, 64))
       || (Object.hasOwn(input, "parentSessionKey") && (typeof input.parentSessionKey !== "string"
         || !UUID_PATTERN.test(input.parentSessionKey)))
       || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0) {
@@ -542,7 +635,7 @@ class ChatSessionStore {
       title: null,
       modelOverride: parent?.modelOverride ?? null,
       ...(parent?.modelSettings ? { modelSettings: clone(parent.modelSettings) } : {}),
-      permissionMode: null,
+      permissionMode: parent?.permissionMode ?? input.permissionMode ?? null,
       status: "draft",
       createdAt: time,
       updatedAt: time,
@@ -570,6 +663,7 @@ class ChatSessionStore {
       },
     };
     this.container = this.#write(candidate);
+    try { this.onSessionEvent?.(clone(session), "session.created", input.operationId); } catch {}
     return this.getSession(session.sessionKey);
   }
 
@@ -579,6 +673,58 @@ class ChatSessionStore {
       throw chatSessionError("CHAT_SESSION_INVALID", "sessionKey 无效");
     }
     return clone(this.container.sessions[sessionKey] || null);
+  }
+
+  // Bind a verified external thread in one durable commit. A crash must never
+  // leave a draft/pending binding that recovery could turn into a new thread.
+  importRuntimeSession(input) {
+    this.#assertOpen();
+    if (!exactObject(input, ["sessionKey", "profileId", "runtimeBindingId", "runtimeSessionId", "workspace",
+      "title", "modelOverride", "modelSettings"]) || !UUID_PATTERN.test(input.sessionKey)
+      || !validOpaqueId(input.profileId) || !validOpaqueId(input.runtimeBindingId)
+      || !validNullableText(input.runtimeSessionId, 512) || input.runtimeSessionId === null
+      || !validNullableText(input.workspace, 4096) || input.workspace === null
+      || !validNullableText(input.title, 512) || !validNullableText(input.modelOverride, 512)
+      || !validModelSettings(input.modelSettings)) throw chatSessionError("CHAT_SESSION_INVALID", "外部会话绑定无效");
+    const existing = this.container.sessions[input.sessionKey];
+    if (existing) {
+      if (existing.profileId !== input.profileId || existing.runtimeSessionId !== input.runtimeSessionId
+        || existing.runtimeBindingId !== input.runtimeBindingId || existing.workspace !== input.workspace) {
+        throw chatSessionError("CHAT_SESSION_BINDING_CONFLICT", "外部会话归属已变化");
+      }
+      return clone(existing);
+    }
+    const binding = this.#resolveBinding(input.profileId, input.runtimeBindingId);
+    if (binding?.runtime !== "codex" || binding.runtimeAccountId !== "native-codex-default-v1") {
+      throw chatSessionError("CHAT_SESSION_BINDING_CONFLICT", "外部会话需要原生 Codex 绑定");
+    }
+    const time = this.#currentTime();
+    const hash = crypto.createHash("sha256").update(input.sessionKey).digest("hex");
+    const operationId = `desktop-import-${hash}`, bindingId = `bind-desktop-${hash.slice(0, 32)}`;
+    if (this.#findOperation(operationId) || this.#findOperation(bindingId)
+      || Object.keys(this.container.sessions).length >= MAX_CHAT_SESSIONS
+      || Object.values(this.container.bindingOperations).filter(value => value.state === "bound").length >= this.maxTerminalBindingOperations) {
+      throw chatSessionError("CHAT_SESSION_CAPACITY", "外部会话无法登记");
+    }
+    const session = normalizeSession({ id: input.sessionKey, sessionKey: input.sessionKey, profileId: input.profileId,
+      runtimeSessionId: input.runtimeSessionId, runtimeBindingId: input.runtimeBindingId, retiredRuntimeSessions: [], revision: 1,
+      workspace: input.workspace, title: input.title, modelOverride: input.modelOverride, modelSettings: clone(input.modelSettings),
+      permissionMode: null, status: "ready", createdAt: time, updatedAt: time });
+    if (Object.values(this.container.sessions).some(value => value.runtimeSessionId === input.runtimeSessionId
+      && sessionNamespace(value, this.getProfileBinding) === sessionNamespace(session, this.getProfileBinding))) {
+      throw chatSessionError("CHAT_THREAD_ID_CONFLICT", "原会话已绑定其他 ChatSession");
+    }
+    const operation = normalizeCreateOperation({ operationId, profileId: input.profileId, workspace: input.workspace,
+      sessionKey: input.sessionKey, state: "active", createdAt: time, finishedAt: null });
+    const bound = normalizeBindingOperation({ operationId: bindingId, sessionKey: input.sessionKey,
+      threadSource: threadSourceFor(input.sessionKey, bindingId), state: "bound", runtimeSessionId: input.runtimeSessionId,
+      createdAt: time, updatedAt: time, finishedAt: time });
+    this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+      sessions: { ...this.container.sessions, [input.sessionKey]: session },
+      createOperations: { ...this.container.createOperations, [operationId]: operation },
+      bindingOperations: { ...this.container.bindingOperations, [input.sessionKey]: bound } });
+    try { this.onSessionEvent?.(clone(session), "session.created", operationId); } catch {}
+    return this.getSession(input.sessionKey);
   }
 
   getCronRunBinding(runId) {
@@ -641,6 +787,7 @@ class ChatSessionStore {
         const operation = this.container.createOperations[operationId];
         if (operation?.state === "deleted") return null;
         session = this.createSession({ operationId, profileId: input.profileId, workspace: input.workspace,
+          permissionMode: "full-access",
           createdAt: operation?.createdAt ?? this.#currentTime() });
       }
       this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
@@ -677,6 +824,20 @@ class ChatSessionStore {
     return binding;
   }
 
+  queueRuntimeSelection(sessionKey, { bindingId, model, permissionMode, modelSettings = { thinkingLevel: null, serviceTier: null }, revision }) {
+    this.#assertOpen();
+    const session = this.container.sessions[sessionKey];
+    if (!session || !["draft", "binding", "ready"].includes(session.status)) throw chatSessionError("CHAT_SESSION_NOT_READY", "会话不可修改");
+    if (session.revision !== revision) throw chatSessionError("CHAT_SESSION_REVISION_CONFLICT", "会话已更新");
+    this.#resolveBinding(session.profileId, bindingId);
+    const nextRuntimeSelection = { bindingId, model, permissionMode, modelSettings };
+    const updated = normalizeSession({ ...session, nextRuntimeSelection, revision: session.revision + 1,
+      updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
+    this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+      sessions: { ...this.container.sessions, [sessionKey]: updated } });
+    return this.getSession(sessionKey);
+  }
+
   switchRuntime(sessionKey, input) {
     this.#assertOpen();
     if (!UUID_PATTERN.test(sessionKey) || !input || typeof input !== "object" || Array.isArray(input)
@@ -698,11 +859,17 @@ class ChatSessionStore {
       throw chatSessionError("CHAT_RUNTIME_SWITCH_PENDING", "会话存在未完成操作");
     }
     const target = this.#resolveBinding(session.profileId, input.bindingId);
+    const { nextRuntimeSelection: _next, ...settled } = session;
+    if (require("./codex-desktop-session-store").isDesktopBinding(this.container.bindingOperations[sessionKey])
+      && !(input.model !== undefined && target.id === session.runtimeBindingId && input.renewSession !== true)) {
+      throw chatSessionError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用原生 Codex CLI");
+    }
     if (input.model !== undefined && session.runtimeBindingId === target.id && input.renewSession !== true) {
-      if (session.modelOverride === input.model && (input.permissionMode === undefined || input.permissionMode === session.permissionMode)) {
+      if (!session.nextRuntimeSelection && session.modelOverride === input.model
+        && (input.permissionMode === undefined || input.permissionMode === session.permissionMode)) {
         return this.getSession(sessionKey);
       }
-      const updated = normalizeSession({ ...session, modelOverride: input.model, revision: session.revision + 1,
+      const updated = normalizeSession({ ...settled, modelOverride: input.model, revision: session.revision + 1,
         modelSettings: { thinkingLevel: null, serviceTier: null },
         ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
         updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
@@ -719,7 +886,7 @@ class ChatSessionStore {
         runtimeSessionId: session.runtimeSessionId, retiredAt: this.#currentTime() });
     }
     const switchedAt = this.#currentTime();
-    const updated = normalizeSession({ ...session, runtimeBindingId: target.id, runtimeSessionId: null, revision: session.revision + 1,
+    const updated = normalizeSession({ ...settled, runtimeBindingId: target.id, runtimeSessionId: null, revision: session.revision + 1,
       retiredRuntimeSessions: retired, status: "draft", updatedAt: Math.max(switchedAt, session.updatedAt),
       ...(input.clearModelOverride ? { modelOverride: null,
         ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}) } : {}),
@@ -752,7 +919,7 @@ class ChatSessionStore {
 
   setModelOverride(sessionKey, model) {
     this.#assertOpen();
-    if (!UUID_PATTERN.test(sessionKey) || !validNullableText(model, 512) || model === null) {
+    if (!UUID_PATTERN.test(sessionKey) || !validNullableText(model, 512) || (model === null && this.container.sessions[sessionKey]?.nextRuntimeSelection)) {
       throw chatSessionError("CHAT_SESSION_INVALID", "session model 输入无效");
     }
     const session = this.container.sessions[sessionKey];
@@ -760,12 +927,15 @@ class ChatSessionStore {
     if (!["draft", "binding", "ready"].includes(session.status)) {
       throw chatSessionError("CHAT_SESSION_NOT_READY", "ChatSession 当前不允许切换模型");
     }
+    if (session.nextRuntimeSelection) return this.queueRuntimeSelection(sessionKey, {
+      ...session.nextRuntimeSelection, model, modelSettings: { thinkingLevel: null, serviceTier: null }, revision: session.revision });
     if (session.modelOverride === model) return clone(session);
     const time = this.#currentTime();
     this.#refreshWindow(time);
     const updated = normalizeSession({
       ...session,
       modelOverride: model,
+      revision: session.revision + 1,
       modelSettings: { thinkingLevel: null, serviceTier: null },
       updatedAt: Math.max(time, session.updatedAt),
     });
@@ -790,8 +960,10 @@ class ChatSessionStore {
     }
     const time = this.#currentTime();
     this.#refreshWindow(time);
+    if (session.nextRuntimeSelection) return this.queueRuntimeSelection(sessionKey, {
+      ...session.nextRuntimeSelection, modelSettings, revision: session.revision });
     const updated = normalizeSession({ ...session, modelSettings: structuredClone(modelSettings),
-      updatedAt: Math.max(time, session.updatedAt) });
+      revision: session.revision + 1, updatedAt: Math.max(time, session.updatedAt) });
     this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
       sessions: { ...this.container.sessions, [sessionKey]: updated } });
     return this.getSession(updated.sessionKey);
@@ -807,12 +979,15 @@ class ChatSessionStore {
     if (!["draft", "binding", "ready"].includes(session.status)) {
       throw chatSessionError("CHAT_SESSION_NOT_READY", "ChatSession 当前不允许切换权限模式");
     }
+    if (session.nextRuntimeSelection) return this.queueRuntimeSelection(sessionKey, {
+      ...session.nextRuntimeSelection, permissionMode: mode, revision: session.revision });
     if (session.permissionMode === mode) return clone(session);
     const time = this.#currentTime();
     this.#refreshWindow(time);
     const updated = normalizeSession({
       ...session,
       permissionMode: mode,
+      revision: session.revision + 1,
       updatedAt: Math.max(time, session.updatedAt),
     });
     const candidate = {
@@ -835,6 +1010,57 @@ class ChatSessionStore {
   listSessions() {
     this.#assertOpen();
     return Object.values(this.container.sessions).map(clone);
+  }
+
+  // Hot memory and recall checks look up one session or one Agent many times
+  // per turn. Cloning the whole roster for each lookup blocks the Service loop.
+  findSessionById(sessionId) {
+    this.#assertOpen();
+    return clone(this.#indexedSessions().byId.get(sessionId) ?? null);
+  }
+
+  listProfileSessions(profileId) {
+    this.#assertOpen();
+    return (this.#indexedSessions().byProfile.get(profileId) || []).map(clone);
+  }
+
+  // Same value as hashing listProfileSessions() sorted by id, cached per write.
+  profileSessionsDigest(profileId) {
+    this.#assertOpen();
+    const index = this.#indexedSessions();
+    if (!index.digests.has(profileId)) {
+      const sessions = [...(index.byProfile.get(profileId) || [])].sort((left, right) => left.id.localeCompare(right.id));
+      index.digests.set(profileId, crypto.createHash("sha256").update(JSON.stringify(sessions)).digest("hex"));
+    }
+    return index.digests.get(profileId);
+  }
+
+  #indexedSessions() {
+    const source = this.container.sessions;
+    if (this.#sessionIndex?.source !== source) {
+      const byId = new Map(), byProfile = new Map();
+      for (const session of Object.values(source)) {
+        if (!byId.has(session.id)) byId.set(session.id, session);
+        if (!byProfile.has(session.profileId)) byProfile.set(session.profileId, []);
+        byProfile.get(session.profileId).push(session);
+      }
+      this.#sessionIndex = { source, byId, byProfile, digests: new Map() };
+    }
+    return this.#sessionIndex;
+  }
+
+  touchSession(sessionKey, occurredAt) {
+    this.#assertOpen();
+    if (!UUID_PATTERN.test(sessionKey) || !Number.isSafeInteger(occurredAt) || occurredAt < 0) {
+      throw chatSessionError("CHAT_SESSION_INVALID", "Session timestamp 无效");
+    }
+    const prior = this.container.sessions[sessionKey];
+    if (!prior) throw chatSessionError("CHAT_SESSION_DELETED", "提醒会话已删除");
+    if (prior.updatedAt >= occurredAt) return clone(prior);
+    const session = { ...prior, updatedAt: occurredAt };
+    this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+      sessions: { ...this.container.sessions, [sessionKey]: session } });
+    return clone(session);
   }
 
   getRevision() {
@@ -963,6 +1189,28 @@ class ChatSessionStore {
     };
     this.container = this.#write(candidate);
     return this.getSession(updated.sessionKey);
+  }
+
+  completeAbsentBinding(sessionKey, operationId) {
+    this.#assertOpen();
+    if (!UUID_PATTERN.test(sessionKey) || !validBindingOperationId(operationId)) {
+      throw chatSessionError("CHAT_BINDING_INVALID", "binding recovery 输入无效");
+    }
+    const session = this.container.sessions[sessionKey];
+    const operation = this.container.bindingOperations[sessionKey];
+    if (!session) throw chatSessionError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
+    if (session.status !== "binding" || session.runtimeSessionId !== null
+      || operation?.state !== "pending" || operation.operationId !== operationId) {
+      throw chatSessionError("CHAT_SESSION_BINDING_CONFLICT", "binding recovery 前置状态已变化");
+    }
+    // The coordinator must first observe complete active + archived native
+    // lists. Only the binding lifecycle changes; selection still uses its CAS.
+    const bindingOperations = { ...this.container.bindingOperations };
+    delete bindingOperations[sessionKey];
+    this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+      bindingOperations, sessions: { ...this.container.sessions,
+        [sessionKey]: { ...session, status: "draft", updatedAt: Math.max(this.#currentTime(), session.updatedAt) } } });
+    return this.getSession(sessionKey);
   }
 
   replaceBoundRuntimeSession(input) {
@@ -1121,6 +1369,9 @@ class ChatSessionStore {
       remoteOperations,
     };
     this.container = this.#write(candidate);
+    if (operation.kind === "delete") {
+      try { this.onSessionEvent?.({ ...clone(existingSession), updatedAt: this.now() }, "session.closed", operationId); } catch {}
+    }
     return clone(result);
   }
 
@@ -1178,6 +1429,9 @@ class ChatSessionStore {
       remoteOperations: { ...this.container.remoteOperations, [operationId]: operation },
     };
     this.container = this.#write(candidate);
+    if (kind === "archive") {
+      try { this.onSessionEvent?.(clone(updatedSession), "session.closed", operationId); } catch {}
+    }
     return clone(operation);
   }
 
@@ -1271,6 +1525,7 @@ class ChatSessionStore {
   }
 
   #write(candidate) {
+    if (this.readOnly) throw chatSessionError("CHAT_SESSION_READ_ONLY", "只读会话禁止写入");
     const sessions = { ...candidate.sessions };
     for (const [key, session] of Object.entries(sessions)) {
       const prior = this.container.sessions[key];
@@ -1291,8 +1546,10 @@ class ChatSessionStore {
         trustedRoot: this.paths.trustedRoot,
       });
     } catch (error) {
-      if (error?.committed === true) return validated;
-      if (error?.committedUncertain === true) {
+      if (error?.committed === true) {
+        // The candidate is durable; retain the same post-install handling as
+        // an ordinary successful write rather than leaving cron state stale.
+      } else if (error?.committedUncertain === true) {
         this.commitUncertain = true;
         const uncertain = chatSessionError(
           "CHAT_SESSION_COMMIT_UNCERTAIN",
@@ -1300,11 +1557,13 @@ class ChatSessionStore {
         );
         uncertain.committedUncertain = true;
         throw uncertain;
+      } else {
+        if (String(error?.code || "").startsWith("UNSAFE_")) throw error;
+        throw chatSessionError("CHAT_SESSION_WRITE_FAILED", "ChatSession 写入失败");
       }
-      if (String(error?.code || "").startsWith("UNSAFE_")) throw error;
-      throw chatSessionError("CHAT_SESSION_WRITE_FAILED", "ChatSession 写入失败");
     }
     this.cronOriginIndex = null;
+    this.#notifyChanges(this.container, validated);
     return validated;
   }
 

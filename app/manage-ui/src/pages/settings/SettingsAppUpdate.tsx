@@ -14,6 +14,7 @@ const fallbackState: AppUpdateState = {
   progress: null,
   canCheck: false,
   canInstall: false,
+  installBlockReason: null,
 };
 
 export default function SettingsAppUpdate() {
@@ -45,7 +46,13 @@ export default function SettingsAppUpdate() {
       case "checking": return t("settings.appUpdate.checking");
       case "available": return t("settings.appUpdate.available", { version: state.availableVersion || "" });
       case "downloading": return t("settings.appUpdate.downloading", { progress: Math.round(state.progress || 0) });
-      case "downloaded": return t("settings.appUpdate.downloaded", { version: state.availableVersion || "" });
+      case "downloaded": return state.installBlockReason
+        ? t(`settings.appUpdate.installBlocked.${state.installBlockReason}`, {
+          defaultValue: t("settings.appUpdate.installBlocked.unknown"),
+        })
+        : t("settings.appUpdate.downloaded", { version: state.availableVersion || "" });
+      case "preparing": return t("settings.appUpdate.preparing");
+      case "recovering": return t("settings.appUpdate.recovering");
       case "up-to-date": return t("settings.appUpdate.upToDate");
       case "error": return t("settings.appUpdate.error");
       case "installing": return t("settings.appUpdate.installing");
@@ -67,6 +74,9 @@ export default function SettingsAppUpdate() {
     if (!bridge) return;
     setActionPending(true);
     try { await bridge.install(); }
+    catch { setState((previous) => previous ? {
+      ...previous, status: "downloaded", canInstall: true, installBlockReason: "unknown",
+    } : fallbackState); }
     finally { setActionPending(false); }
   };
 

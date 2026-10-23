@@ -13,12 +13,10 @@ const { atomicWritePrivateFile } = require(path.join(ROOT, "app", "agent-service
 
 let ChatSessionStore;
 let validateChatContainer;
-let CHAT_SESSION_STORE_VERSION;
 let PendingCommandInbox;
 let moduleLoadError = null;
 try {
   ({
-    CHAT_SESSION_STORE_VERSION,
     ChatSessionStore,
     validateContainer: validateChatContainer,
   } = require(path.join(
@@ -96,7 +94,7 @@ test("createSession 同步生成稳定 sessionKey，并以 0600 原子文件跨�
     id: "11111111-1111-4111-8111-111111111111",
     sessionKey: "22222222-2222-4222-8222-222222222222",
     profileId: "profile-1",
-    codexThreadId: null,
+    runtimeSessionId: null,
     workspace: "/tmp/workspace",
     title: null,
     modelOverride: null,
@@ -171,7 +169,32 @@ test("session model 与权限模式按会话隔离、幂等持久化并拒绝封
   restarted.close();
 });
 
-test("v1 ChatSession 容器读取时补齐新增字段与 Runtime session，首次切换写回当前 schema", () => {
+test("统一权限在创建时持久保存，继承来源选择且不改写旧会话限制", () => {
+  const paths = fixturePaths("shoggoth-session-permission-default-");
+  const store = new ChatSessionStore({ paths, now: () => 100 });
+  store.open();
+  const first = store.createSession({ operationId: "unified-parent", profileId: "profile-1",
+    workspace: "/tmp/workspace", createdAt: 100, permissionMode: "auto-review" });
+  assert.equal(first.permissionMode, "auto-review");
+  store.setPermissionMode(first.sessionKey, "request-approval");
+  const child = store.createSession({ operationId: "unified-child", profileId: "profile-1",
+    workspace: "/tmp/workspace", createdAt: 100, permissionMode: "auto-review", parentSessionKey: first.sessionKey });
+  assert.equal(child.permissionMode, "request-approval");
+  store.setPermissionMode(first.sessionKey, "read-only");
+  const restricted = store.createSession({ operationId: "restricted-child", profileId: "profile-1",
+    workspace: "/tmp/workspace", createdAt: 100, permissionMode: "auto-review", parentSessionKey: first.sessionKey });
+  assert.equal(restricted.permissionMode, "read-only");
+  store.close();
+  const restarted = new ChatSessionStore({ paths });
+  restarted.open();
+  assert.equal(restarted.getSession(child.sessionKey).permissionMode, "request-approval");
+  assert.equal(restarted.getSession(restricted.sessionKey).permissionMode, "read-only");
+  restarted.close();
+});
+
+// 0.8.136 started a fresh data baseline and removed pre-baseline migrations:
+// an older container fails closed and stays on disk as evidence.
+test("v1 ChatSession 容器在 fresh baseline 后 fail closed 且原文件不被改写", () => {
   const paths = fixturePaths("shoggoth-session-model-v1-");
   const ids = [
     "55555555-5555-4555-8555-555555555555",
@@ -179,7 +202,7 @@ test("v1 ChatSession 容器读取时补齐新增字段与 Runtime session，首�
   ];
   const store = new ChatSessionStore({ paths, now: () => 130, randomUUID: () => ids.shift() });
   store.open();
-  const session = store.createSession({
+  store.createSession({
     operationId: "create-model-v1", profileId: "profile-1", workspace: null, createdAt: 130,
   });
   store.close();
@@ -196,14 +219,11 @@ test("v1 ChatSession 容器读取时补齐新增字段与 Runtime session，首�
     delete value.permissionMode;
   }
   fs.writeFileSync(filePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+  const before = fs.readFileSync(filePath);
 
   const restarted = new ChatSessionStore({ paths, now: () => 131 });
-  restarted.open();
-  assert.equal(restarted.getSession(session.sessionKey).modelOverride, null);
-  restarted.setModelOverride(session.sessionKey, "gpt-5.6-luna");
-  const migrated = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  assert.equal(migrated.version, CHAT_SESSION_STORE_VERSION);
-  assert.equal(migrated.sessions[session.sessionKey].modelOverride, "gpt-5.6-luna");
+  assert.throws(() => restarted.open(), (error) => error.code === "CHAT_SESSION_STORE_CORRUPT");
+  assert.deepEqual(fs.readFileSync(filePath), before);
   restarted.close();
 });
 
@@ -237,7 +257,7 @@ test("thread binding 以 operationId 幂等恢复，并全局拒绝重复 thread
 
   now = 202;
   const ready = store.completeBinding(first.sessionKey, "bind-op-1", "thread-shared");
-  assert.equal(ready.codexThreadId, "thread-shared");
+  assert.equal(ready.runtimeSessionId, "thread-shared");
   assert.equal(ready.status, "ready");
   assert.deepEqual(store.completeBinding(first.sessionKey, "bind-op-1", "thread-shared"), ready);
 
@@ -255,7 +275,7 @@ test("thread binding 以 operationId 幂等恢复，并全局拒绝重复 thread
     sessionKey: second.sessionKey,
     threadSource: `shoggoth:${second.sessionKey}:bind-op-2`,
     state: "pending",
-    codexThreadId: null,
+    runtimeSessionId: null,
     createdAt: 202,
     updatedAt: 202,
     finishedAt: null,
@@ -278,33 +298,33 @@ test("远端未持久化的 bound thread 可在明确旧值后原子换绑并跨
   });
   const binding = store.requestBinding(session.sessionKey, "bind-bound-repair", now);
   store.completeBinding(session.sessionKey, binding.operationId, "thread-ephemeral");
-  assert.equal(store.getBinding(session.sessionKey).codexThreadId, "thread-ephemeral");
+  assert.equal(store.getBinding(session.sessionKey).runtimeSessionId, "thread-ephemeral");
 
   now += 1;
   assert.throws(
-    () => store.replaceBoundThread({
+    () => store.replaceBoundRuntimeSession({
       sessionKey: session.sessionKey,
       operationId: binding.operationId,
-      expectedCodexThreadId: "thread-other",
-      codexThreadId: "thread-persisted",
+      expectedRuntimeSessionId: "thread-other",
+      runtimeSessionId: "thread-persisted",
     }),
     (error) => error.code === "CHAT_SESSION_BINDING_CONFLICT",
   );
-  const repaired = store.replaceBoundThread({
+  const repaired = store.replaceBoundRuntimeSession({
     sessionKey: session.sessionKey,
     operationId: binding.operationId,
-    expectedCodexThreadId: "thread-ephemeral",
-    codexThreadId: "thread-persisted",
+    expectedRuntimeSessionId: "thread-ephemeral",
+    runtimeSessionId: "thread-persisted",
   });
   assert.equal(repaired.status, "ready");
-  assert.equal(repaired.codexThreadId, "thread-persisted");
-  assert.equal(store.getBinding(session.sessionKey).codexThreadId, "thread-persisted");
+  assert.equal(repaired.runtimeSessionId, "thread-persisted");
+  assert.equal(store.getBinding(session.sessionKey).runtimeSessionId, "thread-persisted");
   store.close();
 
   const restarted = new ChatSessionStore({ paths });
   restarted.open();
-  assert.equal(restarted.getSession(session.sessionKey).codexThreadId, "thread-persisted");
-  assert.equal(restarted.getBinding(session.sessionKey).codexThreadId, "thread-persisted");
+  assert.equal(restarted.getSession(session.sessionKey).runtimeSessionId, "thread-persisted");
+  assert.equal(restarted.getBinding(session.sessionKey).runtimeSessionId, "thread-persisted");
   restarted.close();
 });
 
@@ -427,11 +447,11 @@ test("远端 thread/start 成功但本地绑定写失败时按 threadSource 恢�
   const match = [remoteThread].find((thread) => thread.threadSource === pending[0].threadSource);
   if (match) restarted.recoverBinding({
     threadSource: match.threadSource,
-    codexThreadId: match.id,
+    runtimeSessionId: match.id,
   });
   else threadStartCalls += 1;
   assert.equal(threadStartCalls, 1);
-  assert.equal(restarted.getSession(session.sessionKey).codexThreadId, "thread-recovered");
+  assert.equal(restarted.getSession(session.sessionKey).runtimeSessionId, "thread-recovered");
   assert.deepEqual(restarted.listPendingBindings(), []);
   restarted.close();
 });
@@ -912,7 +932,7 @@ test("进程死于 release candidate quarantine 后，新实例 inode-safe 恢�
 
 test("status/threadId/binding/threadSource 任一反向不变量损坏均拒绝重启并释放 lease", () => {
   const mutations = [
-    (disk, sessionKey) => { disk.sessions[sessionKey].codexThreadId = "forged-thread"; },
+    (disk, sessionKey) => { disk.sessions[sessionKey].runtimeSessionId = "forged-thread"; },
     (disk, sessionKey) => { disk.sessions[sessionKey].status = "ready"; },
     (disk, sessionKey) => {
       disk.bindingOperations[sessionKey].threadSource = `shoggoth:${sessionKey}:forged`;
@@ -978,11 +998,19 @@ test("writer lease 的 malformed/symlink/hardlink 证据均 fail closed 且不�
 });
 
 test("createOperations active 与 4096 deleted tombstone 独立计数", () => {
-  const createOperations = {};
+  // Build on a real current-schema container instead of a hand-written one.
+  const paths = fixturePaths("shoggoth-create-tombstones-");
+  const store = new ChatSessionStore({ paths, now: () => 5000,
+    randomUUID: (() => { const ids = ["eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "ffffffff-ffff-4fff-8fff-ffffffffffff"]; return () => ids.shift(); })() });
+  store.open();
+  store.createSession({ operationId: "active-create", profileId: "profile-1", workspace: null, createdAt: 5000 });
+  store.close();
+  const container = JSON.parse(fs.readFileSync(path.join(paths.stateDir, "chat-sessions.json"), "utf8"));
+  assert.equal(container.createOperations["active-create"].state, "active");
   for (let index = 0; index < 4096; index += 1) {
     const suffix = index.toString(16).padStart(12, "0");
     const operationId = `deleted-create-${index}`;
-    createOperations[operationId] = {
+    container.createOperations[operationId] = {
       operationId,
       profileId: "profile-1",
       workspace: null,
@@ -992,37 +1020,6 @@ test("createOperations active 与 4096 deleted tombstone 独立计数", () => {
       finishedAt: index,
     };
   }
-  const activeKey = "ffffffff-ffff-4fff-8fff-ffffffffffff";
-  createOperations["active-create"] = {
-    operationId: "active-create",
-    profileId: "profile-1",
-    workspace: null,
-    sessionKey: activeKey,
-    state: "active",
-    createdAt: 5000,
-    finishedAt: null,
-  };
-  const container = {
-    version: 1,
-    revision: 1,
-    idempotencyFloorMs: 0,
-    sessions: {
-      [activeKey]: {
-        id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-        sessionKey: activeKey,
-        profileId: "profile-1",
-        codexThreadId: null,
-        workspace: null,
-        title: null,
-        status: "draft",
-        createdAt: 5000,
-        updatedAt: 5000,
-      },
-    },
-    createOperations,
-    bindingOperations: {},
-    remoteOperations: {},
-  };
   assert.equal(Object.keys(validateChatContainer(container).sessions).length, 1);
   const overflow = structuredClone(container);
   overflow.createOperations["deleted-create-overflow"] = {
@@ -1091,47 +1088,6 @@ test("deleted create tombstone 窗口内满载拒绝，过窗回收且不占活�
   assert.equal(disk.createOperations["create-reclaim-3"].state, "deleted");
   assert.equal(disk.createOperations["create-reclaim-active"].state, "active");
   store.close();
-});
-
-test("legacy Runtime session detach 幂等持久化并允许下一轮语义续接", () => {
-  const paths = fixturePaths("shoggoth-runtime-session-migration-");
-  const ids = [
-    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-  ];
-  let now = 240;
-  const store = new ChatSessionStore({ paths, now: () => now, randomUUID: () => ids.shift() });
-  store.open();
-  const session = store.createSession({
-    operationId: "create-migrated-session",
-    profileId: "profile-1",
-    workspace: "/tmp/workspace",
-    createdAt: now,
-  });
-  store.requestBinding(session.sessionKey, "bind-legacy-session", now);
-  store.completeBinding(session.sessionKey, "bind-legacy-session", "legacy-thread");
-  now += 1;
-  store.detachRuntimeSession({
-    sessionKey: session.sessionKey,
-    expectedRuntimeSessionId: "legacy-thread",
-  });
-  assert.equal(store.getSession(session.sessionKey).codexThreadId, null);
-  store.close();
-
-  const restarted = new ChatSessionStore({ paths, now: () => now + 1 }).open();
-  restarted.detachRuntimeSession({
-    sessionKey: session.sessionKey,
-    expectedRuntimeSessionId: "legacy-thread",
-  });
-  assert.equal(restarted.getSession(session.sessionKey).codexThreadId, null);
-  restarted.requestBinding(session.sessionKey, "bind-semantic-continuation", now);
-  restarted.completeBinding(session.sessionKey, "bind-semantic-continuation", "shared-thread");
-  assert.equal(restarted.getSession(session.sessionKey).codexThreadId, "shared-thread");
-  restarted.close();
-
-  const rebound = new ChatSessionStore({ paths, now: () => now + 2 }).open();
-  assert.equal(rebound.getSession(session.sessionKey).codexThreadId, "shared-thread");
-  rebound.close();
 });
 
 test("Chat operation 30天边界、未来偏差与跨类别 operationId 冲突固定", () => {
@@ -1203,6 +1159,74 @@ test("Chat operation 30天边界、未来偏差与跨类别 operationId 冲突�
     (error) => error.code === "OPERATION_EXPIRED",
   );
   rollback.close();
+});
+
+test("未受理发送在完整幂等窗口内持久拒绝，不要求重启且晚到发送保持隔离", async () => {
+  const paths = fixturePaths("shoggoth-legacy-send-");
+  let now = 100;
+  const inbox = new PendingCommandInbox({ paths, safeStorage: fakeSafeStorage(), now: () => now });
+  const input = { operationId: "legacy", sessionKey: "22222222-2222-4222-8222-222222222222", createdAt: 50 };
+  await inbox.open();
+  assert.equal(await inbox.rejectUnadmitted(input), false, "fresh Inbox cannot prove past absence");
+  await inbox.enqueue({ ...input, operationId: "seed", runId: "seed-run", prompt: "seed" });
+  await inbox.transition("seed", "canceled");
+  await inbox.close(); now = 200; await inbox.open();
+  const current = { ...input, operationId: "current-generation", createdAt: 200 };
+  assert.equal(await inbox.rejectUnadmitted(current), true, "persisted rejection fences a same-generation send");
+  await assert.rejects(inbox.enqueue({ ...current, runId: "late-current", prompt: "must not run" }),
+    { code: "PENDING_COMMAND_IDEMPOTENCY_CONFLICT" });
+  assert.equal(await inbox.rejectUnadmitted({ ...input, operationId: "seed" }), false, "ordinary cancellation is not non-admission");
+  assert.equal(await inbox.rejectUnadmitted(input), true);
+  assert.equal(inbox.isUnadmittedRejection(input.operationId, input.sessionKey), true);
+  assert.equal(inbox.isUnadmittedRejection(input.operationId, "33333333-3333-4333-8333-333333333333"), false);
+  assert.equal(await inbox.rejectUnadmitted({ ...input, createdAt: 51 }), false);
+  const disk = readInboxPlaintext(paths);
+  assert.deepEqual(Object.keys(disk), ["idempotencyFloorMs", "activeCommands", "tombstones"]);
+  assert.equal(Object.keys(disk.activeCommands).length, 0, "no replay payload or synthetic command");
+  await inbox.close(); now = 300; await inbox.open();
+  assert.equal(await inbox.rejectUnadmitted(input), true);
+  await assert.rejects(inbox.enqueue({ ...input, runId: "late", prompt: "must not run", createdAt: now }),
+    { code: "PENDING_COMMAND_IDEMPOTENCY_CONFLICT" });
+  now = 30 * 24 * 60 * 60 * 1000 + 400;
+  assert.equal(await inbox.rejectUnadmitted({ ...input, operationId: "expired" }), false);
+  await inbox.close();
+});
+
+test("新 Inbox 只能核验本次启动后的发送，未来、旧记录和已入队操作仍保留", async () => {
+  const paths = fixturePaths("shoggoth-live-send-");
+  let now = 100;
+  const inbox = await new PendingCommandInbox({ paths, safeStorage: fakeSafeStorage(), now: () => now }).open();
+  const input = { operationId: "current", sessionKey: "22222222-2222-4222-8222-222222222222", createdAt: now };
+  assert.equal(await inbox.rejectUnadmitted({ ...input, operationId: "old", createdAt: now - 1 }), false);
+  assert.equal(await inbox.rejectUnadmitted({ ...input, operationId: "future", createdAt: now + 1 }), false);
+  await inbox.enqueue({ ...input, operationId: "accepted", runId: "accepted-run", prompt: "accepted" });
+  assert.equal(await inbox.rejectUnadmitted({ ...input, operationId: "accepted" }), false);
+  assert.equal(await inbox.rejectUnadmitted(input), true);
+  assert.equal(await inbox.rejectUnadmitted({ ...input, sessionKey: "33333333-3333-4333-8333-333333333333" }), false);
+  await assert.rejects(inbox.enqueue({ ...input, runId: "late", prompt: "must not run" }),
+    { code: "PENDING_COMMAND_IDEMPOTENCY_CONFLICT" });
+  await inbox.close(); now = 200; await inbox.open();
+  assert.equal(await inbox.rejectUnadmitted(input), true, "current-generation fence survives restart");
+  await inbox.close();
+});
+
+test("旧发送拒绝写入失败、未知或账本锁定均不能返回恢复成功", async () => {
+  for (const failure of ["write", "uncertain", "locked"]) {
+    const paths = fixturePaths("shoggoth-legacy-failure-");
+    let fail = false, now = 100;
+    const inbox = new PendingCommandInbox({ paths, now: () => now, safeStorage: fakeSafeStorage(),
+      atomicWrite(...args) {
+        if (fail) throw Object.assign(new Error("injected"), failure === "uncertain" ? { committedUncertain: true } : {});
+        return atomicWritePrivateFile(...args);
+      } });
+    const input = { operationId: "old", sessionKey: "22222222-2222-4222-8222-222222222222", createdAt: 50 };
+    await inbox.open(); await inbox.enqueue({ ...input, operationId: "seed", runId: "seed-run", prompt: "seed" });
+    await inbox.close(); now = 200; await inbox.open();
+    if (failure === "locked") inbox.contentLocked = true; else fail = true;
+    await assert.rejects(async () => inbox.rejectUnadmitted(input), { code: failure === "locked" ? "pending_commands_locked"
+      : failure === "uncertain" ? "PENDING_COMMAND_COMMIT_UNCERTAIN" : "PENDING_COMMAND_WRITE_FAILED" });
+    await inbox.close();
+  }
 });
 
 test("PendingCommand 30天边界保留、容量拒绝、过窗回收及旧 replay 拒绝", async () => {

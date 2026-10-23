@@ -22,7 +22,7 @@ const HISTORY_TYPES = new Set(["text", "thinking", "plan", "tool", "status", "pr
 const HISTORY_ROLES = new Set(["user", "assistant", "toolResult", "system"]);
 const COMMAND_CATEGORIES = new Set(["session", "model", "tools", "agents"]);
 const SESSION_STATUSES = new Set(["draft", "binding", "ready", "archived", "delete_pending"]);
-const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
+const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction", "proactive", "automation"]);
 const WORK_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
   "completed", "failed", "canceled", "interrupted", "skipped",
@@ -53,6 +53,7 @@ const CHAT_SERVICE_METHODS = Object.freeze([
   "chat.command.exec",
   "chat.send",
   "chat.operation.get",
+  "chat.operation.reconcile",
   "chat.steer",
   "chat.abort",
   "run.list",
@@ -64,8 +65,13 @@ const CHAT_SERVICE_METHODS = Object.freeze([
 const CHAT_SERVICE_METHOD_SET = new Set(CHAT_SERVICE_METHODS);
 
 const PUBLIC_MESSAGES = Object.freeze({
+  ...require("./active-memory-command-protocol").MESSAGES,
+  CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用原生 Codex CLI",
+  CODEX_DESKTOP_CONTEXT_CHANGED: "原对话的 Shoggoth 记忆或撤回状态已变化，请新建会话继续",
+  CODEX_DESKTOP_BUSY: "原对话正在 Codex 客户端运行，请等当前回合结束后再发送",
   ...INSPIRATION_PUBLIC_MESSAGES,
-  RUNTIME_AUTH_REQUIRED: "当前 Agent 尚未登录或登录已失效，请前往「设置」登录后重试",
+  RUNTIME_AUTH_REQUIRED: "当前 Agent 尚未登录或登录已失效，请前往「模型」登录后重试",
+  RUNTIME_INCOMPATIBLE: "当前 CLI 版本与应用不兼容，请更新 CLI 或应用后重新检查",
   INVALID_PARAMS: "请求参数无效",
   SERVICE_UNAVAILABLE: "Shoggoth Service 暂时不可用",
   BACKEND_NOT_READY: "Shoggoth Agent 暂不可用",
@@ -81,6 +87,9 @@ const PUBLIC_MESSAGES = Object.freeze({
   CHAT_SESSION_MODEL_NOT_AVAILABLE: "该模型当前不可用",
   CHAT_SESSION_MODEL_SETTINGS_INVALID: "当前模型不支持该思考强度或快速模式",
   CHAT_SESSION_PERMISSION_INVALID: "该权限模式不可用",
+  RUNTIME_PERMISSION_POLICY_CONFLICT: "Agent 运行权限与当前会话不一致，请检查会话权限后重试",
+  RUNTIME_ACCOUNT_BINDING_CONFLICT: "Agent 的运行账号已变化，请重新选择账号后重试",
+  RUNTIME_HOOK_SCOPE_CONFLICT: "Agent 的运行规则已变化，请重试",
   RUNTIME_CAPABILITY_UNSUPPORTED: "当前 Agent Runtime 不支持该操作",
   CHAT_SEND_TOO_LARGE: "消息超过本地协议上限",
   PLUGIN_SELECTION_INVALID: "插件选择无效，请重新选择",
@@ -139,6 +148,7 @@ const DIRECT_INTERNAL_ERROR_MAP = Object.freeze({
   THREAD_ACTIVE_TURN_CONFLICT: "THREAD_ACTIVE_TURN_CONFLICT",
   AUTH_REQUIRED: "RUNTIME_AUTH_REQUIRED",
   RUNTIME_AUTH_REQUIRED: "RUNTIME_AUTH_REQUIRED",
+  RUNTIME_INCOMPATIBLE: "RUNTIME_INCOMPATIBLE",
   CODEX_SYSTEM_BINARY_NOT_FOUND: "BACKEND_NOT_READY",
   CODEX_RUNTIME_VERSION_MISMATCH: "BACKEND_NOT_READY",
   CODEX_RUNTIME_VERSION_PROBE_FAILED: "BACKEND_NOT_READY",
@@ -328,8 +338,8 @@ function validateChatServiceParams(method, params) {
     if (!validateOperationBase(params, ["operationId", "sessionKey", "createdAt"])
       || !validUuid(params.sessionKey)) failParams();
   } else if (method === "chat.history") {
-    validatePageParams(params, ["sessionKey", "cursor", "limit"],
-      (value) => validUuid(value.sessionKey));
+    validatePageParams(params, ["sessionKey", "cursor", "limit", ...(Object.hasOwn(params || {}, "auditRunId") ? ["auditRunId"] : [])],
+      (value) => validUuid(value.sessionKey) && (value.auditRunId === undefined || validOpaqueId(value.auditRunId)));
   } else if (method === "chat.search") {
     if (!exactObject(params, ["profileId", "query", "limit"]) || !validOpaqueId(params.profileId)
       || !validString(params.query, 4096) || !params.query.trim()
@@ -348,6 +358,9 @@ function validateChatServiceParams(method, params) {
       || (params.attachments !== undefined && !validAttachments(params.attachments))
       || (params.pluginSelection !== undefined && !validPluginSelection(params.pluginSelection))
       || !(validString(params.prompt, MAX_FRAME_BYTES) || (params.prompt === "" && params.attachments?.length))) failParams();
+  } else if (method === "chat.operation.reconcile") {
+    if (!validateOperationBase(params, ["operationId", "sessionKey", "createdAt"])
+      || !validUuid(params.sessionKey) || params.createdAt <= 0) failParams();
   } else if (method === "chat.operation.get") {
     if (!exactObject(params, ["operationId", "sessionKey"])
       || !validOpaqueId(params.operationId) || !validUuid(params.sessionKey)) failParams();
@@ -476,7 +489,16 @@ function hasRuntimeSessionFields(value) {
   return ["runtimeBindingId", "retiredRuntimeSessions", "revision"].some(key => Object.hasOwn(value || {}, key));
 }
 
+function validateNextRuntimeSelection(value, recurse) {
+  const { nextRuntimeSelection: next, ...session } = value;
+  if (!exactObject(next, ["bindingId", "model", "permissionMode", "modelSettings"])
+    || !validUuid(next.bindingId) || !validString(next.model, 512)
+    || !validString(next.permissionMode, 64, true) || !validModelSettings(next.modelSettings)) failResponse();
+  return { ...recurse(session), nextRuntimeSelection: cloneCanonical(next) };
+}
+
 function validateSession(value) {
+  if (Object.hasOwn(value || {}, "nextRuntimeSelection")) return validateNextRuntimeSelection(value, validateSession);
   if (hasRuntimeSessionFields(value)) return validateRuntimeSessionFields(value, validateSession);
   if (Object.hasOwn(value || {}, "modelSettings")) {
     const { modelSettings, ...session } = value;
@@ -498,6 +520,21 @@ function validateSession(value) {
 }
 
 function validateListedSession(value) {
+  if (Object.hasOwn(value || {}, "nextRuntimeSelection")) return validateNextRuntimeSelection(value, validateListedSession);
+  if (value?.source === "codex-desktop") {
+    const { source, codexDesktopWriter, ...session } = value;
+    let writer;
+    if (Object.hasOwn(value, "codexDesktopWriter")) {
+      try { writer = require("./codex-desktop-writer-state").validateWriterState(codexDesktopWriter); }
+      catch { failResponse(); }
+    }
+    return { ...validateListedSession(session), source, ...(writer ? { codexDesktopWriter: writer } : {}) };
+  }
+  if (Object.hasOwn(value || {}, "proactiveTarget") || value?.source === "proactive") {
+    const { proactiveTarget, source, ...session } = value;
+    if (proactiveTarget !== true || source !== "proactive") failResponse();
+    return { ...validateListedSession(session), proactiveTarget: true, source: "proactive" };
+  }
   if (Object.hasOwn(value || {}, "productContext")) {
     const { productContext, ...session } = value;
     return { ...validateListedSession(session), productContext: require("./product-context-protocol").validateProductContext(productContext) };
@@ -556,9 +593,22 @@ function validateRemoteOperation(value, expectedKind) {
   return cloneCanonical(value);
 }
 
+function validRunRuntimeRef(ref, turn = false) {
+  return ref === null || (validString(ref.sessionId, 256) && (!turn || validString(ref.turnId, 256)));
+}
+
 function validateRun(value) {
-  try { return require("./product-store").validateWorkRun(cloneCanonical(value)); }
+  let run;
+  try { run = require("./product-store").validateWorkRun(cloneCanonical(value), value?.source === "automation" ? "automation" : null); }
   catch { failResponse(); }
+  // IPC field bounds on top of the store contract. Automation source IDs include a namespace.
+  if (!validOpaqueId(run.id) || !validOpaqueIdWithLimit(run.sourceId, run.source === "automation" ? 256 : 128)
+    || !validOpaqueIdWithLimit(run.idempotencyKey, 256) || !validOpaqueId(run.profileId)
+    || !validString(run.workspace, 4096, true)
+    || !validRunRuntimeRef(run.runtimeSessionRef) || !validRunRuntimeRef(run.runtimeTurnRef, true)
+    || !validString(run.waitingRequestId, 128, true) || !validString(run.resultSummary, 16 * 1024, true)
+    || !validString(run.errorCode, 128, true) || !validNullableOpaqueId(run.retryOf)) failResponse();
+  return run;
 }
 
 function validateFragment(value) {
@@ -586,6 +636,7 @@ function validateRuntimeCommand(value) {
   if (!exactObject(value, ["name", "description", "args", "category", "aliases",
     ...(Object.hasOwn(value || {}, "source") ? ["source"] : []),
     ...(Object.hasOwn(value || {}, "execution") ? ["execution"] : []),
+    ...(Object.hasOwn(value || {}, "allowWhileRunning") ? ["allowWhileRunning"] : []),
   ])
     || !validCommandText(value.name, 128)
     || !/^[a-z0-9_][a-z0-9._:-]*$/u.test(value.name)
@@ -598,6 +649,7 @@ function validateRuntimeCommand(value) {
     || new Set(value.aliases).size !== value.aliases.length
     || value.aliases.includes(value.name)
     || (value.source !== undefined && !validCommandText(value.source, 256))
+    || (value.allowWhileRunning !== undefined && typeof value.allowWhileRunning !== "boolean")
     || (value.execution !== undefined && !["runtime", "client", "cli"].includes(value.execution))) failResponse();
   return cloneCanonical(value);
 }
@@ -779,10 +831,10 @@ function validateChatServiceResult(method, result) {
     }
     return { disposition: result.disposition, reason: result.reason, run };
   }
-  if (method === "chat.operation.get") {
+  if (method === "chat.operation.get" || method === "chat.operation.reconcile") {
     if (!exactObject(result, ["status", "run"])
-      || !["found", "unresolved"].includes(result.status)
-      || (result.status === "unresolved" && result.run !== null)
+      || !(method === "chat.operation.reconcile" ? ["found", "unresolved", "not_admitted"] : ["found", "unresolved"]).includes(result.status)
+      || (result.status !== "found" && result.run !== null)
       || (result.status === "found" && result.run === null)) failResponse();
     return { status: result.status, run: result.run === null ? null : validateRun(result.run) };
   }

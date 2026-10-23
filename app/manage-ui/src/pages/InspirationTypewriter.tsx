@@ -7,8 +7,15 @@ import screenDot from '../assets/inspiration-screen-dot.svg';
 import { inspirationSlogans, type InspirationSlogan, type InspirationSloganLocale } from './inspiration-slogans';
 import { createTypewriterSound } from './inspiration-typewriter-sound';
 
+// Keys land 70–130 ms apart, 100 ms on average, never metronomic; a slogan
+// keeps the same rhythm each time. After a stop or comma the hand rests.
+const PAUSE_AFTER = /[，。、！？；：,.!?;:]/;
+const keyDelay = (character: string, index: number) =>
+  70 + (character.codePointAt(0)! * 7 + index * 13) % 61 + (PAUSE_AFTER.test(character) ? 160 : 0);
+
 function IdlePrompt({ locale, active }: { locale: InspirationSloganLocale; active: boolean }) {
   const [visibleText, setVisibleText] = useState('');
+  const [phase, setPhase] = useState<'typing' | 'shown' | 'leaving'>('shown');
   const currentSlogan = useRef<InspirationSlogan | null>(null);
   const sound = useRef<ReturnType<typeof createTypewriterSound> | null>(null);
 
@@ -25,16 +32,21 @@ function IdlePrompt({ locale, active }: { locale: InspirationSloganLocale; activ
     let characters: string[] = [];
     const typeNext = () => {
       sound.current?.setTyping(true);
+      setPhase('typing');
       position++;
       setVisibleText(characters.slice(0, position).join(''));
       timer = window.setTimeout(position < characters.length ? typeNext : () => {
         sound.current?.setTyping(false);
-        timer = window.setTimeout(nextSlogan, 1900);
-      }, 100);
+        setPhase('shown');
+        timer = window.setTimeout(leave, 1900);
+      }, keyDelay(characters[position - 1], position - 1));
     };
+    // Fade the finished line out before the next one starts typing.
+    const leave = () => { setPhase('leaving'); timer = window.setTimeout(nextSlogan, 200); };
     const restart = () => {
       window.clearTimeout(timer);
       sound.current?.setTyping(false);
+      setPhase('shown');
       position = 0;
       const text = currentSlogan.current?.[locale] ?? '';
       characters = Array.from(text);
@@ -59,7 +71,7 @@ function IdlePrompt({ locale, active }: { locale: InspirationSloganLocale; activ
     };
   }, [locale, active]);
 
-  return <span data-typewriter-prompt="">{visibleText}</span>;
+  return <span data-typewriter-prompt="" data-phase={phase}>{visibleText}</span>;
 }
 
 export default function InspirationTypewriter({ children, accessory, saving, paperTone, ideaCount, paperRef, active = true }: {
@@ -74,6 +86,13 @@ export default function InspirationTypewriter({ children, accessory, saving, pap
   const viewportRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
   const focusPaper = () => paper.current?.querySelector('textarea')?.focus();
+  // A saved note rolls the counter up instead of swapping the digits in place.
+  const shownCount = useRef(ideaCount);
+  const [countTick, setCountTick] = useState(0);
+  useEffect(() => {
+    if (ideaCount !== null && shownCount.current !== null && ideaCount > shownCount.current) setCountTick(value => value + 1);
+    shownCount.current = ideaCount;
+  }, [ideaCount]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -113,7 +132,8 @@ export default function InspirationTypewriter({ children, accessory, saving, pap
           <span className={styles.displayText}><span className={styles.displayValue}>
           <span className={styles.displayGlyphs}>{saving ? t('inspiration.saving') : <IdlePrompt locale={locale} active={active} />}</span><i className={styles.cursor} />
         </span></span></span><span className={styles.ideaCount} data-inspiration-count={ideaCount ?? undefined}
-          lang={locale} title={ideaCount === null ? undefined : t('inspiration.count', { count: ideaCount })}>{ideaCount ?? '—'}</span></span>
+          lang={locale} title={ideaCount === null ? undefined : t('inspiration.count', { count: ideaCount })}>
+          <span key={countTick} className={styles.countValue} data-tick={countTick ? '' : undefined}>{ideaCount ?? '—'}</span></span></span>
       </button>
       {accessory}
     </div>

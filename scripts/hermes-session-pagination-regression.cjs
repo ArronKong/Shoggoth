@@ -11,6 +11,8 @@ const rows = Array.from({ length: 242 }, (_, index) => ({
   started_at: 1_800_000_000 - index,
   last_active: 1_800_000_100 - index,
   source: index % 3 === 0 ? "cron" : "cli",
+  model: "gpt-6-luna",
+  provider: "openai-codex",
 }));
 let servedRows = rows;
 
@@ -56,6 +58,8 @@ async function listen(handler) {
       200,
     );
     assert.equal(firstTwoPages.length, 200, "Hermes 0.20.4 的 100 条上限不能让 session 列表降级为空");
+    assert.ok(firstTwoPages.every(row => row.model === "gpt-6-luna" && row.modelProvider === "openai-codex"),
+      "REST 会话刷新必须保留模型和 provider 的配对，不能继承 Profile 默认供应商");
     assert.deepEqual(calls, [{ limit: 100, offset: 0 }, { limit: 100, offset: 100 }]);
     assert.equal(new Set(firstTwoPages.map((row) => row.key)).size, 200, "分页不得产生重复 session");
     assert.deepEqual(firstTwoPages.map((row) => row.source), rows.slice(0, 200).map((row) => row.source),

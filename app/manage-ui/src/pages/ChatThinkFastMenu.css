@@ -100,15 +100,18 @@
 /* Figma Group 364: 240×12; track 240×2 #d9d9d9 r=2; dots 6×6; thumb 12×12 */
 .think-fast-menu__slider {
   position: relative;
-  width: 240px;
+  width: calc(100% - 4px);
   height: 12px;
   margin: 0 2px;
   display: flex;
   align-items: center;
   touch-action: none;
+  user-select: none;
   cursor: pointer;
   outline: none;
 }
+/* A generous hit area without changing the compact popup's geometry. */
+.think-fast-menu__slider::before { content: ''; position: absolute; inset: -10px -12px; }
 .think-fast-menu__slider:focus-visible {
   outline: 2px solid var(--ui-focus);
   outline-offset: 4px;
@@ -121,11 +124,9 @@
   border-radius: 2px;
   background: var(--track);
 }
-/* Design keeps a uniform track — no progress fill. */
-.think-fast-menu__fill { display: none; }
 .think-fast-menu__dots {
   position: absolute;
-  left: 0; right: 0;
+  left: -3px; right: -3px;
   display: flex;
   justify-content: space-between;
   pointer-events: none;
@@ -138,30 +139,67 @@
   background: var(--dot);
   display: block;
 }
-.think-fast-menu__dots i.is-lit {
-  background: var(--dot);
+.think-fast-menu__thumb-position {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  pointer-events: none;
 }
+/* PillTabs / NavActiveBlob: the leading edge arrives first, the shape follows. */
+.think-fast-menu__slider[data-animate] .think-fast-menu__thumb-position {
+  transition: transform 250ms cubic-bezier(.22, .61, .36, 1);
+}
+.think-fast-menu__slider[data-dragging] .think-fast-menu__thumb-position { transition: none; }
+.think-fast-menu__slider[data-dragging],
+.think-fast-menu__slider[data-dragging] .think-fast-menu__thumb { cursor: grabbing; }
 .think-fast-menu__thumb {
   position: absolute;
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: var(--thumb);
-  pointer-events: none;
-  top: 50%;
+  pointer-events: auto;
+  cursor: grab;
   transform: translate(-50%, -50%);
 }
+.think-fast-menu__thumb::before { content: ''; position: absolute; inset: -10px; border-radius: 50%; }
+.think-fast-menu__thumb-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--thumb);
+  pointer-events: none;
+  transition: transform 120ms ease-out;
+}
+.think-fast-menu__slider[data-dragging] .think-fast-menu__thumb-fill { transform: scaleX(1.12) scaleY(.96); }
+@media (prefers-reduced-motion: reduce) {
+  .think-fast-menu__slider[data-animate] .think-fast-menu__thumb-position { transition: none; }
+  .think-fast-menu__slider[data-dragging] .think-fast-menu__thumb-fill,
+  .think-fast-menu__slider .think-fast-menu__thumb-fill { transform: none; transition: none; }
+}
 
-/* Face: Fast on → swap brain CSS icon for Figma 原版闪电（309:16240，11×13 slot 在 15px 对齐） */
-.chat-composer__bar .chat-pill--think.chat-pill--think-fast.is-fast {
-  background-image:
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='11' height='13' viewBox='0 0 11 13' fill='none'><path d='M0.760102 7.60791C0.849112 7.66825 0.952147 7.70008 1.05724 7.6997H4.94465C5.03448 7.69938 5.12304 7.72261 5.20274 7.76738C5.28243 7.81216 5.35088 7.87715 5.40221 7.95677C5.45354 8.0364 5.48622 8.12829 5.49745 8.22456C5.50868 8.32082 5.49812 8.4186 5.46668 8.50949L4.40042 12.1205C4.38371 12.1861 4.38815 12.2559 4.413 12.3184C4.43785 12.3809 4.48164 12.4325 4.53718 12.4646C4.59272 12.4966 4.65671 12.5074 4.71864 12.495C4.78057 12.4826 4.83677 12.4479 4.87801 12.3965L10.3759 6.27807C10.4421 6.18991 10.4838 6.08328 10.4962 5.97055C10.5085 5.85782 10.491 5.74363 10.4456 5.64124C10.4002 5.53885 10.3289 5.45246 10.2399 5.39211C10.1509 5.33176 10.0479 5.29993 9.94276 5.30032H6.05534C5.96551 5.30064 5.87695 5.27741 5.79726 5.23264C5.71757 5.18786 5.64912 5.12287 5.59779 5.04324C5.54646 4.96362 5.51378 4.87173 5.50255 4.77546C5.49132 4.6792 5.50188 4.58142 5.53332 4.49053L6.59958 0.879473C6.61629 0.813879 6.61185 0.744099 6.587 0.681589C6.56214 0.619078 6.51836 0.567551 6.46282 0.535465C6.40728 0.503378 6.34329 0.492639 6.28136 0.50501C6.21943 0.517381 6.16323 0.552127 6.12199 0.603544L0.624068 6.72195C0.55786 6.8101 0.516168 6.91674 0.503836 7.02947C0.491504 7.14219 0.509038 7.25639 0.5544 7.35878C0.599763 7.46117 0.671093 7.54756 0.760102 7.60791Z' stroke='black' stroke-linecap='round'/></svg>"),
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238993a3' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-size: 11px 13px, 0;
-  background-position: left 11px center, right 10px center;
-}
+/* Keep the original bolt shape in the face, with its own motion layer. */
+.chat-composer__bar .chat-pill--think.chat-pill--think-fast.is-fast,
 :root[data-theme="dark"] .chat-composer__bar .chat-pill--think.chat-pill--think-fast.is-fast {
-  background-image:
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='11' height='13' viewBox='0 0 11 13' fill='none'><path d='M0.760102 7.60791C0.849112 7.66825 0.952147 7.70008 1.05724 7.6997H4.94465C5.03448 7.69938 5.12304 7.72261 5.20274 7.76738C5.28243 7.81216 5.35088 7.87715 5.40221 7.95677C5.45354 8.0364 5.48622 8.12829 5.49745 8.22456C5.50868 8.32082 5.49812 8.4186 5.46668 8.50949L4.40042 12.1205C4.38371 12.1861 4.38815 12.2559 4.413 12.3184C4.43785 12.3809 4.48164 12.4325 4.53718 12.4646C4.59272 12.4966 4.65671 12.5074 4.71864 12.495C4.78057 12.4826 4.83677 12.4479 4.87801 12.3965L10.3759 6.27807C10.4421 6.18991 10.4838 6.08328 10.4962 5.97055C10.5085 5.85782 10.491 5.74363 10.4456 5.64124C10.4002 5.53885 10.3289 5.45246 10.2399 5.39211C10.1509 5.33176 10.0479 5.29993 9.94276 5.30032H6.05534C5.96551 5.30064 5.87695 5.27741 5.79726 5.23264C5.71757 5.18786 5.64912 5.12287 5.59779 5.04324C5.54646 4.96362 5.51378 4.87173 5.50255 4.77546C5.49132 4.6792 5.50188 4.58142 5.53332 4.49053L6.59958 0.879473C6.61629 0.813879 6.61185 0.744099 6.587 0.681589C6.56214 0.619078 6.51836 0.567551 6.46282 0.535465C6.40728 0.503378 6.34329 0.492639 6.28136 0.50501C6.21943 0.517381 6.16323 0.552127 6.12199 0.603544L0.624068 6.72195C0.55786 6.8101 0.516168 6.91674 0.503836 7.02947C0.491504 7.14219 0.509038 7.25639 0.5544 7.35878C0.599763 7.46117 0.671093 7.54756 0.760102 7.60791Z' stroke='%23e4e6eb' stroke-linecap='round'/></svg>"),
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238993a3' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-image: none;
 }
+.chat-pill--think-fast { position: relative; }
+.chat-pill--think-fast__bolt {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  width: 15px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.chat-pill--think-fast__bolt svg,
+.think-fast-menu__fast-btn svg {
+  transform-origin: center;
+  overflow: visible;
+}
+.chat-pill--think-fast__bolt svg,
+.think-fast-menu__fast-btn.is-on svg { fill: currentColor; }

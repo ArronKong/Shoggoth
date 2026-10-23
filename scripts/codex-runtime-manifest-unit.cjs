@@ -42,21 +42,65 @@ const PACKAGE_DIRECTORIES = [
   "bin",
   "codex-path",
   "codex-resources",
+  "codex-resources/voice",
+  "codex-resources/voice/bin",
+  "codex-resources/voice/lib",
+  "codex-resources/voice/licenses",
+  "codex-resources/voice/plugins",
   "codex-resources/zsh",
-  "codex-resources/zsh/bin",
+  "codex-resources/zsh/bin"
 ];
 const PACKAGE_EXECUTABLES = [
   "bin/codex",
   "bin/codex-code-mode-host",
   "codex-path/rg",
-  "codex-resources/zsh/bin/zsh",
+  "codex-resources/voice/bin/codex-voice-host",
+  "codex-resources/voice/lib/libffi.8.dylib",
+  "codex-resources/voice/lib/libgio-2.0.0.dylib",
+  "codex-resources/voice/lib/libglib-2.0.0.dylib",
+  "codex-resources/voice/lib/libgmodule-2.0.0.dylib",
+  "codex-resources/voice/lib/libgobject-2.0.0.dylib",
+  "codex-resources/voice/lib/libgstapp-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstaudio-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstbase-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstnet-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstpbutils-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstreamer-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstrtp-1.0.0.dylib",
+  "codex-resources/voice/lib/libgsttag-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstvideo-1.0.0.dylib",
+  "codex-resources/voice/lib/libintl.8.dylib",
+  "codex-resources/voice/lib/libopus.0.dylib",
+  "codex-resources/voice/lib/libpcre2-8.0.dylib",
+  "codex-resources/voice/lib/libz.1.dylib",
+  "codex-resources/voice/plugins/libgstapp.dylib",
+  "codex-resources/voice/plugins/libgstaudioconvert.dylib",
+  "codex-resources/voice/plugins/libgstaudioresample.dylib",
+  "codex-resources/voice/plugins/libgstcoreelements.dylib",
+  "codex-resources/voice/plugins/libgstopus.dylib",
+  "codex-resources/voice/plugins/libgstrtp.dylib",
+  "codex-resources/voice/plugins/libgstrtpmanager.dylib",
+  "codex-resources/zsh/bin/zsh"
 ];
-const PACKAGE_REGULAR_FILES = ["codex-package.json"];
+const PACKAGE_REGULAR_FILES = [
+  "codex-package.json",
+  "codex-resources/voice/NOTICE.md",
+  "codex-resources/voice/licenses/LGPL-2.1.txt",
+  "codex-resources/voice/licenses/Opus.txt",
+  "codex-resources/voice/licenses/PCRE2.md",
+  "codex-resources/voice/licenses/libffi.txt",
+  "codex-resources/voice/licenses/proxy-libintl.txt",
+  "codex-resources/voice/licenses/sljit.txt",
+  "codex-resources/voice/licenses/zlib.txt",
+  "codex-resources/voice/manifest.json",
+  "codex-resources/voice/runtime.json",
+  "codex-resources/voice/sources.json"
+];
 
 function packageMetadata(overrides = {}) {
   return {
     layoutVersion: 1,
-    version: "0.149.0",
+    version: "0.159.2",
     target: "aarch64-apple-darwin",
     variant: "codex",
     entrypoint: "bin/codex",
@@ -68,6 +112,7 @@ function packageMetadata(overrides = {}) {
 
 function packageEntries(overrides = {}) {
   return {
+    ...Object.fromEntries([...PACKAGE_EXECUTABLES, ...PACKAGE_REGULAR_FILES].map(name => [name, "fixture-resource\n"])),
     "bin/codex": "fixture-codex-binary\n",
     "bin/codex-code-mode-host": "fixture-code-mode-host\n",
     "codex-package.json": `${JSON.stringify(packageMetadata())}\n`,
@@ -139,7 +184,7 @@ function writeFixtureManifest(root, archivePath, overrides = {}) {
   const platform = {
     arch: "arm64",
     assetName: "codex-package-aarch64-apple-darwin.tar.gz",
-    archiveUrl: "https://github.com/openai/codex/releases/download/rust-v0.149.0/codex-package-aarch64-apple-darwin.tar.gz",
+    archiveUrl: "https://github.com/openai/codex/releases/download/rust-v0.159.2/codex-package-aarch64-apple-darwin.tar.gz",
     archiveSha256: sha256(archivePath),
     archiveSize: fs.statSync(archivePath).size,
     archiveEntry: "bin/codex",
@@ -155,7 +200,7 @@ function writeFixtureManifest(root, archivePath, overrides = {}) {
   };
   const manifest = {
     schemaVersion: 1,
-    runtime: { name: "codex", version: "0.149.0" },
+    runtime: { name: "codex", version: "0.159.2" },
     platforms: { "darwin-arm64": platform },
   };
   const fixtureManifestPath = path.join(root, `manifest-${crypto.randomUUID()}.json`);
@@ -282,13 +327,13 @@ async function main() {
     "version",
   ]);
   assert.equal(manifest.runtime.name, "codex");
-  assert.equal(manifest.runtime.version, "0.149.0");
+  assert.equal(manifest.runtime.version, "0.159.2");
   assert.equal(manifest.runtime.tag, `rust-v${manifest.runtime.version}`);
   assert.equal(
     manifest.runtime.releaseUrl,
     `https://github.com/openai/codex/releases/tag/${manifest.runtime.tag}`,
   );
-  assert.equal(manifest.runtime.publishedAt, "2026-08-20T21:04:55Z");
+  assert.equal(manifest.runtime.publishedAt, "2026-09-29T23:57:16Z");
   assert.equal(manifest.runtime.license, "Apache-2.0");
 
   assert.deepEqual(Object.keys(manifest.schema).sort(), ["directory", "includeExperimental", "version"]);
@@ -301,9 +346,9 @@ async function main() {
       arch: "arm64",
       assetName: "codex-package-aarch64-apple-darwin.tar.gz",
       archiveUrl:
-        "https://releases.openai.com/codex/releases/0.149.0/codex-package-aarch64-apple-darwin.tar.gz",
-      archiveSha256: "6c7589a52fe90e3742e35662115a4c55c39715601df0d41345ba8ec8f4221d4e",
-      archiveSize: 110045256,
+        "https://releases.openai.com/codex/releases/0.159.2/codex-package-aarch64-apple-darwin.tar.gz",
+      archiveSha256: "38aaf6dce63099fd10988948d03bbc6c0474253aef6961fcbe60f8d154b39101",
+      archiveSize: 129522674,
       archiveEntry: "bin/codex",
       destination: ".vendor/codex/arm64/package/bin/codex",
       packageDestination: ".vendor/codex/arm64/package",
@@ -318,9 +363,9 @@ async function main() {
       arch: "x64",
       assetName: "codex-package-x86_64-apple-darwin.tar.gz",
       archiveUrl:
-        "https://releases.openai.com/codex/releases/0.149.0/codex-package-x86_64-apple-darwin.tar.gz",
-      archiveSha256: "ba332e647cc898e3b4e86a3bc6e8db414a124eb88d8480f4707bbc66b0432f9d",
-      archiveSize: 119594797,
+        "https://releases.openai.com/codex/releases/0.159.2/codex-package-x86_64-apple-darwin.tar.gz",
+      archiveSha256: "6b9b38bfad6ac8019aa6a243ee3ab11d3e22889eafd5458b0344cf20e797e680",
+      archiveSize: 140813958,
       archiveEntry: "bin/codex",
       destination: ".vendor/codex/x64/package/bin/codex",
       packageDestination: ".vendor/codex/x64/package",
@@ -455,7 +500,7 @@ async function main() {
     ]);
     assert.deepEqual(result, {
       platform: "darwin-arm64",
-      version: "0.149.0",
+      version: "0.159.2",
       destination: installedPath,
       hostDestination: installedHostPath,
       packageDestination: path.join(repoRoot, ".vendor", "codex", "arm64", "package"),
@@ -619,7 +664,7 @@ async function main() {
     assert.throws(() => selectPlatforms("linux-x64", "darwin", "arm64"), /unsupported.*linux-x64/i);
 
     for (const url of [
-      "https://releases.openai.com/codex/releases/0.149.0/codex-fixture.tar.gz",
+      "https://releases.openai.com/codex/releases/0.159.2/codex-fixture.tar.gz",
       "https://github.com/openai/codex/releases/download/tag/asset.tar.gz",
       "https://release-assets.githubusercontent.com/github-production-release-asset/file?sp=signed",
       "https://objects.githubusercontent.com/github-production-release-asset/file?sig=signed",
@@ -636,7 +681,7 @@ async function main() {
     }
 
     const curlDownloadUrl =
-      "https://releases.openai.com/codex/releases/0.149.0/codex-fixture.tar.gz";
+      "https://releases.openai.com/codex/releases/0.159.2/codex-fixture.tar.gz";
     const curlCalls = [];
     const curlDestination = path.join(fixtureRoot, "curl-success.tar.gz");
     await downloadArchiveWithCurl(curlDownloadUrl, curlDestination, {

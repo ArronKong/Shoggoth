@@ -21,6 +21,7 @@ let McpAuthSecretStore;
 let McpSessionManager;
 let createMcpChallengeProof;
 let MCP_MAX_FRAME_BYTES;
+let MCP_MAX_CATALOG_FRAME_BYTES;
 let MCP_STDIO_PROTOCOL_VERSION;
 let authenticateMcpSession;
 let createMcpStdioHandler;
@@ -40,6 +41,7 @@ try {
   )));
   ({
     MCP_MAX_FRAME_BYTES,
+    MCP_MAX_CATALOG_FRAME_BYTES,
     MCP_STDIO_PROTOCOL_VERSION,
     authenticateMcpSession,
     createMcpStdioHandler,
@@ -71,7 +73,7 @@ async function listAllTools(handler, id) {
   do {
     const response = await handler({ jsonrpc: "2.0", id, method: "tools/list", params: cursor ? { cursor } : {} });
     assert.equal(response.error, undefined);
-    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MCP_MAX_FRAME_BYTES);
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MCP_MAX_CATALOG_FRAME_BYTES);
     tools.push(...response.result.tools);
     cursor = response.result.nextCursor;
     if (cursor) { assert.equal(cursors.has(cursor), false); cursors.add(cursor); }
@@ -232,7 +234,9 @@ test("MCP helper argv 同时绑定唯一非敏感 runtimeProfileId 与 runtimeAc
   assert.deepEqual(parseMcpRuntimeBinding(argv), {
     runtimeProfileId: "runtime-a",
     runtimeAccountId: "runtime-a-account",
+    toolExposure: "all",
   });
+  assert.equal(parseMcpRuntimeBinding([...argv, "--shoggoth-tool-exposure=resident"]).toolExposure, "resident");
   assert.equal(parseMcpRuntimeProfileId(argv), "runtime-a");
   for (const invalidArgv of [
     ["--shoggoth-internal-role=mcp"],
@@ -243,6 +247,10 @@ test("MCP helper argv 同时绑定唯一非敏感 runtimeProfileId 与 runtimeAc
     ["--shoggoth-runtime-profile=../escape", "--shoggoth-runtime-account=runtime-a-account"],
     ["--shoggoth-runtime-profile=runtime-a", "--shoggoth-runtime-account=runtime-a-account",
       "--shoggoth-mcp-token=fixture-secret-canary"],
+    ["--shoggoth-runtime-profile=runtime-a", "--shoggoth-runtime-account=runtime-a-account",
+      "--shoggoth-tool-exposure=all"],
+    ["--shoggoth-runtime-profile=runtime-a", "--shoggoth-runtime-account=runtime-a-account",
+      "--shoggoth-tool-exposure=resident", "--shoggoth-tool-exposure=resident"],
   ]) assert.throws(() => parseMcpRuntimeBinding(invalidArgv), /mcp_helper_arguments_invalid/u);
 });
 
@@ -1739,6 +1747,118 @@ test("默认 MCP Product Controller 装配 Service 状态、Token 用量与 Fede
   }
 });
 
+test("原生和外部 MCP helper 经认证 Service 共用只读帮助，外部不继承原生私人能力", async () => {
+  const paths = fixturePaths("sm-help-");
+  const safeStorage = fakeSafeStorage();
+  const service = createAgentService({ paths, safeStorage, version: "mcp-product-help" });
+  await service.start();
+  const handlers = [];
+  try {
+    const profile = service.productStore.listAgentProfiles()[0];
+    const session = await authenticateServiceSession(paths, safeStorage, profile.runtimeProfileId, profile.runtimeAccountId);
+    const trustedRun = trustedRunFixture(service, profile);
+    const native = createMcpStdioHandler({ paths, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId, sessionToken: session.token, requestService, bindRuntimeCalls: true });
+    handlers.push(native);
+    const { authenticateFederationMcpSession, EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS } = require("../app/shoggoth-mcp-helper");
+    const { federationMcpAuthPath } = require("../app/agent-service/federation-mcp-auth");
+    ensureFederationMcpCredential(paths);
+    const externalSession = await authenticateFederationMcpSession({ paths, client: "hermes",
+      runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId,
+      authFile: federationMcpAuthPath(paths), requestService });
+    const external = createMcpStdioHandler({ paths, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId, sessionToken: externalSession.token, requestService,
+      toolDefinitions: EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS });
+    handlers.push(external);
+    const beforeRuns = service.workDispatcher.listRuns().length;
+    const beforeIdeas = service.inspirationStore.list().length;
+    for (const handler of handlers) {
+      await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+        protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: { elicitation: {} },
+        clientInfo: { name: "product-help-integration", version: "1" },
+      } });
+      const tools = await listAllTools(handler, 2);
+      assert.equal(tools.some(tool => tool.name === "app_help_get"), true);
+      const call = (id, name, args) => handler({ jsonrpc: "2.0", id, method: "tools/call",
+        params: { name, arguments: args } }, { async requestClient(_, params) {
+          assert.ok(params._meta?.["shoggoth/runtime-call-binding"], "帮助查询不请求产品写入确认");
+          trustedRun.register(params); return { action: "accept", content: {} };
+        } });
+      const search = await call(3, "app_help_search", { query: "灵感是什么" });
+      assert.equal(search.result.isError, false, JSON.stringify(search));
+      assert.equal(search.result.structuredContent.items[0].featureId, "inspiration");
+      const help = await call(4, "app_help_get", { featureId: "inspiration" });
+      assert.equal(help.result.isError, false, JSON.stringify(help));
+      assert.match(help.result.structuredContent.summary, /灵感/);
+      assert.equal(help.result.structuredContent.title, "灵感便签");
+      assert.equal(help.result.structuredContent.actions.find(item => item.id === "delete").availability, "requires_confirmation");
+      const memory = await call(5, "app_help_get", { featureId: "memory" });
+      assert.equal(memory.result.isError, false, JSON.stringify(memory));
+      const state = memory.result.structuredContent.actions.find(item => item.id === "search");
+      assert.equal(state.availability, handler === external ? "unavailable" : "unknown");
+      if (handler === external) assert.equal(state.reason.code, "NATIVE_ONLY");
+      for (const [index, query] of ["Memo", "Sticky note", "Notes", "灵感便签", "SparkNotes"].entries()) {
+        const alias = await call(6 + index, "app_help_search", { query, locale: "en" });
+        assert.equal(alias.result.isError, false, JSON.stringify(alias));
+        assert.deepEqual(alias.result.structuredContent.items.map(item => item.featureId), ["inspiration"], query);
+        assert.equal(alias.result.structuredContent.items[0].title, "SparkNotes");
+      }
+      const englishHelp = await call(11, "app_help_get", { featureId: "inspiration", locale: "en" });
+      assert.equal(englishHelp.result.isError, false, JSON.stringify(englishHelp));
+      assert.equal(englishHelp.result.structuredContent.title, "SparkNotes");
+    }
+    assert.equal(service.workDispatcher.listRuns().length, beforeRuns);
+    assert.equal(service.inspirationStore.list().length, beforeIdeas);
+  } finally { handlers.forEach(handler => handler.close()); await service.stop({ notify: false }); }
+});
+
+test("常驻工具模式只列核心工具，入口工具按被调用工具自身的规则路由", async () => {
+  const { RESIDENT_PRODUCT_TOOLS } = require(path.join(ROOT, "app", "agent-service", "product-tool-exposure.js"));
+  const paths = fixturePaths("sm-resident-");
+  const safeStorage = fakeSafeStorage();
+  const service = createAgentService({ paths, safeStorage, version: "mcp-resident-tools" });
+  await service.start();
+  let handler;
+  try {
+    const profile = service.productStore.listAgentProfiles()[0];
+    const session = await authenticateServiceSession(paths, safeStorage, profile.runtimeProfileId, profile.runtimeAccountId);
+    const trustedRun = trustedRunFixture(service, profile);
+    handler = createMcpStdioHandler({ paths, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId, sessionToken: session.token, requestService, bindRuntimeCalls: true,
+      toolExposure: "resident" });
+    await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: { elicitation: {} },
+      clientInfo: { name: "resident-tools", version: "1" },
+    } });
+    const names = (await listAllTools(handler, 2)).map(tool => tool.name);
+    assert.equal(names.length, RESIDENT_PRODUCT_TOOLS.size + 3, "core tools, two entry tools and product_result_read");
+    for (const name of ["product_tool_search", "product_tool_call", "memory_save", "group_messages_read"]) {
+      assert.equal(names.includes(name), true, name);
+    }
+    assert.equal(names.includes("cron_list"), false, "non-core tools are found through product_tool_search");
+    const call = (id, name, args) => handler({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } },
+      { async requestClient(_, params) { trustedRun.register(params); return { action: "accept", content: {} }; } });
+    const found = await call(3, "product_tool_search", { query: "cron", limit: 3 });
+    assert.equal(found.result.isError, false, JSON.stringify(found));
+    assert.equal(found.result.structuredContent.tools[0].name, "cron_list");
+    assert.equal(found.result.structuredContent.tools[0].inputSchema.additionalProperties, false);
+    const index = await call(4, "product_tool_search", { query: "" });
+    assert.equal(index.result.structuredContent.index.cron.includes("cron_create"), true);
+    const cronArgs = { enabled: null, cursor: null, limit: 10 };
+    const direct = await call(5, "cron_list", cronArgs);
+    const routed = await call(6, "product_tool_call", { name: "cron_list", arguments: cronArgs });
+    assert.equal(direct.result.isError, false, JSON.stringify(direct));
+    assert.deepEqual(routed.result, direct.result, "a routed call returns the named tool's own result");
+    const invalidArgs = await call(7, "product_tool_call", { name: "cron_list", arguments: { limit: 0 } });
+    assert.equal(invalidArgs.result.isError, true, "the named tool's own schema still applies");
+    for (const [id, args] of [[8, { name: "product_tool_search", arguments: { query: "x" } }],
+      [9, { name: "no_such_tool", arguments: {} }], [10, { name: "cron_list" }]]) {
+      assert.equal((await call(id, "product_tool_call", args)).result.isError, true, JSON.stringify(args));
+    }
+    assert.equal((await call(11, "product_tool_search", { query: 1 })).result.isError, true);
+  } finally { handler?.close(); await service.stop({ notify: false }); }
+});
+
 test("完整 MCP helper 经认证 Service 操作灵感，确认删除并保留正常读写权限边界", async () => {
   const paths = fixturePaths("sm-idea-");
   const safeStorage = fakeSafeStorage();
@@ -2205,7 +2325,7 @@ test("MCP stdio 提供初始化、ping、固定产品工具与受控 request_use
   assert.equal(await handler({ jsonrpc: "2.0", method: "notifications/initialized" }), null);
   assert.deepEqual((await handler({ jsonrpc: "2.0", id: 3, method: "ping" })).result, {});
   const listed = await listAllTools(handler, 4);
-  assert.deepEqual(listed.map((tool) => tool.name), MCP_PRODUCT_TOOL_NAMES);
+  assert.deepEqual(listed.map((tool) => tool.name), [...MCP_PRODUCT_TOOL_NAMES, "product_result_read"]);
   const called = await handler({
     jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "profile_get", arguments: {} },
   });
@@ -2277,7 +2397,7 @@ test("MCP helper 将 12 个远程工具 exact 路由到 Service，非法 authori
     assert.equal(request.params.runtimeProfileId, "runtime-a");
     assert.equal(request.params.runtimeAccountId, runtimeAccountId("runtime-a"));
     assert.equal(request.params.callId,
-      `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`);
+      `00000000-0000-4000-8000-${String(index + 2).padStart(12, "0")}`);
     assert.equal(Object.hasOwn(request.params.arguments, "profileId"), false);
     assert.equal(Object.hasOwn(request.params.arguments, "createdAt"), false);
     assert.equal(Object.hasOwn(request.params.arguments, "operationId"), false);
@@ -2287,7 +2407,8 @@ test("MCP helper 将 12 个远程工具 exact 路由到 Service，非法 authori
     jsonrpc: "2.0", id: 99, method: "tools/call",
     params: { name: "run_get", arguments: { runId: "run-1", profileId: "attacker" } },
   });
-  assert.equal(invalid.error.code, -32602);
+  assert.equal(invalid.result.isError, true);
+  assert.deepEqual(invalid.result.structuredContent.error.problems, ["不支持参数 profileId"]);
   assert.equal(calls.length, before);
 });
 
@@ -2307,14 +2428,22 @@ test("MCP helper 在重复结构化结果超过帧预算时保留完整文本结
     params: { protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: {},
       clientInfo: { name: "fixture", version: "1" } },
   });
+  // Tools whose results must stay whole keep the full text when both copies exceed the frame.
   const response = await handler({
     jsonrpc: "2.0", id: 2, method: "tools/call",
-    params: { name: "profile_get", arguments: {} },
+    params: { name: "computer_status", arguments: {} },
   });
   assert.equal(response.result.isError, false);
   assert.deepEqual(JSON.parse(response.result.content[0].text), payload);
   assert.equal(Object.hasOwn(response.result, "structuredContent"), false);
   assert.ok(Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES);
+  // Other product tools return a preview and a resultRef instead (product-tool-results.js).
+  const paged = await handler({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "profile_get", arguments: {} },
+  });
+  assert.equal(paged.result.structuredContent.truncated, true);
+  assert.match(paged.result.structuredContent.resultRef, /^res-[0-9a-f]{24}$/u);
 });
 
 test("MCP helper session 失效重认证时复用同一 callId，hostile error code getter 不执行", async () => {
@@ -2414,7 +2543,8 @@ test("MCP stdio JSONL 有界串行处理，多帧响应不把 session token 写�
   assert.equal(responses[1].id, 1);
   assert.equal(responses[2].id, 2);
   assert.ok(responses[2].result.tools.length > 0);
-  assert.equal(typeof responses[2].result.nextCursor, "string");
+  assert.equal(responses[2].result.nextCursor, undefined);
+  assert.deepEqual(responses[2].result.tools.map(tool => tool.name), [...MCP_PRODUCT_TOOL_NAMES, "product_result_read"]);
   assert.equal(output.read().includes(token), false);
 });
 
@@ -2461,6 +2591,39 @@ test("完整 helper 入口通过 Service 握手后服务 stdio，EOF 清理且�
   } finally {
     await service.stop({ notify: false });
   }
+});
+
+test("authenticated helper reads and edits foreign Profile Cron through the real Service without UI permissions", async () => {
+  const paths = fixturePaths("sm-app-state-"), safeStorage = fakeSafeStorage();
+  const service = createAgentService({ paths, safeStorage, version: "app-state-fixture" }); await service.start(); let handler;
+  try {
+    const profile = service.productStore.listAgentProfiles()[0];
+    const foreign = { ...profile, id: "22222222-2222-4222-8222-222222222222", name: "Foreign Agent", agentId: "foreign-agent", runtimeProfileId: "foreign-runtime", isDefault: false };
+    service.productStore.putAgentProfile(foreign);
+    const { job } = await service.nativeDomainServiceController.handle("cron.job.create", { operationId: "app-state-foreign-job", profileId: foreign.id,
+      name: "Foreign Cron", prompt: "Fixture instructions", workspace: null, schedule: { kind: "every", everyMs: 60_000, anchorMs: 0 }, enabled: false,
+      misfirePolicy: "latest", maxCatchUp: 1, overlapPolicy: "skip", threadPolicy: "new", threadId: null, createdAt: Date.now() });
+    const session = await authenticateServiceSession(paths, safeStorage, profile.runtimeProfileId, profile.runtimeAccountId);
+    const trustedRun = trustedRunFixture(service, profile);
+    handler = createMcpStdioHandler({ paths, runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId,
+      sessionToken: session.token, requestService, bindRuntimeCalls: true });
+    await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+      capabilities: { elicitation: {} }, clientInfo: { name: "app-state-fixture", version: "1" } } });
+    let sequence = 2;
+    const call = (name, args) => handler({ jsonrpc: "2.0", id: sequence++, method: "tools/call", params: { name, arguments: args } }, {
+      requestClient: async (_, params) => {
+        if (params._meta?.["shoggoth/runtime-call-binding"]) { trustedRun.register(params); return { action: "accept", content: {} }; }
+        assert.match(params.message, /Foreign|cron_update/u); return { action: "accept", content: { confirm_product_action: "确认执行" } };
+      },
+    });
+    const read = await call("app_state_get", { section: "cron", cursor: null, limit: 50 }); assert.equal(read.result.isError, false, JSON.stringify(read));
+    const row = read.result.structuredContent.items.find(row => row.id === job.id); assert.equal(row.profileId, foreign.id);
+    const edited = await call("app_manage", { operation: "cron_update", backendId: foreign.backendId, targetProfileId: foreign.id,
+      expectedRevision: row.revision, arguments: { jobId: job.id, patch: { name: "Edited foreign Cron" } } });
+    assert.equal(edited.result.isError, false, JSON.stringify(edited));
+    const after = await call("app_state_get", { section: "cron", cursor: null, limit: 50 });
+    assert.equal(after.result.structuredContent.items.find(row => row.id === job.id).name, "Edited foreign Cron");
+  } finally { handler?.close(); await service.stop({ notify: false }); }
 });
 
 (async () => {

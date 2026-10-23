@@ -4,7 +4,7 @@ import type { EndpointMutationOutcome, EndpointMutationSession, EndpointMutation
 export function endpointMutationNotice(outcome: EndpointMutationOutcome):
   "syncPending" | "partiallyApplied" | "preflightBlocked" | "writeUnconfirmed" {
   if (outcome.status === "applied") return "syncPending";
-  if (outcome.steps.some((step) => step.status === "applied")) return "partiallyApplied";
+  if (outcome.configSaved || outcome.steps.some((step) => step.status === "applied" || step.configSaved)) return "partiallyApplied";
   if (["blocked", "failed"].includes(outcome.status) && outcome.stage === "preflight") return "preflightBlocked";
   return "writeUnconfirmed";
 }

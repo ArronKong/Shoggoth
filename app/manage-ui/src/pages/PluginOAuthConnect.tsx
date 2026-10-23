@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ApiError, connectPluginOAuth, getPluginOAuthFlow, type PluginOAuthFlow } from "../api/client";
 
-export function PluginOAuthConnect({ agentId, installationId, componentId, revision, disabled, connected, onReady }: {
+export function PluginOAuthConnect({ agentId, installationId, componentId, revision, disabled,
+  disabledReasonId, connected, onReady }: {
   agentId: string; installationId: string; componentId: string; revision: number;
-  disabled: boolean; connected: boolean; onReady: () => void;
+  disabled: boolean; disabledReasonId?: string; connected: boolean; onReady: () => void;
 }) {
   const { t } = useTranslation();
   const key = `shoggoth.plugin.oauth.${agentId}.${installationId}.${componentId}`;
@@ -80,7 +81,9 @@ export function PluginOAuthConnect({ agentId, installationId, componentId, revis
     finally { if (current === generation.current) setBusy(false); }
   };
   return <>
-    <button className="btn-secondary" type="button" disabled={disabled || busy || Boolean(flowId)} onClick={() => void connect()}>
+    <button className="btn-secondary" type="button" disabled={disabled || busy || Boolean(flowId)}
+      aria-describedby={disabledReasonId}
+      onClick={() => void connect()}>
       {t(connected ? "plugins.oauthReconnect" : "plugins.oauthConnect")}
     </button>
     {flowId && <><span role="status">{t("plugins.oauthPending")}</span>

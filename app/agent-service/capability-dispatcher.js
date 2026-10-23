@@ -2,6 +2,15 @@
 
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
+const { SOURCE_IDENTITY: LOVABLE_SOURCE, isLovableReadOnlyTool } =
+  require("./plugin-lovable-official-sidecar");
+const { SOURCE_IDENTITY: HIGGSFIELD_SOURCE } = require("./plugin-higgsfield-official-overlay");
+const { SOURCE_IDENTITY: SLACK_SOURCE } = require("./plugin-slack-official-sidecar");
+const { LEGACY_COMPONENT, PUBLIC_SCOPES, slackBindingComponent, slackDispatchToolAccess } =
+  require("./plugin-slack-access-policy");
+const { SOURCE_IDENTITY: CLOUDFLARE_SOURCE, cloudflareToolAccess } =
+  require("./plugin-cloudflare-access-policy");
+const { reservedEndpointKind } = require("./plugin-reserved-official-endpoints");
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_ARGUMENT_BYTES = 256 * 1024;
@@ -28,10 +37,11 @@ class CapabilityDispatcher {
   #policy;
   #resolveToolContract;
   #now;
+  #slackScopes;
   #tickets = new Map();
   #approvals = new Map();
 
-  constructor({ store, permissionEngine, resolveToolContract, now = Date.now } = {}) {
+  constructor({ store, permissionEngine, resolveToolContract, slackScopes = null, now = Date.now } = {}) {
     if (typeof store?.getCapabilityRecords !== "function"
       || typeof store?.beginCapabilityCall !== "function"
       || typeof store?.markCapabilityCallSendStarted !== "function"
@@ -44,6 +54,24 @@ class CapabilityDispatcher {
     this.#policy = permissionEngine;
     this.#resolveToolContract = resolveToolContract;
     this.#now = now;
+    this.#slackScopes = slackScopes;
+  }
+
+  #assertSlackTool(records, name) {
+    const scopes = typeof this.#slackScopes === "function"
+      ? this.#slackScopes(records.connection?.principalIdentity)
+      : slackBindingComponent(records) === LEGACY_COMPONENT ? PUBLIC_SCOPES : null;
+    const access = slackDispatchToolAccess(records, name, scopes);
+    if (!access.allowed || (access.requiresEachCall && records.grant?.approvalMode !== "each-call")) {
+      fail("CAPABILITY_FORBIDDEN", "Slack 当前账号权限、组件或逐次审批授权不允许此工具");
+    }
+  }
+
+  #assertCloudflareTool(records, name) {
+    const access = cloudflareToolAccess(records, name);
+    if (!access.allowed || (access.requiresEachCall && records.grant?.approvalMode !== "each-call")) {
+      fail("CAPABILITY_FORBIDDEN", "Cloudflare 工具超出已核对清单或缺少逐次审批");
+    }
   }
 
   #approvalFingerprint({ callId, authority, execution, envelope, bindingId,
@@ -112,6 +140,24 @@ class CapabilityDispatcher {
     const argumentDigest = digest(args);
     const records = this.#store.getCapabilityRecords(bindingId, toolIdentity);
     if (!records) fail("CAPABILITY_FORBIDDEN", "能力绑定不存在");
+    const official = reservedEndpointKind(records.connection?.endpointIdentity);
+    if ((official === "lovable") !== (records.installation?.sourceIdentity === LOVABLE_SOURCE)
+      || (official === "higgsfield") !== (records.installation?.sourceIdentity === HIGGSFIELD_SOURCE)
+      || (official === "slack") !== (records.installation?.sourceIdentity === SLACK_SOURCE)
+      || (official === "cloudflare") !== (records.installation?.sourceIdentity === CLOUDFLARE_SOURCE)
+      || (official === "dropbox") !== (records.installation?.sourceIdentity === "bundled:dropbox")) {
+      fail("CAPABILITY_FORBIDDEN", "官方 MCP 端点来源不匹配");
+    }
+    if (official === "lovable" && !isLovableReadOnlyTool(downstreamToolName)) {
+      fail("CAPABILITY_FORBIDDEN", "Lovable 工具超出当前只读授权范围");
+    }
+    if (official === "higgsfield") {
+      fail("CAPABILITY_FORBIDDEN", "Higgsfield 生成工具尚未通过真实合同与计费验收");
+    }
+    if (official === "slack") this.#assertSlackTool(records, downstreamToolName);
+    if (records.installation?.sourceIdentity === CLOUDFLARE_SOURCE) {
+      this.#assertCloudflareTool(records, downstreamToolName);
+    }
     const catalogRevision = this.#assertToolContract(records, toolIdentity,
       downstreamToolName, contractDigest);
     const approved = this.#approvals.get(approvalReceipt);
@@ -171,6 +217,24 @@ class CapabilityDispatcher {
       }
       const records = this.#store.getCapabilityRecords(ticket.bindingId, ticket.toolIdentity);
       if (!records) fail("GRANT_REVOKED", "能力绑定已移除");
+      const official = reservedEndpointKind(records.connection?.endpointIdentity);
+      if ((official === "lovable") !== (records.installation?.sourceIdentity === LOVABLE_SOURCE)
+        || (official === "higgsfield") !== (records.installation?.sourceIdentity === HIGGSFIELD_SOURCE)
+        || (official === "slack") !== (records.installation?.sourceIdentity === SLACK_SOURCE)
+        || (official === "cloudflare") !== (records.installation?.sourceIdentity === CLOUDFLARE_SOURCE)
+        || (official === "dropbox") !== (records.installation?.sourceIdentity === "bundled:dropbox")) {
+        fail("CAPABILITY_FORBIDDEN", "官方 MCP 端点来源不匹配");
+      }
+      if (official === "lovable" && !isLovableReadOnlyTool(toolName)) {
+        fail("CAPABILITY_FORBIDDEN", "Lovable 工具超出当前只读授权范围");
+      }
+      if (official === "higgsfield") {
+        fail("CAPABILITY_FORBIDDEN", "Higgsfield 生成工具尚未通过真实合同与计费验收");
+      }
+      if (official === "slack") this.#assertSlackTool(records, toolName);
+      if (records.installation?.sourceIdentity === CLOUDFLARE_SOURCE) {
+        this.#assertCloudflareTool(records, toolName);
+      }
       if (records.grant?.approvalMode === "each-call"
         && this.#approvals.get(ticket.approvalReceipt)?.ticketId !== ticketId) {
         fail("CAPABILITY_FORBIDDEN", "调用审批收据已失效或已消费");

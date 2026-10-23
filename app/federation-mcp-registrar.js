@@ -9,6 +9,7 @@ const {
   federationMcpAuthPath,
 } = require("./agent-service/federation-mcp-auth");
 const { DEFAULT_RUNTIME_PROFILE_ID } = require("./agent-service/product-store");
+const { DEFAULT_SERVER_REQUEST_TIMEOUT_MS } = require("./agent-service/interactive-timeouts");
 const {
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
 } = require("./agent-service/runtime-account");
@@ -65,7 +66,9 @@ function openClawConfig(options) {
   return {
     ...launchBase(options, "openclaw"),
     connectionTimeoutMs: 10_000,
-    requestTimeoutMs: 120_000,
+    // The shared tool surface can await approval and then run a bounded plugin
+    // call; its transport must cover both windows plus the Service reply grace.
+    requestTimeoutMs: 2 * DEFAULT_SERVER_REQUEST_TIMEOUT_MS + 45_000,
     supportsParallelToolCalls: true,
     codex: { defaultToolsApprovalMode: "auto" },
   };
@@ -88,6 +91,7 @@ function createFederationMcpRegistrar(options = {}) {
     || (options.runtimeAccountId !== undefined
       && (!RUNTIME_ACCOUNT_PATTERN.test(options.runtimeAccountId)))
     || (options.getHermesMode !== undefined && typeof options.getHermesMode !== "function")
+    || (options.getOpenClawMode !== undefined && typeof options.getOpenClawMode !== "function")
     || (options.listHermesProfiles !== undefined
       && typeof options.listHermesProfiles !== "function")) {
     throw new TypeError("Federation MCP registrar 配置无效");
@@ -110,7 +114,7 @@ function createFederationMcpRegistrar(options = {}) {
       if (options.packaged !== true) return { skipped: "not-packaged", openclaw: false, hermes: [] };
       ensureFederationMcpCredential(settings.paths);
       let openclaw = false;
-      try {
+      if (settings.getOpenClawMode?.() !== "managed") try {
         await execute(settings.openclawBin, [
           "mcp", "set", SERVER_NAME, JSON.stringify(openClawConfig(settings)),
         ]);
@@ -119,7 +123,7 @@ function createFederationMcpRegistrar(options = {}) {
       } catch {}
 
       const hermes = [];
-      if ((settings.getHermesMode?.() || "local") !== "remote") {
+      if (!["remote", "managed"].includes(settings.getHermesMode?.() || "local")) {
         let profiles;
         try {
           profiles = settings.listHermesProfiles

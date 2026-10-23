@@ -94,7 +94,7 @@ export default function AgentRuntimeBindings({ backend, agentId, onChanged }: {
           </div>
           {!binding.enabled && <p className="ui-hint">{t("agents.bindingDisabled")}</p>}
           {availability?.available === false && <p className={styles.error}>{t(availability.reason === "runtime-disabled"
-            ? "agents.bindingRuntimeDisabled" : availability.reason === "runtime-not-installed"
+            ? "agents.bindingRuntimeDisabled" : availability.reason === "runtime-incompatible" ? "settings.runtimeIncompatible" : availability.reason === "runtime-not-installed"
               ? "agents.sessionRuntimeNotInstalled" : "agents.bindingRuntimeUnavailable")}</p>}
           {accounts.data && !account && <p className={styles.error}>{t("agents.bindingAccountMissing")}</p>}
           {editing === binding.id && <div className={styles.editor}>

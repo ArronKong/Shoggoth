@@ -11,6 +11,7 @@ const { DEFAULT_TEMPLATE_VERSION, DEFAULT_DOCUMENTS,
   VIEW_HEADERS, EMPTY_VIEW_MESSAGES, createDefaultDocuments } = require("../app/agent-service/agent-definition-defaults");
 const { DEFAULT_TOOL_REGISTRY } = require("../app/agent-service/mcp-product-tool-controller");
 const NATIVE_PROFILES = [defaultAgentProfile(500), ...BUILTIN_CLI_AGENT_PROFILES];
+const { createLegacyV4Identity } = require("../app/agent-service/agent-definition-legacy-defaults");
 
 function fixture(t) {
   const value = contextFixture();
@@ -27,6 +28,31 @@ function update(f, id, documents, actor = "user") {
     actor, documents });
 }
 
+test("English defaults keep completed v4 identities and recover only untouched bootstrap documents", (t) => {
+  const f = fixture(t), name = "Reader", initialIdentity = "用户明确指定的身份，保持原文。";
+  const legacy = createLegacyV4Identity(name);
+  for (const complete of [false, true]) {
+    const id = `v4-create-${complete}`;
+    const old = f.definitions._commit({ profileId: id, expectedRevision: 0, actor: "bootstrap", reason: "default-profile:v4",
+      documents: { ...createDefaultDocuments(name), IDENTITY: legacy + (complete ? `\n## 用户指定的身份与职责\n\n${initialIdentity}\n` : ""), AGENTS: "用户已保存的旧工作约定。" } });
+    const current = f.definitions.ensureProfile({ profileId: id, profileName: name, initialIdentity });
+    assert.equal(current.documents.AGENTS, old.documents.AGENTS);
+    assert.equal(current.documents.IDENTITY.includes(initialIdentity), true);
+    if (complete) assert.deepEqual(current, old, "an already-completed v4 operation replays without rewriting its saved identity");
+    else {
+      assert.equal(current.manifest.revision, old.manifest.revision + 1);
+      assert.match(current.documents.IDENTITY, /## User-provided identity and responsibilities/u);
+      assert.equal(f.definitions.readRevision(id, old.manifest.revision).documents.IDENTITY, legacy);
+    }
+    assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: name, initialIdentity }), current);
+  }
+  const id = "v4-user-edited";
+  f.definitions._commit({ profileId: id, expectedRevision: 0, actor: "bootstrap", reason: "default-profile:v4", documents: { ...createDefaultDocuments(name), IDENTITY: legacy } });
+  update(f, id, { IDENTITY: legacy + "\n用户编辑。" });
+  update(f, id, { IDENTITY: legacy });
+  assert.throws(() => f.definitions.ensureProfile({ profileId: id, profileName: name, initialIdentity }), { code: "DEFINITION_REVISION_CONFLICT" });
+});
+
 test("untouched v3 AGENTS upgrades once while preserving its saved revision", (t) => {
   const f = fixture(t);
   const id = "v3-memory-default";
@@ -36,7 +62,7 @@ test("untouched v3 AGENTS upgrades once while preserving its saved revision", (t
   assert.equal(upgraded.manifest.revision, old.manifest.revision + 1);
   assert.equal(upgraded.manifest.reason, `default-template:v${DEFAULT_TEMPLATE_VERSION}`);
   assert.equal(upgraded.documents.AGENTS, DEFAULT_DOCUMENTS.AGENTS);
-  assert.match(upgraded.documents.AGENTS, /后台提炼只生成待用户审核的候选/u);
+  assert.match(upgraded.documents.AGENTS, /Background extraction creates review candidates/u);
   assert.deepEqual(f.definitions.readRevision(id, old.manifest.revision).documents, old.documents);
   assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: "Current" }), upgraded);
 });
@@ -62,8 +88,8 @@ test("generated MEMORY view distinguishes immediate saves from review candidates
   const f = fixture(t);
   f.memoryEngine.rebuildViews("profile-1");
   const view = f.definitions.readGeneratedView("profile-1", "MEMORY").content;
-  assert.match(view, /前台 memory_save 保存成功即生效/u);
-  assert.match(view, /后台提炼的候选须由用户审核接受后/u);
+  assert.match(view, /successful foreground memory_save takes effect immediately/u);
+  assert.match(view, /Background candidates enter this file only after the user reviews and accepts them/u);
   assert.doesNotMatch(view, /没有待确认队列/u);
 });
 

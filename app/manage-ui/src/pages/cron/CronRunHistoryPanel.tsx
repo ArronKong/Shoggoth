@@ -23,6 +23,7 @@ export default function CronRunHistoryPanel({
   setFilters,
   onRefresh,
   onOpenChat,
+  isCodex = false, onOpenResult, error, nextOffset, onPage,
 }: {
   kind: BackendCronKind;
   runs: CronRun[] | null;
@@ -31,6 +32,8 @@ export default function CronRunHistoryPanel({
   setFilters: (filters: CronRunsFilters) => void;
   onRefresh: () => void;
   onOpenChat?: (sessionKey: string) => void;
+  isCodex?: boolean; onOpenResult?: (run: CronRun) => void; error?: string | null;
+  nextOffset?: number | null; onPage?: (offset: number) => void;
 }) {
   const { t } = useTranslation();
   // 局部更新运行历史筛选项，并交给父级重新拉取数据。
@@ -40,12 +43,12 @@ export default function CronRunHistoryPanel({
   return (
     <div className="run-history-panel">
       <div className="run-history-tools">
-        <Select value={filters.status || "all"} onChange={(event) => set("status", event === "all" ? undefined : event)}>
+        {!isCodex && <Select value={filters.status || "all"} onChange={(event) => set("status", event === "all" ? undefined : event)}>
           <Option value="all">{t("cronForm.runsAllStatuses")}</Option>
           <Option value="ok">ok</Option>
           <Option value="error">error</Option>
           <Option value="skipped">skipped</Option>
-        </Select>
+        </Select>}
         {kind === "openclaw" && (
           <Select
             value={filters.deliveryStatus || "all"}
@@ -58,21 +61,22 @@ export default function CronRunHistoryPanel({
             <Option value="not-requested">not-requested</Option>
           </Select>
         )}
-        <TextInput
+        {!isCodex && <TextInput
           value={filters.query || ""}
           onChange={(event) => set("query", event.target.value)}
           placeholder={t("cronForm.runsSearchPlaceholder")}
-        />
-        <Select value={filters.sortDir || "desc"} onChange={(event) => set("sortDir", event as CronRunsFilters["sortDir"])}>
+        />}
+        {!isCodex && <Select value={filters.sortDir || "desc"} onChange={(event) => set("sortDir", event as CronRunsFilters["sortDir"])}>
           <Option value="desc">{t("cronForm.runsSortNewest")}</Option>
           <Option value="asc">{t("cronForm.runsSortOldest")}</Option>
-        </Select>
+        </Select>}
         <button onClick={onRefresh} disabled={loading}>{t("cronForm.runsRefresh")}</button>
       </div>
+      {error && <p className="codex-source-error" role="alert">{error}</p>}
       {loading ? (
         <p className="muted">{t("common.loading")}</p>
       ) : runs === null || runs.length === 0 ? (
-        <p className="muted">{t("cronForm.runsEmpty")}</p>
+        !error ? <p className="muted">{t("cronForm.runsEmpty")}</p> : null
       ) : (
         <div className="run-list">
           {runs.map((run, index) => {
@@ -84,13 +88,13 @@ export default function CronRunHistoryPanel({
                 <div className="run-outcomes">
                   <div className={`run-outcome run-outcome--${execution.tone}`} data-outcome="execution">
                     <span className="run-outcome__label">{t("cronForm.runExecutionResult")}</span>
-                    <span className={`status status-${execution.value}`}>{execution.value}</span>
+                    <span className={`status status-${execution.value}`}>{isCodex ? t(`codexAutomation.statuses.${run.executionStatus || execution.value}`, { defaultValue: execution.value }) : execution.value}</span>
                     {execution.detail && <span className="run-outcome__detail">{execution.detail}</span>}
                   </div>
                   {delivery && (
                     <div className={`run-outcome run-outcome--${delivery.tone}`} data-outcome="delivery">
                       <span className="run-outcome__label">{t("cronForm.runDeliveryResult")}</span>
-                      <span className={`status status-${delivery.value}`}>{delivery.value}</span>
+                      <span className={`status status-${delivery.value}`}>{delivery.value === "silent" ? t("cron.silentComplete") : delivery.value}</span>
                       {delivery.detail && <span className="run-outcome__detail">{delivery.detail}</span>}
                     </div>
                   )}
@@ -103,9 +107,13 @@ export default function CronRunHistoryPanel({
                   )}
                 </div>
                 <div className="run-row__meta">
+                  {isCodex && <span>{t(`codexAutomation.origins.${run.executionOrigin || "shoggoth"}`)}</span>}
+                  {run.reviewStatus && <span className="muted">{t("codexAutomation.reviewStatus", { status: run.reviewStatus })}</span>}
                   <span className="mono">{fmtTime(run.startedAt)}</span>
                   {typeof run.durationMs === "number" && <span className="muted">{Math.round(run.durationMs / 100) / 10}s</span>}
                   {run.model && <span className="muted">{run.provider ? `${run.provider}/` : ""}{run.model}</span>}
+                  {run.reasoningEffort && <span className="muted">{t(`codexAutomation.efforts.${run.reasoningEffort}`, { defaultValue: run.reasoningEffort })}</span>}
+                  {isCodex && run.runId && onOpenResult && <button type="button" onClick={() => onOpenResult(run)}>{t("codexAutomation.result")}</button>}
                   {run.runId && <span className="mono muted">{run.runId}</span>}
                   {kind !== "native" && run.sessionKey && <span className="mono muted">{run.sessionKey}</span>}
                   {kind === "native" && run.sessionKey && onOpenChat && (
@@ -118,6 +126,10 @@ export default function CronRunHistoryPanel({
           })}
         </div>
       )}
+      {isCodex && onPage && <div className="codex-run-pagination">
+        <button type="button" disabled={loading || !(filters.offset || 0)} onClick={() => onPage(Math.max(0, (filters.offset || 0) - 20))}>{t("codexAutomation.previous")}</button>
+        <button type="button" disabled={loading || nextOffset == null} onClick={() => onPage(nextOffset!)}>{t("codexAutomation.next")}</button>
+      </div>}
     </div>
   );
 }

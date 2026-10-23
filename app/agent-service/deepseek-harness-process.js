@@ -1,8 +1,9 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
 const { DeepSeekHarnessJsonlDecoder, encodeDeepSeekHarnessMessage } = require("./deepseek-harness-jsonl");
-const { serverRequestUsesApprovalWait } = require("./interactive-timeouts");
+const { serverRequestUsesApprovalWait, DEFAULT_SERVER_REQUEST_TIMEOUT_MS } = require("./interactive-timeouts");
 const { serviceError } = require("./security");
 
 function processError(code, message) {
@@ -27,6 +28,7 @@ class DeepSeekHarnessProcess {
     const child = options.child;
     if (!child || !child.stdin || !child.stdout || !child.stderr
       || typeof child.on !== "function" || typeof child.kill !== "function") {
+      retireFailedSpawn(child);
       throw processError(
         "DEEPSEEK_HARNESS_PROCESS_INVALID",
         "DeepSeek process pipes are invalid",
@@ -38,7 +40,7 @@ class DeepSeekHarnessProcess {
       maxStreamBytes: options.maxStreamBytes,
     });
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
-    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs ?? 310_000;
+    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs ?? DEFAULT_SERVER_REQUEST_TIMEOUT_MS;
     this.onEvent = typeof options.onEvent === "function" ? options.onEvent : () => {};
     this.onServerRequest = typeof options.onServerRequest === "function"
       ? options.onServerRequest : null;
@@ -136,7 +138,7 @@ class DeepSeekHarnessProcess {
   }
 
   kill(signal = "SIGTERM") {
-    try { this.child.kill(signal); } catch {}
+    try { killStartedChild(this.child, signal); } catch {}
   }
 
   _onData(chunk) {
@@ -166,7 +168,7 @@ class DeepSeekHarnessProcess {
           "DeepSeek Bridge protocol is unsupported",
         );
       }
-      this.resolveReady();
+      this.resolveReady(message);
       return;
     }
     if (message.type === "response") {

@@ -277,6 +277,12 @@ function projectStandingGrantRevokeForBrowser(result) {
  *
  * Lifecycle: constructor → start() → [serve traffic] → stop()
  */
+function groupChatUnsupported(backendId) {
+  const error = new Error(`${backendId}: Group chat not supported`);
+  error.code = "GROUP_CHAT_UNAVAILABLE";
+  return error;
+}
+
 class AgentBackend {
   constructor() {
     this._inspirationOwner = null;
@@ -299,7 +305,7 @@ class AgentBackend {
    *     archive: boolean, restore: boolean, readStates: boolean},
    *   surfaces: {chat: boolean, agents: boolean, models: boolean, skills: boolean,
    *     usage: boolean, oauth: boolean, dashboardRuns: boolean, agentHarness: boolean,
-   *     nativeCapacity?: boolean, runtimeBindings?: boolean, runtimeStatus?: boolean,
+   *     nativeCapacity?: boolean, nativeMemoryConfig?: boolean, nativeMemorySharingConfig?: boolean, runtimeBindings?: boolean, runtimeStatus?: boolean,
    *     cron: null|{kind: "openclaw"|"hermes"|"native"},
    *     kanban: null|{kind: "workboard"|"hermes"|"native"}}}}
    */
@@ -313,12 +319,23 @@ class AgentBackend {
   /** Local CLI inventory, separate from backend/Agent ownership. Read-only;
    * ready means executable available and Service connected, not verified login.
    * Never starts a CLI, model turn, auth flow, or scans runtime Home contents.
-   * @returns {Promise<Array<{runtime:string,name:string,runtimeAccountId:string,enabled:boolean,releaseEnabled:boolean,installation:"available"|"unavailable"|"unknown",serviceConnected:boolean}>>}
+   * `installsOnSignIn` marks a runtime whose sign-in installs it when missing.
+   * @returns {Promise<Array<{runtime:string,name:string,runtimeAccountId:string,enabled:boolean,releaseEnabled:boolean,installation:"available"|"unavailable"|"unknown",installsOnSignIn:boolean,serviceConnected:boolean}>>}
    */
   async getRuntimeStatuses() { return []; }
 
+  /**
+   * Called after Settings saved a change to the disconnected backends or local
+   * CLIs. A backend can react without being restarted; the default does nothing.
+   */
+  onConnectionsChanged() {}
+
   /** Apply a validated revisioned core config projection to the native Service. */
   async applyNativeRuntimeConfig(projection) { throw new Error(`${this.id}: applyNativeRuntimeConfig() not supported`); }
+  async applyNativeMemoryConfig(projection) { throw new Error(`${this.id}: applyNativeMemoryConfig() not supported`); }
+  /** Independent read-only sharing policy; only native Profiles can participate. */
+  async applyNativeMemorySharingConfig(projection) { throw new Error(`${this.id}: applyNativeMemorySharingConfig() not supported`); }
+  async getNativeMemorySharingContext() { throw new Error(`${this.id}: getNativeMemorySharingContext() not supported`); }
 
   /**
    * Start the backend. Called once during app boot.
@@ -398,6 +415,14 @@ class AgentBackend {
    * @returns {Array<{id: string, name: string}>}
    */
   getAgents() { return []; }
+
+  /**
+   * Current chat roster and whether absence proves an Agent was removed.
+   * A starting/unavailable backend must return complete:false so callers keep
+   * its last known membership instead of treating a partial list as deletion.
+   * @returns {{agents: Array<object>, complete: boolean}}
+   */
+  getAgentsSnapshot() { return { agents: this.getAgents(), complete: true }; }
 
   /**
    * Return available model choices for the UI dropdown.
@@ -481,6 +506,8 @@ class AgentBackend {
    * Native packages are identified by (id, source, version), scoped to agentId.
    * Name-only operations are accepted only when that name resolves uniquely.
    * Powers the Skills management page. Default: none.
+   * opts.strict: report an upstream read failure instead of an empty inventory.
+   * @param {object} [opts]
    * @returns {Promise<Array<object>>}
    */
   async getSkills(_opts = {}) { return []; }
@@ -507,8 +534,11 @@ class AgentBackend {
    * @returns {Promise<{columns: Array<object>, capabilities?: object}>}
    */
   async getTaskBoard(_opts) { return { columns: [] }; }
-  /** Hermes multi-board: list boards (slug/name/total/current). Default: none. */
-  async getBoards() { return []; }
+  /**
+   * Multi-board inventory (slug/name/total/current). Default: none.
+   * @param {{strict?: boolean}} [opts] strict reports upstream read failures.
+   */
+  async getBoards(_opts = {}) { return []; }
   async createBoard(_spec) { throw new Error(`${this.id}: createBoard() not supported`); }
   async switchBoard(_slug) { throw new Error(`${this.id}: switchBoard() not supported`); }
   async deleteBoard(_slug, _hard) { throw new Error(`${this.id}: deleteBoard() not supported`); }
@@ -733,6 +763,10 @@ class AgentBackend {
 
   /**
    * Fetch message history for a session.
+   * An optional subclass watchSession(sessionKey, hooks, {signal, history})
+   * observes an existing run after this page is queued to the same consumer.
+   * `history` is that exact getHistory result, used only to avoid replaying
+   * already rendered message identities; it grants no execution authority.
    * `id` (when present) is a per-message stable identifier the chat UI keys its
    * client-side pin / local-hide on; omit it only when no stable id exists.
    * `notice` marks a **timeline row** rather than a real turn (currently only
@@ -740,9 +774,26 @@ class AgentBackend {
    * carry the new identity, `content` keeps the backend's raw text for hover
    * triage. Without it a `role:"system"` row renders as a red ERROR bubble.
    * @param {string} sessionKey  e.g. "agent:hermes-default:abc-123"
-   * @returns {Promise<{messages: Array<{role: string, id?: string, notice?: string, model?: string, provider?: string, content: Array<{type: string, text: string}>}>}>}
+   * @param {{cursor?: string|null, limit?: number}} [options] Optional backward
+   *        pagination. Pages remain chronological; messages precede the page
+   *        previously loaded. Backends without pagination keep their full result.
+   * @returns {Promise<{messages: Array<{role: string, id?: string, notice?: string, model?: string, provider?: string, content: Array<{type: string, text: string}>}>, hasMore?: boolean, nextCursor?: string|null}>}
    */
-  async getHistory(sessionKey) { return { messages: [] }; }
+  async getHistory(sessionKey, options = {}) { return { messages: [] }; }
+
+  /**
+   * Bounded, backward history transport for the shared chat reader. Unlike
+   * getHistory (also used by previews/audits), this must never read the entire
+   * transcript. Rows are chronological, complete messages; tool/hidden rows do
+   * not define the UI's page size. The UI fills 50 visible messages from these
+   * pages. Cursors are opaque, session/source-bound and fail explicitly if stale.
+   * @param {string} sessionKey
+   * @param {{cursor?: string|null, limit?: number}} options 1..100 transport rows
+   * @returns {Promise<{messages: Array, hasMore: boolean, nextCursor: string|null, sourceId: string}>}
+   */
+  async getHistoryPage(sessionKey, options = {}) {
+    throw Object.assign(new Error("历史分页暂不可用"), { code: "CHAT_HISTORY_UNSUPPORTED" });
+  }
 
   /**
    * Create a new session for the given agent.
@@ -762,7 +813,10 @@ class AgentBackend {
    *
    * Hooks (all optional; a backend emits what its transport can source):
    *   delta(text)                 — FULL accumulated answer text so far
-   *   interim(text)               — the stream so far is SEALED as its own
+   *   interim(text, meta?)        — meta.activityId identifies public progress
+   *                                 to show in the shared activity timeline;
+   *                                 absent metadata keeps ordinary commentary.
+   *                                 The stream so far is SEALED as its own
    *                                 segment (commentary between tool calls);
    *                                 the eventual final carries only the LAST
    *                                 segment. UI settles the pending bubble and
@@ -782,7 +836,9 @@ class AgentBackend {
    *   plan(entries)               — agent todo list ([{content, status?}])
    *   status({kind, text, reason?, queuedAt?}) — session progress: queued,
    *                                 starting, running, retrying, waiting_approval/input,
-   *                                 compacting or compacted. Queue timestamps
+   *                                 compacting or compacted. An observer's idle
+   *                                 confirms no active chat run; it does not
+   *                                 settle an uncertain send receipt. Queue timestamps
    *                                 use milliseconds since the Unix epoch.
    *   prompt(InteractiveRequestV1 | legacyPrompt)
    *                               — the agent BLOCKED on a user answer. Shoggoth
@@ -813,6 +869,24 @@ class AgentBackend {
   }
 
   /**
+   * Observe an original send without replaying it. A backend may advertise
+   * canReconcile only if it can durably prove and fence non-admission.
+   * @returns {Promise<{status:string, run:object|null, canReconcile?:boolean}>}
+   */
+  async getChatOperation(sessionKey, idempotencyKey) {
+    return { status: "unresolved", run: null };
+  }
+
+  /**
+   * Reconcile a persisted observation on its original owner. not_admitted is
+   * allowed only after durable absence evidence and a fence against late sends;
+   * missing/expired/locked state stays unresolved. Never executes the prompt.
+   */
+  async reconcileChatOperation(sessionKey, idempotencyKey, createdAt) {
+    return { status: "unresolved", run: null };
+  }
+
+  /**
    * Chat-surface capabilities for one agent — what the composer may offer.
    * `attachments.image` (base64 on chat.send) is the universal baseline;
    * declare pdf/file only when the transport can actually deliver them
@@ -827,11 +901,30 @@ class AgentBackend {
    * transport exposes one; it includes JSON/base64 envelope overhead.
    * `gatewayPolicy` lets the renderer use its live sanitized hello policy while
    * this management-plane snapshot is temporarily not ready.
+   * `permissions.defaultMode` is the initial selection for a new chat session;
+   * saved session choices take precedence and must never be reset on refresh.
    * @returns {{attachments: {image?: {maxBytes?: number}, pdf?: {maxBytes?: number, maxPages?: number}, file?: {maxBytes?: number}}, maxPayloadBytes?: number, gatewayPolicy?: boolean, slash?: boolean, steer?: boolean, modelProvider?: string, modelScope?: string, permissions?: {scope: "session"|"profile", apply: "next-turn"|"live", defaultMode?: string, options: Array<{id: string, label: string, description?: string, risk?: "safe"|"standard"|"elevated"|"danger", requiresConfirmation?: boolean}>}, notReady?: boolean}}
    */
   getChatCapabilities(agentId) {
     return { attachments: { image: {} } };
   }
+
+  /** Persistent chat cards use management-plane reads and CAS state. These
+   * methods never start a model. Identity includes the exact source/revision.
+   * Unsupported backends keep readable text fallbacks in chat history. */
+  async describeChatUi(agentId, sessionKey, spec) { return { supported: false }; }
+  async openChatUi(agentId, sessionKey, spec) { return { supported: false }; }
+  async readChatUi(agentId, sessionKey, spec) { return { supported: false }; }
+  async saveChatUiState(agentId, sessionKey, spec) { return { supported: false }; }
+  async renewChatUi(agentId, sessionKey, spec) { return { supported: false }; }
+  async closeChatUi(agentId, sessionKey, spec) { return { supported: false }; }
+  async importChatUi(agentId, sessionKey, spec) { return { supported: false }; }
+  async exportChatUi(agentId, sessionKey, spec) { return { supported: false }; }
+  /** Trusted desktop action authority is separate from card state ports. The
+   * service freezes the selected revision and envelope before Coordinator.send.
+   * A lost receipt is queried by actionRequestId without replaying client data. */
+  async submitChatUiAction(agentId, sessionKey, spec) { return { supported: false }; }
+  async getChatUiOperation(agentId, sessionKey, spec) { return { supported: false }; }
 
   /**
    * Read one backend-owned, sandboxed inline-widget document. The browser never
@@ -861,9 +954,11 @@ class AgentBackend {
    * Slash-command catalog for one agent (composer palette). Backends without a
    * server-side command surface return {supported:false} — the UI falls back
    * to its builtin table.
+   * allowWhileRunning is opt-in for commands that can execute without sending
+   * a model turn. The backend still enforces the command's session scope.
    * @param {string} agentId
    * @param {string} [sessionKey]
-   * @returns {Promise<{supported: boolean, reason?: string, commands: Array<{name: string, description: string, args?: string|null, category?: string, aliases?: string[]}>}>}
+   * @returns {Promise<{supported: boolean, reason?: string, commands: Array<{name: string, description: string, args?: string|null, category?: string, aliases?: string[], allowWhileRunning?: boolean}>}>}
    */
   async listSlashCommands(agentId, sessionKey) { return { supported: false, commands: [] }; }
 
@@ -878,11 +973,12 @@ class AgentBackend {
   /**
    * Execute a slash command server-side. Typed result tells the UI what to do:
    * kind "output" → render text; "send" → dispatch text as a normal chat
-   * message; "prefill" → fill the composer.
+   * message; "prefill" → fill the composer. Output with executionUncertain
+   * means execution may still be running; it is neither success nor failure.
    * @param {string} agentId
    * @param {string} sessionKey
    * @param {string} text  full command incl. leading slash
-   * @returns {Promise<{kind: "output"|"send"|"prefill", text?: string, warning?: string}>}
+   * @returns {Promise<{kind: "output"|"send"|"prefill", text?: string, warning?: string, executionUncertain?: boolean}>}
    */
   async execSlash(agentId, sessionKey, text) { throw new Error(`${this.id}: execSlash() not supported`); }
 
@@ -962,10 +1058,12 @@ class AgentBackend {
   /**
    * Abort the in-flight generation of a session (the UI's Stop button →
    * `chat.abort`). Best-effort: resolving without an active run is fine.
+   * Backends with Run controls also accept an explicit target for queued cards.
    * @param {string} sessionKey
+   * @param {string|undefined} runId
    * @returns {Promise<void>}
    */
-  async abortChat(sessionKey) { throw new Error(`${this.id}: abortChat() not supported`); }
+  async abortChat(sessionKey, runId) { throw new Error(`${this.id}: abortChat() not supported`); }
 
   /**
    * Compress/compact a chat session's context (the UI's /compact →
@@ -984,7 +1082,7 @@ class AgentBackend {
    * silently showing nothing.
    * @param {string} agentId
    * @param {string} query
-   * @param {{ limit?: number }} [opts]
+   * @param {{ limit?: number, excludeSessionKeys?: string[] }} [opts] excludeSessionKeys 由群 owner 提供，检索候选和结果均须排除。
    * @returns {Promise<{ supported: boolean, reason?: string, truncated?: boolean, results: Array<{ key: string, sessionId?: string, messageId?: string, snippet: string, ts?: number|null, role?: string }> }>}
    */
   async searchChat(agentId, query, opts) { return { supported: false, results: [] }; }
@@ -1001,6 +1099,9 @@ class AgentBackend {
    * Optional actions {edit,toggle,delete,run,reason?} describe per-job controls;
    * explicit false denies that action, omitted fields preserve legacy support.
    * reason="system-managed" identifies jobs whose lifecycle belongs to the backend.
+   * Optional outputDisposition describes the latest run: pending holds its
+   * notification watermark; silent advances it without notifying; deliver uses
+   * normal terminal notification. Omission preserves legacy backend behavior.
    * @returns {Promise<Array<object>>}
    */
   // Inspiration storage has one product owner, injected into BackendRegistry.
@@ -1043,7 +1144,78 @@ class AgentBackend {
   async cancelInspiration(_id, _input) { throw new Error(`${this.id}: Inspiration cancellation not supported`); }
   async getInspirationExecutions(_id, _query) { throw new Error(`${this.id}: Inspiration history not supported`); }
 
-  async getCronJobs() { return []; }
+  /**
+   * 多 Agent 群聊（共享产品 owner 提供；群里的成员可以来自不同后端）。
+   * 群 id 是不透明字符串，REST 层一律走 `?id=`。
+   * @returns {Promise<{groups: Array<object>, internalSessions: Array<{backendId: string, key: string}>}>}
+   * internalSessions 包含所有已登记的群内部会话（含归档群与已换新的旧会话），不受群列表数量限制。
+   */
+  async listGroupChats(_opts = {}) { throw groupChatUnsupported(this.id); }
+  /** Published member attachments, newest first, from the shared group owner.
+   * Filter enabled backendIds before limiting; user uploads and deleted/archived groups are excluded.
+   * Items retain the saved attachment plus group/member identity and message publication time.
+   * @param {{sinceMs: number, limit: number, backendIds: string[]}} _opts
+   */
+  async getRecentGroupArtifacts(_opts) { return { supported: false, reason: "unsupported", items: [] }; }
+  /** 已配对群执行宿主的可用成员；这里只返回公开身份与能力。 */
+  async listGroupChatHostMembers() { throw groupChatUnsupported(this.id); }
+  async testGroupChatHost(_peer) { throw groupChatUnsupported(this.id); }
+  async getGroupChat(_id) { throw groupChatUnsupported(this.id); }
+  /** @param {{operationId: string, name: string, purpose: string, members: Array<{backendId: string, agentId: string}>}} _input */
+  async createGroupChat(_input) { throw groupChatUnsupported(this.id); }
+  /** ownerMemberId：群主（没有 @ 的消息先交给它）。
+   * @param {{expectedMetadataRevision: number, patch: {name?: string, purpose?: string, status?: "active"|"archived", ownerMemberId?: string}}} _input */
+  async updateGroupChat(_id, _input) { throw groupChatUnsupported(this.id); }
+  async deleteGroupChat(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** @param {{expectedRosterRevision: number, member: {backendId: string, agentId: string}}} _input */
+  async addGroupChatMember(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** Read the member-scoped catalog; never create a session or start a turn. */
+  async getGroupChatMemberModels(_id, _memberId) { throw groupChatUnsupported(this.id); }
+  /** Persist a group-only {model, provider} override. null follows the Agent default. */
+  async setGroupChatMemberModel(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** External host contract: fresh, Agent-scoped {models:[{id,name,provider}], defaultModel}. */
+  async getGroupMemberModels(_agentId) { throw groupChatUnsupported(this.id); }
+  /** Apply only to an already owned group session; null resolves the current Agent default. */
+  async applyGroupSessionModel(_agentId, _sessionKey, _selection) { throw groupChatUnsupported(this.id); }
+  async removeGroupChatMember(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** 成员可共享的角色设定（当前版本、已过滤）；移除的成员返回 access_revoked。 */
+  async getGroupChatMemberRole(_id, _memberId, _query = {}) { throw groupChatUnsupported(this.id); }
+  /** 该成员已保存的公开角色版本，不包含私有原文；before 为上页末尾的版本 id。 */
+  async getGroupChatMemberRoleHistory(_id, _memberId, _query = {}) { throw groupChatUnsupported(this.id); }
+  /** @param {{afterSeq: number|null, beforeSeq: number|null, limit: number}} _query */
+  async listGroupChatMessages(_id, _query) { throw groupChatUnsupported(this.id); }
+  /** Search saved public group history; opaque cursor pins scope and maximum seq. */
+  async searchGroupChatMessages(_id, _query) { throw groupChatUnsupported(this.id); }
+  /** 读取一条公共消息的完整正文；offset 为 UTF-8 字节位置，续页固定 digest。 */
+  async readGroupChatMessage(_id, _query) { throw groupChatUnsupported(this.id); }
+  /** 核对原执行或重新读取其结果，不启动新的执行。target 与交互回应使用同一身份格式。 */
+  async reconcileGroupChatExecution(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** 没有 @ 的消息先交给群主；@ 了谁就是谁，@all 是全员。replyTo：引用回复的那条消息的序号，引用某位成员
+   * 而没有另外 @ 别人时只请它回答。attachments：已上传到媒体库的附件（最多 8 个，上传走 /__api/inspirations/media）；
+   * 有附件时 body 可以为空。
+   * @param {{clientMessageId: string, body: string, mentions: string[], replyTo?: number|null,
+   *   attachments?: Array<{id: string, name: string, mimeType: string, size: number}>}} _input */
+  async sendGroupChatMessage(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** Read the original send identity without submitting work or waking the group driver. */
+  async lookupGroupChatSend(_id, _query) { throw groupChatUnsupported(this.id); }
+  /** 停止全群：清空排队，中止正在发言和在后台干活的成员。 */
+  async stopGroupChatDiscussion(_id, _input = {}) { throw groupChatUnsupported(this.id); }
+  /** 单独停下一位成员：取消它排着的发言，中止它正在跑的回合。@param {{memberId: string}} _input */
+  async stopGroupChatMember(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** 让最近一次失败的成员补答（不产生新的用户消息；同一 operationId 只生效一次）。
+   * @param {{memberId: string, operationId: string}} _input */
+  async retryGroupChatTurn(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** 用户回应群内交互卡（审批或补充输入）；答案只交给原运行，不进群消息。
+   * @param {{target: {kind: "turn", opportunityId: string}, requestId: string, response: object, operationId: string}} _input */
+  async respondGroupChatInteraction(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** 群聊运行诊断：库版本、驱动状态与各类计数，不含消息正文。
+   * @returns {Promise<{schemaVersion: number, driverFence: number, driverRunning: boolean, groups: Record<string, number>,
+   *   rounds: Record<string, number>, turns: Record<string, number>, externalTurns: number, messages: number,
+   *   internalSessions: number}>} */
+  async getGroupChatDiagnostics() { throw groupChatUnsupported(this.id); }
+
+  /** @param {{strict?: boolean}} [opts] strict reports upstream read failures. */
+  async getCronJobs(_opts = {}) { return []; }
 
   /**
    * Create a cron job from a unified spec (includes agentId to target a scope).
@@ -1077,6 +1249,8 @@ class AgentBackend {
 
   /**
    * Recent run history for a cron job (newest first).
+   * Runs may expose outputDisposition (pending/deliver/silent), deliveryStatus
+   * and deliverySuppressionReason. Silent runs retain execution audit details.
    * @param {string} id full unified id
    * @param {object} [options] backend-specific query filters
    * @returns {Promise<{runs: Array<{startedAt?: number|null, finishedAt?: number|null, status?: string, error?: string, sessionKey?: string}>}>}
@@ -1091,6 +1265,8 @@ class AgentBackend {
    * so a recurring job's older slots show their own report, not the latest.
    * Returns source "none" when no matching run exists. A backend without per-run
    * transcripts returns summary-only / nulls.
+   * outputDisposition="silent" or "pending" returns source="none" and no
+   * summary/fullText. An explicit run trajectory may still expose audit data.
    * @param {string} id full unified id
    * @param {number} [atMs] occurrence epoch ms to resolve a specific past run
    * @returns {Promise<{status?: string, startedAt?: number|null, finishedAt?: number|null, model?: string, provider?: string, durationMs?: number, summary?: string, fullText?: string|null, source?: "transcript"|"summary"|"none", sessionKey?: string, error?: string, deliveryStatus?: string}>}
@@ -1239,6 +1415,17 @@ class AgentBackend {
 
   // ---- skills (management UI) ----
 
+  /** Profile-owned background skill learning. Unsupported backends expose no settings or writes. */
+  async getSelfImprovement(_agentId) { return { supported: false, reason: "LEARNING_UNSUPPORTED" }; }
+  async configureSelfImprovement(_agentId, _input) { throw new Error(`${this.id}: self improvement not supported`); }
+  async requestSelfImprovement(_agentId, _input) { throw new Error(`${this.id}: self improvement not supported`); }
+  async getLearningHistory(_agentId, _query = {}) { return { supported: false, items: [], nextCursor: null }; }
+  async readLearningProposal(_agentId, _input) { throw new Error(`${this.id}: learning proposals not supported`); }
+  async getLearnedSkills(_agentId, _query = {}) { return { supported: false, items: [], nextCursor: null }; }
+  async readLearnedSkill(_agentId, _input) { throw new Error(`${this.id}: learned skills not supported`); }
+  async changeLearnedSkill(_agentId, _input) { throw new Error(`${this.id}: learned skills not supported`); }
+  async resolveLearningProposal(_agentId, _input) { throw new Error(`${this.id}: learning proposals not supported`); }
+
   /**
    * Enable/disable a skill by name.
    * @param {string} name
@@ -1282,6 +1469,8 @@ class AgentBackend {
   async commitExternalPluginApproval(_input) { throw new Error(`${this.id}: external plugin approvals not supported`); }
   async previewPluginInstall(_source) { throw new Error(`${this.id}: plugin install not supported`); }
   async listBundledPlugins() { throw new Error(`${this.id}: bundled plugins not supported`); }
+  async listFirstPartyPlugins() { throw new Error(`${this.id}: first-party plugins not supported`); }
+  async installFirstPartyPlugin(_packageId) { throw new Error(`${this.id}: first-party plugins not supported`); }
   async previewPluginUninstall(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
   async uninstallPlugin(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
   async preparePluginMcpConsent(_input) { throw new Error(`${this.id}: plugin consent not supported`); }
@@ -1298,6 +1487,13 @@ class AgentBackend {
   async commitPluginOAuth(_input) { throw new Error(`${this.id}: plugin OAuth not supported`); }
   async preparePluginBearer(_input) { throw new Error(`${this.id}: plugin bearer not supported`); }
   async commitPluginBearer(_input) { throw new Error(`${this.id}: plugin bearer not supported`); }
+  /** Plugin setup (one-confirmation enable) and `${secret:NAME}` credentials; Service-owned only. */
+  async getPluginSetup(_input) { throw new Error(`${this.id}: plugin setup not supported`); }
+  async preparePluginSetup(_input) { throw new Error(`${this.id}: plugin setup not supported`); }
+  async commitPluginSetup(_input) { throw new Error(`${this.id}: plugin setup not supported`); }
+  async getPluginSecrets(_input) { throw new Error(`${this.id}: plugin secrets not supported`); }
+  async preparePluginSecret(_input) { throw new Error(`${this.id}: plugin secrets not supported`); }
+  async commitPluginSecret(_input) { throw new Error(`${this.id}: plugin secrets not supported`); }
   async getPluginOAuthStatus(_agentId, _flowId) { throw new Error(`${this.id}: plugin OAuth not supported`); }
   async cancelPluginOAuth(_agentId, _flowId) { throw new Error(`${this.id}: plugin OAuth not supported`); }
   async preparePluginApp(_sessionKey, _callId) { throw new Error(`${this.id}: plugin Apps not supported`); }
@@ -1508,7 +1704,11 @@ class AgentBackend {
    * （运行时就绪）的分层。
    * `manageAuthProfiles` 是授权 profile 管理面是否存在的静态能力；UI 不得从
    * provider 缺少 config 条目推断 OAuth/CLI 凭证可管理。默认 false。
-   * @returns {Promise<{supported: boolean, create: boolean, update: boolean, rename: boolean, delete: boolean, updateProvider: boolean, perAgentModelSettings?: boolean, manageAuthProfiles?: boolean, blockers: string[]}>}
+   * `configurationDraft` 表示由后端的官方配置编辑语义写定义，引用保持原值。
+   * `mutationSemantics: "native-config"` 的 applied/configSaved 只确认配置保存；
+   * catalogPending/warnings 表示后续目录刷新，不改变保存回执或授权重复写入。
+   * 其它后端及旧 journal 继续执行原有迁移、运行态收敛与恢复协议。
+   * @returns {Promise<{supported: boolean, create: boolean, update: boolean, rename: boolean, delete: boolean, updateProvider: boolean, configurationDraft?: boolean, mutationSemantics?: string, credentialManagement?: boolean, perAgentModelSettings?: boolean, manageAuthProfiles?: boolean, blockers: string[]}>}
    */
   async getModelChangeCapabilities() {
     return { supported: false, create: false, update: false, rename: false, delete: false, updateProvider: false, manageAuthProfiles: false, blockers: ["unsupported"] };
@@ -1584,6 +1784,12 @@ class AgentBackend {
 
   /** 删除一条授权 profile（登出）；生效通常需要重启网关。 */
   async deleteModelAuthProfile() { throw new Error(`${this.id}: deleteModelAuthProfile() not supported`); }
+
+  /**
+   * 清除某 provider 的全部 api_key 型授权（所有 Agent 都不再持有）；OAuth/Token 登录不动。
+   * @returns {Promise<{ok: boolean, provider: string, removed?: number, activation?: object|null}>}
+   */
+  async clearModelAuthProviderKeys() { throw new Error(`${this.id}: clearModelAuthProviderKeys() not supported`); }
 
   /**
    * 新增（同 id 覆盖）一个自定义模型。provider 不存在时必须带 baseUrl
@@ -1706,8 +1912,22 @@ class AgentBackend {
   /** 断开一个 OAuth provider（不带 profile = 全部 profile 广播）。@returns {Promise<object>} */
   async disconnectOAuthProvider(providerId, profile) { throw new Error(`${this.id}: disconnectOAuthProvider() not supported`); }
 
-  /** 发起 OAuth 登录（pkce 返回 auth_url，device_code 返回 user_code）。@returns {Promise<object>} */
-  async startOAuthLogin(providerId, profile) { throw new Error(`${this.id}: startOAuthLogin() not supported`); }
+  /**
+   * 发起 OAuth 登录（pkce 返回 auth_url，device_code 返回 user_code，browser 由后端在应用内发起）。
+   * flow = "providers" 的条目（一个运行时登录多个模型服务商，如 OpenCode）须带 target：
+   * { providerId, method, inputs } —— 选中的服务商、登录方式序号与填写的参数。
+   * @returns {Promise<object>}
+   */
+  async startOAuthLogin(providerId, profile, target) { throw new Error(`${this.id}: startOAuthLogin() not supported`); }
+
+  /**
+   * flow = "providers"：可登录的服务商、各自的登录方式与需要填写的参数。
+   * @returns {Promise<{providers: Array<object>}>}
+   */
+  async listOAuthLoginOptions(providerId) { throw new Error(`${this.id}: listOAuthLoginOptions() not supported`); }
+
+  /** flow = "providers"：为 target 指定的服务商保存 API Key。@returns {Promise<{ok: boolean}>} */
+  async saveOAuthApiKey(providerId, target, key) { throw new Error(`${this.id}: saveOAuthApiKey() not supported`); }
 
   /** 提交 PKCE 授权码。@returns {Promise<object>} */
   async submitOAuthCode(providerId, sessionId, code, profile) { throw new Error(`${this.id}: submitOAuthCode() not supported`); }
@@ -1799,12 +2019,18 @@ class AgentBackend {
   async getAgentRuntimeBindings(_id) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async getAgentRuntimePolicy(_id) { throw new Error(`${this.id}: runtime policy not supported`); }
   async compactConversation(_id, _key, _operationId) { throw new Error(`${this.id}: product context not supported`); }
+  /** Shoggoth's token estimate of one reply's request parts, from that run's immutable context snapshot. */
+  async getContextBreakdown(_id, _key, _runId) { throw new Error(`${this.id}: product context not supported`); }
   async setAgentRuntimePolicy(_id, _policy) { throw new Error(`${this.id}: runtime policy not supported`); }
   async addAgentRuntimeBinding(_id, _spec, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async updateAgentRuntimeBinding(_id, _bindingId, _patch, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async removeAgentRuntimeBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async setAgentDefaultBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async getSessionRuntime(_id, _key) { throw new Error(`${this.id}: session runtime switching not supported`); }
+  /** Read the current session's memory recall state. Details require an explicit
+   * includeTrace request and current source authorization; never starts a model.
+   * Unsupported backends return supported:false through this shared contract. */
+  async getSessionMemoryStatus(_id, _key, _includeTrace = false) { return { supported: false }; }
   async switchSessionRuntime(_id, _key, _input) { throw new Error(`${this.id}: session runtime switching not supported`); }
   /** Connected CLI catalogs for this Agent's conversation; choices retain their Runtime Binding identity. */
   async getSessionRuntimeModels(_id, _key) { throw new Error(`${this.id}: session runtime models not supported`); }
@@ -1850,6 +2076,9 @@ class AgentBackend {
     throw new Error(`${this.id}: importAgentDefinition() not supported`);
   }
   async listAgentMemories(_id, _opts) { return { supported: false, reason: "unsupported", items: [] }; }
+  /** One-time import of the user's Codex memories into the main Agent. */
+  async getAgentMemoryImport(_id) { return { supported: false, reason: "unsupported" }; }
+  async getAgentMemoryImportReport(_id, _options) { return { supported: false, reason: "unsupported" }; }
   async listAgentMemoryCandidates(_id, _opts) {
     return { supported: false, reason: "unsupported", revision: 0, items: [],
       nextCursor: 0, hasMore: false, usage: { day: null, calls: 0, inputTokens: 0, outputTokens: 0 } };
@@ -1951,7 +2180,11 @@ class AgentBackend {
    */
   async getRunningWork() { return { supported: false, reason: "unsupported", items: [] }; }
 
-  /** Native dashboard WorkRun detail; unsupported for external backends. */
+  /**
+   * Dashboard WorkRun snapshot; unsupported unless surfaces.dashboardRuns.
+   * Includes optional title/runtime and bounded public events (text deltas,
+   * commentary, plans and safe tool display fields). Never expose raw payloads.
+   */
   async getDashboardRunDetail(_runId) {
     throw new Error(`${this.id}: getDashboardRunDetail() not supported`);
   }
@@ -1974,11 +2207,14 @@ class AgentBackend {
    * Recently produced work-product files (reports, media), newest first. Only
    * a backend with local-disk access can answer (remote gateway → "remote"),
    * same constraint as getCliUsage.
-   * item: { path, name, area, agentId?, size?, mtimeMs, ext?, kind }
-   *   area: "workspace" | "media/outbound" | "agents/<id>"
+   * Native files use successful output evidence from public sessions; group
+   * attachments are supplied separately by getRecentGroupArtifacts.
+   * item: { path, name, area, agentId?, agentName?, size?, mtimeMs, ext?, kind }
+   *   area: "workspace" | "media/outbound" | "agents/<id>" | "session-reference"
    *   kind: "doc" | "image" | "data" | "other" (by extension; UI picks icon)
-   * @param {{limit?: number}} [opts]
-   * @returns {Promise<{supported: boolean, reason?: string, items: Array<object>}>}
+   * partial means a source could not be read; it must not look like no outputs.
+   * @param {{limit?: number, sinceMs?: number}} [opts]
+   * @returns {Promise<{supported: boolean, reason?: string, partial?: boolean, items: Array<object>}>}
    */
   async getRecentArtifacts(opts) { return { supported: false, reason: "unsupported", items: [] }; }
 
@@ -2024,6 +2260,9 @@ class AgentBackend {
    * @returns {Promise<{absPath: string}|null>}
    */
   async resolveArtifactPreview(_path) { return null; }
+
+  /** Read an image explicitly delivered by the assistant in this session. */
+  async readSessionImage(_key, _ref) { return null; }
 
   /**
    * Test a candidate connection config WITHOUT persisting it (设置 page).

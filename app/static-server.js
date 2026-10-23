@@ -1,4 +1,5 @@
 "use strict";
+const { isCodexAutomationId } = require("./core/codex-automation-backend");
 
 // Minimal loopback HTTP server for the built Control UI bundle.
 //
@@ -13,7 +14,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { UI_CONTENT_SECURITY_POLICY } = require("./ui-content-security");
 const { randomUUID } = require("node:crypto");
-const { createChatAttachmentOpener, validAttachmentName, MAX_OPEN_ATTACHMENT_BYTES } = require("./chat-attachment-open");
+const { SYSTEM_ISSUE_CODES, storageIssueCode } = require("./system-issue");
+const { createChatAttachmentRevealer, validAttachmentName, MAX_OPEN_ATTACHMENT_BYTES } = require("./chat-attachment-open");
 const {
   AVATAR_EXTS: AGENT_AVATAR_EXTS,
   BG_STATES: IMMERSIVE_BG_STATES,
@@ -36,6 +38,20 @@ const { WorkAdmissionError } = require("./core/work-admission-gate");
 const { PluginInstallSelection } = require("./core/plugin-install-selection");
 const { BundledPluginCatalog, bundledRoot } = require("./core/bundled-plugin-catalog");
 const { createNativeRuntimeConfigController } = require("./core/native-runtime-config-controller");
+const { createNativeMemoryConfigController } = require("./core/native-memory-config-controller");
+const { NATIVE_MEMORY_CONFIG_PUBLIC_MESSAGES } = require("./agent-service/native-memory-config-protocol");
+const { createNativeMemorySharingConfigController } = require("./core/native-memory-sharing-config-controller");
+const { NATIVE_MEMORY_SHARING_PUBLIC_MESSAGES } = require("./agent-service/native-memory-sharing-protocol");
+const memoryProviderOwnerProtocol = require("./agent-service/memory-provider-owner-protocol.cjs");
+const { MESSAGES: MEMORY_COMMAND_PUBLIC_MESSAGES } = require("./agent-service/active-memory-command-protocol");
+const { IDENTITY_SCOPE: ZOOM_IDENTITY_SCOPE, MEETING_SCOPES: ZOOM_MEETING_SCOPES,
+  validZoomClientSecret } = require("./agent-service/plugin-zoom-oauth");
+const { SCOPES: DROPBOX_SCOPES, CLIENT_ID: DROPBOX_CLIENT_ID,
+  validDropboxClientSecret } = require("./agent-service/plugin-dropbox-oauth");
+const { FROZEN_SOURCE_CLIENT_ID: FROZEN_SLACK_CLIENT_ID } =
+  require("./agent-service/plugin-slack-registration");
+const { slackAccessProfile } = require("./agent-service/plugin-slack-access-policy");
+const { CAPABILITIES: GRAPH_CAPABILITIES } = require("./agent-service/plugin-microsoft-graph-capabilities");
 const { NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES } = require("./agent-service/native-runtime-config-protocol");
 const { AGENT_BINDING_PUBLIC_MESSAGES, validateAgentBindingParams } = require("./agent-service/agent-runtime-binding-protocol");
 const { SESSION_RUNTIME_PUBLIC_MESSAGES, validateSessionRuntimeParams } = require("./agent-service/session-runtime-protocol");
@@ -53,8 +69,15 @@ const {
   normalizeSessionBoardGrantSpec,
 } = require("./core/session-board-projection");
 
+const { validateCodexSecurityStatusInput, validateCodexSecurityPublicStatus } =
+  require("./core/plugin-codex-security-status-dto");
+const { parsePluginSelectionReadinessQuery } = require("./core/plugin-selection-readiness-dto");
+
 const WS_CLOSE_GRACE_MS = 100;
 const CLI_EXECUTION_LIMIT = 2;
+const GRAPH_REGISTRATION_SCOPES = Object.freeze(["Calendars.Read",
+  ...Object.values(GRAPH_CAPABILITIES).map(capability => capability.scope),
+  "User.Read", "offline_access"]);
 
 /**
  * REST 数据面统一从 active 集合取后端。最后的 Map 回退只服务不实现
@@ -64,6 +87,15 @@ function getActiveBackend(registry, backendId) {
   if (typeof registry?.getBackend === "function") return registry.getBackend(backendId);
   if (typeof registry?._activeGet === "function") return registry._activeGet(backendId);
   return registry?.backends?.get(backendId) || null;
+}
+
+/**
+ * Plugins belong to the native Service, which OpenClaw/Hermes also use, so its
+ * plugin routes stay reachable while a disconnect hides the native Agents.
+ */
+function getPluginServiceBackend(registry) {
+  if (typeof registry?.getServiceBackend === "function") return registry.getServiceBackend("shoggoth");
+  return getActiveBackend(registry, "shoggoth");
 }
 
 function hasAgentScopedSkills(backend) {
@@ -470,6 +502,7 @@ function hasShoggothMutationOrigin(req) {
 }
 
 const SHOGGOTH_PROFILE_PUBLIC_CODES = new Set([
+  "RUNTIME_INCOMPATIBLE",
   "PROFILE_AUTH_REQUIRED",
   "PROFILE_MODEL_NOT_AVAILABLE",
   "PROFILE_MODEL_CATALOG_UNAVAILABLE",
@@ -867,6 +900,8 @@ function filterCronJobs(jobs, params) {
         job.name,
         job.description,
         job.prompt,
+        job.promptPreview,
+        job.origin === "codex-desktop" ? "Codex 客户端" : null,
         job.deliver,
         job.delivery?.mode,
         ...(job.backendDetails?.capabilityTags || []),
@@ -945,6 +980,10 @@ async function resolveResourceBackend(registry, kind, id) {
 //   GET    /__api/plugins/external-calls     bounded external plugin execution receipts
 //   GET/POST /__api/plugins/external-approvals   pending calls and native-confirmed decision
 //   GET    /__api/plugins/mcp-tools          current catalog and saved Grant status
+//   GET/POST /__api/plugins/setup            setup state / one-confirmation enable (native confirm)
+//   GET/POST /__api/plugins/secrets          declared credential names / set or clear (native confirm)
+//   GET  /__api/plugins/first-party           first-party plugins shipped in the App and their state
+//   POST /__api/plugins/first-party-install   reinstall an uninstalled first-party plugin (native confirm)
 //   POST   /__api/plugins/mcp-grants/revoke  revision-fenced permission narrowing
 //   POST   /__api/plugins/mcp-grants/revoke-all  emergency binding-wide revocation
 //   GET    /__api/skills/usage                    per-backend: which skills agents actually loaded (registry merge)
@@ -962,7 +1001,7 @@ async function resolveResourceBackend(registry, kind, id) {
 //   GET    /__api/chat/cache-scope?backend=       opaque renderer history-cache identity
 //   POST   /__api/host/openclaw/start             代跑网关启动 {mode:"start"|"install"}
 //   POST   /__api/host/open-path                  用系统默认程序打开文件/目录
-//   POST   /__api/host/open-attachment?name=       用系统默认程序打开附件字节的私有副本
+//   POST   /__api/host/reveal-attachment?name=     在文件管理器中定位附件字节的私有副本
 //   POST   /__api/host/reveal-path                在系统文件管理器中定位文件
 //   POST   /__api/host/terminal                   在系统终端里跑 provider 的登录/断开命令
 //                                                 {backend,provider,kind:"cli"|"disconnect"} —— **不收命令串**
@@ -998,13 +1037,17 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
   const {
     configStore,
     hostOps,
-    attachmentOpener,
+    attachmentRevealer,
     productHost,
+    managedOpenClawHost,
+    managedHermesHost,
     onConfigChanged,
     modelChangeCoordinator,
     workAdmissionGate,
     cliExecutionGate,
     nativeRuntimeConfigController,
+    nativeMemoryConfigController,
+    nativeMemorySharingConfigController,
     avatarPool,
     pluginInstallSelection,
     bundledPluginCatalog,
@@ -1105,6 +1148,117 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
             : /UNAVAILABLE|CORRUPT|UNCERTAIN/u.test(code) ? 503 : 400;
         return sendJson(res, status, { code, error: code === "INSPIRATION_UNAVAILABLE"
           ? "灵感服务暂不可用，输入仍保留在本机" : error.message });
+      }
+    }
+    if (segs[0] === "group-chats") {
+      try {
+        const id = requestUrl?.searchParams.get("id") || "";
+        const seqParam = (name) => (requestUrl?.searchParams.has(name) ? Number(requestUrl.searchParams.get(name)) : null);
+        // 群功能开关（config-store groupChatEnabled）：关闭后只读、停止与管理仍可用，会引发新群活动的写入一律拒绝。
+        const enabled = !configStore || configStore.read().groupChatEnabled !== false;
+        const startsActivity = method === "POST" && (segs.length === 1
+          || (segs.length === 2 && ["members", "messages"].includes(segs[1]))
+          || (segs.length === 3 && segs[1] === "turns" && segs[2] === "retry"));
+        if (!enabled && startsActivity) {
+          const { PUBLIC_MESSAGES } = require("./agent-service/group-chat-protocol");
+          return sendJson(res, 409, { code: "GROUP_CHAT_DISABLED", error: PUBLIC_MESSAGES.GROUP_CHAT_DISABLED });
+        }
+        if (segs.length === 1 && method === "GET") return sendJson(res, 200, { ...await registry.listGroupChats({
+          includeArchived: requestUrl?.searchParams.get("includeArchived") === "1" }), enabled });
+        if (segs.length === 2 && segs[1] === "hosts" && method === "GET") return sendJson(res, 200, await registry.listGroupChatHostMembers());
+        if (segs.length === 3 && segs[1] === "hosts" && segs[2] === "test" && method === "POST") return sendJson(res, 200,
+          await registry.testGroupChatHost((await readJsonBody(req)).peer));
+        if (segs.length === 2 && segs[1] === "diagnostics" && method === "GET") return sendJson(res, 200,
+          { enabled, ...await registry.getGroupChatDiagnostics() });
+        if (segs.length === 1 && method === "POST") return sendJson(res, 200,
+          await registry.createGroupChat(await readJsonBody(req)));
+        if (segs.length === 2 && segs[1] === "detail" && method === "GET") return sendJson(res, 200,
+          await registry.getGroupChat(id));
+        if (segs.length === 2 && segs[1] === "detail" && method === "PATCH") return sendJson(res, 200,
+          await registry.updateGroupChat(id, await readJsonBody(req)));
+        if (segs.length === 2 && segs[1] === "detail" && method === "DELETE") return sendJson(res, 200,
+          await registry.deleteGroupChat(id, await readJsonBody(req)));
+        if (segs.length === 2 && segs[1] === "members" && method === "POST") return sendJson(res, 200,
+          await registry.addGroupChatMember(id, await readJsonBody(req)));
+        if (segs.length === 2 && segs[1] === "members" && method === "DELETE") return sendJson(res, 200,
+          await registry.removeGroupChatMember(id, await readJsonBody(req)));
+        if (segs.length === 3 && segs[1] === "members" && segs[2] === "stop" && method === "POST") return sendJson(res, 200,
+          await registry.stopGroupChatMember(id, await readJsonBody(req)));
+        if (segs.length === 3 && segs[1] === "members" && segs[2] === "models" && method === "GET") return sendJson(res, 200,
+          await registry.getGroupChatMemberModels(id, requestUrl?.searchParams.get("memberId") || ""));
+        if (segs.length === 3 && segs[1] === "members" && segs[2] === "model" && method === "PATCH") return sendJson(res, 200,
+          await registry.setGroupChatMemberModel(id, await readJsonBody(req)));
+        if (segs.length === 3 && segs[1] === "members" && segs[2] === "role" && method === "GET") {
+          return sendJson(res, 200, await registry.getGroupChatMemberRole(id, requestUrl?.searchParams.get("memberId") || "", {
+            ...(requestUrl?.searchParams.has("revision") ? { revision: requestUrl.searchParams.get("revision") } : {}),
+            ...(requestUrl?.searchParams.has("cursor") ? { cursor: requestUrl.searchParams.get("cursor") } : {}) }));
+        }
+        if (segs.length === 3 && segs[1] === "members" && segs[2] === "role-history" && method === "GET") {
+          return sendJson(res, 200, await registry.getGroupChatMemberRoleHistory(id, requestUrl?.searchParams.get("memberId") || "", {
+            before: requestUrl?.searchParams.get("before") || null, limit: Number(requestUrl?.searchParams.get("limit") || 20) }));
+        }
+        if (segs.length === 2 && segs[1] === "messages" && method === "GET") return sendJson(res, 200,
+          await registry.listGroupChatMessages(id, { afterSeq: seqParam("afterSeq"), beforeSeq: seqParam("beforeSeq"),
+            limit: Number(requestUrl?.searchParams.get("limit") || 50) }));
+        if (segs.length === 3 && segs[1] === "messages" && segs[2] === "lookup" && method === "GET") {
+          return sendJson(res, 200, await registry.lookupGroupChatSend(id, {
+            clientMessageId: requestUrl?.searchParams.get("clientMessageId") || "",
+            ...Object.fromEntries(["payloadDigest", "ownerScope"].filter(key => requestUrl?.searchParams.has(key))
+              .map(key => [key, requestUrl.searchParams.get(key)])) }));
+        }
+        if (segs.length === 3 && segs[1] === "messages" && segs[2] === "read" && method === "GET") {
+          return sendJson(res, 200, await registry.readGroupChatMessage(id, {
+            seq: seqParam("seq"), offset: seqParam("offset") ?? 0, digest: requestUrl?.searchParams.get("digest") ?? null }));
+        }
+        if (segs.length === 3 && segs[1] === "messages" && segs[2] === "search" && method === "GET") {
+          return sendJson(res, 200, await registry.searchGroupChatMessages(id, {
+            query: requestUrl?.searchParams.get("query") ?? "",
+            discussionId: requestUrl?.searchParams.get("discussionId") ?? null,
+            authorKind: requestUrl?.searchParams.get("authorKind") ?? null,
+            memberId: requestUrl?.searchParams.get("memberId") ?? null,
+            cursor: requestUrl?.searchParams.get("cursor") ?? null,
+            limit: Number(requestUrl?.searchParams.get("limit") ?? 20) }));
+        }
+        if (segs.length === 3 && segs[1] === "executions" && segs[2] === "reconcile" && method === "POST") {
+          return sendJson(res, 200, await registry.reconcileGroupChatExecution(id, await readJsonBody(req)));
+        }
+        if (segs.length === 2 && segs[1] === "messages" && method === "POST") return sendJson(res, 200,
+          await registry.sendGroupChatMessage(id, await readJsonBody(req)));
+        if (segs.length === 3 && segs[1] === "discussion" && segs[2] === "stop" && method === "POST") {
+          return sendJson(res, 200, await registry.stopGroupChatDiscussion(id));
+        }
+        if (segs.length === 3 && segs[1] === "turns" && segs[2] === "retry" && method === "POST") {
+          return sendJson(res, 200, await registry.retryGroupChatTurn(id, await readJsonBody(req)));
+        }
+        if (segs.length === 3 && segs[1] === "interactions" && segs[2] === "respond" && method === "POST") {
+          return sendJson(res, 200, await registry.respondGroupChatInteraction(id, await readJsonBody(req)));
+        }
+        return sendJson(res, 404, { error: "Unknown group chat endpoint" });
+      } catch (error) {
+        const { PUBLIC_MESSAGES } = require("./agent-service/group-chat-protocol");
+        const recovery = error?.code === "SERVICE_RECOVERY_REQUIRED";
+        const code = recovery ? "SERVICE_RECOVERY_REQUIRED"
+          : Object.hasOwn(PUBLIC_MESSAGES, error?.code) ? error.code : "GROUP_CHAT_UNAVAILABLE";
+        const systemIssue = storageIssueCode(error);
+        const status = recovery ? 503 : /NOT_FOUND/u.test(code) ? 404
+          : /CONFLICT|ARCHIVED|DUPLICATE|NOTHING|EXPIRED|LIMIT|FORBIDDEN/u.test(code) ? 409
+            : /UNAVAILABLE|CORRUPT/u.test(code) ? 503 : 400;
+        return sendJson(res, status, { code,
+          error: recovery ? "群聊记录需要恢复，请重新启动 Shoggoth 后核对原消息" : PUBLIC_MESSAGES[code],
+          ...(systemIssue ? { systemIssue } : {}),
+        });
+      }
+    }
+    if (segs[0] === "proactive" && segs.length === 1 && method === "POST") {
+      try {
+        const body = await readJsonBody(req);
+        if (!body || Object.keys(body).sort().join() !== "method,params") throw Object.assign(new Error("主动提醒参数无效"), { code: "PROACTIVE_INVALID" });
+        return sendJson(res, 200, await registry.proactiveCall(body.method, body.params));
+      } catch (error) {
+        const { PUBLIC_MESSAGES } = require("./agent-service/proactive-service-protocol");
+        const code = Object.hasOwn(PUBLIC_MESSAGES, error?.code) ? error.code : "PROACTIVE_UNAVAILABLE";
+        return sendJson(res, /CONFLICT|TARGET|SCOPE/u.test(code) ? 409 : /UNAVAILABLE|CORRUPT/u.test(code) ? 503 : 400,
+          { code, error: PUBLIC_MESSAGES[code] });
       }
     }
     // Shoggoth 产品面只消费 Host/Backend 的安全 DTO；不得把 Service 原始
@@ -1407,6 +1561,23 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       return sendJson(res, 200, { runtimes: await registry.getRuntimeStatuses() });
     }
 
+    if (segs[0] === "web-settings" && (segs.length === 1 || segs.length === 2 && segs[1] === "credentials")) {
+      const protocol = require("./agent-service/web-settings-protocol");
+      const credentials = segs.length === 2;
+      if (credentials ? !["PUT", "DELETE"].includes(method) : !["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+      if (method !== "GET" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      try {
+        const rpc = credentials ? method === "PUT" ? "web.credentials.set" : "web.credentials.clear"
+          : method === "GET" ? "web.settings.get" : "web.settings.set";
+        const params = protocol.validateParams(rpc, method === "GET" ? {} : await readJsonBody(req));
+        return sendJson(res, 200, protocol.validateResult(await registry.webSettingsCall(rpc, params)));
+      } catch (error) {
+        const safe = protocol.publicError(error);
+        return sendJson(res, safe.code === "WEB_SETTINGS_INVALID" ? 400 : safe.code === "WEB_SETTINGS_CONFLICT" ? 409 : 503,
+          { code: safe.code, error: safe.message });
+      }
+    }
+
     if (segs[0] === "native-capacity" && segs.length === 1) {
       if (!nativeRuntimeConfigController) return sendJson(res, 501, { error: "Native capacity configuration unavailable" });
       if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
@@ -1421,6 +1592,61 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         return sendJson(res, code === "NATIVE_RUNTIME_CONFIG_INVALID" ? 400 : 409, {
           code, error: NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES[code],
         });
+      }
+    }
+
+    if (segs[0] === "native-memory-config" && (segs.length === 1 || (segs.length === 2 && segs[1] === "context"))) {
+      if (!nativeMemoryConfigController) return sendJson(res, 501, { error: "Memory configuration unavailable" });
+      const context = segs.length === 2;
+      if (context && method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+      if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      try {
+        const result = context ? await nativeMemoryConfigController.context()
+          : method === "GET" ? await nativeMemoryConfigController.read()
+          : await nativeMemoryConfigController.update(await readJsonBody(req));
+        return sendJson(res, 200, result);
+      } catch (error) {
+        const code = Object.hasOwn(NATIVE_MEMORY_CONFIG_PUBLIC_MESSAGES, error?.code || "")
+          ? error.code : "NATIVE_MEMORY_CONFIG_UNAVAILABLE";
+        return sendJson(res, code === "NATIVE_MEMORY_CONFIG_INVALID" ? 400 : 409,
+          { code, error: NATIVE_MEMORY_CONFIG_PUBLIC_MESSAGES[code] });
+      }
+    }
+
+    if (segs[0] === "native-memory-sharing-config" && (segs.length === 1 || segs.length === 2 && segs[1] === "context")) {
+      if (!nativeMemorySharingConfigController) return sendJson(res, 501, { error: "Memory sharing configuration unavailable" });
+      const context = segs.length === 2;
+      if (context && method !== "GET" || !["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+      if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      try {
+        const result = context ? await nativeMemorySharingConfigController.context()
+          : method === "GET" ? await nativeMemorySharingConfigController.read()
+          : await nativeMemorySharingConfigController.update(await readJsonBody(req));
+        return sendJson(res, 200, result);
+      } catch (error) {
+        const code = Object.hasOwn(NATIVE_MEMORY_SHARING_PUBLIC_MESSAGES, error?.code || "") ? error.code : "NATIVE_MEMORY_SHARING_UNAVAILABLE";
+        return sendJson(res, code === "NATIVE_MEMORY_SHARING_INVALID" ? 400 : 409, { code, error: NATIVE_MEMORY_SHARING_PUBLIC_MESSAGES[code] });
+      }
+    }
+
+    if (segs[0] === "memory-provider-owners" && (segs.length === 1 || segs.length === 2 && segs[1] === "recover")) {
+      const recovering = segs.length === 2;
+      if (recovering ? method !== "POST" : !["GET", "POST"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+      if (method === "POST" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      try {
+        const rpcMethod = method === "GET" ? "memory.provider.owner.context"
+          : recovering ? "memory.provider.owner.recover" : "memory.provider.owner.apply";
+        const query = new URL(req.url, "http://127.0.0.1").searchParams;
+        if (method === "GET" && ([...query.keys()].some(key => key !== "profileId") || query.getAll("profileId").length > 1)) memoryProviderOwnerProtocol.fail();
+        const params = memoryProviderOwnerProtocol.validateParams(rpcMethod, method === "GET"
+          ? query.has("profileId") ? { profileId: query.get("profileId") } : {} : await readJsonBody(req));
+        const result = method === "GET" ? await registry.getMemoryProviderOwners(params)
+          : recovering ? await registry.recoverMemoryProviderOwner(params) : await registry.applyMemoryProviderOwner(params);
+        return sendJson(res, 200, memoryProviderOwnerProtocol.validateResult(rpcMethod, result));
+      } catch (error) {
+        const safe = memoryProviderOwnerProtocol.publicError(error);
+        return sendJson(res, safe.code === "MEMORY_OWNER_INVALID" ? 400 : 409, { code: safe.code, error: safe.message });
       }
     }
 
@@ -1439,7 +1665,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         // The shortcut is committed by trusted desktop IPC only, after the OS
         // accepts the new binding. A stale Settings form must not revert it.
         const { windowBounds: _ignoredWindowBounds, inspirationShortcut: _ignoredInspirationShortcut,
-          nativeConcurrency: _ignoredNativeConcurrency, runtimeFrameworkFlags: _ignoredRuntimeFlags, ...writable } = body;
+          nativeConcurrency: _ignoredNativeConcurrency, runtimeFrameworkFlags: _ignoredRuntimeFlags,
+          nativeMemory: _ignoredNativeMemory, nativeMemorySharing: _ignoredNativeMemorySharing,
+          openclawPluginHostMode: _ignoredPluginHostMode, hermesPluginHostMode: _ignoredHermesPluginHostMode, ...writable } = body;
         if (Array.isArray(writable.disabledBackends) && registry) {
           const disabled = new Set(writable.disabledBackends
             .filter((id) => typeof id === "string").map((id) => id.trim()));
@@ -1448,7 +1676,17 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
             return sendJson(res, 409, { code: "LAST_BACKEND_REQUIRED", error: "At least one connection must remain enabled." });
           }
         }
+        const groupChatWasEnabled = configStore.read().groupChatEnabled !== false;
         const saved = configStore.write(writable);
+        // 关闭群功能的那一刻停掉进行中的发言与后台工作（尽力而为：一个群失败不影响其他群，也不影响保存）。
+        if (groupChatWasEnabled && saved.groupChatEnabled === false && registry) {
+          void (async () => {
+            try {
+              const { groups } = await registry.listGroupChats({ includeArchived: false });
+              await Promise.all(groups.map((view) => registry.stopGroupChatDiscussion(view.group.id).catch(() => {})));
+            } catch { /* 群聊服务不可用时没有可停的活动 */ }
+          })();
+        }
         // Respond BEFORE applying: onConfigChanged may reload the Electron window,
         // which would abort THIS fetch mid-flight (the renderer navigates away
         // before it sees the 200), making a successful save look like it failed.
@@ -1527,7 +1765,13 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         }
         const backend = registry.route(agentId);
         if (!backend) return sendJson(res, 404, { error: `unknown agent ${agentId}` });
-        return sendJson(res, 200, await backend.execSlash(agentId, sessionKey, text));
+        try { return sendJson(res, 200, await backend.execSlash(agentId, sessionKey, text)); }
+        catch (error) {
+          const messages = { ...MEMORY_COMMAND_PUBLIC_MESSAGES, ...NATIVE_MEMORY_CONFIG_PUBLIC_MESSAGES };
+          if (!Object.hasOwn(messages, error?.code || "")) throw error;
+          return sendJson(res, error.code === "MEMORY_COMMAND_INVALID" || error.code === "NATIVE_MEMORY_CONFIG_INVALID" ? 400 : 409,
+            { code: error.code, error: messages[error.code] });
+        }
       }
       return sendJson(res, 405, { error: "method not allowed" });
     }
@@ -1555,15 +1799,32 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 405, { error: "method not allowed" });
     }
+    if (segs[0] === "cron" && segs[1] === "codex") {
+      const backend = getActiveBackend(registry, new URL(req.url, "http://127.0.0.1").searchParams.get("backend") || "shoggoth");
+      if (!backend || typeof backend.getCodexAutomationSource !== "function") return sendJson(res, 404, { error: "Codex source unavailable" });
+      if (method === "GET" && segs.length === 2) return sendJson(res, 200, await backend.getCodexAutomationSource());
+      if (method === "GET" && segs[2] === "models") return sendJson(res, 200, await backend.getCodexAutomationModels());
+      return sendJson(res, 405, { error: "method not allowed" });
+    }
     if (segs[0] === "cron" && segs[1] === "jobs") {
       const url = new URL(req.url, "http://127.0.0.1");
       const qid = url.searchParams.get("id");
       if (segs.length === 2 && qid) {
+        if (method !== "GET" && isCodexAutomationId(qid) && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
         // Item ops in query form (?id=&action=) — cron ids may contain "/"
         // (OpenClaw), so they can't be a path segment (ARCHITECTURE §9).
         const backend = await resolveResourceBackend(registry, "cron", qid);
         if (!backend) return sendJson(res, 404, { error: `no backend for cron id ${qid}` });
         const action = url.searchParams.get("action");
+        if (method === "POST" && action === "control") {
+          const body = await readJsonBody(req);
+          if (!body || typeof backend.controlCronRun !== "function") return sendJson(res, 400, { error: "Run control unsupported" });
+          return sendJson(res, 200, await backend.controlCronRun(qid, body));
+        }
+        if (method === "GET" && action === "result") {
+          if (typeof backend.getCronRunResult !== "function") return sendJson(res, 501, { error: "Result unsupported" });
+          return sendJson(res, 200, await backend.getCronRunResult(qid, url.searchParams.get("runId")));
+        }
         if (method === "GET" && action === "runs") {
           return sendJson(res, 200, await backend.getCronRuns(qid, cronRunOptionsFromQuery(url.searchParams)));
         }
@@ -1595,7 +1856,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
             workAdmissionGate,
             backend.id,
             "cron.run",
-            () => backend.runCronJob(qid, body.mode),
+            () => backend.runCronJob(qid, body.mode, { revision: body.revision, operationId: body.operationId }),
           );
           return sendJson(res, 200, { job });
         }
@@ -1617,6 +1878,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         if (method === "POST") {
           const spec = await readJsonBody(req);
           if (!spec) return sendJson(res, 400, { error: "invalid JSON body" });
+          if (spec.origin === "codex-desktop" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
           const backend = spec.backendId
             ? getActiveBackend(registry, spec.backendId)
             : spec.agentId
@@ -1628,6 +1890,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         return sendJson(res, 405, { error: "method not allowed" });
       }
       const id = segs[2];
+      if (method !== "GET" && isCodexAutomationId(id) && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
       const backend = await resolveResourceBackend(registry, "cron", id);
       if (!backend) return sendJson(res, 404, { error: `no backend for cron id ${id}` });
       if (segs.length === 3) {
@@ -1649,7 +1912,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           workAdmissionGate,
           backend.id,
           "cron.run",
-          () => backend.runCronJob(id, body.mode),
+          () => backend.runCronJob(id, body.mode, { revision: body.revision, operationId: body.operationId }),
         );
         return sendJson(res, 200, { job });
       }
@@ -1837,6 +2100,17 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 404, { error: "unknown endpoints action" });
     }
+    if (segs[0] === "models" && segs[1] === "config" && segs[2] === "draft" && segs.length === 3) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      const backendId = new URL(req.url, "http://127.0.0.1").searchParams.get("backend") || "";
+      const coordinator = requireReadyCoordinator(modelChangeCoordinator);
+      const body = await readJsonBody(req);
+      if (!body || typeof body.providerKey !== "string" || !Array.isArray(body.models)) return sendJson(res, 400, { error: "missing providerKey/models" });
+      const { operationId, ...input } = body;
+      return sendModelChangeResult(res, await coordinator.saveProviderDraft(backendId, input, {
+        operationId: typeof operationId === "string" && operationId ? operationId : undefined,
+      }));
+    }
     // 批量模型变更:草稿层一次性提交(N 个无凭证操作合并成一次网关配置写)
     if (segs[0] === "models" && segs[1] === "config" && segs[2] === "batch" && segs.length === 3) {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
@@ -1886,9 +2160,29 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         }
         const body = await readJsonBody(req);
         if (!body?.provider || !body?.apiKey) return sendJson(res, 400, { error: "missing provider/apiKey" });
+        if ((await backend.getModelChangeCapabilities?.())?.mutationSemantics === "native-config") {
+          const coordinator = requireReadyCoordinator(modelChangeCoordinator);
+          return sendModelChangeResult(res, await coordinator.updateProviderCompat(backendId, body.provider,
+            { apiKey: body.apiKey, ...(body.agentId ? { agentId: body.agentId } : {}),
+              ...(body.credentialScope !== undefined ? { credentialScope: body.credentialScope } : {}) }, { operationId: body.operationId }));
+        }
         return sendJson(res, 200, await backend.setModelAuthProfileKey(body.provider, body.apiKey));
       }
       if (method === "DELETE") {
+        // ?provider= 清除该 provider 的全部 API Key；?id= 删除单条授权 profile。
+        const provider = url.searchParams.get("provider") || "";
+        if (provider) {
+          if ((await backend.getModelChangeCapabilities?.())?.mutationSemantics === "native-config") {
+            const coordinator = requireReadyCoordinator(modelChangeCoordinator);
+            return sendModelChangeResult(res, await coordinator.updateProviderCompat(backendId, provider,
+              { clearApiKey: true, ...(url.searchParams.get("agentId") ? { agentId: url.searchParams.get("agentId") } : {}) },
+              { operationId: url.searchParams.get("operationId") || undefined }));
+          }
+          if (typeof backend.clearModelAuthProviderKeys !== "function") {
+            return sendJson(res, 409, { error: "auth provider clear not supported", code: "auth_unsupported" });
+          }
+          return sendJson(res, 200, await backend.clearModelAuthProviderKeys(provider));
+        }
         if (typeof backend.deleteModelAuthProfile !== "function") {
           return sendJson(res, 409, { error: "auth profile delete not supported", code: "auth_unsupported" });
         }
@@ -1923,6 +2217,62 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       const backendId = new URL(req.url, "http://127.0.0.1").searchParams.get("backend") || "";
       return sendJson(res, 200, { operations: modelChangeCoordinator.listPending(backendId) });
+    }
+    if (segs[0] === "models" && segs[1] === "config" && segs[2] === "pending-identities" && segs.length === 3) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const url = new URL(req.url, "http://127.0.0.1");
+      if (url.searchParams.getAll("backend").length !== 1 || [...url.searchParams.keys()].some(key => key !== "backend"))
+        return sendJson(res, 400, { error: "invalid pending observation", code: "invalid_pending_observation" });
+      if (!modelChangeCoordinator || typeof modelChangeCoordinator.listPendingIdentities !== "function")
+        return sendJson(res, 503, { error: "pending observation unavailable", code: "pending_observation_unavailable" });
+      return sendJson(res, 200, modelChangeCoordinator.listPendingIdentities(url.searchParams.get("backend")));
+    }
+    if (segs[0] === "models" && segs[1] === "config" && segs[2] === "operation" && segs[3] === "recover" && segs.length === 4) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      const url = new URL(req.url, "http://127.0.0.1"), keys = ["backend", "operationId", "provider"];
+      if (keys.some(key => url.searchParams.getAll(key).length !== 1) || [...url.searchParams.keys()].some(key => !keys.includes(key)))
+        return sendJson(res, 400, { error: "invalid operation observation", code: "invalid_operation_observation" });
+      const body = await readJsonBody(req);
+      if (!body || Object.getPrototypeOf(body) !== Object.prototype || Reflect.ownKeys(body).length !== 0)
+        return sendJson(res, 400, { error: "invalid original operation recovery", code: "invalid_operation_recovery" });
+      const coordinator = requireReadyCoordinator(modelChangeCoordinator);
+      if (typeof coordinator.recoverOperation !== "function")
+        return sendJson(res, 503, { error: "operation recovery unavailable", code: "operation_recovery_unavailable" });
+      return sendJson(res, 200, await coordinator.recoverOperation(url.searchParams.get("backend"), {
+        operationId: url.searchParams.get("operationId"), providerKey: url.searchParams.get("provider"),
+      }));
+    }
+    if (segs[0] === "models" && segs[1] === "config" && segs[2] === "operation" && segs[3] === "abandon" && segs.length === 4) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      const url = new URL(req.url, "http://127.0.0.1"), keys = ["backend", "operationId", "provider"];
+      if (keys.some(key => url.searchParams.getAll(key).length !== 1) || [...url.searchParams.keys()].some(key => !keys.includes(key)))
+        return sendJson(res, 400, { error: "invalid operation observation", code: "invalid_operation_observation" });
+      const body = await readJsonBody(req);
+      if (!body || Object.getPrototypeOf(body) !== Object.prototype || Reflect.ownKeys(body).length !== 0)
+        return sendJson(res, 400, { error: "invalid original operation abandon", code: "invalid_operation_abandon" });
+      const coordinator = requireReadyCoordinator(modelChangeCoordinator);
+      if (typeof coordinator.abandonOperation !== "function")
+        return sendJson(res, 503, { error: "operation abandon unavailable", code: "operation_abandon_unavailable" });
+      return sendJson(res, 200, await coordinator.abandonOperation(url.searchParams.get("backend"), {
+        operationId: url.searchParams.get("operationId"), providerKey: url.searchParams.get("provider"),
+      }));
+    }
+    if (segs[0] === "models" && segs[1] === "config" && segs[2] === "operation" && segs.length === 3) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const url = new URL(req.url, "http://127.0.0.1");
+      const keys = ["backend", "operationId", "provider"];
+      if (keys.some(key => url.searchParams.getAll(key).length !== 1)
+        || [...url.searchParams.keys()].some(key => !keys.includes(key))) {
+        return sendJson(res, 400, { error: "invalid operation observation", code: "invalid_operation_observation" });
+      }
+      if (!modelChangeCoordinator || typeof modelChangeCoordinator.observeOperation !== "function") {
+        return sendJson(res, 503, { error: "operation observation unavailable", code: "operation_observation_unavailable" });
+      }
+      // Readiness gates mutations; this read-only journal query remains available
+      // during startup recovery and never asks a Runtime to repeat an operation.
+      return sendJson(res, 200, modelChangeCoordinator.observeOperation(url.searchParams.get("backend"), {
+        operationId: url.searchParams.get("operationId"), providerKey: url.searchParams.get("provider"),
+      }));
     }
     if (segs[0] === "models" && segs[1] === "config" && segs[2] === "preview" && segs.length === 3) {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
@@ -1981,6 +2331,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           api: body.api,
           clearBaseUrl: body.clearBaseUrl === true,
           clearApiKey: body.clearApiKey === true,
+          ...(body.baseHash !== undefined ? { baseHash: body.baseHash } : {}),
+          ...(body.credentialScope !== undefined ? { credentialScope: body.credentialScope } : {}),
+          ...(typeof body.agentId === "string" ? { agentId: body.agentId } : {}),
           ...(typeof body.renameTo === "string" && body.renameTo ? { renameTo: body.renameTo } : {}),
         }, {
           operationId: body.operationId,
@@ -2076,8 +2429,18 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (segs[1] === "disconnect") {
         return sendJson(res, 200, await backend.disconnectOAuthProvider(body.provider, profile));
       }
+      // flow "providers": the model providers a runtime signs into, and API keys for them.
+      if (segs[1] === "options") {
+        return sendJson(res, 200, await backend.listOAuthLoginOptions(body.provider));
+      }
+      if (segs[1] === "apikey") {
+        if (!body.target || typeof body.key !== "string" || !body.key) {
+          return sendJson(res, 400, { error: "missing target or key" });
+        }
+        return sendJson(res, 200, await backend.saveOAuthApiKey(body.provider, body.target, body.key));
+      }
       if (segs[1] === "start") {
-        return sendJson(res, 200, await backend.startOAuthLogin(body.provider, profile));
+        return sendJson(res, 200, await backend.startOAuthLogin(body.provider, profile, body.target));
       }
       if (!body.sessionId) return sendJson(res, 400, { error: "missing sessionId" });
       if (segs[1] === "submit") {
@@ -2112,14 +2475,14 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(operationId)) {
         return sendJson(res, 400, { error: "invalid operationId" });
       }
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       return sendJson(res, 200, await backend.getPluginOperation(operationId));
     }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "state") {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
       if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const body = await readJsonBody(req);
       const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -2136,7 +2499,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       return sendJson(res, 200, await backend.setPluginInstallationState(body));
     }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "skill-bindings") {
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
       if (method === "GET") {
@@ -2168,7 +2531,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "mcp-status") {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const params = requestUrl?.searchParams;
       const agentId = params?.get("agentId");
@@ -2185,7 +2548,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external-calls") {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const params = requestUrl?.searchParams;
       const keys = ["backendId", "agentId", "sessionId", "toolCallId",
@@ -2218,7 +2581,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         agentId, sessionId, toolCallId, cursor, limit }));
     }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external-approvals") {
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       if (method === "GET") {
         const params = requestUrl?.searchParams;
@@ -2274,7 +2637,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "mcp-tools") {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const params = requestUrl?.searchParams;
       const agentId = params?.get("agentId");
@@ -2293,7 +2656,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       && segs[1] === "mcp-grants" && segs[2] === "revoke") {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
       if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const body = await readJsonBody(req);
       const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -2315,7 +2678,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       && segs[1] === "mcp-grants" && segs[2] === "revoke-all") {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
       if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const body = await readJsonBody(req);
       const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -2394,7 +2757,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
             : body?.action === "restore" ? [...common, "snapshotId", "snapshotDigest"] : common;
       if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== fields.length
         || !fields.every(key => Object.hasOwn(body, key))) return sendJson(res, 400, { error: "Invalid rollback request" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       if (segs[1] === "rollback-list") return sendJson(res, 200, await backend.listPluginRollback(body));
       if (segs[1] === "rollback-operation") return sendJson(res, 200, await backend.getPluginRollbackOperation(body));
@@ -2416,7 +2779,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
         return sendJson(res, 400, { error: "Invalid plugin dependency request" });
       }
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       if (segs[1] === "dependency-operation") return sendJson(res, 200, await backend.getPluginDependencyOperation(body.operationId));
       if (segs[1] === "dependency-status") return sendJson(res, 200, await backend.getPluginDependencyStatus(body));
@@ -2432,6 +2795,478 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       finally { if (!approved) await backend.commitPluginDependency({ challenge: prepared.challenge, approved: false }); }
       if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
       return sendJson(res, 200, await backend.commitPluginDependency({ challenge: prepared.challenge, approved: true }));
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["zoom-registration-status", "zoom-registration-configure"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const statusOnly = segs[1] === "zoom-registration-status";
+      const fields = statusOnly ? [] : ["clientId", "clientSecret", "redirectPort", "scopes"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid Zoom registration request" });
+      }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend || typeof backend.getPluginZoomRegistrationStatus !== "function"
+        || (!statusOnly && typeof backend.configurePluginZoomRegistration !== "function")) {
+        return sendJson(res, 503, { error: "Zoom registration unavailable" });
+      }
+      if (statusOnly) return sendJson(res, 200, await backend.getPluginZoomRegistrationStatus());
+      if (typeof body.clientId !== "string" || !/^[A-Za-z0-9._-]{10,128}$/u.test(body.clientId)
+        || body.clientId.startsWith("ZOOM_") || !validZoomClientSecret(body.clientSecret)
+        || !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
+        || body.redirectPort > 65535 || !Array.isArray(body.scopes)
+        || body.scopes.length < 2 || body.scopes.length > ZOOM_MEETING_SCOPES.length + 1
+        || !body.scopes.includes(ZOOM_IDENTITY_SCOPE)
+        || !body.scopes.some(scope => ZOOM_MEETING_SCOPES.includes(scope))
+        || body.scopes.some(scope => ![ZOOM_IDENTITY_SCOPE, ...ZOOM_MEETING_SCOPES].includes(scope))
+        || new Set(body.scopes).size !== body.scopes.length) {
+        return sendJson(res, 400, { error: "Invalid Zoom registration request" });
+      }
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const current = await backend.getPluginZoomRegistrationStatus();
+      if (current.configured) return sendJson(res, 409, { error: "Zoom client already configured",
+        code: "ZOOM_ALREADY_CONFIGURED" });
+      const approved = await hostOps.confirmPluginCapability({ action: "zoom-registration",
+        provider: "Zoom Meetings", clientId: body.clientId,
+        redirectUrl: `http://127.0.0.1:${body.redirectPort}/oauth/callback`,
+        scopes: body.scopes }) === true;
+      if (!approved) return sendJson(res, 200,
+        { configured: false, restartRequired: false });
+      const result = await backend.configurePluginZoomRegistration(body);
+      return sendJson(res, 200, { configured: result.configured,
+        restartRequired: result.restartRequired });
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["dropbox-registration-status", "dropbox-registration-configure"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const statusOnly = segs[1] === "dropbox-registration-status";
+      const fields = statusOnly ? [] : ["clientId", "clientSecret", "redirectPort"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid Dropbox registration request" });
+      }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend || typeof backend.getPluginDropboxRegistrationStatus !== "function"
+        || (!statusOnly && typeof backend.configurePluginDropboxRegistration !== "function")) {
+        return sendJson(res, 503, { error: "Dropbox registration unavailable" });
+      }
+      if (statusOnly) return sendJson(res, 200, await backend.getPluginDropboxRegistrationStatus());
+      if (typeof body.clientId !== "string" || !DROPBOX_CLIENT_ID.test(body.clientId)
+        || !validDropboxClientSecret(body.clientSecret)
+        || !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
+        || body.redirectPort > 65535) {
+        return sendJson(res, 400, { error: "Invalid Dropbox registration request" });
+      }
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const current = await backend.getPluginDropboxRegistrationStatus();
+      if (current.configured) return sendJson(res, 409, { error: "Dropbox client already configured",
+        code: "DROPBOX_ALREADY_CONFIGURED" });
+      const approved = await hostOps.confirmPluginCapability({ action: "dropbox-registration",
+        provider: "Dropbox", clientId: body.clientId,
+        redirectUrl: `http://127.0.0.1:${body.redirectPort}/oauth/callback`,
+        scopes: [...DROPBOX_SCOPES] }) === true;
+      if (!approved) return sendJson(res, 200,
+        { configured: false, restartRequired: false });
+      const result = await backend.configurePluginDropboxRegistration(body);
+      return sendJson(res, 200, { configured: result.configured,
+        restartRequired: result.restartRequired });
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "codex-security-status") {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      let input;
+      try { input = validateCodexSecurityStatusInput(await readJsonBody(req)); }
+      catch { return sendJson(res, 400, { error: "Invalid Codex Security status request" }); }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend || typeof backend.getCodexSecurityStatus !== "function") {
+        return sendJson(res, 503, { error: "Codex Security status unavailable" });
+      }
+      try { return sendJson(res, 200, validateCodexSecurityPublicStatus(await backend.getCodexSecurityStatus(input))); }
+      catch { return sendJson(res, 503, { error: "Codex Security status unavailable" }); }
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["gmail-registration-status", "gmail-registration-configure",
+        "gmail-capabilities-status", "gmail-capabilities-configure",
+        "gmail-auth-start", "gmail-auth-status", "gmail-auth-cancel",
+        "gmail-auth-recovery-status", "gmail-auth-reconcile"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const route = segs[1];
+      const authContext = ["agentId", "installationId", "componentId", "expectedRevision"];
+      const fields = route === "gmail-auth-recovery-status" ? authContext
+        : route === "gmail-auth-reconcile" ? [...authContext, "email"]
+        : route.endsWith("-status") && route !== "gmail-auth-status"
+        || route === "gmail-registration-configure" ? []
+        : route === "gmail-capabilities-configure"
+          ? ["expectedRevision", "writeEnabled", "sendEnabled"]
+          : route === "gmail-auth-start"
+            ? ["agentId", "installationId", "componentId", "expectedRevision", "operationId", "email"]
+            : ["agentId", "flowId"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length
+        || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid Gmail request" });
+      }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      if (route === "gmail-registration-status") {
+        return sendJson(res, 200, await backend.getPluginGmailRegistrationStatus());
+      }
+      if (route === "gmail-registration-configure") {
+        if (typeof hostOps?.selectPluginGmailCredentials !== "function"
+          || typeof hostOps?.confirmPluginCapability !== "function") {
+          return sendJson(res, 501, { error: "Native Gmail client import unavailable" });
+        }
+        const credentialsPath = await hostOps.selectPluginGmailCredentials();
+        if (credentialsPath === null) return sendJson(res, 200,
+          { canceled: true, ...await backend.getPluginGmailRegistrationStatus() });
+        if (typeof credentialsPath !== "string") return sendJson(res, 400, { error: "Invalid Gmail client path" });
+        const approved = await hostOps.confirmPluginCapability({ action: "gmail-registration",
+          path: credentialsPath }) === true;
+        if (!approved) return sendJson(res, 200,
+          { canceled: true, ...await backend.getPluginGmailRegistrationStatus() });
+        return sendJson(res, 200, { canceled: false,
+          ...await backend.configurePluginGmailRegistration(credentialsPath) });
+      }
+      if (route === "gmail-capabilities-status") {
+        return sendJson(res, 200, await backend.getPluginGmailCapabilitiesStatus());
+      }
+      if (route === "gmail-capabilities-configure") {
+        if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
+          || typeof body.writeEnabled !== "boolean" || typeof body.sendEnabled !== "boolean"
+          || body.sendEnabled && !body.writeEnabled) {
+          return sendJson(res, 400, { error: "Invalid Gmail capabilities" });
+        }
+        if (typeof hostOps?.confirmPluginCapability !== "function") {
+          return sendJson(res, 501, { error: "Native Gmail confirmation unavailable" });
+        }
+        const approved = await hostOps.confirmPluginCapability({ action: "gmail-capabilities",
+          writeEnabled: body.writeEnabled, sendEnabled: body.sendEnabled }) === true;
+        if (!approved) return sendJson(res, 200,
+          { canceled: true, ...await backend.getPluginGmailCapabilitiesStatus() });
+        return sendJson(res, 200, { canceled: false,
+          ...await backend.configurePluginGmailCapabilities(body) });
+      }
+      if (route === "gmail-auth-recovery-status" || route === "gmail-auth-reconcile") {
+        const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+        if (!["agentId", "installationId"].every(key =>
+          typeof body[key] === "string" && id.test(body[key]))
+          || typeof body.componentId !== "string" || !/^[a-f0-9]{64}$/u.test(body.componentId)
+          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
+          || route === "gmail-auth-reconcile" && (typeof body.email !== "string"
+            || !/^[^\s@\x00-\x1f]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,63}$/u.test(body.email))) {
+          return sendJson(res, 400, { error: "Invalid Gmail recovery request" });
+        }
+        const input = { profileId: body.agentId, installationId: body.installationId,
+          componentId: body.componentId, expectedRevision: body.expectedRevision };
+        if (route === "gmail-auth-recovery-status") {
+          return sendJson(res, 200, await backend.getPluginGmailAuthRecoveryStatus(input));
+        }
+        if (typeof hostOps?.confirmPluginCapability !== "function") {
+          return sendJson(res, 501, { error: "Native Gmail recovery confirmation unavailable" });
+        }
+        const approved = await hostOps.confirmPluginCapability({ action: "gmail-auth-reconcile",
+          email: body.email }) === true;
+        if (!approved) return sendJson(res, 200, { canceled: true, recovered: false });
+        return sendJson(res, 200, { canceled: false,
+          ...await backend.reconcilePluginGmailAuth({ ...input, email: body.email }) });
+      }
+      if (route === "gmail-auth-start") {
+        const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+        if (!["agentId", "installationId", "operationId"].every(key =>
+          typeof body[key] === "string" && id.test(body[key]))
+          || typeof body.componentId !== "string" || !/^[a-f0-9]{64}$/u.test(body.componentId)
+          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
+          || typeof body.email !== "string" || !/^[^\s@\x00-\x1f]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,63}$/u.test(body.email)) {
+          return sendJson(res, 400, { error: "Invalid Gmail account" });
+        }
+        if (typeof hostOps?.confirmPluginCapability !== "function") {
+          return sendJson(res, 501, { error: "Native Gmail confirmation unavailable" });
+        }
+        const approved = await hostOps.confirmPluginCapability({ action: "gmail-auth",
+          email: body.email, scopes: ["gmail"] }) === true;
+        if (!approved) return sendJson(res, 200, { canceled: true, flow: null });
+        return sendJson(res, 200, await backend.startPluginGmailAuth({
+          profileId: body.agentId, installationId: body.installationId,
+          componentId: body.componentId, expectedRevision: body.expectedRevision,
+          operationId: body.operationId, email: body.email,
+        }));
+      }
+      if (typeof body.agentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.agentId)
+        || typeof body.flowId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.flowId)) {
+        return sendJson(res, 400, { error: "Invalid Gmail flow" });
+      }
+      const input = { profileId: body.agentId, flowId: body.flowId };
+      return sendJson(res, 200, await (route === "gmail-auth-cancel"
+        ? backend.cancelPluginGmailAuth(input) : backend.getPluginGmailAuth(input)));
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["graph-registration-status", "graph-registration-configure"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const statusOnly = segs[1] === "graph-registration-status";
+      const fields = statusOnly ? [] : ["clientId"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid Graph registration request" });
+      }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend || typeof backend.getPluginGraphRegistrationStatus !== "function"
+        || (!statusOnly && typeof backend.configurePluginGraphRegistration !== "function")) {
+        return sendJson(res, 503, { error: "Graph registration unavailable" });
+      }
+      if (statusOnly) return sendJson(res, 200, await backend.getPluginGraphRegistrationStatus());
+      if (typeof body.clientId !== "string"
+        || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(body.clientId)) {
+        return sendJson(res, 400, { error: "Invalid Graph client ID", code: "GRAPH_REGISTRATION_INVALID" });
+      }
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const current = await backend.getPluginGraphRegistrationStatus();
+      if (current.configured) return sendJson(res, 409, { error: "Graph client already configured",
+        code: "GRAPH_REGISTRATION_CONFLICT" });
+      const approved = await hostOps.confirmPluginCapability({ action: "graph-registration",
+        provider: "Microsoft Graph", clientId: body.clientId,
+        redirectUrl: "http://localhost", scopes: GRAPH_REGISTRATION_SCOPES }) === true;
+      if (!approved) return sendJson(res, 200,
+        { canceled: true, configured: false, restartRequired: false });
+      const result = await backend.configurePluginGraphRegistration(body);
+      return sendJson(res, 200, { canceled: false, configured: result.configured,
+        restartRequired: result.restartRequired });
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["lovable-registration-status", "lovable-registration-configure",
+        "lovable-registration-reconcile"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const statusOnly = segs[1] === "lovable-registration-status";
+      const reconcile = segs[1] === "lovable-registration-reconcile";
+      const fields = statusOnly ? [] : reconcile ? ["reviewedRemoteOutcome"] : ["redirectPort"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid Lovable registration request" });
+      }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend || typeof backend.getPluginLovableRegistrationStatus !== "function"
+        || (!statusOnly && typeof backend[reconcile
+          ? "reconcilePluginLovableRegistration" : "configurePluginLovableRegistration"] !== "function")) {
+        return sendJson(res, 503, { error: "Lovable registration unavailable" });
+      }
+      if (statusOnly) return sendJson(res, 200, await backend.getPluginLovableRegistrationStatus());
+      if (reconcile ? body.reviewedRemoteOutcome !== true
+        : !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
+          || body.redirectPort > 65535) {
+        return sendJson(res, 400, { error: "Invalid Lovable callback port",
+          code: "LOVABLE_REGISTRATION_INVALID" });
+      }
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const current = await backend.getPluginLovableRegistrationStatus();
+      if (reconcile) {
+        if (!current.needsVerification) return sendJson(res, 409,
+          { error: "No uncertain Lovable registration to reconcile",
+            code: "LOVABLE_REGISTRATION_CONFLICT" });
+        const approved = await hostOps.confirmPluginCapability({
+          action: "lovable-registration-reconcile", provider: "Lovable official MCP",
+          registrationEndpoint: "https://lovable.dev/oauth/register" }) === true;
+        if (!approved) return sendJson(res, 200, { canceled: true, ...current });
+        const result = await backend.reconcilePluginLovableRegistration(body);
+        return sendJson(res, 200, { canceled: false, ...result });
+      }
+      if (current.configured) return sendJson(res, 409, { error: "Lovable client already registered",
+        code: "LOVABLE_REGISTRATION_CONFLICT" });
+      if (current.needsVerification) return sendJson(res, 409,
+        { error: "Prior Lovable registration needs verification",
+          code: "LOVABLE_REGISTRATION_NEEDS_VERIFICATION" });
+      const redirectUrl = `http://127.0.0.1:${body.redirectPort}/oauth/callback`;
+      const approved = await hostOps.confirmPluginCapability({ action: "lovable-registration",
+        provider: "Lovable official MCP", redirectUrl, scopes: ["workspaces:read"],
+        registrationEndpoint: "https://lovable.dev/oauth/register" }) === true;
+      if (!approved) return sendJson(res, 200, { canceled: true, ...current });
+      const result = await backend.configurePluginLovableRegistration(body);
+      return sendJson(res, 200, { canceled: false, ...result });
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["higgsfield-registration-status", "higgsfield-registration-configure",
+        "higgsfield-registration-reconcile"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const statusOnly = segs[1] === "higgsfield-registration-status";
+      const reconcile = segs[1] === "higgsfield-registration-reconcile";
+      const fields = statusOnly ? [] : reconcile ? ["reviewedRemoteOutcome"] : ["redirectPort"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid Higgsfield registration request" });
+      }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend || typeof backend.getPluginHiggsfieldRegistrationStatus !== "function"
+        || (!statusOnly && typeof backend[reconcile
+          ? "reconcilePluginHiggsfieldRegistration" : "configurePluginHiggsfieldRegistration"] !== "function")) {
+        return sendJson(res, 503, { error: "Higgsfield registration unavailable" });
+      }
+      if (statusOnly) return sendJson(res, 200, await backend.getPluginHiggsfieldRegistrationStatus());
+      if (reconcile ? body.reviewedRemoteOutcome !== true
+        : !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
+          || body.redirectPort > 65535) {
+        return sendJson(res, 400, { error: "Invalid Higgsfield callback port",
+          code: "HIGGSFIELD_REGISTRATION_INVALID" });
+      }
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const current = await backend.getPluginHiggsfieldRegistrationStatus();
+      if (reconcile) {
+        if (!current.needsVerification) return sendJson(res, 409,
+          { error: "No uncertain Higgsfield registration to reconcile",
+            code: "HIGGSFIELD_REGISTRATION_CONFLICT" });
+        const approved = await hostOps.confirmPluginCapability({
+          action: "higgsfield-registration-reconcile", provider: "Higgsfield official MCP",
+          registrationEndpoint: "https://clerk.higgsfield.ai/oauth/register" }) === true;
+        if (!approved) return sendJson(res, 200, { canceled: true, ...current });
+        const result = await backend.reconcilePluginHiggsfieldRegistration(body);
+        return sendJson(res, 200, { canceled: false, ...result });
+      }
+      if (current.configured) return sendJson(res, 409, { error: "Higgsfield client already registered",
+        code: "HIGGSFIELD_REGISTRATION_CONFLICT" });
+      if (current.needsVerification) return sendJson(res, 409,
+        { error: "Prior Higgsfield registration needs verification",
+          code: "HIGGSFIELD_REGISTRATION_NEEDS_VERIFICATION" });
+      const redirectUrl = `http://127.0.0.1:${body.redirectPort}/oauth/callback`;
+      const approved = await hostOps.confirmPluginCapability({ action: "higgsfield-registration",
+        provider: "Higgsfield official MCP", redirectUrl, scopes: ["openid", "email", "offline_access"],
+        registrationEndpoint: "https://clerk.higgsfield.ai/oauth/register" }) === true;
+      if (!approved) return sendJson(res, 200, { canceled: true, ...current });
+      const result = await backend.configurePluginHiggsfieldRegistration(body);
+      return sendJson(res, 200, { canceled: false, ...result });
+    }
+    if (segs[0] === "plugins" && segs.length === 2
+      && ["slack-registration-status", "slack-registration-configure"].includes(segs[1])) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const statusOnly = segs[1] === "slack-registration-status";
+      const fields = statusOnly ? [] : ["clientId", "redirectPort", "scopes"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length
+        || !fields.every(key => Object.hasOwn(body, key))) {
+        return sendJson(res, 400, { error: "Invalid Slack registration request" });
+      }
+      const backend = getPluginServiceBackend(registry);
+      if (!backend || typeof backend.getPluginSlackRegistrationStatus !== "function"
+        || (!statusOnly && typeof backend.configurePluginSlackRegistration !== "function")) {
+        return sendJson(res, 503, { error: "Slack registration unavailable" });
+      }
+      if (statusOnly) return sendJson(res, 200, await backend.getPluginSlackRegistrationStatus());
+      const accessProfile = slackAccessProfile(body.scopes);
+      if (typeof body.clientId !== "string"
+        || !/^[0-9]{3,20}\.[0-9]{3,20}$/u.test(body.clientId)
+        || body.clientId === FROZEN_SLACK_CLIENT_ID
+        || !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
+        || body.redirectPort > 65535
+        || accessProfile === null) {
+        return sendJson(res, 400, { error: "Invalid Slack client or scope",
+          code: "SLACK_REGISTRATION_INVALID" });
+      }
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const current = await backend.getPluginSlackRegistrationStatus();
+      if (current.configured) return sendJson(res, 409,
+        { error: "Slack client already configured", code: "SLACK_REGISTRATION_CONFLICT" });
+      const approved = await hostOps.confirmPluginCapability({ action: "slack-registration",
+        provider: "Slack official MCP", clientId: body.clientId,
+        redirectUrl: `http://localhost:${body.redirectPort}/oauth/callback`,
+        scopes: [...accessProfile.scopes] }) === true;
+      if (!approved) return sendJson(res, 200,
+        { canceled: true, configured: false, restartRequired: false });
+      const result = await backend.configurePluginSlackRegistration({ ...body, scopes: [...accessProfile.scopes] });
+      return sendJson(res, 200, { canceled: false, ...result });
+    }
+    // One-confirmation enable and `${secret:NAME}` credentials. GET reads names and
+    // readiness only; a credential value is accepted on POST and never returned.
+    if (segs[0] === "plugins" && segs.length === 2 && ["setup", "secrets"].includes(segs[1])) {
+      const kind = segs[1];
+      if (method === "GET") {
+        const params = requestUrl?.searchParams;
+        const agentId = params?.get("agentId");
+        const installationId = params?.get("installationId");
+        if (!params || [...params.keys()].some(key => !["agentId", "installationId"].includes(key)
+          || params.getAll(key).length !== 1) || typeof agentId !== "string" || agentId.length > 256
+          || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(installationId || "")) {
+          return sendJson(res, 400, { error: "Invalid plugin setup query" });
+        }
+        const backend = registry.route(agentId);
+        if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
+        return sendJson(res, 200, kind === "setup" ? await backend.getPluginSetup({ agentId, installationId })
+          : await backend.getPluginSecrets({ agentId, installationId }));
+      }
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      const fields = kind === "setup" ? ["agentId", "installationId", "expectedRevision"]
+        : ["agentId", "installationId", "name", "value"];
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
+        || typeof body.agentId !== "string" || body.agentId.length > 256
+        || (kind === "secrets" && body.value !== null && (typeof body.value !== "string" || !body.value
+          || Buffer.byteLength(body.value, "utf8") > 16_384))) {
+        return sendJson(res, 400, { error: "Invalid plugin setup request" });
+      }
+      const backend = registry.route(body.agentId);
+      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      const { value, ...request } = body;
+      const prepared = kind === "setup" ? await backend.preparePluginSetup(request)
+        : await backend.preparePluginSecret({ ...request, clear: value === null });
+      const commit = approved => kind === "setup"
+        ? backend.commitPluginSetup({ challenge: prepared.challenge, approved })
+        : backend.commitPluginSecret({ challenge: prepared.challenge, approved, value: approved ? value : null });
+      let approved = false;
+      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
+      finally { if (!approved) await commit(false); }
+      if (!approved) return sendJson(res, 200, { canceled: true, result: null });
+      return sendJson(res, 200, await commit(true));
+    }
+    // First-party plugins shipped in the App: list them, and reinstall one the
+    // user uninstalled. The confirmation names the Service's own metadata.
+    if (segs[0] === "plugins" && segs.length === 2 && ["first-party", "first-party-install"].includes(segs[1])) {
+      const backend = getPluginServiceBackend(registry);
+      if (!backend?.listFirstPartyPlugins) return sendJson(res, 503, { error: "Shoggoth unavailable" });
+      if (segs[1] === "first-party") {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        return sendJson(res, 200, await backend.listFirstPartyPlugins());
+      }
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      const body = await readJsonBody(req);
+      if (!exactJsonObject(body, ["packageId"]) || typeof body.packageId !== "string"
+        || !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(body.packageId)) {
+        return sendJson(res, 400, { error: "Invalid first-party plugin" });
+      }
+      const item = (await backend.listFirstPartyPlugins()).items.find(entry => entry.packageId === body.packageId);
+      if (!item) return sendJson(res, 404, { error: "First-party plugin not found" });
+      if (typeof hostOps?.confirmPluginCapability !== "function") {
+        return sendJson(res, 501, { error: "Native confirmation unavailable" });
+      }
+      if (await hostOps.confirmPluginCapability({ action: "plugin-first-party-install", package: item.name,
+        version: item.version || "" }) !== true) return sendJson(res, 200, { canceled: true, installation: null });
+      return sendJson(res, 200, { canceled: false, ...await backend.installFirstPartyPlugin(body.packageId) });
     }
     if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "bearer-connect") {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
@@ -2548,7 +3383,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
         return sendJson(res, 400, { error: "invalid plugin uninstall request" });
       }
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       return sendJson(res, 200, segs[1] === "uninstall" ? await backend.uninstallPlugin(body)
         : await backend.previewPluginUninstall(body));
@@ -2585,7 +3420,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     }
     if (segs[0] === "plugins" && segs[1] === "bundled" && segs.length === 2) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend?.listBundledPlugins) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       return sendJson(res, 200, await backend.listBundledPlugins());
     }
@@ -2613,7 +3448,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (!hasShoggothMutationOrigin(req)) {
         return sendJson(res, 403, { error: "Forbidden" });
       }
-      const backend = getActiveBackend(registry, "shoggoth");
+      const backend = getPluginServiceBackend(registry);
       if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const body = await readJsonBody(req);
       if (segs[1] === "bundled-preview") {
@@ -2686,6 +3521,56 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       return sendJson(res, 200, await backend.installPlugin({ source,
         previewDigest: body.previewDigest, operationId: body.operationId,
         expectedRevision: body.expectedRevision }));
+    }
+    if (segs[0] === "plugins" && segs.length >= 3 && segs[1] === "host-runtime") {
+      const invalid = () => sendJson(res, 400, { error: "invalid managed Host request", code: "MANAGED_HOST_OPERATION_INVALID" });
+      if (!["openclaw", "hermes"].includes(segs[2]) || requestUrl.search !== "") return invalid();
+      const managedHost = segs[2] === "openclaw" ? managedOpenClawHost : managedHermesHost;
+      if (!managedHost) return sendJson(res, 501, { error: "managed Host unavailable", code: "MANAGED_HOST_UNAVAILABLE" });
+      try {
+        const projectStatus = segs[2] === "openclaw"
+          ? require("./managed-openclaw-product-host").projectManagedOpenClawHostStatus
+          : require("./managed-hermes-product-host").projectManagedHermesHostStatus;
+        if (method === "GET" && (segs.length === 3 || (segs.length === 5 && segs[3] === "operations"))) {
+          if ((Number(req.headers["content-length"] || 0) > 0) || req.headers["transfer-encoding"]) return invalid();
+          if (segs.length === 5) {
+            if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(segs[4])) return invalid();
+            return sendJson(res, 200, projectStatus(await managedHost.getOperationStatus(segs[4])));
+          }
+          return sendJson(res, 200, projectStatus(await managedHost.getStatus()));
+        }
+        if (method !== "POST" || segs.length !== 4 || !["prepare", "restart", "stop"].includes(segs[3])) {
+          return sendJson(res, 405, { error: "method not allowed" });
+        }
+        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        const body = await readJsonBody(req);
+        if (!body || Object.getPrototypeOf(body) !== Object.prototype || Object.keys(body).length !== 1
+          || typeof body.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(body.operationId)) return invalid();
+        return sendJson(res, 202, projectStatus(await managedHost[segs[3]](body)));
+      } catch (error) {
+        const code = /^(?:MANAGED_HOST|RUNTIME|MANAGED_HERMES|MANAGED_WORKER|HERMES)_[A-Z0-9_]{1,80}$/u.test(error?.code || "") ? error.code : "MANAGED_HOST_ACTION_FAILED";
+        return sendJson(res, error?.status === 400 ? 400 : error?.status === 404 ? 404 : 409,
+          { error: "managed Host action unavailable", code });
+      }
+    }
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "selection-readiness") {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      let query;
+      try {
+        if (req.headers["transfer-encoding"] || (req.headers["content-length"] && req.headers["content-length"] !== "0")) {
+          throw new TypeError("read-only query cannot contain a body");
+        }
+        query = parsePluginSelectionReadinessQuery(requestUrl?.searchParams);
+      } catch { return sendJson(res, 400, { error: "Invalid plugin selection readiness query" }); }
+      let supported = false;
+      if (["shoggoth", "openclaw", "hermes"].includes(query.backendId)) {
+        const backend = getActiveBackend(registry, query.backendId);
+        if (typeof backend?.getPluginSelectionReadiness === "function") {
+          try { supported = await backend.getPluginSelectionReadiness(query.input) === true; }
+          catch { /* An unavailable authenticated Host stays unsupported. */ }
+        }
+      }
+      return sendJson(res, 200, { version: 1, supported });
     }
     if (segs[0] === "plugins" && segs.length === 1) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
@@ -2767,6 +3652,23 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         const code = Object.hasOwn(errors, error?.code) ? error.code : "HARNESS_SERVICE_CLOSED";
         return sendJson(res, errors[code] || 503, { error: code === "HARNESS_SERVICE_CLOSED"
           ? "Standalone MCP management unavailable" : error.message, code });
+      }
+    }
+    if (segs[0] === "skills" && segs[1] === "learning" && segs.length === 2) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      const protocol = require("./agent-service/self-improvement/protocol");
+      try {
+        const body = await readJsonBody(req);
+        if (!protocol.exact(body, ["backend", "agentId", "action", "input"])
+          || !protocol.id(body.backend) || !protocol.id(body.agentId)
+          || !["status", "configure", "request", "history", "skills", "read", "change", "proposal", "resolve"].includes(body.action)
+          || !protocol.object(body.input) || Object.hasOwn(body.input, "profileId")) protocol.fail();
+        const result = await registry.selfImprovement(body.backend, body.agentId, body.action, body.input);
+        return sendJson(res, 200, { result });
+      } catch (error) {
+        const code = Object.hasOwn(protocol.PUBLIC_ERRORS, error?.code) ? error.code : "LEARNING_UNAVAILABLE";
+        return sendJson(res, code === "LEARNING_CONFLICT" ? 409 : code === "LEARNING_INVALID" ? 400
+          : code === "LEARNING_UNAVAILABLE" ? 503 : 422, { code, error: protocol.PUBLIC_ERRORS[code] });
       }
     }
     // Per-backend aggregate: which skills have agents actually loaded. Same
@@ -3250,14 +4152,15 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 200, { ok: hostOps.reveal(body.path) !== false });
     }
-    if (segs[0] === "host" && segs[1] === "open-attachment" && segs.length === 2) {
+    // Older renderers may still use open-attachment; both routes only reveal.
+    if (segs[0] === "host" && (segs[1] === "reveal-attachment" || segs[1] === "open-attachment") && segs.length === 2) {
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
       const name = requestUrl?.searchParams.get("name");
       if (!validAttachmentName(name)) return sendJson(res, 400, { error: "invalid attachment name" });
-      if (!attachmentOpener) return sendJson(res, 501, { error: "openPath unavailable (non-Electron host)" });
+      if (!attachmentRevealer) return sendJson(res, 501, { error: "reveal unavailable (non-Electron host)" });
       const bytes = await readRawBody(req, MAX_OPEN_ATTACHMENT_BYTES);
-      const failure = await attachmentOpener.open(name, bytes);
-      if (failure) return sendJson(res, 500, { ok: false, error: failure });
+      const ok = await attachmentRevealer.reveal(name, bytes) !== false;
+      if (!ok) return sendJson(res, 500, { ok: false, error: "Could not reveal attachment in Finder" });
       return sendJson(res, 200, { ok: true });
     }
     // Open a folder/file with the OS default handler (Electron host only) — the
@@ -3286,7 +4189,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (!hostOps || typeof hostOps.reveal !== "function") {
         return sendJson(res, 501, { error: "reveal unavailable (non-Electron host)" });
       }
-      const ok = hostOps.reveal(body.path) !== false;
+      const ok = await hostOps.reveal(body.path) !== false;
       return sendJson(res, ok ? 200 : 500, { ok });
     }
     // 在系统终端里跑 external provider 的登录/断开命令（官方桌面版用内置终端，
@@ -3351,6 +4254,21 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       if (!backend) return sendJson(res, 400, { error: `unknown backend ${backendId}` });
       const id = segs[1]; // agent ids are [a-z0-9-]; safe as a path segment
+      if (segs[2] === "memory-status" && segs.length === 3) {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        const protocol = require("./agent-service/active-memory-status-protocol");
+        try {
+          const key = url.searchParams.get("sessionKey"), trace = url.searchParams.get("trace");
+          if (typeof key !== "string" || !key || key.length > 1024 || !key.isWellFormed() || key.includes("\0")
+            || trace !== null && trace !== "0" && trace !== "1") protocol.fail("MEMORY_STATUS_INVALID");
+          const includeTrace = trace === "1";
+          const result = await backend.getSessionMemoryStatus(id, key, includeTrace);
+          return sendJson(res, 200, protocol.validateResult(result, { includeTrace }));
+        } catch (error) {
+          const code = Object.hasOwn(protocol.MESSAGES, error?.code || "") ? error.code : "MEMORY_STATUS_UNAVAILABLE";
+          return sendJson(res, code === "MEMORY_STATUS_INVALID" ? 400 : 409, { code, error: protocol.MESSAGES[code] });
+        }
+      }
       if (segs[2] === "runtime-models" && segs.length === 3) {
         if (backend.getBackendDescriptor?.().surfaces?.sessionRuntimeSwitch !== true) return sendJson(res, 501, { error: "Runtime model selection unavailable" });
         if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
@@ -3393,6 +4311,18 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       if (segs[2] === "context" && segs.length === 3) {
         if (backend.getBackendDescriptor?.().surfaces?.runtimeBindings !== true) return sendJson(res, 501, { error: "Product context unavailable" });
+        if (method === "GET") {
+          const protocol = require("./agent-service/product-context-protocol");
+          try {
+            const key = url.searchParams.get("sessionKey"), runId = url.searchParams.get("runId");
+            if (typeof key !== "string" || !key || key.length > 1024) throw Object.assign(Error(), { code: "PRODUCT_CONTEXT_INVALID" });
+            protocol.validateParams(protocol.BREAKDOWN_METHOD, { profileId: "rest", sessionKey: key.split(":").at(-1), runId });
+            return sendJson(res, 200, protocol.validateBreakdown(await backend.getContextBreakdown(id, key, runId)));
+          } catch (error) {
+            const code = Object.hasOwn(protocol.MESSAGES, error?.code) ? error.code : "PRODUCT_CONTEXT_BREAKDOWN_UNAVAILABLE";
+            return sendJson(res, code === "PRODUCT_CONTEXT_INVALID" ? 400 : 409, { code, error: protocol.MESSAGES[code] });
+          }
+        }
         if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
         if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
         const protocol = require("./agent-service/product-context-protocol");
@@ -3528,6 +4458,18 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           limit: Number(url.searchParams.get("limit")) || 50,
         }) });
       }
+      if (segs.length === 3 && segs[2] === "memory-import") {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        return sendJson(res, 200, { memoryImport: await backend.getAgentMemoryImport(id) });
+      }
+      if (segs.length === 3 && segs[2] === "memory-import-report") {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        return sendJson(res, 200, { memoryImportReport: await backend.getAgentMemoryImportReport(id, {
+          runId: url.searchParams.get("runId"), expectedHash: url.searchParams.get("expectedHash"),
+          cursor: url.searchParams.has("cursor") ? Number(url.searchParams.get("cursor")) : 0,
+          limit: url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 8000,
+        }) });
+      }
       if (segs.length === 3 && segs[2] === "memory-explain") {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
         return sendJson(res, 200, { explanation: await backend.explainAgentMemory(
@@ -3563,7 +4505,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         const body = await readJsonBody(req);
         if (!body) return sendJson(res, 400, { error: "invalid JSON body" });
         const { action: requestedAction, ...input } = body;
-        if (requestedAction !== undefined && (method !== "POST" || requestedAction !== "create")) {
+        if (requestedAction !== undefined
+          && (method !== "POST" || !["create", "undo", "forgetSession"].includes(requestedAction))) {
           return sendJson(res, 400, { error: "unknown memory action" });
         }
         const action = method === "POST" ? requestedAction || "confirm" : method === "PUT" ? "update" : "delete";
@@ -3612,6 +4555,23 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       const backendId = new URL(req.url, "http://127.0.0.1").searchParams.get("backend") || "";
       if (!isBoundedApiString(backendId, 64)) return sendJson(res, 400, { error: "missing or invalid ?backend=" });
       return sendJson(res, 200, await registry.listEnvironments(backendId));
+    }
+    if (segs[0] === "chat-ui" && segs.length === 2) {
+      const management = require("./core/chat-ui-management"), operation = management.REST_METHODS[segs[1]];
+      if (!operation) return sendJson(res, 404, { error: "unknown card operation" });
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      const body = await readJsonBody(req);
+      try {
+        if (!body || !hasExactApiKeys(body, ["backend", "agentId", "sessionKey", "spec"])
+          || !isBoundedApiString(body.backend, 64) || !isBoundedApiString(body.agentId, 256)
+          || !isBoundedApiString(body.sessionKey, 4096)) return sendJson(res, 400, { error: "交互卡片请求无效", code: "UI_REQUEST_INVALID" });
+        return sendJson(res, 200, await registry[operation](body.backend, body.agentId, body.sessionKey, body.spec));
+      } catch (error) {
+        const messages = require("./agent-service/chat-ui-messages").MESSAGES;
+        const code = Object.hasOwn(messages, error?.code || "") ? error.code : "UI_REQUEST_INVALID";
+        return sendJson(res, 409, { error: messages[code], code,
+          ...(error.state ? { state: error.state } : {}) });
+      }
     }
     if (segs[0] === "session-board" && segs.length === 1) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
@@ -3689,6 +4649,30 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         return sendJson(res, 400, { error: "missing or invalid backend, agentId, or key" });
       }
       return sendJson(res, 200, await registry.describeSession(backendId, agentId, key));
+    }
+    if (segs[0] === "sessions" && segs[1] === "image" && segs.length === 2) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const url = new URL(req.url, "http://127.0.0.1");
+      const backendId = url.searchParams.get("backend") || "";
+      const key = url.searchParams.get("key") || "";
+      const ref = url.searchParams.get("ref") || "";
+      if (!isBoundedApiString(backendId, 64) || !isBoundedApiString(key) || !isBoundedApiString(ref, 4096)) {
+        return sendJson(res, 400, { error: "missing or invalid backend, key, or ref" });
+      }
+      const backend = getActiveBackend(registry, backendId);
+      let image = null;
+      try { image = await backend?.readSessionImage(key, ref); } catch { /* invalid/unavailable session stays closed */ }
+      if (!image) return sendJson(res, 404, { error: "not found" });
+      res.writeHead(200, {
+        "Content-Type": image.mimeType,
+        "Content-Length": image.bytes.length,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+      });
+      res.end(image.bytes);
+      return;
     }
     if (segs[0] === "sessions" && segs[1] === "artifacts" && segs.length === 2) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
@@ -3920,6 +4904,10 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     }
     return sendJson(res, 404, { error: "not found" });
   } catch (err) {
+    const systemIssue = storageIssueCode(err);
+    if (systemIssue) {
+      try { deps.onSystemIssue?.(err); } catch { /* reporting must not hide the request failure */ }
+    }
     // 参数/路径边界错误保持客户端 400；请求体溢出用 413，其余运行时故障保持 500。
     const trusted = trustedApiError(err);
     const pluginStatus = segs[0] === "plugins" && method === "POST"
@@ -3937,6 +4925,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         DEPENDENCY_CONFIRMATION_REQUIRED: 403, DEPENDENCY_REGISTRY_LIMIT: 429,
         PLUGIN_OAUTH_PROVIDER_UNSUPPORTED: 409, PLUGIN_OAUTH_FLOW_NOT_FOUND: 404,
         PLUGIN_OAUTH_BROWSER_FAILED: 503, PLUGIN_OPERATION_OUTCOME_UNKNOWN: 409,
+        FIGMA_DESKTOP_IDENTITY_UNVERIFIED: 409,
         GIT_SOURCE_INVALID: 400, GIT_REMOTE_CANCELLED: 409, GIT_REMOTE_FAILED: 409,
         GIT_REMOTE_TIMEOUT: 504, GIT_REMOTE_TOO_LARGE: 413, GIT_REMOTE_LOG_LIMIT: 413,
         GIT_REMOTE_LIMIT: 429, GIT_REMOTE_EXIT_UNKNOWN: 503,
@@ -3945,6 +4934,13 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         MCP_APP_RESOURCE_FORBIDDEN: 409, MCP_APP_RESOURCE_INVALID: 409,
         MCP_APP_LIMIT: 409, MCP_APP_UNSUPPORTED: 409,
         PLUGIN_COMPONENT_REVISION_CHANGED: 409, PLUGIN_COMPONENT_INACTIVE: 409,
+        GRAPH_REGISTRATION_INVALID: 400, GRAPH_REGISTRATION_CONFLICT: 409,
+        GMAIL_AUTH_INVALID: 400, GMAIL_AUTH_FLOW_NOT_FOUND: 404,
+        GMAIL_AUTH_CONFLICT: 409, GMAIL_AUTH_RECOVERY_REQUIRED: 409,
+        LOVABLE_REGISTRATION_INVALID: 400, LOVABLE_REGISTRATION_CONFLICT: 409,
+        LOVABLE_REGISTRATION_BUSY: 409, LOVABLE_REGISTRATION_NEEDS_VERIFICATION: 409,
+        SLACK_REGISTRATION_INVALID: 409, SLACK_REGISTRATION_CONFLICT: 409,
+        OUTLOOK_CALENDAR_CONFIG_INVALID: 409,
         PLUGIN_REQUEST_INVALID: 400, PLUGIN_OPERATION_INVALID: 400,
         PLUGIN_BINDING_INVALID: 400, PLUGIN_GRANT_INVALID: 400,
         PLUGIN_INSTALLATION_INVALID: 404 })[err?.code]
@@ -3968,7 +4964,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           : 500);
     const safeDetails = modelChangeError ? safeModelChangeDetails(err.details) : undefined;
     return sendJson(res, status, {
-      error: err?.message || String(err),
+      error: systemIssue ? "Disk space is insufficient" : err?.message || String(err),
+      ...(systemIssue ? { systemIssue } : {}),
       ...(modelChangeError ? {
         code: err.code,
         stage: err.stage,
@@ -3985,7 +4982,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
 // Serve a built SPA directory with a hash-router-friendly fallback: unknown
 // non-asset paths resolve to index.html. `relPath` is the request path already
 // stripped of any route prefix. Shows a build hint when the bundle is missing.
-function serveSpaDir(res, baseDir, relPath, { buildHint = "" } = {}) {
+function serveSpaDir(res, baseDir, relPath, { buildHint = "", onSystemIssue } = {}) {
   const rel = (relPath || "").replace(/^\/+/, "");
   let target = rel ? path.resolve(baseDir, rel) : path.join(baseDir, "index.html");
   // Path-traversal guard: resolved file must stay within baseDir.
@@ -4033,15 +5030,32 @@ function serveSpaDir(res, baseDir, relPath, { buildHint = "" } = {}) {
     }
   }
 
-  res.writeHead(200, {
-    "Content-Type": contentTypeFor(target),
-    "Content-Length": stat.size,
-    "Cache-Control": "no-cache",
-    "X-Content-Type-Options": "nosniff",
-    ...(path.extname(target) === ".html"
-      ? { "Content-Security-Policy": UI_CONTENT_SECURITY_POLICY } : {}),
+  // Electron's fs.open extracts ASAR entries to a temporary file. A full disk
+  // makes that extraction fail with ENOENT even when the entry exists. readFile
+  // reads the bundled UI directly, without that temporary write.
+  fs.readFile(target, (error, bytes) => {
+    if (res.destroyed || res.writableEnded) return;
+    if (error) {
+      try { onSystemIssue?.(error, SYSTEM_ISSUE_CODES.uiResourceUnavailable); } catch { /* best-effort notice */ }
+      const status = error.code === "ENOENT" || error.code === "ENOTDIR" ? 404 : 500;
+      res.writeHead(status, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end(status === 404 ? "Not Found" : "Unable to read UI resource");
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": contentTypeFor(target),
+      "Content-Length": bytes.length,
+      "Cache-Control": "no-cache",
+      "X-Content-Type-Options": "nosniff",
+      ...(path.extname(target) === ".html"
+        ? { "Content-Security-Policy": UI_CONTENT_SECURITY_POLICY } : {}),
+    });
+    res.end(bytes);
   });
-  fs.createReadStream(target).pipe(res);
 }
 
 /**
@@ -4063,7 +5077,10 @@ function startStaticServer(
     configStore,
     hostOps,
     productHost,
+    managedOpenClawHost,
+    managedHermesHost,
     onConfigChanged,
+    onSystemIssue,
     authResolver,
     modelChangeCoordinator,
     workAdmissionGate,
@@ -4086,13 +5103,16 @@ function startStaticServer(
   const cliExecutionGate = createCliExecutionGate();
   const pluginInstallSelection = new PluginInstallSelection();
   const bundledPluginCatalog = new BundledPluginCatalog(bundledRoot({ packaged, resourcesPath }));
-  const attachmentOpener = typeof hostOps?.openPath === "function"
-    ? createChatAttachmentOpener((file) => hostOps.openPath(file)) : null;
+  const attachmentRevealer = typeof hostOps?.reveal === "function"
+    ? createChatAttachmentRevealer((file) => hostOps.reveal(file)) : null;
   const apiDeps = {
+    onSystemIssue,
     configStore,
     hostOps,
-    attachmentOpener,
+    attachmentRevealer,
     productHost,
+    managedOpenClawHost,
+    managedHermesHost,
     onConfigChanged,
     modelChangeCoordinator,
     workAdmissionGate,
@@ -4102,6 +5122,10 @@ function startStaticServer(
     bundledPluginCatalog,
     nativeRuntimeConfigController: configStore && typeof configStore.writeNativeRuntimeConfig === "function"
       ? createNativeRuntimeConfigController({ configStore, registry }) : null,
+    nativeMemoryConfigController: configStore && typeof configStore.writeNativeMemoryConfig === "function"
+      ? createNativeMemoryConfigController({ configStore, registry }) : null,
+    nativeMemorySharingConfigController: configStore && typeof configStore.writeNativeMemorySharingConfig === "function"
+      ? createNativeMemorySharingConfigController({ configStore, registry }) : null,
   };
   const server = http.createServer((req, res) => {
     const rawTarget = typeof req.url === "string" ? req.url : "/";
@@ -4313,7 +5337,7 @@ function startStaticServer(
     }
 
     // React control-plane UI at the loopback root; the React app owns its shell.
-    serveSpaDir(res, MANAGE_DIR, pathname, { buildHint: "npm run build:manage" });
+    serveSpaDir(res, MANAGE_DIR, pathname, { buildHint: "npm run build:manage", onSystemIssue });
   });
 
   const activeUpgradePaths = new Set();
@@ -4368,7 +5392,7 @@ function startStaticServer(
           await Promise.all(brokerServers.map((wss) => closeWebSocketServer(wss)));
           await httpClosed;
           clearTimeout(forceHttpTimer);
-          attachmentOpener?.dispose();
+          attachmentRevealer?.dispose();
         })();
         return closePromise;
       };

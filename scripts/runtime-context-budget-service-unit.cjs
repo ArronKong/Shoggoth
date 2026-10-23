@@ -2,9 +2,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
+const { UNKNOWN_WINDOW_BUDGET } = require("../app/agent-service/conversation-context-budget");
 
 test("effective windows track model changes and survive native renewal without reusing old occupancy", async () => {
-  const f = await openHandoffFixture();
+  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", "large-model"] } });
   try {
     const config = f.service.nativeRuntimeConfig.read();
     f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
@@ -18,9 +19,10 @@ test("effective windows track model changes and survive native renewal without r
       threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
       contextUsage: { runtimeSessionId: run.runtimeSessionRef.sessionId, usedTokens: 64000,
         contextWindow: window, quality: "exact", source: "runtime_event", observedAt: Date.now() } });
-    assert.equal(read().productContext.budget.tokens, 1_000_000);
+    assert.equal(read().productContext.budget.tokens, UNKNOWN_WINDOW_BUDGET);
     assert.equal(read().productContext.budget.source, "fallback");
     const first = await f.send(session.sessionKey, "small-window");
+    assert.equal(first.status, "running", first.errorCode);
     emit(first, 128000);
     assert.equal(read().productContext.budget.tokens, 128000);
     assert.equal(read().contextUsage.usedTokens, 64000);
@@ -33,11 +35,12 @@ test("effective windows track model changes and survive native renewal without r
       sessionKey: session.sessionKey, bindingId: f.binding("codex").id,
       revision: current().revision, acceptAdjustments: true, model: "large-model" });
     assert.equal(read().contextUsage, null, "a model change prepares a fresh native session without old occupancy");
-    assert.equal(read().productContext.budget.tokens, 1_000_000, "never inherit the old model's smaller window");
+    assert.equal(read().productContext.budget.tokens, UNKNOWN_WINDOW_BUDGET, "never inherit the old model's smaller window");
     const second = await f.send(session.sessionKey, "large-window");
+    assert.equal(second.status, "running", second.errorCode);
     emit(second, 1_048_576);
     assert.equal(read().productContext.budget.triggerTokens, 838860);
-    assert.equal(read().productContext.budget.retainedTokens, 524288);
+    assert.equal(read().productContext.budget.retainedTokens, 24000, "the recent original tail is capped");
     await f.complete(second);
     f.service.chatSessionStore.switchRuntime(session.sessionKey, { bindingId: f.binding("codex").id,
       revision: current().revision, clearModelOverride: false, permissionMode: current().permissionMode ?? null });
@@ -45,7 +48,7 @@ test("effective windows track model changes and survive native renewal without r
     assert.equal(read().productContext.budget.tokens, 1_048_576);
     assert.equal(read().productContext.budget.source, "last_observed");
     f.service.workRunCoordinator.captureExecutionProviderRoute = () => ({ providerId: "different-route" });
-    assert.equal(read().productContext.budget.tokens, 1000000, "a different provider route cannot reuse the prior route's window");
+    assert.equal(read().productContext.budget.tokens, UNKNOWN_WINDOW_BUDGET, "a different provider route cannot reuse the prior route's window");
     assert.equal(read().productContext.budget.source, "fallback");
   } finally { await f.close(); }
 });

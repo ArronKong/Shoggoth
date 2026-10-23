@@ -92,7 +92,9 @@ class PiRuntimePool {
     try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
     const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
     const permissionPolicy = normalizePiPermissionPolicy(options.permissionPolicy);
-    const policyFingerprint = piPermissionFingerprint(permissionPolicy);
+    const workspaceExecutionVersion = require("./workspace-execution-tools").workspaceAutoExecution(options.executionContract) ? 1 : null;
+    const policyFingerprint = JSON.stringify([piPermissionFingerprint(permissionPolicy), workspaceExecutionVersion]);
+    const hookScopeFingerprint = JSON.stringify(options.nativeHookScope ?? null);
     if (this.blockedProfiles.has(id)) {
       return Promise.reject(poolError("PI_RUNTIME_CLEANUP_INCOMPLETE", "Pi cleanup is incomplete"));
     }
@@ -116,6 +118,9 @@ class PiRuntimePool {
           "RUNTIME_PERMISSION_POLICY_CONFLICT",
           "Stop the Pi runtime before changing its permission policy",
         ));
+      }
+      if (existing.hookScopeFingerprint !== hookScopeFingerprint) {
+        return Promise.reject(poolError("RUNTIME_HOOK_SCOPE_CONFLICT", "A native Hook scope is frozen for this Run"));
       }
       return existing.promise.then((host) => { host.beginAcquire(); return host; });
     }
@@ -166,6 +171,8 @@ class PiRuntimePool {
       runtimeAccountId: accountId,
       runtimeBinding: binding,
       mcpExecutionRunId: executionRunId,
+      workspaceExecutionVersion,
+      nativeHookScope: options.nativeHookScope ?? null,
       ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,
@@ -174,7 +181,7 @@ class PiRuntimePool {
       profileState,
     });
     const entry = {
-      host, key, runtimeProfileId: id, runtimeAccountId: accountId, policyFingerprint, promise: null,
+      host, key, runtimeProfileId: id, runtimeAccountId: accountId, policyFingerprint, hookScopeFingerprint, promise: null,
       ledgerKey, ledgerSlot,
     };
     trackPoolHost(entry, binding);

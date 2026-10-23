@@ -1,7 +1,11 @@
 "use strict";
+const { gatewayResponseMetadata } = require("../chat-response-metadata");
 
 const crypto = require("node:crypto");
 const path = require("node:path");
+const { GroupActivityProjection } = require("../agent-service/group-activity");
+const { GroupPublicProgress } = require("../agent-service/group-public-progress");
+const { groupCapabilities } = require("../agent-service/group-capabilities");
 const {
   normalizeInteractiveRequestV1,
   validateInteractiveResponseV1,
@@ -91,11 +95,13 @@ function resultSummary(value) {
  * replaying a prompt or treating a historical assistant message as its result.
  */
 class HermesInspirationAdapter {
-  constructor({ backend, now = Date.now } = {}) {
+  constructor({ backend, now = Date.now, prepareWorkspace = null, sessionPurpose = "inspiration" } = {}) {
     if (!backend || typeof backend.createSession !== "function"
       || typeof backend.sendMessage !== "function" || typeof now !== "function") {
       throw new TypeError("HermesInspirationAdapter 配置无效");
     }
+    this.prepareWorkspace = prepareWorkspace;
+    this.sessionPurpose = sessionPurpose;
     this.backend = backend;
     this.now = now;
     this.preparations = new Map();
@@ -103,7 +109,7 @@ class HermesInspirationAdapter {
     this.runs = new Map();
   }
 
-  async prepare({ agentId, sessionId, sessionKey: existingSessionKey = null, workspace = null }) {
+  async prepare({ agentId, sessionId, sessionKey: existingSessionKey = null, workspace = null, modelSelection } = {}) {
     if (!validText(agentId) || !validText(sessionId)
       || (workspace !== null && (!validText(workspace, 4096) || !path.isAbsolute(workspace)))) {
       throw adapterError("HERMES_INSPIRATION_INVALID_REQUEST");
@@ -114,24 +120,39 @@ class HermesInspirationAdapter {
     const key = JSON.stringify([agentId, sessionId]);
     const prior = this.preparations.get(key);
     if (prior) {
-      if (prior.workspace !== workspace || prior.sessionKey !== existingSessionKey) {
+      if (prior.workspace !== workspace || prior.sessionKey !== existingSessionKey
+        || JSON.stringify(prior.modelSelection) !== JSON.stringify(modelSelection)) {
         throw adapterError("HERMES_INSPIRATION_CONFLICT");
       }
       return copy(await prior.promise);
     }
-    const preparation = { workspace, sessionKey: existingSessionKey, promise: null };
+    const preparation = { workspace, sessionKey: existingSessionKey, modelSelection, promise: null };
     preparation.promise = (async () => {
-      if (existingSessionKey !== null) return this.#prepareExisting({ agentId, sessionKey: existingSessionKey, workspace });
+      if (existingSessionKey !== null) {
+        const prepared = await this.#prepareExisting({ agentId, sessionKey: existingSessionKey, workspace });
+        if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, existingSessionKey, modelSelection);
+        return prepared;
+      }
       const sessionKey = await this.backend.createSession(agentId, { workspace, freezeWorkspace: true });
       this.#target({ agentId, sessionKey });
-      const actualWorkspace = this.backend.sessionWorkspaceByKey?.get(sessionKey);
+      let actualWorkspace = this.backend.sessionWorkspaceByKey?.get(sessionKey);
       const mode = this.backend.freshSessionTransports?.get(sessionKey);
       if (!validText(actualWorkspace, 4096) || !path.isAbsolute(actualWorkspace)
         || (workspace !== null && actualWorkspace !== workspace) || !MODES.has(mode)) {
         throw adapterError("HERMES_INSPIRATION_WORKSPACE_UNCONFIRMED");
       }
+      if (this.prepareWorkspace && mode === "gateway") {
+        const next = await this.prepareWorkspace({ agentId, sessionId, sessionKey, workspace: actualWorkspace });
+        if (next && next !== actualWorkspace) {
+          if (typeof this.backend._setPreparedGroupWorkspace !== "function") throw adapterError("HERMES_INSPIRATION_WORKSPACE_UNCONFIRMED");
+          await this.backend._setPreparedGroupWorkspace(sessionKey, next);
+          if (this.backend.sessionWorkspaceByKey.get(sessionKey) !== next) throw adapterError("HERMES_INSPIRATION_WORKSPACE_UNCONFIRMED");
+          actualWorkspace = next;
+        }
+      }
       const prepared = { sessionKey, workspace: actualWorkspace, mode };
       this.sessions.set(sessionKey, { ...prepared, agentId, generation: this.backend._lifecycleGeneration });
+      if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, sessionKey, modelSelection);
       return prepared;
     })();
     // Retain rejected preparation promises: another call must not mint an
@@ -166,19 +187,58 @@ class HermesInspirationAdapter {
     const run = { ...input, mode: prepared.mode, generation: prepared.generation,
       fingerprint, listeners: new Set([onSnapshot]), snapshot: snapshot("starting"),
       requestSequence: 0, pending: null, settled: false, controlPending: false };
+    run.activity = new GroupActivityProjection({ runId: input.runId, executionGeneration: String(prepared.generation) }, { now: this.now });
+    run.activity.setStream(`hermes:${prepared.mode}:${prepared.generation}:${input.runId}`);
+    run.activitySeq = 0;
+    run.publicProgress = new GroupPublicProgress(); run.publicParagraph = 0;
     this.runs.set(input.runId, run);
     this.#publish(run, run.snapshot);
     const progress = () => {
       if (run.snapshot.status === "starting") this.#publish(run, snapshot("running"));
     };
     const hooks = {
-      delta: progress, interim: progress, thinking: progress, tool: progress, plan: progress, status: progress,
+      // Hermes 的 delta 是全量累积文本；群聊据此显示成员的回复草稿。
+      delta: (text) => {
+        if (!this.#generationMatches(run) || TERMINAL.has(run.snapshot.status)) return;
+        if (typeof text === "string") {
+          run.draft = text; run.activity.observeEvents([{ seq: ++run.activitySeq, type: "text",
+            payload: { text, itemId: `paragraph:${run.publicParagraph}` } }], run.activity.streamGeneration);
+        }
+        progress();
+      },
+      tool: (tool) => {
+        if (!this.#generationMatches(run) || TERMINAL.has(run.snapshot.status)) return;
+        if (tool && ["start", "update", "result"].includes(tool.phase) && tool.toolCallId) {
+          run.activity.observeEvents([{ seq: ++run.activitySeq, type: `tool.${tool.phase}`, payload: {
+            toolCallId: tool.toolCallId, tool: { name: tool.name, input: tool.args, output: tool.result,
+              isError: tool.isError, durationMs: typeof tool.durationS === "number" ? tool.durationS * 1000 : undefined },
+            changes: tool.diff, message: tool.message, progress: tool.progress } }], run.activity.streamGeneration);
+        }
+        progress();
+      },
+      status: (status) => {
+        if (!this.#generationMatches(run) || TERMINAL.has(run.snapshot.status)) return;
+        if (["compacting", "compacted"].includes(status?.kind)) {
+          run.activity.observeEvents([{ seq: ++run.activitySeq, type: "status",
+            payload: { status: status.kind } }], run.activity.streamGeneration);
+        }
+        progress();
+      },
+      interim: text => {
+        if (!this.#generationMatches(run) || TERMINAL.has(run.snapshot.status)) return;
+        run.publicProgress.put(String(run.publicParagraph), text);
+        run.publicParagraph++; run.draft = null;
+        progress();
+      }, thinking: progress, plan: progress,
       final: (text, errored, meta) => {
+        if (!this.#generationMatches(run) || TERMINAL.has(run.snapshot.status)) return;
         if (meta?.executionUncertain === true) {
           return this.#finish(run, snapshot("unknown", "HERMES_EXECUTION_UNCONFIRMED"));
         }
         if (errored) return this.#finish(run, snapshot("failed", "HERMES_EXECUTION_FAILED"));
         const value = snapshot(meta?.stopReason === "cancelled" ? "canceled" : "completed");
+        run.finalText = typeof text === "string" && text.isWellFormed() && !text.includes("\0") ? text : null;
+        run.responseMetadata = gatewayResponseMetadata({ role: "assistant", model: meta?.model, usage: meta?.usage });
         value.resultSummary = resultSummary(text);
         this.#finish(run, value);
       },
@@ -208,6 +268,53 @@ class HermesInspirationAdapter {
       this.#finish(run, snapshot("unknown", "HERMES_EXECUTION_UNCONFIRMED"));
     });
     return copy(run.snapshot);
+  }
+
+  draft(runId) {
+    const run = this.runs.get(runId);
+    return run && !TERMINAL.has(run.snapshot.status)
+      ? [run.publicProgress.text(), run.draft].filter(Boolean).join("\n\n") || null : null;
+  }
+
+  publicProgress(input) {
+    const run = this.#find(input);
+    return run && this.#generationMatches(run) && run.workspace === input.workspace ? run.publicProgress.text() : null;
+  }
+
+  activity(input) {
+    const run = this.#find(input);
+    if (!run || !this.#generationMatches(run) || run.workspace !== input.workspace) return null;
+    return run.activity?.snapshot() ?? null;
+  }
+
+  async probe(input) {
+    const session = input.sessionKey && this.sessions.get(input.sessionKey);
+    const profile = this.backend.profileById?.get(input.agentId);
+    const configured = profile && typeof this.backend._gatewayChatEnabled === "function"
+      ? this.backend._gatewayChatEnabled(profile) ? "gateway" : "acp" : null;
+    const mode = session?.mode ?? input.mode ?? configured;
+    if (!MODES.has(mode)) return groupCapabilities({ source: "external-binding", checkedAt: this.now() });
+    const gateway = mode === "gateway";
+    return groupCapabilities({ discussion: true, isolatedSession: true, workspaces: gateway,
+      collaborationSupport: this.sessionPurpose === "group",
+      artifacts: true, formalTasks: gateway, textEvents: true, toolEvents: true, interactive: gateway,
+      preciseCancel: gateway && typeof this.backend._sessionTarget === "function" && typeof this.backend._gwSocket === "function",
+      statusQuery: true, restartRecovery: gateway, steer: false,
+      availability: "available", source: "external-binding", mode, checkedAt: this.now() });
+  }
+
+  fullResult(input) {
+    this.#target(input);
+    const run = this.#find(input);
+    return run?.snapshot.status === "completed" && this.#generationMatches(run)
+      && run.workspace === input.workspace ? run.finalText ?? null : null;
+  }
+
+  responseMetadata(input) {
+    this.#target(input);
+    const run = this.#find(input);
+    return run?.snapshot.status === "completed" && this.#generationMatches(run)
+      && run.workspace === input.workspace ? copy(run.responseMetadata ?? null) : null;
   }
 
   async inspect(input) {
@@ -247,7 +354,7 @@ class HermesInspirationAdapter {
     } finally { run.controlPending = false; }
   }
 
-  async cancel(input) {
+  async cancel(input, { groupDeleted = false } = {}) {
     this.#target(input);
     const currentRunId = this.sessions.get(input.sessionKey)?.runId;
     if (currentRunId && currentRunId !== input.runId && !TERMINAL.has(this.runs.get(input.runId)?.snapshot.status)) {
@@ -255,7 +362,7 @@ class HermesInspirationAdapter {
     }
     const run = this.#find(input);
     if (!run || !this.#generationMatches(run)) {
-      return input.mode === "gateway" ? this.#cancelGatewaySession(input)
+      return input.mode === "gateway" ? this.#cancelGatewaySession(input, groupDeleted)
         : snapshot("unknown", "HERMES_CANCELLATION_UNCONFIRMED");
     }
     if (TERMINAL.has(run.snapshot.status)) return copy(run.snapshot);
@@ -263,7 +370,7 @@ class HermesInspirationAdapter {
     if (run.settled || !this.#hasLiveTurn(run)) {
       run.controlPending = true;
       try {
-        const verified = run.mode === "gateway" ? await this.#cancelGatewaySession(run)
+        const verified = run.mode === "gateway" ? await this.#cancelGatewaySession(run, groupDeleted)
           : snapshot("unknown", "HERMES_CANCELLATION_UNCONFIRMED");
         if (verified.status === "canceled") this.#finish(run, verified);
         return verified;
@@ -275,7 +382,7 @@ class HermesInspirationAdapter {
       // abortChat is best effort; only the specific turn's cancelled terminal
       // hook confirms cancellation. Its RPC acknowledgement alone does not.
       if (TERMINAL.has(run.snapshot.status)) return copy(run.snapshot);
-      const verified = run.mode === "gateway" ? await this.#cancelGatewaySession(run) : null;
+      const verified = run.mode === "gateway" ? await this.#cancelGatewaySession(run, groupDeleted) : null;
       if (verified?.status === "canceled") this.#finish(run, verified);
       return TERMINAL.has(run.snapshot.status) ? copy(run.snapshot)
         : { ...copy(run.snapshot), errorCode: "HERMES_CANCELLATION_UNCONFIRMED" };
@@ -461,7 +568,7 @@ class HermesInspirationAdapter {
     return !!client && client.updateHandlers?.has(mapping.acpSessionId) === true;
   }
 
-  async #cancelGatewaySession(input) {
+  async #cancelGatewaySession(input, groupDeleted = false) {
     const unknown = snapshot("unknown", "HERMES_CANCELLATION_UNCONFIRMED");
     try {
       const { profile, dash, tail } = this.backend._sessionTarget(input.sessionKey);
@@ -472,6 +579,8 @@ class HermesInspirationAdapter {
         return rows?.filter((row) => row.session_key === tail) ?? null;
       };
       const before = await list();
+      if (groupDeleted && this.sessionPurpose === "group" && before
+        && (before.length === 0 || before.length === 1 && before[0].status === "idle")) return snapshot("canceled");
       if (!before || before.length !== 1) return unknown;
       if (before[0].status === "idle") return unknown;
       const result = await socket.request("session.interrupt", { session_id: before[0].id });
@@ -563,6 +672,7 @@ class HermesInspirationAdapter {
   #publish(run, value) {
     if (!this.#generationMatches(run)) value = snapshot("unknown", "HERMES_EXECUTION_UNCONFIRMED");
     run.snapshot = value;
+    run.activity?.observeStatus(value.status);
     for (const listener of run.listeners) this.#notify(run, listener);
   }
 

@@ -1,0 +1,323 @@
+import path from "node:path";
+import { isWindowsReservedDeviceName } from "./device-path.js";
+import { isNotFoundPathError } from "./path.js";
+import { FsSafeError } from "./errors.js";
+import { assertSynchronousCallbackResult } from "./mutation-authority.js";
+import { validatePinnedRelativePath } from "./pinned-operation.js";
+import { assertRootIdentityCurrent, assertValidRootRelativePath, resolvePathInRoot } from "./root-context.js";
+import { createRootDirectoryObservationGuard, assertRootDirectoryObservationGuard, openRootDirectoryListing, pathStatFromStats } from "./root-directory-list.js";
+import { createSuppressedError } from "./suppressed-error.js";
+import { lookupRootDirectoryEntry } from "./root-directory-entry.js";
+export function watchScopes(input) {
+    if (!Array.isArray(input) || input.length > 128)
+        throw new RangeError("watch accepts at most 128 scopes");
+    return Object.freeze(input.map(scope => {
+        const { path: suppliedPath, kind: suppliedKind, depth: suppliedDepth } = scope;
+        if (typeof suppliedPath !== "string" || path.isAbsolute(suppliedPath))
+            throw new FsSafeError("invalid-path", "watch scopes must be relative");
+        validatePinnedRelativePath(suppliedPath);
+        assertValidRootRelativePath(suppliedPath);
+        if (process.platform === "win32" && suppliedPath.split(/[\\/]/).some(component => component !== "." &&
+            (component.endsWith(".") || component.endsWith(" ") || isWindowsReservedDeviceName(component)))) {
+            throw new FsSafeError("invalid-path", "watch scopes must use literal Windows names");
+        }
+        if (suppliedKind !== "entry" && suppliedKind !== "tree")
+            throw new TypeError("invalid watch scope kind");
+        const depth = suppliedDepth ?? 32;
+        if (!Number.isSafeInteger(depth) || depth < 0 || depth > 128)
+            throw new RangeError("watch depth must be between 0 and 128");
+        // Normalize only admitted input, then remove the separator normalize preserves.
+        const spelling = path.normalize(suppliedPath);
+        const normalized = spelling.endsWith(path.sep) ? spelling.slice(0, -1) : spelling;
+        return Object.freeze({ path: normalized === "." ? "" : normalized, kind: suppliedKind, depth });
+    }));
+}
+function kind(entry) {
+    return entry.isSymbolicLink ? "symlink" : entry.isDirectory ? "directory" : entry.isFile ? "file" : "other";
+}
+function fingerprint(entry, identity) {
+    const { dev, ino } = identity;
+    // Metadata is advisory; identity bits are never rounded through PathStat. Directory size/mtime
+    // reflect children, not changes to an entry-only scope.
+    return entry.isDirectory
+        ? [kind(entry), dev, ino, entry.mode].join(":")
+        : [kind(entry), dev, ino, entry.size, entry.mtimeMs, entry.mode].join(":");
+}
+/** A descendant's unavailable metadata never grants it authority or retires the Root. */
+export function isWatchPathError(error) {
+    if (isNotFoundPathError(error))
+        return true;
+    if (error instanceof FsSafeError) {
+        if (error.details?.operation === "watch" && ["EACCES", "EPERM", "EBUSY"].includes(String(error.details.code)))
+            return true;
+        return ["not-found", "path-mismatch", "not-file", "symlink", "outside-workspace", "path-alias"].includes(error.code);
+    }
+    return ["ENOTDIR", "EACCES", "EPERM", "EBUSY", "ESTALE", "EIO", "ELOOP"].includes(error?.code ?? "");
+}
+export async function scanWatch(root, scopes, options, signal, register, onCleanupFailure) {
+    const exclusions = new Map();
+    const excludedDirectories = new Map(), directoryPaths = new Map();
+    const entryAnchors = new Map();
+    const scopeAnchors = new Map();
+    const listed = new Map(), childPaths = new Map(), listingPaths = new Map();
+    const result = { entries: new Map(), entryAnchors, scopeAnchors, excluded: exclusions, excludedDirectories, directoryPaths, directories: new Map(), targets: new Map(), scanned: 0, listed, childPaths, listingPaths };
+    const attempts = new Map();
+    const guards = new Map();
+    const walked = new Map();
+    const structural = new Set();
+    result.structural = structural;
+    const invalidate = (relative) => {
+        if (structural.size < options.maxPendingPaths)
+            structural.add(relative);
+        else
+            result.overflow = true;
+        // Discard partially observed names when their enclosing directory lost admission.
+        const below = (name) => name === relative || !relative || name.startsWith(relative + path.sep);
+        for (const anchors of [entryAnchors, scopeAnchors])
+            for (const [scope, anchor] of anchors)
+                if (below(anchor.directory))
+                    anchors.delete(scope);
+        for (const map of [result.entries, exclusions, excludedDirectories, directoryPaths, result.targets, result.directories, guards, walked, listed, childPaths, listingPaths]) {
+            for (const name of map.keys())
+                if (below(name))
+                    map.delete(name);
+        }
+    };
+    const recover = async (relative, error) => {
+        signal.throwIfAborted();
+        await assertRootIdentityCurrent(root);
+        const code = error instanceof FsSafeError ? error.details?.code ?? error.code : error?.code;
+        if (!isWatchPathError(error) || (!relative && (code === "EACCES" || code === "EPERM")))
+            throw error;
+        invalidate(relative);
+    };
+    const examined = () => {
+        if (++result.scanned > options.maxEntries)
+            throw new FsSafeError("too-large", "watch entry budget exceeded", { details: { operation: "scan" } });
+    };
+    const excluded = async (name, entry) => {
+        let value;
+        try {
+            value = options.exclude?.({ path: name, kind: kind(entry) });
+            assertSynchronousCallbackResult(value, "watch exclude");
+        }
+        catch (cause) {
+            throw new FsSafeError("helper-failed", "watch exclusion callback failed", { cause, details: { operation: "callback" } });
+        }
+        signal.throwIfAborted();
+        if (value) {
+            exclusions.set(name, kind(entry));
+            if (process.platform === "darwin" && entry.isDirectory && !entry.isSymbolicLink) {
+                try {
+                    const resolved = await resolvePathInRoot(root, "./" + name, { rejectSymlinks: true });
+                    const guard = await createRootDirectoryObservationGuard(root, resolved.resolved);
+                    await assertRootDirectoryObservationGuard(root, guard);
+                    excludedDirectories.set(name, guard.realPath);
+                }
+                catch (error) {
+                    signal.throwIfAborted();
+                    await assertRootIdentityCurrent(root);
+                    if (!isWatchPathError(error))
+                        throw error;
+                }
+            }
+        }
+        return value;
+    };
+    const directory = async (relative) => {
+        signal.throwIfAborted();
+        const prior = guards.get(relative);
+        if (prior) {
+            try {
+                await assertRootDirectoryObservationGuard(root, prior);
+                return prior;
+            }
+            catch (error) {
+                await recover(relative, error);
+            }
+        }
+        if (!attempts.has(relative) && attempts.size >= options.maxDirectories) {
+            throw new FsSafeError("too-large", "watch directory budget exceeded", { details: { operation: "scan" } });
+        }
+        let registrationError;
+        while ((attempts.get(relative) ?? 0) < 3) {
+            attempts.set(relative, (attempts.get(relative) ?? 0) + 1);
+            try {
+                const resolved = await resolvePathInRoot(root, relative ? "./" + relative : ".", { rejectSymlinks: true });
+                const guard = await createRootDirectoryObservationGuard(root, resolved.resolved);
+                const identity = { dev: guard.stat.dev, ino: guard.stat.ino };
+                result.directories.set(relative, identity);
+                directoryPaths.set(relative, guard.realPath);
+                await register(relative, identity, guard);
+                signal.throwIfAborted();
+                await assertRootDirectoryObservationGuard(root, guard);
+                guards.set(relative, guard);
+                return guard;
+            }
+            catch (error) {
+                registrationError = error;
+                await recover(relative, error);
+            }
+        }
+        if (!relative)
+            throw new FsSafeError("helper-failed", "watch Root registration could not be established", {
+                cause: registrationError, details: { operation: "watch", code: "registration-failed" },
+            });
+        throw new FsSafeError("path-mismatch", "watch directory changed during registration");
+    };
+    const tree = async (relative, depth) => {
+        if ((walked.get(relative) ?? 0) >= depth)
+            return;
+        walked.set(relative, depth);
+        let guard;
+        let listing;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                guard = await directory(relative);
+                listed.set(relative, 0);
+                listing = await openRootDirectoryListing(root, guard.realPath, {
+                    order: "filesystem", snapshot: false, signal, exactIdentity: true, skipVanished: true, onCleanupFailure,
+                    previousPaths: options.previous?.listingPaths?.get(relative),
+                    admitEntry: () => { examined(); listed.set(relative, (listed.get(relative) ?? 0) + 1); return true; },
+                });
+                // The listing has its own guard. Both identities must agree before reading names.
+                await assertRootDirectoryObservationGuard(root, guard);
+                break;
+            }
+            catch (error) {
+                await listing?.[Symbol.asyncDispose]();
+                listing = undefined;
+                await recover(relative, error);
+            }
+        }
+        if (!listing)
+            return;
+        listingPaths.set(relative, listing.paths);
+        const names = new Map();
+        childPaths.set(relative, names);
+        const previousNames = options.previous?.childPaths?.get(relative);
+        let failed = false;
+        let operationError;
+        try {
+            while (true) {
+                const next = await listing.next();
+                signal.throwIfAborted();
+                if (!next)
+                    break;
+                if (next.kind === "limit")
+                    throw new FsSafeError("too-large", "watch entry budget exceeded");
+                if (!next.identity)
+                    throw new FsSafeError("path-mismatch", "watch listing lacks exact identity");
+                const entry = next.entry;
+                const name = previousNames?.get(entry.name) ?? (relative ? path.join(relative, entry.name) : entry.name);
+                names.set(entry.name, name);
+                if (await excluded(name, entry))
+                    continue;
+                result.entries.set(name, fingerprint(entry, next.identity));
+                if (entry.isDirectory && !entry.isSymbolicLink && depth > 1)
+                    await tree(name, depth - 1);
+            }
+            await listing.assertCurrent();
+        }
+        catch (error) {
+            failed = true;
+            operationError = error;
+            await recover(relative, error);
+        }
+        finally {
+            try {
+                await listing[Symbol.asyncDispose]();
+            }
+            catch (closeError) {
+                if (failed)
+                    throw createSuppressedError(closeError, operationError, "watch scan and directory disposal both failed");
+                throw closeError;
+            }
+        }
+        try {
+            await assertRootDirectoryObservationGuard(root, guard);
+        }
+        catch (error) {
+            await recover(relative, error);
+        }
+    };
+    await assertRootIdentityCurrent(root);
+    for (const scope of scopes) {
+        signal.throwIfAborted();
+        if (!scope.path) {
+            const guard = await directory("");
+            scopeAnchors.set(scope.path, { directory: "", name: "" });
+            if (scope.kind === "entry")
+                entryAnchors.set(scope.path, { directory: "", name: "" });
+            result.entries.set("", fingerprint({ name: "", ...pathStatFromStats(guard.stat) }, guard.stat));
+            if (scope.kind === "tree" && scope.depth > 0)
+                await tree("", scope.depth);
+            continue;
+        }
+        const segments = scope.path.split(path.sep);
+        let relative = "";
+        try {
+            for (let i = 0; i < segments.length; i++) {
+                const guard = await directory(relative);
+                const anchor = { directory: relative, name: segments[i] };
+                scopeAnchors.set(scope.path, anchor);
+                if (scope.kind === "entry")
+                    entryAnchors.set(scope.path, anchor);
+                examined();
+                // Filesystem lookup, not lowercase/prefix matching, owns case, Unicode and
+                // short-name aliases. It also preserves case-sensitive Windows directories.
+                const found = await lookupRootDirectoryEntry(root, guard, segments[i]);
+                signal.throwIfAborted();
+                if (!found)
+                    break;
+                const name = relative ? path.join(relative, segments[i]) : segments[i];
+                if (await excluded(name, found.entry))
+                    break;
+                anchor.target = { ...found.identity, kind: kind(found.entry) };
+                if (i === segments.length - 1) {
+                    result.entries.set(name, fingerprint(found.entry, found.identity));
+                    result.targets.set(name, found.identity);
+                    if (scope.kind === "tree" && found.entry.isDirectory && !found.entry.isSymbolicLink && scope.depth > 0)
+                        await tree(name, scope.depth);
+                    break;
+                }
+                if (found.entry.isSymbolicLink) {
+                    if (options.admitting)
+                        throw new FsSafeError("symlink", "watch scope traverses a symbolic link; admit its target separately", { details: { operation: "scope" } });
+                    invalidate(name);
+                    break;
+                }
+                if (!found.entry.isDirectory)
+                    break;
+                relative = name;
+            }
+        }
+        catch (error) {
+            if (error instanceof FsSafeError && error.details?.operation === "scope")
+                throw error;
+            await recover(relative, error);
+        }
+    }
+    for (const [relative, guard] of guards) {
+        try {
+            await assertRootDirectoryObservationGuard(root, guard);
+        }
+        catch (error) {
+            await recover(relative, error);
+        }
+    }
+    await assertRootIdentityCurrent(root);
+    signal.throwIfAborted();
+    // Native deletion hints can arrive after a later scan. Keep bounded tombstones
+    // until the name is admitted again; they never grant authority to publish it.
+    for (const [name, kind] of options.previous?.excluded ?? []) {
+        if (exclusions.size >= options.maxEntries)
+            break;
+        if (!result.entries.has(name) && !result.directories.has(name) && !exclusions.has(name))
+            exclusions.set(name, kind);
+        const priorPath = options.previous?.excludedDirectories?.get(name);
+        if (kind === "directory" && exclusions.get(name) === "directory" && priorPath && !excludedDirectories.has(name))
+            excludedDirectories.set(name, priorPath);
+    }
+    return result;
+}

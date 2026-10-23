@@ -3,6 +3,8 @@
 
 const crypto = require("node:crypto");
 const path = require("node:path");
+const { validResponseMetadata } = require("../chat-response-metadata");
+const { publicCronTranscript } = require("./cron-output-policy");
 const { managedChatWorkspace } = require("./chat-workspace");
 const {
   federationInputProvenanceForOperationId,
@@ -16,9 +18,10 @@ const {
   validateChatServiceResult,
 } = require("./chat-service-protocol");
 const { createCodexChatHistoryMapper } = require("./codex-chat-history");
-const { adaptCodexChatHistoryPage } = require("./chat-history-adapter");
+const { adaptCodexChatHistoryPage, fragmentHistoryItem } = require("./chat-history-adapter");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
+const activeMemoryCommand = require("./active-memory-command-protocol");
 const { normalizeInteractiveRequestV1, mcpElicitationUsesApprovalWait } = require("../core/shoggoth-interaction-contract");
 
 const RESTART_INTERRUPTION_CODES = new Set([
@@ -45,6 +48,7 @@ const IMPLEMENTED_METHODS = new Set([
   "chat.command.exec",
   "chat.send",
   "chat.operation.get",
+  "chat.operation.reconcile",
   "chat.steer",
   "chat.abort",
   "run.list",
@@ -133,6 +137,8 @@ function transcriptMessage(event, role, content) {
     ...(provenance ? { provenance } : {}),
     shoggoth: {
       transcriptSeq: event.seq,
+      sourceEventId: event.id,
+      ...(event.runId ? { runId: event.runId, displayId: `native-run:${event.runId}`, nativeUiVersion: 1 } : {}),
       contextExcluded: event.contextExcluded,
       ...(role === "user" && event.content?.attachments?.length
         ? { attachments: structuredClone(event.content.attachments) } : {}),
@@ -140,13 +146,19 @@ function transcriptMessage(event, role, content) {
         ? { pluginSelection: structuredClone(event.content.pluginSelection) } : {}),
       ...(role === "user" && event.content?.pluginSelectionSnapshot?.length
         ? { pluginSelectionSnapshot: structuredClone(event.content.pluginSelectionSnapshot) } : {}),
+      ...(event.content?.proactiveNotice ? { proactiveNotice: structuredClone(event.content.proactiveNotice), notificationCategory: "proactive" } : {}),
     },
   };
 }
 
-function transcriptHistoryItem(event) {
+function transcriptHistoryItem(event, runSource) {
   if (event.content?.importedFrom === "codex" && event.content.historyItem) {
-    return structuredClone(event.content.historyItem);
+    const item = structuredClone(event.content.historyItem), message = item.payload?.message;
+    if (!message || item.fragment !== null) throw controllerError("CHAT_HISTORY_INVALID", "导入历史来源不完整");
+    message.shoggoth = { ...message.shoggoth, sourceEventId: event.id, transcriptSeq: event.seq,
+      contextExcluded: event.contextExcluded,
+      ...(runSource ? { source: runSource } : {}) };
+    return item;
   }
   const transcriptType = event.content?.transcriptType;
   let role;
@@ -157,7 +169,9 @@ function transcriptHistoryItem(event) {
     if (!text && !event.content?.attachments?.length) return null;
     role = event.kind;
     type = "text";
-    message = transcriptMessage(event, role, [{ type: "text", text }]);
+    message = transcriptMessage(event, role, [{ type: "text", text,
+      ...(role === "assistant" && event.content?.phase === "commentary" ? { activity: true } : {}),
+      ...(event.content?.segmentId ? { segmentId: event.content.segmentId, sourceEventId: event.id } : {}) }]);
   } else if (event.kind === "error") {
     const text = transcriptMessageText(event);
     if (!text) return null;
@@ -227,14 +241,19 @@ function transcriptHistoryItem(event) {
     type = "text";
     message = transcriptMessage(event, role, [{ type: "text", text }]);
   } else if (event.kind === "artifact") {
-    const text = transcriptMessageText(event);
-    if (!text) return null;
-    role = "assistant";
-    type = "text";
-    message = transcriptMessage(event, role, [{ type: "text", text }]);
+    role = "assistant"; type = "text";
+    if (event.content?.uiArtifact) {
+      const part = require("./chat-ui-contract").normalizePart(event.content.uiArtifact);
+      if (part.sourceEventId !== event.id) throw controllerError("CHAT_HISTORY_INVALID", "交互卡片来源无效");
+      message = transcriptMessage(event, role, [part]);
+    } else {
+      const text = transcriptMessageText(event); if (!text) return null;
+      message = transcriptMessage(event, role, [{ type: "text", text }]);
+    }
   } else {
     return null;
   }
+  if (runSource) message.shoggoth.source = runSource;
   return {
     id: event.id,
     runId: event.runId,
@@ -248,6 +267,17 @@ function transcriptHistoryItem(event) {
 
 function paginateTranscriptEvents(options) {
   const { params, responseId, cursorCodec } = options;
+  // One footer per native response, even when it has several text/tool/UI
+  // segments or the final message lives on a different history page.
+  const finalTextByRun = new Map();
+  const savedMetadata = new Map(options.events.filter(event => event.content?.transcriptType === "terminal")
+    .filter(event => validResponseMetadata(event.content?.responseMetadata)).map(event => [event.runId, event.content.responseMetadata]));
+  for (const event of options.events) if (event.runId && event.kind === "assistant"
+    && event.content?.delivery !== "async" && (event.content?.phase == null || event.content.phase === "final_answer")
+    && transcriptMessageText(event)) {
+    const previous = finalTextByRun.get(event.runId);
+    if (!previous || event.content?.phase === "final_answer" || previous.content?.phase !== "final_answer") finalTextByRun.set(event.runId, event);
+  }
   // Approval requests and decisions remain in the transcript for audit/context,
   // but are not conversation messages. Live cards come from run subscriptions.
   // Resolve request identities across the full transcript before pagination so
@@ -258,31 +288,38 @@ function paginateTranscriptEvents(options) {
   const approvalRequests = new Set(options.events.filter(isApproval).map(requestKey));
   const query = {
     method: "chat.history",
-    params: { sessionKey: params.sessionKey, limit: params.limit },
+    params: { sessionKey: params.sessionKey, limit: params.limit, ...(params.auditRunId ? { auditRunId: params.auditRunId } : {}) },
   };
-  let beforeSeq = Number.MAX_SAFE_INTEGER;
+  let beforeSeq = Number.MAX_SAFE_INTEGER, beforeIndex = 0;
   if (params.cursor !== null) {
     try {
       const position = cursorCodec.decode(params.cursor, query).position;
-      if (!/^[1-9][0-9]*$/u.test(position)) throw new Error("invalid cursor");
-      beforeSeq = Number(position);
-      if (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1) throw new Error("invalid cursor");
+      if (!/^[1-9][0-9]*(?::[0-9]+)?$/u.test(position)) throw new Error("invalid cursor");
+      const [seq, index = "0"] = position.split(":"); beforeSeq = Number(seq); beforeIndex = Number(index);
+      if (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1 || !Number.isSafeInteger(beforeIndex)
+        || beforeIndex < 0 || beforeIndex > 1024) throw new Error("invalid cursor");
     } catch {
       throw controllerError("CHAT_HISTORY_CURSOR_INVALID", "Transcript history cursor 无效");
     }
   }
   const available = options.events
-    .filter((event) => event.seq < beforeSeq)
+    .filter((event) => event.seq <= beforeSeq)
     .filter((event) => !isApproval(event)
       && !(event.content?.transcriptType === "interaction.response" && approvalRequests.has(requestKey(event))))
-    .map((event) => ({ seq: event.seq, item: transcriptHistoryItem(event) }))
-    .filter((entry) => entry.item !== null);
+    .flatMap((event) => {
+      const item = transcriptHistoryItem(options.resolveDisplay?.(event) || event, options.getRunSource?.(event.runId));
+      if (item && finalTextByRun.get(event.runId)?.id === event.id) {
+        const metadata = savedMetadata.get(event.runId) ?? options.getResponseMetadata?.(event.runId);
+        if (metadata) item.payload.message.responseMetadata = metadata;
+      }
+      return item ? fragmentHistoryItem(item).map((part, index) => ({ seq: event.seq, index, item: part })) : [];
+    }).filter(entry => entry.seq < beforeSeq || entry.index < beforeIndex);
   let selected = available.slice(Math.max(0, available.length - params.limit));
   while (selected.length > 0) {
     const hasMore = available.length > selected.length;
     const nextCursor = hasMore ? cursorCodec.encode({
       query,
-      position: String(selected[0].seq),
+      position: `${selected[0].seq}:${selected[0].index}`,
     }) : null;
     const result = validateChatServiceResult("chat.history", {
       messages: selected.map((entry) => entry.item),
@@ -334,6 +371,7 @@ function resolveProfileWorkspace(options = {}) {
 
 function createChatServiceController(options = {}) {
   const inspiration = () => options.getInspirationService?.() || null;
+  const isInternalSession = (sessionKey) => options.isInternalSession?.(sessionKey) === true;
   const sessionRuns = (key, query = {}) => typeof options.coordinator?.listSessionRuns === "function"
     ? options.coordinator.listSessionRuns(key, query)
     : options.coordinator.listRuns({ ...query, source: "chat", sourceId: key });
@@ -701,6 +739,14 @@ function createChatServiceController(options = {}) {
   }
 
   async function readHistory(params, responseId, generation) {
+    if (params.auditRunId) {
+      const run = coordinator.getRun(params.auditRunId);
+      const session = chatSessionStore.getSession(params.sessionKey);
+      if (!transcriptStore || !session || run?.source !== "cron" || runSessionKey(run) !== session.sessionKey
+        || run.profileId !== session.profileId || run.workspace !== session.workspace) {
+        throw controllerError("WORK_RUN_CONTROL_MISMATCH", "Cron 审计记录与会话归属不匹配");
+      }
+    }
     if (!transcriptStore) return readCodexHistory(params, responseId, generation);
     requireMethods(chatSessionStore, ["getSession"], "ChatSessionStore getSession");
     const session = chatSessionStore.getSession(params.sessionKey);
@@ -717,7 +763,12 @@ function createChatServiceController(options = {}) {
       }
     }
     return paginateTranscriptEvents({
-      params, responseId, cursorCodec, events,
+      params, responseId, cursorCodec,
+      events: params.auditRunId ? events.filter(event => event.runId === params.auditRunId)
+        : publicCronTranscript(events, runId => coordinator.getCronOutput?.(runId, events)),
+      resolveDisplay: event => transcriptStore.displayEvent(session.profileId, session.id, event),
+      getRunSource: runId => coordinator.getRun(runId)?.source,
+      getResponseMetadata: runId => coordinator.getRunMessageMetadata?.(runId, { profileId: session.profileId, sessionKey: session.sessionKey }, events),
     });
   }
 
@@ -740,21 +791,17 @@ function createChatServiceController(options = {}) {
     const session = chatSessionStore.getSession(params.sessionKey);
     if (!session) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
     enabledProfile(session.profileId);
-    const busy = sessionRuns(session.sessionKey)
-      .some((run) => [
-        "queued", "starting", "running", "waiting_approval", "waiting_input",
-      ].includes(run.status));
-    if (busy) throw controllerError("THREAD_ACTIVE_TURN_CONFLICT", "ChatSession 已有待执行任务");
+    const settingsBindingId = session.nextRuntimeSelection?.bindingId ?? session.runtimeBindingId;
 
     let cursor = null;
     const cursors = new Set();
     let available = false;
     try {
       for (let pageIndex = 0; pageIndex < 32; pageIndex += 1) {
-        const listModels = session.runtimeBindingId && options.listBindingModels ? options.listBindingModels : options.listProfileModels;
+        const listModels = settingsBindingId && options.listBindingModels ? options.listBindingModels : options.listProfileModels;
         const page = await listModels({
           profileId: session.profileId,
-          ...(session.runtimeBindingId && options.listBindingModels ? { bindingId: session.runtimeBindingId } : {}),
+          ...(settingsBindingId && options.listBindingModels ? { bindingId: settingsBindingId } : {}),
           cursor,
           limit: 100,
         });
@@ -782,12 +829,6 @@ function createChatServiceController(options = {}) {
       throw controllerError("CHAT_SESSION_MODEL_NOT_AVAILABLE", "该模型不在当前账号目录中");
     }
     fence(generation);
-    if (sessionRuns(session.sessionKey)
-      .some((run) => [
-        "queued", "starting", "running", "waiting_approval", "waiting_input",
-      ].includes(run.status))) {
-      throw controllerError("THREAD_ACTIVE_TURN_CONFLICT", "ChatSession 已有待执行任务");
-    }
     const current = chatSessionStore.getSession(params.sessionKey);
     if (!current || current.runtimeBindingId !== session.runtimeBindingId || current.revision !== session.revision) {
       throw controllerError("CHAT_SESSION_NOT_READY", "会话已变化，请重试");
@@ -799,21 +840,19 @@ function createChatServiceController(options = {}) {
     requireMethods(chatSessionStore, ["getSession", "setModelSettings"], "ChatSessionStore settings");
     const initial = chatSessionStore.getSession(params.sessionKey);
     if (!initial) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
-    const profile = enabledProfile(initial.profileId);
-    const assertIdle = () => {
-      if (sessionRuns(params.sessionKey).some(run => ["queued", "starting", "running", "waiting_approval", "waiting_input"].includes(run.status))) {
-        throw controllerError("THREAD_ACTIVE_TURN_CONFLICT", "ChatSession 已有待执行任务");
-      }
-    };
-    assertIdle();
+    const initialDefaults = initial.nextRuntimeSelection;
+    const settingsBindingId = initialDefaults?.bindingId ?? initial.runtimeBindingId;
+    const profile = profileForSession({ ...initial, runtimeBindingId: settingsBindingId });
+    // Mutable conversation defaults apply when the next run captures its
+    // execution contract, including while the current run awaits approval.
     if (typeof options.listProfileModels !== "function") throw controllerError("BACKEND_NOT_READY", "模型目录不可用");
-    const selected = initial.modelOverride || profile.defaultModel;
+    const selected = initialDefaults?.model || initial.modelOverride || profile.defaultModel;
     let model, cursor = null;
     const cursors = new Set();
     for (let pageIndex = 0; pageIndex < 32; pageIndex++) {
-      const listModels = initial.runtimeBindingId && options.listBindingModels ? options.listBindingModels : options.listProfileModels;
+      const listModels = settingsBindingId && options.listBindingModels ? options.listBindingModels : options.listProfileModels;
       const page = await listModels({ profileId: profile.id, cursor, limit: 100,
-        ...(initial.runtimeBindingId && options.listBindingModels ? { bindingId: initial.runtimeBindingId } : {}) });
+        ...(settingsBindingId && options.listBindingModels ? { bindingId: settingsBindingId } : {}) });
       fence(generation);
       model = page.models.find(item => selected ? item.id === selected : item.isDefault);
       if (model || !page.hasMore) break;
@@ -821,7 +860,6 @@ function createChatServiceController(options = {}) {
       cursors.add(page.nextCursor); cursor = page.nextCursor;
     }
     if (!model) throw controllerError("CHAT_SESSION_MODEL_NOT_AVAILABLE", "当前模型不在目录中");
-    assertIdle();
     const current = chatSessionStore.getSession(params.sessionKey);
     const currentProfile = enabledProfile(initial.profileId);
     if (!current || current.runtimeBindingId !== initial.runtimeBindingId
@@ -829,7 +867,7 @@ function createChatServiceController(options = {}) {
       || currentProfile.defaultModel !== profile.defaultModel) {
       throw controllerError("CHAT_SESSION_NOT_READY", "模型已变化，请重试");
     }
-    const settings = { thinkingLevel: null, serviceTier: null, ...current.modelSettings };
+    const settings = { thinkingLevel: null, serviceTier: null, ...(current.nextRuntimeSelection?.modelSettings ?? current.modelSettings) };
     const caps = model.capabilities;
     if (Object.hasOwn(params.patch, "thinkingLevel")) {
       const level = params.patch.thinkingLevel;
@@ -851,7 +889,8 @@ function createChatServiceController(options = {}) {
     enabledProfile(params.profileId);
     if (!transcriptStore) throw controllerError("BACKEND_NOT_READY", "本地聊天记录不可用");
     const sessions = chatSessionStore.listSessions()
-      .filter(session => session.profileId === params.profileId && !["archived", "delete_pending"].includes(session.status))
+      .filter(session => session.profileId === params.profileId && !["archived", "delete_pending"].includes(session.status)
+        && !isInternalSession(session.sessionKey))
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const results = [], needle = params.query.trim().toLocaleLowerCase();
     // Bound work on the service's main loop and return an explicit partial flag.
@@ -859,7 +898,8 @@ function createChatServiceController(options = {}) {
     for (const session of sessions) {
       fence(generation);
       if (Date.now() > deadline) return { results, truncated: true };
-      const events = transcriptStore.listEvents(session.profileId, session.id);
+      const allEvents = transcriptStore.listEvents(session.profileId, session.id);
+      const events = publicCronTranscript(allEvents, runId => coordinator.getCronOutput?.(runId, allEvents));
       for (let index = events.length - 1; index >= 0; index--) {
         if (Date.now() > deadline) return { results, truncated: true };
         const event = events[index];
@@ -887,13 +927,8 @@ function createChatServiceController(options = {}) {
     requireMethods(chatSessionStore, ["getSession", "setPermissionMode"], "ChatSessionStore permission");
     const session = chatSessionStore.getSession(params.sessionKey);
     if (!session) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
-    const profile = profileForSession(session);
+    const profile = profileForSession({ ...session, runtimeBindingId: session.nextRuntimeSelection?.bindingId ?? session.runtimeBindingId });
     resolveRuntimePermissionMode(profile.runtime || "codex", params.mode, profile.permissionPolicy);
-    const busy = sessionRuns(session.sessionKey)
-      .some((run) => [
-        "queued", "starting", "running", "waiting_approval", "waiting_input",
-      ].includes(run.status));
-    if (busy) throw controllerError("THREAD_ACTIVE_TURN_CONFLICT", "ChatSession 已有待执行任务");
     fence(generation);
     return { session: chatSessionStore.setPermissionMode(params.sessionKey, params.mode) };
   }
@@ -908,24 +943,47 @@ function createChatServiceController(options = {}) {
     const profile = profileForSession(session);
     const runtimeSessionId = runtimeSessionIdOf(session);
     if (runtimeSessionId !== null) assertSessionOwned(profile, session, runtimeSessionId);
-    const runtimeHandle = await acquireRuntime(profile, session.workspace);
-    fence(generation);
-    if (runtimeHandle.capabilities?.["commands.list"] !== true) {
-      return { supported: false, reason: "当前 Agent Runtime 未提供原生命令目录", commands: [] };
+    const local = options.memoryCommands && ["draft", "binding", "ready"].includes(session.status)
+      && !chatSessionStore.getCronSessionOrigin?.(params.sessionKey) ? [options.memoryCommands.descriptor()] : [];
+    const localCatalog = () => {
+      fence(generation);
+      options.memoryCommands.scope(params.sessionKey, () => fence(generation)).assertCurrent();
+      return { supported: true, reason: null, commands: local };
+    };
+    try {
+      const runtimeHandle = await acquireRuntime(profile, session.workspace);
+      fence(generation);
+      if (runtimeHandle.capabilities?.["commands.list"] !== true) {
+        return local.length ? localCatalog() : { supported: false, reason: "当前 Agent Runtime 未提供原生命令目录", commands: [] };
+      }
+      requireMethods(runtimeHandle, ["commandsList"], "RuntimeHandle commandsList");
+      const validated = validateChatServiceResult("chat.command.list", await runtimeHandle.commandsList({
+        sessionId: runtimeSessionId, cwd: session.workspace,
+      }));
+      const result = { ...validated, commands: validated.commands.map(({ allowWhileRunning: _unsupported, ...command }) => command) };
+      fence(generation);
+      if (!local.length) return result;
+      // Product's command owns its name even if a Runtime advertises an alias.
+      const remote = result.commands.filter(command => ![command.name, ...command.aliases].includes("active-memory"));
+      return { ...localCatalog(), commands: [...local, ...remote.slice(0, 256 - local.length)] };
+    } catch (error) {
+      fence(generation);
+      if (local.length) return localCatalog();
+      throw error;
     }
-    requireMethods(runtimeHandle, ["commandsList"], "RuntimeHandle commandsList");
-    const result = await runtimeHandle.commandsList({
-      sessionId: runtimeSessionId,
-      cwd: session.workspace,
-    });
-    fence(generation);
-    return result;
   }
 
   async function executeRuntimeCommand(params, generation) {
     requireMethods(chatSessionStore, ["getSession"], "ChatSessionStore getSession");
     const session = chatSessionStore.getSession(params.sessionKey);
     if (!session) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
+    if (options.memoryCommands && activeMemoryCommand.isCommand(params.text)) {
+      // This Product command must remain usable while the main Runtime is busy
+      // or unavailable. Global writes are proposals consumed by Core's facade.
+      const result = await options.memoryCommands.execute(params, { assertCurrent: () => fence(generation) });
+      fence(generation);
+      return { kind: "output", text: result.text, warning: null };
+    }
     if (!["draft", "ready"].includes(session.status)) {
       throw controllerError("CHAT_SESSION_NOT_READY", "ChatSession 当前不可执行原生命令");
     }
@@ -985,6 +1043,7 @@ function createChatServiceController(options = {}) {
       const sessions = chatSessionStore.listSessions()
         .filter((session) => session.profileId === params.profileId)
         .filter((session) => params.includeArchived || session.status !== "archived")
+        .filter((session) => !isInternalSession(session.sessionKey))
         .map((session) => {
           const origin = chatSessionStore.getCronSessionOrigin?.(session.sessionKey);
           const title = transcriptStore?.getSessionDerivedTitle(session.profileId, session.id) ?? null;
@@ -993,7 +1052,9 @@ function createChatServiceController(options = {}) {
             try { cronTitle = options.getCronJobName?.(origin.cronJobId) || null; } catch {}
           }
           return { ...session, ...(options.getRuntimeContext?.(session) || {}),
+            ...(options.getCodexDesktopSessionOrigin?.(session.sessionKey) || {}),
             ...(inspiration()?.sessionOrigin(session.sessionKey) || {}), ...(origin || {}),
+            ...(options.getProactiveSessionOrigin?.(session.sessionKey) || {}),
             derivedTitle: origin ? `Cron · ${cronTitle || title || origin.cronJobId.slice(0, 8)}` : title };
         });
       return paginateChatServiceItems({
@@ -1009,6 +1070,7 @@ function createChatServiceController(options = {}) {
       const session = chatSessionStore.createSession({
         operationId: params.operationId,
         profileId: params.profileId,
+        permissionMode: require("./runtime-permission-modes").initialRuntimePermissionMode(profile.runtime || "codex"),
         workspace: resolveProfileWorkspace({ paths: options.paths, profile, requested: params.workspace,
             sessionOperationId: params.operationId }),
         createdAt: params.createdAt,
@@ -1037,6 +1099,20 @@ function createChatServiceController(options = {}) {
       result = await listRuntimeCommands(params, generation);
     } else if (method === "chat.command.exec") {
       result = await executeRuntimeCommand(params, generation);
+    } else if (method === "chat.operation.reconcile") {
+      // Inspiration has its own durable admission store; never apply chat Inbox
+      // absence to that execution domain.
+      result = inspiration()?.sessionOrigin(params.sessionKey)
+        ? { status: "unresolved", run: null }
+        : await coordinator.reconcileChatOperation(params);
+      if (result.status === "found") {
+        const session = chatSessionStore.getSession(params.sessionKey), run = result.run;
+        if (!session || !run || run.source !== "chat" || run.sourceId !== params.sessionKey
+          || run.profileId !== session.profileId || run.workspace !== session.workspace
+          || run.idempotencyKey !== `shoggoth:chat-send:${params.operationId}`) {
+          throw controllerError("CHAT_RESPONSE_INVALID", "Chat operation Run identity 不匹配");
+        }
+      }
     } else if (method === "chat.operation.get") {
       requireMethods(chatSessionStore, ["getSession"], "ChatSessionStore getSession");
       const session = chatSessionStore.getSession(params.sessionKey);
@@ -1166,17 +1242,20 @@ function createChatServiceController(options = {}) {
     }
   }
 
-  async function ensureDefaultSessions() {
-    const profiles = productStore.listAgentProfiles().filter((profile) => profile.enabled);
+  async function ensureDefaultSessions({ profileIds = null } = {}) {
+    const profiles = productStore.listAgentProfiles().filter((profile) => profile.enabled
+      && (profileIds === null || profileIds.includes(profile.id)));
     for (const profile of profiles) {
+      // 群内部会话不算用户可见私聊：先入群的 Agent 仍要有默认私聊（群聊计划 §3.2 第 3 条）。
       const hasSession = chatSessionStore.listSessions()
-        .some((session) => session.profileId === profile.id);
+        .some((session) => session.profileId === profile.id && !isInternalSession(session.sessionKey));
       if (hasSession) continue;
       const time = now();
       const operationId = `default-session-${randomUUID()}`;
       const session = chatSessionStore.createSession({
         operationId,
         profileId: profile.id,
+        permissionMode: require("./runtime-permission-modes").initialRuntimePermissionMode(profile.runtime || "codex"),
         workspace: resolveProfileWorkspace({ paths: options.paths, profile, requested: null,
           sessionOperationId: operationId }),
         createdAt: time,
@@ -1186,6 +1265,34 @@ function createChatServiceController(options = {}) {
         sessionId: session.id,
       });
     }
+  }
+
+  // A new Agent opens its default conversation with fixed greeting text. It is
+  // a normal assistant message, so the next turn's model context includes it.
+  // `settled` also covers Agents already in use, which never get a greeting.
+  function ensureGreetings({ profileIds, textFor }) {
+    requireMethods(chatSessionStore, ["listSessions", "touchSession"], "ChatSessionStore greeting");
+    const greeted = [];
+    const settled = [];
+    if (!transcriptStore) return { greeted, settled };
+    for (const profileId of profileIds) {
+      const profile = productStore.getAgentProfile(profileId);
+      const sessions = chatSessionStore.listSessions().filter((session) => session.profileId === profileId);
+      if (!profile?.enabled || sessions.length === 0) continue;
+      const [session] = sessions;
+      if (sessions.length === 1 && session.status !== "archived") {
+        transcriptStore.ensureSession({ profileId, sessionId: session.id });
+        if (transcriptStore.listEvents(profileId, session.id).length === 0) {
+          const occurredAt = now();
+          transcriptStore.appendEvent({ profileId, sessionId: session.id, id: "agent-greeting", runId: null,
+            kind: "assistant", occurredAt, contextExcluded: false, content: { text: textFor(profile) } });
+          chatSessionStore.touchSession(session.sessionKey, occurredAt);
+          greeted.push(profileId);
+        }
+      }
+      settled.push(profileId);
+    }
+    return { greeted, settled };
   }
 
   function open() {
@@ -1246,8 +1353,8 @@ function createChatServiceController(options = {}) {
     return current;
   }
 
-  const api = Object.freeze({ handle, open, close, ensureDefaultSessions });
+  const api = Object.freeze({ handle, open, close, ensureDefaultSessions, ensureGreetings });
   return api;
 }
 
-module.exports = { createChatServiceController, resolveProfileWorkspace };
+module.exports = { createChatServiceController, resolveProfileWorkspace, transcriptHistoryItem };

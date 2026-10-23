@@ -53,3 +53,8 @@
 .candidateContent { margin: 0 0 10px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .candidateSource { margin: 0; }
 .sourcePreview { margin: 12px 0 0; padding: 10px 12px; border-left: 2px solid var(--ui-hairline); background: var(--ui-surface-1); border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.inlineAction { border: 0; padding: 0; background: transparent; color: var(--ui-text-1); font: inherit; text-decoration: underline; cursor: pointer; }
+.reportBody { font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.reportBody p { margin: 0 0 16px; }
+.reportBody pre { white-space: pre-wrap; padding: 12px; background: var(--ui-surface-1); border-radius: 8px; }
+.reportBody img { max-width: 100%; }

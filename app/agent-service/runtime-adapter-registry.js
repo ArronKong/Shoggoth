@@ -1,5 +1,6 @@
 "use strict";
 
+const { AsyncLocalStorage } = require("node:async_hooks");
 const {
   assertRuntimeAdapter,
   runtimeBinding,
@@ -20,6 +21,7 @@ class RuntimeAdapterRegistry {
   #facades = new WeakMap();
   #hosts = new Set();
   #retired = 0;
+  #activity = new AsyncLocalStorage();
 
   constructor(options = {}) {
     this.validateHandles = options.validateHandles !== false;
@@ -65,7 +67,35 @@ class RuntimeAdapterRegistry {
 
   statistics() { return { hosts: this.#hosts.size, retiredHosts: this.#retired, adapters: this.#adapters.size }; }
 
+  // A Service request leases only the bindings it actually acquires. Keep the
+  // lease until the operation settles, even if its IPC caller disconnects.
+  async withActivity(operation) {
+    const scope = { active: true, entries: new Set() };
+    return this.#activity.run(scope, async () => {
+      try { return await operation(); } finally {
+        scope.active = false;
+        for (const entry of scope.entries) {
+          entry.requests.delete(scope);
+          this.#schedule(this.#key(entry.binding), entry);
+        }
+        scope.entries.clear();
+      }
+    });
+  }
+
+  isBindingActive(value) {
+    const entry = this.#idle.get(this.#key(runtimeBinding(value)));
+    return !!entry && (entry.pending > 0 || entry.requests.size > 0);
+  }
+
   canGenerateModelOnly(runtime) { return isRuntimeAvailable(runtime) && this.#adapters.get(runtime)?.modelOnly === true; }
+
+  // A native session id that the runtime can never continue (for example one
+  // created by a retired transport). Callers move the conversation to a fresh session.
+  isRetiredSessionId(runtime, sessionId) {
+    const adapter = this.#adapters.get(runtime);
+    return typeof adapter?.isRetiredSessionId === "function" && adapter.isRetiredSessionId(sessionId) === true;
+  }
 
   stop(value) {
     const binding = runtimeBinding(value);
@@ -122,8 +152,13 @@ class RuntimeAdapterRegistry {
     if (this.#closing) throw registryError("RUNTIME_REGISTRY_STOPPING", "Runtime registry is stopping");
     let entry = this.#idle.get(key);
     if (!entry) {
-      entry = { binding, pending: 0, timer: null };
+      entry = { binding, pending: 0, requests: new Set(), timer: null };
       this.#idle.set(key, entry);
+    }
+    const scope = this.#activity.getStore();
+    if (scope?.active) {
+      scope.entries.add(entry);
+      entry.requests.add(scope);
     }
     this.clearTimer(entry.timer);
     entry.pending += 1;
@@ -143,7 +178,7 @@ class RuntimeAdapterRegistry {
       // The service checks runs, approvals, login/account mutations and requests.
       // Unknown/broken activity information must retain the runtime.
       let idle = false;
-      try { idle = entry.pending === 0 && this.isIdle(entry.binding) === true; } catch {}
+      try { idle = entry.pending === 0 && entry.requests.size === 0 && this.isIdle(entry.binding) === true; } catch {}
       if (!idle) { this.#schedule(key, entry); return; }
       void this.stop(entry.binding).catch((error) => this.onIdleError(error));
     }, this.idleTimeoutMs);

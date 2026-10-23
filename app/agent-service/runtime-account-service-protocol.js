@@ -8,9 +8,25 @@ const RUNTIME_ACCOUNT_SERVICE_METHODS = Object.freeze([
   "runtime.account.auth.read",
   "runtime.account.login.start",
   "runtime.account.login.cancel",
+  "runtime.account.login.read",
+  "runtime.account.login.options",
+  "runtime.account.login.provider.start",
+  "runtime.account.login.submit",
+  "runtime.account.login.apikey",
   "runtime.account.logout",
   "runtime.account.storage.read",
 ]);
+// Runtimes that sign in from Settings inside the Service. `installsRuntime`:
+// the sign-in also installs a missing runtime (the Antigravity ACP server).
+// `providers`: the runtime signs into model providers the user picks (OpenCode).
+const RUNTIME_ACCOUNT_LOGIN_RUNTIMES = Object.freeze({
+  codex: Object.freeze({ installsRuntime: false, providers: false }),
+  antigravity: Object.freeze({ installsRuntime: true, providers: false }),
+  opencode: Object.freeze({ installsRuntime: false, providers: true }),
+});
+const PROVIDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const PROMPT_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
+const LOGIN_STAGES = new Set(["starting", "installing", "waiting"]);
 const RUNTIME_ACCOUNT_SERVICE_METHOD_SET = new Set(RUNTIME_ACCOUNT_SERVICE_METHODS);
 const RUNTIME_SET = new Set(RUNTIME_ACCOUNT_RUNTIMES);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -27,6 +43,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   RUNTIME_ACCOUNT_HOME_INVALID: "运行环境目录不安全",
   RUNTIME_ACCOUNT_HOME_MISSING: "运行环境目录不存在",
   AUTH_LOGIN_IN_PROGRESS: "登录已在进行中",
+  AUTH_LOGIN_FAILED: "登录没有完成，请检查填写的信息后重试",
   AUTH_LOGIN_NOT_FOUND: "登录请求不存在",
   AUTH_LOGIN_NOT_ACTIVE: "登录请求已结束",
   AUTH_LOGIN_TIMEOUT: "登录已超时",
@@ -95,12 +112,34 @@ function validatePageParams(params, includeAccount) {
   return cloneObject(params);
 }
 
+// Text that may be empty (an option value, a condition, an optional input).
+function validText(value, maxBytes) {
+  return typeof value === "string" && value.isWellFormed() && !value.includes("\0")
+    && Buffer.byteLength(value, "utf8") <= maxBytes;
+}
+
+function validProviderId(value) {
+  return typeof value === "string" && PROVIDER_ID_PATTERN.test(value);
+}
+
+// A pasted code or key: one line, no control characters.
+function validSecret(value, maxBytes) {
+  return validString(value, maxBytes) && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function validLoginInputs(value) {
+  if (!ownDataObject(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length <= 16 && entries.every(([key, item]) => PROMPT_KEY_PATTERN.test(key)
+    && validText(item, 1024) && !/[\u0000-\u001f\u007f]/u.test(item));
+}
+
 function validateRuntimeAccountServiceParams(method, params) {
   if (!RUNTIME_ACCOUNT_SERVICE_METHOD_SET.has(method)) throw protocolError("INVALID_PARAMS");
   if (method === "runtime.account.list") return validatePageParams(params, false);
   if ([
     "runtime.account.read", "runtime.account.auth.read", "runtime.account.logout",
-    "runtime.account.storage.read",
+    "runtime.account.storage.read", "runtime.account.login.read", "runtime.account.login.options",
   ].includes(method)) {
     if (!exactObject(params, ["runtimeAccountId"]) || !validId(params.runtimeAccountId)) {
       throw protocolError("INVALID_PARAMS");
@@ -118,6 +157,31 @@ function validateRuntimeAccountServiceParams(method, params) {
   if (method === "runtime.account.login.cancel") {
     if (!exactObject(params, ["runtimeAccountId", "requestId"])
       || !validId(params.runtimeAccountId) || !validId(params.requestId)) {
+      throw protocolError("INVALID_PARAMS");
+    }
+    return cloneObject(params);
+  }
+  if (method === "runtime.account.login.provider.start") {
+    if (!exactObject(params, ["runtimeAccountId", "providerId", "method", "inputs"])
+      || !validId(params.runtimeAccountId) || !validProviderId(params.providerId)
+      || !Number.isSafeInteger(params.method) || params.method < 0 || params.method > 7
+      || !validLoginInputs(params.inputs)) {
+      throw protocolError("INVALID_PARAMS");
+    }
+    return cloneObject(params);
+  }
+  if (method === "runtime.account.login.submit") {
+    if (!exactObject(params, ["runtimeAccountId", "requestId", "code"])
+      || !validId(params.runtimeAccountId) || !validId(params.requestId)
+      || !validSecret(params.code, 4096)) {
+      throw protocolError("INVALID_PARAMS");
+    }
+    return cloneObject(params);
+  }
+  if (method === "runtime.account.login.apikey") {
+    if (!exactObject(params, ["runtimeAccountId", "providerId", "key", "inputs"])
+      || !validId(params.runtimeAccountId) || !validProviderId(params.providerId)
+      || !validSecret(params.key, 8192) || !validLoginInputs(params.inputs)) {
       throw protocolError("INVALID_PARAMS");
     }
     return cloneObject(params);
@@ -251,14 +315,66 @@ function validateLoginStart(result) {
     || !["waiting", "succeeded", "failed"].includes(result.status)
     || !validString(result.loginId, 256)) throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
   if (result.mode === "browser") {
+    // A runtime that opens the browser itself reports its URL later, in login.read.
     if (!exactObject(result, ["requestId", "mode", "status", "loginId", "authUrl"])
-      || !validAuthUrl(result.authUrl)) throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+      || (result.authUrl !== null && !validAuthUrl(result.authUrl))) {
+      throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+    }
   } else if (!exactObject(result, [
     "requestId", "mode", "status", "loginId", "verificationUrl", "userCode",
   ]) || !validAuthUrl(result.verificationUrl) || !validString(result.userCode, 256)) {
     throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
   }
   return cloneObject(result);
+}
+
+function validateLoginRead(result) {
+  if (!exactObject(result, ["login"])) throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+  if (result.login === null) return { login: null };
+  const login = result.login;
+  if (!exactObject(login, [
+    "requestId", "mode", "status", "updatedAt", "errorCode", "authUrl", "stage", "browserOpened",
+    "instructions", "codeRequired",
+  ]) || !validId(login.requestId) || !["browser", "deviceCode"].includes(login.mode)
+    || !AUTH_STATUSES.has(login.status) || !validInteger(login.updatedAt)
+    || (login.errorCode !== null && (!validString(login.errorCode, 64)
+      || !/^[A-Z][A-Z0-9_]*$/u.test(login.errorCode)))
+    || (login.authUrl !== null && !validAuthUrl(login.authUrl))
+    || (login.stage !== null && !LOGIN_STAGES.has(login.stage))
+    || typeof login.browserOpened !== "boolean"
+    || (login.instructions !== null && !validString(login.instructions, 4096))
+    || typeof login.codeRequired !== "boolean") {
+    throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+  }
+  return { login: cloneObject(login) };
+}
+
+function validPrompt(prompt) {
+  return exactObject(prompt, ["type", "key", "message", "placeholder", "options", "when"])
+    && ["text", "select"].includes(prompt.type) && PROMPT_KEY_PATTERN.test(prompt.key)
+    && validString(prompt.message, 512) && (prompt.placeholder === null || validString(prompt.placeholder, 256))
+    && Array.isArray(prompt.options) && prompt.options.length <= 32
+    && (prompt.type === "select" ? prompt.options.length > 0 : prompt.options.length === 0)
+    && prompt.options.every((option) => exactObject(option, ["label", "value", "hint"])
+      && validString(option.label, 256) && validText(option.value, 256)
+      && (option.hint === null || validString(option.hint, 256)))
+    && (prompt.when === null || (exactObject(prompt.when, ["key", "op", "value"])
+      && PROMPT_KEY_PATTERN.test(prompt.when.key) && ["eq", "neq"].includes(prompt.when.op)
+      && validText(prompt.when.value, 256)));
+}
+
+function validateLoginOptions(result) {
+  if (!exactObject(result, ["providers"]) || !Array.isArray(result.providers) || result.providers.length > 600
+    || !result.providers.every((provider) => exactObject(provider, ["id", "name", "connected", "methods"])
+      && validProviderId(provider.id) && validString(provider.name, 256) && typeof provider.connected === "boolean"
+      && Array.isArray(provider.methods) && provider.methods.length <= 8
+      && provider.methods.every((method) => exactObject(method, ["index", "type", "label", "prompts"])
+        && Number.isSafeInteger(method.index) && method.index >= 0 && method.index <= 7
+        && ["oauth", "api"].includes(method.type) && validString(method.label, 256)
+        && Array.isArray(method.prompts) && method.prompts.length <= 8 && method.prompts.every(validPrompt)))) {
+    throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+  }
+  return structuredClone(result);
 }
 
 function validateRuntimeAccountServiceResult(method, result) {
@@ -269,6 +385,22 @@ function validateRuntimeAccountServiceResult(method, result) {
   }
   if (method === "runtime.account.auth.read") return validateAuthRead(result);
   if (method === "runtime.account.login.start") return validateLoginStart(result);
+  if (method === "runtime.account.login.read") return validateLoginRead(result);
+  if (method === "runtime.account.login.options") return validateLoginOptions(result);
+  if (method === "runtime.account.login.provider.start") return validateLoginStart(result);
+  if (method === "runtime.account.login.submit") {
+    if (!exactObject(result, ["requestId", "status"]) || !validId(result.requestId)
+      || !AUTH_STATUSES.has(result.status) || ["starting", "canceling"].includes(result.status)) {
+      throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+    }
+    return cloneObject(result);
+  }
+  if (method === "runtime.account.login.apikey") {
+    if (!exactObject(result, ["saved"]) || result.saved !== true) {
+      throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+    }
+    return { saved: true };
+  }
   if (method === "runtime.account.login.cancel") {
     if (!exactObject(result, ["requestId", "status"]) || !validId(result.requestId)
       || !AUTH_STATUSES.has(result.status) || ["starting", "waiting", "canceling"].includes(result.status)) {
@@ -300,6 +432,7 @@ function mapRuntimeAccountServiceError(error) {
 
 module.exports = {
   PUBLIC_MESSAGES,
+  RUNTIME_ACCOUNT_LOGIN_RUNTIMES,
   RUNTIME_ACCOUNT_SERVICE_METHODS,
   RUNTIME_ACCOUNT_SERVICE_METHOD_SET,
   mapRuntimeAccountServiceError,

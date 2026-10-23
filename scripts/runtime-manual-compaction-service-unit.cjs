@@ -10,7 +10,7 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { FakeHost, waitUntil } = require("./shoggoth-work-run-coordinator-unit.cjs");
 
 test("manual compact shares global and session admission, and cancel settles sibling runs on the stopped Codex host", async () => {
-  const root = fs.mkdtempSync("/tmp/sgcompact-");
+  const root = fs.realpathSync(fs.mkdtempSync("/tmp/sgcompact-"));
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     cacheRoot: path.join(root, "cache"), profileRoot: path.join(root, "profile") });
   const host = new FakeHost([]);

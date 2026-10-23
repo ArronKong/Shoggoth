@@ -7,6 +7,7 @@ const { PassThrough, Readable } = require("node:stream");
 const {
   MCP_CLIENT_REQUEST_TIMEOUT_MS,
   MCP_MAX_FRAME_BYTES,
+  MCP_MAX_CATALOG_FRAME_BYTES,
   MCP_SERVICE_PROTOCOL_VERSION,
   MCP_STDIO_PROTOCOL_VERSION,
   createMcpStdioHandler: createRawMcpStdioHandler,
@@ -15,8 +16,9 @@ const {
 } = require("../app/shoggoth-mcp-helper");
 const {
   DEFAULT_SERVER_REQUEST_TIMEOUT_MS,
+  DEFAULT_MCP_TOOL_TIMEOUT_MS,
 } = require("../app/agent-service/interactive-timeouts");
-const { MCP_PRODUCT_TOOL_NAMES } = require("../app/agent-service/mcp-product-tool-controller");
+const { MCP_PRODUCT_TOOL_NAMES, MCP_PRODUCT_TOOL_DEFINITIONS } = require("../app/agent-service/mcp-product-tool-controller");
 
 const tests = [];
 function test(name, fn) {
@@ -25,7 +27,87 @@ function test(name, fn) {
 
 test("MCP helper 人工确认等待覆盖完整 server-request 窗口", () => {
   assert.equal(MCP_CLIENT_REQUEST_TIMEOUT_MS, DEFAULT_SERVER_REQUEST_TIMEOUT_MS);
-  assert.ok(MCP_CLIENT_REQUEST_TIMEOUT_MS > 5 * 60_000);
+  assert.ok(MCP_CLIENT_REQUEST_TIMEOUT_MS > 30 * 60_000);
+});
+
+test("Browser handoff Service wait covers user input; normal calls keep the short deadline and Codex binding", async () => {
+  const calls = [], bound = [];
+  const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x11), bindRuntimeCalls: true,
+    requestService: async (_paths, request, options) => {
+      calls.push({ name: request.params.name, timeoutMs: options.timeoutMs });
+      return { sessionId: "browser-one", canceled: false, content: [], isError: false };
+    },
+  });
+  try {
+    await handler(initialize(1, { capabilities: { elicitation: {} } }));
+    const context = { requestClient: async (method, params) => {
+      assert.equal(method, "elicitation/create");
+      bound.push(params._meta["shoggoth/runtime-call-binding"].name);
+      return { action: "accept", content: {} };
+    } };
+    for (const [index, name, args] of [[2, "browser_session_wait_for_user", { source: "chat", sourceId: "session-a", sessionId: "browser-one", instructions: "完成本地测试操作" }],
+      [3, "browser_status", {}]]) {
+      const result = await handler({ jsonrpc: "2.0", id: index, method: "tools/call", params: { name, arguments: args } }, context);
+      assert.equal(result.result.isError, false, JSON.stringify(result));
+    }
+    assert.deepEqual(bound, ["browser_session_wait_for_user", "browser_status"]);
+    assert.equal(calls[1].timeoutMs, 45_000);
+    assert.equal(calls[0].timeoutMs, DEFAULT_SERVER_REQUEST_TIMEOUT_MS + calls[1].timeoutMs);
+    assert.ok(calls[0].timeoutMs > 30 * 60_000);
+  } finally { handler.close(); }
+});
+
+test("a large product result returns a preview and product_result_read restores the exact text", async () => {
+  const large = { featureId: "fixture", body: "help text ".repeat(6_000) };
+  const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x12),
+    requestService: async () => large });
+  try {
+    await handler(initialize(1));
+    const call = (id, name, args) => handler({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, {});
+    const first = await call(2, "app_help_get", { featureId: "inspiration" });
+    assert.equal(first.result.isError, false, JSON.stringify(first).slice(0, 400));
+    const preview = first.result.structuredContent;
+    assert.equal(preview.truncated, true);
+    assert.ok(Buffer.byteLength(JSON.stringify(first)) < 16 * 1024, "the model receives a small preview");
+    let text = preview.preview, offset = preview.nextOffset;
+    for (let id = 3; offset !== null; id++) {
+      const page = await call(id, "product_result_read", { resultRef: preview.resultRef, offset });
+      assert.equal(page.result.isError, false, JSON.stringify(page).slice(0, 400));
+      text += page.result.structuredContent.text;
+      offset = page.result.structuredContent.nextOffset;
+    }
+    assert.deepEqual(JSON.parse(text), large, "paging restores the complete original result");
+    const expired = await call(99, "product_result_read", { resultRef: "res-0123456789abcdef01234567", offset: 0 });
+    assert.equal(expired.result.isError, true);
+  } finally { handler.close(); }
+});
+
+test("workspace commands keep their execution and approval lifecycle across the Service RPC", async () => {
+  let deadline;
+  const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x11),
+    requestService: async (_paths, _request, options) => { deadline = options.timeoutMs; return { exitCode: 7, stdout: "", stderr: "failed" }; } });
+  try {
+    await handler(initialize(1));
+    const result = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: { name: "workspace_execute", arguments: { command: "exit 7", timeoutMs: 1800000 } } });
+    assert.equal(deadline, DEFAULT_MCP_TOOL_TIMEOUT_MS);
+    assert.ok(deadline > 1800000 + DEFAULT_SERVER_REQUEST_TIMEOUT_MS);
+    assert.equal(result.result.isError, true); assert.equal(result.result.structuredContent.exitCode, 7);
+  } finally { handler.close(); }
+});
+
+test("plugin Service calls cover consecutive thirty-minute approval and execution windows", async () => {
+  let deadline;
+  const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x11),
+    requestService: async (_paths, _request, options) => { deadline = options.timeoutMs; return { content: [], isError: false }; } });
+  try {
+    await handler(initialize(1));
+    const result = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+      name: "mcp_server_call", arguments: { serverId: "fixture", toolName: "echo", arguments: {} },
+    } });
+    assert.equal(result.result.isError, false, JSON.stringify(result));
+    assert.equal(deadline, 2 * DEFAULT_SERVER_REQUEST_TIMEOUT_MS + 45_000);
+  } finally { handler.close(); }
 });
 
 function token(byte) {
@@ -46,7 +128,7 @@ async function listAllTools(handler, id) {
   do {
     const response = await handler({ jsonrpc: "2.0", id, method: "tools/list", params: cursor ? { cursor } : {} });
     assert.equal(response.error, undefined);
-    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MCP_MAX_FRAME_BYTES);
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MCP_MAX_CATALOG_FRAME_BYTES);
     tools.push(...response.result.tools);
     cursor = response.result.nextCursor;
     if (cursor) { assert.equal(cursors.has(cursor), false); cursors.add(cursor); }
@@ -260,7 +342,7 @@ test("request_user_input 只接受严格 questions 输入并通过 MCP elicitati
   }));
   assert.equal(initialized.error, undefined);
   const listed = await listAllTools(handler, 2);
-  assert.deepEqual(listed.map((tool) => tool.name), MCP_PRODUCT_TOOL_NAMES);
+  assert.deepEqual(listed.map((tool) => tool.name), [...MCP_PRODUCT_TOOL_NAMES, "product_result_read"]);
   const toolsByName = new Map(listed.map((tool) => [tool.name, tool]));
   assert.deepEqual(toolsByName.get("backend_status").annotations, {
     title: "Shoggoth federation/status",
@@ -359,7 +441,9 @@ test("零参数工具兼容 MCP 省略 arguments，有参数工具仍严格拒�
   const required = await handler({
     jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "usage_get" },
   });
-  assert.equal(required.error.code, -32602);
+  assert.equal(required.result.isError, true);
+  assert.equal(required.result.structuredContent.error.code, "MCP_TOOL_INVALID_ARGUMENTS");
+  assert.match(required.result.content[0].text, /usage_get.*缺少 range/u);
   assert.equal(serviceCalls.length, 1);
 
   const unknownTopLevel = await handler({
@@ -383,7 +467,11 @@ test("computer_snapshot 以 MCP image 返回缩略图且原图只保留私有 Ar
       pid: 42,
       windowId: 7,
       tree: "",
-      elements: [],
+      elements: [
+        { ref: "c1", role: "AXButton", label: "7", value: "", frame: { h: 48, w: 48, x: 591, y: 556 }, secure: false },
+        { ref: "c2", role: "AXStaticText", label: "", value: "4,736", frame: { h: 30, w: 200, x: 591, y: 420 }, secure: false },
+        { ref: "c3", role: "AXTextField", label: "Password", value: "", frame: null, secure: true },
+      ],
       degraded: false,
       image: {
         mimeType: "image/png",
@@ -410,6 +498,12 @@ test("computer_snapshot 以 MCP image 返回缩略图且原图只保留私有 Ar
   assert.deepEqual(response.result.content[0], { type: "image", data: thumbnail, mimeType: "image/jpeg" });
   assert.equal(Object.hasOwn(response.result.structuredContent.image, "thumbnail"), false);
   assert.equal(response.result.structuredContent.image.artifact.storageKey, "abc/image.png");
+  // Clients that only read text content (Pi, OpenCode, DeepSeek) still get what actions need.
+  const text = response.result.content[1].text;
+  assert.match(text, /snapshotRevision=revision-1 pid=42 windowId=7/u);
+  assert.match(text, /^c1 AXButton "7" 591,556,48,48$/mu);
+  assert.match(text, /^c2 AXStaticText "" value="4,736" 591,420,200,30$/mu);
+  assert.match(text, /^c3 AXTextField "Password" secure$/mu);
   handler.close();
 });
 
@@ -461,6 +555,11 @@ test("computer_snapshot 超过 64 KiB 时先省略重复 tree 并保留图像与
   assert.equal(response.result.content[0].type, "image");
   assert.equal(response.result.structuredContent.tree, "");
   assert.equal(response.result.structuredContent.elements.length, elements.length);
+  // The text keeps every ref; frames are dropped from it before the image.
+  const text = response.result.content[1].text;
+  assert.match(text, /snapshotRevision=revision-large/u);
+  assert.match(text, /^c138 AXTextField "control-137" value="value-137"$/mu);
+  assert.equal(text.split("\n").filter((line) => /^c\d+ /u.test(line)).length, elements.length);
   assert.deepEqual(response.result.structuredContent.outputTruncated, {
     tree: true,
     inlineImage: false,
@@ -495,6 +594,56 @@ test("工具失败只公开允许的稳定错误码且不泄露私有消息", as
   const privateCode = await invoke("PRIVATE_SECRET_CANARY", "another-private-secret");
   assert.equal(privateCode.result.structuredContent.error.code, "SERVICE_REQUEST_FAILED");
   assert.doesNotMatch(JSON.stringify(privateCode), /PRIVATE_SECRET_CANARY|another-private-secret/u);
+});
+
+test("web tools and preference errors keep their fixed public codes without leaking private provider details", async () => {
+  const messages = { ...require("../app/agent-service/web-tools").WEB_PUBLIC_MESSAGES,
+    ...require("../app/agent-service/web-settings-protocol").PUBLIC_MESSAGES };
+  for (const [code, message] of [...Object.entries(messages), ["WEB_PRIVATE_SECRET_CANARY", null]]) {
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x39),
+      requestService: async () => { throw Object.assign(new Error("private-web-key-detail"), { code }); } });
+    try {
+      await handler(initialize(1));
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "web_settings_get", arguments: {} } });
+      assert.equal(response.result.structuredContent.error.code, message ? code : "SERVICE_REQUEST_FAILED");
+      if (message) assert.equal(response.result.content[0].text, `${message} (${code})`);
+      assert.doesNotMatch(JSON.stringify(response), /private-web-key-detail|WEB_PRIVATE_SECRET_CANARY/u);
+    } finally { handler.close(); }
+  }
+});
+
+test("heartbeat settings preserve fixed public errors while hiding unknown codes and private details", async () => {
+  const { PUBLIC_MESSAGES } = require("../app/agent-service/proactive-messages");
+  for (const [code, message] of [...Object.entries(PUBLIC_MESSAGES), ["PROACTIVE_PRIVATE_SECRET_CANARY", null]]) {
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x39),
+      requestService: async () => { throw Object.assign(new Error("private-heartbeat-details"), { code }); } });
+    try {
+      await handler(initialize(1));
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "heartbeat_settings_get", arguments: {} } });
+      assert.equal(response.result.structuredContent.error.code, message ? code : "SERVICE_REQUEST_FAILED");
+      if (message) assert.equal(response.result.content[0].text, `${message} (${code})`);
+      assert.doesNotMatch(JSON.stringify(response), /private-heartbeat-details|PROACTIVE_PRIVATE_SECRET_CANARY/u);
+    } finally { handler.close(); }
+  }
+});
+test("交互卡片公开错误保留准确原因，未知 UI 错误仍不泄露", async () => {
+  const { MESSAGES } = require("../app/agent-service/chat-ui-messages");
+  const args = { sourceFile: "card.html", title: "测试卡片", summary: "", stateSchemaVersion: 1,
+    stateSchema: { type: "object", properties: {}, additionalProperties: false }, initialState: {}, actions: [] };
+  for (const [code, expectedMessage] of [...Object.entries(MESSAGES),
+    ["UI_PRIVATE_SECRET_CANARY", null], ["CODEX_PRIVATE_SECRET_CANARY", null]]) {
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x39),
+      requestService: async () => { throw Object.assign(new Error("private-card-path-secret"), { code }); } });
+    try {
+      await handler(initialize(1));
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call",
+        params: { name: "render_ui", arguments: args } });
+      assert.equal(response.result.isError, true);
+      assert.equal(response.result.structuredContent.error.code, expectedMessage ? code : "SERVICE_REQUEST_FAILED", code);
+      if (expectedMessage) assert.equal(response.result.content[0].text, `${expectedMessage} (${code})`);
+      assert.doesNotMatch(JSON.stringify(response), /private-card-path-secret|PRIVATE_SECRET_CANARY/u);
+    } finally { handler.close(); }
+  }
 });
 
 test("破坏性/覆盖类工具必须真实 elicitation，取消与不支持时 Service 零调用", async () => {
@@ -569,9 +718,40 @@ test("破坏性/覆盖类工具必须真实 elicitation，取消与不支持时 
       },
     },
   }, { requestClient: async () => assert.fail("非法更新不得发起确认") });
-  assert.equal(rejected.error.code, -32602);
+  assert.equal(rejected.result.isError, true);
+  assert.match(rejected.result.content[0].text, /不支持参数 patch\.cloneFromDefault/u);
   assert.equal(serviceCalls, 1);
   invalidUpdate.close();
+});
+
+test("参数不合法时以工具错误说明具体字段，不调用 Service", async () => {
+  let serviceCalls = 0;
+  const handler = createMcpStdioHandler({
+    runtimeProfileId: "runtime-a",
+    sessionToken: token(0x3a),
+    randomUUID: () => "92929292-9292-4292-8292-929292929292",
+    requestService: async () => { serviceCalls += 1; return {}; },
+  });
+  await handler(initialize(1));
+  // The arguments Pi sent on 2026-09-29: a guessed ref with coordinates as strings.
+  const response = await handler({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "computer_click", arguments: {
+      source: "chat", sourceId: "session-a", sessionId: "79797979-7979-4979-8979-797979797979",
+      snapshotRevision: "unknown", pid: 42, windowId: 7, ref: "1", x: "115", y: "300",
+    } },
+  });
+  assert.equal(response.result.isError, true);
+  assert.deepEqual(response.result.structuredContent.error, {
+    code: "MCP_TOOL_INVALID_ARGUMENTS",
+    problems: ["x 应为 number 或 null，收到 string", "y 应为 number 或 null，收到 string"],
+  });
+  const text = response.result.content[0].text;
+  assert.match(text, /computer_click/u);
+  assert.match(text, /x、y 设为 null/u);
+  assert.match(text, /同一次 computer_snapshot/u);
+  assert.equal(serviceCalls, 0);
+  handler.close();
 });
 
 test("灵感删除和自动执行设置通过真实 MCP elicitation 确认，拒绝/不支持时零写入", async () => {
@@ -630,7 +810,7 @@ test("Computer Use 只在开/恢复会话确认，已授权会话内输入不重
     jsonrpc: "2.0", id: 2, method: "tools/call",
     params: { name: "computer_session_open", arguments: {
       source: "chat", sourceId: "session-a",
-      allowedApplications: ["com.apple.TextEdit"], expiresInSeconds: 120,
+      allowedApplications: ["com.apple.TextEdit"],
     } },
   }, {
     requestClient: async (_method, params) => {
@@ -656,6 +836,30 @@ test("Computer Use 只在开/恢复会话确认，已授权会话内输入不重
   assert.equal(Object.hasOwn(calls[2].params, "confirmation"), false);
   assert.equal(calls[2].params.arguments.text, secretText);
   handler.close();
+});
+
+test("stdio supports the directory's 23 concurrent execution-binding requests", async () => {
+  const input = new PassThrough();
+  const output = capturingBufferOutput();
+  const handler = async (message, { requestClient }) => {
+    await requestClient("elicitation/create", { message: "Bind this execution" });
+    return { jsonrpc: "2.0", id: message.id, result: { ok: true } };
+  };
+  const running = runMcpStdioSession({ input, output, handler, clientRequestTimeoutMs: 500 });
+  try {
+    for (let id = 1; id <= 23; id++) input.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call" })}\n`);
+    const requests = [];
+    for (let n = 0; n < 23; n++) requests.push(await output.nextMessage());
+    assert.equal(requests.filter(message => message.method === "elicitation/create").length, 23);
+    for (const request of requests) input.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id,
+      result: { action: "accept", content: {} } })}\n`);
+    const results = [];
+    for (let n = 0; n < 23; n++) results.push(await output.nextMessage());
+    assert.equal(results.filter(message => message.result?.ok === true).length, 23);
+  } finally {
+    input.end();
+    await running;
+  }
 });
 
 test("stdio accept/cancel 全路径清零原始输入 chunk 与 owned 输出 frame", async () => {
@@ -763,9 +967,13 @@ test("parse error 写回同时 EPIPE 仍清零 owned parsed frame", async () => 
   const raw = originalFrom("{malformed}\n", "utf8");
   const input = Readable.from([raw]);
   const output = new EventEmitter();
-  output.write = (frame) => {
+  output.write = (frame, callback) => {
     writtenFrame = frame;
-    setImmediate(() => output.emit("error", new Error("parse-epipe-canary")));
+    setImmediate(() => {
+      const error = new Error("parse-epipe-canary");
+      callback(error);
+      output.emit("error", error);
+    });
     return true;
   };
   const handler = createMcpStdioHandler({
@@ -886,9 +1094,23 @@ test("refreshSession 超时有界失败并保持脱敏", async () => {
   const startedAt = Date.now();
   const response = await callProfile(handler);
   assert.equal(response.result.isError, true);
+  assert.match(JSON.stringify(response), /MCP_HELPER_SERVICE_UNAVAILABLE/u);
   assert.ok(Date.now() - startedAt < 500);
   assert.equal(JSON.stringify(response).includes("token"), false);
   handler.close();
+});
+
+test("refresh preserves Service recovery errors and allows a valid exchange taking more than five seconds", async () => {
+  for (const code of ["MCP_HELPER_SERVICE_UNAVAILABLE", "MCP_HELPER_SERVICE_RECOVERY_REQUIRED", "MCP_HELPER_AUTH_FAILED"]) {
+    const handler = await initializedHandler({ sessionExpiresAt: 1, now: () => 2,
+      refreshSession: async () => { throw Object.assign(new Error("private-value"), { code }); } });
+    const response = await callProfile(handler); handler.close();
+    assert.ok(JSON.stringify(response).includes(code)); assert.ok(!JSON.stringify(response).includes("private-value"));
+  }
+  const handler = await initializedHandler({ sessionExpiresAt: 1, now: () => 2,
+    refreshSession: async () => { await new Promise(resolve => setTimeout(resolve, 5100)); return session(0x73, 60_000); } });
+  const response = await callProfile(handler); handler.close();
+  assert.equal(response.result.isError, false);
 });
 
 test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () => {
@@ -897,7 +1119,7 @@ test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () 
   const output = new EventEmitter();
   const input = new PassThrough();
   let written = "";
-  output.write = (frame) => {
+  output.write = (frame, callback) => {
     written += frame;
     const message = JSON.parse(String(frame));
     if (message.method === "elicitation/create") {
@@ -905,6 +1127,7 @@ test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () 
       assert.equal(message.params._meta["shoggoth/runtime-call-binding"].name, "profile_get");
       input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { action: "accept", content: {} } })}\n`);
     } else if (message.id === 2) input.end();
+    callback();
     return true;
   };
   const running = startShoggothMcpHelper({
@@ -944,9 +1167,22 @@ test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () 
 function backpressuredOutput() {
   const output = new EventEmitter();
   output.frames = [];
-  output.write = (frame) => {
+  let completeWrite;
+  output.write = (frame, callback) => {
     output.frames.push(frame);
+    completeWrite = () => {
+      completeWrite = null;
+      callback();
+    };
     return false;
+  };
+  output.on("drain", () => completeWrite?.());
+  output.on("close", () => { output.closed = true; completeWrite?.(); });
+  output.destroy = () => {
+    if (output.destroyed) return;
+    output.destroyed = true;
+    completeWrite?.();
+    setImmediate(() => output.emit("close"));
   };
   return output;
 }
@@ -1016,9 +1252,13 @@ test("背压等待超时返回固定脱敏错误", async () => {
 test("output.write(true) 后的异步 error 也被有界捕获", async () => {
   const output = new EventEmitter();
   let writtenFrame = null;
-  output.write = (frame) => {
+  output.write = (frame, callback) => {
     writtenFrame = frame;
-    setImmediate(() => output.emit("error", new Error("fast-epipe-canary")));
+    setImmediate(() => {
+      const error = new Error("fast-epipe-canary");
+      callback(error);
+      output.emit("error", error);
+    });
     return true;
   };
   await assert.rejects(
@@ -1031,16 +1271,30 @@ test("output.write(true) 后的异步 error 也被有界捕获", async () => {
   assert.equal(writtenFrame.every((byte) => byte === 0), true);
 });
 
-test("工具目录分页覆盖全部工具，拒绝无效游标且最坏 request ID 不超帧", async () => {
+test("当前完整目录在一帧加载，未来分页拒绝无效游标且最坏 request ID 不超帧", async () => {
   const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x37),
     requestService: async () => assert.fail("工具目录不应调用 Service"),
   });
   await handler(initialize());
   const id = "\0".repeat(256);
   const first = await handler({ jsonrpc: "2.0", id, method: "tools/list" });
-  assert.equal(typeof first.result.nextCursor, "string");
-  assert.deepEqual((await listAllTools(handler, id)).map(tool => tool.name), MCP_PRODUCT_TOOL_NAMES);
-  for (const params of [{ cursor: "" }, { cursor: 1 }, { cursor: "invalid" }, { cursor: first.result.nextCursor + "x" },
+  assert.equal(first.result.nextCursor, undefined);
+  assert(first.result.tools.some(tool => tool.name === "app_state_get"));
+  assert(first.result.tools.some(tool => tool.name === "app_manage"));
+  assert(first.result.tools.some(tool => tool.name === "federation_agent_list"));
+  assert(Buffer.byteLength(JSON.stringify(first)) > MCP_MAX_FRAME_BYTES);
+  assert(Buffer.byteLength(JSON.stringify(first)) < MCP_MAX_CATALOG_FRAME_BYTES);
+  const large = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x37),
+    requestService: async () => assert.fail("目录不调用 Service"),
+    toolDefinitions: MCP_PRODUCT_TOOL_DEFINITIONS.map(tool => ({ ...tool, description: "x".repeat(4000) })),
+  });
+  await large(initialize());
+  const largeFirst = await large({ jsonrpc: "2.0", id, method: "tools/list" });
+  assert.equal(typeof largeFirst.result.nextCursor, "string");
+  assert.deepEqual((await listAllTools(large, id)).map(tool => tool.name), [...MCP_PRODUCT_TOOL_NAMES, "product_result_read"]);
+  large.close();
+  assert.deepEqual((await listAllTools(handler, id)).map(tool => tool.name), [...MCP_PRODUCT_TOOL_NAMES, "product_result_read"]);
+  for (const params of [{ cursor: "" }, { cursor: 1 }, { cursor: "invalid" }, { cursor: "invalid.x" },
     { injected: true }, null]) {
     const result = await handler({ jsonrpc: "2.0", id: 3, method: "tools/list", params });
     assert.equal(result.error.code, -32602);
@@ -1062,12 +1316,134 @@ test("电脑操作缺少权限时在确认前失败，并提供具体处理方�
   await handler(initialize(1, { capabilities: { elicitation: {} } }));
   const result = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
     name: "computer_session_open", arguments: { source: "chat", sourceId: "session-a",
-      allowedApplications: ["ai.shoggoth.desktop"], expiresInSeconds: 120 },
+      allowedApplications: ["ai.shoggoth.desktop"] },
   } }, { requestClient: async () => assert.fail("未就绪时不得要求确认") });
   assert.deepEqual(calls, ["computer_status"]);
   assert.equal(result.result.structuredContent.error.code, "COMPUTER_PERMISSION_REQUIRED");
   assert.match(result.result.content[0].text, /辅助功能/u);
   handler.close();
+});
+
+test("Browser Use checks readiness before consent and forwards consent once", async () => {
+  for (const reason of ["BROWSER_DISABLED", "BROWSER_EXECUTABLE_UNAVAILABLE", "BROWSER_ENGINE_UNAVAILABLE", null]) {
+    const calls = [];
+    let prompts = 0;
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x37),
+      requestService: async (_paths, request) => {
+        calls.push(request.params.name);
+        if (request.params.name === "browser_status") return { available: !reason, reason, sessions: [] };
+        assert.equal(request.params.name, "browser_session_open");
+        assert.equal(request.params.confirmation, true);
+        return { id: "browser-session-a" };
+      },
+    });
+    await handler(initialize(1, { capabilities: { elicitation: {} } }));
+    const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+      name: "browser_session_open", arguments: { source: "chat", sourceId: "session-a" },
+    } }, { requestClient: async (_method, params) => {
+      prompts++;
+      assert.match(params.message, /Browser Use.*随当前任务结束/u);
+      return { action: "accept", content: { confirm_product_action: "确认执行" } };
+    } });
+    assert.equal(prompts, reason ? 0 : 1);
+    assert.deepEqual(calls, reason ? ["browser_status"] : ["browser_status", "browser_session_open"]);
+    if (reason) assert.equal(response.result.structuredContent.error.code, reason);
+    else assert.equal(response.result.isError, false, JSON.stringify(response));
+    handler.close();
+  }
+});
+
+test("Browser tool errors survive the MCP wrapper and Codex completed lifecycle", async () => {
+  const browserResult = { sessionId: "browser-session-a", toolName: "browser_click",
+    content: [{ type: "text", text: "### Error\nTimeoutError: browserBackend.callTool: Timeout 5000ms exceeded." }],
+    isError: true, untrusted: true, outputTruncated: false };
+  const handler = await initializedHandler({ requestService: async (_paths, request) => {
+    assert.equal(request.params.name, "browser_tool_call");
+    return browserResult;
+  } });
+  try {
+    const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+      name: "browser_tool_call", arguments: { source: "chat", sourceId: "session-a",
+        sessionId: "browser-session-a", toolName: "browser_click", arguments: { target: "e52" } },
+    } });
+    assert.equal(response.result.isError, true);
+    assert.deepEqual(response.result.structuredContent, browserResult);
+    assert.deepEqual(JSON.parse(response.result.content[0].text), browserResult);
+    const normalized = require("../app/agent-service/codex-event-normalizer").normalizeCodexEvent({
+      method: "item/completed", params: { threadId: "thread-a", turnId: "turn-a", item: {
+        type: "mcpToolCall", id: "browser-click-a", server: "shoggoth", tool: "browser_tool_call",
+        status: "completed", result: response.result,
+      } },
+    });
+    assert.equal(normalized.tool.success, false);
+  } finally { handler.close(); }
+});
+
+test("Browser success does not infer failure from nested content or nonboolean flags", async () => {
+  for (const fields of [{ isError: false }, {}, { isError: "true" }, { isError: null }]) {
+    const browserResult = { sessionId: "browser-session-a", toolName: "browser_snapshot",
+      content: [{ type: "text", text: '{"isError":true,"status":"failed"}' }],
+      untrusted: true, outputTruncated: false, ...fields };
+    const handler = await initializedHandler({ requestService: async () => browserResult });
+    try {
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name: "browser_tool_call", arguments: { source: "chat", sourceId: "session-a",
+          sessionId: "browser-session-a", toolName: "browser_snapshot", arguments: {} },
+      } });
+      assert.equal(response.result.isError, false);
+      assert.deepEqual(response.result.structuredContent, browserResult);
+      assert.deepEqual(JSON.parse(response.result.content[0].text), browserResult);
+    } finally { handler.close(); }
+  }
+});
+
+test("Non-Browser business isError fields do not change MCP call success", async () => {
+  for (const name of ["usage_get", "browser_status"]) {
+    const businessResult = { isError: true, status: "failed", failedJobs: 1 };
+    const handler = await initializedHandler({ requestService: async () => businessResult });
+    try {
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name, arguments: name === "usage_get" ? { range: "today" } : {},
+      } });
+      assert.equal(response.result.isError, false);
+      assert.deepEqual(response.result.structuredContent, businessResult);
+      assert.deepEqual(JSON.parse(response.result.content[0].text), businessResult);
+    } finally { handler.close(); }
+  }
+});
+
+test("Browser MCP frame fallback preserves the error flag and full text result", async () => {
+  for (const isError of [false, true]) {
+    const browserResult = { sessionId: "browser-session-a", toolName: "browser_snapshot",
+      content: [{ type: "text", text: "x".repeat(35 * 1024) }],
+      isError, untrusted: true, outputTruncated: false };
+    const handler = await initializedHandler({ requestService: async () => browserResult });
+    try {
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name: "browser_tool_call", arguments: { source: "chat", sourceId: "session-a",
+          sessionId: "browser-session-a", toolName: "browser_snapshot", arguments: {} },
+      } });
+      assert.equal(response.result.isError, isError);
+      assert.equal(Object.hasOwn(response.result, "structuredContent"), false);
+      assert.deepEqual(JSON.parse(response.result.content[0].text), browserResult);
+      assert.ok(Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES);
+    } finally { handler.close(); }
+  }
+});
+
+test("Oversized Browser output still fails within the existing MCP frame limit", async () => {
+  const handler = await initializedHandler({ requestService: async () => ({
+    content: [{ type: "text", text: "x".repeat(MCP_MAX_FRAME_BYTES) }], isError: true,
+  }) });
+  try {
+    const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+      name: "browser_tool_call", arguments: { source: "chat", sourceId: "session-a",
+        sessionId: "browser-session-a", toolName: "browser_snapshot", arguments: {} },
+    } });
+    assert.equal(response.result.isError, true);
+    assert.equal(response.result.structuredContent.error.code, "MCP_HELPER_RESPONSE_TOO_LARGE");
+    assert.ok(Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES);
+  } finally { handler.close(); }
 });
 
 test("本地助理修改和归档确认展示已核对目标，拒绝时不写入", async () => {
@@ -1128,6 +1504,59 @@ test("确认期间权限丢失仍被服务拒绝，驱动与读取故障不会�
     assert.equal(response.result.structuredContent.error.code, reason || "COMPUTER_PERMISSION_REQUIRED");
     assert.doesNotMatch(JSON.stringify(response), /private-path-canary/u);
     handler.close();
+  }
+});
+
+test("stdio emits the complete >64KiB catalog while preserving ordinary frame limits", async () => {
+  const input = new PassThrough(), output = capturingBufferOutput();
+  const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x31), requestService: async () => assert.fail("no Service catalog call") });
+  const session = runMcpStdioSession({ input, output, handler });
+  input.write(rawJsonLine(initialize(1))); assert.equal((await output.nextMessage()).id, 1);
+  input.write(rawJsonLine({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
+  const catalog = await output.nextMessage(); assert.deepEqual(catalog.result.tools.map(row => row.name), [...MCP_PRODUCT_TOOL_NAMES, "product_result_read"]);
+  assert(Buffer.byteLength(JSON.stringify(catalog)) > MCP_MAX_FRAME_BYTES); assert.equal(catalog.result.nextCursor, undefined);
+  input.end(); await session; handler.close(); assertBuffersWiped(output.frames);
+});
+
+test("cross-Agent management requires exact-target confirmation and cancel makes zero writes", async () => {
+  for (const accept of [false, true]) {
+    let writes = 0, confirmations = 0;
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x31), requestService: async (_, request) => {
+      assert.equal(request.params.name, "app_manage"); assert.equal(request.params.confirmation, true); writes++;
+      return { status: "deleted" };
+    } });
+    await handler(initialize(1, { capabilities: { elicitation: {} } }));
+    const args = { operation: "cron_delete", backendId: "hermes", targetProfileId: null, expectedRevision: "a".repeat(64), arguments: { jobId: "agent:cron-1" } };
+    const result = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "app_manage", arguments: args } }, {
+      requestClient: async (method, params) => {
+        confirmations++; assert.equal(method, "elicitation/create"); assert.match(params.message, /agent:cron-1/u); assert.match(params.message, /hermes/u);
+        return accept ? { action: "accept", content: { confirm_product_action: "确认执行" } } : { action: "cancel" };
+      },
+    });
+    assert.equal(confirmations, 1); assert.equal(writes, accept ? 1 : 0); assert.equal(result.result.isError, false); if (!accept) assert.deepEqual(result.result.structuredContent, { canceled: true }); handler.close();
+  }
+});
+
+test("shared web default confirmation lists exact partial choices; cancel makes zero writes", async () => {
+  for (const accept of [false, true]) {
+    let writes = 0, confirmations = 0;
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x31), requestService: async (_, request) => {
+      assert.equal(request.params.name, "web_defaults_set"); assert.equal(request.params.confirmation, true); writes++;
+      return { defaults: { revision: 4 } };
+    } });
+    try {
+      await handler(initialize(1, { capabilities: { elicitation: {} } }));
+      const args = { expectedRevision: 3, config: { searchProvider: "brave", fetchProvider: "tinyfish" } };
+      const result = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "web_defaults_set", arguments: args } }, {
+        requestClient: async (method, params) => {
+          confirmations++; assert.equal(method, "elicitation/create");
+          for (const text of ["搜索：brave", "网页读取：tinyfish", "保留独立选择", "设置版本 3"]) assert(params.message.includes(text));
+          return accept ? { action: "accept", content: { confirm_product_action: "确认执行" } } : { action: "cancel" };
+        },
+      });
+      assert.equal(confirmations, 1); assert.equal(writes, accept ? 1 : 0); assert.equal(result.result.isError, false);
+      if (!accept) assert.deepEqual(result.result.structuredContent, { canceled: true });
+    } finally { handler.close(); }
   }
 });
 

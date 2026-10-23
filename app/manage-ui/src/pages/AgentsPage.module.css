@@ -1232,3 +1232,8 @@
   vector-effect: non-scaling-stroke;
   stroke-width: 1.2;
 }
+
+/* Leave the rule editor usable below the per-Agent heartbeat controls. */
+.suMain:has([data-heartbeat-settings]) { min-height: 680px; }
+.suMain:has([data-heartbeat-settings]) .suEditor,
+.suMain:has([data-heartbeat-settings]) .suRead { min-height: 220px; }

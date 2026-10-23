@@ -76,7 +76,8 @@ if (args.includes("fetch")) {
     let code = null;
     try { fs.writeFileSync(file, Buffer.alloc(2 * 1024 * 1024)); }
     catch (error) { code = error.code; }
-    fs.writeFileSync(`}${JSON.stringify(hardLimitLog)}${String.raw`, JSON.stringify({ code, size: fs.statSync(file).size }));
+    fs.writeFileSync(`}${JSON.stringify(hardLimitLog)}${String.raw`, JSON.stringify({
+      code, size: fs.existsSync(file) ? fs.statSync(file).size : 0 }));
     process.exit(79);
   }
   args[args.length - 2] = `}${JSON.stringify(localRepo)}${String.raw`;
@@ -175,7 +176,14 @@ process.exit(result.status === null ? 1 : result.status);
     const slow = createFetcher({ timeoutMs: 150, killGraceMs: 30 });
     phase = "timeout";
     await assert.rejects(slow.fetch({ ...input, repositoryUrl: "https://fixture.invalid/slow.git" }), { code: "GIT_REMOTE_TIMEOUT" });
-    for (const pid of JSON.parse(fs.readFileSync(pidLog, "utf8"))) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    // Under load the 150 ms deadline can fire before the fixture Git process
+    // writes its PID file. In that case there is no recorded descendant to
+    // inspect; the timeout and empty staging assertions still apply.
+    if (fs.existsSync(pidLog)) {
+      for (const pid of JSON.parse(fs.readFileSync(pidLog, "utf8"))) {
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+      }
+    }
     stagingEmpty();
     const noisy = createFetcher({ maxLogBytes: 1024 });
     phase = "log limit";

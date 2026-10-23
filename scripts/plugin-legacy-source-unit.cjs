@@ -26,6 +26,7 @@ function createLegacy(root, format = "claude-plugin") {
   write(root, "skills/review/references/guide.md", "Fixture guide\n");
   write(root, "bin/server", "#!/bin/sh\ntouch NEVER_EXECUTE\nexit 99\n", 0o700);
   write(root, "hooks/hooks.json", JSON.stringify({ command: "touch NEVER_EXECUTE" }));
+  write(root, "hooks.json", JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "touch NEVER_EXECUTE" }] }] } }));
   write(root, ".mcp.json", JSON.stringify({ mcpServers: {
     local: { command: "./bin/server" },
     remote: { type: "http", url: "https://example.invalid/mcp" },
@@ -69,6 +70,10 @@ test("legacy directory preview/install is disabled, immutable, standard-readable
     const root = fs.realpathSync(path.join(paths.pluginPackagesDir, installed.releaseDigest));
     const storedPreview = previewPluginDirectory(root);
     assert.equal(storedPreview.contentDigest, preview.contentDigest);
+    assert.equal(storedPreview.hooks.length, 0, "Codex/Claude hooks cannot become Shoggoth Hook authority");
+    assert.equal(fs.existsSync(path.join(root, "hooks.json")), false);
+    assert(preview.diagnostics.some(item => item.scope === "component" && item.name === "hooks"
+      && item.reasonCode === "LEGACY_COMPONENT_NOT_IMPORTED"));
     assert.equal(readPluginMcpServer(root, "remote").spec.type, "streamable-http");
     assert.equal(fs.statSync(path.join(root, "bin/server")).mode & 0o777, 0o700);
     assert.equal(fs.statSync(path.join(root, "plugin.json")).mode & 0o777, 0o600);

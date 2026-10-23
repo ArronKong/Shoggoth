@@ -46,6 +46,8 @@ function testToolLifecycleAcrossKinds() {
     { type: "mcpToolCall", server: "files", tool: "read", arguments: { path: "a" }, result: { ok: true } },
     { type: "dynamicToolCall", namespace: "plugin", tool: "run", arguments: { value: 1 }, contentItems: [] },
     { type: "webSearch", query: "codex", results: [] },
+    { type: "imageView", path: "/tmp/report.png" },
+    { type: "imageGeneration", failure: { code: "fixture_failure" } },
   ];
   for (const item of tools) {
     const started = normalizeCodexEvent({
@@ -56,6 +58,7 @@ function testToolLifecycleAcrossKinds() {
     assert.equal(started.toolCallId, `${item.type}-1`);
     assert.equal(started.tool.kind, item.type);
     if (item.type === "webSearch") assert.equal(started.tool.input, "codex");
+    if (item.type === "imageView") assert.deepEqual(started.tool.input, { path: "/tmp/report.png" });
 
     const completed = normalizeCodexEvent({
       method: "item/completed",
@@ -65,7 +68,14 @@ function testToolLifecycleAcrossKinds() {
     assert.equal(completed.toolCallId, `${item.type}-1`);
     assert.equal(completed.tool.kind, item.type);
     if (item.type === "webSearch") assert.deepEqual(completed.tool.output, []);
+    if (item.type === "imageGeneration") assert.equal(completed.tool.success, false);
   }
+
+  const failedMcp = normalizeCodexEvent({ method: "item/completed", params: {
+    threadId: "thread-1", turnId: "turn-1", item: { type: "mcpToolCall", id: "mcp-failed",
+      server: "fixture", tool: "read", status: "completed", result: { content: [], isError: true } },
+  } });
+  assert.equal(failedMcp.tool.success, false, "MCP result failure survives a completed lifecycle status");
 
   const update = normalizeCodexEvent({
     method: "item/commandExecution/outputDelta",
@@ -128,6 +138,15 @@ function testStatusApprovalPromptCompleteAndError() {
   });
   assertBase(completed, "complete");
   assert.equal(completed.status, "completed");
+  assert.deepEqual(completed.terminalEvidence, { id: "turn-1", status: "completed" });
+  for (const turn of [{ id: "turn-1" }, { status: "completed" }, { id: "turn-1", status: "inProgress" }]) {
+    assert.equal(normalizeCodexEvent({ method: "turn/completed", params: { threadId: "thread-1", turn } }).terminalEvidence,
+      undefined, "missing or defaulted status/identity is not terminal proof");
+  }
+  const terminalFailure = normalizeCodexEvent({ method: "turn/completed", params: { threadId: "thread-1",
+    turn: { id: "turn-1", status: "failed", error: { codexErrorInfo: "unauthorized", message: "private upstream detail" } } } });
+  assert.deepEqual(terminalFailure.terminalEvidence, { id: "turn-1", status: "failed", error: { codexErrorInfo: "unauthorized" } });
+  assert.equal(JSON.stringify(terminalFailure).includes("private upstream detail"), false);
 
   const failed = normalizeCodexEvent({
     method: "error",

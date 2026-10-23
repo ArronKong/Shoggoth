@@ -29,6 +29,8 @@ const GROK_BUILD_CAPABILITIES = runtimeCapabilities({
   events: true,
   serverRequests: true,
   "context.usage.exact": true,
+  "context.compact.native": true,
+  "context.compact.auto": true,
 });
 
 function adapterError(code, message) {

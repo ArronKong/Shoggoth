@@ -55,6 +55,26 @@ test("an explicitly lower account limit is preserved", () => {
   assert.equal(admission.read(runtimeAccountId).maxActive, 2);
 });
 
+test("observing exact Run admission cannot be satisfied by another active Run or mint a slot", () => {
+  const { admission } = fixture();
+  const runtimeAccountId = NATIVE_CODEX_RUNTIME_ACCOUNT_ID;
+  const owner = { runtimeAccountId, runId: "owning-run", generation: 1 };
+  assert.throws(() => admission.assertRunAdmitted(owner), { code: "RUNTIME_ACCOUNT_RUN_NOT_ADMITTED" });
+  assert.equal(admission.read(runtimeAccountId).active, 0);
+  admission.admit(owner);
+  admission.admit({ runtimeAccountId, runId: "neighbor-run" });
+  assert.equal(admission.assertRunAdmitted(owner), true);
+  admission.release(owner);
+  assert.equal(admission.read(runtimeAccountId).active, 1);
+  assert.throws(() => admission.assertRunAdmitted(owner), { code: "RUNTIME_ACCOUNT_RUN_NOT_ADMITTED" });
+  assert.equal(admission.assertRunAdmitted({ runtimeAccountId, runId: "neighbor-run", generation: 1 }), true);
+  assert.throws(() => admission.assertRunAdmitted({ ...owner, runId: "" }), { code: "RUNTIME_ACCOUNT_ADMISSION_INVALID" });
+  admission.release({ runtimeAccountId, runId: "neighbor-run" });
+  admission.finishMutation(admission.beginMutation({ runtimeAccountId, operationId: "account-change" }));
+  assert.throws(() => admission.assertRunAdmitted(owner), { code: "RUNTIME_ACCOUNT_GENERATION_STALE" });
+  assert.equal(admission.read(runtimeAccountId).active, 0);
+});
+
 test("mutation fences active work and advances account generation", () => {
   const { admission } = fixture();
   const account = NATIVE_CODEX_RUNTIME_ACCOUNT_ID;

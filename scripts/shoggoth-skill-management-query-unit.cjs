@@ -81,6 +81,7 @@ test("5k native Service→Backend→REST query stays bounded and revisioned", as
   ];
   const counts = new Map([["profile-a", 2], ["profile-b", 3]]);
   const controller = Object.create(AgentHarnessServiceController.prototype);
+  controller.memoryEngine = { owner: "fixture" };
   controller.productStore = { getAgentProfile: id => profiles.find(profile => profile.id === id) || null,
     listAgentProfiles: () => profiles };
   controller.skillStore = { list: () => catalog,
@@ -111,7 +112,7 @@ test("5k native Service→Backend→REST query stays bounded and revisioned", as
     const start = performance.now();
     const first = await request({ page: "0" });
     const elapsed = performance.now() - start;
-    assert.equal(first.status, 200);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
     assert.equal(first.body.page.total, 5000);
     assert.equal(first.body.page.matchCount, 5000);
     assert.equal(first.body.page.enabledCount, 2500);

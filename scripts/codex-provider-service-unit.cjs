@@ -69,7 +69,7 @@ function fixture(options = {}) {
     randomUUID: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`,
     runtimePool: options.runtimePool,
     protocolValidator: options.protocolValidator
-      || (async () => ({ parsedBy: "codex-0.149.0" })),
+      || (async () => ({ parsedBy: "codex-0.159.2" })),
   });
   return { root, paths, productStore, secretStore, service };
 }
@@ -346,10 +346,10 @@ test("ProviderService/preset 模块可用", () => {
   assert.equal(typeof CodexProviderProtocolValidator, "function");
 });
 
-test("默认 protocol validator 只启动本地 Codex 0.149.0 parser", async () => {
+test("默认 protocol validator 只启动本地 Codex 0.159.2 parser", async () => {
   const validator = new CodexProviderProtocolValidator({ repoRoot: ROOT });
   assert.deepEqual(await validator.validate(buildProviderPreset(input("ollama"), {})), {
-    parsedBy: "codex-0.149.0",
+    parsedBy: "codex-0.159.2",
   });
 });
 
@@ -581,7 +581,7 @@ test("六种 preset 仅在 runtime-material 变化时停止全部绑定 runtime"
       runtimePool: {
         async stop(runtimeProfileId) { stops.push(runtimeProfileId); },
       },
-      protocolValidator: async () => ({ parsedBy: "codex-0.149.0" }),
+      protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }),
     });
     try {
       const saved = await value.service.save(input(entry.kind, entry.initial));
@@ -625,7 +625,7 @@ test("custom config/secret/clear 变更停止全部绑定 runtime 后才删除�
     runtimePool: {
       async stop(runtimeProfileId) { events.push(["stop", runtimeProfileId]); },
     },
-    protocolValidator: async () => ({ parsedBy: "codex-0.149.0" }),
+    protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }),
   });
   try {
     const saved = await value.service.save(input("custom-responses", {
@@ -691,7 +691,7 @@ test("custom runtime stop 不确定时保留新旧 secret 证据并 poison", asy
         },
       },
       randomUUID: () => "00000000-0000-4000-8000-000000000999",
-      protocolValidator: async () => ({ parsedBy: "codex-0.149.0" }),
+      protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }),
     });
     await assert.rejects(
       value.service.setSecret({
@@ -730,7 +730,7 @@ test("custom clear 已确认停止 runtime 后即使 delete generation 变 stale
           await releaseStop.promise;
         },
       },
-      protocolValidator: async () => ({ parsedBy: "codex-0.149.0" }),
+      protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }),
     });
     const clearing = value.service.clearSecret({ providerId: saved.id });
     await stopStarted.promise;
@@ -779,7 +779,7 @@ test("OpenAI credential 加密轮换与清除不获取 Host，不调用 account 
       },
       async stop(runtimeProfileId) { stops.push(runtimeProfileId); },
     },
-    protocolValidator: async () => ({ parsedBy: "codex-0.149.0" }),
+    protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }),
   });
   const firstCanary = "openai-runtime-key-canary-00000001";
   const secondCanary = "openai-runtime-key-canary-00000002";
@@ -837,7 +837,7 @@ test("Provider secret API 拒绝旧版 runtimeProfileId 参数且不获取 Host"
         return { accountLoginApiKey: async () => ({ type: "apiKey" }), accountLogout: async () => ({}) };
       },
     },
-    protocolValidator: async () => ({ parsedBy: "codex-0.149.0" }),
+    protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }),
   });
   try {
     await value.service.save(input("openai-api-key"));
@@ -1040,7 +1040,7 @@ test("protocol validate 离线成功才写 protocol_valid；agent 即使 opt-in 
     assert.deepEqual(await value.service.validate({
       providerId: "provider-ollama", level: "protocol",
     }), {
-      providerId: "provider-ollama", validationStatus: "protocol_valid", parsedBy: "codex-0.149.0",
+      providerId: "provider-ollama", validationStatus: "protocol_valid", parsedBy: "codex-0.159.2",
     });
     await assert.rejects(
       value.service.validate({ providerId: "provider-ollama", level: "agent" }),
@@ -1180,7 +1180,7 @@ test("validation 仅确定性失败写 invalid；transient 与 stale 不覆盖�
       value.productStore.putModelProvider({
         ...provider, model: "fixture/concurrently-changed", validationStatus: "unverified",
       });
-      return { parsedBy: "codex-0.149.0" };
+      return { parsedBy: "codex-0.159.2" };
     };
     await assert.rejects(
       value.service.validate({ providerId: saved.id, level: "protocol" }),

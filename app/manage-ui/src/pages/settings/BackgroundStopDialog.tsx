@@ -25,7 +25,6 @@ export function BackgroundStopImpact({ impact }: { impact: ShoggothStopImpact })
       count: impact.totalCount! - impact.runs.length,
     })}</p>}
     {(impact.totalCount ?? 0) > 0 && <p className={styles.note}>{t("settings.stopImpactInterrupted")}</p>}
-    <p className={styles.note}>{t("settings.stopImpactRetained")}</p>
   </>;
 }
 

@@ -9,8 +9,9 @@ const root = path.resolve(__dirname, "..");
 const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
 (async () => {
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "native-cron-chat-preview-"));
-  const result = spawnSync(process.execPath, ["--test", "--test-name-pattern=scheduled cron", "scripts/native-cron-chat-unit.cjs"], {
-    cwd: root, env: { ...process.env, NATIVE_CRON_PREVIEW_DATA: path.join(output, "fixture-data.json") }, encoding: "utf8",
+  const silence = process.env.NATIVE_CRON_SILENCE === "1";
+  const result = spawnSync(process.execPath, ["--test", silence ? "--test-name-pattern=silent cron keeps" : "--test-name-pattern=scheduled cron", "scripts/native-cron-chat-unit.cjs"], {
+    cwd: root, env: { ...process.env, [silence ? "NATIVE_CRON_SILENT_PREVIEW_DATA" : "NATIVE_CRON_PREVIEW_DATA"]: path.join(output, "fixture-data.json") }, encoding: "utf8",
   });
   if (result.status !== 0) throw Error(result.stdout + result.stderr);
   await uiRequire("esbuild").build({ entryPoints: [path.join(__dirname, "fixtures/native-cron-chat.tsx")],

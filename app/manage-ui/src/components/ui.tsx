@@ -16,6 +16,7 @@ import {
   type RefObject,
 } from "react";
 import { Toast } from "@base-ui/react/toast";
+import { SYSTEM_ISSUE_KEYS } from "../lib/system-issues";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { useTranslation } from "react-i18next";
 import styles from "./ui.module.css";
@@ -112,14 +113,30 @@ export function UiProvider({ children }: { children: ReactNode }) {
 function UiInner({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
   const manager = Toast.useToastManager();
+  const lastSystemIssueAt = useRef(new Map<string, number>());
 
   const toast = useMemo(
     () => ({
       success: (text: string) => manager.add({ title: text, type: "success", timeout: 4200 }),
-      error: (text: string) => manager.add({ title: text, type: "error", timeout: 4200 }),
+      error: (text: string) => {
+        // The IPC notice and the failed request can reach UI together. Give
+        // known system issues one toast and enough time to read its next step.
+        const issue = Object.entries(SYSTEM_ISSUE_KEYS).find(([, key]) => text.includes(t(key)));
+        if (issue) {
+          const [code, key] = issue;
+          const at = Date.now();
+          const previous = lastSystemIssueAt.current.get(code);
+          if (previous !== undefined && at - previous < 30_000) return;
+          lastSystemIssueAt.current.set(code, at);
+          if (code === "STORAGE_FULL") manager.close("system-UI_RESOURCE_UNAVAILABLE");
+          manager.add({ id: `system-${code}`, title: t(key), type: "error", timeout: 8000 });
+          return;
+        }
+        manager.add({ title: text, type: "error", timeout: 4200 });
+      },
       info: (text: string) => manager.add({ title: text, type: "info", timeout: 4200 }),
     }),
-    [manager],
+    [manager, t],
   );
 
   const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);

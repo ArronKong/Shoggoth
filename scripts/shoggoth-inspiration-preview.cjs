@@ -15,10 +15,10 @@ const id = () => crypto.randomUUID();
 const terminal = new Set(['completed', 'failed', 'interrupted', 'canceled', 'skipped']);
 
 async function startPreview(port = 61805, { liveTrajectory = false } = {}) {
-  const f = await startInspirationFixture({ port, agentCount: 3, hostOps: { async openPath(file) {
+  const f = await startInspirationFixture({ port, agentCount: 3, hostOps: { async reveal(file) {
     const real = fs.realpathSync(file);
-    if (!real.startsWith(f.root + path.sep) || !fs.statSync(real).isFile()) return 'Only this preview’s artifacts can be opened';
-    return new Promise(resolve => execFile('/usr/bin/open', [real], { timeout: 10000 }, error => resolve(error ? 'Could not open preview artifact' : '')));
+    if (!real.startsWith(f.root + path.sep) || !fs.statSync(real).isFile()) return false;
+    return new Promise(resolve => execFile('/usr/bin/open', ['-R', real], { timeout: 10000 }, error => resolve(!error)));
   } } });
   try {
     const service = f.service;

@@ -17,7 +17,9 @@ const serve = process.argv.includes("--serve");
 const standalone = process.argv.includes("--standalone");
 const connections = process.argv.includes("--connections");
 const accounts = process.argv.includes("--accounts");
-const query = { ...(standalone ? { standalone: "1" } : {}), ...(connections ? { connections: "1" } : {}), ...(accounts ? { accounts: "1" } : {}) };
+const computer = process.argv.includes("--computer");
+const browser = process.argv.includes("--browser");
+const query = { ...(standalone ? { standalone: "1" } : {}), ...(connections ? { connections: "1" } : {}), ...(accounts ? { accounts: "1" } : {}), ...(computer ? { computer: "1" } : {}), ...(browser ? { browser: "1" } : {}) };
 // Optional read-only comparison against the version that reproduced the bug.
 const sourceRef = process.env.SETTINGS_LOCALE_SOURCE_REF;
 const readSource = (file) => sourceRef
@@ -64,27 +66,32 @@ const vm=require("node:vm"),assert=require("node:assert/strict");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{
   const w=new BrowserWindow({show:false,width:1440,height:1000,webPreferences:{backgroundThrottling:false,preload:${JSON.stringify(path.join(temp, "preload.cjs"))}}});
-  let passed=false,blockedReloads=0,reloads=0,menus=0;
+  let passed=false,blockedReloads=0,reloads=0,menus=0;const hostFailures=[];
   w.webContents.on("console-message",(_event,level,message)=>{if(level>=2)console.error(message);});
   w.webContents.on("will-prevent-unload",()=>blockedReloads++);
   let config={locale:"zh-CN",gatewayUrl:"ws://127.0.0.1:1",hermesMode:"local",hermesRemotes:[],disabledBackends:[]};
-  const context=vm.createContext({configStore:{read:()=>config},appliedConfig:config,appBackendRegistry:null,nativeTheme:{},buildMenu:()=>menus++,mainWindow:{webContents:{reload:()=>{reloads++;w.webContents.reload();}}}});
+  const context=vm.createContext({configStore:{read:()=>config},appliedConfig:config,appBackendRegistry:null,configApplyQueue:Promise.resolve(),nativeTheme:{},buildMenu:()=>menus++,mainWindow:{webContents:{reload:()=>{reloads++;w.webContents.reload();}}}});
   vm.runInContext(${JSON.stringify(hostFunctions)},context);
-  ipcMain.on("fixture:config-saved",(_e,next)=>{config=next;context.applyConfigChange();});
+  ipcMain.on("fixture:config-saved",(_e,next)=>{config=next;context.applyConfigChange().catch(error=>hostFailures.push(error));});
   try {
     await w.loadFile(${JSON.stringify(page)},{query:${JSON.stringify(query)}});
     let deadline;
     const result=await Promise.race([
-      w.webContents.executeJavaScript(${JSON.stringify(`window.${accounts ? "runModelAccountsFixture" : connections ? "runConnectionsFixture" : "runFixture"}().catch(error=>{console.error(error.stack);throw error;})`)},true),
+      w.webContents.executeJavaScript(${JSON.stringify(`window.${browser ? "runBrowserSettingsFixture" : accounts ? "runModelAccountsFixture" : connections ? "runConnectionsFixture" : "runFixture"}().catch(error=>{console.error(error.stack);throw error;})`)},true),
       new Promise((_resolve,reject)=>{deadline=setTimeout(()=>reject(Error("settings fixture deadline")),15_000);}),
     ]).finally(()=>clearTimeout(deadline));
+    await context.configApplyQueue;assert.deepEqual(hostFailures,[],"captured host config queue must settle without rejection");
     assert.equal(reloads,0,"preference saves and connection toggles must not reload settings");
     assert.equal(blockedReloads,0,"no document reload should be attempted");
     assert.equal(menus,${standalone ? "0" : "result.writes"},"native menus must still follow saved config");
     if (!${accounts}) {
     await w.loadFile(${JSON.stringify(page)},{query:${JSON.stringify(query)}});
     const persisted=await w.webContents.executeJavaScript("({lang:document.documentElement.lang,...window.fixtureConfig()})");
-    if (${connections}) {
+    if (${browser}) {
+      assert.deepEqual(persisted.browserUse,result.browserUse,"new document must load saved browser settings");
+      const visible=await w.webContents.executeJavaScript("[...document.querySelectorAll('#settings-browser-use [role=switch]')].map(node=>node.getAttribute('aria-checked'))");
+      assert.deepEqual(visible,["true","true","true"],"saved browser switches must survive document reload");
+    } else if (${connections}) {
       assert.deepEqual(persisted.disabledBackends,result.disabledBackends,"new document must load saved connection switches");
       assert.equal(persisted.gatewayUrl,"ws://127.0.0.1:9","corrected endpoint must auto-save");
     } else {

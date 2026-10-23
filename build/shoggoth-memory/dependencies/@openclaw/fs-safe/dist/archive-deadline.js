@@ -1,0 +1,101 @@
+import { scheduleTimeout } from "./timing.js";
+export async function ownExtractionDestinationMutation(deadline, run) {
+    return deadline ? await deadline.ownDestinationMutation(run) : await run();
+}
+function signalReason(signal, fallback) {
+    const reason = signal.reason;
+    return reason instanceof Error ? reason : fallback ?? new Error(String(reason));
+}
+function deadlineReason(deadline) {
+    return signalReason(deadline.signal);
+}
+export function createPipelineTimeoutError(err, deadline) {
+    if (deadline.signal.aborted &&
+        err instanceof Error &&
+        (err.name === "AbortError" || err.message === "The operation was aborted")) {
+        return deadlineReason(deadline);
+    }
+    return err;
+}
+export async function waitForDeadline(promise, deadline) {
+    // An elapsed synchronous check must not orphan a later operation rejection.
+    void promise.catch(() => undefined);
+    deadline.check();
+    if (deadline.signal.aborted) {
+        throw deadlineReason(deadline);
+    }
+    const result = await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            const abort = () => reject(deadlineReason(deadline));
+            deadline.signal.addEventListener("abort", abort, { once: true });
+            const cleanup = () => {
+                deadline.signal.removeEventListener("abort", abort);
+            };
+            promise.then(cleanup, cleanup);
+        }),
+    ]);
+    deadline.check();
+    return result;
+}
+function createDestinationMutationOwner(check) {
+    const active = new Set();
+    return {
+        ownDestinationMutation: async (run) => {
+            check();
+            const operation = Promise.resolve().then(() => { check(); return run(); });
+            active.add(operation);
+            try {
+                return await operation;
+            }
+            finally {
+                active.delete(operation);
+            }
+        },
+        waitForDestinationMutations: async () => {
+            while (active.size > 0) {
+                await Promise.allSettled(active);
+            }
+        },
+    };
+}
+function createExtractionDeadline(timeoutMs, label) {
+    const controller = new AbortController();
+    const timeoutError = new Error(`${label} timed out after ${timeoutMs}ms`);
+    const enabled = Number.isFinite(timeoutMs) && timeoutMs > 0;
+    const startedAt = enabled ? performance.now() : 0;
+    const check = () => {
+        if (enabled && !controller.signal.aborted && performance.now() - startedAt >= timeoutMs) {
+            controller.abort(timeoutError);
+        }
+        if (controller.signal.aborted) {
+            throw signalReason(controller.signal, timeoutError);
+        }
+    };
+    return {
+        signal: controller.signal,
+        check,
+        ...createDestinationMutationOwner(check),
+        dispose: enabled ? scheduleTimeout(() => controller.abort(timeoutError), timeoutMs) : () => undefined,
+    };
+}
+export async function withExtractionDeadline(timeoutMs, label, run) {
+    const deadline = createExtractionDeadline(timeoutMs, label);
+    const operation = Promise.resolve().then(() => { deadline.check(); return run(deadline); });
+    try {
+        try {
+            return await waitForDeadline(operation, deadline);
+        }
+        catch (error) {
+            if (deadline.signal.aborted && error === deadlineReason(deadline)) {
+                // Preserve prompt timeout settlement for non-mutating work, but never
+                // return while live destination publication or rollback is still owned.
+                await deadline.waitForDestinationMutations();
+            }
+            throw error;
+        }
+    }
+    finally {
+        deadline.dispose();
+    }
+}

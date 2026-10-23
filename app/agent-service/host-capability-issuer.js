@@ -56,6 +56,16 @@ class HostCapabilityIssuer {
       || record.replies.size >= 1024) throw invalid();
     record.replies.add(requestId);
   }
+  inspectReply(lease, requestId, { kind, sessionId, turnId }) {
+    const record = this.#records.get(lease);
+    let active = !!record && !record.controller.signal.aborted && this.now() < record.expiresAt
+      && record.grants.has(kind) && !record.replies.has(requestId)
+      && record.bindings?.sessionId === sessionId && record.bindings?.turnId === turnId;
+    try { active = active && record.validate(record.identity) === true; } catch { active = false; }
+    // A reminder may inspect authority without revoking it, consuming a reply,
+    // cancelling the original request or extending its lifetime.
+    return { active, expiresAt: record?.expiresAt ?? null };
+  }
   revoke(lease) {
     const record = this.#records.get(lease);
     if (!record || record.controller.signal.aborted) return false;

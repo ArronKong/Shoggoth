@@ -320,7 +320,7 @@ main.content {
 .page.management-page,
 .page:has(> .cron-page.management-page) {
   min-height: 100%;
-  padding: 36px 40px 32px;
+  padding: 36px var(--page-inset-right) 32px 0;
   background: var(--ui-canvas);
 }
 
@@ -366,11 +366,10 @@ header.page-head {
   letter-spacing: 0;
 }
 
-/* CLI 页壳没有 .management-page 类（同上），左右内边距因此还停在全局 .page 的
-   20px，标题左起点是 84 而不是 104；这里补齐，与其它页同列。 */
+/* CLI 页壳没有 .management-page 类；同样使用统一的页面左右留白。 */
 .page.cli-page {
-  padding-left: 40px;
-  padding-right: 40px;
+  padding-left: 0;
+  padding-right: var(--page-inset-right);
 }
 
 /* 副标题里的统计条自带字号/颜色会顶掉上面那份，一律拉回继承。 */
@@ -395,9 +394,11 @@ header.page-head {
 
 /* Tasks：看板只在自身形成横向画布，列与卡片保持清晰、轻量的层级。 */
 .management-page.tasks-page {
+  --page-inset-right: calc(var(--page-edge-right) - 2 * var(--ui-scrollbar-track-size, 12px));
   min-width: 0;
   max-width: 100%;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
 }
 
 .management-page.tasks-page .kanban {
@@ -917,9 +918,12 @@ header.page-head {
 .management-page.models-page,
 .management-page.skills-page,
 .management-page.agents-page {
+  /* overflow-x:hidden 也会建立纵向滚动容器；两层滚动槽都计入总右距。 */
+  --page-inset-right: calc(var(--page-edge-right) - 2 * var(--ui-scrollbar-track-size, 12px));
   min-width: 0;
   max-width: 100%;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
 }
 
 /* Models：辅助模型区已随 per-agent 设置面搬到 pages/agents/（样式随组件 CSS Module 走）。 */
@@ -1195,6 +1199,12 @@ header.page-head {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+.management-page.skills-page .skill-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 /* 第二行：说明占满，开关贴右下。开关自带点击拦截（stopPropagation）。 */
@@ -1492,12 +1502,6 @@ header.page-head {
 }
 
 @media (max-width: 960px) {
-  .page.management-page,
-  .page:has(> .cron-page.management-page) {
-    padding-right: 24px;
-    padding-left: 24px;
-  }
-
   .management-page.tasks-page .kanban-col {
     flex-basis: 280px;
     min-width: 280px;
@@ -1536,7 +1540,7 @@ header.page-head {
 @media (max-width: 720px) {
   .page.management-page,
   .page:has(> .cron-page.management-page) {
-    padding: 24px 20px;
+    padding: 24px var(--page-inset-right) 24px 0;
   }
 
   .management-page .page-head {

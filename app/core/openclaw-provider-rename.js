@@ -27,7 +27,10 @@ function profileRef(value, from, to) {
 
 // Only model-bearing config fields are rewritten. Prompts, transcripts, URLs,
 // model IDs inside provider definitions, and usage history are never rewritten.
-function configReferences(parsed, from, to) {
+// renameAuth=false leaves auth.profiles/auth.order alone: with the official
+// credential RPC the new provider gets its own saved key and binding, and the
+// old provider's profiles are logged out (which drops their metadata).
+function configReferences(parsed, from, to, { renameAuth = true } = {}) {
   const replacePaths = [];
   function visit(value, key, at) {
     if (["model", "imageModel", "pdfModel"].includes(key)) {
@@ -77,7 +80,7 @@ function configReferences(parsed, from, to) {
     const next = diff(parsed[key], visit(parsed[key], key, key), key);
     if (next) patch[key] = next;
   }
-  if (parsed.auth) {
+  if (renameAuth && parsed.auth) {
     const auth = structuredClone(parsed.auth);
     if (auth.profiles) {
       for (const [id, item] of Object.entries(auth.profiles)) {
@@ -177,15 +180,26 @@ async function renameProvider(backend, spec, fields, secretEnvelope, context = {
   // same scan only returns references that have not moved yet.
   const references = await listFutureReferences(backend);
   const canonical = backend._usesCanonicalModelAuthCli();
+  // With the official credential RPC the new provider gets one saved key bound
+  // by models.authSetApiKey and the old provider's keys are removed by
+  // models.authLogout, the same channel as the official Model Providers page.
+  const viaGateway = canonical && await backend._usesGatewayCredentialRpc();
   const suppliedKey = String(secretEnvelope?.apiKey || "").trim();
   const auth = canonical ? await backend._readProviderRenameAuth(from, to, suppliedKey, spec.patch.clearApiKey, resumed) : [];
   const entry = { ...(providers[from] || providers[to]), ...fields };
   for (const [key, value] of Object.entries(entry)) if (value === null) delete entry[key];
+  let configKey = "";
   if (entry.apiKey !== undefined) {
     // config.get redacts keys. Read the local value only within this backend;
     // it never enters the journal, endpoint snapshot, or a diagnostic message.
     entry.apiKey = await backend._providerRenameConfigKey(from, to, entry.apiKey);
     if (entry.apiKey === undefined || suppliedKey || spec.patch.clearApiKey) delete entry.apiKey;
+    else if (viaGateway && typeof entry.apiKey === "string") {
+      // A profile binding still names the old provider and an inline key moves
+      // into the credential store; either way the staged entry is bound below.
+      if (!entry.apiKey.includes(":")) configKey = entry.apiKey.trim();
+      delete entry.apiKey;
+    }
   }
   const fingerprints = { ...(context.journalEntry?.fingerprints || {}),
     providerRename: { from, to, digest: renameDigest(entry), sourceDigest: previous?.sourceDigest || renameDigest(providers[from]) } };
@@ -218,20 +232,45 @@ async function renameProvider(backend, spec, fields, secretEnvelope, context = {
     return { patchProviders: { [to]: entry }, replacePaths,
       patchExtra: Object.keys(agents).length ? { agents } : {} };
   }, { beforeWrite: () => context.assertProviderLease?.() });
-  if (canonical) await backend._copyProviderRenameAuth(auth, from, to, context);
+  let credentialRestartRequired = false;
+  if (viaGateway) {
+    // The staged provider exists now, so the saved key binds to it as a connection.
+    const key = spec.patch.clearApiKey ? "" : renameKey(auth, suppliedKey, configKey, backend._modelAuthAgentId());
+    if (key) {
+      context.assertProviderLease?.();
+      const saved = await backend._saveProviderApiKeyViaGateway(to, key);
+      credentialRestartRequired ||= saved?.restartRequired === true;
+    }
+  } else if (canonical) await backend._copyProviderRenameAuth(auth, from, to, context);
   const availableModels = new Set((entry.models || []).map(model => model.id));
   await migrateFutureReferences(backend, references, from, to, context, availableModels);
   const result = await backend._configOnlyRenameProvider(from, to, fields, {
-    staged: true, clearMirroredKey: Boolean(suppliedKey) || spec.patch.clearApiKey === true,
+    // The official binding lives in openclaw.json; a mirrored `profile:<id>:default`
+    // reference would name a profile that no longer exists.
+    staged: true, clearMirroredKey: viaGateway || Boolean(suppliedKey) || spec.patch.clearApiKey === true,
     sourceDigest: fingerprints.providerRename.sourceDigest, targetDigest: fingerprints.providerRename.digest,
-    beforeWrite: () => context.assertProviderLease?.(),
+    beforeWrite: () => context.assertProviderLease?.(), renameAuthConfig: !viaGateway,
   });
   // Catch choices made while the initial snapshot was being migrated.
   await migrateFutureReferences(backend, await listFutureReferences(backend), from, to, context, availableModels);
   if (!canonical && suppliedKey) await backend._writeAuthProfileKey(to, suppliedKey);
   if (!canonical && spec.patch.clearApiKey) await backend._dropAuthProfileKeyQuietly(to);
-  if (canonical) await backend._finishProviderRenameAuth(auth, from, to, context);
-  return { ...result, restart: stagedInfo?.restart === true || result?.restart === true };
+  if (viaGateway) {
+    context.assertProviderLease?.();
+    const cleared = await backend._clearProviderApiKeysViaGateway(from);
+    credentialRestartRequired ||= cleared?.restartRequired === true;
+  } else if (canonical) await backend._finishProviderRenameAuth(auth, from, to, context);
+  return { ...result, restart: credentialRestartRequired || stagedInfo?.restart === true || result?.restart === true };
+}
+
+// The renamed provider gets one shared key: the key typed in this edit, the old
+// inline key, or the old provider's owner-Agent key (older Shoggoth versions
+// copied the same key into every Agent).
+function renameKey(auth, suppliedKey, configKey, ownerAgent) {
+  if (suppliedKey) return suppliedKey;
+  if (configKey) return configKey;
+  const keys = auth.filter(row => row.type === "api_key" && typeof row.key === "string" && row.key.trim());
+  return (keys.find(row => row.agent === ownerAgent) || keys[0])?.key.trim() || "";
 }
 
 module.exports = { renameProvider, renameDigest, configReferences, modelRef, profileRef, listFutureReferences, migrateFutureReferences };

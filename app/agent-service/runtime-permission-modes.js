@@ -2,6 +2,20 @@
 
 const { serviceError } = require("./security");
 
+// These IDs are deliberately distinct from every legacy CLI mode. Old saved
+// sessions and frozen recovery contracts retain their original restrictions.
+const CHAT_PERMISSION_MODES = Object.freeze({
+  ask: "request-approval", auto: "auto-review", full: "full-access",
+});
+const CHAT_MODE_OPTIONS = Object.freeze([
+  Object.freeze({ id: CHAT_PERMISSION_MODES.ask, label: "Request approval",
+    description: "Ask you when an action needs approval.", risk: "standard" }),
+  Object.freeze({ id: CHAT_PERMISSION_MODES.auto, label: "Approve for me",
+    description: "Review actions automatically and ask you when needed.", risk: "elevated" }),
+  Object.freeze({ id: CHAT_PERMISSION_MODES.full, label: "Full access",
+    description: "Allow broad access to files, network, and tools.", risk: "danger", requiresConfirmation: true }),
+]);
+
 const MODE_CATALOGS = Object.freeze({
   codex: Object.freeze([
     Object.freeze({ id: "read-only", label: "Read only", description: "Read files without changing the workspace.", risk: "safe" }),
@@ -47,7 +61,59 @@ function catalogFor(runtime) {
 }
 
 function runtimePermissionModeOptions(runtime) {
-  return (catalogFor(runtime) || []).map((option) => ({ ...option }));
+  const workspaceExecution = ["antigravity", "pi", "opencode", "deepseek-harness"].includes(runtime);
+  return catalogFor(runtime) ? CHAT_MODE_OPTIONS.map((option) => ({ ...option,
+    ...(workspaceExecution && option.id === CHAT_PERMISSION_MODES.auto ? {
+      description: "Automatically run workspace files and commands in a sandbox; ask before wider access.",
+    } : {}),
+  })) : [];
+}
+
+function isUnifiedPermissionMode(mode) {
+  return Object.values(CHAT_PERMISSION_MODES).includes(mode);
+}
+
+function initialRuntimePermissionMode(runtime) {
+  // Only creation uses this default. Saved session choices and legacy profile
+  // policies continue through resolveRuntimePermissionMode unchanged.
+  return catalogFor(runtime) ? CHAT_PERMISSION_MODES.auto : null;
+}
+
+// Adapter-facing IDs remain native to each integration; the public selection
+// stays unchanged when the conversation switches Runtime.
+function adapterPermissionMode(runtime, mode) {
+  if (!isUnifiedPermissionMode(mode)) return mode;
+  const index = Object.values(CHAT_PERMISSION_MODES).indexOf(mode);
+  const modes = {
+    codex: ["ask", "auto-review", "full"],
+    "claude-code": ["default", "auto", "bypassPermissions"],
+    "grok-build": ["ask", "auto", "always-approve"],
+    antigravity: ["ask", "auto-review", "full"],
+    pi: ["ask", "auto-review", "full"],
+    opencode: ["ask", "auto-review", "full"],
+    "deepseek-harness": ["workspace-write", "workspace-write", "danger-full-access"],
+  };
+  return modes[runtime]?.[index] ?? mode;
+}
+
+function unifiedPermission(runtime, mode) {
+  const full = mode === CHAT_PERMISSION_MODES.full;
+  const nativeMode = {
+    codex: full ? "full" : mode === CHAT_PERMISSION_MODES.auto ? "auto_review" : "ask",
+    "claude-code": adapterPermissionMode(runtime, mode),
+    "grok-build": full ? "bypassPermissions" : mode === CHAT_PERMISSION_MODES.auto ? "auto" : "default",
+    // ACP currently exposes default/auto_edit/yolo. Keep its approval gate
+    // open and review in Shoggoth instead of claiming auto_edit is auto review.
+    antigravity: full ? "yolo" : "default",
+    pi: full ? "full" : "ask",
+    opencode: "ask",
+    "deepseek-harness": full ? "danger-full-access" : "workspace-write",
+  }[runtime];
+  return Object.freeze({ mode, nativeMode, permissionPolicy: policy(
+    full && !["codex", "opencode"].includes(runtime) ? "never" : "on-request",
+    // OpenCode's gate is an application permission policy, not an OS sandbox.
+    runtime === "opencode" || full ? "danger-full-access" : "workspace-write",
+  ) });
 }
 
 function defaultRuntimePermissionMode(runtime, permissionPolicy = {}) {
@@ -90,6 +156,7 @@ function resolveRuntimePermissionMode(runtime, requestedMode, profilePermissionP
     });
   }
   const mode = requestedMode || defaultRuntimePermissionMode(runtime, profilePermissionPolicy);
+  if (isUnifiedPermissionMode(mode)) return unifiedPermission(runtime, mode);
   if (!catalog.some((option) => option.id === mode)) {
     throw serviceError("CHAT_SESSION_PERMISSION_INVALID", `Unsupported permission mode for ${runtime}`);
   }
@@ -103,7 +170,8 @@ function resolveRuntimePermissionMode(runtime, requestedMode, profilePermissionP
       mode,
       nativeMode,
       permissionPolicy: policy(
-        profilePermissionPolicy.approvalPolicy,
+        runtime === "codex" && profilePermissionPolicy.approvalPolicy === "never"
+          ? "on-request" : profilePermissionPolicy.approvalPolicy,
         profilePermissionPolicy.sandbox,
       ),
     });
@@ -141,13 +209,21 @@ function resolveRuntimePermissionMode(runtime, requestedMode, profilePermissionP
       permissionPolicy: policy("on-request", "danger-full-access") });
   }
   if (mode === "read-only") return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("on-request", "read-only") });
-  if (mode === "full") return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("never", "danger-full-access") });
-  if (mode === "workspace-auto") return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("never", "workspace-write") });
+  // Codex also uses the approval policy for MCP elicitation. "never" rejects
+  // the helper's internal call-binding proof before it reaches Coordinator.
+  // Keep the selected sandbox and let Coordinator validate the proof.
+  const automaticApproval = runtime === "codex" ? "on-request" : "never";
+  if (mode === "full") return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy(automaticApproval, "danger-full-access") });
+  if (mode === "workspace-auto") return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy(automaticApproval, "workspace-write") });
   return Object.freeze({ mode, nativeMode: mode, permissionPolicy: policy("on-request", "workspace-write") });
 }
 
 module.exports = {
+  CHAT_PERMISSION_MODES,
+  adapterPermissionMode,
   defaultRuntimePermissionMode,
+  initialRuntimePermissionMode,
+  isUnifiedPermissionMode,
   resolveRuntimePermissionMode,
   runtimePermissionModeOptions,
 };

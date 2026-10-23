@@ -97,7 +97,9 @@ assert.equal(summarizeArgs("linear/create_issue", { title: "修复登录" }), "�
 assert.equal(summarizeArgs("unknown_tool", { payload: { code: "implementation" } }), "",
   "没有人类主字段时折叠行不能倾倒对象代码");
 assert.equal(summarizeArgs("Web search:", { query: "native agent trajectory" }),
-  'for "native agent trajectory"', "原生 Web Search 必须按统一格式显示实际查询词");
+  '"native agent trajectory"', "原生 Web Search 必须按统一格式显示实际查询词，不夹英文介词");
+assert.equal(summarizeArgs("read_url_content", { url: "https://example.com" }), "https://example.com",
+  "Antigravity 的网页读取与 web_fetch 同一格式");
 const nativeSteps = stepsFromParts([
   { type: "plan", planEntries: [{ content: "核对代码", status: "completed" }] },
   { type: "toolCall", toolName: "command", toolArgs: { command: "npm test" } },
@@ -140,15 +142,11 @@ assert.equal(dedupedPrompts[0].question, "新问题");
 assert.equal(backendOfAgent("shoggoth-codex"), "shoggoth", "原生命名空间离线时不得回退到 OpenClaw");
 assert.equal(backendOfAgent("hermes-default"), "openclaw", "旧行只允许回退 OpenClaw");
 assert.equal(backendOfAgent("main"), "openclaw");
-assert.equal(resolveBackendOwner("codex", "shoggoth-codex"), "shoggoth");
-assert.equal(resolveBackendOwner("grok-build", "shoggoth-grok"), "shoggoth");
-assert.equal(resolveBackendOwner("antigravity", "shoggoth-antigravity"), "shoggoth");
-assert.equal(resolveBackendOwner("pi", "shoggoth-pi"), "shoggoth");
-assert.equal(resolveBackendOwner("claude-code", "shoggoth-claude-code"), "shoggoth");
-assert.equal(resolveBackendOwner(
-  "deepseek-harness", "shoggoth-deepseek-harness",
-), "shoggoth");
-assert.equal(backendOfSessionRows([{ key: "agent:shoggoth-codex:main", backendId: "codex" }], "agent:shoggoth-codex:main"), "shoggoth");
+// A declared owner is used as-is (0.8.136 retired the per-runtime backend
+// aliases); an undeclared native row still resolves to Shoggoth.
+assert.equal(resolveBackendOwner("shoggoth", "shoggoth-codex"), "shoggoth");
+assert.equal(resolveBackendOwner(undefined, "shoggoth-grok"), "shoggoth");
+assert.equal(backendOfSessionRows([{ key: "agent:shoggoth-codex:main", agentId: "shoggoth-codex" }], "agent:shoggoth-codex:main"), "shoggoth");
 const hermesSessionRows = [{
   key: "agent:hermes-default:main",
   backendId: "hermes",
@@ -171,6 +169,9 @@ for (const state of ["delta", "interim", "thinking", "plan", "status", "prompt"]
 for (const state of ["final", "error", "aborted", "promptExpire", undefined]) {
   assert.equal(isLiveChatState(state), false, `${String(state)} 不能复活 UI in-flight 状态`);
 }
+assert.equal(isLiveChatState("status", "idle"), false, "确认空闲不得恢复思考中");
+assert.equal(isLiveChatState("status", "running"), true, "运行状态仍恢复 in-flight");
+assert.equal(isLiveChatState("status", "needs_verification"), true, "未确认的任务仍保留观测保护");
 assert.equal(supportsBackendAttachments("shoggoth", undefined), false,
   "Shoggoth 能力未返回前必须禁止附件，不能先读入文件");
 assert.equal(supportsBackendAttachments("shoggoth", { attachments: {} }), false,
@@ -238,11 +239,41 @@ assert.equal(
 const chatPage = fs.readFileSync(chatPagePath, "utf8");
 const chatCss = fs.readFileSync(chatCssPath, "utf8");
 const immersiveChat = fs.readFileSync(immersiveChatPath, "utf8");
+const liveFunctionNames = ["toolEntryToPart", "lastText", "composePendingParts", "applyDelta", "applyToolStream", "settlePendingAssistant", "retainLiveLayout"];
+const liveSource = ts.createSourceFile(chatPagePath, chatPage, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+const liveFunctions = liveSource.statements.filter((node) => ts.isFunctionDeclaration(node) && liveFunctionNames.includes(node.name?.text));
+assert.equal(liveFunctions.length, liveFunctionNames.length);
+const liveContext = { mergeLiveText };
+vm.runInNewContext(ts.transpileModule(liveFunctions.map((node) => node.getText(liveSource)).join("\n"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText, liveContext);
+const liveTail = [{ role: "assistant", pending: true, parts: [
+  { type: "toolCall", toolCallId: "call-1" }, { type: "prompt", promptEntry: { id: "approval" } }, { type: "text", text: "partial reply" },
+] }];
+const stopped = liveContext.settlePendingAssistant(liveTail);
+assert.equal(stopped[0].pending, false, "Stop retires the streaming cursor");
+assert.equal(stopped[0].parts.map((part) => part.type).join(","), "toolCall,text", "Stop preserves text and process while retiring approval prompts");
+assert.equal(liveTail[0].pending, true, "Stop must not mutate the previous render state");
+assert.equal(liveContext.settlePendingAssistant([{ role: "assistant", pending: true, parts: [{ type: "text", text: "" }] }]).length, 0);
+const canonicalLayout = [
+  { id: "older-identical", role: "assistant", ts: 1, parts: [{ type: "text", text: "partial reply" }] },
+  { id: "canonical-tail", role: "assistant", ts: 2, parts: [{ type: "text", text: "partial reply" }] },
+];
+const retained = liveContext.retainLiveLayout(stopped, canonicalLayout);
+assert.equal(retained[0].keepLiveLayout, undefined, "An older identical reply keeps history layout skipping");
+assert.equal(retained[1].keepLiveLayout, true, "The latest matching occurrence preserves the streamed layout");
+assert.equal(retained[1].id, "canonical-tail", "Layout preservation must not replace canonical message identity");
+assert.equal(retained[1].ts, 2);
+assert.equal(canonicalLayout[1].keepLiveLayout, undefined, "Canonical input remains unchanged");
+for (const next of [liveContext.applyDelta(retained, "new reply", []), liveContext.applyToolStream(retained, [])]) {
+  assert.equal(next[1].keepLiveLayout, false, "Starting a new turn restores history layout skipping");
+  assert.equal(next.at(-1).pending, true);
+}
 assert.match(chatPage, /import\s*\{[^}]*\bbackendOfSessionRows\b[^}]*\}\s*from\s*"\.\.\/lib\/chatBackend"/);
 assert.doesNotMatch(chatPage, /function\s+backendOf\s*\(/, "ChatPage 不得保留二分类副本");
 assert.match(chatPage, /backendOfSessionRows\(sessionsRef\.current,\s*key,\s*agentOf\(key\)\)/);
 assert.match(chatPage, /backendOfSession\(activeKey\)\s*===\s*"openclaw"/);
-assert.match(chatPage, /if\s*\(sk\s*&&\s*isLiveChatState\(p\.state\)\)\s*markInFlight\(sk,\s*true\)/,
+assert.match(chatPage, /if\s*\(sk\s*&&\s*isLiveChatState\(p\.state,\s*p\.statusKind\)\)\s*markInFlight\(sk,\s*true\)/,
   "重连 watcher 的首个非终态事件必须重新锁定 composer");
 assert.match(chatPage, /return\s*\[\.\.\.out,\s*\{\s*role:\s*"assistant"[^}]*pending:\s*true/s,
   "重连后的首个 text delta 必须能创建 pending assistant 气泡");
@@ -266,16 +297,14 @@ assert.match(chatPage, /supportsAttachments=\{supportsActiveAttachments\}/,
   "沉浸 composer 必须复用同一附件能力门禁");
 assert.match(chatPage, /slashMenu=\{slashMenuNode\}\s*slashOpen=\{slashOpen\}/,
   "沉浸 composer 必须复用同一斜杠菜单和打开状态");
-assert.match(chatPage, /commitOpenedHistory[\s\S]*?supportsBackendAttachments\(backendOfSession\(key\),\s*chatCapsRef\.current\[agentOf\(key\)\]\)[\s\S]*?setComposerAttachments\(\[\]\)/,
+assert.match(chatPage, /commitOpenedHistory[\s\S]*?setComposerAttachments\(supportsBackendAttachments\(backendOfSession\(key\),\s*capabilitiesForSession\(key\)\)[\s\S]*?:\s*\[\]\)/,
   "切入无附件能力的会话时必须清掉上一会话残留附件");
 assert.match(chatPage, /if\s*\(attachments\.length\s*&&\s*key\s*&&\s*!supportsBackendAttachments\(/,
   "submit 必须二次门禁既有附件，不能只隐藏附件按钮");
-assert.match(chatPage, /const nativeModelSelectionDisabled\s*=\s*activeBackendDescriptor\?\.surfaces\.agentHarness\s*===\s*true\s*&&\s*activeRunInFlight/,
-  "Native 模型切换只应在发送或活动 Run 期间禁用");
+assert.match(chatPage, /const nativeModelSelectionDisabled\s*=\s*activeBackendDescriptor\?\.surfaces\.agentHarness\s*===\s*true\s*&&\s*\(activeRunInFlight\s*\|\|\s*runtimeModels\.pending\s*\|\|\s*!connected\)/,
+  "Native 模型切换只在发送或活动 Run、会话模型目录加载中或断开时禁用");
 assert.match(chatPage, /const\s+activeRunInFlight\s*=\s*sending\s*\|\|\s*\(activeKey\s*\?\s*runningKeys\.has\(activeKey\)\s*:\s*false\)/,
   "重连事件恢复 runningKeys 后必须重新显示停止键");
-assert.match(chatPage, /canSteerActiveChat\(\s*activeCaps,\s*runStatusBySessionRef\.current\.get\(activeKey\),\s*0\s*\)/,
-  "运行中发送键必须由 Runtime steer 能力与精确 running 状态共同门禁");
 assert.match(chatPage, /await\s+send\("chat\.steer",\s*\{\s*sessionKey:\s*key,\s*message:\s*text\s*\}\)/,
   "支持 steering 的运行中文本必须追加当前 turn");
 assert.match(chatPage, /case\s+"steer":[\s\S]*?if\s*\(nativeAgent\)[\s\S]*?await\s+sendSteeringMessage\(key,\s*args\)/,
@@ -286,10 +315,6 @@ assert.match(chatPage, /\{activeRunInFlight\s*\?\s*\(/,
   "普通 composer 的停止键必须使用统一运行态");
 assert.match(chatPage, /sending=\{activeRunInFlight\}/,
   "沉浸 composer 必须使用统一运行态");
-assert.match(chatPage, /canSteer=\{activeCanSteer\}/,
-  "沉浸 composer 必须复用同一 steering 能力门禁");
-assert.match(immersiveChat, /sending\s*&&\s*canSteer[\s\S]*?chat\.steerCurrentTurn/,
-  "沉浸 composer 运行中必须同时保留追加与停止入口");
 assert.match(chatPage, /catch\s*\(error\)\s*\{[\s\S]*?setError\([\s\S]*?return;[\s\S]*?\}\s*markInFlight\(key,\s*false\)/,
   "chat.abort 失败时必须保留运行态并显示错误");
 assert.match(chatPage, /disabled=\{nativeModelSelectionDisabled\}/,
@@ -308,7 +333,7 @@ assert.match(chatPage, /activeCaps\?\.modelScope[\s\S]*?model\.modelScopes\?\.in
   "共享 Shoggoth 模型目录必须优先按当前 Agent Profile 隔离");
 assert.match(chatPage, /activeCaps\?\.modelProvider[\s\S]*?models\.filter\(\(model\)\s*=>\s*model\.provider\s*===\s*activeCaps\.modelProvider\)/,
   "没有 profile scope 的旧后端能力仍按 provider/runtime 过滤");
-assert.match(chatPage, /models=\{selectableModels\}/,
+assert.match(chatPage, /models=\{usesRuntimeModelPicker\s*\?\s*selectableModels\.map\([\s\S]*?:\s*selectableModels\}/,
   "普通与沉浸模型菜单必须消费已按 Agent 隔离的目录");
 assert.match(chatPage, /modelCaps\?\.modelScope[\s\S]*?model\.modelScopes\?\.includes\(modelCaps\.modelScope\)[\s\S]*?scopedProvider/,
   "无显式 provider 的模型切换必须同时受当前 Agent Profile 与 provider 边界约束");

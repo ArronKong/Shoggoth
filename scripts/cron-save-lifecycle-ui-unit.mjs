@@ -21,9 +21,12 @@ vm.runInNewContext(compile("lib/lowUiLifecycle.ts"), { exports: lifecycle.export
 const visibility = { exports: {} };
 vm.runInNewContext(compile("lib/cronVisibility.ts"), { exports: visibility.exports });
 const scheduleDisplay = { exports: {} };
+const codexSchedule = { exports: {} };
+vm.runInNewContext(compile("lib/codexAutomationSchedule.ts"), { exports: codexSchedule.exports, require, Intl, Date });
 vm.runInNewContext(compile("pages/cron/cronPresets.tsx"), {
   exports: scheduleDisplay.exports, Intl, Date,
-  require: name => name.endsWith("/Field") || name === "react-i18next" ? {} : require(name),
+  require: name => name === "../../lib/codexAutomationSchedule" ? codexSchedule.exports
+    : name.endsWith("/Field") || name === "react-i18next" ? {} : require(name),
 });
 const pageCode = compile("pages/CronPage.tsx");
 const flush = () => new Promise(setImmediate);
@@ -77,6 +80,8 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "./cron/CronRunHistoryPanel": host("run-history"),
     "./cron/cronPresets": scheduleDisplay.exports,
     "./cron/OpenClawCronForm": form,
+    "./cron/CodexCronForm": { __esModule: true, default: host("codex-form"), emptyCodexCronDraft: () => ({}) },
+    "./cron/CodexCronRunResult": host("codex-result"),
     "./cron/CronCreateForm": { __esModule: true, default: host("create-form") },
     "./cron/cronCreateDraft": {
       emptyCronCreateDraft: () => ({ name: "", prompt: "", backendId: "", agentId: "", enabled: true }),
@@ -154,7 +159,8 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   ];
   const heartbeat = { ...jobs[2], id: "heartbeat", name: "heartbeat-vincent", nextRunAt: now + 60000,
     lastStatus: "error", payload: { kind: "heartbeat" } };
-  const f = await fixture(undefined, [heartbeat, ...visibleJobs]);
+  const desktop = { ...heartbeat, id: "desktop", name: "Desktop schedule", origin: "codex-desktop", payload: { kind: "agentTurn" } };
+  const f = await fixture(undefined, [heartbeat, desktop, ...visibleJobs]);
   assert.deepEqual(f.renderer.root.findAllByProps({ className: "job-name" }).map(node => node.children[0]), ["A", "System"],
     "cached heartbeat jobs must be hidden on the first list render");
   assert.deepEqual(Array.from(f.renderer.root.findByType("header").props.subtitle.props.children, node => node.props.children),
@@ -166,7 +172,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   assert.equal(calendar.props.nextUp.id, "A", "the next-run highlight must skip earlier heartbeats");
   assert.equal(f.state.updates.length + f.state.creates.length, 0);
   f.dispose();
-  const empty = await fixture(undefined, [heartbeat]);
+  const empty = await fixture(undefined, [heartbeat, desktop]);
   assert.equal(empty.renderer.root.findAllByProps({ className: "empty-hint" }).length, 1,
     "a heartbeat-only list shows the normal empty state");
   empty.dispose();

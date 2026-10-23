@@ -115,12 +115,7 @@ assert.doesNotMatch(
 assert.match(
   pageSource,
   /case "new":[\s\S]{0,3000}send\("sessions\.create",\s*\{[\s\S]{0,500}parentSessionKey:\s*key/,
-  "/new 必须把当前会话作为继承来源",
-);
-assert.match(
-  pageSource,
-  /case "new":[\s\S]{0,1800}surfaces\.agentHarness === true[\s\S]{0,3000}nativeSession && workspace[\s\S]{0,100}\{ workspace \}/,
-  "显式 /new [workspace] 仍必须覆盖原生 Agent 的工作区",
+  "/new 必须保留当前会话关联及模型选择",
 );
 assert.match(
   proxySource,
@@ -130,7 +125,7 @@ assert.match(
 assert.match(
   backendSource,
   /async createSession\(agentId, options = \{\}\)[\s\S]{0,500}_sessionTarget\(options\.parentSessionKey\)[\s\S]{0,300}workspace === undefined[\s\S]{0,200}parent\.session\.workspace/,
-  "Shoggoth 后端必须先校验来源会话，再在裸 /new 时继承工作区",
+  "Shoggoth 后端必须校验来源会话，并保留未指定 workspace 的 API 继承语义",
 );
 assert.match(
   pageSource,
@@ -148,4 +143,53 @@ assert.doesNotMatch(
   "ChatPage 的 /new 模型 hints 不得特判 Hermes",
 );
 
-console.log("chat-new-session-recovery-regression: native slash recovery passed");
+// Execute the production /new branch so null (Agent default) cannot silently
+// become an omitted workspace (parent inheritance) in the actual request.
+const pageAst = ts.createSourceFile("ChatPage.tsx", pageSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+let newClause;
+const findNew = node => {
+  if (ts.isCaseClause(node) && ts.isStringLiteral(node.expression) && node.expression.text === "new") newClause = node;
+  ts.forEachChild(node, findNew);
+};
+findNew(pageAst);
+assert.ok(newClause, "必须能执行真实 /new 分支");
+const handlerSource = ts.transpileModule(
+  `globalThis.runNew = async (key, args) => { ${newClause.statements.map(node => node.getText(pageAst)).join("\n")} };`,
+  { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
+).outputText;
+for (const [backendId, native, args, expectedWorkspace] of [
+  ["shoggoth", true, "", null],
+  ["codex", true, "   ", null],
+  ["deepseek-harness", true, "  /tmp/日常工作区 with spaces  ", "/tmp/日常工作区 with spaces"],
+  ["openclaw", false, "", undefined],
+  ["hermes", false, "", undefined],
+]) {
+  const key = `agent:${backendId}-fixture:parent`, newKey = `agent:${backendId}-fixture:fresh`;
+  const active = { model: "fixture-model", modelProvider: "fixture-provider" };
+  const requests = [], registered = [], opened = [], toasts = [];
+  const context = {
+    agentOf: () => `${backendId}-fixture`, backendOfSession: () => backendId,
+    chatBackendDescriptors: new Map([[backendId, { surfaces: { agentHarness: native } }]]),
+    models: [], active, modelsBackendRef: { current: backendId }, inheritedModelChoice: () => undefined,
+    setToast: value => toasts.push(value), t: value => value,
+    pushLocal: () => assert.fail("/new 不应要求输入工作区或报告缺失 key"),
+    send: async (method, params) => { requests.push({ method, params }); return { payload: { key: newKey } }; },
+    ensureSessionRow: rowKey => registered.push(rowKey),
+    openSession: rowKey => { assert.deepEqual(registered, [rowKey]); opened.push(rowKey); },
+    setTimeout: () => {},
+  };
+  vm.runInNewContext(handlerSource, context);
+  assert.equal(await context.runNew(key, args), true);
+  assert.equal(requests.length, 1, "/new 只创建一次会话，不发送模型请求");
+  const [{ method, params }] = requests;
+  assert.equal(method, "sessions.create");
+  assert.equal(params.parentSessionKey, key);
+  assert.equal(params.workspace, expectedWorkspace, `${backendId}: 裸 /new 必须明确使用 Agent 默认目录`);
+  assert.equal(Object.hasOwn(params, "workspace"), native, "外部后端继续使用其原有创建契约");
+  assert.equal(params.model, active.model);
+  assert.equal(params.modelProvider, active.modelProvider);
+  assert.deepEqual(opened, [newKey]);
+  assert.equal(toasts.at(-1).kind, "success");
+}
+
+console.log("chat-new-session-recovery-regression: native slash recovery and workspace defaults passed");

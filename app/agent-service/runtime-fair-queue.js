@@ -2,10 +2,10 @@
 
 // Capacity and per-conversation FIFO are checked by admission, not by this
 // ordering policy. Blocked candidates do not consume a scheduling credit.
-const DEFAULT_WEIGHTS = Object.freeze({ chat: 4, kanban: 2, cron: 1, inspiration: 1, compaction: 1 });
+const DEFAULT_WEIGHTS = Object.freeze({ chat: 4, kanban: 2, cron: 1, inspiration: 1, compaction: 1, proactive: 1 });
 class RuntimeFairQueue {
   constructor({ weights = DEFAULT_WEIGHTS, agingMs = 120_000, now = Date.now } = {}) {
-    if (!Number.isSafeInteger(agingMs) || agingMs < 1 || Object.keys(weights).length !== 5
+    if (!Number.isSafeInteger(agingMs) || agingMs < 1 || Object.keys(weights).length !== Object.keys(DEFAULT_WEIGHTS).length
       || Object.keys(DEFAULT_WEIGHTS).some(source => !Number.isInteger(weights[source])
         || weights[source] < 1 || weights[source] > 16)) throw new Error("Invalid fair queue policy");
     this.weights = Object.freeze({ ...weights });

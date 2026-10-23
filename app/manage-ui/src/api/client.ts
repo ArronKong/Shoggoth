@@ -2,6 +2,7 @@ import type {
   InteractiveApprovalChoice,
   DesktopProductTelemetryBridge,
   UnifiedCronJob,
+  CodexAutomationSource, CodexAutomationModel, CodexAutomationRunResult,
   ChatCapabilities,
   ChatCacheScope,
   SlashCatalogResponse,
@@ -16,6 +17,8 @@ import type {
   ModelCatalogWireResponse,
   ModelChangeCapabilities,
   PendingModelChange,
+  ModelChangeOperation,
+  PendingModelOperationIdentities,
   ModelChangeSpec,
   ModelChangePreview,
   ModelChangeApplyResult,
@@ -31,6 +34,8 @@ import type {
   ProviderCredential,
   ProviderDirectory,
   EnvVar,
+  OAuthLoginProviderOption,
+  OAuthLoginTarget,
   OAuthProvidersSnapshot,
   OAuthStartSession,
   UnifiedSkill,
@@ -110,8 +115,11 @@ import type {
   BackendRunDetail,
   ShoggothRunDetail,
 } from "../types";
+import { fetchMemoryProviderOwnerDto, validateMemoryProviderOwnerContext, validateMemoryProviderOwnerMutation, validateMemoryProviderOwnerProfileId, validateMemoryProviderOwnerReceipt, validateMemoryProviderOwnerRecovery } from './memoryProviderOwnerDto';
 import { isVisibleCronJob } from "../lib/cronVisibility";
 import { isVisibleRuntime } from "../lib/runtimeVisibility";
+import i18n from "i18next";
+import { publishSystemIssue } from "../lib/system-issues";
 
 // All management calls go to the loopback REST plane served by static-server.js.
 // Same origin as the embedding iframe, so relative paths just work.
@@ -158,7 +166,7 @@ export class ApiError extends Error {
 }
 
 // 所有 JSON 请求共用结构化错误映射，调用方可以稳定定位字段与阶段。
-async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
+export async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const text = await res.text();
   let data: unknown = {};
@@ -194,13 +202,17 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
         }];
       })
       : undefined;
-    const msg = typeof source.error === "string" ? source.error : `HTTP ${res.status}`;
+    const storageFull = source.systemIssue === "STORAGE_FULL"
+      || ["ENOSPC", "EDQUOT", "SQLITE_FULL", "STORAGE_FULL"].includes(typeof source.code === "string" ? source.code : "");
+    const msg = storageFull ? i18n.t("common.diskFull")
+      : typeof source.error === "string" ? source.error : `HTTP ${res.status}`;
+    if (storageFull) publishSystemIssue("STORAGE_FULL");
     throw new ApiError(msg, {
       status: res.status,
       ...(typeof source.code === "string" ? { code: source.code } : {}),
       ...(typeof source.stage === "string" ? { stage: source.stage } : {}),
       ...(typeof source.field === "string" ? { field: source.field } : {}),
-      ...(Object.prototype.hasOwnProperty.call(source, "details") ? { details: source.details } : {}),
+      ...(Object.hasOwn(source, "details") ? { details: source.details } : {}),
       ...(safeBlockers ? { safeBlockers } : {}),
       ...(typeof source.canForce === "boolean" ? { canForce: source.canForce } : {}),
       ...(safeReferences ? { safeReferences } : {}),
@@ -222,7 +234,7 @@ export interface CronListFilters {
   query?: string;
   agentIds?: string[];
   enabled?: "all" | "enabled" | "disabled";
-  scheduleKind?: "all" | "cron" | "every" | "at" | "on-exit" | "stream";
+  scheduleKind?: "all" | "cron" | "every" | "at" | "on-exit" | "stream" | "rrule";
   lastStatus?: string;
   sortBy?: "nextRunAt" | "lastRunAt" | "name";
   sortDir?: "asc" | "desc";
@@ -274,19 +286,19 @@ export async function getCronJobDetail(id: string): Promise<UnifiedCronJob> {
   return job;
 }
 
-export async function setCronEnabled(id: string, enabled: boolean): Promise<void> {
+export async function setCronEnabled(id: string, enabled: boolean, revision?: string): Promise<void> {
   await jsonFetch<{ job: UnifiedCronJob }>(jobUrl(id), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify({ enabled, revision }),
   });
 }
 
-export async function runCronJob(id: string, mode: "force" | "due" = "force"): Promise<void> {
+export async function runCronJob(id: string, mode: "force" | "due" = "force", options?: { revision?: string; operationId?: string }): Promise<void> {
   await jsonFetch<{ job: UnifiedCronJob | null }>(jobUrl(id, "run"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ mode, ...options }),
   });
 }
 
@@ -335,6 +347,29 @@ export async function getCronRunTrajectory(id: string, sessionKey: string, runId
 export async function getCronLatestDelivery(id: string, atMs?: number): Promise<CronDelivery> {
   const at = typeof atMs === "number" ? `&at=${Math.round(atMs)}` : "";
   return jsonFetch<CronDelivery>(`${jobUrl(id, "delivery")}${at}`);
+}
+
+export async function runCodexAutomation(id: string, revision: string, operationId: string): Promise<{ runId: string; status: string; executionOrigin: "shoggoth" }> {
+  const { job } = await jsonFetch<{ job: { runId: string; status: string; executionOrigin: "shoggoth" } }>(jobUrl(id, "run"),
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "force", revision, operationId }) });
+  return job;
+}
+export function getCodexAutomationSource(backend = "shoggoth"): Promise<CodexAutomationSource> {
+  return jsonFetch(`/__api/cron/codex?backend=${encodeURIComponent(backend)}`);
+}
+export function getCodexAutomationModels(backend = "shoggoth"): Promise<{ models: CodexAutomationModel[]; defaultModelId: string | null }> {
+  return jsonFetch(`/__api/cron/codex/models?backend=${encodeURIComponent(backend)}`);
+}
+export function getCronRunsPage(id: string, filters: CronRunsFilters = {}): Promise<{ runs: CronRun[]; nextOffset: number | null; sourceError?: string | null }> {
+  const qs = new URLSearchParams({ id, action: "runs" }); appendSearchParams(qs, { ...filters });
+  return jsonFetch(`${BASE}?${qs}`);
+}
+export function getCodexCronRunResult(id: string, runId: string): Promise<CodexAutomationRunResult> {
+  return jsonFetch(`${jobUrl(id, "result")}&runId=${encodeURIComponent(runId)}`);
+}
+export function controlCodexCronRun(id: string, input: { runId: string; operationId: string; action: "stop" | "approval" | "input" | "cancel-input";
+  requestId: string | null; choice: string | null; answers: Record<string, string> }): Promise<{ accepted: boolean; status: string }> {
+  return jsonFetch(jobUrl(id, "control"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
 }
 
 // Model catalog for one backend (the 模型 tab-switch page).
@@ -403,11 +438,11 @@ export async function setModelAuthProfileKey(
   backend: string,
   provider: string,
   apiKey: string,
-): Promise<{ ok: boolean; id: string; activation?: { kind: string; available?: boolean } | null }> {
+): Promise<ModelChangeApplyResult | { ok: boolean; id: string; activation?: { kind: string; available?: boolean } | null }> {
   return jsonFetch(`/__api/models/auth-profiles?backend=${encodeURIComponent(backend)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider, apiKey }),
+    body: JSON.stringify({ provider, apiKey, operationId: `auth:${crypto.randomUUID()}` }),
   });
 }
 
@@ -417,6 +452,17 @@ export async function deleteModelAuthProfile(
 ): Promise<{ ok: boolean; id: string; activation?: { kind: string; available?: boolean } | null }> {
   return jsonFetch(
     `/__api/models/auth-profiles?backend=${encodeURIComponent(backend)}&id=${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** 清除 Provider API Key；官方配置模式按选定 Agent 范围执行。 */
+export async function clearModelAuthProviderKeys(
+  backend: string,
+  provider: string,
+): Promise<ModelChangeApplyResult | { ok: boolean; provider: string; removed?: number; activation?: { kind: string; available?: boolean } | null }> {
+  return jsonFetch(
+    `/__api/models/auth-profiles?backend=${encodeURIComponent(backend)}&provider=${encodeURIComponent(provider)}&operationId=${encodeURIComponent(`auth:${crypto.randomUUID()}`)}`,
     { method: "DELETE" },
   );
 }
@@ -435,6 +481,116 @@ export async function getPendingModelChanges(backend: string): Promise<PendingMo
     `/__api/models/config/pending?backend=${encodeURIComponent(backend)}`,
   );
   return Array.isArray(response.operations) ? response.operations : [];
+}
+
+/** Closed, bounded journal identities; failure never means an empty pending list. */
+export async function getPendingModelOperationIdentities(backend: string): Promise<PendingModelOperationIdentities> {
+  const invalid = () => new ApiError("Pending model operations could not be verified.", {
+    status: 502, code: "model_pending_identities_invalid",
+  });
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  if (!safeId.test(backend)) throw invalid();
+  let response: unknown;
+  try { response = await jsonFetch<unknown>(`/__api/models/config/pending-identities?backend=${encodeURIComponent(backend)}`); }
+  catch { throw new ApiError("Pending model operation observation is unavailable.", {
+    status: 503, code: "model_pending_identities_unavailable",
+  }); }
+  const closed = (value: unknown, required: string[], optional: string[] = []): value is Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
+    const keys = Reflect.ownKeys(value);
+    return required.every((key) => keys.includes(key)) && keys.every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return typeof key === "string" && [...required, ...optional].includes(key)
+        && descriptor?.enumerable === true && Object.hasOwn(descriptor, "value");
+    });
+  };
+  if (!closed(response, ["version", "backendId", "operations"]) || response.version !== 1
+    || response.backendId !== backend || !Array.isArray(response.operations) || response.operations.length > 512) throw invalid();
+  const seen = new Set<string>();
+  const operations: PendingModelOperationIdentities["operations"] = response.operations.map((operation: unknown) => {
+    if (!closed(operation, ["operationId", "providerKey", "status", "stage"], ["code"])
+      || typeof operation.operationId !== "string" || !safeId.test(operation.operationId)
+      || typeof operation.providerKey !== "string" || operation.providerKey.length > 128
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(operation.providerKey)
+      || typeof operation.status !== "string" || !["in_progress", "partial", "blocked", "needs_secret", "cleanup_pending"].includes(operation.status)
+      || typeof operation.stage !== "string" || !safeId.test(operation.stage)
+      || (Object.hasOwn(operation, "code") && (typeof operation.code !== "string" || !safeId.test(operation.code)))
+      || seen.has(operation.operationId)) throw invalid();
+    seen.add(operation.operationId);
+    return Object.freeze({ operationId: operation.operationId, providerKey: operation.providerKey,
+      status: operation.status as PendingModelOperationIdentities["operations"][number]["status"], stage: operation.stage,
+      ...(typeof operation.code === "string" ? { code: operation.code } : {}),
+    });
+  });
+  return Object.freeze({ version: 1, backendId: backend, operations });
+}
+
+/** Validate a closed receipt for the exact original identity; never use a requested-ID fallback. */
+function parseModelChangeOperation(response: unknown, backend: string, operationId: string, providerKey: string): ModelChangeOperation {
+  const invalid = () => new ApiError("Model operation receipt could not be verified.", {
+    status: 502, code: "model_operation_response_invalid",
+  });
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  if (!response || typeof response !== "object" || Array.isArray(response)
+    || Object.getPrototypeOf(response) !== Object.prototype) throw invalid();
+  const required = ["version", "backendId", "operationId", "providerKey", "status", "stage", "terminal"];
+  const keys = Reflect.ownKeys(response);
+  if (keys.some((key) => typeof key !== "string" || ![...required, "code"].includes(key))
+    || required.some((key) => !keys.includes(key))) throw invalid();
+  const value: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(response, key);
+    if (!descriptor || !Object.hasOwn(descriptor, "value") || descriptor.enumerable !== true) throw invalid();
+    value[key as string] = descriptor.value;
+  }
+  const terminal = ["applied", "failed", "compensated"].includes(String(value.status));
+  const statuses = ["applied", "failed", "compensated", "in_progress", "partial", "blocked", "needs_secret", "cleanup_pending", "not_found"];
+  if (value.version !== 1 || value.backendId !== backend || value.operationId !== operationId
+    || value.providerKey !== providerKey || typeof value.status !== "string" || !statuses.includes(value.status)
+    || value.terminal !== terminal || typeof value.stage !== "string" || !safeId.test(value.stage)
+    || (keys.includes("code") && (typeof value.code !== "string" || !safeId.test(value.code)))) throw invalid();
+  // Construct a new DTO so no unverified field or original parsed object escapes.
+  return Object.freeze({ version: 1, backendId: backend, operationId, providerKey,
+    status: value.status, stage: value.stage, terminal,
+    ...(typeof value.code === "string" ? { code: value.code } : {}),
+  }) as ModelChangeOperation;
+}
+
+async function requestOriginalModelOperation(backend: string, operationId: string, providerKey: string,
+  action: "" | "recover" | "abandon"): Promise<ModelChangeOperation> {
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  if (!safeId.test(backend) || !safeId.test(operationId) || providerKey.length > 128
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(providerKey)) throw new ApiError("Model operation identity could not be verified.", {
+      status: 502, code: "model_operation_response_invalid",
+    });
+  let response: unknown;
+  try {
+    response = await jsonFetch<unknown>(
+      `/__api/models/config/operation${action ? `/${action}` : ""}?${new URLSearchParams({ backend, operationId, provider: providerKey })}`,
+      action ? { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" } : undefined,
+    );
+  } catch (error) {
+    // Unverified response text/details can never provide an original receipt.
+    throw new ApiError("Model operation observation is unavailable.", {
+      status: error instanceof ApiError ? error.status : 0, code: "model_operation_observation_failed",
+    });
+  }
+  return parseModelChangeOperation(response, backend, operationId, providerKey);
+}
+
+/** Journal-only observation: no retry, credential recovery or writer resume. */
+export function getModelChangeOperation(backend: string, operationId: string, providerKey: string): Promise<ModelChangeOperation> {
+  return requestOriginalModelOperation(backend, operationId, providerKey, "");
+}
+
+/** Explicit recovery of an existing operation; no new ID, specification or secret. */
+export function recoverModelChangeOperation(backend: string, operationId: string, providerKey: string): Promise<ModelChangeOperation> {
+  return requestOriginalModelOperation(backend, operationId, providerKey, "recover");
+}
+
+/** 用户显式放弃停在半路的原操作：结论记为失败，不回滚已写入的配置，不发送 spec 或密钥。 */
+export function abandonModelChangeOperation(backend: string, operationId: string, providerKey: string): Promise<ModelChangeOperation> {
+  return requestOriginalModelOperation(backend, operationId, providerKey, "abandon");
 }
 
 // 保存前先预览真实引用与 blocker，返回的 token 与当前指纹绑定。
@@ -491,8 +647,20 @@ async function legacyModelMutation(
   return {
     ...rest,
     operationId: result.operationId || requestedOperationId,
+    receiptIdentityVerified: !!requestedOperationId && result.operationId === requestedOperationId,
     ...(catalog ? { catalog: toModelCatalogSnapshot(backend, catalog) } : {}),
   };
+}
+
+export async function saveModelProviderDraft(backend: string, input: {
+  providerKey: string; models: string[]; baseUrl?: string; api?: string; apiKey?: string;
+  renameTo?: string; baseHash?: string; agentId?: string; credentialScope?: "provider";
+  advanced?: Record<string, unknown>;
+}, operationId: string): Promise<ModelChangeApplyResult> {
+  return legacyModelMutation(backend, `/__api/models/config/draft?backend=${encodeURIComponent(backend)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...input, operationId }),
+  }, operationId);
 }
 
 // Active model(s) per scope (agent/profile). byScope maps agentId → modelId.
@@ -727,6 +895,10 @@ type DesktopSecretBridge = {
   getComputerPermissions?: () => Promise<DesktopSecretEnvelope<{
     accessibility: boolean; screenRecording: boolean;
   }>>;
+  getComputerState?: () => Promise<DesktopSecretEnvelope<import("../types").AgentComputerState>>;
+  getBrowserState?: () => Promise<DesktopSecretEnvelope<import("../types").BrowserUseState>>;
+  reloadComputerPermissions?: () => Promise<DesktopSecretEnvelope<import("../types").AgentComputerState>>;
+  openComputerAccessibilitySettings?: () => Promise<DesktopSecretEnvelope<{ opened: boolean }>>;
   requestComputerPermissions?: () => Promise<DesktopSecretEnvelope<{
     accessibility: boolean; screenRecording: boolean;
   }>>;
@@ -763,11 +935,11 @@ export async function revealModelProviderKey(
   return result.value;
 }
 // 更新 provider 的端点字段（apiKey 留空 = 不改；clearBaseUrl = 移除端点覆盖；
-// renameTo = provider 整体改名,引用与凭证由后端同步迁移）。
+// renameTo = provider 整体改名；引用与凭证语义由后端能力决定）。
 export async function updateModelProvider(
   backend: string,
   providerKey: string,
-  patch: { baseUrl?: string; apiKey?: string; api?: string; clearBaseUrl?: boolean; clearApiKey?: boolean; renameTo?: string },
+  patch: { baseUrl?: string; apiKey?: string; api?: string; clearBaseUrl?: boolean; clearApiKey?: boolean; renameTo?: string; agentId?: string; credentialScope?: "provider"; baseHash?: string },
   operationId?: string,
 ): Promise<ModelChangeApplyResult> {
   return legacyModelMutation(backend, `/__api/models/config?backend=${encodeURIComponent(backend)}`, {
@@ -892,8 +1064,15 @@ export function getProviderDirectory(backend: string): Promise<ProviderDirectory
 export function disconnectOAuthProvider(backend: string, provider: string, profile?: string) {
   return oauthPost<{ ok: boolean; warnings?: string[] }>(backend, "disconnect", { provider, profile });
 }
-export function startOAuthLogin(backend: string, provider: string, profile?: string) {
-  return oauthPost<OAuthStartSession>(backend, "start", { provider, profile });
+// flow "providers" passes the chosen model provider, sign-in method and inputs.
+export function startOAuthLogin(backend: string, provider: string, profile?: string, target?: OAuthLoginTarget) {
+  return oauthPost<OAuthStartSession>(backend, "start", { provider, profile, ...(target ? { target } : {}) });
+}
+export function listOAuthLoginOptions(backend: string, provider: string) {
+  return oauthPost<{ providers: OAuthLoginProviderOption[] }>(backend, "options", { provider });
+}
+export function saveOAuthApiKey(backend: string, provider: string, target: OAuthLoginTarget, key: string) {
+  return oauthPost<{ ok: boolean }>(backend, "apikey", { provider, target, key });
 }
 export function submitOAuthCode(
   backend: string,
@@ -910,7 +1089,11 @@ export function submitOAuthCode(
   });
 }
 export function pollOAuthSession(backend: string, provider: string, sessionId: string, profile?: string) {
-  return oauthPost<{ status: string; errorMessage: string }>(backend, "poll", { provider, sessionId, profile });
+  // browser flow: the sign-in page may arrive later (authUrl), with the step it
+  // is on and whether the runtime already opened the browser itself.
+  return oauthPost<{ status: string; errorMessage: string; authUrl?: string | null; stage?: string | null;
+    browserOpened?: boolean; instructions?: string | null; codeRequired?: boolean }>(backend, "poll",
+    { provider, sessionId, profile });
 }
 export function cancelOAuthSession(backend: string, sessionId: string, profile?: string) {
   return oauthPost<{ ok: boolean }>(backend, "cancel", { sessionId, profile });
@@ -948,8 +1131,9 @@ export interface PluginCatalogComponent {
   componentId: string;
   kind: "skill" | "mcp-server";
   title: string;
-  state: "ready" | "installed_inactive" | "connection_required" | "permission_required";
-  transport?: "stdio" | "streamable-http";
+  state: "ready" | "installed_inactive" | "connection_required" | "permission_required" | "secret_required";
+  transport?: "stdio" | "streamable-http" | "shoggoth-graph"
+    | "shoggoth-gogcli-gmail-mcp" | "shoggoth-codex-security-native";
 }
 
 export interface PluginCatalogItem {
@@ -957,7 +1141,7 @@ export interface PluginCatalogItem {
   revision: number;
   packageName: string;
   declaredVersion: string | null;
-  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled";
+  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled" | "first-party";
   desiredState: "enabled" | "disabled";
   components: PluginCatalogComponent[];
   diagnosticCount: number;
@@ -983,8 +1167,18 @@ export async function getPluginCatalogPage(
   return page;
 }
 
+export interface PluginSelectionReadiness { version: 1; supported: boolean }
+export async function getPluginSelectionReadiness(backend: string, agent: string,
+  sessionKey: string): Promise<PluginSelectionReadiness> {
+  const qs = new URLSearchParams({ backend, agent, sessionKey });
+  const result = await jsonFetch<PluginSelectionReadiness>(`/__api/plugins/selection-readiness?${qs}`);
+  if (!result || Object.keys(result).length !== 2 || result.version !== 1
+    || typeof result.supported !== "boolean") throw new Error("Plugin selection readiness unavailable");
+  return result;
+}
+
 export interface PluginInstallPreview {
-  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled";
+  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled" | "first-party";
   previewDigest: string;
   expectedRevision: number;
   specVersion: string;
@@ -993,7 +1187,8 @@ export interface PluginInstallPreview {
   installable: boolean;
   components: {
     skills: Array<{ name: string; description: string; descriptorDigest: string }>;
-    mcpServers: Array<{ name: string; type: "stdio" | "streamable-http";
+    mcpServers: Array<{ name: string; type: "stdio" | "streamable-http" | "shoggoth-graph"
+      | "shoggoth-gogcli-gmail-mcp" | "shoggoth-codex-security-native";
       descriptorDigest: string }>;
   };
   diagnostics: Array<{ scope: string; name?: string; reasonCode: string }>;
@@ -1042,7 +1237,8 @@ export interface PluginOAuthFlow {
 }
 export interface PluginDisconnectReceipt {
   kind: "mcp-disconnect"; profileId: string; bindingId: string; revision: number;
-  connectionId: string; affectedBindings: number; credentialDisposition: "none" | "retained_encrypted_unusable";
+  connectionId: string; affectedBindings: number;
+  credentialDisposition: "none" | "retained_encrypted_unusable" | "retained_encrypted_shared";
   cleanupStatus: "complete" | "pending"; reasonCode: string | null;
 }
 export interface PluginDisconnectRequest {
@@ -1112,6 +1308,269 @@ export function connectPluginBearer(input: { agentId: string; installationId: st
       toolIdentity: null; revision: number } | null }> {
   return jsonFetch("/__api/plugins/bearer-connect", { method: "POST", body: JSON.stringify(input) });
 }
+// One-confirmation plugin enable and `${secret:NAME}` credentials. Values are
+// write-only: reads return names, configured flags and where a value is used.
+export type PluginSetupState = "ready" | "secret_required" | "activation_required" | "unsupported"
+  | "interpreter_unavailable" | "connection_failed";
+export interface PluginSetupComponent {
+  componentId: string;
+  name: string;
+  transport: string;
+  target: string;
+  interpreter: "node" | "python" | null;
+  interpreterReady: boolean | null;
+  secrets: { name: string; configured: boolean }[];
+  state: PluginSetupState;
+  reason: string | null;
+  tools: number | null;
+  granted: number;
+  eachCallTools?: string[];
+}
+export interface PluginSetup {
+  installationId: string;
+  packageName: string;
+  declaredVersion: string | null;
+  releaseDigest: string;
+  desiredState: "enabled" | "disabled";
+  revision: number;
+  skills: number;
+  components: PluginSetupComponent[];
+  nextSteps: string[];
+}
+export interface PluginActivation {
+  installationId: string;
+  packageName: string;
+  desiredState: "enabled" | "disabled";
+  components: PluginSetupComponent[];
+  nextSteps: string[];
+}
+export interface PluginSecretDestination {
+  component: string;
+  kind: "env" | "header";
+  key: string;
+  origin?: string;
+}
+export interface PluginSecrets {
+  installationId: string;
+  packageName: string;
+  items: { name: string; configured: boolean; destinations: PluginSecretDestination[] }[];
+}
+export interface PluginSecretChange {
+  installationId: string;
+  name: string;
+  configured: boolean;
+  components: { name: string; state: string; reason?: string }[];
+  nextSteps: string[];
+}
+export function getPluginSetup(agentId: string, installationId: string): Promise<PluginSetup> {
+  return jsonFetch(`/__api/plugins/setup?${new URLSearchParams({ agentId, installationId })}`);
+}
+export function activatePlugin(input: { agentId: string; installationId: string; expectedRevision: number }): Promise<{
+  canceled: boolean; result: PluginActivation | null }> {
+  return jsonFetch("/__api/plugins/setup", { method: "POST", body: JSON.stringify(input) });
+}
+export function getPluginSecrets(agentId: string, installationId: string): Promise<PluginSecrets> {
+  return jsonFetch(`/__api/plugins/secrets?${new URLSearchParams({ agentId, installationId })}`);
+}
+export function setPluginSecret(input: { agentId: string; installationId: string; name: string; value: string | null }): Promise<{
+  canceled: boolean; result: PluginSecretChange | null }> {
+  return jsonFetch("/__api/plugins/secrets", { method: "POST", body: JSON.stringify(input) });
+}
+// Plugins shipped with the App (resources/shoggoth-plugins). Installed ones are
+// part of the installed catalog; one the user uninstalled can be reinstalled.
+export interface FirstPartyPlugin {
+  packageId: string;
+  name: string;
+  version: string | null;
+  description: string;
+  installationId: string | null;
+  installationState: "enabled" | "disabled" | "uninstalled" | "not-installed";
+}
+export function getFirstPartyPlugins(): Promise<{ items: FirstPartyPlugin[] }> {
+  return jsonFetch("/__api/plugins/first-party");
+}
+export function installFirstPartyPlugin(packageId: string): Promise<{ canceled: boolean;
+  installation: { installationId: string; desiredState: "enabled" | "disabled" } | null }> {
+  return jsonFetch("/__api/plugins/first-party-install", { method: "POST", body: JSON.stringify({ packageId }) });
+}
+export interface PluginZoomRegistrationStatus {
+  configured: boolean;
+  restartRequired: boolean;
+}
+export function getPluginZoomRegistrationStatus(): Promise<PluginZoomRegistrationStatus> {
+  return jsonFetch("/__api/plugins/zoom-registration-status", { method: "POST", body: "{}" });
+}
+export function configurePluginZoomRegistration(input: { clientId: string; clientSecret: string;
+  redirectPort: number; scopes: string[] }): Promise<PluginZoomRegistrationStatus> {
+  return jsonFetch("/__api/plugins/zoom-registration-configure", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export interface PluginDropboxRegistrationStatus {
+  configured: boolean;
+  restartRequired: boolean;
+}
+export function getPluginDropboxRegistrationStatus(): Promise<PluginDropboxRegistrationStatus> {
+  return jsonFetch("/__api/plugins/dropbox-registration-status", { method: "POST", body: "{}" });
+}
+export function configurePluginDropboxRegistration(input: { clientId: string; clientSecret: string;
+  redirectPort: number }): Promise<PluginDropboxRegistrationStatus> {
+  return jsonFetch("/__api/plugins/dropbox-registration-configure", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export interface PluginGraphRegistrationStatus {
+  configured: boolean;
+  restartRequired: boolean;
+}
+export interface PluginGraphRegistrationReceipt extends PluginGraphRegistrationStatus {
+  canceled: boolean;
+}
+export function getPluginGraphRegistrationStatus(): Promise<PluginGraphRegistrationStatus> {
+  return jsonFetch("/__api/plugins/graph-registration-status", { method: "POST", body: "{}" });
+}
+export function configurePluginGraphRegistration(input: { clientId: string }):
+  Promise<PluginGraphRegistrationReceipt> {
+  return jsonFetch("/__api/plugins/graph-registration-configure", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export interface PluginLovableRegistrationStatus {
+  configured: boolean;
+  restartRequired: boolean;
+  needsVerification: boolean;
+}
+export interface PluginLovableRegistrationReceipt extends PluginLovableRegistrationStatus {
+  canceled: boolean;
+}
+export function getPluginLovableRegistrationStatus(): Promise<PluginLovableRegistrationStatus> {
+  return jsonFetch("/__api/plugins/lovable-registration-status", { method: "POST", body: "{}" });
+}
+export function configurePluginLovableRegistration(input: { redirectPort: number }):
+  Promise<PluginLovableRegistrationReceipt> {
+  return jsonFetch("/__api/plugins/lovable-registration-configure", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export function reconcilePluginLovableRegistration(): Promise<PluginLovableRegistrationReceipt> {
+  return jsonFetch("/__api/plugins/lovable-registration-reconcile", {
+    method: "POST", body: JSON.stringify({ reviewedRemoteOutcome: true }),
+  });
+}
+export interface PluginHiggsfieldRegistrationStatus {
+  configured: boolean;
+  restartRequired: boolean;
+  needsVerification: boolean;
+}
+export interface PluginHiggsfieldRegistrationReceipt extends PluginHiggsfieldRegistrationStatus {
+  canceled: boolean;
+}
+export function getPluginHiggsfieldRegistrationStatus(): Promise<PluginHiggsfieldRegistrationStatus> {
+  return jsonFetch("/__api/plugins/higgsfield-registration-status", { method: "POST", body: "{}" });
+}
+export function configurePluginHiggsfieldRegistration(input: { redirectPort: number }):
+  Promise<PluginHiggsfieldRegistrationReceipt> {
+  return jsonFetch("/__api/plugins/higgsfield-registration-configure", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export function reconcilePluginHiggsfieldRegistration(): Promise<PluginHiggsfieldRegistrationReceipt> {
+  return jsonFetch("/__api/plugins/higgsfield-registration-reconcile", {
+    method: "POST", body: JSON.stringify({ reviewedRemoteOutcome: true }),
+  });
+}
+export type PluginSlackAccessProfile = "public-search" | "workspace-read" | "workspace-write";
+export interface PluginSlackRegistrationStatus {
+  configured: boolean;
+  restartRequired: boolean;
+  accessProfile: PluginSlackAccessProfile | null;
+}
+export interface PluginSlackRegistrationReceipt {
+  canceled: boolean;
+  configured: boolean;
+  restartRequired: boolean;
+}
+export function getPluginSlackRegistrationStatus(): Promise<PluginSlackRegistrationStatus> {
+  return jsonFetch("/__api/plugins/slack-registration-status", { method: "POST", body: "{}" });
+}
+export function configurePluginSlackRegistration(input: { clientId: string; redirectPort: number;
+  scopes: string[] }): Promise<PluginSlackRegistrationReceipt> {
+  return jsonFetch("/__api/plugins/slack-registration-configure", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export interface PluginGmailRegistrationStatus {
+  configured: boolean;
+  restartRequired: boolean;
+  runtimeAvailable: boolean;
+  reasonCode: string | null;
+}
+export interface PluginGmailRegistrationReceipt extends PluginGmailRegistrationStatus {
+  canceled: boolean;
+}
+export function getPluginGmailRegistrationStatus(): Promise<PluginGmailRegistrationStatus> {
+  return jsonFetch("/__api/plugins/gmail-registration-status", { method: "POST", body: "{}" });
+}
+export function configurePluginGmailRegistration(): Promise<PluginGmailRegistrationReceipt> {
+  return jsonFetch("/__api/plugins/gmail-registration-configure", {
+    method: "POST", body: "{}",
+  });
+}
+export interface PluginGmailCapabilitiesStatus {
+  revision: number;
+  writeEnabled: boolean;
+  sendEnabled: boolean;
+  deleteEnabled: false;
+}
+export interface PluginGmailCapabilitiesReceipt extends PluginGmailCapabilitiesStatus {
+  canceled: boolean;
+}
+export function getPluginGmailCapabilitiesStatus(): Promise<PluginGmailCapabilitiesStatus> {
+  return jsonFetch("/__api/plugins/gmail-capabilities-status", { method: "POST", body: "{}" });
+}
+export function configurePluginGmailCapabilities(input: { expectedRevision: number;
+  writeEnabled: boolean; sendEnabled: boolean }): Promise<PluginGmailCapabilitiesReceipt> {
+  return jsonFetch("/__api/plugins/gmail-capabilities-configure", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export interface PluginGmailAuthFlow {
+  flowId: string;
+  status: "pending" | "verifying" | "ready" | "failed" | "canceled";
+  expiresAt: number;
+  reasonCode: string | null;
+  bindingId: string | null;
+  receipt: { kind: "mcp-connect"; profileId: string; bindingId: string;
+    toolIdentity: null; revision: number } | null;
+}
+export function startPluginGmailAuth(input: { agentId: string; installationId: string;
+  componentId: string; expectedRevision: number; operationId: string; email: string }): Promise<{
+    canceled: boolean; flow: PluginGmailAuthFlow | null }> {
+  return jsonFetch("/__api/plugins/gmail-auth-start", { method: "POST", body: JSON.stringify(input) });
+}
+export function getPluginGmailAuth(agentId: string, flowId: string, cancel = false): Promise<PluginGmailAuthFlow> {
+  return jsonFetch(`/__api/plugins/gmail-auth-${cancel ? "cancel" : "status"}`, {
+    method: "POST", body: JSON.stringify({ agentId, flowId }),
+  });
+}
+export interface PluginGmailAuthRecoveryContext {
+  agentId: string;
+  installationId: string;
+  componentId: string;
+  expectedRevision: number;
+}
+export function getPluginGmailAuthRecoveryStatus(input: PluginGmailAuthRecoveryContext): Promise<{
+  pending: { email: string; client: string } | null }> {
+  return jsonFetch("/__api/plugins/gmail-auth-recovery-status", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+export function reconcilePluginGmailAuth(input: PluginGmailAuthRecoveryContext & { email: string }): Promise<{
+  canceled: boolean; recovered: boolean }> {
+  return jsonFetch("/__api/plugins/gmail-auth-reconcile", {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
 export function selectPluginAccount(input: { agentId: string; bindingId: string;
   connectionId: string; expectedRevision: number; operationId: string }): Promise<{
     canceled: boolean; receipt: { kind: "mcp-connect"; profileId: string; bindingId: string;
@@ -1170,7 +1629,7 @@ export interface PluginInstallationReceipt {
   releaseDigest: string;
   desiredState: "enabled" | "disabled";
   revision: number;
-  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled";
+  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled" | "first-party";
 }
 
 export interface BundledPluginItem {
@@ -1185,6 +1644,9 @@ export interface BundledPluginItem {
   converted: { skills: number; mcp: number };
   unconvertedMcp: { name: string; reasonCode: "LEGACY_MCP_FIELD_UNSUPPORTED" | "LEGACY_MCP_ENTRY_INVALID" }[];
   importStatus: "previewable" | "needs-adapter";
+  localAdapter?: "shoggoth-graph-read-only" | "shoggoth-lovable-official-mcp"
+    | "shoggoth-slack-official-mcp" | "shoggoth-gogcli-gmail-mcp"
+    | "shoggoth-codex-security-native";
   installationState: "not-installed" | "enabled" | "disabled";
   installedReleaseDigest: string | null;
 }
@@ -1204,6 +1666,7 @@ export interface BundledPluginDetail {
   converted: BundledPluginItem["converted"];
   unconvertedMcp: BundledPluginItem["unconvertedMcp"];
   importStatus: BundledPluginItem["importStatus"];
+  localAdapter?: BundledPluginItem["localAdapter"];
   prompts: string[];
   sourceWarnings: Array<{ code: "MISSING_OPTIONAL_LOCAL_REFERENCES";
     source: string; targets: string[] }>;
@@ -1211,6 +1674,24 @@ export interface BundledPluginDetail {
   mcpServers: Array<{ name: string; type: "stdio" | "streamable-http" }>;
   connectionWarnings: Array<{ name: string; reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }>;
   apps: string[];
+}
+
+export interface CodexSecurityStatus {
+  version: 1;
+  packageId: "codex-security";
+  source: { version: string; fileCount: number };
+  installation: { state: "not-installed" | "enabled" | "disabled" | "uninstalled";
+    integrity: "not-installed" | "verified"; skillCount: number; mcpCount: number; pendingDisable: boolean };
+  authentication: "unobserved" | "unauthenticated" | "authenticated";
+  connections: { total: number; ready: number };
+  fullPluginUsable: false;
+  originalToolsUnlocked: false;
+  blockers: string[];
+}
+
+export function getCodexSecurityStatus(input: { installationId: string | null; agentId: string | null }): Promise<CodexSecurityStatus> {
+  return jsonFetch("/__api/plugins/codex-security-status", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
 }
 
 export function getBundledPlugins(): Promise<{ batchDigest: string; items: BundledPluginItem[] }> {
@@ -1399,6 +1880,16 @@ export async function getPluginOperation(operationId: string): Promise<{
 }
 
 // Skill list for one backend (the Skills tab-switch page).
+export async function selfImprovement<T>(backend: string, agentId: string,
+  action: "status" | "configure" | "request" | "history" | "skills" | "read" | "change" | "proposal" | "resolve",
+  input: Record<string, unknown> = {}): Promise<T> {
+  const { result } = await jsonFetch<{ result: T }>("/__api/skills/learning", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ backend, agentId, action, input }),
+  });
+  return result;
+}
+
 export async function listSkills(backend: string, agentId?: string): Promise<UnifiedSkill[]> {
   const qs = new URLSearchParams({ backend });
   if (agentId) qs.set("agentId", agentId);
@@ -1950,19 +2441,19 @@ export async function openPath(path: string): Promise<void> {
   });
 }
 
-export async function openAttachment(name: string, src: string): Promise<void> {
+export async function revealAttachment(name: string, src: string): Promise<void> {
   if (!src.startsWith("data:") && !/^\/(?:__api\/inspirations\/media|__media)\?/.test(src)) {
     throw new Error("Invalid attachment source");
   }
   const response = await fetch(src);
   if (!response.ok) throw new Error(`File unavailable (${response.status})`);
   const bytes = await response.blob();
-  await jsonFetch<{ ok: boolean }>(`/__api/host/open-attachment?name=${encodeURIComponent(name)}`, {
+  await jsonFetch<{ ok: boolean }>(`/__api/host/reveal-attachment?name=${encodeURIComponent(name)}`, {
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: bytes,
   });
 }
 
-// 在系统文件管理器中定位文件但不打开（聊天 session 产物）。
+// 在系统文件管理器中定位文件，供聊天、详情和产物入口共用。
 export async function revealPath(path: string): Promise<void> {
   const { ok } = await jsonFetch<{ ok: boolean }>(`/__api/host/reveal-path`, {
     method: "POST",
@@ -2081,9 +2572,9 @@ export async function setAgentFile(
   id: string,
   file: string,
   content: string,
-  expectedRevision?: number,
-): Promise<{ id?: string; definitionRevision?: number } | undefined> {
-  const { result } = await jsonFetch<{ result?: { id?: string; definitionRevision?: number } }>(
+  expectedRevision?: number | string,
+): Promise<{ id?: string; definitionRevision?: number; fileRevision?: string } | undefined> {
+  const { result } = await jsonFetch<{ result?: { id?: string; definitionRevision?: number; fileRevision?: string } }>(
     agentUrl(backend, id, "/file") + `&file=${encodeURIComponent(file)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -2116,8 +2607,11 @@ export function setAgentRuntimePolicy(backend: string, id: string, policy: impor
 export function getSessionRuntime(backend: string, id: string, key: string): Promise<import("../types").SessionRuntimeSnapshot> {
   return jsonFetch(`${agentUrl(backend, id, "/session-runtime")}&sessionKey=${encodeURIComponent(key)}`);
 }
-export function getSessionRuntimeModels(backend: string, id: string, key: string): Promise<import("../types").SessionRuntimeModels> {
-  return jsonFetch(`${agentUrl(backend, id, "/runtime-models")}&sessionKey=${encodeURIComponent(key)}`);
+export function getSessionMemoryStatus(backend: string, id: string, key: string, includeTrace = false, signal?: AbortSignal): Promise<import("../types").SessionMemoryStatus> {
+  return jsonFetch(`${agentUrl(backend, id, "/memory-status")}&sessionKey=${encodeURIComponent(key)}&trace=${includeTrace ? "1" : "0"}`, { signal });
+}
+export function getSessionRuntimeModels(backend: string, id: string, key: string, signal?: AbortSignal): Promise<import("../types").SessionRuntimeModels> {
+  return jsonFetch(`${agentUrl(backend, id, "/runtime-models")}&sessionKey=${encodeURIComponent(key)}`, { signal });
 }
 export function selectSessionRuntimeModel(backend: string, id: string, key: string,
   input: { bindingId: string; model: string; revision: number; acceptAdjustments: boolean }): Promise<import("../types").SessionRuntimeSnapshot> {
@@ -2181,6 +2675,23 @@ export async function listAgentMemories(
   );
   return memories;
 }
+export async function getAgentMemoryImport(backend: string, id: string): Promise<import("../types").AgentMemoryImportStatus> {
+  const { memoryImport } = await jsonFetch<{ memoryImport: import("../types").AgentMemoryImportStatus }>(
+    agentUrl(backend, id, "/memory-import"),
+  );
+  return memoryImport;
+}
+export async function getAgentMemoryImportReport(backend: string, id: string, options: {
+  runId?: string | null; cursor?: number; expectedHash?: string | null;
+} = {}): Promise<import("../types").AgentMemoryImportReport> {
+  const query = new URLSearchParams({ cursor: String(options.cursor ?? 0), limit: "8000" });
+  if (options.runId) query.set("runId", options.runId);
+  if (options.expectedHash) query.set("expectedHash", options.expectedHash);
+  const { memoryImportReport } = await jsonFetch<{ memoryImportReport: import("../types").AgentMemoryImportReport }>(
+    agentUrl(backend, id, "/memory-import-report") + `&${query}`,
+  );
+  return memoryImportReport;
+}
 export async function explainAgentMemory(backend: string, id: string, memoryId: string): Promise<import("../types").AgentMemoryExplanation> {
   const { explanation } = await jsonFetch<{ explanation: import("../types").AgentMemoryExplanation }>(
     agentUrl(backend, id, "/memory-explain") + `&memoryId=${encodeURIComponent(memoryId)}`,
@@ -2236,6 +2747,26 @@ export async function mutateAgentMemory(
   );
   return result;
 }
+// Undo one background consolidation; the fact it replaced, if any, returns.
+export async function undoAgentMemoryConsolidation(
+  backend: string, id: string, memoryId: string, expectedRevision: number,
+): Promise<import("../types").AgentMemoryUndoResult> {
+  const { result } = await jsonFetch<{ result: import("../types").AgentMemoryUndoResult }>(
+    agentUrl(backend, id, "/memory"), { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "undo", id: memoryId, expectedRevision }) },
+  );
+  return result;
+}
+// Forget every memory a conversation taught; it is not consolidated again.
+export async function forgetAgentMemorySession(
+  backend: string, id: string, sessionId: string, expectedRevision: number,
+): Promise<{ revision: number; forgotten: number }> {
+  const { result } = await jsonFetch<{ result: { revision: number; forgotten: number } }>(
+    agentUrl(backend, id, "/memory"), { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "forgetSession", sessionId, expectedRevision }) },
+  );
+  return result;
+}
 export async function listAgentTranscripts(
   backend: string, id: string, sessionId?: string, cursor = 0, limit = 50,
 ): Promise<import("../types").AgentTranscriptSessionPage | import("../types").AgentTranscriptEventPage> {
@@ -2281,6 +2812,39 @@ export async function getDesktopComputerPermissions(): Promise<{
   const result = await invoke();
   if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
   return result.value;
+}
+export function desktopComputerAvailable(): boolean {
+  return typeof desktopSecretBridge()?.getComputerState === "function";
+}
+export function desktopBrowserAvailable(): boolean {
+  return typeof desktopSecretBridge()?.getBrowserState === "function";
+}
+export async function getDesktopBrowserState(): Promise<import("../types").BrowserUseState> {
+  const invoke = desktopSecretBridge()?.getBrowserState;
+  if (!invoke) throw desktopSecretError("DESKTOP_BRIDGE_REQUIRED", "仅桌面应用可读取 Browser Use 状态");
+  const result = await invoke();
+  if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
+  return result.value;
+}
+export async function getDesktopComputerState(): Promise<import("../types").AgentComputerState> {
+  const invoke = desktopSecretBridge()?.getComputerState;
+  if (!invoke) throw desktopSecretError("DESKTOP_BRIDGE_REQUIRED", "仅桌面应用可管理 Computer Use 权限");
+  const result = await invoke();
+  if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
+  return result.value;
+}
+export async function reloadDesktopComputerPermissions(): Promise<import("../types").AgentComputerState> {
+  const invoke = desktopSecretBridge()?.reloadComputerPermissions;
+  if (!invoke) throw desktopSecretError("DESKTOP_BRIDGE_REQUIRED", "仅桌面应用可管理 Computer Use 权限");
+  const result = await invoke();
+  if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
+  return result.value;
+}
+export async function openDesktopComputerAccessibilitySettings(): Promise<void> {
+  const invoke = desktopSecretBridge()?.openComputerAccessibilitySettings;
+  if (!invoke) throw desktopSecretError("DESKTOP_BRIDGE_REQUIRED", "仅桌面应用可管理 Computer Use 权限");
+  const result = await invoke();
+  if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
 }
 export async function requestDesktopComputerPermissions(): Promise<{
   accessibility: boolean; screenRecording: boolean;
@@ -2731,9 +3295,11 @@ export async function respondShoggothPrompt(input:
 export async function getBackendRunDetail(
   backendId: string,
   runId: string,
+  signal?: AbortSignal,
 ): Promise<BackendRunDetail> {
   return jsonFetch<BackendRunDetail>(
     `/__api/dashboard/runs/${encodeURIComponent(runId)}?backend=${encodeURIComponent(backendId)}`,
+    { signal },
   );
 }
 
@@ -2844,6 +3410,38 @@ export async function updateNativeCapacity(input: import('../types').NativeCapac
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   });
 }
+export async function getNativeMemoryConfig(): Promise<import('../types').NativeMemoryConfigProjection> {
+  return jsonFetch('/__api/native-memory-config');
+}
+export async function getNativeMemorySharingConfig(): Promise<import('../types').NativeMemorySharingProjection> {
+  return jsonFetch('/__api/native-memory-sharing-config');
+}
+export async function getNativeMemorySharingContext(): Promise<import('../types').NativeMemorySharingContext> {
+  return jsonFetch('/__api/native-memory-sharing-config/context');
+}
+export async function updateNativeMemorySharingConfig(input: import('../types').NativeMemorySharingUpdate): Promise<import('../types').NativeMemorySharingProjection> {
+  return jsonFetch('/__api/native-memory-sharing-config', { method: 'PUT', body: JSON.stringify(input) });
+}
+export async function getNativeMemoryContext(): Promise<import('../types').NativeMemoryContext> {
+  return jsonFetch('/__api/native-memory-config/context');
+}
+export async function updateNativeMemoryConfig(input: import('../types').NativeMemoryConfigUpdate): Promise<import('../types').NativeMemoryConfigProjection> {
+  return jsonFetch('/__api/native-memory-config', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+}
+export async function getMemoryProviderOwners(profileId?: string): Promise<import('../types').MemoryProviderOwnerContext> {
+  if (profileId !== undefined) validateMemoryProviderOwnerProfileId(profileId);
+  return fetchMemoryProviderOwnerDto('/__api/memory-provider-owners' + (profileId !== undefined ? `?profileId=${encodeURIComponent(profileId)}` : ''), value => validateMemoryProviderOwnerContext(value, profileId));
+}
+export async function applyMemoryProviderOwner(input: import('../types').MemoryProviderOwnerMutation): Promise<import('../types').MemoryProviderOwnerReceipt> {
+  const request = validateMemoryProviderOwnerMutation(input);
+  return fetchMemoryProviderOwnerDto('/__api/memory-provider-owners', value => validateMemoryProviderOwnerReceipt(value, request), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
+}
+export async function recoverMemoryProviderOwner(input: { operationId: string; mode: 'resume' | 'cancel'; secret?: string }): Promise<import('../types').MemoryProviderOwnerReceipt> {
+  const request = validateMemoryProviderOwnerRecovery(input);
+  return fetchMemoryProviderOwnerDto('/__api/memory-provider-owners/recover', value => validateMemoryProviderOwnerReceipt(value, request), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
+}
 // Test a candidate connection without saving.
 export async function testConnection(spec: {
   backend: string;
@@ -2931,4 +3529,102 @@ export function respondInspiration(id: string, input: { operationId: string; run
 }
 export function cancelInspiration(id: string, input: { operationId: string; runId: string }) {
   return jsonFetch<{ idea: import('../types').InspirationIdea }>(`/__api/inspirations/cancel?id=${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+// ---- 多 Agent 群聊：群 id 一律走 ?id=（ARCHITECTURE.md 高频雷区）----
+const groupChatUrl = (path: string, id?: string) =>
+  `/__api/group-chats${path}${id ? `?id=${encodeURIComponent(id)}` : ""}`;
+export function listGroupChats(includeArchived = false) {
+  return jsonFetch<{ groups: import('../types').GroupChatView[]; enabled?: boolean;
+    internalSessions?: Array<{ backendId: string; key: string }> }>(
+    `/__api/group-chats${includeArchived ? "?includeArchived=1" : ""}`);
+}
+export function listGroupChatHostMembers() {
+  return jsonFetch<{ members: import('../types').GroupRuntimeHostMember[] }>("/__api/group-chats/hosts");
+}
+export function testGroupChatHost(peer: import('../types').GroupRuntimeHostConnection) {
+  return jsonFetch<{ version: number; hostId: string; backendId: string; agentId: string; groupTools: boolean; workspaces: boolean; artifacts: boolean }>(
+    "/__api/group-chats/hosts/test", { method: "POST", body: JSON.stringify({ peer }) });
+}
+export function getGroupChat(id: string) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/detail", id));
+}
+export function deleteGroupChat(id: string, expectedMetadataRevision: number) {
+  return jsonFetch<{ groupId: string; status: "deleting" | "deleted" }>(groupChatUrl("/detail", id), {
+    method: "DELETE", body: JSON.stringify({ expectedMetadataRevision }),
+  });
+}
+export function createGroupChat(input: { operationId: string; name: string; purpose: string;
+  members: Array<{ backendId: string; agentId: string; peerId?: string }> }) {
+  return jsonFetch<import('../types').GroupChatView>("/__api/group-chats", { method: "POST", body: JSON.stringify(input) });
+}
+export function updateGroupChat(id: string, input: { expectedMetadataRevision: number;
+  patch: { name?: string; purpose?: string; status?: import('../types').GroupChatStatus; ownerMemberId?: string } }) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/detail", id), { method: "PATCH", body: JSON.stringify(input) });
+}
+export function addGroupChatMember(id: string, input: { expectedRosterRevision: number;
+  member: { backendId: string; agentId: string; peerId?: string } }) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members", id), { method: "POST", body: JSON.stringify(input) });
+}
+export function stopGroupChatMember(id: string, memberId: string) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members/stop", id), { method: "POST", body: JSON.stringify({ memberId }) });
+}
+export function removeGroupChatMember(id: string, input: { expectedRosterRevision: number; memberId: string }) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members", id), { method: "DELETE", body: JSON.stringify(input) });
+}
+export function getGroupChatMemberRole(id: string, memberId: string, query: { revision?: string; cursor?: string } = {}) {
+  const params = new URLSearchParams({ id, memberId });
+  if (query.revision !== undefined) params.set("revision", query.revision);
+  if (query.cursor !== undefined) params.set("cursor", query.cursor);
+  return jsonFetch<import('../types').GroupChatMemberRole>(`/__api/group-chats/members/role?${params}`);
+}
+export function getGroupChatMemberRoleHistory(id: string, memberId: string, query: { before?: string; limit?: number } = {}) {
+  const params = new URLSearchParams({ id, memberId, limit: String(query.limit ?? 20) });
+  if (query.before !== undefined) params.set("before", query.before);
+  return jsonFetch<import('../types').GroupChatMemberRoleHistory>(`/__api/group-chats/members/role-history?${params}`);
+}
+export function listGroupChatMessages(id: string, query: { afterSeq?: number; beforeSeq?: number; limit?: number } = {}) {
+  const params = new URLSearchParams({ id, limit: String(query.limit ?? 50) });
+  if (query.afterSeq !== undefined) params.set("afterSeq", String(query.afterSeq));
+  if (query.beforeSeq !== undefined) params.set("beforeSeq", String(query.beforeSeq));
+  return jsonFetch<{ messages: import('../types').GroupChatMessage[]; hasMore: boolean }>(`/__api/group-chats/messages?${params}`);
+}
+export function sendGroupChatMessage(id: string, input: { clientMessageId: string; body: string; mentions: string[];
+  requestMode?: "auto" | "new" | "append" | "replace"; discussionId?: string; summaryMemberId?: string;
+  ownerScope?: string; expectedPolicyVersion?: number;
+  replyTo?: number | null; taskId?: string; attachments?: import('../types').InspirationAttachment[] }) {
+  return jsonFetch<{ message: import('../types').GroupChatMessage; discussionId: string | null; duplicate: boolean }>(
+    groupChatUrl("/messages", id), { method: "POST", body: JSON.stringify(input) });
+}
+export function lookupGroupChatSend(id: string, query: { clientMessageId: string; payloadDigest?: string; ownerScope?: string }) {
+  const params = new URLSearchParams({ id, clientMessageId: query.clientMessageId });
+  if (query.payloadDigest !== undefined) params.set("payloadDigest", query.payloadDigest);
+  if (query.ownerScope !== undefined) params.set("ownerScope", query.ownerScope);
+  return jsonFetch<import('../types').GroupChatSendLookup>(`/__api/group-chats/messages/lookup?${params}`);
+}
+export function retryGroupChatTurn(id: string, memberId: string, operationId: string) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/turns/retry", id), {
+    method: "POST", body: JSON.stringify({ memberId, operationId }) });
+}
+export function stopGroupChatDiscussion(id: string) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/discussion/stop", id), { method: "POST", body: "{}" });
+}
+export type GroupInteractionTarget = { kind: "turn"; opportunityId: string };
+export function reconcileGroupChatExecution(id: string, target: GroupInteractionTarget) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/executions/reconcile", id), {
+    method: "POST", body: JSON.stringify({ target }) });
+}
+export function respondGroupChatInteraction(id: string, input: { target: GroupInteractionTarget; requestId: string;
+  response: Record<string, unknown>; operationId: string }) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/interactions/respond", id), {
+    method: "POST", body: JSON.stringify(input) });
+}
+export function getGroupChatDiagnostics() {
+  return jsonFetch<import('../types').GroupChatDiagnostics>("/__api/group-chats/diagnostics");
+}
+/** Management requests carry only scoped references/state. Actions are desktop IPC. */
+export async function chatUiRequest(backend: string, agentId: string, sessionKey: string,
+  operation: "describe" | "open" | "read" | "state" | "renew" | "close" | "import" | "export" | "operation",
+  spec: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+  return jsonFetch(`/__api/chat-ui/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backend, agentId, sessionKey, spec }), signal });
 }

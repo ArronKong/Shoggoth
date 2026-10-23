@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectThirdPartyLicenses } from "./third-party-licenses.mjs";
+import { bundledPluginSbomComponents } from "./bundled-plugin-sbom.mjs";
 import { createRequire } from "node:module";
 const { E5_MODEL } = createRequire(import.meta.url)("../app/agent-service/e5-model-contract.js");
 
@@ -12,6 +13,14 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json
 const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
 const codex = JSON.parse(fs.readFileSync(path.join(repoRoot, "build", "codex-runtime-manifest.json"), "utf8"));
 const cua = JSON.parse(fs.readFileSync(path.join(repoRoot, "build", "cua-driver-manifest.json"), "utf8"));
+const gog = JSON.parse(fs.readFileSync(path.join(repoRoot, "build", "gog-runtime-manifest.json"), "utf8"));
+const bundledCatalog = JSON.parse(fs.readFileSync(path.join(repoRoot, "resources", "bundled-plugins", "catalog.json"), "utf8"));
+const frozenInventoryPath = path.join(repoRoot, "docs", "architecture", "bundled-plugin-inventory-2026-09-26.json");
+const frozenInventory = fs.existsSync(frozenInventoryPath)
+  ? JSON.parse(fs.readFileSync(frozenInventoryPath, "utf8")) : null;
+const bundledScopePath = path.join(repoRoot, "docs", "architecture", "bundled-plugin-scope-2026-10-02.json");
+const bundledScope = fs.existsSync(bundledScopePath)
+  ? JSON.parse(fs.readFileSync(bundledScopePath, "utf8")) : null;
 
 function purlName(name) {
   if (!name.startsWith("@")) return name;
@@ -56,8 +65,6 @@ const electronRef = addNpm("electron", "node_modules/electron", [
   { name: "shoggoth:role", value: "desktop-runtime" },
 ]);
 const wsRef = addNpm("ws", "node_modules/ws");
-const ptyRef = addNpm("node-pty", "node_modules/node-pty");
-const xtermRef = addNpm("@xterm/headless", "node_modules/@xterm/headless");
 const fflateRef = addNpm("fflate", "node_modules/fflate", [
   { name: "shoggoth:role", value: "inspiration-archive;plugin-git-archive" },
 ]);
@@ -152,6 +159,32 @@ const codexRefs = Object.entries(codex.platforms).map(([platform, entry]) => {
   return ref;
 });
 
+const gogRefs = Object.entries(gog.platforms).map(([platform, entry]) => {
+  const ref = `pkg:generic/gogcli@${gog.version}?platform=${platform}`;
+  components.set(ref, {
+    type: "application",
+    name: "gogcli",
+    version: gog.version,
+    "bom-ref": ref,
+    hashes: [{ alg: "SHA-256", content: entry.binarySha256 }],
+    licenses: licenses(gog.license),
+    purl: ref,
+    externalReferences: [{ type: "distribution", url: entry.url }],
+    properties: [
+      { name: "shoggoth:role", value: "google-workspace-local-runtime" },
+      { name: "shoggoth:target-arch", value: platform },
+      { name: "shoggoth:archive-sha256", value: entry.archiveSha256 },
+    ],
+  });
+  return ref;
+});
+
+const bundledPluginRefs = bundledPluginSbomComponents(bundledCatalog, frozenInventory, bundledScope)
+  .map((entry) => {
+    components.set(entry["bom-ref"], entry);
+    return entry["bom-ref"];
+  });
+
 const check = process.argv.includes("--check");
 const inventory = collectThirdPartyLicenses(repoRoot, { check });
 const inventoryRefs = inventory.npm.map((entry) => {
@@ -200,8 +233,8 @@ const bom = {
   components: [...components.values()].sort((left, right) => left["bom-ref"].localeCompare(right["bom-ref"])),
   dependencies: [
     { ref: rootRef, dependsOn: [
-      electronRef, wsRef, ptyRef, xtermRef, fflateRef, mcpClientRef, cronRef, sqliteRef, cuaSdkRef, cuaBinaryRef,
-      e5Ref, e5RuntimeRef, e5TokenizerRef, ...codexRefs, ...inventoryRefs,
+      electronRef, wsRef, fflateRef, mcpClientRef, cronRef, sqliteRef, cuaSdkRef, cuaBinaryRef,
+      e5Ref, e5RuntimeRef, e5TokenizerRef, ...codexRefs, ...gogRefs, ...bundledPluginRefs, ...inventoryRefs,
     ].filter((ref, index, refs) => refs.indexOf(ref) === index).sort() },
     { ref: mcpClientRef, dependsOn: [mcpCoreRef, ...mcpClientDependencyRefs].sort() },
     { ref: mcpCoreRef, dependsOn: [mcpClientDependencyRefs.at(-1)] },

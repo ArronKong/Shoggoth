@@ -1,0 +1,12 @@
+"use strict";
+const test=require('node:test'),assert=require('node:assert/strict');
+const {GroupExternalExecutor}=require('../app/agent-service/group-external-executor');
+const {groupCapabilities}=require('../app/agent-service/group-capabilities');
+const {GroupAdapterChannel}=require('../app/agent-service/group-adapter-channel');
+function fixture(t){let clock=1000,offline=false;const member={backendId:'hermes',agentId:'hermes-default'};
+ const channel=new GroupAdapterChannel({paths:{},service:{},now:()=>clock,authorize:()=>true});
+ const executor=new GroupExternalExecutor({store:{getDriverFence:()=>1},onTerminal(){},getGroupToolCapability:m=>channel.capability(m),getClient:()=>({request:async()=>{if(offline)throw Error('offline');return groupCapabilities({protocolVersion:2,collaborationSupport:true,groupTools:true,discussion:true,isolatedSession:true,source:'external-binding',availability:'available'});}})});executor.start(1);t.after(()=>executor.stop());
+ return {member,channel,executor,advance:ms=>clock+=ms,setOffline:()=>offline=true,register:()=>channel.handle('group.adapter.register',{backendId:'hermes',agentId:member.agentId,credentialToken:'fixture',instanceId:'fixture-instance',protocolVersion:2,tools:['group_member_role_read','group_messages_read','group_task','group_collaborate']})};}
+test('authenticated local registration reaches execution probe while configuration alone does not',async t=>{const f=fixture(t);assert.equal((await f.executor.probe(f.member)).collaborationActions,false);await f.register();const cap=await f.executor.probe(f.member);assert.equal(cap.collaborationActions,true);assert.equal(cap.groupTools,true);assert.equal(cap.protocolVersion,2);});
+test('expired and foreign local registrations never become tool proof',async t=>{const f=fixture(t);await f.register();assert.equal((await f.executor.probe({...f.member,agentId:'another'})).collaborationActions,false);assert.equal((await f.executor.probe({...f.member,peerId:'remote-peer'})).collaborationActions,false);f.advance(150001);assert.equal((await f.executor.probe(f.member)).collaborationActions,false);});
+test('a live tool registration cannot turn an offline host into an available execution channel',async t=>{const f=fixture(t);await f.register();f.setOffline();const cap=await f.executor.probe(f.member);assert.equal(cap.availability,'unavailable');assert.equal(cap.collaborationActions,false);});

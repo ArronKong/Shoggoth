@@ -146,7 +146,7 @@ test("注册完整 Chat Service 方法集", () => {
     "profile.list",
     "chat.session.list", "chat.session.create", "chat.session.model.set", "chat.session.settings.set", "chat.session.permission.set", "chat.session.rename",
     "chat.session.archive", "chat.session.delete", "chat.history", "chat.search",
-    "chat.command.list", "chat.command.exec", "chat.send", "chat.operation.get",
+    "chat.command.list", "chat.command.exec", "chat.send", "chat.operation.get", "chat.operation.reconcile",
     "chat.steer", "chat.abort", "run.list", "run.get", "run.subscribe",
     "run.approval.respond", "run.input.respond",
   ]);
@@ -163,6 +163,18 @@ test("chat.operation.get 严格验证查询与 found/unresolved 回执", () => {
     { status: "unresolved", run: null }, params), { status: "unresolved", run: null });
   expectCode(() => validateChatServiceResult("chat.operation.get",
     { status: "unresolved", run: found.run }, params), "CHAT_RESPONSE_INVALID");
+});
+
+test("恢复旧发送有独立严格契约，查询缺失不能伪造拒绝凭据", () => {
+  const params = { operationId: "send-1", sessionKey: SESSION_KEY, createdAt: 100 };
+  assert.deepEqual(validateChatServiceParams("chat.operation.reconcile", params), params);
+  for (const createdAt of [0, -1, 1.5, "100", undefined]) expectCode(() =>
+    validateChatServiceParams("chat.operation.reconcile", { ...params, createdAt }), "INVALID_PARAMS");
+  const rejected = { status: "not_admitted", run: null };
+  assert.deepEqual(validateChatServiceResult("chat.operation.reconcile", rejected, params), rejected);
+  expectCode(() => validateChatServiceResult("chat.operation.get", rejected,
+    { operationId: params.operationId, sessionKey: SESSION_KEY }), "CHAT_RESPONSE_INVALID");
+  expectCode(() => validateChatServiceResult("chat.operation.reconcile", { ...rejected, run: currentRun() }, params), "CHAT_RESPONSE_INVALID");
 });
 
 test("params validator 接受 exact DTO 并拒绝未知字段、非法 limit/cursor 与 attachments", () => {
@@ -679,6 +691,24 @@ test("当前 WorkRun DTO 保留 contextSnapshotId 与 Runtime 引用", () => {
       },
     }),
   }), "CHAT_RESPONSE_INVALID");
+});
+
+test("WorkRun IPC 保留完整命名空间的自动化任务 ID 并限制字段长度", () => {
+  const sourceId = `codex-automation:${"a".repeat(24)}:${"t".repeat(128)}`;
+  const expected = run({ id: "automation-run-1", source: "automation", sourceId });
+  for (const [method, result] of [
+    ["run.get", { run: expected }],
+    ["run.list", { runs: [expected], nextCursor: null, hasMore: false }],
+  ]) {
+    const validated = validateChatServiceResult(method, result);
+    assert.deepEqual(method === "run.list" ? validated.runs[0] : validated.run, expected);
+  }
+  for (const invalid of [
+    { ...expected, sourceId: "a".repeat(257) },
+    run({ sourceId: "a".repeat(129) }),
+  ]) {
+    expectCode(() => validateChatServiceResult("run.get", { run: invalid }), "CHAT_RESPONSE_INVALID");
+  }
 });
 
 test("内部 Pending/lease/path/Codex 错误映射到固定公共码和文案且不泄露", () => {

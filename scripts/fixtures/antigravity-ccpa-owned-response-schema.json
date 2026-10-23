@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "scope": "selected-response-fields-used-by-owned-mock-only;not-full-native-request-schema",
+  "source": {
+    "pinnedSdk": "1.2.1",
+    "entry": "google3/google/internal/cloud/code/cloudcode-pa_prod_google_rest_v1internal.json",
+    "bytes": 1092429,
+    "sha256": "e5e49815e4092b41eebdc02b59038289308fdd2bc53da685264958630c456a73"
+  },
+  "methods": {
+    "loadCodeAssist": {
+      "path": "v1internal:loadCodeAssist",
+      "httpMethod": "POST",
+      "response": {
+        "$ref": "LoadCodeAssistResponse"
+      }
+    },
+    "fetchAvailableModels": {
+      "path": "v1internal:fetchAvailableModels",
+      "httpMethod": "POST",
+      "response": {
+        "$ref": "FetchAvailableModelsResponse"
+      }
+    },
+    "generateContent": {
+      "path": "v1internal:generateContent",
+      "httpMethod": "POST",
+      "response": {
+        "$ref": "GenerateContentResponse"
+      }
+    },
+    "streamGenerateContent": {
+      "path": "v1internal:streamGenerateContent",
+      "httpMethod": "POST",
+      "response": {
+        "$ref": "GenerateContentResponse"
+      }
+    }
+  },
+  "schemas": {
+    "LoadCodeAssistResponse": {
+      "type": "object",
+      "properties": {
+        "currentTier": {
+          "$ref": "UserTier"
+        },
+        "cloudaicompanionProject": {
+          "type": "string"
+        }
+      }
+    },
+    "UserTier": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "FetchAvailableModelsResponse": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "ModelDetails"
+          }
+        }
+      }
+    },
+    "ModelDetails": {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": "string"
+        },
+        "supportsImages": {
+          "type": "boolean"
+        },
+        "supportsThinking": {
+          "type": "boolean"
+        }
+      }
+    },
+    "GenerateContentResponse": {
+      "type": "object",
+      "properties": {
+        "response": {
+          "$ref": "GoogleCloudAiplatformMasterGenerateContentResponse"
+        }
+      }
+    },
+    "GoogleCloudAiplatformMasterGenerateContentResponse": {
+      "type": "object",
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "GoogleCloudAiplatformMasterCandidate"
+          }
+        }
+      }
+    },
+    "GoogleCloudAiplatformMasterCandidate": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer"
+        },
+        "content": {
+          "$ref": "GoogleCloudAiplatformMasterContent"
+        },
+        "finishReason": {
+          "type": "string",
+          "enum": [
+            "FINISH_REASON_UNSPECIFIED",
+            "STOP",
+            "MAX_TOKENS",
+            "SAFETY",
+            "RECITATION",
+            "OTHER",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+            "MALFORMED_FUNCTION_CALL",
+            "MODEL_ARMOR",
+            "IMAGE_SAFETY",
+            "IMAGE_PROHIBITED_CONTENT",
+            "IMAGE_RECITATION",
+            "IMAGE_OTHER",
+            "UNEXPECTED_TOOL_CALL",
+            "NO_IMAGE"
+          ]
+        }
+      }
+    },
+    "GoogleCloudAiplatformMasterContent": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "$ref": "GoogleCloudAiplatformMasterPart"
+          }
+        }
+      }
+    },
+    "GoogleCloudAiplatformMasterPart": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "functionCall": {
+          "$ref": "GoogleCloudAiplatformMasterFunctionCall"
+        }
+      }
+    },
+    "GoogleCloudAiplatformMasterFunctionCall": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "any"
+          }
+        }
+      }
+    }
+  }
+}

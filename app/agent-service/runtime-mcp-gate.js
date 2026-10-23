@@ -10,6 +10,11 @@ const { validRuntimeAccountId } = require("./runtime-adapter");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 
 const DEFAULT_GATE_TTL_MS = 45_000;
+// Harness-child tickets are handed over at session/new|resume, but the runtime's
+// harness starts the helper only when the first prompt runs. An unused ticket
+// therefore lapses (its file is removed) instead of being forgotten, and the
+// owning host renews it right before dispatching the prompt.
+const HARNESS_RENEWAL_WINDOW_MS = 10 * 60_000;
 const GATE_FILE_PATTERN = /^mcp-[a-f0-9]{64}\.gate$/u;
 
 function gateError(code, message) {
@@ -93,6 +98,20 @@ function defaultProcessIdentity(pid) {
   }
 }
 
+function defaultProcessLink(pid) {
+  try {
+    const read = (field) => execFileSync("/bin/ps", ["-o", `${field}=`, "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 500,
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 4096,
+    }).trim();
+    return { ppid: Number(read("ppid")), executable: read("comm") };
+  } catch {
+    return { ppid: 0, executable: "" };
+  }
+}
+
 class RuntimeMcpGateIssuer {
   constructor(options = {}) {
     if (!options.paths?.runtimeDir || !options.paths?.trustedRoot
@@ -120,6 +139,7 @@ class RuntimeMcpGateIssuer {
     this.clearTimer = options.clearTimeout || clearTimeout;
     this.onDiagnostic = typeof options.onDiagnostic === "function" ? options.onDiagnostic : null;
     this.getProcessIdentity = options.getProcessIdentity || defaultProcessIdentity;
+    this.getProcessLink = options.getProcessLink || defaultProcessLink;
     this.ttlMs = ttlMs;
     this.gateRoot = path.join(this.paths.runtimeDir, "mcp-gates");
     this.issued = new Map();
@@ -149,16 +169,21 @@ class RuntimeMcpGateIssuer {
   createMcpServer(input = {}) {
     const reservation = this.reserveMcpServer(input);
     try {
-      this.bindMcpServer({
+      this.bindMcpServer(input.ancestorExecutable === undefined ? {
         reservationId: reservation.reservationId,
         parentPid: input.parentPid,
+      } : {
+        reservationId: reservation.reservationId,
+        ancestorPid: input.ancestorPid,
       });
     } catch (error) {
       this.revokeMcpServer({ reservationId: reservation.reservationId });
       throw error;
     }
-    const { reservationId: _reservationId, ...descriptor } = reservation;
-    return Object.freeze(descriptor);
+    const { reservationId, ...descriptor } = reservation;
+    // Only harness-child tickets are renewable; their host keeps this handle.
+    return Object.freeze(input.ancestorExecutable === undefined
+      ? descriptor : { ...descriptor, reservationId });
   }
 
   reserveMcpServer(input = {}) {
@@ -173,6 +198,12 @@ class RuntimeMcpGateIssuer {
       throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP account is invalid");
     }
     const runtimeAccountId = input.runtimeAccountId;
+    // "resident" lists only core product tools plus product_tool_search/call
+    // (see product-tool-exposure.js); it narrows the list and grants nothing.
+    const toolExposure = input.toolExposure ?? "all";
+    if (!["all", "resident"].includes(toolExposure)) {
+      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP tool exposure is invalid");
+    }
     const executionRunId = input.executionRunId ?? null;
     if (executionRunId !== null && (typeof executionRunId !== "string"
       || !executionRunId.trim() || executionRunId.includes("\0")
@@ -182,6 +213,13 @@ class RuntimeMcpGateIssuer {
     const parentExecutable = assertExecutable(
       this.fs,
       input.parentExecutable,
+      "RUNTIME_MCP_GATE_INPUT_INVALID",
+    );
+    // Harness-child tickets: the MCP helper's parent is `parentExecutable`
+    // (a pinned harness) whose own parent is the bound `ancestorExecutable`.
+    const ancestorExecutable = input.ancestorExecutable === undefined ? null : assertExecutable(
+      this.fs,
+      input.ancestorExecutable,
       "RUNTIME_MCP_GATE_INPUT_INVALID",
     );
     const nonceBytes = this.randomBytes(32);
@@ -195,17 +233,7 @@ class RuntimeMcpGateIssuer {
       throw gateError("RUNTIME_MCP_GATE_COLLISION", "Runtime MCP gate collision detected");
     }
     const expiresAt = this.now() + this.ttlMs;
-    const timer = this.setTimer(() => {
-      try {
-        this.#removeIssued(gatePath);
-      } catch {
-        // #removeIssued revokes the in-memory ticket before touching the file. A
-        // cleanup failure is therefore fail-closed, but must not escape a timer
-        // callback and terminate the Service process.
-        try { this.onDiagnostic?.({ code: "RUNTIME_MCP_GATE_CLEANUP_FAILED" }); } catch {}
-      }
-    }, this.ttlMs + 1_000);
-    timer?.unref?.();
+    const timer = this.#scheduleExpiry(gatePath, this.ttlMs + 1_000);
     this.issued.set(gatePath, {
       bound: false,
       dev: null,
@@ -218,7 +246,12 @@ class RuntimeMcpGateIssuer {
       executionRunId,
       parentExecutable,
       parentIdentity: null,
+      ancestorExecutable,
+      ancestorPid: null,
+      ancestorIdentity: null,
+      consumed: false,
       expiresAt,
+      renewUntil: ancestorExecutable === null ? null : this.now() + HARNESS_RENEWAL_WINDOW_MS,
     });
     return Object.freeze({
       reservationId: nonce,
@@ -229,6 +262,7 @@ class RuntimeMcpGateIssuer {
         "--shoggoth-internal-role=mcp",
         `--shoggoth-runtime-profile=${runtimeProfileId}`,
         `--shoggoth-runtime-account=${runtimeAccountId}`,
+        ...(toolExposure === "resident" ? ["--shoggoth-tool-exposure=resident"] : []),
       ]),
       env: Object.freeze([
         Object.freeze({ name: "ELECTRON_RUN_AS_NODE", value: "1" }),
@@ -243,8 +277,7 @@ class RuntimeMcpGateIssuer {
     if (!this.opened) {
       throw gateError("RUNTIME_MCP_GATE_CLOSED", "Runtime MCP gate issuer is closed");
     }
-    if (!/^[a-f0-9]{64}$/u.test(input.reservationId || "")
-      || !Number.isSafeInteger(input.parentPid) || input.parentPid <= 1) {
+    if (!/^[a-f0-9]{64}$/u.test(input.reservationId || "")) {
       throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP reservation is invalid");
     }
     const gatePath = path.join(this.gateRoot, `mcp-${input.reservationId}.gate`);
@@ -252,32 +285,84 @@ class RuntimeMcpGateIssuer {
     if (!record || record.bound || record.expiresAt < this.now()) {
       throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP reservation is unavailable");
     }
-    const parentIdentity = this.getProcessIdentity(input.parentPid);
-    if (typeof parentIdentity !== "string" || parentIdentity.length === 0
-      || Buffer.byteLength(parentIdentity, "utf8") > 4096) {
+    const harnessChild = record.ancestorExecutable !== null;
+    const boundPid = harnessChild ? input.ancestorPid : input.parentPid;
+    if (!Number.isSafeInteger(boundPid) || boundPid <= 1
+      || (harnessChild ? input.parentPid !== undefined : input.ancestorPid !== undefined)) {
+      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP reservation is invalid");
+    }
+    const boundIdentity = this.getProcessIdentity(boundPid);
+    if (typeof boundIdentity !== "string" || boundIdentity.length === 0
+      || Buffer.byteLength(boundIdentity, "utf8") > 4096) {
       throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP parent process is unavailable");
     }
-    const gate = `${JSON.stringify({
-      schemaVersion: 2,
-      nonce: record.nonce,
-      parentPid: input.parentPid,
-      parentExecutable: record.parentExecutable,
-      runtimeProfileId: record.runtimeProfileId,
-      runtimeAccountId: record.runtimeAccountId,
-      expiresAt: record.expiresAt,
-      servicePaths: this.servicePaths,
-    })}\n`;
-    if (Buffer.byteLength(gate, "utf8") > 4096) {
-      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP gate is too large");
-    }
-    atomicWritePrivateFile(gatePath, gate, { trustedRoot: this.paths.trustedRoot, fs: this.fs });
-    const identity = this.fs.lstatSync(gatePath);
+    const identity = this.#publish(gatePath, record, boundPid, record.expiresAt);
     record.bound = true;
     record.dev = identity.dev;
     record.ino = identity.ino;
-    record.parentPid = input.parentPid;
-    record.parentIdentity = parentIdentity;
+    if (harnessChild) {
+      record.ancestorPid = boundPid;
+      record.ancestorIdentity = boundIdentity;
+    } else {
+      record.parentPid = boundPid;
+      record.parentIdentity = boundIdentity;
+    }
     return Object.freeze({ bound: true });
+  }
+
+  // Restarts a harness-child ticket's TTL, including one that lapsed while its
+  // session/new was slow. Consumed, revoked or direct-parent tickets stay as they are.
+  renewMcpServer(input = {}) {
+    if (!this.opened) {
+      throw gateError("RUNTIME_MCP_GATE_CLOSED", "Runtime MCP gate issuer is closed");
+    }
+    if (!/^[a-f0-9]{64}$/u.test(input.reservationId || "")) {
+      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP reservation is invalid");
+    }
+    const gatePath = path.join(this.gateRoot, `mcp-${input.reservationId}.gate`);
+    const record = this.issued.get(gatePath);
+    if (!record || record.bound !== true) {
+      throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP reservation is unavailable");
+    }
+    if (record.renewUntil === null) return Object.freeze({ renewed: false });
+    if (this.now() >= record.renewUntil) {
+      this.#removeIssued(gatePath);
+      throw gateError("RUNTIME_MCP_GATE_EXPIRED", "Runtime MCP reservation expired");
+    }
+    if (this.getProcessIdentity(record.ancestorPid) !== record.ancestorIdentity) {
+      this.#removeIssued(gatePath);
+      throw gateError("RUNTIME_MCP_GATE_PARENT_MISMATCH", "Runtime MCP ancestor changed");
+    }
+    // A consumed receipt proves the eager helper is connected. Missing/revoked
+    // reservations never masquerade as that success, and cannot be revived.
+    if (record.consumed) return Object.freeze({ renewed: false, consumed: true });
+    // Replace rather than overwrite: an overwrite leaves backup links that the
+    // gate directory's naming invariant rejects after a crash.
+    try {
+      let current;
+      try { current = this.fs.lstatSync(gatePath); }
+      catch (error) { if (error?.code !== "ENOENT") throw error; }
+      if (record.dev === null ? current !== undefined
+        : !current || current.dev !== record.dev || current.ino !== record.ino
+          || !current.isFile() || current.isSymbolicLink() || current.nlink !== 1
+          || (current.mode & 0o077) !== 0) {
+        throw gateError("RUNTIME_MCP_GATE_REPLACED", "Runtime MCP gate changed");
+      }
+      this.#unlinkBound(gatePath, record);
+      record.dev = null;
+      record.ino = null;
+      const expiresAt = Math.min(this.now() + this.ttlMs, record.renewUntil);
+      const identity = this.#publish(gatePath, record, record.ancestorPid, expiresAt);
+      record.expiresAt = expiresAt;
+      record.dev = identity.dev;
+      record.ino = identity.ino;
+      this.clearTimer(record.timer);
+      record.timer = this.#scheduleExpiry(gatePath, expiresAt - this.now() + 1_000);
+    } catch (error) {
+      try { this.#removeIssued(gatePath); } catch {}
+      throw error;
+    }
+    return Object.freeze({ renewed: true });
   }
 
   revokeMcpServer(input = {}) {
@@ -310,10 +395,23 @@ class RuntimeMcpGateIssuer {
       throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
     }
     const record = this.issued.get(input.gatePath);
-    if (!record || record.bound !== true || record.runtimeProfileId !== runtimeProfileId
+    const harnessChild = record?.ancestorExecutable !== null && record?.ancestorExecutable !== undefined;
+    if (!record || record.consumed || record.bound !== true || record.runtimeProfileId !== runtimeProfileId
       || record.runtimeAccountId !== runtimeAccountId
-      || record.parentPid !== input.parentPid || !secureEqual(record.nonce, input.nonce)
-      || record.expiresAt < this.now()
+      || !secureEqual(record.nonce, input.nonce)
+      || record.expiresAt < this.now()) {
+      throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
+    }
+    if (harnessChild) {
+      // The relay reports its direct parent. It must be the pinned harness
+      // executable, running directly under the still-live bound runtime process.
+      const link = this.getProcessLink(input.parentPid);
+      if (link?.ppid !== record.ancestorPid
+        || path.resolve(link?.executable || "") !== path.resolve(record.parentExecutable)
+        || this.getProcessIdentity(record.ancestorPid) !== record.ancestorIdentity) {
+        throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
+      }
+    } else if (record.parentPid !== input.parentPid
       || this.getProcessIdentity(record.parentPid) !== record.parentIdentity) {
       throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
     }
@@ -329,9 +427,13 @@ class RuntimeMcpGateIssuer {
         throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
       }
       const gate = JSON.parse(this.fs.readFileSync(fd, "utf8"));
-      const expectedKeys = "expiresAt,nonce,parentExecutable,parentPid,runtimeAccountId,runtimeProfileId,schemaVersion,servicePaths";
+      const expectedKeys = harnessChild
+        ? "ancestorExecutable,ancestorPid,expiresAt,nonce,parentExecutable,parentPid,runtimeAccountId,runtimeProfileId,schemaVersion,servicePaths"
+        : "expiresAt,nonce,parentExecutable,parentPid,runtimeAccountId,runtimeProfileId,schemaVersion,servicePaths";
       if (!gate || Object.keys(gate).sort().join(",") !== expectedKeys
-        || gate.schemaVersion !== 2 || gate.parentPid !== record.parentPid
+        || gate.schemaVersion !== (harnessChild ? 3 : 2) || gate.parentPid !== record.parentPid
+        || (harnessChild && (gate.ancestorPid !== record.ancestorPid
+          || gate.ancestorExecutable !== record.ancestorExecutable))
         || gate.runtimeProfileId !== record.runtimeProfileId
         || gate.runtimeAccountId !== record.runtimeAccountId
         || gate.parentExecutable !== record.parentExecutable
@@ -350,6 +452,15 @@ class RuntimeMcpGateIssuer {
       if (fd !== undefined) this.fs.closeSync(fd);
     }
     this.#removeIssued(input.gatePath);
+    if (harnessChild) {
+      // Retain only a bounded in-memory consumption receipt for the owning
+      // host's first prompt. No gate file or reusable authority remains.
+      record.consumed = true;
+      record.dev = null;
+      record.ino = null;
+      record.timer = this.#scheduleExpiry(input.gatePath, Math.max(1, record.renewUntil - this.now()));
+      this.issued.set(input.gatePath, record);
+    }
     return Object.freeze({ consumed: true,
       ...(record.executionRunId ? { executionRunId: record.executionRunId } : {}) });
   }
@@ -384,6 +495,11 @@ class RuntimeMcpGateIssuer {
       }
       return;
     }
+    this.#unlinkBound(target, record);
+  }
+
+  #unlinkBound(target, record) {
+    if (record.dev === null) return;
     try {
       const stat = this.fs.lstatSync(target);
       if (stat.dev === record.dev && stat.ino === record.ino && stat.isFile()
@@ -391,6 +507,70 @@ class RuntimeMcpGateIssuer {
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
+  }
+
+  #scheduleExpiry(target, delayMs) {
+    const timer = this.setTimer(() => {
+      if (this.issued.get(target)?.timer !== timer) return;
+      try {
+        this.#expire(target);
+      } catch {
+        // #removeIssued and a lapse both revoke the in-memory ticket before
+        // touching the file. A cleanup failure is therefore fail-closed, but must
+        // not escape a timer callback and terminate the Service process.
+        try { this.onDiagnostic?.({ code: "RUNTIME_MCP_GATE_CLEANUP_FAILED" }); } catch {}
+      }
+    }, delayMs);
+    timer?.unref?.();
+    return timer;
+  }
+
+  #expire(target) {
+    const record = this.issued.get(target);
+    if (!record) return;
+    if (record.consumed || record.bound !== true || record.renewUntil === null || this.now() >= record.renewUntil) {
+      this.#removeIssued(target);
+      return;
+    }
+    // Lapse: the file goes away, the reservation waits for its first prompt.
+    try {
+      this.#unlinkBound(target, record);
+    } catch (error) {
+      this.issued.delete(target);
+      throw error;
+    }
+    record.dev = null;
+    record.ino = null;
+    record.timer = this.#scheduleExpiry(target, record.renewUntil - this.now());
+  }
+
+  #publish(target, record, boundPid, expiresAt) {
+    const gate = `${JSON.stringify(record.ancestorExecutable !== null ? {
+      schemaVersion: 3,
+      nonce: record.nonce,
+      parentPid: null,
+      parentExecutable: record.parentExecutable,
+      ancestorPid: boundPid,
+      ancestorExecutable: record.ancestorExecutable,
+      runtimeProfileId: record.runtimeProfileId,
+      runtimeAccountId: record.runtimeAccountId,
+      expiresAt,
+      servicePaths: this.servicePaths,
+    } : {
+      schemaVersion: 2,
+      nonce: record.nonce,
+      parentPid: boundPid,
+      parentExecutable: record.parentExecutable,
+      runtimeProfileId: record.runtimeProfileId,
+      runtimeAccountId: record.runtimeAccountId,
+      expiresAt,
+      servicePaths: this.servicePaths,
+    })}\n`;
+    if (Buffer.byteLength(gate, "utf8") > 4096) {
+      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP gate is too large");
+    }
+    atomicWritePrivateFile(target, gate, { trustedRoot: this.paths.trustedRoot, fs: this.fs });
+    return this.fs.lstatSync(target);
   }
 }
 

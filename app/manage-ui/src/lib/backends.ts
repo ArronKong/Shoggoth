@@ -61,7 +61,7 @@ export const FALLBACK_BACKEND_DESCRIPTORS: readonly BackendDescriptor[] = ([
     id: "shoggoth",
     name: "Shoggoth",
     connectionMode: "builtin-service",
-    disconnectable: false,
+    disconnectable: true,
     agentLifecycle: agentLifecycle("builtin-service"),
     surfaces: { ...allSurfaces("builtin-service", { kind: "native" }, { kind: "native" }), nativeCapacity: true, runtimeBindings: true, runtimeStatus: true, sessionRuntimeSwitch: true, runtimeUsage: true },
   },

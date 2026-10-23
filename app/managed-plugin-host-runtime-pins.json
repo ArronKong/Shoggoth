@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "hosts": {
+    "openclaw": {
+      "version": 1,
+      "backendId": "openclaw",
+      "hostVersion": "2026.9.5",
+      "inputTreeSha256": "2ebecebc5b7cf70499ab82ef4315cf63abdb2dfc6e448adb91c4402ee1976cf9",
+      "outputTreeSha256": "ab1e14fdd13c6edf19d9ab3df6428c34d5a4e42b4c34ff78123086a3e5654407",
+      "dependencyTreeSha256": "97e22d78e8b32e21046b94040a6e5f088b7b20d3e086e4ab60fc6a7c90718f5e",
+      "payloadTreeSha256": "0b8fbfc5d2d2e805c0791df9b522083afbef60f1a23dae88aeeb393013fb4969",
+      "payloadManifestSha256": "22ca68199bb33829a345edb26bfabb67be0e20ce0e17eae12f2990dc7381a721",
+      "identityFile": "package.json",
+      "identityFileSha256": "fe24be9aa953aa41d10da28162bd1221034c4a7983f447f4f861b1452156fd85",
+      "dependencyPath": "node_modules",
+      "entryRelative": "openclaw.mjs",
+      "payloadRelative": "openclaw/2026.9.5",
+      "manifestFile": "openclaw-2026.9.5-selection.json",
+      "licenseFiles": [
+        {
+          "path": "LICENSE",
+          "sha256": "73571b25326281d369087f469842c02444fe39faaecebda4d82ed21ff3a1c29d"
+        },
+        {
+          "path": "THIRD_PARTY_NOTICES.md",
+          "sha256": "c1d1bbc550feee74853eba104e347341569cbbbe37a9f77659993ca0766277d5"
+        }
+      ],
+      "interpreter": {
+        "version": "24.21.0",
+        "architecture": "arm64",
+        "platform": "darwin",
+        "sha256": "e4b5a3af0e05c75de2eae013904145f40fe7fc2a6e6f17510128bf45cca4e79b"
+      }
+    }
+  },
+  "provenance": {
+    "scope": "Exact machine-local installed input baseline; no official full dependency archive reproduction claim",
+    "hermes": "Unpinned: full installation contains escaping .venv Python 3.14 links; no candidate or activation allowed"
+  }
+}

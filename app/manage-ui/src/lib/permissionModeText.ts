@@ -3,6 +3,13 @@ import type { ChatPermissionModeOption } from "../types";
 
 // Match catalog prose exactly: runtimes can share a mode ID but describe different policies.
 const permissionTextKeys = new Map<string, string>([
+  ["Request approval", "requestApproval"],
+  ["Approve for me", "approveForMe"],
+  ["Ask you when an action needs approval.", "requestApprovalDescription"],
+  ["Review actions automatically and ask you when needed.", "approveForMeDescription"],
+  ["Review workspace file actions automatically; ask before commands and other access.", "workspaceFileReviewDescription"],
+  ["Automatically run workspace files and commands in a sandbox; ask before wider access.", "workspaceExecutionDescription"],
+  ["Allow broad access to files, network, and tools.", "broadAccessDescription"],
   ["Read only", "readOnly"],
   ["Guarded", "guarded"],
   ["Inherit", "inherit"],
@@ -39,6 +46,15 @@ const permissionTextKeys = new Map<string, string>([
   ["Bypass all permission checks.", "bypassDescription"],
   ["Allow workspace changes and ask before broader access.", "workspaceDescription"],
 ]);
+
+export function displayedPermissionMode(mode: string): string {
+  if (["request-approval", "auto-review", "full-access"].includes(mode)) return mode;
+  if (["full", "always-approve", "bypassPermissions", "danger-full-access"].includes(mode)) return "full-access";
+  // Legacy edit-only modes do not provide an approval reviewer. Keep their
+  // restrictions, without presenting the new reviewer as already selected.
+  if (mode === "auto") return "auto-review";
+  return "request-approval";
+}
 
 export function localizePermissionMode(option: ChatPermissionModeOption, t: TFunction): ChatPermissionModeOption {
   const translate = (text: string) => {

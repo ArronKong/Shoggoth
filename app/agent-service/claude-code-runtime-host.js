@@ -1,5 +1,6 @@
 "use strict";
-const { openRuntimeLedger } = require("./runtime-shared-ledger");
+const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
+const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
 
 const { imageAttachments } = require("./chat-attachments");
 
@@ -11,6 +12,7 @@ const { safeSnapshot } = require("./codex-event-snapshot");
 const { trustedImportedSettingSources } = require("./claude-code-native-import");
 const {
   DEFAULT_MCP_TOOL_TIMEOUT_MS,
+  DEFAULT_SERVER_REQUEST_TIMEOUT_MS,
   serverRequestUsesApprovalWait,
 } = require("./interactive-timeouts");
 const { serviceError } = require("./security");
@@ -45,7 +47,7 @@ const SDK_ENV_ALLOWLIST = Object.freeze([
 const AUTH_ERROR_PATTERN = /(?:authentication|not logged in|please log in|login required|oauth|api key|unauthorized|401)/iu;
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
 const MAX_STDERR_BYTES = 256 * 1024;
-const MAX_TURN_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_OUTPUT_MESSAGE_BYTES = 8 * 1024 * 1024;
 const MAX_MODELS = 256;
 const AUTH_CACHE_MS = 30_000;
 const MODEL_CACHE_MS = 5 * 60 * 1_000;
@@ -109,6 +111,7 @@ function inputFingerprint(input) {
   return crypto.createHash("sha256").update(JSON.stringify({
     prompt: input.prompt,
     context: input.context ?? null,
+    ...require("./native-instruction-delivery").turnInstructionFingerprint(input),
     model: input.model ?? null,
     cwd: input.cwd ?? null,
     permissionPolicy: input.permissionPolicy ?? null,
@@ -372,6 +375,7 @@ class ClaudeCodeRuntimeHost {
     if (!this.paths?.stateDir || !this.paths?.trustedRoot) {
       throw hostError("CLAUDE_CODE_HOST_OPTIONS_INVALID", "Claude Code host paths are invalid");
     }
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
     this.binding = runtimeBinding(options.runtimeBinding || {
       runtime: CLAUDE_CODE_RUNTIME,
       runtimeProfileId: options.runtimeProfileId,
@@ -395,7 +399,7 @@ class ClaudeCodeRuntimeHost {
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.onDiagnostic = typeof options.onDiagnostic === "function" ? options.onDiagnostic : null;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
-    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs ?? 310_000;
+    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs ?? DEFAULT_SERVER_REQUEST_TIMEOUT_MS;
     this.acceptanceTimeoutMs = options.acceptanceTimeoutMs ?? 30_000;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 3_000;
     this.killGraceMs = options.killGraceMs ?? 2_000;
@@ -413,7 +417,11 @@ class ClaudeCodeRuntimeHost {
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
       throw hostError("CLAUDE_CODE_HOST_OPTIONS_INVALID", "Claude Code MCP gate issuer is invalid");
     }
-    for (const value of [this.requestTimeoutMs, this.serverRequestTimeoutMs, this.acceptanceTimeoutMs,
+    if (!Number.isSafeInteger(this.serverRequestTimeoutMs) || this.serverRequestTimeoutMs < 100
+      || this.serverRequestTimeoutMs > DEFAULT_SERVER_REQUEST_TIMEOUT_MS) {
+      throw hostError("CLAUDE_CODE_HOST_OPTIONS_INVALID", "Claude Code server request timeout is invalid");
+    }
+    for (const value of [this.requestTimeoutMs, this.acceptanceTimeoutMs,
       this.shutdownGraceMs, this.killGraceMs]) {
       if (!Number.isSafeInteger(value) || value < 100 || value > 10 * 60 * 1_000) {
         throw hostError("CLAUDE_CODE_HOST_OPTIONS_INVALID", "Claude Code host timeout is invalid");
@@ -619,11 +627,12 @@ class ClaudeCodeRuntimeHost {
   }
 
   sessionRead(input) {
-    this._assertReady();
+    const settled = settledRuntimeSession(this, input?.sessionId);
+    if (!settled) this._assertReady();
     if (!plain(input) || !safeString(input.sessionId, 512)) {
       return Promise.reject(hostError("RUNTIME_SESSION_PARAMS_INVALID", "Claude Code read input is invalid"));
     }
-    const session = sessionById(this.ledger.snapshot(), input.sessionId);
+    const session = settled || sessionById(this.ledger.snapshot(), input.sessionId);
     if (!session) {
       return Promise.reject(hostError("RUNTIME_SESSION_NOT_FOUND", "Claude Code session was not found"));
     }
@@ -811,7 +820,7 @@ class ClaudeCodeRuntimeHost {
       toolNames: new Map(),
       toolStarts: new Set(),
       localCommandOutputs: [],
-      outputBytes: 0,
+      localCommandOutputBytes: 0,
       acceptanceTimer: null,
       cwd: session.cwd,
       remoteSessionId: session.remoteSessionId,
@@ -1039,7 +1048,10 @@ class ClaudeCodeRuntimeHost {
       systemPrompt: defined({
         type: "preset",
         preset: "claude_code",
-        append: this.sessionConfigs.get(session.id)?.developerInstructions || undefined,
+        append: require("./native-instruction-delivery").systemInstructions(
+          this.sessionConfigs.get(session.id)?.developerInstructions,
+          require("./native-instruction-delivery").splitTurnInstructions(
+            require("./native-instruction-delivery").turnInstructions(input)).rules) || undefined,
       }),
       spawnClaudeCodeProcess: (spawnOptions) => this._spawnSdkTurnProcess(active, spawnOptions),
       ...(permission.sandbox ? { sandbox: permission.sandbox } : {}),
@@ -1049,7 +1061,9 @@ class ClaudeCodeRuntimeHost {
         ? { resume: active.remoteSessionId }
         : { sessionId: active.remoteSessionId, ...(session.title ? { title: session.title } : {}) }),
     };
-    const prompt = this._promptText(input);
+    const promptParts = this._promptParts(session.id, input);
+    active.promptCommit = promptParts.commit;
+    const prompt = promptParts.text;
     active.inputQueue.push(sdkUserMessage(
       prompt,
       active.userMessageUuid,
@@ -1105,7 +1119,8 @@ class ClaudeCodeRuntimeHost {
     }
     if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 1
       || !child.stdin || !child.stdout || !child.stderr || !child.stdio?.[3]) {
-      try { child?.kill?.("SIGKILL"); } catch {}
+      retireFailedSpawn(child);
+      try { killStartedChild(child, "SIGKILL"); } catch {}
       throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code process pipes are invalid");
     }
     active.child = child;
@@ -1119,7 +1134,7 @@ class ClaudeCodeRuntimeHost {
       child.stdio[3].end("go\n");
       active.inputReleased = true;
     } catch (error) {
-      try { child.kill("SIGKILL"); } catch {}
+      try { killStartedChild(child, "SIGKILL"); } catch {}
       throw error;
     }
     return child;
@@ -1223,11 +1238,16 @@ class ClaudeCodeRuntimeHost {
       return false;
     }
     if (message.type === "system" && message.subtype === "local_command_output") {
-      if (!safeString(message.content, MAX_TURN_OUTPUT_BYTES, { empty: true })) {
+      if (typeof message.content === "string") this._validateOutputChunk(message.content);
+      if (!safeString(message.content, MAX_OUTPUT_MESSAGE_BYTES, { empty: true })) {
         throw hostError("CLAUDE_CODE_STREAM_EVENT_INVALID", "Claude Code command output is invalid");
       }
       this._acceptActive(active);
-      this._appendOutput(active, message.content);
+      const retainedBytes = active.localCommandOutputBytes + Buffer.byteLength(message.content, "utf8");
+      if (retainedBytes > MAX_OUTPUT_MESSAGE_BYTES) {
+        throw hostError("CLAUDE_CODE_TURN_OUTPUT_TOO_LARGE", "Claude Code retained command output is too large");
+      }
+      active.localCommandOutputBytes = retainedBytes;
       if (message.content.length === 0) return false;
       if (active.localCommandOutputs.length >= 1023) {
         throw hostError("CLAUDE_CODE_TURN_OUTPUT_TOO_LARGE", "Claude Code emitted too many command outputs");
@@ -1274,7 +1294,7 @@ class ClaudeCodeRuntimeHost {
     if (event.type === "content_block_delta") {
       const delta = event.delta;
       if (delta?.type === "text_delta" && typeof delta.text === "string") {
-        this._appendOutput(active, delta.text);
+        this._validateOutputChunk(delta.text);
         this._publish({
           known: true,
           method: "claude-code/content_block_delta",
@@ -1285,7 +1305,7 @@ class ClaudeCodeRuntimeHost {
         });
       } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
         const text = delta.thinking;
-        this._appendOutput(active, text);
+        this._validateOutputChunk(text);
         this._publish({
           known: true,
           method: "claude-code/thinking_delta",
@@ -1299,14 +1319,25 @@ class ClaudeCodeRuntimeHost {
       // It is neither user-visible reasoning nor text output.
       return;
     }
-    if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
-      this._publishToolStart(active, event.content_block);
-    }
+    // A partial tool_use block starts with input:{} while input_json_delta is
+    // still being generated. Publish once from the complete assistant message
+    // below, before execution, so de-duplication cannot discard its arguments.
   }
 
   _onAssistantMessage(active, message) {
     const content = message.message?.content;
     if (!Array.isArray(content)) return;
+    const progressCall = content.find(block => block?.type === "tool_use" && safeString(block.id, 512));
+    if (progressCall && !(active.publicProgressMessages ||= new Set()).has(progressCall.id)) {
+      const text = content.filter(block => block?.type === "text" && typeof block.text === "string")
+        .map(block => block.text).join("");
+      if (text) {
+        this._validateOutputChunk(text);
+        active.publicProgressMessages.add(progressCall.id);
+        this._publish({ known: true, method: "claude-code/assistant", type: "text",
+          sessionId: active.sessionId, turnId: active.turnId, text, phase: "commentary" });
+      }
+    }
     for (const block of content) {
       if (block?.type === "tool_use") this._publishToolStart(active, block);
     }
@@ -1363,7 +1394,7 @@ class ClaudeCodeRuntimeHost {
         kind: toolKind(block.name),
         name: block.name,
         status: "in_progress",
-        input: safeSnapshot(block.input ?? {}, { maxSnapshotBytes: 64 * 1024 }),
+        input: safeSnapshot(block.input ?? {}, { registeredSecrets: this.registeredSecrets, maxSnapshotBytes: 64 * 1024 }),
       },
     });
   }
@@ -1396,7 +1427,7 @@ class ClaudeCodeRuntimeHost {
         turnId: active.turnId,
         itemId: options.toolUseID,
         grantRoot: active.cwd,
-        reason: options.title || options.decisionReason || `${toolName} requires approval`,
+        reason: options.title || options.decisionReason || undefined,
         sessionApprovalAvailable: sessionPermissions.length > 0,
       }
       : {
@@ -1408,7 +1439,7 @@ class ClaudeCodeRuntimeHost {
             maxSnapshotBytes: 8 * 1024,
           }))})`,
         cwd: active.cwd,
-        reason: options.title || options.decisionReason || `${toolName} requires approval`,
+        reason: options.title || options.decisionReason || undefined,
         sessionApprovalAvailable: sessionPermissions.length > 0,
       };
     params.toolName = toolName;
@@ -1555,6 +1586,7 @@ class ClaudeCodeRuntimeHost {
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
     active.accepted = true;
+    active.promptCommit?.();
     this.profileState.authenticated = true;
     this.profileState.credentialPresent = true;
     this.profileState.authCheckedAt = timestamp;
@@ -1568,7 +1600,7 @@ class ClaudeCodeRuntimeHost {
     const timestamp = this.now();
     const responseId = responseIdFor(active, result);
     const response = typeof result.result === "string" ? result.result : "";
-    if (Buffer.byteLength(response, "utf8") > MAX_TURN_OUTPUT_BYTES) {
+    if (Buffer.byteLength(response, "utf8") > MAX_OUTPUT_MESSAGE_BYTES) {
       this._failActive(active, hostError(
         "CLAUDE_CODE_TURN_OUTPUT_TOO_LARGE",
         "Claude Code response is too large",
@@ -1711,7 +1743,7 @@ class ClaudeCodeRuntimeHost {
     try {
       if (this.controlProcessGroups.has(child) && Number.isSafeInteger(child.pid) && child.pid > 1) {
         this.killProcessGroup(child.pid, signal);
-      } else child.kill(signal);
+      } else killStartedChild(child, signal);
     } catch {}
   }
 
@@ -1721,35 +1753,209 @@ class ClaudeCodeRuntimeHost {
     }
   }
 
-  _appendOutput(active, text) {
-    active.outputBytes += Buffer.byteLength(text, "utf8");
-    if (active.outputBytes > MAX_TURN_OUTPUT_BYTES) {
-      throw hostError("CLAUDE_CODE_TURN_OUTPUT_TOO_LARGE", "Claude Code response is too large");
+  _validateOutputChunk(text) {
+    // Text/thinking deltas are delivered and released. Their lifetime sum is
+    // not retained memory; bound individual chunks and stored results instead.
+    if (Buffer.byteLength(text, "utf8") > MAX_OUTPUT_MESSAGE_BYTES) {
+      throw hostError("CLAUDE_CODE_TURN_OUTPUT_TOO_LARGE", "Claude Code output chunk is too large");
     }
+  }
+
+  async _withModelOnlyQuery(input, signal, work, transportPlan) {
+    this._assertReady();
+    if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+    // An empty, open stream lets the SDK answer control requests without
+    // starting a model turn. Generation enqueues one message only after its
+    // caller's control requests and Product source fence have succeeded.
+    // Discover native controls before choosing a legacy budget transport. A
+    // non-adaptive family can still expose native effort in its SDK catalog.
+    const transport = transportPlan || require("./claude-memory-model-settings").planClaudeMemoryTransport(input.execution, null);
+    const messages = new AsyncMessageQueue(), canceled = makeDeferred();
+    const abortController = new AbortController(), owned = new Map();
+    let query, closed = false;
+    const close = () => {
+      closed = true;
+      messages.close();
+      abortController.abort();
+      try { query?.close?.(); } catch {}
+      canceled.reject(hostError("MODEL_ONLY_CANCELED", "Model task canceled"));
+    };
+    const record = { query: { close } };
+    this.controlQueries.add(record);
+    signal.addEventListener("abort", close, { once: true });
+    const check = () => {
+      this._assertReady();
+      if (closed || signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+      input.assertCurrent?.();
+    };
+    const wait = async pending => { const value = await Promise.race([pending, canceled.promise]); check(); return value; };
+    const remaining = () => [...owned.keys()].filter(child => this.controlProcesses.has(child));
+    const waitForExit = async () => {
+      const children = remaining();
+      if (!children.length) return;
+      let timer;
+      try {
+        await Promise.race([
+          Promise.all(children.map(child => owned.get(child).promise)),
+          new Promise(resolve => { timer = setTimeout(resolve, Math.min(this.killGraceMs, 2_000)); }),
+        ]);
+      } finally { clearTimeout(timer); }
+    };
+    try {
+      query = this.sdk.query({ prompt: messages, options: {
+        cwd: this.userHome, pathToClaudeCodeExecutable: this.binaryPath,
+        env: { ...this._spawnEnvironment(), ...transport.thinkingEnv }, settingSources: [], strictMcpConfig: true,
+        mcpServers: {}, skills: [], tools: [], allowedTools: [], persistSession: false,
+        permissionMode: "dontAsk", maxTurns: 1, abortController,
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.onText ? { includePartialMessages: true } : {}),
+        canUseTool: async () => ({ behavior: "deny", message: "Tool-free model task" }),
+        spawnClaudeCodeProcess: options => {
+          check();
+          const child = this._spawnSdkControlProcess(options, transport);
+          const done = this.controlProcesses.get(child);
+          if (done) owned.set(child, done);
+          return child;
+        },
+      } });
+      check();
+      return await work({ query, messages, check, wait, transport });
+    } finally {
+      signal.removeEventListener("abort", close);
+      close();
+      for (const child of remaining()) this._signalControlProcess(child, "SIGTERM");
+      await waitForExit();
+      for (const child of remaining()) this._signalControlProcess(child, "SIGKILL");
+      await waitForExit();
+      this.controlQueries.delete(record);
+      if (remaining().length) {
+        this.cleanupIncomplete = true;
+        throw hostError("RUNTIME_STOP_UNCONFIRMED", "Model worker did not stop");
+      }
+    }
+  }
+
+  async resolveModelOnly(input) {
+    const { runBoundedModelResolution, validateModelResolution } = require("./runtime-model-resolution");
+    return runBoundedModelResolution(input, async signal => {
+      try {
+        return await this._withModelOnlyQuery(input, signal, async ({ query, wait }) => {
+          if (typeof query?.getSettings !== "function") throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Claude Code applied model is unavailable");
+          const settings = await wait(Promise.resolve().then(() => query.getSettings()));
+          // Never return raw settings or claim the SDK attested an API vendor.
+          return validateModelResolution({ model: settings?.applied?.model, provider: CLAUDE_CODE_RUNTIME });
+        });
+      } catch (error) {
+        if (["MODEL_ONLY_CANCELED", "RUNTIME_HOST_TERMINATED", "RUNTIME_STOP_UNCONFIRMED"].includes(error?.code)) throw error;
+        throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Claude Code applied model is unavailable");
+      }
+    });
+  }
+
+  async _prepareMemoryModelSettings(input, control) {
+    const { projectClaudeMemorySettings: project, describeClaudeMemoryModel: describe,
+      resolveClaudeMemoryExecution: resolve, assertClaudeMemorySettings: assertSettings } = require("./claude-memory-model-settings");
+    const { query, wait, check } = control;
+    const unavailable = () => hostError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Claude Code model settings unavailable");
+    for (const method of ["getSettings", "supportedModels", "applyFlagSettings", "setMaxThinkingTokens"]) {
+      if (typeof query?.[method] !== "function") throw unavailable();
+    }
+    // SDK control errors can contain raw settings. Sanitize only SDK failures;
+    // a Product fence error must retain its own code and lifecycle semantics.
+    const call = action => wait(Promise.resolve().then(async () => {
+      check();
+      try { return await action(); } catch { throw unavailable(); }
+    }));
+    const before = project(await call(() => query.getSettings()));
+    const model = describe(before, await call(() => query.supportedModels()), input.model);
+    let resolved = resolve(input.execution, model);
+    if (resolved.thinkingBudgetRequested !== undefined
+      && (control.transport.model !== model.model
+        || control.transport.thinkingBudgetRequested !== resolved.thinkingBudgetRequested)) {
+      // The catalog selected a CLI budget request rather than native effort.
+      // Retire this prompt-free discovery process before starting one bound to
+      // the actual canonical model and its upstream budget request.
+      return Object.freeze({ restartModel: model.model,
+        transport: require("./claude-memory-model-settings").planClaudeMemoryTransport(input.execution, model.model) });
+    }
+    if (resolved.thinkingBudgetRequested === undefined && control.transport.thinkingBudgetRequested !== null) throw unavailable();
+    await call(() => query.applyFlagSettings({ alwaysThinkingEnabled: resolved.thinkingEnabled,
+      ...(resolved.effort === undefined ? {} : { effortLevel: resolved.effort }),
+      ...(resolved.fastMode === undefined ? {} : { fastMode: resolved.fastMode }) }));
+    // Budget controls acknowledge the request, not an applied-budget receipt.
+    // Keep native adaptive/effort controls on their existing null/zero path.
+    await call(() => query.setMaxThinkingTokens(resolved.thinkingBudgetRequested
+      ?? (resolved.thinkingEnabled ? null : 0)));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const after = project(await call(() => query.getSettings()));
+      assertSettings(after, model, resolved); check();
+      const latest = resolve(input.execution, model);
+      if (latest.fastMode === resolved.fastMode) return model.model;
+      resolved = latest;
+      await call(() => query.applyFlagSettings({ fastMode: resolved.fastMode }));
+    }
+    throw unavailable();
   }
 
   async generateModelOnly(input) {
     return require("./runtime-model-only").runBoundedModelOnly(input, async signal => {
-      const query = this.sdk.query({ prompt: input.prompt, options: {
-        cwd: this.userHome, pathToClaudeCodeExecutable: this.binaryPath,
-        env: this._spawnEnvironment(), settingSources: [], strictMcpConfig: true,
-        mcpServers: {}, skills: [], tools: [], allowedTools: [], persistSession: false,
-        permissionMode: "dontAsk", maxTurns: 1, ...(input.model ? { model: input.model } : {}),
-        canUseTool: async () => ({ behavior: "deny", message: "Tool-free model task" }),
-        spawnClaudeCodeProcess: options => this._spawnSdkControlProcess(options),
-      } });
-      const record = { query }; this.controlQueries.add(record);
-      const abort = () => { try { query.close(); } catch {} };
-      signal.addEventListener("abort", abort, { once: true });
-      try {
-        for await (const event of query) {
-          if (event.type !== "result") continue;
-          if (event.is_error || event.subtype !== "success") throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model task failed");
-          return { text: event.result, model: Object.keys(event.modelUsage || {})[0] || input.model,
-            provider: null, usage: usageFromResult(event) };
-        }
-        throw hostError("MODEL_ONLY_ACCEPTANCE_UNKNOWN", "Model task disconnected");
-      } finally { signal.removeEventListener("abort", abort); abort(); this.controlQueries.delete(record); }
+      let selectedInput = input, transport;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const outcome = await this._withModelOnlyQuery(selectedInput, signal, async control => {
+          const { query, messages, check, wait } = control;
+          const prepared = selectedInput.execution ? await this._prepareMemoryModelSettings(selectedInput, control) : selectedInput.model;
+          if (prepared?.restartModel) return prepared;
+          const appliedModel = prepared;
+          check();
+          messages.push(sdkUserMessage(input.prompt, crypto.randomUUID(), "", undefined));
+          let text = "";
+          const iterator = query[Symbol.asyncIterator]();
+          while (true) {
+            const next = await wait(iterator.next());
+            if (next.done) break;
+            const event = next.value;
+            if (event.type === "stream_event") {
+              const part = event.event;
+              if (part?.type === "message_start") { text = ""; input.onText?.(text); }
+              if (part?.type === "content_block_delta" && part.delta?.type === "text_delta") {
+                const delta = part.delta.text;
+                if (!safeString(delta, 32 * 1024, { empty: true })
+                  || Buffer.byteLength(text) + Buffer.byteLength(delta) > 32 * 1024) {
+                  throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model output too large");
+                }
+                text += delta; input.onText?.(text);
+              }
+              if (part?.type === "content_block_start" && part.content_block?.type === "tool_use") {
+                input.onText?.(""); throw hostError("MODEL_ONLY_TOOLS_FORBIDDEN", "Tool-free contract violated");
+              }
+            }
+            if (event.type === "assistant" && Array.isArray(event.message?.content)) {
+              if (event.message.content.some(block => block.type === "tool_use")) {
+                input.onText?.(""); throw hostError("MODEL_ONLY_TOOLS_FORBIDDEN", "Tool-free contract violated");
+              }
+              text = event.message.content.filter(block => block.type === "text").map(block => block.text).join("");
+              if (!safeString(text, 32 * 1024, { empty: true })) throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model output too large");
+              input.onText?.(text);
+            }
+            if (event.type !== "result") continue;
+            if (event.is_error || event.subtype !== "success") throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model task failed");
+            const reportedModels = Object.keys(event.modelUsage || {});
+            if (input.execution && reportedModels.some(model => model !== appliedModel)) {
+              input.onText?.("");
+              throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "Model task selection changed");
+            }
+            return { text: event.result, model: reportedModels[0] || appliedModel,
+              provider: null, usage: usageFromResult(event) };
+          }
+          throw hostError("MODEL_ONLY_ACCEPTANCE_UNKNOWN", "Model task disconnected");
+        }, transport);
+        if (!outcome?.restartModel) return outcome;
+        if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+        input.assertCurrent?.();
+        selectedInput = { ...input, model: outcome.restartModel };
+        transport = outcome.transport;
+      }
+      throw hostError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Claude Code model settings unavailable");
     });
   }
 
@@ -1879,7 +2085,7 @@ class ClaudeCodeRuntimeHost {
     }
   }
 
-  _spawnSdkControlProcess(options) {
+  _spawnSdkControlProcess(options, transport) {
     if (!Array.isArray(options.args)) {
       throw hostError("CLAUDE_CODE_PROCESS_SPAWN_FAILED", "Claude Code SDK control process is invalid");
     }
@@ -1892,9 +2098,16 @@ class ClaudeCodeRuntimeHost {
     }
     let child;
     try {
+      const env = this._sdkEnvironment(options.env);
+      // These values come only from this query's frozen upstream request plan.
+      // Arbitrary SDK environment values remain filtered by _sdkEnvironment.
+      for (const key of ["MAX_THINKING_TOKENS", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"]) {
+        const value = transport?.thinkingEnv[key];
+        if (value !== undefined) env[key] = value;
+      }
       child = this.spawnProcess(command, options.args, {
         cwd: options.cwd || this.workspace || this.userHome,
-        env: this._sdkEnvironment(options.env),
+        env,
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
         signal: options.signal,
@@ -1918,7 +2131,9 @@ class ClaudeCodeRuntimeHost {
       if (this.controlProcesses.delete(child)) done.resolve();
     };
     child.once("exit", finish);
-    child.once("error", finish);
+    // An error from kill()/IPC does not prove that an already spawned child
+    // exited. Only a spawn failure without a PID can settle on error alone.
+    child.once("error", () => { if (!Number.isSafeInteger(child.pid) || child.pid < 1) finish(); });
     return done.promise;
   }
 
@@ -1972,6 +2187,7 @@ class ClaudeCodeRuntimeHost {
         turns: session.turns.map((turn) => ({
           id: turn.id,
           status: turn.status,
+          ...(turn.errorCode ? { errorCode: turn.errorCode } : {}),
           itemsView: "full",
           items: turn.acceptance !== "accepted" ? [] : [
             { type: "userMessage", clientId: turn.operationId },
@@ -1988,13 +2204,21 @@ class ClaudeCodeRuntimeHost {
     });
   }
 
-  _promptText(input) {
+  _promptText(input) { return this._promptParts(null, input).text; }
+
+  _promptParts(sessionId, input) {
     if (Array.isArray(this.commandCatalog)
-      && parseRuntimeCommand(input.prompt, this.commandCatalog)) return input.prompt.trim();
-    const blocks = [];
-    if (typeof input.context === "string" && input.context.length > 0) blocks.push(input.context);
+      && parseRuntimeCommand(input.prompt, this.commandCatalog)) {
+      if (sessionId !== null) this.promptLedger?.reset(sessionId);
+      return { text: input.prompt.trim(), commit() {} };
+    }
+    const delivery = require("./native-instruction-delivery");
+    const { blocks, commit } = delivery.promptBlocks(sessionId === null ? null : this.promptLedger, sessionId, {
+      context: typeof input.context === "string" ? input.context : "",
+      run: delivery.splitTurnInstructions(delivery.turnInstructions(input)).run,
+    });
     blocks.push(`CURRENT USER REQUEST\n${input.prompt}`);
-    return blocks.join("\n\n");
+    return { text: blocks.join("\n\n"), commit };
   }
 
   _spawnEnvironment() {
@@ -2063,7 +2287,7 @@ class ClaudeCodeRuntimeHost {
       const append = (current, chunk, maxBytes) => {
         const next = `${current}${Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk)}`;
         if (Buffer.byteLength(next, "utf8") > maxBytes) {
-          try { child.kill("SIGKILL"); } catch {}
+          try { killStartedChild(child, "SIGKILL"); } catch {}
           finish(() => reject(hostError(
             "CLAUDE_CODE_CONTROL_OUTPUT_TOO_LARGE",
             "Claude Code control output is too large",
@@ -2080,7 +2304,7 @@ class ClaudeCodeRuntimeHost {
       ))));
       child.once("close", (code, signal) => finish(() => resolve({ code, signal, stdout, stderr })));
       const timer = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch {}
+        try { killStartedChild(child, "SIGKILL"); } catch {}
         finish(() => reject(hostError(
           "CLAUDE_CODE_CONTROL_TIMEOUT",
           "Claude Code control command timed out",

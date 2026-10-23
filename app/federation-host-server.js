@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
+const { FEDERATION_RUN_ERROR_CODES, federationRunErrorCode } = require("./federation-run-error");
 const {
   FEDERATION_MAX_FRAME_BYTES,
   FEDERATION_PROTOCOL_VERSION,
@@ -10,7 +11,7 @@ const {
   validateFederationParams,
   validateFederationResult,
 } = require("./federation-host-protocol");
-const { EXTERNAL_INSPIRATION_METHODS } = require("./external-inspiration-protocol");
+const { EXTERNAL_INSPIRATION_METHODS, GROUP_EXTERNAL_METHODS, EXTERNAL_EXECUTION_METHODS } = require("./external-inspiration-protocol");
 const { atomicWritePrivateFile } = require("./agent-service/private-file");
 const {
   ensurePrivateDirectoryTree,
@@ -18,13 +19,17 @@ const {
   serviceError,
 } = require("./agent-service/security");
 
+const { AppStateHostReader } = require("./app-state-host-reader");
+const { AppManagementHost } = require("./app-management-host");
+
 const MAX_OPERATIONS = 1024;
 const PUBLIC_ERROR_CODES = new Set([
+  ...FEDERATION_RUN_ERROR_CODES,
   "APP_HOST_INVALID_REQUEST", "APP_HOST_UNAVAILABLE", "BACKEND_UNAVAILABLE",
   "AGENT_NOT_FOUND", "AGENT_OPERATION_FAILED", "AGENT_RUN_TIMEOUT",
   "FEDERATION_OPERATION_CONFLICT", "FEDERATION_RESPONSE_INVALID",
   "FEDERATION_TASK_NOT_FOUND", "FEDERATION_TASK_STATE_CONFLICT",
-  "FEDERATION_COMMIT_UNCERTAIN",
+  "FEDERATION_COMMIT_UNCERTAIN", "APP_MANAGE_RESOURCE_CHANGED", "APP_MANAGE_OUTCOME_UNKNOWN", "APP_MANAGE_CAPACITY", "APP_MANAGE_OPERATION_UNSUPPORTED", "APP_STATE_CURSOR_INVALID", "APP_STATE_CURSOR_EXPIRED", "APP_STATE_RESPONSE_TOO_LARGE",
 ]);
 
 function exactObject(value, fields) {
@@ -201,11 +206,11 @@ async function terminalRun(backend, agentId, prompt, timeoutMs) {
     };
     const timer = setTimeout(() => finish(hostError("AGENT_RUN_TIMEOUT")), timeoutMs);
     const hooks = {
-      final: (output, errored) => finish(errored ? hostError("AGENT_OPERATION_FAILED") : null, output),
-      error: () => finish(hostError("AGENT_OPERATION_FAILED")),
+      final: (output, errored) => finish(errored ? hostError(federationRunErrorCode(output)) : null, output),
+      error: (error) => finish(hostError(federationRunErrorCode(error))),
     };
     Promise.resolve(backend.sendMessage(sessionKey, prompt, undefined, hooks, {}))
-      .catch(() => finish(hostError("AGENT_OPERATION_FAILED")));
+      .catch((error) => finish(hostError(federationRunErrorCode(error))));
   });
 }
 
@@ -215,13 +220,14 @@ function createFederationHostServer(options = {}) {
     || !options.registry || typeof options.registry.getStatus !== "function"
     || typeof options.registry.getBackend !== "function"
     || (options.delegateRun !== undefined && typeof options.delegateRun !== "function")
+    || (options.groupToolCapability !== undefined && typeof options.groupToolCapability !== "function")
     || (options.taskRunner !== undefined && (!options.taskRunner
       || ["run", "message", "get", "cancel"].some(
         (method) => typeof options.taskRunner[method] !== "function",
       )))
-    || (options.inspirationRunner !== undefined && (!options.inspirationRunner
+    || ["inspirationRunner", "groupRunner"].some((name) => options[name] !== undefined && (!options[name]
       || ["prepare", "start", "get", "respond", "cancel", "reset"].some(
-        (method) => typeof options.inspirationRunner[method] !== "function",
+        (method) => typeof options[name][method] !== "function",
       )))) {
     throw new TypeError("Federation Host 配置无效");
   }
@@ -230,6 +236,8 @@ function createFederationHostServer(options = {}) {
   const delegateRun = options.delegateRun || null;
   const taskRunner = options.taskRunner || null;
   const inspirationRunner = options.inspirationRunner || null;
+  const groupRunner = options.groupRunner || null;
+  const groupToolCapability = options.groupToolCapability || (() => false);
   const sockets = new Set();
   const operations = new Map();
   let server = null;
@@ -275,13 +283,39 @@ function createFederationHostServer(options = {}) {
     throw hostError("FEDERATION_RESPONSE_INVALID");
   };
 
+  const appManagement = new AppManagementHost({ paths, now: options.now });
+  const appStateReader = new AppStateHostReader({ registry, getStatuses: statuses, now: options.now });
   const perform = async (method, params) => {
+    if (method === "chat.ui.click.verify") return options.verifyChatUiClick?.(params) || { approved: false };
+    if (method === "app.state.read") return appStateReader.read(params);
+    if (method === "notification.context") return { focused: options.getNotificationContext?.().focused === true };
     if (method === "inspiration.executor.ready") {
       return registry.getInspirationExecutorReadiness(params);
     }
     if (EXTERNAL_INSPIRATION_METHODS.includes(method)) {
       if (!inspirationRunner) throw hostError("APP_HOST_UNAVAILABLE");
       return inspirationRunner[method.split(".").at(-1)](params);
+    }
+    if (method === "group.hosts.list") return groupRunner?.members ? groupRunner.members() : { members: [] };
+    if (method === "group.host.test") { if (!groupRunner?.testPeer) throw hostError("APP_HOST_UNAVAILABLE"); return groupRunner.testPeer(params.peer); }
+    if (method === "group.external.member" || method === "group.external.role" || method === "group.external.models") {
+      if (!groupRunner) throw hostError("APP_HOST_UNAVAILABLE"); return groupRunner[method.split(".").at(-1)](params);
+    }
+    if (method === "group.external.capabilities") {
+      const { groupCapabilities } = require("./agent-service/group-capabilities");
+      let value = groupCapabilities();
+      try { value = await groupRunner?.capabilities?.(params) ?? value; } catch {}
+      let proof = null;
+      try { if (!params.peerId) proof = await groupToolCapability(params); } catch {}
+      const tools = proof === true || proof?.groupTools === true || value.groupTools === true;
+      if (params.protocolVersion !== 2) return { groupTools: tools };
+      const actions = value.collaborationActions === true || proof?.protocolVersion === 2 && proof?.collaborationActions === true;
+      return groupCapabilities({ ...value, groupTools: tools, collaborationActions: tools && actions,
+        formalTasks: value.formalTasks && tools, protocolVersion: actions ? 2 : value.protocolVersion });
+    }
+    if (GROUP_EXTERNAL_METHODS.includes(method) || method === "group.external.draft" || method === "group.external.activity" || method === "group.external.result" || method === "group.external.artifact" || method === "group.external.metadata") {
+      if (!groupRunner) throw hostError("APP_HOST_UNAVAILABLE");
+      return groupRunner[method.split(".").at(-1)](params);
     }
     if (method === "backend.status") return { backends: await statuses() };
     if (method === "backend.require") {
@@ -295,6 +329,7 @@ function createFederationHostServer(options = {}) {
       return { task };
     }
     const { backend } = await requireBackend(params.backendId);
+    if (method === "app.manage") return appManagement.run(params, backend);
     if (method === "federation.run" || method === "federation.message") {
       if (!taskRunner) throw hostError("APP_HOST_UNAVAILABLE");
       const task = method === "federation.run"
@@ -389,20 +424,29 @@ function createFederationHostServer(options = {}) {
 
   const route = async (method, params) => {
     if (!Object.prototype.hasOwnProperty.call(params, "operationId")) return perform(method, params);
-    const key = EXTERNAL_INSPIRATION_METHODS.includes(method) ? `${method}:${params.operationId}` : params.operationId;
+    const key = EXTERNAL_EXECUTION_METHODS.includes(method) ? `${method}:${params.operationId}` : params.operationId;
     const fingerprint = operationFingerprint(method, params);
+    const groupStop = method === "group.external.cancel" && params.stopGroup === true;
     const existing = operations.get(key);
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw hostError("FEDERATION_OPERATION_CONFLICT");
-      return existing.promise;
+      // A terminal selected execution does not prove that the entire Host has
+      // stopped. Keep its binding, share in-flight work and recheck incomplete
+      // or failed stop receipts under the same cancellation identity.
+      if (!groupStop || !existing.settled || existing.stopConfirmed) return existing.promise;
     }
-    if (operations.size >= MAX_OPERATIONS) {
+    if (!existing && operations.size >= MAX_OPERATIONS) {
       const settled = [...operations.entries()].find(([, record]) => record.settled);
       if (!settled) throw hostError("APP_HOST_UNAVAILABLE");
       operations.delete(settled[0]);
     }
-    const record = { fingerprint, settled: false, promise: null };
+    const record = { fingerprint, settled: false, stopConfirmed: false, promise: null };
     record.promise = Promise.resolve().then(() => perform(method, params))
+      .then(result => {
+        record.stopConfirmed = groupStop && result?.groupStopped === true
+          && validateFederationResult(method, result, params);
+        return result;
+      })
       .finally(() => { record.settled = true; });
     operations.set(key, record);
     return record.promise;
@@ -446,8 +490,8 @@ function createFederationHostServer(options = {}) {
         if (!validateFederationResult(request.method, result, request.params)) throw hostError("FEDERATION_RESPONSE_INVALID");
         write(socket, { id, ok: true, result });
       }).catch((error) => {
-        const code = PUBLIC_ERROR_CODES.has(error?.code) || (EXTERNAL_INSPIRATION_METHODS.includes(request.method)
-          && isPublicExternalInspirationError(error?.code)) ? error.code : "AGENT_OPERATION_FAILED";
+        const code = PUBLIC_ERROR_CODES.has(error?.code) || (request.method.startsWith("group.") || EXTERNAL_EXECUTION_METHODS.includes(request.method))
+          && isPublicExternalInspirationError(error?.code) ? error.code : "AGENT_OPERATION_FAILED";
         write(socket, { id, ok: false, error: { code } });
       });
     });
@@ -509,6 +553,7 @@ function createFederationHostServer(options = {}) {
       socketIdentity = null; tokenIdentity = null; token = null; operations.clear();
       try { taskRunner?.reset?.(); } catch {}
       try { await inspirationRunner?.reset(); } catch {}
+      try { await groupRunner?.reset(); } catch {}
     },
   };
 }

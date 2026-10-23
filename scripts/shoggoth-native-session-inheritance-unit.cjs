@@ -26,9 +26,12 @@ test("backend and Service inherit the authoritative selection, even with an expl
   try {
     const profile = f.service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
     const parent = f.service.chatSessionStore.listSessions().find(item => item.profileId === profile.id);
+    assert.equal(parent.permissionMode, "auto-review", "the Agent's initial conversation uses Approve for me");
+    assert.equal(f.backend.getChatCapabilities(profile.agentId).permissions.defaultMode, "auto-review");
+    const parentKey = `agent:${profile.agentId}:${parent.sessionKey}`;
+    await f.backend.setSessionPermission(parentKey, { mode: "request-approval" });
     f.service.chatSessionStore.setModelOverride(parent.sessionKey, "gpt-5.5");
     f.service.chatSessionStore.setModelSettings(parent.sessionKey, { thinkingLevel: "low", serviceTier: null });
-    const parentKey = `agent:${profile.agentId}:${parent.sessionKey}`;
     const childKey = await f.backend.createSession(profile.agentId, { parentSessionKey: parentKey,
       workspace: f.root, model: "ignored-stale-ui-model", modelProvider: "ignored-stale-ui-provider" });
     const child = f.service.chatSessionStore.getSession(childKey.split(":").at(-1));
@@ -37,6 +40,10 @@ test("backend and Service inherit the authoritative selection, even with an expl
     assert.equal(child.runtimeBindingId, parent.runtimeBindingId);
     assert.equal(child.runtimeSessionId, null);
     assert.equal(child.workspace, f.root);
+    assert.equal(child.permissionMode, "request-approval", "the user's choice wins over the creation default");
+    const freshKey = await f.backend.createSession(profile.agentId, { workspace: f.root });
+    assert.equal(f.service.chatSessionStore.getSession(freshKey.split(":").at(-1)).permissionMode, "auto-review",
+      "a new independent session uses the initial default");
     const other = f.service.productStore.listAgentProfiles().find(item => item.id !== profile.id);
     const count = f.service.chatSessionStore.listSessions().length;
     await assert.rejects(f.backend.createSession(other.agentId, { parentSessionKey: parentKey, workspace: f.root }),

@@ -28,11 +28,13 @@ export interface ModelEditorValues {
   contextWindow: string;
   maxTokens: string;
   reasoning: boolean;
+  advanced: string;
 }
 
 type ModelEditorBaseline = Omit<ModelEditorValues, "apiKey">;
 
 export interface EditableModelInput {
+  advanced?: Record<string, unknown>;
   providerKey: string;
   baseUrl?: string;
   api?: string;
@@ -99,6 +101,7 @@ export function createInitialModelEditorState(
     contextWindow: model?.contextWindow == null ? "" : String(model.contextWindow),
     maxTokens: model?.maxTokens == null ? "" : String(model.maxTokens),
     reasoning: model?.reasoning ?? false,
+    advanced: model?.advanced && Object.keys(model.advanced).length ? JSON.stringify(model.advanced, null, 2) : "",
   };
   return {
     mode,
@@ -211,6 +214,10 @@ export function validateModelEditor(state: ModelEditorState): Partial<Record<Mod
   }
   if (fieldSupported("contextWindow") && !isPositiveIntegerText(values.contextWindow)) errors.contextWindow = "context_positive_integer";
   if (fieldSupported("maxTokens") && !isPositiveIntegerText(values.maxTokens)) errors.maxTokens = "max_tokens_positive_integer";
+  if (state.capabilities.configurationDraft && values.advanced.trim()) {
+    try { const value = JSON.parse(values.advanced); if (!value || typeof value !== "object" || Array.isArray(value)) throw Error(); }
+    catch { errors.advanced = "invalid_json"; }
+  }
   return errors;
 }
 
@@ -221,6 +228,12 @@ function optionalPositiveInteger(value: string): number | undefined {
 // 只在提交边界裁剪字符串和解析数字，输入期间不破坏用户正在编辑的文本。
 export function toModelChangeSpec(state: ModelEditorState): ModelChangeSpec {
   const { values } = state;
+  const advanced = state.capabilities.configurationDraft && values.advanced.trim() ? JSON.parse(values.advanced) : {};
+  if (state.capabilities.configurationDraft && state.mode === "edit") {
+    for (const field of ["name", "contextWindow", "maxTokens"] as const) {
+      if (state.baseline[field].trim() && !values[field].trim()) advanced[field] = null;
+    }
+  }
   // 后端显式声明不支持的字段既不展示，也不得进入请求摘要或 journal。
   const fieldSupported = (field: string) => state.capabilities.fields?.[field] !== false;
   return {
@@ -240,6 +253,7 @@ export function toModelChangeSpec(state: ModelEditorState): ModelChangeSpec {
         ? { maxTokens: optionalPositiveInteger(values.maxTokens) }
         : {}),
       ...(fieldSupported("reasoning") ? { reasoning: values.reasoning } : {}),
+      ...(state.capabilities.configurationDraft && Object.keys(advanced).length ? { advanced } : {}),
     },
   };
 }

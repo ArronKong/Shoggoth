@@ -1,0 +1,13 @@
+"use strict";
+const fs=require("node:fs"),path=require("node:path"),{createAgentService}=require("../app/agent-service/server"),{resolveServicePaths}=require("../app/agent-service/paths");
+const [root,phase]=process.argv.slice(2),paths=resolveServicePaths({trustedRoot:root,stateRoot:path.join(root,"s"),profileRoot:path.join(root,"p"),cacheRoot:path.join(root,"c")});
+const safeStorage={isEncryptionAvailable:()=>true,encryptString:v=>Buffer.from(v),decryptString:v=>Buffer.from(v).toString()};
+const tempFiles=new Map();const nativeOpen=fs.openSync,nativeClose=fs.closeSync,nativeFsync=fs.fsyncSync,nativeLink=fs.linkSync,nativeRename=fs.renameSync;
+fs.openSync=function(target,...args){const fd=nativeOpen.call(this,target,...args);if(typeof target==="string"&&target.endsWith(".tmp"))tempFiles.set(fd,target);return fd;};
+fs.closeSync=function(fd,...args){tempFiles.delete(fd);return nativeClose.call(this,fd,...args);};
+fs.fsyncSync=function(fd,...args){const result=nativeFsync.call(this,fd,...args),target=tempFiles.get(fd);
+ const files={"initial-temp":"/memory-native-initialization-v1/owner.json.tmp","staging-memory-temp":"/workspace-staging/MEMORY.md.tmp","staging-user-temp":"/workspace-staging/USER.md.tmp","staging-marker-temp":"/workspace-staging/.shoggoth-native-owner.json.tmp"};
+ if(files[phase]&&target?.endsWith(files[phase]))process.exit(84);return result;};
+fs.linkSync=function(from,to,...args){const result=nativeLink.call(this,from,to,...args);if(typeof to==="string"&&to.includes("/memory-native-initialization-v1/owner.json.backup-")&&((phase==="prepared-backup"&&JSON.parse(fs.readFileSync(from+".tmp","utf8")).phase==="prepared")||(phase==="active-backup"&&JSON.parse(fs.readFileSync(from+".tmp","utf8")).phase==="active")))process.exit(84);return result;};
+fs.renameSync=function(from,to,...args){const result=nativeRename.call(this,from,to,...args);if(typeof to==="string"&&to.endsWith("/memory-native-initialization-v1/owner.json")&&fs.readdirSync(path.dirname(to)).some(name=>name.startsWith("owner.json.backup-"))&&((phase==="prepared-published"&&JSON.parse(fs.readFileSync(to,"utf8")).phase==="prepared")||(phase==="active-published"&&JSON.parse(fs.readFileSync(to,"utf8")).phase==="active")))process.exit(84);return result;};
+createAgentService({paths,safeStorage,prewarmMcpAuth:false,parentEnv:{},runtimeStorageHomedir:root,memoryCoreConfig:{memory:{search:{provider:"none",rememberAcrossConversations:false}}}}).start().then(()=>{process.stderr.write("Expected atomic crash did not occur");process.exitCode=1;},error=>{process.stderr.write(String(error.stack));process.exitCode=1;});

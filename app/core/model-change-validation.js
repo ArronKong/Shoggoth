@@ -4,6 +4,34 @@ const { createHash } = require("node:crypto");
 const { assertHttpUrl, normalizeOptionalString } = require("./model-validation");
 
 const PROVIDER_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MODEL_BASIC_FIELDS = new Set(["id", "name", "contextWindow", "maxTokens", "reasoning", "catalogId"]);
+const MODEL_SECRET_FIELD = /^(?:key|token|__proto__|prototype|constructor|.*(?:authorization|api[-_]?key|password|secret|access[-_]?token|refresh[-_]?token|auth[-_]?token|cookie))$/i;
+
+/** Transport validation only. The actual Gateway schema remains authoritative. */
+function normalizeModelAdvanced(value, { projection = false, scope = "model" } = {}) {
+  const basicFields = scope === "provider" ? new Set(["baseUrl", "api", "models", "apiKey"]) : MODEL_BASIC_FIELDS;
+  const budget = { nodes: 4000, bytes: 65536 };
+  const visit = (input, depth = 0) => {
+    if (--budget.nodes < 0 || depth > 16) throw new ModelChangeError("invalid_model_metadata", "模型高级参数过大");
+    if (input === null || typeof input === "boolean" || typeof input === "number" && Number.isFinite(input)) return input;
+    if (typeof input === "string") { budget.bytes -= Buffer.byteLength(input); if (budget.bytes < 0) throw new ModelChangeError("invalid_model_metadata", "模型高级参数过大"); return input; }
+    if (Array.isArray(input)) return input.map(item => visit(item, depth + 1));
+    assertPlainInputObject(input);
+    const result = {};
+    for (const [key, child] of Object.entries(input)) {
+      if (MODEL_SECRET_FIELD.test(key)) { if (projection) continue; throw new ModelChangeError("secret_in_model_metadata", "凭据请通过 API Key 设置保存"); }
+      budget.bytes -= Buffer.byteLength(key);
+      if (budget.bytes < 0) throw new ModelChangeError("invalid_model_metadata", "模型高级参数过大");
+      if (depth === 0 && basicFields.has(key) && !(scope === "model" && child === null && ["name", "contextWindow", "maxTokens", "reasoning"].includes(key))) {
+        if (projection) continue; throw new ModelChangeError("invalid_model_metadata", "基本字段请在表单中编辑");
+      }
+      result[key] = visit(child, depth + 1);
+    }
+    return result;
+  };
+  assertPlainInputObject(value);
+  return Object.freeze(visit(value));
+}
 
 /**
  * 模型变更请求的字段级错误；稳定 code 供 API 层映射，消息绝不包含用户输入的 secret。
@@ -108,6 +136,7 @@ function normalizeModelChangeRequest(input = {}) {
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(typeof input.model?.reasoning === "boolean" ? { reasoning: input.model.reasoning } : {}),
+    ...(input.model?.advanced !== undefined ? { advanced: normalizeModelAdvanced(input.model.advanced) } : {}),
   });
   const safeSpec = Object.freeze({
     kind,
@@ -119,9 +148,60 @@ function normalizeModelChangeRequest(input = {}) {
     baseUrl,
     api: optionalString(input.api, "api"),
     model,
+    ...normalizeModelCredentialScope(input),
   });
   const apiKey = typeof input.apiKey === "string" ? input.apiKey : "";
   return Object.freeze({ safeSpec, secretEnvelope: apiKey ? Object.freeze({ apiKey }) : null });
+}
+
+function normalizeModelAuthAgent(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > 128 || /[\0\r\n]/u.test(value)) {
+    throw new ModelChangeError("invalid_agent", "Agent 身份无效", { field: "agentId" });
+  }
+  return value.trim();
+}
+
+function normalizeModelCredentialScope(input) {
+  if (input.credentialScope !== undefined && input.credentialScope !== "provider") {
+    throw new ModelChangeError("invalid_credential_scope", "凭据范围无效", { field: "credentialScope" });
+  }
+  if (input.credentialScope && input.agentId !== undefined) {
+    throw new ModelChangeError("conflicting_fields", "统一凭据不能同时指定 Agent", { field: "agentId" });
+  }
+  return input.credentialScope ? { credentialScope: "provider" }
+    : input.agentId ? { agentId: normalizeModelAuthAgent(input.agentId) } : {};
+}
+
+/** A whole endpoint form is one official config draft, with Key kept separate. */
+function normalizeModelProviderDraft(input = {}) {
+  input = assertPlainInputObject(input);
+  const providerKey = requiredString(input.providerKey, "providerKey");
+  if (!PROVIDER_KEY_RE.test(providerKey)) throw new ModelChangeError("invalid_provider", "Provider 身份无效");
+  const patch = {};
+  if (input.advanced !== undefined) patch.advanced = normalizeModelAdvanced(input.advanced, { scope: "provider" });
+  for (const field of ["baseUrl", "api"]) {
+    const value = optionalString(input[field], field);
+    if (value) patch[field] = value;
+  }
+  if (patch.baseUrl) assertHttpUrl(patch.baseUrl, "baseUrl");
+  const renameTo = optionalString(input.renameTo, "renameTo");
+  if (renameTo && !PROVIDER_KEY_RE.test(renameTo)) throw new ModelChangeError("invalid_provider", "Provider 身份无效");
+  if (renameTo && renameTo !== providerKey) patch.renameTo = renameTo;
+  if (!Array.isArray(input.models) || input.models.length > 1000) throw new ModelChangeError("invalid_input", "模型列表无效");
+  patch.modelIds = [...new Set(input.models.map(value => {
+    if (typeof value !== "string" || !value.trim() || value.length > 512 || /[\0\r\n]/u.test(value)) {
+      throw new ModelChangeError("invalid_input", "模型 ID 无效");
+    }
+    return value.trim();
+  }))];
+  const baseHash = optionalString(input.baseHash, "baseHash");
+  const safeSpec = Object.freeze({ kind: "save-provider", providerKey, sourceModelId: null,
+    sourceKey: modelIdentityKey(providerKey, "*"), targetKey: modelIdentityKey(patch.renameTo || providerKey, "*"),
+    target: null, patch: Object.freeze(patch),
+    ...normalizeModelCredentialScope(input),
+    ...(baseHash ? { baseHash } : {}),
+  });
+  return { safeSpec, secretEnvelope: typeof input.apiKey === "string" && input.apiKey ? Object.freeze({ apiKey: input.apiKey }) : null };
 }
 
 /** 将删除模型或删除 Provider 的输入转换为明确且不可变的删除契约。 */
@@ -163,5 +243,9 @@ module.exports = {
   modelIdentityKey,
   normalizeModelChangeRequest,
   normalizeModelDeleteSpec,
+  normalizeModelProviderDraft,
+  normalizeModelAuthAgent,
+  normalizeModelCredentialScope,
+  normalizeModelAdvanced,
   modelChangeRequestDigest,
 };

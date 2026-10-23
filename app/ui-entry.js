@@ -8,18 +8,24 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog, Notification, nativeTheme, powerMonitor, Tray, nativeImage, globalShortcut, screen, session, systemPreferences, clipboard } = require("electron");
+const { app, BrowserWindow, WebContentsView, webContents, Menu, shell, ipcMain, dialog, Notification, nativeTheme, powerMonitor, Tray, nativeImage, globalShortcut, screen, session, systemPreferences, clipboard } = require("electron");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const { startStaticServer } = require("./static-server");
+const { revealHostPath } = require("./host-path-reveal");
+const { createDesktopSystemIssueReporter } = require("./desktop-system-issue");
+const { resolveDesktopProxyPort } = require("./desktop-dev-proxy-port");
 const { assertUiHostOpsCoverage } = require("./host-capability-manifest");
 const { DesktopPluginAppHost } = require("./desktop-plugin-app-host");
 const pluginAppHost = new DesktopPluginAppHost({ BrowserWindow, ipcMain, session });
+const { DesktopChatUiHost } = require("./desktop-chat-ui-host");
+const { registerDesktopChatUiIpc } = require("./desktop-chat-ui-ipc");
+const chatUiHost = new DesktopChatUiHost({ WebContentsView, ipcMain, session, webContents });
 const { scanInstalledClis, resolveCliVersion } = require("./cli-scanner");
 const { startProxyGateway } = require("./core/proxy-gateway");
-const { HermesBackend } = require("./core/hermes-backend");
+const { HermesBackend, agentIdForProfile } = require("./core/hermes-backend");
 const { ShoggothBackend } = require("./core/shoggoth-backend");
 const { escapeInvisibleJsonCharacters } = require("./core/plugin-approval-display");
 const { BackendRegistry } = require("./core/backend-registry");
@@ -31,9 +37,19 @@ const { createLaunchAgentController } = require("./agent-service/launch-agent");
 const { PROTOCOL_VERSION } = require("./agent-service/server");
 const { createProductHostController } = require("./product-host-controller");
 const { createFederationHostServer } = require("./federation-host-server");
+const { notificationPolicy } = require("./agent-service/notification-policy");
 const { ExternalInspirationRunner } = require("./external-inspiration-runner");
 const { createFederationMcpRegistrar } = require("./federation-mcp-registrar");
 const { createExternalPluginAdapterRegistrar } = require("./external-plugin-adapter-registrar");
+const { createManagedOpenClawProductHost } = require("./managed-openclaw-product-host");
+const { createManagedOpenClawProviderCredentialBroker } = require("./managed-openclaw-provider-credential-broker");
+const { createManagedOpenClawProductAuth } = require("./managed-openclaw-product-auth");
+const { createManagedOpenClawEndpointGeneration } = require("./managed-openclaw-endpoint-generation");
+const { resolveManagedOpenClawProductInputs } = require("./managed-openclaw-product-inputs");
+const { createManagedHermesProductHost } = require("./managed-hermes-product-host");
+const { createManagedHermesProductAuth } = require("./managed-hermes-product-auth");
+const { resolveManagedHermesProductInputs } = require("./managed-hermes-product-inputs");
+const { installManagedPluginHostQuitGate } = require("./managed-plugin-host-quit");
 const {
   createFederatedAgentTaskRunner,
   runFederatedAgentViaBroker,
@@ -44,14 +60,21 @@ const { createDashboardJournal } = require("./core/dashboard-journal");
 const { createKanbanProjectStore } = require("./core/kanban-project-store");
 const { createModelChangeJournal } = require("./core/model-change-journal");
 const { ModelChangeCoordinator } = require("./core/model-change-coordinator");
+const { ModelOperationRecoveryStore } = require("./model-operation-recovery-store");
+const { registerDesktopModelOperationRecoveryIpc } = require("./desktop-model-operation-recovery-ipc");
+const { DesktopGroupSendJournalStore } = require("./desktop-group-send-journal-store");
+const { registerDesktopGroupSendJournalIpc } = require("./desktop-group-send-journal-ipc");
 const { createWorkAdmissionGate } = require("./core/work-admission-gate");
 const { createOpenClawRuntimeApply } = require("./core/openclaw-runtime-apply");
 const { createOpenClawModelChange } = require("./core/openclaw-model-change");
+const { createManagedOpenClawModelApply } = require("./core/managed-openclaw-model-apply");
 const { createOpenclawHostController } = require("./openclaw-host");
 const { createHermesModelMutationGate } = require("./core/hermes-model-mutation");
 const { createHermesModelChange } = require("./core/hermes-model-change");
 const { registerDesktopSecretIpc } = require("./desktop-secret-ipc");
 const { registerDesktopComputerIpc } = require("./desktop-computer-ipc");
+const { registerDesktopBrowserIpc } = require("./desktop-browser-ipc");
+const { createDesktopComputerServiceRestart } = require("./desktop-computer-service-restart");
 const { registerDesktopInspirationIpc } = require("./desktop-inspiration-ipc");
 const { createDesktopInspirationController } = require("./desktop-inspiration-controller");
 const { createDesktopBackendStopAction } = require("./desktop-backend-stop");
@@ -60,6 +83,7 @@ const { registerDesktopTypewriterSoundIpc } = require("./desktop-typewriter-soun
 const { registerDesktopChatClipboardIpc } = require("./desktop-chat-clipboard-ipc");
 const { registerDesktopTelemetryIpc } = require("./desktop-telemetry-ipc");
 const { createDesktopAppUpdateController } = require("./desktop-app-update");
+const { createDesktopAppInstallPreparation } = require("./desktop-app-install-preparation");
 const { createProductTelemetry } = require("./core/product-telemetry");
 const productTelemetryBuildConfig = require("./product-telemetry-build-config");
 const { createBoardWidgetHost } = require("./board-widget-host");
@@ -68,7 +92,6 @@ const {
   createBoardWidgetNavigationGuard,
   shouldOpenExternalUrl,
 } = require("./board-widget-navigation");
-const { createCuaSdkLoader } = require("./cua-sdk-loader");
 
 // GUI-launched macOS apps inherit a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
 // with no Homebrew/npm/cargo/… dirs, so the CLI page's $PATH scan finds 0
@@ -134,7 +157,7 @@ const configStore = createConfigStore(CONFIG_PATH, { defaultGatewayUrl: "ws://12
 // straight to the gateway; the proxy relays every frame to the real gateway
 // (config.gatewayUrl) and injects foreign (Hermes) agents into agents.list so
 // they appear in the contact list. OpenClaw traffic is otherwise untouched.
-const GATEWAY_PROXY_PORT = 18790;
+const GATEWAY_PROXY_PORT = resolveDesktopProxyPort({ isPackaged: app.isPackaged });
 const APP_VERSION = require("../package.json").version;
 
 // Supported UI languages. "" means "follow system" (we resolve via app.getLocale
@@ -205,6 +228,7 @@ function nativeT(locale, key, params) {
 }
 
 let mainWindow = null;
+let desktopSystemIssues = null;
 let desktopInspiration = null;
 let disposeMicrophoneIpc = null;
 let disposeTypewriterSoundIpc = null;
@@ -212,10 +236,24 @@ let disposeChatClipboardIpc = null;
 let appIsQuitting = false;
 let staticServer = null;
 let federationHost = null;
+// 最近一次 shoggoth MCP 静默注册的结果：群聊据此判断外部成员有没有群工具通道（D2）。
+let federationMcpRegistration = null;
 let serverOrigin = null;
 let gatewayProxy = null;
 let gatewayProxyUrl = null;
 let appBackendRegistry = null;
+let modelOperationRecoveryStore = null;
+let modelOperationRecoveryOpening = null;
+let groupSendJournalStore = null;
+let groupSendJournalOpening = null;
+let managedOpenClawProductHost = null;
+let managedOpenClawCredentialBroker = null;
+let managedHermesProductHost = null;
+let openClawEndpointGeneration = 0;
+const openClawCredentialGeneration = createManagedOpenClawEndpointGeneration({
+  getConfig: () => readConfig(), isManaged: () => managedOpenClawProductHost?.isManaged() === true,
+  getOwnerGeneration: () => openClawEndpointGeneration,
+});
 let boardWidgetHost = null;
 let productTelemetry = null;
 let disposeTelemetryIpc = null;
@@ -242,13 +280,14 @@ function writeConfig(config) {
 // save can reconnect ONLY what actually changed. Seeded at startup, refreshed at
 // the end of every applyConfigChange.
 let appliedConfig = null;
+let configApplyQueue = Promise.resolve();
 
 // Which expensive reactions a config change actually requires. A null prev
 // (first apply) conservatively marks everything changed.
 function connectionFieldsChanged(prev, next) {
   return {
-    // OpenClaw socket depends only on the gateway URL (device identity is on-disk).
-    gateway: !prev || prev.gatewayUrl !== next.gatewayUrl,
+    // URL or shared-token changes retire the old credential namespace.
+    gateway: !prev || prev.gatewayUrl !== next.gatewayUrl || prev.token !== next.token,
     // Hermes re-spawns / re-points on a mode switch or an edited remote list.
     hermes:
       !prev ||
@@ -267,66 +306,89 @@ function connectionFieldsChanged(prev, next) {
 // failed reconnect surfaces on the next request.
 async function applyConfigChange() {
   const next = configStore.read();
-  const diff = connectionFieldsChanged(appliedConfig, next);
+  const applying = configApplyQueue.then(async () => {
+    const diff = connectionFieldsChanged(appliedConfig, next);
 
-  // Native chrome (titlebar, scrollbars, dialogs) tracks the theme every time —
-  // cheap, and needs neither a reconnect nor a reload.
-  try {
-    nativeTheme.themeSource = next.theme || "light";
-  } catch {
-    /* ignore */
-  }
+    // Native chrome (titlebar, scrollbars, dialogs) tracks the theme every time —
+    // cheap, and needs neither a reconnect nor a reload.
+    try {
+      nativeTheme.themeSource = next.theme || "light";
+    } catch {
+      /* ignore */
+    }
 
-  if (appBackendRegistry && diff.gateway) {
-    const oc = appBackendRegistry.backends.get("openclaw");
-    // Drop the OpenClaw socket; the next RPC lazily reconnects using the fresh
-    // gatewayUrl/origin (getUpstreamUrl reads config live).
-    if (oc && typeof oc.stop === "function") {
-      try { await oc.stop(); } catch { /* ignore */ }
-    }
-  }
-  if (appBackendRegistry && diff.hermes && !next.disabledBackends.includes("hermes")) {
-    const hb = appBackendRegistry.backends.get("hermes");
-    // Hermes switches between local-spawn and remote-dashboard mode / edited remotes.
-    // 已断开时跳过——reconfigure 内部 start() 会把用户刚停掉的 dashboards 又拉起来。
-    if (hb && typeof hb.reconfigure === "function") {
-      try { await hb.reconfigure(); } catch { console.error("[hermes] reconfigure failed"); }
-    }
-  }
-  if (appBackendRegistry && diff.backends) {
-    // 断开 → stop（openclaw 断 WS、hermes 停 dashboards/ACP；registry 过滤保证
-    // 之后无人再触达它）；重新连接 → start（openclaw 的 start 是空操作，之后
-    // 首个 RPC 惰性重连）。逐后端 diff，未变的不动。
-    const prevDisabled = new Set(appliedConfig?.disabledBackends || []);
-    const nextDisabled = new Set(next.disabledBackends);
-    for (const [id, backend] of appBackendRegistry.backends) {
-      let disconnectable = false;
-      try { disconnectable = backend.getBackendDescriptor()?.disconnectable === true; } catch {}
-      if (!disconnectable) continue;
-      const was = prevDisabled.has(id);
-      const is = nextDisabled.has(id);
-      if (was === is) continue;
-      try {
-        if (is) await backend.stop();
-        else await appBackendRegistry.start(id);
-      } catch {
-        console.error("[registry] backend lifecycle update failed");
+    if (appBackendRegistry && diff.gateway && !managedOpenClawProductHost?.isManaged()) {
+      openClawEndpointGeneration += 1;
+      gatewayProxy?.invalidateOpenClawUpstream?.();
+      const oc = appBackendRegistry.backends.get("openclaw");
+      // Drop the OpenClaw socket; the next RPC lazily reconnects using the fresh
+      // gatewayUrl/origin (getUpstreamUrl reads config live).
+      if (oc && typeof oc.stop === "function") {
+        try { await oc.stop(); } catch { /* ignore */ }
       }
     }
-  }
+    if (appBackendRegistry && diff.hermes && !managedHermesProductHost?.isManaged() && !next.disabledBackends.includes("hermes")) {
+      const hb = appBackendRegistry.backends.get("hermes");
+      // Hermes switches between local-spawn and remote-dashboard mode / edited remotes.
+      // 已断开时跳过——reconfigure 内部 start() 会把用户刚停掉的 dashboards 又拉起来。
+      if (hb && typeof hb.reconfigure === "function") {
+        try { await hb.reconfigure(); } catch { console.error("[hermes] reconfigure failed"); }
+      }
+    }
+    if (appBackendRegistry && diff.backends) {
+      // 断开 → stop（openclaw 断 WS、hermes 停 dashboards/ACP；registry 过滤保证
+      // 之后无人再触达它）；重新连接 → start（openclaw 的 start 是空操作，之后
+      // 首个 RPC 惰性重连）。逐后端 diff，未变的不动。
+      const prevDisabled = new Set(appliedConfig?.disabledBackends || []);
+      const nextDisabled = new Set(next.disabledBackends);
+      for (const [id, backend] of appBackendRegistry.backends) {
+        let disconnectable = false;
+        try { disconnectable = backend.getBackendDescriptor()?.disconnectable === true; } catch {}
+        // A disconnected built-in service is only hidden; it keeps running.
+        if (!disconnectable || appBackendRegistry.keepsRunningWhenDisconnected(id)) continue;
+        const was = prevDisabled.has(id);
+        const is = nextDisabled.has(id);
+        if (was === is) continue;
+        try {
+          if (id === "openclaw") {
+            openClawEndpointGeneration += 1;
+            gatewayProxy?.invalidateOpenClawUpstream?.();
+          }
+          if (is) {
+            if (id === "openclaw" && managedOpenClawProductHost?.isManaged()) {
+              await managedOpenClawProductHost.suspend({ operationId: `backend-disable-${crypto.randomUUID()}`, timeoutMs: 60000 });
+            } else if (id === "hermes" && managedHermesProductHost?.isManaged()) {
+              await managedHermesProductHost.suspend({ operationId: `backend-disable-${crypto.randomUUID()}`, timeoutMs: 60000 });
+            } else await backend.stop();
+          } else if (id === "openclaw" && managedOpenClawProductHost?.isManaged()) {
+            managedOpenClawProductHost.prepare({ operationId: `backend-enable-${crypto.randomUUID()}` });
+          } else if (id === "hermes" && managedHermesProductHost?.isManaged()) {
+            managedHermesProductHost.prepare({ operationId: `backend-enable-${crypto.randomUUID()}` });
+          } else await appBackendRegistry.start(id);
+        } catch {
+          console.error("[registry] backend lifecycle update failed");
+        }
+      }
+      appBackendRegistry.notifyConnectionsChanged();
+    }
 
-  buildMenu(); // menu labels may depend on locale; cheap to always rebuild.
+    buildMenu(); // menu labels may depend on locale; cheap to always rebuild.
 
-  // stop/reconfigure above refresh the affected transports. Keep the renderer
-  // mounted so an automatic save cannot interrupt later edits or queued writes.
+    // stop/reconfigure above refresh the affected transports. Keep the renderer
+    // mounted so an automatic save cannot interrupt later edits or queued writes.
 
-  appliedConfig = next;
+    appliedConfig = next;
+  });
+  // Preserve every captured save in order. A failed owned stop remains visible
+  // in its host controller, while later saves cannot bypass or overwrite it.
+  configApplyQueue = applying.catch(() => {});
+  return await applying;
 }
 
 // Capabilities the loopback REST plane needs from the Electron host (file
 // reveal/open plus CLI actions). Omitted in the dev harness.
 const hostOps = {
-  reveal: (p) => { try { shell.showItemInFolder(p); return true; } catch { return false; } },
+  reveal: (p) => revealHostPath(p, (absolute) => shell.showItemInFolder(absolute)),
   // Open a path with the OS default handler (agent workspace → Finder). Agent
   // workspaces can be stored tilde-form (Hermes: ~/.hermes/profiles/<p>), which
   // only the shell expands — do it here, the host owns filesystem semantics.
@@ -346,21 +408,22 @@ const hostOps = {
       type: "question",
       title: "安装 Shoggoth Skill",
       message: "请选择 Skill 包的来源格式",
-      detail: "支持包含 SKILL.md 与 skill.json 的本地目录，或同样结构的 ZIP 包。",
-      buttons: ["选择目录", "选择 ZIP", "取消"],
+      detail: "支持通用 SKILL.md 格式的本地目录、ZIP 包或单个 SKILL.md 文件。",
+      buttons: ["选择目录", "选择 ZIP", "选择 SKILL.md", "取消"],
       defaultId: 0,
-      cancelId: 2,
+      cancelId: 3,
       noLink: true,
     });
-    if (kind.response === 2) return null;
+    if (kind.response === 3) return null;
     const result = await dialog.showOpenDialog(mainWindow || undefined, kind.response === 0 ? {
       title: "选择 Shoggoth Skill 包目录",
       properties: ["openDirectory"],
       buttonLabel: "选择 Skill",
     } : {
-      title: "选择 Shoggoth Skill ZIP 包",
+      title: kind.response === 1 ? "选择 Skill ZIP 包" : "选择 SKILL.md 文件",
       properties: ["openFile"],
-      filters: [{ name: "Shoggoth Skill ZIP", extensions: ["zip"] }],
+      filters: kind.response === 1 ? [{ name: "Skill ZIP", extensions: ["zip"] }]
+        : [{ name: "SKILL.md", extensions: ["md"] }],
       buttonLabel: "选择 Skill",
     });
     if (result.canceled || result.filePaths.length !== 1) return null;
@@ -393,11 +456,118 @@ const hostOps = {
       : { kind: "legacy-directory", path: result.filePaths[0],
         format: format.response === 1 ? "claude-plugin" : "codex-plugin", components };
   },
+  selectPluginGmailCredentials: async () => {
+    const result = await dialog.showOpenDialog(mainWindow || undefined, {
+      title: "选择 Google Desktop OAuth 客户端 JSON",
+      properties: ["openFile"], filters: [{ name: "JSON", extensions: ["json"] }],
+      buttonLabel: "导入客户端",
+    });
+    return result.canceled || result.filePaths.length !== 1 ? null : result.filePaths[0];
+  },
   confirmPluginCapability: async (summary) => {
     const clean = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 256);
     const cleanPath = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 4096);
     const connect = summary.action === "connect";
     const oauth = summary.action === "oauth-connect";
+    if (summary.action === "gmail-registration") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "导入 Gmail OAuth 客户端",
+        message: "保存你自己的 Google Desktop OAuth 客户端？",
+        detail: `文件：${cleanPath(summary.path)}\n客户端密钥由本机 gog 保存在系统钥匙串。此操作不会连接邮箱；之后仍须逐个账号登录。`,
+        buttons: ["取消", "导入"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "gmail-capabilities") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "调整 Gmail 工具权限",
+        message: summary.sendEnabled ? "允许草稿、邮箱修改和发送邮件？"
+          : summary.writeEnabled ? "允许草稿和邮箱修改？" : "恢复 Gmail 只读工具？",
+        detail: "权限适用于已连接的 Gmail 账号。永久删除始终关闭；实际工具调用仍需 Agent 的独立授权。",
+        buttons: ["取消", "保存权限"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "gmail-auth") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "连接 Gmail 账号",
+        message: `在浏览器登录 ${clean(summary.email)}？`,
+        detail: "将使用你导入的 Google Desktop OAuth 客户端请求 Gmail 完整权限，以便日后可选择开启写入。连接后的 MCP 工具默认只读，发送和永久删除默认关闭。",
+        buttons: ["取消", "打开 Google 登录"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "gmail-auth-reconcile") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "核验 Gmail 授权恢复",
+        message: `你已在本机核验并清理 ${clean(summary.email)} 的 Shoggoth gog 授权吗？`,
+        detail: "Shoggoth 不会替你删除钥匙串凭据；只有重新检查确认该账号不在 shoggoth 凭据库后，才会解除待核验锁。未清理前请取消。",
+        buttons: ["取消", "重新检查"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "graph-registration") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "配置 Microsoft Graph 客户端",
+        message: "保存你的 Entra 桌面应用客户端 ID？",
+        detail: `客户端 ID：${clean(summary.clientId)}\n本机回调登记：${clean(summary.redirectUrl)}（登录时使用随机端口）\n各卡可能请求的委托权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\nSites.Read.All 允许读取登录用户可访问的所有站点内容。这里只保存公开客户端 ID；各卡仍需分别连接和授权。保存后需要重启 Shoggoth，已保存的客户端不能在这里直接覆盖。`,
+        buttons: ["取消", "保存并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "zoom-registration") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "配置 Zoom OAuth 客户端", message: "保存你的 Zoom 客户端？",
+        detail: `客户端 ID：${clean(summary.clientId)}\n本机回调：${clean(summary.redirectUrl)}\n权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n客户端密钥只提交到本机 Agent Service 并加密保存；保存后需要重新启动 Shoggoth 才能连接 Zoom 账号。已保存的客户端不能在这里直接覆盖。`,
+        buttons: ["取消", "保存并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "lovable-registration") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "登记 Lovable 官方 MCP 客户端",
+        message: "向 Lovable 动态登记这个 Shoggoth 本机客户端？",
+        detail: `官方注册端点：${clean(summary.registrationEndpoint)}\n本机回调：${clean(summary.redirectUrl)}\n申请权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n此步骤会向 Lovable 创建公开 OAuth 客户端登记；不登录账号，也不会授予工具调用权限。登记结果只保存到本机私有目录。保存后重启 Shoggoth，再在已安装能力包中连接账号。原 Codex 托管 app 的能力并未由此等价移植。`,
+        buttons: ["取消", "登记并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "lovable-registration-reconcile") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "核对 Lovable 登记结果",
+        message: "此前向 Lovable 登记客户端的结果尚未确认。是否已人工核对？",
+        detail: `请先检查 Lovable 中此前的客户端登记。若远端已经创建客户端但本机未保存回执，重新登记可能留下另一个远端客户端。\n\n官方注册端点：${clean(summary.registrationEndpoint)}\n\n只有完成核对后，才清除本机待核对记录；此操作本身不会再次联系 Lovable。`,
+        buttons: ["取消", "已核对，允许重新登记"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "higgsfield-registration") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "登记 Higgsfield 官方 MCP 客户端",
+        message: "向 Higgsfield 动态登记这个 Shoggoth 本机客户端？",
+        detail: `官方注册端点：${clean(summary.registrationEndpoint)}\n本机回调：${clean(summary.redirectUrl)}\n申请权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n此步骤会向 Higgsfield 的 Clerk 授权服务器创建公开 OAuth 客户端登记；不登录账号，也不会授予工具调用权限。登记结果只保存到本机私有目录。保存后重启 Shoggoth，再在已安装能力包中连接账号。生成工具及冻结包内 3 个 sandbox Skill 均未开放使用，需另行真实验收。`,
+        buttons: ["取消", "登记并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "higgsfield-registration-reconcile") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "核对 Higgsfield 登记结果",
+        message: "此前向 Higgsfield 登记客户端的结果尚未确认。是否已人工核对？",
+        detail: `请先检查 Higgsfield 中此前的客户端登记。若远端已经创建客户端但本机未保存回执，重新登记可能留下另一个远端客户端。\n\n官方注册端点：${clean(summary.registrationEndpoint)}\n\n只有完成核对后，才清除本机待核对记录；此操作本身不会再次联系 Higgsfield。`,
+        buttons: ["取消", "已核对，允许重新登记"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "slack-registration") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: "配置 Slack 内部应用客户端",
+        message: "保存你自己的 Slack 内部应用客户端 ID？",
+        detail: `客户端 ID：${clean(summary.clientId)}\n本机回调：${clean(summary.redirectUrl)}\n用户权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n请先在你控制的 Slack 内部应用启用 PKCE、登记相同的 localhost 回调，并获得工作区管理员的 MCP 准入。此处只保存公开客户端 ID，不会登录账号或授予工具权限。重启后需单独连接账号；当前独立入口仅开放公共消息搜索，原 Codex 托管连接器及完整 Slack MCP 未移植。`,
+        buttons: ["取消", "保存并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
     if (summary.action === "external-plugin-call") {
       const command = escapeInvisibleJsonCharacters(summary.command);
       const result = await dialog.showMessageBox(mainWindow || undefined, {
@@ -416,10 +586,56 @@ const hostOps = {
       });
       return result.response === 1;
     }
-    if (summary.action === "bearer-connect") {
+    if (summary.action === "plugin-quick-enable") {
+      const interpreterName = kind => kind === "node" ? "Node.js" : "Python";
+      const lines = (Array.isArray(summary.components) ? summary.components : []).slice(0, 16).map(item =>
+        `• ${clean(item.name)}：${/^https?:\/\//iu.test(String(item.target)) ? "连接" : "运行"} ${clean(item.target)}`
+        + (item.interpreter ? `（使用本机 ${interpreterName(item.interpreter)}）` : "")
+        + (Array.isArray(item.missingSecrets) && item.missingSecrets.length
+          ? `（缺少凭据 ${item.missingSecrets.map(clean).join("、")}，本次跳过）` : ""));
+      const unsupported = Array.isArray(summary.unsupported) && summary.unsupported.length
+        ? `\n需在插件页单独连接账号：${summary.unsupported.map(clean).join("、")}` : "";
       const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "连接 GitHub 插件账号", message: "验证并保存 GitHub 令牌？",
-        detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n\n令牌会提交到本机 Agent Service，向 GitHub 验证账号后加密保存，用于连接固定的 GitHub MCP 端点。${summary.reconnect ? "重连会撤销旧连接的工具授权。" : ""}工具仍需单独发现和授权。断开本机连接不会撤销 GitHub 上的令牌。`,
+        type: "warning", title: "一键启用插件",
+        message: `启用 ${clean(summary.package)}${summary.version ? ` ${clean(summary.version)}` : ""}，并允许所有助理使用它的工具？`,
+        detail: `${lines.length ? lines.join("\n") : "此插件没有需要连接的 MCP 服务。"}${unsupported}\n\n确认后会启用插件、按需固定本机解释器、连接上述服务、发现工具并授权给所有助理；标注为破坏性的工具每次调用前仍需确认。可随时在插件页撤销授权或停用。`,
+        buttons: ["取消", "启用"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "plugin-first-party-install") {
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "question", title: "重新安装内置插件",
+        message: `重新安装 Shoggoth 内置插件 ${clean(summary.package)}${summary.version ? ` ${clean(summary.version)}` : ""}？`,
+        detail: "插件随 App 提供。安装后其技能对所有助理启用；MCP 服务仍需在插件页“快速设置”里一键启用。之后随 App 更新自动更新，再次卸载后不会自动重装。",
+        buttons: ["取消", "安装"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "plugin-secret-set" || summary.action === "plugin-secret-clear") {
+      const set = summary.action === "plugin-secret-set";
+      const where = (Array.isArray(summary.destinations) ? summary.destinations : []).slice(0, 16).map(item =>
+        item.kind === "env" ? `${clean(item.component)} 的环境变量 ${clean(item.key)}`
+          : `发往 ${clean(item.origin || item.component)} 的请求头 ${clean(item.key)}`).join("；");
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: set ? "保存插件凭据" : "清除插件凭据",
+        message: set ? `保存 ${clean(summary.name)}，供插件 ${clean(summary.package)} 使用？`
+          : `清除插件 ${clean(summary.package)} 的 ${clean(summary.name)}？`,
+        detail: set ? `仅用于：${where}\n\n凭据加密保存在本机 Agent Service，只注入到上述位置，不会发送给模型或写入会话记录。已有的值会被替换。`
+          : `清除后，依赖它的服务在重新填写前无法连接。`,
+        buttons: ["取消", set ? "保存" : "清除"], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      return result.response === 1;
+    }
+    if (summary.action === "bearer-connect") {
+      const cloudflare = summary.provider === "Cloudflare";
+      const provider = cloudflare ? "Cloudflare" : "GitHub";
+      const verification = cloudflare
+        ? "向 Cloudflare 验证用户 API Token 状态和官方 MCP 工具列表"
+        : "向 GitHub 验证账号";
+      const result = await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning", title: `连接 ${provider} 插件账号`, message: `验证并保存 ${provider} 令牌？`,
+        detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n\n令牌会提交到本机 Agent Service，${verification}后加密保存，用于连接固定的 ${provider} MCP 端点。${summary.reconnect ? "重连会撤销旧连接的工具授权。" : ""}工具仍需单独发现和授权。${cloudflare ? "Cloudflare 的 execute 工具每次调用都需确认。" : ""}断开本机连接不会撤销 ${provider} 上的令牌。`,
         buttons: ["取消", "验证并连接"], defaultId: 0, cancelId: 0, noLink: true,
       });
       return result.response === 1;
@@ -440,8 +656,11 @@ const hostOps = {
     if (summary.action === "mcp-disconnect") {
       const result = await dialog.showMessageBox(mainWindow || undefined, {
         type: "warning", title: "断开插件账号", message: "断开这个插件账号？",
-        detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n受影响的 Agent 绑定：${summary.affectedBindings}\n\n此账号的所有绑定将停用，工具授权将撤销，旧连接和未完成的登录将关闭。插件数据保留。${summary.credentialDisposition === "retained_encrypted_unusable"
-          ? "本地加密凭据保留但不可使用；这不会撤销提供方的远端令牌。" : "此连接没有保存的账号凭据。"}重新连接后需要重新发现工具并授权。`,
+        detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n受影响的 Agent 绑定：${summary.affectedBindings}\n\n此账号的所有绑定将停用，工具授权将撤销，旧连接和未完成的登录将关闭。插件数据保留。${summary.credentialDisposition === "retained_encrypted_shared"
+          ? "加密账号凭据保留在共享存储中；此插件连接不可再使用，但其他单独授权的功能仍可能使用该账号。这不会撤销提供方的远端令牌。"
+          : summary.credentialDisposition === "retained_encrypted_unusable"
+            ? "本地加密凭据保留但不可用于此插件连接；这不会撤销提供方的远端令牌。"
+            : "此连接没有保存的账号凭据。"}重新连接后需要重新发现工具并授权。`,
         buttons: ["取消", "断开账号"], defaultId: 0, cancelId: 0, noLink: true,
       });
       return result.response === 1;
@@ -549,6 +768,7 @@ function createMainWindow() {
       nodeIntegration: false,
       sandbox: true,
       spellcheck: true,
+      devTools: !app.isPackaged,
     },
   });
   const windowForRecovery = mainWindow;
@@ -618,6 +838,7 @@ function createMainWindow() {
       : _sameDocument;
     if (isMainFrame && isSameDocument !== true
       && !boardWidgetNavigation.isBoardFrame(details?.initiator)) {
+      desktopSystemIssues?.reset();
       void desktopBoardWidgetIpc.revokeOwner(windowWebContentsId);
     }
   });
@@ -662,7 +883,8 @@ function createMainWindow() {
     try {
       // write 是 read-merge-write：只覆盖 windowBounds，用户在设置页刚存的字段不受影响。
       configStore.write({ windowBounds: { width, height } });
-    } catch {
+    } catch (error) {
+      desktopSystemIssues?.report(error);
       // 尺寸记忆是锦上添花，写失败不该影响使用。
       console.warn("[window] persist bounds failed");
     }
@@ -683,7 +905,10 @@ function createMainWindow() {
     mainWindow = null;
   });
 
-  void mainWindow.loadURL(serverOrigin);
+  void mainWindow.loadURL(serverOrigin).then(() => {
+    const id = pendingProactiveNotice; pendingProactiveNotice = null;
+    if (id) void openProactiveNotice(id).catch(() => {});
+  });
 }
 
 function showMainWindow() {
@@ -728,7 +953,8 @@ function setLocaleAndApply(localeRaw) {
   }
   // 原生菜单直接写配置时不会经过 applyConfigChange；同步运行态快照，避免
   // 下一次仅保存主题/通知时把旧 locale 误判成新变化并重复 reload。
-  appliedConfig = writeConfig({ ...current, locale: value });
+  writeConfig({ ...current, locale: value });
+  appliedConfig = { ...(appliedConfig || current), locale: value };
   buildMenu();
   if (mainWindow) {
     mainWindow.webContents.reload();
@@ -818,7 +1044,7 @@ function buildMenu() {
         { role: "zoomOut" },
         { type: "separator" },
         { role: "togglefullscreen" },
-        { role: "toggleDevTools" },
+        ...(!app.isPackaged ? [{ role: "toggleDevTools" }] : []),
       ],
     },
     {
@@ -844,18 +1070,44 @@ ipcMain.on("openclaw:get-config", (event) => {
   };
 });
 
+const modelOperationRecoveryIpc = registerDesktopModelOperationRecoveryIpc({
+  ipcMain,
+  getMainWindow: () => mainWindow,
+  getUiOrigin: () => serverOrigin,
+  async getStore() {
+    const store = modelOperationRecoveryStore, opening = modelOperationRecoveryOpening;
+    if (appIsQuitting || !store || !opening) throw new Error("model recovery store unavailable");
+    await opening;
+    if (appIsQuitting || modelOperationRecoveryStore !== store) throw new Error("model recovery store retired");
+    return store;
+  },
+});
+
+const groupSendJournalIpc = registerDesktopGroupSendJournalIpc({
+  ipcMain, getMainWindow: () => mainWindow, getUiOrigin: () => serverOrigin,
+  async getStore({ readonlyRecovery = false } = {}) {
+    const store = groupSendJournalStore, opening = groupSendJournalOpening;
+    if (appIsQuitting || !store || !opening) throw new Error("group journal unavailable");
+    try { await opening; } catch (error) { if (!readonlyRecovery || store.mode !== "failed") throw error; }
+    if (appIsQuitting || groupSendJournalStore !== store) throw new Error("group journal retired");
+    return store;
+  },
+  async getAuthorityScope({ groupId }) {
+    if (!appBackendRegistry) throw new Error("group owner unavailable");
+    const result = await appBackendRegistry.lookupGroupChatSend(groupId,
+      { clientMessageId: `journal-observation:${crypto.randomUUID()}` });
+    return result.ownerScope;
+  },
+  async lookupSend({ groupId, ...query }) {
+    if (!appBackendRegistry) throw new Error("group owner unavailable");
+    return appBackendRegistry.lookupGroupChatSend(groupId, query);
+  },
+});
+
 registerDesktopSecretIpc({
   ipcMain,
   getMainWindow: () => mainWindow,
   getRegistry: () => appBackendRegistry,
-});
-registerDesktopComputerIpc({
-  ipcMain,
-  getMainWindow: () => mainWindow,
-  sdkLoader: createCuaSdkLoader({
-    packaged: app.isPackaged === true,
-    resourcesPath: process.resourcesPath,
-  }),
 });
 registerDesktopInspirationIpc({ ipcMain, dialog, getMainWindow: () => mainWindow,
   getDesktopWindow: () => desktopInspiration?.getWindow() });
@@ -866,6 +1118,9 @@ const desktopBoardWidgetIpc = registerDesktopBoardWidgetIpc({
   getHost: () => boardWidgetHost,
   navigationGuard: boardWidgetNavigation,
 });
+
+const desktopChatUiIpc = registerDesktopChatUiIpc({ ipcMain, getMainWindow: () => mainWindow,
+  getUiOrigin: () => serverOrigin, getRegistry: () => appBackendRegistry, host: chatUiHost });
 
 ipcMain.handle("openclaw:scan-cli-tools", async () => {
   try {
@@ -898,14 +1153,34 @@ ipcMain.handle("openclaw:resolve-cli-version", async (_event, cliPath) => {
 // config toggle (config-store is the single source) and suppresses while the
 // window is focused (you're already looking at the app). A click routes back to
 // the renderer via "openclaw:open-target" so the Notifier can navigate.
+function proactiveNoticeArgument(argv) {
+  const value = argv.find(arg => typeof arg === "string" && /^--shoggoth-open-notice=notice-[a-f0-9]{64}$/u.test(arg));
+  return value ? value.slice("--shoggoth-open-notice=".length) : null;
+}
+let pendingProactiveNotice = proactiveNoticeArgument(process.argv);
+let proactiveUiRegistry = null;
+async function openProactiveNotice(id) {
+  if (!mainWindow || !proactiveUiRegistry || !id) return;
+  const { notice } = await proactiveUiRegistry.proactiveCall("proactive.notice.get", { id });
+  if (!notice.sessionKey) return;
+  let cursor = null, profile = null;
+  for (let page = 0; page < 82; page++) {
+    const result = await proactiveUiRegistry.proactiveCall("proactive.agents.list", { cursor, limit: 50 });
+    profile = result.agents.find(agent => agent.id === notice.profileId);
+    if (profile || !result.nextCursor) break; cursor = result.nextCursor;
+  }
+  if (!profile || !mainWindow) return;
+  const destination = `/chat?backend=${encodeURIComponent(profile.backendId)}&session=${encodeURIComponent(`agent:${profile.agentId}:${notice.sessionKey}`)}`;
+  mainWindow.webContents.send("openclaw:navigate", destination);
+  mainWindow.show(); mainWindow.focus();
+}
+
 ipcMain.handle("openclaw:notify", (_event, opts) => {
   const o = opts && typeof opts === "object" ? opts : {};
   const category = typeof o.category === "string" ? o.category : "";
-  if (!["chat", "cron", "task"].includes(category)) return false;
+  if (!["chat", "cron", "task", "proactive"].includes(category)) return false;
   if (!Notification.isSupported()) return false;
-  const prefs = readConfig().notifications || {};
-  if (!prefs[category]) return false; // category toggled off
-  if (mainWindow && mainWindow.isFocused()) return false; // foreground → don't interrupt
+  if (!notificationPolicy({ config: readConfig(), category, focused: mainWindow?.isFocused() === true }).allowed) return false;
   const title = typeof o.title === "string" && o.title ? o.title : "OpenClaw";
   const body = typeof o.body === "string" ? o.body : "";
   const note = new Notification({ title, body });
@@ -929,7 +1204,15 @@ if (!gotLock) {
 } else {
   let hostStopping = false;
   let hostGeneration = 0;
-  app.on("second-instance", () => {
+  const systemIssues = createDesktopSystemIssueReporter({
+    ipcMain, getMainWindow: () => mainWindow, getUiOrigin: () => {
+      try { return new URL(serverOrigin).origin; } catch { return null; }
+    },
+  });
+  desktopSystemIssues = systemIssues;
+  app.on("second-instance", (_event, argv) => {
+    const noticeId = proactiveNoticeArgument(argv || []);
+    if (noticeId) void openProactiveNotice(noticeId).catch(() => {});
     if (mainWindow) {
       if (mainWindow.isMinimized()) {
         mainWindow.restore();
@@ -972,7 +1255,8 @@ if (!gotLock) {
 
     // 统一认证解析器:管理面(OpenClawBackend)与聊天面(chat broker)共用一份
     // 凭证(config.token / 本机 operator 身份 / loopback 网关 token / 已存设备令牌)。
-    const authResolver = createAuthResolver({
+    const shoggothServicePaths = getBootstrappedDesktopPaths(app);
+    const legacyOpenClawAuth = createAuthResolver({
       getConfig: () => readConfig(),
       credentialsDir: path.join(app.getPath("userData"), "credentials"),
     });
@@ -985,30 +1269,140 @@ if (!gotLock) {
     const openclawHostController = createOpenclawHostController();
     const hermesModelMutationGate = createHermesModelMutationGate();
     const registry = new BackendRegistry();
-    const openclawBackend = new OpenClawBackend({
-      getUpstreamUrl: () => readConfig().gatewayUrl,
+    proactiveUiRegistry = registry;
+    let openclawBackend, managedOpenClawModelChange;
+    const withdrawOpenClawEndpoint = async () => {
+      openClawEndpointGeneration += 1;
+      gatewayProxy?.invalidateOpenClawUpstream?.();
+      await openclawBackend?.stop();
+    };
+    managedOpenClawProductHost = createManagedOpenClawProductHost({
+      getMode: () => readConfig().openclawPluginHostMode,
+      getEnabled: () => !readConfig().disabledBackends.includes("openclaw"),
+      setManagedMode: () => configStore.write({ openclawPluginHostMode: "managed" }),
+      createClient: () => {
+        const input = resolveManagedOpenClawProductInputs({ openclawBin: resolveOpenclawBin() });
+        require("./agent-service/external-plugin-adapter-auth").ensureCredential(shoggothServicePaths, "openclaw");
+        return require("./managed-openclaw-host-client").createManagedOpenClawHostClient({
+          ...input, stateDir: shoggothServicePaths.stateDir,
+          serviceUserDataRoot: shoggothServicePaths.userDataRoot,
+          resourcesRoot: app.isPackaged ? path.join(process.resourcesPath, "external-plugin-host-patches")
+            : path.join(__dirname, "..", "resources", "external-plugin-host-patches"),
+          adapterResourcesRoot: app.isPackaged ? path.join(process.resourcesPath, "external-plugin-adapters")
+            : path.join(__dirname, "..", "resources", "external-plugin-adapters"),
+          gatewayConfiguration: { tools: { alsoAllow: ["shoggoth_capability_search", "shoggoth_skill_read",
+            "shoggoth_skill_file_read", "shoggoth_plugin_resource_read", "shoggoth_plugin_call"] } },
+        });
+      },
+      onUnavailable: async () => {
+        managedOpenClawModelChange?.runtimeApply.invalidateConnectionGeneration();
+        await withdrawOpenClawEndpoint();
+      },
+      // The transaction's own pause withdraws the ordinary Gateway socket but
+      // keeps the private operation lease valid. Foreign lifecycle changes use
+      // onUnavailable above and retire the Core scope as well.
+      onModelUnavailable: withdrawOpenClawEndpoint,
+      onOwnedExit: proof => managedOpenClawModelChange?.releaseAfterOwnedExit(proof),
+      onReady: async () => { await registry.start("openclaw"); },
+    });
+    const authResolver = createManagedOpenClawProductAuth({ host: managedOpenClawProductHost,
+      legacyResolver: legacyOpenClawAuth,
+      getGatewayGeneration: () => openClawCredentialGeneration.current(),
+      credentialsDir: path.join(app.getPath("userData"), "credentials", "managed-openclaw"),
+      dataRoot: path.join(shoggothServicePaths.stateDir, "external-plugin-host-data", "openclaw", "v1"),
+    });
+    const openClawUpstreamUrl = () => managedOpenClawProductHost.isManaged()
+      ? managedOpenClawProductHost.getEndpoint()?.url || "" : readConfig().gatewayUrl;
+    openclawBackend = new OpenClawBackend({
+      getUpstreamUrl: openClawUpstreamUrl,
       getOrigin: () => serverOrigin,
       authResolver,
+      getManagedExecution: () => managedOpenClawProductHost.getExecution(),
+      restartManagedHost: async () => {
+        const operationId = `model-restart-${crypto.randomUUID()}`;
+        managedOpenClawProductHost.restart({ operationId });
+        const result = await managedOpenClawProductHost.waitForOperation(operationId);
+        if (result.state !== "running") throw Object.assign(new Error("受管 OpenClaw 重启未验证"), {
+          code: result.errorCode || "MANAGED_HOST_ENDPOINT_UNVERIFIED",
+        });
+      },
     });
-    const openclawRuntimeApply = createOpenClawRuntimeApply({
-      backend: openclawBackend,
-      admissionGate: workAdmissionGate,
-      supervisor: openclawHostController,
+    const legacyOpenClawRuntimeApply = createOpenClawRuntimeApply({
+      backend: openclawBackend, admissionGate: workAdmissionGate, supervisor: openclawHostController,
     });
-    openclawBackend.attachModelRuntimeApply(openclawRuntimeApply);
-    const openclawModelChange = createOpenClawModelChange({
-      backend: openclawBackend,
-      runtimeApply: openclawRuntimeApply,
+    const legacyOpenClawModelChange = createOpenClawModelChange({
+      backend: openclawBackend, runtimeApply: legacyOpenClawRuntimeApply,
     });
-    openclawBackend.attachModelChangeAdapter(openclawModelChange);
+    const nativeOpenClawModelChange = createOpenClawModelChange({
+      backend: openclawBackend, runtimeApply: legacyOpenClawRuntimeApply, configurationMode: "native-config",
+    });
+    const managedOpenClawModelApi = managedOpenClawProductHost.getModelApplyApi();
+    managedOpenClawCredentialBroker = createManagedOpenClawProviderCredentialBroker({
+      paths: shoggothServicePaths, modelController: managedOpenClawModelApi,
+    });
+    managedOpenClawModelChange = createManagedOpenClawModelApply({
+      backend: openclawBackend, modelController: managedOpenClawModelApi,
+      admissionGate: workAdmissionGate, credentialBroker: managedOpenClawCredentialBroker,
+      configurationMode: "native-config",
+    });
+    const selectedModelChange = () => managedOpenClawProductHost.isManaged()
+      ? managedOpenClawModelChange : nativeOpenClawModelChange;
+    const selectedRuntimeApply = () => managedOpenClawProductHost.isManaged()
+      ? managedOpenClawModelChange.runtimeApply : legacyOpenClawRuntimeApply;
+    // Route complete transactions at the trusted composition root. The managed
+    // facade does not replace ordinary backend.request or config-only methods.
+    openclawBackend.attachModelRuntimeApply(Object.freeze({
+      inspect: (...args) => selectedRuntimeApply().inspect(...args),
+      acquireForApply: (...args) => selectedRuntimeApply().acquireForApply(...args),
+      recoverLease: (...args) => selectedRuntimeApply().recoverLease(...args),
+      verifyTarget: (...args) => selectedRuntimeApply().verifyTarget(...args),
+      convergeAfterRetire: (...args) => selectedRuntimeApply().convergeAfterRetire(...args),
+      invalidateConnectionGeneration: () => {
+        legacyOpenClawRuntimeApply.invalidateConnectionGeneration?.();
+        // Private managed leases bind to their owned Host, not this ordinary
+        // WS connection. Product lifecycle retirement invalidates them above.
+      },
+    }));
+    openclawBackend.attachModelChangeAdapter(Object.freeze({
+      configurationSemantics: "native-config",
+      getCapabilities: (...args) => selectedModelChange().getCapabilities(...args),
+      preview: (...args) => selectedModelChange().preview(...args),
+      apply: (spec, context, secret) => !managedOpenClawProductHost.isManaged() && context.journalEntry?.mode !== "native-config"
+        ? legacyOpenClawModelChange.apply(spec, context, secret) : selectedModelChange().apply(spec, context, secret),
+      recover: (entry, context) => !managedOpenClawProductHost.isManaged() && entry.mode !== "native-config"
+        ? legacyOpenClawModelChange.recover(entry, context) : selectedModelChange().recover(entry, context),
+    }));
+    let managedHermesAuth;
     const hermesBackend = new HermesBackend({
       getConfig: () => readConfig(),
       modelMutationGate: hermesModelMutationGate,
+      getManagedExecution: () => managedHermesProductHost ? managedHermesProductHost.getExecution()
+        : readConfig().hermesPluginHostMode === "managed" ? null : undefined,
+      getManagedEndpoint: () => managedHermesAuth.resolveEndpoint(),
     });
+    managedHermesProductHost = createManagedHermesProductHost({
+      getMode: () => readConfig().hermesPluginHostMode,
+      getEnabled: () => !readConfig().disabledBackends.includes("hermes"),
+      setManagedMode: () => configStore.write({ hermesPluginHostMode: "managed" }),
+      createClient: () => {
+        const input = resolveManagedHermesProductInputs({ hermesBin: hermesBackend.bin });
+        require("./agent-service/external-plugin-adapter-auth").ensureCredential(shoggothServicePaths, "hermes");
+        return require("./managed-hermes-host-client").createManagedHermesHostClient({
+          ...input, stateDir: shoggothServicePaths.stateDir,
+          serviceUserDataRoot: shoggothServicePaths.userDataRoot,
+          resourcesRoot: app.isPackaged ? path.join(process.resourcesPath, "external-plugin-host-patches")
+            : path.join(__dirname, "..", "resources", "external-plugin-host-patches"),
+          adapterResourcesRoot: app.isPackaged ? path.join(process.resourcesPath, "external-plugin-adapters")
+            : path.join(__dirname, "..", "resources", "external-plugin-adapters"),
+        });
+      },
+      onUnavailable: async () => { await hermesBackend.stop(); },
+      onReady: async () => { await registry.start("hermes"); },
+    });
+    managedHermesAuth = createManagedHermesProductAuth({ host: managedHermesProductHost });
     // The UI process owns only this lightweight adapter and its polling loops;
     // the background Agent Service has a separate lifecycle/role and is never
     // terminated when the registry or desktop window stops.
-    const shoggothServicePaths = getBootstrappedDesktopPaths(app);
     const federationMcpRegistrar = createFederationMcpRegistrar({
       paths: shoggothServicePaths,
       packaged: app.isPackaged,
@@ -1016,7 +1410,8 @@ if (!gotLock) {
       bootstrapPath: path.join(app.getAppPath(), "app", "bootstrap.js"),
       openclawBin: resolveOpenclawBin(),
       hermesBin: hermesBackend.bin,
-      getHermesMode: () => readConfig().hermesMode,
+      getOpenClawMode: () => readConfig().openclawPluginHostMode,
+      getHermesMode: () => managedHermesProductHost.isManaged() ? "managed" : readConfig().hermesMode,
     });
     const externalPluginAdapterRegistrar = createExternalPluginAdapterRegistrar({
       paths: shoggothServicePaths,
@@ -1025,7 +1420,8 @@ if (!gotLock) {
       packaged: app.isPackaged,
       openclawBin: resolveOpenclawBin(),
       hermesBin: hermesBackend.bin,
-      getHermesMode: () => readConfig().hermesMode,
+      getOpenClawMode: () => readConfig().openclawPluginHostMode,
+      getHermesMode: () => managedHermesProductHost.isManaged() ? "managed" : readConfig().hermesMode,
     });
     // Authentication and CLI commands are keyed by RuntimeAccount, never by
     // Agent/Profile. Native accounts point at the user's existing CLI Home;
@@ -1035,20 +1431,30 @@ if (!gotLock) {
       parentEnv: process.env,
       homedir: os.homedir,
       repoRoot: path.join(__dirname, ".."),
+      executablePath: process.execPath,
       packaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
     });
+    const memoryCommandConfigController = require("./core/native-memory-config-controller")
+      .createNativeMemoryConfigController({ configStore, registry });
     const shoggothBackend = new ShoggothBackend({
       paths: shoggothServicePaths,
       runtimeCliAuth: getRuntimeCliAuth(),
       getRuntimeCliAuth,
       getNativeRuntimeConfig: () => require("./core/config-store").projectNativeRuntimeConfig(configStore.read()),
+      getNativeChatUiConfig: () => require("./core/config-store").projectNativeChatUiConfig(configStore.read()),
+      getNativeMemoryConfig: () => require("./core/config-store").projectNativeMemoryConfig(configStore.read()),
+      getNativeMemorySharingConfig: () => require("./core/config-store").projectNativeMemorySharingConfig(configStore.read()),
+      updateNativeMemoryConfig: input => memoryCommandConfigController.update(input),
+      getLocale: () => resolveLocale(readConfig().locale),
       id: "shoggoth",
       name: "Shoggoth",
       connectionMode: "builtin-service",
       version: APP_VERSION,
     });
     const nativeBackends = [shoggothBackend];
+    openclawBackend.attachExternalPluginSelectionService(shoggothBackend);
+    hermesBackend.attachExternalPluginSelectionService(shoggothBackend);
     const shoggothLaunchAgent = createLaunchAgentController({
       homeDir: os.userInfo().homedir,
       servicePaths: shoggothServicePaths,
@@ -1065,25 +1471,26 @@ if (!gotLock) {
       if (!canReload()) return;
       await registry.start(shoggothBackend.id);
     };
+    const shoggothServiceRequest = async (method, params) => {
+      let token;
+      try {
+        token = readClientToken(shoggothServicePaths);
+        return await requestService(shoggothServicePaths, {
+          id: crypto.randomUUID(),
+          token,
+          version: PROTOCOL_VERSION,
+          method,
+          params,
+        });
+      } finally {
+        token = null;
+      }
+    };
     const shoggothProductHost = createProductHostController({
       launchAgent: shoggothLaunchAgent,
       onProfileConfigured: () => reloadNativeBackends(),
       onBackgroundReady: (_status, stillCurrent) => reloadNativeBackends(stillCurrent),
-      serviceRequest: async (method, params) => {
-        let token;
-        try {
-          token = readClientToken(shoggothServicePaths);
-          return await requestService(shoggothServicePaths, {
-            id: crypto.randomUUID(),
-            token,
-            version: PROTOCOL_VERSION,
-            method,
-            params,
-          });
-        } finally {
-          token = null;
-        }
-      },
+      serviceRequest: shoggothServiceRequest,
     });
     const reportBackgroundStartupFailure = () => {
       console.error("[shoggoth] background service auto-start unavailable");
@@ -1093,6 +1500,22 @@ if (!gotLock) {
     const backgroundStartup = app.isPackaged
       ? shoggothProductHost.ensureBackgroundRunning().catch(reportBackgroundStartupFailure)
       : Promise.resolve(null);
+    registerDesktopComputerIpc({
+      ipcMain,
+      getMainWindow: () => mainWindow,
+      serviceRequest: shoggothServiceRequest,
+      restartService: createDesktopComputerServiceRestart({
+        launchAgent: shoggothLaunchAgent,
+        serviceRequest: shoggothServiceRequest,
+        backgroundStartup,
+        suspendBackgroundActions: () => shoggothProductHost.suspendBackgroundActions(),
+        onRestarted: () => reloadNativeBackends(),
+      }),
+      openSettings: (kind) => shell.openExternal(kind === "accessibility"
+        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        : "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+    });
+    registerDesktopBrowserIpc({ ipcMain, getMainWindow: () => mainWindow, serviceRequest: shoggothServiceRequest });
     const hermesModelChange = createHermesModelChange({
       backend: hermesBackend,
       mutationGate: hermesModelMutationGate,
@@ -1106,6 +1529,14 @@ if (!gotLock) {
     // config，与 getUpstreamUrl 同款拉模型），startup 也不启动它们。
     registry.setDisabledBackendsProvider(() => readConfig().disabledBackends);
     appBackendRegistry = registry;
+    try {
+      groupSendJournalStore = new DesktopGroupSendJournalStore({ userDataRoot: app.getPath("userData") });
+      groupSendJournalOpening = groupSendJournalStore.open();
+      void groupSendJournalOpening.catch(() => console.warn("[Group journal] send recovery unavailable"));
+    } catch {
+      groupSendJournalOpening = null;
+      console.warn("[Group journal] send recovery unavailable");
+    }
     // Dashboard journal（健康事件 + kanban cursor 留存）：路径由入口注入
     //（core 不碰 electron）；写失败/损坏都在 journal 内降级，不阻断启动。
     registry.attachDashboardJournal(
@@ -1120,6 +1551,19 @@ if (!gotLock) {
       journal: createModelChangeJournal(path.join(app.getPath("userData"), "model-change-journal.json")),
       workAdmissionGate,
     });
+    // Safety identities are Main-owned and independent of the loopback port.
+    // Failure locks managed model mutations in the UI; it never becomes empty.
+    try {
+      modelOperationRecoveryStore = new ModelOperationRecoveryStore({
+        userDataRoot: app.getPath("userData"), coordinator: modelChangeCoordinator,
+      });
+      modelOperationRecoveryOpening = modelOperationRecoveryStore.open();
+      void modelOperationRecoveryOpening.catch(() => console.warn("[Model recovery] identity store unavailable"));
+    } catch {
+      modelOperationRecoveryOpening = null;
+      console.warn("[Model recovery] identity store unavailable");
+    }
+
 
     // Always start the static server (serves the React UI + /__api, /avatar,
     // and the /__chatws chat broker). chatUpstreamUrl wires the native React
@@ -1135,7 +1579,10 @@ if (!gotLock) {
       configStore,
       hostOps,
       productHost: shoggothProductHost,
+      managedOpenClawHost: managedOpenClawProductHost,
+      managedHermesHost: managedHermesProductHost,
       onConfigChanged: applyConfigChange,
+      onSystemIssue: (error, fallbackCode) => systemIssues.report(error, fallbackCode),
       authResolver,
       modelChangeCoordinator,
       workAdmissionGate,
@@ -1176,11 +1623,12 @@ if (!gotLock) {
     try {
       gatewayProxy = await startProxyGateway({
         port: GATEWAY_PROXY_PORT,
+        getUpstreamGeneration: () => openClawCredentialGeneration.current(),
         // OpenClaw 断开时上游 URL 视作未配置：proxy 现有的降级路径（本地握手 +
         // 外籍 list 合成）就是「只剩 Hermes」的正确形态，重连开关翻回即恢复透传。
         getUpstreamUrl: () => {
           const cfg = readConfig();
-          return cfg.disabledBackends.includes("openclaw") ? "" : cfg.gatewayUrl;
+          return cfg.disabledBackends.includes("openclaw") ? "" : openClawUpstreamUrl();
         },
         origin: serverOrigin,
         registry,
@@ -1204,7 +1652,29 @@ if (!gotLock) {
       federationHost = createFederationHostServer({
         paths: shoggothServicePaths,
         registry,
+        verifyChatUiClick: value => desktopChatUiIpc.verifyClick(value),
+        getNotificationContext: () => ({ focused: mainWindow?.isFocused() === true }),
         inspirationRunner: new ExternalInspirationRunner({ registry, origin: staticServer.url }),
+        // 群聊外部成员：同一外部执行合同的并列实例，OpenClaw 会话按群用途命名。
+        groupRunner: new (require("./group-runtime-router").GroupRuntimeRouter)({ registry, paths: shoggothServicePaths,
+          localRunner: new ExternalInspirationRunner({ registry, origin: staticServer.url, adapterOptions: { sessionPurpose: "group" } }),
+          // 用户 2026-10-12 明确跳过远程；本轮仅启用经过本机证明的宿主。
+          allowRemote: false,
+          invokeTool: params => shoggothServiceRequest("group.remote.tool", params),
+          readTerminalReceipt: params => shoggothServiceRequest("group.execution.receipt", params),
+          isLocal: ({ backendId, agentId }) => {
+            const backend = registry.getBackend(backendId);
+            if (backendId === "hermes") {
+              if (backend._localRuntime.isManaged()) return true;
+              const profile = backend.profileById.get(agentId), dash = backend.dashboards.get(profile);
+              return !!dash && backend._getConfig().hermesMode !== "remote" && require("./group-local-runtime-proof").verifyLocalGroupRuntime({ backendId, url: dash.baseUrl });
+            }
+            if (backend?._localRuntimeScope.isManaged()) return true;
+            return require("./group-local-runtime-proof").verifyLocalGroupRuntime({ backendId, url: openClawUpstreamUrl() });
+          } }),
+        groupToolCapability: ({ backendId, agentId }) => backendId === "openclaw"
+          ? federationMcpRegistration?.openclaw === true
+          : (federationMcpRegistration?.hermes || []).some((profile) => agentIdForProfile(profile) === agentId),
         taskRunner: createFederatedAgentTaskRunner({ origin: staticServer.url }),
         delegateRun: ({ agentId, prompt, timeoutMs }) => runFederatedAgentViaBroker({
           origin: staticServer.url,
@@ -1222,6 +1692,12 @@ if (!gotLock) {
     // 后台预热 backend，但必须在 proxy 监听 backend.ready 之后再启动。
     // static server 已先提供只读页面；只有 backend ready + journal 全量恢复成功后
     // 才开放模型 mutation。恢复失败仅保持未 ready，不关闭 UI 或伪装成功。
+    if (managedOpenClawProductHost.isManaged() && !readConfig().disabledBackends.includes("openclaw")) {
+      managedOpenClawProductHost.prepare({ operationId: `desktop-start-${crypto.randomUUID()}` });
+    }
+    if (managedHermesProductHost.isManaged() && !readConfig().disabledBackends.includes("hermes")) {
+      managedHermesProductHost.prepare({ operationId: `desktop-start-${crypto.randomUUID()}` });
+    }
     registry.start()
       .then(async () => {
         await modelChangeCoordinator.recoverPending();
@@ -1232,7 +1708,7 @@ if (!gotLock) {
       .finally(() => {
         registry.startDashboardHealthSampler();
         void (async () => {
-          try { await federationMcpRegistrar.reconcile(); }
+          try { federationMcpRegistration = await federationMcpRegistrar.reconcile(); }
           catch { console.error("[federation] silent MCP registration incomplete"); }
           try {
             const adapters = await externalPluginAdapterRegistrar.reconcile();
@@ -1258,11 +1734,18 @@ if (!gotLock) {
         : path.join(__dirname, "manage-ui", "public", "audio", "typewriter-loop.wav") });
     disposeChatClipboardIpc = registerDesktopChatClipboardIpc({ ipcMain, clipboard,
       getWindows: () => [mainWindow], getUiOrigin: () => serverOrigin });
+    const appInstallPreparation = createDesktopAppInstallPreparation({
+      launchAgent: shoggothLaunchAgent,
+      serviceRequest: shoggothServiceRequest,
+      backgroundStartup,
+      suspendBackgroundActions: () => shoggothProductHost.suspendBackgroundActions(),
+    });
     appUpdateController = createDesktopAppUpdateController({
       app,
       ipcMain,
       getMainWindow: () => mainWindow,
       onDownloaded: showUpdateReadyNotification,
+      ...appInstallPreparation,
     });
     createMainWindow();
     void backgroundStartup.then((status) => {
@@ -1289,8 +1772,27 @@ if (!gotLock) {
     }
   });
 
+  const managedQuitGate = installManagedPluginHostQuitGate({ app, getHosts: () => [managedOpenClawProductHost, managedHermesProductHost],
+    onFailure: () => {
+      showMainWindow();
+      dialog.showErrorBox("Shoggoth", "暂时无法确认插件后台已停止。请稍后重试退出；原任务不会重复启动。");
+    },
+  });
   app.on("before-quit", async () => {
+    if ([managedOpenClawProductHost, managedHermesProductHost].some(host => host?.isManaged()) && !managedQuitGate.complete()) return;
     appIsQuitting = true;
+    groupSendJournalIpc.dispose();
+    const sendJournalStore = groupSendJournalStore;
+    groupSendJournalStore = null; groupSendJournalOpening = null;
+    if (sendJournalStore) await sendJournalStore.close().catch(() => {});
+    modelOperationRecoveryIpc.dispose();
+    const recoveryStore = modelOperationRecoveryStore;
+    modelOperationRecoveryStore = null;
+    modelOperationRecoveryOpening = null;
+    if (recoveryStore) await recoveryStore.close().catch(() => {});
+    managedOpenClawCredentialBroker?.retire();
+    managedOpenClawCredentialBroker = null;
+    await desktopChatUiIpc.close();
     await pluginAppHost.closeAll();
     desktopInspiration?.dispose(); desktopInspiration = null;
     disposeMicrophoneIpc?.(); disposeMicrophoneIpc = null;
@@ -1299,6 +1801,8 @@ if (!gotLock) {
     appUpdateController?.dispose(); appUpdateController = null;
     disposeTelemetryIpc?.();
     productTelemetry?.close();
+    systemIssues.dispose();
+    desktopSystemIssues = null;
     hostStopping = true;
     hostGeneration += 1;
     await desktopBoardWidgetIpc.dispose().catch(() => {});

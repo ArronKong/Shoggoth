@@ -1,7 +1,34 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { memoryFixture } = require("./fixtures/shoggoth-memory-fixture.cjs");
+const { hasSecret } = require("../app/agent-service/memory-engine");
+
+assert.equal(hasSecret('api_key = os.environ.get("NCBI_API_KEY")'), false);
+assert.equal(hasSecret('token = process.env.GITHUB_TOKEN'), false);
+assert.equal(hasSecret('api_key = os.environ.get("NCBI_API_KEY") or os.environ.get("NCBI_EUTILS_API_KEY")'), false);
+assert.equal(hasSecret('const token = argv[index];'), false);
+assert.equal(hasSecret('const re = /(?:[?&]token=|[?&]signature=)/i;'), false);
+const frozenGwasHelper = fs.readFileSync(path.join(__dirname,
+  "../resources/bundled-plugins/packages/life-science-research/skills/locus-to-gene-mapper-skill/scripts/map_locus_to_gene.py"), "utf8");
+assert.equal(hasSecret(frozenGwasHelper), false);
+assert.equal(hasSecret('token = str(effect[0])'), true);
+assert.equal(hasSecret(`${frozenGwasHelper}\npassword = "syntheticfallback123"\n`), true);
+assert.equal(hasSecret('token = str(effect[0]) or "syntheticfallback123"'), true);
+assert.equal(hasSecret('token = str(effect[0]); password = "syntheticfallback123"'), true);
+assert.equal(hasSecret('api_key = str(effect[0])'), true);
+assert.equal(hasSecret('token = str(effect[1])'), true);
+assert.equal(hasSecret('api_key = "synthetic-but-secret-shaped-value"'), true);
+assert.equal(hasSecret('token = ghp_testsecretvalue123456'), true);
+assert.equal(hasSecret('token = process.env.GITHUB_TOKEN || "syntheticfallback123"'), true);
+assert.equal(hasSecret('api_key = os.getenv("MISSING") + "syntheticfallback123"'), true);
+assert.equal(hasSecret('api_key = os.getenv("MISSING") or "syntheticfallback123"'), true);
+assert.equal(hasSecret('token = argv[index] || "syntheticfallback123"'), true);
+assert.equal(hasSecret('const re = /(?:[?&]token=syntheticfallback123|[?&]signature=)/i;'), true);
+assert.equal(hasSecret('token=|syntheticfallback123'), true);
+assert.equal(hasSecret('token = process.env.GITHUB_TOKEN; password = "syntheticfallback123"'), true);
 
 const value = memoryFixture();
 try {

@@ -10,6 +10,7 @@ const uiRoot = path.join(root, "app/manage-ui");
 const require = createRequire(path.join(uiRoot, "package.json"));
 const ts = require("typescript");
 const i18next = require("i18next");
+const { load: loadUiSource } = require(path.join(root, "scripts/fixtures/load-ui-typescript.cjs"));
 process.env.TZ = "Asia/Shanghai";
 
 function load(relative) {
@@ -21,7 +22,9 @@ function load(relative) {
   }).outputText;
   vm.runInNewContext(code, {
     module: mod, exports: mod.exports, Intl, Date,
-    require: name => name.endsWith("/Field") || name === "react-i18next" ? {} : require(name),
+    require: name => name.endsWith("/Field") || name === "react-i18next" ? {}
+      : name.startsWith(".") ? load(path.relative(path.join(uiRoot, "src"), path.resolve(path.dirname(file), `${name}.ts`)))
+        : require(name),
   });
   return mod.exports;
 }
@@ -31,8 +34,8 @@ const i18n = i18next.createInstance();
 await i18n.init({
   lng: "zh-CN", fallbackLng: "zh-CN", interpolation: { escapeValue: false },
   resources: {
-    "zh-CN": { translation: load("i18n/locales/zh-CN.ts").default },
-    en: { translation: load("i18n/locales/en.ts").default },
+    "zh-CN": { translation: loadUiSource("i18n/locales/zh-CN.ts").default },
+    en: { translation: loadUiSource("i18n/locales/en.ts").default },
   },
 });
 const describe = (schedule, locale = "zh-CN", extras = {}) =>

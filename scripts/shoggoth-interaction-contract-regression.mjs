@@ -150,8 +150,25 @@ assert.deepEqual(detailedApproval.approvalDetails, {
   kind: "command", toolName: "shoggoth__kanban_card_create", command: "shoggoth__kanban_card_create",
   cwd: "/tmp/project", input: '{"boardId":"board-1","title":"Remember this idea"}',
 });
+// Codex describes a command by its parsed actions and the host it needs.
+const codexCommand = normalizeInteractiveRequestV1({
+  runId: "run-codex-actions", eventType: "approval",
+  payload: {
+    requestId: "codex-actions", kind: "command", command: "cat README.md", cwd: "/tmp/project",
+    networkHost: "registry.npmjs.org",
+    commandActions: [
+      { type: "read", command: "cat README.md", name: "README.md", path: "/tmp/project/README.md" },
+      { type: "search", command: "rg todo", query: "todo", path: null },
+      ...Array.from({ length: 20 }, () => ({ type: "unknown", command: "true" })),
+    ],
+  },
+});
+assert.equal(codexCommand.approvalDetails.networkHost, "registry.npmjs.org");
+const actions = JSON.parse(codexCommand.approvalDetails.actions);
+assert.deepEqual(actions.slice(0, 2), [{ type: "read", path: "/tmp/project/README.md" }, { type: "search", query: "todo" }]);
+assert.equal(actions.length, 16, "parsed actions are bounded");
 for (const payload of [
-  { command: "x".repeat(17 * 1024) },
+  { command: "x".repeat(24 * 1024 + 1) },
   { command: "bad\u0000command" },
   { toolInput: { title: "x".repeat(17 * 1024) } },
   { redacted: true, command: "hidden command", toolInput: { title: "hidden title" } },

@@ -38,7 +38,7 @@ const LEGAL_WORK_RUN_TRANSITIONS = Object.freeze({
   interrupted: new Set(),
   skipped: new Set(),
 });
-const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
+const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction", "proactive", "automation"]);
 const TRANSITION_PATCH_FIELDS = new Set([
   "contextSnapshotId", "runtimeSessionRef", "runtimeTurnRef", "waitingRequestId", "resultSummary", "errorCode",
 ]);
@@ -106,7 +106,19 @@ function createWorkDispatcher(options = {}) {
   }
   const now = options.now || Date.now;
   const admissions = new Map();
+  const changeListeners = new Set();
   const getNativeRuntimeConfig = options.getNativeRuntimeConfig || (() => null);
+
+  function notifyChanged(run) {
+    for (const listener of changeListeners) {
+      try { Promise.resolve(listener(clone(run))).catch(() => {}); } catch { /* The journal is already committed. */ }
+    }
+  }
+  function subscribeChanges(listener) {
+    if (typeof listener !== "function") throw new TypeError("Invalid WorkRun listener");
+    changeListeners.add(listener);
+    return () => changeListeners.delete(listener);
+  }
 
   function getRun(id) {
     return store.getWorkRun(id);
@@ -140,7 +152,7 @@ function createWorkDispatcher(options = {}) {
       requireNonEmptyString(input[field], field);
     }
     if (!WORK_RUN_SOURCES.has(input.source)) {
-      throw workRunError("INVALID_WORK_RUN", "source 必须是 chat、kanban、cron 或 inspiration");
+      throw workRunError("INVALID_WORK_RUN", "WorkRun source 无效");
     }
     if (input.workspace !== null && input.workspace !== undefined
       && (typeof input.workspace !== "string" || input.workspace.trim().length === 0)) {
@@ -165,7 +177,7 @@ function createWorkDispatcher(options = {}) {
       throw workRunError("INVALID_WORK_RUN", `WorkRun input 含未知字段: ${unknown.join(", ")}`);
     }
     const skippedAt = skippedSummary === null ? null : now();
-    return store.putWorkRun({
+    const saved = store.putWorkRun({
       id: input.id,
       source: input.source,
       sourceId: input.sourceId,
@@ -184,6 +196,11 @@ function createWorkDispatcher(options = {}) {
       errorCode: null,
       retryOf: input.retryOf ?? null,
     });
+    if (saved.status === "skipped") {
+      try { options.onSkippedRun?.(saved); } catch {}
+    }
+    notifyChanged(saved);
+    return saved;
   }
 
   function enqueue(input) {
@@ -261,6 +278,7 @@ function createWorkDispatcher(options = {}) {
     assertThreadAdmission(candidate);
     const saved = store.putWorkRun(candidate);
     if (TERMINAL_WORK_RUN_STATUSES.has(nextStatus)) admissions.delete(id);
+    notifyChanged(saved);
     return saved;
   }
 
@@ -313,8 +331,13 @@ function createWorkDispatcher(options = {}) {
     // identity, not the runtime (two backends may use the same CLI) or a process.
     const backendActive = active.filter((candidate) =>
       store.getAgentProfile(candidate.profileId)?.backendId === profile.backendId);
-    if (!policy.enabled && run.source !== "chat" && backendActive.filter((candidate) => candidate.source !== "chat").length
-      >= EXECUTION_LIMITS.backendBackground) {
+    // The legacy task lane can be occupied by a pending approval. A separate
+    // read-only review lane lets SparkNotes inspect it without answering it.
+    // Account, global and profile limits above still apply to both lanes.
+    const backgroundActive = backendActive.filter((candidate) => candidate.source !== "chat"
+      && (run.source === "proactive" ? candidate.source === "proactive" : candidate.source !== "proactive"));
+    if (!policy.enabled && run.source !== "chat" && backgroundActive.length
+      >= (run.source === "proactive" ? 1 : EXECUTION_LIMITS.backendBackground)) {
       return busyResult(run, "BACKEND_BACKGROUND_ACTIVE_LIMIT", onBusy);
     }
     if (!policy.enabled && backendActive.length >= EXECUTION_LIMITS.backend) {
@@ -334,6 +357,7 @@ function createWorkDispatcher(options = {}) {
   function recoverActiveRunAfterServiceRestart(id) {
     const recovered = store.recoverActiveRunAfterServiceRestart(id);
     admissions.delete(id);
+    notifyChanged(recovered);
     return recovered;
   }
 
@@ -349,6 +373,7 @@ function createWorkDispatcher(options = {}) {
     const saved = store.putWorkRun({ ...run, status: "queued", startedAt: null,
       eventSeq: run.eventSeq + 1 });
     admissions.delete(id);
+    notifyChanged(saved);
     return saved;
   }
 
@@ -358,6 +383,7 @@ function createWorkDispatcher(options = {}) {
     enqueueSkipped,
     getRun,
     listRuns,
+    subscribeChanges,
     recoverActiveRunAfterServiceRestart,
     requeueBeforeDispatch,
     transition,

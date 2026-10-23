@@ -84,6 +84,8 @@ export interface ChatHistoryControllerDeps<TMessage> {
   clearCachedExcept(scope: string): Promise<void>;
   prepare(key: string, messages: unknown[]): Promise<TMessage[]>;
   requestCanonical(key: string): Promise<unknown>;
+  /** Release a prepared reader candidate even when ownership/send fences discard it. */
+  releaseCanonical?(raw: unknown[]): void;
   isInFlight(key: string): boolean;
   commitOpen(key: string, messages: TMessage[], cacheVisible: boolean): void;
   commitCanonical(key: string, messages: TMessage[], raw: unknown[]): void;
@@ -198,9 +200,11 @@ export function createChatHistoryController<TMessage>(
       ...(scopeBinding ? { scope: scopeBinding.scope, scopeVersion: scopeBinding.version } : {}),
     };
     if (!ticketCurrent(ticket)) return;
+    let candidate: unknown[] | undefined;
     try {
       const raw = await deps.requestCanonical(key);
       if (!Array.isArray(raw)) throw new Error("chat.history returned no messages array");
+      candidate = raw;
       const prepared = await deps.prepare(key, raw);
       if (!ticketCurrent(ticket)) return;
 
@@ -257,6 +261,8 @@ export function createChatHistoryController<TMessage>(
       if (!ticketCurrent(ticket)) return;
       needsRevalidate.add(key);
       deps.commitFailure(key, error, cacheVisible.has(key));
+    } finally {
+      if (candidate) deps.releaseCanonical?.(candidate);
     }
   };
 
@@ -293,7 +299,7 @@ export function createChatHistoryController<TMessage>(
         if (Array.isArray(cached)) {
           prepared = await deps.prepare(key, cached);
           if (generation !== openGeneration) return;
-          visible = true;
+          visible = prepared.length > 0;
         }
       }
     }

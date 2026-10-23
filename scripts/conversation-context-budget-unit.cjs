@@ -28,15 +28,15 @@ test("the same history compacts on a small window and stays verbatim on a larger
   assert.ok(plan(events, { budget: conversationContextBudget(64_000) }), "switching back reevaluates the smaller budget");
 });
 
-test("unknown capacity uses the requested 1M budget, and native current pressure wins over accumulated history", () => {
+test("unknown capacity uses the requested 500K budget, and native current pressure wins over accumulated history", () => {
   const budget = conversationContextBudget(null);
-  assert.deepEqual(budget, { tokens: 1000000, source: "fallback", triggerTokens: 800000, retainedTokens: 500000 });
+  assert.deepEqual(budget, { tokens: 500000, source: "fallback", triggerTokens: 400000, retainedTokens: 24000 });
   for (const value of [0, -1, Infinity, NaN, 1.5]) assert.equal(conversationContextBudget(value).source, "fallback");
-  assert.ok(plan(history(430), { budget }));
-  assert.equal(plan(history(380), { budget }), null);
-  assert.equal(plan(history(430), { budget, usage: { usedTokens: 1000, observedAt: 101 } }), null,
+  assert.ok(plan(history(215), { budget }));
+  assert.equal(plan(history(190), { budget }), null);
+  assert.equal(plan(history(215), { budget, usage: { usedTokens: 1000, observedAt: 101 } }), null,
     "native compaction already reduced pressure; old transcript totals must not cause another summary");
-  assert.ok(plan(history(10), { budget, usage: { usedTokens: 850_000, observedAt: 101 } }),
+  assert.ok(plan(history(10), { budget, usage: { usedTokens: 450_000, observedAt: 101 } }),
     "hidden native tool/system context can cause pressure with a shorter transcript");
   assert.equal(estimateContextTokens("中文"), 4);
   assert.equal(estimateContextTokens("abcd"), 1);
@@ -46,7 +46,7 @@ test("Gemini's documented input limit is not its 64k output limit or a fabricate
   const capacity = documentedModelWindow("antigravity", "gemini-3.8-flash-medium");
   assert.equal(capacity, 1_048_576);
   assert.deepEqual(conversationContextBudget(capacity, "model_spec"), {
-    tokens: 1_048_576, source: "model_spec", triggerTokens: 838_860, retainedTokens: 524_288 });
+    tokens: 1_048_576, source: "model_spec", triggerTokens: 838_860, retainedTokens: 24_000 });
   assert.equal(documentedModelWindow("codex", "gemini-3.8-flash-medium"), null);
   assert.equal(documentedModelWindow("antigravity", "gemini-3.8-flash-unknown"), null);
   assert.equal(documentedModelWindow("antigravity", null), null);
@@ -116,4 +116,22 @@ test("the public budget includes its provenance and cannot be mistaken for a mea
     { targetBindingId: null }, { unknown: true }]) {
     assert.throws(() => validateProductContext({ ...state, transfer: { ...transfer, ...patch } }), { code: "PRODUCT_CONTEXT_INVALID" });
   }
+});
+
+test("past the working target a summary is advisory until the capacity trigger, and keeps a small original tail", () => {
+  const { WORKING_CONTEXT_TARGET, RETAINED_TAIL_TOKENS } = require("../app/agent-service/conversation-context-budget");
+  const budget = conversationContextBudget(1_000_000);
+  const middle = history(100);
+  assert.equal(plan(middle, { budget }), null, "without advisory summaries nothing is planned below capacity");
+  const early = plan(middle, { budget, advisory: true });
+  assert.ok(early, `history above ${WORKING_CONTEXT_TARGET} plans an early summary`);
+  assert.equal(early.advisory, true);
+  assert.equal(plan(history(40), { budget, advisory: true }), null, "below the working target nothing is planned");
+  const required = plan(history(430), { budget, advisory: true });
+  assert.equal(required.advisory, false, "past the capacity trigger the summary is required");
+  // Summaries run in segments; targetThroughSeq is where the retained original tail begins.
+  const tail = middle.filter(event => event.seq > early.targetThroughSeq)
+    .reduce((sum, event) => sum + estimateContextTokens(JSON.stringify(event.content)) + 32, 0);
+  assert.ok(tail <= RETAINED_TAIL_TOKENS, `kept original tail ${tail} stays within ${RETAINED_TAIL_TOKENS}`);
+  assert.ok(early.targetThroughSeq >= middle.length - 15, "most history is summarized, not retained");
 });

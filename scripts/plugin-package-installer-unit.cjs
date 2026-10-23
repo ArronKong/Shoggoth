@@ -181,7 +181,7 @@ try {
     cacheRoot: path.join(temp, "cache"), trustedRoot: temp });
   new PluginStore({ paths: oldPaths }).open().close();
   const oldDb = new Database(oldPaths.pluginCatalogPath);
-  oldDb.pragma(`user_version = ${PLUGIN_STORE_SCHEMA_VERSION - 2}`);
+  oldDb.pragma("user_version = 7");
   oldDb.close();
   const oldBytes = fs.readFileSync(oldPaths.pluginCatalogPath);
   assert.throws(() => new PluginStore({ paths: oldPaths }).open(),

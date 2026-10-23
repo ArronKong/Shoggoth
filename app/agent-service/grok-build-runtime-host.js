@@ -1,5 +1,5 @@
 "use strict";
-const { openRuntimeLedger } = require("./runtime-shared-ledger");
+const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
 
 const { imageAttachments } = require("./chat-attachments");
 
@@ -31,6 +31,7 @@ const {
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { classifyProviderLimit } = require("./runtime-provider-errors");
+const { unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { serviceError } = require("./security");
 
 // A written prompt with an unknown receipt can only run in the process that
@@ -109,6 +110,23 @@ function plain(value) {
     && Object.getPrototypeOf(value) === Object.prototype;
 }
 
+// X tools return their arguments in a JSON string on the receipt, unlike web
+// search's action.query. This is display metadata, never a dispatch identity.
+function completedToolInput(output) {
+  if (!plain(output)) return undefined;
+  if (plain(output.action) && typeof output.action.query === "string" && output.action.query) {
+    return { query: output.action.query };
+  }
+  if (!["x_semantic_search", "x_keyword_search", "x_thread_fetch"].includes(output.name)
+    || typeof output.input !== "string" || Buffer.byteLength(output.input) > 64 * 1024) return undefined;
+  let input;
+  try { input = JSON.parse(output.input); } catch { return undefined; }
+  if (!plain(input)) return undefined;
+  const key = output.name === "x_thread_fetch" ? "post_id" : "query";
+  if (!safeString(input[key], 64 * 1024)) return undefined;
+  return { operation: output.name, [key]: input[key] };
+}
+
 function defined(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
 }
@@ -175,6 +193,8 @@ function inputFingerprint(input, attachments, images) {
     input.permissionMode ?? null,
   ];
   fields.push(attachments, images);
+  if (input.turnDeveloperInstructions != null) fields.push(
+    require("./native-instruction-delivery").turnInstructionFingerprint(input));
   return crypto.createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 }
 
@@ -600,6 +620,7 @@ class GrokBuildRuntimeHost {
   constructor(options = {}) {
     this.options = { ...options, spawnEnv: { ...(options.spawnEnv || {}) } };
     this.fs = options.fs || fs;
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
     if (options.resolveProxy !== undefined && typeof options.resolveProxy !== "function") {
       throw hostError("GROK_BUILD_PROXY_RESOLVER_INVALID", "Grok Build proxy resolver is invalid");
     }
@@ -737,6 +758,11 @@ class GrokBuildRuntimeHost {
 
   async _start() {
     this.ledger = await openRuntimeLedger(this.ledgerSlot, () => this.ledger.open());
+    this.instructionState = new (require("./runtime-instruction-state").RuntimeInstructionState)({
+      directory: path.dirname(this.ledger.ledgerPath), trustedRoot: this.paths.trustedRoot,
+      binding: { runtime: GROK_BUILD_RUNTIME, runtimeProfileId: this.runtimeProfileId,
+        runtimeAccountId: this.runtimeAccountId }, fs: this.fs,
+    });
     const runtimeHome = this.runtimeEnvironment.home;
     const ledgerRelative = path.relative(runtimeHome, this.ledger.ledgerPath);
     if (ledgerRelative === "" || (!ledgerRelative.startsWith(`..${path.sep}`)
@@ -761,6 +787,7 @@ class GrokBuildRuntimeHost {
       env,
     });
     if (!Number.isSafeInteger(child?.pid) || child.pid <= 1) {
+      require("./failed-spawn").retireFailedSpawn(child);
       throw hostError("GROK_BUILD_PROCESS_INVALID", "Grok Build child pid is invalid");
     }
     this.child = child;
@@ -823,6 +850,11 @@ class GrokBuildRuntimeHost {
       && this.authMethods.some((method) => method.id === defaultMethod) ? defaultMethod : null;
     this.authenticated = this.authMethods.length === 0;
     this.agentCapabilities = structuredClone(response.agentCapabilities);
+    // Verified against the local 1.0.63 ACP server and its session/new rules
+    // contract. Unknown/older servers retain the full prompt fallback.
+    const version = /^(\d+)\.(\d+)\.(\d+)(?:\+[a-zA-Z0-9.-]+)?$/u.exec(response._meta?.agentVersion ?? "");
+    this.nativeRulesSupported = !!version && Number(version[1]) === 1
+      && (Number(version[2]) > 0 || Number(version[3]) >= 63);
     this.modelCatalog = modelCatalogFromInitialize(response);
   }
 
@@ -1226,7 +1258,9 @@ class GrokBuildRuntimeHost {
   async sessionStart(input) {
     this._assertExecutionInstance();
     await this._prepareAuthentication();
-    if (!plain(input) || !safeString(input.source, 256)) {
+    if (!plain(input) || !safeString(input.source, 256)
+      || (input.developerInstructions !== undefined
+        && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
       throw hostError("RUNTIME_SESSION_PARAMS_INVALID", "Grok Build session start input is invalid");
     }
     this._assertInputPermissionPolicy(input.permissionPolicy);
@@ -1236,7 +1270,9 @@ class GrokBuildRuntimeHost {
     const current = this.ledger.snapshot();
     const existing = current.sessions.find((session) => session.source === input.source);
     if (existing) {
+      const nativeRules = this._nativeRules(existing.id, input.developerInstructions ?? "");
       this.sessionConfigs.set(existing.id, {
+        nativeRules,
         cwd: existing.cwd,
         developerInstructions: typeof input.developerInstructions === "string"
           ? input.developerInstructions : "",
@@ -1252,9 +1288,10 @@ class GrokBuildRuntimeHost {
     const params = defined({
       cwd,
       mcpServers,
-      _meta: model === null && input.permissionMode == null
+      _meta: model === null && input.permissionMode == null && !this.nativeRulesSupported
         ? undefined
-        : { ...(model === null ? {} : { modelId: model }), ...(input.permissionMode == null ? {} : permissionMeta(permissionMode)) },
+        : { ...(model === null ? {} : { modelId: model }), ...(input.permissionMode == null ? {} : permissionMeta(permissionMode)),
+          ...(this.nativeRulesSupported ? { rules: input.developerInstructions ?? "" } : {}) },
     });
     this.rpc.preflightRequest("session/new", params);
     const createdAt = this.now();
@@ -1304,6 +1341,20 @@ class GrokBuildRuntimeHost {
       updatedAt: createdAt,
       turns: [],
     };
+    if (this.nativeRulesSupported) {
+      if (this.ledger.snapshot().sessions.some(candidate => candidate.id === session.id)) {
+        throw hostError("RUNTIME_SESSION_CONFLICT", "Grok Build returned a duplicate session id");
+      }
+      // Commit the receipt before publishing a usable session. If persistence
+      // fails, retain the pending-source tombstone: a retry must not mistake a
+      // new immutable-policy session for a legacy session or create it twice.
+      try { this.instructionState.record(session.id, input.developerInstructions ?? ""); }
+      catch (cause) {
+        const error = hostError("RUNTIME_SESSION_ACCEPTANCE_UNKNOWN", "Grok Build instruction state was not committed");
+        error.cause = cause;
+        throw error;
+      }
+    }
     this.ledger.update((data) => {
       if (data.sessions.some((candidate) => candidate.id === session.id)) {
         throw hostError("RUNTIME_SESSION_CONFLICT", "Grok Build returned a duplicate session id");
@@ -1312,6 +1363,7 @@ class GrokBuildRuntimeHost {
       data.sessions.push(session);
     });
     this.sessionConfigs.set(session.id, {
+      nativeRules: this.nativeRulesSupported === true,
       cwd,
       developerInstructions: typeof input.developerInstructions === "string"
         ? input.developerInstructions : "",
@@ -1324,7 +1376,9 @@ class GrokBuildRuntimeHost {
   async sessionResume(input) {
     this._assertExecutionInstance();
     await this._prepareAuthentication();
-    if (!plain(input) || !safeString(input.sessionId, 512)) {
+    if (!plain(input) || !safeString(input.sessionId, 512)
+      || (input.developerInstructions !== undefined
+        && !safeString(input.developerInstructions, 1024 * 1024, { empty: true }))) {
       throw hostError("RUNTIME_SESSION_PARAMS_INVALID", "Grok Build session resume input is invalid");
     }
     this._assertInputPermissionPolicy(input.permissionPolicy);
@@ -1342,6 +1396,9 @@ class GrokBuildRuntimeHost {
     if (session.cwd !== cwd) {
       throw hostError("RUNTIME_SESSION_NOT_FOUND", "Grok Build session cwd does not match");
     }
+    const nativeRules = input.preserveRunningContext === true
+      ? this.instructionState.matches(session.id, input.developerInstructions ?? "")
+      : this._nativeRules(session.id, input.developerInstructions ?? "");
     const mcpServers = await this._mcpServers({
       operation: "session.resume",
       cwd,
@@ -1388,6 +1445,7 @@ class GrokBuildRuntimeHost {
       throw error;
     }
     this.sessionConfigs.set(session.id, {
+      nativeRules,
       cwd,
       developerInstructions: typeof input.developerInstructions === "string"
         ? input.developerInstructions : "",
@@ -1398,11 +1456,12 @@ class GrokBuildRuntimeHost {
   }
 
   sessionRead(input) {
-    this._assertReady();
+    const settled = settledRuntimeSession(this, input?.sessionId);
+    if (!settled) this._assertReady();
     if (!plain(input) || !safeString(input.sessionId, 512)) {
       return Promise.reject(hostError("RUNTIME_SESSION_PARAMS_INVALID", "Grok Build session read input is invalid"));
     }
-    const session = sessionById(this.ledger.snapshot(), input.sessionId);
+    const session = settled || sessionById(this.ledger.snapshot(), input.sessionId);
     if (!session) return Promise.reject(hostError("RUNTIME_SESSION_NOT_FOUND", "Grok Build session was not found"));
     if (session.turns.some((turn) => turn.acceptance === "unknown" && this._mayStillRun(turn))) {
       return Promise.reject(hostError(
@@ -1563,7 +1622,8 @@ class GrokBuildRuntimeHost {
     }
     // Read attachments and validate the whole encoded frame before creating a
     // receipt. Text limits alone do not cover base64 expansion or JSON overhead.
-    const prompt = this._promptText(session.id, input);
+    const promptParts = this._promptParts(session.id, input);
+    const prompt = promptParts.text;
     const params = {
       sessionId: session.id,
       prompt: [{ type: "text", text: prompt }, ...images
@@ -1593,6 +1653,7 @@ class GrokBuildRuntimeHost {
     const acceptance = makeDeferred();
     const active = {
       sessionId: session.id,
+      promptCommit: promptParts.commit,
       createdAt,
       cwd: session.cwd,
       turnId,
@@ -1605,6 +1666,8 @@ class GrokBuildRuntimeHost {
       timedOut: false,
       messages: new Map(),
       messageOrder: [],
+      implicitMessageIndex: 0,
+      implicitMessageOpen: false,
       messageBytes: 0,
       authFingerprint: null,
       nativePromptId: null,
@@ -1638,18 +1701,42 @@ class GrokBuildRuntimeHost {
   }
 
   _promptText(sessionId, input) {
+    return this._promptParts(sessionId, input, null).text;
+  }
+
+  // Unchanged prompt blocks are not repeated in the native history (see
+  // PromptBlockLedger); a bare command such as /compact restarts that record.
+  _promptParts(sessionId, input, ledger = this.promptLedger) {
     const commands = this.commandCatalogs.get(sessionId) || GROK_BUILD_BOOTSTRAP_COMMANDS;
-    if (parseRuntimeCommand(input.prompt, commands)) return input.prompt.trim();
+    if (parseRuntimeCommand(input.prompt, commands)) {
+      ledger?.reset(sessionId);
+      return { text: input.prompt.trim(), commit() {} };
+    }
     const config = this.sessionConfigs.get(sessionId);
-    const blocks = [];
-    if (config?.developerInstructions) {
-      blocks.push(`SHOGGOTH DEVELOPER INSTRUCTIONS\n${config.developerInstructions}`);
-    }
-    if (typeof input.context === "string" && input.context.length > 0) {
-      blocks.push(input.context);
-    }
+    const delivery = require("./native-instruction-delivery");
+    const turn = delivery.splitTurnInstructions(delivery.turnInstructions(input));
+    const { blocks, commit } = delivery.promptBlocks(ledger, sessionId, {
+      stable: config?.developerInstructions && config.nativeRules !== true
+        ? `SHOGGOTH DEVELOPER INSTRUCTIONS\n${config.developerInstructions}` : "",
+      rules: turn.rules,
+      context: typeof input.context === "string" ? input.context : "",
+      run: turn.run,
+    });
     blocks.push(`CURRENT USER REQUEST\n${input.prompt}`);
-    return blocks.join("\n\n");
+    return { text: blocks.join("\n\n"), commit };
+  }
+
+  _nativeRules(sessionId, instructions) {
+    // Legacy sessions have no native system-rule receipt. Preserve their exact
+    // native history and full policy until normal lifecycle renewal occurs.
+    if (!this.instructionState?.has(sessionId)) return false;
+    if (!this.instructionState.matches(sessionId, instructions)) {
+      const error = hostError("RUNTIME_SESSION_INSTRUCTIONS_CHANGED", "Native system rules require a fresh session");
+      error.acceptance = "not_sent";
+      error.sessionId = sessionId;
+      throw error;
+    }
+    return this.nativeRulesSupported === true;
   }
 
   turnSteer() {
@@ -1870,8 +1957,12 @@ class GrokBuildRuntimeHost {
     }
     if (update.sessionUpdate === "agent_message_chunk") {
       const text = update.content.type === "text" ? update.content.text : "";
+      if (!active.implicitMessageOpen) {
+        active.implicitMessageIndex += 1;
+        active.implicitMessageOpen = true;
+      }
       const itemId = safeString(update.messageId, 512)
-        ? update.messageId : `grok-message-${active.turnId}`;
+        ? update.messageId : `grok-message-${active.turnId}-${active.implicitMessageIndex}`;
       const previous = active.messages.get(itemId) || "";
       const combined = `${previous}${text}`;
       const combinedBytes = Buffer.byteLength(combined, "utf8");
@@ -1893,6 +1984,9 @@ class GrokBuildRuntimeHost {
       return;
     }
     if (update.sessionUpdate === "tool_call") {
+      // ACP chunks often have no message id. A tool boundary separates the
+      // preamble from the final answer; joining them would destroy NO_REPLY.
+      active.implicitMessageOpen = false;
       const input = update.rawInput === undefined ? undefined : safeSnapshot(update.rawInput, {
         registeredSecrets: this.registeredSecrets,
         maxSnapshotBytes: 64 * 1024,
@@ -1914,34 +2008,34 @@ class GrokBuildRuntimeHost {
     }
     if (update.sessionUpdate === "tool_call_update") {
       const completed = update.status === "completed" || update.status === "failed";
+      if (completed) active.implicitMessageOpen = false;
       const rawOutput = update.rawOutput ?? update.content;
       const output = rawOutput === undefined ? undefined : safeSnapshot(rawOutput, {
         registeredSecrets: this.registeredSecrets,
         maxSnapshotBytes: 64 * 1024,
       });
-      const completionInput = plain(rawOutput?.action)
-        && typeof rawOutput.action.query === "string" && rawOutput.action.query
-        ? safeSnapshot({ query: rawOutput.action.query }, {
-          registeredSecrets: this.registeredSecrets,
-          maxSnapshotBytes: 64 * 1024,
-        })
-        : undefined;
+      const receiptInput = completedToolInput(rawOutput);
+      const rawInput = plain(update.rawInput) && receiptInput
+        ? { ...update.rawInput, ...receiptInput } : update.rawInput ?? receiptInput;
+      const input = rawInput === undefined ? undefined : safeSnapshot(rawInput, {
+        registeredSecrets: this.registeredSecrets,
+        maxSnapshotBytes: 64 * 1024,
+      });
       this._publish({
         ...common,
         type: completed ? "tool_result" : "tool_update",
         itemId: update.toolCallId,
         toolCallId: update.toolCallId,
-        ...(completed ? {
-          ...require("./context-tool-content").contextToolContent({ output: rawOutput }, this.registeredSecrets),
-          tool: {
-            ...(update.kind ? { kind: update.kind } : {}),
-            ...(update.title ? { name: update.title } : {}),
-            status: update.status,
-            success: update.status === "completed",
-            ...(completionInput === undefined ? {} : { input: completionInput }),
-            ...(output === undefined ? {} : { output }),
-          },
-        } : { progress: update.status, message: update.title }),
+        ...require("./context-tool-content").contextToolContent({ input: rawInput, ...(completed ? { output: rawOutput } : {}) }, this.registeredSecrets),
+        tool: {
+          ...(update.kind ? { kind: update.kind } : {}),
+          ...(update.title ? { name: update.title } : {}),
+          ...(update.status ? { status: update.status } : {}),
+          ...(completed ? { success: update.status === "completed" } : {}),
+          ...(input === undefined ? {} : { input }),
+          ...(completed && output !== undefined ? { output } : {}),
+        },
+        ...(completed ? {} : { progress: update.status, message: update.title }),
       });
       return;
     }
@@ -2076,6 +2170,7 @@ class GrokBuildRuntimeHost {
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
     active.accepted = true;
+    active.promptCommit?.();
     this._clearLive(active.turnId);
     this._markRuntimeAuthenticated(active.authFingerprint);
     clearTimeout(active.timer);
@@ -2163,6 +2258,12 @@ class GrokBuildRuntimeHost {
         this._publish({ ...common, type: "text", itemId: message.id, text: message.text, phase: "final_answer" });
       }
     }
+    // The built-in /compact command was sent bare (see _promptText); ending the
+    // turn normally is Grok's only completion fact for it over ACP.
+    if (status === "completed" && /^\/compact(?:\s|$)/u.test(active.promptText)) {
+      this._publish({ ...common, type: "context_compacted",
+        contextUsage: unknownRuntimeContextUsage(active.sessionId, { observedAt: timestamp, source: "runtime_event" }) });
+    }
     this._publish({ ...common, method: "session/prompt", type: "complete", status,
       ...(status === "failed" ? { errorCode: active.failureCode || "GROK_BUILD_TURN_FAILED" } : {}) });
     active.terminal.resolve({ status });
@@ -2170,6 +2271,18 @@ class GrokBuildRuntimeHost {
 
   _failPrompt(active, error) {
     if (this.activeTurns.get(active.sessionId) !== active) return;
+    // Grok can return a provider failure on the exact session/prompt RPC
+    // without emitting its extended turn_completed notification over ACP.
+    // The bounded private RPC detail is safe to classify, never to publish.
+    const remoteRejected = error?.code === "GROK_ACP_REMOTE_ERROR";
+    const providerCode = remoteRejected
+      ? (active.failureCode || classifyProviderLimit(error.rpcDetail)) : null;
+    if (providerCode) {
+      const original = error;
+      error = hostError(providerCode, "Grok Build provider rejected the prompt");
+      error.dispatchState = original.dispatchState || active.dispatchState;
+      Object.defineProperty(error, "cause", { value: original });
+    }
     if (!error?.dispatchState) {
       const original = error;
       error = hostError(original?.code || "GROK_BUILD_TURN_FAILED", "Grok Build prompt failed");
@@ -2179,7 +2292,7 @@ class GrokBuildRuntimeHost {
     clearTimeout(active.timer);
     active.timer = null;
     const explicit = active.dispatchState === "not_sent"
-      || ["AUTH_REQUIRED", "GROK_ACP_REMOTE_ERROR"].includes(error?.code);
+      || error?.code === "AUTH_REQUIRED" || remoteRejected;
     if (active.timedOut && !explicit) {
       this.activeTurns.delete(active.sessionId);
       active.terminal.reject(error);
@@ -2206,7 +2319,7 @@ class GrokBuildRuntimeHost {
       active.terminal.reject(error);
       return;
     }
-    const status = ["AUTH_REQUIRED", "GROK_ACP_REMOTE_ERROR"].includes(error?.code)
+    const status = error?.code === "AUTH_REQUIRED" || remoteRejected
       ? "failed" : "interrupted";
     this.ledger.update((data) => {
       const session = sessionById(data, active.sessionId);

@@ -9,6 +9,10 @@ const asar = require("@electron/asar");
 const { createDefaultAgentAvatarPool } = require("../app/default-agent-avatar-pool");
 const { resolveDesktopAssetPaths } = require("../app/desktop-assets");
 const manifest = require("../app/assets/agent-avatars/manifest.json");
+const builtinManifest = require("../app/assets/agent-avatars/builtin/manifest.json");
+const { BUILTIN_CLI_AGENT_PROFILES } = require("../app/agent-service/builtin-cli-profiles");
+const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
+const { isRuntimeAvailable } = require("../app/runtime-availability");
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-bundled-avatars-"));
 const assetDir = path.resolve(__dirname, "../app/assets/agent-avatars");
@@ -25,6 +29,21 @@ const hash = (file) => crypto.createHash("sha256").update(fs.readFileSync(file))
   }
   const uniqueCount = new Set(manifest.entries.map((entry) => entry.sha256)).size;
   assert.equal(uniqueCount, 149, "one pair of supplied files has identical bytes");
+  assert.equal(builtinManifest.version, 1);
+  assert.equal(builtinManifest.entries.length, 7, "seven reserved first-creation avatars");
+  assert.deepEqual(builtinManifest.entries.map(entry => [entry.profileId, entry.agentId]), [
+    [DEFAULT_AGENT_PROFILE_ID, `shoggoth-${DEFAULT_AGENT_PROFILE_ID}`],
+    ...BUILTIN_CLI_AGENT_PROFILES.filter(profile => isRuntimeAvailable(profile.runtime))
+      .map(profile => [profile.id, profile.agentId]),
+  ]);
+  for (const entry of builtinManifest.entries) {
+    const file = path.join(assetDir, "builtin", entry.file);
+    assert.equal(hash(file), entry.sha256);
+    assert.equal(fs.statSync(file).size, entry.bytes);
+    assert.ok(entry.bytes <= 200_000);
+    assert.equal(manifest.entries.some(item => item.sha256 === entry.sha256), false,
+      "reserved avatar never enters the random library");
+  }
 
   const paths = resolveDesktopAssetPaths({ homeDir: path.join(temporary, "home") });
   const pool = createDefaultAgentAvatarPool(paths, { choose: () => 0 });
@@ -65,8 +84,14 @@ const hash = (file) => crypto.createHash("sha256").update(fs.readFileSync(file))
     assert.deepEqual(asar.extractFile(archive, `app/assets/agent-avatars/library/${file}`),
       fs.readFileSync(path.join(libraryDir, file)));
   }
+  for (const { file } of builtinManifest.entries) {
+    assert.deepEqual(asar.extractFile(archive, `app/assets/agent-avatars/builtin/${file}`),
+      fs.readFileSync(path.join(assetDir, "builtin", file)), "package reserved avatar without recompression");
+  }
+  assert.deepEqual(asar.extractFile(archive, "app/assets/agent-avatars/builtin/manifest.json"),
+    fs.readFileSync(path.join(assetDir, "builtin/manifest.json")));
   assert.deepEqual(asar.extractFile(archive, "app/assets/agent-avatars/manifest.json"),
     fs.readFileSync(path.join(assetDir, "manifest.json")));
-  console.log("PASS bundled avatars: 150 exact JPGs, 149 unique assignments, restart, release, exhaustion, archive parity");
+  console.log("PASS bundled avatars: 7 reserved first-creation JPGs, 150 random JPGs, 149 unique assignments, restart, release, exhaustion, archive parity");
 })().catch((error) => { console.error(error); process.exitCode = 1; })
   .finally(() => fs.rmSync(temporary, { recursive: true, force: true }));

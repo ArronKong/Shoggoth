@@ -40,7 +40,7 @@ function conversation(socketPath) {
 }
 
 test("parallel bridges retain independent tokens and terminal authority never revives for another run", async () => {
-  const root = fs.mkdtempSync("/tmp/sgmbi-");
+  const root = fs.realpathSync(fs.mkdtempSync("/tmp/sgmbi-"));
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     cacheRoot: path.join(root, "cache"), profileRoot: path.join(root, "profile") });
   let calls = 0;
@@ -62,8 +62,12 @@ test("parallel bridges retain independent tokens and terminal authority never re
   try {
     await service.start();
     const profile = service.productStore.listAgentProfiles()[0];
+    // Writable Runs may not overlap their canonical workspaces. Use siblings
+    // so this fixture tests bridge isolation independently of the writer gate.
+    const firstWorkspace = path.join(root, "first-workspace");
+    fs.mkdirSync(firstWorkspace);
     const session = service.chatSessionStore.createSession({ operationId: "bridge-fixture-session",
-      profileId: profile.id, workspace: root, createdAt: Date.now() });
+      profileId: profile.id, workspace: firstWorkspace, createdAt: Date.now() });
     const secondWorkspace = path.join(root, "second-workspace");
     fs.mkdirSync(secondWorkspace);
     const secondSession = service.chatSessionStore.createSession({ operationId: "bridge-second-session",

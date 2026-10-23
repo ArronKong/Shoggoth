@@ -12,7 +12,12 @@ function load(file, globals = {}) {
   const code = ts.transpileModule(fs.readFileSync(path.join(uiRoot, "src", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  vm.runInNewContext(code, { exports, ...globals });
+  vm.runInNewContext(code, { exports, require: name => {
+    if (!name.startsWith(".")) return require(name);
+    const relative = path.join(path.dirname(file), name);
+    return relative.endsWith(".json") ? require(path.join(uiRoot, "src", relative))
+      : load(`${relative}.ts`, globals);
+  }, ...globals });
   return exports;
 }
 
@@ -22,6 +27,8 @@ const job = (id, fields = {}) => ({
   schedule: { kind: "every", everyMs: 1800000 }, ...fields,
 });
 const hidden = [
+  job("desktop-cron", { origin: "codex-desktop", backendId: "shoggoth", payload: { kind: "agentTurn" } }),
+  job("desktop-followup", { origin: "codex-desktop", backendId: "shoggoth", enabled: false, codex: { kind: "heartbeat" } }),
   job("heartbeat-vincent", { payload: { kind: "heartbeat" } }),
   job("renamed-system-task", { payload: { kind: "heartbeat" }, enabled: false, lastStatus: "error" }),
   job("tag-only", { backendDetails: { capabilityTags: ["heartbeat"] } }),
@@ -34,6 +41,7 @@ const visible = [
   job("skill-review", { payload: { kind: "skillCollectionReview" }, actions: { reason: "system-managed" } }),
   job("hermes-report", { backendId: "hermes" }),
   job("native-report", { backendId: "shoggoth" }),
+  job("Codex Desktop", { backendId: "shoggoth", agentId: "shoggoth-codex", payload: { kind: "agentTurn" } }),
   job("explicit-user-task", { payload: { kind: "systemEvent", text: "Reminder" }, rawCapabilities: ["heartbeat"] }),
 ];
 const allJobs = [...hidden, ...visible];
@@ -42,10 +50,6 @@ const calls = [];
 let responseJobs = allJobs;
 const api = load("api/client.ts", {
   URLSearchParams,
-  require: name => {
-    assert.equal(name, "../lib/cronVisibility");
-    return visibility;
-  },
   fetch: async (url, init) => {
     calls.push({ url, method: init?.method || "GET" });
     return new Response(JSON.stringify({ jobs: responseJobs, job: hidden[0] }));
@@ -65,4 +69,4 @@ assert.equal((await api.listCronJobs()).length, 0, "missing job lists remain emp
 assert.equal((await api.getCronJobDetail(hidden[0].id)).id, hidden[0].id,
   "the display filter does not remove access to the underlying job");
 assert.ok(calls.every(call => call.method === "GET"), "hiding heartbeats performs no scheduler mutation");
-console.log("PASS Cron visibility: heartbeat payloads and legacy tags hidden; user tasks, wake modes, managed reviews and backend records preserved");
+console.log("PASS Cron visibility: Codex Desktop and system heartbeats hidden; native Codex jobs, user tasks and backend records preserved");

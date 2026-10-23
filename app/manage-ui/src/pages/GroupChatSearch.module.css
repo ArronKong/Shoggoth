@@ -1,0 +1,10 @@
+.root { min-width: 0; overflow-wrap: anywhere; }
+.root p { margin: 8px 0; }
+.form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0; }
+.form label { display: grid; gap: 5px; flex: 1 1 180px; min-width: 0; }
+.form .query { flex-basis: 100%; }
+.form input, .form select { width: 100%; min-width: 0; box-sizing: border-box; }
+.results { display: grid; gap: 12px; margin: 12px 0; max-height: 45vh; overflow: auto; }
+.results article { border: 1px solid var(--border); border-radius: 8px; padding: 10px; min-width: 0; }
+.results small { display: block; margin-bottom: 6px; }
+.snippet { white-space: pre-wrap; overflow-wrap: anywhere; }

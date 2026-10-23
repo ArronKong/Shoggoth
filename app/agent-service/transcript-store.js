@@ -32,6 +32,8 @@ const MAX_CONTEXT_CONTENT_BYTES = 8 * 1024 * 1024;
 const MAX_LOG_BYTES = 256 * 1024 * 1024;
 const MAX_USAGE_TOOL_ROWS = 32;
 const MAX_USAGE_ACTIVITY_ROWS = 240;
+const { normalizeBorrowedMemoryRefs, extractBorrowedMemoryRefs, mergeBorrowedMemoryRefs, refsFromEvents,
+  isReferentialMemoryRequest, sanitizeBorrowedToolContent } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 
 function transcriptError(code, message) {
   return serviceError(code, message);
@@ -195,14 +197,17 @@ class TranscriptStore {
     this.now = options.now || Date.now;
     this.assertSecretSafe = options.assertSecretSafe || (() => true);
     this.maxLogBytes = options.maxLogBytes ?? MAX_LOG_BYTES;
+    this.readOnly = options.readOnly === true;
     this.opened = false;
     this.sessions = new Map();
     this.changeRevisions = new Map();
+    this.changeSubscriptions = new Set();
     this.poisonError = null;
   }
 
   _assertOpen(write = false) {
     if (!this.opened) throw transcriptError("TRANSCRIPT_STORE_CLOSED", "Transcript Store 未打开");
+    if (write && this.readOnly) throw transcriptError("TRANSCRIPT_READ_ONLY", "只读来源禁止写入");
     if (write && this.poisonError) throw this.poisonError;
   }
 
@@ -235,7 +240,16 @@ class TranscriptStore {
     }
   }
 
+  openReadOnly() {
+    if (!this.readOnly) throw transcriptError("TRANSCRIPT_READ_ONLY_REQUIRED", "只读打开必须显式声明");
+    if (this.opened) return this;
+    this.sessions.clear(); this.changeRevisions.clear(); this.poisonError = null;
+    this.opened = true;
+    return this;
+  }
+
   open() {
+    if (this.readOnly) return this.openReadOnly();
     if (this.opened) return;
     ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
     this.sessions.clear();
@@ -245,10 +259,54 @@ class TranscriptStore {
   }
 
   close() {
+    for (const subscription of this.changeSubscriptions) subscription.unsubscribe();
     this.sessions.clear();
     this.changeRevisions.clear();
     this.poisonError = null;
     this.opened = false;
+  }
+
+  subscribeChanges(listener, { signal } = {}) {
+    this._assertOpen();
+    if (typeof listener !== "function") throw new TypeError("Transcript change listener must be a function");
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      throw new TypeError("Transcript change signal must be an AbortSignal");
+    }
+    if (signal?.aborted) return () => {};
+    const subscription = { listener, unsubscribe: null };
+    const unsubscribe = () => {
+      this.changeSubscriptions.delete(subscription);
+      signal?.removeEventListener("abort", unsubscribe);
+    };
+    subscription.unsubscribe = unsubscribe;
+    this.changeSubscriptions.add(subscription);
+    signal?.addEventListener("abort", unsubscribe, { once: true });
+    return unsubscribe;
+  }
+
+  _queueChange(state, record) {
+    if (this.changeSubscriptions.size === 0) return;
+    const change = Object.freeze({
+      type: record.type,
+      profileId: state.profileId,
+      sessionId: state.sessionId,
+      eventId: record.type === "event.append" ? record.payload.id : record.payload.eventId,
+      revision: state.revision,
+      lastEventSeq: state.lastEventSeq,
+      sourceIdentity: state.indexDigests.at(-1),
+    });
+    // Capture current subscriptions, rather than giving a later subscriber an
+    // old commit. Membership checks also discard queued events after close,
+    // unsubscribe or abort, including when the same listener subscribes again.
+    const subscriptions = [...this.changeSubscriptions];
+    queueMicrotask(() => {
+      for (const subscription of subscriptions) {
+        if (!this.opened || !this.changeSubscriptions.has(subscription)) continue;
+        try {
+          Promise.resolve(subscription.listener(change)).catch(() => {});
+        } catch { /* A listener cannot roll back an already durable commit. */ }
+      }
+    });
   }
 
   forgetProfile(profileId) {
@@ -414,9 +472,14 @@ class TranscriptStore {
       return cached;
     }
     const targets = this._paths(profileId, sessionId);
-    ensurePrivateDirectoryTree(targets.dir, this.paths.trustedRoot);
+    if (!this.readOnly) ensurePrivateDirectoryTree(targets.dir, this.paths.trustedRoot);
     const state = this._emptyState(profileId, sessionId);
-    const buffer = this._repairPartialTail(targets.log);
+    const buffer = this.readOnly
+      ? (lstatIfExists(targets.log) ? readPrivateFile(targets.log, { fs: this.fs, maxBytes: this.maxLogBytes }) : Buffer.alloc(0))
+      : this._repairPartialTail(targets.log);
+    if (this.readOnly && buffer.length && buffer.at(-1) !== 0x0a) {
+      throw transcriptError("TRANSCRIPT_TRANSACTION_UNSETTLED", "只读来源拒绝未闭合尾部");
+    }
     const text = buffer.toString("utf8");
     const lines = text.length === 0 ? [] : text.slice(0, -1).split("\n");
     for (let index = 0; index < lines.length; index += 1) {
@@ -440,7 +503,10 @@ class TranscriptStore {
       }
       manifestCurrent = this._validateManifest(value, state);
     }
-    if (!manifestCurrent) this._writeManifest(state);
+    if (!manifestCurrent) {
+      if (this.readOnly) throw transcriptError("TRANSCRIPT_MANIFEST_CORRUPT", "只读来源 manifest 缺失或不一致");
+      this._writeManifest(state);
+    }
     state.journalIdentity = this._fileIdentity(targets.log);
     state.manifestIdentity = this._fileIdentity(targets.manifest);
     this.sessions.set(key, state);
@@ -522,6 +588,7 @@ class TranscriptStore {
       this.poisonError = error;
       throw error;
     }
+    this._queueChange(state, record);
     return record;
   }
 
@@ -530,21 +597,63 @@ class TranscriptStore {
     const state = this._load(input.profileId, input.sessionId);
     const existing = state.byId.get(input.id);
     let content = input.content;
-    const encoded = JSON.stringify(input.contextContent ?? content);
-    if (input.contextContent !== undefined || Buffer.byteLength(encoded || "") > 48 * 1024) {
-      const contextRef = this.saveContextContent(input.profileId, input.sessionId, input.contextContent ?? content);
-      // The journal remains a bounded display projection. The model projection
-      // resolves the verified content object rather than this display excerpt.
-      content = input.contextContent !== undefined ? { ...content, contextRef } : {
-        ...(typeof content?.text === "string" ? { text: Buffer.from(content.text).subarray(0, 24 * 1024)
-          .toString("utf8").toWellFormed() } : {}),
-        ...(content?.operationId ? { operationId: content.operationId } : {}),
-        ...(content?.attachments ? { attachments: content.attachments } : {}),
-        ...(content?.pluginSelection ? { pluginSelection: content.pluginSelection } : {}),
-        ...(content?.pluginSelectionSnapshot ? { pluginSelectionSnapshot: content.pluginSelectionSnapshot } : {}),
-        contextRef,
-      };
+    let contextContent = input.contextContent;
+    const output = ["assistant", "tool_call", "tool_result", "artifact"].includes(input.kind);
+    const past = state.events.filter(event => event.seq <= (existing?.seq ?? Infinity));
+    const historicalRefs = output || (input.kind === "user" && isReferentialMemoryRequest(content?.text))
+      ? refsFromEvents(past) : [];
+    let inherited = historicalRefs;
+    let derived = content?.borrowedMemoryDerived === true;
+    if (input.borrowedMemoryProjection !== undefined) {
+      const projection = input.borrowedMemoryProjection;
+      if (!output || !exactKeys(projection, ["refs", "derived"])
+        || Object.values(Object.getOwnPropertyDescriptors(projection)).some(value => !Object.hasOwn(value, "value"))
+        || typeof projection.derived !== "boolean") throw transcriptError("TRANSCRIPT_EVENT_INVALID", "借阅上下文投影无效");
+      // Trusted coordinator projection describes the current safe context.
+      // Invalid old sources remain in their original events, while a rebuilt
+      // native session can record newly read versions without inheriting them.
+      inherited = normalizeBorrowedMemoryRefs(projection.refs);
+      derived ||= projection.derived || historicalRefs.length > 0
+        || past.some(event => event.content?.borrowedMemoryDerived === true);
     }
+    const borrowedMemoryRefs = mergeBorrowedMemoryRefs(inherited, input.borrowedMemoryRefs,
+      extractBorrowedMemoryRefs(content), extractBorrowedMemoryRefs(contextContent));
+    derived ||= borrowedMemoryRefs.length > 0 && (output || input.kind === "user");
+    if (borrowedMemoryRefs.length) {
+      if (["tool_call", "tool_result"].includes(input.kind)) {
+        content = sanitizeBorrowedToolContent(content, borrowedMemoryRefs);
+        contextContent = undefined;
+      } else {
+        content = { ...content, borrowedMemoryRefs,
+          ...(derived ? { borrowedMemoryDerived: true } : {}) };
+        if (contextContent !== undefined) contextContent = { ...contextContent, borrowedMemoryRefs,
+          ...(derived ? { borrowedMemoryDerived: true } : {}) };
+      }
+    }
+    if (derived) {
+      content = { ...content, borrowedMemoryDerived: true };
+      if (contextContent !== undefined) contextContent = { ...contextContent, borrowedMemoryDerived: true };
+    }
+    const displayContent = content;
+    const displayLarge = Buffer.byteLength(JSON.stringify(content) || "") > 44 * 1024;
+    const contextRef = contextContent !== undefined || displayLarge
+      ? this.saveContextContent(input.profileId, input.sessionId, contextContent ?? content) : null;
+    if (displayLarge) {
+      const displayRef = contextContent === undefined ? contextRef
+        : this.saveContextContent(input.profileId, input.sessionId, displayContent);
+      // Keep authority/provenance metadata in the journal, and resolve the full
+      // display object independently of the model-context projection. A sealed
+      // prefix may be contextExcluded and still has complete readable history.
+      content = {
+        ...(typeof displayContent?.text === "string" ? { text: Buffer.from(displayContent.text).subarray(0, 20 * 1024)
+          .toString("utf8").toWellFormed() } : {}),
+        ...Object.fromEntries(["operationId", "cronOutputVersion", "attachments", "pluginSelection", "pluginSelectionSnapshot",
+          "transcriptType", "segmentId", "origin", "uiAction", "importedFrom"].filter(key => displayContent?.[key] !== undefined)
+          .map(key => [key, displayContent[key]])),
+        ...(borrowedMemoryRefs.length ? { borrowedMemoryRefs } : {}),
+        ...(derived ? { borrowedMemoryDerived: true } : {}), contextRef, displayRef,
+      };
+    } else if (contextRef) content = { ...content, contextRef };
     const candidate = {
       id: input.id,
       sessionId: input.sessionId,
@@ -643,6 +752,9 @@ class TranscriptStore {
 
   saveContextContent(profileId, sessionId, content) {
     this._assertOpen(true);
+    if (content?.tool && extractBorrowedMemoryRefs(content).length) {
+      content = sanitizeBorrowedToolContent(content);
+    }
     const encoded = JSON.stringify(content);
     if (!encoded || Buffer.byteLength(encoded) > MAX_CONTEXT_CONTENT_BYTES) {
       throw transcriptError("TRANSCRIPT_EVENT_TOO_LARGE", "可迁移正文超过单个对象容量");
@@ -663,9 +775,17 @@ class TranscriptStore {
       estimatedTokens: require("./conversation-context-budget").estimateContextTokens(encoded) };
   }
 
+  displayEvent(profileId, sessionId, event) {
+    return this._contentEvent(profileId, sessionId, event, event.content?.displayRef);
+  }
+
   contextEvent(profileId, sessionId, event) {
-    const ref = event.content?.contextRef;
-    if (!ref || event.contextExcluded) return event;
+    if (event.contextExcluded) return event;
+    return this._contentEvent(profileId, sessionId, event, event.content?.contextRef);
+  }
+
+  _contentEvent(profileId, sessionId, event, ref) {
+    if (!ref) return event;
     if (ref.version !== 1 || !HASH_PATTERN.test(ref.hash) || !Number.isSafeInteger(ref.bytes)
       || ref.bytes < 1 || ref.bytes > MAX_CONTEXT_CONTENT_BYTES) {
       throw transcriptError("CONTEXT_CONTENT_CORRUPT", "可迁移正文引用无效");
@@ -762,8 +882,11 @@ class TranscriptStore {
       throw transcriptError("TRANSCRIPT_IMPORT_INVALID", "Transcript import items 无效");
     }
     const imported = [];
-    for (const item of input.items) {
-      const canonical = cloneJson(item, "TRANSCRIPT_IMPORT_INVALID");
+    const items = require("./chat-history-adapter").reassembleHistoryItems(input.items);
+    for (const item of items) {
+      const encoded = JSON.stringify(item);
+      if (Buffer.byteLength(encoded) > MAX_CONTEXT_CONTENT_BYTES) throw transcriptError("TRANSCRIPT_IMPORT_INVALID", "Codex history item 超过容量");
+      const canonical = JSON.parse(encoded);
       if (!canonical || typeof canonical.id !== "string" || !ID_PATTERN.test(canonical.id)
         || !["user", "assistant", "toolResult", "system"].includes(canonical.role)
         || !["text", "thinking", "plan", "tool", "status", "prompt", "error"].includes(canonical.type)) {

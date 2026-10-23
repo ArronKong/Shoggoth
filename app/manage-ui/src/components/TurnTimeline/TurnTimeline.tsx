@@ -3,12 +3,16 @@
 // 历史回放 / 将来聊天页的实时流都一样)。
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { deriveRelations, formatDuration, summarizeArgs, toolLabelKey, type StepStatus, type TurnStep, type TurnTimelineState } from "../../lib/turnTimeline";
-import { TrajChevron, TrajGlyphExec, TrajGlyphRead, TrajGlyphThinking, TrajGlyphWorkboard } from "./trajectoryIcons";
+import { deriveRelations, formatDuration, toolActivityTitles, toolLabelKey, type StepStatus, type TurnStep, type TurnTimelineState } from "../../lib/turnTimeline";
+import { TrajChevron, TrajGlyph } from "./trajectoryIcons";
 import styles from "./TurnTimeline.module.css";
 import { PluginAppCard, pluginAppCallReference } from "../PluginAppCard";
 import { validPluginAppCallId } from "../../lib/turnTimeline";
+import { approvalActionText, describeApproval, type ApprovalFacts } from "../../lib/approvalPhrase";
+import { approvalChoiceLabel, approvalOptionIsVisible } from "../../lib/approvalOptions";
+import type { InteractiveApprovalOption } from "../../types";
 import ExternalPluginCallOutcome from "./ExternalPluginCallOutcome";
+import type { SubagentProgress } from "../../lib/chatSubagentActivity";
 
 export interface TurnTimelineProps {
   steps: TurnStep[];
@@ -43,43 +47,6 @@ function fmtK(n?: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
-// ---- 步骤类型小图标(currentColor,颜色由节点的分类/状态色决定) ----------
-// thinking/read/execute/workboard 四类 1:1 取自 Figma 稿(trajectoryIcons);
-// 其余仍是旧线条图标,待设计稿补齐后逐类替换。
-function glyph(kind: string): ReactNode {
-  const p = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
-  switch (kind) {
-    case "user":
-      return <svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6" /></svg>;
-    case "thinking":
-      return <TrajGlyphThinking />;
-    case "gather":
-      return <svg {...p}><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>;
-    case "read":
-      return <TrajGlyphRead />;
-    case "execute":
-      return <TrajGlyphExec />;
-    case "workboard":
-      return <TrajGlyphWorkboard />;
-    case "message":
-      return <svg {...p}><path d="M21 4 3 11l7 2 2 7 9-16Z" /></svg>;
-    case "plan":
-      return <svg {...p}><path d="m4 6 2 2 3-3M4 13l2 2 3-3M4 20l2 2 3-3" transform="translate(0,-1.5)" /><path d="M13 6h7M13 13h7M13 20h7" transform="translate(0,-1.5)" /></svg>;
-    case "prompt":
-      return <svg {...p}><path d="M9.5 9a2.5 2.5 0 1 1 3.4 2.3c-.8.3-.9 1-.9 1.7" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>;
-    case "status":
-      return <svg {...p}><path d="M8 4v6l-3 3M16 20v-6l3-3" /><path d="M4 13h6M14 11h6" /></svg>;
-    case "error":
-      return <svg {...p}><path d="M12 7v6M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>;
-    case "final":
-      return <svg {...p}><path d="m6 12 4 4 8-8" /></svg>;
-    case "text":
-      return <svg {...p}><path d="M4 6h16M4 12h16M4 18h9" /></svg>;
-    default:
-      return <svg {...p}><path d="M14 3a5 5 0 0 0-4.6 7L3 16.5V21h4.5L14 14.6A5 5 0 0 0 20.9 8l-3.4 3.4-2.9-2.9L18 5.1A5 5 0 0 0 14 3Z" /></svg>;
-  }
-}
-
 // 节点着色用的语义槽:tool 用分类,其他 kind 用固定映射。
 function nodeAccent(step: TurnStep): string {
   if (step.status === "error" || step.isError) return "error";
@@ -92,7 +59,30 @@ function nodeAccent(step: TurnStep): string {
 }
 
 function nodeGlyph(step: TurnStep): ReactNode {
-  return glyph(step.kind === "tool" ? (step.category === "other" ? "wrench" : step.category ?? "wrench") : step.kind);
+  return <TrajGlyph kind={step.kind === "tool" ? step.category ?? "execute" : step.kind} />;
+}
+
+function SubagentActivity({ progress }: { progress: SubagentProgress }) {
+  const { t } = useTranslation();
+  const running = progress.status === "running";
+  const [open, setOpen] = useState(running || progress.status === "pending");
+  const failed = progress.status === "failed" || progress.status === "timeout";
+  const status = running ? "running" : failed ? "error" : progress.status === "done" ? "ok"
+    : progress.status === "killed" || progress.status === "interrupted" ? "aborted" : "pending";
+  const labels: Record<string, string> = { running: "turnLab.running", done: "turnLab.done", failed: "turnLab.failed",
+    timeout: "turnLab.subagentTimeout", killed: "turnLab.aborted", interrupted: "turnLab.aborted", queued: "chat.liveStatus.queued", pending: "turnLab.subagentWaiting" };
+  return <section className={styles.subagent} data-subagent-key={progress.key}>
+    <button type="button" className={styles.head} aria-expanded={open} onClick={() => setOpen(value => !value)}>
+      <span className={styles.title}>{t("turnLab.subagentTask", { label: progress.label || t("turnLab.subagentDefault") })}</span>
+      <span className={styles.chip} data-st={status}>{t(labels[progress.status] || "turnLab.subagentWaiting")}</span>
+      <span className={styles.chev} data-show="1" data-open={open ? "1" : undefined}><TrajChevron /></span>
+    </button>
+    {progress.unavailable ? <p className={styles.subagentHint}>{t("turnLab.subagentUnavailable")}</p> : null}
+    {progress.error ? <p className={styles.subagentHint}>{progress.error}</p> : null}
+    {open ? <TurnTimeline steps={progress.steps} status={running ? "running" : failed ? "error" : "done"}
+      showDurations={false} autoFollow={running} emptyHint={t(running || status === "pending" ? "turnLab.subagentWaiting" : "turnLab.subagentNoSteps")} /> : null}
+    {open && progress.truncated ? <p className={styles.subagentHint}>{t("turnLab.subagentTruncated")}</p> : null}
+  </section>;
 }
 
 export default function TurnTimeline({ steps, status, showDurations = true, autoFollow = true, onUserScrollAway, emptyHint, className, pluginConversation }: TurnTimelineProps) {
@@ -106,6 +96,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
   const followedAutoRef = useRef(false);
 
   const relations = useMemo(() => deriveRelations(steps), [steps]);
+  const activityTitles = useMemo(() => toolActivityTitles(steps, t), [steps, t]);
   const duplicateStepCallIds = useMemo(() => {
     const seen = new Set<string>();
     const duplicates = new Set<string>();
@@ -163,13 +154,20 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
     };
   }, [onUserScrollAway]);
 
+  // Choices read as the card's buttons did, never as internal choice ids.
+  const choiceLabel = (s: TurnStep, choice: string): string => {
+    const prompt = s.prompt as { approvalOptions?: InteractiveApprovalOption[]; approvalDetails?: ApprovalFacts } | undefined;
+    return approvalChoiceLabel(choice, t, prompt?.approvalOptions?.filter(approvalOptionIsVisible),
+      prompt?.approvalDetails?.kind === "permissions");
+  };
+
   const chipLabel = (s: TurnStep): string => {
     if (s.kind === "tool" && s.toolName === "shoggoth_plugin_call" && s.status === "ok") {
       // The host wrapper ended; Service audit may still have an unknown remote result.
       return t("plugins.externalHostToolEnded");
     }
     if (s.kind === "prompt") {
-      if (s.promptOutcome === "answered") return t("turnLab.promptAnswered", { choice: s.promptChoice ?? "" });
+      if (s.promptOutcome === "answered") return t("turnLab.promptAnswered", { choice: choiceLabel(s, s.promptChoice ?? "") });
       if (s.promptOutcome === "expired") return t("turnLab.promptExpired");
       if (s.status === "pending") return t("turnLab.pending");
     }
@@ -190,7 +188,8 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
       case "text": return t("turnLab.stepSegment");
       case "plan": return t("turnLab.stepPlan");
       case "prompt": return t("turnLab.stepPrompt");
-      case "status": return t("turnLab.stepStatus");
+      case "status": return s.statusKind === "recalling" || s.statusKind === "recalled"
+        ? t("turnLab.stepRecall") : t("turnLab.stepStatus");
       case "error": return t("turnLab.stepError");
       case "final": return t("turnLab.stepFinal");
       default: {
@@ -204,14 +203,27 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
 
   const titleFor = (s: TurnStep): string => {
     switch (s.kind) {
-      case "tool": return summarizeArgs(s.toolName, s.args);
+      case "tool": return activityTitles.get(s.id) || "";
       case "plan": {
         const total = s.planEntries?.length ?? 0;
         const done = s.planEntries?.filter((e) => e.status === "completed").length ?? 0;
         return `${done}/${total} · ${t("turnLab.planVersion", { n: s.planVersion ?? 1 })}`;
       }
-      case "prompt": return oneLine(s.prompt?.command || s.prompt?.question, 80);
-      case "status": return oneLine(s.text, 80);
+      case "prompt": {
+        // Same plain-language action as the approval card, without the subject.
+        const details = (s.prompt as { approvalDetails?: ApprovalFacts } | undefined)?.approvalDetails;
+        const phrase = details ? describeApproval(details) : null;
+        if (!phrase) return oneLine(s.prompt?.command || s.prompt?.question || s.prompt?.message || s.prompt?.title, 80);
+        const action = approvalActionText(phrase, t);
+        return phrase.target?.kind === "command" ? `${action} · ${oneLine(phrase.target.text, 60)}` : action;
+      }
+      case "status":
+        // 进度使用界面语言；后端原文保留在展开详情。
+        if (s.statusKind === "recalling" || s.statusKind === "recalled") {
+          return s.status === "running" ? t("chat.recallingMemory") : s.statusKind === "recalled" ? t("chat.recalledMemory") : "";
+        }
+        return s.status === "running" ? t("chat.compactingCtx")
+          : s.statusKind === "compacted" ? t("chat.compactedCtx") : "";
       case "final": {
         const u = s.usage;
         const meta = [s.model, u ? `↑${fmtK(u.input)} ↓${fmtK(u.output)}` : ""].filter(Boolean).join(" · ");
@@ -227,7 +239,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
       const appCall = pluginConversation && (validPluginAppCallId(s.pluginAppCallId) || pluginAppCallReference(s.output));
       return (
         <>
-          <div className={styles.secLabel}>{t("turnLab.argsLabel")}</div>
+          <div className={styles.secLabel}>{t("turnLab.argsLabel")}{s.toolName ? ` · ${s.toolName}` : ""}</div>
           {argsText ? <pre className={styles.pre}>{argsText}</pre> : <div className={styles.noArgs}>{t("turnLab.noArgs")}</div>}
           {s.diffText || s.diff ? (
             <>
@@ -276,9 +288,9 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
     if (s.kind === "prompt") {
       return (
         <>
-          {s.prompt?.description ? <div className={styles.bodyText}>{s.prompt.description}</div> : null}
+          {s.prompt?.message || s.prompt?.description ? <div className={styles.bodyText}>{s.prompt.message || s.prompt.description}</div> : null}
           {s.prompt?.command ? <pre className={styles.pre}>{s.prompt.command}</pre> : null}
-          {s.prompt?.choices?.length ? <div className={styles.noArgs}>{s.prompt.choices.join(" / ")}</div> : null}
+          {s.prompt?.choices?.length ? <div className={styles.noArgs}>{s.prompt.choices.map((choice) => choiceLabel(s, choice)).join(" / ")}</div> : null}
         </>
       );
     }
@@ -290,7 +302,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
     if (s.kind === "tool") return s.args !== undefined || !!s.output || !!s.diffText || !!s.diff
       || !!validPluginAppCallId(s.pluginAppCallId);
     if (s.kind === "plan") return (s.planEntries?.length ?? 0) > 0;
-    if (s.kind === "prompt") return !!(s.prompt?.description || s.prompt?.command || s.prompt?.choices?.length);
+    if (s.kind === "prompt") return !!(s.prompt?.message || s.prompt?.description || s.prompt?.command || s.prompt?.choices?.length);
     return !!s.text?.trim();
   };
 
@@ -304,6 +316,8 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
           const isOpen = open.has(s.id);
           const rel = relations.get(s.id);
           const running = s.status === "running" || s.status === "pending";
+          const actionTitle = s.kind === "tool" ? titleFor(s) : "";
+          const isTextStep = s.kind === "text" || s.kind === "thinking";
           return (
             <li
               key={s.id}
@@ -329,14 +343,16 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                   </span>
                 ) : null}
                 <button type="button" className={styles.head} onClick={expandable ? () => setOpen((prev) => { const n = new Set(prev); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }) : undefined} disabled={!expandable} aria-expanded={expandable ? isOpen : undefined}>
-                  <span
+                  {!actionTitle && !isTextStep ? <span
                     className={styles.name}
                     data-mono={s.kind === "tool" && /^[\w.:-]+$/.test(kindLabel(s)) ? "1" : undefined}
                     title={s.kind === "tool" ? s.toolName : undefined}
                   >
                     {kindLabel(s)}
-                  </span>
-                  <span className={styles.title}>{titleFor(s)}</span>
+                  </span> : null}
+                  <span className={styles.title} data-action={actionTitle ? "1" : undefined}
+                    data-progress={isTextStep ? "1" : undefined}
+                    title={actionTitle ? `${actionTitle} (${s.toolName})` : isTextStep ? s.text : undefined}>{titleFor(s)}</span>
                   {s.kind === "tool" && s.status === "running" && s.updateCount ? (
                     <span className={styles.updates}>{t("turnLab.updates", { count: s.updateCount })}</span>
                   ) : null}
@@ -345,6 +361,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                     data-external-plugin={s.kind === "tool" && s.toolName === "shoggoth_plugin_call" ? "1" : undefined}>{chipLabel(s)}</span>
                   <span className={styles.chev} data-show={expandable ? "1" : undefined} data-open={isOpen ? "1" : undefined}><TrajChevron /></span>
                 </button>
+                {s.subagent ? <SubagentActivity key={s.subagent.key} progress={s.subagent} /> : null}
                 {s.kind === "tool" && s.toolName === "shoggoth_plugin_call"
                   && s.toolCallId && pluginConversation?.agentId && pluginConversation.sessionId
                   && !pluginConversation.duplicateToolCallIds?.has(s.toolCallId)

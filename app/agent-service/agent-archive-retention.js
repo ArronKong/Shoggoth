@@ -4,7 +4,6 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { DEFAULT_AGENT_PROFILE_ID } = require("./product-store");
-const { BUILTIN_CLI_AGENT_PROFILES } = require("./builtin-cli-profiles");
 const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 const { validateCanonicalOwnedDirectory, sameIdentity } = require("./runtime-storage-inspector");
@@ -12,8 +11,11 @@ const { validateCanonicalOwnedDirectory, sameIdentity } = require("./runtime-sto
 const AGENT_ARCHIVE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const AGENT_ARCHIVE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
-const PROTECTED = new Set([DEFAULT_AGENT_PROFILE_ID, ...BUILTIN_CLI_AGENT_PROFILES.map((p) => p.id)]);
+const PROTECTED = new Set([DEFAULT_AGENT_PROFILE_ID]);
 const RUNTIMES = new Set(["codex", "grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness"]);
+// Ledger directories not named after the runtime. The retired Antigravity terminal
+// transport left its ledger under the runtime name; both belong to the Agent.
+const LEDGER_DIRECTORIES = Object.freeze({ antigravity: Object.freeze(["antigravity-acp", "antigravity"]) });
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const BUSY = new Set(["queued", "starting", "running", "waiting_approval", "waiting_input"]);
 
@@ -123,6 +125,11 @@ class AgentArchiveRetention {
     } });
   }
 
+  has(profileId) {
+    this._assertOpen();
+    return Object.hasOwn(this.entries, profileId);
+  }
+
   assertRestorable(profileId) {
     this._assertOpen();
     const entry = this.entries[profileId];
@@ -195,11 +202,14 @@ class AgentArchiveRetention {
   }
 
   _fileTargets(entry) {
+    const ledgers = LEDGER_DIRECTORIES[entry.runtime] || [entry.runtime];
     return [
       ["agent", path.join(this.paths.stateDir, "agents", entry.profileId)],
       ["computer", path.join(this.paths.stateDir, "computer", "artifacts",
         crypto.createHash("sha256").update(entry.profileId).digest("hex").slice(0, 32))],
-      ["ledger", path.join(this.paths.stateDir, "runtime-ledgers", entry.runtime, entry.runtimeProfileId)],
+      ["browser-use", path.join(this.paths.stateDir, "browser-use", "profiles", entry.profileId)],
+      ...ledgers.map((directory, index) => [index === 0 ? "ledger" : `ledger-${directory}`,
+        path.join(this.paths.stateDir, "runtime-ledgers", directory, entry.runtimeProfileId)]),
     ];
   }
 

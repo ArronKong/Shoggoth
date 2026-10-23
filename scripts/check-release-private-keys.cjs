@@ -2,20 +2,32 @@
 
 // Run on a fresh public-source export before pushing, and on the assembled App
 // from electron-builder's afterPack hook before any signing or publication.
-const { createHash, createPrivateKey } = require("node:crypto");
+const { createPrivateKey } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
 const PRIVATE_KEY_BLOCK = /-----BEGIN ((?:(?:ENCRYPTED|RSA|EC|DSA|OPENSSH) )?PRIVATE KEY)-----([\s\S]{0,131072}?)-----END \1-----/gu;
 const PRIVATE_KEY_FILE = /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.npmrc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]+\.(?:p8|p12|pfx|key|kdbx|keychain-db))$/iu;
-// The bundled product-design catalog includes a fixed, credential-free npm
-// template. Its package digest requires the file, so permit only these exact
-// bytes at this exact App resource path; changed or relocated .npmrc files
-// remain blocked by the normal credential-file rule.
-const SAFE_BUNDLED_NPMRC = Object.freeze({
-  path: "Contents/Resources/bundled-plugins/packages/product-design/templates/prototype/.npmrc",
-  sha256: "37ae29f49cb719e0a2fbdef151dcfac3062390219ef54e2a5586e89303bd8648",
-});
+// Elsewhere (the pre-package scan of resources/, a public export) an npm config
+// that only sets these keys holds no credential. Any other line, including
+// tokens, passwords, registries and scoped `//host/:_authToken` settings, keeps
+// the file blocked by name.
+const HARMLESS_NPMRC_KEYS = new Set(["audit", "cache", "fund"]);
+
+function isHarmlessNpmrc(name, bytes) {
+  if (!/(?:^|\/)\.npmrc$/iu.test(name)) return false;
+  return bytes.toString("utf8").split(/\r?\n/u).every((line) => {
+    const setting = line.trim();
+    if (!setting || setting.startsWith("#") || setting.startsWith(";")) return true;
+    const key = /^([a-z][a-z0-9-]*)\s*=/u.exec(setting)?.[1];
+    return Boolean(key) && HARMLESS_NPMRC_KEYS.has(key);
+  });
+}
+
+function allowedNpmrc(name, bytes) {
+  if (name.startsWith("Contents/")) return false;
+  return isHarmlessNpmrc(name, bytes);
+}
 
 function hasPrivateJwk(value, depth = 0) {
   if (!value || typeof value !== "object" || depth > 32) return false;
@@ -39,9 +51,7 @@ function isPrivateKeyBlock(block, body) {
 
 function inspectFile(name, bytes, findings) {
   const normalizedName = name.split(path.sep).join("/");
-  const safeBundledTemplate = normalizedName === SAFE_BUNDLED_NPMRC.path
-    && createHash("sha256").update(bytes).digest("hex") === SAFE_BUNDLED_NPMRC.sha256;
-  if (PRIVATE_KEY_FILE.test(normalizedName) && !safeBundledTemplate) {
+  if (PRIVATE_KEY_FILE.test(normalizedName) && !allowedNpmrc(normalizedName, bytes)) {
     findings.push({ path: name, reason: "credential file name" });
   }
   const text = bytes.toString("latin1");

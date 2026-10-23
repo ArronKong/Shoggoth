@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "shoggoth-plugin-authoring",
+  "name": "shoggoth-plugin-authoring",
+  "version": "1.0.0",
+  "description": "Create a reusable Codex-format plugin from a task, public MCP configuration, CLI documentation, or existing Skills, then validate and install it in Shoggoth for native Agents and bridged Hermes/OpenClaw.",
+  "entry": "SKILL.md",
+  "requiredTools": ["plugin_create", "plugin_install", "plugin_status", "app_help_get"],
+  "requiredRuntimeCapabilities": [],
+  "sourceCompatibility": ["shoggoth", "codex", "openclaw", "hermes"]
+}

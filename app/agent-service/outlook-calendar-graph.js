@@ -1,19 +1,23 @@
 "use strict";
 
-// Fixture-only independent Graph candidate. These methods accept a caller-
-// supplied profile/client for local contract tests; do not expose them through
-// Service IPC, MCP or UI until an authenticated host context derives both,
-// and a separately installed Shoggoth component owns the per-host grant.
+// Independent Shoggoth Graph calendar reader. The legacy direct profile/client
+// methods remain local contract-test surfaces; production plugin reads enter
+// through the Service-owned Connection, current Grant and one-use dispatcher.
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { serviceError } = require("./security");
+const { CAPABILITIES, capabilityFor, listRequest, projectList } =
+  require("./plugin-microsoft-graph-capabilities");
 
 const GRAPH_ORIGIN = "https://graph.microsoft.com";
 const GRAPH_PATH = "/v1.0/me/calendarView";
 const SCOPES = Object.freeze(["Calendars.Read", "User.Read", "offline_access"]);
+const CAPABILITY_SCOPES = new Set(["Calendars.Read",
+  ...Object.values(CAPABILITIES).map(capability => capability.scope)]);
+const ALLOWED_SCOPES = new Set([...SCOPES, ...CAPABILITY_SCOPES, "openid", "profile", "email"]);
 const SELECT = "id,subject,start,end,isAllDay,showAs,location,organizer";
 const MAX_PAGES = 3;
 const PAGE_SIZE = 50;
@@ -111,14 +115,16 @@ function validToken(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 16_384 && TOKEN.test(value);
 }
 
-function parseTokenResponse(value, now, previousRefreshToken = null) {
+function parseTokenResponse(value, now, previousRefreshToken = null,
+  requiredScopes = ["Calendars.Read", "User.Read"], allowedScopes = SCOPES) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || value.token_type?.toLowerCase() !== "bearer" || !validToken(value.access_token)
     || !Number.isSafeInteger(value.expires_in) || value.expires_in < 1 || value.expires_in > 86_400
     || typeof value.scope !== "string" || value.scope.length > 2048) fail("OUTLOOK_CALENDAR_AUTH_FAILED");
   const granted = scopeSet(value.scope);
-  if (!granted.has("Calendars.Read") || !granted.has("User.Read")
-    || [...granted].some(scope => !SCOPES.includes(scope) && !["openid", "profile", "email"].includes(scope))) {
+  const allowed = new Set([...allowedScopes, "openid", "profile", "email"]);
+  if (requiredScopes.some(scope => !granted.has(scope))
+    || [...granted].some(scope => !ALLOWED_SCOPES.has(scope) || !allowed.has(scope))) {
     fail("OUTLOOK_CALENDAR_AUTH_FAILED");
   }
   const refreshToken = value.refresh_token ?? previousRefreshToken;
@@ -135,11 +141,12 @@ function parseCredential(raw, clientId) {
     || value.version !== 1 || value.clientId !== clientId
     || typeof value.principalHash !== "string" || !/^[a-f0-9]{64}$/u.test(value.principalHash)
     || !validToken(value.accessToken) || !validToken(value.refreshToken)
-    || !Array.isArray(value.scopes) || !value.scopes.includes("Calendars.Read")
-    || !value.scopes.includes("User.Read")
-    || value.scopes.some(scope => !SCOPES.includes(scope) && !["openid", "profile", "email"].includes(scope))
+    || !Array.isArray(value.scopes) || !value.scopes.includes("User.Read")
+    || !value.scopes.some(scope => CAPABILITY_SCOPES.has(scope))
+    || value.scopes.some(scope => typeof scope !== "string" || !ALLOWED_SCOPES.has(scope))
     || !Number.isSafeInteger(value.expiresAt) || value.expiresAt < 0
-    || !Array.isArray(value.grants) || value.grants.length < 1 || value.grants.length > 128
+    || !Array.isArray(value.grants) || value.grants.length > 128
+    || value.grants.length > 0 && !value.scopes.includes("Calendars.Read")
     || new Set(value.grants).size !== value.grants.length
     || value.grants.some(grant => typeof grant !== "string"
       || !/^(native|openclaw|hermes):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(grant))) {
@@ -198,12 +205,10 @@ function assertNextLink(value, range) {
     || url.username || url.password || url.hash
     || [...url.searchParams.keys()].some(key => !allowed.has(key))
     || [...allowed].some(key => url.searchParams.getAll(key).length > 1)
-    || (url.searchParams.has("startDateTime")
-      && url.searchParams.get("startDateTime") !== range.startDateTime)
-    || (url.searchParams.has("endDateTime")
-      && url.searchParams.get("endDateTime") !== range.endDateTime)
-    || (url.searchParams.has("$select") && url.searchParams.get("$select") !== SELECT)
-    || (url.searchParams.has("$top") && url.searchParams.get("$top") !== String(PAGE_SIZE))) {
+    || url.searchParams.get("startDateTime") !== range.startDateTime
+    || url.searchParams.get("endDateTime") !== range.endDateTime
+    || url.searchParams.get("$select") !== SELECT
+    || url.searchParams.get("$top") !== String(PAGE_SIZE)) {
     fail("OUTLOOK_CALENDAR_REMOTE_FAILED");
   }
   return url.href;
@@ -223,6 +228,9 @@ class OutlookCalendarGraphController {
   // grant in this process can activate it. This also fails closed if a revoke
   // write failed and the process stopped before it could be retried.
   #sessionGrants = new Set();
+  // Independent account activation for the Service-owned plugin path. A
+  // legacy per-host grant must never activate this path after a restart.
+  #sessionPluginPrincipalHash = null;
   #closed = false;
 
   constructor({ paths, secretStore, productStore, fetchImpl = globalThis.fetch,
@@ -274,6 +282,19 @@ class OutlookCalendarGraphController {
     return { revision, value: parseCredential(raw, this.config.clientId) };
   }
 
+  hasStoredAccount() {
+    return this.secrets.getCredentialRevision(ACCOUNT_REF) !== null;
+  }
+
+  // Service startup uses this encrypted-record view only to demote stale
+  // plugin Connections. It never activates a principal or grants a tool.
+  async storedPluginAuthority() {
+    if (!this.config || this.#closed) return undefined;
+    const record = await this.#record();
+    return record ? { principalIdentity: `microsoft-graph:${record.value.principalHash}`,
+      scopes: [...record.value.scopes] } : null;
+  }
+
   async status({ profileId, client = "native" } = {}) {
     const subject = this.#subject(profileId, client);
     if (!this.config) return { configured: false, accountConnected: false,
@@ -283,17 +304,54 @@ class OutlookCalendarGraphController {
     const flow = [...this.#flows.values()].find(item => item.profileId === profileId && item.status === "pending");
     const connected = !this.#closed && !this.#revocationFailed
       && this.#pendingRevocations === 0 && this.#pendingAccountSwitches === 0
+      && record?.value.scopes.includes("Calendars.Read") === true
       && record?.value.grants.includes(subject) === true && this.#sessionGrants.has(subject);
     return { configured: true, accountConnected: !!record, connected,
       principalHash: connected ? record.value.principalHash : null,
       flow: flow ? { flowId: flow.id, status: flow.status, expiresAt: flow.expiresAt } : null,
       revocationFailed: this.#revocationFailed,
-      activationRequired: !!record?.value.grants.includes(subject) && !this.#sessionGrants.has(subject) };
+      activationRequired: !!record?.value.scopes.includes("Calendars.Read")
+        && !!record?.value.grants.includes(subject) && !this.#sessionGrants.has(subject) };
   }
 
-  async connect({ profileId } = {}) {
-    this.#profile(profileId);
+  async connect({ profileId, onReady = null } = {}) {
+    return this.#connect({ profileId, onReady, scopes: SCOPES,
+      packageId: "outlook-calendar" });
+  }
+
+  // Incremental consent on the same encrypted Microsoft account. The Store
+  // still owns a separate Connection, Binding and Grant for each installed
+  // package; acquiring a scope never grants a tool invocation on its own.
+  async consentPlanForCapability(packageId) {
+    const capability = capabilityFor(packageId);
     if (!this.config || this.#closed || this.#revocationFailed) fail();
+    const previous = await this.#record();
+    const scopes = [...new Set([
+      ...(previous?.value.scopes.filter(scope => CAPABILITY_SCOPES.has(scope)) || []),
+      capability.scope, "User.Read", "offline_access"])];
+    return Object.freeze({ scopes: Object.freeze(scopes),
+      accountRevision: previous?.revision ?? null });
+  }
+
+  async connectForCapability({ profileId, packageId, onReady = null,
+    expectedAccountRevision = undefined } = {}) {
+    this.#profile(profileId);
+    const plan = await this.consentPlanForCapability(packageId);
+    if (expectedAccountRevision !== undefined
+      && expectedAccountRevision !== plan.accountRevision) fail("OUTLOOK_CALENDAR_AUTH_FAILED");
+    return this.#connect({ profileId, onReady, scopes: plan.scopes, packageId,
+      expectedAccountRevision: plan.accountRevision });
+  }
+
+  async #connect({ profileId, onReady, scopes, packageId,
+    expectedAccountRevision = undefined }) {
+    this.#profile(profileId);
+    if (onReady !== null && typeof onReady !== "function") fail("OUTLOOK_CALENDAR_FORBIDDEN");
+    if (!this.config || this.#closed || this.#revocationFailed) fail();
+    if (expectedAccountRevision !== undefined
+      && this.secrets.getCredentialRevision(ACCOUNT_REF) !== expectedAccountRevision) {
+      fail("OUTLOOK_CALENDAR_AUTH_FAILED");
+    }
     if ([...this.#flows.values()].some(flow => ["pending", "exchanging"].includes(flow.status))) {
       fail("OUTLOOK_CALENDAR_AUTH_BUSY");
     }
@@ -302,7 +360,8 @@ class OutlookCalendarGraphController {
     }
     const flow = { id: crypto.randomUUID(), profileId, status: "pending", expiresAt: this.now() + FLOW_LIFETIME_MS,
       state: crypto.randomBytes(32).toString("base64url"), verifier: crypto.randomBytes(32).toString("base64url"),
-      generation: this.#generation, server: null, timer: null };
+      generation: this.#generation, server: null, timer: null, onReady,
+      scopes, packageId, expectedAccountRevision };
     const server = http.createServer((request, response) => {
       void this.#callback(flow, request, response);
     });
@@ -326,7 +385,7 @@ class OutlookCalendarGraphController {
       flow.timer.unref?.();
       const url = new URL(this.endpoints.authorize);
       url.search = new URLSearchParams({ client_id: this.config.clientId, response_type: "code",
-        redirect_uri: flow.redirectUrl, response_mode: "query", scope: SCOPES.join(" "),
+        redirect_uri: flow.redirectUrl, response_mode: "query", scope: flow.scopes.join(" "),
         state: flow.state, code_challenge: crypto.createHash("sha256").update(flow.verifier).digest("base64url"),
         code_challenge_method: "S256" }).toString();
       return { flowId: flow.id, authorizationUrl: url.href, expiresAt: flow.expiresAt };
@@ -378,7 +437,7 @@ class OutlookCalendarGraphController {
         fail("OUTLOOK_CALENDAR_AUTH_FAILED");
       }
       const tokens = await this.#token({ grant_type: "authorization_code", code: code[0],
-        redirect_uri: flow.redirectUrl, code_verifier: flow.verifier });
+        redirect_uri: flow.redirectUrl, code_verifier: flow.verifier }, null, flow.scopes);
       this.#profile(flow.profileId);
       const identity = await this.#me(tokens.accessToken);
       await this.#exclusive(async () => {
@@ -386,13 +445,21 @@ class OutlookCalendarGraphController {
           || this.now() >= flow.expiresAt) fail("OUTLOOK_CALENDAR_AUTH_FAILED");
         this.#profile(flow.profileId);
         const previous = await this.#record();
+        if (flow.expectedAccountRevision !== undefined
+          && (previous?.revision ?? null) !== flow.expectedAccountRevision) {
+          fail("OUTLOOK_CALENDAR_AUTH_FAILED");
+        }
         if (flow.status !== "exchanging" || flow.generation !== this.#generation || this.#closed
           || this.now() >= flow.expiresAt) fail("OUTLOOK_CALENDAR_AUTH_FAILED");
         const previousRevision = previous?.revision ?? null;
+        const principalHash = digest(`${this.config.clientId}:${identity}`);
+        const samePrincipal = previous?.value.principalHash === principalHash;
+        const preserveGrants = flow.packageId !== "outlook-calendar" && samePrincipal;
         const record = { version: 1, clientId: this.config.clientId,
-          principalHash: digest(`${this.config.clientId}:${identity}`), ...tokens,
-          grants: [`native:${flow.profileId}`] };
+          principalHash, ...tokens, grants: preserveGrants ? previous.value.grants
+            : flow.packageId === "outlook-calendar" ? [`native:${flow.profileId}`] : [] };
         this.#pendingAccountSwitches += 1;
+        this.#sessionPluginPrincipalHash = null;
         this.#bump();
         flow.generation = this.#generation;
         try {
@@ -419,9 +486,27 @@ class OutlookCalendarGraphController {
             this.#bump();
             fail("OUTLOOK_CALENDAR_AUTH_FAILED");
           }
-          this.#sessionGrants.clear();
-          this.#sessionGrants.add(`native:${flow.profileId}`);
+          if (!preserveGrants) this.#sessionGrants.clear();
+          if (flow.packageId === "outlook-calendar") {
+            this.#sessionGrants.add(`native:${flow.profileId}`);
+          }
+          this.#sessionPluginPrincipalHash = record.principalHash;
           this.#bump();
+          try {
+            const result = flow.onReady?.({ profileId: flow.profileId,
+              principalHash: record.principalHash, packageId: flow.packageId,
+              grantedScopes: Object.freeze([...record.scopes]) });
+            if (result && typeof result.then === "function") fail("OUTLOOK_CALENDAR_AUTH_FAILED");
+          } catch {
+            // The OAuth account may have been stored, but no Service-owned
+            // connection was published. Close every read path until repaired.
+            this.#sessionGrants.clear();
+            this.#sessionPluginPrincipalHash = null;
+            this.#revocationFailed = true;
+            this.#revocationFailureSubjects.add("*");
+            this.#bump();
+            fail("OUTLOOK_CALENDAR_AUTH_FAILED");
+          }
         } finally { this.#pendingAccountSwitches -= 1; }
       });
       this.#finishFlow(flow, "ready");
@@ -456,6 +541,7 @@ class OutlookCalendarGraphController {
         || this.#pendingAccountSwitches > 0) fail();
       const record = await this.#record();
       if (!record) fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
+      if (!record.value.scopes.includes("Calendars.Read")) fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
       if (record.value.grants.includes(subject)) {
         this.#sessionGrants.add(subject);
         return { granted: true, principalHash: record.value.principalHash };
@@ -475,6 +561,7 @@ class OutlookCalendarGraphController {
     if (!this.config) fail();
     this.#pendingRevocations += 1;
     this.#sessionGrants.delete(subject);
+    this.#sessionPluginPrincipalHash = null;
     this.#bump();
     for (const flow of this.#flows.values()) if (flow.profileId === profileId) this.#finishFlow(flow, "canceled");
     try { return await this.#exclusive(async () => {
@@ -519,11 +606,13 @@ class OutlookCalendarGraphController {
     return boundedJson(response);
   }
 
-  async #token(fields, previousRefreshToken = null) {
-    const body = new URLSearchParams({ client_id: this.config.clientId, scope: SCOPES.join(" "), ...fields });
+  async #token(fields, previousRefreshToken = null, requestedScopes = SCOPES) {
+    const body = new URLSearchParams({ client_id: this.config.clientId,
+      scope: requestedScopes.join(" "), ...fields });
     const value = await this.#request(this.endpoints.token, { method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
-    return parseTokenResponse(value, this.now(), previousRefreshToken);
+    return parseTokenResponse(value, this.now(), previousRefreshToken,
+      requestedScopes.filter(scope => scope !== "offline_access"), requestedScopes);
   }
 
   async #me(accessToken, signal) {
@@ -535,16 +624,22 @@ class OutlookCalendarGraphController {
     return value.id;
   }
 
-  async #usableRecord(subject, expectedGeneration) {
+  async #usableRecord(subject, expectedGeneration, principalHash = null,
+    assertAuthority = null, requiredScope = "Calendars.Read") {
+    assertAuthority?.();
     if (this.#pendingRevocations > 0 || this.#pendingAccountSwitches > 0 || this.#revocationFailed) {
       fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
     }
     let current = await this.#record();
+    assertAuthority?.();
     if (expectedGeneration !== this.#generation || this.#pendingRevocations > 0
       || this.#pendingAccountSwitches > 0 || this.#revocationFailed) {
       fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
     }
-    if (!current?.value.grants.includes(subject) || !this.#sessionGrants.has(subject)) {
+    if (!current || !current.value.scopes.includes(requiredScope) || (subject === null
+      ? current.value.principalHash !== principalHash
+        || this.#sessionPluginPrincipalHash !== principalHash
+      : !current.value.grants.includes(subject) || !this.#sessionGrants.has(subject))) {
       fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
     }
     if (current.value.expiresAt > this.now() + 30_000) {
@@ -555,9 +650,15 @@ class OutlookCalendarGraphController {
       || this.#revocationFailed || generation !== expectedGeneration) {
       fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
     }
+    assertAuthority?.();
+    const requestedScopes = [
+      ...current.value.scopes.filter(scope => CAPABILITY_SCOPES.has(scope)),
+      "User.Read", "offline_access"];
     const refreshed = await this.#token({ grant_type: "refresh_token",
-      refresh_token: current.value.refreshToken }, current.value.refreshToken);
+      refresh_token: current.value.refreshToken }, current.value.refreshToken, requestedScopes);
+    assertAuthority?.();
     const identity = await this.#me(refreshed.accessToken);
+    assertAuthority?.();
     await this.#exclusive(async () => {
       if (digest(`${this.config.clientId}:${identity}`) !== current.value.principalHash
         || generation !== this.#generation
@@ -569,7 +670,11 @@ class OutlookCalendarGraphController {
       this.#bump();
     });
     current = await this.#record();
-    if (!current?.value.grants.includes(subject) || !this.#sessionGrants.has(subject)) {
+    assertAuthority?.();
+    if (!current || !current.value.scopes.includes(requiredScope) || (subject === null
+      ? current.value.principalHash !== principalHash
+        || this.#sessionPluginPrincipalHash !== principalHash
+      : !current.value.grants.includes(subject) || !this.#sessionGrants.has(subject))) {
       fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
     }
     return { record: current, generation: this.#generation };
@@ -577,20 +682,133 @@ class OutlookCalendarGraphController {
 
   async calendarView({ profileId, client = "native", startDateTime, endDateTime } = {}) {
     const subject = this.#subject(profileId, client);
+    return this.#calendarView({ subject, startDateTime, endDateTime,
+      assertAuthority: () => { this.#subject(profileId, client); } });
+  }
+
+  // Only Service-owned connector code may call this method. A public route
+  // must first derive a current PluginStore binding and a one-use dispatch
+  // ticket; the account identity alone is never a tool invocation grant.
+  async calendarViewForPrincipal({ principalIdentity, startDateTime, endDateTime,
+    assertCurrent, signal } = {}) {
+    if (typeof principalIdentity !== "string"
+      || !/^microsoft-graph:[a-f0-9]{64}$/u.test(principalIdentity)
+      || typeof assertCurrent !== "function") fail("OUTLOOK_CALENDAR_FORBIDDEN");
+    const principalHash = principalIdentity.slice("microsoft-graph:".length);
+    const current = () => {
+      const value = assertCurrent();
+      if (value && typeof value.then === "function") fail("OUTLOOK_CALENDAR_FORBIDDEN");
+    };
+    return this.#calendarView({ subject: null, principalHash,
+      startDateTime, endDateTime, assertAuthority: current, signal });
+  }
+
+  // Service-owned Graph family read. A Product Connection, Binding, Grant and
+  // one-use dispatch ticket must be checked by the caller through
+  // assertCurrent. The account broker independently checks the exact delegated
+  // scope, current encrypted credential and process-local account activation.
+  async readCollectionForPrincipal({ principalIdentity, packageId, input, toolName,
+    assertCurrent, signal = null } = {}) {
+    const capability = capabilityFor(packageId);
+    const url = listRequest(packageId, input, toolName);
+    if (typeof principalIdentity !== "string"
+      || !/^microsoft-graph:[a-f0-9]{64}$/u.test(principalIdentity)
+      || typeof assertCurrent !== "function" || !this.config || this.#closed
+      || this.#revocationFailed) fail("OUTLOOK_CALENDAR_FORBIDDEN");
+    const principalHash = principalIdentity.slice("microsoft-graph:".length);
+    const current = () => {
+      const result = assertCurrent();
+      if (result && typeof result.then === "function") fail("OUTLOOK_CALENDAR_FORBIDDEN");
+    };
+    const admissionGeneration = this.#generation;
+    const { record, generation } = await this.#usableRecord(null, admissionGeneration,
+      principalHash, current, capability.scope);
+    const controller = new AbortController();
+    this.#calls.add(controller);
+    const assertAuthority = () => {
+      current();
+      if (controller.signal.aborted || signal?.aborted || this.#pendingRevocations > 0
+        || this.#pendingAccountSwitches > 0 || this.#revocationFailed
+        || this.#sessionPluginPrincipalHash !== principalHash
+        || generation !== this.#generation
+        || this.secrets.getCredentialRevision(ACCOUNT_REF) !== record.revision) {
+        fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
+      }
+    };
+    try {
+      assertAuthority();
+      const page = await this.#request(url, { method: "GET", signal: signal
+        ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+        headers: { Authorization: `Bearer ${record.value.accessToken}`,
+          Accept: "application/json" } });
+      assertAuthority();
+      const projected = projectList(packageId, page, toolName, input);
+      assertAuthority();
+      return projected;
+    } finally { this.#calls.delete(controller); }
+  }
+
+  // A persisted OAuth record cannot activate itself. The Service calls this
+  // only after resolving a current installed, enabled Graph Connection and
+  // Binding from PluginStore. The dispatch ticket and Grant remain separate.
+  async activatePluginAccount({ principalIdentity, assertCurrent,
+    packageId = "outlook-calendar" } = {}) {
+    const requiredScope = packageId === "outlook-calendar" ? "Calendars.Read"
+      : capabilityFor(packageId).scope;
+    if (typeof principalIdentity !== "string"
+      || !/^microsoft-graph:[a-f0-9]{64}$/u.test(principalIdentity)
+      || typeof assertCurrent !== "function" || !this.config || this.#closed
+      || this.#pendingRevocations > 0 || this.#pendingAccountSwitches > 0
+      || this.#revocationFailed) fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
+    const current = () => {
+      const result = assertCurrent();
+      if (result && typeof result.then === "function") fail("OUTLOOK_CALENDAR_FORBIDDEN");
+    };
+    current();
+    const record = await this.#record();
+    current();
+    const hash = principalIdentity.slice("microsoft-graph:".length);
+    if (!record || record.value.principalHash !== hash
+      || !record.value.scopes.includes(requiredScope)
+      || this.#pendingRevocations > 0 || this.#pendingAccountSwitches > 0
+      || this.#revocationFailed) fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
+    this.#sessionPluginPrincipalHash = hash;
+    return { activated: true };
+  }
+
+  // A plugin Connection has its own durable authority. Once it is fenced,
+  // clear only its process-local Graph activation; the shared encrypted
+  // account may still be needed by separately granted direct host clients.
+  deactivatePluginAccount({ principalIdentity } = {}) {
+    if (typeof principalIdentity !== "string"
+      || !/^microsoft-graph:[a-f0-9]{64}$/u.test(principalIdentity)) {
+      fail("OUTLOOK_CALENDAR_FORBIDDEN");
+    }
+    const hash = principalIdentity.slice("microsoft-graph:".length);
+    if (this.#sessionPluginPrincipalHash === hash) {
+      this.#sessionPluginPrincipalHash = null;
+      this.#bump();
+    }
+  }
+
+  async #calendarView({ subject, principalHash = null, startDateTime, endDateTime,
+    assertAuthority, signal = null }) {
     if (!this.config || this.#closed || this.#revocationFailed) fail();
     const range = calendarRange({ startDateTime, endDateTime });
     if (this.#pendingRevocations > 0 || this.#pendingAccountSwitches > 0 || this.#revocationFailed) {
       fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
     }
     const admissionGeneration = this.#generation;
-    const { record, generation } = await this.#usableRecord(subject, admissionGeneration);
+    const { record, generation } = await this.#usableRecord(subject, admissionGeneration,
+      principalHash, assertAuthority);
     const controller = new AbortController();
     this.#calls.add(controller);
     const assertCurrent = () => {
-      this.#subject(profileId, client);
+      assertAuthority();
       if (controller.signal.aborted || this.#pendingRevocations > 0
         || this.#pendingAccountSwitches > 0 || this.#revocationFailed
-        || !this.#sessionGrants.has(subject)
+        || (subject === null ? this.#sessionPluginPrincipalHash !== principalHash
+          || record.value.principalHash !== principalHash : !this.#sessionGrants.has(subject))
         || generation !== this.#generation
         || this.secrets.getCredentialRevision(ACCOUNT_REF) !== record.revision) {
         fail("OUTLOOK_CALENDAR_AUTH_REQUIRED");
@@ -608,7 +826,8 @@ class OutlookCalendarGraphController {
         assertCurrent();
         if (seen.has(next)) fail("OUTLOOK_CALENDAR_REMOTE_FAILED");
         seen.add(next);
-        const page = await this.#request(next, { method: "GET", signal: controller.signal,
+        const page = await this.#request(next, { method: "GET", signal: signal
+          ? AbortSignal.any([controller.signal, signal]) : controller.signal,
           headers: { Authorization: `Bearer ${record.value.accessToken}`, Accept: "application/json" } });
         assertCurrent();
         if (!page || !Array.isArray(page.value) || page.value.length > PAGE_SIZE) {
@@ -638,6 +857,7 @@ class OutlookCalendarGraphController {
     for (const controller of this.#calls) controller.abort();
     this.#calls.clear();
     this.#sessionGrants.clear();
+    this.#sessionPluginPrincipalHash = null;
   }
 }
 

@@ -9,6 +9,7 @@ const { createAgentService } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { requestService, readClientToken } = require("../app/agent-service/client");
 const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-protocol-version");
+const { trackPoolHost } = require("../app/agent-service/runtime-pool-capacity");
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check) {
@@ -25,8 +26,10 @@ async function until(check) {
   const write = (sessions) => fs.writeFileSync(saved, JSON.stringify(sessions));
   let serial = 0; let starts = 0; let resumes = 0; let stops = 0; let modelGate = null;
   const hosts = new Map();
+  const signingIn = new Set();
   const pool = {
-    async get(_binding, options) {
+    entries: new Map(), stoppingProfiles: new Set(), blockedProfiles: new Set(),
+    async get(binding, options) {
       const key = options.workspace || "control";
       if (hosts.has(key)) return hosts.get(key);
       starts += 1;
@@ -37,6 +40,7 @@ async function until(check) {
         subscribe() { return () => {}; },
         registerServerRequestHandler() { return () => {}; },
         authenticationState() { return { authenticated: true, credentialPresent: true }; },
+        canRetireIdle() { return true; },
         async modelsList() {
           if (modelGate) await modelGate;
           return { data: [{ model: "idle-fixture", displayName: "Fixture", description: "", isDefault: true, hidden: false }], nextCursor: null };
@@ -66,16 +70,21 @@ async function until(check) {
         async turnInterrupt() { return {}; },
         finish() { finish(); },
       };
+      const entry = { key, host, runtimeProfileId: binding.runtimeProfileId, runtimeAccountId: binding.runtimeAccountId };
+      trackPoolHost(entry, binding);
+      entry.capacity.ready = true;
+      this.entries.set(key, entry);
       hosts.set(key, host); return host;
     },
-    async stop() { stops += 1; for (const host of hosts.values()) host.finish(); hosts.clear(); },
-    async stopAll() { for (const host of hosts.values()) host.finish(); hosts.clear(); },
+    async stop() { stops += 1; for (const host of hosts.values()) host.finish(); hosts.clear(); this.entries.clear(); },
+    async stopAll() { for (const host of hosts.values()) host.finish(); hosts.clear(); this.entries.clear(); },
   };
   const service = createAgentService({
     paths, version: "idle-integration", builtinCliProfiles: true,
     builtinCliInstalledAccountIds: ["native-deepseek-harness-default-v1"], runtimeIdleTimeoutMs: 100,
     safeStorage: { isEncryptionAvailable: () => true, encryptString: (v) => Buffer.from(v), decryptString: (v) => Buffer.from(v).toString() },
     deepSeekHarnessRuntimePool: pool,
+    runtimeLoginManagers: { fixture: { isActive: (id) => signingIn.has(id), read: () => ({ login: null }), cancel: async () => ({}) } },
   });
   try {
     await service.start();
@@ -115,6 +124,11 @@ async function until(check) {
     service.accountAuthManager.active.set(binding.runtimeAccountId, {});
     assert.equal(service.runtimeManager.isIdle(binding), false);
     service.accountAuthManager.active.delete(binding.runtimeAccountId);
+    // A Settings sign-in that lives in the runtime's server (OpenCode) retains it too.
+    signingIn.add(binding.runtimeAccountId);
+    assert.equal(service.runtimeManager.isIdle(binding), false);
+    signingIn.delete(binding.runtimeAccountId);
+    assert.equal(service.runtimeManager.isIdle(binding), true);
 
     let releaseModels;
     modelGate = new Promise((resolve) => { releaseModels = resolve; });

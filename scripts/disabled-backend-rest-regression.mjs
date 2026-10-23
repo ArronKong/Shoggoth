@@ -139,12 +139,11 @@ configStore.ensure();
 const connections = new BackendRegistry();
 connections.register(new OpenClawBackend());
 connections.register(new HermesBackend());
-for (const id of ["shoggoth", "codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]) {
-  connections.register(new ShoggothBackend({ id, name: id,
-    connectionMode: id === "shoggoth" ? "builtin-service" : "native-runtime",
-    readToken: () => { throw Error("Test must not access a real Service"); },
-  }));
-}
+// Native Runtimes are bindings of the single Shoggoth backend, not backends.
+connections.register(new ShoggothBackend({ id: "shoggoth", name: "Shoggoth",
+  connectionMode: "builtin-service",
+  readToken: () => { throw Error("Test must not access a real Service"); },
+}));
 connections.setDisabledBackendsProvider(() => configStore.read().disabledBackends);
 const configServer = await startStaticServer(0, { registry: connections, configStore });
 try {
@@ -171,4 +170,5 @@ try {
   await configServer.close();
   fs.rmSync(temp, { recursive: true, force: true });
 }
-console.log("PASS disabled backend REST isolation and all 9 last-connection guards");
+assert.deepEqual([...connections.backends.keys()].sort(), ["hermes", "openclaw", "shoggoth"]);
+console.log("PASS disabled backend REST isolation and all 3 last-connection guards");

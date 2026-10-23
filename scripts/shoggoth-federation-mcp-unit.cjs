@@ -133,7 +133,11 @@ test("外部 helper 通过独立 Service 握手认证，配置文件不直接携
 });
 
 test("外部 MCP 排除原生设定、记忆和 Computer Use，保留外部 Agent 的自身身份", async () => {
-  assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.length, 71);
+  // D22 保留读取入口，退役写工具不再出现在产品 MCP 目录中。
+  assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.length, 93);
+  for (const group of ["group_member_role_read", "group_messages_read"]) {
+    assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.some((definition) => definition.name === group), true, group);
+  }
   assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.filter(tool => tool.name.startsWith("inspiration_")).length, 10);
   assert.equal(EXTERNAL_FEDERATION_MCP_INSTRUCTIONS
     .includes("You are the Shoggoth App's native Agent"), false);
@@ -142,6 +146,8 @@ test("外部 MCP 排除原生设定、记忆和 Computer Use，保留外部 Agen
     /memory_save|memory_search|agent_definition_update|agent_definition_read|unnamespaced Codex request_user_input/u);
   assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS
     .some((definition) => definition.name.startsWith("computer_")), false);
+  assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS
+    .some((definition) => definition.name.startsWith("browser_")), false);
   let serviceCalls = 0;
   const handler = createMcpStdioHandler({
     runtimeProfileId: DEFAULT_RUNTIME_PROFILE_ID,
@@ -154,16 +160,19 @@ test("外部 MCP 排除原生设定、记忆和 Computer Use，保留外部 Agen
     protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" },
   } });
   const listed = await handler({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.equal(listed.result.tools.length, 71);
-  for (const shared of ["skill_catalog", "skill_read", "mcp_server_list", "mcp_server_tools", "mcp_server_call"]) {
+  assert.equal(listed.result.tools.length, 93);
+  for (const shared of ["app_help_search", "app_help_get", "skill_catalog", "skill_read", "skill_file_read", "plugin_resource_read",
+    "plugin_create", "plugin_install", "plugin_status", "plugin_setup_get",
+    "mcp_server_list", "mcp_server_tools", "mcp_server_call", "web_search", "web_fetch"]) {
     assert.equal(listed.result.tools.some((definition) => definition.name === shared), true, shared);
   }
-  for (const hidden of ["external_agent_list", "external_agent_get", "external_agent_run",
+  for (const hidden of ["group_task", "group_collaborate", "external_agent_list", "external_agent_get", "external_agent_run",
     "native_agent_get", "native_agent_update", "native_agent_archive",
-    "memory_search", "memory_save", "memory_confirm", "memory_forget", "agent_definition_read", "agent_definition_update"]) {
+    "memory_search", "memory_save", "memory_confirm", "memory_forget", "agent_definition_read", "agent_definition_update",
+    "plugin_secret_request", "plugin_activate"]) {
     assert.equal(listed.result.tools.some((definition) => definition.name === hidden), false);
   }
-  for (const name of ["computer_status", "memory_search", "agent_definition_read"]) {
+  for (const name of ["group_task", "group_collaborate", "computer_status", "memory_search", "agent_definition_read"]) {
     const refused = await handler({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
       name, arguments: {},
     } });
@@ -207,6 +216,17 @@ test("packaged 外部 role 只接受规范私有 credential 路径和显式客�
   }, runtime, argv));
 });
 
+test("受管 OpenClaw 不运行旧全局 MCP 注册 CLI", async () => {
+  const paths = tempPaths(); const calls = [];
+  const registrar = createFederationMcpRegistrar({ paths, packaged: true,
+    executablePath: "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth",
+    bootstrapPath: "/Applications/Shoggoth.app/Contents/Resources/app.asar/app/bootstrap.js",
+    getOpenClawMode: () => "managed", getHermesMode: () => "managed",
+    execFile(command, args, _options, callback) { calls.push([command, args]); callback(null, "", ""); } });
+  assert.deepEqual(await registrar.reconcile(), { skipped: null, openclaw: false, hermes: [] });
+  assert.equal(calls.length, 0);
+});
+
 test("静默注册使用官方 CLI 配置入口、覆盖本地 Hermes profiles，且 JSON 不含 token", async () => {
   const paths = tempPaths();
   const calls = [];
@@ -237,11 +257,15 @@ test("静默注册使用官方 CLI 配置入口、覆盖本地 Hermes profiles�
   assert.equal(serialized.includes(credential.token), false);
   assert.equal(serialized.includes("SHOGGOTH_FEDERATION_MCP_AUTH_FILE"), true);
   const openConfig = JSON.parse(calls[0][1][3]);
+  assert.equal(openConfig.requestTimeoutMs, 2 * (30 * 60_000 + 30_000) + 45_000);
+  assert.equal(openConfig.connectionTimeoutMs, 10_000);
   assert.equal(openConfig.env.SHOGGOTH_FEDERATION_MCP_CLIENT, "openclaw");
   assert.equal(openConfig.args.includes(
     `--shoggoth-runtime-account=${SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID}`,
   ), true);
   const hermesConfig = JSON.parse(calls[2][1].at(-1));
+  assert.equal(Object.hasOwn(hermesConfig, "request_timeout"), false);
+  assert.equal(Object.hasOwn(hermesConfig, "requestTimeoutMs"), false);
   assert.equal(hermesConfig.env.SHOGGOTH_FEDERATION_MCP_CLIENT, "hermes");
   assert.equal(calls[2][1][3], "mcp_servers.shoggoth");
   assert.equal(calls.every(([, args]) => !args.includes("remove") && !args.includes("reset")), true);

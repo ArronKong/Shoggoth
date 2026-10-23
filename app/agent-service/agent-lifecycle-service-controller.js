@@ -3,7 +3,7 @@
 
 const crypto = require("node:crypto");
 const path = require("node:path");
-const { BUILTIN_CLI_AGENT_PROFILES } = require("./builtin-cli-profiles");
+const { createBuiltinCliAgentProfile, planBuiltinCliAgentProfiles } = require("./builtin-cli-profiles");
 const { DEFAULT_AGENT_PROFILE_ID } = require("./product-store");
 const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 const { runtimeBinding } = require("./runtime-adapter");
@@ -21,10 +21,8 @@ const NON_TERMINAL_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
 ]);
 const BACKEND_BINDINGS = Object.freeze({ shoggoth: Object.freeze({ runtime: "codex" }) });
-const PROTECTED_PROFILE_IDS = new Set([
-  DEFAULT_AGENT_PROFILE_ID,
-  ...BUILTIN_CLI_AGENT_PROFILES.map((profile) => profile.id),
-]);
+// Built-in CLI Agents can be archived like user-created ones.
+const PROTECTED_PROFILE_IDS = new Set([DEFAULT_AGENT_PROFILE_ID]);
 const RETRYABLE_CODES = new Set([
   "AGENT_RETENTION_FAILED",
   "AGENT_INITIALIZATION_FAILED", "AGENT_RUNTIME_CLEANUP_FAILED", "AGENT_COMMIT_UNCERTAIN",
@@ -187,9 +185,12 @@ function createAgentLifecycleServiceController(options = {}) {
     || typeof options.activateProfile !== "function"
     || (options.onProfileChanged !== undefined && typeof options.onProfileChanged !== "function")
     || (options.revokePluginProfile !== undefined
-      && typeof options.revokePluginProfile !== "function")) {
+      && typeof options.revokePluginProfile !== "function")
+    || (options.hasActiveExternalRuns !== undefined && typeof options.hasActiveExternalRuns !== "function")) {
     throw lifecycleError("AGENT_SERVICE_CLOSED", "Profile lifecycle callbacks are invalid");
   }
+  // Optional: { state, installedAccountIds(), beforeCreate(profile), afterEnsure({createdProfileIds, locale}) }.
+  const builtinAgents = options.builtinAgents || null;
   const productStore = options.productStore;
   const now = options.now || Date.now;
   let state = "closed";
@@ -345,7 +346,8 @@ function createAgentLifecycleServiceController(options = {}) {
     if (profile.enabled) {
       assertCas(profile, binding.expectedUpdatedAt);
       if (productStore.listWorkRuns({ profileId: profile.id })
-        .some((run) => NON_TERMINAL_RUN_STATUSES.has(run.status))) {
+        .some((run) => NON_TERMINAL_RUN_STATUSES.has(run.status))
+        || options.hasActiveExternalRuns?.(profile.id) === true) {
         throw lifecycleError("AGENT_ACTIVE_RUNS");
       }
       // Revoke in the plugin Store before publishing disabled Product state.
@@ -394,6 +396,50 @@ function createAgentLifecycleServiceController(options = {}) {
     if (!profile.enabled) profile = putProfile({ ...profile, enabled: true });
     options.archiveRetention?.cancel(profile.id);
     return validateAgentLifecycleResult("agent.restore", { profile });
+  }
+
+  // Creates each connected, installed built-in CLI Agent once, through the same
+  // initialization as agent.create, then lets the Service add default sessions
+  // and first greetings.
+  async function ensureBuiltins(params, expectedGeneration) {
+    if (!builtinAgents) throw lifecycleError("AGENT_SERVICE_CLOSED");
+    const { state } = builtinAgents;
+    const installed = builtinAgents.installedAccountIds();
+    let plan;
+    try {
+      plan = planBuiltinCliAgentProfiles(productStore,
+        new Set(params.runtimeAccountIds.filter((id) => installed.has(id))), state);
+    } catch (error) {
+      if (dataErrorCode(error) === "BUILTIN_AGENT_PROFILE_CONFLICT") throw lifecycleError("AGENT_PROFILE_CONFLICT");
+      throw error;
+    }
+    const record = [...plan.record];
+    const createdProfileIds = [];
+    for (const spec of [...plan.pending, ...plan.build]) {
+      let profile = productStore.getAgentProfile(spec.id);
+      // A disabled Agent with a retention entry was deleted by the user.
+      if (profile && (!options.archiveRetention || options.archiveRetention.has(profile.id))) {
+        record.push(spec.id);
+        continue;
+      }
+      if (!profile) {
+        const time = now();
+        profile = { ...createBuiltinCliAgentProfile(spec), enabled: false, createdAt: time, updatedAt: time };
+        builtinAgents.beforeCreate?.(profile);
+        profile = putProfile(profile);
+      }
+      await initialize(profile, expectedGeneration);
+      await activate(profile, expectedGeneration);
+      profile = productStore.getAgentProfile(spec.id);
+      if (!profile.enabled) profile = putProfile({ ...profile, enabled: true });
+      state.markSeeded([spec.id]);
+      createdProfileIds.push(profile.id);
+      try { options.onProfileChanged?.({ profileId: profile.id, backendId: profile.backendId }); } catch {}
+    }
+    state.markSeeded(record);
+    assertOpen(expectedGeneration);
+    const greetedProfileIds = await builtinAgents.afterEnsure({ createdProfileIds, locale: params.locale });
+    return validateAgentLifecycleResult("agent.builtin.ensure", { createdProfileIds, greetedProfileIds });
   }
 
   function replayOutcome(method, outcome) {
@@ -561,6 +607,10 @@ function createAgentLifecycleServiceController(options = {}) {
         params = canonicalParams(method, rawParams);
         assertOpen();
         if (method === "agent.lifecycle.list") return Promise.resolve(lifecycleList(params));
+        if (method === "agent.builtin.ensure") {
+          const expectedGeneration = generation;
+          return controller.runMaintenance(() => ensureBuiltins(params, expectedGeneration));
+        }
         const durable = prepareDurable(method, params);
         if (durable.status === "completed") {
           return Promise.resolve(structuredClone(replayOutcome(method, durable.result)));

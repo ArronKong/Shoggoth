@@ -445,11 +445,13 @@ try {
     toolIdentity: "echo", contractDigest: digest, effect: "allow",
     approvalMode: "always", expectedRevision: 0 });
   assert.equal(reopened.listGlobalBindings().length, 1);
+  // Model the old catalog before headless Hook bindings existed.
+  reopened.db.exec("DROP TABLE hook_bindings");
   reopened.db.pragma("user_version = 8");
   reopened.close();
   assertPluginCatalogBaseline(paths);
   const migrated = new PluginStore({ paths }).open();
-  assert.equal(migrated.db.pragma("user_version", { simple: true }), 9);
+  assert.equal(migrated.db.pragma("user_version", { simple: true }), 10);
   assert.equal(migrated.listGlobalBindings()[0].bindingId, globalBinding.bindingId);
   assert.equal(migrated.getGrant(globalBinding.bindingId, "echo").effect, "allow");
   assert.equal(migrated.db.prepare("PRAGMA foreign_key_check").all().length, 0);

@@ -125,9 +125,9 @@ test("通用 MCP 包装器只规范化明确指向 Shoggoth 的联邦结果工�
   assert.equal(Buffer.from(encoded.resultBase64, "base64").toString("utf8"), escaped.task.result);
 });
 
-test("审批默认持续等待，普通输入等待 5 分钟且 transport 留有终态收敛余量", () => {
+test("审批默认持续等待，普通输入等待 30 分钟且 transport 留有终态收敛余量", () => {
   assert.equal(DEFAULT_APPROVAL_TIMEOUT_MS, null);
-  assert.equal(DEFAULT_PROMPT_TIMEOUT_MS, 5 * 60 * 1_000);
+  assert.equal(DEFAULT_PROMPT_TIMEOUT_MS, 30 * 60 * 1_000);
   assert.equal(DEFAULT_SERVER_REQUEST_TIMEOUT_MS, DEFAULT_PROMPT_TIMEOUT_MS + 30_000);
   assert.equal(DEFAULT_MCP_TOOL_TIMEOUT_MS, 2_147_000_000);
   assert.equal(DEFAULT_MCP_TOOL_TIMEOUT_SEC, DEFAULT_MCP_TOOL_TIMEOUT_MS / 1_000);
@@ -909,6 +909,91 @@ async function openFixture(options = {}) {
   return value;
 }
 
+test("旧发送恢复等待同会话准入，已受理请求不能变成拒绝", async () => {
+  const value = await openFixture(), entered = deferred(), release = deferred();
+  const input = { operationId: "reconcile-race", sessionKey: SESSION_KEY, prompt: "once" };
+  value.inbox.rejectUnadmitted = () => { throw new Error("accepted operation must never be fenced"); };
+  value.coordinator.beforeSessionSend = async () => { entered.resolve(); await release.promise; };
+  const sending = value.coordinator.send(input);
+  await entered.promise;
+  let settled = false;
+  const checking = value.coordinator.reconcileChatOperation({ operationId: input.operationId, sessionKey: SESSION_KEY, createdAt: 100 })
+    .then(result => { settled = true; return result; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false);
+  release.resolve(); const sent = await sending, observed = await checking;
+  assert.equal(observed.status, "found"); assert.equal(observed.run.id, sent.run.id);
+  assert.equal(value.dispatcher.listRuns().length, 1);
+  await value.coordinator.close();
+});
+
+test("恢复凭据拦截迟到原发送，存储失败继续保留未知", async () => {
+  const value = await openFixture(); let fenced = false;
+  value.inbox.rejectUnadmitted = async () => { fenced = true; return true; };
+  value.inbox.isUnadmittedRejection = () => fenced;
+  const input = { operationId: "rejected-old", sessionKey: SESSION_KEY, createdAt: 100 };
+  assert.deepEqual(await value.coordinator.reconcileChatOperation(input), { status: "not_admitted", run: null });
+  await assert.rejects(value.coordinator.send({ operationId: input.operationId, sessionKey: SESSION_KEY, prompt: "late" }),
+    { code: "WORK_RUN_SEND_REJECTED", admissionAccepted: false });
+  assert.equal(value.host.turnStartCalls, 0); assert.equal(value.dispatcher.listRuns().length, 0);
+  fenced = false;
+  value.inbox.rejectUnadmitted = async () => { throw codedError("PENDING_COMMAND_COMMIT_UNCERTAIN"); };
+  await assert.rejects(value.coordinator.reconcileChatOperation(input), { code: "PENDING_COMMAND_COMMIT_UNCERTAIN" });
+  await value.coordinator.close();
+});
+
+test("发送准备失败只在未入队且账本可核实时声明未接收", async () => {
+  const value = await openFixture();
+  const input = { operationId: "memory-preflight-rejected", sessionKey: SESSION_KEY, prompt: "hello" };
+  value.coordinator.beforeSessionSend = async () => { throw codedError("MEMORY_SESSION_REVOKED"); };
+  await assert.rejects(value.coordinator.send(input), { code: "MEMORY_SESSION_REVOKED", admissionAccepted: false });
+  assert.equal(value.inbox.get(input.operationId), null);
+  assert.equal(value.dispatcher.listRuns().length, 0);
+  assert.equal(value.host.turnStartCalls, 0);
+  const get = value.inbox.get;
+  value.coordinator.beforeSessionSend = async () => {
+    value.inbox.get = () => { throw codedError("PENDING_COMMAND_STORE_CLOSED"); };
+    throw codedError("MEMORY_SESSION_REVOKED");
+  };
+  await assert.rejects(value.coordinator.send(input), error => error.code === "MEMORY_SESSION_REVOKED"
+    && error.admissionAccepted === undefined);
+  value.inbox.get = get;
+  await value.coordinator.close();
+});
+
+test("入队写入结果未知时不能生成可重发的拒绝回执", async () => {
+  const value = await openFixture();
+  const enqueue = value.inbox.enqueue.bind(value.inbox);
+  value.inbox.enqueue = input => { enqueue(input); throw codedError("PENDING_COMMAND_WRITE_FAILED"); };
+  const input = { operationId: "uncertain-inbox-write", sessionKey: SESSION_KEY, prompt: "hello" };
+  await assert.rejects(value.coordinator.send(input), error => error.code === "PENDING_COMMAND_WRITE_FAILED"
+    && error.admissionAccepted === undefined);
+  assert.ok(value.inbox.get(input.operationId));
+  assert.equal(value.host.turnStartCalls, 0);
+  await value.coordinator.close();
+});
+
+test("发送准备等待记忆保存时关闭 Service，不能再写入或启动用户回合", async () => {
+  const value = await openFixture(), entered = deferred(), release = deferred();
+  value.coordinator.beforeSessionSend = async () => { entered.resolve(); await release.promise; };
+  const sending = value.coordinator.send({ operationId: "memory-preflight-cancel", sessionKey: SESSION_KEY, prompt: "hello" });
+  const rejected = assert.rejects(sending, error => ["WORK_RUN_COORDINATOR_CLOSED", "WORK_RUN_SEND_CANCELED"].includes(error.code));
+  await entered.promise;
+  const closing = value.coordinator.close(); release.resolve();
+  await rejected; await closing;
+  assert.equal(value.inbox.get("memory-preflight-cancel"), null);
+  assert.equal(value.host.turnStartCalls, 0);
+});
+
+test("记忆发送准备期间会话变为不可发送，阻止新命令落盘", async () => {
+  const value = await openFixture();
+  value.coordinator.beforeSessionSend = async () => { value.sessions.session.status = "archived"; };
+  await assert.rejects(value.coordinator.send({ operationId: "memory-preflight-archive", sessionKey: SESSION_KEY, prompt: "hello" }),
+    { code: "CHAT_SESSION_NOT_READY" });
+  assert.equal(value.inbox.get("memory-preflight-archive"), null);
+  assert.equal(value.host.turnStartCalls, 0);
+  await value.coordinator.close();
+});
+
 function recoveryStore() {
   const records = new Map();
   return { records,
@@ -1002,8 +1087,21 @@ test("恢复时权限或命令binding变化即停止，不读取新CLI执行", a
 });
 
 test("interrupted 保留安全具体原因且任意CLI文本不会成为公共错误", async () => {
-  for (const [code, expected] of [["ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED", "ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED"],
+  for (const [code, expected] of [["ANTIGRAVITY_ACP_REQUEST_TIMEOUT", "ANTIGRAVITY_ACP_REQUEST_TIMEOUT"],
+    ["ANTIGRAVITY_ACP_MALFORMED_JSONL", "RUNTIME_PROTOCOL_ERROR"],
+    ["ANTIGRAVITY_ACP_PROCESS_EXITED", "RUNTIME_CONNECTION_LOST"],
+    // Retired terminal-transport codes are no longer public causes.
+    ["ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED", "RUNTIME_TURN_INTERRUPTED"],
     ["DEEPSEEK_HARNESS_FRAME_INVALID", "RUNTIME_PROTOCOL_ERROR"],
+    ["PI_RPC_STREAM_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["PI_RPC_FRAME_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["DEEPSEEK_HARNESS_STREAM_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["DEEPSEEK_HARNESS_FRAME_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["CLAUDE_CODE_TURN_OUTPUT_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["GROK_ACP_TURN_OUTPUT_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["ANTIGRAVITY_TURN_OUTPUT_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["RPC_FRAME_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
+    ["OPENCODE_HTTP_RESPONSE_TOO_LARGE", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"],
     ["DEEPSEEK_HARNESS_WRITE_FAILED", "RUNTIME_CONNECTION_LOST"],
     ["PI_PROCESS_FAILED", "RUNTIME_CONNECTION_LOST"],
     ["GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE"],
@@ -1249,6 +1347,7 @@ test("公开 Run 查询/订阅并只路由当前 generation 与 thread/turn 的�
     method: "item/agentMessage/delta",
     itemId: "item-live",
     delta: "hello",
+    segmentId: `native-text:${running.id}:1`,
   });
   assert.equal(subscription.unsubscribe(), true);
   value.host.emit({
@@ -1358,15 +1457,18 @@ test("text/reasoning/plan/tool/status 事件按白名单快照追加，工具只
   assert.equal(received.some((event) => Object.prototype.hasOwnProperty.call(event.payload, "opaque")), false);
   assert.deepEqual(routed[0].payload, {
     method: "item/completed", itemId: "text-1", text: "answer", phase: "final_answer",
+    segmentId: `native-text:${run.id}:1`,
   });
   assert.deepEqual(routed[5].payload, {
     method: "item/commandExecution/outputDelta", itemId: "tool-1", delta: "chunk",
+    tool: { kind: "commandExecution", displayArgs: { command: "printf safe" } },
   });
   assert.deepEqual(routed[4].payload.tool, {
     kind: "commandExecution", status: "inProgress", displayArgs: { command: "printf safe" },
   });
   assert.deepEqual(routed[6].payload.tool, {
     kind: "commandExecution", status: "completed", exitCode: 0, resultSummary: "build ok",
+    displayArgs: { command: "printf safe" },
   });
   assert.deepEqual(routed[7].payload.tool, {
     kind: "function", name: "web_search", status: "in_progress",
@@ -1384,6 +1486,283 @@ test("text/reasoning/plan/tool/status 事件按白名单快照追加，工具只
   assert.equal(Object.hasOwn(routed[6].payload.tool, "output"), false);
   subscription.unsubscribe();
   await value.coordinator.close();
+});
+
+test("命令操作说明经过脱敏与大小限制，同步进入事件流和历史记录", async () => {
+  const transcript = [];
+  const value = await openFixture({
+    sessionStatus: "ready", threadId: "thread-readable-tools",
+    threads: [{ id: "thread-readable-tools", threadSource: null, turns: [] }],
+    transcriptStore: { appendEvent: event => { transcript.push(clone(event)); return clone(event); } },
+    sanitizeSummary: summary => summary.includes("registered-secret") ? null : summary.replaceAll("private-token", "[redacted]"),
+    assertSecretSafe: payload => !JSON.stringify(payload).includes("blocked-value"),
+  });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "readable-tools" });
+    const run = value.coordinator.getRun(ack.run.id);
+    const received = [];
+    const subscription = value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => received.push(event));
+    const samples = [
+      { kind: "commandExecution", name: "Bash", input: { command: "npm test", description: "检查回归测试" } },
+      { kind: "other", name: "bash", input: { command: "npm test", description: "检查 private-token" } },
+      { kind: "execute", name: "Run tests", input: { command: "npm test", description: "x".repeat(900) + "registered-secret" } },
+      { kind: "commandExecution", name: "Bash", input: { command: "npm test", description: "blocked-value" } },
+      { kind: "commandExecution", name: "Bash", input: { command: "npm test", description: "查".repeat(400) } },
+      { kind: "other", name: "read_file", input: { path: "/tmp/result.md", description: "document body", content: "private file contents" } },
+      { kind: "other", name: "grep_search", input: { SearchPath: "/tmp/project", Query: "timeout", CodeContent: "private source" } },
+      { kind: "mcpToolCall", name: "shoggoth/app_state_get", input: { section: "cron", limit: 20, enabled: false, cursor: "private source" } },
+      { kind: "other", name: "CallMcpTool", input: { server_name: "shoggoth", tool_name: "app_state_get",
+        arguments: { section: "agents", prompt: "private source" } } },
+      { kind: "mcpToolCall", name: "shoggoth/web_search", input: { query: "Oracle limits", activityTitle: "核对免费资源上限" } },
+      { kind: "other", name: "CallMcpTool", input: { server_name: "shoggoth", tool_name: "web_fetch",
+        arguments: { activityTitle: "读取 private-token 的说明", body: "private source" } } },
+    ];
+    samples.forEach((tool, index) => value.host.emit({
+      known: true, type: "tool_start", method: "item/started",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
+      itemId: `readable-${index}`, toolCallId: `readable-${index}`, tool,
+    }));
+    const tools = received.filter(event => event.type === "tool.start").map(event => event.payload.tool);
+    assert.equal(tools.length, samples.length);
+    assert.deepEqual(tools[0].displayArgs, { command: "npm test", description: "检查回归测试" });
+    assert.deepEqual(tools[1].displayArgs, { command: "npm test", description: "检查 [redacted]" });
+    assert.deepEqual(tools[2].displayArgs, { command: "npm test" });
+    assert.deepEqual(tools[3].displayArgs, { command: "npm test" });
+    assert.ok(Buffer.byteLength(tools[4].displayArgs.description, "utf8") <= 768);
+    assert.deepEqual(tools[5].displayArgs, { path: "/tmp/result.md" });
+    assert.deepEqual(tools[6].displayArgs, { SearchPath: "/tmp/project", Query: "timeout" });
+    assert.deepEqual(tools[7].displayArgs, { limit: 20, section: "cron", enabled: false });
+    assert.deepEqual(tools[8].displayArgs, { section: "agents", tool_name: "app_state_get", server_name: "shoggoth" });
+    assert.deepEqual(tools[9].displayArgs, { activityTitle: "核对免费资源上限", query: "Oracle limits" });
+    assert.deepEqual(tools[10].displayArgs, { activityTitle: "读取 [redacted] 的说明", tool_name: "web_fetch", server_name: "shoggoth" });
+    const stored = transcript.filter(event => event.kind === "tool_call").map(event => event.content.tool);
+    assert.deepEqual(stored, tools, "history must persist the same safe descriptions as the live stream");
+    assert.ok(!JSON.stringify(tools).includes("registered-secret"));
+    assert.ok(!JSON.stringify(stored).includes("private source"));
+    subscription.unsubscribe();
+  } finally { await value.coordinator.close(); }
+});
+
+test("后补工具参数经过相同脱敏投影并保留到完成事件与历史", async () => {
+  const transcript = [];
+  const value = await openFixture({
+    sessionStatus: "ready", threadId: "thread-late-tool-args",
+    threads: [{ id: "thread-late-tool-args", threadSource: null, turns: [] }],
+    transcriptStore: { appendEvent: event => { transcript.push(clone(event)); return clone(event); } },
+    sanitizeSummary: summary => summary.replaceAll("private-token", "[redacted]"),
+  });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "late-tool-args" });
+    const run = value.coordinator.getRun(ack.run.id), received = [];
+    const subscription = value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => received.push(event));
+    const common = { known: true, method: "opencode/session.message", threadId: run.runtimeSessionRef.sessionId,
+      turnId: run.runtimeTurnRef.turnId, itemId: "late-tool", toolCallId: "late-tool" };
+    value.host.emit({ ...common, type: "tool_start", tool: { name: "bash", kind: "bash", input: {} } });
+    const input = { command: "npm test", description: "核对 private-token", body: "private body" };
+    value.host.emit({ ...common, type: "tool_update", tool: { name: "bash", kind: "bash", input } });
+    value.host.emit({ ...common, type: "tool_result", tool: { name: "bash", kind: "bash", input,
+      status: "completed", output: "ok" } });
+    for (const type of ["tool.update", "tool.result"]) {
+      assert.deepEqual(received.find(event => event.type === type).payload.tool.displayArgs,
+        { command: "npm test", description: "核对 [redacted]" });
+    }
+    assert.deepEqual(transcript.find(event => event.kind === "tool_result").content.tool.displayArgs,
+      { command: "npm test", description: "核对 [redacted]" });
+    assert.ok(!JSON.stringify(received).includes("private body"));
+    subscription.unsubscribe();
+  } finally { await value.coordinator.close(); }
+});
+
+test("status-only completion retains late public fields by call ID and stores real Grok X receipts", async () => {
+  const transcript = [];
+  const value = await openFixture({
+    sessionStatus: "ready", threadId: "thread-tool-receipts",
+    threads: [{ id: "thread-tool-receipts", threadSource: null, turns: [] }],
+    transcriptStore: { appendEvent: event => { transcript.push(clone(event)); return clone(event); } },
+    sanitizeSummary: summary => summary.replaceAll("private-token", "[redacted]"),
+  });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "tool-receipts" });
+    const run = value.coordinator.getRun(ack.run.id), received = [];
+    const subscription = value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => received.push(event));
+    const emit = (id, type, tool) => value.host.emit({ known: true, type, method: "session/update",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, itemId: id, toolCallId: id, tool });
+    const { GrokBuildRuntimeHost } = require("../app/agent-service/grok-build-runtime-host");
+    const grok = Object.assign(Object.create(GrokBuildRuntimeHost.prototype), {
+      activeTurns: new Map([[run.runtimeSessionRef.sessionId, { turnId: run.runtimeTurnRef.turnId,
+        accepted: true, dispatchState: "write_attempted" }]]), registeredSecrets: [], _acceptTurn() {},
+      _publish: event => value.host.emit(event),
+    });
+    const x = update => grok._onNotification({ method: "session/update", params: {
+      sessionId: run.runtimeSessionRef.sessionId, update: { toolCallId: "search", title: "X search:", kind: "search", ...update },
+    } });
+    emit("command", "tool_start", { name: "run_command", kind: "execute", input: {} });
+    x({ sessionUpdate: "tool_call", status: "in_progress", rawInput: { variant: "XSearch", backend: true } });
+    emit("command", "tool_update", { input: { command: "npm test", description: "Check private-token", body: "private body" } });
+    x({ sessionUpdate: "tool_call_update", status: "completed", rawOutput: { name: "x_thread_fetch",
+      input: JSON.stringify({ post_id: "1234567890123456789", body: "private body" }), id: "receipt", call_id: "search" } });
+    emit("command", "tool_result", { status: "completed", success: true });
+    const result = id => received.find(event => event.type === "tool.result" && event.payload.toolCallId === id).payload.tool;
+    assert.deepEqual(result("command"), { name: "run_command", kind: "execute", status: "completed", success: true,
+      displayArgs: { command: "npm test", description: "Check [redacted]" } });
+    assert.deepEqual(result("search"), { name: "X search:", kind: "search", status: "completed", success: true,
+      displayArgs: { operation: "x_thread_fetch", post_id: "1234567890123456789" } });
+    emit("unrelated", "tool_result", { status: "completed" });
+    assert.equal(result("unrelated").displayArgs, undefined);
+    const stored = transcript.filter(event => event.kind === "tool_result").map(event => event.content.tool);
+    assert.deepEqual(stored, received.filter(event => event.type === "tool.result").map(event => event.payload.tool));
+    assert.ok(!JSON.stringify(received).includes("private body"));
+    assert.ok(!JSON.stringify(received).includes("private-token"));
+    subscription.unsubscribe();
+  } finally { await value.coordinator.close(); }
+});
+
+test("completed 工具按真实退出码与协议失败标记展示，不把内部数据状态当调用失败", async () => {
+  const transcript = [];
+  const value = await openFixture({
+    sessionStatus: "ready", threadId: "thread-tool-outcomes",
+    threads: [{ id: "thread-tool-outcomes", threadSource: null, turns: [] }],
+    transcriptStore: { appendEvent: event => { transcript.push(clone(event)); return clone(event); } },
+  });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "tool-outcomes" });
+    const run = value.coordinator.getRun(ack.run.id), received = [];
+    const subscription = value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => received.push(event));
+    const common = { known: true, method: "item/completed", threadId: run.runtimeSessionRef.sessionId,
+      turnId: run.runtimeTurnRef.turnId };
+    const failedTools = [
+      { name: "command", kind: "commandExecution", status: "completed", exitCode: 1, output: "exit 1" },
+      { name: "command", kind: "commandExecution", status: "declined" },
+      { name: "plugin/tool", kind: "dynamicToolCall", status: "completed", success: false },
+      { name: "plugin/read", kind: "mcpToolCall", status: "completed", error: { code: "fixture" } },
+      { name: "imageGeneration", kind: "imageGeneration", status: "completed", error: { code: "fixture" } },
+    ];
+    for (const [index, tool] of failedTools.entries()) {
+      const id = `outcome-${index}`;
+      value.host.emit({ ...common, type: "tool_start", itemId: id, toolCallId: id, tool: { name: tool.name, kind: tool.kind } });
+      value.host.emit({ ...common, type: "tool_result", itemId: id, toolCallId: id, tool });
+    }
+    value.host.emit({ ...common, type: "tool_result", itemId: "outcome-directory", toolCallId: "outcome-directory",
+      tool: { name: "app_state_get", kind: "mcpToolCall", status: "completed", success: true,
+        output: { jobs: [{ status: "error" }] } } });
+    const results = received.filter(event => event.type === "tool.result").map(event => event.payload.tool);
+    assert.deepEqual(results.map(tool => tool.status), [...failedTools.map(() => "failed"), "completed"]);
+    const stored = transcript.filter(event => event.kind === "tool_result").map(event => event.content.tool);
+    assert.deepEqual(stored, results, "history uses the same exact tool outcome as the live stream");
+    assert.equal(value.coordinator.getRun(run.id).status, "running", "a failed tool does not settle or abort the Agent run");
+    assert.ok(!JSON.stringify(results).includes('"error":{'), "raw protocol error objects stay out of the public projection");
+    subscription.unsubscribe();
+  } finally { await value.coordinator.close(); }
+});
+
+test("Antigravity native command output reaches live, durable transcript and canonical display", async () => {
+  const { AntigravityAcpRuntimeHost } = require("../app/agent-service/antigravity-acp-runtime-host");
+  const { TranscriptStore } = require("../app/agent-service/transcript-store");
+  const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "antig-command-projection-")));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), profileRoot: path.join(root, "profile"),
+    cacheRoot: path.join(root, "cache"), trustedRoot: root });
+  const transcripts = new TranscriptStore({ paths }); transcripts.open();
+  const host = new FakeHost([], { threads: [{ id: "thread-native-command", threadSource: null, turns: [] }] });
+  const value = await openFixture({ runtime: "antigravity", host, runtimeManager: directRuntimeManager(host, "antigravity"),
+    sessionStatus: "ready", threadId: "thread-native-command", sessionWorkspace: root, transcriptStore: transcripts });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "native-command-projection" });
+    const run = value.coordinator.getRun(ack.run.id), received = [];
+    const subscription = value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => received.push(event));
+    const active = { sessionId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
+      accepted: true, dispatchState: "write_attempted", toolCalls: new Map(), completedToolCalls: new Set(),
+      pendingToolResults: new Map(), pendingToolResultBytes: 0, nativeToolCursor: null };
+    const native = Object.assign(Object.create(AntigravityAcpRuntimeHost.prototype), {
+      server: { version: "1.2.0" }, // This fixture exercises native output projection before the 1.2.1 failure fallback.
+      registeredSecrets: [], activeTurns: new Map([[active.sessionId, active]]), _acceptTurn() {}, _diagnostic() {},
+      _publish: event => value.host.emit(event),
+    });
+    const notify = update => native._onNotification({ method: "session/update", params: { sessionId: active.sessionId, update } });
+    const output = code => ({ commandLine: "python3 test_shipment.py", workingDir: root,
+      exitCode: code, exit_code: code, combinedOutput: code === 0 ? "Ran 4 tests\nOK\n" : "Ran 4 tests\nFAILED (failures=4)\n",
+      formatted_output: "duplicated output must not be joined" });
+    const cases = [
+      { id: "native-red", raw: output(1), code: 1, failed: true },
+      { id: "native-green", raw: output(0), code: 0, failed: false },
+      { id: "native-negative", raw: output(-1), code: -1, failed: true },
+      { id: "native-snake-only", raw: { ...output(2), exitCode: undefined }, code: 2, failed: true },
+      { id: "native-partial", raw: output(1), partial: true, code: 1, failed: true },
+      { id: "native-existing-failed", raw: output(0), status: "failed", code: 0, failed: true },
+      { id: "native-business-read", raw: output(1), kind: "read", failed: false },
+      { id: "native-mcp-business", raw: output(1), mcp: true, failed: false },
+      { id: "native-unknown-shape", raw: { exitCode: 1, combinedOutput: "business data" }, failed: false },
+      { id: "native-conflicting-aliases", raw: { ...output(0), exit_code: 1 }, failed: false },
+      { id: "native-boolean-code", raw: { ...output(0), exitCode: false, exit_code: false }, failed: false },
+    ];
+    // An absent alias is a different valid schema shape, not an undefined JSON value.
+    delete cases[3].raw.exitCode;
+    for (const row of cases) {
+      const kind = row.kind || "execute", meta = row.mcp ? { mcp: { server: "business", tool: "read" } } : undefined;
+      notify({ sessionUpdate: "tool_call", toolCallId: row.id, title: "Running run_command", kind,
+        rawInput: row.mcp ? { arguments: {} } : { CommandLine: "python3 test_shipment.py", Cwd: root },
+        ...(meta ? { _meta: meta } : {}), status: "in_progress" });
+      notify({ sessionUpdate: "tool_call_update", toolCallId: row.id, status: row.status || "completed",
+        ...(row.partial ? {} : { kind }), rawOutput: row.raw });
+    }
+    const publicResults = received.filter(e => e.type === "tool.result");
+    assert.equal(publicResults.length, cases.length);
+    for (const row of cases) {
+      const tool = publicResults.find(e => e.payload.toolCallId === row.id).payload.tool;
+      assert.equal(tool.resultSummary, row.raw.combinedOutput.trim(), row.id + " stdout");
+      assert.equal(tool.status, row.failed ? "failed" : "completed", row.id + " status");
+      assert.equal(tool.exitCode, row.code, row.id + " exitCode");
+      assert.equal(tool.success, !row.failed, row.id + " success");
+    }
+    transcripts.close(); transcripts.open();
+    const stored = transcripts.listEvents(PROFILE_ID, value.sessions.session.id).filter(e => e.kind === "tool_result");
+    for (const row of cases) {
+      const event = stored.find(e => e.content.toolCallId === row.id), live = publicResults.find(e => e.payload.toolCallId === row.id);
+      assert.deepEqual(event.content.tool, live.payload.tool);
+      const canonical = transcriptHistoryItem(transcripts.displayEvent(PROFILE_ID, value.sessions.session.id, event));
+      assert.equal(canonical.payload.message.content[0].content, row.raw.combinedOutput.trim());
+      assert.equal(canonical.payload.message.content[0].is_error, row.failed);
+      assert.deepEqual(transcripts.contextEvent(PROFILE_ID, value.sessions.session.id, event).content.tool.output, row.raw);
+    }
+    assert.equal(value.coordinator.getRun(run.id).status, "running", "tool exit failure does not end the Agent run");
+    subscription.unsubscribe();
+  } finally { await value.coordinator.close(); transcripts.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("command output fallbacks preserve existing field precedence and the UTF8 public budget", async () => {
+  const transcript = [];
+  const value = await openFixture({ transcriptStore: { appendEvent: event => { transcript.push(clone(event)); return clone(event); } },
+    sanitizeSummary: text => text.replaceAll("fixture-sensitive", "[redacted]") });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "command-output-fallbacks" });
+    const run = value.coordinator.getRun(ack.run.id), received = [];
+    const subscription = value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, e => received.push(e));
+    const base = { combinedOutput: "combined", formatted_output: "formatted" };
+    const rows = [
+      ...["summary", "message", "text", "output", "result", "error"].map(key => ({ raw: { ...base, [key]: "old-" + key }, expected: "old-" + key })),
+      { raw: { ...base, content: "old-content" }, expected: "old-content" },
+      { raw: { ...base, content: [{ type: "text", text: "old-array" }] }, expected: "old-array" },
+      { raw: { ...base, content: { text: "old-object" } }, expected: "old-object" },
+      { raw: base, expected: "combined" },
+      { raw: { combinedOutput: "", formatted_output: "formatted" }, expected: "formatted" },
+      { raw: { combinedOutput: true, formatted_output: "formatted" }, expected: "formatted" },
+      { raw: { combinedOutput: "fixture-sensitive" }, expected: "[redacted]" },
+      { raw: { combinedOutput: "中文🙂".repeat(2048) }, long: true },
+      { raw: { exitCode: 9, combinedOutput: "successful business data" }, expected: "successful business data" },
+    ];
+    for (const [index, row] of rows.entries()) value.host.emit({ known: true, type: "tool_result", method: "item/completed",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, itemId: `fallback-${index}`, toolCallId: `fallback-${index}`,
+      tool: { kind: "mcpToolCall", name: "business/read", status: "completed", success: true, output: row.raw } });
+    const results = received.filter(e => e.type === "tool.result");
+    for (const [index, row] of rows.entries()) {
+      const tool = results[index].payload.tool;
+      if (row.long) { assert.ok(tool.resultSummary.isWellFormed()); assert.ok(Buffer.byteLength(tool.resultSummary, "utf8") <= 2048); }
+      else assert.equal(tool.resultSummary, row.expected);
+      assert.equal(tool.status, "completed"); assert.equal(tool.exitCode, undefined);
+    }
+    assert.deepEqual(transcript.filter(e => e.kind === "tool_result").map(e => e.content.tool), results.map(e => e.payload.tool));
+    subscription.unsubscribe();
+  } finally { await value.coordinator.close(); }
 });
 
 test("通用 MCP 包装调用按 toolCallId 关联为去密的联邦结果", async () => {
@@ -1509,6 +1888,7 @@ test("通用 MCP 包装调用按 toolCallId 关联为去密的联邦结果", asy
   const secretResult = received.filter((event) => event.type === "tool.result").at(-1);
   assert.deepEqual(secretResult.payload.tool, {
     kind: "other", name: "federation_task_get", status: "completed", success: true,
+    displayArgs: { server: "shoggoth" },
   });
   subscription.unsubscribe();
   await value.coordinator.close();
@@ -1628,7 +2008,7 @@ test("运行阶段耗时以安全 performance.stage 事件公开", async () => {
     received.find((event) => event.type === "tool.result")?.payload.tool,
     {
       kind: "commandExecution", name: "command", status: "completed", exitCode: 0,
-      resultSummary: "all tests passed", durationMs: 150,
+      resultSummary: "all tests passed", durationMs: 150, displayArgs: { command: "npm test" },
     },
   );
   subscription.unsubscribe();
@@ -1706,6 +2086,7 @@ test("turn/completed 以 full thread/read 对账并按 durable 顺序 exactly-on
     threadId: running.runtimeSessionRef?.sessionId,
     turnId: running.runtimeTurnRef?.turnId,
     status: "failed",
+    terminalEvidence: { id: running.runtimeTurnRef.turnId, status: "failed" },
   };
   value.host.emit(completedEvent);
   value.host.emit(completedEvent);
@@ -1776,6 +2157,7 @@ test("terminal canonical read 必须证明 operationId 与目标 turn 的 userMe
       threadId: running.runtimeSessionRef?.sessionId,
       turnId: running.runtimeTurnRef?.turnId,
       status: "completed",
+      terminalEvidence: { id: running.runtimeTurnRef.turnId, status: "completed" },
     });
     await assert.rejects(
       () => value.coordinator.waitForIdle(running.id),
@@ -1855,6 +2237,123 @@ test("terminal 单次通知读到暂时 inProgress 时自动重读 canonical ter
   assert.equal(value.inbox.get("terminal-stale").state, "completed");
   assert.equal(terminalReads, 2);
   await value.coordinator.close();
+});
+
+test("默认 terminal 观察窗口容纳超过两秒的原生历史滞后且不重发", async () => {
+  let elapsed = 0;
+  const delays = [];
+  const value = await openFixture({
+    sessionStatus: "ready",
+    threadId: "thread-terminal-delayed-history",
+    threads: [{ id: "thread-terminal-delayed-history", threadSource: null, turns: [] }],
+    terminalRetryScheduler: {
+      set(callback, delay) {
+        delays.push(delay);
+        elapsed += delay;
+        return setImmediate(callback);
+      },
+      clear: clearImmediate,
+    },
+  });
+  const { ack } = await sendAndDrain(value, { operationId: "terminal-delayed-history" });
+  const running = value.coordinator.getRun(ack.run.id);
+  const turn = value.host.threads[0].turns.find(item => item.id === running.runtimeTurnRef.turnId);
+  const originalRead = value.host.threadRead.bind(value.host);
+  let reads = 0;
+  value.host.threadRead = async params => {
+    reads += 1;
+    if (reads <= 2) throw codedError("TRANSIENT_READ_FAILURE");
+    if (elapsed >= 3_000) {
+      turn.status = "completed";
+      turn.items.push({ type: "agentMessage", phase: "final_answer", text: "delayed canonical answer" });
+    }
+    return originalRead(params);
+  };
+  value.host.emit({ known: true, type: "complete", method: "turn/completed",
+    threadId: running.runtimeSessionRef.sessionId, turnId: running.runtimeTurnRef.turnId, status: "completed" });
+  const terminal = await value.coordinator.waitForIdle(running.id);
+  assert.equal(terminal.status, "completed");
+  assert.equal(terminal.resultSummary, "delayed canonical answer");
+  assert.equal(value.inbox.get("terminal-delayed-history").state, "completed");
+  assert.equal(value.host.turnStartCalls, 1);
+  assert.equal(reads, 7);
+  assert.equal(elapsed, 3_900);
+  assert.deepEqual(delays, [50, 100, 250, 500, 1_000, 2_000]);
+  await value.coordinator.close();
+});
+
+test("显式原生终态在历史读失败后保留真实结果、原回答和 exactly-once", async () => {
+  for (const status of ["completed", "failed", "interrupted", "canceled"]) {
+    const value = await openFixture({
+      sessionStatus: "ready", threadId: "thread-terminal-proof",
+      threads: [{ id: "thread-terminal-proof", threadSource: null, turns: [] }],
+      terminalRetryDelaysMs: [0, 0],
+    });
+    const { ack } = await sendAndDrain(value, { operationId: `terminal-proof-${status}` });
+    const running = value.coordinator.getRun(ack.run.id);
+    let reads = 0;
+    value.host.threadRead = async () => { reads += 1; throw codedError("TRANSIENT_READ_FAILURE"); };
+    const identity = { known: true, threadId: running.runtimeSessionRef.sessionId, turnId: running.runtimeTurnRef.turnId };
+    value.host.emit({ ...identity, type: "text", text: "original native answer", phase: "final_answer" });
+    const event = { ...identity, type: "complete", method: "turn/completed", status,
+      terminalEvidence: { id: identity.turnId, status,
+        ...(status === "failed" ? { error: { codexErrorInfo: "unauthorized" } } : {}) } };
+    value.host.emit(event);
+    value.host.emit(event);
+    const terminal = await value.coordinator.waitForIdle(running.id);
+    assert.equal(terminal.status, status);
+    assert.equal(terminal.errorCode, status === "failed" ? "RUNTIME_AUTH_REQUIRED"
+      : status === "interrupted" ? "RUNTIME_TURN_INTERRUPTED" : null);
+    assert.equal(value.inbox.get(`terminal-proof-${status}`).state, "completed");
+    assert.equal(reads, 3);
+    assert.equal(value.host.turnStartCalls, 1);
+    const replay = value.coordinator.subscribeRun(running.id, { streamId: null, afterSeq: 0 }, () => {});
+    assert.equal(replay.events.filter(item => item.type === "terminal").length, 1);
+    assert.equal(replay.events.find(item => item.type === "text").payload.text, "original native answer");
+    replay.unsubscribe();
+    await value.coordinator.close();
+  }
+});
+
+test("显式原生终态不能越过 RuntimeAccount 代际与会话归属检查", async () => {
+  for (const invalidate of ["account-generation", "session-owner"]) {
+    const admission = createRuntimeAccountAdmission([]);
+    const ownership = createRuntimeSessionOwnership([]);
+    const value = await openFixture({ runtimeAccountAdmission: admission, runtimeSessionOwnershipStore: ownership,
+      sessionStatus: "ready", threadId: "thread-terminal-stale-proof",
+      threads: [{ id: "thread-terminal-stale-proof", threadSource: null, turns: [] }], terminalRetryDelaysMs: [] });
+    const { ack } = await sendAndDrain(value, { operationId: `terminal-stale-proof-${invalidate}` });
+    const running = value.coordinator.getRun(ack.run.id);
+    if (invalidate === "account-generation") admission.bumpGeneration();
+    else ownership.assertOwned = () => { throw codedError("RUNTIME_SESSION_NOT_OWNED"); };
+    value.host.emit({ known: true, type: "complete", method: "turn/completed",
+      threadId: running.runtimeSessionRef.sessionId, turnId: running.runtimeTurnRef.turnId, status: "completed",
+      terminalEvidence: { id: running.runtimeTurnRef.turnId, status: "completed" } });
+    await assert.rejects(() => value.coordinator.waitForIdle(running.id));
+    assert.equal(value.coordinator.getRun(running.id).status, "running");
+    assert.equal(value.inbox.get(`terminal-stale-proof-${invalidate}`).state, "dispatching");
+    assert.equal(value.host.turnStartCalls, 1);
+    await value.coordinator.close();
+  }
+});
+
+test("缺失、错配或非终态的原生证据不得把历史读取失败改成成功", async () => {
+  for (const kind of ["missing", "wrong-turn", "in-progress", "wrong-method"]) {
+    const value = await openFixture({ sessionStatus: "ready", threadId: "thread-terminal-unproven",
+      threads: [{ id: "thread-terminal-unproven", threadSource: null, turns: [] }], terminalRetryDelaysMs: [] });
+    const { ack } = await sendAndDrain(value, { operationId: `terminal-unproven-${kind}` });
+    const running = value.coordinator.getRun(ack.run.id);
+    value.host.threadRead = async () => { throw codedError("TRANSIENT_READ_FAILURE"); };
+    value.host.emit({ known: true, type: "complete", method: kind === "wrong-method" ? "other/completed" : "turn/completed",
+      threadId: running.runtimeSessionRef.sessionId, turnId: running.runtimeTurnRef.turnId, status: "completed",
+      ...(kind !== "missing" ? { terminalEvidence: { id: kind === "wrong-turn" ? "foreign-turn" : running.runtimeTurnRef.turnId,
+        status: kind === "in-progress" ? "inProgress" : "completed" } } : {}) });
+    const terminal = await value.coordinator.waitForIdle(running.id);
+    assert.equal(terminal.status, "interrupted");
+    assert.equal(terminal.errorCode, "CODEX_TERMINAL_RECONCILIATION_FAILED");
+    assert.equal(value.host.turnStartCalls, 1);
+    await value.coordinator.close();
+  }
 });
 
 test("terminal canonical 对账重试耗尽后按 durable 顺序收敛 interrupted", async () => {
@@ -2635,9 +3134,10 @@ test("terminal failed turn 映射已知服务错误而不泄露 Runtime message"
 
 test("terminal failed turn 保留权限与上游不可用公共错误码", async () => {
   for (const errorCode of ["RUNTIME_PERMISSION_REQUIRED", "RUNTIME_UPSTREAM_UNAVAILABLE",
+    "RUNTIME_ATTACHMENT_UNSUPPORTED", "RUNTIME_ATTACHMENT_RECOVERY_REQUIRED",
     "RUNTIME_APPROVAL_UNAVAILABLE", "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_RATE_LIMITED", "RUNTIME_ACCOUNT_BLOCKED",
     "RUNTIME_SPENDING_LIMIT_REACHED", "ANTIGRAVITY_NETWORK_UNAVAILABLE",
-    "ANTIGRAVITY_REGION_UNSUPPORTED", "ANTIGRAVITY_ELIGIBILITY_FAILED", "ANTIGRAVITY_STARTUP_TIMEOUT"]) {
+    "ANTIGRAVITY_REGION_UNSUPPORTED", "ANTIGRAVITY_MCP_UNAVAILABLE", "ANTIGRAVITY_TURN_FAILED"]) {
     const value = await openFixture({
       sessionStatus: "ready",
       threadId: `thread-terminal-${errorCode}`,
@@ -3348,12 +3848,9 @@ test("准入冻结 ContextSnapshot，WorkRun 持久绑定且 Codex 分离 develo
   assert.equal(value.dispatcher.lastAdmission.contextSnapshotId, compiled.id);
   assert.equal(value.dispatcher.getRun(ack.run.id).contextSnapshotId, compiled.id);
   assert.equal(value.host.lastThreadStartParams.developerInstructions, compiled.developerInstructions);
-  assert.equal(value.host.lastTurnStartParams.input[0].text, [
-    compiled.dynamicContext,
-    "",
-    "CURRENT USER REQUEST",
-    "freeze this request",
-  ].join("\n"));
+  assert.equal(value.host.lastTurnStartParams.input[0].text, "freeze this request");
+  assert.deepEqual(value.host.lastInjectedItems.items, [{ type: "message", role: "user",
+    content: [{ type: "input_text", text: compiled.dynamicContext }] }]);
   assert.equal(value.host.lastThreadStartParams.developerInstructions.includes("remembered preference"), false);
   await value.coordinator.close();
 });
@@ -3366,7 +3863,7 @@ test("候选记忆来源在 Runtime 获取期间失效时不得发送已冻结�
   const value = await openFixture({ runtimeGate: gate,
     contextCompiler: {
       memoryStore: { get: (profileId, id) => profileId === PROFILE_ID && id === reviewedId ? item : null },
-      memoryEngine: { isReviewCommitted: () => sourceCurrent },
+      memoryEngine: { isRecallCommitted: () => sourceCurrent },
       compile: () => ({ id: `ctx-${"b".repeat(64)}`,
         developerInstructions: "trusted policy", dynamicContext: `reviewed memory ${reviewedId}`,
         report: { memoryMatches: [reviewedId] } }),
@@ -3389,6 +3886,33 @@ test("候选记忆来源在 Runtime 获取期间失效时不得发送已冻结�
   }
 });
 
+test("其他 Agent 共享的已审核记忆在发送前按所属 Agent 复核，不因本 Agent 库中没有而失败", async () => {
+  const reviewedId = `reviewed-mc-${"c".repeat(64)}`;
+  const shared = { id: reviewedId, profileId: "peer-profile", status: "active" };
+  const checked = [];
+  const value = await openFixture({
+    contextCompiler: {
+      memoryStore: { get: () => null },
+      memoryEngine: {
+        findSharedItem: (profileId, id) => profileId === PROFILE_ID && id === reviewedId
+          ? { home: "peer-profile", item: shared } : null,
+        isRecallCommitted: (profileId, item) => { checked.push([profileId, item.id]); return true; },
+      },
+      compile: () => ({ id: `ctx-${"d".repeat(64)}`,
+        developerInstructions: "trusted policy", dynamicContext: `shared memory ${reviewedId}`,
+        report: { memoryMatches: [reviewedId] } }),
+    },
+  });
+  try {
+    const ack = await value.coordinator.send({ operationId: "reviewed-shared-source",
+      sessionKey: SESSION_KEY, prompt: "继续" });
+    await value.coordinator.waitForIdle(ack.run.id);
+    assert.notEqual(value.dispatcher.getRun(ack.run.id).errorCode, "CONTEXT_SOURCE_STALE");
+    assert.equal(value.host.turnStartCalls, 1);
+    assert.deepEqual(checked, [[PROFILE_ID, reviewedId]]);
+  } finally { await value.coordinator.close(); }
+});
+
 test("semantic preparation yields before admission; cancellation cannot start a late native turn", async () => {
   const gate = deferred(), entered = deferred();
   let compileCalls = 0;
@@ -3406,6 +3930,9 @@ test("semantic preparation yields before admission; cancellation cannot start a 
     await value.coordinator.abort({ operationId: "abort-preparation", sessionKey: SESSION_KEY, runId: run.id });
     gate.resolve();
     const ack = await sending;
+    assert.equal(ack.disposition, "completed");
+    assert.equal(ack.reason, null);
+    assert.equal(ack.run.status, "canceled");
     assert.equal(value.dispatcher.getRun(ack.run.id).status, "canceled");
     assert.equal(compileCalls, 0); assert.equal(value.host.turnStartCalls, 0);
   } finally { gate.resolve(); await value.coordinator.close(); }
@@ -3583,6 +4110,26 @@ test("认证状态瞬时不可用时只重试一次，恢复后只启动一个 t
   }
 });
 
+test("认证读取失败保留实际阶段和安全协议原因，不创建原生回合", async () => {
+  for (const protocol of [false, true]) {
+    const value = await openFixture();
+    value.host.accountRead = async () => {
+      value.host.accountReadCalls += 1;
+      throw codedError(protocol ? "CODEX_ACCOUNT_PROTOCOL_INVALID" : "RPC_REMOTE_ERROR", "private-auth-canary");
+    };
+    try {
+      const { ack } = await sendAndDrain(value, { operationId: `auth-read-failed-${protocol}` });
+      const run = value.coordinator.getRun(ack.run.id);
+      assert.equal(run.status, "failed");
+      assert.equal(run.errorCode, protocol ? "RUNTIME_INCOMPATIBLE" : "RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED");
+      assert.equal(value.host.accountReadCalls, protocol ? 1 : 2);
+      assert.equal(value.host.threadStartCalls, 0);
+      assert.equal(value.host.turnStartCalls, 0);
+      assert.equal(JSON.stringify(run).includes("private-auth-canary"), false);
+    } finally { await value.coordinator.close(); }
+  }
+});
+
 test("Grok 缺少凭据时被中央门禁拦截，有凭据但未验证时允许真实 session 验证", async () => {
   const missingHost = new FakeHost([], {
     accountReadSupported: false,
@@ -3736,10 +4283,12 @@ test("turn_start 失败保留唯一阶段码且绝不自动重放", async () => 
   }
 });
 
-test("Codex 安装与协议错误穿透启动包装且不重复启动或泄漏诊断", async () => {
+test("原生 CLI 安装与兼容性错误穿透启动包装且不重复启动或泄漏诊断", async () => {
   for (const errorCode of [
     "CODEX_SYSTEM_BINARY_NOT_FOUND", "CODEX_RUNTIME_VERSION_MISMATCH",
     "CODEX_RUNTIME_VERSION_PROBE_FAILED", "CODEX_SCHEMA_ERROR",
+    "PI_VERSION_UNSUPPORTED", "CLAUDE_CODE_VERSION_UNSUPPORTED", "GROK_ACP_INITIALIZE_INVALID",
+    "OPENCODE_PROTOCOL_UNSUPPORTED", "DEEPSEEK_HARNESS_PROTOCOL_UNSUPPORTED", "ANTIGRAVITY_ACP_INITIALIZE_INVALID",
   ]) {
     let attempts = 0;
     const value = await openFixture({
@@ -3756,7 +4305,8 @@ test("Codex 安装与协议错误穿透启动包装且不重复启动或泄漏�
       const { ack } = await sendAndDrain(value, { operationId: `setup-${errorCode}` });
       const settled = value.coordinator.getRun(ack.run.id);
       assert.equal(settled.status, "failed");
-      assert.equal(settled.errorCode, errorCode);
+      assert.equal(settled.errorCode, ["CODEX_SYSTEM_BINARY_NOT_FOUND", "CODEX_RUNTIME_VERSION_PROBE_FAILED"].includes(errorCode)
+        ? errorCode : "RUNTIME_INCOMPATIBLE");
       assert.equal(attempts, 1);
       assert.equal(value.host.turnStartCalls, 0);
       assert.equal(JSON.stringify(settled).includes("private CLI diagnostic"), false);
@@ -3767,8 +4317,9 @@ test("Codex 安装与协议错误穿透启动包装且不重复启动或泄漏�
 });
 
 test("turn_start 的上游暂时不可用错误穿透阶段包装且不自动重放", async () => {
+ for (const errorCode of ["RUNTIME_UPSTREAM_UNAVAILABLE", "RUNTIME_ATTACHMENT_UNSUPPORTED", "RUNTIME_ATTACHMENT_RECOVERY_REQUIRED"]) {
   const value = await openFixture({
-    turnStartError: codedError("RUNTIME_UPSTREAM_UNAVAILABLE"),
+    turnStartError: codedError(errorCode),
     unreadableFreshThreadUntilTurnStart: true,
   });
   try {
@@ -3779,11 +4330,12 @@ test("turn_start 的上游暂时不可用错误穿透阶段包装且不自动重
     });
     const settled = await value.coordinator.waitForIdle(ack.run.id);
     assert.equal(settled.status, "failed");
-    assert.equal(settled.errorCode, "RUNTIME_UPSTREAM_UNAVAILABLE");
+    assert.equal(settled.errorCode, errorCode);
     assert.equal(value.host.turnStartCalls, 1);
   } finally {
     await value.coordinator.close();
   }
+ }
 });
 
 test("Host cwd 使用 WorkRun 准入时 canonical workspace，不重新读取可变 Session 路径", async () => {
@@ -3850,8 +4402,11 @@ test("ChatSession 权限模式覆盖 Profile 基线并冻结到下一轮 Runtime
   });
   await sendAndDrain(value, { operationId: "session-permission" });
   assert.equal(value.host.lastResumeParams.sandbox, "workspace-write");
-  assert.equal(value.host.lastResumeParams.approvalPolicy, "never");
-  assert.equal(value.host.lastTurnStartParams.approvalPolicy, "never");
+  // Codex uses the approval policy for MCP elicitation too and refuses the helper's
+  // per-call binding proof under "never", so "workspace-auto" keeps its sandbox and
+  // asks for escalations ("on-request").
+  assert.equal(value.host.lastResumeParams.approvalPolicy, "on-request");
+  assert.equal(value.host.lastTurnStartParams.approvalPolicy, "on-request");
   await value.coordinator.close();
 });
 
@@ -4495,6 +5050,44 @@ test("open recovery 期间的精确 Host 事件不会因 lifecycle=opening 丢�
   await value.coordinator.close();
 });
 
+test("message usage is scoped to its native run and terminal model/context remain frozen after later events", async () => {
+  const { TranscriptStore } = require("../app/agent-service/transcript-store");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "response-metadata-")));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache"), trustedRoot: root });
+  const transcriptStore = new TranscriptStore({ paths }); transcriptStore.open();
+  const records = [];
+  const usageStore = { record(input) { records.push({ ...input.usage, profileId: input.profileId, runId: input.runId, model: input.model }); },
+    list(query) { return records.filter(record => record.profileId === query.profileId && record.runId === query.runId); } };
+  const value = await openFixture({ transcriptStore, usageStore, sessionStatus: "ready", threadId: "thread-response-meta",
+    sessionWorkspace: root, threads: [{ id: "thread-response-meta", threadSource: null, turns: [] }] });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "response-metadata" });
+    const run = value.coordinator.getRun(ack.run.id);
+    const identity = { known: true, threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId };
+    const usage = { inputTokens: 1000, outputTokens: 20, cachedInputTokens: 400, cacheWriteInputTokens: 0, totalTokens: 1020, reasoningOutputTokens: 0 };
+    value.host.emit({ ...identity, type: "usage", responseId: "response-1", model: "actual-model", usage });
+    value.host.emit({ ...identity, type: "context_usage", contextUsage: { runtimeSessionId: identity.threadId,
+      usedTokens: 800, contextWindow: 10000, quality: "estimated", source: "estimate", observedAt: 1000 } });
+    records.push({ ...usage, profileId: PROFILE_ID, runId: "different-run", model: "foreign-model" });
+    const scope = { profileId: PROFILE_ID, sessionKey: SESSION_KEY };
+    const before = value.coordinator.getRunMessageMetadata(run.id, scope);
+    assert.deepEqual(before.models, ["actual-model"]);
+    assert.equal(before.usage.inputTokens, 1000); assert.equal(before.context.usedTokens, 800);
+    assert.equal(value.coordinator.getRunMessageMetadata(run.id, { ...scope, profileId: "different-profile" }), null);
+    assert.equal(value.coordinator.getRunMessageMetadata(run.id, { ...scope, sessionKey: "different-session" }), null);
+    const turn = value.host.threads[0].turns[0]; turn.status = "completed"; turn.itemsView = "full";
+    turn.items.push({ type: "agentMessage", text: "final response", phase: "final_answer" });
+    value.host.emit({ ...identity, type: "complete", method: "turn/completed", status: "completed" });
+    await value.coordinator.waitForIdle(run.id);
+    const saved = transcriptStore.listEvents(PROFILE_ID, value.sessions.session.id)
+      .find(event => event.content?.transcriptType === "terminal").content.responseMetadata;
+    assert.deepEqual(saved, before);
+    records[0].model = "later-config"; records[0].inputTokens = 99999;
+    assert.deepEqual(value.coordinator.getRunMessageMetadata(run.id, scope), before);
+    assert.equal(value.coordinator.runExecutionContracts.has(run.id), false, "snapshot survives execution-contract release");
+  } finally { await value.coordinator.close(); transcriptStore.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("公开 thread usage 在 turn context 发布前缓冲并按 Run/Profile 精确落盘", async () => {
   const value = await openFixture({
     sessionStatus: "ready",
@@ -4984,7 +5577,7 @@ test("真实 MCP helper request_user_input 经 elicitation 桥接 assigned turn�
     jsonrpc: "2.0", id: 1, method: "initialize", params: {
       protocolVersion: "2025-06-18",
       capabilities: { elicitation: {} },
-      clientInfo: { name: "fake-codex", version: "0.149.0" },
+      clientInfo: { name: "fake-codex", version: "0.159.2" },
     },
   })}\n`);
   assert.equal((await nextLine()).result.protocolVersion, "2025-06-18");
@@ -5071,7 +5664,7 @@ test("真实 fake Codex JSONL 经 Host schema 进入 Coordinator assigned turn �
       jsonrpc: "2.0", id: 1, method: "initialize", params: {
         protocolVersion: "2025-06-18",
         capabilities: { elicitation: {} },
-        clientInfo: { name: "fake-codex-transport", version: "0.149.0" },
+        clientInfo: { name: "fake-codex-transport", version: "0.159.2" },
       },
     })}\n`);
     assert.equal((await nextLine()).result.protocolVersion, "2025-06-18");
@@ -6081,7 +6674,7 @@ test("abort 在 interrupt 前先 settle 当前 pending server request，并清�
   await value.coordinator.close();
 });
 
-test("approval 超过默认五分钟仍保持 pending，expiresAt 为 null 且可正常批准", async () => {
+test("approval 超过三十分钟仍保持 pending，expiresAt 为 null 且可正常批准", async () => {
   let now = 1_000;
   let timerSets = 0;
   const value = await openFixture({
@@ -6110,7 +6703,7 @@ test("approval 超过默认五分钟仍保持 pending，expiresAt 为 null 且�
   while (value.coordinator.getRun(run.id).status !== "waiting_approval") {
     await new Promise((resolve) => setImmediate(resolve));
   }
-  now += 6 * 60 * 1_000;
+  now += 31 * 60 * 1_000;
   await new Promise((resolve) => setImmediate(resolve));
   const waiting = value.coordinator.getRun(run.id);
   assert.equal(waiting.status, "waiting_approval");
@@ -6125,6 +6718,58 @@ test("approval 超过默认五分钟仍保持 pending，expiresAt 为 null 且�
   assert.deepEqual(await response, { decision: "accept" });
   assert.equal(value.coordinator.getRun(run.id).status, "running");
   await value.coordinator.close();
+});
+
+test("ordinary input survives the old deadlines, accepts until thirty minutes, then interrupts exactly once", async () => {
+  for (const outcome of ["answer", "expire"]) {
+    let now = 1_000;
+    const scheduled = new Set();
+    const value = await openFixture({
+      sessionStatus: "ready", threadId: "thread-thirty-minute-input",
+      threads: [{ id: "thread-thirty-minute-input", threadSource: null, turns: [] }],
+      now: () => now,
+      promptScheduler: {
+        set(callback, delay) { const handle = { callback, at: now + delay }; scheduled.add(handle); return handle; },
+        clear(handle) { scheduled.delete(handle); },
+      },
+    });
+    try {
+      const { ack } = await sendAndDrain(value, { operationId: `thirty-minute-${outcome}` });
+      const run = value.coordinator.getRun(ack.run.id);
+      const response = value.host.request("mcpServer/elicitation/request", {
+        serverName: "shoggoth", threadId: run.runtimeSessionRef.sessionId,
+        turnId: run.runtimeTurnRef.turnId, mode: "form", message: "Wait for input",
+        requestedSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
+      }, `raw-thirty-minute-${outcome}`);
+      response.catch(() => {});
+      await waitUntil(() => scheduled.size === 1, 1000, "default input timer");
+      const timer = [...scheduled][0];
+      const requestId = value.coordinator.getRun(run.id).waitingRequestId;
+      assert.equal(timer.at, 1_000 + 30 * 60_000);
+      for (const elapsed of [5 * 60_000, 10 * 60_000, 30 * 60_000 - 1]) {
+        now = 1_000 + elapsed;
+        for (const pending of [...scheduled]) if (pending.at <= now) pending.callback();
+        assert.equal(value.coordinator.getRun(run.id).status, "waiting_input");
+        assert.equal(value.host.turnInterruptCalls, 0);
+      }
+      if (outcome === "answer") {
+        await value.coordinator.respondInput({ operationId: "answer-before-deadline", runId: run.id,
+          requestId, action: "submit", answers: { answer: "done" } });
+        assert.deepEqual(await response, { action: "accept", content: { answer: "done" } });
+        assert.equal(value.coordinator.getRun(run.id).status, "running");
+      } else {
+        now += 1;
+        timer.callback();
+        assert.deepEqual(await response, { action: "cancel" });
+        const terminal = await value.coordinator.waitForIdle(run.id);
+        assert.equal(terminal.status, "interrupted");
+        assert.equal(terminal.errorCode, "CODEX_PROMPT_TIMEOUT");
+        timer.callback();
+        assert.equal(value.host.turnInterruptCalls, 1);
+      }
+      assert.equal(scheduled.size, 0);
+    } finally { await value.coordinator.close(); }
+  }
 });
 
 test("prompt timeout 有界 settle/interrupt，并 durable 收敛 interrupted 与 Inbox tombstone", async () => {
@@ -6156,16 +6801,13 @@ test("prompt timeout 有界 settle/interrupt，并 durable 收敛 interrupted �
     turnId: run.runtimeTurnRef?.turnId,
     mode: "form",
     message: "timeout me",
-    requestedSchema: {
-      type: "object",
-      properties: { answer: { type: "string" } },
-      required: ["answer"],
-    },
+    // Empty forms are tool consent and intentionally wait without a deadline.
+    requestedSchema: { type: "object", properties: { response: { type: "string" } }, required: ["response"] },
   }, "raw-timeout");
   serverResponse.catch(() => {});
-  while (value.coordinator.getRun(run.id).status !== "waiting_input") {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+  // Fire only the actual installed input timer, with a bounded wait.
+  await waitUntil(() => value.coordinator.getRun(run.id).status === "waiting_input"
+    && scheduled.size === 1, 1000, "prompt timeout scheduler installation");
   assert.equal(scheduled.size, 1);
   [...scheduled][0].callback();
   assert.deepEqual(await serverResponse, { action: "cancel" });

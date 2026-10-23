@@ -1,0 +1,110 @@
+import fs, {} from "node:fs";
+export function captureSecureTempRepairAdapter(supplied, hasLegacyFsHooks) {
+    if (supplied === undefined && hasLegacyFsHooks)
+        return undefined;
+    if (supplied !== undefined && (supplied === null || (typeof supplied !== "object" && typeof supplied !== "function")))
+        return undefined;
+    const source = supplied === undefined ? fs : supplied;
+    const { lstatSync, fstatSync, openSync, fchmodSync, closeSync, constants } = source;
+    const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK } = constants ?? {};
+    if ([lstatSync, fstatSync, openSync, fchmodSync, closeSync].some((fn) => typeof fn !== "function") ||
+        O_RDONLY !== 0 || [O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK].some((flag) => !Number.isSafeInteger(flag) || flag <= 0 || flag > 0x7fff_ffff) ||
+        (O_DIRECTORY & O_NOFOLLOW) !== 0 || (O_DIRECTORY & O_NONBLOCK) !== 0 || (O_NOFOLLOW & O_NONBLOCK) !== 0) {
+        return undefined;
+    }
+    return { lstatSync, fstatSync, openSync, fchmodSync, closeSync, flags: O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK };
+}
+// Node exposes stat identity through BigInt64Array; a high OS bit can be negative.
+// Preserve raw values and existing positive adapter receipts, never normalize them.
+const MIN_NODE_STAT_IDENTITY = -(1n << 63n);
+export function secureTempDirectoryReceipt(stat, uid) {
+    const { dev, ino, uid: owner, mode } = stat;
+    if (typeof dev !== "bigint" || dev < MIN_NODE_STAT_IDENTITY ||
+        typeof ino !== "bigint" || ino < MIN_NODE_STAT_IDENTITY || ino === 0n ||
+        typeof owner !== "bigint" || owner !== BigInt(uid) || typeof mode !== "bigint" ||
+        mode < 0n || mode > 0xffffffffn || (mode & 61440n) !== 16384n ||
+        stat.isDirectory() !== true || stat.isSymbolicLink() !== false) {
+        throw new Error("Secure temp directory identity, owner, or type could not be verified.");
+    }
+    return { dev, ino, uid: owner, mode };
+}
+function assertSameDirectory(stat, expected, uid) {
+    const observed = secureTempDirectoryReceipt(stat, uid);
+    if (observed.dev !== expected.dev || observed.ino !== expected.ino || observed.uid !== expected.uid) {
+        throw new Error("Secure temp directory changed during repair.");
+    }
+    return observed;
+}
+function mayHaveConcurrentRepair(error) {
+    if (typeof error !== "object" || error === null || !("code" in error))
+        return false;
+    const code = error.code;
+    return code === "EPERM" || code === "EACCES" || code === "ENOENT";
+}
+/** No pathname chmod, search-only descriptors, procfs, or reopening fallback. */
+export function repairSecureTempDirectory(candidate, expected, uid, adapter, access, repaired, finalize = false) {
+    assertSameDirectory(adapter.lstatSync(candidate, { bigint: true }), expected, uid);
+    const fd = adapter.openSync(candidate, adapter.flags);
+    if (!Number.isSafeInteger(fd) || fd < 0)
+        throw new Error("Secure temp directory descriptor is invalid.");
+    const errors = [];
+    try {
+        const inspect = () => {
+            const opened = assertSameDirectory(adapter.fstatSync(fd, { bigint: true }), expected, uid);
+            const named = assertSameDirectory(adapter.lstatSync(candidate, { bigint: true }), expected, uid);
+            return { opened, named };
+        };
+        const verify = (requireExactMode) => {
+            const check = () => {
+                const { opened, named } = inspect();
+                for (const stat of [opened, named]) {
+                    if ((stat.mode & 18n) !== 0n || (requireExactMode && (stat.mode & 4095n) !== 448n)) {
+                        throw new Error("Secure temp directory permissions remain unsafe.");
+                    }
+                }
+            };
+            check();
+            access();
+            check();
+        };
+        const { opened } = inspect();
+        const needsChmod = finalize ? (opened.mode & 4095n) !== 448n :
+            (opened.mode & 18n) !== 0n || (opened.mode & 448n) !== 448n;
+        let chmodError;
+        let chmodFailed = false;
+        if (needsChmod) {
+            try {
+                adapter.fchmodSync(fd, 0o700);
+            }
+            catch (error) {
+                if (!mayHaveConcurrentRepair(error))
+                    throw error;
+                chmodFailed = true;
+                chmodError = error;
+            }
+            if (!chmodFailed)
+                repaired();
+        }
+        try {
+            verify(finalize || (needsChmod && !chmodFailed));
+        }
+        catch (error) {
+            if (chmodFailed)
+                throw new AggregateError([chmodError, error], "Secure temp directory chmod and verification failed.");
+            throw error;
+        }
+    }
+    catch (error) {
+        errors.push(error);
+    }
+    try {
+        adapter.closeSync(fd);
+    }
+    catch (error) {
+        errors.push(error);
+    }
+    if (errors.length > 1)
+        throw new AggregateError(errors, "Secure temp directory repair and close failed.");
+    if (errors.length === 1)
+        throw errors[0];
+}

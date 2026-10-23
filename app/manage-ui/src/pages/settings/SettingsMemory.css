@@ -1,0 +1,29 @@
+.settings-memory-body { padding: 0 24px 24px; }
+.settings-memory-body form { display: grid; gap: 24px; }
+.settings-memory-section { min-width: 0; margin: 0; padding: 20px 0 0; border: 0; border-top: 1px solid var(--ui-hairline); }
+.settings-memory-section legend { padding: 0 8px 0 0; font-size: 15px; font-weight: 600; }
+.settings-memory-section > .field { max-width: 360px; margin: 16px 0; }
+.settings-memory-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; margin: 16px 0; }
+.settings-memory-grid .field { min-width: 0; }
+.settings-memory-grid [role="combobox"] { width: 100%; }
+.settings-memory-extra { margin-top: 16px; }
+.settings-memory-extra > summary { cursor: pointer; font-size: 13px; padding: 8px 0; }
+.settings-memory-path { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; margin: 12px 0; }
+.settings-memory-path .ui-cbtn { margin-bottom: 2px; }
+.settings-memory-alias { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; margin: 16px 0; }
+.settings-memory-alias .field, .settings-memory-alias-add .field { min-width: 0; }
+.settings-memory-alias-model { display: grid; align-self: start; gap: 8px; padding-top: 2px; min-width: 0; font-size: 13px; }
+.settings-memory-alias-model > span { color: var(--ui-text-2); }
+.settings-memory-alias-model code { font-size: 12px; overflow-wrap: anywhere; }
+.settings-memory-alias-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: start; margin: 16px 0; }
+.settings-memory-alias-add > button { margin-top: 24px; }
+.settings-memory-agents { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin: 20px 0; font-size: 13px; }
+.settings-memory-agents p { margin: 0; }
+.settings-memory-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 16px; border-top: 1px solid var(--ui-hairline); }
+.settings-memory-actions p { flex: 1 1 160px; margin: 0; font-size: 12px; color: var(--ui-text-2); }
+@media (max-width: 720px) {
+  .settings-memory-body { padding: 0 16px 16px; }
+  .settings-memory-grid, .settings-memory-path, .settings-memory-alias, .settings-memory-alias-add { grid-template-columns: minmax(0, 1fr); }
+  .settings-memory-path .ui-cbtn { justify-self: start; }
+  .settings-memory-alias .ui-cbtn, .settings-memory-alias-add > button { justify-self: start; margin-top: 0; }
+}

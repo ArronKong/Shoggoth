@@ -62,7 +62,10 @@ function externalObservation(value) {
 
 function validIdea(value) {
   const hasTone = value && own(value, "paperTone");
-  return exact(value, attachmentFields(value, hasTone ? [...IDEA_FIELDS, "paperTone"] : IDEA_FIELDS))
+  const fields = hasTone ? [...IDEA_FIELDS, "paperTone"] : [...IDEA_FIELDS];
+  if (own(value || {}, "restoredAt")) fields.push("restoredAt");
+  return exact(value, attachmentFields(value, fields))
+    && (!own(value, "restoredAt") || time(value.restoredAt))
     && (!own(value, "attachments") || validAttachments(value.attachments))
     && (!hasTone || validInspirationPaperTone(value.paperTone))
     && UUID.test(value.id) && textValue(value.body, MAX_BODY_BYTES, value.deletedAt !== null || Boolean(value.attachments?.length))
@@ -464,6 +467,18 @@ class InspirationStore extends EventEmitter {
     return this.#statement("SELECT data FROM ideas WHERE deleted=0 ORDER BY sort_at,id").all().map(row => this.#decode("ideas", row));
   }
 
+  reminderPage(bucket, cursor = null, limit = 50) {
+    this.#assertOpen();
+    if (!["saved", "active", "result"].includes(bucket) || !Number.isInteger(limit) || limit < 1 || limit > 50) {
+      fail("INSPIRATION_INVALID", "回顾列表参数无效");
+    }
+    const point = cursor === null ? null : this.#cursor(cursor);
+    const rows = this.#statement(`SELECT data FROM ideas WHERE deleted=0 AND archived=0 AND bucket=?
+      ${point ? "AND (sort_at,id)<(?,?)" : ""} ORDER BY sort_at DESC,id DESC LIMIT ?`)
+      .all(bucket, ...(point ? [-point.at, point.id] : []), limit).map(row => this.#decode("ideas", row));
+    return { ideas: rows, nextCursor: rows.length === limit ? `${rows.at(-1).updatedAt}:${rows.at(-1).id}` : null };
+  }
+
   agentExecutionStats(agents) {
     this.#assertOpen();
     if (!agents.length) return [];
@@ -710,7 +725,10 @@ class InspirationStore extends EventEmitter {
       }
       const at = Math.max(this.#at(), idea.updatedAt);
       for (const key of ["body", "title", "favorite", "attachments"]) if (own(input.patch, key)) idea[key] = clone(input.patch[key]);
-      if (own(input.patch, "archived")) idea.archivedAt = input.patch.archived ? at : null;
+      if (own(input.patch, "archived")) {
+        if (!input.patch.archived && idea.archivedAt !== null) idea.restoredAt = at;
+        idea.archivedAt = input.patch.archived ? at : null;
+      }
       if (own(input.patch, "accepted")) idea.acceptedAt = input.patch.accepted ? at : null;
       if (own(input.patch, "body") || own(input.patch, "attachments")) idea.acceptedAt = null;
       // Favorites are a bookmark, not a content or growth update. Keep cursor

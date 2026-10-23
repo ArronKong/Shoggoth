@@ -28,6 +28,9 @@ const PI_CAPABILITIES = runtimeCapabilities({
   "context.compact.native": true,
   "context.compact.auto": true,
   "model.generate.toolFree": true,
+  "model.generate.settings": true,
+  "model.resolve.toolFree": true,
+  "model.resolve.explicit": true,
 });
 
 function adapterError(code, message) {
@@ -47,8 +50,10 @@ class PiRuntimeHandle {
 
   get terminated() { return this.host.terminated; }
   get registeredSecrets() { return []; }
+  nativeHookCapabilities() { return require("./pi-hook-contract").piNativeHookCapabilities(this.host); }
   authenticationState() { return this.host.authenticationState(); }
   generateModelOnly(input) { return this.host.generateModelOnly(input); }
+  resolveModelOnly(input) { return this.host.resolveModelOnly(input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);

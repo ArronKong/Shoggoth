@@ -15,12 +15,8 @@ const source = fs.readFileSync(componentPath, 'utf8');
 const compiled = ts.transpileModule(source, { fileName: componentPath, compilerOptions: {
   esModuleInterop: true, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
 } }).outputText;
-const localePath = path.join(root, 'app/manage-ui/src/i18n/locales/zh-CN.ts');
-const localeModule = { exports: {} };
-vm.runInNewContext(ts.transpileModule(fs.readFileSync(localePath, 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText, { module: localeModule, exports: localeModule.exports });
-const errorLabels = localeModule.exports.default.inspiration.growth.errors;
+const { load: loadUiSource } = uiRequire(path.join(root, 'scripts/fixtures/load-ui-typescript.cjs'));
+const errorLabels = loadUiSource('i18n/locales/zh-CN.ts').default.inspiration.growth.errors;
 const errorKeyPrefix = 'inspiration.growth.errors.';
 const errorLabel = (key) => key.startsWith(errorKeyPrefix) ? errorLabels[key.slice(errorKeyPrefix.length)] : undefined;
 const execution = { exports: {} };

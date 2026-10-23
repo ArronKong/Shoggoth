@@ -150,7 +150,7 @@ function commentDto(value) {
   };
 }
 
-function cronJobDto(value) {
+function cronJobDto(value, systemManaged = false) {
   if (!ownDataObject(value)) return value;
   const {
     id, name, enabled, profileId, prompt, workspace, schedule,
@@ -163,6 +163,7 @@ function cronJobDto(value) {
     enabled,
     profileId,
     promptMeta: dtoContentMeta(prompt),
+    ...(systemManaged ? { systemManaged: true } : {}),
     workspace,
     schedule,
     misfirePolicy,
@@ -213,11 +214,13 @@ class NativeDomainServiceController {
     this.kanbanRunService = options.kanbanRunService;
     this.cronStore = options.cronStore;
     this.cronScheduler = options.cronScheduler;
+    this.isSystemCronJob = options.isSystemCronJob || (() => false);
     this.workDispatcher = options.workDispatcher;
     this.getDomainAvailability = options.getDomainAvailability;
     this.onFatalDomainError = options.onFatalDomainError || null;
     this.describeCronRun = options.describeCronRun || null;
     this.getRunSessionKey = options.getRunSessionKey || (() => null);
+    this.getCronOutput = options.getCronOutput || (() => null);
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.poisoned = { kanban: null, cron: null };
@@ -235,6 +238,8 @@ class NativeDomainServiceController {
     if (this.poisoned[domain]) throw this.poisoned[domain];
     try {
       this.#assertAvailable(domain);
+      if (["cron.job.update", "cron.job.delete", "cron.job.enabled.set", "cron.run.trigger", "cron.run.retry"].includes(method)
+        && this.isSystemCronJob(params.jobId)) throw internalError("CRON_SYSTEM_MANAGED");
       const rawResult = await this.#route(method, params);
       return validateDomainServiceResult(method, rawResult, params);
     } catch (error) {
@@ -380,6 +385,7 @@ class NativeDomainServiceController {
       .filter((value) => params.status === null || value.status === params.status);
     const entries = runs.map((runValue) => {
       const description = this.describeCronRun(runValue);
+      const cronOutput = this.getCronOutput(runValue);
       if (!ownDataObject(description) || Object.keys(description).length !== 2
         || !CRON_RUN_KINDS.has(description.kind)
         || !Number.isSafeInteger(description.createdAt) || description.createdAt < 0) {
@@ -388,6 +394,7 @@ class NativeDomainServiceController {
       return {
         key: stableTimestampKey(description.createdAt, runValue.id),
         item: { run: runValue, kind: description.kind, createdAt: description.createdAt,
+          ...(cronOutput ? { cronOutput } : {}),
           ...(this.getRunSessionKey(runValue) ? { sessionKey: this.getRunSessionKey(runValue) } : {}) },
       };
     });
@@ -514,13 +521,13 @@ class NativeDomainServiceController {
       const query = { profileId: params.profileId };
       if (params.enabled !== null) query.enabled = params.enabled;
       return this.#page(method, params, this.#stableEntries(
-        this.cronStore.listJobs(query), cronJobDto,
+        this.cronStore.listJobs(query), (job) => cronJobDto(job, this.isSystemCronJob(job.id)),
       ));
     }
     if (method === "cron.job.get") {
       return { job: cronJobDto(requireEntity(
         this.cronStore.getJob(params.jobId), "CRON_JOB_NOT_FOUND",
-      )) };
+      ), this.isSystemCronJob(params.jobId)) };
     }
     if (method === "cron.job.prompt.read") {
       const value = requireEntity(this.cronStore.getJob(params.jobId), "CRON_JOB_NOT_FOUND");

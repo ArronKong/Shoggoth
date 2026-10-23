@@ -126,6 +126,11 @@ class RuntimeAccountServiceController {
     this.productStore = options.productStore;
     this.runtimeAccountAdmission = options.runtimeAccountAdmission;
     this.accountAuthManager = options.accountAuthManager;
+    // Sign-in hosts for runtimes other than Codex, keyed by runtime.
+    this.loginManagers = options.loginManagers || {};
+    for (const manager of Object.values(this.loginManagers)) {
+      requireMethods(manager, ["read", "cancel"], "Runtime login manager");
+    }
     this.readStorage = options.readAccountStorage || defaultStorageReader(options);
     if (typeof this.readStorage !== "function") {
       throw controllerError("RUNTIME_ACCOUNT_SERVICE_OPTIONS_INVALID", "Storage reader is invalid");
@@ -140,6 +145,7 @@ class RuntimeAccountServiceController {
 
   close() {
     this.opened = false;
+    for (const manager of Object.values(this.loginManagers)) manager.close?.();
   }
 
   #assertOpen() {
@@ -201,6 +207,20 @@ class RuntimeAccountServiceController {
     return account;
   }
 
+  // Codex signs in through AccountAuthManager; other runtimes through their manager.
+  #loginManager(runtimeAccountId, accounts) {
+    const account = this.#account(runtimeAccountId, accounts);
+    if (account.runtime === "codex") return null;
+    const manager = this.loginManagers[account.runtime];
+    if (!manager) {
+      throw controllerError(
+        "RUNTIME_ACCOUNT_AUTH_UNSUPPORTED",
+        "RuntimeAccount Service authentication is unsupported for this runtime",
+      );
+    }
+    return manager;
+  }
+
   async handle(method, input) {
     this.#assertOpen();
     if (!RUNTIME_ACCOUNT_SERVICE_METHOD_SET.has(method)) {
@@ -220,11 +240,44 @@ class RuntimeAccountServiceController {
       this.#authAccount(params.runtimeAccountId, accounts);
       result = await this.accountAuthManager.read({ runtimeAccountId: params.runtimeAccountId });
     } else if (method === "runtime.account.login.start") {
-      this.#authAccount(params.runtimeAccountId, accounts);
-      result = await this.accountAuthManager.loginStart(params);
+      const manager = this.#loginManager(params.runtimeAccountId, accounts);
+      // A runtime that signs into a chosen provider starts through provider.start.
+      if (manager && (params.mode !== "browser" || typeof manager.start !== "function")) {
+        throw controllerError("RUNTIME_ACCOUNT_AUTH_UNSUPPORTED", "Only browser sign-in is supported");
+      }
+      result = manager ? await manager.start({ runtimeAccountId: params.runtimeAccountId })
+        : await this.accountAuthManager.loginStart(params);
     } else if (method === "runtime.account.login.cancel") {
-      this.#authAccount(params.runtimeAccountId, accounts);
-      result = await this.accountAuthManager.loginCancel(params);
+      const manager = this.#loginManager(params.runtimeAccountId, accounts);
+      result = manager ? await manager.cancel(params) : await this.accountAuthManager.loginCancel(params);
+    } else if (method === "runtime.account.login.read") {
+      const manager = this.#loginManager(params.runtimeAccountId, accounts);
+      if (manager) result = await manager.read({ runtimeAccountId: params.runtimeAccountId });
+      else {
+        // Codex's app-server does not open the browser; the app opens the start URL.
+        const { login } = await this.accountAuthManager.read({ runtimeAccountId: params.runtimeAccountId });
+        result = { login: login ? { ...login, authUrl: null, stage: null, browserOpened: false,
+          instructions: null, codeRequired: false } : null };
+      }
+    } else if ([
+      "runtime.account.login.options", "runtime.account.login.provider.start",
+      "runtime.account.login.submit", "runtime.account.login.apikey",
+    ].includes(method)) {
+      // Sign-in into model providers the user picks (OpenCode).
+      const operation = {
+        "runtime.account.login.options": "options",
+        "runtime.account.login.provider.start": "providerStart",
+        "runtime.account.login.submit": "submit",
+        "runtime.account.login.apikey": "apiKey",
+      }[method];
+      const manager = this.#loginManager(params.runtimeAccountId, accounts);
+      if (typeof manager?.[operation] !== "function") {
+        throw controllerError(
+          "RUNTIME_ACCOUNT_AUTH_UNSUPPORTED",
+          "RuntimeAccount Service authentication is unsupported for this runtime",
+        );
+      }
+      result = await manager[operation](params);
     } else if (method === "runtime.account.logout") {
       this.#authAccount(params.runtimeAccountId, accounts);
       result = await this.accountAuthManager.logout(params);

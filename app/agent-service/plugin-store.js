@@ -9,7 +9,15 @@ const { assertPrivateDirectory, assertPrivateRegularFile, ensurePrivateDirectory
   lstatIfExists, serviceError } = require("./security");
 const { componentId } = require("./plugin-component-catalog");
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
+const HOOK_BINDING_SCHEMA = `CREATE TABLE hook_bindings (
+  id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, installation_id TEXT NOT NULL REFERENCES installations(id),
+  component_id TEXT NOT NULL, release_digest TEXT NOT NULL, workspace TEXT,
+  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), revision INTEGER NOT NULL, epoch INTEGER NOT NULL,
+  grant_data TEXT CHECK(grant_data IS NULL OR json_valid(grant_data)),
+  test_data TEXT CHECK(test_data IS NULL OR json_valid(test_data)), updated_at INTEGER NOT NULL,
+  UNIQUE(profile_id,installation_id,component_id)
+);`;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const REQUIRED_TABLES = Object.freeze(["releases", "installations", "operations", "connections",
@@ -26,6 +34,19 @@ const READ_SQL = Object.freeze({
   release: "SELECT * FROM releases WHERE source_identity = ? AND content_digest = ?",
   profileBindings: "SELECT * FROM bindings WHERE subject_kind = 'native-profile' AND subject_id = ? ORDER BY id",
   globalBindings: "SELECT * FROM bindings WHERE subject_kind = 'global' AND subject_id = 'all-agents' ORDER BY id",
+  currentAllowedGrantCount: `SELECT COUNT(*) AS count FROM grants g
+      JOIN bindings b ON b.id = g.binding_id
+      JOIN installations i ON i.id = b.installation_id
+      JOIN connections c ON c.id = b.connection_id
+      WHERE b.id = ? AND b.component_kind = 'mcp-server' AND b.enabled = 1
+        AND i.desired_state = 'enabled'
+        AND NOT EXISTS (SELECT 1 FROM operation_intents o JOIN operations op ON op.id = o.operation_id
+          WHERE o.installation_id = i.id AND op.phase IN ('created', 'committed', 'outcome_unknown'))
+        AND c.state = 'ready' AND c.installation_id = i.id AND c.component_id = b.component_id
+        AND c.principal_identity IS NOT NULL AND length(c.principal_identity) > 0
+        AND g.effect = 'allow' AND g.approval_mode IN ('always', 'each-call')
+        AND g.connection_id = c.id AND g.principal_identity = c.principal_identity
+        AND (g.expires_at IS NULL OR g.expires_at > ?)`,
 });
 
 function error(code, message) { return serviceError(code, message); }
@@ -120,13 +141,15 @@ function assertPluginCatalogBaseline(paths) {
   let db;
   try {
     db = openPluginDatabase(paths.pluginCatalogPath, { readonly: true, fileMustExist: true });
-    if (![8, SCHEMA_VERSION].includes(db.pragma("user_version", { simple: true }))) {
+    if (![8, 9, SCHEMA_VERSION].includes(db.pragma("user_version", { simple: true }))) {
       throw error("PLUGIN_STORE_UNSUPPORTED", "插件账本版本不受支持");
     }
     for (const table of REQUIRED_TABLES) {
       if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .get(table)) throw error("PLUGIN_STORE_CORRUPT", "插件账本缺少必要表");
     }
+    if (db.pragma("user_version", { simple: true }) === SCHEMA_VERSION
+      && !db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='hook_bindings'").get()) throw error("PLUGIN_STORE_CORRUPT", "插件 Hook 账本缺失");
     authorityState(db);
   } catch (failure) {
     if (failure?.code === "PLUGIN_STORE_UNSUPPORTED" || failure?.code === "PLUGIN_STORE_CORRUPT") {
@@ -182,7 +205,7 @@ class PluginStore {
     this.db = openPluginDatabase(this.paths.pluginCatalogPath);
     try {
       const version = this.db.pragma("user_version", { simple: true });
-      if (existing && ![8, SCHEMA_VERSION].includes(version)) {
+      if (existing && ![8, 9, SCHEMA_VERSION].includes(version)) {
         throw error("PLUGIN_STORE_UNSUPPORTED", "插件账本版本不受支持");
       }
       fs.chmodSync(this.paths.pluginCatalogPath, 0o600);
@@ -330,12 +353,14 @@ class PluginStore {
           PRAGMA user_version = 9;
         `))();
       }
-      for (const table of REQUIRED_TABLES) {
+      if (!existing || version === 8 || version === 9) this.db.transaction(() => this.db.exec(HOOK_BINDING_SCHEMA + "PRAGMA user_version=10;"))();
+      for (const table of [...REQUIRED_TABLES, "hook_bindings"]) {
         if (!this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)) {
           throw error("PLUGIN_STORE_CORRUPT", "插件账本缺少必要表");
         }
       }
       authorityState(this.db);
+      this.validateHookBindings();
       // A send may have reached a remote server before this process died. A
       // restarted Service must never turn that attempt into a fresh call.
       this.db.transaction(() => {
@@ -407,6 +432,7 @@ class PluginStore {
       const grants = db.prepare("UPDATE grants SET effect = 'deny', epoch = ?, revision = revision + 1").run(epoch).changes;
       const connections = db.prepare(`UPDATE connections SET state = 'disconnected',
         auth_revision = auth_revision + 1, revision = revision + 1`).run().changes;
+      db.prepare("UPDATE hook_bindings SET enabled=0,revision=revision+1,epoch=epoch+1,grant_data=NULL,test_data=NULL").run();
       const bindings = db.prepare("UPDATE bindings SET enabled = 0, revision = revision + 1").run().changes;
       const installations = db.prepare(`UPDATE installations SET desired_state = 'disabled',
         revision = revision + 1, updated_at = ? WHERE desired_state != 'uninstalled'`).run(now).changes;
@@ -526,13 +552,14 @@ class PluginStore {
           components_json, diagnostics_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
         preview.contentDigest, sourceIdentity, preview.name, preview.declaredVersion,
         JSON.stringify({ name: preview.name, version: preview.declaredVersion, specVersion: preview.specVersion }),
-        JSON.stringify({ skills: preview.skills, mcpServers: preview.mcpServers }),
+        JSON.stringify({ skills: preview.skills, mcpServers: preview.mcpServers, hooks: preview.hooks || [] }),
         JSON.stringify(preview.diagnostics), now,
       );
       if (existing && (existing.release_digest !== preview.contentDigest
         || existing.desired_state === "uninstalled")) {
         db.prepare("UPDATE installations SET release_digest = ?, desired_state = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
           .run(preview.contentDigest, activateOnInstall ? "enabled" : "disabled", now, installationId);
+        this.revokeHookInstallation(installationId);
         // A new package generation must not silently reactivate the previous
         // Skill text or MCP contract when the installation is enabled again.
         db.prepare("UPDATE bindings SET enabled = 0, revision = revision + 1 WHERE installation_id = ?")
@@ -750,6 +777,7 @@ class PluginStore {
       }
       const now = this.now();
       if (operation.kind !== "data-snapshot") {
+        this.revokeHookInstallation(request.installationId);
         db.prepare(`UPDATE installations SET release_digest = ?, revision = revision + 1,
           updated_at = ? WHERE id = ?`).run(operation.kind === "code-rollback" ? request.targetDigest
           : request.fromDigest, now, request.installationId);
@@ -835,6 +863,7 @@ class PluginStore {
       db.prepare(`INSERT INTO operation_intents
         (operation_id, installation_id, desired_state, expected_revision)
         VALUES (?, ?, 'uninstalled', ?)`).run(operationId, installationId, expectedRevision);
+      this.revokeHookInstallation(installationId);
       // Revoke before any asynchronous drain. The intent also fences re-enable,
       // account verification and new Grants through a Service restart.
       const epoch = db.prepare("UPDATE capability_epoch SET value = value + 1 WHERE id = 1 RETURNING value")
@@ -971,6 +1000,7 @@ class PluginStore {
       this._db().prepare("UPDATE installations SET desired_state = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
         .run(desiredState, this.now(), installationId);
       if (desiredState === "disabled") {
+        this.revokeHookInstallation(installationId);
         const epoch = this._db().prepare("UPDATE capability_epoch SET value = value + 1 WHERE id = 1 RETURNING value")
           .get().value;
         this._db().prepare(`UPDATE grants SET epoch = ?, revision = revision + 1
@@ -1015,6 +1045,10 @@ class PluginStore {
   getConnection(connectionId) {
     if (!ID_PATTERN.test(connectionId)) throw error("PLUGIN_CONNECTION_INVALID", "connectionId 无效");
     return publicConnection(this._readStatement("connection").get(connectionId));
+  }
+  listConnections() {
+    return this._db().prepare("SELECT * FROM connections ORDER BY installation_id, component_id, id")
+      .all().map(publicConnection);
   }
   getConnectionCountsForComponent(installationId, selectedComponentId) {
     if (!ID_PATTERN.test(installationId) || !HASH_PATTERN.test(selectedComponentId)) {
@@ -1173,6 +1207,91 @@ class PluginStore {
   getBinding(bindingId) {
     if (!ID_PATTERN.test(bindingId)) throw error("PLUGIN_BINDING_INVALID", "bindingId 无效");
     return publicBinding(this._readStatement("binding").get(bindingId));
+  }
+  getHookBinding(profileId, installationId, selectedId) {
+    if (!ID_PATTERN.test(profileId) || !ID_PATTERN.test(installationId) || !HASH_PATTERN.test(selectedId)) throw error("PLUGIN_BINDING_INVALID", "Hook 绑定无效");
+    const row = this._db().prepare("SELECT * FROM hook_bindings WHERE profile_id=? AND installation_id=? AND component_id=?").get(profileId, installationId, selectedId);
+    if (!row) return null;
+    return { bindingId: row.id, profileId: row.profile_id, installationId: row.installation_id, componentId: row.component_id,
+      releaseDigest: row.release_digest, workspace: row.workspace, enabled: row.enabled === 1,
+      revision: row.revision, epoch: row.epoch, grant: readJson(row.grant_data), test: readJson(row.test_data), updatedAt: row.updated_at };
+  }
+  validateHookBindings() {
+    try {
+      const { safeJson, id } = require("./hook-contract");
+      const rows = this._db().prepare("SELECT * FROM hook_bindings LIMIT 1025").all();
+      if (rows.length > 1024) throw new Error("capacity");
+      const counts = new Map();
+      for (const row of rows) {
+        if (!ID_PATTERN.test(row.profile_id) || !ID_PATTERN.test(row.installation_id) || !HASH_PATTERN.test(row.component_id)
+          || !HASH_PATTERN.test(row.release_digest) || ![0, 1].includes(row.enabled)
+          || !Number.isSafeInteger(row.revision) || row.revision < 1 || !Number.isSafeInteger(row.epoch) || row.epoch < 0
+          || !Number.isSafeInteger(row.updated_at) || row.updated_at < 0
+          || row.id !== "hook-binding-" + crypto.createHash("sha256").update(JSON.stringify([row.profile_id, row.installation_id, row.component_id])).digest("hex")
+          || !(row.workspace === null || typeof row.workspace === "string" && path.isAbsolute(row.workspace) && path.normalize(row.workspace) === row.workspace)) throw new Error("binding");
+        counts.set(row.profile_id, (counts.get(row.profile_id) || 0) + 1);
+        if (counts.get(row.profile_id) > 64) throw new Error("capacity");
+        const grant = row.grant_data && safeJson(readJson(row.grant_data));
+        if (grant && (!HASH_PATTERN.test(grant.incarnation) || !HASH_PATTERN.test(grant.contentDigest)
+          || !grant.access || Object.keys(grant.access).length !== 3
+          || ["payload", "workspaceRead", "workspaceWrite"].some(key => typeof grant.access[key] !== "boolean")
+          || !Array.isArray(grant.connections) || grant.connections.length > 16)) throw new Error("grant");
+        for (const item of grant?.connections || []) if (!id(item.bindingId) || !id(item.connectionId) || typeof item.principalIdentity !== "string"
+          || !Number.isSafeInteger(item.bindingRevision) || item.bindingRevision < 1 || !Number.isSafeInteger(item.authRevision) || item.authRevision < 1) throw new Error("connection");
+        const receipt = row.test_data && safeJson(readJson(row.test_data));
+        if (receipt && (typeof receipt.passed !== "boolean" || !HASH_PATTERN.test(receipt.contentDigest)
+          || !HASH_PATTERN.test(receipt.incarnation) || !Number.isSafeInteger(receipt.testedAt) || receipt.testedAt < 0)) throw new Error("test");
+        if (row.enabled && (!grant || !receipt?.passed || grant.contentDigest !== receipt.contentDigest
+          || grant.incarnation !== receipt.incarnation || grant.incarnation !== this.getAuthorityIncarnation())) throw new Error("active");
+      }
+    } catch { throw error("PLUGIN_STORE_CORRUPT", "插件 Hook 绑定或授权损坏"); }
+  }
+  ensureHookBinding({ profileId, installationId, componentId: selectedId, releaseDigest }) {
+    const installation = this.getInstallation(installationId), release = installation && this.getRelease(installation.sourceIdentity, installation.releaseDigest);
+    if (!ID_PATTERN.test(profileId) || !installation || installation.releaseDigest !== releaseDigest || installation.desiredState === "uninstalled"
+      || this.hasPendingInstallationDisable(installationId)
+      || !release.components.hooks?.some(item => componentId(installationId, "hook", item.name) === selectedId)) throw error("PLUGIN_BINDING_INVALID", "Hook 不属于当前插件版本");
+    const current = this.getHookBinding(profileId, installationId, selectedId);
+    if (current?.releaseDigest === installation.releaseDigest) return current;
+    if (!current && (this._db().prepare("SELECT count(*) AS n FROM hook_bindings WHERE profile_id=?").get(profileId).n >= 64
+      || this._db().prepare("SELECT count(*) AS n FROM hook_bindings").get().n >= 1024)) throw error("HOOK_CAPACITY", "Hook 绑定数量超限");
+    const bindingId = "hook-binding-" + crypto.createHash("sha256").update(JSON.stringify([profileId, installationId, selectedId])).digest("hex");
+    this._db().prepare("INSERT INTO hook_bindings VALUES(?,?,?,?,?,NULL,0,1,0,NULL,NULL,?) ON CONFLICT(profile_id,installation_id,component_id) DO UPDATE SET release_digest=excluded.release_digest,workspace=NULL,enabled=0,revision=revision+1,epoch=epoch+1,grant_data=NULL,test_data=NULL,updated_at=excluded.updated_at")
+      .run(bindingId, profileId, installationId, selectedId, installation.releaseDigest, this.now());
+    return this.getHookBinding(profileId, installationId, selectedId);
+  }
+  setHookGrant(input, grant, workspace) {
+    return this._db().transaction(() => {
+      const binding = this.ensureHookBinding(input);
+      if (binding.enabled) throw error("HOOK_REVISION_CONFLICT", "修改插件 Hook 授权前先停用");
+      this._db().prepare("UPDATE hook_bindings SET workspace=?,epoch=epoch+1,grant_data=?,updated_at=? WHERE id=?")
+        .run(workspace, JSON.stringify(grant), this.now(), binding.bindingId);
+      return this.getHookBinding(input.profileId, input.installationId, input.componentId);
+    })();
+  }
+  recordHookTest(input, receipt) {
+    const binding = this.ensureHookBinding(input);
+    this._db().prepare("UPDATE hook_bindings SET test_data=? WHERE id=?").run(JSON.stringify(receipt), binding.bindingId);
+  }
+  setHookEnabled(input, enabled, expectedRevision) {
+    return this._db().transaction(() => {
+      const binding = this.ensureHookBinding(input);
+      if (binding.revision !== expectedRevision) throw error("HOOK_REVISION_CONFLICT", "Hook 绑定已变化");
+      if (enabled && (this.getInstallation(input.installationId).desiredState !== "enabled"
+        || !binding.grant || !binding.test?.passed)) throw error("HOOK_GRANT_REQUIRED", "插件 Hook 需要测试、授权和已启用的安装");
+      this._db().prepare("UPDATE hook_bindings SET enabled=?,revision=revision+1,epoch=epoch+?,updated_at=? WHERE id=?")
+        .run(enabled ? 1 : 0, enabled ? 0 : 1, this.now(), binding.bindingId);
+      return this.getHookBinding(input.profileId, input.installationId, input.componentId);
+    })();
+  }
+  listHookBindings(profileId) {
+    if (!ID_PATTERN.test(profileId)) throw error("PLUGIN_BINDING_INVALID", "Agent ID 无效");
+    return this._db().prepare("SELECT installation_id,component_id FROM hook_bindings WHERE profile_id=? LIMIT 65").all(profileId)
+      .map(row => this.getHookBinding(profileId, row.installation_id, row.component_id));
+  }
+  revokeHookInstallation(installationId) {
+    this._db().prepare("UPDATE hook_bindings SET enabled=0,revision=revision+1,epoch=epoch+1,grant_data=NULL,test_data=NULL,updated_at=? WHERE installation_id=?")
+      .run(this.now(), installationId);
   }
   listBindingsForConnection(connectionId) {
     if (typeof connectionId !== "string" || !ID_PATTERN.test(connectionId)) {
@@ -1407,6 +1526,7 @@ class PluginStore {
           throw error("PLUGIN_STORE_CORRUPT", "Agent 插件绑定计数不一致");
         }
       }
+      this._db().prepare("UPDATE hook_bindings SET enabled=0,revision=revision+1,epoch=epoch+1,grant_data=NULL WHERE profile_id=?").run(profileId);
       return { profileId, disabledBindings, revokedGrants, epoch };
     })();
   }
@@ -1462,6 +1582,7 @@ class PluginStore {
           throw error("PLUGIN_STORE_CORRUPT", "Agent 插件绑定清理计数不一致");
         }
       }
+      db.prepare("DELETE FROM hook_bindings WHERE profile_id=?").run(profileId);
       return { profileId, removedBindings: bindings, removedGrants: grants,
         scrubbedCalls: calls, epoch };
     })();
@@ -1473,6 +1594,15 @@ class PluginStore {
       WHERE binding_id = ? GROUP BY effect`).all(bindingId)) counts[row.effect] = row.count;
     return counts;
   }
+  // This read only decides whether an existing Connection may be rediscovered.
+  // A fresh tools/list contract still has to match each saved Grant at dispatch.
+  getCurrentAllowedGrantCount(bindingId, now = this.now()) {
+    if (!ID_PATTERN.test(bindingId) || !Number.isSafeInteger(now) || now < 0) {
+      throw error("PLUGIN_GRANT_INVALID", "当前授权计数参数无效");
+    }
+    return this._readStatement("currentAllowedGrantCount").get(bindingId, now).count;
+  }
+
   getCapabilityRecords(bindingId, toolIdentity) {
     const binding = this.getBinding(bindingId);
     if (!binding) return null;

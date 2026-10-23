@@ -30,8 +30,8 @@ const SESSION_KEY = `agent:codex-default:${SESSION_ID}`;
     fs.utimesSync(newPath, new Date(3_000_000), new Date(3_000_000));
 
     const native = new ShoggothBackend({
-      id: "codex",
-      name: "Codex",
+      id: "shoggoth",
+      name: "Shoggoth",
       paths: { tokenPath: "/tmp/token" },
       readToken: () => "token",
       requestService: async () => ({}),
@@ -39,7 +39,7 @@ const SESSION_KEY = `agent:codex-default:${SESSION_ID}`;
     native._profilesByAgent.set("codex-default", {
       id: "profile-codex",
       agentId: "codex-default",
-      backendId: "codex",
+      backendId: "shoggoth",
       runtime: "grok-build",
       runtimeProfileId: "grok-runtime",
       runtimeAccountId: "grok-account",

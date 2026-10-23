@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "profileId": "f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4",
+      "agentId": "shoggoth-f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4",
+      "file": "Shoggoth.jpg",
+      "sha256": "86fe4384249fb6ccbfb558c42f21c7e69aecfb52821eacc070e7ef339d1e1440",
+      "bytes": 83329
+    },
+    {
+      "profileId": "2c0d5a3e-7b91-4a6f-9d42-0d3a8c5f1e72",
+      "agentId": "shoggoth-codex",
+      "file": "shoggoth_codex.jpg",
+      "sha256": "f13ee9d0cd2d1ab2d7242bcb8bece148e9d3315deca6131d85133bdc8e7829c4",
+      "bytes": 135934
+    },
+    {
+      "profileId": "7a4b9c2d-1e63-4f85-a0b7-6c2d9e4f8a31",
+      "agentId": "shoggoth-grok",
+      "file": "shoggoth_grok.jpg",
+      "sha256": "f8ed7582c9d3278f5fb06fa7d18644cf0cd29eb920b2aca62154bada912d599f",
+      "bytes": 193402
+    },
+    {
+      "profileId": "b8fd5c6a-397e-4e2d-9c81-6af43d2e7501",
+      "agentId": "shoggoth-antigravity",
+      "file": "shoggoth_antigravity.jpg",
+      "sha256": "d5bafbe1a73283f4222d88787196790edca32e9ac4cd472a4b0bebe0a90c36ce",
+      "bytes": 118438
+    },
+    {
+      "profileId": "d34e8f72-6a91-4c5b-b207-9f3a1e6d8c44",
+      "agentId": "shoggoth-pi",
+      "file": "shoggoth_pi.jpg",
+      "sha256": "5e3686edc6784291bedc23edd024290c29127976b2367f756dc26c036e973a72",
+      "bytes": 120552
+    },
+    {
+      "profileId": "e7f48b2a-9c51-4d36-8f0e-2b8a71d5c603",
+      "agentId": "shoggoth-opencode",
+      "file": "shoggoth_opencode.jpg",
+      "sha256": "109189c380b4974fe8375be79ef7aff0d45eff668250d20f8bf875be60b95e5d",
+      "bytes": 105245
+    },
+    {
+      "profileId": "6f2b8d41-93c7-4e5a-b168-7d4c2f9a305e",
+      "agentId": "shoggoth-deepseek-harness",
+      "file": "shoggoth_deepseek.jpg",
+      "sha256": "6bb3276c9081acf3088f0e3e86701aefdcff9f6d5c7e44829b26fdf77ff99f81",
+      "bytes": 114828
+    }
+  ]
+}

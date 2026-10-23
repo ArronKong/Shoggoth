@@ -94,6 +94,11 @@ window.fetch = async (input, init) => {
   if (url.pathname === "/__api/chat/capabilities") payload = { slash: true, attachments: {} };
   if (url.pathname === "/__api/chat/slash") payload = { supported: true, commands: [] };
   if (url.pathname === "/__api/chat/cache-scope") payload = { backendId: url.searchParams.get("backend"), cacheScope: "identity-fixture" };
+  if (url.pathname.endsWith("/runtime-models")) payload = {
+    selection: { bindingId: "identity-fixture-binding", model: "fixture-model", canSwitch: false, candidates: [], revision: 1 },
+    models: [{ id: "fixture-model", bindingId: "identity-fixture-binding", isDefault: true }],
+    runtimes: [], capabilities: { slash: true, attachments: {} },
+  };
   if (url.pathname.endsWith("/archive")) payload = { archive: { supported: false, segments: [] } };
   return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
 };

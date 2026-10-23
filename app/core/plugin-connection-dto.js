@@ -5,7 +5,7 @@ const exact = (value, keys) => value && Object.getPrototypeOf(value) === Object.
   && Reflect.ownKeys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const text = value => typeof value === "string" && value.isWellFormed() && Buffer.byteLength(value) <= 256;
 const positive = value => Number.isSafeInteger(value) && value > 0;
-const disposition = value => ["none", "retained_encrypted_unusable"].includes(value);
+const disposition = value => ["none", "retained_encrypted_unusable", "retained_encrypted_shared"].includes(value);
 const reason = value => value === null || (typeof value === "string" && /^[A-Z][A-Z_]{1,127}$/u.test(value));
 const fail = () => { throw new TypeError("Invalid plugin disconnect response"); };
 function receipt(value) {

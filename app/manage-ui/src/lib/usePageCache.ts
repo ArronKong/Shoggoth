@@ -6,9 +6,12 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 // 即首帧渲染旧数据，effect 照常后台刷新并回写；fetch 完成时即使组件已卸载也落
 // 缓存（首次加载中途切走，扫完回来仍秒开）。refresh() 写穿缓存且不进加载态，
 // 供变更操作后与手动刷新键调用。
+// 显式 staleTime 的重型资源在有效期内复用结果，并合并切页期间的在途读取；
+// 默认仍保持原先每次挂载后台刷新。refresh/replace 不受有效期限制。
 // 连接配置变化通过 invalidatePageCache 统一失效，不删除用户数据或草稿。
 const PAGE_CACHE_LIMIT = 64;
-const cache = new Map<string, unknown>();
+const cache = new Map<string, { value: unknown; updatedAt: number }>();
+const inFlight = new Map<string, { generation: number; promise: Promise<unknown> }>();
 const generations = new Map<string, number>();
 let cacheRevision = 0;
 const revisionListeners = new Set<() => void>();
@@ -23,6 +26,7 @@ const subscribeRevision = (listener: () => void) => {
 export function invalidatePageCache(): void {
   cacheRevision += 1;
   cache.clear();
+  inFlight.clear();
   generations.clear();
   for (const listener of revisionListeners) listener();
 }
@@ -41,10 +45,10 @@ function advanceGeneration(key: string): number {
 // 读取命中项时移动到 Map 尾部，Map 的插入顺序就能充当轻量 LRU 队列。
 function readCache<T>(key: string): T | undefined {
   if (!cache.has(key)) return undefined;
-  const value = cache.get(key) as T | undefined;
+  const entry = cache.get(key)!;
   cache.delete(key);
-  cache.set(key, value);
-  return value;
+  cache.set(key, entry);
+  return entry.value as T;
 }
 
 // 写缓存后淘汰最久未使用的键，避免筛选组合长期累积撑大渲染进程内存。
@@ -52,7 +56,7 @@ function readCache<T>(key: string): T | undefined {
 // 被淘汰键的在途请求 generation 归零后失配即丢弃 —— 宁可少一次回写，不给脏数据。
 function writeCache<T>(key: string, value: T): void {
   cache.delete(key);
-  cache.set(key, value);
+  cache.set(key, { value, updatedAt: Date.now() });
   while (cache.size > PAGE_CACHE_LIMIT) {
     const oldest = cache.keys().next().value as string | undefined;
     if (oldest === undefined) break;
@@ -72,7 +76,10 @@ export type PageCache<T> = {
   replace: (next: T) => void;
 };
 
-export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>): PageCache<T> {
+export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>, {
+  staleTime = 0,
+  enabled = true,
+}: { staleTime?: number; enabled?: boolean } = {}): PageCache<T> {
   const revision = useSyncExternalStore(subscribeRevision, readRevision, readRevision);
   const key = `${revision}:${resourceKey}`;
   // fetcher 是每次渲染新建的闭包：走 ref 出依赖，只在 key 变化时重新拉。
@@ -108,20 +115,35 @@ export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>):
 
   useEffect(() => {
     let alive = true;
+    if (!enabled) return;
+    if (staleTime > 0 && cache.has(key) && Date.now() - cache.get(key)!.updatedAt < staleTime) {
+      setData(readCache<T>(key));
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    setLoading(!cache.has(key));
     // 每次真实 fetch 都领取新代际；同 key 的 effect/refresh 反序完成时只允许
     // 最后发起的一次写 cache 与 UI。replace() 也走同一代际，因此 mutation 优先。
-    const requestGeneration = advanceGeneration(key);
-    fetcherRef.current().then(
+    const pending = staleTime > 0 ? inFlight.get(key) : undefined;
+    const shared = pending?.generation === generationOf(key) ? pending : undefined;
+    const requestGeneration = shared?.generation ?? advanceGeneration(key);
+    const promise = (shared?.promise as Promise<T> | undefined) ?? fetcherRef.current();
+    if (staleTime > 0) inFlight.set(key, { generation: requestGeneration, promise });
+    promise.then(
       (result) => {
         // 失配（期间有更新请求/变更写穿，或键被淘汰使计数器归零）整次丢弃；
         // loading/error 也只能由当前代际结算，避免旧请求提前结束新请求的加载态。
         const fresh = generationOf(key) === requestGeneration;
         if (fresh) writeCache(key, result); // 卸载后也落缓存
+        if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
         if (!alive || !fresh) return;
         setData(result);
         setLoading(false);
+        setError(null);
       },
       (e) => {
+        if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
         if (!alive || generationOf(key) !== requestGeneration) return;
         setError(e instanceof Error ? e.message : String(e));
         setLoading(false);
@@ -130,7 +152,7 @@ export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>):
     return () => {
       alive = false;
     };
-  }, [key]);
+  }, [key, enabled, staleTime]);
 
   const refresh = useCallback(async () => {
     // 捕获本次请求的 key；切换后端后结果仍写旧缓存，但不得覆盖新 key 的 UI 状态。

@@ -4,6 +4,8 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { serviceError } = require("./security");
 const { componentId } = require("./plugin-component-catalog");
+const { normalizePluginSelection } = require("./plugin-chat-selection");
+const { validSubject } = require("./external-plugin-selection-dispatch");
 
 const METHODS = Object.freeze(["plugins.bundled.list", "plugins.capabilities.list", "plugins.install.preview",
   "plugins.install", "plugins.installations.set", "plugins.skills.bindings.list",
@@ -18,7 +20,16 @@ const METHODS = Object.freeze(["plugins.bundled.list", "plugins.capabilities.lis
   "plugins.connections.prepare", "plugins.connections.commit", "plugins.connections.operation",
   "plugins.connections.selectPrepare", "plugins.connections.selectCommit",
   "plugins.rollback.list", "plugins.rollback.prepare", "plugins.rollback.commit", "plugins.rollback.operation",
-  "plugins.operations.get"]);
+  "plugins.operations.get", "plugins.selection.external.prepare",
+  "plugins.selection.external.get", "plugins.selection.external.cancel", "plugins.selection.external.cancelSession",
+  "plugins.setup.get", "plugins.setup.prepare", "plugins.setup.commit",
+  "plugins.secrets.list", "plugins.secrets.prepare", "plugins.secrets.commit",
+  "plugins.firstParty.list", "plugins.firstParty.install"]);
+const QUICK_SETUP_ACTIONS = Object.freeze({
+  "plugins.setup.get": "inspect", "plugins.setup.prepare": "prepare", "plugins.setup.commit": "commit",
+  "plugins.secrets.list": "listSecrets", "plugins.secrets.prepare": "prepareSecret",
+  "plugins.secrets.commit": "commitSecret",
+});
 const DIGEST = /^[a-f0-9]{64}$/u;
 const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const TOOL_ID = /^plugin:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}$/u;
@@ -87,7 +98,7 @@ function publicInstallation(value) {
   if (typeof sourceIdentity !== "string"
     || (!sourceIdentity.startsWith("local:") && !sourceIdentity.startsWith("git:")
       && !sourceIdentity.startsWith("legacy:") && !sourceIdentity.startsWith("remote-git:")
-      && !sourceIdentity.startsWith("bundled:"))) {
+      && !sourceIdentity.startsWith("bundled:") && !sourceIdentity.startsWith("first-party:"))) {
     throw serviceError("PLUGIN_SERVICE_FAILED", "插件来源标识无效");
   }
   return { installationId: value.installationId,
@@ -95,11 +106,12 @@ function publicInstallation(value) {
     revision: value.revision, createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     sourceKind: sourceIdentity.startsWith("bundled:") ? "bundled"
+      : sourceIdentity.startsWith("first-party:") ? "first-party"
       : sourceIdentity.startsWith("remote-git:") ? "remote-git" : sourceIdentity.startsWith("legacy:") ? "legacy-directory"
         : sourceIdentity.startsWith("git:") ? "git" : "directory",
     ...(Object.hasOwn(value, "packageName") ? {
       packageName: value.packageName, declaredVersion: value.declaredVersion,
-      components: value.components, diagnostics: value.diagnostics,
+      components: value.components.filter(item => item.kind !== "hook"), diagnostics: value.diagnostics,
     } : {}),
   };
 }
@@ -157,8 +169,11 @@ class PluginServiceController {
   constructor({ store, installer, catalog, bundledCatalog = null, resolver, productStore,
     toolCatalogRegistry, drainInstallation, resumeInstallation, getConsent = () => null,
     getAppController = () => null, getOAuthController = () => null, getBearerController = () => null,
+    getGraphController = () => null,
     getDependencyController = () => null,
-    getConnectionController = () => null, getRollbackController = () => null } = {}) {
+    getConnectionController = () => null, getRollbackController = () => null,
+    getExternalSelectionDispatch = () => null, prepareSelectionCatalog = null,
+    getQuickSetup = () => null, getFirstPartySync = () => null } = {}) {
     if (typeof store?.getOperation !== "function"
       || typeof installer?.preview !== "function"
       || typeof installer?.install !== "function"
@@ -176,7 +191,8 @@ class PluginServiceController {
       || typeof store?.revokeAllGrants !== "function"
       || typeof toolCatalogRegistry?.listForBinding !== "function"
       || typeof drainInstallation !== "function"
-      || typeof resumeInstallation !== "function") {
+      || typeof resumeInstallation !== "function"
+      || (prepareSelectionCatalog !== null && typeof prepareSelectionCatalog !== "function")) {
       throw new TypeError("PluginServiceController requires Service-owned plugin components");
     }
     this.store = store;
@@ -191,14 +207,43 @@ class PluginServiceController {
     this.getConsent = getConsent;
     this.getAppController = getAppController;
     this.getOAuthController = getOAuthController;
+    this.getGraphController = getGraphController;
     this.getBearerController = getBearerController;
     this.getDependencyController = getDependencyController;
     this.getConnectionController = getConnectionController;
     this.getRollbackController = getRollbackController;
+    this.getExternalSelectionDispatch = getExternalSelectionDispatch;
+    this.prepareSelectionCatalog = prepareSelectionCatalog;
+    this.getQuickSetup = getQuickSetup;
+    this.getFirstPartySync = getFirstPartySync;
   }
 
   handle(method, params) {
     if (!METHODS.includes(method)) fail();
+    if (method.startsWith("plugins.selection.external.")) {
+      const action = method.slice("plugins.selection.external.".length);
+      if (!plain(params, action === "prepare"
+        ? ["subject", "operationId", "requiredAdapterId", "adapterGeneration", "pluginSelection"]
+        : action === "cancelSession" ? ["subject"] : ["subject", "operationId"])) fail();
+      const dispatch = this.getExternalSelectionDispatch();
+      if (!dispatch) throw serviceError("EXTERNAL_PLUGIN_SELECTION_UNAVAILABLE", "外部插件选择派发不可用");
+      if (action === "prepare" && this.prepareSelectionCatalog !== null) {
+        const opaque = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value);
+        if (!validSubject(params.subject) || !opaque(params.operationId)
+          || !opaque(params.requiredAdapterId) || !opaque(params.adapterGeneration)) fail();
+        const selection = normalizePluginSelection(params.pluginSelection);
+        if (!selection) fail();
+        const captured = { ...structuredClone(params), pluginSelection: selection };
+        // A completed/unknown original operation remains an observation. Its
+        // fingerprint is checked by prepare; it must not probe or remint now.
+        if (dispatch.get({ subject: captured.subject, operationId: captured.operationId })) {
+          return bounded(dispatch.prepare(captured));
+        }
+        return Promise.resolve(this.prepareSelectionCatalog(selection))
+          .then(() => bounded(dispatch.prepare(captured)));
+      }
+      return bounded(dispatch[action](params));
+    }
     if (method === "plugins.bundled.list") {
       if (!plain(params, [])) fail();
       if (!this.bundledCatalog) throw serviceError("PLUGIN_UNAVAILABLE", "内置插件目录不可用");
@@ -210,6 +255,21 @@ class PluginServiceController {
         installedReleaseDigest: installation && installation.desiredState !== "uninstalled"
           ? installation.releaseDigest : null };
       }) });
+    }
+    if (method === "plugins.firstParty.list" || method === "plugins.firstParty.install") {
+      const firstParty = this.getFirstPartySync();
+      if (!firstParty) throw serviceError("PLUGIN_UNAVAILABLE", "Shoggoth 内置插件不可用");
+      if (method === "plugins.firstParty.list") {
+        if (!plain(params, [])) fail();
+        return bounded(firstParty.list());
+      }
+      if (!plain(params, ["packageId"]) || typeof params.packageId !== "string") fail();
+      return bounded({ installation: publicInstallation(firstParty.install(params.packageId)) });
+    }
+    if (Object.hasOwn(QUICK_SETUP_ACTIONS, method)) {
+      const quick = this.getQuickSetup();
+      if (!quick) throw serviceError("PLUGIN_UNAVAILABLE", "插件快速启用不可用");
+      return Promise.resolve(quick[QUICK_SETUP_ACTIONS[method]](params)).then(bounded);
     }
     if (method.startsWith("plugins.rollback.")) {
       const controller = this.getRollbackController();
@@ -229,7 +289,13 @@ class PluginServiceController {
     if (method.startsWith("plugins.oauth.")) {
       const oauth = this.getOAuthController();
       if (!oauth) throw serviceError("PLUGIN_UNAVAILABLE", "插件账号连接不可用");
-      return Promise.resolve(oauth[method.slice("plugins.oauth.".length)](params)).then(bounded);
+      const graph = this.getGraphController();
+      const action = method.slice("plugins.oauth.".length);
+      const selected = action === "prepare"
+        ? graph?.matches(params) ? graph : oauth
+        : action === "commit" ? graph?.ownsChallenge(params?.challenge) ? graph : oauth
+          : graph?.owns(params) ? graph : oauth;
+      return Promise.resolve(selected[action](params)).then(bounded);
     }
     if (method.startsWith("plugins.bearer.")) {
       const bearer = this.getBearerController();
@@ -441,6 +507,10 @@ class PluginServiceController {
             .map(connection => ({ connectionId: connection.connectionId,
               label: /^github:[1-9][0-9]{0,19}$/u.test(connection.principalIdentity || "")
                 ? `GitHub #${connection.principalIdentity.slice(7)}`
+                : /^cloudflare-token:[a-f0-9]{32}$/u.test(connection.principalIdentity || "")
+                  ? `Cloudflare Token ${connection.principalIdentity.slice(-8)}`
+                : /^gmail:[^\s@]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$/u.test(connection.principalIdentity || "")
+                  ? connection.principalIdentity.slice(6)
                 : `连接 ${connection.connectionId.slice(0, 8)}` })),
           binding: binding ? { bindingId: binding.bindingId,
             connectionId: binding.connectionId, enabled: binding.enabled,
@@ -454,46 +524,17 @@ class PluginServiceController {
         profileId: params.profileId, items });
     }
     if (method === "plugins.mcp.tools.list") {
-      if (!plain(params, ["profileId", "bindingId"])
-        || typeof params.profileId !== "string" || !OPERATION_ID.test(params.profileId)
-        || typeof params.bindingId !== "string"
-        || !OPERATION_ID.test(params.bindingId)) fail();
-      if (!this.productStore.getAgentProfile(params.profileId)) {
-        throw serviceError("PLUGIN_BINDING_INVALID", "Agent 不存在");
-      }
+      const result = this._mcpToolsList(params);
+      if (result.available || this.prepareSelectionCatalog === null) return result;
       const binding = this.store.getBinding(params.bindingId);
-      if (!eligibleMcpBinding(binding, params.profileId)) {
-        throw serviceError("PLUGIN_BINDING_INVALID", "MCP 绑定不存在");
-      }
       const installation = this.store.getInstallation(binding.installationId);
-      const connection = this.store.getConnection(binding.connectionId);
-      const unavailable = { profileId: params.profileId, bindingId: binding.bindingId,
-        available: false, catalogRevision: null, items: [] };
-      if (!installation || installation.desiredState !== "enabled"
-        || !binding.enabled || !connection || connection.state !== "ready") {
-        return unavailable;
-      }
-      const snapshot = this.toolCatalogRegistry.listForBinding({
-        installation: { ...installation,
-          activeReleaseDigest: installation.releaseDigest }, binding, connection });
-      if (!snapshot) return unavailable;
-      return bounded({ profileId: params.profileId, bindingId: binding.bindingId,
-        available: true, catalogRevision: snapshot.catalogRevision,
-        ...(snapshot.portableCapabilities?.length
-          ? { portableCapabilities: snapshot.portableCapabilities } : {}),
-        ...(snapshot.referenceCoverage
-          ? { referenceCoverage: snapshot.referenceCoverage } : {}),
-        items: snapshot.entries.map((item) => {
-          const grant = this.store.getGrant(binding.bindingId, item.toolIdentity);
-          return { toolIdentity: item.toolIdentity, name: item.downstreamName,
-            contractDigest: item.contractDigest,
-            savedGrant: grant ? { effect: grant.effect,
-              approvalMode: grant.approvalMode, revision: grant.revision,
-              expired: grant.expiresAt !== null && grant.expiresAt <= Date.now(),
-              matchesCurrentContract: grant.connectionId === connection.connectionId
-                && grant.principalIdentity === connection.principalIdentity
-                && grant.contractDigest === item.contractDigest } : null };
-        }) });
+      if (!this.productStore.getAgentProfile(params.profileId)?.enabled
+        || !installation || this.store.getCurrentAllowedGrantCount?.(binding.bindingId) < 1
+        || typeof this.store.getCurrentAllowedGrantCount !== "function") return result;
+      const captured = structuredClone(params);
+      return Promise.resolve(this.prepareSelectionCatalog([{ installationId: installation.installationId,
+        revision: installation.revision }])).then(() => this._mcpToolsList(captured),
+        () => this._mcpToolsList(captured));
     }
     if (method === "plugins.mcp.grants.revoke") {
       if (!plain(params, ["profileId", "bindingId", "toolIdentity",
@@ -591,6 +632,50 @@ class PluginServiceController {
       || !OPERATION_ID.test(params.operationId)) fail();
     const operation = this.store.getOperation(params.operationId);
     return bounded({ found: operation !== null, operation: publicOperation(operation) });
+  }
+
+  _mcpToolsList(params) {
+    if (!plain(params, ["profileId", "bindingId"])
+      || typeof params.profileId !== "string" || !OPERATION_ID.test(params.profileId)
+      || typeof params.bindingId !== "string"
+      || !OPERATION_ID.test(params.bindingId)) fail();
+    if (!this.productStore.getAgentProfile(params.profileId)) {
+      throw serviceError("PLUGIN_BINDING_INVALID", "Agent 不存在");
+    }
+    const binding = this.store.getBinding(params.bindingId);
+    if (!eligibleMcpBinding(binding, params.profileId)) {
+      throw serviceError("PLUGIN_BINDING_INVALID", "MCP 绑定不存在");
+    }
+    const installation = this.store.getInstallation(binding.installationId);
+    const connection = this.store.getConnection(binding.connectionId);
+    const unavailable = { profileId: params.profileId, bindingId: binding.bindingId,
+      available: false, catalogRevision: null, items: [] };
+    if (!installation || installation.desiredState !== "enabled"
+      || this.store.hasPendingInstallationDisable(installation.installationId)
+      || !binding.enabled || !connection || connection.state !== "ready") {
+      return unavailable;
+    }
+    const snapshot = this.toolCatalogRegistry.listForBinding({
+      installation: { ...installation,
+        activeReleaseDigest: installation.releaseDigest }, binding, connection });
+    if (!snapshot) return unavailable;
+    return bounded({ profileId: params.profileId, bindingId: binding.bindingId,
+      available: true, catalogRevision: snapshot.catalogRevision,
+      ...(snapshot.portableCapabilities?.length
+        ? { portableCapabilities: snapshot.portableCapabilities } : {}),
+      ...(snapshot.referenceCoverage
+        ? { referenceCoverage: snapshot.referenceCoverage } : {}),
+      items: snapshot.entries.map((item) => {
+        const grant = this.store.getGrant(binding.bindingId, item.toolIdentity);
+        return { toolIdentity: item.toolIdentity, name: item.downstreamName,
+          contractDigest: item.contractDigest,
+          savedGrant: grant ? { effect: grant.effect,
+            approvalMode: grant.approvalMode, revision: grant.revision,
+            expired: grant.expiresAt !== null && grant.expiresAt <= Date.now(),
+            matchesCurrentContract: grant.connectionId === connection.connectionId
+              && grant.principalIdentity === connection.principalIdentity
+              && grant.contractDigest === item.contractDigest } : null };
+      }) });
   }
 }
 

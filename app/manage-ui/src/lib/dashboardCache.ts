@@ -104,6 +104,7 @@ function isRunEntry(value: unknown): boolean {
     "deliveryStatus",
     "deliveryError",
     "deliverySuppressionReason",
+    "outputDisposition",
     "model",
     "sessionKey",
     "runId",
@@ -170,9 +171,23 @@ function isArtifactItem(value: unknown): boolean {
     isFiniteNumber(value.mtimeMs) &&
     typeof value.kind === "string" &&
     hasOptionalString(value, "agentId") &&
+    hasOptionalString(value, "agentName") &&
     hasOptionalString(value, "ext") &&
     hasOptionalFiniteNumber(value, "size")
   );
+}
+
+function isGroupArtifacts(value: unknown): boolean {
+  return isRecord(value) && typeof value.supported === "boolean" && hasOptionalString(value, "reason")
+    && hasOptionalBoolean(value, "partial") && hasOptionalBoolean(value, "truncated")
+    && Array.isArray(value.items) && value.items.every(item => {
+      if (!isRecord(item) || !isRecord(item.attachment)) return false;
+      const attachment = item.attachment;
+      return ["groupId", "groupName", "backendId", "agentId", "agentName"].every(key => typeof item[key] === "string")
+        && Number.isSafeInteger(item.messageSeq) && Number(item.messageSeq) > 0 && isFiniteNumber(item.createdAt)
+        && ["id", "name", "mimeType"].every(key => typeof attachment[key] === "string")
+        && isFiniteNumber(attachment.size) && attachment.size > 0;
+    });
 }
 
 /** 校验能力 section 的公共字段，并委托对应条目验证器。 */
@@ -188,6 +203,7 @@ function isBackendSectionArray(
         typeof section.backend === "string" &&
         typeof section.supported === "boolean" &&
         hasOptionalString(section, "reason") &&
+        hasOptionalBoolean(section, "partial") &&
         Array.isArray(section.items) &&
         section.items.every(isItem),
     )
@@ -295,6 +311,7 @@ function isDashboardSummary(value: unknown, todayStart: number): value is Dashbo
   if (!isBackendSectionArray(value.running, isRunningItem)) return false;
   if (!isBackendSectionArray(value.approvals, isApprovalItem)) return false;
   if (!isBackendSectionArray(value.artifacts, isArtifactItem)) return false;
+  if (value.groupArtifacts !== undefined && !isGroupArtifacts(value.groupArtifacts)) return false;
   if (value.activityPage !== undefined && !isActivityPage(value.activityPage)) return false;
   if (value.runStats !== undefined && !isRunStats(value.runStats)) return false;
   if (value.taskStats !== undefined && !isTaskStats(value.taskStats)) return false;

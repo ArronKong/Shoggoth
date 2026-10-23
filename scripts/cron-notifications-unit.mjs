@@ -1,0 +1,23 @@
+import assert from "node:assert/strict";
+import vm from "node:vm";
+import { createRequire } from "node:module";
+const require = createRequire(new URL("../app/manage-ui/package.json", import.meta.url));
+const { outputFiles } = await require("esbuild").build({ entryPoints: [new URL("../app/manage-ui/src/lib/cronNotifications.ts", import.meta.url).pathname],
+  bundle: true, write: false, platform: "node", format: "cjs" });
+const module = { exports: {} };
+vm.runInNewContext(outputFiles[0].text, { module, exports: module.exports });
+const { consumeCronNotification: consume } = module.exports;
+const state = new Map(), job = { id: "a", backendId: "any", lastRunAt: 100, lastStatus: "ok" };
+assert.equal(consume(state, job, false), false);
+assert.equal(consume(state, { ...job, lastRunAt: 200, lastStatus: "running", outputDisposition: "pending" }, true), false);
+assert.equal(state.get("a"), 100, "pending must preserve the last completed watermark");
+assert.equal(consume(state, { ...job, lastRunAt: 200, outputDisposition: "silent" }, true), false);
+assert.equal(state.get("a"), 200, "silence consumes the occurrence exactly once");
+assert.equal(consume(state, { ...job, lastRunAt: 200, outputDisposition: "silent" }, true), false);
+assert.equal(consume(state, { ...job, lastRunAt: 300, lastStatus: "running", outputDisposition: "pending" }, true), false);
+assert.equal(consume(state, { ...job, lastRunAt: 300, outputDisposition: "deliver" }, true), true);
+assert.equal(consume(state, { ...job, lastRunAt: 300, outputDisposition: "deliver" }, true), false);
+assert.equal(consume(state, { ...job, lastRunAt: 400, lastStatus: "error", outputDisposition: "deliver" }, true), true);
+assert.equal(consume(state, { ...job, lastRunAt: 500 }, true), true, "legacy backends retain notifications");
+assert.equal(consume(state, { ...job, id: "new-job" }, true), false);
+console.log("cron notifications: PASS (pending, silence, delivery, failure, dedup, legacy)");

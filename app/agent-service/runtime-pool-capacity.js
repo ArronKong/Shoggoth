@@ -7,7 +7,7 @@ const HARD_MAX_HOSTS = 128;
 const OPERATIONS = Object.freeze([
   "authenticationState", "modelsList", "sessionList", "sessionStart", "sessionResume",
   "sessionRead", "sessionRename", "sessionArchive", "sessionUnarchive", "sessionDelete",
-  "turnStart", "turnSteer", "turnInterrupt", "commandsList", "commandExecute", "generateModelOnly",
+  "turnStart", "turnSteer", "turnInterrupt", "commandsList", "commandExecute", "generateModelOnly", "resolveModelOnly",
   // Background catalog refresh and incoming server requests can outlive callers.
   "_runControl", "_readModelCatalog", "_onServerRequest",
 ]);
@@ -69,6 +69,21 @@ function trackPoolHost(entry, binding) {
   }
 }
 
+// Profile-wide idle retirement must prove every workspace/control host idle,
+// including background I/O that has outlived its original Service request.
+function isPoolBindingIdle(pool, binding) {
+  if (!(pool?.entries instanceof Map) || pool.closing
+    || pool.stoppingProfiles.has(binding.runtimeProfileId)
+    || pool.blockedProfiles.has(binding.runtimeProfileId)) return false;
+  for (const entry of pool.entries.values()) {
+    if (entry.runtimeProfileId !== binding.runtimeProfileId) continue;
+    if (entry.runtimeAccountId !== binding.runtimeAccountId || entry.retiring
+      || entry.capacity?.ready !== true || entry.capacity.pending !== 0
+      || entry.capacity.retiring !== false || entry.host.canRetireIdle?.() !== true) return false;
+  }
+  return true;
+}
+
 function retirePoolHost(pool) {
   if (pool.capacityRetirement) return pool.capacityRetirement;
   // The Service guard protects acquired-but-not-yet-used hosts using durable
@@ -105,5 +120,5 @@ function retirePoolHost(pool) {
 
 module.exports = {
   DEFAULT_MAX_HOSTS, HARD_MAX_HOSTS, configurePoolCapacity, poolHostLimit,
-  retirePoolHost, trackPoolHost, executionRunIdForPool,
+  retirePoolHost, trackPoolHost, executionRunIdForPool, isPoolBindingIdle,
 };

@@ -6,11 +6,11 @@ import { Trans, useTranslation } from "react-i18next";
 import { animate } from "animejs";
 import {
   getCronLatestDelivery,
-  getBackendRunDetail,
   getDashboardSummary,
   getUsageSeries,
   listAgents,
   revealCli,
+  revealAttachment,
 } from "../api/client";
 import type {
   CronDelivery,
@@ -18,7 +18,6 @@ import type {
   DashboardApprovalItem,
   DashboardRunEntry,
   DashboardRunningItem,
-  BackendRunDetail,
 } from "../types";
 import {
   readDashboardCache,
@@ -37,14 +36,12 @@ import { fmtCost, fmtTokens, fmtMs } from "./usage/charts";
 import { cronDeliveryView, cronExecutionView } from "./cron/runPresentation";
 import ActivityFeed from "./dashboard/ActivityFeed";
 import { useDashboardLiveWork } from "./dashboard/useDashboardLiveWork";
+import RunDetailModal from "./dashboard/RunDetailModal";
+import { recentDashboardArtifacts } from "../lib/dashboardArtifacts";
+import ArtifactThumb from "../components/ArtifactThumb";
+import { inspirationMediaUrl } from "./inspiration-media";
 import { useBackendCatalog, useEnabledBackends } from "../lib/backends";
 import { createAgentNameIndex, resolveAgentDisplayName } from "../lib/agentDisplay";
-import iconTextDocuments from "../assets/artifact-icons/icon_textdocuments.png";
-import iconImagesGraphics from "../assets/artifact-icons/icon_imagesgraphics.png";
-import iconAudioVideo from "../assets/artifact-icons/icon_audiovideo.png";
-import iconArchiveCompression from "../assets/artifact-icons/icon_archivecompression.png";
-import iconExecutableSystem from "../assets/artifact-icons/icon_executablesystem.png";
-import iconWebSourceCode from "../assets/artifact-icons/icon_websourcecode.png";
 import "./dashboard/DashboardPage.css";
 
 const InspirationDetail = lazy(() => import("./InspirationPage").then(module => ({ default: module.IdeaDetail })));
@@ -267,86 +264,6 @@ function fmtRelative(ms: number, t: (k: string, o?: Record<string, unknown>) => 
   return new Date(ms).toLocaleDateString();
 }
 
-// 产出文件按后缀归 6 大类（通用文件管理器口径，不特判本机数据）；未匹配 → 文本与文档兜底。
-type ArtifactCategory =
-  | "textdocuments" | "imagesgraphics" | "audiovideo"
-  | "archivecompression" | "executablesystem" | "websourcecode";
-
-const ARTIFACT_CATEGORY_ICONS: Record<ArtifactCategory, string> = {
-  textdocuments: iconTextDocuments,
-  imagesgraphics: iconImagesGraphics,
-  audiovideo: iconAudioVideo,
-  archivecompression: iconArchiveCompression,
-  executablesystem: iconExecutableSystem,
-  websourcecode: iconWebSourceCode,
-};
-
-// 后缀（小写、不含点）→ 类别。json/csv/yaml 归网页与代码（按用户口径）；.xlsx→文档、.dmg→执行、.iso→压缩。
-const ARTIFACT_EXT_CATEGORY: Record<string, ArtifactCategory> = {
-  md: "textdocuments", markdown: "textdocuments", txt: "textdocuments", pdf: "textdocuments",
-  doc: "textdocuments", docx: "textdocuments", xls: "textdocuments", xlsx: "textdocuments",
-  ppt: "textdocuments", pptx: "textdocuments", rtf: "textdocuments", odt: "textdocuments",
-  pages: "textdocuments", key: "textdocuments", numbers: "textdocuments", epub: "textdocuments", tex: "textdocuments",
-  jpg: "imagesgraphics", jpeg: "imagesgraphics", png: "imagesgraphics", gif: "imagesgraphics",
-  svg: "imagesgraphics", psd: "imagesgraphics", webp: "imagesgraphics", heic: "imagesgraphics",
-  bmp: "imagesgraphics", tiff: "imagesgraphics", tif: "imagesgraphics", ico: "imagesgraphics",
-  ai: "imagesgraphics", sketch: "imagesgraphics", fig: "imagesgraphics", avif: "imagesgraphics",
-  mp3: "audiovideo", wav: "audiovideo", flac: "audiovideo", aac: "audiovideo", ogg: "audiovideo",
-  m4a: "audiovideo", mp4: "audiovideo", mkv: "audiovideo", mov: "audiovideo", avi: "audiovideo",
-  webm: "audiovideo", wmv: "audiovideo", flv: "audiovideo", m4v: "audiovideo",
-  zip: "archivecompression", rar: "archivecompression", "7z": "archivecompression", iso: "archivecompression",
-  tar: "archivecompression", gz: "archivecompression", tgz: "archivecompression", bz2: "archivecompression", xz: "archivecompression",
-  exe: "executablesystem", msi: "executablesystem", app: "executablesystem", dmg: "executablesystem",
-  pkg: "executablesystem", dll: "executablesystem", deb: "executablesystem", rpm: "executablesystem",
-  apk: "executablesystem", bin: "executablesystem", so: "executablesystem", sys: "executablesystem",
-  html: "websourcecode", htm: "websourcecode", css: "websourcecode", py: "websourcecode",
-  js: "websourcecode", ts: "websourcecode", tsx: "websourcecode", jsx: "websourcecode",
-  java: "websourcecode", json: "websourcecode", csv: "websourcecode", yaml: "websourcecode",
-  yml: "websourcecode", toml: "websourcecode", xml: "websourcecode", sh: "websourcecode",
-  go: "websourcecode", rs: "websourcecode", c: "websourcecode", cpp: "websourcecode", h: "websourcecode",
-  rb: "websourcecode", php: "websourcecode", sql: "websourcecode", ipynb: "websourcecode", vue: "websourcecode",
-};
-
-function extOf(name: string): string {
-  const i = name.lastIndexOf(".");
-  if (i <= 0 || i >= name.length - 1) return "";
-  return name.slice(i + 1).toLowerCase();
-}
-// 后缀标签（大写、最长 4 字符），叠加在图标上；隐藏文件 / 无后缀 → 空。
-function extLabel(name: string): string {
-  return extOf(name).slice(0, 4).toUpperCase();
-}
-function artifactCategory(name: string): ArtifactCategory {
-  return ARTIFACT_EXT_CATEGORY[extOf(name)] || "textdocuments";
-}
-
-// 后缀文字颜色（叠在图标左下角，各类一色 @ 50% 透明度，随图标配色，用户指定）。
-const ARTIFACT_CATEGORY_EXT_COLORS: Record<ArtifactCategory, string> = {
-  textdocuments: "rgba(255, 196, 89, 0.5)", // FFC459
-  websourcecode: "rgba(255, 196, 89, 0.5)", // FFC459
-  imagesgraphics: "rgba(255, 128, 130, 0.5)", // FF8082
-  audiovideo: "rgba(217, 108, 199, 0.5)", // D96CC7
-  archivecompression: "rgba(238, 196, 119, 0.5)", // EEC477
-  executablesystem: "rgba(81, 145, 255, 0.5)", // 5191FF
-};
-
-// 产出缩略图：一律按 6 大类文件夹图标（含图片，不走真实预览），
-// 后缀印在左下角，颜色随类别。
-function ArtifactThumb({ name }: { name: string }) {
-  const ext = extLabel(name);
-  const category = artifactCategory(name);
-  return (
-    <span className="dash-art-thumb">
-      <img className="dash-art-icon" src={ARTIFACT_CATEGORY_ICONS[category]} alt="" aria-hidden="true" />
-      {ext ? (
-        <span className="dash-art-ext" style={{ color: ARTIFACT_CATEGORY_EXT_COLORS[category] }}>
-          {ext}
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
 export default function DashboardPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -521,35 +438,23 @@ export default function DashboardPage() {
   };
 
   const toast = useToast();
-  const [backendRunDetail, setBackendRunDetail] = useState<BackendRunDetail | null>(null);
+  const [backendRun, setBackendRun] = useState<DashboardRunningItem | DashboardApprovalItem | null>(null);
   const [backendRunOpen, setBackendRunOpen] = useState(false);
-  const [backendRunLoading, setBackendRunLoading] = useState(false);
-  const [backendRunError, setBackendRunError] = useState(false);
-  const backendRunRequestRef = useRef(0);
 
   const openBackendRun = (item: DashboardRunningItem | DashboardApprovalItem) => {
     if (!item.backendId || !dashboardRunBackends.has(item.backendId) || !item.runId) return;
-    const ticket = backendRunRequestRef.current + 1;
-    backendRunRequestRef.current = ticket;
+    setBackendRun(item);
     setBackendRunOpen(true);
-    setBackendRunDetail(null);
-    setBackendRunError(false);
-    setBackendRunLoading(true);
-    void getBackendRunDetail(item.backendId, item.runId)
-      .then((detail) => {
-        if (backendRunRequestRef.current === ticket) setBackendRunDetail(detail);
-      })
-      .catch(() => {
-        if (backendRunRequestRef.current === ticket) setBackendRunError(true);
-      })
-      .finally(() => {
-        if (backendRunRequestRef.current === ticket) setBackendRunLoading(false);
-      });
   };
 
-  const revealArtifact = async (path: string) => {
-    const ok = await revealCli(path);
-    if (!ok) toast.info(t("dashboard.revealFailed"));
+  const revealArtifact = async (item: ReturnType<typeof recentDashboardArtifacts>[number]) => {
+    if (item.attachment) {
+      try { await revealAttachment(item.name, inspirationMediaUrl(item.attachment.id)); }
+      catch { toast.error(t("dashboard.artifactRevealFailed")); }
+    } else if (item.path) {
+      const ok = await revealCli(item.path);
+      if (!ok) toast.info(t("dashboard.revealFailed"));
+    }
   };
 
   const statusRows = data?.status || [];
@@ -576,18 +481,9 @@ export default function DashboardPage() {
     )),
     [currentWork],
   );
-  // C 区：supported 后端出条目；reason:"remote" 显示降级说明行（不整块消失，
-  // 免得像坏了）；unsupported（如 Hermes）不出现。
+  // 文件目录与群聊已发布附件共用最近 20 条；远程目录保持原有降级提示。
   const artifactSections = data?.artifacts || [];
-  // 双后端合并 + 记住来源后端（徽标 + 预览路由都要它），mtime 倒序取前 20。
-  const artifactItems = useMemo(
-    () =>
-      artifactSections
-        .flatMap((s) => (s.supported ? s.items.map((x) => ({ ...x, backend: s.backend })) : []))
-        .sort((a, b) => b.mtimeMs - a.mtimeMs)
-        .slice(0, 20),
-    [artifactSections],
-  );
+  const artifactItems = useMemo(() => recentDashboardArtifacts(data), [data]);
   const artifactRemotes = artifactSections.filter((s) => !s.supported && s.reason === "remote");
 
   return (
@@ -679,15 +575,23 @@ export default function DashboardPage() {
               }}
             />
 
-            {/* 最近产出（右栏）：本机 workspace/media 的最近产出，点击 Finder 定位。 */}
+            {/* 最近产出（右栏）：本机文件与群成员发送的文件，点击 Finder 定位。 */}
             <section className="dash-section dash-artifacts">
               <h2 className="dash-section-title">
                 {t("dashboard.artifactsTitle")}
-                <span className="dash-section-count">{artifactItems.length}</span>
+                <span className="dash-section-count" title={t("dashboard.artifactsCountHint")}>{artifactItems.length}</span>
               </h2>
               {artifactRemotes.map((s) => (
                 <div key={s.backend} className="dash-remote-note">
                   {t("dashboard.artifactsRemote", { backend: s.backend })}
+                </div>
+              ))}
+              {(data?.groupArtifacts?.reason === "unavailable" || data?.groupArtifacts?.partial) && (
+                <div className="dash-remote-note">{t("dashboard.artifactsGroupUnavailable")}</div>
+              )}
+              {artifactSections.filter(s => s.partial || (!s.supported && s.reason !== "unsupported" && s.reason !== "remote")).map(s => (
+                <div key={s.backend} className="dash-remote-note">
+                  {t("dashboard.artifactsUnavailable", { backend: statusRows.find(row => row.id === s.backend)?.name || s.backend })}
                 </div>
               ))}
               {artifactItems.length === 0 ? (
@@ -696,16 +600,18 @@ export default function DashboardPage() {
                 <div className="dash-art-list">
                   {artifactItems.map((a) => (
                     <button
-                      key={a.path}
+                      key={a.key}
                       className="dash-art"
-                      title={`${a.path}\n${t("dashboard.revealHint")}`}
-                      onClick={() => void revealArtifact(a.path)}
+                      title={`${a.groupName || a.path}\n${t("dashboard.revealHint")}`}
+                      onClick={() => void revealArtifact(a)}
                     >
                       <ArtifactThumb name={a.name} />
                       <span className="dash-art-body">
                         <span className="dash-art-name">{a.name}</span>
                         <span className="dash-art-sub">
-                          {a.agentId ? `@${currentAgentName(a.agentId, a.backend)}` : a.area}
+                          {a.groupName ? t("dashboard.artifactGroupSource", { group: a.groupName,
+                            agent: currentAgentName(a.agentId!, a.backend, a.agentName || undefined) })
+                            : a.agentId ? `@${currentAgentName(a.agentId, a.backend, a.agentName || undefined)}` : a.area}
                         </span>
                         <span className="dash-art-foot">
                           <span>{a.size != null ? fmtSize(a.size) : ""}</span>
@@ -789,7 +695,7 @@ export default function DashboardPage() {
               {openRunDelivery && (
                 <DetailRow label={t("cronForm.runDeliveryResult")}>
                   <span>
-                    {openRunDelivery.value}
+                    {openRunDelivery.value === "silent" ? t("cron.silentComplete") : openRunDelivery.value}
                     {openRunDelivery.detail ? ` · ${openRunDelivery.detail}` : ""}
                   </span>
                 </DetailRow>
@@ -801,7 +707,7 @@ export default function DashboardPage() {
                 <div
                   className="chat-md cron-delivery-md"
                   dangerouslySetInnerHTML={{
-                    __html: toSanitizedMarkdownHtml(visibleRunText),
+                    __html: toSanitizedMarkdownHtml(visibleRunText, true),
                   }}
                 />
               </ModalSection>
@@ -814,56 +720,12 @@ export default function DashboardPage() {
         )}
       </Modal>
 
-      <Modal
-        open={backendRunOpen}
-        onClose={() => {
-          backendRunRequestRef.current += 1;
-          setBackendRunOpen(false);
-        }}
-        title={backendRunDetail?.id || t("dashboard.runModalTitle")}
-        subtitle={t("dashboard.nativeRunSubtitle")}
-      >
-        {backendRunLoading && <ModalSection>{t("common.loading")}</ModalSection>}
-        {backendRunError && <ModalSection><span className="status-error">{t("dashboard.shoggothRunFailed")}</span></ModalSection>}
-        {backendRunDetail && (
-          <>
-            <ModalSection>
-              <DetailRow label={t("dashboard.statusLabel")}>{backendRunDetail.status}</DetailRow>
-              {backendRunDetail.agentId && (
-                <DetailRow label={t("dashboard.agentLabel")}>
-                  {currentAgentName(backendRunDetail.agentId, backendRunDetail.backendId)}
-                </DetailRow>
-              )}
-              {typeof backendRunDetail.startedAt === "number" && (
-                <DetailRow label={t("dashboard.timeLabel")}>{new Date(backendRunDetail.startedAt).toLocaleString()}</DetailRow>
-              )}
-              {backendRunDetail.error && (
-                <DetailRow label={t("dashboard.errorLabel")}><span className="status-error">{backendRunDetail.error}</span></DetailRow>
-              )}
-            </ModalSection>
-            {backendRunDetail.summary && (
-              <ModalSection title={t("dashboard.summaryTitle")}><div className="chat-md"><pre>{backendRunDetail.summary}</pre></div></ModalSection>
-            )}
-            <ModalSection title={t("dashboard.runEventsTitle")}>
-              {backendRunDetail.events.length === 0 ? (
-                <span className="muted">{t("dashboard.runEventsEmpty")}</span>
-              ) : backendRunDetail.events.map((event) => (
-                <div key={`${event.seq}:${event.type}`} className="status-row">
-                  <span className="status-label mono">#{event.seq} · {event.type}</span>
-                  <span className={event.error ? "status-error" : "mono"}>
-                    {event.text || event.message || event.summary || event.error || event.tool?.name || event.status || "—"}
-                  </span>
-                </div>
-              ))}
-            </ModalSection>
-            {backendRunDetail.artifacts.length > 0 && (
-              <ModalSection title={t("dashboard.runArtifactsTitle")}>
-                {backendRunDetail.artifacts.map((artifact) => <div key={artifact.id}>{artifact.name}</div>)}
-              </ModalSection>
-            )}
-          </>
-        )}
-      </Modal>
+      {backendRun && enabledBackendIds.includes(backendRun.backendId!) && <Suspense fallback={null}>
+        <RunDetailModal key={JSON.stringify([backendScopeKey, backendRun.backendId, backendRun.runId])}
+          item={backendRun} agentName={currentAgentName(backendRun.agentId || "", backendRun.backendId)}
+          onFinished={refresh}
+          open={backendRunOpen} onClose={() => setBackendRunOpen(false)} onClosed={() => setBackendRun(null)} />
+      </Suspense>}
     </div>
   );
 }

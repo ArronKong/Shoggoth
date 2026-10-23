@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT = path.resolve(path.dirname(SCRIPT_PATH), "..");
@@ -33,7 +33,10 @@ function runFakeMcp() {
         serverInfo: { name: "shoggoth-official-dsh-smoke", version: "1.0.0" },
       };
     } else if (message.method === "tools/list") {
-      result = { tools: [] };
+      result = { tools: [{ name: "workspace_execute", description: "Controlled workspace transport probe.",
+        inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } }] };
+    } else if (message.method === "tools/call" && message.params?.name === "workspace_execute") {
+      result = { content: [{ type: "text", text: "managed transport reached" }] };
     } else if (message.method === "ping") {
       result = {};
     } else {
@@ -54,12 +57,15 @@ if (process.argv[2] === "--fake-mcp") {
   process.stderr.write("fixture MCP credentials unavailable\n");
   process.exitCode = 1;
 } else {
-  if (process.argv[2] !== "--control-only") await runSmoke();
-  await runSmoke({ controlOnly: true });
-  await runSmoke({ executionMcpUnavailable: true });
+  if (process.argv[2] === "--workspace-auto") await runSmoke({ workspaceAuto: true });
+  else {
+    if (process.argv[2] !== "--control-only") await runSmoke();
+    await runSmoke({ controlOnly: true });
+    await runSmoke({ executionMcpUnavailable: true });
+  }
 }
 
-async function runSmoke({ controlOnly = false, executionMcpUnavailable = false } = {}) {
+async function runSmoke({ controlOnly = false, executionMcpUnavailable = false, workspaceAuto = false } = {}) {
   let binaryPath;
   try {
     binaryPath = resolveDeepSeekHarnessBinary({ parentEnv: process.env });
@@ -74,9 +80,39 @@ async function runSmoke({ controlOnly = false, executionMcpUnavailable = false }
   const stateDir = path.join(trustedRoot, "state");
   const workspace = path.join(trustedRoot, "workspace");
   fs.mkdirSync(workspace, { mode: 0o700 });
-  const home = prepareDeepSeekHarnessHome({ trustedRoot, stateDir }, "official-smoke", {
-    bridgePath: path.join(ROOT, "resources", "deepseek-harness", "shoggoth-dsh-bridge.mjs"),
-  });
+  const nativeBridgePath = path.join(ROOT, "resources", "deepseek-harness", "shoggoth-dsh-bridge.mjs");
+  let bridgePath = nativeBridgePath;
+  if (workspaceAuto) {
+    bridgePath = path.join(trustedRoot, "managed-probe.mjs");
+    fs.writeFileSync(bridgePath, `import {apply as applyBridge, inject as nativeInject} from ${JSON.stringify(pathToFileURL(nativeBridgePath).href)};
+export const inject = [...nativeInject, "tools"];
+export function apply(ctx) {
+  applyBridge(ctx);
+  ctx.llm.generate = () => { throw new Error("ZERO_PROVIDER_GUARD"); };
+  ctx.on("llm/stream", () => { throw new Error("ZERO_PROVIDER_GUARD"); });
+  globalThis.fetch = () => { throw new Error("ZERO_PROVIDER_NETWORK_GUARD"); };
+  // An allow from another pre-hook must not undo the registry-owned guard.
+  ctx.on("tools/pre-execute", (exec, next) => exec.name === "guard_canary"
+    ? Promise.resolve({kind:"allow"}) : next(), {prepend:true});
+  ctx.commands.register({name:"workspace-guard-probe", description:"Managed native guard probe", handler:async ({agent,signal}) => {
+    const visible = ctx.tools.schemas(agent).map(tool=>tool.name);
+    const native = [];
+    for (const name of ["read","write","bash","run_code","spawn_agent","mcp__other__read"]) {
+      native.push(await ctx.tools.execute({name, arguments:{file_path:"outside",command:"arbitrary"},agent,signal,callId:crypto.randomUUID()}));
+    }
+    let bodies = 0;
+    const dispose = agent.ctx.tools.register({name:"guard_canary",description:"Scoped late native tool",parameters:{type:"object",properties:{}},
+      output:{schema:{type:"object",properties:{}},render:()=>[]},async execute(){bodies++;return {};}});
+    let late;
+    try {late=await ctx.tools.execute({name:"guard_canary",arguments:{},agent,signal,callId:crypto.randomUUID()});} finally {dispose();}
+    const managed=await ctx.tools.execute({name:"mcp__shoggoth__workspace_execute",arguments:{command:"controlled-probe"},agent,signal,callId:crypto.randomUUID()});
+    return {kind:"success",text:JSON.stringify({visible,native,late,bodies,managed})};
+  }});
+}
+import crypto from "node:crypto";
+`, { mode: 0o600 });
+  }
+  const home = prepareDeepSeekHarnessHome({ trustedRoot, stateDir }, "official-smoke", { bridgePath });
   fs.writeFileSync(path.join(home, ".credentials.yaml"),
     "version: 1\nrefs:\n  DEEPSEEK_API_KEY: smoke-only\n", { mode: 0o600 });
   const mcpStartedPath = path.join(trustedRoot, "failed-mcp-started");
@@ -103,6 +139,7 @@ async function runSmoke({ controlOnly = false, executionMcpUnavailable = false }
       SHOGGOTH_DSH_APPROVAL_POLICY:
         DEFAULT_DEEPSEEK_HARNESS_PERMISSION_POLICY.approvalPolicy === "never" ? "never" : "ask",
       SHOGGOTH_DSH_CONTROL_INSTANCE: controlOnly ? "1" : "0",
+      SHOGGOTH_DSH_WORKSPACE_EXECUTION_VERSION: workspaceAuto ? "1" : "0",
       SHOGGOTH_DSH_ENTRYPOINT: launch.argsPrefix[0] || "",
       SHOGGOTH_DSH_MCP_CONFIG: JSON.stringify(mcpConfig),
       DSH_TELEMETRY_DISABLED: "1",
@@ -141,7 +178,7 @@ async function runSmoke({ controlOnly = false, executionMcpUnavailable = false }
     }
     if (message.type === "ready") {
       readySettled = true;
-      readyResolve();
+      readyResolve(message);
       return;
     }
     if (message.type === "event") { events.push(message.event); return; }
@@ -182,7 +219,8 @@ async function runSmoke({ controlOnly = false, executionMcpUnavailable = false }
       console.log("PASS official dsh execution: unavailable required MCP still fails startup");
       return;
     }
-    await ready;
+    const readyMessage = await ready;
+    if (workspaceAuto) assert.equal(readyMessage.workspaceExecutionVersion, 1);
     const catalog = await request("models/list");
     assert.equal(catalog.models.some((model) => (
       model.model === "deepseek-official/deepseek-v4-flash"
@@ -213,6 +251,22 @@ async function runSmoke({ controlOnly = false, executionMcpUnavailable = false }
     const inspection = await request("session/read", { remoteSessionId });
     assert.equal(inspection.remoteSessionId, remoteSessionId);
     assert.equal((await request("commands/list", { remoteSessionId })).scoped, true);
+    if (workspaceAuto) {
+      const turnId = "workspace-native-guard";
+      await request("turn/start", { remoteSessionId, sessionId: "managed-session", turnId,
+        operationId: crypto.randomUUID(), prompt: "/workspace-guard-probe", context: "" });
+      const deadline = Date.now() + 5000;
+      while (!events.some(event => event.type === "complete" && event.turnId === turnId) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(events.find(event => event.type === "complete" && event.turnId === turnId)?.status, "completed", stderr);
+      const result = JSON.parse(events.find(event => event.type === "text" && event.turnId === turnId)?.text || "null");
+      assert.deepEqual(result.visible, ["mcp__shoggoth__workspace_execute"]);
+      assert.equal(result.native.every(outcome => outcome.isError), true);
+      assert.equal(result.late.isError, true); assert.equal(result.bodies, 0);
+      assert.equal(result.managed.isError, false);
+      console.log("PASS official DSH managed mode: native catalog hidden, monotonic guard survives pre-allow, MCP works, zero Provider calls");
+    }
     for (const [index, prompt] of ["/goal", "/goal pause"].entries()) {
       const turnId = `smoke-command-${index}`;
       await request("turn/start", {

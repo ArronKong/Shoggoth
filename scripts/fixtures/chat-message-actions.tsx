@@ -18,13 +18,19 @@ const repeatedText = "再检查一遍。";
 const mixedText = "这条用户消息没有服务端 ID。";
 const identifiedText = "这条相邻用户消息有服务端 ID。";
 const agentText = "收到，开始整理日报。";
+const footerModels = ["native-actual-model", "openclaw-actual-model", "hermes-actual-model"];
 const messages = [
   { role: "user", content: userText, timestamp: 1790000000000 },
-  { id: "assistant-a", role: "assistant", content: agentText },
+  { id: "assistant-a", role: "assistant", content: agentText, timestamp: 1790000001000,
+    responseMetadata: { models: [footerModels[0]], modelSource: "reported",
+      usage: { inputTokens: 359700, outputTokens: 3600, cachedInputTokens: 344100, cacheWriteInputTokens: 2000 },
+      context: { usedTokens: 14000, windowTokens: 100000, quality: "estimated" } } },
   { role: "user", content: repeatedText, timestamp: 1790000060000 },
-  { id: "assistant-b", role: "assistant", content: "第一遍检查完成。" },
+  { id: "assistant-b", role: "assistant", content: "第一遍检查完成。", timestamp: 1790000061000,
+    model: footerModels[1], usage: { input: 359700, output: 3600, cacheRead: 344100, cacheWrite: 2000, totalTokens: 363300 } },
   { role: "user", content: repeatedText, timestamp: 1790000060000 },
-  { id: "assistant-c", role: "assistant", content: "第二遍检查完成。" },
+  { id: "assistant-c", role: "assistant", content: "第二遍检查完成。", timestamp: 1790000062000,
+    model: footerModels[2], usage: { inputTokens: 359700, outputTokens: 3600, contextPercent: 14, totalTokens: 363300 } },
   { role: "user", content: mixedText },
   { id: "user-identified", role: "user", content: identifiedText },
   { id: "assistant-d", role: "assistant", content: "两条补充要求都已收到。" },
@@ -59,7 +65,7 @@ class FixtureSocket {
     if (request.method === "chat.history") state.historyLoads += 1;
     const payload = request.method === "sessions.list" ? { sessions, hasMore: false }
       : request.method === "agents.list" ? { agents: sessions.map((session) => ({ id: session.agentId, name: session.agentName })) }
-      : request.method === "chat.history" ? { messages } : {};
+      : request.method === "chat.history" ? { messages, hasMore: false, nextCursor: null, sourceId: "fixture-message-actions" } : {};
     setTimeout(() => this.onmessage?.({ data: JSON.stringify({ type: "res", id: request.id, ok: true, payload }) }), 0);
   }
   close() { this.readyState = 3; }
@@ -124,24 +130,53 @@ const remount = async (sessionKey = key) => {
 
 state.runFixture = async () => {
   await wait(() => bubbles(userText).length && bubbles(identifiedText).length, "history rendered");
+  for (const model of footerModels) {
+    const label = [...document.querySelectorAll<HTMLElement>(".chat-thread .chat-response-model")].find(element => element.title === model)!;
+    check(label, "normal footer keeps model " + model);
+    const footer = label.closest<HTMLElement>(".chat-group__footer")!, button = footer.querySelector<HTMLButtonElement>(".chat-copybtn")!;
+    check(!/[↑↓]|\b[RW]\d|\bctx\b|\btok\b/.test(footer.textContent || ""), "normal footer removes every metric " + model);
+    check(getComputedStyle(label).opacity === "0", "normal model is hidden by default " + model);
+    button.focus();
+    await wait(() => getComputedStyle(label).opacity === "1" && getComputedStyle(button).opacity === "1", "normal model and actions reveal on focus");
+    button.blur();
+    await wait(() => getComputedStyle(label).opacity === "0", "normal model hides after focus leaves");
+  }
+  const footerScope = '[data-testid="immersive-chat"]';
+  document.querySelector<HTMLButtonElement>(`button[title="${i18n.t("chat.immersiveEnter")}"]`)!.click();
+  await wait(() => document.querySelector(footerScope), "immersive footer fixture");
+  for (const model of footerModels) {
+    const label = [...document.querySelectorAll<HTMLElement>(`${footerScope} .chat-response-model`)].find(element => element.title === model)!;
+    check(label, "immersive footer keeps model " + model);
+    const row = label.closest<HTMLElement>("[data-immersive-message]")!, footer = label.closest<HTMLElement>("[data-immersive-message-footer]")!;
+    const button = row.querySelector<HTMLButtonElement>(`button[title="${i18n.t("chat.copy")}"]`)!;
+    check(!/[↑↓]|\b[RW]\d|\bctx\b|\btok\b/.test(footer.textContent || ""), "immersive footer removes every metric " + model);
+    check(getComputedStyle(label).opacity === "0", "immersive model is hidden by default " + model);
+    button.focus();
+    await wait(() => getComputedStyle(label).opacity === "1" && getComputedStyle(button.parentElement!).opacity === "1", "immersive model and actions reveal on focus");
+    button.blur();
+    await wait(() => getComputedStyle(label).opacity === "0", "immersive model hides after focus leaves");
+  }
+  document.querySelector<HTMLButtonElement>(`${footerScope} [aria-label="${i18n.t("chat.immersiveExit")}"]`)!.click();
+  await wait(() => !document.querySelector(footerScope), "normal chat restored after footer checks");
   check(!bubbles("此前已隐藏的消息。").length, "legacy backend-id deletion remains hidden");
-  check(document.querySelector(".chat-pinbar__text")?.textContent === agentText, "legacy backend-id pin remains visible");
+  check(!document.querySelector(".chat-pinbar"), "saved pins do not render a pin bar");
+  check(!document.querySelector(`button[title="${i18n.t("chat.pin")}"], button[title="${i18n.t("chat.unpin")}"]`), "message footers hide pin and unpin shortcuts");
   await openMenu(bubbles(userText)[0]);
   const labels = Array.from(document.querySelectorAll(".chat-ctxmenu button")).map((button) => button.textContent);
-  check(JSON.stringify(labels) === JSON.stringify(["复制", "引用", "置顶", "删除"]), `anonymous user menu has four actions: ${labels}`);
+  check(JSON.stringify(labels) === JSON.stringify(["复制", "引用", "删除"]), `anonymous user menu hides pinning: ${labels}`);
   await clickMenu("复制");
   check(state.clipboardText === userText, "user copy remains correct");
-  await action(bubbles(userText)[0], "置顶");
-  check(saved(pinnedKey).length === 2, "anonymous user pin is saved alongside the existing agent pin");
-  check(document.querySelector(".chat-pinbar__text")?.textContent === userText, "pin bar displays the user message");
+  await openMenu(bubbles(agentText)[0]);
+  check(!menuButton("置顶") && !menuButton("取消置顶"), "saved agent pin has no pin or unpin menu action");
+  await clickMenu("复制");
+  check(state.clipboardText === agentText, "agent copy remains correct");
   await remount();
-  await action(bubbles(userText)[0], "取消置顶");
-  check(JSON.stringify(saved(pinnedKey)) === JSON.stringify(["assistant-a"]), "user unpin persists and preserves the agent pin");
+  check(!document.querySelector(".chat-pinbar"), "pin bar stays hidden after reload");
+  check(JSON.stringify(saved(pinnedKey)) === JSON.stringify(["assistant-a"]), "saved agent pin is preserved");
 
-  await action(bubbles(repeatedText)[1], "置顶");
-  const duplicatePin = saved(pinnedKey).find((id) => id !== "assistant-a")!;
   await action(bubbles(repeatedText)[1], "删除");
   await wait(() => bubbles(repeatedText).length === 1, "only the selected duplicate is hidden");
+  const duplicateHidden = saved(hiddenKey).find((id) => id !== "legacy-hidden")!;
   await undo();
   await wait(() => bubbles(repeatedText).length === 2, "undo restores the selected duplicate");
   // Archive prepend must not move the saved action to a different duplicate.
@@ -151,8 +186,11 @@ state.runFixture = async () => {
   );
   await remount();
   await wait(() => bubbles(repeatedText).length === 3, "older history prepended");
-  await action(bubbles(repeatedText)[2], "取消置顶");
-  check(!saved(pinnedKey).includes(duplicatePin), "archive prepend preserves the original pin target");
+  await action(bubbles(repeatedText)[2], "删除");
+  await wait(() => bubbles(repeatedText).length === 2, "selected duplicate hidden after archive prepend");
+  check(saved(hiddenKey).includes(duplicateHidden), "archive prepend preserves the original action target");
+  await undo();
+  await wait(() => bubbles(repeatedText).length === 3, "undo restores the same duplicate after archive prepend");
 
   await action(bubbles(mixedText)[0], "删除");
   await wait(() => !bubbles(mixedText).length && !bubbles(identifiedText).length, "mixed-id user group is completely hidden");
@@ -164,13 +202,9 @@ state.runFixture = async () => {
   check(!document.querySelector(".chat-pinbar"), "pins are scoped to their session");
   await remount();
 
-  await action(bubbles(userText)[0], "置顶");
-  document.querySelector<HTMLButtonElement>(".chat-pinbar__toggle")!.click();
-  await wait(() => !bubbles(repeatedText).length, "pinned-only filter excludes unpinned user messages");
-  check(bubbles(userText).length && bubbles(agentText).length, "pinned-only filter includes user and agent messages");
-  document.querySelector<HTMLButtonElement>(".chat-pinbar__toggle")!.click();
-  await wait(() => bubbles(repeatedText).length === 3, "all messages restored");
-  await action(bubbles(userText)[0], "取消置顶");
+  check(bubbles(userText).length && bubbles(agentText).length && bubbles(repeatedText).length === 3,
+    "saved pins do not filter the message stream");
+  check(!document.querySelector(".chat-pinbar__toggle"), "pinned-only filter is hidden");
 
   Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-headbtn"))
     .find((button) => button.title === i18n.t("chat.immersiveEnter"))!.click();
@@ -178,18 +212,20 @@ state.runFixture = async () => {
   await wait(() => document.querySelector(scope), "immersive chat");
   const immersiveUser = () => Array.from(document.querySelectorAll(`${scope} p`)).find((element) => element.textContent?.trim() === userText)!;
   await openMenu(immersiveUser());
-  check(document.querySelectorAll(".chat-ctxmenu button").length === 4, "immersive anonymous user menu has four actions");
-  await clickMenu("置顶");
-  await action(immersiveUser(), "取消置顶");
+  check(document.querySelectorAll(".chat-ctxmenu button").length === 3, "immersive anonymous user menu has three actions");
+  check(!menuButton("置顶") && !menuButton("取消置顶"), "immersive context menu hides pinning");
+  check(!document.querySelector(`${scope} button[title="${i18n.t("chat.pin")}"], ${scope} button[title="${i18n.t("chat.unpin")}"]`), "immersive hover actions hide pinning");
+  await clickMenu("复制");
   await action(immersiveUser(), "删除");
   await wait(() => !immersiveUser(), "immersive delete hides the user message");
   document.querySelector<HTMLButtonElement>(`${scope} [aria-label="${i18n.t("chat.immersiveExit")}"]`)!.click();
   await wait(() => !document.querySelector(scope), "normal chat restored");
   await undo();
   await wait(() => bubbles(userText).length, "immersive deletion can be undone after mode switch");
+  check(JSON.stringify(saved(pinnedKey)) === JSON.stringify(["assistant-a"]), "all message actions preserve saved pins while pinning is hidden");
   check(!state.requests.some((request: { method: string }) => /^(chat.send|sessions.delete|sessions.patch|sessions.fork)$/.test(request.method)), "local actions never mutate backend history");
   check(!state.fixtureError, "no renderer errors");
-  return { passed: true, checks: "four actions, copy, pin/unpin, delete/undo, reload persistence, duplicate identity, archive prepend, mixed IDs, legacy storage, session isolation, pinned filter, immersive parity" };
+  return { passed: true, checks: "model-only footers for native/OpenClaw/Hermes history shapes, focus visibility and immersive parity; pin controls and bar hidden, saved pins retained, three actions, copy, delete/undo, reload persistence, duplicate identity, archive prepend, mixed IDs, legacy storage, session isolation, full message stream" };
 };
 document.getElementById("run-fixture")!.onclick = async () => {
   const output = document.getElementById("fixture-result")!;

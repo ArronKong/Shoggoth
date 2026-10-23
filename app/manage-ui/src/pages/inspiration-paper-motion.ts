@@ -6,9 +6,15 @@ export type InspirationPaperFlight = {
 const EJECT_MS = 240;
 const ROUND_CORNERS_MS = 120;
 const TRANSFER_MS = 700;
-const FEED_MS = 540;
 const PAPER_INSETS = ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'] as const;
 const PAPER_CORNERS = ['borderTopLeftRadius', 'borderTopRightRadius', 'borderBottomRightRadius', 'borderBottomLeftRadius'] as const;
+
+// Every sheet leaves the slot the same way, on summon and after a print: the
+// rollers push at a steady pace and stop it dead. It never passes its resting
+// place, which would open a gap under the housing.
+export const PAPER_FEED_MS = 440;
+export const PAPER_FEED_EASING = 'cubic-bezier(.25, .75, .3, 1)';
+const feedFrames: Keyframe[] = [{ transform: 'translateY(-100%)' }, { transform: 'translateY(0)' }];
 
 function sampleMotion(steps: number, frame: (progress: number) => Keyframe): Keyframe[] {
   return Array.from({ length: steps + 1 }, (_, index) => {
@@ -17,20 +23,9 @@ function sampleMotion(steps: number, frame: (progress: number) => Keyframe): Key
   });
 }
 
-// An underdamped sheet feed: the rollers impart an initial velocity, then the
-// paper passes its resting position once and settles with diminishing recoil.
-function feedPosition(progress: number): number {
-  if (progress === 0) return -100;
-  if (progress === 1) return 0;
-  const time = progress * FEED_MS / 1000;
-  const frequency = 23;
-  const damping = .72;
-  const velocity = 3;
-  const decay = damping * frequency;
-  const oscillation = frequency * Math.sqrt(1 - damping * damping);
-  return -100 * Math.exp(-decay * time) * (Math.cos(oscillation * time)
-    + (decay - velocity) / oscillation * Math.sin(oscillation * time));
-}
+type Point = { x: number; y: number };
+const cubic = (a: number, b: number, c: number, d: number, t: number) =>
+  (1 - t) ** 3 * a + 3 * (1 - t) ** 2 * t * b + 3 * (1 - t) * t * t * c + t ** 3 * d;
 
 // Capture only after the save succeeds, before React replaces the draft. The
 // travelling sheet stays in page coordinates, so scrolling follows the paper.
@@ -159,26 +154,43 @@ export function prepareInspirationPaperFlight(source: HTMLElement | null, page: 
       if (stopped || !source.isConnected) { cancel(); return; }
       try {
         const ejectDistance = Math.min(88, Math.max(52, from.height * .32));
-        const eject = animate(carrier, [
-          { transform: 'translate3d(0, 0, 0)', borderTopLeftRadius: '0px', borderTopRightRadius: '0px' },
-          { transform: `translate3d(0, ${ejectDistance}px, 0)`, borderTopLeftRadius: '24px', borderTopRightRadius: '24px' },
-        ], { duration: EJECT_MS, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both' }, 'inspiration-paper-eject');
-        const feed = animate(source, sampleMotion(36, progress => ({ transform: `translateY(${feedPosition(progress)}%)` })),
-          { delay: EJECT_MS, duration: FEED_MS, easing: 'linear', fill: 'both' }, 'inspiration-paper-feed');
+        // One continuous throw. The push out of the slot drifts sideways and is
+        // still moving when the flight takes over, so the sheet never hangs
+        // under an empty slot; the flight starts with the same velocity.
+        const drift = Math.min(24, from.width * .05);
+        const exit = { x: 3 * drift / EJECT_MS, y: .5 * ejectDistance / EJECT_MS };
+        const eject = animate(carrier, sampleMotion(16, progress => {
+          const rounded = 1 - (1 - Math.min(1, progress * EJECT_MS / ROUND_CORNERS_MS)) ** 3;
+          return { transform: `translate3d(${drift * progress ** 3}px, ${ejectDistance * (1.5 * progress - .5 * progress * progress)}px, 0)`,
+            borderTopLeftRadius: `${24 * rounded}px`, borderTopRightRadius: `${24 * rounded}px` };
+        }), { duration: EJECT_MS, easing: 'linear', fill: 'both' }, 'inspiration-paper-eject');
+        // The lifted sheet casts onto the next one, which feeds out behind it.
+        animate(shadow, [
+          { opacity: 0, transform: 'translate3d(0, 0, 0)', offset: 0 },
+          { opacity: .7, transform: 'translate3d(0, 10px, 0)', offset: .26 },
+          { opacity: 0, transform: 'translate3d(0, 4px, 0)', offset: .7 },
+          { opacity: 0, transform: 'translate3d(0, 4px, 0)', offset: 1 },
+        ], { duration: EJECT_MS + TRANSFER_MS, fill: 'both' }, 'inspiration-paper-shadow');
+        const feed = animate(source, feedFrames, { delay: EJECT_MS + 40, duration: PAPER_FEED_MS,
+          easing: PAPER_FEED_EASING, fill: 'both' }, 'inspiration-paper-feed');
         source.style.visibility = sourceVisibility;
         await eject.finished;
         if (stopped || !source.isConnected) return;
         carrier.setAttribute('data-paper-flight', 'to-tray');
         carrier.style.transformOrigin = 'center center';
-        const dx = trayTarget.x - from.left - from.width / 2;
-        const dy = trayTarget.y - from.top - from.height / 2;
+        // Swing out beside the machine and rise straight into the status item,
+        // instead of cutting across the machine's screen.
+        const start: Point = { x: drift, y: ejectDistance };
+        const end: Point = { x: trayTarget.x - from.left - from.width / 2, y: trayTarget.y - from.top - from.height / 2 };
+        const lead: Point = { x: start.x + exit.x * TRANSFER_MS / 3, y: start.y + exit.y * TRANSFER_MS / 3 };
+        // Bulge a little past the tray, but keep the swing on screen.
+        const screenRight = window.innerWidth - from.left - from.width / 2 - 40;
+        const swing: Point = { x: Math.max(end.x, Math.min(end.x + Math.abs(end.x - start.x) * .12, screenRight)), y: start.y };
         const flight = animate(carrier, sampleMotion(44, progress => {
-          const settle = progress * progress * (3 - 2 * progress);
-          // Preserve a little downward momentum before the sheet turns toward
-          // the real native status item. Scale the entire printed sheet.
-          const y = ejectDistance + (dy - ejectDistance) * settle + 48 * progress * (1 - progress) ** 2;
-          return { transform: `translate3d(${dx * settle}px, ${y}px, 0) scale(${1 - .98 * settle})`,
-            opacity: progress < .82 ? 1 : (1 - progress) / .18 };
+          const x = cubic(start.x, lead.x, swing.x, end.x, progress);
+          const y = cubic(start.y, lead.y, swing.y, end.y, progress);
+          return { transform: `translate3d(${x}px, ${y}px, 0) rotate(${+(-5 * Math.sin(Math.PI * progress)).toFixed(2)}deg) scale(${1 - .97 * progress ** 1.25})`,
+            opacity: progress < .84 ? 1 : (1 - progress) / .16 };
         }), { duration: TRANSFER_MS, easing: 'linear', fill: 'both' }, 'inspiration-paper-to-tray');
         await Promise.all([flight.finished, feed.finished]);
       } catch { /* A canceled flight still represents a successfully saved note. */ }
@@ -214,9 +226,8 @@ export function prepareInspirationPaperFlight(source: HTMLElement | null, page: 
         { opacity: .5, transform: 'translate3d(0, 6px, 0) scale(.99)', offset: .66 },
         { opacity: 0, transform: 'translate3d(0, 0, 0) scale(1)', offset: 1 },
       ], { duration: EJECT_MS + TRANSFER_MS, fill: 'both' }, 'inspiration-paper-shadow');
-      const feed = animate(source, sampleMotion(36, progress => ({
-        transform: `translateY(${feedPosition(progress)}%)`,
-      })), { delay: EJECT_MS, duration: FEED_MS, easing: 'linear', fill: 'both' }, 'inspiration-paper-feed');
+      const feed = animate(source, feedFrames, { delay: EJECT_MS, duration: PAPER_FEED_MS,
+        easing: PAPER_FEED_EASING, fill: 'both' }, 'inspiration-paper-feed');
       source.style.visibility = sourceVisibility;
 
       // Let the ejection be seen at the printer before the page follows the

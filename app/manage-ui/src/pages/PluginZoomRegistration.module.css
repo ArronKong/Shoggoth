@@ -1,0 +1,8 @@
+.control { display: grid; gap: 8px; justify-items: start; min-width: 0; }
+.form { display: grid; gap: 7px; width: min(100%, 440px); min-width: 0; }
+.form > input { width: 100%; min-width: 0; }
+.hint { color: var(--ui-text-2); line-height: 1.45; overflow-wrap: anywhere; }
+.scopes { display: grid; gap: 8px; width: 100%; min-width: 0; margin: 2px 0; padding: 10px; border: 1px solid var(--ui-hairline); border-radius: 8px; }
+.scopes label { display: flex; align-items: start; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.scopes input { flex: none; margin-top: 3px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }

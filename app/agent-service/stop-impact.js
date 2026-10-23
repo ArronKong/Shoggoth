@@ -4,7 +4,7 @@ const { createHash } = require("node:crypto");
 const { ACTIVE_WORK_RUN_STATUSES } = require("./work-run");
 
 const MAX_STOP_IMPACT_RUNS = 50;
-const SOURCES = new Set(["chat", "kanban", "cron", "inspiration"]);
+const SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "proactive"]);
 
 function displayText(value, maxBytes) {
   if (typeof value !== "string" || !value.isWellFormed()) return null;
@@ -37,7 +37,9 @@ function createStopImpact({ runs, instanceNonce, profileFor, titleFor }) {
       let title = null;
       try { agentName = displayText(profileFor(run.profileId)?.name, 128); } catch {}
       try { title = displayText(titleFor(run), 256); } catch {}
-      return { runId: run.id, source: run.source, status: run.status, agentName, title };
+      // This presentation DTO groups scheduled work as cron; the durable
+      // WorkRun retains its distinct automation source and identity.
+      return { runId: run.id, source: run.source === "automation" ? "cron" : run.source, status: run.status, agentName, title };
     }),
   };
 }

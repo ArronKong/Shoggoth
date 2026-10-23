@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { getShoggothProductStatus, getShoggothProviders } from "../../api/client";
 import { ShoggothProviderSetup } from "../../components/ShoggothProviderSetup";
@@ -18,8 +18,13 @@ function ShoggothModelSettings({ refreshKey, onChanged }: {
     const status = await getShoggothProductStatus();
     const providers = status.service.healthy ? await getShoggothProviders() : null;
     return { status, providers };
-  });
-  useEffect(() => { if (refreshKey > 0) void refresh(); }, [refreshKey, refresh]);
+  }, { staleTime: 30_000 });
+  const previousRefreshKey = useRef(refreshKey);
+  useEffect(() => {
+    if (previousRefreshKey.current === refreshKey) return;
+    previousRefreshKey.current = refreshKey;
+    void refresh();
+  }, [refreshKey, refresh]);
   const providers = data?.providers ?? null;
   const onConfigured = async () => { await refresh(); onChanged(); };
   const presets = providers?.providers.filter((provider) => provider.kind !== "custom-responses") ?? [];

@@ -1,0 +1,176 @@
+import path from "node:path";
+import { inspectDirectoryIdentitySync } from "./directory-guard.js";
+import { isPathRelativeEscape } from "./path.js";
+import { realpathSync } from "./realpath.js";
+export function sameNormalizedPathSpelling(left, right) {
+    // Preserve case on Windows, where individual directories can be case-sensitive.
+    return path.resolve(left) === path.resolve(right);
+}
+function windowsComparisonSpelling(original) {
+    if (/^\\\\\?\\UNC\\/i.test(original)) {
+        return `\\\\${original.slice(8)}`;
+    }
+    if (original.startsWith("\\\\?\\")) {
+        return original.slice(4);
+    }
+    return original;
+}
+function trimWindowsTrailingSeparators(value) {
+    const rootLength = path.win32.parse(value).root.length;
+    let end = value.length;
+    while (end > rootLength && value[end - 1] === "\\")
+        end -= 1;
+    return value.slice(0, end);
+}
+function trimWindowsLeadingSeparators(value) {
+    let start = 0;
+    while (value[start] === "\\")
+        start += 1;
+    return value.slice(start);
+}
+function exactWindowsRootPrefix(rootPath, candidatePath) {
+    const root = trimWindowsTrailingSeparators(rootPath.replaceAll("/", "\\"));
+    const candidate = candidatePath.replaceAll("/", "\\");
+    let relativePath;
+    if (candidate === root) {
+        relativePath = "";
+    }
+    else {
+        const rootWithSep = root.endsWith("\\") ? root : `${root}\\`;
+        if (!candidate.startsWith(rootWithSep))
+            return undefined;
+        relativePath = trimWindowsLeadingSeparators(candidate.slice(rootWithSep.length));
+    }
+    return {
+        admission: "exact",
+        candidateRootPath: root,
+        path: relativePath === "" ? root : `${root}${root.endsWith("\\") ? "" : "\\"}${relativePath}`,
+        relativePath,
+    };
+}
+function windowsRootPrefix(rootPath, candidatePath) {
+    const exact = exactWindowsRootPrefix(rootPath, candidatePath);
+    if (exact)
+        return exact;
+    const trusted = path.win32.normalize(rootPath.replaceAll("/", "\\"));
+    const trustedComparison = windowsComparisonSpelling(trusted);
+    const supplied = candidatePath.replaceAll("/", "\\");
+    const candidate = windowsComparisonSpelling(supplied);
+    const root = trimWindowsTrailingSeparators(trusted);
+    const rootComparison = trimWindowsTrailingSeparators(trustedComparison);
+    if (!path.win32.isAbsolute(supplied))
+        return undefined;
+    let relativePath;
+    let candidateRootPath;
+    let admission;
+    if (candidate === rootComparison) {
+        relativePath = "";
+        candidateRootPath = supplied;
+        admission = "exact";
+    }
+    else if (candidate.toLowerCase() === rootComparison.toLowerCase()) {
+        relativePath = "";
+        candidateRootPath = supplied;
+        admission = "identity";
+    }
+    else {
+        const rootWithSep = rootComparison.endsWith("\\") ? rootComparison : `${rootComparison}\\`;
+        const candidatePrefix = candidate.slice(0, rootWithSep.length);
+        if (candidatePrefix === rootWithSep) {
+            admission = "exact";
+        }
+        else if (candidatePrefix.toLowerCase() === rootWithSep.toLowerCase()) {
+            admission = "identity";
+        }
+        else {
+            return undefined;
+        }
+        relativePath = trimWindowsLeadingSeparators(candidate.slice(rootWithSep.length));
+        candidateRootPath = supplied.slice(0, rootComparison.length + (supplied.length - candidate.length));
+    }
+    const rebasedPath = relativePath === ""
+        ? root
+        : `${root}${root.endsWith("\\") ? "" : "\\"}${relativePath}`;
+    return { candidateRootPath, path: rebasedPath, relativePath, admission };
+}
+function exactRootIdentity(rootPath, expected) {
+    if (typeof expected?.dev === "bigint" && typeof expected.ino === "bigint") {
+        return { dev: expected.dev, ino: expected.ino };
+    }
+    const observed = inspectDirectoryIdentitySync(rootPath);
+    return { dev: observed.dev, ino: observed.ino };
+}
+/**
+ * Admit a path at a trusted directory boundary.
+ *
+ * On Windows, an exact structural prefix is allocation-only and performs no
+ * filesystem observation. A match which depends on case folding is accepted
+ * only when the candidate prefix names the exact trusted root object. Accepted
+ * paths are always returned under the trusted root spelling.
+ */
+export function admitPathInsideRoot(params) {
+    // Some platform-fallback tests intentionally spoof process.platform while
+    // retaining Node's POSIX path module. A single-slash absolute root remains
+    // unambiguously POSIX; double-slash and slash-backslash roots are reserved
+    // for the synthetic Windows namespace cases below.
+    const usesPosixBoundary = process.platform !== "win32" || (path.sep === "/" &&
+        params.rootPath.startsWith("/") &&
+        params.rootPath[1] !== "/" &&
+        params.rootPath[1] !== "\\");
+    if (usesPosixBoundary) {
+        if (params.rootPath.startsWith("/") &&
+            params.candidatePath.startsWith("/") &&
+            !params.candidatePath.includes("/..") &&
+            (params.candidatePath === params.rootPath ||
+                (params.candidatePath.startsWith(params.rootPath) &&
+                    (params.rootPath.endsWith("/") || params.candidatePath[params.rootPath.length] === "/")))) {
+            const relativeStart = params.rootPath.endsWith("/")
+                ? params.rootPath.length
+                : params.rootPath.length + 1;
+            return {
+                admission: "exact",
+                path: params.candidatePath,
+                relativePath: params.candidatePath === params.rootPath
+                    ? ""
+                    : params.candidatePath.slice(relativeStart),
+            };
+        }
+        const root = path.resolve(params.rootPath);
+        const candidate = path.resolve(params.candidatePath);
+        const relativePath = path.relative(root, candidate);
+        if (isPathRelativeEscape(relativePath))
+            return undefined;
+        return { path: candidate, relativePath: relativePath === "." ? "" : relativePath, admission: "exact" };
+    }
+    const match = windowsRootPrefix(params.rootPath, params.candidatePath);
+    if (!match)
+        return undefined;
+    const admitted = () => ({
+        admission: match.admission,
+        path: match.path,
+        relativePath: match.relativePath,
+    });
+    if (match.admission === "exact")
+        return admitted();
+    const cached = params.identityCache?.get(match.candidateRootPath);
+    if (cached !== undefined)
+        return cached ? admitted() : undefined;
+    try {
+        const expected = exactRootIdentity(params.rootPath, params.rootIdentity);
+        const candidateRootPath = params.resolveCandidateRoot
+            ? realpathSync.native(match.candidateRootPath)
+            : match.candidateRootPath;
+        if (params.inspectCandidateRoot) {
+            params.inspectCandidateRoot(candidateRootPath, expected);
+        }
+        else {
+            inspectDirectoryIdentitySync(candidateRootPath, expected);
+        }
+        params.identityCache?.set(match.candidateRootPath, true);
+        return admitted();
+    }
+    catch {
+        params.identityCache?.set(match.candidateRootPath, false);
+        return undefined;
+    }
+}

@@ -22,6 +22,10 @@ const AGENT_HARNESS_METHODS = Object.freeze([
   "harness.memory.create",
   "harness.memory.update",
   "harness.memory.delete",
+  "harness.memory.undo",
+  "harness.memory.forgetSession",
+  "harness.memory.import.status",
+  "harness.memory.import.report",
   "harness.transcript.sessions",
   "harness.transcript.events",
   "harness.transcript.context.set",
@@ -55,6 +59,13 @@ const PUBLIC_MESSAGES = Object.freeze({
   DEFINITION_SECRET_REJECTED: "Agent Definition 拒绝保存敏感信息",
   MEMORY_NOT_CONFIRMABLE: "候选记忆不存在或已处理",
   MEMORY_NOT_FOUND: "记忆不存在",
+  MEMORY_IMPORT_REPORT_NOT_FOUND: "运行报告不存在或已不可用",
+  MEMORY_IMPORT_REPORT_CHANGED: "运行报告已变化，请刷新后重新查看",
+  MEMORY_IMPORT_REPORT_INCOMPLETE: "运行报告正文未完整保存，无法显示完整结果",
+  MEMORY_IMPORT_JOB_CHANGED: "系统导入任务绑定已变化，无法核对运行报告",
+  CONTEXT_CONTENT_UNAVAILABLE: "运行报告正文已不可用，无法显示完整结果",
+  CONTEXT_CONTENT_CORRUPT: "运行报告正文校验失败，无法显示完整结果",
+  MEMORY_SOURCE_SESSION_NOT_FOUND: "来源对话不存在",
   MEMORY_SECRET_REJECTED: "记忆拒绝保存敏感信息",
   MEMORY_INVALID: "记忆内容无效，请填写不超过 8 KB 的有效文本",
   MEMORY_COMMIT_UNCERTAIN: "记忆写入结果不确定；请重启 Shoggoth 后核对记忆状态，确认前不要重试",
@@ -140,6 +151,13 @@ function validPage(value, itemValidator, withRevision = false) {
 function validMemoryItem(value) {
   try { validateMemoryItem(value); return true; } catch { return false; }
 }
+function validSharedMemory(value) {
+  return exact(value, ["items", "truncated"]) && typeof value.truncated === "boolean"
+    && Array.isArray(value.items) && value.items.length <= 500
+    && value.items.every((row) => exact(row, ["item", "homeProfileId", "homeRevision"])
+      && validMemoryItem(row.item) && id(row.homeProfileId) && row.item.profileId === row.homeProfileId
+      && integer(row.homeRevision));
+}
 function validReviewCandidate(value) {
   return id(value?.profileId) && validCandidate(value, value.profileId);
 }
@@ -164,7 +182,12 @@ function validMemoryEvidence(value) {
       && (value.importFile.name === null || (text(value.importFile.name, 255, false)
         && /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,127}\.(?:md|txt|json)$/iu.test(value.importFile.name)
         && !value.importFile.name.includes("..")))
-      && hash(value.importFile.sha256))))) return false;
+      && hash(value.importFile.sha256)))
+    && (value.importSpan === undefined || (value.origin === "import" && value.importFile !== undefined
+      && exact(value.importSpan, ["lineStart", "lineEnd", "excerpt"])
+      && integer(value.importSpan.lineStart, 1)
+      && integer(value.importSpan.lineEnd, value.importSpan.lineStart)
+      && (value.importSpan.excerpt === null || text(value.importSpan.excerpt, 2048, false)))))) return false;
   if (value.status === "verified_quote") {
     return value.origin === "conversation" && integer(value.memoryRevision, 1)
       && id(value.sessionId) && id(value.eventId)
@@ -182,6 +205,30 @@ function validMemoryEvidence(value) {
       && (value.origin === "import" ? value.importFile !== undefined : value.importFile === undefined);
   }
   return text(value.reason, 128, false);
+}
+function validMemoryImportStatus(value) {
+  if (!own(value) || typeof value.applicable !== "boolean") return false;
+  if (!value.applicable) return exact(value, ["applicable"]);
+  return exact(value, ["applicable", "state", "reason", "sources", "chunks", "imported", "skipped",
+    "modelCalls", "updatedAt", "completedAt", ...(Object.hasOwn(value, "task") ? ["task"] : [])])
+    && (value.task === undefined || (exact(value.task, ["jobId", "runId", "attempts", "maxAttempts",
+      ...(Object.hasOwn(value.task, "retryAt") ? ["retryAt"] : []),
+      ...(Object.hasOwn(value.task, "reportRunId") ? ["reportRunId"] : [])])
+      && (value.task.jobId === null || text(value.task.jobId, 256, false))
+      && (value.task.runId === null || text(value.task.runId, 256, false))
+      && (value.task.retryAt === undefined || value.task.retryAt === null || integer(value.task.retryAt))
+      && (value.task.reportRunId === undefined || value.task.reportRunId === null || id(value.task.reportRunId))
+      && integer(value.task.attempts) && value.task.maxAttempts === 2))
+    && ["idle", "no_source", "running", "deferred", "completed", "abandoned", "failed"].includes(value.state)
+    && (value.reason === null || /^[A-Z][A-Z0-9_]{0,95}$/u.test(value.reason))
+    && Array.isArray(value.sources) && value.sources.length <= 2
+    && value.sources.every((source) => exact(source, ["name", "lines"])
+      && ["memory_summary.md", "MEMORY.md"].includes(source.name) && integer(source.lines))
+    && exact(value.chunks, ["total", "done", "skipped", "pending"])
+    && Object.values(value.chunks).every((count) => integer(count))
+    && integer(value.imported) && integer(value.skipped) && integer(value.modelCalls)
+    && (value.updatedAt === null || integer(value.updatedAt))
+    && (value.completedAt === null || integer(value.completedAt));
 }
 function validTranscriptEvent(value) {
   try { validateEvent(value); return true; } catch { return false; }
@@ -209,6 +256,11 @@ function validSkill(value) {
     && typeof value.enabled === "boolean" && typeof value.eligible === "boolean"
     && (value.ineligibleReason === null || text(value.ineligibleReason, 128, false));
 }
+function validManagementSkill(value) {
+  if (value?.source !== "learned") return validSkill(value);
+  return validSkill({ ...value, source: "user" }) && text(value.title, 256, false)
+    && integer(value.learnedRevision, 1);
+}
 function validComputerSession(value) {
   return own(value) && id(value.id) && id(value.profileId) && id(value.workRunId)
     && Array.isArray(value.allowedApplications) && value.allowedApplications.length >= 1
@@ -216,9 +268,10 @@ function validComputerSession(value) {
     && value.allowedApplications.every((bundleId) => (
       typeof bundleId === "string" && /^[A-Za-z0-9][A-Za-z0-9.-]{0,255}$/u.test(bundleId)
     ))
-    && ["ready", "paused", "closed", "failed"].includes(value.status)
-    && integer(value.createdAt) && integer(value.updatedAt) && integer(value.expiresAt)
-    && value.updatedAt >= value.createdAt && value.expiresAt >= value.createdAt
+    && ["starting", "ready", "paused", "closing", "close_failed", "closed", "failed"].includes(value.status)
+    && integer(value.createdAt) && integer(value.updatedAt)
+    && value.updatedAt >= value.createdAt
+    && (value.expiresAt === null || (integer(value.expiresAt) && value.expiresAt >= value.createdAt))
     && (value.pauseReason === null || text(value.pauseReason, 128, false));
 }
 function validComputerStatus(value) {
@@ -240,8 +293,14 @@ function validateAgentHarnessParams(method, params) {
   if (!id(profileId)) throw protocolError("INVALID_PARAMS");
   let valid = false;
   if (method === "harness.definition.meta" || method === "harness.tools.list"
-    || method === "harness.skills.usage" || method === "harness.computer.status") {
+    || method === "harness.skills.usage" || method === "harness.computer.status"
+    || method === "harness.memory.import.status") {
     valid = exact(params, ["profileId"]);
+  } else if (method === "harness.memory.import.report") {
+    valid = exact(params, ["profileId", "runId", "cursor", "limit", "expectedHash"])
+      && (params.runId === null || id(params.runId)) && integer(params.cursor)
+      && integer(params.limit, 2, 8000) && (params.expectedHash === null || hash(params.expectedHash))
+      && (params.cursor === 0 || (params.runId !== null && params.expectedHash !== null));
   } else if (method === "harness.skills.list") {
     valid = exact(params, ["profileId", "cursor", "limit"])
       && integer(params.cursor, 0) && integer(params.limit, 1, 100);
@@ -335,9 +394,12 @@ function validateAgentHarnessParams(method, params) {
     valid = exact(params, ["profileId", "content", "scope", "expectedRevision"])
       && text(params.content, 8 * 1024, false) && params.content.trim().length > 0
       && ["user", "agent"].includes(params.scope) && integer(params.expectedRevision, 0);
-  } else if (method === "harness.memory.delete") {
+  } else if (method === "harness.memory.delete" || method === "harness.memory.undo") {
     valid = exact(params, ["profileId", "id", "expectedRevision"])
       && id(params.id) && integer(params.expectedRevision, 0);
+  } else if (method === "harness.memory.forgetSession") {
+    valid = exact(params, ["profileId", "sessionId", "expectedRevision"])
+      && id(params.sessionId) && integer(params.expectedRevision, 0);
   } else if (method === "harness.memory.update") {
     valid = exact(params, ["profileId", "id", "content", "confidence", "validUntil", "expectedRevision"])
       && id(params.id) && text(params.content, 8 * 1024, false)
@@ -386,9 +448,33 @@ function validateAgentHarnessResult(method, result, params = null) {
       && result.changes.every((change) => own(change) && KINDS.has(change.kind)
         && typeof change.changed === "boolean" && hash(change.beforeHash) && hash(change.afterHash));
   } else if (method === "harness.memory.list") {
-    valid = validPage(result, validMemoryItem, true);
+    valid = validPage(result, validMemoryItem, true) && validSharedMemory(result.shared);
   } else if (method === "harness.memory.explain") {
     valid = own(result) && validMemoryItem(result.item) && validMemoryEvidence(result.evidence);
+  } else if (method === "harness.memory.import.status") {
+    valid = validMemoryImportStatus(result);
+  } else if (method === "harness.memory.import.report") {
+    valid = typeof result.applicable === "boolean" && (!result.applicable ? exact(result, ["applicable"])
+      : exact(result, ["applicable", "jobId", "runId", "attempt", "runStatus", "finishedAt",
+        "reportedOutcome", "reportHash", "text", "nextCursor", "hasMore"])
+        && (result.jobId === null || id(result.jobId)) && (result.runId === null || id(result.runId))
+        && (result.attempt === null || integer(result.attempt, 1, 2))
+        && (result.runStatus === null || ["completed", "failed", "canceled", "interrupted", "skipped"].includes(result.runStatus))
+        && (result.finishedAt === null || integer(result.finishedAt))
+        && [null, "completed", "failed"].includes(result.reportedOutcome)
+        && (result.reportHash === null || hash(result.reportHash)) && text(result.text)
+        && (result.nextCursor === null || integer(result.nextCursor, 1)) && typeof result.hasMore === "boolean"
+        && result.hasMore === (result.nextCursor !== null)
+        && (result.runId === null ? result.attempt === null && result.runStatus === null
+          && result.finishedAt === null && result.reportedOutcome === null && result.reportHash === null
+          && result.text === "" && !result.hasMore
+          : result.jobId !== null && result.attempt !== null && result.runStatus !== null)
+        && (result.reportHash !== null || (result.text === "" && result.reportedOutcome === null))
+        && (!result.hasMore || (result.runId !== null && result.reportHash !== null && result.text.length > 0))
+        && (!params || ((params.runId === null || params.runId === result.runId)
+          && (params.expectedHash === null || params.expectedHash === result.reportHash)
+          && result.text.length <= params.limit
+          && (result.nextCursor === null || result.nextCursor === params.cursor + result.text.length))));
   } else if (method === "harness.memory.candidates.list") {
     valid = own(result) && integer(result.revision) && Array.isArray(result.items)
       && result.items.length <= 100 && result.items.every(validReviewCandidate)
@@ -423,6 +509,12 @@ function validateAgentHarnessResult(method, result, params = null) {
       && result.candidate.status === "rejected"
       && (!params || (result.candidate.id === params.candidateId
         && result.candidate.profileId === params.profileId));
+  } else if (method === "harness.memory.undo") {
+    valid = exact(result, ["revision", "item", "restored"]) && integer(result.revision)
+      && validMemoryItem(result.item) && result.item.status === "deleted"
+      && (result.restored === null || (validMemoryItem(result.restored) && result.restored.status === "active"));
+  } else if (method === "harness.memory.forgetSession") {
+    valid = exact(result, ["revision", "forgotten"]) && integer(result.revision) && integer(result.forgotten);
   } else if (["harness.memory.create", "harness.memory.update", "harness.memory.delete"].includes(method)) {
     valid = integer(result.revision) && (method === "harness.memory.create"
       ? validMemoryItem(result.item) && result.item.status === "active"
@@ -452,7 +544,7 @@ function validateAgentHarnessResult(method, result, params = null) {
       && typeof result.usageSupported === "boolean"
       && integer(result.matchCount, 0, result.total)
       && Array.isArray(result.items) && result.items.length <= 100
-      && result.items.every(item => validSkill(item)
+      && result.items.every(item => validManagementSkill(item)
         && item.backendId === "shoggoth" && id(item.profileId) && id(item.agentId)
         && text(item.category, 128) && text(item.emoji, 16)
         && item.registryRevision === result.registryRevision

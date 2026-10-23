@@ -8,6 +8,10 @@ const {
 const { ANTIGRAVITY_RUNTIME } = require("./antigravity-runtime-paths");
 const { serviceError } = require("./security");
 
+// Session ids minted by the retired agy CLI transport. The official ACP server
+// cannot continue them; the conversation moves to a fresh native session.
+const RETIRED_SESSION_PREFIX = "antigravity-session-";
+
 const ANTIGRAVITY_CAPABILITIES = runtimeCapabilities({
   "session.start": true,
   "session.resume": true,
@@ -82,6 +86,10 @@ class AntigravityRuntimeAdapter {
     this.runtimePool = options.runtimePool;
     this.handles = new Map();
     assertRuntimeAdapter(this);
+  }
+
+  isRetiredSessionId(sessionId) {
+    return typeof sessionId === "string" && sessionId.startsWith(RETIRED_SESSION_PREFIX);
   }
 
   async acquire(value, options = {}) {

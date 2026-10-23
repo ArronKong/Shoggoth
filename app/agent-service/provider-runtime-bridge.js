@@ -159,6 +159,7 @@ class ProviderRuntimeBridge {
         registeredSecrets: Object.freeze([]),
         runtimeConfig: null,
         configArgs: configured.args || Object.freeze([]),
+        mcpBootstrap: configured.mcpBootstrap ?? null,
         assertCurrent,
         executionProviderRoute,
       });
@@ -209,6 +210,7 @@ class ProviderRuntimeBridge {
         registeredSecrets: Object.freeze(registeredSecrets),
         runtimeConfig,
         configArgs: configured.args || Object.freeze([]),
+        mcpBootstrap: configured.mcpBootstrap ?? null,
         assertCurrent,
         executionProviderRoute,
       });

@@ -1,7 +1,7 @@
 "use strict";
 const { poolLedgerSlot } = require("./runtime-shared-ledger");
 
-const { AntigravityRuntimeHost } = require("./antigravity-runtime-host");
+const { AntigravityAcpRuntimeHost } = require("./antigravity-acp-runtime-host");
 const {
   ANTIGRAVITY_RUNTIME,
   antigravityPermissionFingerprint,
@@ -64,7 +64,7 @@ class AntigravityRuntimePool {
     this.options = { ...options };
     this.hostOptions = { ...(options.hostOptions || {}) };
     this.hostFactory = options.hostFactory
-      || ((hostOptions) => new AntigravityRuntimeHost(hostOptions));
+      || ((hostOptions) => new AntigravityAcpRuntimeHost(hostOptions));
     this.runtimeAccountLookup = options.runtimeAccountLookup || defaultRuntimeAccountLookup;
     this.runtimeAccountResolver = options.runtimeAccountResolver || new RuntimeAccountResolver({
       paths: options.paths ?? options.hostOptions?.paths,
@@ -93,7 +93,8 @@ class AntigravityRuntimePool {
     try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
     const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
     const permissionPolicy = normalizeAntigravityPermissionPolicy(options.permissionPolicy);
-    const policyFingerprint = antigravityPermissionFingerprint(permissionPolicy);
+    const workspaceExecutionVersion = require("./workspace-execution-tools").workspaceAutoExecution(options.executionContract) ? 1 : null;
+    const policyFingerprint = JSON.stringify([antigravityPermissionFingerprint(permissionPolicy), workspaceExecutionVersion]);
     if (this.blockedProfiles.has(id)) {
       return Promise.reject(poolError(
         "ANTIGRAVITY_RUNTIME_CLEANUP_INCOMPLETE",
@@ -159,14 +160,17 @@ class AntigravityRuntimePool {
       platform: this.options.platform ?? this.hostOptions.platform,
       securityExecFileSync:
         this.options.securityExecFileSync ?? this.hostOptions.securityExecFileSync,
+      initializeTimeoutMs: this.options.initializeTimeoutMs ?? this.hostOptions.initializeTimeoutMs,
       requestTimeoutMs: this.options.requestTimeoutMs ?? this.hostOptions.requestTimeoutMs,
       promptTimeoutMs: this.options.promptTimeoutMs ?? this.hostOptions.promptTimeoutMs,
       acceptanceTimeoutMs: this.options.acceptanceTimeoutMs ?? this.hostOptions.acceptanceTimeoutMs,
-      nativeStartupTimeoutMs: this.options.nativeStartupTimeoutMs ?? this.hostOptions.nativeStartupTimeoutMs,
       shutdownGraceMs: this.options.shutdownGraceMs ?? this.hostOptions.shutdownGraceMs,
       killGraceMs: this.options.killGraceMs ?? this.hostOptions.killGraceMs,
       maxFrameBytes: this.options.maxFrameBytes ?? this.hostOptions.maxFrameBytes,
       killProcessGroup: this.options.killProcessGroup ?? this.hostOptions.killProcessGroup,
+      processGroupExists: this.options.processGroupExists ?? this.hostOptions.processGroupExists,
+      verifyServer: this.options.verifyServer ?? this.hostOptions.verifyServer,
+      packageVersion: this.options.packageVersion ?? this.hostOptions.packageVersion,
       now: this.options.now ?? this.hostOptions.now,
       randomUUID: this.options.randomUUID ?? this.hostOptions.randomUUID,
       onDiagnostic: this.options.onDiagnostic ?? this.hostOptions.onDiagnostic,
@@ -175,6 +179,7 @@ class AntigravityRuntimePool {
       runtimeAccountId: accountId,
       runtimeBinding: binding,
       mcpExecutionRunId: executionRunId,
+      workspaceExecutionVersion,
       ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,

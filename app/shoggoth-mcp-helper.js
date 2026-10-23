@@ -17,9 +17,13 @@ const {
 const {
   MCP_PRODUCT_TOOL_DEFINITIONS,
   PUBLIC_MESSAGES: MCP_PRODUCT_PUBLIC_MESSAGES,
+  explainMcpProductToolArguments,
   isNativeOnlyMcpTool,
   validateMcpProductToolArguments,
 } = require("./agent-service/mcp-product-tool-controller");
+const { MESSAGES: CHAT_UI_PUBLIC_MESSAGES } = require("./agent-service/chat-ui-messages");
+const { groupManagementRequest } = require("./agent-service/group-chat-agent-tools");
+const { PRODUCT_CONFIRMATION_META, productConfirmationIdentity } = require("./agent-service/cron-approval-policy");
 const {
   SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS,
   SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS,
@@ -27,6 +31,8 @@ const {
 } = require("./agent-service/product-capability-manifest");
 const {
   DEFAULT_SERVER_REQUEST_TIMEOUT_MS,
+  DEFAULT_MCP_TOOL_TIMEOUT_MS,
+  serverRequestUsesApprovalWait,
 } = require("./agent-service/interactive-timeouts");
 const {
   resolveCanonicalServicePaths,
@@ -43,17 +49,32 @@ const {
 const MCP_STDIO_PROTOCOL_VERSION = "2025-06-18";
 const MCP_RUNTIME_PROFILE_PREFIX = "--shoggoth-runtime-profile=";
 const MCP_RUNTIME_ACCOUNT_PREFIX = "--shoggoth-runtime-account=";
+// Set by the runtime MCP gate for Runtimes that load every tool definition up front.
+const MCP_RESIDENT_TOOL_EXPOSURE_ARG = "--shoggoth-tool-exposure=resident";
+const productToolExposure = require("./agent-service/product-tool-exposure");
+const productToolResults = require("./agent-service/product-tool-results");
+const { withActivityTitle, splitActivityArguments } = require("./agent-service/tool-activity");
 const FEDERATION_MCP_CLIENT_ENV = "SHOGGOTH_FEDERATION_MCP_CLIENT";
 const FEDERATION_MCP_AUTH_FILE_ENV = "SHOGGOTH_FEDERATION_MCP_AUTH_FILE";
 const MCP_MAX_FRAME_BYTES = 64 * 1024;
+// Some Runtime MCP clients only consume the first tools/list page. Keep the
+// complete product catalog in one bounded response without widening tool-call
+// input/result limits.
+const MCP_MAX_CATALOG_FRAME_BYTES = 256 * 1024;
 const MCP_INITIALIZE_CAPABILITIES_MAX_BYTES = 4 * 1024;
 const MCP_INITIALIZE_TEXT_MAX_BYTES = 128;
 const MCP_SESSION_REFRESH_SKEW_MS = 5_000;
-const MCP_SESSION_REFRESH_TIMEOUT_MS = 5_000;
-const MCP_OUTPUT_TIMEOUT_MS = 2_000;
+// Refresh can include two authentication requests (10s each) and credential access.
+// Its outer deadline must not cut off an otherwise valid authentication exchange.
+const MCP_SESSION_REFRESH_TIMEOUT_MS = 30_000;
+// ACP startup can pause its MCP reader while loading the local harness. Allow
+// that bounded pause, including a full catalog response, before closing it.
+const MCP_OUTPUT_TIMEOUT_MS = 10_000;
 const MCP_CLIENT_REQUEST_TIMEOUT_MS = DEFAULT_SERVER_REQUEST_TIMEOUT_MS;
 const MCP_AUTH_SERVICE_TIMEOUT_MS = 10_000;
 const MCP_TOOL_SERVICE_TIMEOUT_MS = 45_000;
+// Tools that keep the call open while the user answers a Service-raised card.
+const USER_WAIT_TOOL_NAMES = new Set(["browser_session_wait_for_user", "plugin_secret_request", "workspace_execute"]);
 const MCP_PACKAGED_CRYPTO_TIMEOUT_MS = 30_000;
 const MCP_MAX_QUESTIONS = 3;
 const MCP_MAX_QUESTION_OPTIONS = 3;
@@ -65,7 +86,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const PUBLIC_SERVICE_ERROR_PREFIXES = Object.freeze([
   "AGENT_", "BROWSER_", "COMPUTER_", "CRON_", "FEDERATION_", "KANBAN_",
   "MCP_", "MEMORY_", "MODEL_", "PROFILE_", "RUNTIME_", "SERVICE_",
-  "SKILL_", "SYSTEM_", "TOOL_", "TRANSCRIPT_", "USAGE_",
+  "SKILL_", "SYSTEM_", "TOOL_", "TRANSCRIPT_", "USAGE_", "WORKSPACE_",
 ]);
 const EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS = Object.freeze(
   MCP_PRODUCT_TOOL_DEFINITIONS.filter((definition) => !isNativeOnlyMcpTool(definition.name)),
@@ -80,6 +101,31 @@ const EXTERNAL_FEDERATION_MCP_INSTRUCTIONS = [
 
 function helperError(code, message) {
   return serviceError(code, message);
+}
+
+// A stopped/recovering Service cannot authenticate a helper. Keep that distinct
+// from rejected credentials, without carrying transport messages or private paths.
+function authenticationError(error, fromService = false) {
+  let code;
+  try { code = Object.getOwnPropertyDescriptor(error, "code")?.value; } catch {}
+  if (code === "MCP_HELPER_SERVICE_RECOVERY_REQUIRED" || fromService && code === "SERVICE_RECOVERY_REQUIRED") {
+    return helperError("MCP_HELPER_SERVICE_RECOVERY_REQUIRED", "mcp_helper_service_recovery_required");
+  }
+  if (code === "MCP_HELPER_SERVICE_UNAVAILABLE" || fromService && [
+    "SERVICE_UNAVAILABLE", "SERVICE_QUIESCED", "SERVICE_DISCONNECTED", "REQUEST_TIMEOUT",
+    "ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE",
+  ].includes(code)) {
+    return helperError("MCP_HELPER_SERVICE_UNAVAILABLE", "mcp_helper_service_unavailable");
+  }
+  return helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
+}
+
+async function requestAuthentication(requestService, paths, request) {
+  try {
+    return await requestService(paths, request, { timeoutMs: MCP_AUTH_SERVICE_TIMEOUT_MS });
+  } catch (error) {
+    throw authenticationError(error, true);
+  }
 }
 
 function resolveMcpCryptoRequestTimeout({ explicitTimeoutMs, isPackaged, defaultApp }) {
@@ -127,11 +173,13 @@ function parseMcpRuntimeBinding(argv = process.argv.slice(1)) {
     && arg.startsWith(MCP_RUNTIME_PROFILE_PREFIX));
   const accounts = argv.filter((arg) => typeof arg === "string"
     && arg.startsWith(MCP_RUNTIME_ACCOUNT_PREFIX));
+  const residentExposure = argv.filter((arg) => arg === MCP_RESIDENT_TOOL_EXPOSURE_ARG);
   const forbidden = argv.some((arg) => typeof arg === "string" && arg.startsWith("--shoggoth-")
     && !arg.startsWith(MCP_RUNTIME_PROFILE_PREFIX)
     && !arg.startsWith(MCP_RUNTIME_ACCOUNT_PREFIX)
+    && arg !== MCP_RESIDENT_TOOL_EXPOSURE_ARG
     && arg !== "--shoggoth-internal-role=mcp");
-  if (forbidden || profiles.length !== 1 || accounts.length !== 1) {
+  if (forbidden || profiles.length !== 1 || accounts.length !== 1 || residentExposure.length > 1) {
     throw helperError("MCP_HELPER_ARGUMENTS_INVALID", "mcp_helper_arguments_invalid");
   }
   const runtimeProfileId = profiles[0].slice(MCP_RUNTIME_PROFILE_PREFIX.length);
@@ -139,7 +187,8 @@ function parseMcpRuntimeBinding(argv = process.argv.slice(1)) {
   if (!validRuntimeProfileId(runtimeProfileId) || !validRuntimeAccountId(runtimeAccountId)) {
     throw helperError("MCP_HELPER_ARGUMENTS_INVALID", "mcp_helper_arguments_invalid");
   }
-  return Object.freeze({ runtimeProfileId, runtimeAccountId });
+  return Object.freeze({ runtimeProfileId, runtimeAccountId,
+    toolExposure: residentExposure.length === 1 ? "resident" : "all" });
 }
 
 function parseMcpRuntimeProfileId(argv = process.argv.slice(1)) {
@@ -233,7 +282,7 @@ async function authenticateMcpSession(options = {}) {
     const clientNonce = clientNonceBytes.toString("base64url");
     clientNonceBytes.fill(0);
     clientNonceBytes = null;
-    const challenge = await requestService(paths, {
+    const challenge = await requestAuthentication(requestService, paths, {
       version: MCP_SERVICE_PROTOCOL_VERSION,
       method: "mcp.auth.challenge",
       params: {
@@ -242,7 +291,7 @@ async function authenticateMcpSession(options = {}) {
         runtimeAccountId,
         clientNonce,
       },
-    }, { timeoutMs: MCP_AUTH_SERVICE_TIMEOUT_MS });
+    });
     if (!validateChallenge(challenge, { runtimeProfileId, runtimeAccountId, clientNonce })) {
       throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
     }
@@ -255,7 +304,7 @@ async function authenticateMcpSession(options = {}) {
       secret = authStore.readForHelper();
     }
     const proof = createMcpChallengeProof(secret, challenge);
-    const session = await requestService(paths, {
+    const session = await requestAuthentication(requestService, paths, {
       version: MCP_SERVICE_PROTOCOL_VERSION,
       method: "mcp.auth.exchange",
       params: {
@@ -267,13 +316,13 @@ async function authenticateMcpSession(options = {}) {
         serverNonce: challenge.serverNonce,
         proof,
       },
-    }, { timeoutMs: MCP_AUTH_SERVICE_TIMEOUT_MS });
+    });
     if (!validateSession(session, { runtimeProfileId, runtimeAccountId })) {
       throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
     }
     return { ...session };
-  } catch {
-    throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
+  } catch (error) {
+    throw authenticationError(error);
   } finally {
     if (clientNonceBytes) clientNonceBytes.fill(0);
     if (secret) secret.fill(0);
@@ -295,17 +344,17 @@ async function authenticateFederationMcpSession(options = {}) {
   let credential;
   try {
     credential = loadFederationMcpCredential(paths);
-    const session = await requestService(paths, {
+    const session = await requestAuthentication(requestService, paths, {
       version: MCP_SERVICE_PROTOCOL_VERSION,
       method: "mcp.federation.open",
       params: { runtimeProfileId, runtimeAccountId, credentialToken: credential.token, client },
-    }, { timeoutMs: MCP_AUTH_SERVICE_TIMEOUT_MS });
+    });
     if (!validateSession(session, { runtimeProfileId, runtimeAccountId })) {
       throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
     }
     return { ...session };
-  } catch {
-    throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
+  } catch (error) {
+    throw authenticationError(error);
   } finally {
     credential = null;
   }
@@ -376,7 +425,11 @@ function dataErrorCode(error) {
 function publicServiceErrorCode(error) {
   const code = dataErrorCode(error);
   return /^[A-Z][A-Z0-9_]{2,63}$/u.test(code)
-    && PUBLIC_SERVICE_ERROR_PREFIXES.some((prefix) => code.startsWith(prefix))
+    && (PUBLIC_SERVICE_ERROR_PREFIXES.some((prefix) => code.startsWith(prefix))
+      || Object.hasOwn(CHAT_UI_PUBLIC_MESSAGES, code)
+      || code.startsWith("WEB_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
+      || code.startsWith("PROACTIVE_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
+      || require("./agent-service/hook-contract").HOOK_PUBLIC_ERROR_CODES.includes(code))
     ? code
     : "SERVICE_REQUEST_FAILED";
 }
@@ -387,6 +440,20 @@ function toolFailureResponse(id, error) {
   return jsonRpcResult(id, {
     content: [{ type: "text", text: `${message} (${code})` }],
     structuredContent: { error: { code } },
+    isError: true,
+  });
+}
+
+// A tool result rather than a JSON-RPC error, so every runtime shows the model
+// which fields to fix (Pi, for one, reduces protocol errors to a fixed string).
+function invalidToolArgumentsResponse(id, name, args) {
+  const code = "MCP_TOOL_INVALID_ARGUMENTS";
+  const { problems, hints } = explainMcpProductToolArguments(name, args);
+  const details = [...problems, ...hints];
+  const reason = details.length > 0 ? details.join("；") : "参数组合不满足该工具的要求，请对照工具说明";
+  return jsonRpcResult(id, {
+    content: [{ type: "text", text: `${MCP_PRODUCT_PUBLIC_MESSAGES[code]}（${name}）：${reason} (${code})` }],
+    structuredContent: { error: { code, problems } },
     isError: true,
   });
 }
@@ -558,7 +625,10 @@ function elicitationParamsFor(questions) {
       type: "string",
       title: question.header,
       description: [
-        question.question,
+        // Product details live once in message, where the confirmation card
+        // renders them in full. Duplicating a large roster here exceeds the
+        // bounded transport and the field-description limit.
+        question.id === "confirm_product_action" ? question.header : question.question,
         ...question.options.map((option) => `${option.label}: ${option.description}`),
       ].join("\n"),
       enum: question.options.map((option) => option.label),
@@ -608,7 +678,93 @@ function normalizeElicitationResult(value, questions) {
   return { answers };
 }
 
-function confirmationQuestionFor(name, args, nativeAgent = null) {
+function listPreview(names, limit = 8) {
+  const shown = names.slice(0, limit).map(value => JSON.stringify(String(value).slice(0, 64)));
+  return `${shown.join("、")}${names.length > limit ? ` 等 ${names.length} 项` : ""}`;
+}
+
+function endpointLabel(target) {
+  try { return new URL(target).origin; } catch { return String(target).slice(0, 128); }
+}
+
+function pluginConfirmationQuestion(name, args, plugin) {
+  if (name === "plugin_install") {
+    const skills = plugin.previewComponents.skills.map(item => item.name);
+    const servers = plugin.previewComponents.mcpServers.map(item => item.name);
+    const contents = [`${skills.length} 个技能${skills.length ? `（${listPreview(skills)}）` : ""}`,
+      `${servers.length} 个 MCP 服务${servers.length ? `（${listPreview(servers)}）` : ""}`].join("、");
+    const version = plugin.declaredVersion || "未标注";
+    const installed = plugin.installation;
+    const update = Boolean(installed) && installed.releaseDigest !== plugin.previewDigest;
+    const verb = update ? "更新" : "安装";
+    const head = update
+      ? `Shoggoth 将把插件 ${JSON.stringify(plugin.name)} 从版本 ${installed.declaredVersion || "未标注"} 更新为 ${version}：${contents}。${installed.desiredState === "enabled"
+        ? "更新前会先停用旧版本，并等待进行中的调用结束。" : ""}`
+      : `Shoggoth 将安装插件 ${JSON.stringify(plugin.name)}（版本 ${version}）：${contents}。`;
+    return `${head}${args.enable
+      ? `${verb}后立即为所有助理启用其技能；MCP 服务的连接与工具授权${update ? "需要重新" : "仍需单独"}确认。`
+      : `${verb}后保持停用。`}是否继续？`;
+  }
+  const active = plugin.components.filter(item => !["unsupported", "secret_required"].includes(item.state));
+  const skipped = plugin.components.filter(item => ["unsupported", "secret_required"].includes(item.state));
+  const lines = active.map(item => `${JSON.stringify(item.name)}（${item.transport === "stdio"
+    ? `运行 ${JSON.stringify(item.target)}` : `连接 ${endpointLabel(item.target)}`}${item.interpreter && !item.interpreterReady
+    ? `，使用本机已安装的 ${item.interpreter === "node" ? "Node.js" : "Python"}` : ""}）`);
+  return `Shoggoth 将启用插件 ${JSON.stringify(plugin.packageName)}${lines.length
+    ? `，并连接 MCP 服务 ${lines.join("；")}。所有助理将可使用这些服务提供的全部工具；标注为破坏性的工具每次调用前仍会询问你，可随时在插件页撤销`
+    : ""}。${skipped.length ? `${listPreview(skipped.map(item => item.name))} 尚需凭据或在插件页连接账号，本次不处理。` : ""}是否继续？`;
+}
+
+function confirmationQuestionFor(name, args, nativeAgent = null, hookGrant = null, plugin = null, group = null, management = null) {
+  if (["group_chat_create", "group_chat_members_add"].includes(name)) {
+    if (!management || management.ok !== true || management.state !== "prepared" || !Array.isArray(management.members)
+      || management.ownerScope !== args.ownerScope || management.previewDigest !== args.previewDigest) {
+      throw helperError("MCP_TOOL_STATE_CONFLICT", "group_management_preflight_failed");
+    }
+    const members = management.members.map(member => `${JSON.stringify(member.displayName)}（${member.backendId} / ${member.agentId}）`).join("、");
+    const question = name === "group_chat_create"
+      ? `创建群 ${JSON.stringify(management.name)}，成员为 ${members}。${management.purpose ? `\n\n群用途：${management.purpose}` : ""}\n\n确认创建？`
+      : `将 ${members} 加入群 ${JSON.stringify(management.group?.name)}（${args.groupId}）。\n\n确认添加？`;
+    if (Buffer.byteLength(question) > 12 * 1024) throw helperError("MCP_TOOL_CAPACITY", "group_management_preflight_failed");
+    return [{ header: name === "group_chat_create" ? "确认建群" : "确认添加成员", id: "confirm_product_action", question,
+      options: [{ label: "确认执行", description: "按上述群名和名单完成这一次操作。" }, { label: "取消", description: "不修改群或成员。" }] }];
+  }
+  if (name === "group_chat_dispatch") {
+    if (!group || group.ok !== true || group.group?.id !== args.groupId || !Array.isArray(group.members)) {
+      throw helperError("MCP_TOOL_RESPONSE_INVALID", "group_dispatch_preflight_failed");
+    }
+    const targets = args.targetMemberIds.map(id => group.members.find(member => member.id === id && member.state === "active"));
+    if (targets.some(member => !member) || group.ownerScope !== args.ownerScope
+      || group.group.status !== "active" || group.group.rosterRevision !== args.expectedRosterRevision
+      || group.group.policyVersion !== args.expectedPolicyVersion) throw helperError("MCP_TOOL_STATE_CONFLICT", "group_dispatch_preflight_failed");
+    const question = `将下列安排发送到群 ${JSON.stringify(group.group.name)}（${args.groupId}），交给 ${targets.map(member => `${JSON.stringify(member.displayName)}（${member.id}）`).join("、")}。${args.requestMode === "append" ? `追加到请求 ${args.discussionId}` : "新建一项群内请求"}，可能启动成员执行。\n\n${args.instruction}\n\n确认发送？`;
+    if (Buffer.byteLength(question) > 12 * 1024) throw helperError("MCP_TOOL_CAPACITY", "group_dispatch_preflight_failed");
+    return [{ header: "确认群内安排", id: "confirm_product_action", question,
+      options: [{ label: "确认执行", description: "仅向上述群和成员提交这一次安排。" }, { label: "取消", description: "不发送群消息，不启动执行。" }] }];
+  }
+  if (name === "plugin_install" || name === "plugin_activate") {
+    const question = pluginConfirmationQuestion(name, args, plugin);
+    if (Buffer.byteLength(question, "utf8") > 4096) throw helperError("MCP_TOOL_CAPACITY", "plugin_preflight_failed");
+    return [{ header: name === "plugin_install" ? "确认安装" : "确认启用", id: "confirm_product_action", question,
+      options: [{ label: "确认执行", description: "仅执行上述已列出的插件操作。" },
+        { label: "取消", description: "不修改插件状态。" }] }];
+  }
+  if (name === "hook_grant") {
+    if (!hookGrant || hookGrant.hookId !== args.hookId || hookGrant.version !== args.version) {
+      throw helperError("MCP_TOOL_RESPONSE_INVALID", "hook_grant_preflight_failed");
+    }
+    const definition = hookGrant.definition;
+    const handler = definition.handler;
+    const name = handler.name;
+    const payload = handler.type === "script" || ["guard.condition", "arguments.patch", "result.redact"].includes(name);
+    const write = definition.kind === "action";
+    const read = write || ["context.file", "workspace.copy"].includes(name) || handler.access?.workspaceRead === true;
+    const question = `授权持续规则 ${JSON.stringify(definition.name)}（${hookGrant.hookId}，版本 ${hookGrant.version}，内容摘要 ${hookGrant.contentDigest}）。事件：${definition.event}；处理器：${handler.type === "script" ? handler.language + " 脚本" : name}；匹配：${JSON.stringify(definition.matcher)}；设置：${handler.type === "script" ? "脚本源摘要 " + handler.sourceDigest : JSON.stringify(handler.config)}；业务事件内容：${payload ? "可读取" : "仅元数据"}；工作目录读取：${read ? "允许" : "禁止"}；工作目录写入：${write ? "允许" : "禁止"}；目录：${hookGrant.boundWorkspace === null ? "当前助理的所有工作目录" : JSON.stringify(hookGrant.boundWorkspace)}。网络和子进程禁止。授权仅对这个不可变版本有效，启用后会在匹配事件中持续生效。是否授权？`;
+    if (Buffer.byteLength(question, "utf8") > 4096) throw helperError("MCP_TOOL_CAPACITY", "hook_grant_preflight_failed");
+    return [{ header: "确认授权", id: "confirm_product_action", question,
+      options: [{ label: "确认执行", description: "仅授权上述版本、数据和目录范围。" },
+        { label: "取消", description: "不授权此版本。" }] }];
+  }
   if (name === "native_agent_archive" || name === "native_agent_update") {
     const target = `${JSON.stringify(nativeAgent.name)}（${args.backendId}/${args.agentId}）`;
     const changes = [
@@ -624,17 +780,29 @@ function confirmationQuestionFor(name, args, nativeAgent = null) {
         { label: "取消", description: "不修改任何产品状态。" }],
     }];
   }
+  if (name === "app_manage") {
+    const input = args.arguments;
+    const target = input.jobId || input.cardId || input.boardId || input.agentId || args.targetProfileId;
+    const details = JSON.stringify(input);
+    const preview = [...details].slice(0, 900).join("");
+    return [{ header: "确认管理", id: "confirm_product_action",
+      question: `Shoggoth 将执行 ${args.operation}。后端：${args.backendId}；目标：${target}；归属：${args.targetProfileId || "按目标核对"}；版本：${args.expectedRevision || "新建"}。参数：${preview}${details.length > preview.length ? "…（参数较长）" : ""}。是否执行这一次操作？`,
+      options: [{ label: "确认执行", description: "授权这一次列出的目标与操作。" }, { label: "取消", description: "不修改 App 数据。" }],
+    }];
+  }
   const targetFactories = {
     cron_delete: () => `Cron Job ${args.jobId}`,
     inspiration_delete: () => `灵感 ${args.id}（版本 ${args.expectedRevision}）`,
+    web_defaults_set: () => `统一联网默认设置（${Object.entries(args.config).map(([key, value]) => `${key === "searchProvider" ? "搜索" : "网页读取"}：${value}`).join("；")}；未列出的选项不变；影响所有跟随默认的原生 Agent 和 HEARTBEAT，保留独立选择；设置版本 ${args.expectedRevision}）`,
     inspiration_growth_set: () => `灵感自动执行设置（${args.enabled
       ? "开启后将自动分派已保存的便签"
       : "暂停新的自动分派；正在执行的任务会继续"}；执行者：${args.executors.map(value => `${value.backendId}/${value.agentId}`).join(", ") || "无"}；设置版本 ${args.expectedRevision}）`,
     external_agent_update: () => `${args.backendId} Agent ${args.agentId}`,
     external_agent_delete: () => `${args.backendId} Agent ${args.agentId}`,
     external_agent_file_write: () => `${args.backendId} Agent ${args.agentId} 的 ${args.file}`,
-    computer_session_open: () => `Computer Use 会话（${args.allowedApplications.join(", ")}）`,
+    computer_session_open: () => `Computer Use 会话（${args.allowedApplications.join(", ")}；随当前任务结束）`,
     computer_session_resume: () => `Computer Use 会话 ${args.sessionId}`,
+    browser_session_open: () => `Browser Use 会话（随当前任务结束；使用本机 Chrome，运行与登录状态模式遵循设置）`,
     skill_install_global: () => `全局 Skill 包 ${JSON.stringify(args.sourcePath)}`,
     mcp_server_register: () => `共享 MCP Server ${JSON.stringify(args.name)}（${args.id}；${JSON.stringify(args.command)}）`,
     mcp_server_remove: () => `共享 MCP Server ${args.id}（仅移除注册，不删除安装文件）`,
@@ -680,11 +848,15 @@ function jsonRpcResult(id, result) {
   return { jsonrpc: "2.0", id, result };
 }
 
-function toolSuccessResponse(id, result) {
+function toolSuccessResponse(id, result, toolName) {
   const content = [{ type: "text", text: JSON.stringify(result) }];
-  let response = jsonRpcResult(id, { content, structuredContent: result, isError: false });
+  // Browser calls and workspace commands return an execution outcome inside a
+  // successful Service RPC. Preserve their real failure in the MCP envelope.
+  const isError = (toolName === "browser_tool_call" && result?.isError === true)
+    || (toolName === "workspace_execute" && Number.isInteger(result?.exitCode) && result.exitCode !== 0);
+  let response = jsonRpcResult(id, { content, structuredContent: result, isError });
   if (Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES) return response;
-  response = jsonRpcResult(id, { content, isError: false });
+  response = jsonRpcResult(id, { content, isError });
   if (Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES) return response;
   throw helperError("MCP_HELPER_RESPONSE_TOO_LARGE", "mcp_helper_response_too_large");
 }
@@ -700,7 +872,7 @@ function toolListPages(definitions) {
     // Reserve room for the JSON-RPC envelope, escaped request ID and cursor.
     while (end < definitions.length) {
       const size = Buffer.byteLength(JSON.stringify(definitions[end]), "utf8") + 1;
-      if (bytes + size > MCP_MAX_FRAME_BYTES - 2048) break;
+      if (bytes + size > MCP_MAX_CATALOG_FRAME_BYTES - 2048) break;
       tools.push(structuredClone(definitions[end++]));
       bytes += size;
     }
@@ -713,6 +885,40 @@ function toolListPages(definitions) {
   return pages;
 }
 
+// Pi, OpenCode and DeepSeek give the model only the text content, and several
+// models have no image input, so the text repeats the revision and element refs
+// the action tools need. One line per element keeps the 64 KiB frame budget;
+// the full values stay in structuredContent.
+function computerSnapshotText(snapshot, includeImage, includeFrames) {
+  const lines = [
+    includeImage ? "Shoggoth Computer Use snapshot captured"
+      : "Shoggoth Computer Use snapshot captured without an inline image",
+    `sessionId=${snapshot.sessionId} snapshotRevision=${snapshot.snapshotRevision}`
+      + ` pid=${snapshot.pid} windowId=${snapshot.windowId}`,
+    "Action tools take this snapshotRevision, pid and windowId with one ref from the list below."
+      + " Take a new snapshot after every action.",
+  ];
+  const truncated = snapshot.outputTruncated;
+  if (truncated && truncated.returnedElementCount < truncated.originalElementCount) {
+    lines.push(`Only the first ${truncated.returnedElementCount} of ${truncated.originalElementCount} elements are listed.`);
+  }
+  lines.push(`Elements (ref role "label" value${includeFrames ? " x,y,width,height" : ""}):`);
+  for (const element of snapshot.elements) {
+    const frame = element?.frame && typeof element.frame === "object" ? element.frame : {};
+    const box = [frame.x, frame.y, frame.w ?? frame.width, frame.h ?? frame.height];
+    const value = typeof element?.value === "string" ? element.value : "";
+    lines.push([
+      element?.ref,
+      element?.role || "unknown",
+      JSON.stringify(typeof element?.label === "string" ? element.label : ""),
+      ...(value ? [`value=${JSON.stringify(value.length > 200 ? `${value.slice(0, 200)}…` : value)}`] : []),
+      ...(element?.secure === true ? ["secure"] : []),
+      ...(includeFrames && box.every(Number.isFinite) ? [box.join(",")] : []),
+    ].join(" "));
+  }
+  return lines.join("\n");
+}
+
 function computerSnapshotResponse(id, result, thumbnail, mimeType) {
   if (!Array.isArray(result?.elements) || typeof result.tree !== "string") {
     throw helperError("MCP_HELPER_RESPONSE_INVALID", "mcp_helper_response_invalid");
@@ -721,14 +927,12 @@ function computerSnapshotResponse(id, result, thumbnail, mimeType) {
   delete structuredContent.image.thumbnail;
   const originalElementCount = structuredContent.elements.length;
   let includeImage = true;
+  let includeFrames = true;
   const build = () => jsonRpcResult(id, {
-    content: includeImage ? [
-      { type: "image", data: thumbnail, mimeType },
-      { type: "text", text: "Shoggoth Computer Use snapshot captured" },
-    ] : [{
-      type: "text",
-      text: "Shoggoth Computer Use snapshot captured without an inline image",
-    }],
+    content: [
+      ...(includeImage ? [{ type: "image", data: thumbnail, mimeType }] : []),
+      { type: "text", text: computerSnapshotText(structuredContent, includeImage, includeFrames) },
+    ],
     structuredContent,
     isError: false,
   });
@@ -744,6 +948,11 @@ function computerSnapshotResponse(id, result, thumbnail, mimeType) {
     originalElementCount,
     returnedElementCount: originalElementCount,
   };
+  response = build();
+  if (fits(response)) return response;
+
+  // Frames are also in structuredContent; drop them from the text before the image.
+  includeFrames = false;
   response = build();
   if (fits(response)) return response;
 
@@ -795,8 +1004,11 @@ function createMcpStdioHandler(options = {}) {
     || (options.sessionExpiresAt !== undefined
       && (!Number.isSafeInteger(options.sessionExpiresAt) || options.sessionExpiresAt < 0))
     || (options.refreshSession !== undefined && typeof options.refreshSession !== "function")
+    || (options.interactionClient !== undefined && typeof options.interactionClient !== "function")
     || (options.now !== undefined && typeof options.now !== "function")
-    || (options.randomUUID !== undefined && typeof options.randomUUID !== "function")) {
+    || (options.randomUUID !== undefined && typeof options.randomUUID !== "function")
+    || (options.setInterval !== undefined && typeof options.setInterval !== "function")
+    || (options.clearInterval !== undefined && typeof options.clearInterval !== "function")) {
     throw helperError("MCP_HELPER_OPTIONS_INVALID", "mcp_helper_options_invalid");
   }
   const requestService = options.requestService;
@@ -809,8 +1021,17 @@ function createMcpStdioHandler(options = {}) {
     || typeof instructions !== "string" || !instructions) {
     throw helperError("MCP_HELPER_OPTIONS_INVALID", "mcp_helper_options_invalid");
   }
+  const toolExposure = options.toolExposure ?? "all";
+  if (!["all", "resident"].includes(toolExposure)) {
+    throw helperError("MCP_HELPER_OPTIONS_INVALID", "mcp_helper_options_invalid");
+  }
+  // Every defined tool stays callable; "resident" only shortens tools/list.
   const allowedTools = new Set(toolDefinitions.map((definition) => definition.name));
-  const toolPages = toolListPages(toolDefinitions);
+  const toolPages = toolListPages([...(toolExposure === "resident"
+    ? productToolExposure.residentToolDefinitions(toolDefinitions) : toolDefinitions),
+  productToolResults.PRODUCT_RESULT_READ_DEFINITION].map(withActivityTitle));
+  // Full text of large results returned as previews; see product-tool-results.js.
+  const resultCache = new productToolResults.ProductResultCache();
   const paths = options.paths || resolveCanonicalServicePaths();
   const serviceVersion = typeof options.serviceVersion === "string" ? options.serviceVersion : "0.0.0";
   const refreshSession = options.refreshSession || null;
@@ -829,9 +1050,27 @@ function createMcpStdioHandler(options = {}) {
   let sessionExpiresAt = options.sessionExpiresAt ?? Number.MAX_SAFE_INTEGER;
   let initialized = false;
   let closed = false;
+  let groupExposureTimer = null;
   let refreshPromise = null;
   let generation = 0;
   let supportsElicitation = false;
+  const exposureInstanceId = randomUUID();
+  const exposedGroupTools = new Set();
+  const reportGroupExposure = async (tools = [...exposedGroupTools]) => {
+    if (options.reportGroupExposure !== true || !sessionToken || !tools.length && !closed) return;
+    try {
+      await requestService(paths, { version: MCP_SERVICE_PROTOCOL_VERSION, method: "mcp.group.exposure", params: {
+        runtimeProfileId, runtimeAccountId, sessionToken, instanceId: exposureInstanceId,
+        protocolVersion: 2, tools,
+      } }, { timeoutMs: 1000 });
+    } catch { /* Capability observation cannot break the existing MCP session. */ }
+  };
+  // A Service-hosted session asks its user through the Service itself, so a product
+  // confirmation never depends on whether (or how) a Runtime forwards MCP elicitation.
+  const interactionClient = options.interactionClient || null;
+  const canAskUser = context => interactionClient !== null
+    || (supportsElicitation && typeof context.requestClient === "function");
+  const askUser = (context, method, params) => (interactionClient || context.requestClient)(method, params);
 
   const refresh = async () => {
     if (!refreshSession || closed) {
@@ -842,16 +1081,17 @@ function createMcpStdioHandler(options = {}) {
       const pending = withTimeout(
         Promise.resolve().then(() => refreshSession()),
         refreshTimeoutMs,
-        () => helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed"),
-      ).then((nextSession) => {
+        () => helperError("MCP_HELPER_SERVICE_UNAVAILABLE", "mcp_helper_service_unavailable"),
+      ).then(async (nextSession) => {
         if (closed || generation !== refreshGeneration
           || !validateSession(nextSession, { runtimeProfileId, runtimeAccountId })) {
           throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
         }
         sessionToken = nextSession.token;
         sessionExpiresAt = nextSession.expiresAt;
-      }).catch(() => {
-        throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
+        await reportGroupExposure();
+      }).catch(error => {
+        throw authenticationError(error);
       });
       const tracked = pending.finally(() => {
         if (refreshPromise === tracked) refreshPromise = null;
@@ -879,7 +1119,12 @@ function createMcpStdioHandler(options = {}) {
       arguments: args,
       ...(confirmed ? { confirmation: true } : {}),
     },
-  }, { timeoutMs: MCP_TOOL_SERVICE_TIMEOUT_MS });
+  // Plugin calls can first await per-use approval, then execute with their own
+  // bounded tool/input window. The envelope must cover both sequential phases.
+  }, { timeoutMs: name === "workspace_execute" ? DEFAULT_MCP_TOOL_TIMEOUT_MS
+    : name === "mcp_server_call" ? 2 * DEFAULT_SERVER_REQUEST_TIMEOUT_MS + MCP_TOOL_SERVICE_TIMEOUT_MS
+    : name === "external_agent_run" ? DEFAULT_SERVER_REQUEST_TIMEOUT_MS + MCP_TOOL_SERVICE_TIMEOUT_MS : USER_WAIT_TOOL_NAMES.has(name)
+    ? DEFAULT_SERVER_REQUEST_TIMEOUT_MS + MCP_TOOL_SERVICE_TIMEOUT_MS : MCP_TOOL_SERVICE_TIMEOUT_MS });
 
   const invokeTool = async (name, args, confirmed = false, context = {}) => {
     let callId;
@@ -945,8 +1190,63 @@ function createMcpStdioHandler(options = {}) {
         return jsonRpcError(message.id, -32602, "Invalid params");
       }
       const page = toolPages.get(params.cursor ?? "");
+      if (page && options.reportGroupExposure === true) {
+        for (const tool of page.tools) if (require("./agent-service/group-mcp-tools").isGroupMcpTool(tool.name)) exposedGroupTools.add(tool.name);
+        await reportGroupExposure();
+        if (refreshSession && groupExposureTimer === null && exposedGroupTools.size) {
+          groupExposureTimer = (options.setInterval || setInterval)(() => {
+            void handler.maintainGroupExposure().catch(() => {});
+          }, 60_000);
+          groupExposureTimer.unref?.();
+        }
+      }
       return page ? jsonRpcResult(message.id, structuredClone(page))
         : jsonRpcError(message.id, -32602, "Invalid params");
+    }
+    // Strip only bounded display metadata before dispatch, validation, confirmation
+    // and Hook handling. Runtime events retain the original per-call arguments.
+    if (message.method === "tools/call" && hasId && Object.hasOwn(message.params || {}, "arguments")) {
+      const activity = splitActivityArguments(message.params.arguments);
+      if (!activity.valid) return jsonRpcError(message.id, -32602, "Invalid activityTitle");
+      if (activity.arguments !== message.params.arguments) message = { ...message, params: { ...message.params, arguments: activity.arguments } };
+    }
+    if (message.method === "tools/call" && hasId && message.params?.name === productToolResults.PRODUCT_RESULT_READ) {
+      const params = message.params;
+      if (!(exactObject(params, ["name", "arguments"]) || exactObject(params, ["name", "arguments", "_meta"]))
+        || (Object.hasOwn(params, "_meta") && !boundedJsonObject(params._meta, 4 * 1024))) {
+        return jsonRpcError(message.id, -32602, "Invalid params");
+      }
+      const page = productToolResults.validReadArguments(params.arguments)
+        ? resultCache.read(params.arguments.resultRef, params.arguments.offset, params.arguments.length) : null;
+      if (!page) {
+        return jsonRpcResult(message.id, { content: [{ type: "text", text: "product_result_read needs a current resultRef and offset; the result may have expired, so call the original tool again." }],
+          structuredContent: { error: { code: "MCP_TOOL_INVALID_ARGUMENTS" } }, isError: true });
+      }
+      return jsonRpcResult(message.id, { content: [{ type: "text", text: JSON.stringify(page) }], structuredContent: page, isError: false });
+    }
+    if (message.method === "tools/call" && hasId && toolExposure === "resident"
+      && productToolExposure.ENTRY_TOOL_NAMES.has(message.params?.name)) {
+      const params = message.params;
+      if (!(exactObject(params, ["name", "arguments"]) || exactObject(params, ["name", "arguments", "_meta"]))
+        || (Object.hasOwn(params, "_meta") && !boundedJsonObject(params._meta, 4 * 1024))) {
+        return jsonRpcError(message.id, -32602, "Invalid params");
+      }
+      const entryError = text => jsonRpcResult(message.id, { content: [{ type: "text", text }],
+        structuredContent: { error: { code: "MCP_TOOL_INVALID_ARGUMENTS" } }, isError: true });
+      if (params.name === productToolExposure.PRODUCT_TOOL_SEARCH) {
+        if (!productToolExposure.validSearchArguments(params.arguments)) {
+          return entryError("product_tool_search needs { query: string (≤200), limit?: 1-10 }.");
+        }
+        const found = productToolExposure.searchProductTools(toolDefinitions, params.arguments);
+        return jsonRpcResult(message.id, { content: [{ type: "text", text: JSON.stringify(found) }],
+          structuredContent: found, isError: false });
+      }
+      if (!productToolExposure.validCallArguments(params.arguments) || !allowedTools.has(params.arguments.name)) {
+        return entryError("product_tool_call needs { name, arguments } with the exact name of a Shoggoth product tool from product_tool_search.");
+      }
+      // Route as an ordinary call so confirmations and permissions are the named tool's own.
+      return handler({ ...message, params: { name: params.arguments.name, arguments: params.arguments.arguments,
+        ...(Object.hasOwn(params, "_meta") ? { _meta: params._meta } : {}) } }, context);
     }
     if (message.method === "tools/call" && hasId) {
       const hasArguments = exactObject(message.params, ["name", "arguments"])
@@ -964,12 +1264,12 @@ function createMcpStdioHandler(options = {}) {
       const toolArguments = hasArguments ? message.params.arguments : {};
       if (message.params.name === "request_user_input") {
         const questions = validateRequestUserInputArguments(toolArguments);
-        if (!questions || !supportsElicitation || typeof context.requestClient !== "function") {
+        if (!questions || !canAskUser(context)) {
           return jsonRpcError(message.id, -32602, "Invalid params");
         }
         try {
-          const elicitation = await context.requestClient(
-            "elicitation/create", elicitationParamsFor(questions),
+          const elicitation = await askUser(
+            context, "elicitation/create", elicitationParamsFor(questions),
           );
           const result = normalizeElicitationResult(elicitation, questions);
           return jsonRpcResult(message.id, {
@@ -985,10 +1285,64 @@ function createMcpStdioHandler(options = {}) {
         }
       }
       if (!validateMcpProductToolArguments(message.params.name, toolArguments)) {
-        return jsonRpcError(message.id, -32602, "Invalid params");
+        return invalidToolArgumentsResponse(message.id, message.params.name, toolArguments);
       }
       let nativeAgent = null;
+      let hookGrant = null;
+      let plugin = null;
+      let group = null;
+      let management = null;
       try {
+        // The confirmation text is built from the Service's own current view of
+        // the draft or installation, never from model-supplied descriptions.
+        if (message.params.name === "group_chat_dispatch") {
+          group = cloneMcpServiceResult(await invokeTool("group_chat_get", { groupId: toolArguments.groupId }, false, context));
+        }
+        if (["group_chat_create", "group_chat_members_add"].includes(message.params.name)) {
+          management = cloneMcpServiceResult(await invokeTool("group_chat_prepare",
+            groupManagementRequest(message.params.name, toolArguments), false, context));
+          if (management?.ok !== true) return jsonRpcResult(message.id, { content: [{ type: "text",
+            text: management?.message || "群或成员当前不可用，请重新读取。" }], structuredContent: management, isError: true });
+          if (management.ownerScope !== toolArguments.ownerScope) throw helperError("MCP_TOOL_STATE_CONFLICT", "group_management_preflight_failed");
+          if (management.state === "completed") {
+            if (management.receipt?.previewDigest !== toolArguments.previewDigest) throw helperError("MCP_TOOL_STATE_CONFLICT", "group_management_preflight_failed");
+            return jsonRpcResult(message.id, { content: [{ type: "text", text: JSON.stringify(management.receipt) }],
+              structuredContent: management.receipt, isError: false });
+          }
+        }
+        if (message.params.name === "plugin_install") {
+          plugin = cloneMcpServiceResult(await invokeTool("plugin_status", {
+            draftId: toolArguments.draftId }, false, context));
+          if (plugin?.draftId !== toolArguments.draftId || plugin.installable !== true
+            || plugin.previewDigest !== toolArguments.previewDigest
+            || !Array.isArray(plugin.previewComponents?.skills)
+            || !Array.isArray(plugin.previewComponents?.mcpServers)) {
+            throw helperError("MCP_TOOL_STATE_CONFLICT", "plugin_install_preflight_failed");
+          }
+        }
+        if (message.params.name === "plugin_activate") {
+          plugin = cloneMcpServiceResult(await invokeTool("plugin_setup_get", {
+            installationId: toolArguments.installationId }, false, context));
+          if (plugin?.installationId !== toolArguments.installationId
+            || plugin.releaseDigest !== toolArguments.releaseDigest || !Array.isArray(plugin.components)) {
+            throw helperError("MCP_TOOL_STATE_CONFLICT", "plugin_activate_preflight_failed");
+          }
+        }
+        if (message.params.name === "hook_grant") {
+          hookGrant = cloneMcpServiceResult(await invokeTool("hook_get", {
+            hookId: toolArguments.hookId, version: toolArguments.version,
+          }, false, context));
+          if (!hookGrant?.definition || typeof hookGrant.contentDigest !== "string"
+            || !/^[a-f0-9]{64}$/u.test(hookGrant.contentDigest)) throw helperError("MCP_TOOL_RESPONSE_INVALID", "hook_grant_preflight_failed");
+        }
+        if (message.params.name === "browser_session_open") {
+          const state = cloneMcpServiceResult(await invokeTool("browser_status", {}, false, context));
+          if (state?.available !== true) {
+            const reason = Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, state?.reason || "")
+              ? state.reason : "BROWSER_SERVICE_UNAVAILABLE";
+            throw helperError(reason, "browser_preflight_failed");
+          }
+        }
         if (["computer_session_open", "computer_session_resume"].includes(message.params.name)) {
           const state = cloneMcpServiceResult(await invokeTool("computer_status", {}, false, context));
           if (state?.available !== true) {
@@ -1022,23 +1376,25 @@ function createMcpStdioHandler(options = {}) {
           }
         }
       } catch (error) { return toolFailureResponse(message.id, error); }
-      const confirmation = confirmationQuestionFor(message.params.name, toolArguments, nativeAgent);
+      let confirmation;
+      try { confirmation = confirmationQuestionFor(message.params.name, toolArguments, nativeAgent, hookGrant, plugin, group, management); }
+      catch (error) { return toolFailureResponse(message.id, error); }
       let confirmed = false;
       if (confirmation) {
-        if (!supportsElicitation || typeof context.requestClient !== "function") {
+        if (!canAskUser(context)) {
           return jsonRpcResult(message.id, {
             content: [{ type: "text", text: "该操作需要用户确认，但当前客户端不支持确认。" }],
             isError: true,
           });
         }
         try {
-          const elicitation = await context.requestClient(
-            "elicitation/create", elicitationParamsFor(confirmation),
-          );
+          const params = elicitationParamsFor(confirmation);
+          params._meta = { [PRODUCT_CONFIRMATION_META]: productConfirmationIdentity(message.params.name, toolArguments) };
+          const elicitation = await askUser(context, "elicitation/create", params);
           const normalized = normalizeElicitationResult(elicitation, confirmation);
           if (normalized.answers.confirm_product_action?.answers?.[0] !== "确认执行") {
             return jsonRpcResult(message.id, {
-              content: [{ type: "text", text: "用户已取消操作。" }],
+              content: [{ type: "text", text: "操作未获确认，未执行。" }],
               structuredContent: { canceled: true },
               isError: false,
             });
@@ -1064,17 +1420,31 @@ function createMcpStdioHandler(options = {}) {
           }
           return computerSnapshotResponse(message.id, result, thumbnail, mimeType);
         }
-        return toolSuccessResponse(message.id, result);
+        const paged = productToolResults.pagedResult(resultCache, message.params.name, result);
+        return toolSuccessResponse(message.id, paged ?? result, message.params.name);
       } catch (error) {
         return toolFailureResponse(message.id, error);
       }
     }
     return hasId ? jsonRpcError(message.id, -32601, "Method not found") : null;
   };
+  handler.maintainGroupExposure = async () => {
+    // A configured but unused helper must never initiate periodic authentication.
+    // Renew only an inventory this current Runtime actually consumed; no tool
+    // action, group grant or model turn is issued by this heartbeat.
+    if (closed || !initialized || options.reportGroupExposure !== true || !exposedGroupTools.size || !refreshSession) return false;
+    if (sessionExpiresAt - now() <= Math.max(sessionRefreshSkewMs, 60_000)) await refresh();
+    else await reportGroupExposure();
+    return !closed;
+  };
   handler.close = () => {
+    if (groupExposureTimer !== null) {
+      (options.clearInterval || clearInterval)(groupExposureTimer); groupExposureTimer = null;
+    }
     initialized = false;
     supportsElicitation = false;
     closed = true;
+    void reportGroupExposure([]);
     generation += 1;
     sessionToken = null;
     sessionExpiresAt = 0;
@@ -1093,59 +1463,58 @@ async function writeJsonLine(output, payload, maxFrameBytes, outputTimeoutMs) {
     serialized = null;
   }
   payload = null;
-  try {
-    await new Promise((resolve, reject) => {
-      let timer = null;
-      let settled = false;
-      let writeCompleted = false;
-      let drainCompleted = false;
-      let fallback = null;
-      const cleanup = () => {
-        if (timer) clearTimeout(timer);
-        if (fallback) clearImmediate(fallback);
-        output.off("drain", onDrain);
-        output.off("error", onError);
-        output.off("close", onClose);
-      };
-      const settle = (error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        if (error) reject(error);
-        else resolve();
-      };
-      const maybeResolve = () => {
-        if (writeCompleted && drainCompleted) settle();
-      };
-      const onDrain = () => { drainCompleted = true; maybeResolve(); };
-      const onError = () => settle(helperError("MCP_HELPER_OUTPUT_FAILED", "mcp_helper_output_failed"));
-      const onClose = () => settle(helperError("MCP_HELPER_OUTPUT_CLOSED", "mcp_helper_output_closed"));
-      const onTimeout = () => settle(helperError("MCP_HELPER_OUTPUT_TIMEOUT", "mcp_helper_output_timeout"));
-      const onWrite = (error) => {
-        if (error) { onError(); return; }
-        writeCompleted = true;
-        maybeResolve();
-      };
-      output.once("drain", onDrain);
-      output.once("error", onError);
-      output.once("close", onClose);
-      timer = setTimeout(onTimeout, outputTimeoutMs);
-      try {
-        const accepted = output.write(frame, onWrite);
-        drainCompleted = accepted === true;
-        // 轻量测试/嵌入式 sink 可能不实现 write callback；至少跨过一个事件循环，
-        // 让 write(true) 紧随其后的 EPIPE/error 有机会在 listener 存活期内收敛。
-        if (output.write.length < 2) fallback = setImmediate(() => onWrite());
-        if (output.destroyed || output.closed || output.writableEnded) onClose();
-        else maybeResolve();
-      } catch {
-        onError();
-      }
-    });
-  } finally {
-    frame.fill(0);
-    frame = null;
-  }
+  await new Promise((resolve, reject) => {
+    let timer = null;
+    let settled = false;
+    let writeCompleted = false;
+    let drainCompleted = false;
+    const releaseFrame = () => {
+      if (frame) frame.fill(0);
+      frame = null;
+    };
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      output.off("drain", onDrain);
+      output.off("error", onError);
+      output.off("close", onClose);
+    };
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const maybeResolve = () => {
+      if (writeCompleted && drainCompleted) settle();
+    };
+    const onDrain = () => { drainCompleted = true; maybeResolve(); };
+    const onError = () => settle(helperError("MCP_HELPER_OUTPUT_FAILED", "mcp_helper_output_failed"));
+    const onClose = () => settle(helperError("MCP_HELPER_OUTPUT_CLOSED", "mcp_helper_output_closed"));
+    const onTimeout = () => settle(helperError("MCP_HELPER_OUTPUT_TIMEOUT", "mcp_helper_output_timeout"));
+    const onWrite = (error) => {
+      // A timeout/error does not release a pending write's buffer. Wiping it
+      // before this callback can put literal NUL bytes onto the MCP wire.
+      // Keep this callback alive even after the session has failed/closed.
+      releaseFrame();
+      if (error) { onError(); return; }
+      writeCompleted = true;
+      maybeResolve();
+    };
+    output.once("drain", onDrain);
+    output.once("error", onError);
+    output.once("close", onClose);
+    timer = setTimeout(onTimeout, outputTimeoutMs);
+    try {
+      const accepted = output.write(frame, onWrite);
+      drainCompleted ||= accepted === true;
+      if (output.destroyed || output.closed || output.writableEnded) onClose();
+      else maybeResolve();
+    } catch {
+      releaseFrame();
+      onError();
+    }
+  });
 }
 
 async function runMcpStdioSession(options = {}) {
@@ -1158,26 +1527,33 @@ async function runMcpStdioSession(options = {}) {
     ?? MCP_CLIENT_REQUEST_TIMEOUT_MS;
   if (!input || typeof input[Symbol.asyncIterator] !== "function"
     || !output || typeof output.write !== "function"
-    || typeof output.once !== "function" || typeof output.off !== "function"
+    || typeof output.on !== "function" || typeof output.once !== "function"
+    || typeof output.off !== "function"
     || typeof handler !== "function"
     || !Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < 1024
     || maxFrameBytes > 1024 * 1024
     || !Number.isSafeInteger(outputTimeoutMs) || outputTimeoutMs < 1
     || outputTimeoutMs > 30_000
     || !Number.isSafeInteger(clientRequestTimeoutMs) || clientRequestTimeoutMs < 10
-    || clientRequestTimeoutMs > 10 * 60_000) {
+    || clientRequestTimeoutMs > DEFAULT_SERVER_REQUEST_TIMEOUT_MS) {
     throw helperError("MCP_HELPER_OPTIONS_INVALID", "mcp_helper_options_invalid");
   }
   let buffered = Buffer.alloc(0);
   let requestSequence = 0;
   let outputTail = Promise.resolve();
   let sessionError = null;
+  let signalFailure;
+  const failed = new Promise(resolve => { signalFailure = resolve; });
   const pendingClientRequests = new Map();
   const handlerTasks = new Set();
-  const emit = (payload) => {
-    const current = outputTail.catch(() => {}).then(
-      () => writeJsonLine(output, payload, maxFrameBytes, outputTimeoutMs),
-    );
+  const emit = (payload, frameLimit = maxFrameBytes) => {
+    const current = outputTail.then(() => {
+      if (sessionError) throw sessionError;
+      return writeJsonLine(output, payload, frameLimit, outputTimeoutMs);
+    });
+    // Output failure is fatal to this connection. Do not send later responses
+    // after a truncated frame or leave the input loop waiting for another request.
+    current.catch(failSession);
     outputTail = current;
     return current;
   };
@@ -1188,21 +1564,50 @@ async function runMcpStdioSession(options = {}) {
     }
     pendingClientRequests.clear();
   };
+  const failSession = (error) => {
+    if (sessionError) return;
+    sessionError = error;
+    signalFailure();
+    rejectPendingClientRequests();
+    handler.close?.();
+    output.destroy?.();
+    if (input !== output) input.destroy?.();
+  };
+  const onOutputError = () => failSession(helperError("MCP_HELPER_OUTPUT_FAILED", "mcp_helper_output_failed"));
+  const cleanupOutput = () => {
+    output.off("error", onOutputError);
+    output.off("close", onOutputClose);
+  };
+  const onOutputClose = () => {
+    failSession(helperError("MCP_HELPER_OUTPUT_CLOSED", "mcp_helper_output_closed"));
+    cleanupOutput();
+  };
+  output.on("error", onOutputError);
+  output.once("close", onOutputClose);
   const requestClient = async (method, params) => {
-    if (method !== "elicitation/create" || !boundedJsonObject(params, 16 * 1024)
-      || pendingClientRequests.size >= 8) {
+    if (sessionError || method !== "elicitation/create" || !boundedJsonObject(params, 16 * 1024)
+      // Binding proofs must accommodate a parallel roster read batch while
+      // retaining a bounded number of client requests.
+      || pendingClientRequests.size >= 128) {
       throw helperError("MCP_HELPER_CLIENT_REQUEST_FAILED", "mcp_helper_client_request_failed");
     }
     requestSequence += 1;
     const id = `shoggoth-elicitation-${requestSequence}`;
+    // Match the Service card's approval lifetime. Binding proofs and ordinary
+    // input retain a finite transport deadline; EOF/error still rejects every
+    // pending request. A short helper timer must not leave a live, unusable card.
+    const approvalWait = Object.hasOwn(params.requestedSchema?.properties ?? {}, "confirm_product_action")
+      && serverRequestUsesApprovalWait("mcpServer/elicitation/request", { ...params, serverName: "shoggoth", mode: "form" });
     let timer;
     const response = new Promise((resolve, reject) => {
-      timer = setTimeout(() => {
+      if (!approvalWait) timer = setTimeout(() => {
         pendingClientRequests.delete(id);
         reject(helperError("MCP_HELPER_CLIENT_REQUEST_FAILED", "mcp_helper_client_request_failed"));
       }, clientRequestTimeoutMs);
       pendingClientRequests.set(id, { resolve, reject, timer });
     });
+    // A transport failure may reject the response while emit is still pending.
+    response.catch(() => {});
     try {
       await emit({ jsonrpc: "2.0", id, method, params });
     } catch {
@@ -1235,20 +1640,24 @@ async function runMcpStdioSession(options = {}) {
   const dispatch = (message) => {
     let task;
     task = Promise.resolve().then(async () => {
+      if (sessionError) return;
       let response;
       try {
         response = await handler(message, { requestClient });
       } catch {
         response = jsonRpcError(message?.id, -32603, "Internal error");
       }
-      if (response) await emit(response);
-    }).catch((error) => {
-      sessionError ||= error;
-    }).finally(() => handlerTasks.delete(task));
+      if (response) await emit(response, message.method === "tools/list"
+        ? Math.max(maxFrameBytes, MCP_MAX_CATALOG_FRAME_BYTES) : maxFrameBytes);
+    }).catch(failSession).finally(() => handlerTasks.delete(task));
     handlerTasks.add(task);
   };
-  try {
+  const readInput = async () => {
     for await (const chunk of input) {
+      if (sessionError) {
+        if (Buffer.isBuffer(chunk)) chunk.fill(0);
+        break;
+      }
       const previous = buffered;
       let incoming = null;
       let next = null;
@@ -1263,7 +1672,7 @@ async function runMcpStdioSession(options = {}) {
         if (Buffer.isBuffer(chunk)) chunk.fill(0);
         if (next) next.fill(0);
       }
-      while (true) {
+      while (!sessionError) {
         const newline = buffered.indexOf(0x0a);
         if (newline < 0) {
           if (buffered.length > maxFrameBytes) {
@@ -1295,14 +1704,22 @@ async function runMcpStdioSession(options = {}) {
         if (!consumeClientResponse(message)) dispatch(message);
       }
     }
-    if (buffered.length > 0) await emit(jsonRpcError(null, -32700, "Parse error"));
+    if (!sessionError && buffered.length > 0) await emit(jsonRpcError(null, -32700, "Parse error"));
+  };
+  try {
+    await Promise.race([readInput(), failed]);
+    rejectPendingClientRequests();
+    // Successful EOF drains in-flight handlers. A broken transport must not wait
+    // for a tool or a user confirmation that can no longer deliver its result.
+    await Promise.race([Promise.allSettled([...handlerTasks]), failed]);
+    if (!sessionError) await outputTail;
   } catch (error) {
-    sessionError ||= error;
+    failSession(error);
   } finally {
     buffered.fill(0);
     rejectPendingClientRequests();
-    await Promise.allSettled([...handlerTasks]);
-    try { await outputTail; } catch (error) { sessionError ||= error; }
+    // Keep the error listener through asynchronous destroy/write callbacks.
+    if (!sessionError || output.closed) cleanupOutput();
   }
   if (sessionError) throw sessionError;
 }
@@ -1316,7 +1733,8 @@ async function startShoggothMcpHelper(options = {}) {
   try {
     const binding = options.runtimeProfileId !== undefined
       || options.runtimeAccountId !== undefined
-      ? { runtimeProfileId: options.runtimeProfileId, runtimeAccountId: options.runtimeAccountId }
+      ? { runtimeProfileId: options.runtimeProfileId, runtimeAccountId: options.runtimeAccountId,
+        toolExposure: options.toolExposure ?? "all" }
       : parseMcpRuntimeBinding(options.argv || process.argv.slice(1));
     if (!validRuntimeProfileId(binding.runtimeProfileId)
       || !validRuntimeAccountId(binding.runtimeAccountId)) {
@@ -1456,6 +1874,7 @@ async function startShoggothMcpHelper(options = {}) {
       fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
     ).version;
     handler = createMcpStdioHandler({
+      reportGroupExposure: true,
       paths,
       runtimeProfileId,
       runtimeAccountId,
@@ -1463,6 +1882,8 @@ async function startShoggothMcpHelper(options = {}) {
       sessionExpiresAt: session.expiresAt,
       serviceVersion,
       bindRuntimeCalls: true,
+      toolDefinitions: options.toolDefinitions,
+      toolExposure: binding.toolExposure,
       requestService: options.requestService || defaultRequestService,
       refreshSession: loadSession,
       now: options.now,
@@ -1492,6 +1913,7 @@ async function startShoggothMcpHelper(options = {}) {
 
 module.exports = {
   MCP_MAX_FRAME_BYTES,
+  MCP_MAX_CATALOG_FRAME_BYTES,
   MCP_CLIENT_REQUEST_TIMEOUT_MS,
   MCP_RUNTIME_ACCOUNT_PREFIX,
   MCP_RUNTIME_PROFILE_PREFIX,

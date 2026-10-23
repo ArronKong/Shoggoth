@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import type { IncomingMessage } from "node:http";
 import type { ProxyOptions } from "vite";
+import { debugInspectorSource } from "./debug-inspector-source.ts";
 
 const DEV_WS_TARGET = "http://127.0.0.1:18799";
 
@@ -46,7 +47,7 @@ function devWsProxy(): ProxyOptions {
 // static-server.js.
 export default defineConfig({
   base: "/",
-  plugins: [react()],
+  plugins: [react(), debugInspectorSource()],
   server: {
     host: "127.0.0.1",
     proxy: {

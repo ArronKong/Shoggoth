@@ -5,6 +5,7 @@ const http = require("node:http");
 const { PluginOAuthSessionManager } = require("./plugin-oauth-session");
 const { newPluginCredentialRef } = require("./plugin-credential-vault");
 const { serviceError } = require("./security");
+const { assertReservedOfficialEndpoint } = require("./plugin-reserved-official-endpoints");
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const exact = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype
@@ -38,6 +39,10 @@ class PluginOAuthConnectionController {
     if (context.installation.revision !== input.expectedRevision) fail("REVISION_CONFLICT");
     if (context.component.transport !== "streamable-http") fail("PLUGIN_OAUTH_PROVIDER_UNSUPPORTED");
     const provider = this.providers.forEndpoint(new URL(context.component.spec.url).href);
+    assertReservedOfficialEndpoint({ sourceIdentity: context.installation.sourceIdentity,
+      componentName: context.component.name, serverUrl: context.component.spec.url,
+      oauthResource: context.component.oauthResource, provider },
+    "PLUGIN_OAUTH_PROVIDER_UNSUPPORTED");
     if (context.component.oauthResource
       && provider.audience !== context.component.oauthResource) fail("PLUGIN_OAUTH_PROVIDER_UNSUPPORTED");
     const binding = this.store.listGlobalBindings().find(item =>
@@ -51,7 +56,10 @@ class PluginOAuthConnectionController {
       providerId: context.provider.id, scopes: context.provider.scopes,
       endpoint: context.provider.serverUrl, issuer: context.provider.issuer,
       audience: context.provider.audience, clientId: context.provider.clientId,
-      redirectUrl: context.provider.redirectUrl });
+      redirectUrl: context.provider.redirectUrl,
+      clientSecretRef: context.provider.clientSecretRef,
+      clientSecretRevision: ["zoom-mcp", "dropbox-mcp"].includes(context.provider.protocol)
+        ? this.providers.clientSecretRevision(context.provider.serverUrl) : null });
   }
 
   prepare(input) {
@@ -103,7 +111,8 @@ class PluginOAuthConnectionController {
     const flowId = crypto.randomUUID();
     const flow = { flowId, input: pending.input, connectionId, provider: context.provider,
       status: "starting", expiresAt: this.now() + this.lifetimeMs, reasonCode: null, bindingId: null,
-      fence: null, server: null, tasks: new Set(), timer: null, receipt: null, abort: new AbortController() };
+      fence: null, server: null, ipv6Server: null, tasks: new Set(), timer: null,
+      receipt: null, abort: new AbortController() };
     let finishStart;
     flow.startFinished = new Promise(resolve => { finishStart = resolve; });
     this.#flows.set(flowId, flow);
@@ -112,6 +121,10 @@ class PluginOAuthConnectionController {
       // verified replacement is switched and its old grants revoked atomically
       // by setMcpBindingConnection inside the final management transaction.
       flow.fence = this.#fence(this.#context(flow.input));
+      const confidential = ["zoom-mcp", "dropbox-mcp"].includes(flow.provider.protocol)
+        ? { clientSecret: await this.providers.clientSecretFor(flow.provider.serverUrl),
+          expectedIssuer: flow.provider.issuer } : {};
+      this.#assert(flow);
       this.store.createConnection({ connectionId, installationId: flow.input.installationId,
         componentId: flow.input.componentId, endpointIdentity: flow.provider.serverUrl,
         credentialRef: newPluginCredentialRef() });
@@ -121,30 +134,51 @@ class PluginOAuthConnectionController {
         return trustedFetch(request, { signal: AbortSignal.any([request.signal, flow.abort.signal]) });
       },
         now: this.now, lifetimeMs: this.lifetimeMs });
-      flow.server = http.createServer((request, response) => {
+      const onCallback = (request, response) => {
         const task = this.#callback(flow, request, response);
         flow.tasks.add(task);
         void task.finally(() => flow.tasks.delete(task)).catch(() => {});
-      });
-      flow.server.headersTimeout = 5000;
-      flow.server.requestTimeout = 5000;
-      flow.server.maxConnections = 4;
-      await new Promise((resolve, reject) => {
+      };
+      const listener = () => {
+        const server = http.createServer(onCallback);
+        server.headersTimeout = 5000;
+        server.requestTimeout = 5000;
+        server.maxConnections = 4;
+        return server;
+      };
+      const listen = (server, port, host) => new Promise((resolve, reject) => {
+        if (flow.abort.signal.aborted) {
+          reject(serviceError("CONNECTION_AUTH_REQUIRED", "OAuth 连接已取消"));
+          return;
+        }
         const onAbort = () => reject(serviceError("CONNECTION_AUTH_REQUIRED", "OAuth 连接已取消"));
         flow.abort.signal.addEventListener("abort", onAbort, { once: true });
-        flow.server.once("error", reject);
-        const port = flow.provider.redirectUrl
-          ? Number(new URL(flow.provider.redirectUrl).port) : 0;
-        flow.server.listen({ port, host: "127.0.0.1", signal: flow.abort.signal }, () => {
-          flow.abort.signal.removeEventListener("abort", onAbort); resolve();
+        server.once("error", reject);
+        server.listen({ port, host, ipv6Only: host === "::1", signal: flow.abort.signal }, () => {
+          flow.abort.signal.removeEventListener("abort", onAbort);
+          resolve();
         });
       });
+      const port = flow.provider.redirectUrl
+        ? Number(new URL(flow.provider.redirectUrl).port) : 0;
+      flow.server = listener();
+      await listen(flow.server, port, "127.0.0.1");
+      if (flow.provider.protocol === "slack-mcp") {
+        // `localhost` can resolve to either loopback family. Both listeners
+        // must own the same port before exposing Slack's authorization URL;
+        // binding only IPv4 leaves the OAuth code on IPv6 to another process.
+        flow.ipv6Server = listener();
+        await listen(flow.ipv6Server, flow.server.address().port, "::1");
+      }
       this.#assert(flow);
-      const redirectUrl = `http://127.0.0.1:${flow.server.address().port}/oauth/callback`;
+      const callbackHost = flow.provider.protocol === "slack-mcp" ? "localhost" : "127.0.0.1";
+      const redirectUrl = `http://${callbackHost}:${flow.server.address().port}/oauth/callback`;
       if (flow.provider.redirectUrl && redirectUrl !== flow.provider.redirectUrl) fail("CONNECTION_AUTH_REQUIRED");
       flow.redirectUrl = redirectUrl;
       const started = await flow.oauth.start({ connectionId, serverUrl: flow.provider.serverUrl, redirectUrl,
-        clientId: flow.provider.clientId, scope: flow.provider.scopes.join(" "), allowLoopback: true });
+        clientId: flow.provider.clientId, scope: flow.provider.scopes.join(" "),
+        allowLoopback: true, allowSlackLocalhostCallback: flow.provider.protocol === "slack-mcp",
+        ...confidential });
       this.#assert(flow);
       const authorizationUrl = this.providers.assertAuthorizationUrl(flow.provider.serverUrl, started.authorizationUrl, redirectUrl);
       flow.status = "pending";
@@ -186,6 +220,9 @@ class PluginOAuthConnectionController {
       this.#assert(flow);
       await flow.oauth.consumeTokens({ connectionId: flow.connectionId, commit: async (tokens, metadata) => {
         this.#assert(flow);
+        if (flow.provider.protocol === "dropbox-mcp" && !tokens.refresh_token) {
+          fail("CONNECTION_AUTH_REQUIRED");
+        }
         if (new URL(metadata.issuer).href !== flow.provider.issuer || metadata.audience !== flow.provider.audience
           || JSON.stringify(metadata.requestedScopes) !== JSON.stringify(flow.provider.scopes)) fail("CONNECTION_AUTH_REQUIRED");
         await this.vault.storePendingOAuthTokens({ connectionId: flow.connectionId,
@@ -222,8 +259,10 @@ class PluginOAuthConnectionController {
 
   #closeListener(flow) {
     clearTimeout(flow.timer);
-    flow.server?.close();
-    flow.server?.closeIdleConnections();
+    for (const server of [flow.server, flow.ipv6Server]) {
+      server?.close();
+      server?.closeIdleConnections();
+    }
   }
 
   #terminate(flow, status, reasonCode) {

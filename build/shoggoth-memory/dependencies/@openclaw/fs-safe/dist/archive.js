@@ -1,0 +1,329 @@
+import { createTarEntryPlanner, createArchiveEntrySelector, resolveArchiveFilteredEntryPolicy, resolveArchiveEntryMode, createArchiveEntryPlanner, } from "./archive-plan.js";
+import { inspectTar, replayTar } from "./archive-tar-stream.js";
+import { runPinnedWriteHelper } from "./pinned-write.js";
+import { constants as fsConstants } from "node:fs";
+import fs, {} from "node:fs/promises";
+import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createPipelineTimeoutError, waitForDeadline, withExtractionDeadline, } from "./archive-deadline.js";
+import { assertArchiveEntryCountWithinLimit, createByteBudgetTracker, createExtractBudgetTransform, resolveExtractLimits, resolveTarMeterLimits, } from "./archive-limits.js";
+import { resolveArchiveKind } from "./archive-kind.js";
+import { prepareArchiveDestinationGuard, preparePrivateArchiveOutputPath, } from "./archive-staging.js";
+import { withStagedArchivePublication } from "./archive-merge.js";
+import { loadZipArchiveWithAdmission } from "./archive-zip-preflight.js";
+import { createZipIntegrityTransform, normalizeZipIntegrityError, } from "./archive-zip-integrity.js";
+import { ArchiveSecurityError, ArchiveFormatError, isArchiveFormatErrorMessage, } from "./archive-errors.js";
+import { stageArchiveFileForExtraction } from "./archive-input.js";
+import { getNativeBinding, } from "./native.js";
+import { writeSiblingTempFile } from "./sibling-temp.js";
+import { assertExclusiveCreateLeaf } from "./exclusive-create.js";
+import { assertNoWindowsPathAlias } from "./windows-path-alias.js";
+import { classifyArchiveParserError } from "./archive-parser-errors.js";
+import { validateArchiveEntryPath } from "./archive-entry.js";
+import { admitZipFile } from "./archive-zip-admission.js";
+import { validateNativeZipManifest } from "./archive-zip-manifest.js";
+export { isWindowsDrivePath, normalizeArchiveEntryPath, resolveArchiveOutputPath, stripArchivePath, validateArchiveEntryPath, } from "./archive-entry.js";
+export { resolveArchiveKind, resolvePackedRootDir } from "./archive-kind.js";
+export { readArchiveEntry } from "./archive-read.js";
+export { ARCHIVE_LIMIT_ERROR_CODE, ArchiveLimitError, DEFAULT_MAX_ARCHIVE_BYTES_ZIP, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_EXTRACTED_BYTES, DEFAULT_MAX_ENTRY_BYTES, DEFAULT_MAX_META_ENTRY_BYTES, DEFAULT_MAX_ENTRY_PATH_COMPONENTS, } from "./archive-limits.js";
+export { ArchiveFormatError } from "./archive-errors.js";
+export { ArchiveSecurityError } from "./archive-errors.js";
+export { createArchiveSymlinkTraversalError, prepareArchiveDestinationDir, prepareArchiveOutputPath, withStagedArchiveDestination, } from "./archive-staging.js";
+export { mergeExtractedTreeIntoDestination } from "./archive-merge.js";
+export { createTarEntryPreflightChecker } from "./archive-plan.js";
+export { loadZipArchiveWithPreflight } from "./archive-zip-preflight.js";
+export { readZipCentralDirectoryEntryCount } from "./archive-zip-count.js";
+const SUPPORTS_NOFOLLOW = process.platform !== "win32" && "O_NOFOLLOW" in fsConstants;
+const OPEN_WRITE_CREATE_FLAGS = fsConstants.O_WRONLY |
+    fsConstants.O_CREAT |
+    fsConstants.O_EXCL |
+    (SUPPORTS_NOFOLLOW ? fsConstants.O_NOFOLLOW : 0);
+async function readZipEntryStream(entry) {
+    if (typeof entry.nodeStream === "function") {
+        return entry.nodeStream();
+    }
+    // Old JSZip: fall back to buffering, but still extract via a stream.
+    const buf = await entry.async("nodebuffer");
+    return Readable.from(buf);
+}
+async function writeZipFileEntry(params) {
+    params.deadline.check();
+    params.budget.startEntry();
+    const readable = await readZipEntryStream(params.record.entry);
+    const destinationPath = params.outPath;
+    let tempHandle = null;
+    let handleClosedByStream = false;
+    try {
+        await writeSiblingTempFile({
+            dir: path.dirname(destinationPath),
+            chmodDir: false,
+            mode: 0o600,
+            syncTempFile: false,
+            syncParentDir: false,
+            writeTemp: async (tempPath) => {
+                assertExclusiveCreateLeaf(tempPath);
+                tempHandle = await fs.open(tempPath, OPEN_WRITE_CREATE_FLAGS, 0o600);
+                const writable = tempHandle.createWriteStream();
+                writable.once("close", () => {
+                    handleClosedByStream = true;
+                });
+                try {
+                    await pipeline(readable, createExtractBudgetTransform({ onChunkBytes: params.budget.addBytes }), createZipIntegrityTransform(params.record), writable, { signal: params.deadline.signal });
+                }
+                catch (err) {
+                    throw normalizeZipIntegrityError(createPipelineTimeoutError(err, params.deadline));
+                }
+                params.deadline.check();
+                if (!handleClosedByStream) {
+                    await tempHandle.close();
+                    handleClosedByStream = true;
+                }
+                tempHandle = null;
+                return destinationPath;
+            },
+            resolveFinalPath: (filePath) => filePath,
+        });
+    }
+    finally {
+        const openTempHandle = tempHandle;
+        if (openTempHandle && !handleClosedByStream) {
+            await openTempHandle.close().catch(() => undefined);
+        }
+    }
+}
+async function extractZip(params) {
+    const { limits, deadline } = params;
+    const destinationGuard = await prepareArchiveDestinationGuard(params.destDir);
+    deadline.check();
+    const buffer = await fs.readFile(params.archivePath, { signal: deadline.signal });
+    deadline.check();
+    const { entries } = await waitForDeadline(loadZipArchiveWithAdmission(buffer, limits), deadline);
+    deadline.check();
+    assertArchiveEntryCountWithinLimit(entries.size, limits);
+    const budget = createByteBudgetTracker(limits);
+    await withStagedArchivePublication({ ...params, destinationGuard }, async (stagingDir) => {
+        const { select } = createArchiveEntrySelector({ ...params, rootDir: stagingDir });
+        const acceptedEntries = [];
+        for (const record of entries.values()) {
+            deadline.check();
+            const { entry, kind: entryKind, size, mode: archivedMode } = record;
+            const relPath = select({ path: record.name, kind: entryKind, size });
+            if (relPath === null)
+                continue;
+            if (entryKind === "symlink") {
+                throw new ArchiveSecurityError("entry-link", `zip entry is a link: ${record.name}`);
+            }
+            if (entryKind === "other")
+                continue;
+            const mode = resolveArchiveEntryMode({
+                kind: entry.dir ? "directory" : "file",
+                archivedMode,
+                policy: params.entryModes,
+            });
+            acceptedEntries.push({ path: relPath, kind: entry.dir ? "directory" : "file", mode });
+            const outPath = path.join(stagingDir, relPath);
+            await preparePrivateArchiveOutputPath({
+                destinationDir: stagingDir,
+                destinationRealDir: stagingDir,
+                relPath,
+                outPath,
+                originalPath: record.name,
+                isDirectory: entry.dir,
+                deadline,
+            });
+            if (!entry.dir) {
+                await writeZipFileEntry({ record, outPath, budget, deadline });
+            }
+        }
+        return acceptedEntries;
+    });
+}
+export async function extractArchive(params) {
+    const archivePath = params.archivePath;
+    const destDir = params.destDir;
+    const { entryUmask = 0 } = params;
+    if (!Number.isInteger(entryUmask) || entryUmask < 0 || entryUmask > 0o777) {
+        throw new RangeError("archive entryUmask must be an integer between 0 and 0o777");
+    }
+    const onFiltered = resolveArchiveFilteredEntryPolicy(params.onFiltered);
+    const kind = params.kind ?? resolveArchiveKind(archivePath);
+    if (!kind) {
+        throw new Error(`unsupported archive: ${archivePath}`);
+    }
+    const label = kind === "zip" ? "extract zip" : "extract tar";
+    const limits = resolveExtractLimits(params.limits);
+    const tarLimits = resolveTarMeterLimits(limits);
+    const native = getNativeBinding();
+    assertNoWindowsPathAlias(archivePath, "filesystem", "archive source uses a Windows filesystem namespace alias");
+    assertNoWindowsPathAlias(destDir, "filesystem", "archive destination uses a Windows filesystem namespace alias");
+    // Read the declared public fields before private adapters copy options: class
+    // getters and inherited policy must survive identically on every backend.
+    const options = {
+        archivePath, destDir,
+        durable: params.durable,
+        stripComponents: params.stripComponents, limits,
+        entryModes: params.entryModes, entryUmask, entryFilter: params.entryFilter, onFiltered,
+    };
+    await withExtractionDeadline(params.timeoutMs, label, async (deadline) => {
+        const stagedArchive = await stageArchiveFileForExtraction({ archivePath, limits, deadline });
+        try {
+            deadline.check();
+            const stagedOptions = { ...options, archivePath: stagedArchive.path, deadline };
+            if (native)
+                await extractNativeArchive({ ...stagedOptions, binding: native, kind, tarLimits });
+            else if (kind === "zip")
+                await extractZip(stagedOptions);
+            else
+                await extractWasmTar({ ...stagedOptions, kind, tarLimits });
+        }
+        finally {
+            await stagedArchive.cleanup();
+        }
+    });
+}
+async function extractWasmTar(params) {
+    const { deadline, tarLimits } = params;
+    const manifest = [];
+    await inspectTar({ archivePath: params.archivePath, kind: params.kind, limits: tarLimits, signal: deadline.signal,
+        onMember: (entry) => { manifest.push(entry); } });
+    deadline.check();
+    const destinationGuard = await prepareArchiveDestinationGuard(params.destDir);
+    await withStagedArchivePublication({ ...params, destinationGuard }, async (stagingDir) => {
+        const planEntry = createTarEntryPlanner({ ...params, rootDir: destinationGuard.realPath });
+        const accepted = manifest.flatMap((entry) => {
+            deadline.check();
+            const planned = planEntry(entry);
+            return planned ? [{ ...entry, ...planned }] : [];
+        });
+        await replayTar({ archivePath: params.archivePath, kind: params.kind, limits: tarLimits, signal: deadline.signal, members: accepted,
+            async consume(member, payload) {
+                deadline.check();
+                await preparePrivateArchiveOutputPath({ destinationDir: stagingDir, destinationRealDir: stagingDir,
+                    relPath: member.path, outPath: path.join(stagingDir, member.path), originalPath: member.path,
+                    isDirectory: member.kind === "directory", deadline });
+                if (member.kind === "file") {
+                    await runPinnedWriteHelper({ rootPath: stagingDir, relativeParentPath: path.posix.dirname(member.path),
+                        basename: path.posix.basename(member.path), mkdir: false, mode: 0o600, overwrite: false,
+                        sync: false,
+                        maxBytes: member.size, input: { kind: "stream", stream: Readable.from(payload) } });
+                }
+                deadline.check();
+            },
+        });
+        return accepted;
+    });
+}
+function throwMappedNativeArchiveError(error) {
+    if (error instanceof Error) {
+        const mapped = classifyArchiveParserError(error.message, { cause: error });
+        if (mapped)
+            throw mapped;
+        if (isArchiveFormatErrorMessage(error.message)) {
+            throw new ArchiveFormatError(error.message, { cause: error });
+        }
+        if (error.code === "InvalidArg") {
+            throw new ArchiveFormatError(`invalid archive: ${error.message}`, { cause: error });
+        }
+    }
+    throw error;
+}
+async function extractNativeArchive(params) {
+    const { archivePath, limits, tarLimits, deadline } = params;
+    const zipEntries = [];
+    if (params.kind === "zip") {
+        await admitZipFile(archivePath, limits, deadline, (entry) => { zipEntries.push(entry); });
+    }
+    const destinationGuard = await prepareArchiveDestinationGuard(params.destDir);
+    await withStagedArchivePublication({ ...params, destinationGuard }, async (stagingDir) => {
+        deadline.check();
+        // N-API retains completed task state on its signal; each pass needs its own.
+        const manifest = await params.binding
+            .inspectArchiveNative(archivePath, params.kind, tarLimits, AbortSignal.any([deadline.signal]))
+            .catch(throwMappedNativeArchiveError);
+        deadline.check();
+        assertArchiveEntryCountWithinLimit(manifest.length, limits);
+        if (params.kind === "zip") {
+            validateNativeZipManifest(manifest, zipEntries);
+        }
+        // Recheck the native manifest before any caller callback observes an entry.
+        if (params.kind !== "zip") {
+            for (const entry of manifest)
+                validateArchiveEntryPath(entry.path);
+        }
+        const planEntry = createArchiveEntryPlanner({ ...params, rootDir: stagingDir }, params.kind);
+        const plan = [];
+        for (const entry of manifest) {
+            deadline.check();
+            const mode = params.kind === "zip"
+                ? zipEntries[entry.index].creatorSystem === 3
+                    ? zipEntries[entry.index].externalAttributes >>> 16
+                    : undefined
+                : entry.mode;
+            const accepted = planEntry({ ...entry, mode });
+            if (accepted)
+                plan.push({ ...accepted, index: entry.index });
+        }
+        const directory = await fs.open(stagingDir, fsConstants.O_RDONLY |
+            (typeof fsConstants.O_DIRECTORY === "number" ? fsConstants.O_DIRECTORY : 0));
+        try {
+            deadline.check();
+            await params.binding.extractArchiveNative(archivePath, params.kind, directory.fd, plan.map((entry) => ({ ...entry, mode: entry.kind === "directory" ? 0o700 : 0o600 })), tarLimits, AbortSignal.any([deadline.signal])).catch(throwMappedNativeArchiveError);
+        }
+        finally {
+            await directory.close().catch(() => undefined);
+        }
+        return plan;
+    });
+}
+/** Complete TAR/gzip admission and zero-strip extraction policy, without output writes. */
+export async function inspectTarArchive(params) {
+    const archivePath = params.archivePath;
+    const onFiltered = resolveArchiveFilteredEntryPolicy(params.onFiltered);
+    const limits = resolveExtractLimits(params.limits);
+    const tarLimits = resolveTarMeterLimits(limits);
+    const native = getNativeBinding();
+    assertNoWindowsPathAlias(archivePath, "filesystem", "archive source uses a Windows filesystem namespace alias");
+    return await withExtractionDeadline(params.timeoutMs, "inspect tar", async (deadline) => {
+        const staged = await stageArchiveFileForExtraction({ archivePath, limits, deadline });
+        try {
+            // Staging closes descriptors asynchronously; expiry there must not start a decoder.
+            deadline.check();
+            const entries = [];
+            const append = (entry) => {
+                if (entry)
+                    entries.push(Object.freeze({ path: entry.path, kind: entry.kind, size: entry.size }));
+            };
+            const policy = { limits, entryFilter: params.entryFilter, onFiltered };
+            if (native) {
+                const manifest = await native.inspectArchiveNative(staged.path, "tar", tarLimits, deadline.signal)
+                    .catch(throwMappedNativeArchiveError);
+                deadline.check();
+                // Match extraction's whole-manifest validation before caller policy runs.
+                for (const entry of manifest)
+                    validateArchiveEntryPath(entry.path);
+                const planEntry = createArchiveEntryPlanner(policy, "tar");
+                for (const entry of manifest) {
+                    deadline.check();
+                    append(planEntry(entry));
+                }
+            }
+            else {
+                const manifest = [];
+                await inspectTar({ archivePath: staged.path, limits: tarLimits, signal: deadline.signal,
+                    onMember: (entry) => { manifest.push(entry); } });
+                const planEntry = createTarEntryPlanner(policy);
+                for (const entry of manifest) {
+                    deadline.check();
+                    append(planEntry(entry));
+                }
+            }
+            deadline.check();
+            // This is bounded evidence about the staged bytes, not a reusable write plan.
+            return Object.freeze(entries);
+        }
+        finally {
+            await staged.cleanup();
+        }
+    });
+}

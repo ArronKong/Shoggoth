@@ -119,7 +119,7 @@ await settle(() => { renderer = create(React.createElement(Feed, { ...props, fir
 assert.equal(rows(renderer).length, 1, 'Pagination must pass hidden heartbeat rows to reach ordinary tasks');
 assert.match(textOf(renderer.toJSON()), /heartbeat-report/, 'A user task mentioning heartbeat remains visible');
 await settle(() => renderer.update(React.createElement(Feed, { ...props, firstPage: { ...firstPage } })));
-assert.equal(rows(renderer).length, 3, 'Refresh merges visible tasks while continuing to hide heartbeat');
+assert.equal(rows(renderer).length, 2, 'A complete refresh replaces superseded rows while continuing to hide heartbeat');
 assert.doesNotMatch(textOf(renderer.toJSON()), /heartbeat-vincent/);
 await settle(() => renderer.unmount());
 
@@ -193,4 +193,68 @@ await settle(() => renderer.update(React.createElement(Feed, { ...props, status:
 assert.equal(rows(renderer).length, 1, 'Disconnecting the selected backend resets its hidden filter to All');
 assert.ok(requests.slice(requestsBeforeDisconnect).every(request => request.backend !== 'openclaw'));
 await settle(() => renderer.unmount());
-console.log('PASS Dashboard activity filters, refresh, disconnect/reconnect, stale-cache/page isolation and bounded failure');
+
+// A queued execution initially uses its admission timestamp. Starting it fills
+// startedAt, so older servers/caches supply a different activity id for the same run.
+const pendingCron = { ...cron, id: 'cron:native:daily:100:execution', occurredAt: 100,
+  run: { backendId: 'native', jobId: 'daily', runId: 'execution', startedAt: 100, status: 'running' } };
+const startedCron = { ...pendingCron, id: 'cron:native:daily:150:execution', occurredAt: 150,
+  run: { ...pendingCron.run, startedAt: 150 } };
+const completedCron = { ...startedCron, id: 'cron:native:daily:run:execution', occurredAt: 200,
+  summary: 'current result', severity: 'success', run: { ...startedCron.run, finishedAt: 200, status: 'ok' } };
+fetchPage = async () => empty;
+await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: { ...empty, items: [pendingCron] } })); });
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [startedCron], degradedSources: [{ backend: 'other', source: 'cron', reason: 'error' }] },
+})));
+assert.equal(rows(renderer).length, 1, 'A changed start timestamp must update the same execution even in a partial snapshot');
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [completedCron] },
+})));
+assert.equal(rows(renderer).length, 1, 'A current canonical id replaces legacy cached ids');
+assert.match(textOf(rows(renderer)[0]), /current result/);
+const secondExecution = { ...completedCron, id: 'second', run: { ...completedCron.run, runId: 'execution-2' } };
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [completedCron, secondExecution] },
+})));
+assert.equal(rows(renderer).length, 2, 'Identical titles, results and times do not merge distinct executions');
+await settle(() => renderer.unmount());
+
+// Session-backed fallbacks may be superseded without a shared run id. The
+// authoritative snapshot removes obsolete rows; it must not guess by title.
+const provisional = { ...cron, id: 'fallback', occurredAt: 300 };
+const canonical = { ...cron, id: 'canonical', occurredAt: 350 };
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [provisional] },
+})); });
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [canonical] },
+})));
+assert.equal(rows(renderer).length, 1, 'A full snapshot removes a superseded fallback without a route change');
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, degradedSources: [{ backend: 'native', source: 'cron', reason: 'error' }] },
+})));
+assert.equal(rows(renderer).length, 1, 'A failed source is not evidence that history was deleted');
+await settle(() => renderer.update(React.createElement(Feed, { ...props, firstPage: { ...empty } })));
+assert.equal(rows(renderer).length, 0, 'An authoritative empty snapshot clears stale history');
+await settle(() => renderer.unmount());
+
+const older = { ...cron, id: 'older-history', occurredAt: 50 };
+const boundary = { ...cron, id: 'page-boundary', occurredAt: 100 };
+fetchPage = async () => ({ ...empty, items: [older] });
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [provisional, boundary], hasMore: true, nextCursor: 'first-page' },
+})); });
+assert.equal(rows(renderer).length, 3);
+let resolveStalePage;
+fetchPage = async () => new Promise(resolve => { resolveStalePage = resolve; });
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [canonical, boundary], hasMore: true, nextCursor: 'updated-page' },
+})));
+assert.equal(rows(renderer).length, 3, 'Refresh retains already-loaded rows older than the current page boundary');
+assert.equal(requests.at(-1).cursor, 'updated-page', 'Pagination continues from the current snapshot');
+await settle(() => renderer.update(React.createElement(Feed, { ...props, firstPage: { ...empty, items: [canonical] } })));
+await settle(() => resolveStalePage({ ...empty, items: [provisional] }));
+assert.equal(rows(renderer).length, 1, 'Late pagination cannot restore a row removed by a newer complete snapshot');
+await settle(() => renderer.unmount());
+console.log('PASS Dashboard activity identity, authoritative refresh, pagination races, filters, scope and failure retention');

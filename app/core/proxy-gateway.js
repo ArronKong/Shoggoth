@@ -13,11 +13,14 @@
 // routed to the owning backend so it doesn't error against the real gateway.
 
 const http = require("node:http");
+const { encodeNativeChatFrames } = require("./native-chat-ui-frames");
+const { randomUUID } = require("node:crypto");
 const { WebSocketServer, WebSocket } = require("ws");
 const {
   normalizeFederationInputProvenance,
 } = require("../federation-chat-provenance");
 const { normalizeInteractiveRequestV1 } = require("./shoggoth-interaction-contract");
+const { createEndpointGenerationGuard } = require("./upstream-endpoint-generation");
 
 function safeParse(raw) {
   try {
@@ -64,6 +67,7 @@ const FOREIGN_ROUTED_METHODS = new Set([
   "chat.history",
   "chat.send",
   "chat.operation.get",
+  "chat.operation.reconcile",
   "chat.steer",
   "chat.abort",
   "chat.respond",
@@ -113,8 +117,9 @@ function targetAgentIdsOf(frame) {
 // The UI sends backend-neutral model identity fields. OpenClaw's public RPCs
 // still expect one qualified `provider/model` string and reject unknown fields,
 // so adapt only at the upstream boundary after foreign routing has had a chance
-// to consume the structured hints locally.
-function adaptModelHintsForOpenClaw(frame, raw) {
+// to consume the structured hints locally. Fresh chats also persist the owning
+// backend's initial permission mode instead of only displaying it in the UI.
+function adaptModelHintsForOpenClaw(frame, raw, defaultPermissionMode) {
   if (
     !frame
     || (frame.method !== "sessions.patch" && frame.method !== "sessions.create")
@@ -125,8 +130,16 @@ function adaptModelHintsForOpenClaw(frame, raw) {
   }
   const hasProviderHint = Object.prototype.hasOwnProperty.call(frame.params, "modelProvider");
   const hasAcpHint = Object.prototype.hasOwnProperty.call(frame.params, "acpProviderRef");
-  if (!hasProviderHint && !hasAcpHint) return raw;
+  const initializePermission = frame.method === "sessions.create"
+    && !frame.params.key && frame.params.fork !== true
+    && typeof defaultPermissionMode === "string" && defaultPermissionMode.length > 0
+    && !Object.prototype.hasOwnProperty.call(frame.params, "permissionMode");
+  if (!hasProviderHint && !hasAcpHint && !initializePermission) return raw;
   const params = { ...frame.params };
+  // Persist the same initial mode the composer displays. Patches and explicit
+  // creation choices retain their original values. Reusing a key or forking
+  // preserves the upstream selection; reading a session never writes.
+  if (initializePermission) params.permissionMode = defaultPermissionMode;
   const provider = String(params.modelProvider ?? "").trim();
   delete params.modelProvider;
   delete params.acpProviderRef;
@@ -166,6 +179,7 @@ function injectIntoAgentsList(resFrame, agents, isForeignNamespace) {
     .filter((agent) => agent && agent.id && !have.has(agent.id))
     .map((agent) => {
       const row = { id: agent.id, name: agent.name, identity: { name: agent.name } };
+      if (agent.backendId) row.backendId = agent.backendId;
       // GatewayAgentModel = { primary?, fallbacks? }. `primary` shows the agent's
       // active model; `fallbacks` carries the full per-profile model list so the
       // skin can filter the chat-model dropdown to just that agent's choices.
@@ -253,10 +267,10 @@ function injectIntoSessionsList(resFrame, rows, isForeignNamespace) {
   };
 }
 
-// `degradedBackends` means this sessions.list response is not authoritative for
+// `degradedBackends` means this Agent/session list is not authoritative for
 // those backend partitions. Preserve any marker already present on a locally
 // synthesized OpenClaw-down response and union registry-reported starting rows.
-function markIncompleteSessionBackends(resFrame, backendIds) {
+function markIncompleteListBackends(resFrame, backendIds) {
   if (!resFrame.ok || !resFrame.payload || typeof resFrame.payload !== "object") return resFrame;
   const ids = new Set(Array.isArray(resFrame.payload.degradedBackends) ? resFrame.payload.degradedBackends : []);
   for (const id of Array.isArray(backendIds) ? backendIds : []) {
@@ -341,18 +355,20 @@ function createProxyListRequestTracker() {
 /**
  * @param {object} opts
  * @param {number} opts.port            local port the Control UI connects to
- * @param {() => string} opts.getUpstreamUrl  resolves the real gateway ws URL (read fresh per connection)
+ * @param {() => string} opts.getUpstreamUrl  trusted App getter, rechecked before every upstream send
+ * @param {() => (string|number|null)} [opts.getUpstreamGeneration] trusted credential/owner generation
  * @param {number} [opts.upstreamRetryMs]  degraded-mode upstream retry interval (default 4000; tests shrink it)
  * @param {number} [opts.upstreamHandshakeTimeoutMs] degraded recovery handshake deadline (default 8000)
  * @param {string} [opts.origin]        Origin header to present upstream (mirrors the UI page origin)
  * @param {import('./backend-registry').BackendRegistry} [opts.registry]  multi-backend registry for routing
  * @param {{enter:(backendId:string,kind:string)=>Function}} [opts.workAdmissionGate] 新工作入口闸门
  * @param {() => Array<{id:string,name:string}>} [opts.getInjectAgents]  fallback when no registry is provided
- * @returns {Promise<{url:string, port:number, close:() => Promise<void>}>}
+ * @returns {Promise<{url:string, port:number, invalidateOpenClawUpstream:() => void, close:() => Promise<void>}>}
  */
 function startProxyGateway({
   port = 18790,
   getUpstreamUrl,
+  getUpstreamGeneration,
   origin,
   registry,
   workAdmissionGate,
@@ -367,6 +383,10 @@ function startProxyGateway({
   const terminalDeliveries = new WeakMap();
   const federationPrompts = new Map();
   const connectionShutdowns = new Set();
+  const connectionRetirements = new Set();
+  const endpointGuard = createEndpointGenerationGuard({
+    getUrl: () => getUpstreamUrl?.() || "", getGeneration: getUpstreamGeneration,
+  });
   let closing = false;
   let closePromise = null;
 
@@ -420,11 +440,17 @@ function startProxyGateway({
   // example Notifier) are not blind. Service watchers and idempotent retries may
   // discover the same terminal concurrently, so each authenticated socket keeps
   // a bounded ledger keyed by durable Run id, falling back to idempotencyKey.
+  const nativeUiClients = new WeakSet();
+  const sendNativeAware = (ws, raw) => {
+    const candidate = typeof raw === "string" && raw.includes('"nativeUiVersion":1');
+    const frames = candidate ? encodeNativeChatFrames(raw, nativeUiClients.has(ws)) : [raw];
+    for (const frame of frames) ws.send(frame);
+  };
   const deliverTerminal = (ws, raw, terminalKey) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (typeof terminalKey !== "string" || terminalKey.length === 0
       || Buffer.byteLength(terminalKey, "utf8") > 512) {
-      ws.send(raw);
+      sendNativeAware(ws, raw);
       return;
     }
     let ledger = terminalDeliveries.get(ws);
@@ -442,7 +468,7 @@ function startProxyGateway({
       const oldestKey = ledger.keys().next().value;
       ledger.delete(oldestKey);
     }
-    ws.send(raw);
+    sendNativeAware(ws, raw);
   };
 
   const broadcastTerminal = (raw, terminalKey) => {
@@ -505,12 +531,52 @@ function startProxyGateway({
   const onBackendSessionActivity = (event) => {
     const activity = event?.activity;
     if (!activity) return;
+    if (activity.kind === "native.ui.operation") {
+      if (!isPlainRecord(activity) || Object.keys(activity).length !== 3 || registry.getBackend(event.backendId)?.getBackendDescriptor?.().surfaces?.agentHarness !== true
+        || typeof activity.sessionKey !== "string" || federationActivityAgentIds(event, activity.sessionKey) === null) return;
+      try { require("../agent-service/chat-ui-operation-protocol").validateUiOperationResult("chat.ui.action", activity.operation); }
+      catch { return; }
+      broadcastAuthenticated(JSON.stringify({ type: "event", event: "chat.ui.operation", payload: {
+        sessionKey: activity.sessionKey, operation: activity.operation } })); return;
+    }
+    if (activity.kind === "native.ui.revoked") {
+      if (!isPlainRecord(activity) || Object.keys(activity).length !== 5
+        || registry.getBackend(event.backendId)?.getBackendDescriptor?.().surfaces?.agentHarness !== true
+        || typeof activity.sessionKey !== "string" || federationActivityAgentIds(event, activity.sessionKey) === null
+        || activity.artifactId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(activity.artifactId)
+        || activity.revision !== null && (!Number.isSafeInteger(activity.revision) || activity.revision < 1)
+        || !["UI_SOURCE_EXPIRED", "UI_FEATURE_DISABLED"].includes(activity.reason)) return;
+      broadcastAuthenticated(JSON.stringify({ type: "event", event: "chat.ui.revoked", payload: {
+        sessionKey: activity.sessionKey, artifactId: activity.artifactId, revision: activity.revision, reason: activity.reason,
+      } })); return;
+    }
     if (activity.kind === "sessions.changed") {
       if (!isPlainRecord(activity) || Object.keys(activity).length !== 2
         || typeof activity.sessionKey !== "string"
         || federationActivityAgentIds(event, activity.sessionKey) === null) return;
       broadcastAuthenticated(JSON.stringify({ type: "event", event: "sessions.changed",
         payload: { sessionKey: activity.sessionKey, backendId: event.backendId } }));
+      return;
+    }
+    if (activity.kind === "skills.changed") {
+      if (!isPlainRecord(activity) || Object.keys(activity).length !== 5
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(activity.agentId)
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(activity.noticeId)
+        || !["create", "patch", "pin", "unpin", "archive", "restore", "adopt", "revert", "edit", "withdraw",
+          "pending_review", "failed", "outcome_unknown"].includes(activity.change)
+        || typeof activity.attention !== "boolean"
+        || registry.getBackend(event.backendId)?.getBackendDescriptor?.().surfaces?.agentHarness !== true) return;
+      broadcastAuthenticated(JSON.stringify({ type: "event", event: "skills.changed", payload: {
+        backendId: event.backendId, agentId: activity.agentId, noticeId: activity.noticeId,
+        change: activity.change, attention: activity.attention } })); return;
+    }
+    if (activity.kind === "group.changed") {
+      // 群聊只推「哪个群变了」，内容由页面按 seq 经 /__api 增量拉取。
+      if (!isPlainRecord(activity) || Object.keys(activity).length !== 2
+        || typeof activity.groupId !== "string" || activity.groupId.length === 0
+        || !activity.groupId.isWellFormed() || Buffer.byteLength(activity.groupId, "utf8") > 128) return;
+      broadcastAuthenticated(JSON.stringify({ type: "event", event: "group.changed",
+        payload: { groupId: activity.groupId } }));
       return;
     }
     if (activity.kind === "federation.chat.interaction.reset") {
@@ -671,7 +737,9 @@ function startProxyGateway({
       state: activity.status === "completed" ? "final"
         : ["canceled", "interrupted"].includes(activity.status) ? "aborted" : "error",
     };
-    if (payload.state === "final") {
+    if (payload.state === "final" && activity.outputDisposition === "silent") {
+      payload.outputDisposition = "silent";
+    } else if (payload.state === "final") {
       payload.message = {
         role: "assistant",
         content: [{ type: "text", text: activity.result || "" }],
@@ -701,10 +769,16 @@ function startProxyGateway({
     // No early-close when the gateway is unconfigured/unreachable — the proxy
     // degrades instead (enterDegraded below) so foreign backends keep chatting.
 
-    const injectAgents = () => {
-      const agents = registry?.aggregateAgents() ?? getInjectAgents?.() ?? [];
-      rememberForeignAgents(agents.map((agent) => agent?.id));
-      return agents;
+    const injectAgents = (frame, incompleteBackends = []) => {
+      const snapshot = registry?.aggregateAgentSnapshot?.() ?? {
+        agents: registry?.aggregateAgents() ?? getInjectAgents?.() ?? [], incompleteBackends: [],
+      };
+      rememberForeignAgents(snapshot.agents.map((agent) => agent?.id));
+      // Foreign injection must not turn a malformed upstream roster into an
+      // authoritative empty upstream partition.
+      if (frame.ok && !Array.isArray(frame.payload?.agents)) incompleteBackends = [...incompleteBackends, "openclaw"];
+      return injectIntoAgentsList(markIncompleteListBackends(frame,
+        [...incompleteBackends, ...snapshot.incompleteBackends]), snapshot.agents, claims);
     };
     const owns = (agentId) => {
       if (!agentId) return false;
@@ -730,6 +804,12 @@ function startProxyGateway({
     const SESSION_MESSAGE_COALESCE_MS = 800;
     const lastSessionMessageAt = new Map(); // sessionKey -> ts
     const pendingSessionMessage = new Map(); // sessionKey -> { raw, timer }
+    const selectionControlRequests = new Map();
+    const steeringRequests = new Map(); // browser request id -> new admission run id
+    const steeringRuns = new Map(); // admission-only empty finals must not end the live reply
+
+    const selectedUpstreamSends = new Map();
+    const sentUpstreamRequests = new Map(); // actual sends only; never replayed across owners
 
     // Device-auth gate for locally-served foreign RPCs. The proxy holds no
     // identity: it learns the handshake settled by watching `connect` succeed
@@ -749,6 +829,7 @@ function startProxyGateway({
     // its hello-ok flips us back. `agents.changed` tells the UI to re-pull lists
     // on both the way down and the way back up.
     let upstream = null;
+    let upstreamBinding = null;
     let upstreamReady = false;
     let upstreamDown = false;
     let reconnecting = false; // degraded + a fresh upstream handshake in flight
@@ -759,7 +840,7 @@ function startProxyGateway({
 
     const sendToClient = (data) => {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(data);
+        sendNativeAware(client, data);
       }
     };
 
@@ -810,8 +891,11 @@ function startProxyGateway({
         chatEvent(state, {
           message: {
             role: "assistant",
-            content: [{ type: "text", text }],
+            content: [{ type: "text", text,
+              ...(state === "interim" && typeof meta?.activityId === "string"
+                ? { activity: true, segmentId: meta.activityId } : {}) }],
             timestamp: Date.now(),
+            ...(meta?.displayId ? { shoggoth: { nativeUiVersion: 1, displayId: meta.displayId, runId: meta.runId } } : {}),
             ...(meta?.usage ? { usage: meta.usage } : {}),
             ...(meta?.model ? { model: meta.model } : {}),
             ...(["cron", "inspiration"].includes(meta?.notificationCategory)
@@ -819,14 +903,25 @@ function startProxyGateway({
           },
         }, meta?.runId ?? runId ?? null);
       return {
+        nativeContent: (state, parts, meta) => {
+          if (!["delta", "final", "interim"].includes(state) || !Array.isArray(parts)) return;
+          chatEvent(state, { message: { role: "assistant", content: parts,
+            timestamp: Date.now(), shoggoth: { nativeUiVersion: 1, runId: meta.runId, displayId: meta.displayId },
+            ...(meta.errorMessage ? { errorMessage: meta.errorMessage } : {}),
+          } }, meta.runId);
+        },
         accepted: () => chatEvent("accepted", {}),
-        delta: (text) => emitMessage("delta", text),
+        delta: (text, meta) => emitMessage("delta", text, meta),
         final: (text, errored, meta) => {
           if (errored === true) chatEvent("error", { errorMessage: text });
+          else if (meta?.outputDisposition === "silent") chatEvent("final", { outputDisposition: "silent" }, meta.runId);
           else emitMessage("final", text, meta);
         },
-        interim: (text) => emitMessage("interim", text),
-        error: (msg) => chatEvent("error", { errorMessage: msg }),
+        interim: (text, meta) => emitMessage("interim", text, meta),
+        error: (msg, meta) => chatEvent("error", { errorMessage: msg,
+          ...(typeof meta?.code === "string" ? { errorCode: meta.code } : {}),
+          ...(meta?.admissionAccepted === false ? { admissionAccepted: false } : {}),
+          ...(meta?.receiptUncertain === true ? { receiptUncertain: true } : {}) }),
         tool: (data) =>
           sendToClient(
             JSON.stringify({ type: "event", event: "session.tool", payload: { sessionKey, data } }),
@@ -851,7 +946,7 @@ function startProxyGateway({
       };
     };
 
-    const queueSessionWatcher = (backend, sessionKey, generation) => {
+    const queueSessionWatcher = (backend, sessionKey, generation, history) => {
       const priorTask = sessionWatcherTasks.get(sessionKey) || Promise.resolve();
       const task = priorTask.catch(() => {}).then(async () => {
         if (clientWatchersClosed
@@ -882,7 +977,7 @@ function startProxyGateway({
         });
         const entry = { controller, promise: null };
         entry.promise = Promise.resolve()
-          .then(() => backend.watchSession(sessionKey, hooks, { signal: controller.signal }))
+          .then(() => backend.watchSession(sessionKey, hooks, { signal: controller.signal, history }))
           .catch(() => {
             if (!controller.signal.aborted && !clientWatchersClosed) {
               hooks.status({ kind: "needs_verification", text: "needs_verification" });
@@ -949,7 +1044,11 @@ function startProxyGateway({
         );
       }).catch((error) => {
         if (!controller.signal.aborted && !clientWatchersClosed) {
-          hooks.error(error && error.message ? error.message : String(error));
+          hooks.error(error && error.message ? error.message : String(error), {
+            code: error?.code,
+            ...(error?.admissionAccepted === false ? { admissionAccepted: false } : {}),
+            ...(error?.receiptUncertain === true ? { receiptUncertain: true } : {}),
+          });
         }
       }).finally(() => {
         if (livePromptsBySession.get(sessionKey)?.owner === promptOwner) {
@@ -1008,6 +1107,7 @@ function startProxyGateway({
         // and a local process that can sign could read the identity off disk anyway.
         authed = true;
         authenticatedClients.add(client);
+        connectReqIds.delete(frame.id);
         sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { degraded: true } }));
         replayFederationPrompts();
         return;
@@ -1015,7 +1115,8 @@ function startProxyGateway({
       if (frame.method === "agents.list") {
         sendToClient(
           JSON.stringify(
-            injectIntoAgentsList({ type: "res", id: frame.id, ok: true, payload: { agents: [] } }, injectAgents()),
+            injectAgents({ type: "res", id: frame.id, ok: true, payload: { agents: [] } },
+              upstreamConfigured ? ["openclaw"] : []),
           ),
         );
         return;
@@ -1048,7 +1149,7 @@ function startProxyGateway({
         // upstreamConfigured 为假：那是明确意图，不报缺席，列表照旧塌掉。
         const payload = { sessions: [] };
         if (upstreamConfigured) payload.degradedBackends = ["openclaw"];
-        const marked = markIncompleteSessionBackends(
+        const marked = markIncompleteListBackends(
           { type: "res", id: frame.id, ok: true, payload },
           snapshot.incompleteBackends,
         );
@@ -1077,26 +1178,129 @@ function startProxyGateway({
       );
     };
 
-    const enterDegraded = () => {
-      if (upstreamDown) return;
+    const rejectUnsent = (raw) => {
+      const frame = safeParse(raw.toString());
+      if (frame?.type !== "req") return;
+      listRequestTracker.forget(frame.id);
+      connectReqIds.delete(frame.id);
+      sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
+        code: "UPSTREAM_CHANGED", message: "后台连接已切换，消息未发送，请在后台就绪后重试",
+        admissionAccepted: false,
+      } }));
+    };
+
+    const enterDegraded = (retiring = false) => {
+      const wasDown = upstreamDown;
       upstreamDown = true;
+      for (const control of selectionControlRequests.values()) {
+        clearTimeout(control.timer);
+        control.reject(Object.assign(new Error("插件协商连接已中断"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+      }
+      selectionControlRequests.clear();
+      steeringRequests.clear();
+      steeringRuns.clear();
+      for (const [id, selected] of selectedUpstreamSends) {
+        clearTimeout(selected.timer);
+        sendToClient(JSON.stringify({ type: "res", id, ok: false, error: {
+          // An unsent retry may still name a previously accepted original
+          // operation; transport loss alone cannot prove non-admission.
+          code: "PLUGIN_SELECTION_NEEDS_VERIFICATION",
+          message: "插件消息连接已中断，请查询原操作，不能自动重发",
+        } }));
+      }
+      for (const id of selectedUpstreamSends.keys()) sentUpstreamRequests.delete(id);
+      selectedUpstreamSends.clear();
+      for (const id of sentUpstreamRequests.keys()) {
+        listRequestTracker.forget(id);
+        sendToClient(JSON.stringify({ type: "res", id, ok: false, error: {
+          code: "UPSTREAM_NEEDS_VERIFICATION",
+          message: "后台连接中断，原操作需要核实，不能自动重发",
+          receiptUncertain: true,
+        } }));
+      }
+      sentUpstreamRequests.clear();
       // The gateway normally OPENS the handshake; without one the broker sits on
       // its connect timeout and kills the browser socket. Synthesize the challenge
       // ourselves — an already-authed broker re-answers it, which is harmlessly
       // idempotent (its `connect` gets an ok from answerDegraded).
-      sendToClient(
+      if (!wasDown || retiring) sendToClient(
         JSON.stringify({
           type: "event",
           event: "connect.challenge",
-          payload: { nonce: `degraded-${Date.now().toString(36)}` },
+          payload: { nonce: `degraded-${Date.now().toString(36)}`, degraded: true },
         }),
       );
-      while (backlog.length) answerDegraded(backlog.shift());
-      notifyAgentsChanged();
+      while (backlog.length) {
+        const queued = backlog.shift();
+        if (retiring && safeParse(queued.data.toString())?.method !== "connect") rejectUnsent(queued.data);
+        else answerDegraded(queued.data);
+      }
+      if (!wasDown || retiring) notifyAgentsChanged();
+    };
+
+    // Retire only OpenClaw state. Native/federated watchers, authenticated UI
+    // sockets and their active runs remain attached to the same connection.
+    const retireUpstream = () => {
+      if (cleaned || closing) return;
+      const retired = upstream;
+      if (upstreamBinding && !endpointGuard.isCurrent(upstreamBinding)) upstreamAgentIds.clear();
+      upstream = null;
+      upstreamBinding = null;
+      upstreamReady = false;
+      reconnecting = false;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      clearReconnectHandshakeDeadline();
+      for (const held of pendingSessionMessage.values()) clearTimeout(held.timer);
+      pendingSessionMessage.clear();
+      lastSessionMessageAt.clear();
+      enterDegraded(true);
+      listRequestTracker.clear();
+      connectReqIds.clear();
+      try { retired?.terminate(); } catch { /* already closed */ }
+      scheduleUpstreamRetry();
+    };
+    connectionRetirements.add(retireUpstream);
+
+    const currentUpstream = () => {
+      if (!upstream || !endpointGuard.isCurrent(upstreamBinding)) {
+        if (upstream) retireUpstream();
+        return false;
+      }
+      return true;
+    };
+
+    const forwardUpstream = (data, frame) => {
+      const selected = selectedUpstreamSends.has(frame?.id);
+      if (!currentUpstream()) {
+        if (!selected) rejectUnsent(data);
+        return false;
+      }
+      if (frame?.type === "req" && frame.method !== "connect") {
+        if (sentUpstreamRequests.size >= 1024 && !sentUpstreamRequests.has(frame.id)) {
+          sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
+            code: "UPSTREAM_BUSY", message: "后台待确认请求过多，请稍后重试", admissionAccepted: false,
+          } }));
+          return false;
+        }
+        sentUpstreamRequests.set(frame.id, { method: frame.method,
+          ...(frame.method === "chat.send" && !selected ? {
+            sessionKey: frame.params?.sessionKey, runId: frame.params?.idempotencyKey,
+          } : {}) });
+        const selectedEntry = selectedUpstreamSends.get(frame.id);
+        if (selectedEntry) selectedEntry.dispatched = true;
+      }
+      try { upstream.send(data); return true; }
+      catch { retireUpstream(); return false; }
     };
 
     const sendToUpstream = (data) => {
       const frame = safeParse(data.toString());
+      if (upstream && !endpointGuard.isCurrent(upstreamBinding)) {
+        const selected = selectedUpstreamSends.has(frame?.id);
+        retireUpstream();
+        if (!selected) rejectUnsent(data);
+        return false;
+      }
       let leaveAdmission = null;
       if (frame?.type === "req" && OPENCLAW_START_RPC_METHOD_SET.has(frame.method) && workAdmissionGate) {
         try {
@@ -1109,7 +1313,7 @@ function startProxyGateway({
               ok: false,
               error: { code: "GATEWAY_DRAINING", message: error.message },
             }));
-            return;
+            return false;
           }
           sendToClient(JSON.stringify({
             type: "res",
@@ -1117,7 +1321,7 @@ function startProxyGateway({
             ok: false,
             error: { code: "ADMISSION_ERROR", message: "工作入口检查失败" },
           }));
-          return;
+          return false;
         }
       }
       try {
@@ -1126,20 +1330,63 @@ function startProxyGateway({
           // the FRESH gateway, not the local degraded answerer.
           if (reconnecting && upstream && upstream.readyState === WebSocket.OPEN) {
             if (frame && frame.type === "req" && frame.method === "connect") {
-              upstream.send(data);
-              return;
+              return forwardUpstream(data, frame);
             }
           }
           answerDegraded(data);
+          return false;
         } else if (upstreamReady && upstream && upstream.readyState === WebSocket.OPEN) {
-          upstream.send(data);
+          return forwardUpstream(data, frame);
         } else {
-          backlog.push(data);
+          backlog.push({ data, binding: upstreamBinding });
+          return true;
         }
       } finally {
         // admission 只覆盖一次转发动作，完整任务生命周期由 runtime tasks.list 判断。
         leaveAdmission?.();
       }
+    };
+
+    // Recovery and selection negotiation use this browser's authenticated Host.
+    // A second backend socket may have a different receipt owner.
+    const requestHostControl = (method, params, expectedSocket = upstream) => {
+      if (!currentUpstream() || !authed || upstreamDown || !upstreamReady || upstream?.readyState !== WebSocket.OPEN
+        || upstream !== expectedSocket
+        || selectionControlRequests.size >= 128
+        || !["chat.selection.capabilities", "chat.selection.get", "chat.history", "agent.wait"].includes(method)) {
+        return Promise.reject(Object.assign(new Error("插件选择宿主暂不可用"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+      }
+      const id = `selection-control-${randomUUID()}`;
+      return new Promise((resolve, reject) => {
+        const entry = { resolve, reject, socket: upstream, timer: null };
+        entry.timer = setTimeout(() => {
+          selectionControlRequests.delete(id);
+          reject(Object.assign(new Error("插件选择协商超时，消息未发送"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+        }, 10_000);
+        selectionControlRequests.set(id, entry);
+        try {
+          if (!currentUpstream()) return;
+          upstream.send(JSON.stringify({ type: "req", id, method, params }));
+        }
+        catch (error) {
+          clearTimeout(entry.timer);
+          selectionControlRequests.delete(id);
+          reject(error);
+        }
+      });
+    };
+    const requestSelectionControl = (method, params) => {
+      if (!["chat.selection.capabilities", "chat.selection.get"].includes(method)) {
+        return Promise.reject(Object.assign(new Error("插件选择宿主暂不可用"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+      }
+      return requestHostControl(method, params);
+    };
+    const selectionOwner = (agentId) => {
+      const routed = registry?.route(agentId);
+      if (routed) return routed;
+      // OpenClaw is the passthrough owner and intentionally injects no agents
+      // through ownsAgentId(). Preserve foreign namespace/disabled gates.
+      return agentId && !claims(agentId) ? registry?.getBackend?.("openclaw") : null;
     };
 
     // 清除当前恢复握手 deadline；成功、失败、close 三条路径共用。
@@ -1152,6 +1399,7 @@ function startProxyGateway({
     const onUpstreamGone = () => {
       clearReconnectHandshakeDeadline();
       upstream = null;
+      upstreamBinding = null;
       upstreamReady = false;
       reconnecting = false;
       if (closing || cleaned) return;
@@ -1191,28 +1439,42 @@ function startProxyGateway({
     // by a retry) are ignored via the `sock !== upstream` guard.
     const connectUpstream = () => {
       if (closing || cleaned) return null;
-      const url = (getUpstreamUrl?.() || "").trim();
-      if (!url) return null;
+      const binding = endpointGuard.capture();
+      if (!binding) return null;
+      const url = binding.url;
       let sock;
       try {
         sock = new WebSocket(url, origin ? { headers: { Origin: origin } } : undefined);
       } catch {
         return null;
       }
+      upstreamBinding = binding;
       sock.on("open", () => {
         if (sock !== upstream) return;
+        if (!currentUpstream()) return;
         upstreamReady = true;
         while (backlog.length) {
           // 排队后才开始 drain 的启动请求必须在真正转发时重新过 gate，不能绕过关闭窗口。
-          sendToUpstream(backlog.shift());
+          const queued = backlog.shift();
+          if (queued.binding !== binding || !endpointGuard.isCurrent(binding)) rejectUnsent(queued.data);
+          else sendToUpstream(queued.data);
         }
       });
       sock.on("message", (data) => {
-        if (sock !== upstream) return;
-        const raw = data.toString();
+        if (sock !== upstream || !currentUpstream()) return;
+        let raw = data.toString();
+        const challenge = safeParse(raw);
+        if (challenge?.type === "event" && challenge.event === "connect.challenge") {
+          // The broker validates this App-owned source binding before choosing
+          // a credential namespace. Never trust a value supplied by the Host.
+          raw = JSON.stringify({ ...challenge, payload: {
+            ...challenge.payload, degraded: false, gatewayBinding: binding.digest,
+          } });
+        }
         if (reconnecting) {
           const frame = safeParse(raw);
-          if (frame && frame.type === "res" && frame.id === "broker-connect") {
+          if (frame && frame.type === "res" && connectReqIds.has(frame.id)) {
+            connectReqIds.delete(frame.id);
             if (frame.ok) {
               // Handshake settled — back to full passthrough. The relayed
               // hello-ok is idempotent for an already-ready broker.
@@ -1250,6 +1512,17 @@ function startProxyGateway({
 
     upstream = connectUpstream();
     if (!upstream) onUpstreamGone();
+    else {
+      // A cold Gateway can accept TCP before it can issue a challenge. Without
+      // an initial deadline the broker's auth timer closes the browser every
+      // eight seconds, also interrupting healthy native histories. Retire only
+      // that upstream and complete the ordinary local degraded handshake.
+      const initialSocket = upstream;
+      reconnectHandshakeTimer = setTimeout(() => {
+        if (initialSocket === upstream && !authed && !upstreamDown) retireUpstream();
+      }, Math.max(10, Math.min(1500, Number(upstreamHandshakeTimeoutMs) || 8000)));
+      reconnectHandshakeTimer.unref?.();
+    }
 
     // External inspiration Sessions retain their upstream keys and OpenClaw
     // ownership stays unchanged. Resolve their durable binding before the
@@ -1291,7 +1564,7 @@ function startProxyGateway({
             if (livePrompt) sendToClient(JSON.stringify({ type: "event", event: "chat", payload: {
               runId: livePrompt.runId, sessionKey, state: "prompt", prompt: livePrompt.prompt,
             } }));
-            queueSessionWatcher(backend, sessionKey, watchGeneration);
+            queueSessionWatcher(backend, sessionKey, watchGeneration, displayed);
           } catch (error) {
             if (historyWatchGenerations.get(sessionKey) === watchGeneration) historyWatchGenerations.delete(sessionKey);
             throw error;
@@ -1316,7 +1589,7 @@ function startProxyGateway({
             normalizeFederationInputProvenance(frame.params?.systemInputProvenance)).finally(release);
         } else {
           let payload;
-          if (frame.method === "chat.abort") payload = await backend.abortChat(sessionKey);
+          if (frame.method === "chat.abort") payload = await backend.abortChat(sessionKey, frame.params?.runId);
           else {
             payload = await backend.respondChatPrompt(sessionKey, frame.params || {});
             if (livePromptsBySession.get(sessionKey)?.prompt?.requestId === frame.params?.requestId) {
@@ -1329,10 +1602,11 @@ function startProxyGateway({
         // A failed binding lookup cannot safely become a second raw chat.send.
         sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
           code: error?.code === "gateway_draining" ? "GATEWAY_DRAINING"
-            : typeof error?.code === "string" && /^INSPIRATION_[A-Z_]+$/.test(error.code)
-              ? error.code : "INSPIRATION_UNAVAILABLE",
+            : ["SERVICE_UNAVAILABLE", "REQUEST_TIMEOUT", "SERVICE_DISCONNECTED", "FRAME_TIMEOUT"].includes(error?.code)
+              ? error.code : typeof error?.code === "string" && /^INSPIRATION_[A-Z_]+$/.test(error.code)
+                ? error.code : "INSPIRATION_UNAVAILABLE",
           message: error?.code === "gateway_draining" ? error.message
-            : "灵感会话操作暂不可用，请查看灵感的执行状态后重试",
+            : "暂时无法确认会话归属；消息未发送，请等待后台服务恢复后重试",
         } }));
       }
       return true;
@@ -1343,9 +1617,60 @@ function startProxyGateway({
       const raw = data.toString();
       const frame = safeParse(raw);
       if (frame && frame.type === "req") {
+        // Product pagination is consumed here, including the default backend.
+        // Never forward its opaque cursor or `page` selector to a gateway.
+        if (frame.method === "chat.history" && frame.params?.page === true) {
+          if (!authed) { denyUnauthed(frame.id); return; }
+          const sessionKey = frame.params.sessionKey;
+          const firstPage = frame.params.cursor == null;
+          let watchGeneration;
+          try {
+            if (!isPlainRecord(frame.params) || Object.keys(frame.params).some(key => !["sessionKey", "page", "cursor", "limit"].includes(key))
+              || typeof sessionKey !== "string" || !/^agent:[^:]+:.+$/u.test(sessionKey)) {
+              throw Object.assign(new Error("历史分页参数无效"), { code: "INVALID_PARAMS" });
+            }
+            if (!registry?.getChatHistoryPage) throw Object.assign(new Error("历史分页暂不可用"), { code: "BACKEND_NOT_READY" });
+            if (firstPage) {
+              if (!historyWatchGenerations.has(sessionKey) && historyWatchGenerations.size >= MAX_CLIENT_HISTORY_WATCHES) {
+                throw Object.assign(new Error("活动会话恢复请求过多，请稍后重试"), { code: "BACKEND_BUSY" });
+              }
+              watchGeneration = ++historyWatchSequence;
+              historyWatchGenerations.set(sessionKey, watchGeneration);
+            }
+            const { payload, observer } = await registry.getChatHistoryPage(sessionKey, {
+              cursor: frame.params.cursor, limit: frame.params.limit,
+            });
+            if (clientWatchersClosed) return;
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
+            if (firstPage && historyWatchGenerations.get(sessionKey) === watchGeneration) {
+              const prompts = typeof observer.getPendingChatPrompts === "function"
+                ? observer.getPendingChatPrompts(sessionKey) : [livePromptsBySession.get(sessionKey)].filter(Boolean);
+              for (const livePrompt of prompts) sendToClient(JSON.stringify({ type: "event", event: "chat", payload: {
+                runId: livePrompt.runId, sessionKey, state: "prompt", prompt: livePrompt.prompt,
+              } }));
+              if (typeof observer.watchSession === "function") queueSessionWatcher(observer, sessionKey, watchGeneration, payload);
+              else if (historyWatchGenerations.get(sessionKey) === watchGeneration) historyWatchGenerations.delete(sessionKey);
+            }
+          } catch (error) {
+            if (firstPage && historyWatchGenerations.get(sessionKey) === watchGeneration) historyWatchGenerations.delete(sessionKey);
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
+              code: SAFE_BACKEND_ERROR_CODE.test(error?.code || "") ? error.code : "BACKEND_ERROR",
+              message: error?.message || "历史加载失败，请重试",
+            } }));
+          }
+          return;
+        }
         // Foreign RPCs are answered locally, bypassing the gateway's auth. Refuse
         // them until `connect` has succeeded, else anyone able to open this socket
         // could drive a Hermes agent (tools included) with no credentials at all.
+        if (frame.method === "chat.ui.capabilities") {
+          if (!authed) { denyUnauthed(frame.id); return; }
+          if (!isPlainRecord(frame.params) || Object.keys(frame.params).length !== 1 || frame.params.nativeUiArtifactsV1 !== true) {
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: { code: "INVALID_PARAMS", message: "显示能力参数无效" } })); return;
+          }
+          nativeUiClients.add(client);
+          sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { nativeUiArtifactsV1: true } })); return;
+        }
         if (!authed && FOREIGN_ROUTED_METHODS.has(frame.method)) {
           // Use static namespace ownership, not live readiness: during startup
           // ownsAgentId() is intentionally false, but an unauthenticated caller
@@ -1357,6 +1682,13 @@ function startProxyGateway({
         }
         const hasPluginSelection = frame.params
           && Object.prototype.hasOwnProperty.call(frame.params, "pluginSelection");
+        if (frame.params && (Object.hasOwn(frame.params, "capabilitySelection")
+          || Object.hasOwn(frame.params, "selection_dispatch"))) {
+          if (!authed) { denyUnauthed(frame.id); return; }
+          sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+            error: { code: "PLUGIN_SELECTION_UNAVAILABLE", message: "插件选择必须由 Shoggoth 验证后发送" } }));
+          return;
+        }
         // A selection is admitted with a new chat.send only. In particular,
         // steer and prompt responses may resume an already-running turn; an
         // unknown field must not silently become authority for that turn.
@@ -1369,12 +1701,59 @@ function startProxyGateway({
         }
         if (frame.method === "chat.send" && hasPluginSelection) {
           if (!authed) { denyUnauthed(frame.id); return; }
-          const owner = registry?.route(agentIdFromSessionKey(frame.params.sessionKey));
-          if (owner?.id !== "shoggoth") {
+          const owner = selectionOwner(agentIdFromSessionKey(frame.params.sessionKey));
+          if (owner?.id === "openclaw" && typeof owner.prepareExternalChatSelection === "function") {
+            if (selectedUpstreamSends.size >= 64 || selectedUpstreamSends.has(frame.id)) {
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+                error: { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "插件消息正在处理，请稍后核实" } }));
+              return;
+            }
+            const selected = { selection: null, socket: upstream, dispatched: false, timer: null };
+            selected.timer = setTimeout(() => {
+              if (selectedUpstreamSends.get(frame.id) !== selected) return;
+              selectedUpstreamSends.delete(frame.id);
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
+                code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "插件消息回执超时，请查询原操作，不能自动重发",
+              } }));
+            }, 60_000);
+            selected.timer.unref?.();
+            selectedUpstreamSends.set(frame.id, selected);
+            try {
+              const prepared = await owner.prepareExternalChatSelection(frame.params, { requestHost: requestSelectionControl });
+              if (selectedUpstreamSends.get(frame.id) !== selected) return;
+              if (client.readyState !== WebSocket.OPEN || selected.socket !== upstream
+                || !currentUpstream() || upstreamDown || !upstreamReady) throw Object.assign(new Error("插件消息连接已变化"), { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION" });
+              selected.selection = prepared.selection;
+              if (sendToUpstream(JSON.stringify({ ...frame, params: prepared.params })) === false) {
+                // A local admission rejection has already answered this request.
+                // It must not later produce an ambiguous timeout for an unsent turn.
+                clearTimeout(selected.timer);
+                selectedUpstreamSends.delete(frame.id);
+              }
+            } catch (error) {
+              if (selectedUpstreamSends.get(frame.id) !== selected) return;
+              clearTimeout(selected.timer);
+              selectedUpstreamSends.delete(frame.id);
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+                error: { code: error?.code === "PLUGIN_SELECTION_NEEDS_VERIFICATION"
+                  ? error.code : "PLUGIN_SELECTION_UNAVAILABLE",
+                  message: error?.code === "PLUGIN_SELECTION_NEEDS_VERIFICATION"
+                    ? "原插件消息需要核实，请保留输入并查询原操作" : "插件选择暂不可用，消息未发送，输入已保留" } }));
+            }
+            return;
+          }
+          if (owner?.id !== "shoggoth" && !(owner?.id === "hermes" && owner.supportsExternalChatSelection?.() === true)) {
             sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
               error: { code: "PLUGIN_SELECTION_UNAVAILABLE",
                 message: "当前宿主尚未接入 Shoggoth 插件选择，请保留草稿并切换到支持的 Agent" } }));
             return;
+          }
+        }
+        if (frame.method === "chat.abort" && authed) {
+          const owner = selectionOwner(agentIdFromSessionKey(frame.params?.sessionKey));
+          if (owner?.id === "openclaw" && typeof owner.cancelExternalChatSelections === "function") {
+            try { await owner.cancelExternalChatSelections(frame.params.sessionKey, { requestHost: requestSelectionControl }); }
+            catch { /* Host Stop still runs if selection discovery is unavailable. */ }
           }
         }
         if (registry?.hasExternalInspirationSessionBridge?.() === true
@@ -1387,9 +1766,66 @@ function startProxyGateway({
           frame.method === "sessions.list"
         ) {
           listRequestTracker.track(frame);
+        } else if (frame.method === "sessions.messages.subscribe" || frame.method === "sessions.messages.unsubscribe") {
+          // Foreign backends already use watchChat via chat.history. Do not send
+          // their keys to the upstream gateway's session subscription service.
+          const key = frame.params?.key;
+          if (claims(agentIdFromSessionKey(key))) {
+            if (!authed) { denyUnauthed(frame.id); return; }
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true,
+              payload: { subscribed: false, key } }));
+            return;
+          }
+        } else if (frame.method === "chat.operation.reconcile") {
+          if (!authed) { denyUnauthed(frame.id); return; }
+          const sessionKey = frame.params?.sessionKey;
+          try {
+            const backend = registry?.route(agentIdFromSessionKey(sessionKey));
+            if (typeof backend?.reconcileChatOperation !== "function") {
+              throw Object.assign(new Error("Native recovery unavailable"), { code: "BACKEND_NOT_READY" });
+            }
+            const payload = await backend.reconcileChatOperation(sessionKey,
+              frame.params?.idempotencyKey, frame.params?.createdAt);
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
+          } catch {
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+              error: { code: "BACKEND_NOT_READY", message: "暂时无法恢复原发送，请稍后核对" } }));
+          }
+          return;
         } else if (frame.method === "chat.operation.get") {
           const sessionKey = frame.params?.sessionKey;
           const agentId = agentIdFromSessionKey(sessionKey);
+          const selectionBackend = selectionOwner(agentId);
+          if (frame.params?.operationKind === "chat" && (selectionBackend?.id === "openclaw"
+            || (!selectionBackend && agentId && !claims(agentId)))) {
+            if (!authed) { denyUnauthed(frame.id); return; }
+            const socket = upstream;
+            try {
+              const payload = await require("./openclaw-chat-operation").getOpenClawChatOperation(
+                sessionKey, frame.params?.idempotencyKey,
+                { requestHost: (method, params) => requestHostControl(method, params, socket) });
+              if (upstream !== socket || !currentUpstream()) throw new Error("original observation connection changed");
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
+            } catch {
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
+                code: "UPSTREAM_NEEDS_VERIFICATION", message: "暂时无法核验原消息，请稍后查询，不能自动重发",
+              } }));
+            }
+            return;
+          }
+          if (selectionBackend?.id === "openclaw" && typeof selectionBackend.getExternalChatSelectionOperation === "function") {
+            if (!authed) { denyUnauthed(frame.id); return; }
+            try {
+              const payload = await selectionBackend.getExternalChatSelectionOperation(
+                sessionKey, frame.params?.idempotencyKey, { requestHost: requestSelectionControl });
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
+            } catch {
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
+                code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "暂时无法核验原插件消息，请稍后查询，不能自动重发",
+              } }));
+            }
+            return;
+          }
           if (owns(agentId)) {
             const backend = registry?.route(agentId);
             Promise.resolve()
@@ -1425,28 +1861,25 @@ function startProxyGateway({
             // getHistory is async — historical sessions hit the backend
             // for messages on first access. Don't forward upstream either way.
             Promise.resolve()
-              .then(() => backend.getHistory(sessionKey))
+              .then(() => backend.getHistory(sessionKey, { cursor: frame.params?.cursor, limit: frame.params?.limit }))
               .then((payload) => {
                 sendToClient(
                   JSON.stringify({ type: "res", id: frame.id, ok: true, payload }),
                 );
-                const livePrompt = livePromptsBySession.get(sessionKey);
-                if (livePrompt) {
-                  sendToClient(JSON.stringify({
-                    type: "event",
-                    event: "chat",
-                    payload: {
-                      runId: livePrompt.runId,
-                      sessionKey,
-                      state: "prompt",
-                      prompt: livePrompt.prompt,
-                    },
-                  }));
+                // An authoritative in-process queue can contain several pending
+                // Hermes requests. The connection-local cache holds only one.
+                const prompts = typeof backend.getPendingChatPrompts === "function"
+                  ? backend.getPendingChatPrompts(sessionKey)
+                  : [livePromptsBySession.get(sessionKey)].filter(Boolean);
+                for (const livePrompt of prompts) {
+                  sendToClient(JSON.stringify({ type: "event", event: "chat", payload: {
+                    runId: livePrompt.runId, sessionKey, state: "prompt", prompt: livePrompt.prompt,
+                  } }));
                 }
                 // The successful history frame is queued first. Observer
                 // discovery/stream errors are isolated to later chat events.
                 if (typeof backend.watchSession === "function") {
-                  queueSessionWatcher(backend, sessionKey, watchGeneration);
+                  queueSessionWatcher(backend, sessionKey, watchGeneration, payload);
                 } else if (historyWatchGenerations.get(sessionKey) === watchGeneration) {
                   historyWatchGenerations.delete(sessionKey);
                 }
@@ -1526,6 +1959,32 @@ function startProxyGateway({
           // anything the backend can't do comes back as a clean error frame.
           const key = frame.params?.sessionKey ?? frame.params?.key;
           const agentId = agentIdFromSessionKey(key);
+          if (frame.method === "chat.steer" && !owns(agentId) && !claims(agentId)) {
+            const owner = registry?.getBackend?.("openclaw");
+            if (!authed || !currentUpstream() || upstreamDown || !upstreamReady
+              || owner?.getChatCapabilities?.(agentId)?.steer !== true) {
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+                error: { code: "STEERING_UNAVAILABLE", message: "OpenClaw 当前连接不支持引导消息" } }));
+              return;
+            }
+            const message = String(frame.params?.message ?? "").trim();
+            if (!message || steeringRuns.size >= 128) {
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+                error: { code: "INVALID_PARAMS", message: "引导消息无效或仍有未确认的引导请求" } }));
+              return;
+            }
+            const operationId = randomUUID();
+            steeringRequests.set(frame.id, operationId);
+            steeringRuns.set(operationId, key);
+            const translated = { ...frame, method: "chat.send", params: {
+              sessionKey: key, message, idempotencyKey: operationId, queueMode: "steer",
+            } };
+            if (!sendToUpstream(JSON.stringify(translated))) {
+              steeringRequests.delete(frame.id);
+              steeringRuns.delete(operationId);
+            }
+            return;
+          }
           if (owns(agentId)) {
             const backend = registry?.route(agentId);
             const run = async () => {
@@ -1534,7 +1993,7 @@ function startProxyGateway({
                 return (await backend.steerChat(key, String(frame.params?.message ?? ""))) ?? {};
               }
               if (frame.method === "chat.abort") {
-                await backend?.abortChat?.(key);
+                await backend?.abortChat?.(key, frame.params?.runId);
                 return {};
               }
               if (frame.method === "chat.respond") {
@@ -1750,7 +2209,11 @@ function startProxyGateway({
           }
         }
       }
-      sendToUpstream(adaptModelHintsForOpenClaw(frame, raw));
+      const defaultPermissionMode = frame?.method === "sessions.create"
+        ? registry?.getBackend?.("openclaw")?.getChatCapabilities?.(
+          frame.params?.agentId || agentIdFromSessionKey(frame.params?.parentSessionKey),
+        )?.permissions?.defaultMode : undefined;
+      sendToUpstream(adaptModelHintsForOpenClaw(frame, raw, defaultPermissionMode));
     });
 
     // gateway -> UI (rewrite agents.list + sessions.list responses; rest verbatim).
@@ -1758,6 +2221,69 @@ function startProxyGateway({
     // same injection behavior.
     function handleUpstreamMessage(raw) {
       const frame = safeParse(raw);
+      const originalRequest = frame?.type === "res" ? sentUpstreamRequests.get(frame.id) : null;
+      if (frame?.type === "res") sentUpstreamRequests.delete(frame.id);
+      // The renderer may already have timed out its RPC promise. Publish a
+      // correlated observation as well, so a late ACK can resume verification.
+      if (originalRequest?.method === "chat.send" && originalRequest.sessionKey && originalRequest.runId
+        && !steeringRequests.has(frame.id)
+        && frame.ok && frame.payload?.runId === originalRequest.runId
+        && ["started", "accepted", "queued"].includes(frame.payload.status)) {
+        sendToClient(raw);
+        sendToClient(JSON.stringify({ type: "event", event: "chat.operation.accepted", payload: {
+          sessionKey: originalRequest.sessionKey, runId: originalRequest.runId,
+        } }));
+        return;
+      }
+      if (frame?.type === "res" && steeringRequests.has(frame.id)) {
+        const operationId = steeringRequests.get(frame.id);
+        steeringRequests.delete(frame.id);
+        if (!frame.ok) steeringRuns.delete(operationId);
+        sendToClient(JSON.stringify(frame));
+        return;
+      }
+      if (frame?.type === "event" && frame.event === "chat"
+        && steeringRuns.get(frame.payload?.runId) === frame.payload?.sessionKey
+        && ["final", "error", "aborted"].includes(frame.payload?.state)) {
+        steeringRuns.delete(frame.payload.runId);
+        // OpenClaw sends an empty final for the admitted steering request while
+        // the original run keeps streaming. A real follow-up answer still flows.
+        if (frame.payload.state === "final" && (!frame.payload.message
+          || (Array.isArray(frame.payload.message.content) && frame.payload.message.content.length === 0))) return;
+      }
+      if (frame?.type === "res" && selectionControlRequests.has(frame.id)) {
+        const control = selectionControlRequests.get(frame.id);
+        selectionControlRequests.delete(frame.id);
+        clearTimeout(control.timer);
+        if (control.socket !== upstream || !frame.ok) {
+          control.reject(Object.assign(new Error("插件选择宿主协商失败"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+        } else control.resolve(frame.payload);
+        return;
+      }
+      if (frame?.type === "res" && selectedUpstreamSends.has(frame.id)) {
+        const selected = selectedUpstreamSends.get(frame.id);
+        selectedUpstreamSends.delete(frame.id);
+        clearTimeout(selected.timer);
+        if (frame.ok) {
+          try {
+            if (selected.socket !== upstream || !["started", "accepted"].includes(frame.payload?.status)
+              || frame.payload.runId !== selected.selection?.operationId) throw new Error("invalid receipt");
+            const receipt = require("./openclaw-plugin-selection").validateOpenClawSelectionReceipt(
+              frame.payload.capabilitySelection, selected.selection);
+            sendToClient(raw);
+            sendToClient(JSON.stringify({ type: "event", event: "chat", payload: {
+              sessionKey: selected.selection.sessionKey, runId: selected.selection.operationId,
+              state: receipt.status === "needs-verification" ? "status" : "accepted",
+              ...(receipt.status === "needs-verification" ? { status: { kind: "needs_verification", text: "needs_verification" } } : {}),
+            } }));
+          } catch {
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
+              code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "插件消息回执需要核实，请查询原操作，不能自动重发",
+            } }));
+          }
+          return;
+        }
+      }
       let replayPromptsAfterSend = false;
       if (frame && frame.type === "res" && connectReqIds.has(frame.id)) {
         // The gateway accepted the handshake → foreign RPCs may be served locally.
@@ -1767,6 +2293,7 @@ function startProxyGateway({
         // socket and hide every healthy native backend. Drop only this upstream,
         // synthesize a fresh local challenge, and keep the client in degraded mode.
         connectReqIds.delete(frame.id);
+        clearReconnectHandshakeDeadline();
         if (frame.ok) {
           authed = true;
           authenticatedClients.add(client);
@@ -1785,7 +2312,7 @@ function startProxyGateway({
         rememberUpstreamAgents(frame);
         // claims 过滤：上游返回的 hermes-* agent（孤儿泄漏）从 roster 里滤掉，
         // 只保留 Hermes 就绪后注入的那份。
-        sendToClient(JSON.stringify(injectIntoAgentsList(frame, injectAgents(), claims)));
+        sendToClient(JSON.stringify(injectAgents(frame)));
         return;
       }
       const modelsMeta = frame?.type === "res"
@@ -1820,7 +2347,7 @@ function startProxyGateway({
         }
         // claims 过滤：上游返回的 agent:hermes-*:… 孤儿 session 从列表里滤掉，
         // 免得 hermes-default 行在 Hermes 就绪前提前进 roster、缓存降级能力。
-        const marked = markIncompleteSessionBackends(frame, snapshot.incompleteBackends);
+        const marked = markIncompleteListBackends(frame, snapshot.incompleteBackends);
         sendToClient(JSON.stringify(injectIntoSessionsList(marked, snapshot.rows, claims)));
         return;
       }
@@ -1836,9 +2363,11 @@ function startProxyGateway({
             // Inside the window: hold the LATEST frame and flush it when the
             // window closes. Dropping it would strand the UI on stale history —
             // nothing else re-triggers a reload once the burst ends.
+            const heldBinding = upstreamBinding;
             const timer = setTimeout(() => {
               const queued = pendingSessionMessage.get(sk);
               pendingSessionMessage.delete(sk);
+              if (heldBinding !== upstreamBinding || !currentUpstream()) return;
               if (!queued) return;
               lastSessionMessageAt.set(sk, Date.now());
               sendToClient(queued.raw);
@@ -1866,6 +2395,18 @@ function startProxyGateway({
       cleaned = true;
       clients.delete(client);
       stopClientWatchers();
+      for (const control of selectionControlRequests.values()) {
+        clearTimeout(control.timer);
+        control.reject(Object.assign(new Error("插件协商连接已关闭"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+      }
+      selectionControlRequests.clear();
+      steeringRequests.clear();
+      steeringRuns.clear();
+      for (const selected of selectedUpstreamSends.values()) clearTimeout(selected.timer);
+      selectedUpstreamSends.clear();
+      sentUpstreamRequests.clear();
+      backlog.length = 0;
+      connectionRetirements.delete(retireUpstream);
       connectionShutdowns.delete(shutdownConnection);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -1906,6 +2447,15 @@ function startProxyGateway({
     });
   });
 
+  // Trusted App lifecycle only: no request envelope may select or resurrect an
+  // upstream. New connections may be negotiated, but no prior request is replayed.
+  const invalidateOpenClawUpstream = () => {
+    if (closing) return;
+    endpointGuard.invalidate();
+    upstreamAgentIds.clear();
+    for (const retire of [...connectionRetirements]) retire();
+  };
+
   const close = () => {
     if (closePromise) return closePromise;
     closing = true;
@@ -1944,6 +2494,7 @@ function startProxyGateway({
       resolve({
         url: `ws://127.0.0.1:${actualPort}`,
         port: actualPort,
+        invalidateOpenClawUpstream,
         close,
       });
     });

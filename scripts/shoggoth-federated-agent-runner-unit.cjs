@@ -41,7 +41,7 @@ test("broker URL 固定为当前 App 的私有聊天入口", () => {
   assert.equal(brokerUrl("https://app.example.test"), "wss://app.example.test/__chatws");
 });
 
-test("创建目标 Agent session、发送一次 prompt 并只接受同 session 终态", async () => {
+test("旧同步调用允许 30 分钟，发送一次 prompt 并只接受同 session 终态", async () => {
   const seen = [];
   const result = await withBroker((socket, frame, request) => {
     seen.push({ frame, origin: request.headers.origin });
@@ -62,7 +62,7 @@ test("创建目标 Agent session、发送一次 prompt 并只接受同 session �
       } })));
     }
   }, (origin) => runFederatedAgentViaBroker({
-    origin, agentId: "agent-1", prompt: "do work", timeoutMs: 5_000,
+    origin, agentId: "agent-1", prompt: "do work", timeoutMs: 1_800_000,
   }));
   assert.deepEqual(result, { sessionKey: "session-target", text: "delegated answer" });
   assert.deepEqual(seen.map(({ frame }) => frame.method), ["sessions.create", "chat.send"]);
@@ -157,6 +157,99 @@ test("异步联邦任务可查询、续聊和取消，并拒绝旧 turn", async 
     } finally {
       runner.close();
     }
+  });
+});
+
+test("超时先锁定失败，迟到 final/prompt/aborted 不覆盖；中止 RPC 有界", async () => {
+  const sends = [], aborted = [];
+  await withBroker((socket, frame) => {
+    if (frame.method === "sessions.create") {
+      socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
+        payload: { key: `session-${sends.length}` } }));
+    } else if (frame.method === "chat.send") {
+      sends.push(frame.params);
+      socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
+        payload: { runId: frame.params.idempotencyKey } }));
+    } else if (frame.method === "chat.abort") {
+      aborted.push(frame.params);
+      for (const state of ["final", "prompt", "aborted"]) socket.send(JSON.stringify({ type: "event", event: "chat",
+        payload: { sessionKey: frame.params.sessionKey, runId: frame.params.runId, state,
+          message: { content: "[已停止生成]" } } }));
+      // Deliberately lose the control ACK; it must not resurrect the task.
+    }
+  }, async origin => {
+    const runner = createFederatedAgentTaskRunner({ origin });
+    try {
+      const tasks = [];
+      for (const backendId of ["hermes", "openclaw"]) tasks.push(await runner.run({
+        backendId, agentId: "agent-1", prompt: "slow report", timeoutMs: 5_000,
+      }));
+      await new Promise(resolve => setTimeout(resolve, 5_100));
+      for (let n = 0; n < tasks.length; n++) {
+        const state = runner.get({ backendId: ["hermes", "openclaw"][n], agentId: "agent-1", taskId: tasks[n].taskId });
+        assert.equal(state.status, "failed");
+        assert.equal(state.errorCode, "AGENT_RUN_TIMEOUT");
+        assert.equal(state.result, null);
+        assert.equal(aborted[n].runId, sends[n].idempotencyKey);
+      }
+      assert.equal(sends.length, 2, "timeout must not replay a prompt");
+      await new Promise(resolve => setTimeout(resolve, 4_100));
+      assert.equal([...runner.tasks.values()].every(task => task.pending.size === 0), true);
+    } finally { runner.close(); }
+  });
+});
+
+test("终态关联 ACK 的 native runId；旧回合事件不能终结续聊，abort 不冒充成功", async () => {
+  let socket, sequence = 0;
+  await withBroker((connected, frame) => {
+    socket = connected;
+    if (frame.method === "sessions.create") socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { key: "continued" } }));
+    if (frame.method === "chat.send") {
+      const runId = `native-${++sequence}`;
+      if (sequence === 1) socket.send(JSON.stringify({ type: "event", event: "chat", payload: {
+        sessionKey: "continued", runId, state: "final", message: { content: "before ack" },
+      } }));
+      socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { runId } }));
+    }
+  }, async origin => {
+    const runner = createFederatedAgentTaskRunner({ origin });
+    try {
+      const first = await runner.run({ backendId: "openclaw", agentId: "one", prompt: "first", timeoutMs: 5000 });
+      assert.equal(first.status, "completed"); assert.equal(first.result, "before ack");
+      const target = { backendId: "openclaw", agentId: "one", taskId: first.taskId };
+      await runner.message({ ...target, expectedTurn: 1, prompt: "second", timeoutMs: 5000 });
+      for (const state of ["final", "error", "prompt", "aborted"]) socket.send(JSON.stringify({ type: "event", event: "chat",
+        payload: { sessionKey: first.sessionKey, runId: "native-1", state, message: { content: "old" } } }));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(runner.get(target).status, "running");
+      socket.send(JSON.stringify({ type: "event", event: "chat", payload: { sessionKey: first.sessionKey, runId: "native-2", state: "aborted" } }));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(runner.get(target).status, "canceled"); assert.equal(runner.get(target).result, null);
+      socket.send(JSON.stringify({ type: "event", event: "chat", payload: { sessionKey: first.sessionKey, runId: "native-2", state: "final", message: { content: "late" } } }));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(runner.get(target).status, "canceled");
+    } finally { runner.close(); }
+  });
+});
+
+test("异步和旧同步报告均保留 30 分钟上界与显式短期限", async () => {
+  let sends = 0;
+  await withBroker((socket, frame) => {
+    if (frame.method === "sessions.create") socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { key: "long-report" } }));
+    else {
+      if (frame.method === "chat.send") sends++;
+      socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
+    }
+  }, async origin => {
+    const runner = createFederatedAgentTaskRunner({ origin });
+    const input = { backendId: "hermes", agentId: "one", prompt: "report", timeoutMs: 1_800_000 };
+    try {
+      const task = await runner.run(input); assert.equal(task.status, "running");
+      await assert.rejects(runner.run({ ...input, timeoutMs: 1_800_001 }), error => error.code === "AGENT_OPERATION_FAILED");
+      await assert.rejects(runFederatedAgentViaBroker({ ...input, origin, timeoutMs: 1_800_001 }), error => error.code === "AGENT_OPERATION_FAILED");
+      assert.equal(sends, 1);
+      await runner.cancel({ backendId: input.backendId, agentId: input.agentId, taskId: task.taskId });
+    } finally { runner.close(); }
   });
 });
 

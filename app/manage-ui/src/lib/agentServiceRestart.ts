@@ -3,6 +3,7 @@ import type { ShoggothBackgroundStatus, ShoggothServiceProductStatus } from "../
 export interface AgentServiceRestartState {
   startedAt: number | null;
   wasHealthy: boolean | null;
+  hasBeenHealthy: boolean;
   recoveringNotified: boolean;
   notifyAt: number | null;
 }
@@ -12,6 +13,7 @@ export type AgentServiceRestartNotice = "recovering" | "restarted" | null;
 export const INITIAL_AGENT_SERVICE_RESTART_STATE: AgentServiceRestartState = {
   startedAt: null,
   wasHealthy: null,
+  hasBeenHealthy: false,
   recoveringNotified: false,
   notifyAt: null,
 };
@@ -41,11 +43,15 @@ export function observeAgentService(
     && !service.pendingCommandsLocked
     && service.domainAvailability?.kanban !== false && service.domainAvailability?.cron !== false;
   if (!ready) {
-    // A null sample means the host status request failed, not proof of a restart.
-    // Keep startedAt so a later authoritative sample can still detect one.
-    const grace = previous.wasHealthy === null ? STARTUP_GRACE_MS
-      : service?.healthy === true ? DEGRADED_GRACE_MS : 0;
-    const notifyAt = previous.notifyAt ?? now + grace;
+    // Failed HTTP/IPC reads also produce healthy:false conservative snapshots.
+    // Confirm them on a later poll while launchd is loaded or unobservable;
+    // an unloaded or repair-required job is authoritative and bypasses that wait.
+    const confirmedFailure = background?.supported === true
+      && (background.needsRepair === true || (background.enabled === true && background.loaded === false));
+    const grace = !previous.hasBeenHealthy ? STARTUP_GRACE_MS
+      : confirmedFailure ? 0 : DEGRADED_GRACE_MS;
+    const notifyAt = confirmedFailure && previous.hasBeenHealthy ? now
+      : previous.notifyAt ?? now + grace;
     const shouldNotify = !previous.recoveringNotified && now >= notifyAt;
     return {
       state: { ...previous, wasHealthy: false, notifyAt,
@@ -58,7 +64,8 @@ export function observeAgentService(
     ? service.startedAt : null;
   const restarted = startedAt !== null && previous.startedAt !== null && previous.startedAt !== startedAt;
   return {
-    state: { startedAt: startedAt ?? previous.startedAt, wasHealthy: true, recoveringNotified: false, notifyAt: null },
+    state: { startedAt: startedAt ?? previous.startedAt, wasHealthy: true, hasBeenHealthy: true,
+      recoveringNotified: false, notifyAt: null },
     notice: restarted ? "restarted" : null,
   };
 }

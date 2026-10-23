@@ -1,0 +1,100 @@
+import fsSync, { constants as fsConstants } from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { ARCHIVE_LIMIT_ERROR_CODE, ArchiveLimitError, } from "./archive-limits.js";
+import { FsSafeError } from "./errors.js";
+import { inspectFileIdentity } from "./strict-file-identity.js";
+import { resolveReadOpenFlags } from "./read-open-flags.js";
+import { tempFile } from "./temp-target.js";
+import { assertExclusiveCreateLeaf } from "./exclusive-create.js";
+import { assertNoWindowsPathAlias } from "./windows-path-alias.js";
+async function closeFileHandle(handle) {
+    if (handle)
+        await handle.close().catch(() => undefined);
+}
+export async function writeFileHandleFully(params) {
+    let offset = 0;
+    while (offset < params.bytes) {
+        params.deadline.check();
+        const { bytesWritten } = await params.handle.write(params.buffer, offset, params.bytes - offset);
+        if (bytesWritten <= 0) {
+            throw new Error("archive staging write made no progress");
+        }
+        offset += bytesWritten;
+    }
+}
+export async function stageArchiveFileForExtraction(params) {
+    params.deadline.check();
+    const archivePath = params.archivePath;
+    assertNoWindowsPathAlias(archivePath);
+    const sourcePath = path.resolve(archivePath);
+    assertNoWindowsPathAlias(sourcePath);
+    const initialStat = await inspectFileIdentity(async () => {
+        const stat = fsSync.lstatSync(sourcePath, { bigint: true });
+        if (stat.isSymbolicLink() || !stat.isFile()) {
+            throw new Error(`archive is not a regular file: ${archivePath}`);
+        }
+        return stat;
+    });
+    if (initialStat.size > params.limits.maxArchiveBytes) {
+        throw new ArchiveLimitError(ARCHIVE_LIMIT_ERROR_CODE.ARCHIVE_SIZE_EXCEEDS_LIMIT);
+    }
+    const handle = await fs.open(sourcePath, resolveReadOpenFlags());
+    let staged;
+    let output;
+    try {
+        staged = await tempFile({
+            prefix: "fs-safe-archive-input",
+            fileName: path.basename(sourcePath),
+        });
+        const opened = await inspectFileIdentity(async () => {
+            const stat = fsSync.fstatSync(handle.fd, { bigint: true });
+            if (!stat.isFile())
+                throw new Error("archive changed during validation");
+            return stat;
+        }, initialStat);
+        await inspectFileIdentity(async () => {
+            const stat = fsSync.lstatSync(sourcePath, { bigint: true });
+            if (stat.isSymbolicLink() || !stat.isFile())
+                throw new Error("archive changed during validation");
+            return stat;
+        }, opened);
+        const flags = fsConstants.O_WRONLY |
+            fsConstants.O_CREAT |
+            fsConstants.O_EXCL |
+            (process.platform !== "win32" && "O_NOFOLLOW" in fsConstants
+                ? fsConstants.O_NOFOLLOW
+                : 0);
+        assertExclusiveCreateLeaf(staged.path);
+        output = await fs.open(staged.path, flags, 0o600);
+        const buffer = Buffer.allocUnsafe(Math.min(512 * 1024, Math.max(64 * 1024, Number(opened.size)), params.limits.maxArchiveBytes + 1));
+        let written = 0;
+        while (true) {
+            params.deadline.check();
+            const length = Math.min(buffer.length, params.limits.maxArchiveBytes - written + 1);
+            const { bytesRead } = await handle.read(buffer, 0, length, null);
+            params.deadline.check();
+            if (bytesRead === 0)
+                break;
+            written += bytesRead;
+            if (written > params.limits.maxArchiveBytes) {
+                throw new ArchiveLimitError(ARCHIVE_LIMIT_ERROR_CODE.ARCHIVE_SIZE_EXCEEDS_LIMIT);
+            }
+            await writeFileHandleFully({ handle: output, buffer, bytes: bytesRead, deadline: params.deadline });
+        }
+        await output.close();
+        output = undefined;
+        return staged;
+    }
+    catch (error) {
+        await closeFileHandle(output);
+        await staged?.cleanup().catch(() => undefined);
+        if (error instanceof FsSafeError && error.code === "path-mismatch") {
+            throw new FsSafeError("path-mismatch", "archive changed during validation", { cause: error });
+        }
+        throw error;
+    }
+    finally {
+        await closeFileHandle(handle);
+    }
+}

@@ -107,12 +107,16 @@ async function main() {
     };
     const profile = service.productStore.listAgentProfiles().find(item => item.enabled);
     assert(profile, "isolated Service must have a native Profile");
-    const readFile = async (skillId, packageId, skillName, relativePath) => {
+    const readFile = async (skillId, packageId, skillName, relativePath,
+      { correctedBundledCopy = false } = {}) => {
       const sourcePath = path.join(bundledRoot(), "packages", packageId,
         "skills", skillName, relativePath);
       const source = fs.readFileSync(sourcePath, "utf8");
       const read = await readChunks("shoggoth_skill_file_read", { skillId, relativePath });
-      assert.equal(read.text, source, `installed file changed: ${relativePath}`);
+      if (correctedBundledCopy) {
+        assert.notEqual(read.text, source,
+          `installed file was not corrected: ${relativePath}`);
+      } else assert.equal(read.text, source, `installed file changed: ${relativePath}`);
       return { ...read, sourcePath, sourceSha256: sha256(source) };
     };
     const installSkill = async (packageId, skillName) => {
@@ -151,8 +155,9 @@ async function main() {
       assert.equal((await findSkill(skillName)).filter(item => item.id === state.skillId).length, 0);
       assert(!service.runtimeSkillStore.catalog(profile.id).items.some(item => item.id === state.skillId));
     };
-    const retrieveProgram = async (state, packageId, skillName, relativePath, name) => {
-      const retrieved = await readFile(state.skillId, packageId, skillName, relativePath);
+    const retrieveProgram = async (state, packageId, skillName, relativePath, name,
+      options = {}) => {
+      const retrieved = await readFile(state.skillId, packageId, skillName, relativePath, options);
       const target = path.join(root, name);
       fs.writeFileSync(target, retrieved.text, { mode: 0o700 });
       return { ...retrieved, target };
@@ -296,7 +301,11 @@ async function main() {
     const docs = await installSkill("google-drive", "google-docs");
     assert.match(docs.skill.text, /canonicalize_google_workspace_url\.mjs/u);
     const docsProgram = await retrieveProgram(docs, "google-drive", "google-docs",
-      "scripts/canonicalize_google_workspace_url.mjs", "retrieved-canonicalize-google-url.mjs");
+      "scripts/canonicalize_google_workspace_url.mjs", "retrieved-canonicalize-google-url.mjs",
+      { correctedBundledCopy: true });
+    assert.equal(docsProgram.sourceSha256,
+      "e439d12ad25f60049c15d8bbfabb9e29fa6b3233c42e653006049127414c2521",
+      "frozen Google Docs helper source changed without catalog review");
     const docsUrls = [
       "https://docs.google.com/document/u/2/d/Doc_123-abc/edit?usp=sharing",
       "https://docs.google.com/spreadsheets/d/Sheet_456/edit#gid=12",
@@ -327,6 +336,16 @@ async function main() {
     { cwd: root, env: childEnv });
     assert.equal(docsNoId.code, 1, "Docs URL without file ID was accepted");
     assert.match(docsNoId.stderr, /does not contain a supported Google Workspace file ID/u);
+    for (const malformed of [
+      "https://docs.google.com/document/d//edit",
+      "https://docs.google.com/document/u/2/d//edit",
+      "https://docs.google.com/document/x/d/Doc_123/edit",
+    ]) {
+      const rejected = await run(process.execPath, [docsProgram.target, malformed],
+        { cwd: root, env: childEnv });
+      assert.equal(rejected.code, 1, `malformed Docs URL was accepted: ${malformed}`);
+      assert.match(rejected.stderr, /does not contain a supported Google Workspace file ID/u);
+    }
     await disableSkill(docs, "google-docs");
 
     // The Android QA helper converts a real hierarchy XML input into a small,
@@ -461,9 +480,11 @@ async function main() {
         sourceSkillSha256: docs.sourceSkillSha256,
         installedSkillSha256: docs.skill.digest,
         scriptSha256: docsProgram.sourceSha256,
+        installedScriptSha256: docsProgram.digest,
         skillPages: docs.skill.pages, scriptPages: docsProgram.pages,
         normalizedResourceTypes: normalized.map(item => item.resourceType),
-        rejectedLookalikeHost: true, rejectedMissingId: true },
+        rejectedLookalikeHost: true, rejectedMissingId: true,
+        rejectedMalformedIdPaths: true },
       { packageId: "test-android-apps", skill: "android-emulator-qa",
         sourceDigest: android.frozen.sourceDigest,
         installedReleaseDigest: android.installed.releaseDigest,

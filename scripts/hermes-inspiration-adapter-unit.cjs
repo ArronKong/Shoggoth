@@ -127,6 +127,17 @@ test("start uses the stable run ID once and publishes only its own terminal", as
   assert.equal((await adapter.inspect(input)).resultSummary, "done");
 });
 
+test("M36: full final text is independent from the bounded summary and excludes intermediate channels", async () => {
+  const { adapter, backend, input, hooks } = await running();
+  const text = "完整答案🙂\n".repeat(10_000) + "尾部交接";
+  hooks.thinking("private reasoning"); hooks.delta("draft only");
+  backend.finish(input.sessionKey, { text }); await tick();
+  assert.ok(Buffer.byteLength(JSON.stringify((await adapter.inspect(input)).resultSummary)) <= 16 * 1024);
+  assert.equal(adapter.fullResult(input), text);
+  assert.equal(adapter.fullResult({ ...input, runId: "other" }), null);
+  assert.equal(adapter.fullResult({ ...input, workspace: "/other" }), null);
+});
+
 test("restart and unknown run IDs never infer success from history or resume", async () => {
   const { adapter, backend, input } = await running();
   backend.getHistory = () => { throw new Error("must not read unrelated history"); };
@@ -135,6 +146,19 @@ test("restart and unknown run IDs never infer success from history or resume", a
   backend._lifecycleGeneration += 1;
   assert.equal((await adapter.inspect(input)).status, "unknown");
   assert.equal(backend.calls.some((call) => call[0] === "session.resume"), false);
+});
+
+test("sealed public paragraphs survive the next draft and terminal, with no reasoning or tool payloads", async () => {
+  const { adapter, backend, input, hooks } = await running();
+  hooks.thinking("private-reasoning"); hooks.delta("第一段分工"); hooks.interim("第一段分工");
+  hooks.tool({ phase: "result", toolCallId: "private-tool", result: "private-output" });
+  hooks.delta("第二段进展");
+  assert.equal(adapter.draft(input.runId), "第一段分工\n\n第二段进展");
+  hooks.interim("第二段进展"); hooks.delta("最后答案");
+  backend.finish(input.sessionKey, { text: "最后答案" }); await tick();
+  assert.equal(adapter.publicProgress(input), "第一段分工\n\n第二段进展");
+  assert.equal(adapter.publicProgress({ ...input, runId: "unrelated" }), null);
+  assert.equal(adapter.publicProgress({ ...input, workspace: "/unrelated" }), null);
 });
 
 test("prepare continues an existing session only after identity and workspace verification", async () => {
@@ -500,8 +524,9 @@ function actualBackend(mode, request) {
   const backend = new HermesBackend();
   backend.profileById.set(agentId, "fixture");
   backend.dashboards.set("fixture", { baseUrl: "http://fixture.invalid", token: "fake" });
+  backend._settingsGet = async () => ({ model: "fixture-model", provider: "fixture-provider" });
   backend._gatewayChatEnabled = () => mode === "gateway";
-  backend.gwSockets.set("fixture", { generation: 1, request });
+  backend.gwSockets.set("fixture", { generation: 1, request, restoreServerRequests() {}, replayServerRequests() {} });
   backend._gwSocket = () => backend.gwSockets.get("fixture");
   return backend;
 }
@@ -540,7 +565,8 @@ test("real ACP creation uses the selected directory and exposes actual default c
   for (const workspace of [null, os.tmpdir()]) {
     const backend = actualBackend("acp");
     const seen = [];
-    backend._clientForProfile = () => ({ newSession: async (cwd) => { seen.push(cwd); return "fake-acp-id"; } });
+    backend._clientForProfile = () => ({ newSession: async (cwd) => { seen.push(cwd); return "fake-acp-id"; },
+      setSessionModel: async (id, model) => { assert.equal(id, "fake-acp-id"); assert.match(model, /fixture-model/u); } });
     const key = await backend.createSession(agentId, { workspace, freezeWorkspace: true });
     assert.deepEqual(seen, [os.tmpdir()]);
     assert.equal(backend.sessionWorkspaceByKey.get(key), os.tmpdir());
@@ -710,6 +736,34 @@ test("gateway observation timeout carries uncertainty even after successful subm
   assert.deepEqual(calls, ["prompt.submit"]);
   assert.equal(errors[0][1].executionUncertain, true);
   assert.equal(backend.gwTurns.size, 0);
+});
+
+test("a Host-sealed deleted group confirms only an absent or uniquely idle complete gateway session", async () => {
+  for (const variant of ["absent", "idle", "partial", "duplicate", "working"]) {
+    const backend = fakeBackend("gateway"), adapter = new HermesInspirationAdapter({ backend, sessionPurpose: "group" });
+    const input = { agentId, sessionKey: `agent:${agentId}:stored`, runId: "old-group-run", workspace: "/fixture", mode: "gateway" };
+    backend.activeRows = variant === "absent" || variant === "partial" ? []
+      : [{ id: "runtime", session_key: "stored", status: variant === "working" ? "working" : "idle" }];
+    if (variant === "duplicate") backend.activeRows.push({ ...backend.activeRows[0], id: "duplicate" });
+    if (variant === "partial") backend.listFlags = { truncated: true };
+    assert.equal((await adapter.cancel(input)).status, "unknown");
+    assert.equal((await adapter.cancel(input, { groupDeleted: true })).status,
+      ["absent", "idle"].includes(variant) ? "canceled" : "unknown", variant);
+  }
+});
+
+test("Hermes response facts belong to its exact final callback, with absent usage staying unknown", async () => {
+  const { adapter, backend, input } = await running();
+  backend.finish(input.sessionKey, { text: "done", meta: { model: "actual-model",
+    usage: { input: 1000, output: 20, contextUsed: 800, contextMax: 10000 } } });
+  const metadata = adapter.responseMetadata(input);
+  assert.equal(metadata.usage.inputTokens, 1000); assert.equal(metadata.context.usedTokens, 800);
+  assert.equal(metadata.models[0], "actual-model");
+  assert.equal(adapter.responseMetadata({ ...input, runId: "wrong-run" }), null);
+  assert.equal(adapter.responseMetadata({ ...input, workspace: "/wrong" }), null);
+  metadata.models[0] = "changed"; assert.equal(adapter.responseMetadata(input).models[0], "actual-model");
+  const missing = await running(); missing.backend.finish(missing.input.sessionKey, { text: "no metrics" });
+  assert.equal(missing.adapter.responseMetadata(missing.input), null);
 });
 
 test("summary truncation respects the public JSON byte limit", async () => {

@@ -4,10 +4,14 @@ const { createHash } = require("node:crypto");
 const { TextDecoder } = require("node:util");
 const http = require("node:http");
 const net = require("node:net");
+const { secretReference } = require("./plugin-secret-placeholders");
 const yaml = require("js-yaml");
 const Ajv2020 = require("ajv/dist/2020");
 const manifestSchema = require("../../schemas/agent-plugins/1.0.0/plugin.schema.json");
 const mcpSchema = require("../../schemas/agent-plugins/1.0.0/mcp.schema.json");
+const { ENDPOINT: FIGMA_DESKTOP_ENDPOINT,
+  FROZEN_DECLARATION_DIGEST: FIGMA_DECLARATION_DIGEST,
+  isFigmaDesktopSkill } = require("./figma-desktop-mcp");
 
 // Deliberately pure: the caller supplies an already safely scanned immutable
 // file inventory. This module never opens a path, resolves env, or executes code.
@@ -18,7 +22,7 @@ const FORMATS = Object.freeze({ "claude-plugin": ".claude-plugin/plugin.json",
 const METADATA = ["name", "version", "description", "author", "homepage", "repository", "license", "keywords"];
 const SKILL_NAME = /^(?!.*--)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u;
 const STANDARD_SKILL_FIELDS = new Set(["name", "description", "license", "compatibility", "metadata"]);
-const LEGACY_CONTROL_FILES = new Set([".mcp.json", ".app.json", ".lsp.json", "settings.json",
+const LEGACY_CONTROL_FILES = new Set([".mcp.json", ".app.json", ".lsp.json", "settings.json", "hooks.json",
   ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]);
 // Only these exact frozen declarations may become Shoggoth-owned Desktop OAuth
 // candidates. Their original callback, client secret placeholders and union of
@@ -30,6 +34,33 @@ const FROZEN_GOOGLE_MCP = Object.freeze({
     declarationDigest: "7a670a2ad93f430d176698941ad136c1286d502f26079f8661a3fb44dcae0cb0" }),
   "google-drive": Object.freeze({ endpoint: "https://drivemcp.googleapis.com/mcp/v1",
     declarationDigest: "5e231b20fa17af688c689de0bda6905ea5225cf8e34d4e9627fad9c03e73919f" }),
+});
+// The frozen Google Docs helper silently treats /document/d//edit as file ID
+// "edit" because it drops empty path segments. Correct only this exact source
+// file in the installed, Shoggoth-owned conversion; leave the bundled source
+// and its catalog digest untouched. A source update must be reviewed afresh.
+const FROZEN_GOOGLE_DOCS_URL_HELPER = Object.freeze({
+  path: "skills/google-docs/scripts/canonicalize_google_workspace_url.mjs",
+  sourceDigest: "e439d12ad25f60049c15d8bbfabb9e29fa6b3233c42e653006049127414c2521",
+  oldParser: [
+    '  const segments = parsed.pathname.split("/").filter(Boolean);',
+    "  const resourceSegment = segments[0];",
+    "  const resourceType = RESOURCE_TYPES.get(resourceSegment);",
+    '  const dIndex = segments.indexOf("d");',
+    "  const fileId = dIndex >= 0 ? segments[dIndex + 1] : null;",
+  ].join("\n"),
+  newParser: [
+    '  const segments = parsed.pathname.split("/");',
+    "  const resourceSegment = segments[1];",
+    "  const resourceType = RESOURCE_TYPES.get(resourceSegment);",
+    '  const dIndex = segments[2] === "u" && /^[0-9]+$/u.test(segments[3]) ? 4 : 2;',
+    '  const fileId = segments[dIndex] === "d" ? segments[dIndex + 1] : null;',
+  ].join("\n"),
+});
+const FROZEN_ZOOM_MCP = Object.freeze({
+  endpoint: "https://mcp.zoom.us/mcp/meeting/streamable",
+  declarationDigest: "2fcc33f6cdb41b7ecebe80624b7fc8fc207daef923df2e8fbda582ecab040890",
+  placeholderClientId: "<ZOOM_PUBLIC_CLIENT_ID>",
 });
 const ajv = new Ajv2020({ strict: true });
 const validateManifest = ajv.compile(manifestSchema);
@@ -135,6 +166,22 @@ function normalizedBundledSkill(file, directoryName, diagnostics) {
     return { content: Buffer.from(content, "utf8"), changed: content !== source };
   } catch { return null; }
 }
+function correctedBundledGoogleDocsHelper(files, skills, manifestName, bundledCodex, diagnostics) {
+  if (!bundledCodex || manifestName !== "google-drive"
+    || !skills.some((skill) => skill.name === "google-docs")) return [];
+  const expected = FROZEN_GOOGLE_DOCS_URL_HELPER;
+  const original = files.get(expected.path);
+  if (!original || digest(original.bytes) !== expected.sourceDigest) {
+    fail("LEGACY_BUNDLED_HELPER_DRIFT");
+  }
+  const source = decoder.decode(original.bytes);
+  if (source.split(expected.oldParser).length !== 2) fail("LEGACY_BUNDLED_HELPER_DRIFT");
+  diagnostics.push({ scope: "skill-file", name: "google-docs",
+    reasonCode: "CODEX_GOOGLE_DOCS_URL_HELPER_CORRECTED" });
+  return [{ path: expected.path,
+    content: Buffer.from(source.replace(expected.oldParser, expected.newParser), "utf8"),
+    executable: original.executable }];
+}
 function normalizedValue(value, format) {
   if (typeof value !== "string" || !value.isWellFormed() || value.includes("\0")
     || Buffer.byteLength(value) > 8192) fail("LEGACY_MCP_ENTRY_INVALID");
@@ -157,6 +204,15 @@ function stringMap(value, format, type) {
     const lower = key.toLowerCase();
     if (names.has(lower)) fail("LEGACY_MCP_ENTRY_INVALID");
     names.add(lower);
+    // A `${secret:NAME}` value names a credential the user supplies in Shoggoth.
+    // The Service resolves it at launch; nothing is read from the importing host.
+    const reference = secretReference(raw, { allowBearer: type === "headers" });
+    if (reference && (type === "headers" ? !["cookie", "proxy-authorization"].includes(lower)
+      : /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)
+        && !["PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA"].includes(key))) {
+      result[key] = raw;
+      continue;
+    }
     if (type === "headers" && ["authorization", "cookie", "proxy-authorization"].includes(lower)) {
       fail("LEGACY_CREDENTIAL_UNSUPPORTED");
     }
@@ -175,12 +231,23 @@ function stringMap(value, format, type) {
   return result;
 }
 function mcpEntry(value, format, files, diagnostics, name, bundledGithub = false,
-  bundledCodex = false, bundledOAuthPackage = null, bundledCodexSecurity = false) {
+  bundledCodex = false, bundledOAuthPackage = null, bundledCodexSecurity = false,
+  bundledFigma = false) {
   if (!own(value)) fail("LEGACY_MCP_ENTRY_INVALID");
   // Removing host-only fields must not turn this frozen, thread-owned scan
   // service into an ordinary stdio MCP candidate.
   if (bundledCodexSecurity && name === "codex-security") {
     fail("LEGACY_MCP_FIELD_UNSUPPORTED");
+  }
+  if (bundledFigma) {
+    if (name !== "figma" || !files.has(".mcp.json")
+      || digest(files.get(".mcp.json").bytes) !== FIGMA_DECLARATION_DIGEST
+      || Object.keys(value).sort().join(",") !== "oauth_resource,type,url"
+      || value.type !== "http" || value.url !== "https://mcp.figma.com/mcp"
+      || value.oauth_resource !== value.url) fail("FIGMA_DESKTOP_SOURCE_UNREVIEWED");
+    value = { type: "http", url: FIGMA_DESKTOP_ENDPOINT };
+    diagnostics.push({ scope: "mcp-server", name,
+      reasonCode: "FIGMA_DESKTOP_MCP_REQUIRED" });
   }
   // The pinned GitHub bundle declares a host environment variable for its PAT.
   // Import only its fixed endpoint; Shoggoth connects it through a separate
@@ -207,6 +274,13 @@ function mcpEntry(value, format, files, diagnostics, name, bundledGithub = false
     && value.oauth_resource === value.url
     && own(value.oauth) && Object.keys(value.oauth).join(",") === "client_id"
     && value.oauth.client_id === "<SHOPIFY_PUBLIC_CLIENT_ID>";
+  const managedZoomOAuth = bundledOAuthPackage === "zoom" && name === "zoom"
+    && Object.keys(value).sort().join(",") === "oauth,type,url"
+    && value.type === "http" && value.url === FROZEN_ZOOM_MCP.endpoint
+    && own(value.oauth) && Object.keys(value.oauth).join(",") === "client_id"
+    && value.oauth.client_id === FROZEN_ZOOM_MCP.placeholderClientId
+    && files.has(".mcp.json")
+    && digest(files.get(".mcp.json").bytes) === FROZEN_ZOOM_MCP.declarationDigest;
   const google = FROZEN_GOOGLE_MCP[bundledOAuthPackage];
   const managedGoogleDesktopOAuth = google && name === bundledOAuthPackage
     && value.type === "http" && value.url === google.endpoint
@@ -217,7 +291,7 @@ function mcpEntry(value, format, files, diagnostics, name, bundledGithub = false
         return canonical(pinned.mcpServers?.[name]) === canonical(value);
       } catch { return false; }
     })();
-  if (managedAirtableOAuth || managedShopifyOAuth || managedGoogleDesktopOAuth) {
+  if (managedAirtableOAuth || managedShopifyOAuth || managedGoogleDesktopOAuth || managedZoomOAuth) {
     oauthResource = value.url;
     value = { type: value.type, url: value.url };
     diagnostics.push({ scope: "mcp-server", name,
@@ -332,7 +406,7 @@ function convertLegacyPluginContents(input) {
       diagnostics.push({ scope: "manifest", name: key, reasonCode: "LEGACY_FIELD_NOT_IMPORTED" });
     }
   }
-  for (const [name, prefixes] of Object.entries({ hooks: ["hooks/"], commands: ["commands/"],
+  for (const [name, prefixes] of Object.entries({ hooks: ["hooks/", "hooks.json"], commands: ["commands/"],
     agents: ["agents/"], apps: [".app.json"], lspServers: [".lsp.json"],
     outputStyles: ["output-styles/"], workflows: ["workflows/"], monitors: ["monitors/"] })) {
     if ([...files.keys()].some((filePath) => prefixes.some((prefix) =>
@@ -351,6 +425,12 @@ function convertLegacyPluginContents(input) {
     for (const [filePath, file] of files) {
       const match = /^skills\/([^/]+)\/SKILL\.md$/u.exec(filePath);
       if (!match) continue;
+      if (bundledCodex && manifest.name === "figma"
+        && !isFigmaDesktopSkill(match[1])) {
+        diagnostics.push({ scope: "skill", name: match[1],
+          reasonCode: "FIGMA_DESKTOP_SKILL_REMOTE_ONLY" });
+        continue;
+      }
       if (bundledCodex) {
         const normalized = normalizedBundledSkill(file, match[1], diagnostics);
         if (normalized) {
@@ -396,9 +476,10 @@ function convertLegacyPluginContents(input) {
       try {
         const converted = mcpEntry(value, input.format, files, diagnostics, name,
           bundledCodex && manifest.name === "github", bundledCodex,
-          bundledCodex && ["airtable", "shopify", "gmail", "google-calendar", "google-drive"]
+          bundledCodex && ["airtable", "shopify", "zoom", "gmail", "google-calendar", "google-drive"]
             .includes(manifest.name) ? manifest.name : null,
-          manifest.name === "codex-security" && value?.command === "./scripts/launch_codex_security_mcp");
+          manifest.name === "codex-security" && value?.command === "./scripts/launch_codex_security_mcp",
+          bundledCodex && manifest.name === "figma");
         mcpServers[name] = converted.spec;
         if (converted.oauthResource !== null) mcpOAuthResources[name] = converted.oauthResource;
       }
@@ -406,9 +487,12 @@ function convertLegacyPluginContents(input) {
     }
   }
   skills.sort(byPath);
+  const correctedSkillFiles = correctedBundledGoogleDocsHelper(files, skills,
+    manifest.name, bundledCodex, diagnostics);
   // Source control manifests may contain credentials or host-specific hooks.
   // Keep their hashes as provenance, not their bodies in the imported package.
-  const normalizedPaths = new Set(normalizedSkillFiles.map(file => file.path));
+  const normalizedPaths = new Set([...normalizedSkillFiles, ...correctedSkillFiles]
+    .map(file => file.path));
   const retainedPaths = [...files.keys()].filter((filePath) => !LEGACY_CONTROL_FILES.has(filePath)
     && !normalizedPaths.has(filePath)
     && (!filePath.startsWith("skills/")
@@ -424,7 +508,7 @@ function convertLegacyPluginContents(input) {
     manifest.extensions = { shoggoth: { mcpOAuthResources } };
   }
   const generatedFiles = [{ path: "plugin.json", content: `${JSON.stringify(manifest, null, 2)}\n`, executable: false },
-    ...normalizedSkillFiles];
+    ...normalizedSkillFiles, ...correctedSkillFiles];
   if (Object.keys(mcpServers).length) generatedFiles.push({ path: "mcp.json",
     content: `${JSON.stringify({ $schema: mcpSchema.$id, mcpServers }, null, 2)}\n`, executable: false });
   const inputDigest = digest(canonical([...files].map(([filePath, file]) => ({ path: filePath,

@@ -22,6 +22,7 @@ test("context observations do not cross runtime/account namespaces with the same
     emit(codex, 123, now);
     assert.equal(read().usedTokens, 123);
     await f.complete(first);
+    f.collideNextSessionId("pi", nativeId);
     await f.switch(session.sessionKey, "pi");
     const second = await f.send(session.sessionKey, "context-pi");
     assert.equal(second.runtimeSessionRef.sessionId, nativeId, "fixture must collide across namespaces");

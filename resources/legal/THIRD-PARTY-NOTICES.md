@@ -18,8 +18,9 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | @floating-ui/react-dom | 2.1.8 | MIT | [LICENSE](licenses/npm/_floating-ui_react-dom@2.1.8/LICENSE) |
 | @floating-ui/utils | 0.2.11 | MIT | [LICENSE](licenses/npm/_floating-ui_utils@0.2.11/LICENSE) |
 | @huggingface/tokenizers | 0.2.0 | Apache-2.0 | [LICENSE](licenses/npm/_huggingface_tokenizers@0.2.0/LICENSE) |
-| @modelcontextprotocol/client | 2.1.0 | MIT | [LICENSE](licenses/npm/_modelcontextprotocol_client@2.1.0/LICENSE) |
-| @modelcontextprotocol/core | 2.1.0 | MIT | [LICENSE](licenses/npm/_modelcontextprotocol_core@2.1.0/LICENSE) |
+| @modelcontextprotocol/client | 2.3.1 | Apache-2.0 | [LICENSE](licenses/npm/_modelcontextprotocol_client@2.3.1/LICENSE) |
+| @modelcontextprotocol/core | 2.3.1 | Apache-2.0 | [LICENSE](licenses/npm/_modelcontextprotocol_core@2.3.1/LICENSE) |
+| @playwright/mcp | 0.0.82 | Apache-2.0 | [LICENSE](licenses/npm/_playwright_mcp@0.0.82/LICENSE) |
 | @trycua/cua-driver-darwin-arm64 | 0.22.0 | MIT AND MPL-2.0 | [CUA-LICENSE.md](CUA-LICENSE.md), [CUA-NOTICE.md](CUA-NOTICE.md), [MPL-2.0.txt](MPL-2.0.txt) |
 | @trycua/cua-driver-darwin-x64 | 0.22.0 | MIT AND MPL-2.0 | [CUA-LICENSE.md](CUA-LICENSE.md), [CUA-NOTICE.md](CUA-NOTICE.md), [MPL-2.0.txt](MPL-2.0.txt) |
 | @trycua/cua-driver | 0.22.0 | MIT | [CUA-LICENSE.md](CUA-LICENSE.md), [CUA-NOTICE.md](CUA-NOTICE.md), [MPL-2.0.txt](MPL-2.0.txt) |
@@ -33,7 +34,6 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | @ubjs/node-darwin-arm64 | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
 | @ubjs/node-darwin-x64 | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
 | @ubjs/node | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
-| @xterm/headless | 6.0.0 | MIT | [XTERM-LICENSE.txt](XTERM-LICENSE.txt) |
 | adm-zip | 0.6.1 | MIT | [LICENSE](licenses/npm/adm-zip@0.6.1/LICENSE) |
 | ajv | 8.20.0 | MIT | [LICENSE](licenses/npm/ajv@8.20.0/LICENSE) |
 | animejs | 4.4.1 | MIT | [LICENSE.md](licenses/npm/animejs@4.4.1/LICENSE.md) |
@@ -49,9 +49,9 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | define-data-property | 1.1.4 | MIT | [LICENSE](licenses/npm/define-data-property@1.1.4/LICENSE) |
 | define-properties | 1.2.1 | MIT | [LICENSE](licenses/npm/define-properties@1.2.1/LICENSE) |
 | detect-node | 2.1.0 | MIT | [LICENSE](licenses/npm/detect-node@2.1.0/LICENSE) |
-| dompurify | 3.4.15 | Apache-2.0 | [LICENSE](licenses/npm/dompurify@3.4.15/LICENSE), [LICENSE-MPL](licenses/npm/dompurify@3.4.15/LICENSE-MPL) |
+| dompurify | 3.4.17 | Apache-2.0 | [LICENSE](licenses/npm/dompurify@3.4.17/LICENSE), [LICENSE-MPL](licenses/npm/dompurify@3.4.17/LICENSE-MPL) |
 | electron-updater | 6.8.9 | MIT | [LICENSE](licenses/npm/electron-updater@6.8.9/LICENSE) |
-| electron | 44.4.2 | MIT | [LICENSE](licenses/npm/electron@44.4.2/LICENSE) |
+| electron | 44.9.3 | MIT | [LICENSE](licenses/npm/electron@44.9.3/LICENSE) |
 | entities | 4.5.0 | BSD-2-Clause | [LICENSE](licenses/npm/entities@4.5.0/LICENSE) |
 | es-define-property | 1.0.1 | MIT | [LICENSE](licenses/npm/es-define-property@1.0.1/LICENSE) |
 | es-errors | 1.3.0 | MIT | [LICENSE](licenses/npm/es-errors@1.3.0/LICENSE) |
@@ -87,19 +87,19 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | loose-envify | 1.4.0 | MIT | [LICENSE](licenses/npm/loose-envify@1.4.0/LICENSE) |
 | luxon | 3.7.2 | MIT | [LICENSE.md](licenses/npm/luxon@3.7.2/LICENSE.md) |
 | markdown-it-task-lists | 2.1.1 | ISC | [LICENSE](licenses/npm/markdown-it-task-lists@2.1.1/LICENSE) |
-| markdown-it | 14.2.0 | MIT | [LICENSE](licenses/npm/markdown-it@14.2.0/LICENSE) |
+| markdown-it | 14.3.3 | MIT | [LICENSE](licenses/npm/markdown-it@14.3.3/LICENSE) |
 | matcher | 3.0.0 | MIT | [license](licenses/npm/matcher@3.0.0/license) |
 | mdurl | 2.0.0 | MIT | [LICENSE](licenses/npm/mdurl@2.0.0/LICENSE) |
 | ms | 2.1.3 | MIT | [license.md](licenses/npm/ms@2.1.3/license.md) |
-| node-addon-api | 7.1.1 | MIT | [LICENSE.md](licenses/npm/node-addon-api@7.1.1/LICENSE.md) |
 | node-addon-api | 8.9.2 | MIT | [LICENSE.md](licenses/npm/node-addon-api@8.9.2/LICENSE.md) |
-| node-pty | 1.1.0 | MIT | [LICENSE](licenses/npm/node-pty@1.1.0/LICENSE) |
 | object-keys | 1.1.1 | MIT | [LICENSE](licenses/npm/object-keys@1.1.1/LICENSE) |
 | onnxruntime-common | 1.22.0 | MIT | [ONNX-RUNTIME-LICENSE.txt](ONNX-RUNTIME-LICENSE.txt) |
 | onnxruntime-node | 1.22.0 | MIT | [ONNX-RUNTIME-LICENSE.txt](ONNX-RUNTIME-LICENSE.txt) |
 | path-key | 3.1.1 | MIT | [license](licenses/npm/path-key@3.1.1/license) |
 | pinyin-pro | 3.29.3 | MIT | [LICENSE](licenses/npm/pinyin-pro@3.29.3/LICENSE) |
 | pkce-challenge | 5.0.1 | MIT | [LICENSE](licenses/npm/pkce-challenge@5.0.1/LICENSE) |
+| playwright-core | 1.64.0-alpha-1789764292000 | Apache-2.0 | [LICENSE](licenses/npm/playwright-core@1.64.0-alpha-1789764292000/LICENSE), [NOTICE](licenses/npm/playwright-core@1.64.0-alpha-1789764292000/NOTICE) |
+| playwright | 1.64.0-alpha-1789764292000 | Apache-2.0 | [LICENSE](licenses/npm/playwright@1.64.0-alpha-1789764292000/LICENSE), [NOTICE](licenses/npm/playwright@1.64.0-alpha-1789764292000/NOTICE) |
 | punycode.js | 2.3.1 | MIT | [LICENSE-MIT.txt](licenses/npm/punycode.js@2.3.1/LICENSE-MIT.txt) |
 | react-dom | 18.3.1 | MIT | [LICENSE](licenses/npm/react-dom@18.3.1/LICENSE) |
 | react-i18next | 17.0.8 | MIT | [LICENSE](licenses/npm/react-i18next@17.0.8/LICENSE) |
@@ -109,6 +109,7 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | require-from-string | 2.0.2 | MIT | [license](licenses/npm/require-from-string@2.0.2/license) |
 | reselect | 5.2.0 | MIT | [LICENSE](licenses/npm/reselect@5.2.0/LICENSE) |
 | roarr | 2.15.4 | BSD-3-Clause | [LICENSE](licenses/npm/roarr@2.15.4/LICENSE) |
+| rrule | 2.8.1 | BSD-3-Clause | [LICENCE](licenses/npm/rrule@2.8.1/LICENCE) |
 | sax | 1.6.1 | BlueOak-1.0.0 | [LICENSE.md](licenses/npm/sax@1.6.1/LICENSE.md) |
 | scheduler | 0.23.2 | MIT | [LICENSE](licenses/npm/scheduler@0.23.2/LICENSE) |
 | semver-compare | 1.0.0 | MIT | [LICENSE](licenses/npm/semver-compare@1.0.0/LICENSE) |
@@ -118,9 +119,11 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | set-cookie-parser | 2.7.2 | MIT | [LICENSE](licenses/npm/set-cookie-parser@2.7.2/LICENSE) |
 | shebang-command | 2.0.0 | MIT | [license](licenses/npm/shebang-command@2.0.0/license) |
 | shebang-regex | 3.0.0 | MIT | [license](licenses/npm/shebang-regex@3.0.0/license) |
+| smol-toml | 1.9.0 | BSD-3-Clause | [LICENSE](licenses/npm/smol-toml@1.9.0/LICENSE) |
 | sprintf-js | 1.1.3 | BSD-3-Clause | [LICENSE](licenses/npm/sprintf-js@1.1.3/LICENSE) |
 | three | 0.185.0 | MIT | [LICENSE](licenses/npm/three@0.185.0/LICENSE) |
 | tiny-typed-emitter | 2.1.0 | MIT | [LICENSE](licenses/npm/tiny-typed-emitter@2.1.0/LICENSE) |
+| tslib | 2.8.1 | 0BSD | [LICENSE.txt](licenses/npm/tslib@2.8.1/LICENSE.txt) |
 | type-fest | 0.13.1 | (MIT OR CC0-1.0) | [license](licenses/npm/type-fest@0.13.1/license) |
 | typescript | 5.9.3 | Apache-2.0 | [LICENSE.txt](licenses/npm/typescript@5.9.3/LICENSE.txt) |
 | uc.micro | 2.1.0 | MIT | [LICENSE.txt](licenses/npm/uc.micro@2.1.0/LICENSE.txt) |
@@ -129,9 +132,36 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | void-elements | 3.1.0 | MIT | [LICENSE](licenses/npm/void-elements@3.1.0/LICENSE) |
 | which | 2.0.2 | ISC | [LICENSE](licenses/npm/which@2.0.2/LICENSE) |
 | ws | 8.21.0 | MIT | [LICENSE](licenses/npm/ws@8.21.0/LICENSE) |
-| zod | 4.6.5 | MIT | [LICENSE](licenses/npm/zod@4.6.5/LICENSE) |
+| zod | 4.6.7 | MIT | [LICENSE](licenses/npm/zod@4.6.7/LICENSE) |
 
 ## Copied source, fonts and bundled programs
+
+### OpenClaw memory core and bundled source dependencies
+
+- License: MIT.
+- Source: https://github.com/openclaw/openclaw/tree/c10679395819ede78bb073f979f95c157e165bfa
+- Revision / evidence: c10679395819ede78bb073f979f95c157e165bfa; per-file SHA-256 in build/shoggoth-memory/manifest.json.
+- Local files: `app/agent-service/shoggoth-memory/core.cjs`, `build/shoggoth-memory`.
+- Full text: [OPENCLAW.txt](licenses/source/openclaw-memory/OPENCLAW.txt), [fs-safe.txt](licenses/source/openclaw-memory/fs-safe.txt), [p-limit.txt](licenses/source/openclaw-memory/p-limit.txt), [p-map.txt](licenses/source/openclaw-memory/p-map.txt), [kysely.txt](licenses/source/openclaw-memory/kysely.txt), [ipaddr.js.txt](licenses/source/openclaw-memory/ipaddr.js.txt), [undici.txt](licenses/source/openclaw-memory/undici.txt), [yocto-queue.txt](licenses/source/openclaw-memory/yocto-queue.txt), [ansi-regex.txt](licenses/source/openclaw-memory/ansi-regex.txt), [get-east-asian-width.txt](licenses/source/openclaw-memory/get-east-asian-width.txt), [string-width.txt](licenses/source/openclaw-memory/string-width.txt), [strip-ansi.txt](licenses/source/openclaw-memory/strip-ansi.txt), [typebox.txt](licenses/source/openclaw-memory/typebox.txt).
+- Changes / provenance: Pinned upstream algorithm bodies are bundled from byte-identical source inputs. An export-only build transform exposes the private Dreaming runner. Shoggoth host adapters provide Profile, file, session, SQLite, model and embedding ownership; the network module loader resolves bundled Undici instead of optional desktop dependencies. fs-safe 0.24.0, p-limit 7.3.3, p-map 7.0.8, yocto-queue 1.2.2, kysely 0.29.6, ipaddr.js 2.5.0, undici 8.11.2, ansi-regex 6.4.0, get-east-asian-width 1.7.0, string-width 8.2.2, strip-ansi 7.2.0 and typebox 1.3.34 retain their original MIT notices. OpenAI/Mistral/Voyage/Google/Ollama provider source is included but has no Product credential or production selection binding. No external OpenClaw installation or Gateway is used.
+
+### Memory MIME detection and AI option dependencies
+
+- License: MIT AND BSD-3-Clause.
+- Source: https://github.com/openclaw/openclaw/blob/c10679395819ede78bb073f979f95c157e165bfa/pnpm-lock.yaml
+- Revision / evidence: file-type 22.1.1; dependency versions and per-file SHA-256 in build/shoggoth-memory/manifest.json.
+- Local files: `app/agent-service/shoggoth-memory/core.cjs`, `build/shoggoth-memory/dependencies`.
+- Full text: [file-type.txt](licenses/source/openclaw-memory/file-type.txt), [inflate.txt](licenses/source/openclaw-memory/inflate.txt), [strtok3.txt](licenses/source/openclaw-memory/strtok3.txt), [token-types.txt](licenses/source/openclaw-memory/token-types.txt), [uint8array-extras.txt](licenses/source/openclaw-memory/uint8array-extras.txt), [debug.txt](licenses/source/openclaw-memory/debug.txt), [text-codec.txt](licenses/source/openclaw-memory/text-codec.txt), [ieee754.txt](licenses/source/openclaw-memory/ieee754.txt), [ms.txt](licenses/source/openclaw-memory/ms.txt), [partial-json.txt](licenses/source/openclaw-memory/partial-json.txt).
+- Changes / provenance: Original dependencies are bundled from byte-identical package source inputs. Versions and package tarball integrity match the pinned OpenClaw lockfile. file-type 22.1.1, @tokenizer/inflate 0.4.1, strtok3 10.3.5, token-types 6.1.2, uint8array-extras 1.5.0, debug 4.4.3, @borewit/text-codec 0.2.2, ms 2.1.3 and partial-json 0.1.7 retain MIT notices; ieee754 1.2.1 retains BSD-3-Clause. partial-json is in the original AI options module's parsing closure. This component does not enable remote media upload, legacy Claude thinking or production multimodal configuration.
+
+### gogcli Gmail MCP runtime
+
+- License: MIT.
+- Source: https://github.com/openclaw/gogcli/tree/v0.42.0
+- Revision / evidence: v0.42.0 (commit 792107a); arm64 and x64 release binaries pinned by SHA-256 in build/gog-runtime-manifest.json.
+- Local files: `app/agent-service/plugin-gogcli-gmail-runtime.js`, `build/gog-runtime-manifest.json`, `scripts/fetch-gog-runtime.mjs`.
+- Full text: [GOGCLI.txt](licenses/source/GOGCLI.txt).
+- Changes / provenance: Unmodified upstream gogcli executable; Shoggoth adds a separate Service-owned account, tool, and permission adapter. The MIT notice text is retained with the distributed binary.
 
 ### Multilingual E5-small bundled embedding model
 
@@ -190,11 +220,20 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 ### OpenAI Codex
 
 - License: Apache-2.0.
-- Source: https://github.com/openai/codex/tree/rust-v0.149.0
-- Revision / evidence: 0.149.0.
-- Local files: `schemas/codex-app-server/0.149.0`, `build/codex-runtime-manifest.json`.
+- Source: https://github.com/openai/codex/tree/rust-v0.159.2
+- Revision / evidence: 0.159.2.
+- Local files: `schemas/codex-app-server/0.159.2`, `build/codex-runtime-manifest.json`.
 - Full text: [CODEX-LICENSE.txt](CODEX-LICENSE.txt), [CODEX-NOTICE.txt](CODEX-NOTICE.txt).
 - Changes / provenance: Pinned unmodified runtime; generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately.
+
+### Codex native voice libraries
+
+- License: LGPL-2.1-or-later AND MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib.
+- Source: https://github.com/openai/codex/tree/rust-v0.159.2/third_party/voice
+- Revision / evidence: Codex 0.159.2; library versions and source archive hashes in codex-voice/sources.json.
+- Local files: `.vendor/codex/arm64/package/codex-resources/voice`, `.vendor/codex/x64/package/codex-resources/voice`.
+- Full text: [NOTICE.md](licenses/source/codex-voice/NOTICE.md), [LGPL-2.1.txt](licenses/source/codex-voice/LGPL-2.1.txt), [Opus.txt](licenses/source/codex-voice/Opus.txt), [PCRE2.md](licenses/source/codex-voice/PCRE2.md), [libffi.txt](licenses/source/codex-voice/libffi.txt), [proxy-libintl.txt](licenses/source/codex-voice/proxy-libintl.txt), [sljit.txt](licenses/source/codex-voice/sljit.txt), [zlib.txt](licenses/source/codex-voice/zlib.txt).
+- Changes / provenance: Unmodified upstream dynamic libraries and selected GStreamer plugins. Complete upstream notices and licenses are retained here and in the runtime package. Corresponding source archive URLs, versions and SHA-256 digests are retained in codex-voice/sources.json; build source and commit are identified in codex-voice/manifest.json. Build tools in sources.json are not bundled runtime libraries.
 
 ### ChillKai
 
@@ -249,6 +288,15 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 - Local files: `build/codex-runtime-manifest.json`.
 - Full text: [ZSH.txt](licenses/source/ZSH.txt).
 - Changes / provenance: Preserved zsh upstream redistribution terms. Shell shipped unchanged as part of the pinned Codex package; upstream package does not identify a separate zsh source commit.
+
+### Codex inline visualization stylesheet
+
+- License: Apache-2.0.
+- Source: https://github.com/openai/codex/tree/rust-v0.162.0/codex-rs/tui/assets/inline_visualization
+- Revision / evidence: rust-v0.162.0; stylesheet SHA-256 4b1d492f1e67394f80dc83fe7e9d3a508648dbeffe7a5152b27a567da972c50f.
+- Local files: `app/native-chat-ui-resources/visualize.css`, `app/native-chat-ui-resources/manifest.json`.
+- Full text: [CODEX-LICENSE.txt](CODEX-LICENSE.txt), [CODEX-NOTICE.txt](CODEX-NOTICE.txt).
+- Changes / provenance: The upstream stylesheet is vendored without changes. Shoggoth supplies its own isolated HTML host, state SDK and trusted action controls. The copied style does not upgrade the bundled Codex Runtime.
 
 See [runtime source locations](RUNTIME-LICENSE-SOURCES.md) for MPL corresponding source.
 Brand names and logos identify compatible services; their trademarks remain with their owners.

@@ -14,14 +14,18 @@ class PluginConnectionController {
   #selectPending = new Map();
   #cleanup = new Map();
   constructor({ store, productStore, drainConnection, cancelStaleOAuth, invalidateConnection,
+    credentialDispositionForConnection = null,
     now = Date.now, onPhase = null } = {}) {
     if (typeof store?.disconnectMcpConnection !== "function" || typeof store?.listBindingsForConnection !== "function"
       || typeof productStore?.getAgentProfile !== "function" || typeof drainConnection !== "function"
       || typeof cancelStaleOAuth !== "function" || typeof invalidateConnection !== "function"
-      || typeof now !== "function" || (onPhase !== null && typeof onPhase !== "function")) {
+      || typeof now !== "function" || (onPhase !== null && typeof onPhase !== "function")
+      || (credentialDispositionForConnection !== null
+        && typeof credentialDispositionForConnection !== "function")) {
       throw new TypeError("PluginConnectionController requires trusted Service dependencies");
     }
-    Object.assign(this, { store, productStore, drainConnection, cancelStaleOAuth, invalidateConnection, now, onPhase });
+    Object.assign(this, { store, productStore, drainConnection, cancelStaleOAuth,
+      invalidateConnection, credentialDispositionForConnection, now, onPhase });
   }
   #request(input) {
     if (!exact(input, ["profileId", "bindingId", "expectedRevision", "operationId"])
@@ -57,14 +61,21 @@ class PluginConnectionController {
       componentId(binding.installationId, "mcp-server", item.name) === binding.componentId);
     const bindings = this.store.listBindingsForConnection(connection.connectionId);
     if (bindings.length > 1024) fail("PLUGIN_CONNECTION_LIMIT");
+    const defaultDisposition = connection.credentialRef ? "retained_encrypted_unusable" : "none";
+    const credentialDisposition = this.credentialDispositionForConnection?.({ connection, installation,
+      binding }) ?? defaultDisposition;
+    if (!["none", "retained_encrypted_unusable", "retained_encrypted_shared"].includes(credentialDisposition)) {
+      fail("PLUGIN_SERVICE_FAILED");
+    }
     return { authorityIncarnation: this.store.getAuthorityIncarnation(), profile, binding,
-      connection, installation, releaseName: release.name, componentName: component?.name || "MCP", bindings };
+      connection, installation, releaseName: release.name, componentName: component?.name || "MCP",
+      bindings, credentialDisposition };
   }
   #summary(context) {
     return { action: "mcp-disconnect", agent: context.binding.subjectKind === "global"
       ? "所有助理" : context.profile.name, package: context.releaseName,
       capability: context.componentName, affectedBindings: context.bindings.length,
-      credentialDisposition: context.connection.credentialRef ? "retained_encrypted_unusable" : "none" };
+      credentialDisposition: context.credentialDisposition };
   }
   #selectRequest(input) {
     if (!exact(input, ["profileId", "bindingId", "connectionId", "expectedRevision", "operationId"])
@@ -113,6 +124,10 @@ class PluginConnectionController {
       agent: "所有助理", package: context.packageName, capability: context.componentName,
       account: /^github:[1-9][0-9]{0,19}$/u.test(context.target.principalIdentity)
         ? `GitHub #${context.target.principalIdentity.slice(7)}`
+        : /^cloudflare-token:[a-f0-9]{32}$/u.test(context.target.principalIdentity)
+          ? `Cloudflare Token ${context.target.principalIdentity.slice(-8)}`
+        : /^gmail:[^\s@]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$/u.test(context.target.principalIdentity)
+          ? context.target.principalIdentity.slice(6)
         : `连接 ${context.target.connectionId.slice(0, 8)}`,
       grantsRevoked: context.grantCounts.allow } };
   }

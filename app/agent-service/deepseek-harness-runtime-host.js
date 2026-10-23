@@ -1,5 +1,6 @@
 "use strict";
-const { openRuntimeLedger } = require("./runtime-shared-ledger");
+const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
+const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -12,7 +13,7 @@ const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
 const { DeepSeekHarnessProcess } = require("./deepseek-harness-process");
-const { DEFAULT_MCP_TOOL_TIMEOUT_MS } = require("./interactive-timeouts");
+const { DEFAULT_MCP_TOOL_TIMEOUT_MS, DEFAULT_SERVER_REQUEST_TIMEOUT_MS } = require("./interactive-timeouts");
 const {
   DeepSeekHarnessRuntimeLedger,
   emptyDeepSeekHarnessUsage,
@@ -108,6 +109,7 @@ function inputFingerprint(input) {
   return crypto.createHash("sha256").update(JSON.stringify({
     prompt: input.prompt,
     context: input.context ?? null,
+    ...require("./native-instruction-delivery").turnInstructionFingerprint(input),
     model: input.model ?? null,
     cwd: input.cwd ?? null,
     permissionPolicy: input.permissionPolicy ?? null,
@@ -208,6 +210,7 @@ class DeepSeekHarnessRuntimeHost {
         "DeepSeek host paths are invalid",
       );
     }
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
     this.binding = runtimeBinding(options.runtimeBinding || {
       runtime: DEEPSEEK_HARNESS_RUNTIME,
       runtimeProfileId: options.runtimeProfileId,
@@ -216,6 +219,7 @@ class DeepSeekHarnessRuntimeHost {
     this.runtimeProfileId = this.binding.runtimeProfileId;
     this.runtimeAccountId = this.binding.runtimeAccountId;
     this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
+    this.workspaceExecutionVersion = options.workspaceExecutionVersion === 1 ? 1 : null;
     this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeDeepSeekHarnessPermissionPolicy(options.permissionPolicy);
@@ -232,7 +236,7 @@ class DeepSeekHarnessRuntimeHost {
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.onDiagnostic = typeof options.onDiagnostic === "function" ? options.onDiagnostic : null;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
-    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs ?? 310_000;
+    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs ?? DEFAULT_SERVER_REQUEST_TIMEOUT_MS;
     this.startupTimeoutMs = options.startupTimeoutMs ?? 45_000;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
     this.killGraceMs = options.killGraceMs ?? 2_000;
@@ -253,7 +257,11 @@ class DeepSeekHarnessRuntimeHost {
         "DeepSeek MCP gate issuer is invalid",
       );
     }
-    for (const value of [this.requestTimeoutMs, this.serverRequestTimeoutMs, this.startupTimeoutMs,
+    if (!Number.isSafeInteger(this.serverRequestTimeoutMs) || this.serverRequestTimeoutMs < 100
+      || this.serverRequestTimeoutMs > DEFAULT_SERVER_REQUEST_TIMEOUT_MS) {
+      throw hostError("DEEPSEEK_HARNESS_HOST_OPTIONS_INVALID", "DeepSeek server request timeout is invalid");
+    }
+    for (const value of [this.requestTimeoutMs, this.startupTimeoutMs,
       this.shutdownGraceMs, this.killGraceMs]) {
       if (!Number.isSafeInteger(value) || value < 100 || value > 10 * 60 * 1000) {
         throw hostError(
@@ -275,6 +283,7 @@ class DeepSeekHarnessRuntimeHost {
     this.sessionConfigs = new Map();
     this.activeTurns = new Map();
     this.listeners = new Set();
+    this.modelTextObservers = new Map();
     this.serverRequestHandlers = new Map();
     this.cleanupIncomplete = false;
     this.stopping = null;
@@ -324,7 +333,7 @@ class DeepSeekHarnessRuntimeHost {
       this._spawnBridge();
       let startupTimer;
       try {
-        await Promise.race([
+        const ready = await Promise.race([
           this.process.ready,
           new Promise((_, reject) => {
             startupTimer = setTimeout(() => reject(hostError(
@@ -333,6 +342,9 @@ class DeepSeekHarnessRuntimeHost {
             )), this.startupTimeoutMs);
           }),
         ]);
+        if (this.workspaceExecutionVersion === 1 && ready?.workspaceExecutionVersion !== 1) {
+          throw hostError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "DeepSeek did not attest its workspace execution guard");
+        }
       } finally {
         clearTimeout(startupTimer);
       }
@@ -513,14 +525,15 @@ class DeepSeekHarnessRuntimeHost {
   }
 
   sessionRead(input) {
-    this._assertReady();
+    const settled = settledRuntimeSession(this, input?.sessionId);
+    if (!settled) this._assertReady();
     if (!plain(input) || !safeString(input.sessionId, 512)) {
       return Promise.reject(hostError(
         "RUNTIME_SESSION_PARAMS_INVALID",
         "DeepSeek read input is invalid",
       ));
     }
-    const session = sessionById(this.ledger.snapshot(), input.sessionId);
+    const session = settled || sessionById(this.ledger.snapshot(), input.sessionId);
     if (!session) {
       return Promise.reject(hostError(
         "RUNTIME_SESSION_NOT_FOUND",
@@ -776,15 +789,85 @@ class DeepSeekHarnessRuntimeHost {
     return {};
   }
 
+  async resolveModelOnly(input) {
+    return require("./runtime-model-resolution").runBoundedModelResolution(input, async signal => {
+      this._assertReady();
+      if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model discovery canceled");
+      const explicit = input.model !== undefined;
+      const abort = () => {
+        if (explicit) void Promise.resolve().then(() => this.process.request("model/cancel",
+          { operationId: input.operationId }, { timeoutMs: 1_000 })).catch(() => {});
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        let result;
+        try {
+          result = await this.process.request("model/resolve", explicit ? { model: input.model, operationId: input.operationId } : {}, { timeoutMs: 4_000 });
+        } catch (error) {
+          // A transport timeout does not prove the adapter's metadata lookup
+          // ended. Only terminal bridge replies release that control task.
+          if (explicit && !["MODEL_ONLY_CANCELED", "RUNTIME_MODEL_UNAVAILABLE", "MODEL_RESOLUTION_INVALID"].includes(error?.code)) {
+            abort(); throw hostError("RUNTIME_STOP_UNCONFIRMED", "Model discovery completion is unknown");
+          }
+          throw error;
+        }
+        this._assertReady();
+        if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model discovery canceled");
+        return result;
+      } finally { signal.removeEventListener("abort", abort); }
+    });
+  }
+
   async generateModelOnly(input) {
     this._assertReady();
     return require("./runtime-model-only").runBoundedModelOnly(input, async signal => {
+      let model = input.model, settings;
+      if (input.execution) {
+        const description = await this.process.request("model/describe", { model }, { timeoutMs: 4_000 });
+        this._assertReady();
+        input.assertCurrent?.();
+        if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+        if (!plain(description) || Object.keys(description).some(key => !["model", "provider", "capabilities"].includes(key))) {
+          throw hostError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Model settings unavailable");
+        }
+        const selection = require("./runtime-model-resolution").validateModelResolution({
+          model: description.model, provider: description.provider,
+        });
+        if (model && model !== selection.model) throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Model route changed");
+        if (!require("./chat-model-settings").validModelCapabilities(description.capabilities)
+          || description.capabilities.fastTier !== null) {
+          throw hostError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Model settings unavailable");
+        }
+        const resolved = require("./memory-model-settings").resolveMemoryModelExecution(input.execution, description.capabilities);
+        model = selection.model;
+        settings = { ...(resolved.thinkingLevel === undefined ? {} : { reasoningEffort: resolved.thinkingLevel }) };
+      }
+      if (this.modelTextObservers.has(input.operationId)) throw hostError("MODEL_ONLY_INVALID", "Duplicate model request");
+      let streamError = null, streamedText = "";
       const cancel = () => { void this.process.request("model/cancel", { operationId: input.operationId }).catch(() => {}); };
+      this.modelTextObservers.set(input.operationId, delta => {
+        if (signal.aborted || streamError || !input.onText) return;
+        try {
+          if (!safeString(delta, 32 * 1024, { empty: true })
+            || Buffer.byteLength(streamedText) + Buffer.byteLength(delta) > 32 * 1024) {
+            throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Invalid streamed model output");
+          }
+          streamedText += delta; input.onText(streamedText);
+        } catch (error) { streamError = error; cancel(); }
+      });
       signal.addEventListener("abort", cancel, { once: true });
-      try { return await this.process.request("model/generate", {
-        operationId: input.operationId, prompt: input.prompt, model: input.model,
-      }, { timeoutMs: 180_000 }); }
-      finally { signal.removeEventListener("abort", cancel); }
+      try {
+        input.assertCurrent?.();
+        if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+        const result = await this.process.request("model/generate", {
+        operationId: input.operationId, prompt: input.prompt, model,
+        ...(settings ? { settings } : {}),
+        ...(input.onText ? { streamText: true } : {}),
+      }, { timeoutMs: 180_000 });
+        if (streamError) throw streamError;
+        return result;
+      } catch (error) { throw streamError || error; }
+      finally { signal.removeEventListener("abort", cancel); this.modelTextObservers.delete(input.operationId); }
     });
   }
 
@@ -867,13 +950,24 @@ class DeepSeekHarnessRuntimeHost {
   }
 
   async _beginTurn(active, input) {
+    // The system section keeps only rules that persist across turns; the Run ID
+    // and memory context ride in the injected context message, which stays in
+    // history, so unchanged memory is not injected again (see PromptBlockLedger).
+    const delivery = require("./native-instruction-delivery");
+    const turn = delivery.splitTurnInstructions(delivery.turnInstructions(input));
+    const command = input.prompt.trimStart().startsWith("/");
+    if (command) this.promptLedger?.reset(active.sessionId);
+    const context = command ? { blocks: [input.context || "", turn.run].filter(Boolean), commit() {} }
+      : delivery.promptBlocks(this.promptLedger, active.sessionId, { context: input.context || "", run: turn.run });
+    active.promptCommit = context.commit;
     await this.process.request("turn/start", {
       remoteSessionId: active.remoteSessionId,
       sessionId: active.sessionId,
       turnId: active.turnId,
       operationId: active.operationId,
       prompt: input.prompt,
-      context: input.context || "",
+      context: context.blocks.join("\n\n"),
+      turnDeveloperInstructions: turn.rules,
     }, { timeoutMs: this.startupTimeoutMs });
     this._acceptActive(active);
   }
@@ -897,11 +991,16 @@ class DeepSeekHarnessRuntimeHost {
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
     active.accepted = true;
+    active.promptCommit?.();
     active.acceptance.resolve({ turn: { id: active.turnId, status: "inProgress", items: [] } });
     for (const event of active.bufferedEvents.splice(0)) this._handleEvent(active, event);
   }
 
   _onEvent(event) {
+    if (plain(event) && event.known === true && event.type === "model_text"
+      && event.method === "deepseek-harness/model_text" && safeString(event.operationId, 256)) {
+      this.modelTextObservers.get(event.operationId)?.(event.delta); return;
+    }
     if (!plain(event) || event.known !== true || !safeString(event.sessionId, 512)
       || !safeString(event.turnId, 512) || !safeString(event.type, 128)) return;
     const active = this.activeTurns.get(event.sessionId);
@@ -925,7 +1024,8 @@ class DeepSeekHarnessRuntimeHost {
         const session = sessionById(data, active.sessionId);
         const turn = turnById(session, active.turnId);
         if (!turn.assistantMessages.some((message) => message.id === event.itemId)) {
-          turn.assistantMessages.push({ id: event.itemId, text: event.text });
+          turn.assistantMessages.push({ id: event.itemId, text: event.text,
+            phase: event.phase === "commentary" ? "commentary" : "final_answer" });
         }
         turn.updatedAt = Math.max(turn.updatedAt, timestamp);
         session.updatedAt = Math.max(session.updatedAt, timestamp);
@@ -1044,6 +1144,7 @@ class DeepSeekHarnessRuntimeHost {
       runtimeAccountId: this.runtimeAccountId,
       executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.launch.command,
+      toolExposure: require("./product-tool-exposure").toolExposureFor("deepseek-harness"),
     });
     this.reservationId = reservation?.reservationId || null;
     const mcpEnv = Object.fromEntries((reservation?.env || []).map((entry) => [entry.name, entry.value]));
@@ -1063,6 +1164,7 @@ class DeepSeekHarnessRuntimeHost {
       SHOGGOTH_DSH_APPROVAL_POLICY: this.permissionPolicy.approvalPolicy === "never"
         ? "never" : "ask",
       SHOGGOTH_DSH_CONTROL_INSTANCE: this.controlInstance ? "1" : "0",
+      SHOGGOTH_DSH_WORKSPACE_EXECUTION_VERSION: this.workspaceExecutionVersion === 1 ? "1" : "0",
       ...(this.launch.argsPrefix[0] ? { SHOGGOTH_DSH_ENTRYPOINT: this.launch.argsPrefix[0] } : {}),
       SHOGGOTH_DSH_MCP_CONFIG: JSON.stringify(mcpConfig),
       DSH_TELEMETRY_DISABLED: "1",
@@ -1095,7 +1197,8 @@ class DeepSeekHarnessRuntimeHost {
     }
     if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 1
       || !child.stdin || !child.stdout || !child.stderr || !child.stdio?.[3]) {
-      try { child?.kill?.("SIGKILL"); } catch {}
+      retireFailedSpawn(child);
+      try { killStartedChild(child, "SIGKILL"); } catch {}
       this._revokeMcp();
       throw hostError(
         "DEEPSEEK_HARNESS_PROCESS_SPAWN_FAILED",
@@ -1309,7 +1412,7 @@ class DeepSeekHarnessRuntimeHost {
               id: message.id,
               type: "agentMessage",
               text: message.text,
-              phase: "final_answer",
+              phase: message.phase === "commentary" ? "commentary" : "final_answer",
               delivery: "local",
             })),
           ],
@@ -1390,7 +1493,7 @@ class DeepSeekHarnessRuntimeHost {
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        try { child.kill("SIGKILL"); } catch {}
+        try { killStartedChild(child, "SIGKILL"); } catch {}
         reject(hostError(
           "DEEPSEEK_HARNESS_CONTROL_TIMEOUT",
           "DeepSeek control command timed out",
@@ -1401,7 +1504,7 @@ class DeepSeekHarnessRuntimeHost {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        try { child.kill("SIGKILL"); } catch {}
+        try { killStartedChild(child, "SIGKILL"); } catch {}
         reject(error);
       };
       child.stdout.on("data", (chunk) => { try { stdout = append(stdout, chunk); } catch (error) { fail(error); } });

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "hosts": {
+    "openclaw": {
+      "version": 1,
+      "backendId": "openclaw",
+      "hostVersion": "2026.9.5",
+      "inputTreeSha256": "2ebecebc5b7cf70499ab82ef4315cf63abdb2dfc6e448adb91c4402ee1976cf9",
+      "outputTreeSha256": "6841ac2d667b88f6ffa9d6a3df7f126e3620233f41d2211cff1b669ac0e2b58c",
+      "dependencyTreeSha256": "97e22d78e8b32e21046b94040a6e5f088b7b20d3e086e4ab60fc6a7c90718f5e",
+      "payloadTreeSha256": "430f50ecdb147a493c73848a623b691dbf1610fbd9c0ba2c45a394a0a9ffe6c3",
+      "payloadManifestSha256": "75f8ec284f2ef6e6e2f093a21a11a42444bc501c6c921bead7cf6ee8c8f7620a",
+      "identityFile": "package.json",
+      "identityFileSha256": "fe24be9aa953aa41d10da28162bd1221034c4a7983f447f4f861b1452156fd85",
+      "dependencyPath": "node_modules",
+      "entryRelative": "openclaw.mjs",
+      "payloadRelative": "openclaw/2026.9.5-managed-v2",
+      "manifestFile": "openclaw-2026.9.5-managed.json",
+      "licenseFiles": [
+        {
+          "path": "LICENSE",
+          "sha256": "73571b25326281d369087f469842c02444fe39faaecebda4d82ed21ff3a1c29d"
+        },
+        {
+          "path": "THIRD_PARTY_NOTICES.md",
+          "sha256": "c1d1bbc550feee74853eba104e347341569cbbbe37a9f77659993ca0766277d5"
+        }
+      ],
+      "interpreter": {
+        "version": "24.21.0",
+        "architecture": "arm64",
+        "platform": "darwin",
+        "sha256": "e4b5a3af0e05c75de2eae013904145f40fe7fc2a6e6f17510128bf45cca4e79b"
+      },
+      "managedProtocol": "openclaw-managed-v1",
+      "managedModelReadProtocol": "openclaw-model-read-v1"
+    }
+  },
+  "provenance": {
+    "scope": "Exact local original input and dependencies; managed-v1 is an App-owned compatibility layer, not an official upstream version"
+  }
+}

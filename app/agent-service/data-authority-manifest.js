@@ -22,6 +22,54 @@ function recordAuthority({ authority = [], runtimeCache = [], derived = [], uiCa
 const DATA_AUTHORITY_MANIFEST = Object.freeze({
   schemaVersion: 1,
   stores: Object.freeze({
+    webSettings: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/web-settings.json", "agents/<profileId>/web-settings.json", "stateDir/encrypted-secrets.json"]),
+      records: Object.freeze({
+        WebProviderSettings: recordAuthority({ authority: ["revision", "searchProvider", "fetchProvider"] }),
+        AgentWebProviderSettings: recordAuthority({ authority: ["profileId", "revision", "searchProvider", "fetchProvider"], derived: ["effective", "source"] }),
+        WebProviderCredentialStatus: recordAuthority({ derived: ["provider", "configured", "revision"] }),
+      }),
+      recovery: "Service owns CAS provider choices; API keys are separate encrypted credentials and plaintext canaries; authority backup keeps both files; absence uses keyless Exa search and direct fetch",
+    }),
+    heartbeat: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["agents/<profileId>/HEARTBEAT.md", "stateDir/proactive.sqlite"]),
+      records: Object.freeze({
+        HeartbeatDocument: recordAuthority({ authority: ["profileId", "content"], derived: ["revision", "missing", "readOnly"] }),
+        HeartbeatScratch: recordAuthority({ authority: ["profileId", "content", "revision", "updatedAt"] }),
+        HeartbeatEvidence: recordAuthority({ authority: ["revision", "content", "scratch", "web"] }),
+      }),
+      recovery: "User rules stay separate from monitor state and working notes; completed reviews save scratch with CAS only while the frozen file remains current; authority backup restores both file and database",
+    }),
+    chatUi: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/chat-ui-config.json", "agents/<profileId>/chat-ui/<sessionId>/journal.jsonl",
+        "agents/<profileId>/chat-ui/<sessionId>/manifest.json", "agents/<profileId>/chat-ui/objects/<sha256>.html"]),
+      records: Object.freeze({
+        ChatUiConfig: recordAuthority({ authority: ["revision", "config"] }),
+        ChatUiSession: recordAuthority({ authority: ["profileId", "sessionId", "owner", "epoch", "seq", "checksum"] }),
+        ChatUiRevision: recordAuthority({ authority: ["publicationId", "callId", "fingerprint", "tool", "artifactId", "revision", "sourceEventId", "segmentId", "htmlHash",
+          "htmlBytes", "declaration", "creatorRunId", "creatorAttemptId", "conversationEpoch", "provenance", "state",
+          "stateRevision", "status", "transcriptSeq", "createdAt", "legacy", "bridgeApiVersion", "resourceBundleId", "rendererPolicyVersion"] }),
+        ChatUiOperation: recordAuthority({ authority: ["actionRequestId", "operationId", "artifactId", "revision",
+          "sourceEventId", "actionId", "action", "baseStateRevision", "snapshot", "fingerprint", "sendEnvelope", "sendFingerprint", "stateRevision",
+          "conversationEpoch", "status", "receipt", "publicCode", "createdAt", "updatedAt"] }),
+        ChatUiMount: recordAuthority({ runtimeCache: ["leaseId", "mountId", "generation", "expiresAt", "port"] }),
+      }),
+      recovery: "Private single Service writer; immutable objects and confirmed facts survive restart; authority restore advances UI epochs before Inbox recovery; stale operations never replay; writer locks, mounts, ports and previews are excluded from backup",
+    }),
+    hooks: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/hooks/hooks.sqlite", "stateDir/hooks/packages/<contentDigest>"]),
+      records: Object.freeze({
+        HookDefinition: recordAuthority({ authority: ["hookId", "profileId", "owner", "revision", "version", "contentDigest", "definition", "activeVersion", "epoch"] }),
+        HookGrant: recordAuthority({ authority: ["hookId", "version", "incarnation", "epoch", "contentDigest", "payload", "workspaceRead", "workspaceWrite"] }),
+        HookSnapshot: recordAuthority({ authority: ["id", "runId", "profileId", "workspace", "source", "incarnation", "entries", "capabilities"] }),
+        HookExecution: recordAuthority({ authority: ["id", "profileId", "hookId", "version", "eventId", "runId", "kind", "state", "inputDigest", "outputDigest", "workerPid", "workerStartIdentity"] }),
+      }),
+      recovery: "Single private Service writer; restored definitions stay disabled, grants rotate with incarnation, uncertain actions are never replayed; cacheDir/hooks workers and simulation directories are ephemeral",
+    }),
     runtimeSelectionPolicy: Object.freeze({
       owner: "shoggoth", schemaVersion: 1,
       pathRules: Object.freeze(["agents/<profileId>/runtime-selection-policy.json"]),
@@ -42,6 +90,13 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       records: Object.freeze({ CronTombstone: recordAuthority({ authority: ["id", "profileId", "name", "deletedAt", "operationId"] }) }),
       recovery: "Deleted job IDs remain reserved and historical WorkRuns remain attributable",
     }),
+    cronAuthorization: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["stateDir/cron-authorizations-v1.json"]),
+      records: Object.freeze({ CronAuthorization: recordAuthority({ authority: ["jobId", "profileId", "epoch",
+        "definitionDigest", "grants", "approvedAt", "runId"] }) }),
+      recovery: "Exact task and operation grants survive restart; definition edits revoke before the job changes",
+    }),
     runtimeExtensions: Object.freeze({
       owner: "shoggoth", schemaVersion: 1,
       pathRules: Object.freeze(["stateDir/runtime-extensions-v1.json", "stateDir/runtime-acp-ledgers/<sha256-binding-workspace>.json"]),
@@ -50,7 +105,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       recovery: "Signed opt-in packages; ACP pending receipts reject replay when remote acceptance is unknown",
     }),
     plugins: Object.freeze({
-      owner: "shoggoth", schemaVersion: 9,
+      owner: "shoggoth", schemaVersion: 10,
       pathRules: Object.freeze(["stateDir/plugins/catalog.sqlite", "stateDir/plugins/packages/<contentDigest>",
         "stateDir/plugins/staging/<operationId>", "stateDir/plugins/data/<installationId>/<dataScopeId>",
         "stateDir/plugins/oauth-providers.json", "stateDir/plugins/data/.prepared-dependencies",
@@ -69,13 +124,14 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
           "endpointIdentity", "principalIdentity", "credentialRef", "state", "authRevision", "revision"] }),
         PluginBinding: recordAuthority({ authority: ["bindingId", "subjectKind", "subjectId", "installationId",
           "componentId", "componentKind", "connectionId", "enabled", "revision"] }),
+        PluginHookBinding: recordAuthority({ authority: ["bindingId", "profileId", "installationId", "componentId", "releaseDigest", "workspace", "enabled", "grant", "test", "epoch", "revision", "updatedAt"] }),
         PluginGrant: recordAuthority({ authority: ["grantId", "bindingId", "connectionId", "principalIdentity",
           "toolIdentity", "contractDigest", "effect", "approvalMode", "expiresAt", "epoch", "revision"] }),
         PluginCapabilityCall: recordAuthority({ authority: ["callId", "runRef", "bindingId", "connectionId",
           "principalIdentity", "toolIdentity", "contractDigest", "argumentDigest", "phase", "createdAt",
           "updatedAt"] }),
       }),
-      recovery: "Catalog schema 9 is preflighted read-only; maintenance intents survive restart; code rollback stays disabled until explicit pinned data restoration; authority restore rotates incarnation and preserves unknown receipts; all new installations use Product15 in one canonical root; incompatible data is rejected before writers open",
+      recovery: "Catalog schema 10 is preflighted read-only; headless Hook bindings and exact grants remain PluginStore-owned; maintenance intents survive restart; code rollback stays disabled until explicit pinned data restoration; authority restore rotates incarnation and preserves unknown receipts; all new installations use Product15 in one canonical root; incompatible data is rejected before writers open",
     }),
     externalPluginAudit: Object.freeze({
       owner: "shoggoth", schemaVersion: 4, journalSchemaVersion: 1,
@@ -103,6 +159,20 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       }),
       recovery: "EncryptedSecretStore is the sole ciphertext owner; mcp-oauth remains fixture-only until live identity and installed new-App acceptance",
     }),
+    externalProviderCredentialRecovery: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["stateDir/external-provider-credentials.json", "stateDir/external-provider-credential-receipts/*",
+        "stateDir/openclaw-auth-profile-credentials.json", "stateDir/openclaw-auth-profile-credential-receipts/*"]),
+      records: Object.freeze({
+        CredentialLedger: recordAuthority({ authority: ["version", "revision", "bindings", "operations"] }),
+        CredentialBinding: recordAuthority({ authority: ["backendId", "providerKey", "baseUrl", "api", "revision",
+          "credentialRef", "credentialFingerprint", "lastOperationId"] }),
+        CredentialOperation: recordAuthority({ authority: ["backendId", "providerKey", "baseUrl", "api", "operationId", "requestDigest",
+          "action", "status", "previousBinding", "candidateRef", "candidateFingerprint", "ownerGeneration", "createdAt", "updatedAt"] }),
+        CredentialReceipt: recordAuthority({ authority: ["version", "operationId", "requestDigest", "scopeDigest", "providerKey", "action", "status"] }),
+      }),
+      recovery: "Back up stopped-Service ledgers and receipts with encryptedSecrets; legacy endpoint and native auth-profile namespaces remain separate; receipts never authorize a replacement write or credential replay",
+    }),
     runtimeObservation: Object.freeze({
       owner: "shoggoth", schemaVersion: 1,
       pathRules: Object.freeze(["cacheDir/runtime-context-v1.json", "cacheDir/runtime-queue-clock-v1.json"]),
@@ -123,12 +193,12 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         "version", "id", "profileId", "sessionId", "coveredThroughSeq", "coveredHash", "transcriptRevision",
         "previousId", "summary", "provenance", "createdAt", "contentHash", "partial",
       ] }), CheckpointMemoryAnchor: recordAuthority({ authority: ["version", "profileId",
-          "checkpointId", "memoryRevision", "memoryFreshUntil", "checksum"] }),
+          "checkpointId", "memoryRevision", "memoryInvalidationRevision", "memoryFreshUntil", "checksum"] }),
         NativeMemoryAnchor: recordAuthority({ authority: ["version", "profileId", "sessionId",
-          "nativeSessionId", "bindingId", "memoryRevision", "memoryFreshUntil", "policyRevision", "checksum"] }),
+          "nativeSessionId", "bindingId", "memoryRevision", "memoryInvalidationRevision", "memoryFreshUntil", "policyRevision", "checksum"] }),
         CheckpointInvalidation: recordAuthority({ authority: ["version", "checkpointId", "coverageHash", "nativeSessionId", "bindingId"] }),
         CheckpointMemoryInvalidation: recordAuthority({ authority: ["version", "checkpointId", "coverageHash",
-          "nativeSessionId", "bindingId", "memoryRevision", "memoryFreshUntil", "policyRevision"] }) }),
+          "nativeSessionId", "bindingId", "memoryRevision", "memoryInvalidationRevision", "memoryFreshUntil", "policyRevision"] }) }),
       recovery: "New App projection requires a matching Transcript prefix and separate Memory revision/expiry anchor; any revocation blocks unprovenanced compaction",
     }),
     runExecution: Object.freeze({
@@ -148,6 +218,25 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         Inspiration: recordAuthority({ authority: IDEA_FIELDS }),
         InspirationExecution: recordAuthority({ authority: EXECUTION_FIELDS }),
         InspirationOperation: recordAuthority({ authority: OPERATION_FIELDS }),
+      }),
+    }),
+    groupChat: Object.freeze({
+      owner: "shoggoth",
+      pathRules: Object.freeze(["stateDir/group-chats.sqlite", "stateDir/group-chats.sqlite-wal"]),
+      records: Object.freeze({
+        GroupChat: recordAuthority({ authority: ["id", "name", "purpose", "status", "createdAt", "updatedAt",
+          "metadataRevision", "rosterRevision", "controlEpoch", "lastSeq"] }),
+        GroupChatMember: recordAuthority({ authority: ["id", "groupId", "backendId", "agentId", "profileId",
+          "displayName", "handle", "state", "position", "joinedSeq", "leftSeq"] }),
+        GroupChatMessage: recordAuthority({ authority: ["id", "groupId", "seq", "threadId", "author", "body",
+          "mentions", "system", "origin", "createdAt"] }),
+        GroupChatDiscussion: recordAuthority({ authority: ["id", "groupId", "status", "causeMessageId",
+          "publicReplyCount", "opportunityCount", "deferredMemberIds"] }),
+        GroupChatOpportunity: recordAuthority({ authority: ["id", "discussionId", "memberId", "state", "round",
+          "operationId", "runId", "inputThroughSeq", "errorCode"] }),
+        // 内部会话归属记在群库里：会话库 schema 不变，回退旧版不会把会话库判为损坏。
+        GroupChatSessionBinding: recordAuthority({ authority: ["groupId", "memberId", "threadId", "purpose",
+          "profileId", "sessionKey", "watermark"] }),
       }),
     }),
     product: Object.freeze({
@@ -342,17 +431,25 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       classification: "derivedIntegration",
       rootRule: "runtimeIntegrationDir/antigravity/<runtimeAccountId>/home",
       backupRequired: false,
+      // The ACP server keeps its sign-in selection and native conversations under
+      // .gemini/antigravity-acp; the retired agy CLI data under .gemini/antigravity-cli is never read.
       excludedRuntimeCaches: Object.freeze([
-        "runtimeIntegrationDir/antigravity/<runtimeAccountId>/home/.gemini/antigravity-cli/cli.log",
-        "runtimeIntegrationDir/antigravity/<runtimeAccountId>/home/.gemini/antigravity-cli/log",
+        "runtimeIntegrationDir/antigravity/<runtimeAccountId>/home/.gemini/antigravity/bin",
       ]),
       credentialPolicy: "one lightweight integration Home per account; native ~/.gemini is never rewritten and credentials are never copied",
     }),
     antigravityLedger: Object.freeze({
       owner: "shoggoth",
       classification: "authority",
-      rootRule: "stateDir/runtime-ledgers/antigravity/<runtimeProfileId>/<workspaceShardId>",
+      rootRule: "stateDir/runtime-ledgers/antigravity-acp/<runtimeProfileId>/<workspaceShardId>",
       backupRequired: true,
+    }),
+    antigravityAcpServer: Object.freeze({
+      owner: "shoggoth",
+      classification: "runtimeCache",
+      rootRule: "stateDir/runtime-bin/antigravity-acp/<version>",
+      backupRequired: false,
+      credentialPolicy: "pinned official server re-downloaded and verified by hash and Google signature; holds no credentials",
     }),
     piHome: Object.freeze({
       owner: "pi",
@@ -460,7 +557,8 @@ function validateDataAuthorityManifest(manifest) {
     || !manifest.runtime?.codexHome || !manifest.runtime?.nativeCodexHome
     || !manifest.runtime?.grokBuildHome
     || !manifest.runtime?.grokBuildLedger || !manifest.runtime?.antigravityHome
-    || !manifest.runtime?.antigravityLedger || !manifest.runtime?.piHome
+    || !manifest.runtime?.antigravityLedger || !manifest.runtime?.antigravityAcpServer
+    || !manifest.runtime?.piHome
     || !manifest.runtime?.piLedger || !manifest.runtime?.claudeCodeHome
     || !manifest.runtime?.claudeCodeLedger || !manifest.runtime?.deepSeekHarnessHome
     || !manifest.runtime?.deepSeekHarnessIntegration

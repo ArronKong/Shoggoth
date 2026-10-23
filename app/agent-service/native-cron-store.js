@@ -14,6 +14,7 @@ const {
 } = require("./private-file");
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
+const { CronAuthorizationStore } = require("./cron-authorization-store");
 
 const NATIVE_CRON_STORE_VERSION = 3;
 const MAX_NATIVE_CRON_STORE_BYTES = 64 * 1024 * 1024;
@@ -427,6 +428,8 @@ class NativeCronStore {
     this.filePath = path.join(this.paths.stateDir, "native-cron.json");
     this.fs = options.fs || fs;
     this.atomicWrite = options.atomicWrite || atomicWritePrivateFile;
+    this.authorizations = new CronAuthorizationStore({ paths: this.paths, fs: this.fs,
+      atomicWrite: options.authorizationAtomicWrite || atomicWritePrivateFile });
     this.acquireWriterLease = options.acquireWriterLease || acquirePrivateWriterLease;
     this.profileExists = options.profileExists;
     this.isSensitiveValue = options.isSensitiveValue || null;
@@ -470,6 +473,7 @@ class NativeCronStore {
         maxBytes: MAX_NATIVE_CRON_STORE_BYTES,
       })) : this.#emptyContainer();
       this.container = parsed;
+      this.authorizations.open();
       assertNoSensitive(this.container, this.isSensitiveValue);
       this.#assertExternalReferences(this.container);
       this.commitUncertain = false;
@@ -479,6 +483,7 @@ class NativeCronStore {
       this.opened = true;
       return this;
     } catch (openError) {
+      this.authorizations.close();
       try {
         lease.release();
       } catch (releaseError) {
@@ -507,6 +512,7 @@ class NativeCronStore {
     this.opened = false;
     this.commitUncertain = false;
     this.container = this.#emptyContainer();
+    this.authorizations.close();
   }
 
   createJob(input) {
@@ -688,6 +694,33 @@ class NativeCronStore {
     return clone(this.container.jobs[jobId] || null);
   }
   getJobTombstone(jobId) { this.#assertOpen(); return clone(this.container.tombstones[jobId] || null); }
+
+  authorizationScope(jobId, profileId, prompt) {
+    this.#assertOpen();
+    const job = this.container.jobs[jobId];
+    if (!job || job.profileId !== profileId || job.prompt !== prompt) return null;
+    return this.authorizations.scope(job);
+  }
+
+  authorizationMatches(scope) {
+    this.#assertOpen();
+    return this.authorizations.matches(scope, this.container.jobs[scope?.jobId]);
+  }
+
+  hasAuthorization(scope, key) {
+    this.#assertOpen();
+    return this.authorizations.has(scope, this.container.jobs[scope?.jobId], key);
+  }
+
+  rememberAuthorization(scope, key, receipt) {
+    this.#assertOpen();
+    return this.authorizations.remember(scope, this.container.jobs[scope?.jobId], key, receipt);
+  }
+
+  getOperation(operationId) {
+    this.#assertOpen();
+    return Object.hasOwn(this.container.operations, operationId) ? clone(this.container.operations[operationId]) : null;
+  }
 
   listJobs(query = {}) {
     this.#assertOpen();
@@ -880,6 +913,9 @@ class NativeCronStore {
     if (Buffer.byteLength(serialized, "utf8") > MAX_NATIVE_CRON_STORE_BYTES) {
       throw cronError("CRON_CAPACITY", "Native Cron 文件容量已满");
     }
+    // Revoke before changing the definition. A failed job write can revoke too
+    // much, but cannot restore an old grant after an edit/revert or crash.
+    this.authorizations.invalidateChanges(this.container.jobs, validated.jobs);
     try {
       this.atomicWrite(this.filePath, serialized, {
         fs: this.fs,

@@ -1,0 +1,60 @@
+import fs, {} from "node:fs";
+import path from "node:path";
+import { assertSyncDirectoryGuard } from "./directory-guard.js";
+import { FsSafeError } from "./errors.js";
+import { sameFileIdentityForCleanup } from "./file-identity.js";
+// Node has no portable no-replace rename. Publish the completed stage by link,
+// then remove its verified temporary name without yielding.
+export function publishCopyStage(params) {
+    const { identity, temporaryPath, targetPath } = params;
+    const assertCurrent = () => {
+        assertSyncDirectoryGuard(params.parentGuard);
+        const staged = fs.lstatSync(temporaryPath, { bigint: true });
+        const opened = fs.fstatSync(params.fd, { bigint: true });
+        if (!staged.isFile() || staged.isSymbolicLink() || staged.nlink !== 1n ||
+            !sameFileIdentityForCleanup(staged, identity) ||
+            !sameFileIdentityForCleanup(opened, identity)) {
+            throw new FsSafeError("path-mismatch", "exclusive copy stage changed before publication");
+        }
+    };
+    assertCurrent();
+    params.assertBeforeMutation?.();
+    // Caller authority checks can synchronously replace a parent or staged entry.
+    if (params.assertBeforeMutation)
+        assertCurrent();
+    // An observed collision needs no dispatch; errno after a link attempt remains ambiguous.
+    if (fs.lstatSync(targetPath, { throwIfNoEntry: false })) {
+        throw new FsSafeError("already-exists", "destination already exists");
+    }
+    params.onPublicationAttempt?.();
+    fs.linkSync(temporaryPath, targetPath);
+    let observerRejected = false;
+    let observerError;
+    try {
+        params.onPublished?.(identity);
+    }
+    catch (error) {
+        observerRejected = true;
+        observerError = error;
+    }
+    try {
+        const parent = fs.lstatSync(path.dirname(temporaryPath), { bigint: true });
+        const current = fs.lstatSync(temporaryPath, { bigint: true });
+        if (parent.isSymbolicLink() || !parent.isDirectory() ||
+            !sameFileIdentityForCleanup(parent, params.parentGuard.stat) ||
+            current.isSymbolicLink() || !current.isFile() ||
+            !sameFileIdentityForCleanup(current, identity)) {
+            throw new FsSafeError("path-mismatch", "published copy temporary name changed before cleanup");
+        }
+        // This removes the stage's name, never the published destination or source.
+        fs.unlinkSync(temporaryPath);
+    }
+    catch (error) {
+        throw new FsSafeError("helper-failed", "published copy temporary cleanup failed", {
+            cause: observerRejected ? new AggregateError([observerError, error], "observer and cleanup failed") : error,
+            details: { publication: "published", path: targetPath, dev: identity.dev, ino: identity.ino, cleanup: "failed" },
+        });
+    }
+    if (observerRejected)
+        throw observerError;
+}

@@ -151,9 +151,10 @@ function projectServiceStatus(value) {
   };
 }
 
-function unavailableServiceStatus() {
+function unavailableServiceStatus(recoveryCode = null) {
   return {
     healthy: false,
+    ...(recoveryCode ? { recoveryCode } : {}),
     domainAvailability: { kanban: false, cron: false },
     // Service 不可达时无法证明持久敏感状态已解锁，必须按锁定处理。
     pendingCommandsLocked: true,
@@ -286,6 +287,8 @@ function createProductHostController(options = {}) {
   const onBackgroundReady = options.onBackgroundReady || (() => {});
   let backgroundIntentGeneration = 0;
   let backgroundMaintenance = false;
+  let serviceRecoveryCode = null;
+  let serviceStatusSequence = 0;
   const backgroundStartupAuthorities = new WeakMap();
 
   function backgroundIntentIsCurrent(generation) {
@@ -490,14 +493,24 @@ function createProductHostController(options = {}) {
     },
 
     async getStatus() {
+      const sequence = ++serviceStatusSequence;
       const [serviceResult, backgroundResult] = await Promise.allSettled([
         serviceRequest("service.status", {}),
         launchAgent.status(),
       ]);
+      const service = serviceResult.status === "fulfilled" ? projectServiceStatus(serviceResult.value) : null;
+      if (sequence === serviceStatusSequence) {
+        if (service) serviceRecoveryCode = null;
+        else {
+          try {
+            if (Object.getOwnPropertyDescriptor(serviceResult.reason, "code")?.value === "SERVICE_RECOVERY_REQUIRED") {
+              serviceRecoveryCode = "SERVICE_RECOVERY_REQUIRED";
+            }
+          } catch { /* Hostile error objects cannot supply a recovery identity. */ }
+        }
+      }
       return {
-        service: serviceResult.status === "fulfilled"
-          ? projectServiceStatus(serviceResult.value)
-          : unavailableServiceStatus(),
+        service: serviceRecoveryCode ? unavailableServiceStatus(serviceRecoveryCode) : service || unavailableServiceStatus(),
         // 后台安装状态和 Service 健康状态是两个独立信号，任一失败都不能遮蔽另一侧。
         background: backgroundResult.status === "fulfilled"
           ? projectBackgroundStatus(backgroundResult.value)

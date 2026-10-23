@@ -32,6 +32,25 @@ const { scanDirectory } = require("./check-release-private-keys.cjs");
     assert.throws(() => scanDirectory(source), /PRIVATE_KEY_MATERIAL_FOUND.*\.env.*credential file name/u);
     fs.rmSync(env);
 
+    // A local npm cache setting is harmless before packaging.
+    const npmrc = path.join(source, ".npmrc");
+    fs.writeFileSync(npmrc, "cache=.npm-cache\nfund=false\naudit=false\n");
+    assert.equal(scanDirectory(source).fileCount, 3, "an npm config without credential settings is allowed");
+    for (const setting of [
+      "//registry.npmjs.org/:_authToken=${NPM_TOKEN}", "_auth=cGxhY2Vob2xkZXI=", "_password=cGxhY2Vob2xkZXI=", // gitleaks:allow -- placeholder npm credentials that the scanner fixture must reject
+      "registry=https://user:pass@registry.example/", "email=user@example.com", "[section]",
+    ]) {
+      fs.writeFileSync(npmrc, `cache=.npm-cache\n${setting}\n`);
+      assert.throws(() => scanDirectory(source), /PRIVATE_KEY_MATERIAL_FOUND.*\.npmrc.*credential file name/u, setting);
+    }
+    fs.writeFileSync(npmrc, `cache=.npm-cache\n${pem}`);
+    assert.throws(() => scanDirectory(source), /PRIVATE_KEY_MATERIAL_FOUND.*\.npmrc.*private key block/u,
+      "key material inside an npm config is still reported");
+    fs.rmSync(npmrc);
+    fs.symlinkSync("missing-npm-config", npmrc);
+    assert.throws(() => scanDirectory(source), /PRIVATE_KEY_MATERIAL_FOUND.*\.npmrc.*credential symlink name/u);
+    fs.rmSync(npmrc);
+
     const linkedKey = path.join(source, "id_ed25519");
     fs.symlinkSync("missing-local-key", linkedKey);
     assert.throws(() => scanDirectory(source), /PRIVATE_KEY_MATERIAL_FOUND.*id_ed25519.*credential symlink name/u);
@@ -49,18 +68,17 @@ const { scanDirectory } = require("./check-release-private-keys.cjs");
 
     const app = path.join(scratch, "Shoggoth.app", "Contents", "Resources");
     fs.mkdirSync(app, { recursive: true });
-    const template = path.join(app, "bundled-plugins", "packages", "product-design",
-      "templates", "prototype", ".npmrc");
+    const template = path.join(app, "bundled-plugins", "packages", "fixture", ".npmrc");
     fs.mkdirSync(path.dirname(template), { recursive: true });
     const safeTemplate = "cache=.npm-cache\nfund=false\naudit=false\n";
     fs.writeFileSync(template, safeTemplate);
     const archive = path.join(app, "app.asar");
     await asar.createPackage(source, archive);
-    assert.equal(scanDirectory(path.join(scratch, "Shoggoth.app")).fileCount, 3);
-    fs.appendFileSync(template, "# changed\n");
     assert.throws(() => scanDirectory(path.join(scratch, "Shoggoth.app")),
-      /PRIVATE_KEY_MATERIAL_FOUND.*prototype\/\.npmrc.*credential file name/u);
-    fs.writeFileSync(template, safeTemplate);
+      /PRIVATE_KEY_MATERIAL_FOUND.*fixture\/\.npmrc.*credential file name/u,
+      "the App cannot ship npm configuration from a removed or hidden package");
+    fs.rmSync(template);
+    assert.equal(scanDirectory(path.join(scratch, "Shoggoth.app")).fileCount, 2);
     fs.writeFileSync(leaked, pem);
     const blockedApp = path.join(scratch, "Blocked.app", "Contents", "Resources");
     fs.mkdirSync(blockedApp, { recursive: true });

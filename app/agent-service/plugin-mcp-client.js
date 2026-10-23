@@ -1,24 +1,39 @@
 "use strict";
 
 const fs = require("node:fs");
+const http = require("node:http");
 const path = require("node:path");
 const { Client, StreamableHTTPClientTransport } = require("@modelcontextprotocol/client");
 const { StdioClientTransport } = require("@modelcontextprotocol/client/stdio");
 const { serviceError } = require("./security");
 const { PluginDataScopeLeaseManager } = require("./plugin-data-scope-lease");
 const { pluginToolContractDigest, pluginToolUi } = require("./plugin-tool-contract");
+const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
+const { DEFAULT_SERVER_REQUEST_TIMEOUT_MS } = require("./interactive-timeouts");
 
 const MAX_MESSAGE_BYTES = 256 * 1024;
 const MAX_HTTP_SSE_BYTES = 1024 * 1024;
 const MAX_TOOLS = 256;
 const MAX_QUEUED_CALLS = 16;
 const DEFAULT_TIMEOUT_MS = 15_000;
-const INTERACTIVE_CALL_TIMEOUT_MS = 5 * 60_000 + 30_000;
+const INTERACTIVE_CALL_TIMEOUT_MS = DEFAULT_SERVER_REQUEST_TIMEOUT_MS;
 const STDIO_EXIT_TIMEOUT_MS = 5_000;
 const APP_MIME = "text/html;profile=mcp-app";
 const MAX_APP_HTML_BYTES = 192 * 1024;
+const GITHUB_HOSTED_MCP_ENDPOINT = "https://api.githubcopilot.com/mcp/";
+const GITHUB_LEGACY_HEADER_TOOLS = new Set(["get_file_contents", "create_or_update_file",
+  "issue_read", "add_issue_comment"]);
+const GITHUB_REPOSITORY_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 
 function fail(code, message) { throw serviceError(code, message); }
+// The SDK wraps transport failures (for example during version negotiation);
+// a refused declared credential keeps its own code for the user and Agent.
+function secretRejection(error) {
+  for (let current = error, depth = 0; current && depth < 6; current = current.cause, depth += 1) {
+    if (current.code === "PLUGIN_SECRET_REJECTED") return current;
+  }
+  return null;
+}
 function bounded(value, code = "MCP_SERVER_RESPONSE_TOO_LARGE") {
   let json;
   try { json = JSON.stringify(value); } catch { fail("MCP_SERVER_RESPONSE_INVALID", "MCP 消息不是 JSON"); }
@@ -175,16 +190,18 @@ class PluginMcpClient {
   #appSupport = false;
   #discoveredTools = new Map();
   #activeResource = null;
+  #legacyGitHubHttpHeaders = false;
 
   constructor({ transport, connectionId, principalIdentity, authorizeEgress, versionMode,
     timeoutMs = DEFAULT_TIMEOUT_MS, protocol, onToolsChanged = null,
-    onDisconnected = null, appSupport = false }) {
+    onDisconnected = null, appSupport = false, legacyGitHubHttpHeaders = false }) {
     if (typeof connectionId !== "string" || !connectionId || connectionId.length > 128
       || typeof principalIdentity !== "string" || !principalIdentity
       || principalIdentity.length > 1024 || typeof authorizeEgress !== "function"
       || (onToolsChanged !== null && typeof onToolsChanged !== "function")
       || (onDisconnected !== null && typeof onDisconnected !== "function")
       || typeof appSupport !== "boolean"
+      || typeof legacyGitHubHttpHeaders !== "boolean"
       || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
       fail("CAPABILITY_FORBIDDEN", "MCP 连接缺少身份或派发门禁");
     }
@@ -194,6 +211,7 @@ class PluginMcpClient {
     this.#onDisconnected = onDisconnected;
     this.#timeoutMs = timeoutMs;
     this.#appSupport = appSupport;
+    this.#legacyGitHubHttpHeaders = legacyGitHubHttpHeaders;
     this.#client = new Client({ name: "shoggoth-plugin-host", version: "1" }, {
       capabilities: { elicitation: { form: {} },
         ...(appSupport ? { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: [APP_MIME] } } } : {}) },
@@ -231,7 +249,15 @@ class PluginMcpClient {
   static async connectStdio({ command, args = [], cwd, env = {}, connectionId,
     principalIdentity, authorizeEgress, timeoutMs, dataScope, onToolsChanged,
     onDisconnected, pluginRoot = null, appSupport = false, dependencyFingerprint = null,
-    assertDependencyCurrent = null }) {
+    assertDependencyCurrent = null, secretEnv = null }) {
+    // Resolved user credentials are added verbatim after template expansion:
+    // a credential value is never interpreted as a path or placeholder.
+    if (secretEnv !== null && (!secretEnv || typeof secretEnv !== "object" || Array.isArray(secretEnv)
+      || Object.entries(secretEnv).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)
+        || ["PLUGIN_DATA", "PLUGIN_ROOT"].includes(key) || Object.hasOwn(env || {}, key)
+        || typeof value !== "string" || !value || /[\0\r\n]/u.test(value) || value.length > 8192))) {
+      fail("MCP_SERVER_START_FAILED", "MCP stdio 凭据环境变量无效");
+    }
     if ((dependencyFingerprint !== null && (typeof dependencyFingerprint !== "string"
       || !/^[a-f0-9]{64}$/u.test(dependencyFingerprint) || typeof assertDependencyCurrent !== "function"))
       || (assertDependencyCurrent !== null && typeof assertDependencyCurrent !== "function")) {
@@ -280,6 +306,7 @@ class PluginMcpClient {
         effectiveEnv.PLUGIN_ROOT = root;
         effectiveEnv.PLUGIN_DATA = lease.directory;
       }
+      if (secretEnv !== null) Object.assign(effectiveEnv, secretEnv);
       if (Object.values(effectiveEnv).some((value) => value.length > 8192)) {
         fail("MCP_SERVER_START_FAILED", "MCP stdio 展开后的环境变量过长");
       }
@@ -319,9 +346,25 @@ class PluginMcpClient {
   static async connectHttp({ url, allowLoopback = false, fetchImpl = globalThis.fetch,
     connectionId, principalIdentity, authRevision = null, credentialProvider = null,
     authorizeEgress, versionMode = "auto", timeoutMs, onToolsChanged,
-    onDisconnected, appSupport = false }) {
+    onDisconnected, appSupport = false, staticHeaders = null, secretHeaders = false }) {
     const endpoint = endpointOf(url, allowLoopback);
+    if (typeof secretHeaders !== "boolean" || (secretHeaders && staticHeaders === null)) {
+      fail("MCP_SERVER_START_FAILED", "MCP HTTP 声明头无效");
+    }
     if (typeof fetchImpl !== "function") fail("MCP_SERVER_URL_INVALID", "MCP HTTP fetch 不可用");
+    // Declared headers, including resolved `${secret:NAME}` values, travel only
+    // to this exact endpoint: guardedFetch rejects every other URL and redirect.
+    if (staticHeaders !== null) {
+      if (!staticHeaders || typeof staticHeaders !== "object" || Array.isArray(staticHeaders)
+        || credentialProvider !== null || Object.keys(staticHeaders).length > 64) {
+        fail("MCP_SERVER_START_FAILED", "MCP HTTP 声明头无效");
+      }
+      for (const [name, value] of Object.entries(staticHeaders)) {
+        try { http.validateHeaderName(name); http.validateHeaderValue(name, value); }
+        catch { fail("MCP_SERVER_START_FAILED", "MCP HTTP 声明头无效"); }
+        if (typeof value !== "string" || value.length > 16_384) fail("MCP_SERVER_START_FAILED", "MCP HTTP 声明头无效");
+      }
+    }
     if (credentialProvider !== null && (typeof credentialProvider !== "function"
       || typeof credentialProvider.assertCurrent !== "function"
       || !Number.isSafeInteger(authRevision) || authRevision < 1)) {
@@ -361,21 +404,39 @@ class PluginMcpClient {
         let message;
         try { message = JSON.parse(init.body); } catch { fail("MCP_SERVER_REQUEST_INVALID", "MCP HTTP 请求无效"); }
         const call = outgoingCall(message);
-        if (call) connection._admit(call);
+        if (call) {
+          const headers = connection._legacyGitHubCallHeaders(call, init.headers);
+          if (headers !== init.headers) init = { ...init, headers };
+          connection._admit(call);
+        }
         const resource = outgoingResource(message);
         if (resource) connection._admitResource(resource);
+      }
+      if (staticHeaders !== null) {
+        const headers = new Headers(init.headers);
+        for (const [name, value] of Object.entries(staticHeaders)) headers.set(name, value);
+        init = { ...init, headers };
       }
       // authorizeEgress above is synchronous. The fetch starts in the same JS turn;
       // a later revocation cannot slip between the admission check and send start.
       return Promise.resolve(fetchImpl(target, { ...init, redirect: "manual" }))
-        .then(boundedHttpResponse);
+        .then(response => {
+          // An endpoint refusing a declared credential is reported as such and
+          // the same value is never retried automatically.
+          if (secretHeaders && (response.status === 401 || response.status === 403)) {
+            if (response.body) response.body.cancel().catch(() => {});
+            fail("PLUGIN_SECRET_REJECTED", "MCP 端点拒绝了插件凭据");
+          }
+          return boundedHttpResponse(response);
+        });
     };
     const transport = new StreamableHTTPClientTransport(endpoint, {
       fetch: guardedFetch, authProvider, onInsufficientScope: "throw",
     });
     connection = new PluginMcpClient({ transport, connectionId, principalIdentity,
       authorizeEgress, versionMode, timeoutMs, protocol: "http", onToolsChanged,
-      onDisconnected, appSupport });
+      onDisconnected, appSupport,
+      legacyGitHubHttpHeaders: endpoint.href === GITHUB_HOSTED_MCP_ENDPOINT });
     try {
       await connection.#client.connect(transport, { timeout: connection.#timeoutMs });
       const sdkOnClose = transport.onclose;
@@ -383,7 +444,7 @@ class PluginMcpClient {
         try { sdkOnClose?.(); } finally { connection.#notifyDisconnected(); }
       };
     }
-    catch (error) { await connection.close(); throw error; }
+    catch (error) { await connection.close(); throw secretRejection(error) || error; }
     return connection;
   }
 
@@ -452,6 +513,26 @@ class PluginMcpClient {
     active.egressed = true;
   }
 
+  _legacyGitHubCallHeaders(message, originalHeaders) {
+    // GitHub currently advertises these SEP-2243 annotations while negotiating
+    // a legacy MCP revision. The SDK mirrors them only for modern connections.
+    // Keep this exception bound to the hosted endpoint and the four verified
+    // repository tools; never accept arbitrary schema-directed HTTP headers.
+    if (!this.#legacyGitHubHttpHeaders || this.#client.getProtocolEra() !== "legacy"
+      || !this.#discoveredTools.get(message.params?.name)?.legacyGitHubHeaderPair) {
+      return originalHeaders;
+    }
+    const { owner, repo } = message.params.arguments || {};
+    if (typeof owner !== "string" || !GITHUB_REPOSITORY_SEGMENT.test(owner)
+      || typeof repo !== "string" || !GITHUB_REPOSITORY_SEGMENT.test(repo)) {
+      fail("MCP_SERVER_REQUEST_INVALID", "GitHub 仓库参数不能安全写入 MCP HTTP 头");
+    }
+    const headers = new Headers(originalHeaders);
+    headers.set("Mcp-Param-owner", owner);
+    headers.set("Mcp-Param-repo", repo);
+    return headers;
+  }
+
   #assertResource(input) {
     if (!this.isAlive()) fail("MCP_SERVER_EXITED", "MCP 连接已关闭");
     if (!this.#appSupport || !this.#client.getServerCapabilities()?.resources) {
@@ -496,7 +577,8 @@ class PluginMcpClient {
     let cursor;
     do {
       const page = await this.#client.listTools(cursor ? { cursor } : undefined,
-        { timeout: this.#timeoutMs, cacheMode: "refresh" });
+        { timeout: this.#timeoutMs, cacheMode: "refresh" })
+        .catch(error => { throw secretRejection(error) || error; });
       if (!Array.isArray(page.tools) || tools.length + page.tools.length > MAX_TOOLS
         || (page.nextCursor && (typeof page.nextCursor !== "string" || seen.has(page.nextCursor)))) {
         fail("MCP_SERVER_RESPONSE_INVALID", "MCP 工具清单无效");
@@ -511,7 +593,13 @@ class PluginMcpClient {
     const safeTools = bounded(tools);
     for (const tool of safeTools) {
       const metadata = pluginToolUi(tool);
-      this.#discoveredTools.set(tool.name, { contractDigest: pluginToolContractDigest(tool), ui: metadata.ui });
+      const properties = tool.inputSchema?.type === "object" && tool.inputSchema.properties;
+      const legacyGitHubHeaderPair = this.#legacyGitHubHttpHeaders
+        && GITHUB_LEGACY_HEADER_TOOLS.has(tool.name)
+        && ["owner", "repo"].every(field => properties?.[field]?.type === "string"
+          && properties[field]["x-mcp-header"] === field);
+      this.#discoveredTools.set(tool.name, { contractDigest: pluginToolContractDigest(tool),
+        ui: metadata.ui, legacyGitHubHeaderPair });
     }
     this.#catalogDirty = false;
     return safeTools;
@@ -563,7 +651,7 @@ class PluginMcpClient {
       if (this.#closed) fail("MCP_SERVER_EXITED", "MCP 连接已关闭");
       this.#activeCall = active;
       const modern = this.#client.getProtocolEra() === "modern";
-      const deadline = Date.now() + (active.onElicitation ? INTERACTIVE_CALL_TIMEOUT_MS : this.#timeoutMs);
+      const deadline = Date.now() + (active.onElicitation ? INTERACTIVE_CALL_TIMEOUT_MS : EXECUTION_TIMEOUT_MS);
       let params = { name, arguments: safeArguments };
       for (let round = 0; round < 2; round += 1) {
         const remaining = deadline - Date.now();
@@ -595,6 +683,9 @@ class PluginMcpClient {
       }
       fail("MCP_ELICITATION_UNSUPPORTED", "MCP 表单续传次数超过上限");
     } catch (error) {
+      // A 401/403 answer is a definite refusal, not an unknown outcome.
+      const rejected = secretRejection(error);
+      if (rejected) throw rejected;
       if (active.egressed) fail("CALL_OUTCOME_UNKNOWN", "MCP 请求已发送但结果未能确认");
       throw error;
     } finally {

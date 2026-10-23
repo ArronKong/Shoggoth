@@ -5,6 +5,30 @@ on:
 permissions:
   contents: read
 jobs:
+  macos-hook-checks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+          cache: npm
+      - name: Install locked Hooks test runtime
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/electron/install.js
+      - name: Headless Hooks source, real Service and Electron ASAR boundaries
+        run: npm run test:hooks
+      - name: Static UI ASAR disk-write failure regressions
+        run: node --test scripts/static-ui-assets-regression.cjs scripts/system-issue-unit.cjs
+      - name: Borrowed-memory Hook isolation in the real macOS sandbox
+        run: node --test scripts/native-memory-sharing-hook-no-copy-unit.cjs
+      - name: Install the version-pinned Pi test SDK without lifecycle scripts
+        run: npm install --prefix "$RUNNER_TEMP/shoggoth-hooks-pi" --ignore-scripts --no-audit --no-fund --save-exact @earendil-works/pi-coding-agent@0.84.4
+      - name: Actual Pi tool loop with controlled model input
+        env:
+          SHOGGOTH_HOOKS_PI_PACKAGE: ${{ runner.temp }}/shoggoth-hooks-pi/node_modules/@earendil-works/pi-coding-agent
+        run: npm run test:hooks:pi
   isolated-checks:
     runs-on: ubuntu-latest
     steps:
@@ -26,19 +50,30 @@ jobs:
           npm run build:manage
       - name: Third-party license completeness and consistency
         run: |
+          npm run fetch:codex
           npm run licenses:check
           node scripts/third-party-licenses-unit.mjs
       - name: Isolated release-policy and transport checks
         run: |
+          node --test scripts/static-ui-assets-regression.cjs
+          node --test scripts/system-issue-unit.cjs
+          node scripts/system-issue-ui-unit.mjs
           node scripts/export-public-source-unit.mjs
           node scripts/desktop-app-update-unit.cjs
           node scripts/app-update-release-contract-unit.cjs
           node scripts/check-release-private-keys-unit.cjs
           node scripts/adhoc-sign-unit.cjs
+          node scripts/release-package-checks-unit.cjs
           node scripts/notarize-unit.cjs
+          node scripts/shoggoth-memory-sharing-unit.cjs
+          node scripts/shoggoth-memory-trust-unit.cjs
+          node --test scripts/shoggoth-memory-consolidation-unit.cjs
+          node scripts/shoggoth-memory-recall-scope-unit.cjs
           node scripts/shoggoth-memory-e5-index-unit.cjs
           node scripts/shoggoth-memory-e5-context-unit.cjs
           node scripts/shoggoth-memory-e5-backup-unit.cjs
+          node scripts/shoggoth-codex-memory-import-unit.cjs
+          node --test scripts/shoggoth-codex-memory-import-service-fixture.cjs
           node scripts/shoggoth-builtin-cli-profiles-unit.cjs
           node scripts/runtime-cli-auth-unit.cjs
           node scripts/shoggoth-runtime-adapter-registry-unit.cjs
@@ -46,10 +81,46 @@ jobs:
           node scripts/proxy-smoke.mjs
           node scripts/proxy-chat-smoke.mjs
           node scripts/hermes-start-smoke.cjs
+      - name: Pinned OpenClaw memory core and isolated Service
+        run: |
+          npm run check:memory-core
+          npm run test:memory-core
+      - name: OpenClaw endpoint and credential regressions
+        run: |
+          node --test scripts/openclaw-credential-rpc-regression.cjs scripts/openclaw-endpoint-activity-regression.cjs
+          node scripts/openclaw-model-change-regression.cjs
+          node scripts/openclaw-provider-rename-regression.cjs
+          node scripts/openclaw-key-digests-unit.cjs
+          node scripts/model-change-observation-unit.cjs
+      - name: Computer Use permissions and Settings regressions
+        run: |
+          node scripts/shoggoth-computer-use-controller-unit.cjs
+          node scripts/desktop-computer-ipc-unit.cjs
+          node scripts/desktop-computer-service-restart-unit.cjs
+          node scripts/computer-service-permissions-unit.cjs
+          node scripts/computer-use-settings-ui-unit.mjs
       - name: Dependency vulnerability audit
         run: |
           npm audit --audit-level=moderate
           npm --prefix app/manage-ui audit --audit-level=moderate
+      - name: Product help and Browser Use regressions
+        run: |
+          node --test scripts/shoggoth-browser-use-controller-unit.cjs
+          node scripts/shoggoth-mcp-product-tool-controller-unit.cjs
+          node scripts/shoggoth-native-skill-engine-unit.cjs
+          node --test scripts/shoggoth-product-help-unit.cjs
+          node scripts/browser-use-settings-ui-unit.mjs
+          node scripts/browser-use-service-unit.cjs
+          node scripts/shoggoth-mcp-helper-hardening-unit.cjs
+      - name: Native Agent Computer Use and Browser Use path
+        run: |
+          node scripts/shoggoth-runtime-adapter-contract.cjs
+          node scripts/shoggoth-work-run-coordinator-unit.cjs
+          node --test scripts/runtime-execution-context-unit.cjs
+          node --test scripts/runtime-mcp-bridge-isolation-unit.cjs
+          node --test scripts/runtime-mcp-bridge-confirmation-unit.cjs
+          node --test scripts/product-confirmation-schema-unit.cjs
+          node --test scripts/computer-browser-use-conformance.cjs
       - name: Scan the public source export for secrets
         shell: bash
         run: |

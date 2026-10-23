@@ -19,33 +19,63 @@ if (process.env.CHAT_STREAM_SOURCE_REF) {
   normalizeCodexEvent = module.exports.normalizeCodexEvent;
 }
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { PiRuntimeHost } = require("../app/agent-service/pi-runtime-host");
 const backend = new ShoggothBackend({ requestService: async () => { throw Error("fixture must stay offline"); } });
+const runtime = process.env.CHAT_STREAM_RUNTIME || "codex";
+const terminal = process.env.CHAT_STREAM_TERMINAL || "final";
+const replay = process.env.CHAT_STREAM_REPLAY === "1";
 const key = "agent:shoggoth-default:stream-fixture";
 const note = "我会先检查资料，再整理成产品能力、使用场景与潜在风险三部分。";
 const answer = "这是一段包含 **重点说明** 的完整回答。\n\n1. 第一部分保留清晰的分段。\n2. 第二部分包含可阅读的列表。\n3. 最后一部分给出结论。\n\n```js\nconst stable = true;\n```\n\n正文在输出过程中保持相同气泡，完成后仍然可以逐段复制。";
+const expectedTexts = runtime === "pi" ? [note,
+  "✅ 第一阶段完成：12 条文字与顺序全部核对无误。继续第二阶段。",
+  "✅ 第二阶段完成：All=12、Active=8、Completed=4。继续检查编辑结果。", answer] : replay ? [note, note, answer] : [note, answer];
 const frames = [];
-const emit = (state, text) => frames.push({ type: "event", event: "chat", payload: {
-  sessionKey: key, runId: "run-fixture", state, message: { role: "assistant", content: [{ type: "text", text }] },
+const emit = (state, text, meta) => frames.push({ type: "event", event: "chat", payload: {
+  sessionKey: key, runId: "run-fixture", state, message: { role: "assistant", content: [{ type: "text", text,
+    ...(state === "interim" && meta?.activityId ? { activity: true, segmentId: meta.activityId } : {}) }], ...(meta?.displayId ? { shoggoth: { nativeUiVersion: 1, displayId: meta.displayId, runId: meta.runId } } : {}) },
 } });
 const context = { sessionKey: "stream-fixture", run: { id: "run-fixture" }, poll: {}, hooks: {
-  delta: (text) => emit("delta", text), interim: (text) => emit("interim", text), final: (text) => emit("final", text),
+  delta: (text, meta) => emit("delta", text, meta), interim: (text, meta) => emit("interim", text, meta), final: (text, _error, meta) => emit("final", text, meta),
+  error: (errorMessage) => frames.push({ type: "event", event: "chat", payload: {
+    sessionKey: key, runId: "run-fixture", state: "error", errorMessage,
+  } }),
   tool: (tool) => frames.push({ type: "event", event: "session.tool", payload: { sessionKey: key, data: tool } }),
 } };
 const live = { text: "", reasoning: "", settled: false };
 // Use the native normalizer and App bridge, rather than hand-authoring the
 // interim event whose absence caused the bug. No model or Service is started.
-for (const [id, text, phase] of [["note", note, "commentary"], ["answer", answer, "final_answer"]]) {
+const native = [];
+const pi = Object.create(PiRuntimeHost.prototype);
+pi._publish = (event) => native.push(event);
+const active = { sessionId: "pi-session-fixture", turnId: "pi-turn-fixture", settled: false,
+  messageSequence: 0, currentMessageId: null, completedMessages: new Map() };
+for (const [index, text] of expectedTexts.entries()) {
+  const id = index === expectedTexts.length - 1 ? "answer" : `note-${index}`;
+  const phase = id === "answer" ? "final_answer" : "commentary";
+  if (runtime === "pi") pi._onPiEvent(active, { type: "message_start", message: { role: "assistant" } });
   for (let offset = 0; offset < text.length; offset += 24) {
-    const event = normalizeCodexEvent({ method: "item/agentMessage/delta", params: {
+    const delta = text.slice(offset, offset + 24);
+    if (runtime === "pi") pi._onPiEvent(active, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta } });
+    else native.push(normalizeCodexEvent({ method: "item/agentMessage/delta", params: {
       threadId: "thread-fixture", turnId: "turn-fixture", itemId: id, delta: text.slice(offset, offset + 24),
-    } });
-    await backend._consumeEvent(context, live, { type: "text.delta", payload: event });
+    } }));
   }
-  const event = normalizeCodexEvent({ method: "item/completed", params: {
+  if (runtime === "pi") pi._onPiEvent(active, { type: "message_end", message: { role: "assistant", content: [
+    { type: "text", text }, ...(phase === "commentary" ? [{ type: "toolCall", id: "tool-1", name: "web_search" }] : []),
+  ] } });
+  else native.push(normalizeCodexEvent({ method: "item/completed", params: {
     threadId: "thread-fixture", turnId: "turn-fixture", item: { id, type: "agentMessage", text, phase },
-  } });
-  await backend._consumeEvent(context, live, { type: "text", payload: event });
-  if (id === "note") {
+  } }));
+  const completedId = native.findLast(event => event.type === "text")?.itemId || id;
+  for (const event of native.splice(0)) await backend._consumeEvent(context, live, {
+    type: event.type === "text_delta" ? "text.delta" : event.type, payload: event,
+  });
+  if (index === 0) {
+    if (replay) for (let repeat = 0; repeat < 7; repeat++) {
+      await backend._consumeEvent(context, live, { type: "text", payload: { itemId: completedId, text, phase: "commentary" } });
+      await backend._consumeEvent(context, live, { type: "text.delta", payload: { itemId: completedId, delta: text } });
+    }
     for (const type of ["tool.start", "tool.result"]) await backend._consumeEvent(context, live, {
       type, payload: { itemId: "tool-1", toolCallId: "tool-1", tool: {
         name: "web_search", status: type === "tool.start" ? "inProgress" : "completed", resultSummary: "Found sources", durationMs: 300,
@@ -53,13 +83,18 @@ for (const [id, text, phase] of [["note", note, "commentary"], ["answer", answer
     });
   }
 }
-await backend._settleTerminal(context, live, { id: "run-fixture", status: "completed" });
+await backend._settleTerminal(context, live, { id: "run-fixture", status: terminal === "final" ? "completed" : "canceled" });
+if (terminal.startsWith("aborted")) frames[frames.length - 1] = { type: "event", event: "chat", payload: {
+  sessionKey: key, runId: "run-fixture", state: "aborted",
+  ...(terminal === "aborted-empty" ? { message: { role: "assistant", content: [{ type: "text", text: "" }] } } : {}),
+  ...(terminal === "aborted-text" ? { message: { role: "assistant", content: [{ type: "text", text: answer }] } } : {}),
+} };
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-chat-stream-"));
 try {
   await build({
     entryPoints: [path.join(root, "scripts/fixtures/chat-stream-completion.tsx")], bundle: true, format: "esm",
-    define: { "process.env.NODE_ENV": '"production"', __STREAM_FIXTURE__: JSON.stringify({ key, note, answer, frames }) },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" }, outfile: path.join(temp, "fixture.js"),
+    define: { "process.env.NODE_ENV": '"production"', __STREAM_FIXTURE__: JSON.stringify({ key, note, answer, frames, expectedTexts, terminal }) },
+    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
     nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
   });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
@@ -76,7 +111,7 @@ try {const results=[];for(const width of [1360,600])for(const theme of ["light",
   if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/"+width+"-"+theme+"-live.png",(await w.webContents.capturePage()).toPNG());
   const result=await w.webContents.executeJavaScript('window.finishFixture()');results.push({width,theme,...result});
   if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/"+width+"-"+theme+"-final.png",(await w.webContents.capturePage()).toPNG());
-}console.log(JSON.stringify({passed:true,results}));passed=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(passed?0:1);}});`);
+}console.log(JSON.stringify({passed:true,runtime:${JSON.stringify(runtime)},replay:${JSON.stringify(replay)},terminal:${JSON.stringify(terminal)},results}));passed=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(passed?0:1);}});`);
   const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], {
     encoding: "utf8", timeout: 60_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
   });

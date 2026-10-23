@@ -1,6 +1,7 @@
 "use strict";
 
 const { execFile } = require("node:child_process");
+const path = require("node:path");
 
 const maskKey = value => value.length >= 10
   ? `${value.slice(0, 4)}...${value.slice(-4)}` : "••••••";
@@ -34,22 +35,25 @@ function projectKeyDigests(config, store = {}) {
   return [...digests];
 }
 
-function readCanonicalKeyDigests({ sdk, home, agentId }) {
+function readCanonicalKeyDigests({ sdk, home, agentId, configPath = path.join(home, "openclaw.json"), execution = null }) {
   // Mask inside the read-only SDK process: plaintext never crosses its stdout.
+  // The masking code is inlined: in the packaged App this file lives inside
+  // app.asar, which the plain Node child cannot import.
   const script = `
     import fs from 'node:fs';
     import path from 'node:path';
     import { pathToFileURL } from 'node:url';
-    const [sdk, helper, home, agentId] = process.argv.slice(1);
+    const [sdk, home, agentId, configPath] = process.argv.slice(1);
     const { loadAuthProfileStoreForSecretsRuntime } = await import(pathToFileURL(sdk).href);
-    const { projectKeyDigests } = (await import(pathToFileURL(helper).href)).default;
-    const config = JSON.parse(fs.readFileSync(path.join(home, 'openclaw.json'), 'utf8'));
+    const maskKey = ${maskKey};
+    ${projectKeyDigests}
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     const store = loadAuthProfileStoreForSecretsRuntime(path.join(home, 'agents', agentId, 'agent'));
     process.stdout.write(JSON.stringify(projectKeyDigests(config, store)));
   `;
   return new Promise((resolve, reject) => {
-    execFile("node", ["--input-type=module", "-e", script, sdk, __filename, home, agentId], {
-      encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024,
+    execFile(execution?.file || "node", ["--input-type=module", "-e", script, sdk, home, agentId, configPath], {
+      env: execution?.env, cwd: execution?.cwd, encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024,
     }, (error, stdout) => {
       if (error) return reject(new Error("Provider key previews unavailable"));
       try { resolve(new Map(JSON.parse(stdout))); }

@@ -15,6 +15,12 @@ const { PluginMcpClient } = require("../app/agent-service/plugin-mcp-client");
 const { PluginDataScopeLeaseManager } = require("../app/agent-service/plugin-data-scope-lease");
 const { BundledPluginCatalog, bundledRoot } = require("../app/core/bundled-plugin-catalog");
 const { validatePluginManagementResult } = require("../app/core/plugin-management-dto");
+const { GRAPH_IDS, componentFor } = require("../app/agent-service/plugin-microsoft-graph-sidecar");
+const { COMPONENT_NAME: LOVABLE_COMPONENT, SERVER: LOVABLE_SERVER,
+  SOURCE_DIGEST: LOVABLE_SOURCE_DIGEST } =
+  require("../app/agent-service/plugin-lovable-official-sidecar");
+const { FULL_COMPONENT: SLACK_COMPONENT } = require("../app/agent-service/plugin-slack-access-policy");
+const { SOURCE_DIGEST: SLACK_SOURCE_DIGEST } = require("../app/agent-service/plugin-slack-official-sidecar");
 
 function main() {
   const catalog = new BundledPluginCatalog(bundledRoot());
@@ -25,8 +31,8 @@ function main() {
     console.log("public source without redistributed bundled packages: PASS");
     return;
   }
-  assert.equal(items.length, 62);
-  assert.equal(new Set(items.map(item => item.id)).size, 62);
+  assert.equal(items.length, 9);
+  assert.equal(new Set(items.map(item => item.id)).size, 9);
   assert.equal(items.some(item => Object.hasOwn(item, "details")), false,
     "list responses keep detailed descriptions and Skills out of the initial catalog");
   assert.equal(catalog.detail("missing-bundle"), null);
@@ -41,23 +47,14 @@ function main() {
   const figmaDetail = catalog.detail("figma");
   assert.equal(figmaDetail.developerName, "Figma");
   assert.ok(figmaDetail.longDescription.includes("Code Connect"));
-  assert.equal(figmaDetail.skills.length, 12);
+  assert.equal(figmaDetail.skills.length, 2);
   assert.deepEqual(figmaDetail.apps, ["figma"]);
   assert.deepEqual(figmaDetail.unconvertedMcp, []);
   assert.equal(figmaDetail.mcpServers.length, 1);
   assert.deepEqual(figmaDetail.sourceWarnings, []);
-  assert.deepEqual(catalog.detail("mixpanel-headless").sourceWarnings, [{
-    code: "MISSING_OPTIONAL_LOCAL_REFERENCES",
-    source: "skills/setup/SKILL.md",
-    targets: [
-      "skills/mixpanelyst/references/analytical-frameworks.md",
-      "skills/mixpanelyst/references/python-api.md",
-    ],
-  }], "the frozen source gap is visible without disabling import or inventing files");
-  assert.equal(catalog.get("mixpanel-headless").importStatus, "previewable");
-  assert.equal(items.reduce((total, item) => total + item.unconvertedMcp.length, 0), 3);
-  assert.deepEqual(catalog.get("airtable").unconvertedMcp, []);
-  assert.equal(catalog.get("airtable").converted.mcp, 1);
+  assert.equal(catalog.detail("mixpanel-headless"), null);
+  assert.equal(catalog.get("mixpanel-headless"), null);
+  assert.equal(items.reduce((total, item) => total + item.unconvertedMcp.length, 0), 0);
   assert.deepEqual(catalog.get("shopify").unconvertedMcp, []);
   assert.equal(catalog.get("shopify").converted.mcp, 1);
   assert.deepEqual(catalog.get("github").unconvertedMcp, []);
@@ -68,8 +65,7 @@ function main() {
     assert.deepEqual(catalog.detail(packageId).connectionWarnings,
       [{ name: packageId, reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }]);
   }
-  for (const packageId of ["cloudflare", "creative-production", "data-analytics",
-    "openai-developers", "figma", "linear", "notion"]) {
+  for (const packageId of ["cloudflare", "figma", "dropbox", "higgsfield"]) {
     assert.equal(catalog.get(packageId).converted.mcp, 1,
       `${packageId} must retain its representable MCP declaration`);
     assert.deepEqual(catalog.get(packageId).unconvertedMcp, []);
@@ -92,6 +88,56 @@ function main() {
     let convertedMcp = 0;
     let previewablePackages = 0;
     for (const item of items) {
+      if (item.localAdapter === "shoggoth-graph-read-only") {
+        assert.equal(GRAPH_IDS.includes(item.id), true);
+        assert.deepEqual(item.converted, { skills: 0, mcp: 0 },
+          "the frozen Codex managed connector remains unconverted");
+        const sidecar = installer.previewBundled(item.id);
+        assert.equal(sidecar.installable, true);
+        assert.equal(sidecar.skills.length, 0);
+        assert.deepEqual(sidecar.mcpServers.map(server => [server.name, server.type]),
+          [[componentFor(item.id), "shoggoth-graph"]]);
+        continue;
+      }
+      if (item.localAdapter === "shoggoth-lovable-official-mcp") {
+        assert.equal(item.id, "lovable");
+        assert.equal(catalog.assertCurrent(item.id).sourceDigest, LOVABLE_SOURCE_DIGEST);
+        assert.deepEqual(item.converted, { skills: 0, mcp: 0 },
+          "the frozen Codex managed app remains unconverted");
+        const sidecar = installer.previewBundled(item.id);
+        assert.equal(sidecar.installable, true);
+        assert.equal(sidecar.skills.length, 0);
+        assert.deepEqual(sidecar.mcpServers.map(server => [server.name, server.type]),
+          [[LOVABLE_COMPONENT, "streamable-http"]]);
+        assert.equal(sidecar.sourceIdentity, "bundled:lovable");
+        assert.equal(LOVABLE_SERVER, "https://mcp.lovable.dev");
+        continue;
+      }
+      if (item.localAdapter === "shoggoth-slack-official-mcp") {
+        assert.equal(item.id, "slack");
+        assert.equal(catalog.assertCurrent(item.id).sourceDigest, SLACK_SOURCE_DIGEST);
+        assert.deepEqual(item.converted, { skills: 0, mcp: 0 },
+          "the frozen Codex Slack MCP and managed app remain unconverted");
+        const sidecar = installer.previewBundled(item.id);
+        assert.equal(sidecar.installable, true);
+        assert.equal(sidecar.skills.length, 0);
+        assert.deepEqual(sidecar.mcpServers.map(server => [server.name, server.type]),
+          [[SLACK_COMPONENT, "streamable-http"]]);
+        assert.equal(sidecar.sourceIdentity, "bundled:slack");
+        continue;
+      }
+      if (item.localAdapter === "shoggoth-codex-security-native") {
+        assert.equal(item.id, "codex-security");
+        assert.deepEqual(item.converted, { skills: 15, mcp: 0 }, "native artifact registration is not full scan acceptance");
+        const candidate = installer.previewBundled(item.id);
+        assert.equal(candidate.installable, true);
+        assert.equal(candidate.skills.length, 15);
+        assert.deepEqual(candidate.mcpServers.map(server => [server.name, server.type]),
+          [["codex-security", "shoggoth-codex-security-native"]]);
+        discoveredSkills += candidate.skills.length;
+        previewablePackages += 1;
+        continue;
+      }
       if (item.importStatus !== "previewable") {
         assert.throws(() => installer.previewBundled(item.id),
           { code: "BUNDLED_PLUGIN_ADAPTER_REQUIRED" });
@@ -99,8 +145,8 @@ function main() {
       }
       const packagePreview = installer.previewBundled(item.id);
       assert.equal(packagePreview.installable, true, `${item.id} must be previewable`);
-      assert.equal(packagePreview.skills.length, item.components.skills,
-        `${item.id} must retain every top-level Codex Skill`);
+      assert.equal(packagePreview.skills.length, item.converted.skills,
+        `${item.id} preview must match the supported Skill subset`);
       const publicPreview = { sourceKind: "bundled", previewDigest: packagePreview.contentDigest,
         expectedRevision: packagePreview.expectedRevision, specVersion: packagePreview.specVersion,
         name: packagePreview.name, declaredVersion: packagePreview.declaredVersion,
@@ -124,40 +170,38 @@ function main() {
       `${item.id} catalog must explain every unconverted MCP declaration`);
       previewablePackages += 1;
     }
-    assert.equal(previewablePackages, 56);
-    assert.equal(discoveredSkills, 502);
-    assert.equal(convertedMcp, 28);
-    for (const packageId of ["figma", "linear", "notion"]) {
-      assert.ok(installer.previewBundled(packageId).diagnostics.some(issue =>
-        issue.reasonCode === "CODEX_OAUTH_RESOURCE_CONNECTION_REQUIRED"),
-      `${packageId} requires a trusted OAuth provider with the declared resource audience`);
-    }
+    assert.equal(previewablePackages, 9);
+    assert.equal(discoveredSkills, 45);
+    assert.equal(convertedMcp, 9);
+    assert.ok(installer.previewBundled("figma").diagnostics.some(issue =>
+      issue.reasonCode === "FIGMA_DESKTOP_MCP_REQUIRED"),
+    "Figma requires the local desktop MCP connection");
     assert.ok(installer.previewBundled("github").diagnostics.some(issue =>
       issue.reasonCode === "CODEX_BEARER_CONNECTION_REQUIRED"));
-    assert.ok(installer.previewBundled("airtable").diagnostics.some(issue =>
-      issue.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"));
     assert.ok(installer.previewBundled("shopify").diagnostics.some(issue =>
       issue.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"));
-    for (const packageId of ["gmail", "google-calendar", "google-drive"]) {
+    assert.deepEqual(installer.previewBundled("gmail").mcpServers.map(server => server.type),
+      ["shoggoth-gogcli-gmail-mcp"]);
+    for (const packageId of ["google-calendar", "google-drive"]) {
       const googlePreview = installer.previewBundled(packageId);
       assert.ok(googlePreview.diagnostics.some(issue => issue.name === packageId
         && issue.reasonCode === "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED"));
       assert.equal(JSON.stringify(googlePreview).includes("12798"), false);
     }
-    for (const packageId of ["cloudflare", "data-analytics"]) {
+    for (const packageId of ["cloudflare"]) {
       assert.ok(installer.previewBundled(packageId).diagnostics.some(issue =>
         issue.reasonCode === "LEGACY_PRESENTATION_METADATA_OMITTED"),
       `${packageId} must disclose discarded presentation metadata`);
     }
     assert.deepEqual(store.listInstallations(), [], "catalog previews must never install packages");
-    const preview = installer.previewBundled("chatcut");
+    const preview = installer.previewBundled("cloudflare");
     assert.equal(preview.installable, true);
-    assert.equal(preview.skills.length, 1);
+    assert.equal(preview.skills.length, 9);
     assert.deepEqual(store.listInstallations(), [], "preview must not create an installation");
-    const input = { packageId: "chatcut", previewDigest: preview.contentDigest,
-      operationId: "bundled-install-chatcut", expectedRevision: preview.expectedRevision };
+    const input = { packageId: "cloudflare", previewDigest: preview.contentDigest,
+      operationId: "bundled-install-cloudflare", expectedRevision: preview.expectedRevision };
     const installed = installer.installBundled(input);
-    assert.equal(installed.sourceIdentity, "bundled:chatcut");
+    assert.equal(installed.sourceIdentity, "bundled:cloudflare");
     assert.equal(installed.desiredState, "enabled");
     assert.equal(installer.installBundled(input).installationId, installed.installationId,
       "replaying the same operation must return its prior receipt");
@@ -166,31 +210,34 @@ function main() {
       preview.contentDigest);
     const firstAgent = resolver.listEnabledSkillDescriptors("native-agent-a");
     const futureAgent = resolver.listEnabledSkillDescriptors("native-agent-b");
-    assert.equal(firstAgent.length, 1);
+    assert.equal(firstAgent.length, 9);
     assert.deepEqual(firstAgent, futureAgent,
       "a future Agent must see the same installed Skill without another installation");
-    assert.equal(resolver.inspectSkill(firstAgent[0]).name, "connect-chatcut-desktop");
+    assert.equal(catalog.detail("cloudflare").skills.some(skill =>
+      skill.name === resolver.inspectSkill(firstAgent[0]).name), true);
     const disabled = store.setInstallationDesiredState({ installationId: installed.installationId,
       desiredState: "disabled", expectedRevision: installed.revision });
     assert.equal(disabled.desiredState, "disabled");
     assert.deepEqual(resolver.listEnabledSkillDescriptors("native-agent-a"), []);
     const uninstall = { installationId: installed.installationId,
-      expectedRevision: disabled.revision, operationId: "bundled-uninstall-chatcut" };
+      expectedRevision: disabled.revision, operationId: "bundled-uninstall-cloudflare" };
     assert.equal(installer.previewUninstall(uninstall).installationId, installed.installationId);
     installer.beginUninstall(uninstall);
     assert.equal(installer.uninstall(uninstall).packageRemoved, true);
     assert.deepEqual(store.listInstallations(), []);
-    assert.equal(catalog.get("chatcut").importStatus, "previewable",
+    assert.equal(catalog.get("cloudflare").importStatus, "previewable",
       "uninstall must keep the App's read-only installation source");
-    const again = installer.previewBundled("chatcut");
-    assert.equal(again.expectedRevision, store.getBySource("bundled:chatcut").revision,
+    const again = installer.previewBundled("cloudflare");
+    assert.equal(again.expectedRevision, store.getBySource("bundled:cloudflare").revision,
       "reinstall must use the uninstalled record's next revision");
-    const reinstalled = installer.installBundled({ packageId: "chatcut",
+    const reinstalled = installer.installBundled({ packageId: "cloudflare",
       previewDigest: again.contentDigest, expectedRevision: again.expectedRevision,
-      operationId: "bundled-reinstall-chatcut" });
+      operationId: "bundled-reinstall-cloudflare" });
     assert.equal(reinstalled.desiredState, "enabled");
-    assert.equal(resolver.listEnabledSkillDescriptors("native-agent-a").length, 1);
-    assert.throws(() => installer.previewBundled("../chatcut"), { code: "BUNDLED_PLUGIN_NOT_FOUND" });
+    assert.equal(resolver.listEnabledSkillDescriptors("native-agent-a").length, 9);
+    assert.throws(() => installer.previewBundled("chatcut"), { code: "BUNDLED_PLUGIN_NOT_FOUND" });
+    assert.throws(() => installer.previewBundled("codex-security"), { code: "BUNDLED_PLUGIN_NOT_FOUND" });
+    assert.throws(() => installer.previewBundled("../cloudflare"), { code: "BUNDLED_PLUGIN_NOT_FOUND" });
   } finally {
     store?.close();
     fs.rmSync(temp, { recursive: true, force: true });
@@ -325,6 +372,6 @@ async function verifyBundledLocalMcp() {
   console.log("bundled local MCP dependency, launch, and tool listing fixture: PASS");
 }
 
-if (new BundledPluginCatalog(bundledRoot()).list().items.length > 0) {
+if (new BundledPluginCatalog(bundledRoot()).get("openai-developers")) {
   verifyBundledLocalMcp().catch(error => { console.error(error); process.exitCode = 1; });
 }

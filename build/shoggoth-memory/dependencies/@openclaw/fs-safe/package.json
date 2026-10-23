@@ -1,0 +1,204 @@
+{
+  "name": "@openclaw/fs-safe",
+  "version": "0.24.0",
+  "description": "Capability-style filesystem roots for Node.js apps that handle untrusted relative paths.",
+  "keywords": [
+    "filesystem",
+    "openclaw",
+    "path-traversal",
+    "security",
+    "typescript"
+  ],
+  "homepage": "https://fs-safe.io",
+  "bugs": {
+    "url": "https://github.com/openclaw/fs-safe/issues"
+  },
+  "license": "MIT",
+  "author": "OpenClaw Team <dev@openclaw.ai>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openclaw/fs-safe.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist/archive-parser.wasm",
+    "dist/windows-security-bridge.cs",
+    "dist/windows-security-bridge.ps1",
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "docs/**/*.md",
+    "docs/assets/readme-banner.jpg",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./root": {
+      "types": "./dist/root.d.ts",
+      "default": "./dist/root.js"
+    },
+    "./copy": {
+      "types": "./dist/copy.d.ts",
+      "default": "./dist/copy.js"
+    },
+    "./guest": {
+      "types": "./dist/guest.d.ts",
+      "default": "./dist/guest.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    },
+    "./path": {
+      "types": "./dist/path.d.ts",
+      "default": "./dist/path.js"
+    },
+    "./output": {
+      "types": "./dist/output.d.ts",
+      "default": "./dist/output.js"
+    },
+    "./advanced": {
+      "types": "./dist/advanced.d.ts",
+      "default": "./dist/advanced.js"
+    },
+    "./json": {
+      "types": "./dist/json.d.ts",
+      "default": "./dist/json.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "default": "./dist/store.js"
+    },
+    "./secret": {
+      "types": "./dist/secret.d.ts",
+      "default": "./dist/secret.js"
+    },
+    "./permissions": {
+      "types": "./dist/permissions-public.d.ts",
+      "default": "./dist/permissions-public.js"
+    },
+    "./secure-file": {
+      "types": "./dist/secure-file.d.ts",
+      "default": "./dist/secure-file.js"
+    },
+    "./file-lock": {
+      "types": "./dist/file-lock.d.ts",
+      "default": "./dist/file-lock.js"
+    },
+    "./watch": {
+      "types": "./dist/watch.d.ts",
+      "default": "./dist/watch.js"
+    },
+    "./walk": {
+      "types": "./dist/walk.d.ts",
+      "default": "./dist/walk.js"
+    },
+    "./temp": {
+      "types": "./dist/temp.d.ts",
+      "default": "./dist/temp.js"
+    },
+    "./secure-temp-root": {
+      "types": "./dist/secure-temp-dir.d.ts",
+      "default": "./dist/secure-temp-dir.js"
+    },
+    "./atomic": {
+      "types": "./dist/atomic.d.ts",
+      "default": "./dist/atomic.js"
+    },
+    "./durability": {
+      "types": "./dist/durability.d.ts",
+      "default": "./dist/durability.js"
+    },
+    "./archive": {
+      "types": "./dist/archive.d.ts",
+      "default": "./dist/archive.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "default": "./dist/errors.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "default": "./dist/types.js"
+    },
+    "./test-hooks": {
+      "types": "./dist/test-hooks.d.ts",
+      "default": "./dist/test-hooks.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "benchmark": "node scripts/benchmark.mjs",
+    "benchmark:methods": "node benchmarks/runner.mjs",
+    "benchmark:publish": "pnpm build && node scripts/bench-publish.mjs",
+    "build": "node scripts/prepack-build.mjs",
+    "lint:file-size": "node scripts/check-file-size.mjs",
+    "lint:fs-boundary": "node scripts/check-fs-boundary-primitives.mjs",
+    "prepack": "node scripts/prepack-build.mjs",
+    "test": "vitest run",
+    "test:bun": "bun node_modules/vitest/vitest.mjs run --config scripts/bun-vitest.config.ts",
+    "test:bun:native": "bun scripts/bun-native-proof.mjs && bun node_modules/vitest/vitest.mjs run --config scripts/bun-native-vitest.config.ts",
+    "test:coverage": "vitest run --coverage",
+    "test:coverage:collect": "pnpm build && pnpm archive:wasm:allocator-tests && vitest run --coverage --coverage.reporter=json --coverage.thresholds.lines=0 --coverage.thresholds.functions=0 --coverage.thresholds.statements=0 --coverage.thresholds.branches=0",
+    "test:coverage:merge": "node scripts/merge-coverage.mjs",
+    "test:security": "vitest run test/fs-safe.test.ts test/read-boundary-bypass.test.ts test/write-boundary-bypass.test.ts test/additional-boundary-bypass.test.ts test/adversarial-boundary-payloads.test.ts",
+    "check": "pnpm lint:file-size && pnpm lint:fs-boundary && pnpm build && pnpm archive:wasm:allocator-tests && pnpm docs:check && pnpm test && node scripts/check-pack.mjs",
+    "docs:check": "node scripts/check-doc-examples.mjs",
+    "docs:site": "node scripts/build-docs-site.mjs",
+    "native:build": "pnpm --filter @openclaw/fs-safe-native-build build",
+    "native:test": "cargo test --workspace",
+    "pack:check": "pnpm build && node scripts/check-pack.mjs",
+    "public-api:update": "pnpm build && node scripts/check-pack.mjs --update-public-api",
+    "package:collect": "node scripts/check-release-packages.mjs --output release-artifacts",
+    "package:smoke": "node scripts/check-release-packages.mjs --allow-host-only --output release-artifacts",
+    "check:changed": "pnpm run check",
+    "release:notes": "node scripts/release-notes.mjs",
+    "test:changed": "pnpm run test",
+    "crabbox:hydrate": "crabbox actions hydrate",
+    "crabbox:run": "crabbox run",
+    "crabbox:stop": "crabbox stop",
+    "crabbox:warmup": "crabbox warmup",
+    "archive:wasm": "node scripts/build-archive-wasm.mjs",
+    "archive:wasm:allocator-tests": "node scripts/build-archive-wasm.mjs --allocator-tests",
+    "archive:producer-smoke": "node scripts/archive-producer-smoke.mjs"
+  },
+  "optionalDependencies": {
+    "@openclaw/fs-safe-darwin-arm64": "0.24.0",
+    "@openclaw/fs-safe-darwin-x64": "0.24.0",
+    "@openclaw/fs-safe-linux-arm64-gnu": "0.24.0",
+    "@openclaw/fs-safe-linux-arm64-musl": "0.24.0",
+    "@openclaw/fs-safe-linux-x64-gnu": "0.24.0",
+    "@openclaw/fs-safe-linux-x64-musl": "0.24.0",
+    "@openclaw/fs-safe-win32-x64-msvc": "0.24.0",
+    "jszip": "^3.10.2"
+  },
+  "devDependencies": {
+    "@emnapi/runtime": "2.0.0-alpha.5",
+    "@napi-rs/cli": "3.10.6",
+    "@types/node": "^26.6.1",
+    "@vitest/coverage-v8": "5.0.3",
+    "fast-check": "^4.10.1",
+    "istanbul-lib-coverage": "3.2.2",
+    "istanbul-lib-report": "3.0.1",
+    "istanbul-reports": "3.2.0",
+    "sigstore": "5.0.0",
+    "tar": "7.5.22",
+    "typescript": "^7.0.2",
+    "vite": "8.3.2",
+    "vitest": "^5.0.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@12.4.2"
+}

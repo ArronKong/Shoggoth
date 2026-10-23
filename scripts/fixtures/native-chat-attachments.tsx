@@ -24,8 +24,8 @@ let history: any[] = [
   { id: "failed", role: "assistant", content: "", stopReason: "error", errorMessage: "测试用失败，可重试附件" },
 ];
 const sent: any[] = [], slash: string[] = [];
-const attachmentOpens: { name: string; content: string }[] = [];
-let failAttachmentOpen = false;
+const attachmentReveals: { name: string; content: string }[] = [];
+let failAttachmentReveal = false;
 const originalFetch = window.fetch.bind(window);
 localStorage.clear();
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
@@ -75,10 +75,10 @@ state.fetch = async (url: unknown, init?: RequestInit) => {
   const pathname = String(url);
   if (pathname.startsWith("data:")) return originalFetch(pathname);
   if (pathname.startsWith("/__api/inspirations/media?")) return new Response("%PDF-1.7\nfixture");
-  if (pathname.startsWith("/__api/host/open-attachment?")) {
-    attachmentOpens.push({ name: new URL(pathname, "http://fixture").searchParams.get("name")!, content: await (init!.body as Blob).text() });
-    return new Response(JSON.stringify(failAttachmentOpen ? { error: "File opener failed" } : { ok: true }), {
-      status: failAttachmentOpen ? 500 : 200, headers: { "Content-Type": "application/json" },
+  if (pathname.startsWith("/__api/host/reveal-attachment?")) {
+    attachmentReveals.push({ name: new URL(pathname, "http://fixture").searchParams.get("name")!, content: await (init!.body as Blob).text() });
+    return new Response(JSON.stringify(failAttachmentReveal ? { error: "Finder reveal failed" } : { ok: true }), {
+      status: failAttachmentReveal ? 500 : 200, headers: { "Content-Type": "application/json" },
     });
   }
   if (pathname.includes("/slash/exec")) slash.push(String(init?.body));
@@ -168,12 +168,12 @@ const clipboardChecks = async () => {
     state.openclawDesktop.readClipboardFiles = readFiles;
   }
 };
-state.runFixture = async () => {
+state.runFileRevealFixture = async () => {
   await wait(() => input() && document.querySelector(".chat-retrybtn"), "native history");
-  const historyFile = document.querySelector<HTMLButtonElement>(".is-sent .chat-att-chip__open")!;
+  const historyFile = document.querySelector<HTMLButtonElement>(".chat-thread .chat-file-button")!;
   historyFile.click();
-  await wait(() => attachmentOpens.length === 1, "history attachment opens");
-  check(attachmentOpens[0].name === "需求文档.pdf" && attachmentOpens[0].content === "%PDF-1.7\nfixture", "history click opens the original bytes");
+  await wait(() => attachmentReveals.length === 1, "history attachment reveals");
+  check(attachmentReveals[0].name === "需求文档.pdf" && attachmentReveals[0].content === "%PDF-1.7\nfixture", "history click reveals the original bytes");
   const fileData = new DataTransfer();
   fileData.items.add(new File(["first content"], "11README.md", { type: "text/markdown" }));
   fileData.items.add(new File(["second content"], "11README.md", { type: "text/markdown" }));
@@ -181,23 +181,50 @@ state.runFixture = async () => {
   await wait(() => pending() === 2, "file drafts");
   const fileButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-att-row--pending .chat-att-chip__open"));
   const chip = fileButtons[0].parentElement!;
-  check(getComputedStyle(chip).borderRadius === "999px" && getComputedStyle(chip).backgroundColor === "rgba(0, 0, 0, 0)", "file chips are transparent capsules");
+  const style = getComputedStyle(chip);
+  check(style.borderTopLeftRadius === "24px" && style.borderTopRightRadius === "24px"
+    && style.borderBottomLeftRadius === "24px" && style.borderBottomRightRadius === "24px"
+    && style.borderTopWidth === "0px" && style.backgroundColor !== "rgba(0, 0, 0, 0)", "file chips use the solid shared file surface");
   fileButtons[0].focus();
-  check(getComputedStyle(chip).backgroundColor === "rgba(0, 0, 0, 0.05)", "focused file has five percent black background");
+  check(getComputedStyle(chip).outlineStyle === "solid" && getComputedStyle(chip).outlineWidth === "2px", "focused files retain a visible keyboard indicator");
   fileButtons[0].click();
-  await wait(() => attachmentOpens.length === 2, "first draft opens");
+  await wait(() => attachmentReveals.length === 2, "first draft reveals");
   fileButtons[1].click();
-  await wait(() => attachmentOpens.length === 3, "second draft opens");
-  check(attachmentOpens[1].content === "first content" && attachmentOpens[2].content === "second content", "same-name drafts open their own content");
-  failAttachmentOpen = true;
+  await wait(() => attachmentReveals.length === 3, "second draft reveals");
+  check(attachmentReveals[1].content === "first content" && attachmentReveals[2].content === "second content", "same-name drafts reveal their own content");
+  failAttachmentReveal = true;
   fileButtons[0].click();
-  await wait(() => document.querySelector(".chat-toast--error")?.textContent?.includes("File opener failed"), "failed open is visible");
-  failAttachmentOpen = false;
+  await wait(() => document.querySelector(".chat-toast--error")?.textContent?.includes("Finder reveal failed"), "failed reveal is visible");
+  failAttachmentReveal = false;
   document.querySelector<HTMLButtonElement>(".chat-toast__dismiss")!.click();
-  const openCount = attachmentOpens.length;
+  Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+    .find(button => button.title === i18n.t("chat.immersiveEnter"))!.click();
+  const immersive = '[data-testid="immersive-chat"]';
+  await wait(() => document.querySelectorAll(`${immersive} .chat-att-row--pending .chat-file-button`).length === 2, "immersive file drafts");
+  const immersiveFiles = Array.from(document.querySelectorAll<HTMLButtonElement>(`${immersive} .chat-att-row--pending .chat-file-button`));
+  check(immersiveFiles.every(button => button.querySelector<HTMLImageElement>(".chat-file-icon")?.naturalWidth === 16
+    && getComputedStyle(button.parentElement!).borderTopLeftRadius === "24px"), "immersive drafts share the original Figma icon and file surface");
+  const luminance = (color: string) => {
+    const rgb = color.match(/[\d.]+/g)!.slice(0, 3).map(value => Number(value) / 255)
+      .map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+  };
+  const foreground = luminance(getComputedStyle(immersiveFiles[0].querySelector(".chat-file-name")!).color);
+  const background = luminance(getComputedStyle(immersiveFiles[0].parentElement!).backgroundColor);
+  check((Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) >= 4.5, "immersive filenames remain readable on the solid surface");
+  const immersiveRevealCount = attachmentReveals.length;
+  immersiveFiles[0].click();
+  await wait(() => attachmentReveals.length === immersiveRevealCount + 1, "immersive draft reveals");
+  check(attachmentReveals.at(-1)?.content === "first content", "immersive draft preserves its original bytes");
+  document.querySelector<HTMLButtonElement>(`${immersive} .chat-att-row--pending .chat-att-x`)!.click();
+  await wait(() => document.querySelectorAll(`${immersive} .chat-att-row--pending .chat-file-button`).length === 1, "immersive removal");
+  check(attachmentReveals.length === immersiveRevealCount + 1, "immersive removal does not reveal a file");
+  document.querySelector<HTMLButtonElement>(`${immersive} [aria-label="${i18n.t("chat.immersiveExit")}"]`)!.click();
+  await wait(() => !document.querySelector(immersive) && pending() === 1, "remaining draft returns to normal mode");
+  const openCount = attachmentReveals.length;
   for (const button of document.querySelectorAll<HTMLButtonElement>(".chat-att-row--pending .chat-att-x")) button.click();
   await wait(() => pending() === 0, "draft removal");
-  check(attachmentOpens.length === openCount, "remove never opens a file");
+  check(attachmentReveals.length === openCount, "remove never reveals a file");
   const repeatedTextKey = `files::fixture::${crypto.randomUUID()}`;
   const firstFiles = [{ name: "same.md", kind: "file", src: "data:text/plain;base64,Zmlyc3Q=" }];
   await putFiles(repeatedTextKey, firstFiles);
@@ -206,6 +233,10 @@ state.runFixture = async () => {
   check(await getFiles(repeatedTextKey) === undefined, "repeated message text must not open another attachment's bytes");
   await putFiles(repeatedTextKey, firstFiles);
   check(await getFiles(repeatedTextKey) === undefined, "ambiguous history cache stays unavailable");
+  return { passed: true, checks: ["history attachment reveals original bytes", "same-name drafts reveal distinct content", "Finder failure is visible", "immersive drafts share style, bytes and removal", "removal has no host action", "ambiguous attachment cache stays unavailable"] };
+};
+state.runFixture = async () => {
+  await state.runFileRevealFixture();
   await wait(() => document.querySelector(".chat-pill--think"), "native thinking options");
   const thinking = document.querySelector<HTMLButtonElement>(".chat-pill--think")!;
   const inheritedThinking = i18n.t("chat.thinkingInherited", { level: i18n.t("chat.thinkLevel.medium") });

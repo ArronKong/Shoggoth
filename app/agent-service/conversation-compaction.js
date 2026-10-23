@@ -2,7 +2,7 @@
 
 const { coveredTranscript, SUMMARY_FIELDS, validateSummary } = require("./conversation-checkpoint-store");
 const { serviceError } = require("./security");
-const { conversationContextBudget, estimateContextTokens } = require("./conversation-context-budget");
+const { conversationContextBudget, estimateContextTokens, WORKING_CONTEXT_TARGET } = require("./conversation-context-budget");
 const { contextTransportLimits } = require("./context-request-budget");
 const crypto = require("node:crypto");
 const MAX_SOURCE_BYTES = 96 * 1024;
@@ -12,7 +12,8 @@ const MAX_SOURCE_BYTES = 96 * 1024;
 function planConversationCompaction({ profileId, sessionId, transcriptStore, checkpointStore,
   force = false, freshSession = false, budget = conversationContextBudget(null), usage = null, targetThroughSeq = null,
   maxSourceBytes = MAX_SOURCE_BYTES, maxSourceTokens = Infinity, requestPlan = null,
-  currentOperationId = null, transportBytes = contextTransportLimits().contextBytes }) {
+  currentOperationId = null, transportBytes = contextTransportLimits().contextBytes, advisory = false,
+  restorePolicy = null }) {
   // A checkpoint can carry statements without event-level provenance. Until
   // compaction has a revocation-aware source and summary format, do not send
   // any of this Profile's history to the model after a forget or UI deletion.
@@ -22,8 +23,12 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   const previous = checkpointStore.compatible(profileId, sessionId, events);
   const pending = events.filter(event => event.seq > (previous?.coveredThroughSeq ?? 0)
     && !(event.kind === "user" && currentOperationId && event.content?.operationId === currentOperationId));
-  const project = event => ({ seq: event.seq, kind: event.kind,
-    content: transcriptStore.contextEvent?.(profileId, sessionId, event)?.content ?? event.content });
+  const projected = new Map();
+  const project = event => {
+    if (!projected.has(event.seq)) projected.set(event.seq, checkpointStore.projectCompactionEvent?.(profileId, sessionId, event)
+      ?? { seq: event.seq, kind: event.kind, content: transcriptStore.contextEvent?.(profileId, sessionId, event)?.content ?? event.content });
+    return projected.get(event.seq);
+  };
   const visible = event => !event.contextExcluded && ["user", "assistant", "tool_call", "tool_result"].includes(event.kind);
   // Descriptors let planning count large bodies without loading every blob.
   const size = event => visible(event) ? (event.content?.contextRef?.bytes ?? Buffer.byteLength(JSON.stringify(event.content))) + 64 : 0;
@@ -42,7 +47,13 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   const projectionOverflow = freshSession && (requestPlan?.historyTruncated || requestPlan?.transportExceeded
     || pending.reduce((sum, event) => sum + size(event), 0) > transportBytes);
   const trigger = requestPlan?.limitTokens ?? budget.triggerTokens;
-  if (!force && !continuing && !projectionOverflow && used < trigger) return null;
+  // With advisory=true a caller also accepts a summary past the working target
+  // while the request still fits; the plan is marked advisory so that a failed
+  // early summary never blocks a turn that does not need it.
+  // Required means the request cannot proceed without it; continuing a planned
+  // target below the trigger stays advisory.
+  const required = force || projectionOverflow || used >= trigger;
+  if (!required && !continuing && !(advisory && used >= Math.min(trigger, WORKING_CONTEXT_TARGET))) return null;
   // A native session can include much more tool/system context than its
   // display transcript. Still summarize a useful prefix in that case.
   const retainedTokens = Math.max(0, Math.min(trigger - (requestPlan?.fixedTokens ?? 0) - 1024,
@@ -108,11 +119,14 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
     fromSeq: previous?.coveredThroughSeq ?? 0,
     throughSeq: partial?.seq ?? throughSeq,
   })) return null;
+  const sourceProjection = checkpointStore.createSourceProjection?.({ profileId, sessionId, events, previous,
+    throughSeq, partial, source });
   const schema = Object.fromEntries(SUMMARY_FIELDS.map(field => [field, ["concise factual statement"]]));
   return Object.freeze({ profileId, sessionId, expectedRevision: transcriptStore.getRevision(profileId, sessionId),
     expectedMemoryRevision: memory.revision, expectedMemoryFreshUntil: memory.freshUntil,
-    throughSeq, partial, windowTokens: budget.tokens, targetThroughSeq: target,
+    throughSeq, partial, windowTokens: budget.tokens, targetThroughSeq: target, advisory: restorePolicy ? advisory : !required,
     coveredHash: coveredTranscript(events, partial?.seq ?? throughSeq).hash, previousId: previous?.id ?? null,
+    ...(sourceProjection ? { sourceProjection } : {}),
     prompt: [
       "Summarize the supplied conversation data into a durable checkpoint. Return only one JSON object.",
       "Every field must be an array of short factual strings; use [] when unknown. Keep the total below 12000 UTF-8 bytes.",

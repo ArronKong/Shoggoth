@@ -1,7 +1,7 @@
 "use strict";
 
 const { serviceError } = require("./security");
-const { DEFAULT_RUNTIME_ACCOUNTS } = require("./runtime-account");
+const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 const { isRuntimeAvailable } = require("../runtime-availability");
 
 function createAgentRuntimeBindingController({ productStore, chatSessionStore, getNativeRuntimeConfig,
@@ -31,9 +31,10 @@ function createAgentRuntimeBindingController({ productStore, chatSessionStore, g
       let result;
       if (method === "agent.binding.list") result = state;
       else if (method === "agent.binding.sync") {
-        // The App supplies only connected, installed CLI accounts. Keep this
-        // additive and idempotent: disconnecting never destroys session history
-        // or changes an Agent's default/explicitly disabled Binding.
+        // The App supplies only connected, installed CLI accounts. The Service
+        // also offers its bundled Harness to Agents with a native CLI default.
+        // Keep this additive and idempotent so defaults, disabled Bindings and
+        // session history remain intact.
         const accounts = params.runtimeAccountIds.map(id => {
           const account = productStore.getRuntimeAccount(id);
           if (!DEFAULT_RUNTIME_ACCOUNTS.some(entry => entry.id === id && entry.kind === "native-user")
@@ -42,6 +43,8 @@ function createAgentRuntimeBindingController({ productStore, chatSessionStore, g
           }
           return account;
         });
+        const harness = productStore.getRuntimeAccount(SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+        if (harness && isRuntimeAvailable(harness.runtime)) accounts.unshift(harness);
         if (enabled && profile.enabled) for (const account of accounts) {
           const current = productStore.getAgentRuntimeBindings(profile.id);
           if (current.bindings.some(binding => binding.runtimeAccountId === account.id)) continue;

@@ -66,6 +66,7 @@ jobs:
           done
           npm run export:source -- "$RUNNER_TEMP/shoggoth-release-source"
           node scripts/check-release-private-keys.cjs "$RUNNER_TEMP/shoggoth-release-source"
+          node scripts/check-bundled-plugin-public-release.cjs
 
       - name: Install locked dependencies
         run: |
@@ -85,6 +86,7 @@ jobs:
           node scripts/app-update-release-contract-unit.cjs
           node scripts/check-release-private-keys-unit.cjs
           node scripts/adhoc-sign-unit.cjs
+          node scripts/release-package-checks-unit.cjs
           node scripts/notarize-unit.cjs
           npm audit --audit-level=moderate
           npm --prefix app/manage-ui audit --audit-level=moderate

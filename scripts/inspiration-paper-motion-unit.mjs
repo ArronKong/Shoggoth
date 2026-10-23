@@ -22,7 +22,7 @@ const events = () => {
 };
 const motion = { ...events(), matches: false };
 const document = { ...events(), hidden: false };
-const window = { ...events(), matchMedia: () => motion };
+const window = { ...events(), matchMedia: () => motion, innerWidth: 1440 };
 const mod = { exports: {} };
 vm.runInNewContext(compiled, { exports: mod.exports, window, document, getComputedStyle: element => ({ ...element.computedStyle, ...element.style }) });
 const { prepareInspirationPaperFlight: prepare } = mod.exports;
@@ -97,17 +97,27 @@ const assertClean = ({ source, page, target }) => {
   const flight = prepare(desktop.source, desktop.page, { x: 1200, y: 12 });
   const carrier = desktop.page.children[0];
   const complete = flight.play(null);
-  assert.equal(carrier.animations[0].id, 'inspiration-paper-eject');
-  assert.ok(!carrier.animations[0].keyframes.at(-1).transform.includes('scale'), 'a desktop sheet exits at its original size');
-  carrier.animations[0].complete();
+  const eject = carrier.animations[0];
+  assert.equal(eject.id, 'inspiration-paper-eject');
+  assert.ok(!eject.keyframes.at(-1).transform.includes('scale'), 'a desktop sheet exits at its original size');
+  const ejectY = eject.keyframes.map(frame => Number(frame.transform.match(/, ([-\d.]+)px, 0\)/)[1]));
+  assert.ok(ejectY.at(-1) > ejectY.at(-2), 'the ejected sheet is still moving when the flight takes over');
+  const feed = desktop.source.animations[0];
+  assert.deepEqual(Array.from(feed.keyframes, frame => frame.transform), ['translateY(-100%)', 'translateY(0)']);
+  assert.ok(feed.options.delay >= eject.options.duration, 'the next sheet feeds once the saved one has left the slot');
+  eject.complete();
   await new Promise(setImmediate);
   const travel = carrier.animations.at(-1);
   assert.equal(travel.id, 'inspiration-paper-to-tray');
+  const position = frame => frame.transform.match(/^translate3d\([-\d.]+px, [-\d.]+px, 0\)/)[0];
+  assert.equal(position(travel.keyframes[0]), eject.keyframes.at(-1).transform, 'the flight starts exactly where the ejection ends');
   const last = travel.keyframes.at(-1);
-  assert.ok(last.transform.startsWith('translate3d(460px, -218px, 0) scale(0.02'), 'the paper center reaches the actual tray coordinates');
+  assert.ok(last.transform.startsWith('translate3d(460px, -218px, 0) rotate(0deg) scale(0.03'), 'the paper center reaches the actual tray coordinates');
   assert.equal(last.opacity, 0);
+  const travelX = travel.keyframes.map(frame => Number(frame.transform.match(/^translate3d\(([-\d.]+)px/)[1]));
+  assert.ok(Math.max(...travelX) > 460, 'the sheet swings out beside the machine before rising into the tray');
   assert.ok(travel.keyframes.every(frame => !('width' in frame) && !('height' in frame)), 'desktop flight scales the printed sheet without layout changes');
-  travel.complete(); desktop.source.animations[0].complete();
+  travel.complete(); feed.complete();
   await complete; assertClean(desktop);
 }
 
@@ -167,9 +177,10 @@ assert.equal(f.target.style.display, 'none', 'the list reserves no slot during e
 assert.equal(f.source.style.visibility, '');
 assert.equal(f.source.animations[0].keyframes[0].transform, 'translateY(-100%)', 'the next sheet starts entirely above its clipping window');
 assert.ok(f.source.animations[0].options.delay >= carrier.animations[0].options.duration, 'the next paper only feeds after the saved sheet is ejected');
-const feedPositions = f.source.animations[0].keyframes.map(frame => Number(frame.transform.match(/translateY\(([-\d.]+)%\)/)[1]));
-assert.ok(Math.max(...feedPositions) > 0 && Math.max(...feedPositions) < 8, 'the next sheet passes its resting position with a small physical recoil');
-assert.equal(feedPositions.at(-1), 0, 'the new sheet settles exactly at its input position');
+assert.deepEqual(Array.from(f.source.animations[0].keyframes, frame => frame.transform), ['translateY(-100%)', 'translateY(0)'],
+  'the new sheet settles exactly at its input position');
+const [, feedY1, , feedY2] = f.source.animations[0].options.easing.match(/[\d.]+/g).map(Number);
+assert.ok(feedY1 <= 1 && feedY2 <= 1, 'the next sheet never passes its resting position, which would open a gap under the housing');
 assert.equal(f.target.scrolled, undefined, 'the printer stays in view during ejection');
 assert.equal(carrier.attributes.get('data-paper-flight'), 'ejecting');
 assert.ok(carrier.animations[0].keyframes.every(frame => /^translate3d\(0, [\d.]+px, 0\)$/.test(frame.transform) && !('width' in frame) && !('height' in frame)),
@@ -280,4 +291,4 @@ for (const unavailable of ['hidden', 'reduced', 'unsupported']) {
 const missing = fixture();
 await prepare(missing.source, missing.page).play(null);
 assertClean(missing);
-console.log('PASS Inspiration printer: translation-only ejection without a grid slot, real-size transfer and text reflow, spring feed, preserved text/color, handoff, both-phase interruptions, reduced motion and cleanup');
+console.log('PASS Inspiration printer: translation-only ejection without a grid slot, real-size transfer and text reflow, overshoot-free feed, continuous desktop throw around the machine, preserved text/color, handoff, both-phase interruptions, reduced motion and cleanup');

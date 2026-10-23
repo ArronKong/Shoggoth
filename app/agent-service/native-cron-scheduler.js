@@ -398,6 +398,7 @@ class NativeCronScheduler {
     this.cronStore = options.cronStore;
     this.dispatcher = options.dispatcher;
     this.executor = options.executor;
+    this.memoryMaintenance = options.memoryMaintenance || null;
     this.now = options.now || Date.now;
     this.monotonicNow = options.monotonicNow || (() => Number(process.hrtime.bigint() / 1_000_000n));
     this.setTimer = options.setTimer || setTimeout;
@@ -750,6 +751,9 @@ class NativeCronScheduler {
       if (run.status === "queued") reservation.queued = true;
     }
     const wallNow = this.#wallNow();
+    // Memory maintenance uses this lifecycle's timer without blocking task
+    // dispatch. Its durable receipt owns model retries and its own failures.
+    try { this.memoryMaintenance?.tick(wallNow); } catch (error) { this.memoryMaintenanceError = error; }
     const monotonicNow = this.#monotonicTime();
     // wall clock 回拨不会倒退任何持久 nextRunAt；只重新计算下一次本地等待。
     this.lastWallNow = wallNow;
@@ -1311,8 +1315,11 @@ class NativeCronScheduler {
 
   #scheduleNextTimer(generation) {
     if (this.state !== "open" || generation !== this.generation) return;
-    const next = this.cronStore.listJobs({ enabled: true })
+    let memoryDue = null;
+    try { memoryDue = this.memoryMaintenance?.nextDueAt() ?? null; } catch (error) { this.memoryMaintenanceError = error; }
+    const next = [...this.cronStore.listJobs({ enabled: true })
       .map((job) => job.nextRunAt)
+      , memoryDue]
       .filter((value) => value !== null)
       .sort((left, right) => left - right)[0];
     if (next === undefined) return;

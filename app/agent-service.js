@@ -4,12 +4,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createAgentService } = require("./agent-service/server");
+const { createNativeNotificationSender } = require("./agent-service/native-notification-sender");
+const { createConfigStore } = require("./core/config-store");
+const { FederationHostClient } = require("./agent-service/federation-host-client");
 const { inferAppPath } = require("./agent-service/bundle-paths");
 const { McpCryptoBroker } = require("./agent-service/mcp-crypto-broker");
 const { PackagedMcpCryptoBroker } = require("./agent-service/packaged-mcp-crypto-broker");
 const { resolveCanonicalServicePaths } = require("./agent-service/paths");
 const { RuntimeMcpGateIssuer } = require("./agent-service/runtime-mcp-gate");
 const { ensurePrivateDirectoryTree } = require("./agent-service/security");
+const { installServiceProcessFailureHandler } = require("./agent-service/process-failure-handler");
 const { createCuaSdkLoader } = require("./cua-sdk-loader");
 const {
   hideBackgroundDock,
@@ -58,6 +62,20 @@ function loadComputerDriverConfiguration(options) {
 
 async function startAgentServiceProcess(options = {}) {
   const paths = options.paths || resolveCanonicalServicePaths();
+  const detachFailureHandler = installServiceProcessFailureHandler({
+    paths,
+    emitter: options.signalEmitter || process,
+    exit: options.exitProcess,
+  });
+  try {
+    return await startAgentService(options, paths, detachFailureHandler);
+  } catch (error) {
+    detachFailureHandler();
+    throw error;
+  }
+}
+
+async function startAgentService(options, paths, detachFailureHandler) {
   // Native CLI homes remain owned by their official tools. New installations
   // resolve those homes in place and never copy them into Shoggoth state.
   const signalEmitter = options.signalEmitter || process;
@@ -114,19 +132,13 @@ async function startAgentServiceProcess(options = {}) {
       ? (url) => electronApp.resolveProxy(url)
       : undefined);
 
-  const notificationSender = options.notificationSender || (ElectronNotification
-    ? async ({ title, body }) => {
-      if (typeof ElectronNotification.isSupported !== "function"
-        || ElectronNotification.isSupported() !== true) {
-        throw new Error("native_notification_unsupported");
-      }
-      const notification = new ElectronNotification({ title, body });
-      if (!notification || typeof notification.show !== "function") {
-        throw new Error("native_notification_invalid");
-      }
-      notification.show();
-    }
-    : undefined);
+  const notificationConfig = createConfigStore(path.join(paths.userDataRoot, "config.json"));
+  const notificationHost = new FederationHostClient({ paths });
+  const notificationSender = options.notificationSender || (ElectronNotification ? createNativeNotificationSender({
+    Notification: ElectronNotification, readConfig: () => notificationConfig.read(),
+    isFocused: async () => { try { return (await notificationHost.request("notification.context", {})).focused; } catch { return false; } },
+    openTarget: async input => { if (input.noticeId) await openUiApp?.(input.noticeId); },
+  }) : undefined);
   const systemHostAdapter = options.systemHostAdapter || (ElectronShell
     && typeof ElectronShell.openPath === "function"
     && typeof ElectronShell.openExternal === "function"
@@ -154,7 +166,7 @@ async function startAgentServiceProcess(options = {}) {
   const packagedExternalCrypto = !options.paths && Boolean(electronApp)
     && process.env.NODE_ENV !== "test";
   const openUiApp = options.openUiApp || (packagedExternalCrypto && process.platform === "darwin"
-    ? () => new Promise((resolve, reject) => {
+    ? (noticeId) => new Promise((resolve, reject) => {
       const appPath = inferAppPath(process.execPath);
       if (!appPath) {
         reject(new Error("stable_app_path_unavailable"));
@@ -164,7 +176,7 @@ async function startAgentServiceProcess(options = {}) {
       delete childEnv.SHOGGOTH_INTERNAL_LAUNCH;
       delete childEnv.SHOGGOTH_LAUNCHD_LABEL;
       delete childEnv.SHOGGOTH_BOOTSTRAP_PATH;
-      const child = spawn("/usr/bin/open", ["-n", appPath], {
+      const child = spawn("/usr/bin/open", ["-n", appPath, ...(typeof noticeId === "string" && /^notice-[a-f0-9]{64}$/u.test(noticeId) ? ["--args", `--shoggoth-open-notice=${noticeId}`] : [])], {
         env: childEnv,
         stdio: "ignore",
         detached: true,
@@ -231,6 +243,7 @@ async function startAgentServiceProcess(options = {}) {
     paths,
     version: packageVersion,
     builtinCliProfiles: options.builtinCliProfiles ?? true,
+    codexMemoryImport: options.codexMemoryImport ?? false,
     runtimePool: options.runtimePool,
     grokBuildRuntimePool: options.grokBuildRuntimePool,
     grokBuildBinaryPath: options.grokBuildBinaryPath,
@@ -338,7 +351,11 @@ async function startAgentServiceProcess(options = {}) {
   service.stop = async (...args) => {
     detachActivationHandler();
     detachPowerHandlers();
-    return stopService(...args);
+    try {
+      return await stopService(...args);
+    } finally {
+      detachFailureHandler();
+    }
   };
 
   let signalHandler = null;

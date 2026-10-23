@@ -1,0 +1,37 @@
+.control {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  min-width: 0;
+  max-width: 610px;
+  padding: 15px 17px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 11px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 11px; }
+.heading strong { font-size: 13px; }
+.shared { color: var(--ui-text-2); }
+.intro, .secondaryScope, .formHint, .scopeWarning, .state { margin: 0; overflow-wrap: anywhere; }
+.intro, .secondaryScope, .formHint { color: var(--ui-text-2); }
+.facts { display: grid; gap: 8px; width: 100%; min-width: 0; margin: 1px 0; }
+.facts > div { display: grid; grid-template-columns: minmax(85px, 112px) minmax(0, 1fr); gap: 8px; }
+.facts dt { color: var(--ui-text-2); }
+.facts dd { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 9px; min-width: 0; margin: 0; }
+.facts code { color: var(--ui-text-1); font-size: 11px; overflow-wrap: anywhere; }
+.facts dd span { color: var(--ui-text-2); }
+.scopeWarning { color: var(--ui-text-1); }
+.state { color: var(--ui-text-1); }
+.form { display: grid; gap: 7px; width: min(100%, 440px); min-width: 0; }
+.form label { font-weight: 600; }
+.form input, .form select { width: 100%; min-width: 0; max-width: 100%; }
+.form .choice { display: flex; align-items: flex-start; gap: 7px; font-weight: 500; }
+.form .choice input { width: auto; min-width: auto; max-width: none; margin: 2px 0 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 480px) {
+  .control { width: 100%; padding: 13px; }
+  .facts > div { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+}

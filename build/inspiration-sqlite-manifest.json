@@ -1,6 +1,6 @@
 {
   "version": "13.0.3",
-  "electronVersion": "44.4.2",
+  "electronVersion": "44.9.3",
   "nativeApi": "Node-API",
   "sqliteVersion": "3.53.4",
   "source": {

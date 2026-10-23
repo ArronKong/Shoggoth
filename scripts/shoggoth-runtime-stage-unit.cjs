@@ -20,6 +20,7 @@ const {
 
 assert.deepEqual(STARTUP_STAGES, [
   "runtime_acquire",
+  "runtime_authentication",
   "process_spawn",
   "bootstrap_role",
   "rpc_initialize",
@@ -50,7 +51,8 @@ for (const stage of STARTUP_STAGES.slice(0, -1)) {
 assert.throws(() => runtimeStageCode("unknown"), TypeError);
 for (const code of ["RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN",
   "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "RUNTIME_SESSION_BUSY", "RUNTIME_MODEL_UNAVAILABLE",
-  "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED", "RUNTIME_MODEL_SETTINGS_INVALID"]) {
+  "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED", "RUNTIME_MODEL_SETTINGS_INVALID",
+  "CODEX_ACCOUNT_PROTOCOL_INVALID", "CODEX_SCHEMA_ERROR", "RUNTIME_PROTOCOL_ERROR", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"]) {
   const cause = Object.assign(new Error("private"), { code });
   assert.equal(isRetryablePreTurnStageError(runtimeStageError("session_start_or_resume", cause)), false, code);
 }

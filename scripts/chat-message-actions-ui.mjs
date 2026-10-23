@@ -14,7 +14,7 @@ let serving = false;
 try {
   await build({
     entryPoints: [path.join(root, "scripts/fixtures/chat-message-actions.tsx")], bundle: true, format: "esm",
-    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" },
+    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
     plugins: process.env.CHAT_ACTIONS_SOURCE_PATH ? [{ name: "baseline", setup(builder) {
       builder.onLoad({ filter: /\/ChatPage\.tsx$/ }, ({ path: file }) => ({

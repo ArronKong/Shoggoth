@@ -12,9 +12,11 @@ const module = { exports: {} };
 const source = ts.transpileModule(fs.readFileSync(file, "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
-vm.runInNewContext(source, { exports: module.exports });
+let monitorNow = 100_000;
+vm.runInNewContext(source, { exports: module.exports, Date: { now: () => monitorNow } });
 const { observeAgentService: observe, INITIAL_AGENT_SERVICE_RESTART_STATE: initial } = module.exports;
 const background = { supported: true, installed: true, enabled: true, loaded: true, needsRepair: false };
+const unloadedBackground = { ...background, loaded: false };
 const healthy = { healthy: true, startedAt: 100, domainAvailability: { kanban: true, cron: true },
   pendingCommandsLocked: false, mcpCredentialsLocked: false };
 // Matches the unavailable status shown in Settings, including conservative locks.
@@ -28,35 +30,57 @@ assert.equal(observe(initial, lazyMcp, background, 0).state.wasHealthy, true,
 assert.equal(observe(ready.state, lazyMcp, background, 15_000).notice, null,
   "Optional MCP credentials must not trigger a background-service fault");
 
-let sample = observe(ready.state, offline, background, 5_000);
-assert.equal(sample.notice, "recovering", "A running service failure must notify immediately");
+let sample;
+for (const failure of [offline, null]) {
+  sample = observe(ready.state, failure, failure ? background : undefined, 5_000);
+  assert.equal(sample.notice, null, "One failed health read must not report a running Service as unavailable");
+  assert.equal(sample.state.startedAt, 100, "Uncertain health reads must preserve the confirmed generation");
+  assert.equal(observe(sample.state, healthy, background, 10_000).notice, null,
+    "Recovery within the verification window must stay silent");
+  sample = observe(sample.state, failure, failure ? background : undefined, 14_999);
+  assert.equal(sample.notice, null, "Repeated uncertain samples must preserve the verification deadline");
+  sample = observe(sample.state, failure, failure ? background : undefined, 15_000);
+  assert.equal(sample.notice, "recovering", "Persistent health read failures must still notify");
+  assert.equal(observe(sample.state, failure, failure ? background : undefined, 20_000).notice, null);
+}
+sample = observe(ready.state, null, undefined, 5_000);
+assert.equal(observe(sample.state, offline, unloadedBackground, 6_000).notice, "recovering",
+  "A confirmed stopped job must bypass a pending verification deadline");
+
+sample = observe(ready.state, offline, unloadedBackground, 5_000);
+assert.equal(sample.notice, "recovering", "A confirmed stopped Service must notify immediately");
 sample = observe(sample.state, offline, background, 10_000);
 assert.equal(sample.notice, null, "Polling must not repeat the same fault notification");
 sample = observe(sample.state, null, undefined, 15_000);
 assert.equal(sample.notice, null, "A subsequent host failure is still the same outage");
 sample = observe(sample.state, healthy, background, 20_000);
 assert.equal(sample.notice, null, "Recovery with the same startedAt is not a restart");
-sample = observe(sample.state, offline, background, 25_000);
+sample = observe(sample.state, offline, unloadedBackground, 25_000);
 assert.equal(sample.notice, "recovering", "A new outage after recovery must notify again");
 sample = observe(sample.state, { ...healthy, startedAt: 200 }, background, 30_000);
 assert.equal(sample.notice, "restarted", "An authoritative changed startedAt still reports restart");
 assert.equal(observe(sample.state, { ...healthy, startedAt: 200 }, background, 35_000).notice, null);
 
 sample = observe(ready.state, null, undefined, 5_000);
-assert.equal(sample.notice, "recovering", "Rejected or timed-out host requests must not be swallowed");
+assert.equal(sample.notice, null, "A rejected or timed-out host request needs a confirming sample");
 assert.equal(sample.state.startedAt, 100, "Host failure must preserve the last confirmed generation");
 assert.equal(observe(sample.state, { ...healthy, startedAt: 200 }, background, 10_000).notice, "restarted");
+sample = observe(initial, { ...healthy, startedAt: null }, background, 0);
+sample = observe(sample.state, null, undefined, 5_000);
+assert.equal(observe(sample.state, offline, unloadedBackground, 6_000).notice, "recovering",
+  "A healthy baseline without a generation must still bypass grace for a confirmed stopped job");
 
-for (const failure of [offline, null]) {
-  sample = observe(initial, failure, failure ? background : undefined, 0);
+for (const [failure, startupBackground] of [[offline, background], [null, undefined],
+  [offline, unloadedBackground], [offline, { ...background, needsRepair: true }]]) {
+  sample = observe(initial, failure, startupBackground, 0);
   assert.equal(sample.notice, null, "Normal startup gets the LaunchAgent's health budget");
   for (const now of [5_000, 15_000, 44_999]) {
-    sample = observe(sample.state, failure, failure ? background : undefined, now);
+    sample = observe(sample.state, failure, startupBackground, now);
     assert.equal(sample.notice, null, "Repeated startup samples must preserve the grace deadline");
   }
-  sample = observe(sample.state, failure, failure ? background : undefined, 45_000);
+  sample = observe(sample.state, failure, startupBackground, 45_000);
   assert.equal(sample.notice, "recovering", "An already broken service must eventually notify without a healthy baseline");
-  assert.equal(observe(sample.state, failure, failure ? background : undefined, 50_000).notice, null);
+  assert.equal(observe(sample.state, failure, startupBackground, 50_000).notice, null);
 }
 sample = observe(initial, offline, background, 0);
 sample = observe(sample.state, healthy, background, 40_000);
@@ -158,7 +182,18 @@ const poll = () => settle(() => [...intervals.values()].forEach(callback => call
 let renderer;
 await settle(() => { renderer = create(React.createElement(App)); });
 assert.equal(notices.length, 0);
+rejectRequest = true;
+await poll();
+assert.equal(notices.length, 0, "One rejected request must not produce a false global outage toast");
+rejectRequest = false;
+await poll();
 response = { service: offline, background };
+await poll();
+assert.equal(notices.length, 0, "A conservative HTTP fallback while launchd is loaded must be verified first");
+response = { service: healthy, background };
+await poll();
+assert.equal(notices.length, 0, "Transient health failures must recover silently in the real App shell");
+response = { service: offline, background: unloadedBackground };
 await poll();
 assert.deepEqual(notices, [{ type: "error", key: "common.agentServiceRecovering" }],
   "App must display a red global toast for the Settings reconnect state");
@@ -171,6 +206,9 @@ response = { service: healthy, background };
 await poll();
 rejectRequest = true;
 await poll();
+assert.equal(notices.length, 1, "A new failed read must receive its own verification window");
+monitorNow += 10_000;
+await poll();
 assert.equal(notices.length, 2, "The global toast must also cover failed status requests on another page");
 assert.equal(notices[1].type, "error");
 rejectRequest = false;
@@ -179,7 +217,7 @@ await poll();
 assert.deepEqual(notices[2], { type: "info", key: "common.agentServiceRestarted" });
 
 doc.visibilityState = "hidden";
-response = { service: offline, background };
+response = { service: offline, background: unloadedBackground };
 const beforeHidden = calls;
 await poll();
 assert.equal(calls, beforeHidden, "Hidden windows must not consume the notification");

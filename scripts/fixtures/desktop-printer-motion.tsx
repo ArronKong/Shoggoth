@@ -87,10 +87,10 @@ createRoot(document.getElementById('root')!).render(<UiProvider>
     <button onClick={() => { manual = true; show(); }}>逐帧：起点</button>
     <button onClick={() => at(100)}>机器滑入</button>
     <button onClick={() => at(220)}>便签送出</button>
-    <button onClick={() => at(540)}>默认位置</button>
+    <button onClick={() => at(620)}>默认位置</button>
     <button onClick={() => { manual = true; dismiss(); }}>逐帧：收起</button>
     <button onClick={() => at(60)}>便签收回</button>
     <button onClick={() => at(200)}>机器退场</button>
-    <button onClick={() => at(300)}>退场终点</button>
+    <button onClick={() => at(360)}>退场终点</button>
   </aside>
 </UiProvider>);

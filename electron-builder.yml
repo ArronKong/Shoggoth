@@ -10,13 +10,6 @@ files:
   - schemas/**/*
   - package.json
   - node_modules/ws/**/*
-  - node_modules/@xterm/headless/lib-headless/**/*
-  - node_modules/@xterm/headless/package.json
-  - node_modules/node-pty/lib/**/*
-  - node_modules/node-pty/package.json
-  - node_modules/node-pty/LICENSE
-  - node_modules/node-pty/prebuilds/darwin-*/**/*
-  - '!node_modules/node-pty/lib/*.test.js'
   - node_modules/pinyin-pro/**/*
   - node_modules/@huggingface/tokenizers/**/*
   - node_modules/onnxruntime-common/**/*
@@ -36,6 +29,9 @@ files:
   - node_modules/argparse/**/*
   - node_modules/@modelcontextprotocol/client/**/*
   - node_modules/@modelcontextprotocol/core/**/*
+  - node_modules/@playwright/mcp/**/*
+  - node_modules/playwright/**/*
+  - node_modules/playwright-core/**/*
   - node_modules/cross-spawn/**/*
   - node_modules/path-key/**/*
   - node_modules/shebang-command/**/*
@@ -79,15 +75,22 @@ files:
 asar: true
 npmRebuild: false
 asarUnpack:
+  - app/agent-service/hook-worker.js
+  - app/agent-service/hook-worker.py
+  - app/agent-service/hook-supervisor.js
+  - node_modules/@playwright/mcp/**/*
+  - node_modules/playwright/**/*
+  - node_modules/playwright-core/**/*
   - app/manage-ui/public/audio/typewriter-loop.wav
   - node_modules/@trycua/**/*
   - node_modules/@ubjs/**/*
   - .vendor/cua/node-modules/${arch}/node_modules/**/*
   - node_modules/better-sqlite3/**/*
-  - node_modules/node-pty/**/*
   - node_modules/onnxruntime-node/bin/**/*
   - .vendor/embedding/node-modules/${arch}/node_modules/**/*
 extraResources:
+  - from: .vendor/workspace-execution
+    to: workspace-execution
   - from: LICENSE
     to: legal/SHOGGOTH-LICENSE.txt
   - from: NOTICE
@@ -106,16 +109,24 @@ extraResources:
     to: codex/package
   - from: build/codex-runtime-manifest.json
     to: codex/runtime-manifest.json
+  - from: .vendor/gogcli/${arch}/gog
+    to: gogcli/gog
+  - from: build/gog-runtime-manifest.json
+    to: gogcli/runtime-manifest.json
   - from: resources/shoggoth-skills
     to: shoggoth-skills
-  - from: resources/bundled-plugins
-    to: bundled-plugins
-    filter:
-      - '**/*'
-      - '!**/.npmrc'
-      - packages/product-design/templates/prototype/.npmrc
+  - from: resources/shoggoth-plugins
+    to: shoggoth-plugins
+  - from: resources/bundled-plugins/catalog.json
+    to: bundled-plugins/catalog.json
   - from: resources/external-plugin-adapters
     to: external-plugin-adapters
+    filter:
+      - '**/*'
+      - '!**/__pycache__/**'
+      - '!**/*.pyc'
+  - from: resources/external-plugin-host-patches
+    to: external-plugin-host-patches
     filter:
       - '**/*'
       - '!**/__pycache__/**'
@@ -130,8 +141,6 @@ extraResources:
     to: cua-driver/manifest.json
   - from: node_modules/better-sqlite3/LICENSE
     to: legal/BETTER-SQLITE3-LICENSE.txt
-  - from: node_modules/node-pty/LICENSE
-    to: legal/NODE-PTY-LICENSE.txt
   - from: build/inspiration-sqlite-manifest.json
     to: sqlite/manifest.json
   - from: .vendor/sqlite/${arch}
@@ -148,12 +157,16 @@ publish:
   repo: Shoggoth
   releaseType: draft
 mac:
+  icon: build/shoggothappicon.icon
   identity: null
   category: public.app-category.developer-tools
   entitlements: build/entitlements.mac.plist
   extendInfo:
     LSUIElement: true
     NSMicrophoneUsageDescription: 用于在灵感便签中录制语音。
+    CFBundleLocalizations:
+      - en
+      - zh_CN
   target:
     - target: zip
       arch:

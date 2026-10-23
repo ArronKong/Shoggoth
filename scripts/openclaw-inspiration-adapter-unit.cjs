@@ -61,6 +61,46 @@ async function observeResult(adapter, state, text) {
     summary: "completed", result: { payloads: [{ text }] } } });
 }
 
+test("final OpenClaw metadata uses the exact callback and prompt snapshot, never cumulative usage as context", async () => {
+  const { state, adapter } = fixture();
+  await adapter.start({ ...TARGET, prompt: "do work", workspace: state.workspace });
+  state.finalObserver.onFinal({ payload: { runId: TARGET.runId, sessionKey: TARGET.sessionKey, status: "ok",
+    result: { payloads: [{ text: "done" }], meta: { agentMeta: { model: "actual-model", sessionId: "private",
+      usage: { input: 24000, output: 50, cacheRead: 4000 }, promptTokens: 4000, contextTokens: 20000, contextTokensSource: "runtime" } } } } });
+  const input = { ...TARGET, workspace: state.workspace };
+  const metadata = adapter.responseMetadata(input);
+  assert.equal(metadata.usage.inputTokens, 24000); assert.equal(metadata.context.usedTokens, 4000);
+  assert.equal(metadata.context.quality, "exact"); assert.equal(metadata.models[0], "actual-model");
+  assert.ok(!JSON.stringify(metadata).includes("private"));
+  assert.equal(adapter.responseMetadata({ ...input, workspace: "/wrong" }), null);
+  assert.equal(adapter.responseMetadata({ ...input, runId: "different-run" }), null);
+  metadata.models[0] = "mutated"; assert.equal(adapter.responseMetadata(input).models[0], "actual-model");
+});
+
+test("group drafts honor snapshot, append and empty replacement without publishing intermediate or reasoning text", async t => {
+  const { state, backend } = fixture();
+  const adapter = new OpenClawInspirationAdapter({ backend, now: () => state.now, sessionPurpose: "group" });
+  t.after(() => adapter.reset());
+  const target = { ...TARGET, sessionKey: SESSION.replace(":inspiration-", ":group-") };
+  await adapter.start({ ...target, prompt: "按范围核对", workspace: state.workspace });
+  assert.equal(adapter.draft(target), null);
+  state.finalObserver.onAssistant({ text: "正在核对", delta: "核对" });
+  assert.equal(adapter.draft(target), "正在核对", "snapshot already contains delta");
+  state.finalObserver.onAssistant({ delta: "结果" });
+  assert.equal(adapter.draft(target), "正在核对结果");
+  state.finalObserver.onAssistant({ text: "不能公开", phase: "analysis" });
+  assert.equal(adapter.draft(target), "正在核对结果");
+  assert.equal(adapter.draft({ ...target, runId: "another-run" }), null);
+  state.finalObserver.onAssistant({ replace: true });
+  assert.equal(adapter.draft(target), "正在核对结果", "reset retires the paragraph instead of erasing public text");
+  state.finalObserver.onAssistant({ text: "🙂".repeat(5000) });
+  assert.equal(Array.from(adapter.draft(target)).length, 4000);
+  state.finalObserver.onFinal({ payload: { runId: target.runId, sessionKey: target.sessionKey, status: "ok",
+    result: { payloads: [{ text: "完整最终回答" }] } } });
+  assert.equal(adapter.draft(target), null);
+  assert.equal(await adapter.fullResult({ ...target, workspace: state.workspace }), "完整最终回答");
+});
+
 function task(overrides = {}) {
   return { id: "task-1", taskId: "task-1", ...TARGET, status: "running", ...overrides };
 }
@@ -461,4 +501,176 @@ test("an already completed task never triggers cancellation writes", async () =>
   state.tasks = [task({ status: "completed", result: "finished" })];
   assert.equal((await adapter.cancel(TARGET)).status, "completed");
   assert.equal(state.calls.some((call) => ["chat.abort", "tasks.cancel"].includes(call.method)), false);
+});
+
+test("a Host-sealed deleted group can confirm an expired inactive run, never an active or partial session", async () => {
+  for (const variant of ["inactive", "absent", "active", "partial", "bad-abort"]) {
+    const { state, backend } = fixture();
+    const adapter = new OpenClawInspirationAdapter({ backend, sessionPurpose: "group" });
+    const target = { ...TARGET, sessionKey: SESSION.replace(":inspiration-", ":group-") };
+    state.overrides["sessions.list"] = () => ({ sessions: variant === "absent" ? [] : [{ key: target.sessionKey,
+      hasActiveRun: variant === "active" }], ...(variant === "partial" ? { hasMore: true } : {}) });
+    if (variant === "bad-abort") state.overrides["chat.abort"] = () => ({ ok: true });
+    assert.equal((await adapter.cancel(target)).status, "unknown", "ordinary cancellation still requires run-specific proof");
+    const result = await adapter.cancel(target, { groupDeleted: true });
+    assert.equal(result.status, ["inactive", "absent"].includes(variant) ? "canceled" : "unknown", variant);
+    assert(state.calls.filter(call => call.method === "chat.abort").every(call => call.params.sessionKey === target.sessionKey
+      && call.params.runId === target.runId));
+  }
+});
+
+// ---- Gateway 2026.9.9 起没有任务账 RPC（tasks.*）：改用 agent.wait ----
+const WITHOUT_LEDGER = ["agents.list", "sessions.create", "sessions.list", "agent", "agent.wait", "chat.abort",
+  "question.list", "question.resolve", "exec.approval.list", "exec.approval.get", "exec.approval.resolve"];
+
+function waitFixture() {
+  const f = fixture();
+  f.state.methods = [...WITHOUT_LEDGER];
+  f.state.wait = { status: "timeout" };
+  f.state.overrides["agent.wait"] = (params) => ({ runId: params.runId, ...f.state.wait });
+  return f;
+}
+
+test("a gateway without the task ledger is supported through agent.wait, and never calls tasks.*", async () => {
+  const { adapter, state } = waitFixture();
+  const prepared = await adapter.prepare({ agentId: "main", sessionId: "s-1", workspace: state.workspace });
+  assert.equal(prepared.mode, "openclaw");
+  state.methods = WITHOUT_LEDGER.filter((method) => method !== "agent.wait");
+  await assert.rejects(adapter.prepare({ agentId: "main", sessionId: "s-2", workspace: state.workspace }),
+    { code: "OPENCLAW_INSPIRATION_UNSUPPORTED" }, "neither the ledger nor agent.wait: unsupported");
+  state.methods = [...WITHOUT_LEDGER];
+  assert.equal((await adapter.start({ ...TARGET, prompt: "Do the work", workspace: state.workspace })).status, "starting");
+  state.wait = { status: "pending", timeoutPhase: "queue" };
+  assert.equal((await adapter.inspect(TARGET)).status, "starting");
+  state.wait = { status: "timeout" };
+  state.active = true;
+  assert.equal((await adapter.inspect(TARGET)).status, "running", "no terminal record and an active session: still running");
+  state.active = false;
+  assert.deepEqual(await adapter.inspect(TARGET), { status: "unknown", resultSummary: "", errorCode: "OPENCLAW_TASK_NOT_FOUND", attention: null },
+    "no terminal record and no active run is never reported as finished");
+  assert.equal(state.calls.some((call) => call.method.startsWith("tasks.")), false);
+});
+
+test("agent.wait terminal states map to completed, failed, timed out and canceled", async () => {
+  const { adapter, state } = waitFixture();
+  // 没观察到原始 RPC 的终帧（例如 App 重启过）：最终回复取 agent.wait 自带的那份。
+  state.wait = { status: "ok", startedAt: 1, endedAt: 2, terminalReply: { disposition: "visible", text: "行程建议如下" } };
+  assert.deepEqual(await adapter.inspect(TARGET), { status: "completed", resultSummary: "行程建议如下", errorCode: null, attention: null });
+  state.wait = { status: "ok", startedAt: 1, endedAt: 2, terminalReply: { disposition: "silent" } };
+  assert.equal((await adapter.inspect(TARGET)).errorCode, "OPENCLAW_RESULT_UNAVAILABLE", "a silent run has no text to publish");
+  state.wait = { status: "error", startedAt: 1, endedAt: 2, error: "provider failed" };
+  assert.deepEqual([(await adapter.inspect(TARGET)).status, (await adapter.inspect(TARGET)).errorCode], ["failed", "OPENCLAW_RUN_FAILED"]);
+  state.wait = { status: "timeout", startedAt: 1, endedAt: 2, timeoutPhase: "provider" };
+  assert.equal((await adapter.inspect(TARGET)).errorCode, "OPENCLAW_RUN_TIMED_OUT");
+  state.wait = { status: "timeout", timeoutPhase: "gateway_draining" };
+  state.active = true;
+  assert.equal((await adapter.inspect(TARGET)).status, "running", "a draining gateway is not a run timeout");
+  state.wait = { status: "error", startedAt: 1, endedAt: 2, stopReason: "aborted" };
+  assert.equal((await adapter.inspect(TARGET)).errorCode, "OPENCLAW_STOP_UNCONFIRMED", "an aborted run is canceled only once the session is inactive");
+  state.active = false;
+  assert.equal((await adapter.inspect(TARGET)).status, "canceled");
+  state.overrides["agent.wait"] = () => ({ runId: "another-run", status: "ok" });
+  assert.equal((await adapter.inspect(TARGET)).errorCode, "OPENCLAW_TASK_RESPONSE_INVALID", "a result for another run is rejected");
+});
+
+test("without the ledger the observed RPC final supplies the text, and pending questions still surface", async () => {
+  const { adapter, state } = waitFixture();
+  await observeResult(adapter, state, "来自终帧的回答");
+  state.wait = { status: "ok", startedAt: 1, endedAt: 2, terminalReply: { disposition: "visible", text: "wait 里的文本" } };
+  assert.equal((await adapter.inspect(TARGET)).resultSummary, "来自终帧的回答", "the original RPC final wins over the cached reply");
+  // Gateway 的记录已过期，但终帧观察过：仍按终帧判定完成。
+  state.wait = { status: "timeout" };
+  assert.deepEqual([(await adapter.inspect(TARGET)).status, (await adapter.inspect(TARGET)).resultSummary], ["completed", "来自终帧的回答"]);
+
+  const other = waitFixture();
+  other.state.active = true;
+  other.state.questions = [question()];
+  const waiting = await other.adapter.inspect(TARGET);
+  assert.equal(waiting.status, "waiting_input");
+  assert.equal(validInspirationAttention(waiting.attention, TARGET.runId), true);
+  const answered = await other.adapter.respond({ ...TARGET, requestId: "question-1", response: { action: "submit", answers: { question_0: "A" } } });
+  assert.equal(answered.status, "running");
+  other.state.wait = { status: "ok", startedAt: 1, endedAt: 2 };
+  await assert.rejects(other.adapter.respond({ ...TARGET, requestId: "question-1", response: { action: "cancel" } }),
+    { code: "OPENCLAW_REQUEST_STALE" }, "a finished run accepts no further answers");
+});
+
+test("without the ledger cancellation is chat.abort plus verified inactivity, and a finished run is left alone", async () => {
+  const { adapter, state } = waitFixture();
+  state.active = true;
+  assert.equal((await adapter.cancel(TARGET)).errorCode, "OPENCLAW_STOP_UNCONFIRMED", "an abort that stopped nothing is not a cancellation");
+  state.overrides["chat.abort"] = () => { state.active = false; return { ok: true, aborted: true, runIds: [TARGET.runId] }; };
+  assert.equal((await adapter.cancel(TARGET)).status, "canceled");
+  assert.deepEqual(state.calls.filter((call) => call.method === "chat.abort").at(-1).params, { sessionKey: SESSION, runId: TARGET.runId });
+  assert.equal(state.calls.some((call) => call.method.startsWith("tasks.")), false);
+
+  const done = waitFixture();
+  done.state.wait = { status: "ok", startedAt: 1, endedAt: 2, terminalReply: { disposition: "visible", text: "已完成" } };
+  assert.equal((await done.adapter.cancel(TARGET)).status, "completed");
+  assert.equal(done.state.calls.some((call) => call.method === "chat.abort"), false, "no abort is sent to a finished run");
+});
+
+test("a group-purpose adapter runs group sessions end to end; the two purposes never accept each other's sessions", async () => {
+  const { backend, state } = waitFixture();
+  const group = new OpenClawInspirationAdapter({ backend, now: () => state.now, sessionPurpose: "group" });
+  const prepared = await group.prepare({ agentId: "main", sessionId: "group-opportunity-1", workspace: state.workspace });
+  assert.match(prepared.sessionKey, /^agent:main:dashboard:group-[a-f0-9]{64}$/u);
+  const target = { agentId: "main", sessionKey: prepared.sessionKey, runId: "group-run-1" };
+  state.overrides["sessions.list"] = () => ({ sessions: [{ key: prepared.sessionKey, hasActiveRun: state.active }] });
+  // 准备好的群会话必须能真正启动：启动请求确实发给了 Gateway。
+  assert.equal((await group.start({ ...target, prompt: "群里的新消息", workspace: state.workspace })).status, "starting");
+  const sent = state.calls.find((call) => call.method === "agent");
+  assert.deepEqual([sent.params.sessionKey, sent.params.idempotencyKey], [prepared.sessionKey, "group-run-1"]);
+  state.overrides["agent.wait"] = (params) => ({ runId: params.runId, status: "ok", startedAt: 1, endedAt: 2,
+    terminalReply: { disposition: "visible", text: "我是旅行规划助手" } });
+  state.finalObserver.onClose();
+  state.now += 6000;
+  assert.deepEqual([(await group.inspect(target)).status, (await group.inspect(target)).resultSummary], ["completed", "我是旅行规划助手"]);
+  assert.equal((await group.cancel(target)).status, "completed");
+  // 灵感适配器不接受群会话，群适配器也不接受灵感会话。
+  const inspiration = new OpenClawInspirationAdapter({ backend, now: () => state.now });
+  await assert.rejects(inspiration.start({ ...target, prompt: "x", workspace: state.workspace }), { code: "OPENCLAW_EXECUTION_IDENTITY_INVALID" });
+  await assert.rejects(group.start({ ...TARGET, prompt: "x", workspace: state.workspace }), { code: "OPENCLAW_EXECUTION_IDENTITY_INVALID" });
+});
+
+test("after a gateway restart the session's recovery run is not mistaken for ours", async () => {
+  const { adapter, state } = waitFixture();
+  await adapter.prepare({ agentId: "main", sessionId: "s-1", workspace: state.workspace });
+  await adapter.start({ ...TARGET, prompt: "Do the work", workspace: state.workspace });
+  state.active = true;
+  state.methods.push("chat.history");
+  state.overrides["chat.history"] = () => ({ inFlightRun: { runId: state.inFlight } });
+  // 连接还在：只要会话有运行就是「运行中」，不去多问一次。
+  state.inFlight = "the-gateways-recovery-run";
+  assert.equal((await adapter.inspect(TARGET)).status, "running");
+  assert.equal(state.calls.some((call) => call.method === "chat.history"), false);
+  // 连接在终帧之前断了（Gateway 重启），会话里跑的是 Gateway 自己恢复出来的另一次运行。
+  state.finalObserver.onClose();
+  assert.deepEqual(await adapter.inspect(TARGET),
+    { status: "unknown", resultSummary: "", errorCode: "OPENCLAW_RUN_INTERRUPTED", attention: null });
+  // 只是连接重连、运行还是我们这次：继续等它的终态。
+  state.inFlight = TARGET.runId;
+  assert.equal((await adapter.inspect(TARGET)).status, "running");
+  // 读不到进行中的运行（老版本 Gateway、请求失败）时不误判。
+  state.overrides["chat.history"] = () => { throw new Error("unavailable"); };
+  assert.equal((await adapter.inspect(TARGET)).status, "running");
+  state.methods = state.methods.filter((method) => method !== "chat.history");
+  assert.equal((await adapter.inspect(TARGET)).status, "running");
+});
+
+
+test("M36: fullResult preserves the complete final answer, excludes non-final channels and binds the exact run", async () => {
+  const { state, adapter } = fixture();
+  await adapter.start({ ...TARGET, prompt: "Do the work", workspace: state.workspace });
+  const text = "原始回答🙂\n".repeat(12_000) + "最后的交接";
+  state.tasks = [task({ status: "completed" })];
+  state.finalObserver.onFinal({ ok: true, payload: { runId: TARGET.runId, status: "ok", result: { payloads: [
+    { text: "private analysis", isReasoning: true }, { text: "progress", isCommentary: true },
+    { text: "tool trace", isError: true }, { text },
+  ] } } });
+  assert.ok((await adapter.inspect(TARGET)).resultSummary.length <= 4000);
+  assert.equal(await adapter.fullResult(TARGET), text);
+  assert.equal(await adapter.fullResult({ ...TARGET, runId: "other-run" }), null);
+  adapter.reset();
+  assert.equal(await adapter.fullResult(TARGET), null);
 });

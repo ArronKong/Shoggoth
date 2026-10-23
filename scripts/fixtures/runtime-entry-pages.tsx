@@ -93,6 +93,7 @@ scope.fetch = async (input: string, init?: RequestInit) => {
   }
   if (route === "/__api/status") return Response.json({ backends: [{ id: "shoggoth", name: "Shoggoth", connected: true, info: { readyAgentIds: [agentId] } }] });
   if (route === "/__api/runtime-status") return Response.json({ runtimes: ["codex", "claude-code", "pi", "grok-build", "antigravity", "deepseek-harness"].map(runtime => ({
+    readiness: "ready",
     runtime, name: runtime, runtimeAccountId: `native-${runtime}-default-v1`, backendId: "shoggoth", enabled: preview ? ["codex", "pi", "deepseek-harness"].includes(runtime) : runtime !== "pi",
     releaseEnabled: runtime !== "claude-code", installation: runtime === "grok-build" ? "unavailable" : "available", serviceConnected: true,
   })) });

@@ -16,6 +16,7 @@ const {
 } = require(path.join(ROOT, "app", "agent-service", "agent-harness-service-protocol.js"));
 const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
 const { MemoryProvenanceStore } = require("../app/agent-service/memory-provenance-store");
+const { memoryTrust } = require("../app/agent-service/memory-engine");
 const { MemoryProvenanceService } = require("../app/agent-service/memory-provenance-service");
 const { NativeSkillStore } = require(path.join(
   ROOT, "app", "agent-service", "native-skill-store.js",
@@ -210,6 +211,87 @@ test("Memory/Transcript/Tool mutations 都以实时 revision 防止旧窗口覆�
     assert.throws(() => value.controller.handle("harness.tools.permission.set", {
       profileId: "profile-1", toolName: target.name, effect: "allow", expectedRevision: tools.revision,
     }), (error) => error.code === "TOOL_PERMISSION_REVISION_CONFLICT");
+  } finally { value.cleanup(); }
+});
+
+test("其他 Agent 共享的记忆随 active 列表返回其归属 Agent 与 revision，严格协议拒绝伪造归属", () => {
+  const value = fixture();
+  try {
+    value.memoryEngine.close();
+    value.definitions.ensureProfile({ profileId: "profile-2" });
+    value.memoryEngine.sharedProfiles = () => ["profile-1", "profile-2"];
+    value.memoryEngine.open(["profile-1", "profile-2"]);
+    const peer = value.memoryEngine.propose({ profileId: "profile-2", classification: "explicit",
+      scope: "user", type: "semantic", content: "用户偏好简短回答", sourceRefs: ["user-edit:peer"] });
+    value.memoryEngine.propose({ profileId: "profile-2", classification: "explicit",
+      scope: "agent", type: "semantic", content: "profile-2 的私有笔记", sourceRefs: ["user-edit:private"] });
+    const list = (status, scope = null) => value.controller.handle("harness.memory.list", {
+      profileId: "profile-1", status, scope, cursor: 0, limit: 50,
+    });
+    const active = list("active");
+    assert.deepEqual(active.items, []);
+    assert.deepEqual(active.shared.items.map((row) => [row.item.id, row.homeProfileId, row.homeRevision]),
+      [[peer.id, "profile-2", value.memoryStore.getRevision("profile-2")]]);
+    assert.deepEqual(validateAgentHarnessResult("harness.memory.list", active).shared.items.length, 1);
+    assert.deepEqual(list("deleted").shared.items, [], "audit lists never mix in other Agents' facts");
+    assert.deepEqual(list("active", "project").shared.items, []);
+    assert.throws(() => validateAgentHarnessResult("harness.memory.list", {
+      ...active, shared: { ...active.shared, items: [{ ...active.shared.items[0], homeProfileId: "profile-1" }] },
+    }), (error) => error.code === "HARNESS_RESPONSE_INVALID");
+    const { shared: _shared, ...withoutShared } = active;
+    assert.throws(() => validateAgentHarnessResult("harness.memory.list", withoutShared),
+      (error) => error.code === "HARNESS_RESPONSE_INVALID");
+  } finally { value.cleanup(); }
+});
+
+test("待确认记忆只出现在用户的记忆列表里，用户确认后成为本人记忆并可被召回", () => {
+  const value = fixture();
+  try {
+    const held = value.memoryEngine.propose({ profileId: "profile-1", classification: "explicit", scope: "user",
+      type: "semantic", content: "用户每天七点起床", sourceRefs: ["event-held", "run-held", "untrusted:quote-unsupported"] });
+    const list = () => value.controller.handle("harness.memory.list", {
+      profileId: "profile-1", status: "active", scope: null, cursor: 0, limit: 50,
+    });
+    assert.deepEqual(list().items.map((item) => item.id), [held.id], "the owner sees it to confirm or forget");
+    assert.deepEqual(value.memoryEngine.search({ profileId: "profile-1", query: "七点起床" }).items, []);
+    const confirmed = value.controller.handle("harness.memory.update", {
+      profileId: "profile-1", id: held.id, expectedRevision: list().revision, content: held.content,
+    }).item;
+    assert.equal(memoryTrust(confirmed), "owner");
+    assert.equal(value.memoryStore.get("profile-1", held.id).status, "superseded");
+    assert.deepEqual(value.memoryEngine.search({ profileId: "profile-1", query: "七点起床" }).items
+      .map((item) => item.id), [confirmed.id]);
+  } finally { value.cleanup(); }
+});
+
+test("记忆页可撤销一次后台整理，或遗忘一次对话记下的全部记忆", () => {
+  const value = fixture();
+  try {
+    const call = (method, params) => validateAgentHarnessResult(method, value.controller.handle(method, params), params);
+    const revision = () => value.memoryStore.getRevision("profile-1");
+    const old = value.memoryEngine.propose({ profileId: "profile-1", classification: "explicit", scope: "user",
+      type: "semantic", content: "用户希望被称呼为阿棠", sourceRefs: ["user-edit:old"] });
+    value.memoryStore.upsertMany([{ ...old, id: "consolidated-name", content: "用户希望被称呼为小唐",
+      sourceRefs: ["event-c", "run-c", "consolidated:auto"], supersedes: old.id }, { ...old, status: "superseded" }]);
+    const undone = call("harness.memory.undo", { profileId: "profile-1", id: "consolidated-name", expectedRevision: revision() });
+    assert.equal(undone.item.status, "deleted");
+    assert.equal(undone.restored.id, old.id);
+    assert.throws(() => value.controller.handle("harness.memory.undo", { profileId: "profile-1", id: old.id,
+      expectedRevision: revision() }), (error) => error.code === "MEMORY_NOT_FOUND");
+
+    value.append({ id: "event-session", kind: "user", content: { text: "我住在杭州" } });
+    const learned = value.memoryEngine.propose({ profileId: "profile-1", classification: "explicit", scope: "user",
+      type: "semantic", content: "用户住在杭州", sourceRefs: ["event-session", "run-1"] });
+    const forgot = call("harness.memory.forgetSession", { profileId: "profile-1", sessionId: "session-1",
+      expectedRevision: revision() });
+    assert.equal(forgot.forgotten, 1);
+    assert.equal(value.memoryStore.get("profile-1", learned.id).status, "deleted");
+    assert.equal(value.memoryStore.get("profile-1", old.id).status, "active", "facts of other sources stay");
+    assert.throws(() => value.controller.handle("harness.memory.forgetSession", { profileId: "profile-1",
+      sessionId: "session-unknown", expectedRevision: revision() }),
+    (error) => error.code === "MEMORY_SOURCE_SESSION_NOT_FOUND");
+    assert.throws(() => validateAgentHarnessParams("harness.memory.forgetSession", { profileId: "profile-1",
+      sessionId: "session-1", expectedRevision: 0, extra: true }), (error) => error.code === "INVALID_PARAMS");
   } finally { value.cleanup(); }
 });
 

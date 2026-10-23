@@ -75,6 +75,7 @@ window.fetch = async (input, init) => {
     if (scenario === "pending") return new Promise<Response>(resolve => { resolveCatalog = resolve; });
     return response;
   }
+  if (url.pathname === "/__api/plugins/selection-readiness") payload = { version: 1, supported: url.searchParams.get("backend") === "shoggoth" };
   if (url.pathname === "/__api/plugins/bundled") payload = { batchDigest: "a".repeat(64), items: [] };
   if (url.pathname === "/__api/status") payload = { backends: ["shoggoth", "openclaw"].map(id =>
     ({ id, connected: true, info: { readyAgentIds: [agentId] } })) };

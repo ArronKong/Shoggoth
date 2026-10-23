@@ -1,0 +1,303 @@
+import fs from "node:fs";
+import path from "node:path";
+import { FsSafeError } from "./errors.js";
+import { captureRootSyncAcquireOptions } from "./file-lock-sync-root-options.js";
+import { defaultSyncShouldReclaim, foreignSyncHeldLock } from "./file-lock-sync-admission.js";
+import { isTransientLockFileDenial, sidecarLockStale } from "./sidecar-lock-policy.js";
+import { serializeSidecarLockPayload, } from "./sidecar-lock-reclaim.js";
+import { createSuppressedError } from "./suppressed-error.js";
+import { SyncLockAcquisition } from "./file-lock-sync-acquisition.js";
+import { assertSynchronousCallbackResult } from "./mutation-authority.js";
+import { assertNoWindowsPathAlias } from "./windows-path-alias.js";
+import { admitFileLockSyncRootPath, assertFileLockSyncRootPathsCurrent, captureFileLockSyncRootAuthority, normalizeFileLockSyncTargetWithRoot, } from "./file-lock-sync-root.js";
+import { cleanupCreatedRootSyncLock, FileLockSyncRootArbitrationCollision, tryReuseCurrentRootSyncHeldLock, } from "./file-lock-sync-root-arbitration.js";
+import { fileLockSyncRootSnapshotStillCurrent, } from "./file-lock-sync-root-io.js";
+import { createFileLockSyncRootDirectory, createFileLockSyncRootFile, fileLockSyncRootGuardExists, fileLockSyncRootDirectoryReceiptStillCurrent, refreshFileLockSyncRootFileReceipt, removeFileLockSyncRootDirectory, removeFileLockSyncRootFile, } from "./file-lock-sync-root-mutation.js";
+import { createRootSyncHeldLockHandle, ensureRootSyncExitCleanupRegistered, getRootSyncHeldLocks, readRootSidecarSnapshotSync, } from "./file-lock-sync-root-held.js";
+export function acquireFileLockSyncWithRoot(targetPath, inputOptions, lockRoot) {
+    // The public dispatcher already read lockRoot exactly once. Validate and
+    // snapshot that genuine Root before any remaining option or retry getter can
+    // mutate its defaults or retained policy inputs.
+    const authority = captureFileLockSyncRootAuthority(lockRoot);
+    const options = captureRootSyncAcquireOptions(inputOptions);
+    ensureRootSyncExitCleanupRegistered();
+    assertNoWindowsPathAlias(targetPath);
+    if (options.lockPath !== undefined)
+        assertNoWindowsPathAlias(options.lockPath);
+    const resolvedTargetPath = path.resolve(targetPath);
+    const normalizedTargetPath = normalizeFileLockSyncTargetWithRoot(authority, resolvedTargetPath);
+    const requestedLockPath = path.resolve(options.lockPath ?? `${normalizedTargetPath}.lock`);
+    const lockRootPath = admitFileLockSyncRootPath(authority, requestedLockPath);
+    // A followed final alias and its admitted canonical spelling name the same
+    // sidecar. Derive their arbitration guard from that shared admitted path,
+    // then independently admit the derived mutation target under Root policy.
+    const reclaimRootPath = admitFileLockSyncRootPath(authority, `${lockRootPath.path}.reclaim`);
+    const guardedPaths = Object.freeze([lockRootPath, reclaimRootPath]);
+    const lockPath = lockRootPath.path;
+    const heldLocks = getRootSyncHeldLocks();
+    const currentTargetHolder = () => heldLocks.get(normalizedTargetPath) ??
+        foreignSyncHeldLock("root", normalizedTargetPath);
+    const arbitration = Object.freeze({
+        authority,
+        heldLocks,
+        lockRootPath,
+        normalizedTargetPath,
+        reentrantOwner: options.reentrantOwner,
+    });
+    if (heldLocks.has(normalizedTargetPath) && !foreignSyncHeldLock("root", normalizedTargetPath)) {
+        assertFileLockSyncRootPathsCurrent(guardedPaths);
+        const initiallyReusable = tryReuseCurrentRootSyncHeldLock(arbitration);
+        if (initiallyReusable)
+            return initiallyReusable;
+    }
+    const acquisition = new SyncLockAcquisition(lockPath, normalizedTargetPath, options.retry, options.timeoutMs);
+    let ownedReclaimGuard;
+    let reclaimCleanupAttempted = false;
+    const reuseCurrentHeld = () => ownedReclaimGuard ? undefined : tryReuseCurrentRootSyncHeldLock(arbitration);
+    const releaseReclaimGuard = () => {
+        const receipt = ownedReclaimGuard;
+        if (!receipt)
+            return;
+        reclaimCleanupAttempted = true;
+        if (!removeFileLockSyncRootDirectory(reclaimRootPath, receipt)) {
+            throw new FsSafeError("path-mismatch", "owned sidecar reclaim guard changed before release");
+        }
+        ownedReclaimGuard = undefined;
+        reclaimCleanupAttempted = false;
+    };
+    const assertOwnedReclaimGuardCurrent = () => {
+        const receipt = ownedReclaimGuard;
+        if (!receipt || !fileLockSyncRootDirectoryReceiptStillCurrent(reclaimRootPath, receipt)) {
+            throw new FsSafeError("path-mismatch", "owned sidecar reclaim guard changed during acquisition");
+        }
+    };
+    try {
+        while (true) {
+            acquisition.reserve();
+            acquisition.assert();
+            assertFileLockSyncRootPathsCurrent(guardedPaths);
+            acquisition.assert();
+            if (ownedReclaimGuard)
+                assertOwnedReclaimGuardCurrent();
+            if (!ownedReclaimGuard && fileLockSyncRootGuardExists(reclaimRootPath)) {
+                acquisition.waitForRetry();
+                continue;
+            }
+            if (currentTargetHolder() !== undefined) {
+                const reused = reuseCurrentHeld();
+                if (reused)
+                    return reused;
+            }
+            const payload = Reflect.apply(options.payload, options.optionsReceiver, []);
+            acquisition.assert();
+            const { raw, ownershipToken } = serializeSidecarLockPayload(payload);
+            acquisition.assert();
+            if (ownedReclaimGuard)
+                assertOwnedReclaimGuardCurrent();
+            if (currentTargetHolder() !== undefined) {
+                const reused = reuseCurrentHeld();
+                if (reused)
+                    return reused;
+                acquisition.waitForRetry();
+                continue;
+            }
+            let fd;
+            let rootReceipt;
+            let unpublishedTimer;
+            let lockFileCreateOpenFailure;
+            try {
+                const created = createFileLockSyncRootFile(lockRootPath, {
+                    assertBeforeOpen: () => {
+                        acquisition.assert();
+                        if (ownedReclaimGuard)
+                            assertOwnedReclaimGuardCurrent();
+                        if (currentTargetHolder() !== undefined)
+                            throw new FileLockSyncRootArbitrationCollision();
+                    },
+                    onOpenFailure: (error) => {
+                        lockFileCreateOpenFailure = { error };
+                    },
+                });
+                fd = created.fd;
+                rootReceipt = created.receipt;
+                fs.writeFileSync(fd, raw, "utf8");
+                fs.fsyncSync(fd);
+                const snapshot = {
+                    raw,
+                    payload,
+                    ownershipToken,
+                };
+                if (ownedReclaimGuard)
+                    releaseReclaimGuard();
+                rootReceipt = refreshFileLockSyncRootFileReceipt(lockRootPath, rootReceipt);
+                const createdHeld = {
+                    fd,
+                    lockPath,
+                    normalizedTargetPath,
+                    parsePayload: options.parsePayload,
+                    refCount: 1,
+                    reentrantOwner: options.reentrantOwner,
+                    releaseState: "active",
+                    revision: 0,
+                    rootAuthority: authority,
+                    rootPath: lockRootPath,
+                    rootReceipt,
+                    snapshot,
+                };
+                const returnedHandle = createRootSyncHeldLockHandle(createdHeld);
+                acquisition.monitor(createdHeld, returnedHandle, options.onCompromised, options.compromiseCheckIntervalMs, options.optionsReceiver, (timer) => { unpublishedTimer = timer; });
+                if (currentTargetHolder() !== undefined) {
+                    throw new FileLockSyncRootArbitrationCollision();
+                }
+                acquisition.assert();
+                heldLocks.set(normalizedTargetPath, createdHeld);
+                fd = undefined;
+                unpublishedTimer = undefined;
+                return returnedHandle;
+            }
+            catch (error) {
+                if (fd !== undefined && rootReceipt) {
+                    const cleanupFd = fd;
+                    const cleanupReceipt = rootReceipt;
+                    const cleanupTimer = unpublishedTimer;
+                    fd = undefined;
+                    rootReceipt = undefined;
+                    unpublishedTimer = undefined;
+                    try {
+                        cleanupCreatedRootSyncLock(lockRootPath, cleanupFd, cleanupReceipt, cleanupTimer);
+                    }
+                    catch (cleanupError) {
+                        throw createSuppressedError(error, cleanupError, "file lock acquisition and Root cleanup both failed");
+                    }
+                }
+                if (error instanceof FileLockSyncRootArbitrationCollision) {
+                    const reused = reuseCurrentHeld();
+                    if (reused)
+                        return reused;
+                    acquisition.waitForRetry();
+                    continue;
+                }
+                const fromLockFileOpen = lockFileCreateOpenFailure !== undefined &&
+                    lockFileCreateOpenFailure.error === error;
+                if (fromLockFileOpen && acquisition.retryDenial(error))
+                    continue;
+                if (!fromLockFileOpen || error.code !== "EEXIST")
+                    throw error;
+                if (ownedReclaimGuard) {
+                    releaseReclaimGuard();
+                    const reused = reuseCurrentHeld();
+                    if (reused)
+                        return reused;
+                    acquisition.waitForRetry();
+                    continue;
+                }
+                if (currentTargetHolder() !== undefined) {
+                    const reused = reuseCurrentHeld();
+                    if (reused)
+                        return reused;
+                    acquisition.waitForRetry();
+                    continue;
+                }
+                let lockFileOpenDenied = false;
+                let current;
+                try {
+                    current = readRootSidecarSnapshotSync(lockRootPath, options.parsePayload, (openError) => {
+                        lockFileOpenDenied = isTransientLockFileDenial(openError, lockPath);
+                    });
+                }
+                catch (readError) {
+                    if (lockFileOpenDenied && acquisition.retryDenial(readError))
+                        continue;
+                    throw readError;
+                }
+                if (currentTargetHolder() !== undefined) {
+                    const reused = reuseCurrentHeld();
+                    if (reused)
+                        return reused;
+                    acquisition.waitForRetry();
+                    continue;
+                }
+                acquisition.assert();
+                if (!current) {
+                    acquisition.waitForRetry();
+                    continue;
+                }
+                const snapshot = current.snapshot;
+                const nowMs = Date.now();
+                let reclaim;
+                if (options.shouldReclaim) {
+                    reclaim = Reflect.apply(options.shouldReclaim, options.optionsReceiver, [{
+                            lockPath,
+                            normalizedTargetPath,
+                            payload: snapshot.payload,
+                            staleMs: options.staleMs,
+                            nowMs,
+                            heldByThisProcess: false,
+                        }]);
+                    assertSynchronousCallbackResult(reclaim, "shouldReclaim");
+                    acquisition.assert();
+                    if (!fileLockSyncRootSnapshotStillCurrent(lockRootPath, current)) {
+                        throw new FsSafeError("path-mismatch", "sidecar changed during reclaim policy callback");
+                    }
+                }
+                else {
+                    reclaim = defaultSyncShouldReclaim(snapshot, options.staleMs, nowMs);
+                }
+                if (reclaim) {
+                    if (options.staleRecovery === "remove-if-unchanged" &&
+                        snapshot.raw !== undefined &&
+                        options.shouldRemoveStaleLock) {
+                        const guard = createFileLockSyncRootDirectory(reclaimRootPath);
+                        if (!guard) {
+                            acquisition.waitForRetry();
+                            continue;
+                        }
+                        ownedReclaimGuard = guard;
+                        reclaimCleanupAttempted = false;
+                        const approved = Reflect.apply(options.shouldRemoveStaleLock, options.optionsReceiver, [{
+                                lockPath,
+                                normalizedTargetPath,
+                                raw: snapshot.raw,
+                                payload: snapshot.payload,
+                            }]);
+                        assertSynchronousCallbackResult(approved, "shouldRemoveStaleLock");
+                        acquisition.assert();
+                        assertOwnedReclaimGuardCurrent();
+                        if (approved) {
+                            const removed = removeFileLockSyncRootFile(lockRootPath, current.receipt, snapshot, () => {
+                                acquisition.assert();
+                                assertOwnedReclaimGuardCurrent();
+                                if (currentTargetHolder() !== undefined)
+                                    throw new FileLockSyncRootArbitrationCollision();
+                            });
+                            if (!removed) {
+                                throw new FsSafeError("path-mismatch", "stale sidecar changed before removal");
+                            }
+                            continue;
+                        }
+                        if (!fileLockSyncRootSnapshotStillCurrent(lockRootPath, current)) {
+                            throw new FsSafeError("path-mismatch", "sidecar changed during stale-removal policy callback");
+                        }
+                        releaseReclaimGuard();
+                    }
+                    throw sidecarLockStale(lockPath, normalizedTargetPath);
+                }
+                acquisition.waitForRetry();
+            }
+        }
+    }
+    catch (error) {
+        if (ownedReclaimGuard && !reclaimCleanupAttempted) {
+            try {
+                releaseReclaimGuard();
+            }
+            catch (cleanupError) {
+                throw createSuppressedError(error, cleanupError, "file lock acquisition and reclaim cleanup both failed");
+            }
+        }
+        throw error;
+    }
+    finally {
+        acquisition.release();
+    }
+}

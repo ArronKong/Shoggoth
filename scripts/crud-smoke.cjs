@@ -223,8 +223,17 @@ function installSmokeModelAdapter(backend) {
 
 async function main() {
   if (WHICH === "all" || WHICH === "isolated") {
+    await require("./shoggoth-self-improvement-rest-smoke.cjs").run();
+    await require("./native-memory-sharing-crud-smoke.cjs").run();
     await require("./runtime-status-rest.cjs").run();
     await require("./session-runtime-models-rest.cjs").run();
+    await require("./session-memory-status-rest.cjs").run();
+    await require("./session-context-breakdown-rest.cjs").run();
+    await require("./group-chat-rest-smoke.cjs").run();
+  }
+  if (WHICH === "group-chat") {
+    await require("./group-chat-rest-smoke.cjs").run();
+    return;
   }
   if (WHICH === "external-fixtures") {
     await runExternalMutationFixtures();
@@ -299,6 +308,13 @@ async function main() {
       let r = await req("GET", `${B}/__api/config`);
       ok(r.status === 200 && r.json.config?.setupCompletedAt === 0,
         `config GET fresh -> ${r.status}, setupCompletedAt=${r.json.config?.setupCompletedAt}`);
+      ok(r.json.config?.browserUse?.enabled === true && r.json.config.browserUse.browser === "chrome",
+        "Browser Use defaults are projected through config REST");
+      const browserUse = { enabled: false, browser: "chrome", headless: true, isolated: false };
+      r = await req("PUT", `${B}/__api/config`, { browserUse });
+      ok(r.status === 200 && JSON.stringify(r.json.config?.browserUse) === JSON.stringify(browserUse), "Browser Use settings saved");
+      r = await req("GET", `${B}/__api/config`);
+      ok(JSON.stringify(r.json.config?.browserUse) === JSON.stringify(browserUse), "Browser Use settings persisted");
       // SetupOverlay 的盖章路径：PUT 局部字段 → 数值 round-trip 持久化。
       const STAMP = 1750000000000;
       r = await req("PUT", `${B}/__api/config`, { setupCompletedAt: STAMP });
@@ -976,6 +992,7 @@ async function main() {
           // 明确投影 supported:false，证明 REST 层没有按 backend id 特判。
           const def = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}/definition?backend=${backend}`);
           const mem = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}/memories?backend=${backend}&cursor=0&limit=1`);
+          const memoryImport = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}/memory-import?backend=${backend}`);
           const tx = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}/transcripts?backend=${backend}&cursor=0&limit=1`);
           const tools = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}/tools?backend=${backend}`);
           const retiredBrowser = await req("GET", `${B}/__api/agents/${encodeURIComponent(aid)}/browser?backend=${backend}`);
@@ -984,6 +1001,8 @@ async function main() {
             `${backend} persistent definition -> supported:false`);
           ok(mem.status === 200 && mem.json.memories?.supported === false,
             `${backend} persistent memory -> supported:false`);
+          ok(memoryImport.status === 200 && memoryImport.json.memoryImport?.supported === false,
+            `${backend} Codex memory import -> supported:false`);
           ok(tx.status === 200 && tx.json.transcripts?.supported === false,
             `${backend} persistent transcripts -> supported:false`);
           ok(tools.status === 200 && tools.json.tools?.supported === false,
@@ -1265,6 +1284,10 @@ async function main() {
           `  ${key} -> ${(secs || []).map((x) => `${x.backend}:${x.supported ? x.items.length : x.reason || "unsupported"}`).join(", ")}`,
         );
       }
+      ok(s?.groupArtifacts && typeof s.groupArtifacts.supported === "boolean" && Array.isArray(s.groupArtifacts.items)
+        && s.groupArtifacts.items.every(item => item.groupId && item.backendId && item.agentId && item.attachment?.id
+          && typeof item.attachment.name === "string" && isNumeric(item.createdAt)),
+      "  group artifacts -> typed member attachment references (shared owner)");
       // 本机默认 loopback gateway URL → artifacts 的 openclaw 条目必须 supported
       //（_isLocalGateway 只看 URL 不看连通性，离线也成立）。
       const art = (s?.artifacts || []).find((x) => x.backend === "openclaw");

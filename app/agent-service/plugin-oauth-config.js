@@ -5,6 +5,9 @@ const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 const { PluginOAuthProviderRegistry } = require("./plugin-oauth-provider-registry");
 const { validGoogleWorkspaceProvider } = require("./plugin-google-workspace-oauth");
+const { isSlackMcpHost } = require("./plugin-slack-oauth");
+const { isZoomMcpHost, validZoomProviderConfig, verifyZoomPrincipal } = require("./plugin-zoom-oauth");
+const { isDropboxMcpHost } = require("./plugin-dropbox-oauth");
 const exact = (v, keys) => v && Object.getPrototypeOf(v) === Object.prototype
   && Object.keys(v).length === keys.length && keys.every(key => Object.hasOwn(v, key));
 const fail = () => { throw serviceError("PLUGIN_OAUTH_CONFIG_INVALID", "插件认证服务配置无效"); };
@@ -19,7 +22,7 @@ function privateRedirect(value) {
 
 // This private, user-managed file is outside every installed package. It only
 // selects data for a built-in identity probe; it cannot load code or credentials.
-function loadPluginOAuthProviders(paths) {
+function loadPluginOAuthProviders(paths, { registeredZoomClientId = null } = {}) {
   const file = path.join(paths.pluginsDir, "oauth-providers.json");
   let fd;
   try {
@@ -42,17 +45,26 @@ function loadPluginOAuthProviders(paths) {
     const providers = config.providers.map(item => {
       const keys = ["id", "name", "serverUrl", "issuer", "audience", "authorizationEndpoint",
         "tokenEndpoint", "clientId", "scopes", "metadataUrls", "identity"];
-      if (!(exact(item, keys) || exact(item, [...keys, "redirectUrl"]))
+      const zoom = isZoomMcpHost(item?.serverUrl);
+      const permitted = zoom ? [...keys, "clientSecretRef", "redirectUrl"] : keys;
+      if (!(zoom ? exact(item, permitted)
+        : exact(item, permitted) || exact(item, [...permitted, "redirectUrl"]))
         || !exact(item.identity, ["url", "subjectField"])
         || !["sub", "id"].includes(item.identity.subjectField)
-        || !validGoogleWorkspaceProvider(item)) fail();
+        || !validGoogleWorkspaceProvider(item)
+        || !validZoomProviderConfig(item)
+        || isDropboxMcpHost(item.serverUrl)
+        // Slack requires a Shoggoth-owned, fixed registered app ID and its own
+        // token/identity contract. A private JSON file cannot supply either
+        // authority while the frozen Codex client ID remains untrusted.
+        || isSlackMcpHost(item.serverUrl)) fail();
       const redirectUrl = item.redirectUrl === undefined ? null : privateRedirect(item.redirectUrl);
       const identityUrl = new URL(item.identity.url);
       if (identityUrl.protocol !== "https:" || identityUrl.username || identityUrl.password
         || identityUrl.hash || identityUrl.search) fail();
       const subjectField = item.identity.subjectField;
       return { ...item, redirectUrl, identityUrls: [identityUrl.href],
-        verifyPrincipal: async ({ accessToken, issuer, fetchImpl }) => {
+        ...(zoom ? { protocol: "zoom-mcp", verifyPrincipal: verifyZoomPrincipal } : { verifyPrincipal: async ({ accessToken, issuer, fetchImpl }) => {
           const response = await fetchImpl(identityUrl.href, { headers: {
             Authorization: `Bearer ${accessToken}`, Accept: "application/json" } });
           if (!response.ok) fail();
@@ -61,10 +73,10 @@ function loadPluginOAuthProviders(paths) {
           if (!((typeof subject === "string" && subject.length > 0 && subject.length <= 512
             && !/[\x00-\x1f\x7f]/u.test(subject)) || (Number.isSafeInteger(subject) && subject >= 0))) fail();
           return `oauth:${item.id}:${crypto.createHash("sha256").update(JSON.stringify([issuer, subject])).digest("hex")}`;
-        } };
+        } }) };
     });
     // Validate the complete registry without contacting the provider.
-    new PluginOAuthProviderRegistry({ providers });
+    new PluginOAuthProviderRegistry({ providers, registeredZoomClientId });
     return providers;
   } catch (error) { if (error.code === "PLUGIN_OAUTH_CONFIG_INVALID") throw error; fail(); }
   finally { if (fd !== undefined) fs.closeSync(fd); }

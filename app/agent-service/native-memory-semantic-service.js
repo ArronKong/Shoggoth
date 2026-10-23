@@ -2,7 +2,7 @@
 
 const { LocalEmbeddingService, bounded } = require("./local-embedding-service");
 const { hashText } = require("./e5-encoder");
-const { hasSecret, workspaceMemoryRef } = require("./memory-engine");
+const { hasSecret, workspaceMemoryRefs } = require("./memory-engine");
 const { SEMANTIC_MIN_COSINE } = require("./memory-semantic-ranking");
 
 // Owns disposable native recall indexes. Authoritative stores and access checks
@@ -68,12 +68,14 @@ class NativeMemorySemanticService {
     return job;
   }
   ensureMemory(profileId) {
+    if (this.engine.owner === "shoggoth-memory-core") return null;
     const stamp = this.engine.semanticStamp(profileId);
     return this.ensure({ profileId, domain: "memory", stamp,
       documents: () => this.engine.semanticDocuments(profileId),
       isCurrent: () => this.engine.opened && this.engine.semanticStamp(profileId) === stamp });
   }
   scheduleMemory(profileId) {
+    if (this.engine.owner === "shoggoth-memory-core") return;
     if (this.closed || this.blockedProfiles.has(profileId) || this.timers.has(profileId)) return;
     const timer = setTimeout(() => {
       this.timers.delete(profileId);
@@ -112,7 +114,7 @@ class NativeMemorySemanticService {
     const value = await this.query({ profileId: input.profileId, domain: "memory", job, query: input.query,
       filter: { now: this.engine.now(), scopes: input.scopes,
         maxSensitivity: input.maxSensitivity === "private" ? 1 : 0,
-        workspaceRef: workspaceMemoryRef(input.workspace) }, budgetMs });
+        workspaceRefs: workspaceMemoryRefs(input.workspace, "project") }, budgetMs });
     if (this.closed || this.blockedProfiles.has(input.profileId)
       || this.engine.semanticStamp(input.profileId) !== job?.stamp) return { status: "rebuilding", candidates: [] };
     const candidates = value.results.filter(row => row.score >= SEMANTIC_MIN_COSINE).flatMap(row => {
@@ -122,6 +124,7 @@ class NativeMemorySemanticService {
     return { status: value.status, candidates, stamp: job.stamp };
   }
   async searchMemory(input) {
+    if (this.engine.owner === "shoggoth-memory-core") return this.engine.searchMemory(input);
     const semantic = await this.memoryCandidates(input);
     return { ...this.engine.search({ ...input, semanticCandidates: semantic.candidates }),
       semantic: { status: semantic.status, modelId: "intfloat/multilingual-e5-small",

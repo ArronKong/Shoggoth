@@ -24,9 +24,11 @@ class PluginDependencyController {
     return { installation, release, component, pin: { installationId, componentId: selectedId,
       releaseDigest: installation.releaseDigest, descriptorDigest: component.descriptorDigest } };
   }
-  #disabled(context, expectedRevision) {
+  // A component without any pinned interpreter cannot have started, so its first
+  // pin needs no disable/drain. Replacing or revoking a pin still does.
+  #disabled(context, expectedRevision, firstPin = false) {
     if (context.installation.revision !== expectedRevision) fail("REVISION_CONFLICT");
-    if (context.installation.desiredState !== "disabled"
+    if ((context.installation.desiredState !== "disabled" && !firstPin)
       || this.store.hasPendingInstallationDisable(context.installation.installationId)) fail("DEPENDENCY_REQUIRES_DISABLE");
   }
   #receipt(value) {
@@ -51,7 +53,8 @@ class PluginDependencyController {
       || !["prepare", "revoke"].includes(input.action) || !id(input.operationId)
       || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) fail();
     const context = this.#context(input.installationId, input.componentId);
-    this.#disabled(context, input.expectedRevision);
+    this.#disabled(context, input.expectedRevision, input.action === "prepare"
+      && this.registry.queryState(context.pin).status === "missing");
     const preview = input.action === "prepare" ? this.registry.preview({ ...context.pin, executablePath: input.executablePath })
       : this.registry.queryState(context.pin);
     if (input.action === "revoke" && preview.expectedRevision < 1) fail("DEPENDENCY_PREPARATION_REQUIRED");
@@ -70,23 +73,26 @@ class PluginDependencyController {
     if (!pending || pending.expiresAt <= this.now()) fail("PLUGIN_CONSENT_EXPIRED");
     if (!input.approved) return { canceled: true, receipt: null };
     const { input: original, preview } = pending;
+    const firstPin = original.action === "prepare" && preview.expectedRevision === 0;
     const check = () => {
       const context = this.#context(original.installationId, original.componentId);
-      this.#disabled(context, original.expectedRevision);
+      this.#disabled(context, original.expectedRevision, firstPin);
       if (JSON.stringify(context) !== JSON.stringify(pending.context)) fail("REVISION_CONFLICT");
     };
-    check();
-    // Disabled installations have already revoked all Grants. Wait for the old
-    // process before changing the executable; no authorization survives it.
-    await this.drainInstallation(original.installationId);
-    try {
+    const apply = () => {
       check();
       const args = { ...pending.context.pin, expectedRevision: preview.expectedRevision,
         operationId: original.operationId, confirmed: true };
       const result = original.action === "prepare" ? this.registry.prepare({ ...args,
         executablePath: original.executablePath, previewDigest: preview.previewDigest }) : this.registry.revoke(args);
       return { canceled: false, receipt: this.#receipt(result) };
-    } finally { this.resumeInstallation(original.installationId); }
+    };
+    check();
+    if (firstPin) return apply();
+    // Disabled installations have already revoked all Grants. Wait for the old
+    // process before changing the executable; no authorization survives it.
+    await this.drainInstallation(original.installationId);
+    try { return apply(); } finally { this.resumeInstallation(original.installationId); }
   }
   clear() { this.#pending.clear(); }
 }

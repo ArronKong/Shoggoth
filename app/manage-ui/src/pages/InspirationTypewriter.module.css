@@ -32,22 +32,28 @@
   border-radius: var(--machine-radius);
   transform: translateX(1px);
 }
+/* Layered drop shadow: a tight contact edge, then a soft ambient falloff. */
 .chassis {
-  background: linear-gradient(180deg, #e6e5e1 60%, #c3c1ba 90%, #aeaca5 97%, #d7d5cf);
+  background: linear-gradient(180deg, #ebeae6 60%, #cfcdc6 90%, #bdbbb4 97%, #e0ded8);
   box-shadow: inset 1px 0 1px #ffffffcc,
-    6px 15px 15px light-dark(#4e4c4417, #0608044d),
-    12px 28px 34px light-dark(#4b483a3d, #03060280);
+    0 1px 1px light-dark(#4e4c440f, #0608044d),
+    4px 10px 12px -2px light-dark(#4e4c4414, #0608044d),
+    12px 30px 40px -6px light-dark(#4b483a3b, #03060280);
 }
+/* Slightly cleaner white with the same warm hue; the lower curve fades
+   softly into a faint, blurred bounce light instead of a grey band. */
 .housing {
   overflow: hidden;
   background:
-    radial-gradient(ellipse at 25% 0, #ffffff80 0, #ffffff39 30%, transparent 66%),
-    radial-gradient(ellipse at 50% 130%, #99978d2b, transparent 60%),
-    linear-gradient(112deg, #f5f4f0 0, #eeede9 46%, #deddd7 100%);
+    radial-gradient(ellipse at 25% 0, #ffffff8c 0, #ffffff40 30%, transparent 66%),
+    radial-gradient(ellipse at 50% 130%, #99978d21, transparent 60%),
+    linear-gradient(112deg, #f8f7f3 0, #f1f0ec 46%, #e4e3dd 100%);
   box-shadow: inset 2px 3px 4px #ffffff, inset 8px 1px 12px #ffffff94,
-    inset -7px -2px 11px #77746a30, inset 0 -9px 9px -6px #78756b7a,
+    inset 0 -1px 1.5px #ffffff40,
+    inset -7px -2px 11px #77746a29, inset 0 -16px 18px -10px #6f6c6352,
     inset 0 0 1px 1px #e0ded6;
 }
+/* Printed, not pasted: a hairline catch-light under the wordmark. */
 .branding {
   position: absolute;
   top: calc(var(--machine-height) * 189.85 / 228);
@@ -56,7 +62,10 @@
   width: 68px;
   height: 9.645px;
   transform: translateX(-50%);
+  opacity: .86;
+  filter: drop-shadow(0 .5px 0 #ffffffe6);
 }
+/* The screen well: a lighter upper wall and a crisper lower chamfer. */
 .displayFrame {
   position: absolute;
   inset: calc(var(--machine-height) * 82 / 228) 8.82353% auto 9.11765%;
@@ -65,10 +74,10 @@
   padding: 8px;
   border: 0;
   border-radius: 36px;
-  background: linear-gradient(180deg, #96948c 0, #d9d6cd 55%, #faf9f4 100%);
-  box-shadow: 0 -1px 2px #8f8d878f, 0 2px 2px #ffffff,
-    -3px 0 5px #aaa79c26, 3px 1px 4px #ffffff70,
-    inset 0 -2px 3px #ffffffb3;
+  background: linear-gradient(180deg, #a3a199 0, #d5d3ca 44%, #f2f1ec 78%, #fcfcf9 100%);
+  box-shadow: 0 -1px 1.5px #8f8d8770, 0 1.5px 1px #ffffff, 0 3px 5px #ffffffa6,
+    -3px 0 5px #aaa79c1f, 3px 1px 4px #ffffff70,
+    inset 0 -2px 3px #ffffffc4;
   color: #e7e8e2;
   font-family: inherit;
   font-size: 12px;
@@ -80,7 +89,7 @@
   cursor: text;
   pointer-events: auto;
 }
-.displayFrame:hover:not(:disabled) { background: linear-gradient(180deg, #96948c 0, #d9d6cd 55%, #faf9f4 100%); }
+.displayFrame:hover:not(:disabled) { background: linear-gradient(180deg, #a3a199 0, #d5d3ca 44%, #f2f1ec 78%, #fcfcf9 100%); }
 .displayFrame:disabled { cursor: wait; opacity: 1; }
 .displayFrame:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 5px; }
 .display {
@@ -92,11 +101,24 @@
   height: 100%;
   overflow: hidden;
   padding: 0 26px;
-  border: 1px solid #131613;
+  border: 1px solid #121513;
   border-radius: 28px;
-  background: linear-gradient(105deg, #232726 0, #1b201f 54%, #141817 100%);
-  box-shadow: inset 0 6px 8px #060807d9, inset 0 -1px 1px #535b504d,
+  background:
+    radial-gradient(130% 190% at 50% 50%, transparent 58%, #0000002e 100%),
+    linear-gradient(105deg, #202523 0, #181c1b 54%, #111413 100%);
+  box-shadow: inset 0 6px 8px #060807d9, inset 0 -1px 1px #5d665a59,
     inset 2px 0 4px #070a088c, 0 1px 1px #ffffff5e;
+}
+/* Cover glass: a soft glare from the upper left, under 8% white. */
+.display::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(55% 130% at 16% -38%, #ffffff14, transparent 72%),
+    linear-gradient(180deg, #ffffff0a 0, transparent 48%);
+  pointer-events: none;
 }
 .screenPrompt {
   display: flex;
@@ -114,8 +136,12 @@
 }
 .indicator img {
   position: absolute; left: -2px; top: -1px; display: block; width: 10px; height: 10px;
-  animation: indicator-breathe 3.2s cubic-bezier(.45, 0, .55, 1) infinite;
+  filter: drop-shadow(0 0 2.5px #ffe46b80);
+  /* Start at full glow, so the light eases down when typing stops. */
+  animation: indicator-breathe 3.2s cubic-bezier(.45, 0, .55, 1) -1.6s infinite;
 }
+/* While the screen types, the lamp holds steady like a busy device. */
+.screenPrompt:has([data-phase="typing"]) .indicator img { animation: none; opacity: 1; }
 .displayText {
   display: flex;
   justify-content: flex-end;
@@ -130,7 +156,9 @@
   height: 18px;
 }
 .displayValue { display: flex; align-items: center; flex: 0 0 auto; min-width: 100%; height: 18px; gap: 3px; }
-.displayGlyphs { display: block; line-height: 18px; transform: translateY(.25px); }
+/* Emissive glyphs: a soft phosphor bloom keeps the copy crisp. */
+.displayGlyphs { display: block; line-height: 18px; transform: translateY(.25px); text-shadow: 0 0 8px #f2f4ea4d; }
+.displayGlyphs [data-phase="leaving"] { opacity: 0; transition: opacity 180ms ease-in; }
 .ideaCount {
   display: flex;
   align-items: center;
@@ -140,7 +168,12 @@
   font-size: inherit;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 8px #f2f4ea40;
+  overflow: clip;
+  overflow-clip-margin: 6px;
 }
+.countValue { display: block; }
+.countValue[data-tick] { animation: count-tick 420ms cubic-bezier(.2, .8, .3, 1) both; }
 .ideaCount[lang="zh-CN"] { font-family: inherit; }
 .cursor {
   display: block;
@@ -149,9 +182,12 @@
   width: 1px;
   border-radius: 2px;
   background: #ecede5;
+  box-shadow: 0 0 4px #ecede58c;
   opacity: .75;
   animation: cursor 1.2s steps(1) infinite;
 }
+/* A caret stays lit while keys are landing and blinks only at rest. */
+.displayValue:has([data-phase="typing"]) .cursor { animation: none; }
 .paperWindow {
   position: relative;
   left: -1px;
@@ -163,8 +199,25 @@
   clip-path: inset(0 -40px -40px);
 }
 .paperWindow > [data-paper] { border-top-left-radius: 0; border-top-right-radius: 0; }
+/* Feed slot: the sheet darkens where it leaves the rollers. It travels with
+   the sheet, so the flying copy (outside this window) never carries it. */
+.paperWindow > [data-paper]::before {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 auto;
+  /* The first --paper-overlap pixels sit under the housing edge. */
+  height: calc(var(--paper-overlap) + 30px);
+  background: linear-gradient(180deg,
+    light-dark(#37342c1f, #0000004d) var(--paper-overlap),
+    light-dark(#37342c0e, #00000024) calc(var(--paper-overlap) + 4px),
+    light-dark(#37342c05, #0000000d) calc(var(--paper-overlap) + 15px), transparent);
+  pointer-events: none;
+}
 @keyframes cursor { 50% { opacity: 0; } }
 @keyframes indicator-breathe { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+@keyframes count-tick { from { opacity: 0; transform: translateY(14px); } 45% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
-  .cursor, .indicator img { animation: none; }
+  .cursor, .indicator img, .countValue[data-tick] { animation: none; }
+  .displayGlyphs [data-phase="leaving"] { transition: none; }
 }

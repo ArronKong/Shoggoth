@@ -96,7 +96,8 @@ class DeepSeekHarnessRuntimePool {
     try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
     const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
     const permissionPolicy = normalizeDeepSeekHarnessPermissionPolicy(options.permissionPolicy);
-    const policyFingerprint = deepSeekHarnessPermissionFingerprint(permissionPolicy);
+    const workspaceExecutionVersion = require("./workspace-execution-tools").workspaceAutoExecution(options.executionContract) ? 1 : null;
+    const policyFingerprint = JSON.stringify([deepSeekHarnessPermissionFingerprint(permissionPolicy), workspaceExecutionVersion]);
     if (this.blockedProfiles.has(id)) {
       return Promise.reject(poolError(
         "DEEPSEEK_HARNESS_RUNTIME_CLEANUP_INCOMPLETE",
@@ -177,6 +178,7 @@ class DeepSeekHarnessRuntimePool {
       runtimeAccountId: accountId,
       runtimeBinding: binding,
       mcpExecutionRunId: executionRunId,
+      workspaceExecutionVersion,
       ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,

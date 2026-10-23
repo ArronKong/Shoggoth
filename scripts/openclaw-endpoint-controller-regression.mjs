@@ -645,8 +645,31 @@ try {
         providerRenames.push({ first, final, writes });
       }
 
+      const pendingActivations = [];
+      for (const code of ["catalog_pending", "response_lost"]) {
+        let requests = 0;
+        const notifications = [];
+        const pending = controllerModule.createOpenClawEndpointController("openclaw", {
+          ...deps,
+          listCustomEndpoints: async () => ({ supported: true, endpoints: [endpoint(["keep"])] }),
+          updateModelProvider: async (_backend, _id, _patch, operationId) => {
+            requests++;
+            return { operationId, status: requests === 1 ? "partial" : "applied", stage: "catalog", code,
+              activation: { kind: "gateway_restart", available: true } };
+          },
+        }, activation => notifications.push(activation.kind));
+        await pending.list();
+        const source = endpoint(["keep"]);
+        const session = shared.createEndpointMutationSession("openclaw", "edit", `activation-${code}`);
+        const first = await pending.save({ ...source, baseUrl: "https://changed.test/v1" }, session, source);
+        const afterFirst = [...notifications];
+        const final = await pending.retry(session);
+        pendingActivations.push({ code, first, final, afterFirst, notifications });
+      }
+
       return {
         calls,
+        pendingActivations,
         createFirst,
         createRetry,
         activations,
@@ -685,6 +708,14 @@ try {
       };
     });
 
+    for (const sample of result.pendingActivations) {
+      assert.equal(sample.first.status, "partial", "an activation hint must not turn a pending catalog into success");
+      assert.equal(sample.first.recovery.locked, true);
+      assert.deepEqual(sample.afterFirst, sample.code === "catalog_pending" ? ["gateway_restart"] : [],
+        "only an acknowledged save with a pending catalog emits the restart hint");
+      assert.equal(sample.final.status, "applied");
+      assert.deepEqual(sample.notifications, ["gateway_restart"], "the same activation is emitted once across recovery");
+    }
     for (const rename of result.providerRenames) {
       assert.equal(rename.final.status, "applied");
       assert.equal(rename.final.sync, "synced");
@@ -853,6 +884,191 @@ try {
       edit: result.edit,
       clear: result.clear,
     }), /sk-(?:must-never-leak|another-secret|replace-secret|supplement-only)/);
+    const managed = await page.evaluate(async () => {
+      const { createOpenClawEndpointController } = await import("/src/pages/models/openclaw-endpoint-controller.ts");
+      const samples = [];
+      for (const kind of ["create", "edit"]) {
+        for (const loseAck of [false, true]) {
+          const root = `managed-${kind}-${loseAck ? "lost" : "normal"}`;
+          const calls = [], effects = [], receipts = new Map();
+          let dropped = false;
+          let current = kind === "edit" ? {
+            id: "managed", name: "managed", baseUrl: "https://fixture.test/v1",
+            model: "keep", models: ["keep", "old"], api: "openai-completions", hasApiKey: true,
+          } : null;
+          const snapshot = () => ({ supported: true,
+            endpoints: current ? [{ ...current, models: [...current.models] }] : [],
+            form: { singleModelMutations: true, batchModelSelection: true },
+          });
+          const applyOnce = (operationId, identity, mutate) => {
+            const previous = receipts.get(operationId);
+            if (previous) {
+              if (previous.identity !== identity) throw new Error("operation_identity_changed");
+              return previous.result;
+            }
+            mutate();
+            effects.push(operationId);
+            const result = { operationId, status: "applied", stage: "commit", receiptIdentityVerified: true };
+            receipts.set(operationId, { identity, result });
+            return result;
+          };
+          const controller = createOpenClawEndpointController("openclaw", {
+            listCustomEndpoints: async () => snapshot(),
+            validateCustomEndpoint: async () => ({ ok: true, reachable: true, models: [], message: "" }),
+            addModelConfig: async (_backend, spec, operationId) => {
+              const safe = { providerMode: spec.providerMode, providerKey: spec.providerKey,
+                modelId: spec.model.id, secretSubmitted: Boolean(spec.apiKey) };
+              calls.push({ kind: "add", operationId, ...safe });
+              const result = applyOnce(operationId, JSON.stringify(safe), () => {
+                if (spec.providerMode === "new") current = {
+                  id: spec.providerKey, name: spec.providerKey, baseUrl: spec.baseUrl,
+                  api: spec.api, model: spec.model.id, models: [spec.model.id], hasApiKey: Boolean(spec.apiKey),
+                };
+                else if (!current.models.includes(spec.model.id)) current.models.push(spec.model.id);
+              });
+              if (loseAck && operationId === `${root}:add:0` && !dropped) {
+                dropped = true;
+                throw { code: "response_lost", stage: "request" };
+              }
+              return result;
+            },
+            applyModelBatch: async () => { throw new Error("managed_batch_must_not_run"); },
+            updateModelProvider: async () => { throw new Error("unexpected_provider_update"); },
+            removeModelProvider: async () => { throw new Error("unexpected_provider_delete"); },
+            revealModelProviderKey: async () => ({ apiKey: null }),
+            removeModelConfig: async (_backend, id, model, operationId) => {
+              calls.push({ kind: "delete", operationId, providerKey: id, modelId: model });
+              return applyOnce(operationId, JSON.stringify([id, model]), () => {
+                current.models = current.models.filter(value => value !== model);
+              });
+            },
+          });
+          const loaded = await controller.list();
+          const source = loaded.endpoints[0];
+          const input = { id: "managed", name: "managed", baseUrl: "https://fixture.test/v1",
+            api: "openai-completions", model: kind === "create" ? "one" : "keep",
+            models: kind === "create" ? ["one", "two", "three"] : ["keep", "one", "two"],
+            ...(kind === "create" ? { apiKey: "fixture-private-key" } : {}),
+          };
+          const session = { rootOperationId: root, kind };
+          const first = await controller.save(input, session, source);
+          const callsBeforeRetry = calls.map(call => ({ ...call }));
+          // Neither a public readback nor caller mutation can change a pending plan.
+          input.models.splice(0, input.models.length, "foreign");
+          if (source) source.models.splice(0, source.models.length, "foreign-source");
+          let retry = null, afterObservationLocked = null;
+          if (loseAck) {
+            try { await controller.retry(session); retry = { locked: false }; }
+            catch (error) { retry = { locked: error.message === "model_original_operation_pending" }; }
+            const { confirmModelOperationTerminal } = await import("/src/pages/models/model-operation-recovery.ts");
+            const original = `${root}:add:0`;
+            if (!await confirmModelOperationTerminal({ version: 1, backendId: "openclaw", providerKey: "managed",
+              operationId: original, status: "applied", stage: "commit", terminal: true })) throw new Error("original fixture receipt missing");
+            try { await controller.retry(session); afterObservationLocked = false; }
+            catch (error) { afterObservationLocked = error.message === "model_original_operation_pending"; }
+          }
+          samples.push({ kind, loseAck, root, first, retry, afterObservationLocked, callsBeforeRetry, calls, effects,
+            final: snapshot().endpoints[0] });
+        }
+      }
+      return samples;
+    });
+    assert.equal(managed.length, 4);
+    for (const sample of managed) {
+      const expected = sample.loseAck ? (sample.kind === "create" ? ["one", "two"] : ["keep", "old", "one"])
+        : sample.kind === "create" ? ["one", "two", "three"] : ["keep", "one", "two"];
+      assert.deepEqual(sample.final.models, expected);
+      const adds = sample.calls.filter(call => call.kind === "add");
+      const expectedAdds = sample.kind === "create" ? [
+        { kind: "add", operationId: `${sample.root}:provider`, providerMode: "new", providerKey: "managed", modelId: "one", secretSubmitted: true },
+        { kind: "add", operationId: `${sample.root}:add:0`, providerMode: "existing", providerKey: "managed", modelId: "two", secretSubmitted: false },
+        { kind: "add", operationId: `${sample.root}:add:1`, providerMode: "existing", providerKey: "managed", modelId: "three", secretSubmitted: false },
+      ] : [
+        { kind: "add", operationId: `${sample.root}:add:0`, providerMode: "existing", providerKey: "managed", modelId: "one", secretSubmitted: false },
+        { kind: "add", operationId: `${sample.root}:add:1`, providerMode: "existing", providerKey: "managed", modelId: "two", secretSubmitted: false },
+      ];
+      if (sample.loseAck) {
+        assert.equal(sample.first.status, "partial");
+        assert.equal(sample.first.recovery.locked, true);
+        assert.equal(sample.callsBeforeRetry.some(call => call.operationId.endsWith(":add:1") || call.kind === "delete"), false,
+          "an unknown add must stop later additions and removals");
+        const unknownIndex = expectedAdds.findIndex(call => call.operationId.endsWith(":add:0"));
+        expectedAdds.splice(unknownIndex + 1);
+        assert.equal(sample.retry.locked, true);
+        assert.equal(sample.afterObservationLocked, true);
+        assert.deepEqual(sample.calls, sample.callsBeforeRetry, "unknown managed writes never replay the frozen plan");
+      } else {
+        assert.equal(sample.first.status, "applied");
+        assert.equal(sample.first.sync, "synced");
+      }
+      assert.deepEqual(adds, expectedAdds,
+        "each managed model uses the original single-model operation and secret remains only in provider creation");
+      assert.equal(new Set(sample.effects).size, sample.effects.length, "unknown ACK recovery must not repeat a write");
+      assert.deepEqual(sample.calls.filter(call => call.kind === "delete"), sample.kind === "edit" && !sample.loseAck ? [
+        { kind: "delete", operationId: `${sample.root}:delete:0`, providerKey: "managed", modelId: "old" },
+      ] : []);
+    }
+    assert.doesNotMatch(JSON.stringify(managed), /fixture-private-key|foreign-source/);
+    console.log("openclaw managed single-model controller regression: PASS (4 cases)");
+    // Monitored (recovery panel active) edits: a definitive server answer must be
+    // settled against the original operation so a rejected or unjournaled step can
+    // never leave the endpoint locked forever; a lost response stays locked.
+    const settled = await page.evaluate(async () => {
+      const { createOpenClawEndpointController } = await import("/src/pages/models/openclaw-endpoint-controller.ts");
+      const { ApiError } = await import("/src/api/client.ts");
+      const recovery = await import("/src/pages/models/model-operation-recovery.ts");
+      recovery.beginModelOperationRecoveryRead("openclaw");
+      await recovery.acceptModelOperationRecoveryRead({ version: 1, backendId: "openclaw", operations: [] });
+      const endpoint = (id) => ({ id, name: id, baseUrl: "https://fixture.test/v1", model: "keep", models: ["keep"],
+        api: "openai-completions", hasApiKey: true });
+      const observed = [];
+      const receipt = (operationId, providerKey, code) => ({ version: 1, backendId: "openclaw", operationId, providerKey,
+        status: "failed", stage: "preflight", code, terminal: true });
+      const make = (id, overrides) => createOpenClawEndpointController("openclaw", {
+        listCustomEndpoints: async () => ({ supported: true, endpoints: [endpoint(id)], form: { batchModelSelection: true } }),
+        validateCustomEndpoint: async () => ({ ok: true, reachable: true, models: [], message: "" }),
+        addModelConfig: async () => { throw new Error("unexpected_add"); },
+        applyModelBatch: async () => { throw new Error("unexpected_batch"); },
+        updateModelProvider: async () => { throw new Error("unexpected_update"); },
+        removeModelConfig: async () => { throw new Error("unexpected_delete"); },
+        removeModelProvider: async () => { throw new Error("unexpected_provider_delete"); },
+        revealModelProviderKey: async () => ({ apiKey: null }),
+        getModelChangeOperation: async (_backend, operationId, providerKey) => {
+          observed.push([operationId, providerKey]);
+          return receipt(operationId, providerKey, "provider_change_pending");
+        },
+        ...overrides,
+      });
+      const run = async (id, overrides, input) => {
+        const controller = make(id, overrides);
+        const loaded = await controller.list();
+        const outcome = await controller.save({ ...endpoint(id), ...input }, { rootOperationId: `settle-${id}`, kind: "edit" },
+          loaded.endpoints[0]);
+        return { status: outcome.status, locked: recovery.modelOperationRecoveryBlocks("openclaw", id),
+          retained: recovery.getModelOperationRecoverySnapshot("openclaw").operations
+            .filter((row) => row.providerKey === id).map((row) => [row.operationId, row.status]) };
+      };
+      const rejected = await run("rejected", {
+        updateModelProvider: async () => { throw new ApiError("pending", { status: 409, code: "provider_change_pending", stage: "recovery" }); },
+      }, { baseUrl: "https://changed.test/v1" });
+      const lost = await run("lost", {
+        updateModelProvider: async () => { throw new TypeError("Failed to fetch"); },
+      }, { baseUrl: "https://changed.test/v1" });
+      const blockedBatch = await run("blocked-batch", {
+        applyModelBatch: async (_backend, _items, operationId) => ({ operationId, status: "blocked", code: "config_write_conflict",
+          stage: "preflight", receiptIdentityVerified: true }),
+      }, { model: "keep", models: ["keep", "added"] });
+      return { rejected, lost, blockedBatch, observed };
+    });
+    assert.equal(settled.rejected.locked, false, "a 409 rejection is settled against its original operation and unlocks the endpoint");
+    assert.deepEqual(settled.rejected.retained, []);
+    assert.equal(settled.lost.locked, true, "a lost response keeps the original ID locked for the recovery panel");
+    assert.deepEqual(settled.lost.retained, [["settle-lost:provider", "unconfirmed"]]);
+    assert.equal(settled.blockedBatch.locked, false, "an unjournaled blocked batch settles and does not lock the endpoint");
+    assert.deepEqual(settled.observed, [
+      ["settle-rejected:provider", "rejected"], ["settle-blocked-batch:selection", "blocked-batch"],
+    ], "only definitive server answers are observed, each with the exact original identity");
+    console.log("openclaw monitored endpoint settle regression: PASS (3 cases)");
     assert.deepEqual(pageErrors, []);
     console.log("openclaw endpoint controller regression: PASS");
   }

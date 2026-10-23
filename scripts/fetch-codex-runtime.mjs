@@ -36,16 +36,60 @@ const expectedPackageDirectories = [
   "bin",
   "codex-path",
   "codex-resources",
+  "codex-resources/voice",
+  "codex-resources/voice/bin",
+  "codex-resources/voice/lib",
+  "codex-resources/voice/licenses",
+  "codex-resources/voice/plugins",
   "codex-resources/zsh",
-  "codex-resources/zsh/bin",
+  "codex-resources/zsh/bin"
 ];
 const expectedPackageExecutables = [
   "bin/codex",
   "bin/codex-code-mode-host",
   "codex-path/rg",
-  "codex-resources/zsh/bin/zsh",
+  "codex-resources/voice/bin/codex-voice-host",
+  "codex-resources/voice/lib/libffi.8.dylib",
+  "codex-resources/voice/lib/libgio-2.0.0.dylib",
+  "codex-resources/voice/lib/libglib-2.0.0.dylib",
+  "codex-resources/voice/lib/libgmodule-2.0.0.dylib",
+  "codex-resources/voice/lib/libgobject-2.0.0.dylib",
+  "codex-resources/voice/lib/libgstapp-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstaudio-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstbase-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstnet-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstpbutils-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstreamer-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstrtp-1.0.0.dylib",
+  "codex-resources/voice/lib/libgsttag-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstvideo-1.0.0.dylib",
+  "codex-resources/voice/lib/libintl.8.dylib",
+  "codex-resources/voice/lib/libopus.0.dylib",
+  "codex-resources/voice/lib/libpcre2-8.0.dylib",
+  "codex-resources/voice/lib/libz.1.dylib",
+  "codex-resources/voice/plugins/libgstapp.dylib",
+  "codex-resources/voice/plugins/libgstaudioconvert.dylib",
+  "codex-resources/voice/plugins/libgstaudioresample.dylib",
+  "codex-resources/voice/plugins/libgstcoreelements.dylib",
+  "codex-resources/voice/plugins/libgstopus.dylib",
+  "codex-resources/voice/plugins/libgstrtp.dylib",
+  "codex-resources/voice/plugins/libgstrtpmanager.dylib",
+  "codex-resources/zsh/bin/zsh"
 ];
-const expectedPackageRegularFiles = ["codex-package.json"];
+const expectedPackageRegularFiles = [
+  "codex-package.json",
+  "codex-resources/voice/NOTICE.md",
+  "codex-resources/voice/licenses/LGPL-2.1.txt",
+  "codex-resources/voice/licenses/Opus.txt",
+  "codex-resources/voice/licenses/PCRE2.md",
+  "codex-resources/voice/licenses/libffi.txt",
+  "codex-resources/voice/licenses/proxy-libintl.txt",
+  "codex-resources/voice/licenses/sljit.txt",
+  "codex-resources/voice/licenses/zlib.txt",
+  "codex-resources/voice/manifest.json",
+  "codex-resources/voice/runtime.json",
+  "codex-resources/voice/sources.json"
+];
 
 function runtimeError(platform, field, message) {
   return new Error(`[${platform}] ${field}: ${message}`);

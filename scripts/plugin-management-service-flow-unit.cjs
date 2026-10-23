@@ -314,14 +314,14 @@ async function main() {
       expectedRevision: legacy.installation.revision, operationId: "legacy-management-uninstall" });
     const bundledBefore = await backend.listBundledPlugins();
     if (bundledBefore.items.length > 0) {
-      assert.equal(bundledBefore.items.find(item => item.id === "chatcut").installedReleaseDigest, null);
-      const bundledSource = { kind: "bundled", packageId: "chatcut" };
+      assert.equal(bundledBefore.items.find(item => item.id === "github").installedReleaseDigest, null);
+      const bundledSource = { kind: "bundled", packageId: "github" };
       const bundledPreview = await backend.previewPluginInstall(bundledSource);
       const bundledInstall = await backend.installPlugin({ source: bundledSource,
         previewDigest: bundledPreview.previewDigest, expectedRevision: bundledPreview.expectedRevision,
         operationId: "management-bundled-install" });
       assert.equal(bundledInstall.installation.desiredState, "enabled");
-      assert.equal((await backend.listBundledPlugins()).items.find(item => item.id === "chatcut")
+      assert.equal((await backend.listBundledPlugins()).items.find(item => item.id === "github")
         .installedReleaseDigest, bundledPreview.previewDigest);
     } else {
       assert.deepEqual(bundledBefore.items, []);

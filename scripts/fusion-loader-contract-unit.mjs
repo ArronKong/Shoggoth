@@ -126,9 +126,10 @@ const checks = [
   ["loader color inherits from its current surface", /fill:\s*var\(--fusion-loader-color,\s*currentColor\)/.test(styles)],
   ["gallery imports FusionLoader", /import FusionLoader from "\.\.\/components\/FusionLoader"/.test(gallery)],
   ["gallery renders only both fusion loader sizes", /data-gallery="fusion-loader"/.test(gallery) && !/data-gallery="dot-loader"/.test(gallery) && /<FusionLoader size="sm" label=\{t\("common\.loading"\)\}/.test(gallery) && /<FusionLoader label=\{t\("componentsGallery\.fusionLoaderLabel"\)\}/.test(gallery)],
-  ["chat uses the small fusion loader in the agent list and first-byte state", !/DotLoader/.test(chat) && (chat.match(/<FusionLoader(?:\s+size="sm")?/g) || []).length === 2 && (chat.match(/size="sm"/g) || []).length >= 2],
-  ["first-byte chat loader announces thinking without visible copy", /<FusionLoader size="sm" ariaLabel=\{t\("chat\.liveStatus\.running"\)\} \/>/.test(chat)],
-  ["agent-list thinking loader inherits pure black", /FusionLoader 双球/.test(chatStyles) && /\.chat-thinking-dots\s*\{\s*color:\s*#000\s*;/.test(chatStyles)],
+  // Agent / 群聊列表只显示逐字文案；消息首字节等待仍使用 FusionLoader。
+  ["chat keeps the small fusion loader only in the first-byte state", !/DotLoader/.test(chat) && (chat.match(/<FusionLoader(?:\s+size="sm")?/g) || []).length === 1],
+  ["first-byte chat loader announces its status without visible copy", /<FusionLoader size="sm" ariaLabel=\{t\("chat\.liveStatus\.running"\)\} \/>/.test(chat)],
+  ["agent-list no longer includes the fusion loader", !/chat-thinking-dots/.test(chat) && !/chat-thinking-dots/.test(chatStyles)],
   ["model menu uses the small fusion loader", !/DotLoader/.test(modelMenu) && /<FusionLoader size="sm" label=\{t\("chat\.loadingModels"\)\}/.test(modelMenu)],
   ["activity feed uses the small fusion loader", !/DotLoader/.test(activityFeed) && /<FusionLoader size="sm" label=\{t\("common\.loading"\)\}/.test(activityFeed)],
   ["tasks page uses the medium fusion loader", !/DotLoader/.test(tasksPage) && /<FusionLoader size="md" label=\{t\("common\.loading"\)\}/.test(tasksPage)],

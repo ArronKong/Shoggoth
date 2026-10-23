@@ -2,6 +2,11 @@
 
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
+const { slackDispatchToolAccess } = require("./plugin-slack-access-policy");
+const { SOURCE_IDENTITY: CLOUDFLARE_SOURCE, cloudflareToolAccess } =
+  require("./plugin-cloudflare-access-policy");
+const { ENDPOINT: FIGMA_DESKTOP_ENDPOINT,
+  isFigmaDesktopComponent } = require("../core/figma-desktop-mcp");
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const TOOL = /^plugin:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}$/u;
@@ -27,8 +32,9 @@ class PluginMcpConsent {
     if (input.action === "connect") {
       const result = this.manager.component(input.installationId, input.componentId);
       if (result.installation.revision !== input.expectedRevision) fail("REVISION_CONFLICT");
-      if (result.component.transport !== "stdio") fail("CONNECTION_AUTH_REQUIRED");
-      this.manager.planner.planStdio(result.input); // validation only; no process
+      if (result.component.transport === "stdio") {
+        this.manager.planner.planStdio(result.input); // validation only; no process
+      } else if (!isFigmaDesktopComponent(result)) fail("CONNECTION_AUTH_REQUIRED");
       const binding = this.store.listGlobalBindings().find(item =>
         item.installationId === input.installationId && item.componentId === input.componentId);
       return { ...result, profile, binding };
@@ -48,6 +54,20 @@ class PluginMcpConsent {
       || tool.catalogRevision !== input.catalogRevision) fail("TOOL_CONTRACT_CHANGED");
     const grant = this.store.getGrant(binding.bindingId, tool.toolIdentity);
     if ((grant?.revision || 0) !== input.expectedRevision) fail("REVISION_CONFLICT");
+    if (installation.sourceIdentity === "bundled:slack") {
+      const scopes = typeof this.manager.slackScopes === "function"
+        ? this.manager.slackScopes(connection?.principalIdentity) : null;
+      const access = slackDispatchToolAccess({ installation, binding }, tool.downstreamName, scopes);
+      if (!access.allowed || (access.requiresEachCall && input.approvalMode !== "each-call")) {
+        fail("CAPABILITY_FORBIDDEN");
+      }
+    }
+    if (installation.sourceIdentity === CLOUDFLARE_SOURCE) {
+      const access = cloudflareToolAccess({ installation, connection }, tool.downstreamName);
+      if (!access.allowed || (access.requiresEachCall && input.approvalMode !== "each-call")) {
+        fail("CAPABILITY_FORBIDDEN");
+      }
+    }
     return { profile, installation, binding, connection, tool, grant };
   }
 
@@ -90,18 +110,25 @@ class PluginMcpConsent {
     const { input } = pending;
     const current = this.#context(input);
     if (fingerprint(current) !== pending.fence) fail("REVISION_CONFLICT");
+    if (input.action === "connect" && isFigmaDesktopComponent(current)) {
+      await this.manager.probeFigmaDesktop(current.input);
+      if (fingerprint(this.#context(input)) !== pending.fence) fail("REVISION_CONFLICT");
+    }
     const kind = input.action === "connect" ? "mcp-connect" : "grant-allow";
     const operation = this.store.performManagementOperation({ operationId: input.operationId,
       kind, fingerprint: fingerprint(input), apply: () => {
         let binding = current.binding;
         if (input.action === "connect") {
+          const endpointIdentity = isFigmaDesktopComponent(current)
+            ? FIGMA_DESKTOP_ENDPOINT : `stdio:${current.component.descriptorDigest}`;
           const existing = binding && this.store.getConnection(binding.connectionId);
-          const connectionId = existing?.endpointIdentity === `stdio:${current.component.descriptorDigest}`
+          const connectionId = existing?.endpointIdentity === endpointIdentity
             ? existing.connectionId : fingerprint(["local-connection", "all-agents",
-              input.installationId, input.componentId, current.component.descriptorDigest]);
+              input.installationId, input.componentId, current.component.descriptorDigest,
+              endpointIdentity]);
           let connection = this.store.getConnection(connectionId) || this.store.createConnection({
             connectionId, installationId: input.installationId, componentId: input.componentId,
-            endpointIdentity: `stdio:${current.component.descriptorDigest}` });
+            endpointIdentity });
           if (connection.state !== "ready") connection = this.store.setConnectionIdentity({
             connectionId, principalIdentity: `local:${process.getuid?.() ?? "user"}`,
             state: "ready", expectedRevision: connection.revision });
@@ -126,7 +153,8 @@ class PluginMcpConsent {
     return { canceled: false, receipt: operation.result };
   }
 
-  async discover({ profileId, bindingId }) {
+  async discover({ profileId, bindingId }, { assertCurrent = null } = {}) {
+    if (assertCurrent !== null && typeof assertCurrent !== "function") fail();
     const profile = this.productStore.getAgentProfile(profileId);
     const binding = this.store.getBinding(bindingId);
     if (!profile?.enabled || !binding?.enabled
@@ -135,24 +163,31 @@ class PluginMcpConsent {
       || binding.componentKind !== "mcp-server") fail("PLUGIN_BINDING_INVALID");
     const installation = this.store.getInstallation(binding.installationId);
     const connection = this.store.getConnection(binding.connectionId);
-    const handle = await this.manager.acquire({ installation, binding, connection });
-    try {
+    const checkpoint = () => {
       if (!this.productStore.getAgentProfile(profileId)?.enabled
-        || JSON.stringify(this.store.getBinding(bindingId)) !== JSON.stringify(binding)
+        || !connection || JSON.stringify(this.store.getBinding(bindingId)) !== JSON.stringify(binding)
         || JSON.stringify(this.store.getConnection(connection.connectionId)) !== JSON.stringify(connection)
-        || JSON.stringify(this.store.getInstallation(installation.installationId)) !== JSON.stringify(installation)
-        || this.store.hasPendingInstallationDisable(installation.installationId)) fail("CONNECTION_IDENTITY_CHANGED");
-      const snapshot = await this.registry.refresh({ installation, connection, client: handle });
-      // Archive/disconnect during tools/list cannot publish a usable result.
-      if (!this.productStore.getAgentProfile(profileId)?.enabled
-        || JSON.stringify(this.store.getBinding(bindingId)) !== JSON.stringify(binding)
-        || JSON.stringify(this.store.getConnection(connection.connectionId)) !== JSON.stringify(connection)
-        || JSON.stringify(this.store.getInstallation(installation.installationId)) !== JSON.stringify(installation)
-        || this.store.hasPendingInstallationDisable(installation.installationId)) {
-        this.registry.invalidate(connection.connectionId);
-        fail("CONNECTION_IDENTITY_CHANGED");
+        || JSON.stringify(this.store.getInstallation(binding.installationId)) !== JSON.stringify(installation)
+        || this.store.hasPendingInstallationDisable(binding.installationId)) fail("CONNECTION_IDENTITY_CHANGED");
+      if (assertCurrent !== null) {
+        const current = assertCurrent();
+        if (current === false || (current && typeof current.then === "function")) fail("CONNECTION_IDENTITY_CHANGED");
       }
+    };
+    checkpoint();
+    const handle = await this.manager.acquire({ installation, binding, connection });
+    let snapshot;
+    try {
+      checkpoint();
+      snapshot = await this.registry.refresh({ installation, connection, client: handle,
+        assertCurrent: checkpoint });
+      checkpoint();
       return { profileId, bindingId, catalogRevision: snapshot.catalogRevision };
+    } catch (error) {
+      // A different discovery may already own the current slot. Revoke only
+      // the exact catalog this invocation published, never its successor.
+      if (snapshot) this.registry.invalidate(connection.connectionId, snapshot.catalogRevision);
+      throw error;
     } finally { await handle.release(); }
   }
 

@@ -17,7 +17,7 @@ const contentCode = compile('inspiration-content.ts');
 const mediaCode = compile('inspiration-media.ts'), editorCode = compile('InspirationMedia.tsx'), previewCode = compile('InspirationMediaPreview.tsx');
 
 async function fixture(options = {}) {
-  const state = { attachments: [], busy: false, uploads: [], fail: false, tracksStopped: 0, recorders: [], permission: null, microphoneRequests: 0, mediaRequests: 0, durationDecoders: 0, timers: new Map(), players: [], observers: new Set(), visibilityListeners: new Set(), opened: 0 };
+  const state = { attachments: [], busy: false, uploads: [], fail: false, tracksStopped: 0, recorders: [], permission: null, microphoneRequests: 0, mediaRequests: 0, durationDecoders: 0, timers: new Map(), players: [], observers: new Set(), visibilityListeners: new Set(), opened: 0, reveals: [], revealFailure: false, errors: [] };
   const document = { hidden: false,
     addEventListener(type, listener) { if (type === 'visibilitychange') state.visibilityListeners.add(listener); },
     removeEventListener(type, listener) { if (type === 'visibilitychange') state.visibilityListeners.delete(listener); },
@@ -60,6 +60,8 @@ async function fixture(options = {}) {
   } : require(name) });
   const preview = { exports: {} }, editor = { exports: {} }, content = { exports: {} };
   const localRequire = name => name === '../components/Field' ? { TextArea: React.forwardRef((props, ref) => React.createElement('textarea', { ...props, ref })) }
+    : name === '../api/client' ? { revealAttachment: async (name, src) => { state.reveals.push({ name, src }); if (state.revealFailure) throw Error('Finder unavailable'); } }
+    : name === '../components/ui' ? { useToast: () => ({ error: message => state.errors.push(message) }) }
     : name === './inspiration-content' ? content.exports : name.endsWith('.css') ? {} : name.endsWith('.svg') ? name
     : name === './InspirationMediaPreview' ? preview.exports
     : name === './inspiration-media' ? media.exports : name === 'react-i18next' ? { useTranslation: () => ({ t: key => key }) } : require(name);
@@ -225,9 +227,10 @@ const png = (size = 12) => new File([Buffer.concat([Buffer.from('89504e470d0a1a0
   await f.click('inspiration.media.remove'); assert.equal(f.state.attachments.length, 2);
   await f.pick([new File(['<svg/>'], 'x.svg', { type: 'image/svg+xml' })]);
   assert.equal(f.state.attachments.length, 3);
-  assert.equal(f.state.attachments[2].mimeType, 'application/octet-stream', 'unknown types are opaque downloads');
-  assert.equal(f.renderer.root.findAllByType('a').find(node => node.props.download === 'x.svg').props.href,
-    `/__api/inspirations/media?id=${f.state.attachments[2].id}`);
+  assert.equal(f.state.attachments[2].mimeType, 'application/octet-stream', 'unknown types remain opaque files');
+  const file = f.renderer.root.findAllByType('button').find(node => node.props.title === 'chat.artifactsRevealInFolder');
+  await act(async () => { await file.props.onClick(); await flush(); });
+  assert.deepEqual(f.state.reveals, [{ name: 'x.svg', src: `/__api/inspirations/media?id=${f.state.attachments[2].id}` }]);
   act(() => f.renderer.unmount());
 }
 {
@@ -243,10 +246,17 @@ const png = (size = 12) => new File([Buffer.concat([Buffer.from('89504e470d0a1a0
   assert.equal(f.state.attachments[0].mimeType, 'text/markdown');
   assert.equal(f.renderer.root.findAllByType('img').length, 0, 'documents are filename rows, without image previews');
   for (const name of ['说明.md', 'Plan.docx', 'Deck.pptx']) {
-    const row = f.renderer.root.findAllByType('a').find(node => node.props.download === name);
+    const row = f.renderer.root.findAllByType('button').find(node => node.props.title === 'chat.artifactsRevealInFolder'
+      && node.findAllByType('span').some(child => child.props.title === name));
     assert.equal(row.findByType('svg').props.strokeWidth, '1');
     assert.ok(row.findAllByType('span').some(node => node.props.title === name));
+    await act(async () => { row.props.onClick(); await flush(); });
+    assert.deepEqual(f.state.reveals.at(-1), { name, src: `/__api/inspirations/media?id=${f.state.attachments.find(item => item.name === name).id}` });
   }
+  f.state.revealFailure = true;
+  await act(async () => { f.renderer.root.findAllByType('button').find(node => node.props.title === 'chat.artifactsRevealInFolder').props.onClick(); await flush(); });
+  assert.deepEqual(f.state.errors, ['chat.artifactsRevealFailed']);
+  assert.equal(f.renderer.root.findAllByType('a').filter(node => node.props.download).length, 0);
   const textParts = () => f.renderer.root.findAllByType('textarea');
   assert.equal(textParts().filter(node => node.props['data-file-gap']).length, 2, 'only empty insertion points between documents collapse');
   const gap = textParts()[1];

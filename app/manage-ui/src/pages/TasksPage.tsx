@@ -1691,7 +1691,7 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
               {detail.body ? (
                 <div
                   className="md-body"
-                  dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(detail.body) }}
+                  dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(detail.body, true) }}
                 />
               ) : (
                 <p className="muted">{t("tasks.bodyEmpty")}</p>
@@ -1719,7 +1719,7 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
               <ModalSection title={detail.result ? t("tasks.resultLabel") : t("tasks.finalResultLabel")}>
                 <div
                   className="md-body"
-                  dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(detail.result || detail.latestSummary || "") }}
+                  dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(detail.result || detail.latestSummary || "", true) }}
                 />
               </ModalSection>
             )}
@@ -1743,7 +1743,7 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
                         <button className="btn-sm" onClick={() => openView(c.id)}>{t("tasks.diagnosticsOpenTask")}</button>
                       </div>
                       {c.result || c.latestSummary ? (
-                        <div className="md-body" dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(c.result || c.latestSummary || "") }} />
+                        <div className="md-body" dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(c.result || c.latestSummary || "", true) }} />
                       ) : (
                         <p className="muted">{t("tasks.noChildResult")}</p>
                       )}

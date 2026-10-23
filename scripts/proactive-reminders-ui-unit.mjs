@@ -1,0 +1,22 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+const root = path.resolve(import.meta.dirname, '..');
+const require = createRequire(path.join(root, 'app/manage-ui/package.json'));
+const { build } = require('esbuild');
+const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'sg-proactive-ui-'));
+const output = path.join(root, '.artifacts/proactive-reminders'); fs.mkdirSync(output, { recursive: true });
+try {
+  await build({ entryPoints: [path.join(root, 'scripts/fixtures/proactive-reminders-ui.tsx')], bundle: true, format: 'esm', jsx: 'automatic',
+    define: { 'process.env.NODE_ENV': '"production"' }, loader: { '.woff2': 'dataurl', '.svg': 'dataurl', '.webp': 'dataurl' },
+    outfile: path.join(temp, 'fixture.js'), nodePaths: [path.join(root, 'app/manage-ui/node_modules')], logLevel: 'silent' });
+  fs.writeFileSync(path.join(temp, 'index.html'), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;width:100%}#root{display:flex;flex-direction:column}</style><div id="root"></div><script>window.addEventListener("error",e=>window.fixtureError=e.error?.stack||e.message);window.addEventListener("unhandledrejection",e=>window.fixtureError=String(e.reason));</script><script type="module" src="fixture.js"></script>');
+  const main = path.join(root, 'scripts/fixtures/proactive-reminders-electron.cjs');
+  const result = spawnSync(path.join(root, 'node_modules/.bin/electron'), [main, path.join(temp, 'index.html'), output], { encoding: 'utf8', timeout: 45000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' } });
+  process.stdout.write(result.stdout || ''); if (result.status !== 0) process.stderr.write(result.stderr || String(result.error));
+  assert.equal(result.status, 0, 'Proactive UI fixture must exit naturally with success'); assert.match(result.stdout, /"verified":true/u);
+  fs.writeFileSync(path.join(output, 'ui-result.json'), result.stdout);
+} finally { fs.rmSync(temp, { recursive: true, force: true }); }

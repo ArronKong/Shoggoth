@@ -311,7 +311,43 @@ async function testRunEventPaginationMustAdvance() {
   );
 }
 
+async function testDashboardPublicActivityAndTaskTitle() {
+  const active = run("run-live-detail", "running", { source: "cron", sourceId: "job-1" });
+  let jobProfile = PROFILE_ID;
+  const backend = backendWith(async (method) => {
+    if (method === "run.get") return { run: active };
+    if (method === "cron.job.get") return { job: { id: "job-1", profileId: jobProfile, name: "Daily report" } };
+    return eventsPage(active.id, [
+      event(active.id, 1, "text.delta", { delta: "Checking sources", itemId: "comment-1", private: "hidden-secret" }),
+      event(active.id, 2, "text", { text: "Checking sources", phase: "commentary", itemId: "comment-1" }),
+      event(active.id, 3, "tool.start", { toolCallId: "call-1", tool: { name: "web_search",
+        displayArgs: { activityTitle: "Find primary sources", query: "example" }, arguments: { token: "hidden-secret" } } }),
+      event(active.id, 4, "tool.update", { toolCallId: "call-1", delta: "2 sources found", tool: { name: "web_search" } }),
+      event(active.id, 5, "tool.result", { toolCallId: "call-1", tool: { name: "web_search", status: "failed", exitCode: 1,
+        resultSummary: "No network", durationMs: 25, rawOutput: "hidden-secret" } }),
+      event(active.id, 6, "plan", { plan: [{ step: "Write report", status: "inProgress", secret: "hidden-secret" }] }),
+    ]);
+  });
+  const detail = await backend.getDashboardRunDetail(active.id);
+  assert.equal(detail.title, "Daily report");
+  assert.equal(detail.runtime, "codex");
+  assert.equal(detail.events[0].delta, "Checking sources");
+  assert.equal(detail.events[1].phase, "commentary");
+  assert.equal(detail.events[1].segmentId, "comment-1");
+  assert.equal(detail.events[2].toolCallId, "call-1");
+  assert.equal(detail.events[2].tool.displayArgs.activityTitle, "Find primary sources");
+  assert.equal(detail.events[3].message, "2 sources found");
+  assert.equal(detail.events[4].tool.resultSummary, "No network");
+  assert.deepEqual(detail.events[5].plan, [{ content: "Write report", status: "in_progress" }]);
+  assert.ok(!JSON.stringify(detail).includes("hidden-secret"));
+  jobProfile = "another-profile";
+  const foreign = await backend.getDashboardRunDetail(active.id);
+  assert.equal(foreign.title, undefined, "A source from another Agent cannot name this run");
+  assert.equal(foreign.events.length, 6, "Missing source metadata must retain the Run activity");
+}
+
 const tests = [
+  testDashboardPublicActivityAndTaskTitle,
   testRunningWorkUsesAuthoritativeRunsAndProfileBinding,
   testPendingPromptProjectionIsSafeAndPersistent,
   testPendingPromptGapFallsBackWithoutInventingDetails,

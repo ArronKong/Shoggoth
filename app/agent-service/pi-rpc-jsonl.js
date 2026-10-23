@@ -3,7 +3,9 @@
 const { serviceError } = require("./security");
 
 const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024;
-const DEFAULT_MAX_STREAM_BYTES = 32 * 1024 * 1024;
+// Streaming peers may run for many turns. Consumed frames do not occupy the
+// decoder's buffer, so only an explicitly bounded caller gets a lifetime cap.
+const DEFAULT_MAX_STREAM_BYTES = null;
 
 function rpcError(code, message) {
   return serviceError(code, message);
@@ -24,8 +26,9 @@ class PiRpcJsonlDecoder {
     this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     this.maxStreamBytes = options.maxStreamBytes ?? DEFAULT_MAX_STREAM_BYTES;
     if (!Number.isSafeInteger(this.maxFrameBytes) || this.maxFrameBytes < 1024
-      || !Number.isSafeInteger(this.maxStreamBytes)
-      || this.maxStreamBytes < this.maxFrameBytes || this.maxStreamBytes > 256 * 1024 * 1024) {
+      || this.maxFrameBytes > 256 * 1024 * 1024
+      || (this.maxStreamBytes !== null && (!Number.isSafeInteger(this.maxStreamBytes)
+        || this.maxStreamBytes < this.maxFrameBytes || this.maxStreamBytes > 256 * 1024 * 1024))) {
       throw rpcError("PI_RPC_DECODER_OPTIONS_INVALID", "Pi RPC decoder limits are invalid");
     }
     this.buffer = Buffer.alloc(0);
@@ -37,8 +40,8 @@ class PiRpcJsonlDecoder {
   push(chunk) {
     if (this.finished) throw rpcError("PI_RPC_STREAM_CLOSED", "Pi RPC stream is closed");
     const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    this.totalBytes += incoming.length;
-    if (this.totalBytes > this.maxStreamBytes) {
+    if (this.maxStreamBytes !== null) this.totalBytes += incoming.length;
+    if (this.maxStreamBytes !== null && this.totalBytes > this.maxStreamBytes) {
       throw rpcError("PI_RPC_STREAM_TOO_LARGE", "Pi RPC stream exceeds its limit");
     }
     this.buffer = Buffer.concat([this.buffer, incoming]);

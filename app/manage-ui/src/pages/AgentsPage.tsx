@@ -13,12 +13,12 @@ import {
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
 import type {
-  AgentComputerState,
   DashboardArtifactItem,
   AgentDefinitionState,
   AgentTranscriptEvent,
   AgentTranscriptSession,
   AgentToolsState,
+  RuntimeStatus,
   ShoggothProviderSnapshot,
   UnifiedAgent,
   UnifiedAgentDetail,
@@ -31,10 +31,10 @@ import {
   deleteAgent,
   exportAgentDefinition,
   getAgent,
-  getAgentComputerState,
   getAgentDefinition,
   getAgentFile,
   getModelCatalog,
+  getRuntimeStatuses,
   getShoggothProviders,
   importAgentDefinition,
   listAgentArtifacts,
@@ -42,10 +42,9 @@ import {
   listCronJobs,
   listAgentTools,
   listAgentTranscripts,
-  openDesktopComputerScreenRecordingSettings,
   openPath,
+  revealPath,
   restoreAgentDefinition,
-  requestDesktopComputerPermissions,
   runCronJob,
   setAgentFile,
   setAgentToolPermission,
@@ -63,7 +62,7 @@ import BackendTabs from "../components/BackendTabs";
 import FilterTabs from "../components/FilterTabs";
 import { cronForceRunResumesPaused, useBackendCatalog, useBackendState } from "../lib/backends";
 import Modal, { ModalSection } from "../components/Modal";
-import { Field, Switch, TextInput } from "../components/Field";
+import { Field, Option, Select, Switch, TextInput } from "../components/Field";
 import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { useStickyState } from "../lib/useStickyState";
@@ -79,8 +78,10 @@ import AgentModelCards from "./agents/AgentModelCards";
 import EmojiField from "./agents/EmojiField";
 import AgentMemoryEditor from "./agents/AgentMemoryEditor";
 import { visibleAgentFiles } from "../lib/agentFiles";
+import { codexScheduleLabel } from "../lib/codexAutomationSchedule";
 import s from "./AgentsPage.module.css";
 
+const HeartbeatSettings = lazy(() => import("./agents/HeartbeatSettings"));
 const AgentInspirationPanel = lazy(() => import("./InspirationPage").then(module => ({ default: module.AgentInspirationPanel })));
 
 type Tab = "overview" | "setup" | "memory" | "history" | "tools" | "computer" | "cron" | "inspiration" | "artifacts";
@@ -116,6 +117,8 @@ function emptyCreateDraft() {
     name: "",
     workspace: "",
     model: "",
+    // Native only: "" keeps the built-in harness as the default runtime.
+    runtimeAccountId: "",
     cloneFromDefault: true,
     noSkills: false,
   };
@@ -181,7 +184,7 @@ export default function AgentsPage() {
   const [fileEditing, setFileEditing] = useState(false);
   const [fileReadOnly, setFileReadOnly] = useState(false);
   const fileOrigRef = useRef("");
-  const fileRevisionRef = useRef<number | undefined>(undefined);
+  const fileRevisionRef = useRef<number | string | undefined>(undefined);
   const fileTargetRef = useRef<string | null>(null);
   const fileRequestGuardRef = useRef<ReturnType<typeof createTargetRequestGuard> | null>(null);
   if (!fileRequestGuardRef.current) fileRequestGuardRef.current = createTargetRequestGuard();
@@ -198,8 +201,6 @@ export default function AgentsPage() {
   const [transcriptRevision, setTranscriptRevision] = useState(0);
   const [harnessLoadingMore, setHarnessLoadingMore] = useState(false);
   const [toolsState, setToolsState] = useState<AgentToolsState | null>(null);
-  const [computerState, setComputerState] = useState<AgentComputerState | null>(null);
-  const [computerPermissionBusy, setComputerPermissionBusy] = useState(false);
   const [shoggothProviderSnapshot, setShoggothProviderSnapshot] = useState<ShoggothProviderSnapshot | null>(null);
   const harnessImportRef = useRef<HTMLInputElement>(null);
 
@@ -216,6 +217,8 @@ export default function AgentsPage() {
   // create
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState(emptyCreateDraft);
+  // Connected local CLIs offered as the new Agent's default runtime.
+  const [createRuntimes, setCreateRuntimes] = useState<RuntimeStatus[]>([]);
   const [savingCreate, setSavingCreate] = useState(false);
   const createOperationRef = useRef<LifecycleRetryOperation | null>(null);
   const archiveOperationRef = useRef<LifecycleRetryOperation | null>(null);
@@ -284,7 +287,6 @@ export default function AgentsPage() {
     setTranscriptEventsCursor(0);
     setTranscriptEventsHasMore(false);
     setToolsState(null);
-    setComputerState(null);
     setShoggothProviderSnapshot(null);
     setAgentCron(null);
     setArtifacts(null);
@@ -435,17 +437,8 @@ export default function AgentsPage() {
         .then((value) => { if (alive) setToolsState(value); })
         .catch(() => { if (alive) setToolsState({ supported: true, registryRevision: "", revision: 1, tools: [] }); });
     }
-    if (hasAgentHarness && tab === "computer" && computerState === null) {
-      getAgentComputerState(backend, agentId)
-        .then((value) => { if (alive) setComputerState(value); })
-        .catch(() => { if (alive) setComputerState({
-          supported: true, available: false, reason: "unavailable",
-          driverVersion: null, contractVersion: null,
-          permissions: { accessibility: false, screenRecording: false }, sessions: [],
-        }); });
-    }
     return () => { alive = false; };
-  }, [tab, detail, backend, agentCron, artifacts, activeFile, hasAgentHarness, definition, transcriptSessions, toolsState, computerState]);
+  }, [tab, detail, backend, agentCron, artifacts, activeFile, hasAgentHarness, definition, transcriptSessions, toolsState]);
 
   useEffect(() => {
     const profileId = backend === "shoggoth" ? detail?.profile : undefined;
@@ -496,19 +489,12 @@ export default function AgentsPage() {
     setFileEditing(false);
     setFileLoading(true);
     setFileContent("");
-    if (hasAgentHarness && name === "MEMORY.md") {
-      // The embedded editor reads the complete, paginated memory authority.
-      // A missing/stale Markdown projection must not block manual repairs.
-      setFileReadOnly(true);
-      setFileLoading(false);
-      return;
-    }
     try {
       const f = await getAgentFile(backend, detail.id, name);
       if (!fileRequestGuard.isCurrent(ticket, target)) return;
       setFileContent(f.content || "");
       setFileReadOnly(f.readOnly === true);
-      fileRevisionRef.current = typeof f.revision === "number" ? f.revision : undefined;
+      fileRevisionRef.current = f.revision ?? undefined;
       fileOrigRef.current = f.content || "";
       fileTargetRef.current = target;
     } catch (e) {
@@ -544,6 +530,7 @@ export default function AgentsPage() {
       if (fileTargetRef.current !== target) return;
       fileOrigRef.current = nextContent;
       setFileEditing(false);
+      if (result?.fileRevision) fileRevisionRef.current = result.fileRevision;
       if (result?.definitionRevision) {
         fileRevisionRef.current = result.definitionRevision;
         setDetail((current) =>
@@ -732,41 +719,6 @@ export default function AgentsPage() {
     }
   };
 
-  const refreshComputerState = async () => {
-    if (!detail) return;
-    // The background service performs the operation; GUI permissions can have
-    // a different macOS attribution and must not overwrite its status.
-    setComputerState(await getAgentComputerState(backend, detail.id));
-  };
-
-  const grantComputerPermissions = async () => {
-    if (!detail || computerPermissionBusy) return;
-    setComputerPermissionBusy(true);
-    try {
-      await requestDesktopComputerPermissions();
-      const state = await getAgentComputerState(backend, detail.id);
-      setComputerState(state);
-      if (state.available && state.permissions.accessibility && state.permissions.screenRecording) {
-        toast.success(t("agents.computerPermissionGranted"));
-      } else {
-        toast.error(t("agents.computerPermissionIncomplete"));
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setComputerPermissionBusy(false);
-    }
-  };
-
-  const openComputerScreenSettings = async () => {
-    try {
-      await openDesktopComputerScreenRecordingSettings();
-      toast.success(t("agents.computerSettingsOpened"));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    }
-  };
-
   const overviewDirty =
     !!detail &&
     (form.name !== (detail.name || "") ||
@@ -861,6 +813,12 @@ export default function AgentsPage() {
     if (!canCreateAgent) return;
     createOperationRef.current = null;
     setCreateDraft(emptyCreateDraft());
+    setCreateRuntimes([]);
+    if (activeBackendDescriptor?.surfaces.runtimeBindings) {
+      // Without the list the dialog still offers the built-in harness.
+      void getRuntimeStatuses().then((items) => setCreateRuntimes(items.filter((runtime) => runtime.enabled
+        && runtime.releaseEnabled && runtime.installation === "available" && runtime.readiness !== "incompatible"))).catch(() => {});
+    }
     setCreating(true);
   };
 
@@ -877,6 +835,7 @@ export default function AgentsPage() {
         ? {
             name: createDraft.name.trim(),
             workspace: createDraft.workspace.trim() || undefined,
+            runtimeAccountId: createDraft.runtimeAccountId || undefined,
           }
         : backend === "openclaw"
         ? {
@@ -896,6 +855,9 @@ export default function AgentsPage() {
       });
       createOperationRef.current = null;
       toast.success(t("agents.created"));
+      if (created && typeof created === "object" && "runtimeSwitchFailed" in created) {
+        toast.error(t("agents.createRuntimeFailed"));
+      }
       setCreating(false);
       setCreateDraft(emptyCreateDraft());
       await doRefresh();
@@ -922,9 +884,10 @@ export default function AgentsPage() {
     }));
   };
 
-  const openHostPath = async (target: string) => {
+  const openHostPath = async (target: string, reveal = false) => {
     try {
-      await openPath(target);
+      if (reveal) await revealPath(target);
+      else await openPath(target);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     }
@@ -984,6 +947,7 @@ export default function AgentsPage() {
 
   // 已知 setup 文件的「作用」一句话（右上角文件名下方）；未知文件给通用描述。
   const fileDesc = (name: string): string => {
+    if (name === "MEMORY.md" && fileReadOnly) return t("agents.memoryGeneratedFileDescription");
     const key = fileDisplayName(name);
     return t(`agents.fileDesc.${key}`, { defaultValue: t("agents.fileDescDefault") });
   };
@@ -1831,9 +1795,10 @@ export default function AgentsPage() {
                           </button>
                         )}
                       </header>
-                      {hasAgentHarness && activeFile === "MEMORY.md" ? (
-                        <AgentMemoryEditor key={`${backend}:${detail.id}`} backendId={backend} agentId={detail.id} />
-                      ) : fileLoading ? (
+                      {hasAgentHarness && activeFile === "HEARTBEAT.md" && detail.profile && (
+                        <Suspense fallback={null}><HeartbeatSettings key={detail.profile} profileId={detail.profile} /></Suspense>
+                      )}
+                      {fileLoading ? (
                         <p className={s.dim}>{t("common.loading")}</p>
                       ) : fileEditing && !fileReadOnly ? (
                         <textarea
@@ -1857,7 +1822,7 @@ export default function AgentsPage() {
                           title={fileReadOnly ? t("agents.generatedReadOnly") : t("agents.clickToEdit")}
                           onClick={() => { if (!fileReadOnly) setFileEditing(true); }}
                         >
-                          {fileContent || <span className={s.dim}>{t("agents.emptyFile")}</span>}
+                          {fileContent || <span className={s.dim}>{t(fileReadOnly ? "agents.emptyReadOnlyFile" : "agents.emptyFile")}</span>}
                         </div>
                       )}
                     </>
@@ -1961,80 +1926,9 @@ export default function AgentsPage() {
               </div>
             )}
 
-            {detail && tab === "computer" && (
-              <div className={s.tabPane}>
-                <p className={s.paneNote}>{t("agents.computerExplain")}</p>
-                {computerState === null ? <p className={s.dim}>{t("common.loading")}</p> : (
-                  <>
-                    <div className={s.rowList}>
-                      <div className={s.row}>
-                        <span className={s.rowTitle}>{t("agents.computerDriver")}</span>
-                        <span className={computerState.available ? `${s.chip} ${s.chipOn}` : s.chip}>
-                          {computerState.available ? t("agents.computerAvailable") : t("agents.computerUnavailable")}
-                        </span>
-                        <span className={s.rowSpacer} />
-                        <span className={s.rowMeta}>
-                          {computerState.driverVersion ? `v${computerState.driverVersion}` : computerState.reason || "—"}
-                        </span>
-                      </div>
-                      <div className={s.row}>
-                        <span className={s.rowTitle}>{t("agents.computerAccessibility")}</span>
-                        <span className={computerState.permissions.accessibility ? `${s.chip} ${s.chipOn}` : s.chip}>
-                          {t(computerState.permissions.accessibility === null ? "agents.computerPermissionUnknown"
-                            : computerState.permissions.accessibility ? "agents.computerGranted" : "agents.computerNotGranted")}
-                        </span>
-                      </div>
-                      <div className={s.row}>
-                        <span className={s.rowTitle}>{t("agents.computerScreenRecording")}</span>
-                        <span className={computerState.permissions.screenRecording ? `${s.chip} ${s.chipOn}` : s.chip}>
-                          {t(computerState.permissions.screenRecording === null ? "agents.computerPermissionUnknown"
-                            : computerState.permissions.screenRecording ? "agents.computerGranted" : "agents.computerNotGranted")}
-                        </span>
-                      </div>
-                    </div>
-                    <div className={s.harnessActions}>
-                      <button
-                        type="button"
-                        className={s.pillBtn}
-                        disabled={computerPermissionBusy}
-                        onClick={() => void grantComputerPermissions()}
-                      >
-                        {computerPermissionBusy ? t("common.loading") : t("agents.computerGrantPermissions")}
-                      </button>
-                      <button type="button" className={s.pillBtnGhost} onClick={() => void openComputerScreenSettings()}>
-                        {t("agents.computerOpenScreenSettings")}
-                      </button>
-                      <button
-                        type="button"
-                        className={s.pillBtnGhost}
-                        onClick={() => void refreshComputerState().catch((error) => toast.error(error instanceof Error ? error.message : String(error)))}
-                      >
-                        {t("common.refresh")}
-                      </button>
-                    </div>
-                    <p className={s.paneNote}>{t("agents.computerPermissionNote")}</p>
-                    <h3>{t("agents.computerSessions")}</h3>
-                    {computerState.sessions.length === 0 ? <p className={s.dim}>{t("agents.computerSessionsEmpty")}</p>
-                      : <div className={s.rowList}>
-                        {computerState.sessions.map((session) => (
-                          <div key={session.id} className={s.row}>
-                            <span className={s.rowTitle}>{session.allowedApplications.join(", ")}</span>
-                            <span className={session.status === "ready" ? `${s.chip} ${s.chipOn}` : s.chip}>{session.status}</span>
-                            <span className={s.rowMono}>{session.workRunId}</span>
-                            <span className={s.rowSpacer} />
-                            <span className={s.rowMeta}>
-                              {t("agents.computerExpires", { time: new Date(session.expiresAt).toLocaleTimeString() })}
-                            </span>
-                          </div>
-                        ))}
-                      </div>}
-                  </>
-                )}
-              </div>
-            )}
-
             {detail && tab === "cron" && (
               <div className={s.tabPane}>
+                {detail.codexAutomationOwner && <p className={s.dim}>{t("codexAutomation.definitionNote")} <button type="button" className={s.pillBtnGhost} onClick={() => requestNavigation("/cron")}>{t("codexAutomation.manage")}</button></p>}
                 {agentCron === null ? (
                   <p className={s.dim}>{t("common.loading")}</p>
                 ) : agentCron.length === 0 ? (
@@ -2044,13 +1938,16 @@ export default function AgentsPage() {
                     {agentCron.map((j) => (
                       <div key={j.id} className={s.row}>
                         <span className={s.rowTitle}>{j.name}</span>
-                        <span className={s.rowMono}>{j.scheduleDisplay || j.schedule.kind}</span>
+                        <span className={s.rowMono}>{j.schedule.kind === "rrule" ? codexScheduleLabel(j.schedule, t) : j.scheduleDisplay || j.schedule.kind}</span>
                         <span className={j.enabled ? `${s.chip} ${s.chipOn}` : s.chip}>
                           {j.enabled ? t("agents.enabled") : t("agents.disabled")}
                         </span>
                         <span className={s.rowSpacer} />
-                        <button type="button" className={s.pillBtn} disabled={j.actions?.run === false} onClick={() => void runAgentCron(j)}>
-                          {t(runWillResumePaused(j) ? "cron.runAndEnable" : "agents.run")}
+                        <button type="button" className={s.pillBtn} disabled={j.origin !== "codex-desktop" && j.actions?.run === false} onClick={() => {
+                          if (j.origin === "codex-desktop") requestNavigation(`/cron?${new URLSearchParams({ backend: j.backendId, job: j.id, notification: crypto.randomUUID() })}`);
+                          else void runAgentCron(j);
+                        }}>
+                          {t(j.origin === "codex-desktop" ? "codexAutomation.manage" : runWillResumePaused(j) ? "cron.runAndEnable" : "agents.run")}
                         </button>
                         <button
                           type="button"
@@ -2096,13 +1993,13 @@ export default function AgentsPage() {
                 ) : (
                   <div className={s.rowList}>
                     {artifacts.items.map((f) => (
-                      // 点一行 = 用系统默认程序打开这个文件（同 workspace 行的 host 能力）。
+                      // 点一行 = 在 Finder 中定位产物文件。
                       <button
                         key={f.path}
                         type="button"
                         className={`${s.row} ${s.rowClickable}`}
-                        title={f.path}
-                        onClick={() => openHostPath(f.path)}
+                        title={`${t("chat.artifactsRevealInFolder")} · ${f.path}`}
+                        onClick={() => openHostPath(f.path, true)}
                       >
                         <span className={`${s.rowTitle} ${s.rowMonoTitle}`}>{f.name}</span>
                         <span className={s.chip}>{f.kind}</span>
@@ -2162,6 +2059,20 @@ export default function AgentsPage() {
                   : openclawWorkspacePlaceholder(createDraft.name)}
               />
             </Field>
+            {activeBackendDescriptor?.surfaces.runtimeBindings && (
+              <Field label={t("agents.defaultRuntime")} hint={t("agents.createRuntimeHint")}>
+                <Select
+                  title={t("agents.defaultRuntime")}
+                  value={createDraft.runtimeAccountId}
+                  onChange={(runtimeAccountId) => setCreateDraft({ ...createDraft, runtimeAccountId })}
+                >
+                  <Option value="">{t("agents.codexHarnessRuntime")}</Option>
+                  {createRuntimes.map((runtime) => (
+                    <Option key={runtime.runtimeAccountId} value={runtime.runtimeAccountId}>{runtime.name}</Option>
+                  ))}
+                </Select>
+              </Field>
+            )}
             {!hasAgentHarness && (
               <Field label={t("agents.modelOptional")} hint={t("agents.modelOptionalHint")}>
                 <TextInput

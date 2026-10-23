@@ -1,0 +1,194 @@
+import { execFile } from "node:child_process";
+import path from "node:path";
+import { promisify, types as utilTypes } from "node:util";
+import { formatErrorDetail } from "./error-detail.js";
+const execFileAsync = promisify(execFile);
+export const DEFAULT_PERMISSION_EXEC_TIMEOUT_MS = 30_000;
+export function formatPermissionErrorDetail(value) {
+    const formatted = formatErrorDetail(value);
+    return formatted.length > 400 ? `${formatted.slice(0, 399)}…` : formatted;
+}
+const MAX_CAUGHT_FAILURE_PROTOTYPES = 4;
+const primitiveString = String;
+const isUint8Array = utilTypes.isUint8Array;
+const Uint8ArrayIntrinsic = Uint8Array;
+const typedArrayPrototype = Object.getPrototypeOf(Uint8ArrayIntrinsic.prototype);
+const typedArrayBufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "buffer").get;
+const typedArrayByteOffsetGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteOffset").get;
+const typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteLength").get;
+const typedArraySet = Object.getOwnPropertyDescriptor(typedArrayPrototype, "set").value;
+const textDecoderDecode = TextDecoder.prototype.decode;
+const stderrDecoder = new TextDecoder("utf-8", {
+    fatal: false,
+    ignoreBOM: true,
+});
+const MAX_STDERR_BYTES = 1600;
+function isInspectableCaughtObject(value) {
+    if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+        return false;
+    }
+    try {
+        return !utilTypes.isProxy(value);
+    }
+    catch {
+        return false;
+    }
+}
+function dataProperty(value, name) {
+    let current = value;
+    for (let depth = 0; current !== null && depth < MAX_CAUGHT_FAILURE_PROTOTYPES; depth += 1) {
+        if (!isInspectableCaughtObject(current))
+            return undefined;
+        let descriptor;
+        try {
+            descriptor = Object.getOwnPropertyDescriptor(current, name);
+        }
+        catch {
+            return undefined;
+        }
+        if (descriptor) {
+            return Object.hasOwn(descriptor, "value") ? descriptor : undefined;
+        }
+        try {
+            current = Object.getPrototypeOf(current);
+        }
+        catch {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+/** Formats only caught permission-query failures without invoking user code. */
+export function formatCaughtPermissionFailure(error) {
+    const primitive = error !== null && (typeof error === "object" || typeof error === "function")
+        ? undefined
+        : primitiveString(error);
+    if (primitive !== undefined)
+        return formatBoundedCaughtDetail(primitive);
+    if (!isInspectableCaughtObject(error)) {
+        return "Uninspectable proxy failure";
+    }
+    const message = dataProperty(error, "message");
+    const name = dataProperty(error, "name");
+    const rawMessage = typeof message?.value === "string"
+        ? message.value : "";
+    const rawName = typeof name?.value === "string"
+        ? name.value : "";
+    const messageText = rawMessage.slice(0, 400);
+    const nameText = rawName.slice(0, 400);
+    const display = messageText
+        ? (nameText ? `${nameText}: ${messageText}` : messageText)
+        : nameText || (typeof error === "function" ? "Unknown function failure" : "Unknown object failure");
+    return formatBoundedCaughtDetail(display, rawMessage.length > messageText.length || rawName.length > nameText.length);
+}
+function formatBoundedCaughtDetail(value, alreadyTruncated = false) {
+    const inputWasTruncated = alreadyTruncated || value.length > 400;
+    const formatted = formatPermissionErrorDetail(value.slice(0, 400));
+    if (!inputWasTruncated || formatted.endsWith("…"))
+        return formatted;
+    return `${formatted.slice(0, 399)}…`;
+}
+function safeStderr(value) {
+    if (typeof value === "string")
+        return formatBoundedCaughtDetail(value);
+    try {
+        if (!isUint8Array(value))
+            return "";
+        const backing = Reflect.apply(typedArrayBufferGetter, value, []);
+        const byteOffset = Reflect.apply(typedArrayByteOffsetGetter, value, []);
+        const byteLength = Reflect.apply(typedArrayByteLengthGetter, value, []);
+        const copiedByteLength = byteLength < MAX_STDERR_BYTES
+            ? byteLength : MAX_STDERR_BYTES;
+        const source = new Uint8ArrayIntrinsic(backing, byteOffset, copiedByteLength);
+        const copy = new Uint8ArrayIntrinsic(copiedByteLength);
+        Reflect.apply(typedArraySet, copy, [source, 0]);
+        const decoded = Reflect.apply(textDecoderDecode, stderrDecoder, [copy]);
+        return formatBoundedCaughtDetail(decoded, byteLength > copiedByteLength);
+    }
+    catch {
+        return "";
+    }
+}
+function commandFailureFields(error) {
+    const killed = dataProperty(error, "killed");
+    const code = dataProperty(error, "code");
+    const signal = dataProperty(error, "signal");
+    const stderr = dataProperty(error, "stderr");
+    return {
+        found: !!(killed || code || signal || stderr),
+        timedOut: killed?.value === true && signal?.value === "SIGKILL",
+        exitCode: typeof code?.value === "number" ? code.value : null,
+        signal: typeof signal?.value === "string" ? signal.value : null,
+        stderr: stderr ? safeStderr(stderr.value) : "",
+    };
+}
+export class PermissionCommandError extends Error {
+    command;
+    durationMs;
+    timedOut;
+    exitCode;
+    signal;
+    stderr;
+    constructor(command, durationMs, cause, timeoutMs = DEFAULT_PERMISSION_EXEC_TIMEOUT_MS) {
+        const fields = commandFailureFields(cause);
+        super(fields.timedOut
+            ? `Windows permission inspection timed out after ${timeoutMs}ms`
+            : `Windows permission command ${formatPermissionErrorDetail(path.win32.basename(command))} failed (exit code ${fields.exitCode}, signal ${formatPermissionErrorDetail(fields.signal ?? "none")})`, { cause });
+        this.name = "PermissionCommandError";
+        this.command = command;
+        this.durationMs = Math.round(durationMs);
+        this.timedOut = fields.timedOut;
+        this.exitCode = fields.exitCode;
+        this.signal = fields.signal;
+        this.stderr = fields.stderr;
+    }
+}
+export function getPermissionCommandFailure(error, command, durationMs) {
+    if (isInspectableCaughtObject(error) && utilTypes.isNativeError(error)) {
+        const name = dataProperty(error, "name");
+        if (name?.value === "PermissionCommandError") {
+            const wrappedCommand = dataProperty(error, "command");
+            const wrappedDuration = dataProperty(error, "durationMs");
+            const wrappedTimedOut = dataProperty(error, "timedOut");
+            const wrappedExitCode = dataProperty(error, "exitCode");
+            const wrappedSignal = dataProperty(error, "signal");
+            const wrappedStderr = dataProperty(error, "stderr");
+            if (typeof wrappedCommand?.value === "string" &&
+                typeof wrappedDuration?.value === "number" &&
+                Number.isSafeInteger(wrappedDuration.value) && wrappedDuration.value >= 0 &&
+                typeof wrappedTimedOut?.value === "boolean" &&
+                wrappedExitCode && (wrappedExitCode.value === null || typeof wrappedExitCode.value === "number") &&
+                wrappedSignal && (wrappedSignal.value === null || typeof wrappedSignal.value === "string") &&
+                wrappedStderr) {
+                return {
+                    command: wrappedCommand.value,
+                    durationMs: wrappedDuration.value,
+                    timedOut: wrappedTimedOut.value,
+                    exitCode: wrappedExitCode.value,
+                    signal: wrappedSignal.value,
+                    stderr: safeStderr(wrappedStderr.value),
+                };
+            }
+        }
+    }
+    const fields = commandFailureFields(error);
+    if (!fields.found)
+        return undefined;
+    const { found: _found, ...detail } = fields;
+    return { command, durationMs: Math.round(durationMs), ...detail };
+}
+export async function executePermissionCommand(command, args, timeoutMs = DEFAULT_PERMISSION_EXEC_TIMEOUT_MS) {
+    const startedAt = performance.now();
+    try {
+        return (await execFileAsync(command, args, {
+            encoding: "utf8",
+            windowsHide: true,
+            maxBuffer: 1024 * 1024,
+            timeout: timeoutMs,
+            killSignal: "SIGKILL",
+        }));
+    }
+    catch (err) {
+        throw new PermissionCommandError(command, performance.now() - startedAt, err, timeoutMs);
+    }
+}

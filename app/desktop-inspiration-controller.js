@@ -164,9 +164,10 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
     window.setBounds(display().bounds); window.webContents.send(PREFIX + "geometry", geometry());
   } };
   screen.on("display-metrics-changed", onDisplayChange); screen.on("display-removed", onDisplayChange);
-  // Dedicated 14pt transparent white (90%) artwork, with an @2x representation for
-  // Retina. Keep it non-template so macOS preserves the requested color/alpha.
+  // Preserve the 14pt alpha mask and Retina artwork. macOS tints template images
+  // to match the menu bar's appearance, including light/dark changes at runtime.
   const image = nativeImage.createFromPath(path.join(__dirname, "assets/tray/shoggoth.png"));
+  if (process.platform === "darwin") image.setTemplateImage(true);
   tray = new Tray(image);
   tray.setToolTip(`Shoggoth · ${configured()}`);
   const openMainWindow = () => { hide(); showMainWindow(); };

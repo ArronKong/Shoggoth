@@ -1,6 +1,7 @@
 "use strict";
 
 const { validateChatServiceResult } = require("./chat-service-protocol");
+const { GREETING_LOCALES } = require("./agent-greeting");
 
 const AGENT_LIFECYCLE_METHODS = Object.freeze([
   "agent.create",
@@ -8,7 +9,9 @@ const AGENT_LIFECYCLE_METHODS = Object.freeze([
   "agent.archive",
   "agent.restore",
   "agent.lifecycle.list",
+  "agent.builtin.ensure",
 ]);
+const MAX_BUILTIN_ENSURE_IDS = 64;
 const AGENT_LIFECYCLE_METHOD_SET = new Set(AGENT_LIFECYCLE_METHODS);
 const LIFECYCLE_STATES = Object.freeze([
   "active", "updating", "provisioning", "archiving", "archive-repair", "archived", "restoring",
@@ -23,7 +26,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   AGENT_NOT_FOUND: "Agent 不存在",
   AGENT_NAME_CONFLICT: "当前后端已有同名 Agent",
   AGENT_PROFILE_CONFLICT: "Agent 设置已被其他操作更新",
-  AGENT_PROTECTED: "内置 Agent 不可归档",
+  AGENT_PROTECTED: "默认 Agent 不可归档",
   AGENT_ACTIVE_RUNS: "Agent 仍有待执行或运行中的任务",
   AGENT_OPERATION_BUSY: "Agent 正在执行另一个生命周期操作",
   AGENT_OPERATION_CONFLICT: "operationId 已用于其他 Agent 操作",
@@ -82,8 +85,18 @@ function validMutationEnvelope(params) {
     && Number.isSafeInteger(params.createdAt) && params.createdAt >= 0;
 }
 
+function validIdList(value) {
+  return Array.isArray(value) && value.length <= MAX_BUILTIN_ENSURE_IDS
+    && value.every((id) => validOpaqueId(id)) && new Set(value).size === value.length;
+}
+
 function validateAgentLifecycleParams(method, params) {
   if (!AGENT_LIFECYCLE_METHOD_SET.has(method)) throw protocolError("INVALID_PARAMS");
+  if (method === "agent.builtin.ensure") {
+    if (!exactObject(params, ["runtimeAccountIds", "locale"]) || !validIdList(params.runtimeAccountIds)
+      || !GREETING_LOCALES.includes(params.locale)) throw protocolError("INVALID_PARAMS");
+    return { runtimeAccountIds: [...params.runtimeAccountIds], locale: params.locale };
+  }
   if (method === "agent.lifecycle.list") {
     if (!exactObject(params, ["backendId"]) || typeof params.backendId !== "string"
       || !BACKEND_ID_PATTERN.test(params.backendId)) throw protocolError("INVALID_PARAMS");
@@ -126,6 +139,13 @@ function validateProfile(value) {
 
 function validateAgentLifecycleResult(method, result) {
   if (!AGENT_LIFECYCLE_METHOD_SET.has(method)) throw protocolError("AGENT_RESPONSE_INVALID");
+  if (method === "agent.builtin.ensure") {
+    if (!exactObject(result, ["createdProfileIds", "greetedProfileIds"])
+      || !validIdList(result.createdProfileIds) || !validIdList(result.greetedProfileIds)) {
+      throw protocolError("AGENT_RESPONSE_INVALID");
+    }
+    return { createdProfileIds: [...result.createdProfileIds], greetedProfileIds: [...result.greetedProfileIds] };
+  }
   if (method !== "agent.lifecycle.list") {
     if (!exactObject(result, ["profile"])) throw protocolError("AGENT_RESPONSE_INVALID");
     return { profile: validateProfile(result.profile) };

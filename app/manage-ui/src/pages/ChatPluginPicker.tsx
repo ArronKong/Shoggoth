@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getBundledPlugins, getPluginCatalogPage, type PluginCatalogItem } from "../api/client";
+import { useComposerPopupPosition } from "../lib/useComposerPopupPosition";
+import { IconPlugin, IconSearch } from "./chatIcons";
+import "./ChatModelMenu.css";
 import styles from "./ChatPluginPicker.module.css";
 
 export type ChatPluginSelection = { installationId: string; revision: number };
@@ -17,9 +20,12 @@ function readRecent(): string[] {
 }
 
 export default function ChatPluginPicker({ sessionKey, backendId, selected, onChange, onBrowse,
-  onSelectionValidity }: {
+  onSelectionValidity, selectionSupported = false, selectionChecking = false, onRetryReadiness }: {
   sessionKey: string | null;
   backendId: string;
+  selectionSupported?: boolean;
+  selectionChecking?: boolean;
+  onRetryReadiness?: () => void;
   selected: ChatPluginSelection[];
   onChange: (next: ChatPluginSelection[]) => void;
   onBrowse: (installationId?: string) => void;
@@ -39,11 +45,14 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
   const [recent, setRecent] = useState(readRecent);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const popupStyle = useComposerPopupPosition(open, rootRef, popupRef);
 
   useEffect(() => { setOpen(false); setQuery(""); }, [sessionKey, backendId]);
+  useEffect(() => { if (selectionSupported !== true) setOpen(false); }, [selectionSupported]);
   useEffect(() => {
-    if ((!open && selected.length === 0) || !sessionKey || backendId !== "shoggoth") return;
+    if ((!open && selected.length === 0) || !sessionKey || selectionSupported !== true) return;
     let canceled = false;
     setLoading(true); setError(false);
     void (async () => {
@@ -75,10 +84,10 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
       } finally { if (!canceled) setLoading(false); }
     })();
     return () => { canceled = true; };
-  }, [open, selected.length, sessionKey, backendId]);
+  }, [open, selected.length, sessionKey, backendId, selectionSupported]);
   useEffect(() => {
     if (!open) return;
-    searchRef.current?.focus();
+    searchRef.current?.focus({ preventScroll: true });
     const onPointer = (event: PointerEvent) => {
       if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false);
     };
@@ -96,7 +105,7 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
     return (ai < 0 ? 1000 : ai) - (bi < 0 ? 1000 : bi);
   }), [items, query, recent]);
   const byId = useMemo(() => new Map(items.map(item => [item.installationId, item])), [items]);
-  const catalogCurrent = catalogKey === `${backendId}\0${sessionKey}` && !loading && !error;
+  const catalogCurrent = selectionSupported === true && catalogKey === `${backendId}\0${sessionKey}` && !loading && !error;
   const staleSelection = catalogCurrent && selected.some(value => {
     const item = byId.get(value.installationId);
     return !item || item.revision !== value.revision || !ready(item);
@@ -123,12 +132,19 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
     if (event.key === "Escape" && open) { event.stopPropagation(); close(); }
   }}>
     <div className={styles.inline}>
-      <button ref={triggerRef} type="button" className={styles.trigger} aria-expanded={open}
-        aria-haspopup="dialog" disabled={!sessionKey || backendId !== "shoggoth"}
-        title={backendId === "shoggoth" ? t("chat.pluginPickerHint") : t("chat.pluginPickerHostPending")}
+      <button ref={triggerRef} type="button" className="chat-pill chat-pill--select chat-pill--icon-label chat-pill--plugin" aria-expanded={open}
+        aria-haspopup="dialog" disabled={!sessionKey || selectionSupported !== true}
+        title={selectionSupported === true ? t("chat.pluginPickerHint")
+          : t(selectionChecking ? "chat.pluginSelectionChecking" : "chat.pluginPickerHostPending")}
         onClick={() => setOpen(value => !value)}>
-        {t("chat.pluginPicker")}{selected.length ? ` · ${selected.length}` : ""}
+        <span className="chat-pill__icon" aria-hidden="true"><IconPlugin /></span>
+        <span className="chat-pill__label">{t("chat.pluginPicker")}{selected.length ? ` · ${selected.length}` : ""}</span>
       </button>
+      {sessionKey && selectionSupported !== true && onRetryReadiness && <button type="button"
+        className={styles.retry} disabled={selectionChecking} onClick={onRetryReadiness}
+        aria-label={t("chat.pluginSelectionRetry")} title={t("chat.pluginPickerHostPending")}>
+        {t(selectionChecking ? "chat.pluginSelectionChecking" : "chat.pluginSelectionRetry")}
+      </button>}
       {selected.map(value => {
         const item = byId.get(value.installationId);
         return <span className={styles.chip} key={value.installationId}>
@@ -139,13 +155,18 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
       })}
     </div>
     {staleSelection && <p className={styles.stale} role="alert">{t("chat.pluginSelectionStale")}</p>}
-    {open && <div className={styles.panel} role="dialog" aria-label={t("chat.pluginPickerTitle")}>
+    {open && <div ref={popupRef} className={`${styles.panel} chat-plugin-menu chat-composer-menu-surface`}
+      style={popupStyle} role="dialog" aria-label={t("chat.pluginPickerTitle")}>
       <div className={styles.heading}><strong>{t("chat.pluginPickerTitle")}</strong>
         <button type="button" className={styles.close} onClick={close} aria-label={t("common.close")}>×</button>
       </div>
       <p className={styles.hint}>{t("chat.pluginPickerHint")}</p>
-      <input ref={searchRef} type="search" className={styles.search} value={query}
-        onChange={event => setQuery(event.target.value)} placeholder={t("chat.pluginSearch")} />
+      <div className="model-menu__search-field">
+        <span className="model-menu__search-icon" aria-hidden="true"><IconSearch /></span>
+        <input ref={searchRef} type="search" className="model-menu__search" value={query}
+          aria-label={t("chat.pluginSearch")}
+          onChange={event => setQuery(event.target.value)} placeholder={t("chat.pluginSearch")} />
+      </div>
       {loading && <p className={styles.state} role="status">{t("plugins.loading")}</p>}
       {error && <p className={styles.state} role="status">{t("chat.pluginCatalogError")}</p>}
       {!loading && !error && <div className={styles.list}>
@@ -155,7 +176,8 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
           const icon = icons.get(item.installationId);
           const needsPermission = item.components.some(component => component.state === "permission_required");
           const needsConnection = item.components.some(component => component.state === "connection_required");
-          const canPrepare = needsPermission || needsConnection;
+          const needsSecret = item.components.some(component => component.state === "secret_required");
+          const canPrepare = needsPermission || needsConnection || needsSecret;
           return <div className={styles.itemRow} key={item.installationId}><label className={styles.item}>
             {icon ? <img src={`/__api/plugins/bundled-icon/${encodeURIComponent(icon)}`} alt="" />
               : <span className={styles.iconFallback} aria-hidden="true" />}
@@ -168,7 +190,8 @@ export default function ChatPluginPicker({ sessionKey, backendId, selected, onCh
                 })}${adapterGaps.has(item.installationId) ? ` · ${t("chat.pluginPartialGap")}` : ""}`
                   : needsPermission ? t("chat.pluginPermissionRequired")
                     : needsConnection ? t("chat.pluginConnectionRequired")
-                      : t("chat.pluginUnavailable")}</small></span>
+                      : needsSecret ? t("chat.pluginSecretRequired")
+                        : t("chat.pluginUnavailable")}</small></span>
             <input type="checkbox" checked={checked} disabled={!ready(item)}
               onChange={() => toggle(item)} />
           </label>{item.desiredState === "enabled" && !ready(item) && <button type="button"

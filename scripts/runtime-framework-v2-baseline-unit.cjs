@@ -40,6 +40,7 @@ const SUITES = Object.freeze([
   ["context-budget", "conversation-context-budget-unit.cjs", "Model windows, explicit 1M fallback and adaptive history projection"],
   ["context-budget-service", "runtime-context-budget-service-unit.cjs", "Model changes and native renewal preserve capacity without inheriting occupancy"],
   ["context-request-budget", "context-request-budget-unit.cjs", "Whole requests, complete tool bodies, durable summary fragments and window growth"],
+  ["context-breakdown", "context-breakdown-unit.cjs", "Per-reply composition recorded at compile time, strict DTO and cached snapshot reads"],
   ["context-window-handoff", "context-window-handoff-unit.cjs", "Destination capacity preflight, summary failures, source preservation and acceptance receipts"],
   ["manual-compaction", "runtime-manual-compaction-unit.cjs", "Runtime capability-gated explicit compaction lifecycle"],
   ["manual-compaction-service", "runtime-manual-compaction-service-unit.cjs", "Isolated Service compaction success, stale state and unsupported runtime"],

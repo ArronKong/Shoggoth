@@ -1,0 +1,489 @@
+var __addDisposableResource = (this && this.__addDisposableResource) || function (env, value, async) {
+    if (value !== null && value !== void 0) {
+        if (typeof value !== "object" && typeof value !== "function") throw new TypeError("Object expected.");
+        var dispose, inner;
+        if (async) {
+            if (!Symbol.asyncDispose) throw new TypeError("Symbol.asyncDispose is not defined.");
+            dispose = value[Symbol.asyncDispose];
+        }
+        if (dispose === void 0) {
+            if (!Symbol.dispose) throw new TypeError("Symbol.dispose is not defined.");
+            dispose = value[Symbol.dispose];
+            if (async) inner = dispose;
+        }
+        if (typeof dispose !== "function") throw new TypeError("Object not disposable.");
+        if (inner) dispose = function() { try { inner.call(this); } catch (e) { return Promise.reject(e); } };
+        env.stack.push({ value: value, dispose: dispose, async: async });
+    }
+    else if (async) {
+        env.stack.push({ async: true });
+    }
+    return value;
+};
+var __disposeResources = (this && this.__disposeResources) || (function (SuppressedError) {
+    return function (env) {
+        function fail(e) {
+            env.error = env.hasError ? new SuppressedError(e, env.error, "An error was suppressed during disposal.") : e;
+            env.hasError = true;
+        }
+        var r, s = 0;
+        function next() {
+            while (r = env.stack.pop()) {
+                try {
+                    if (!r.async && s === 1) return s = 0, env.stack.push(r), Promise.resolve().then(next);
+                    if (r.dispose) {
+                        var result = r.dispose.call(r.value);
+                        if (r.async) return s |= 2, Promise.resolve(result).then(next, function(e) { fail(e); return next(); });
+                    }
+                    else s |= 1;
+                }
+                catch (e) {
+                    fail(e);
+                }
+            }
+            if (s === 1) return env.hasError ? Promise.reject(env.error) : Promise.resolve();
+            if (env.hasError) throw env.error;
+        }
+        return next();
+    };
+})(typeof SuppressedError === "function" ? SuppressedError : function (error, suppressed, message) {
+    var e = new Error(message);
+    return e.name = "SuppressedError", e.error = error, e.suppressed = suppressed, e;
+});
+import { assertDarwinCreationAcl, assertPrivateCreationFile } from "./creation-boundary.js";
+import { requireNativeBinding } from "./native.js";
+import { syncFileBestEffortSync } from "./file-sync.js";
+import { randomUUID } from "node:crypto";
+import fs, {} from "node:fs";
+import path from "node:path";
+import { FsSafeError } from "./errors.js";
+import { assertSynchronousCallbackResult, isMutationAuthorityError } from "./mutation-authority.js";
+import { captureNativeFdClose } from "./native-binding.js";
+import { replayPinnedInput, writePinnedInput } from "./pinned-write-input.js";
+import { assertNativeCopyCompleted, createNativeCopyFile } from "./copy-file-input.js";
+import { assertStagedDirectoryCurrent, openStagedDirectory } from "./staged-directory.js";
+import { assertFinalSymlinkRejected } from "./root-symlink-policy.js";
+import { classifyNativeRenameFailure } from "./native-rename-outcome.js";
+import { createStagedFileReceipt, stagedFailure } from "./staged-file-settlement.js";
+import { noReplaceUnavailable, rememberNoReplaceUnavailable } from "./native-noreplace.js";
+import { isFsSafeNativeRequired } from "./native-config.js";
+export function assertNativeStaging(binding) {
+    if ([
+        binding.closeOwnedFd,
+        binding.createStagedFile,
+        binding.stagedFileMatches,
+        binding.removeStagedFile,
+        binding.renameReplace,
+        binding.renameNoReplace,
+    ].some((fn) => typeof fn !== "function")) {
+        throw new FsSafeError("helper-unavailable", "native retained-directory staging is unavailable");
+    }
+}
+function assertBasename(name, portable) {
+    if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\0") ||
+        (portable && /[\\:\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(name))) {
+        throw new FsSafeError("invalid-path", "publication requires one direct-child basename");
+    }
+}
+const NOT_PUBLISHED = Object.freeze({ status: "not-published" });
+class NativeStagedFile {
+    #owner;
+    #closeFd;
+    #assertBeforeMutation;
+    #private;
+    #verifyMode;
+    #state = { status: "open", publication: NOT_PUBLISHED };
+    #receipt;
+    #rejectFinalSymlink = false;
+    #unsupportedNoReplace;
+    #fallbackCleanup;
+    #fallbackCleanupError;
+    constructor(owner) {
+        const name = owner.name ?? `.fs-safe-${randomUUID()}.tmp`;
+        assertBasename(name, owner.portableNames !== false);
+        this.#closeFd = captureNativeFdClose(owner.binding);
+        this.#owner = { ...owner, name };
+        this.#assertBeforeMutation = owner.assertBeforeMutation;
+        this.#private = owner.permissionPolicy === "private-creation";
+        this.#verifyMode = owner.permissionPolicy !== undefined;
+    }
+    // Public staging supplies a Node parent; pinned writes supply a native parent.
+    // The supplied closer owns parentFd even on construction or preparation failure.
+    static async create(owner, input, maxBytes) {
+        let staged;
+        try {
+            staged = new NativeStagedFile(owner);
+        }
+        catch (error) {
+            try {
+                owner.closeParentFd(owner.parentFd);
+            }
+            catch (closeError) {
+                throw new AggregateError([error, closeError], "staged owner construction and close failed");
+            }
+            throw error;
+        }
+        await staged.#prepare(input, maxBytes);
+        return staged;
+    }
+    static async write(binding, parentFd, closeParentFd, directory, params, parentGuard, fallback) {
+        const env_1 = { stack: [], error: void 0, hasError: false };
+        try {
+            const exclusive = params.overwrite === false && params.input.kind === "buffer" && params.input.stageBeforePublish === false;
+            // This owner never escapes. Only the internal verifier borrows its fd;
+            // public descriptor methods remain await-free and cannot race disposal.
+            const staged = __addDisposableResource(env_1, await NativeStagedFile.create({
+                binding, parentFd, closeParentFd, directory, mode: params.mode, sync: params.sync,
+                // Public staging uses portable names; existing POSIX writes accept literal names.
+                portableNames: false, assertBeforeMutation: params.assertBeforeMutation,
+                name: exclusive ? params.basename : undefined, strictFileSync: params.strictFileSync,
+                permissionPolicy: params.private ? "private-creation" : params.verifyPosixMode === true ? "mode-only" : undefined,
+            }, params.input, params.maxBytes), true);
+            staged.#rejectFinalSymlink = params.rejectFinalSymlink === true;
+            if (params.input.kind === "file")
+                await params.input.verifySource();
+            if (exclusive) {
+                staged.#assertCurrent();
+                params.assertBeforeMutation?.();
+                if (staged.#verifyMode)
+                    staged.#assertCurrent();
+            }
+            let published;
+            try {
+                published = exclusive
+                    ? staged.#completePublication(params.basename, false, params.onPublished)
+                    : await staged.publish(params.basename, { overwrite: params.overwrite !== false }, params.onPublished);
+            }
+            catch (error) {
+                if (!staged.#unsupportedNoReplace || isFsSafeNativeRequired() ||
+                    (params.input.kind === "file" && params.input.clone === "always"))
+                    throw error;
+                // Remove only our identity-known stage before re-admitting the JS write.
+                // Keep its descriptor alive to replay a one-shot stream in bounded chunks.
+                staged.#fallbackCleanup = "failed";
+                let removed;
+                try {
+                    removed = binding.removeStagedFile(parentFd, staged.#owner.name, staged.#file());
+                    staged.#fallbackCleanup = removed;
+                }
+                catch (cleanupError) {
+                    staged.#fallbackCleanupError = { error: cleanupError };
+                    throw error;
+                }
+                if (removed !== "removed" && removed !== "name-absent")
+                    throw error;
+                rememberNoReplaceUnavailable(binding, parentFd, staged.#unsupportedNoReplace);
+                return await fallback(replayPinnedInput(staged.#file(), params.input));
+            }
+            const identity = published.staged.identity;
+            try {
+                await params.verifyPublished?.(staged.#file(), identity, parentGuard);
+            }
+            catch (error) {
+                if (params.overwrite === false && params.input.kind !== "file" && params.input.stageBeforePublish === true) {
+                    throw stagedFailure("file", error, { phase: "publish", publication: published });
+                }
+                throw error;
+            }
+            return { dev: identity.dev, ino: identity.ino };
+        }
+        catch (e_1) {
+            env_1.error = e_1;
+            env_1.hasError = true;
+        }
+        finally {
+            const result_1 = __disposeResources(env_1);
+            if (result_1)
+                await result_1;
+        }
+    }
+    get receipt() {
+        if (!this.#receipt) {
+            throw new FsSafeError("helper-failed", "staged file preparation is incomplete");
+        }
+        return this.#receipt;
+    }
+    #open() {
+        if (this.#state.status !== "open") {
+            throw new FsSafeError("helper-failed", "staged file is closed");
+        }
+        return this.#state;
+    }
+    #file() {
+        const state = this.#open();
+        if (state.fileFd === undefined) {
+            throw new FsSafeError("helper-failed", "staged file has not been created");
+        }
+        return state.fileFd;
+    }
+    #assertNamed(name, expectedMode) {
+        const fd = this.#file();
+        const stat = this.#owner.binding.stagedFileMatches(this.#owner.parentFd, name, fd)
+            ? fs.fstatSync(fd, { bigint: true }) : undefined;
+        if (!stat || stat.nlink !== 1n) {
+            throw new FsSafeError("path-mismatch", "staged entry no longer names the exclusive created file");
+        }
+        this.#assertPermissions(fd, stat, expectedMode);
+        return Number(stat.mode & 4095n);
+    }
+    #assertCurrent() {
+        if (this.#open().publication.status !== "not-published") {
+            throw new FsSafeError("helper-failed", "staged file publication has already been attempted");
+        }
+        assertStagedDirectoryCurrent(this.#owner.directory);
+        this.#assertNamed(this.#owner.name, 0o600);
+    }
+    #assertPermissions(fd, stat, expectedMode) {
+        if (this.#private)
+            assertPrivateCreationFile(stat, fd);
+        if (this.#verifyMode && Number(stat.mode & 4095n) !== expectedMode) {
+            throw new FsSafeError("insecure-permissions", "filesystem did not enforce the staged file mode");
+        }
+    }
+    #assertStagePermissions(fd) {
+        this.#assertPermissions(fd, fs.fstatSync(fd, { bigint: true }), 0o600);
+    }
+    async #prepare(input, maxBytes) {
+        try {
+            const mode = this.#owner.mode;
+            if (!Number.isInteger(mode) || mode < 0 || mode > 0o7777) {
+                throw new FsSafeError("invalid-path", "invalid staged file mode");
+            }
+            const fileSignal = input.kind === "file" && this.#verifyMode ? input.signal : undefined;
+            if (input.kind === "file" && this.#verifyMode) {
+                fileSignal?.throwIfAborted();
+                if (input.clone === "always") {
+                    throw new FsSafeError("helper-unavailable", "required cloning cannot verify staged permissions before copying");
+                }
+            }
+            assertStagedDirectoryCurrent(this.#owner.directory);
+            // The exclusive open performs no fallible post-open checks. Store its fd
+            // before every subsequent operation, including the first metadata read.
+            const state = this.#open();
+            if (this.#private)
+                assertDarwinCreationAcl(this.#owner.parentFd, "file");
+            this.#assertBeforeMutation?.();
+            if (this.#private)
+                assertDarwinCreationAcl(this.#owner.parentFd, "file");
+            // Native copying populates its new file before returning its descriptor.
+            const copied = input.kind === "file" && !this.#verifyMode
+                ? await createNativeCopyFile(this.#owner.binding, input, this.#owner.parentFd, this.#owner.name, maxBytes)
+                : undefined;
+            state.fileFd = copied?.fd;
+            if (state.fileFd === undefined) {
+                this.#assertBeforeMutation?.();
+                if (this.#private)
+                    assertDarwinCreationAcl(this.#owner.parentFd, "file");
+                state.fileFd = this.#owner.binding.createStagedFile(this.#owner.parentFd, this.#owner.name);
+            }
+            const fd = state.fileFd;
+            if (input.kind === "file")
+                assertNativeCopyCompleted(input, copied);
+            const assertBeforeChmod = this.#assertBeforeMutation;
+            const beforeChmodResult = assertBeforeChmod?.();
+            if (this.#private) {
+                assertSynchronousCallbackResult(beforeChmodResult, "assertBeforeMutation");
+                assertPrivateCreationFile(fs.fstatSync(fd, { bigint: true }), fd);
+            }
+            fs.fchmodSync(fd, 0o600);
+            // Some filesystems report successful chmod without enforcing its mode.
+            if (this.#verifyMode)
+                this.#assertStagePermissions(fd);
+            const assertBeforeMutation = this.#verifyMode ? () => {
+                assertSynchronousCallbackResult(this.#assertBeforeMutation?.(), "assertBeforeMutation");
+                fileSignal?.throwIfAborted();
+                this.#assertStagePermissions(fd);
+            } : this.#assertBeforeMutation;
+            if (!copied)
+                await writePinnedInput(fd, input, maxBytes, assertBeforeMutation);
+            if (this.#verifyMode)
+                this.#assertStagePermissions(fd);
+            if (this.#owner.sync !== false) {
+                if (this.#owner.strictFileSync)
+                    fs.fsyncSync(fd);
+                else
+                    syncFileBestEffortSync(fd);
+            }
+            const stat = fs.fstatSync(fd, { bigint: true });
+            this.#receipt = createStagedFileReceipt(this.#owner.directory, this.#owner.name, stat);
+            this.#assertCurrent();
+        }
+        catch (error) {
+            const { receipt: cleanup, error: cleanupError } = this.#finalize();
+            if (cleanupError) {
+                throw stagedFailure("file", new AggregateError([error, cleanupError], "preparation and cleanup failed"), { phase: "prepare", publication: cleanup.publication, cleanup });
+            }
+            if (cleanup.status === "preserved") {
+                throw stagedFailure("file", error, { phase: "prepare", publication: cleanup.publication, cleanup });
+            }
+            throw error;
+        }
+    }
+    // Keep public descriptor work await-free: each call completes its mutations
+    // before the next invocation, including closure and cached cleanup failures.
+    async assertCurrent() {
+        this.#assertCurrent();
+    }
+    async publish(basename, options, onPublished) {
+        const overwrite = options?.overwrite;
+        try {
+            const state = this.#open();
+            assertBasename(basename, this.#owner.portableNames !== false);
+            if (basename === this.#owner.name || typeof overwrite !== "boolean") {
+                throw new FsSafeError("invalid-path", "publication needs a distinct basename and explicit overwrite policy");
+            }
+            this.#assertCurrent();
+            assertFinalSymlinkRejected(path.join(this.#owner.directory.realPath, basename), this.#rejectFinalSymlink);
+            this.#assertBeforeMutation?.();
+            if (this.#assertBeforeMutation) {
+                this.#assertCurrent();
+                assertFinalSymlinkRejected(path.join(this.#owner.directory.realPath, basename), this.#rejectFinalSymlink);
+            }
+            try {
+                if (overwrite) {
+                    this.#owner.binding.renameReplace(this.#owner.parentFd, this.#owner.name, this.#owner.parentFd, basename);
+                }
+                else {
+                    this.#owner.binding.renameNoReplace(this.#owner.parentFd, this.#owner.name, this.#owner.parentFd, basename);
+                }
+            }
+            catch (error) {
+                // Record before inspecting metadata, whose getters can reenter cleanup.
+                state.publication = Object.freeze({ status: "indeterminate", basename, overwrite });
+                // Linux VFS and rename(2): unsupported flags return EINVAL; ENOSYS
+                // means no syscall. A regular file renamed to a distinct sibling cannot
+                // hit the directory-into-itself EINVAL case. Nothing was published.
+                const unavailable = !overwrite ? noReplaceUnavailable(error, "publication", true) : undefined;
+                if (unavailable && this.#state === state && state.status === "open") {
+                    state.publication = NOT_PUBLISHED;
+                    this.#unsupportedNoReplace = unavailable;
+                    throw unavailable;
+                }
+                // Only explicit pre-dispatch provenance can rule out a committed rename.
+                if (classifyNativeRenameFailure(error) === "uncommitted") {
+                    state.publication = NOT_PUBLISHED;
+                }
+                throw error;
+            }
+            return this.#completePublication(basename, overwrite, onPublished);
+        }
+        catch (error) {
+            if (isMutationAuthorityError(error))
+                throw error;
+            // Closure rejects further use, not the recorded outcome of an earlier publication.
+            const publication = this.#state.status === "closed"
+                ? this.#state.receipt.publication
+                : this.#state.publication;
+            throw stagedFailure("file", error, { phase: "publish", publication });
+        }
+    }
+    #completePublication(basename, overwrite, onPublished) {
+        // Record complete content before fallible post-publication verification.
+        const receipt = Object.freeze({ status: "published", staged: this.receipt, basename, overwrite });
+        this.#open().publication = receipt;
+        onPublished?.(receipt.staged.identity);
+        const stagedMode = this.#assertNamed(basename, 0o600);
+        assertStagedDirectoryCurrent(this.#owner.directory);
+        // Keep contents private until the name passes its identity fence. Mode
+        // changes use the owned fd, including for final mode 000.
+        const fd = this.#file();
+        if (this.#owner.mode !== 0o600 || stagedMode !== 0o600)
+            fs.fchmodSync(fd, this.#owner.mode);
+        // Content was synced during preparation. A lost chmod leaves 0600, no wider
+        // than modes retaining owner rw; restrictive modes still need a durable correction.
+        if (this.#owner.sync !== false && ((this.#owner.mode & 0o600) !== 0o600 || (stagedMode & ~this.#owner.mode) !== 0)) {
+            if (this.#owner.strictFileSync)
+                fs.fsyncSync(fd);
+            else
+                syncFileBestEffortSync(fd);
+        }
+        if (this.#owner.sync !== false)
+            syncFileBestEffortSync(this.#owner.parentFd);
+        this.#assertNamed(basename, this.#owner.mode);
+        assertStagedDirectoryCurrent(this.#owner.directory);
+        return receipt;
+    }
+    #finalize() {
+        if (this.#state.status === "closed") {
+            return this.#state;
+        }
+        const state = this.#open();
+        // Consume descriptor authority before native calls or diagnostic getters can reenter.
+        state.status = "closing";
+        let outcome = "not-needed";
+        const errors = [];
+        if (state.publication.status === "indeterminate") {
+            outcome = "preserved";
+        }
+        else if (this.#fallbackCleanup) {
+            outcome = this.#fallbackCleanup;
+            if (this.#fallbackCleanupError)
+                errors.push(this.#fallbackCleanupError.error);
+        }
+        else if (state.publication.status === "not-published" && state.fileFd !== undefined) {
+            try {
+                outcome = this.#owner.binding.removeStagedFile(this.#owner.parentFd, this.#owner.name, state.fileFd);
+            }
+            catch (error) {
+                outcome = "failed";
+                errors.push(error);
+            }
+        }
+        let resources = "closed";
+        for (const [fd, closeFd] of [
+            [state.fileFd, this.#closeFd],
+            [this.#owner.parentFd, this.#owner.closeParentFd],
+        ]) {
+            if (fd === undefined) {
+                continue;
+            }
+            try {
+                closeFd(fd);
+            }
+            catch (error) {
+                resources = "close-failed";
+                errors.push(error);
+            }
+        }
+        const receipt = Object.freeze({
+            temporaryBasename: this.#owner.name,
+            publication: state.publication,
+            status: outcome,
+            resources,
+        });
+        const error = errors.length ? stagedFailure("file", errors.length === 1 ? errors[0] : new AggregateError(errors, "staged cleanup failed"), { phase: "cleanup", publication: state.publication, cleanup: receipt }) : undefined;
+        this.#state = { status: "closed", receipt, error };
+        return this.#state;
+    }
+    async cleanup() {
+        const closed = this.#finalize();
+        if (closed.error) {
+            throw closed.error;
+        }
+        return closed.receipt;
+    }
+    async [Symbol.asyncDispose]() {
+        const cleanup = await this.cleanup();
+        if (cleanup.status === "preserved") {
+            throw new FsSafeError("not-removable", "staged cleanup preserved an unverified entry", {
+                details: { phase: "cleanup", publication: cleanup.publication, cleanup },
+            });
+        }
+    }
+}
+export const createNativeStage = NativeStagedFile.create;
+export const writeNativeStage = NativeStagedFile.write;
+export async function stageFileInDirectory(options) {
+    if (process.platform !== "linux" && process.platform !== "darwin") {
+        throw new FsSafeError("unsupported-platform", "retained-directory staging requires Linux or macOS");
+    }
+    const binding = requireNativeBinding();
+    assertNativeStaging(binding);
+    const input = { kind: "buffer", data: Buffer.from(options.content) };
+    const mode = options.mode ?? 0o600;
+    const parent = openStagedDirectory(options.directory);
+    return await createNativeStage({
+        binding, parentFd: parent.fd, closeParentFd: fs.closeSync,
+        directory: parent.receipt, mode, permissionPolicy: "mode-only",
+    }, input);
+}

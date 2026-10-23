@@ -22,7 +22,7 @@ async function expectCode(action, code) {
     && !String(error?.message).includes("fixture-private-canary"));
 }
 
-function createFixture() {
+function createFixture({ group = false } = {}) {
   const trustedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-federation-"));
   fs.chmodSync(trustedRoot, 0o700);
   const paths = resolveServicePaths({
@@ -164,6 +164,11 @@ function createFixture() {
     paths,
     registry,
     taskRunner,
+    ...(group ? { groupRunner: new (require("../app/group-runtime-router").GroupRuntimeRouter)({
+      registry, localRunner: new (require("../app/external-inspiration-runner").ExternalInspirationRunner)({
+        registry, origin: "http://127.0.0.1", adapterOptions: { sessionPurpose: "group" },
+      }),
+    }) } : {}),
     async delegateRun(input) {
       delegateCalls += 1;
       calls.push(["delegateRun", structuredClone({
@@ -174,7 +179,7 @@ function createFixture() {
     },
   });
   return {
-    paths, calls, agents, files, host, registry,
+    paths, calls, agents, files, host, registry, taskRunner,
     client: new FederationHostClient({ paths, timeoutMs: 2_000 }),
     getDelegateCalls: () => delegateCalls,
     getTaskRuns: () => taskRuns,
@@ -198,6 +203,67 @@ test("All inspiration executors use a read-only readiness RPC without broadening
     ready = true;
     assert.deepEqual(await fixture.client.request('inspiration.executor.ready', { backendId: 'shoggoth', agentId: 'selected-agent' }), { ready: true });
     await expectCode(() => fixture.client.request('agent.delete', { backendId: 'shoggoth', agentId: 'selected-agent', operationId: operation('a') }), 'APP_HOST_INVALID_REQUEST');
+  } finally { await fixture.host.stop(); }
+});
+
+test("联邦任务启动失败的安全原因穿过 Host/client，重复操作不重放", async () => {
+  const fixture = createFixture();
+  let calls = 0, code;
+  fixture.taskRunner.run = async () => {
+    calls++;
+    throw Object.assign(new Error("fixture-private-canary provider body"), { code });
+  };
+  await fixture.host.start();
+  try {
+    const codes = ["AGENT_AUTH_REQUIRED", "AGENT_MODEL_UNAVAILABLE", "AGENT_QUOTA_EXHAUSTED",
+      "AGENT_CONTEXT_LIMIT", "AGENT_PERMISSION_DENIED", "AGENT_NETWORK_UNAVAILABLE"];
+    for (let n = 0; n < codes.length; n++) {
+      code = codes[n];
+      const params = { backendId: "openclaw", agentId: "agent-1", prompt: "fixture task",
+        timeoutMs: 5000, operationId: operation(String.fromCharCode(97 + n)) };
+      await expectCode(() => fixture.client.request("federation.run", params), code);
+      await expectCode(() => fixture.client.request("federation.run", params), code);
+      assert.equal(calls, n + 1);
+    }
+  } finally { await fixture.host.stop(); }
+});
+
+test("默认目录预算涵盖串行健康/模型读取，显式短期限仍生效且不重放", async () => {
+  const fixture = createFixture();
+  const backend = fixture.registry.getBackend("openclaw");
+  let calls = 0;
+  const original = backend.listAgents;
+  backend.listAgents = async () => { calls++; await new Promise(resolve => setTimeout(resolve, 5100)); return original(); };
+  await fixture.host.start();
+  try {
+    const client = new FederationHostClient({ paths: fixture.paths });
+    const result = await client.request("agent.list", { backendId: "openclaw" });
+    assert.equal(result.agents.length, 1);
+    assert.equal(calls, 1);
+    const short = new FederationHostClient({ paths: fixture.paths, timeoutMs: 100 });
+    await expectCode(() => short.request("agent.list", { backendId: "openclaw" }), "APP_HOST_UNAVAILABLE");
+    assert.equal(calls, 2);
+  } finally { await fixture.host.stop(); }
+});
+
+test("群模型目录的冷读取超过普通控制期限仍成功，显式短期限拒绝且不重放", async () => {
+  const fixture = createFixture({ group: true });
+  const backend = fixture.registry.getBackend("openclaw");
+  let calls = 0;
+  const catalog = { models: [{ id: "fixture-model", name: "Fixture", provider: "fixture-provider" }], defaultModel: "fixture-model" };
+  backend.getGroupMemberModels = async agentId => {
+    assert.equal(agentId, "agent-1"); calls++;
+    await new Promise(resolve => setTimeout(resolve, 5100)); return catalog;
+  };
+  await fixture.host.start();
+  try {
+    const params = { backendId: "openclaw", agentId: "agent-1" };
+    assert.deepEqual(await new FederationHostClient({ paths: fixture.paths }).request("group.external.models", params), catalog);
+    assert.equal(calls, 1);
+    const short = new FederationHostClient({ paths: fixture.paths, timeoutMs: 100 });
+    await expectCode(() => short.request("group.external.models", params), "APP_HOST_UNAVAILABLE");
+    assert.equal(calls, 2);
+    assert.equal(fixture.getDelegateCalls(), 0);
   } finally { await fixture.host.stop(); }
 });
 
@@ -311,10 +377,19 @@ test("Agent 管理、文件、频道、产物与委派均做权威回读和 exac
       "联邦 Cron DTO 不得暴露 prompt、错误详情或 workdir");
 
     const runParams = {
-      backendId: "openclaw", agentId: "agent-1", prompt: "run task", timeoutMs: 5_000,
+      backendId: "openclaw", agentId: "agent-1", prompt: "run task", timeoutMs: 1_800_000,
       operationId: operation("d"),
     };
-    const delegated = await fixture.client.request("agent.run", runParams);
+    const originalSetTimeout = global.setTimeout;
+    const executionTimers = [];
+    let delegated;
+    global.setTimeout = (callback, delay, ...args) => {
+      if (delay >= 1_800_000) executionTimers.push(delay);
+      return originalSetTimeout(callback, delay, ...args);
+    };
+    try { delegated = await fixture.client.request("agent.run", runParams); }
+    finally { global.setTimeout = originalSetTimeout; }
+    assert.deepEqual(executionTimers, [1_802_000], "Host RPC must cover the full execution plus reply grace");
     assert.equal(delegated.text, "delegated result");
     assert.deepEqual(await fixture.client.request("agent.run", runParams), delegated);
     assert.equal(fixture.getDelegateCalls(), 1);

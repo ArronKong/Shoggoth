@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import FilterTabs from "../components/FilterTabs";
-import { SESSION_CATEGORY_ORDER, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../lib/sessionKind";
+import type { CodexDesktopWriterState } from "../lib/codexDesktopWriter";
+import { SESSION_CATEGORY_ORDER, isVisibleSession, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../lib/sessionKind";
 
 export interface SessionMenuRow extends SessionCategoryRow {
+  codexDesktopWriter?: CodexDesktopWriterState;
   /** 已算好的显示名（friendlySessionLabel）。 */
   title: string;
   /** 最近消息仅参与搜索，不在单行列表中显示。 */
@@ -12,19 +14,19 @@ export interface SessionMenuRow extends SessionCategoryRow {
   time: string;
   /** `time` 对应的时间戳——列表排序用它，做到「显示什么时间就按什么排」。 */
   ts: number;
+  unread?: boolean;
 }
 
 // 会话切换器：把 header 里那个原生 <select> 换成模型菜单同款弹层——
 // 头部 = 搜索框 + 按会话类型分的 FilterTabs，列表按时间倒序、单行显示。
 //
-// R266 起会话不再按类型隐藏（cron/子代理/dream/心跳过去被整片抹掉，导致工作板
-// 「运行」跳过来的 subagent 会话在 UI 里根本无处可寻），改为全量显示 + Tab 分流。
+// 可见性由 isVisibleSession 统一决定；子代理过程归父对话，底层会话记录保留。
 //
 // 皮肤直接复用模型菜单的 `.model-menu*`（同一个弹层语言，避免第二份重复 CSS——
 // R264 刚清掉过一轮），只加 `.session-menu` 一个修饰类改定位：模型菜单从
 // composer 向上弹，这个从 header 向下弹。
 export default function ChatSessionMenu({
-  sessions,
+  sessions: allSessions,
   activeKey,
   onSelect,
 }: {
@@ -32,6 +34,7 @@ export default function ChatSessionMenu({
   activeKey: string;
   onSelect: (key: string) => void;
 }) {
+  const sessions = useMemo(() => allSessions.filter(isVisibleSession), [allSessions]);
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -122,11 +125,11 @@ export default function ChatSessionMenu({
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const rows = sessions.filter((s) => {
-      if (q && !`${s.title} ${s.sub} ${s.key}`.toLowerCase().includes(q)) return false;
+      if (q && !`${s.title} ${s.sub} ${s.key} ${t(`chat.sessionFilter.${kindOf.get(s.key) ?? "other"}`)}`.toLowerCase().includes(q)) return false;
       return !kindFilter || (kindOf.get(s.key) ?? "other") === kindFilter;
     });
     return rows.slice().sort((a, b) => b.ts - a.ts);
-  }, [sessions, query, kindFilter, kindOf]);
+  }, [sessions, query, kindFilter, kindOf, t]);
 
   return (
     <div className="chat-session-menu" ref={rootRef}>
@@ -138,8 +141,9 @@ export default function ChatSessionMenu({
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        {active?.title || t("chat.switchAgentSession")}
-        {active?.time ? ` · ${active.time}` : ""}
+        <span className="session-menu__selected-title">{active?.title || t("chat.switchAgentSession")}
+          {active?.time ? ` · ${active.time}` : ""}</span>
+        {sessions.some(s => s.unread) && <span className="chat-agent__unread-dot session-menu__unread" role="img" aria-label={t("chat.unread")} />}
       </button>
       {open && (
         <div className="model-menu session-menu" style={popupStyle} role="listbox" aria-label={t("chat.switchAgentSession")}>
@@ -197,7 +201,7 @@ export default function ChatSessionMenu({
                     <span className="session-menu__title">{s.title}</span>
                   </span>
                   {s.time && <span className="model-menu__price">{s.time}</span>}
-                  {isActive && <span className="model-menu__check">✓</span>}
+                  {s.unread && <span className="chat-agent__unread-dot" role="img" aria-label={t("chat.unread")} />}
                 </button>
               );
             })}

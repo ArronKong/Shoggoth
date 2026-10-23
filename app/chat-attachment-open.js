@@ -12,12 +12,12 @@ function validAttachmentName(name) {
 }
 
 // Browser-picked files have bytes rather than an OS path. Keep private copies
-// for the lifetime of the UI server so the default application can read them.
-function createChatAttachmentOpener(openPath) {
+// for the lifetime of the UI server so Finder can reveal them.
+function createChatAttachmentRevealer(revealPath) {
   let directory;
   const files = new Map();
   return {
-    async open(name, bytes) {
+    async reveal(name, bytes) {
       if (!validAttachmentName(name) || !Buffer.isBuffer(bytes) || bytes.length > MAX_OPEN_ATTACHMENT_BYTES) {
         throw new Error("Invalid attachment");
       }
@@ -31,7 +31,7 @@ function createChatAttachmentOpener(openPath) {
         fs.writeFileSync(file, bytes, { mode: 0o600, flag: "wx" });
         files.set(key, file);
       }
-      return openPath(file);
+      return revealPath(file);
     },
     dispose() {
       if (directory) fs.rmSync(directory, { recursive: true, force: true });
@@ -41,4 +41,4 @@ function createChatAttachmentOpener(openPath) {
   };
 }
 
-module.exports = { createChatAttachmentOpener, validAttachmentName, MAX_OPEN_ATTACHMENT_BYTES };
+module.exports = { createChatAttachmentRevealer, validAttachmentName, MAX_OPEN_ATTACHMENT_BYTES };

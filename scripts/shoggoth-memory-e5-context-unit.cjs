@@ -36,7 +36,8 @@ test("prepared semantic hot memory is consumed synchronously, bounded and frozen
     assert.ok(!f.compiler.compile(input).report.memoryMatches.includes(target.id), "a changed authoritative stamp rejects prepared candidates");
     assert.equal(f.snapshots.get(f.profile.id, prepared.id).contentHash, prepared.contentHash);
     for (const run of [{ ...f.run, source: "cron" }, { ...f.run,
-      idempotencyKey: "shoggoth:chat-send:federation-send-test" }]) await f.compiler.prepareRelated({ ...input, run });
+      idempotencyKey: "shoggoth:chat-send:federation-send-test" }, { ...f.run,
+      idempotencyKey: "shoggoth:chat-send:group-turn-test" }]) await f.compiler.prepareRelated({ ...input, run });
     assert.equal(prepares, 2, "background and federated callers cannot prepare private semantic context");
   } finally { f.cleanup(); }
 });

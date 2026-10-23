@@ -1,8 +1,13 @@
 "use strict";
 
+const { mapComputerServiceError, validateComputerServiceResult } = require("./agent-service/computer-service-protocol");
+
 const CHANNELS = Object.freeze({
   status: "shoggoth:computer:permissions-status",
+  state: "shoggoth:computer:state",
   request: "shoggoth:computer:permissions-request",
+  reload: "shoggoth:computer:permissions-reload",
+  openAccessibility: "shoggoth:computer:open-accessibility-settings",
   openScreenRecording: "shoggoth:computer:open-screen-recording-settings",
 });
 
@@ -20,11 +25,7 @@ function trustedRenderer(event, getMainWindow) {
 }
 
 function permissionValue(value) {
-  if (!value || typeof value !== "object") throw new TypeError("invalid permission response");
-  return {
-    accessibility: value.accessibility === true,
-    screenRecording: value.screenRecording === true,
-  };
+  return validateComputerServiceResult("computer.permissions.request", value);
 }
 
 function registerDesktopComputerIpc(options = {}) {
@@ -33,49 +34,42 @@ function registerDesktopComputerIpc(options = {}) {
     || typeof getMainWindow !== "function") {
     throw new TypeError("registerDesktopComputerIpc 需要 IPC 与宿主依赖");
   }
-  const sdkLoader = options.sdkLoader || (() => import("@trycua/cua-driver"));
-  let sdkPromise = null;
-  const sdk = async () => {
-    if (!sdkPromise) sdkPromise = Promise.resolve().then(() => sdkLoader());
-    const value = await sdkPromise;
-    if (!value || typeof value.currentMacOsPermissionStatus !== "function"
-      || typeof value.requestMacOsPermissions !== "function"
-      || typeof value.openMacOsScreenRecordingSettings !== "function") {
-      throw new TypeError("Cua permission SDK unavailable");
+  const state = async () => ({ supported: true,
+    ...validateComputerServiceResult("computer.status", await options.serviceRequest("computer.status", {})) });
+  const register = (channel, operation) => ipcMain.handle(channel, async (event, ...args) => {
+    if (!trustedRenderer(event, getMainWindow)) {
+      return failure("PRIVILEGED_RENDERER_REQUIRED", "仅桌面应用可管理 Computer Use 权限");
     }
-    return value;
-  };
-  const authorized = (event) => trustedRenderer(event, getMainWindow)
-    ? null : failure("PRIVILEGED_RENDERER_REQUIRED", "仅桌面应用可管理 Computer Use 权限");
-
-  ipcMain.handle(CHANNELS.status, async (event) => {
-    const denied = authorized(event);
-    if (denied) return denied;
-    try {
-      return { ok: true, value: permissionValue((await sdk()).currentMacOsPermissionStatus()) };
-    } catch {
-      return failure("COMPUTER_PERMISSION_STATUS_FAILED", "无法读取 Computer Use 权限");
+    if (args.length) return failure("INVALID_PARAMS", "请求参数无效");
+    try { return { ok: true, value: await operation() }; }
+    catch (error) {
+      if (["COMPUTER_PERMISSION_RELOAD_BUSY", "COMPUTER_PERMISSION_RELOAD_FAILED", "COMPUTER_SETTINGS_OPEN_FAILED"].includes(error?.code)) {
+        return failure(error.code, error.code === "COMPUTER_PERMISSION_RELOAD_BUSY"
+          ? "请等待运行中的任务结束后重载权限" : "操作未能完成，请检查后台服务与系统设置");
+      }
+      const mapped = mapComputerServiceError(error);
+      return failure(mapped.code, mapped.message);
     }
   });
-  ipcMain.handle(CHANNELS.request, async (event) => {
-    const denied = authorized(event);
-    if (denied) return denied;
-    try {
-      return { ok: true, value: permissionValue((await sdk()).requestMacOsPermissions()) };
-    } catch {
-      return failure("COMPUTER_PERMISSION_REQUEST_FAILED", "无法申请 Computer Use 权限");
+  register(CHANNELS.state, state);
+  register(CHANNELS.status, async () => {
+    const permissions = (await state()).permissions;
+    if (typeof permissions.accessibility !== "boolean" || typeof permissions.screenRecording !== "boolean") {
+      throw Object.assign(new Error("permission status unknown"), { code: "COMPUTER_PERMISSION_STATUS_FAILED" });
     }
+    return { accessibility: permissions.accessibility, screenRecording: permissions.screenRecording };
   });
-  ipcMain.handle(CHANNELS.openScreenRecording, async (event) => {
-    const denied = authorized(event);
-    if (denied) return denied;
-    try {
-      (await sdk()).openMacOsScreenRecordingSettings();
-      return { ok: true, value: { opened: true } };
-    } catch {
-      return failure("COMPUTER_SETTINGS_OPEN_FAILED", "无法打开屏幕录制设置");
-    }
-  });
+  register(CHANNELS.request, async () => permissionValue(
+    await options.serviceRequest("computer.permissions.request", {}),
+  ));
+  register(CHANNELS.reload, async () => { await options.restartService(); return state(); });
+  for (const [channel, kind] of [[CHANNELS.openAccessibility, "accessibility"], [CHANNELS.openScreenRecording, "screenRecording"]]) {
+    register(channel, async () => {
+      try { await options.openSettings(kind); }
+      catch { throw Object.assign(new Error("settings unavailable"), { code: "COMPUTER_SETTINGS_OPEN_FAILED" }); }
+      return { opened: true };
+    });
+  }
 
   let disposed = false;
   return () => {

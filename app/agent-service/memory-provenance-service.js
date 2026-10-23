@@ -15,7 +15,8 @@ function safeImportName(value) {
 
 class MemoryProvenanceService {
   constructor({ store, memoryStore, transcriptStore, chatSessionStore, recallPolicy,
-    getRun = null, getRunSessionKey = null, getInspirationOrigin = null, now = Date.now }) {
+    getRun = null, getRunSessionKey = null, getInspirationOrigin = null,
+    resolveImportExcerpt = null, now = Date.now }) {
     this.store = store;
     this.memoryStore = memoryStore;
     this.transcripts = transcriptStore;
@@ -24,7 +25,13 @@ class MemoryProvenanceService {
     this.getRun = getRun;
     this.getRunSessionKey = getRunSessionKey;
     this.getInspirationOrigin = getInspirationOrigin;
+    this.resolveImportExcerpt = resolveImportExcerpt;
     this.now = now;
+  }
+  // The import source keeps cited excerpt text; this sidecar keeps only its hash.
+  setImportExcerptResolver(resolve) {
+    if (typeof resolve !== "function") throw new TypeError("Import excerpt resolver 无效");
+    this.resolveImportExcerpt = resolve;
   }
   _verifiedDirectRun(profileId, session, runId) {
     if (!this.getRun || !this.getRunSessionKey || !runId
@@ -92,7 +99,8 @@ class MemoryProvenanceService {
       observedAt: this.now(),
     });
   }
-  recordImport({ profileId, item, sourceRef, fileName, fileHash }) {
+  // span = { lineStart, lineEnd, excerptHash } pins the cited source lines.
+  recordImport({ profileId, item, sourceRef, fileName, fileHash, span = null }) {
     if (item?.profileId !== profileId || item.status !== "active"
       || !item.sourceRefs.includes(sourceRef)
       || !/^codex-memory:[a-f0-9]{32}$/u.test(sourceRef)
@@ -107,7 +115,8 @@ class MemoryProvenanceService {
       contentHash: sha256(item.content), origin: "import", runId: null, sessionId: null,
       eventId: null, eventTextHash: null, quoteHash: null,
       quoteStartUtf16: null, quoteEndUtf16: null,
-      importFile: { name: safeImportName(fileName), fileHash, sourceRef },
+      importFile: { name: safeImportName(fileName), fileHash, sourceRef,
+        ...(span ? { lineStart: span.lineStart, lineEnd: span.lineEnd, excerptHash: span.excerptHash } : {}) },
       observedAt: this.now(),
     });
   }
@@ -172,8 +181,18 @@ class MemoryProvenanceService {
       if (!item.sourceRefs.includes(record.importFile.sourceRef)) {
         return result({ ...base, status: "unavailable", reason: "import_source_mismatch" });
       }
+      let importSpan;
+      if (Object.hasOwn(record.importFile, "lineStart")) {
+        let excerpt = null;
+        try {
+          const value = this.resolveImportExcerpt?.(profileId, record.importFile.sourceRef) ?? null;
+          if (typeof value === "string" && sha256(value) === record.importFile.excerptHash) excerpt = value;
+        } catch { /* A missing or damaged import source leaves only the pinned line range. */ }
+        importSpan = { lineStart: record.importFile.lineStart, lineEnd: record.importFile.lineEnd, excerpt };
+      }
       return result({ ...base, status: "verified_origin", quote: null,
-        importFile: { name: record.importFile.name, sha256: record.importFile.fileHash } });
+        importFile: { name: record.importFile.name, sha256: record.importFile.fileHash },
+        ...(importSpan ? { importSpan } : {}) });
     }
     if (record.origin !== "conversation") {
       return result({ ...base, status: "verified_origin", quote: null });

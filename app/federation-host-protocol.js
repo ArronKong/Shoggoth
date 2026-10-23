@@ -1,19 +1,38 @@
 "use strict";
 
-const { EXTERNAL_INSPIRATION_METHODS, validateExternalInspirationParams,
-  validateExternalInspirationResult } = require("./external-inspiration-protocol");
+const { GROUP_EXTERNAL_ACTIVITY_METHOD, validateGroupExternalActivityParams, validateGroupExternalActivityResult } = require("./external-inspiration-protocol");
+const { GROUP_EXTERNAL_METADATA_METHOD, validateGroupExternalMetadataParams, validateGroupExternalMetadataResult } = require("./external-inspiration-protocol");
+
+const { EXTERNAL_EXECUTION_METHODS, canonicalExternalMethod, validateExternalInspirationParams,
+  validateExternalInspirationResult, GROUP_EXTERNAL_RESULT_METHOD, validateGroupExternalResultParams,
+  validateGroupExternalResultResult, GROUP_EXTERNAL_DRAFT_METHOD, validateGroupExternalDraftParams,
+  validateGroupExternalDraftResult, GROUP_EXTERNAL_CAPABILITIES_METHOD, validateGroupExternalCapabilitiesParams,
+  validateGroupExternalCapabilitiesResult, GROUP_EXTERNAL_ARTIFACT_METHOD, validateGroupExternalArtifactParams, validateGroupExternalArtifactResult } = require("./external-inspiration-protocol");
+
+const { APP_STATE_HOST_SECTIONS, validAppStateArguments, validateAppStateHostResult } = require("./agent-service/app-state-contract");
+
+const { validHostManageArguments, APP_MANAGE_OPERATIONS } = require("./agent-service/app-manage-contract");
+const { FEDERATION_TASK_MAX_TIMEOUT_MS } = require("./federation-task-timeout");
 
 const FEDERATION_PROTOCOL_VERSION = 1;
 const FEDERATION_MAX_FRAME_BYTES = 64 * 1024;
 const FEDERATION_METHODS = Object.freeze([
-  "backend.status", "backend.require",
+  "backend.status", "backend.require", "app.state.read", "app.manage",
+  "notification.context", "chat.ui.click.verify",
+  "group.hosts.list", "group.host.test", "group.external.member", "group.external.role", "group.external.models",
   "inspiration.executor.ready",
   "cron.list",
   "agent.list", "agent.get", "agent.create", "agent.update", "agent.delete",
   "agent.file.list", "agent.file.read", "agent.file.write",
   "agent.channels", "agent.artifacts", "agent.run",
   "federation.run", "federation.message", "federation.task.get", "federation.task.cancel",
-  ...EXTERNAL_INSPIRATION_METHODS,
+  ...EXTERNAL_EXECUTION_METHODS,
+  GROUP_EXTERNAL_RESULT_METHOD,
+  GROUP_EXTERNAL_METADATA_METHOD,
+  GROUP_EXTERNAL_ARTIFACT_METHOD,
+  GROUP_EXTERNAL_DRAFT_METHOD,
+  GROUP_EXTERNAL_ACTIVITY_METHOD,
+  GROUP_EXTERNAL_CAPABILITIES_METHOD,
 ]);
 const FEDERATION_METHOD_SET = new Set(FEDERATION_METHODS);
 const BACKEND_IDS = new Set(["openclaw", "hermes"]);
@@ -40,7 +59,8 @@ const EXTERNAL_ERROR_CODES = new Set([
 
 function isPublicExternalInspirationError(code) {
   return typeof code === "string" && (/^INSPIRATION_[A-Z0-9_]{1,112}$/u.test(code)
-    || EXTERNAL_ERROR_CODES.has(code));
+    || /^GROUP_HOST_[A-Z_]{1,112}$/u.test(code) || EXTERNAL_ERROR_CODES.has(code)
+    || require("./group-member-model").isModelError(code));
 }
 
 function exactObject(value, fields) {
@@ -149,8 +169,28 @@ function validCronJob(value, backendId) {
 
 function validateFederationParams(method, params) {
   if (!FEDERATION_METHOD_SET.has(method)) return false;
-  if (EXTERNAL_INSPIRATION_METHODS.includes(method)) return validateExternalInspirationParams(method, params);
+  if (EXTERNAL_EXECUTION_METHODS.includes(method)) return validateExternalInspirationParams(method, params);
+  if (method === "group.hosts.list") return exactObject(params, []);
+  if (method === "group.host.test") return exactObject(params, ["peer"]) && require("./group-runtime-host-protocol").validPeer(params.peer);
+  if (method === "group.external.models") return validateGroupExternalCapabilitiesParams(params)
+    && !Object.hasOwn(params, "protocolVersion");
+  if (method === "group.external.member") return exactObject(params, ["backendId", "agentId", "peerId"])
+    && validateGroupExternalCapabilitiesParams(params);
+  if (method === "group.external.role") return exactObject(params, ["backendId", "agentId", "peerId", "offset", "digest"])
+    && validateGroupExternalCapabilitiesParams({ backendId: params.backendId, agentId: params.agentId, peerId: params.peerId })
+    && require("./group-result-content").validOffset(params.offset) && require("./group-result-content").validDigest(params.digest);
+  if (method === GROUP_EXTERNAL_ARTIFACT_METHOD) return validateGroupExternalArtifactParams(params);
+  if (method === GROUP_EXTERNAL_RESULT_METHOD) return validateGroupExternalResultParams(params);
+  if (method === GROUP_EXTERNAL_METADATA_METHOD) return validateGroupExternalMetadataParams(params);
+  if (method === GROUP_EXTERNAL_DRAFT_METHOD) return validateGroupExternalDraftParams(params);
+  if (method === GROUP_EXTERNAL_ACTIVITY_METHOD) return validateGroupExternalActivityParams(params);
+  if (method === GROUP_EXTERNAL_CAPABILITIES_METHOD) return validateGroupExternalCapabilitiesParams(params);
+  if (method === "app.manage") return validHostManageArguments(params);
+  if (method === "app.state.read") return validAppStateArguments(params, APP_STATE_HOST_SECTIONS);
   if (method === "backend.status") return exactObject(params, []);
+  if (method === "notification.context") return exactObject(params, []);
+  if (method === "chat.ui.click.verify") return exactObject(params, ["proofId", "fingerprint"])
+    && validAgentId(params.proofId) && typeof params.fingerprint === "string" && /^[a-f0-9]{64}$/u.test(params.fingerprint);
   // Read-only readiness includes native backends. Federation mutations retain
   // their existing external-backend allowlist below.
   if (method === "inspiration.executor.ready") return exactObject(params, ["backendId", "agentId"])
@@ -204,7 +244,7 @@ function validateFederationParams(method, params) {
       && validBackendId(params.backendId) && validAgentId(params.agentId)
       && boundedString(params.prompt, 16 * 1024)
       && Number.isSafeInteger(params.timeoutMs) && params.timeoutMs >= 5_000
-      && params.timeoutMs <= 120_000 && validOperationId(params.operationId);
+      && params.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS && validOperationId(params.operationId);
   }
   if (method === "federation.message") {
     return exactObject(params, [
@@ -214,7 +254,7 @@ function validateFederationParams(method, params) {
       && Number.isSafeInteger(params.expectedTurn) && params.expectedTurn >= 1
       && params.expectedTurn <= 32 && boundedString(params.prompt, 16 * 1024)
       && Number.isSafeInteger(params.timeoutMs) && params.timeoutMs >= 5_000
-      && params.timeoutMs <= 120_000 && validOperationId(params.operationId);
+      && params.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS && validOperationId(params.operationId);
   }
   if (method === "federation.task.get") {
     return exactObject(params, ["backendId", "agentId", "taskId"])
@@ -231,7 +271,7 @@ function validateFederationParams(method, params) {
     && exactObject(params, ["backendId", "agentId", "prompt", "timeoutMs", "operationId"])
     && validBackendId(params.backendId) && validAgentId(params.agentId)
     && boundedString(params.prompt, 16 * 1024)
-    && Number.isSafeInteger(params.timeoutMs) && params.timeoutMs >= 5_000 && params.timeoutMs <= 120_000
+    && Number.isSafeInteger(params.timeoutMs) && params.timeoutMs >= 5_000 && params.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS
     && validOperationId(params.operationId);
 }
 
@@ -250,20 +290,49 @@ function safeJsonValue(value, state = { nodes: 0 }, depth = 0) {
 }
 
 function validateFederationResult(method, result, params) {
+  if (method === "group.external.models") return require("./group-member-model").validModelCatalog(result);
   if (!FEDERATION_METHOD_SET.has(method) || !safeJsonValue(result)) return false;
-  if (EXTERNAL_INSPIRATION_METHODS.includes(method)) {
+  if (method === "group.hosts.list") return exactObject(result, ["members"]) && Array.isArray(result.members) && result.members.length <= 32
+    && result.members.every(member => exactObject(member, ["peerId", "backendId", "agentId", "name", "connected", "groupTools"])
+      && validBackendId(member.backendId) && boundedString(member.agentId, 128) && boundedString(member.peerId, 128)
+      && boundedString(member.name, 256) && typeof member.connected === "boolean" && typeof member.groupTools === "boolean");
+  if (method === "group.host.test") return require("./group-runtime-host-protocol").validHostResult("host.capabilities", result);
+  if (method === "group.external.member") return require("./group-runtime-host-protocol").validHostResult("host.member", result);
+  if (method === "group.external.role") return require("./group-runtime-host-protocol").validHostResult("host.role", result);
+  if (method === GROUP_EXTERNAL_ARTIFACT_METHOD) return validateGroupExternalArtifactResult(result);
+  if (method === GROUP_EXTERNAL_RESULT_METHOD) return validateGroupExternalResultResult(result)
+    && (!params || (validateGroupExternalResultParams(params) && (result.page === null
+      || (result.page.offset === params.offset && (params.digest === null || result.page.digest === params.digest)))));
+  if (method === GROUP_EXTERNAL_DRAFT_METHOD) return validateGroupExternalDraftResult(result);
+  if (method === GROUP_EXTERNAL_METADATA_METHOD) return validateGroupExternalMetadataResult(result);
+  if (method === GROUP_EXTERNAL_ACTIVITY_METHOD) return validateGroupExternalActivityResult(result);
+  if (method === GROUP_EXTERNAL_CAPABILITIES_METHOD) return validateGroupExternalCapabilitiesResult(result);
+  if (EXTERNAL_EXECUTION_METHODS.includes(method)) {
     if (!validateExternalInspirationResult(method, result)) return false;
     if (!params) return true;
     if (!validateExternalInspirationParams(method, params)) return false;
-    if (method === "inspiration.external.prepare") {
+    const canonical = canonicalExternalMethod(method);
+    if (canonical === "inspiration.external.prepare") {
+      if (result.remote && (!params.context || ["groupId", "ownerId", "epoch"].some(key => result.remote[key] !== params.context.authority[key])
+        || (params.context.peerId && result.remote.peerId !== params.context.peerId))) return false;
       return (params.backendId === "openclaw" ? result.binding.mode === "openclaw" : result.binding.mode !== "openclaw")
         && (params.sessionKey === null || result.binding.sessionKey === params.sessionKey)
         && (params.workspace === null || result.binding.workspace === params.workspace);
     }
-    return (method === "inspiration.external.get" || result.hostId === params.hostId)
+    return (canonical === "inspiration.external.get" || result.hostId === params.hostId
+      || method === "group.external.cancel" && params.stopGroup === true && result.groupStopped === true)
       && ["executionId", "runId", "backendId", "agentId", "sessionKey", "workspace", "mode"]
       .every((field) => result.snapshot[field] === params[field]);
   }
+  if (method === "app.manage") return exactObject(result, ["operation", "backendId", "targetId", "agentId", "status", "revision"])
+    && APP_MANAGE_OPERATIONS.includes(result.operation) && validBackendId(result.backendId)
+    && (!params || result.operation === params.operation && result.backendId === params.backendId)
+    && boundedString(result.targetId, 512) && boundedString(result.agentId, 128, { nullable: true })
+    && ["saved", "deleted", "accepted"].includes(result.status)
+    && (result.revision === null || /^[a-f0-9]{64}$/u.test(result.revision));
+  if (method === "app.state.read") return validateAppStateHostResult(result, params);
+  if (method === "notification.context") return exactObject(result, ["focused"]) && typeof result.focused === "boolean";
+  if (method === "chat.ui.click.verify") return exactObject(result, ["approved"]) && typeof result.approved === "boolean";
   if (["backend.status", "backend.require"].includes(method)) {
     return exactObject(result, method === "backend.status" ? ["backends"] : ["backend"])
       && (method === "backend.status" ? Array.isArray(result.backends) : !!result.backend);

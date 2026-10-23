@@ -1,0 +1,42 @@
+export { copyRootFileSync } from "./copy-root-file-sync.js";
+// Advanced composition surface. These exports are less stable than the focused
+// public subpaths; prefer root/json/store/temp/archive unless you are building a
+// higher-level primitive.
+export { createAsyncLock } from "./async-lock.js";
+export { createDirectory, createDirectorySync, createFileSync, } from "./create.js";
+export { copyFileHandle, copyFileDescriptorSync } from "./file-handle-transfer.js";
+export { sameFileContentsSync } from "./file-contents.js";
+export { overwriteFileHandle } from "./overwrite-file-handle.js";
+export { probePathCaseInsensitiveSync } from "./path-case.js";
+export { resolvePathPrefixSync } from "./path-prefix.js";
+export { probePathSuffixAliasesSync } from "./path-suffix-aliases.js";
+export { readDirectoryIdentity, assertDirectoryIdentitySync, } from "./directory-guard.js";
+export { stageFileInDirectory, } from "./native-staged-file.js";
+export { retainSymlinkInDirectory } from "./native-staged-symlink.js";
+export { readFileDescriptorBounded, readFileDescriptorBoundedSync, readFileHandleBounded, } from "./bounded-read.js";
+export { readFileWindowFully, readFileWindowFullySync, } from "./positional-read.js";
+export { writeFileWindowFully } from "./write-file-handle.js";
+export { assertNoUnsafeDeviceReadPath, isUnsafeDeviceReadPath, matchUnsafeDeviceReadPath, } from "./device-path.js";
+export { assertAbsolutePathInput, canonicalPathFromExistingAncestor, ensureAbsoluteDirectory, findExistingAncestor, resolveAbsolutePathForRead, resolveAbsolutePathForWrite, } from "./absolute-path.js";
+export { sameFileIdentity } from "./file-identity.js";
+export { sanitizeUntrustedFileName } from "./filename.js";
+export { pathExists, pathExistsSync } from "./fs.js";
+export { resolveLocalPathFromRootsSync, readLocalFileFromRoots, } from "./local-roots.js";
+export { assertNoWindowsNetworkPath, basenameFromMediaSource, hasEncodedFileUrlSeparator, isWindowsDriveLetterPath, isWindowsNetworkPath, safeFileURLToPath, trySafeFileURLToPath, } from "./local-file-access.js";
+export { formatPosixMode } from "./permissions.js";
+export { configureFsSafeLocks, getFsSafeLockConfig, } from "./lock-config.js";
+export { assertNoHardlinkedFinalPath, assertNoPathAliasEscape, PATH_ALIAS_POLICIES, } from "./path-policy.js";
+export { openRootFile, openRootFileSync, canUseRootFileOpen, matchRootFileOpenFailure, } from "./root-file.js";
+export { ROOT_PATH_ALIAS_POLICIES, resolvePathViaExistingAncestorSync, resolveRootPath, resolveRootPathSync, } from "./root-path.js";
+export { ensureDirectoryWithinRoot, pathScope, resolveExistingPathsWithinRoot, resolvePathWithinRoot, resolvePathsWithinRoot, resolveStrictExistingPathsWithinRoot, resolveWritablePathWithinRoot, } from "./root-paths.js";
+export { safeDirName, safePathSegmentHashed, safePathSegmentHashedV2, resolveSafeInstallDir, assertCanonicalPathWithinBase, } from "./install-path.js";
+export { assertNoSymlinkParents, assertNoSymlinkParentsSync, } from "./symlink-parents.js";
+export { movePathToTrash } from "./trash.js";
+export { withTimeout } from "./timing.js";
+export { resolveHomeRelativePath } from "./home-dir.js";
+export { appendRegularFile, appendRegularFileSync, readRegularFile, readRegularFileSync, resolveRegularFileAppendFlags, statRegularFile, statRegularFileSync, } from "./regular-file.js";
+export { buildRandomTempFilePath, sanitizeTempFileName, tempFile, withTempFile, } from "./temp-target.js";
+export { writeSiblingTempFile, writeViaSiblingTempPath, } from "./sibling-temp.js";
+export { createIcaclsResetCommand, formatIcaclsResetCommand, formatWindowsAclSummary, inspectWindowsAcl, parseIcaclsOutput, resolveWindowsUserPrincipal, summarizeWindowsAcl, } from "./permissions-windows.js";
+export { retainFileInDirectory } from "./retained-file.js";
+export { retainEntryForPublication } from "./entry-publication.js";

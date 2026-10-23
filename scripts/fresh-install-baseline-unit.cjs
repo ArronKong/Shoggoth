@@ -24,7 +24,7 @@ function fixture(t) {
 test("fresh profiles share one backend, use explicit runtime accounts and reopen without rewriting", t => {
   const f = fixture(t); assertCurrentStorageBaseline(f.paths);
   const installed = new Set(Object.values(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME));
-  const store = f.open(); ensureBuiltinCliAgentProfiles(store, installed);
+  const store = f.open(); ensureBuiltinCliAgentProfiles(store, installed, { isSeeded: () => false, markSeeded() {} });
   const profiles = store.listAgentProfiles();
   assert.equal(profiles.length, 1 + Object.keys(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME).filter(isRuntimeAvailable).length);
   for (const profile of profiles) {
@@ -35,7 +35,7 @@ test("fresh profiles share one backend, use explicit runtime accounts and reopen
   }
   store.close(); const before = fs.readFileSync(f.paths.stateSnapshotPath);
   const reopened = f.open(); assert.deepEqual(reopened.listAgentProfiles(), profiles);
-  assert.deepEqual(ensureBuiltinCliAgentProfiles(reopened, installed), []); reopened.close();
+  assert.deepEqual(ensureBuiltinCliAgentProfiles(reopened, installed, { isSeeded: () => false, markSeeded() {} }), []); reopened.close();
   assert.deepEqual(fs.readFileSync(f.paths.stateSnapshotPath), before);
   assertCurrentStorageBaseline(f.paths);
 });

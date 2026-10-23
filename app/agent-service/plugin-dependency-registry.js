@@ -245,6 +245,14 @@ class PluginDependencyRegistry {
       ...(operation.result ? { result: structuredClone(operation.result) } : {}),
       ...(operation.reasonCode ? { reasonCode: operation.reasonCode } : {}) } : null;
   }
+  // Registry-only status for summaries. It neither re-verifies the package nor
+  // inspects the pinned binary; execution still goes through queryState/resolve.
+  peek(input) {
+    const pin = pinOf(input), record = this._read().entries[identity(pin)];
+    if (!record) return "missing";
+    if (!sameJson(record.pin, pin) || record.authorityIncarnation !== this.store.getAuthorityIncarnation()) return "stale";
+    return record.status;
+  }
   queryState(input) {
     const current = this._component(input), record = this._read().entries[identity(current.pin)];
     if (!record) return { status: "missing", pin: current.pin, interpreter: current.interpreter, expectedRevision: 0 };
@@ -268,7 +276,11 @@ class PluginDependencyRegistry {
     if (operation && operation.fingerprint !== fingerprint) fail("REVISION_CONFLICT");
     if (operation?.phase === "completed") return operation.result;
     if (operation?.phase === "failed") fail("DEPENDENCY_OPERATION_FAILED");
-    if (this.store.getInstallation(pin.installationId)?.desiredState !== "disabled") fail("DEPENDENCY_REQUIRES_DISABLE");
+    // A first pin cannot affect a running process: without it the component
+    // never starts. Replacing an existing pin still requires a drained disable.
+    const requiresDisable = () => (input.expectedRevision > 0 || Boolean(this._read().entries[key]))
+      && this.store.getInstallation(pin.installationId)?.desiredState !== "disabled";
+    if (requiresDisable()) fail("DEPENDENCY_REQUIRES_DISABLE");
     const preview = this.preview(input);
     if (preview.expectedRevision !== input.expectedRevision) fail("REVISION_CONFLICT");
     if (preview.previewDigest !== input.previewDigest) fail("DEPENDENCY_CHANGED");
@@ -291,7 +303,7 @@ class PluginDependencyRegistry {
         || (preview.interpreter === "node" ? Number(matched[1]) < 20
           : Number(matched[1]) !== 3 || Number(matched[2]) < 8)) fail("DEPENDENCY_PROBE_FAILED");
       if (this.preview(input).previewDigest !== input.previewDigest) fail("DEPENDENCY_CHANGED");
-      if (this.store.getInstallation(pin.installationId)?.desiredState !== "disabled") fail("DEPENDENCY_REQUIRES_DISABLE");
+      if (requiresDisable()) fail("DEPENDENCY_REQUIRES_DISABLE");
       body = this._read();
       if ((body.entries[key]?.revision || 0) !== input.expectedRevision) fail("REVISION_CONFLICT");
       const { version: _unprobed, ...executable } = preview.executable;

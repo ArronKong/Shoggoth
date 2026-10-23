@@ -8,7 +8,8 @@ const OPENCODE_CAPABILITIES = runtimeCapabilities({
   "session.start": true, "session.resume": true, "session.read": true, "session.list": true,
   "session.rename": true, "session.archive": true, "session.unarchive": true,
   "session.delete": true, "turn.start": true, "turn.interrupt": true,
-  "models.list": true, events: true, serverRequests: true,
+  "models.list": true, "commands.list": true, "commands.execute": true, events: true, serverRequests: true,
+  "context.compact.native": true, "context.compact.auto": true,
 });
 
 class OpenCodeRuntimeHandle {
@@ -37,6 +38,13 @@ class OpenCodeRuntimeHandle {
   turnStart(input) { return this.host.turnStart(input); }
   turnInterrupt(input) { return this.host.turnInterrupt(input); }
   modelsList(input) { return this.host.modelsList(input); }
+  commandsList(input) { return this.host.commandsList(input); }
+  commandExecute(input) { return this.host.commandExecute(input); }
+  // Settings sign-in into model providers, on the account's control instance.
+  providerLoginOptions() { return this.host.providerLoginOptions(); }
+  providerLoginAuthorize(input) { return this.host.providerLoginAuthorize(input); }
+  providerLoginCallback(input) { return this.host.providerLoginCallback(input); }
+  providerLoginApiKey(input) { return this.host.providerLoginApiKey(input); }
 }
 
 class OpenCodeRuntimeAdapter {

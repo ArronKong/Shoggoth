@@ -72,7 +72,7 @@ function environmentFor(value) {
     integrationRoot: value.runtime === "antigravity" ? path.dirname(home) : null,
     binaryPath: "/tmp/shoggoth-runtime-binary",
     launchArgs: Object.freeze(value.runtime === "codex"
-      ? ["-c", "check_for_update_on_startup=false", "app-server", "--stdio"] : []),
+      ? ["-c", "check_for_update_on_startup=false", "-c", "skills.include_instructions=false", "app-server", "--stdio"] : []),
     spawnEnv: Object.freeze(spawnEnv),
     configurationMode: value.runtime === "codex" ? "overlay"
       : value.runtime === "antigravity" || value.runtime === "deepseek-harness"

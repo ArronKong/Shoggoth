@@ -1,0 +1,8 @@
+.search { display: flex; gap: 8px; margin-block: 12px; }
+.search input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: inherit; }
+.results { display: grid; gap: 10px; max-height: 280px; overflow: auto; }
+.results article { padding: 10px; border: 1px solid var(--border); border-radius: 10px; overflow-wrap: anywhere; }
+.snippet { white-space: pre-wrap; max-height: 100px; overflow: auto; }
+.editor { display: grid; gap: 8px; margin-top: 16px; }
+.editor textarea { box-sizing: border-box; width: 100%; min-width: 0; resize: vertical; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: inherit; font: inherit; }
+.editor small { color: var(--muted); }

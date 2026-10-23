@@ -22,7 +22,7 @@ let resolveReplay;
 const replay = new Promise((resolve) => { resolveReplay = resolve; });
 let controller;
 const memory = {
-  engine: { recallPolicy: { getRevision: () => 0 }, now: () => 100 },
+  engine: { recallPolicy: { getRevision: () => 0 }, now: () => 100, isRecallCommitted: () => true },
   store: { getRevision: () => 1 },
   provenance: { getEvidenceRevision: () => evidenceRevision },
   bind: noop, search: noop, get: noop, write: noop,

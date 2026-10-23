@@ -287,20 +287,33 @@ async function testServiceResourceWiringAndRestart() {
       assert.equal(service.agentDefinitionStore.get(profile.id).documents.IDENTITY
         .match(/^- Name: (.+)$/mu)?.[1], profile.name);
     }
+    // Only the default Agent is protected; a built-in CLI Agent can be archived.
     await assert.rejects(
       () => requestService(paths, {
         method: "agent.archive",
         token,
         version: PROTOCOL_VERSION,
         params: {
-          operationId: "service-archive-protected-builtin",
-          profileId: builtin.id,
-          expectedUpdatedAt: builtin.updatedAt,
+          operationId: "service-archive-protected-default",
+          profileId: DEFAULT_AGENT_PROFILE_ID,
+          expectedUpdatedAt: service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).updatedAt,
           createdAt: Date.now(),
         },
       }, { timeoutMs: 5_000 }),
       (error) => error.code === "AGENT_PROTECTED",
     );
+    const archivedBuiltin = await requestService(paths, {
+      method: "agent.archive",
+      token,
+      version: PROTOCOL_VERSION,
+      params: {
+        operationId: "service-archive-builtin",
+        profileId: builtin.id,
+        expectedUpdatedAt: builtin.updatedAt,
+        createdAt: Date.now(),
+      },
+    }, { timeoutMs: 5_000 });
+    assert.equal(archivedBuiltin.profile.enabled, false);
     for (const backendId of ["codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]) {
       await assert.rejects(() => requestService(paths, {
         method: "agent.create", token, version: PROTOCOL_VERSION,
@@ -359,6 +372,8 @@ async function testServiceResourceWiringAndRestart() {
     });
     await service.start();
     token = readClientToken(paths);
+    assert.equal(service.productStore.getAgentProfile(builtin.id).enabled, false,
+      "an archived built-in CLI Agent is not created again on restart");
     for (const profile of created) {
       const listed = await requestService(paths, {
         method: "agent.lifecycle.list",

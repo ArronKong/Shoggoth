@@ -52,6 +52,7 @@ async function fixture(native = true) {
     close() { this.readyState = 3; this.onclose?.(); }
     open() { this.readyState = Socket.OPEN; this.onopen?.(); }
   }
+  const groupInternalKeys = new Set();
   const notifications = load("lib/notify.ts", { window, Notification: BrowserNotification, document: { hasFocus: () => false } });
   const enabled = [];
   const Notifier = load("components/Notifier.tsx", {
@@ -65,6 +66,7 @@ async function fixture(native = true) {
       "../lib/shoggothDomainUi": {},
       "../lib/inspiration-notifications": {},
       "../lib/notify": notifications,
+      "../lib/groupChat": { isGroupInternalSession: async key => groupInternalKeys.has(key) },
     })[name] || require(name),
     window, location, WebSocket: Socket,
     sessionStorage: { setItem: (key, value) => storage.set(key, value) },
@@ -90,6 +92,7 @@ async function fixture(native = true) {
     }
   });
   return { notices, sockets, requests, timers, location, storage, open, latestRequest, respond, reply, receive, runTimer,
+    groupInternalKeys,
     save: chat => settle(() => { config = { notifications: { chat, cron: false, task: false } }; listeners.get("openclaw:config-changed")(); }),
     click: index => settle(() => native
       ? nativeOpen({ category: "chat", target: notices[index].target }) : notices[index].onclick()),
@@ -124,6 +127,14 @@ assert.ok(f.notices.every(notice => notice.body === "已处理完毕。"));
 await f.click(3);
 assert.equal(f.location.hash, "#/chat");
 assert.equal(f.storage.get("openclaw.pendingChatSession"), `agent:${rows[3].id}:main`, "Names never replace routing identity");
+
+// A group member's internal session reply belongs to the group panel, not a desktop notice.
+f.groupInternalKeys.add("agent:ada:group-internal");
+const beforeGroup = f.notices.length;
+await f.receive({ type: "event", event: "chat", payload: { state: "final", sessionKey: "agent:ada:group-internal",
+  message: { role: "assistant", content: "群里的回答", timestamp: 999_999 } } });
+await f.respond(rows);
+assert.equal(f.notices.length, beforeGroup, "Group internal sessions never raise chat notifications");
 
 // Rename without a page switch or a backend change event.
 rows[0].name = "产品负责人";

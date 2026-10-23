@@ -4,17 +4,23 @@ import { Field, Option, Select, Switch } from "../../components/Field";
 import ThemePicker from "./ThemePicker";
 import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
 import SettingsAppUpdate from "./SettingsAppUpdate";
+import SettingsComputerUse from "./SettingsComputerUse";
+import SettingsBrowserUse from "./SettingsBrowserUse";
+import SettingsWeb from "./SettingsWeb";
+import SettingsGroupChat from "./SettingsGroupChat";
 import { SettingsIcon } from "./SettingsIcons";
 
 // Keep the theme preference and picker implementation available for a later
 // re-enable, but do not expose theme switching in Settings for now.
 const SHOW_THEME_PICKER = false;
 
-export default function SettingsPreferences({ cfg, onChange, disabled, themeLoaded }: {
+
+export default function SettingsPreferences({ cfg, onChange, disabled, themeLoaded, onComputerServiceRestarted }: {
   cfg: AppConfig;
   onChange: (patch: Partial<AppConfig>) => void;
   disabled: boolean;
   themeLoaded: boolean;
+  onComputerServiceRestarted?: () => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -36,7 +42,7 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
                 <Select disabled={disabled} value={cfg.locale} onChange={(v) => onChange({ locale: v })}>
                   <Option value="">{t("settings.langAuto")}</Option>
                   <Option value="zh-CN">简体中文</Option>
-                  <Option value="en">English</Option>
+                  <Option value="en">{t("settings.copy.languageEnglish")}</Option>
                 </Select>
               </Field>
             </div>
@@ -45,6 +51,11 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
           <SettingsAppUpdate />
         </div>
       </section>
+
+      <SettingsComputerUse onServiceRestarted={onComputerServiceRestarted} />
+      <SettingsBrowserUse cfg={cfg} onChange={onChange} disabled={disabled} />
+      <SettingsWeb />
+      <SettingsGroupChat cfg={cfg} onChange={onChange} disabled={disabled} />
 
       {/* Notifications — native macOS desktop notifications. */}
       <section className="settings-section" id="settings-notif">

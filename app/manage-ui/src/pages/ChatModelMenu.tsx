@@ -4,7 +4,8 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import FilterTabs from "../components/FilterTabs";
 import FusionLoader from "../components/FusionLoader";
-import { IconSearch } from "./chatIcons";
+import { IconModel, IconSearch } from "./chatIcons";
+import { useComposerPopupPosition } from "../lib/useComposerPopupPosition";
 import "./ChatModelMenu.css";
 
 export interface ModelMenuChoice {
@@ -79,6 +80,7 @@ export default function ChatModelMenu({
   const listRef = useRef<HTMLDivElement>(null);
   const [popupHost, setPopupHost] = useState<HTMLElement | null>(null);
   const [popupStyle, setPopupStyle] = useState<CSSProperties | undefined>();
+  const composerPopupStyle = useComposerPopupPosition(open && !portalInDialog, rootRef, popupRef);
 
   // 打开（或菜单先开、模型后到）时把列表滚到当前选中模型（居中）——长目录里选中项
   // 多半在视口外，打开即见才对得上「查看/切换当前模型」的心智。手动算滚动量而非
@@ -140,22 +142,8 @@ export default function ChatModelMenu({
     }
     if (!portalInDialog) {
       setPopupHost(null);
-      const composer = rootRef.current?.closest<HTMLElement>("[data-chat-composer]");
-      if (!composer) { setPopupStyle(undefined); return; }
-      // Align the surface with the composer frame, independently of its toolbar
-      // padding and the menu's absolute/fixed positioning at narrow widths.
-      const position = () => {
-        const popup = popupRef.current;
-        if (!popup) return;
-        const left = parseFloat(window.getComputedStyle(popup).left) || 0;
-        setPopupStyle({ left: left + composer.getBoundingClientRect().left - popup.getBoundingClientRect().left });
-      };
-      position();
-      const observer = new ResizeObserver(position);
-      observer.observe(composer);
-      if (rootRef.current) observer.observe(rootRef.current);
-      window.addEventListener("resize", position);
-      return () => { observer.disconnect(); window.removeEventListener("resize", position); };
+      setPopupStyle(undefined);
+      return;
     }
     const trigger = triggerRef.current;
     const host = trigger?.closest<HTMLElement>("[role=dialog]");
@@ -190,20 +178,18 @@ export default function ChatModelMenu({
     };
   }, [open, portalInDialog]);
 
-  // 同一个模型 id 可能出现在多个 provider 下（实测 deepseek-v4-flash 同时在
-  // deepseek 与 volcengine）。勾选/高亮必须连 provider 一起比；当 activeProvider
-  // 与 models 的 provider 口径对不上（无合格命中，如部分后端不带 provider）时退回
-  // 纯 id 匹配——宁可保持旧的「都勾」也不要「一个都不勾」。
+  // Preserve a known Provider identity even when its model has disappeared.
+  // Bare-id compatibility is only for catalogues with no Provider identities.
   const multi = Array.isArray(selectedRefs);
   const selectedSet = useMemo(() => new Set(selectedRefs || []), [selectedRefs]);
   const providerQualified =
-    !!activeProvider && models.some((m) => m.id === activeModel && (m.provider || "") === activeProvider);
+    !!activeProvider && models.some((m) => !!m.provider);
   const isActiveChoice = (m: ModelMenuChoice) =>
     multi
       ? selectedSet.has(m.provider ? `${m.provider}/${m.id}` : m.id)
       : m.id === activeModel && (activeBindingId ? m.bindingId === activeBindingId
         : !providerQualified || (m.provider || "") === activeProvider);
-  const active = models.find((m) => isActiveChoice(m)) ?? models.find((m) => m.id === activeModel);
+  const active = models.find((m) => isActiveChoice(m));
   const activeLabel = triggerLabel || active?.name || activeModel || t("chat.switchModel");
   const OTHER = t("chat.otherProvider");
 
@@ -245,7 +231,7 @@ export default function ChatModelMenu({
       <button
         ref={triggerRef}
         type="button"
-        className="chat-pill chat-pill--select chat-pill--model"
+        className="chat-pill chat-pill--select chat-pill--icon-label chat-pill--model"
         onClick={() => {
           if (!open) onRefresh?.();
           setOpen(!open);
@@ -256,16 +242,17 @@ export default function ChatModelMenu({
         title={active?.runtimeName ? `${active.runtimeName} / ${activeModel}`
           : activeProvider ? `${activeProvider} / ${activeModel}` : t("chat.switchModel")}
       >
-        {activeLabel}
+        <span className="chat-pill__icon" aria-hidden="true"><IconModel /></span>
+        <span className="chat-pill__label">{activeLabel}</span>
       </button>
       {open && (() => {
         const popup = (
         <div
-          className={`model-menu model-menu--catalog${popupHost ? " model-menu--portal" : ""}`}
+          className={`model-menu model-menu--catalog chat-composer-menu-surface${popupHost ? " model-menu--portal" : ""}`}
           role="listbox"
           aria-label={t("chat.switchModel")}
           ref={popupRef}
-          style={popupStyle}
+          style={portalInDialog ? popupStyle : composerPopupStyle}
         >
           {/* 不滚动的头部：搜索框 + provider 筛选 Tab。占 grid 第一行(auto)，
               列表始终落在第二行(1fr)滚动——单一滚动条不受 Tab 有无影响。 */}

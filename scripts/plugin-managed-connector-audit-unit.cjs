@@ -16,7 +16,7 @@ test("frozen managed App inventory retains all references and deduplicated ident
   assert.equal(Object.values(audit.idClasses).reduce((total, count) => total + count, 0), 53);
   assert.equal(audit.ids.find(item => item.id === ref("github", "github").id).references.length, 3);
   assert.deepEqual(audit.exactOverlapCounts, { "candidate-only": 37, unsupported: 36 });
-  assert.equal(audit.references.filter(item => item.samePackageConverted.length).length, 47);
+  assert.equal(audit.references.filter(item => item.samePackageConverted.length).length, 48);
 });
 
 test("same-package converted MCP is listed without asserting managed functional overlap", () => {

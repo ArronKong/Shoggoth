@@ -751,8 +751,8 @@ export default function DebugInspector() {
             </div>
 
             <div className={styles.toolbar}>
-              {actionBtn("copy", t("debug.export"), copyForAi, true)}
-              {canSave && actionBtn("save", t("debug.saveToCode"), saveToSource)}
+              {canSave && actionBtn("save", t("debug.saveToCode"), saveToSource, true)}
+              {actionBtn("copy", t("debug.export"), copyForAi, !canSave)}
               {actionBtn("clear", t("debug.clear"), clearAll)}
             </div>
           </div>

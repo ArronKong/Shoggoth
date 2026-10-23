@@ -25,27 +25,32 @@ if (!process.versions.electron) {
       const env = { ...process.env };
       delete env.ELECTRON_RUN_AS_NODE;
       for (const [phase, appDir] of [["source", source], ["packaged", path.join(archive, "app")]]) {
-        const child = spawnSync(require("electron"), [__filename, "--fixture", path.join(root, phase), appDir], {
-          env, encoding: "utf8", timeout: 20_000,
-        });
-        if (child.stdout) process.stdout.write(child.stdout);
-        assert.equal(child.status, 0, `${phase}: ${child.stderr || child.error || child.signal}`);
+        for (const theme of ["light", "dark"]) {
+          const child = spawnSync(require("electron"), [__filename, "--fixture", path.join(root, `${phase}-${theme}`), appDir, theme], {
+            env, encoding: "utf8", timeout: 20_000,
+          });
+          if (child.stdout) process.stdout.write(child.stdout);
+          assert.equal(child.status, 0, `${phase}-${theme}: ${child.stderr || child.error || child.signal}`);
+        }
       }
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
   })().catch(error => { console.error(error); process.exitCode = 1; });
 } else {
-  const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain } = require("electron");
+  const { app, BrowserWindow, Tray, Menu, nativeImage, nativeTheme, screen, ipcMain } = require("electron");
   const at = process.argv.indexOf("--fixture");
   const profile = process.argv[at + 1], appDir = process.argv[at + 2];
   assert.ok(at > 0 && profile && appDir);
+  const theme = process.argv[at + 3];
+  assert.ok(theme === "light" || theme === "dark");
+  nativeTheme.themeSource = theme;
   app.setPath("userData", profile);
   app.setName("Shoggoth tray isolated test");
   app.on("window-all-closed", () => {});
   const { createDesktopInspirationController } = require(path.join(appDir, "desktop-inspiration-controller.js"));
   app.whenReady().then(async () => {
-    let controller, main, tray;
+    let controller, main, tray, trayImage;
     const shortcuts = new Map();
     try {
       main = new BrowserWindow({ show: false });
@@ -54,12 +59,12 @@ if (!process.versions.electron) {
           constructor(image) {
             assert.equal(image.isEmpty(), false, "the menu bar image must decode in the packaged app");
             assert.deepEqual(image.getSize(), { width: 14, height: 14 });
-            assert.equal(image.isTemplateImage(), false, "macOS must preserve the white artwork");
+            assert.equal(image.isTemplateImage(), process.platform === "darwin", "macOS must tint the icon for light and dark menu bars");
             assert.deepEqual(image.getScaleFactors(), [1, 2], "load crisp 1x and Retina artwork");
             for (const scaleFactor of image.getScaleFactors()) {
               const pixels = image.toBitmap({ scaleFactor });
               const alpha = pixels.filter((_, index) => index % 4 === 3);
-              assert.ok(Math.abs(Math.max(...alpha) - 255 * 0.9) < 1, "white artwork has 90% opacity");
+              assert.ok(Math.abs(Math.max(...alpha) - 255 * 0.9) < 1, "the source mask retains 90% opacity");
               assert.ok(alpha.filter(value => value === 0).length > alpha.length / 4, "the background is transparent");
               assert.equal(alpha[0], 0, "the top-left corner has no white square");
               for (let index = 0; index < pixels.length; index += 4) {
@@ -69,6 +74,7 @@ if (!process.versions.electron) {
                 assert.equal(pixels[index + 2], pixels[index + 3]);
               }
             }
+            trayImage = image;
             super(image);
             tray = this;
           }
@@ -85,6 +91,11 @@ if (!process.versions.electron) {
         getUiOrigin: () => "http://127.0.0.1:18799", getLocale: () => "zh-CN", quit: () => app.quit(), stopBackend: async () => {},
       });
       await new Promise(resolve => setTimeout(resolve, 150));
+      assert.equal(nativeTheme.shouldUseDarkColors, theme === "dark");
+      nativeTheme.themeSource = theme === "light" ? "dark" : "light";
+      await new Promise(resolve => setTimeout(resolve, 150));
+      assert.equal(nativeTheme.shouldUseDarkColors, theme === "light", "the isolated app changes appearance without recreating its tray");
+      assert.equal(trayImage.isTemplateImage(), process.platform === "darwin", "the icon remains eligible for system tinting after an appearance change");
       if (process.platform === "darwin") {
         const bounds = controller.getTrayBounds();
         assert.ok(bounds.width > 0 && bounds.height > 0, "macOS must allocate a menu bar status item");
@@ -100,7 +111,7 @@ if (!process.versions.electron) {
       controller.dispose(); controller = null;
       assert.equal(tray.isDestroyed(), true);
       assert.equal(shortcuts.size, 0);
-      console.log(`PASS desktop inspiration tray (${path.basename(profile)}): 14pt transparent white 90% icon, Retina, status item, main-window reopen and cleanup`);
+      console.log(`PASS desktop inspiration tray (${path.basename(profile)}): adaptive macOS template, live appearance change, 14pt transparent 90% mask, Retina, status item, main-window reopen and cleanup`);
       app.quit();
     } finally {
       controller?.dispose();

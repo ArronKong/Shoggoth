@@ -1,0 +1,59 @@
+/* The same file surface is used by message paths and attached files in every chat mode. */
+.chat-file-button,
+.chat-att-chip.chat-att-chip--file {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  max-width: min(440px, 100%);
+  min-height: 44px;
+  /* Figma 383:871: 20px leading inset, 16px icon, 4px gap, 28px trailing inset. */
+  padding: 12px 28px 12px 20px;
+  border: 0;
+  border-radius: 24px;
+  background: var(--skin-bg-assistant, var(--ui-surface-1, #fff));
+  color: var(--composer-fg, var(--ui-text-1, #000));
+  font: inherit;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+  text-align: left;
+  text-decoration: none;
+  box-shadow: none;
+  transition: background-color 120ms;
+}
+.chat-file-button { cursor: pointer; }
+.chat-file-button:disabled { opacity: .5; cursor: default; }
+.chat-file-button:not(:disabled):hover,
+.chat-att-chip.chat-att-chip--file:hover {
+  background: color-mix(in srgb, var(--skin-bg-assistant, var(--ui-surface-1, #fff)) 93%, var(--chat-text, var(--ui-text-1, #171717)) 7%);
+}
+.chat-file-button:focus-visible,
+.chat-att-chip.chat-att-chip--file:focus-within { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.chat-file-label { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.chat-file-icon { display: block; flex: 0 0 auto; }
+:root[data-theme="dark"] .chat-file-icon { filter: invert(1); }
+.chat-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Pending files retain their independent remove action without nesting buttons. */
+.chat-att-chip.chat-att-chip--file { gap: 0; padding: 0; overflow: hidden; }
+.chat-att-chip__open {
+  display: flex; align-items: center; min-width: 0; max-width: 100%; padding: 12px 28px 12px 20px;
+  border: 0; border-radius: inherit; background: transparent; color: inherit; font: inherit; text-align: left;
+}
+button.chat-att-chip__open { cursor: pointer; }
+.chat-att-chip__open:focus-visible { outline: none; }
+.chat-att-row--pending .chat-att-chip--file .chat-att-chip__open { padding-right: 10px; }
+.chat-att-chip--file .chat-att-x {
+  position: static; inset: auto; display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 24px; width: 24px; height: 24px; margin-right: 10px;
+  background: transparent; color: inherit; font-size: 14px; line-height: 1;
+}
+.chat-att-chip--file .chat-att-x > span { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; }
+.chat-att-chip--file .chat-att-x:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
+.chat-att-chip--file .chat-att-x:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+  .chat-file-button, .chat-att-chip.chat-att-chip--file { transition: none; }
+}

@@ -62,6 +62,7 @@ class ExternalPluginLeaseManager {
 
   async issue({ credentialToken, identity }, capture = null) {
     if (!validToken(credentialToken) || !validIdentity(identity)) fail();
+    identity = Object.freeze({ ...identity });
     const authorized = await this.#authorizeAdapter(identity.backendId, credentialToken, identity);
     if (authorized !== true) fail();
     const snapshot = typeof capture === "function" ? capture() : null;
@@ -123,6 +124,7 @@ class ExternalPluginLeaseManager {
 
   #assertLeaseCurrent(lease) {
     if (lease.canceled || lease.controller.signal.aborted || lease.expiresAt <= this.#now()) fail();
+    if (typeof lease.snapshot?.assertSelectionCurrent === "function") lease.snapshot.assertSelectionCurrent();
   }
 
   #purge(now) {
@@ -140,6 +142,19 @@ class ExternalPluginLeaseManager {
       lease.controller.abort();
     }
     this.#leases.clear();
+  }
+
+  cancelExecution(identity) {
+    if (!validIdentity({ ...identity, toolCallId: "execution-cancel" })) fail();
+    const canceled = [];
+    for (const [key, lease] of this.#leases) {
+      if (!Object.keys(identity).every(field => lease.identity[field] === identity[field])) continue;
+      lease.canceled = true;
+      lease.controller.abort();
+      this.#leases.delete(key);
+      canceled.push(lease.identity);
+    }
+    return canceled;
   }
 }
 

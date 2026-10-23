@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const [origin, root, output] = process.argv.slice(2);
-assert.match(root, /^\/tmp\/sghui-[A-Za-z0-9]+$/u);
+assert.match(root, /^\/private\/tmp\/sghui-[A-Za-z0-9]+$/u);
 assert.match(origin, /^http:\/\/127\.0\.0\.1:\d+$/u);
 app.setPath("userData", path.join(root, "electron-profile"));
 app.setPath("logs", path.join(root, "electron-logs"));

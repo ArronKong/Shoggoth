@@ -17,6 +17,9 @@ async function main() {
     const other = service.productStore.listAgentProfiles().find((item) => item.id !== profile.id);
     const session = service.chatSessionStore.listSessions().find((item) => item.profileId === profile.id);
     assert.ok(other && session);
+    // This regression covers the manual review endpoints, which remain for
+    // suggestions the background gate could not save automatically.
+    service.memoryCandidateService.autoConsolidate = false;
     service.memoryCandidateService.extract = async ({ events }) => ({ candidates: events
       .filter((event) => event.text.includes("每周五进行候选集成复盘"))
       .flatMap((event) => [

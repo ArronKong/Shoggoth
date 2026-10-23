@@ -8,9 +8,14 @@ const { CODEX_VERSION } = require("./codex-schema-contract");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { PROXY_ENV_PAIRS, normalizeProxyEnvironment } = require("./proxy-environment");
 
+// skills.include_instructions=false drops Codex's passive index of every
+// skill under ~/.agents/skills from each request (Shoggoth Skills come from
+// skill_catalog); an explicit $skill-name mention still injects that skill.
 const CODEX_APP_SERVER_ARGS = Object.freeze([
   "-c",
   "check_for_update_on_startup=false",
+  "-c",
+  "skills.include_instructions=false",
   "app-server",
   "--stdio",
 ]);

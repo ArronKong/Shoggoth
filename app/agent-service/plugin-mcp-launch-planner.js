@@ -5,10 +5,23 @@ const path = require("node:path");
 const { PluginComponentResolver } = require("./plugin-component-resolver");
 const { PluginDependencyRegistry } = require("./plugin-dependency-registry");
 const { serviceError } = require("./security");
+const { secretReference } = require("../core/plugin-secret-placeholders");
 
 const BARE_COMMAND = /^[^./\\\s][^/\\\s]*$/u;
 
 function fail(code, message) { throw serviceError(code, message); }
+// The plan names declared credentials only; the connection manager resolves
+// their values immediately before the process starts.
+function splitSecretEnv(env) {
+  const plain = {};
+  const secretEnvRefs = [];
+  for (const [key, value] of Object.entries(env || {})) {
+    const reference = secretReference(value);
+    if (reference) secretEnvRefs.push(Object.freeze({ key, name: reference.name }));
+    else plain[key] = value;
+  }
+  return { env: Object.freeze(plain), secretEnvRefs: Object.freeze(secretEnvRefs) };
+}
 function inside(root, target) {
   const relative = path.relative(root, target);
   return relative !== ".." && !relative.startsWith(`..${path.sep}`)
@@ -41,7 +54,7 @@ class PluginMcpLaunchPlanner {
       const dependency = this.dependencies.resolve(input);
       const root = fs.realpathSync(path.join(this.store.paths.pluginPackagesDir, input.releaseDigest));
       return Object.freeze({ ...dependency, args: Object.freeze(dependency.args),
-        env: Object.freeze(dependency.env), pluginRoot: root, source: "plugin",
+        ...splitSecretEnv(dependency.env), pluginRoot: root, source: "plugin",
         installationId: input.installationId, componentId: input.componentId,
         releaseDigest: input.releaseDigest, descriptorDigest: input.descriptorDigest });
     }
@@ -61,7 +74,7 @@ class PluginMcpLaunchPlanner {
     try { fs.accessSync(real, fs.constants.X_OK); }
     catch { fail("DEPENDENCY_MISSING", "插件 stdio 启动文件没有执行权限"); }
     return Object.freeze({ command: real, args: Object.freeze([...(spec.args || [])]),
-      cwd: spec.cwd || "${PLUGIN_ROOT}", env: Object.freeze({ ...(spec.env || {}) }),
+      cwd: spec.cwd || "${PLUGIN_ROOT}", ...splitSecretEnv(spec.env),
       pluginRoot: root, source: "plugin", installationId: input.installationId,
       componentId: input.componentId, releaseDigest: input.releaseDigest,
       descriptorDigest: input.descriptorDigest });

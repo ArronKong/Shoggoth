@@ -27,7 +27,7 @@ function BackendRow({ backend: b, descriptor, version, attention, details, body,
   useEffect(() => { if (attention) setExpanded(true); }, [attention]);
   const mode = descriptor?.connectionMode || b.info.connectionMode;
   const cli = mode === "native-runtime";
-  const status = b.disabled ? t("settings.backendDisabled") : b.info.starting ? t("common.loading")
+  const status = b.disabled ? t("settings.backendDisabled") : b.info.starting ? t("settings.serviceWorking")
     : b.connected ? t("common.connected") : t("common.disconnected");
   const toggleButton = canToggle && <button className="ui-cbtn ui-cbtn--sm" onClick={onToggle} disabled={toggleDisabled}
     title={lastEnabled ? t("settings.disconnectLastHint") : undefined}>
@@ -42,7 +42,7 @@ function BackendRow({ backend: b, descriptor, version, attention, details, body,
     <div className="settings-backend-details" id={`backend-detail-${b.id}`} hidden={!expanded}>
       {!b.disabled && details}
       {typeof b.info.hasIdentity === "boolean" && <p className="ui-hint">
-        {t("settings.deviceIdentity")} · <span className={b.info.hasIdentity ? "" : "status-error"}>{t(b.info.hasIdentity ? "settings.configured" : "settings.missing")}</span>
+        {t("settings.deviceIdentity")} · <span className={b.info.hasIdentity ? "" : "status-error"}>{t(b.info.hasIdentity ? "settings.copy.configured" : "settings.missing")}</span>
       </p>}
       {!!b.info.dashboards?.length && <div className="status-dashboards">
         {b.info.dashboards.map((d) => {
@@ -136,7 +136,7 @@ export default function BackendOverview({ backends, descriptors, versions, loadi
       <div><h3 className="settings-h">{t("settings.connectionsTitle")}</h3><p className="settings-sech">{t("settings.connStatusDesc")}</p></div>
       <span className="settings-count">{t("settings.backendsConnected", { connected: backends.filter((b) => b.connected && !b.disabled).length, total: backends.length })}</span>
     </header>
-    {backends.length === 0 && <div className="settings-card"><p className="ui-hint">{t(loading ? "common.loading" : "settings.backendsEmpty")}</p></div>}
+    {backends.length === 0 && <div className="settings-card"><p className="ui-hint">{t(loading ? "settings.serviceWorking" : "settings.backendsEmpty")}</p></div>}
     {serviceBackends.length > 0 && <div className="settings-backend-stack">{serviceBackends.map(row)}</div>}
     {cliBackends.length > 0 && <div className="settings-native-list">
       <div className="settings-list-heading"><strong>{t("settings.localRuntimes")}</strong><span>{t("settings.localRuntimesHint")}</span></div>

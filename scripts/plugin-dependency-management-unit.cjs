@@ -113,10 +113,6 @@ async function main() {
     assert.equal(fs.existsSync(service.pluginDependencyController.registry.file), false,
       "picker and consent cancellation must not create a dependency authority file");
     approved = true;
-    await state("enabled");
-    assert.equal((await post("dependency-change", change("enabled-denied"))).status, 409);
-    assert.equal(confirmations, 1); assert.equal(probes, 0);
-    await state("disabled");
 
     // Lose the operation response after the durable commit, then recover by ID
     // without accepting a second confirmation or running a second probe.
@@ -142,6 +138,11 @@ async function main() {
     assert.equal(probes, 1); assert.equal(confirmations, confirmationCount); assert.equal(selections, selectionCount);
 
     await state("enabled");
+    // Replacing an existing pin still needs a drained disable; only a first pin
+    // (nothing could have started) is accepted while the package is enabled.
+    const deniedConfirmations = confirmations;
+    assert.equal((await post("dependency-change", change("enabled-denied"))).status, 409);
+    assert.equal(confirmations, deniedConfirmations); assert.equal(probes, 1);
     const connect = await post("mcp-consent", { action: "connect", agentId: profile.agentId,
       ...selector, expectedRevision: installationRevision, operationId: "connect-prepared-node" });
     assert.equal(connect.status, 200, JSON.stringify(connect.body));

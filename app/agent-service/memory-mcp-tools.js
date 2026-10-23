@@ -9,8 +9,11 @@ const object = (properties, required = Object.keys(properties)) => ({ type: "obj
 const nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });
 const DEFINITIONS = [
   ["memory_search", object({ ...source, query: { type: "string", maxLength: 1024 },
+    maxResults: { type: "integer", minimum: 1, maximum: 20 }, minScore: { type: "number", minimum: 0, maximum: 1 },
+    memoryScope: { type: "string", enum: ["own", "all"] }, ownerProfileId: id,
     includeCandidates: { type: "boolean" } }, ["source", "sourceId", "query"])],
-  ["memory_get", object({ ...source, id })],
+  ["memory_get", object({ ...source, id, path: text(1024), from: { type: "integer", minimum: 1 },
+    lines: { type: "integer", minimum: 1, maximum: 200 } }, ["source", "sourceId"])],
   ["memory_explain", object({ ...source, id })],
   ["conversation_search", object({ ...source, query: text(1024),
     sessionId: id, limit: { type: "integer", minimum: 1, maximum: 10 } },
@@ -42,6 +45,8 @@ function matches(value, schema) {
     && (!schema.pattern || new RegExp(schema.pattern, "u").test(value));
   if (schema.type === "integer") return Number.isSafeInteger(value)
     && value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity);
+  if (schema.type === "number") return typeof value === "number" && Number.isFinite(value)
+    && value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity);
   if (schema.type === "boolean") return typeof value === "boolean";
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype) return false;
@@ -58,6 +63,8 @@ function validateMemoryMcpArguments(name, args) {
     // Pending background suggestions are human-review only. Preserve callers
     // that explicitly send false, but never silently ignore a true request.
     && (name !== "memory_search" || args.includeCandidates !== true)
+    && (name !== "memory_get" || Boolean(args.id) !== Boolean(args.path))
+    && (name !== "memory_get" || args.path || args.from === undefined && args.lines === undefined)
     && (name !== "memory_save" || args.classification !== "explicit" || args.sourceQuote?.trim()));
 }
 

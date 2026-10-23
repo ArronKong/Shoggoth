@@ -20,6 +20,7 @@ import Notifier from "./components/Notifier";
 import ScrollbarProvider from "./components/ScrollbarProvider";
 import SetupOverlay from "./components/SetupOverlay";
 import { useToast } from "./components/ui";
+import UiResourceBoundary from "./components/UiResourceBoundary";
 import { getShoggothProductStatus } from "./api/client";
 import { useDebugEnabled } from "./components/debug/store";
 import {
@@ -388,42 +389,46 @@ export default function App() {
       <main className="content">
         {/* 常驻保活：display:contents 让 .chat-shell 仍是 .content 的直接子（不破坏其 grid/flex 布局），隐藏时彻底不占位。 */}
         {(chatMounted || onChat) && (
-          <Suspense fallback={onChat ? <div className="page page-loading"><FusionLoader ariaLabel={t("common.loading")} /></div> : null}>
-            <div style={{ display: onChat ? "contents" : "none" }}>
-              <ChatPage />
-            </div>
-          </Suspense>
+          <div style={{ display: onChat ? "contents" : "none" }}>
+            <UiResourceBoundary resetKey="/chat">
+              <Suspense fallback={onChat ? <div className="page page-loading"><FusionLoader ariaLabel={t("common.loading")} /></div> : null}>
+                <ChatPage />
+              </Suspense>
+            </UiResourceBoundary>
+          </div>
         )}
-        <Suspense fallback={<div className="page page-loading"><FusionLoader ariaLabel={t("common.loading")} /></div>}>
-          <Routes>
-            <Route path="/" element={<Navigate to="/chat" replace />} />
-            {/* /chat 由上方常驻渲染；此处占位，避免 * 兜底把 /chat 重定向成死循环。 */}
-            <Route path="/chat" element={null} />
-            <Route path="/dashboard" element={<DashboardPage />} />
-            <Route path="/inspirations" element={<InspirationPage />} />
-            <Route
-              path="/cron"
-              element={
-                <div className="page">
-                  <CronPage />
-                </div>
-              }
-            />
-            <Route path="/tasks" element={<TasksPage />} />
-            <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/token" element={<UsagePage />} />
-            <Route path="/skills" element={<SkillsPage />} />
-            <Route path="/plugins" element={<PluginsPage />} />
-            <Route path="/cli" element={<CliPage />} />
-            <Route path="/models" element={<ModelsPage />} />
-            <Route path="/glass" element={<GlassLab />} />
-            <Route path="/components" element={<ComponentsPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            {/* Turn Lab:回合过程可视化的临时演示页 —— 故意不进 PRIMARY_NAV(隐藏路由,直达 #/turnlab)。 */}
-            <Route path="/turnlab" element={<TurnLabPage />} />
-            <Route path="*" element={<Navigate to="/chat" replace />} />
-          </Routes>
-        </Suspense>
+        <UiResourceBoundary resetKey={location.pathname}>
+          <Suspense fallback={<div className="page page-loading"><FusionLoader ariaLabel={t("common.loading")} /></div>}>
+            <Routes>
+              <Route path="/" element={<Navigate to="/chat" replace />} />
+              {/* /chat 由上方常驻渲染；此处占位，避免 * 兜底把 /chat 重定向成死循环。 */}
+              <Route path="/chat" element={null} />
+              <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/inspirations" element={<InspirationPage />} />
+              <Route
+                path="/cron"
+                element={
+                  <div className="page">
+                    <CronPage />
+                  </div>
+                }
+              />
+              <Route path="/tasks" element={<TasksPage />} />
+              <Route path="/agents" element={<AgentsPage />} />
+              <Route path="/token" element={<UsagePage />} />
+              <Route path="/skills" element={<SkillsPage />} />
+              <Route path="/plugins" element={<PluginsPage />} />
+              <Route path="/cli" element={<CliPage />} />
+              <Route path="/models" element={<ModelsPage />} />
+              <Route path="/glass" element={<GlassLab />} />
+              <Route path="/components" element={<ComponentsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              {/* Turn Lab:回合过程可视化的临时演示页 —— 故意不进 PRIMARY_NAV(隐藏路由,直达 #/turnlab)。 */}
+              <Route path="/turnlab" element={<TurnLabPage />} />
+              <Route path="*" element={<Navigate to="/chat" replace />} />
+            </Routes>
+          </Suspense>
+        </UiResourceBoundary>
       </main>
     </div>
   );

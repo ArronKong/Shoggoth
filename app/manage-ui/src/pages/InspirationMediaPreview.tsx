@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { revealAttachment } from '../api/client';
+import { useToast } from '../components/ui';
 import type { InspirationAttachment } from '../types';
 import { formatInspirationMediaTime, groupInspirationMedia, inspirationMediaUrl, isInspirationDocument, middleEllipsis } from './inspiration-media';
 import playIcon from '../assets/inspiration/media-play.svg';
@@ -225,15 +227,25 @@ function AttachmentPreview({ item, motion, compact, disabled, onRemove, onOpen }
   item: InspirationAttachment; motion?: InspirationAttachment; compact: boolean;
 }) {
   const { t } = useTranslation();
+  const toast = useToast();
+  const [revealing, setRevealing] = useState(false);
   const [audioOnly, setAudioOnly] = useState(false);
   const audio = item.mimeType.startsWith('audio/') || audioOnly;
   const document = isInspirationDocument(item.mimeType);
+  const reveal = async () => {
+    if (revealing) return;
+    setRevealing(true);
+    try { await revealAttachment(item.name, inspirationMediaUrl(item.id)); }
+    catch (error) { toast.error(t('chat.artifactsRevealFailed', { msg: error instanceof Error ? error.message : String(error) })); }
+    finally { setRevealing(false); }
+  };
   return <div className={styles.attachment} data-kind={document ? 'file' : audio ? 'audio' : motion ? 'live' : item.mimeType.split('/')[0]}>
-    {document ? <a className={styles.fileRow} href={inspirationMediaUrl(item.id)} download={item.name} title={t('inspiration.media.download')}>
+    {document ? <button type="button" className={styles.fileRow} disabled={revealing} onClick={() => void reveal()}
+      title={t('chat.artifactsRevealInFolder')} aria-label={t('inspiration.revealArtifact', { name: item.name })}>
       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" aria-hidden="true">
         <path d="M9.5 1.5h-6a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-8z" vectorEffect="non-scaling-stroke" /><path d="M9.5 1.5v4h4" vectorEffect="non-scaling-stroke" />
       </svg><MediaFilename name={item.name} />
-    </a> : <><MediaFilename name={item.name} onOpen={onOpen} />
+    </button> : <><MediaFilename name={item.name} onOpen={onOpen} />
       {audio ? <AudioAttachment item={item} /> : <VisualAttachment key={`${item.id}:${motion?.id || ''}`} item={item} motion={motion} compact={compact} onOpen={onOpen} onAudioOnly={() => setAudioOnly(true)} />}</>}
     {onRemove && <button type="button" className={styles.remove} disabled={disabled} aria-label={t('inspiration.media.remove', { name: item.name })}
       onClick={() => onRemove([item.id, ...(motion ? [motion.id] : [])])}><span aria-hidden="true">×</span></button>}

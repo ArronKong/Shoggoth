@@ -198,6 +198,8 @@ export interface PendingRpcEntry<TSocket = unknown> {
 
 interface RenderPart {
   type?: string;
+  segmentId?: string;
+  sourceEventId?: string;
   text?: string;
   toolName?: string;
   toolArgs?: unknown;
@@ -206,6 +208,10 @@ interface RenderPart {
 }
 
 interface RenderMessage {
+  openclawPreambleKey?: string;
+  nativeDisplayId?: string;
+  localSlashId?: string;
+  sourceEventIds?: string[];
   id?: string;
   role?: string;
   ts?: number;
@@ -345,7 +351,10 @@ function stableHash(value: unknown): string {
 
 // 消息基础身份优先采用服务端 id；缺失时使用 reset 元数据或稳定内容。
 function chatMessageBaseKey(message: RenderMessage): string {
+  if (message.nativeDisplayId) return `message:${message.nativeDisplayId}`;
+  if (message.openclawPreambleKey) return `message:preamble:${message.openclawPreambleKey}`;
   if (message.id) return `message:${message.id}`;
+  if (message.localSlashId) return `message:slash:${message.localSlashId}:${message.role}`;
   if (message.divider) {
     return `divider:${message.divider.sealedAt ?? "unknown"}:${message.divider.fromReset ? 1 : 0}:${message.divider.truncated ? 1 : 0}`;
   }
@@ -361,9 +370,18 @@ function chatMessageBaseKey(message: RenderMessage): string {
 
 // 视觉组基础身份锚定首个带 id 的消息；全组无 id 时锚定首条稳定消息身份。
 function chatGroupBaseKey(messages: readonly RenderMessage[]): string {
+  const native = messages.find(message => message.nativeDisplayId);
+  if (native?.nativeDisplayId) return `group:${native.nativeDisplayId}`;
+  const preamble = messages.find(message => message.openclawPreambleKey);
+  if (preamble) return `group:preamble:${preamble.openclawPreambleKey}`;
   const identified = messages.find((message) => message.id);
   if (identified?.id) return `group:${identified.id}`;
+  const slash = messages.find(message => message.localSlashId);
+  if (slash) return `group:slash:${slash.localSlashId}:${slash.role}`;
   const first = messages[0];
+  // Live interim messages have receipt timestamps before history supplies ids.
+  // Process updates must not remount their group and reset its expanded state.
+  if (first?.ts != null) return `group:${first.role ?? "unknown"}:${first.ts}`;
   return first ? `group:${chatMessageBaseKey(first)}` : "group:empty";
 }
 
@@ -417,7 +435,7 @@ export function findChatSearchGroupKey<T extends RenderGroup>(
   anchor: ChatSearchAnchor,
 ): string | undefined {
   if (anchor.messageId) {
-    return groups.find(({ item }) => item.msgs.some((message) => message.id === anchor.messageId))?.key;
+    return groups.find(({ item }) => item.msgs.some((message) => message.id === anchor.messageId || message.sourceEventIds?.includes(anchor.messageId || "")))?.key;
   }
   const snippet = searchSnippetProbe(anchor.snippet);
   const query = normalizedSearchText(anchor.query);
@@ -445,7 +463,11 @@ export function keyedChatChildren<T>(
   const parentKey = chatMessageBaseKey(message);
   return keyedByOccurrence(children, (child) => {
     const type = child && typeof child === "object" ? (child as RenderPart).type : undefined;
-    const liveSlot = message.pending && kind === "part"
+    if (kind === "part" && child && typeof child === "object") {
+      const part = child as RenderPart;
+      if (part.segmentId) return `${parentKey}:${kind}:${part.sourceEventId || ""}:${part.segmentId}`;
+    }
+    const liveSlot = (message.pending || !!message.openclawPreambleKey) && kind === "part"
       && (type === "text" || type === "thinking" || type === "plan");
     return `${parentKey}:${kind}:${liveSlot ? `live:${type}` : stableHash(child)}`;
   });

@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { assertTrustedCodexTurn } = require("../app/agent-service/runtime-mcp-call-binding");
 const { openFixture, sendAndDrain, recoveryStore, SESSION_KEY, RUNTIME_ACCOUNT_ID } =
   require("./shoggoth-work-run-coordinator-unit.cjs");
 
@@ -32,6 +33,9 @@ async function main() {
       input.assertCurrent(); return input;
     });
     assert.equal(scope.runId, run.id, "runtime scope includes the authenticated Run identity");
+    assert.throws(() => assertTrustedCodexTurn(scope, run.id),
+      { code: "MCP_SESSION_INVALID" },
+      "a generic Run lease is not an owning Codex MCP call proof");
     Object.assign(value.host.threads[0].turns[0], { status: "completed" });
     value.host.emit({ known: true, type: "complete", method: "turn/completed",
       threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, status: "completed" });

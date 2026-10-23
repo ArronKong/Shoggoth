@@ -41,8 +41,6 @@ app.whenReady().then(async()=>{
       w.webContents.sendInputEvent({type:"char",keyCode:"\\r"});
       w.webContents.sendInputEvent({type:"keyUp",keyCode:"Return"});
       await w.webContents.executeJavaScript("window.checkPluginKeyboard()",true);
-      w.webContents.sendInputEvent({type:"keyDown",keyCode:"Escape"});
-      w.webContents.sendInputEvent({type:"keyUp",keyCode:"Escape"});
       w.webContents.sendInputEvent({type:"keyDown",keyCode:"Tab"});
       w.webContents.sendInputEvent({type:"keyUp",keyCode:"Tab"});
       const keyboard=await w.webContents.executeJavaScript("window.checkPluginTab()",true);
@@ -51,18 +49,10 @@ app.whenReady().then(async()=>{
       const dependency=await w.webContents.executeJavaScript("window.runPluginDependencyFixture()",true);
       const disconnect=await w.webContents.executeJavaScript("window.runPluginDisconnectFixture()",true);
       const defaultPlugins=await w.webContents.executeJavaScript("window.runPluginDefaultFixture()",true);
-      assert.equal((await w.webContents.executeJavaScript("window.preparePluginGitKeyboard()",true)).focused,true);
-      w.webContents.sendInputEvent({type:"keyDown",keyCode:"Return"});
-      w.webContents.sendInputEvent({type:"char",keyCode:"\\r"});
-      w.webContents.sendInputEvent({type:"keyUp",keyCode:"Return"});
-      await w.webContents.executeJavaScript("window.preparePluginGitSubmit()",true);
-      app.focus({steal:true});w.focus();w.webContents.focus();
-      for(const type of ["keyDown","keyUp"]) w.webContents.sendInputEvent({type,keyCode:"Tab"});
-      await w.webContents.executeJavaScript("window.checkPluginGitTab()",true);
-      w.webContents.sendInputEvent({type:"keyDown",keyCode:"Return"});
-      w.webContents.sendInputEvent({type:"char",keyCode:"\\r"});
-      w.webContents.sendInputEvent({type:"keyUp",keyCode:"Return"});
-      const git=await w.webContents.executeJavaScript("window.finishPluginGitFixture()",true);
+      const quickSetup=await w.webContents.executeJavaScript("window.runPluginQuickSetupFixture()",true);
+      quickSetup.screenshot=path.join(outputDir,'plugins-900-quick-setup.png');
+      fs.writeFileSync(quickSetup.screenshot,(await w.webContents.capturePage()).toPNG());
+      Object.assign(quickSetup,await w.webContents.executeJavaScript("window.finishPluginQuickSetupFixture()",true));
       const rollback=await w.webContents.executeJavaScript("window.runPluginRollbackFixture()",true);
       w.focus();w.webContents.focus();
       assert.equal((await w.webContents.executeJavaScript("window.preparePluginHostKeyboard()",true)).focused,true);
@@ -73,10 +63,29 @@ app.whenReady().then(async()=>{
       w.webContents.sendInputEvent({type:"keyUp",keyCode:"Return"});
       const hostKeyboard=await w.webContents.executeJavaScript("window.checkPluginHostKeyboard()",true);
       const hostTabs=await w.webContents.executeJavaScript("window.runPluginHostTabsFixture()",true);
+      const detailInstallEntry=await w.webContents.executeJavaScript("window.runPluginDetailInstallEntry()",true);
+      const installWorkflow=await w.webContents.executeJavaScript("window.preparePluginInstallPreview()",true);
+      assert.equal((await w.webContents.executeJavaScript("window.preparePluginInstallFocusTrap()",true)).focused,true);
+      w.focus();w.webContents.focus();
+      for(const type of ["keyDown","keyUp"]) w.webContents.sendInputEvent({type,keyCode:"Tab"});
+      Object.assign(installWorkflow,await w.webContents.executeJavaScript("window.checkPluginInstallFocusTrap()",true));
+      for (const [stage, action] of [["preview", null], ["progress", "window.startPluginDialogInstallation()"], ["result", "window.finishPluginDialogInstallation()"]]) {
+        if(stage==="result") {
+          w.webContents.sendInputEvent({type:"keyDown",keyCode:"Escape"});
+          w.webContents.sendInputEvent({type:"keyUp",keyCode:"Escape"});
+        }
+        if(action) Object.assign(installWorkflow,await w.webContents.executeJavaScript(action,true));
+        await w.webContents.executeJavaScript("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",true);
+        fs.writeFileSync(path.join(outputDir,'plugins-900-install-'+stage+'.png'),(await w.webContents.capturePage()).toPNG());
+      }
+      const installRecovery=await w.webContents.executeJavaScript("window.runPluginInstallRecoveryFixture()",true);
       const geometry=[],screenshots=[];
       for(const width of [900,390]) {
         w.setContentSize(width,1050);
         for(const theme of ["light","dark"]) {
+          geometry.push(await w.webContents.executeJavaScript('window.preparePluginListCapture('+JSON.stringify(theme)+')',true));
+          const listScreenshot=path.join(outputDir,'plugins-'+width+'-'+theme+'-list.png');
+          fs.writeFileSync(listScreenshot,(await w.webContents.capturePage()).toPNG()); screenshots.push(listScreenshot);
           geometry.push(await w.webContents.executeJavaScript('window.prepareBundledCapture('+JSON.stringify(theme)+')',true));
           const bundledScreenshot=path.join(outputDir,'plugins-'+width+'-'+theme+'-bundled.png');
           fs.writeFileSync(bundledScreenshot,(await w.webContents.capturePage()).toPNG()); screenshots.push(bundledScreenshot);
@@ -101,13 +110,10 @@ app.whenReady().then(async()=>{
           const screenshot=path.join(outputDir,'plugins-'+width+'-'+theme+'.png');
           fs.writeFileSync(screenshot,(await w.webContents.capturePage()).toPNG()); screenshots.push(screenshot);
           if(width===390) {
-            await w.webContents.executeJavaScript('document.querySelector("#plugin-git-url").closest("form").scrollIntoView({block:"start"})');
-            const gitForm=path.join(outputDir,'plugins-'+width+'-'+theme+'-git.png');
-            fs.writeFileSync(gitForm,(await w.webContents.capturePage()).toPNG()); screenshots.push(gitForm);
-            await w.webContents.executeJavaScript('document.querySelector("select[id^=rollback-code-]").parentElement.scrollIntoView({block:"start"})');
+            await w.webContents.executeJavaScript("window.preparePluginRollbackCapture()",true);
             const rollbackPanel=path.join(outputDir,'plugins-'+width+'-'+theme+'-rollback.png');
             fs.writeFileSync(rollbackPanel,(await w.webContents.capturePage()).toPNG()); screenshots.push(rollbackPanel);
-            await w.webContents.executeJavaScript('document.querySelector("main.content").scrollTop = document.querySelector("main.content").scrollHeight');
+            await w.webContents.executeJavaScript('(()=>{const d=document.querySelector("[role=dialog] > div");d.scrollTop=d.scrollHeight;})()');
             const detail=path.join(outputDir,'plugins-'+width+'-'+theme+'-tools.png');
             fs.writeFileSync(detail,(await w.webContents.capturePage()).toPNG()); screenshots.push(detail);
           }
@@ -116,13 +122,6 @@ app.whenReady().then(async()=>{
             const external=path.join(outputDir,'plugins-'+width+'-'+theme+'-'+host.toLowerCase()+'.png');
             fs.writeFileSync(external,(await w.webContents.capturePage()).toPNG()); screenshots.push(external);
           }
-          geometry.push(await w.webContents.executeJavaScript('window.prepareGoogleBundledDetailCapture()',true));
-          const googleDetail=path.join(outputDir,'plugins-'+width+'-'+theme+'-google-detail.png');
-          fs.writeFileSync(googleDetail,(await w.webContents.capturePage()).toPNG()); screenshots.push(googleDetail);
-          geometry.push(await w.webContents.executeJavaScript('window.prepareGoogleBundledPreviewCapture()',true));
-          const googlePreview=path.join(outputDir,'plugins-'+width+'-'+theme+'-google-preview.png');
-          fs.writeFileSync(googlePreview,(await w.webContents.capturePage()).toPNG()); screenshots.push(googlePreview);
-          await w.webContents.executeJavaScript('window.closeGoogleBundledPreview()',true);
         }
       }
       const bearer=await w.webContents.executeJavaScript('window.runPluginBearerFixture()',true);
@@ -133,18 +132,19 @@ app.whenReady().then(async()=>{
       const approvalScreenshot=path.join(outputDir,'plugins-390-dark-external-approval.png');
       fs.writeFileSync(approvalScreenshot,(await w.webContents.capturePage()).toPNG()); screenshots.push(approvalScreenshot);
       const bundledManagement=await w.webContents.executeJavaScript('window.runBundledManageFixture()',true);
-      const report={...result,oauth,bearer,externalActivity,dependency,disconnect,defaultPlugins,git,rollback,keyboard,hostKeyboard,hostTabs,bundledManagement,geometry,screenshots,verified:true};
+      const deferredOAuth=await w.webContents.executeJavaScript('window.runDeferredOAuthFixture()',true);
+      const report={...result,oauth,bearer,externalActivity,dependency,disconnect,defaultPlugins,quickSetup,rollback,keyboard,hostKeyboard,hostTabs,detailInstallEntry,installWorkflow,installRecovery,bundledManagement,deferredOAuth,geometry,screenshots,verified:true};
       fs.writeFileSync(path.join(outputDir,"report.json"),JSON.stringify(report,null,2)+"\\n");
       console.log(JSON.stringify(report)); passed=true;
-    })(),new Promise((_resolve,reject)=>{timeout=setTimeout(()=>reject(Error("Plugins page fixture deadline")),45000);})]);
+    })(),new Promise((_resolve,reject)=>{timeout=setTimeout(()=>reject(Error("Plugins page fixture deadline")),90000);})]);
   } catch(error) {
     console.error(error);
-    console.error(await w.webContents.executeJavaScript("JSON.stringify({errors:window.fixtureErrors,keys:window.fixtureKeys,writes:window.fixtureWrites,text:document.body.innerText.slice(0,6000)})"));
+    console.error(await w.webContents.executeJavaScript("JSON.stringify({errors:window.fixtureErrors,keys:window.fixtureKeys.slice(-8),writes:window.fixtureWrites.slice(-8),text:document.body.innerText.slice(0,6000)})"));
     fs.writeFileSync(path.join(outputDir,"failure.png"),(await w.webContents.capturePage()).toPNG());
   } finally {clearTimeout(timeout);w.destroy();app.exit(passed?0:1);}
 }).catch(error=>{console.error(error);app.exit(1)});`);
   const result = spawnSync(createRequire(path.join(root, "package.json"))("electron"), [main], {
-    encoding: "utf8", timeout: 60_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
+    encoding: "utf8", timeout: 120_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
   });
   process.stdout.write(result.stdout || "");
   if (result.status !== 0) process.stderr.write(result.stderr || String(result.error || ""));

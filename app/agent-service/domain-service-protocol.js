@@ -118,6 +118,7 @@ const DIRECT_INTERNAL_ERROR_MAP = Object.freeze({
   KANBAN_COMPLETION_REQUEST_INVALID: "STATE_CONFLICT",
   KANBAN_RUN_NOT_COMPLETED: "STATE_CONFLICT",
   CRON_RETRY_REFERENCE_INVALID: "STATE_CONFLICT",
+  CRON_SYSTEM_MANAGED: "STATE_CONFLICT",
   CRON_OVERLAP_SKIPPED: "STATE_CONFLICT",
   CRON_SCHEDULER_CLOSED: "CRON_UNAVAILABLE",
   CRON_SCHEDULER_CLOSING: "CRON_UNAVAILABLE",
@@ -534,6 +535,7 @@ function validateDomainServiceParams(method, params) {
       && validUuid(params.jobId) && validCursor(params.cursor)
       && validContentReadSize(params.maxBytes);
   } else if (method === "cron.job.create") {
+    if (ownDataObject(params)) params = { threadPolicy: "continue", threadId: null, ...params };
     valid = validOperationBase(params, [
       "operationId", "name", "enabled", "profileId", "prompt", "workspace", "schedule",
       "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "createdAt",
@@ -733,6 +735,15 @@ function validateKanbanRunItem(value, params) {
 }
 
 function validateCronRunItem(value, params) {
+  if (Object.hasOwn(value || {}, "cronOutput")) {
+    const { cronOutput, ...item } = value;
+    if (!require("./cron-output-policy").validCronOutput(cronOutput)) failResponse();
+    const validated = validateCronRunItem(item, params);
+    const terminal = ["completed", "failed", "canceled", "interrupted", "skipped"].includes(validated.run.status);
+    if ((cronOutput.disposition === "pending") === terminal
+      || cronOutput.disposition === "silent" && validated.run.status !== "completed") failResponse();
+    return { ...validated, cronOutput: structuredClone(cronOutput) };
+  }
   if (Object.hasOwn(value || {}, "sessionKey")) {
     const { sessionKey, ...item } = value;
     if (!validUuid(sessionKey)) failResponse();
@@ -749,7 +760,8 @@ function validateCronRunItem(value, params) {
 }
 
 function validateCronJob(value) {
-  if (!exactObject(value, CRON_JOB_FIELDS) || !validUuid(value.id)
+  if (!(exactObject(value, CRON_JOB_FIELDS) || exactObject(value, [...CRON_JOB_FIELDS, "systemManaged"]))
+    || (value.systemManaged !== undefined && typeof value.systemManaged !== "boolean") || !validUuid(value.id)
     || !validString(value.name, 512) || typeof value.enabled !== "boolean"
     || !validUuid(value.profileId) || !validCronWorkspace(value.workspace)
     || !validSchedule(value.schedule) || !MISFIRE_POLICIES.has(value.misfirePolicy)

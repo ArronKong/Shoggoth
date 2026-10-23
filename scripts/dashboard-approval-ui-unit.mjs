@@ -22,6 +22,7 @@ function load(file) {
     esModuleInterop: true, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
   const localRequire = name => {
+  if (name.endsWith("/i18n/promptCardResources")) return {};
     if (name === 'react-i18next') return { useTranslation: () => ({ t: key => key }) };
     if (name.endsWith('/api/client')) return { respondBackendPrompt: async (backend, input) => { calls.push({ backend, ...input }); return send(); } };
     if (name.endsWith('/components/ui')) return { useToast: () => ({ success: key => notifications.push(key), error: key => notifications.push(key) }) };
@@ -63,6 +64,8 @@ const button = label => renderer.root.findAllByType('button').find(button => tex
 const expanded = () => header().props['aria-expanded'];
 
 await mount();
+assert.ok(renderer.root.findAll((node) => node.props?.entry && node.props.agentName === 'My agent').length > 0,
+  'the approval card names the row agent instead of a generic subject');
 assert.equal(expanded(), false);
 assert.equal(renderer.root.findByProps({ id: header().props['aria-controls'] }).props['aria-hidden'], true);
 assert.equal(renderer.root.findByProps({ id: header().props['aria-controls'] }).props.inert, '');
@@ -86,6 +89,27 @@ assert.equal(renderer.root.findByType('img').props.src, '/avatar/stable-agent');
 assert.match(text(renderer.toJSON()), /git diff -- app\/manage-ui/);
 await settle(() => renderer.unmount());
 
+// Native questions can arrive as several allow_once choices on the dashboard.
+const taskOptions = [
+  { choice: 'once', kind: 'allow_once', label: 'macOS 系统原生后台服务 (Launchd 脚本)' },
+  { choice: 'runtime:1', kind: 'allow_once', label: 'Shoggoth 应用内 Cron 任务' },
+];
+await mount({ item: { ...item, allowedDecisions: ['once', 'runtime:1', 'deny'],
+  interactiveRequest: { ...request, approvalChoices: ['once', 'runtime:1', 'deny'], approvalOptions: taskOptions } } });
+for (const option of taskOptions) assert.ok(text(renderer.toJSON()).includes(option.label), 'Every answer must be readable without hover');
+assert.equal(button('chat.promptConfirmChoice').props.disabled, true);
+assert.equal(button('chat.promptAllowOnce (1)'), undefined);
+assert.equal(button('chat.promptAllowOnce (2)'), undefined);
+await settle(() => renderer.root.findByProps({ 'aria-label': taskOptions[1].label }).props.onChange());
+assert.equal(calls.length, 0, 'Selecting a row must not submit the approval');
+await settle(() => button('chat.promptConfirmChoice').props.onClick());
+assert.deepEqual(calls.at(-1), { backend: 'shoggoth', kind: 'approval', runId: request.runId,
+  requestId: request.requestId, choice: 'runtime:1' });
+assert.equal(renderer.toJSON(), null);
+await settle(() => renderer.unmount());
+calls.length = 0;
+refreshed = 0;
+
 // Native approval scopes keep their original choice and owning backend/run/request.
 const options = [
   { choice: 'runtime:4', kind: 'allow_always', scope: 'tool', label: 'Only this tool' },
@@ -98,12 +122,13 @@ assert.equal(renderer.root.findAllByType('button').filter(b => /promptDeny/.test
 assert.doesNotMatch(text(renderer.toJSON()), /Never allow/);
 let release;
 send = () => new Promise(resolve => { release = resolve; });
-await settle(() => button('chat.promptAllowTool').props.onClick());
-await settle(() => button('chat.promptAllowTool').props.onClick());
+const chooseTool = button('chat.promptAllowTool').props.onClick;
+await settle(() => chooseTool());
+await settle(() => chooseTool());
 await settle(() => row().props.onPointerLeave());
 assert.equal(calls.length, 1, 'Pending response suppresses double submission');
 assert.equal(expanded(), true, 'Response stays visible while submitting');
-assert.equal(button('chat.promptAllowTool').props.disabled, true);
+assert.equal(button('chat.promptAllowTool'), undefined, 'The approval disappears while its response is pending');
 assert.deepEqual(calls[0], { backend: 'grok-build', kind: 'approval', runId: 'owner-run', requestId: 'owner-request', choice: 'runtime:4' });
 await settle(() => release(resumed));
 assert.equal(renderer.toJSON(), null, 'Successful response removes only its own row');

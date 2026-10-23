@@ -86,6 +86,7 @@ function snapshotChecksum(snapshot) {
 class MemoryStore {
   constructor(options) {
     this.paths = options.paths;
+    this.readOnly = options.readOnly === true;
     this.fs = options.fs || fs;
     this.maxLogBytes = options.maxLogBytes ?? MAX_LOG_BYTES;
     this.opened = false;
@@ -96,6 +97,7 @@ class MemoryStore {
 
   _assertOpen(write = false) {
     if (!this.opened) throw memoryError("MEMORY_STORE_CLOSED", "Memory Store 未打开");
+    if (write && this.readOnly) throw memoryError("MEMORY_LEGACY_READ_ONLY", "旧记忆仅供迁移读取");
     if (write && this.poisonError) throw this.poisonError;
   }
   _dir(profileId) { return path.join(this.paths.agentsDir, assertId(profileId, "profileId"), "memory"); }
@@ -110,7 +112,7 @@ class MemoryStore {
   }
   close() { this.profiles.clear(); this.poisonError = null; this.uncertainProfiles.clear(); this.opened = false; }
   forgetProfile(profileId) { this._assertOpen(); this.profiles.delete(profileId); }
-  _empty(profileId) { return { profileId, revision: 0, items: new Map(), contentRevisions: new Map(),
+  _empty(profileId) { return { profileId, revision: 0, invalidationRevision: 0, items: new Map(), contentRevisions: new Map(),
     contentChangedIds: new Set(), itemWriteProofs: new Map() }; }
   _snapshot(state) {
     const snapshot = {
@@ -137,6 +139,7 @@ class MemoryStore {
     if (buffer.length === 0 || buffer.at(-1) === 0x0a) return buffer;
     const newline = buffer.lastIndexOf(0x0a);
     const size = newline < 0 ? 0 : newline + 1;
+    if (this.readOnly) return buffer.subarray(0, size);
     const fd = this.fs.openSync(target, this.fs.constants.O_RDWR | (this.fs.constants.O_NOFOLLOW || 0));
     try { validatePrivateStat(this.fs.fstatSync(fd), target); this.fs.ftruncateSync(fd, size); this.fs.fsyncSync(fd); }
     finally { this.fs.closeSync(fd); }
@@ -149,7 +152,7 @@ class MemoryStore {
     if (uncertain) throw uncertain;
     if (this.profiles.has(profileId)) return this.profiles.get(profileId);
     const targets = this._paths(profileId);
-    ensurePrivateDirectoryTree(targets.dir, this.paths.trustedRoot);
+    if (!this.readOnly) ensurePrivateDirectoryTree(targets.dir, this.paths.trustedRoot);
     const state = this._empty(profileId);
     const buffer = this._repairTail(targets.log);
     const lines = buffer.length === 0 ? [] : buffer.toString("utf8").slice(0, -1).split("\n");
@@ -172,6 +175,7 @@ class MemoryStore {
         if (seen.has(item.id)) throw memoryError("MEMORY_LOG_CORRUPT", "Memory journal batch id 重复");
         seen.add(item.id);
         const previous = state.items.get(item.id);
+        if (previous?.status === "active") state.invalidationRevision = record.seq;
         if (previous?.content !== item.content) state.contentRevisions.set(item.id, record.seq);
         if (previous && previous.content !== item.content) state.contentChangedIds.add(item.id);
         state.itemWriteProofs.set(item.id, { seq: record.seq, checksum: record.checksum });
@@ -198,12 +202,18 @@ class MemoryStore {
         throw memoryError("MEMORY_SNAPSHOT_CORRUPT", "Memory snapshot 与 journal 不一致");
       }
     }
-    if (!current) this._writeSnapshot(state);
+    if (!current && !this.readOnly) this._writeSnapshot(state);
     this.profiles.set(profileId, state);
     return state;
   }
   ensureProfile(profileId) { return this.getRevision(profileId); }
   getRevision(profileId) { return this._load(profileId).revision; }
+  // invalidationRevision is the last write that changed or retired an active
+  // item. New items and candidate promotions leave it unchanged.
+  getRevisions(profileId) {
+    const state = this._load(profileId);
+    return { revision: state.revision, invalidationRevision: state.invalidationRevision };
+  }
   get(profileId, id) {
     const item = this._load(profileId).items.get(assertId(id, "memory.id"));
     return item ? structuredClone(item) : null;
@@ -312,6 +322,7 @@ class MemoryStore {
     }
     for (const item of changed) {
       const previous = state.items.get(item.id);
+      if (previous?.status === "active") state.invalidationRevision = record.seq;
       if (previous?.content !== item.content) state.contentRevisions.set(item.id, record.seq);
       if (previous && previous.content !== item.content) state.contentChangedIds.add(item.id);
       state.itemWriteProofs.set(item.id, { seq: record.seq, checksum: record.checksum });

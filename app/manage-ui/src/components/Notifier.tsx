@@ -2,10 +2,12 @@ import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { getBoards, getConfig, getInspiration, getTask, getTaskBoard, listCronJobs, listInspirations } from "../api/client";
 import type { NotificationPrefs } from "../types";
+import { consumeCronNotification } from "../lib/cronNotifications";
 import { useToast } from "./ui";
 import { useEnabledBackends } from "../lib/backends";
 import { createAgentNameIndex, findAgentDisplayName, type AgentNameSource } from "../lib/agentDisplay";
 import { usesExplicitBoardIdentity } from "../lib/shoggothDomainUi";
+import { isGroupInternalSession } from "../lib/groupChat";
 import { inspirationNotificationStatus, readInspirationNotifications, type InspirationNotificationSnapshot } from "../lib/inspiration-notifications";
 import {
   agentOf,
@@ -34,11 +36,16 @@ import {
 
 const POLL_MS = 30000;
 const PENDING_CHAT_KEY = "openclaw.pendingChatSession";
-const DEFAULT_PREFS: NotificationPrefs = { chat: true, cron: true, task: true };
+const DEFAULT_PREFS: NotificationPrefs = { chat: true, cron: true, task: true, proactive: true };
 let navigationSequence = 0;
 
 async function navigateForTarget(category: NotifyCategory, target: NotifyTarget | null, unavailable: (failed: boolean) => void) {
   const sequence = ++navigationSequence;
+  if (category === "proactive" && typeof target === "object" && target?.kind === "chat") {
+    const key = target.sessionKey.startsWith("agent:") ? target.sessionKey : `agent:${target.agentId}:${target.sessionKey}`;
+    window.location.hash = `#/chat?backend=${encodeURIComponent(target.backendId)}&session=${encodeURIComponent(key)}`;
+    return;
+  }
   if (category === "chat" && typeof target === "string" && target) {
     try {
       sessionStorage.setItem(PENDING_CHAT_KEY, target);
@@ -190,7 +197,8 @@ export default function Notifier() {
       socket.onmessage = (ev) => {
         if (closedByUs || ws !== socket) return;
         let f: { type?: string; id?: string; ok?: boolean; event?: string;
-          payload?: { agents?: AgentNameSource[]; state?: string; sessionKey?: string; message?: unknown } };
+          payload?: { agents?: AgentNameSource[]; state?: string; sessionKey?: string; message?: unknown;
+            backendId?: string; agentId?: string; noticeId?: string; change?: string; attention?: boolean } };
         try {
           f = JSON.parse(ev.data);
         } catch {
@@ -211,6 +219,18 @@ export default function Notifier() {
           void refreshAgentNames();
           return;
         }
+        if (f.type === "event" && f.event === "skills.changed" && typeof f.payload?.noticeId === "string") {
+          const key = `learning:${f.payload.noticeId}`;
+          if (seen.has(key)) return;
+          seen.add(key); if (seen.size > 200) seen.delete(seen.values().next().value as string);
+          window.dispatchEvent(new CustomEvent("shoggoth:skills-changed", { detail: f.payload }));
+          if (prefsReadyRef.current && prefsRef.current.proactive && f.payload.attention) {
+            toastRef.current.info(f.payload.change === "pending_review" ? "自动学习生成了一条待审核提案，可在技能页查看。"
+              : ["failed", "outcome_unknown"].includes(f.payload.change ?? "") ? "后台复盘未完成，可在技能页查看原因。"
+                : "自动学习技能已更新，可在技能页查看来源和版本。");
+          }
+          return;
+        }
         if (f.type !== "event" || f.event !== "chat" || f.payload?.state !== "final") return;
         const sk = f.payload.sessionKey;
         const msg = f.payload.message as { timestamp?: number } | undefined;
@@ -223,7 +243,9 @@ export default function Notifier() {
         const payload = chatNotificationFor(msg, sk);
         if (!payload) return;
         const generation = prefsGeneration.current;
-        void refreshAgentNames().then(() => {
+        // 群成员在群里用的内部会话不单独通知；群消息在群面板里看。
+        void isGroupInternalSession(sk).then((internal) => internal ? false : refreshAgentNames().then(() => true)).then((notify) => {
+          if (!notify) return;
           if (closedByUs || !prefsRef.current.chat || generation !== prefsGeneration.current) return;
           const title = findAgentDisplayName(agentNames, agentOf(sk)) || payload.title;
           void fireNotification({ ...payload, title }, { onClick: () => { void navigate("chat", sk); } });
@@ -276,12 +298,9 @@ export default function Notifier() {
         const jobs = await listCronJobs();
         if (!alive || !prefsRef.current.cron || generation !== prefsGeneration.current) return;
         for (const j of jobs) {
-          const last = j.lastRunAt ?? 0;
-          const prev = cronLastRun.get(j.id);
-          cronLastRun.set(j.id, last);
           // Notify only when a KNOWN job's run timestamp advances (seed silently;
           // a brand-new job that already ran is not announced).
-          if (cronSeeded && prev !== undefined && last > prev) {
+          if (consumeCronNotification(cronLastRun, j, cronSeeded)) {
             const status = j.lastStatus ? ` · ${j.lastStatus}` : "";
             const target: NotifyTarget = { kind: "cron", jobId: j.id, backendId: j.backendId };
             fireNotification({

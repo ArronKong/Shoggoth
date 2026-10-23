@@ -1,7 +1,8 @@
 "use strict";
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
-const { RuntimeMcpCallBindings, bindingElicitation, parseBindingElicitation } = require("../app/agent-service/runtime-mcp-call-binding");
+const { RuntimeMcpCallBindings, bindingElicitation, parseBindingElicitation,
+  assertTrustedCodexTurn } = require("../app/agent-service/runtime-mcp-call-binding");
 const { openFixture, sendAndDrain, PROFILE_ID, RUNTIME_ACCOUNT_ID } = require("./shoggoth-work-run-coordinator-unit.cjs");
 const token = crypto.randomBytes(32).toString("base64url");
 const input = () => ({ callId: crypto.randomUUID(), name: "mcp_server_call", arguments: { a: 1, z: 2 },
@@ -23,6 +24,44 @@ const params = value => ({ ...bindingElicitation(value), serverName: "shoggoth" 
   assert.equal(store.consume({ ...one, arguments: { z: 2, a: 1 } }).runId, "run-one");
   assert.throws(() => store.consume(one), { code: "MCP_SESSION_INVALID" });
   assert.throws(() => register(one), { code: "MCP_SESSION_INVALID" });
+  const turnStore = new RuntimeMcpCallBindings();
+  const turnCall = input();
+  const codexTurn = { threadId: "thread-owned", turnId: "turn-owned" };
+  const addTurn = (call, selectedTurn = codexTurn) => turnStore.register({ ...call,
+    proof: parseBindingElicitation(params(call)), runId: "run-owned", codexTurn: selectedTurn,
+    assertCurrent() { if (!live) throw new Error("revoked"); } });
+  addTurn(turnCall);
+  const rotatedTurnCall = { ...turnCall, sessionToken: crypto.randomBytes(32).toString("base64url") };
+  assert.throws(() => addTurn(rotatedTurnCall,
+    { threadId: codexTurn.threadId, turnId: "another-turn" }),
+  { code: "MCP_SESSION_INVALID" }, "auth refresh cannot move the call to another turn");
+  addTurn(rotatedTurnCall);
+  const turnBound = turnStore.consume(rotatedTurnCall);
+  assert.equal(assertTrustedCodexTurn(turnBound, "run-owned").turnId, "turn-owned");
+  assert.equal(assertTrustedCodexTurn(turnBound, "run-owned").turnId, "turn-owned",
+    "the turn proof can be rechecked while its one-use call is live");
+  assert.throws(() => assertTrustedCodexTurn(turnBound, "another-run"),
+    { code: "MCP_SESSION_INVALID" });
+  assert.throws(() => assertTrustedCodexTurn({ ...turnBound, runId: "another-run" }, "run-owned"),
+    { code: "MCP_SESSION_INVALID" }, "the scope Run must match the issued proof");
+  assert.throws(() => assertTrustedCodexTurn({ runId: "run-owned", trustedCodexTurn: {
+    ...turnBound.trustedCodexTurn } }, "run-owned"),
+  { code: "MCP_SESSION_INVALID" }, "a copied or model-supplied thread ID has no authority");
+  live = false;
+  assert.throws(() => assertTrustedCodexTurn(turnBound, "run-owned"), /revoked/u);
+  live = true;
+  turnStore.releaseRun("run-owned");
+  assert.throws(() => assertTrustedCodexTurn(turnBound, "run-owned"),
+    { code: "MCP_SESSION_INVALID" }, "releaseRun removes the brand even while the host is live");
+  const clearStore = new RuntimeMcpCallBindings();
+  const clearCall = input();
+  clearStore.register({ ...clearCall, proof: parseBindingElicitation(params(clearCall)),
+    runId: "run-clear", codexTurn, assertCurrent() {} });
+  const clearBound = clearStore.consume(clearCall);
+  assertTrustedCodexTurn(clearBound, "run-clear");
+  clearStore.clear();
+  assert.throws(() => assertTrustedCodexTurn(clearBound, "run-clear"),
+    { code: "MCP_SESSION_INVALID" }, "clear removes all issued turn brands");
   const expired = input(); register(expired); now += 60_001;
   assert.throws(() => store.consume(expired), { code: "MCP_SESSION_INVALID" });
   const revoked = input(); register(revoked); live = false;
@@ -66,6 +105,7 @@ const params = value => ({ ...bindingElicitation(value), serverName: "shoggoth" 
   }
 
   const value = await openFixture();
+  let capturedTurn;
   try {
     const { ack } = await sendAndDrain(value);
     const run = value.dispatcher.getRun(ack.run.id);
@@ -77,12 +117,26 @@ const params = value => ({ ...bindingElicitation(value), serverName: "shoggoth" 
     assert.deepEqual(await value.host.request("mcpServer/elicitation/request", binding), { action: "accept", content: {} });
     let executions = 0;
     const result = await value.coordinator.invokeBoundRuntimeMcpCall(call, scope => {
-      assert.equal(scope.runId, run.id); scope.assertCurrent(); executions += 1; return "matched";
+      assert.equal(scope.runId, run.id); scope.assertCurrent();
+      capturedTurn = assertTrustedCodexTurn(scope, run.id);
+      assert.equal(capturedTurn.threadId, run.runtimeSessionRef.sessionId);
+      assert.equal(capturedTurn.turnId, run.runtimeTurnRef.turnId);
+      executions += 1; return "matched";
     });
     assert.equal(result, "matched"); assert.equal(executions, 1);
     await assert.rejects(value.coordinator.invokeBoundRuntimeMcpCall(call, () => { executions += 1; }));
     assert.equal(executions, 1);
     assert.equal(value.dispatcher.getRun(run.id).status, "running", "internal binding never opens a user approval card");
+    Object.assign(value.host.threads[0].turns[0], { status: "completed" });
+    value.host.emit({ known: true, type: "complete", method: "turn/completed",
+      threadId: capturedTurn.threadId, turnId: capturedTurn.turnId, status: "completed" });
+    await value.coordinator.waitForIdle(run.id);
+    assert.throws(() => assertTrustedCodexTurn({ runId: run.id,
+      trustedCodexTurn: capturedTurn }, run.id),
+      "completed turns cannot authorize later Codex Security work");
   } finally { await value.coordinator.close(); }
+  assert.throws(() => assertTrustedCodexTurn({ runId: capturedTurn.runId,
+    trustedCodexTurn: capturedTurn }, capturedTurn.runId),
+    "Codex turn authority must die with the owning Coordinator");
   console.log("PASS Runtime MCP call binding: exact host/thread/turn, arguments, account, session restart, expiry, capacity and one-use fence");
 })().catch(error => { console.error(error); process.exitCode = 1; });

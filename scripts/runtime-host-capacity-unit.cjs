@@ -4,17 +4,21 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const path = require("node:path");
+const fs = require("node:fs");
+const os = require("node:os");
 const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
-const { DEFAULT_MAX_HOSTS, HARD_MAX_HOSTS } = require("../app/agent-service/runtime-pool-capacity");
+const { DEFAULT_MAX_HOSTS, HARD_MAX_HOSTS, isPoolBindingIdle } = require("../app/agent-service/runtime-pool-capacity");
 const { PiRuntimePool } = require("../app/agent-service/pi-runtime-pool");
 const { DeepSeekHarnessRuntimePool } = require("../app/agent-service/deepseek-harness-runtime-pool");
 const { GrokBuildRuntimePool } = require("../app/agent-service/grok-build-runtime-pool");
 const { AntigravityRuntimePool } = require("../app/agent-service/antigravity-runtime-pool");
 const { ClaudeCodeRuntimePool } = require("../app/agent-service/claude-code-runtime-pool");
+const { OpenCodeRuntimePool } = require("../app/agent-service/opencode-runtime-pool");
 const pools = [
   ["pi", PiRuntimePool], ["deepseek-harness", DeepSeekHarnessRuntimePool],
   ["grok-build", GrokBuildRuntimePool], ["antigravity", AntigravityRuntimePool],
   ["claude-code", ClaudeCodeRuntimePool],
+  ["opencode", OpenCodeRuntimePool],
 ];
 const capacity = { code: "RUNTIME_HOST_CAPACITY" };
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -24,16 +28,18 @@ function fixture(runtime, Pool, options = {}) {
   const account = DEFAULT_RUNTIME_ACCOUNTS.find(value => value.runtime === runtime);
   const binding = id => ({ runtime, runtimeProfileId: id, runtimeAccountId: account.id });
   const homeKey = { pi: "PI_CODING_AGENT_DIR", "grok-build": "GROK_HOME", antigravity: "HOME",
-    "claude-code": "CLAUDE_CONFIG_DIR", "deepseek-harness": "DSH_HOME" }[runtime];
+    "claude-code": "CLAUDE_CONFIG_DIR", "deepseek-harness": "DSH_HOME", opencode: "XDG_DATA_HOME" }[runtime];
   const environment = value => Object.freeze({
     runtime, runtimeAccountId: value.runtimeAccountId, kind: "native-user",
     installationKind: "system", homeKind: "system-default", home: "/tmp/fixture-home",
     nativeHome: "/tmp/fixture-home", integrationRoot: null,
+    ...(runtime === "opencode" ? { configSourceHome: "/tmp/fixture-home" } : {}),
     strategy: "native", binaryPath: "/tmp/fixture-binary", launchArgs: Object.freeze([]),
     spawnEnv: Object.freeze({ HOME: "/tmp/fixture-home", [homeKey]: "/tmp/fixture-home" }),
     configurationMode: ["antigravity", "deepseek-harness"].includes(runtime) ? "integration" : "native",
   });
   const pool = new Pool({
+    maxHosts: DEFAULT_MAX_HOSTS,
     runtimeAccountLookup: id => id === account.id ? account : null,
     runtimeAccountResolver: { resolve: environment },
     canRetireHost: () => true,
@@ -50,7 +56,15 @@ function fixture(runtime, Pool, options = {}) {
     },
     ...options,
   });
-  return { pool, hosts, binding, get: (id, workspace = `/tmp/${id}`) => pool.get(binding(id), { workspace }) };
+  const root = runtime === "opencode" ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-oc-cap-"))) : null;
+  if (root) {
+    const stopAll = pool.stopAll.bind(pool);
+    pool.stopAll = async () => { try { return await stopAll(); } finally { fs.rmSync(root, { recursive: true, force: true }); } };
+  }
+  return { pool, hosts, binding, get: (id, workspace = `/tmp/${id}`) => {
+    if (root) { workspace = path.join(root, path.basename(workspace)); fs.mkdirSync(workspace, { recursive: true }); }
+    return pool.get(binding(id), { workspace });
+  } };
 }
 
 for (const [runtime, Pool] of pools) {
@@ -113,13 +127,38 @@ for (const [runtime, Pool] of pools) {
     assert.equal(f.pool.entries.size, 1);
     await f.pool.stopAll();
   });
+
+  test(`${runtime}: binding idle proof includes every workspace and rejects unknown or pending host activity`, async () => {
+    const f = fixture(runtime, Pool);
+    const first = await f.get("profile", "/tmp/one"), second = await f.get("profile", "/tmp/two");
+    first.idle = true;
+    assert.equal(isPoolBindingIdle(f.pool, f.binding("profile")), false);
+    second.idle = true;
+    assert.equal(isPoolBindingIdle(f.pool, f.binding("profile")), true);
+    first.gate = deferred();
+    const pending = first.modelsList();
+    assert.equal(isPoolBindingIdle(f.pool, f.binding("profile")), false);
+    first.gate.resolve(); await pending;
+    second.idle = undefined;
+    assert.equal(isPoolBindingIdle(f.pool, f.binding("profile")), false);
+    second.idle = true;
+    f.pool.blockedProfiles.add("profile");
+    assert.equal(isPoolBindingIdle(f.pool, f.binding("profile")), false);
+    f.pool.blockedProfiles.clear();
+    const entry = f.pool.entries.values().next().value;
+    entry.capacity.ready = false;
+    assert.equal(isPoolBindingIdle(f.pool, f.binding("profile")), false);
+    entry.capacity.ready = true;
+    entry.capacity.retiring = true;
+    assert.equal(isPoolBindingIdle(f.pool, f.binding("profile")), false);
+    await f.pool.stopAll();
+  });
 }
 
 test("native Host idle predicates refuse active turns, control work, pending RPC and approvals", () => {
   const specs = [
     ["pi", "PiRuntimeHost", { activeTurns: new Map(), turnProcesses: new Map(), controlProcesses: new Map() }, "turnProcesses"],
     ["claude-code", "ClaudeCodeRuntimeHost", { activeTurns: new Map(), controlProcesses: new Map(), controlQueries: new Set() }, "controlQueries"],
-    ["antigravity", "AntigravityRuntimeHost", { activeTurns: new Map(), controlProcesses: new Map(), controlRequests: new Map() }, "controlRequests"],
   ];
   for (const [runtime, name, fields, field] of specs) {
     const Host = require(path.join("..", "app", "agent-service", `${runtime}-runtime-host`))[name];
@@ -129,11 +168,12 @@ test("native Host idle predicates refuse active turns, control work, pending RPC
     if (host[field] instanceof Set) host[field].add("work"); else host[field].set("work", {});
     assert.equal(host.canRetireIdle(), false);
   }
-  for (const [runtime, name, transport] of [
-    ["deepseek-harness", "DeepSeekHarnessRuntimeHost", "process"],
-    ["grok-build", "GrokBuildRuntimeHost", "rpc"],
+  for (const [module, name, transport] of [
+    ["deepseek-harness-runtime-host", "DeepSeekHarnessRuntimeHost", "process"],
+    ["grok-build-runtime-host", "GrokBuildRuntimeHost", "rpc"],
+    ["antigravity-acp-runtime-host", "AntigravityAcpRuntimeHost", "rpc"],
   ]) {
-    const Host = require(path.join("..", "app", "agent-service", `${runtime}-runtime-host`))[name];
+    const Host = require(path.join("..", "app", "agent-service", module))[name];
     const child = { stdin: { writableLength: 0 } };
     const rpc = { pending: new Map(), activeServerRequests: 0, activeServerRequestIds: new Set(), child, closed: false, ended: false };
     const host = Object.assign(Object.create(Host.prototype), { state: "ready", activeTurns: new Map(), child, [transport]: rpc });
@@ -142,4 +182,24 @@ test("native Host idle predicates refuse active turns, control work, pending RPC
     rpc.activeServerRequests = 1; rpc.activeServerRequestIds.add("approval");
     assert.equal(host.canRetireIdle(), false);
   }
+});
+
+test("capacity ownership recognizes an acquired V1 handle before native I/O starts", () => {
+  const { WorkRunCoordinator } = require("../app/agent-service/work-run-coordinator");
+  const raw = {}, sibling = {};
+  const binding = { runtime: "antigravity", runtimeProfileId: "agent", runtimeAccountId: "shared" };
+  const coordinator = Object.assign(Object.create(WorkRunCoordinator.prototype), {
+    state: "open", poisonError: null,
+    dispatcher: { listRuns: () => [{ id: "starting", status: "starting", profileId: "agent" }] },
+    runHostAssignments: new Map([["starting", { host: { ...binding, host: raw } }]]),
+    runExecutionContracts: new Map([["starting", { ...binding, runId: "starting", profileId: "agent" }]]),
+  });
+  assert.equal(coordinator.isRuntimeHostIdle(binding, raw), false);
+  assert.equal(coordinator.isRuntimeHostIdle(binding, sibling), true);
+  coordinator.runHostAssignments.set("starting", {});
+  assert.equal(coordinator.isRuntimeHostIdle(binding, sibling), false);
+  coordinator.runHostAssignments.clear();
+  assert.equal(coordinator.isRuntimeHostIdle(binding, raw), false);
+  coordinator.runExecutionContracts.set("starting", { runtime: "pi" });
+  assert.equal(coordinator.isRuntimeHostIdle(binding, sibling), false);
 });

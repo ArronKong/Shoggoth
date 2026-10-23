@@ -8,8 +8,6 @@ const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { validRuntimeProfileId } = require("./runtime-adapter");
 
 const PI_RUNTIME = "pi";
-const MIN_PI_VERSION = Object.freeze([0, 84, 4]);
-const MAX_PI_VERSION_EXCLUSIVE = Object.freeze([0, 85, 0]);
 const DEFAULT_PI_PERMISSION_POLICY = Object.freeze({
   approvalPolicy: "on-request",
   sandbox: "danger-full-access",
@@ -152,20 +150,6 @@ function parsePiVersion(value) {
   return parts.every((part) => Number.isSafeInteger(part)) ? Object.freeze(parts) : null;
 }
 
-function compareVersions(left, right) {
-  for (let index = 0; index < 3; index += 1) {
-    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1;
-  }
-  return 0;
-}
-
-function supportsPiVersion(value) {
-  const version = Array.isArray(value) ? value : parsePiVersion(value);
-  return Boolean(version && version.length === 3
-    && compareVersions(version, MIN_PI_VERSION) >= 0
-    && compareVersions(version, MAX_PI_VERSION_EXCLUSIVE) < 0);
-}
-
 function normalizePiPermissionPolicy(value = DEFAULT_PI_PERMISSION_POLICY) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || !VALID_APPROVAL_POLICIES.has(value.approvalPolicy)
@@ -261,7 +245,12 @@ function buildPiRpcArgs(options = {}) {
   const excluded = policy.sandbox === "read-only"
     ? "bash,powershell,edit,write"
     : policy.sandbox === "workspace-write" ? "bash,powershell" : "powershell";
-  args.push("--exclude-tools", excluded);
+  if (options.workspaceExecutionVersion === 1) args.push("--no-builtin-tools", "--no-mcp");
+  else args.push("--exclude-tools", excluded);
+  // Ordinary turns do not carry Pi's index of every native SKILL.md (Shoggoth
+  // Skills come from skill_catalog). A /skill:name turn keeps native skills so
+  // the command still expands; command discovery is separate and unchanged.
+  if (options.nativeSkills !== true) args.push("--no-skills");
   if (options.model !== null && options.model !== undefined) {
     const model = parsePiModelRef(options.model);
     if (!model) throw runtimeError("RUNTIME_MODEL_UNAVAILABLE", "Pi model is invalid");
@@ -278,8 +267,6 @@ function buildPiRpcArgs(options = {}) {
 
 module.exports = {
   DEFAULT_PI_PERMISSION_POLICY,
-  MAX_PI_VERSION_EXCLUSIVE,
-  MIN_PI_VERSION,
   PI_RUNTIME,
   assertPiExtensionPath,
   buildPiRpcArgs,
@@ -294,5 +281,4 @@ module.exports = {
   resolvePiBinary,
   resolvePiExecutable,
   resolvePiLaunch,
-  supportsPiVersion,
 };

@@ -24,16 +24,18 @@ vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(requir
   require: name => name.endsWith(".css") ? {}
     : name === "react-dom" ? { createPortal: node => node }
     : name === "react-i18next" ? { useTranslation: () => ({ t: key => key }) }
+    : name === "../lib/useComposerPopupPosition" ? { useComposerPopupPosition: () => ({}) }
     : name === "../components/FilterTabs" ? () => null
     : name === "../components/FusionLoader" ? ({ label }) => React.createElement("span", { role: "status" }, label)
-    : name === "./chatIcons" ? { IconSearch: () => React.createElement("svg", { "aria-hidden": true }) }
+    : name === "./chatIcons" ? { IconSearch: () => React.createElement("svg", { "aria-hidden": true }), IconModel: () => React.createElement("svg", { "aria-hidden": true }) }
     : require(name),
   document: { addEventListener() {}, removeEventListener() {} },
   requestAnimationFrame: callback => { callback(); return 1; },
   cancelAnimationFrame() {},
 });
 const Menu = mod.exports.default;
-const trigger = renderer => renderer.root.findByProps({ className: "chat-pill chat-pill--select chat-pill--model" });
+const trigger = renderer => renderer.root.findByProps({ "aria-haspopup": "listbox" });
+const triggerLabel = renderer => trigger(renderer).findByProps({ className: "chat-pill__label" }).children.join("");
 const contents = renderer => JSON.stringify(renderer.toJSON());
 const choice = { id: "native-default", name: "Native Default", provider: "native" };
 
@@ -73,7 +75,7 @@ test("failed refresh preserves the current model and cached choices remain selec
     loadError: true, onSelect: (...args) => { selected = args; }, onRefresh() {},
   })); });
   try {
-    assert.equal(trigger(renderer).children.join(""), choice.name);
+    assert.equal(triggerLabel(renderer), choice.name);
     act(() => { trigger(renderer).props.onClick(); });
     assert.equal(renderer.root.findAllByProps({ role: "alert" }).length, 1);
     const option = renderer.root.findByProps({ role: "option" });
@@ -84,6 +86,19 @@ test("failed refresh preserves the current model and cached choices remain selec
   } finally { act(() => renderer.unmount()); }
 });
 
+test("deleting the selected provider never activates another provider with the same model ID", () => {
+  let renderer;
+  act(() => { renderer = create(React.createElement(Menu, {
+    models: [{ id: "same", name: "Other Provider Model", provider: "other" }],
+    activeModel: "same", activeProvider: "deleted", onSelect() {},
+  })); });
+  try {
+    assert.equal(triggerLabel(renderer), "same");
+    act(() => { trigger(renderer).props.onClick(); });
+    assert.equal(renderer.root.findByProps({ role: "option" }).props["aria-selected"], false);
+  } finally { act(() => renderer.unmount()); }
+});
+
 test("no matches means a search miss and a late catalog resolves the default model label", () => {
   let renderer;
   const props = { activeModel: choice.id, activeProvider: choice.provider, onSelect() {} };
@@ -91,7 +106,7 @@ test("no matches means a search miss and a late catalog resolves the default mod
   try {
     act(() => { trigger(renderer).props.onClick(); });
     act(() => { renderer.update(React.createElement(Menu, { ...props, models: [choice] })); });
-    assert.equal(trigger(renderer).children.join(""), choice.name);
+    assert.equal(triggerLabel(renderer), choice.name);
     assert.equal(renderer.root.findByProps({ role: "option" }).props["aria-selected"], true);
     act(() => { renderer.root.findByType("input").props.onChange({ target: { value: "missing" } }); });
     assert.match(contents(renderer), /chat.noModelMatch/);

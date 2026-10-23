@@ -25,7 +25,7 @@ const {
   resolveCodexSystemBinary,
 } = require("./agent-service/codex-runtime-paths");
 const { resolveGrokBuildBinary } = require("./agent-service/grok-build-runtime-paths");
-const { resolveAntigravityBinary } = require("./agent-service/antigravity-runtime-paths");
+const { antigravityUsedOnThisMac, resolveAntigravityBinary } = require("./agent-service/antigravity-runtime-paths");
 const { resolvePiBinary } = require("./agent-service/pi-runtime-paths");
 const { resolveClaudeCodeBinary } = require("./agent-service/claude-code-runtime-paths");
 const { resolveOpenCodeBinary } = require("./agent-service/opencode-runtime-paths");
@@ -82,6 +82,13 @@ const AUTH_SPECS = Object.freeze([
     credentialProbe: "runtime",
     loginArgs: Object.freeze([]),
     logoutArgs: Object.freeze([]),
+    // Sign-in runs Shoggoth's own script (installs the ACP server when missing).
+    loginScript: "antigravity-acp-login.js",
+    unavailableReasons: Object.freeze({
+      ANTIGRAVITY_ACP_NOT_INSTALLED: "Antigravity ACP server is not installed; Sign in installs it",
+      ANTIGRAVITY_ACP_INTEGRITY_FAILED: "Antigravity ACP server failed verification; Sign in reinstalls it",
+      ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED: "Antigravity ACP server is not available for this Mac",
+    }),
     docsUrl: "https://antigravity.google/docs/cli/install/",
   }),
   Object.freeze({
@@ -194,6 +201,7 @@ function resolveBinary(account, options) {
     parentEnv: options.parentEnv,
     homedir: options.userHome,
     fs: options.fs,
+    paths: options.paths,
   };
   return options.binaryResolvers[account.runtime](binaryOptions);
 }
@@ -244,6 +252,7 @@ function createRuntimeCliAuth(options = {}) {
     parentEnv,
     userHome,
     repoRoot: options.repoRoot,
+    executablePath: options.executablePath,
     packaged: options.packaged,
     resourcesPath: options.resourcesPath,
     platform: options.platform,
@@ -273,16 +282,33 @@ function createRuntimeCliAuth(options = {}) {
     if (!unavailableReason) {
       try {
         binaryPath = resolveBinary(account, context);
-      } catch {
-        unavailableReason = `${spec.name} CLI is not installed or executable`;
+      } catch (error) {
+        unavailableReason = spec.unavailableReasons?.[error?.code]
+          || `${spec.name} CLI is not installed or executable`;
       }
     }
+    const loginCommand = spec.loginScript && !accountHome.error && !authorityConflict
+      && typeof context.executablePath === "string" && typeof context.repoRoot === "string"
+      ? Object.freeze({
+        executable: path.resolve(context.executablePath),
+        args: Object.freeze([
+          path.join(path.resolve(context.repoRoot), "app", "agent-service", spec.loginScript),
+          "--account", account.id,
+        ]),
+        env: Object.freeze({ ELECTRON_RUN_AS_NODE: "1" }),
+      })
+      : null;
+    // Antigravity's sign-in installs its server. Without one, the product being
+    // on this Mac is what makes that sign-in available.
+    const installableOnSignIn = binaryPath === null && account.runtime === "antigravity" && !accountHome.error
+      && !authorityConflict && antigravityUsedOnThisMac({ fs: fileSystem, parentEnv, homedir: userHome });
     return Object.freeze({
       runtime: account.runtime,
       runtimeAccountId: account.id,
       name: spec.name,
       binaryPath,
       ...(binaryPath === null ? { unavailableReason } : {}),
+      ...(installableOnSignIn ? { installableOnSignIn: true } : {}),
       accountHome: path.resolve(accountHome.home),
       processHome: account.runtime === "antigravity"
         ? path.resolve(accountHome.home) : userHome,
@@ -292,6 +318,7 @@ function createRuntimeCliAuth(options = {}) {
       credentialProbe: spec.credentialProbe,
       loginArgs: authorityConflict ? Object.freeze([]) : spec.loginArgs,
       logoutArgs: authorityConflict ? Object.freeze([]) : spec.logoutArgs,
+      ...(loginCommand ? { loginCommand } : {}),
       docsUrl: spec.docsUrl,
     });
   });

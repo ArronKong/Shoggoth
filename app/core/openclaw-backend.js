@@ -18,6 +18,13 @@
 // proxy untouched, so getAgents()/getModelChoices()/getSessionRows() stay empty
 // here — this backend only contributes the management RPC data the proxy can't.
 
+function supportsOpenClawSteering(version) {
+  const parts = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u.exec(String(version || ""));
+  if (!parts) return false;
+  const [year, month, patch] = parts.slice(1).map(Number);
+  return year > 2026 || (year === 2026 && (month > 9 || (month === 9 && patch >= 6)));
+}
+
 const fs = require("node:fs");
 const { providerPublicDigest } = require("./openclaw-model-change");
 const { renameProvider, renameDigest, configReferences: providerRenameReferences, profileRef: renameProfileRef } = require("./openclaw-provider-rename");
@@ -40,6 +47,11 @@ const {
   projectStandingGrantRevokeResult,
 } = require("./agent-backend");
 const { OpenClawUpdateController } = require("./openclaw-self-updater");
+const { createOpenClawLocalRuntimeScope } = require("./openclaw-local-runtime-scope");
+const { resolveOpenclawBin } = require("../cli-runtime/openclaw");
+const { createEndpointGenerationGuard } = require("./upstream-endpoint-generation");
+const { historyError, historySource, historyPageOptions, encodeHistoryCursor,
+  decodeHistoryCursor, historyPage } = require("./chat-history-page");
 const {
   normalizeExternalPluginQuery,
   supportedExternalPluginVersion,
@@ -111,23 +123,28 @@ const OPENCLAW_MODEL_APIS = Object.freeze([
   "azure-openai-responses",
 ]);
 
-// GUI-launched .app 的 PATH 修复（main.js 灌 login-shell PATH）可能超时降级，
-// 自更新命令照 hermes-backend resolveHermesBin 的模式先探已知安装位置。
-function resolveOpenclawBin() {
-  if (process.env.OPENCLAW_BIN) return process.env.OPENCLAW_BIN;
-  const candidates = [
-    "/opt/homebrew/bin/openclaw",
-    "/usr/local/bin/openclaw",
-    path.join(os.homedir(), ".npm-global", "bin", "openclaw"),
-  ];
-  for (const candidate of candidates) {
-    try {
-      if (fs.statSync(candidate).isFile() || fs.lstatSync(candidate).isSymbolicLink()) return candidate;
-    } catch {
-      /* not present, try next */
-    }
+// 官方 Control UI「模型 Provider」页的凭据通道（2026.9+ 网关）：列、存、删 API Key
+// 只走这三个 RPC。网关未声明时才回退到逐 Agent 的 `openclaw models auth` CLI。
+const GATEWAY_CREDENTIAL_RPC_METHODS = Object.freeze(["models.authStatus", "models.authSetApiKey", "models.authLogout"]);
+const GATEWAY_CREDENTIAL_RPC_TIMEOUT_MS = 30000;
+// 凭据已落盘后官方 handler 还要重建全部运行时鉴权/模型目录才发回执。
+// 真机冷刷新可达 70s；写请求保持同一个 RPC 等待，不在 30s 后丢掉成功回执。
+const GATEWAY_CREDENTIAL_MUTATION_TIMEOUT_MS = 120000;
+// 本进程刚经官方 RPC 改过凭据时，网关已在进程内重建鉴权快照；窗口内的读回不再强刷用量。
+const CREDENTIAL_RPC_FRESH_WINDOW_MS = 60000;
+// 网关启动或配置/凭据刷新期间目录尚未发布：同一连接上短暂等待后重读。
+const CATALOG_NOT_READY_MESSAGE = "Model catalog is not ready. Retry after Gateway startup or refresh finishes.";
+const CATALOG_NOT_READY_RETRY_MS = Object.freeze([500, 1500]);
+
+/** models.authLogout 的 provider 必须是凭据存储名；按它分组，各组去重后一次删除。 */
+function groupProfileIds(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const ids = groups.get(row.provider) || [];
+    if (!ids.includes(row.profileId)) ids.push(row.profileId);
+    groups.set(row.provider, ids);
   }
-  return "openclaw"; // last resort — relies on PATH
+  return groups;
 }
 
 // gateway 的结构化日志目录（launchd 拉起时 stderr 常被丢进 /dev/null，启动
@@ -191,6 +208,7 @@ const ARCHIVE_MAX_PER_SEGMENT = 2000;
 // core/device-auth.js —— 没被删除,别在那边「清理」(见 ARCHITECTURE §9 雷区)。
 const CONNECT_TIMEOUT_MS = 8000;
 const REQUEST_TIMEOUT_MS = 10000;
+const CONFIG_SNAPSHOT_TIMEOUT_MS = 30000;
 // A full 9.1 catalog read may need to rebuild a stale gateway-owned generation.
 // Give it a bounded budget separate from ordinary RPCs.
 const MODEL_CATALOG_REFRESH_TIMEOUT_MS = 60000;
@@ -406,10 +424,10 @@ function normalizeOpenClawAgentId(name) {
     : lower.replace(OPENCLAW_AGENT_ID_INVALID_RE, "-").replace(/^-+/, "").replace(/-+$/, "").slice(0, 64);
 }
 
-function defaultOpenClawAgentWorkspace(name) {
+function defaultOpenClawAgentWorkspace(name, home = resolveOpenClawHome()) {
   const id = normalizeOpenClawAgentId(name);
   if (!id || id === "main") return "";
-  return path.join(resolveOpenClawHome(), "agents", id);
+  return path.join(home, "agents", id);
 }
 
 function randomOpenClawCreateEmoji() {
@@ -419,7 +437,7 @@ function randomOpenClawCreateEmoji() {
 
 // agentId 只能是一个无控制字符的文件名单段，并在 path.resolve 后再次验证
 // containment；这样即使调用层漏校验，也不能越出 <OPENCLAW_HOME>/agents。
-function resolveOpenClawSessionsDir(agentId) {
+function resolveOpenClawSessionsDir(agentId, home = resolveOpenClawHome()) {
   const id = typeof agentId === "string" ? agentId : "";
   if (
     !id ||
@@ -429,7 +447,7 @@ function resolveOpenClawSessionsDir(agentId) {
   ) {
     throw new Error("openclaw: invalid agent id");
   }
-  const agentsRoot = path.resolve(resolveOpenClawHome(), "agents");
+  const agentsRoot = path.resolve(home, "agents");
   const agentRoot = path.resolve(agentsRoot, id);
   const relative = path.relative(agentsRoot, agentRoot);
   if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
@@ -637,10 +655,16 @@ class OpenClawBackend extends AgentBackend {
    * @param {() => (string|undefined)} [opts.getOrigin] optional Origin header to present (mirrors the UI page origin)
    * @param {object} [opts.authResolver] device-auth createAuthResolver 实例(与 chat-broker 共享凭证)
    */
-  constructor({ getUpstreamUrl, getOrigin, authResolver } = {}) {
+  constructor({ getUpstreamUrl, getOrigin, authResolver, externalPluginSelectionService = null,
+    getManagedExecution = null, restartManagedHost = null } = {}) {
     super();
     this._getUpstreamUrl = typeof getUpstreamUrl === "function" ? getUpstreamUrl : () => DEFAULT_GATEWAY_URL;
     this._getOrigin = typeof getOrigin === "function" ? getOrigin : () => DEFAULT_ORIGIN;
+    this._localRuntimeScope = createOpenClawLocalRuntimeScope({ getManagedExecution, resolveLegacyBin: resolveOpenclawBin });
+    this._localRuntimeIdentity = null;
+    if (restartManagedHost !== null && typeof restartManagedHost !== "function") throw new TypeError("Invalid managed Host restart");
+    this._restartManagedHost = restartManagedHost;
+    if (getManagedExecution !== null && !authResolver) throw new TypeError("Managed OpenClaw requires App-private authentication");
     this._ws = null;
     this._wsGatewayUrl = null;
     this._stopGeneration = 0;
@@ -650,6 +674,7 @@ class OpenClawBackend extends AgentBackend {
     this._cancelConnecting = null;
     this._pending = new Map(); // reqId -> { resolve, reject, socket }
     this._finalObservers = new Map(); // original agent RPC id -> socket-bound final observer
+    this._externalPluginSelectionService = externalPluginSelectionService;
     // 统一凭证解析(config.token / operator 身份 / loopback 网关 token / 已存设备令牌)。
     // 无注入时自建缺省(独立脚本直接 new 本类的旧用法保持可跑)。
     this._authResolver =
@@ -658,6 +683,17 @@ class OpenClawBackend extends AgentBackend {
         getConfig: () => ({ gatewayUrl: (this._getUpstreamUrl() || "").trim(), token: "" }),
         credentialsDir: path.join(os.homedir(), ".shoggoth", "credentials"),
       });
+    this._gatewaySocketBindings = new WeakMap();
+    this._connectingEndpointBinding = null;
+    this._endpointGuard = createEndpointGenerationGuard({
+      getUrl: () => {
+        const url = (this._getUpstreamUrl() || "").trim();
+        // A managed-but-unavailable endpoint never becomes the global default.
+        return this._localRuntimeScope.isManaged() ? url : url || DEFAULT_GATEWAY_URL;
+      },
+      ...(typeof this._authResolver.getGatewayGeneration === "function"
+        ? { getGeneration: () => this._authResolver.getGatewayGeneration() } : {}),
+    });
     this._breakdownCache = new Map(); // range -> { at, data }; smooths slow sessions.usage
     this._cliUsageCache = null; // { sig, at, data }; smooths the slow per-session CLI scan
     this._breakdownInFlight = new Map(); // range -> Promise; 单飞后台重扫（SWR，R106）
@@ -670,6 +706,7 @@ class OpenClawBackend extends AgentBackend {
     this._usageCubeCache = null; // { sig, at, cube }; 本地 usage 文件扫描立方体（R173）
     this._usageCubeScanInFlight = null; // Promise | null; 同上（SWR 单飞）
     this._modelConfigCache = null; // 上次成功的 getModelConfig 结果；瞬断时回退用（读路径 only）
+    this._configSnapshotInFlight = null; // 仅共享同一连接中尚未完成的配置读取。
     this._gatewayVersion = null; // gateway hello-ok server.version，远程连接时比本机 CLI 更准确。
     this._openClawCliVersion = undefined; // 9.1 auth store 分界；undefined=尚未探测，null=探测失败。
     this._canonicalAuthProfiles = null; // 9.1 `models auth list` 的脱敏摘要缓存，不保存密钥。
@@ -681,7 +718,7 @@ class OpenClawBackend extends AgentBackend {
     // 8.1 updater owns the complete update -> loaded-version -> doctor state
     // machine. A zero exit code alone is not success, and plugin capability
     // widening is only retried after a separate explicit user action.
-    this._selfUpdater = new OpenClawUpdateController({
+    this._selfUpdater = this._localRuntimeScope.isManaged() ? null : new OpenClawUpdateController({
       bin: resolveOpenclawBin(),
       getGatewayUrl: () => (this._getUpstreamUrl() || DEFAULT_GATEWAY_URL).trim(),
       statePath: path.join(os.homedir(), ".shoggoth", "self-update", "openclaw.json"),
@@ -690,6 +727,63 @@ class OpenClawBackend extends AgentBackend {
 
   get id() { return "openclaw"; }
   get name() { return "OpenClaw"; }
+
+  _invalidateLocalRuntimeCaches() {
+    this._openClawCliVersion = undefined;
+    this._canonicalAuthProfiles = null;
+    this._canonicalAuthProfilesAgent = null;
+    this._endpointAuthKeyProfiles = null;
+    this._modelConfigCache = null;
+    this._cliUsageCache = null;
+    this._skillUsageCache = null;
+    this._artifactsCache = null;
+    this._usageCubeCache = null;
+    this._skillNameByPath?.clear();
+    this._breakdownCache?.clear();
+  }
+
+  _resolveLocalRuntime() {
+    let scope;
+    try { scope = this._localRuntimeScope.current(); }
+    catch (error) {
+      this._localRuntimeIdentity = null;
+      this._invalidateLocalRuntimeCaches();
+      throw error;
+    }
+    const identity = scope
+      ? createHash("sha256").update(JSON.stringify([scope.runtimeRoot, scope.interpreterPath,
+        scope.entryPath, scope.home, scope.stateDir, scope.configPath, scope.workspace,
+        Object.entries(scope.env).sort(([a], [b]) => a.localeCompare(b))])).digest("hex")
+      : `legacy:${resolveOpenClawHome()}:${this._localRuntimeScope.configPath()}:${os.homedir()}`;
+    if (this._localRuntimeIdentity !== identity) {
+      this._invalidateLocalRuntimeCaches();
+      this._localRuntimeIdentity = identity;
+    }
+    return scope;
+  }
+
+  _localStateRoot() { return this._resolveLocalRuntime()?.stateDir || resolveOpenClawHome(); }
+  _localUserHome() { return this._resolveLocalRuntime()?.home || os.homedir(); }
+  _localConfigPath() { return this._resolveLocalRuntime()?.configPath || this._localRuntimeScope.configPath(); }
+
+  async getPluginSelectionReadiness({ agentId, sessionKey } = {}) {
+    try {
+      if (typeof agentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(agentId)
+        || typeof sessionKey !== "string" || Buffer.byteLength(sessionKey, "utf8") > 256
+        || /[\u0000-\u001f\u007f]/u.test(sessionKey) || agentIdFromSessionKey(sessionKey) !== agentId
+        || !this._externalPluginSelectionService) return false;
+      await this._connect();
+      const generation = this._connectionGeneration;
+      if (!this.hasGatewayMethod("chat.selection.capabilities") || !this.hasGatewayMethod("chat.selection.get")) return false;
+      const agent = await this.getAgent(agentId);
+      if (!agent || agent.id !== agentId || generation !== this._connectionGeneration) return false;
+      // The no-subject form observes registration only. Supplying sessionKey
+      // would materialize a physical session, which a readiness GET must not do.
+      const capability = await this.request("chat.selection.capabilities", {});
+      return generation === this._connectionGeneration
+        && require("./openclaw-plugin-selection").supportsOpenClawPluginSelection(capability);
+    } catch { return false; }
+  }
 
   getBackendDescriptor() {
     return {
@@ -744,10 +838,12 @@ class OpenClawBackend extends AgentBackend {
       },
       ...(maxPayloadBytes !== undefined ? { maxPayloadBytes } : {}),
       gatewayPolicy: true,
+      // queueMode:"steer" is available in the verified 2026.9.6 protocol.
+      steer: supportsOpenClawSteering(this._gatewayHello?.server?.version),
       permissions: {
         scope: "session",
         apply: "next-turn",
-        defaultMode: "guarded",
+        defaultMode: "workspace",
         options: [
           { id: "read-only", label: "Read only", description: "Read files without changing the workspace.", risk: "safe" },
           { id: "guarded", label: "Guarded", description: "Ask before sensitive commands or changes.", risk: "standard" },
@@ -780,13 +876,14 @@ class OpenClawBackend extends AgentBackend {
 
     const generation = this._connectionGeneration;
     const socket = this._ws;
+    const endpointBinding = this._endpointGuard.capture();
     let auth;
     try {
       auth = await this._loadAuth(gatewayUrl);
     } catch {
       return { supported: true, ok: false, reason: "upstream-rejected" };
     }
-    if (generation !== this._connectionGeneration || socket !== this._ws
+    if (!this._endpointGuard.isCurrent(endpointBinding) || generation !== this._connectionGeneration || socket !== this._ws
       || gatewayUrl !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
       return { supported: true, ok: false, reason: "upstream-error" };
     }
@@ -1259,6 +1356,9 @@ class OpenClawBackend extends AgentBackend {
     assertSupportedOpenClawHello(hello);
     this._gatewayHello = sanitizeOpenClawHello(hello);
     this._gatewayVersion = hello.server.version.trim();
+    // 记住该网关声明过官方凭据 RPC：断线期间调用凭据接口时先重连，不回退到逐 Agent CLI。
+    this._gatewayCredentialRpcSeen = GATEWAY_CREDENTIAL_RPC_METHODS
+      .every((method) => hasGatewayMethod(this._gatewayHello, method));
     this._advanceModelRuntimeGeneration();
     return hello;
   }
@@ -1267,6 +1367,8 @@ class OpenClawBackend extends AgentBackend {
 
   async stop() {
     this._stopGeneration += 1;
+    this._endpointGuard.invalidate();
+    this._connectingEndpointBinding = null;
     this._cancelConnecting?.(new Error("openclaw: backend stopped"));
     this._ready = false;
     this._gatewayHello = null;
@@ -1333,13 +1435,21 @@ class OpenClawBackend extends AgentBackend {
     let caps;
     try { caps = await this._requireModelChangeAdapter().getCapabilities(); }
     catch { caps = { ...(await super.getModelChangeCapabilities()), blockers: ["capability_unavailable"] }; }
-    return { ...caps, providerDirectory: true, manageAuthProfiles: this._isLocalGateway() };
+    return { ...caps, providerDirectory: true,
+      manageAuthProfiles: !this._localRuntimeScope.isManaged() && this._isLocalGateway() };
+  }
+
+  async getNativeModelMethodSupport() {
+    try { await this._connect(); } catch { return { config: false, credentials: false }; }
+    return { config: ["config.get", "config.set"].every(method => this.hasGatewayMethod(method)),
+      credentials: ["models.authSetApiKey", "models.authLogout"].every(method => this.hasGatewayMethod(method)) };
   }
 
   /** 模型变更预览只委托注入 adapter。 */
   async previewModelChange(safeSpec) {
     const preview = await this._requireModelChangeAdapter().preview(safeSpec);
-    if (safeSpec.kind === "update-provider" && safeSpec.patch?.renameTo) {
+    if (safeSpec.kind === "update-provider" && safeSpec.patch?.renameTo
+      && this._modelChangeAdapter.configurationSemantics !== "native-config") {
       // Provider rename has its own staged credential/reference migration;
       // the generic runtime adapter only understands provider field edits.
       preview.blockers.push({ code: "provider_rename_config_write", store: "config" });
@@ -1369,7 +1479,22 @@ class OpenClawBackend extends AgentBackend {
    * 聊天可用模型目录（models.list）不随 patch 热刷新，生效 = 重启网关。
    * rename 涉及引用迁移，永不降级（不在返回字段里）。
    */
-  async getModelConfigWriteCapabilities() {
+  async getModelConfigWriteCapabilities({ legacy = false } = {}) {
+    if (!legacy && this._modelChangeAdapter?.configurationSemantics === "native-config") {
+      const caps = await this.getModelChangeCapabilities();
+      return { supported: caps.supported, create: caps.create, update: caps.update, delete: caps.delete,
+        updateProvider: caps.updateProvider, renameProvider: caps.renameProvider,
+        batch: caps.configurationDraft === true, configurationDraft: caps.configurationDraft === true,
+        mutationSemantics: "native-config", preservePrimaryRefs: true,
+        deleteCatalogModel: false, renameCatalogModel: false,
+        activation: null, bypassBlockerCodes: [], blockers: caps.blockers || [] };
+    }
+    if (this._localRuntimeScope.isManaged()) return {
+      supported: false, create: false, update: false, delete: false, updateProvider: false,
+      renameProvider: false, deleteCatalogModel: false, renameCatalogModel: false,
+      batch: false, preservePrimaryRefs: false, activation: null, bypassBlockerCodes: [],
+      blockers: ["managed_model_transaction_required"],
+    };
     try {
       await this._configSnapshot();
     } catch {
@@ -1412,7 +1537,14 @@ class OpenClawBackend extends AgentBackend {
   }
 
   /** 仅写配置的模型变更；同 spec 重放幂等（upsert/删除/字段合并均收敛到同一终态）。 */
+  _assertLegacyConfigOnly() {
+    if (this._localRuntimeScope.isManaged()) throw Object.assign(new Error("App 管理的 OpenClaw 模型变更必须通过受管事务完成"), {
+      code: "managed_model_transaction_required", status: 409,
+    });
+  }
+
   async applyModelChangeConfigOnly(safeSpec, context, secretEnvelope) {
+    this._assertLegacyConfigOnly();
     const kind = safeSpec?.kind;
     let patchInfo;
     if (kind === "create" || kind === "update") {
@@ -1433,10 +1565,14 @@ class OpenClawBackend extends AgentBackend {
     // restartRequired=false ⇒ 本次写触达的路径全部热生效（config.schema.lookup 判定，
     // 见 _pathsNeedRestart），coordinator 据此不附 activation、UI 不弹重启横幅。
     // 拿不到判定（老路径/异常）保守视为需重启。
-    await context?.recordStage?.("config-write", {
+    const checkpoint = await context?.recordStage?.("config-write", {
       ...(secretEnvelope?.apiKey ? { secretStep: "applied" } : {}),
     });
-    return { status: "applied", stage: "config-write", restartRequired: patchInfo ? patchInfo.restart !== false : true };
+    const restartRequired = patchInfo ? patchInfo.restart !== false : true;
+    if (restartRequired) await context?.recordStage?.("config-write", {
+      fingerprints: { ...(checkpoint?.fingerprints || context?.journalEntry?.fingerprints || {}), configOnlyRestartRequired: true },
+    });
+    return { status: "applied", stage: "config-write", restartRequired };
   }
 
   /**
@@ -1447,12 +1583,13 @@ class OpenClawBackend extends AgentBackend {
    * 跳过;冲突/不存在抛错并带 batchIndex 定位到第几项。
    */
   async applyModelChangeConfigOnlyBatch(specs, { preservePrimaryRefs = false } = {}) {
+    this._assertLegacyConfigOnly();
     if (!Array.isArray(specs) || specs.length === 0) {
       throw new Error("批量变更为空");
     }
     const removedProviders = [];
     const registryModelSync = new Map(); // key -> 剩余 models(config 删除侧镜像)
-    const patchInfo = await this._patchModelProviders((current, parsed) => {
+    let patchInfo = await this._patchModelProviders((current, parsed) => {
       // hash 冲突会带着新快照重跑本闭包:累加器必须只反映最后一次成功的那轮
       removedProviders.length = 0;
       registryModelSync.clear();
@@ -1655,7 +1792,7 @@ class OpenClawBackend extends AgentBackend {
     });
     // 文件层同步(patch 成功后;失败仅告警的既有语义在各 helper 内)
     for (const key of removedProviders) {
-      await this._dropAuthProfileKeyQuietly(key);
+      if (await this._dropAuthProfileKeyQuietly(key)) patchInfo = { ...patchInfo, restart: true };
       this._syncRegistryProvider(key, null);
       this._purgeAgentShadowRegistries(key);
     }
@@ -1682,6 +1819,7 @@ class OpenClawBackend extends AgentBackend {
 
   /** 启动恢复只读回配置判定写入是否落盘；不重放（baseUrl/api 原文不入 journal）。 */
   async recoverModelChangeConfigOnly(entry) {
+    this._assertLegacyConfigOnly();
     let providers;
     let parsed;
     try {
@@ -1736,6 +1874,7 @@ class OpenClawBackend extends AgentBackend {
 
   /** 生效动作：重启本机网关服务，让 models.list 目录重新加载。远程网关不支持。 */
   async activateModelConfig() {
+    this._assertLegacyConfigOnly();
     if (!this._isLocalGateway()) {
       const error = new Error("远程网关无法从本机重启，请在网关主机上重启 openclaw");
       error.code = "activation_remote_gateway";
@@ -1763,9 +1902,12 @@ class OpenClawBackend extends AgentBackend {
   // 旧版本继续走 auth-profiles.json + agent sqlite 的兼容路径。
 
   _localOpenClawVersion() {
+    this._resolveLocalRuntime();
     if (this._openClawCliVersion !== undefined) return this._openClawCliVersion;
     try {
-      const result = spawnSync(resolveOpenclawBin(), ["--version"], {
+      const cli = this._localRuntimeScope.cli(["--version"]);
+      const result = spawnSync(cli.file, cli.args, {
+        env: cli.env, cwd: cli.cwd,
         encoding: "utf8",
         timeout: 10000,
       });
@@ -1778,7 +1920,8 @@ class OpenClawBackend extends AgentBackend {
   }
 
   _usesCanonicalModelAuthCli() {
-    if (this._modelAuthCliVersionOverride !== undefined) {
+    this._resolveLocalRuntime();
+    if (!this._localRuntimeScope.isManaged() && this._modelAuthCliVersionOverride !== undefined) {
       const compared = compareVersions(this._modelAuthCliVersionOverride, "2026.9.1");
       return compared !== null && compared >= 0;
     }
@@ -1790,6 +1933,14 @@ class OpenClawBackend extends AgentBackend {
   }
 
   _runModelAuthCli(args, options = {}) {
+    // Read-only inventory can use the private runtime. Credential writes require
+    // the Service/Worker transaction and must never escape through this CLI.
+    if (this._localRuntimeScope.isManaged()
+      && !(Array.isArray(args) && args[0] === "models" && args[1] === "auth" && args[2] === "list")) {
+      return Promise.reject(Object.assign(new Error("App 管理的 OpenClaw 凭据必须通过受管模型事务修改"), {
+        code: "managed_model_transaction_required", status: 409,
+      }));
+    }
     const secret = typeof options.stdin === "string" ? options.stdin : "";
     const safeError = (message, code = "auth_cli_failed") => {
       const error = new Error(message);
@@ -1800,8 +1951,9 @@ class OpenClawBackend extends AgentBackend {
     return new Promise((resolve, reject) => {
       let child;
       try {
-        child = execFile(resolveOpenclawBin(), ["--no-color", ...args], {
-          env: process.env,
+        const cli = this._localRuntimeScope.cli(["--no-color", ...args]);
+        child = execFile(cli.file, cli.args, {
+          env: cli.env, cwd: cli.cwd,
           encoding: "utf8",
           timeout: 90000,
           maxBuffer: 1024 * 1024,
@@ -1838,8 +1990,8 @@ class OpenClawBackend extends AgentBackend {
     if (Array.isArray(this._modelAuthAgentIdsOverride) && this._modelAuthAgentIdsOverride.length > 0) {
       return [...new Set(this._modelAuthAgentIdsOverride)];
     }
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
-    const config = JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8"));
+    const home = this._localStateRoot();
+    const config = JSON.parse(fs.readFileSync(this._localConfigPath(), "utf8"));
     const ids = readCanonicalAgentEntries(config).map((agent) => agent.id);
     return ids.includes("main") ? ["main", ...ids.filter((id) => id !== "main")] : ids.length ? ids : ["main"];
   }
@@ -1886,8 +2038,9 @@ class OpenClawBackend extends AgentBackend {
   }
 
   _authProfilesPath() {
-    return this._authProfilesPathOverride
-      || path.join(os.homedir(), ".openclaw", "agents", "auth-profiles.json");
+    const root = this._localStateRoot();
+    return (!this._localRuntimeScope.isManaged() && this._authProfilesPathOverride)
+      || path.join(root, "agents", "auth-profiles.json");
   }
 
   _readAuthProfiles() {
@@ -1902,6 +2055,7 @@ class OpenClawBackend extends AgentBackend {
   }
 
   _writeAuthProfiles(file, data) {
+    this._assertLegacyConfigOnly();
     if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`);
     const tmp = `${file}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
@@ -1911,7 +2065,7 @@ class OpenClawBackend extends AgentBackend {
   /** 枚举各 agent sqlite 凭证库的 profile(gateway 登录流程直写 agent 库,不回写主文件)。 */
   _listAgentSqliteAuthProfiles() {
     const byId = new Map(); // id -> { profile, agents: [name] }
-    const agentsDir = path.join(os.homedir(), ".openclaw", "agents");
+    const agentsDir = path.join(this._localStateRoot(), "agents");
     let names;
     try {
       names = fs.readdirSync(agentsDir);
@@ -1939,7 +2093,11 @@ class OpenClawBackend extends AgentBackend {
   }
 
   async listModelAuthProfiles() {
+    if (this._localRuntimeScope.isManaged()) return { supported: false, reason: "managed-model-transaction", profiles: [] };
     if (!this._isLocalGateway()) return { supported: false, reason: "remote", profiles: [] };
+    if (await this._usesGatewayCredentialRpc()) {
+      return { supported: true, profiles: await this._listAuthProfilesViaGateway() };
+    }
     if (this._usesCanonicalModelAuthCli()) {
       return { supported: true, profiles: await this._loadCanonicalAuthProfiles() };
     }
@@ -1971,6 +2129,7 @@ class OpenClawBackend extends AgentBackend {
 
   /** api_key 型 profile 写入的共享实现;oauth 型拒绝覆盖。返回 profile id。 */
   async _writeAuthProfileKey(providerKey, apiKey) {
+    this._assertLegacyConfigOnly();
     const provider = String(providerKey || "").trim();
     const key = String(apiKey || "").trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(provider)) throw new Error("provider 非法");
@@ -2026,14 +2185,248 @@ class OpenClawBackend extends AgentBackend {
   }
 
   async setModelAuthProfileKey(providerKey, apiKey) {
+    if (this._modelChangeAdapter?.configurationSemantics === "native-config") {
+      throw Object.assign(new Error("请通过模型协调器保存凭据"), { code: "model_change_required", status: 409 });
+    }
+    this._assertLegacyConfigOnly();
     if (!this._isLocalGateway()) {
       const error = new Error("远程网关的授权文件不在本机,无法编辑");
       error.code = "auth_remote_gateway";
       error.status = 409;
       throw error;
     }
+    if (await this._usesGatewayCredentialRpc()) {
+      const { profileId, restartRequired } = await this._saveProviderApiKeyViaGateway(providerKey, apiKey);
+      return { ok: true, id: profileId, activation: restartRequired ? { kind: "gateway_restart", available: true } : null };
+    }
     const id = await this._writeAuthProfileKey(providerKey, apiKey);
     return { ok: true, id, activation: { kind: "gateway_restart", available: true } };
+  }
+
+  /** 清除 provider 的全部 API Key（Provider 卡片「清除 Key」）；OAuth/Token 授权不动。 */
+  async clearModelAuthProviderKeys(providerKey) {
+    if (this._modelChangeAdapter?.configurationSemantics === "native-config") {
+      throw Object.assign(new Error("请通过模型协调器清除凭据"), { code: "model_change_required", status: 409 });
+    }
+    this._assertLegacyConfigOnly();
+    if (!this._isLocalGateway()) {
+      const error = new Error("远程网关的授权文件不在本机,无法编辑");
+      error.code = "auth_remote_gateway";
+      error.status = 409;
+      throw error;
+    }
+    const provider = String(providerKey || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(provider)) throw new Error("provider 非法");
+    if (await this._usesGatewayCredentialRpc()) {
+      const { removed, restartRequired } = await this._clearProviderApiKeysViaGateway(provider);
+      return { ok: true, provider, removed, activation: restartRequired ? { kind: "gateway_restart", available: true } : null };
+    }
+    // 旧版网关没有官方凭据 RPC：沿用按 `<provider>:default` 删除的原语义。
+    return { ...(await this.deleteModelAuthProfile(`${provider}:default`)), provider };
+  }
+
+  // ---- 官方 Control UI 同款凭据通道（网关 models.auth* RPC）----
+  // 官方「模型 Provider」页列凭据用 models.authStatus、存 Key 用 models.authSetApiKey、
+  // 删 Key 用 models.authLogout：网关在自身进程内写凭据库并立刻刷新鉴权与模型目录，
+  // 刷新成功时无需重启；成功回执中的 warning 表示保存完成但仍需重启生效。
+  // 冷刷新可能超过一分钟。逐 Agent spawn CLI 的旧写法每次冷启动 15–50s，
+  // 10 个 Agent 一次保存要 20 次（实测 6 分钟），且进程外写入网关刷新不到。
+
+  /** 本机非受管网关且 hello 声明了官方凭据 RPC 才走 RPC；远程、受管与旧网关路径不变。 */
+  async _usesGatewayCredentialRpc() {
+    if (this._gatewayCredentialRpcOverride !== undefined) return this._gatewayCredentialRpcOverride === true;
+    if (this._localRuntimeScope.isManaged() || !this._isLocalGateway()) return false;
+    // 声明过这些方法的网关断线后先重连；从未握手（网关一直不可达）时不主动建连，沿用旧通道。
+    if (!this._gatewayHello && this._gatewayCredentialRpcSeen) {
+      try { await this._connect(); } catch { return false; }
+    }
+    return GATEWAY_CREDENTIAL_RPC_METHODS.every((method) => this.hasGatewayMethod(method));
+  }
+
+  /** 某 Agent 在官方 models.authStatus 视角下的全部凭据行；鉴权快照未就绪时返回 null。 */
+  async _gatewayAuthProfileRows(agentId) {
+    await this._connect();
+    const status = await this.request("models.authStatus", { agentId }, GATEWAY_CREDENTIAL_RPC_TIMEOUT_MS);
+    if (status?.unavailable || !Array.isArray(status?.providers)) return null;
+    const rows = [];
+    for (const provider of status.providers) {
+      if (typeof provider?.provider !== "string" || !Array.isArray(provider.profiles)) continue;
+      for (const profile of provider.profiles) {
+        if (typeof profile?.profileId !== "string" || !profile.profileId.trim()) continue;
+        rows.push({
+          provider: provider.provider,
+          profileId: profile.profileId.trim(),
+          type: String(profile.type || "unknown"),
+          // saved = 本 Agent 自己的库；inherited = 共享库；config = 被 provider 连接绑定
+          source: typeof profile.source === "string" ? profile.source : null,
+          logoutSupported: profile.logoutSupported === true,
+          ...(typeof profile.email === "string" && profile.email ? { email: profile.email } : {}),
+          ...(typeof profile.displayName === "string" && profile.displayName ? { displayName: profile.displayName } : {}),
+          ...(Number(profile.expiry?.at) > 0 ? { expires: Number(profile.expiry.at) } : {}),
+        });
+      }
+    }
+    return rows;
+  }
+
+  /** Provider-wide public Key state, read only from this Gateway's roster. */
+  async _nativeProviderApiKeys(config) {
+    const ids = readCanonicalAgentEntries(config).map(agent => agent.id);
+    const views = await Promise.all((ids.length ? ids : ["main"]).map(async agentId => {
+      try { return await this._gatewayAuthProfileRows(agentId); } catch { return null; }
+    }));
+    const rows = views.flatMap(view => view || []);
+    const profiles = new Map();
+    for (const row of rows) {
+      if (row.type !== "api_key") continue;
+      const key = row.provider.toLowerCase();
+      if (!profiles.has(key)) profiles.set(key, new Set());
+      profiles.get(key).add(row.profileId);
+    }
+    return { rows, profiles, unavailable: views.some(view => view === null) };
+  }
+
+  /** authStatus 按存储 provider 名分组，别名行用 `<provider>:` 前缀兜底归集。 */
+  _gatewayRowsForProvider(rows, provider) {
+    return (rows || []).filter((row) => row.provider === provider || row.profileId.startsWith(`${provider}:`));
+  }
+
+  /** 本进程刚经官方 RPC 改过凭据：失效本地缓存，并让随后的读回不再强刷。 */
+  _noteGatewayCredentialMutation() {
+    this._credentialRpcMutatedAt = Date.now();
+    this._canonicalAuthProfiles = null;
+    this._endpointAuthKeyProfiles = null;
+    this._canonicalKeyDigests = null;
+  }
+
+  noteCredentialMutation() { this._noteGatewayCredentialMutation(); }
+
+  _gatewayCredentialRecentlyMutated() {
+    return Number.isFinite(this._credentialRpcMutatedAt)
+      && Date.now() - this._credentialRpcMutatedAt < CREDENTIAL_RPC_FRESH_WINDOW_MS;
+  }
+
+  /** 与官方 listModelAuthProfiles 的 CLI 版同形：owner 视角的凭据摘要，绝不含密钥。 */
+  async _listAuthProfilesViaGateway() {
+    const rows = await this._gatewayAuthProfileRows(this._modelAuthAgentId());
+    if (rows === null) {
+      throw Object.assign(new Error("OpenClaw 授权状态暂不可用，请稍后刷新"), { code: "auth_status_unavailable", status: 503 });
+    }
+    const seen = new Set();
+    return rows.flatMap((row) => {
+      if (seen.has(row.profileId)) return [];
+      seen.add(row.profileId);
+      return [{
+        id: row.profileId,
+        provider: row.provider,
+        type: row.type,
+        source: "canonical",
+        ...(row.displayName ? { label: row.displayName, displayName: row.displayName } : {}),
+        ...(row.email ? { email: row.email } : {}),
+        ...(row.expires ? { expires: row.expires } : {}),
+      }];
+    });
+  }
+
+  /**
+   * 「全部 Agent 共用一把 Key」语义的官方写入（models.authSetApiKey）。
+   * - config 里有该 provider 的连接定义（自定义端点等）：网关把 Key 存进共享凭据库并在
+   *   models.providers.<id>.apiKey 绑定该 profile，所有 Agent 经绑定解析。随后用官方
+   *   models.authLogout 移除该 provider 的其余 API Key（旧版逐 Agent 复制的 `<id>:default`
+   *   等），鉴权轮换时就不会再拿到旧 Key。
+   * - 无连接定义的内置 provider：官方 RPC 按 Agent 作用域写入。先写 owner（共享库），再对
+   *   仍有本地 API Key 覆盖的 Agent 逐个写入——等价于在官方页面逐个 Agent 保存，每个 Agent
+   *   首选的 Key 都是新值。
+   * 调用方须已确认 _usesGatewayCredentialRpc()；Key 只经已认证 WS 送达，不进参数/日志。
+   */
+  async _saveProviderApiKeyViaGateway(providerKey, apiKey) {
+    const provider = String(providerKey || "").trim();
+    const key = String(apiKey || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(provider)) throw new Error("provider 非法");
+    if (!key) throw new Error("缺少 apiKey");
+    const agentIds = this._modelAuthAgentIds();
+    const owner = agentIds[0];
+    const { parsed } = await this._configSnapshot();
+    const connection = Boolean(parsed?.models?.providers?.[provider]);
+    let restartRequired = false;
+    const mutate = async (method, params) => {
+      const result = await this.request(method, params, GATEWAY_CREDENTIAL_MUTATION_TIMEOUT_MS);
+      this._noteGatewayCredentialMutation();
+      restartRequired ||= typeof result?.warning === "string" && Boolean(result.warning.trim());
+      return result;
+    };
+    // 各 Agent 的凭据视图一次并行读完再写：写 owner 不改其它 Agent 的本地覆盖，
+    // 逐个穿插读会给每次保存多加一轮网关往返（真机 10 个 Agent 各 0.05–18s）。
+    const views = await Promise.all(agentIds.map((agentId) => this._gatewayAuthProfileRows(agentId)));
+    const saved = await mutate("models.authSetApiKey", { provider, apiKey: key, agentId: owner });
+    const profileId = typeof saved?.profileId === "string" && saved.profileId.trim() ? saved.profileId.trim() : null;
+    if (!profileId) {
+      throw Object.assign(new Error("OpenClaw 未返回已保存的凭据 profile"), { code: "auth_rpc_invalid_response", status: 502 });
+    }
+    for (const [index, agentId] of agentIds.entries()) {
+      const rows = views[index];
+      // 该 Agent 鉴权快照未就绪：连接绑定仍保证常规解析；内置 provider 照常写入它的首选 Key。
+      if (rows === null) {
+        if (!connection && agentId !== owner) {
+          await mutate("models.authSetApiKey", { provider, apiKey: key, agentId });
+        }
+        continue;
+      }
+      const apiKeys = this._gatewayRowsForProvider(rows, provider).filter((row) => row.type === "api_key");
+      if (connection) {
+        const stale = apiKeys.filter((row) => row.profileId !== profileId && row.logoutSupported
+          && (agentId === owner || row.source === "saved"));
+        for (const [storedProvider, ids] of groupProfileIds(stale)) {
+          await mutate("models.authLogout", { provider: storedProvider, agentId, profileIds: ids });
+        }
+      } else if (agentId !== owner && apiKeys.some((row) => row.source === "saved")) {
+        await mutate("models.authSetApiKey", { provider, apiKey: key, agentId });
+      }
+    }
+    return { profileId, restartRequired };
+  }
+
+  /**
+   * 官方 models.authLogout 删除 provider 的凭据：owner 先删共享库里可见的，再删各 Agent 的
+   * 本地覆盖副本，所有 Agent 都不再持有。profileIds 缺省 = 该 provider 的全部 API Key。
+   * 返回删除的 profile 数和是否仍需重启生效。
+   */
+  async _clearProviderApiKeysViaGateway(providerKey, { profileIds = null } = {}) {
+    const provider = String(providerKey || "").trim();
+    const wanted = Array.isArray(profileIds) && profileIds.length ? new Set(profileIds) : null;
+    const agentIds = this._modelAuthAgentIds();
+    const owner = agentIds[0];
+    let removed = 0;
+    let restartRequired = false;
+    const logout = async (params) => {
+      const result = await this.request("models.authLogout", params, GATEWAY_CREDENTIAL_MUTATION_TIMEOUT_MS);
+      this._noteGatewayCredentialMutation();
+      restartRequired ||= typeof result?.warning === "string" && Boolean(result.warning.trim());
+    };
+    // 与保存同理：先并行读全部视图。非 owner 只删自己库里的 saved 行，owner 先删
+    // 共享库，读取时刻不影响要删的集合。
+    const views = await Promise.all(agentIds.map((agentId) => this._gatewayAuthProfileRows(agentId)));
+    for (const [index, agentId] of agentIds.entries()) {
+      const rows = views[index];
+      if (rows === null) {
+        if (agentId === owner) {
+          throw Object.assign(new Error("OpenClaw 授权状态暂不可用，请稍后重试"), { code: "auth_status_unavailable", status: 503 });
+        }
+        // 清单未知时不猜 profile：清掉该 Agent 能看到的全部 API Key（共享的已在 owner 一轮删除）。
+        if (!wanted) {
+          await logout({ provider, agentId, credentialType: "api_key" });
+        }
+        continue;
+      }
+      const targets = this._gatewayRowsForProvider(rows, provider).filter((row) => row.logoutSupported
+        && (wanted ? wanted.has(row.profileId) : row.type === "api_key")
+        && (agentId === owner || row.source === "saved"));
+      for (const [storedProvider, ids] of groupProfileIds(targets)) {
+        await logout({ provider: storedProvider, agentId, profileIds: ids });
+        removed += ids.length;
+      }
+    }
+    return { removed, restartRequired };
   }
 
   // ---- 主注册表 agents/models.json 同步(R179)----
@@ -2042,8 +2435,9 @@ class OpenClawBackend extends AgentBackend {
   // missing-provider-auth(2026-07-19 真机实测)。
 
   _registryPath() {
-    return this._registryPathOverride
-      || path.join(os.homedir(), ".openclaw", "agents", "models.json");
+    const root = this._localStateRoot();
+    return (!this._localRuntimeScope.isManaged() && this._registryPathOverride)
+      || path.join(root, "agents", "models.json");
   }
 
   _readRegistry() {
@@ -2097,7 +2491,7 @@ class OpenClawBackend extends AgentBackend {
     if (!this._isLocalGateway()) return;
     let pattern;
     try {
-      pattern = path.join(os.homedir(), ".openclaw", "agents");
+      pattern = path.join(this._localStateRoot(), "agents");
       for (const name of fs.readdirSync(pattern)) {
         const file = path.join(pattern, name, "agent", "models.json");
         if (!fs.existsSync(file)) continue;
@@ -2128,8 +2522,9 @@ class OpenClawBackend extends AgentBackend {
    * 内置 Node 无 node:sqlite);失败仅告警。
    */
   _syncAgentSqliteAuthKey(profileId, cred) {
+    this._assertLegacyConfigOnly();
     if (!this._isLocalGateway()) return;
-    const agentsDir = path.join(os.homedir(), ".openclaw", "agents");
+    const agentsDir = path.join(this._localStateRoot(), "agents");
     let names;
     try {
       names = fs.readdirSync(agentsDir);
@@ -2219,7 +2614,11 @@ class OpenClawBackend extends AgentBackend {
     try {
       // Explicit Agent scope matches `models auth list --agent`; refresh also
       // observes credentials edited outside Shoggoth. Never cache secret values.
-      const status = await this.request("models.authStatus", { agentId, refresh: true }, 20000);
+      // Right after this process changed credentials through the official RPC
+      // the Gateway has already rebuilt its auth snapshot, so skip the forced
+      // provider-usage refresh (it costs ~10s), like the official Control UI.
+      const forceRefresh = !this._gatewayCredentialRecentlyMutated();
+      const status = await this.request("models.authStatus", { agentId, ...(forceRefresh ? { refresh: true } : {}) }, 20000);
       if (status?.unavailable || !Array.isArray(status?.providers)) {
         throw new Error("OpenClaw auth status unavailable");
       }
@@ -2251,6 +2650,7 @@ class OpenClawBackend extends AgentBackend {
   }
 
   async deleteModelAuthProfile(profileId) {
+    this._assertLegacyConfigOnly();
     if (!this._isLocalGateway()) {
       const error = new Error("远程网关的授权文件不在本机,无法编辑");
       error.code = "auth_remote_gateway";
@@ -2259,6 +2659,28 @@ class OpenClawBackend extends AgentBackend {
     }
     const id = String(profileId || "").trim();
     if (!id) throw new Error("缺少 profileId");
+    if (await this._usesGatewayCredentialRpc()) {
+      if (this._modelChangeAdapter?.configurationSemantics === "native-config") {
+        const agentId = this._modelAuthAgentId();
+        const rows = await this._gatewayAuthProfileRows(agentId);
+        const owned = rows?.find(row => row.profileId === id);
+        if (!owned) throw Object.assign(new Error("授权 profile 不存在"), { code: "auth_profile_not_found", status: 404 });
+        const receipt = await this.request("models.authLogout", { provider: owned.provider, agentId, profileIds: [id] }, GATEWAY_CREDENTIAL_MUTATION_TIMEOUT_MS);
+        this._noteGatewayCredentialMutation();
+        return { ok: true, id, activation: null, ...(receipt?.warning ? { warning: "凭据已移除，网关刷新尚未完成" } : {}) };
+      }
+      // 官方 models.authLogout 需要凭据的存储 provider 名，从 owner 视角的清单里取。
+      const owned = (await this._gatewayAuthProfileRows(this._modelAuthAgentId()) || [])
+        .find((row) => row.profileId === id);
+      if (!owned) {
+        const error = new Error(`授权 profile ${id} 不存在`);
+        error.code = "auth_profile_not_found";
+        error.status = 404;
+        throw error;
+      }
+      const { restartRequired } = await this._clearProviderApiKeysViaGateway(owned.provider, { profileIds: [id] });
+      return { ok: true, id, activation: restartRequired ? { kind: "gateway_restart", available: true } : null };
+    }
     if (this._usesCanonicalModelAuthCli()) {
       const profiles = await this._loadCanonicalAuthProfiles();
       if (!profiles.some((profile) => profile.id === id)) {
@@ -2290,6 +2712,7 @@ class OpenClawBackend extends AgentBackend {
   }
 
   async _deleteCanonicalAuthProfile(profileId) {
+    this._assertLegacyConfigOnly();
     const owner = this._modelAuthAgentId();
     await this._runModelAuthCli(["models", "auth", "logout", profileId, "--yes", "--agent", owner]);
     if (Array.isArray(this._canonicalAuthProfiles)) {
@@ -2344,56 +2767,52 @@ class OpenClawBackend extends AgentBackend {
     return this._provCatalogCache;
   }
 
-  /**
-   * OAuth 登录卡数据：目录快照（哪些 provider 可登录）+ models.authStatus（状态/过期）
-   * + config auth.profiles（email 做 token 摘要）。无 profile 维度（profiles 恒空）。
-   * authStatus 有 60s 网关侧缓存——本方法同时是「我已登录」回查与断开后刷新的唯一
-   * 入口，必须 refresh:true，否则回查读到旧缓存会误判未登录。
-   */
+  /** 全局 OAuth 卡片覆盖网关的全部 Agent；远程/受管连接不能借本机 roster 选 owner。 */
+  async _oauthAuthSnapshot() {
+    const { parsed } = await this._configSnapshot();
+    const binding = this._endpointGuard.capture();
+    const generation = this._connectionGeneration;
+    const assertCurrent = () => {
+      if (!this._endpointGuard.isCurrent(binding) || generation !== this._connectionGeneration) {
+        throw Object.assign(new Error("OpenClaw 连接已变化，请刷新登录状态后重试"), { code: "auth_scope_changed", status: 409 });
+      }
+    };
+    const configured = readCanonicalAgentEntries(parsed).map(agent => agent.id);
+    const agentIds = configured.length ? configured : ["main"];
+    // main 的 saved 行也可能来自共享库，先处理它，随后跳过其它 Agent 的 inherited 行。
+    agentIds.sort((a, b) => a === "main" ? -1 : b === "main" ? 1 : 0);
+    const views = await Promise.all(agentIds.map(async agentId => {
+      const status = await this.request("models.authStatus", { agentId, refresh: true }, GATEWAY_CREDENTIAL_RPC_TIMEOUT_MS);
+      if (status?.unavailable || !Array.isArray(status?.providers) || status.providers.some(provider =>
+        typeof provider?.provider !== "string" || !provider.provider.trim() || !Array.isArray(provider.profiles)
+        || provider.profiles.some(profile => typeof profile?.profileId !== "string" || !profile.profileId.trim()
+          || (profile.type === "oauth" && profile.logoutSupported === true
+            && !["saved", "inherited", "config", "external"].includes(profile.source))))) {
+        throw Object.assign(new Error("OpenClaw 授权状态暂不可用，请稍后刷新"), { code: "auth_status_unavailable", status: 503 });
+      }
+      const rows = status.providers.flatMap(provider => provider.profiles.map(profile => ({
+        ...profile, provider: provider.provider, expiry: profile.expiry ?? provider.expiry,
+      })));
+      return { agentId, rows };
+    }));
+    assertCurrent();
+    return { views, authProfiles: parsed.auth?.profiles || {}, assertCurrent };
+  }
+
+  /** OAuth 登录卡：目录 + 全部 Agent 的实时状态；不可用不能当作已登出。 */
   async listOAuthProviders() {
     const catalog = this._providerCatalogSnapshot().providers;
     const oauthIds = Object.keys(catalog).filter((id) => catalog[id].oauth.length > 0);
     if (!oauthIds.length) return { providers: [], profiles: [] };
-    let status = null;
-    let authProfiles = {};
-    try {
-      await this._connect();
-      status = await this.request("models.authStatus", { refresh: true }, 20000);
-    } catch { /* gateway 不可达 → 全部按未连接展示（列表仍可看，铁律 4） */ }
-    try {
-      const { parsed } = await this._configSnapshot();
-      if (parsed?.auth?.profiles && typeof parsed.auth.profiles === "object") authProfiles = parsed.auth.profiles;
-    } catch { /* 同上 */ }
-    const statusRows = Array.isArray(status?.providers) ? status.providers : [];
-    const statusByProvider = new Map(statusRows.map((p) => [p.provider, p]));
-    // authStatus 的行按**存储 provider 名**分组，与目录 id 可能错位（实测 Claude CLI
-    // 凭证挂在 "claude-cli" 行下，profileId 却是 "anthropic:claude-cli"）。所以除精确
-    // 命中外，还按 profileId 前缀 `<id>:` 归集别名行，否则 anthropic 永远显示未连接。
-    const rowsFor = (id) => {
-      const rows = [];
-      const direct = statusByProvider.get(id);
-      if (direct) rows.push(direct);
-      const prefix = `${id}:`;
-      for (const row of statusRows) {
-        if (row === direct) continue;
-        const profs = Array.isArray(row.profiles) ? row.profiles : [];
-        if (profs.some((pr) => typeof pr.profileId === "string" && pr.profileId.startsWith(prefix))) rows.push(row);
-      }
-      return rows;
-    };
+    const { views, authProfiles } = await this._oauthAuthSnapshot();
+    const statusRows = views.flatMap(view => view.rows);
     const cliRunnable = this._isLocalGateway();
     const providers = oauthIds.sort().map((id) => {
       const cat = catalog[id];
-      const rows = rowsFor(id);
-      const oauthProfiles = rows
-        .flatMap((row) => (Array.isArray(row.profiles) ? row.profiles : []))
-        .filter((pr) => pr.type === "oauth");
+      const oauthProfiles = this._gatewayRowsForProvider(statusRows, id).filter(pr => pr.type === "oauth");
       const best = oauthProfiles.find((pr) => pr.status === "ok" || pr.status === "expiring") || oauthProfiles[0] || null;
-      // 承载状态/过期时间的行：优先 best profile 所在行，回落首行
-      const st = rows.find((row) => (Array.isArray(row.profiles) ? row.profiles : []).includes(best)) || rows[0] || null;
-      // token 摘要：config auth.profiles 里该 provider oauth 条目的 email，回落 profileId 尾段
-      const metaEntry = Object.entries(authProfiles).find(([, v]) => v && v.provider === id && v.mode === "oauth");
-      const email = metaEntry?.[1]?.email
+      // 摘要只取当前选中 profile 的身份，不借用同 provider 另一账号的 email。
+      const email = best?.email || authProfiles[best?.profileId]?.email
         || (best?.profileId ? String(best.profileId).split(":").pop() : null);
       const loggedIn = !!best && (best.status === "ok" || best.status === "expiring");
       return {
@@ -2413,8 +2832,8 @@ class OpenClawBackend extends AgentBackend {
           // error 会盖过 UI 本地化的 oauthRowExpired 文案，过期态由 expiresAt 驱动。
           sourceLabel: null,
           tokenPreview: loggedIn ? email : null,
-          expiresAt: (best?.expiry?.at ?? st?.expiry?.at)
-            ? new Date(best?.expiry?.at ?? st.expiry.at).toISOString()
+          expiresAt: best?.expiry?.at
+            ? new Date(best.expiry.at).toISOString()
             : null,
           hasRefreshToken: false,
           error: null,
@@ -2425,13 +2844,54 @@ class OpenClawBackend extends AgentBackend {
     return { providers, profiles: [] };
   }
 
-  /** 断开 = gateway models.authLogout（删该 provider 全部 auth profile + abort 在跑 run）。 */
+  /** 仅删除已保存的 OAuth：显式 owner + profileIds，保留 API Key、token 和外部 CLI 凭据。 */
   async disconnectOAuthProvider(providerId) {
     const id = String(providerId || "").trim();
     if (!id) throw new Error("缺少 provider");
-    await this._connect();
-    const r = await this.request("models.authLogout", { provider: id }, 15000);
-    return { ok: true, removedProfiles: Array.isArray(r?.removedProfiles) ? r.removedProfiles : [] };
+    const { views, assertCurrent } = await this._oauthAuthSnapshot();
+    const shared = new Set();
+    const removedProfiles = [];
+    const warnings = [];
+    // 全部视图成功读完再写；共享行只删一次，同名的 Agent 本地覆盖仍逐个处理。
+    for (const { agentId, rows } of views) {
+      const targets = this._gatewayRowsForProvider(rows, id).filter(row => {
+        if (row.type !== "oauth" || row.logoutSupported !== true || row.source === "external") return false;
+        if (agentId !== "main" && row.source === "saved") return true;
+        const key = JSON.stringify([row.provider, row.profileId]);
+        if (shared.has(key)) return false;
+        shared.add(key);
+        return true;
+      });
+      for (const [provider, profileIds] of groupProfileIds(targets)) {
+        assertCurrent();
+        let result;
+        try {
+          result = await this.request("models.authLogout", { provider, agentId, profileIds }, GATEWAY_CREDENTIAL_MUTATION_TIMEOUT_MS);
+        } finally {
+          // 结果未知也不复用旧凭据快照；绝不自动重放可能已成功的删除。
+          this._noteGatewayCredentialMutation();
+        }
+        assertCurrent();
+        if (!Array.isArray(result?.removedProfiles) || profileIds.some(profile => !result.removedProfiles.includes(profile))) {
+          throw new Error("OpenClaw 断开结果未确认，请刷新登录状态后再检查");
+        }
+        removedProfiles.push(...result.removedProfiles);
+        if (typeof result.warning === "string" && result.warning.trim()) warnings.push(`${agentId}: ${result.warning}`);
+      }
+    }
+    if (removedProfiles.length) {
+      // 删除本地覆盖后可能重新显露共享或外部登录；回读确认，不自动删除新出现的凭据。
+      const after = await this._oauthAuthSnapshot();
+      assertCurrent();
+      for (const { agentId, rows } of after.views) {
+        const remaining = this._gatewayRowsForProvider(rows, id).filter(row => row.type === "oauth");
+        if (remaining.some(row => row.logoutSupported === true)) warnings.push(`${agentId}: 仍有已保存的 OAuth 登录，请刷新后检查`);
+        if (remaining.some(row => row.logoutSupported !== true && ["ok", "expiring"].includes(row.status))) {
+          warnings.push(`${agentId}: 仍有外部管理的登录，请在对应 CLI 中退出`);
+        }
+      }
+    }
+    return { ok: removedProfiles.length > 0, removedProfiles, ...(warnings.length ? { warnings } : {}) };
   }
 
   /**
@@ -2487,8 +2947,8 @@ class OpenClawBackend extends AgentBackend {
     let plainVars = null;
     if (this._isLocalGateway()) {
       try {
-        const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
-        const cfg = JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8"));
+        const home = this._localStateRoot();
+        const cfg = JSON.parse(fs.readFileSync(this._localConfigPath(), "utf8"));
         if (cfg?.env?.vars && typeof cfg.env.vars === "object") plainVars = cfg.env.vars;
       } catch { /* 摘要缺席不影响列表 */ }
     }
@@ -2530,8 +2990,8 @@ class OpenClawBackend extends AgentBackend {
     const k = String(key || "").trim();
     if (!k) throw new Error("缺少变量名");
     if (!this._isLocalGateway()) throw new Error("远程网关的配置文件不在本机，无法查看明文");
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
-    const cfg = JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8"));
+    const home = this._localStateRoot();
+    const cfg = JSON.parse(fs.readFileSync(this._localConfigPath(), "utf8"));
     const v = cfg?.env?.vars?.[k];
     if (typeof v !== "string") throw new Error(`变量 ${k} 不存在`);
     return { value: v };
@@ -2544,10 +3004,10 @@ class OpenClawBackend extends AgentBackend {
    */
   async _localKeyDigests({ refresh = true } = {}) {
     if (!this._isLocalGateway()) return new Map();
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const home = this._localStateRoot();
     let cfg = {};
     try {
-      cfg = JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8"));
+      cfg = JSON.parse(fs.readFileSync(this._localConfigPath(), "utf8"));
     } catch { /* 读不到磁盘按无摘要处理（目录照常） */ }
     if (this._usesCanonicalModelAuthCli()) {
       const agentId = this._modelAuthAgentId();
@@ -2556,8 +3016,9 @@ class OpenClawBackend extends AgentBackend {
       if (this._canonicalKeyDigestsInFlight?.identity === identity) return this._canonicalKeyDigestsInFlight.promise;
       const promise = (async () => {
         try {
-          const sdk = path.join(path.dirname(fs.realpathSync(resolveOpenclawBin())), "dist", "plugin-sdk", "agent-runtime.js");
-          const digests = await readCanonicalKeyDigests({ sdk, home, agentId });
+          const sdk = this._localRuntimeScope.sdkPath();
+          const digests = await readCanonicalKeyDigests({ sdk, home, agentId,
+            configPath: this._localConfigPath(), execution: this._localRuntimeScope.node([]) });
           this._canonicalKeyDigests = { identity, digests };
           return digests;
         } catch { return new Map(projectKeyDigests(cfg)); }
@@ -2605,8 +3066,9 @@ class OpenClawBackend extends AgentBackend {
   async getProviderDirectory() {
     const catalog = this._providerCatalogSnapshot().providers;
     let parsed = null;
+    let configRevision;
     try {
-      ({ parsed } = await this._configSnapshot());
+      ({ parsed, hash: configRevision } = await this._configSnapshot());
     } catch (err) {
       const e = new Error(`gateway 配置读取失败：${err?.message || err}`);
       e.status = 503;
@@ -2616,20 +3078,43 @@ class OpenClawBackend extends AgentBackend {
       ? parsed.models.providers : {};
     const authProfiles = parsed?.auth?.profiles && typeof parsed.auth.profiles === "object"
       ? parsed.auth.profiles : {};
+    const nativeConfig = this._modelChangeAdapter?.configurationSemantics === "native-config";
+    let nativeAuth = null;
     const authProviderSet = new Set(Object.values(authProfiles).map((v) => v?.provider).filter(Boolean));
-    const defaultAuthProviderSet = new Set(Object.entries(authProfiles).flatMap(([profileId, value]) => {
+    // 可清除 = 该 provider 有 API Key 型凭据：旧版固定 `<id>:default`，官方
+    // models.authSetApiKey 新建的是 `<id>:manual`；OAuth/Token 登录不在此列。
+    const apiKeyAuthProviderSet = new Set(Object.entries(authProfiles).flatMap(([profileId, value]) => {
       const provider = value?.provider;
-      return provider && profileId === `${provider}:default` ? [provider] : [];
+      return provider && (profileId === `${provider}:default` || value?.mode === "api_key") ? [provider] : [];
     }));
-    const keyDigests = await this._localKeyDigests();
+    // config 的 auth.profiles 只是可选元数据：凭据只在凭据库里（CLI 迁移、登出清掉
+    // 元数据）时也照样生效。官方页面按 models.authStatus 判定，这里并入 owner 视图。
+    if (nativeConfig) {
+      nativeAuth = await this._nativeProviderApiKeys(parsed);
+      for (const row of nativeAuth.rows) authProviderSet.add(row.provider);
+    } else if (await this._usesGatewayCredentialRpc()) {
+      try {
+        for (const row of await this._gatewayAuthProfileRows(this._modelAuthAgentId()) || []) {
+          authProviderSet.add(row.provider);
+          if (row.type === "api_key") apiKeyAuthProviderSet.add(row.provider);
+        }
+      } catch { /* 读不到凭据状态时保留 config 视图 */ }
+    }
+    const keyDigests = nativeConfig ? new Map() : await this._localKeyDigests();
+    const managed = this._localRuntimeScope.isManaged();
+    let canCreate = false;
     let canUpdateProvider = false;
+    let canManageCredentials = !nativeConfig;
     try {
       const capabilities = await this.getModelChangeCapabilities();
+      canCreate = capabilities?.supported === true && capabilities.create === true;
       canUpdateProvider = capabilities?.supported === true && capabilities.updateProvider === true;
+      canManageCredentials = nativeConfig ? capabilities?.credentialManagement === true : true;
     } catch { /* adapter 不可用时继续检查 config-only 能力 */ }
     if (!canUpdateProvider) {
       try {
         const capabilities = await this.getModelConfigWriteCapabilities();
+        canCreate = canCreate || capabilities?.supported === true && capabilities.create === true;
         canUpdateProvider = capabilities?.supported === true && capabilities.updateProvider === true;
       } catch { /* 两条能力链都不可读时 fail-closed */ }
     }
@@ -2644,28 +3129,57 @@ class OpenClawBackend extends AgentBackend {
       if (emptyShell) return [];
       const keyInConfig = !!(cfg && cfg.apiKey); // 哨兵/SecretRef/字符串皆真值
       const keyInAuth = authProviderSet.has(id);
+      const nativeApiKey = Boolean(nativeAuth?.profiles.get(id.toLowerCase())?.size);
       // 用户已在 config/auth 里配过的一律放行——分类再对也不能把用户配好的东西藏起来
       if (!cfg && !keyInAuth && this._outOfDirectoryScope(cat)) return [];
+      if (nativeConfig && !cfg && !keyInAuth && cat?.builtin && cat.classified && !cat.keyMethods.includes("api-key")) return [];
+      const nativeKeyEditable = canManageCredentials && (!cat?.builtin || !cat.classified || cat.keyMethods.includes("api-key"));
+      const defaultModelId = typeof cat?.defaultModels?.[0]?.id === "string"
+        && cat.defaultModels[0].id.trim() && cat.defaultModels[0].id.length <= 256
+        && !/[\u0000-\u001f\u007f]/u.test(cat.defaultModels[0].id)
+        ? cat.defaultModels[0].id.trim() : null;
+      // Existing providers may use OpenClaw's documented implicit API. A new
+      // catalog entry needs an explicit protocol and a real catalog model ID.
+      const api = managed && cfg ? cfg.api || "openai-completions" : (cfg?.api || cat?.api) ?? null;
+      const hasCreateMetadata = defaultModelId !== null && OPENCLAW_MODEL_APIS.includes(api);
+      const endpoint = managed && cfg ? cfg.baseUrl : typeof cfg?.baseUrl === "string" ? cfg.baseUrl : cat?.baseUrl;
+      let hasEndpoint = false;
+      try {
+        const url = new URL(endpoint);
+        hasEndpoint = typeof endpoint === "string" && endpoint.length <= 4096
+          && endpoint === endpoint.trim() && ["http:", "https:"].includes(url.protocol)
+          && Boolean(url.hostname) && !url.username && !url.password && !url.search && !url.hash;
+      } catch { /* No arbitrary endpoint can be invented for a catalog entry. */ }
+      const editable = cfg ? canUpdateProvider && hasEndpoint && OPENCLAW_MODEL_APIS.includes(api)
+        : canCreate && hasCreateMetadata && hasEndpoint;
+      const editReason = !(cfg ? canUpdateProvider : canCreate) ? "transaction_unavailable"
+        : !OPENCLAW_MODEL_APIS.includes(api) || !cfg && !hasCreateMetadata ? "provider_metadata_required"
+          : !hasEndpoint ? "endpoint_required" : null;
       return [{
         id,
         label: cat?.label || id,
         logoKey: id,
         getKeyUrl: cat?.getKeyUrl || null,
-        // 保存分支判据：config 有条目走 update-provider；没有则 key 走 auth-profile
-        // 直写、覆盖端点走 create（见 OpenClawProvidersPane 的 save）。
+        // Managed keys always use model-change; an absent provider is created
+        // only from exact catalog endpoint/protocol/model metadata.
         inConfig: !!cfg,
-        api: (cfg?.api || cat?.api) ?? null,
+        api,
+        ...(nativeConfig ? { writeMode: "native-config",
+          configRevision,
+        } : managed ? { writeMode: "managed-model-change" } : {}),
         baseUrl: {
           value: typeof cfg?.baseUrl === "string" ? cfg.baseUrl : null,
           defaultValue: cat?.baseUrl ?? null,
-          editable: true,
+          editable: nativeConfig ? canUpdateProvider && OPENCLAW_MODEL_APIS.includes(api) : managed ? (cfg ? canUpdateProvider && OPENCLAW_MODEL_APIS.includes(api) : canCreate && hasCreateMetadata) : true,
         },
         key: {
-          configured: keyInConfig || keyInAuth,
-          clearable: keyInConfig
-            ? canUpdateProvider
-            : keyInAuth && this._isLocalGateway() && defaultAuthProviderSet.has(id),
-          source: keyInConfig ? "config" : (keyInAuth ? "auth-profile" : null),
+          configured: keyInConfig || (nativeConfig ? nativeApiKey : keyInAuth),
+          ...(nativeConfig ? { statusUnknown: nativeAuth.unavailable } : {}),
+          clearable: nativeConfig ? nativeKeyEditable && (keyInConfig || nativeApiKey || nativeAuth.unavailable) : keyInConfig
+            ? managed ? editable : canUpdateProvider
+            : keyInAuth && !managed && this._isLocalGateway() && apiKeyAuthProviderSet.has(id),
+          source: keyInConfig ? "config" : ((nativeConfig ? nativeApiKey : keyInAuth) ? "auth-profile" : null),
+          ...(nativeConfig ? { editable: nativeKeyEditable, editReason: nativeKeyEditable ? null : "transaction_unavailable" } : managed ? { editable, editReason } : {}),
           // 本机才有摘要；远程 null → UI 退化显示「已设置」
           redacted: keyDigests.get(id) ?? null,
         },
@@ -2676,9 +3190,8 @@ class OpenClawBackend extends AgentBackend {
         // provider、paste-api-key 进 auth 的目录外家、manual 补元数据的常见家。
         custom: cat?.builtin !== true,
         modelsCount: Array.isArray(cfg?.models) ? cfg.models.length : (cat?.defaultModels?.length || 0),
-        // 未配置目录 provider 首次「覆盖端点」要走 create（config 的 models 必填），
-        // 用快照默认首模型起步；没有默认模型的家为 null（UI 回落 "default"）。
-        defaultModelId: cat?.defaultModels?.[0]?.id ?? null,
+        // Null is an actual metadata gap; managed creation never fabricates a model.
+        defaultModelId: managed ? defaultModelId : cat?.defaultModels?.[0]?.id ?? null,
         oauth: (cat?.oauth || []).map(({ choiceId, method, label }) => ({ choiceId, method, label })),
       }];
     });
@@ -2690,22 +3203,31 @@ class OpenClawBackend extends AgentBackend {
    * Key 只输出本机安全摘要；明文、SecretRef 和远程凭证均不会进入响应。
    */
   async listCustomEndpoints({ refreshAuth = true } = {}) {
-    const { parsed } = await this._configSnapshot();
+    const { parsed, hash } = await this._configSnapshot();
+    const nativeDraft = this._modelChangeAdapter?.configurationSemantics === "native-config";
     const catalog = this._providerCatalogSnapshot().providers;
     // Normal loads and key edits query fresh Gateway metadata. Model-only save
     // readback can reuse it while still reading fresh endpoint configuration.
-    const [authKeyProfiles, keyDigests] = await Promise.all([
-      this._loadEndpointAuthKeyProfiles({ refresh: refreshAuth }),
-      this._localKeyDigests({ refresh: refreshAuth }),
+    const [authState, keyDigests] = await Promise.all([
+      nativeDraft ? this._nativeProviderApiKeys(parsed) : this._loadEndpointAuthKeyProfiles({ refresh: refreshAuth }),
+      nativeDraft ? new Map() : this._localKeyDigests({ refresh: refreshAuth }),
     ]);
+    const authKeyProfiles = nativeDraft ? authState.profiles : authState;
+    const authStatusUnknown = nativeDraft && authState.unavailable;
+    const managed = this._localRuntimeScope.isManaged();
+    let canRenameProvider = false;
     let canUpdateProvider = false;
+    let canManageCredentials = !nativeDraft;
     try {
       const capabilities = await this.getModelChangeCapabilities();
+      canRenameProvider = capabilities?.supported === true && capabilities.renameProvider === true;
       canUpdateProvider = capabilities?.supported === true && capabilities.updateProvider === true;
+      canManageCredentials = nativeDraft ? capabilities?.credentialManagement === true : true;
     } catch { /* 完整能力不可读时继续检查 config-only 能力 */ }
     if (!canUpdateProvider) {
       try {
         const capabilities = await this.getModelConfigWriteCapabilities();
+        canRenameProvider = capabilities?.supported === true && capabilities.renameProvider === true;
         canUpdateProvider = capabilities?.supported === true && capabilities.updateProvider === true;
       } catch { /* 两条能力链都不可读时 fail-closed，不影响只读列表 */ }
     }
@@ -2737,24 +3259,25 @@ class OpenClawBackend extends AgentBackend {
       } catch {
         return [];
       }
-      if (!Array.isArray(provider.models) || provider.models.length === 0) return [];
+      if (!Array.isArray(provider.models) || (!nativeDraft && provider.models.length === 0)) return [];
       if (catalog[id]?.builtin === true) return [];
 
       const models = provider.models
         .filter((model) => typeof model?.id === "string" && model.id.trim())
         .map((model) => model.id.trim());
-      if (models.length === 0) return [];
+      if (!nativeDraft && models.length === 0) return [];
       const configKey = provider.apiKey != null && provider.apiKey !== "";
-      const providerAuthProfiles = authKeyProfiles.get(id);
+      const providerAuthProfiles = authKeyProfiles.get(nativeDraft ? id.toLowerCase() : id);
       const authKey = Boolean(providerAuthProfiles?.size);
       const defaultAuthKey = providerAuthProfiles?.has(`${id}:default`) === true;
       const hasApiKey = configKey || authKey;
       const managedKey = provider.apiKey && typeof provider.apiKey === "object";
       const canRevealApiKey = hasApiKey
+        && !nativeDraft
         && this._isLocalGateway()
         && !managedKey
         && (typeof provider.apiKey === "string" || defaultAuthKey);
-      const canClearConfiguredKey = configKey || defaultAuthKey;
+      const canClearConfiguredKey = configKey || (nativeDraft ? authKey || authStatusUnknown : defaultAuthKey);
       // Include retained bindings after a confirmed deselection. Reopening the
       // editor should show their usage without selecting the removed model again.
       const usageModels = [...new Set([...models, ...primaryHolders.flatMap(({ ref }) =>
@@ -2779,10 +3302,12 @@ class OpenClawBackend extends AgentBackend {
           ? { api: provider.api.trim() }
           : {}),
         hasApiKey,
+        ...(nativeDraft ? { apiKeyStatusUnknown: authStatusUnknown } : {}),
         apiKeyPreview: keyDigests.get(id) ?? null,
         canRevealApiKey,
-        canClearApiKey: canClearConfiguredKey && canUpdateProvider,
+        canClearApiKey: canClearConfiguredKey && (nativeDraft ? canManageCredentials : canUpdateProvider),
         discoverModels: false,
+        ...(nativeDraft ? { advanced: require("./model-change-validation").normalizeModelAdvanced(provider, { projection: true, scope: "provider" }) } : {}),
         source: "config",
       }];
     });
@@ -2794,9 +3319,11 @@ class OpenClawBackend extends AgentBackend {
         defaultApi: "openai-completions",
         nameEditable: false,
         nameIsProviderId: true,
-        providerIdEditable: canUpdateProvider && this._isLocalGateway(),
+        providerIdEditable: canUpdateProvider && (nativeDraft || this._isLocalGateway()) && (!managed || canRenameProvider),
         firstModelIsDefault: false,
-        batchModelSelection: true,
+        batchModelSelection: nativeDraft || !managed,
+        ...(managed && !nativeDraft ? { singleModelMutations: true } : {}),
+        ...(nativeDraft ? { configurationDraft: true, configRevision: hash, allowEmptyModels: true, canEditApiKey: canManageCredentials } : {}),
         allowPrimaryModelRemoval: true,
       },
     };
@@ -2866,9 +3393,10 @@ class OpenClawBackend extends AgentBackend {
 
   /**
    * create/update 共用的同 id 覆盖写；新 provider 才写 baseUrl/api 端点字段。
-   * 密钥收敛（R178 官方推荐形态）：本机网关时 apiKey 写 auth-profiles（先写
-   * profile 再 patch config，profile 失败即零 config 写）；远程网关授权文件
-   * 不可达，降级为旧行为把 key 放进 config provider。
+   * 密钥收敛（R178 官方推荐形态）：本机网关时 apiKey 不进 config。网关声明官方
+   * 凭据 RPC 时先 patch config、再 models.authSetApiKey 存 Key 并绑定该连接（官方
+   * 页面同序）；旧网关先写 profile 再 patch config，profile 失败即零 config 写。
+   * 远程网关授权文件不可达，降级为旧行为把 key 放进 config provider。
    */
   _configOnlyModelTargetDigest(provider, modelId, target) {
     const pick = (value, fields) => Object.fromEntries(fields.map((field) => [field, value?.[field] ?? null]));
@@ -2909,17 +3437,25 @@ class OpenClawBackend extends AgentBackend {
     assertProviderDestination(initialProvider);
     const apiKey = String(secretEnvelope?.apiKey || "").trim();
     const keyToProfile = Boolean(apiKey) && this._isLocalGateway();
-    let localAuthKeyProviders;
-    if (keyToProfile) {
+    // 官方通道先写 provider 定义，再由 models.authSetApiKey 存 Key 并绑定到该连接；
+    // 旧 CLI 通道保持「先写凭据、失败即零 config 写」的原顺序。
+    const keyViaGateway = keyToProfile && await this._usesGatewayCredentialRpc();
+    if (keyToProfile && !keyViaGateway) {
       await this._writeAuthProfileKey(key, apiKey);
       await context?.recordStage?.("credential-write", { secretStep: "applied" });
-      localAuthKeyProviders = this._localAuthKeyProviders();
-    } else {
-      localAuthKeyProviders = new Set((await this._loadLocalAuthKeyProfiles()).keys());
+    }
+    // 只有「config 无该 provider 且未给端点」的裸 allowlist 登记要判断它是不是授权型
+    // provider；自定义端点与已有 provider 加模型都不读凭据清单。本次带 Key 的一律视为已授权。
+    let localAuthKeyProviders = new Set();
+    if (!initialProvider && !requestedBaseUrl) {
+      localAuthKeyProviders = keyToProfile && !keyViaGateway
+        ? this._localAuthKeyProviders()
+        : new Set((await this._loadEndpointAuthKeyProfiles({ refresh: false })).keys());
+      if (keyViaGateway) localAuthKeyProviders.add(key);
     }
     let registryEntry = null;
     let configOnlyTarget = null;
-    const patchInfo = await this._patchModelProviders((current, parsed) => {
+    let patchInfo = await this._patchModelProviders((current, parsed) => {
       const existing = current[key] && typeof current[key] === "object" ? current[key] : null;
       assertProviderDestination(existing);
       if (!existing && !requestedBaseUrl) {
@@ -2989,6 +3525,13 @@ class OpenClawBackend extends AgentBackend {
     });
     // agent 运行时读主注册表——config 写成功后必须镜像,否则 agent 侧 missing-provider-auth
     if (registryEntry) this._syncRegistryProvider(key, registryEntry);
+    if (keyViaGateway) {
+      context?.assertProviderLease?.();
+      await context?.recordStage?.("credential-write");
+      const credential = await this._saveProviderApiKeyViaGateway(key, apiKey);
+      if (credential.restartRequired) patchInfo = { ...patchInfo, restart: true };
+      await context?.recordStage?.("credential-write", { secretStep: "applied" });
+    }
     return patchInfo;
   }
 
@@ -3161,7 +3704,7 @@ class OpenClawBackend extends AgentBackend {
     const id = safeSpec.sourceModelId;
     let providerRemoved = false;
     let remainingModels = null;
-    const patchInfo = await this._patchModelProviders((current, parsed) => {
+    let patchInfo = await this._patchModelProviders((current, parsed) => {
       // hash 冲突会带着新快照重跑本闭包:结论必须只反映最后一次成功的那轮
       providerRemoved = false;
       remainingModels = null;
@@ -3228,7 +3771,7 @@ class OpenClawBackend extends AgentBackend {
       };
     });
     if (providerRemoved) {
-      await this._dropAuthProfileKeyQuietly(key);
+      if (await this._dropAuthProfileKeyQuietly(key)) patchInfo = { ...patchInfo, restart: true };
       this._syncRegistryProvider(key, null);
       this._purgeAgentShadowRegistries(key);
     } else if (remainingModels) {
@@ -3244,8 +3787,8 @@ class OpenClawBackend extends AgentBackend {
 
   async _configOnlyDeleteProvider(safeSpec) {
     const key = safeSpec.providerKey;
-    const localAuthKeyProviders = new Set((await this._loadLocalAuthKeyProfiles()).keys());
-    const patchInfo = await this._patchModelProviders((current, parsed) => {
+    const localAuthKeyProviders = new Set((await this._loadEndpointAuthKeyProfiles({ refresh: false })).keys());
+    let patchInfo = await this._patchModelProviders((current, parsed) => {
       const inConfig = current[key] && typeof current[key] === "object";
       if (!inConfig && !localAuthKeyProviders.has(key)) {
         throw new Error(`provider ${key} 不存在或不可编辑`);
@@ -3274,13 +3817,16 @@ class OpenClawBackend extends AgentBackend {
         patchAgentMetadata,
       };
     });
-    await this._dropAuthProfileKeyQuietly(key);
+    if (await this._dropAuthProfileKeyQuietly(key)) patchInfo = { ...patchInfo, restart: true };
     this._syncRegistryProvider(key, null);
     this._purgeAgentShadowRegistries(key);
     return patchInfo;
   }
 
   async _deleteCanonicalAuthKeysForProvider(providerKey) {
+    if (await this._usesGatewayCredentialRpc()) {
+      return (await this._clearProviderApiKeysViaGateway(providerKey)).restartRequired;
+    }
     const profiles = await this._loadCanonicalAuthProfiles();
     for (const profile of profiles) {
       if (profile.provider === providerKey && profile.type === "api_key") {
@@ -3294,8 +3840,7 @@ class OpenClawBackend extends AgentBackend {
     if (!this._isLocalGateway()) return;
     try {
       if (this._usesCanonicalModelAuthCli()) {
-        await this._deleteCanonicalAuthKeysForProvider(providerKey);
-        return;
+        return await this._deleteCanonicalAuthKeysForProvider(providerKey);
       }
       const { file, data } = this._readAuthProfiles();
       const id = `${providerKey}:default`;
@@ -3311,8 +3856,8 @@ class OpenClawBackend extends AgentBackend {
 
   async _providerRenameConfigKey(from, to, value) {
     if (typeof value === "string" && value.includes("REDACTED")) {
-      const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
-      const config = JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8"));
+      const home = this._localStateRoot();
+      const config = JSON.parse(fs.readFileSync(this._localConfigPath(), "utf8"));
       const key = config.models?.providers?.[from]?.apiKey ?? config.models?.providers?.[to]?.apiKey;
       if (key === undefined) throw Object.assign(new Error("无法读取原端点密钥，尚未改名"), { code: "auth_read_failed" });
       return key;
@@ -3323,8 +3868,8 @@ class OpenClawBackend extends AgentBackend {
   async _loadProviderRenameAuth(from, to, agentIds = this._modelAuthAgentIds()) {
     // The installed SDK provides a read-only projection of canonical auth.
     // Writes still go through the official CLI, which owns the state DB.
-    const sdk = path.join(path.dirname(fs.realpathSync(resolveOpenclawBin())), "dist", "plugin-sdk", "agent-runtime.js");
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const sdk = this._localRuntimeScope.sdkPath();
+    const home = this._localStateRoot();
     const script = `
       import { pathToFileURL } from 'node:url';
       import path from 'node:path';
@@ -3349,8 +3894,9 @@ class OpenClawBackend extends AgentBackend {
       process.stdout.write(JSON.stringify(rows));
     `;
     return new Promise((resolve, reject) => {
-      execFile("node", ["--input-type=module", "-e", script, sdk, home, from, to || "", JSON.stringify(agentIds)], {
-        env: process.env, encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024,
+      const node = this._localRuntimeScope.node(["--input-type=module", "-e", script, sdk, home, from, to || "", JSON.stringify(agentIds)]);
+      execFile(node.file, node.args, {
+        env: node.env, cwd: node.cwd, encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024,
       }, (error, stdout) => {
         // Never put SDK stdout/stderr (which can contain credentials) in errors.
         if (error) return reject(Object.assign(new Error("无法读取原端点授权，尚未改名"), { code: "auth_read_failed" }));
@@ -3449,43 +3995,55 @@ class OpenClawBackend extends AgentBackend {
       else await this._dropAuthProfileKeyQuietly(key);
     }
     const apiKey = String(secretEnvelope?.apiKey || "").trim();
-    // 密钥收敛：本机网关 key 写 auth-profiles;config 里若还留着旧明文顺带清掉。
+    // 密钥收敛：本机网关 key 不进 config。官方 RPC 通道在端点字段写完后由
+    // models.authSetApiKey 存 Key 并把连接绑定到该 profile（旧明文随绑定一并替换）；
+    // 旧网关先写 auth-profile，再顺带清掉 config 里的旧明文。
     const keyToProfile = Boolean(apiKey) && this._isLocalGateway();
-    if (keyToProfile) {
+    const keyViaGateway = keyToProfile && await this._usesGatewayCredentialRpc();
+    if (keyToProfile && !keyViaGateway) {
       await this._writeAuthProfileKey(key, apiKey);
       fields.apiKey = null;
-    } else if (apiKey) {
+    } else if (apiKey && !keyToProfile) {
       fields.apiKey = apiKey;
     }
-    if (Object.keys(fields).length === 0) return { restart: false, noop: true };
-    const patchInfo = await this._patchModelProviders((current) => {
-      if (!current[key] || typeof current[key] !== "object") {
-        // auth-only(内置 provider,凭证型):config 本无条目,key 在 auth-profiles 层
-        // (换 key 已写 profile / clearApiKey 已 drop profile),fields 只剩 apiKey
-        // 清除项 → 零写返回(幂等:config 没键=已清);有端点字段则明确报错。
-        const onlyKeyClear = Object.keys(fields).every((f) => f === "apiKey" && fields[f] === null);
-        if (onlyKeyClear) return null;
-        throw new Error(`provider ${key} 不存在或不可编辑`);
-      }
-      // 纯对象字段合并，不碰 models 数组 → 无需 replacePaths
-      return { patchProviders: { [key]: fields }, replacePaths: [] };
-    });
-    if (dropKeyAfterPatch) await this._deleteCanonicalAuthKeysForProvider(key);
-    // 端点字段变化镜像注册表(条目存在才;镜像不带 key,apiKey:null 清除项不进镜像)
-    if ((fields.baseUrl !== undefined || fields.api !== undefined) && this._isLocalGateway()) {
-      try {
-        const { data } = this._readRegistry();
-        const prev = data.providers?.[key];
-        if (prev && typeof prev === "object") {
-          const next = { ...prev };
-          if (fields.baseUrl === null) delete next.baseUrl;
-          else if (fields.baseUrl !== undefined) next.baseUrl = fields.baseUrl;
-          if (fields.api !== undefined) next.api = fields.api;
-          this._syncRegistryProvider(key, next);
+    let patchInfo = { restart: false, noop: true };
+    if (Object.keys(fields).length > 0) {
+      patchInfo = await this._patchModelProviders((current) => {
+        if (!current[key] || typeof current[key] !== "object") {
+          // auth-only(内置 provider,凭证型):config 本无条目,key 在 auth-profiles 层
+          // (换 key 已写 profile / clearApiKey 已 drop profile),fields 只剩 apiKey
+          // 清除项 → 零写返回(幂等:config 没键=已清);有端点字段则明确报错。
+          const onlyKeyClear = Object.keys(fields).every((f) => f === "apiKey" && fields[f] === null);
+          if (onlyKeyClear) return null;
+          throw new Error(`provider ${key} 不存在或不可编辑`);
         }
-      } catch (err) {
-        console.error(`[openclaw] 注册表端点镜像失败(${key}):`, err?.message || err);
+        // 纯对象字段合并，不碰 models 数组 → 无需 replacePaths
+        return { patchProviders: { [key]: fields }, replacePaths: [] };
+      });
+      if (dropKeyAfterPatch && await this._deleteCanonicalAuthKeysForProvider(key)) patchInfo = { ...patchInfo, restart: true };
+      // 端点字段变化镜像注册表(条目存在才;镜像不带 key,apiKey:null 清除项不进镜像)
+      if ((fields.baseUrl !== undefined || fields.api !== undefined) && this._isLocalGateway()) {
+        try {
+          const { data } = this._readRegistry();
+          const prev = data.providers?.[key];
+          if (prev && typeof prev === "object") {
+            const next = { ...prev };
+            if (fields.baseUrl === null) delete next.baseUrl;
+            else if (fields.baseUrl !== undefined) next.baseUrl = fields.baseUrl;
+            if (fields.api !== undefined) next.api = fields.api;
+            this._syncRegistryProvider(key, next);
+          }
+        } catch (err) {
+          console.error(`[openclaw] 注册表端点镜像失败(${key}):`, err?.message || err);
+        }
       }
+    }
+    if (keyViaGateway) {
+      context?.assertProviderLease?.();
+      await context?.recordStage?.("credential-write");
+      const credential = await this._saveProviderApiKeyViaGateway(key, apiKey);
+      if (credential.restartRequired) patchInfo = { ...patchInfo, restart: true };
+      await context?.recordStage?.("credential-write", { secretStep: "applied" });
     }
     return patchInfo;
   }
@@ -3493,12 +4051,14 @@ class OpenClawBackend extends AgentBackend {
   /**
    * provider 整体改名:config 搬键(旧删新建) + 允许列表前缀搬迁 + primary/fallbacks
    * 引用改写(改名不悬空,改写而非拒绝) + 主注册表/分身注册表整体迁移。
-   * 旧版 auth-profiles/agent sqlite 一并搬迁；9.1 state DB 凭证由调用方经 CLI 重建。
+   * 旧版 auth-profiles/agent sqlite 一并搬迁；9.1 state DB 凭证由调用方经官方 RPC
+   * （旧网关经 CLI）重建。renameAuthConfig=false 时 config 的 auth 元数据不搬键，
+   * 新 provider 的凭据元数据由官方 RPC 写入、旧 provider 的随 logout 移除。
    * fields 为随改名一并提交的端点变更(null=删键)。
    * 重试时配置已经搬走则只补齐本地镜像，不重复写配置。
    */
   async _configOnlyRenameProvider(oldKey, newKey, fields, {
-    staged = false, clearMirroredKey = false, sourceDigest, targetDigest, beforeWrite,
+    staged = false, clearMirroredKey = false, sourceDigest, targetDigest, beforeWrite, renameAuthConfig = true,
   } = {}) {
     let renamedEntry = null;
     const patchInfo = await this._patchModelProviders((current, parsed) => {
@@ -3522,7 +4082,7 @@ class OpenClawBackend extends AgentBackend {
       }
       if (entry.apiKey) entry.apiKey = renameProfileRef(entry.apiKey, oldKey, newKey);
       renamedEntry = entry;
-      const references = providerRenameReferences(parsed, oldKey, newKey);
+      const references = providerRenameReferences(parsed, oldKey, newKey, { renameAuth: renameAuthConfig });
       return {
         patchProviders: { [oldKey]: null, [newKey]: entry },
         replacePaths: [`models.providers.${oldKey}.models`, ...references.replacePaths],
@@ -3690,7 +4250,7 @@ class OpenClawBackend extends AgentBackend {
   _renameAgentShadowRegistries(oldKey, newKey, { clearMirroredKey = false } = {}) {
     if (!this._isLocalGateway()) return;
     try {
-      const agentsDir = path.join(process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw"), "agents");
+      const agentsDir = path.join(this._localStateRoot(), "agents");
       if (!fs.existsSync(agentsDir)) return;
       for (const name of fs.readdirSync(agentsDir)) {
         const file = path.join(agentsDir, name, "agent", "models.json");
@@ -3775,12 +4335,39 @@ class OpenClawBackend extends AgentBackend {
 
   // ---- connection / RPC ----
 
+  _isGatewaySocketCurrent(socket) {
+    const binding = this._gatewaySocketBindings.get(socket);
+    // Legacy test adapters may inject an already connected socket. Every socket
+    // opened by this Backend has a binding; managed sockets require one.
+    if (!binding) return !this._localRuntimeScope.isManaged();
+    return this._ws === socket && this._endpointGuard.isCurrent(binding);
+  }
+
+  _retireGatewaySocket(socket) {
+    const error = Object.assign(new Error("openclaw: connection superseded"), { code: "UPSTREAM_ENDPOINT_RETIRED", receiptUncertain: false });
+    if (this._ws === socket) {
+      this._ready = false; this._ws = null; this._wsGatewayUrl = null; this._gatewayHello = null;
+      this._advanceModelRuntimeGeneration();
+    }
+    this._flushPending(error, socket);
+    this._cancelConnecting?.(error);
+    try { socket.close(); } catch { /* the exact old socket is already retired */ }
+    return Object.assign(new Error("openclaw: connection superseded before dispatch"), {
+      code: "UPSTREAM_ENDPOINT_RETIRED", receiptUncertain: false,
+    });
+  }
+
   _flushPending(err, socket = null) {
     for (const [id, entry] of this._pending) {
       // 旧 socket close 只终止它自己发出的 RPC，不能冲掉新连接的 pending。
       if (socket && entry.socket !== socket) continue;
       this._pending.delete(id);
-      try { entry.reject(err); } catch { /* ignore */ }
+      const failure = err?.code === "UPSTREAM_ENDPOINT_RETIRED" && entry.dispatched && entry.method !== "connect"
+        ? Object.assign(new Error("openclaw: dispatched RPC needs verification after connection superseded"), {
+          code: "UPSTREAM_NEEDS_VERIFICATION", receiptUncertain: true,
+          ...(entry.operationId ? { operationId: entry.operationId } : {}),
+        }) : err;
+      try { entry.reject(failure); } catch { /* ignore */ }
     }
     for (const [id, entry] of this._finalObservers) {
       if (!socket || entry.socket === socket) this._closeFinalObserver(id);
@@ -3811,6 +4398,28 @@ class OpenClawBackend extends AgentBackend {
     this._closeFinalObserver(frame.id, frame);
   }
 
+  // 群草稿只观察原 agent RPC 的 assistant 投影。其他运行、旧连接和 reasoning 不进入草稿。
+  _observeAssistantEvent(frame, socket) {
+    if (frame.type !== "event" || frame.event !== "agent" || !["assistant", "tool"].includes(frame.payload?.stream)) return;
+    const payload = frame.payload;
+    const data = payload.data;
+    if (!data || typeof data !== "object" || data.isReasoning === true || data.phase === "analysis") return;
+    const seq = Number.isSafeInteger(payload.seq) ? payload.seq : frame.seq;
+    for (const entry of this._finalObservers.values()) {
+      const listener = payload.stream === "tool" ? entry.onTool : entry.onAssistant;
+      if (entry.socket !== socket || entry.runId !== payload.runId || typeof listener !== "function"
+        || (payload.sessionKey !== undefined && payload.sessionKey !== entry.sessionKey)
+        || (payload.agentId !== undefined && payload.agentId !== entry.agentId)) continue;
+      if (Number.isSafeInteger(seq)) {
+        if (seq <= (entry.activitySeq ?? -1)) continue;
+        entry.activitySeq = seq;
+      } else if (payload.stream === "tool" || typeof data.text !== "string") continue;
+      try { listener(data); } catch { /* 活动旁路不能影响执行回执 */ }
+    }
+  }
+
+  get groupActivityProtocolVersion() { return 2; }
+
   /** Observe the final response of this exact agent RPC without delaying acceptance. */
   requestWithFinalObservation(method, params, observer, timeoutMs = REQUEST_TIMEOUT_MS) {
     if (method !== "agent" || typeof params?.idempotencyKey !== "string"
@@ -3821,20 +4430,64 @@ class OpenClawBackend extends AgentBackend {
   }
 
   /** Send an RPC request on the live socket. */
+  attachExternalPluginSelectionService(service) { this._externalPluginSelectionService = service; }
+
+  async prepareExternalChatSelection(params, { requestHost } = {}) {
+    const generation = this._connectionGeneration;
+    return require("./openclaw-plugin-selection").prepareOpenClawPluginSelection({
+      params, service: this._externalPluginSelectionService,
+      requestHost: requestHost || ((method, value) => this.request(method, value)),
+      assertCurrent: () => {
+        if (generation !== this._connectionGeneration) {
+          throw Object.assign(new Error("OpenClaw 插件选择连接已变化，请核实原操作"),
+            { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", executionUncertain: true });
+        }
+      },
+    });
+  }
+
+  cancelExternalChatSelections(sessionKey, { requestHost } = {}) {
+    return require("./openclaw-plugin-selection").cancelOpenClawPluginSelectionSession({
+      sessionKey, service: this._externalPluginSelectionService,
+      requestHost: requestHost || ((method, params) => this.request(method, params)),
+    });
+  }
+
+  getExternalChatSelectionOperation(sessionKey, operationId, { requestHost } = {}) {
+    return require("./openclaw-plugin-selection").readOpenClawPluginSelectionOperation({
+      sessionKey, operationId, requestHost: requestHost || ((method, params) => this.request(method, params)),
+    });
+  }
+
   request(method, params, timeoutMs = REQUEST_TIMEOUT_MS, observer = null) {
-    // Chat selection has no trusted dispatch receipt -> execution run mapping
-    // in this Gateway contract. Reject direct backend callers as well as the
-    // Proxy route, before a frame can leave this process.
+    // Direct backend callers must use the same Service/Host negotiation as
+    // the Proxy. An unconfigured or incompatible Host cannot fall back to an
+    // ordinary chat.send that silently loses the user's selected plugins.
     if (method === "chat.send" && params
       && Object.prototype.hasOwnProperty.call(params, "pluginSelection")) {
-      const error = new Error("OpenClaw 尚无法将插件选择绑定到本次真实执行回合");
-      error.code = "PLUGIN_SELECTION_UNAVAILABLE";
-      return Promise.reject(error);
+      if (!this._externalPluginSelectionService) {
+        const error = new Error("OpenClaw 尚无法将插件选择绑定到本次真实执行回合");
+        error.code = "PLUGIN_SELECTION_UNAVAILABLE";
+        return Promise.reject(error);
+      }
+      return this.prepareExternalChatSelection(params).then(async prepared => {
+        const result = await this.request(method, prepared.params, timeoutMs, observer);
+        if (!["started", "accepted"].includes(result?.status) || result.runId !== prepared.selection.operationId) {
+          throw Object.assign(new Error("OpenClaw 原插件消息回执需要核实"),
+            { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", executionUncertain: true });
+        }
+        require("./openclaw-plugin-selection").validateOpenClawSelectionReceipt(result?.capabilitySelection, prepared.selection);
+        return result;
+      });
     }
     const ws = this._ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       try { observer?.onClose?.(); } catch { /* observer is isolated from RPC */ }
       return Promise.reject(new Error("openclaw: not connected"));
+    }
+    if (!this._isGatewaySocketCurrent(ws)) {
+      try { observer?.onClose?.(); } catch { /* observer is isolated from RPC */ }
+      return Promise.reject(this._retireGatewaySocket(ws));
     }
     const id = randomUUID();
     return new Promise((resolve, reject) => {
@@ -3845,7 +4498,9 @@ class OpenClawBackend extends AgentBackend {
       this._pending.set(id, {
         resolve: (v) => { clearTimeout(timer); resolve(v); },
         reject: (e) => { clearTimeout(timer); reject(e); },
-        socket: ws,
+        socket: ws, method, dispatched: false,
+        operationId: typeof params?.idempotencyKey === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(params.idempotencyKey)
+          ? params.idempotencyKey : null,
       });
       if (observer) {
         const entry = { ...observer, socket: ws, runId: params.idempotencyKey,
@@ -3856,7 +4511,12 @@ class OpenClawBackend extends AgentBackend {
         this._finalObservers.set(id, entry);
         observer.signal?.addEventListener("abort", entry.abort, { once: true });
       }
-      try { ws.send(JSON.stringify({ type: "req", id, method, params })); }
+      try {
+        const payload = JSON.stringify({ type: "req", id, method, params });
+        if (!this._isGatewaySocketCurrent(ws)) throw this._retireGatewaySocket(ws);
+        const entry = this._pending.get(id); if (entry) entry.dispatched = true;
+        ws.send(payload);
+      }
       catch (error) {
         this._pending.delete(id);
         clearTimeout(timer);
@@ -3868,8 +4528,16 @@ class OpenClawBackend extends AgentBackend {
 
   /** Ensure an authenticated connection; lazily (re)connects + handshakes. */
   _connect() {
-    const url = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL;
-    if (this._wsGatewayUrl && this._wsGatewayUrl !== url) void this.stop();
+    try { this._resolveLocalRuntime(); } catch (error) { return Promise.reject(error); }
+    let binding = this._endpointGuard.capture();
+    if (!binding) return Promise.reject(Object.assign(new Error("openclaw: managed endpoint unavailable"), { code: "MANAGED_HOST_ENDPOINT_UNVERIFIED" }));
+    if ((this._ws && !this._isGatewaySocketCurrent(this._ws))
+      || (this._connectingEndpointBinding && !this._endpointGuard.isCurrent(this._connectingEndpointBinding))) {
+      if (this._ws) this._retireGatewaySocket(this._ws);
+      void this.stop(); binding = this._endpointGuard.capture();
+    }
+    if (!binding) return Promise.reject(Object.assign(new Error("openclaw: endpoint unavailable"), { code: "MANAGED_HOST_ENDPOINT_UNVERIFIED" }));
+    const url = binding.url;
     if (this._ready && this._ws && this._ws.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
@@ -3885,6 +4553,7 @@ class OpenClawBackend extends AgentBackend {
     });
     this._connecting = connecting;
     this._connectingAttempt = attempt;
+    this._connectingEndpointBinding = binding;
 
     // 只允许本次握手清理自己的单飞句柄，旧 socket 的迟到事件不碰新代际。
     const clearConnecting = () => {
@@ -3892,6 +4561,7 @@ class OpenClawBackend extends AgentBackend {
       this._connectingAttempt = null;
       this._connecting = null;
       this._cancelConnecting = null;
+      this._connectingEndpointBinding = null;
     };
     let ws;
     let settled = false;
@@ -3908,7 +4578,7 @@ class OpenClawBackend extends AgentBackend {
       if (settled) return;
       // 握手完成前连接已被替换时，本次结果已过期，不能把 _ready 写回 true。
       if (this._ws !== ws || this._connectingAttempt !== attempt
-        || url !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
+        || !this._endpointGuard.isCurrent(binding)) {
         fail(new Error("openclaw: connection superseded"));
         return;
       }
@@ -3924,7 +4594,7 @@ class OpenClawBackend extends AgentBackend {
       const auth = await this._loadAuth(url);
       if (settled) return;
       if (this._connectingAttempt !== attempt
-        || url !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
+        || !this._endpointGuard.isCurrent(binding)) {
         fail(new Error("openclaw: connection superseded"));
         return;
       }
@@ -3932,24 +4602,33 @@ class OpenClawBackend extends AgentBackend {
       ws = new WebSocket(url, origin ? { headers: { Origin: origin } } : undefined);
       this._ws = ws;
       this._wsGatewayUrl = url;
+      this._gatewaySocketBindings.set(ws, binding);
     ws.on("message", (data) => {
+      if (this._ws !== ws) return;
+      if (!this._endpointGuard.isCurrent(binding)) { this._retireGatewaySocket(ws); return; }
       const frame = safeParse(data.toString());
       if (!frame) return;
       if (frame.type === "res") this._observeFinalResponse(frame, ws);
+      else this._observeAssistantEvent(frame, ws);
       // Resolve any pending RPC response (including the connect request).
       if (frame.type === "res" && this._pending.has(frame.id)) {
         const entry = this._pending.get(frame.id);
         if (entry.socket !== ws) return;
         this._pending.delete(frame.id);
         if (frame.ok) entry.resolve(frame.payload);
-        else entry.reject(new Error(frame.error?.message || "gateway error"));
+        else {
+          const error = new Error(frame.error?.message || "gateway error");
+          if (typeof frame.error?.code === "string") error.code = frame.error.code;
+          if (typeof frame.error?.retryable === "boolean") error.retryable = frame.error.retryable;
+          entry.reject(error);
+        }
         return;
       }
       if (this._ws !== ws) return; // 旧 socket 的迟到 challenge 不得驱动新连接握手
       // Device-auth challenge → sign + send connect, then mark ready.
       if (frame.type === "event" && frame.event === "connect.challenge") {
         const nonce = frame.payload?.nonce;
-        this._sendConnect(auth, nonce, ws, url, attempt).then(succeed).catch((err) => {
+        this._sendConnect(auth, nonce, ws, url, attempt, binding).then(succeed).catch((err) => {
           // 设备令牌陈旧(共享身份被别的客户端轮换)→ 清存储,下次连接自愈。
           if (classifyAuthError(err) === "device_token_stale") {
             try { this._authResolver.clearDeviceToken(url); } catch { /* 清不掉也不影响本次失败上抛 */ }
@@ -3977,9 +4656,10 @@ class OpenClawBackend extends AgentBackend {
   }
 
   async _sendConnect(auth, nonce, socket = this._ws,
-    gatewayUrl = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL, attempt = this._connectingAttempt) {
+    gatewayUrl = (this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL, attempt = this._connectingAttempt, binding = this._gatewaySocketBindings.get(socket)) {
     if (!nonce) throw new Error("openclaw: connect challenge missing nonce");
     const isCurrent = () => this._ws === socket && this._connectingAttempt === attempt
+      && (!binding ? !this._localRuntimeScope.isManaged() : this._endpointGuard.isCurrent(binding))
       && gatewayUrl === ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL);
     if (!isCurrent()) throw new Error("openclaw: connection superseded");
     const params = buildConnectParams(auth, nonce);
@@ -4004,12 +4684,13 @@ class OpenClawBackend extends AgentBackend {
     return i >= 0 ? String(id).slice(i + 1) : String(id || "");
   }
 
-  async getCronJobs() {
+  async getCronJobs({ strict = false } = {}) {
     try {
       await this._connect();
     } catch (err) {
       // Gateway not up / no identity → contribute no OpenClaw jobs (the merged
       // list still shows Hermes), mirroring Hermes' resilient empty behavior.
+      if (strict) throw err;
       console.error("[openclaw] cron.list skipped:", err?.message || err);
       return [];
     }
@@ -4466,7 +5147,7 @@ class OpenClawBackend extends AgentBackend {
     if (!safeSegment(m[3])) return null;
     let sessionsDir;
     try {
-      sessionsDir = resolveOpenClawSessionsDir(m[1]);
+      sessionsDir = resolveOpenClawSessionsDir(m[1], this._localStateRoot());
     } catch {
       return null;
     }
@@ -4541,7 +5222,7 @@ class OpenClawBackend extends AgentBackend {
 
   // 计算本机目录签名并按 cache/SWR 规则返回；冷启动的并发编排由 getCliUsage 负责。
   async _getLocalCliUsage() {
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const home = this._localStateRoot();
     const agentsDir = path.join(home, "agents");
     let entries;
     try {
@@ -4671,7 +5352,7 @@ class OpenClawBackend extends AgentBackend {
   }
 
   async _getLocalSkillUsage() {
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const home = this._localStateRoot();
     const agentsDir = path.join(home, "agents");
     let entries;
     try {
@@ -4774,7 +5455,7 @@ class OpenClawBackend extends AgentBackend {
   async _resolveSkillName(mdPath) {
     const memo = this._skillNameByPath;
     if (memo.has(mdPath)) return memo.get(mdPath);
-    const abs = mdPath.startsWith("~/") ? path.join(os.homedir(), mdPath.slice(2)) : mdPath;
+    const abs = mdPath.startsWith("~/") ? path.join(this._localUserHome(), mdPath.slice(2)) : mdPath;
     let name = path.basename(path.dirname(abs)) || null; // 兜底：目录名
     try {
       const head = (await fs.promises.readFile(abs, "utf8")).slice(0, 4096);
@@ -4874,7 +5555,7 @@ class OpenClawBackend extends AgentBackend {
   // getCliUsage.
   async getRecentArtifacts({ limit = 20, sinceMs = 0 } = {}) {
     if (!this._isLocalGateway()) return { supported: false, reason: "remote", items: [] };
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const home = this._localStateRoot();
     const roots = await this._artifactRoots(home);
     if (!roots.length) return { supported: true, items: [] };
     // sinceMs（本地零点）在请求层过滤：缓存按 mtime desc 存 top-N，今天的文件
@@ -4926,7 +5607,7 @@ class OpenClawBackend extends AgentBackend {
       const list = readCanonicalAgentEntries(parsed);
       for (const agent of list) {
         let ws = typeof agent?.workspace === "string" ? agent.workspace.trim() : "";
-        if (ws.startsWith("~/")) ws = path.join(os.homedir(), ws.slice(2));
+        if (ws.startsWith("~/")) ws = path.join(this._localUserHome(), ws.slice(2));
         const id = typeof agent?.id === "string" ? agent.id : "";
         if (ws && path.isAbsolute(ws)) {
           candidates.push({ path: ws, area: id ? `agents/${id}` : "agents", agentId: id || undefined });
@@ -4956,7 +5637,7 @@ class OpenClawBackend extends AgentBackend {
   // realpath 包含 + 图片扩展 + 普通文件；远程网关一律拒绝。
   async resolveArtifactPreview(reqPath) {
     if (!this._isLocalGateway()) return null;
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const home = this._localStateRoot();
     const roots = await this._artifactRoots(home);
     return resolveArtifactPreviewPath(reqPath, roots, ARTIFACT_IMAGE_EXTS);
   }
@@ -5040,6 +5721,7 @@ class OpenClawBackend extends AgentBackend {
    * @returns {Array<object>}
    */
   _mergeConfiguredModels(models, parsed) {
+    if (this._modelChangeAdapter?.configurationSemantics === "native-config") return models;
     const providers = parsed?.models?.providers;
     if (!providers || typeof providers !== "object") return models;
     const configured = new Map();
@@ -5076,6 +5758,7 @@ class OpenClawBackend extends AgentBackend {
    * 目录行,补出目录还没有的键(裸行,重启后目录元数据接管)。
    */
   _mergeAllowlistModels(models, parsed) {
+    if (this._modelChangeAdapter?.configurationSemantics === "native-config") return models;
     const allow = readDefaultModelPolicyAllow(parsed);
     if (!Array.isArray(allow)) return models;
     let authProviders;
@@ -5127,6 +5810,31 @@ class OpenClawBackend extends AgentBackend {
     return out;
   }
 
+  async getGroupMemberModels(agentId) {
+    const { assertModelCatalog, modelError } = require("../group-member-model");
+    await this._connect();
+    const generation = this._connectionGeneration;
+    const [result, agent] = await Promise.all([this.request("models.list", { agentId, view: "configured" }), this.getAgent(agentId)]);
+    if (generation !== this._connectionGeneration || !Array.isArray(result?.models)) throw modelError("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
+    const models = this._mapRuntimeModels(result.models).filter(item => item.available !== false)
+      .map(item => ({ id: item.id, name: item.name, provider: item.provider || null }));
+    return assertModelCatalog({ models, defaultModel: typeof agent.model === "string" && agent.model ? agent.model : null });
+  }
+
+  async applyGroupSessionModel(agentId, sessionKey, selection) {
+    const { assertModelSelection, validModelSelection, modelError } = require("../group-member-model");
+    if (agentIdFromSessionKey(sessionKey) !== agentId || !validModelSelection(selection)) throw modelError();
+    await this._connect();
+    const generation = this._connectionGeneration;
+    if (selection !== null) assertModelSelection(await this.getGroupMemberModels(agentId), selection);
+    if (generation !== this._connectionGeneration) throw modelError();
+    // Explicit null removes the session override; the Gateway resolves this
+    // Agent's current primary model on every subsequent turn.
+    await this.request("sessions.patch", { key: sessionKey,
+      model: selection === null ? null : selection.provider ? `${selection.provider}/${selection.model}` : selection.model });
+    if (generation !== this._connectionGeneration) throw modelError();
+  }
+
   async getModels() {
     try {
       await this._connect();
@@ -5159,34 +5867,50 @@ class OpenClawBackend extends AgentBackend {
   async getModelCatalogSources({ fresh = true } = {}) {
     // 当前 OpenClaw 来源没有热缓存；即使调用方传 fresh:false，也执行真实双读取。
     void fresh;
-    let parsed;
-    try {
-      ({ parsed } = await this._configSnapshot());
-    } catch (cause) {
-      const error = new Error("openclaw: fresh model config unavailable", { cause });
-      error.code = "ERR_MODEL_CATALOG_CONFIG";
-      throw error;
-    }
+    for (let attempt = 0; ; attempt += 1) {
+      let parsed;
+      try {
+        ({ parsed } = await this._configSnapshot());
+      } catch (cause) {
+        const error = new Error("openclaw: fresh model config unavailable", { cause });
+        error.code = "ERR_MODEL_CATALOG_CONFIG";
+        throw error;
+      }
 
-    let response;
-    try {
-      response = await this.request("models.list", {
-        view: "all",
-        includeProviderCapabilities: true,
-        // This new RPC reads the gateway's current generation; config/auth
-        // changes invalidate it upstream. refresh:true instead forces every
-        // provider's network discovery even when that generation is current.
-      }, MODEL_CATALOG_REFRESH_TIMEOUT_MS);
-      if (!Array.isArray(response?.models)) throw new Error("models.list omitted its catalog");
-    } catch (cause) {
-      const error = new Error("openclaw: fresh runtime model catalog unavailable", { cause });
-      error.code = "ERR_MODEL_CATALOG_RUNTIME";
-      throw error;
+      const endpointBinding = this._endpointGuard.capture();
+      const connectionGeneration = this._connectionGeneration;
+      let response;
+      try {
+        response = await this.request("models.list", {
+          view: "all",
+          includeProviderCapabilities: true,
+          // Read the current generation without forcing provider discovery.
+        }, MODEL_CATALOG_REFRESH_TIMEOUT_MS);
+        if (!Array.isArray(response?.models)) throw new Error("models.list omitted its catalog");
+      } catch (cause) {
+        // A prepared catalog can be retired during this read. The Gateway
+        // explicitly marks this race retryable; re-read both sources at most
+        // twice, on the same connection/endpoint. Never replay a config write.
+        const publicationChanged = cause?.code === "UNAVAILABLE" && cause?.retryable === true
+          && cause.message === "Model catalog changed while preparing this result. Retry the request.";
+        // During Gateway startup or a config/credential refresh the catalog owner
+        // is briefly unpublished; that error carries no retry flag, only its text.
+        const notReady = cause?.code === "UNAVAILABLE"
+          && String(cause?.message || "").includes(CATALOG_NOT_READY_MESSAGE);
+        const current = () => connectionGeneration === this._connectionGeneration
+          && this._endpointGuard.isCurrent(endpointBinding);
+        if ((publicationChanged || notReady) && attempt < 2 && current()) {
+          if (notReady) await new Promise((resolve) => setTimeout(resolve, CATALOG_NOT_READY_RETRY_MS[attempt]));
+          if (current()) continue;
+        }
+        const error = new Error("openclaw: fresh runtime model catalog unavailable", { cause });
+        error.code = "ERR_MODEL_CATALOG_RUNTIME";
+        throw error;
+      }
+      const config = this._modelConfigRowsFromParsed(parsed);
+      const runtime = this._mapRuntimeModels(response.models);
+      return { models: runtime, config, runtime };
     }
-    const config = this._modelConfigRowsFromParsed(parsed);
-    const runtime = this._mapRuntimeModels(response?.models);
-    const models = runtime;
-    return { models, config, runtime };
   }
 
   // OpenClaw has no single "active" model — each agent has a default. Expose the
@@ -5214,15 +5938,31 @@ class OpenClawBackend extends AgentBackend {
 
   async _configSnapshot() {
     await this._connect();
-    const res = await this.request("config.get", {}, 10000);
-    const parsed = res && typeof res.parsed === "object" && res.parsed ? res.parsed : {};
-    const hash = typeof res?.hash === "string" ? res.hash : "";
-    if (!hash) throw new Error("openclaw: config.get 未返回 hash");
-    return { parsed, hash };
+    const generation = this._connectionGeneration;
+    let read = this._configSnapshotInFlight;
+    if (!read || read.generation !== generation || !this._endpointGuard.isCurrent(read.binding)) {
+      read = { generation, binding: this._endpointGuard.capture(),
+        promise: this.request("config.get", {}, CONFIG_SNAPSHOT_TIMEOUT_MS) };
+      this._configSnapshotInFlight = read;
+    }
+    try {
+      const res = await read.promise;
+      if (generation !== this._connectionGeneration || !this._endpointGuard.isCurrent(read.binding)) {
+        throw new Error("openclaw: config.get connection changed");
+      }
+      const parsed = res && typeof res.parsed === "object" && res.parsed ? res.parsed : {};
+      const hash = typeof res?.hash === "string" ? res.hash : "";
+      if (!hash) throw new Error("openclaw: config.get 未返回 hash");
+      // Concurrent readers share transport work, never mutable config objects.
+      return { parsed: structuredClone(parsed), hash };
+    } finally {
+      if (this._configSnapshotInFlight === read) this._configSnapshotInFlight = null;
+    }
   }
 
   async getModelConfig() {
     try {
+      this._resolveLocalRuntime();
       const { parsed } = await this._configSnapshot();
       const authKeyProviders = this._localAuthKeyProviders();
       const providers = parsed?.models?.providers && typeof parsed.models.providers === "object"
@@ -5247,6 +5987,8 @@ class OpenClawBackend extends AgentBackend {
               contextWindow: typeof m.contextWindow === "number" ? m.contextWindow : undefined,
               maxTokens: typeof m.maxTokens === "number" ? m.maxTokens : undefined,
               reasoning: m.reasoning === true,
+              ...(this._modelChangeAdapter?.configurationSemantics === "native-config"
+                ? { advanced: require("./model-change-validation").normalizeModelAdvanced(m, { projection: true }) } : {}),
               // models.list 目录行的 id 就是条目裸 id（provider 是独立字段），
               // 页面用 `${provider}:${catalogId}` 复合键匹配卡片。
               catalogId: String(m.id),
@@ -5504,10 +6246,10 @@ class OpenClawBackend extends AgentBackend {
     const key = String(providerKey || "").trim();
     if (!key) throw new Error("缺少 providerKey");
     if (!this._isLocalGateway()) return { apiKey: null, reason: "remote" };
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const home = this._localStateRoot();
     let cfg;
     try {
-      cfg = JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8"));
+      cfg = JSON.parse(fs.readFileSync(this._localConfigPath(), "utf8"));
     } catch {
       return { apiKey: null, reason: "remote" };
     }
@@ -5609,7 +6351,7 @@ class OpenClawBackend extends AgentBackend {
   // 与 _getLocalCliUsage 同款 SWR：目录签名 + 60s TTL；过期先回旧立方体、后台单飞
   // 重扫；冷启动并发共享同一次扫描。立方体含全历史，所有 range/两个接口共用一份。
   async _getUsageCube() {
-    const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+    const home = this._localStateRoot();
     const agentsDir = path.join(home, "agents");
     let entries;
     try {
@@ -5893,15 +6635,17 @@ class OpenClawBackend extends AgentBackend {
 
   // ---- skills (management UI, read-only) ----
 
-  async getSkills() {
+  async getSkills({ strict = false } = {}) {
     try {
       await this._connect();
     } catch (err) {
+      if (strict) throw err;
       console.error("[openclaw] skills.status skipped:", err?.message || err);
       return [];
     }
     try {
       const res = await this.request("skills.status", {}, 15000);
+      if (strict && !Array.isArray(res?.skills)) throw new Error("openclaw: Skill inventory invalid");
       const skills = Array.isArray(res?.skills) ? res.skills : [];
       return skills.map((s) => ({
         name: s.name || s.skillKey || "",
@@ -5912,6 +6656,7 @@ class OpenClawBackend extends AgentBackend {
         backendId: "openclaw",
       }));
     } catch (err) {
+      if (strict) throw err;
       console.error("[openclaw] skills.status failed:", err?.message || err);
       return [];
     }
@@ -6738,7 +7483,7 @@ class OpenClawBackend extends AgentBackend {
       const defaultId = r?.defaultId;
       const agents = Array.isArray(r?.agents) ? r.agents : [];
       const local = this._isLocalGateway();
-      const home = local ? resolveOpenClawHome() : null;
+      const home = local ? this._localStateRoot() : null;
       return sortAgentsByCreatedAt(agents.map((a) => {
         const id = String(a?.id || "");
         const workspace = a?.workspace || undefined;
@@ -6878,7 +7623,7 @@ class OpenClawBackend extends AgentBackend {
     if (!agentId || agentId === "main") throw new Error("openclaw: 创建 agent 需要有效名称");
     const workspace = typeof spec?.workspace === "string" && spec.workspace.trim()
       ? spec.workspace.trim()
-      : defaultOpenClawAgentWorkspace(name);
+      : defaultOpenClawAgentWorkspace(name, this._localStateRoot());
     if (!workspace) throw new Error("openclaw: 创建 agent 需要有效名称");
     // Gateway 用 name 生成 id；非规范名称先用稳定 ASCII id 创建，再写回展示名。
     const createName = OPENCLAW_AGENT_ID_RE.test(name) ? name : agentId;
@@ -6909,7 +7654,7 @@ class OpenClawBackend extends AgentBackend {
     const r = await this.request("agents.list", {}, 12000);
     const a = (Array.isArray(r?.agents) ? r.agents : []).find((x) => String(x?.id) === String(agentId));
     let ws = typeof a?.workspace === "string" ? a.workspace.trim() : "";
-    if (ws.startsWith("~/")) ws = path.join(os.homedir(), ws.slice(2));
+    if (ws.startsWith("~/")) ws = path.join(this._localUserHome(), ws.slice(2));
     if (!ws || !path.isAbsolute(ws)) return { supported: true, items: [] };
     const roots = await normalizeArtifactRoots([{ path: ws, area: `agents/${agentId}`, agentId }]);
     if (!roots.length) return { supported: true, items: [], total: 0 };
@@ -6951,12 +7696,12 @@ class OpenClawBackend extends AgentBackend {
     try {
       const agents = await this.request("agents.list", {}, 12000);
       let workspace = agents?.agents?.find((agent) => agent.id === agentId)?.workspace;
-      if (workspace?.startsWith("~/")) workspace = path.join(os.homedir(), workspace.slice(2));
+      if (workspace?.startsWith("~/")) workspace = path.join(this._localUserHome(), workspace.slice(2));
       if (!workspace || !path.isAbsolute(workspace)) throw new Error("Workspace unavailable");
       const history = await this.request("chat.history", { sessionKey, limit: 1000 }, 15000);
       if (!Array.isArray(history?.messages)) throw new Error("History unavailable");
       matched = await collectSessionOutputArtifacts({
-        ...sessionArtifactHistory(history.messages, sinceMs), workspace, runtimeHome: os.homedir(),
+        ...sessionArtifactHistory(history.messages, sinceMs), workspace, runtimeHome: this._localUserHome(),
         sessionCreatedAt: sinceMs, agentId,
       });
     } catch {
@@ -7076,18 +7821,54 @@ class OpenClawBackend extends AgentBackend {
     }
   }
 
+  async getHistoryPage(sessionKey, options = {}) {
+    const { limit, cursor } = historyPageOptions(options);
+    const binding = this._endpointGuard.capture();
+    if (!binding) throw historyError("BACKEND_NOT_READY");
+    const scope = historySource(sessionKey, binding.digest);
+    const position = decodeHistoryCursor(this, scope, cursor);
+    const offset = position?.offset ?? 0;
+    const result = await this.request("chat.history", {
+      sessionKey, limit, ...(offset ? { offset } : {}),
+    }, 15000);
+    if (!this._endpointGuard.isCurrent(binding)) throw historyError();
+    if (!Array.isArray(result?.messages)) throw historyError("CHAT_HISTORY_INVALID");
+    let messages = result.messages.slice();
+    if (position) {
+      if (position.sessionId !== result.sessionId
+        || position.total !== result.totalMessages) throw historyError();
+      // nextOffset is a raw-record offset, not a displayed-message offset.
+      // Gateways may deliberately replay a split display boundary. Remove only
+      // exact repeated projections; siblings with the same source id survive.
+      const seen = new Set(position.seen);
+      messages = messages.filter(message => !seen.has(historySource(message)));
+    }
+    // Older non-paginating gateways must not silently claim their tail is all
+    // history. The normal reader can display a retry/unavailable state.
+    if (typeof result.hasMore !== "boolean" && messages.length && result.completeSnapshot !== true) throw historyError("CHAT_HISTORY_UNSUPPORTED");
+    const hasMore = result.hasMore === true;
+    if (hasMore && (!Number.isSafeInteger(result.nextOffset) || result.nextOffset <= offset
+      || !Number.isSafeInteger(result.totalMessages) || typeof result.sessionId !== "string")) throw historyError("CHAT_HISTORY_INVALID");
+    const nextCursor = hasMore ? encodeHistoryCursor(this, scope, {
+      offset: result.nextOffset, sessionId: result.sessionId, total: result.totalMessages,
+      seen: result.messages.map(message => historySource(message)),
+    }) : null;
+    return historyPage(messages, hasMore, nextCursor, historySource(scope, result.sessionId ?? sessionKey));
+  }
+
   // ---- archived session history (local on-disk reset/rotation chain) ----
 
   // The .reset archive lives on the gateway HOST's disk; only readable when the
   // gateway is this machine (loopback). A remote gateway → not supported.
   _isLocalGateway() {
+    this._localRuntimeScope.current();
     return isLoopbackGatewayUrl((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL);
   }
 
   async getSessionArchive(agentId, sessionKey) {
     if (!this._isLocalGateway()) return { supported: false, reason: "remote", segments: [] };
     if (!agentId || !sessionKey) return { supported: true, segments: [] };
-    const dir = resolveOpenClawSessionsDir(agentId);
+    const dir = resolveOpenClawSessionsDir(agentId, this._localStateRoot());
     let entry;
     try {
       const store = JSON.parse(fs.readFileSync(path.join(dir, "sessions.json"), "utf8"));
@@ -7176,6 +7957,7 @@ class OpenClawBackend extends AgentBackend {
     const q = String(query || "").trim().slice(0, 4096);
     if (!agentId || !q) return { supported: true, results: [] };
     const limit = Number(opts.limit) > 0 ? Math.min(Math.floor(Number(opts.limit)), 25) : 25;
+    const excluded = new Set(opts.excludeSessionKeys ?? []);
     await this._connect();
     const listed = await this.request("sessions.list", {
       agentId: String(agentId),
@@ -7184,7 +7966,7 @@ class OpenClawBackend extends AgentBackend {
     }, 15000);
     const sessionKeys = [...new Set((Array.isArray(listed?.sessions) ? listed.sessions : [])
       .map((entry) => (typeof entry?.key === "string" ? entry.key.trim() : ""))
-      .filter(Boolean))];
+      .filter((key) => key && !excluded.has(key)))];
     if (!sessionKeys.length) return { supported: true, results: [] };
     const chunks = [];
     for (let offset = 0; offset < sessionKeys.length; offset += 200) {
@@ -7196,7 +7978,8 @@ class OpenClawBackend extends AgentBackend {
       query: q,
       limit,
     }, 20000)));
-    const rawResults = responses.flatMap((response) => Array.isArray(response?.results) ? response.results : []);
+    const rawResults = responses.flatMap((response) => Array.isArray(response?.results) ? response.results : [])
+      .filter((hit) => !excluded.has(hit?.sessionKey));
     const results = rawResults.map((hit) => ({
       key: String(hit?.sessionKey || ""),
       sessionId: typeof hit?.sessionId === "string" ? hit.sessionId : undefined,
@@ -7262,8 +8045,11 @@ class OpenClawBackend extends AgentBackend {
     };
     let connected = false;
     try {
+      this._resolveLocalRuntime();
+      const endpointBinding = this._endpointGuard.capture();
+      if (!endpointBinding) throw Object.assign(new Error("Managed endpoint unavailable"), { code: "MANAGED_HOST_ENDPOINT_UNVERIFIED" });
       info.hasIdentity = !!(await this._loadAuth(gatewayUrl)); // existence only — never expose key/token
-      if (generation !== this._stopGeneration
+      if (!this._endpointGuard.isCurrent(endpointBinding) || generation !== this._stopGeneration
         || gatewayUrl !== ((this._getUpstreamUrl() || "").trim() || DEFAULT_GATEWAY_URL)) {
         throw new Error("openclaw: connection superseded");
       }
@@ -7315,6 +8101,7 @@ class OpenClawBackend extends AgentBackend {
   // `openclaw update` 只能更新本机安装；gateway 配置指向别的机器时更新不到
   // 远端，明确返回不支持（reason 机器码，前端映射文案）。
   _selfUpdateGate() {
+    if (this._localRuntimeScope.isManaged()) return { supported: false, reason: "managed-runtime" };
     const url = (this._getUpstreamUrl() || DEFAULT_GATEWAY_URL).trim();
     try {
       new URL(url);

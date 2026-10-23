@@ -1,0 +1,49 @@
+import fs from "node:fs";
+import { ROOT_PATH_ALIAS_POLICIES, resolveRootPath, } from "./root-path.js";
+import { isNotFoundPathError } from "./path.js";
+import { shortPath } from "./error-detail.js";
+import { assertNoWindowsPathAlias } from "./windows-path-alias.js";
+export const PATH_ALIAS_POLICIES = ROOT_PATH_ALIAS_POLICIES;
+export async function assertNoPathAliasEscape(params) {
+    const resolved = await resolveRootPath({
+        absolutePath: params.absolutePath,
+        rootPath: params.rootPath,
+        boundaryLabel: params.boundaryLabel,
+        policy: params.policy,
+    });
+    const allowFinalSymlink = params.policy?.allowFinalSymlinkForUnlink === true;
+    if (allowFinalSymlink && resolved.kind === "symlink") {
+        return;
+    }
+    await assertNoHardlinkedFinalPath({
+        filePath: resolved.canonicalPath,
+        root: resolved.rootPath,
+        boundaryLabel: params.boundaryLabel,
+        allowFinalHardlinkForUnlink: params.policy?.allowFinalHardlinkForUnlink,
+    });
+}
+export async function assertNoHardlinkedFinalPath(params) {
+    if (params.allowFinalHardlinkForUnlink) {
+        return;
+    }
+    const filePath = params.filePath;
+    const root = params.root;
+    const boundaryLabel = params.boundaryLabel;
+    assertNoWindowsPathAlias(filePath);
+    let stat;
+    try {
+        stat = fs.statSync(filePath);
+    }
+    catch (err) {
+        if (isNotFoundPathError(err)) {
+            return;
+        }
+        throw err;
+    }
+    if (!stat.isFile()) {
+        return;
+    }
+    if (stat.nlink > 1) {
+        throw new Error(`Hardlinked path is not allowed under ${boundaryLabel} (${shortPath(root)}): ${shortPath(filePath)}`);
+    }
+}

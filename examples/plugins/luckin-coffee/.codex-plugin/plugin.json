@@ -1,0 +1,7 @@
+{
+  "name": "luckin-coffee-mcp",
+  "description": "瑞幸咖啡 my-coffee MCP 插件：直接连接瑞幸 AI 开放平台的远程 MCP 端点，提供门店查询、商品搜索、自提下单、支付二维码、订单查询与取消。访问凭据由 Shoggoth 凭据卡收集并加密保存，不写入插件文件。",
+  "version": "0.3.0",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

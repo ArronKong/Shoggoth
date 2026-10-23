@@ -2,6 +2,10 @@
 .chat-prompt {
   --chat-text: #1a1a1a;
   --ui-focus: #2563eb;
+  --prompt-muted: #69584f;
+  --prompt-line: #48301224;
+  --prompt-surface: #ffffff80;
+  --prompt-selected: #fff;
   margin: 6px 0; padding: 24px; border-radius: 24px; border: 0;
   background: linear-gradient(180deg, #FFEEE5 0%, #FFF7F3 100%);
   display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 640px;
@@ -13,6 +17,9 @@
   padding: 0; border-radius: 0; background: transparent; color: #b45309;
 }
 .chat-prompt__desc { font-size: 12px; line-height: 1.5; color: #69584f; overflow-wrap: anywhere; }
+.chat-prompt__risk { font-size: 12px; line-height: 1.5; color: #b45309; overflow-wrap: anywhere; }
+.chat-prompt__risk::before { content: "⚠ "; }
+.chat-prompt__technical { font-size: 11px; line-height: 1.5; color: #8a7a70; font-family: var(--mono); overflow-wrap: anywhere; }
 .chat-prompt__cmd {
   margin: 0; padding: 8px 10px; border-radius: 8px; font-family: var(--mono); font-size: 12px;
   line-height: 1.5; background: rgba(72, 38, 18, 0.05);
@@ -30,22 +37,44 @@
 .chat-prompt__btn.is-primary:hover:not(:disabled), .chat-prompt__btn.is-primary:active:not(:disabled) { background: #000; }
 .chat-prompt__btn.is-primary:disabled { opacity: 0.4; cursor: default; }
 .chat-prompt__input {
-  flex: 1; min-width: 160px; padding: 6px 10px; border-radius: 999px; font-size: 13px;
-  border: 1px solid #000; background: transparent; color: var(--chat-text, var(--ui-text-1));
+  box-sizing: border-box; width: 100%; min-width: 0; padding: 11px 12px; border-radius: 12px;
+  font: inherit; font-size: 13px; line-height: 1.65;
+  border: 1px solid var(--prompt-line); background: var(--prompt-surface); color: var(--chat-text);
 }
+.chat-prompt__input::placeholder { color: var(--prompt-muted); opacity: .75; }
+textarea.chat-prompt__input { min-height: 96px; max-height: 320px; resize: vertical; }
+.chat-prompt__input:disabled { opacity: .6; }
 
-.chat-prompt__fields { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.chat-prompt__field { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; }
-.chat-prompt__options { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; width: 100%; min-width: 0; }
-.chat-prompt__options > .chat-prompt__field { max-width: 100%; }
-.chat-prompt__field > .chat-prompt__input { align-self: stretch; }
+.chat-prompt__content { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.chat-prompt__fields { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.chat-prompt__field { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.chat-prompt__field-label { padding: 0; margin: 0 0 8px; font-size: 13px; line-height: 1.6; font-weight: 600; color: var(--chat-text); overflow-wrap: anywhere; }
+.chat-prompt__optional { margin-left: 8px; color: var(--prompt-muted); font-size: 11px; font-weight: 400; }
+.chat-prompt__options { display: flex; flex-direction: column; gap: 8px; width: 100%; min-width: 0; }
+.chat-prompt__option {
+  box-sizing: border-box; display: flex; align-items: flex-start; gap: 10px; width: 100%; min-width: 0; min-height: 44px;
+  padding: 12px; border: 1px solid var(--prompt-line); border-radius: 12px;
+  background: var(--prompt-surface); color: var(--chat-text); cursor: pointer;
+}
+.chat-prompt__option[data-selected=true] { border-color: var(--chat-text); background: var(--prompt-selected); }
+.chat-prompt__option > input { flex: 0 0 16px; width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--chat-text); cursor: inherit; }
+.chat-prompt__option-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.chat-prompt__option-title { font-size: 13px; font-weight: 500; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-prompt__option-description { color: var(--prompt-muted); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-prompt__option:has(input:focus-visible) { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+.chat-prompt__option > input:focus-visible { outline: none; }
+.chat-prompt__option[data-disabled=true] { cursor: default; opacity: .6; }
+@media (hover: hover) and (pointer: fine) {
+  .chat-prompt__option:hover:not([data-disabled=true]) { border-color: var(--chat-text); }
+}
 .chat-prompt--input, .chat-prompt--approval, .chat-prompt--confirmation { gap: 8px; }
 /* 标题间距为 8px 容器间隔 + 8px 外边距，底部操作间距为 12px + 4px。 */
 .chat-prompt--input > .chat-prompt__head,
 .chat-prompt--approval > .chat-prompt__head,
 .chat-prompt--confirmation > .chat-prompt__head { margin-bottom: 8px; }
-.chat-prompt--input .chat-prompt__field { gap: 4px; }
-.chat-prompt--input > .chat-prompt__fields > .chat-prompt__row { margin-top: 4px; }
+.chat-prompt--input > .chat-prompt__actions, .chat-prompt--selection > .chat-prompt__actions {
+  padding-top: 12px; border-top: 1px solid var(--prompt-line);
+}
 .chat-prompt__btn:disabled { cursor: default; opacity: 0.5; }
 .chat-prompt__btn:focus-visible, .chat-prompt__input:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 

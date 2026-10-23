@@ -9,7 +9,6 @@ import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
 const require = createRequire(import.meta.url);
 const { cliReferenceCommands, mergeNativeCommands, requireRuntimeCommand } = require("../app/agent-service/native-cli-commands.js");
 const { normalizeRuntimeCommands } = require("../app/agent-service/runtime-commands.js");
-const { parseAntigravityCommands } = require("../app/agent-service/antigravity-runtime-host.js");
 const source = (file) => readFileSync(new URL(file, import.meta.url), "utf8");
 const compile = (text) => ts.transpileModule(text, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -19,8 +18,14 @@ function load(file) {
   vm.runInNewContext(compile(source(file)), { module, exports: module.exports, AbortSignal, Error });
   return module.exports;
 }
-const { SlashCatalogStore } = load("../app/manage-ui/src/lib/slashCatalog.ts");
+const { SlashCatalogStore, mapServerSlashCommand } = load("../app/manage-ui/src/lib/slashCatalog.ts");
 const policy = load("../app/manage-ui/src/lib/slashCommands.ts");
+const memoryCommand = mapServerSlashCommand({ name: "active-memory", description: "Memory", execution: "runtime", allowWhileRunning: true });
+assert.equal(policy.canRunServerSlashDuringTurn(memoryCommand), true);
+assert.equal(policy.canRunServerSlashDuringTurn({ ...memoryCommand, allowWhileRunning: undefined }), false);
+assert.equal(policy.canRunServerSlashDuringTurn({ ...memoryCommand, execution: "cli" }), false);
+assert.equal(policy.canRunServerSlashDuringTurn({ ...memoryCommand, execution: "client" }), false);
+assert.equal(policy.canRunServerSlashDuringTurn(mapServerSlashCommand({ ...memoryCommand, allowWhileRunning: "true" })), false);
 const chatRuntime = load("../app/manage-ui/src/lib/chatRuntime.ts");
 for (const input of ["/Users/example/Downloads/微信图片.png", "/Users/example/My Files/report.pdf", "/report.pdf", '"/Users/example/picture.png"', "~/Downloads/image.png"]) {
   assert.equal(policy.isSlashCommandInput(input), false, input);
@@ -118,11 +123,6 @@ assert.throws(() => normalizeRuntimeCommands([command("bad", { execution: "shell
 assert.throws(() => normalizeRuntimeCommands([command("bad", { source: "x".repeat(257) })]));
 assert.equal(normalizeRuntimeCommands([command("__remote-workflow")])[0].name, "__remote-workflow",
   "a valid underscore-prefixed SDK command cannot poison the entire Claude catalog");
-const antigravity = parseAntigravityCommands("usage (quota)\tShow account usage\nhelp\tList commands\n");
-assert.deepEqual(antigravity[0].aliases, ["quota"]);
-assert.equal(antigravity[0].execution, "runtime");
-assert.equal(parseAntigravityCommands("project-check\tCheck project\n", true)[0].source, "Antigravity skill");
-assert.throws(() => parseAntigravityCommands("unexpected format"), { code: "RUNTIME_COMMAND_CATALOG_INVALID" });
 
 // Execute the actual ChatPage closures with controlled dependencies; this catches
 // wrong dispatch semantics, unlike matching a route name in the source text.
@@ -141,6 +141,9 @@ function closure(name, environment) {
 const calls = [];
 const state = { key: "session-a", messages: [] };
 const environment = {
+  crypto: globalThis.crypto,
+  localSlashHistoryRef: { current: load("../app/manage-ui/src/lib/chatSlashHistory.ts").createChatSlashHistory() },
+  messagesRef: { get current() { return state.messages; }, set current(value) { state.messages = value; } },
   activeKeyRef: { get current() { return state.key; } },
   agentOf: () => "agent-a", backendOfSession: () => "codex",
   chatBackendDescriptors: new Map([["codex", { surfaces: { agentHarness: true } }]]),
@@ -149,6 +152,7 @@ const environment = {
   send: async (method, params) => { calls.push([method, plain(params)]); return { payload: { key: "new-session" } }; },
   setMessages: (value) => { state.messages = typeof value === "function" ? value(state.messages) : value; },
   markInFlight() {}, setSending() {}, setToast() {}, setTimeout() {},
+  optimisticHistoryRef: { current: { forget: key => calls.push(["forget-optimistic", key]) } },
   active: { model: "gpt-5.6", modelProvider: "codex" }, models: [], modelsBackendRef: { current: "codex" },
   inheritedModelChoice: () => undefined, ensureSessionRow() {}, openSession: (key) => calls.push(["open", key]),
 };
@@ -164,6 +168,7 @@ const created = calls.filter(([method]) => method === "sessions.create").length;
 await dispatch(command("shoggoth:clear", { execution: "client", source: "Shoggoth" }), "", "/shoggoth:clear");
 assert.equal(calls.filter(([method]) => method === "sessions.create").length, created);
 assert.equal(state.messages[0].parts[0].text, "chat.localCleared");
+assert.deepEqual(calls.filter(([method]) => method === "forget-optimistic"), [["forget-optimistic", "session-a"]]);
 
 const result = deferred();
 const drafts = new Map();
@@ -179,4 +184,26 @@ result.resolve({ kind: "send", text: "/compact" });
 await execution;
 assert.equal(outputs.length, 0, "a late command result cannot run inside the newly selected agent");
 assert.equal(drafts.get("session-a"), "/compact", "unsubmitted commands remain recoverable in their original session");
+
+// Exercise the actual composer closure while a turn is still running. The
+// capability must get through both admission checks and the later slash branch.
+state.key = "session-a";
+const submissions = [], cleared = [];
+let ready = true;
+const submit = closure("submit", {
+  ...environment, attachments: [], input: "", slashPool: () => [memoryCommand, { ...memoryCommand, name: "compact", allowWhileRunning: false }],
+  sendController: { composerButton: (_key, action) => ready ? action() : undefined, slash: (_key, action) => ready ? action() : undefined },
+  supportsBackendSlash: () => true, capabilitiesForSession: () => ({ slash: true }),
+  recoverySlashCommandsForBackend: policy.recoverySlashCommandsForBackend, SLASH_COMMANDS: [],
+  parseSlashInput: policy.parseSlashInput, isSlashCommandInput: policy.isSlashCommandInput,
+  canRunSlashDuringTurn: policy.canRunSlashDuringTurn, canRunServerSlashDuringTurn: policy.canRunServerSlashDuringTurn,
+  inFlightRef: { current: new Set(["session-a"]) }, histRef: { current: new Map() }, histPosRef: { current: -1 },
+  setInput: value => cleared.push(value), setSlashOpen() {}, setQuote() {}, dispatchSlash: dispatch,
+  execServerSlash: async (key, text) => submissions.push([key, text]),
+  sendChatMessage: async () => assert.fail("a memory command must not become model input"),
+});
+await submit("/compact"); assert.deepEqual(submissions, []); assert.deepEqual(cleared, []);
+await submit("/active-memory off"); assert.deepEqual(submissions, [["session-a", "/active-memory off"]]); assert.deepEqual(cleared, [""]);
+ready = false;
+await submit("/active-memory on"); assert.equal(submissions.length, 1); assert.equal(cleared.length, 1, "unready transport must preserve the draft");
 console.log("PASS native slash catalogs: six runtimes, race/retry/isolation, alias ownership and actual UI dispatch");

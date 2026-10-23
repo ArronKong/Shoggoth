@@ -4,21 +4,24 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const CODEX_VERSION = "0.149.0";
+const CODEX_VERSION = "0.159.2";
 const SCHEMA_BUNDLES = Object.freeze({
   legacy: "json/codex_app_server_protocol.schemas.json",
   v2: "json/codex_app_server_protocol.v2.schemas.json",
 });
 const PINNED_BUNDLE_SHA256 = Object.freeze({
-  [SCHEMA_BUNDLES.legacy]: "02a4c63a638fdae4a5f6c3ad32a41a377b642c66f3abc84f6fc47c7f3d6074df",
-  [SCHEMA_BUNDLES.v2]: "9b3de71a5a2ffc980b792a18aa8f8dec3f85f48829560222a0264fe494b679a9",
+  [SCHEMA_BUNDLES.legacy]: "8683f6fd9fbb994fa2bfb704ab5b02c9890238fa507a4c0ff33ff45884cd0a2e",
+  [SCHEMA_BUNDLES.v2]: "81a88c04ae4984b16d73080f4109d0477682bc76c8adbe483e371175ce54c054",
 });
 const OPERATION_DEFINITIONS = Object.freeze({
   initialize: ["InitializeParams", "InitializeResponse"],
   threadStart: ["ThreadStartParams", "ThreadStartResponse"],
+  threadUnsubscribe: ["ThreadUnsubscribeParams", "ThreadUnsubscribeResponse"],
   threadResume: ["ThreadResumeParams", "ThreadResumeResponse"],
   threadInjectItems: ["ThreadInjectItemsParams", "ThreadInjectItemsResponse"],
   threadRead: ["ThreadReadParams", "ThreadReadResponse"],
+  threadTurnsList: ["ThreadTurnsListParams", "ThreadTurnsListResponse"],
+  threadItemsList: ["ThreadItemsListParams", "ThreadItemsListResponse"],
   threadList: ["ThreadListParams", "ThreadListResponse"],
   threadSetName: ["ThreadSetNameParams", "ThreadSetNameResponse"],
   threadArchive: ["ThreadArchiveParams", "ThreadArchiveResponse"],
@@ -36,7 +39,10 @@ const OPERATION_DEFINITIONS = Object.freeze({
   accountLoginCancel: ["CancelLoginAccountParams", "CancelLoginAccountResponse"],
   accountLogout: [null, "LogoutAccountResponse", "account/logout"],
   modelList: ["ModelListParams", "ModelListResponse"],
+  configRead: ["ConfigReadParams", "ConfigReadResponse"],
   mcpServerStatusList: ["ListMcpServerStatusParams", "ListMcpServerStatusResponse"],
+  experimentalFeatureList: ["ExperimentalFeatureListParams", "ExperimentalFeatureListResponse"],
+  mcpServerToolCall: ["McpServerToolCallParams", "McpServerToolCallResponse"],
   skillsList: ["SkillsListParams", "SkillsListResponse"],
 });
 const constructedSchemaContracts = new WeakSet();
@@ -432,6 +438,12 @@ class CodexSchemaContract {
       operation.responseRoot,
       `${operationName}:response`,
     );
+    // The pinned CLI sends workspaceRouting in account/read although stable
+    // generation omits the property. Reuse its verified generated definition.
+    if (operationName === "accountRead" && response.workspaceRouting !== undefined && response.workspaceRouting !== null) {
+      this._validate(this.v2Schema.definitions.WorkspaceRouting, response.workspaceRouting,
+        this.v2Schema, "accountRead:workspaceRouting");
+    }
     return response;
   }
 

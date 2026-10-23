@@ -1,0 +1,229 @@
+import syncFs, {} from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { createAsyncDirectoryGuard } from "./directory-guard.js";
+import { hasErrorCode } from "./file-cleanup.js";
+import { resolveReadOpenFlags } from "./read-open-flags.js";
+import { FsSafeError } from "./errors.js";
+import { sameFileIdentityForCleanup, sha256Hex } from "./file-identity.js";
+import { withAsyncDirectoryGuards } from "./guarded-mutation.js";
+import { inspectAtomicIdentity, wait } from "./atomic-io.js";
+import { registerTempPathForExit } from "./temp-cleanup.js";
+const PUBLISHED_READ_FLAGS = resolveReadOpenFlags();
+function describeFailure(error) {
+    try {
+        return String(error);
+    }
+    catch {
+        return "<unprintable failure>";
+    }
+}
+function isErrorValue(error) {
+    try {
+        return error instanceof Error;
+    }
+    catch {
+        return false;
+    }
+}
+export async function removePathIfIdentityUnchanged(targetPath, identity) {
+    const parentGuard = await createAsyncDirectoryGuard(path.dirname(targetPath), { bigint: true });
+    await withAsyncDirectoryGuards([parentGuard], async () => {
+        const current = syncFs.lstatSync(targetPath, { bigint: true });
+        if (current.isSymbolicLink() || !current.isFile() || !sameFileIdentityForCleanup(current, identity))
+            return;
+        await fs.unlink(targetPath);
+    });
+}
+function assertOwnedFile(stat, pathname, pathnameEntry) {
+    if (stat.isSymbolicLink()) {
+        throw new FsSafeError("symlink", `Atomic replace owned file became a symlink: ${pathname}`);
+    }
+    if (!stat.isFile()) {
+        throw new FsSafeError("not-file", `Atomic replace owned file must remain regular: ${pathname}`);
+    }
+    if (stat.nlink > 1n || (pathnameEntry && stat.nlink !== 1n)) {
+        throw new FsSafeError("hardlink", `Atomic replace owned file must retain one link: ${pathname}`);
+    }
+}
+function missingOwnedFile(pathname, cause) {
+    return new FsSafeError("path-mismatch", `Atomic replace owned file disappeared: ${pathname}`, {
+        cause,
+    });
+}
+function cleanupFailure(originalFailure, cleanupError) {
+    if (originalFailure) {
+        return new Error(`Atomic file replace failed (${describeFailure(originalFailure.error)}); cleanup also failed (${describeFailure(cleanupError)})`, { cause: originalFailure.error });
+    }
+    return isErrorValue(cleanupError) ? cleanupError : new Error(describeFailure(cleanupError));
+}
+function closeFailure(closeError, params, cleanupFailure) {
+    return {
+        error: cleanupFailure
+            ? new AggregateError([cleanupFailure.error, closeError], "Atomic temp cleanup and close failed")
+            : params.originalFailure
+                ? new AggregateError([params.originalFailure.error, closeError], "Atomic file replace and close failed")
+                : closeError,
+    };
+}
+export class AtomicTempOwner {
+    pathname;
+    io;
+    resource;
+    recordedIdentity;
+    exists = false;
+    unregister;
+    constructor(pathname, io) {
+        this.pathname = pathname;
+        this.io = io;
+        this.unregister = registerTempPathForExit(pathname, { singleLinkFile: true });
+    }
+    start() {
+        this.exists = true;
+    }
+    onIdentity = (identity) => {
+        this.recordedIdentity = identity;
+        this.unregister.setIdentity(identity);
+    };
+    get identity() {
+        if (!this.recordedIdentity)
+            throw new Error("Atomic temp owner has no identity");
+        return this.recordedIdentity;
+    }
+    markRenamed() {
+        this.exists = false;
+        this.unregister();
+    }
+    takeResource() {
+        // A throwing close may already have released the descriptor for reuse.
+        const resource = this.resource;
+        this.resource = undefined;
+        return resource;
+    }
+    adopt(temp) {
+        this.resource = temp.file;
+        this.onIdentity(temp.identity);
+    }
+    inspectOwned(read, pathname, pathnameEntry, expected) {
+        return inspectAtomicIdentity(this.io, read, expected, false, stat => assertOwnedFile(stat, pathname, pathnameEntry));
+    }
+    *assertCurrent(pathname = this.pathname) {
+        const openedInspection = this.inspectOwned(() => this.resource.statExact(), pathname, false, this.identity);
+        const opened = (this.io.asynchronous ? (yield openedInspection) : openedInspection);
+        try {
+            const currentInspection = this.inspectOwned(() => this.io.lstatExact(pathname), pathname, true, opened);
+            if (this.io.asynchronous)
+                yield currentInspection;
+        }
+        catch (error) {
+            if (hasErrorCode(error, "ENOENT")) {
+                throw missingOwnedFile(pathname, error);
+            }
+            throw error;
+        }
+    }
+    *assertPublished(pathname, expectedHash, onVerified) {
+        let identityCurrent = false;
+        try {
+            yield* this.assertCurrent(pathname);
+            identityCurrent = true;
+        }
+        catch (error) {
+            if (!(error instanceof FsSafeError) || !hasErrorCode(error, "path-mismatch") || !expectedHash) {
+                throw error;
+            }
+        }
+        if (identityCurrent) {
+            onVerified?.(this.identity);
+            return;
+        }
+        let published;
+        try {
+            try {
+                published = yield* this.io.open(pathname, PUBLISHED_READ_FLAGS);
+            }
+            catch (error) {
+                if (hasErrorCode(error, "ELOOP")) {
+                    throw new FsSafeError("symlink", `Atomic replace published file became a symlink: ${pathname}`, {
+                        cause: error,
+                    });
+                }
+                throw error;
+            }
+            const openedInspection = this.inspectOwned(() => published.statExact(), pathname, false);
+            const identity = (this.io.asynchronous ? (yield openedInspection) : openedInspection);
+            const currentInspection = this.inspectOwned(() => this.io.lstatExact(pathname), pathname, true, identity);
+            if (this.io.asynchronous)
+                yield currentInspection;
+            if (sha256Hex(yield* published.readFile()) !== expectedHash) {
+                throw new FsSafeError("path-mismatch", `Atomic replace published content changed: ${pathname}`);
+            }
+            onVerified?.(identity);
+            const previous = this.takeResource();
+            const closing = previous?.close();
+            if (previous && this.io.asynchronous)
+                yield closing;
+            this.resource = published;
+            this.recordedIdentity = identity;
+            published = undefined;
+        }
+        finally {
+            try {
+                const closing = published?.close();
+                if (published && this.io.asynchronous)
+                    yield closing;
+            }
+            catch {
+                // Preserve the selected verification or previous-resource close failure.
+            }
+        }
+    }
+    *cleanupOwnedPath(params) {
+        const identity = this.recordedIdentity;
+        if (!identity)
+            return true;
+        try {
+            const observation = this.io.lstatExact(this.pathname);
+            const current = this.io.asyncFs && this.io.asyncFs !== fs
+                ? yield* wait(observation) : observation;
+            if (!current.isSymbolicLink() && current.isFile() && current.nlink === 1n &&
+                sameFileIdentityForCleanup(current, identity)) {
+                yield* this.io.unlink(this.pathname);
+            }
+            return true;
+        }
+        catch (cleanupError) {
+            if (hasErrorCode(cleanupError, "ENOENT"))
+                return true;
+            if (params.throwOnCleanupError) {
+                throw cleanupFailure(params.originalFailure, cleanupError);
+            }
+            return false;
+        }
+    }
+    *finish(params) {
+        let deferredFailure;
+        let cleanupComplete = !this.exists;
+        if (this.exists) {
+            try {
+                cleanupComplete = yield* this.cleanupOwnedPath(params);
+            }
+            catch (error) {
+                deferredFailure = { error };
+            }
+        }
+        if (cleanupComplete)
+            this.unregister();
+        const file = this.takeResource();
+        try {
+            const closing = file?.close();
+            if (file && this.io.asynchronous)
+                yield closing;
+        }
+        catch (closeError) {
+            deferredFailure = closeFailure(closeError, params, deferredFailure);
+        }
+        if (deferredFailure)
+            throw deferredFailure.error;
+    }
+}

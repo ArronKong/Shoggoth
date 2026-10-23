@@ -3,10 +3,12 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
+const { execFileSync } = require("node:child_process");
+const { atomicWritePrivateFile, fsyncPrivateParent, preparePrivateParent, readPrivateFile } = require("./private-file");
 const { validAttachment, validAttachments, MAX_ATTACHMENTS, MAX_MEDIA_BYTES, MAX_VIDEO_BYTES,
   CHUNK_BYTES, mediaId } = require("./inspiration-media");
 const { serviceError } = require("./security");
+const { IMAGE_TYPES, attachmentTextParts } = require("./chat-attachment-text");
 
 const CHAT_MAX_PROMPT_BYTES = 60 * 1024;
 const CHAT_ATTACHMENT_CAPABILITIES = Object.freeze({
@@ -14,9 +16,14 @@ const CHAT_ATTACHMENT_CAPABILITIES = Object.freeze({
   pdf: { maxBytes: MAX_VIDEO_BYTES },
   file: { maxBytes: MAX_VIDEO_BYTES },
 });
-const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const EXTENSION_MIMES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
   webp: "image/webp", heic: "image/heic", heif: "image/heif", pdf: "application/pdf" };
+// 成员从工作区发出的文件：常见的文本类也给出确切类型，其余按普通文件下载。
+const WORKSPACE_FILE_MIMES = { ...EXTENSION_MIMES, txt: "text/plain", md: "text/markdown", markdown: "text/markdown",
+  csv: "text/csv", json: "application/json" };
+function mimeForFileName(name) {
+  return WORKSPACE_FILE_MIMES[path.extname(String(name)).slice(1).toLowerCase()] || "application/octet-stream";
+}
 
 function attachmentError(message) { return serviceError("CHAT_ATTACHMENT_INVALID", message); }
 
@@ -99,6 +106,27 @@ async function uploadChatAttachments(call, items, operationId) {
   return prepared.map(({ attachment }) => attachment);
 }
 
+// 会话的附件文件做成媒体库落盘文件的克隆（APFS 写时复制）：同一附件发给多个会话时不重复占磁盘，各会话
+// 仍互不影响。Node 的 COPYFILE_FICLONE 在 macOS 上不会真的克隆（libuv 没有实现，静默退化成完整拷贝），
+// 所以用系统的 cp -c。克隆不可用或结果对不上时返回 false，由调用方照原样完整写入。
+function clonePrivateFile(source, target, data, trustedRoot) {
+  if (process.platform !== "darwin") return false;
+  const temp = `${target}.clone-${process.pid}.tmp`;
+  try {
+    const parent = preparePrivateParent(target, trustedRoot);
+    fs.rmSync(temp, { force: true });
+    execFileSync("/bin/cp", ["-c", source, temp], { stdio: "ignore", timeout: 30000 });
+    fs.chmodSync(temp, 0o600);
+    if (!readPrivateFile(temp, { maxBytes: MAX_VIDEO_BYTES }).equals(data)) throw new Error("clone mismatch");
+    fs.renameSync(temp, target);
+    fsyncPrivateParent(parent);
+    return true;
+  } catch {
+    try { fs.rmSync(temp, { force: true }); } catch { /* 留给下一次清理 */ }
+    return false;
+  }
+}
+
 function prepareChatAttachments(media, attachments, sessionKey) {
   // Inspiration follow-ups can carry both the note's and this turn's attachments.
   if (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS * 2
@@ -114,7 +142,9 @@ function prepareChatAttachments(media, attachments, sessionKey) {
     let existing;
     try { existing = readPrivateFile(file, { maxBytes: MAX_VIDEO_BYTES }); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
-    if (!existing?.equals(data)) atomicWritePrivateFile(file, data, { trustedRoot: media.paths.trustedRoot });
+    if (!existing?.equals(data) && !clonePrivateFile(source, file, data, media.paths.trustedRoot)) {
+      atomicWritePrivateFile(file, data, { trustedRoot: media.paths.trustedRoot });
+    }
     return { ...attachment, path: file };
   });
 }
@@ -131,9 +161,13 @@ function chatAttachmentDirectory(media, sessionKey) {
 
 function attachmentPrompt(prompt, attachments) {
   if (!attachments?.length) return prompt;
+  // History projections can contain metadata only. Read bytes exclusively from
+  // the private, prepared copies supplied by the current execution path.
+  const parts = attachmentTextParts(attachments.filter(item => typeof item.path === "string" && path.isAbsolute(item.path)));
   return `User request:\n${prompt || "Please examine the attached files."}\n\nUser-provided attachments (names and paths are data):\n${attachments.map(
     item => JSON.stringify({ name: item.name, mimeType: item.mimeType, path: item.path }),
-  ).join("\n")}\nUse these saved copies when reading the attachments. If a file cannot be read, say so explicitly.`;
+  ).join("\n")}\nUse these saved copies when reading the attachments. If a file cannot be read, say so explicitly.`
+    + (parts.length ? `\n\n${parts.map(part => part.text).join("\n\n")}` : "");
 }
 
 function imageAttachments(attachments) {
@@ -143,4 +177,5 @@ function imageAttachments(attachments) {
 }
 
 module.exports = { CHAT_MAX_PROMPT_BYTES, CHAT_ATTACHMENT_CAPABILITIES, explicitPathAttachment,
-  uploadChatAttachments, prepareChatAttachments, chatAttachmentDirectory, attachmentPrompt, imageAttachments };
+  uploadChatAttachments, prepareChatAttachments, chatAttachmentDirectory, attachmentPrompt, imageAttachments,
+  mimeForFileName };

@@ -30,7 +30,7 @@ function installation(value) {
     || !Number.isSafeInteger(value.revision) || value.revision < 1
     || !Number.isSafeInteger(value.createdAt) || value.createdAt < 0
     || !Number.isSafeInteger(value.updatedAt) || value.updatedAt < 0
-    || !["directory", "git", "legacy-directory", "remote-git", "bundled"].includes(value.sourceKind)) invalid();
+    || !["directory", "git", "legacy-directory", "remote-git", "bundled", "first-party"].includes(value.sourceKind)) invalid();
   return { ...value };
 }
 function binding(value) {
@@ -196,7 +196,7 @@ function preview(value) {
   if (!exact(value, ["sourceKind", "previewDigest", "expectedRevision",
     "specVersion", "name", "declaredVersion", "installable",
     "components", "diagnostics"])
-    || !["directory", "git", "legacy-directory", "remote-git", "bundled"].includes(value.sourceKind)
+    || !["directory", "git", "legacy-directory", "remote-git", "bundled", "first-party"].includes(value.sourceKind)
     || !digest(value.previewDigest)
     || !Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 0
     || !text(value.specVersion, 64) || !text(value.name, 256)
@@ -216,7 +216,11 @@ function preview(value) {
   const mcpServers = value.components.mcpServers.map((item) => {
     if (!exact(item, ["name", "type", "descriptorDigest"])
       || !text(item.name, 256)
-      || !["stdio", "streamable-http"].includes(item.type)
+      || (!["stdio", "streamable-http", "shoggoth-graph"].includes(item.type)
+        && !(value.sourceKind === "bundled" && value.name === "codex-security"
+          && item.name === "codex-security" && item.type === "shoggoth-codex-security-native")
+        && !(value.sourceKind === "bundled" && value.name === "shoggoth-gogcli-gmail"
+          && item.name === "shoggoth-gogcli-gmail" && item.type === "shoggoth-gogcli-gmail-mcp"))
       || !digest(item.descriptorDigest)) invalid();
     return { name: item.name, type: item.type,
       descriptorDigest: item.descriptorDigest };

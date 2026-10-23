@@ -18,6 +18,7 @@ const { createWorkAdmissionGate } = require("../app/core/work-admission-gate.js"
 const { BackendRegistry } = require("../app/core/backend-registry.js");
 const { AgentBackend } = require("../app/core/agent-backend.js");
 const { HermesBackend } = require("../app/core/hermes-backend.js");
+const { OpenClawBackend } = require("../app/core/openclaw-backend.js");
 
 const HERMES_AGENTS = [{ id: "hermes-default", name: "default", model: "grok-4.3" }];
 const HERMES_TRANSCRIPTS = new Map([
@@ -82,7 +83,8 @@ class MockChatBackend extends AgentBackend {
   getModelChoices() { return HERMES_MODEL_CHOICES; }
   getSessionRows() { return HERMES_SESSION_ROWS; }
   claimsAgentId(id) { return typeof id === "string" && id.startsWith("hermes-"); }
-  async getHistory(sk) {
+  async getHistory(sk, options) {
+    this.historyOptions = options;
     return { messages: HERMES_HISTORICAL_MSGS.get(sk) ?? HERMES_TRANSCRIPTS.get(sk) ?? [] };
   }
   async createSession(agentId, options) {
@@ -156,6 +158,9 @@ class AsyncChatBackend extends AgentBackend {
     if (behavior.fail) throw Object.assign(new Error("history unavailable"), { code: "SERVICE_DISCONNECTED" });
     return { messages: [] };
   }
+  async reconcileChatOperation(sessionKey, idempotencyKey, createdAt) {
+    return { status: "not_admitted", run: null, observed: { sessionKey, idempotencyKey, createdAt } };
+  }
   async getChatOperation(sessionKey, idempotencyKey) {
     return { status: "found", run: { sourceId: sessionKey,
       idempotencyKey: `shoggoth:chat-send:${idempotencyKey}`, status: "running" } };
@@ -179,6 +184,17 @@ class AsyncChatBackend extends AgentBackend {
       pluginSelection: opts.pluginSelection,
     };
     shoggothSendRecords.push(record);
+    if (message === "thrown-preparation" || message === "thrown-uncertain") {
+      record.settled = true;
+      throw Object.assign(new Error("Service preparation failed"), { code: "SERVICE_UNAVAILABLE", admissionAccepted: false,
+        ...(message === "thrown-uncertain" ? { receiptUncertain: true } : {}), privateDetails: "must not cross the bridge" });
+    }
+    if (message === "rejected-preparation" || message === "uncertain-preparation") {
+      record.settled = true;
+      hooks.error?.("Service preparation failed", { code: "INTERNAL_ERROR", admissionAccepted: false,
+        ...(message === "uncertain-preparation" ? { receiptUncertain: true } : {}), privateDetails: "must not cross the bridge" });
+      return;
+    }
     if (opts.pluginSelection) opts.onAccepted?.();
     if (message.startsWith("capacity-complete-")) {
       record.settled = true;
@@ -215,6 +231,7 @@ class AsyncChatBackend extends AgentBackend {
     const record = {
       sessionKey,
       mode: shoggothWatchMode,
+      history: opts.history,
       aborted: false,
       settled: false,
       startedAfterPreviousSettled: !previous || previous.settled,
@@ -308,8 +325,12 @@ const upstreamUrl = `ws://127.0.0.1:${upstreamHttp.address().port}`;
 
 // --- proxy ------------------------------------------------------------------
 const registry = new BackendRegistry();
-registry.register(new MockChatBackend());
+const mockBackend = new MockChatBackend();
+registry.register(mockBackend);
 registry.register(new AsyncChatBackend());
+const openclawSteeringBackend = new OpenClawBackend();
+openclawSteeringBackend._gatewayHello = { server: { version: "2026.9.6" } };
+registry.register(openclawSteeringBackend);
 let idempotentExecutions = 0;
 const idempotentOptions = [];
 const idempotentBackend = new HermesBackend({
@@ -436,6 +457,12 @@ try {
   );
   await new Promise((resolve) => setTimeout(resolve, 30));
   check("unauthenticated Shoggoth request never reaches upstream", upstreamReceived.length === upstreamBeforeUnauthed);
+  send({ type: "req", id: "unauth-reconcile", method: "chat.operation.reconcile", params: {
+    sessionKey: "agent:shoggoth-default:real-default", idempotencyKey: "old", createdAt: 123,
+  } });
+  const unauthRecovery = await waitFor(f => f.type === "res" && f.id === "unauth-reconcile", "unauthenticated recovery");
+  check("recovery fence requires authentication", unauthRecovery.ok === false && unauthRecovery.error?.code === "UNAUTHORIZED");
+  check("unauthenticated recovery never reaches upstream", upstreamReceived.length === upstreamBeforeUnauthed);
   shoggothOnline = true;
   const createCallsBeforeMixedAuth = asyncCreateCalls.length;
   const upstreamBeforeMixedAuth = upstreamReceived.length;
@@ -469,6 +496,19 @@ try {
   send2({ type: "req", id: "c0-second", method: "connect", params: {} });
   const connectRes2 = await waitFor2((f) => f.type === "res" && f.id === "c0-second", "connect res");
   check("second connect handshake ok", connectRes2.ok === true);
+
+  for (const method of ["sessions.messages.subscribe", "sessions.messages.unsubscribe"]) {
+    const localId = `foreign-${method}`;
+    send({ type: "req", id: localId, method, params: { key: "agent:hermes-default:main", subscriptionId: "fixture" } });
+    const local = await waitFor(frame => frame.type === "res" && frame.id === localId, localId);
+    check(`${method} keeps foreign session subscriptions local`, local.ok === true && local.payload?.subscribed === false
+      && !upstreamReceived.some(frame => frame.id === localId));
+    const remoteId = `upstream-${method}`;
+    send({ type: "req", id: remoteId, method, params: { key: "agent:main:main", subscriptionId: "fixture" } });
+    const remote = await waitFor(frame => frame.type === "res" && frame.id === remoteId, remoteId);
+    check(`${method} preserves upstream subscription identity`, remote.ok === true
+      && upstreamReceived.some(frame => frame.id === remoteId && frame.params.subscriptionId === "fixture"));
+  }
 
   const createCallsBeforeMixedRoute = asyncCreateCalls.length;
   const upstreamBeforeMixedRoute = upstreamReceived.length;
@@ -605,6 +645,8 @@ try {
       && shoggothWatchRecords.length === 1
       && clientFrames.indexOf(watchHistory1) < clientFrames.indexOf(recoveredDelta1),
   );
+  check("history watcher receives exactly the history queued to this consumer",
+    JSON.stringify(shoggothWatchRecords[0].history) === JSON.stringify(watchHistory1.payload));
   check(
     "history watcher reuses chat thinking and tool gateway event mapping",
     !!recoveredThinking1 && !!recoveredTool1,
@@ -794,6 +836,7 @@ try {
   );
   const upstreamCreate = upstreamReceived.find((f) => f.id === "create-openclaw");
   check("gateway sessions.create 仍正常转发", openclawCreated.ok === true);
+  check("gateway 新会话默认工作区并写入实际创建请求", upstreamCreate?.params?.permissionMode === "workspace");
   check(
     "gateway sessions.create 边界重组 qualified model 并剥离 hints",
     upstreamCreate?.params?.model === "openrouter/google/gemini-3"
@@ -802,13 +845,34 @@ try {
     JSON.stringify(upstreamCreate?.params),
   );
 
+  for (const [name, params, expected] of [
+    ["default", { agentId: "main" }, "workspace"],
+    ["saved", { agentId: "main", permissionMode: "read-only" }, "read-only"],
+    ["full", { agentId: "main", permissionMode: "full" }, "full"],
+    ["existing", { key: "agent:main:main", agentId: "main" }, undefined],
+    ["fork", { parentSessionKey: "agent:main:main", fork: true }, undefined],
+  ]) {
+    const id = `create-openclaw-permission-${name}`;
+    send({ type: "req", id, method: "sessions.create", params });
+    await waitFor(frame => frame.type === "res" && frame.id === id, id);
+    check(`gateway 创建权限 ${name} 不依赖 model hints，保留既有选择`,
+      upstreamReceived.find(frame => frame.id === id)?.params?.permissionMode === expected);
+  }
+  send({ type: "req", id: "patch-openclaw-permission", method: "sessions.patch",
+    params: { key: "agent:main:main", permissionMode: "guarded" } });
+  await waitFor(frame => frame.type === "res" && frame.id === "patch-openclaw-permission", "permission patch");
+  check("gateway 用户修改权限保持原值，不套用初始默认值",
+    upstreamReceived.find(frame => frame.id === "patch-openclaw-permission")?.params?.permissionMode === "guarded");
+
   // 1. chat.history for foreign historical session: backend serves real messages.
   const histUpstreamBefore = upstreamReceived.filter((f) => f.method === "chat.history").length;
-  send({ type: "req", id: "h1", method: "chat.history", params: { sessionKey: "agent:hermes-default:hist-1", limit: 100, maxChars: 4000 } });
+  send({ type: "req", id: "h1", method: "chat.history", params: { sessionKey: "agent:hermes-default:hist-1", cursor: "history-page-2", limit: 100, maxChars: 4000 } });
   const histRes = await waitFor((f) => f.type === "res" && f.id === "h1", "chat.history res");
   check("chat.history served locally", histRes.ok === true);
   check("chat.history returns historical messages", Array.isArray(histRes.payload?.messages) && histRes.payload.messages.length === 2);
   check("chat.history first message is user", histRes.payload.messages[0]?.role === "user");
+  check("chat.history forwards generic cursor and limit to its owner", mockBackend.historyOptions?.cursor === "history-page-2"
+    && mockBackend.historyOptions?.limit === 100);
   await new Promise((r) => setTimeout(r, 50));
   check("chat.history NOT forwarded upstream", upstreamReceived.filter((f) => f.method === "chat.history").length === histUpstreamBefore);
   check("Hermes history never starts a Shoggoth active-run watcher", shoggothWatchRecords.length === 4);
@@ -890,6 +954,15 @@ try {
     && queryResponse.payload?.run?.idempotencyKey === "shoggoth:chat-send:original-send");
   check("native operation query never reaches upstream",
     upstreamReceived.filter((f) => f.method === "chat.operation.get").length === queryUpstreamBefore);
+
+  send({ type: "req", id: "native-operation-reconcile", method: "chat.operation.reconcile", params: {
+    sessionKey: "agent:shoggoth-default:real-default", idempotencyKey: "original-send", createdAt: 123,
+  } });
+  const reconciled = await waitFor(f => f.type === "res" && f.id === "native-operation-reconcile", "native recovery");
+  check("native recovery retains original observation and owner", reconciled.ok === true
+    && reconciled.payload?.status === "not_admitted" && reconciled.payload?.observed?.idempotencyKey === "original-send"
+    && reconciled.payload?.observed?.createdAt === 123);
+  check("native recovery is never forwarded to a foreign gateway", !upstreamReceived.some(f => f.method === "chat.operation.reconcile"));
 
   // Selection is a Shoggoth-owned field. The proxy starts observation first,
   // then emits a separate durable acceptance event from the Service backend.
@@ -975,10 +1048,22 @@ try {
   check("cross-socket idempotent final reaches each client exactly once",
     finalCount(clientFrames) === 1 && finalCount(client2Frames) === 1);
 
+  // OpenClaw has chat.send(queueMode=steer), not a chat.steer RPC.
+  send({ type: "req", id: "openclaw-steer-relay", method: "chat.steer", params: { sessionKey: "agent:main:main", message: "focus on the current result" } });
+  const ocSteer = await waitFor(f => f.type === "res" && f.id === "openclaw-steer-relay", "OpenClaw steering relay");
+  const ocWire = upstreamReceived.find(f => f.id === "openclaw-steer-relay");
+  check("OpenClaw guidance explicitly requests native steering queue", ocSteer.ok === true && ocWire?.method === "chat.send"
+    && ocWire.params.queueMode === "steer" && ocWire.params.message === "focus on the current result" && !!ocWire.params.idempotencyKey);
+  const steeringFinalBefore = clientFrames.filter(f => f.event === "chat" && f.payload?.runId === ocWire?.params.idempotencyKey).length;
+  for (const upstreamSocket of upstreamWss.clients) upstreamSocket.send(JSON.stringify({ type: "event", event: "chat",
+    payload: { sessionKey: "agent:main:main", runId: ocWire.params.idempotencyKey, state: "final", message: { role: "assistant", content: [] } } }));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  check("OpenClaw admission-only final cannot end the original reply", clientFrames.filter(f => f.event === "chat" && f.payload?.runId === ocWire?.params.idempotencyKey).length === steeringFinalBefore);
+
   // 3. real chat.send still passes through.
   send({ type: "req", id: "s2", method: "chat.send", params: { sessionKey: "agent:main:main", message: "yo", runId: "run-real" } });
   await waitFor((f) => f.type === "res" && f.id === "s2", "real chat.send res");
-  check("real chat.send forwarded upstream", upstreamReceived.filter((f) => f.method === "chat.send").length === sendUpstreamBefore + 2);
+  check("real chat.send forwarded upstream", upstreamReceived.filter((f) => f.method === "chat.send").length === sendUpstreamBefore + 3);
 
   // 4. 模型切换进入 drain 后，所有已声明的 OpenClaw 启动型 RPC 都必须在
   // 本地失败，不能漏到上游；Hermes 自有 chat.send 不受 OpenClaw drain 影响。
@@ -1323,6 +1408,17 @@ try {
     );
   }
 
+  for (const message of ["rejected-preparation", "uncertain-preparation", "thrown-preparation", "thrown-uncertain"]) {
+    const runId = `native-${message}`, sessionKey = "agent:shoggoth-default:real-default";
+    send({ type: "req", id: runId, method: "chat.send", params: { sessionKey, message, idempotencyKey: runId } });
+    const errorEvent = await waitFor(frame => frame.type === "event" && frame.event === "chat"
+      && frame.payload?.runId === runId && frame.payload?.state === "error", "native rejection metadata");
+    check(`${message} keeps the exact send identity and literal receipt flags`, errorEvent.payload.sessionKey === sessionKey
+      && errorEvent.payload.errorCode === (message.startsWith("thrown-") ? "SERVICE_UNAVAILABLE" : "INTERNAL_ERROR") && errorEvent.payload.admissionAccepted === false
+      && (errorEvent.payload.receiptUncertain === true) === (message === "uncertain-preparation" || message === "thrown-uncertain")
+      && !JSON.stringify(errorEvent).includes("privateDetails"));
+  }
+
   hermesOnline = false;
   try {
     const patchBefore = upstreamReceived.filter((f) => f.method === "sessions.patch").length;
@@ -1473,7 +1569,8 @@ try {
   await refreshClient.wait(
     (frame) => frame.type === "event" && frame.event === "chat"
       && frame.payload?.state === "prompt"
-      && frame.payload?.prompt?.requestId === "live-refresh-prompt",
+      && frame.payload?.prompt?.requestId === "live-refresh-prompt"
+      && refreshClient.frames.indexOf(frame) >= replayStart,
     "prompt replay after session history reload",
   );
   check("session history reload restores the active prompt card",

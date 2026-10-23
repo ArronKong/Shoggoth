@@ -7,6 +7,7 @@
 // time. Anything it can't expand falls back to the backend-computed nextRunAt
 // so a job still appears at least once.
 
+import { codexScheduleTimes } from "./codexAutomationSchedule";
 import type { UnifiedCronJob } from "../types";
 
 const DAY_MS = 86_400_000;
@@ -356,7 +357,13 @@ export function hourlyOccurrencesOnDay(job: UnifiedCronJob, day: Date): Map<numb
   const fromMs = createdAt ?? -Infinity;
   const s = job.schedule;
   let out = new Map<number, HourOccurrence>();
-  if (s?.kind === "cron") {
+  if (s?.kind === "rrule") {
+    const times = codexScheduleTimes(s, Math.max(dayStart, fromMs), dayEnd);
+    for (const time of times || []) {
+      const hour = new Date(time).getHours(), previous = out.get(hour);
+      out.set(hour, { first: previous?.first ?? time, count: (previous?.count || 0) + 1 });
+    }
+  } else if (s?.kind === "cron") {
     const c = parseCronExpr(s.expr);
     const fmt = c && s.tz ? tzFmt(s.tz) : null;
     out = c ? (fmt ? cronHourlyTz(c, dayStart, dayEnd, fmt, fromMs) : cronHourly(c, day, fromMs)) : out;
@@ -406,7 +413,10 @@ export function occurrencesOnDay(job: UnifiedCronJob, day: Date): DayOccurrences
   const fromMs = createdAt ?? -Infinity;
   const s = job.schedule;
   let occ: DayOccurrences = EMPTY;
-  if (s?.kind === "cron") {
+  if (s?.kind === "rrule") {
+    const times = codexScheduleTimes(s, Math.max(dayStart, fromMs), dayEnd);
+    if (times) occ = { times: times.slice(0, TIME_CAP), count: times.length, capped: times.length > TIME_CAP };
+  } else if (s?.kind === "cron") {
     const c = parseCronExpr(s.expr);
     const fmt = c && s.tz ? tzFmt(s.tz) : null;
     occ = c ? (fmt ? cronDayTz(c, dayStart, dayEnd, fmt, fromMs) : cronDay(c, day, fromMs)) : EMPTY;

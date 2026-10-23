@@ -5,10 +5,13 @@ const { ConversationRecallIndex, hashText, lexicalTerms } = require("./conversat
 const { HistoricalMemoryAnnotations } = require("./historical-memory-annotations");
 const { hasSecret } = require("./memory-engine");
 const { isHistoricalChatSession } = require("./historical-chat-session");
+const { findProfileSession, listProfileSessions } = require("./chat-session-lookup");
 const { serviceError } = require("./security");
 const { hybridScore, SEMANTIC_MIN_COSINE, sourceLanguage } = require("./memory-semantic-ranking");
 
 const FEDERATION_CHAT = /^shoggoth:chat-send:federation-(?:send|message)-/u;
+// 回忆工具的调用资格（读取）对群回合同样收窄（群聊计划 D3）；会话进入回忆索引（写入）沿用默认。
+const NON_DIRECT_CHAT = /^shoggoth:chat-send:(?:federation-(?:send|message)|group-(?:turn|task))-/u;
 const MAX_INDEX_TEXT_BYTES = 256 * 1024;
 const MAX_READ_TEXT_BYTES = 16 * 1024;
 // The MCP bridge reserves a 64 KiB response frame, including a worst-case
@@ -16,6 +19,8 @@ const MAX_READ_TEXT_BYTES = 16 * 1024;
 const MAX_GET_RESPONSE_BYTES = 48 * 1024;
 const MAX_SNIPPET_CHARS = 480;
 const MAX_CANDIDATES = 250;
+const { isBorrowedMemoryDerived } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
+const { isUiActionSubmission } = require("./ui-input-provenance");
 
 function recallError(code, message) { return serviceError(code, message); }
 
@@ -191,11 +196,21 @@ class ConversationRecallService {
     return this.historicalMemory?.view(profileId) ?? null;
   }
 
+  // Opaque token for answers of assertCandidateSourceCurrent that do not follow
+  // a transcript/session/policy revision: memory supersession and expiry by time.
+  // The historical view is rebuilt, with a new identity, whenever either changes.
+  candidateSourceEpoch(profileId) {
+    return this._outdatedView(profileId);
+  }
+
   // Background extraction cannot treat a superseded or expired user event as
   // fresh evidence. Historical search still returns the event with a notice;
   // extraction has no per-fact quote lineage, so exclude the whole event.
   assertCandidateSourceCurrent(profileId, event) {
     this.policy.assertReady(profileId);
+    const session = event?.sessionId && findProfileSession(this.sessions, profileId, event.sessionId);
+    const raw = session && this.transcripts.getEvent(profileId, session.id, event.eventId);
+    if (isUiActionSubmission(event) || isUiActionSubmission(raw)) throw recallError("MEMORY_CANDIDATE_SOURCE_OUTDATED", "交互界面的自动提交不是用户独立陈述的事实");
     if (!this.historicalMemory || typeof event?.eventId !== "string"
       || typeof event?.runId !== "string") {
       throw recallError("MEMORY_CANDIDATE_SOURCE_UNAVAILABLE", "候选来源无法核实");
@@ -303,7 +318,7 @@ class ConversationRecallService {
     this.policy.assertReady(profileId);
     if (!run || run.profileId !== profileId || args.source !== run.source
       || args.sourceId !== run.sourceId || !["chat", "inspiration"].includes(run.source)
-      || FEDERATION_CHAT.test(run.idempotencyKey || "")
+      || NON_DIRECT_CHAT.test(run.idempotencyKey || "")
       || !this._directInspiration(run)) {
       throw recallError("MCP_TOOL_FORBIDDEN", "该工具仅供当前原生用户对话使用");
     }
@@ -334,8 +349,7 @@ class ConversationRecallService {
   }
 
   _targetSessions(profileId) {
-    return this.sessions.listSessions().filter((session) => session.profileId === profileId
-      && isHistoricalChatSession(session)
+    return listProfileSessions(this.sessions, profileId).filter((session) => isHistoricalChatSession(session)
       && !this.sessions.getCronSessionOrigin?.(session.sessionKey))
       .map((session) => {
         const snapshot = this.transcripts.getIndexSnapshot?.(profileId, session.id);
@@ -358,9 +372,9 @@ class ConversationRecallService {
       || typeof completedOnly !== "boolean") {
       throw recallError("CONVERSATION_SEARCH_INVALID", "扫描范围无效");
     }
-    const session = this.sessions.listSessions().find((entry) => entry.id === sessionId
-      && entry.profileId === profileId && isHistoricalChatSession(entry)
-      && !this.sessions.getCronSessionOrigin?.(entry.sessionKey));
+    const found = findProfileSession(this.sessions, profileId, sessionId);
+    const session = found && isHistoricalChatSession(found)
+      && !this.sessions.getCronSessionOrigin?.(found.sessionKey) ? found : null;
     if (!session) throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");
     session.lastSeq = this.transcripts.getLastEventSeq?.(profileId, session.id)
       ?? this.transcripts.listEvents(profileId, session.id).at(-1)?.seq ?? 0;
@@ -412,10 +426,12 @@ class ConversationRecallService {
   }
 
   _resolvedText(profileId, session, event, policyView = null) {
-    if (event.contextExcluded || !["user", "assistant"].includes(event.kind)) return null;
+    if (event.contextExcluded || !["user", "assistant"].includes(event.kind)
+      || isBorrowedMemoryDerived(event) || isUiActionSubmission(event)) return null;
     let current;
     try { current = this.transcripts.contextEvent?.(profileId, session.id, event) || event; }
     catch { return null; }
+    if (isBorrowedMemoryDerived(current) || isUiActionSubmission(current)) return null;
     const text = current.content?.text;
     if (typeof text !== "string" || !text.trim() || !text.isWellFormed()
       || Buffer.byteLength(text, "utf8") > MAX_INDEX_TEXT_BYTES || hasSecret(text)) return null;
@@ -596,10 +612,9 @@ class ConversationRecallService {
     if (!Number.isSafeInteger(window) || window < 0 || window > 3) {
       throw recallError("CONVERSATION_GET_INVALID", "原话窗口无效");
     }
-    const session = this.sessions.listSessions().find((entry) => entry.id === args.sessionId
-      && entry.profileId === profileId && entry.workspace === run.workspace
-      && isHistoricalChatSession(entry)
-      && !this.sessions.getCronSessionOrigin?.(entry.sessionKey));
+    const found = findProfileSession(this.sessions, profileId, args.sessionId);
+    const session = found && found.workspace === run.workspace && isHistoricalChatSession(found)
+      && !this.sessions.getCronSessionOrigin?.(found.sessionKey) ? found : null;
     if (!session) throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");
     const target = this._event(profileId, session, args.eventId, null, policyView);
     if (!target) throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");

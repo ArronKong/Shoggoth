@@ -23,6 +23,7 @@ export function cronExecutionView(run: CronRun): CronRunStatusView {
 }
 
 export function cronDeliveryView(run: CronRun): CronRunStatusView | null {
+  if (run.outputDisposition === "silent") return { value: "silent", tone: "neutral" };
   if (!run.deliveryStatus && !run.deliveryError && !run.deliverySuppressionReason) return null;
   const value = run.deliveryStatus || "unknown";
   const tone: CronRunTone = value === "delivered"
