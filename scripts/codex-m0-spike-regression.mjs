@@ -687,7 +687,7 @@ async function runFakeAppServer(behavior, scratchPath) {
           writeJsonLine({ id: 1.5, method: "item/commandExecution/requestApproval", params: {} });
           continue;
         }
-        writeJsonLine({ id: request.id, result: { userAgent: "codex-m0-fake/0.149.0" } });
+        writeJsonLine({ id: request.id, result: { userAgent: "codex-m0-fake/0.159.2" } });
       } else if (request.method === "initialized") {
         if (Object.hasOwn(request, "id")) throw new Error("initialized must be a notification");
       } else if (request.method === "thread/start") {
@@ -932,7 +932,7 @@ async function runOfflineRegression() {
 
 async function runtimeForCurrentPlatform(scratchPath) {
   const manifest = JSON.parse(await readFile(MANIFEST_PATH, "utf8"));
-  assert.equal(manifest.runtime?.version, "0.149.0", "M0 real smoke must stay pinned to Codex 0.149.0");
+  assert.equal(manifest.runtime?.version, "0.159.2", "M0 real smoke must stay pinned to Codex 0.159.2");
   const platform = process.platform === "darwin"
     ? process.arch === "arm64" ? "darwin-arm64" : process.arch === "x64" ? "darwin-x64" : null
     : null;

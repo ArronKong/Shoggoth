@@ -48,6 +48,7 @@ import styles from "./ModelsPage.module.css";
 import CustomEndpointsPanel from "./models/CustomEndpointsPanel";
 import { createHermesEndpointController } from "./models/endpoint-controller";
 import OpenClawProvidersPane from "./models/OpenClawProvidersPane";
+import ModelOperationRecovery from "./models/ModelOperationRecovery";
 import ModelEditorDrawer from "./models/ModelEditorDrawer";
 import ModelAccounts from "./models/ModelAccounts";
 import type { EditableModelInput, ModelEditorMode } from "./models/model-editor-state";
@@ -109,6 +110,7 @@ export default function ModelsPage() {
   const accountBackend = backendCatalog.find((item) => item.id === backend && item.surfaces.oauth
     && (item.connectionMode === "builtin-service" || item.connectionMode === "native-runtime"));
   const [accountRefreshKey, setAccountRefreshKey] = useState(0);
+  const [providerRecoveryRefreshKey, setProviderRecoveryRefreshKey] = useState(0);
   // 工具栏视角（provider 筛选 + 搜索词）跨切页记忆，同 Cron/Tasks 的做法。
   const [providerFilter, setProviderFilter] = useStickyState("models.provider", "");
   const [query, setQuery] = useStickyState("models.query", "");
@@ -125,7 +127,17 @@ export default function ModelsPage() {
   const requestNavigation = useNavigationRequest();
 
   const { data: modelsData, loading, error, refresh, replace } = usePageCache(`models:${backend}`, async () => {
-    const [catalogResult, active, config, capabilities, pending, authList] = await Promise.all([
+    const capabilities = await getModelChangeCapabilities(backend).catch(() => ({
+      supported: false, create: false, update: false, rename: false, delete: false,
+      updateProvider: false, blockers: ["capability_unavailable"],
+    } as ModelChangeCapabilities));
+    // 提供方页面有独立的数据源；不要先等待不会显示的模型目录、主模型和配置。
+    if (capabilities.providerDirectory || capabilities.perAgentModelSettings) return {
+      models: [] as UnifiedModel[], catalogRevision: "", catalogError: "",
+      byScope: {}, providerByScope: {}, config: { providers: [] } as ModelConfig,
+      capabilities, pending: [] as PendingModelChange[], authProviders: [] as string[],
+    };
+    const [catalogResult, active, config, pending, authList] = await Promise.all([
       // 目录读挂不连坐整页（铁律 4 的 UI 侧同款）：提供方/设置面根本不依赖目录，
       // 一个 profile 的运行时目录读不全时它们必须照常可用，失败原因单独成行显示。
       revalidateModelCatalog(backend, (knownRevision) => getModelCatalog(backend, knownRevision))
@@ -134,15 +146,6 @@ export default function ModelsPage() {
       getActiveModel(backend).catch(() => ({ byScope: {}, providerByScope: {} })),
       // 自定义模型配置读挂时降级为空（页面照常渲染目录，只是失去增删能力）
       getModelConfig(backend).catch(() => ({ providers: [] }) as ModelConfig),
-      getModelChangeCapabilities(backend).catch(() => ({
-        supported: false,
-        create: false,
-        update: false,
-        rename: false,
-        delete: false,
-        updateProvider: false,
-        blockers: ["capability_unavailable"],
-      } as ModelChangeCapabilities)),
       getPendingModelChanges(backend).catch(() => [] as PendingModelChange[]),
       // 组头判断「config + 授权 profile 共存」用；失败静默为空（授权入口只会少不会错）
       listModelAuthProfiles(backend).catch(() => ({ supported: false, profiles: [] })),
@@ -158,9 +161,10 @@ export default function ModelsPage() {
       pending,
       authProviders: authList.supported ? [...new Set(authList.profiles.map((p) => p.provider))] : [],
     };
-  });
+  }, { staleTime: 30_000 });
   const refreshAccountsAndModels = () => {
     setAccountRefreshKey((value) => value + 1);
+    setProviderRecoveryRefreshKey((value) => value + 1);
     return refresh();
   };
   useRegisterPageRefresh("/models", refreshAccountsAndModels);
@@ -285,6 +289,7 @@ export default function ModelsPage() {
     try {
       const r = await setModelAuthProfileKey(backend, authManage, authKeyInput.trim());
       if (actionEpoch !== backendEpoch.current) return;
+      if ("status" in r && r.status !== "applied") throw new Error(t("models.dirManagedNotApplied", { status: r.status }));
       toast.success(t("models.authSaved"));
       noteActivation(r.activation);
       setAuthManage(null);
@@ -610,6 +615,7 @@ export default function ModelsPage() {
         contextWindow: configured.entry.contextWindow,
         maxTokens: configured.entry.maxTokens,
         reasoning: configured.entry.reasoning ?? modelToEdit.reasoning,
+        advanced: configured.entry.advanced,
       },
     });
   };
@@ -1408,6 +1414,10 @@ export default function ModelsPage() {
       {/* 模型配置 per-agent 的后端（Hermes）：本页 = **跨 agent 共享**的凭证层
           （读聚合、写广播到每个 Profile）。per-agent 的主模型/参数/辅助模型/MoA/
           回退链在「代理」页每个 agent 的概览里，本页不再有 Profile 作用域概念。 */}
+      <ModelOperationRecovery backend={backend} active={backend === "openclaw"} onSettled={() => {
+        void refreshAccountsAndModels();
+      }} />
+
       {showProviders && (
         <div className={styles.pane}>
           {/* 不再套外层白卡：KeysPanel 里的每张卡自己就是一张卡（设计稿 6958-135
@@ -1417,11 +1427,13 @@ export default function ModelsPage() {
               R296 起端点写广播到全部 Profile → 它和密钥一样是跨 agent 的东西，归本页。 */}
           <KeysPanel
             id={KEYS_ANCHOR}
+            refreshKey={providerRecoveryRefreshKey}
             endpointsSlot={
               <CustomEndpointsPanel
                 key={backend}
                 active={showProviders}
                 controller={endpointController}
+                refreshKey={providerRecoveryRefreshKey}
                 anchorId={ENDPOINTS_ANCHOR}
                 onChanged={() => void refresh()}
                 onActivation={noteActivation}
@@ -1440,6 +1452,7 @@ export default function ModelsPage() {
             backend={backend}
             active={showDirectoryPane}
             onActivation={noteActivation}
+            recoveryRefreshKey={providerRecoveryRefreshKey}
           />
         </div>
       )}

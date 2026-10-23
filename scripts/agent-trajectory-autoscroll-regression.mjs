@@ -178,6 +178,7 @@ function mountTimeline(TurnTimeline, { steps, autoFollow }) {
     renderer = TestRenderer.create(tree(steps), { createNodeMock });
   });
   return {
+    renderer,
     outerNode,
     wrapNode,
     update(nextSteps) {
@@ -246,6 +247,31 @@ try {
   check("history 追加步骤后仍保持顶部", history.wrapNode.scrollTop === 0);
   history.unmount();
 
+  const actionTitles = ["统计cron任务问题", "统计投递与超时任务", "列出历史error与never任务", "列出24h内ok与高频失联任务"];
+  const actionSteps = actionTitles.map((title, index) => ({
+    id: `action-${index}`, kind: "tool", toolName: "exec", category: "execute",
+    status: index === 3 ? "error" : "ok", isError: index === 3, startTs: index,
+    args: { title, command: `openclaw cron list --json | report-${index}`, timeoutSeconds: 60 },
+    output: index === 3 ? "AttributeError: 'dict' object has no attribute 'startswith'" : "result",
+  }));
+  const actions = mountTimeline(compiled.TurnTimeline, { steps: actionSteps, autoFollow: false });
+  const actionRoot = actions.renderer.root;
+  const collapsed = JSON.stringify(actions.renderer.toJSON());
+  check("四个执行步骤优先显示各自的操作说明", actionTitles.every(title => collapsed.includes(title)));
+  check("收起时不暴露命令或重复工具名称", !collapsed.includes("cron list") && actionRoot.findAllByProps({ className: "name" }).length === 0);
+  check("操作描述不改变真实失败状态", actionRoot.findAllByProps({ "data-st": "error" }).length === 1);
+  const buttons = actionRoot.findAllByType("button");
+  act(() => buttons[3].props.onClick());
+  const expanded = actionRoot.findAllByType("pre").map(node => node.children.join("")).join("\n");
+  check("展开仍可检查完整命令和错误输出", expanded.includes(actionSteps[3].args.command) && expanded.includes(actionSteps[3].output));
+  act(() => buttons[3].props.onClick());
+  check("重新收起后隐藏技术详情", actionRoot.findAllByType("pre").length === 0);
+  actions.update([{ ...actionSteps[0], args: { command: "cron list" }, status: "running" }]);
+  check("缺少描述的旧调用使用通用动作标题", actionRoot.findAllByProps({ className: "name" }).length === 0
+    && JSON.stringify(actions.renderer.toJSON()).includes("turnLab.activity.runCommand")
+    && !JSON.stringify(actions.renderer.toJSON()).includes("cron list"));
+  actions.unmount();
+
   const timelineSource = fs.readFileSync(timelineSourcePath, "utf8");
   const processSource = fs.readFileSync(processSourcePath, "utf8");
   const chatSource = fs.readFileSync(chatSourcePath, "utf8");
@@ -264,18 +290,18 @@ try {
   const groupedMessagesIndex = chatSource.indexOf("{keyedMessages.map");
   check(
     "直播时间线固定在 assistant 组第一条回复上方",
-    /const liveMessage = g\.msgs\.find\(\(message\) => message\.pending\);/.test(chatSource)
+    /const liveMessage = g\.msgs\.find\(\(message\) => message\.pending \|\| message\.settledPending\);/.test(chatSource)
       && /const groupLiveSteps = liveMessage \? liveStepsFor\(liveMessage\) : \[\];/.test(chatSource)
       && groupTrajectoryIndex >= 0
       && groupTrajectoryIndex < groupedMessagesIndex
       && !chatSource.includes('key={`${messageRenderKey}:live-trajectory`}'),
   );
-  check(
-    "直播临时计划写入 Agent Trajectory，持久进度卡继续独立展示",
-    chatSource.includes('timelineFeed(sk, { kind: "plan", entries: p.plan })')
-      && /if \(m\.pending && showTraj && !progress && liveStepsFor\(m\)\.length\) return null;/.test(chatSource)
-      && (chatSource.match(/else pendingPlanRef\.current\.delete\(sk\);/g)?.length ?? 0) >= 3,
-  );
+  const planModule = { exports: {} };
+  const planCode = esbuild.transformSync(fs.readFileSync(path.join(uiRoot, "src/lib/chatPlan.ts"), "utf8"), { loader: "ts", format: "cjs" }).code;
+  new Function("module", "exports", planCode)(planModule, planModule.exports);
+  const activity = [{ kind: "tool", id: "tool-1" }, { kind: "plan", planEntries: [{ content: "Work", status: "in_progress" }] }];
+  check("计划从直播和历史过程分离，保留工具活动", JSON.stringify(planModule.exports.withoutPlanSteps(activity)) === JSON.stringify([activity[0]])
+    && planModule.exports.chatMessagesWithoutPlans([{ role: "assistant", parts: [{ type: "plan", planEntries: activity[1].planEntries }] }]).length === 0);
   check(
     "时间线按实际 1–6 行自然增高并以六行为最大高度",
     /--trajectory-row-height:\s*36px\s*;/.test(cssSource)

@@ -25,7 +25,8 @@ class FakeUpdater extends EventEmitter {
   quitAndInstall() { this.installs += 1; }
 }
 
-function fixture({ packaged = true, marker = "official", config = true } = {}) {
+function fixture({ packaged = true, marker = "official", config = true,
+  prepareInstall = async () => null, restoreAfterInstallFailure = async () => {} } = {}) {
   const handlers = new Map();
   const ipcMain = {
     handle(name, handler) { handlers.set(name, handler); },
@@ -60,6 +61,8 @@ function fixture({ packaged = true, marker = "official", config = true } = {}) {
     clearIntervalFn: (timer) => { timer.cleared = true; },
     defer: (callback) => deferred.push(callback),
     onDownloaded: (state) => notifications.push(state),
+    prepareInstall,
+    restoreAfterInstallFailure,
   });
   const event = { sender: webContents, senderFrame: webContents.mainFrame };
   return { controller, handlers, sends, updater, timeouts, intervals, deferred, notifications, event, webContents };
@@ -90,7 +93,7 @@ async function main() {
     const item = fixture();
     assert.equal(item.controller.getState().supported, true);
     assert.equal(item.updater.autoDownload, true);
-    assert.equal(item.updater.autoInstallOnAppQuit, true);
+    assert.equal(item.updater.autoInstallOnAppQuit, false);
     assert.equal(item.updater.allowPrerelease, false);
     assert.equal(item.timeouts[0].ms, INITIAL_CHECK_DELAY_MS);
     assert.equal(item.intervals[0].ms, CHECK_INTERVAL_MS);
@@ -115,7 +118,7 @@ async function main() {
     assert.equal(item.controller.getState().canInstall, true);
     assert.equal(item.controller.getState().canCheck, false);
     assert.equal(item.notifications.length, 1);
-    assert.equal(item.handlers.get(CHANNELS.install)(item.event), true);
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), true);
     assert.equal(item.updater.installs, 0, "install should be deferred until IPC can return");
     item.deferred.shift()();
     assert.equal(item.updater.installs, 1);
@@ -125,6 +128,139 @@ async function main() {
     assert.equal(item.timeouts[0].cleared, true);
     assert.equal(item.intervals[0].cleared, true);
     assert.equal(item.updater.listenerCount("update-downloaded"), 0);
+  }
+
+  {
+    let reason = "active-runs";
+    const item = fixture({ prepareInstall: async () => reason });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    assert.equal(item.controller.getState().status, "downloaded");
+    assert.equal(item.controller.getState().installBlockReason, "active-runs");
+    assert.equal(item.controller.getState().canInstall, true);
+    assert.equal(item.deferred.length, 0, "blocked install must leave the app running");
+    reason = null;
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), true);
+    item.deferred.shift()();
+    assert.equal(item.updater.installs, 1);
+    item.controller.dispose();
+  }
+
+  {
+    let restores = 0;
+    const item = fixture({ restoreAfterInstallFailure: async () => { restores += 1; } });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), true);
+    item.deferred.shift()();
+    item.updater.emit("error", new Error("native installer failed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(restores, 1, "an asynchronous installer error must restore the stopped background service");
+    assert.equal(item.controller.getState().status, "downloaded");
+    assert.equal(item.controller.getState().canInstall, true);
+    assert.equal(item.controller.getState().installBlockReason, "install-failed");
+    item.controller.dispose();
+  }
+
+  {
+    let finishPreparation;
+    let preparations = 0;
+    const preparation = new Promise((resolve) => { finishPreparation = resolve; });
+    const item = fixture({ prepareInstall: async () => { preparations += 1; return preparation; } });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(await item.handlers.get(CHANNELS.install)({ sender: {}, senderFrame: {} }), false);
+    assert.equal(preparations, 0, "untrusted renderers cannot stop the background service");
+    const install = item.handlers.get(CHANNELS.install)(item.event);
+    assert.equal(item.controller.getState().status, "preparing");
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    await item.controller.check();
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(item.controller.getState().canInstall, false);
+    assert.equal(preparations, 1, "concurrent install clicks must share one preparation");
+    assert.equal(item.updater.checks, 0, "scheduled checks must not run during preparation");
+    finishPreparation(null);
+    assert.equal(await install, true);
+    item.deferred.shift()();
+    assert.equal(item.updater.installs, 1);
+    item.controller.dispose();
+  }
+
+  {
+    const item = fixture({ prepareInstall: async () => { throw new Error("stop failed"); } });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    assert.equal(item.controller.getState().installBlockReason, "background-stop-failed");
+    assert.equal(item.controller.getState().canInstall, true);
+    assert.equal(item.deferred.length, 0);
+    item.controller.dispose();
+  }
+
+  {
+    let restores = 0;
+    let releaseRestore;
+    const restored = new Promise((resolve) => { releaseRestore = resolve; });
+    const item = fixture({ restoreAfterInstallFailure: async () => {
+      restores += 1;
+      await restored;
+    } });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    await item.handlers.get(CHANNELS.install)(item.event);
+    item.updater.quitAndInstall = () => { throw new Error("installer could not start"); };
+    item.deferred.shift()();
+    item.updater.emit("error", new Error("the same failure also arrived as an event"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(item.controller.getState().status, "recovering");
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    await item.controller.check();
+    assert.equal(item.updater.checks, 0);
+    assert.equal(restores, 1, "one installer failure must trigger one background restore");
+    releaseRestore();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(item.controller.getState().installBlockReason, "install-failed");
+    assert.equal(item.controller.getState().canInstall, true);
+    item.controller.dispose();
+  }
+
+  {
+    const item = fixture({ restoreAfterInstallFailure: async () => { throw new Error("restart failed"); } });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    await item.handlers.get(CHANNELS.install)(item.event);
+    item.deferred.shift()();
+    item.updater.emit("error", new Error("native installer failed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(item.controller.getState().installBlockReason, "background-restore-failed");
+    assert.equal(item.controller.getState().canInstall, true);
+    item.controller.dispose();
+  }
+
+  {
+    let rejectCheck;
+    const item = fixture();
+    item.updater.pendingCheck = new Promise((resolve, reject) => { rejectCheck = reject; });
+    const check = item.controller.check();
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    await item.handlers.get(CHANNELS.install)(item.event);
+    rejectCheck(new Error("the completed download's check rejected late"));
+    await check;
+    assert.equal(item.controller.getState().status, "installing");
+    assert.equal(item.controller.getState().canInstall, false);
+    item.controller.dispose();
+    item.deferred.shift()();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  {
+    let restores = 0;
+    let finishPreparation;
+    const preparation = new Promise((resolve) => { finishPreparation = resolve; });
+    const item = fixture({ prepareInstall: async () => preparation,
+      restoreAfterInstallFailure: async () => { restores += 1; } });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    const install = item.handlers.get(CHANNELS.install)(item.event);
+    item.controller.dispose();
+    finishPreparation(null);
+    assert.equal(await install, false);
+    assert.equal(restores, 1, "closing the controller during preparation must restore its stopped service");
+    assert.equal(item.deferred.length, 0);
   }
 
   console.log("Desktop App update controller unit: PASS");

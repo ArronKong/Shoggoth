@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { OAuthProvider } from "../../types";
-import { disconnectOAuthProvider, listOAuthProviders, runProviderCommandInTerminal } from "../../api/client";
+import { disconnectOAuthProvider, getConfig, listOAuthProviders, runProviderCommandInTerminal, updateConfig } from "../../api/client";
 import { useConfirm, useToast } from "../../components/ui";
+import { applyDisabledBackends } from "../../lib/backends";
+import { usePageCache } from "../../lib/usePageCache";
+import { useSlowPending } from "../models/useSlowPending";
 import OAuthLoginModal from "./OAuthLoginModal";
 import ProviderLogo from "./ProviderLogo";
 import styles from "./KeysPanel.module.css";
@@ -87,6 +90,8 @@ function OAuthRow({
   showActionLabels,
   onDisconnect,
   onLogin,
+  onToggleConnection,
+  onRecheck,
 }: {
   p: OAuthProvider;
   backend: string;
@@ -94,16 +99,24 @@ function OAuthRow({
   showActionLabels: boolean;
   onDisconnect: (p: OAuthProvider) => void;
   onLogin: (p: OAuthProvider) => void;
+  onToggleConnection: (p: OAuthProvider) => void;
+  onRecheck: () => void;
 }) {
   const { t } = useTranslation();
   const exp = expiresLabel(p.status.expiresAt, (time) => t("keys.oauthExpiresIn", { time }));
   const expired = exp === "expired";
   const isExternal = p.flow === "external";
   const title = providerTitle(p, backend);
+  // A disconnected native CLI keeps its login; the row only offers to reconnect.
+  const off = p.connection?.enabled === false;
+  const incompatible = p.status.verification === "incompatible";
+  const main = () => (off ? onToggleConnection(p) : incompatible ? onRecheck() : onLogin(p));
 
   // 一句话副标题：过期最要紧（红字 + 说清怎么救），其次是已连接的凭证出处，
   // 未连接则沿用官方那句 flow 说明（告诉用户点下去会发生什么）。
-  const sub = expired
+  const sub = off
+    ? t("keys.oauthConnectionOff")
+    : expired
     ? t("keys.oauthRowExpired")
     : p.status.loggedIn
       ? [
@@ -128,40 +141,46 @@ function OAuthRow({
 
   // 断开：能走 API 就走 API；Hermes 清不掉但给了命令的（claude-code 这类）也照样
   // 给按钮，点下去是「在终端执行这条命令」的确认框。两条路都没有才不显示。
-  const canDisconnect = p.status.loggedIn && (p.disconnectable || Boolean(p.disconnectCommand));
-  const mainLabel = p.status.loggedIn
+  // A native CLI's 断开 is the app switch, never a sign-out.
+  const canDisconnect = p.connection ? !off
+    : p.status.loggedIn && (p.disconnectable || Boolean(p.disconnectCommand));
+  const disconnectLabel = p.connection ? t(incompatible ? "agents.disable" : "settings.disconnect") : t("keys.oauthDisconnect");
+  const mainLabel = off
+    ? t("settings.reconnect")
+    : incompatible ? t("settings.retry")
+    : p.status.loggedIn
     ? t("keys.oauthRelogin")
     : isExternal
       ? t("keys.oauthLoginExternal")
       : t("keys.oauthLogin");
 
   return (
-    <div className={`${styles.oauthRow} ${p.status.error ? styles.oauthRowErr : ""}`}>
-      <button className={styles.oauthMain} title={tip} disabled={busy} onClick={() => onLogin(p)}>
+    <div className={`${styles.oauthRow} ${p.status.error && !off ? styles.oauthRowErr : ""}`}>
+      <button className={styles.oauthMain} title={tip} disabled={busy} onClick={main}>
         <ProviderLogo name={p.id} />
         <span className={styles.oauthText}>
           <span className={styles.oauthName}>
             {title}
-            {p.status.loggedIn && !expired && <span className={styles.oauthDot} aria-hidden="true" />}
+            {p.status.loggedIn && !expired && !off && !incompatible && <span className={styles.oauthDot} aria-hidden="true" />}
           </span>
-          <span className={`${styles.oauthSub} ${expired || p.status.error ? styles.oauthSubErr : ""}`}>
-            {p.status.error || sub}
+          <span className={`${styles.oauthSub} ${!off && (expired || p.status.error) ? styles.oauthSubErr : ""}`}>
+            {off ? sub : incompatible ? t("settings.runtimeIncompatible") : p.status.error || sub}
           </span>
         </span>
       </button>
 
       <div className={showActionLabels ? styles.oauthActions : styles.oauthIcons}>
         <button className={showActionLabels ? "ui-cbtn ui-cbtn--sm" : styles.iconBtn} title={mainLabel} aria-label={`${title} — ${mainLabel}`}
-          disabled={busy} onClick={() => onLogin(p)}>
-          {showActionLabels ? mainLabel : isExternal && p.cliCommand ? <IconTerminal /> : <IconChevron />}
+          disabled={busy} onClick={main}>
+          {showActionLabels ? mainLabel : !off && isExternal && p.cliCommand ? <IconTerminal /> : <IconChevron />}
         </button>
         {canDisconnect && (
           <button
-            className={`${styles.iconBtn} ${styles.iconDanger}`}
+            className={p.connection ? styles.iconBtn : `${styles.iconBtn} ${styles.iconDanger}`}
             disabled={busy}
-            title={t("keys.oauthDisconnect")}
-            aria-label={`${title} — ${t("keys.oauthDisconnect")}`}
-            onClick={() => onDisconnect(p)}
+            title={disconnectLabel}
+            aria-label={`${title} — ${disconnectLabel}`}
+            onClick={() => (p.connection ? onToggleConnection(p) : onDisconnect(p))}
           >
             <IconUnlink />
           </button>
@@ -194,26 +213,18 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
   const { t } = useTranslation();
   const toast = useToast();
   const confirm = useConfirm();
-  const [providers, setProviders] = useState<OAuthProvider[] | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const { data, loading, error, refresh } = usePageCache(`models:oauth:${backend}`,
+    () => listOAuthProviders(backend), { staleTime: 30_000 });
+  const providers = data?.providers ?? null;
   const [busyId, setBusyId] = useState<string | null>(null);
+  const slowDisconnect = useSlowPending(Boolean(busyId && providers?.some(p => p.id === busyId && p.disconnectable && !p.connection)));
   const [loginFor, setLoginFor] = useState<OAuthProvider | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const snap = await listOAuthProviders(backend);
-      setProviders(snap.providers);
-      setError(false);
-    } catch {
-      setError(true);
-    } finally {
-      setLoading(false);
-    }
-  }, [backend]);
+  const previousRefreshKey = useRef(refreshKey);
   useEffect(() => {
-    refresh();
+    if (previousRefreshKey.current === refreshKey) return;
+    previousRefreshKey.current = refreshKey;
+    void refresh();
   }, [refresh, refreshKey]);
 
   // 在系统终端里跑该 provider 的断开命令。它会删钥匙串条目/凭证文件 → danger 确认
@@ -231,6 +242,33 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
       toast.info(t("keys.oauthTerminalLaunched"));
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // A native CLI's switch is the same disabledBackends toggle as Settings. Read
+  // the saved list first so a change made on another page is not overwritten.
+  const toggleConnection = async (p: OAuthProvider) => {
+    const connection = p.connection;
+    if (!connection) return;
+    if (connection.enabled && !await confirm({
+      title: t("settings.disconnectConfirmTitle", { name: p.name }),
+      message: t("settings.disconnectNativeConfirmMessage", { name: p.name }),
+      confirmLabel: t("settings.disconnect"),
+    })) return;
+    setBusyId(p.id);
+    try {
+      const current = (await getConfig()).disabledBackends || [];
+      const next = connection.enabled ? [...new Set([...current, connection.id])]
+        : current.filter((value) => value !== connection.id);
+      const saved = await updateConfig({ disabledBackends: next });
+      applyDisabledBackends(saved.disabledBackends);
+      toast.success(t(connection.enabled ? "settings.disconnectedToast" : "keys.oauthReconnected", { name: p.name }));
+      await refresh();
+      onChanged?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -261,6 +299,9 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
       onChanged?.();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
+      // 多个 profile 可能只完成一部分；只回读状态，不能把失败的删除自动重发。
+      await refresh();
+      onChanged?.();
     } finally {
       setBusyId(null);
     }
@@ -283,6 +324,7 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
       </div>
 
       <div className={styles.cardBody}>
+        {slowDisconnect && <p className="muted" role="status">{t("keys.oauthDisconnectSlow")}</p>}
         {loading && providers === null && <p className="muted">{t("common.loading")}</p>}
         {error && <div className="settings-actions" role="alert"><span>{t("settings.runtimeAuthUnavailable")}</span><button className="ui-cbtn ui-cbtn--sm" disabled={loading} onClick={() => void refresh()}>{t("settings.retry")}</button></div>}
         {!error && providers !== null && providers.length === 0 && <p className="muted">{t("keys.oauthNone")}</p>}
@@ -293,10 +335,12 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
                 key={p.id}
                 p={p}
                 backend={backend}
-                busy={error || busyId === p.id}
+                busy={Boolean(error) || busyId === p.id}
                 showActionLabels={showActionLabels}
                 onDisconnect={disconnect}
                 onLogin={setLoginFor}
+                onToggleConnection={toggleConnection}
+                onRecheck={() => { void refresh(); onChanged?.(); }}
               />
             ))}
           </div>

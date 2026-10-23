@@ -21,6 +21,9 @@ export default function ChatContextUsage({ usage, capabilities, product, busy, o
   const compact = product?.automatic === "enabled" || capabilities["context.compact.native"];
   const warning = percent !== null && percent >= 93 && product?.automatic !== "enabled";
   const number = (value: number) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value);
+  const failure = product?.lastError ? t(`chat.productContextErrors.${product.lastError}`, {
+    defaultValue: t("chat.productContextFailed"),
+  }) : null;
   return <div className={styles.row} data-quality={quality}>
     <span className={styles.value} title={t("chat.nativeContextHint")}>
       {t("chat.nativeContextLabel")}{" "}
@@ -41,9 +44,9 @@ export default function ChatContextUsage({ usage, capabilities, product, busy, o
     </span>}
     {product && <span className={styles.quality} title={t("chat.productContextHint", {
       runtime: product.summaryRuntime || "—", model: product.summaryModel || t("chat.contextDefaultModel"), seq: product.coveredThroughSeq })
-      + " " + t("chat.contextBudgetHint", { trigger: number(product.budget.triggerTokens), retained: number(product.budget.retainedTokens) })}>
-      {t(product.pendingRunId ? "chat.productContextPending" : product.lastError ? "chat.productContextFailed"
-        : `chat.productContextAutomatic.${product.automatic}`)}</span>}
+      + " " + t("chat.contextBudgetHint", { trigger: number(product.budget.triggerTokens), retained: number(product.budget.retainedTokens) })
+      + (failure ? " " + failure + " " + t("chat.productContextRetryHint", { runtime: product.summaryRuntime || "—" }) : "")}>
+      {product.pendingRunId ? t("chat.productContextPending") : failure || t(`chat.productContextAutomatic.${product.automatic}`)}</span>}
     {compact && <button type="button" className={styles.compact} disabled={busy || pending || !!product?.pendingRunId}
       onClick={() => { setPending(true); Promise.resolve().then(onCompact).catch(() => {}).finally(() => setPending(false)); }}
       title={t(product?.automatic === "enabled" ? "chat.productCompactHint" : "chat.nativeCompactHint")}>{t("chat.nativeCompact")}</button>}

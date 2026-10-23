@@ -23,8 +23,41 @@ let config = JSON.parse(localStorage.getItem(configKey) || "null") || {
   disabledBackends: [], notifications: { chat: true, cron: true, task: true }, setupCompletedAt: 1,
 };
 const standalone = new URLSearchParams(location.search).has("standalone");
+const useSessions = new URLSearchParams(location.search).has("use-sessions");
+let fixtureChromeInstalled = !new URLSearchParams(location.search).has("browser-missing");
 if (!standalone) state.openclawDesktop = {};
+// Optional Computer Use preview: every operation stays in memory and never
+// touches TCC, launchd, the installed App, or a real desktop session.
+if (new URLSearchParams(location.search).has("computer") && !standalone) {
+  let computer = { supported: true, available: true, driverVersion: "0.22.0", contractVersion: "0.7.0",
+    permissions: { accessibility: false, screenRecording: false }, sessions: useSessions ? [{
+      id: "computer-preview", profileId: "agent-preview", workRunId: "run-preview",
+      allowedApplications: ["com.apple.TextEdit"], status: "paused", createdAt: 1000,
+      updatedAt: 1000, expiresAt: null, pauseReason: "system_suspended",
+    }] : [] };
+  state.openclawDesktop = {
+    getComputerState: async () => ({ ok: true, value: structuredClone(computer) }),
+    requestComputerPermissions: async () => ({ ok: true, value: { ...computer.permissions } }),
+    reloadComputerPermissions: async () => {
+      computer = { ...computer, permissions: { accessibility: true, screenRecording: true } };
+      return { ok: true, value: structuredClone(computer) };
+    },
+    openComputerAccessibilitySettings: async () => ({ ok: true, value: { opened: true } }),
+    openComputerScreenRecordingSettings: async () => ({ ok: true, value: { opened: true } }),
+  };
+}
 state.fixtureConfig = () => ({ ...config });
+if (new URLSearchParams(location.search).has("browser")) {
+  config.browserUse = { enabled: true, headless: false, isolated: true, ...config.browserUse, browser: "chrome" };
+  if (!standalone) state.openclawDesktop.getBrowserState = async () => ({ ok: true, value: {
+    available: config.browserUse.enabled && fixtureChromeInstalled,
+    reason: !config.browserUse.enabled ? "BROWSER_DISABLED" : !fixtureChromeInstalled ? "BROWSER_EXECUTABLE_UNAVAILABLE" : null,
+    engineVersion: "0.0.82", browser: config.browserUse.browser, sessions: useSessions ? [{
+      id: "browser-preview", profileId: "agent-preview", workRunId: "run-preview",
+      browser: "chrome", headless: false, isolated: true, status: "ready", expiresAt: null,
+    }] : [],
+  } });
+}
 state.fixtureWrites = 0;
 state.fixtureConfigReads = 0;
 state.fixtureConfigEvents = 0;
@@ -154,14 +187,51 @@ state.checkLocale = async (locale: string, title: string, configuredLocale = loc
   check(document.querySelector("#persistent-label")?.textContent === title, "already-mounted components must translate");
   check(document.querySelector("#persistent-markdown .code-block-copy__idle")?.textContent === (locale === "en" ? "Copy" : "复制"), "cached Markdown controls must translate");
   const notificationText = document.querySelector("#settings-notif")?.textContent || "";
-  check(notificationText.includes(locale === "en" ? "Task and inspiration notifications" : "任务和灵感通知"), "merged notification label must translate");
-  check(notificationText.includes(locale === "en" ? "Get notified when a task or inspiration changes status." : "任务或灵感状态发生变化时通知你。"), "merged notification description must translate");
+  check(notificationText.includes(locale === "en" ? "Task and inspiration notifications" : "任务动态"), "merged notification label must translate");
+  check(notificationText.includes(locale === "en" ? "Get notified when a task or inspiration changes status." : "定时、任务或灵感有变化时提醒"), "merged notification description must translate");
   check(!notificationText.includes(locale === "en" ? "Scheduled job runs" : "定时任务运行"), "scheduled jobs must not have a separate switch");
   check(!document.querySelector("#settings-notif .settings-notification-footer button"), "test notification button must stay absent");
   check(!document.body.textContent?.includes(locale === "en" ? "Change this shortcut in the Shoggoth desktop app settings." : "请在 Shoggoth 桌面 App 的设置中更改快捷键。"), "desktop-only shortcut guidance must stay absent");
   check(!document.body.textContent?.includes(locale === "en" ? "Update controls are available in the Shoggoth desktop app." : "请在 Shoggoth 桌面 App 中使用更新功能。"), "desktop-only update guidance must stay absent");
   check(noSaveActions(), "settings must have no manual save or discard actions");
 };
+state.runBrowserSettingsFixture = async () => {
+  await wait(state.fixtureReady, "settings ready");
+  const section = document.getElementById("settings-browser-use")!;
+  const switches = () => [...section.querySelectorAll<HTMLElement>('[role="switch"]')];
+  const checked = (index: number) => switches()[index].getAttribute("aria-checked") === "true";
+  const status = () => section.querySelector<HTMLElement>("[data-browser-state]")?.dataset.browserState;
+  const refresh = () => section.querySelector<HTMLButtonElement>("button.ui-cbtn")!.click();
+  check(document.getElementById("settings-computer-use")!.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING,
+    "Browser Use must follow Computer Use in general settings");
+  check(switches().length === 3 && checked(0) && !checked(1) && !checked(2), "Browser Use defaults must match its config");
+  check(state.fixtureWrites === 0, "reading Browser Use must not save defaults");
+  switches()[1].click();
+  await wait(() => config.browserUse.headless && checked(1) && state.activeWrites === 0, "headless click saved");
+  switches()[2].click();
+  await wait(() => !config.browserUse.isolated && checked(2) && state.activeWrites === 0, "persistent login click saved");
+
+  check(!section.querySelector('[role="combobox"]') && !section.textContent?.includes("Edge"), "browser picker must stay hidden on macOS");
+  check(config.browserUse.browser === "chrome", "macOS Browser Use must use Chrome");
+  fixtureChromeInstalled = false; refresh();
+  await wait(() => status() === "browserMissing", "missing Chrome is unavailable");
+  fixtureChromeInstalled = true; refresh();
+  await wait(() => config.browserUse.browser === "chrome" && status() === "ready", "Chrome ready");
+
+  switches()[0].click();
+  await wait(() => !config.browserUse.enabled && status() === "disabled" && state.activeWrites === 0, "feature disable saved");
+  check(switches().slice(1).every(node => node.hasAttribute("data-disabled")), "disabled Browser Use disables dependent switches");
+  switches()[0].click();
+  await wait(() => config.browserUse.enabled && state.activeWrites === 0, "feature enable saved");
+  refresh();
+  await wait(() => status() === "ready", "feature ready after enabling");
+  check(state.maxActiveWrites === 1 && state.fixtureConfigEvents === state.fixtureWrites, "Browser Use shares the serialized auto-save queue");
+  check(noSaveActions() && !unloadBlocked(), "Browser Use settings must save automatically");
+  check(JSON.stringify(config.notifications) === JSON.stringify({ chat: true, cron: true, task: true }), "Browser Use saves preserve other preferences");
+  return { locale: config.locale, browserUse: config.browserUse, writes: state.fixtureWrites,
+    checks: "fixed Chrome / hidden browser picker / mouse clicks / automatic saves / missing Chrome / disabled controls / isolation / persistence / serialized patches" };
+};
+
 state.runFixture = async () => {
   await wait(state.fixtureReady, "settings ready");
   check(state.fixtureWrites === 0, "loading must not write defaults");
@@ -170,7 +240,7 @@ state.runFixture = async () => {
   check(!document.querySelector('input[name="settings-theme"]'), "theme picker must stay hidden");
   check([...document.querySelectorAll<HTMLButtonElement>("#settings-notif [role=switch]")]
     .map(node => node.getAttribute("aria-checked")).join() === "true,true", "new notification settings default to on");
-  await state.chooseLocale("English");
+  await state.chooseLocale("英文");
   await state.checkLocale("en", "Settings");
   check(config.locale === "en" && localStorage.getItem("openclaw.i18n.locale") === "en", "English saves and seeds the boot cache");
   await state.chooseLocale("简体中文");
@@ -180,7 +250,7 @@ state.runFixture = async () => {
   await state.checkLocale(systemLocale, systemLocale === "en" ? "Settings" : "设置", "");
   check(config.locale === "" && localStorage.getItem("openclaw.i18n.locale") === null, "follow-system must clear explicit override");
   const retryLocale = systemLocale === "en" ? "zh-CN" : "en";
-  const retryLabel = systemLocale === "en" ? "简体中文" : "English";
+  const retryLabel = systemLocale === "en" ? "简体中文" : "英文";
   state.failNextSave = true;
   await state.chooseLocale(retryLabel);
   await wait(() => document.body.textContent?.includes("fixture save failed"), "save error");
@@ -308,10 +378,16 @@ state.runConnectionsFixture = async () => {
     }
     retained();
   };
-  check(!row("shoggoth").querySelector(".settings-backend-row .settings-backend-actions .ui-cbtn"),
-    "Shoggoth cannot be disconnected from its backend card");
-  for (const id of ["openclaw", "hermes"]) await toggle(id, true);
+  const actualDisconnectable = FALLBACK_BACKEND_DESCRIPTORS.filter(backend => backend.disconnectable).map(backend => backend.id);
+  check(actualDisconnectable.includes("openclaw") && actualDisconnectable.includes("hermes"), "actual descriptors must expose both external connections");
+  // Keep the real native backend enabled; no unavailable CLI may become a fake row.
+  for (const id of actualDisconnectable.filter(id => id !== "shoggoth")) await toggle(id, true);
   await toggle("hermes", false);
+  check(actualDisconnectable.includes("shoggoth"), "built-in connection remains independently disconnectable");
+  await toggle("shoggoth", true);
+  check(document.getElementById("settings-shoggoth")?.textContent?.includes("运行正常"),
+    "hiding the built-in connection must keep the background service running");
+  await toggle("shoggoth", false);
   await toggle("openclaw", false, true);
   await pause(900);
   retained();

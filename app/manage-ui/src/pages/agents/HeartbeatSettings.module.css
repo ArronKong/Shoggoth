@@ -1,0 +1,13 @@
+.panel { flex-shrink: 0; padding: 14px 18px; border-bottom: 1px solid var(--line, #8883); font-size: 12px; }
+.top, .row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.top { justify-content: space-between; }
+.toggle { display: inline-flex; align-items: center; gap: 7px; }
+.hint { color: var(--text-secondary, #888); line-height: 1.6; margin: 8px 0; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 10px 0; }
+.button { border: 1px solid var(--line, #8885); border-radius: 6px; padding: 5px 10px; color: inherit; background: transparent; cursor: pointer; }
+.button:disabled { opacity: .5; cursor: default; }
+.row input { color: inherit; background: transparent; border: 1px solid var(--line, #8885); border-radius: 5px; padding: 3px; }
+.notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 130px; overflow: auto; }
+.error { color: var(--danger, #c44545); }
+.panel details { margin-top: 8px; }
+@media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }

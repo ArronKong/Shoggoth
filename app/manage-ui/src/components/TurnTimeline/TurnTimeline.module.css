@@ -131,6 +131,10 @@
   font-weight: 300;
   color: var(--ui-text-3);
 }
+.title[data-action="1"], .title[data-progress="1"] {
+  font-weight: 400;
+  color: var(--ui-text-1);
+}
 .updates {
   flex: none;
   font-size: var(--ui-fs-caption);
@@ -178,7 +182,7 @@
   font-variant-numeric: tabular-nums;
   color: var(--ui-text-2);
 }
-/* 稿:行尾箭头是 24px 盒(login1,node 7167:560),线形纯黑。 */
+/* 行尾箭头保留原版 24px 画布与容器，线形纯黑。 */
 .chev {
   flex: none;
   width: 24px;
@@ -369,7 +373,7 @@
 .procErr {
   color: light-dark(#c12727, #f87171);
 }
-/* 稿:头部展开箭头与行尾同款 24px 盒、纯黑。 */
+/* 头部展开箭头与行尾共用原版 24px 图标，纯黑。 */
 .procChev {
   flex: none;
   width: 24px;
@@ -382,7 +386,7 @@
 .procChev[data-open="1"] {
   transform: rotate(90deg);
 }
-/* 稿:⤢ 是 24px 圆钮(node 7167:569),图标 12px,纯黑。 */
+/* 放大按钮保留 24px 圆钮，内置原版 12px 图标、纯黑。 */
 .procZoom {
   flex: none;
   width: 24px;
@@ -413,4 +417,18 @@
   .chev { transition: none; }
   .procChev { transition: none; }
   .chip { transition: none; }
+}
+.subagent {
+  margin: 4px 0 8px;
+  padding: 4px 0;
+}
+.subagent .gutter {
+  margin-left: 2px;
+}
+.subagentHint {
+  margin: 6px 8px;
+  font-size: 12px;
+  opacity: .7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

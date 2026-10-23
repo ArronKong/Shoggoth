@@ -22,7 +22,8 @@ const { validateSessionRuntimeParams } = require("../app/agent-service/session-r
     let busy = false; const calls = []; const notifications = [];
     const backend = new ShoggothBackend({ paths: {}, readToken: () => "fake", requestService: async (_paths, request, options) => {
       calls.push(request.method);
-      if (request.method === "agent.binding.list") return { bindings, defaultBindingId: bindings[0].id, revision: 1, canAdd: true };
+      // Reading bindings first reconciles connected CLI bindings (agent.binding.sync).
+      if (["agent.binding.sync", "agent.binding.list"].includes(request.method)) return { bindings, defaultBindingId: bindings[0].id, revision: 1, canAdd: true };
       const params = validateSessionRuntimeParams(request.method, request.params);
       assert.equal(options.timeoutMs, 12000); assert.equal(params.profileId, profile.id); assert.equal(params.sessionKey, sessionKey);
       if (request.method.endsWith("switch")) {
@@ -38,13 +39,15 @@ const { validateSessionRuntimeParams } = require("../app/agent-service/session-r
     backend._sessionActivityNotifier = (event) => notifications.push(event);
     const registry = new BackendRegistry(); registry.register(backend);
     server = await startStaticServer(0, { registry, homeDir: root, userDataRoot: path.join(root, "data") });
-    const request = async (body, { origin = server.url, id = profile.agentId, key = gatewayKey, alias = "codex" } = {}) => {
+    const request = async (body, { origin = server.url, id = profile.agentId, key = gatewayKey, alias = "shoggoth" } = {}) => {
       const response = await fetch(`${server.url}/__api/agents/${id}/session-runtime?backend=${alias}&sessionKey=${encodeURIComponent(key)}`, {
         method: body ? "PUT" : "GET", headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
       }); return { status: response.status, body: await response.json() };
     };
     assert.equal((await request()).body.runtime, "codex");
+    // Backend aliases were retired with 0.8.136; Runtime ids are not backends.
+    assert.equal((await request(null, { alias: "codex" })).status, 400);
     const input = { bindingId: bindings[1].id, revision: 1, acceptAdjustments: false };
     assert.equal((await request(input, { origin: null })).status, 403);
     assert.equal((await request({ ...input, profileId: "foreign" })).status, 400);
@@ -58,6 +61,6 @@ const { validateSessionRuntimeParams } = require("../app/agent-service/session-r
     const before = calls.length; let getters = 0;
     await assert.rejects(() => backend.switchSessionRuntime(profile.agentId, gatewayKey, { ...input, get revision() { getters++; return 2; } }));
     assert.equal(getters, 0); assert.equal(calls.length, before);
-    console.log("Session Runtime REST passed: strict Backend IPC, aliases, Origin, ownership, busy/CAS failures, notification.");
+    console.log("Session Runtime REST passed: strict Backend IPC, retired aliases, Origin, ownership, busy/CAS failures, notification.");
   } finally { if (server) await server.close(); fs.rmSync(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

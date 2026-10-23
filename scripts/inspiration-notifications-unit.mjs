@@ -16,15 +16,15 @@ function load(file, globals = {}) {
   return module.exports;
 }
 const { sanitizeNotifications, normalizeConfig } = require(path.join(root, 'app/core/config-store.js'));
-const allOn = { chat: true, cron: true, task: true };
+const allOn = { chat: true, cron: true, task: true, proactive: true };
 assert.deepEqual(sanitizeNotifications(undefined), allOn);
 assert.deepEqual(sanitizeNotifications({ chat: null, cron: 'false', task: 0 }), allOn);
-assert.deepEqual(sanitizeNotifications({ task: false }), { chat: true, cron: false, task: false },
+assert.deepEqual(sanitizeNotifications({ task: false }), { chat: true, cron: false, task: false, proactive: true },
   'An old task-only disabled choice keeps the merged category off');
-assert.deepEqual(sanitizeNotifications({ cron: false }), { chat: true, cron: false, task: false },
+assert.deepEqual(sanitizeNotifications({ cron: false }), { chat: true, cron: false, task: false, proactive: true },
   'An old cron-only disabled choice keeps the merged category off');
 assert.deepEqual(normalizeConfig({ notifications: { chat: false, cron: false, task: false } }).notifications,
-  { chat: false, cron: false, task: false }, 'Existing explicit choices survive normalization');
+  { chat: false, cron: false, task: false, proactive: true }, 'Existing explicit choices survive normalization');
 
 const helper = load('app/manage-ui/src/lib/inspiration-notifications.ts');
 const { readInspirationNotifications: read, inspirationNotificationStatus: statusOf } = helper;
@@ -148,6 +148,7 @@ const Notifier = load('app/manage-ui/src/components/Notifier.tsx', {
     if (name === '../lib/agentDisplay') return agentDisplay;
     if (name === '../lib/shoggothDomainUi') return { usesExplicitBoardIdentity: () => boardIds.length > 0 };
     if (name === '../lib/inspiration-notifications') return helper;
+    if (name === '../lib/groupChat') return { isGroupInternalSession: async () => false };
     if (name === '../lib/notify') return { ...notifications,
       onOpenTarget: callback => { openTarget = callback; return () => { openTarget = null; }; },
       fireNotification: (payload, options) => { notices.push({ payload, options }); return true; } };

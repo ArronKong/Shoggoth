@@ -2,6 +2,23 @@
 // 抽成独立模块是为了让沉浸层复用同形状图标而不反向 import ChatPage（避免循环依赖）；
 // 颜色一律 currentColor：普通模式随主题、沉浸模式按钮 color:#fff 即白色。
 
+export function IconModel() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.92" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" />
+    </svg>
+  );
+}
+export function IconPlugin() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.92" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M19 13h-2a2 2 0 1 1 0-4h2V5h-4V3a2 2 0 1 0-4 0v2H5v6H3a2 2 0 1 0 0 4h2v4h4v-2a2 2 0 1 1 4 0v2h6Z" />
+    </svg>
+  );
+}
+
 export function IconSend() {
   // exact Figma vector (node 6377:473 "send-diagonal")
   return (
@@ -51,6 +68,11 @@ export function IconArchive() {
       <path d="M5 9v9a1.5 1.5 0 001.5 1.5h11A1.5 1.5 0 0019 18V9M10 13h4" />
     </svg>
   );
+}
+export function IconDeleteGroup() {
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" />
+  </svg>;
 }
 export function IconMic() {
   // exact Figma vector (node 6377:476), 24×24 centred

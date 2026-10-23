@@ -214,7 +214,7 @@ test("config writer 原子生成真实 custom provider TOML，使用内部 alias
   assert.equal(fs.statSync(codexHome).mode & 0o777, 0o700);
 });
 
-test("Codex 0.149.0 本地解析生成的 update/shell env policy 语法", () => {
+test("Codex 0.159.2 本地解析生成的 update/shell env policy 语法", () => {
   const fixture = fixturePaths();
   const writer = new CodexRuntimeConfigWriter({ paths: fixture.paths });
   const codexHome = prepareCodexHome(fixture.paths, "strict-config");
@@ -254,7 +254,7 @@ test("Codex 0.149.0 本地解析生成的 update/shell env policy 语法", () =>
   assert.match(result.stdout, /^memories\s+stable\s+false$/m);
 });
 
-test("六种 Provider TOML 使用准确 wire/built-in/AWS 语义并由真实 Codex 0.149.0 离线解析", () => {
+test("六种 Provider TOML 使用准确 wire/built-in/AWS 语义并由真实 Codex 0.159.2 离线解析", () => {
   const fixture = fixturePaths();
   const writer = new CodexRuntimeConfigWriter({ paths: fixture.paths });
   const common = {

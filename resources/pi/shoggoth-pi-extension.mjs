@@ -3,10 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_FRAME_BYTES = 64 * 1024;
+const MAX_CATALOG_FRAME_BYTES = 256 * 1024;
 const MAX_TOOLS = 256;
 const CONTROL_REQUEST_TIMEOUT_MS = 45_000;
-const TOOL_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+// Standalone extension: match the 30-minute input budget plus Service reply grace.
+const INPUT_TIMEOUT_MS = 30 * 60_000;
+const TOOL_REQUEST_TIMEOUT_MS = INPUT_TIMEOUT_MS + 30_000 + 45_000;
+const PLUGIN_REQUEST_TIMEOUT_MS = 2 * (INPUT_TIMEOUT_MS + 30_000) + 45_000;
+const WORKSPACE_REQUEST_TIMEOUT_MS = 2_147_000_000;
 const PRODUCT_CONFIRMATION_SELECT_PREFIX = "[[shoggoth-product-confirmation]]";
+const NATIVE_HOOK_TITLE = "[[shoggoth-native-tool-hook-v1]]";
+const RUNTIME_CALL_BINDING_TITLE = "[[shoggoth-runtime-call-binding-v1]]";
 const MUTATING_BUILTINS = new Set(["bash", "powershell", "edit", "write"]);
 const STRUCTURAL_NULL_FIELDS = new Set([
   "boardId", "cursor", "enabled", "mimeType", "percent", "ref", "status",
@@ -205,6 +212,12 @@ function isProductConfirmationSchema(schema) {
 }
 
 async function answerElicitation(params, ctx) {
+  if (params?._meta?.["shoggoth/runtime-call-binding"] !== undefined) {
+    const encoded = JSON.stringify(params);
+    if (Buffer.byteLength(encoded, "utf8") > 32 * 1024) return { action: "cancel" };
+    const response = await ctx.ui.input(RUNTIME_CALL_BINDING_TITLE, encoded);
+    return response === "accept" ? { action: "accept", content: {} } : { action: "cancel" };
+  }
   const schema = params?.requestedSchema;
   if (!plain(schema) || schema.type !== "object" || !plain(schema.properties)) {
     return { action: "cancel" };
@@ -220,7 +233,7 @@ async function answerElicitation(params, ctx) {
       && property.enum.length <= 32 && property.enum.every((item) => safeString(item, 1024))) {
       const selected = productConfirmation
         ? await ctx.ui.select(`${PRODUCT_CONFIRMATION_SELECT_PREFIX}${title}`, property.enum)
-        : await ctx.ui.select(title, property.enum, { timeout: 10 * 60 * 1000 });
+        : await ctx.ui.select(title, property.enum, { timeout: INPUT_TIMEOUT_MS });
       if (selected === undefined) return { action: "cancel" };
       content[name] = selected;
     } else if (property.type === "boolean") {
@@ -228,12 +241,12 @@ async function answerElicitation(params, ctx) {
         title,
         description || (safeString(params.message, 4096) ? params.message : title),
         {
-          timeout: 10 * 60 * 1000,
+          timeout: INPUT_TIMEOUT_MS,
         },
       );
     } else if (property.type === "string") {
       const entered = await ctx.ui.input(title, description, {
-        timeout: 10 * 60 * 1000,
+        timeout: INPUT_TIMEOUT_MS,
       });
       if (entered === undefined) return { action: "cancel" };
       content[name] = entered;
@@ -271,7 +284,7 @@ class McpClient {
     this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     let newline;
     while ((newline = this.buffer.indexOf(0x0a)) >= 0) {
-      if (newline === 0 || newline > MAX_FRAME_BYTES) {
+      if (newline === 0 || newline > MAX_CATALOG_FRAME_BYTES) {
         this.fail(new Error("Invalid Shoggoth MCP frame"));
         return;
       }
@@ -282,9 +295,13 @@ class McpClient {
         this.fail(new Error("Invalid Shoggoth MCP frame"));
         return;
       }
+      if (newline > MAX_FRAME_BYTES && this.pending.get(message.id)?.method !== "tools/list") {
+        this.fail(new Error("Oversized Shoggoth MCP frame"));
+        return;
+      }
       void this.onMessage(message);
     }
-    if (this.buffer.length > MAX_FRAME_BYTES) this.fail(new Error("Oversized Shoggoth MCP frame"));
+    if (this.buffer.length > MAX_CATALOG_FRAME_BYTES) this.fail(new Error("Oversized Shoggoth MCP frame"));
   }
 
   async onMessage(message) {
@@ -332,12 +349,14 @@ class McpClient {
     this.sequence += 1;
     const id = `pi-mcp-${this.sequence}`;
     return new Promise((resolve, reject) => {
-      const pending = { resolve, reject, timer: null, deadlineAt: null, remainingTimeoutMs: null };
+      const pending = { method, resolve, reject, timer: null, deadlineAt: null, remainingTimeoutMs: null };
       this.pending.set(id, pending);
       this.armPendingTimeout(
         id,
         pending,
-        ctx ? TOOL_REQUEST_TIMEOUT_MS : CONTROL_REQUEST_TIMEOUT_MS,
+        ctx && method === "tools/call" && params?.name === "workspace_execute" ? WORKSPACE_REQUEST_TIMEOUT_MS
+          : ctx && method === "tools/call" && params?.name === "mcp_server_call" ? PLUGIN_REQUEST_TIMEOUT_MS
+          : ctx ? TOOL_REQUEST_TIMEOUT_MS : CONTROL_REQUEST_TIMEOUT_MS,
       );
       this.activeContext = ctx;
       if (ctx) this.activeRequestId = id;
@@ -407,6 +426,7 @@ class McpClient {
 }
 
 export default async function shoggothPiExtension(pi) {
+  const workspaceExecution = process.env.SHOGGOTH_PI_WORKSPACE_EXECUTION_VERSION === "1";
   const command = process.env.SHOGGOTH_PI_MCP_COMMAND;
   const rawArgs = process.env.SHOGGOTH_PI_MCP_ARGS;
   const policyRaw = process.env.SHOGGOTH_PI_PERMISSION_POLICY;
@@ -420,6 +440,23 @@ export default async function shoggothPiExtension(pi) {
     || !["read-only", "workspace-write", "danger-full-access"].includes(policy.sandbox)) {
     throw new Error("Shoggoth Pi policy is invalid");
   }
+  let nativeHookNames;
+  try { nativeHookNames = JSON.parse(process.env.SHOGGOTH_PI_NATIVE_HOOK_TOOLS || "[]"); }
+  catch { throw new Error("Shoggoth Pi Hook scope is invalid"); }
+  const builtinNames = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+  if (!Array.isArray(nativeHookNames) || nativeHookNames.length > 7 || nativeHookNames.some(name => !builtinNames.has(name))) {
+    throw new Error("Shoggoth Pi Hook scope is invalid");
+  }
+  const nativeHooks = new Set(nativeHookNames), pendingNative = new Map();
+  const hookRequest = async (ctx, request) => {
+    const encoded = JSON.stringify(request);
+    if (Buffer.byteLength(encoded, "utf8") > 64 * 1024) throw new Error("HOOK_CAPACITY");
+    const value = await ctx.ui.input(NATIVE_HOOK_TITLE, encoded);
+    if (typeof value !== "string") throw new Error("HOOK_NATIVE_CALL_FAILED");
+    const response = JSON.parse(value);
+    if (!plain(response) || response.errorCode) throw new Error(response?.errorCode || "HOOK_NATIVE_CALL_FAILED");
+    return response;
+  };
 
   // Pi rewrites process.title to "pi", while the one-shot MCP gate verifies the
   // direct parent through ps(1). Expose the real launch path until that gate is consumed.
@@ -439,11 +476,27 @@ export default async function shoggothPiExtension(pi) {
       throw new Error("Shoggoth MCP initialization failed");
     }
     client.notify("notifications/initialized");
-    catalog = await client.request("tools/list", {});
-    if (!plain(catalog) || !Array.isArray(catalog.tools) || catalog.tools.length > MAX_TOOLS) {
-      client.close();
-      throw new Error("Shoggoth MCP tool catalog is invalid");
-    }
+    catalog = { tools: [] };
+    const cursors = new Set(), names = new Set();
+    let cursor;
+    do {
+      const page = await client.request("tools/list", cursor ? { cursor } : {});
+      if (!plain(page) || !Array.isArray(page.tools)
+        || catalog.tools.length + page.tools.length > MAX_TOOLS
+        || page.tools.some(tool => !plain(tool) || !safeString(tool.name, 128) || names.has(tool.name))
+        || (page.nextCursor !== undefined && page.nextCursor !== null
+          && (!safeString(page.nextCursor, 256) || cursors.has(page.nextCursor)))) {
+        client.close();
+        throw new Error("Shoggoth MCP tool catalog is invalid");
+      }
+      for (const tool of page.tools) {
+        if (names.has(tool.name)) { client.close(); throw new Error("Shoggoth MCP tool catalog is invalid"); }
+        names.add(tool.name);
+        catalog.tools.push(tool);
+      }
+      cursor = page.nextCursor;
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
   } finally {
     process.title = originalProcessTitle;
   }
@@ -457,7 +510,9 @@ export default async function shoggothPiExtension(pi) {
       name: tool.name,
       label: safeString(tool.title, 1024) ? tool.title : tool.name,
       description: tool.description,
-      promptSnippet: tool.description,
+      // No promptSnippet: Pi would otherwise repeat every product tool's full
+      // description in its system prompt "Available tools" text, on top of the
+      // tool definitions the model already receives.
       parameters: tool.inputSchema,
       prepareArguments: (args) => prepareProductArguments(tool.name, tool.inputSchema, args),
       executionMode: "sequential",
@@ -479,17 +534,41 @@ export default async function shoggothPiExtension(pi) {
   }
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!MUTATING_BUILTINS.has(event.toolName)) return undefined;
-    if (policy.sandbox === "read-only") {
+    // --no-builtin-tools removes builtins from the model. Keep a dispatch guard as
+    // well: historical tool calls and future builtins cannot bypass the OS
+    // workspace executor through an unprompted native read or cached approval.
+    if (workspaceExecution && !catalog.tools.some(tool => tool.name === event.toolName)) {
+      return { block: true, reason: "Use workspace_execute for workspace operations in this mode." };
+    }
+    const mutating = MUTATING_BUILTINS.has(event.toolName);
+    if (mutating && policy.sandbox === "read-only") {
       return { block: true, reason: "This Pi profile does not permit mutating built-in tools." };
     }
-    if (policy.sandbox === "workspace-write" && ["edit", "write"].includes(event.toolName)) {
+    let prepared = null;
+    if (nativeHooks.has(event.toolName)) {
+      try {
+        const schema = pi.getAllTools().find(tool => tool.name === event.toolName)?.parameters;
+        if (!plain(schema) || !plain(event.input) || !safeString(event.toolCallId, 256)) throw new Error("HOOK_NATIVE_CALL_FAILED");
+        prepared = await hookRequest(ctx, { phase: "before", toolCallId: event.toolCallId,
+          toolName: event.toolName, arguments: event.input, inputSchema: schema });
+        if (!plain(prepared.arguments)) throw new Error("HOOK_NATIVE_CALL_FAILED");
+        // Pi emits tool_call after its first validation. The Service validates
+        // this final input against the actual runtime tool schema before return.
+        for (const key of Object.keys(event.input)) delete event.input[key];
+        Object.assign(event.input, prepared.arguments);
+      } catch (error) { return { block: true, reason: /^HOOK_[A-Z_]+$/u.test(error.message) ? error.message : "HOOK_NATIVE_CALL_FAILED" }; }
+    }
+    if (mutating && policy.sandbox === "workspace-write" && ["edit", "write"].includes(event.toolName)) {
       const target = toolPath(event.input);
       if (!target || !contained(ctx.cwd, target)) {
         return { block: true, reason: "The target path is outside the authorized workspace." };
       }
     }
-    if (["untrusted", "on-failure", "on-request"].includes(policy.approvalPolicy)) {
+    if (prepared?.requiresApproval) {
+      try {
+        if ((await hookRequest(ctx, { phase: "approve", toolCallId: event.toolCallId })).approved !== true) throw new Error("HOOK_APPROVAL_DENIED");
+      } catch { return { block: true, reason: "HOOK_APPROVAL_DENIED" }; }
+    } else if (mutating && ["untrusted", "on-failure", "on-request"].includes(policy.approvalPolicy)) {
       const detail = event.toolName === "bash" && safeString(event.input?.command, 4096)
         ? event.input.command : JSON.stringify(event.input ?? {});
       const allowed = await ctx.ui.confirm(
@@ -498,8 +577,39 @@ export default async function shoggothPiExtension(pi) {
       );
       if (!allowed) return { block: true, reason: "The user declined this tool call." };
     }
+    if (prepared?.needsAfter) {
+      if (pendingNative.size >= 1024) return { block: true, reason: "HOOK_CAPACITY" };
+      pendingNative.set(event.toolCallId, prepared);
+    }
     return undefined;
   });
 
-  pi.on("session_shutdown", () => client.close());
+  pi.on("tool_result", async (event, ctx) => {
+    const prepared = pendingNative.get(event.toolCallId);
+    if (!prepared) return undefined;
+    pendingNative.delete(event.toolCallId);
+    try {
+      const response = await hookRequest(ctx, { phase: "after", toolCallId: event.toolCallId,
+        result: { content: event.content, details: event.details ?? null, isError: event.isError } });
+      const result = response.result;
+      if (result?.hookDisposition === "result_withheld") return { content: [{ type: "text", text: "业务操作已执行，Hook 结果需要验证。请勿自动重试。" }],
+        details: result, isError: event.isError };
+      if (!plain(result) || !Array.isArray(result.content) || result.isError !== event.isError) throw new Error("HOOK_RESULT_FACT_CHANGED");
+      if (plain(result._meta?.shoggothHooks)) {
+        const metadata = result._meta.shoggothHooks;
+        return { content: [...result.content, { type: "text", text: "业务操作已执行，Hook 后续动作未完成，需要验证。请勿自动重试。" }],
+          details: { businessDetails: result.details ?? null, shoggothHooks: metadata }, isError: result.isError };
+      }
+      return { content: result.content, details: result.details, isError: result.isError };
+    } catch {
+      // Pi logs and ignores thrown result-handler errors. Always return an
+      // explicit withheld body for mandatory transformations or actions.
+      if (prepared.requiredAfter) return { content: [{ type: "text", text: "业务操作已执行，Hook 结果未确认。请勿自动重试。" }],
+        details: { hookDisposition: "result_withheld", businessOperation: "already_executed", retryAllowed: false,
+          errorCode: "HOOK_NATIVE_RESULT_UNVERIFIED" }, isError: event.isError };
+      return undefined;
+    }
+  });
+
+  pi.on("session_shutdown", () => { pendingNative.clear(); client.close(); });
 }

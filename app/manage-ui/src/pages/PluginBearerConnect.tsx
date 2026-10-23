@@ -4,15 +4,17 @@ import { ApiError, connectPluginBearer } from "../api/client";
 import styles from "./PluginBearerConnect.module.css";
 
 export function PluginBearerConnect({ agentId, installationId, componentId, revision,
-  disabled, connected, onReady }: {
+  disabled, connected, onReady, provider = "github" }: {
   agentId: string; installationId: string; componentId: string; revision: number;
   disabled: boolean; connected: boolean; onReady: () => void;
+  provider?: "github" | "cloudflare";
 }) {
   const { t } = useTranslation();
   const input = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const label = (key: string) => t(provider === "cloudflare" ? `plugins.cloudflare${key}` : `plugins.bearer${key}`);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy || disabled) return;
@@ -31,14 +33,15 @@ export function PluginBearerConnect({ agentId, installationId, componentId, revi
   return <div className={styles.control}>
     <button className="btn-secondary" type="button" disabled={disabled || busy}
       aria-expanded={open} onClick={() => { setOpen(value => !value); setError(null); }}>
-      {t(connected ? "plugins.bearerReconnect" : "plugins.bearerConnect")}
+      {label(connected ? "Reconnect" : "Connect")}
     </button>
     {open && <form className={styles.form} onSubmit={event => void submit(event)}>
-      <label htmlFor={`plugin-bearer-${componentId}`}>{t("plugins.bearerTokenLabel")}</label>
+      <label htmlFor={`plugin-bearer-${componentId}`}>{label("TokenLabel")}</label>
       <input ref={input} id={`plugin-bearer-${componentId}`} className="field-input"
         type="password" autoComplete="off" spellCheck={false} disabled={disabled || busy}
-        placeholder="github_pat_…" aria-invalid={Boolean(error)} />
-      <span className={styles.hint}>{t("plugins.bearerTokenHint")}</span>
+        placeholder={provider === "cloudflare" ? "cfut_…" : "github_pat_…"}
+        aria-invalid={Boolean(error)} />
+      <span className={styles.hint}>{label("TokenHint")}</span>
       <div className={styles.actions}>
         <button className="btn-secondary" type="button" disabled={busy}
           onClick={() => { if (input.current) input.current.value = ""; setOpen(false); setError(null); }}>
@@ -48,9 +51,8 @@ export function PluginBearerConnect({ agentId, installationId, componentId, revi
           {t(busy ? "plugins.bearerVerifying" : "plugins.bearerSubmit")}
         </button>
       </div>
-      {error && <span role="alert">{t(error === "empty" ? "plugins.bearerEmpty"
-        : error === "CONNECTION_AUTH_REQUIRED" ? "plugins.bearerInvalid"
-          : "plugins.bearerFailed")}</span>}
+      {error && <span role="alert">{label(error === "empty" ? "Empty"
+        : error === "CONNECTION_AUTH_REQUIRED" ? "Invalid" : "Failed")}</span>}
     </form>}
   </div>;
 }

@@ -83,6 +83,23 @@ test("A mismatched preparation never gains permission to send", async () => {
   }
 });
 
+test("response facts are terminal, execution-scoped and frozen; reset cannot publish a late read", async () => {
+  const f = await running();
+  let metadata = { models: ["actual"], modelSource: "reported", usage: { inputTokens: 100, outputTokens: 4 } };
+  f.driver.responseMetadata = async () => metadata;
+  assert.equal((await f.runner.metadata(f.base)).responseMetadata, null);
+  f.callbacks[0]({ status: "completed", resultSummary: "done" });
+  assert.deepEqual((await f.runner.metadata(f.base)).responseMetadata, metadata);
+  metadata = { models: ["later-model"] };
+  assert.equal((await f.runner.metadata(f.base)).responseMetadata.models[0], "actual");
+  await assert.rejects(f.runner.metadata({ ...f.base, runId: crypto.randomUUID() }), { code: "INSPIRATION_BINDING_INVALID" });
+  await assert.rejects(f.runner.metadata({ ...f.base, hostId: crypto.randomUUID() }), { code: "APP_HOST_UNAVAILABLE" });
+  const g = await running(); g.callbacks[0]({ status: "completed" });
+  const pending = deferred(); g.driver.responseMetadata = () => pending.promise;
+  const reading = g.runner.metadata(g.base); g.runner.reset(); pending.resolve(metadata);
+  await assert.rejects(reading, { code: "APP_HOST_UNAVAILABLE" });
+});
+
 test("Lost-host recovery only inspects the frozen binding and never replays start", async () => {
   const f = fixture();
   const oldHost = crypto.randomUUID();
@@ -94,6 +111,22 @@ test("Lost-host recovery only inspects the frozen binding and never replays star
   await assert.rejects(f.runner.start({ ...f.start, hostId: oldHost }), { code: "APP_HOST_UNAVAILABLE" });
   await assert.rejects(f.runner.start(f.start), { code: "EXTERNAL_EXECUTION_UNCONFIRMED" });
   assert.equal(f.calls.some(([name]) => name === "start" || name === "prepare"), false);
+});
+
+test("historical answer and progress reads never publish a recovered execution", async () => {
+  const f = fixture(), published = [];
+  f.runner.onSnapshot = (...args) => published.push(args);
+  f.driver.fullResult = async () => "saved answer";
+  f.driver.publicProgress = async () => null;
+  const input = { ...f.base, hostId: crypto.randomUUID(), offset: 0, digest: null };
+  assert.equal((await f.runner.result(input)).page.text, "saved answer");
+  assert.equal((await f.runner.result({ ...input, part: "progress" })).page, null);
+  assert.equal(f.runner.records.size, 0);
+  assert.deepEqual(published, []);
+  const pending = deferred(); f.driver.publicProgress = () => pending.promise;
+  const reading = f.runner.result({ ...input, part: "progress" });
+  f.runner.reset(); pending.resolve("late progress");
+  await assert.rejects(reading, { code: "APP_HOST_UNAVAILABLE" });
 });
 
 test("An old inspection cannot overwrite a newer callback, including its attention", async () => {
@@ -233,8 +266,9 @@ test("Cancellation waits for start acceptance and requires a confirmed stop", as
   accepted.resolve({ status: "running" });
   assert.equal((await canceled).snapshot.status, "unknown");
   assert.equal(f.calls.filter(([name]) => name === "cancel").length, 1);
-  f.driver.cancel = async () => ({ status: "canceled" });
-  assert.equal((await f.runner.cancel({ ...f.base, operationId: "retry-cancel" })).snapshot.status, "canceled");
+  f.driver.cancel = async input => { f.calls.push(["cancel", input]); return { status: "canceled" }; };
+  assert.equal((await f.runner.cancel({ ...f.base, operationId: "cancel" })).snapshot.status, "canceled");
+  assert.equal(f.calls.filter(([name]) => name === "cancel").length, 2, "the original cancellation identity retries after an unconfirmed response");
 });
 
 test("Reset prevents old queued actions, old callbacks, and old replies from owning the new host", async () => {
@@ -294,4 +328,51 @@ test("Invalid or failed transport observations remain nonterminal", async () => 
   assert.equal(result.snapshot.status, "unknown");
   assert.equal(result.snapshot.finishedAt, null);
   assert.equal(JSON.stringify(result).includes("private-error-canary"), false);
+});
+
+
+test("M36/M37: group full results use bounded, digest-bound pages while shared summaries keep their limit", async () => {
+  const f = await running("hermes");
+  const text = "最终回答🙂\n".repeat(12_000) + "可追溯尾部";
+  f.driver.fullResult = async (input) => { assert.equal(input.runId, f.base.runId); return text; };
+  f.callbacks[0]({ status: "completed", resultSummary: text });
+  assert.ok(Buffer.byteLength(JSON.stringify((await f.runner.get(f.base)).snapshot.resultSummary)) <= 16 * 1024);
+  const { validateFederationParams, validateFederationResult } = require("../app/federation-host-protocol");
+  let offset = 0, digest = null, collected = "";
+  do {
+    const params = { ...f.base, offset, digest };
+    assert.equal(validateFederationParams("group.external.result", params), true);
+    const result = await f.runner.result(params);
+    assert.equal(validateFederationResult("group.external.result", result, params), true);
+    assert.equal(validateFederationResult("group.external.result", result, { ...params, offset: offset + 1 }), false);
+    collected += result.page.text; offset = result.page.nextOffset; digest = result.page.digest;
+  } while (offset !== null);
+  assert.equal(collected, text);
+  await assert.rejects(f.runner.result({ ...f.base, offset: 0, digest: "0".repeat(64) }), { code: "GROUP_RESULT_MISMATCH" });
+  await assert.rejects(f.runner.result({ ...f.base, sessionKey: "other-session", offset: 0, digest: null }), { code: "INSPIRATION_BINDING_INVALID" });
+  assert.equal(f.calls.filter(([name]) => name === "start").length, 1);
+});
+
+test("full-result absence never falls back to a possibly truncated summary or starts the model", async () => {
+  const f = await running("hermes");
+  f.callbacks[0]({ status: "completed", resultSummary: "summary only" });
+  assert.equal((await f.runner.result({ ...f.base, offset: 0, digest: null })).page, null);
+  assert.equal(f.calls.filter(([name]) => name === "start").length, 1);
+});
+
+test("public progress is a separately bound paged part, independent of the final result", async () => {
+  const f = await running("hermes");
+  const text = "公开分工🙂\n".repeat(3000);
+  f.driver.publicProgress = async input => { assert.equal(input.runId, f.base.runId); return text; };
+  f.driver.fullResult = async () => "final-only";
+  let offset = 0, digest = null, collected = "";
+  do {
+    const { page } = await f.runner.result({ ...f.base, part: "progress", offset, digest });
+    collected += page.text; offset = page.nextOffset; digest = page.digest;
+  } while (offset !== null);
+  assert.equal(collected, text);
+  assert.equal((await f.runner.result({ ...f.base, offset: 0, digest: null })).page.text, "final-only");
+  await assert.rejects(f.runner.result({ ...f.base, part: "analysis", offset: 0, digest: null }), { code: "INVALID_PARAMS" });
+  await assert.rejects(f.runner.result({ ...f.base, part: "progress", sessionKey: "other", offset: 0, digest: null }), { code: "INSPIRATION_BINDING_INVALID" });
+  assert.equal(f.calls.filter(([name]) => name === "start").length, 1);
 });

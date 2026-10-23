@@ -136,6 +136,42 @@ class BackendRegistry extends EventEmitter {
   }
 
   listInspirations(query) { return this._requireInspirationOwner().listInspirations(query); }
+  proactiveCall(method, params) { return this._requireInspirationOwner().proactiveCall(method, params); }
+  webSettingsCall(method, params) { return this._requireInspirationOwner().webSettingsCall(method, params); }
+
+  // 群聊由同一个共享产品 owner 持有；成员可来自不同后端，群本身不属于任何单个后端。
+  _requireGroupChatOwner() {
+    if (!this._inspirationOwner) {
+      const error = new Error("群聊服务暂不可用");
+      error.code = "GROUP_CHAT_UNAVAILABLE";
+      throw error;
+    }
+    return this._inspirationOwner;
+  }
+  listGroupChats(opts) { return this._requireGroupChatOwner().listGroupChats(opts); }
+  listGroupChatHostMembers() { return this._requireGroupChatOwner().listGroupChatHostMembers(); }
+  testGroupChatHost(peer) { return this._requireGroupChatOwner().testGroupChatHost(peer); }
+  getGroupChat(id) { return this._requireGroupChatOwner().getGroupChat(id); }
+  createGroupChat(input) { return this._requireGroupChatOwner().createGroupChat(input); }
+  updateGroupChat(id, input) { return this._requireGroupChatOwner().updateGroupChat(id, input); }
+  deleteGroupChat(id, input) { return this._requireGroupChatOwner().deleteGroupChat(id, input); }
+  addGroupChatMember(id, input) { return this._requireGroupChatOwner().addGroupChatMember(id, input); }
+  getGroupChatMemberModels(id, memberId) { return this._requireGroupChatOwner().getGroupChatMemberModels(id, memberId); }
+  setGroupChatMemberModel(id, input) { return this._requireGroupChatOwner().setGroupChatMemberModel(id, input); }
+  removeGroupChatMember(id, input) { return this._requireGroupChatOwner().removeGroupChatMember(id, input); }
+  getGroupChatMemberRole(id, memberId, query) { return this._requireGroupChatOwner().getGroupChatMemberRole(id, memberId, query); }
+  getGroupChatMemberRoleHistory(id, memberId, query) { return this._requireGroupChatOwner().getGroupChatMemberRoleHistory(id, memberId, query); }
+  listGroupChatMessages(id, query) { return this._requireGroupChatOwner().listGroupChatMessages(id, query); }
+  searchGroupChatMessages(id, query) { return this._requireGroupChatOwner().searchGroupChatMessages(id, query); }
+  readGroupChatMessage(id, query) { return this._requireGroupChatOwner().readGroupChatMessage(id, query); }
+  reconcileGroupChatExecution(id, input) { return this._requireGroupChatOwner().reconcileGroupChatExecution(id, input); }
+  sendGroupChatMessage(id, input) { return this._requireGroupChatOwner().sendGroupChatMessage(id, input); }
+  lookupGroupChatSend(id, query) { return this._requireGroupChatOwner().lookupGroupChatSend(id, query); }
+  stopGroupChatDiscussion(id) { return this._requireGroupChatOwner().stopGroupChatDiscussion(id); }
+  stopGroupChatMember(id, input) { return this._requireGroupChatOwner().stopGroupChatMember(id, input); }
+  retryGroupChatTurn(id, input) { return this._requireGroupChatOwner().retryGroupChatTurn(id, input); }
+  respondGroupChatInteraction(id, input) { return this._requireGroupChatOwner().respondGroupChatInteraction(id, input); }
+  getGroupChatDiagnostics() { return this._requireGroupChatOwner().getGroupChatDiagnostics(); }
   getInspirationGrowth() { return this._requireInspirationOwner().getInspirationGrowth(); }
   async updateInspirationGrowth(input) {
     const { validateInspirationServiceParams } = require("../agent-service/inspiration-service-protocol");
@@ -263,6 +299,36 @@ class BackendRegistry extends EventEmitter {
     return [...this.backends.values()].filter((backend) => !disabled.has(backend.id));
   }
 
+  /**
+   * A disconnected built-in service is hidden but keeps running: other backends
+   * use its product features (plugins, Inspiration).
+   * @param {string} backendId
+   */
+  keepsRunningWhenDisconnected(backendId) {
+    try {
+      return this._registeredGet(backendId)?.getBackendDescriptor()?.connectionMode === "builtin-service";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Service-level product surfaces (plugins), reachable on an active backend and
+   * on a disconnected built-in service. Agent surfaces use getBackend().
+   * @param {string} backendId
+   */
+  getServiceBackend(backendId) {
+    return this._activeGet(backendId)
+      || (this.keepsRunningWhenDisconnected(backendId) ? this._registeredGet(backendId) : null);
+  }
+
+  /** Settings saved a connection change; each backend may react in place. */
+  notifyConnectionsChanged() {
+    for (const backend of this.backends.values()) {
+      try { backend.onConnectionsChanged?.(); } catch { /* one backend cannot block the others */ }
+    }
+  }
+
   /** 按 id 取后端；断开的视作不存在（数据面/管理面都不再触达它）。 */
   _activeGet(backendId) {
     const backend = this._registeredGet(backendId);
@@ -332,6 +398,30 @@ class BackendRegistry extends EventEmitter {
   applyNativeRuntimeConfig(projection) {
     return this._nativeCapacityBackend().applyNativeRuntimeConfig(projection);
   }
+  _nativeMemoryConfigBackend() {
+    const backend = this._activeBackends().find(candidate => {
+      try { return candidate.getBackendDescriptor()?.surfaces?.nativeMemoryConfig === true; }
+      catch { return false; }
+    });
+    if (!backend) throw Object.assign(new Error("Memory configuration is unavailable"), { code: "NATIVE_MEMORY_CONFIG_UNAVAILABLE" });
+    return backend;
+  }
+  applyNativeMemoryConfig(projection) { return this._nativeMemoryConfigBackend().applyNativeMemoryConfig(projection); }
+  getNativeMemoryContext() { return this._nativeMemoryConfigBackend().getNativeMemoryContext(); }
+  _nativeMemorySharingConfigBackend() {
+    const backend = this._activeBackends().find(candidate => {
+      try { return candidate.getBackendDescriptor()?.surfaces?.nativeMemorySharingConfig === true; }
+      catch { return false; }
+    });
+    if (!backend) throw Object.assign(new Error("Memory sharing configuration is unavailable"), { code: "NATIVE_MEMORY_SHARING_UNAVAILABLE" });
+    return backend;
+  }
+  applyNativeMemorySharingConfig(projection) { return this._nativeMemorySharingConfigBackend().applyNativeMemorySharingConfig(projection); }
+  getNativeMemorySharingContext() { return this._nativeMemorySharingConfigBackend().getNativeMemorySharingContext(); }
+  getMemoryProviderOwners(input) { return this._nativeMemoryConfigBackend().getMemoryProviderOwners(input); }
+  applyMemoryProviderOwner(input) { return this._nativeMemoryConfigBackend().applyMemoryProviderOwner(input); }
+  recoverMemoryProviderOwner(input) { return this._nativeMemoryConfigBackend().recoverMemoryProviderOwner(input); }
+
 
   /**
    * Register a backend. Must be called before start().
@@ -418,7 +508,8 @@ class BackendRegistry extends EventEmitter {
    */
   async start(backendId) {
     const results = new Map();
-    const backends = backendId === undefined ? this._activeBackends() : [this._activeGet(backendId)].filter(Boolean);
+    const backends = (backendId === undefined ? [...this.backends.keys()] : [backendId])
+      .map((id) => this.getServiceBackend(id)).filter(Boolean);
     await Promise.all(
       backends.map(async (backend) => {
         // 分阶段启动的后端（Hermes 每 profile 一个 dashboard 进程）每就绪一批就
@@ -437,6 +528,8 @@ class BackendRegistry extends EventEmitter {
           });
         };
         const emitSessionActivity = (activity) => {
+          // A disconnected built-in service keeps running; its Agents stay hidden.
+          if (this._disabledSet().has(backend.id)) return;
           const agentIds = failSoftSyncRows(backend, "getAgents")
             .map((agent) => agent?.id)
             .filter(Boolean);
@@ -504,6 +597,19 @@ class BackendRegistry extends EventEmitter {
     return null;
   }
 
+  /** Resolve the product chat reader through the same active owner as sends. */
+  async getChatHistoryPage(sessionKey, options = {}) {
+    const agentId = /^agent:([^:]+):.+$/u.exec(String(sessionKey || ""))?.[1];
+    const backend = agentId && (this.route(agentId)
+      || (!this.claimsAgentId(agentId) ? this.getBackend("openclaw") : null));
+    if (!backend) throw Object.assign(new Error("会话后端暂不可用"), { code: "BACKEND_NOT_READY" });
+    const bridge = ["openclaw", "hermes"].includes(backend.id) && this.hasExternalInspirationSessionBridge()
+      ? await this.getExternalInspirationSessionRoute({ backendId: backend.id, agentId, sessionKey }) : null;
+    const page = await backend.getHistoryPage(sessionKey, options);
+    const payload = bridge?.projectHistory ? await bridge.projectHistory(page) : page;
+    return { payload, observer: bridge || backend };
+  }
+
   /**
    * 是否有已注册后端「声称」这个 agentId 属于它的静态命名空间——独立于就绪状态
    * （见 agent-backend.claimsAgentId）。proxy 用它在启动竞态窗口正确归属：foreign
@@ -534,6 +640,27 @@ class BackendRegistry extends EventEmitter {
       }
     }
     return agents;
+  }
+
+  /** Chat roster, with explicit ownership and incomplete backend partitions. */
+  aggregateAgentSnapshot() {
+    const agents = [], incompleteBackends = [];
+    for (const backend of this._activeBackends()) {
+      try {
+        const snapshot = typeof backend.getAgentsSnapshot === "function"
+          ? backend.getAgentsSnapshot()
+          : { agents: backend.getAgents(), complete: true };
+        if (!Array.isArray(snapshot?.agents)
+          || snapshot.agents.some(agent => !agent || typeof agent.id !== "string" || !agent.id.trim())) {
+          throw new Error("Invalid Agent roster");
+        }
+        if (snapshot.complete === false) incompleteBackends.push(backend.id);
+        agents.push(...snapshot.agents.map(agent => ({ ...agent, backendId: backend.id })));
+      } catch {
+        incompleteBackends.push(backend.id);
+      }
+    }
+    return { agents, incompleteBackends };
   }
 
   /**
@@ -637,6 +764,25 @@ class BackendRegistry extends EventEmitter {
       return { ...unsupportedAdvancedSessionResult("error"), session: null };
     }
   }
+
+  async _chatUiRequest(method, backendId, agentId, sessionKey, spec) {
+    const backend = this._activeGet(backendId), management = require("./chat-ui-management");
+    const checked = management.normalizeSpec(method, spec);
+    const owner = normalizeSessionBoardAgentId(agentId), key = normalizeSessionBoardSessionKey(sessionKey);
+    if (!owner || !key) throw Object.assign(new Error("交互卡片归属无效"), { code: "UI_SCOPE_MISMATCH" });
+    if (!backend || backend.getBackendDescriptor?.().surfaces?.agentHarness !== true) return { supported: false };
+    return management.projectResult(method, await backend[method](owner, key, checked));
+  }
+  async describeChatUi(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("describeChatUi", backendId, agentId, sessionKey, spec); }
+  async openChatUi(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("openChatUi", backendId, agentId, sessionKey, spec); }
+  async readChatUi(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("readChatUi", backendId, agentId, sessionKey, spec); }
+  async saveChatUiState(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("saveChatUiState", backendId, agentId, sessionKey, spec); }
+  async renewChatUi(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("renewChatUi", backendId, agentId, sessionKey, spec); }
+  async closeChatUi(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("closeChatUi", backendId, agentId, sessionKey, spec); }
+  async importChatUi(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("importChatUi", backendId, agentId, sessionKey, spec); }
+  async exportChatUi(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("exportChatUi", backendId, agentId, sessionKey, spec); }
+  async getChatUiOperation(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("getChatUiOperation", backendId, agentId, sessionKey, spec); }
+  async submitChatUiAction(backendId, agentId, sessionKey, spec) { return this._chatUiRequest("submitChatUiAction", backendId, agentId, sessionKey, spec); }
 
   async listSessionArtifacts(backendId, agentId, sessionKey, opts = {}) {
     const backend = this._activeGet(backendId);
@@ -931,6 +1077,16 @@ class BackendRegistry extends EventEmitter {
     }
   }
 
+  async selfImprovement(backendId, agentId, action, input = {}) {
+    const methods = { status: "getSelfImprovement", configure: "configureSelfImprovement", request: "requestSelfImprovement",
+      history: "getLearningHistory", skills: "getLearnedSkills", read: "readLearnedSkill",
+      change: "changeLearnedSkill", proposal: "readLearningProposal", resolve: "resolveLearningProposal" };
+    if (!Object.hasOwn(methods, action)) throw Object.assign(new Error("Invalid learning action"), { code: "LEARNING_INVALID" });
+    const backend = this._activeGet(backendId);
+    if (!backend) throw Object.assign(new Error("Backend unavailable"), { code: "LEARNING_UNAVAILABLE" });
+    return backend[methods[action]](agentId, input);
+  }
+
   /** Revisioned server-side native Skill page; failures must reach the caller. */
   async getSkillsPage(backendId, opts = {}) {
     const backend = this._activeGet(backendId);
@@ -958,7 +1114,7 @@ class BackendRegistry extends EventEmitter {
   async getPluginCapabilitiesPage(backendId, query) {
     const unavailable = (reasonCode) => ({ supported: false, reasonCode,
       catalogRevision: null, items: [], nextCursor: null });
-    const backend = this._activeGet(backendId);
+    const backend = this.getServiceBackend(backendId);
     if (!backend) return unavailable("BACKEND_UNAVAILABLE");
     try {
       return await backend.getPluginCapabilitiesPage(query);
@@ -1457,6 +1613,22 @@ class BackendRegistry extends EventEmitter {
     }
   }
 
+  /** 群 owner 持有全部内部会话归属；按后端区分，避免误伤另一个后端的同名会话。 */
+  async _chatSearchExclusions() {
+    if (!this._inspirationOwner?.listGroupChats) return new Map();
+    const result = await this.listGroupChats({ includeArchived: true });
+    if (!Array.isArray(result?.internalSessions)) throw new Error("Group session scope unavailable");
+    const byBackend = new Map();
+    for (const session of result.internalSessions) {
+      if (typeof session?.backendId !== "string" || typeof session.key !== "string") {
+        throw new Error("Invalid group session scope");
+      }
+      if (!byBackend.has(session.backendId)) byBackend.set(session.backendId, new Set());
+      byBackend.get(session.backendId).add(session.key);
+    }
+    return byBackend;
+  }
+
   /**
    * Cross-session chat search for one agent (chat page "全部会话" scope).
    * Mirrors getSessionArchive's degrade-to-unsupported error handling (铁律4).
@@ -1470,7 +1642,10 @@ class BackendRegistry extends EventEmitter {
     const backend = this._activeGet(backendId);
     if (!backend) return { supported: false, results: [] };
     try {
-      return await backend.searchChat(agentId, query, opts);
+      const excluded = (await this._chatSearchExclusions()).get(backendId) ?? new Set();
+      const result = await backend.searchChat(agentId, query,
+        { ...opts, ...(excluded.size ? { excludeSessionKeys: [...excluded] } : {}) });
+      return { ...result, results: (result.results ?? []).filter((hit) => !excluded.has(hit.key)) };
     } catch (err) {
       console.error(`[registry] ${backendId} searchChat failed:`, err?.message || err);
       return { supported: false, results: [] };
@@ -1502,6 +1677,11 @@ class BackendRegistry extends EventEmitter {
       };
     }
 
+    // 群 owner 是内部会话归属的权威；无法核对时不把隐藏回合原文当成普通搜索结果返回。
+    const exclusionsPromise = this._chatSearchExclusions().catch((error) => {
+      console.error(`[registry] group session scope for chat search unavailable: ${error?.code || "UNAVAILABLE"}`);
+      return null;
+    });
     const targetGroups = await Promise.all(this._activeBackends().map(async (backend) => {
       const seen = new Set();
       let listed = [];
@@ -1529,6 +1709,7 @@ class BackendRegistry extends EventEmitter {
       return targets;
     }));
     const targets = targetGroups.flat();
+    const exclusions = await exclusionsPromise;
 
     let searchedAgents = 0;
     let unsupportedAgents = 0;
@@ -1536,12 +1717,15 @@ class BackendRegistry extends EventEmitter {
     let truncated = false;
     const results = [];
     await Promise.all(targets.map(async ({ backend, agentId, agentName }) => {
+      if (exclusions === null) { failedAgents += 1; return; }
+      const excluded = exclusions.get(backend.id) ?? new Set();
       let search;
       try {
         // Fetch the same bounded candidate pool for every page. Varying this by
         // offset would let newly included candidates reorder earlier pages.
         // Individual backends keep their own stricter protocol caps.
-        search = await backend.searchChat(agentId, q, { limit: 100 });
+        search = await backend.searchChat(agentId, q, { limit: 100,
+          ...(excluded.size ? { excludeSessionKeys: [...excluded] } : {}) });
       } catch (err) {
         failedAgents += 1;
         console.error(`[registry] ${backend.id} searchChat(${agentId}) failed:`, err?.message || err);
@@ -1556,7 +1740,7 @@ class BackendRegistry extends EventEmitter {
       for (const hit of Array.isArray(search.results) ? search.results : []) {
         const key = typeof hit?.key === "string" ? hit.key.trim() : "";
         const snippet = typeof hit?.snippet === "string" ? hit.snippet : "";
-        if (!key || !snippet) continue;
+        if (!key || !snippet || excluded.has(key)) continue;
         results.push({
           backendId: backend.id,
           agentId,
@@ -1641,6 +1825,7 @@ class BackendRegistry extends EventEmitter {
           backend: backend.id,
           supported: !!r?.supported,
           ...(r?.reason ? { reason: r.reason } : {}),
+          ...(r?.partial ? { partial: true } : {}),
           items: Array.isArray(r?.items) ? r.items : [],
         };
       } catch (err) {
@@ -1681,7 +1866,7 @@ class BackendRegistry extends EventEmitter {
       console.error("[registry] dashboard activity aggregation failed:", err?.message || err);
       return null;
     });
-    const [status, running, approvals, artifacts, usage, activity] = await Promise.all([
+    const [status, running, approvals, artifacts, usage, activity, groupArtifacts] = await Promise.all([
       this.getStatus(), // already fail-soft per backend
       section("getRunningWork", (b) => b.getRunningWork()),
       section("getPendingApprovals", (b) => b.getPendingApprovals()),
@@ -1729,6 +1914,7 @@ class BackendRegistry extends EventEmitter {
         }),
       ),
       activityPromise,
+      this._dashboardGroupArtifacts({ sinceMs: since, limit: artifactsLimit, backends }),
     ]);
     let activityRuns = Array.isArray(activity?.runs) ? activity.runs.slice() : null;
     // 只在活动层整体失败/旧桩未提供 runs 时回退，保持 summary 的 fail-soft 契约。
@@ -1761,11 +1947,24 @@ class BackendRegistry extends EventEmitter {
       }
     }
     return {
-      generatedAt: Date.now(), sinceMs: since, status, runs, running, approvals, artifacts, usage,
+      generatedAt: Date.now(), sinceMs: since, status, runs, running, approvals, artifacts, groupArtifacts, usage,
       ...(activityPage ? { activityPage } : {}),
       ...(runStats ? { runStats } : {}),
       ...(activity?.taskStats ? { taskStats: activity.taskStats } : {}),
     };
+  }
+
+  async _dashboardGroupArtifacts({ sinceMs, limit, backends }) {
+    if (!this._inspirationOwner?.getRecentGroupArtifacts) return { supported: false, reason: "unsupported", items: [] };
+    const backendIds = backends.map(backend => backend.id);
+    try {
+      const result = await this._inspirationOwner.getRecentGroupArtifacts({ sinceMs,
+        limit: Math.min(100, Math.max(1, Math.floor(Number(limit) || 20))), backendIds });
+      return { ...result, items: result.items.filter(item => backendIds.includes(item.backendId)) };
+    } catch (error) {
+      console.error("[registry] dashboard group artifacts failed:", error?.code || error?.message || error);
+      return { supported: false, reason: "unavailable", items: [] };
+    }
   }
 
   /**

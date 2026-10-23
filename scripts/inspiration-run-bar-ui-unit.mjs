@@ -31,7 +31,7 @@ const load = file => {
   const compiled = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { esModuleInterop: true, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const localRequire = name => name.endsWith('.css') ? { __esModule: true, default: new Proxy({}, { get: (_target, key) => key }) }
+  const localRequire = name => name.endsWith('/i18n/promptCardResources') ? {} : name.endsWith('.css') ? { __esModule: true, default: new Proxy({}, { get: (_target, key) => key }) }
     : name === '../components/AgentAvatar' ? avatarModule
     : name === 'react-i18next' ? { useTranslation: () => ({ t: (key, options) => options?.defaultValue ?? key }) }
       : name === '../api/client' ? { getInspirationActivity: (ideaId, runId, signal) => new Promise((resolve, reject) => requests.push({ ideaId, runId, signal, resolve, reject })) }
@@ -139,7 +139,9 @@ await act(async () => requests.shift().resolve(searchFailure));
 assert.equal(root().props['data-tone'], 'running', 'an individual failed search keeps the black running bar');
 assert.equal(renderer.root.findAllByProps({ className: 'name' }).length, 0, 'running bars never show the assistant name');
 assert.equal(renderer.root.findAllByProps({ className: 'elapsed' }).length, 1);
-assert.ok(header().props['aria-label'].includes('Source unavailable; preparing an alternative.'), 'the actual tool result remains in the live activity');
+assert.ok(header().props['aria-label'].includes('Weekly report sources'), 'the action keeps its query when a result arrives');
+assert.ok(header().props['aria-label'].includes('turnLab.failed'), 'the individual tool failure remains visible');
+assert.ok(!header().props['aria-label'].includes('Source unavailable; preparing an alternative.'), 'raw tool output belongs in the expanded trajectory');
 
 act(() => renderer.update(view({ ...execution, status: 'failed', finishedAt: Date.now() })));
 await act(async () => requests.shift().resolve(searchFailure));
@@ -205,7 +207,8 @@ for (const details of [
   let full, compact;
   act(() => { full = create(React.createElement(ChatPromptCard, props)); compact = create(React.createElement(ChatPromptCard, { ...props, compactApproval: true })); });
   assert.equal(visibleText(compact.toJSON()), visibleText(full.toJSON()), 'compact approval preserves exactly the Chat content and choices');
-  if (details.kind === 'file_change') assert.ok(visibleText(compact.toJSON()).includes('chat.promptChangeFiles'));
+  if (details.kind === 'file_change') assert.ok(visibleText(compact.toJSON()).includes('/workspace/capture.md'),
+    'a file change shows the file it changes');
   act(() => { full.unmount(); compact.unmount(); });
 }
 act(() => { renderer = create(React.createElement(ChatPromptCard, { entry, compactApproval: true,
@@ -232,7 +235,8 @@ assert.ok(visibleText(content).includes('handbrew') && visibleText(content).incl
 assert.ok(!visibleText(content).includes('chat.promptSubmit'), 'answer options stay in the colored content');
 assert.ok(visibleText(actions).includes('chat.promptSubmit') && visibleText(actions).includes('common.cancel'),
   'submit and cancel sit outside the colored content');
-act(() => content.findAllByType('button').find(button => visibleText(button) === 'handbrew').props.onClick());
+act(() => content.findByProps({ 'aria-label': 'handbrew' }).props.onChange());
+assert.equal(inputResponse, undefined, 'selecting a row keeps the form editable');
 await act(async () => actions.findAllByType('button')[0].props.onClick());
 assert.deepEqual(JSON.parse(JSON.stringify(inputResponse)), { action: 'submit', answers: { coffee: 'handbrew' } });
 act(() => renderer.unmount());

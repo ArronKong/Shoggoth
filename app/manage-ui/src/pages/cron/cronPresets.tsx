@@ -1,3 +1,4 @@
+import { codexScheduleLabel } from "../../lib/codexAutomationSchedule";
 // Shared cron-schedule helpers for the Hermes/OpenClaw cron forms: a best-effort
 // cron→human summary and a deliver-target preset picker.
 import { useTranslation } from "react-i18next";
@@ -72,6 +73,7 @@ export function formatCronTime(value: number | string | null | undefined, locale
 // Keep raw schedule expressions in the editor; the overview describes when it runs.
 export function scheduleText(job: UnifiedCronJob, t: Translate, locale: string): string {
   const schedule = job.schedule;
+  if (schedule.kind === "rrule") return codexScheduleLabel(schedule, t);
   if (schedule.kind === "every") {
     if (!Number.isFinite(schedule.everyMs) || schedule.everyMs <= 0) return "—";
     const interval = intervalLabel(schedule.everyMs / 60000, t);

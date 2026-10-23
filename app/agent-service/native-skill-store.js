@@ -6,6 +6,7 @@ const path = require("node:path");
 const { TextDecoder } = require("node:util");
 const { hasSecret } = require("./memory-engine");
 const { extractSkillZip } = require("./native-skill-archive");
+const { isSkillPackagingArtifact, portableSkillManifest } = require("./skill-package-format");
 const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile } = require("./private-file");
 const {
   ensurePrivateDirectoryTree,
@@ -31,7 +32,6 @@ const MANIFEST_FIELDS = Object.freeze([
   "schemaVersion", "id", "name", "version", "description", "entry",
   "requiredTools", "requiredRuntimeCapabilities", "sourceCompatibility",
 ]);
-const ROOT_ENTRIES = new Set(["SKILL.md", "skill.json", "scripts", "references", "assets"]);
 const TEXT_EXTENSIONS = new Set([
   ".md", ".json", ".txt", ".js", ".cjs", ".mjs", ".ts", ".tsx", ".py", ".sh",
   ".bash", ".zsh", ".yaml", ".yml", ".toml", ".xml", ".html", ".css", ".csv",
@@ -109,8 +109,8 @@ function validateRelativePath(relativePath) {
   }
   const parts = relativePath.split(path.sep);
   if (parts.some((part) => part === "" || part === "." || part === "..")
-    || parts.length > MAX_PACKAGE_DEPTH || !ROOT_ENTRIES.has(parts[0])) {
-    throw skillError("SKILL_PATH_INVALID", "Skill 包路径越界或包含未知根条目");
+    || parts.length > MAX_PACKAGE_DEPTH || relativePath.includes("\\") || /^[A-Za-z]:/u.test(relativePath)) {
+    throw skillError("SKILL_PATH_INVALID", "Skill 包路径越界或嵌套过深");
   }
   return parts;
 }
@@ -121,6 +121,8 @@ function scanPackage(sourcePath, options = {}) {
     throw skillError("SKILL_PACKAGE_NOT_FOUND", "Skill 包目录不存在");
   }
   assertSafeDirectory(rootStat, root, options.enforceOwner !== false);
+  // Existing versioned Shoggoth packages retain their exact file/hash contract.
+  const hasManifest = lstatIfExists(path.join(root, "skill.json")) !== null;
   const entries = [];
   let totalBytes = 0;
   const walk = (directory, relativeDirectory = "") => {
@@ -134,11 +136,9 @@ function scanPackage(sourcePath, options = {}) {
       const target = path.join(directory, name);
       const stat = fs.lstatSync(target);
       if (stat.isSymbolicLink()) throw skillError("UNSAFE_SYMLINK", `Skill 拒绝 symlink: ${target}`);
+      if (!hasManifest && isSkillPackagingArtifact(parts)) continue;
       if (stat.isDirectory()) {
         assertSafeDirectory(stat, target, options.enforceOwner !== false);
-        if (parts.length === 1 && !["scripts", "references", "assets"].includes(parts[0])) {
-          throw skillError("SKILL_PATH_INVALID", "Skill 根目录结构无效");
-        }
         walk(target, relativePath);
         continue;
       }
@@ -152,8 +152,8 @@ function scanPackage(sourcePath, options = {}) {
   };
   walk(root);
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
-  if (!byPath.has("skill.json") || !byPath.has("SKILL.md")) {
-    throw skillError("SKILL_MANIFEST_INVALID", "Skill 包缺少 skill.json 或 SKILL.md");
+  if (!byPath.has("SKILL.md")) {
+    throw skillError("SKILL_MANIFEST_INVALID", "Skill 包缺少根级 SKILL.md");
   }
   for (const entry of entries) {
     const bytes = fs.readFileSync(entry.sourcePath);
@@ -173,14 +173,18 @@ function scanPackage(sourcePath, options = {}) {
       entry.text = text;
     }
   }
-  let parsed;
-  try { parsed = JSON.parse(byPath.get("skill.json").text); } catch {
-    throw skillError("SKILL_MANIFEST_INVALID", "Skill manifest 不是有效 JSON");
-  }
-  const manifest = validateManifest(parsed);
   const files = entries.map(({ path: relativePath, size, sha256: fileHash }) => ({
     path: relativePath, size, sha256: fileHash,
   }));
+  let parsed;
+  if (hasManifest) {
+    try { parsed = JSON.parse(byPath.get("skill.json").text); } catch {
+      throw skillError("SKILL_MANIFEST_INVALID", "Skill manifest 不是有效 JSON");
+    }
+  } else {
+    parsed = portableSkillManifest(byPath.get("SKILL.md").text, sha256(stable(files)));
+  }
+  const manifest = validateManifest(parsed);
   const contentHash = sha256(stable({ manifest, files }));
   return Object.freeze({ root, manifest, files: Object.freeze(files), contentHash });
 }
@@ -262,12 +266,19 @@ function prepareInstallSource(sourcePath, stagingDirectory) {
   if (stat.isSymbolicLink()) throw skillError("UNSAFE_SYMLINK", "Skill 安装源不能是 symlink");
   assertOwned(stat, source, true);
   if (stat.isDirectory()) return { scan: scanPackage(source), extracted: null };
-  if (!stat.isFile() || stat.nlink !== 1 || path.extname(source).toLowerCase() !== ".zip") {
-    throw skillError("SKILL_INSTALL_INVALID", "Skill 安装源必须是目录或 ZIP");
+  const markdown = path.basename(source) === "SKILL.md";
+  if (!stat.isFile() || stat.nlink !== 1 || (!markdown && path.extname(source).toLowerCase() !== ".zip")) {
+    throw skillError("SKILL_INSTALL_INVALID", "Skill 安装源必须是目录、ZIP 或 SKILL.md");
   }
   const extracted = path.join(stagingDirectory, `archive-${crypto.randomBytes(8).toString("hex")}`);
   try {
-    extractSkillZip(source, extracted);
+    if (markdown) {
+      assertSafeFile(stat, source, true);
+      fs.mkdirSync(extracted, { mode: 0o700 });
+      createPrivateFile(path.join(extracted, "SKILL.md"), readStableOwnedFile(source));
+    } else {
+      extractSkillZip(source, extracted);
+    }
     return { scan: scanPackage(extracted), extracted };
   } catch (error) {
     if (lstatIfExists(extracted)) safeRemoveTree(extracted);
@@ -898,21 +909,32 @@ class NativeSkillStore {
       || registryRevision !== this.registry.revision) {
       throw skillError("SKILL_REVISION_CHANGED", "全局 Skill 已变化");
     }
-    if (typeof relativePath !== "string" || relativePath.includes("\\")
-      || !["references", "scripts", "assets"].includes(relativePath.split("/")[0])) {
-      throw skillError("SKILL_PATH_INVALID", "Skill 附属文件路径无效");
-    }
-    const parts = validateRelativePath(relativePath);
-    if (parts.length < 2) throw skillError("SKILL_PATH_INVALID", "Skill 附属文件路径无效");
     const record = this.registry.packages.find(item => item.globalEnabled
       && item.id === skillId && item.version === version && item.contentHash === contentHash);
     if (!record) throw skillError("SKILL_NOT_ENABLED", "全局 Skill 未启用");
+    return this._readVerifiedFile(record, relativePath);
+  }
+  readEnabledFile({ profileId, name, contentHash, relativePath } = {}) {
+    this._assertOpen();
+    const record = this._selected(profileId).find(item => item.name === name);
+    if (!record) throw skillError("SKILL_NOT_ENABLED", "Skill 未为当前 Agent 启用");
+    if (record.contentHash !== contentHash) {
+      throw skillError("SKILL_REVISION_CHANGED", "Skill 内容版本已变化");
+    }
+    return this._readVerifiedFile(record, relativePath);
+  }
+  _readVerifiedFile(record, relativePath) {
+    if (typeof relativePath !== "string" || relativePath.includes("\\")
+      || ["SKILL.md", "skill.json"].includes(relativePath)) {
+      throw skillError("SKILL_PATH_INVALID", "Skill 附属文件路径无效");
+    }
+    const parts = validateRelativePath(relativePath);
     const expected = record.files.find(file => file.path === relativePath);
     if (!expected || expected.size > MAX_SKILL_INSTRUCTION_BYTES) {
       throw skillError("SKILL_PATH_INVALID", "Skill 附属文件不存在或超过读取上限");
     }
     const root = this._packageRoot(record);
-    if (scanPackage(root).contentHash !== contentHash) {
+    if (scanPackage(root).contentHash !== record.contentHash) {
       throw skillError("SKILL_PACKAGE_CHANGED", "全局 Skill 文件已变化");
     }
     const bytes = readStableOwnedFile(path.join(root, ...parts));
@@ -920,7 +942,9 @@ class NativeSkillStore {
     if (sha256(bytes) !== expected.sha256 || hasSecret(content)) {
       throw skillError("SKILL_PACKAGE_CHANGED", "全局 Skill 附属文件校验失败");
     }
-    return { name: record.name, contentHash, relativePath, fileHash: expected.sha256, content };
+    return { name: record.name, version: record.version, source: record.source,
+      contentHash: record.contentHash,
+      relativePath, fileHash: expected.sha256, content };
   }
   _eligibility(record, options) {
     const available = new Set(options.availableTools || []);
@@ -958,6 +982,7 @@ class NativeSkillStore {
     }
     return {
       registryRevision: this.registryRevision,
+      registryVersion: this.registry.revision,
       profileRevision: this._manifest(profileId).revision,
       items,
       ineligible,
@@ -967,7 +992,9 @@ class NativeSkillStore {
     this._assertOpen();
     const catalog = this.catalog(profileId, options);
     const mentions = [...String(query || "").matchAll(/\$([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-])/gu)]
-      .map((match) => match[1]);
+      // Dollar amounts (including ranges and comma-separated prices) are
+      // ordinary prose. Keep digit-prefixed names such as $3d-review valid.
+      .map((match) => match[1]).filter((name) => /[a-z]/u.test(name));
     if (new Set(mentions).size > 4) {
       throw skillError("SKILL_SELECTION_LIMIT", "单次 Run 最多显式选择四个 Skill");
     }

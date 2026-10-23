@@ -34,3 +34,19 @@ for (const [pendingCommandsLocked, mcpCredentialsLocked] of [[false, false], [tr
   assert.equal(html.includes("settings.shoggothLocked"), locked);
 }
 console.log("Service Settings readiness: PASS (4 lock combinations)");
+
+for (const error of [false, true]) {
+  const base = { service: { healthy: false, pendingCommandsLocked: true, mcpCredentialsLocked: true,
+    domainAvailability: { kanban: false, cron: false } },
+    background: { supported: true, installed: true, loaded: true, needsRepair: false } };
+  for (const recoveryCode of ["SERVICE_RECOVERY_REQUIRED", "SERVICE_RECOVERY_REQUIRED_EXTRA", "REQUEST_TIMEOUT", undefined]) {
+    const html = renderToStaticMarkup(React.createElement(ServiceSettings, {
+      status: { ...base, service: { ...base.service, recoveryCode } }, error, busy: null, onRetry() {}, onAction() {},
+    }));
+    const confirmed = recoveryCode === "SERVICE_RECOVERY_REQUIRED";
+    assert.equal(html.includes("settings.serviceRecoveryRequired"), confirmed);
+    assert.equal(html.includes("settings.serviceRecoveryHint"), confirmed);
+    if (confirmed) assert.ok(html.includes('role="alert"'));
+  }
+}
+console.log("Service Settings recovery: PASS (precise code, transient error retention, unknown codes)");

@@ -60,6 +60,18 @@ try {
   ]);
   assert.deepEqual(localPaths('文件 "' + expected + '" 已生成'), [expected]);
   assert.deepEqual(localPaths(expected, true), [expected]);
+  const reminderPath = "/Users/example/Library/Application Support/Shoggoth/shoggoth-core/workspaces/abc/sessions/def/.artifacts/group-acceptance-0.8.211-20261016-L06-recheck/reminder-plan.md";
+  assert.deepEqual(localPaths("文件：" + reminderPath), [reminderPath]);
+  assert.deepEqual(localPaths("文件：" + reminderPath + " 已生成，请复核。"), [reminderPath]);
+  const spacedPath = "/Users/example/My Project Files/Quarterly Reports/最终 报告.md";
+  assert.deepEqual(localPaths("结果：" + spacedPath + " saved successfully"), [spacedPath]);
+  assert.deepEqual(localPaths(reminderPath + " /tmp/next.md"), [reminderPath, "/tmp/next.md"]);
+  assert.deepEqual(localPaths("/tmp/report.md see docs/guide.md"), ["/tmp/report.md"]);
+  assert.deepEqual(localPaths("/tmp/output saved successfully"), ["/tmp/output"]);
+  assert.deepEqual(localPaths("/tmp/output\nnext/report.md"), ["/tmp/output"]);
+  assert.deepEqual(localPaths("/tmp/output\tnext/report.md"), ["/tmp/output"]);
+  assert.deepEqual(localPaths("/tmp/one\u00a0two/report.md"), ["/tmp/one\u00a0two/report.md"]);
+  assert.deepEqual(localPaths("/tmp/output /Users/example/next.md"), ["/tmp/output", "/Users/example/next.md"]);
   assert.deepEqual(localPaths("文件（/Users/example/report(1).pdf），以及 (/tmp/output.txt)."), [
     "/Users/example/report(1).pdf", "/tmp/output.txt",
   ]);
@@ -73,10 +85,25 @@ try {
   }
 
   const renderedPaths = (text) => Array.from(md.render(text, { localFiles: true }).matchAll(/data-local-path="([^"]*)"/g), (match) => decodeURIComponent(match[1]));
+  const renderedLabels = (text) => Array.from(md.render(text, { localFiles: true }).matchAll(/<a\b[^>]*data-local-path="[^"]*"[^>]*>([\s\S]*?)<\/a>/g), (match) => match[1].replace(/<[^>]*>/g, ""));
+  assert.deepEqual(renderedLabels(`文件：${reminderPath}；\`${reminderPath}\`；[reminder-plan.md](<${reminderPath}>)`), [
+    "reminder-plan.md", "reminder-plan.md", "reminder-plan.md",
+  ]);
+  assert.deepEqual(renderedLabels(`[查看文件](<${expected}>) [**结果**](<${expected}>)`), ["index.html", "index.html"]);
+  assert.deepEqual(renderedLabels(`${spacedPath}；\`/Users/example/report.ts:12:3\`；file:///Users/example/My%20Report.pdf`), [
+    "最终 报告.md", "report.ts", "My Report.pdf",
+  ]);
+  assert.deepEqual(renderedLabels("/Users/example/100%ready.txt /Users/example/literal%20space.txt"), ["100%ready.txt", "literal%20space.txt"]);
+  assert.deepEqual(renderedLabels("~/Documents/Project/"), ["Project"]);
+  assert.deepEqual(renderedPaths("/tmp/one/report.md /tmp/two/report.md"), ["/tmp/one/report.md", "/tmp/two/report.md"]);
+  assert.deepEqual(renderedLabels("/tmp/one/report.md /tmp/two/report.md"), ["report.md", "report.md"]);
   assert.deepEqual(renderedPaths("打开 /Users/example/report.pdf，然后查看 `~/Desktop/报告.csv`。"), [
     "/Users/example/report.pdf", "~/Desktop/报告.csv",
   ]);
   assert.deepEqual(renderedPaths("`" + expected + "`"), [expected]);
+  assert.deepEqual(renderedPaths("文件：" + reminderPath + "\nSHA-256：637b3167"), [reminderPath]);
+  assert.deepEqual(renderedPaths("文件：" + spacedPath + " 已保存。"), [spacedPath]);
+  assert.deepEqual(renderedPaths("文件：" + reminderPath + "；[reminder-plan.md](<" + reminderPath + ">)"), [reminderPath, reminderPath]);
   assert.deepEqual(renderedPaths("[文件](</Users/example/My Report.pdf:12>)"), ["/Users/example/My Report.pdf"]);
   assert.deepEqual(renderedPaths("[文件](file:///Users/example/My%20Report.pdf#L12)"), ["/Users/example/My Report.pdf"]);
   assert.deepEqual(renderedPaths("[文件](~/Desktop/report.md)"), ["~/Desktop/report.md"]);
@@ -85,7 +112,10 @@ try {
   assert.deepEqual(renderedPaths("https://example.com/Users/example/a.txt ![/Users/example/a.txt](https://example.com/image.png)"), []);
   assert.deepEqual(renderedPaths("```sh\ncat /Users/example/a.txt\n```"), []);
   assert.deepEqual(renderedPaths('<a data-local-path="%2FUsers%2Fexample%2Fa.txt">injected</a>'), []);
-  assert.match(md.render("`/Users/example/a.txt`", { localFiles: true }), /<a [^>]*><code>\/Users\/example\/a.txt<\/code><\/a>/);
+  assert.match(md.render("`/Users/example/a.txt`", { localFiles: true }), /<a [^>]*><code>a.txt<\/code><\/a>/);
+  assert.match(md.render("/Users/example/A&B.md", { localFiles: true }), />A&amp;B\.md<\/a>/);
+  assert.match(md.render("```text\n" + reminderPath + "\n```", { localFiles: true }), /\/Users\/example\/Library\/Application Support/);
+  assert.match(md.render("[查看文件](<" + expected + ">)"), />查看文件<\/a>/);
   assert.doesNotMatch(md.render("/Users/example/a.txt `~/Desktop/b.txt`"), /data-local-path/);
 
   const currentHref = "http://127.0.0.1:18799/#/chat";
@@ -103,7 +133,8 @@ try {
   assert.match(markdownSource, /data-local-path/);
   assert.match(markdownSource, /internalAppHashFromHref/);
   assert.match(markdownSource, /appRoute[\s\S]{0,240}removeAttribute\("target"\)/);
-  assert.match(chatSource, /a\[data-local-path\]/);
+  const linkHandlerSource = fs.readFileSync(path.join(uiRoot, "src/components/LocalFileLinks.tsx"), "utf8");
+  assert.match(linkHandlerSource, /a\[data-local-path\]/);
   assert.match(chatSource, /chat-artifacts-popover/);
   assert.match(chatSource, /ref=\{sessionArtifactsTriggerRef\}[\s\S]{0,240}chat-artifacts-trigger/);
   assert.match(chatSource, /const sessionArtifactItems = activeSessionArtifactResult\?\.items \?\? \[\]/);

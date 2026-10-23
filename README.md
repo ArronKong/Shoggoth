@@ -93,6 +93,13 @@ Agent SDK is not included in dependencies or packages. Existing account and
 conversation data is preserved. Anthropic models accessed through a separately
 configured backend are unaffected.
 
+
+Desktop group drafts and original send records are stored in the private Electron
+`userData/group-send-journal/journal.json` file. This client journal is separate
+from the Service authority backup; include it in desktop data backups and
+preserve unconfirmed entries during cache cleanup. Restart recovery checks the
+original message ID without automatically resending it.
+
 ## Checks
 
 ```sh

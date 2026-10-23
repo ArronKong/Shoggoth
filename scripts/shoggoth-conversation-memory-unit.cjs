@@ -244,7 +244,8 @@ const { McpProductToolController, validateMcpProductToolArguments } = require(".
     assert.match(compile().dynamicContext, /owner@example/u, "同一 Agent 的直接对话可使用已保存的私人资料");
     for (const extra of [{ source: "cron" }, { source: "inspiration" },
       { source: "chat", idempotencyKey: "shoggoth:chat-send:federation-send-test" },
-      { source: "chat", idempotencyKey: "shoggoth:chat-send:federation-message-test" }]) {
+      { source: "chat", idempotencyKey: "shoggoth:chat-send:federation-message-test" },
+      { source: "chat", idempotencyKey: "shoggoth:chat-send:group-turn-test" }]) {
       const background = f.compiler.compile({ profile: f.profile, run: { ...run, ...extra },
         transcriptSessionId: f.transcriptSessionId, query: "邮箱" });
       assert.doesNotMatch(background.dynamicContext, /owner@example/u, "后台执行及其他 Agent 委派不自动注入私人资料");
@@ -353,6 +354,28 @@ const { McpProductToolController, validateMcpProductToolArguments } = require(".
     assert.match(f.definitions.get("profile-1").documents.USER, /additional records are stored/u);
     assert.equal(f.memoryStore.list("profile-1").filter((item) => item.id.startsWith("bulk-")).length, 40);
     console.log("PASS 视图失败可见、隐私标签不触发确认、容量满时保留原始记录");
-    console.log("8 conversation memory regression groups passed");
+
+    // Another Agent's shared fact passes the MCP recheck and reaches this
+    // Agent's compiled context; its private agent-scope notes do not.
+    f.memoryEngine.close();
+    f.definitions.ensureProfile({ profileId: "profile-peer" });
+    f.memoryEngine.sharedProfiles = () => ["profile-1", "profile-peer"];
+    f.memoryEngine.open(["profile-1", "profile-peer"]);
+    const peerFact = f.memoryEngine.propose({ profileId: "profile-peer", classification: "explicit",
+      scope: "user", type: "semantic", content: "用户偏好深色主题界面", sourceRefs: ["user-edit:peer-fact"] });
+    f.memoryEngine.propose({ profileId: "profile-peer", classification: "explicit",
+      scope: "agent", type: "semantic", content: "同伴自己的深色主题调试笔记", sourceRefs: ["user-edit:peer-note"] });
+    const sharedHits = (await search("深色主题")).items;
+    assert.deepEqual(sharedHits.map((item) => [item.id, item.profileId]), [[peerFact.id, "profile-peer"]]);
+    const sharedGet = await call("memory_get", { id: peerFact.id });
+    assert.equal(sharedGet.item.content, "用户偏好深色主题界面");
+    assert.equal(sharedGet.sharedFrom, "profile-peer");
+    assert.match(compile("深色主题").dynamicContext, /用户偏好深色主题界面/u);
+    assert.doesNotMatch(compile("深色主题").dynamicContext, /调试笔记/u);
+    f.memoryEngine.delete({ profileId: "profile-peer", id: peerFact.id, reason: "forgotten" });
+    assert.equal(f.memoryEngine.isRecallCommitted("profile-1", sharedHits[0]), false);
+    assert.equal((await search("深色主题")).items.length, 0);
+    console.log("PASS 其他 Agent 的共享记忆可经 MCP 检索、读取并进入上下文，遗忘后同时消失");
+    console.log("9 conversation memory regression groups passed");
   } finally { products.close(); f.cleanup(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

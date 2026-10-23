@@ -37,12 +37,14 @@ function hello(version = "2026.8.1") {
       file: { maxBytes: 20 * 1024 * 1024 },
     },
     gatewayPolicy: true,
+    steer: false,
     notReady: true,
     permissions: undefined,
   });
   assert.deepEqual(capabilities.permissions.options.map((option) => option.id), [
     "read-only", "guarded", "workspace", "full",
   ]);
+  assert.equal(capabilities.permissions.defaultMode, "workspace");
 }
 
 {
@@ -57,6 +59,7 @@ function hello(version = "2026.8.1") {
     },
     maxPayloadBytes: 1_000_000,
     gatewayPolicy: true,
+    steer: false,
     permissions: undefined,
   });
   const serialized = JSON.stringify(backend.getGatewayContract());
@@ -120,3 +123,5 @@ testUsageFallsBackWhenLocalTranscriptScanIsEmpty()
     console.error(error);
     process.exitCode = 1;
   });
+
+{ const backend = new OpenClawBackend(); backend._acceptGatewayHello(hello("2026.9.6")); assert.equal(backend.getChatCapabilities("main").steer, true); }

@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const net = require("node:net");
+const { performance } = require("node:perf_hooks");
 const { randomUUID } = require("node:crypto");
 const {
   assertPrivateDirectory,
@@ -12,6 +13,7 @@ const {
 } = require("./security");
 
 const DEFAULT_TIMEOUT_MS = 2000;
+const PROACTIVE_VERIFY_TIMEOUT_MS = 120_000;
 const CLIENT_MAX_RESPONSE_BYTES = 64 * 1024;
 
 function readClientToken(paths) {
@@ -64,13 +66,20 @@ function requestService(paths, request, options = {}) {
   const authRead = ["auth.read", "runtime.account.auth.read", "profile.models.list"].includes(request.method);
   // Explicit legacy migration may wait for one macOS Keychain authorization.
   const migration = request.method === "service.mcpAuth.migrateKeychain";
-  const timeoutMs = options.timeoutMs ?? (migration ? 65_000 : authRead ? 20_000 : DEFAULT_TIMEOUT_MS);
+  // Restricted runtime verification starts a native host and inspects several
+  // metadata endpoints before replying; it does not submit a model turn.
+  const runtimeVerification = request.method === "proactive.runtime.verify";
+  const permissionRequest = request.method === "computer.permissions.request";
+  const timeoutMs = options.timeoutMs ?? (migration ? 65_000 : runtimeVerification ? PROACTIVE_VERIFY_TIMEOUT_MS
+    : permissionRequest ? 30_000 : authRead ? 20_000 : DEFAULT_TIMEOUT_MS);
   const payload = {
-    id: request.id || randomUUID(),
     ...request,
+    id: request.id || randomUUID(),
   };
 
   return new Promise((resolve, reject) => {
+    const started = performance.now();
+    let phase = "connect";
     const socket = net.createConnection(paths.socketPath);
     let settled = false;
     let buffered = Buffer.alloc(0);
@@ -85,7 +94,10 @@ function requestService(paths, request, options = {}) {
     };
     const onAbort = () => finish(serviceError("REQUEST_ABORTED", "Service 请求已取消"));
     const timer = setTimeout(() => {
-      finish(serviceError("REQUEST_TIMEOUT", `Service 请求在 ${timeoutMs}ms 内未响应`));
+      const error = serviceError("REQUEST_TIMEOUT", `Service 请求在 ${timeoutMs}ms 内未响应`);
+      error.serviceRequestDiagnostic = Object.freeze({ phase, timeoutMs,
+        elapsedMs: Math.max(0, Math.round(performance.now() - started)), responseBytes: buffered.length });
+      finish(error);
     }, timeoutMs);
     options.signal?.addEventListener("abort", onAbort, { once: true });
     if (options.signal?.aborted) { onAbort(); return; }
@@ -96,6 +108,7 @@ function requestService(paths, request, options = {}) {
         finish(serviceError("UNSAFE_SOCKET_CHANGED", "Service socket 在连接期间被替换"));
         return;
       }
+      phase = "response";
       socket.write(`${JSON.stringify(payload)}\n`);
     });
     socket.on("data", (chunk) => {
@@ -128,12 +141,27 @@ function requestService(paths, request, options = {}) {
         finish(serviceError("MALFORMED_RESPONSE", "Service 返回了无效 JSON"));
         return;
       }
-      if (response.id !== payload.id) {
-        finish(serviceError("RESPONSE_ID_MISMATCH", "Service 响应 id 不匹配"));
+      if (response?.id !== payload.id) {
+        // The server cannot echo an ID when it has not parsed a complete frame.
+        // Keep this narrow transport-error exception separate from RPC replies:
+        // a mismatched success/error with any actual ID must still be rejected.
+        const frameErrors = {
+          FRAME_TIMEOUT: "Service 请求帧接收超时，未获得请求结果",
+          FRAME_TOO_LARGE: "Service 请求帧超过上限",
+          INCOMPLETE_FRAME: "Service 请求帧未完整接收",
+          MALFORMED_JSON: "Service 未能解析请求帧",
+          MULTIPLE_REQUESTS: "Service 拒绝单连接中的多个请求帧",
+        };
+        const code = response?.id === null && response?.ok === false
+          && typeof response.error?.code === "string" && Object.hasOwn(frameErrors, response.error.code) ? response.error.code : null;
+        finish(serviceError(code || "RESPONSE_ID_MISMATCH", code ? frameErrors[code] : "Service 响应 id 不匹配"));
         return;
       }
       if (!response.ok) {
-        finish(serviceError(response.error?.code || "SERVICE_ERROR", response.error?.message || "Service 请求失败"));
+        const error = serviceError(response.error?.code || "SERVICE_ERROR", response.error?.message || "Service 请求失败");
+        if (response.error?.systemIssue === "STORAGE_FULL") error.systemIssue = "STORAGE_FULL";
+        if (payload.method === "chat.send" && response.error?.admissionAccepted === false) error.admissionAccepted = false;
+        finish(error);
         return;
       }
       finish(null, response.result);
@@ -144,4 +172,4 @@ function requestService(paths, request, options = {}) {
   });
 }
 
-module.exports = { DEFAULT_TIMEOUT_MS, readClientToken, requestService };
+module.exports = { DEFAULT_TIMEOUT_MS, PROACTIVE_VERIFY_TIMEOUT_MS, readClientToken, requestService };

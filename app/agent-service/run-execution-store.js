@@ -54,11 +54,23 @@ class RunExecutionStore {
     }
     const c = value.contract;
     const command = value.command;
+    if (c?.contextRequest?.restorePolicy && (!require("./context-transfer").validRestorePolicy(c.contextRequest.restorePolicy)
+      || !Number.isSafeInteger(c.contextRequest.nativeSeed?.usedTokens) || c.contextRequest.nativeSeed.usedTokens < 0
+      || !Number.isSafeInteger(c.contextRequest.nativeSeed?.throughSeq) || c.contextRequest.nativeSeed.throughSeq < 0
+      || c.contextRequest.nativeSeed.operationId !== command?.operationId)) throw invalid();
     if (!c || c.runId !== run.id || c.profileId !== run.profileId || c.source !== run.source
       || c.sourceId !== run.sourceId || c.workspace !== run.workspace
       || typeof c.runtime !== "string" || typeof c.runtimeProfileId !== "string"
       || typeof c.runtimeAccountId !== "string" || !validPolicy(c.permissionPolicy)
       || !validPolicy(c.runtimeHostPermissionPolicy) || typeof c.developerInstructions !== "string"
+      || (c.cronAuthorization != null && (run.source !== "cron"
+        || !require("./cron-authorization-store").validCronAuthorizationScope(c.cronAuthorization)
+        || c.cronAuthorization.jobId !== run.sourceId || c.cronAuthorization.profileId !== run.profileId))
+      || (c.workspaceExecutionVersion !== undefined && (c.workspaceExecutionVersion !== 1
+        || !require("./workspace-execution-tools").workspaceAutoExecution(c)))
+      || (c.turnDeveloperInstructions != null && (typeof c.turnDeveloperInstructions !== "string"
+        || !c.turnDeveloperInstructions.isWellFormed() || c.turnDeveloperInstructions.includes("\0")
+        || Buffer.byteLength(c.turnDeveloperInstructions) > 1024 * 1024))
       || !command || command.runId !== run.id || typeof command.operationId !== "string"
       || typeof command.prompt !== "string"
       || (run.source === "chat" ? command.kind !== "chat" : command.kind !== "domain")) throw invalid();

@@ -120,8 +120,13 @@ function minimalAuthorityPathDisposition(relativePath) {
   const [root] = parts;
   if (root === "agents" && parts.length === 3
     && /^native-memory-semantic\.sqlite(?:-(?:wal|shm|journal))?$/u.test(parts[2])) return "exclude";
+  if (root === "chat-ui.writer.lock" || root === "self-improvement.writer.lock") return "exclude";
+  if (root === "agents" && parts[2] === "chat-ui" && ["previews", "leases", "ports"].some(part => parts.includes(part))) return "exclude";
+  if (root === "hooks" && parts[1]?.startsWith("writer.lock")) return "exclude";
   if ((root === "plugins" || root === "skills") && parts[1] === "staging") return "exclude";
-  if (root === "runtime-integration") return "exclude";
+  // Integration Homes and verified binaries are derived. Browser profiles contain
+  // machine-local login state, caches and Chromium process locks, not product authority.
+  if (root === "runtime-integration" || root === "runtime-bin" || root === "browser-use") return "exclude";
   if (["legacy-runtime-homes", "native-runtime-imports"].includes(root)
     || RETIRED_RUNTIME_HOME_ROOTS.has(root)) return "exclude";
   if (root === "runtime-accounts") {
@@ -388,7 +393,8 @@ function assertServiceStopped(paths, activeServiceLock = null) {
   if ((activeServiceLock === null && lock) || lstatIfExists(paths.socketPath)) {
     throw backupError("BACKUP_SERVICE_ACTIVE", "Agent Service 运行时不能建立一致备份");
   }
-  if (fs.readdirSync(paths.stateDir).some(name => name.endsWith(".writer.lock"))) {
+  if (lstatIfExists(path.join(paths.stateDir, "hooks", "writer.lock"))
+    || fs.readdirSync(paths.stateDir).some(name => name.endsWith(".writer.lock"))) {
     throw backupError("BACKUP_SERVICE_ACTIVE", "持久化 writer 未关闭，不能建立一致备份");
   }
 }
@@ -954,11 +960,49 @@ function invalidateRestoredNativeMemoryAnchors(staging, trustedRoot) {
   return removed;
 }
 
+function invalidateRestoredChatUiAuthority(staging, trustedRoot) {
+  const restoredPaths = require("./paths").resolveServicePaths({ stateRoot: staging, trustedRoot });
+  const store = new (require("./chat-ui-store").ChatUiStore)({ paths: restoredPaths });
+  store.open();
+  try {
+    const owners = new Map();
+    for (const publication of store.publicationsForRecovery()) {
+      const owner = { profileId: publication.profileId, transcriptSessionId: publication.transcriptSessionId,
+        sessionKey: publication.sessionKey };
+      owners.set(JSON.stringify(owner), owner);
+    }
+    const operations = store.operationsForRecovery();
+    for (const { owner } of operations) owners.set(JSON.stringify(owner), owner);
+    // A snapshot can predate an already executed UI action. Keep immutable
+    // content, confirmed state and receipt identities, but revoke every restored
+    // conversation's execution epoch before Coordinator/Inbox recovery can run.
+    for (const owner of owners.values()) store.invalidate(owner, "UI_SOURCE_EXPIRED");
+    return { invalidatedSessions: owners.size, preservedOperations: operations.length };
+  } finally { store.close(); }
+}
+
 function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
   const verified = verifyAuthorityBackup({ paths, backupId });
   assertServiceStopped(paths);
   const hasPluginCatalog = verified.manifest.entries.some(entry => entry.type === "file"
     && entry.path === "plugins/catalog.sqlite");
+  const hookPath = paths.hookDatabasePath || path.join(paths.stateDir, "hooks", "hooks.sqlite");
+  const hookBarrier = require("./hook-store").readHookReplayBarrier(paths);
+  const hookSource = lstatIfExists(hookPath);
+  const learningPath = path.join(paths.stateDir, "self-improvement.sqlite");
+  const learningSource = lstatIfExists(learningPath);
+  const learningBarrier = require("./self-improvement/restore").readLearningRestoreBarrier(paths);
+  const assertLearningSourceUnchanged = () => {
+    const current = lstatIfExists(learningPath);
+    if ((learningSource === null) !== (current === null) || learningSource && !sameFileVersion(learningSource, current))
+      throw backupError("BACKUP_SOURCE_CHANGED", "自动学习恢复期间源账本发生变化");
+  };
+  const assertHookSourceUnchanged = () => {
+    const current = lstatIfExists(hookPath);
+    if ((hookSource === null) !== (current === null) || hookSource && !sameFileVersion(hookSource, current)) {
+      throw backupError("BACKUP_SOURCE_CHANGED", "Hooks 恢复期间源执行账本发生变化");
+    }
+  };
   let pluginBarrier = null;
   let sourceCatalogStat = null;
   // An old snapshot can predate a completed external write or a revocation.
@@ -1021,8 +1065,38 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
     // seen newer content. Missing anchors force a fresh native session.
     const nativeMemoryAnchorsInvalidated = invalidateRestoredNativeMemoryAnchors(staging,
       paths.trustedRoot);
+    let hookRestore = null;
     let pluginRestore = null;
     let nativeMcpRestore = null;
+    let chatUiRestore = null;
+    let learningRestore = null;
+    const removedLearningDirectories = new Set();
+    if (learningBarrier || verified.manifest.entries.some(entry => entry.type === "file" && entry.path === "self-improvement.sqlite")) {
+      assertLearningSourceUnchanged();
+      const restoredPaths = require("./paths").resolveServicePaths({ stateRoot: staging, trustedRoot: paths.trustedRoot });
+      const store = new (require("./self-improvement/store").LearningStore)({ paths: restoredPaths }).open();
+      try { learningRestore = store.restoreBarrier(learningBarrier); } finally { store.close(); }
+      for (const [target] of directoryModes) {
+        const relative = path.relative(staging, target).split(path.sep).join("/");
+        if (/^agents\/[^/]+\/learned-skills\/skill-[a-f0-9]{40}\/versions\/[a-f0-9]{64}(?:\/references)?$/u.test(relative)
+          && !lstatIfExists(target)) removedLearningDirectories.add(target);
+      }
+      fsyncFile(path.join(staging, "self-improvement.sqlite"));
+    }
+    if (verified.manifest.entries.some(entry => entry.type === "file"
+      && /^agents\/[^/]+\/chat-ui\/[^/]+\/journal\.jsonl$/u.test(entry.path))) {
+      chatUiRestore = invalidateRestoredChatUiAuthority(staging, paths.trustedRoot);
+    }
+    if (hookBarrier.length || verified.manifest.entries.some(entry => entry.type === "file" && entry.path === "hooks/hooks.sqlite")) {
+      assertHookSourceUnchanged();
+      const restoredPaths = require("./paths").resolveServicePaths({ stateRoot: staging, trustedRoot: paths.trustedRoot });
+      const store = new (require("./hook-store").HookStore)({ paths: restoredPaths }).open();
+      try {
+        store.restoreReplayBarrier(hookBarrier); store.rotateAuthority();
+        hookRestore = { definitionsDisabled: true, grantsRevoked: true, noReplayReceipts: hookBarrier.length };
+      } finally { store.close(); }
+      fsyncFile(restoredPaths.hookDatabasePath);
+    }
     if (hasPluginCatalog) {
       assertPluginSourceUnchanged();
       const { resolveServicePaths } = require("./paths");
@@ -1044,9 +1118,11 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       fsyncFile(restoredPaths.nativeMcpRegistryPath);
     }
     fsyncDirectoryTree(staging);
-    for (const [target, mode] of directoryModes.reverse()) fs.chmodSync(target, mode);
+    for (const [target, mode] of directoryModes.reverse()) if (!removedLearningDirectories.has(target)) fs.chmodSync(target, mode);
     fsyncDirectory(staging);
     assertPluginSourceUnchanged();
+    assertHookSourceUnchanged();
+    assertLearningSourceUnchanged();
     assertServiceStopped(paths);
     recallRestore.verifySourceUnchanged();
     fs.renameSync(staging, destination);
@@ -1058,8 +1134,11 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       recallRestore: Object.freeze({ overlaidProfiles: recallRestore.restored,
         digest: crypto.createHash("sha256").update(JSON.stringify(recallRestore.restored)).digest("hex") }),
       nativeMemoryAnchorsInvalidated,
+      ...(hookRestore ? { hookRestore } : {}),
+      ...(learningRestore ? { learningRestore } : {}),
       ...(pluginRestore ? { pluginRestore } : {}),
       ...(nativeMcpRestore ? { nativeMcpRestore } : {}),
+      ...(chatUiRestore ? { chatUiRestore } : {}),
     });
   } catch (error) {
     cleanupStaging(staging);

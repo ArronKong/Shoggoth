@@ -6,8 +6,8 @@
 // 原样喂进 reduceTimeline 即可,本模块无需改动。
 //
 // 与 ChatPage 既有语义对齐的点(改这里前先看那边):
-// - 工具事件合并规则照抄 ChatPage.tsx:2406-2429(name 可覆盖 / args 只写一次 /
-//   durationS>0 才采 / isError 含 "status":"error" 正则兜底)。
+// - 工具事件合并规则与 ChatPage 共用(name 可覆盖 / args 支持后补和结果合并 /
+//   durationS>0 才采 / 失败标记优先，未提供时仅检查结果根节点状态)。
 // - thinking/delta 在线上是「全量累积」文本(见根 CLAUDE.md 雷区);本模块靠
 //   已封存前缀切片,把累积流还原成真实交错的分段。
 // - 输出截断与 ChatPage formatToolOutput 同为 4000 字。
@@ -17,10 +17,16 @@ export function validPluginAppCallId(value: unknown): string | undefined {
   return typeof value === "string" && /^runtime-[a-f0-9]{64}$/.test(value) ? value : undefined;
 }
 
+export type TurnPrompt = {
+  kind: string; requestId?: string; question?: string; command?: string; description?: string; choices?: string[];
+  title?: string; message?: string;
+};
+
 export type TurnEvent =
   | { kind: "user"; text: string } // 合成:开启本回合的用户消息
   | { kind: "delta"; text: string } // 全量累积的回答文本
-  | { kind: "interim"; text: string } // 把当前回答段封存为独立分段
+  | { kind: "interim"; text: string; activity?: boolean; activityId?: string } // 封存当前回答段
+  | { kind: "progress"; text: string; activityId: string } // 按来源 ID 更新公开进度
   | { kind: "thinking"; text: string } // 全量累积的思考文本
   | {
       kind: "tool";
@@ -37,10 +43,10 @@ export type TurnEvent =
       diffText?: string; // Hermes inline_diff(unified diff 文本)
     }
   | { kind: "plan"; entries: { content: string; status?: string }[] }
-  | { kind: "status"; status: { kind: string; text?: string } } // compacting | compacted
+  | { kind: "status"; status: { kind: string; text?: string } } // compacting | compacted | recalling | recalled
   | {
       kind: "prompt";
-      prompt: { kind: string; requestId?: string; question?: string; command?: string; description?: string; choices?: string[] };
+      prompt: TurnPrompt;
     }
   | { kind: "promptExpire"; requestId?: string }
   | { kind: "promptAnswer"; requestId?: string; choice?: string } // 合成:用户已应答
@@ -56,9 +62,10 @@ export type TurnEvent =
 
 export type StepKind = "user" | "thinking" | "tool" | "text" | "plan" | "prompt" | "status" | "error" | "final";
 export type StepStatus = "running" | "ok" | "error" | "pending" | "aborted";
-export type ToolCategory = "gather" | "read" | "execute" | "message" | "workboard" | "other";
+export type ToolCategory = "gather" | "read" | "execute" | "message" | "workboard" | "cron" | "inspiration" | "other";
 
 export interface TurnStep {
+  subagent?: import("./chatSubagentActivity").SubagentProgress;
   id: string;
   toolCallId?: string; // exact host call identity; never infer from tool name/position
   kind: StepKind;
@@ -80,10 +87,11 @@ export interface TurnStep {
   updateCount?: number;
   // 文本类步(user / thinking 段 / text 段 / final / error)
   text?: string;
+  activity?: boolean; // explicit public progress, shown inside the activity timeline
   // plan / prompt / status / final 元数据
   planEntries?: { content: string; status?: string }[];
   planVersion?: number;
-  prompt?: { kind: string; requestId?: string; question?: string; command?: string; description?: string; choices?: string[] };
+  prompt?: TurnPrompt;
   promptOutcome?: "answered" | "expired";
   promptChoice?: string;
   statusKind?: string;
@@ -120,6 +128,8 @@ const TOOL_ALIASES: Record<string, string> = {
   websearch: "web_search",
   "web search": "web_search",
   "web search:": "web_search",
+  "x search": "x_search",
+  "x search:": "x_search",
   search_web: "web_search",
   run_terminal_command: "exec",
   run_command: "exec",
@@ -130,6 +140,12 @@ const TOOL_ALIASES: Record<string, string> = {
   mcptoolcall: "mcp",
   dynamictoolcall: "dynamic_tool",
   collabagenttoolcall: "collab",
+  // Antigravity (ACP) and OpenCode names for the same capabilities.
+  read_url_content: "web_fetch",
+  webfetch: "web_fetch",
+  view_file: "read_file",
+  list_directory: "ls",
+  find_file: "find",
 };
 
 export function canonicalToolName(name: string): string {
@@ -142,6 +158,9 @@ const CAT_EXACT: Record<string, ToolCategory> = {
   web_fetch: "gather",
   web_extract: "gather",
   x_search: "gather",
+  x_semantic_search: "gather",
+  x_keyword_search: "gather",
+  x_thread_fetch: "gather",
   read: "read",
   read_file: "read",
   image_view: "read",
@@ -162,6 +181,11 @@ const CAT_EXACT: Record<string, ToolCategory> = {
   image_generate: "execute",
   message: "message",
   sessions_send: "message",
+  cron: "cron",
+  cronjob: "cron",
+  cronjob_manage: "cron",
+  automations: "cron",
+  inspiration: "inspiration",
 };
 const CAT_PREFIX: Array<[string, ToolCategory]> = [
   ["browser", "gather"],
@@ -173,10 +197,13 @@ const CAT_PREFIX: Array<[string, ToolCategory]> = [
   // Figma 稿把 OpenClaw workboard 与 Hermes kanban 归成同一类看板图标(node 7167:630)。
   ["workboard", "workboard"],
   ["kanban", "workboard"],
+  ["cron_", "cron"],
+  ["inspiration_", "inspiration"],
 ];
 
 export function categorizeTool(name: string): ToolCategory {
-  const n = canonicalToolName(name);
+  // Reuse the action-title namespaces without changing the original tool identity.
+  const n = canonicalToolName(productActivityTool(name) ?? name);
   const leaf = canonicalToolName(n.includes("/") ? n.split("/").at(-1)! : n);
   const exact = CAT_EXACT[n] ?? CAT_EXACT[leaf];
   if (exact) return exact;
@@ -237,9 +264,9 @@ export function capText(v: unknown): { text: string; truncated: boolean } {
   return { text: s, truncated: false };
 }
 
-// 与 ChatPage formatToolTitle 同一套「人话标题」规则(web_search/web_fetch 特判 +
-// 主参数扫描),让演示页与聊天页说同一种语言。
-const PRIMARY_ARG_KEYS = ["command", "path", "file_path", "filePath", "url", "query", "pattern", "name", "message", "title", "summary"];
+// Language-neutral argument excerpt retained for diagnostic callers.
+// Compact activity surfaces use toolActivityTitle instead of raw arguments.
+const PRIMARY_ARG_KEYS = ["command", "path", "file_path", "filePath", "url", "query", "pattern", "name", "message", "title", "summary", "server"];
 
 function compactPath(value: string): string {
   const managed = /\/shoggoth-core\/workspaces\/[^/]+\/(.+)$/u.exec(value);
@@ -269,17 +296,64 @@ function primaryArgText(key: string, value: string): string {
   return one;
 }
 
+// Display aliases are deliberately separate from capability/approval matching.
+const ACTIVITY_ALIASES: Record<string, string> = {
+  exec_command: "exec", run_shell_command: "exec", execute_bash: "exec", shell: "exec", execute: "exec", fetch: "web_fetch",
+  "terminal command": "exec",
+  readfile: "read_file", view_image: "image_view", notebookedit: "edit", write_to_file: "write_file", replace_file_content: "edit",
+  multi_replace_file_content: "edit", edit_file: "edit", multiedit: "edit",
+  grep_search: "grep", glob: "find", find_by_name: "find", list_dir: "ls",
+  browse_page: "web_fetch", todo_list: "update_plan", process_manage: "process", cronjob_manage: "cronjob",
+  automations: "cron",
+  spawnagent: "spawn_agent", sendinput: "send_input", resumeagent: "resume_agent", closeagent: "close_agent",
+};
+
+function activityToolName(name?: string, args?: unknown): string {
+  const rawName = (name ?? "").trim();
+  const tool = canonicalToolName(rawName);
+  // Some ACP execute records use the command as their title, or the generic
+  // "tool" when that title exceeds the adapter's limit. Use the already-public
+  // command field only for those shapes; other tool identities stay unchanged.
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const a = args as Record<string, unknown>;
+    const command = [a.command, a.cmd, a.CommandLine].find((value): value is string => typeof value === "string" && !!value.trim());
+    if (command && !tool.startsWith("mcp__") && (tool === "tool"
+      || rawName.replace(/\s+/gu, " ") === command.replace(/\s+/gu, " ").trim())) return "exec";
+  }
+  return ACTIVITY_ALIASES[tool] ?? tool;
+}
+
+// Execution tools may supply an action label alongside the shell command.
+// Explicit activityTitle is presentation metadata. Other tools can use description
+// for document/task content, so only command tools promote that older field.
+// Keep the original args for expanded details.
+export function toolActionTitle(name?: string, args?: unknown): string {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const activity = (args as Record<string, unknown>).activityTitle;
+    if (typeof activity === "string" && activity.trim() && activity.length <= 120
+      && !/[\u0000-\u001f\u007f]/u.test(activity)) return activity.trim();
+  }
+  const tool = activityToolName(name, args);
+  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+  const a = args as Record<string, unknown>;
+  for (const key of tool === "exec" || tool === "terminal" ? ["title", "description"] : []) {
+    const value = a[key];
+    if (typeof value === "string" && value.trim()) return value.replace(/\s+/g, " ").trim();
+  }
+  const native = a.nativeActivityTitle;
+  if (typeof native === "string" && native.trim() && native.length <= 120
+    && !/[\u0000-\u001f\u007f]/u.test(native)) return native.trim();
+  return "";
+}
+
 export function summarizeArgs(name?: string, args?: unknown): string {
   const a = args && typeof args === "object" ? (args as Record<string, any>) : null;
   if (!a) return "";
-  if (canonicalToolName(name ?? "") === "web_search" && typeof a.query === "string") {
-    const n = a.count ?? a.top_n ?? a.topN;
-    return n != null ? `for "${a.query}" (top ${n})` : `for "${a.query}"`;
-  }
-  if (canonicalToolName(name ?? "") === "web_fetch" && typeof a.url === "string") {
-    const max = a.max_chars ?? a.maxChars ?? a.max_length ?? a.maxLength;
-    return max != null ? `from ${a.url} (max ${max} chars)` : `from ${a.url}`;
-  }
+  const actionTitle = toolActionTitle(name, args);
+  if (actionTitle) return actionTitle.length > 90 ? actionTitle.slice(0, 90) + "…" : actionTitle;
+  // Language-neutral: the step label already says what kind of action it is.
+  if (canonicalToolName(name ?? "") === "web_search" && typeof a.query === "string") return `"${a.query}"`;
+  if (canonicalToolName(name ?? "") === "web_fetch" && typeof a.url === "string") return a.url;
   for (const k of PRIMARY_ARG_KEYS) {
     const v = a[k];
     if (typeof v === "string" && v.trim()) {
@@ -288,6 +362,198 @@ export function summarizeArgs(name?: string, args?: unknown): string {
     }
   }
   return "";
+}
+
+type ActivityTranslate = (key: string, values?: Record<string, unknown>) => string;
+
+// Product tools have the same identity across runtimes, with these three MCP
+// namespaces or a direct name. This is display matching only: do not use it for
+// permission, dispatch, or result ownership checks.
+function productActivityTool(name: string | undefined): string | undefined {
+  const raw = name?.trim().toLowerCase() || "";
+  const bare = raw.replace(/^(?:mcp__shoggoth__|shoggoth__|shoggoth\/)/u, "");
+  return /^[a-z][a-z0-9_]*$/u.test(bare) ? bare : undefined;
+}
+
+/** Runtime arguments can arrive after the start event. Merge already-projected
+ * object fields so a completed/result-only part retains earlier descriptions. */
+export function mergeToolArgs(current: unknown, incoming: unknown): unknown {
+  if (incoming === undefined) return current;
+  const record = (value: unknown): Record<string, unknown> | undefined => {
+    if (typeof value === "string" && value.trimStart().startsWith("{")) {
+      try { value = JSON.parse(value); } catch { return undefined; }
+    }
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown> : undefined;
+  };
+  const prior = record(current);
+  const next = record(incoming);
+  return prior && next ? { ...prior, ...next } : incoming;
+}
+
+/** A tool can successfully return a list of failed jobs. Never scan nested
+ * output text for statuses, and preserve an explicit false from the runtime. */
+export function toolResultFailed(result: unknown, isError?: boolean): boolean {
+  if (typeof isError === "boolean") return isError;
+  let value = result;
+  if (typeof value === "string" && value.trimStart().startsWith("{")) {
+    try { value = JSON.parse(value); } catch { return false; }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const data = value as Record<string, unknown>;
+  return data.isError === true || data.is_error === true || data.status === "error"
+    || data.status === "failed" || data.success === false;
+}
+
+const ACTIVITY_ACTIONS: Record<string, string> = {
+  read: "readFile", read_file: "readFile", image_view: "viewImage",
+  write: "writeFile", write_file: "writeFile", edit: "editFile", patch: "editFile",
+  apply_patch: "editFile", file_change: "editFile", ls: "listDirectory",
+  find: "findFiles", grep: "searchFiles", search_files: "searchFiles",
+  web_search: "webSearch", x_search: "xSearch", x_semantic_search: "xSemanticSearch",
+  x_keyword_search: "xKeywordSearch", x_thread_fetch: "xThread", web_fetch: "openPage", web_extract: "openPage",
+  search: "searchContent",
+  browser_navigate: "navigatePage",
+  process: "process", update_plan: "plan", todo: "plan", todowrite: "plan",
+  message: "message", sessions_send: "message", delegate_task: "delegate", task: "delegate",
+};
+
+/** A compact activity headline, never a raw command, result, or JSON payload.
+ * Labels describe the requested action; status remains a separate, factual field.
+ * All backends use this after their normal argument projection/redaction. */
+export function toolActivityTitle(name: string | undefined, args: unknown, t: ActivityTranslate, wrapperDepth = 0): string {
+  const short = (value: string, max = 90) => {
+    const text = value.replace(/\s+/gu, " ").trim();
+    return text.length > max ? `${text.slice(0, max)}…` : text;
+  };
+  let input = args;
+  if (typeof input === "string" && input.trimStart().startsWith("{")) {
+    try { input = JSON.parse(input); } catch { /* A raw command is also valid. */ }
+  }
+  const a = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const first = (...keys: string[]) => keys.map(key => a[key]).find((value): value is string => typeof value === "string" && Boolean(value.trim()))?.trim();
+  const tool = activityToolName(name, a);
+  const explicit = toolActionTitle(name, a);
+  if (explicit) return short(explicit);
+  const action = (key: string, values?: Record<string, unknown>) => t(`turnLab.activity.${key}`, values);
+  const withTarget = (key: string, target?: string) => short(target ? `${action(key)} · ${target}` : action(key));
+  const translated = (key: string) => {
+    const text = t(key, { defaultValue: "" });
+    return text && text !== key ? text : "";
+  };
+  // A single UI row still represents the outer call. Unwrap only known runtime
+  // wrappers for its headline, without changing identity, pairing, or statuses.
+  if (wrapperDepth < 2) {
+    const rawName = name?.trim().toLowerCase();
+    if (["call_mcp_tool", "use_tool", "callmcptool", "usetool", "tool_call"].includes(rawName || "")) {
+      const referenced = first("toolName", "tool_name", "tool", "name");
+      const server = first("server", "serverName", "server_name")?.toLowerCase();
+      const scoped = referenced && /^(?:mcp__shoggoth__|shoggoth__|shoggoth\/)/iu.test(referenced);
+      if (referenced && (scoped || server === "shoggoth" || rawName === "tool_call")) {
+        const nested = [a.arguments, a.args, a.parameters, a.input]
+          .find(value => value && typeof value === "object" && !Array.isArray(value));
+        return toolActivityTitle(referenced, nested || a, t, wrapperDepth + 1);
+      }
+      if (rawName === "tool_call" && Array.isArray(a.calls) && a.calls.length) {
+        const titles = a.calls.slice(0, 2).map(call => {
+          const value = call && typeof call === "object" ? call as Record<string, unknown> : {};
+          const callName = typeof value.name === "string" ? value.name : undefined;
+          return toolActivityTitle(callName, value.arguments || value.args || value.parameters, t, wrapperDepth + 1);
+        });
+        return short(`${action("batchTools", { count: a.calls.length })} · ${titles.join(" / ")}`);
+      }
+    }
+  }
+  const product = productActivityTool(name);
+  let productTitle = product && translated(`turnLab.productTools.${product}`);
+  if (productTitle) {
+    if (product === "app_state_get") {
+      const section = first("section");
+      if (section && /^[a-z_]+$/u.test(section)) {
+        productTitle = translated(`turnLab.appStateSections.${section}`) || productTitle;
+      }
+    } else if (product === "app_manage") {
+      const operation = first("operation");
+      if (operation && /^(?:cron|kanban)_[a-z_]+$/u.test(operation)) {
+        productTitle = translated(`turnLab.productTools.${operation}`) || productTitle;
+      }
+    } else if (product === "cron_set_enabled" && typeof a.enabled === "boolean") {
+      productTitle = action(a.enabled ? "enableCron" : "disableCron");
+    }
+    return short(productTitle);
+  }
+
+  const operation = first("action", "operation");
+  if (operation && /^[a-z_.-]+$/u.test(operation)
+    && ["process", "cron", "cronjob", "browser", "gateway", "message", "memory", "subagents", "terminal"].includes(tool)) {
+    const operationTitle = translated(`turnLab.operations.${tool}.${operation.replace(/[.-]/gu, "_")}`);
+    if (operationTitle) return short(operationTitle);
+    const familyTitle = translated(`turnLab.builtinTools.${tool}`);
+    if (familyTitle) return short(familyTitle);
+  }
+
+  if (tool === "exec" || tool === "terminal") {
+    const command = unwrapShellCommand(first("command", "cmd", "CommandLine") || (typeof input === "string" ? input : "")).trim();
+    const program = /^(?:[\w./~-]*\/)?([\w.+-]+)(?=\s|$)/u.exec(command)?.[1];
+    if (program && /^python(?:\d+(?:\.\d+)*)?$/u.test(program)) return action("runScript", { language: "Python" });
+    if (program === "node" || program === "nodejs") return action("runScript", { language: "Node.js" });
+    // Only classify a single, simple command. Pipelines, substitutions and shell
+    // scripts can do more than their first command suggests, so keep those generic.
+    if (command && !/[\r\n;&|><`$()]/u.test(command)) {
+      const words = command.split(/\s+/u);
+      const operation = words[1];
+      if (program === "git" && ["status", "diff", "log"].includes(operation)) return action(`git_${operation}`);
+      if (program === "pwd") return action("workingDirectory");
+      if (program === "ls") return action("listDirectory");
+      if (program && ["cat", "head", "tail"].includes(program)) return action("readFile");
+      if (program && ["rg", "grep"].includes(program)) return action("searchFiles");
+      if (program === "find") return action("findFiles");
+      if (program && ["npm", "pnpm", "yarn", "bun"].includes(program)) {
+        const script = operation === "run" ? words[2] : operation;
+        if (script === "test") return action("test");
+        if (script === "build") return action("build");
+      }
+    }
+    return action("runCommand");
+  }
+
+  const path = first("path", "file_path", "filePath", "file", "notebook_path", "TargetFile", "target_file", "AbsolutePath", "DirectoryPath", "SearchDirectory", "SearchPath", "directory", "output_path", "output_file");
+  const file = path?.replace(/\\/gu, "/").replace(/\/$/u, "").split("/").at(-1) || path;
+  const query = first("query", "pattern", "Query", "Pattern")
+    || (Array.isArray(a.queries) ? a.queries.filter((value): value is string => typeof value === "string").join(" · ") : undefined);
+  const xOperation = tool === "x_search" && ["x_semantic_search", "x_keyword_search", "x_thread_fetch"].includes(operation || "")
+    ? operation! : tool;
+  const key = ACTIVITY_ACTIONS[xOperation] || ACTIVITY_ACTIONS[product || ""];
+  if (key === "xThread") return withTarget(key, first("post_id"));
+  if (["xSearch", "xSemanticSearch", "xKeywordSearch"].includes(key)) return withTarget(key, query);
+  if (key === "openPage" || key === "navigatePage") {
+    const url = first("url", "Url", "URL") || (Array.isArray(a.urls) && typeof a.urls[0] === "string" ? a.urls[0] : undefined);
+    // Host only: query strings and credentials are unnecessary in a step title.
+    const host = url && /^https?:\/\/(?:[^@/?#]*@)?([^/?#]+)/iu.exec(url)?.[1];
+    return withTarget(key, host || undefined);
+  }
+  if (key === "webSearch" || key === "searchFiles" || key === "findFiles") return withTarget(key, query || file);
+  if (["readFile", "writeFile", "editFile", "listDirectory", "viewImage"].includes(key)) {
+    const count = typeof a.changeCount === "number" ? a.changeCount : Array.isArray(a.changes) ? a.changes.length : 0;
+    if (key === "editFile" && count > 1) return action("editFiles", { count });
+    const changed = Array.isArray(a.changes) ? a.changes[0] as { path?: unknown } | undefined : undefined;
+    return withTarget(key, file || (typeof changed?.path === "string" ? changed.path.split("/").at(-1) : undefined));
+  }
+  if (key) return action(key);
+  const builtinTitle = translated(`turnLab.builtinTools.${tool}`);
+  if (builtinTitle) return short(builtinTitle);
+  if (tool.startsWith("browser")) return action("browser");
+  if (tool.startsWith("memory_") || tool.startsWith("wiki_")) return action("memory");
+  if (tool.startsWith("mcp__") || tool.includes("/")) return withTarget("externalTool", first("title", "name"));
+  // ACP can use a prose title as its tool name. Keep that supplied label when
+  // it contains ordinary words, rather than replacing it with an identifier.
+  const supplied = name?.trim();
+  if (supplied && /^[\p{L}\p{N} ,，。.!?'’()-]+$/u.test(supplied)
+    && (/\p{Script=Han}/u.test(supplied) || /^[A-Z][a-z]+ /u.test(supplied))) return short(supplied);
+  // Known product tools retain their translated family name. Unknown identifiers
+  // stay in the tooltip/details instead of becoming the primary activity text.
+  const label = t(toolLabelKey(name || "tool"), { defaultValue: "" });
+  return short(label && (label !== tool || tool === "kanban" || tool === "workboard") ? label : action("tool"));
 }
 
 // 与 ChatPage 工具卡耗时 chip 同规则:≥10s 取整,否则一位小数。
@@ -315,9 +581,13 @@ function sliceAccumulated(full: string, sealed: string): { segment: string; seal
   return { segment: full, sealed: "" };
 }
 
+// Status kinds that are real process steps: a running kind and the kind that completes it.
+const STATUS_STEP_DONE: Record<string, string> = { compacting: "compacted", recalling: "recalled" };
+const STATUS_STEP_RUNNING: Record<string, string> = { compacted: "compacting", recalled: "recalling" };
+
 export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: number): TurnTimelineState {
-  // 运行生命周期不属于过程步骤，也不能打断思考/回答分段或提前结束上下文压缩。
-  if (ev.kind === "status" && ev.status.kind !== "compacting" && ev.status.kind !== "compacted") return state;
+  // 运行生命周期不属于过程步骤，也不能打断思考/回答分段或提前结束上下文压缩/记忆回忆。
+  if (ev.kind === "status" && !STATUS_STEP_DONE[ev.status.kind] && !STATUS_STEP_RUNNING[ev.status.kind]) return state;
 
   let { steps, status, thinkingSealed, answerSealed, nextId } = state;
   const { deriveDurations } = state;
@@ -367,11 +637,28 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
       }
       break;
     }
+    case "progress": {
+      if (!ev.text.trim()) break;
+      const id = `progress:${ev.activityId}`;
+      const i = steps.findIndex(s => s.id === id);
+      if (i >= 0) steps = replaceStep(steps, i, { text: ev.text });
+      else steps = [...steps, { id, kind: "text", activity: true, status: "ok", startTs: ts, endTs: ts, text: ev.text }];
+      break;
+    }
     case "interim": {
       // interim 携带的就是本段权威文本;上游随后把累积清零重来。
+      const progressId = ev.activity && ev.activityId ? `progress:${ev.activityId}` : undefined;
+      const existing = progressId ? steps.findIndex(s => s.id === progressId) : -1;
+      if (existing >= 0) {
+        steps = replaceStep(steps, existing, { text: ev.text });
+        answerSealed = "";
+        break;
+      }
       const i = lastIndexWhere(steps, (s) => s.kind === "final" && s.status === "running");
-      if (i >= 0) steps = replaceStep(steps, i, { kind: "text", status: "ok", endTs: ts, text: ev.text });
-      else if (ev.text) steps = [...steps, { id: takeId(), kind: "text", status: "ok", startTs: ts, endTs: ts, text: ev.text }];
+      if (i >= 0) steps = replaceStep(steps, i, { kind: "text", status: "ok", endTs: ts, text: ev.text,
+        ...(ev.activity ? { activity: true, ...(ev.activityId ? { id: `progress:${ev.activityId}` } : {}) } : {}) });
+      else if (ev.text) steps = [...steps, { id: ev.activityId ? `progress:${ev.activityId}` : takeId(), kind: "text", status: "ok", startTs: ts, endTs: ts, text: ev.text,
+        ...(ev.activity ? { activity: true } : {}) }];
       answerSealed = "";
       break;
     }
@@ -396,13 +683,14 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
         i = steps.length - 1;
       }
       const cur = steps[i];
+      if (cur.endTs !== undefined && ev.phase !== "result") return state;
       const patch: Partial<TurnStep> = {};
       if (ev.name && ev.name.trim() && ev.name !== cur.toolName) {
         patch.toolName = ev.name;
         patch.canonicalName = canonicalToolName(ev.name);
         patch.category = categorizeTool(ev.name);
       }
-      if (cur.args === undefined && ev.args !== undefined) patch.args = ev.args;
+      if (ev.args !== undefined) patch.args = mergeToolArgs(cur.args, ev.args);
       if (cur.diff === undefined && ev.diff) patch.diff = ev.diff;
       if (cur.diffText === undefined && typeof ev.diffText === "string" && ev.diffText) patch.diffText = ev.diffText;
       if (typeof ev.durationS === "number" && ev.durationS > 0) patch.durationS = ev.durationS;
@@ -422,8 +710,9 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
           patch.outputTruncated = capped.truncated;
         }
         patch.endTs = ts;
-        const failed = ev.isError === true || /"status"\s*:\s*"error"/.test((patch.output ?? cur.output) || "");
-        patch.isError = failed || cur.isError;
+        const failed = typeof ev.isError === "boolean" ? ev.isError
+          : cur.isError === true || toolResultFailed(ev.result ?? cur.output);
+        patch.isError = failed;
         patch.status = patch.isError ? "error" : "ok";
         const backendS = typeof ev.durationS === "number" && ev.durationS > 0 ? ev.durationS : cur.durationS;
         if (backendS) patch.durationS = backendS;
@@ -441,13 +730,21 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
       break;
     }
     case "status": {
-      const open = lastIndexWhere(steps, (s) => s.kind === "status" && s.status === "running");
-      if (ev.status.kind === "compacting" && open < 0) {
-        steps = [...steps, { id: takeId(), kind: "status", status: "running", startTs: ts, statusKind: ev.status.kind, text: ev.status.text }];
+      const kind = ev.status.kind;
+      const runningKind = STATUS_STEP_DONE[kind] ? kind : STATUS_STEP_RUNNING[kind];
+      const open = lastIndexWhere(steps, (s) => s.kind === "status" && s.status === "running" && s.statusKind === runningKind);
+      if (STATUS_STEP_DONE[kind]) {
+        if (open >= 0) steps = replaceStep(steps, open, { text: ev.status.text ?? steps[open].text });
+        else steps = [...steps, { id: takeId(), kind: "status", status: "running", startTs: ts, statusKind: kind, text: ev.status.text }];
       } else if (open >= 0) {
-        steps = replaceStep(steps, open, { status: "ok", endTs: ts, statusKind: ev.status.kind, text: ev.status.text ?? steps[open].text });
+        steps = replaceStep(steps, open, { status: "ok", endTs: ts, statusKind: kind, text: ev.status.text ?? steps[open].text });
       } else {
-        steps = [...steps, { id: takeId(), kind: "status", status: "ok", startTs: ts, endTs: ts, statusKind: ev.status.kind, text: ev.status.text }];
+        const last = steps.length - 1;
+        if (steps[last]?.kind === "status" && steps[last].statusKind === kind && steps[last].status === "ok") {
+          steps = replaceStep(steps, last, { text: ev.status.text ?? steps[last].text });
+        } else {
+          steps = [...steps, { id: takeId(), kind: "status", status: "ok", startTs: ts, endTs: ts, statusKind: ev.status.kind, text: ev.status.text }];
+        }
       }
       break;
     }
@@ -479,6 +776,7 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
     }
     case "aborted": {
       steps = steps.map((s) => {
+        if (s.kind === "status" && s.status === "running") return { ...s, status: "aborted" as const, endTs: ts };
         if (s.status === "running") return { ...s, status: s.kind === "tool" ? ("aborted" as const) : ("ok" as const), endTs: s.endTs ?? ts };
         if (s.status === "pending") return { ...s, status: "aborted" as const, endTs: s.endTs ?? ts };
         return s;
@@ -503,6 +801,9 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
     case "final": {
       // 终结:所有仍在跑的步收敛(没等到结果的工具标「中断」,挂起的确认同样中断)。
       steps = steps.map((s) => {
+        if (s.kind === "status" && s.status === "running") {
+          return { ...s, status: ev.kind === "error" || ev.errored ? ("error" as const) : ("aborted" as const), endTs: ts };
+        }
         if (s.status === "running") return { ...s, status: s.kind === "tool" ? ("aborted" as const) : ("ok" as const), endTs: s.endTs ?? ts };
         if (s.status === "pending") return { ...s, status: "aborted" as const, endTs: s.endTs ?? ts };
         return s;
@@ -538,6 +839,8 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
 // ChatPage 内部类型)。
 export interface TimelinePartLike {
   type: string; // thinking | toolCall | toolResult | plan
+  activity?: boolean;
+  segmentId?: string;
   text?: string;
   toolName?: string;
   toolArgs?: unknown;
@@ -564,7 +867,10 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
   let plan: TurnStep | null = null;
   for (const p of seq) {
     ts += 1;
-    if (p.type === "thinking") {
+    if (p.type === "text" && p.activity === true) {
+      if (p.text?.trim()) steps.push({ id: p.segmentId ? `progress:${p.segmentId}` : `h${n++}`, kind: "text", activity: true,
+        status: "ok", startTs: ts, endTs: ts, text: p.text });
+    } else if (p.type === "thinking") {
       if (p.text?.trim()) steps.push({ id: `h${n++}`, kind: "thinking", status: "ok", startTs: ts, endTs: ts, text: p.text });
     } else if (p.type === "toolCall") {
       const name = p.toolName?.trim() || "tool";
@@ -596,12 +902,12 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
         st.canonicalName = canonicalToolName(p.toolName);
         st.category = categorizeTool(p.toolName);
       }
-      if (st.args === undefined && p.toolArgs !== undefined) st.args = p.toolArgs;
+      if (p.toolArgs !== undefined) st.args = mergeToolArgs(st.args, p.toolArgs);
       const capped = capText(p.text ?? "");
       st.output = capped.text;
       st.pluginAppCallId = validPluginAppCallId(p.pluginAppCallId);
       st.outputTruncated = capped.truncated;
-      st.isError = p.isError === true || /"status"\s*:\s*"error"/.test(capped.text);
+      st.isError = toolResultFailed(p.text, p.isError);
       st.status = st.isError ? "error" : "ok";
       st.endTs = ts;
       if (typeof p.durationS === "number" && p.durationS > 0) st.durationS = p.durationS;
@@ -624,22 +930,90 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
   return steps;
 }
 
-// ---- 派生关系:出错后的「同工具重试 / 换工具」 ------------------------------
+// Only already-public fields of known tools can identify an activity's target.
+// This is a display comparison, never an execution or authorization identity.
+function activityTarget(name: string | undefined, args: unknown, depth = 0): { tool: string; key: string; label: string } | undefined {
+  let input = args;
+  if (typeof input === "string" && input.trimStart().startsWith("{")) {
+    try { input = JSON.parse(input); } catch { return; }
+  }
+  const a = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const first = (...keys: string[]) => keys.map(key => a[key]).find((value): value is string => typeof value === "string" && !!value.trim())?.trim();
+  const rawName = name?.trim().toLowerCase() || "";
+  if (depth < 2 && ["call_mcp_tool", "use_tool", "callmcptool", "usetool", "tool_call"].includes(rawName)) {
+    const referenced = first("toolName", "tool_name", "tool", "name");
+    if (referenced && (/^(?:mcp__shoggoth__|shoggoth__|shoggoth\/)/iu.test(referenced)
+      || first("server", "serverName", "server_name")?.toLowerCase() === "shoggoth" || rawName === "tool_call")) {
+      return activityTarget(referenced, a.arguments || a.args || a.parameters || a.input, depth + 1);
+    }
+    return;
+  }
+  const tool = activityToolName(productActivityTool(name) || name, a);
+  let kind = "", value = "", label = "";
+  if (["web_search", "x_search", "x_semantic_search", "x_keyword_search"].includes(tool)) {
+    kind = "query"; value = first("query", "Query") || ""; label = value;
+  } else if (["web_fetch", "browser_navigate", "read_url"].includes(tool)) {
+    const url = first("url", "Url", "URL");
+    if (!url) return;
+    try {
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol)) return;
+      kind = "url"; value = `${parsed.origin}${parsed.pathname}${parsed.search}`;
+      label = `${parsed.host}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+    } catch { return; }
+  } else if (["exec", "terminal"].includes(tool)) {
+    kind = "command"; value = unwrapShellCommand(first("command", "cmd", "CommandLine") || (typeof input === "string" ? input : ""));
+  } else if (["read", "read_file", "write", "write_file", "edit", "ls", "list_directory", "image_view"].includes(tool)) {
+    kind = "path"; value = first("path", "file_path", "filePath", "file", "TargetFile", "AbsolutePath", "DirectoryPath") || "";
+  }
+  return value ? { tool, key: `${kind}:${value}`, label } : undefined;
+}
+
+/** Preserve model wording; qualify repeated web headlines with their real target. */
+export function toolActivityTitles(steps: TurnStep[], t: ActivityTranslate): Map<string, string> {
+  const titles = new Map<string, string>();
+  const targets = new Map<string, Set<string>>();
+  const rows = steps.filter(step => step.kind === "tool").map(step => {
+    const title = toolActivityTitle(step.toolName, step.args, t), target = activityTarget(step.toolName, step.args);
+    titles.set(step.id, title);
+    if (target?.label) {
+      if (!targets.has(title)) targets.set(title, new Set());
+      targets.get(title)!.add(target.key);
+    }
+    return { step, title, target };
+  });
+  for (const { step, title, target } of rows) {
+    if (!target?.label || (targets.get(title)?.size ?? 0) < 2) continue;
+    const base = title.length > 38 ? `${title.slice(0, 37)}…` : title;
+    const label = target.label.replace(/\s+/gu, " ");
+    const compact = label.length > 48 ? `${label.slice(0, 20)}…${label.slice(-27)}` : label;
+    titles.set(step.id, `${base} · ${compact}`);
+  }
+  return titles;
+}
+
+// ---- 派生关系:已失败目标的后续重试 / 换工具 -------------------------------
 
 export interface StepRelation {
   type: "retry" | "switch";
   fromStepId: string;
 }
 
-// 不落库、每次重算:并行场景里 error 可能晚于下一个工具的 start 到达,存量标记会算错。
+// A matching tool name alone cannot establish retry intent. The same target
+// must have failed before this call started; overlapping batches are unrelated.
 export function deriveRelations(steps: TurnStep[]): Map<string, StepRelation> {
   const rel = new Map<string, StepRelation>();
-  const tools = steps.filter((s) => s.kind === "tool");
-  for (let i = 1; i < tools.length; i++) {
-    const prev = tools[i - 1];
-    const cur = tools[i];
-    if (!prev.isError) continue;
-    rel.set(cur.id, { type: prev.canonicalName === cur.canonicalName ? "retry" : "switch", fromStepId: prev.id });
+  const latest = new Map<string, { step: TurnStep; tool: string }>();
+  for (const cur of steps) {
+    if (cur.kind !== "tool") continue;
+    const target = activityTarget(cur.toolName, cur.args);
+    if (!target) continue;
+    const previous = latest.get(target.key), prev = previous?.step;
+    if (previous && prev?.isError && prev.endTs !== undefined && prev.endTs <= cur.startTs) {
+      rel.set(cur.id, { type: previous.tool === target.tool ? "retry" : "switch", fromStepId: prev.id });
+    }
+    // A newer success or overlapping call supersedes an older failure.
+    latest.set(target.key, { step: cur, tool: target.tool });
   }
   return rel;
 }

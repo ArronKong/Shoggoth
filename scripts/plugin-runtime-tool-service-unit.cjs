@@ -89,6 +89,13 @@ async function main() {
     } };
     const authority = () => ({ profileId: "agent-a", callId: crypto.randomUUID() });
     const serverId = pluginServerId(binding.bindingId);
+    assert.deepEqual(runtime.skillToolProjection(authority(), scope).map(item => item.name), ["read"]);
+    assert.deepEqual(runtime.skillToolProjectionForRun(runs.get("run-b")), [],
+      "a Profile-specific binding cannot satisfy another Agent's Skill");
+    runs.get("run-a").status = "completed";
+    assert.deepEqual(runtime.skillToolProjectionForRun(runs.get("run-a")), [],
+      "a completed Run cannot keep a model-readable Skill dependency projection");
+    runs.get("run-a").status = "running";
     const args = { serverId, toolName: "read", arguments: { value: "hello" } };
     assert(validateMcpProductToolArguments("mcp_server_call", args));
     assert(!validateMcpProductToolArguments("mcp_server_remove", { id: serverId, expectedRevision: 1 }));
@@ -110,10 +117,14 @@ async function main() {
     store.setGrant({ grantId: "runtime-grant-write", bindingId: binding.bindingId,
       toolIdentity: write.toolIdentity, contractDigest: write.contractDigest,
       effect: "allow", approvalMode: "always", expectedRevision: 0 });
+    assert.deepEqual(runtime.skillToolProjection(authority(), scope).map(item => item.name), ["read"],
+      "a post-admission Grant cannot make an existing Run's Skill eligible");
     await assert.rejects(runtime.callTool({ ...args, toolName: "write" }, authority(), scope),
       error => error.code === "CAPABILITY_FORBIDDEN");
     assert.throws(() => runtime.captureRun(runs.get("run-a")), error => error.code === "TOOL_CONTRACT_CHANGED");
     runtime.captureRun(newRun("run-new"));
+    assert.deepEqual(runtime.skillToolProjectionForRun(runs.get("run-new"))
+      .map(item => item.name).sort(), ["read", "write"]);
     assert.equal((await runtime.callTool({ ...args, toolName: "write" }, authority(), { ...scope, runId: "run-new" }))
       .result.structuredContent.name, "write");
 
@@ -138,6 +149,8 @@ async function main() {
     beforeSend = async () => { policy.setProfileOverride("agent-a", "mcp_server_call", "deny"); };
     await assert.rejects(runtime.callTool(args, authority(), scope), error => error.code === "MCP_TOOL_FORBIDDEN");
     assert.equal(sends, 2, "current Product policy intersects frozen admission permission");
+    assert.deepEqual(runtime.skillToolProjection(authority(), scope), [],
+      "a revoked Product permission cannot keep a dependent Skill eligible");
     policy.setProfileOverride("agent-a", "mcp_server_call", "allow");
     beforeSend = null;
 
@@ -183,6 +196,8 @@ async function main() {
     const denied = store.setGrant({ grantId: existingGrant.grantId, bindingId: binding.bindingId,
       toolIdentity: read.toolIdentity, contractDigest: read.contractDigest,
       effect: "deny", approvalMode: "always", expectedRevision: existingGrant.revision });
+    assert.deepEqual(runtime.skillToolProjection(authority(), scope), [],
+      "revocation must remove Skill dependencies from the current Run");
     store.setGrant({ grantId: existingGrant.grantId, bindingId: binding.bindingId,
       toolIdentity: read.toolIdentity, contractDigest: read.contractDigest,
       effect: "allow", approvalMode: "always", expectedRevision: denied.revision });
@@ -196,6 +211,7 @@ async function main() {
     await assert.rejects(runtime.callTool(args, authority(), freshScope), error => error.code === "TOOL_CONTRACT_CHANGED");
     assert.equal(sends, count, "reconnect cannot replace the frozen tool contract");
     runtime.releaseRun("run-a");
+    assert.deepEqual(runtime.skillToolProjectionForRun(runs.get("run-a")), []);
     await assert.rejects(runtime.callTool(args, authority(), scope), error => error.code === "CAPABILITY_FORBIDDEN");
     assert(releases > 0);
     runtime.clear();

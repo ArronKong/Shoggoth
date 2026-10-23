@@ -25,7 +25,19 @@
 // mid-stream and restarted repeatedly.
 
 let installed = false;
-let sendPromptHandler: ((text: string) => void) | null = null;
+let sendPromptHandler: ((text: string, scope: string) => void) | null = null;
+let currentScope: string | null = null;
+
+export function setHtmlArtifactScope(scope: string | null): void {
+  currentScope = scope;
+  document.querySelectorAll<HTMLElement>(".chat-html-artifact[data-mounted]").forEach(el => {
+    if (el.dataset.htmlScope === scope) return;
+    el.querySelector("iframe.chat-html-frame")?.remove();
+    el.querySelector(".chat-html-bar")?.remove();
+    el.removeAttribute("data-mounted"); el.setAttribute("data-view", "source");
+  });
+  if (scope) sweep();
+}
 // data-html values already mounted once. When the chat list re-renders (optimistic
 // send → assistant pending → error swap), React rebuilds a bubble's DOM into a fresh
 // source-view placeholder; without this, each rebuild flashes source→preview again.
@@ -108,8 +120,9 @@ function buildSrcdoc(rawHtml: string, theme: "light" | "dark"): string {
 }
 
 function mount(el: HTMLElement) {
+  if (!currentScope || el.dataset.htmlScope !== currentScope) return;
   el.setAttribute("data-mounted", "1");
-  mountedKeys.add(el.getAttribute("data-html") || "");
+  mountedKeys.add(`${currentScope}:${el.getAttribute("data-html") || ""}`);
   const raw = decodeURIComponent(el.getAttribute("data-html") || "");
 
   const bar = document.createElement("div");
@@ -149,13 +162,13 @@ function sweep() {
 // ```html isn't mounted mid-stream.
 function remountKnown() {
   document.querySelectorAll<HTMLElement>(".chat-html-artifact:not([data-mounted])").forEach((el) => {
-    if (mountedKeys.has(el.getAttribute("data-html") || "")) mount(el);
+    if (currentScope && mountedKeys.has(`${currentScope}:${el.getAttribute("data-html") || ""}`)) mount(el);
   });
 }
 
 // Registered by ChatPage so window.sendPrompt(text) inside a widget forwards to
 // the chat composer (sends as if the user typed it, matching the real host).
-export function setSendPromptHandler(fn: (text: string) => void): void {
+export function setSendPromptHandler(fn: ((text: string, scope: string) => void) | null): void {
   sendPromptHandler = fn;
 }
 
@@ -186,9 +199,10 @@ export function installHtmlArtifacts(): void {
         }
       });
     } else if (d.__chatHtmlArtifact === "sendPrompt") {
-      const fromOurFrame = Array.from(frames).some((f) => f.contentWindow === e.source);
+      const fromOurFrame = Array.from(frames).find((f) => f.contentWindow === e.source
+        && currentScope !== null && f.closest<HTMLElement>(".chat-html-artifact")?.dataset.htmlScope === currentScope);
       const text = String(d.text ?? "").slice(0, SENDPROMPT_MAX).trim();
-      if (fromOurFrame && text && sendPromptHandler) sendPromptHandler(text);
+      if (fromOurFrame && currentScope && text && sendPromptHandler) sendPromptHandler(text, currentScope);
     }
   });
 

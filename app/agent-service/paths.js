@@ -50,6 +50,7 @@ function resolveServicePaths(options = {}) {
   const computerDir = path.join(stateDir, "computer");
   return Object.freeze({
     productSchemaVersion: 15,
+    homeDir,
     stateDir,
     userDataRoot,
     trustedRoot,
@@ -83,6 +84,9 @@ function resolveServicePaths(options = {}) {
     skillRegistryPath: path.join(skillsDir, "registry.json"),
     nativeMcpDir,
     nativeMcpRegistryPath: path.join(nativeMcpDir, "registry.json"),
+    hooksDir: path.join(stateDir, "hooks"),
+    hookDatabasePath: path.join(stateDir, "hooks", "hooks.sqlite"),
+    hookEphemeralDir: path.join(cacheDir, "hooks"),
     computerDir,
     computerArtifactsDir: path.join(computerDir, "artifacts"),
     computerEphemeralDir: path.join(cacheDir, "computer-sessions"),

@@ -34,6 +34,7 @@ export interface SlashCommand {
   aliases?: string[];
   source?: string;
   execution?: "runtime" | "client" | "cli";
+  allowWhileRunning?: boolean;
 }
 
 // Curated to the commands that actually EXECUTE in webchat (OpenClaw's own Control UI
@@ -101,6 +102,10 @@ const NATIVE_LOCAL_COMMANDS = new Set([
 // /new 是故障恢复入口：即使旧轮次尚未收尾，也必须能切到一条不依赖旧 runtime 的空会话。
 export function canRunSlashDuringTurn(commandName: string): boolean {
   return RUN_CONTROL_COMMANDS.has(commandName.replace(/^shoggoth:/, ""));
+}
+
+export function canRunServerSlashDuringTurn(command: SlashCommand): boolean {
+  return command.execution === "runtime" && command.allowWhileRunning === true;
 }
 
 // Hermes 的大部分命令由官方 slash.exec 执行；共享控制命令在客户端走通用 RPC。

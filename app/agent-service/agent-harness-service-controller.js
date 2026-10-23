@@ -12,6 +12,15 @@ const GENERATED = new Set(["TOOLS", "MEMORY"]);
 const IMPORT_TTL_MS = 15 * 60 * 1000;
 const PAGE_BYTES = 44 * 1024;
 const REVIEWED_MEMORY_ID = /^reviewed-mc-[a-f0-9]{64}$/u;
+const PUBLIC_MEMORY_FIELDS = ["id", "profileId", "scope", "type", "content", "sourceRefs", "confidence", "sensitivity", "status", "validFrom", "validUntil", "supersedes", "createdAt", "updatedAt"];
+function publicMemoryResult(value) {
+  if (Array.isArray(value)) return value.map(publicMemoryResult);
+  if (!value || typeof value !== "object") return value;
+  if (value.profileId && value.id && typeof value.content === "string" && value.validFrom !== undefined) {
+    return Object.fromEntries(PUBLIC_MEMORY_FIELDS.map(key => [key, value[key]]));
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, publicMemoryResult(child)]));
+}
 
 function harnessError(code, message) { return serviceError(code, message); }
 function reviewItemVisible(engine, profileId, item) {
@@ -95,6 +104,8 @@ class AgentHarnessServiceController {
     this.memoryEngine = options.memoryEngine;
     this.memoryProvenanceService = options.memoryProvenanceService || null;
     this.memoryCandidateService = options.memoryCandidateService || null;
+    this.memoryImportStatus = typeof options.memoryImportStatus === "function" ? options.memoryImportStatus : null;
+    this.memoryImportReport = typeof options.memoryImportReport === "function" ? options.memoryImportReport : null;
     if (this.memoryCandidateService && ["list", "accept", "acceptMany", "reject"].some(
       (method) => typeof this.memoryCandidateService[method] !== "function")) {
       throw new TypeError("MemoryCandidateService dependency is invalid");
@@ -107,6 +118,10 @@ class AgentHarnessServiceController {
     if (this.skillStore && ["list", "setProfileSkill", "setGlobalSkill", "installFromDirectory", "uninstall", "preview", "usage"]
       .some((method) => typeof this.skillStore[method] !== "function")) {
       throw new TypeError("NativeSkillStore dependency is invalid");
+    }
+    this.learnedSkillStore = options.learnedSkillStore || null;
+    if (this.learnedSkillStore && typeof this.learnedSkillStore.management !== "function") {
+      throw new TypeError("LearnedSkillStore dependency is invalid");
     }
     this.nativeMcpStore = options.nativeMcpStore || null;
     this.nativeMcpClientManager = options.nativeMcpClientManager || null;
@@ -164,7 +179,20 @@ class AgentHarnessServiceController {
     };
   }
   handle(method, params) {
+    const result = this._handle(method, params);
+    if (this.memoryEngine.owner !== "shoggoth-memory-core" || !method.startsWith("harness.memory.")) return result;
+    return result?.then ? result.then(publicMemoryResult) : publicMemoryResult(result);
+  }
+  _handle(method, params) {
     this._profile(params.profileId);
+    if (this.memoryEngine.owner === "shoggoth-memory-core") {
+      if (method === "harness.definition.read" && ["MEMORY", "USER"].includes(params.kind) && params.revision === null) {
+        return this.memoryEngine.readCanonical(params.profileId, params.kind);
+      }
+      if (["harness.memory.create", "harness.memory.update", "harness.memory.delete", "harness.memory.undo", "harness.memory.forgetSession"].includes(method)) {
+        return this._writeFileMemory(method, params);
+      }
+    }
     if (method.startsWith("harness.skills.") && !this.skillStore) {
       throw harnessError("HARNESS_SERVICE_CLOSED", "Skill management is unavailable");
     }
@@ -328,8 +356,15 @@ class AgentHarnessServiceController {
         try { return this.memoryEngine.recallPolicy.isMemoryVisible(params.profileId, item); }
         catch { return false; }
       });
+      // Other Agents' shared facts are listed beside this Agent's own memory;
+      // the editor changes one through its home Agent at homeRevision.
+      let shared = { items: [], truncated: false };
+      if (params.status === null || params.status === "active") {
+        try { shared = this.memoryEngine.listShared(params.profileId); } catch {}
+        if (params.scope) shared = { ...shared, items: shared.items.filter((row) => row.item.scope === params.scope) };
+      }
       return { revision: this.memoryStore.getRevision(params.profileId), recallPolicy,
-        ...page(all, params.cursor, params.limit) };
+        ...page(all, params.cursor, params.limit), shared };
     }
     if (method === "harness.memory.explain") {
       const current = this.memoryStore.get(params.profileId, params.id);
@@ -343,6 +378,12 @@ class AgentHarnessServiceController {
       const item = this.memoryStore.get(params.profileId, params.id);
       if (!item) throw harnessError("MEMORY_NOT_FOUND", "记忆不存在");
       return { item, evidence: { status: "unavailable", reason: "provenance_store_unavailable" } };
+    }
+    if (method === "harness.memory.import.status") {
+      return this.memoryImportStatus ? this.memoryImportStatus(params.profileId) : { applicable: false };
+    }
+    if (method === "harness.memory.import.report") {
+      return this.memoryImportReport ? this.memoryImportReport(params.profileId, params) : { applicable: false };
     }
     if (method === "harness.memory.candidates.list") {
       if (!this.memoryCandidateService) throw harnessError("MEMORY_CANDIDATE_UNAVAILABLE", "候选审核不可用");
@@ -397,8 +438,32 @@ class AgentHarnessServiceController {
     }
     if (method === "harness.memory.delete") {
       this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
-      const value = this.memoryEngine.delete({ ...params, reason: "user_deleted" });
+      // A shared-scope fact is forgotten for every Agent, including copies.
+      const value = this.memoryEngine.forgetEverywhere({ profileId: params.profileId, id: params.id,
+        reason: "user_deleted" });
       return { revision: this.memoryStore.getRevision(params.profileId), item: value };
+    }
+    if (method === "harness.memory.undo") {
+      this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+      const value = this.memoryEngine.undoConsolidation({ profileId: params.profileId, id: params.id,
+        operationId: `undo-${crypto.randomUUID()}` });
+      return { revision: this.memoryStore.getRevision(params.profileId), ...value };
+    }
+    if (method === "harness.memory.forgetSession") {
+      this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+      const session = this.chatSessionStore.listSessions().find((entry) => entry.id === params.sessionId
+        && entry.profileId === params.profileId);
+      if (!session) throw harnessError("MEMORY_SOURCE_SESSION_NOT_FOUND", "来源对话不存在");
+      // Stop consolidating it first, so a batch in flight cannot re-add a fact.
+      this.memoryCandidateService?.excludeSession({ profileId: params.profileId, sessionId: session.id });
+      const sourceRefs = new Set();
+      for (const event of this.transcriptStore.listEvents(params.profileId, session.id)) {
+        sourceRefs.add(event.id);
+        if (event.runId) sourceRefs.add(event.runId);
+      }
+      const forgotten = this.memoryEngine.forgetSources({ profileId: params.profileId, sourceRefs,
+        reason: "user_deleted", operationId: `forget-session-${crypto.randomUUID()}` });
+      return { revision: this.memoryStore.getRevision(params.profileId), forgotten };
     }
     if (method === "harness.transcript.sessions") {
       const sessions = this.chatSessionStore.listSessions()
@@ -430,6 +495,10 @@ class AgentHarnessServiceController {
     if (method === "harness.skills.query") {
       const profile = this._profile(params.profileId);
       const value = this.skillStore.list(params.profileId);
+      const learned = this.learnedSkillStore?.management(params.profileId) ?? [];
+      const registryRevision = learned.length ? crypto.createHash("sha256").update(JSON.stringify([
+        value.registryRevision, learned.map(skill => [skill.id, skill.contentHash, skill.learnedRevision, skill.enabled]),
+      ])).digest("hex") : value.registryRevision;
       const usage = new Map();
       const usageAgents = new Map();
       usage.supported = true;
@@ -453,20 +522,25 @@ class AgentHarnessServiceController {
         usageAgents.clear();
         usage.supported = false;
       }
-      const items = value.items.map(skill => ({
+      if (usage.supported) for (const skill of learned) {
+        usage.set(skill.name, skill.usageCount);
+        if (skill.usageCount > 0) usageAgents.set(skill.name, { [profile.agentId]: skill.usageCount });
+      }
+      const items = [...value.items, ...learned].map(skill => ({
         ...skill,
         backendId: "shoggoth",
-        category: skill.source === "builtin" ? "Shoggoth built-in" : "Shoggoth native",
+        category: skill.source === "learned" ? "Shoggoth learned"
+          : skill.source === "builtin" ? "Shoggoth built-in" : "Shoggoth native",
         emoji: "🧩",
         profileId: profile.id,
         agentId: profile.agentId,
-        registryRevision: value.registryRevision,
+        registryRevision,
         registryVersion: value.registryVersion,
         profileRevision: value.profileRevision,
         usageCount: usage.get(skill.name) || 0,
         usageAgents: usageAgents.get(skill.name) || {},
       }));
-      return querySkillManagementCatalog({ catalog: { ...value, items }, usage,
+      return querySkillManagementCatalog({ catalog: { ...value, registryRevision, items }, usage,
         query: params.query, status: params.status, pageIndex: params.pageIndex,
         limit: params.limit, expectedRevision: params.expectedRevision });
     }
@@ -520,18 +594,56 @@ class AgentHarnessServiceController {
     if (method === "harness.computer.status") {
       return this.computerUseController.status(params.profileId);
     }
-    if (method === "harness.tools.list") return this.permissionEngine.profileProjection(params.profileId);
+    const publicTools = () => {
+      const view = this.permissionEngine.profileProjection(params.profileId);
+      const visible = new Set(this.toolRegistry.list().filter(tool => tool.uiVisible !== false).map(tool => tool.tool));
+      return { ...view, tools: view.tools.filter(tool => visible.has(tool.name)) };
+    };
+    if (method === "harness.tools.list") return publicTools();
     if (method === "harness.tools.permission.set") {
       const revision = this.permissionEngine.setProfileOverride(
         params.profileId, params.toolName, params.effect, params.expectedRevision,
       );
-      const response = { revision, tools: this.permissionEngine.profileProjection(params.profileId).tools };
+      const response = { revision, tools: publicTools().tools };
       if (params.effect === "deny" && params.toolName.startsWith("computer_")) {
         return Promise.resolve(this.computerUseController?.closeForProfile(params.profileId)).then(() => response);
       }
       return response;
     }
     throw harnessError("HARNESS_SERVICE_CLOSED", "Agent Harness method 未接线");
+  }
+  async _writeFileMemory(method, params) {
+    this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+    if (method === "harness.memory.forgetSession") {
+      const session = this.chatSessionStore.listSessions().find(entry => entry.profileId === params.profileId && entry.id === params.sessionId);
+      if (!session) throw harnessError("MEMORY_SOURCE_SESSION_NOT_FOUND", "来源对话不存在");
+      const report = await this.memoryEngine.forgetSession(params.profileId, session.id);
+      const refs = new Set(this.transcriptStore.listEvents(params.profileId, session.id).flatMap(event => [event.id, event.runId].filter(Boolean)));
+      const forgotten = await this.memoryEngine.forgetSources({ profileId: params.profileId, sourceRefs: refs,
+        reason: "user_deleted", operationId: `forget-session-${crypto.randomUUID()}` });
+      return { revision: this.memoryStore.getRevision(params.profileId), forgotten: forgotten + report.artifacts.memoryEntries };
+    }
+    if (method === "harness.memory.undo") {
+      const value = await this.memoryEngine.undoConsolidation({ ...params, operationId: `undo-${crypto.randomUUID()}` });
+      return { revision: this.memoryStore.getRevision(params.profileId), ...value };
+    }
+    if (method === "harness.memory.delete") {
+      const item = await this.memoryEngine.forgetEverywhere({ ...params, reason: "user_deleted" });
+      return { revision: this.memoryStore.getRevision(params.profileId), item };
+    }
+    const previous = method === "harness.memory.update" ? this.memoryStore.get(params.profileId, params.id) : null;
+    if (method.endsWith("update") && previous?.status !== "active") throw harnessError("MEMORY_NOT_FOUND", "记忆不存在");
+    const sourceRef = `user-edit:${crypto.randomUUID()}`;
+    const item = await this.memoryEngine.propose({ profileId: params.profileId, expectedRevision: params.expectedRevision,
+      scope: previous?.scope ?? params.scope, type: previous?.type ?? "semantic", content: params.content,
+      sourceRefs: [sourceRef, ...(previous?.sourceRefs.filter(ref => ref.startsWith("workspace:")) || [])],
+      classification: "explicit", sensitivity: previous?.sensitivity, confidence: params.confidence,
+      validUntil: params.validUntil, supersedes: previous?.id ?? null });
+    if (item.sourceRefs.includes(sourceRef)) {
+      try { this.memoryProvenanceService?.recordUiWrite({ profileId: params.profileId, item,
+        operationId: `ui-${item.id}`, origin: previous ? "ui_edit" : "ui_create" }); } catch {}
+    }
+    return { revision: this.memoryStore.getRevision(params.profileId), item };
   }
 }
 

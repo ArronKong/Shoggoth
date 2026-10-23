@@ -71,6 +71,7 @@ test("handoff rollback preserves the selected Cron namespace even when native se
     const trigger = await cronFixture(f);
     const first = await trigger();
     await f.complete(first);
+    f.collideNextSessionId("pi", first.runtimeSessionRef.sessionId);
     setDefault(f, "pi");
     const second = await trigger();
     assert.equal(second.runtimeSessionRef.runtime, "pi");

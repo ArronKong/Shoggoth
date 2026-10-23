@@ -79,11 +79,8 @@ const server = spawn(process.execPath, [viteBin, "--host", "127.0.0.1", "--port"
 let serverLog = "";
 server.stdout.on("data", (chunk) => { serverLog += chunk; });
 server.stderr.on("data", (chunk) => { serverLog += chunk; });
-await waitFor(async () => {
-  try { return (await fetch(baseUrl)).ok; } catch { return false; }
-}, "Vite 服务启动", 10_000);
-
-const browser = await chromium.launch({ channel: "chrome" });
+let browser;
+const fixtureDisposers = [];
 
 function revision(char) { return char.repeat(64); }
 
@@ -140,9 +137,10 @@ async function createHarness({
     compatStatus: "applied",
     compatStatuses: [],
     pendingOperations: [],
+    pendingIdentityReads: [],
     pendingApplyRoute: null,
     deferApply: false,
-    pendingRevealRoute: null,
+    pendingRevealResolve: null,
     deferReveal: false,
     ...overrides,
   };
@@ -181,6 +179,41 @@ async function createHarness({
     nextRevision();
   }
 
+  // 凭据读取走当前桌面桥；恢复账本使用真实 Store 的隔离目录。
+  const recoveryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "models-page-recovery-"));
+  const { ModelOperationRecoveryStore } = require("../app/model-operation-recovery-store");
+  const recoveryStore = new ModelOperationRecoveryStore({ userDataRoot: recoveryRoot,
+    coordinator: { observeOperation() { throw new Error("fixture has no verified terminal journal receipt"); } } });
+  fixtureDisposers.push(async () => {
+    await recoveryStore.close();
+    fs.rmSync(recoveryRoot, { recursive: true, force: true });
+  });
+  await recoveryStore.open();
+  await page.exposeFunction("__modelsFixtureRecovery", async (method, value) => {
+    assert.ok(["read", "retain", "ack"].includes(method));
+    try { return { ok: true, value: await recoveryStore[method](value) }; }
+    catch { return { ok: false, error: { code: "MODEL_RECOVERY_STORE_UNAVAILABLE", message: "fixture receipt unavailable" } }; }
+  });
+  await page.exposeFunction("__modelsFixtureReveal", async (backend, providerKey) => {
+    assert.equal(backend, "openclaw");
+    assert.equal(providerKey, "alpha");
+    state.revealCalls += 1;
+    const value = state.deferReveal
+      ? await new Promise((resolve) => { state.pendingRevealResolve = resolve; })
+      : { apiKey: "existing-secret", reason: "env" };
+    return { ok: true, value };
+  });
+  await page.addInitScript(() => {
+    window.openclawDesktop = {
+      revealModelProviderKey: (backend, providerKey) => window.__modelsFixtureReveal(backend, providerKey),
+      modelOperationRecovery: {
+        read: () => window.__modelsFixtureRecovery("read"),
+        retain: (row) => window.__modelsFixtureRecovery("retain", row),
+        ack: (identity) => window.__modelsFixtureRecovery("ack", identity),
+      },
+    };
+  });
+
   await page.route("**/__api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -196,6 +229,15 @@ async function createHarness({
     }
     if (url.pathname === "/__api/models/config/pending") {
       await route.fulfill({ json: { operations: state.pendingOperations } });
+      return;
+    }
+    if (url.pathname === "/__api/models/config/pending-identities") {
+      state.pendingIdentityReads.push(backend);
+      const operations = state.pendingOperations.filter((operation) => operation.backendId === backend)
+        .map(({ operationId, providerKey, status, stage, code }) => ({
+          operationId, providerKey, status, stage, ...(code ? { code } : {}),
+        }));
+      await route.fulfill({ json: { version: 1, backendId: backend, operations } });
       return;
     }
     if (url.pathname === "/__api/models/config/preview") {
@@ -239,13 +281,7 @@ async function createHarness({
       return;
     }
     if (url.pathname === "/__api/models/config/reveal") {
-      state.revealCalls += 1;
-      if (state.deferReveal) {
-        state.pendingRevealRoute = route;
-        return;
-      }
-      await route.fulfill({ json: { apiKey: "existing-secret", reason: "env" } });
-      return;
+      assert.fail("凭据读取不能退回 HTTP reveal 路由");
     }
     if (url.pathname === "/__api/models/config") {
       if (method === "GET") {
@@ -297,8 +333,16 @@ async function createHarness({
     await route.fulfill({ json: {} });
   });
 
+  const recoveryRead = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/__api/models/config/pending-identities"
+      && url.searchParams.get("backend") === "openclaw" && response.status() === 200;
+  });
   await page.goto(`${baseUrl}/#/models`, { waitUntil: "domcontentloaded" });
+  await recoveryRead;
   await page.locator(".models-page .model-card").first().waitFor();
+  await page.locator("[data-model-recovery-unknown]").waitFor({ state: "hidden" });
+  assert.ok(state.pendingIdentityReads.includes("openclaw"), "模型操作恢复必须读取当前 backend 的清单");
   return { context, page, state };
 }
 
@@ -319,6 +363,11 @@ async function openAlphaEdit(page) {
 }
 
 try {
+  await waitFor(async () => {
+    try { return (await fetch(baseUrl)).ok; } catch { return false; }
+  }, "Vite 服务启动", 10_000);
+  browser = await chromium.launch({ channel: "chrome" });
+
   // 新增与编辑使用同一 Drawer；保存后必须经过 preview/apply 并立即出现新卡片。
   {
     const { context, page, state } = await createHarness();
@@ -434,7 +483,7 @@ try {
       },
     });
     assert.equal(await page.getByRole("button", { name: "新增模型" }).isDisabled(), true);
-    const notice = page.getByRole("status");
+    const notice = page.getByRole("status").filter({ hasText: /条件写入/ });
     await notice.waitFor();
     assert.match(await notice.textContent(), /条件写入/);
     assert.doesNotMatch(await notice.textContent(), /hermes_conditional_write_unsupported/);
@@ -695,9 +744,9 @@ try {
     const delayedProvider = delayed.page.getByRole("dialog", { name: "编辑 provider 端点" });
     const delayedInput = delayedProvider.getByLabel("API Key");
     await delayedProvider.getByRole("button", { name: "显示现有 Key" }).click();
-    await waitFor(() => !!delayed.state.pendingRevealRoute, "reveal 进入 pending");
+    await waitFor(() => !!delayed.state.pendingRevealResolve, "reveal 进入 pending");
     await delayedInput.fill("user-secret");
-    await delayed.state.pendingRevealRoute.fulfill({ json: { apiKey: "late-secret" } });
+    delayed.state.pendingRevealResolve({ apiKey: "late-secret" });
     await delayed.page.waitForTimeout(100);
     assert.equal(await delayedInput.inputValue(), "user-secret");
     await delayed.context.close();
@@ -713,12 +762,19 @@ try {
     await page.getByRole("dialog", { name: "Builtin" }).getByRole("button", { name: "关闭" }).click();
     const drawer = await openCreate(page);
     await drawer.getByLabel("模型 ID").fill("guarded-model");
-    page.once("dialog", (dialog) => dialog.dismiss());
-    await page.locator('[role="tab"]').filter({ hasText: "Hermes" }).click({ force: true });
+    // Modal 将外部导航设为 inert；直接提出 DOM 导航请求，验证共享 dirty guard。
+    let navigationConfirmations = 0;
+    const refuseNavigation = async (dialog) => { navigationConfirmations += 1; await dialog.dismiss(); };
+    page.once("dialog", refuseNavigation);
+    const hermesTab = page.locator('[role="tab"][aria-label="Hermes"]');
+    assert.equal(await hermesTab.count(), 1);
+    await hermesTab.evaluate((node) => node.click());
+    assert.equal(navigationConfirmations, 1, "后端切换必须触发放弃草稿确认");
     assert.equal(await drawer.isVisible(), true);
     assert.equal(await drawer.getByLabel("模型 ID").inputValue(), "guarded-model");
-    page.once("dialog", (dialog) => dialog.dismiss());
-    await page.locator('a[aria-label="设置"]').click({ force: true });
+    page.once("dialog", refuseNavigation);
+    await page.locator('a[aria-label="设置"]').evaluate((node) => node.click());
+    assert.equal(navigationConfirmations, 2, "路由切换必须触发放弃草稿确认");
     assert.match(page.url(), /#\/models$/);
     await context.close();
   }
@@ -774,7 +830,8 @@ try {
 
   console.log("models page interaction regression: PASS");
 } finally {
-  await browser.close();
+  await browser?.close();
+  await Promise.all(fixtureDisposers.map((dispose) => dispose()));
   server.kill("SIGTERM");
   await Promise.race([
     new Promise((resolve) => server.once("exit", resolve)),

@@ -90,19 +90,23 @@ function createProfile(spec) {
   };
 }
 
-function ensureBuiltinCliAgentProfiles(productStore, installedRuntimeAccountIds) {
+// Each built-in CLI Agent is created at most once. `state` records the ones
+// already created, so an Agent the user deleted is not created again.
+function planBuiltinCliAgentProfiles(productStore, installedRuntimeAccountIds, state) {
   if (!productStore || typeof productStore.getAgentProfile !== "function"
     || typeof productStore.listAgentProfiles !== "function"
     || typeof productStore.putAgentProfile !== "function"
-    || !(installedRuntimeAccountIds instanceof Set)) {
-    throw new TypeError("ProductStore and installed RuntimeAccount IDs are required");
+    || !(installedRuntimeAccountIds instanceof Set)
+    || typeof state?.isSeeded !== "function" || typeof state.markSeeded !== "function") {
+    throw new TypeError("ProductStore, installed RuntimeAccount IDs and built-in Agent state are required");
   }
   // Preflight every fixed identity before writing any profile. A conflict in a
   // later built-in must not leave an earlier one partially bootstrapped.
   const profiles = productStore.listAgentProfiles();
   for (const spec of BUILTIN_CLI_AGENT_PROFILES) {
     const existing = productStore.getAgentProfile(spec.id);
-    if (!existing && !installedRuntimeAccountIds.has(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[spec.runtime])) continue;
+    if (!existing && (state.isSeeded(spec.id)
+      || !installedRuntimeAccountIds.has(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[spec.runtime]))) continue;
     if (existing) {
       if (!identityMatches(existing, spec)) {
         throw serviceError(
@@ -124,23 +128,46 @@ function ensureBuiltinCliAgentProfiles(productStore, installedRuntimeAccountIds)
       );
     }
   }
-  const created = [];
+  // record: existing Agents created before the state knew about them.
+  // build: Agents to create now.
+  // pending: disabled and unrecorded, so either deleted by the user while the
+  // record was missing, or interrupted while being created. Only the caller can
+  // tell them apart from the archive retention journal.
+  const record = [];
+  const build = [];
+  const pending = [];
   for (const spec of BUILTIN_CLI_AGENT_PROFILES) {
-    if (!isRuntimeAvailable(spec.runtime)) continue;
+    if (!isRuntimeAvailable(spec.runtime) || state.isSeeded(spec.id)) continue;
     const existing = productStore.getAgentProfile(spec.id);
-    if (existing) {
-      if (spec.runtime === "deepseek-harness" && existing.name === "DeepSeek Harness") {
-        productStore.putAgentProfile({ ...existing, name: spec.name });
-      }
-      continue;
-    }
-    if (!installedRuntimeAccountIds.has(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[spec.runtime])) continue;
-    created.push(productStore.putAgentProfile(createProfile(spec)));
+    if (existing?.enabled) record.push(spec.id);
+    else if (existing) pending.push(spec);
+    else if (installedRuntimeAccountIds.has(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME[spec.runtime])) build.push(spec);
   }
+  return { record, build, pending };
+}
+
+// Service startup path: later startup steps initialize every enabled Profile.
+// Pending Agents wait for the runtime path, which can read archive retention.
+function ensureBuiltinCliAgentProfiles(productStore, installedRuntimeAccountIds, state, { beforeCreate } = {}) {
+  const { record, build } = planBuiltinCliAgentProfiles(productStore, installedRuntimeAccountIds, state);
+  for (const spec of BUILTIN_CLI_AGENT_PROFILES) {
+    const existing = isRuntimeAvailable(spec.runtime) ? productStore.getAgentProfile(spec.id) : null;
+    if (spec.runtime === "deepseek-harness" && existing?.name === "DeepSeek Harness") {
+      productStore.putAgentProfile({ ...existing, name: spec.name });
+    }
+  }
+  const created = build.map((spec) => {
+    const profile = createProfile(spec);
+    beforeCreate?.(profile);
+    return productStore.putAgentProfile(profile);
+  });
+  state.markSeeded([...record, ...build.map((spec) => spec.id)]);
   return created;
 }
 
 module.exports = {
   BUILTIN_CLI_AGENT_PROFILES,
+  createBuiltinCliAgentProfile: createProfile,
   ensureBuiltinCliAgentProfiles,
+  planBuiltinCliAgentProfiles,
 };

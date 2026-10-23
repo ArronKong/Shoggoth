@@ -8,6 +8,7 @@ const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs")
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { BackendRegistry } = require("../app/core/backend-registry");
 const { startStaticServer } = require("../app/static-server");
+const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
 
 async function run() {
   const f = await openHandoffFixture();
@@ -18,7 +19,14 @@ async function run() {
       ...config, revision: config.revision + 1,
       flags: { ...config.flags, runtimeMultiBinding: true },
     });
-    const backend = new ShoggothBackend({ paths: f.paths });
+    // Native-user bindings require a discovered CLI. These descriptors are
+    // never executed: the CRUD handoff below must not dispatch a Runtime.
+    const runtimeCliAuth = DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user").map(account => ({
+      runtime: account.runtime, name: account.runtime, runtimeAccountId: account.id,
+      binaryPath: path.join(f.root, "fixture-cli"), accountHome: path.join(f.root, account.id), processHome: f.root,
+      homeEnv: null, accountKind: account.kind, credentialFile: "auth.json", loginArgs: [], logoutArgs: [], docsUrl: "https://example.invalid/",
+    }));
+    const backend = new ShoggothBackend({ paths: f.paths, runtimeCliAuth });
     backend._state = "started";
     await backend._refreshManagedProfiles();
     const registry = new BackendRegistry();
@@ -34,6 +42,14 @@ async function run() {
       });
       return { status: response.status, body: await response.json() };
     };
+
+    // A Service started without the production option never imports; the
+    // status still travels REST -> Backend -> socket -> Harness.
+    const memoryImport = await request("GET", "/memory-import?backend=shoggoth");
+    assert.equal(memoryImport.status, 200, JSON.stringify(memoryImport.body));
+    assert.equal(memoryImport.body.memoryImport.supported, true);
+    assert.equal(typeof memoryImport.body.memoryImport.applicable, "boolean");
+    if (memoryImport.body.memoryImport.applicable) assert.equal(memoryImport.body.memoryImport.state, "idle");
 
     const route = "/runtime-bindings?backend=shoggoth";
     let current = (await request("GET", route)).body;
@@ -85,7 +101,7 @@ async function run() {
     assert.equal(f.transport.acquisitions.length, 0, "CRUD handoff must not dispatch runtime");
     assert.equal(f.service.chatSessionStore.listPendingRuntimeSwitches().length, 0,
       "audit outbox completes through controller");
-    console.log("PASS isolated native CRUD: production REST/Backend/socket/Product15/Chat8; bindings create/read/update/default/delete/CAS; session runtime read/switch/audit; no CLI or provider.");
+    console.log("PASS isolated native CRUD: production REST/Backend/socket/Product15/Chat8; bindings create/read/update/default/delete/CAS; session runtime read/switch/audit; Codex memory import status; no CLI or provider.");
   } finally {
     if (server) await server.close();
     await f.close();

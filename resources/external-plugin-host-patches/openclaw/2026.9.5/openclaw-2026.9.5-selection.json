@@ -1,0 +1,261 @@
+{
+  "version": 1,
+  "package": "openclaw",
+  "packageVersion": "2026.9.5",
+  "files": [
+    {
+      "path": "dist/sessions-DqDwh-oU.mjs",
+      "beforeSha256": "cb49011eae021aae81de05d6a23167429cd9029070076bd8bfa0a50139668501",
+      "afterSha256": "dba0c02f901579e67f6ae0ffa6df66f59b05a5c2c731333f2d1286dcdaa111f8",
+      "edits": [
+        {
+          "before": "const ChatSendParamsSchema = closedObject({",
+          "after": "const CapabilitySelectionSchema = closedObject({\n\tversion: Type.Literal(1),\n\toperationId: Type.String({ minLength: 1, maxLength: 128, pattern: \"^[A-Za-z0-9][A-Za-z0-9._:-]*$\" }),\n\tdispatchRef: Type.String({ minLength: 1, maxLength: 256, pattern: \"^[A-Za-z0-9][A-Za-z0-9._:-]*$\" }),\n\tselectionDigest: Type.String({ pattern: \"^[a-f0-9]{64}$\" }),\n\trequiredAdapterId: Type.String({ minLength: 1, maxLength: 128, pattern: \"^[a-z0-9][a-z0-9._-]*$\" }),\n\tadapterGeneration: Type.String({ minLength: 1, maxLength: 128, pattern: \"^[A-Za-z0-9][A-Za-z0-9._:-]*$\" })\n});\nconst ChatSendParamsSchema = closedObject({"
+        },
+        {
+          "before": "\ttoolBindings: Type.Optional(RunToolBindingsSchema),",
+          "after": "\ttoolBindings: Type.Optional(RunToolBindingsSchema),\n\tcapabilitySelection: Type.Optional(CapabilitySelectionSchema),"
+        }
+      ]
+    },
+    {
+      "path": "dist/setup-registry-C0Jco-hC.mjs",
+      "beforeSha256": "7146e121eb5a59ec50330fa1b8e24736227d13a0e1216040bc8a8cc01b90ac47",
+      "afterSha256": "8f77ae4590e64d2bf4e905947490d2e7fd201f170d777a74aaff055377de5133",
+      "edits": [
+        {
+          "before": "\tregisterTool: () => {},",
+          "after": "\tregisterTool: () => {},\n\tregisterCapabilitySelectionGate: () => { throw new Error(\"CAPABILITY_SELECTION_API_UNAVAILABLE\"); },"
+        }
+      ]
+    },
+    {
+      "path": "dist/loader-runtime-load-CdQ5OcQq.mjs",
+      "beforeSha256": "91180d699f6441048b1330ade47a65402ab3110cb746b5ff7d6d30d495a4be3c",
+      "afterSha256": "25bb20e41408d5f9e719ddbbdf3594bbded928b89001bd00b279cf51672b7b77",
+      "edits": [
+        {
+          "before": "import { D as resolveExpiresAtMsFromDurationMs, R as timestampMsToIsoString } from \"./number-coercion-CLj0HTDM.mjs\";\n",
+          "after": "import { registerSelectionGate } from \"./shoggoth-capability-selection.mjs\";\nimport { D as resolveExpiresAtMsFromDurationMs, R as timestampMsToIsoString } from \"./number-coercion-CLj0HTDM.mjs\";\n"
+        },
+        {
+          "before": "\t\t\t\t...registrationCapabilities.capabilityHandlers ? {\n\t\t\t\t\t...bound,",
+          "after": "\t\t\t\t...registrationCapabilities.capabilityHandlers ? {\n\t\t\t\t\t...bound,\n\t\t\t\t\tregisterCapabilitySelectionGate: (handler, metadata) => registerSelectionGate(record, handler, metadata),"
+        }
+      ]
+    },
+    {
+      "path": "dist/chat-send-handler-BBsH-uIk.mjs",
+      "beforeSha256": "a363309dfeada1d1bf17efe1c58fdf59a01b9aa05d1f694148e19b9e29e53f94",
+      "afterSha256": "c9990818c88e4d455179d7855f3d1a72ad07c6c8debb2dbe6e60a5b9fa965382",
+      "edits": [
+        {
+          "before": "import { g as isFutureDateTimestampMs } from \"./number-coercion-CLj0HTDM.mjs\";\n",
+          "after": "import { validateSelectionEnvelope, assertSelectionRegistration, replaySelectionRequest, acceptSelection, markSelection } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-D_mv_Ppq.mjs\";\nimport { g as isFutureDateTimestampMs } from \"./number-coercion-CLj0HTDM.mjs\";\n"
+        },
+        {
+          "before": "\tconst p = controlUiReconnectResume.params;",
+          "after": "\tlet p = controlUiReconnectResume.params;\n\tif (p.capabilitySelection) {\n\t\ttry { validateSelectionEnvelope(p.capabilitySelection, p.idempotencyKey); }\n\t\tcatch (error) { return { ok: false, error: error.code }; }\n\t\tif (p.queueMode !== void 0 && p.queueMode !== \"followup\" || p.intent || params.goalResume || p.toolBindings || p.message.trimStart().startsWith(\"/\") || p.message.trimStart().startsWith(\"!\") || isChatStopCommandText(p.message) || isBtwRequestText(p.message)) return { ok: false, error: \"CAPABILITY_SELECTION_PATH_UNSUPPORTED\" };\n\t\tp = { ...p, queueMode: \"followup\", capabilitySelection: validateSelectionEnvelope(p.capabilitySelection, p.idempotencyKey) };\n\t}"
+        },
+        {
+          "before": "]) ?? []])).digest(\"hex\");",
+          "after": "]) ?? [], p.capabilitySelection ?? null])).digest(\"hex\");"
+        },
+        {
+          "before": "eligible: isBrowserOperatorUiClient(request.clientInfo) && turnKind === \"main\"",
+          "after": "eligible: !p.capabilitySelection && isBrowserOperatorUiClient(request.clientInfo) && turnKind === \"main\""
+        },
+        {
+          "before": "\tif (normalizedRequest.value.mentions) {",
+          "after": "\ttry {\n\t\tassertCurrent?.();\n\t\tconst selectedRequest = normalizedRequest.value;\n\t\tconst selectedSession = preparedSession.value;\n\t\tconst replay = replaySelectionRequest({ envelope: selectedRequest.p.capabilitySelection, operationId: selectedSession.clientRunId,\n\t\t\trequestIdentity: selectedRequest.requestIdentity, sessionKey: selectedSession.sessionKey,\n\t\t\tagentId: selectedSession.selectedAgent.agentId ?? selectedSession.agentId, client });\n\t\tif (replay) { respond(true, replay); return; }\n\t\tassertSelectionRegistration(selectedRequest.p.capabilitySelection, getSelectionRegistrationRegistry());\n\t} catch (error) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, error.code || \"CAPABILITY_SELECTION_ADMISSION_FAILED\")); return; }\n\tif (normalizedRequest.value.mentions) {"
+        },
+        {
+          "before": "\t\tconst receipt = userTurnRecorder.getAdmissionReceipt?.();\n\t\tconst ackPayload = {",
+          "after": "\t\tconst receipt = userTurnRecorder.getAdmissionReceipt?.();\n\t\tconst selectionReceipt = acceptSelection({ envelope: p.capabilitySelection, requestIdentity: normalizedRequest.value.requestIdentity,\n\t\t\tidentity: { operationId: clientRunId, agentId: selectedAgent.agentId ?? preparedSession.value.agentId, sessionKey, sessionId: admittedSessionId }, client });\n\t\tconst ackPayload = {\n\t\t\t...selectionReceipt ? { capabilitySelection: selectionReceipt } : {},"
+        },
+        {
+          "before": "\t\t\t\t\tqueueModeOverride: p.queueMode,",
+          "after": "\t\t\t\t\tqueueModeOverride: p.queueMode,\n\t\t\t\t\tcapabilitySelection: p.capabilitySelection,"
+        },
+        {
+          "before": "\t\thasCronCreatorAuthority: cronCreatorAuthority !== void 0,",
+          "after": "\t\thasCronCreatorAuthority: cronCreatorAuthority !== void 0,\n\t\tcapabilitySelection: p.capabilitySelection,"
+        },
+        {
+          "before": "\t\t\tif (enqueued) lateFollowup.recordQueued();",
+          "after": "\t\t\tif (enqueued) lateFollowup.recordQueued();\n\t\t\tif (enqueued) markSelection(params.capabilitySelection, \"queued\");"
+        },
+        {
+          "before": "\t}).catch(dispatchErrorLifecycle.handleError);",
+          "after": "\t}).catch((error) => { markSelection(p.capabilitySelection, \"failed\"); return dispatchErrorLifecycle.handleError(error); });"
+        }
+      ]
+    },
+    {
+      "path": "dist/get-reply-DN4OcavF.mjs",
+      "beforeSha256": "ddacdea4bc3ea5e0fc10418e7c2688f76f97fe74358b03ba6d6c29ded4c51081",
+      "afterSha256": "d6c1914ed59b77fe248d017614cca91210544855120c011d59c8ef441bdf8b3a",
+      "edits": [
+        {
+          "before": "\t\t\ttoolBindings: ctx.GatewayRunToolBindings,",
+          "after": "\t\t\ttoolBindings: ctx.GatewayRunToolBindings,\n\t\t\tcapabilitySelection: opts?.capabilitySelection,"
+        }
+      ]
+    },
+    {
+      "path": "dist/agent-runner.runtime-DRp6jmuv.mjs",
+      "beforeSha256": "f3f4732fc5eec0ded876b6e8db31abd06bf30b5a30c7cbd1094cd9c4e7f5c190",
+      "afterSha256": "8468fab272b13e87943bb80f7fc0f0b23650c9440b9199d5ffbc266b52275bc2",
+      "edits": [
+        {
+          "before": "import { S as parseStrictInteger, f as asSafeIntegerInRange, l as asNonNegativeFiniteNumber, s as asFiniteNumber } from \"./number-coercion-CLj0HTDM.mjs\";\n",
+          "after": "import { enforceSelection, finishSelection, markSelection, rejectSelectionRuntime } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-D_mv_Ppq.mjs\";\nimport { S as parseStrictInteger, f as asSafeIntegerInRange, l as asNonNegativeFiniteNumber, s as asFiniteNumber } from \"./number-coercion-CLj0HTDM.mjs\";\n"
+        },
+        {
+          "before": "\tconst runId = params.opts?.runId ?? crypto.randomUUID();\n\tconst agentTurnTiming =",
+          "after": "\tconst runId = params.opts?.runId ?? crypto.randomUUID();\n\tawait enforceSelection(params.followupRun.run.capabilitySelection, { operationId: params.followupRun.run.capabilitySelection?.operationId,\n\t\tagentId: params.followupRun.run.agentId, sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,\n\t\tsessionId: params.followupRun.run.sessionId, actualRunId: runId }, getSelectionRegistrationRegistry());\n\tconst agentTurnTiming ="
+        },
+        {
+          "before": "async function runCliFallbackCandidate(params) {\n\tconst turn = params.turn;",
+          "after": "async function runCliFallbackCandidate(params) {\n\tconst turn = params.turn;\n\trejectSelectionRuntime(turn.followupRun.run.capabilitySelection, \"cli-fallback\");"
+        },
+        {
+          "before": "\tconst embeddedRunProvider = resolveOpenAIRuntimeProvider({",
+          "after": "\tif (turn.followupRun.run.capabilitySelection && agentHarnessPolicy.runtime !== \"openclaw\") rejectSelectionRuntime(turn.followupRun.run.capabilitySelection, agentHarnessPolicy.runtime);\n\tif (turn.followupRun.run.capabilitySelection && resolveSessionPinnedHarnessId(turn.getActiveSessionEntry()) && resolveSessionPinnedHarnessId(turn.getActiveSessionEntry()) !== \"openclaw\") rejectSelectionRuntime(turn.followupRun.run.capabilitySelection, \"pinned-harness\");\n\tconst embeddedRunProvider = resolveOpenAIRuntimeProvider({"
+        },
+        {
+          "before": "\t\treturn await executeAgentTurnInternalLoop(params, commitTerminalOutcome, commitMcpAppModelContext, preparedRunAdmission, admittedRunContext, deferredLifecycle, compaction);",
+          "after": "\t\tconst result = await executeAgentTurnInternalLoop(params, commitTerminalOutcome, commitMcpAppModelContext, preparedRunAdmission, admittedRunContext, deferredLifecycle, compaction);\n\t\tawait finishSelection(params.followupRun.run.capabilitySelection, result.kind === \"aborted\" ? \"aborted\" : result.terminalRunFailed ? \"failed\" : \"completed\", getSelectionRegistrationRegistry());\n\t\treturn result;\n\t} catch (error) {\n\t\tmarkSelection(params.followupRun.run.capabilitySelection, \"failed\", error.code);\n\t\tthrow error;"
+        }
+      ]
+    },
+    {
+      "path": "dist/builtin-openclaw-C7-lQJ2Z.mjs",
+      "beforeSha256": "97435362096a8903b3a01ee82869b55b4375c371db4be3bcc32b641a9074bcca",
+      "afterSha256": "6f0a40a375c2159b86d23046e5ae3804d4e5fee5c892c31ef2c037f07317e286",
+      "edits": [
+        {
+          "before": "import { D as resolveExpiresAtMsFromDurationMs, F as resolveTimerTimeoutMs, g as isFutureDateTimestampMs, h as finiteSecondsToTimerSafeMilliseconds, m as clampTimerTimeoutMs, o as asDateTimestampMs, s as asFiniteNumber, v as parseDateFirstTimestampMs, w as parseStrictPositiveInteger, y as parseDateStringTimestampMs } from \"./number-coercion-CLj0HTDM.mjs\";\n",
+          "after": "import { assertSelectionRun, selectionSystemContext } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-D_mv_Ppq.mjs\";\nimport { D as resolveExpiresAtMsFromDurationMs, F as resolveTimerTimeoutMs, g as isFutureDateTimestampMs, h as finiteSecondsToTimerSafeMilliseconds, m as clampTimerTimeoutMs, o as asDateTimestampMs, s as asFiniteNumber, v as parseDateFirstTimestampMs, w as parseStrictPositiveInteger, y as parseDateStringTimestampMs } from \"./number-coercion-CLj0HTDM.mjs\";\n"
+        },
+        {
+          "before": "async function runEmbeddedAttemptBeforeAgentRun(input) {\n\tif (!input.hookRunner?.hasHooks(\"before_agent_run\")) return;",
+          "after": "async function runEmbeddedAttemptBeforeAgentRun(input) {\n\ttry { assertSelectionRun(input.attempt.runId, { agentId: input.hookContext.agentId, sessionKey: input.attempt.sessionKey, sessionId: input.attempt.sessionId }, getSelectionRegistrationRegistry()); }\n\tcatch (error) { return { blockedBy: \"capabilitySelection\", promptError: new Error(error.code || \"CAPABILITY_SELECTION_GATE_FAILED\") }; }\n\tif (!input.hookRunner?.hasHooks(\"before_agent_run\")) return;"
+        },
+        {
+          "before": "\tconst modelAwareSystemPrompt = isSettledTurnFinalization ? systemPromptText : appendModelIdentitySystemPrompt({",
+          "after": "\tconst selectionContext = selectionSystemContext(attempt.runId, { agentId: input.hookAgentId, sessionKey: attempt.sessionKey, sessionId: attempt.sessionId }, getSelectionRegistrationRegistry());\n\tif (selectionContext) setSystemPrompt(composeSystemPromptWithHookContext({ baseSystemPrompt: systemPromptText, prependSystemContext: selectionContext }));\n\tconst modelAwareSystemPrompt = isSettledTurnFinalization ? systemPromptText : appendModelIdentitySystemPrompt({"
+        }
+      ]
+    },
+    {
+      "path": "dist/dispatch-from-config-CTQQ29Us.mjs",
+      "beforeSha256": "3adc03cc42a63c286da95aded18fa47ea33eee13642ff770ccef13caa0d1e69c",
+      "afterSha256": "fae891b3ede726a74983a0c9e2c9dc55a45cd04aa7506fe7222051cc11af63f0",
+      "edits": [
+        {
+          "before": "import { o as asDateTimestampMs } from \"./number-coercion-CLj0HTDM.mjs\";\n",
+          "after": "import { rejectSelectionRuntime } from \"./shoggoth-capability-selection.mjs\";\nimport { t as getSelectionDispatchHooks } from \"./hook-runner-global-CN2-D2Rq.mjs\";\nimport { o as asDateTimestampMs } from \"./number-coercion-CLj0HTDM.mjs\";\n"
+        },
+        {
+          "before": "\tconst dispatchKind = resolveSessionDispatchKind(acpDispatchSessionKey, sessionStoreEntry.entry);",
+          "after": "\tconst dispatchKind = resolveSessionDispatchKind(acpDispatchSessionKey, sessionStoreEntry.entry);\n\tif (params.replyOptions?.capabilitySelection && (dispatchKind !== \"agent\" || getSelectionDispatchHooks()?.hasHooks(\"reply_dispatch\") || getSelectionDispatchHooks()?.hasHooks(\"before_dispatch\"))) rejectSelectionRuntime(params.replyOptions.capabilitySelection, \"dispatch-takeover\");"
+        },
+        {
+          "before": "\tif (pluginOwnedBinding) {\n\t\tif (isPreDispatchOperationAborted()) return {",
+          "after": "\tif (pluginOwnedBinding) {\n\t\trejectSelectionRuntime(params.replyOptions?.capabilitySelection, \"plugin-bound-dispatch\");\n\t\tif (isPreDispatchOperationAborted()) return {"
+        }
+      ]
+    },
+    {
+      "path": "dist/chat-BQ5bS4bL.mjs",
+      "beforeSha256": "9c57fcfbae8e69791d238e270b4182b03e2241af27f1090707491ce5350dc54f",
+      "afterSha256": "f26db33b6d3cb95cfd2cab900691617b74156c0dbe25c13ea58c827c98a5b3f1",
+      "edits": [
+        {
+          "before": "import \"./session-key-CPlMYURm.mjs\";\n",
+          "after": "import { querySelection, selectionCapabilities } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-D_mv_Ppq.mjs\";\nimport { t as selectionSessionCreateHandlers } from \"./sessions-create-DCdsbk-U.mjs\";\nimport \"./session-key-CPlMYURm.mjs\";\n"
+        },
+        {
+          "before": "\t\"chat.send\": handleDirectExternalChatSend,",
+          "after": "\t\"chat.selection.capabilities\": async (options) => {\n\t\tconst { params, respond } = options;\n\t\tif (params && (Object.keys(params).some(key => ![\"sessionKey\", \"agentId\"].includes(key)) || params.sessionKey !== void 0 && (typeof params.sessionKey !== \"string\" || params.sessionKey.length < 1 || params.sessionKey.length > 512) || params.agentId !== void 0 && (typeof params.agentId !== \"string\" || params.agentId.length < 1 || params.agentId.length > 128))) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, \"CAPABILITY_SELECTION_QUERY_INVALID\")); return; }\n\t\tlet subject;\n\t\tif (params?.sessionKey) {\n\t\t\tconst requestedAgent = resolveRequestedSessionAgentId(options.context.getRuntimeConfig(), params.sessionKey, params.agentId);\n\t\t\tif (!requestedAgent.ok) { respond(false, void 0, requestedAgent.error); return; }\n\t\t\tlet creationError;\n\t\t\tawait selectionSessionCreateHandlers[\"sessions.create\"]({ ...options, params: { key: params.sessionKey, ...params.agentId ? { agentId: params.agentId } : {} }, respond: (ok, payload, error) => {\n\t\t\t\tif (!ok) { creationError = error; return; }\n\t\t\t\tif (payload?.key !== params.sessionKey || typeof payload?.sessionId !== \"string\" || payload.runStarted === true) { creationError = errorShape(ErrorCodes.INVALID_REQUEST, \"CAPABILITY_SELECTION_SESSION_MISMATCH\"); return; }\n\t\t\t\tsubject = { sessionKey: payload.key, sessionId: payload.sessionId, agentId: requestedAgent.agentId };\n\t\t\t} });\n\t\t\tif (creationError || !subject) { respond(false, void 0, creationError ?? errorShape(ErrorCodes.UNAVAILABLE, \"CAPABILITY_SELECTION_SESSION_UNAVAILABLE\")); return; }\n\t\t}\n\t\trespond(true, { ...selectionCapabilities(getSelectionRegistrationRegistry()), ...subject ? { subject } : {} });\n\t},\n\t\"chat.selection.get\": async ({ params, client, respond }) => {\n\t\ttry { respond(true, querySelection(params, client)); }\n\t\tcatch (error) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, error.code || \"CAPABILITY_SELECTION_QUERY_FAILED\")); }\n\t},\n\t\"chat.send\": handleDirectExternalChatSend,"
+        }
+      ]
+    },
+    {
+      "path": "dist/method-scopes-CF6Mdynq.mjs",
+      "beforeSha256": "3677c0bfeac96f5731eb5dadd808e0cb30d6ed5f9b95ce5c3346b5f0cabda10c",
+      "afterSha256": "b29653b6de2c1949728926ecfa137bc718cd8022e203034206cc8fa0f1e9b69a",
+      "edits": [
+        {
+          "before": "\t[\n\t\t\"chat.send\",\n\t\t\"chat\",",
+          "after": "\t[ \"chat.selection.capabilities\", \"chat\", \"operator.write\", \"2026.9.5-shoggoth-v1\" ],\n\t[ \"chat.selection.get\", \"chat\", \"operator.write\", \"2026.9.5-shoggoth-v1\" ],\n\t[\n\t\t\"chat.send\",\n\t\t\"chat\","
+        }
+      ]
+    },
+    {
+      "path": "dist/agent-tools.before-tool-call-ya9NNSXc.mjs",
+      "beforeSha256": "39e6ae403ad478b147c9af6306dec376b026ab95aa0a7580fcba027db896270c",
+      "afterSha256": "8235f510ec8dea0cc5018a4a68860818a54fc5e3758cbb7dab192757d567db1e",
+      "edits": [
+        {
+          "before": "import { a as addTimerTimeoutGraceMs } from \"./number-coercion-CLj0HTDM.mjs\";\n",
+          "after": "import { selectionToolContext } from \"./shoggoth-capability-selection.mjs\";\nimport { a as addTimerTimeoutGraceMs } from \"./number-coercion-CLj0HTDM.mjs\";\n"
+        },
+        {
+          "before": "async function runBeforeToolCallHook(args) {\n\tconst toolName =",
+          "after": "async function runBeforeToolCallHook(args) {\n\tselectionToolContext(args.ctx?.runId, args.ctx, getActivePluginRegistry());\n\tconst toolName ="
+        },
+        {
+          "before": "\t\tconst buildToolContext = (identity) => ({",
+          "after": "\t\tconst buildToolContext = (identity) => selectionToolContext(args.ctx?.runId, {"
+        },
+        {
+          "before": "\t\t\t...args.ctx?.requester ? { requester: args.ctx.requester } : {}\n\t\t});",
+          "after": "\t\t\t...args.ctx?.requester ? { requester: args.ctx.requester } : {}\n\t\t}, getActivePluginRegistry());"
+        },
+        {
+          "before": "\t\t\tassertAgentPluginRuntimeCurrent();\n\t\t\trunAgentToolSourceExecutionGuard(tool);",
+          "after": "\t\t\tassertAgentPluginRuntimeCurrent();\n\t\t\tselectionToolContext(ctx?.runId, ctx, getActivePluginRegistry());\n\t\t\trunAgentToolSourceExecutionGuard(tool);"
+        }
+      ]
+    }
+  ],
+  "newFiles": [
+    {
+      "path": "dist/shoggoth-capability-selection.mjs",
+      "source": "shoggoth-capability-selection.mjs",
+      "sha256": "dbedf2cd60990265b547566b044250c304e66070ff847866ea916d21b0076d34"
+    }
+  ],
+  "dependencies": [
+    {
+      "path": "dist/runtime-D_mv_Ppq.mjs",
+      "sha256": "7767498a64ae6e9200db98ae19f7b5d84ea1bf3d6d2f5f43f1a967e94bdc2ff3"
+    },
+    {
+      "path": "dist/registry-lifecycle-FQWvWEID.mjs",
+      "sha256": "12e4a5eaab737efde5d8547d388df3946da7c79368d70c59d9d5692ef7f8be1f"
+    },
+    {
+      "path": "dist/sessions-create-DCdsbk-U.mjs",
+      "sha256": "d8599b1d21499a99a0e5de12c59a2b543106f75e6d08dfd103c0b485348bf890"
+    }
+  ],
+  "upstreamSource": {
+    "package": "openclaw@2026.9.5",
+    "repository": "https://github.com/openclaw/openclaw",
+    "packageJsonSha256": "fe24be9aa953aa41d10da28162bd1221034c4a7983f447f4f861b1452156fd85",
+    "license": "MIT"
+  },
+  "licenseFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "73571b25326281d369087f469842c02444fe39faaecebda4d82ed21ff3a1c29d"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "sha256": "c1d1bbc550feee74853eba104e347341569cbbbe37a9f77659993ca0766277d5"
+    }
+  ]
+}

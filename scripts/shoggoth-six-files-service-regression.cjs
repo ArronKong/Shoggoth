@@ -31,7 +31,7 @@ function runtimePool() {
     if (hosts.has(identity)) return hosts.get(identity);
     const sessions = new Map();
     const listeners = new Set();
-    const calls = { start: [], resume: [], turn: [] };
+    const calls = { start: [], resume: [], turn: [], inject: [] };
     const host = {
       workspace: options.workspace || null, controlInstance: !options.workspace,
       terminated: new Promise(() => {}), registeredSecrets: [], calls,
@@ -71,6 +71,7 @@ function runtimePool() {
       async threadInjectItems(input) {
         assert.ok(sessions.has(input.threadId));
         this.lastInjectedItems = structuredClone(input);
+        calls.inject.push(structuredClone(input));
         return {};
       },
       async threadRead(input) {
@@ -143,13 +144,16 @@ async function verifySixFiles() {
       backends.push(backend);
       assert.equal(await backend.start(), true);
       const detail = await backend.getAgent(profile.agentId);
-      assert.deepEqual(detail.files.map((file) => file.name).sort(), FILES.map((kind) => `${kind}.md`).sort());
+      // HEARTBEAT.md is the proactive rules document (ded3d2a3), outside the six Harness files.
+      assert.deepEqual(detail.files.map((file) => file.name).sort(), [...FILES.map((kind) => `${kind}.md`), "HEARTBEAT.md"].sort());
+      let freshMemoryRevision = null;
       for (const kind of FILES) {
         const value = await backend.getAgentFile(profile.agentId, `${kind}.md`);
         assert.ok(value.content.length > 0, `${profile.name}/${kind} must load`);
         assert.equal(value.readOnly, READ_ONLY.has(kind));
         if (kind === "IDENTITY") assert.ok(value.content.includes(`- Name: ${profile.name}\n`));
-        if (kind === "MEMORY") assert.equal(value.revision, 0);
+        // Shoggoth Memory seeds an empty MEMORY.md, so a fresh profile starts at revision 1.
+        if (kind === "MEMORY") { assert.equal(value.revision, 1); freshMemoryRevision = value.revision; }
       }
       const tools = await read(profile.id, "TOOLS");
       assert.equal(tools.revision, service.toolRegistry.revision);
@@ -180,7 +184,7 @@ async function verifySixFiles() {
       const frozen = service.contextSnapshotStore.get(profile.id, run.contextSnapshotId);
       assert.ok(frozen.blocks.some((block) => block.id === "first-conversation"));
       const empty = await call(run, "memory_search", { query: nickname });
-      assert.equal(empty.revision, 0);
+      assert.equal(empty.revision, freshMemoryRevision);
       assert.deepEqual(empty.items, []);
       const saveArgs = { expectedRevision: empty.revision, content: `用户要求称呼为 ${nickname}`,
         scope: "user", classification: "explicit", sourceQuote: `以后叫我 ${nickname}` };
@@ -195,7 +199,8 @@ async function verifySixFiles() {
       const memory = await read(profile.id, "MEMORY");
       assert.ok(user.content.includes(nickname));
       assert.equal(user.content.includes(agentFact), false, "USER must contain only user-scope facts");
-      assert.ok(memory.content.includes(nickname) && memory.content.includes(agentFact));
+      // Shoggoth Memory keeps user-scope facts in USER.md and Agent facts in MEMORY.md.
+      assert.ok(memory.content.includes(agentFact) && !memory.content.includes(nickname));
       assert.equal(memory.revision, fact.revision);
 
       for (const kind of ["IDENTITY", "SOUL", "AGENTS"]) {
@@ -254,11 +259,25 @@ async function verifySixFiles() {
         assert.equal(snapshot.dynamicContext.includes(`长期事实-${other.id}`), false);
       }
       const host = pool.get(profile, { workspace: session.workspace });
-      assert.ok(host.calls.resume.length > 0, "Continue the existing runtime session");
-      assert.equal(host.calls.resume.at(-1).developerInstructions, snapshot.developerInstructions,
-        "Updated definitions must reach the runtime resume call");
+      // Memory changed after the first turn, so its native history is stale
+      // (0355577c): the conversation continues in a renewed native session on
+      // the same binding instead of resuming the old one.
+      assert.notEqual(next.runtimeSessionRef.sessionId, run.runtimeSessionRef.sessionId, "Renew the stale runtime session");
+      const renewed = service.chatSessionStore.getSession(session.sessionKey);
+      assert.ok(renewed.retiredRuntimeSessions.some((item) => item.runtimeSessionId === run.runtimeSessionRef.sessionId
+        && item.bindingId === renewed.runtimeBindingId), "The stale session is retired on the same binding");
+      // Stable rules are delivered at session start; per-run material is a
+      // separate developer item (de45ac6f), so compare the definition texts.
+      for (const text of [`- Name: ${newName}`, `温和-${profile.id}`, `先查证再回答-${profile.id}`]) {
+        assert.ok(host.calls.start.at(-1).developerInstructions.includes(text),
+          "Updated definitions must reach the renewed runtime session");
+      }
       const turn = host.calls.turn.at(-1);
-      const delivered = profile.runtime === "codex" ? turn.input[0].text : turn.context;
+      // Codex receives dynamic memory as an injected user-authority item before turn/start.
+      const delivered = profile.runtime === "codex" ? host.calls.inject
+        .filter((entry) => entry.threadId === next.runtimeSessionRef.sessionId)
+        .flatMap((entry) => entry.items).filter((item) => item.role === "user")
+        .flatMap((item) => item.content.map((part) => part.text)).join("\n") : turn.context;
       assert.ok(delivered.includes(nickname) && delivered.includes(agentFact),
         "Generated user/memory context must reach the runtime turn");
       const latestTools = await ipc("harness.tools.list", { profileId: profile.id });
@@ -272,7 +291,7 @@ async function verifySixFiles() {
       report.push({ backend: profile.backendId, name: profile.name, files: FILES.map((kind) => `${kind}.md`),
         fileReads: "passed", memoryWrite: "passed", manualMemoryEdit: "passed", conversationalEdit: "passed", profileRename: "passed",
         nextTurnDelivery: "passed", permissions: "passed", isolation: "passed" });
-      console.log(`PASS ${profile.name}: six files, bound product writes, rename, same-session delivery, isolation and permissions`);
+      console.log(`PASS ${profile.name}: six files, bound product writes, rename, renewed-session delivery, isolation and permissions`);
       await backend.stop();
     }
     await service.stop();

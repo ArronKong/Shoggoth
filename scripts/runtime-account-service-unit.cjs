@@ -13,8 +13,10 @@ const {
   validateRuntimeAccountServiceResult,
 } = require("../app/agent-service/runtime-account-service-protocol");
 const {
+  NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID,
   NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
   NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
+  NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID,
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
   DEFAULT_RUNTIME_ACCOUNTS,
 } = require("../app/agent-service/runtime-account");
@@ -35,6 +37,7 @@ function fixture(options = {}) {
     SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
     NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
     NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
+    ...(options.loginManagers ? [NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID, NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID] : []),
   ].includes(account.id)).map((account) => ({ ...account }));
   const profiles = [
     {
@@ -104,6 +107,7 @@ function fixture(options = {}) {
       }),
     },
     accountAuthManager,
+    ...(options.loginManagers ? { loginManagers: options.loginManagers } : {}),
     paths,
     fs: options.fs,
     now: options.now || (() => 1_000),
@@ -131,6 +135,93 @@ function fixture(options = {}) {
     authCalls,
   };
 }
+
+test("Antigravity signs in through its Service manager and Codex progress reads the same shape", async () => {
+  const calls = [];
+  const manager = {
+    start: async (input) => {
+      calls.push(["start", input]);
+      return { requestId: "agy-1", mode: "browser", status: "waiting", loginId: "agy-1", authUrl: null };
+    },
+    read: async (input) => {
+      calls.push(["read", input]);
+      return { login: { requestId: "agy-1", mode: "browser", status: "waiting", updatedAt: 5, errorCode: null,
+        authUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=x", stage: "waiting", browserOpened: true,
+        instructions: null, codeRequired: false } };
+    },
+    cancel: async (input) => {
+      calls.push(["cancel", input]);
+      return { requestId: input.requestId, status: "canceled" };
+    },
+    close: () => { calls.push(["close"]); },
+  };
+  const value = fixture({ loginManagers: { antigravity: manager } });
+  const agy = NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID;
+  try {
+    const start = await value.controller.handle("runtime.account.login.start", { runtimeAccountId: agy, mode: "browser" });
+    assert.equal(validateRuntimeAccountServiceResult("runtime.account.login.start", start).authUrl, null,
+      "a runtime that opens the browser itself reports its URL later");
+    const read = await value.controller.handle("runtime.account.login.read", { runtimeAccountId: agy });
+    assert.equal(validateRuntimeAccountServiceResult("runtime.account.login.read", read).login.browserOpened, true);
+    assert.deepEqual(await value.controller.handle("runtime.account.login.cancel", { runtimeAccountId: agy, requestId: "agy-1" }),
+      { requestId: "agy-1", status: "canceled" });
+    await assert.rejects(value.controller.handle("runtime.account.login.start", { runtimeAccountId: agy, mode: "deviceCode" }),
+      { code: "RUNTIME_ACCOUNT_AUTH_UNSUPPORTED" });
+    for (const method of ["runtime.account.auth.read", "runtime.account.logout"]) {
+      await assert.rejects(value.controller.handle(method, { runtimeAccountId: agy }), { code: "RUNTIME_ACCOUNT_AUTH_UNSUPPORTED" });
+    }
+    const codex = await value.controller.handle("runtime.account.login.read", { runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID });
+    assert.deepEqual(validateRuntimeAccountServiceResult("runtime.account.login.read", codex), { login: null });
+    assert.deepEqual(value.authCalls.map(([name]) => name), ["read"], "only Codex reaches the Codex auth manager");
+    assert.deepEqual(calls.map(([name]) => name), ["start", "read", "cancel"]);
+  } finally {
+    value.controller.close();
+    fs.rmSync(value.root, { recursive: true });
+  }
+  assert.deepEqual(calls.at(-1), ["close"], "closing the controller stops active sign-ins");
+});
+
+test("OpenCode signs into a chosen provider through its manager", async () => {
+  const calls = [];
+  const manager = {
+    read: async () => ({ login: null }),
+    cancel: async (input) => ({ requestId: input.requestId, status: "canceled" }),
+    options: async (input) => { calls.push(["options", input]); return { providers: [] }; },
+    providerStart: async (input) => {
+      calls.push(["providerStart", input]);
+      return { requestId: "oc-1", mode: "browser", status: "waiting", loginId: "oc-1", authUrl: "https://github.com/login/device" };
+    },
+    submit: async (input) => { calls.push(["submit", input]); return { requestId: input.requestId, status: "succeeded" }; },
+    apiKey: async (input) => { calls.push(["apiKey", input]); return { saved: true }; },
+  };
+  const value = fixture({ loginManagers: { opencode: manager } });
+  const opencode = NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID;
+  try {
+    assert.deepEqual(await value.controller.handle("runtime.account.login.options", { runtimeAccountId: opencode }), { providers: [] });
+    await value.controller.handle("runtime.account.login.provider.start",
+      { runtimeAccountId: opencode, providerId: "github-copilot", method: 0, inputs: { deploymentType: "github.com" } });
+    await value.controller.handle("runtime.account.login.submit", { runtimeAccountId: opencode, requestId: "oc-1", code: "abc" });
+    await value.controller.handle("runtime.account.login.apikey",
+      { runtimeAccountId: opencode, providerId: "deepseek", key: "sk-test", inputs: {} });
+    assert.deepEqual(calls.map(([name]) => name), ["options", "providerStart", "submit", "apiKey"]);
+    await assert.rejects(value.controller.handle("runtime.account.login.start", { runtimeAccountId: opencode, mode: "browser" }),
+      { code: "RUNTIME_ACCOUNT_AUTH_UNSUPPORTED" }, "OpenCode needs a provider choice");
+    await assert.rejects(value.controller.handle("runtime.account.login.options", { runtimeAccountId: NATIVE_CODEX_RUNTIME_ACCOUNT_ID }),
+      { code: "RUNTIME_ACCOUNT_AUTH_UNSUPPORTED" }, "Codex has no provider choice");
+    for (const params of [
+      { runtimeAccountId: opencode, providerId: "../x", method: 0, inputs: {} },
+      { runtimeAccountId: opencode, providerId: "openai", method: 9, inputs: {} },
+      { runtimeAccountId: opencode, providerId: "openai", method: 0, inputs: { "bad key": "x" } },
+    ]) {
+      assert.throws(() => validateRuntimeAccountServiceParams("runtime.account.login.provider.start", params), { code: "INVALID_PARAMS" });
+    }
+    assert.throws(() => validateRuntimeAccountServiceParams("runtime.account.login.apikey",
+      { runtimeAccountId: opencode, providerId: "deepseek", key: "line\nbreak", inputs: {} }), { code: "INVALID_PARAMS" });
+  } finally {
+    value.controller.close();
+    fs.rmSync(value.root, { recursive: true });
+  }
+});
 
 test("protocol rejects raw paths and response-only storage paths", () => {
   assert.throws(
@@ -326,6 +417,9 @@ test("non-Codex auth operations fail closed before touching the Codex auth manag
       ["runtime.account.login.cancel", {
         runtimeAccountId: NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
         requestId: "request-1",
+      }],
+      ["runtime.account.login.read", {
+        runtimeAccountId: NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,
       }],
       ["runtime.account.logout", {
         runtimeAccountId: NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID,

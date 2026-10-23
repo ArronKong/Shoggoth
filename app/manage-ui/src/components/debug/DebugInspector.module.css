@@ -801,7 +801,11 @@
   overflow-y: auto;
 }
 .histRow {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) 14px minmax(0, 0.8fr);
+  flex: 0 0 auto;
+  min-height: 16px;
+  line-height: 1.5;
   align-items: baseline;
   gap: 5px;
   font-family: var(--mono);
@@ -810,17 +814,22 @@
   overflow: hidden;
 }
 .histSel {
+  grid-column: 1;
+  min-width: 0;
   color: #6b7280;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 104px;
 }
 .histProp {
+  grid-column: 2;
   color: #4b5563;
-  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .histForced {
-  flex: 0 0 auto;
+  grid-column: 3;
   min-width: 14px;
   padding: 0 3px;
   text-align: center;
@@ -838,11 +847,12 @@
   margin-top: 2px;
 }
 .histVal {
+  grid-column: 4;
   color: #1d1d1f;
   font-weight: 600;
-  margin-left: auto;
-  flex-shrink: 0;
+  min-width: 0;
   max-width: 96px;
+  text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
 }

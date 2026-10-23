@@ -520,6 +520,36 @@ test("happy stream uses native account GROK_HOME, models, controlled MCP and loc
   }
 });
 
+test("fatal ACP response mismatch keeps the accepted operation's durable terminal readable", async () => {
+  const fixture = fixtureOptions(standardServer((message, child) => {
+    if (message.method !== "session/prompt") return NO_RESPONSE;
+    setImmediate(() => {
+      child.sendNotification("session/update", { sessionId: message.params.sessionId,
+        update: { sessionUpdate: "tool_call", toolCallId: "search-a", kind: "search",
+          title: "Search", status: "in_progress", rawInput: {} } });
+      setImmediate(() => child.sendResult(900_000, {}));
+    });
+    return NO_RESPONSE;
+  }));
+  try {
+    const runtime = await acquire(fixture);
+    await startSession(runtime);
+    const completed = [];
+    runtime.subscribe(event => { if (event.type === "complete") completed.push(event); });
+    const turn = await runtime.turnStart({ sessionId: "session-1", operationId: "response-mismatch", prompt: "search" });
+    await assert.rejects(runtime.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+    const history = await runtime.sessionRead({ sessionId: "session-1", includeTurns: true });
+    assert.equal(history.session.turns[0].id, turn.turn.id);
+    assert.equal(history.session.turns[0].status, "interrupted");
+    assert.equal(history.session.turns[0].errorCode, "GROK_ACP_UNKNOWN_RESPONSE_ID");
+    assert.deepEqual(history.session.turns[0].items, [{ type: "userMessage", clientId: "response-mismatch" }]);
+    assert.equal(completed.length, 1);
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/prompt").length, 1);
+    await assert.rejects(async () => runtime.turnStart({ sessionId: "session-1", operationId: "new-work", prompt: "must not run" }));
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});
+
 test("ACP command catalog is session-scoped and recognized commands bypass prompt wrapping", async () => {
   const prompts = [];
   const server = standardServer((message, child) => {
@@ -584,6 +614,42 @@ test("ACP command catalog is session-scoped and recognized commands bypass promp
     });
     await waitFor(() => prompts.length === 1, "native command prompt");
     assert.deepEqual(prompts, ["/memory list"]);
+    await fixture.adapter.stopAll();
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a completed bare /compact turn publishes its compacted notice before completion", async () => {
+  const prompts = [];
+  const server = standardServer((message, child) => {
+    if (message.method !== "session/prompt") return undefined;
+    prompts.push(message.params.prompt[0].text);
+    setImmediate(() => child.sendResult(message.id, { stopReason: "end_turn" }));
+    return NO_RESPONSE;
+  });
+  const fixture = fixtureOptions(server);
+  try {
+    const runtime = await acquire(fixture);
+    assert.equal(runtime.capabilities["context.compact.native"], true);
+    const started = await startSession(runtime, "chat:compact");
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    const turn = (operationId, prompt) => runtime.turnStart({ sessionId: started.session.id, operationId, prompt,
+      model: "grok-4.6", cwd: "/tmp/workspace",
+      permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" } });
+    assert.deepEqual(await runtime.commandExecute({ sessionId: started.session.id, text: "/compact" }),
+      { kind: "send", text: "/compact", warning: null });
+    const compacted = await turn("operation-compact", "/compact");
+    await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === compacted.turn.id), "compact turn");
+    const kinds = events.filter((event) => event.turnId === compacted.turn.id).map((event) => event.type);
+    assert.deepEqual(kinds.slice(-2), ["context_compacted", "complete"]);
+    const notice = events.find((event) => event.type === "context_compacted");
+    assert.equal(notice.contextUsage.runtimeSessionId, started.session.id);
+    const ordinary = await turn("operation-ordinary", "compact the notes please");
+    await waitFor(() => events.some((event) => event.type === "complete" && event.turnId === ordinary.turn.id), "ordinary turn");
+    assert.equal(events.filter((event) => event.type === "context_compacted").length, 1, "only the bare command compacts");
+    assert.equal(prompts[0], "/compact");
     await fixture.adapter.stopAll();
   } finally {
     fixture.cleanup();
@@ -1348,6 +1414,42 @@ test("native failure categories require the exact prompt receipt and survive ses
       assert.equal(JSON.stringify(session).includes(diagnostic), false);
       await fixture.adapter.stopAll();
     } finally { fixture.cleanup(); }
+  }
+});
+
+test("prompt RPC errors retain provider limits with or without an earlier queue receipt", async () => {
+  for (const accepted of [false, true]) {
+    for (const [diagnostic, expectedCode] of [
+      ["API error (status 402 Payment Required): Grok Build usage balance exhausted", "RUNTIME_QUOTA_EXHAUSTED"],
+      ["API error (status 429 Too Many Requests): rate limit exceeded", "RUNTIME_RATE_LIMITED"],
+      ["Unexpected upstream error", "GROK_ACP_REMOTE_ERROR"],
+    ]) {
+      const fixture = fixtureOptions(standardServer((message, child) => {
+        if (message.method !== "session/prompt") return undefined;
+        if (accepted) child.sendNotification("_x.ai/queue/changed", { sessionId: message.params.sessionId,
+          entries: [{ id: "native-current", kind: "prompt", text: message.params.prompt[0].text }] });
+        return rpcError(-32603, `${diagnostic}; private upstream detail`);
+      }));
+      try {
+        const runtime = await acquire(fixture);
+        await startSession(runtime);
+        const events = [];
+        runtime.host.subscribe(event => events.push(event));
+        const input = { sessionId: "session-1", operationId: "rpc-failure-check", prompt: "check" };
+        if (accepted) await runtime.turnStart(input);
+        else await assert.rejects(runtime.turnStart(input), { code: expectedCode });
+        await waitFor(() => runtime.host.activeTurns.size === 0, "RPC failure completion");
+        const { session } = await runtime.sessionRead({ sessionId: "session-1", includeTurns: true });
+        assert.equal(session.turns[0].status, "failed");
+        assert.equal(session.turns[0].errorCode, expectedCode);
+        if (accepted) assert.equal(events.find(event => event.type === "complete")?.errorCode, expectedCode);
+        assert.equal(JSON.stringify([session, events]).includes("private upstream detail"), false);
+        if (accepted) assert.equal((await runtime.turnStart(input)).turn.status, "failed");
+        else await assert.rejects(runtime.turnStart(input), { code: expectedCode });
+        assert.equal(fixture.children[0].messages.filter(message => message.method === "session/prompt").length, 1);
+        await fixture.adapter.stopAll();
+      } finally { fixture.cleanup(); }
+    }
   }
 });
 
@@ -3200,4 +3302,330 @@ for (const version of [2, 3]) test(`ledger schema ${version} is refused without 
     await assert.rejects(acquire(fixture), { code: "GROK_BUILD_LEDGER_INVALID" });
     assert.deepEqual(fs.readFileSync(ledgerPath), bytes);
   } finally { await fixture.adapter.stopAll(); fixture.cleanup(); }
+});
+
+test("native system rules survive transport restart and policy changes stop before dispatch", async () => {
+  const fallback = standardServer(message => message.method === "session/prompt" ? rpcResult({ stopReason: "end_turn" }) : undefined);
+  const fixture = fixtureOptions((message, child) => {
+    if (message.method === "initialize") {
+      const result = initializeResult({ authMethods: [], defaultAuthMethodId: null });
+      result._meta.agentVersion = "1.0.63";
+      return rpcResult(result);
+    }
+    return fallback(message, child);
+  });
+  try {
+    let runtime = await acquire(fixture);
+    const session = await startSession(runtime);
+    const created = fixture.children[0].messages.find(message => message.method === "session/new");
+    assert.equal(created.params._meta.rules, "Keep changes scoped.");
+    const input = { sessionId: session.session.id, operationId: "system-policy-one", prompt: "actual user request",
+      turnDeveloperInstructions: "CURRENT_RUN_ONLY", context: "CURRENT_MEMORY", cwd: "/tmp/workspace" };
+    await runtime.turnStart(input);
+    await waitFor(() => runtime.host.activeTurns.size === 0, "first policy turn");
+    const firstPrompt = fixture.children[0].messages.find(message => message.method === "session/prompt");
+    assert.doesNotMatch(firstPrompt.params.prompt[0].text, /Keep changes scoped\./u);
+    assert.match(firstPrompt.params.prompt[0].text, /CURRENT_RUN_ONLY/u);
+    await fixture.adapter.stop(binding());
+    runtime = await acquire(fixture);
+    await runtime.sessionResume({ sessionId: session.session.id, developerInstructions: "Keep changes scoped.", cwd: "/tmp/workspace" });
+    await runtime.turnStart({ ...input, operationId: "system-policy-two" });
+    await waitFor(() => runtime.host.activeTurns.size === 0, "resumed policy turn");
+    assert.doesNotMatch(fixture.children[1].messages.find(message => message.method === "session/prompt").params.prompt[0].text,
+      /Keep changes scoped\./u);
+    const before = fixture.children[1].messages.length;
+    await assert.rejects(runtime.sessionResume({ sessionId: session.session.id,
+      developerInstructions: "A genuinely changed complete policy.", cwd: "/tmp/workspace" }),
+    { code: "RUNTIME_SESSION_INSTRUCTIONS_CHANGED", acceptance: "not_sent" });
+    assert.equal(fixture.children[1].messages.length, before, "a changed immutable policy sends neither load nor user prompt");
+    await runtime.sessionResume({ sessionId: session.session.id, developerInstructions: "changed during recovery",
+      preserveRunningContext: true, cwd: "/tmp/workspace" });
+  } finally { await fixture.adapter.stopAll(); fixture.cleanup(); }
+});
+
+test("a failed native rule receipt cannot publish a legacy-looking session or replay session/new", async () => {
+  const fallback = standardServer();
+  const fixture = fixtureOptions((message, child) => {
+    if (message.method === "initialize") {
+      const result = initializeResult({ authMethods: [], defaultAuthMethodId: null });
+      result._meta.agentVersion = "1.0.63";
+      return rpcResult(result);
+    }
+    return fallback(message, child);
+  });
+  try {
+    let runtime = await acquire(fixture);
+    runtime.host.instructionState.record = () => { throw Object.assign(new Error("fixture disk write failed"), { code: "ENOSPC" }); };
+    await assert.rejects(startSession(runtime), { code: "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN" });
+    assert.equal(runtime.host.ledger.snapshot().sessions.length, 0);
+    assert.equal(runtime.host.ledger.snapshot().pendingSessions.length, 1);
+    assert.equal(fixture.children[0].messages.filter(message => message.method === "session/new").length, 1);
+    await fixture.adapter.stop(binding());
+    runtime = await acquire(fixture);
+    await assert.rejects(startSession(runtime), { code: "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN" });
+    assert.equal(fixture.children[1].messages.some(message => message.method === "session/new" || message.method === "session/prompt"), false);
+  } finally { await fixture.adapter.stopAll(); fixture.cleanup(); }
+});
+
+// Real Grok 1.0.63 leaks its internal file-watcher replies onto ACP stdout.
+// Keep the exception local to that runtime and prove business replies stay strict.
+const { AcpJsonlClient } = require(path.join(ROOT, "app/agent-service/acp-jsonl-client"));
+const { CodexJsonlRpcClient } = require(path.join(ROOT, "app/agent-service/codex-jsonl-rpc"));
+const { PiRpcProcess } = require(path.join(ROOT, "app/agent-service/pi-rpc-process"));
+const { DeepSeekHarnessProcess } = require(path.join(ROOT, "app/agent-service/deepseek-harness-process"));
+
+function reloadAck(id = "skills-reload", reloaded = 1) {
+  return { jsonrpc: "2.0", id, result: { result: { reloaded } } };
+}
+
+function reloadInitialize(version = "1.0.63") {
+  const result = initializeResult({ authMethods: [], defaultAuthMethodId: null });
+  result._meta.agentVersion = version;
+  return result;
+}
+
+async function reloadTransport(version = "1.0.63", options = {}) {
+  const child = new FakeChild(message => message.method === "initialize"
+    ? rpcResult(reloadInitialize(version)) : NO_RESPONSE);
+  const rpc = new GrokBuildAcpJsonlClient(child, { requestTimeoutMs: 1_000, ...options });
+  await rpc.request("initialize", { protocolVersion: 1 });
+  return { child, rpc, async close() { await rpc.terminate(); child.closeProcess(); } };
+}
+
+for (const id of ["skills-reload", "workflows-reload"]) {
+  test(`Grok 1.0.63 ${id} acknowledgements neither settle nor interrupt concurrent requests`, async () => {
+    const diagnostics = [];
+    const f = await reloadTransport("1.0.63", { onDiagnostic: event => diagnostics.push(event) });
+    try {
+      const first = f.rpc.request("session/prompt", { sessionId: "one" });
+      const second = f.rpc.request("session/prompt", { sessionId: "two" });
+      // Observe rejections immediately so the pre-fix regression stays clean.
+      const results = Promise.allSettled([first, second]);
+      await waitFor(() => f.child.messages.length === 3, "both prompts written");
+      f.child.send(reloadAck(id, 0));
+      f.child.send(reloadAck(id, 2));
+      assert.equal(f.rpc.ended, false);
+      assert.equal(f.rpc.pending.size, 2, "internal acknowledgements cannot settle business requests");
+      f.child.sendResult(3, { stopReason: "end_turn", session: "two" });
+      f.child.sendResult(2, { stopReason: "end_turn", session: "one" });
+      assert.deepEqual((await results).map(row => row.value?.session), ["one", "two"]);
+      assert.deepEqual(diagnostics, [{ code: "GROK_ACP_INTERNAL_RELOAD_ACK", id, agentVersion: "1.0.63" }]);
+      f.child.send(reloadAck(id));
+      assert.equal(f.rpc.ended, false, "idle reload is also harmless");
+      assert.equal(diagnostics.length, 1, "repeated reloads do not flood diagnostics");
+      f.child.sendResult(2, { stopReason: "end_turn" });
+      await assert.rejects(f.rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+    } finally { await f.close(); }
+  });
+}
+
+test("Grok initializes compatibility before the next frame in the same stdout chunk", async () => {
+  const child = new FakeChild();
+  const rpc = new GrokBuildAcpJsonlClient(child);
+  try {
+    const initialized = rpc.request("initialize", { protocolVersion: 1 });
+    await waitFor(() => child.messages.length === 1, "initialize written");
+    child.stdout.write([
+      { jsonrpc: "2.0", id: 1, result: reloadInitialize() }, reloadAck(),
+    ].map(message => JSON.stringify(message) + "\n").join(""));
+    await initialized;
+    assert.equal(rpc.ended, false);
+  } finally { await rpc.terminate(); child.closeProcess(); }
+});
+
+for (const version of [null, "1.0.62", "1.0.64", "2.0.0", "1.0.63+unknown"]) {
+  test(`unverified Grok version ${version} retains strict response matching`, async () => {
+    const f = await reloadTransport(version);
+    try {
+      f.child.send(reloadAck());
+      await assert.rejects(f.rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+    } finally { await f.close(); }
+  });
+}
+
+test("Grok internal acknowledgements before initialize remain a protocol failure", async () => {
+  const child = new FakeChild(), rpc = new GrokBuildAcpJsonlClient(child);
+  try {
+    child.send(reloadAck());
+    await assert.rejects(rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+  } finally { await rpc.terminate(); child.closeProcess(); }
+});
+
+for (const [label, frame] of [
+  ["unknown string ID", reloadAck("models-reload")],
+  ["unissued number ID", reloadAck(900_000)],
+  ["negative count", reloadAck("skills-reload", -1)],
+  ["fractional count", reloadAck("skills-reload", 0.5)],
+  ["unsafe count", reloadAck("skills-reload", Number.MAX_SAFE_INTEGER + 1)],
+  ["string count", reloadAck("skills-reload", "1")],
+  ["missing result", { jsonrpc: "2.0", id: "skills-reload" }],
+  ["error reply", { jsonrpc: "2.0", id: "skills-reload", error: { code: -32603 } }],
+  ["result and error", { ...reloadAck(), error: { code: -32603 } }],
+  ["extra envelope field", { ...reloadAck(), extra: true }],
+  ["extra result field", { ...reloadAck(), result: { result: { reloaded: 1 }, extra: true } }],
+  ["extra count field", { ...reloadAck(), result: { result: { reloaded: 1, extra: true } } }],
+  ["array payload", { ...reloadAck(), result: [{ result: { reloaded: 1 } }] }],
+  ["null payload", { ...reloadAck(), result: null }],
+]) {
+  test(`Grok reload compatibility rejects ${label}`, async () => {
+    const f = await reloadTransport();
+    try {
+      const prompt = f.rpc.request("session/prompt", {});
+      const rejected = assert.rejects(prompt, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+      await waitFor(() => f.child.messages.length === 2, "prompt written");
+      f.child.send(frame);
+      await rejected;
+      await assert.rejects(f.rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+    } finally { await f.close(); }
+  });
+}
+
+test("Grok reload ID that collides with a reverse request remains ambiguous and fails", async () => {
+  const f = await reloadTransport();
+  try {
+    f.child.send({ jsonrpc: "2.0", id: "skills-reload", method: "fs/read_text_file", params: {} });
+    await waitFor(() => f.child.messages.some(message => message.id === "skills-reload"), "reverse request denied");
+    f.child.send(reloadAck());
+    await assert.rejects(f.rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+  } finally { await f.close(); }
+});
+
+test("Grok reload diagnostic observer failure cannot stop the connection", async () => {
+  const f = await reloadTransport("1.0.63", { onDiagnostic() { throw new Error("observer failed"); } });
+  try {
+    f.child.send(reloadAck());
+    assert.equal(f.rpc.ended, false);
+  } finally { await f.close(); }
+});
+
+test("Grok implicit messages preserve separate pre-tool commentary and silent final answers", async () => {
+  const fixture = fixtureOptions(standardServer((message, child) => {
+    if (message.method !== "session/prompt") return NO_RESPONSE;
+    setImmediate(() => {
+      const send = update => child.sendNotification("session/update", { sessionId: message.params.sessionId, update });
+      send({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Checking " } });
+      send({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "the watermark." } });
+      send({ sessionUpdate: "tool_call", toolCallId: "search", kind: "search", title: "Search", status: "in_progress" });
+      send({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Still checking." } });
+      send({ sessionUpdate: "tool_call_update", toolCallId: "search", status: "completed" });
+      send({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "NO_" } });
+      send({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "REPLY" } });
+      child.sendResult(message.id, { stopReason: "end_turn" });
+    });
+    return NO_RESPONSE;
+  }));
+  try {
+    const runtime = await acquire(fixture), session = await startSession(runtime);
+    const events = [];
+    runtime.subscribe(event => events.push(event));
+    await runtime.turnStart({ sessionId: session.session.id, operationId: "implicit-silent", prompt: "Check" });
+    await waitFor(() => events.some(event => event.type === "complete"), "real final");
+    const history = await runtime.sessionRead({ sessionId: session.session.id, includeTurns: true });
+    assert.deepEqual(history.session.turns[0].items.filter(item => item.type === "agentMessage").map(item => item.text),
+      ["Checking the watermark.", "Still checking.", "NO_REPLY"]);
+    assert.deepEqual(events.filter(event => event.type === "text").map(event => event.text), ["Checking the watermark.", "Still checking.", "NO_REPLY"]);
+  } finally { await fixture.adapter.stopAll(); fixture.cleanup(); }
+});
+
+test("Grok reload acknowledgements preserve the accepted turn until its real final reply", async () => {
+  const fallback = standardServer((message, child) => {
+    if (message.method === "session/prompt") setImmediate(() => {
+      child.sendNotification("session/update", { sessionId: message.params.sessionId,
+        update: { sessionUpdate: "tool_call", toolCallId: "search", title: "Search", kind: "search", status: "in_progress" } });
+    });
+    return NO_RESPONSE;
+  });
+  const fixture = fixtureOptions((message, child) => message.method === "initialize"
+    ? rpcResult(reloadInitialize()) : fallback(message, child));
+  try {
+    const runtime = await acquire(fixture);
+    const session = await startSession(runtime);
+    const completed = [];
+    runtime.subscribe(event => { if (event.type === "complete") completed.push(event); });
+    await runtime.turnStart({ sessionId: session.session.id, operationId: "reload-survives", prompt: "Search" });
+    const child = fixture.children[0];
+    child.send(reloadAck()); child.send(reloadAck("workflows-reload"));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(runtime.host.state, "ready");
+    assert.equal(completed.length, 0);
+    assert.equal(runtime.host.activeTurns.size, 1);
+    const request = child.messages.find(message => message.method === "session/prompt");
+    child.sendNotification("session/update", { sessionId: session.session.id,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "CHECK COMPLETE" } } });
+    child.sendResult(request.id, { stopReason: "end_turn" });
+    await waitFor(() => completed.length === 1, "real prompt completion");
+    const history = await runtime.sessionRead({ sessionId: session.session.id, includeTurns: true });
+    assert.equal(history.session.turns[0].status, "completed");
+    assert.equal(child.messages.filter(message => message.method === "session/prompt").length, 1);
+    child.send(reloadAck());
+    assert.equal(completed.length, 1);
+  } finally { await fixture.adapter.stopAll(); fixture.cleanup(); }
+});
+
+for (const [name, makeClient, code] of [
+  ["generic ACP", child => new AcpJsonlClient(child), "ACP_UNKNOWN_RESPONSE_ID"],
+  ["Antigravity", child => new AcpJsonlClient(child, { naming: {
+    codePrefix: "ANTIGRAVITY_ACP", protocolLabel: "Antigravity ACP", runtimeName: "Antigravity" } }), "ANTIGRAVITY_ACP_UNKNOWN_RESPONSE_ID"],
+  ["Codex", child => new CodexJsonlRpcClient(child), "RPC_UNKNOWN_RESPONSE_ID"],
+]) {
+  test(`${name} never inherits Grok's internal reload exception`, async () => {
+    const child = new FakeChild(message => message.method === "initialize" ? rpcResult(reloadInitialize()) : NO_RESPONSE);
+    const rpc = makeClient(child);
+    try {
+      await rpc.request("initialize", { protocolVersion: 1 });
+      child.send(reloadAck());
+      await assert.rejects(rpc.terminated, { code });
+    } finally { await rpc.terminate(); child.closeProcess(); }
+  });
+}
+
+for (const [name, Process, code] of [
+  ["Pi", PiRpcProcess, "PI_RPC_RESPONSE_INVALID"],
+  ["DeepSeek", DeepSeekHarnessProcess, "DEEPSEEK_HARNESS_RESPONSE_INVALID"],
+]) {
+  test(`${name} retains strict native response IDs`, async () => {
+    const child = new FakeChild(), failures = [];
+    child.kill = () => child.closeProcess();
+    const rpc = new Process({ child, onFatal: error => failures.push(error.code) });
+    try {
+      child.send({ type: "response", id: "skills-reload", command: "prompt", success: true, data: {} });
+      assert.deepEqual(failures, [code]);
+    } finally { child.closeProcess(); await rpc.closedPromise; }
+  });
+}
+
+for (const [label, result] of [
+  ["wrong protocol", { ...reloadInitialize(), protocolVersion: 2 }],
+  ["invalid capabilities", { ...reloadInitialize(), agentCapabilities: null }],
+]) test(`Grok ${label} handshake cannot enable reload compatibility`, async () => {
+  const child = new FakeChild(() => rpcResult(result));
+  const rpc = new GrokBuildAcpJsonlClient(child);
+  try {
+    await rpc.request("initialize", { protocolVersion: 1 });
+    child.send(reloadAck());
+    await assert.rejects(rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+  } finally { await rpc.terminate(); child.closeProcess(); }
+});
+
+test("Grok notifications and ordinary results cannot enable reload compatibility", async () => {
+  const f = await reloadTransport("1.0.64");
+  try {
+    f.child.sendNotification("_x.ai/models/update", reloadInitialize());
+    const request = f.rpc.request("session/new", {});
+    await waitFor(() => f.child.messages.length === 2, "session request written");
+    f.child.sendResult(2, reloadInitialize());
+    await request;
+    f.child.send(reloadAck());
+    await assert.rejects(f.rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+  } finally { await f.close(); }
+});
+
+test("a failed Grok initialize response cannot enable reload compatibility", async () => {
+  const child = new FakeChild(() => rpcError(-32603, "fixture failure"));
+  const rpc = new GrokBuildAcpJsonlClient(child);
+  try {
+    await assert.rejects(rpc.request("initialize", {}), { code: "GROK_ACP_REMOTE_ERROR" });
+    child.send(reloadAck());
+    await assert.rejects(rpc.terminated, { code: "GROK_ACP_UNKNOWN_RESPONSE_ID" });
+  } finally { await rpc.terminate(); child.closeProcess(); }
 });

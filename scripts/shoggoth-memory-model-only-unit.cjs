@@ -155,7 +155,7 @@ test("service rejects a corrected or expired source before sending a queued extr
           afterSeq: source.seq - 1, limit: 1, completedOnly: true });
         assert.equal(visibleBefore.events[0]?.eventId, source.id,
           "completed direct user source must be eligible before Runtime acquisition");
-        const old = f.service.memoryEngine.propose({ profileId: session.profileId,
+        const old = await f.service.memoryEngine.propose({ profileId: session.profileId,
           scope: "project", type: "semantic", content: "用户的项目代号是蓝鸟",
           sourceRefs: [source.id, run.id], classification: "explicit" });
         const manager = f.service.workRunCoordinator.runtimeManager;
@@ -180,11 +180,11 @@ test("service rejects a corrected or expired source before sending a queued extr
         });
         await acquired;
         if (state === "superseded") {
-          f.service.memoryEngine.propose({ profileId: session.profileId,
+          await f.service.memoryEngine.propose({ profileId: session.profileId,
             scope: "project", type: "semantic", content: "用户的项目代号是绿洲",
             sourceRefs: ["user-edit:manual"], classification: "explicit", supersedes: old.id });
         } else {
-          f.service.memoryEngine.update({ profileId: session.profileId,
+          await f.service.memoryEngine.update({ profileId: session.profileId,
             id: old.id, validUntil: Date.now() - 1 });
         }
         releaseAcquire();

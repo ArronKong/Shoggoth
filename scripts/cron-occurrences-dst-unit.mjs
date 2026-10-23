@@ -34,7 +34,7 @@ const src = path.join(root, "app/manage-ui/src/lib/cronOccurrences.ts");
 const esbuild = path.join(root, "app/manage-ui/node_modules/.bin/esbuild");
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "cronocc-dst-"));
 const out = path.join(outDir, "cronOccurrences.mjs");
-execFileSync(esbuild, [src, "--format=esm", "--loader:.ts=ts", `--outfile=${out}`], { stdio: "pipe" });
+execFileSync(esbuild, [src, "--bundle", "--format=esm", "--loader:.ts=ts", `--outfile=${out}`], { stdio: "pipe" });
 const { occurrencesOnDay, hourlyOccurrencesOnDay } = await import(pathToFileURL(out).href);
 
 const results = [];

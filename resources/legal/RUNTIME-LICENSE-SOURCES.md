@@ -4,24 +4,40 @@ Shoggoth-authored source code is Apache-2.0 licensed. The components below retai
 own licenses. This index records the runtime license documents added on
 2026-09-18; it is not the complete inventory of all application dependencies.
 
-## OpenAI Codex 0.149.0
+## OpenAI Codex 0.159.2
 
 The pinned runtime version is recorded in `build/codex-runtime-manifest.json` in
 the source repository and `codex/runtime-manifest.json` in the application.
-The generated protocol files under `schemas/codex-app-server/0.149.0` originate
+The generated protocol files under `schemas/codex-app-server/0.159.2` originate
 from that version of Codex.
 
-- Source: <https://github.com/openai/codex/tree/rust-v0.149.0>
+- Source: <https://github.com/openai/codex/tree/rust-v0.159.2>
 - [CODEX-LICENSE.txt](CODEX-LICENSE.txt): unmodified copy of
-  <https://raw.githubusercontent.com/openai/codex/rust-v0.149.0/LICENSE>
+  <https://raw.githubusercontent.com/openai/codex/rust-v0.159.2/LICENSE>
 - [CODEX-NOTICE.txt](CODEX-NOTICE.txt): unmodified copy of
-  <https://raw.githubusercontent.com/openai/codex/rust-v0.149.0/NOTICE>, including
+  <https://raw.githubusercontent.com/openai/codex/rust-v0.159.2/NOTICE>, including
   the upstream Ratatui attribution.
 
 The [third-party index](THIRD-PARTY-NOTICES.md) also preserves the upstream
 ripgrep, PCRE2 and zsh license texts. Their versions were read from the pinned
 package binaries. The two Codex documents above do not replace those texts.
+Codex 0.159.2 also bundles a native voice host, dynamically linked GStreamer,
+GLib and their dependencies. Their unmodified notices and complete license texts
+are retained under `licenses/source/codex-voice/` and inside the runtime package
+at `codex-resources/voice/`. The exact versions, corresponding source archive URLs
+and SHA-256 digests are retained in `codex-voice/sources.json`; the upstream build
+source and commit are identified in `codex-voice/manifest.json`.
 When updating Codex, review its license and notices at the new pinned version.
+
+## gogcli 0.42.0
+
+The independent Gmail MCP runtime is the unmodified `gog` executable from
+<https://github.com/openclaw/gogcli/releases/tag/v0.42.0>. Its arm64 and x64
+release artifacts are pinned in `build/gog-runtime-manifest.json` and copied
+into `gogcli/gog` in the application. The project declares MIT; its copyright
+notice and complete MIT terms are retained in
+[GOGCLI.txt](licenses/source/GOGCLI.txt). Shoggoth's Service adapter is separate
+from the upstream binary.
 
 ## Cua and UniFFI
 

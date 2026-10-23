@@ -36,15 +36,19 @@ async function run() {
     const rows = await read();
     assert.equal(rows.length, 7);
     assert.ok(rows.every(row => row.backendId === "shoggoth"));
+    assert.ok(rows.every(row => row.readiness === "unverified"), "installation without a proof is never Ready");
     assert.equal(rows.find(row => row.runtime === "pi").enabled, false);
     assert.equal(rows.find(row => row.runtime === "claude-code").releaseEnabled, false);
     assert.equal(rows.find(row => row.runtime === "codex").installation, "available");
     assert.deepEqual(backend._bindingAvailability("shoggoth-codex", "codex", NATIVE_CODEX_RUNTIME_ACCOUNT_ID),
       { available: true, reason: null });
     assert.ok(!JSON.stringify(rows).includes(home));
+    // Only Antigravity installs itself from its sign-in.
+    assert.deepEqual(rows.filter(row => row.installsOnSignIn).map(row => row.runtime), ["antigravity"]);
     installed = false; connected = false;
     const refreshed = await read();
     assert.equal(refreshed.find(row => row.runtime === "codex").installation, "unavailable");
+    assert.equal(refreshed.find(row => row.runtime === "antigravity").installsOnSignIn, true);
     assert.deepEqual(backend._bindingAvailability("shoggoth-codex", "codex", NATIVE_CODEX_RUNTIME_ACCOUNT_ID),
       { available: false, reason: "runtime-not-installed" });
     assert.throws(() => backend._assertRuntimeEnabled({ agentId: "shoggoth-codex", runtime: "codex",

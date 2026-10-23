@@ -1,6 +1,8 @@
 "use strict";
+const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
 
 const crypto = require("node:crypto");
+const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
 const { serviceError } = require("./security");
 const { PiRpcJsonlDecoder, encodePiRpcCommand } = require("./pi-rpc-jsonl");
 
@@ -28,6 +30,7 @@ class PiRpcProcess {
     const child = options.child;
     if (!child || !child.stdin || !child.stdout || !child.stderr
       || typeof child.on !== "function" || typeof child.kill !== "function") {
+      retireFailedSpawn(child);
       throw processError("PI_PROCESS_INVALID", "Pi RPC process pipes are invalid");
     }
     this.child = child;
@@ -66,7 +69,7 @@ class PiRpcProcess {
       return Promise.reject(processError("PI_RPC_REQUEST_ID_INVALID", "Pi RPC request id is invalid"));
     }
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 10 * 60 * 1000) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > EXECUTION_TIMEOUT_MS) {
       return Promise.reject(processError("PI_RPC_TIMEOUT_INVALID", "Pi RPC timeout is invalid"));
     }
     return new Promise((resolve, reject) => {
@@ -93,7 +96,7 @@ class PiRpcProcess {
   }
 
   kill(signal = "SIGTERM") {
-    try { this.child.kill(signal); } catch {}
+    try { killStartedChild(this.child, signal); } catch {}
   }
 
   _onData(chunk) {
@@ -125,7 +128,8 @@ class PiRpcProcess {
       clearTimeout(pending.timer);
       if (message.success) pending.resolve(message.data);
       else pending.reject(processError(
-        /auth|credential|api key|login|unauthorized/iu.test(String(message.error || ""))
+        message.error === `Unknown command: ${pending.type}` ? "PI_RPC_COMMAND_UNSUPPORTED"
+          : /auth|credential|api key|login|unauthorized/iu.test(String(message.error || ""))
           ? "AUTH_REQUIRED" : "PI_RPC_REQUEST_FAILED",
         `Pi RPC ${pending.type} failed`,
       ));

@@ -71,14 +71,17 @@ function rejectsCode(action, code) {
 
 function testGeneratedMethodMappingAndContracts() {
   const contract = new CodexSchemaContract({ repoRoot: REPO_ROOT });
-  assert.equal(contract.version, "0.149.0");
-  assert.equal(CODEX_VERSION, "0.149.0");
+  assert.equal(contract.version, "0.159.2");
+  assert.equal(CODEX_VERSION, "0.159.2");
   assert.deepEqual(Object.fromEntries(Object.entries(contract.operations).map(([name, operation]) => [name, operation.method])), {
     initialize: "initialize",
     threadStart: "thread/start",
     threadResume: "thread/resume",
     threadInjectItems: "thread/inject_items",
     threadRead: "thread/read",
+    threadTurnsList: "thread/turns/list",
+    threadItemsList: "thread/items/list",
+    threadUnsubscribe: "thread/unsubscribe",
     threadList: "thread/list",
     threadSetName: "thread/name/set",
     threadArchive: "thread/archive",
@@ -96,7 +99,10 @@ function testGeneratedMethodMappingAndContracts() {
     accountLoginCancel: "account/login/cancel",
     accountLogout: "account/logout",
     modelList: "model/list",
+    configRead: "config/read",
     mcpServerStatusList: "mcpServerStatus/list",
+    experimentalFeatureList: "experimentalFeature/list",
+    mcpServerToolCall: "mcpServer/tool/call",
     skillsList: "skills/list",
   });
 
@@ -105,7 +111,7 @@ function testGeneratedMethodMappingAndContracts() {
     capabilities: null,
   });
   contract.validateResponse("initialize", {
-    userAgent: "codex/0.149.0",
+    userAgent: "codex/0.159.2",
     codexHome: "/tmp/codex-home",
     platformFamily: "unix",
     platformOs: "macos",
@@ -141,6 +147,10 @@ function testGeneratedMethodMappingAndContracts() {
     cursor: null, detail: "toolsAndAuthOnly", limit: 100, threadId: "thread-1",
   });
   contract.validateResponse("mcpServerStatusList", { data: [], nextCursor: null });
+  contract.validateParams("mcpServerToolCall", { server: "fixture", threadId: "thread-1", tool: "echo",
+    arguments: { value: "local" } });
+  contract.validateResponse("mcpServerToolCall", { content: [{ type: "text", text: "local" }],
+    structuredContent: { value: "local" }, isError: false });
   contract.validateParams("skillsList", { cwds: ["/tmp"], forceReload: false });
   contract.validateResponse("skillsList", { data: [] });
   contract.validateParams("turnStart", {
@@ -958,7 +968,7 @@ async function testBinaryVersionProbeIsStrictBoundedAndSanitized() {
   assert.deepEqual(calls[0].options.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(calls[0].options.windowsHide, true);
 
-  for (const version of [CODEX_VERSION, "0.153.4", "0.154.0-alpha.2", "0.153.4+build.1"]) {
+  for (const version of [CODEX_VERSION, "0.160.0", "0.161.0-alpha.2", "0.160.0+build.1"]) {
     const result = await probeCodexBinaryVersion("/safe/system-codex", {
       installationKind: "system",
       env: safeEnv,
@@ -966,7 +976,7 @@ async function testBinaryVersionProbeIsStrictBoundedAndSanitized() {
     });
     assert.deepEqual(result, { version });
   }
-  for (const version of ["0.148.99", "0.149.0-alpha.1", "0.153", "99999999999999999.0.0", "invalid-output"]) {
+  for (const version of ["0.159.1", "0.159.2-alpha.1", "0.153", "99999999999999999.0.0", "invalid-output"]) {
     await assert.rejects(probeCodexBinaryVersion("/safe/system-codex", {
       installationKind: "system",
       env: safeEnv,
@@ -1256,7 +1266,7 @@ async function testRuntimeHostCoreApiEnvironmentAndEvents() {
     assert.equal(initialized.userAgent, `codex/${CODEX_VERSION}`);
     assert.equal(fixture.spawns.length, 1);
     const spawn = fixture.spawns[0];
-    assert.deepEqual(spawn.args, ["-c", "check_for_update_on_startup=false", "app-server", "--stdio"]);
+    assert.deepEqual(spawn.args, ["-c", "check_for_update_on_startup=false", "-c", "skills.include_instructions=false", "app-server", "--stdio"]);
     assert.equal(spawn.options.detached, true);
     assert.equal(spawn.options.env.EVIL_TOKEN, undefined);
     assert.equal(spawn.options.env.OPENAI_API_KEY, "explicit-provider-secret");
@@ -1473,6 +1483,35 @@ async function testAccountAuthHostApiUsesOnlyGeneratedMethods() {
   } finally {
     await bedrock.host.stop().catch(() => {});
     fs.rmSync(bedrock.root, { recursive: true, force: true });
+  }
+}
+
+async function testAccountWorkspaceRoutingIsValidatedAndKeptPrivate() {
+  const routing = { chatgptAccountId: "private-routing-account", backendOrigin: "https://routing.example.test",
+    accountRoutingOverride: "us" };
+  for (const workspaceRouting of [null, routing]) {
+    for (const account of [null, { type: "apiKey" }, { type: "chatgpt", email: "private@example.test", planType: "plus" }]) {
+      const fixture = hostFixture({ childOptions: { accountResponse: { account, requiresOpenaiAuth: true, workspaceRouting } } });
+      try {
+        await fixture.host.initialize();
+        const result = await fixture.host.accountRead({ refreshToken: false });
+        assert.deepEqual(result, { account: account?.type === "chatgpt" ? { type: "chatgpt", planType: "plus" } : account,
+          requiresOpenaiAuth: true });
+        assert.equal(JSON.stringify(result).includes("private"), false);
+        assert.equal(Object.hasOwn(result, "workspaceRouting"), false);
+      } finally { await fixture.host.stop().catch(() => {}); fs.rmSync(fixture.root, { recursive: true, force: true }); }
+    }
+  }
+  for (const [workspaceRouting, code] of [["invalid", "CODEX_SCHEMA_ERROR"], [{}, "CODEX_SCHEMA_ERROR"],
+    [{ ...routing, accountRoutingOverride: "unknown" }, "CODEX_SCHEMA_ERROR"],
+    [{ ...routing, token: "private-routing-canary" }, "CODEX_ACCOUNT_PROTOCOL_INVALID"],
+    [{ ...routing, backendOrigin: "x".repeat(4097) }, "CODEX_ACCOUNT_PROTOCOL_INVALID"]]) {
+    const fixture = hostFixture({ childOptions: { accountResponse: { account: null, requiresOpenaiAuth: true, workspaceRouting } } });
+    try {
+      await fixture.host.initialize();
+      await assert.rejects(fixture.host.accountRead({ refreshToken: false }), error => error.code === code
+        && !error.message.includes("private-routing-canary"));
+    } finally { await fixture.host.stop().catch(() => {}); fs.rmSync(fixture.root, { recursive: true, force: true }); }
   }
 }
 
@@ -2233,7 +2272,7 @@ async function runRealBinarySmoke() {
     maxBuffer: 16 * 1024,
   });
   assert.equal(version.status, 0, "real Codex --version failed");
-  assert.match(version.stdout, /0\.149\.0/);
+  assert.match(version.stdout, /0\.159\.2/);
   const host = new CodexRuntimeHost({
     ...codexHostRuntimeOptions({
       paths: fixture.paths,
@@ -2289,6 +2328,7 @@ async function main() {
     testRealVersionProbeKillsTermIgnoringProcessGroup,
     testRuntimeHostCoreApiEnvironmentAndEvents,
     testAccountAuthHostApiUsesOnlyGeneratedMethods,
+    testAccountWorkspaceRoutingIsValidatedAndKeptPrivate,
     testHostDynamicSecretLimitFailsBeforeAccountRpcWrite,
     testAccountAuthUsesOpaqueLoginIdInternallyAndSanitizesPublicDisplay,
     testPackagedHostUsesPhysicalCodexHomeAsProcessCwd,

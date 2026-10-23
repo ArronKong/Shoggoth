@@ -37,7 +37,7 @@ app.whenReady().then(async()=>{
       await w.webContents.executeJavaScript('window.prepareBundledCapture("light")',true);
       await new Promise(resolve=>setTimeout(resolve,200));
       const result=await w.webContents.executeJavaScript('window.prepareBundledDetailCapture()',true);
-      const dialog=await w.webContents.executeJavaScript('(()=>{const d=document.querySelector("dialog[open]"); const r=d.getBoundingClientRect(); const b=d.querySelector("footer button:last-child").getBoundingClientRect(); const s=d.querySelector("[class*=scroll]"); return {warning:d.textContent.includes("来源包参考文档缺失"), left:r.left,right:r.right,top:r.top,bottom:r.bottom,viewport:innerWidth,viewportHeight:innerHeight,buttonTop:b.top,buttonBottom:b.bottom,scroll:s.scrollWidth,scrollHeight:s.scrollHeight,scrollClientHeight:s.clientHeight}})()',true);
+      const dialog=await w.webContents.executeJavaScript('(()=>{const d=document.querySelector("[role=dialog]"); const action=d.querySelector("footer button:last-child"); action.scrollIntoView({block:"nearest"}); const r=d.getBoundingClientRect(); const b=action.getBoundingClientRect(); const s=d.querySelector(":scope > div"); return {warning:d.textContent.includes("来源包参考文档缺失"), left:r.left,right:r.right,top:r.top,bottom:r.bottom,viewport:innerWidth,viewportHeight:innerHeight,buttonTop:b.top,buttonBottom:b.bottom,scroll:s.scrollWidth,scrollHeight:s.scrollHeight,scrollClientHeight:s.clientHeight}})()',true);
       fs.writeFileSync(path.join(outputDir,'mixpanel-detail-'+width+'.png'),(await w.webContents.capturePage()).toPNG());
       results.push({width,...result,...dialog});
       await w.webContents.executeJavaScript('window.closeBundledDetail()',true);

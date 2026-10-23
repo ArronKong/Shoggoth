@@ -1,5 +1,6 @@
 "use strict";
-const { openRuntimeLedger } = require("./runtime-shared-ledger");
+const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
+const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
 
 const { imageAttachments } = require("./chat-attachments");
 
@@ -15,6 +16,7 @@ const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-
 const { piRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { PiRpcProcess } = require("./pi-rpc-process");
+const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
 const { PiRuntimeLedger, emptyPiUsage } = require("./pi-runtime-ledger");
 const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
 const { classifyProviderFailure } = require("./runtime-provider-errors");
@@ -36,7 +38,6 @@ const {
   piModelRef,
   piWorkspaceShardId,
   resolvePiLaunch,
-  supportsPiVersion,
 } = require("./pi-runtime-paths");
 
 const PARENT_ENV_ALLOWLIST = Object.freeze([
@@ -120,6 +121,7 @@ function inputFingerprint(input) {
   return crypto.createHash("sha256").update(JSON.stringify({
     prompt: input.prompt,
     context: input.context ?? null,
+    ...require("./native-instruction-delivery").turnInstructionFingerprint(input),
     model: input.model ?? null,
     cwd: input.cwd ?? null,
     permissionPolicy: input.permissionPolicy ?? null,
@@ -212,7 +214,7 @@ function securePiCredentialPresent(fileSystem, home) {
 function validateCatalog(state, payload) {
   if (!plain(state) || !safeString(state.sessionId, 128)
     || !plain(payload) || !Array.isArray(payload.models)
-    || payload.models.length === 0 || payload.models.length > MAX_MODELS) {
+    || payload.models.length > MAX_MODELS) {
     throw hostError("RUNTIME_MODEL_CATALOG_INVALID", "Pi model catalog is invalid");
   }
   const defaultRef = state.model && safeString(state.model.provider, 128)
@@ -249,7 +251,7 @@ function validateCatalog(state, payload) {
   if (defaultRef !== null && !seen.has(defaultRef)) {
     throw hostError("RUNTIME_MODEL_CATALOG_INVALID", "Pi default model is missing from its catalog");
   }
-  if (!models.some((model) => model.isDefault)) models[0] = Object.freeze({ ...models[0], isDefault: true });
+  if (models.length && !models.some((model) => model.isDefault)) models[0] = Object.freeze({ ...models[0], isDefault: true });
   return Object.freeze(models);
 }
 
@@ -259,6 +261,7 @@ class PiRuntimeHost {
     if (!this.paths?.stateDir || !this.paths?.trustedRoot) {
       throw hostError("PI_HOST_OPTIONS_INVALID", "Pi host paths are invalid");
     }
+    this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
     this.binding = runtimeBinding(options.runtimeBinding || {
       runtime: PI_RUNTIME,
       runtimeProfileId: options.runtimeProfileId,
@@ -267,9 +270,18 @@ class PiRuntimeHost {
     this.runtimeProfileId = this.binding.runtimeProfileId;
     this.runtimeAccountId = this.binding.runtimeAccountId;
     this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
+    this.nativeHookScope = options.nativeHookScope ?? null;
+    if (this.nativeHookScope !== null && (!plain(this.nativeHookScope)
+      || Object.keys(this.nativeHookScope).length !== 3 || this.nativeHookScope.runId !== this.mcpExecutionRunId
+      || !safeString(this.nativeHookScope.snapshotId, 128) || !Array.isArray(this.nativeHookScope.toolNames)
+      || this.nativeHookScope.toolNames.length > 7 || this.nativeHookScope.toolNames.some(name => !require("./pi-hook-contract").PI_BUILTIN_TOOLS.includes(name)))) {
+      throw hostError("PI_HOOK_SCOPE_INVALID", "Pi Hook scope is invalid");
+    }
+    if (this.nativeHookScope) this.nativeHookScope = Object.freeze({ ...this.nativeHookScope, toolNames: Object.freeze([...this.nativeHookScope.toolNames]) });
     this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizePiPermissionPolicy(options.permissionPolicy);
+    this.workspaceExecutionVersion = options.workspaceExecutionVersion === 1 ? 1 : null;
     this.controlInstance = options.controlInstance === true;
     this.workspace = this.controlInstance ? null : normalizePiWorkspace(options.workspace);
     this.binaryCandidate = options.binaryPath;
@@ -283,7 +295,7 @@ class PiRuntimeHost {
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.onDiagnostic = typeof options.onDiagnostic === "function" ? options.onDiagnostic : null;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
-    this.promptTimeoutMs = options.promptTimeoutMs ?? 10 * 60 * 1_000;
+    this.promptTimeoutMs = options.promptTimeoutMs ?? EXECUTION_TIMEOUT_MS;
     this.acceptanceTimeoutMs = options.acceptanceTimeoutMs ?? 45_000;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
     this.killGraceMs = options.killGraceMs ?? 2_000;
@@ -301,7 +313,11 @@ class PiRuntimeHost {
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
       throw hostError("PI_HOST_OPTIONS_INVALID", "Pi MCP gate issuer is invalid");
     }
-    for (const value of [this.requestTimeoutMs, this.promptTimeoutMs, this.acceptanceTimeoutMs,
+    if (!Number.isSafeInteger(this.promptTimeoutMs) || this.promptTimeoutMs < 100
+      || this.promptTimeoutMs > EXECUTION_TIMEOUT_MS) {
+      throw hostError("PI_HOST_OPTIONS_INVALID", "Pi turn timeout is invalid");
+    }
+    for (const value of [this.requestTimeoutMs, this.acceptanceTimeoutMs,
       this.shutdownGraceMs, this.killGraceMs]) {
       if (!Number.isSafeInteger(value) || value < 100 || value > 10 * 60 * 1000) {
         throw hostError("PI_HOST_OPTIONS_INVALID", "Pi host timeout is invalid");
@@ -347,11 +363,15 @@ class PiRuntimeHost {
       if (this.state !== "initializing") {
         throw hostError("RUNTIME_HOST_TERMINATED", "Pi host stopped during initialization");
       }
-      const version = parsePiVersion(versionResult.stdout);
-      if (versionResult.code !== 0 || !supportsPiVersion(version)) {
-        throw hostError("PI_VERSION_UNSUPPORTED", "Pi CLI 0.84.4 (0.84.x) is required");
+      if (versionResult.code !== 0) {
+        throw hostError("PI_VERSION_PROBE_FAILED", "Pi CLI version could not be read");
       }
-      this.cliVersion = version;
+      // Diagnostic metadata only; an unfamiliar version label does not reject
+      // a CLI that implements the required protocol. Optional pinned features
+      // (native Hooks) still require their separately verified contract.
+      this.cliVersion = parsePiVersion(versionResult.stdout);
+      await this._probeProtocol();
+      if (this.state !== "initializing") throw hostError("RUNTIME_HOST_TERMINATED", "Pi host stopped during initialization");
       this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new PiRuntimeLedger({
         fs: this.fs,
         stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", PI_RUNTIME),
@@ -381,21 +401,53 @@ class PiRuntimeHost {
 
   beginAcquire() { this._assertReady(); }
 
+  async _probeProtocol() {
+    // No prompt, persistent session, tools, extensions or credential refresh.
+    // Validate the commands used by the adapter; every later response remains
+    // validated independently, including approval and turn acceptance fences.
+    const rpc = this._spawnControlRpc();
+    try {
+      const [state, messages, commands, thinking] = await Promise.all([
+        "get_state", "get_messages", "get_commands", "get_available_thinking_levels",
+      ].map(type => rpc.request(type, {}, { timeoutMs: Math.min(this.requestTimeoutMs, 5000) })));
+      if (!plain(state) || !safeString(state.sessionId, 128)
+        || typeof state.isStreaming !== "boolean" || typeof state.isCompacting !== "boolean"
+        || !Number.isSafeInteger(state.messageCount) || state.messageCount < 0
+        || !plain(messages) || !Array.isArray(messages.messages)
+        || !plain(commands) || !Array.isArray(commands.commands)
+        || !plain(thinking) || !Array.isArray(thinking.levels)
+        || thinking.levels.some(level => !safeString(level, 64))) {
+        throw hostError("RUNTIME_INCOMPATIBLE", "Pi RPC contract is incompatible");
+      }
+    } catch (error) {
+      if (["PI_RPC_COMMAND_UNSUPPORTED", "PI_RPC_RESPONSE_INVALID", "PI_RPC_FRAME_INVALID"].includes(error?.code)) {
+        throw hostError("RUNTIME_INCOMPATIBLE", "Pi RPC contract is incompatible");
+      }
+      throw error;
+    } finally {
+      rpc.endInput();
+      await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]);
+      if (!rpc.closed) {
+        rpc.kill("SIGKILL");
+        await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]);
+      }
+      if (!rpc.closed) {
+        this.cleanupIncomplete = true;
+        throw hostError("PI_PROCESS_CLOSE_TIMEOUT", "Pi compatibility probe did not terminate");
+      }
+    }
+  }
+
   async authenticationState() {
     this._assertReady();
     const localCredentialPresent = securePiCredentialPresent(this.fs, this.home)
       || PI_CREDENTIAL_ENV_KEYS.some((key) => safeString(this.parentEnv[key], 64 * 1024));
     const cachedAuth = this.profileState.authIdentity === this._modelCatalogIdentity()
       && this.profileState.auth?.state.authenticated ? this.profileState.auth : null;
-    let catalog;
-    try {
-      // Readiness may reuse the last explicitly checked model's catalog while
-      // still performing the real auth check below when its own TTL expires.
-      catalog = await this._ensureModelCatalog({ model: cachedAuth?.model });
-    } catch {
-      return Object.freeze({ authenticated: false, credentialPresent: localCredentialPresent });
-    }
+    // Malformed/failed discovery must remain distinct from being signed out.
+    const catalog = await this._ensureModelCatalog({ model: cachedAuth?.model });
     const selected = catalog.find((model) => model.isDefault) || catalog[0];
+    if (!selected) return Object.freeze({ authenticated: false, credentialPresent: localCredentialPresent });
     const identity = this._modelCatalogIdentity();
     const now = this.now();
     if (this.profileState.auth && this.profileState.authExpiresAt > now
@@ -408,6 +460,10 @@ class PiRuntimeHost {
     ], { timeoutMs: 15_000 });
     let payload = null;
     try { payload = JSON.parse(result.stdout); } catch {}
+    if (!plain(payload) || typeof payload.status !== "string") {
+      throw hostError(result.code === 0 ? "RUNTIME_INCOMPATIBLE" : "PI_AUTH_STATUS_UNAVAILABLE",
+        "Pi authentication status could not be verified");
+    }
     const authenticated = result.code === 0 && payload?.status === "ready";
     const credentialPresent = authenticated || localCredentialPresent;
     const state = Object.freeze({ authenticated, credentialPresent });
@@ -436,6 +492,14 @@ class PiRuntimeHost {
     return () => {
       if (this.serverRequestHandlers.get(method) === handler) this.serverRequestHandlers.delete(method);
     };
+  }
+
+  pauseManagedToolTimeout({ sessionId, turnId }) {
+    const active = this.activeTurns.get(sessionId);
+    if (!active || active.turnId !== turnId || active.settled) throw hostError("RUNTIME_SESSION_BUSY", "Pi turn is not active");
+    this._pausePromptTimeout(active);
+    let released = false;
+    return () => { if (!released) { released = true; this._resumePromptTimeout(active); } };
   }
 
   async sessionStart(input) {
@@ -509,11 +573,12 @@ class PiRuntimeHost {
   }
 
   sessionRead(input) {
-    this._assertReady();
+    const settled = settledRuntimeSession(this, input?.sessionId);
+    if (!settled) this._assertReady();
     if (!plain(input) || !safeString(input.sessionId, 512)) {
       return Promise.reject(hostError("RUNTIME_SESSION_PARAMS_INVALID", "Pi read input is invalid"));
     }
-    const session = sessionById(this.ledger.snapshot(), input.sessionId);
+    const session = settled || sessionById(this.ledger.snapshot(), input.sessionId);
     if (!session) return Promise.reject(hostError("RUNTIME_SESSION_NOT_FOUND", "Pi session was not found"));
     if (session.turns.some((turn) => turn.acceptance === "unknown" && turn.executionEndedAt === null)) {
       return Promise.reject(hostError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "Pi turn acceptance is unknown"));
@@ -654,6 +719,10 @@ class PiRuntimeHost {
       });
       current.updatedAt = Math.max(current.updatedAt, createdAt);
     });
+    const promptParts = this._promptParts(session.id, input);
+    const delivery = require("./native-instruction-delivery");
+    const turn = delivery.splitTurnInstructions(delivery.turnInstructions(input));
+    const command = parseRuntimeCommand(input.prompt, this.commandCatalog || PI_RPC_COMMANDS);
     const active = {
       sessionId: session.id,
       remoteSessionId: session.remoteSessionId,
@@ -663,11 +732,15 @@ class PiRuntimeHost {
       contextWindow: models.find((entry) => entry.model === model)?.contextWindow ?? null,
       observeContextUsage: input.observeContextUsage === true,
       title: session.title,
-      prompt: this._promptText(session.id, input),
+      prompt: promptParts.text,
+      promptCommit: promptParts.commit,
       images: imageAttachments(input.attachments).map(image => ({ type: "image", ...image })),
       thinkingLevel: input.thinkingLevel,
-      nativeCommand: parseRuntimeCommand(input.prompt, this.commandCatalog || PI_RPC_COMMANDS),
-      commandContext: [this.sessionConfigs.get(session.id)?.developerInstructions, input.context]
+      nativeCommand: command,
+      // The Run ID rides with the user message so this system addendum stays
+      // identical across turns; a bare command has no user message to carry it.
+      commandContext: [this.sessionConfigs.get(session.id)?.developerInstructions, turn.rules,
+        ...(command ? [turn.run, input.context] : [])]
         .filter(Boolean).join("\n\n"),
       commandContextFile: null,
       acceptance: makeDeferred(),
@@ -680,6 +753,7 @@ class PiRuntimeHost {
       baselineMessageCount: 0,
       messageSequence: 0,
       currentMessageId: null,
+      completedMessages: new Map(),
       process: null,
       reservationId: null,
       acceptanceTimer: null,
@@ -696,7 +770,7 @@ class PiRuntimeHost {
     }
     void this._beginTurn(active).catch((error) => {
       const definitelyRejected = !active.promptDispatched
-        || ["AUTH_REQUIRED", "PI_RPC_REQUEST_FAILED"].includes(error?.code);
+        || ["AUTH_REQUIRED", "PI_RPC_REQUEST_FAILED", "PI_RPC_COMMAND_UNSUPPORTED"].includes(error?.code);
       this._failActive(active, error, { definitelyRejected });
     });
     return active.acceptance.promise;
@@ -777,7 +851,7 @@ class PiRuntimeHost {
       const controlProcesses = [...this.controlProcesses.entries()];
       for (const [rpc] of turnProcesses) this._killRpcProcess(rpc, "SIGTERM");
       for (const [child] of controlProcesses) {
-        try { child.kill("SIGTERM"); } catch {}
+        try { killStartedChild(child, "SIGTERM"); } catch {}
       }
       if (active.length > 0 || turnProcesses.length > 0 || controlProcesses.length > 0) {
         await Promise.race([
@@ -791,7 +865,7 @@ class PiRuntimeHost {
       }
       for (const rpc of this.turnProcesses.keys()) this._killRpcProcess(rpc, "SIGKILL");
       for (const [child] of this.controlProcesses) {
-        try { child.kill("SIGKILL"); } catch {}
+        try { killStartedChild(child, "SIGKILL"); } catch {}
       }
       if (this.activeTurns.size > 0 || this.turnProcesses.size > 0
         || this.controlProcesses.size > 0) await delay(this.killGraceMs);
@@ -818,17 +892,20 @@ class PiRuntimeHost {
       runtimeAccountId: this.runtimeAccountId,
       executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.launch.command,
+      toolExposure: require("./product-tool-exposure").toolExposureFor("pi"),
     });
     active.reservationId = reservation.reservationId;
     const args = buildPiRpcArgs({
       permissionPolicy: active.permissionPolicy,
+      workspaceExecutionVersion: this.workspaceExecutionVersion,
       sessionId: active.remoteSessionId,
       sessionDir: this.ledger.sessionDir,
       extensionPath: this.extensionPath,
       model: active.model,
       name: active.title,
+      nativeSkills: active.nativeCommand?.command?.name?.startsWith("skill:") === true,
     }).slice();
-    if (active.nativeCommand && active.commandContext) {
+    if (active.commandContext) {
       const target = path.join(this.ledger.sessionDir, `.shoggoth-command-${active.turnId}.md`);
       atomicWritePrivateFile(target, active.commandContext, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
       const stat = validatePrivateStat(this.fs.lstatSync(target), target);
@@ -839,6 +916,8 @@ class PiRuntimeHost {
       SHOGGOTH_PI_MCP_COMMAND: reservation.command,
       SHOGGOTH_PI_MCP_ARGS: JSON.stringify(reservation.args),
       SHOGGOTH_PI_PERMISSION_POLICY: JSON.stringify(active.permissionPolicy),
+      SHOGGOTH_PI_WORKSPACE_EXECUTION_VERSION: this.workspaceExecutionVersion === 1 ? "1" : "0",
+      SHOGGOTH_PI_NATIVE_HOOK_TOOLS: JSON.stringify(this.nativeHookScope?.toolNames || []),
     });
     const launcherArgs = [
       "-c", "IFS= read -r _ <&3 || exit 125; exec \"$@\"",
@@ -858,7 +937,8 @@ class PiRuntimeHost {
     }
     if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 1
       || !child.stdin || !child.stdout || !child.stderr || !child.stdio?.[3]) {
-      try { child?.kill?.("SIGKILL"); } catch {}
+      retireFailedSpawn(child);
+      try { killStartedChild(child, "SIGKILL"); } catch {}
       this.mcpGateIssuer.revokeMcpServer({ reservationId: reservation.reservationId });
       throw hostError("PI_PROCESS_SPAWN_FAILED", "Pi process pipes are invalid");
     }
@@ -921,7 +1001,10 @@ class PiRuntimeHost {
   }
 
   _pausePromptTimeout(active) {
-    if (active.settled || active.promptTimeoutPaused || active.promptTimer === null) return;
+    if (active.settled) return;
+    if (active.promptTimeoutPaused) { active.promptPauseDepth = (active.promptPauseDepth || 1) + 1; return; }
+    if (active.promptTimer === null) return;
+    active.promptPauseDepth = 1;
     active.promptTimeoutRemainingMs = Math.max(1, active.promptDeadlineAt - this.now());
     clearTimeout(active.promptTimer);
     active.promptTimer = null;
@@ -931,7 +1014,10 @@ class PiRuntimeHost {
 
   _resumePromptTimeout(active) {
     if (!active.promptTimeoutPaused) return;
+    active.promptPauseDepth = Math.max(0, (active.promptPauseDepth || 1) - 1);
+    if (active.promptPauseDepth > 0) return;
     active.promptTimeoutPaused = false;
+    active.promptPauseDepth = 0;
     if (active.settled) return;
     this._armPromptTimeout(active, active.promptTimeoutRemainingMs);
   }
@@ -1059,6 +1145,24 @@ class PiRuntimeHost {
       }
       return;
     }
+    if (event.type === "message_end" && event.message?.role === "assistant" && active.currentMessageId) {
+      const text = messageText(event.message);
+      const itemId = active.currentMessageId;
+      if (text && !active.completedMessages.has(itemId)) {
+        if (Buffer.byteLength(text, "utf8") > MAX_ASSISTANT_TEXT_BYTES) {
+          this._failActive(active, hostError("PI_TURN_OUTPUT_TOO_LARGE", "Pi response is too large"));
+          return;
+        }
+        active.completedMessages.set(itemId, text);
+        this._publish({
+          known: true, method: "pi/message_end", type: "text",
+          sessionId: active.sessionId, turnId: active.turnId, itemId, text,
+          phase: event.message.content.some((part) => part?.type === "toolCall") ? "commentary" : "final_answer",
+          delivery: "local",
+        });
+      }
+      return;
+    }
     if (event.type === "tool_execution_start" && safeString(event.toolCallId, 512)
       && safeString(event.toolName, 256)) {
       const input = event.args === undefined ? undefined : safeSnapshot(event.args, {
@@ -1154,7 +1258,10 @@ class PiRuntimeHost {
       if (authenticationFailed) {
         this._invalidateAuthentication();
       }
-      const texts = assistants.map(messageText).filter((text) => text.length > 0);
+      const textMessages = assistants.map((message, index) => ({
+        id: `pi-message-${active.turnId}-${index + 1}`, text: messageText(message),
+      })).filter((message) => message.text.length > 0);
+      const texts = textMessages.map((message) => message.text);
       if (texts.some((text) => Buffer.byteLength(text, "utf8") > MAX_ASSISTANT_TEXT_BYTES)) {
         throw hostError("PI_TURN_OUTPUT_TOO_LARGE", "Pi response is too large");
       }
@@ -1163,6 +1270,7 @@ class PiRuntimeHost {
         errorCode: status === "failed" ? (accountBlocked ? "RUNTIME_ACCOUNT_BLOCKED"
           : authenticationFailed ? "AUTH_REQUIRED" : providerFailure ?? "PI_TURN_FAILED") : null,
         texts,
+        messageIds: textMessages.map((message) => message.id),
         usage,
         responseId: responseIdFor(active, assistants),
         ...(assistants.length && assistants.every(message => typeof message.usage?.cost?.total === "number"
@@ -1190,6 +1298,7 @@ class PiRuntimeHost {
       session.updatedAt = Math.max(session.updatedAt, timestamp);
     });
     active.accepted = true;
+    active.promptCommit?.();
     clearTimeout(active.acceptanceTimer);
     active.acceptanceTimer = null;
     active.acceptance.resolve({ turn: { id: active.turnId, status: "inProgress", items: [] } });
@@ -1198,16 +1307,15 @@ class PiRuntimeHost {
   _finishActive(active, result) {
     if (active.settled || !TERMINAL_STATUSES.has(result.status)) return;
     const timestamp = this.now();
-    let messageSequence = 0;
+    const messages = result.texts.map((text, index) => ({
+      id: result.messageIds?.[index] ?? `pi-message-${active.turnId}-final-${index + 1}`, text,
+    }));
     this.ledger.update((data) => {
       const session = sessionById(data, active.sessionId);
       const turn = turnById(session, active.turnId);
       turn.status = result.status;
       turn.errorCode = result.errorCode;
-      turn.assistantMessages = result.texts.map((text) => ({
-        id: `pi-message-${active.turnId}-final-${messageSequence += 1}`,
-        text,
-      }));
+      turn.assistantMessages = messages;
       turn.responseId = result.responseId;
       turn.provider = result.provider;
       turn.model = result.model;
@@ -1217,17 +1325,22 @@ class PiRuntimeHost {
     });
     active.settled = true;
     this._clearActive(active);
-    result.texts.forEach((text, index) => this._publish({
-      known: true,
-      method: "pi/agent_settled",
-      type: "text",
-      sessionId: active.sessionId,
-      turnId: active.turnId,
-      itemId: `pi-message-${active.turnId}-final-${index + 1}`,
-      text,
-      phase: index === result.texts.length - 1 ? "final_answer" : "commentary",
-      delivery: "local",
-    }));
+    // message_end already sealed live output. Terminal observation
+    // only supplies missing messages, keeping the same identities in the ledger.
+    messages.forEach(({ id, text }, index) => {
+      if (active.completedMessages.get(id) === text) return;
+      this._publish({
+        known: true,
+        method: "pi/agent_settled",
+        type: "text",
+        sessionId: active.sessionId,
+        turnId: active.turnId,
+        itemId: id,
+        text,
+        phase: index === result.texts.length - 1 ? "final_answer" : "commentary",
+        delivery: "local",
+      });
+    });
     this._publish({
       known: true,
       method: "pi/agent_settled",
@@ -1307,6 +1420,7 @@ class PiRuntimeHost {
     active.promptTimer = null;
     active.promptDeadlineAt = null;
     active.promptTimeoutPaused = false;
+    active.promptPauseDepth = 0;
     if (active.commandContextFile) {
       const { target, dev, ino } = active.commandContextFile;
       try {
@@ -1349,6 +1463,34 @@ class PiRuntimeHost {
   }
 
   async _onExtensionRequest(active, request) {
+    const { PI_HOOK_TITLE, PI_CALL_BINDING_TITLE, piNativeHookCapabilities } = require("./pi-hook-contract");
+    if (request.method === "input" && [PI_HOOK_TITLE, PI_CALL_BINDING_TITLE].includes(request.title)) {
+      const binding = request.title === PI_CALL_BINDING_TITLE;
+      const method = binding ? "mcpServer/elicitation/request" : "shoggoth/hooks/tool";
+      const handler = this.serverRequestHandlers.get(method);
+      const cancel = { type: "extension_ui_response", id: request.id, cancelled: true };
+      if (!handler || active.settled || request.timeout !== undefined || !safeString(request.placeholder, 64 * 1024)
+        || !binding && (!this.nativeHookScope || piNativeHookCapabilities(this).runtime_builtin?.guard.status !== "supported")) return cancel;
+      let input;
+      try {
+        input = JSON.parse(request.placeholder);
+        if (binding) { if (!require("./runtime-mcp-call-binding").parseBindingElicitation({ ...input, serverName: "shoggoth" })) return cancel; }
+        else {
+          input = require("./hook-contract").safeJson(input, 65536);
+          if (input.phase === "before" && !this.nativeHookScope.toolNames.includes(input.toolName)) return cancel;
+        }
+      } catch { return cancel; }
+      this._pausePromptTimeout(active);
+      try {
+        const response = await handler(binding ? { ...input, serverName: "shoggoth", sessionId: active.sessionId, turnId: active.turnId }
+          : { sessionId: active.sessionId, turnId: active.turnId, request: input }, { sourceMethod: "extension_ui_request" });
+        const value = binding ? response?.action === "accept" ? "accept" : "cancel" : JSON.stringify(response);
+        return safeString(value, 64 * 1024) ? { type: "extension_ui_response", id: request.id, value } : cancel;
+      } catch (error) {
+        if (binding) return cancel;
+        return { type: "extension_ui_response", id: request.id, value: JSON.stringify({ errorCode: /^HOOK_[A-Z_]+$/u.test(error.code || "") ? error.code : "HOOK_NATIVE_CALL_FAILED" }) };
+      } finally { this._resumePromptTimeout(active); }
+    }
     const permissionMatch = request.method === "confirm" && request.timeout === undefined
       && /^Allow Pi ([a-z][a-z0-9_-]{0,63})\?$/u.exec(request.title || "");
     const toolName = permissionMatch?.[1] || null;
@@ -1362,22 +1504,34 @@ class PiRuntimeHost {
     if (toolName !== null) {
       this._pausePromptTimeout(active);
       try {
+        // The Shoggoth extension sends the bash command, or the tool input as JSON.
+        // The confirm title ("Allow Pi edit?") only restates the tool.
+        const detail = typeof request.message === "string" && request.message.length <= 16 * 1024
+          ? request.message : "";
+        let toolInput;
+        if (toolName === "bash") toolInput = detail ? { command: detail } : undefined;
+        else {
+          try { toolInput = JSON.parse(detail); } catch {}
+          if (!toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) toolInput = undefined;
+        }
         const params = method === "item/fileChange/requestApproval"
           ? {
             sessionId: active.sessionId,
             turnId: active.turnId,
             itemId: request.id,
             grantRoot: active.cwd,
-            reason: request.message || request.title,
+            toolName,
+            ...(toolInput ? { toolInput: safeSnapshot(toolInput, { maxSnapshotBytes: 16 * 1024 }) } : {}),
             sessionApprovalAvailable: false,
           }
           : {
             sessionId: active.sessionId,
             turnId: active.turnId,
             itemId: request.id,
-            command: request.message || request.title,
+            ...(toolName === "bash" && detail ? { command: detail } : {}),
             cwd: active.cwd,
-            reason: request.title,
+            toolName,
+            ...(toolInput ? { toolInput: safeSnapshot(toolInput, { maxSnapshotBytes: 16 * 1024 }) } : {}),
             sessionApprovalAvailable: false,
           };
         const response = await handler(params, { method, sourceMethod: "extension_ui_request" });
@@ -1501,7 +1655,7 @@ class PiRuntimeHost {
       fs: this.fs,
       values: [this.runtimeEnvironment, this.cliVersion, this.profileState.authGeneration || 0,
         PARENT_ENV_ALLOWLIST.map((key) => [key, this.parentEnv[key] ?? null])],
-      files: [this.binaryPath, ...["auth.json", "settings.json", "models.json"]
+      files: [this.binaryPath, ...["auth.json", "settings.json", "models.json", "models-store.json"]
         .map((name) => path.join(this.home, name))],
     });
   }
@@ -1598,24 +1752,124 @@ class PiRuntimeHost {
     return { kind: "send", text: parsed.text, warning: null };
   }
 
+  async resolveModelOnly(input) {
+    return require("./runtime-model-resolution").runBoundedModelResolution(input, async signal => {
+      this._assertReady();
+      if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model discovery canceled");
+      const identity = this._modelCatalogIdentity(), rpc = this._spawnControlRpc({ model: input.model });
+      const abort = () => rpc.kill();
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        const state = await rpc.request("get_state"), model = state?.model;
+        this._assertReady();
+        if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model discovery canceled");
+        if (identity !== this._modelCatalogIdentity()) throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "Pi model configuration changed");
+        if (!model || !safeString(model.provider, 128) || !safeString(model.id, 512) || model.provider === "unknown") {
+          throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Pi has no selected model");
+        }
+        return { model: piModelRef(model.provider, model.id), provider: model.provider };
+      } finally {
+        signal.removeEventListener("abort", abort);
+        rpc.endInput(); rpc.kill();
+        await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]);
+        if (!rpc.closed) { rpc.kill("SIGKILL"); await Promise.race([rpc.closedPromise, delay(this.killGraceMs)]); }
+        if (!rpc.closed) throw hostError("RUNTIME_STOP_UNCONFIRMED", "Model discovery worker did not stop");
+      }
+    });
+  }
+
   async generateModelOnly(input) {
     return require("./runtime-model-only").runBoundedModelOnly(input, async signal => {
+      this._assertReady();
+      if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+      const identity = this._modelCatalogIdentity();
       const done = makeDeferred();
+      let streamedText = "", streamFailed = false;
       const rpc = this._spawnControlRpc({ model: input.model,
         onEvent: event => {
-          if (["agent_end", "agent_settled"].includes(event.type)) done.resolve();
-          if (event.type === "tool_execution_start") done.reject(hostError("MODEL_ONLY_TOOLS_FORBIDDEN", "Tool-free contract violated"));
+          if (streamFailed || signal.aborted) return;
+          try {
+            if (event.type === "message_start" && event.message?.role === "assistant") {
+              streamedText = ""; input.onText?.(streamedText);
+            }
+            const update = event.type === "message_update" && event.assistantMessageEvent;
+            if (update?.type === "text_delta") {
+              if (!safeString(update.delta, 32 * 1024, { empty: true })
+                || Buffer.byteLength(streamedText) + Buffer.byteLength(update.delta) > 32 * 1024) {
+                throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model output too large");
+              }
+              streamedText += update.delta; input.onText?.(streamedText);
+            }
+            if (event.type === "message_end" && event.message?.role === "assistant") {
+              const text = messageText(event.message);
+              if (!safeString(text, 32 * 1024, { empty: true })) throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model output too large");
+              input.onText?.(text);
+            }
+            if (event.type === "tool_execution_start") {
+              input.onText?.(""); throw hostError("MODEL_ONLY_TOOLS_FORBIDDEN", "Tool-free contract violated");
+            }
+            if (["agent_end", "agent_settled"].includes(event.type)) done.resolve();
+          } catch (error) { streamFailed = true; done.reject(error); }
         } });
       const abort = () => { rpc.kill(); done.reject(hostError("MODEL_ONLY_CANCELED", "Model task canceled")); };
       signal.addEventListener("abort", abort, { once: true });
       void rpc.closedPromise.then(() => done.reject(hostError("MODEL_ONLY_ACCEPTANCE_UNKNOWN", "Model task disconnected")));
       try {
+        // Pi may choose another model when its configured default is unusable.
+        // auth check requires an explicit model; check this worker's real route.
+        const state = await rpc.request("get_state");
+        const model = state?.model;
+        const selectedModel = model && safeString(model.provider, 128) && safeString(model.id, 512)
+          && model.provider !== "unknown" ? piModelRef(model.provider, model.id) : null;
+        if (!selectedModel) throw hostError("AUTH_REQUIRED", "Pi model worker has no authenticated model");
+        if (input.model && input.model !== selectedModel) {
+          throw hostError("RUNTIME_MODEL_UNAVAILABLE", "Pi model worker selected a different model");
+        }
+        const auth = await this._runControl(["auth", "check", "--model", selectedModel,
+          "--json", "--no-refresh"], { timeoutMs: 15_000, signal });
+        let authentication = null;
+        try { authentication = JSON.parse(auth.stdout); } catch {}
+        this._assertReady();
+        if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+        if (identity !== this._modelCatalogIdentity()) {
+          throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "Pi model configuration changed before dispatch");
+        }
+        if (auth.code !== 0 || authentication?.status !== "ready") {
+          throw hostError("AUTH_REQUIRED", "Pi model worker requires authentication");
+        }
+        if (input.execution) {
+          const available = await rpc.request("get_available_thinking_levels", {});
+          const settings = require("./memory-model-settings").resolveMemoryModelExecution(input.execution, {
+            thinkingOptions: available?.levels, thinkingDefault: state.thinkingLevel ?? null, fastTier: null,
+          });
+          if (settings.thinkingLevel !== undefined) {
+            await rpc.request("set_thinking_level", { level: settings.thinkingLevel });
+          }
+          // The capability query and setter both cross an async boundary. The
+          // same private worker must still own the selected model at dispatch.
+          const current = await rpc.request("get_state");
+          this._assertReady();
+          if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+          if (identity !== this._modelCatalogIdentity() || current?.model?.provider !== model.provider
+            || current?.model?.id !== model.id || settings.thinkingLevel !== undefined
+              && current.thinkingLevel !== settings.thinkingLevel) {
+            throw hostError("RUNTIME_MODEL_CATALOG_CHANGED", "Pi model settings changed before dispatch");
+          }
+        }
+        input.assertCurrent?.();
         await rpc.request("prompt", { message: input.prompt });
         await done.promise;
         const result = await rpc.request("get_messages");
         const assistants = (result?.messages || []).filter(message => message.role === "assistant");
         const last = assistants.at(-1);
         if (!last || ["error", "aborted", "toolUse"].includes(last.stopReason)) {
+          if (last?.stopReason === "error") {
+            const providerFailure = classifyProviderFailure(last.errorMessage);
+            if (providerFailure) throw hostError(providerFailure, "Pi model worker provider failed");
+            if (typeof last.errorMessage === "string" && AUTH_ERROR_PATTERN.test(last.errorMessage)) {
+              throw hostError("AUTH_REQUIRED", "Pi model worker requires authentication");
+            }
+          }
           throw hostError("MODEL_ONLY_OUTPUT_INVALID", "Model task did not produce a final response");
         }
         let usage = emptyPiUsage();
@@ -1739,16 +1993,20 @@ class PiRuntimeHost {
     });
   }
 
-  _promptText(sessionId, input) {
-    if (parseRuntimeCommand(input.prompt, this.commandCatalog || PI_RPC_COMMANDS)) return input.prompt.trim();
-    const config = this.sessionConfigs.get(sessionId);
-    const blocks = [];
-    if (config?.developerInstructions) {
-      blocks.push(`SHOGGOTH DEVELOPER INSTRUCTIONS\n${config.developerInstructions}`);
+  _promptText(sessionId, input) { return this._promptParts(sessionId, input, null).text; }
+
+  _promptParts(sessionId, input, ledger = this.promptLedger) {
+    if (parseRuntimeCommand(input.prompt, this.commandCatalog || PI_RPC_COMMANDS)) {
+      ledger?.reset(sessionId);
+      return { text: input.prompt.trim(), commit() {} };
     }
-    if (typeof input.context === "string" && input.context.length > 0) blocks.push(input.context);
+    const delivery = require("./native-instruction-delivery");
+    const { blocks, commit } = delivery.promptBlocks(ledger, sessionId, {
+      context: typeof input.context === "string" ? input.context : "",
+      run: delivery.splitTurnInstructions(delivery.turnInstructions(input)).run,
+    });
     blocks.push(`CURRENT USER REQUEST\n${input.prompt}`);
-    return blocks.join("\n\n");
+    return { text: blocks.join("\n\n"), commit };
   }
 
   _spawnEnvironment(entries = [], reserved = {}) {
@@ -1800,7 +2058,8 @@ class PiRuntimeHost {
       }
       if (!child || typeof child.on !== "function" || !child.stdout || !child.stderr
         || typeof child.kill !== "function") {
-        try { child?.kill?.("SIGKILL"); } catch {}
+        retireFailedSpawn(child);
+        try { killStartedChild(child, "SIGKILL"); } catch {}
         reject(hostError("PI_PROCESS_SPAWN_FAILED", "Pi control process is invalid"));
         return;
       }
@@ -1809,6 +2068,9 @@ class PiRuntimeHost {
       let stdout = "";
       let stderr = "";
       let settled = false;
+      let canceled = false;
+      const onAbort = () => { canceled = true; try { killStartedChild(child, "SIGKILL"); } catch {} };
+      const clearAbort = () => options.signal?.removeEventListener("abort", onAbort);
       const append = (current, chunk) => {
         const next = `${current}${Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk)}`;
         if (Buffer.byteLength(next, "utf8") > MAX_CONTROL_OUTPUT_BYTES) {
@@ -1819,7 +2081,8 @@ class PiRuntimeHost {
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        try { child.kill("SIGKILL"); } catch {}
+        clearAbort();
+        try { killStartedChild(child, "SIGKILL"); } catch {}
         reject(hostError("PI_CONTROL_TIMEOUT", "Pi control command timed out"));
       }, timeoutMs);
       timer.unref?.();
@@ -1827,7 +2090,8 @@ class PiRuntimeHost {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        try { child.kill("SIGKILL"); } catch {}
+        clearAbort();
+        try { killStartedChild(child, "SIGKILL"); } catch {}
         reject(error);
       };
       child.stdout.on("data", (chunk) => { try { stdout = append(stdout, chunk); } catch (error) { fail(error); } });
@@ -1839,8 +2103,12 @@ class PiRuntimeHost {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ code, signal, stdout, stderr });
+        clearAbort();
+        if (canceled) reject(hostError("MODEL_ONLY_CANCELED", "Model task canceled"));
+        else resolve({ code, signal, stdout, stderr });
       });
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) onAbort();
     });
   }
 

@@ -2,7 +2,7 @@ import AgentAvatarView from "../components/AgentAvatar";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { InspirationAgent, InspirationExecution } from '../types';
-import { summarizeArgs, toolLabelKey } from '../lib/turnTimeline';
+import { toolActivityTitle } from '../lib/turnTimeline';
 import { useInspirationActivity } from './use-inspiration-activity';
 import { inspirationRunTone, latestInspirationStep } from './inspiration-run-status';
 import styles from './InspirationRunBar.module.css';
@@ -42,8 +42,8 @@ export default function InspirationRunBar({ ideaId, execution, agent, attention,
   const status = t(`inspiration.status.${execution.status === 'canceled' ? 'failed' : execution.status}`);
   let detail = '';
   if (step?.kind === 'tool') {
-    const tool = t(toolLabelKey(step.toolName || 'tool'), { defaultValue: '' }) || step.toolName;
-    detail = [tool, oneLine(step.output) || summarizeArgs(step.toolName, step.args)].filter(Boolean).join(' · ');
+    detail = toolActivityTitle(step.toolName, step.args, t);
+    if (step.status === 'error' || step.isError) detail += ` · ${t('turnLab.failed')}`;
   } else if (step?.kind === 'plan') {
     detail = step.planEntries?.find(entry => entry.status === 'in_progress')?.content
       || step.planEntries?.at(-1)?.content || t('turnLab.stepPlan');

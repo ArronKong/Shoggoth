@@ -7,7 +7,7 @@ const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 
 if (process.argv.includes("--version")) {
-  process.stdout.write("codex-cli 0.149.0\n");
+  process.stdout.write("codex-cli 0.159.2\n");
   process.exit(0);
 }
 
@@ -33,6 +33,11 @@ const independentProtocolIds = process.env.CODEX_FAKE_INDEPENDENT_IDS === "1";
 const independentIdPrefix = process.env.CODEX_FAKE_ID_NAMESPACE
   ? `${crypto.createHash("sha256").update(process.env.CODEX_FAKE_ID_NAMESPACE).digest("hex").slice(0, 10)}-` : "";
 const autocompleteDomain = process.env.CODEX_FAKE_AUTOCOMPLETE_DOMAIN === "1";
+// Completes every turn without an elicitation (group chat turns run in hidden chat sessions).
+const autocompleteAll = process.env.CODEX_FAKE_AUTOCOMPLETE_ALL === "1";
+const controlledGroup = process.env.CODEX_FAKE_GROUP_CONTROLLED === "1";
+const groupControlPath = process.env.CODEX_FAKE_GROUP_CONTROL_PATH;
+const groupBindingRequests = new Map();
 const elicitationThreadId = process.env.CODEX_FAKE_ELICITATION_THREAD_ID || "";
 const elicitationTurnId = process.env.CODEX_FAKE_ELICITATION_TURN_ID || "";
 const allowedElicitationModes = new Set([
@@ -72,7 +77,7 @@ function thread(id, threadSource = null) {
     ephemeral: true,
     turns: [],
     cwd: process.cwd(),
-    cliVersion: "0.149.0",
+    cliVersion: "0.159.2",
     source: "appServer",
     sessionId: `session-${id}`,
     projectId: null,
@@ -82,7 +87,7 @@ function thread(id, threadSource = null) {
   return created;
 }
 
-function threadConfigResponse(value) {
+function threadConfigResponse(value, params = {}) {
   return {
     thread: value,
     model: "fake-model",
@@ -91,7 +96,8 @@ function threadConfigResponse(value) {
     cwd: process.cwd(),
     instructionSources: [],
     approvalPolicy: "never",
-    approvalsReviewer: "user",
+    // The production adapter requires acknowledgement of the requested reviewer.
+    approvalsReviewer: params.approvalsReviewer ?? "user",
     sandbox: { type: "readOnly", networkAccess: false },
     reasoningEffort: null,
   };
@@ -182,6 +188,45 @@ function completeTurn(threadId, turnId) {
   send({ method: "turn/completed", params: { threadId: current.id, turn } });
 }
 
+// Test-only model control. Requests still leave this child as native protocol
+// server requests and pass the production Host schema and Coordinator routing.
+if (controlledGroup && path.isAbsolute(groupControlPath || "")) {
+  setInterval(() => {
+    for (const name of fs.readdirSync(groupControlPath).filter(name => name.endsWith(".request.json"))) {
+      const file = path.join(groupControlPath, name);
+      let request;
+      try { request = JSON.parse(fs.readFileSync(file, "utf8")); } catch { continue; }
+      const active = threads.get(request.threadId)?.turns.find(turn => turn.id === request.turnId && turn.status === "inProgress");
+      if (!active) continue;
+      fs.unlinkSync(file);
+      const responsePath = path.join(groupControlPath, `${request.id}.response.json`);
+      if (request.action === "complete") {
+        completeTurn(request.threadId, request.turnId);
+        fs.writeFileSync(responsePath, JSON.stringify({ result: {} }), { mode: 0o600 });
+      } else if (request.action === "activity") {
+        const marker = request.marker ?? request.title;
+        const itemId = request.toolCallId ?? request.itemId ?? `activity-${crypto.randomUUID()}`;
+        if (typeof marker !== "string" || !marker || marker.length > 96 || !marker.isWellFormed() || marker.includes("\0")
+          || typeof itemId !== "string" || !itemId || itemId.length > 96 || !itemId.isWellFormed() || itemId.includes("\0")) {
+          fs.writeFileSync(responsePath, JSON.stringify({ error: { code: "FIXTURE_ACTIVITY_INVALID" } }), { mode: 0o600 });
+          continue;
+        }
+        const item = { id: itemId, type: "mcpToolCall", server: "shoggoth", tool: "exec_command", status: "inProgress",
+          arguments: { title: marker, command: "fixture" }, result: null, error: null, durationMs: null };
+        active.items.push(item);
+        const emittedAt = Date.now();
+        send({ method: "item/started", params: { threadId: request.threadId, turnId: request.turnId, item, startedAtMs: emittedAt } });
+        fs.writeFileSync(responsePath, JSON.stringify({ result: { emittedAt, itemId, marker } }), { mode: 0o600 });
+      } else if (request.action === "binding") {
+        const requestId = `group-binding-${crypto.randomUUID()}`;
+        groupBindingRequests.set(requestId, { responsePath });
+        send({ id: requestId, method: "mcpServer/elicitation/request", params: { ...request.params,
+          serverName: "shoggoth", threadId: request.threadId, turnId: request.turnId } });
+      }
+    }
+  }, 10);
+}
+
 let buffer = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -192,6 +237,14 @@ process.stdin.on("data", (chunk) => {
     const message = JSON.parse(buffer.slice(0, newline));
     buffer = buffer.slice(newline + 1);
     if (Object.prototype.hasOwnProperty.call(message, "id") && !message.method) {
+      if (groupBindingRequests.has(message.id)) {
+        const pending = groupBindingRequests.get(message.id);
+        groupBindingRequests.delete(message.id);
+        const value = message.error ? { error: message.error } : { result: message.result };
+        if (pending.responsePath) fs.writeFileSync(pending.responsePath, JSON.stringify(value), { mode: 0o600 });
+        else send({ id: pending, ...value });
+        continue;
+      }
       if (message.id === pendingServerRequestId && elicitationEnabled) {
         fs.writeFileSync(
           elicitationResponsePath,
@@ -205,11 +258,13 @@ process.stdin.on("data", (chunk) => {
         pendingTurn = null;
         if (elicitationRepeat) elicitationSent = false;
       }
+    } else if (message.method === "mcpServerStatus/list") {
+      send({ id: message.id, result: { data: [], nextCursor: null } });
     } else if (message.method === "initialize") {
       send({
         id: message.id,
         result: {
-          userAgent: "codex/0.149.0",
+          userAgent: "codex/0.159.2",
           codexHome: process.env.CODEX_HOME,
           platformFamily: "unix",
           platformOs: process.platform === "darwin" ? "macos" : process.platform,
@@ -223,8 +278,16 @@ process.stdin.on("data", (chunk) => {
         account: { type: "chatgpt", email: null, planType: "plus" },
         requiresOpenaiAuth: true,
       } });
+    } else if (process.env.CODEX_FAKE_MODEL_CATALOG === "1" && message.method === "model/list") {
+      send({ id: message.id, result: { data: [{
+        id: "fake-model", model: "fake-model", displayName: "Fixture model", description: "Isolated catalog",
+        upgrade: null, upgradeInfo: null, availabilityNux: null, modelSpecialty: null,
+        hidden: false, isDefault: true, supportedReasoningEfforts: [], defaultReasoningEffort: "medium",
+        inputModalities: ["text"], supportsPersonality: false, multiAgentVersion: null,
+        additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, availableAccessPrograms: null,
+      }], nextCursor: null } });
     } else if (elicitationEnabled && message.method === "thread/resume") {
-      send({ id: message.id, result: threadConfigResponse(thread(message.params.threadId)) });
+      send({ id: message.id, result: threadConfigResponse(thread(message.params.threadId), message.params) });
     } else if (elicitationEnabled && message.method === "thread/inject_items") {
       thread(message.params.threadId);
       send({ id: message.id, result: {} });
@@ -239,7 +302,7 @@ process.stdin.on("data", (chunk) => {
         independentProtocolIds ? `thread-fixture-${independentIdPrefix}${threads.size + 1}` : `thread-${elicitationProfile}`,
         message.params.threadSource ?? null,
       );
-      send({ id: message.id, result: threadConfigResponse(created) });
+      send({ id: message.id, result: threadConfigResponse(created, message.params) });
     } else if (elicitationEnabled && message.method === "turn/start") {
       const current = thread(message.params.threadId);
       turnSequence += 1;
@@ -262,11 +325,11 @@ process.stdin.on("data", (chunk) => {
       };
       current.turns.push(turn);
       send({ id: message.id, result: { turn } });
-      if (autocompleteDomain && typeof current.threadSource === "string"
+      if (autocompleteAll || autocompleteDomain && typeof current.threadSource === "string"
         && (current.threadSource.startsWith("shoggoth:work:")
           || current.threadSource.startsWith("shoggoth:cron:"))) {
         setTimeout(() => completeTurn(current.id, turn.id), 20);
-      } else {
+      } else if (!controlledGroup) {
         emitElicitation(current.id, turn.id);
       }
     } else if (elicitationEnabled && message.method === "turn/interrupt") {

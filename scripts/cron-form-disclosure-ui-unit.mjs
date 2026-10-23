@@ -24,6 +24,8 @@ function load(file) {
   }).outputText;
   vm.runInNewContext(code, { module: mod, exports: mod.exports, Intl, Date,
     require: name => {
+      if (name.endsWith(".css")) return {};
+      if (name.endsWith("/api/client")) return { getCodexAutomationModels: async () => ({ models: [] }) };
       if (name === "react-i18next") return { useTranslation: () => ({ t: key => key }) };
       if (name.endsWith("/Field")) return fields;
       if (name.endsWith("/i18n")) return { t: key => key };
@@ -106,18 +108,20 @@ for (const test of cases) {
   assert.throws(() => createDraft.cronCreateInputFromDraft(draft, "openclaw", key => key), /nativeValidateAgent/);
   function Harness() {
     const [value, setValue] = React.useState(draft); draft = value;
-    return React.createElement(createForm.default, { draft: value, setDraft: setValue, backends: [], agents: {},
+    return React.createElement(createForm.default, { draft: value, setDraft: setValue, backends: [],
+      agents: { shoggoth: [{ id: "same-id", name: "Codex", backendId: "shoggoth", codexAutomationOwner: true }] },
       loading: false, failedBackends: [], onRetry() {}, disabled: false });
   }
   let renderer;
   act(() => { renderer = create(React.createElement(Harness)); });
-  for (const [backendId, kind] of [["openclaw", "openclaw"], ["hermes", "hermes"], ["codex", "native"], ["antigravity", "native"]]) {
+  for (const [backendId, kind] of [["openclaw", "openclaw"], ["hermes", "hermes"], ["codex", "native"], ["shoggoth", "native"], ["antigravity", "native"]]) {
     act(() => renderer.root.findByType("agent-picker").props.onChange({ backendId, agentId: "same-id" }));
     assert.equal(draft.name, "Keep name"); assert.equal(draft.prompt, "Keep prompt");
     assert.equal(draft.everyMin, 37); assert.equal(draft.atLocal, "2026-09-18T09:00");
     for (const schedKind of ["cron", "every", "at"]) {
       const input = createDraft.cronCreateInputFromDraft({ ...draft, schedKind }, kind, key => key);
       assert.equal(input.backendId, backendId); assert.equal(input.agentId, "same-id");
+      assert.equal(input.origin, undefined, "even the Desktop owner creates a local Cron job");
       assert.equal(input.schedule.kind, schedKind);
       if (schedKind === "cron") assert.equal(input.schedule.expr, "0 9 * * *");
       if (schedKind === "every") assert.equal(input.schedule.everyMs, 37 * 60000);

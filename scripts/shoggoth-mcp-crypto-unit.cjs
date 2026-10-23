@@ -1466,6 +1466,37 @@ test("code identity 默认拒绝 ad-hoc，仅显式 Shoggoth bundle + cdhash 自
   }
 });
 
+test("local-signed 身份也接受 codesign 为私有证书生成的 certificate leaf 要求，且只固定一个具体证书", () => {
+  const executable = "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth";
+  const certificateLeafHash = "944829268790c31998163b056d6bfa3ab7955b6c";
+  const requirement = `identifier "ai.shoggoth.desktop" and certificate leaf = H"${certificateLeafHash}"`;
+  const details = [
+    `Executable=${executable}`, "Identifier=ai.shoggoth.desktop", "CodeDirectory v=20500 flags=0x10000(runtime)",
+    "Signature size=2558", "Authority=Shoggoth Internal Signing", "TeamIdentifier=not set", `# designated => ${requirement}`,
+  ].join("\n");
+  const spawn = text => (_command, args) => args[0] === "--verify"
+    ? { status: 0, stdout: "", stderr: "" } : { status: 0, stdout: "", stderr: text };
+  const identity = readCodeIdentity(executable, { allowLocalSignedIdentifier: "ai.shoggoth.desktop", spawnSync: spawn(details) });
+  assert.deepEqual(identity, { teamIdentifier: null, designatedRequirement: requirement,
+    identifier: "ai.shoggoth.desktop", localSigned: true, certificateLeafHash });
+  assert.equal(isStrictLocalSignedAppIdentity(identity), true);
+  assert.equal(isLocalFileCryptoAppIdentity(identity), true);
+  for (const malformed of [
+    details.replace("Identifier=ai.shoggoth.desktop", "Identifier=ai.attacker.desktop"),
+    details.replace(certificateLeafHash, "not-a-certificate-hash"),
+    details.replace("certificate leaf", "certificate anchor"),
+  ]) {
+    assert.throws(() => readCodeIdentity(executable, { allowLocalSignedIdentifier: "ai.shoggoth.desktop",
+      spawnSync: spawn(malformed) }), /code_identity_invalid/u);
+  }
+  // Exactly one pinned hash, and the requirement must be the one codesign generates for it.
+  assert.equal(isStrictLocalSignedAppIdentity({ ...identity, certificateRootHash: certificateLeafHash }), false);
+  assert.equal(isStrictLocalSignedAppIdentity({ ...identity, certificateLeafHash: "edb8a6fee24f4bd865bab191d92c44062f213137" }), false);
+  assert.equal(isStrictLocalSignedAppIdentity({ ...identity,
+    designatedRequirement: requirement.replace("certificate leaf", "certificate root") }), false);
+  assert.equal(isStrictLocalSignedAppIdentity({ ...identity, identifier: "ai.attacker.desktop" }), false);
+});
+
 test("packaged code identity 校验给大型 Codex 二进制保留有界冷启动预算", () => {
   const executable = "/Applications/Shoggoth.app/Contents/Resources/codex/package/bin/codex";
   const calls = [];
@@ -2495,7 +2526,8 @@ test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读�
   }).trim();
   const repositoryRoot = path.dirname(path.resolve(ROOT, commonGitDir));
   const electronBinary = require(path.join(repositoryRoot, "node_modules", "electron"));
-  const homeDir = fs.mkdtempSync("/tmp/sgwd-");
+  // The external provider writer rejects symlinked roots; /tmp is one on macOS.
+  const homeDir = fs.realpathSync(fs.mkdtempSync("/tmp/sgwd-"));
   const paths = resolveServicePaths({ homeDir });
   fs.mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
   const evidence = Buffer.from(`${JSON.stringify({
@@ -2576,7 +2608,8 @@ test("真实 Electron safeStorage 卡住只超时目标 MCP/Inbox 操作，普�
   }).trim();
   const repositoryRoot = path.dirname(path.resolve(ROOT, commonGitDir));
   const electronBinary = require(path.join(repositoryRoot, "node_modules", "electron"));
-  const homeDir = fs.mkdtempSync("/tmp/sgwc-");
+  // The external provider writer rejects symlinked roots; /tmp is one on macOS.
+  const homeDir = fs.realpathSync(fs.mkdtempSync("/tmp/sgwc-"));
   const paths = resolveServicePaths({ homeDir });
   const gatePath = path.join(homeDir, "role-gate.json");
   const gateNonce = crypto.randomBytes(16).toString("hex");

@@ -76,7 +76,8 @@
 @media (hover: none) {
   .editor[data-capture] .toolbar, .editor[data-capture] .remove { opacity: 1; }
 }
-.fileRow { display: flex; align-items: center; gap: 4px; min-width: 0; color: inherit; text-decoration: none; }
+.fileRow { display: flex; align-items: center; gap: 4px; min-width: 0; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
+.fileRow:disabled { cursor: wait; }
 .fileRow > svg { flex: none; }
 .fileRow .filename { margin: 0; flex: 1; min-width: 0; }
 .fileRow:hover { color: inherit; text-decoration: underline; text-underline-offset: 3px; }

@@ -10,7 +10,7 @@ const { validateChatServiceParams } = require("../app/agent-service/chat-service
 const { PendingCommandInbox } = require("../app/agent-service/pending-command-inbox");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { computeCatalogRevision } = require("../app/core/model-catalog-revision");
-const { normalizeSession, CHAT_SESSION_STORE_VERSION } = require("../app/agent-service/chat-session-store");
+const { normalizeSession } = require("../app/agent-service/chat-session-store");
 const model = { id: "catalog-model", displayName: "Catalog model", description: "", isDefault: true,
   capabilities: { thinkingOptions: ["low", "medium", "high", "ultra"], thinkingDefault: "medium", fastTier: "fast" } };
 const page = { models: [model], nextCursor: null, hasMore: false };
@@ -40,13 +40,11 @@ test("model catalog retains only runtime-advertised effort and speed capabilitie
 test("session settings validate the profile catalog, persist across reopen, and reset on model change", async t => {
   const f = await fixture(t), session = makeSession(f), controller = await controllerFor(t, f);
   const set = patch => controller.handle("chat.session.settings.set", { sessionKey: session.sessionKey, patch });
-  assert.equal(Object.hasOwn(session, "modelSettings"), false, "legacy session shape remains unchanged");
-  const { codexThreadId, ...legacy } = session;
-  legacy.runtimeSessionId = codexThreadId; legacy.permissionMode = "default";
-  assert.equal(CHAT_SESSION_STORE_VERSION, 5);
-  assert.equal(normalizeSession(legacy, false, 4).permissionMode, "default", "version 4 permission choices survive migration");
-  assert.throws(() => normalizeSession({ ...legacy, modelSettings: { thinkingLevel: "high", serviceTier: null } }, false, 4),
-    { code: "CHAT_SESSION_INVALID" }, "new fields cannot masquerade as a legacy schema");
+  assert.equal(Object.hasOwn(session, "modelSettings"), false, "a new session has no settings until one is chosen");
+  // 0.8.136 removed pre-baseline schema migrations; only the current shape is accepted.
+  assert.equal(normalizeSession({ ...session, modelSettings: { thinkingLevel: "high", serviceTier: null } }).modelSettings.thinkingLevel, "high");
+  assert.throws(() => normalizeSession({ ...session, modelSettings: { thinkingLevel: "high" } }),
+    { code: "CHAT_SESSION_INVALID" }, "partial settings are rejected");
   await assert.rejects(set({ thinkingLevel: "xhigh" }), { code: "CHAT_SESSION_MODEL_SETTINGS_INVALID" });
   await set({ thinkingLevel: "high" }); await set({ fastMode: true });
   f.sessions.close(); f.sessions.open();
@@ -60,7 +58,9 @@ test("session settings validate the profile catalog, persist across reopen, and 
   await assert.rejects(set({ thinkingLevel: "high" }), { code: "CHAT_SESSION_MODEL_NOT_AVAILABLE" });
 });
 
-test("settings refuse an in-flight run and a model changed during catalog lookup", async t => {
+// Since 7142a98a settings are conversation defaults captured by the next run,
+// so they may change while a run is in flight; a concurrent model change still wins.
+test("settings apply during an in-flight run and refuse a model changed during catalog lookup", async t => {
   const f = await fixture(t), session = makeSession(f);
   let busy = false, changeModel = false;
   const controller = await controllerFor(t, f, {
@@ -69,10 +69,12 @@ test("settings refuse an in-flight run and a model changed during catalog lookup
     listProfileModels: async () => { if (changeModel) f.sessions.setModelOverride(session.sessionKey, "new-model"); return page; },
   });
   busy = true;
-  await assert.rejects(controller.handle("chat.session.settings.set", { sessionKey: session.sessionKey, patch: { fastMode: true } }), { code: "THREAD_ACTIVE_TURN_CONFLICT" });
+  await controller.handle("chat.session.settings.set", { sessionKey: session.sessionKey, patch: { fastMode: true } });
+  assert.deepEqual(f.sessions.getSession(session.sessionKey).modelSettings, { thinkingLevel: null, serviceTier: "fast" });
   busy = false; changeModel = true;
   await assert.rejects(controller.handle("chat.session.settings.set", { sessionKey: session.sessionKey, patch: { thinkingLevel: "high" } }), { code: "CHAT_SESSION_NOT_READY" });
-  assert.equal(f.sessions.getSession(session.sessionKey).modelSettings, undefined);
+  assert.deepEqual(f.sessions.getSession(session.sessionKey).modelSettings, { thinkingLevel: null, serviceTier: null },
+    "the concurrent model change resets the earlier settings and the stale patch is not applied");
 });
 
 test("persisted effort and fast settings reach Codex turn/start and inherited effort clears the old override", async t => {

@@ -827,6 +827,11 @@ class NativeKanbanStore {
     return clone(this.container.boards[boardId] || null);
   }
 
+  getOperation(operationId) {
+    this.#assertOpen();
+    return Object.hasOwn(this.container.operations, operationId) ? clone(this.container.operations[operationId]) : null;
+  }
+
   listBoards() {
     this.#assertOpen();
     return this.#sorted(this.container.boards);

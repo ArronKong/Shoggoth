@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { openPath } from '../api/client';
+import { revealPath } from '../api/client';
 import type { InspirationExecution } from '../types';
 import { useToast } from '../components/ui';
 import TurnProcess from '../components/TurnTimeline/TurnProcess';
@@ -13,16 +13,16 @@ export default function InspirationActivity({ ideaId, execution }: { ideaId: str
   const { t } = useTranslation();
   const toast = useToast();
   const { activity, error, live, retry } = useInspirationActivity(ideaId, execution);
-  const [opening, setOpening] = useState<string | null>(null);
+  const [revealing, setRevealing] = useState<string | null>(null);
   const steps = useMemo(() => stepsFromParts(activity?.trajectory.parts || [], { live, includeText: true }), [activity, live]);
   // A finished round leads with its result: its trajectory starts folded, and an empty one stays out of the way.
   const unrecorded = Boolean(activity && !live && !error && !steps.length && !activity.trajectory.reason);
-  const open = async (file: string) => {
-    if (opening) return;
-    setOpening(file);
-    try { await openPath(file); }
-    catch (error) { toast.error(error instanceof Error ? error.message : t('inspiration.artifactOpenFailed')); }
-    finally { setOpening(null); }
+  const reveal = async (file: string) => {
+    if (revealing) return;
+    setRevealing(file);
+    try { await revealPath(file); }
+    catch (error) { toast.error(t('chat.artifactsRevealFailed', { msg: error instanceof Error ? error.message : String(error) })); }
+    finally { setRevealing(null); }
   };
   return <div className={styles.activity} data-inspiration-run={execution.runId}>
     {!unrecorded && <section aria-label={t('turnLab.processLabel')}>
@@ -38,10 +38,10 @@ export default function InspirationActivity({ ideaId, execution }: { ideaId: str
     </section>}
     {Boolean(activity?.artifacts.items.length) && <section aria-label={t('inspiration.artifacts')} className={styles.artifacts}>
       <div className={styles.sectionHeading}><h3>{t('inspiration.artifacts')}</h3>
-        <span className={styles.meta}>{t('inspiration.artifactOpenHint')}</span></div>
+        <span className={styles.meta}>{t('chat.artifactsRevealInFolder')}</span></div>
       <ul className={styles.artifactList}>{activity!.artifacts.items.map(file => <li key={file.path}>
-        <button className={styles.artifactButton} disabled={opening !== null} onClick={() => { void open(file.path); }}
-          title={file.path} aria-label={t('inspiration.openArtifact', { name: file.name })}>
+        <button className={styles.artifactButton} disabled={revealing !== null} onClick={() => { void reveal(file.path); }}
+          title={file.path} aria-label={t('inspiration.revealArtifact', { name: file.name })}>
           <span className={styles.artifactType} aria-hidden="true">{(file.ext?.slice(1) || 'FILE').slice(0, 5).toUpperCase()}</span>
           <span className={styles.artifactName}><strong>{file.name}</strong><span>{file.path}</span></span>
           <span className={styles.artifactOpen} aria-hidden="true">↗</span>

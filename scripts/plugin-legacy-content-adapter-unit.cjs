@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -106,6 +107,38 @@ test("only the pinned bundled GitHub bearer declaration becomes a managed MCP en
   }
 });
 
+test("frozen Google Docs URL helper is corrected only in the installed bundled conversion", () => {
+  const helperPath = "skills/google-docs/scripts/canonicalize_google_workspace_url.mjs";
+  const sourcePath = path.join(__dirname, "../resources/bundled-plugins/packages/google-drive", helperPath);
+  const original = fs.readFileSync(sourcePath);
+  assert.equal(crypto.createHash("sha256").update(original).digest("hex"),
+    "e439d12ad25f60049c15d8bbfabb9e29fa6b3233c42e653006049127414c2521");
+  const input = { format: "codex-plugin", bundledCodex: true, components: ["skills"], files: [
+    { path: ".codex-plugin/plugin.json", content: JSON.stringify({
+      name: "google-drive", version: "0.1.15", description: "Fixture Google Drive" }) },
+    { path: "skills/google-docs/SKILL.md", content: skill("google-docs") },
+    { path: helperPath, content: original },
+  ] };
+  const converted = convertLegacyPluginContents(input);
+  const corrected = converted.generatedFiles.find(file => file.path === helperPath);
+  assert(corrected, "installed package must contain a corrected helper");
+  assert(!converted.retainedPaths.includes(helperPath), "buggy source was retained in installed package");
+  assert.notDeepEqual(corrected.content, original, "installed helper still has the source bug");
+  assert.match(corrected.content.toString("utf8"),
+    /const fileId = segments\[dIndex\] === "d" \? segments\[dIndex \+ 1\] : null;/u);
+  assert.deepEqual(fs.readFileSync(sourcePath), original, "frozen source was changed");
+  assert(converted.diagnostics.some(entry => entry.scope === "skill-file"
+    && entry.reasonCode === "CODEX_GOOGLE_DOCS_URL_HELPER_CORRECTED"));
+
+  const untrusted = convertLegacyPluginContents({ ...input, bundledCodex: false });
+  assert(untrusted.retainedPaths.includes(helperPath), "untrusted source was silently modified");
+  assert(!untrusted.generatedFiles.some(file => file.path === helperPath));
+  const drifted = { ...input, files: input.files.map(file => file.path === helperPath
+    ? { ...file, content: Buffer.from(`${original.toString("utf8")}\n`) } : file) };
+  assert.throws(() => convertLegacyPluginContents(drifted),
+    { code: "LEGACY_BUNDLED_HELPER_DRIFT" }, "changed frozen helper was silently trusted");
+});
+
 test("only the frozen Airtable placeholder becomes a user-registered OAuth candidate", () => {
   const input = fixture("codex-plugin", { name: "airtable" });
   input.bundledCodex = true;
@@ -182,7 +215,6 @@ test("only the frozen Shopify endpoint and resource become a user-registered OAu
 
 test("bundled OAuth resource declarations become constrained candidates, never host credentials", () => {
   for (const [name, endpoint, resource] of [
-    ["figma", "https://mcp.figma.com/mcp", "https://mcp.figma.com/mcp"],
     ["linear", "https://mcp.linear.app/mcp", "https://mcp.linear.app/mcp"],
     ["notion", "https://mcp.notion.com/mcp", "https://mcp.notion.com"],
   ]) {
@@ -257,18 +289,48 @@ test("only byte-pinned Google declarations become distinct Desktop OAuth candida
   }
 });
 
-test("remaining Slack, Zoom and Codex Security host declarations stay blocked", () => {
+test("only the frozen Zoom meeting MCP declaration becomes a registered-client candidate", () => {
+  const packageRoot = path.join(__dirname, "../resources/bundled-plugins/packages/zoom");
+  const manifest = fs.readFileSync(path.join(packageRoot, ".codex-plugin/plugin.json"));
+  const original = fs.readFileSync(path.join(packageRoot, ".mcp.json"));
+  const input = { format: "codex-plugin", bundledCodex: true, components: ["mcp-servers"], files: [
+    { path: ".codex-plugin/plugin.json", content: manifest },
+    { path: ".mcp.json", content: original },
+  ] };
+  const converted = convertLegacyPluginContents(input);
+  const endpoint = "https://mcp.zoom.us/mcp/meeting/streamable";
+  assert.deepEqual(generatedMcp(converted).zoom, { type: "streamable-http", url: endpoint });
+  const output = JSON.parse(converted.generatedFiles.find(file => file.path === "plugin.json").content);
+  assert.equal(output.extensions.shoggoth.mcpOAuthResources.zoom, endpoint);
+  assert.ok(converted.diagnostics.some(issue => issue.name === "zoom"
+    && issue.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"));
+  assert.equal(JSON.stringify(converted).includes("<ZOOM_PUBLIC_CLIENT_ID>"), false);
+  assert.equal(generatedMcp(convertLegacyPluginContents({ ...input, bundledCodex: false })).zoom, undefined);
+  const tampered = JSON.parse(original);
+  tampered.mcpServers.zoom.oauth.client_id = "foreign-client";
+  for (const content of [JSON.stringify(tampered), original.toString("utf8").replace("\n", " ")]) {
+    const rejected = convertLegacyPluginContents({ ...input, files: [input.files[0],
+      { path: ".mcp.json", content }] });
+    assert.equal(generatedMcp(rejected).zoom, undefined);
+    assert.ok(rejected.diagnostics.some(issue => issue.name === "zoom"
+      && issue.reasonCode === "LEGACY_MCP_FIELD_UNSUPPORTED"));
+  }
+});
+
+test("remaining Slack and synthetic host declarations stay blocked", () => {
   const blocked = [
     { packageId: "slack", name: "slack", fields: ["oauth"],
       clientId: "11843774967.11905492103734" },
-    { packageId: "zoom", name: "zoom", fields: ["oauth"] },
-    { packageId: "codex-security", name: "codex-security",
+    { packageId: "synthetic-host", name: "synthetic-host",
+      declaration: { command: "node", args: ["./mcp/server.mjs"],
+        env_vars: ["CODEX_HOME", "OPENAI_API_KEY"],
+        startup_timeout_sec: 60, tool_timeout_sec: 349200 },
       fields: ["env_vars", "startup_timeout_sec", "tool_timeout_sec"] },
   ];
   for (const item of blocked) {
-    const source = JSON.parse(fs.readFileSync(path.join(__dirname,
-      "../resources/bundled-plugins/packages", item.packageId, ".mcp.json"), "utf8"));
-    const declaration = source.mcpServers[item.name];
+    const declaration = item.declaration || JSON.parse(fs.readFileSync(path.join(__dirname,
+      "../resources/bundled-plugins/packages", item.packageId, ".mcp.json"), "utf8"))
+      .mcpServers[item.name];
     assert(declaration, `${item.packageId} frozen MCP declaration is missing`);
     for (const field of item.fields) {
       assert(Object.hasOwn(declaration, field), `${item.packageId} lost source ${field}`);
@@ -277,7 +339,7 @@ test("remaining Slack, Zoom and Codex Security host declarations stay blocked", 
     if (item.callbackPort) assert.equal(declaration.oauth.callback_port, item.callbackPort);
     if (item.confidentialClient) assert.match(declaration.oauth.client_secret, /^<[^>]+>$/u);
     if (item.clientId) assert.equal(declaration.oauth.client_id, item.clientId);
-    if (item.packageId === "codex-security") {
+    if (item.packageId === "synthetic-host") {
       assert(declaration.env_vars.includes("CODEX_HOME"));
       assert(declaration.env_vars.includes("OPENAI_API_KEY"));
       assert.equal(declaration.tool_timeout_sec, 349200);

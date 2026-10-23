@@ -30,7 +30,7 @@ function attachmentTokens(attachments = []) {
 }
 
 function requestBudget({ budget, limits = {}, developerInstructions = "", context = "", prompt = "",
-  tools = [], attachments = [], nativeUsage = null, fresh = true }) {
+  tools = [], attachments = [], nativeUsage = null, fresh = true, appendedInstructions = "" }) {
   const instructions = estimateContextTokens(developerInstructions);
   const toolTokens = estimateContextTokens(JSON.stringify(tools));
   const added = estimateContextTokens(context) + estimateContextTokens(prompt) + attachmentTokens(attachments);
@@ -38,7 +38,7 @@ function requestBudget({ budget, limits = {}, developerInstructions = "", contex
   // A native meter includes its own history, instructions and tools. Using the
   // larger estimate avoids counting the same definitions twice on every turn.
   const estimatedTokens = !fresh && nativeUsage?.usedTokens != null
-    ? Math.max(serializedTokens, nativeUsage.usedTokens + added) : serializedTokens;
+    ? Math.max(serializedTokens, nativeUsage.usedTokens + added + estimateContextTokens(appendedInstructions)) : serializedTokens;
   const limitTokens = inputTokenLimit(budget, limits);
   return Object.freeze({ estimatedTokens, limitTokens, fixedTokens: instructions + toolTokens
     + estimateContextTokens(prompt) + attachmentTokens(attachments),

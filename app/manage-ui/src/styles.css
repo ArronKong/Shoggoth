@@ -12,6 +12,9 @@
 }
 
 :root {
+  /* 内容到窗口右缘的总距离，包含占位滚动条。 */
+  --page-edge-right: 40px;
+  --page-inset-right: var(--page-edge-right);
   /* 日历当前时间标记的水滴形状（Figma 6833-261）：左端正圆向右收窄成 2px 细线。
      只作形状用（mask），颜色由使用处的 background 决定。 */
   --cal-now-drop: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 6'%3E%3Cpath d='M3 0A3 3 0 1 0 3 6C5.6 6 6.2 4 8.6 4L24 4L24 2L8.6 2C6.2 2 5.6 0 3 0Z' fill='%23000'/%3E%3C/svg%3E");
@@ -97,6 +100,41 @@ body {
   display: flex;
   height: 100vh;
 }
+
+/* The hiddenInset window only has a narrow native title bar. Extend dragging
+   through the existing top gutter and page headers without changing layout.
+   Leave the outer 6px for resizing and the first 80px for macOS window buttons.
+   Pointer events pass through the gutter so scrolled controls remain usable. */
+:root.electron-macos-hidden-inset .app::before {
+  content: "";
+  position: fixed;
+  top: 6px;
+  left: 80px;
+  right: 6px;
+  height: 30px;
+  z-index: 1002; /* Above the immersive backdrop and navigation rail. */
+  pointer-events: none;
+  -webkit-app-region: drag;
+}
+:root.electron-macos-hidden-inset :is(.page-head, .chat-aside__title-row, .chat-header__row) {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+/* Exclude whole action/menu surfaces as well as individual controls. This also
+   protects controls that scroll or open into the fixed top gutter. */
+:root.electron-macos-hidden-inset :is(
+  button, a, input, textarea, select, summary, [tabindex],
+  [contenteditable]:not([contenteditable="false"]),
+  [role="button"], [role="combobox"], [role="menu"], [role="listbox"], [role="dialog"],
+  .page-head-actions, .chat-header__tools
+) {
+  -webkit-app-region: no-drag;
+}
+:root.electron-macos-hidden-inset :is(.page-head, .chat-aside__title-row, .chat-header__row)
+  :is(input, textarea, [contenteditable]:not([contenteditable="false"])) {
+  user-select: text;
+}
+
 .sidebar {
   width: 64px;
   height: 100vh;
@@ -410,12 +448,15 @@ body[data-immersive] .nav-link:hover:not(.active) {
   background: rgba(255, 255, 255, 0.1);
 }
 .content {
+  /* 固定滚动槽并计入右侧总留白，长短页面切换时内容边缘不跳动。 */
+  --page-inset-right: calc(var(--page-edge-right) - var(--ui-scrollbar-track-size, 12px));
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 /* 12 项主导航在常规规格（132 顶距 + 16 间隙）下连底部设置需要 ≥840px 视口，
@@ -429,7 +470,7 @@ body[data-immersive] .nav-link:hover:not(.active) {
 }
 .page {
   /* 顶部统一 36px，与聊天页栏头（chat-aside__head）同一起点 */
-  padding: 36px 1.25rem 1.25rem;
+  padding: 36px var(--page-inset-right) 1.25rem 0;
 }
 /* 页面加载占位以内容画布为中心，路由首载和看板首载共用。 */
 .page-loading {
@@ -3098,6 +3139,7 @@ button:disabled {
    控件而非图标，也不收编。
    ══════════════════════════════════════════════════════════════════════════════ */
 
+/* 轨迹图标自行保持 1px 描边，不参与下方通用图标的 1.2px 归一。 */
 :is(.nav-icon, .cli-path-icon,
     .chat-headbtn svg, .chat-pill--ghost svg, .chat-iconbtn svg,
     .chat-copybtn svg, .chat-ctxmenu__item svg,
@@ -3105,7 +3147,7 @@ button:disabled {
     .chat-thinking__ico svg, .chat-card__ico svg, .slash-menu__icon svg,
     .wb-card-updated svg, .wb-card-iconbtn svg, .wb-move svg,
     .ui-toggle svg, .ui-cbtn svg,
-    .cron-search-box svg, .btn-primary svg),
+    .cron-search-box svg, .btn-primary svg):not([data-trajectory-icon]),
 :is(.nav-icon, .cli-path-icon,
     .chat-headbtn svg, .chat-pill--ghost svg, .chat-iconbtn svg,
     .chat-copybtn svg, .chat-ctxmenu__item svg,
@@ -3113,7 +3155,7 @@ button:disabled {
     .chat-thinking__ico svg, .chat-card__ico svg, .slash-menu__icon svg,
     .wb-card-updated svg, .wb-card-iconbtn svg, .wb-move svg,
     .ui-toggle svg, .ui-cbtn svg,
-    .cron-search-box svg, .btn-primary svg) * {
+    .cron-search-box svg, .btn-primary svg):not([data-trajectory-icon]) * {
   vector-effect: non-scaling-stroke;
   stroke-width: 1.2;
 }

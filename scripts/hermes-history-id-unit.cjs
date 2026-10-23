@@ -68,6 +68,15 @@ async function testFetchHistoricalPreservesDashboardId() {
               name: "shoggoth_plugin_call", arguments: "{}" } }] },
           { id: 13, role: "tool", content: "fixture result",
             tool_name: "shoggoth_plugin_call", tool_call_id: "hermes-tool-12" },
+          { id: 14, role: "assistant", content: "", tool_calls: [{ id: "terminal-failed",
+            function: { name: "terminal", arguments: '{"command":"python3 report.py"}' } }] },
+          { id: 15, role: "tool", content: '{"exit_code":1,"output":"fixture error"}',
+            tool_name: "terminal", tool_call_id: "terminal-failed" },
+          { id: 16, role: "tool", content: '{"jobs":[{"status":"error"}],"success":true}',
+            tool_name: "cronjob_manage", tool_call_id: "successful-directory" },
+          { id: 17, role: "assistant", content: "", tool_calls: [{ id: "empty-result",
+            function: { name: "skill_view", arguments: '{"name":"fixture"}' } }] },
+          { id: 18, role: "tool", content: "", tool_name: "skill_view", tool_call_id: "empty-result" },
         ],
       }));
     } else {
@@ -83,7 +92,7 @@ async function testFetchHistoricalPreservesDashboardId() {
     be.dashboards.set("default", { baseUrl: `http://127.0.0.1:${port}`, token: "x" });
 
     const fetched = await be._fetchHistoricalMessages("agent:hermes-default:abc-uuid");
-    assert.equal(fetched.length, 6, "system role filtered, tool result retained");
+    assert.equal(fetched.length, 11, "system role filtered, tool result retained");
     assert.equal(fetched[0].id, "hermes-msg-7", "real autoincrement id mapped");
     assert.equal(fetched[1].id, "hermes-msg-8", "real autoincrement id mapped");
     assert.equal(fetched[2].id, "hermes-msg-10", "id kept even for structured content");
@@ -94,6 +103,10 @@ async function testFetchHistoricalPreservesDashboardId() {
       "host tool call id survives dashboard history mapping");
     assert.equal(fetched[5].toolCallId, "hermes-tool-12",
       "tool result carries the same host call id");
+    assert.deepEqual(fetched[6].content[0].arguments, { command: "python3 report.py" });
+    assert.equal(fetched[7].isError, true, "stored nonzero terminal outcome stays failed");
+    assert.equal(fetched[8].isError, false, "failed jobs are returned data, not a failed read");
+    assert.equal(fetched[10].toolCallId, "empty-result", "empty output still preserves the completion event");
 
     // End-to-end: a fresh session seeds from the dashboard → all real ids, no local stamps.
     const hg = await be.getHistory("agent:hermes-default:abc-uuid");

@@ -1,0 +1,13 @@
+/* Keep links inline so long labels wrap naturally in every Markdown surface. */
+.markdown-link-icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  max-width: none;
+  margin-inline-end: 0.25em;
+  vertical-align: -0.125em;
+  object-fit: contain;
+  /* Some sites only supply dark artwork on a transparent background. */
+  background: #fff;
+  border-radius: 2px;
+}

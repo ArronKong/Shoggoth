@@ -40,13 +40,18 @@ const developer = registry.developerSummary();
 const visibleCapabilities = PRODUCT_CAPABILITIES.filter(({ modelVisible }) => modelVisible !== false);
 assert.equal(mcp.length, visibleCapabilities.length);
 assert.equal(registry.list().length, PRODUCT_CAPABILITIES.length);
-assert.equal(ui.capabilities.length, mcp.length);
+const uiVisible = PRODUCT_CAPABILITIES.filter(tool => tool.modelVisible !== false && tool.uiVisible !== false);
+assert.equal(ui.capabilities.length, uiVisible.length);
 assert.equal(ui.revision, revision);
 assert.equal(mcp.every((tool) => tool._meta["shoggoth/toolRegistryRevision"] === revision), true);
 assert.match(markdown, new RegExp(revision, "u"));
 assert.match(developer, new RegExp(revision, "u"));
-assert.deepEqual(mcp.map((tool) => tool.name), ui.capabilities.map((tool) => tool.tool));
-for (const hidden of ["external_agent_list", "external_agent_get", "external_agent_run"]) {
+assert.deepEqual(uiVisible.map(tool => tool.tool), ui.capabilities.map((tool) => tool.tool));
+const hooks = mcp.filter(tool => tool.name.startsWith("hook_"));
+assert.equal(hooks.length, 12);
+assert.equal(ui.capabilities.some(tool => tool.tool.startsWith("hook_")), false);
+assert.equal(publicProductCapabilities().capabilities.some(tool => tool.tool.startsWith("hook_")), false);
+for (const hidden of ["group_task", "group_collaborate", "external_agent_list", "external_agent_get", "external_agent_run"]) {
   assert.equal(registry.get(hidden)?.modelVisible, false, `${hidden} remains callable for old helpers`);
   assert.equal(mcp.some((tool) => tool.name === hidden), false);
   assert.equal(ui.capabilities.some((tool) => tool.tool === hidden), false);

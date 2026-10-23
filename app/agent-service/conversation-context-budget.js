@@ -1,7 +1,16 @@
 "use strict";
 
 // This is a product fallback, never a claim about an unidentified model.
-const UNKNOWN_WINDOW_BUDGET = 1_000_000;
+// The user set it to 500K on 2026-10-22 (previously 1M).
+const UNKNOWN_WINDOW_BUDGET = 500_000;
+// A product summary keeps at most this much recent original text; older text
+// stays reachable through conversation_search/conversation_get (2026-10-22,
+// previously half the window).
+const RETAINED_TAIL_TOKENS = 24_000;
+// The summary path may summarize early, once history passes this size, even
+// though the window still has room. Such an early summary is advisory: if it
+// fails, the turn proceeds (see planConversationCompaction).
+const WORKING_CONTEXT_TARGET = 160_000;
 const validWindow = value => Number.isSafeInteger(value) && value > 0;
 
 function conversationContextBudget(contextWindow, source = "runtime") {
@@ -9,7 +18,7 @@ function conversationContextBudget(contextWindow, source = "runtime") {
   const tokens = known ? contextWindow : UNKNOWN_WINDOW_BUDGET;
   return Object.freeze({ tokens, source: known ? source : "fallback",
     triggerTokens: Math.max(1, Math.floor(tokens * 0.8)),
-    retainedTokens: Math.max(1, Math.floor(tokens * 0.5)) });
+    retainedTokens: Math.max(1, Math.min(Math.floor(tokens * 0.5), RETAINED_TAIL_TOKENS)) });
 }
 
 // Local planning estimate only. CJK and other non-ASCII text must not be
@@ -32,5 +41,5 @@ function documentedModelWindow(runtime, model) {
     "gemini-3.8-flash-medium", "gemini-3.8-flash-low"].includes(model) ? 1_048_576 : null;
 }
 
-module.exports = { UNKNOWN_WINDOW_BUDGET,
+module.exports = { UNKNOWN_WINDOW_BUDGET, RETAINED_TAIL_TOKENS, WORKING_CONTEXT_TARGET,
   validWindow, conversationContextBudget, estimateContextTokens, documentedModelWindow };

@@ -44,7 +44,7 @@ async function main() {
       assert.equal((event.payload.tool.resultSummary || "").includes(id), false, "receipt lies beyond the summary boundary");
       let hook;
       await ShoggothBackend.prototype._consumeEvent.call({ _invokeHook: (_hooks, _name, value) => { hook = value; } },
-        { hooks: {} }, {}, event);
+        { hooks: {}, run }, {}, event);
       assert.equal(hook.pluginAppCallId, id, `${runtime} live Backend hook`);
       const state = reduceTimeline(createTimeline(), { kind: "tool", ...hook }, 1);
       assert.equal(state.steps[0].pluginAppCallId, id, `${runtime} live UI reducer`);

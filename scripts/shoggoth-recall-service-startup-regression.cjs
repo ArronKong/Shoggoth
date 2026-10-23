@@ -34,28 +34,36 @@ test("Service restart rebuilds reauthorized Memory after transcript stores open 
     const old = service.transcriptStore.appendEvent({ profileId, sessionId: session.id,
       id: "recall-old-event", runId: "recall-old-run", kind: "user",
       content: { text: "请记住我偏好蓝色番茄计划" }, occurredAt: now() });
-    const forgotten = service.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+    // Shoggoth Memory (the default memory owner) has an async write API.
+    const forgotten = await service.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
       content, sourceRefs: [old.id, old.runId], classification: "explicit" });
-    service.memoryEngine.delete({ profileId, id: forgotten.id, reason: "forgotten",
+    await service.memoryEngine.delete({ profileId, id: forgotten.id, reason: "forgotten",
       operationId: "recall-startup-forget" });
     const fresh = service.transcriptStore.appendEvent({ profileId, sessionId: session.id,
       id: "recall-new-event", runId: "recall-new-run", kind: "user",
       content: { text: "我现在明确重新授权蓝色番茄计划" }, occurredAt: now() });
-    const reauthorized = service.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+    const reauthorized = await service.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
       content, sourceRefs: [fresh.id, fresh.runId], classification: "explicit" });
     assert.equal(service.memoryEngine.recallPolicy.isMemoryVisible(profileId, reauthorized), true);
+    assert.equal(service.memoryEngine.recallPolicy.hasRevokedContent(profileId, content), true);
+    assert.equal(service.memoryEngine.visible(service.memoryEngine.store.get(profileId, reauthorized.id),
+      { workspace, maxSensitivity: "private" }), true);
+    assert.deepEqual(service.memoryEngine.search({ profileId, workspace, maxSensitivity: "private" }).items.map(item => item.id),
+      [reauthorized.id], "a new explicit save must be recallable before restart too");
     await service.stop({ notify: false });
 
     service = create();
     await service.start();
     assert.equal(service.memoryEngine.viewStatus(profileId).stale, false,
       "view rebuild must retry after ChatSessionStore and TranscriptStore open");
-    const generated = service.agentDefinitionStore.readGeneratedView(profileId, "MEMORY");
+    // Shoggoth Memory keeps canonical USER.md/MEMORY.md files; user facts are in USER.md.
+    const generated = service.memoryEngine.readCanonical(profileId, "USER");
     assert.ok(generated);
     assert.equal(generated.content.split(content).length - 1, 1,
-      "generated view includes only the newly authorized claim");
-    const search = service.mcpProductToolController.conversationMemoryService.search(profileId,
-      { query: "蓝色番茄" }, { workspace });
+      "the canonical file includes only the newly authorized claim");
+    // Shoggoth Memory only searches text through the Run-bound async index entry;
+    // its recall-visible listing applies the same restored policy.
+    const search = service.memoryEngine.search({ profileId, workspace, maxSensitivity: "private" });
     assert.deepEqual(search.items.map((item) => item.id), [reauthorized.id]);
     assert.equal(service.memoryEngine.recallPolicy.isMemoryVisible(profileId, forgotten), false);
     await service.stop({ notify: false });
@@ -63,12 +71,14 @@ test("Service restart rebuilds reauthorized Memory after transcript stores open 
     const log = path.join(paths.agentsDir, profileId, "memory", "recall-policy.jsonl");
     fs.appendFileSync(log, "{", { mode: 0o600 });
     service = create();
-    await service.start();
-    assert.throws(() => service.mcpProductToolController.conversationMemoryService.search(profileId,
-      { query: "蓝色番茄" }, { workspace }),
-    (error) => error.code === "RECALL_POLICY_UNAVAILABLE");
+    // The current owner validates its policy during open(), before publishing
+    // the Service socket. A corrupt ledger rejects startup and closes reads.
+    await assert.rejects(service.start(), { code: "RECALL_POLICY_UNAVAILABLE" });
+    assert.equal(fs.existsSync(paths.socketPath), false);
+    assert.throws(() => service.memoryEngine.search({ profileId, workspace, maxSensitivity: "private" }),
+      (error) => error.code === "MEMORY_SCOPE_REVOKED");
     assert.throws(() => service.memoryEngine.recallPolicy.isMemoryVisible(profileId, reauthorized),
-      (error) => error.code === "RECALL_POLICY_UNAVAILABLE");
+      (error) => error.code === "RECALL_POLICY_CLOSED");
   } finally {
     try { await service?.stop({ notify: false }); } catch {}
     fs.rmSync(root, { recursive: true, force: true });

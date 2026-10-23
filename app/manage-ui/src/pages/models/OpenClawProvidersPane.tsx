@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import type { EnvVar, ProviderDirectoryEntry } from "../../types";
+import type { EnvVar, ModelChangeApplyResult, ModelChangeOperation, ProviderDirectoryEntry } from "../../types";
 import {
   addModelConfig,
+  clearModelAuthProviderKeys,
   deleteEnvVar,
-  deleteModelAuthProfile,
   getProviderDirectory,
+  getModelChangeOperation,
   listEnvVars,
   revealEnvVar,
   revealModelProviderKey,
   setEnvVar,
   setModelAuthProfileKey,
+  saveModelProviderDraft,
   updateModelProvider,
   validateCustomEndpoint,
 } from "../../api/client";
@@ -22,9 +24,33 @@ import { SHOW_TOOL_KEYS, ToolKeysCard } from "../keys/ToolKeysCard";
 import styles from "../keys/KeysPanel.module.css";
 import CustomEndpointsPanel from "./CustomEndpointsPanel";
 import { createOpenClawEndpointController } from "./openclaw-endpoint-controller";
+import { useSlowPending } from "./useSlowPending";
+import { usePageCache } from "../../lib/usePageCache";
+import {
+  confirmModelOperationTerminal, getModelOperationRecoverySnapshot, modelOperationRecoveryBlocks,
+  retainModelOperation, retainedProviderModelOperation, subscribeModelOperationRecovery,
+} from "./model-operation-recovery";
 import own from "./OpenClawProvidersPane.module.css";
 
 type Activation = { kind: string; available?: boolean } | null | undefined;
+
+// Keep only non-secret operation metadata across navigation/reload. An unknown
+// acknowledgement can be observed, but must never mint a replacement operation.
+type ProviderWriteReceipt = { operationId: string; status: string; code?: string };
+const providerMutationStatuses = new Set(["applied", "partial", "failed", "blocked", "needs_secret", "cleanup_pending", "compensated"]);
+function readProviderWriteReceipt(backend: string, provider: string): ProviderWriteReceipt | null {
+  const record = retainedProviderModelOperation(backend, provider);
+  return record ? { operationId: record.operationId, status: record.status, ...(record.code ? { code: record.code } : {}) } : null;
+}
+
+function providerEndpoint(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (value !== value.trim() || value.length > 4096 || !["http:", "https:"].includes(url.protocol)
+      || !url.hostname || url.username || url.password || url.search || url.hash) return null;
+    return url.toString().replace(/\/$/, "");
+  } catch { return null; }
+}
 
 function ProviderRow({
   entry,
@@ -43,6 +69,34 @@ function ProviderRow({
   const toast = useToast();
   const confirm = useConfirm();
   const [busy, setBusy] = useState(false);
+  const slowSave = useSlowPending(busy);
+  const [preparedEndpoint, setPreparedEndpoint] = useState<string | null>(null);
+  const preparedEndpointRef = useRef(preparedEndpoint);
+  preparedEndpointRef.current = preparedEndpoint;
+  const prepareEndpoint = (endpoint: string | null) => { preparedEndpointRef.current = endpoint; setPreparedEndpoint(endpoint); };
+  const nativeConfig = entry.writeMode === "native-config";
+  const managed = entry.writeMode === "managed-model-change" || nativeConfig;
+  const providerKey = entry.key.statusUnknown && !entry.key.configured
+    ? { ...entry.key, configured: true, redacted: t("models.dirNativeKeyStatusUnknown") } : entry.key;
+  const recovery = useSyncExternalStore(subscribeModelOperationRecovery,
+    () => getModelOperationRecoverySnapshot(backend));
+  const recoveryBlocked = managed && (!recovery.storageVerified || modelOperationRecoveryBlocks(backend, entry.id));
+  const [pendingWrite, setPendingWrite] = useState<ProviderWriteReceipt | null>(() =>
+    managed ? readProviderWriteReceipt(backend, entry.id) : null);
+  const pendingWriteRef = useRef(pendingWrite);
+  const [observation, setObservation] = useState<"found" | "not-found" | null>(null);
+  const [settledWrite, setSettledWrite] = useState<ModelChangeOperation | null>(null);
+  const recordWrite = async (receipt: ProviderWriteReceipt | null, terminal?: ModelChangeOperation): Promise<boolean> => {
+    const verified = receipt ? await retainModelOperation({ version: 1, backendId: backend, providerKey: entry.id,
+      operationId: receipt.operationId, status: receipt.status,
+      ...(receipt.code === "model_recovery_requested" ? { code: "model_recovery_requested" } : {}) })
+      : !!terminal && await confirmModelOperationTerminal(terminal);
+    const retained = readProviderWriteReceipt(backend, entry.id);
+    pendingWriteRef.current = retained;
+    setPendingWrite(retained);
+    setObservation(null);
+    return verified;
+  };
   const lifecycleEpoch = useRef(0);
   const activeRef = useRef(active);
   const backendRef = useRef(backend);
@@ -52,24 +106,84 @@ function ProviderRow({
   useEffect(() => {
     lifecycleEpoch.current += 1;
     setBusy(false);
+    const receipt = managed ? readProviderWriteReceipt(backend, entry.id) : null;
+    pendingWriteRef.current = receipt;
+    setPendingWrite(receipt);
+    setObservation(null);
+    setSettledWrite(null);
     return () => {
       lifecycleEpoch.current += 1;
     };
-  }, [active, backend]);
+  }, [active, backend, entry.id, managed]);
 
-  const run = async (request: () => Promise<Activation>, message: string): Promise<boolean> => {
+  useEffect(() => { prepareEndpoint(null); }, [active, backend, entry.id, entry.baseUrl.value]);
+
+  useEffect(() => {
+    const retained = managed ? readProviderWriteReceipt(backend, entry.id) : null;
+    pendingWriteRef.current = retained; setPendingWrite(retained);
+  }, [managed, backend, entry.id, recovery.revision]);
+
+  const run = async (
+    request: (operationId?: string) => Promise<ModelChangeApplyResult | { ok: boolean; activation?: Activation }>,
+    message: string,
+  ): Promise<boolean> => {
     const epoch = lifecycleEpoch.current;
     if (!activeRef.current || backendRef.current !== backend) return false;
+    if (managed && (pendingWriteRef.current || !getModelOperationRecoverySnapshot(backend).storageVerified
+      || modelOperationRecoveryBlocks(backend, entry.id))) {
+      toast.info(t(pendingWriteRef.current ? "models.dirManagedPending" : "models.dirManagedRecoveryUnknown"));
+      return false;
+    }
+    const operationId = managed ? `provider:${crypto.randomUUID()}` : undefined;
+    setSettledWrite(null);
     setBusy(true);
     try {
-      const activation = await request();
+      if (operationId && !await recordWrite({ operationId, status: "unconfirmed" })) {
+        toast.error(t("models.dirManagedRecoveryStorage")); return false;
+      }
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
-      onActivation(activation);
+      const result = await request(operationId);
+      if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
+      if (managed && (!operationId || !("status" in result) || result.operationId !== operationId
+        || result.receiptIdentityVerified !== true
+        || Object.keys(result).some((key) => !["operationId", "status", "stage", "code", "catalog", "activation", "warnings", "details", "canForce", "receiptIdentityVerified", "configSaved", "catalogPending", "retryable", "needsVerification"].includes(key))
+        || !providerMutationStatuses.has(result.status) || typeof result.stage !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(result.stage)
+        || result.code !== undefined && (typeof result.code !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(result.code)))) {
+        throw new Error(t("models.dirManagedUnconfirmed"));
+      }
+      if ("status" in result && result.status !== "applied") {
+        if (operationId) {
+          if (["failed", "compensated"].includes(result.status)) {
+            if (!await recordWrite(null, { version: 1, backendId: backend, providerKey: entry.id, operationId,
+              status: result.status === "compensated" ? "compensated" : "failed", stage: result.stage, terminal: true })) {
+              toast.error(t("models.dirManagedRecoveryStorage")); return false;
+            }
+          }
+          else if (!await recordWrite({ operationId, status: result.status })) {
+            toast.error(t("models.dirManagedRecoveryStorage")); return false;
+          }
+        }
+        if (activeRef.current && backendRef.current === backend && epoch === lifecycleEpoch.current) {
+          toast.error(t(result.code === "provider_credentials_incomplete" ? "models.dirProviderKeysIncomplete"
+            : "models.dirManagedNotApplied", { status: result.status }));
+        }
+        return false;
+      }
+      if (operationId && "status" in result && !await recordWrite(null, { version: 1, backendId: backend,
+        providerKey: entry.id, operationId, status: "applied", stage: result.stage, terminal: true })) {
+        toast.error(t("models.dirManagedRecoveryStorage")); return false;
+      }
+      if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
+      onActivation(result.activation);
       toast.success(message);
-      await onSaved();
+      try { await onSaved(); } catch { toast.info(t("models.dirManagedRefreshFailed")); }
+      if ("warnings" in result && result.warnings?.length) toast.info(result.warnings.join("；"));
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
       return true;
     } catch (error) {
+      // The original record is retained. Neither refresh nor another click
+      // resubmits this write after an uncertain acknowledgement.
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
       toast.error(error instanceof Error ? error.message : String(error));
       return false;
@@ -78,35 +192,124 @@ function ProviderRow({
     }
   };
 
-  const saveBaseUrl = (url: string) => run(async () => {
-    if (entry.inConfig) {
-      return (await updateModelProvider(backend, entry.id, { baseUrl: url })).activation;
+  const updateProvider = (patch: Parameters<typeof updateModelProvider>[2], operationId?: string) =>
+    updateModelProvider(backend, entry.id, {
+      ...patch, ...(nativeConfig ? { baseHash: entry.configRevision } : {}),
+    }, operationId);
+
+  const createProvider = (baseUrl: string, apiKey?: string, operationId?: string) => {
+    if (nativeConfig) return saveModelProviderDraft(backend, {
+      providerKey: entry.id, baseUrl, api: entry.api || undefined, models: [],
+      ...(apiKey ? { apiKey } : {}), credentialScope: "provider", baseHash: entry.configRevision,
+    }, operationId!);
+    if (managed && (!entry.defaultModelId || !entry.api)) {
+      throw new Error(t("models.dirManagedMetadataRequired"));
     }
-    return (await addModelConfig(backend, {
+    return addModelConfig(backend, {
+      providerMode: "new",
       providerKey: entry.id,
-      baseUrl: url,
-      ...(entry.api ? { api: entry.api } : {}),
+      baseUrl: managed ? providerEndpoint(baseUrl) ?? baseUrl : baseUrl,
+      ...(entry.api ?  { api: entry.api } : {}),
+      ...(apiKey ? { apiKey } : {}),
       model: { id: entry.defaultModelId ?? "default" },
-    })).activation;
-  }, t("models.dirSaved", { name: entry.label }));
+    }, operationId);
+  };
+
+  const saveBaseUrl = (url: string) => {
+    if (managed && !nativeConfig && entry.inConfig) {
+      const endpoint = providerEndpoint(url);
+      if (!endpoint || !entry.baseUrl.editable || pendingWriteRef.current || busy
+        || modelOperationRecoveryBlocks(backend, entry.id)
+        || !activeRef.current || backendRef.current !== backend) return Promise.resolve(false);
+      if (endpoint !== entry.baseUrl.value) {
+        // A domain change cannot reuse the old key by implication. Keep a local
+        // endpoint draft until the user supplies a key or explicitly clears it.
+        prepareEndpoint(endpoint);
+        toast.info(t("models.dirManagedEndpointDraft"));
+        return Promise.resolve(true);
+      }
+      return Promise.resolve(true);
+    }
+    return run(async (operationId) => {
+      if (entry.inConfig) return updateProvider({ baseUrl: url }, operationId);
+      return createProvider(url, undefined, operationId);
+    }, t("models.dirSaved", { name: entry.label }));
+  };
 
   const clearBaseUrl = () => run(
-    async () => (await updateModelProvider(backend, entry.id, { clearBaseUrl: true })).activation,
+    async (operationId) => updateProvider({ clearBaseUrl: true }, operationId),
     t("models.dirSaved", { name: entry.label }),
   );
 
-  const saveKey = (key: string) => run(async () => {
-    if (entry.inConfig) {
-      return (await updateModelProvider(backend, entry.id, { apiKey: key })).activation;
+  const saveKey = (key: string) => run(async (operationId) => {
+    if (entry.inConfig || nativeConfig) return updateProvider({ apiKey: key,
+      ...(nativeConfig ? { credentialScope: "provider" } : {}),
+      ...(managed && preparedEndpoint ? { baseUrl: preparedEndpoint } : {}) }, operationId);
+    if (managed) {
+      const endpoint = entry.baseUrl.value || entry.baseUrl.defaultValue;
+      if (entry.key.editable !== true || !endpoint) throw new Error(t("models.dirManagedEndpointRequired"));
+      return createProvider(endpoint, key, operationId);
     }
-    return (await setModelAuthProfileKey(backend, entry.id, key)).activation;
+    return setModelAuthProfileKey(backend, entry.id, key);
   }, t("models.dirSaved", { name: entry.label }));
+
+  const saveKeylessEndpoint = async () => {
+    const endpoint = preparedEndpoint;
+    const epoch = lifecycleEpoch.current;
+    if (!managed || !endpoint || pendingWriteRef.current || busy || modelOperationRecoveryBlocks(backend, entry.id)) return;
+    if (entry.key.configured && !await confirm({
+      title: t("models.dirManagedKeylessConfirmTitle", { name: entry.label }),
+      message: t("models.dirManagedKeylessConfirmMessage", { endpoint }),
+      confirmLabel: t("models.dirManagedSaveKeyless"), danger: true,
+    })) return;
+    if (epoch !== lifecycleEpoch.current || endpoint !== preparedEndpointRef.current
+      || !activeRef.current || backendRef.current !== backend) return;
+    await run(async (operationId) => updateProvider(
+      { baseUrl: endpoint, clearApiKey: true }, operationId), t("models.dirSaved", { name: entry.label }));
+  };
+
+  const observeWrite = async () => {
+    const original = pendingWriteRef.current;
+    const epoch = lifecycleEpoch.current;
+    if (!original || busy || !activeRef.current || backendRef.current !== backend) return;
+    let terminalObserved = false;
+    setBusy(true);
+    try {
+      const operation = await getModelChangeOperation(backend, original.operationId, entry.id);
+      if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current
+        || pendingWriteRef.current?.operationId !== original.operationId) return;
+      if (operation.terminal) {
+        // Only the closed, identity-checked original journal receipt unlocks the
+        // form. Snapshot changes or absence from a pending list are insufficient.
+        if (!await recordWrite(null, operation)) throw new Error("unverified_storage");
+        terminalObserved = true;
+        if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return;
+        prepareEndpoint(null);
+        setSettledWrite(operation);
+        if (operation.status === "applied") toast.success(t("models.dirSaved", { name: entry.label }));
+        else toast.error(t(operation.status === "compensated"
+          ? "models.dirManagedCompensated" : "models.dirManagedFailed"));
+        await onSaved();
+      } else if (operation.status === "not_found") {
+        setObservation("not-found");
+      } else {
+        if (!await recordWrite({ operationId: original.operationId, status: operation.status })) throw new Error("unverified_storage");
+        setObservation("found");
+      }
+    } catch {
+      if (activeRef.current && backendRef.current === backend && epoch === lifecycleEpoch.current) {
+        toast.error(t(terminalObserved ? "models.dirManagedRefreshFailed" : "models.dirManagedUnconfirmed"));
+      }
+    } finally {
+      if (epoch === lifecycleEpoch.current) setBusy(false);
+    }
+  };
 
   const clearKey = async () => {
     const guardEpoch = lifecycleEpoch.current;
     const approved = await confirm({
       title: t("models.dirClearKeyTitle", { name: entry.label }),
-      message: t("models.dirClearKeyMessage", { name: entry.label }),
+      message: t(nativeConfig ? "models.dirClearProviderKeyMessage" : "models.dirClearKeyMessage", { name: entry.label }),
       confirmLabel: t("keys.clear"),
       danger: true,
     });
@@ -116,11 +319,11 @@ function ProviderRow({
       || !activeRef.current
       || backendRef.current !== backend
     ) return;
-    await run(async () => {
-      if (entry.inConfig) {
-        return (await updateModelProvider(backend, entry.id, { clearApiKey: true })).activation;
-      }
-      return (await deleteModelAuthProfile(backend, `${entry.id}:default`)).activation;
+    await run(async (operationId) => {
+      if (entry.inConfig || nativeConfig) return updateProvider(
+        { clearApiKey: true, ...(nativeConfig ? { credentialScope: "provider" } : {}) }, operationId);
+      if (managed) throw new Error(t("models.dirManagedMetadataRequired"));
+      return clearModelAuthProviderKeys(backend, entry.id);
     }, t("models.dirKeyCleared", { name: entry.label }));
   };
 
@@ -136,7 +339,7 @@ function ProviderRow({
     }
   };
 
-  const probeUrl = entry.baseUrl.value || entry.baseUrl.defaultValue || null;
+  const probeUrl = preparedEndpoint || entry.baseUrl.value || entry.baseUrl.defaultValue || null;
   const validateKey = async (key: string) => {
     if (!probeUrl) return;
     try {
@@ -175,37 +378,77 @@ function ProviderRow({
         baseUrl={{
           value: entry.baseUrl.value,
           fallback: entry.baseUrl.defaultValue,
-          configured: Boolean(entry.baseUrl.value),
-          preview: entry.baseUrl.value,
+          configured: Boolean(preparedEndpoint || entry.baseUrl.value),
+          preview: preparedEndpoint || entry.baseUrl.value,
           placeholder: t("keys.baseUrlPlaceholder"),
           ariaLabel: `${entry.id} base URL`,
           title: entry.baseUrl.value ? t("keys.baseUrlReset") : t("keys.baseUrlPlaceholder"),
         }}
         secret={{
           value: null,
-          configured: entry.key.configured,
-          preview: entry.key.redacted ?? t("models.dirKeySetShort"),
+          configured: providerKey.configured,
+          preview: providerKey.redacted ?? t("models.dirKeySetShort"),
           placeholder: t("keys.enterValue"),
           ariaLabel: `${entry.id} API key`,
           title: entry.id,
         }}
-        busy={busy}
+        busy={busy || recoveryBlocked || managed && pendingWrite !== null}
         capabilities={{
           editBaseUrl: entry.baseUrl.editable,
-          clearBaseUrl: entry.baseUrl.editable && Boolean(entry.baseUrl.value),
-          revealSecret: entry.key.configured && entry.key.redacted !== null,
+          clearBaseUrl: (!managed || nativeConfig) && entry.baseUrl.editable && Boolean(entry.baseUrl.value),
+          editSecret: !managed || (entry.key.editable === true || Boolean(preparedEndpoint && entry.baseUrl.editable && entry.api))
+            && pendingWrite === null && !recoveryBlocked,
+          revealSecret: !nativeConfig && entry.key.configured && entry.key.redacted !== null,
           validateSecret: probeUrl !== null,
-          clearSecret: entry.key.configured && entry.key.clearable,
+          clearSecret: providerKey.configured && providerKey.clearable,
         }}
         onSaveBaseUrl={saveBaseUrl}
-        validateBaseUrl={(value) => /^https?:\/\//i.test(value)}
-        onResolveBaseUrlForEdit={() => Promise.resolve(entry.baseUrl.value)}
+        validateBaseUrl={(value) => managed ? providerEndpoint(value) !== null : /^https?:\/\//i.test(value)}
+        onResolveBaseUrlForEdit={() => Promise.resolve(preparedEndpoint || entry.baseUrl.value)}
         onClearBaseUrl={clearBaseUrl}
         onSaveSecret={saveKey}
         onRevealSecret={revealKey}
         onValidateSecret={validateKey}
         onClearSecret={clearKey}
       />
+
+      {slowSave && <p className={styles.cardHint} role="status">{t("models.savingSlow")}</p>}
+
+      {managed && preparedEndpoint && (
+        <div className={styles.cardHint} data-managed-endpoint-draft>
+          <p>{t("models.dirManagedEndpointDraft")}</p>
+          <button type="button" className={styles.linkBtn} disabled={busy || pendingWrite !== null}
+            onClick={() => void saveKeylessEndpoint()}>{t("models.dirManagedSaveKeyless")}</button>
+          {" · "}
+          <button type="button" className={styles.linkBtn} disabled={busy || pendingWrite !== null}
+            onClick={() => prepareEndpoint(null)}>{t("common.cancel")}</button>
+        </div>
+      )}
+      {managed && entry.key.editReason && !preparedEndpoint && (
+        <p className={styles.cardHint}>
+          {t(entry.key.editReason === "transaction_unavailable" ? "models.dirManagedUnavailable"
+            : entry.key.editReason === "endpoint_required" ? "models.dirManagedEndpointRequired"
+              : "models.dirManagedMetadataRequired")}
+        </p>
+      )}
+      {managed && pendingWrite && (
+        <div className={styles.cardHint} role="status" data-managed-provider-operation>
+          <p>{t("models.dirManagedPending")}</p>
+          <p>{t("models.dirManagedOperation", { operationId: pendingWrite.operationId, status: pendingWrite.status })}</p>
+          <button type="button" className={styles.linkBtn} disabled={busy} onClick={() => void observeWrite()}>
+            {t("models.dirManagedObserve")}
+          </button>
+          {observation === "not-found" && <p>{t("models.dirManagedNotObserved")}</p>}
+        </div>
+      )}
+
+      {managed && settledWrite && (
+        <div className={styles.cardHint} role="status" data-managed-provider-terminal>
+          <p>{t(settledWrite.status === "applied" ? "models.dirManagedApplied"
+            : settledWrite.status === "compensated" ? "models.dirManagedCompensated" : "models.dirManagedFailed")}</p>
+          <p>{t("models.dirManagedOperation", { operationId: settledWrite.operationId, status: settledWrite.status })}</p>
+        </div>
+      )}
 
       {entry.oauth.length > 0 && !entry.key.configured && (
         <p className={styles.cardHint}>{t("models.dirOauthHint")}</p>
@@ -349,16 +592,19 @@ export default function OpenClawProvidersPane({
   backend,
   active,
   onActivation,
+  recoveryRefreshKey = 0,
 }: {
   backend: string;
   active: boolean;
   onActivation: (activation: Activation) => void;
+  recoveryRefreshKey?: number;
 }) {
   const { t } = useTranslation();
-  const [entries, setEntries] = useState<ProviderDirectoryEntry[] | null>(null);
-  const [error, setError] = useState("");
+  const { data: directory, error, refresh } = usePageCache(`models:providers:${backend}`,
+    () => getProviderDirectory(backend), { staleTime: 30_000, enabled: active });
+  const entries = directory ? (directory.supported ? directory.providers ?? [] : []) : null;
   const [expanded, setExpanded] = useState(false);
-  const refreshGeneration = useRef(0);
+  const [providerWriteRevision, setProviderWriteRevision] = useState(0);
   const currentBackend = useRef(backend);
   currentBackend.current = backend;
   const activeRef = useRef(active);
@@ -382,29 +628,16 @@ export default function OpenClawProvidersPane({
     };
   }, [active, backend]);
 
-  const refresh = useCallback(async () => {
-    const generation = ++refreshGeneration.current;
-    try {
-      const directory = await getProviderDirectory(backend);
-      if (generation !== refreshGeneration.current || backend !== currentBackend.current) return;
-      setEntries(directory.supported && directory.providers ? directory.providers : []);
-      setError("");
-    } catch (cause) {
-      if (generation !== refreshGeneration.current || backend !== currentBackend.current) return;
-      setEntries((previous) => previous ?? []);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [backend]);
-
+  const previousRefreshKey = useRef(recoveryRefreshKey);
   useEffect(() => {
-    refreshGeneration.current += 1;
-    setEntries(null);
-    setError("");
+    if (previousRefreshKey.current === recoveryRefreshKey) return;
+    previousRefreshKey.current = recoveryRefreshKey;
     if (active) void refresh();
-    return () => {
-      refreshGeneration.current += 1;
-    };
-  }, [active, refresh]);
+  }, [active, refresh, recoveryRefreshKey]);
+  const providerChanged = () => {
+    setProviderWriteRevision((value) => value + 1);
+    return refresh();
+  };
 
   const directoryEntries = useMemo(() => (entries ?? []).filter((provider) => {
     if (!provider.custom) return true;
@@ -417,7 +650,7 @@ export default function OpenClawProvidersPane({
         && !url.username
         && !url.password;
     } catch { /* URL 不完整的手工 provider 仍留在 Provider 卡修复。 */ }
-    return !provider.inConfig || !hasEndpoint || provider.modelsCount === 0;
+    return !provider.inConfig || !hasEndpoint || provider.writeMode !== "native-config" && provider.modelsCount === 0;
   }), [entries]);
   const configured = useMemo(
     () => directoryEntries.filter((provider) => provider.configured),
@@ -432,7 +665,8 @@ export default function OpenClawProvidersPane({
 
   return (
     <div className={styles.panel}>
-      <OAuthProvidersCard backend={backend} />
+      <OAuthProvidersCard backend={backend} refreshKey={recoveryRefreshKey + providerWriteRevision}
+        onChanged={providerChanged} />
 
       <section className={styles.card}>
         <div className={styles.cardHead}>
@@ -461,7 +695,7 @@ export default function OpenClawProvidersPane({
               entry={provider}
               backend={backend}
               active={active}
-              onSaved={refresh}
+              onSaved={providerChanged}
               onActivation={onActivation}
             />
           ))}
@@ -471,6 +705,7 @@ export default function OpenClawProvidersPane({
       <CustomEndpointsPanel
         key={backend}
         controller={endpointController}
+        refreshKey={recoveryRefreshKey + providerWriteRevision}
         active={active}
         onChanged={() => void refresh()}
         onActivation={onActivation}

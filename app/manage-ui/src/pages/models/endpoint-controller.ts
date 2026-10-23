@@ -33,6 +33,8 @@ export type EndpointMutationStep = {
   blockers?: EndpointMutationBlocker[];
   references?: EndpointSafeReference[];
   canForce?: boolean;
+  configSaved?: boolean;
+  warnings?: string[];
 };
 
 // UI 只消费结构化、安全字段；controller 不把配置正文、密钥或任意后端消息放进恢复视图。
@@ -60,6 +62,8 @@ export type EndpointMutationOutcome = {
   stage?: string;
   activation?: ModelChangeApplyResult["activation"];
   canForce?: boolean;
+  configSaved?: boolean;
+  warnings?: string[];
   sync: "synced" | "pending";
   snapshot?: CustomEndpointsSnapshot;
   steps: EndpointMutationStep[];
@@ -74,6 +78,9 @@ export type EndpointMutationSession = {
 
 export interface EndpointController {
   readonly backend: string;
+  /** Public snapshot identity; include the profile when the endpoint list is scoped. */
+  readonly cacheKey?: string;
+  adoptSnapshot?(snapshot: CustomEndpointsSnapshot): void;
   list(signal?: AbortSignal): Promise<CustomEndpointsSnapshot>;
   validate(
     input: CustomEndpointInput,
@@ -96,6 +103,7 @@ export interface EndpointController {
   clearApiKey?(
     endpoint: CustomEndpoint,
     session: EndpointMutationSession,
+    scope?: { agentId?: string; credentialScope?: "provider"; baseHash?: string },
   ): Promise<EndpointMutationOutcome>;
   retry?(
     session: EndpointMutationSession,
@@ -197,6 +205,7 @@ function appliedSnapshot(
 export function createHermesEndpointController(backend: string): EndpointController {
   return {
     backend,
+    cacheKey: `models:endpoints:${backend}`,
     list: (signal) =>
       withAbortSignal(signal, () => listCustomEndpoints(backend)),
     validate: (input, signal) =>
@@ -219,6 +228,7 @@ export function createShoggothEndpointController(profile?: string): EndpointCont
   const backend = "shoggoth";
   return {
     backend,
+    cacheKey: `models:endpoints:${backend}:${profile ?? ""}`,
     list: (signal) => withAbortSignal(signal, () => listCustomEndpoints(backend, profile)),
     validate: (input, signal) => validateCustomEndpoint(backend, profile, input, signal),
     async save(input, session) {

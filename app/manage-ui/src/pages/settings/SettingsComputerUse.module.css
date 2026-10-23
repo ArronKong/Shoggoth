@@ -1,0 +1,23 @@
+.section { min-width: 0; container: computerUse / inline-size; }
+.card { gap: 0; }
+.permission { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 16px; }
+.status { display: inline-flex; align-items: center; gap: 6px; color: var(--settings-muted-surface-1); font-size: 12px; white-space: nowrap; }
+.status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.granted { color: var(--ui-success); }
+.footer { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 18px 0; border-top: 1px solid var(--ui-hairline); }
+.footer p { margin: 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.reloadHint { max-width: 64ch; }
+.version { color: var(--settings-muted-surface-1); font-size: 11px; }
+.sessions { padding: 14px 0; border-top: 1px solid var(--ui-hairline); font-size: 12px; }
+.sessions summary { cursor: pointer; color: var(--ui-text-1); }
+.sessions summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; border-radius: 4px; }
+.sessions p { margin: 12px 0 0; }
+.sessions ul { display: flex; flex-direction: column; gap: 10px; margin: 14px 0 0; padding: 0; list-style: none; }
+.sessions li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+.sessions li > :first-child { flex: 1 1 200px; overflow-wrap: anywhere; }
+.sessions small { color: var(--settings-muted-surface-1); }
+@container computerUse (max-width: 540px) {
+  .permission { grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; }
+  .permission > button { grid-column: 1 / -1; justify-self: start; }
+}

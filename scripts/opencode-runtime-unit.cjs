@@ -9,13 +9,15 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { OpenCodeHttpClient } = require("../app/agent-service/opencode-http-client");
 const { OpenCodeRuntimeLedger } = require("../app/agent-service/opencode-runtime-ledger");
-const { OpenCodeRuntimeHost, commandEnvironment, modelRef, usageFromTokens } = require("../app/agent-service/opencode-runtime-host");
+const { OpenCodeRuntimeHost, answersShoggothToolPrompts, commandEnvironment, modelRef,
+  usageFromTokens, nativePermissionRules } = require("../app/agent-service/opencode-runtime-host");
 const { supportsOpenCodeVersion, normalizeOpenCodeWorkspace } = require("../app/agent-service/opencode-runtime-paths");
+const { attachmentPrompt } = require("../app/agent-service/chat-attachments");
 
 test("OpenCode version and workspace identity reject unsupported or missing targets", () => {
   assert.equal(supportsOpenCodeVersion("1.18.31"), false);
   assert.equal(supportsOpenCodeVersion("1.18.32"), true);
-  assert.equal(supportsOpenCodeVersion("2.0.0"), false);
+  assert.equal(supportsOpenCodeVersion("2.0.0"), true);
   assert.throws(() => normalizeOpenCodeWorkspace("/not-a-shoggoth-workspace"),
     { code: "OPENCODE_WORKSPACE_INVALID" });
   assert.equal(normalizeOpenCodeWorkspace(fs.realpathSync(os.tmpdir())), fs.realpathSync(os.tmpdir()));
@@ -32,6 +34,7 @@ test("private command environment keeps credentials out and enforces ask", () =>
   assert.equal(env.XDG_CONFIG_HOME, "/tmp/config/config");
   assert.deepEqual(JSON.parse(env.OPENCODE_CONFIG_CONTENT).permission, { "*": "ask" });
   assert.equal(JSON.parse(env.OPENCODE_CONFIG_CONTENT).autoupdate, false);
+  assert.equal(env.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT, "1", "the user's ~/.claude/CLAUDE.md is not Agent context");
 });
 
 test("model and usage preserve provider identity and native token totals", () => {
@@ -116,6 +119,362 @@ function completion(host, timeoutMs = 5000) {
   }).finally(() => clearTimeout(timer));
   return { events, settled };
 }
+
+test("managed OpenCode resumes history with verified tool rules and restores the next selected mode", async () => {
+  const f = openCodeFixture("shoggoth-opencode-managed-");
+  const sessionId = "ses_managedfixture12345";
+  const ledger = new OpenCodeRuntimeLedger(f.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "managed-test", cwd: f.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+  let permission = nativePermissionRules(POLICY), busy = false, patches = 0;
+  const native = async (method, route, body) => {
+    if (method === "GET" && route === "/session/status") return { data: busy ? { [sessionId]: { type: "busy" } } : {} };
+    if (route === `/session/${sessionId}`) {
+      if (method === "PATCH") { permission = body.permission; patches++; }
+      return { data: { id: sessionId, directory: f.workspace, permission } };
+    }
+    throw new Error(`Unexpected route ${method} ${route}`);
+  };
+  const host = f.host(ledger, native);
+  try {
+    host.workspaceExecutionVersion = 1;
+    busy = true;
+    await assert.rejects(host.sessionResume({ sessionId, cwd: f.workspace }), { code: "RUNTIME_SESSION_BUSY" });
+    assert.equal(patches, 0, "running sessions keep their frozen permissions");
+    busy = false;
+    await host.sessionResume({ sessionId, cwd: f.workspace });
+    assert.deepEqual(permission, nativePermissionRules(POLICY, 1));
+    assert.equal(patches, 1);
+    host.workspaceExecutionVersion = null;
+    await host.sessionResume({ sessionId, cwd: f.workspace });
+    assert.deepEqual(permission, nativePermissionRules(POLICY));
+    assert.equal(patches, 2);
+    host.workspaceExecutionVersion = 1;
+    permission = [{ permission: "*", pattern: "*", action: "allow" }];
+    await assert.rejects(host.sessionResume({ sessionId, cwd: f.workspace }), { code: "OPENCODE_SESSION_IDENTITY_MISMATCH" });
+    assert.equal(patches, 2, "unknown native permissions remain a fail-closed identity error");
+  } finally { host.state = "stopped"; f.cleanup(); }
+});
+
+test("OpenCode status distinguishes signed out, protocol incompatibility and transport failure", async () => {
+  const fixture = openCodeFixture("shoggoth-opencode-auth-contract-");
+  try {
+    const read = response => fixture.host(null, async () => ({ data: response })).authenticationState();
+    assert.deepEqual(await read({ connected: [] }), { authenticated: false, credentialPresent: false });
+    assert.deepEqual(await read({ connected: ["fixture"] }), { authenticated: true, credentialPresent: true });
+    await assert.rejects(read({}), { code: "OPENCODE_PROTOCOL_UNSUPPORTED" });
+    const disconnected = fixture.host(null, async () => { throw Object.assign(new Error("private"), { code: "RUNTIME_CONNECTION_LOST" }); });
+    await assert.rejects(disconnected.authenticationState(), { code: "RUNTIME_CONNECTION_LOST" });
+  } finally { fixture.cleanup(); }
+});
+
+test("pending tool arguments are published when filled and retained on completion", async (t) => {
+  for (const finalStatus of ["completed", "error"]) await t.test(finalStatus, async () => {
+    const fixture = openCodeFixture("shoggoth-opencode-tool-activity-");
+    const sessionId = "ses_toolactivity12345";
+    const ledger = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+    ledger.update(data => data.sessions.push({ id: sessionId, source: "test", cwd: fixture.workspace,
+      title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+    let userMessageId, poll = 0;
+    const input = { command: "npm test", description: "验证聊天回归" };
+    const host = fixture.host(ledger, async (method, route, body) => {
+      if (method === "POST" && route.endsWith("/prompt_async")) {
+        assert.equal(body.system, "CURRENT_OPENCODE_RUN");
+        userMessageId = body.messageID; return { status: 204, data: null };
+      }
+      if (method === "GET" && route.startsWith(`/session/${sessionId}/message?`)) {
+        poll += 1;
+        const completed = poll >= 4;
+        return { data: [
+          { info: { id: userMessageId, sessionID: sessionId, role: "user" }, parts: [] },
+          { info: { id: "msg_toolactivity12345", sessionID: sessionId, role: "assistant", parentID: userMessageId,
+            ...(completed ? { time: { completed: Date.now() } } : {}) }, parts: [
+            { type: "tool", id: "prt_toolactivity12345", callID: "call_toolactivity12345", tool: "bash",
+              state: { status: poll === 1 ? "pending" : completed ? finalStatus : "running",
+                input: poll === 1 ? {} : input,
+                ...(poll >= 3 ? { title: "核对聊天工具状态" } : {}),
+                ...(completed ? finalStatus === "error" ? { error: "fixture error" } : { output: "ok" } : {}) } },
+          ] },
+        ] };
+      }
+      if (route === "/permission" || route === "/question") return { data: [] };
+      if (route === "/session/status") return { data: { [sessionId]: { type: poll >= 4 ? "idle" : "busy" } } };
+      throw new Error(`unexpected ${method} ${route}`);
+    });
+    const { events, settled } = completion(host);
+    try {
+      await host.turnStart({ sessionId, operationId: `tool-activity-${finalStatus}`, prompt: "fixture",
+        turnDeveloperInstructions: "CURRENT_OPENCODE_RUN", cwd: fixture.workspace, permissionPolicy: POLICY });
+      await settled;
+      const start = events.filter(event => event.type === "tool_start");
+      const updates = events.filter(event => event.type === "tool_update");
+      const results = events.filter(event => event.type === "tool_result");
+      assert.equal(start.length, 1);
+      assert.deepEqual(start[0].tool.input, {});
+      assert.equal(updates.length, 2, "late native titles publish even when input stays unchanged");
+      assert.deepEqual(updates[0].tool.input, input);
+      assert.equal(updates[1].tool.activityTitle, "核对聊天工具状态");
+      assert.equal(results.length, 1);
+      assert.deepEqual(results[0].tool.input, input);
+      assert.equal(results[0].tool.activityTitle, "核对聊天工具状态");
+      assert.equal(results[0].tool.status, finalStatus === "error" ? "failed" : "completed");
+    } finally { host.state = "stopped"; fixture.cleanup(); }
+  });
+});
+
+test("the per-turn Run ID rides with the user message so the system prompt stays identical", async () => {
+  const fixture = openCodeFixture("shoggoth-opencode-run-id-");
+  const sessionId = "ses_runidsystem123456";
+  const ledger = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "test", cwd: fixture.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+  const bodies = [];
+  const host = fixture.host(ledger, async (method, route, body) => {
+    if (method === "POST" && route.endsWith("/prompt_async")) { bodies.push(body); return { status: 204, data: null }; }
+    if (method === "GET" && route.startsWith(`/session/${sessionId}/message?`)) {
+      const user = bodies.at(-1).messageID;
+      return { data: [{ info: { id: user, sessionID: sessionId, role: "user" }, parts: [] },
+        { info: { id: `msg_reply${bodies.length}runid1234`, sessionID: sessionId, role: "assistant", parentID: user,
+          time: { completed: Date.now() } }, parts: [{ type: "text", id: `prt_reply${bodies.length}runid12`, text: "ok" }] }] };
+    }
+    if (route === "/permission" || route === "/question") return { data: [] };
+    if (route === "/session/status") return { data: { [sessionId]: { type: "idle" } } };
+    throw new Error(`unexpected ${method} ${route}`);
+  });
+  try {
+    for (const runId of ["run-1", "run-2"]) {
+      const { settled } = completion(host);
+      await host.turnStart({ sessionId, operationId: `op-${runId}`, prompt: "ask", context: "MEMORY",
+        turnDeveloperInstructions: `RULES\n\nCurrent Shoggoth Run ID: ${runId}`, cwd: fixture.workspace, permissionPolicy: POLICY });
+      await settled;
+    }
+    assert.deepEqual(bodies.map(body => body.system), ["RULES\n\nMEMORY", "RULES\n\nMEMORY"]);
+    assert.deepEqual(bodies.map(body => body.parts.filter(part => part.type === "text").map(part => part.text)),
+      [["ask", "Current Shoggoth Run ID: run-1"], ["ask", "Current Shoggoth Run ID: run-2"]]);
+  } finally { host.state = "stopped"; fixture.cleanup(); }
+});
+
+test("native provider failures keep upstream availability distinct from limits and client errors", async (t) => {
+  const privateTrace = "private-provider-error-canary";
+  const unavailable = "Error from provider (Console): Upstream request failed: Endpoint is unavailable.";
+  const apiError = (statusCode, fields = {}) => ({ name: "APIError", data: {
+    statusCode, message: unavailable, isRetryable: true,
+    responseHeaders: { authorization: privateTrace },
+    responseBody: JSON.stringify({ error: { type: "server_error", message: unavailable }, trace: privateTrace }),
+    ...fields,
+  } });
+  const cases = [
+    ...[500, 502, 503, 504, 599].map(status => [`HTTP ${status}`, apiError(status), "RUNTIME_UPSTREAM_UNAVAILABLE"]),
+    ["top-level HTTP 503", { statusCode: 503, message: unavailable }, "RUNTIME_UPSTREAM_UNAVAILABLE"],
+    ["quota takes precedence", apiError(503, { responseBody: "insufficient_quota" }), "RUNTIME_QUOTA_EXHAUSTED"],
+    ["rate limit takes precedence", apiError(503, { message: "Rate limit exceeded" }), "RUNTIME_RATE_LIMITED"],
+    ["HTTP 429", apiError(429), "RUNTIME_RATE_LIMITED"],
+    ["unsupported file input", { name: "UnknownError", data: {
+      message: "'file part media type application/octet-stream' functionality not supported.",
+    } }, "RUNTIME_ATTACHMENT_UNSUPPORTED"],
+    ...[400, 401, 403, 404, 499, 600, "503", null].map(status =>
+      [`client or invalid status ${status}`, apiError(status), "OPENCODE_TURN_FAILED"]),
+    ["unknown failure", { name: "UnknownError", data: { message: privateTrace } }, "OPENCODE_TURN_FAILED"],
+  ];
+  for (const [name, nativeError, expected] of cases) await t.test(name, async () => {
+    const fixture = openCodeFixture("shoggoth-opencode-provider-error-");
+    const sessionId = "ses_providererror12345";
+    const ledger = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+    ledger.update(data => data.sessions.push({ id: sessionId, source: "test", cwd: fixture.workspace,
+      title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+    let userMessageId, prompts = 0;
+    const host = fixture.host(ledger, async (method, route, body) => {
+      if (method === "POST" && route.endsWith("/prompt_async")) {
+        userMessageId = body.messageID; prompts += 1;
+        return { status: 204, data: null };
+      }
+      if (method === "GET" && route.startsWith(`/session/${sessionId}/message?`)) return { data: [
+        { info: { id: userMessageId, sessionID: sessionId, role: "user" }, parts: [] },
+        { info: { id: "msg_providererror12345", sessionID: sessionId, role: "assistant", parentID: userMessageId,
+          time: { completed: Date.now() }, error: nativeError }, parts: [] },
+      ] };
+      if (method === "GET" && route === "/session/status") return { data: {} };
+      if (method === "GET" && ["/permission", "/question"].includes(route)) return { data: [] };
+      throw new Error(`unexpected ${method} ${route}`);
+    });
+    const { events, settled } = completion(host);
+    try {
+      await host.turnStart({ sessionId, operationId: "provider-failure", prompt: "hi",
+        cwd: fixture.workspace, permissionPolicy: POLICY });
+      assert.equal((await settled).status, "failed");
+      const read = await host.sessionRead({ sessionId, includeTurns: true });
+      assert.equal(read.session.turns[0].errorCode, expected);
+      const restored = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+      const restoredHost = fixture.host(restored, async () => { throw new Error("settled history must not call provider"); });
+      const history = await restoredHost.sessionRead({ sessionId, includeTurns: true });
+      assert.equal(history.session.turns[0].errorCode, expected);
+      assert.equal(JSON.stringify({ events, history, ledger: restored.snapshot() }).includes(privateTrace), false);
+      assert.equal(prompts, 1, "a provider failure never replays the user message");
+    } finally {
+      host.state = "stopped";
+      fixture.cleanup();
+    }
+  });
+});
+
+test("direct and group OpenCode turns use saved files and reserve native file parts for images", async t => {
+  for (const source of ["direct-chat", "group-chat"]) await t.test(source, async () => {
+    const f = openCodeFixture("shoggoth-opencode-attachments-");
+    const sessionId = "ses_attachmentinput12345";
+    const ledger = new OpenCodeRuntimeLedger(f.ledgerOptions).open();
+    ledger.update(data => data.sessions.push({ id: sessionId, source, cwd: f.workspace,
+      title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+    const attachments = [
+      ["page.html", "application/octet-stream"], ["notes.md", "text/markdown"],
+      ["data.json", "application/json"], ["report.pdf", "application/pdf"],
+      ["archive.zip", "application/octet-stream"], ["drawing.svg", "image/svg+xml"],
+      ["preview.png", "image/png"],
+    ].map(([name, mimeType], index) => ({ id: `attachment-${index}`, name, mimeType,
+      size: 10, path: path.join(f.workspace, name) }));
+    for (const item of attachments) fs.writeFileSync(item.path, "file bytes", { mode: 0o600 });
+    let submitted;
+    const host = f.host(ledger, async (method, route, body) => {
+      if (method === "POST" && route.endsWith("/prompt_async")) {
+        submitted = body; return { status: 204, data: null };
+      }
+      if (route.startsWith(`/session/${sessionId}/message?`)) return { data: [
+        { info: { id: submitted.messageID, sessionID: sessionId, role: "user" }, parts: submitted.parts },
+        { info: { id: "msg_attachmentanswer12345", sessionID: sessionId, role: "assistant",
+          parentID: submitted.messageID, time: { completed: 2 } }, parts: [{ type: "text", text: "ok" }] },
+      ] };
+      if (route === "/session/status") return { data: {} };
+      if (["/permission", "/question"].includes(route)) return { data: [] };
+      throw Error(`unexpected ${method} ${route}`);
+    });
+    const { settled } = completion(host);
+    try {
+      await host.turnStart({ sessionId, operationId: source, attachments,
+        prompt: attachmentPrompt("检查附件", attachments), cwd: f.workspace, permissionPolicy: POLICY });
+      assert.equal((await settled).status, "completed");
+      assert.deepEqual(submitted.parts.filter(part => part.type === "file").map(part => part.mime), ["image/png"]);
+      for (const item of attachments) assert.ok(submitted.parts[0].text.includes(item.path));
+      assert.ok(submitted.parts.some(part => part.type === "text" && part.text.includes("BEGIN ATTACHMENT CONTENT")));
+    } finally { host.state = "stopped"; f.cleanup(); }
+  });
+});
+
+test("a failed file history continues in a normalized copy without rewriting or replaying the original", async t => {
+ for (const scenario of ["success", "busy", "foreign-copy", "incomplete-copy", "patch-interrupted"]) await t.test(scenario, async () => {
+  const f = openCodeFixture("shoggoth-opencode-attachment-recovery-");
+  const sessionId = "ses_originalfiles12345", forkId = "ses_continuedfiles12345";
+  const ledger = new OpenCodeRuntimeLedger(f.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "group-chat", cwd: f.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 2, turns: [{
+      id: "opencode-turn-original", operationId: "original-operation", fingerprint: "a".repeat(64),
+      messageId: "msg_originalfiles12345", acceptance: "accepted", status: "failed",
+      errorCode: "OPENCODE_TURN_FAILED", assistantMessages: [], createdAt: 1, updatedAt: 2,
+    }] }));
+  const original = [{ info: { id: "msg_originalfiles12345", sessionID: sessionId, role: "user" }, parts: [
+    { id: "prt_originaltext12345", sessionID: sessionId, messageID: "msg_originalfiles12345", type: "text",
+      text: `User-provided attachment: ${JSON.stringify({ name: "page.html", path: path.join(f.workspace, "page.html") })}` },
+    { id: "prt_originalfile12345", sessionID: sessionId, messageID: "msg_originalfiles12345", type: "file",
+      mime: "application/octet-stream", filename: "page.html", url: "data:application/octet-stream;base64,PGh0bWw+" },
+  ] }, { info: { id: "msg_originalerror12345", sessionID: sessionId, role: "assistant",
+    parentID: "msg_originalfiles12345", time: { completed: 2 }, error: { name: "UnknownError", data: {
+      message: "'file part media type application/octet-stream' functionality not supported.",
+    } } }, parts: [] }];
+  const snapshot = JSON.stringify(original);
+  let fork, permission, prompts = 0, forks = 0, interruptPatch = scenario === "patch-interrupted";
+  const native = async (method, route, body) => {
+    if (route === "/session/status") return { data: scenario === "busy" ? { [sessionId]: { type: "busy" } } : {} };
+    if (["/permission", "/question"].includes(route)) return { data: [] };
+    if (method === "POST" && route === `/session/${sessionId}/fork`) {
+      forks++;
+      fork = structuredClone(original);
+      for (const message of fork) { message.info.sessionID = forkId;
+        for (const part of message.parts) part.sessionID = forkId; }
+      if (scenario === "incomplete-copy") fork.pop();
+      return { data: { id: forkId, directory: scenario === "foreign-copy" ? path.dirname(f.workspace) : f.workspace } };
+    }
+    if (method === "PATCH" && route === `/session/${forkId}`) {
+      permission = body.permission; return { data: { id: forkId, directory: f.workspace, permission } };
+    }
+    if (method === "GET" && route === `/session/${sessionId}`) return { data: { id: sessionId, directory: f.workspace,
+      permission: [{ permission: "*", pattern: "*", action: "ask" }] } };
+    if (method === "GET" && route === `/session/${forkId}`) return { data: { id: forkId, directory: f.workspace, permission } };
+    if (method === "GET" && route.startsWith(`/session/${sessionId}/message?`)) return { data: structuredClone(original) };
+    if (method === "GET" && route.startsWith(`/session/${forkId}/message?`)) return { data: structuredClone(fork) };
+    if (method === "PATCH" && route.includes(`/session/${forkId}/message/`)) {
+      const part = fork.flatMap(message => message.parts).find(item => item.id === body.id);
+      assert.equal(body.type, "text");
+      assert.equal(JSON.stringify(body).includes("base64"), false);
+      assert.ok(body.text.includes("page.html"));
+      Object.keys(part).forEach(key => delete part[key]); Object.assign(part, body);
+      if (interruptPatch) { interruptPatch = false; throw Object.assign(Error("lost confirmation"), { code: "RUNTIME_CONNECTION_LOST" }); }
+      return { data: structuredClone(part) };
+    }
+    if (method === "POST" && route === `/session/${forkId}/prompt_async`) {
+      prompts++;
+      assert.equal(fork.flatMap(message => message.parts).some(part => part.type === "file"), false);
+      fork.push({ info: { id: body.messageID, sessionID: forkId, role: "user" }, parts: body.parts },
+        { info: { id: "msg_continuedanswer12345", sessionID: forkId, role: "assistant",
+          parentID: body.messageID, time: { completed: 3 } }, parts: [{ type: "text", text: "continued" }] });
+      return { status: 204, data: null };
+    }
+    throw Error(`unexpected ${method} ${route}`);
+  };
+  const host = f.host(ledger, native);
+  const input = { sessionId, operationId: "new-explicit-operation", prompt: "继续", cwd: f.workspace, permissionPolicy: POLICY };
+  try {
+    if (scenario !== "success") {
+      await assert.rejects(host.turnStart(input), { code: scenario === "busy" ? "RUNTIME_SESSION_BUSY" : "RUNTIME_ATTACHMENT_RECOVERY_REQUIRED" });
+      assert.equal(JSON.stringify(original), snapshot);
+      assert.equal(prompts, 0, "preparation failure cannot dispatch a model request");
+      assert.equal(ledger.snapshot().sessions[0].turns.length, 1, "no new execution receipt before preparation succeeds");
+      if (scenario !== "patch-interrupted") return;
+      assert.equal(ledger.snapshot().sessions[0].attachmentSessionId, forkId);
+    }
+    const { settled } = completion(host);
+    await host.turnStart(input);
+    assert.equal((await settled).status, "completed");
+    assert.equal(prompts, 1); assert.equal(forks, 1);
+    assert.equal(JSON.stringify(original), snapshot);
+    assert.deepEqual(permission, [{ permission: "*", pattern: "*", action: "ask" }]);
+    const stored = new OpenCodeRuntimeLedger(f.ledgerOptions).open();
+    assert.equal(stored.snapshot().sessions[0].attachmentSessionId, forkId);
+    assert.equal(stored.snapshot().sessions[0].turns[0].errorCode, "OPENCODE_TURN_FAILED");
+    const resumed = f.host(stored, native);
+    const read = await resumed.sessionResume({ sessionId, cwd: f.workspace, permissionPolicy: POLICY });
+    assert.equal(read.session.id, sessionId);
+    assert.equal((await resumed.sessionRead({ sessionId, includeTurns: true })).session.turns.length, 2);
+    assert.equal(prompts, 1, "resume must not replay either operation");
+  } finally { host.state = "stopped"; f.cleanup(); }
+ });
+});
+
+test("reconciling a pending native 503 turn retains the public upstream failure", async () => {
+  const fixture = openCodeFixture("shoggoth-opencode-upstream-recovery-");
+  const sessionId = "ses_upstreamrecovery12345", messageId = "msg_upstreamrecovery12345";
+  const ledger = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "test", cwd: fixture.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1,
+    turns: [{ id: "opencode-turn-upstream", operationId: "original-operation", messageId,
+      fingerprint: "a".repeat(64), acceptance: "accepted", status: "inProgress", errorCode: null,
+      assistantMessages: [], createdAt: 1, updatedAt: 1 }] }));
+  const host = fixture.host(ledger, async (method, route) => {
+    assert.equal(method, "GET", "reconciliation must not replay a prompt");
+    assert.ok(route.startsWith(`/session/${sessionId}/message?`));
+    return { data: [
+      { info: { id: messageId, sessionID: sessionId, role: "user" }, parts: [] },
+      { info: { id: "msg_recoveredanswer12345", sessionID: sessionId, role: "assistant", parentID: messageId,
+        time: { completed: Date.now() }, error: { name: "APIError", data: { statusCode: 503,
+          message: "Endpoint is unavailable", isRetryable: true } } }, parts: [] },
+    ] };
+  });
+  try {
+    const read = await host.sessionRead({ sessionId, includeTurns: true });
+    assert.equal(read.session.turns[0].status, "failed");
+    assert.equal(read.session.turns[0].errorCode, "RUNTIME_UPSTREAM_UNAVAILABLE");
+  } finally {
+    host.state = "stopped";
+    fixture.cleanup();
+  }
+});
 
 test("a turn from a stopped server generation fences only its own operation", async () => {
   const fixture = openCodeFixture("shoggoth-opencode-unknown-");
@@ -202,6 +561,114 @@ test("an unconfirmed native stop fences other operations until its server stops,
     } finally { second.state = "stopped"; }
   } finally {
     first.state = "stopped";
+    fixture.cleanup();
+  }
+});
+
+test("a native permission reaches Shoggoth as the tool and its command, not a composed sentence", async () => {
+  const fixture = openCodeFixture("shoggoth-opencode-permission-");
+  const sessionId = "ses_permission12345";
+  const ledger = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "test", cwd: fixture.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+  const state = { userMessageId: null, asked: false, replied: null };
+  const host = fixture.host(ledger, async (method, route, body) => {
+    if (method === "POST" && route.endsWith("/prompt_async")) { state.userMessageId = body.messageID; return { status: 204, data: null }; }
+    if (method === "GET" && route === "/permission") {
+      if (state.asked) return { data: [] };
+      state.asked = true;
+      return { data: [{ id: "per_one", sessionID: sessionId, permission: "bash", patterns: ["npm test"] }] };
+    }
+    if (method === "POST" && route === "/permission/per_one/reply") { state.replied = body.reply; return { data: true }; }
+    if (method === "GET" && route === "/question") return { data: [] };
+    if (method === "GET" && route === "/session/status") return { data: state.replied ? {} : { [sessionId]: { type: "busy" } } };
+    if (method === "GET" && route.startsWith(`/session/${sessionId}/message?`)) {
+      return { data: [
+        { info: { id: state.userMessageId, sessionID: sessionId, role: "user" }, parts: [] },
+        ...(state.replied ? [{ info: { id: "msg_done12345", sessionID: sessionId, role: "assistant",
+          parentID: state.userMessageId, time: { completed: Date.now() } },
+        parts: [{ type: "text", id: "prt_done", text: "done" }] }] : []),
+      ] };
+    }
+    throw new Error(`unexpected ${method} ${route}`);
+  });
+  const requests = [];
+  host.registerServerRequestHandler("item/commandExecution/requestApproval", async (params) => {
+    requests.push(params);
+    return { decision: "accept" };
+  });
+  const { settled } = completion(host);
+  try {
+    await host.turnStart({ sessionId, operationId: "permission", prompt: "run the tests",
+      cwd: fixture.workspace, permissionPolicy: POLICY });
+    assert.equal((await settled).status, "completed");
+    assert.equal(state.replied, "once");
+    assert.deepEqual({ toolName: requests[0].toolName, toolInput: requests[0].toolInput,
+      command: requests[0].command, reason: requests[0].reason },
+    { toolName: "bash", toolInput: { command: "npm test" }, command: "npm test", reason: undefined });
+  } finally {
+    host.state = "stopped";
+    fixture.cleanup();
+  }
+});
+
+test("Shoggoth tool prompts are answered only while no other MCP server can spell shoggoth_", () => {
+  assert.equal(answersShoggothToolPrompts({ mcp: { shoggoth: {} } }), true);
+  assert.equal(answersShoggothToolPrompts({ mcp: { shoggoth: {}, figma: {} } }), true);
+  // `shoggoth_computer` + tool `status` would also be named shoggoth_computer_status.
+  assert.equal(answersShoggothToolPrompts({ mcp: { shoggoth: {}, shoggoth_computer: {} } }), false);
+  assert.equal(answersShoggothToolPrompts({ mcp: { shoggoth: {}, "Shoggoth-extra": {} } }), false);
+  assert.equal(answersShoggothToolPrompts({ mcp: { figma: {} } }), false);
+  assert.equal(answersShoggothToolPrompts({}), false);
+});
+
+test("Shoggoth's own tools skip the duplicate OpenCode prompt; other tools still reach the user", async () => {
+  const fixture = openCodeFixture("shoggoth-opencode-own-tools-");
+  const sessionId = "ses_owntools12345";
+  const ledger = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "test", cwd: fixture.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+  const state = { userMessageId: null, asked: false, replies: {} };
+  const host = fixture.host(ledger, async (method, route, body) => {
+    if (method === "POST" && route.endsWith("/prompt_async")) { state.userMessageId = body.messageID; return { status: 204, data: null }; }
+    if (method === "GET" && route === "/permission") {
+      if (state.asked) return { data: [] };
+      state.asked = true;
+      return { data: [
+        { id: "per_shoggoth", sessionID: sessionId, permission: "shoggoth_computer_status", patterns: ["*"] },
+        { id: "per_bash", sessionID: sessionId, permission: "bash", patterns: ["rm -rf build"] },
+      ] };
+    }
+    const reply = route.match(/^\/permission\/(per_[a-z]+)\/reply$/u);
+    if (method === "POST" && reply) { state.replies[reply[1]] = body.reply; return { data: true }; }
+    if (method === "GET" && route === "/question") return { data: [] };
+    const done = Object.keys(state.replies).length === 2;
+    if (method === "GET" && route === "/session/status") return { data: done ? {} : { [sessionId]: { type: "busy" } } };
+    if (method === "GET" && route.startsWith(`/session/${sessionId}/message?`)) {
+      return { data: [
+        { info: { id: state.userMessageId, sessionID: sessionId, role: "user" }, parts: [] },
+        ...(done ? [{ info: { id: "msg_done12345", sessionID: sessionId, role: "assistant",
+          parentID: state.userMessageId, time: { completed: Date.now() } },
+        parts: [{ type: "text", id: "prt_done", text: "done" }] }] : []),
+      ] };
+    }
+    throw new Error(`unexpected ${method} ${route}`);
+  });
+  host.answersShoggothToolPrompts = true;
+  const asked = [];
+  host.registerServerRequestHandler("item/commandExecution/requestApproval", async (params) => {
+    asked.push(params.toolName);
+    return { decision: "decline" };
+  });
+  const { settled } = completion(host);
+  try {
+    await host.turnStart({ sessionId, operationId: "own-tools", prompt: "check the computer",
+      cwd: fixture.workspace, permissionPolicy: POLICY });
+    assert.equal((await settled).status, "completed");
+    assert.deepEqual(state.replies, { per_shoggoth: "once", per_bash: "reject" });
+    assert.deepEqual(asked, ["bash"], "only the non-Shoggoth tool asks the user");
+  } finally {
+    host.state = "stopped";
     fixture.cleanup();
   }
 });

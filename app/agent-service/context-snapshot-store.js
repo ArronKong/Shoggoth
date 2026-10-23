@@ -5,6 +5,35 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
+const { extractBorrowedMemoryRefs, mergeBorrowedMemoryRefs, borrowedMemoryPlaceholder } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
+
+function referenceOnlyMaterial(material) {
+  const canonical = structuredClone(material);
+  const refs = mergeBorrowedMemoryRefs(extractBorrowedMemoryRefs(material),
+    ...material.blocks.map(extractBorrowedMemoryRefs));
+  if (!refs.length) return canonical;
+  canonical.borrowedMemoryRefs = refs;
+  for (const item of canonical.blocks) {
+    const ownRefs = extractBorrowedMemoryRefs(item);
+    // A caller that has only a joined-context dependency cannot prove which
+    // portion is derived. Conservatively redact the complete dynamic block.
+    const affected = ownRefs.length || ["memory", "transcript", "checkpoint", "handoff", "hook-data"].includes(item.kind);
+    if (!affected || !item.content) continue;
+    const original = item.content, references = ownRefs.length ? ownRefs : refs;
+    const placeholder = borrowedMemoryPlaceholder(references);
+    item.borrowedMemoryRefs = references; item.persistPolicy = "reference_only";
+    item.content = placeholder;
+    for (const field of ["dynamicContext", "dynamicContextWithoutTranscript", "developerInstructions",
+      "stableDeveloperInstructions", "turnDeveloperInstructions"]) {
+      if (typeof canonical[field] === "string") canonical[field] = canonical[field].split(original).join(placeholder);
+    }
+  }
+  // Joined projections may have been truncated independently of their blocks.
+  // Keep no unproven tail in a disk snapshot; in-memory dispatch is unaffected.
+  canonical.dynamicContext = borrowedMemoryPlaceholder(refs);
+  if (canonical.dynamicContextWithoutTranscript !== undefined) canonical.dynamicContextWithoutTranscript = borrowedMemoryPlaceholder(refs);
+  return canonical;
+}
 
 // Native context fields currently accept 4 MiB. Snapshots contain both blocks
 // and their joined projection; JSON escaping also consumes space.
@@ -43,7 +72,8 @@ class ContextSnapshotStore {
   }
   create(material) {
     this._assertOpen();
-    const canonical = structuredClone(material);
+    if (!material || !Array.isArray(material.blocks)) throw snapshotError("CONTEXT_SNAPSHOT_INVALID", "Context Snapshot 内容无效");
+    const canonical = referenceOnlyMaterial(material);
     if (!canonical || canonical.schemaVersion !== 1 || typeof canonical.runId !== "string"
       || canonical.runId.length === 0 || profileId(canonical.profileId) !== canonical.profileId
       || !Number.isSafeInteger(canonical.createdAt) || canonical.createdAt < 0
@@ -66,10 +96,10 @@ class ContextSnapshotStore {
       if (stable(existing) !== stable(snapshot)) {
         throw snapshotError("CONTEXT_SNAPSHOT_CONFLICT", "Context Snapshot hash 冲突");
       }
-      return existing;
+      return { ...structuredClone(material), id: snapshot.id, contentHash: snapshot.contentHash };
     }
     atomicWritePrivateFile(target, serialized, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
-    return structuredClone(snapshot);
+    return { ...structuredClone(material), id: snapshot.id, contentHash: snapshot.contentHash };
   }
   get(profile, id) {
     this._assertOpen();
@@ -88,4 +118,4 @@ class ContextSnapshotStore {
   }
 }
 
-module.exports = { ContextSnapshotStore, MAX_CONTEXT_SNAPSHOT_BYTES, SNAPSHOT_ID_PATTERN };
+module.exports = { ContextSnapshotStore, MAX_CONTEXT_SNAPSHOT_BYTES, SNAPSHOT_ID_PATTERN, referenceOnlyMaterial };

@@ -17,7 +17,8 @@ export default function AgentDefaultRuntime({ backend, agentId, onChanged }: {
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const snapshot = cache.data;
-  const connected = status.data?.filter(runtime => runtime.enabled && runtime.releaseEnabled && runtime.installation === "available") || [];
+  const connected = status.data?.filter(runtime => runtime.enabled && runtime.releaseEnabled && runtime.installation === "available"
+    && runtime.readiness !== "incompatible") || [];
   const bindings = snapshot?.bindings.filter(binding => isVisibleRuntime(binding.runtime)
     && (binding.id === snapshot.defaultBindingId || (binding.enabled
     && (binding.runtimeAccountId === "shoggoth-internal-codex-default-v1"
@@ -55,6 +56,8 @@ export default function AgentDefaultRuntime({ backend, agentId, onChanged }: {
     </Field>
     {snapshot?.availability?.some(entry => entry.bindingId === snapshot.defaultBindingId
       && entry.reason === "runtime-not-installed") && <p className={styles.error} role="status">{t("agents.sessionRuntimeNotInstalled")}</p>}
+    {status.data?.some(runtime => runtime.runtimeAccountId === choices.find(binding => binding.id === snapshot?.defaultBindingId)?.runtimeAccountId
+      && runtime.readiness === "incompatible") && <p className={styles.error} role="status">{t("settings.runtimeIncompatible")}</p>}
     {(cache.error || status.error) && <p className={styles.error} role="alert">{t("agents.sessionRuntimeLoadFailed")} <button
       className="ui-cbtn ui-cbtn--sm" onClick={() => { void cache.refresh(); void status.refresh(); }}>{t("settings.retry")}</button></p>}
   </section>;

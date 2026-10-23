@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 const { pluginServerId } = require("./plugin-runtime-tool-service");
+const { evaluatePluginSkill } = require("./plugin-skill-eligibility");
 
 const MAX_BINDINGS = 64;
 const MAX_SKILLS = 5_000;
@@ -47,10 +48,11 @@ class ExternalPluginToolService {
   #approvals;
   #activeCalls = new Map();
   #getNativeSkillStore;
+  #selectionDispatch;
 
   constructor({ store, resolver, toolCatalogRegistry, capabilityDispatcher,
     acquireConnection, leaseManager, provenance, approvalBroker,
-    getNativeSkillStore = null } = {}) {
+    getNativeSkillStore = null, selectionDispatch = null } = {}) {
     if (typeof store?.listGlobalBindings !== "function"
       || typeof store?.getCapabilityRecords !== "function"
       || typeof store?.getRelease !== "function"
@@ -67,7 +69,8 @@ class ExternalPluginToolService {
       || typeof provenance?.settle !== "function"
       || typeof provenance?.requestCancel !== "function"
       || typeof approvalBroker?.request !== "function"
-      || (getNativeSkillStore !== null && typeof getNativeSkillStore !== "function")) {
+      || (getNativeSkillStore !== null && typeof getNativeSkillStore !== "function")
+      || (selectionDispatch !== null && typeof selectionDispatch.getExecutionSelection !== "function")) {
       throw new TypeError("ExternalPluginToolService requires trusted Service authorities");
     }
     this.#store = store;
@@ -79,6 +82,7 @@ class ExternalPluginToolService {
     this.#provenance = provenance;
     this.#approvals = approvalBroker;
     this.#getNativeSkillStore = getNativeSkillStore;
+    this.#selectionDispatch = selectionDispatch;
   }
 
   #snapshot() {
@@ -138,8 +142,22 @@ class ExternalPluginToolService {
     return Object.freeze({ skills: Object.freeze(skills), tools: Object.freeze(tools), revision });
   }
 
-  async open({ credentialToken, identity }) {
-    return this.#leases.issue({ credentialToken, identity }, () => this.#snapshot());
+  async open({ credentialToken, identity, selectionEnvelope }) {
+    if (identity && Object.getPrototypeOf(identity) === Object.prototype) identity = Object.freeze({ ...identity });
+    if (selectionEnvelope && Object.getPrototypeOf(selectionEnvelope) === Object.prototype) {
+      selectionEnvelope = Object.freeze({ ...selectionEnvelope });
+    }
+    return this.#leases.issue({ credentialToken, identity }, () => {
+      const { toolCallId: _toolCallId, ...executionIdentity } = identity;
+      if (!this.#selectionDispatch && selectionEnvelope !== undefined) fail();
+      const selected = this.#selectionDispatch?.getExecutionSelection({
+        envelope: selectionEnvelope, identity: executionIdentity });
+      const snapshot = this.#snapshot();
+      if (!selected) return snapshot;
+      return Object.freeze({ ...snapshot, selectionEnvelope: selected.envelope,
+        assertSelectionCurrent: () => this.#selectionDispatch.getExecutionSelection({
+          envelope: selected.envelope, identity: executionIdentity }) });
+    });
   }
 
   #currentTool(frozen) {
@@ -176,6 +194,21 @@ class ExternalPluginToolService {
     return descriptor;
   }
 
+  #activeTools(snapshot) {
+    return snapshot.tools.filter((tool) => {
+      try { this.#currentTool(tool); return true; } catch { return false; }
+    });
+  }
+
+  #skillEligibility(descriptor, activeTools) {
+    return evaluatePluginSkill(descriptor, {
+      pluginTools: activeTools.map((tool) => ({ name: tool.toolName,
+        installationId: tool.envelope.installationId,
+        sourceIdentity: this.#store.getInstallation(tool.envelope.installationId)?.sourceIdentity })),
+      runtimeCapabilities: ["mcp"],
+    });
+  }
+
   async search({ token, identity, query = "", cursor = 0, limit = 5, revision }) {
     if (typeof query !== "string" || !query.isWellFormed()
       || Buffer.byteLength(query, "utf8") > 512
@@ -188,16 +221,20 @@ class ExternalPluginToolService {
     try {
       const words = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
       const matches = (text) => words.every(word => text.toLocaleLowerCase().includes(word));
+      const activeTools = this.#activeTools(lease.snapshot);
       const skills = lease.snapshot.skills.filter(item => {
         try { this.#currentSkill(item); return matches(`${item.packageName} ${item.name} ${item.description}`); }
         catch { return false; }
-      }).map(item => ({ kind: "skill", id: item.componentId,
-        packageName: item.packageName, name: item.name, description: item.description,
-        source: item.source }));
-      const tools = lease.snapshot.tools.filter(item => {
-        try { this.#currentTool(item); return matches(`${item.packageName} ${item.toolName} ${item.description}`); }
-        catch { return false; }
-      }).map(item => ({ kind: "tool", serverId: item.serverId,
+      }).map(item => {
+        const eligibility = this.#skillEligibility(item, activeTools);
+        return { kind: "skill", id: item.componentId,
+          packageName: item.packageName, name: item.name, description: item.description,
+          source: item.source, eligible: eligibility.eligible,
+          reason: eligibility.reason, dependency: eligibility.dependency,
+          assessment: eligibility.assessment };
+      });
+      const tools = activeTools.filter(item => matches(`${item.packageName} ${item.toolName} ${item.description}`))
+        .map(item => ({ kind: "tool", serverId: item.serverId,
         packageName: item.packageName, name: item.toolName, description: item.description }));
       const all = [...skills, ...tools].sort((a, b) =>
         a.packageName.localeCompare(b.packageName) || a.name.localeCompare(b.name));
@@ -223,6 +260,8 @@ class ExternalPluginToolService {
       const descriptor = lease.snapshot.skills.find(item => item.componentId === skillId);
       if (!descriptor) fail();
       this.#currentSkill(descriptor);
+      if (!this.#skillEligibility(descriptor,
+        this.#activeTools(lease.snapshot)).eligible) fail();
       const skill = descriptor.source === "native-skill"
         ? this.#getNativeSkillStore().readGlobalEnabled({ skillId: descriptor.skillId,
           version: descriptor.version, contentHash: descriptor.contentHash,
@@ -249,12 +288,41 @@ class ExternalPluginToolService {
       const descriptor = lease.snapshot.skills.find(item => item.componentId === skillId);
       if (!descriptor) fail();
       this.#currentSkill(descriptor);
+      if (!this.#skillEligibility(descriptor,
+        this.#activeTools(lease.snapshot)).eligible) fail();
       const file = descriptor.source === "native-skill"
         ? this.#getNativeSkillStore().readGlobalEnabledFile({ skillId: descriptor.skillId,
           version: descriptor.version, contentHash: descriptor.contentHash,
           registryRevision: descriptor.registryRevision, relativePath })
         : this.#resolver.inspectSkillFile(descriptor, relativePath);
       this.#currentSkill(descriptor);
+      lease.assertCurrent();
+      const chars = Array.from(file.content);
+      if (cursor > chars.length) fail();
+      const end = Math.min(chars.length, cursor + 8_000);
+      return { name: file.name, relativePath: file.relativePath,
+        fileHash: file.fileHash, content: chars.slice(cursor, end).join(""),
+        nextCursor: end < chars.length ? end : null };
+    } finally { this.#finish(token, identity); }
+  }
+
+  async readPluginResource({ token, identity, skillId, relativePath, cursor = 0 }) {
+    if (typeof skillId !== "string" || !/^[a-f0-9]{64}$/u.test(skillId)
+      || typeof relativePath !== "string" || !relativePath.isWellFormed()
+      || Buffer.byteLength(relativePath, "utf8") > 1024
+      || !Number.isSafeInteger(cursor) || cursor < 0) fail();
+    const lease = this.#leases.claim({ token, identity });
+    try {
+      const descriptor = lease.snapshot.skills.find(item => item.componentId === skillId
+        && item.source === "plugin");
+      if (!descriptor) fail();
+      this.#currentSkill(descriptor);
+      if (!this.#skillEligibility(descriptor,
+        this.#activeTools(lease.snapshot)).eligible) fail();
+      const file = this.#resolver.inspectPackageResource(descriptor, relativePath);
+      this.#currentSkill(descriptor);
+      if (!this.#skillEligibility(descriptor,
+        this.#activeTools(lease.snapshot)).eligible) fail();
       lease.assertCurrent();
       const chars = Array.from(file.content);
       if (cursor > chars.length) fail();
@@ -360,6 +428,14 @@ class ExternalPluginToolService {
       try { this.#provenance.requestCancel(callId); }
       catch { console.error("[agent-service] external plugin audit cancellation deferred"); }
     }
+  }
+  cancelExecution(identity) {
+    const canceled = this.#leases.cancelExecution(identity);
+    for (const captured of canceled) {
+      const callId = `external-${hash([runKey(captured), captured.toolCallId])}`;
+      try { this.#provenance.requestCancel(callId); } catch { /* Search/read leases have no call audit. */ }
+    }
+    return canceled.length;
   }
   #finish(token, identity) {
     try { this.#leases.finish({ token, identity }); } catch { /* Expired/canceled leases stay revoked. */ }

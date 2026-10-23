@@ -116,6 +116,48 @@ test("pending startup is not timed out as an idle runtime", async () => {
   await h.advance(1); assert.equal(stopped, true);
 });
 
+test("request leases cover the acquire/use gap and release on rejection without retaining other bindings", async () => {
+  const h = harness(), acquired = deferred(), response = deferred();
+  const first = binding("antigravity", "first"), second = binding("antigravity", "second");
+  await h.registry.acquire(second);
+  const request = h.registry.withActivity(async () => {
+    await h.registry.acquire(first);
+    await h.registry.acquire(first); // One request can acquire the same binding repeatedly.
+    acquired.resolve();
+    await response.promise;
+  });
+  await acquired.promise;
+  assert.equal(h.registry.isBindingActive(first), true);
+  await h.advance(120);
+  assert.deepEqual(h.stops, [second]);
+  const rejected = assert.rejects(request, /request failed/);
+  response.reject(new Error("request failed")); await rejected;
+  assert.equal(h.registry.isBindingActive(first), false);
+  await h.advance(119); assert.deepEqual(h.stops, [second]);
+  await h.advance(1); assert.deepEqual(h.stops, [second, first]);
+});
+
+test("concurrent request leases survive one caller finishing; detached work cannot leak a completed lease", async () => {
+  const h = harness(), first = deferred(), second = deferred(), acquired = deferred();
+  const b = binding("pi"), late = deferred();
+  let background;
+  const one = h.registry.withActivity(async () => {
+    await h.registry.acquire(b);
+    background = late.promise.then(() => h.registry.acquire(binding("pi", "late")));
+    acquired.resolve();
+    await first.promise;
+  });
+  await acquired.promise;
+  const two = h.registry.withActivity(async () => { await h.registry.acquire(b); await second.promise; });
+  await flush();
+  first.resolve(); await one;
+  await h.advance(120); assert.equal(h.stops.length, 0);
+  second.resolve(); await two;
+  late.resolve(); await background;
+  assert.equal(h.registry.isBindingActive(binding("pi", "late")), false);
+  await h.advance(120); assert.equal(h.stops.length, 2);
+});
+
 test("cleanup failures are reported and are never turned into successful reacquisition", async () => {
   const h = harness(); const stopped = deferred(); const error = new Error("cleanup incomplete");
   h.registry.register("test-runtime", {

@@ -235,6 +235,26 @@ function lazyPool(label) {
   };
 }
 
+// The one Shoggoth backend lists every visible Agent's models, including the
+// default Agent's Codex runtime. It answers that catalog and nothing else: it
+// has no session or turn methods, so any execution on it fails loudly.
+function catalogOnlyPool() {
+  return {
+    get() {
+      return {
+        terminated: new Promise(() => {}), registeredSecrets: [],
+        subscribe() { return () => {}; }, subscribeAccountAuth() { return () => {}; },
+        registerServerRequestHandler() { return () => {}; },
+        authenticationState: () => ({ authenticated: true, credentialPresent: true }),
+        accountRead: async () => ({ account: { type: "chatgpt" }, requiresOpenaiAuth: false }),
+        async modelList() { return { data: [], nextCursor: null }; },
+      };
+    },
+    stop() { return Promise.resolve(); },
+    stopAll() { return Promise.resolve(); },
+  };
+}
+
 function authority(profileId) {
   return { profileId, callId: crypto.randomUUID(), confirmation: true };
 }
@@ -267,7 +287,7 @@ async function main() {
     },
     builtinCliProfiles: true,
     builtinCliInstalledAccountIds: [NATIVE_PI_RUNTIME_ACCOUNT_ID],
-    runtimePool: lazyPool("Codex"),
+    runtimePool: catalogOnlyPool(),
     grokBuildRuntimePool: lazyPool("Grok"),
     antigravityRuntimePool: lazyPool("Antigravity"),
     piRuntimePool: runtimePool,
@@ -275,7 +295,7 @@ async function main() {
   });
   const backend = new ShoggothBackend({
     paths,
-    id: "pi",
+    id: "shoggoth",
     name: "Pi",
     connectionMode: "native-runtime",
     claimsAgentId: (agentId) => agentId === "shoggoth-pi"
@@ -329,12 +349,23 @@ async function main() {
       oauth: true,
       dashboardRuns: true,
       agentHarness: true,
+      nativeCapacity: true,
+      nativeChatUi: false,
+      nativeMemoryConfig: true,
+      nativeMemorySharingConfig: true,
+      runtimeBindings: true,
+      runtimeStatus: true,
+      sessionRuntimeSwitch: true,
+      runtimeUsage: true,
       cron: { kind: "native" },
       kanban: { kind: "native" },
     });
-    assert.deepEqual(backend.getAgents().map((agent) => agent.id), [piSpec.agentId]);
+    // One Shoggoth backend lists every native agent; the default one runs on Codex.
+    assert.deepEqual(backend.getAgents().map((agent) => agent.runtime === "pi" ? agent.id : agent.runtime).sort(),
+      [piSpec.agentId, "codex"].sort());
     const chatCapabilities = backend.getChatCapabilities(piSpec.agentId);
     assert.deepEqual({ ...chatCapabilities, permissions: undefined }, {
+      nativeUiArtifactsV1: false,
       attachments: {
         image: { maxBytes: 10 * 1024 * 1024 },
         pdf: { maxBytes: 50 * 1024 * 1024 },
@@ -426,7 +457,7 @@ async function main() {
     assert.equal((await backend.getCronRuns(cron.id)).runs[0].status, "ok");
 
     const dashboard = await backend.getDashboardRunDetail(kanbanRun.id);
-    assert.equal(dashboard.backendId, "pi");
+    assert.equal(dashboard.backendId, "shoggoth");
     assert.equal(dashboard.agentId, piSpec.agentId);
     assert.equal(dashboard.status, "completed");
     assert.equal(dashboard.events.some((event) => (
@@ -468,9 +499,10 @@ async function main() {
     }, authority(piSpec.id));
     assert.match(read.content, /Shoggoth Skill Authoring/u);
 
+    // A new Agent starts on the default Codex runtime; other runtimes are bound to it afterwards.
     const createdAgent = await backend.createAgent({ name: "Pi Reviewer" });
-    assert.match(createdAgent.id, /^pi-/u);
-    assert.equal((await backend.getAgent(createdAgent.id)).provider, "pi");
+    assert.match(createdAgent.id, /^shoggoth-agent-/u);
+    assert.equal((await backend.getAgent(createdAgent.id)).provider, "codex");
     const createdProfile = service.productStore.listAgentProfiles()
       .find((profile) => profile.agentId === createdAgent.id);
     assert.ok(createdProfile);
@@ -479,8 +511,6 @@ async function main() {
     assert.ok(service.nativeSkillStore.ensureProfile(createdProfile.id));
     assert.equal(service.nativeKanbanStore.listBoards()
       .some((candidate) => candidate.profileId === createdProfile.id), true);
-    const createdHome = path.join(paths.stateDir, "pi", createdProfile.runtimeProfileId);
-    assert.equal(fs.existsSync(path.join(createdHome, "auth.json")), false);
 
     const executionHosts = [...runtimePool.hosts.values()].filter((host) => !host.controlInstance);
     const starts = executionHosts.flatMap((host) => host.calls.sessionStart);

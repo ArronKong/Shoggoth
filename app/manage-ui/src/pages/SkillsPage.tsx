@@ -1,5 +1,5 @@
 import AgentAvatarView from "../components/AgentAvatar";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
 import type { NativeSkillPage, UnifiedSkill } from "../types";
@@ -11,6 +11,7 @@ import {
   listSkills,
   listSkillsPage,
   previewSkill,
+  selfImprovement,
   uninstallSkill,
   updateSkill,
 } from "../api/client";
@@ -26,6 +27,7 @@ import { useConfirm, useToast } from "../components/ui";
 import { toSanitizedMarkdownHtml } from "../lib/markdown";
 import { skillIdentity } from "../lib/skillIdentity";
 import StandaloneMcpRepair from "./StandaloneMcpRepair";
+const SelfImprovementPanel = lazy(() => import("./SelfImprovementPanel"));
 
 const EMPTY_USAGE = {
   usage: new Map<string, number>(),
@@ -103,6 +105,19 @@ export default function SkillsPage() {
   const activeAgent = isNativeSkills
     ? (nativeAgents.some((agent) => agent.id === selectedAgent) ? selectedAgent : nativeAgents[0]?.id)
     : undefined;
+  useEffect(() => {
+    if (!isNativeSkills || typeof window === "undefined") return;
+    const changed = (event: Event) => {
+      const detail = (event as CustomEvent<{ backendId?: string; agentId?: string }>).detail;
+      if (detail?.backendId !== backend || detail.agentId !== activeAgent) return;
+      setSelectedIdentity(null);
+      nativeRevision.current = null;
+      setPage(0);
+      setNativeReload(value => value + 1);
+    };
+    window.addEventListener("shoggoth:skills-changed", changed);
+    return () => window.removeEventListener("shoggoth:skills-changed", changed);
+  }, [activeAgent, backend, isNativeSkills]);
   useEffect(() => {
     if (isNativeSkills && activeAgent && activeAgent !== selectedAgent) setSelectedAgent(activeAgent);
   }, [activeAgent, isNativeSkills, selectedAgent]);
@@ -241,7 +256,9 @@ export default function SkillsPage() {
     () => (selectedIdentity ? skills.find((s) => skillIdentity(s) === selectedIdentity) || null : null),
     [skills, selectedIdentity],
   );
-  const previewKey = isNativeSkills && activeAgent && selected
+  const learnedSelection = useMemo(() => selected?.source === "learned" && selected.id && selected.contentHash
+    ? { id: selected.id, versionHash: selected.contentHash } : null, [selected]);
+  const previewKey = isNativeSkills && activeAgent && selected && selected.source !== "learned"
     ? JSON.stringify([
         backend,
         activeAgent || "",
@@ -277,7 +294,14 @@ export default function SkillsPage() {
   const toggle = async (s: UnifiedSkill, enabled: boolean) => {
     setBusy(skillIdentity(s));
     try {
-      await updateSkill(backend, s.name, {
+      if (s.source === "learned") {
+        if (!activeAgent) throw new Error(t("skills.errorPrefix", { msg: "Agent unavailable" }));
+        await selfImprovement(backend, activeAgent, "change", { skillId: s.id,
+          expectedRevision: s.learnedRevision, action: enabled ? "restore" : "archive" });
+        window.dispatchEvent(new CustomEvent("shoggoth:skills-changed", {
+          detail: { backendId: backend, agentId: activeAgent },
+        }));
+      } else await updateSkill(backend, s.name, {
         enabled,
         id: s.id,
         source: s.source,
@@ -287,8 +311,8 @@ export default function SkillsPage() {
       }, activeAgent);
       toast.success(
         enabled
-          ? t("skills.enabledToast", { name: s.name })
-          : t("skills.disabledToast", { name: s.name }),
+          ? t("skills.enabledToast", { name: s.title || s.name })
+          : t("skills.disabledToast", { name: s.title || s.name }),
       );
       await refresh();
     } catch (e) {
@@ -443,6 +467,10 @@ export default function SkillsPage() {
       </div>
 
       {isNativeSkills && activeAgent && <StandaloneMcpRepair key={activeAgent} agentId={activeAgent} />}
+      {isNativeSkills && activeAgent && <Suspense fallback={null}>
+        <SelfImprovementPanel key={`${backend}:${activeAgent}`} backend={backend} agentId={activeAgent}
+          skillSelection={learnedSelection} onSelectionClosed={closeDetail} onSkillsChanged={() => void refresh()} />
+      </Suspense>}
 
       {error && <div className="error">{t("skills.errorPrefix", { msg: error })}</div>}
       {!loading && !error && totalCount === 0 && (
@@ -462,35 +490,36 @@ export default function SkillsPage() {
                 const used = usage.get(s.name) || 0;
                 const identity = skillIdentity(s);
                 const isSel = selectedIdentity === identity;
+                const usageBadge = usageSupported && (used > 0
+                  ? <span className="skill-badge skill-badge-used">{t("skills.usedTimes", { count: used })}</span>
+                  : <span className="skill-badge skill-badge-never">{t("skills.neverUsed")}</span>);
                 return (
                   <article
                     key={identity}
                     className={`skill-card${isSel ? " skill-card-selected" : ""}${s.enabled ? "" : " skill-off"}`}
-                    title={s.name}
+                    title={s.title || s.name}
                   >
                     <button
                       type="button"
                       className="skill-card-open"
-                      aria-label={s.version ? `${s.name} v${s.version} · ${s.source}` : s.name}
+                      aria-label={s.version ? `${s.title || s.name} v${s.version} · ${s.source}` : s.name}
                       onClick={(event) => openDetail(s, event?.currentTarget)}
                     />
                     <div className="skill-card-top">
                       <span className="skill-emoji" aria-hidden="true">
                         {s.emoji || "🧩"}
                       </span>
-                      <span className="skill-name">{s.name}</span>
-                      {s.version && <span className="skill-badge">v{s.version}</span>}
+                      <span className="skill-name">{s.title || s.name}</span>
+                      {s.source !== "learned" && s.version && <span className="skill-badge">v{s.version}</span>}
                       {isNativeSkills && s.globalEnabled && <span className="skill-badge">
                         {t("skills.globalScope")}</span>}
-                      {usageSupported &&
-                        (used > 0 ? (
-                          <span className="skill-badge skill-badge-used">
-                            {t("skills.usedTimes", { count: used })}
-                          </span>
-                        ) : (
-                          <span className="skill-badge skill-badge-never">{t("skills.neverUsed")}</span>
-                        ))}
+                      {s.source !== "learned" && usageBadge}
                     </div>
+                    {s.source === "learned" && <div className="skill-card-tags">
+                      <span className="skill-badge">{t("skills.learnedSource")}</span>
+                      <span className="skill-badge">v{s.contentHash?.slice(0, 12) || s.version}</span>
+                      {usageBadge}
+                    </div>}
                     {/* 开关放第二行右下角：跟徽章挤在标题行会把技能名压到 ~110px 全是省略号。 */}
                     <div className="skill-card-foot">
                       <div className="skill-desc">{s.description || ""}</div>
@@ -498,7 +527,7 @@ export default function SkillsPage() {
                         <Switch
                           checked={s.enabled}
                           disabled={busy === identity}
-                          ariaLabel={`${t("skills.enabledLabel")}: ${s.name}${s.version ? ` v${s.version}` : ""}`}
+                          ariaLabel={`${t("skills.enabledLabel")}: ${s.title || s.name}${s.version ? ` v${s.version}` : ""}`}
                           onChange={(v) => toggle(s, v)}
                         />
                       </span>
@@ -525,7 +554,7 @@ export default function SkillsPage() {
           )}
         </div>
 
-        {selected && (
+        {selected && selected.source !== "learned" && (
           <aside className="skill-detail" ref={skillDetailRef}>
             <div className="skill-detail-head">
               <button

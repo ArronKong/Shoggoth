@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "hosts": {
+    "hermes": {
+      "version": 1,
+      "backendId": "hermes",
+      "hostVersion": "c7c2df1a536d62b45fda8907bb1898981721794d",
+      "inputTreeSha256": "c3b8c857212a97ec39c9f2b57608a5276c7f85491033d19721dd7dc77ad6903e",
+      "outputTreeSha256": "a3d3eeb238e2abe460aad34103f25c3fd5b339af3ab29c48544555b66248128a",
+      "dependencyTreeSha256": "a19d70209cc41faf6fbbef2eb95a166a5bdd8236b3350cd721a3a8d58bec9f1e",
+      "payloadTreeSha256": "b842707740c1c374660be1e06a22c1d27003935abdf7c3948693262f7ed002d9",
+      "payloadManifestSha256": "3e930960ab4a0752144e81c4c9cf670b379804e386a347312437f92ca43750ff",
+      "identityFile": "pyproject.toml",
+      "identityFileSha256": "d660dc790a25a8eb20c5ec209df3939f3d6f3f872d7c987c286e90fa759ec499",
+      "dependencyPath": "venv",
+      "entryRelative": "hermes_cli/main.py",
+      "payloadRelative": "hermes/managed-v3",
+      "manifestFile": "manifest.json",
+      "licenseFiles": [
+        {
+          "path": "LICENSE",
+          "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+        },
+        {
+          "path": "python/lib/python3.11/LICENSE.txt",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+        },
+        {
+          "path": "hermes-managed-dependency-notices.json",
+          "sha256": "5b4ffc26257421666169a745db6d0d16cbcb2b1e80a40ca80d478eb898e6972b"
+        }
+      ],
+      "interpreter": {
+        "version": "3.11.15",
+        "architecture": "arm64",
+        "platform": "darwin",
+        "sha256": "aaf189bf1730d36e2f683102a31c51395d6df2f45c587ebb874f417c97cccadc"
+      }
+    }
+  },
+  "provenance": {
+    "scope": "Fixed original Hermes commit plus exact observed macOS arm64 Python and installed dependency closure, normalized only in new private copies; not an official rebuilt wheel/installer or redistribution approval",
+    "inputNormalization": {
+      "version": 1,
+      "sourceCommit": "c7c2df1a536d62b45fda8907bb1898981721794d",
+      "selectionPayloadManifestSha256": "eb031dac92ee7a1bafddcae09420d9b87d7a0b99c89427bdbcea65423e973489",
+      "exclude": [
+        "old .venv (not archived)",
+        "__pycache__",
+        "*.pyc",
+        "*.pyo",
+        ".lock",
+        ".DS_Store"
+      ],
+      "sourceDependencyTreeSha256": "b0c5ae0589947e961e3fd4e13b6cdedaa29812e68747e2e3e487f63ef71415e5",
+      "sourcePythonTreeSha256": "049f0b8c17699902341d3d3e6aab05290807fb80d51bfedf28dabb4d3f9b859e",
+      "webDistTreeSha256": "7b41d397f48f6c8addfc96eb12b653e8c18821061ae3ece4a37f4b8bde76b834",
+      "normalized": [
+        {
+          "path": "venv/pyvenv.cfg",
+          "before": "43c7113cff9b869cfb6320253437cb3092536daab6d20406108b37a4fa457ac5",
+          "after": "f94dafb473f8de1bdfa8201f007039bc9dad9b3b6a485ee32015068fd4f49d42"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/__editable___hermes_agent_0_21_4_finder.py",
+          "before": "5b2bebdd00e689a6d6109dcace58a0e3d056981a5d601cbf3c7bb1d47c1cb12e",
+          "after": "ad9585c8fe363b1f9cdb4d5ebd3cc0bf6065c9ec39fb2009a8572f011f11c6e4"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/PIL/.dylibs/libjpeg.62.4.0.dylib",
+          "before": "cf7c4e5c2d2c007fc51afcb95b649415cfe0bc4d7137ace897a6eff6550fa967",
+          "after": "0366e7ad1d6589eada6b99e13e92ceb67485cd9be03fd3aa0b3ee9b0bc5757c3"
+        },
+        {
+          "path": "venv/bin/python",
+          "target": "../../python/bin/python3.11"
+        }
+      ],
+      "nativeFiles": 73,
+      "distributions": 116
+    },
+    "dependencyNoticesSha256": "5b4ffc26257421666169a745db6d0d16cbcb2b1e80a40ca80d478eb898e6972b",
+    "requiresActualColdStartAndSupervisorProof": true
+  }
+}

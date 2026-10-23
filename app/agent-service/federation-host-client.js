@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
+const { FEDERATION_RUN_ERROR_CODES } = require("../federation-run-error");
 const {
   FEDERATION_MAX_FRAME_BYTES,
   FEDERATION_PROTOCOL_VERSION,
@@ -10,7 +11,7 @@ const {
   validateFederationParams,
   validateFederationResult,
 } = require("../federation-host-protocol");
-const { EXTERNAL_INSPIRATION_METHODS } = require("../external-inspiration-protocol");
+const { canonicalExternalMethod } = require("../external-inspiration-protocol");
 const {
   assertPrivateDirectory,
   lstatIfExists,
@@ -21,11 +22,12 @@ const {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const PUBLIC_HOST_CODES = new Set([
+  ...FEDERATION_RUN_ERROR_CODES,
   "APP_HOST_UNAVAILABLE", "BACKEND_UNAVAILABLE", "AGENT_NOT_FOUND",
   "AGENT_OPERATION_FAILED", "AGENT_RUN_TIMEOUT", "FEDERATION_OPERATION_CONFLICT",
   "FEDERATION_RESPONSE_INVALID", "FEDERATION_TASK_NOT_FOUND",
   "FEDERATION_TASK_STATE_CONFLICT",
-  "FEDERATION_COMMIT_UNCERTAIN",
+  "FEDERATION_COMMIT_UNCERTAIN", "APP_MANAGE_RESOURCE_CHANGED", "APP_MANAGE_OUTCOME_UNKNOWN", "APP_MANAGE_CAPACITY", "APP_MANAGE_OPERATION_UNSUPPORTED", "APP_STATE_CURSOR_INVALID", "APP_STATE_CURSOR_EXPIRED", "APP_STATE_RESPONSE_TOO_LARGE",
 ]);
 
 function readHostToken(paths) {
@@ -90,14 +92,20 @@ class FederationHostClient {
       before = socketIdentity(this.paths);
     } catch (error) { return Promise.reject(error); }
     const id = crypto.randomUUID();
-    const external = EXTERNAL_INSPIRATION_METHODS.includes(method);
-    const externalMutation = external && method !== "inspiration.external.get";
-    const timeoutMs = method === "agent.run"
-      ? Math.min(125_000, params.timeoutMs + 2_000)
+    // 灵感与群聊的外部执行方法同形，按规范名统一超时与「变更」语义。
+    const externalMethod = canonicalExternalMethod(method);
+    const external = externalMethod !== null;
+    const externalMutation = method === "app.manage" || external && externalMethod !== "inspiration.external.get";
+    const timeoutMs = method === "group.external.metadata" ? Math.min(this.timeoutMs, 2000) : method === "agent.run"
+      ? params.timeoutMs + 2_000
       : ["federation.run", "federation.message"].includes(method)
         ? Math.min(30_000, Math.max(this.timeoutMs, params.timeoutMs + 2_000))
-        : !this._customTimeout && method === "inspiration.external.prepare" ? 30_000
-          : !this._customTimeout && ["inspiration.external.respond", "inspiration.external.cancel"].includes(method)
+        : !this._customTimeout && (externalMethod === "inspiration.external.prepare" || method === "group.external.models") ? 30_000
+          : !this._customTimeout && ["app.state.read", "app.manage"].includes(method) ? 30_000
+          // A directory read includes backend readiness and then live profile
+          // defaults. Their separate bounded probes can exceed the 5s IPC default.
+          : !this._customTimeout && ["agent.list", "agent.get"].includes(method) ? 15_000
+          : !this._customTimeout && ["inspiration.external.respond", "inspiration.external.cancel"].includes(externalMethod)
             ? 15_000 : this.timeoutMs;
     const payload = `${JSON.stringify({
       id, token, version: FEDERATION_PROTOCOL_VERSION, method, params,
@@ -138,7 +146,7 @@ class FederationHostClient {
       socket.on("data", (chunk) => {
         buffered = Buffer.concat([buffered, chunk]);
         if (buffered.length > FEDERATION_MAX_FRAME_BYTES) {
-          finish(serviceError("FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
+          finish(serviceError(method === "app.manage" && sent ? "FEDERATION_COMMIT_UNCERTAIN" : "FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
         }
       });
       const unavailable = () => serviceError(externalMutation && sent ? "FEDERATION_COMMIT_UNCERTAIN"
@@ -149,27 +157,27 @@ class FederationHostClient {
         const newline = buffered.indexOf(0x0a);
         if (newline < 0 || newline !== buffered.length - 1) {
           finish(externalMutation && sent && buffered.length === 0 ? unavailable()
-            : serviceError("FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
+            : serviceError(method === "app.manage" && sent ? "FEDERATION_COMMIT_UNCERTAIN" : "FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
           return;
         }
         let response;
         try { response = JSON.parse(buffered.subarray(0, newline).toString("utf8")); } catch {
-          finish(serviceError("FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
+          finish(serviceError(method === "app.manage" && sent ? "FEDERATION_COMMIT_UNCERTAIN" : "FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
           return;
         }
         if (!response || response.id !== id || typeof response.ok !== "boolean") {
-          finish(serviceError("FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
+          finish(serviceError(method === "app.manage" && sent ? "FEDERATION_COMMIT_UNCERTAIN" : "FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
           return;
         }
         if (response.ok !== true) {
           const code = PUBLIC_HOST_CODES.has(response.error?.code)
-            || (external && isPublicExternalInspirationError(response.error?.code))
+            || ((external || method.startsWith("group.")) && isPublicExternalInspirationError(response.error?.code))
             ? response.error.code : "AGENT_OPERATION_FAILED";
           finish(serviceError(code, code));
           return;
         }
         if (!validateFederationResult(method, response.result, params)) {
-          finish(serviceError("FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
+          finish(serviceError(method === "app.manage" && sent ? "FEDERATION_COMMIT_UNCERTAIN" : "FEDERATION_RESPONSE_INVALID", "federation_response_invalid"));
           return;
         }
         finish(null, structuredClone(response.result));

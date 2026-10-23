@@ -7,11 +7,13 @@ const {
 } = require("./chat-service-protocol");
 
 const PROFILE_SERVICE_METHODS = Object.freeze([
-  "profile.models.list", "profile.binding.models.list", "profile.auth.read", "profile.bind", "profile.configure", "profile.clear",
+  "profile.models.list", "profile.binding.models.list", "profile.auth.read", "profile.binding.auth.read",
+  "profile.bind", "profile.configure", "profile.clear",
 ]);
 const PROFILE_SERVICE_METHOD_SET = new Set(PROFILE_SERVICE_METHODS);
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const PUBLIC_MESSAGES = Object.freeze({
+  RUNTIME_INCOMPATIBLE: "当前 CLI 版本与应用不兼容，请更新 CLI 或应用后重新检查",
   INVALID_PARAMS: "请求参数无效",
   PROFILE_TARGET_FORBIDDEN: "只允许配置 Shoggoth 内置 Codex Profile",
   PROFILE_NOT_FOUND: "Shoggoth Profile 不存在",
@@ -23,6 +25,8 @@ const PUBLIC_MESSAGES = Object.freeze({
   PROFILE_MODEL_CATALOG_UNAVAILABLE: "暂时无法读取当前 Agent 的模型目录",
   PROFILE_AUTH_REQUIRED: "ChatGPT 尚未登录",
   PROFILE_AUTH_STATUS_UNAVAILABLE: "暂时无法验证 Agent CLI 登录状态",
+  CODEX_NATIVE_AUTH_READ_FAILED: "暂时无法读取本机 Codex 登录状态，请稍后重试",
+  CODEX_RUNTIME_CLEANUP_INCOMPLETE: "Codex 登录检查进程尚未确认退出，暂不能启动新的登录检查",
   PROFILE_OPERATION_CONFLICT: "operationId 已用于其他 Profile 配置",
   PROFILE_ACCOUNT_BUSY: "该运行账号当前有任务或配置操作正在进行",
   PROFILE_OPERATION_EXPIRED: "Profile 配置操作已过期",
@@ -88,8 +92,10 @@ function validateProfileServiceParams(method, params) {
     }
     return cloneParams(params);
   }
-  if (method === "profile.auth.read") {
-    if (!exactObject(params, ["profileId"]) || !validOpaqueId(params.profileId)) {
+  if (method === "profile.auth.read" || method === "profile.binding.auth.read") {
+    if (!exactObject(params, ["profileId", ...(method === "profile.binding.auth.read" ? ["bindingId"] : [])])
+      || !validOpaqueId(params.profileId)
+      || (method === "profile.binding.auth.read" && !validOpaqueId(params.bindingId))) {
       throw protocolError("INVALID_PARAMS");
     }
     return cloneParams(params);
@@ -112,7 +118,7 @@ function validateProfileServiceParams(method, params) {
 }
 
 function validateProfileServiceResult(method, result) {
-  if (method === "profile.auth.read") {
+  if (method === "profile.auth.read" || method === "profile.binding.auth.read") {
     if (!exactObject(result, ["status"])
       || !["authenticated", "unverified", "unauthenticated"].includes(result.status)) {
       throw protocolError("PROFILE_RESPONSE_INVALID");

@@ -343,15 +343,16 @@ class RuntimeAccountResolver {
       binaryPath = resolveGrokBuildBinary(binaryOptions);
       spawnEnv = { HOME: this.userHome, GROK_HOME: nativeHome };
     } else if (runtime === "antigravity") {
-      binaryPath = resolveAntigravityBinary(binaryOptions);
       if (!this.paths) {
         throw resolverError(
           "RUNTIME_ACCOUNT_PATHS_REQUIRED",
           "Antigravity integration paths are required",
         );
       }
-      // agy 1.1.x has no supported per-process MCP config overlay. Keep one
-      // Shoggoth-owned Home per account so native ~/.gemini is never rewritten.
+      binaryPath = resolveAntigravityBinary({ ...binaryOptions, paths: this.paths });
+      // The ACP server keeps its settings, login selection and conversations under
+      // GEMINI_HOME. Keep one Shoggoth-owned Home per account so native ~/.gemini
+      // is never rewritten.
       integrationRoot = runtimeAccountIntegrationRoot(
         this.paths,
         runtime,

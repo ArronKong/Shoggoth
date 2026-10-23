@@ -66,6 +66,8 @@ function createDesktopAppUpdateController(options = {}) {
     clearIntervalFn = clearInterval,
     defer = setImmediate,
     onDownloaded = () => {},
+    prepareInstall = async () => null,
+    restoreAfterInstallFailure = async () => {},
   } = options;
   if (!app || typeof app.getVersion !== "function" || !ipcMain?.handle
     || !ipcMain?.removeHandler || typeof getMainWindow !== "function") {
@@ -90,9 +92,11 @@ function createDesktopAppUpdateController(options = {}) {
     progress: null,
     canCheck: support.supported,
     canInstall: false,
+    installBlockReason: null,
   };
   let updater = null;
   let checkPromise = null;
+  let installRecoveryPromise = null;
   let initialTimer = null;
   let intervalTimer = null;
   let disposed = false;
@@ -109,19 +113,32 @@ function createDesktopAppUpdateController(options = {}) {
     state = { ...state, ...patch };
     broadcast();
   };
+  const recoverInstall = () => {
+    if (installRecoveryPromise) return installRecoveryPromise;
+    updateState({ status: "recovering", canCheck: false, canInstall: false });
+    installRecoveryPromise = Promise.resolve().then(restoreAfterInstallFailure)
+      .then(() => "install-failed", () => "background-restore-failed")
+      .then((installBlockReason) => {
+        updateState({ status: "downloaded", canCheck: false, canInstall: true, installBlockReason });
+      })
+      .finally(() => { installRecoveryPromise = null; });
+    return installRecoveryPromise;
+  };
   const bind = (name, handler) => {
     updater.on(name, handler);
     updaterListeners.push([name, handler]);
   };
 
   const check = () => {
-    if (disposed || !updater || !state.supported || state.canInstall) {
+    if (disposed || !updater || !state.supported || state.canInstall
+      || ["preparing", "installing", "recovering"].includes(state.status)) {
       return Promise.resolve(publicState());
     }
     if (checkPromise) return checkPromise.then(publicState);
     updateState({ status: "checking", progress: null, canCheck: false, canInstall: false });
     checkPromise = Promise.resolve(updater.checkForUpdates())
       .catch(() => {
+        if (["preparing", "installing", "recovering"].includes(state.status)) return;
         updateState({ status: "error", progress: null, canCheck: true, canInstall: false });
       })
       .finally(() => { checkPromise = null; });
@@ -131,10 +148,30 @@ function createDesktopAppUpdateController(options = {}) {
   const authorize = (event) => trustedRenderer(event, getMainWindow);
   ipcMain.handle(CHANNELS.getState, (event) => authorize(event) ? publicState() : null);
   ipcMain.handle(CHANNELS.check, (event) => authorize(event) ? check() : null);
-  ipcMain.handle(CHANNELS.install, (event) => {
+  ipcMain.handle(CHANNELS.install, async (event) => {
     if (!authorize(event) || !updater || !state.canInstall) return false;
+    updateState({ status: "preparing", canCheck: false, canInstall: false, installBlockReason: null });
+    let blockReason;
+    try { blockReason = await prepareInstall(); }
+    catch { blockReason = "background-stop-failed"; }
+    if (disposed) {
+      try { await restoreAfterInstallFailure(); } catch { /* the renderer has already closed */ }
+      return false;
+    }
+    if (blockReason) {
+      updateState({ status: "downloaded", canCheck: false, canInstall: true,
+        installBlockReason: blockReason });
+      return false;
+    }
     updateState({ status: "installing", canCheck: false, canInstall: false });
-    defer(() => { if (!disposed) updater.quitAndInstall(); });
+    defer(() => {
+      if (disposed) {
+        void Promise.resolve().then(restoreAfterInstallFailure).catch(() => {});
+        return;
+      }
+      try { updater.quitAndInstall(); }
+      catch { void recoverInstall(); }
+    });
     return true;
   });
 
@@ -142,14 +179,15 @@ function createDesktopAppUpdateController(options = {}) {
     try {
       updater = loadUpdater();
       updater.autoDownload = true;
-      updater.autoInstallOnAppQuit = true;
+      updater.autoInstallOnAppQuit = false;
       updater.allowPrerelease = false;
       updater.logger = {
         info: () => {},
         warn: () => console.warn("[app-update] updater warning"),
         error: () => console.error("[app-update] updater error"),
       };
-      bind("checking-for-update", () => updateState({ status: "checking", progress: null, canCheck: false, canInstall: false }));
+      bind("checking-for-update", () => updateState({ status: "checking", progress: null, canCheck: false, canInstall: false,
+        installBlockReason: null }));
       bind("update-available", (info = {}) => updateState({
         status: "available",
         availableVersion: typeof info.version === "string" ? info.version : null,
@@ -170,6 +208,7 @@ function createDesktopAppUpdateController(options = {}) {
         releaseDate: null, progress: null, canCheck: true, canInstall: false,
       }));
       bind("update-downloaded", (info = {}) => {
+        if (["preparing", "installing", "recovering"].includes(state.status)) return;
         updateState({
           status: "downloaded",
           availableVersion: typeof info.version === "string" ? info.version : state.availableVersion,
@@ -178,15 +217,20 @@ function createDesktopAppUpdateController(options = {}) {
           progress: 100,
           canCheck: false,
           canInstall: true,
+          installBlockReason: null,
         });
         try { onDownloaded(publicState()); } catch { /* notification failure is non-fatal */ }
       });
       bind("update-cancelled", () => updateState({
         status: "idle", progress: null, canCheck: true, canInstall: false,
       }));
-      bind("error", () => updateState({
-        status: "error", progress: null, canCheck: true, canInstall: false,
-      }));
+      bind("error", () => {
+        if (state.status === "installing" || installRecoveryPromise) {
+          void recoverInstall();
+          return;
+        }
+        updateState({ status: "error", progress: null, canCheck: true, canInstall: false });
+      });
       initialTimer = setTimeoutFn(() => { void check(); }, INITIAL_CHECK_DELAY_MS);
       initialTimer?.unref?.();
       intervalTimer = setIntervalFn(() => { void check(); }, CHECK_INTERVAL_MS);

@@ -50,7 +50,6 @@ const { OpenClawBackend } = backendModule;
     assert.deepEqual(params, {
       view: "all",
       includeProviderCapabilities: true,
-      refresh: true,
     });
     return { models: [{ id: "live", name: "Live", provider: "p" }] };
   };

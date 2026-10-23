@@ -1,5 +1,5 @@
 .page {
-  --studio-inset: clamp(20px, 3vw, 40px);
+  --studio-inset: var(--page-inset-right);
   --studio-wall: var(--ui-canvas);
   --studio-ink: light-dark(#363d30, #e4e7d9);
   --studio-muted: light-dark(#747867, #a9af9c);
@@ -8,7 +8,7 @@
   --studio-shadow: light-dark(#363b2424, #11170e66);
   --wall-sticky-top: 92px;
   display: flex; flex-direction: column; flex-shrink: 0; gap: 0; position: relative; isolation: isolate;
-  min-height: max(100%, var(--inspiration-scroll-height, 0px)); padding: 0 var(--studio-inset) 48px;
+  min-height: max(100%, var(--inspiration-scroll-height, 0px)); padding: 0 var(--studio-inset) 48px 0;
   color: var(--studio-ink); background: var(--studio-wall);
   container-type: inline-size;
 }
@@ -43,7 +43,7 @@
 .growthNoticeSlot { display: flex; flex: none; }
 .growthNoticeSlot:empty { display: none; }
 .toolbar { position: sticky; top: var(--wall-sticky-top); z-index: 10; flex-wrap: wrap; margin-bottom: 19px; background: var(--studio-wall); }
-.toolbar[data-stuck]::before { content: ''; position: absolute; z-index: -1; inset: calc(-1 * var(--wall-sticky-top)) calc(-1 * var(--studio-inset)) -16px; background: var(--studio-wall); pointer-events: none; }
+.toolbar[data-stuck]::before { content: ''; position: absolute; z-index: -1; inset: calc(-1 * var(--wall-sticky-top)) calc(-1 * var(--studio-inset)) -16px 0; background: var(--studio-wall); pointer-events: none; }
 .wallControls { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; margin-left: auto; }
 .page .filterTabs { --ui-text-1: light-dark(#000, #fff); --ft-color: light-dark(#000, #fff); --ui-surface-1: light-dark(#fff, #000); flex-wrap: nowrap; flex-shrink: 0; padding: 7px; gap: 0; }
 .filterTabs [role=tab] { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; min-height: 32px; padding: 8px; }
@@ -205,7 +205,12 @@
 .statePanel .attention { padding: 0; border-radius: 0; background: transparent; }
 .statePanel .command { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--ui-text-1) 5%, transparent); font-family: var(--mono); }
 /* The shared prompt card is drawn light-only; inside the tinted panel it follows the page theme and the panel's tone. */
-.statePanel .attention :global(.chat-prompt) { --chat-text: var(--ui-text-1); color-scheme: inherit; }
+.statePanel .attention :global(.chat-prompt) {
+  --chat-text: var(--ui-text-1); --prompt-muted: var(--ui-text-2);
+  --prompt-line: color-mix(in srgb, var(--ui-text-1) 20%, transparent);
+  --prompt-surface: color-mix(in srgb, var(--ui-text-1) 3%, transparent);
+  --prompt-selected: color-mix(in srgb, var(--ui-text-1) 8%, transparent); color-scheme: inherit;
+}
 .statePanel .attention :global(.chat-prompt__badge) { color: var(--tone); }
 .statePanel .attention :global(:is(.chat-prompt__desc, .chat-prompt__status, .chat-prompt__summary dt)) { color: var(--ui-text-2); }
 .statePanel .attention :global(.chat-prompt__cmd) { background: color-mix(in srgb, var(--ui-text-1) 5%, transparent); }
@@ -222,7 +227,7 @@
 .activity:empty { display: none; }
 .trajectoryEmpty { padding: 14px 16px; border: 1px solid var(--ui-hairline); border-radius: 16px; }
 .trajectoryLabel { display: flex; align-items: center; gap: 8px; color: var(--ui-text-1); font-size: 13px; }
-.trajectoryLabel svg { width: 18px; height: 18px; color: var(--ui-text-2); }
+.trajectoryLabel svg { width: 16px; height: 16px; color: var(--ui-text-2); }
 .trajectoryEmpty p { margin: 8px 0 0; }
 .sectionHeading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 24px; margin-bottom: 10px; }
 .sectionHeading h3 { margin: 0; font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-text-1); }
@@ -308,7 +313,7 @@
   .grid { column-gap: 22px; }
 }
 @media (max-width: 580px) {
-  .page { --studio-inset: 18px; padding-bottom: 32px; }
+  .page { padding-bottom: 32px; }
 }
 @media (max-width: 860px) {
   .detail, .detailLoading { grid-template-columns: minmax(0, 1fr); }

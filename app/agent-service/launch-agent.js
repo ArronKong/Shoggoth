@@ -421,7 +421,14 @@ function createLaunchAgentController(options = {}) {
         if (status?.healthy === true
           && status.protocolVersion === PROTOCOL_VERSION
           && status.serviceVersion === serviceVersion) return status;
-      } catch {
+      } catch (error) {
+        let recoveryRequired = false;
+        try {
+          recoveryRequired = Object.getOwnPropertyDescriptor(error, "code")?.value === "SERVICE_RECOVERY_REQUIRED";
+        } catch { /* Do not read accessors on an untrusted probe error. */ }
+        // Poisoned durable state cannot recover in this process. Hand it to the
+        // existing single stop/bootstrap recovery immediately, within its budget.
+        if (recoveryRequired) throw healthNotConfirmed();
         // launchctl loaded 只表示 job 已注册；socket 可能尚未发布或处于 crash loop。
       } finally {
         if (timer) clearTimeout(timer);
@@ -664,6 +671,7 @@ function createLaunchAgentController(options = {}) {
   const controller = {
     paths,
     status: () => rawController.status(),
+    whenIdle: () => mutationTail,
     install: () => scheduleMutation("install", () => rawController.install()),
     start: () => scheduleMutation("start", () => rawController.start(createStartBudget())),
     stop: () => scheduleMutation("stop", () => rawController.stop()),

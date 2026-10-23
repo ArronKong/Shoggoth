@@ -1,0 +1,4 @@
+.panel { min-width: 0; }
+.panel + .panel { margin-block-start: 24px; }
+.status { margin-block: 14px; font-size: 14px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }

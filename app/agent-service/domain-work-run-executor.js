@@ -4,7 +4,8 @@ const crypto = require("node:crypto");
 const { MAX_PROMPT_BYTES } = require("./pending-command-inbox");
 const { WORK_RUN_FIELDS, validateWorkRun } = require("./product-store");
 
-const DOMAIN_SOURCES = new Set(["kanban", "cron", "inspiration"]);
+const DOMAIN_SOURCES = new Set(["kanban", "cron", "inspiration", "proactive", "automation"]);
+const PROACTIVE_PAYLOAD_FIELDS = Object.freeze(["run", "monitor", "prompt", "scheduledAt", "recovered"]);
 const INSPIRATION_PAYLOAD_FIELDS = Object.freeze(["run", "execution", "prompt", "recovered"]);
 const KANBAN_PAYLOAD_FIELDS = Object.freeze([
   "run", "card", "prompt", "recovered", "onStateChange",
@@ -44,7 +45,7 @@ function assertDomainRun(run) {
       || WORK_RUN_FIELDS.some((field) => run[field] === undefined)) {
       throw new Error("WorkRun shape invalid");
     }
-    const validated = validateWorkRun(run);
+    const validated = validateWorkRun(run, run?.source === "automation" ? "automation" : null);
     if (!DOMAIN_SOURCES.has(validated.source) || !validOpaqueId(validated.profileId)) {
       throw new Error("WorkRun binding invalid");
     }
@@ -54,12 +55,15 @@ function assertDomainRun(run) {
 }
 
 function assertDomainPayload(payload, run) {
-  const fields = run.source === "inspiration" ? INSPIRATION_PAYLOAD_FIELDS
+  const fields = run.source === "proactive" ? PROACTIVE_PAYLOAD_FIELDS : run.source === "inspiration" ? INSPIRATION_PAYLOAD_FIELDS
     : run.source === "kanban" ? KANBAN_PAYLOAD_FIELDS : CRON_PAYLOAD_FIELDS;
   const validCommon = exactObject(payload, fields)
     && validPrompt(payload.prompt)
     && typeof payload.recovered === "boolean";
-  const validDomain = run.source === "inspiration"
+  const validDomain = run.source === "proactive"
+    ? payload.monitor?.id === run.sourceId && payload.monitor.profileId === run.profileId
+      && Number.isSafeInteger(payload.scheduledAt) && payload.scheduledAt >= 0 && run.workspace === null
+    : run.source === "inspiration"
     ? payload.execution && payload.execution.ideaId === run.sourceId
       && payload.execution.runId === run.id && payload.execution.profileId === run.profileId
       && payload.execution.workspace === run.workspace && validOpaqueId(payload.execution.sessionKey)

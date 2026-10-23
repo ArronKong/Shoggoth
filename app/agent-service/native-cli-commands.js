@@ -12,7 +12,7 @@ const { serviceError } = require("./security");
 // https://code.claude.com/docs/en/commands (2.1.258; removed/hidden commands omitted)
 // https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md
 // Pi 0.84.4: @earendil-works/pi-coding-agent/dist/core/slash-commands.js
-// https://antigravity.google/docs/cli/reference/ (CLI 1.1.25; live /help and /skills win)
+// Antigravity: official ACP server 1.2.1 advertises its commands via available_commands_update.
 // Format: [name, description, argument hint, aliases]. Live metadata wins.
 const CLI_COMMAND_ROWS = {
   codex: [
@@ -264,41 +264,15 @@ const CLI_COMMAND_ROWS = {
     ["reload", "Reload session resources"],
     ["quit", "Leave the CLI"],
   ],
+  // Shoggoth runs Antigravity through the official ACP server, which has no
+  // terminal UI and advertises its runtime commands live. Only the Shoggoth
+  // conversation commands remain as a fallback.
   antigravity: [
-    ["add-dir", "Workspace access", "<path>"],
-    ["agents", "Agent manager"],
-    ["boost", "Deep reasoning", "<task>"],
-    ["artifact", "Artifact review"],
-    ["btw", "Side question", "<query>"],
     ["clear", "New conversation", null, ["new"]],
-    ["config", "CLI settings", null, ["settings"]],
-    ["context", "Context breakdown"],
     ["copy", "Response clipboard"],
-    ["credits", "Account credits"],
-    ["diff", "Change review"],
-    ["exit", "Exit CLI", null, ["quit"]],
-    ["fast", "Fast mode"],
-    ["feedback", "Feedback panel"],
-    ["fork", "Conversation fork", null, ["branch"]],
     ["help", "Command reference"],
-    ["hooks", "Active hooks"],
-    ["keybindings", "Keyboard bindings"],
-    ["logout", "Account sign-out"],
-    ["mcp", "MCP manager"],
     ["model", "Model selection", "[model]"],
-    ["open", "External editor", "<path>"],
-    ["permissions", "Tool permissions"],
-    ["planning", "Planning mode"],
     ["rename", "Conversation name", "<name>"],
-    ["resume", "Saved conversations", null, ["switch", "conversation"]],
-    ["rewind", "Conversation checkpoint", null, ["undo"]],
-    ["skills", "Skill browser"],
-    ["statusline", "Status-bar settings"],
-    ["tasks", "Background work"],
-    ["teamwork-preview", "Collaborative teams", "<task>", ["teamwork"]],
-    ["title", "Window title", "[on|off]"],
-    ["usage", "Model quotas", null, ["quota"]],
-    ["voice", "Voice dictation", null, ["record"]],
   ],
   "deepseek-harness": [
     ["model", "Select the session model", "[provider/model]"],

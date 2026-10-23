@@ -12,6 +12,7 @@ const brokenPipe = () => Object.assign(new Error("write EPIPE private-pipe-detai
 
 function fixture(write) {
   const child = new EventEmitter();
+  child.pid = 72_001; // Synthetic started child; kill is the local spy below.
   child.stdin = new Writable({ write });
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();

@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "host": "hermes",
+  "sourceCommit": "c7c2df1a536d62b45fda8907bb1898981721794d",
+  "protocol": "hermes-managed-v1",
+  "selectionBaseManifestSha256": "eb031dac92ee7a1bafddcae09420d9b87d7a0b99c89427bdbcea65423e973489",
+  "files": [
+    {
+      "path": "tui_gateway/selection_dispatch.py",
+      "originalSha256": null,
+      "patchedSha256": "9a48844506d97ec22d126510259f811ffed5e02df87e999f0de23e568e55b8bd"
+    },
+    {
+      "path": "tui_gateway/contracts/prompt_voice.py",
+      "originalSha256": "7a79651a55424b41d65d1bb97972087e50fc1dd953143adc1da440bc0fce86c7",
+      "patchedSha256": "dae91a310dbfb3b8fc70a650a834273d75029a96e86f1868a57e6531e1561646"
+    },
+    {
+      "path": "tui_gateway/methods_prompt.py",
+      "originalSha256": "e86dba75b66734a8e44a31c4ad57a4a08dddee77dc3fe04fdcb6b2349e1eff45",
+      "patchedSha256": "cab61531370d689c8c9efe24876cc9426b2c2fda01adcfb5b2f51e10728ae084"
+    },
+    {
+      "path": "tui_gateway/session_auto_continue.py",
+      "originalSha256": "69dfb58c18fa365fb7c2e9f753e671ad49a071699502d534b2ef9b883573fc34",
+      "patchedSha256": "11dd6d5d30e7200163b3066e46f40a877a70063a930424336d927eb1928d6ff5"
+    },
+    {
+      "path": "tui_gateway/prompt_turn.py",
+      "originalSha256": "f9a3e7313d41c96fd8dbcc1c086fdbdb2a2441d561909ceb9ffbbe54c38aa0c8",
+      "patchedSha256": "e85b54c8f736a1d9ea4b57ee0fa6ab6b114883a9923776db395f89a7cad55b0d"
+    },
+    {
+      "path": "agent/turn_context.py",
+      "originalSha256": "1c5a956d7252cba7be85d104c5a2ff6a5b0656234ab3d36cbe5ee9f734900eaf",
+      "patchedSha256": "be973ab664c38aa3b3ad9f082fbdfb4322bf90110c0529427ecd83f159cc4a37"
+    },
+    {
+      "path": "agent/turn_api_call.py",
+      "originalSha256": "a2b2c0232b1d37d5ebfefff2d06ce1bd3b69cfe93ab3a8c9f382d62f2a6deb8b",
+      "patchedSha256": "82a37080a5515d396eeabd94e0c399fa41b087f1bb7e3162b277e3d986bd8b0d"
+    },
+    {
+      "path": "hermes_cli/plugins.py",
+      "originalSha256": "0e2d82b1abcbda95d4c96c40daef0887d728bfd12a1e0c9bc155d0ebd335fc70",
+      "patchedSha256": "b53183fb5aaa0f74b27f9d8520080fb3aec22ba473698f7e5ff909e1985686bb"
+    },
+    {
+      "path": "hermes_cli/plugins_ledger.py",
+      "originalSha256": "e69e7ebd75fb10b255af3407e1f3cc1a5cfe4ba5f81c7d2af61d33ca493de2ac",
+      "patchedSha256": "be8b8acd3227bb9766af7a4c88db3c42152fe1e316c38dd50893f8ed5128f200"
+    },
+    {
+      "path": "apps/shared/src/gateway-contract.generated.ts",
+      "originalSha256": "f27016317a236cd3bc75b1eff0c11e56bda59b015f907743e65fca99588a40f9",
+      "patchedSha256": "dab7fb673d4dcab7fecc668b150f3949072361f2ed80863de9ea0def03c9ec96"
+    },
+    {
+      "path": "apps/shared/src/gateway-contract.openrpc.json",
+      "originalSha256": "358b160cd3e9420111fa6f97e4c08d27b648ff802738f79712fe1e92fbd3556f",
+      "patchedSha256": "b069b7262a31c6f83f773e83ce66e8f06373bb0de519e31e7d91806e2eb353b1"
+    },
+    {
+      "path": "tui_gateway/session_lifecycle.py",
+      "originalSha256": "4f54d2a45ac34fdcf6b2606a7730be863ab41ef2e26ef0394dc2c1935a3008e3",
+      "patchedSha256": "b5c55b976ac3fa2ad85f63980dc4e9f53b87b95b70e47111827bf477d6da8ab9"
+    },
+    {
+      "path": "tui_gateway/methods_session.py",
+      "originalSha256": "b7dfc0094425c27984957c0530431815a13058e19262c78ae79308fb7172eed4",
+      "patchedSha256": "9632d7d4c8bb58ddee9bc9d022a897cb156594c234a956a612aca2f59cee9e7d"
+    },
+    {
+      "path": "agent/tool_executor.py",
+      "originalSha256": "2ce7f46d5c79f47dbdd9e4f2c7c959d54662c44b0c18d9ad0570b37b0c54acd9",
+      "patchedSha256": "36422b3e1ed98c963150246253cedd7f2a5a6d42f9921ae2e066546e73a36809"
+    },
+    {
+      "path": "tui_gateway/server.py",
+      "originalSha256": "8a02d6fbcb034ee3737eb7175e59e0433384c72232bcc274b3768f743a9c74ad",
+      "patchedSha256": "f32a48aef97f66026a0ada576c4f121b24f172e7621701e74fd5f5537a90adce"
+    },
+    {
+      "path": "tui_gateway/contracts/events.py",
+      "originalSha256": "3eada5d20e98ccae6dc6a4432402b9ea8eb4742b6c27cd3c28ea9d05813c25ae",
+      "patchedSha256": "9399dbfeff243eb6dd2f1aa8a3e57575c8043cbe428b201f7497edbd4ed14942"
+    },
+    {
+      "path": "tui_gateway/selection_input.py",
+      "originalSha256": null,
+      "patchedSha256": "dc974e7cb99d02dfa25a4ee974a7b427dc0d5f2f4beac7010d79c15a0f251690"
+    },
+    {
+      "path": "shoggoth_managed_runtime.py",
+      "originalSha256": null,
+      "patchedSha256": "ffa14ccba9ff118cd87ac8414375c551d38614aad3df9ceef1cde3364c746bbb"
+    },
+    {
+      "path": "hermes_cli/main.py",
+      "originalSha256": "648fdd918ae0f86d768561442a993193278692c1fe12d56eab63e276a6d732bf",
+      "patchedSha256": "654cfb96819bec79c6498be7349021bb1b0957a48fb154273f8b2f1045aff9f0"
+    },
+    {
+      "path": "hermes_cli/backend_retirement.py",
+      "originalSha256": "1122ace38dea6bd7cc298c2e1f59aefa757a7ed88d8a01dc7bddc14a47c55c55",
+      "patchedSha256": "4816ff8034ebbccb09a05c22bcdb9a61c1d2c647094e255fb9bbe3b32345396d"
+    },
+    {
+      "path": "tui_gateway/rpc_dispatch.py",
+      "originalSha256": "82561f808b743506d84b916577906f4fe6529cad42c9d23e28b160867221046c",
+      "patchedSha256": "103d3777e38a268c8db33b17f8c00284fe33724897e0d701df1be1fc1e7a7f7f"
+    },
+    {
+      "path": "agent/conversation_loop.py",
+      "originalSha256": "fb2fddda46a148f80e6384f138e27ecc4b71e05c26465859dd2824a757016eb6",
+      "patchedSha256": "7500fbc8756c8a2058e8fd76edf69c4ccc517643c259946bbe47d3461ddd2147"
+    },
+    {
+      "path": "agent/chat_completion_helpers.py",
+      "originalSha256": "7b026aeadfe61e507d93a93c8b3094e30d4a52df37d6e226c28bea33de80c2e2",
+      "patchedSha256": "eff1ec9b56cd78907dbd2cb0fbfb2ef7612ce6f649dad194325df91dcd788027"
+    },
+    {
+      "path": "hermes_cli/banner.py",
+      "originalSha256": "4e3cb4cdb32c0ab00281de26fb3980981cd47f7cb95961eb28d8408a5af54bad",
+      "patchedSha256": "45d0699af4b1dde553e5d509f1b8ec5466c82c7e3f8588f8108e188b4f7d88e4"
+    }
+  ],
+  "licenseFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+    },
+    {
+      "path": "python/lib/python3.11/LICENSE.txt",
+      "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+    },
+    {
+      "path": "hermes-managed-dependency-notices.json",
+      "sha256": "5b4ffc26257421666169a745db6d0d16cbcb2b1e80a40ca80d478eb898e6972b"
+    }
+  ],
+  "scope": "Isolated foreground serve/normal prompt turns; not all Hermes ingress or production supervisor activation"
+}

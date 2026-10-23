@@ -19,7 +19,7 @@ const { validateAgentBindingParams } = require("../app/agent-service/agent-runti
     const backend = new ShoggothBackend({ paths: {}, readToken: () => "fixture-token", requestService: async (_paths, request) => {
       const params = validateAgentBindingParams(request.method, request.params); calls.push(request.method);
       assert.equal(params.profileId, "profile-one");
-      if (request.method === "agent.binding.list") return state;
+      if (["agent.binding.list", "agent.binding.sync"].includes(request.method)) return state;
       if (params.revision !== state.revision) throw Object.assign(Error("private service error"), { code: "AGENT_BINDING_REVISION_CONFLICT" });
       if (request.method === "agent.binding.add") {
         const added = { ...binding, ...params.spec, id: bindingId("profile-one", "runtime-added"), runtimeProfileId: "runtime-added", revision: 2, updatedAt: 2 };
@@ -42,7 +42,7 @@ const { validateAgentBindingParams } = require("../app/agent-service/agent-runti
     assert.equal((await request("POST", "", add, null)).status, 403);
     assert.equal((await request("POST", "", { ...add, profileId: "foreign" })).status, 400);
     assert.equal((await request("POST", "", { ...add, revision: undefined })).status, 400);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
     const added = await request("POST", "", add); assert.equal(added.status, 200); assert.equal(added.body.bindings.length, 2);
     assert.equal((await request("POST", "", add)).body.code, "AGENT_BINDING_REVISION_CONFLICT");
     for (const [method, suffix, body] of [["PATCH", `/${binding.id}`, { patch: { label: "Name" }, revision: 2 }],

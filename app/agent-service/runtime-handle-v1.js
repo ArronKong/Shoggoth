@@ -9,6 +9,7 @@ const METHODS = Object.freeze({
   turnStart: "turn.start", turnSteer: "turn.steer", turnInterrupt: "turn.interrupt", modelsList: "models.list",
   commandsList: "commands.list", commandExecute: "commands.execute", accountRead: "account.read",
   accountLogin: "account.login", accountLogout: "account.logout", generateModelOnly: "model.generate.toolFree",
+  resolveModelOnly: "model.resolve.toolFree", releaseModelOnlySession: "model.session.release",
 });
 const EVENT_TYPES = new Set(["text", "text_delta", "reasoning", "reasoning_delta", "plan", "tool_start", "tool_update", "tool_result", "status",
   "complete", "usage", "context_usage", "context_compacted", "error", "warning", "account_backoff", "account_unavailable", "rate_limits"]);
@@ -39,7 +40,9 @@ function data(value, maxBytes = 8 * 1024 * 1024) {
 }
 const id = value => typeof value === "string" && value.length > 0 && value.length <= 512 && value.isWellFormed() && !value.includes("\0");
 function validateResult(method, value, input = {}) {
-  const result = data(value ?? null);
+  let result;
+  try { result = data(value ?? null); }
+  catch (error) { if (method === "releaseModelOnlySession") throw fail("RUNTIME_STOP_UNCONFIRMED"); throw error; }
   if (["sessionStart", "sessionResume", "sessionRead"].includes(method)) {
     if (!result?.session || !id(result.session.id)
       || (method !== "sessionStart" && input.sessionId && result.session.id !== input.sessionId)) throw fail("RUNTIME_PROTOCOL_INVALID");
@@ -47,6 +50,9 @@ function validateResult(method, value, input = {}) {
   else if (method === "sessionList" && !Array.isArray(result?.data ?? result?.sessions)) throw fail("RUNTIME_PROTOCOL_INVALID");
   else if (method === "modelsList" && !Array.isArray(result?.data ?? result?.models)) throw fail("RUNTIME_PROTOCOL_INVALID");
   else if (method === "commandsList" && !Array.isArray(result?.commands)) throw fail("RUNTIME_PROTOCOL_INVALID");
+  else if (method === "resolveModelOnly") require("./runtime-model-resolution").validateModelResolution(result);
+  else if (method === "releaseModelOnlySession" && (!result || result.released !== true
+    || result.sessionId !== input.sessionId || Object.keys(result).length !== 2)) throw fail("RUNTIME_STOP_UNCONFIRMED");
   return result;
 }
 function validateEvent(value) {
@@ -87,6 +93,20 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
     host: raw.host, workspace: raw.workspace, controlInstance: raw.controlInstance === true,
     get registeredSecrets() { return raw.registeredSecrets || []; },
     assertExecutionProviderCurrent() { assertAlive(); raw.assertExecutionProviderCurrent?.(); },
+    // Service-owned managed tools can wait for a user or run a bounded command.
+    // Suspend only this native turn's outer deadline; this grants no tool access
+    // and does not change cancellation or the managed command's own deadline.
+    pauseManagedToolTimeout(input) {
+      assertAlive(); const checked = data(input);
+      if (!checked || Object.keys(checked).sort().join(",") !== "sessionId,turnId"
+        || !id(checked.sessionId) || !id(checked.turnId)) throw fail("RUNTIME_PROTOCOL_INVALID");
+      const target = typeof raw.pauseManagedToolTimeout === "function" ? raw : raw.host;
+      const release = typeof target?.pauseManagedToolTimeout === "function"
+        ? target.pauseManagedToolTimeout(checked) : () => {};
+      if (typeof release !== "function") throw fail("RUNTIME_PROTOCOL_INVALID");
+      let released = false;
+      return () => { if (!released) { released = true; release(); } };
+    },
     async authenticationState(input) { assertAlive(); if (typeof raw.authenticationState !== "function") throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
       const result = await raw.authenticationState(input); assertAlive(); return data(result); },
     subscribe(listener) {
@@ -130,19 +150,64 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
     async stop() { if (!alive) return; if (typeof raw.host?.stop !== "function" && typeof raw.stop !== "function") throw fail("RUNTIME_STOP_UNCONFIRMED");
       await (raw.stop ? raw.stop() : raw.host.stop()); finish(); },
   };
+  const recordSessionHandleFailure = (method, input, phase, error) => {
+    if (binding.runtime !== "codex" || !["sessionStart", "sessionResume"].includes(method)) return;
+    try {
+      require("./codex-session-diagnostics").recordCodexSessionFailure({
+        paths: raw.host?.paths, binding, phase, error,
+        operationName: method === "sessionStart" ? "threadStart" : "threadResume",
+        params: { threadId: input?.sessionId, developerInstructions: input?.developerInstructions },
+      });
+    } catch { /* Diagnostics cannot replace a V1 contract failure. */ }
+  };
   for (const [method, capability] of Object.entries(METHODS)) {
     if (!capabilities[capability]) continue;
     facade[method] = async input => {
     assertAlive(); if (!capabilities[capability]) throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
-    // Signals are local control authority, not transport data.
-    const { signal, ...payload } = input || {}; const checked = data(payload);
-    const result = await raw[nativeMethod(method)]({ ...checked, ...(signal ? { signal } : {}) });
-    assertAlive(); return validateResult(method, result, checked);
+    // Model-only observers and dispatch fences stay local to this call; they
+    // must never be serialized into a Runtime or provider RPC.
+    const { signal, onText, assertCurrent, ...payload } = input || {};
+    if (onText !== undefined && (method !== "generateModelOnly" || typeof onText !== "function")) throw fail("RUNTIME_PROTOCOL_INVALID");
+    if (assertCurrent !== undefined && (method !== "generateModelOnly" || typeof assertCurrent !== "function")) throw fail("RUNTIME_PROTOCOL_INVALID");
+    let checked;
+    try { checked = data(payload); }
+    catch (error) { recordSessionHandleFailure(method, payload, "handle_request", error); throw error; }
+    if (method === "releaseModelOnlySession" && (Object.keys(checked).length !== 1 || !id(checked.sessionId))) {
+      throw fail("RUNTIME_PROTOCOL_INVALID");
+    }
+    let observing = true;
+    if (method === "resolveModelOnly" && checked.model !== undefined && !capabilities["model.resolve.explicit"]) {
+      throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
+    }
+    const fence = assertCurrent && (() => {
+      assertAlive();
+      if (!observing || signal?.aborted) throw fail("MODEL_ONLY_CANCELED");
+      assertCurrent();
+    });
+    const observer = onText && (text => {
+      if (!observing || !alive || signal?.aborted) return;
+      if (typeof text !== "string") throw fail("RUNTIME_PROTOCOL_INVALID");
+      onText(data(text, 64 * 1024));
+    });
+    try {
+      const result = await raw[nativeMethod(method)]({ ...checked, ...(signal ? { signal } : {}),
+        ...(observer ? { onText: observer } : {}), ...(fence ? { assertCurrent: fence } : {}) });
+      try { assertAlive(); return validateResult(method, result, checked); }
+      catch (error) {
+        if (method === "releaseModelOnlySession") throw fail("RUNTIME_STOP_UNCONFIRMED");
+        recordSessionHandleFailure(method, checked, "handle_response", error); throw error;
+      }
+    } finally { observing = false; }
   };
   }
   if (facade.accountLogin) facade.accountLoginStart = facade.accountLogin;
   for (const method of ["accountLoginApiKey", "accountLoginCancel"]) if (capabilities["account.login"] && typeof raw[method] === "function") {
     facade[method] = async input => { assertAlive(); const result = await raw[method](data(input)); assertAlive(); return data(result); };
+  }
+  // Settings sign-in into model providers (OpenCode); a waiting callback keeps its abort signal.
+  for (const method of ["providerLoginOptions", "providerLoginAuthorize", "providerLoginCallback", "providerLoginApiKey"]) if (typeof raw[method] === "function") {
+    facade[method] = async input => { assertAlive(); const { signal, ...payload } = input || {};
+      const result = await raw[method]({ ...data(payload), ...(signal ? { signal } : {}) }); assertAlive(); return data(result ?? null); };
   }
   return Object.freeze(facade);
 }

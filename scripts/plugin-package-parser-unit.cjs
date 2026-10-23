@@ -118,6 +118,28 @@ withCopy((root) => {
 });
 
 withCopy((root) => {
+  const skillFile = path.join(root, "skills/issue-summary/SKILL.md");
+  const header = "---\nname: issue-summary\ndescription: Machine requirements test\n";
+  fs.writeFileSync(skillFile, `${header}x-shoggoth:\n  requiredTools:\n    - echo\n`+
+    `  requiredRuntimeCapabilities:\n    - mcp\nallowed-tools: echo\n---\n\n# Issue summary\n`);
+  const declared = previewPluginDirectory(root).skills[0];
+  assert.deepEqual(declared.requiredTools, ["echo"]);
+  assert.deepEqual(declared.requiredRuntimeCapabilities, ["mcp"]);
+  assert.equal(declared.declaredAllowedTools, true);
+  for (const invalid of [
+    "  requiredTools: echo\n",
+    "  requiredTools:\n    - echo\n    - echo\n",
+    "  requiredTools:\n    - ../echo\n",
+    "  unknown: echo\n",
+  ]) {
+    fs.writeFileSync(skillFile, `${header}x-shoggoth:\n${invalid}---\n\n# Issue summary\n`);
+    const preview = previewPluginDirectory(root);
+    assert.equal(preview.skills.length, 0);
+    assert.equal(reason(preview, "skill", "issue-summary"), "COMPONENT_INVALID");
+  }
+});
+
+withCopy((root) => {
   fs.unlinkSync(path.join(root, "skills/issue-summary/SKILL.md"));
   fs.symlinkSync(path.join(os.tmpdir(), "outside-SKILL.md"), path.join(root, "skills/issue-summary/SKILL.md"));
   const result = previewPluginDirectory(root);

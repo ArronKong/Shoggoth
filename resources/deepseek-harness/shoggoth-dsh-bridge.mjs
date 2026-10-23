@@ -16,6 +16,7 @@ export const inject = [
   "sessionPersistence",
   "sessions",
   "systemPrompt",
+  "tools",
   "userQuestions",
 ];
 
@@ -148,9 +149,24 @@ function commandFromToolCall(call) {
   return `${call.name}(${call.arguments || "{}"})`;
 }
 
+export function installWorkspaceExecutionGuard(ctx) {
+  if (typeof ctx.tools?.guard !== "function" || typeof ctx.tools?.restrict !== "function") {
+    throw bridgeError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "DeepSeek's monotonic native tool guard is unavailable");
+  }
+  const denied = exec => !/^mcp__shoggoth__[A-Za-z0-9_-]+$/u.test(exec.name)
+    ? "Use mcp__shoggoth__workspace_execute for workspace operations in this mode." : undefined;
+  ctx.on("tools/pre-execute", (exec, next) => {
+    const reason = denied(exec);
+    return reason ? Promise.resolve({ kind: "deny", reason }) : next();
+  }, { prepend: true });
+  ctx.tools.guard(denied);
+}
+
 export class BridgeRuntime {
-  constructor(ctx) {
+  constructor(ctx, options = {}) {
     this.ctx = ctx;
+    this.workspaceExecution = options.workspaceExecution
+      ?? (process.env.SHOGGOTH_DSH_WORKSPACE_EXECUTION_VERSION === "1");
     this.sessions = new Map();
     this.activeTurns = new Map();
     this.modelRequests = new Map();
@@ -163,6 +179,12 @@ export class BridgeRuntime {
   }
 
   start() {
+    if (this.workspaceExecution) {
+      // Pre-execute avoids showing a native approval that we will decline. The
+      // registry-owned monotonic guard also denies after other pre-execute
+      // listeners, including previously approved native tools and subdispatch.
+      installWorkspaceExecutionGuard(this.ctx);
+    }
     this.ctx.on("session/event", (session, event) => this.onSessionEvent(session, event));
     this.ctx.on("approval/request", (request) => this.onApprovalRequest(request), { prepend: true });
     this.ctx.on("user-questions/request", (request) => this.onUserQuestionsRequest(request), {
@@ -178,7 +200,8 @@ export class BridgeRuntime {
     await this.ctx.get("loader")?.await();
     if (this.closed) return;
     this.ready = true;
-    await this.write({ type: "ready", protocol: PROTOCOL, protocolVersion: PROTOCOL_VERSION });
+    await this.write({ type: "ready", protocol: PROTOCOL, protocolVersion: PROTOCOL_VERSION,
+      ...(this.workspaceExecution ? { workspaceExecutionVersion: 1 } : {}) });
   }
 
   onLine(line) {
@@ -240,6 +263,16 @@ export class BridgeRuntime {
       case "commands/list": return this.commandsList(params);
       case "auth/read": return this.authRead();
       case "model/generate": return this.generateModelOnly(params);
+      case "model/describe": return this.describeModel(params);
+      case "model/resolve": {
+        if (Object.hasOwn(params, "model")) return this.resolveExplicitModel(params);
+        if (Object.keys(params).length) throw bridgeError("MODEL_RESOLUTION_INVALID", "Invalid model discovery request");
+        const selection = this.ctx.agentDefaultModel.currentSelection();
+        if (!safeString(selection?.provider, 128) || !safeString(selection?.model, 512)) {
+          throw bridgeError("RUNTIME_MODEL_UNAVAILABLE", "Model unavailable");
+        }
+        return { model: modelRef(selection), provider: selection.provider };
+      }
       case "model/cancel": {
         if (!safeString(params.operationId, 256)) throw bridgeError("MODEL_ONLY_INVALID", "Invalid model operation");
         this.modelRequests.get(params.operationId)?.abort();
@@ -257,8 +290,63 @@ export class BridgeRuntime {
     }
   }
 
+  async resolveExplicitModel(params) {
+    if (Object.keys(params).some(key => !["model", "operationId"].includes(key))
+      || !safeString(params.model, 512) || !safeString(params.operationId, 256)
+      || this.modelRequests.size >= 4 || this.modelRequests.has(params.operationId)) {
+      throw bridgeError("MODEL_RESOLUTION_INVALID", "Invalid model discovery request");
+    }
+    const selection = parseModelRef(params.model);
+    if (!selection || typeof this.ctx.llm.resolveModelInfo !== "function") {
+      throw bridgeError("RUNTIME_MODEL_UNAVAILABLE", "Model unavailable");
+    }
+    const controller = new AbortController(); this.modelRequests.set(params.operationId, controller);
+    const timer = setTimeout(() => controller.abort(), 3500);
+    try {
+      // The native LLM API explicitly rejects aliases: it attests an exact
+      // provider/model pair without dispatching a model request. Never rename
+      // a requested route based on a catalog label or an unverified result.
+      const info = await this.ctx.llm.resolveModelInfo(selection.provider, selection.model, controller.signal);
+      if (controller.signal.aborted) throw bridgeError("MODEL_ONLY_CANCELED", "Model discovery canceled");
+      if (info?.provider !== selection.provider || info?.id !== selection.model) throw new Error();
+      return { model: modelRef(selection), provider: selection.provider };
+    } catch {
+      throw bridgeError(controller.signal.aborted ? "MODEL_ONLY_CANCELED" : "RUNTIME_MODEL_UNAVAILABLE", "Model unavailable");
+    } finally { clearTimeout(timer); this.modelRequests.delete(params.operationId); }
+  }
+
+  async describeModel(params) {
+    if (Object.keys(params).some(key => key !== "model")
+      || params.model !== null && !safeString(params.model, 640)
+      || typeof this.ctx.llm.resolveModelInfo !== "function" || typeof this.ctx.llm.prepareCall !== "function") {
+      throw bridgeError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Model settings unavailable");
+    }
+    const selection = params.model ? parseModelRef(params.model) : this.ctx.agentDefaultModel.currentSelection();
+    if (!safeString(selection?.provider, 128) || !safeString(selection?.model, 512)) {
+      throw bridgeError("RUNTIME_MODEL_UNAVAILABLE", "Model unavailable");
+    }
+    try {
+      const info = await this.ctx.llm.resolveModelInfo(selection.provider, selection.model, AbortSignal.timeout(4_000));
+      if (info?.id !== selection.model) throw new Error();
+      const reasoning = info?.reasoning;
+      const options = reasoning === undefined ? [] : reasoning?.efforts?.map(effort => effort?.id);
+      if (!Array.isArray(options) || options.length > 16 || new Set(options).size !== options.length
+        || options.some(id => typeof id !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/u.test(id))
+        || reasoning?.defaultEffort !== undefined && !options.includes(reasoning.defaultEffort)) throw new Error();
+      return { model: modelRef(selection), provider: selection.provider, capabilities: {
+        thinkingOptions: options, thinkingDefault: reasoning?.defaultEffort ?? null, fastTier: null,
+      } };
+    } catch { throw bridgeError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Model settings unavailable"); }
+  }
+
   async generateModelOnly(params) {
     if (!safeString(params.operationId, 256) || !safeString(params.prompt, 128 * 1024)
+      || Object.keys(params).some(key => !["operationId", "prompt", "model", "streamText", "settings"].includes(key))
+      || (params.streamText !== undefined && typeof params.streamText !== "boolean")
+      || params.settings !== undefined && (!plain(params.settings)
+        || Object.keys(params.settings).some(key => key !== "reasoningEffort")
+        || params.settings.reasoningEffort !== undefined && (typeof params.settings.reasoningEffort !== "string"
+          || !/^[a-z][a-z0-9_-]{0,31}$/u.test(params.settings.reasoningEffort)))
       || this.modelRequests.size >= 4 || this.modelRequests.has(params.operationId)) {
       throw bridgeError("MODEL_ONLY_INVALID", "Invalid or duplicate model request");
     }
@@ -269,14 +357,32 @@ export class BridgeRuntime {
     let text = "", usage = null, finished = false;
     const timer = setTimeout(() => controller.abort(), 170_000);
     try {
+      let call = { ...selection, maxTokens: 4096 }, prepared;
+      if (params.settings) {
+        if (typeof this.ctx.llm.prepareCall !== "function") {
+          throw bridgeError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Model settings unavailable");
+        }
+        try {
+          // The native SDK revalidates the exact effort and binds this call to
+          // one adapter generation. A registry reload cannot change dispatch.
+          prepared = await this.ctx.llm.prepareCall({ ...call, ...params.settings }, controller.signal);
+          call = prepared.config;
+        } catch { throw bridgeError("MODEL_ONLY_SETTINGS_UNAVAILABLE", "Model settings unavailable"); }
+      }
+      if (controller.signal.aborted) throw bridgeError("MODEL_ONLY_CANCELED", "Model task canceled");
       // Direct LLM call: no Agent, MCP, tool registry, workspace or permission
       // preset is attached. Even a returned tool call cannot execute anything.
-      for await (const chunk of this.ctx.llm.stream({ ...selection,
+      const request = { ...call,
         messages: [userMessage(params.operationId, params.prompt, { kind: "plugin", plugin: name })],
         system: "Produce a factual conversation checkpoint from supplied data.", tools: [],
-        maxTokens: 4096, purpose: "compaction", signal: controller.signal })) {
+        purpose: "compaction", signal: controller.signal };
+      for await (const chunk of prepared ? prepared.stream(request) : this.ctx.llm.stream(request)) {
         if (chunk.type === "text-delta") text += chunk.text;
         if (Buffer.byteLength(text) > 32 * 1024) throw bridgeError("MODEL_ONLY_OUTPUT_INVALID", "Model output too large");
+        if (chunk.type === "text-delta" && params.streamText === true) {
+          await this.write({ type: "event", event: { known: true, method: "deepseek-harness/model_text",
+            type: "model_text", operationId: params.operationId, delta: chunk.text } });
+        }
         if (chunk.type === "usage") usage = normalizeUsage(chunk.usage);
         if (chunk.type === "tool-call-delta") throw bridgeError("MODEL_ONLY_OUTPUT_INVALID", "Unexpected tool call");
         if (chunk.type === "finish") finished = chunk.reason?.kind === "stop";
@@ -371,17 +477,37 @@ export class BridgeRuntime {
         "DeepSeek system prompt API is unavailable",
       );
     }
+    let turnInstructions = "";
     agentCtx.systemPrompt.section({
       name: "shoggoth:developer-instructions",
       order: 0,
-      text: developerInstructions,
+      // DSH permits one complete prompt and rejects duplicate registrations.
+      // Evaluate the current turn inside that one section on every assembly.
+      text: () => [developerInstructions, turnInstructions].filter(Boolean).join("\n\n"),
       complete: true,
     });
+    return (text) => { turnInstructions = text; };
   }
 
   async createHandle(config, resume) {
     const agentOptions = { provider: config.selection.provider, model: config.selection.model };
-    const setup = (agentCtx) => this.setupAgent(agentCtx, config.developerInstructions);
+    let setTurnInstructions;
+    const setup = (agentCtx) => {
+      if (this.workspaceExecution) {
+        if (typeof agentCtx.tools?.restrict !== "function" || typeof agentCtx.tools?.schemas !== "function"
+          || typeof agentCtx.tools?.presentAs !== "function") {
+          throw bridgeError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "DeepSeek's scoped native tool catalog is unavailable");
+        }
+        agentCtx.tools.presentAs("native");
+        const names = agentCtx.tools.schemas().map(tool => tool.name)
+          .filter(name => /^mcp__shoggoth__[A-Za-z0-9_-]+$/u.test(name));
+        if (!names.includes("mcp__shoggoth__workspace_execute")) {
+          throw bridgeError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "DeepSeek's managed workspace tool is unavailable");
+        }
+        agentCtx.tools.restrict({ allow: names });
+      }
+      setTurnInstructions = this.setupAgent(agentCtx, config.developerInstructions);
+    };
     const handle = resume
       ? await this.ctx.agents.resume({
         resumeSessionId: config.remoteSessionId,
@@ -397,6 +523,7 @@ export class BridgeRuntime {
     const record = {
       handle,
       agent: handle.agent,
+      setTurnInstructions,
       config,
       key: JSON.stringify([config.cwd, config.developerInstructions, config.selection]),
     };
@@ -537,7 +664,8 @@ export class BridgeRuntime {
     if (!safeString(params.remoteSessionId, 256) || !safeString(params.sessionId, 512)
       || !safeString(params.turnId, 512) || !safeString(params.operationId, 512)
       || !safeString(params.prompt, 1024 * 1024, true)
-      || !safeString(params.context ?? "", 4 * 1024 * 1024, true)) {
+      || !safeString(params.context ?? "", 4 * 1024 * 1024, true)
+      || !safeString(params.turnDeveloperInstructions ?? "", 1024 * 1024, true)) {
       throw bridgeError("RUNTIME_TURN_PARAMS_INVALID", "DeepSeek turn input is invalid");
     }
     const record = this.sessions.get(params.remoteSessionId);
@@ -545,6 +673,7 @@ export class BridgeRuntime {
     if (this.activeTurns.has(params.remoteSessionId)) {
       throw bridgeError("RUNTIME_SESSION_BUSY", "DeepSeek session is active");
     }
+    record.setTurnInstructions(params.turnDeveloperInstructions || "");
     if (params.prompt.trimStart().startsWith("/")) {
       return this.commandTurnStart(record, params);
     }
@@ -567,21 +696,18 @@ export class BridgeRuntime {
       buffered: [],
       settled: false,
       userMessageId: replay?.messageId || stableUuid(`shoggoth-dsh-user:${params.operationId}`),
-      appended: null,
-      resolveAppended: null,
+      acceptanceReady: null,
+      resolveAcceptanceReady: null,
     };
     if (replay) {
       this.activeTurns.set(params.remoteSessionId, active);
       queueMicrotask(() => {
         for (const event of replay.events) this.publishMappedEvent(active, event);
       });
-      void record.agent.whenIdle().then(
-        () => this.ensureTurnSettled(active),
-        (error) => this.failTurn(active, error),
-      );
+      this.observeTurnIdle(active);
       return { turnId: params.turnId, replayed: true };
     }
-    active.appended = new Promise((resolve) => { active.resolveAppended = resolve; });
+    active.acceptanceReady = new Promise((resolve) => { active.resolveAcceptanceReady = resolve; });
     this.activeTurns.set(params.remoteSessionId, active);
     if (params.context) {
       record.agent.inject(userMessage(
@@ -592,7 +718,11 @@ export class BridgeRuntime {
     }
     try {
       record.agent.followup(userMessage(active.userMessageId, params.prompt, { kind: "user" }));
-      await active.appended;
+      // An early native failure can end the turn before user/message exists.
+      // Observe idle now and accept either the user record or the terminal
+      // result, then flush before acknowledging the dispatch.
+      this.observeTurnIdle(active);
+      await active.acceptanceReady;
       await this.ctx.sessions.flush(record.agent.session);
     } catch (error) {
       if (this.activeTurns.get(params.remoteSessionId) === active) {
@@ -600,10 +730,6 @@ export class BridgeRuntime {
       }
       throw error;
     }
-    void record.agent.whenIdle().then(
-      () => this.ensureTurnSettled(active),
-      (error) => this.failTurn(active, error),
-    );
     return { turnId: params.turnId, replayed: false };
   }
 
@@ -698,9 +824,10 @@ export class BridgeRuntime {
   onSessionEvent(session, event) {
     const active = this.activeTurns.get(session.id);
     if (!active || active.settled) return;
-    if (event.type === "user/message" && event.data?.id === active.userMessageId) {
-      active.resolveAppended?.();
-      active.resolveAppended = null;
+    if (event.type === "turn/end"
+      || (event.type === "user/message" && event.data?.id === active.userMessageId)) {
+      active.resolveAcceptanceReady?.();
+      active.resolveAcceptanceReady = null;
     }
     if (event.type === "tool/call") {
       active.toolCalls.set(event.data.callId, {
@@ -779,7 +906,7 @@ export class BridgeRuntime {
         type: "text",
         itemId,
         text,
-        phase: "final_answer",
+        phase: event.data?.message?.content?.some(block => block?.type === "tool-call") ? "commentary" : "final_answer",
         delivery: "local",
       });
       if (event.data?.usage) {
@@ -843,6 +970,13 @@ export class BridgeRuntime {
     return [];
   }
 
+  observeTurnIdle(active) {
+    void Promise.resolve().then(() => active.agent.whenIdle())
+      .then(() => this.ensureTurnSettled(active))
+      .catch((error) => this.failTurn(active, error))
+      .catch((error) => this.fatal(error));
+  }
+
   async ensureTurnSettled(active) {
     if (active.settled) return;
     await this.ctx.sessions.flush(active.agent.session);
@@ -857,39 +991,52 @@ export class BridgeRuntime {
   async failTurn(active, error) {
     if (active.settled) return;
     active.settled = true;
-    if (this.activeTurns.get(active.remoteSessionId) === active) {
+    active.resolveAcceptanceReady?.();
+    active.resolveAcceptanceReady = null;
+    if (!active.accepting && this.activeTurns.get(active.remoteSessionId) === active) {
       this.activeTurns.delete(active.remoteSessionId);
     }
-    await this.write({
-      type: "event",
-      event: {
-        known: true,
-        method: "deepseek-harness/error",
-        type: "complete",
-        sessionId: active.sessionId,
-        turnId: active.turnId,
-        status: "failed",
-        errorCode: turnErrorCode(error),
-      },
-    });
+    const event = {
+      known: true,
+      method: "deepseek-harness/error",
+      type: "complete",
+      sessionId: active.sessionId,
+      turnId: active.turnId,
+      status: "failed",
+      errorCode: turnErrorCode(error),
+    };
+    if (active.accepting) active.buffered.push(event);
+    else await this.write({ type: "event", event });
   }
 
   async onApprovalRequest(request) {
     const active = request?.agent ? this.activeTurns.get(request.agent.id) : null;
     if (!active || active.settled) return "unavailable";
+    if (this.workspaceExecution && /^mcp__shoggoth__[A-Za-z0-9_-]+$/u.test(request.toolName || "")) {
+      return "allowed-once"; // Authentication and product confirmation remain in Shoggoth's MCP controller.
+    }
     const call = request.callId ? active.toolCalls.get(request.callId) : null;
     const fileChange = WRITE_TOOL_PATTERN.test(request.toolName || "")
       && !SHELL_TOOL_PATTERN.test(request.toolName || "");
     const cwd = active.agent?.session?.header?.cwd || process.cwd();
     const method = fileChange
       ? "item/fileChange/requestApproval" : "item/commandExecution/requestApproval";
+    // Structured tool and arguments let Shoggoth describe the request; a reason is
+    // only sent when DSH gave one.
+    const toolName = typeof request.toolName === "string" && request.toolName ? request.toolName : undefined;
+    let toolInput;
+    try { toolInput = JSON.parse(call?.arguments || "null"); } catch {}
+    if (!toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) toolInput = undefined;
+    const reason = typeof request.reason === "string" && request.reason ? request.reason : undefined;
+    const described = { ...(toolName ? { toolName } : {}), ...(toolInput ? { toolInput } : {}),
+      ...(reason ? { reason } : {}) };
     const params = method === "item/fileChange/requestApproval"
       ? {
         sessionId: active.sessionId,
         turnId: active.turnId,
         itemId: request.callId,
         grantRoot: cwd,
-        reason: request.reason || `${request.toolName} requires approval`,
+        ...described,
         sessionApprovalAvailable: true,
       }
       : {
@@ -898,7 +1045,7 @@ export class BridgeRuntime {
         itemId: request.callId,
         command: commandFromToolCall(call) || `${request.toolName}()`,
         cwd,
-        reason: request.reason || `${request.toolName} requires approval`,
+        ...described,
         sessionApprovalAvailable: true,
       };
     try {

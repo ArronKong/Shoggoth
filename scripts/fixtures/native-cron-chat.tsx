@@ -28,12 +28,13 @@ localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(data.sessions))
 localStorage.setItem("shoggoth.chat.lastActive.v1", key);
 localStorage.setItem("shoggoth.chat.immersive.v1", "0");
 class FixtureSocket {
+  static instances = new Set<FixtureSocket>();
   static OPEN = 1;
   readyState = 1;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
-  constructor() { setTimeout(() => this.onopen?.(), 0); }
+  constructor() { FixtureSocket.instances.add(this); setTimeout(() => this.onopen?.(), 0); }
   send(raw: string) {
     const request = JSON.parse(raw);
     let payload: unknown = {};
@@ -42,8 +43,16 @@ class FixtureSocket {
     if (request.method === "chat.history") payload = request.params.sessionKey === key ? data.history : { messages: [] };
     setTimeout(() => this.onmessage?.({ data: JSON.stringify({ type: "res", id: request.id, ok: true, payload }) }), 0);
   }
-  close() { this.readyState = 3; }
+  close() { this.readyState = 3; FixtureSocket.instances.delete(this); }
 }
+const emit = (payload: unknown) => FixtureSocket.instances.forEach(socket => socket.onmessage?.({
+  data: JSON.stringify({ type: "event", event: "chat", payload }),
+}));
+state.beginSilentCron = () => emit({ runId: data.activity.runId, sessionKey: key, state: "status", statusKind: "running", text: "running" });
+state.completeSilentCron = () => {
+  Object.assign(data, data.silentAfter);
+  emit({ runId: data.activity.runId, sessionKey: key, state: "final", outputDisposition: data.activity.outputDisposition });
+};
 state.WebSocket = FixtureSocket;
 state.fetch = async (input: unknown, init?: RequestInit) => {
   const url = new URL(String(input), location.origin);
@@ -56,6 +65,12 @@ state.fetch = async (input: unknown, init?: RequestInit) => {
   if (url.pathname === "/__api/backends") result = { backends: FALLBACK_BACKEND_DESCRIPTORS.filter((item) => item.id === "shoggoth") };
   if (url.pathname === "/__api/chat/cache-scope") result = { backendId: "shoggoth", cacheScope: "native-cron-isolated-preview" };
   if (url.pathname === "/__api/agents") result = { agents: data.agents };
+  if (url.pathname.endsWith("/runtime-models")) result = data.runtimeModels || {
+    selection: { sessionKey: key, revision: 0, bindingId: "fixture-binding", runtime: "codex", model: null,
+      contextUsage: null, candidates: [], canSwitch: false }, models: [], runtimes: [], capabilities: {},
+  };
+  if (url.pathname.endsWith("/memory-status")) result = { supported: false };
+  if (url.pathname.endsWith("/capabilities")) result = data.capabilities || {};
   if (url.pathname.endsWith("/archive")) result = { archive: { supported: false, segments: [] } };
   if (url.pathname === "/__api/cron/jobs") {
     const action = url.searchParams.get("action");
@@ -76,6 +91,7 @@ createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><Scr
     <Link to={`/chat?backend=shoggoth&session=${encodeURIComponent(key)}`}>查看 Cron 会话</Link>
     <button onClick={() => openNotification({ category: "cron", target: { kind: "cron", backendId: "shoggoth", jobId: data.jobs[0].id } })}>模拟定时任务通知</button>
     <button onClick={() => openNotification({ category: "task", target: { kind: "task", backendId: "shoggoth", taskId: "fixture", sessionKey: key } })}>模拟任务 Session 通知</button>
+    {data.silentAfter && <><button onClick={state.beginSilentCron}>开始静默检查</button><button onClick={state.completeSilentCron}>完成静默检查</button></>}
   </nav>
   <main style={{ height: "calc(100vh - 40px)", padding: "0 24px", boxSizing: "border-box" }}>
     <Routes><Route path="/chat" element={<ChatPage />} /><Route path="/cron" element={<CronPage />} /></Routes>

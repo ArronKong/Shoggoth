@@ -30,6 +30,13 @@ test("impact includes every active state and source, excluding queues and termin
   assert.equal(snapshot([...runs].reverse()).revision, result.revision);
 });
 
+test("Codex automation remains visible in scheduled-work stop impact", () => {
+  const result = snapshot([run("codex-automation", "running", "automation")]);
+  assert.equal(result.totalCount, 1);
+  assert.equal(result.runs[0].source, "cron");
+  assert.equal(validStopImpact(result), true);
+});
+
 test("revision tracks new tasks, approval replacement and service restart, not streamed text", () => {
   const original = run("one", "waiting_approval");
   original.waitingRequestId = "approval-one";

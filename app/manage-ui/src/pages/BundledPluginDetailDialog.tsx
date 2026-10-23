@@ -4,12 +4,22 @@ import { useTranslation } from "react-i18next";
 import { getBundledPluginDetail, type BundledPluginDetail,
   type BundledPluginItem } from "../api/client";
 import styles from "./BundledPluginDetailDialog.module.css";
+import { graphReadOnlyCopy } from "./graphReadOnlyCopy";
+import { PluginGraphRegistration, isGraphRegistrationPackage } from "./PluginGraphRegistration";
+import { PluginLovableRegistration } from "./PluginLovableRegistration";
+import { PluginHiggsfieldRegistration } from "./PluginHiggsfieldRegistration";
+import { PluginSlackRegistration } from "./PluginSlackRegistration";
+import { PluginGmailRegistration } from "./PluginGmailRegistration";
+import { PluginCodexSecurityStatus } from "./PluginCodexSecurityStatus";
 
 const VISIBLE_SKILLS = 5;
 
-export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, onPreview, onManage }: {
+export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, onPreview, onManage,
+  nativeAgentId = null, embedded = false }: {
   item: BundledPluginItem;
   busy: boolean;
+  nativeAgentId?: string | null;
+  embedded?: boolean;
   returnFocusTo: HTMLButtonElement | null;
   onClose: () => void;
   onPreview: (id: string) => void;
@@ -27,14 +37,14 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
 
   useEffect(() => {
     const dialog = dialogRef.current;
-    dialog?.showModal();
-    closeRef.current?.focus();
+    if (!embedded) dialog?.showModal();
+    if (!embedded) closeRef.current?.focus();
     return () => {
       if (dialog?.open) dialog.close();
-      if (!previewRequested.current && returnFocusTo?.isConnected
+      if (!embedded && !previewRequested.current && returnFocusTo?.isConnected
         && returnFocusTo.offsetParent !== null) returnFocusTo.focus();
     };
-  }, [returnFocusTo]);
+  }, [returnFocusTo, embedded]);
 
   useEffect(() => {
     let active = true;
@@ -53,14 +63,18 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
   const icon = item.iconAvailable
     ? <img className={styles.icon} src={`/__api/plugins/bundled-icon/${item.id}`} alt="" />
     : <span className={styles.iconFallback} aria-hidden="true">{item.displayName.slice(0, 1)}</span>;
-  const installLabel = item.importStatus !== "previewable" ? t("plugins.adapterPending")
+  const installable = item.importStatus === "previewable" || Boolean(item.localAdapter);
+  const graphReadOnly = item.localAdapter === "shoggoth-graph-read-only";
+  const lovableOfficial = item.localAdapter === "shoggoth-lovable-official-mcp";
+  const slackOfficial = item.localAdapter === "shoggoth-slack-official-mcp";
+  const gmailGogcli = item.localAdapter === "shoggoth-gogcli-gmail-mcp";
+  const graphCopy = graphReadOnlyCopy(item.id);
+  const installLabel = !installable ? t("plugins.adapterPending")
     : item.installationState === "not-installed" ? t("plugins.detailInstallPreview")
       : t("plugins.checkBundledUpdate");
+  const startInstall = () => { previewRequested.current = true; onPreview(item.id); };
 
-  return createPortal(<dialog ref={dialogRef} className={styles.dialog}
-    aria-labelledby="bundled-plugin-detail-title"
-    onCancel={event => { event.preventDefault(); onClose(); }}
-    onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
+  const content = <>
     <div className={styles.scroll}>
       <header className={styles.header}>
         <div className={styles.identity}>
@@ -68,17 +82,24 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
           <div className={styles.heading}>
             <span className={styles.eyebrow}>{t("plugins.bundledSource")} · {item.category}</span>
             <h2 id="bundled-plugin-detail-title">{item.displayName}</h2>
-            <p>{item.shortDescription}</p>
+            <p>{graphReadOnly ? t(graphCopy.short)
+              : lovableOfficial ? t("plugins.lovableOfficialShort")
+                : slackOfficial ? t("plugins.slackOfficialShort")
+                  : gmailGogcli ? t("plugins.gmailGogcliShort") : item.shortDescription}</p>
           </div>
         </div>
-        <button ref={closeRef} className={styles.close} type="button" onClick={onClose}
-          aria-label={t("plugins.detailClose")}>×</button>
+        <div className={styles.headerActions}>
+          {embedded && <button className="btn-primary" type="button" disabled={busy || !installable}
+            onClick={startInstall}>{busy ? t("plugins.choosing") : installLabel}</button>}
+          {!embedded && <button ref={closeRef} className={styles.close} type="button" onClick={onClose}
+            aria-label={t("plugins.detailClose")}>×</button>}
+        </div>
       </header>
 
       <div className={styles.statusLine}>
         <span className={styles.state} data-state={item.installationState}>
           {item.installationState === "not-installed" ? t("plugins.notInstalled")
-            : item.installationState === "enabled" ? t("plugins.desiredEnabled") : t("plugins.disabled")}
+            : item.installationState === "enabled" ? t("plugins.detailInstalledEnabled") : t("plugins.disabled")}
         </span>
         <span>{t("plugins.detailVersion", { version: item.version })}</span>
       </div>
@@ -91,14 +112,59 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
         </button>
       </div>}
       {detail && <>
-        <p className={styles.description}>{detail.longDescription || detail.shortDescription}</p>
-        {(detail.unconvertedMcp.length > 0 || detail.apps.length > 0)
+        <p className={styles.description}>{graphReadOnly
+          ? t(graphCopy.description) : lovableOfficial
+            ? t("plugins.lovableOfficialDescription") : slackOfficial
+              ? t("plugins.slackOfficialDescription") : gmailGogcli
+                ? t("plugins.gmailGogcliDescription") : detail.longDescription || detail.shortDescription}</p>
+        {item.id === "higgsfield" && <aside className={styles.sourceNotice} role="status">
+          <p>{t("plugins.higgsfieldAcceptancePending")}</p>
+        </aside>}
+        {item.id === "higgsfield" && <div className={styles.registrationPanel}>
+          <PluginHiggsfieldRegistration />
+        </div>}
+        {detail.localAdapter === "shoggoth-graph-read-only" && <aside className={styles.sourceNotice} role="status">
+          <strong>{t(graphCopy.badge)}</strong>
+          <p>{t(graphCopy.explanation)}</p>
+        </aside>}
+        {item.id === "codex-security" && <PluginCodexSecurityStatus
+          installationId={item.installationState === "not-installed" ? null : item.installationId}
+          nativeAgentId={nativeAgentId} />}
+        {graphReadOnly && isGraphRegistrationPackage(item.id)
+          && <div className={styles.registrationPanel}>
+            <PluginGraphRegistration packageId={item.id} />
+          </div>}
+        {lovableOfficial && <aside className={styles.sourceNotice} role="status">
+          <strong>{t("plugins.lovableOfficialBadge")}</strong>
+          <p>{t("plugins.lovableOfficialExplanation")}</p>
+        </aside>}
+        {lovableOfficial && <div className={styles.registrationPanel}>
+          <PluginLovableRegistration />
+        </div>}
+        {slackOfficial && <aside className={styles.sourceNotice} role="status">
+          <strong>{t("plugins.slackOfficialBadge")}</strong>
+          <p>{t("plugins.slackOfficialExplanation")}</p>
+        </aside>}
+        {slackOfficial && <div className={styles.registrationPanel}>
+          <PluginSlackRegistration />
+        </div>}
+        {gmailGogcli && <aside className={styles.sourceNotice} role="status">
+          <strong>{t("plugins.gmailGogcliBadge")}</strong>
+          <p>{t("plugins.gmailGogcliExplanation")}</p>
+        </aside>}
+        {gmailGogcli && <div className={styles.registrationPanel}>
+          <PluginGmailRegistration />
+        </div>}
+        {item.id !== "codex-security" && (!detail.localAdapter || lovableOfficial || slackOfficial || gmailGogcli)
+          && (detail.unconvertedMcp.length > 0 || detail.apps.length > 0)
           && <p className={styles.adapterNotice} role="status">
-            {t(detail.converted.mcp > 0 ? "plugins.detailAccountPartiallyPending"
-              : detail.converted.skills > 0 ? "plugins.detailAccountPendingWithSkills"
-                : "plugins.detailAccountPending")}
+            {t(gmailGogcli ? "plugins.gmailSourceConnectorPending"
+              : slackOfficial ? "plugins.slackOriginalConnectorPending"
+              : detail.converted.mcp > 0 ? "plugins.detailAccountPartiallyPending"
+                : detail.converted.skills > 0 ? "plugins.detailAccountPendingWithSkills"
+                  : "plugins.detailAccountPending")}
           </p>}
-        {detail.connectionWarnings.map(warning => <aside key={warning.name}
+        {!gmailGogcli && detail.connectionWarnings.map(warning => <aside key={warning.name}
           className={styles.sourceNotice} role="status">
           <strong>{t("plugins.googleDesktopOAuthWarningTitle")}</strong>
           <p>{t("plugins.googleDesktopOAuthRequired")}</p>
@@ -112,10 +178,13 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
           <ul>{warning.targets.map(target => <li key={target}><code>{target}</code></li>)}</ul>
           <p>{t("plugins.detailSourceMissingImpact")}</p>
         </aside>)}
-        {item.importStatus === "previewable" && detail.prompts.length > 0 && <section className={styles.promptPanel}
+        {installable && (graphReadOnly || lovableOfficial || slackOfficial || gmailGogcli || detail.prompts.length > 0) && <section className={styles.promptPanel}
           aria-label={t("plugins.detailExamples")}>
           <span className={styles.panelLabel}>{t("plugins.detailExamples")}</span>
-          {detail.prompts.map((prompt, index) => <p key={`${index}-${prompt}`}>
+          {(graphReadOnly ? [t(graphCopy.example)] : lovableOfficial
+            ? [t("plugins.lovableOfficialExample")] : slackOfficial
+              ? [t("plugins.slackOfficialExample")] : gmailGogcli
+                ? [t("plugins.gmailGogcliExample")] : detail.prompts).map((prompt, index) => <p key={`${index}-${prompt}`}>
             <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>{prompt}
           </p>)}
         </section>}
@@ -140,15 +209,23 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
 
         {detail.components.mcp > 0 && <section className={styles.section}>
           <div className={styles.sectionTitle}><h3>{t("plugins.detailMcp")}</h3>
-            <span>{detail.converted.mcp} / {detail.components.mcp}</span></div>
-          <p className={styles.sectionNote}>{t("plugins.detailMcpNote")}</p>
+            <span>{gmailGogcli ? t("plugins.gmailGogcliMcpCount")
+              : `${detail.converted.mcp} / ${detail.components.mcp}`}</span></div>
+          <p className={styles.sectionNote}>{t(lovableOfficial
+            ? "plugins.lovableOfficialMcpNote" : slackOfficial
+              ? "plugins.slackOfficialMcpNote" : gmailGogcli
+                ? "plugins.gmailGogcliMcpNote" : "plugins.detailMcpNote")}</p>
           <ul className={styles.componentList}>
-            {detail.mcpServers.map(server => <li key={server.name}>
+            {gmailGogcli ? <li>
+              <span className={styles.componentMark} aria-hidden="true">⌘</span>
+              <div><strong>gog mcp</strong><p>stdio · gogcli v0.42.0</p></div>
+              <span className={styles.componentState}>{t("plugins.gmailGogcliBadge")}</span>
+            </li> : detail.mcpServers.map(server => <li key={server.name}>
               <span className={styles.componentMark} aria-hidden="true">⌘</span>
               <div><strong>{server.name}</strong><p>{server.type}</p></div>
               <span className={styles.componentState}>{t("plugins.detailInstallable")}</span>
             </li>)}
-            {detail.unconvertedMcp.map(server => <li key={server.name}>
+            {!gmailGogcli && detail.unconvertedMcp.map(server => <li key={server.name}>
               <span className={styles.componentMark} aria-hidden="true">⌘</span>
               <div><strong>{server.name}</strong><p>{t(server.reasonCode === "LEGACY_MCP_FIELD_UNSUPPORTED"
                 ? "plugins.bundledMcpUnsupported" : "plugins.bundledMcpInvalid")}</p></div>
@@ -157,7 +234,7 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
           </ul>
         </section>}
 
-        {detail.apps.length > 0 && <section className={styles.section}>
+        {detail.apps.length > 0 && !gmailGogcli && <section className={styles.section}>
           <div className={styles.sectionTitle}><h3>{t("plugins.detailApps")}</h3>
             <span>{detail.apps.length}</span></div>
           <p className={styles.sectionNote}>{t("plugins.detailAppsPending")}</p>
@@ -170,6 +247,7 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
 
         <section className={styles.section}>
           <div className={styles.sectionTitle}><h3>{t("plugins.detailInformation")}</h3></div>
+          {gmailGogcli && <p className={styles.sectionNote}>{t("plugins.gmailSourceMetadataNotice")}</p>}
           <dl className={styles.infoGrid}>
             {detail.developerName && <><dt>{t("plugins.detailDeveloper")}</dt><dd>{detail.developerName}</dd></>}
             <dt>{t("plugins.detailVersionLabel")}</dt><dd>{detail.version}</dd>
@@ -177,20 +255,33 @@ export function BundledPluginDetailDialog({ item, busy, returnFocusTo, onClose, 
             {detail.license && <><dt>{t("plugins.detailLicense")}</dt><dd>{detail.license}</dd></>}
             {detail.websiteURL && <><dt>{t("plugins.detailWebsite")}</dt><dd>{detail.websiteURL}</dd></>}
           </dl>
+          {detail.license && <p className={styles.sectionNote}>{t("plugins.detailLicenseEvidenceNotice")}</p>}
         </section>
       </>}
     </div>
     <footer className={styles.footer}>
-      <span>{item.importStatus === "previewable" ? t("plugins.detailInstallNotice")
-        : t("plugins.detailAdapterNotice")}</span>
+      <span>{lovableOfficial ? t("plugins.lovableOfficialInstallNotice")
+        : slackOfficial ? t("plugins.slackOfficialInstallNotice")
+        : gmailGogcli ? t("plugins.gmailGogcliInstallNotice")
+        : item.localAdapter ? t("plugins.graphAdapterInstallNotice")
+        : item.importStatus === "previewable" ? t("plugins.detailInstallNotice")
+          : t("plugins.detailAdapterNotice")}</span>
       <div className={styles.footerActions}>
         {item.installationState !== "not-installed" && <button className="btn-secondary" type="button"
           onClick={() => { previewRequested.current = true; onManage(item.installationId); }}>
           {t("plugins.detailManageInstalled")}</button>}
-        <button className="btn-secondary" type="button" disabled={busy || item.importStatus !== "previewable"}
-          onClick={() => { previewRequested.current = true; onPreview(item.id); }}>
+        <button className="btn-primary" type="button" disabled={busy || !installable}
+          onClick={startInstall}>
           {busy ? t("plugins.choosing") : installLabel}</button>
       </div>
     </footer>
+  </>;
+
+  if (embedded) return <div className={styles.embedded}>{content}</div>;
+  return createPortal(<dialog ref={dialogRef} className={styles.dialog}
+    aria-labelledby="bundled-plugin-detail-title"
+    onCancel={event => { event.preventDefault(); onClose(); }}
+    onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
+    {content}
   </dialog>, document.body);
 }

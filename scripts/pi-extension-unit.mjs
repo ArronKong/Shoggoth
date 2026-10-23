@@ -24,6 +24,7 @@ const ENV_KEYS = [
   "SHOGGOTH_PI_MCP_COMMAND",
   "SHOGGOTH_PI_MCP_ARGS",
   "SHOGGOTH_PI_PERMISSION_POLICY",
+  "SHOGGOTH_PI_WORKSPACE_EXECUTION_VERSION",
   "SHOGGOTH_PI_EXTENSION_TEST_SECRET",
 ];
 
@@ -73,6 +74,9 @@ process.stdin.on("data", (chunk) => {
         id: message.id,
         result: {
           tools: [{
+            name: "workspace_execute", description: "Execute in the managed workspace.",
+            inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+          }, {
             name: "skill_read",
             title: 42,
             description: "Read a skill through Shoggoth.",
@@ -114,7 +118,7 @@ process.stdin.on("data", (chunk) => {
         },
       });
     } else if (message.method === "tools/call") {
-      if (message.params?.name === "cron_create") {
+      if (["cron_create", "workspace_execute"].includes(message.params?.name)) {
         send({
           jsonrpc: "2.0",
           id: message.id,
@@ -211,7 +215,7 @@ try {
   } finally {
     process.title = previousTitle;
   }
-  assert.equal(first.tools.length, 8);
+  assert.equal(first.tools.length, 9);
   const skillTool = first.tools.find((tool) => tool.name === "skill_read");
   const cronTool = first.tools.find((tool) => tool.name === "cron_create");
   const cronUpdateTool = first.tools.find((tool) => tool.name === "cron_update");
@@ -342,7 +346,7 @@ try {
   assert.deepEqual(selections, [{
     title: "Version",
     options: ["stable", "next"],
-    settings: { timeout: 10 * 60 * 1000 },
+    settings: { timeout: 30 * 60 * 1000 },
   }]);
   assert.deepEqual(toolResult, {
     content: [{ type: "text", text: "selected:stable;secret:absent" }],
@@ -414,6 +418,21 @@ try {
     { cwd: scratch, ui: { async confirm() { return true; } } },
   ), undefined);
   second.handlers.get("session_shutdown")();
+
+  process.env.SHOGGOTH_PI_WORKSPACE_EXECUTION_VERSION = "1";
+  const managed = fakePi();
+  await extension(managed.api);
+  const managedGuard = managed.handlers.get("tool_call");
+  let unwantedPrompts = 0;
+  const ctx = { cwd: scratch, ui: { async confirm() { unwantedPrompts++; return true; } } };
+  for (const toolName of ["read", "find", "grep", "ls", "edit", "write", "bash", "powershell", "future_native_tool"]) {
+    assert.equal((await managedGuard({ toolName, input: { path: "/outside", command: "arbitrary" } }, ctx)).block, true);
+  }
+  assert.equal(unwantedPrompts, 0, "native calls never acquire a cached or fresh approval in managed mode");
+  assert.equal(await managedGuard({ toolName: "workspace_execute", input: { command: "arbitrary" } }, ctx), undefined);
+  assert.equal((await managed.tools.find(tool => tool.name === "workspace_execute")
+    .execute("managed-call", { command: "arbitrary" }, new AbortController().signal, () => {}, ctx)).details.arguments.command, "arbitrary");
+  managed.handlers.get("session_shutdown")();
 
   console.log("PASS Pi trusted extension MCP, elicitation and permission bridge");
 } finally {

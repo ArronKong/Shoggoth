@@ -8,12 +8,13 @@ function componentId(installationId, kind, localName) {
 }
 
 class PluginComponentCatalog {
-  constructor({ store, toolCatalogRegistry = null } = {}) {
+  constructor({ store, toolCatalogRegistry = null, secrets = null } = {}) {
     if (!store || typeof store.listInstallations !== "function") {
       throw new TypeError("PluginComponentCatalog requires PluginStore");
     }
     this.store = store;
     this.toolCatalogRegistry = toolCatalogRegistry;
+    this.secrets = secrets;
   }
 
   list() {
@@ -32,13 +33,22 @@ class PluginComponentCatalog {
         componentId: componentId(installation.installationId, "mcp-server", server.name),
         kind: "mcp-server", localName: server.name, title: server.name,
         transport: server.type, descriptorDigest: server.descriptorDigest,
-        state: stateFor(installation, "mcp-server", server.name),
+        // A declared `${secret:NAME}` without a stored value cannot start.
+        state: installation.desiredState === "enabled"
+          && this.secrets?.missing(installation.installationId, installation.releaseDigest, server.name).length
+          ? "secret_required" : stateFor(installation, "mcp-server", server.name),
+      }));
+      const hooks = (release.components.hooks || []).map(hook => ({
+        componentId: componentId(installation.installationId, "hook", hook.name), kind: "hook",
+        localName: hook.name, title: hook.name, event: hook.event, hookKind: hook.kind,
+        descriptorDigest: hook.descriptorDigest,
+        state: installation.desiredState === "enabled" ? "permission_required" : "installed_inactive",
       }));
       return {
         ...installation,
         packageName: release.name,
         declaredVersion: release.declaredVersion,
-        components: [...skills, ...mcpServers],
+        components: [...skills, ...mcpServers, ...hooks],
         diagnostics: release.diagnostics,
       };
     });

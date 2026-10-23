@@ -91,7 +91,7 @@ const FORBIDDEN_HEADER_NAMES = new Set([
   "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
 ]);
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
+const WORK_RUN_SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction", "proactive"]);
 const WORK_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
   "completed", "failed", "canceled", "interrupted", "skipped",
@@ -119,6 +119,14 @@ function storeError(code, message) {
 
 function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
+}
+
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
 }
 
 function writeFully(fileSystem, fd, value) {
@@ -461,7 +469,7 @@ function modelProviderView(provider) {
   return clone(publicFields);
 }
 
-function validateWorkRun(record) {
+function validateWorkRun(record, source = null) {
   const run = pickExact(record, WORK_RUN_FIELDS, "WorkRun");
   for (const field of ["id", "source", "sourceId", "idempotencyKey", "profileId", "status"]) {
     requireString(run[field], `WorkRun.${field}`);
@@ -470,7 +478,8 @@ function validateWorkRun(record) {
   if (run.contextSnapshotId !== null && !/^ctx-[a-f0-9]{64}$/u.test(run.contextSnapshotId)) {
     throw storeError("STORE_INVALID_RECORD", "WorkRun.contextSnapshotId 无效");
   }
-  if (!WORK_RUN_SOURCES.has(run.source) || !WORK_RUN_STATUSES.has(run.status)) {
+  if (!(source === null ? WORK_RUN_SOURCES.has(run.source) : source === "automation" && run.source === source)
+    || !WORK_RUN_STATUSES.has(run.status)) {
     throw storeError("STORE_INVALID_RECORD", "WorkRun.source/status 不受支持");
   }
   if (run.workspace !== null
@@ -741,6 +750,8 @@ class ProductStore {
 }
 
 class JsonlProductStore extends ProductStore {
+  #readOnlyProfiles = null;
+
   constructor(options = {}) {
     super();
     if (!options.paths?.stateDir || !options.paths?.stateSnapshotPath || !options.paths?.eventLogPath) {
@@ -797,8 +808,11 @@ class JsonlProductStore extends ProductStore {
     this.requiredSensitiveValueMatcher = null;
     this.sensitiveValueMatcherSessionFactory = null;
     this.activeSensitiveValueMatcher = null;
+    this.beforeCreateDefaultAgentProfile = options.beforeCreateDefaultAgentProfile;
+    this.readOnly = options.readOnly === true;
     this.opened = false;
     this.commitUncertain = false;
+    this.commitError = null;
     this.lastEventSeq = 0;
     this.modelProviders = new Map();
     this.runtimeAccounts = new Map();
@@ -810,7 +824,21 @@ class JsonlProductStore extends ProductStore {
     this.mcpToolCalls = new Map();
   }
 
+  openReadOnly() {
+    if (!this.readOnly) throw storeError("STORE_READ_ONLY_REQUIRED", "只读打开必须显式声明");
+    if (this.opened) return this;
+    this.agentProfiles.clear(); this.modelProviders.clear(); this.runtimeAccounts.clear();
+    this.runtimeAccountTombstones.clear(); this.workRuns.clear(); this.workRunIdempotency.clear();
+    this.runNotes.clear(); this.mcpToolCalls.clear(); this.lastEventSeq = 0;
+    this.commitUncertain = false; this.commitError = null;
+    this.#readSnapshot(); this.#ensureDefaultRuntimeAccounts();
+    this.#replayEventLog(); this.#assertAllReferences();
+    this.opened = true;
+    return this;
+  }
+
   open() {
+    if (this.readOnly) return this.openReadOnly();
     if (this.opened) return this;
     this.fs.mkdirSync(this.paths.stateDir, { recursive: true, mode: 0o700 });
     this.agentProfiles.clear();
@@ -823,19 +851,23 @@ class JsonlProductStore extends ProductStore {
     this.mcpToolCalls.clear();
     this.lastEventSeq = 0;
     this.commitUncertain = false;
+    this.commitError = null;
     this.#readSnapshot();
     this.#ensureDefaultRuntimeAccounts();
     this.#replayEventLog();
     this.#assertAllReferences();
     this.opened = true;
     if (!this.agentProfiles.has(DEFAULT_AGENT_PROFILE_ID)) {
-      this.putAgentProfile(defaultAgentProfile(this.now()));
+      const profile = defaultAgentProfile(this.now());
+      this.beforeCreateDefaultAgentProfile?.(profile);
+      this.putAgentProfile(profile);
     }
     return this;
   }
 
   close() {
     if (!this.opened) return;
+    if (this.readOnly) { this.opened = false; return; }
     if (this.commitUncertain) {
       this.opened = false;
       return;
@@ -856,9 +888,8 @@ class JsonlProductStore extends ProductStore {
     this.#assertOpen();
     const profile = this.agentProfiles.get(profileId);
     if (!profile) return;
-    if (profile.enabled || profile.isDefault || profileId === DEFAULT_AGENT_PROFILE_ID
-      || BUILTIN_CLI_AGENT_PROFILES.some((entry) => entry.id === profileId)) {
-      throw storeError("AGENT_PROTECTED", "只能清理已归档的自建 Agent");
+    if (profile.enabled || profile.isDefault || profileId === DEFAULT_AGENT_PROFILE_ID) {
+      throw storeError("AGENT_PROTECTED", "只能清理已归档的非默认 Agent");
     }
     const runs = new Set([...this.workRuns.values()]
       .filter((run) => run.profileId === profileId).map((run) => run.id));
@@ -970,6 +1001,19 @@ class JsonlProductStore extends ProductStore {
   listAgentProfiles() {
     this.#assertOpen();
     return [...this.agentProfiles.values()].map((profile) => clone(projectProfile(profile)));
+  }
+
+  // Memory checks read the roster thousands of times per turn. Share one frozen
+  // projection; stored profiles are replaced, never edited, so a changed object
+  // identity (or count) rebuilds it.
+  listAgentProfilesReadOnly() {
+    this.#assertOpen();
+    const sources = [...this.agentProfiles.values()], cached = this.#readOnlyProfiles;
+    if (!cached || cached.sources.length !== sources.length
+      || cached.sources.some((source, index) => source !== sources[index])) {
+      this.#readOnlyProfiles = { sources, value: deepFreeze(sources.map((profile) => clone(projectProfile(profile)))) };
+    }
+    return this.#readOnlyProfiles.value;
   }
 
   getAgentProfile(id) {
@@ -1673,6 +1717,7 @@ class JsonlProductStore extends ProductStore {
   #replayEventLog() {
     const target = this.paths.eventLogPath;
     if (!this.#lstatIfExists(target)) {
+      if (this.readOnly) throw storeError("STORE_SOURCE_MISSING", "只读 Product journal 缺失");
       const fd = this.#openNewSafe(
         target,
         this.fs.constants.O_CREAT | this.fs.constants.O_EXCL | this.fs.constants.O_RDWR,
@@ -1681,7 +1726,7 @@ class JsonlProductStore extends ProductStore {
       this.#fsyncStateDirectory();
       return;
     }
-    const fd = this.#openExistingSafe(target, this.fs.constants.O_RDWR);
+    const fd = this.#openExistingSafe(target, this.readOnly ? this.fs.constants.O_RDONLY : this.fs.constants.O_RDWR);
     try {
       const bytes = this.fs.readFileSync(fd);
       const lastNewline = bytes.lastIndexOf(0x0a);
@@ -1709,6 +1754,7 @@ class JsonlProductStore extends ProductStore {
         expectedSeq += 1;
       }
       if (completeLength !== bytes.length) {
+        if (this.readOnly) throw storeError("STORE_TRANSACTION_UNSETTLED", "只读 Product journal 拒绝未闭合尾部");
         // 只有完整前缀已经全部验证后才截掉崩溃尾部；使用已 pin inode 的 fd 截断。
         this.fs.ftruncateSync(fd, completeLength);
         this.fs.fsyncSync(fd);
@@ -2141,6 +2187,7 @@ class JsonlProductStore extends ProductStore {
   }
 
   #append(type, aggregateId, payload, includeRequiredMatcher = true) {
+    if (this.readOnly) throw storeError("STORE_READ_ONLY", "只读 Product 禁止写入");
     this.#assertNoSensitiveFields(payload, includeRequiredMatcher);
     const event = {
       schemaVersion: this.schemaVersion,
@@ -2170,7 +2217,10 @@ class JsonlProductStore extends ProductStore {
     if (operationError || closeError) {
       if (writeAttempted) {
         this.commitUncertain = true;
-        throw storeError("STORE_COMMIT_UNCERTAIN", "ProductStore event 提交状态不确定，必须重新打开");
+        const uncertain = storeError("STORE_COMMIT_UNCERTAIN", "ProductStore event 提交状态不确定，必须重新打开");
+        uncertain.cause = operationError || closeError;
+        this.commitError = uncertain;
+        throw uncertain;
       }
       throw operationError || closeError;
     }
@@ -2179,6 +2229,7 @@ class JsonlProductStore extends ProductStore {
   }
 
   #writeSnapshot() {
+    if (this.readOnly) throw storeError("STORE_READ_ONLY", "只读 Product 禁止 snapshot 写入");
     const snapshot = {
       schemaVersion: this.schemaVersion,
       lastSeq: this.lastEventSeq,

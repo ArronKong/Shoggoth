@@ -95,6 +95,11 @@ async function main() {
   const input = { connectionId: "account-a", serverUrl: `${fixture.base}/mcp`,
     redirectUrl: `${fixture.base}/callback`, clientId: "fixture-client",
     scope: "issues:read", allowLoopback: true };
+  await assert.rejects(manager.start({ ...input, connectionId: "slack-flag-other-server",
+    redirectUrl: "http://localhost:49152/oauth/callback",
+    allowSlackLocalhostCallback: true }),
+  (error) => error.code === "CONNECTION_AUTH_REQUIRED");
+  assert.equal(manager.status("slack-flag-other-server").status, "disconnected");
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-plugin-oauth-vault-"));
   const paths = resolveServicePaths({ stateRoot: path.join(temp, "state"),
     userDataRoot: temp, profileRoot: path.join(temp, "profile"),

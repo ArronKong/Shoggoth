@@ -54,6 +54,24 @@ function localFilePathFromText(text: string): string | null {
 
 export type LocalFileLink = { start: number; end: number; path: string };
 
+function plainPathLabel(tail: string): string {
+  const words = tail.matchAll(/[^\s<>"'`，。；：！？、（）【】《》“”‘’]+|[^\S\r\n\t]+/gy);
+  // A filename ends the path before trailing prose. While a directory or
+  // filename is unfinished, retain spaces only when a slash or suffix follows.
+  const fileEnd = /[^/]\.[a-z\d]{1,16}(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)?[.,;:!?)]*$/i;
+  let label = words.next().value?.[0] || "", pending = label;
+  if (!localFilePathFromText(label) || fileEnd.test(label)) return label;
+  for (const [word] of words) {
+    // A second absolute path or URL starts a separate reference.
+    if (/^(?:\/|~\/|[a-z][\w+.-]*:)/i.test(word)) break;
+    pending += word;
+    const finished = fileEnd.test(word);
+    if (word.includes("/") || finished) label = pending;
+    if (finished) break;
+  }
+  return label;
+}
+
 /** Find paths in prose or inline code, leaving display text and punctuation intact. */
 export function findLocalFileLinks(text: string, wholePath = false): LocalFileLink[] {
   if (wholePath) {
@@ -73,7 +91,7 @@ export function findLocalFileLinks(text: string, wholePath = false): LocalFileLi
     const quoted = quoteEnd >= 0 && !/[\r\n]/.test(tail.slice(0, quoteEnd));
     let label = quoted
       ? tail.slice(0, quoteEnd)
-      : tail.match(/^[^\s<>"'`，。；：！？、（）【】《》“”‘’]+/)?.[0] || "";
+      : plainPathLabel(tail);
     if (!quoted) {
       // Keep balanced parentheses in filenames, but exclude surrounding prose.
       const pairs: Record<string, string> = { ")": "(", "]": "[", "}": "{" };

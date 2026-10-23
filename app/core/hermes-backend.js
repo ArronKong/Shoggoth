@@ -46,6 +46,7 @@ const HERMES_CLI_TOOLS = new Set(["terminal", "bash", "shell", "exec"]);
 const HERMES_SKILL_VIEW_TOOL = "skill_view";
 const { AgentBackend, dirCreatedAtMs, sortAgentsByCreatedAt } = require("./agent-backend");
 const { SelfUpdater } = require("./self-updater");
+const { createHermesLocalRuntimeScope } = require("./hermes-local-runtime-scope");
 const {
   MAX_BYTES: EXTERNAL_PLUGIN_RESPONSE_MAX_BYTES,
   normalizeExternalPluginQuery,
@@ -80,7 +81,7 @@ const HERMES_IDEMPOTENCY_TTL_MS = 10 * 60_000;
 const HERMES_IDEMPOTENCY_MAX = 256;
 const CHAT_HOOK_METHODS = Object.freeze([
   "delta", "final", "error", "interim", "thinking", "tool", "plan",
-  "status", "prompt", "promptExpire",
+  "status", "prompt", "promptExpire", "accepted",
 ]);
 // Hermes reasoning-effort vocabulary (hermes_constants.VALID_REASONING_EFFORTS
 // + the "none" sentinel the Thinking toggle uses). Surfaces as the chat page's
@@ -346,18 +347,25 @@ function hermesHttpError(code, message) {
 function performHttpRequest(
   method,
   url,
-  { headers = {}, payload = null, timeoutMs, maxResponseBytes, raw = false } = {},
+  { headers = {}, payload = null, timeoutMs, maxResponseBytes, raw = false, assertCurrent = null } = {},
 ) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let deadline = null;
+    let dispatched = false;
+    const assertBinding = () => {
+      try { if (assertCurrent && assertCurrent() !== true) throw new Error("retired"); }
+      catch { throw Object.assign(new Error("Hermes 运行环境已变化，请核对原操作"), { code: dispatched ? "UPSTREAM_NEEDS_VERIFICATION" : "UPSTREAM_ENDPOINT_RETIRED", status: 503, receiptUncertain: dispatched, noAcpFallback: true }); }
+    };
     const finish = (error, value) => {
       if (settled) return;
+      if (!error) { try { assertBinding(); } catch (retired) { error = retired; } }
       settled = true;
       if (deadline) clearTimeout(deadline);
       if (error) reject(error);
       else resolve(value);
     };
+    try { assertBinding(); } catch (error) { finish(error); return; }
     const req = requestModule(url).request(url, { method, headers }, (res) => {
       const declared = Number(res.headers["content-length"]);
       if (Number.isFinite(declared) && declared > maxResponseBytes) {
@@ -407,15 +415,20 @@ function performHttpRequest(
       req.destroy(error);
       finish(error);
     }, timeoutMs);
-    if (payload) req.write(payload);
-    req.end();
+    try {
+      assertBinding();
+      dispatched = true;
+      if (payload) req.write(payload);
+      req.end();
+    } catch (error) { req.destroy(); finish(error); }
   });
 }
 
 /** GET helper 返回状态、正文和白名单响应头。 */
-function httpGet(url, { token, timeoutMs = 4000, maxResponseBytes = HERMES_TEXT_RESPONSE_MAX_BYTES } = {}) {
+function httpGet(url, { token, timeoutMs = 4000, maxResponseBytes = HERMES_TEXT_RESPONSE_MAX_BYTES, assertCurrent = null } = {}) {
   return performHttpRequest("GET", url, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
+    assertCurrent,
     timeoutMs,
     maxResponseBytes,
   });
@@ -425,7 +438,7 @@ function httpGet(url, { token, timeoutMs = 4000, maxResponseBytes = HERMES_TEXT_
 function httpRequest(
   method,
   url,
-  { token, body, timeoutMs = 6000, extraHeaders = {}, maxResponseBytes = HERMES_TEXT_RESPONSE_MAX_BYTES } = {},
+  { token, body, timeoutMs = 6000, extraHeaders = {}, maxResponseBytes = HERMES_TEXT_RESPONSE_MAX_BYTES, assertCurrent = null } = {},
 ) {
   const payload = body != null ? Buffer.from(JSON.stringify(body)) : null;
   const headers = {};
@@ -444,7 +457,7 @@ function httpRequest(
     }
     headers[name] = value;
   }
-  return performHttpRequest(method, url, { headers, payload, timeoutMs, maxResponseBytes });
+  return performHttpRequest(method, url, { headers, payload, timeoutMs, maxResponseBytes, assertCurrent });
 }
 
 // 上游是 FastAPI，错误体形如 {"detail": "..."}。剥出人话，别把 HTTP 管道
@@ -463,7 +476,7 @@ function kanbanDetail(body) {
 function httpRaw(
   method,
   url,
-  { token, contentType, payload, timeoutMs = 30000, maxResponseBytes = HERMES_RAW_RESPONSE_MAX_BYTES } = {},
+  { token, contentType, payload, timeoutMs = 30000, maxResponseBytes = HERMES_RAW_RESPONSE_MAX_BYTES, assertCurrent = null } = {},
 ) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -477,6 +490,7 @@ function httpRaw(
     timeoutMs,
     maxResponseBytes,
     raw: true,
+    assertCurrent,
   });
 }
 
@@ -794,6 +808,26 @@ function isResumableAcpSessionId(tail) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(tail || ""));
 }
 
+// The gateway and stored messages do not always include an is_error flag.
+// Use Hermes' structured outcome fields; never search nested/prose output for
+// the word "error" (a successful directory read can contain failed jobs).
+function hermesToolFailed(name, result, explicit) {
+  if (typeof explicit === "boolean") return explicit;
+  let value = result;
+  if (typeof value === "string" && value.trimStart().startsWith("{")) {
+    try { value = JSON.parse(value); } catch { return false; }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value.guardrail_refusal === true) return false;
+  if (typeof value.is_error === "boolean") return value.is_error;
+  if (typeof value.isError === "boolean") return value.isError;
+  if (name === "terminal" && Number.isInteger(value.exit_code)) return value.exit_code !== 0;
+  if (typeof value.success === "boolean") return !value.success;
+  if (value.status === "error" || value.status === "failed") return true;
+  if (["ok", "success", "completed"].includes(value.status)) return false;
+  return typeof value.error === "string" && Boolean(value.error.trim());
+}
+
 // Flatten an ACP tool_call(_update) `content` (ToolCallContent[] — text blocks,
 // diffs, etc.) into a display string. Best-effort: falls back to JSON so the chat
 // tool card always shows *something* even for shapes we don't special-case.
@@ -973,6 +1007,7 @@ function rowFromSession(session, agentId) {
     startedAt: Number(session.started_at) ? Math.round(session.started_at * 1000) : undefined,
     endedAt: Number(session.ended_at) ? Math.round(session.ended_at * 1000) : undefined,
     model: typeof session.model === "string" ? session.model : undefined,
+    modelProvider: typeof session.provider === "string" && session.provider ? session.provider : undefined,
     permissionMode: session.yolo === true ? "yolo" : "inherit",
     inputTokens: Number(session.input_tokens) || undefined,
     outputTokens: Number(session.output_tokens) || undefined,
@@ -1009,8 +1044,10 @@ class HermesBackend extends AgentBackend {
     };
   }
 
-  constructor({ port = DEFAULT_PORT, bin = HERMES_BIN, getConfig, modelMutationGate } = {}) {
+  constructor({ port = DEFAULT_PORT, bin = HERMES_BIN, getConfig, modelMutationGate, externalPluginSelectionService = null, getManagedExecution = null, getManagedEndpoint = null } = {}) {
     super();
+    this._localRuntime = createHermesLocalRuntimeScope({ getManagedExecution, getManagedEndpoint });
+    this._externalPluginSelectionService = externalPluginSelectionService;
     // 所有 Provider/Main/Aux/Cron 模型写共享一个 per-profile gate；条件快照只在
     // fresh GET 后建立，dashboard 拓扑变化或缺 header 时保持 fail-closed。
     this._modelMutationGate = modelMutationGate || createHermesModelMutationGate();
@@ -1020,7 +1057,8 @@ class HermesBackend extends AgentBackend {
     this.bin = bin;
     // Connection mode comes from app config: "local" spawns dashboards, "remote"
     // connects to already-running ones (see reconfigure()/_remoteDashboards()).
-    this._getConfig = typeof getConfig === "function" ? getConfig : () => ({ hermesMode: "local", hermesRemotes: [] });
+    const readConfig = typeof getConfig === "function" ? getConfig : () => ({ hermesMode: "local", hermesRemotes: [] });
+    this._getConfig = () => this._localRuntime.isManaged() ? { ...readConfig(), hermesMode: "local", hermesRemotes: [] } : readConfig();
     this.agents = [];
     this.profileById = new Map(); // agentId -> profileName
     this._profileNames = new Set(); // authoritative raw names, including identities rejected as ambiguous
@@ -1068,6 +1106,7 @@ class HermesBackend extends AgentBackend {
     this.gwTurns = new Map();         // runtimeId -> live turn state (hooks, accumulators)
     this.gwUsageByKey = new Map();    // sessionKey -> last cumulative usage snapshot (per-turn deltas)
     this.gwChatDisabledUntil = new Map(); // profile -> ts;网关拨号失败后的 ACP 降级 TTL
+    this.nextTurnConfigs = new Map(); // sessionKey -> config.set picks waiting for the current reply
     this.sessionLiveMeta = new Map(); // sessionKey -> {model, reasoningEffort, fast, contextUsed, contextMax} (session.info)
     this.sessionRows = [];            // aggregated GatewaySessionRow[] across profiles
     // false = 当前 rows 只是启动/失败窗口里的局部快照，proxy 必须让 UI 保留缓存中
@@ -1116,8 +1155,9 @@ class HermesBackend extends AgentBackend {
     // 官方 `hermes update` 只换磁盘上的代码（git pull + 重装依赖）；本地 spawn
     // 的 dashboard 进程要重启才跑新版本，所以成功后 stop+start 一轮。
     // 状态落盘：更新失败的原因不能随 app 重启蒸发。
-    this._selfUpdater = new SelfUpdater({
-      command: () => ({ cmd: this.bin, args: ["update", "--yes"] }),
+    this._selfUpdater = null;
+    this._createSelfUpdater = () => new SelfUpdater({
+      command: () => { this._localRuntime.assertLegacyProcess(); return { cmd: this.bin, args: ["update", "--yes"] }; },
       statePath: path.join(os.homedir(), ".shoggoth", "self-update", "hermes.json"),
       onSuccess: async () => {
         if (this._getConfig().hermesMode === "remote") return;
@@ -1235,7 +1275,57 @@ class HermesBackend extends AgentBackend {
     return publish;
   }
 
+  _hermesHomeForProfile(profile) { return this._localRuntime.profileHome(profile); }
+
+  _ownedHttpOptions(url, options, dashboard) {
+    if (!this._localRuntime.isManaged() && !dashboard?.managed) return { url, options };
+    const dash = dashboard || this.dashboards.get(new URL(url).searchParams.get("profile") || "default");
+    const generation = this._lifecycleGeneration;
+    const assertCurrent = () => {
+      this._localRuntime.assertDashboard(dash);
+      if (!dash?.managed || generation !== this._lifecycleGeneration || this.dashboards.get(dash.profile) !== dash
+        || options?.token !== dash.token) throw Object.assign(new Error("Hermes 运行环境已变化"), { code: "MANAGED_HERMES_HOST_UNAVAILABLE", status: 503 });
+      return true;
+    };
+    assertCurrent();
+    return { url: this._localRuntime.requestUrl(dash, url), options: { ...options, assertCurrent } };
+  }
+  _httpGet(url, options = {}, dash) {
+    const captured = this._ownedHttpOptions(url, options, dash);
+    return httpGet(captured.url, captured.options);
+  }
+  _httpRequest(method, url, options = {}, dash) {
+    const captured = this._ownedHttpOptions(url, options, dash);
+    return httpRequest(method, captured.url, captured.options);
+  }
+  _httpRaw(method, url, options = {}, dash) {
+    const captured = this._ownedHttpOptions(url, options, dash);
+    return httpRaw(method, captured.url, captured.options);
+  }
+
+  async _startManaged(hooks, generation) {
+    this.lastError = null;
+    // One owned serve process multiplexes the profiles in its private data root.
+    const dash = this._localRuntime.bindDashboard("default");
+    this.dashboards.set("default", dash);
+    const { status } = await this._httpGet(`${dash.baseUrl}/api/status`, { token: dash.token, timeoutMs: 5000 }, dash);
+    if (status !== 200) throw Object.assign(new Error("Hermes 受管运行环境未就绪"), { code: "MANAGED_HERMES_HOST_UNAVAILABLE" });
+    await this._refreshAgentsFor(dash, generation);
+    if (generation !== this._lifecycleGeneration) return false;
+    this._localRuntime.assertDashboard(dash);
+    if (!this._profileNames.has("default")) throw Object.assign(new Error("Hermes 未返回默认助理"), { code: "MANAGED_HERMES_HOST_UNAVAILABLE" });
+    const publishReady = this._makeReadyPublisher(hooks, generation); publishReady();
+    await publishReady.drain();
+    await Promise.all([this.refreshSessions().catch(() => {}), this.refreshModelChoices().catch(() => {})]);
+    if (generation !== this._lifecycleGeneration) return false;
+    this._localRuntime.assertDashboard(dash);
+    if (this.sessionsRefreshTimer) clearInterval(this.sessionsRefreshTimer);
+    this.sessionsRefreshTimer = setInterval(() => this.refreshSessions().catch(() => {}), SESSIONS_REFRESH_MS);
+    return true;
+  }
+
   async _startImpl(hooks, generation = this._lifecycleGeneration) {
+    if (this._localRuntime.isManaged()) return this._startManaged(hooks, generation);
     const cfg = this._getConfig();
     if (cfg.hermesMode === "remote") {
       return this._startRemote(cfg, generation);
@@ -1452,10 +1542,15 @@ class HermesBackend extends AgentBackend {
 
   // Probe a candidate connection without persisting (设置 page Test button).
   async testConnection(spec = {}) {
+    if (this._localRuntime.isManaged()) {
+      throw Object.assign(new Error("受管 Hermes 连接由 App 验证，请使用插件后台状态"), {
+        code: "MANAGED_HERMES_LEGACY_CONNECTION_UNSUPPORTED", status: 409,
+      });
+    }
     const baseUrl = String(spec.baseUrl || "").replace(/\/+$/, "");
     if (baseUrl) {
       let token = spec.token || (await scrapeToken(baseUrl).catch(() => null));
-      const { status } = await httpGet(`${baseUrl}/api/status`, { token, timeoutMs: 5000 }).catch(
+      const { status } = await this._httpGet(`${baseUrl}/api/status`, { token, timeoutMs: 5000 }).catch(
         () => ({ status: 0 }),
       );
       if (status === 200) return { ok: true, info: { baseUrl, tokenResolved: !!token } };
@@ -1472,7 +1567,7 @@ class HermesBackend extends AgentBackend {
     // No baseUrl → probe the live local default dashboard.
     const dash = this._defaultDash();
     if (!dash) return { ok: false, error: "本地没有运行中的 Hermes dashboard" };
-    const { status } = await httpGet(`${dash.baseUrl}/api/status`, { token: dash.token }).catch(
+    const { status } = await this._httpGet(`${dash.baseUrl}/api/status`, { token: dash.token }, dash).catch(
       () => ({ status: 0 }),
     );
     return status === 200
@@ -1566,7 +1661,7 @@ class HermesBackend extends AgentBackend {
             // `custom:<slug>:<id>`——这里给 choice 记下该用的 ref，聊天页组命令用。
             const acpProviderRef =
               p.is_user_defined === true || p.source === "user-config"
-                ? `custom:${providerSlug}`
+                ? (providerSlug.startsWith("custom:") ? providerSlug : `custom:${providerSlug}`)
                 : undefined;
             const models = Array.isArray(p.models) ? p.models : [];
             // /api/model/options ships pricing=True & capabilities=True: parallel
@@ -1697,6 +1792,7 @@ class HermesBackend extends AgentBackend {
     claimed = new Set(),
     generation = this._lifecycleGeneration,
   ) {
+    this._localRuntime.assertLegacyProcess();
     for (let port = preferredPort; port < preferredPort + DASHBOARD_PORT_SCAN; port++) {
       if (generation !== this._lifecycleGeneration) return null;
       if (claimed.has(port)) continue;
@@ -1707,14 +1803,14 @@ class HermesBackend extends AgentBackend {
       //   连接失败        → 真空闲，spawn；
       //   响应但无 token   → 被其它服务/异版 dashboard 占用，跳过该端口；
       //   有 token        → 校验 profile 归属后 reuse。
-      const probe = await httpGet(`${baseUrl}/`, { timeoutMs: 2000 }).catch(() => null);
+      const probe = await this._httpGet(`${baseUrl}/`, { timeoutMs: 2000 }).catch(() => null);
       if (generation !== this._lifecycleGeneration) return null;
       if (!probe) return this._spawnDashboard(profile, port, { generation });
       const existing = probe.status === 200 ? (SESSION_TOKEN_RE.exec(probe.body)?.[1] ?? null) : null;
       if (existing) {
         const ident = await this._dashboardIdentity(baseUrl, existing);
         if (generation !== this._lifecycleGeneration) return null;
-        if (ident && samePath(ident.home, hermesHomeForProfile(profile))) {
+        if (ident && samePath(ident.home, this._hermesHomeForProfile(profile))) {
           // 版本守卫（R279 遗留）：跨过 Hermes 升级仍在跑的旧 dashboard 会被无条件
           // 复用，而 /api/ws 等新能力在旧进程上直接失败（0.18.2+--isolated 甚至 500）。
           // 复用前比对进程自报版本与本机 CLI 版本；不一致时——仅当该进程可证明是
@@ -1753,7 +1849,7 @@ class HermesBackend extends AgentBackend {
   // the installed CLI. Returns null when the endpoint doesn't answer/parse
   // (identity unprovable → caller must not reuse).
   async _dashboardIdentity(baseUrl, token) {
-    const { status, body } = await httpGet(`${baseUrl}/api/status`, { token, timeoutMs: 3000 }).catch(
+    const { status, body } = await this._httpGet(`${baseUrl}/api/status`, { token, timeoutMs: 3000 }).catch(
       () => ({ status: 0, body: "" }),
     );
     if (status !== 200) return null;
@@ -1777,6 +1873,7 @@ class HermesBackend extends AgentBackend {
   // 不校验 hermes_home 会静默串号（读到别人的配置还以为是自己的）。
   // `dash` 是 `this.dashboards` 里的同一个对象，原地改 token 后全部调用点自动受益。
   async _renewDashToken(dash) {
+    if (dash?.managed || this._localRuntime.isManaged()) { this._localRuntime.assertDashboard(dash); return false; }
     if (!dash?.baseUrl) return false;
     const inflight = this._tokenRenewals.get(dash.baseUrl);
     if (inflight) return inflight; // 单飞：多个读路径同时撞 401 只探一次首页
@@ -1785,7 +1882,7 @@ class HermesBackend extends AgentBackend {
       // token 没变说明 401 另有原因（真的没权限），重试也是白重试。
       if (!token || token === dash.token) return false;
       const ident = await this._dashboardIdentity(dash.baseUrl, token);
-      if (!ident || !samePath(ident.home, hermesHomeForProfile(dash.profile))) return false;
+      if (!ident || !samePath(ident.home, this._hermesHomeForProfile(dash.profile))) return false;
       dash.token = token;
       console.warn(`[hermes] profile ${dash.profile}: dashboard token 已失效，就地续期成功`);
       return true;
@@ -1797,10 +1894,10 @@ class HermesBackend extends AgentBackend {
   // 带 401 自愈的 GET：认证失败就续一次 token 再重试，其余状态原样返回。
   // 读路径专用——写路径的重试要连同条件写 If-Match 一起考虑，别顺手套上来。
   async _dashGet(dash, endpoint, opts = {}) {
-    const res = await httpGet(`${dash.baseUrl}${endpoint}`, { token: dash.token, ...opts });
+    const res = await this._httpGet(`${dash.baseUrl}${endpoint}`, { token: dash.token, ...opts }, dash);
     if (res.status !== 401 && res.status !== 403) return res;
     if (!(await this._renewDashToken(dash))) return res;
-    return httpGet(`${dash.baseUrl}${endpoint}`, { token: dash.token, ...opts });
+    return this._httpGet(`${dash.baseUrl}${endpoint}`, { token: dash.token, ...opts }, dash);
   }
 
   // Installed `hermes --version` → "0.19.0" (first semver in the banner).
@@ -1808,6 +1905,7 @@ class HermesBackend extends AgentBackend {
   // null when the CLI can't answer (missing/broken install): the version guard
   // then stands down and reuse behaves as before.
   _installedCliVersion() {
+    if (this._localRuntime.isManaged()) return Promise.resolve(null);
     if (!this._cliVersionPromise) {
       this._cliVersionPromise = new Promise((resolve) => {
         const proc = spawn(this.bin, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -1838,6 +1936,7 @@ class HermesBackend extends AgentBackend {
   // 端口上的监听进程工作目录是否为 `/`（见 _spawnOrReuseDashboard 的 cwd 守卫）。
   // 查不到时返回 false —— 拿不准就不动别人的进程。
   async _dashboardCwdIsRoot(port) {
+    this._localRuntime.assertLegacyProcess();
     const out = await new Promise((resolve) => {
       const p = spawn("sh", ["-c", `lsof -a -p $(lsof -ti :${port} -sTCP:LISTEN | head -1) -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-`], {
         stdio: ["ignore", "pipe", "ignore"],
@@ -1851,6 +1950,7 @@ class HermesBackend extends AgentBackend {
   }
 
   async _reapStaleDashboard(port, profile, why) {
+    this._localRuntime.assertLegacyProcess();
     const run = (cmd, args) =>
       new Promise((resolve) => {
         const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
@@ -1891,6 +1991,7 @@ class HermesBackend extends AgentBackend {
     port,
     { skipBuild = true, isolated = true, generation = this._lifecycleGeneration } = {},
   ) {
+    this._localRuntime.assertLegacyProcess();
     const baseUrl = `http://127.0.0.1:${port}`;
     // Mint the session token ourselves and inject it via
     // HERMES_DASHBOARD_SESSION_TOKEN (web_server.py reads this env and only falls
@@ -2015,7 +2116,7 @@ class HermesBackend extends AgentBackend {
         `[hermes] profile ${profile}: dashboard(port ${port})身份校验未通过——` +
           "版本过老或未返回 hermes_home，无法验证 profile 归属",
       );
-    } else if (!samePath(ident.home, hermesHomeForProfile(profile))) {
+    } else if (!samePath(ident.home, this._hermesHomeForProfile(profile))) {
       console.warn(
         `[hermes] profile ${profile}: dashboard(port ${port})的 hermes_home 不匹配，拒绝接入`,
       );
@@ -2037,7 +2138,7 @@ class HermesBackend extends AgentBackend {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (isDead?.()) return false;
-      const { status } = await httpGet(`${baseUrl}/api/status`, {
+      const { status } = await this._httpGet(`${baseUrl}/api/status`, {
         token,
         timeoutMs: 3000,
       }).catch(() => ({ status: 0 }));
@@ -2054,9 +2155,9 @@ class HermesBackend extends AgentBackend {
     // profile on that host) would drop the configured agents and mint new ones
     // with no dashboard behind them: sessions/cron go empty, chat can't route.
     if (this._getConfig().hermesMode === "remote") return;
-    const { status, body } = await httpGet(`${dash.baseUrl}/api/profiles`, {
+    const { status, body } = await this._httpGet(`${dash.baseUrl}/api/profiles`, {
       token: dash.token,
-    });
+    }, dash);
     if (status !== 200) return;
     let parsed;
     try {
@@ -2067,6 +2168,17 @@ class HermesBackend extends AgentBackend {
     if (generation !== this._lifecycleGeneration) return;
     const profiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
     this._installProfileRows(profiles);
+    if (this._localRuntime.isManaged()) {
+      this._localRuntime.assertDashboard(dash);
+      for (const profile of this._profileNames) if (!this.dashboards.has(profile)) {
+        this.dashboards.set(profile, this._localRuntime.bindDashboard(profile));
+      }
+      for (const profile of this.dashboards.keys()) if (!this._profileNames.has(profile)) {
+        try { this.gwSockets.get(profile)?.close(); } catch { /* already retired */ }
+        this.gwSockets.delete(profile);
+        this.dashboards.delete(profile);
+      }
+    }
   }
 
   // ---- sessions ----
@@ -2126,9 +2238,9 @@ class HermesBackend extends AgentBackend {
     let offset = 0;
     while (sessions.length < requested) {
       const pageLimit = Math.min(100, requested - sessions.length);
-      const { status, body } = await httpGet(
+      const { status, body } = await this._httpGet(
         `${dash.baseUrl}/api/sessions?limit=${pageLimit}&offset=${offset}`,
-        { token: dash.token },
+        { token: dash.token }, dash,
       );
       if (status !== 200) break;
       let parsed;
@@ -2205,7 +2317,7 @@ class HermesBackend extends AgentBackend {
         ));
       source = { mode, remotes };
     } else {
-      const configuredHome = process.env.HERMES_HOME || path.join(os.homedir(), ".hermes");
+      const configuredHome = this._localRuntime.hermesHome();
       let hermesHome;
       try {
         hermesHome = fs.realpathSync(configuredHome);
@@ -2219,6 +2331,10 @@ class HermesBackend extends AgentBackend {
 
   getAgents() {
     return this.agents;
+  }
+
+  getAgentsSnapshot() {
+    return { agents: this.getAgents(), complete: this._sessionRowsComplete };
   }
 
   getSessionRows() {
@@ -2444,22 +2560,22 @@ class HermesBackend extends AgentBackend {
     const extraHeaders = this._modelMutationGate.conditionalHeaders(reference.snapshot);
     let response;
     if (reference.store === "main") {
-      response = await httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
+      response = await this._httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
         token: dash.token,
         extraHeaders,
         body: { scope: "main", provider: value.provider, model: value.model, task: "" },
-      });
+      }, dash);
     } else if (reference.store === "auxiliary") {
-      response = await httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
+      response = await this._httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
         token: dash.token,
         extraHeaders,
         body: { scope: "auxiliary", task: value.task, provider: value.provider, model: value.model },
-      });
+      }, dash);
     } else if (reference.store === "cron") {
-      response = await httpRequest(
+      response = await this._httpRequest(
         "PUT",
         `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(value.id)}?profile=${encodeURIComponent(reference.profile)}`,
-        { token: dash.token, extraHeaders, body: { updates: { provider: value.provider, model: value.model, fallbacks: value.fallbacks } } },
+        { token: dash.token, extraHeaders, body: { updates: { provider: value.provider, model: value.model, fallbacks: value.fallbacks } } }, dash,
       );
     } else {
       const error = new Error("Hermes Session 模型引用不可安全改写");
@@ -2727,9 +2843,9 @@ class HermesBackend extends AgentBackend {
         const scope = this._agentIdForRoutableProfile(profile);
         if (!scope) return;
         try {
-          const { status, body } = await httpGet(`${dash.baseUrl}/api/model/info`, {
+          const { status, body } = await this._httpGet(`${dash.baseUrl}/api/model/info`, {
             token: dash.token,
-          });
+          }, dash);
           if (status !== 200) return;
           const j = JSON.parse(body);
           if (j.model) byScope[scope] = j.model;
@@ -2769,10 +2885,10 @@ class HermesBackend extends AgentBackend {
     const dash = this.dashboards.get(profile);
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
     const provider = opts.provider || (modelId.includes("/") ? modelId.split("/")[0] : "");
-    const { status, body } = await httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
+    const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
       token: dash.token,
       body: { scope: "main", provider, model: modelId, task: "" },
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes set model failed: ${status} ${body}`);
     return { ok: true, model: modelId, scope: agentId || "default" };
   }
@@ -3092,11 +3208,11 @@ class HermesBackend extends AgentBackend {
 
   /** 单 Profile 读取一个非 password env 端点明文；调用方只允许立即哈希，不得返回或缓存。 */
   async _revealEnvVarOf(dash, key) {
-    const { status, body } = await httpRequest("POST", `${dash.baseUrl}/api/env/reveal`, {
+    const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/env/reveal`, {
       token: dash.token,
       body: { key },
       timeoutMs: 10000,
-    });
+    }, dash);
     if (status >= 300) throw catalogUnavailable("hermes env Provider 摘要读取失败");
     try {
       const parsed = JSON.parse(body);
@@ -3161,10 +3277,10 @@ class HermesBackend extends AgentBackend {
   }
 
   async _readPoolOf(dash) {
-    const { status, body } = await httpGet(`${dash.baseUrl}/api/credentials/pool`, {
+    const { status, body } = await this._httpGet(`${dash.baseUrl}/api/credentials/pool`, {
       token: dash.token,
       timeoutMs: 10000,
-    });
+    }, dash);
     if (status !== 200) return null;
     const j = JSON.parse(body);
     const map = new Map();
@@ -3219,10 +3335,10 @@ class HermesBackend extends AgentBackend {
   }
 
   async _deletePoolEntryOf(dash, poolId, index) {
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "DELETE",
       `${dash.baseUrl}/api/credentials/pool/${encodeURIComponent(poolId)}/${index}`,
-      { token: dash.token, timeoutMs: 8000 },
+      { token: dash.token, timeoutMs: 8000 }, dash,
     );
     if (status >= 300) throw new Error(`${status} ${String(body).slice(0, 120)}`);
   }
@@ -3353,12 +3469,12 @@ class HermesBackend extends AgentBackend {
     const profile = [...this.dashboards.entries()].find(([, candidate]) => candidate === dash)?.[0];
     const snapshot = this._providerMutationSnapshots.get(profile);
     // conditionalHeaders 对未声明条件写的 dashboard 会直接抛错，无条件路径不得触碰。
-    const response = await httpRequest("PUT", `${dash.baseUrl}/api/config`, {
+    const response = await this._httpRequest("PUT", `${dash.baseUrl}/api/config`, {
       token: dash.token,
       body: { config: { providers: { [key]: entry } } },
       timeoutMs: 10000,
       ...(conditional ? { extraHeaders: this._modelMutationGate.conditionalHeaders(snapshot) } : {}),
-    });
+    }, dash);
     if (!conditional) {
       if (response.status < 200 || response.status >= 300) {
         const error = new Error(`hermes config 写入失败 (HTTP ${response.status})`);
@@ -3866,13 +3982,13 @@ class HermesBackend extends AgentBackend {
   async _dashFetch(dash, method, path, { body, timeoutMs, extraHeaders } = {}) {
     const once = () =>
       method === "GET"
-        ? httpGet(`${dash.baseUrl}${path}`, { token: dash.token, timeoutMs })
-        : httpRequest(method, `${dash.baseUrl}${path}`, {
+        ? this._httpGet(`${dash.baseUrl}${path}`, { token: dash.token, timeoutMs }, dash)
+        : this._httpRequest(method, `${dash.baseUrl}${path}`, {
             token: dash.token,
             ...(body !== undefined ? { body } : {}),
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
             ...(extraHeaders ? { extraHeaders } : {}),
-          });
+          }, dash);
     let r = await once().catch((err) => ({ status: 0, body: err?.message || String(err) }));
     if (r.status === 401 || r.status === 403) {
       if (await this._renewDashToken(dash)) {
@@ -3936,11 +4052,11 @@ class HermesBackend extends AgentBackend {
   async _setAuxiliaryModelUnlocked(task, provider, model, opts = {}) {
     const { dash } = this._settingsDash(opts.profile);
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
-    const { status, body } = await httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
+    const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
       token: dash.token,
       body: { scope: "auxiliary", task, provider: provider || "", model: model || "" },
       timeoutMs: 15000,
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes set auxiliary failed: ${status} ${body}`);
     return { ok: true };
   }
@@ -4027,11 +4143,11 @@ class HermesBackend extends AgentBackend {
     const { name, dash } = this._settingsDash(opts.profile);
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
     return this._modelMutationGate.withProfiles([name], `main:${randomUUID()}`, async () => {
-      const { status, body } = await httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
+      const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/model/set`, {
         token: dash.token,
         body: { scope: "main", provider, model, task: "" },
         timeoutMs: 20000,
-      });
+      }, dash);
       if (status >= 300) throw new Error(`hermes set model failed: ${status} ${body}`);
       let j = {};
       try { j = JSON.parse(body); } catch { /* 非 JSON 响应按成功兜底 */ }
@@ -4051,11 +4167,11 @@ class HermesBackend extends AgentBackend {
 
   /** 深合并 PUT /api/config 单键写（官方整份回环的等价最小面；无条件写，R272 路线）。 */
   async _putConfigPatch(dash, configPatch) {
-    const { status, body } = await httpRequest("PUT", `${dash.baseUrl}/api/config`, {
+    const { status, body } = await this._httpRequest("PUT", `${dash.baseUrl}/api/config`, {
       token: dash.token,
       body: { config: configPatch },
       timeoutMs: 15000,
-    });
+    }, dash);
     if (status < 200 || status >= 300) {
       const error = new Error(`hermes config 写入失败 (HTTP ${status}) ${String(body || "").slice(0, 200)}`);
       error.code = "hermes_config_write_failed";
@@ -4104,11 +4220,11 @@ class HermesBackend extends AgentBackend {
     const { name, dash } = this._settingsDash(opts.profile);
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
     return this._modelMutationGate.withProfiles([name], `moa:${randomUUID()}`, async () => {
-      const { status, body } = await httpRequest("PUT", `${dash.baseUrl}/api/model/moa`, {
+      const { status, body } = await this._httpRequest("PUT", `${dash.baseUrl}/api/model/moa`, {
         token: dash.token,
         body: moaConfigToSnake(config),
         timeoutMs: 15000,
-      });
+      }, dash);
       if (status >= 300) throw new Error(`hermes save moa failed: ${status} ${String(body || "").slice(0, 300)}`);
       try {
         return moaConfigToCamel(JSON.parse(body));
@@ -4345,11 +4461,11 @@ class HermesBackend extends AgentBackend {
             // discover_models=true 时服务端会真探测端点 → 给足余量
             const body = { ...base, make_default: base.make_default === true && name === target };
             try {
-              const r = await httpRequest("POST", `${dash.baseUrl}/api/providers/custom-endpoints`, {
+              const r = await this._httpRequest("POST", `${dash.baseUrl}/api/providers/custom-endpoints`, {
                 token: dash.token,
                 body,
                 timeoutMs: 30000,
-              });
+              }, dash);
               if (r.status >= 300) throw new Error(`${r.status} ${String(r.body || "").slice(0, 200)}`);
               return { name, snap: this._customEndpointsResponse(JSON.parse(r.body)) };
             } catch (err) {
@@ -4371,10 +4487,10 @@ class HermesBackend extends AgentBackend {
   async validateCustomEndpoint(endpoint, opts = {}) {
     const { dash } = this._settingsDash(opts.profile);
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "POST",
       `${dash.baseUrl}/api/providers/custom-endpoints/validate`,
-      { token: dash.token, body: this._customEndpointToSnake(endpoint), timeoutMs: 30000 },
+      { token: dash.token, body: this._customEndpointToSnake(endpoint), timeoutMs: 30000 }, dash,
     );
     if (status >= 300) throw new Error(`hermes validate endpoint failed: ${status} ${String(body || "").slice(0, 300)}`);
     let j = {};
@@ -4393,10 +4509,10 @@ class HermesBackend extends AgentBackend {
     const { name, dash } = this._settingsDash(opts.profile);
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
     return this._modelMutationGate.withProfiles([name], `endpoint:${randomUUID()}`, async () => {
-      const { status, body } = await httpRequest(
+      const { status, body } = await this._httpRequest(
         "POST",
         `${dash.baseUrl}/api/providers/custom-endpoints/${encodeURIComponent(endpointId)}/activate`,
-        { token: dash.token, body: {}, timeoutMs: 20000 },
+        { token: dash.token, body: {}, timeoutMs: 20000 }, dash,
       );
       if (status >= 300) throw new Error(`hermes activate endpoint failed: ${status} ${String(body || "").slice(0, 300)}`);
       let j = {};
@@ -4422,10 +4538,10 @@ class HermesBackend extends AgentBackend {
         await Promise.all(
           entries.map(async ([name, dash]) => {
             try {
-              const r = await httpRequest(
+              const r = await this._httpRequest(
                 "DELETE",
                 `${dash.baseUrl}/api/providers/custom-endpoints/${encodeURIComponent(endpointId)}`,
-                { token: dash.token, timeoutMs: 15000 },
+                { token: dash.token, timeoutMs: 15000 }, dash,
               );
               if (r.status === 404) { ok = true; return; }
               if (r.status >= 300) throw new Error(`${r.status} ${String(r.body || "").slice(0, 200)}`);
@@ -4517,10 +4633,10 @@ class HermesBackend extends AgentBackend {
     const failures = [];
     await Promise.all(
       dashes.map(async (dash) => {
-        const { status, body } = await httpRequest(method, `${dash.baseUrl}/api/env`, {
+        const { status, body } = await this._httpRequest(method, `${dash.baseUrl}/api/env`, {
           token: dash.token,
           body: payload,
-        }).catch((err) => ({ status: 0, body: err?.message || String(err) }));
+        }, dash).catch((err) => ({ status: 0, body: err?.message || String(err) }));
         if (status >= 200 && status < 300) return;
         // DELETE 是幂等的：Hermes 对 .env 里不存在的键返回 404「not found in .env」。
         // isolated dashboard 各存一份 .env——只在 default 配过的键（如 DEEPSEEK_API_KEY）
@@ -4550,10 +4666,10 @@ class HermesBackend extends AgentBackend {
     let answered = false;
     for (const dash of dashes) {
       try {
-        const { status, body } = await httpRequest("POST", `${dash.baseUrl}/api/env/reveal`, {
+        const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/env/reveal`, {
           token: dash.token,
           body: { key },
-        });
+        }, dash);
         if (status >= 300) {
           lastErr = new Error(`hermes reveal env failed: ${status} ${body}`);
           continue;
@@ -4580,10 +4696,10 @@ class HermesBackend extends AgentBackend {
   async validateProviderCredential(key, value) {
     const dash = this._envDash();
     if (!dash) return { supported: false };
-    const { status, body } = await httpRequest("POST", `${dash.baseUrl}/api/providers/validate`, {
+    const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/providers/validate`, {
       token: dash.token,
       body: { key, value: String(value ?? "") },
-    });
+    }, dash);
     if (status >= 300) return { supported: true, valid: false, error: String(body).slice(0, 200) };
     try {
       const j = JSON.parse(body);
@@ -4831,7 +4947,7 @@ class HermesBackend extends AgentBackend {
     this._usageHistoryPending ||= new Map();
     const key = `${profile}:${range}`;
     if (!this._usageHistoryPending.has(key)) {
-      const pending = readHermesUsageHistory(path.join(hermesHomeForProfile(profile), "state.db"), { range })
+      const pending = readHermesUsageHistory(path.join(this._hermesHomeForProfile(profile), "state.db"), { range })
         .finally(() => this._usageHistoryPending.delete(key));
       this._usageHistoryPending.set(key, pending);
     }
@@ -4856,7 +4972,7 @@ class HermesBackend extends AgentBackend {
           let j;
           if (local || range === "all") j = await this._fetchLifetimeUsage(profile, range);
           else {
-            const { status, body } = await httpGet(`${dash.baseUrl}/api/analytics/usage${qs}`, { token: dash.token });
+            const { status, body } = await this._httpGet(`${dash.baseUrl}/api/analytics/usage${qs}`, { token: dash.token }, dash);
             if (status !== 200) throw new Error("Hermes usage unavailable");
             j = JSON.parse(body);
           }
@@ -4969,7 +5085,7 @@ class HermesBackend extends AgentBackend {
         const agentId = this._agentIdForRoutableProfile(profile);
         if (!agentId) return;
         const get = (path, timeoutMs = 6000) =>
-          httpGet(`${dash.baseUrl}${path}`, { token: dash.token, timeoutMs })
+          this._httpGet(`${dash.baseUrl}${path}`, { token: dash.token, timeoutMs }, dash)
             .then(({ status, body }) => (status === 200 ? JSON.parse(body) : null))
             .catch(() => null);
         const lifetime = local || range === "all" ? await this._fetchLifetimeUsage(profile, range).catch(() => null) : null;
@@ -5163,9 +5279,9 @@ class HermesBackend extends AgentBackend {
     const token = dash.token;
     try {
       const [status, inventory] = await Promise.all([
-        httpGet(`${baseUrl}/api/status`, { token, timeoutMs: 5000, maxResponseBytes: 64 * 1024 }),
-        httpGet(`${baseUrl}/api/dashboard/plugins/hub`, { token, timeoutMs: 5000,
-          maxResponseBytes: EXTERNAL_PLUGIN_RESPONSE_MAX_BYTES }),
+        this._httpGet(`${baseUrl}/api/status`, { token, timeoutMs: 5000, maxResponseBytes: 64 * 1024 }, dash),
+        this._httpGet(`${baseUrl}/api/dashboard/plugins/hub`, { token, timeoutMs: 5000,
+          maxResponseBytes: EXTERNAL_PLUGIN_RESPONSE_MAX_BYTES }, dash),
       ]);
       if (generation !== this._lifecycleGeneration || this.dashboards.get(profile) !== dash
         || dash.baseUrl !== baseUrl || dash.token !== token
@@ -5197,17 +5313,18 @@ class HermesBackend extends AgentBackend {
   // ---- skills (management UI, read-only) ----
 
   // Aggregate /api/skills across profile dashboards, deduped by name.
-  async getSkills() {
+  async getSkills({ strict = false } = {}) {
     const seen = new Set();
     const out = [];
     await Promise.all(
       [...this.dashboards.values()].map(async (dash) => {
         try {
-          const { status, body } = await httpGet(`${dash.baseUrl}/api/skills`, {
+          const { status, body } = await this._httpGet(`${dash.baseUrl}/api/skills`, {
             token: dash.token,
-          });
-          if (status !== 200) return;
+          }, dash);
+          if (status !== 200) { if (strict) throw new Error("hermes: Skill inventory unavailable"); return; }
           const j = JSON.parse(body);
+          if (strict && !Array.isArray(j) && !Array.isArray(j.skills)) throw new Error("hermes: Skill inventory invalid");
           const arr = Array.isArray(j) ? j : Array.isArray(j.skills) ? j.skills : [];
           for (const s of arr) {
             const name = s.name || "";
@@ -5221,7 +5338,8 @@ class HermesBackend extends AgentBackend {
               backendId: "hermes",
             });
           }
-        } catch {
+        } catch (error) {
+          if (strict) throw error;
           /* skip dashboard on failure */
         }
       }),
@@ -5233,10 +5351,10 @@ class HermesBackend extends AgentBackend {
   async setSkillEnabled(name, enabled) {
     const dash = this.dashboards.get("default") || [...this.dashboards.values()][0];
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "PUT",
       `${dash.baseUrl}/api/skills/toggle`,
-      { token: dash.token, body: { name, enabled: !!enabled } },
+      { token: dash.token, body: { name, enabled: !!enabled } }, dash,
     );
     if (status >= 300) throw new Error(`hermes toggle skill failed: ${status} ${body}`);
     return { name, enabled: !!enabled };
@@ -5259,9 +5377,9 @@ class HermesBackend extends AgentBackend {
       if (opts?.includeArchived) params.set("include_archived", "true");
       if (opts?.board) params.set("board", opts.board);
       const qs = params.toString() ? `?${params.toString()}` : "";
-      const { status, body } = await httpGet(
+      const { status, body } = await this._httpGet(
         `${dash.baseUrl}/api/plugins/kanban/board${qs}`,
-        { token: dash.token },
+        { token: dash.token }, dash,
       );
       if (status !== 200) return { columns: [] }; // plugin disabled / unavailable
       const j = JSON.parse(body);
@@ -5336,7 +5454,7 @@ class HermesBackend extends AgentBackend {
     if (opts?.board) qs.set("board", opts.board);
     if (opts?.severity) qs.set("severity", opts.severity);
     const q = qs.toString() ? `?${qs.toString()}` : "";
-    const { status, body } = await httpGet(this._kanbanUrl(dash, `/diagnostics${q}`), { token: dash.token });
+    const { status, body } = await this._httpGet(this._kanbanUrl(dash, `/diagnostics${q}`), { token: dash.token }, dash);
     if (status !== 200) throw new Error(`hermes diagnostics failed: ${status}`);
     const rows = JSON.parse(body);
     return (Array.isArray(rows) ? rows : []).map((r) => ({
@@ -5353,13 +5471,14 @@ class HermesBackend extends AgentBackend {
   }
 
   // ---- multi-board (Slice 4) ----
-  async getBoards() {
+  async getBoards({ strict = false } = {}) {
     const dash = this._kanbanDash();
-    if (!dash) return [];
+    if (!dash) { if (strict) throw new Error("hermes: Board inventory unavailable"); return []; }
     try {
-      const { status, body } = await httpGet(this._kanbanUrl(dash, "/boards"), { token: dash.token });
-      if (status !== 200) return [];
+      const { status, body } = await this._httpGet(this._kanbanUrl(dash, "/boards"), { token: dash.token }, dash);
+      if (status !== 200) { if (strict) throw new Error("hermes: Board inventory unavailable"); return []; }
       const j = JSON.parse(body);
+      if (strict && !Array.isArray(j) && !Array.isArray(j.boards)) throw new Error("hermes: Board inventory invalid");
       const arr = Array.isArray(j) ? j : Array.isArray(j.boards) ? j.boards : [];
       return arr.map((b) => ({
         slug: String(b.slug ?? ""),
@@ -5376,7 +5495,8 @@ class HermesBackend extends AgentBackend {
         defaultWorkdir: b.default_workdir || undefined,
         defaultWorkspaceKind: b.default_workspace_kind || undefined,
       }));
-    } catch {
+    } catch (error) {
+      if (strict) throw error;
       return [];
     }
   }
@@ -5386,7 +5506,7 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error("hermes: 没有可用的看板");
     const slug = String(spec?.slug || "").trim();
     if (!slug) throw new Error("看板 slug 不能为空");
-    const { status, body } = await httpRequest("POST", this._kanbanUrl(dash, "/boards"), {
+    const { status, body } = await this._httpRequest("POST", this._kanbanUrl(dash, "/boards"), {
       token: dash.token,
       body: {
         slug,
@@ -5396,7 +5516,7 @@ class HermesBackend extends AgentBackend {
         default_workdir: spec?.defaultWorkdir || undefined,
         switch: spec?.switch !== false,
       },
-    });
+    }, dash);
     if (status >= 300) throw new Error(kanbanDetail(body));
     let j = {};
     try { j = JSON.parse(body); } catch { /* tolerate empty */ }
@@ -5406,7 +5526,7 @@ class HermesBackend extends AgentBackend {
   async switchBoard(slug) {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
-    const { status, body } = await httpRequest("POST", this._kanbanUrl(dash, `/boards/${encodeURIComponent(slug)}/switch`), { token: dash.token });
+    const { status, body } = await this._httpRequest("POST", this._kanbanUrl(dash, `/boards/${encodeURIComponent(slug)}/switch`), { token: dash.token }, dash);
     if (status >= 300) throw new Error(`hermes switch board failed: ${status} ${body}`);
     return { ok: true };
   }
@@ -5415,7 +5535,7 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
     if (slug === "default") throw new Error("default 看板不可删除");
-    const { status, body } = await httpRequest("DELETE", this._kanbanUrl(dash, `/boards/${encodeURIComponent(slug)}${hard ? "?delete=true" : ""}`), { token: dash.token });
+    const { status, body } = await this._httpRequest("DELETE", this._kanbanUrl(dash, `/boards/${encodeURIComponent(slug)}${hard ? "?delete=true" : ""}`), { token: dash.token }, dash);
     if (status >= 300) throw new Error(`hermes delete board failed: ${status} ${body}`);
     return { ok: true };
   }
@@ -5424,7 +5544,7 @@ class HermesBackend extends AgentBackend {
   async getOrchestration() {
     const dash = this._kanbanDash();
     if (!dash) return { autoDecompose: false, autoPromoteChildren: false };
-    const { status, body } = await httpGet(this._kanbanUrl(dash, "/orchestration"), { token: dash.token });
+    const { status, body } = await this._httpGet(this._kanbanUrl(dash, "/orchestration"), { token: dash.token }, dash);
     if (status !== 200) throw new Error(`hermes orchestration failed: ${status}`);
     const j = JSON.parse(body);
     return {
@@ -5446,7 +5566,7 @@ class HermesBackend extends AgentBackend {
     if (patch.defaultAssignee !== undefined) body.default_assignee = patch.defaultAssignee || null;
     if (typeof patch.autoDecompose === "boolean") body.auto_decompose = patch.autoDecompose;
     if (typeof patch.autoPromoteChildren === "boolean") body.auto_promote_children = patch.autoPromoteChildren;
-    const { status, body: resp } = await httpRequest("PUT", this._kanbanUrl(dash, "/orchestration"), { token: dash.token, body });
+    const { status, body: resp } = await this._httpRequest("PUT", this._kanbanUrl(dash, "/orchestration"), { token: dash.token, body }, dash);
     if (status >= 300) throw new Error(`hermes set orchestration failed: ${status} ${resp}`);
     return this.getOrchestration();
   }
@@ -5456,9 +5576,9 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
     if (!parent || !child) throw new Error("依赖需要父/子任务 id");
-    const { status, body } = await httpRequest("POST", this._kanbanUrl(dash, `/links${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpRequest("POST", this._kanbanUrl(dash, `/links${kanbanBoardQ(opts)}`), {
       token: dash.token, body: { parent_id: String(parent), child_id: String(child) },
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes add link failed: ${status} ${body}`);
     return { ok: true };
   }
@@ -5467,7 +5587,7 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error("hermes: 没有可用的看板");
     // DELETE /links takes parent_id/child_id as QUERY params (not a body).
     const q = `?parent_id=${encodeURIComponent(String(parent))}&child_id=${encodeURIComponent(String(child))}${kanbanBoardQ(opts, "&")}`;
-    const { status, body } = await httpRequest("DELETE", this._kanbanUrl(dash, `/links${q}`), { token: dash.token });
+    const { status, body } = await this._httpRequest("DELETE", this._kanbanUrl(dash, `/links${q}`), { token: dash.token }, dash);
     if (status >= 300) throw new Error(`hermes remove link failed: ${status} ${body}`);
     return { ok: true };
   }
@@ -5477,9 +5597,9 @@ class HermesBackend extends AgentBackend {
     // 官方 ReassignBody 是 {profile, reclaim_first}（""/null = 解除指派）；旧的
     // {assignee, reclaim} 键会被上游静默忽略，等效 profile=None → 每次"重新指派"
     // 实际执行解除指派（KAN-002）。
-    const { status, body } = await httpRequest("POST", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/reassign${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpRequest("POST", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/reassign${kanbanBoardQ(opts)}`), {
       token: dash.token, body: { profile: assignee || null, reclaim_first: !!reclaim },
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes reassign failed: ${status} ${body}`);
     return { ok: true };
   }
@@ -5488,9 +5608,9 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error("hermes: 没有可用的看板");
     // 官方 reclaim_task_endpoint 的 ReclaimBody 是必需 body 参数——不带 JSON body
     // 一律 422（KAN-003）。字段全可选，body 本身不能省。
-    const { status, body } = await httpRequest("POST", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/reclaim${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpRequest("POST", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/reclaim${kanbanBoardQ(opts)}`), {
       token: dash.token, body: { reason: "dashboard" },
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes reclaim failed: ${status} ${body}`);
     return { ok: true };
   }
@@ -5502,7 +5622,7 @@ class HermesBackend extends AgentBackend {
     if (!dash) return { content: "", exists: false };
     const tail = Number(opts?.tail) > 0 ? Number(opts.tail) : 100000;
     const q = `?tail=${tail}${kanbanBoardQ(opts, "&")}`;
-    const { status, body } = await httpGet(this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/log${q}`), { token: dash.token });
+    const { status, body } = await this._httpGet(this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/log${q}`), { token: dash.token }, dash);
     if (status !== 200) return { content: "", exists: false };
     try {
       const j = JSON.parse(body);
@@ -5538,9 +5658,9 @@ class HermesBackend extends AgentBackend {
     if (typeof p.modelOverride === "string") payload.model_override = p.modelOverride;
     if (typeof p.providerOverride === "string") payload.provider_override = p.providerOverride;
     if (p.clearModelOverride) payload.clear_model_override = true;
-    const { status, body } = await httpRequest("POST", this._kanbanUrl(dash, `/tasks/bulk${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpRequest("POST", this._kanbanUrl(dash, `/tasks/bulk${kanbanBoardQ(opts)}`), {
       token: dash.token, body: payload, timeoutMs: 30000,
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes bulk failed: ${kanbanDetail(body)}`);
     let rows = [];
     try { rows = JSON.parse(body).results || []; } catch { /* 容忍空体 */ }
@@ -5578,7 +5698,7 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) return null;
     try {
-      const { status, body } = await httpGet(this._kanbanUrl(dash, "/config"), { token: dash.token });
+      const { status, body } = await this._httpGet(this._kanbanUrl(dash, "/config"), { token: dash.token }, dash);
       if (status !== 200) return null;
       const j = JSON.parse(body);
       return {
@@ -5602,8 +5722,8 @@ class HermesBackend extends AgentBackend {
     if (patch?.icon !== undefined) body.icon = patch.icon || undefined;
     // 官方：default_workdir 无条件送——""=清除，绝对路径=服务端校验后设置。
     if (patch?.defaultWorkdir !== undefined) body.default_workdir = String(patch.defaultWorkdir ?? "");
-    const { status, body: resp } = await httpRequest(
-      "PATCH", this._kanbanUrl(dash, `/boards/${encodeURIComponent(slug)}`), { token: dash.token, body },
+    const { status, body: resp } = await this._httpRequest(
+      "PATCH", this._kanbanUrl(dash, `/boards/${encodeURIComponent(slug)}`), { token: dash.token, body }, dash,
     );
     if (status >= 300) throw new Error(kanbanDetail(resp));
     return { ok: true };
@@ -5613,7 +5733,7 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) return [];
     try {
-      const { status, body } = await httpGet(this._kanbanUrl(dash, "/profiles"), { token: dash.token });
+      const { status, body } = await this._httpGet(this._kanbanUrl(dash, "/profiles"), { token: dash.token }, dash);
       if (status !== 200) return [];
       const j = JSON.parse(body);
       const arr = Array.isArray(j) ? j : Array.isArray(j.profiles) ? j.profiles : [];
@@ -5635,9 +5755,9 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
     if (!name) throw new Error("profile 名不能为空");
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "PATCH", this._kanbanUrl(dash, `/profiles/${encodeURIComponent(name)}`),
-      { token: dash.token, body: { description: String(patch?.description ?? "") } },
+      { token: dash.token, body: { description: String(patch?.description ?? "") } }, dash,
     );
     if (status >= 300) throw new Error(kanbanDetail(body));
     return { ok: true };
@@ -5649,9 +5769,9 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
     if (!name) throw new Error("profile 名不能为空");
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "POST", this._kanbanUrl(dash, `/profiles/${encodeURIComponent(name)}/describe-auto`),
-      { token: dash.token, body: { overwrite: !!overwrite }, timeoutMs: 180000 },
+      { token: dash.token, body: { overwrite: !!overwrite }, timeoutMs: 180000 }, dash,
     );
     if (status >= 300) throw new Error(kanbanDetail(body));
     try {
@@ -5668,7 +5788,7 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) return { providers: [] };
     try {
-      const { status, body } = await httpGet(this._kanbanUrl(dash, "/model-options"), { token: dash.token, timeoutMs: 15000 });
+      const { status, body } = await this._httpGet(this._kanbanUrl(dash, "/model-options"), { token: dash.token, timeoutMs: 15000 }, dash);
       if (status !== 200) return { providers: [] };
       const j = JSON.parse(body);
       return {
@@ -5687,8 +5807,8 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) return [];
     try {
-      const { status, body } = await httpGet(
-        this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/attachments${kanbanBoardQ(opts)}`), { token: dash.token },
+      const { status, body } = await this._httpGet(
+        this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/attachments${kanbanBoardQ(opts)}`), { token: dash.token }, dash,
       );
       if (status !== 200) return [];
       return hermesAttachments(JSON.parse(body).attachments);
@@ -5705,9 +5825,9 @@ class HermesBackend extends AgentBackend {
       throw new Error(`附件超过 ${HERMES_ATTACHMENT_MAX_BYTES / (1024 * 1024)} MB 上限`);
     }
     const { contentType, payload } = multipartFile("file", file);
-    const { status, data } = await httpRaw(
+    const { status, data } = await this._httpRaw(
       "POST", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/attachments${kanbanBoardQ(opts)}`),
-      { token: dash.token, contentType, payload, timeoutMs: 120000 },
+      { token: dash.token, contentType, payload, timeoutMs: 120000 }, dash,
     );
     const text = data.toString("utf8");
     if (status >= 300) throw new Error(kanbanDetail(text));
@@ -5721,9 +5841,9 @@ class HermesBackend extends AgentBackend {
   async readTaskAttachment(attachmentId, opts) {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
-    const { status, data, headers } = await httpRaw(
+    const { status, data, headers } = await this._httpRaw(
       "GET", this._kanbanUrl(dash, `/attachments/${encodeURIComponent(attachmentId)}${kanbanBoardQ(opts)}`),
-      { token: dash.token, timeoutMs: 120000, maxResponseBytes: HERMES_ATTACHMENT_MAX_BYTES },
+      { token: dash.token, timeoutMs: 120000, maxResponseBytes: HERMES_ATTACHMENT_MAX_BYTES }, dash,
     );
     if (status >= 300) throw new Error(kanbanDetail(data.toString("utf8")));
     const disp = String(headers?.["content-disposition"] || "");
@@ -5737,9 +5857,9 @@ class HermesBackend extends AgentBackend {
   async deleteTaskAttachment(attachmentId, opts) {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "DELETE", this._kanbanUrl(dash, `/attachments/${encodeURIComponent(attachmentId)}${kanbanBoardQ(opts)}`),
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     if (status >= 300) throw new Error(kanbanDetail(body));
     return { ok: true };
@@ -5752,7 +5872,7 @@ class HermesBackend extends AgentBackend {
     if (!dash) return [];
     try {
       const q = `?task_id=${encodeURIComponent(id)}${kanbanBoardQ(opts, "&")}`;
-      const { status, body } = await httpGet(this._kanbanUrl(dash, `/home-channels${q}`), { token: dash.token });
+      const { status, body } = await this._httpGet(this._kanbanUrl(dash, `/home-channels${q}`), { token: dash.token }, dash);
       if (status !== 200) return [];
       const j = JSON.parse(body);
       return (Array.isArray(j.home_channels) ? j.home_channels : []).map((c) => ({
@@ -5775,7 +5895,7 @@ class HermesBackend extends AgentBackend {
       dash,
       `/tasks/${encodeURIComponent(id)}/home-subscribe/${encodeURIComponent(platform)}${kanbanBoardQ(opts)}`,
     );
-    const { status, body } = await httpRequest(subscribed ? "POST" : "DELETE", url, { token: dash.token });
+    const { status, body } = await this._httpRequest(subscribed ? "POST" : "DELETE", url, { token: dash.token }, dash);
     if (status >= 300) throw new Error(kanbanDetail(body));
     return { ok: true };
   }
@@ -5859,7 +5979,7 @@ class HermesBackend extends AgentBackend {
     let board;
     try {
       // include_archived：归档任务的标题也要能查到（今天的 archived 事件很常见）
-      board = await this._httpGetJson(this._kanbanUrl(dash, "/board?include_archived=true"), dash.token);
+      board = await this._httpGetJson(this._kanbanUrl(dash, "/board?include_archived=true"), dash.token, dash);
     } catch {
       return { supported: false, reason: "unavailable", items: [] };
     }
@@ -5879,14 +5999,15 @@ class HermesBackend extends AgentBackend {
     const start = Number.isFinite(storedCursor) ? storedCursor : Math.max(0, latest - 5000);
     if (!Number.isFinite(storedCursor) && latest > 5000) truncated = true; // 有界回放跳过更早历史
     if (latest > start) {
-      const wsBase = String(dash.baseUrl).replace(/^http/i, "ws");
+      const target = this._captureKanbanStream(dash);
       const drained = await this._drainKanbanEvents({
-        wsUrl: `${wsBase}/api/plugins/kanban/events`,
-        token: dash.token || "",
+        ...target, dashboard: dash,
         since: start,
         latest,
         deadlineMs: this._kanbanDrainDeadlineMs || 5000,
       });
+      if (drained.retired) return { supported: false, reason: "unavailable", items: [] };
+      target.assertCurrent?.();
       if (drained.rows.length) journal.appendKanbanEvents(key, drained.rows, { dayStartMs: sinceMs });
       if (drained.cursor > start) journal.setKanbanCursor(key, drained.cursor);
       if (!drained.complete) truncated = true;
@@ -5902,7 +6023,17 @@ class HermesBackend extends AgentBackend {
   }
 
   // WS 短连 drain：收帧 {events[], cursor} 直到 cursor ≥ latest 或 deadline。
-  _drainKanbanEvents({ wsUrl, token, since, latest, deadlineMs }) {
+  _drainKanbanEvents({ wsUrl, token, since, latest, deadlineMs, dashboard }) {
+    let binding;
+    const assertCurrent = () => {
+      if (!binding && this._localRuntime.isManaged()) throw new Error("Managed event stream is unbound");
+      if (binding && (binding.wsUrl !== wsUrl || binding.token !== token || binding.assertCurrent?.() !== true)) {
+        throw new Error("Hermes event stream retired");
+      }
+      return true;
+    };
+    try { binding = dashboard ? this._captureKanbanStream(dashboard) : null; assertCurrent(); }
+    catch { return Promise.resolve({ rows: [], cursor: since, complete: false, retired: true }); }
     return new Promise((resolve) => {
       const rows = [];
       let cursor = since;
@@ -5912,20 +6043,27 @@ class HermesBackend extends AgentBackend {
       const done = (complete) => {
         if (settled) return;
         settled = true;
+        let retired = false;
+        try { assertCurrent(); } catch { retired = true; }
         if (timer) clearTimeout(timer);
-        try { if (ws) ws.close(); } catch { /* closing */ }
-        resolve({ rows, cursor, complete });
+        try { if (ws) ws.terminate(); } catch { /* closing */ }
+        resolve(retired ? { rows: [], cursor: since, complete: false, retired: true }
+          : { rows, cursor, complete });
       };
-      const q = new URLSearchParams({ since: String(since) });
-      if (token) q.set("token", token);
       try {
-        ws = new WebSocket(`${wsUrl}?${q.toString()}`);
-      } catch {
-        return done(false);
-      }
+        const url = new URL(wsUrl);
+        url.searchParams.set("since", String(since));
+        if (token) url.searchParams.set("token", token);
+        const outgoing = url.toString();
+        assertCurrent();
+        ws = new WebSocket(outgoing);
+      } catch { return done(false); }
       timer = setTimeout(() => done(false), deadlineMs);
       if (typeof timer.unref === "function") timer.unref();
+      ws.on("open", () => { try { assertCurrent(); } catch { done(false); } });
       ws.on("message", (data) => {
+        if (settled) return;
+        try { assertCurrent(); } catch { return done(false); }
         try {
           const frame = JSON.parse(data.toString());
           if (Array.isArray(frame.events)) rows.push(...frame.events);
@@ -5938,21 +6076,41 @@ class HermesBackend extends AgentBackend {
     });
   }
 
-  // WS target for the live kanban event stream (Slice 9 broker). Hermes-only;
-  // returns null when no dashboard is up so the broker degrades gracefully.
+  _captureKanbanStream(dash) {
+    const managed = this._localRuntime.isManaged() || dash?.managed === true;
+    const generation = this._lifecycleGeneration;
+    const assertCurrent = () => {
+      if (managed) {
+        this._localRuntime.assertDashboard(dash);
+        if (generation !== this._lifecycleGeneration || this.dashboards.get(dash?.profile) !== dash) {
+          throw Object.assign(new Error("Hermes 运行环境已变化"), { code: "MANAGED_HERMES_HOST_UNAVAILABLE", status: 503 });
+        }
+      }
+      return true;
+    };
+    assertCurrent();
+    const token = dash.token || "";
+    const url = new URL(this._localRuntime.requestUrl(dash, `${dash.baseUrl}/api/plugins/kanban/events`));
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    assertCurrent();
+    return Object.freeze({ wsUrl: url.toString(), token, assertCurrent });
+  }
+
+  // The server-only checker stays with the captured private descriptor and is
+  // never serialized to the browser. An unavailable owner supplies no target.
   getKanbanEventsTarget() {
-    const dash = this._kanbanDash();
-    if (!dash || !dash.baseUrl) return null;
-    const wsBase = String(dash.baseUrl).replace(/^http/i, "ws");
-    return { wsUrl: `${wsBase}/api/plugins/kanban/events`, token: dash.token || "" };
+    try {
+      const dash = this._kanbanDash();
+      return dash ? this._captureKanbanStream(dash) : null;
+    } catch { return null; }
   }
 
   async getTask(id, opts) {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
-    const { status, body } = await httpGet(this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpGet(this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`), {
       token: dash.token,
-    });
+    }, dash);
     if (status !== 200) throw new Error(`hermes get task failed: ${status}`);
     const j = JSON.parse(body);
     const t = j.task || {};
@@ -6042,10 +6200,10 @@ class HermesBackend extends AgentBackend {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
     if (!body || !String(body).trim()) throw new Error("评论不能为空");
-    const { status, body: resp } = await httpRequest(
+    const { status, body: resp } = await this._httpRequest(
       "POST",
       this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/comments${kanbanBoardQ(opts)}`),
-      { token: dash.token, body: { body: String(body), author: author || "dashboard" } },
+      { token: dash.token, body: { body: String(body), author: author || "dashboard" } }, dash,
     );
     if (status >= 300) throw new Error(`hermes add comment failed: ${status} ${resp}`);
     return { ok: true };
@@ -6060,10 +6218,10 @@ class HermesBackend extends AgentBackend {
     }
     // ?board= 贯穿：不带时官方在 current board 找任务，非当前板的任务会
     // 返回 200 + ok:false "unknown task id"（KAN-006）。
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "POST",
       this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}/${action}${kanbanBoardQ(opts)}`),
-      { token: dash.token, body: { author: "dashboard" }, timeoutMs: 180000 },
+      { token: dash.token, body: { author: "dashboard" }, timeoutMs: 180000 }, dash,
     );
     if (status >= 300) throw new Error(`hermes ${action} failed: ${status} ${body}`);
     try {
@@ -6081,10 +6239,10 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error("hermes: 没有可用的看板");
     const max = Number(opts?.max) > 0 ? Number(opts.max) : 8;
     const dryRun = opts?.dryRun ? "true" : "false";
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "POST",
       this._kanbanUrl(dash, `/dispatch?max=${max}&dry_run=${dryRun}`),
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     if (status >= 300) throw new Error(`hermes dispatch failed: ${status} ${body}`);
     let j = {};
@@ -6100,7 +6258,7 @@ class HermesBackend extends AgentBackend {
   async createTask(spec, opts) {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
-    const { status, body } = await httpRequest("POST", this._kanbanUrl(dash, `/tasks${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpRequest("POST", this._kanbanUrl(dash, `/tasks${kanbanBoardQ(opts)}`), {
       token: dash.token,
       body: {
         title: spec?.title || "(无标题)",
@@ -6121,7 +6279,7 @@ class HermesBackend extends AgentBackend {
         model_override: spec?.modelOverride || undefined,
         provider_override: spec?.providerOverride || undefined,
       },
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes create task failed: ${status} ${body}`);
     const t = (JSON.parse(body).task) || {};
     const id = String(t.id ?? "");
@@ -6177,10 +6335,10 @@ class HermesBackend extends AgentBackend {
     // column == status in Hermes' kanban.
     const targetStatus = patch?.status ?? patch?.column;
     if (typeof targetStatus === "string") upd.status = targetStatus;
-    const { status, body } = await httpRequest("PATCH", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpRequest("PATCH", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`), {
       token: dash.token,
       body: upd,
-    });
+    }, dash);
     if (status >= 300) throw new Error(kanbanDetail(body));
     return this.getTask(id, opts);
   }
@@ -6195,10 +6353,10 @@ class HermesBackend extends AgentBackend {
     // 移到 done 时官方强制带完成摘要（写进 result+summary）；调用方在 opts 里带上。
     if (typeof opts?.result === "string") patch.result = opts.result;
     if (typeof opts?.summary === "string") patch.summary = opts.summary;
-    const { status: code, body } = await httpRequest(
+    const { status: code, body } = await this._httpRequest(
       "PATCH",
       this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`),
-      { token: dash.token, body: patch },
+      { token: dash.token, body: patch }, dash,
     );
     if (code >= 300) throw new Error(kanbanDetail(body));
     return this.getTask(id, opts);
@@ -6210,9 +6368,9 @@ class HermesBackend extends AgentBackend {
   async deleteTask(id, opts) {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
-    const { status, body } = await httpRequest("DELETE", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`), {
+    const { status, body } = await this._httpRequest("DELETE", this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`), {
       token: dash.token,
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes delete task failed: ${status} ${body}`);
   }
 
@@ -6221,10 +6379,10 @@ class HermesBackend extends AgentBackend {
   async archiveTask(id, archived = true, opts) {
     const dash = this._kanbanDash();
     if (!dash) throw new Error("hermes: 没有可用的看板");
-    const { status: code, body } = await httpRequest(
+    const { status: code, body } = await this._httpRequest(
       "PATCH",
       this._kanbanUrl(dash, `/tasks/${encodeURIComponent(id)}${kanbanBoardQ(opts)}`),
-      { token: dash.token, body: { status: archived ? "archived" : "todo" } },
+      { token: dash.token, body: { status: archived ? "archived" : "todo" } }, dash,
     );
     if (code >= 300) throw new Error(`hermes ${archived ? "archive" : "unarchive"} task failed: ${code} ${body}`);
     return this.getTask(id, opts);
@@ -6234,15 +6392,18 @@ class HermesBackend extends AgentBackend {
   // Reuse the profile-derived agent list, shaped as UnifiedAgent[].
   async listAgents() {
     const local = this._getConfig().hermesMode !== "remote";
+    const generation = this._lifecycleGeneration;
+    const active = await this.getActiveModel();
+    if (generation !== this._lifecycleGeneration) return [];
     return sortAgentsByCreatedAt(this.getAgents().map((a) => {
       const profile = this.profileById.get(a.id);
       return {
         id: a.id,
         name: a.name,
         kanbanAssignee: profile || undefined,
-        model: a.model || undefined,
-        provider: a.provider || undefined,
-        createdAt: local && profile ? dirCreatedAtMs(hermesHomeForProfile(profile)) : null,
+        model: active.byScope[a.id] || undefined,
+        provider: active.providerByScope[a.id] || undefined,
+        createdAt: local && profile ? dirCreatedAtMs(this._hermesHomeForProfile(profile)) : null,
         backendId: "hermes",
       };
     }));
@@ -6262,13 +6423,16 @@ class HermesBackend extends AgentBackend {
     const a = this.agents.find((x) => x.id === id);
     const profile = this.profileById.get(id);
     if (!a || !profile) throw new Error(`hermes: 未找到 agent ${id}`);
+    const dash = this._requireDashboard(this.dashboards.get(profile), "读取模型");
+    const info = await this._settingsGet(dash, "/api/model/info");
+    if (this.dashboards.get(profile) !== dash) throw new Error("hermes: 读取期间连接配置已变化");
     return {
       id: a.id,
       name: a.name,
-      model: a.model || undefined,
-      provider: a.provider || undefined,
+      model: info?.model || undefined,
+      provider: info?.provider || undefined,
       profile,
-      workspace: `~/.hermes/profiles/${profile}`,
+      ...(!this._localRuntime.isManaged() ? { workspace: `~/.hermes/profiles/${profile}` } : {}),
       files: [{ name: "SOUL.md" }],
       backendId: "hermes",
     };
@@ -6279,14 +6443,14 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
     if (!spec?.name) throw new Error("hermes: 创建 profile 需要 name");
     this._assertProfileIdentityAvailable(spec.name);
-    const { status, body } = await httpRequest("POST", `${dash.baseUrl}/api/profiles`, {
+    const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/profiles`, {
       token: dash.token,
       body: {
         name: spec.name,
         clone_from_default: !!spec.cloneFromDefault,
         no_skills: !!spec.noSkills,
       },
-    });
+    }, dash);
     if (status >= 300) throw new Error(`hermes create profile failed: ${status} ${body}`);
     await this._refreshAgentsFor(dash).catch(() => {});
     return { ok: true, name: spec.name };
@@ -6300,10 +6464,10 @@ class HermesBackend extends AgentBackend {
     if (newName && newName !== profile) {
       this._assertProfileIdentityAvailable(newName, profile);
       const dash = this._requireDashboard(this._defaultDash(), "重命名 profile");
-      const { status, body } = await httpRequest(
+      const { status, body } = await this._httpRequest(
         "PATCH",
         `${dash.baseUrl}/api/profiles/${encodeURIComponent(profile)}`,
-        { token: dash.token, body: { new_name: newName } },
+        { token: dash.token, body: { new_name: newName } }, dash,
       );
       if (status >= 300) throw new Error(`hermes rename profile failed: ${status} ${body}`);
       await this._refreshAgentsFor(dash).catch(() => {});
@@ -6319,10 +6483,10 @@ class HermesBackend extends AgentBackend {
     if (!profile) throw new Error(`hermes: 未找到 agent ${id}`);
     if (profile === "default") throw new Error("hermes: 不能删除 default profile");
     const dash = this._requireDashboard(this._defaultDash(), "删除 profile");
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "DELETE",
       `${dash.baseUrl}/api/profiles/${encodeURIComponent(profile)}`,
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     if (status >= 300) throw new Error(`hermes delete profile failed: ${status} ${body}`);
     await this._refreshAgentsFor(dash).catch(() => {});
@@ -6339,9 +6503,9 @@ class HermesBackend extends AgentBackend {
       this.dashboards.get(profile) || this._defaultDash(),
       "读取 agent 文件",
     );
-    const { status, body } = await httpGet(
+    const { status, body } = await this._httpGet(
       `${dash.baseUrl}/api/profiles/${encodeURIComponent(profile)}/soul`,
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     if (status !== 200) return { name: "SOUL.md", content: "", missing: true };
     const j = JSON.parse(body);
@@ -6355,10 +6519,10 @@ class HermesBackend extends AgentBackend {
       this.dashboards.get(profile) || this._defaultDash(),
       "写入 agent 文件",
     );
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "PUT",
       `${dash.baseUrl}/api/profiles/${encodeURIComponent(profile)}/soul`,
-      { token: dash.token, body: { content } },
+      { token: dash.token, body: { content } }, dash,
     );
     if (status >= 300) throw new Error(`hermes set soul failed: ${status} ${body}`);
     return { ok: true };
@@ -6430,9 +6594,9 @@ class HermesBackend extends AgentBackend {
         let connected = false;
         let version;
         try {
-          const { status, body } = await httpGet(`${d.baseUrl}/api/status`, {
+          const { status, body } = await this._httpGet(`${d.baseUrl}/api/status`, {
             token: d.token,
-          });
+          }, d);
           connected = status === 200;
           if (connected) {
             try {
@@ -6464,7 +6628,8 @@ class HermesBackend extends AgentBackend {
     const readyAgentIds = [...this.profileById.entries()]
       .filter(([, profile]) => connectedProfiles.has(profile))
       .map(([agentId]) => agentId);
-    const info = { mode, profiles: dashboards.length, dashboards, readyAgentIds };
+    const publicDashboards = this._localRuntime.isManaged() ? dashboards.map(({ profile, connected, version }) => ({ profile, connected, ...(version ? { version } : {}) })) : dashboards;
+    const info = { mode, profiles: dashboards.length, dashboards: publicDashboards, readyAgentIds };
     if (this.profileIdentityCollisions.length) {
       info.profileIdentityCollisions = this.profileIdentityCollisions.map((row) => ({
         agentId: row.agentId,
@@ -6550,7 +6715,9 @@ class HermesBackend extends AgentBackend {
     const updates = new Map();
     const mode = this._getConfig().hermesMode === "remote" ? "remote" : "local";
 
-    if (mode === "local" && connected.length > 0) {
+    if (this._localRuntime.isManaged()) {
+      // The immutable managed runtime is updated through its owned lifecycle.
+    } else if (mode === "local" && connected.length > 0) {
       // 本地 profile 共用同一份 Hermes 安装，只向官方源检查一次。
       const representative = this.dashboards.get(connected[0].profile);
       const update = representative
@@ -6574,8 +6741,7 @@ class HermesBackend extends AgentBackend {
       const current = update?.current || dashboard.version;
       return {
         profile: dashboard.profile,
-        port: dashboard.port,
-        baseUrl: dashboard.baseUrl,
+        ...(!this._localRuntime.isManaged() ? { port: dashboard.port, baseUrl: dashboard.baseUrl } : {}),
         connected: dashboard.connected,
         ...(current ? { current } : {}),
         ...(typeof update?.updateAvailable === "boolean"
@@ -6611,13 +6777,15 @@ class HermesBackend extends AgentBackend {
   // ---- self-update（设置页「立即更新」，契约见 agent-backend.js）----
   // remote 模式连的是别处的 dashboard，本机 `hermes update` 更新不到它们。
   runSelfUpdate() {
+    if (this._localRuntime.isManaged()) return { supported: false, reason: "managed-runtime" };
     if (this._getConfig().hermesMode === "remote") return { supported: false, reason: "remote" };
-    return { supported: true, actions: ["update"], status: this._selfUpdater.run() };
+    return { supported: true, actions: ["update"], status: (this._selfUpdater ||= this._createSelfUpdater()).run() };
   }
 
   getSelfUpdateStatus() {
+    if (this._localRuntime.isManaged()) return { supported: false, reason: "managed-runtime" };
     if (this._getConfig().hermesMode === "remote") return { supported: false, reason: "remote" };
-    return { supported: true, actions: ["update"], status: this._selfUpdater.status() };
+    return { supported: true, actions: ["update"], status: (this._selfUpdater ||= this._createSelfUpdater()).status() };
   }
 
   /** Async dispatcher: synthetic "main" → empty seed; historical → fetched from the right dashboard. */
@@ -6631,14 +6799,76 @@ class HermesBackend extends AgentBackend {
    * @param {{model?: string, provider?: string, acpProviderRef?: string, workspace?: string|null, freezeWorkspace?: boolean}} [options]
    * @returns {Promise<string>} canonical new sessionKey
    */
+  async _setPreparedGroupWorkspace(sessionKey, workspace) {
+    const target = this._sessionTarget(sessionKey);
+    const mapped = this.gwRuntimeByKey.get(sessionKey);
+    const generation = this._lifecycleGeneration;
+    if (!mapped || !this.freshSessionKeys.has(sessionKey) || this.gwTurns.has(mapped.runtimeId) || this.sendQueues.has(sessionKey)
+      || this.freshSessionTransports.get(sessionKey) !== "gateway" || !path.isAbsolute(workspace)) {
+      throw Object.assign(new Error("Group workspace cannot be bound to this session"), { code: "HERMES_INSPIRATION_WORKSPACE_UNCONFIRMED" });
+    }
+    const socket = this._gwSocket(target.profile, target.dash);
+    const result = await socket.request("session.cwd.set", { session_id: mapped.runtimeId, cwd: workspace });
+    if (generation !== this._lifecycleGeneration || this.dashboards.get(target.profile) !== target.dash || this.gwRuntimeByKey.get(sessionKey) !== mapped
+      || !this.freshSessionKeys.has(sessionKey) || this.gwTurns.has(mapped.runtimeId) || this.sendQueues.has(sessionKey) || result?.cwd !== workspace) {
+      throw Object.assign(new Error("Group workspace binding changed"), { code: "HERMES_INSPIRATION_WORKSPACE_UNCONFIRMED" });
+    }
+    this.sessionWorkspaceByKey.set(sessionKey, workspace);
+  }
+
+  async _groupMemberModelState(agentId, includeModels = true) {
+    const { assertModelCatalog, modelError } = require("../group-member-model");
+    const profile = this.profileById.get(agentId), dash = this.dashboards.get(profile);
+    if (!dash) throw modelError("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
+    const generation = this._lifecycleGeneration, baseUrl = dash.baseUrl, token = dash.token;
+    const assertCurrent = () => {
+      if (generation !== this._lifecycleGeneration || this.profileById.get(agentId) !== profile
+        || this.dashboards.get(profile) !== dash || dash.baseUrl !== baseUrl || dash.token !== token) throw modelError();
+    };
+    const [info, options] = await Promise.all([this._settingsGet(dash, "/api/model/info"),
+      includeModels ? this._settingsGet(dash, "/api/model/options", 20000) : null]);
+    assertCurrent();
+    if (!info || typeof info.model !== "string" || !info.model.trim()
+      || includeModels && !Array.isArray(options?.providers)) throw modelError("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
+    const providers = options?.providers ?? [], models = [], seen = new Set();
+    for (const row of providers) {
+      if (row.authenticated === false) continue;
+      const provider = String(row.slug || row.name || "");
+      for (const value of Array.isArray(row.models) ? row.models : []) {
+        const id = normalizeModelId(value), key = JSON.stringify([provider, id]);
+        if (!id || !provider || seen.has(key) || row.unavailable_models?.includes(id)) continue;
+        seen.add(key); models.push({ id, name: id, provider });
+      }
+    }
+    return { catalog: assertModelCatalog({ models, defaultModel: info.model }), info, providers, assertCurrent };
+  }
+
+  async getGroupMemberModels(agentId) { return (await this._groupMemberModelState(agentId)).catalog; }
+
+  async applyGroupSessionModel(agentId, sessionKey, selection) {
+    const { assertModelSelection, validModelSelection, modelError } = require("../group-member-model");
+    if (this._sessionTarget(sessionKey).agentId !== agentId || !validModelSelection(selection)) throw modelError();
+    const state = await this._groupMemberModelState(agentId, selection !== null);
+    assertModelSelection(state.catalog, selection);
+    const model = selection?.model ?? state.info.model, provider = selection?.provider ?? state.info.provider;
+    if (typeof provider !== "string" || !provider.trim()) throw modelError();
+    const row = state.providers.find(item => (item.slug || item.name) === provider);
+    const acpProviderRef = row && (row.is_user_defined === true || row.source === "user-config")
+      ? (provider.startsWith("custom:") ? provider : `custom:${provider}`) : undefined;
+    state.assertCurrent();
+    const result = await this.setSessionModel(sessionKey, { model, provider, ...(acpProviderRef ? { acpProviderRef } : {}), scope: "session" });
+    state.assertCurrent();
+    if (result.scope !== "session") throw modelError();
+  }
+
   async createSession(agentId, options = {}) {
     const profile = this.profileById.get(agentId);
     if (!profile) throw new Error(`hermes-backend: unknown agent ${agentId}`);
     const dash = this.dashboards.get(profile);
     if (!dash) throw new Error(`hermes: 未找到 agent ${agentId} 的 dashboard`);
     const generation = this._lifecycleGeneration;
-    const model = String(options?.model || "").trim();
-    const provider = String(options?.provider || "").trim();
+    let model = String(options?.model || "").trim();
+    let provider = String(options?.provider || "").trim();
     const acpProviderRef = String(options?.acpProviderRef || "").trim();
     const workspace = options?.workspace == null ? null : options.workspace;
     const freezeWorkspace = options?.freezeWorkspace === true;
@@ -6646,22 +6876,36 @@ class HermesBackend extends AgentBackend {
       || !workspace.isWellFormed() || workspace.includes("\0"))) {
       throw new Error("hermes: 工作目录必须为绝对路径");
     }
+    if (!model) {
+      // Dashboard config is the per-agent authority. Gateway default resolution
+      // is a separate path, and /api/profiles can be stale.
+      const info = await this._settingsGet(dash, "/api/model/info");
+      if (typeof info?.model !== "string" || !info.model.trim()) throw Object.assign(new Error("hermes: 无法读取当前 Agent 的默认模型"), {
+        code: "AGENT_MODEL_UNAVAILABLE",
+      });
+      if (generation !== this._lifecycleGeneration || this.dashboards.get(profile) !== dash) {
+        throw new Error("hermes: 读取默认模型期间连接配置已变化，请重试");
+      }
+      model = String(info.model || "").trim();
+      provider = String(info.provider || "").trim();
+    }
 
     if (this._gatewayChatEnabled(profile)) {
       const sock = this._gwSocket(profile, dash);
+      const runtimeProvider = this._modelProviderRef(model, provider, acpProviderRef);
       let res;
       try {
         res = await sock.request("session.create", {
           cols: GW_COLS,
           source: GW_SOURCE,
           ...(model ? { model } : {}),
-          ...(provider ? { provider } : {}),
+          ...(runtimeProvider ? { provider: runtimeProvider } : {}),
           ...(workspace !== null ? { cwd: workspace } : {}),
         });
       } catch (err) {
         // A served JSON-RPC error is authoritative. Only transport failure may
         // fall back to the existing ACP channel.
-        if (err?.jsonRpc === true) throw err;
+        if (err?.jsonRpc === true || err?.noAcpFallback === true || this._localRuntime.isManaged()) throw err;
         this.gwChatDisabledUntil.set(profile, Date.now() + GW_CHAT_RETRY_MS);
         console.warn(`[hermes] profile ${profile}: 新会话网关不可用（${err?.message || err}），回落 ACP`);
         res = null;
@@ -6755,19 +6999,74 @@ class HermesBackend extends AgentBackend {
     }
   }
 
+  async getHistoryPage(sessionKey, options = {}) {
+    const { historyError, historySource, historyPageOptions, encodeHistoryCursor,
+      decodeHistoryCursor, historyRowId, historyPage } = require("./chat-history-page");
+    const { limit, cursor } = historyPageOptions(options);
+    const generation = this._lifecycleGeneration;
+    const { tail } = this._sessionTarget(sessionKey);
+    const serverId = this._serverSessionId(sessionKey, tail);
+    const scope = historySource(sessionKey, serverId, this.getChatCacheScope(), generation);
+    const position = decodeHistoryCursor(this, scope, cursor);
+    // session.create can return a canonical id before the first prompt persists
+    // it. Use the same local transcript as getHistory until acceptance; querying
+    // the dashboard here would turn a valid empty /new session into an HTTP 404.
+    if (serverId === "main" || this.freshSessionKeys.has(sessionKey)) {
+      const all = (await this.getHistory(sessionKey)).messages;
+      if (generation !== this._lifecycleGeneration
+        || scope !== historySource(sessionKey, this._serverSessionId(sessionKey, tail), this.getChatCacheScope(), generation)) throw historyError();
+      const end = position ? all.findIndex(message => historyRowId(message) === position.before) : all.length;
+      if (end < 0) throw historyError();
+      const start = Math.max(0, end - limit);
+      return historyPage(all.slice(start, end), start > 0,
+        start > 0 ? encodeHistoryCursor(this, scope, { before: historyRowId(all[start]) }) : null, scope);
+    }
+    const offset = position ? Math.max(0, position.offset - 1) : 0;
+    const requested = limit + (position ? 2 : 1); // overlap + one older lookahead
+    const parsed = await this._readHistoricalMessageResponse(sessionKey, serverId, {
+      limit: requested, offset, order: "latest",
+    });
+    if (generation !== this._lifecycleGeneration
+      || scope !== historySource(sessionKey, this._serverSessionId(sessionKey, tail), this.getChatCacheScope(), generation)) throw historyError();
+    if (parsed.pagination?.limit !== requested || parsed.pagination.offset !== offset
+      || parsed.pagination.order !== "latest" || parsed.pagination.returned !== parsed.messages.length) {
+      throw historyError("CHAT_HISTORY_UNSUPPORTED");
+    }
+    const rows = parsed.messages.slice();
+    if (rows.length > requested) throw historyError("CHAT_HISTORY_INVALID");
+    if (position) {
+      if (parsed.session_id !== position.sessionId || historyRowId(rows.at(-1)) !== position.anchor) throw historyError();
+      rows.pop();
+    }
+    const hasMore = rows.length > limit;
+    if (hasMore) rows.shift();
+    const nextOffset = (position?.offset ?? 0) + rows.length;
+    const messages = this._mapHistoricalMessages(rows);
+    return historyPage(position ? messages : this._stitchLastFinalMeta(sessionKey, messages), hasMore,
+      hasMore ? encodeHistoryCursor(this, scope, { offset: nextOffset, anchor: historyRowId(rows[0]), sessionId: parsed.session_id }) : null,
+      historySource(sessionKey, parsed.session_id || serverId, this.getChatCacheScope()));
+  }
+
   async getHistory(sessionKey) {
     const generation = this._lifecycleGeneration;
-    if (!this.transcripts.has(sessionKey)) {
-      const tail = String(sessionKey || "").split(":").slice(2).join(":") || "main";
+    const [, agentId, ...tailParts] = String(sessionKey || "").split(":");
+    const tail = tailParts.join(":") || "main";
+    const serverTail = this._serverSessionId(sessionKey, tail);
+    // Cron/CLI/channel sessions change outside Shoggoth's send lifecycle. A
+    // cached snapshot from their first read cannot be their final authority.
+    // Keep local pending sends intact; a read must never overwrite live appends.
+    const readStored = serverTail !== "main" && this.profileById.has(agentId)
+      && !this.freshSessionKeys.has(sessionKey) && !this.sendQueues.has(sessionKey);
+    if (!this.transcripts.has(sessionKey) || readStored) {
       // ":main" and eagerly-created keys bind to their stored session through
       // gateway/ACP mappings. Resolving the server id here lets post-final cache
       // invalidation refetch canonical history (including tool/thinking rows).
-      const serverTail = this._serverSessionId(sessionKey, tail);
       const seed = serverTail === "main" ? [] : this._stitchLastFinalMeta(sessionKey, await this._fetchHistoricalMessages(sessionKey, serverTail));
       // 历史读取跨过 stop/reconfigure 时明确失败且不缓存，下一代可重新读取。
       if (generation !== this._lifecycleGeneration) {
         throw new Error("hermes: history lifecycle changed while loading");
       }
+      if (readStored) return { messages: seed };
       this.transcripts.set(sessionKey, seed);
     }
     const messages = this.transcripts.get(sessionKey);
@@ -6805,25 +7104,31 @@ class HermesBackend extends AgentBackend {
     );
   }
 
-  // ACP model refs use `provider:model`, except user-defined providers which
-  // require `custom:<slug>:<model>`. Prefer the catalog-carried transport ref;
-  // callers may also pass it explicitly when inheriting a selected model.
-  _acpModelRef(model, provider, explicitRef) {
+  // Both Gateway and ACP must keep the catalog's named custom route. Sending
+  // its bare slug can select a builtin provider with a different credential
+  // source (for example xiaomi requires XIAOMI_API_KEY).
+  _modelProviderRef(model, provider, explicitRef) {
     const modelId = String(model || "").trim();
     const providerId = String(provider || "").trim();
     const catalogRef = providerId
       ? this.modelChoices.find((choice) =>
         choice?.id === modelId && choice?.provider === providerId)?.acpProviderRef
       : "";
-    const providerRef = String(explicitRef || catalogRef || providerId || "").trim();
+    return String(explicitRef || catalogRef || providerId || "").trim();
+  }
+
+  // ACP additionally encodes the model after the runtime provider identity.
+  _acpModelRef(model, provider, explicitRef) {
+    const modelId = String(model || "").trim();
+    const providerRef = this._modelProviderRef(modelId, provider, explicitRef);
     return providerRef ? `${providerRef}:${modelId}` : modelId;
   }
 
   async _deleteServerSession(dash, serverId) {
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "DELETE",
       `${dash.baseUrl}/api/sessions/${encodeURIComponent(serverId)}`,
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     // 404 = already gone server-side; callers still clear their local state.
     if (status >= 300 && status !== 404) {
@@ -6850,6 +7155,11 @@ class HermesBackend extends AgentBackend {
   async setSessionModel(sessionKey, opts = {}) {
     const model = String(opts.model || "").trim();
     if (!model) throw new Error("hermes: 缺少 model");
+    if (this._queueNextTurnConfig(sessionKey, "model", modelSwitchValue(model,
+      this._modelProviderRef(model, opts.provider, opts.acpProviderRef), "session"),
+      { model, ...(opts.provider ? { provider: opts.provider } : {}) })) {
+      return { model, scope: "session", apply: "next-turn" };
+    }
     const freshTransport = this.freshSessionTransports.get(sessionKey);
     if (freshTransport === "acp") {
       const mapping = this.acpSessionByKey.get(sessionKey);
@@ -6901,7 +7211,7 @@ class HermesBackend extends AgentBackend {
       result = await sock.request("config.set", {
         session_id: m.runtimeId,
         key: "model",
-        value: modelSwitchValue(model, opts.provider, "session"),
+        value: modelSwitchValue(model, this._modelProviderRef(model, opts.provider, opts.acpProviderRef), "session"),
       });
     } catch (err) {
       // 4009 = 轮次进行中的服务端忙守卫（官方桌面同款拒绝）。
@@ -6919,6 +7229,51 @@ class HermesBackend extends AgentBackend {
       scope: "session",
       warning: String(result?.warning || "") || undefined,
     };
+  }
+
+  _queueNextTurnConfig(sessionKey, key, value, display) {
+    const mapping = this.gwRuntimeByKey.get(sessionKey);
+    const turn = mapping && this.gwTurns.get(mapping.runtimeId);
+    if ((!turn || turn.ended) && !this.nextTurnConfigs.has(sessionKey)) return false;
+    const { dash } = this._sessionTarget(sessionKey);
+    this._captureGatewayDashboard(dash).assertCurrent?.();
+    const pending = this.nextTurnConfigs.get(sessionKey) || {
+      generation: this._lifecycleGeneration, dash, values: new Map(), display: {},
+    };
+    pending.values.set(key, value);
+    Object.assign(pending.display, display);
+    this.nextTurnConfigs.set(sessionKey, pending);
+    this.sessionLiveMeta.set(sessionKey, { ...this.sessionLiveMeta.get(sessionKey), ...pending.display });
+    this._applyLiveMetaToRow(sessionKey);
+    return true;
+  }
+
+  async _applyNextTurnConfigs(sessionKey, mapping, sock) {
+    const pending = this.nextTurnConfigs.get(sessionKey);
+    if (!pending) return;
+    const assertCurrent = () => {
+      const { dash } = this._sessionTarget(sessionKey);
+      if (pending.generation !== this._lifecycleGeneration || pending.dash !== dash
+        || mapping.generation !== sock.generation || this.gwTurns.has(mapping.runtimeId)) {
+        throw new Error("Hermes 下一轮设置的会话归属已变化");
+      }
+      this._captureGatewayDashboard(dash).assertCurrent?.();
+    };
+    assertCurrent();
+    // Apply model before effort/tier so overrides target the selected model.
+    // Revisit earlier keys if the user edits them during a later config RPC.
+    while (pending.values.size > 0) {
+      for (const key of ["model", "reasoning", "fast", "yolo"]) {
+        while (pending.values.has(key)) {
+          const value = pending.values.get(key);
+          const result = await sock.request("config.set", { session_id: mapping.runtimeId, key, value });
+          assertCurrent();
+          if (result?.confirm_required) throw new Error(result.confirm_message || result.warning || "Hermes 模型需要确认");
+          if (pending.values.get(key) === value) pending.values.delete(key);
+        }
+      }
+    }
+    if (this.nextTurnConfigs.get(sessionKey) === pending) this.nextTurnConfigs.delete(sessionKey);
   }
 
   // Shared config.set relay for session-scoped controls (reasoning/fast).
@@ -6949,7 +7304,8 @@ class HermesBackend extends AgentBackend {
     if (!HERMES_THINKING_LEVELS.includes(level)) {
       throw new Error(`hermes: 未知思考档「${level}」`);
     }
-    const { scope } = await this._sessionConfigSet(sessionKey, "reasoning", level);
+    const deferred = this._queueNextTurnConfig(sessionKey, "reasoning", level, { reasoningEffort: level });
+    const { scope } = deferred ? { scope: "session" } : await this._sessionConfigSet(sessionKey, "reasoning", level);
     const meta = this.sessionLiveMeta.get(sessionKey) || {};
     meta.reasoningEffort = level;
     this.sessionLiveMeta.set(sessionKey, meta);
@@ -6962,7 +7318,8 @@ class HermesBackend extends AgentBackend {
   // sessions.patch {fastMode} here.
   async setSessionFast(sessionKey, opts = {}) {
     const fast = opts.fast === true;
-    const { scope } = await this._sessionConfigSet(sessionKey, "fast", fast ? "fast" : "normal");
+    const deferred = this._queueNextTurnConfig(sessionKey, "fast", fast ? "fast" : "normal", { fast });
+    const { scope } = deferred ? { scope: "session" } : await this._sessionConfigSet(sessionKey, "fast", fast ? "fast" : "normal");
     const meta = this.sessionLiveMeta.get(sessionKey) || {};
     meta.fast = fast;
     this.sessionLiveMeta.set(sessionKey, meta);
@@ -6974,7 +7331,8 @@ class HermesBackend extends AgentBackend {
     if (!["inherit", "yolo"].includes(mode)) {
       throw new Error(`hermes: 未知权限模式「${mode}」`);
     }
-    const { scope } = await this._sessionConfigSet(sessionKey, "yolo", mode === "yolo" ? "1" : "0");
+    const deferred = this._queueNextTurnConfig(sessionKey, "yolo", mode === "yolo" ? "1" : "0", { permissionMode: mode });
+    const { scope } = deferred ? { scope: "session" } : await this._sessionConfigSet(sessionKey, "yolo", mode === "yolo" ? "1" : "0");
     const meta = this.sessionLiveMeta.get(sessionKey) || {};
     meta.permissionMode = mode;
     this.sessionLiveMeta.set(sessionKey, meta);
@@ -6992,10 +7350,10 @@ class HermesBackend extends AgentBackend {
       throw new Error("hermes: 该会话还没有任何消息，发送一条后才能重命名");
     }
     const serverId = this._serverSessionId(sessionKey, tail);
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "PATCH",
       `${dash.baseUrl}/api/sessions/${encodeURIComponent(serverId)}`,
-      { token: dash.token, body: { title: String(label ?? "").trim() } },
+      { token: dash.token, body: { title: String(label ?? "").trim() } }, dash,
     );
     if (status >= 300) throw new Error(`hermes rename session failed: ${status} ${body}`);
     await this.refreshSessions().catch(() => {});
@@ -7027,6 +7385,7 @@ class HermesBackend extends AgentBackend {
       this.gwRuntimeByKey.delete(sessionKey);
     }
     this.sessionLiveMeta.delete(sessionKey);
+    this.nextTurnConfigs.delete(sessionKey);
     this.gwUsageByKey.delete(sessionKey);
     this.gwLastFinalMeta?.delete?.(sessionKey);
     this.sessionRows = this.sessionRows.filter((r) => r.key !== sessionKey);
@@ -7040,7 +7399,14 @@ class HermesBackend extends AgentBackend {
   async abortChat(sessionKey) {
     const gw = this.gwRuntimeByKey.get(sessionKey);
     const sock = gw ? this.gwSockets.get(gw.profile) : null;
-    if (gw && sock && this.gwTurns.has(gw.runtimeId)) {
+    if (gw && sock && this._externalPluginSelectionService) {
+      try {
+        await require("./hermes-plugin-selection").cancelHermesPluginSelectionSession({ runtimeId: gw.runtimeId,
+          agentId: /^agent:([^:]+)/u.exec(sessionKey)?.[1], requestHost: (method, params) => sock.request(method, params),
+          service: this._externalPluginSelectionService });
+      } catch { /* The actual Host interrupt must still run. */ }
+    }
+    if (gw && sock && (this.gwTurns.has(gw.runtimeId) || this._externalPluginSelectionService)) {
       try {
         await sock.request("session.interrupt", { session_id: gw.runtimeId });
         return;
@@ -7097,7 +7463,7 @@ class HermesBackend extends AgentBackend {
       return { supported: false, reason: "remote", commands: {} };
     }
     const generation = this._lifecycleGeneration;
-    const home = process.env.HERMES_HOME || path.join(os.homedir(), ".hermes");
+    const home = this._localRuntime.hermesHome();
     // Per-profile sessions: default → <home>/sessions, others → <home>/profiles/<p>/sessions.
     // Key counts by the hermes agent id (hermes-<profile>) so they merge with OpenClaw's.
     const profileDirs = [];
@@ -7215,7 +7581,7 @@ class HermesBackend extends AgentBackend {
       return { supported: false, reason: "remote", skills: {} };
     }
     const generation = this._lifecycleGeneration;
-    const home = process.env.HERMES_HOME || path.join(os.homedir(), ".hermes");
+    const home = this._localRuntime.hermesHome();
     const profileDirs = [];
     for (const [agentId, profile] of this.profileById.entries()) {
       const base = profile === "default" ? home : path.join(home, "profiles", profile);
@@ -7318,9 +7684,12 @@ class HermesBackend extends AgentBackend {
     const q = String(query || "").trim();
     if (!q) return { supported: true, results: [] };
     const limit = Number(opts.limit) > 0 ? Math.min(Number(opts.limit), 100) : 30;
-    const { status, body } = await httpGet(
-      `${dash.baseUrl}/api/sessions/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-      { token: dash.token, timeoutMs: 10000 },
+    const excluded = new Set(opts.excludeSessionKeys ?? []);
+    // Dashboard 没有按 key 排除的参数，取有界候选池后过滤；池满时继续明确标记来源截断。
+    const sourceLimit = excluded.size ? 100 : limit;
+    const { status, body } = await this._httpGet(
+      `${dash.baseUrl}/api/sessions/search?q=${encodeURIComponent(q)}&limit=${sourceLimit}`,
+      { token: dash.token, timeoutMs: 10000 }, dash,
     );
     if (status !== 200) return { supported: false, reason: `http-${status}`, results: [] };
     let parsed;
@@ -7332,8 +7701,8 @@ class HermesBackend extends AgentBackend {
     const rows = Array.isArray(parsed.results) ? parsed.results : [];
     return {
       supported: true,
-      ...(rows.length >= limit ? { truncated: true } : {}),
-      results: rows.map((r) => ({
+      ...(rows.length >= sourceLimit ? { truncated: true } : {}),
+      results: rows.filter((row) => !excluded.has(`agent:${agentId}:${row.session_id}`)).slice(0, limit).map((r) => ({
         key: `agent:${agentId}:${r.session_id}`,
         sessionId: typeof r.session_id === "string" ? r.session_id : undefined,
         // hermes_state.search_messages wraps FTS5/trigram matches in >>>…<<<
@@ -7346,6 +7715,10 @@ class HermesBackend extends AgentBackend {
   }
 
   async _fetchHistoricalMessages(sessionKey, overrideTail) {
+    return this._mapHistoricalMessages((await this._readHistoricalMessageResponse(sessionKey, overrideTail)).messages);
+  }
+
+  async _readHistoricalMessageResponse(sessionKey, overrideTail, page) {
     const m = /^agent:([^:]+):(.+)$/.exec(String(sessionKey || ""));
     if (!m) throw new Error(`hermes history: 非法会话 key ${sessionKey}`);
     const [, agentId, keyTail] = m;
@@ -7356,9 +7729,9 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error(`hermes history: 未找到 agent ${agentId} 的 dashboard`);
     let response;
     try {
-      response = await httpGet(
-        `${dash.baseUrl}/api/sessions/${encodeURIComponent(tail)}/messages`,
-        { token: dash.token },
+      response = await this._httpGet(
+        `${dash.baseUrl}/api/sessions/${encodeURIComponent(tail)}/messages${page ? `?${new URLSearchParams(page)}` : ""}`,
+        { token: dash.token }, dash,
       );
     } catch (error) {
       throw new Error(`hermes history request failed: ${error?.message || String(error)}`);
@@ -7374,7 +7747,10 @@ class HermesBackend extends AgentBackend {
     if (!Array.isArray(parsed.messages)) {
       throw new Error("hermes history response missing messages array");
     }
-    const raw = parsed.messages;
+    return parsed;
+  }
+
+  _mapHistoricalMessages(raw) {
     // The endpoint returns RAW `messages` table rows (hermes_state.get_messages):
     // role user/assistant/system/tool, `tool_calls` (parsed JSON on assistant
     // rows), `tool_name` (on tool-result rows), `reasoning`/`reasoning_content`,
@@ -7446,13 +7822,14 @@ class HermesBackend extends AgentBackend {
         // Tool RESULT row → the UI's toolResult role (own collapsed group, same
         // as OpenClaw's history tool results).
         const text = textOf(msg.content);
-        if (!text.trim()) continue;
         out.push({
           role: "toolResult",
           id,
           toolCallId: typeof msg.tool_call_id === "string" ? msg.tool_call_id : undefined,
           toolName: typeof msg.tool_name === "string" && msg.tool_name ? msg.tool_name : undefined,
           content: [{ type: "text", text }],
+          isError: hermesToolFailed(msg.tool_name, msg.content,
+            typeof msg.is_error === "boolean" ? msg.is_error : msg.isError),
           ...(ts != null ? { timestamp: ts } : {}),
         });
         continue;
@@ -7490,7 +7867,14 @@ class HermesBackend extends AgentBackend {
         ...(tokenCount > 0 ? { usage: { totalTokens: tokenCount } } : {}),
       });
     }
-    return out;
+    return out.map(message => {
+      const text = message.role === "user" ? message.content[0]?.text || "" : "";
+      // These are Hermes's persisted continuation envelopes, not human turns.
+      const continuation = /^\[System: (?:The previous response was cut off by a network error mid-stream|Your previous response was truncated by the output length limit|Your previous tool call \()/u.test(text);
+      return { ...message, historySource: "hermes",
+        ...(continuation ? { automation: "continuation" }
+          : text.startsWith("[IMPORTANT: You are running as a scheduled cron job.") ? { automation: "cron" } : {}) };
+    });
   }
 
   // Top 会话行点击的「聊了什么」预览：复用 dashboard 的
@@ -7556,6 +7940,7 @@ class HermesBackend extends AgentBackend {
   }
 
   _clientForProfile(profile) {
+    this._localRuntime.assertLegacyProcess();
     // Chat always runs through a LOCAL `hermes acp` subprocess. When the dashboard
     // actually lives on another host, spawning it here answers out of THIS machine's
     // SessionDB (or ENOENTs when hermes isn't installed locally) while the UI shows
@@ -7641,28 +8026,68 @@ class HermesBackend extends AgentBackend {
     return next;
   }
 
+  attachExternalPluginSelectionService(service) { this._externalPluginSelectionService = service; }
+  supportsExternalChatSelection() { return typeof this._externalPluginSelectionService?.prepareExternalPluginSelection === "function"; }
+  async getPluginSelectionReadiness({ agentId, sessionKey } = {}) {
+    if (typeof agentId !== "string" || !agentId || typeof sessionKey !== "string"
+      || !sessionKey.startsWith(`agent:${agentId}:`) || !this.supportsExternalChatSelection()) return false;
+    const generation = this._lifecycleGeneration;
+    try {
+      const profile = this.profileById.get(agentId);
+      const mapping = this.gwRuntimeByKey.get(sessionKey);
+      const dashboard = profile && this.dashboards.get(profile);
+      if (!profile || !dashboard || !mapping || mapping.profile !== profile
+        || this.freshSessionTransports.get(sessionKey) === "acp") return false;
+      // A readiness GET must not resume a crashed ordinary turn: session.resume
+      // can execute recovery. Probe only the current established Gateway owner.
+      const socket = this._gwSocket(profile, dashboard);
+      if (mapping.generation !== socket.generation) return false;
+      const capabilities = await socket.request("prompt.selection.capabilities", { session_id: mapping.runtimeId });
+      require("./hermes-plugin-selection").trustedHermesSelectionSubject(capabilities, agentId);
+      return generation === this._lifecycleGeneration && this.gwRuntimeByKey.get(sessionKey) === mapping
+        && this.gwSockets.get(profile) === socket && mapping.generation === socket.generation;
+    } catch { return false; }
+  }
+  async getChatOperation(sessionKey, operationId) {
+    const { m, sock } = await this._gwEnsureRuntime(sessionKey, { eagerBuild: true });
+    return require("./hermes-plugin-selection").readHermesPluginSelectionOperation({ runtimeId: m.runtimeId,
+      agentId: /^agent:([^:]+)/u.exec(sessionKey)?.[1], sessionKey, operationId,
+      requestHost: (method, params) => sock.request(method, params) });
+  }
+
   sendMessage(sessionKey, message, idempotencyKey, hooks = {}, opts = {}) {
-    // A direct backend caller must not bypass the Proxy's external-selection
-    // admission guard. Hermes' prompt.submit cannot bind a dispatch receipt to
-    // its eventual task/turn, so silently ignoring this field would send a
-    // message with a capability choice that was never applied.
+    // Capture a selected submission before queueing it. It must negotiate the
+    // Host's actual physical session and mandatory gate through the Gateway;
+    // silently falling back to ACP would lose the selected-turn authority.
     if (opts && Object.prototype.hasOwnProperty.call(opts, "pluginSelection")) {
-      const error = new Error("Hermes 尚无法将插件选择绑定到本次真实执行回合");
-      error.code = "PLUGIN_SELECTION_UNAVAILABLE";
-      return Promise.reject(error);
+      if (!this._externalPluginSelectionService || typeof idempotencyKey !== "string" || !idempotencyKey) {
+        const error = new Error("Hermes 尚无法将插件选择绑定到本次真实执行回合");
+        error.code = "PLUGIN_SELECTION_UNAVAILABLE";
+        return Promise.reject(error);
+      }
+      opts = { ...opts, pluginSelection: structuredClone(opts.pluginSelection),
+        attachments: opts.attachments && structuredClone(opts.attachments), requiredTransport: "gateway" };
     }
     if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
       return this._enqueueMessage(sessionKey, message, undefined, hooks, opts);
     }
     const cacheKey = JSON.stringify([sessionKey, idempotencyKey]);
+    const fingerprint = createHash("sha256").update(JSON.stringify([message, opts.attachments || null,
+      normalizeFederationInputProvenance(opts.inputProvenance), opts.pluginSelection || null])).digest("hex");
     const existing = this._idempotentSends.get(cacheKey);
     if (
       existing
       && (!existing.settledAt || Date.now() - existing.settledAt < HERMES_IDEMPOTENCY_TTL_MS)
     ) {
+      if (existing.fingerprint && existing.fingerprint !== fingerprint) {
+        return Promise.reject(Object.assign(new Error("同一消息操作不能更换内容或插件选择"), { code: "PLUGIN_SELECTION_CONFLICT" }));
+      }
       // Map insertion order is the LRU order. Refresh a hit before capacity eviction.
       this._idempotentSends.delete(cacheKey);
       this._idempotentSends.set(cacheKey, existing);
+      if (existing.admissionAccepted) queueMicrotask(() => {
+        try { hooks.accepted?.(); } catch { /* one observer must not change the original admission */ }
+      });
       if (existing.terminal) this._replayIdempotentTerminal(existing, hooks);
       else existing.listeners.add(hooks);
       return existing.promise;
@@ -7679,10 +8104,13 @@ class HermesBackend extends AgentBackend {
       terminal: null,
       settledAt: 0,
       promise: null,
+      fingerprint,
+      admissionAccepted: false,
     };
     const fanout = {};
     for (const method of CHAT_HOOK_METHODS) {
       fanout[method] = (...args) => {
+        if (method === "accepted") entry.admissionAccepted = true;
         if ((method === "final" || method === "error") && !entry.terminal) {
           entry.terminal = { method, args };
         }
@@ -7772,6 +8200,7 @@ class HermesBackend extends AgentBackend {
       // 网关 slash 面（commands.catalog / slash.exec）可用 → UI 把未在本地
       // 处理的 / 命令交给它执行，而不是当聊天消息发出。
       slash: true,
+      steer: true,
       permissions: {
         scope: "session",
         apply: "next-turn",
@@ -7784,6 +8213,33 @@ class HermesBackend extends AgentBackend {
     };
   }
 
+  async steerChat(sessionKey, message) {
+    const text = String(message || "").trim();
+    if (!text) throw new Error("hermes: 引导消息不能为空");
+    const { profile, dash } = this._sessionTarget(sessionKey);
+    const lease = this._captureGatewayDashboard(dash);
+    const generation = this._lifecycleGeneration;
+    const sock = this._gwSocket(profile, lease);
+    const mapping = this.gwRuntimeByKey.get(sessionKey);
+    const turn = mapping && this.gwTurns.get(mapping.runtimeId);
+    // Do not create/resume a session for steering: either may start fresh work.
+    if (!mapping || mapping.generation !== sock.generation || !turn || turn.ended
+      || turn.sessionKey !== sessionKey || turn.selection) {
+      throw new Error("Hermes 当前没有可接收引导的执行回合");
+    }
+    const socketGeneration = sock.generation;
+    const result = await sock.request("session.steer", { session_id: mapping.runtimeId, text });
+    lease.assertCurrent?.();
+    if (generation !== this._lifecycleGeneration || socketGeneration !== sock.generation
+      || this.gwRuntimeByKey.get(sessionKey) !== mapping) {
+      throw new Error("Hermes 引导回执需要核实，连接归属已变化");
+    }
+    if (result?.status !== "queued" || result.text !== text) {
+      throw new Error("Hermes 未接受当前回合的引导消息");
+    }
+    return { accepted: true, mode: "steer" };
+  }
+
   // ---- slash commands (S6): the gateway's command surface ----
 
   _slashDash(agentId) {
@@ -7793,6 +8249,26 @@ class HermesBackend extends AgentBackend {
     return dash;
   }
 
+  // One-shot reads must retire with this Backend/profile binding, even when
+  // the private Host still has the same URL, credential and physical owner.
+  _captureGatewayDashboard(dash) {
+    if (!this._localRuntime.isManaged() && dash?.managed !== true) return dash;
+    const generation = this._lifecycleGeneration;
+    const assertCurrent = () => {
+      this._localRuntime.assertDashboard(dash);
+      if (generation !== this._lifecycleGeneration || this.dashboards.get(dash?.profile) !== dash) {
+        throw Object.assign(new Error("Hermes 私有 Agent 归属已变化"), { code: "MANAGED_HERMES_HOST_UNAVAILABLE", status: 503 });
+      }
+      return true;
+    };
+    assertCurrent();
+    return Object.freeze({ managed: true, profile: dash.profile,
+      get baseUrl() { assertCurrent(); return dash.baseUrl; },
+      get token() { assertCurrent(); return dash.token; },
+      assertCurrent,
+    });
+  }
+
   // Full command catalog (hermes_cli COMMAND_REGISTRY + TUI extras + skill /
   // quick commands), categorized. Feeds the composer palette for this agent.
   async listSlashCommands(agentId) {
@@ -7800,7 +8276,14 @@ class HermesBackend extends AgentBackend {
     if (!dash) return { supported: false, commands: [] };
     let res;
     try {
-      res = await gatewayRpc(dash, "commands.catalog", {});
+      const owned = this._captureGatewayDashboard(dash);
+      // The frozen host's formal profile field only chooses cwd for catalog;
+      // its quick/plugin commands and home-scoped skills need an exact session.
+      // This Agent-only API has no session input and must not mint one to read.
+      if (owned.managed && owned.profile !== "default") {
+        return { supported: false, reason: "profile-scope-unavailable", commands: [] };
+      }
+      res = await gatewayRpc(owned, "commands.catalog", owned.managed ? { profile: owned.profile } : {});
     } catch (err) {
       return { supported: false, reason: err?.message || String(err), commands: [] };
     }
@@ -7835,7 +8318,13 @@ class HermesBackend extends AgentBackend {
     const dash = this._slashDash(agentId);
     if (!dash) return { supported: false, items: [] };
     try {
-      const res = await gatewayRpc(dash, "complete.slash", { text: String(text || "") });
+      const owned = this._captureGatewayDashboard(dash);
+      // CompleteSlashParams has session_id but rejects profile. No session is
+      // selected by this API; unscoped named reads would use the launch home.
+      if (owned.managed && owned.profile !== "default") {
+        return { supported: false, reason: "profile-scope-unavailable", items: [] };
+      }
+      const res = await gatewayRpc(owned, "complete.slash", { text: String(text || "") });
       const items = (Array.isArray(res?.items) ? res.items : [])
         .map((it) =>
           typeof it === "string"
@@ -7866,18 +8355,30 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error("hermes: 该 agent 的命令执行面当前不可用");
     const { m, sock } = await this._gwEnsureRuntime(sessionKey, { allowCreate: true });
     const command = String(text || "").trim();
-    const res = await sock.request(
-      "slash.exec",
-      { session_id: m.runtimeId, command: command.startsWith("/") ? command : `/${command}` },
-      { timeoutMs: 60_000 },
-    );
+    const wireCommand = command.startsWith("/") ? command : `/${command}`;
+    let res;
+    try {
+      res = await sock.request(
+        "slash.exec",
+        { session_id: m.runtimeId, command: wireCommand },
+        // Manual compression can spend several minutes summarizing; Hermes'
+        // compute-host waiter allows 630 seconds. Keep a bounded margin above it.
+        { timeoutMs: /^\/compress(?:\s|$)/i.test(wireCommand) ? 660_000 : 60_000 },
+      );
+    } catch (error) {
+      if (error?.executionUncertain !== true) throw error;
+      // A dispatched RPC timeout/disconnect does not cancel the command. Do not
+      // misreport failure or retry a potentially completed side effect.
+      return { kind: "output", text: String(error.message || error), executionUncertain: true };
+    }
     if (typeof res?.type === "string") {
       if (res.type === "send") return { kind: "send", text: String(res.message ?? "") };
       if (res.type === "prefill") return { kind: "prefill", text: String(res.text ?? res.message ?? "") };
       if (res.type === "alias" && depth < 3) {
         return this.execSlash(agentId, sessionKey, String(res.target || ""), depth + 1);
       }
-      return { kind: "output", text: String(res.output ?? "") || "(no output)" };
+      return { kind: "output", text: String(res.output ?? "") || "(no output)",
+        ...(res.status === "pending" ? { executionUncertain: true } : {}) };
     }
     return {
       kind: "output",
@@ -7898,6 +8399,7 @@ class HermesBackend extends AgentBackend {
   // blocking approval/clarify/sudo/secret prompts.
 
   _gatewayChatEnabled(profile) {
+    if (this._localRuntime.isManaged()) return true;
     const mode = String(process.env.SHOGGOTH_HERMES_CHAT || "").toLowerCase();
     if (mode === "acp") return false;
     if (mode === "gateway") return true;
@@ -7927,6 +8429,8 @@ class HermesBackend extends AgentBackend {
         }
       },
       onReconnect: () => this._onGwReconnect(profile),
+      onServerRequest: frame => this._onGwServerRequest(profile, frame),
+      onServerRequestCancel: frame => this._onGwServerRequestCancel(profile, frame),
     });
     this.gwSockets.set(profile, sock);
     return sock;
@@ -7959,15 +8463,79 @@ class HermesBackend extends AgentBackend {
             m.runtimeId = newId;
           }
           m.generation = sock.generation;
+          sock.restoreServerRequests(res?.open_requests, m.runtimeId);
+          sock.replayServerRequests(m.runtimeId);
         })
         .catch(() => { /* 轮次超时兜底会收尾 */ });
     }
   }
 
+  getPendingChatPrompts(sessionKey) {
+    const mapping = this.gwRuntimeByKey.get(sessionKey);
+    const turn = mapping && this.gwTurns.get(mapping.runtimeId);
+    const sock = mapping && this.gwSockets.get(mapping.profile);
+    if (!turn || turn.ended || turn.sessionKey !== sessionKey || turn.requiredTransport === "gateway"
+      || mapping.generation !== sock?.generation) return [];
+    return sock.pendingServerRequestPrompts(mapping.runtimeId).map(prompt => ({ runId: turn.operationId, prompt }));
+  }
+
+  // A browser reload only observes the existing turn. It must not resume a
+  // runtime session, resend the user message, or acquire execution ownership.
+  async watchSession(sessionKey, hooks = {}, { signal } = {}) {
+    if (signal?.aborted) return;
+    const mapping = this.gwRuntimeByKey.get(sessionKey);
+    const turn = mapping && this.gwTurns.get(mapping.runtimeId);
+    if (!turn || turn.ended || turn.sessionKey !== sessionKey || turn.requiredTransport === "gateway") return;
+    if (turn.observers.size >= 64) throw new Error("Hermes session has too many observers");
+    let finish;
+    const done = new Promise(resolve => { finish = resolve; });
+    const observer = { hooks, finish };
+    turn.observers.add(observer);
+    signal?.addEventListener("abort", finish, { once: true });
+    try {
+      for (const { prompt } of this.getPendingChatPrompts(sessionKey)) hooks.prompt?.(prompt);
+      await done;
+    } finally {
+      signal?.removeEventListener("abort", finish);
+      turn.observers.delete(observer);
+    }
+  }
+
+  _onGwServerRequest(profile, frame) {
+    const sid = frame.params.session_id;
+    const sessionKey = this._gwSessionKeyFor(profile, sid);
+    const mapping = sessionKey && this.gwRuntimeByKey.get(sessionKey);
+    const sock = this.gwSockets.get(profile);
+    const turn = this.gwTurns.get(sid);
+    if (!mapping || mapping.profile !== profile || mapping.runtimeId !== sid
+      || mapping.generation !== sock?.generation || !turn || turn.sessionKey !== sessionKey) return false;
+    if (turn.selection) {
+      try {
+        const proof = require("./hermes-plugin-selection").validateHermesSelectionReceipt(frame.params.selection_dispatch, turn.selection, true);
+        const identity = [proof.actual_session_id, proof.actual_task_id, proof.actual_turn_id];
+        if (["unknown", "interrupted"].includes(proof.state) || identity.some(value => value === null)
+          || (turn.selectionIdentity && identity.some((value, index) => turn.selectionIdentity[index] !== value))) throw new Error();
+        turn.selectionIdentity = identity;
+      } catch {
+        throw Object.assign(new Error("Hermes request does not prove selected-turn ownership"), { code: "HERMES_REQUEST_OWNER_UNVERIFIED" });
+      }
+    }
+    const prompt = require("./hermes-server-requests").promptForRequest(frame);
+    if (!prompt || typeof turn.hooks.prompt !== "function") return false;
+    turn.hooks.prompt(prompt);
+    return true;
+  }
+  _onGwServerRequestCancel(profile, frame) {
+    const sid = frame.params.session_id;
+    const sessionKey = this._gwSessionKeyFor(profile, sid);
+    const turn = this.gwTurns.get(sid);
+    if (sessionKey && turn?.sessionKey === sessionKey) turn.hooks.promptExpire?.({ requestId: frame.id });
+  }
+
   _gwSessionKeyFor(profile, sessionId) {
     if (!sessionId) return null;
     const direct = this.gwKeyByRuntime.get(sessionId);
-    if (direct) return direct;
+    if (direct && this.gwRuntimeByKey.get(direct)?.profile === profile) return direct;
     for (const [key, m] of this.gwRuntimeByKey) {
       if (m.profile === profile && m.storedId === sessionId) return key;
     }
@@ -8004,6 +8572,22 @@ class HermesBackend extends AgentBackend {
     }
     const turn = this.gwTurns.get(sid);
     if (!turn) return;
+    if (turn.selection) {
+      if (!params?.selection_dispatch || params.selection_dispatch.operation_id !== turn.selection.operationId) return;
+      let proof;
+      try { proof = require("./hermes-plugin-selection").validateHermesSelectionReceipt(params.selection_dispatch, turn.selection, true); }
+      catch { turn.failObservation?.("Hermes 插件回合事件身份无法核实"); return; }
+      if (["unknown", "interrupted"].includes(proof.state)) {
+        turn.failObservation?.("Hermes 原插件回合结果需要核实，不能自动重发"); return;
+      }
+      if (proof.actual_task_id === null || proof.actual_turn_id === null) return;
+      const identity = [proof.actual_session_id, proof.actual_task_id, proof.actual_turn_id];
+      if (turn.selectionIdentity && identity.some((value, index) => turn.selectionIdentity[index] !== value)) {
+        turn.failObservation?.("Hermes 插件回合身份发生变化"); return;
+      }
+      turn.selectionIdentity = identity;
+      if (type === "selection.dispatch.bound") return;
+    }
     const hooks = turn.hooks;
     switch (type) {
       case "message.delta":
@@ -8036,8 +8620,8 @@ class HermesBackend extends AgentBackend {
       case "thinking.delta":
         break; // spinner-status noise — the official client ignores it too
       case "tool.start": {
-        let args;
-        if (typeof payload.args_text === "string" && payload.args_text.trim().startsWith("{")) {
+        let args = payload.args;
+        if (args === undefined && typeof payload.args_text === "string" && payload.args_text.trim().startsWith("{")) {
           try { args = JSON.parse(payload.args_text); } catch { /* still streaming */ }
         }
         hooks.tool?.({
@@ -8062,6 +8646,8 @@ class HermesBackend extends AgentBackend {
           args: payload.args,
           phase: "result",
           result: resultText,
+          isError: hermesToolFailed(payload.name, payload.result ?? resultText,
+            typeof payload.is_error === "boolean" ? payload.is_error : payload.isError),
           durationS: Number(payload.duration_s) > 0 ? Number(payload.duration_s) : undefined,
           diffText: typeof payload.inline_diff === "string" && payload.inline_diff ? payload.inline_diff : undefined,
         });
@@ -8140,6 +8726,7 @@ class HermesBackend extends AgentBackend {
         this.gwUsageByKey.set(sessionKey, u);
       }
     }
+    Object.assign(meta, this.nextTurnConfigs.get(sessionKey)?.display);
     this.sessionLiveMeta.set(sessionKey, meta);
     this._applyLiveMetaToRow(sessionKey);
   }
@@ -8219,10 +8806,14 @@ class HermesBackend extends AgentBackend {
 
   _gwEndTurn(runtimeId, turn) {
     if (!turn || turn.ended) return;
+    const mapping = this.gwRuntimeByKey.get(turn.sessionKey);
+    if (mapping?.runtimeId === runtimeId) this.gwSockets.get(mapping.profile)?.forgetServerRequestsForSession?.(runtimeId);
     turn.ended = true;
     if (turn.timer) clearTimeout(turn.timer);
     turn.timer = null;
     if (this.gwTurns.get(runtimeId) === turn) this.gwTurns.delete(runtimeId);
+    for (const observer of turn.observers || []) observer.finish();
+    turn.observers?.clear();
     turn.resolve?.();
     turn.resolve = null;
   }
@@ -8285,13 +8876,17 @@ class HermesBackend extends AgentBackend {
   }
 
   // Answer a blocking agent prompt (approval / clarify / sudo / secret) —
-  // routed here from the proxy's `chat.respond`. Approval resolves FIFO per
-  // session (no request_id); the rest correlate by request_id.
+  // routed here from the proxy's `chat.respond`. v7 answers the exact captured
+  // JSON-RPC request ID; only older gateways retain their legacy FIFO protocol.
   async respondChatPrompt(sessionKey, data = {}) {
     const m = this.gwRuntimeByKey.get(sessionKey);
     const sock = m ? this.gwSockets.get(m.profile) : null;
     if (!m || !sock) throw new Error("hermes: 该会话没有进行中的网关轮次，无法回应");
     const kind = String(data.kind || "");
+    if (sock.serverRequestsSupported || String(data.requestId || "").startsWith("srq-")) {
+      if (m.generation !== sock.generation || !this.gwTurns.has(m.runtimeId)) throw new Error("Hermes 请求所属轮次已失效");
+      return sock.respondServerRequest(m.runtimeId, data);
+    }
     if (kind === "approval") {
       return sock.request("approval.respond", {
         session_id: m.runtimeId,
@@ -8377,6 +8972,8 @@ class HermesBackend extends AgentBackend {
       // = 还没建。老网关不回 info → 按「已建」放行（宽松兜底，别把能切的挡住）。
       agentBuilt: !eagerError && res?.info?.lazy !== true,
       eagerError,
+      resumeInfo: res?.info,
+      openRequests: res?.open_requests,
     };
     this.gwRuntimeByKey.set(sessionKey, m);
     this.gwKeyByRuntime.set(runtimeId, sessionKey);
@@ -8406,7 +9003,7 @@ class HermesBackend extends AgentBackend {
           "建出 agent 才能改模型。请补回该 provider / 凭证，或新建一条会话。",
       );
     };
-    if (m.eagerError) throw dangling(m.eagerError);
+    if (m.eagerError && !this._gwLegacyCustomRoute(m)) throw dangling(m.eagerError);
     try {
       await sock.request("process.list", { session_id: m.runtimeId }, { timeoutMs: 40_000 });
     } catch (err) {
@@ -8415,9 +9012,36 @@ class HermesBackend extends AgentBackend {
         m.agentBuilt = true;
         return;
       }
+      if (await this._gwRecoverLegacyCustomRoute(m, sock, err)) return;
       throw dangling(err);
     }
     m.agentBuilt = true;
+  }
+
+  _gwLegacyCustomRoute(m) {
+    const provider = String(m.resumeInfo?.provider || "").trim();
+    const model = String(m.resumeInfo?.model || "").trim();
+    if (!m.resumed || !provider || provider.startsWith("custom:") || !model) return null;
+    const choice = this._modelCatalogProfileSnapshots.get(m.profile)?.choices?.find(row =>
+      row.id === model && row.provider === provider && row.acpProviderRef === `custom:${provider}`);
+    return choice ? { model, provider, providerRef: choice.acpProviderRef } : null;
+  }
+
+  async _gwRecoverLegacyCustomRoute(m, sock, error) {
+    const route = this._gwLegacyCustomRoute(m);
+    if (!route || error?.jsonRpc !== true || error.code !== 5032
+      || !String(error.message).includes(`No usable credentials found for provider '${route.provider}'.`)) return false;
+    // Current Hermes can retry a completed failed build through its official
+    // model setter. Keep the stored conversation and let the Runtime persist
+    // the corrected identity; no database edits or prompt replay.
+    const result = await sock.request("config.set", { session_id: m.runtimeId, key: "model",
+      value: modelSwitchValue(route.model, route.providerRef, "session") });
+    if (result?.confirm_required) throw new Error(result.confirm_message || result.warning || "Hermes 模型恢复需要确认");
+    await sock.request("process.list", { session_id: m.runtimeId }, { timeoutMs: 40_000 });
+    m.resumeInfo = { ...m.resumeInfo, provider: route.providerRef };
+    m.eagerError = null;
+    m.agentBuilt = true;
+    return true;
   }
 
   // Compact the session's context = the gateway's session.compress (what the
@@ -8436,7 +9060,7 @@ class HermesBackend extends AgentBackend {
   }
 
   async _sendViaGateway({ sessionKey, message, hooks, atts, transcript, profile, assertCurrentGeneration,
-    requiredTransport }, retried = false) {
+    requiredTransport, pluginSelection, operationId, selectedAttachments }, retried = false) {
     const { tail, dash } = this._sessionTarget(sessionKey);
     const sock = this._gwSocket(profile, dash);
     const unavailable = (err) => {
@@ -8447,7 +9071,7 @@ class HermesBackend extends AgentBackend {
     // —— ensure a runtime session (create for main/fresh keys, resume otherwise)
     let m = this.gwRuntimeByKey.get(sessionKey);
     if (m && m.generation !== (this.gwSockets.get(profile)?.generation ?? -1)) m = null;
-    if (!m && requiredTransport === "gateway") {
+    if (!m && requiredTransport === "gateway" && pluginSelection === undefined) {
       // session.resume can execute a crash-recovery continuation by itself.
       // An inspiration turn must keep its prepared runtime identity and cannot
       // silently recover that session before submitting another prompt.
@@ -8491,14 +9115,37 @@ class HermesBackend extends AgentBackend {
         runtimeId,
         storedId: String(res?.stored_session_id || res?.resumed || (useCreate ? "" : prior?.storedId || tail)) || undefined,
         generation: sock.generation,
+        resumed: !useCreate,
+        agentBuilt: res?.info?.lazy !== true,
+        resumeInfo: res?.info,
+        openRequests: res?.open_requests,
       };
       this.gwRuntimeByKey.set(sessionKey, m);
       this.gwKeyByRuntime.set(runtimeId, sessionKey);
+    }
+    if (this._gwLegacyCustomRoute(m)) {
+      await this._gwRequireAgent(m, sock);
+      assertCurrentGeneration();
+    }
+    let selected = null;
+    if (pluginSelection !== undefined) {
+      selected = await require("./hermes-selection-input").prepareHermesSelectedInput({
+        runtimeId: m.runtimeId, agentId: /^agent:([^:]+)/u.exec(sessionKey)?.[1], operationId, pluginSelection,
+        message, attachments: selectedAttachments || [],
+        requestHost: (method, params, options) => sock.request(method, params, options), service: this._externalPluginSelectionService,
+        assertCurrent: assertCurrentGeneration,
+      });
     }
     // —— attachments: upload-then-submit (official style). Images/PDF pages
     // queue into this turn server-side; files stage under the workspace and
     // return an @file: ref that must ride the prompt TEXT.
     let fileRefs = "";
+    try { await this._applyNextTurnConfigs(sessionKey, m, sock); }
+    catch (error) {
+      hooks.error?.(`Hermes 下一轮设置未应用，消息未发送：${error.message}`);
+      return;
+    }
+    assertCurrentGeneration();
     const uploadFail = (label, err) => {
       const errText = `${label}上传失败：${err?.message || err}，消息未发送。`;
       transcript.push({ role: "assistant", content: [{ type: "text", text: `[${errText}]` }], timestamp: Date.now() });
@@ -8508,7 +9155,7 @@ class HermesBackend extends AgentBackend {
     // 而 dashboard 冷启动期还并行着模型目录抓取（/api/model/options 可达 20s），
     // 排队后极易超过默认 30s——真机实测「file.attach 超时」即出自此，同一调用在
     // 暖机后只要 3s。
-    for (const img of atts.images) {
+    for (const img of selected ? [] : atts.images) {
       try {
         const ext = /\/(\w+)/.exec(String(img.mimeType || ""))?.[1] || "png";
         await sock.request("image.attach_bytes", {
@@ -8522,7 +9169,7 @@ class HermesBackend extends AgentBackend {
         return;
       }
     }
-    for (const pdf of atts.pdfs) {
+    for (const pdf of selected ? [] : atts.pdfs) {
       try {
         // pdftoppm renders each page to an image server-side — minutes-scale on
         // big documents; give it room.
@@ -8533,7 +9180,7 @@ class HermesBackend extends AgentBackend {
         return;
       }
     }
-    for (const f of atts.files) {
+    for (const f of selected ? [] : atts.files) {
       try {
         const r = await sock.request("file.attach", {
           session_id: m.runtimeId,
@@ -8552,15 +9199,25 @@ class HermesBackend extends AgentBackend {
     // then wait for message.complete/error via the turn promise.
     const turn = {
       sessionKey,
+      operationId,
       requiredTransport,
       hooks,
+      observers: new Set(),
       accumulated: "",
       thought: "",
       sealed: 0,
       usageBefore: this.gwUsageByKey.get(sessionKey) || null,
       resolve: null,
       timer: null,
+      ...(selected ? { selection: selected.selection } : {}),
     };
+    const originalHooks = turn.hooks;
+    turn.hooks = Object.fromEntries(CHAT_HOOK_METHODS.map(name => [name, (...args) => {
+      originalHooks[name]?.(...args);
+      for (const observer of turn.observers) {
+        try { observer.hooks[name]?.(...args); } catch { /* a detached UI cannot interrupt execution */ }
+      }
+    }]));
     const pendingHooks = [];
     if (requiredTransport === "gateway") {
       // Events may precede the submit acknowledgement. Hermes can queue or
@@ -8586,17 +9243,33 @@ class HermesBackend extends AgentBackend {
       this._gwEndTurn(m.runtimeId, turn);
     }, GW_TURN_TIMEOUT_MS);
     this.gwTurns.set(m.runtimeId, turn);
+    sock.restoreServerRequests(m.openRequests, m.runtimeId); delete m.openRequests;
+    sock.replayServerRequests(m.runtimeId);
     try {
       // @file: refs (staged uploads) ride the prompt text — that's how the
       // agent learns about them (official desktop inlines them the same way).
-      const acknowledgement = await sock.request("prompt.submit", { session_id: m.runtimeId, text: `${message}${fileRefs}` });
+      const acknowledgement = await sock.request("prompt.submit", { session_id: m.runtimeId, text: `${message}${fileRefs}`,
+        ...(selected ? { selection_dispatch: selected.wire, queued: true, ...(selected.inputDigest ? { selection_input_digest: selected.inputDigest } : {}) } : {}) }, { operationId });
       if (requiredTransport === "gateway") {
         if (turn.submissionState === "rejected") return;
-        if (acknowledgement?.status !== "streaming") {
+        if (selected) {
+          const receipt = require("./hermes-plugin-selection").validateHermesSelectionAcknowledgement(acknowledgement, selected.selection);
+          if (["complete", "stopped", "failed", "canceled", "cancelled"].includes(receipt.state)
+            && (acknowledgement.replayed === true || receipt.actual_turn_id === null || pendingHooks.length === 0)) {
+            // Finished replays and failures before a physical turn have no live
+            // stream. Observe the original operation instead of waiting thirty
+            // minutes or consuming a new draft. A buffered exact completion may
+            // still precede the first ACK and is released by normal acceptance.
+            turn.failObservation("原插件任务已结束，请核验原任务并同步历史记录");
+            return;
+          }
+        }
+        if (acknowledgement?.status !== "streaming" && !(selected && acknowledgement?.status === "queued")) {
           turn.failObservation("Hermes 未确认本轮独立执行，需要核对运行状态");
           return;
         }
         turn.submissionState = "accepted";
+        if (selected) hooks.accepted?.();
         for (const notify of pendingHooks.splice(0)) notify();
       }
       // Hermes starts persisting the canonical stored session once the prompt
@@ -8719,9 +9392,12 @@ class HermesBackend extends AgentBackend {
           profile,
           assertCurrentGeneration,
           requiredTransport,
+          pluginSelection: opts.pluginSelection,
+          operationId: idempotencyKey,
+          selectedAttachments: opts.attachments,
         });
       } catch (err) {
-        if (err?.code !== "GW_UNAVAILABLE") throw err;
+        if (err?.code !== "GW_UNAVAILABLE" || err?.noAcpFallback === true || this._localRuntime.isManaged()) throw err;
         this.gwChatDisabledUntil.set(profile, Date.now() + GW_CHAT_RETRY_MS);
         if (freshGatewayBinding || requiredTransport === "gateway") {
           assertCurrentGeneration();
@@ -8844,6 +9520,8 @@ class HermesBackend extends AgentBackend {
           hooks.tool?.({
             toolCallId: update.toolCallId,
             phase: done ? "result" : "update",
+            args: update.rawInput,
+            diff: acpToolDiff(update.content),
             result: acpToolText(update.content),
             isError: update.status === "failed",
           });
@@ -8937,7 +9615,7 @@ class HermesBackend extends AgentBackend {
     for (const profile of this.dashboards.keys()) {
       const agentId = this._agentIdForRoutableProfile(profile);
       if (!agentId) continue;
-      const home = hermesHomeForProfile(profile);
+      const home = this._hermesHomeForProfile(profile);
       for (const sub of subdirs) {
         candidates.push({ path: path.join(home, sub), area: `${profile}/${sub}`, agentId });
       }
@@ -8946,7 +9624,7 @@ class HermesBackend extends AgentBackend {
       const jobs = await this.getCronJobs();
       for (const job of Array.isArray(jobs) ? jobs : []) {
         let wd = typeof job?.workdir === "string" ? job.workdir.trim() : "";
-        if (wd.startsWith("~/")) wd = path.join(os.homedir(), wd.slice(2));
+        if (wd.startsWith("~/")) wd = path.join(this._localRuntime.userHome(), wd.slice(2));
         if (wd && path.isAbsolute(wd)) candidates.push({ path: wd, area: "cron-workdir", agentId: job.agentId });
       }
     } catch { /* cron 不可达 → 静态根即可 */ }
@@ -8956,7 +9634,7 @@ class HermesBackend extends AgentBackend {
         : [...this.dashboards.entries()][0] || null;
       const [profile, dash] = entry || [];
       if (dash?.baseUrl && this._agentIdForRoutableProfile(profile)) {
-        const { status, json } = await this._httpGetJson(this._kanbanUrl(dash, "/board"), dash.token);
+        const { status, json } = await this._httpGetJson(this._kanbanUrl(dash, "/board"), dash.token, dash);
         if (status === 200 && json) {
           for (const col of Array.isArray(json.columns) ? json.columns : []) {
             for (const t of Array.isArray(col?.tasks) ? col.tasks : []) {
@@ -9031,11 +9709,11 @@ class HermesBackend extends AgentBackend {
       const target = this._sessionTarget(sessionKey);
       const serverId = this._serverSessionId(sessionKey, target.tail);
       const { status, json } = await this._httpGetJson(
-        `${target.dash.baseUrl}/api/sessions/${encodeURIComponent(serverId)}/messages`, target.dash.token,
+        `${target.dash.baseUrl}/api/sessions/${encodeURIComponent(serverId)}/messages`, target.dash.token, target.dash,
       );
       if (status !== 200 || !Array.isArray(json?.messages)) throw new Error("History unavailable");
       const roots = (await this._artifactRoots()).filter((root) => root.agentId === agentId);
-      const home = hermesHomeForProfile(target.profile);
+      const home = this._hermesHomeForProfile(target.profile);
       matched = await collectSessionOutputArtifacts({
         ...sessionArtifactHistory(json.messages, sinceMs), workspace: home, runtimeHome: home,
         outputRoots: roots, sessionCreatedAt: sinceMs, agentId,
@@ -9060,8 +9738,8 @@ class HermesBackend extends AgentBackend {
   }
 
   // GET+JSON 小包装（单测注入点）
-  async _httpGetJson(url, token) {
-    const { status, body } = await httpGet(url, { token });
+  async _httpGetJson(url, token, dash) {
+    const { status, body } = await this._httpGet(url, { token }, dash);
     let json = null;
     try { json = JSON.parse(body); } catch { /* 非 JSON 响应 */ }
     return { status, json };
@@ -9076,7 +9754,7 @@ class HermesBackend extends AgentBackend {
       try {
         const { status, json } = await this._httpGetJson(
           `${dash.baseUrl}/api/sessions/${encodeURIComponent(sessionKey)}/messages?profile=${encodeURIComponent(profile)}`,
-          dash.token,
+          dash.token, dash,
         );
         if (status !== 200 || !Array.isArray(json?.messages)) return undefined;
         for (let i = json.messages.length - 1; i >= 0; i -= 1) {
@@ -9128,7 +9806,7 @@ class HermesBackend extends AgentBackend {
   // 旧版或远端无账本时兼容 /runs（最多 100 条）及 job 的 last-run，
   // 并明确标记截断、仅最新执行或未知结果。
   _readCronExecutionHistory(profile, sinceMs) {
-    return readHermesCronHistory(path.join(hermesHomeForProfile(profile), "cron", "executions.db"), sinceMs);
+    return readHermesCronHistory(path.join(this._hermesHomeForProfile(profile), "cron", "executions.db"), sinceMs);
   }
 
   async getRecentCronRuns({ sinceMs = 0, limit = 50 } = {}) {
@@ -9183,7 +9861,7 @@ class HermesBackend extends AgentBackend {
         try {
           const { status, json } = await this._httpGetJson(
             `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(localId)}/runs?limit=100`,
-            dash.token,
+            dash.token, dash,
           );
           if (hasLedger) {
             // Preserve trajectory/assistant summaries without counting the
@@ -9247,7 +9925,7 @@ class HermesBackend extends AgentBackend {
     return result;
   }
 
-  async getCronJobs() {
+  async getCronJobs({ strict = false } = {}) {
     // 官方 GET /api/cron/jobs 默认 ?profile=all（全机聚合）：每个 dashboard 都会
     // 返回所有 profile 的 job，按 dashboard 循环推入就是 1→N 幽灵行（CRON-001）。
     // 每个 dashboard 只查它自己的 ?profile=<name>——owner 即查询目标，天然无重。
@@ -9256,11 +9934,11 @@ class HermesBackend extends AgentBackend {
         const agentId = this._agentIdForRoutableProfile(profile);
         if (!agentId) return [];
         try {
-          const { status, body } = await httpGet(
+          const { status, body } = await this._httpGet(
             `${dash.baseUrl}/api/cron/jobs?profile=${encodeURIComponent(profile)}`,
-            { token: dash.token },
+            { token: dash.token }, dash,
           );
-          if (status !== 200) return [];
+          if (status !== 200) { if (strict) throw new Error("hermes: Cron inventory unavailable"); return []; }
           const parsed = JSON.parse(body);
           // The HTTP endpoint returns a bare array (list_jobs() -> List[Dict]);
           // the {jobs:[...]} wrapper is only the on-disk file shape.
@@ -9269,8 +9947,10 @@ class HermesBackend extends AgentBackend {
             : Array.isArray(parsed?.jobs)
               ? parsed.jobs
               : [];
+          if (strict && !Array.isArray(parsed) && !Array.isArray(parsed?.jobs)) throw new Error("hermes: Cron inventory invalid");
           return list.map((j) => normalizeHermesCronJob(j, agentId));
-        } catch {
+        } catch (error) {
+          if (strict) throw error;
           return []; /* skip dashboard on failure */
         }
       }),
@@ -9323,10 +10003,10 @@ class HermesBackend extends AgentBackend {
     if (Array.isArray(spec.contextFrom) && spec.contextFrom.length) createBody.context_from = spec.contextFrom;
     if (Array.isArray(spec.enabledToolsets) && spec.enabledToolsets.length) createBody.enabled_toolsets = spec.enabledToolsets;
     if (typeof spec.workdir === "string" && spec.workdir) createBody.workdir = spec.workdir;
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "POST",
       `${dash.baseUrl}/api/cron/jobs${q}`,
-      { token: dash.token, body: createBody },
+      { token: dash.token, body: createBody }, dash,
     );
     if (status >= 300) throw new Error(`hermes create cron failed: ${status} ${body}`);
     const created = JSON.parse(body);
@@ -9335,33 +10015,33 @@ class HermesBackend extends AgentBackend {
     const advanced = buildHermesCronUpdates({ repeat: spec.repeat, profile: spec.profile });
     try {
       if (Object.keys(advanced).length) {
-        const upd = await httpRequest(
+        const upd = await this._httpRequest(
           "PUT",
           `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}${q}`,
-          { token: dash.token, body: { updates: advanced } },
+          { token: dash.token, body: { updates: advanced } }, dash,
         );
         if (upd.status >= 300) throw new Error(`hermes advanced cron update failed: ${upd.status} ${upd.body}`);
       }
       if (spec.enabled === false) {
-        const paused = await httpRequest(
+        const paused = await this._httpRequest(
           "POST",
           `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}/pause${q}`,
-          { token: dash.token },
+          { token: dash.token }, dash,
         );
         if (paused.status >= 300) throw new Error(`hermes pause cron failed: ${paused.status} ${paused.body}`);
       }
-      const latest = await httpGet(
+      const latest = await this._httpGet(
         `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}${q}`,
-        { token: dash.token },
+        { token: dash.token }, dash,
       );
       if (latest.status !== 200) throw new Error(`hermes get cron after create failed: ${latest.status}`);
       return normalizeHermesCronJob(JSON.parse(latest.body), agentId);
     } catch (err) {
       try {
-        await httpRequest(
+        await this._httpRequest(
           "DELETE",
           `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}${q}`,
-          { token: dash.token },
+          { token: dash.token }, dash,
         );
       } catch {
         /* 回滚失败时保留原始错误，避免掩盖创建后补丁失败的根因。 */
@@ -9389,10 +10069,10 @@ class HermesBackend extends AgentBackend {
     // enable/disable maps to Hermes' dedicated pause/resume endpoints.
     if (typeof src.enabled === "boolean") {
       const action = src.enabled ? "resume" : "pause";
-      const { status, body } = await httpRequest(
+      const { status, body } = await this._httpRequest(
         "POST",
         `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}/${action}${q}`,
-        { token: dash.token },
+        { token: dash.token }, dash,
       );
       if (status >= 300) throw new Error(`hermes ${action} cron failed: ${status} ${body}`);
     }
@@ -9400,16 +10080,16 @@ class HermesBackend extends AgentBackend {
     const rest = buildHermesCronUpdates(src);
     delete rest.enabled;
     if (Object.keys(rest).length) {
-      const { status, body } = await httpRequest(
+      const { status, body } = await this._httpRequest(
         "PUT",
         `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}${q}`,
-        { token: dash.token, body: { updates: rest } },
+        { token: dash.token, body: { updates: rest } }, dash,
       );
       if (status >= 300) throw new Error(`hermes update cron failed: ${status} ${body}`);
     }
-    const { status, body } = await httpGet(
+    const { status, body } = await this._httpGet(
       `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}${q}`,
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     if (status !== 200) throw new Error(`hermes get cron after update failed: ${status}`);
     return normalizeHermesCronJob(JSON.parse(body), agentId);
@@ -9427,20 +10107,20 @@ class HermesBackend extends AgentBackend {
   /** 已持 Profile gate 的 Cron 删除。 */
   async _deleteCronJobUnlocked(id) {
     const { dash, jobId, profile } = this._cronTarget(id);
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "DELETE",
       `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}?profile=${encodeURIComponent(profile)}`,
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     if (status >= 300) throw new Error(`hermes delete cron failed: ${status} ${body}`);
   }
 
   async runCronJob(id) {
     const { dash, jobId, agentId, profile } = this._cronTarget(id);
-    const { status, body } = await httpRequest(
+    const { status, body } = await this._httpRequest(
       "POST",
       `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}/trigger?profile=${encodeURIComponent(profile)}`,
-      { token: dash.token },
+      { token: dash.token }, dash,
     );
     if (status >= 300) throw new Error(`hermes trigger cron failed: ${status} ${body}`);
     try {
@@ -9459,14 +10139,14 @@ class HermesBackend extends AgentBackend {
     try {
       const { dash, jobId, profile } = this._cronTarget(id);
       const q = `?profile=${encodeURIComponent(profile)}`;
-      const jobResp = await httpGet(
+      const jobResp = await this._httpGet(
         `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}${q}`,
-        { token: dash.token },
+        { token: dash.token }, dash,
       );
       if (jobResp.status !== 200) return { runs: [] };
       let job = JSON.parse(jobResp.body);
       try {
-        const listResp = await httpGet(`${dash.baseUrl}/api/cron/jobs${q}`, { token: dash.token });
+        const listResp = await this._httpGet(`${dash.baseUrl}/api/cron/jobs${q}`, { token: dash.token }, dash);
         if (listResp.status === 200) {
           const parsed = JSON.parse(listResp.body);
           const list = Array.isArray(parsed)
@@ -9481,9 +10161,9 @@ class HermesBackend extends AgentBackend {
         // Older dashboards may not expose a usable list snapshot here. Keep the
         // detail response and fall back to conservative legacy correlation.
       }
-      const runsResp = await httpGet(
+      const runsResp = await this._httpGet(
         `${dash.baseUrl}/api/cron/jobs/${encodeURIComponent(jobId)}/runs${q}&limit=100`,
-        { token: dash.token },
+        { token: dash.token }, dash,
       );
       let runs;
       if (runsResp.status === 200) {
@@ -9589,9 +10269,9 @@ class HermesBackend extends AgentBackend {
     }
     let response;
     try {
-      response = await httpGet(
+      response = await this._httpGet(
         `${target.dash.baseUrl}/api/sessions/${encodeURIComponent(sessionKey)}/messages?profile=${encodeURIComponent(target.profile)}`,
-        { token: target.dash.token },
+        { token: target.dash.token }, target.dash,
       );
     } catch {
       return { supported: false, reason: "unavailable", parts: [] };
@@ -9662,7 +10342,8 @@ class HermesBackend extends AgentBackend {
           toolCallId: typeof message.tool_call_id === "string" ? message.tool_call_id : undefined,
           toolName: typeof message.tool_name === "string" && message.tool_name ? message.tool_name : undefined,
           text: clip(text),
-          ...((message.is_error === true || message.isError === true) ? { isError: true } : {}),
+          isError: hermesToolFailed(message.tool_name, message.content,
+            typeof message.is_error === "boolean" ? message.is_error : message.isError),
           ts,
         });
       }
@@ -9711,6 +10392,7 @@ class HermesBackend extends AgentBackend {
     this.gwUsageByKey.clear();
     this.gwChatDisabledUntil.clear();
     this.sessionLiveMeta.clear();
+    this.nextTurnConfigs.clear();
     this.gwLastFinalMeta?.clear?.();
     if (this.sessionsRefreshTimer) {
       clearInterval(this.sessionsRefreshTimer);

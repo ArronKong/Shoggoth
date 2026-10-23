@@ -1,13 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { acceptAgentMemoryCandidates, explainAgentMemory, listAgentMemories,
-  listAgentMemoryCandidates, listAgentTranscripts, mutateAgentMemory,
-  reviewAgentMemoryCandidate } from "../../api/client";
+import { acceptAgentMemoryCandidates, explainAgentMemory, forgetAgentMemorySession, getAgentMemoryImport,
+  listAgentMemories, listAgentMemoryCandidates, listAgentTranscripts, mutateAgentMemory,
+  reviewAgentMemoryCandidate, undoAgentMemoryConsolidation } from "../../api/client";
 import { useToast } from "../../components/ui";
 import { useNavigationGuard } from "../../lib/navigation-guard";
 import type { AgentMemoryCandidate, AgentMemoryCandidatePage, AgentMemoryExplanation,
-  AgentMemoryItem, AgentMemoryPage, AgentTranscriptEventPage } from "../../types";
+  AgentMemoryImportStatus, AgentMemoryItem, AgentMemoryPage, AgentTranscriptEventPage } from "../../types";
+import AgentSharedMemoryList from "./AgentSharedMemoryList";
 import s from "./AgentMemoryEditor.module.css";
+import CodexMemoryImportReportDialog from "./CodexMemoryImportReportDialog";
+
+// An Agent's save that the user's quoted words did not support. No Agent
+// recalls it until the user confirms it here, which re-saves it as theirs.
+const awaitsConfirmation = (item: AgentMemoryItem) => item.sourceRefs.some((ref) => ref.startsWith("untrusted:"));
 
 // Edit authoritative records, not the bounded Markdown projection. Unloaded
 // records, provenance and workspace bindings must survive edits to this page.
@@ -19,11 +25,15 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
   const [explanation, setExplanation] = useState<AgentMemoryExplanation | null>(null);
   const [evidenceAnchorId, setEvidenceAnchorId] = useState<string | null>(null);
   const [explaining, setExplaining] = useState(false);
+  const [importStatus, setImportStatus] = useState<AgentMemoryImportStatus | null>(null);
+  const [importReportOpen, setImportReportOpen] = useState(false);
   const [candidatePage, setCandidatePage] = useState<AgentMemoryCandidatePage | null>(null);
   const [candidateStatus, setCandidateStatus] = useState<"pending" | "all">("pending");
   const [candidateBusy, setCandidateBusy] = useState(false);
   const [candidateError, setCandidateError] = useState("");
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
+  // The conversation whose memories the user is about to forget (second click confirms).
+  const [forgetSessionId, setForgetSessionId] = useState<string | null>(null);
   const [sourcePreview, setSourcePreview] = useState<{ candidateId: string; text: string } | null>(null);
   const [sourceLoading, setSourceLoading] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -107,7 +117,29 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
     setSelectedCandidateIds([]);
     void load();
     void loadCandidates();
+    let current = true;
+    let importTimer: ReturnType<typeof setTimeout> | undefined;
+    setImportStatus(null);
+    setImportReportOpen(false);
+    // Only the main Agent imports Codex memories; other Agents report not applicable.
+    if (backendId === "shoggoth") {
+      const refreshImport = async () => {
+        try {
+          const value = await getAgentMemoryImport(backendId, agentId);
+          if (!current) return;
+          setImportStatus(value);
+          if (value.applicable && ["idle", "running", "deferred"].includes(value.state || "")) {
+            importTimer = setTimeout(refreshImport, value.state === "deferred" ? 60_000 : 5000);
+          }
+        } catch {
+          if (current) importTimer = setTimeout(refreshImport, 15_000);
+        }
+      };
+      void refreshImport();
+    }
     return () => {
+      current = false;
+      clearTimeout(importTimer);
       generation.current++; inFlight.current = false;
       candidateGeneration.current++; candidateInFlight.current = false;
       evidenceGeneration.current++;
@@ -206,6 +238,32 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
     }
   };
 
+  // Undo a consolidation or forget a conversation from its record, then reload both lists.
+  const changeFromRecord = async (run: () => Promise<string>) => {
+    if (!page || busy || inFlight.current || candidateInFlight.current) return;
+    candidateInFlight.current = true;
+    const ticket = ++candidateGeneration.current;
+    setCandidateBusy(true); setCandidateError("");
+    let succeeded = false;
+    try {
+      const message = await run();
+      if (candidateGeneration.current !== ticket) return;
+      succeeded = true;
+      setForgetSessionId(null);
+      toast.success(message);
+    } catch (cause) {
+      if (candidateGeneration.current === ticket) {
+        setCandidateError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      if (candidateGeneration.current === ticket) { candidateInFlight.current = false; setCandidateBusy(false); }
+    }
+    if (succeeded) {
+      void loadCandidates(false, candidateStatus);
+      void load(false, "active");
+    }
+  };
+
   const toggleCandidateSelection = (candidateId: string) => {
     setSelectedCandidateIds((selected) => selected.includes(candidateId)
       ? selected.filter((id) => id !== candidateId)
@@ -285,6 +343,20 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
   return (
     <div className={s.editor} aria-label={t("agents.memoryEditor")}>
       <p className={s.hint}>{t("agents.memoryExplain")}</p>
+      {importStatus?.supported && importStatus.applicable && importStatus.state
+        && ["running", "completed", "deferred", "abandoned", "failed"].includes(importStatus.state) && <p className={s.hint}>
+        {t(`agents.${importStatus.task ? "memoryCodexTask" : "memoryCodexImport"}.${importStatus.state}`, {
+          imported: importStatus.imported ?? 0, skipped: importStatus.skipped ?? 0,
+          attempts: importStatus.task?.attempts ?? 0, reason: importStatus.reason ?? "" })}
+        {importStatus.task?.retryAt != null && <> {t("agents.memoryCodexTask.retryScheduled", {
+          time: new Date(importStatus.task.retryAt).toLocaleString(),
+        })}</>}
+        {importStatus.task?.reportRunId && <> <button type="button" className={s.inlineAction}
+          onClick={() => setImportReportOpen(true)}>{t("agents.memoryCodexTask.reportOpen")}</button></>}
+        {importStatus.task?.jobId && <> <a href="#/cron">{t("agents.memoryCodexTask.open")}</a></>}
+      </p>}
+      <CodexMemoryImportReportDialog backendId={backendId} agentId={agentId}
+        open={importReportOpen} onClose={() => setImportReportOpen(false)} />
       <button className={s.more} type="button" disabled={busy} onClick={switchAudit}>
         {t(auditMode ? "agents.memoryShowActive" : "agents.memoryShowForgotten")}
       </button>
@@ -367,6 +439,13 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
                 onClick={() => void previewCandidateSource(candidate)}>
                 {t("agents.memoryCandidateShowSource")}
               </button>
+              {candidate.status === "accepted" && page?.items.some((item) => item.id === candidate.acceptedMemoryId
+                && item.sourceRefs.includes("consolidated:auto")) && <button type="button"
+                disabled={candidateBusy || busy || sourceLoading !== null}
+                onClick={() => void changeFromRecord(async () => {
+                  await undoAgentMemoryConsolidation(backendId, agentId, candidate.acceptedMemoryId!, page.revision);
+                  return t("agents.memoryConsolidationUndone");
+                })}>{t("agents.memoryConsolidationUndo")}</button>}
               {candidate.status === "pending" && <>
                 <button type="button" disabled={candidateBusy || busy || sourceLoading !== null}
                   onClick={() => void reviewCandidate(candidate, "reject")}>
@@ -377,6 +456,17 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
                   {t("agents.memoryCandidateAccept")}
                 </button>
               </>}
+              <button type="button" disabled={candidateBusy || busy || sourceLoading !== null || !page}
+                onClick={() => forgetSessionId !== candidate.source.sessionId
+                  ? setForgetSessionId(candidate.source.sessionId)
+                  : void changeFromRecord(async () => {
+                    const result = await forgetAgentMemorySession(backendId, agentId,
+                      candidate.source.sessionId, page!.revision);
+                    return t("agents.memorySessionForgotten", { count: result.forgotten });
+                  })}>
+                {t(forgetSessionId === candidate.source.sessionId
+                  ? "agents.memoryForgetSessionConfirm" : "agents.memoryForgetSession")}
+              </button>
             </div>
           </article>)}
           {candidatePage?.hasMore && <button className={s.more} type="button" disabled={candidateBusy}
@@ -387,6 +477,8 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
           <div className={s.meta}>
             <span>{t(`agents.memoryScopes.${item.scope}`)}</span>
             {item.sensitivity === "private" && <span>{t("agents.memoryPrivate")}</span>}
+            {awaitsConfirmation(item) && <span title={t("agents.memoryAwaitingConfirmationHint")}>
+              {t("agents.memoryAwaitingConfirmation")}</span>}
           </div>
           <textarea className={s.text} value={drafts[item.id] ?? item.content} disabled={busy || auditMode}
             aria-label={t("agents.memoryContent", { index: index + 1 })} rows={3}
@@ -399,6 +491,9 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
             {!auditMode && <button type="button" disabled={busy || !(drafts[item.id] ?? item.content).trim()
               || (drafts[item.id] ?? item.content) === item.content}
               onClick={() => void save("update", item)}>{t("common.save")}</button>}
+            {!auditMode && awaitsConfirmation(item) && <button type="button"
+              disabled={busy || !(drafts[item.id] ?? item.content).trim()}
+              onClick={() => void save("update", item)}>{t("agents.memoryConfirm")}</button>}
           </div>
           {evidenceAnchorId === item.id && explanation && <aside className={s.detail} aria-live="polite">
             <p><strong>{t(explanation.item.id === item.id
@@ -412,6 +507,13 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
               ? "agents.memoryImportEvidence" : `agents.memoryEvidence.${explanation.evidence.status}`)}</p>
             {explanation.evidence.importFile && <p>{t("agents.memoryImportedFile")}: {explanation.evidence.importFile.name
               ?? t("agents.memoryImportedFileNameUnavailable")} · SHA-256 <code>{explanation.evidence.importFile.sha256}</code></p>}
+            {explanation.evidence.importSpan && <p>{t("agents.memoryImportedLines", {
+              lines: explanation.evidence.importSpan.lineStart === explanation.evidence.importSpan.lineEnd
+                ? `${explanation.evidence.importSpan.lineStart}`
+                : `${explanation.evidence.importSpan.lineStart}–${explanation.evidence.importSpan.lineEnd}` })}</p>}
+            {explanation.evidence.importSpan && (explanation.evidence.importSpan.excerpt
+              ? <blockquote>{explanation.evidence.importSpan.excerpt}</blockquote>
+              : <p>{t("agents.memoryImportedExcerptUnavailable")}</p>)}
             {explanation.evidence.quote && <blockquote>{explanation.evidence.quote}</blockquote>}
             {explanation.evidence.sessionId && <p>{t("agents.memorySession")}: {explanation.evidence.sessionId}</p>}
             {explanation.evidence.eventId && <p>{t("agents.memoryEvent")}: {explanation.evidence.eventId}</p>}
@@ -424,6 +526,8 @@ export default function AgentMemoryEditor({ backendId, agentId }: { backendId: s
         {page.hasMore && <button className={s.more} type="button" disabled={busy} onClick={() => void load(true)}>
           {t("common.loadMore")}
         </button>}
+        {!auditMode && <AgentSharedMemoryList backendId={backendId} shared={page.shared} disabled={busy}
+          onChanged={() => void load(false, "active")} />}
       </>}
     </div>
   );

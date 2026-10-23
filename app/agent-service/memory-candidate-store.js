@@ -111,17 +111,18 @@ function validState(value, profileId, version = SCHEMA_VERSION) {
 }
 
 class MemoryCandidateStore {
-  constructor({ paths, now = Date.now, fs: fileSystem = fs }) {
+  constructor({ paths, now = Date.now, fs: fileSystem = fs, readOnly = false }) {
     if (!paths?.agentsDir || !paths?.trustedRoot) throw new TypeError("MemoryCandidateStore paths 无效");
     this.paths = paths;
     this.now = now;
     this.fs = fileSystem;
+    this.readOnly = readOnly;
   }
 
   _file(profileId) {
     if (!validId(profileId)) throw error("MEMORY_CANDIDATE_INVALID", "Profile 无效");
     const dir = path.join(this.paths.agentsDir, profileId, "memory");
-    ensurePrivateDirectoryTree(dir, this.paths.trustedRoot);
+    if (!this.readOnly) ensurePrivateDirectoryTree(dir, this.paths.trustedRoot);
     return path.join(dir, "candidate-review.json");
   }
 
@@ -135,7 +136,7 @@ class MemoryCandidateStore {
 
   _load(profileId) {
     const file = this._file(profileId);
-    const recovery = recoverInterruptedPrivateFile(file, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
+    const recovery = this.readOnly ? "none" : recoverInterruptedPrivateFile(file, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
     if (recovery === "uncertain") throw error("MEMORY_CANDIDATE_UNAVAILABLE", "候选队列写入状态不确定");
     const stat = statIfExists(this.fs, file);
     if (!stat) return { file, state: this._fresh(profileId), identity: null };
@@ -160,6 +161,7 @@ class MemoryCandidateStore {
   get(profileId) { return structuredClone(this._load(profileId).state); }
 
   mutate(profileId, expectedRevision, mutate) {
+    if (this.readOnly) throw error("MEMORY_LEGACY_READ_ONLY", "旧候选仅供迁移读取");
     const loaded = this._load(profileId);
     if (expectedRevision !== null && loaded.state.revision !== expectedRevision) {
       throw error("MEMORY_CANDIDATE_REVISION_CONFLICT", "候选队列已变化，请重新读取");

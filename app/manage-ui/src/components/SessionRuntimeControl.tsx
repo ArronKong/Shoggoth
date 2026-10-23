@@ -101,6 +101,7 @@ export default function SessionRuntimeControl({ backend, agentId, sessionKey, bu
           const availability = cache.data?.bindings.availability?.find((entry) => entry.bindingId === candidate.bindingId);
           const selected = candidate.bindingId === current.bindingId;
           const reason = availability?.available === false ? t(availability.reason === "runtime-disabled" ? "agents.bindingRuntimeDisabled"
+            : availability.reason === "runtime-incompatible" ? "settings.runtimeIncompatible"
             : availability.reason === "runtime-not-installed" ? "agents.sessionRuntimeNotInstalled" : "agents.bindingRuntimeUnavailable")
             : candidate.support.supported ? null : unsupported(candidate.support.code);
           return <li key={candidate.bindingId}>

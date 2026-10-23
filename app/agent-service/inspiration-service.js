@@ -256,6 +256,20 @@ class InspirationService {
       status: latestExecution?.status ?? "saved", latestExecution };
   }
 
+  reminderView(id) {
+    const idea = this.view(id, true);
+    const execution = this.store.latestExecution(id);
+    const latestExecution = execution ? this.#executionView(execution, true) : null;
+    if (latestExecution?.attention?.active && !execution.external) {
+      const state = this.getCoordinator().getProactiveRequestState(execution.runId, latestExecution.attention.request.requestId);
+      latestExecution.attention.active = state.active;
+      latestExecution.attention.request = { ...latestExecution.attention.request, expiresAt: state.expiresAt };
+    }
+    return { ...idea, latestExecution };
+  }
+
+  refreshReminderProjection() { this.#refreshStatusProjection(); }
+
   #refreshStatusProjection() {
     const values = this.store.pendingExecutions(false).map(execution => {
       const current = this.dispatcher.getRun(execution.runId);
@@ -413,7 +427,10 @@ class InspirationService {
   }
 
   async handle(method, raw) {
-    if (!this.opened) fail("INSPIRATION_UNAVAILABLE", "灵感服务暂不可用");
+    // Routing is a read of durable ownership, independent of executor workers.
+    // The store still fails closed when unavailable; never guess that an
+    // external execution is an ordinary chat or start a replacement send.
+    if (!this.opened && method !== "inspiration.session.get") fail("INSPIRATION_UNAVAILABLE", "灵感服务暂不可用");
     const input = validateInspirationServiceParams(method, raw);
     let result;
     if (method === "inspiration.agent-stats") result = { agents: this.store.agentExecutionStats(input.agents) };

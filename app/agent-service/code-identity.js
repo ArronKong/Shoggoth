@@ -25,14 +25,21 @@ function isStrictAdHocAppIdentity(identity) {
     && identity.designatedRequirement === `cdhash H"${identity.cdHash}"`;
 }
 
+// A local certificate is pinned either by its root ("certificate root", a chain that ends in a
+// trusted root) or by the certificate itself ("certificate leaf", what codesign emits for a
+// self-signed or private-CA certificate). Exactly one hash is present and the requirement must
+// be exactly the one codesign generates for it.
 function isStrictLocalSignedAppIdentity(identity) {
+  const pinned = [["root", identity?.certificateRootHash], ["leaf", identity?.certificateLeafHash]]
+    .filter(([, hash]) => hash !== undefined);
   return identity?.localSigned === true
     && identity.teamIdentifier === null
     && identity.identifier === SHOGGOTH_APP_IDENTIFIER
-    && typeof identity.certificateRootHash === "string"
-    && /^[a-f0-9]{40}$/u.test(identity.certificateRootHash)
+    && pinned.length === 1
+    && typeof pinned[0][1] === "string"
+    && /^[a-f0-9]{40}$/u.test(pinned[0][1])
     && identity.designatedRequirement
-      === `identifier "${SHOGGOTH_APP_IDENTIFIER}" and certificate root = H"${identity.certificateRootHash}"`;
+      === `identifier "${SHOGGOTH_APP_IDENTIFIER}" and certificate ${pinned[0][0]} = H"${pinned[0][1]}"`;
 }
 
 function isLocalFileCryptoAppIdentity(identity) {
@@ -48,14 +55,14 @@ function parseCodeIdentityDetails(details, options = {}) {
   }
 
   // 本机开发包没有 Apple Team ID，但可以由固定的本机代码签名证书签名。
-  // 只接受 codesign 生成的精确 certificate-root designated requirement；证书
-  // 指纹成为稳定身份，避免 ad-hoc CDHash 在每次重打包后变化并反复触发钥匙串授权。
+  // 只接受 codesign 生成的精确 certificate-root / certificate-leaf designated requirement；
+  // 证书指纹成为稳定身份，避免 ad-hoc CDHash 在每次重打包后变化并反复触发钥匙串授权。
   const allowedLocalIdentifier = options.allowLocalSignedIdentifier;
   const identifier = details.match(/^Identifier=([^\r\n]+)$/mu)?.[1] || "";
   const signatureSize = details.match(/^Signature size=([0-9]+)$/mu)?.[1] || "";
   const authority = details.match(/^Authority=([^\r\n]+)$/mu)?.[1] || "";
   const localRequirement = designatedRequirement.match(
-    /^identifier "([A-Za-z0-9.-]+)" and certificate root = H"([a-f0-9]{40})"$/u,
+    /^identifier "([A-Za-z0-9.-]+)" and certificate (root|leaf) = H"([a-f0-9]{40})"$/u,
   );
   if (typeof allowedLocalIdentifier === "string" && allowedLocalIdentifier.length > 0
     && identifier === allowedLocalIdentifier && teamIdentifier === "not set"
@@ -67,7 +74,8 @@ function parseCodeIdentityDetails(details, options = {}) {
       designatedRequirement,
       identifier,
       localSigned: true,
-      certificateRootHash: localRequirement[2],
+      ...(localRequirement[2] === "root"
+        ? { certificateRootHash: localRequirement[3] } : { certificateLeafHash: localRequirement[3] }),
     });
   }
 

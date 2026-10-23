@@ -76,6 +76,7 @@ function safeStorageFixture() {
       "runtime.account.list",
       { cursor: null, limit: 100 },
     ]]);
+    // 0.8.136 retired legacy home cleanup; a forged request for it never reaches the controller.
     await assert.rejects(
       requestService(paths, {
         method: "runtime.account.legacyHomes.cleanup.commit",
@@ -83,11 +84,11 @@ function safeStorageFixture() {
         version: PROTOCOL_VERSION,
         params: { planId: "f".repeat(64), path: "/tmp/forged" },
       }),
-      (error) => error.code === "INVALID_PARAMS"
+      (error) => error.code === "UNKNOWN_METHOD"
         && !String(error.message).includes("/tmp/forged"),
     );
-    assert.equal(calls.length, 1, "invalid cleanup request is rejected before controller dispatch");
-    process.stdout.write("PASS RuntimeAccount Service dispatch + lifecycle + exact cleanup params\n");
+    assert.equal(calls.length, 1, "a retired cleanup request is rejected before controller dispatch");
+    process.stdout.write("PASS RuntimeAccount Service dispatch + lifecycle + retired cleanup refused\n");
   } finally {
     await service.stop({ notify: false }).catch(() => {});
     assert.equal(closed, opened);

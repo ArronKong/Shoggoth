@@ -7,11 +7,12 @@ const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs")
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { BackendRegistry } = require("../app/core/backend-registry");
 const { startStaticServer } = require("../app/static-server");
-const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
+const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
+  NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
 const { createConfigStore, projectNativeRuntimeConfig } = require("../app/core/config-store");
 
 async function run() {
-  const f = await openHandoffFixture({ catalogs: {
+  const f = await openHandoffFixture({ builtinCliProfiles: true, catalogs: {
     codex: ["fixture-model", "codex-only"], pi: ["fixture-model", "pi-only"],
     opencode: ["fixture-model", "opencode-only"],
     "deepseek-harness": ["fixture-model", "dsh-only"],
@@ -38,6 +39,14 @@ async function run() {
     await f.complete(await f.send(session.sessionKey, "model-menu-history", "Keep this conversation"));
     const original = f.service.chatSessionStore.getSession(session.sessionKey);
     const initialDefault = f.service.productStore.getAgentProfile(f.profile.id).defaultBindingId;
+    const otherProfile = f.service.productStore.listAgentProfiles().find(profile => profile.agentId === "shoggoth-pi");
+    const otherSession = f.service.chatSessionStore.createSession({ operationId: "other-agent-model-menu",
+      profileId: otherProfile.id, workspace: f.workspace, createdAt: Date.now() });
+    await f.complete(await f.send(otherSession.sessionKey, "other-agent-history", "Keep the Pi Agent conversation"));
+    const otherOriginal = f.service.chatSessionStore.getSession(otherSession.sessionKey);
+    const fallbackProfile = f.service.productStore.listAgentProfiles().find(profile => profile.agentId === "shoggoth-opencode");
+    const fallbackSession = f.service.chatSessionStore.createSession({ operationId: "no-cli-harness-model-menu",
+      profileId: fallbackProfile.id, workspace: f.workspace, createdAt: Date.now() });
     await backend._refreshManagedProfiles();
     const initialBindings = f.service.productStore.getAgentRuntimeBindings(f.profile.id);
     assert.ok(initialBindings.bindings.some(binding => binding.runtimeAccountId === "native-codex-default-v1"), "connected CLI bound automatically");
@@ -51,6 +60,38 @@ async function run() {
         ...(body ? { body: JSON.stringify(body) } : {}) });
       return { status: response.status, body: await response.json() };
     };
+    const otherRoute = `/__api/agents/${otherProfile.agentId}/runtime-models?backend=shoggoth&sessionKey=${encodeURIComponent(
+      `agent:${otherProfile.agentId}:${otherSession.sessionKey}`)}`;
+    const otherCatalog = await request(undefined, server.url, otherRoute);
+    assert.equal(otherCatalog.status, 200, JSON.stringify(otherCatalog.body));
+    assert.deepEqual(otherCatalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
+      .map(runtime => runtime.name).sort(), ["Codex CLI", "Codex Harness"],
+    "an Agent with a native CLI default must also offer the bundled Codex Harness");
+    const otherBindings = f.service.productStore.getAgentRuntimeBindings(otherProfile.id);
+    const otherHarness = otherBindings.bindings.find(binding =>
+      binding.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+    const otherCli = otherBindings.bindings.find(binding => binding.runtimeAccountId === NATIVE_CODEX_RUNTIME_ACCOUNT_ID);
+    assert.notEqual(otherHarness.id, otherCli.id, "Harness and CLI remain separate account bindings");
+    await request(undefined, server.url, otherRoute);
+    assert.deepEqual(f.service.productStore.getAgentRuntimeBindings(otherProfile.id), otherBindings,
+      "automatic Harness binding is idempotent");
+    const otherChanged = await request({ bindingId: otherHarness.id, model: "codex-only",
+      revision: otherCatalog.body.selection.revision, acceptAdjustments: true }, server.url, otherRoute);
+    assert.equal(otherChanged.status, 200, JSON.stringify(otherChanged.body));
+    const otherSaved = f.service.chatSessionStore.getSession(otherSession.sessionKey);
+    assert.equal(otherSaved.runtimeBindingId, otherHarness.id);
+    assert.equal(otherSaved.modelOverride, "codex-only");
+    assert.equal(otherSaved.retiredRuntimeSessions.at(-1).runtimeSessionId, otherOriginal.runtimeSessionId);
+    assert.equal(f.service.productStore.getAgentProfile(otherProfile.id).defaultBindingId, otherProfile.defaultBindingId);
+    const harnessRun = await f.send(otherSession.sessionKey, "other-agent-harness-run");
+    assert.equal(harnessRun.status, "running", harnessRun.errorCode);
+    const harnessAcquisition = f.transport.acquisitions.at(-1);
+    assert.equal(harnessAcquisition.binding.runtimeAccountId, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
+      "the selected Harness model executes through the managed account");
+    await f.complete(harnessRun, "Harness answer for the Pi Agent");
+    const otherEvents = f.service.transcriptStore.listEvents(otherProfile.id, otherSession.id);
+    assert.ok(otherEvents.some(event => event.content?.text === "Keep the Pi Agent conversation"));
+    assert.ok(otherEvents.some(event => event.content?.text === "Harness answer for the Pi Agent"));
     let catalog = await request();
     assert.equal(catalog.status, 200, JSON.stringify(catalog.body));
     assert.equal(catalog.body.selection.canSwitch, true, "fresh App must allow cross-Runtime selection");
@@ -82,7 +123,13 @@ async function run() {
     assert.equal(f.transport.hosts.get("pi").lastTurnStartParams.model, "pi-only");
     assert.equal(f.transport.acquisitions.at(-1).options.executionContract.provider.modelRef, "pi-only");
     selection = (await request()).body.selection;
-    assert.equal((await request(input("codex", "codex-only"))).body.code, "SESSION_BUSY");
+    const futureSelection = await request(input("codex", "codex-only"));
+    assert.equal(futureSelection.status, 200, JSON.stringify(futureSelection.body));
+    const stillActive = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(stillActive.runtimeBindingId, f.binding("pi").id);
+    assert.equal(stillActive.runtimeSessionId, active.runtimeSessionRef.sessionId);
+    assert.equal(stillActive.nextRuntimeSelection.model, "codex-only");
+    assert.equal(f.service.workRunCoordinator.getRun(active.id).status, "running");
     await f.complete(active, "Answer after selection");
     catalog = await request(); selection = catalog.body.selection;
     const beforeSame = f.service.chatSessionStore.getSession(session.sessionKey);
@@ -112,7 +159,38 @@ async function run() {
     const managedCodex = await request({ bindingId: initialDefault, model: "codex-only",
       revision: catalog.body.selection.revision, acceptAdjustments: true });
     assert.equal(managedCodex.status, 200, JSON.stringify(managedCodex.body));
-    console.log("PASS Runtime model REST: automatic binding, CLI catalogs, duplicate IDs, atomic selection, native-session renewal, busy/CAS/origin/ownership gates and unchanged Agent default.");
+    const fallbackBindings = f.service.productStore.getAgentRuntimeBindings(fallbackProfile.id);
+    const fallbackHarness = fallbackBindings.bindings.find(binding =>
+      binding.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+    f.service.productStore.removeAgentRuntimeBinding(fallbackProfile.id, fallbackHarness.id,
+      { revision: fallbackBindings.revision });
+    backend.runtimeCliAuth.clear();
+    const fallbackRoute = `/__api/agents/${fallbackProfile.agentId}/runtime-models?backend=shoggoth&sessionKey=${encodeURIComponent(
+      `agent:${fallbackProfile.agentId}:${fallbackSession.sessionKey}`)}`;
+    const fallbackCatalog = await request(undefined, server.url, fallbackRoute);
+    assert.equal(fallbackCatalog.status, 200, JSON.stringify(fallbackCatalog.body));
+    assert.deepEqual(fallbackCatalog.body.runtimes.map(runtime => runtime.name), ["Codex Harness"],
+      "an Agent without a Harness binding can discover it with no native CLI installed");
+    const fallbackState = f.service.productStore.getAgentRuntimeBindings(fallbackProfile.id);
+    const restoredHarness = fallbackState.bindings.find(binding =>
+      binding.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+    await request(undefined, server.url, fallbackRoute);
+    assert.deepEqual(f.service.productStore.getAgentRuntimeBindings(fallbackProfile.id), fallbackState);
+    const disabledHarness = await backend.updateAgentRuntimeBinding(fallbackProfile.agentId, restoredHarness.id,
+      { enabled: false }, { revision: fallbackState.revision });
+    const disabledCatalog = await request(undefined, server.url, fallbackRoute);
+    assert.equal(disabledCatalog.status, 200, JSON.stringify(disabledCatalog.body));
+    assert.deepEqual(disabledCatalog.body.runtimes, [], "sync must preserve an explicitly disabled Harness binding");
+    assert.equal(f.service.productStore.getAgentRuntimeBindings(fallbackProfile.id).bindings
+      .find(binding => binding.id === restoredHarness.id).enabled, false);
+    await backend.updateAgentRuntimeBinding(fallbackProfile.agentId, restoredHarness.id,
+      { enabled: true }, { revision: disabledHarness.revision });
+    const fallbackChanged = await request({ bindingId: restoredHarness.id, model: "codex-only",
+      revision: fallbackCatalog.body.selection.revision, acceptAdjustments: true }, server.url, fallbackRoute);
+    assert.equal(fallbackChanged.status, 200, JSON.stringify(fallbackChanged.body));
+    assert.equal(f.service.productStore.getAgentProfile(fallbackProfile.id).defaultBindingId, fallbackProfile.defaultBindingId);
+    assert.equal(f.service.chatSessionStore.getSession(fallbackSession.sessionKey).runtimeBindingId, restoredHarness.id);
+    console.log("PASS Runtime model REST: other Agents discover and execute through Codex Harness; account separation, no-CLI binding, explicit disable, atomic selection, history and Agent defaults preserved.");
   } finally { if (server) await server.close(); await f.close(); }
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

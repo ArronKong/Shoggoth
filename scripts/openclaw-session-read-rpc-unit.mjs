@@ -72,6 +72,24 @@ function createBackend(respond) {
 }
 
 {
+  const hidden = ["agent:main:group-current", "agent:main:group-retired"];
+  const { backend, calls } = createBackend((method, params) => {
+    if (method === "sessions.list") return { sessions: [...hidden, "agent:main:direct"].map((key) => ({ key })) };
+    if (method === "sessions.search") {
+      assert.deepEqual(params.sessionKeys, ["agent:main:direct"], "exclude before the Gateway's 25-hit cap");
+      return { results: [
+        { sessionKey: hidden[0], snippet: "must stay hidden", score: 1 },
+        { sessionKey: "agent:main:direct", snippet: "visible", score: 0.5 },
+      ] };
+    }
+    throw new Error(`unexpected method ${method}`);
+  });
+  const result = await backend.searchChat("main", "needle", { limit: 1, excludeSessionKeys: hidden });
+  assert.deepEqual(result.results.map((hit) => hit.key), ["agent:main:direct"]);
+  assert.equal(calls.length, 2);
+}
+
+{
   const { backend, calls } = createBackend((method) => {
     if (method === "sessions.list") return { sessions: [] };
     throw new Error(`unexpected method ${method}`);

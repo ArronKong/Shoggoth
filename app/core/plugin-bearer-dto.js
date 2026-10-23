@@ -15,7 +15,8 @@ function validatePluginBearerResult(method, value) {
       || typeof value.challenge !== "string" || !ID.test(value.challenge)
       || !Number.isSafeInteger(value.expiresAt) || value.expiresAt < 0
       || !exact(summary, ["action", "agent", "package", "capability", "provider", "reconnect"])
-      || summary.action !== "bearer-connect" || summary.provider !== "GitHub"
+      || summary.action !== "bearer-connect"
+      || !["GitHub", "Cloudflare"].includes(summary.provider)
       || typeof summary.reconnect !== "boolean"
       || !["agent", "package", "capability"].every(key => text(summary[key]))) fail();
   } else if (method === "plugins.bearer.commit") {

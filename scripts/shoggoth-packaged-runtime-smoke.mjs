@@ -45,8 +45,62 @@ const yauzl = require("yauzl");
 const OUTPUT_LIMIT = 512 * 1024;
 // Rosetta 首次冷启动可能需要几十秒；保持有界，但不要把冷启动误判为 runtime 失败。
 const TIMEOUT_MS = 90_000;
-const EXPECTED_DIRECTORIES = ["bin", "codex-path", "codex-resources", "codex-resources/zsh", "codex-resources/zsh/bin"];
-const EXPECTED_FILES = ["bin/codex", "bin/codex-code-mode-host", "codex-package.json", "codex-path/rg", "codex-resources/zsh/bin/zsh"];
+const EXPECTED_DIRECTORIES = [
+  "bin",
+  "codex-path",
+  "codex-resources",
+  "codex-resources/voice",
+  "codex-resources/voice/bin",
+  "codex-resources/voice/lib",
+  "codex-resources/voice/licenses",
+  "codex-resources/voice/plugins",
+  "codex-resources/zsh",
+  "codex-resources/zsh/bin"
+];
+const EXPECTED_FILES = [
+  "bin/codex",
+  "bin/codex-code-mode-host",
+  "codex-package.json",
+  "codex-path/rg",
+  "codex-resources/voice/NOTICE.md",
+  "codex-resources/voice/bin/codex-voice-host",
+  "codex-resources/voice/lib/libffi.8.dylib",
+  "codex-resources/voice/lib/libgio-2.0.0.dylib",
+  "codex-resources/voice/lib/libglib-2.0.0.dylib",
+  "codex-resources/voice/lib/libgmodule-2.0.0.dylib",
+  "codex-resources/voice/lib/libgobject-2.0.0.dylib",
+  "codex-resources/voice/lib/libgstapp-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstaudio-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstbase-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstnet-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstpbutils-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstreamer-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstrtp-1.0.0.dylib",
+  "codex-resources/voice/lib/libgsttag-1.0.0.dylib",
+  "codex-resources/voice/lib/libgstvideo-1.0.0.dylib",
+  "codex-resources/voice/lib/libintl.8.dylib",
+  "codex-resources/voice/lib/libopus.0.dylib",
+  "codex-resources/voice/lib/libpcre2-8.0.dylib",
+  "codex-resources/voice/lib/libz.1.dylib",
+  "codex-resources/voice/licenses/LGPL-2.1.txt",
+  "codex-resources/voice/licenses/Opus.txt",
+  "codex-resources/voice/licenses/PCRE2.md",
+  "codex-resources/voice/licenses/libffi.txt",
+  "codex-resources/voice/licenses/proxy-libintl.txt",
+  "codex-resources/voice/licenses/sljit.txt",
+  "codex-resources/voice/licenses/zlib.txt",
+  "codex-resources/voice/manifest.json",
+  "codex-resources/voice/plugins/libgstapp.dylib",
+  "codex-resources/voice/plugins/libgstaudioconvert.dylib",
+  "codex-resources/voice/plugins/libgstaudioresample.dylib",
+  "codex-resources/voice/plugins/libgstcoreelements.dylib",
+  "codex-resources/voice/plugins/libgstopus.dylib",
+  "codex-resources/voice/plugins/libgstrtp.dylib",
+  "codex-resources/voice/plugins/libgstrtpmanager.dylib",
+  "codex-resources/voice/runtime.json",
+  "codex-resources/voice/sources.json",
+  "codex-resources/zsh/bin/zsh"
+];
 const MACHO_MAGIC = new Set([
   "cafebabe", "bebafeca", "cafebabf", "bfbafeca",
   "feedface", "cefaedfe", "feedfacf", "cffaedfe",
@@ -120,12 +174,22 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
       (async () => {
         const relay = require(${JSON.stringify(relayPath)});
         const agentService = require(${JSON.stringify(agentServicePath)});
+        require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/bootstrap-role.js"))})
+          .assertServiceRoleIsolation();
         const agentServiceServer = require(${JSON.stringify(agentServiceServerPath)});
         const pluginMcpClient = require(${JSON.stringify(pluginMcpClientPath)});
         const { resolveServicePaths } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/paths.js"))});
         const { createRuntimeCliAuth } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/runtime-cli-auth.js"))});
-        const { normalizeConfig, projectNativeRuntimeConfig } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/core/config-store.js"))});
+        const { normalizeConfig, projectNativeRuntimeConfig, projectNativeChatUiConfig } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/core/config-store.js"))});
         const { lexicalTerms } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/conversation-recall-index.js"))});
+        const nativeUi = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/native-chat-ui-renderer.js"))});
+        const nativeUiResources = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/native-chat-ui-resources.js"))}).loadChatUiResources();
+        assert.equal(nativeUiResources.bundleId, nativeUi.RESOURCE_BUNDLE_ID);
+        assert.equal(nativeUiResources.manifest.bridgeApiVersion, nativeUi.BRIDGE_API_VERSION);
+        const sdk = nativeUi.bridgeSdk(); new (require("node:vm").Script)(sdk);
+        const uiDocument = nativeUi.wrapperHtml("<!doctype html><h1>offline-native-ui-smoke</h1>");
+        assert(uiDocument.includes('sandbox="allow-scripts"')); assert(uiDocument.includes("offline-native-ui-smoke"));
+        assert(sdk.includes("shoggothUi"));
         const { DatabaseSync } = require("node:sqlite");
         const sqlitePath = path.join(${JSON.stringify(scratchPath)}, "recall-fts-smoke.sqlite");
         const terms = lexicalTerms("蓝色番茄");
@@ -166,8 +230,12 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
           execPath: process.execPath,
           resourcesPath: process.resourcesPath,
           nodeVersion: process.versions.node,
+          processArch: process.arch,
           electronVersion: process.versions.electron,
           sqliteFtsChineseBigram: Boolean(match),
+          nativeChatUi: { resourceBundleId: nativeUiResources.bundleId, bridgeApiVersion: nativeUi.BRIDGE_API_VERSION,
+            cssBytes: Buffer.byteLength(nativeUiResources.stylesheet), cssSha256: nativeUiResources.manifest.files["visualize.css"],
+            sdkBytes: Buffer.byteLength(sdk), source: "packaged-asar", initialConfig: projectNativeChatUiConfig(normalizeConfig({})) },
           bootstrapResolved: require.resolve(${JSON.stringify(bootstrapPath)}),
           relayResolved: require.resolve(${JSON.stringify(relayPath)}),
           relayStartType: typeof relay.startRuntimeMcpRelay,
@@ -211,6 +279,14 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
     assert.match(result.electronVersion, /^\d+\.\d+\.\d+$/u);
     assert.equal(result.sqliteFtsChineseBigram, true,
       "packaged Electron node:sqlite must persist and query Chinese FTS5 bigrams");
+    assert(["arm64", "x64"].includes(result.processArch));
+    assert.equal(result.nativeChatUi.resourceBundleId, "native-chat-ui-v1");
+    assert.equal(result.nativeChatUi.bridgeApiVersion, 1);
+    assert(result.nativeChatUi.cssBytes > 0 && result.nativeChatUi.sdkBytes > 0);
+    assert.match(result.nativeChatUi.cssSha256, /^[a-f0-9]{64}$/u);
+    assert.equal(result.nativeChatUi.source, "packaged-asar");
+    assert.deepEqual(result.nativeChatUi.initialConfig, { revision: 1, config: { nativeChatUiV1: false } },
+      "fresh packaged App must leave native UI disabled until the separate device acceptance gate is met");
     assert.equal(result.bootstrapResolved, bootstrapPath);
     assert.equal(result.relayResolved, relayPath);
     assert.equal(result.relayStartType, "function");
@@ -235,6 +311,7 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
     assert.deepEqual(await readdir(scratchPath), [], "desktop auth catalog must not create Runtime Homes");
     assert.deepEqual(result.forbiddenDescendants, [],
       "RunAsNode must not start GPU or Network Service child processes");
+    console.log("[shoggoth-packaged-runtime-smoke] native-chat-ui " + JSON.stringify({ architecture: result.processArch, ...result.nativeChatUi }));
   } finally {
     await rm(scratchPath, { recursive: true, force: true });
   }
@@ -257,6 +334,7 @@ async function verifyPackagedService(appPath) {
       const { createAgentService, PROTOCOL_VERSION } = require(path.join(appRoot, "agent-service/server.js"));
       const { resolveServicePaths } = require(path.join(appRoot, "agent-service/paths.js"));
       const { requestService, readClientToken } = require(path.join(appRoot, "agent-service/client.js"));
+      const { ShoggothBackend } = require(path.join(appRoot, "core/shoggoth-backend.js"));
       const { DEFAULT_AGENT_PROFILE_ID: profileId, STORE_SCHEMA_VERSION } = require(path.join(appRoot, "agent-service/product-store.js"));
       const { CHAT_SESSION_STORE_VERSION } = require(path.join(appRoot, "agent-service/chat-session-store.js"));
       const { STORE_VERSION: TOKEN_USAGE_STORE_VERSION } = require(path.join(appRoot, "agent-service/token-usage-store.js"));
@@ -290,7 +368,7 @@ async function verifyPackagedService(appPath) {
         }
       };
       (async () => {
-        assert.equal(PROTOCOL_VERSION, 11, "packaged Service v11 exact DTO contract is required");
+        assert.equal(PROTOCOL_VERSION, 13, "packaged Service v13 Cron output DTO contract is required");
         assert.equal(STORE_SCHEMA_VERSION, 15, "packaged current Product15 reader is required");
         assert.equal(CHAT_SESSION_STORE_VERSION, 8, "packaged Chat8 reader is required");
         assert.equal(TOKEN_USAGE_STORE_VERSION, 2, "packaged usage attribution reader is required");
@@ -302,6 +380,7 @@ async function verifyPackagedService(appPath) {
         let idea;
         let pluginInstallation;
         let pluginAuthority;
+        let nativeMemoryOwnerId;
         let packagedMemoryId;
         let packagedUiMemoryId;
         const sourceEventId = "packaged-memory-source-user";
@@ -327,9 +406,20 @@ async function verifyPackagedService(appPath) {
         for (let generation = 0; generation < 3; generation++) {
           const service = createAgentService({ paths, safeStorage, prewarmMcpAuth: true,
             packaged: true, resourcesPath: ${JSON.stringify(resourcesPath)}, parentEnv: {},
-            runtimeStorageHomedir: root, version: "packaged-service-smoke" });
+            runtimeStorageHomedir: root, version: "packaged-service-smoke",
+            memoryCoreConfig: { memory: { search: { provider: "none", rememberAcrossConversations: true,
+              query: { minScore: 0 } } } } });
           try {
             await service.start();
+            assert.equal(service.memoryEngine.owner, "shoggoth-memory-core",
+              "fresh packaged Service must use the shipped native memory owner by default");
+            assert.equal(service.memoryEngine.legacy, null, "fresh packaged startup must not import old memory");
+            const nativeOwner = service.memoryEngine.initialization.assertOwned(profileId);
+            if (generation === 0) nativeMemoryOwnerId = nativeOwner.ownerId;
+            else assert.equal(nativeOwner.ownerId, nativeMemoryOwnerId, "native memory ownership survives restart");
+            const searchPackagedMemory = () => service.memoryEngine.searchMemory({ profileId,
+              workspace: service.memoryEngine.host(profileId).workspaceDir, query: "Packaged memory",
+              record: false, minScore: 0, maxSensitivity: "private" });
             let status;
             for (let attempt = 0; attempt < 100; attempt++) {
               status = await ipc("service.status", {});
@@ -341,6 +431,10 @@ async function verifyPackagedService(appPath) {
             assert.equal(status.pendingCommandsLocked, false);
             assert.equal(status.mcpCredentialsLocked, false);
             assert.ok(service.pluginStore, "default packaged Service must open its plugin database");
+            const rawLibrary = await ipc("plugins.bundled.list", {});
+            const desktopLibrary = await new ShoggothBackend({ paths }).listBundledPlugins();
+            assert.deepEqual(desktopLibrary, rawLibrary,
+              "every bundled plugin must pass the packaged desktop response validator");
             if (generation === 0) {
               const source = { kind: "directory", path: pluginSourcePath };
               const preview = await ipc("plugins.install.preview", { source });
@@ -395,13 +489,13 @@ async function verifyPackagedService(appPath) {
               service.transcriptStore.appendEvent({ profileId, sessionId: session.id,
                 id: "packaged-memory-source-echo", runId: sourceRunId, kind: "assistant",
                 content: { text: "I heard: Packaged memory survives restart" } });
-              const remembered = service.memoryEngine.propose({
+              const remembered = await service.memoryEngine.propose({
                 id: "packaged-memory-persistence", profileId, scope: "user", type: "semantic",
                 content: "Packaged memory survives restart", sensitivity: "normal",
                 sourceRefs: [sourceEventId, sourceRunId], classification: "explicit",
               });
               packagedMemoryId = remembered.id;
-              assert.equal(service.memoryEngine.search({ profileId, query: "Packaged memory" })
+              assert.equal((await searchPackagedMemory())
                 .items.some(item => item.id === packagedMemoryId), true);
               const uiCreated = await ipc("harness.memory.create", { profileId,
                 content: "Packaged UI memory persists through Service restart", scope: "user",
@@ -432,7 +526,7 @@ async function verifyPackagedService(appPath) {
             const history = await ipc("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 10 });
             assert.ok(JSON.stringify(history.messages).includes("Packaged chat history survives restart"));
             if (generation === 1) {
-              assert.equal(service.memoryEngine.search({ profileId, query: "Packaged memory" })
+              assert.equal((await searchPackagedMemory())
                 .items.some(item => item.id === packagedMemoryId), true,
                 "packaged memory must survive Service restart");
               assert.equal((await memoryList("active")).items.some(item => item.id === packagedUiMemoryId), true,
@@ -447,7 +541,7 @@ async function verifyPackagedService(appPath) {
               const uiDeleted = await ipc("harness.memory.delete", { profileId,
                 id: packagedUiMemoryId, expectedRevision: service.memoryStore.getRevision(profileId) });
               assert.equal(uiDeleted.item.status, "deleted");
-              service.memoryEngine.delete({ profileId, id: packagedMemoryId,
+              await service.memoryEngine.delete({ profileId, id: packagedMemoryId,
                 reason: "forgotten", operationId: "packaged-memory-forget" });
               assert.equal(service.memoryEngine.recallPolicy.isEventVisible(profileId, sourceEvent), false,
                 "forget must revoke the original user transcript source");
@@ -455,7 +549,7 @@ async function verifyPackagedService(appPath) {
                 "forget must also revoke an assistant echo from the same source Run");
             }
             if (generation === 2) {
-              assert.equal(service.memoryEngine.search({ profileId, query: "Packaged memory" })
+              assert.equal((await searchPackagedMemory())
                 .items.some(item => item.id === packagedMemoryId), false,
                 "forgotten packaged memory must stay hidden after restart");
               const audit = await ipc("harness.memory.explain", { profileId, id: packagedMemoryId });
@@ -544,7 +638,7 @@ async function verifyPackage(packageRoot, expected) {
   const metadata = JSON.parse(await readFile(path.join(packageRoot, "codex-package.json"), "utf8"));
   assert.deepEqual(metadata, {
     layoutVersion: 1,
-    version: "0.149.0",
+    version: "0.159.2",
     target: expected.target,
     variant: "codex",
     entrypoint: "bin/codex",
@@ -712,6 +806,18 @@ async function verifyPackagedCua(appPath, archivePath, electronExecutable, expec
   ]) await access(path.join(resourcesPath, "legal", legalName));
   const sbom = JSON.parse(await readFile(path.join(resourcesPath, "legal", "release-sbom.cdx.json"), "utf8"));
   assert.equal(sbom.bomFormat, "CycloneDX");
+  const bundledCatalog = JSON.parse(await readFile(path.join(resourcesPath, "bundled-plugins", "catalog.json"), "utf8"));
+  const bundledEntries = sbom.components.filter((component) =>
+    component["bom-ref"].startsWith("urn:shoggoth:bundled-plugin:"));
+  assert.equal(bundledEntries.length, bundledCatalog.packages.length);
+  for (const entry of bundledCatalog.packages) {
+    const component = bundledEntries.find((candidate) =>
+      candidate["bom-ref"] === `urn:shoggoth:bundled-plugin:${entry.id}`);
+    assert.equal(component?.properties?.find((property) =>
+      property.name === "shoggoth:source-digest-sha256")?.value, entry.sourceDigest);
+    assert.equal(component?.properties?.find((property) =>
+      property.name === "shoggoth:redistribution-review")?.value, "unverified");
+  }
   assert.equal(sbom.components.some((component) => (
     component.name === `@trycua/cua-driver-darwin-${expected.arch}`
   )), true);
@@ -791,9 +897,11 @@ async function verifySourceContract(onlyArch = null) {
   assert.equal(packageJson.repository?.url, "https://github.com/ArronKong/Shoggoth.git");
   assert.equal(
     packageJson.scripts?.dist,
-    "npm run build:manage && npm run prepare:runtimes && npm run release:metadata && electron-builder --mac",
-    "dist must build the Manage UI before packaging",
+    "node scripts/shoggoth-host-capability-coverage-unit.cjs && node scripts/release-package-checks.cjs preflight && npm run build:manage && npm run prepare:runtimes && npm run release:metadata && electron-builder --mac",
+    "dist must check Electron host capabilities, pass the release preflight and build the Manage UI before packaging",
   );
+  assert.match(packageJson.scripts?.["dist:arm64"] || "", /^node scripts\/shoggoth-host-capability-coverage-unit\.cjs && node scripts\/release-package-checks\.cjs preflight &&/u,
+    "dist:arm64 must check Electron host capabilities before packaging");
   const agentService = require(path.join(REPO_ROOT, "app", "agent-service.js"));
   const agentServiceServer = require(path.join(REPO_ROOT, "app", "agent-service", "server.js"));
   assert.equal(typeof agentService.startAgentServiceProcess, "function");
@@ -815,6 +923,9 @@ async function verifySourceContract(onlyArch = null) {
   assert.match(builder, /from: resources\/deepseek-harness\/shoggoth-dsh-bridge\.mjs\s*\n\s*to: deepseek-harness\/shoggoth-dsh-bridge\.mjs/u);
   assert.ok(require("js-yaml").load(builder).extraResources.some((entry) => entry.from === "resources/legal" && entry.to === "legal"));
   assert.match(builder, /afterSign: scripts\/notarize\.cjs/u);
+  // Without declared languages macOS gives the App English even on a Chinese Mac,
+  // so "follow system" would never pick Chinese.
+  assert.deepEqual(builderConfig.mac.extendInfo.CFBundleLocalizations, ["en", "zh_CN"]);
   assert.match(builder, /entitlements:\s*build\/entitlements\.mac\.plist/);
   const entitlements = await readFile(path.join(REPO_ROOT, "build", "entitlements.mac.plist"), "utf8");
   for (const entitlement of [
@@ -823,7 +934,7 @@ async function verifySourceContract(onlyArch = null) {
     "com.apple.security.cs.disable-library-validation",
   ]) assert.match(entitlements, new RegExp(`<key>${entitlement.replaceAll(".", "\\.")}</key>\\s*<true/>`));
   const manifest = JSON.parse(await readFile(path.join(REPO_ROOT, "build", "codex-runtime-manifest.json"), "utf8"));
-  assert.equal(manifest.runtime.version, "0.149.0");
+  assert.equal(manifest.runtime.version, "0.159.2");
   const cuaManifest = JSON.parse(await readFile(path.join(REPO_ROOT, "build", "cua-driver-manifest.json"), "utf8"));
   assert.equal(cuaManifest.version, "0.22.0");
   assert.equal(cuaManifest.nodePackages.length, 4);
@@ -1122,7 +1233,7 @@ async function verifyLaunchAgent(runtimePath, scratchPath) {
       }
       throw new Error("LaunchAgent output timed out");
     })();
-    assert.equal(output, "codex-cli 0.149.0");
+    assert.equal(output, "codex-cli 0.159.2");
   } catch (error) {
     primaryError = error;
     throw error;
@@ -1147,6 +1258,9 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: package`);
   const appStat = await lstat(appPath);
   assert.equal(appStat.isDirectory(), true, `${appPath} must exist`);
+  assert.deepEqual(JSON.parse(require("node:child_process").execFileSync("/usr/bin/plutil", ["-extract",
+    "CFBundleLocalizations", "json", "-o", "-", path.join(appPath, "Contents", "Info.plist")], { encoding: "utf8" })),
+  ["en", "zh_CN"], "the packaged App declares its UI languages");
   const bundledRoot = path.join(appPath, "Contents", "Resources", "bundled-plugins");
   const { BundledPluginCatalog } = require("../app/core/bundled-plugin-catalog.js");
   const bundledCatalog = new BundledPluginCatalog(bundledRoot);
@@ -1181,11 +1295,11 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   }
   await access(path.join(appPath, "Contents", "Resources", "app-update.yml"));
   const schemaManifest = JSON.parse(extractAsarFile(
-    archivePath, "schemas/codex-app-server/0.149.0/schema-manifest.json",
+    archivePath, "schemas/codex-app-server/0.159.2/schema-manifest.json",
   ).toString("utf8"));
-  assert.equal(schemaManifest.codexVersion, "0.149.0", "packaged schema contract is missing");
+  assert.equal(schemaManifest.codexVersion, "0.159.2", "packaged schema contract is missing");
   assert.doesNotThrow(() => extractAsarFile(
-    archivePath, "schemas/codex-app-server/0.149.0/json/ClientRequest.json",
+    archivePath, "schemas/codex-app-server/0.159.2/json/ClientRequest.json",
   ));
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: cua-sdk`);
   await verifyPackagedCua(appPath, archivePath, electronExecutable, expected);
@@ -1208,7 +1322,10 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
       `${signedPath} must retain its OpenAI signature for the MCP parent-identity gate`);
   }
   const { assertCodeIdentity, CODEX_TEAM_IDENTIFIER, CODEX_DESIGNATED_REQUIREMENT } = require("../app/agent-service/code-identity");
-  assertCodeIdentity(runtimePath, { teamIdentifier: CODEX_TEAM_IDENTIFIER, designatedRequirement: CODEX_DESIGNATED_REQUIREMENT });
+  const { CODEX_PARENT_VERIFY_TIMEOUT_MS } = require("../app/agent-service/codex-startup-timeouts");
+  // Match the real MCP bootstrap's bounded cold verification of the same parent.
+  assertCodeIdentity(runtimePath, { teamIdentifier: CODEX_TEAM_IDENTIFIER, designatedRequirement: CODEX_DESIGNATED_REQUIREMENT },
+    { verifyTimeoutMs: CODEX_PARENT_VERIFY_TIMEOUT_MS });
   const architecture = await runCaptured("/usr/bin/lipo", ["-archs", runtimePath]);
   assert.equal(architecture.code, 0);
   assert.equal(architecture.stdout.trim(), expected.binaryArch);
@@ -1220,7 +1337,7 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
       env: { CODEX_HOME: scratchPath, HOME: scratchPath, PATH: process.env.PATH ?? "", TMPDIR: scratchPath },
     });
     assert.equal(version.code, 0);
-    assert.equal(version.stdout.trim(), "codex-cli 0.149.0");
+    assert.equal(version.stdout.trim(), "codex-cli 0.159.2");
     console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: app-server`);
     await verifyPackagedAppServer(runtimePath, scratchPath);
     if (runLaunchAgent) {

@@ -174,18 +174,12 @@ async function main() {
     assert.equal(detail.status, 200);
     const figma = (await detail.json()).detail;
     assert.equal(figma.displayName, "Figma");
-    assert.equal(figma.skills.length, 12);
+    assert.equal(figma.skills.length, 2);
     assert.deepEqual(figma.apps, ["figma"]);
     assert.deepEqual(figma.unconvertedMcp, []);
     assert.deepEqual(figma.mcpServers.map(server => server.name), ["figma"]);
     const mixpanelResponse = await fetch(`${server.url}/__api/plugins/bundled/mixpanel-headless`);
-    assert.equal(mixpanelResponse.status, 200);
-    const mixpanel = (await mixpanelResponse.json()).detail;
-    assert.equal(mixpanel.sourceWarnings[0].code, "MISSING_OPTIONAL_LOCAL_REFERENCES");
-    assert.deepEqual(mixpanel.sourceWarnings[0].targets, [
-      "skills/mixpanelyst/references/analytical-frameworks.md",
-      "skills/mixpanelyst/references/python-api.md",
-    ]);
+    assert.equal(mixpanelResponse.status, 404, "hidden bundles must not be visible via detail routes");
     assert.equal((await fetch(`${server.url}/__api/plugins/bundled/missing-bundle`)).status, 404);
     assert.equal((await fetch(`${server.url}/__api/plugins/bundled/figma`, { method: "POST" })).status, 405);
     assert.equal(previews + installs, 0, "reading details must not preview or install a plugin");

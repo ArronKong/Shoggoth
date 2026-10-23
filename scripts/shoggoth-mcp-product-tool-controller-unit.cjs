@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const ownedArtifactRoots = new Set();
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -34,6 +35,32 @@ const { resolveServicePaths } = require(path.join(
 
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
+
+test("异步及旧同步联邦报告在 MCP 和 Host 均以 30 分钟为上限", () => {
+  const { validateFederationParams } = require("../app/federation-host-protocol");
+  const args = { backendId: "hermes", agentId: "bull", prompt: "report", timeoutMs: 600_000 };
+  for (const timeoutMs of [5000, 600_000, 1_800_000]) {
+    assert.equal(validateMcpProductToolArguments("federation_agent_run", { ...args, timeoutMs }), true);
+    assert.equal(validateMcpProductToolArguments("external_agent_run", { ...args, timeoutMs }), true);
+    assert.equal(validateMcpProductToolArguments("federation_agent_message", { handle: "fixture", message: "report", timeoutMs }), true);
+    assert.equal(validateFederationParams("federation.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), true);
+    assert.equal(validateFederationParams("agent.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), true);
+  }
+  for (const timeoutMs of [4999, 1_800_001, Infinity]) {
+    assert.equal(validateMcpProductToolArguments("federation_agent_run", { ...args, timeoutMs }), false);
+    assert.equal(validateMcpProductToolArguments("external_agent_run", { ...args, timeoutMs }), false);
+    assert.equal(validateFederationParams("federation.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), false);
+    assert.equal(validateFederationParams("agent.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), false);
+  }
+  for (const tool of ["federation_agent_run", "federation_agent_message"]) {
+    assert.equal(MCP_PRODUCT_TOOL_DEFINITIONS.find(definition => definition.name === tool).inputSchema.properties.timeoutMs.maximum, 1_800_000);
+  }
+  // The federation workflow travels with the tool the model uses to dispatch.
+  const instructions = MCP_PRODUCT_TOOL_DEFINITIONS.find(definition => definition.name === "federation_agent_run").description;
+  assert.match(instructions, /Never infer missing output/);
+  assert.match(instructions, /Native tasks follow their Runtime's execution policy/);
+  assert.match(instructions, /use 1800000ms unless the user specifies a shorter limit/);
+});
 
 const PROFILE_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_PROFILE_ID = "11111111-1111-4111-8111-222222222222";
@@ -366,6 +393,7 @@ function makeFixture(overrides = {}) {
   };
   const notificationSender = async (value) => { calls.push(["notify", structuredClone(value)]); };
   const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-mcp-artifacts-"));
+  ownedArtifactRoots.add(artifactRoot);
   fs.chmodSync(artifactRoot, 0o700);
   const controller = new McpProductToolController({
     productStore,
@@ -416,6 +444,17 @@ test("运行上下文以数据形式冻结 Agent Profile 名称与 Runtime", () 
   }), TypeError);
 });
 
+test("每步说明只用于展示，不进入业务和 Hook 参数", async () => {
+  const calls = [];
+  const f = makeFixture({ appStateService: { async get(args) { calls.push(args); return { items: [] }; } } });
+  f.controller.hookToolExecution = {
+    async execute(input, dispatch) { assert.deepEqual(input.args, { section: "cron", cursor: null, limit: 20 });
+      return dispatch(input.args, { changed: false, token: "fixture" }); }, assertCurrent() {},
+  };
+  await f.controller.handle("app_state_get", { section: "cron", cursor: null, limit: 20, activityTitle: "检查定时任务" }, authority(), { runId: RUN_ID, assertCurrent() {} });
+  assert.deepEqual(calls, [{ section: "cron", cursor: null, limit: 20 }]);
+});
+
 test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定，能力查询与目录一致", async () => {
   const f = makeFixture();
   const source = { source: "chat", sourceId: "current-user-conversation" };
@@ -446,25 +485,104 @@ test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定�
     assert.equal(f.mcpCalls.size, 0, "refused external access must not create native durable writes");
     assert.equal(f.calls.length, beforeCalls);
     const projection = await f.controller.handle("app_capabilities", {}, trusted);
-    assert.equal(projection.capabilities.length, 71);
+    assert.equal(projection.capabilities.length, 93);
+    for (const name of ["group_task", "group_collaborate"]) {
+      assert.equal(projection.capabilities.some((item) => item.tool === name), false);
+    }
     for (const [name] of calls) assert.equal(projection.capabilities.some((item) => item.tool === name), false);
     assert.ok(projection.capabilities.some((item) => item.tool === "federation_agent_list"));
   }
 });
 
-test("固定 99 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 99);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 99);
+test("全局只读工具把范围交给 AppStateReadService，不伪造当前 Profile 数量", async () => {
+  const calls = [];
+  const f = makeFixture({ appStateService: { async get(args, source) {
+    calls.push({ args, source }); return { knownTotal: 8, complete: true, items: [] };
+  } } });
+  const args = { section: "cron", cursor: null, limit: 20 };
+  assert.equal(validateMcpProductToolArguments("app_state_get", args), true);
+  assert.deepEqual(await f.controller.handle("app_state_get", args, authority()), { knownTotal: 8, complete: true, items: [] });
+  assert.equal(calls[0].source.profileId, PROFILE_ID);
+  assert.equal(validateMcpProductToolArguments("app_state_get", { ...args, profileId: OTHER_PROFILE_ID }), false);
+});
+
+test("确认的全局管理可编辑其他 Agent Cron，保留原工具范围和 source 审计及回放", async () => {
+  const f = makeFixture(), { resourceRevision } = require("../app/agent-service/app-state-projection");
+  f.jobs.set(JOB_ID, job({ profileId: OTHER_PROFILE_ID }));
+  let writes = 0;
+  f.dependencies.domainController.handle = async (method, params) => {
+    assert.equal(method, "cron.job.update"); writes += 1;
+    f.jobs.set(params.jobId, { ...f.jobs.get(params.jobId), ...params.patch });
+    return { job: jobDto(f.jobs.get(params.jobId)) };
+  };
+  const input = { jobId: JOB_ID, patch: { name: "Managed by user" } };
+  const args = { operation: "cron_update", backendId: "shoggoth", targetProfileId: null,
+    expectedRevision: resourceRevision("cron", f.jobs.get(JOB_ID)), arguments: input, activityTitle: "更新定时任务名称" };
+  await expectCode(() => f.controller.handle("cron_update", input, authority()), "MCP_TOOL_NOT_FOUND");
+  await expectCode(() => f.controller.handle("app_manage", args, authority()), "MCP_TOOL_CONFIRMATION_REQUIRED");
+  assert.equal(writes, 0);
+  const receipt = await f.controller.handle("app_manage", args, authority({ confirmation: true }));
+  assert.equal(receipt.job.name, "Managed by user"); assert.equal(writes, 1);
+  assert.deepEqual(await f.controller.handle("app_manage", { ...args, activityTitle: "核对该任务名称修改" }, authority({ confirmation: true })), receipt);
+  assert.equal(writes, 1);
+  assert.ok(!JSON.stringify([...f.mcpCalls.values()]).includes("activityTitle"));
+  const call = [...f.mcpCalls.values()][0]; assert.equal(call.profileId, PROFILE_ID);
+  assert.equal(call.binding.profileId, OTHER_PROFILE_ID);
+});
+
+test("全局管理拒绝错误归属/版本/权限/外部身份；不把失败变为无条件重发", async () => {
+  const { resourceRevision } = require("../app/agent-service/app-state-projection");
+  for (const kind of ["wrong_backend", "wrong_owner", "stale", "denied", "external"]) {
+    const f = makeFixture(); f.jobs.set(JOB_ID, job({ profileId: OTHER_PROFILE_ID }));
+    const args = { operation: "cron_set_enabled", backendId: "shoggoth", targetProfileId: null,
+      expectedRevision: resourceRevision("cron", f.jobs.get(JOB_ID)), arguments: { jobId: JOB_ID, enabled: false } };
+    let code = "MCP_TOOL_FORBIDDEN";
+    if (kind === "wrong_backend") { args.backendId = "codex"; code = "MCP_TOOL_NOT_FOUND"; }
+    if (kind === "wrong_owner") args.targetProfileId = PROFILE_ID;
+    if (kind === "stale") { args.expectedRevision = "0".repeat(64); code = "APP_MANAGE_RESOURCE_CHANGED"; }
+    if (kind === "denied") f.controller.permissionEngine.setProfileOverride(PROFILE_ID, "cron_set_enabled", "deny");
+    await expectCode(() => f.controller.handle("app_manage", args, authority({ confirmation: true,
+      ...(kind === "external" ? { federationClient: "hermes" } : {}) })), code);
+    assert.equal(f.calls.filter(call => call[0] === "domain").length, 0);
+    assert.equal(f.mcpCalls.size, 0);
+  }
+  const nested = { operation: "cron_update", backendId: "shoggoth", targetProfileId: null, expectedRevision: "a".repeat(64),
+    arguments: { jobId: JOB_ID, patch: { enabled: true, apiKey: "fixture-secret-canary" } } };
+  assert.equal(validateMcpProductToolArguments("app_manage", nested), false);
+  assert.equal(validateMcpProductToolArguments("app_manage", { ...nested, operation: "memory_forget" }), false);
+});
+
+test("外部管理的未知结果冻结在原调用回执，后续同 callId 不触达后端", async () => {
+  let writes = 0;
+  const f = makeFixture({ federationClient: { async request(method) {
+    if (method === "backend.require") return { backend: { id: "hermes" } };
+    assert.equal(method, "app.manage"); writes += 1;
+    throw Object.assign(new Error("fixture-secret-canary"), { code: "FEDERATION_COMMIT_UNCERTAIN" });
+  } } });
+  const args = { operation: "cron_run_now", backendId: "hermes", targetProfileId: null,
+    expectedRevision: "a".repeat(64), arguments: { jobId: "hermes-default:cron" } };
+  for (let attempt = 0; attempt < 2; attempt++) await expectCode(() => f.controller.handle("app_manage", args,
+    authority({ confirmation: true })), "APP_MANAGE_OUTCOME_UNKNOWN");
+  assert.equal(writes, 1); assert.equal(f.controller.poisonError, null);
+});
+
+test("固定 152 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 152);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 152);
+  for (const name of ["group_task", "group_collaborate"]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name), false);
   for (const required of [
-    "app_capabilities", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
-    "cron_create", "cron_delete", "backend_status", "external_cron_list",
+    "workspace_execute",
+    "app_capabilities", "app_help_search", "app_help_get", "app_state_get", "app_manage", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
+    "cron_create", "cron_delete", "backend_status", "external_cron_list", "web_search", "web_fetch", "web_settings_get", "web_settings_set", "web_defaults_set",
+    "heartbeat_settings_get", "heartbeat_settings_set",
     "federation_agent_list", "federation_agent_get", "federation_agent_run",
     "federation_agent_message", "federation_task_get", "federation_task_cancel",
-    "skill_catalog", "skill_read", "skill_install_global",
+    "skill_catalog", "skill_read", "skill_file_read", "skill_learn", "plugin_resource_read", "skill_install_global",
+    "plugin_create", "plugin_install", "plugin_status", "plugin_setup_get", "plugin_secret_request", "plugin_activate",
     "mcp_server_list", "mcp_server_register", "mcp_server_tools", "mcp_server_call", "mcp_server_remove",
     "system_application_search", "system_application_launch",
     "system_open_url", "finder_open_folder", "computer_status", "computer_session_open", "computer_snapshot",
-    "computer_click", "computer_type", "computer_key",
+    "computer_click", "computer_type", "computer_key", "browser_session_wait_for_user",
     "inspiration_list", "inspiration_get", "inspiration_create", "inspiration_update", "inspiration_delete",
     "inspiration_start", "inspiration_executions", "inspiration_cancel", "inspiration_growth_get", "inspiration_growth_set",
     "memory_search", "memory_get", "memory_explain", "conversation_search", "conversation_get",
@@ -475,7 +593,7 @@ test("固定 99 个模型可见产品工具及 strict object schemas，不暴露
   for (const hidden of ["memory_confirm", "external_agent_list", "external_agent_get", "external_agent_run"]) {
     assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(hidden), false, hidden);
   }
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.some((name) => name.startsWith("browser_")), false);
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.filter((name) => name.startsWith("browser_")).length, 6);
   assert.deepEqual(MCP_PRODUCT_TOOL_DEFINITIONS.map((tool) => tool.name), MCP_PRODUCT_TOOL_NAMES);
   for (const tool of MCP_PRODUCT_TOOL_DEFINITIONS) {
     assert.equal(tool.description, productToolDescription(tool.name));
@@ -515,7 +633,7 @@ test("固定 99 个模型可见产品工具及 strict object schemas，不暴露
     assert.equal(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes(phrase), true, phrase);
   }
   assert.equal(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes("Managed Browser"), false);
-  assert.equal(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes("browser_session_open"), false);
+  assert.equal(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes("browser_session_open"), true);
 });
 
 test("外层 Permission Engine 不接受只有 Codex approval、缺少本次确认凭据的破坏操作", async () => {
@@ -671,9 +789,12 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 99);
+  assert.equal(capabilities.capabilities.length, 139);
+  for (const name of ["group_task", "group_collaborate"]) {
+    assert.equal(capabilities.capabilities.some((item) => item.tool === name), false);
+  }
   assert.equal(capabilities.capabilities.some((item) => item.tool === "cron_create"), true);
-  assert.equal(capabilities.capabilities.some((item) => item.domain === "browser"), false);
+  assert.equal(capabilities.capabilities.some((item) => item.domain === "browser"), true);
   assert.equal(capabilities.lifecycle.nativeWhenAppQuit, true);
   assert.equal(capabilities.lifecycle.federationRequiresAppProcess, true);
   assert.deepEqual(await fixture.controller.handle("app_status", {}, authorityFor("b")), {
@@ -695,7 +816,37 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     ["30d", { backendId: "shoggoth", profileIds: [PROFILE_ID] }],
     ["7d", { backendId: "shoggoth", profileIds: [OTHER_PROFILE_ID] }],
   ]);
-  assert.equal(statusCalls.length, 1);
+  assert.equal(statusCalls.length, 2);
+});
+
+test("产品帮助只读返回功能、权限和连接状态，同 callId 回读不会复用过期可用结果", async () => {
+  let connected = false;
+  const f = makeFixture({
+    federationClient: { async request(method) {
+      assert.equal(method, "backend.status");
+      return { backends: [{ id: "hermes", connected, disabled: false }] };
+    } },
+    getServiceStatus: async () => ({ domainAvailability: { cron: { available: true }, kanban: { available: true } } }),
+    getProductHelpContext: () => ({ runtime: "pi", source: "chat", sourceId: "current", userConversation: true,
+      capabilities: { "turn.steer": false } }),
+  });
+  const index = await f.controller.handle("app_help_search", { query: "灵感是什么" }, authorityFor("1"));
+  assert.equal(index.items[0].featureId, "inspiration");
+  const args = { featureId: "cron", backendId: "hermes" };
+  const auth = authorityFor("2");
+  const before = await f.controller.handle("app_help_get", args, auth);
+  assert.equal(before.actions.find(item => item.id === "create").reason.code, "BACKEND_DISCONNECTED");
+  connected = true;
+  const after = await f.controller.handle("app_help_get", args, auth);
+  assert.equal(after.actions.find(item => item.id === "create").availability, "requires_confirmation");
+  f.controller.permissionEngine.setProfileOverride(PROFILE_ID, "cron_create", "deny");
+  const revoked = await f.controller.handle("app_help_get", args, auth);
+  assert.equal(revoked.actions.find(item => item.id === "create").reason.code, "TOOL_FORBIDDEN");
+  const capabilities = await f.controller.handle("app_capabilities", {}, authorityFor("3"));
+  assert.equal(capabilities.currentAgent.tools.find(item => item.tool === "cron_create").reason.code, "TOOL_FORBIDDEN");
+  assert.equal(capabilities.currentAgent.runtime, "pi");
+  assert.equal(f.mcpCalls.size, 0);
+  assert.equal(f.calls.some(([kind]) => ["domain", "mcp.begin", "note.add", "comment.add"].includes(kind)), false);
 });
 
 test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash 分块且首块记录使用", async () => {
@@ -731,7 +882,8 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
     isDefault: false,
   }));
   const catalog = await fixture.controller.handle("skill_catalog", { cursor: 0, limit: 10 }, authorityFor("d"));
-  assert.deepEqual(catalog.items, [skill]);
+  assert.deepEqual(catalog.items, [{ ...skill, eligible: true, reason: null,
+    dependency: null, assessment: "declared_dependencies_only" }]);
   assert.equal(catalog.registryRevision, "b".repeat(64));
   await fixture.controller.handle(
     "skill_catalog",
@@ -746,6 +898,7 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
       allowedTools: calls.find(([kind]) => kind === "catalog")[2].allowedTools,
       allowPluginSkills: true,
       runtimeCapabilities: ["mcp", "filesystem", "shell"],
+      pluginToolProjection: [],
     },
   ]);
   const first = await fixture.controller.handle("skill_read", {
@@ -758,6 +911,103 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
   await expectCode(() => fixture.controller.handle("skill_read", {
     name: "careful-review", contentHash: "c".repeat(64), cursor: 0, maxBytes: 32,
   }, authorityFor("f")), "MCP_TOOL_NOT_FOUND");
+});
+
+test("skill_file_read 只读已启用 Skill 的冻结附属文本，按 UTF-8 页与身份范围拒绝旧请求", async () => {
+  let enabled = false;
+  const calls = [];
+  const skill = { id: "plugin-support", name: "plugin-support", version: "1.0.0",
+    description: "Support file fixture", source: "plugin", contentHash: "a".repeat(64),
+    requiredTools: [], requiredRuntimeCapabilities: [] };
+  const fixture = makeFixture({ skillStore: {
+    catalog(_profileId, options) {
+      return { registryRevision: "b".repeat(64), profileRevision: 1,
+        items: enabled && options.allowPluginSkills ? [skill] : [], ineligible: [] };
+    },
+    read() { throw new Error("Not exercised by file read test"); },
+    readFile(input) {
+      calls.push(structuredClone(input));
+      return { ...skill, relativePath: input.relativePath,
+        fileHash: "c".repeat(64), content: "A😀B" };
+    },
+  } });
+  const input = { name: skill.name, contentHash: skill.contentHash,
+    relativePath: "references/guide.md", cursor: 0, maxBytes: 5 };
+  await expectCode(() => fixture.controller.handle("skill_file_read", input,
+    authorityFor("f")), "MCP_TOOL_NOT_FOUND");
+  enabled = true;
+  const first = await fixture.controller.handle("skill_file_read", input, authorityFor("1"));
+  assert.equal(first.content, "A😀");
+  assert.equal(first.fileHash, "c".repeat(64));
+  assert.equal(first.relativePath, "references/guide.md");
+  assert.equal(first.nextCursor, 2);
+  assert.equal(first.hasMore, true);
+  const last = await fixture.controller.handle("skill_file_read", { ...input, cursor: 2 },
+    authorityFor("2"));
+  assert.equal(last.content, "B");
+  assert.equal(last.hasMore, false);
+  assert.deepEqual(calls.map(call => call.relativePath),
+    ["references/guide.md", "references/guide.md"]);
+  await expectCode(() => fixture.controller.handle("skill_file_read", {
+    ...input, contentHash: "d".repeat(64),
+  }, authorityFor("3")), "MCP_TOOL_NOT_FOUND");
+  for (const relativePath of ["../skill.json", "/private/secret", "references/../SKILL.md",
+    "references\\guide.md", "SKILL.md"]) {
+    await expectCode(() => fixture.controller.handle("skill_file_read", {
+      ...input, relativePath,
+    }, authorityFor("4")), "MCP_TOOL_INVALID_ARGUMENTS");
+  }
+  await expectCode(() => fixture.controller.handle("skill_file_read", input,
+    { ...authorityFor("5"), federationClient: "openclaw" }), "MCP_TOOL_NOT_FOUND");
+  enabled = false;
+  await expectCode(() => fixture.controller.handle("skill_file_read", input,
+    authorityFor("6")), "MCP_TOOL_NOT_FOUND");
+  assert.equal(calls.length, 2, "rejected file reads must not reach Skill storage");
+});
+
+test("plugin_resource_read 只读合格插件 Skill 的同包共享文本，拒绝联邦身份与旧版本", async () => {
+  let enabled = false;
+  const calls = [];
+  const skill = { id: "plugin-resource", name: "plugin-resource", version: "1.0.0",
+    description: "Installed plugin resource", source: "plugin", contentHash: "a".repeat(64),
+    requiredTools: [], requiredRuntimeCapabilities: [] };
+  const fixture = makeFixture({ skillStore: {
+    catalog(_profileId, options) {
+      return { registryRevision: "b".repeat(64), profileRevision: 1,
+        items: enabled && options.allowPluginSkills ? [skill] : [], ineligible: [] };
+    },
+    read() { throw new Error("Not exercised by package resource read test"); },
+    readResource(input) {
+      calls.push(structuredClone(input));
+      return { ...skill, relativePath: input.relativePath,
+        fileHash: "c".repeat(64), content: "共😀享" };
+    },
+  } });
+  const input = { name: skill.name, contentHash: skill.contentHash,
+    relativePath: "shared/workflow.md", cursor: 0, maxBytes: 7 };
+  await expectCode(() => fixture.controller.handle("plugin_resource_read", input,
+    authorityFor("0")), "MCP_TOOL_NOT_FOUND");
+  enabled = true;
+  const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
+  assert.equal(capabilities.currentAgent.tools.find(item => item.tool === "plugin_resource_read").availability,
+    "available", "resource availability must use the storage facade's actual readResource method");
+  const first = await fixture.controller.handle("plugin_resource_read", input, authorityFor("1"));
+  assert.equal(first.content, "共😀");
+  assert.equal(first.nextCursor, 2);
+  assert.equal(first.relativePath, "shared/workflow.md");
+  assert.equal(first.fileHash, "c".repeat(64));
+  await expectCode(() => fixture.controller.handle("plugin_resource_read", {
+    ...input, contentHash: "d".repeat(64),
+  }, authorityFor("2")), "MCP_TOOL_NOT_FOUND");
+  await expectCode(() => fixture.controller.handle("plugin_resource_read", {
+    ...input, relativePath: "../shared/workflow.md",
+  }, authorityFor("3")), "MCP_TOOL_INVALID_ARGUMENTS");
+  await expectCode(() => fixture.controller.handle("plugin_resource_read", input,
+    { ...authorityFor("4"), federationClient: "openclaw" }), "MCP_TOOL_NOT_FOUND");
+  enabled = false;
+  await expectCode(() => fixture.controller.handle("plugin_resource_read", input,
+    authorityFor("5")), "MCP_TOOL_NOT_FOUND");
+  assert.equal(calls.length, 1);
 });
 
 test("大型 Skill 目录按查询返回末尾匹配项，默认五条且不暴露未安装项", async () => {
@@ -810,6 +1060,37 @@ test("联邦 Skill 目录不继承默认原生 Profile 的插件绑定", async (
   const catalog = await fixture.controller.handle("skill_catalog", { cursor: 0, limit: 10 }, external);
   assert.deepEqual(catalog.items, []);
   assert.deepEqual(calls, [false]);
+});
+
+test("产品安装入口经真实 PluginSkillFacade 安装通用包，并返回可用于下一次安装的 registryVersion", async () => {
+  const { NativeSkillStore } = require("../app/agent-service/native-skill-store");
+  const { PluginSkillFacade } = require("../app/agent-service/plugin-skill-facade");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-portable-product-"));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), trustedRoot: root });
+  const native = new NativeSkillStore({ paths });
+  try {
+    native.open([PROFILE_ID, OTHER_PROFILE_ID]);
+    const skillStore = new PluginSkillFacade({ nativeStore: native,
+      resolver: { listEnabledSkillDescriptors: () => [], inspectSkill() {}, inspectSkillFile() {} } });
+    assert.equal(typeof skillStore.installGlobalFromDirectory, "function");
+    const fixture = makeFixture({ skillStore });
+    for (const [index, name] of ["portable-first", "portable-second"].entries()) {
+      const source = path.join(root, name);
+      fs.mkdirSync(source);
+      fs.writeFileSync(path.join(source, "SKILL.md"), `---\nname: ${name}\ndescription: Portable product workflow.\n---\n\nInstructions.\n`);
+      const catalog = await fixture.controller.handle("skill_catalog", { cursor: 0, limit: 10 },
+        authorityFor(String(index + 3)));
+      assert.equal(catalog.registryVersion, native.revision);
+      const installed = await fixture.controller.handle("skill_install_global", {
+        sourcePath: source, expectedRevision: catalog.registryVersion,
+      }, authorityFor(String(index + 1)));
+      assert.equal(installed.complete, true);
+      assert.deepEqual(installed.enabledProfiles.sort(), [PROFILE_ID, OTHER_PROFILE_ID].sort());
+    }
+    native.close();
+    native.open([PROFILE_ID, OTHER_PROFILE_ID]);
+    assert.equal(native.catalog(PROFILE_ID).items.length, 2);
+  } finally { native.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 Agent 使用", async () => {
@@ -1014,18 +1295,23 @@ test("Computer Use 绑定当前 WorkRun、确认边界与单次 snapshot revisio
   };
   const fixture = makeFixture({ computerUseController });
   const source = { source: "kanban", sourceId: CARD_ID };
+  assert.equal(validateMcpProductToolArguments("computer_session_open", { ...source,
+    allowedApplications: ["com.apple.TextEdit"] }), true);
+  assert.equal(validateMcpProductToolArguments("computer_session_open", { ...source,
+    allowedApplications: ["com.apple.TextEdit"], expiresInSeconds: 900 }), false);
+  assert.equal(validateMcpProductToolArguments("browser_session_open", source), true);
+  assert.equal(validateMcpProductToolArguments("browser_session_open", { ...source, expiresInSeconds: 900 }), false);
   assert.equal((await fixture.controller.handle("computer_status", {}, authorityFor("1"))).available, true);
   await expectCode(() => fixture.controller.handle("computer_session_open", {
-    ...source, allowedApplications: ["com.apple.TextEdit"], expiresInSeconds: 120,
+    ...source, allowedApplications: ["com.apple.TextEdit"],
   }, authority()), "MCP_TOOL_CONFIRMATION_REQUIRED");
   assert.deepEqual(await fixture.controller.handle("computer_session_open", {
-    ...source, allowedApplications: ["com.apple.TextEdit"], expiresInSeconds: 120,
+    ...source, allowedApplications: ["com.apple.TextEdit"],
   }, authorityFor("2")), session);
   assert.deepEqual(calls.find(([kind]) => kind === "create")[1], {
     profileId: PROFILE_ID,
     workRunId: RUN_ID,
     allowedApplications: ["com.apple.TextEdit"],
-    expiresInSeconds: 120,
   });
   const snapshot = await fixture.controller.handle("computer_snapshot", {
     ...source, sessionId: session.id, pid: 42, windowId: 7,
@@ -1051,7 +1337,7 @@ test("Computer Use 绑定当前 WorkRun、确认边界与单次 snapshot revisio
   await expectCode(() => fixture.controller.handle("computer_click", {
     ...source, sessionId: session.id, snapshotRevision: "stale-revision", pid: 42, windowId: 7,
     ref: "c1", x: null, y: null,
-  }, authorityFor("5")), "MCP_TOOL_STATE_CONFLICT");
+  }, authorityFor("5")), "COMPUTER_SNAPSHOT_STALE");
   assert.equal(validateMcpProductToolArguments("computer_type", {
     ...source, sessionId: session.id, snapshotRevision: "revision-1", pid: 42, windowId: 7,
     ref: "c2", text: "hello",
@@ -1163,7 +1449,6 @@ test("新增 Kanban/Cron 路由使用 Service 生成的 operation/time 并 exact
       name: "QA cron", prompt: "check", workspace: null,
       schedule: { kind: "every", everyMs: 60_000, anchorMs: 1_000 }, enabled: false,
       misfirePolicy: "latest", maxCatchUp: 1, overlapPolicy: "skip",
-      threadPolicy: "new", threadId: null,
     }, "cron.job.create", "2"],
     ["cron_update", { jobId: JOB_ID, patch: { prompt: "updated" } }, "cron.job.update", "3"],
     ["cron_set_enabled", { jobId: JOB_ID, enabled: false }, "cron.job.enabled.set", "4"],
@@ -1181,6 +1466,10 @@ test("新增 Kanban/Cron 路由使用 Service 生成的 operation/time 并 exact
     assert.equal(matching[0][1].createdAt, 5_000);
     assert.equal(Object.hasOwn(matching[0][1], "profileId") ? matching[0][1].profileId : PROFILE_ID,
       PROFILE_ID);
+    if (name === "cron_create") {
+      assert.equal(matching[0][1].threadPolicy, "continue");
+      assert.equal(matching[0][1].threadId, null);
+    }
   }
 
   const readCases = [
@@ -1383,6 +1672,24 @@ test("统一联邦工具把目录、异步派活、查询、续聊与取消交�
   assert.equal(validateMcpProductToolArguments("federation_agent_get", {
     backendId: "Bad", agentId: "agent-other",
   }), false);
+});
+
+test("联邦认证与模型失败穿过 MCP 边界且只保留静态说明，原操作不重放", async () => {
+  for (const code of ["AGENT_AUTH_REQUIRED", "AGENT_MODEL_UNAVAILABLE", "AGENT_QUOTA_EXHAUSTED",
+    "AGENT_CONTEXT_LIMIT", "AGENT_PERMISSION_DENIED", "AGENT_NETWORK_UNAVAILABLE"]) {
+    let calls = 0;
+    const fixture = makeFixture({ federationCoordinator: {
+      list() {}, get() {}, message() {}, taskGet() {}, cancel() {}, async run() {
+      calls++;
+      throw Object.assign(new Error("fixture-secret-canary provider response"), { code });
+    } } });
+    const args = { backendId: "hermes", agentId: "hermes-bull", prompt: "do work", timeoutMs: 5000 };
+    try {
+      await expectCode(() => fixture.controller.handle("federation_agent_run", args, authorityFor("a")), code);
+      await expectCode(() => fixture.controller.handle("federation_agent_run", args, authorityFor("a")), code);
+      assert.equal(calls, 1, "the failed operation receipt prevents replay");
+    } finally { fs.rmSync(fixture.artifactRoot, { recursive: true, force: true }); }
+  }
 });
 
 test("所有不可信 args/authority 在零依赖触碰前 exact validation", async () => {
@@ -2050,7 +2357,11 @@ test("本地 Agent 通过 MCP 读取、修改和归档，保留确认与版本�
 });
 
 test("Computer Use 的权限、驱动和读取错误保留安全的具体错误码", async () => {
-  for (const code of ["COMPUTER_PERMISSION_REQUIRED", "COMPUTER_DRIVER_UNAVAILABLE", "COMPUTER_PERMISSION_STATUS_FAILED"]) {
+  // Pause, takeover, target and action errors keep their own code and next step
+  // instead of collapsing into MCP_TOOL_STATE_CONFLICT or MCP_TOOL_UNAVAILABLE.
+  for (const code of ["COMPUTER_PERMISSION_REQUIRED", "COMPUTER_DRIVER_UNAVAILABLE", "COMPUTER_PERMISSION_STATUS_FAILED",
+    "COMPUTER_SESSION_PAUSED", "COMPUTER_USER_TAKEOVER", "COMPUTER_SCREEN_LOCKED", "COMPUTER_SESSION_STATE_INVALID",
+    "COMPUTER_ARGUMENTS_INVALID", "COMPUTER_TARGET_FORBIDDEN", "COMPUTER_SECURE_INPUT_FORBIDDEN", "COMPUTER_ACTION_FAILED"]) {
     const stub = Object.fromEntries(["status", "create", "resume", "closeSession", "applicationList", "windowList", "snapshot", "focus", "action"]
       .map(name => [name, () => { throw Object.assign(new Error("private diagnostic canary"), { code }); }]));
     const fixture = makeFixture({ computerUseController: stub });
@@ -2060,6 +2371,306 @@ test("Computer Use 的权限、驱动和读取错误保留安全的具体错误�
       return true;
     });
   }
+});
+
+test("Browser Use uses confirmed current WorkRun identity and exact downstream arguments", async () => {
+  const dispatched = [];
+  const browser = Object.fromEntries(["status", "create", "closeSession", "listTools", "callTool"].map(method => [method, async input => {
+    dispatched.push([method, structuredClone(input)]);
+    return method === "status" ? { available: true, reason: null, browser: "chrome", engineVersion: "0.0.82", sessions: [] }
+      : method === "create" ? { id: "browser-fixture" } : { sessionId: "browser-fixture", content: [], isError: false };
+  }]));
+  const f = makeFixture({ browserUseController: browser });
+  const source = { source: "kanban", sourceId: CARD_ID };
+  await expectCode(() => f.controller.handle("browser_session_open", { ...source }, authority()), "MCP_TOOL_CONFIRMATION_REQUIRED");
+  assert.equal(dispatched.length, 0);
+  const session = await f.controller.handle("browser_session_open", { ...source }, authorityFor("1"));
+  assert.equal(session.sessionId, "browser-fixture");
+  assert.deepEqual(dispatched[0], ["create", { profileId: PROFILE_ID, workRunId: RUN_ID,
+    workspace: f.runs.get(RUN_ID).workspace }]);
+  const args = { ...source, sessionId: "browser-fixture", toolName: "browser_snapshot", arguments: {} };
+  await f.controller.handle("browser_tool_call", args, authorityFor("2"));
+  assert.deepEqual(dispatched[1], ["callTool", { profileId: PROFILE_ID, workRunId: RUN_ID,
+    sessionId: "browser-fixture", toolName: "browser_snapshot", arguments: {} }]);
+  assert.equal(validateMcpProductToolArguments("browser_tool_call", { ...args, profileId: OTHER_PROFILE_ID }), false);
+  await expectCode(() => f.controller.handle("browser_status", {}, authority({ federationClient: "hermes" })), "MCP_TOOL_FORBIDDEN");
+  f.runs.get(RUN_ID).status = "completed";
+  await expectCode(() => f.controller.handle("browser_tool_call", args, authorityFor("3")), "MCP_TOOL_STATE_CONFLICT");
+  assert.equal(dispatched.length, 2);
+});
+
+test("Browser handoff requires the current native execution scope and executes the input callback once", async () => {
+  const dispatched = [], inputs = [];
+  const browser = Object.fromEntries(["status", "create", "closeSession", "listTools", "callTool"].map(name => [name, async () => ({})]));
+  browser.waitForUser = async (input, ask) => {
+    dispatched.push(structuredClone(input));
+    return { sessionId: input.sessionId, canceled: !await ask(new AbortController().signal) };
+  };
+  const f = makeFixture({ browserUseController: browser, requestBrowserUserInput: async input => {
+    inputs.push(input); return true;
+  } });
+  const args = { source: "kanban", sourceId: CARD_ID, sessionId: "browser-fixture", instructions: "完成本地测试操作" };
+  await expectCode(() => f.controller.handle("browser_session_wait_for_user", args, authorityFor("1")), "MCP_TOOL_FORBIDDEN");
+  await expectCode(() => f.controller.handle("browser_session_wait_for_user", args,
+    authority({ federationClient: "hermes" })), "MCP_TOOL_FORBIDDEN");
+  const scope = { runId: RUN_ID, signal: new AbortController().signal, assertCurrent() {} };
+  const result = await f.controller.handle("browser_session_wait_for_user", args, authorityFor("2"), scope);
+  assert.equal(result.canceled, false);
+  assert.deepEqual(dispatched, [{ profileId: PROFILE_ID, workRunId: RUN_ID, sessionId: "browser-fixture" }]);
+  assert.equal(inputs[0].run.id, RUN_ID);
+  assert.equal(inputs[0].scope, scope);
+  assert.equal(inputs[0].instructions, args.instructions);
+  assert.ok(inputs[0].signal instanceof AbortSignal);
+  assert.deepEqual(await f.controller.handle("browser_session_wait_for_user", args, authorityFor("2"), scope), result);
+  assert.equal(inputs.length, 1, "a duplicate call ID never creates another prompt or action");
+  await expectCode(() => f.controller.handle("browser_session_wait_for_user", args, authorityFor("3"),
+    { ...scope, runId: OTHER_RUN_ID }), "MCP_TOOL_FORBIDDEN");
+  assert.equal(inputs.length, 1);
+});
+
+test("Every native Runtime receives the browser handoff tool and lifecycle instructions", () => {
+  const { DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME } = require("../app/agent-service/runtime-account");
+  for (const runtime of Object.keys(DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME)) {
+    const instructions = shoggothProductDeveloperInstructions({ runtime, profileName: "fixture", source: "chat", sourceId: "fixture-chat" });
+    assert.match(instructions, /call browser_session_wait_for_user/u, runtime);
+    assert.match(instructions, /final answer completes the WorkRun and closes its browser/u, runtime);
+  }
+  const definition = MCP_PRODUCT_TOOL_DEFINITIONS.find(tool => tool.name === "browser_session_wait_for_user");
+  // The detailed handoff workflow travels with the tool itself.
+  assert.match(definition.description, /same Chrome window open/u);
+  assert.match(definition.description, /never in the Shoggoth card or conversation/u);
+  assert.equal(definition.annotations.readOnlyHint, false);
+  assert.equal(definition.inputSchema.additionalProperties, false);
+  const valid = { source: "chat", sourceId: "fixture", sessionId: "browser-fixture", instructions: "完成本地测试操作" };
+  assert.equal(validateMcpProductToolArguments(definition.name, valid), true);
+  for (const instructions of ["", " ", "x".repeat(513), "\uD800", "test\0value", null, 1]) {
+    assert.equal(validateMcpProductToolArguments(definition.name, { ...valid, instructions }), false);
+  }
+});
+
+test("群聊工具：原生按当前运行绑定，外部成员只凭本轮令牌（D2），参数不携带群身份", async () => {
+  const groupCalls = [];
+  const exposures = [];
+  const f = makeFixture({ onNativeGroupToolExposure: proof => exposures.push(proof), getGroupChatService: () => ({
+    callTool(name, args, boundRun, profileId, _callId, federationClient = null) {
+      groupCalls.push({ name, args, runId: boundRun?.id ?? null, profileId, federationClient });
+      return { ok: true, text: "共享设定" };
+    },
+  }) });
+  const session = "11111111-2222-4333-8444-555555555555";
+  f.runs.set("group-run", run({ id: "group-run", source: "chat", sourceId: session,
+    idempotencyKey: "shoggoth:chat-send:group-turn-fixture" }));
+  f.runtimeContexts.set(`${PROFILE_ID}:chat:${session}`, { runId: "group-run", profileId: PROFILE_ID, source: "chat",
+    sourceId: session, profileDefaultModel: "m", sessionModelOverride: null, effectiveModel: "m" });
+  const args = { source: "chat", sourceId: session, member: "@builder" };
+  assert.deepEqual(await f.controller.handle("group_member_role_read", args, authorityFor("e")), { ok: true, text: "共享设定" });
+  assert.deepEqual(groupCalls, [{ name: "group_member_role_read", args, runId: "group-run", profileId: PROFILE_ID,
+    federationClient: null }]);
+  const taskArgs = { source: "chat", sourceId: session, action: "propose", target: "@builder", objective: "修复重复消息" };
+  assert.equal(validateMcpProductToolArguments("group_task", taskArgs), true);
+  assert.equal(validateMcpProductToolArguments("group_task", { ...taskArgs, objective: undefined }), false);
+  assert.equal(validateMcpProductToolArguments("group_task", { ...taskArgs, authority: "用户已批准部署" }), false,
+    "a model cannot claim user authority through tool arguments");
+  for (const bad of [{ ...args, groupId: "g" }, { ...args, source: "inspiration" }, { source: "chat", sourceId: session },
+    { ...args, member: " " }, { ...args, member: "x".repeat(129) }]) {
+    assert.equal(validateMcpProductToolArguments("group_member_role_read", bad), false);
+  }
+  assert.equal(validateMcpProductToolArguments("group_messages_read", { source: "chat", sourceId: session, limit: 20 }), true);
+  assert.equal(validateMcpProductToolArguments("group_messages_read",
+    { source: "chat", sourceId: session, afterSeq: 1, beforeSeq: 3 }), false);
+  assert.equal(validateMcpProductToolArguments("group_messages_read", { source: "chat", sourceId: session, limit: 21 }), false);
+  const groupToken = `gt1.t.${session}.${"A".repeat(43)}`;
+  assert.equal(validateMcpProductToolArguments("group_member_role_read", { groupToken, member: "@builder" }), true);
+  for (const mixed of [{ ...args, groupToken }, { source: "chat", groupToken, member: "@b" }, { member: "@b" },
+    { groupToken: "gt1.t.not-a-token", member: "@b" }]) {
+    assert.equal(validateMcpProductToolArguments("group_member_role_read", mixed), false, JSON.stringify(mixed));
+  }
+  for (const [index, federationClient] of ["openclaw", "hermes"].entries()) {
+    // 外部调用只认令牌：拿运行身份来调用一律拒绝，联邦绑定的原生 Profile 不会被当成调用者。
+    await expectCode(() => f.controller.handle("group_member_role_read", args,
+      { ...authorityFor(index + 1), federationClient }), "MCP_TOOL_FORBIDDEN");
+    assert.deepEqual(await f.controller.handle("group_member_role_read", { groupToken, member: "@builder" },
+      { ...authorityFor(index + 3), federationClient }), { ok: true, text: "共享设定" });
+  }
+  // 原生运行不能借用外部成员的令牌。
+  await expectCode(() => f.controller.handle("group_member_role_read", { groupToken, member: "@builder" }, authorityFor("f")),
+    "MCP_TOOL_FORBIDDEN");
+  assert.deepEqual(groupCalls.slice(1).map(({ runId, profileId, federationClient }) => ({ runId, profileId, federationClient })),
+    [{ runId: null, profileId: null, federationClient: "openclaw" }, { runId: null, profileId: null, federationClient: "hermes" }]);
+  const collaboration = { source: "chat", sourceId: session, action: "plan", clientActionId: "plan-1", scopeKey: "research",
+    target: "@builder", objective: "Verify source", stopCondition: "Deliver evidence" };
+  assert.equal(validateMcpProductToolArguments("group_collaborate", collaboration), true);
+  assert.deepEqual(await f.controller.handle("group_collaborate", collaboration, authorityFor("c")), { ok: true, text: "共享设定" });
+  assert.equal(groupCalls.at(-1).name, "group_collaborate");
+  assert.equal(groupCalls.at(-1).runId, "group-run");
+  assert.equal(groupCalls.at(-1).profileId, PROFILE_ID);
+  assert.deepEqual(exposures, [{ profileId: PROFILE_ID, runId: "group-run", name: "group_collaborate" }]);
+  assert.equal(validateMcpProductToolArguments("group_collaborate", { ...collaboration, coordinatorEpoch: 999 }), false);
+  const externalCollaboration = { groupToken, action: "pass", clientActionId: "pass-1", reason: "Already covered" };
+  await expectCode(() => f.controller.handle("group_collaborate", externalCollaboration, authorityFor("a")), "MCP_TOOL_FORBIDDEN");
+  assert.deepEqual(await f.controller.handle("group_collaborate", externalCollaboration,
+    { ...authorityFor("b"), federationClient: "hermes" }), { ok: true, text: "共享设定" });
+  assert.equal(groupCalls.at(-1).runId, null);
+  assert.equal(groupCalls.at(-1).federationClient, "hermes");
+  assert.equal(exposures.length, 1, "external tokens cannot create native exposure proof");
+});
+
+
+test("联网工具保持原生和外部 MCP 契约，停止后的结果不能返回", async () => {
+  const sent = [], abort = new AbortController(); let current = true;
+  const f = makeFixture({ webService: { async call(name, args, { signal, profileId }) {
+    sent.push({ name, args, signal, profileId }); if (args.query === "stop") current = false;
+    return { text: "Public result", sources: [{ title: "Source", url: "https://example.com" }], untrusted: true };
+  } } });
+  const authority = { profileId: PROFILE_ID, callId: CALL_ID };
+  const scope = { runId: RUN_ID, signal: abort.signal, assertCurrent() {
+    if (!current) throw Object.assign(new Error("stale"), { code: "MCP_TOOL_STATE_CONFLICT" });
+  } };
+  assert.equal((await f.controller.handle("web_search", { query: "docs" }, authority, scope)).untrusted, true);
+  assert.equal(sent[0].signal, abort.signal);
+  assert.equal(sent[0].profileId, PROFILE_ID);
+  await expectCode(() => f.controller.handle("web_search", { query: "stop" },
+    { ...authority, callId: crypto.randomUUID() }, scope), "MCP_TOOL_STATE_CONFLICT");
+  assert.equal(sent.length, 2);
+  current = true;
+  assert.equal((await f.controller.handle("web_fetch", { url: "https://example.com" },
+    { ...authority, callId: crypto.randomUUID(), federationClient: "hermes" })).text, "Public result");
+  assert.equal(sent.at(-1).profileId, null, "external bridge calls must not inherit a native Agent override");
+});
+test("联网错误经过公开错误映射，搜索失败没有成功结果", async () => {
+  const f = makeFixture({ webService: { async call() { throw Object.assign(new Error("fixture-secret-canary"), { code: "WEB_RATE_LIMITED" }); } } });
+  await expectCode(() => f.controller.handle("web_search", { query: "docs" },
+    { profileId: PROFILE_ID, callId: CALL_ID }), "WEB_RATE_LIMITED");
+});
+
+test("skill_learn only signals its active native owner and replays no second write", async () => {
+  const calls = [], f = makeFixture({ learningService: { request(profileId, runId) {
+    calls.push({ profileId, runId }); return { queued: true, runId, jobId: null, state: "awaiting_completion" };
+  } } });
+  const scope = { runId: RUN_ID, assertCurrent() {} }, auth = authority({ callId: crypto.randomUUID() });
+  await expectCode(() => f.controller.handle("skill_learn", {}, authority()), "MCP_TOOL_FORBIDDEN");
+  await expectCode(() => f.controller.handle("skill_learn", {}, authority({ federationClient: "hermes" }), scope), "MCP_TOOL_FORBIDDEN");
+  await expectCode(() => f.controller.handle("skill_learn", { profileId: OTHER_PROFILE_ID }, auth, scope), "MCP_TOOL_INVALID_ARGUMENTS");
+  assert.equal((await f.controller.handle("skill_learn", {}, auth, scope)).queued, true);
+  await f.controller.handle("skill_learn", {}, auth, scope); assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { profileId: PROFILE_ID, runId: RUN_ID });
+  f.runs.set(RUN_ID, run({ status: "completed" }));
+  await expectCode(() => f.controller.handle("skill_learn", {}, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+});
+test("心跳设置仅当前活跃原生 Run 可改，受限心跳、外部会话和撤权不能改", async () => {
+  const calls = [], f = makeFixture({ proactiveService: { async handleSettingsTool(name, profileId, args, context) {
+    context.assertCurrent(); calls.push({ name, profileId, args, operationId: context.operationId }); return { revision: calls.length };
+  } } });
+  const scope = { runId: RUN_ID, assertCurrent() {} }, args = { expectedRevision: 1, config: { intervalMinutes: 15 } };
+  await expectCode(() => f.controller.handle("heartbeat_settings_get", {}, authority()), "MCP_TOOL_FORBIDDEN");
+  await expectCode(() => f.controller.handle("heartbeat_settings_get", {}, authority({ profileId: OTHER_PROFILE_ID }), scope), "MCP_TOOL_NOT_FOUND");
+  for (const name of ["heartbeat_settings_get", "heartbeat_settings_set"]) await expectCode(() => f.controller.handle(name,
+    name.endsWith("get") ? {} : args, authority({ federationClient: "hermes", callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  const readAuth = authority({ callId: crypto.randomUUID() });
+  assert.equal((await f.controller.handle("heartbeat_settings_get", {}, readAuth, scope)).revision, 1);
+  assert.equal((await f.controller.handle("heartbeat_settings_get", {}, readAuth, scope)).revision, 2, "reads refresh the current settings");
+  await f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope);
+  assert.equal(calls.at(-1).profileId, PROFILE_ID);
+  assert.match(calls.at(-1).operationId, /^heartbeat-mcp-[a-f0-9]{64}$/u);
+  f.runs.set(RUN_ID, run({ source: "proactive" }));
+  await expectCode(() => f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  f.runs.set(RUN_ID, run({ status: "completed" }));
+  await expectCode(() => f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  f.runs.set(RUN_ID, run());
+  f.controller.permissionEngine.setProfileOverride(PROFILE_ID, "heartbeat_settings_set", "deny");
+  await expectCode(() => f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  assert.equal(calls.length, 3);
+});
+test("原生联网偏好绑定当前 Run 和 Agent，外部会话不能读写", async () => {
+  const calls = [], f = makeFixture({ webSettings: { async handleTool(name, profileId, args, { assertCurrent }) {
+    assertCurrent(); calls.push({ name, profileId, args }); return { saved: true };
+  } } });
+  const scope = { runId: RUN_ID, assertCurrent() {} }, auth = authority();
+  const args = { expectedRevision: 0, config: { searchProvider: "brave" } };
+  await expectCode(() => f.controller.handle("web_settings_get", {}, auth), "MCP_TOOL_FORBIDDEN");
+  for (const name of ["web_settings_get", "web_settings_set", "web_defaults_set"]) {
+    await expectCode(() => f.controller.handle(name, name === "web_settings_get" ? {} : args,
+      authority({ callId: crypto.randomUUID(), federationClient: "hermes", confirmation: true }), scope), "MCP_TOOL_FORBIDDEN");
+  }
+  await expectCode(() => f.controller.handle("web_settings_get", {}, authority({ profileId: OTHER_PROFILE_ID }), scope), "MCP_TOOL_NOT_FOUND");
+  assert.deepEqual(await f.controller.handle("web_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), { saved: true });
+  assert.equal(calls[0].profileId, PROFILE_ID);
+  f.runs.set(RUN_ID, run({ status: "completed" }));
+  await expectCode(() => f.controller.handle("web_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  assert.equal(calls.length, 1);
+});
+test("统一联网默认要求单次确认，偏好读取重放读取现值，撤权仍生效", async () => {
+  let revision = 0;
+  const f = makeFixture({ webSettings: { async handleTool(name, _profileId, _args, { assertCurrent }) {
+    assertCurrent(); if (name !== "web_settings_get") revision++; return { revision };
+  } } });
+  const scope = { runId: RUN_ID, assertCurrent() {} }, auth = authority(), args = { expectedRevision: 0, config: { fetchProvider: "tavily" } };
+  await expectCode(() => f.controller.handle("web_defaults_set", args, auth, scope), "MCP_TOOL_CONFIRMATION_REQUIRED");
+  assert.equal(revision, 0);
+  assert.equal((await f.controller.handle("web_settings_get", {}, auth, scope)).revision, 0);
+  assert.equal((await f.controller.handle("web_defaults_set", args, authority({ callId: crypto.randomUUID(), confirmation: true }), scope)).revision, 1);
+  assert.equal((await f.controller.handle("web_settings_get", {}, auth, scope)).revision, 1, "same-call read must be live after defaults changed");
+  f.controller.permissionEngine.setProfileOverride(PROFILE_ID, "web_settings_set", "deny");
+  await expectCode(() => f.controller.handle("web_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  assert.equal(revision, 1);
+});
+
+test("workspace execution uses only the four runtimes' frozen auto contract and current lease", async () => {
+  let contract = null, executions = 0;
+  const f = makeFixture({ workspaceExecutionService: { async execute(input) {
+    input.scope.assertCurrent(); executions++; return { exitCode: 0, stdout: "done", stderr: "" };
+  } }, getExecutionContract: () => contract });
+  const current = f.runs.get(RUN_ID);
+  current.source = "chat"; current.workspace = f.artifactRoot;
+  const scope = { runId: RUN_ID, assertCurrent() {} };
+  const args = { command: "node -e 'workspace task'" };
+  for (const runtime of ["antigravity", "pi", "opencode", "deepseek-harness"]) {
+    contract = { ...current, runId: RUN_ID, runtime, permissionMode: "auto-review", workspaceExecutionVersion: 1,
+      permissionPolicy: { sandbox: "workspace-write", approvalPolicy: "on-request" } };
+    const result = await f.controller.handle("workspace_execute", args, authority({ callId: crypto.randomUUID() }), scope);
+    assert.equal(result.exitCode, 0);
+  }
+  const original = contract;
+  for (const change of [{ permissionMode: "full-access" }, { permissionMode: "request-approval" },
+    { workspaceExecutionVersion: undefined }, { runtime: "codex" }, { source: "proactive" },
+    { permissionPolicy: { sandbox: "read-only" } }, { workspace: "/foreign" }, { profileId: OTHER_PROFILE_ID }]) {
+    contract = { ...original, ...change };
+    await expectCode(() => f.controller.handle("workspace_execute", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  }
+  contract = original;
+  await expectCode(() => f.controller.handle("workspace_execute", args, authority({ federationClient: "hermes" }), scope), "MCP_TOOL_FORBIDDEN");
+  await expectCode(() => f.controller.handle("workspace_execute", args, authority()), "MCP_TOOL_FORBIDDEN");
+  f.controller.permissionEngine.setProfileOverride(PROFILE_ID, "workspace_execute", "deny");
+  await expectCode(() => f.controller.handle("workspace_execute", args, authority(), scope), "MCP_TOOL_FORBIDDEN");
+  assert.equal(executions, 4);
+});
+
+test("workspace commands share concurrent calls and never replay a pending command after restart", async () => {
+  let contract, release, executions = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const service = { async execute(input) { input.scope.assertCurrent(); executions++; await gate; return { exitCode: 0, stdout: "once", stderr: "" }; } };
+  const f = makeFixture({ workspaceExecutionService: service, getExecutionContract: () => contract });
+  const current = f.runs.get(RUN_ID); current.workspace = f.artifactRoot;
+  contract = { ...current, runId: RUN_ID, runtime: "pi", permissionMode: "auto-review", workspaceExecutionVersion: 1,
+    permissionPolicy: { sandbox: "workspace-write", approvalPolicy: "on-request" } };
+  const scope = { runId: RUN_ID, assertCurrent() {} }, args = { command: "one operation" };
+  const first = f.controller.handle("workspace_execute", args, authority(), scope);
+  const duplicate = f.controller.handle("workspace_execute", args, authority(), scope);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(executions, 1);
+  release(); assert.deepEqual(await first, await duplicate);
+  assert.deepEqual(await f.controller.handle("workspace_execute", args, authority(), scope), await first);
+  assert.equal(executions, 1); assert.equal(f.controller.workspaceExecutionCalls.size, 0);
+  const callId = crypto.randomUUID();
+  f.dependencies.productStore.beginMcpToolCall({ profileId: PROFILE_ID, callId, name: "workspace_execute",
+    fingerprint: fingerprintMcpToolCall("workspace_execute", args), createdAt: 1,
+    binding: { runId: RUN_ID, profileId: PROFILE_ID, workspace: f.artifactRoot } });
+  const restarted = new McpProductToolController({ ...f.dependencies, workspaceExecutionService: service,
+    getExecutionContract: () => contract, artifactRoot: f.artifactRoot, isSensitiveValue: () => false });
+  await expectCode(() => restarted.handle("workspace_execute", args, authority({ callId }), scope), "MCP_TOOL_STATE_CONFLICT");
+  assert.equal(executions, 1);
+  contract = { ...contract, runId: OTHER_RUN_ID };
+  f.runs.set(OTHER_RUN_ID, { ...current, id: OTHER_RUN_ID });
+  await expectCode(() => restarted.handle("workspace_execute", args, authority(), { ...scope, runId: OTHER_RUN_ID }), "MCP_TOOL_FORBIDDEN");
 });
 
 (async () => {
@@ -2074,6 +2685,7 @@ test("Computer Use 的权限、驱动和读取错误保留安全的具体错误�
       console.error(error?.stack || error);
     }
   }
+  for (const root of ownedArtifactRoots) fs.rmSync(root, { recursive: true, force: true });
   if (failed > 0) process.exitCode = 1;
   else console.log(`PASS mcp product tool controller unit (${tests.length})`);
 })();

@@ -232,12 +232,17 @@ test("当前 Transcript 与各 Runtime home 的真实 owner 被显式记录", ()
   assert.equal(DATA_AUTHORITY_MANIFEST.runtime.grokBuildLedger.owner, "shoggoth");
   assert.equal(DATA_AUTHORITY_MANIFEST.runtime.grokBuildLedger.backupRequired, true);
   assert.deepEqual(DATA_AUTHORITY_MANIFEST.runtime.antigravityHome.excludedRuntimeCaches, [
-    "runtimeIntegrationDir/antigravity/<runtimeAccountId>/home/.gemini/antigravity-cli/cli.log",
-    "runtimeIntegrationDir/antigravity/<runtimeAccountId>/home/.gemini/antigravity-cli/log",
+    "runtimeIntegrationDir/antigravity/<runtimeAccountId>/home/.gemini/antigravity/bin",
   ]);
   assert.match(DATA_AUTHORITY_MANIFEST.runtime.antigravityHome.credentialPolicy, /native ~\/\.gemini is never rewritten/u);
   assert.equal(DATA_AUTHORITY_MANIFEST.runtime.antigravityLedger.owner, "shoggoth");
   assert.equal(DATA_AUTHORITY_MANIFEST.runtime.antigravityLedger.backupRequired, true);
+  assert.equal(DATA_AUTHORITY_MANIFEST.runtime.antigravityLedger.rootRule,
+    "stateDir/runtime-ledgers/antigravity-acp/<runtimeProfileId>/<workspaceShardId>");
+  assert.deepEqual({ ...DATA_AUTHORITY_MANIFEST.runtime.antigravityAcpServer, credentialPolicy: undefined }, {
+    owner: "shoggoth", classification: "runtimeCache", credentialPolicy: undefined,
+    rootRule: "stateDir/runtime-bin/antigravity-acp/<version>", backupRequired: false,
+  });
   assert.match(runtimeHomes.piHome.credentialPolicy, /never copied/u);
   assert.equal(DATA_AUTHORITY_MANIFEST.runtime.piLedger.owner, "shoggoth");
   assert.equal(DATA_AUTHORITY_MANIFEST.runtime.piLedger.backupRequired, true);

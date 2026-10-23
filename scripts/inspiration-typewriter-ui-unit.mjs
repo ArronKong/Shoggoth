@@ -86,7 +86,28 @@ for (const width of [800, 680, 620, 400, 340, 680]) {
   act(() => { const frames = [...resizeFrames.values()]; resizeFrames.clear(); frames.forEach(callback => callback()); });
   assert.equal(Number(viewportProperties.get('--printer-scale')), Math.min(1, width / 680), 'the entire printer scales continuously below its design width and never grows above it');
 }
-const displayedPrompt = () => renderer.root.findAll(node => 'data-typewriter-prompt' in node.props)[0]?.children.join('');
+const prompt = () => renderer.root.findAll(node => 'data-typewriter-prompt' in node.props)[0];
+const displayedPrompt = () => prompt()?.children.join('');
+const shownCount = value => renderer.root.findByProps({ 'data-inspiration-count': value }).children[0];
+// Run the next timers until the screen reaches a state, within a time budget.
+const advanceUntil = async (condition, budget) => {
+  const deadline = now + budget;
+  while (!condition()) {
+    const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+    assert.ok(next && next[1].at <= deadline, 'the screen reaches its next state in time');
+    await advance(next[1].at - now);
+  }
+};
+// Type the rest of a sentence key by key and return the gaps between keys.
+const typeOut = async text => {
+  const gaps = [];
+  while (displayedPrompt() !== text) {
+    const typed = Array.from(displayedPrompt()).length, started = now;
+    await advanceUntil(() => Array.from(displayedPrompt()).length > typed, 300);
+    gaps.push(now - started);
+  }
+  return gaps;
+};
 const update = changes => act(() => { props = { ...props, ...changes }; renderer.update(React.createElement(Typewriter, props)); });
 const first = inspirationSlogans[0];
 const last = inspirationSlogans.at(-1);
@@ -96,28 +117,31 @@ assert.equal(renderer.root.findByProps({ 'data-inspiration-count': 15 }).props.l
 await advance(300);
 assert.equal(displayedPrompt(), Array.from(first[locale])[0]);
 assert.equal(soundPlaying(), true, 'the first screen character starts the loop');
-await advance(100);
+assert.equal(prompt().props['data-phase'], 'typing', 'the caret and lamp hold steady while keys land');
+await advanceUntil(() => Array.from(displayedPrompt()).length === 2, 300);
 update({ paperTone: 1 });
 assert.equal(displayedPrompt(), Array.from(first[locale]).slice(0, 2).join(''), 'parent refreshes do not restart typing');
 assert.equal(randomCalls, 1, 'parent refreshes do not select a different phrase');
-await advance(100 * (Array.from(first[locale]).length - 2));
-assert.equal(displayedPrompt(), first[locale]);
+const gaps = await typeOut(first[locale]);
+assert.ok(new Set(gaps).size > 2 && gaps.every(gap => gap >= 70 && gap <= 290), 'keys land at a varied, human pace');
+assert.equal(randomCalls, 1, 'the typing rhythm does not consume slogan randomness');
 await advance(1999);
 assert.equal(soundPlaying(), false, 'the completed sentence holds in silence');
 assert.equal(displayedPrompt(), first[locale], 'the complete sentence stays for two seconds');
 randomValue = 1 - Number.EPSILON;
-await advance(1);
-assert.equal(displayedPrompt(), '', 'the complete sentence clears at the end of the hold');
+await advanceUntil(() => prompt().props['data-phase'] === 'leaving', 400);
+assert.equal(displayedPrompt(), first[locale], 'the finished sentence fades out before it clears');
+await advanceUntil(() => displayedPrompt() === '', 200);
 await advance(300);
 assert.equal(displayedPrompt(), Array.from(last[locale])[0], 'the next cycle starts a randomly selected phrase');
-await advance(100 * (Array.from(last[locale]).length - 1));
+await typeOut(last[locale]);
 assert.equal(displayedPrompt(), last[locale], 'the random pool includes the end of the extracted corpus');
 
 locale = 'en';
 update({});
 assert.equal(renderer.root.findByProps({ 'data-inspiration-count': 15 }).props.lang, 'en', 'the count follows live language changes independently of the draft');
 assert.equal(displayedPrompt(), '', 'a locale change starts the translation cleanly');
-await advance(300 + 100 * (Array.from(last.en).length - 1));
+await advance(300); await typeOut(last.en);
 assert.equal(displayedPrompt(), last.en, 'changing language keeps the corresponding phrase');
 assert.equal(randomCalls, 2, 'locale changes do not choose an unrelated slogan');
 
@@ -126,24 +150,25 @@ assert.equal(randomCalls, 2, 'locale changes do not choose an unrelated slogan')
 const duplicate = inspirationSlogans.findIndex(slogan => slogan.en === last.en);
 assert.notEqual(duplicate, inspirationSlogans.length - 1);
 randomValue = (duplicate + 0.5) / (inspirationSlogans.length - 1);
-await advance(2000);
-assert.equal(displayedPrompt(), '');
+await advanceUntil(() => displayedPrompt() === '', 2600);
 const nextEnglish = inspirationSlogans[duplicate - 1].en;
-await advance(300 + 100 * (Array.from(nextEnglish).length - 1));
+await advance(300); await typeOut(nextEnglish);
 assert.equal(displayedPrompt(), nextEnglish);
 assert.notEqual(displayedPrompt(), last.en, 'duplicate English translations cannot appear consecutively');
 
 update({ children: React.createElement('textarea', { value: '用户正在输入的内容' }) });
 assert.equal(displayedPrompt(), nextEnglish, 'editing a note never replaces the screen slogan with the draft');
 assert.equal(timers.size, 1, 'typing in the note leaves the decorative loop running');
-assert.equal(renderer.root.findByProps({ 'data-inspiration-count': 15 }).children.join(''), '15', 'the count is independent of draft length');
+assert.equal(shownCount(15).children.join(''), '15', 'the count is independent of draft length');
+assert.equal(shownCount(15).props['data-tick'], undefined, 'the first count appears without rolling');
 update({ saving: true });
 assert.equal(timers.size, 0);
 assert.equal(soundPlaying(), false, 'saving stops the decorative typing sound');
 locale = 'zh-CN';
 randomValue = 0;
 update({ children: React.createElement('textarea', { value: '' }), saving: false, ideaCount: 16 });
-assert.equal(renderer.root.findByProps({ 'data-inspiration-count': 16 }).children.join(''), '16');
+assert.equal(shownCount(16).children.join(''), '16');
+assert.equal(shownCount(16).props['data-tick'], '', 'a newly saved note rolls the counter up');
 await advance(300);
 assert.equal(soundPlaying(), true);
 update({ active: false });
@@ -168,10 +193,9 @@ update({});
 assert.equal(displayedPrompt(), first.en, 'reduced motion still follows the selected language');
 assert.equal(timers.size, 0);
 act(() => { motion.matches = false; motionListeners.forEach(listener => listener()); });
-await advance(300 + 100 * (Array.from(first.en).length - 1));
+await advance(300); await typeOut(first.en);
 assert.equal(displayedPrompt(), first.en);
-await advance(2000 + 300);
-assert.equal(soundPlaying(), true);
+await advanceUntil(() => soundPlaying(), 2800);
 act(() => renderer.unmount());
 assert.equal(timers.size, 0, 'leaving the route cancels the loop');
 assert.equal(soundPlaying(), false, 'leaving the route during typing stops sound');
@@ -180,4 +204,4 @@ assert.equal(visibilityListeners.size, 0);
 assert.equal(motionListeners.size, 0);
 assert.equal(resizeListeners.size, 0, 'leaving the route stops observing printer size');
 assert.equal(resizeFrames.size, 0, 'leaving the route cancels pending scale updates');
-console.log('PASS Inspiration typewriter: proportional responsive scaling, random bilingual corpus, sequential typing, two-second hold, no consecutive duplicates, stable locale/refresh behavior, independent note input, recorded count, visibility, reduced motion and cleanup');
+console.log('PASS Inspiration typewriter: proportional responsive scaling, random bilingual corpus, sequential human-paced typing, two-second hold and fade, rolling count, no consecutive duplicates, stable locale/refresh behavior, independent note input, recorded count, visibility, reduced motion and cleanup');

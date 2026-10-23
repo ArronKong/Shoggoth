@@ -254,8 +254,46 @@ test("Antigravity native and integration authority overlap is unavailable withou
       loginArgs: [],
       logoutArgs: [],
     });
+    assert.equal(descriptor.loginCommand, undefined, "an unsafe authority layout offers no sign-in");
     assert.deepEqual(fs.readdirSync(value.userHome), before);
     assert.equal(fs.existsSync(nativeHome), false);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("Antigravity signs in through Shoggoth's own script, even before the ACP server is installed", () => {
+  const value = fixture();
+  try {
+    const before = fs.readdirSync(value.paths.stateDir);
+    const executablePath = path.join(value.root, "Shoggoth.app", "Contents", "MacOS", "Shoggoth");
+    const repoRoot = path.join(value.root, "app.asar");
+    let received;
+    const descriptor = value.create({
+      executablePath,
+      repoRoot,
+      binaryResolvers: {
+        antigravity: (options) => {
+          received = options;
+          throw Object.assign(new Error("missing"), { code: "ANTIGRAVITY_ACP_NOT_INSTALLED" });
+        },
+      },
+    }).find((entry) => entry.runtimeAccountId === NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID);
+    assert.equal(received.paths, value.paths, "the ACP server lives under Shoggoth's state directory");
+    assert.equal(descriptor.binaryPath, null);
+    assert.equal(descriptor.unavailableReason, "Antigravity ACP server is not installed; Sign in installs it");
+    assert.deepEqual(descriptor.loginCommand, {
+      executable: executablePath,
+      args: [path.join(repoRoot, "app", "agent-service", "antigravity-acp-login.js"),
+        "--account", NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+    assert.ok(fs.existsSync(descriptor.loginCommand.args[0].replace(repoRoot, path.join(__dirname, ".."))),
+      "the command points at a script that ships with the app");
+    const other = value.create({ executablePath, repoRoot })
+      .filter((entry) => entry.runtimeAccountId !== NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID);
+    assert.ok(other.every((entry) => entry.loginCommand === undefined), "other runtimes keep their CLI login");
+    assert.deepEqual(fs.readdirSync(value.paths.stateDir), before);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }

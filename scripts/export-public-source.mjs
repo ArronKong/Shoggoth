@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { withoutBundledPlugins } from './bundled-plugin-sbom.mjs';
 import { createRequire } from 'node:module';
 
 const yaml = createRequire(import.meta.url)('js-yaml');
@@ -15,16 +16,22 @@ const privateFiles = new Set([
   'CLAUDE.md', 'PROGRESS.md', 'prd.md',
   'openclaw-hermes-kanban-flow.png', 'openclaw-hermes-kanban-flow.svg',
   'app/manage-ui/openclawdesign.md', 'scripts/import-bundled-plugins.cjs',
+  'scripts/hermes-managed-title-policy-patch.py',
   'SOURCE-EXPORT.json',
 ]);
 const bundledPackages = 'resources/bundled-plugins/packages/';
 const bundledCatalog = 'resources/bundled-plugins/catalog.json';
-const bundledCatalogVersion = JSON.parse(fs.readFileSync(path.join(root, bundledCatalog), 'utf8')).version;
+const bundledSbom = 'build/release-sbom.cdx.json';
+const sourceBundledCatalog = JSON.parse(fs.readFileSync(path.join(root, bundledCatalog), 'utf8'));
+const bundledCatalogVersion = sourceBundledCatalog.version;
 const emptyBundledCatalog = Buffer.from(`${JSON.stringify({
   version: bundledCatalogVersion,
   batchDigest: crypto.createHash('sha256').update('[]').digest('hex'),
   packages: [],
 }, null, 2)}\n`);
+const emptyBundledSbom = Buffer.from(`${JSON.stringify(withoutBundledPlugins(
+  JSON.parse(fs.readFileSync(path.join(root, bundledSbom), 'utf8')), sourceBundledCatalog,
+), null, 2)}\n`);
 
 // Check tracked files too: .gitignore alone does not exclude already tracked notes.
 export function isPublicSourcePath(relative) {
@@ -36,6 +43,7 @@ export function isPublicSourcePath(relative) {
 
 export function publicSourceBytes(relative, sourceBytes) {
   if (relative === bundledCatalog) return emptyBundledCatalog;
+  if (relative === bundledSbom) return emptyBundledSbom;
   if (relative !== 'electron-builder.yml') return sourceBytes;
   const config = yaml.load(sourceBytes.toString('utf8'));
   const retained = config.extraResources.filter(item =>
@@ -65,7 +73,7 @@ export function exportPublicSource(destinationPath = path.join(root, 'output/pub
     const bytes = publicSourceBytes(relative, sourceBytes);
     const transformed = !bytes.equals(sourceBytes);
     entries.push({ path: relative, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), mode: stat.mode & 0o777,
-      ...(transformed ? { redaction: 'bundled packages omitted pending redistribution review' } : {}) });
+      ...(transformed ? { redaction: 'bundled packages and SBOM entries omitted pending redistribution review' } : {}) });
   }
   fs.mkdirSync(destination, { recursive: true });
   for (const entry of entries) {

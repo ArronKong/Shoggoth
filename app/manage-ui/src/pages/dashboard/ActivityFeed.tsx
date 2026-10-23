@@ -20,7 +20,7 @@ import { activityStatusRows } from "./activityStatusRows";
 // 统一活动流（今日动态）：cron / kanban / inspiration，隐藏系统健康及 heartbeat 记录。
 // - 首屏来自 summary.activityPage（默认筛选第一页）；筛选/加载更多走
 //   /__api/dashboard/activities（服务端筛选 + opaque cursor）。
-// - 45s 轮询到的新首屏按 id 合并进已加载列表，不清空「加载更多」的旧记录；
+// - 45s 轮询的新首屏替换其覆盖范围，只保留已加载的更旧记录；来源降级时保留旧数据。
 //   summary.sinceMs 变化（跨本地午夜）时整体重置。
 // - 点击：cron → 运行弹窗（父组件既有逻辑）；kanban → Tasks 深链；
 //   inspiration → 当前页面的灵感详情弹窗。
@@ -43,12 +43,28 @@ function fmtClock(ts: number): string {
 
 const stripMdMarks = (s: string): string => s.replace(/[*_`#]{1,}/g, "").replace(/\s+/g, " ").trim();
 
+const entryOrder = (a: DashboardActivityEntry, b: DashboardActivityEntry): number =>
+  a.occurredAt !== b.occurredAt ? b.occurredAt - a.occurredAt : a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+
 function mergeEntries(base: DashboardActivityEntry[], incoming: DashboardActivityEntry[]): DashboardActivityEntry[] {
   const byId = new Map<string, DashboardActivityEntry>();
-  for (const e of [...base, ...incoming]) byId.set(e.id, e);
-  return [...byId.values()].sort((a, b) =>
-    a.occurredAt !== b.occurredAt ? b.occurredAt - a.occurredAt : a.id < b.id ? 1 : a.id > b.id ? -1 : 0,
-  );
+  for (const e of [...base, ...incoming]) {
+    // Older servers and persisted caches include startedAt in the activity id.
+    // Reconcile those rows by execution identity, never by title or result text.
+    const runId = e.kind === "cron" && e.run.runId;
+    const key = e.kind === "cron" && runId
+      ? JSON.stringify([e.kind, e.backendId, e.run.jobId, runId]) : e.id;
+    byId.set(key, e);
+  }
+  return [...byId.values()].sort(entryOrder);
+}
+
+function mergeFirstPage(base: DashboardActivityEntry[], page?: DashboardActivityPage): DashboardActivityEntry[] {
+  if (!page) return base;
+  const last = page.items[page.items.length - 1];
+  const retained = page.degradedSources.length ? base
+    : page.hasMore ? last ? base.filter(entry => entryOrder(entry, last) > 0) : base : [];
+  return mergeEntries(retained, page.items);
 }
 
 // Keep stable avatar identity separate from its current display name.
@@ -104,10 +120,11 @@ export default function ActivityFeed({
   // 「断开连接」的后端不进筛选按钮组（status 全量返回，含 disabled 卡片行）。
   const visibleBackends = sortBackendTabs(status.filter((b) => !b.disabled));
   const filtered = backendFilter !== "" || kindFilter !== "";
-  const filteredFirstPage = filtered ? firstPage : undefined;
+  const queryScope = JSON.stringify([backendScopeKey, backendFilter, kindFilter, sinceMs]);
+  const loadedScope = useRef(queryScope);
 
   // 无筛选时以 summary 首屏为基底；有筛选时以服务端筛选页为基底。
-  const [entries, setEntries] = useState<DashboardActivityEntry[]>(firstPage?.items || []);
+  const [entries, setEntries] = useState<DashboardActivityEntry[]>(() => mergeEntries([], firstPage?.items || []));
   const visibleEntries = useMemo(() => entries.filter(isVisibleDashboardActivity)
     .filter(entry => activeBackendIds.has(entry.backendId)), [entries, activeBackendIds]);
   const [hasMore, setHasMore] = useState(!!firstPage?.hasMore);
@@ -130,50 +147,38 @@ export default function ActivityFeed({
       dayRef.current = sinceMs;
       setBackendFilter("");
       setKindFilter("");
-      setEntries(firstPage?.items || []);
-      setHasMore(!!firstPage?.hasMore);
-      setNextCursor(firstPage?.nextCursor);
     }
-    // firstPage 由下面的合并 effect 消费；这里只处理换日。
+    // 下方按 queryScope 重置列表和分页；这里只处理换日筛选。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sinceMs]);
 
-  // 45s 轮询带来的新首屏：无筛选时按 id 合并（不清空已加载旧记录）。
-  useEffect(() => {
-    if (!firstPage || filtered) return;
-    setEntries((prev) => mergeEntries(prev, firstPage.items));
-    // 只有未点过「加载更多」时才采信首屏的 hasMore/cursor（否则保留更深的游标）。
-    setNextCursor((prev) => prev ?? firstPage.nextCursor);
-    setHasMore((prev) => prev || !!firstPage.hasMore);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstPage]);
-
-  // 筛选变化或 summary 刷新：重新取筛选页，运行状态随轮询更新。
+  // 每次首屏刷新都使旧分页失效，避免迟到的旧页重新带回已被替代的动态。
   useEffect(() => {
     const generation = ++requestGeneration.current;
+    const scopeChanged = loadedScope.current !== queryScope;
+    loadedScope.current = queryScope;
+    let cancelled = false;
+    setFetchError(false);
     if (!filtered) {
       setBusy(false);
-      setFetchError(false);
-      setEntries(firstPage?.items || []);
+      setEntries(prev => mergeFirstPage(scopeChanged ? [] : prev, firstPage));
       setHasMore(!!firstPage?.hasMore);
       setNextCursor(firstPage?.nextCursor);
-      return;
+    } else {
+      setBusy(true);
+      getDashboardActivities({ backend: backendFilter || undefined, kind: kindFilter || undefined })
+        .then((page) => {
+          if (cancelled) return;
+          setEntries(mergeEntries([], page.items));
+          setHasMore(page.hasMore);
+          setNextCursor(page.nextCursor);
+        })
+        .catch(() => { if (!cancelled) setFetchError(true); })
+        .finally(() => { if (!cancelled) setBusy(false); });
     }
-    let cancelled = false;
-    setBusy(true);
-    setFetchError(false);
-    getDashboardActivities({ backend: backendFilter || undefined, kind: kindFilter || undefined })
-      .then((page) => {
-        if (cancelled) return;
-        setEntries(page.items);
-        setHasMore(page.hasMore);
-        setNextCursor(page.nextCursor);
-      })
-      .catch(() => { if (!cancelled) setFetchError(true); })
-      .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; if (requestGeneration.current === generation) requestGeneration.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendFilter, kindFilter, filteredFirstPage, backendScopeKey, sinceMs]);
+  }, [backendFilter, kindFilter, firstPage, queryScope]);
 
   const loadMore = async () => {
     if (!nextCursor || busy) return;

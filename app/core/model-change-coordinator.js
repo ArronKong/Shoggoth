@@ -14,6 +14,8 @@ const {
   modelIdentityKey,
   normalizeModelChangeRequest,
   normalizeModelDeleteSpec,
+  normalizeModelProviderDraft,
+  normalizeModelCredentialScope,
   modelChangeRequestDigest,
 } = require("./model-change-validation");
 const { createEntry, isNonTerminalStatus } = require("./model-change-journal");
@@ -27,6 +29,13 @@ const RESULT_STATUSES = new Set([
   "applied", "failed", "compensated",
 ]);
 const TERMINAL_STATUSES = new Set(["applied", "failed", "compensated"]);
+const ORIGINAL_OPERATION_FIELDS = Object.freeze([
+  "operationId", "backendId", "providerKey", "requestDigest", "previewTokenDigest", "kind", "mode", "createdAt",
+]);
+function captureOperationIdentity(entry) {
+  return Object.freeze(Object.fromEntries(ORIGINAL_OPERATION_FIELDS.map((key) => [key, entry[key]])));
+}
+
 const SECRET_KEYS = new Set([
   "apikey", "xapikey", "token", "accesstoken", "refreshtoken", "authorization",
   "clientsecret", "secret", "password", "credential", "credentials",
@@ -213,6 +222,61 @@ class ModelChangeCoordinator {
     this.ready = false;
     this.keyedTails = new Map();
     this.consumedTokenDigests = new Set();
+    // 本进程正在处理的 operationId（请求进入到返回）；观察它们时结果仍未知。
+    this.inFlightOperations = new Map();
+    // 不进 journal 的操作（批量配置写、journal.begin 前被拒绝）在本进程内的终态回执，
+    // 供 Main 恢复层核对后解锁原 ID。仅内存且有界。
+    this.unjournaledOutcomes = new Map();
+  }
+
+  /**
+   * 包住每个公开 mutation 入口：处理期间标记 in-flight；结束后若 journal 仍没有该
+   * operation（批量写，或 begin 前的拒绝），把已确定的结论记为终态回执。
+   * 未进 journal 的非终态结论（如预检 blocked）不会再有后续写入，按 failed 记录。
+   */
+  async _trackOperation(backendId, providerKey, operationId, run) {
+    if (typeof operationId !== "string" || !OPERATION_ID_RE.test(operationId)) return run();
+    this.inFlightOperations.set(operationId, (this.inFlightOperations.get(operationId) || 0) + 1);
+    let outcome = null;
+    try {
+      const result = await run();
+      outcome = {
+        status: TERMINAL_STATUSES.has(result?.status) ? result.status : "failed",
+        stage: result?.stage,
+        code: result?.code,
+      };
+      return result;
+    } catch (error) {
+      outcome = { status: "failed", stage: error?.stage, code: error?.code };
+      throw error;
+    } finally {
+      const remaining = (this.inFlightOperations.get(operationId) || 1) - 1;
+      if (remaining > 0) this.inFlightOperations.set(operationId, remaining);
+      else {
+        this.inFlightOperations.delete(operationId);
+        if (outcome) this._noteUnjournaledOutcome(backendId, providerKey, operationId, outcome);
+      }
+    }
+  }
+
+  _noteUnjournaledOutcome(backendId, providerKey, operationId, outcome) {
+    if (typeof backendId !== "string" || !OPERATION_ID_RE.test(backendId)
+      || typeof providerKey !== "string" || providerKey.length > 128 || !PROVIDER_KEY_RE.test(providerKey)) return;
+    let journaled;
+    try { journaled = this.journal.get(operationId); } catch { return; }
+    this.unjournaledOutcomes.delete(operationId);
+    if (journaled) return; // journal 是已受理操作的唯一真值
+    const safe = (value, fallback) => (typeof value === "string" && OPERATION_ID_RE.test(value) ? value : fallback);
+    this.unjournaledOutcomes.set(operationId, Object.freeze({
+      backendId,
+      providerKey,
+      status: outcome.status,
+      stage: safe(outcome.stage, "preflight"),
+      code: safe(outcome.code, undefined),
+    }));
+    while (this.unjournaledOutcomes.size > 512) {
+      this.unjournaledOutcomes.delete(this.unjournaledOutcomes.keys().next().value);
+    }
   }
 
   /** 返回启动恢复是否已经完成；写路由在 Task 5 以此建立 readiness 门。 */
@@ -252,6 +316,130 @@ class ModelChangeCoordinator {
         source: entry.source,
         target: entry.target,
       }));
+  }
+
+  /** Closed identity-only projection for restart recovery, independent of
+   * Runtime readiness/catalog availability. No spec, refs, diff or key data. */
+  listPendingIdentities(backendId) {
+    if (typeof backendId !== "string" || !OPERATION_ID_RE.test(backendId))
+      throw new ModelChangeError("invalid_pending_observation", "未完成模型操作查询参数无效", { status: 400 });
+    const entries = this.journal.listPending().filter(entry => entry.backendId === backendId);
+    if (entries.length > 512)
+      throw new ModelChangeError("pending_observation_unavailable", "未完成模型操作过多，无法核实完整清单", { status: 503 });
+    const operations = entries.map(entry => {
+      if (typeof entry.operationId !== "string" || !OPERATION_ID_RE.test(entry.operationId)
+        || typeof entry.providerKey !== "string" || entry.providerKey.length > 128 || !PROVIDER_KEY_RE.test(entry.providerKey)
+        || !isNonTerminalStatus(entry.status) || typeof entry.stage !== "string" || !OPERATION_ID_RE.test(entry.stage))
+        throw new ModelChangeError("pending_observation_unverified", "未完成模型操作身份无法核实", { status: 503 });
+      const code = entry.result?.code;
+      return Object.freeze({ operationId: entry.operationId, providerKey: entry.providerKey, status: entry.status, stage: entry.stage,
+        ...(typeof code === "string" && OPERATION_ID_RE.test(code) ? { code } : {}) });
+    });
+    return Object.freeze({ version: 1, backendId, operations: Object.freeze(operations) });
+  }
+
+  /** Observe only the original durable operation. Never acquire a provider lease,
+   * call a backend, attach a fresh catalog, recover or repeat a write here. */
+  observeOperation(backendId, identity) {
+    const invalid = () => { throw new ModelChangeError("invalid_operation_observation", "模型操作查询参数无效", { status: 400 }); };
+    if (typeof backendId !== "string" || !OPERATION_ID_RE.test(backendId)
+      || !isPlainObject(identity) || Reflect.ownKeys(identity).length !== 2) invalid();
+    const captured = {};
+    for (const key of ["operationId", "providerKey"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(identity, key);
+      if (!descriptor || !Object.hasOwn(descriptor, "value") || descriptor.enumerable !== true) invalid();
+      captured[key] = descriptor.value;
+    }
+    if (typeof captured.operationId !== "string" || !OPERATION_ID_RE.test(captured.operationId)
+      || typeof captured.providerKey !== "string" || captured.providerKey.length > 128
+      || !PROVIDER_KEY_RE.test(captured.providerKey)) invalid();
+    const base = { version: 1, backendId, operationId: captured.operationId, providerKey: captured.providerKey };
+    const entry = this.journal.get(captured.operationId);
+    if (!entry) {
+      // 仍在本进程处理中：结论未知，保持锁定。
+      if (this.inFlightOperations.has(captured.operationId)) {
+        return Object.freeze({ ...base, status: "not_found", stage: "observation", terminal: false });
+      }
+      const settled = this.unjournaledOutcomes.get(captured.operationId);
+      if (settled) {
+        if (settled.backendId !== backendId || settled.providerKey !== captured.providerKey) {
+          throw new ModelChangeError("operation_scope_mismatch", "模型操作不属于当前提供方", { status: 404 });
+        }
+        return Object.freeze({ ...base, status: settled.status, stage: settled.stage, terminal: true,
+          ...(settled.code ? { code: settled.code } : {}) });
+      }
+      // 既不在 journal、本进程也没在处理：该 ID 从未被受理（或受理结论已超出保留期），
+      // 今后也不会再有写入。按「未受理」终态回执，Main 据此解除原 ID 的锁。
+      return Object.freeze({ ...base, status: "failed", stage: "observation", code: "operation_not_admitted",
+        terminal: true });
+    }
+    if (entry.backendId !== backendId || entry.providerKey !== captured.providerKey) {
+      throw new ModelChangeError("operation_scope_mismatch", "模型操作不属于当前提供方", { status: 404 });
+    }
+    const terminal = TERMINAL_STATUSES.has(entry.status);
+    if (terminal && (!isPlainObject(entry.result) || entry.result.operationId !== entry.operationId
+      || entry.result.status !== entry.status)) {
+      throw new ModelChangeError("operation_receipt_unverified", "模型操作终态回执无法核实", { status: 503 });
+    }
+    const code = entry.result?.code;
+    return Object.freeze({ ...base, status: entry.status, stage: entry.stage, terminal,
+      ...(typeof code === "string" && OPERATION_ID_RE.test(code) ? { code } : {}),
+    });
+  }
+
+  /** Explicitly recover one original journal identity under its existing
+   * provider fencing. This is never called by a GET or a background UI retry. */
+  async recoverOperation(backendId, identity) {
+    const observed = this.observeOperation(backendId, identity);
+    if (observed.status === "not_found")
+      throw new ModelChangeError("original_operation_not_found", "无法找到原模型操作，不能创建替代操作", { status: 404 });
+    if (observed.terminal) return observed;
+    const entry = this.journal.get(observed.operationId);
+    if (!entry || entry.backendId !== backendId || entry.providerKey !== observed.providerKey)
+      throw new ModelChangeError("operation_scope_mismatch", "原模型操作身份已变化", { status: 404 });
+    await this._trackOperation(backendId, observed.providerKey, observed.operationId, () => this._recoverEntry(entry));
+    return this.observeOperation(backendId, { operationId: observed.operationId, providerKey: observed.providerKey });
+  }
+
+  /**
+   * 用户显式放弃一条停在半路的 config-only 原操作（例如改名停在「需要重新输入 Key」）：
+   * 只把 journal 结论改为终态 failed，不回滚已写入的配置，也不调用 backend。
+   * 正在处理的操作与 full 模式（含引用迁移、运行时收敛）不能放弃。
+   */
+  async abandonOperation(backendId, identity) {
+    const observed = this.observeOperation(backendId, identity);
+    if (observed.terminal) return observed;
+    if (observed.status === "not_found")
+      throw new ModelChangeError("operation_in_flight", "原模型操作仍在处理，不能放弃", { status: 409 });
+    const entry = this.journal.get(observed.operationId);
+    if (!entry || entry.backendId !== backendId || entry.providerKey !== observed.providerKey)
+      throw new ModelChangeError("operation_scope_mismatch", "原模型操作身份已变化", { status: 404 });
+    if (entry.mode !== "config-only")
+      throw new ModelChangeError("abandon_unsupported", "该模型操作不能放弃", { status: 409 });
+    const original = captureOperationIdentity(entry);
+    await this._withKeyedMutex(`${original.backendId}\0${original.providerKey}`, async () => {
+      if (this.inFlightOperations.has(original.operationId))
+        throw new ModelChangeError("operation_in_flight", "原模型操作仍在处理，不能放弃", { status: 409 });
+      const providerScope = `${original.backendId}:${original.providerKey}`;
+      return this.journal.withProviderLock(providerScope, original.operationId, async (guard) => {
+        guard.assertActive();
+        const current = this.journal.get(original.operationId);
+        if (!current) return null;
+        if (Object.keys(original).some((key) => current[key] !== original[key]))
+          throw new ModelChangeError("operation_scope_mismatch", "原模型操作身份已变化", { status: 404 });
+        if (TERMINAL_STATUSES.has(current.status)) return current.result;
+        const abandoned = {
+          status: "failed",
+          code: "abandoned_by_user",
+          stage: current.stage,
+          retryable: false,
+          operationId: current.operationId,
+        };
+        return (await this._guardedJournalMutation(guard, current.operationId, "abandon",
+          () => this.journal.finish(current.operationId, "failed", abandoned))).result;
+      });
+    });
+    return this.observeOperation(backendId, { operationId: observed.operationId, providerKey: observed.providerKey });
   }
 
   /** 获取已激活 backend；未知 ID 不允许静默降级。 */
@@ -379,6 +567,9 @@ class ModelChangeCoordinator {
     }
     const requestDigest = modelChangeRequestDigest(safeSpec);
     const capabilities = cloneSafeJson(await backend.getModelChangeCapabilities(), "capabilities");
+    if (safeSpec.model?.advanced !== undefined && capabilities.configurationDraft !== true) {
+      throw new ModelChangeError("unsupported_model_metadata", "当前后端不支持模型高级配置", { status: 409 });
+    }
     const preview = this._normalizePreviewOutput(await backend.previewModelChange(safeSpec));
     const payload = {
       version: PREVIEW_TOKEN_VERSION,
@@ -415,7 +606,7 @@ class ModelChangeCoordinator {
    * （即纯能力类阻断）。冲突类 blocker（target_conflict 等）永远不可绕过；
    * rename 不在映射表内，天然不降级。
    */
-  async _configOnlyEligible(backendId, safeSpec, blockers, { forced = false } = {}) {
+  async _configOnlyEligible(backendId, safeSpec, blockers, { forced = false, legacy = false } = {}) {
     const kindField = {
       create: "create",
       update: "update",
@@ -431,7 +622,7 @@ class ModelChangeCoordinator {
     if (typeof backend.getModelConfigWriteCapabilities !== "function") return null;
     let caps;
     try {
-      caps = cloneSafeJson(await backend.getModelConfigWriteCapabilities(), "configWriteCapabilities");
+      caps = cloneSafeJson(await backend.getModelConfigWriteCapabilities({ legacy }), "configWriteCapabilities");
     } catch {
       return null;
     }
@@ -497,7 +688,7 @@ class ModelChangeCoordinator {
           })),
         } : {}),
       };
-    } else if (safeSpec.kind === "update-provider") {
+    } else if (["update-provider", "save-provider"].includes(safeSpec.kind)) {
       target = { provider: safeSpec.patch?.renameTo || safeSpec.providerKey };
     } else if (safeSpec.kind === "delete-model") {
       modelDiff = {
@@ -591,6 +782,7 @@ class ModelChangeCoordinator {
       return { status: "failed", code: "invalid_backend_result", stage: "apply", retryable: false };
     }
     const result = cloneSafeJson(rawResult, "applyResult");
+    delete result.noWrite; // Private managed settlement proof; terminal receipt is public.
     // backend 无权自行声明最终目录；applied 也必须由 coordinator 的 strict fresh
     // snapshot 覆盖，其他状态则永远不携带 catalog。
     delete result.catalog;
@@ -608,7 +800,7 @@ class ModelChangeCoordinator {
   }
 
   /** applied 必须先取得 strict fresh catalog；失败降级为可恢复 partial 且不携带伪目录。 */
-  async _attachStrictCatalog(backendId, result) {
+  async _attachStrictCatalog(backendId, result, mode = "full") {
     if (result.status !== "applied") return result;
     try {
       const snapshot = await this.registry.listModelsSnapshot(backendId, { fresh: true });
@@ -623,6 +815,11 @@ class ModelChangeCoordinator {
         },
       }, "finalResult");
     } catch {
+      if (mode === "native-config") {
+        return { ...result, catalogPending: true,
+          warnings: [...(Array.isArray(result.warnings) ? result.warnings : []),
+            "配置已保存，模型目录暂未刷新"] };
+      }
       return {
         status: "partial",
         code: "catalog_pending",
@@ -637,9 +834,15 @@ class ModelChangeCoordinator {
    * 检查已有 operation 的摘要。journal 建立后由 operationId+requestDigest 作为恢复凭据，
    * 不依赖上个进程的 HMAC secret；若调用方仍提交 token，则必须与 journal 摘要一致。
    */
-  _existingOperation(operationId, requestDigest, previewToken) {
+  _existingOperation(backendId, providerKey, operationId, requestDigest, previewToken, original = null) {
     const existing = this.journal.get(operationId);
-    if (!existing) return null;
+    if (!existing) {
+      if (original) throw new ModelChangeError("operation_scope_mismatch", "原模型操作已不存在，不能创建替代操作", { status: 404 });
+      return null;
+    }
+    if (existing.backendId !== backendId || existing.providerKey !== providerKey
+      || (original && ORIGINAL_OPERATION_FIELDS.some((key) => existing[key] !== original[key])))
+      throw new ModelChangeError("operation_scope_mismatch", "模型操作不属于原提供方或原请求身份", { status: 404 });
     if (existing.requestDigest !== requestDigest) {
       throw new ModelChangeError("operation_reused", "operationId 已绑定不同请求", { status: 409 });
     }
@@ -670,7 +873,8 @@ class ModelChangeCoordinator {
     const requestDigest = modelChangeRequestDigest(safeSpec);
     // 兼容 REST 的续提凭据是 operationId；已有 journal 时不再要求客户端持有内部 preview token。
     const submittedToken = resumeByOperationId ? undefined : previewToken;
-    const known = this._existingOperation(operationId, requestDigest, submittedToken);
+    const known = this._existingOperation(backendId, safeSpec.providerKey, operationId, requestDigest, submittedToken);
+    const original = known ? captureOperationIdentity(known.existing) : null;
     if (known && TERMINAL_STATUSES.has(known.existing.status)) return known.existing.result;
 
     // A completed config write can be left pending only because the immediate
@@ -686,7 +890,8 @@ class ModelChangeCoordinator {
 
     const mutexKey = `${backendId}\0${safeSpec.providerKey}`;
     return this._withKeyedMutex(mutexKey, async () => {
-      const afterWait = this._existingOperation(operationId, requestDigest, submittedToken);
+      const afterWait = this._existingOperation(backendId, safeSpec.providerKey, operationId, requestDigest, submittedToken, original);
+      const admittedIdentity = original || (afterWait ? captureOperationIdentity(afterWait.existing) : null);
       if (afterWait && TERMINAL_STATUSES.has(afterWait.existing.status)) return afterWait.existing.result;
 
       let tokenDigest = afterWait?.tokenDigest || null;
@@ -707,7 +912,7 @@ class ModelChangeCoordinator {
 
       return this.journal.withProviderLock(providerScope, operationId, async (guard) => {
         guard.assertActive();
-        const lockedExisting = this._existingOperation(operationId, requestDigest, submittedToken);
+        const lockedExisting = this._existingOperation(backendId, safeSpec.providerKey, operationId, requestDigest, submittedToken, admittedIdentity);
         if (lockedExisting && TERMINAL_STATUSES.has(lockedExisting.existing.status)) {
           guard.assertActive();
           return lockedExisting.existing.result;
@@ -715,8 +920,9 @@ class ModelChangeCoordinator {
         const otherPending = this.journal.listPending().find((entry) => (
           entry.operationId !== operationId
           && entry.backendId === backendId
-          && [entry.providerKey, entry.target?.provider].some(provider => provider &&
-            (provider === safeSpec.providerKey || provider === safeSpec.patch?.renameTo))
+          && [entry.providerKey, entry.target?.provider, ...(entry.fingerprints?.nativeProviders || [])].some(provider => provider &&
+            [safeSpec.providerKey, safeSpec.patch?.renameTo, ...(safeSpec.patch?.items || []).flatMap(item =>
+              [item.providerKey, item.patch?.renameTo])].includes(provider))
         ));
         if (otherPending) {
           throw new ModelChangeError("provider_change_pending", "该 Provider 存在未完成的模型变更", {
@@ -726,7 +932,7 @@ class ModelChangeCoordinator {
         }
 
         // journal 明确记录 secret 尚未完成时，空凭证重试/自动恢复绝不能把公开字段收敛误报成功。
-        if (lockedExisting?.existing.secretStep === "pending" && !secretEnvelope?.apiKey) {
+        if (lockedExisting?.existing.secretStep === "pending" && !secretEnvelope?.apiKey && lockedExisting.existing.mode !== "native-config") {
           const needsSecret = {
             status: "needs_secret",
             code: "recovery_input_required",
@@ -794,7 +1000,7 @@ class ModelChangeCoordinator {
           let recovered = this._normalizeApplyResult(
             await backend.recoverModelChange(lockedExisting.existing, recoveryContext),
           );
-          recovered = await this._attachStrictCatalog(backendId, recovered);
+          recovered = await this._attachStrictCatalog(backendId, recovered, lockedExisting.existing.mode);
           recovered = { ...recovered, operationId };
           const recoveredEntry = await this._guardedJournalMutation(
             guard,
@@ -827,7 +1033,7 @@ class ModelChangeCoordinator {
             : verifiedConfigOnlyTarget
             ? currentPreview.blockers.filter((blocker) => !["target_conflict", "provider_conflict"].includes(blocker.code))
             : currentPreview.blockers;
-          configWriteCaps = await this._configOnlyEligible(backendId, safeSpec, blockers, { forced: force });
+          configWriteCaps = await this._configOnlyEligible(backendId, safeSpec, blockers, { forced: force, legacy: lockedExisting?.existing.mode === "config-only" });
           if (!configWriteCaps) {
             return blockedResult(
               currentPreview.blockers.length > 0
@@ -848,8 +1054,8 @@ class ModelChangeCoordinator {
           sourceSnapshot: currentPreview.sourceSnapshot,
           modelProfiles: currentPreview.modelProfiles,
           providerDiff: currentPreview.providerDiff,
-          hasSecret: Boolean(secretEnvelope),
-          mode: configOnlyContext ? "config-only" : "full",
+          hasSecret: Boolean(secretEnvelope) || currentPreview.fingerprints?.nativeConfigVersion === 1 && safeSpec.patch?.clearApiKey === true,
+          mode: lockedExisting?.existing.mode || (currentPreview.fingerprints?.nativeConfigVersion === 1 ? "native-config" : configOnlyContext ? "config-only" : "full"),
         });
         const journalEntry = await this._guardedJournalMutation(
           guard,
@@ -857,6 +1063,12 @@ class ModelChangeCoordinator {
           "begin",
           () => this.journal.begin(candidate),
         );
+        // Another provider/backend may have admitted this ID during preview.
+        // begin is globally idempotent by digest; never accept its foreign row.
+        if (journalEntry.backendId !== backendId || journalEntry.providerKey !== safeSpec.providerKey
+          || journalEntry.requestDigest !== requestDigest
+          || (admittedIdentity && ORIGINAL_OPERATION_FIELDS.some((key) => journalEntry[key] !== admittedIdentity[key])))
+          throw new ModelChangeError("operation_scope_mismatch", "持久模型操作不属于原请求身份", { status: 404 });
         this.consumedTokenDigests.add(tokenDigest);
         if (TERMINAL_STATUSES.has(journalEntry.status)) return journalEntry.result;
 
@@ -883,7 +1095,7 @@ class ModelChangeCoordinator {
               ? null
               : (configWriteCaps?.activation ?? null);
           }
-          result = await this._attachStrictCatalog(backendId, result);
+          result = await this._attachStrictCatalog(backendId, result, journalEntry.mode);
           guard.assertActive();
         } catch (error) {
           // fencing/journal 错误必须原样上抛，失锁后绝不尝试继续写 journal 或返回成功。
@@ -940,16 +1152,25 @@ class ModelChangeCoordinator {
 
   /** 公开 apply 入口重新 normalize，以确保 secret 只进入第三参数。 */
   async apply(backendId, rawSpec, options = {}) {
-    const { safeSpec, secretEnvelope } = normalizeModelChangeRequest(rawSpec);
-    return this._applySafe(backendId, safeSpec, secretEnvelope, options);
+    return this._trackOperation(backendId, rawSpec?.providerKey, options.operationId, () => {
+      const { safeSpec, secretEnvelope } = normalizeModelChangeRequest(rawSpec);
+      return this._applySafe(backendId, safeSpec, secretEnvelope, options);
+    });
   }
 
   /** 兼容旧 POST：内部 preview，blocker 零写；通过后仍走同一 token + journal 协议。 */
   async applyCompat(backendId, rawSpec, { operationId = randomUUID() } = {}) {
+    return this._trackOperation(backendId, rawSpec?.providerKey, operationId,
+      () => this._applyCompatUntracked(backendId, rawSpec, operationId));
+  }
+
+  async _applyCompatUntracked(backendId, rawSpec, operationId) {
     const { safeSpec, secretEnvelope } = normalizeModelChangeRequest(rawSpec);
     // 幂等续提：journal 已有同 id+digest 的 operation（含终态）时直接按 operationId
     // 恢复，不重新 preview——否则响应丢失后的重试会撞 preview_mismatch/target_conflict。
     const existing = this._existingOperation(
+      backendId,
+      safeSpec.providerKey,
       normalizeOperationId(operationId),
       modelChangeRequestDigest(safeSpec),
     );
@@ -982,7 +1203,7 @@ class ModelChangeCoordinator {
   async _applyCompatSafe(backendId, safeSpec, secretEnvelope, operationId) {
     operationId = normalizeOperationId(operationId);
     const requestDigest = modelChangeRequestDigest(safeSpec);
-    const existing = this._existingOperation(operationId, requestDigest);
+    const existing = this._existingOperation(backendId, safeSpec.providerKey, operationId, requestDigest);
     if (existing) {
       return this._applySafe(backendId, safeSpec, secretEnvelope, {
         operationId,
@@ -1008,8 +1229,26 @@ class ModelChangeCoordinator {
     });
   }
 
+  /** Whole-form saves still use this coordinator's identities, locks and journal. */
+  async saveProviderDraft(backendId, input, { operationId = randomUUID() } = {}) {
+    return this._trackOperation(backendId, input?.providerKey, operationId, async () => {
+      const backend = this._backend(backendId);
+      const capabilities = await backend.getModelChangeCapabilities();
+      if (capabilities?.configurationDraft !== true || capabilities.mutationSemantics !== "native-config") {
+        throw new ModelChangeError("unsupported", "后端不支持配置草稿保存", { status: 409 });
+      }
+      const { safeSpec, secretEnvelope } = normalizeModelProviderDraft(input);
+      return this._applyCompatSafe(backendId, safeSpec, secretEnvelope, operationId);
+    });
+  }
+
   /** Provider PUT 兼容入口：公开 patch 与 apiKey 信封拆分后复用协调器协议。 */
   async updateProviderCompat(backendId, providerKey, patch = {}, { operationId = randomUUID() } = {}) {
+    return this._trackOperation(backendId, providerKey, operationId,
+      () => this._updateProviderCompatUntracked(backendId, providerKey, patch, operationId));
+  }
+
+  async _updateProviderCompatUntracked(backendId, providerKey, patch, operationId) {
     if (typeof providerKey !== "string" || !PROVIDER_KEY_RE.test(providerKey)) {
       throw new ModelChangeError("invalid_provider", "providerKey 格式不合法", { field: "providerKey" });
     }
@@ -1017,7 +1256,7 @@ class ModelChangeCoordinator {
       throw new ModelChangeError("invalid_input", "Provider patch 必须是普通对象", { field: "patch" });
     }
     for (const key of Object.keys(patch)) {
-      if (!["baseUrl", "api", "apiKey", "clearBaseUrl", "clearApiKey", "renameTo"].includes(key)) {
+      if (!["baseUrl", "api", "apiKey", "clearBaseUrl", "clearApiKey", "renameTo", "agentId", "credentialScope", "baseHash"].includes(key)) {
         throw new ModelChangeError("unknown_field", "Provider patch 包含未知字段", { field: key });
       }
     }
@@ -1032,6 +1271,10 @@ class ModelChangeCoordinator {
     }
     if (patch.clearApiKey === true && patch.apiKey) {
       throw new ModelChangeError("conflicting_fields", "clearApiKey 与 apiKey 不能同时提交", { field: "apiKey" });
+    }
+    if (patch.baseHash !== undefined && (typeof patch.baseHash !== "string" || !patch.baseHash
+      || patch.baseHash.length > 256 || /[\u0000-\u001f\u007f]/u.test(patch.baseHash))) {
+      throw new ModelChangeError("invalid_string", "baseHash 必须是有效配置版本", { field: "baseHash" });
     }
     const safePatch = {};
     if (patch.clearBaseUrl === true) safePatch.clearBaseUrl = true;
@@ -1072,6 +1315,8 @@ class ModelChangeCoordinator {
       targetKey: modelIdentityKey(safePatch.renameTo || providerKey, "*"),
       target: null,
       patch: Object.freeze(safePatch),
+      ...normalizeModelCredentialScope(patch),
+      ...(patch.baseHash !== undefined ? { baseHash: patch.baseHash } : {}),
     });
     const secretEnvelope = typeof patch.apiKey === "string" && patch.apiKey
       ? Object.freeze({ apiKey: patch.apiKey })
@@ -1086,6 +1331,13 @@ class ModelChangeCoordinator {
    * 不进 journal 状态机(每个子项幂等,失败由 UI 保留草稿整批重试)。
    */
   async batchCompat(backendId, items, { operationId = randomUUID(), confirmReferences = false, force = false, preservePrimaryRefs = false } = {}) {
+    // 批量写不进 journal；单一 provider 的批（端点编辑）按该 provider 记录终态回执。
+    const providers = Array.isArray(items) ? [...new Set(items.map((item) => item?.providerKey))] : [];
+    return this._trackOperation(backendId, providers.length === 1 ? providers[0] : null, operationId,
+      () => this._batchCompatUntracked(backendId, items, { operationId, confirmReferences, force, preservePrimaryRefs }));
+  }
+
+  async _batchCompatUntracked(backendId, items, { operationId, confirmReferences, force, preservePrimaryRefs }) {
     if (!Array.isArray(items) || items.length === 0) {
       throw new ModelChangeError("invalid_input", "批量项不能为空", { field: "items" });
     }
@@ -1120,6 +1372,14 @@ class ModelChangeCoordinator {
       }
     });
     const backend = this._backend(backendId);
+    const mutationCaps = await backend.getModelChangeCapabilities?.();
+    if (mutationCaps?.mutationSemantics === "native-config" && mutationCaps.configurationDraft === true) {
+      return this._applyCompatSafe(backendId, Object.freeze({
+        kind: "batch", providerKey: specs[0].providerKey, sourceModelId: null,
+        sourceKey: modelIdentityKey(specs[0].providerKey, "*"), target: null,
+        patch: Object.freeze({ items: JSON.parse(JSON.stringify(specs)) }),
+      }), null, operationId);
+    }
     let caps = null;
     try {
       caps = cloneSafeJson(await backend.getModelConfigWriteCapabilities(), "configWriteCapabilities");
@@ -1197,8 +1457,15 @@ class ModelChangeCoordinator {
 
   /** 模型/Provider DELETE 兼容入口：引用或 blocker 存在时必须在 journal.begin 前停止。 */
   async deleteCompat(backendId, ref, { operationId = randomUUID(), force = false } = {}) {
+    return this._trackOperation(backendId, ref?.providerKey, operationId,
+      () => this._deleteCompatUntracked(backendId, ref, { operationId, force }));
+  }
+
+  async _deleteCompatUntracked(backendId, ref, { operationId, force }) {
     const safeSpec = normalizeModelDeleteSpec(ref);
     const existing = this._existingOperation(
+      backendId,
+      safeSpec.providerKey,
       normalizeOperationId(operationId),
       modelChangeRequestDigest(safeSpec),
     );
@@ -1258,17 +1525,23 @@ class ModelChangeCoordinator {
 
   /** 在与正常 apply 完全相同的进程锁和 Provider fencing 下恢复一条 journal。 */
   async _recoverEntry(entry) {
-    const mutexKey = `${entry.backendId}\0${entry.providerKey}`;
+    // Capture the original journal incarnation before either FIFO or file-lock
+    // await. A pruned ID may be reused; that new entry cannot inherit this lock.
+    const original = captureOperationIdentity(entry);
+    const mutexKey = `${original.backendId}\0${original.providerKey}`;
     return this._withKeyedMutex(mutexKey, async () => {
-      const providerScope = `${entry.backendId}:${entry.providerKey}`;
-      return this.journal.withProviderLock(providerScope, entry.operationId, async (guard) => {
+      const providerScope = `${original.backendId}:${original.providerKey}`;
+      return this.journal.withProviderLock(providerScope, original.operationId, async (guard) => {
         guard.assertActive();
-        const current = this.journal.get(entry.operationId);
-        if (!current || TERMINAL_STATUSES.has(current.status)) return current?.result || null;
-        if (current.status === "needs_secret") {
+        const current = this.journal.get(original.operationId);
+        if (!current) return null;
+        if (Object.keys(original).some((key) => current[key] !== original[key]))
+          throw new ModelChangeError("operation_scope_mismatch", "原模型操作身份已变化，不能恢复替代操作", { status: 404 });
+        if (TERMINAL_STATUSES.has(current.status)) return current.result || null;
+        if (current.status === "needs_secret" && current.mode !== "native-config") {
           return { status: "needs_secret", stage: current.stage };
         }
-        if (current.secretStep === "pending") {
+        if (current.secretStep === "pending" && current.mode !== "native-config") {
           const needsSecret = {
             status: "needs_secret",
             code: "recovery_input_required",
@@ -1314,10 +1587,10 @@ class ModelChangeCoordinator {
           }
           guard.assertActive();
           if (current.mode === "config-only" && current.fingerprints?.configOnlyRestartRequired === true) {
-            const caps = await backend.getModelConfigWriteCapabilities();
+            const caps = await backend.getModelConfigWriteCapabilities({ legacy: true });
             result = { ...result, restartRequired: true, activation: caps?.activation ?? null };
           }
-          result = await this._attachStrictCatalog(current.backendId, result);
+          result = await this._attachStrictCatalog(current.backendId, result, current.mode);
           guard.assertActive();
         } catch (error) {
           // journal/fencing 故障意味着无法证明独占权，禁止继续写任何恢复结论。
@@ -1329,6 +1602,9 @@ class ModelChangeCoordinator {
             retryable: true,
           };
         }
+        if (Object.hasOwn(result, "operationId") && result.operationId !== current.operationId)
+          result = { status: "partial", code: "recovery_receipt_identity_mismatch", stage: "recovery", retryable: false };
+        result = { ...result, operationId: current.operationId };
         const finalEntry = await this._guardedJournalMutation(
           guard,
           current.operationId,

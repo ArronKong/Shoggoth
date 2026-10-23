@@ -1,0 +1,17 @@
+{
+  "version": "0.42.0",
+  "source": "https://github.com/openclaw/gogcli/releases/tag/v0.42.0",
+  "license": "MIT",
+  "platforms": {
+    "darwin-arm64": {
+      "url": "https://github.com/openclaw/gogcli/releases/download/v0.42.0/gogcli_0.42.0_darwin_arm64.tar.gz",
+      "archiveSha256": "6a92b35473ed057c55677c2ba7d5af8e154d1bad23fa35e74994bc2f3bce4672",
+      "binarySha256": "39c0db09b1dcfbe12662d9de58c69d67d6520a77cafdc34e28dad0120f57bf19"
+    },
+    "darwin-x64": {
+      "url": "https://github.com/openclaw/gogcli/releases/download/v0.42.0/gogcli_0.42.0_darwin_amd64.tar.gz",
+      "archiveSha256": "f28d7f64fb85d726e4757261a02879f35968ad7096fe00761cd9eda8e9f6d2dd",
+      "binarySha256": "5a5cbdabafda5eb7ccb8ff24eb4c54fc20f954aa40181cbdb769a7f7290f05bb"
+    }
+  }
+}

@@ -15,6 +15,7 @@ const { createAgentService } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-protocol-version");
 const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
+const { bindingId } = require("../app/agent-service/agent-runtime-binding");
 
 const SESSION_A = "11111111-1111-4111-8111-111111111111";
 const SESSION_B = "22222222-2222-4222-8222-222222222222";
@@ -48,7 +49,7 @@ function session(id = SESSION_A, patch = {}) {
     id,
     sessionKey: id,
     profileId: "profile-default",
-    codexThreadId: null,
+    runtimeSessionId: null,
     workspace: "/tmp/shoggoth-managed",
     title: "A real chat",
     modelOverride: null,
@@ -59,6 +60,9 @@ function session(id = SESSION_A, patch = {}) {
     ...patch,
   };
 }
+
+// Work runs point at the runtime session/turn that carried them.
+const RUNTIME_BINDING = { runtime: "codex", runtimeProfileId: "runtime-default", runtimeAccountId: "fixture-runtime-account" };
 
 function run(status = "running", patch = {}) {
   const terminal = ["completed", "failed", "canceled", "interrupted", "skipped"].includes(status);
@@ -71,8 +75,9 @@ function run(status = "running", patch = {}) {
     profileId: "profile-default",
     workspace: "/tmp/shoggoth-managed",
     status,
-    codexThreadId: queued ? null : "thread-1",
-    codexTurnId: queued ? null : "turn-1",
+    contextSnapshotId: null,
+    runtimeSessionRef: queued ? null : { ...RUNTIME_BINDING, sessionId: "thread-1" },
+    runtimeTurnRef: queued ? null : { ...RUNTIME_BINDING, sessionId: "thread-1", turnId: "turn-1" },
     eventSeq: 1,
     waitingRequestId: status === "waiting_approval" || status === "waiting_input" ? "request-1" : null,
     startedAt: queued ? null : 100,
@@ -105,12 +110,21 @@ function serviceEventPage(events, options = {}) {
   };
 }
 
-function readyStatus(ready = true) {
+function readyStatus(ready = true, instanceNonce = undefined) {
   return {
     healthy: true,
     pendingCommandsLocked: !ready,
     mcpCredentialsLocked: !ready,
+    ...(instanceNonce === undefined ? {} : { instanceNonce }),
   };
+}
+
+// A restarted Service reports a new instance nonce. That, not a locked status,
+// is what makes a started backend drop its snapshot and recover.
+const INSTANCE_A = "a".repeat(48);
+const INSTANCE_B = "b".repeat(48);
+function restartedStatus(call, restartCall = 2) {
+  return readyStatus(true, call < restartCall ? INSTANCE_A : INSTANCE_B);
 }
 
 async function waitForCondition(check, timeoutMs = 500) {
@@ -231,6 +245,20 @@ function federationInteractionReset(request, snapshotRun, interactionPayload, st
   };
 }
 
+// Sending first checks that the session's runtime binding is enabled; every
+// fixture profile runs on its Codex runtime.
+function runtimeGate(request) {
+  const id = bindingId(request.params.profileId, "runtime-default");
+  if (!["chat.session.runtime.get", "chat.session.runtime.state"].includes(request.method)) {
+    return { bindings: [{ id, profileId: request.params.profileId, runtime: "codex", runtimeProfileId: "runtime-default",
+      runtimeAccountId: "fixture-runtime-account", label: null, enabled: true, revision: 1, createdAt: 1, updatedAt: 1 }],
+    defaultBindingId: id, revision: 1, canAdd: false };
+  }
+  return { sessionKey: request.params.sessionKey, revision: 1, bindingId: id, runtime: "codex", model: null,
+    contextUsage: null, canSwitch: false, candidates: [{ bindingId: id, support: { supported: true },
+      adjustments: { clearModelOverride: false, permissionMode: null } }] };
+}
+
 function fakeBackend(handler, options = {}) {
   const calls = [];
   let tokenReads = 0;
@@ -248,6 +276,9 @@ function fakeBackend(handler, options = {}) {
       return `fresh-token-${tokenReads}`;
     },
     requestService: async (paths, request, requestOptions) => {
+      if (["chat.session.runtime.get", "chat.session.runtime.state", "agent.binding.list", "agent.binding.sync"].includes(request.method)) {
+        return runtimeGate(request);
+      }
       calls.push(structuredClone({ paths, request, requestOptions }));
       if (request.method === "service.status") {
         const callNumber = serviceStatusCalls;
@@ -272,6 +303,8 @@ function fakeBackend(handler, options = {}) {
     readinessMaxAttempts: options.readinessMaxAttempts,
     serviceEventPollMs: options.serviceEventPollMs,
     runtimeCliAuth: options.runtimeCliAuth,
+    getNativeMemoryConfig: options.getNativeMemoryConfig,
+    updateNativeMemoryConfig: options.updateNativeMemoryConfig,
   });
   backend._serviceEventStreamId = Object.prototype.hasOwnProperty.call(
     options,
@@ -307,68 +340,13 @@ test("identity, namespace and capability contract", () => {
   });
 });
 
-test("peer native facade loads and stamps only its backendId profile partition", async () => {
-  const codexProfile = profile({
-    id: "profile-codex",
-    backendId: "codex",
-    agentId: "shoggoth-codex",
-    name: "Codex",
-    runtimeProfileId: "runtime-codex",
-    providerRef: null,
-    defaultModel: null,
-    isDefault: false,
-  });
-  const codexSession = session(SESSION_A, {
-    profileId: codexProfile.id,
-    derivedTitle: "第一条 Codex 消息",
-  });
-  const emptyParts = {
-    totalTokens: 0, totalCost: 0, inputTokens: 0, outputTokens: 0,
-    cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
-  };
-  const value = fakeBackend((request) => {
-    if (request.method === "profile.list") {
-      assert.equal(request.params.backendId, "codex");
-      return page("profiles", [codexProfile]);
-    }
-    if (request.method === "chat.session.list") return page("sessions", [codexSession]);
-    if (request.method === "usage.series") {
-      assert.deepEqual(request.params, { range: "today", backendId: "codex" });
-      return { daily: [], totals: { ...emptyParts, missingCostEntries: 0 } };
-    }
-    throw new Error(`unexpected ${request.method}`);
-  }, {
-    id: "codex",
-    name: "Codex",
-    connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-codex",
-  });
-  assert.equal(await value.backend.start(), true);
-  assert.deepEqual(value.backend.getAgents(), [{
-    id: "shoggoth-codex", name: "Codex", model: undefined,
-    provider: "codex", runtime: "codex",
-    runtimeAccountId: "fixture-runtime-account",
-    environmentKind: undefined, sharedAgentCount: 1,
-    backendId: "codex",
-  }]);
-  assert.equal(value.backend.getSessionRows()[0].backendId, "codex");
-  assert.equal(value.backend.getSessionRows()[0].agentId, "shoggoth-codex");
-  assert.equal(value.backend.getSessionRows()[0].derivedTitle, "第一条 Codex 消息");
-  assert.equal(value.backend.claimsAgentId("shoggoth-codex"), true);
-  assert.equal(value.backend.claimsAgentId("shoggoth-default"), false);
-  assert.equal(value.backend.getBackendDescriptor().connectionMode, "native-runtime");
-  assert.deepEqual(await value.backend.getUsageSeries("today"), {
-    daily: [], totals: { ...emptyParts, missingCostEntries: 0 },
-  });
-
+test("the Shoggoth facade refuses a profile partition that belongs to another backend", async () => {
   const foreign = fakeBackend((request) => {
     if (request.method === "profile.list") {
-      return page("profiles", [{ ...codexProfile, backendId: "grok-build" }]);
+      assert.equal(request.params.backendId, "shoggoth");
+      return page("profiles", [profile({ backendId: "grok-build" })]);
     }
     throw new Error(`unexpected ${request.method}`);
-  }, {
-    id: "codex", name: "Codex", connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-codex",
   });
   assert.equal(await foreign.backend.start(), false);
   assert.deepEqual(foreign.backend.getAgents(), []);
@@ -432,7 +410,7 @@ test("status and read-only model catalog reflect the loaded lifecycle", async ()
 
 test("native model catalog cold reads have a runtime budget and retain inherited defaults", async () => {
   for (const runtime of ["codex", "grok-build", "antigravity", "pi", "claude-code", "deepseek-harness"]) {
-    const bound = profile({ backendId: runtime, runtime, providerRef: null, defaultModel: null });
+    const bound = profile({ runtime, providerRef: null, defaultModel: null });
     const { backend, calls } = fakeBackend((request) => {
       if (request.method === "profile.list") return page("profiles", [bound]);
       if (request.method === "chat.session.list") return page("sessions", []);
@@ -443,7 +421,7 @@ test("native model catalog cold reads have a runtime budget and retain inherited
         }
         return page("models", [{ id: "native-default", displayName: "Native default", description: "", isDefault: true }]);
       }
-    }, { id: runtime });
+    });
     assert.equal(await backend.start(), true);
     const catalog = await backend.getModelCatalogSources();
     assert.equal(catalog.models[0]?.id, "native-default", runtime);
@@ -473,6 +451,79 @@ test("a backend with no visible profiles has a valid empty model catalog", async
   assert.deepEqual((await backend.getModelCatalogSources()).models, []);
   assert.equal(calls.some(({ request }) => request.method === "profile.models.list"), false);
   await backend.stop();
+});
+
+test("model catalog discovery bounds cold Runtime probes and still covers every visible Agent", async () => {
+  let active = 0, peak = 0;
+  const profiles = Array.from({ length: 11 }, (_, index) => profile({
+    id: `profile-${index}`, agentId: `shoggoth-${index}`, runtimeProfileId: `runtime-${index}`,
+    isDefault: index === 0,
+  }));
+  const { backend } = await readyBackend(async (request) => {
+    if (request.method !== "profile.models.list") return;
+    active += 1; peak = Math.max(peak, active);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return page("models", [{ id: request.params.profileId, displayName: "Model", description: "", isDefault: true }]);
+    } finally { active -= 1; }
+  }, { profiles, sessions: [] });
+  try {
+    const [first, shared] = await Promise.all([backend.getModelCatalogSources(), backend.getModelCatalogSources()]);
+    assert.ok(peak <= 3, `metadata reads started ${peak} Runtime probes together`);
+    assert.equal(first.models.length, 11);
+    assert.deepEqual(shared.models, first.models);
+    assert.equal(new Set(first.models.flatMap(model => model.modelScopes)).size, 11);
+  } finally { await backend.stop(); }
+});
+
+test("a pending keychain command does not block production Service health, group history or model reads", async () => {
+  const { startInspirationFixture } = require("./fixtures/inspiration-service-fixture.cjs");
+  const { prepareAntigravityKeychainContextAsync } = require("../app/agent-service/antigravity-runtime-paths");
+  const f = await startInspirationFixture({ agentCount: 2, codexFakeEnv: { CODEX_FAKE_MODEL_CATALOG: "1" } });
+  let release, preparation;
+  try {
+    const group = await f.backend.createGroupChat({ operationId: "metadata-read-responsiveness",
+      name: "Metadata reads", purpose: "isolated regression",
+      members: f.backend.getAgents().map(agent => ({ backendId: "shoggoth", agentId: agent.id })) });
+    const home = path.join(f.root, "keychain-home"), userHome = path.join(f.root, "keychain-user");
+    const keychain = path.join(userHome, "login.keychain-db");
+    fs.mkdirSync(userHome, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(keychain, "fixture", { mode: 0o600 });
+    const preferences = path.join(home, "Library", "Preferences");
+    fs.mkdirSync(preferences, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(preferences, "com.apple.security.plist"), "fixture", { mode: 0o600 });
+    let began;
+    const pending = new Promise(resolve => { began = resolve; });
+    let commands = 0, finished = false;
+    preparation = prepareAntigravityKeychainContextAsync({ platform: "darwin", home, userHome, trustedRoot: f.root,
+      execFile(_command, _args, _options, callback) {
+        const complete = () => callback(null, `    "${keychain}"\n`, "");
+        if (++commands === 1) { release = complete; began(); }
+        else setImmediate(complete);
+      },
+    }).then(() => { finished = true; });
+    await pending;
+    const { requestService, readClientToken } = require("../app/agent-service/client");
+    const health = await requestService(f.paths, { version: SERVICE_PROTOCOL_VERSION,
+      token: readClientToken(f.paths), method: "service.status", params: {} }, { timeoutMs: 1000 });
+    assert.equal(health.healthy, true);
+    for (const route of [`/__api/group-chats/detail?id=${group.group.id}`,
+      `/__api/group-chats/messages?id=${group.group.id}&limit=50`, "/__api/models?backend=shoggoth"]) {
+      let response;
+      try { response = await fetch(`${f.url}${route}`, { signal: AbortSignal.timeout(2000) }); }
+      catch (error) { throw new Error(`metadata read failed: ${route}`, { cause: error }); }
+      assert.equal(response.status, 200, route);
+      const result = await response.json();
+      if (route.includes("/messages")) assert.ok(Array.isArray(result.messages));
+      else if (route.includes("/detail")) assert.equal(result.group.id, group.group.id);
+      else assert.ok(result.models.length > 0);
+    }
+    assert.equal(finished, false, "all reads complete while macOS is still pending");
+  } finally {
+    release?.();
+    await preparation;
+    await f.close();
+  }
 });
 
 test("failed or partial model discovery never publishes an empty or incomplete verified catalog", async () => {
@@ -604,20 +655,23 @@ test("runtime catalog/provider stays bound to each visible Agent", async () => {
   const codexCaps = backend.getChatCapabilities(codex.agentId);
   assert.deepEqual({ ...codexCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
+    nativeUiArtifactsV1: false,
     maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: true, modelProvider: "codex", modelScope: codex.id, permissions: undefined,
   });
   const codexOtherCaps = backend.getChatCapabilities(codexOther.agentId);
   assert.deepEqual({ ...codexOtherCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
+    nativeUiArtifactsV1: false,
     maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: true, modelProvider: "codex", modelScope: codexOther.id, permissions: undefined,
   });
   const grokCaps = backend.getChatCapabilities(grok.agentId);
   assert.deepEqual({ ...grokCaps, permissions: undefined }, {
     attachments: { image: { maxBytes: 10485760 }, pdf: { maxBytes: 52428800 }, file: { maxBytes: 52428800 } },
+    nativeUiArtifactsV1: false,
     maxPromptBytes: 61440, maxAttachmentBytes: 52428800, maxAttachments: 8, slash: true, steer: false, modelProvider: "grok-build", modelScope: grok.id, permissions: undefined,
   });
-  assert.deepEqual(codexCaps.permissions.options.map((option) => option.id), ["read-only", "ask", "workspace-auto", "full"]);
-  assert.deepEqual(grokCaps.permissions.options.map((option) => option.id), ["ask", "auto", "always-approve"]);
+  assert.deepEqual(codexCaps.permissions.options.map((option) => option.id), ["request-approval", "auto-review", "full-access"]);
+  assert.deepEqual(grokCaps.permissions.options.map((option) => option.id), ["request-approval", "auto-review", "full-access"]);
   const visibleModels = (agentId) => {
     const scope = backend.getChatCapabilities(agentId).modelScope;
     return catalog.filter((model) => model.modelScopes.includes(scope)).map((model) => model.id);
@@ -645,30 +699,92 @@ test("runtime catalog/provider stays bound to each visible Agent", async () => {
   assert.equal(backend.getSessionRows()[0].provider, "grok-build");
 });
 
-test("all native facades and Shoggoth's bound runtimes route scoped command catalogs", async () => {
+test("every bound runtime routes its scoped command catalog", async () => {
   const steerable = new Set(["codex", "claude-code", "pi", "deepseek-harness"]);
   for (const runtime of ["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness"]) {
-    for (const backendId of new Set([runtime, "shoggoth"])) {
-      const bound = profile({ backendId, runtime, providerRef: null });
-      const { backend, calls } = fakeBackend((request) => {
-        if (request.method === "profile.list") return page("profiles", [bound]);
-        if (request.method === "chat.session.list") return page("sessions", [session()]);
-        if (request.method === "chat.command.list") return {
-          supported: true, reason: null,
-          commands: [{ name: "native-check", description: runtime, args: null, category: "tools", aliases: [], source: runtime, execution: "runtime" }],
-        };
-        throw new Error(`unexpected ${request.method}`);
-      }, { id: backendId });
-      assert.equal(await backend.start(), true);
-      assert.equal(backend.getChatCapabilities(bound.agentId).slash, true, `${backendId}/${runtime}`);
-      assert.equal(backend.getChatCapabilities(bound.agentId).steer, steerable.has(runtime), `${backendId}/${runtime}`);
-      const key = backend.getSessionRows()[0].key;
-      const catalog = await backend.listSlashCommands(bound.agentId, key);
-      assert.equal(catalog.commands[0].source, runtime);
-      assert.deepEqual(calls.find(({ request }) => request.method === "chat.command.list").request.params,
-        { sessionKey: SESSION_A });
-    }
+    const bound = profile({ runtime, providerRef: null });
+    const { backend, calls } = fakeBackend((request) => {
+      if (request.method === "profile.list") return page("profiles", [bound]);
+      if (request.method === "chat.session.list") return page("sessions", [session()]);
+      if (request.method === "chat.command.list") return {
+        supported: true, reason: null,
+        commands: [{ name: "native-check", description: runtime, args: null, category: "tools", aliases: [], source: runtime, execution: "runtime" }],
+      };
+      throw new Error(`unexpected ${request.method}`);
+    });
+    assert.equal(await backend.start(), true);
+    assert.equal(backend.getChatCapabilities(bound.agentId).slash, true, runtime);
+    assert.equal(backend.getChatCapabilities(bound.agentId).steer, steerable.has(runtime), runtime);
+    const key = backend.getSessionRows()[0].key;
+    const catalog = await backend.listSlashCommands(bound.agentId, key);
+    assert.equal(catalog.commands[0].source, runtime);
+    assert.deepEqual(calls.find(({ request }) => request.method === "chat.command.list").request.params,
+      { sessionKey: SESSION_A });
   }
+});
+
+test("Product memory command does not depend on a Runtime command capability and waits for Core's acknowledgement", async t => {
+  const current = { revision: 0, config: {} }, updated = { plugins: { entries: { "active-memory": { enabled: true, config: { enabled: true } } } } };
+  let release, entered; const arrived = new Promise(resolve => { entered = resolve; });
+  const waiting = new Promise(resolve => { release = resolve; });
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "memory.config.apply") return request.params;
+    if (request.method === "chat.command.list") return { supported: true, reason: null,
+      commands: [{ name: "active-memory", description: "Memory", args: null, category: "session", aliases: [] }] };
+    if (request.method === "memory.active.command") return { text: "Active Memory: on globally.",
+      configUpdate: { expectedRevision: 0, config: updated } };
+    throw new Error(`unexpected ${request.method}`);
+  }, { profiles: [profile({ runtime: "opencode" })],
+    serviceStatus: () => ({ ...readyStatus(true), activeMemoryCommands: true }),
+    getNativeMemoryConfig: () => current,
+    updateNativeMemoryConfig: async input => { assert.deepEqual(input, { expectedRevision: 0, config: updated });
+      entered(); await waiting; return { revision: 1, config: updated }; },
+  });
+  t.after(() => backend.stop());
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  assert.equal(backend.getChatCapabilities("shoggoth-default").slash, true);
+  assert.equal((await backend.listSlashCommands("shoggoth-default", key)).commands[0].name, "active-memory");
+  let completed = false;
+  const pending = backend.execSlash("shoggoth-default", key, "/active-memory on --global").then(result => { completed = true; return result; });
+  await arrived; assert.equal(completed, false); release();
+  assert.deepEqual(await pending, { kind: "output", text: "Active Memory: on globally.", warning: null });
+  assert.equal(calls.some(({ request }) => request.method === "chat.command.exec"), false);
+  await assert.rejects(backend.execSlash("shoggoth-default", key, "/native-runtime-command"), { code: "RUNTIME_CAPABILITY_UNSUPPORTED" });
+});
+
+test("memory command cannot turn a Service proposal into unrelated Core edits or report an unverified apply", async t => {
+  let writes = 0, behavior = "unrelated";
+  const updated = { plugins: { entries: { "active-memory": { enabled: true, config: { enabled: true } } } } };
+  const { backend } = await readyBackend(request => {
+    if (request.method === "memory.config.apply") return request.params;
+    if (request.method === "memory.active.command") return { text: "Active Memory: on globally.", configUpdate: { expectedRevision: 0,
+      config: behavior === "unrelated" ? { ...updated, memory: { search: { enabled: false } } } : updated } };
+    throw new Error(`unexpected ${request.method}`);
+  }, { serviceStatus: () => ({ ...readyStatus(true), activeMemoryCommands: true }),
+    getNativeMemoryConfig: () => ({ revision: 0, config: {} }),
+    updateNativeMemoryConfig: async () => { writes++; return { revision: 99, config: updated }; },
+  });
+  t.after(() => backend.stop());
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  await assert.rejects(backend.execSlash("shoggoth-default", key, "/active-memory on --global"), { code: "MEMORY_COMMAND_INVALID" });
+  assert.equal(writes, 0);
+  behavior = "mismatched-apply";
+  await assert.rejects(backend.execSlash("shoggoth-default", key, "/active-memory on --global"), { code: "NATIVE_MEMORY_CONFIG_CONFLICT" });
+  assert.equal(writes, 1);
+  backend.updateNativeMemoryConfig = null;
+  await assert.rejects(backend.execSlash("shoggoth-default", key, "/active-memory on --global"), { code: "MEMORY_COMMAND_CONFIG_REQUIRED" });
+  assert.equal(writes, 1);
+});
+
+test("a legacy memory owner leaves an identically named Runtime command with that Runtime", async t => {
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "chat.command.exec") return { kind: "output", text: "Runtime-owned command", warning: null };
+    throw new Error(`unexpected ${request.method}`);
+  });
+  t.after(() => backend.stop());
+  const result = await backend.execSlash("shoggoth-default", `agent:shoggoth-default:${SESSION_A}`, "/active-memory off");
+  assert.equal(result.text, "Runtime-owned command");
+  assert.equal(calls.some(({ request }) => request.method === "memory.active.command"), false);
 });
 
 test("managed CLI auth catalog binds fixed commands and credential state to each Agent profile", async () => {
@@ -848,6 +964,58 @@ test("runtime-probed CLI auth supports isolated HOME without a guessed credentia
     await value.backend.stop();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a Shoggoth-owned sign-in command is runnable before the runtime is installed and re-resolved afterwards", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-runtime-login-command-"));
+  const accountHome = path.join(root, "antigravity", "account-home");
+  const antigravity = profile({
+    id: "profile-antigravity", agentId: "shoggoth-antigravity", name: "Antigravity", runtime: "antigravity",
+    runtimeProfileId: "runtime-antigravity", runtimeAccountId: "account-antigravity",
+    providerRef: null, defaultModel: null, isDefault: false,
+  });
+  const entry = {
+    runtime: "antigravity", runtimeAccountId: "account-antigravity", name: "Antigravity",
+    binaryPath: null, unavailableReason: "Antigravity ACP server is not installed; Sign in installs it",
+    accountHome, processHome: accountHome, homeEnv: null, accountKind: "native-user",
+    credentialFile: null, credentialProbe: "runtime", loginArgs: [], logoutArgs: [],
+    loginCommand: {
+      executable: "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth",
+      args: ["/app.asar/app/agent-service/antigravity-acp-login.js", "--account", "account-antigravity"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    },
+    docsUrl: "https://example.test/antigravity",
+  };
+  let current = entry;
+  const value = fakeBackend((request) => {
+    if (request.method === "profile.list") return page("profiles", [antigravity]);
+    if (request.method === "chat.session.list") return page("sessions", []);
+    if (request.method === "profile.auth.read") return { status: "authenticated" };
+    throw new Error(`unexpected ${request.method}`);
+  }, { paths: { tokenPath: "/private/client.token" }, runtimeCliAuth: [entry] });
+  value.backend.getRuntimeCliAuth = () => [current];
+  try {
+    assert.equal(await value.backend.start(), true);
+    const [before] = (await value.backend.listOAuthProviders()).providers;
+    assert.equal(before.cliCommand, "/usr/bin/env ELECTRON_RUN_AS_NODE='1' "
+      + "'/Applications/Shoggoth.app/Contents/MacOS/Shoggoth' "
+      + "'/app.asar/app/agent-service/antigravity-acp-login.js' '--account' 'account-antigravity'");
+    assert.equal(before.cliRunnable, true);
+    assert.deepEqual([before.status.loggedIn, before.status.error],
+      [false, "Antigravity ACP server is not installed; Sign in installs it"]);
+    assert.equal(value.calls.some(({ request }) => request.method === "profile.auth.read"), false,
+      "a runtime that is not installed is never probed");
+    current = { ...entry, binaryPath: "/state/runtime-bin/agy_acp_server.par" };
+    delete current.unavailableReason;
+    const [after] = (await value.backend.listOAuthProviders()).providers;
+    assert.deepEqual([after.status.loggedIn, after.status.error], [true, null]);
+  } finally {
+    await value.backend.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  assert.throws(() => fakeBackend(() => {}, {
+    runtimeCliAuth: [{ ...entry, loginCommand: { ...entry.loginCommand, executable: "Shoggoth" } }],
+  }), TypeError);
 });
 
 test("empty managed credential storage remains logged out without a Runtime auth probe", async () => {
@@ -1172,6 +1340,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
   assert.deepEqual(await backend.listAgents(), [{
     id: "shoggoth-default",
     name: "Shoggoth",
+    codexAutomationOwner: false,
     model: "openai/gpt-5",
     provider: "openrouter",
     runtime: "codex",
@@ -1184,6 +1353,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
   assert.deepEqual(await backend.getAgent("shoggoth-default"), {
     id: "shoggoth-default",
     name: "Shoggoth",
+    codexAutomationOwner: false,
     model: "openai/gpt-5",
     provider: "openrouter",
     runtime: "codex",
@@ -1199,6 +1369,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
     files: [
       { name: "IDENTITY.md", size: 10, readOnly: false },
       { name: "USER.md", size: 30, readOnly: true },
+      { name: "HEARTBEAT.md", readOnly: false },
     ],
     definitionRevision: 3,
     backendId: "shoggoth",
@@ -1209,10 +1380,31 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
   );
 });
 
-test("native facade creates, updates, archives and restores a long-lived Agent", async () => {
+test("native agent cards pin Shoggoth first, then keep first connection order", async () => {
+  const grok = profile({ id: "profile-grok", agentId: "shoggoth-grok", name: "Grok",
+    runtime: "grok-build", isDefault: false, createdAt: 200, updatedAt: 250 });
+  const codex = profile({ id: "profile-codex", agentId: "shoggoth-codex", name: "Codex",
+    isDefault: false, createdAt: 150, updatedAt: 500 });
+  const pi = profile({ id: "profile-pi", agentId: "shoggoth-pi", name: "Pi",
+    runtime: "pi", isDefault: false, createdAt: 150, updatedAt: 150 });
+  const shoggoth = profile({ createdAt: 300, updatedAt: 300 });
+  // Equal timestamps retain the service's persisted insertion order (Pi before Codex).
+  // updatedAt changes on reconnect but must not change card numbers.
+  const profiles = [grok, pi, shoggoth, codex];
+  const { backend } = await readyBackend((request) => {
+    if (request.method === "agent.lifecycle.list") return {
+      agents: profiles.map((item) => ({ profile: item, state: "active", pendingOperationId: null })),
+    };
+    throw new Error(`unexpected ${request.method}`);
+  }, { profiles, sessions: [] });
+  const expected = ["shoggoth-default", "shoggoth-pi", "shoggoth-codex", "shoggoth-grok"];
+  assert.deepEqual((await backend.listAgents()).map((agent) => agent.id), expected);
+  assert.deepEqual((await backend.listAgents({ lifecycle: "all" })).map((agent) => agent.id), expected);
+});
+
+test("the facade creates, updates, archives and restores a long-lived Agent", async () => {
   const profiles = [profile({
     id: "profile-codex",
-    backendId: "codex",
     agentId: "shoggoth-codex",
     name: "Codex",
     runtimeProfileId: "shoggoth-codex-cli-v1",
@@ -1222,10 +1414,9 @@ test("native facade creates, updates, archives and restores a long-lived Agent",
   })];
   const created = profile({
     id: "33333333-3333-8333-8333-333333333333",
-    backendId: "codex",
-    agentId: "codex-33333333-3333-8333-8333-333333333333",
+    agentId: "shoggoth-agent-33333333-3333-8333-8333-333333333333",
     name: "Reviewer",
-    runtimeProfileId: "codex-33333333-3333-8333-8333-333333333333-runtime-v1",
+    runtimeProfileId: "shoggoth-agent-33333333-3333-8333-8333-333333333333-runtime-v1",
     providerRef: null,
     defaultModel: null,
     isDefault: false,
@@ -1279,11 +1470,6 @@ test("native facade creates, updates, archives and restores a long-lived Agent",
       throw new Error(`unexpected ${request.method}`);
     }
     return { profile: profiles[index] };
-  }, {
-    id: "codex",
-    name: "Codex",
-    connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-codex" || agentId.startsWith("codex-"),
   });
   assert.equal(await value.backend.start(), true);
   assert.equal(value.backend.getBackendDescriptor().agentLifecycle.restore, true);
@@ -1307,6 +1493,75 @@ test("native facade creates, updates, archives and restores a long-lived Agent",
   );
   await value.backend.restoreAgent(created.agentId, restoreOptions);
   assert.equal(value.backend.ownsAgentId(created.agentId), true);
+});
+
+test("a new Agent shows in Chat with its greeting, on the runtime chosen when creating it", async () => {
+  const created = profile({ id: "44444444-4444-8444-8444-444444444444",
+    agentId: "shoggoth-agent-44444444-4444-8444-8444-444444444444", name: "CodeX", isDefault: false,
+    createdAt: 1234, updatedAt: 1234 });
+  const profiles = [profile()];
+  const sessions = [session()];
+  const order = [];
+  const value = fakeBackend((request) => {
+    order.push(request.method);
+    if (request.method === "profile.list") return page("profiles", profiles.filter((item) => item.enabled));
+    if (request.method === "chat.session.list") {
+      return page("sessions", sessions.filter((item) => item.profileId === request.params.profileId));
+    }
+    if (request.method === "agent.lifecycle.list") {
+      return { agents: profiles.map((item) => ({ profile: item, state: "active", pendingOperationId: null })) };
+    }
+    if (request.method === "agent.create") {
+      profiles.push(created);
+      return { profile: created };
+    }
+    // The Service gives every Agent without a conversation its default one and greets it.
+    if (request.method === "agent.builtin.ensure") {
+      const greeted = !profiles.includes(created) || sessions.some((item) => item.profileId === created.id)
+        ? [] : [created.id];
+      if (greeted.length) sessions.push(session(SESSION_B, { profileId: created.id, title: null }));
+      return { createdProfileIds: [], greetedProfileIds: greeted };
+    }
+    if (request.method === "codex.automation.owner") return { ownerProfileId: null, ownerAgentId: null };
+    throw new Error(`unexpected ${request.method}`);
+  });
+  assert.equal(await value.backend.start(), true);
+  // Stand-ins for Agents -> Runtime: the chosen CLI becomes the default Binding.
+  value.backend.getAgentRuntimeBindings = async () => ({ revision: 1,
+    bindings: [{ id: "binding-codex-cli", enabled: true, runtimeAccountId: "native-codex-default-v1" }],
+    availability: [{ bindingId: "binding-codex-cli", available: true }] });
+  value.backend.setAgentDefaultBinding = async () => { order.push("set default runtime"); };
+  order.length = 0;
+  const added = await value.backend.createAgent({ name: "CodeX", runtimeAccountId: "native-codex-default-v1" });
+  assert.equal(added.id, created.agentId);
+  assert.equal(added.runtimeSwitchFailed, undefined);
+  const greetedAt = order.lastIndexOf("agent.builtin.ensure");
+  assert.ok(order.indexOf("set default runtime") >= 0 && order.indexOf("set default runtime") < greetedAt,
+    `the default conversation follows the chosen runtime: ${order.join(", ")}`);
+  assert.ok(order.lastIndexOf("chat.session.list") > greetedAt, "Chat reloads after the Service added the conversation");
+  assert.deepEqual(value.backend.getSessionRows().filter((row) => row.agentId === created.agentId)
+    .map((row) => row.sessionId), [SESSION_B], "the new Agent is in the Chat list");
+});
+
+test("a finished sign-in creates the built-in Agent of a CLI it just installed", async () => {
+  let ensures = 0;
+  const { backend } = await readyBackend((request) => {
+    if (request.method === "agent.builtin.ensure") {
+      ensures += 1;
+      return { createdProfileIds: [], greetedProfileIds: [] };
+    }
+    if (request.method === "codex.automation.owner") return { ownerProfileId: null, ownerAgentId: null };
+    if (request.method === "runtime.account.login.read") {
+      return { login: { requestId: "login-1", mode: "browser", status: "succeeded", updatedAt: 1, errorCode: null,
+        authUrl: null, stage: null, browserOpened: true, instructions: null, codeRequired: false } };
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const before = ensures;
+  backend._loginSessions = new Map([["login-1", "native-antigravity-default-v1"]]);
+  assert.equal((await backend.pollOAuthSession("native-antigravity-default-v1", "login-1")).status, "approved");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ensures, before + 1, "Antigravity's sign-in installs its server, so its Agent may now be created");
 });
 
 test("user-installed native Skills use a global registry revision through the backend", async () => {
@@ -1411,7 +1666,7 @@ test("user-installed native Skills use a global registry revision through the ba
   });
   const installCall = calls.find(({ request }) => request.method === "harness.skills.install").request;
   assert.equal(installCall.params.sourcePath, "/trusted/package");
-  assert.equal(installCall.params.expectedRevision, 7);
+  assert.equal(installCall.params.expectedRevision, 8, "install reads the version the toggle left");
 });
 
 test("native Skill operations resolve exact package identity and reject ambiguous names", async () => {
@@ -1673,6 +1928,12 @@ test("MCP 凭据按需初始化时仍显示 OpenCode 并保持 Service 连接", 
     throw new Error(`unexpected ${request.method}`);
   }, {
     serviceStatus: () => ({ healthy: true, pendingCommandsLocked: false, mcpCredentialsLocked: true }),
+    runtimeCliAuth: [{
+      runtime: "opencode", name: "OpenCode", runtimeAccountId: "native-opencode-default-v1",
+      binaryPath: "/opt/shoggoth/opencode", accountHome: "/private/opencode", processHome: "/private",
+      homeEnv: null, accountKind: "native-user", credentialFile: null, credentialProbe: "runtime",
+      loginArgs: ["auth", "login"], logoutArgs: ["auth", "logout"], docsUrl: "https://example.test/opencode",
+    }],
   });
   assert.equal(await backend.start(), true, JSON.stringify(calls.map(({ request }) => request.method)));
   assert.deepEqual(backend.getAgents().map((agent) => agent.id), ["shoggoth-default", "shoggoth-opencode"]);
@@ -1773,7 +2034,8 @@ test("达到预算后下一次权威状态采样可以恢复且不叠加轮询",
 });
 
 test("started backend 发现 Service 重启上锁后立即撤销 ready 并自动恢复", async () => {
-  const statuses = [readyStatus(true), readyStatus(false), readyStatus(false), readyStatus(true)];
+  const statuses = [readyStatus(true, INSTANCE_A), readyStatus(false, INSTANCE_B),
+    readyStatus(false, INSTANCE_B), readyStatus(true, INSTANCE_B)];
   const readyEvents = [];
   const { backend } = fakeBackend((request) => {
     if (request.method === "profile.list") return page("profiles", [profile()]);
@@ -1971,20 +2233,28 @@ test("start paginates profiles and sessions, uses a fresh token per request, the
     }
     if (request.method === "profile.list") return page("profiles", [p2]);
     if (request.method === "chat.session.list") return page("sessions", [session()]);
+    if (request.method === "agent.builtin.ensure") return { createdProfileIds: [], greetedProfileIds: [] };
+    if (request.method === "codex.automation.owner") return { ownerProfileId: null, ownerAgentId: null };
     throw new Error(`unexpected ${request.method}`);
   });
   assert.equal(await backend.start(), true);
-  assert.equal(tokenReads(), 4);
+  assert.equal(tokenReads(), 7,
+    "startup authenticates built-in Agent creation, Harness binding sync and the automation owner lookup");
   assert.deepEqual(calls.map((entry) => entry.request.method), [
-    "service.status", "profile.list", "profile.list", "chat.session.list",
+    "service.status", "agent.builtin.ensure", "profile.list", "profile.list", "chat.session.list", "codex.automation.owner",
   ]);
   assert.deepEqual(calls.map((entry) => entry.request.token), [
-    "fresh-token-1", "fresh-token-2", "fresh-token-3", "fresh-token-4",
+    "fresh-token-1", "fresh-token-2", "fresh-token-3", "fresh-token-4", "fresh-token-6", "fresh-token-7",
   ]);
+  const ensure = calls[1].request.params;
+  assert.ok(["zh-CN", "en"].includes(ensure.locale));
+  assert.ok(ensure.runtimeAccountIds.length > 0, "every release-enabled CLI is connected by default");
   assert.equal(calls[0].requestOptions.timeoutMs, 1_000);
-  assert.ok(calls.slice(1).every((entry) => entry.requestOptions.timeoutMs === 5_000));
+  assert.equal(calls[1].requestOptions.timeoutMs, 60_000, "creating built-in Agents initializes each one");
+  assert.ok(calls.slice(2).every((entry) => entry.requestOptions.timeoutMs === 5_000));
   assert.deepEqual(backend.getAgents(), [{
     id: "shoggoth-default", name: "Shoggoth", model: "openai/gpt-5", provider: "openrouter",
+    codexAutomationOwner: false,
     runtime: "codex", runtimeAccountId: "fixture-runtime-account",
     environmentKind: undefined, sharedAgentCount: 1,
     backendId: "shoggoth",
@@ -2067,7 +2337,7 @@ test("conversation rename events refresh Agent and row names without resetting c
 
 test("context updates refresh only the owning profile and publish a content-free session invalidation", async () => {
   const { runtimeContextCapabilities } = require("../app/agent-service/runtime-context-usage");
-  let current = session(SESSION_A, { codexThreadId: "thread-1", status: "ready" });
+  let current = session(SESSION_A, { runtimeSessionId: "thread-1", status: "ready" });
   let events = [];
   const { backend, calls } = fakeBackend((request) => {
     if (request.method === "profile.list") return page("profiles", [profile()]);
@@ -2081,7 +2351,7 @@ test("context updates refresh only the owning profile and publish a content-free
     backend._sessionActivityNotifier = (notice) => notices.push(notice);
     backend._serviceEventPollGeneration = backend._generation;
     current = { ...current, contextCapabilities: runtimeContextCapabilities("codex"),
-      contextUsage: { runtimeSessionId: current.codexThreadId, usedTokens: 60000, contextWindow: 200000,
+      contextUsage: { runtimeSessionId: current.runtimeSessionId, usedTokens: 60000, contextWindow: 200000,
         quality: "exact", source: "runtime_event", observedAt: 200 } };
     events = [{ seq: 1, type: "runtime.context.updated", payload: { profileId: current.profileId, sessionKey: current.sessionKey } }];
     calls.length = 0;
@@ -3027,10 +3297,9 @@ test("archived sessions and disabled profiles expire their exact bridged approva
   }
 });
 
-test("peer native facade skips another profile terminal and advances to its own activity", async () => {
+test("activity for a profile the facade does not list is skipped while the cursor advances to its own", async () => {
   const codexProfile = profile({
     id: "profile-codex",
-    backendId: "codex",
     agentId: "shoggoth-codex",
     name: "Codex",
     runtimeProfileId: "runtime-codex",
@@ -3093,10 +3362,6 @@ test("peer native facade skips another profile terminal and advances to its own 
     }
     throw new Error(`unexpected ${request.method}`);
   }, {
-    id: "codex",
-    name: "Codex",
-    connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-codex",
     serviceEventPollMs: 1,
   });
   const registry = new BackendRegistry();
@@ -3105,7 +3370,7 @@ test("peer native facade skips another profile terminal and advances to its own 
   registry.on("backend.sessionActivity", (event) => activityEvents.push(structuredClone(event)));
   try {
     const started = await registry.start();
-    assert.equal(started.get("codex"), true);
+    assert.equal(started.get("shoggoth"), true);
     await waitForCondition(() => activityEvents.length > 0, 1_000);
     assert.equal(activityEvents.length, 1);
     assert.deepEqual(activityEvents[0].activity, {
@@ -3324,64 +3589,6 @@ test("a partial refresh never replaces an authoritative cache", async () => {
   assert.deepEqual(backend.getSessionRowsSnapshot(), { rows: stable, complete: false });
 });
 
-test("disconnecting a native facade leaves peers and the shared Service running", async () => {
-  const registry = new BackendRegistry();
-  const fixtures = ["shoggoth", "codex", "grok-build"].map((id) => fakeBackend(
-    () => page("profiles", []), { id, name: id, connectionMode: id === "shoggoth" ? "builtin-service" : "native-runtime" },
-  ));
-  let disabled = [];
-  registry.setDisabledBackendsProvider(() => disabled);
-  for (const { backend } of fixtures) registry.register(backend);
-  try {
-    await registry.start();
-    for (const { backend, calls } of fixtures.filter(({ backend }) => backend.getBackendDescriptor().disconnectable)) {
-      disabled = [backend.id];
-      calls.length = 0;
-      await backend.stop();
-      assert.equal((await backend.getStatus()).connected, false);
-      assert.equal(calls.length, 0, "disconnect must not send Service stop or other commands");
-      const statuses = await registry.getStatus();
-      assert.equal(statuses.find(({ id }) => id === backend.id).disabled, true);
-      assert.ok(statuses.filter(({ id }) => id !== backend.id).every(({ connected }) => connected));
-      assert.equal(calls.length, 0, "disabled status must not restart or probe the facade");
-      disabled = [];
-      assert.equal(await backend.start(), true);
-      assert.equal((await backend.getStatus()).connected, true);
-    }
-  } finally { await registry.stop(); }
-});
-
-test("a native connection disabled at boot gets live event hooks when reconnected", async () => {
-  const registry = new BackendRegistry();
-  const shoggoth = fakeBackend(() => page("profiles", []));
-  const codex = fakeBackend(() => page("profiles", []), { id: "codex", connectionMode: "native-runtime" });
-  let disabled = ["codex"];
-  const ready = [], activity = [];
-  registry.register(shoggoth.backend);
-  registry.register(codex.backend);
-  registry.setDisabledBackendsProvider(() => disabled);
-  registry.on("backend.ready", event => ready.push(event.backendId));
-  registry.on("backend.sessionActivity", event => activity.push(event));
-  try {
-    await registry.start();
-    assert.equal(codex.calls.length, 0);
-    assert.equal((await registry.start("codex")).size, 0, "disabled connections cannot be started indirectly");
-    disabled = [];
-    for (let cycle = 0; cycle < 2; cycle++) {
-      ready.length = 0;
-      shoggoth.calls.length = 0;
-      const started = await registry.start("codex");
-      assert.deepEqual([...started], [["codex", true]]);
-      assert.deepEqual(ready, ["codex"], "reconnect publishes exactly one readiness event");
-      assert.equal(shoggoth.calls.length, 0, "reconnect must not restart peers");
-      codex.backend._sessionActivityNotifier({ kind: "fixture-session-update" });
-      assert.equal(activity.at(-1).backendId, "codex");
-      assert.equal(activity.at(-1).activity.kind, "fixture-session-update");
-      await codex.backend.stop();
-    }
-  } finally { await registry.stop(); }
-});
-
 test("start is single-flight and a start racing stop waits for the stopped generation", async () => {
   let profileCalls = 0;
   const { backend } = fakeBackend((request) => {
@@ -3425,6 +3632,7 @@ test("pending start must fully quiesce before stop permits a fresh generation", 
   await stopping;
   assert.equal(await freshStart, true);
   assert.equal(profileCalls, 2);
+  await backend.stop();
 });
 
 test("malformed Service DTO is rejected instead of trusted", async () => {
@@ -3520,6 +3728,20 @@ test("dashboard preserves native approval scopes and only forwards offered choic
   assert.deepEqual(forwarded, ["runtime:2"]);
 });
 
+test("pending Runtime preferences project the next model and settings without inheriting the active permission override", async () => {
+  const pending = session(SESSION_A, { permissionMode: "full", modelOverride: "old-model",
+    modelSettings: { thinkingLevel: "low", serviceTier: null },
+    nextRuntimeSelection: { bindingId: STREAM_B, model: "next-model", permissionMode: null,
+      modelSettings: { thinkingLevel: "high", serviceTier: "priority" } } });
+  const { backend } = await readyBackend(() => { throw new Error("unused"); }, { sessions: [pending] });
+  const row = backend.getSessionRows()[0];
+  assert.equal(row.model, "next-model");
+  assert.equal(row.thinkingLevel, "high");
+  assert.equal(row.fastMode, true);
+  assert.equal(row.permissionMode, undefined, "inherit uses the next Runtime capability default");
+  assert.equal(backend._sessionTarget(row.key).session.permissionMode, "full", "the current override remains frozen");
+});
+
 test("session create/rename/delete translate gateway keys and maintain snapshot", async () => {
   const calls = [];
   const activityEvents = [];
@@ -3535,14 +3757,14 @@ test("session create/rename/delete translate gateway keys and maintain snapshot"
       session: session(SESSION_A, { permissionMode: request.params.mode, updatedAt: 1235 }),
     };
     if (request.method === "chat.session.rename") return {
-      session: session(SESSION_A, { title: request.params.title, status: "ready", codexThreadId: "thread-1" }),
+      session: session(SESSION_A, { title: request.params.title, status: "ready", runtimeSessionId: "thread-1" }),
       operation: {
         operationId: request.params.operationId, sessionKey: SESSION_A, kind: "rename",
         title: request.params.title, state: "completed", createdAt: 1234, updatedAt: 1234, finishedAt: 1234,
       },
     };
     if (request.method === "chat.session.delete") return {
-      session: session(SESSION_A, { status: "delete_pending", codexThreadId: "thread-1" }),
+      session: session(SESSION_A, { status: "delete_pending", runtimeSessionId: "thread-1" }),
       operation: {
         operationId: request.params.operationId, sessionKey: SESSION_A, kind: "delete",
         title: null, state: "completed", createdAt: 1234, updatedAt: 1234, finishedAt: 1234,
@@ -3600,7 +3822,7 @@ test("session create/rename/delete translate gateway keys and maintain snapshot"
   assert.equal(backend._promptByRequest.size, 0);
 });
 
-test("session create inherits its parent workspace unless explicitly overridden", async () => {
+test("session create supports inherited, Agent-default and explicit workspaces", async () => {
   const calls = [];
   const parent = session(SESSION_A, { workspace: "/tmp/current-project" });
   const { backend } = fakeBackend((request) => {
@@ -3631,6 +3853,15 @@ test("session create inherits its parent workspace unless explicitly overridden"
 
   await backend.createSession("shoggoth-default", {
     parentSessionKey: `agent:shoggoth-default:${SESSION_A}`,
+    workspace: null,
+  });
+  const defaultRequest = calls.filter((call) => call.method === "chat.session.create").at(-1);
+  assert.equal(defaultRequest.params.workspace, null, "explicit null must reach the Service's Agent-default resolver");
+  assert.equal(defaultRequest.params.parentSessionKey, SESSION_A, "keep the parent selection without inheriting its workspace");
+  assert.equal(backend._sessionTarget(`agent:shoggoth-default:${SESSION_A}`).session.workspace, "/tmp/current-project");
+
+  await backend.createSession("shoggoth-default", {
+    parentSessionKey: `agent:shoggoth-default:${SESSION_A}`,
     workspace: "/tmp/explicit-project",
   });
   assert.equal(
@@ -3641,7 +3872,11 @@ test("session create inherits its parent workspace unless explicitly overridden"
 
 test("UI new-session inheritance isolates generated directories and preserves explicit overrides", async () => {
   const root = "/private/generated-workspaces";
-  for (const workspace of [root + "/profile-default", root + "/profile-default/sessions/" + "a".repeat(64)]) {
+  // Only a generated session directory is implicit; the retired profile directory is an ordinary folder.
+  for (const [workspace, inherited] of [
+    [root + "/profile-default/sessions/" + "a".repeat(64), null],
+    [root + "/profile-default", root + "/profile-default"],
+  ]) {
     const requests = [];
     const { backend } = fakeBackend(request => {
       requests.push(request);
@@ -3652,7 +3887,7 @@ test("UI new-session inheritance isolates generated directories and preserves ex
     }, { paths: { tokenPath: "/private/client.token", defaultWorkspaceDir: root } });
     await backend.start();
     await backend.createSession("shoggoth-default", { parentSessionKey: `agent:shoggoth-default:${SESSION_A}` });
-    assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, null);
+    assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, inherited);
     await backend.createSession("shoggoth-default", { parentSessionKey: `agent:shoggoth-default:${SESSION_A}`, workspace });
     assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, workspace);
     await backend.stop();
@@ -3719,7 +3954,7 @@ test("session mutations preserve the listed derived title beneath manual rename"
       session: session(SESSION_A, { title: null, permissionMode: request.params.mode }),
     };
     if (request.method === "chat.session.rename") return {
-      session: session(SESSION_A, { title: request.params.title, status: "ready", codexThreadId: "thread-1" }),
+      session: session(SESSION_A, { title: request.params.title, status: "ready", runtimeSessionId: "thread-1" }),
       operation: {
         operationId: request.params.operationId, sessionKey: SESSION_A, kind: "rename",
         title: request.params.title, state: "completed", createdAt: 1234, updatedAt: 1234,
@@ -3771,7 +4006,7 @@ test("durable runtime errors remain readable after history reload without rewrit
   const { backend } = await readyBackend(() => page("messages", items));
   const read = await backend.getHistory(`agent:shoggoth-default:${SESSION_A}`);
   assert.equal(read.messages[0].content[0].text,
-    "错误：当前 Agent 登录验证失败，请前往「设置」检查账号状态或重新登录后重试");
+    "错误：当前 Agent 登录验证失败，请前往「模型」检查账号状态或重新登录后重试");
   assert.equal(read.messages[0].id, "error");
   assert.equal(read.messages[0].timestamp, 100);
   assert.deepEqual(read.messages.slice(1), messages.slice(1));
@@ -3791,7 +4026,7 @@ test("fragmented runtime errors use the same history display after integrity val
     ? page("messages", [items[1]], "older") : page("messages", [items[0]]));
   const read = await backend.getHistory(`agent:shoggoth-default:${SESSION_A}`);
   assert.equal(read.messages[0].content[0].text,
-    "错误：当前 Agent 登录验证失败，请前往「设置」检查账号状态或重新登录后重试");
+    "错误：当前 Agent 登录验证失败，请前往「模型」检查账号状态或重新登录后重试");
 });
 
 test("draft session 尚未绑定 Codex thread 时显示空历史而不是首用错误", async () => {
@@ -3958,7 +4193,8 @@ test("a transient status probe cannot cancel an active send before its terminal 
   releaseTerminal();
   await sending;
 
-  assert.equal(status.connected, true);
+  assert.equal(status.connected, false);
+  assert.equal(status.info.cacheStale, true);
   assert.equal(backend._generation, generation);
   assert.deepEqual(seen, {
     delta: ["partial"],
@@ -3999,7 +4235,7 @@ test("an accepted run reconnects after backend generation recovery instead of re
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
   const seen = { delta: [], final: [], error: [] };
@@ -4033,14 +4269,19 @@ test("an accepted run can finish while backend write readiness is still recoveri
     if (request.method === "chat.send") {
       return { disposition: "started", reason: null, run: run() };
     }
+    // A not-ready status only marks the cache stale; the accepted run keeps
+    // streaming to its own terminal.
     if (request.method === "run.subscribe") {
       markSubscriptionStarted();
       await subscriptionGate;
-      return subscription([], { latestSeq: 0 });
+      return subscription([event(1, "terminal", {
+        status: "completed", resultSummary: "Completed while recovering", errorCode: null,
+      })]);
     }
     if (request.method === "run.get") {
       return { run: run("completed", { resultSummary: "Completed while recovering" }) };
     }
+    if (request.method === "chat.history") return page("items", []);
     throw new Error(`unexpected ${request.method}`);
   }, {
     serviceStatus: () => {
@@ -4350,11 +4591,10 @@ test("consumer abort does not wait for the shared backend recovery cycle", async
     maxPollErrors: 1,
     serviceStatus: async () => {
       statusCalls += 1;
-      if (statusCalls === 1) return readyStatus(true);
-      if (statusCalls === 2) return readyStatus(false);
+      if (statusCalls <= 2) return restartedStatus(statusCalls);
       markRecoveryStarted();
       await recoveryGate;
-      return readyStatus(true);
+      return restartedStatus(statusCalls);
     },
   });
   const seen = { final: [], error: [] };
@@ -4421,7 +4661,7 @@ test("generation recovery preserves an already delivered approval response", asy
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
   const prompts = [];
@@ -4482,7 +4722,7 @@ test("generation recovery expires a prompt already resolved by another client", 
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
   const prompts = [];
@@ -4524,7 +4764,7 @@ test("a resumed status expires the exact prompt resolved by another observer", a
   assert.equal(backend._promptByRequest.size, 0);
 });
 
-test("an authoritative not-ready status still settles a returned completed terminal exactly once", async () => {
+test("a Service restart still settles a returned completed terminal exactly once", async () => {
   let statusCalls = 0;
   let releaseSubscription;
   let markSubscriptionStarted;
@@ -4546,7 +4786,7 @@ test("an authoritative not-ready status still settles a returned completed termi
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
   const seen = { final: [], error: [] };
@@ -4594,7 +4834,7 @@ test("a completed terminal remains final when generation changes during history 
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
   const seen = { final: [], error: [] };
@@ -4652,7 +4892,42 @@ test("consumer abort stays silent when it arrives during completed-terminal hist
   assert.deepEqual(seen, { final: [], error: [] });
 });
 
-test("an authoritative not-ready status still settles a returned failed terminal exactly once", async () => {
+test("native operation reads carry durable Service authority only after exact identity validation", async () => {
+  const crypto = require("node:crypto");
+  const operation = `send-${crypto.createHash("sha256").update("shoggoth-chat-send\0")
+    .update(SESSION_A).update("\0").update("original-client").digest("hex")}`;
+  let foreign = false;
+  const { backend } = await readyBackend(request => {
+    if (request.method === "chat.operation.get") return { status: "found", run: run("running", {
+      idempotencyKey: `shoggoth:chat-send:${foreign ? "foreign" : operation}`,
+    }) };
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  assert.equal((await backend.getChatOperation(key, "original-client")).stateAuthority, "native-service");
+  foreign = true;
+  await assert.rejects(backend.getChatOperation(key, "original-client"), { code: "WORK_RUN_CONTROL_MISMATCH" });
+});
+
+test("legacy recovery pins the original native identity and never resends the prompt", async () => {
+  const calls = [];
+  const { backend } = await readyBackend(request => {
+    calls.push(request);
+    if (request.method === "chat.operation.get") return { status: "unresolved", run: null };
+    if (request.method === "chat.operation.reconcile") return { status: "not_admitted", run: null };
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  assert.equal((await backend.getChatOperation(key, "legacy-client")).canReconcile, true);
+  assert.deepEqual(await backend.reconcileChatOperation(key, "legacy-client", 123), { status: "not_admitted", run: null });
+  const operations = calls.filter(request => request.method.startsWith("chat.operation."));
+  assert.equal(operations[0].params.operationId, operations[1].params.operationId);
+  assert.equal(operations[1].params.sessionKey, SESSION_A); assert.equal(operations[1].params.createdAt, 123);
+  assert.equal(calls.some(request => request.method === "chat.send"), false);
+  await assert.rejects(backend.reconcileChatOperation(key, "legacy-client", 0), { code: "CHAT_IDEMPOTENCY_KEY_INVALID" });
+});
+
+test("a Service restart still settles a returned failed terminal exactly once", async () => {
   let statusCalls = 0;
   let releaseSubscription;
   let markSubscriptionStarted;
@@ -4675,7 +4950,7 @@ test("an authoritative not-ready status still settles a returned failed terminal
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
   const seen = { final: [], error: [] };
@@ -4716,13 +4991,14 @@ test("a generation change rejects a returned terminal bound to another run", asy
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
-  const seen = { final: [], error: [] };
+  const seen = { final: [], error: [], status: [] };
   const sending = backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     final: (...args) => seen.final.push(args),
     error: (value) => seen.error.push(value),
+    status: (value) => seen.status.push(value.kind),
   });
   await subscriptionStarted;
   const status = await backend.getStatus();
@@ -4731,11 +5007,11 @@ test("a generation change rejects a returned terminal bound to another run", asy
 
   assert.equal(status.connected, false);
   assert.deepEqual(seen.final, []);
-  assert.equal(seen.error.length, 1);
-  assert.match(seen.error[0], /CHAT_RESPONSE_INVALID/u);
+  assert.deepEqual(seen.error, []);
+  assert.equal(seen.status.at(-1), "needs_verification");
 });
 
-test("an authoritative not-ready status settles a send that is still awaiting chat.send", async () => {
+test("a Service restart settles a send that is still awaiting chat.send", async () => {
   let statusCalls = 0;
   let releaseSend;
   let markSendStarted;
@@ -4747,17 +5023,19 @@ test("an authoritative not-ready status settles a send that is still awaiting ch
       await sendGate;
       throw Object.assign(new Error("late send failure"), { code: "SERVICE_UNAVAILABLE" });
     }
+    if (request.method === "chat.operation.get") return { status: "unresolved", run: null };
     throw new Error(`unexpected ${request.method}`);
   }, {
     serviceStatus: () => {
       statusCalls += 1;
-      return readyStatus(statusCalls !== 2);
+      return restartedStatus(statusCalls);
     },
   });
-  const seen = { final: [], error: [] };
+  const seen = { final: [], error: [], status: [] };
   const sending = backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     final: (...args) => seen.final.push(args),
     error: (value) => seen.error.push(value),
+    status: (value) => seen.status.push(value.kind),
   });
   await sendStarted;
   const status = await backend.getStatus();
@@ -4766,8 +5044,8 @@ test("an authoritative not-ready status settles a send that is still awaiting ch
 
   assert.equal(status.connected, false);
   assert.deepEqual(seen.final, []);
-  assert.equal(seen.error.length, 1);
-  assert.match(seen.error[0], /SERVICE_UNAVAILABLE/u);
+  assert.deepEqual(seen.error, []);
+  assert.equal(seen.status.at(-1), "needs_verification");
 });
 
 test("send exposes at most one terminal hook when a malformed interaction precedes terminal", async () => {
@@ -4785,17 +5063,19 @@ test("send exposes at most one terminal hook when a malformed interaction preced
     }
     throw new Error(`unexpected ${request.method}`);
   });
-  const seen = { final: [], error: [] };
+  const seen = { final: [], error: [], status: [] };
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     final: (...args) => seen.final.push(args),
     error: (value) => seen.error.push(value),
+    status: (value) => seen.status.push(value.kind),
   });
 
   assert.deepEqual(seen.final, []);
-  assert.deepEqual(seen.error, ["交互请求格式不兼容，请重新发起"]);
+  assert.deepEqual(seen.error, []);
+  assert.equal(seen.status.at(-1), "needs_verification");
 });
 
-test("only one consecutive status timeout preserves a started snapshot", async () => {
+test("status timeouts mark a started snapshot stale but never drop it", async () => {
   let statusCalls = 0;
   const { backend } = await readyBackend(() => { throw new Error("unexpected request"); }, {
     readinessMaxAttempts: 1,
@@ -4807,13 +5087,42 @@ test("only one consecutive status timeout preserves a started snapshot", async (
   });
   const generation = backend._generation;
 
-  assert.equal((await backend.getStatus()).connected, true);
-  assert.equal((await backend.getStatus()).connected, true);
-  assert.equal((await backend.getStatus()).connected, true);
-  assert.equal(backend._generation, generation);
   assert.equal((await backend.getStatus()).connected, false);
-  assert.ok(backend._generation > generation);
+  assert.equal((await backend.getStatus()).connected, true);
+  assert.equal((await backend.getStatus()).connected, false);
+  assert.equal((await backend.getStatus()).connected, false);
+  assert.equal(backend._generation, generation);
+  assert.equal(backend.getAgents().length, 1);
   await backend.stop();
+});
+
+test("a stale status gate refreshes before sending and rejects an unavailable Service as not admitted", async () => {
+  let healthy = true;
+  let sends = 0;
+  const { backend } = await readyBackend(request => {
+    if (request.method === "chat.send") { sends += 1; return { disposition: "started", reason: null, run: run() }; }
+    if (request.method === "run.subscribe") return subscription([event(1, "terminal", {
+      status: "completed", resultSummary: "recovered", errorCode: null,
+    })]);
+    throw new Error(`unexpected ${request.method}`);
+  }, { serviceStatus: () => {
+    if (!healthy) throw Object.assign(new Error("status timeout"), { code: "REQUEST_TIMEOUT" });
+    return readyStatus(true);
+  } });
+  try {
+    healthy = false;
+    assert.equal((await backend.getStatus()).connected, false);
+    await assert.rejects(backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", "stale-send"),
+      { code: "SERVICE_UNAVAILABLE", admissionAccepted: false });
+    assert.equal(sends, 0);
+    healthy = true;
+    const finals = [];
+    await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", "recovered-send", {
+      final: text => finals.push(text),
+    });
+    assert.equal(sends, 1);
+    assert.deepEqual(finals, ["recovered"]);
+  } finally { await backend.stop(); }
 });
 
 test("send derives a session-bound stable Service operationId from the client idempotency key", async () => {
@@ -4860,7 +5169,7 @@ test("completed text does not duplicate a delta and commentary seals before the 
     if (request.method === "chat.send") return { disposition: "started", reason: null, run: run() };
     if (request.method === "run.subscribe") return subscription([
       event(1, "text.delta", { delta: "note" }),
-      event(2, "text", { text: "note", phase: "commentary" }),
+      event(2, "text", { text: "note", phase: "commentary", segmentId: "progress-note" }),
       event(3, "text.delta", { delta: "answer" }),
       event(4, "text", { text: "answer", phase: "final_answer" }),
       event(5, "terminal", { status: "completed", resultSummary: "answer", errorCode: null }),
@@ -4870,10 +5179,127 @@ test("completed text does not duplicate a delta and commentary seals before the 
   const seen = { delta: [], interim: [], final: [] };
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     delta: (value) => seen.delta.push(value),
-    interim: (value) => seen.interim.push(value),
+    interim: (value, meta) => { assert.equal(meta.activityId, "progress-note"); seen.interim.push(value); },
     final: (value) => seen.final.push(value),
   });
   assert.deepEqual(seen, { delta: ["note", "answer"], interim: ["note"], final: ["answer"] });
+});
+
+test("a sealed native text identity ignores replay without dropping identical later messages", async () => {
+  const backend = new ShoggothBackend({ requestService: async () => { throw Error("offline fixture"); } });
+  const seen = [];
+  const context = { sessionKey: SESSION_A, run: run(), hooks: {
+    delta: text => seen.push(["delta", text]), interim: text => seen.push(["interim", text]),
+  } };
+  const state = { text: "", reasoning: "", settled: false };
+  const text = "I will open the browser.";
+  await backend._consumeEvent(context, state, event(1, "text.delta", { itemId: "note-1", delta: text }));
+  await backend._consumeEvent(context, state, event(2, "text", { itemId: "note-1", text, phase: "commentary" }));
+  await backend._consumeEvent(context, state, event(3, "text", { itemId: "note-1", text, phase: "commentary" }));
+  await backend._consumeEvent(context, state, event(4, "text.delta", { itemId: "note-1", delta: text }));
+  await backend._consumeEvent(context, state, event(5, "text.delta", { itemId: "note-2", delta: text }));
+  await backend._consumeEvent(context, state, event(6, "text", { itemId: "note-2", text, phase: "commentary" }));
+  assert.deepEqual(seen, [["delta", text], ["interim", text], ["delta", text], ["interim", text]],
+    "identity, not text equality, decides whether a sealed paragraph has already been displayed");
+});
+
+test("history watchers replay tools but do not reopen rendered paragraphs or resolved prompts", async () => {
+  const backend = new ShoggothBackend({ requestService: async () => { throw Error("offline fixture"); } });
+  const text = "I will open the browser.";
+  const prompt = requestId => ({ requestId, method: "mcpServer/elicitation/request",
+    kind: "mcp_elicitation", serverName: "shoggoth", mode: "form", message: "Allow browser?",
+    requestedSchema: { type: "object", properties: {}, required: [] } });
+  const events = [
+    event(1, "text.delta", { itemId: "note-1", segmentId: "note-segment-1", delta: text }),
+    event(2, "text", { itemId: "note-1", segmentId: "note-segment-1", text, phase: "commentary" }),
+    event(3, "prompt", prompt("old-request")),
+    event(4, "status", { status: "running", requestId: "old-request" }),
+    event(5, "tool.start", { toolCallId: "browser-1", tool: { name: "browser_status" } }),
+    event(6, "text.delta", { itemId: "note-2", segmentId: "note-segment-2", delta: text }),
+    event(7, "text", { itemId: "note-2", segmentId: "note-segment-2", text, phase: "commentary" }),
+    event(8, "prompt", prompt("new-request")),
+    event(9, "status", { status: "running", requestId: "new-request" }),
+    event(10, "text.delta", { itemId: "answer", segmentId: "answer-segment", delta: "Answer" }),
+    event(11, "text", { itemId: "answer", segmentId: "answer-segment", text: "Answer", phase: "final_answer" }),
+    event(12, "terminal", { status: "completed", resultSummary: "Answer", errorCode: null }),
+  ];
+  backend._sessionTarget = () => ({ sessionKey: SESSION_A, profile: profile() });
+  backend._findActiveRun = async () => run("running", { eventSeq: 5 });
+  backend._call = async (method) => {
+    assert.equal(method, "run.subscribe", "watching must never send another prompt or answer a request");
+    return subscription(events, { nextCursor: 12, latestSeq: 12 });
+  };
+  const history = { messages: [{ id: "canonical-note-1", role: "assistant", shoggoth: { runId: "run-1" },
+    content: [{ type: "text", text, segmentId: "note-segment-1", sourceEventId: "canonical-note-1" }] }] };
+  const original = JSON.stringify(history);
+  for (let refresh = 0; refresh < 3; refresh++) {
+    const seen = { interim: [], prompt: [], tools: [], final: [] };
+    await backend.watchSession(`agent:shoggoth-default:${SESSION_A}`, {
+      interim: value => seen.interim.push(value), prompt: value => seen.prompt.push(value.requestId),
+      tool: value => seen.tools.push(value.toolCallId), final: value => seen.final.push(value),
+    }, { history });
+    assert.deepEqual(seen.interim, [text], "only the new paragraph streams, even if its wording matches history");
+    assert.deepEqual(seen.prompt, ["new-request"], "historical resolved requests cannot become new waiting/expired steps");
+    assert.deepEqual(seen.tools, ["browser-1"], "tool replay still restores the live process");
+    assert.deepEqual(seen.final, ["Answer"]);
+  }
+  assert.equal(JSON.stringify(history), original, "history is a consumer snapshot and must remain unchanged");
+  const otherRun = { messages: [{ ...history.messages[0], shoggoth: { runId: "other-run" } }] };
+  const paragraphs = [];
+  await backend.watchSession(`agent:shoggoth-default:${SESSION_A}`, { interim: value => paragraphs.push(value) }, { history: otherRun });
+  assert.deepEqual(paragraphs, [text, text], "history from another Run cannot suppress this Run's text");
+});
+
+test("a history-seeded observer keeps the prefix when a later UI publication arrives", async () => {
+  const backend = new ShoggothBackend({ requestService: async () => { throw Error("offline fixture"); } });
+  backend._nativeUiAvailable = true;
+  const history = { messages: [{ role: "assistant", shoggoth: { runId: "run-1" }, content: [
+    { type: "text", text: "Before the card.", segmentId: "note-segment", sourceEventId: "source-note" },
+  ] }] };
+  const card = { type: "ui_artifact", schemaVersion: 1, artifactId: "card-1", revision: 1,
+    sourceEventId: "source-card", segmentId: "card-segment", title: "Browser result", summary: "Result" };
+  const events = [
+    event(1, "text.delta", { segmentId: "note-segment", delta: "Before the card." }),
+    event(2, "text", { segmentId: "note-segment", text: "Before the card.", phase: "commentary" }),
+    event(3, "ui_artifact", { part: card, sourceEventId: card.sourceEventId, segmentId: card.segmentId, transcriptSeq: 2 }),
+    event(4, "text.delta", { segmentId: "answer-segment", delta: "After the card." }),
+    event(5, "text", { segmentId: "answer-segment", text: "After the card.", phase: "final_answer" }),
+    event(6, "terminal", { status: "completed", resultSummary: "After the card.", errorCode: null }),
+  ];
+  backend._sessionTarget = () => ({ sessionKey: SESSION_A, profile: profile() });
+  backend._findActiveRun = async () => run("running", { eventSeq: 2 });
+  backend._call = async method => {
+    if (method === "run.subscribe") return subscription(events);
+    throw Error("canonical history temporarily unavailable");
+  };
+  const views = [], paragraphs = [];
+  await backend.watchSession(`agent:shoggoth-default:${SESSION_A}`, {
+    interim: text => paragraphs.push(text), nativeContent: (mode, parts) => views.push({ mode, parts }),
+  }, { history });
+  assert.deepEqual(paragraphs, [], "a canonical prefix must not create another standalone bubble");
+  assert.deepEqual(views.at(-1), { mode: "final", parts: [history.messages[0].content[0], card,
+    { type: "text", segmentId: "answer-segment", text: "After the card." }] },
+  "the full native snapshot must retain the prefix on its original side of the card");
+});
+
+test("a stream reset retires the historical prompt filter before new low-sequence requests", async () => {
+  const backend = new ShoggothBackend({ requestService: async () => { throw Error("offline fixture"); } });
+  const controller = new AbortController();
+  backend._sessionTarget = () => ({ sessionKey: SESSION_A, profile: profile() });
+  backend._findActiveRun = async () => run("running", { eventSeq: 100 });
+  let subscriptions = 0;
+  backend._call = async method => {
+    assert.equal(method, "run.subscribe");
+    if (++subscriptions === 1) return nonterminalStreamReset(run("running", { eventSeq: 2 }));
+    return subscription([{ ...event(3, "approval", { requestId: "fresh-after-reset", kind: "command", command: "pwd" }), streamId: STREAM_B }],
+      { nextCursor: 3, latestSeq: 3 });
+  };
+  const prompts = [];
+  await backend.watchSession(`agent:shoggoth-default:${SESSION_A}`, {
+    prompt: value => { prompts.push(value.requestId); controller.abort(); },
+  }, { signal: controller.signal, history: { messages: [] } });
+  assert.deepEqual(prompts, ["fresh-after-reset"], "new requests in the replacement stream remain actionable");
+  assert.equal(subscriptions, 2);
 });
 
 test("native Codex commentary closes live before the final answer starts", async () => {
@@ -4939,19 +5365,23 @@ test("tool prefers its explicit name/safe display fields and incremental plan te
         itemId: "tool-1", toolCallId: "tool-1",
         tool: { kind: "mcpToolCall", name: "linear.create", displayArgs: { title: "T" }, status: "inProgress" },
       }),
-      event(2, "tool.result", {
+      event(2, "tool.update", {
+        itemId: "tool-1", toolCallId: "tool-1",
+        tool: { kind: "mcpToolCall", name: "linear.create", displayArgs: { title: "Updated T" }, status: "inProgress" },
+      }),
+      event(3, "tool.result", {
         itemId: "tool-1", toolCallId: "tool-1",
         tool: {
           kind: "mcpToolCall", name: "linear.create", status: "completed",
           resultSummary: "Issue created", durationMs: 420,
         },
       }),
-      event(3, "plan", {
+      event(4, "plan", {
         plan: [{ step: "Inspect repository", status: "inProgress" }],
         delta: "Apply fix",
       }),
-      event(4, "terminal", { status: "completed", resultSummary: "done", errorCode: null }),
-    ], { nextCursor: 4, latestSeq: 4 });
+      event(5, "terminal", { status: "completed", resultSummary: "done", errorCode: null }),
+    ], { nextCursor: 5, latestSeq: 5 });
     if (request.method === "chat.history") return page("messages", []);
     throw new Error(`unexpected ${request.method}`);
   });
@@ -4964,8 +5394,10 @@ test("tool prefers its explicit name/safe display fields and incremental plan te
   });
   assert.equal(tools[0].name, "linear.create");
   assert.deepEqual(tools[0].args, { title: "T" });
-  assert.equal(tools[1].result, "Issue created");
-  assert.equal(tools[1].durationS, 0.42);
+  assert.equal(tools[1].phase, "update");
+  assert.deepEqual(tools[1].args, { title: "Updated T" });
+  assert.equal(tools[2].result, "Issue created");
+  assert.equal(tools[2].durationS, 0.42);
   assert.deepEqual(plans, [[
     { content: "Inspect repository", status: "in_progress" },
     { content: "Apply fix", status: "in_progress" },
@@ -5292,7 +5724,7 @@ test("prompt timeout expires the exact card and reports an actionable error", as
   }));
   assert.deepEqual(expired, [{ requestId: "permission-timeout" }]);
   assert.deepEqual(errors, [
-    "等待补充信息已超时（5 分钟）。任务已中断，请重新发送并及时完成输入",
+    "等待补充信息已超时（30 分钟）。任务已中断，请重新发送并及时完成输入",
   ]);
   assert.equal(backend._promptByRequest.size, 0);
 });
@@ -5319,7 +5751,7 @@ test("chat request failures distinguish archived inspiration and missing login w
   for (const [code, expected] of [
     ["INSPIRATION_ARCHIVED", "此会话关联的灵感已归档，请先在「灵感便签」中恢复它，或切换到普通聊天会话"],
     ["INSPIRATION_NOT_FOUND", "此会话关联的灵感已删除或不存在，历史记录仍可查看；请切换到普通聊天会话继续"],
-    ["RUNTIME_AUTH_REQUIRED", "当前 Agent 尚未登录或登录已失效，请前往「设置」登录后重试"],
+    ["RUNTIME_AUTH_REQUIRED", "当前 Agent 尚未登录或登录已失效，请前往「模型」登录后重试"],
   ]) {
     let calls = 0;
     const { backend } = await readyBackend(request => {
@@ -5336,16 +5768,42 @@ test("chat request failures distinguish archived inspiration and missing login w
   }
 });
 
+test("public runtime failures reach both live chat and canonical history", async () => {
+  const messages = require("../app/agent-service/product-context-protocol").MESSAGES;
+  for (const code of ["PRODUCT_COMPACTION_FAILED", "PRODUCT_COMPACTION_AUTH_REQUIRED",
+    "PRODUCT_COMPACTION_MODEL_UNAVAILABLE", "PRODUCT_COMPACTION_OUTPUT_INVALID", "PRODUCT_COMPACTION_OUTCOME_UNKNOWN",
+    "RUNTIME_HOST_RESTARTED", "RUNTIME_UPSTREAM_UNAVAILABLE"]) {
+    const message = code === "RUNTIME_UPSTREAM_UNAVAILABLE"
+      ? "上游模型服务不可用，请稍后重试，或选择其他可用模型"
+      : code === "RUNTIME_HOST_RESTARTED"
+      ? "原生 Runtime 已重启，本次任务已中断；请查看已保存的会话记录后决定是否重试，任务不会自动重发" : messages[code];
+    const { backend } = await readyBackend(request => {
+      assert.equal(request.method, "chat.history");
+      return page("messages", [historyItem({ id: "error-1", role: "system", timestamp: 200,
+        content: [{ type: "text", text: code }] }, { type: "error" })]);
+    });
+    const errors = [];
+    await backend._settleTerminal({ key: `agent:shoggoth-default:${SESSION_A}`, sessionKey: SESSION_A,
+      run: run(), hooks: { error: value => errors.push(value) }, poll: { cancelled: false }, generation: backend._generation },
+    { text: "", reasoning: "", settled: false, lastStatus: "running" }, run("failed", { errorCode: code }));
+    assert.deepEqual(errors, [message]);
+    assert.equal((await backend.getHistory(`agent:shoggoth-default:${SESSION_A}`)).messages[0].content[0].text, `错误：${message}`);
+  }
+});
+
 test("Runtime 启动阶段错误显示可操作信息而不是通用失败", async () => {
   const { backend } = await readyBackend(() => { throw new Error("unexpected request"); });
   const expected = new Map([
-    ["RUNTIME_AUTH_REQUIRED", "当前 Agent 登录验证失败，请前往「设置」检查账号状态或重新登录后重试"],
+    ["RUNTIME_AUTH_REQUIRED", "当前 Agent 登录验证失败，请前往「模型」检查账号状态或重新登录后重试"],
+    ["RUNTIME_AUTH_STATUS_UNAVAILABLE", "暂时无法读取 Agent 登录状态，请稍后重试"],
+    ["CODEX_NATIVE_AUTH_READ_FAILED", "暂时无法读取本机 Codex 登录状态，请稍后重试"],
+    ["CODEX_RUNTIME_CLEANUP_INCOMPLETE", "Codex 登录检查进程未能完成清理，请重启 Shoggoth 后台服务后重试"],
     ["RUNTIME_PERMISSION_REQUIRED", "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试"],
     ["RUNTIME_APPROVAL_UNAVAILABLE", "Antigravity 的非交互模式无法弹出原生工具授权，本次操作已被拒绝；请检查权限设置，调整后可在当前会话重新发送"],
     ["RUNTIME_QUOTA_EXHAUSTED", "当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试"],
     ["RUNTIME_SPENDING_LIMIT_REACHED", "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试"],
     ["RUNTIME_ACCOUNT_BLOCKED", "模型服务商返回账号受限（account blocked），请前往服务商检查账号状态；解除限制或更换可用账号后重试"],
-    ["RUNTIME_UPSTREAM_UNAVAILABLE", "Agent 上游服务暂时不可用，请稍后重试"],
+    ["RUNTIME_UPSTREAM_UNAVAILABLE", "上游模型服务不可用，请稍后重试，或选择其他可用模型"],
     ["GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "消息或附件超过 Grok CLI 的传输大小限制，本次消息未发送；请缩小附件或减少内容后重试"],
     ["ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED", "暂时无法识别 Antigravity 的原生授权界面，本次操作已停止；请检查 CLI 与 Shoggoth 的版本兼容性"],
     ["RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "未能确认 CLI 是否已接受本次任务，已暂停自动重试以避免重复执行；请先检查原生会话的执行结果"],
@@ -5354,9 +5812,10 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
     ["CODEX_RUNTIME_VERSION_MISMATCH", "Codex CLI 版本与当前 App 不兼容，请检查 CLI 与 App 版本"],
     ["CODEX_RUNTIME_VERSION_PROBE_FAILED", "无法读取 Codex CLI 版本，请检查本机安装与执行权限"],
     ["CODEX_SCHEMA_ERROR", "Codex 协议校验失败，请检查 CLI 与 App 的版本兼容性"],
-    ["RUNTIME_TURN_FAILED", "Agent 本次任务执行失败，请重试；若持续失败，请在「设置」中检查登录状态"],
+    ["RUNTIME_TURN_FAILED", "Agent 本次任务执行失败，请查看原生会话的错误原因后决定是否重试"],
     ["RUNTIME_START_FAILED", "启动 Agent Runtime 失败，请重试；若持续失败，请检查 CLI 安装与登录状态"],
     ["RUNTIME_START_RUNTIME_ACQUIRE_FAILED", "获取 Agent Runtime 失败，请重试"],
+    ["RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED", "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试"],
     ["RUNTIME_START_PROCESS_SPAWN_FAILED", "启动 Agent Runtime 进程失败，请重试或检查 CLI 安装"],
     ["RUNTIME_START_BOOTSTRAP_ROLE_FAILED", "启动 Shoggoth Helper 失败，请重试或重启 App"],
     ["RUNTIME_START_RPC_INITIALIZE_FAILED", "初始化 Agent Runtime 通信失败，请重试"],
@@ -5364,7 +5823,7 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
     ["RUNTIME_START_SESSION_START_OR_RESUME_FAILED", "创建或恢复 Agent 会话失败，请重试"],
     ["RUNTIME_START_TURN_START_FAILED", "发送本次任务失败；为避免重复执行，未自动重放"],
     ["CODEX_START_FAILED", "启动 Codex Runtime 失败，请重试"],
-    ["CODEX_TURN_FAILED", "Codex 本次任务执行失败，请重试；若持续失败，请在「设置」中检查登录状态"],
+    ["CODEX_TURN_FAILED", "Codex 本次任务执行失败，请查看原生会话的错误原因后决定是否重试"],
     ["CODEX_START_RUNTIME_ACQUIRE_FAILED", "获取 Agent Runtime 失败，请重试"],
     ["CODEX_START_PROCESS_SPAWN_FAILED", "启动 Codex 进程失败，请重试或检查安装完整性"],
     ["CODEX_START_BOOTSTRAP_ROLE_FAILED", "启动 Shoggoth Helper 失败，请重试或重启 App"],
@@ -5449,7 +5908,7 @@ test("CURSOR_GAP and nonterminal STREAM_RESET restore waiting interaction state 
   }
 });
 
-test("transport failure, abort, delete and stop clear active/prompt runtime maps", async () => {
+test("a transport failure leaves the accepted run to verify, and stop clears active/prompt runtime maps", async () => {
   const seen = [];
   const { backend } = await readyBackend((request) => {
     if (request.method === "chat.send") return { disposition: "started", reason: null, run: run() };
@@ -5457,12 +5916,13 @@ test("transport failure, abort, delete and stop clear active/prompt runtime maps
     if (request.method === "run.get") throw Object.assign(new Error("still offline"), { code: "SERVICE_DISCONNECTED" });
     throw new Error(`unexpected ${request.method}`);
   }, { maxPollErrors: 1 });
+  const statuses = [];
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     error: (value) => seen.push(value),
+    status: (value) => statuses.push(value.kind),
   });
-  assert.deepEqual(seen, ["Shoggoth 请求失败 (SERVICE_DISCONNECTED)"]);
-  assert.equal(backend._activeBySession.size, 0);
-  assert.equal(backend._promptByRequest.size, 0);
+  assert.deepEqual(seen, []);
+  assert.equal(statuses.at(-1), "needs_verification");
 
   backend._activeBySession.set(SESSION_A, { runId: "run-1", status: "running" });
   backend._promptByRequest.set("request-1", { sessionKey: SESSION_A, runId: "run-1" });
@@ -5668,7 +6128,7 @@ test("abortChat finds a queued run and sends its exact id to chat.abort", async 
       aborts.push(structuredClone(request.params));
       return { run: run("canceled", {
         id: "run-queued", idempotencyKey: "idem-queued",
-        codexThreadId: null, codexTurnId: null, startedAt: null,
+        runtimeSessionRef: null, runtimeTurnRef: null, startedAt: null,
       }) };
     }
     throw new Error(`unexpected ${request.method}`);
@@ -5679,18 +6139,68 @@ test("abortChat finds a queued run and sends its exact id to chat.abort", async 
   assert.equal(aborts[0].sessionKey, SESSION_A);
 });
 
+test("targeted abort cancels the queued UI Run and preserves the producer's observer and prompt", async () => {
+  const queued = run("queued", { id: "run-ui-queued", idempotencyKey: "idem-ui-queued" });
+  const aborts = [];
+  const { backend } = await readyBackend((request) => {
+    if (request.method === "run.get") {
+      assert.equal(request.params.runId, queued.id);
+      return { run: queued };
+    }
+    if (request.method === "chat.abort") {
+      aborts.push(structuredClone(request.params));
+      return { run: { ...queued, status: "canceled", finishedAt: 200 } };
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const producer = { runId: "run-1", status: "running", run: run() };
+  const prompt = { sessionKey: SESSION_A, runId: "run-1" };
+  backend._activeBySession.set(SESSION_A, producer);
+  backend._promptByRequest.set("producer-prompt", prompt);
+  await backend.abortChat(`agent:shoggoth-default:${SESSION_A}`, queued.id);
+  assert.equal(aborts.length, 1);
+  assert.equal(aborts[0].runId, queued.id);
+  assert.equal(aborts[0].sessionKey, SESSION_A);
+  assert.deepEqual(backend._activeBySession.get(SESSION_A), producer);
+  assert.deepEqual(backend._promptByRequest.get("producer-prompt"), prompt);
+});
+
+test("a stale, foreign or invalid targeted abort never falls back to the active generation", async () => {
+  let current = run("completed", { id: "run-old" });
+  const aborts = [];
+  const { backend } = await readyBackend((request) => {
+    if (request.method === "run.get") return { run: current };
+    if (request.method === "chat.abort") { aborts.push(request.params); return {}; }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const producer = { runId: "run-1", status: "running", run: run() };
+  backend._activeBySession.set(SESSION_A, producer);
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  await backend.abortChat(key, "run-old");
+  current = run("queued", { id: "run-foreign", sourceId: SESSION_B });
+  await assert.rejects(backend.abortChat(key, current.id), { code: "WORK_RUN_CONTROL_MISMATCH" });
+  current = run("queued", { id: "run-other" });
+  await assert.rejects(backend.abortChat(key, "run-expected"), { code: "WORK_RUN_CONTROL_MISMATCH" });
+  for (const invalid of [null, "", 7, {}]) {
+    await assert.rejects(backend.abortChat(key, invalid), { code: "WORK_RUN_CONTROL_MISMATCH" });
+  }
+  assert.deepEqual(aborts, []);
+  assert.deepEqual(backend._activeBySession.get(SESSION_A), producer);
+});
+
 test("abort is best-effort, while local cancellation and stop never call chat.abort", async () => {
   const methods = [];
   let release;
+  let markSubscribed;
   const wait = new Promise((resolve) => { release = resolve; });
+  const subscribed = new Promise((resolve) => { markSubscribed = resolve; });
   const { backend } = await readyBackend(async (request) => {
     methods.push(request.method);
     if (request.method === "chat.send") return { disposition: "started", reason: null, run: run() };
     if (request.method === "run.subscribe") {
+      markSubscribed();
       await wait;
-      return subscription([
-        event(1, "terminal", { status: "completed", resultSummary: "done", errorCode: null }),
-      ]);
+      return subscription([], { latestSeq: 0 });
     }
     if (request.method === "chat.abort") return { run: run("canceled") };
     if (request.method === "run.list") return page("runs", []);
@@ -5702,6 +6212,7 @@ test("abort is best-effort, while local cancellation and stop never call chat.ab
     final: (...args) => seen.final.push(args),
     error: (value) => seen.error.push(value),
   }, { signal: controller.signal });
+  await subscribed;
   controller.abort();
   release();
   await pending;
@@ -5721,4 +6232,74 @@ test("malformed attachments cannot reach chat.send", async () => {
   assert.match(errors[0], /附件无效/);
   assert.equal(calls.length, before);
   await backend.stop();
+});
+
+
+test("storage recovery metadata survives Backend sanitization without copying private fields", async () => {
+  let failing = false;
+  const f = await readyBackend(() => { throw new Error("must not send"); }, {
+    serviceStatus: () => {
+      if (!failing) return readyStatus(true);
+      throw Object.assign(Error("private storage path"), { code: "SERVICE_RECOVERY_REQUIRED", systemIssue: "STORAGE_FULL", privatePath: "private" });
+    },
+  });
+  try {
+    failing = true;
+    await assert.rejects(f.backend._call("service.status", {}), error => {
+      assert.equal(error.code, "SERVICE_RECOVERY_REQUIRED");
+      assert.equal(error.systemIssue, "STORAGE_FULL");
+      assert.equal(error.privatePath, undefined);
+      assert.equal(error.message.includes("private"), false);
+      assert.equal(error.admissionAccepted, undefined);
+      return true;
+    });
+  } finally { failing = false; await f.backend.stop(); }
+});
+
+test("confirmed storage recovery survives transient status failure and clears only on fresh healthy proof", async () => {
+  let mode = "healthy";
+  const f = await readyBackend(() => { throw new Error("no task must be sent"); }, {
+    serviceStatus: () => {
+      if (mode === "healthy") return readyStatus(true);
+      throw Object.assign(new Error("private path must not be projected"), {
+        code: mode === "recovery" ? "SERVICE_RECOVERY_REQUIRED" : "REQUEST_TIMEOUT",
+      });
+    },
+  });
+  try {
+    const generation = f.backend._generation;
+    f.backend._promptByRequest.set("accepted-fixture-operation", "retained fixture input");
+    mode = "recovery";
+    const failed = await f.backend.getStatus();
+    assert.equal(failed.connected, false);
+    assert.equal(failed.info.recoveryCode, "SERVICE_RECOVERY_REQUIRED");
+    assert.ok(!JSON.stringify(failed).includes("private path"));
+    mode = "timeout";
+    assert.equal((await f.backend.getStatus()).info.recoveryCode, "SERVICE_RECOVERY_REQUIRED");
+    assert.equal(f.backend._generation, generation);
+    assert.equal(f.backend._promptByRequest.get("accepted-fixture-operation"), "retained fixture input");
+    assert.equal(f.backend.getAgents().length, 1);
+    mode = "healthy";
+    const recovered = await f.backend.getStatus();
+    assert.equal(recovered.connected, true);
+    assert.equal(recovered.info.recoveryCode, undefined);
+    mode = "timeout";
+    assert.equal((await f.backend.getStatus()).info.recoveryCode, undefined);
+    assert.equal(f.calls.filter(item => item.request.method === "chat.send").length, 0);
+  } finally { await f.backend.stop(); }
+});
+
+test("cold readiness reports only the confirmed storage code without retrying a permanently poisoned sample", async () => {
+  const f = fakeBackend(() => { throw new Error("no discovery must begin"); }, {
+    readinessMaxAttempts: 3,
+    serviceStatus: () => { throw Object.assign(new Error("private storage error"), { code: "SERVICE_RECOVERY_REQUIRED" }); },
+  });
+  try {
+    assert.equal(await f.backend.start(), false);
+    const status = f.backend._statusResult();
+    assert.equal(status.info.recoveryCode, "SERVICE_RECOVERY_REQUIRED");
+    assert.equal(status.connected, false);
+    assert.equal(f.calls.filter(item => item.request.method === "service.status").length, 1);
+    assert.ok(!JSON.stringify(status).includes("private storage"));
+  } finally { await f.backend.stop(); }
 });

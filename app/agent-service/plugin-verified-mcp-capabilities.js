@@ -33,13 +33,18 @@ function own(value) {
       || Object.getPrototypeOf(value) === null);
 }
 
-function acceptsString(schema) {
+function acceptsString(schema, { rootPathDefault = false, headerName = null } = {}) {
   return own(schema) && schema.type === "string"
-    && Object.keys(schema).every(key => ["type", "title", "description"].includes(key));
+    && (!Object.hasOwn(schema, "default") || (rootPathDefault && schema.default === "/"))
+    && (!Object.hasOwn(schema, "x-mcp-header")
+      || (headerName !== null && schema["x-mcp-header"] === headerName))
+    && Object.keys(schema).every(key => ["type", "title", "description",
+      ...(rootPathDefault ? ["default"] : []),
+      ...(headerName !== null ? ["x-mcp-header"] : [])].includes(key));
 }
 
-function acceptsField(schema, kind) {
-  if (kind === "string") return acceptsString(schema);
+function acceptsField(schema, kind, options) {
+  if (kind === "string") return acceptsString(schema, options);
   if (!own(schema)) return false;
   if (kind === "number") return schema.type === "number"
     && Object.keys(schema).every(key => ["type", "title", "description"].includes(key));
@@ -63,7 +68,16 @@ function matchesOperation(tool, operation) {
       || !operation.supplied.includes(name))
     || operation.mandatory.some(name => !tool.inputSchema.required.includes(name))) return false;
   return operation.supplied.every(name => acceptsField(tool.inputSchema.properties[name],
-    operation.fields?.[name] || "string"))
+    operation.fields?.[name] || "string", {
+      // GitHub's get_file_contents contract defaults an omitted path to "/".
+      // We always supply a path, and accept this exact harmless default only
+      // on that field; other unreviewed defaults or restrictions still fail.
+      rootPathDefault: operation.id === "repository-file-read" && name === "path",
+      // The hosted GitHub MCP server mirrors these two top-level string
+      // parameters into Mcp-Param-* headers. Only the exact field-name
+      // annotation is part of this bounded profile.
+      headerName: name === "owner" || name === "repo" ? name : null,
+    }))
     && (operation.optional || []).every(name => !Object.hasOwn(tool.inputSchema.properties, name)
       || acceptsString(tool.inputSchema.properties[name]));
 }

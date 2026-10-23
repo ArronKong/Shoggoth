@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.151",
+      "version": "0.8.244",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.151",
-      "purl": "pkg:generic/shoggoth@0.8.151",
+      "bom-ref": "pkg:generic/shoggoth@0.8.244",
+      "purl": "pkg:generic/shoggoth@0.8.244",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -66,6 +66,86 @@
       ]
     },
     {
+      "type": "application",
+      "name": "gogcli",
+      "version": "0.42.0",
+      "bom-ref": "pkg:generic/gogcli@0.42.0?platform=darwin-arm64",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "39c0db09b1dcfbe12662d9de58c69d67d6520a77cafdc34e28dad0120f57bf19"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:generic/gogcli@0.42.0?platform=darwin-arm64",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openclaw/gogcli/releases/download/v0.42.0/gogcli_0.42.0_darwin_arm64.tar.gz"
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:role",
+          "value": "google-workspace-local-runtime"
+        },
+        {
+          "name": "shoggoth:target-arch",
+          "value": "darwin-arm64"
+        },
+        {
+          "name": "shoggoth:archive-sha256",
+          "value": "6a92b35473ed057c55677c2ba7d5af8e154d1bad23fa35e74994bc2f3bce4672"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "name": "gogcli",
+      "version": "0.42.0",
+      "bom-ref": "pkg:generic/gogcli@0.42.0?platform=darwin-x64",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "5a5cbdabafda5eb7ccb8ff24eb4c54fc20f954aa40181cbdb769a7f7290f05bb"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:generic/gogcli@0.42.0?platform=darwin-x64",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/openclaw/gogcli/releases/download/v0.42.0/gogcli_0.42.0_darwin_amd64.tar.gz"
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:role",
+          "value": "google-workspace-local-runtime"
+        },
+        {
+          "name": "shoggoth:target-arch",
+          "value": "darwin-x64"
+        },
+        {
+          "name": "shoggoth:archive-sha256",
+          "value": "f28d7f64fb85d726e4757261a02879f35968ad7096fe00761cd9eda8e9f6d2dd"
+        }
+      ]
+    },
+    {
       "type": "data",
       "name": "intfloat/multilingual-e5-small",
       "version": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
@@ -100,12 +180,12 @@
     {
       "type": "application",
       "name": "OpenAI Codex",
-      "version": "0.149.0",
-      "bom-ref": "pkg:generic/openai-codex@0.149.0?platform=darwin-arm64",
+      "version": "0.159.2",
+      "bom-ref": "pkg:generic/openai-codex@0.159.2?platform=darwin-arm64",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "6c7589a52fe90e3742e35662115a4c55c39715601df0d41345ba8ec8f4221d4e"
+          "content": "38aaf6dce63099fd10988948d03bbc6c0474253aef6961fcbe60f8d154b39101"
         }
       ],
       "licenses": [
@@ -115,11 +195,11 @@
           }
         }
       ],
-      "purl": "pkg:generic/openai-codex@0.149.0?platform=darwin-arm64",
+      "purl": "pkg:generic/openai-codex@0.159.2?platform=darwin-arm64",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://releases.openai.com/codex/releases/0.149.0/codex-package-aarch64-apple-darwin.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.159.2/codex-package-aarch64-apple-darwin.tar.gz"
         }
       ],
       "properties": [
@@ -132,12 +212,12 @@
     {
       "type": "application",
       "name": "OpenAI Codex",
-      "version": "0.149.0",
-      "bom-ref": "pkg:generic/openai-codex@0.149.0?platform=darwin-x64",
+      "version": "0.159.2",
+      "bom-ref": "pkg:generic/openai-codex@0.159.2?platform=darwin-x64",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "ba332e647cc898e3b4e86a3bc6e8db414a124eb88d8480f4707bbc66b0432f9d"
+          "content": "6b9b38bfad6ac8019aa6a243ee3ab11d3e22889eafd5458b0344cf20e797e680"
         }
       ],
       "licenses": [
@@ -147,11 +227,11 @@
           }
         }
       ],
-      "purl": "pkg:generic/openai-codex@0.149.0?platform=darwin-x64",
+      "purl": "pkg:generic/openai-codex@0.159.2?platform=darwin-x64",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://releases.openai.com/codex/releases/0.149.0/codex-package-x86_64-apple-darwin.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.159.2/codex-package-x86_64-apple-darwin.tar.gz"
         }
       ],
       "properties": [
@@ -1634,19 +1714,19 @@
     {
       "type": "library",
       "name": "@modelcontextprotocol/client",
-      "version": "2.1.0",
-      "bom-ref": "pkg:npm/%40modelcontextprotocol/client@2.1.0",
-      "purl": "pkg:npm/%40modelcontextprotocol/client@2.1.0",
+      "version": "2.3.1",
+      "bom-ref": "pkg:npm/%40modelcontextprotocol/client@2.3.1",
+      "purl": "pkg:npm/%40modelcontextprotocol/client@2.3.1",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "983561a32e568c36f453ee1d40fccb71c882d9ead27b1fc645542a9e865d8ae3281376224d97624bb7b335c1705f85c439639a8fb8d9af490b62720b9cbf28ac"
+          "content": "9881995e91ec8e767a943fa00ff58232947993cc95410f273451f53744ab7fb02f9f04d43180faa6f4d8f27836f877b915f57b60c64b9ab8cbedc2dafdc73775"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "MIT"
+            "id": "Apache-2.0"
           }
         }
       ],
@@ -1668,19 +1748,19 @@
     {
       "type": "library",
       "name": "@modelcontextprotocol/core",
-      "version": "2.1.0",
-      "bom-ref": "pkg:npm/%40modelcontextprotocol/core@2.1.0",
-      "purl": "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+      "version": "2.3.1",
+      "bom-ref": "pkg:npm/%40modelcontextprotocol/core@2.3.1",
+      "purl": "pkg:npm/%40modelcontextprotocol/core@2.3.1",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "61d163e603111ebd2060d0214db4038232c788425d200518c689a12ac7943727bb646948490994a0b876b2f785142890ee3d9831f7d3d64812343d0549f2058d"
+          "content": "95a5662213c6a568bbac6f6afb452281b9513741f0b3f62395beaa2c5b55aabc9754b91ce21fb237ccfbdf53ce0f62e700642515eeffb578549bb062d1807dd6"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "MIT"
+            "id": "Apache-2.0"
           }
         }
       ],
@@ -1758,13 +1838,13 @@
     {
       "type": "library",
       "name": "@oxc-project/types",
-      "version": "0.150.0",
-      "bom-ref": "pkg:npm/%40oxc-project/types@0.150.0",
-      "purl": "pkg:npm/%40oxc-project/types@0.150.0",
+      "version": "0.155.0",
+      "bom-ref": "pkg:npm/%40oxc-project/types@0.155.0",
+      "purl": "pkg:npm/%40oxc-project/types@0.155.0",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ac34b9ff7d44f477cf97f088cc6ae7d033a5bc16d716c790e54449f6c60c7ecb5b28b0ff73a1a6f6f991cd11837405f23882f8ce63b7ee573d448c18a95aee67"
+          "content": "49e13c24fc16d71b35b4778dc9c8d4b5405d868ad16bca388e5be3c24e3d47bfd9dbdd62fb80d06bb2492203a6fd3698419c7e42b3d06d527ff5cf1d30864df1"
         }
       ],
       "licenses": [
@@ -1907,14 +1987,44 @@
     },
     {
       "type": "library",
-      "name": "@rolldown/binding-android-arm-eabi",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.9",
+      "name": "@playwright/mcp",
+      "version": "0.0.82",
+      "bom-ref": "pkg:npm/%40playwright/mcp@0.0.82",
+      "purl": "pkg:npm/%40playwright/mcp@0.0.82",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b4d21269ed5011ffef91bdf19117235794847733c4f7b59ee4855a6b667c8d2b3340f67c53ad01fd8098a70e1023b562758b01b4a6af7335dff83c83b3d586c7"
+          "content": "382a9fb5f6fc1f8767aa6fe78db4c1464dec794bd43edb4e9495310ad1335c611360e9511f942dddb6d722399922e580c43f5117eca0d404ab3de5ef9b4cb970"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@rolldown/binding-android-arm-eabi",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.15",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "68b7202bd808277611bebaed7d205b45adbb1795aba624da3ee967169b073f1a541e01654a09d4e3ce78307c2844610185f4490d6092d9643b9488ec904f4e97"
         }
       ],
       "licenses": [
@@ -1938,13 +2048,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-android-arm64",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-android-arm64@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-android-arm64@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "602f18b08df4a3ad3a193662d15cb3625b032853fc5bad62fd0cdac870e42db344cff21286a0264dafa1b09463d77c531c0d07fba7e4e1bd949869fe43f70c96"
+          "content": "c43ec37590ab6d384abb1360ee8a109afa74ef2b3827fa674843131b7fce74e5a5e9d682ebb9bf4387cbefcb111ccc531ff3787c651b62170f334305e5614792"
         }
       ],
       "licenses": [
@@ -1968,13 +2078,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-darwin-arm64",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2308651f7a8ae6eaeb63c85988480690728414df74d69fe9d9b8f10b1265af81b236717bc18a54bcaf98e37b9a458b82e21a5f8f36d1dd2242ddaad7d631af9b"
+          "content": "9b65ae43aaf4078393631c8fa4d2ed5da3116d10d46c6f18415d90dca4dd4922bc4e1e8a1c29c2f2354226df1bbd87920795a2be490d6dcf3998a69d69274ec4"
         }
       ],
       "licenses": [
@@ -1998,13 +2108,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-darwin-x64",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "5f1a497d5cc587e8e2951c485d4a9c7d801872e9c873f5c4cc88b3b0e2f57dc25e7b949fec7de61fc5a52e67c77e5bb3e5a9aa47cf10428f62ccab663256af03"
+          "content": "e51b67b07337ea7a1d33d59b332fb38a9d0b192fc6fb2e70ae8e511eba4e96be1a736e3ed734a2f64895d8c3f59b265e67f89f1077ee9507168e7017cdcd82d8"
         }
       ],
       "licenses": [
@@ -2028,13 +2138,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-freebsd-x64",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9127ef86681e5b27e46d3de9ff5b39bd281ba288286a1db3926f5f5f6ce3836847c5257b4f82a131645451a464e0e5cdaa80f740051e46a2dcb3569938ae14d6"
+          "content": "837974f69c85aa1bbed77e492a46e4c22286426c14e6150c50f27855d0400efbaa47c777dcbe87e7bf2b87c9bbaedc5b769f95997ffe9f323b9ef852665ce951"
         }
       ],
       "licenses": [
@@ -2058,13 +2168,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-linux-arm-gnueabihf",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d515731b5ee9c6a6d37d82c2df9d8994bb7a90a2c6fba1ebdf49fc0e5209aac9d5e65b940ddd90771f40cb0d4269b7f26f52bd9348d7119edebf1911a13fae8b"
+          "content": "9c87b756e808f7b9c642db293f10ea038b17314a5e8a870a20ffc2aa963fbbfbe06d3f9a957f9c571bb50bfa1504f2a0e1f78d4e6628bc4f75bf80e05ef5cdc1"
         }
       ],
       "licenses": [
@@ -2088,13 +2198,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-linux-arm64-gnu",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "057a8fbd9d9daea543fbf67c5292b072ce0ca7b82b33e786164bb808010aac4b5c6c0b14a73444a612b5b288024591ab7953e23248a206dc349f74cfb5ebaabf"
+          "content": "8930635f1f81e504af808f3d9497e6aa1e304e1f0d69b47561920837784dc78cd21b41157d5aa43af2ee94da46e36e75a5b77afc802667f2de7d5935638acf87"
         }
       ],
       "licenses": [
@@ -2118,13 +2228,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-linux-arm64-musl",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d75bd6be8f180f02f3ba4b76ec9dda603594fa08363fb27e64e9a22748641790576435bba55c9aeebe343170f2eb26b48bd29a9a810d495288ba0bc936015720"
+          "content": "b8ddba5ce9d547baea42ea46dd5f68006d841866ad5a37091ce7833875050a1e1305698fdad1d316854dd776986f07e6d1a1ea240126730840bbab28a088dfa9"
         }
       ],
       "licenses": [
@@ -2148,13 +2258,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-linux-ppc64-gnu",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6b5b628cc91dc2c20046d734177f40a544513a47f7370aa29c8e933a24925824d1edd4fde9d7df36f314b431e7abae3028d4c864e225ccaac5bef154ce7262cb"
+          "content": "f675a471d77e1fe5e1680ddf408c291e7288adfc7f3d0eab3b4a62bebefc3a0d3bb5795495cb41049a0460b3df85398247f431115767eae3e31d5e52ca63e177"
         }
       ],
       "licenses": [
@@ -2178,13 +2288,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-linux-s390x-gnu",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c7a49035d02fbf8737856a9331a5ae6b0ccc5fd9b2682b3fc849a51acc49ce47429671d6ec56eb8d0b928910e1b92633118a04321b1a272f6a1c6fd735e9893d"
+          "content": "1a08747221632f022eb0b48bcfb2d96046867713805095c8f90bb92426e13c924712df2f3fe2234404d32617a226c773cd36205221d48b0dd7d446b766930174"
         }
       ],
       "licenses": [
@@ -2208,13 +2318,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-linux-x64-gnu",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f6cd0067c0452b9fe7ec1fd30686b6c89137808dca511adb5dc3c196c02cbe353855e24a804f74cb562d371c845087073d0920ebfc9f177aa2854adc33f29fd1"
+          "content": "14783ad2b4ba0c178f01867d5fd17aef1f8939b15d9a09fab6ea40d42fdadc1f82b9f1664c3e265fe7bc33be6d0a200eddfa11ffac70541234290888eec9ffaf"
         }
       ],
       "licenses": [
@@ -2238,13 +2348,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-linux-x64-musl",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "3fb55602657e59d265b87ee8be7446a22bf68bc4e8ec6019fa41b37c6ba9eb7e5cc8bed2c9897795251a0371a9e531dfd27fc2a3913212a6f6cdbaaafa730e1d"
+          "content": "fdcbd5ffbbf9546cff9a88b3d172918f6744f03cec2b2848bb52a93af2463e3472c20df2b1c38df3cf541af01ef337e224b1eea7b54b8c176ea065a2dc7bac59"
         }
       ],
       "licenses": [
@@ -2268,13 +2378,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-openharmony-arm64",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d6a8b1b6c13804af21fb24b705f999d3d52103b3bf3782000af6ba601afb101bc226b681c93b917203936a203ad939b4bdecb751c2972ce6a8187b5898d18456"
+          "content": "332cc2e47aeffec9be67b4d218a3ff8fcd34d513b6c509b5ccea423552f88f4718fd584166f8a5b9d03660543b8b8947e99017c509b495c31d07333ef7d984ef"
         }
       ],
       "licenses": [
@@ -2298,13 +2408,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-win32-arm64-msvc",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a24f084237043ecd402997ee114ce7541ac9c3e80ae2ca2af9bc7c6f55f65e832a54295aadcd6ae490e656d597635c5fafa66e1d302c3d71d3813aea29365ec3"
+          "content": "f8f818892f801f9a26cba2f8e592f1c9b6ac6ae25a8f733c6eea13f370fe9f33e609ac97971515f61c9d85c882295c8883407fbf406d5cf0c4d6e1aa37008fa6"
         }
       ],
       "licenses": [
@@ -2328,13 +2438,13 @@
     {
       "type": "library",
       "name": "@rolldown/binding-win32-x64-msvc",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.9",
-      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.15",
+      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "229da65e853484cd1ba2add17fe7a4b93eb9dce44e4a8e9a49870f4f5547138ab9d8abf2c60164420ae06ff204b313aebd0d9f6596ecf248490320843ccdb8fe"
+          "content": "1c565dd90350627d496c88be1e977b1feaff9645b171f22edbc9e2ad9e9e0a7d8b69fbaf984c4c95bfcff7a49fc79b5fee93c0af0dfd21d866085f2f995f8d85"
         }
       ],
       "licenses": [
@@ -3636,36 +3746,6 @@
         {
           "name": "shoggoth:distribution",
           "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "@xterm/headless",
-      "version": "6.0.0",
-      "bom-ref": "pkg:npm/%40xterm/headless@6.0.0",
-      "purl": "pkg:npm/%40xterm/headless@6.0.0",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "e588f54083580b2ceb66d7fc3852078b8ee242d23ed2a6053c79a8b847c6f1d1cdc5b67d4dbf58192b8b72c1308fd67e38bef9189a8fc896f2a057abf346b61f"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "desktop"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "macos-production-input"
         }
       ]
     },
@@ -5518,13 +5598,13 @@
     {
       "type": "library",
       "name": "dompurify",
-      "version": "3.4.15",
-      "bom-ref": "pkg:npm/dompurify@3.4.15",
-      "purl": "pkg:npm/dompurify@3.4.15",
+      "version": "3.4.17",
+      "bom-ref": "pkg:npm/dompurify@3.4.17",
+      "purl": "pkg:npm/dompurify@3.4.17",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "11406333e07e9640c4e35884f360c34827e4a0f19f5f1f08c45c4f3233739bf524e310deb7beeb4cdf70aa5c65560ef590aed71ae50cbfac14c49530c2ff97cb"
+          "content": "07fa52958547439f24a88483ff20e3b89d727f3237e26d60178940a1dd9bc1246188de0ae429771fc01fee1a81d8f9932fdd75b5d12e7679d79f9167851a33d3"
         }
       ],
       "licenses": [
@@ -5848,13 +5928,13 @@
     {
       "type": "library",
       "name": "electron",
-      "version": "44.4.2",
-      "bom-ref": "pkg:npm/electron@44.4.2",
-      "purl": "pkg:npm/electron@44.4.2",
+      "version": "44.9.3",
+      "bom-ref": "pkg:npm/electron@44.9.3",
+      "purl": "pkg:npm/electron@44.9.3",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f3bdadffef0cf13cab89b5a6d9c6294701d8d9a0e5c831ce9fe0879e137d907412b555bca408a322116895803fa90c8376b8b6f17a7c322dc7123e6416f6a30b"
+          "content": "0aff7fc8c9d9c4d5ac32521ef13e2ffff34a1dd52f6deca84c9a17137048711c6eb3699e78568ef61fcfdf30797787015ee9b9d4880062b4f6423a480d62a924"
         }
       ],
       "licenses": [
@@ -7416,13 +7496,13 @@
     {
       "type": "library",
       "name": "http-cache-semantics",
-      "version": "4.2.0",
-      "bom-ref": "pkg:npm/http-cache-semantics@4.2.0",
-      "purl": "pkg:npm/http-cache-semantics@4.2.0",
+      "version": "4.3.0",
+      "bom-ref": "pkg:npm/http-cache-semantics@4.3.0",
+      "purl": "pkg:npm/http-cache-semantics@4.3.0",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "753c5cbcf5ea3ef5c1429ab9754afa9843095f8a08105bfa6f0a26dc50f02910ecb888e324600daa106ea009fd73545024874029abf7dc40fae44db2b3ef3b41"
+          "content": "339b792e52694b5507323bf045055d147bcf21219e2c0c4d72b5ae2647868742b1b2a0876753b7357654ffcc7b703d010dc196f246a9c4c293bf096aacd90790"
         }
       ],
       "licenses": [
@@ -8946,13 +9026,13 @@
     {
       "type": "library",
       "name": "markdown-it",
-      "version": "14.2.0",
-      "bom-ref": "pkg:npm/markdown-it@14.2.0",
-      "purl": "pkg:npm/markdown-it@14.2.0",
+      "version": "14.3.3",
+      "bom-ref": "pkg:npm/markdown-it@14.3.3",
+      "purl": "pkg:npm/markdown-it@14.3.3",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d531a2422255450dcd3e6647eacc7909f9e683a1909bd8ef0b5721e132b9d75363489be3cca2f39f9a4f7d944d66444f64fd07a828a84a776a1fcbf69d169655"
+          "content": "2fffed0c09234e324253aa4151205382cdca83822755a66e519a20fdbe95d7650a85c0d0ed2efcf3bee26db09a9d1131c0fb983f50990fb19dd9dc52cb519746"
         }
       ],
       "licenses": [
@@ -9516,13 +9596,13 @@
     {
       "type": "library",
       "name": "nanoid",
-      "version": "3.3.19",
-      "bom-ref": "pkg:npm/nanoid@3.3.19",
-      "purl": "pkg:npm/nanoid@3.3.19",
+      "version": "3.3.20",
+      "bom-ref": "pkg:npm/nanoid@3.3.20",
+      "purl": "pkg:npm/nanoid@3.3.20",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "636b54372e28bb0eadab9a0348a7906063b286450184d39c195ff4d8a0beea477d7831aa75977efa68cc8880e296b058be3127098bd5b6cb870ae3fea2449fba"
+          "content": "b8a760d86dc63422909fd6f260ea716c6aab4f67c63b9291b7927ff1bde9a24f2b4faab119617a871332262118b407fe155c98b83f6145a0ea5f9b8f15827865"
         }
       ],
       "licenses": [
@@ -9570,36 +9650,6 @@
         {
           "name": "shoggoth:distribution",
           "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "node-addon-api",
-      "version": "7.1.1",
-      "bom-ref": "pkg:npm/node-addon-api@7.1.1",
-      "purl": "pkg:npm/node-addon-api@7.1.1",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "e66ddbb32ae3156135c5fee7cfb61774de2e76756d5caebf61f827e6a9da84be9b0a47f6c8ab789379ee4ca02d4f8af7206f09351da772c20c759b80cc98c741"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "desktop"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "macos-production-input"
         }
       ]
     },
@@ -9720,36 +9770,6 @@
         {
           "name": "shoggoth:distribution",
           "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "node-pty",
-      "version": "1.1.0",
-      "bom-ref": "pkg:npm/node-pty@1.1.0",
-      "purl": "pkg:npm/node-pty@1.1.0",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "db426ab6eb58e893d74d49cbd228f5b9a77b41ed5b693e3a972a25876b1210d0dde2c4f3299e279801647800110cac2694b8cfc7a5ca465c11531c233b2fa552"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "desktop"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "macos-production-input"
         }
       ]
     },
@@ -10333,6 +10353,66 @@
     },
     {
       "type": "library",
+      "name": "playwright-core",
+      "version": "1.64.0-alpha-1789764292000",
+      "bom-ref": "pkg:npm/playwright-core@1.64.0-alpha-1789764292000",
+      "purl": "pkg:npm/playwright-core@1.64.0-alpha-1789764292000",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "66045ac9b16fe2b472ed03069d8a6b10615d3499ef6a936a71a111db0f7a6c3400fb8d0158895ed5e975621f4a1c3dc4e9762689e301fabf94c454c26ae4c619"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "playwright",
+      "version": "1.64.0-alpha-1789764292000",
+      "bom-ref": "pkg:npm/playwright@1.64.0-alpha-1789764292000",
+      "purl": "pkg:npm/playwright@1.64.0-alpha-1789764292000",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "dcd82ce04446742f75dae5b7b2b103b4d55ecb8bb5c12690fc415c2a1c4ca73d1bcb42ba9e275a260334f3ba4ba49735a2ccad8959cbeda724e60be03c0acf37"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "plist",
       "version": "3.1.0",
       "bom-ref": "pkg:npm/plist@3.1.0",
@@ -10364,13 +10444,13 @@
     {
       "type": "library",
       "name": "postcss",
-      "version": "8.5.28",
-      "bom-ref": "pkg:npm/postcss@8.5.28",
-      "purl": "pkg:npm/postcss@8.5.28",
+      "version": "8.5.31",
+      "bom-ref": "pkg:npm/postcss@8.5.31",
+      "purl": "pkg:npm/postcss@8.5.31",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "451bb3a83b6de58f61deabb3e615a12be4cf9ec995b3a5b0494e8b90931e6381ecb54103b984c6f1425275ac0c4739b302d57e284a06f0ddd0836a8bcb9bccfc"
+          "content": "6146d6602804af09cc01592352761af8a94c0731a91f0888b7f0c4edfd06df702e5f62c7f5471393a2a05b1777cd153ea4ddeefc2f9797712730b3381de6bb4a"
         }
       ],
       "licenses": [
@@ -11294,13 +11374,13 @@
     {
       "type": "library",
       "name": "rolldown",
-      "version": "1.2.9",
-      "bom-ref": "pkg:npm/rolldown@1.2.9",
-      "purl": "pkg:npm/rolldown@1.2.9",
+      "version": "1.2.15",
+      "bom-ref": "pkg:npm/rolldown@1.2.15",
+      "purl": "pkg:npm/rolldown@1.2.15",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "871fcfbf437585a5d16f5d6a91f9cae4c5c1fe2aabee2d328d642a98ef6e1ea669060412ab373c52c4a71296a5b21fa3d48f2a4360a45c09090bc06bddd29296"
+          "content": "ea874d0fe7de979cd5c3723861cd9eebd82f82e0e75f408000688d0d94aae2293959471a2eb903d862eea20d1770e0dba2bdf5859e5ac843205439e8f8a3d5e6"
         }
       ],
       "licenses": [
@@ -11318,6 +11398,36 @@
         {
           "name": "shoggoth:distribution",
           "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "rrule",
+      "version": "2.8.1",
+      "bom-ref": "pkg:npm/rrule@2.8.1",
+      "purl": "pkg:npm/rrule@2.8.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "84cddd1d204c79a2742ada7b5b7f01259eced733a068512c9f8d4f0e4fb21e812d7cb57e3e826df44f710256625a07ff8aa12a8a89cdd1e6c7159203029fa21b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop,frontend"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
         }
       ]
     },
@@ -11771,14 +11881,44 @@
     },
     {
       "type": "library",
-      "name": "source-map-js",
-      "version": "1.2.1",
-      "bom-ref": "pkg:npm/source-map-js@1.2.1",
-      "purl": "pkg:npm/source-map-js@1.2.1",
+      "name": "smol-toml",
+      "version": "1.9.0",
+      "bom-ref": "pkg:npm/smol-toml@1.9.0",
+      "purl": "pkg:npm/smol-toml@1.9.0",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "51758c2a12cec1529bef6f0852d40f5f17d853ebac7726ed52b2bff2e184f0240cbeb84ea70bf30c1c23d108522fb31073bbc8b084811bc550f3e203431a5f40"
+          "content": "86977e1cb38dec77595ea61c84c33ff8b6934db74ad00537367808278295c966d8f5b7d0a9d2fd703fb8c9fe9d528536029e15b14d099108ba171008d41da65d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "source-map-js",
+      "version": "1.2.2",
+      "bom-ref": "pkg:npm/source-map-js@1.2.2",
+      "purl": "pkg:npm/source-map-js@1.2.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2868fff18e37c77e5a6550edb7e27898ad61a0b18750b3187d290e0c93508cd0c2de85b53ea3e8c4cc28d292d4b1633f5041b338dfcdc5e1f2c047cd5cd3f757"
         }
       ],
       "licenses": [
@@ -12391,11 +12531,11 @@
       "properties": [
         {
           "name": "shoggoth:dependency-scopes",
-          "value": "desktop"
+          "value": "desktop,frontend"
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -12788,13 +12928,13 @@
     {
       "type": "library",
       "name": "vite",
-      "version": "8.3.0",
-      "bom-ref": "pkg:npm/vite@8.3.0",
-      "purl": "pkg:npm/vite@8.3.0",
+      "version": "8.3.5",
+      "bom-ref": "pkg:npm/vite@8.3.5",
+      "purl": "pkg:npm/vite@8.3.5",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "96164156f10779f804f874190bd3bb101260094fe757314d97bbe44b8444d003ed58b3f4dbff10548910b730713eaba1ee5ab9ffbf0d1e2a538fb38343a5eec9"
+          "content": "cf56298e2789f60d1e6d3990a4b06ffe8abd13717d10894e7beecb6a15bc4ab1372d3886dee7414545d03a56173fd6fe202daada9847795c63f711a5c37e0e11"
         }
       ],
       "licenses": [
@@ -13298,13 +13438,13 @@
     {
       "type": "library",
       "name": "zod",
-      "version": "4.6.5",
-      "bom-ref": "pkg:npm/zod@4.6.5",
-      "purl": "pkg:npm/zod@4.6.5",
+      "version": "4.6.7",
+      "bom-ref": "pkg:npm/zod@4.6.7",
+      "purl": "pkg:npm/zod@4.6.7",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "bf997f6855d941e6a2e1ac0b6cea52a0779c13d52232b9dfc7be6d1172e33689d754047143998e7a2a538d1394721b3350d0aa9c4fa1a8032e8d1b111ecbadd9"
+          "content": "83c5b60f6914e9af2e9ed734e777d7d6e5412b333bcaa0315bfdf3c24f37fba472176f9228eb95f9cd30043854c335753da19aa66647fab99c5333dffb7086c2"
         }
       ],
       "licenses": [
@@ -13345,6 +13485,42 @@
       ]
     },
     {
+      "type": "library",
+      "name": "Codex inline visualization stylesheet",
+      "version": "rust-v0.162.0; stylesheet SHA-256 4b1d492f1e67394f80dc83fe7e9d3a508648dbeffe7a5152b27a567da972c50f",
+      "bom-ref": "source:Codex inline visualization stylesheet",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "app/native-chat-ui-resources/visualize.css,app/native-chat-ui-resources/manifest.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Codex native voice libraries",
+      "version": "Codex 0.159.2; library versions and source archive hashes in codex-voice/sources.json",
+      "bom-ref": "source:Codex native voice libraries",
+      "licenses": [
+        {
+          "expression": "LGPL-2.1-or-later AND MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib"
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": ".vendor/codex/arm64/package/codex-resources/voice,.vendor/codex/x64/package/codex-resources/voice"
+        }
+      ]
+    },
+    {
       "type": "file",
       "name": "Courier Prime",
       "version": "bundled font files; original copyright and license retained",
@@ -13360,6 +13536,25 @@
         {
           "name": "shoggoth:local-files",
           "value": "app/manage-ui/public/fonts/courier-prime"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "gogcli Gmail MCP runtime",
+      "version": "v0.42.0 (commit 792107a); arm64 and x64 release binaries pinned by SHA-256 in build/gog-runtime-manifest.json",
+      "bom-ref": "source:gogcli Gmail MCP runtime",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "app/agent-service/plugin-gogcli-gmail-runtime.js,build/gog-runtime-manifest.json,scripts/fetch-gog-runtime.mjs"
         }
       ]
     },
@@ -13439,6 +13634,23 @@
     },
     {
       "type": "library",
+      "name": "Memory MIME detection and AI option dependencies",
+      "version": "file-type 22.1.1; dependency versions and per-file SHA-256 in build/shoggoth-memory/manifest.json",
+      "bom-ref": "source:Memory MIME detection and AI option dependencies",
+      "licenses": [
+        {
+          "expression": "MIT AND BSD-3-Clause"
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "app/agent-service/shoggoth-memory/core.cjs,build/shoggoth-memory/dependencies"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "Multilingual E5-small bundled embedding model",
       "version": "614241f622f53c4eeff9890bdc4f31cfecc418b3; fixed qint8 ONNX and tokenizer assets",
       "bom-ref": "source:Multilingual E5-small bundled embedding model",
@@ -13459,7 +13671,7 @@
     {
       "type": "library",
       "name": "OpenAI Codex",
-      "version": "0.149.0",
+      "version": "0.159.2",
       "bom-ref": "source:OpenAI Codex",
       "licenses": [
         {
@@ -13471,7 +13683,7 @@
       "properties": [
         {
           "name": "shoggoth:local-files",
-          "value": "schemas/codex-app-server/0.149.0,build/codex-runtime-manifest.json"
+          "value": "schemas/codex-app-server/0.159.2,build/codex-runtime-manifest.json"
         }
       ]
     },
@@ -13491,6 +13703,25 @@
         {
           "name": "shoggoth:local-files",
           "value": "app/manage-ui/src/lib/markdown.ts,app/manage-ui/src/lib/slashCommands.ts,app/manage-ui/src/pages/workboard"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "OpenClaw memory core and bundled source dependencies",
+      "version": "c10679395819ede78bb073f979f95c157e165bfa; per-file SHA-256 in build/shoggoth-memory/manifest.json",
+      "bom-ref": "source:OpenClaw memory core and bundled source dependencies",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "app/agent-service/shoggoth-memory/core.cjs,build/shoggoth-memory"
         }
       ]
     },
@@ -13569,12 +13800,14 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.151",
+      "ref": "pkg:generic/shoggoth@0.8.244",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
+        "pkg:generic/gogcli@0.42.0?platform=darwin-arm64",
+        "pkg:generic/gogcli@0.42.0?platform=darwin-x64",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
-        "pkg:generic/openai-codex@0.149.0?platform=darwin-arm64",
-        "pkg:generic/openai-codex@0.149.0?platform=darwin-x64",
+        "pkg:generic/openai-codex@0.159.2?platform=darwin-arm64",
+        "pkg:generic/openai-codex@0.159.2?platform=darwin-x64",
         "pkg:npm/%40babel/runtime@7.29.7",
         "pkg:npm/%40base-ui/react@1.5.0",
         "pkg:npm/%40base-ui/utils@0.2.9",
@@ -13624,30 +13857,31 @@
         "pkg:npm/%40isaacs/fs-minipass@4.0.1",
         "pkg:npm/%40malept/cross-spawn-promise@2.0.0",
         "pkg:npm/%40malept/flatpak-bundler@0.4.0",
-        "pkg:npm/%40modelcontextprotocol/client@2.1.0",
-        "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+        "pkg:npm/%40modelcontextprotocol/client@2.3.1",
+        "pkg:npm/%40modelcontextprotocol/core@2.3.1",
         "pkg:npm/%40noble/hashes@1.4.0",
         "pkg:npm/%40noble/hashes@2.4.0",
-        "pkg:npm/%40oxc-project/types@0.150.0",
+        "pkg:npm/%40oxc-project/types@0.155.0",
         "pkg:npm/%40peculiar/asn1-schema@2.9.4",
         "pkg:npm/%40peculiar/json-schema@1.1.12",
         "pkg:npm/%40peculiar/utils@2.0.3",
         "pkg:npm/%40peculiar/webcrypto@1.7.1",
-        "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.9",
-        "pkg:npm/%40rolldown/binding-android-arm64@1.2.9",
-        "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.9",
-        "pkg:npm/%40rolldown/binding-darwin-x64@1.2.9",
-        "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.9",
-        "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.9",
-        "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.9",
-        "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.9",
-        "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.9",
-        "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.9",
-        "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.9",
-        "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.9",
-        "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.9",
-        "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.9",
-        "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.9",
+        "pkg:npm/%40playwright/mcp@0.0.82",
+        "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.15",
+        "pkg:npm/%40rolldown/binding-android-arm64@1.2.15",
+        "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.15",
+        "pkg:npm/%40rolldown/binding-darwin-x64@1.2.15",
+        "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.15",
+        "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.15",
+        "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.15",
+        "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.15",
+        "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.15",
+        "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.15",
+        "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.15",
+        "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.15",
+        "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.15",
+        "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.15",
+        "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.15",
         "pkg:npm/%40rolldown/pluginutils@1.0.1",
         "pkg:npm/%40sindresorhus/is@4.6.0",
         "pkg:npm/%40szmarczak/http-timer@4.0.6",
@@ -13690,7 +13924,6 @@
         "pkg:npm/%40ubjs/node@0.31.0-3",
         "pkg:npm/%40vitejs/plugin-react@6.1.1",
         "pkg:npm/%40xmldom/xmldom@0.8.15",
-        "pkg:npm/%40xterm/headless@6.0.0",
         "pkg:npm/abbrev@4.0.0",
         "pkg:npm/adm-zip@0.6.1",
         "pkg:npm/agent-base@7.1.4",
@@ -13752,7 +13985,7 @@
         "pkg:npm/detect-node@2.1.0",
         "pkg:npm/dir-compare@4.2.0",
         "pkg:npm/dmg-builder@26.15.3",
-        "pkg:npm/dompurify@3.4.15",
+        "pkg:npm/dompurify@3.4.17",
         "pkg:npm/dotenv-expand@11.0.7",
         "pkg:npm/dotenv@16.6.1",
         "pkg:npm/dunder-proto@1.0.1",
@@ -13763,7 +13996,7 @@
         "pkg:npm/electron-publish@26.15.3",
         "pkg:npm/electron-updater@6.8.9",
         "pkg:npm/electron-winstaller@5.4.0",
-        "pkg:npm/electron@44.4.2",
+        "pkg:npm/electron@44.9.3",
         "pkg:npm/emoji-regex@8.0.0",
         "pkg:npm/end-of-stream@1.4.5",
         "pkg:npm/entities@4.5.0",
@@ -13815,7 +14048,7 @@
         "pkg:npm/highlight.js@11.11.1",
         "pkg:npm/hosted-git-info@4.1.0",
         "pkg:npm/html-parse-stringify@3.0.1",
-        "pkg:npm/http-cache-semantics@4.2.0",
+        "pkg:npm/http-cache-semantics@4.3.0",
         "pkg:npm/http-proxy-agent@7.0.2",
         "pkg:npm/http2-wrapper@1.0.3",
         "pkg:npm/https-proxy-agent@7.0.6",
@@ -13866,7 +14099,7 @@
         "pkg:npm/lru-cache@6.0.0",
         "pkg:npm/luxon@3.7.2",
         "pkg:npm/markdown-it-task-lists@2.1.1",
-        "pkg:npm/markdown-it@14.2.0",
+        "pkg:npm/markdown-it@14.3.3",
         "pkg:npm/matcher@3.0.0",
         "pkg:npm/math-intrinsics@1.1.0",
         "pkg:npm/mdurl@2.0.0",
@@ -13885,14 +14118,12 @@
         "pkg:npm/minizlib@3.1.0",
         "pkg:npm/mkdirp@0.5.6",
         "pkg:npm/ms@2.1.3",
-        "pkg:npm/nanoid@3.3.19",
+        "pkg:npm/nanoid@3.3.20",
         "pkg:npm/node-abi@4.35.0",
-        "pkg:npm/node-addon-api@7.1.1",
         "pkg:npm/node-addon-api@8.9.2",
         "pkg:npm/node-api-version@0.2.1",
         "pkg:npm/node-gyp@12.4.0",
         "pkg:npm/node-int64@0.4.0",
-        "pkg:npm/node-pty@1.1.0",
         "pkg:npm/nopt@9.0.0",
         "pkg:npm/normalize-url@6.1.0",
         "pkg:npm/object-assign@4.1.1",
@@ -13912,8 +14143,10 @@
         "pkg:npm/pinyin-pro@3.29.3",
         "pkg:npm/pkce-challenge@5.0.1",
         "pkg:npm/pkijs@3.4.0",
+        "pkg:npm/playwright-core@1.64.0-alpha-1789764292000",
+        "pkg:npm/playwright@1.64.0-alpha-1789764292000",
         "pkg:npm/plist@3.1.0",
-        "pkg:npm/postcss@8.5.28",
+        "pkg:npm/postcss@8.5.31",
         "pkg:npm/postject@1.0.0-alpha.6",
         "pkg:npm/proc-log@6.1.0",
         "pkg:npm/process-nextick-args@2.0.1",
@@ -13944,7 +14177,8 @@
         "pkg:npm/retry@0.12.0",
         "pkg:npm/rimraf@2.6.3",
         "pkg:npm/roarr@2.15.4",
-        "pkg:npm/rolldown@1.2.9",
+        "pkg:npm/rolldown@1.2.15",
+        "pkg:npm/rrule@2.8.1",
         "pkg:npm/safe-buffer@5.1.2",
         "pkg:npm/sanitize-filename@1.6.4",
         "pkg:npm/sax@1.6.1",
@@ -13960,7 +14194,8 @@
         "pkg:npm/shebang-regex@3.0.0",
         "pkg:npm/signal-exit@3.0.7",
         "pkg:npm/simple-update-notifier@2.0.0",
-        "pkg:npm/source-map-js@1.2.1",
+        "pkg:npm/smol-toml@1.9.0",
+        "pkg:npm/source-map-js@1.2.2",
         "pkg:npm/source-map-support@0.5.21",
         "pkg:npm/source-map@0.6.1",
         "pkg:npm/sprintf-js@1.1.3",
@@ -13994,7 +14229,7 @@
         "pkg:npm/use-sync-external-store@1.6.0",
         "pkg:npm/utf8-byte-length@1.0.5",
         "pkg:npm/util-deprecate@1.0.2",
-        "pkg:npm/vite@8.3.0",
+        "pkg:npm/vite@8.3.5",
         "pkg:npm/void-elements@3.1.0",
         "pkg:npm/webcrypto-core@1.9.2",
         "pkg:npm/which@2.0.2",
@@ -14011,38 +14246,43 @@
         "pkg:npm/yargs@17.7.3",
         "pkg:npm/yauzl@3.4.0",
         "pkg:npm/yocto-queue@0.1.0",
-        "pkg:npm/zod@4.6.5",
+        "pkg:npm/zod@4.6.7",
         "source:ChillKai",
+        "source:Codex inline visualization stylesheet",
+        "source:Codex native voice libraries",
         "source:Courier Prime",
         "source:Hermes Agent model settings",
         "source:LiquidGlass",
         "source:Lobe Icons provider logos",
         "source:Lucide / Feather icons",
+        "source:Memory MIME detection and AI option dependencies",
         "source:Multilingual E5-small bundled embedding model",
         "source:OpenAI Codex",
         "source:OpenClaw Control UI",
+        "source:OpenClaw memory core and bundled source dependencies",
         "source:PCRE2 (ripgrep embedded library)",
         "source:Source Han Serif CN",
+        "source:gogcli Gmail MCP runtime",
         "source:ripgrep (Codex bundled program)",
         "source:zsh (Codex bundled shell)"
       ]
     },
     {
-      "ref": "pkg:npm/%40modelcontextprotocol/client@2.1.0",
+      "ref": "pkg:npm/%40modelcontextprotocol/client@2.3.1",
       "dependsOn": [
-        "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+        "pkg:npm/%40modelcontextprotocol/core@2.3.1",
         "pkg:npm/cross-spawn@7.0.6",
         "pkg:npm/eventsource-parser@3.1.1",
         "pkg:npm/eventsource@3.0.7",
         "pkg:npm/jose@6.2.12",
         "pkg:npm/pkce-challenge@5.0.1",
-        "pkg:npm/zod@4.6.5"
+        "pkg:npm/zod@4.6.7"
       ]
     },
     {
-      "ref": "pkg:npm/%40modelcontextprotocol/core@2.1.0",
+      "ref": "pkg:npm/%40modelcontextprotocol/core@2.3.1",
       "dependsOn": [
-        "pkg:npm/zod@4.6.5"
+        "pkg:npm/zod@4.6.7"
       ]
     },
     {

@@ -1,0 +1,54 @@
+// Real member modal + model menu + translations/styles. All API data is isolated.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+const root = path.resolve(import.meta.dirname, '..'), require = createRequire(path.join(root, 'app/manage-ui/package.json'));
+const { build } = require('esbuild');
+const output = path.join(root, '.artifacts/group-member-model/ui'); fs.mkdirSync(output, { recursive: true });
+const temp = fs.realpathSync(fs.mkdtempSync('/private/tmp/shoggoth-group-model-ui-'));
+const fixture = String.raw`
+import React,{useState}from'react';import{createRoot}from'react-dom/client';import{MemoryRouter}from'react-router-dom';import{UiProvider}from'./app/manage-ui/src/components/ui';
+import Member from'./app/manage-ui/src/pages/GroupChatMemberModal';import i18n from'./app/manage-ui/src/i18n';
+import'./app/manage-ui/src/styles.css';import'./app/manage-ui/src/manage-skin.css';import'./app/manage-ui/src/pages/ChatPage.css';
+const state=window as any,params=new URLSearchParams(location.search),language=params.get('language')||'zh-CN',theme=params.get('theme')||'light';
+const pause=(ms=20)=>new Promise(r=>setTimeout(r,ms)),assert=(v:any,label:string)=>{if(!v)throw Error(label)},errors:any[]=[],writes:any[]=[];
+addEventListener('error',e=>errors.push(e.error?.stack||e.message));addEventListener('unhandledrejection',e=>errors.push(String(e.reason)));
+const until=async(read:()=>any,label:string)=>{const end=Date.now()+5000;while(!read()){assert(Date.now()<end,label);assert(!errors.length,errors.join('\n'));await pause()}};
+let offline=false,rejectWrite=false,holdWrite=false,release:any,current=true,applied=0,setView:any;
+let view:any={ownerScope:'fixture-owner',group:{id:'g',status:'active',rosterRevision:1},members:[{id:'a',groupId:'g',backendId:'shoggoth',agentId:'a',displayName:'Researcher',handle:'researcher',state:'active',modelSelection:null,card:null}]};
+state.fetch=async(url:any,init:any={})=>{const target=String(url);if(target.includes('/members/models')){if(offline)return new Response(JSON.stringify({error:'catalog offline'}),{status:503});return new Response(JSON.stringify({defaultModel:'Default A',models:[{id:'model-b',name:'Model B',provider:'codex'},{id:'model-b',name:'Model B alternate',provider:'other'}]}))}
+ if(target.includes('/members/role-history'))return new Response(JSON.stringify({snapshots:[],hasMore:false,nextCursor:null}));
+ if(target.includes('/members/role'))return new Response(JSON.stringify({ok:false,code:'source_unavailable'}));
+ if(target.includes('/members/model?')){const input=JSON.parse(init.body);writes.push(input);assert(input.memberId==='a','scoped member');assert(input.expectedRosterRevision===view.group.rosterRevision,'CAS revision');if(holdWrite)await new Promise(r=>release=r);if(rejectWrite)return new Response(JSON.stringify({error:'fixture save failed'}),{status:409});view={...view,group:{...view.group,rosterRevision:view.group.rosterRevision+1},members:[{...view.members[0],modelSelection:input.modelSelection}]};return new Response(JSON.stringify(view))}throw Error('unexpected request '+target)};
+await i18n.changeLanguage(language);document.documentElement.setAttribute('data-theme',theme);
+function App(){const[v,set]=useState(view);setView=set;return <MemoryRouter><UiProvider><Member groupId='g' member={v.members[0]} view={v} onView={next=>{applied++;set(next)}} isCurrentScope={()=>current} onClose={()=>{}}/></UiProvider></MemoryRouter>}
+createRoot(document.getElementById('root')!).render(<App/>);
+const section=()=>document.querySelector('[data-group-member-model]')!,trigger=()=>section().querySelector('.chat-pill--model')as HTMLButtonElement;
+const choose=async(provider='codex')=>{trigger().click();await pause();await until(()=>section().getAttribute('aria-busy')==='false'&&document.querySelectorAll('.model-menu__item').length>=3,'model menu');const rows=[...document.querySelectorAll<HTMLButtonElement>('.model-menu__item')];const item=rows.find(item=>item.textContent?.includes(provider==='codex'?'Model B':'Model B alternate')&&!item.textContent?.includes(provider==='codex'?'alternate':'never'));assert(item,'model choice');item!.click();await pause()};
+state.showDefault=async()=>{await until(()=>trigger()&&!section().textContent?.includes(i18n.t('groupChat.model.loading')),'catalog loaded');assert(trigger().textContent?.includes(i18n.t('groupChat.model.follow')),'inherit by default');assert(section().textContent?.includes('Default A'),'current Agent default visible');assert(!section().textContent?.includes('groupChat.'),'translations resolved');assert(!writes.length,'opening dialog does not write');assert(document.documentElement.scrollWidth<=innerWidth+1,'no horizontal overflow');return true};
+state.showMenu=async()=>{trigger().click();await pause();await until(()=>section().getAttribute('aria-busy')==='false'&&document.querySelectorAll('.model-menu__item').length>=3,'loaded menu');const box=document.querySelector('.model-menu--catalog')!.getBoundingClientRect();assert(box.left>=0&&box.right<=innerWidth+1&&box.top>=0&&box.bottom<=innerHeight+1,'model menu remains in viewport');return true};state.closeMenu=async()=>{document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await pause()};
+state.exercise=async()=>{await choose();await until(()=>trigger().textContent?.includes('Model B')&&!trigger().disabled,'selection saved');assert(writes[0].modelSelection.provider==='codex','provider identity preserved');assert(applied===1,'authoritative view applied');
+ rejectWrite=true;await choose('other');await until(()=>section().textContent?.includes('fixture save failed'),'failed save visible');assert(trigger().textContent?.trim()==='Model B','failed save keeps prior selection');rejectWrite=false;
+ offline=true;trigger().click();await until(()=>document.querySelector('.model-menu--catalog'),'menu open');await until(()=>section().textContent?.includes(i18n.t('groupChat.model.loadError')),'offline catalog shown');document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+ // A successful policy save refreshes the catalog, which now fails; restoring inheritance must remain usable.
+ await pause();
+ const reset=[...section().querySelectorAll<HTMLButtonElement>('button')].find(b=>!b.classList.contains('chat-pill--model')&&b.textContent===i18n.t('groupChat.model.follow'));assert(reset&&!reset.disabled,'reset available offline');reset!.click();await until(()=>trigger().textContent?.includes(i18n.t('groupChat.model.follow'))&&!trigger().disabled,'inheritance restored');assert(writes.at(-1).modelSelection===null,'reset stores null');await until(()=>section().textContent?.includes(i18n.t('groupChat.model.loadError')),'catalog failure visible');
+ offline=false;const retry=[...section().querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===i18n.t('groupChat.model.retry'));retry!.click();await until(()=>!section().textContent?.includes(i18n.t('groupChat.model.loadError'))&&!section().textContent?.includes(i18n.t('groupChat.model.loading')),'retry loads catalog');
+ holdWrite=true;await choose();await until(()=>release,'pending save');const before=applied;current=false;release();await pause(100);assert(applied===before,'late owner response ignored');assert(!errors.length,errors.join('\n'));return{language,theme,writes:writes.length,applied,passed:true};};
+state.ready=true;`;
+try {
+  await build({ stdin: { contents: fixture, loader: 'tsx', resolveDir: root }, bundle: true, format: 'esm', jsx: 'automatic',
+    nodePaths: [path.join(root, 'app/manage-ui/node_modules')], loader: { '.woff2':'dataurl','.svg':'dataurl','.webp':'dataurl' },
+    define: { 'process.env.NODE_ENV':'"production"' }, outfile: path.join(temp, 'fixture.js'), logLevel: 'silent' });
+  fs.writeFileSync(path.join(temp, 'index.html'), '<link rel="stylesheet" href="fixture.css"><div id="root" class="chat-shell"></div><script type="module" src="fixture.js"></script>');
+  fs.writeFileSync(path.join(temp, 'main.cjs'), `const{app,BrowserWindow,session}=require('electron'),fs=require('node:fs');app.setPath('userData',${JSON.stringify(path.join(temp,'profile'))});app.setPath('sessionData',${JSON.stringify(path.join(temp,'sessions'))});
+app.whenReady().then(async()=>{const outside=[];session.defaultSession.webRequest.onBeforeRequest((d,cb)=>{if(/^https?:|^wss?:/.test(d.url)){outside.push(d.url);cb({cancel:true})}else cb({cancel:false})});const w=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});const results=[];let ok=false;try{for(const width of[1200,390])for(const language of['zh-CN','en'])for(const theme of['light','dark']){w.setSize(width,950);await w.loadFile(${JSON.stringify(path.join(temp,'index.html'))},{query:{language,theme}});await w.webContents.executeJavaScript('new Promise(async r=>{while(!window.ready)await new Promise(r=>setTimeout(r,10));r(true)})');await w.webContents.executeJavaScript('window.showDefault()');fs.writeFileSync(${JSON.stringify(output)}+'/default-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());await w.webContents.executeJavaScript('window.showMenu()');fs.writeFileSync(${JSON.stringify(output)}+'/menu-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());await w.webContents.executeJavaScript('window.closeMenu()');const r=await w.webContents.executeJavaScript('window.exercise()');results.push({width,...r});console.log(JSON.stringify({width,...r}))}if(outside.length)throw Error('outside network used');fs.writeFileSync(${JSON.stringify(path.join(output,'results.json'))},JSON.stringify({results,outside,completed:true},null,2));ok=true}catch(e){console.error(e.stack||e);fs.writeFileSync(${JSON.stringify(path.join(output,'failed.png'))},(await w.webContents.capturePage()).toPNG())}finally{w.destroy();if(ok)app.quit();else app.exit(1)}});`);
+  const child = spawn(require('electron'), [path.join(temp,'main.cjs')], { env: { PATH:process.env.PATH, HOME:path.join(temp,'home'), TMPDIR:temp, ELECTRON_DISABLE_SECURITY_WARNINGS:'true' }, stdio:['ignore','pipe','pipe'] });
+  child.stdout.on('data',data=>process.stdout.write(data));child.stderr.on('data',data=>process.stderr.write(data));
+  const timer=setTimeout(()=>child.kill('SIGTERM'),60000);
+  const result=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}))});clearTimeout(timer);
+  assert.deepEqual(result,{code:0,signal:null});assert.equal(JSON.parse(fs.readFileSync(path.join(output,'results.json'))).results.length,8);
+  console.log('PASS group member models: eight real Electron dialog scenarios');
+} finally { fs.rmSync(temp,{recursive:true,force:true}); }

@@ -107,7 +107,7 @@ function currentRun(overrides = {}) {
 function codexThreadReadFixture(items, overrides = {}) {
   return {
     thread: {
-      cliVersion: "0.149.0",
+      cliVersion: "0.159.2",
       cwd: "/tmp/shoggoth-bound",
       ephemeral: false,
       id: "thread-bound",
@@ -245,7 +245,7 @@ function fixture(overrides = {}) {
     productStore,
     chatSessionStore,
     coordinator,
-    ...(overrides.transcriptStore ? { transcriptStore: overrides.transcriptStore } : {}),
+    ...(overrides.transcriptStore ? { transcriptStore: { displayEvent: (_profile, _session, event) => event, ...overrides.transcriptStore } } : {}),
     cursorSecret: Buffer.alloc(32, 11),
     now: () => 1000,
     randomUUID: () => "44444444-4444-4444-8444-444444444444",
@@ -701,6 +701,35 @@ test("transcript tool result without summary stays empty instead of repeating co
   });
 });
 
+test("response metadata is frozen on the final text of its run across history pages and controller restart", async () => {
+  const metadata = { models: ["actual-model"], modelSource: "reported", usage: { inputTokens: 2000, outputTokens: 32 },
+    context: { usedTokens: 1500, windowTokens: 10000, quality: "estimated" } };
+  const events = [
+    ["user", "question", "run-a", {}], ["assistant", "progress", "run-a", { phase: "commentary" }],
+    ["assistant", "final answer", "run-a", { phase: "final_answer" }],
+    ["status", "", "run-a", { transcriptType: "terminal", responseMetadata: metadata }],
+    ["assistant", "later turn", "run-b", { phase: "final_answer" }],
+    ["assistant", "commentary without a final reply", "run-c", { phase: "commentary" }],
+    ["status", "", "run-c", { transcriptType: "terminal", responseMetadata: metadata }],
+  ].map(([kind, text, runId, content], index) => ({ id: `metadata-event-${index}`, seq: index + 1, kind, runId,
+    content: { text, ...content }, occurredAt: 100 + index, contextExcluded: false }));
+  const transcriptStore = { ensureSession() {}, importHistoryItems() {}, getSessionDerivedTitle() { return null; },
+    listEvents: () => structuredClone(events) };
+  for (let restart = 0; restart < 2; restart++) {
+    const { controller } = fixture({ transcriptStore }); await controller.open();
+    const all = []; let cursor = null;
+    do {
+      const page = await controller.handle("chat.history", { sessionKey: SESSION_KEY, cursor, limit: 1 }, "metadata-history");
+      all.push(...page.messages); cursor = page.nextCursor;
+    } while (cursor);
+    const decorated = all.filter(item => item.payload.message.responseMetadata);
+    assert.equal(decorated.length, 1);
+    assert.equal(decorated[0].payload.message.content[0].text, "final answer");
+    assert.deepEqual(decorated[0].payload.message.responseMetadata, metadata);
+    await controller.close();
+  }
+});
+
 test("transcript history 只给 federation 用户输入附加 inter-session provenance", async () => {
   const transcriptStore = {
     ensureSession() {},
@@ -861,7 +890,7 @@ test("session.create 验证 enabled profile，null workspace 使用 defaultCwd �
   assert.deepEqual(fs.readdirSync(victim), []);
 });
 
-test("session model 仅在空闲时切换到账号授权目录中的模型", async () => {
+test("session model 在运行中也可保存下一轮使用的授权模型", async () => {
   const pages = [];
   const available = fixture({
     runs: [],
@@ -901,16 +930,15 @@ test("session model 仅在空闲时切换到账号授权目录中的模型", asy
 
   const busy = fixture({ runs: [run({ status: "running", startedAt: 101 })] });
   await busy.controller.open();
-  await assert.rejects(
-    busy.controller.handle("chat.session.model.set", {
-      sessionKey: SESSION_KEY, model: "gpt-5.6-terra",
-    }, "model-busy"),
-    (error) => error.code === "THREAD_ACTIVE_TURN_CONFLICT",
-  );
-  assert.deepEqual(busy.calls.models, []);
+  const futureModel = await busy.controller.handle("chat.session.model.set", {
+    sessionKey: SESSION_KEY, model: "gpt-5.6-terra",
+  }, "model-busy");
+  assert.equal(futureModel.session.modelOverride, "gpt-5.6-terra");
+  assert.equal(busy.calls.models.length, 1);
+  assert.equal(busy.calls.send.length, 0, "changing defaults does not start another run");
 });
 
-test("session permission 只接受 Runtime 目录中的模式并在忙碌时拒绝", async () => {
+test("session permission 只接受 Runtime 目录中的模式并允许保存下一轮权限", async () => {
   const available = fixture({ runs: [] });
   await available.controller.open();
   const result = await available.controller.handle("chat.session.permission.set", {
@@ -928,13 +956,11 @@ test("session permission 只接受 Runtime 目录中的模式并在忙碌时拒�
 
   const busy = fixture({ runs: [run({ status: "running", startedAt: 101 })] });
   await busy.controller.open();
-  await assert.rejects(
-    busy.controller.handle("chat.session.permission.set", {
-      sessionKey: SESSION_KEY, mode: "ask",
-    }, "permission-busy"),
-    (error) => error.code === "THREAD_ACTIVE_TURN_CONFLICT",
-  );
-  assert.deepEqual(busy.calls.permissions, []);
+  const futurePermission = await busy.controller.handle("chat.session.permission.set", {
+    sessionKey: SESSION_KEY, mode: "ask",
+  }, "permission-busy");
+  assert.equal(futurePermission.session.permissionMode, "ask");
+  assert.equal(busy.calls.permissions.length, 1);
 });
 
 test("ensureDefaultSessions 只为 enabled 且零 session 的 profile 创建一次", async () => {
@@ -1270,6 +1296,19 @@ test("原生命令目录与执行按当前 Session 的 Runtime binding、workspa
   })));
   await value.controller.close();
   value.chatSessionStore.close();
+});
+
+test("未启用新记忆 owner 时同名 active-memory 命令仍由 Runtime 执行", async () => {
+  const value = boundControllerFixture({ host: { capabilities: { "commands.execute": true },
+    async commandExecute(input) {
+      assert.equal(input.text, "/active-memory off");
+      return { kind: "output", text: "Runtime-owned command", warning: null };
+    },
+  } });
+  await value.controller.open();
+  const result = await value.controller.handle("chat.command.exec", { sessionKey: value.bound.sessionKey, text: "/active-memory off" });
+  assert.equal(result.text, "Runtime-owned command");
+  await value.controller.close(); value.chatSessionStore.close();
 });
 
 test("Runtime 明示不支持物理删除时拒绝且不写入 delete_pending", async () => {
@@ -1705,7 +1744,7 @@ test("真实 Socket 暴露严格 usage series/breakdown 且 Service 拥有其生
   await service.start();
   try {
     ensureBuiltinCliAgentProfiles(service.productStore, new Set(Object.values(
-      require("../app/agent-service/runtime-account").DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME)));
+      require("../app/agent-service/runtime-account").DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME)), { isSeeded: () => false, markSeeded() {} });
     service.tokenUsageStore.record({
       runId: "fixture-run-usage", runtime: "codex",
       runtimeAccountId: service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).runtimeAccountId,
@@ -1838,6 +1877,9 @@ test("真实 Socket 严格分派 Agent Harness Definition/Memory/Transcript/Tool
   const { service, paths } = fixtureValue;
   await service.start();
   try {
+    const initialMemories = await ipc(paths, "harness.memory.list", {
+      profileId: DEFAULT_AGENT_PROFILE_ID, status: null, scope: null, cursor: 0, limit: 50,
+    });
     const meta = await ipc(paths, "harness.definition.meta", {
       profileId: DEFAULT_AGENT_PROFILE_ID,
     });
@@ -1859,7 +1901,8 @@ test("真实 Socket 严格分派 Agent Harness Definition/Memory/Transcript/Tool
     const memories = await ipc(paths, "harness.memory.list", {
       profileId: DEFAULT_AGENT_PROFILE_ID, status: null, scope: null, cursor: 0, limit: 50,
     });
-    assert.equal(memories.revision, 0);
+    // Startup can seed policy records. Editing SOUL must retain that memory revision.
+    assert.equal(memories.revision, initialMemories.revision);
     const sessions = await ipc(paths, "harness.transcript.sessions", {
       profileId: DEFAULT_AGENT_PROFILE_ID, cursor: 0, limit: 50,
     });

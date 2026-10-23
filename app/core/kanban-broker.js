@@ -53,9 +53,10 @@ function attachKanbanBroker(httpServer, { registry } = {}) {
 
   function bridge(client, req) {
     const hermes = registry?.getBackend?.("hermes"); // 走 registry 的「已禁用后端」门，禁用即视作不存在
-    const target = hermes && typeof hermes.getKanbanEventsTarget === "function"
-      ? hermes.getKanbanEventsTarget()
-      : null;
+    let target;
+    try { target = hermes && typeof hermes.getKanbanEventsTarget === "function"
+      ? hermes.getKanbanEventsTarget() : null; }
+    catch { target = null; }
     if (!target || !target.wsUrl) {
       try { client.close(1011, "kanban events unavailable"); } catch { /* ignore */ }
       return;
@@ -64,19 +65,29 @@ function attachKanbanBroker(httpServer, { registry } = {}) {
     let board = "";
     try { board = new URL(req.url, "http://127.0.0.1").searchParams.get("board") || ""; } catch { /* ignore */ }
 
-    const q = new URLSearchParams({ since: "0" });
-    if (target.token) q.set("token", target.token);
-    if (board) q.set("board", board);
-
+    const assertCurrent = () => {
+      if (registry?.getBackend?.("hermes") !== hermes
+        || (target.assertCurrent && target.assertCurrent() !== true)) throw new Error("Hermes event stream retired");
+    };
     let upstream;
+    const retire = () => {
+      try { upstream?.terminate(); } catch { /* already closed */ }
+      try { client.close(1011, "kanban events unavailable"); } catch { /* ignore */ }
+    };
     try {
-      upstream = new WebSocket(`${target.wsUrl}?${q.toString()}`);
-    } catch {
-      try { client.close(1011, "upstream connect failed"); } catch { /* ignore */ }
-      return;
-    }
+      assertCurrent();
+      const url = new URL(target.wsUrl);
+      url.searchParams.set("since", "0");
+      if (target.token) url.searchParams.set("token", target.token);
+      if (board) url.searchParams.set("board", board);
+      const outgoing = url.toString();
+      assertCurrent();
+      upstream = new WebSocket(outgoing);
+    } catch { retire(); return; }
 
+    upstream.on("open", () => { try { assertCurrent(); } catch { retire(); } });
     upstream.on("message", (data) => {
+      try { assertCurrent(); } catch { retire(); return; }
       if (client.readyState === WebSocket.OPEN) {
         try { client.send(data.toString()); } catch { /* ignore */ }
       }

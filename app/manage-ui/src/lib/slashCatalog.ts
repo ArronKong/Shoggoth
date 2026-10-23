@@ -23,6 +23,7 @@ export function mapServerSlashCommand(command: SlashCatalogResponse["commands"][
       .filter((alias) => /^[a-z0-9_][a-z0-9._:-]*$/u.test(alias) && alias !== name))],
     source: command.source,
     execution: command.execution,
+    ...(command.allowWhileRunning === true ? { allowWhileRunning: true } : {}),
   };
 }
 

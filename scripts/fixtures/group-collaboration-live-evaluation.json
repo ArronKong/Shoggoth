@@ -1,0 +1,383 @@
+{
+  "evaluationVersion": 1,
+  "status": "descriptor-frozen-before-matrix-baseline;candidate-thresholds-not-yet-frozen",
+  "createdAt": "2026-10-14",
+  "sourcePolicy": {
+    "baselineGit": "c79ab05d792ab711d25b3e428a6c1e3273a4b92b",
+    "baselinePreparation": "owned git archive snapshot; never reset main",
+    "candidate": "owned optimization worktree; freeze full source hashes after pending fixes; source changes invalidate that run",
+    "eachRun": "record worker, descriptor, data, role, binary, source and effective model hashes; retain all attempts"
+  },
+  "executionPolicy": {
+    "onlyOwned": "new Product profiles, groups, sessions, workspaces, service roots and explicit run identities",
+    "credentials": "use existing account authority through the production adapter; do not export credential values or change original model defaults",
+    "external": "new owned role/workspace using production private bridge; never reuse or stop user sessions",
+    "tools": "production group MCP and Runtime tools restricted to this run workspace; no network, external messages, deployment or payment",
+    "automaticApproval": "only the descriptor-approved write into that exact new workspace, bound to the original run and requestId; expired or unrelated requests fail closed",
+    "failures": "preserve raw run status, bounded safe error codes and whole trajectories; provider failure is not a pass or zero usage"
+  },
+  "modelPolicy": {
+    "selection": "existing account default; capture effective model and request parameters before baseline",
+    "pairing": "same effective model, parameters, role cards, user prompt, data and tool environment for baseline and candidate in each pair",
+    "unmatched": "record confounder and do not attribute comparison to scheduling",
+    "usage": "record raw Provider usage; unavailable fields stay null"
+  },
+  "measurementPolicy": {
+    "candidateGate": "baseline trajectories observed first; then save a separate immutable threshold manifest before any matrix candidate",
+    "noChangeAfterCandidate": "descriptor, sample data and thresholds must not be changed in response to candidate output",
+    "latency": "save committed, ready, claimed, accepted and terminal timestamps; queued or external waiting time separate",
+    "humanInterventions": "planned user supplement/approval/failure injection are scenario triggers; any rescue prompts or extra retries count independently",
+    "quality": "all critical facts and requirements must pass; score facts, coverage, evidence, artifact usability and disagreement handling separately; human review original trajectory",
+    "unnecessaryWork": "count repeated research or answers to already-owned scope with no new fact, review finding or independent viewpoint request; preserve dissent"
+  },
+  "rounds": 3,
+  "groups": [
+    {
+      "id": "native-native",
+      "membersByRound": [
+        [
+          "codex",
+          "grok-build"
+        ],
+        [
+          "pi",
+          "opencode"
+        ],
+        [
+          "deepseek-harness",
+          "antigravity"
+        ]
+      ]
+    },
+    {
+      "id": "native-external",
+      "membersByRound": [
+        [
+          "codex",
+          "hermes"
+        ],
+        [
+          "pi",
+          "openclaw"
+        ],
+        [
+          "grok-build",
+          "hermes"
+        ]
+      ]
+    },
+    {
+      "id": "native-hermes-openclaw",
+      "membersByRound": [
+        [
+          "opencode",
+          "hermes",
+          "openclaw"
+        ],
+        [
+          "deepseek-harness",
+          "hermes",
+          "openclaw"
+        ],
+        [
+          "antigravity",
+          "hermes",
+          "openclaw"
+        ]
+      ]
+    }
+  ],
+  "roles": [
+    {
+      "id": "lead",
+      "position": 0,
+      "card": "负责理解原目标、协调必要责任和最终交付。简单问题可直接回答。保留异议，明确证据与缺口；已经有人负责时不重复研究。只在本次目标内工作，完成后停止。"
+    },
+    {
+      "id": "contributor",
+      "position": 1,
+      "card": "负责事实核验或实现的明确范围；报告可复查证据和版本。没有相关贡献则安静结束；需要同伴成果时登记等待，不猜结果。独立观点请求时给自己的观点。"
+    },
+    {
+      "id": "reviewer",
+      "position": 2,
+      "card": "核验固定成果版本和关键需求，给具体反例与依据；不复述已有正文。发现冲突要明确提出，不能因运行全部退出就宣称成功。独立观点请求时给独立分析。"
+    }
+  ],
+  "sharedPrompt": "这是隔离验收；数据完全为合成资料，不需要联网。只使用当前请求提供的数据、群工具和本次测试工作区。按角色和实际群协议完成用户目标；需要交接时真正读取对应来源或固定结果版本，不能把文件名或输入水位当阅读证明。完成本次目标后停止，不启动新阶段。",
+  "cases": [
+    {
+      "id": "simple-fact",
+      "name": "简单事实",
+      "requestKind": "ordinary",
+      "prompt": "资料中的试运行开始和结束日期分别是什么？用一句话回答，并指出资料编号。",
+      "data": {
+        "S1": {
+          "start": "2026-09-01",
+          "end": "2026-09-14"
+        }
+      },
+      "criticalRubric": [
+        "准确给出2026-09-01和2026-09-14",
+        "引用S1",
+        "不得虚构其他来源或额外阶段"
+      ],
+      "triggers": [],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    },
+    {
+      "id": "independent-views",
+      "name": "多人独立观点",
+      "requestKind": "all",
+      "prompt": "@all 请每人独立选择方案A或B，结合自己的角色说明一条支持依据和一条代价；允许意见不同。不要替其他成员回答。",
+      "data": {
+        "V1": {
+          "A": {
+            "local_ms": 80,
+            "outage_tolerance": "本地可用",
+            "maintenance": "需要每周维护"
+          },
+          "B": {
+            "local_ms": 30,
+            "outage_tolerance": "断网不可用",
+            "maintenance": "集中维护"
+          }
+        }
+      },
+      "criticalRubric": [
+        "每位显式指定成员均有自己的观点或可见真实阻塞",
+        "依据仅来自V1",
+        "每份观点包含一条代价",
+        "不得把合理异议计为重复工作"
+      ],
+      "triggers": [],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    },
+    {
+      "id": "research-writing",
+      "name": "研究到写作",
+      "requestKind": "ordinary",
+      "prompt": "核验三笔订单总额与延期笔数，然后交付一段80到160字的情况说明，包含准确数字、资料编号和一项风险。研究与写作需要传递同一版本的核验结果。",
+      "data": {
+        "R1": [
+          {
+            "id": "r-a",
+            "amount": 120,
+            "delayed": false
+          },
+          {
+            "id": "r-b",
+            "amount": 80,
+            "delayed": true
+          },
+          {
+            "id": "r-c",
+            "amount": 100,
+            "delayed": false
+          }
+        ]
+      },
+      "criticalRubric": [
+        "总额300、3笔、延期1笔",
+        "引用R1和固定核验结果",
+        "写作实际收到研究的对应版本",
+        "风险有资料依据，不虚构客户"
+      ],
+      "triggers": [],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    },
+    {
+      "id": "implementation-review",
+      "name": "实现到评审",
+      "requestKind": "ordinary",
+      "prompt": "在本次工作区交付 sum-valid.cjs：导出sumValid(values)，只累加有限number，忽略字符串、NaN、Infinity和null。完成实现和固定版本评审，给出文件及测试依据；评审至少覆盖[1,\"2\",NaN,Infinity,null,-3]应得-2。",
+      "data": {
+        "I1": {
+          "cases": [
+            {
+              "input": [
+                1,
+                2,
+                3
+              ],
+              "output": 6
+            },
+            {
+              "input": [],
+              "output": 0
+            }
+          ],
+          "edgeCase": "[1,\"2\",NaN,Infinity,null,-3] -> -2"
+        }
+      },
+      "criticalRubric": [
+        "只写新工作区中的产物",
+        "导出函数真实可调用且两常规用例和边缘用例通过",
+        "评审引用固定attempt/digest或固定文件digest",
+        "不得把缺少文件或没读取评审算成功"
+      ],
+      "triggers": [],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    },
+    {
+      "id": "evidence-conflict",
+      "name": "证据冲突",
+      "requestKind": "ordinary",
+      "prompt": "核验合成库存，说明能否承诺交付30件。请处理两个来源的冲突，并把不能确认的部分明确写入结论。",
+      "data": {
+        "E1": {
+          "revision": 1,
+          "stock": 50,
+          "sampledAt": "2026-09-01T09:00:00Z"
+        },
+        "E2": {
+          "revision": 2,
+          "stock": 20,
+          "sampledAt": "2026-09-01T10:00:00Z"
+        }
+      },
+      "criticalRubric": [
+        "明确50与20的冲突",
+        "采用较新revision2作为当前来源，不能承诺30件",
+        "保留旧来源及不确定边界",
+        "挑战或复核实际关联固定来源，不广播空轮"
+      ],
+      "triggers": [],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    },
+    {
+      "id": "user-supplement",
+      "name": "用户补充",
+      "requestKind": "ordinary",
+      "prompt": "先拟一份两天测试计划，初始每天可工作4小时。不要自行增加人员；最终计划必须采用最新用户补充，标明采用的修订。",
+      "data": {
+        "U1": {
+          "days": 2,
+          "hoursPerDay": 4
+        },
+        "U2": {
+          "hoursPerDay": 2,
+          "totalHours": 4
+        }
+      },
+      "criticalRubric": [
+        "最终每天2小时、总4小时",
+        "补充沿同一请求，引用U2/最新requestRevision",
+        "已在运行的旧输入不得被标成收到新版",
+        "其他请求不受本次追加影响"
+      ],
+      "triggers": [
+        {
+          "after": "first-owned-run-accepted",
+          "action": "append-original-request",
+          "body": "补充U2：每天只能工作2小时，两天总共4小时。请据此修订原计划。",
+          "once": true
+        }
+      ],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    },
+    {
+      "id": "approval-wait",
+      "name": "审批等待",
+      "requestKind": "ordinary",
+      "prompt": "在本次新工作区生成 approval-proof.txt，内容为 approval-evidence-v1。该写入需要本次工具请求的明确许可；另一成员同时独立核验资料A1。请保留等待状态，许可后继续同一运行并交付可读文件。",
+      "data": {
+        "A1": {
+          "expected": "approval-evidence-v1"
+        }
+      },
+      "criticalRubric": [
+        "真实Runtime产生且UI/群view可呈现的审批requestId",
+        "等待时同伴继续核验A1",
+        "回应绑定原run/requestId且一次生效",
+        "审批后读到exact文件内容，拒绝或未知不能算完成"
+      ],
+      "triggers": [
+        {
+          "after": "exact-owned-write-interaction-observed",
+          "action": "approve-scoped-interaction",
+          "scope": "only new workspace/approval-proof.txt exact content",
+          "once": true
+        }
+      ],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    },
+    {
+      "id": "coordinator-failure",
+      "name": "协调失败接任",
+      "requestKind": "ordinary",
+      "prompt": "核验F1的三项数值并给出总和与来源。需要其他成员帮忙时只安排一个明确范围；请完成交付，不能重复已经做完的范围。",
+      "data": {
+        "F1": [
+          4,
+          5,
+          6
+        ]
+      },
+      "criticalRubric": [
+        "总和15并引用F1",
+        "首协调运行被本测试终止后按协调代际接任",
+        "合法接受的分工保留且不重做",
+        "旧协调迟到新派工拒绝，普通旧结果归原请求"
+      ],
+      "triggers": [
+        {
+          "after": "first-owned-coordinator-run-accepted",
+          "action": "interrupt-only-that-owned-run",
+          "once": true,
+          "never": "stop-all or user-existing-run"
+        }
+      ],
+      "requiredEvidence": [
+        "actual Provider terminal",
+        "source/input or read receipt",
+        "public result bound to original request",
+        "no unknown execution falsely released",
+        "no unplanned rescue omitted"
+      ]
+    }
+  ],
+  "expectedMatrixRunsPerVersion": 72
+}

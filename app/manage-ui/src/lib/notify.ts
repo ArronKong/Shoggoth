@@ -8,13 +8,14 @@
 //
 // Kept framework-free (no React) so the logic is testable in isolation.
 
-export type NotifyCategory = "chat" | "cron" | "task";
+export type NotifyCategory = "chat" | "cron" | "task" | "proactive";
 
 export type TaskNotificationTarget = {
   kind: "task"; backendId: string; taskId: string; boardId?: string; sessionKey?: string;
 };
 export type NotifyTarget = string | TaskNotificationTarget
-  | { kind: "cron"; backendId: string; jobId: string };
+  | { kind: "cron"; backendId: string; jobId: string }
+  | { kind: "chat"; backendId: string; agentId: string; sessionKey: string };
 
 export interface NotifyPayload {
   category: NotifyCategory;
@@ -88,8 +89,9 @@ export function snippet(s: string, max = 120): string {
 // their own apps.
 export function chatNotificationFor(message: unknown, sessionKey: string): NotifyPayload | null {
   if (message && typeof message === "object" && "shoggoth" in message) {
-    const source = (message.shoggoth as { source?: string } | null)?.source;
-    if (source === "cron" || source === "inspiration") return null;
+    const meta = message.shoggoth as { source?: string; notificationCategory?: string; proactiveNotice?: unknown } | null;
+    const source = meta?.source;
+    if (source === "cron" || source === "inspiration" || source === "proactive" || meta?.notificationCategory === "proactive" || meta?.proactiveNotice) return null;
   }
   if (sessionTailKind(sessionKey) !== "chat") return null;
   const m = message as { stopReason?: string; isError?: boolean } | null;

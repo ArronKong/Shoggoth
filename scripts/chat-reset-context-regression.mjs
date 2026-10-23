@@ -23,6 +23,9 @@ function fixture({ deny = false, switchDuringRequest = false, native = false, he
   const calls = [], toasts = [], archive = { key, msgs: ["old archive"] };
   const context = {
     activeKeyRef: { current: key },
+    localSlashHistoryRef: { current: { forget: k => calls.push(["forget-slash", k]) } },
+    optimisticHistoryRef: { current: { forget: k => calls.push(["forget-optimistic", k]) } },
+    runStatusBySessionRef: { current: new Map() },
     chatBackendDescriptors: new Map([["fixture", { surfaces: { agentHarness: native } }]]),
     backendOfSession: () => "fixture",
     agentOf: () => hermes ? "hermes-default" : "main",
@@ -60,6 +63,7 @@ function fixture({ deny = false, switchDuringRequest = false, native = false, he
   const f = fixture();
   assert.equal(await f.context.dispatch({ name: "reset" }, "", "/reset"), true);
   assert.deepEqual(f.calls[0], ["sessions.reset", { key, reason: "reset" }]);
+  assert.ok(f.calls.some(([op, k]) => op === "forget-slash" && k === key));
   assert.ok(f.calls.some(([op, k]) => op === "history" && k === key));
   assert.ok(f.calls.some(([op]) => op === "sessions.list"));
   assert.equal(f.calls.some(([op]) => op === "chat.send"), false, "bare desktop reset is not a channel message");

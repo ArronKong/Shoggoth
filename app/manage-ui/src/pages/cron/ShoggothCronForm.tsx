@@ -49,7 +49,7 @@ export function emptyNativeCronDraft(backendId: string, agentId = ""): NativeCro
     misfirePolicy: "latest",
     maxCatchUp: 1,
     overlapPolicy: "skip",
-    threadPolicy: "new",
+    threadPolicy: "continue",
     threadId: "",
   };
 }
@@ -58,7 +58,7 @@ export function nativeCronDraftFromJob(job: UnifiedCronJob): NativeCronDraft {
   const base = emptyNativeCronDraft(job.backendId, job.agentId || "");
   const raw = job.backendDetails?.raw;
   const schedule = job.schedule;
-  const threadPolicy = raw?.threadPolicy === "continue" ? "continue" : "new";
+  const threadPolicy = raw?.threadPolicy === "new" ? "new" : "continue";
   return {
     ...base,
     name: job.name || "",

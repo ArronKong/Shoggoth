@@ -19,7 +19,7 @@ function fail() {
 class PluginToolCatalogRegistry {
   #slots = new Map();
 
-  async refresh({ installation, connection, client } = {}) {
+  async refresh({ installation, connection, client, assertCurrent = null } = {}) {
     const installationId = installation?.installationId;
     const releaseDigest = installation?.activeReleaseDigest ?? installation?.releaseDigest;
     const connectionId = connection?.connectionId;
@@ -29,7 +29,8 @@ class PluginToolCatalogRegistry {
       || connection.installationId !== installationId
       || connection.state !== "ready" || !connection.principalIdentity
       || !Number.isSafeInteger(connection.authRevision)
-      || connection.authRevision < 1 || typeof client?.listTools !== "function") fail();
+      || connection.authRevision < 1 || typeof client?.listTools !== "function"
+      || (assertCurrent !== null && typeof assertCurrent !== "function")) fail();
 
     const marker = { phase: "refreshing" };
     this.#slots.set(connectionId, marker);
@@ -45,12 +46,23 @@ class PluginToolCatalogRegistry {
       const entries = Object.freeze(catalog.entries.map((entry) => Object.freeze({
         ...entry, catalogRevision,
       })));
+      // There is no await between this final authority/generation checkpoint
+      // and publication. An old waiter must never publish into a new slot.
+      if (assertCurrent !== null) {
+        const current = assertCurrent();
+        if (current === false || (current && typeof current.then === "function")) fail();
+      }
+      if (this.#slots.get(connectionId) !== marker) fail();
       this.#slots.set(connectionId, {
         phase: "ready", installationId, releaseDigest, componentId,
         connectionId, principalIdentity: connection.principalIdentity,
         authRevision: connection.authRevision, endpointIdentity: connection.endpointIdentity,
         catalogRevision, portableCapabilities, referenceCoverage,
         entries: new Map(entries.map((entry) => [entry.toolIdentity, entry])),
+        schemas: new Map(tools.map(tool => [tool.name, structuredClone(tool.inputSchema)])),
+        // Remote annotations are untrusted: they may only narrow a default grant.
+        destructive: new Set(tools.filter(tool => tool?.annotations?.destructiveHint === true)
+          .map(tool => tool.name)),
       });
       return Object.freeze({ catalogRevision, generationDigest: catalog.generationDigest,
         entries, ...(portableCapabilities.length ? { portableCapabilities } : {}),
@@ -81,6 +93,16 @@ class PluginToolCatalogRegistry {
       ?.entries.get(toolIdentity) ?? null;
   }
 
+  destructiveToolNames(records) {
+    return new Set(this.#currentSlot(records)?.destructive ?? []);
+  }
+
+  inputSchema(records) {
+    const slot = this.#currentSlot(records);
+    const tool = slot?.entries.get(records.toolIdentity);
+    return tool ? slot.schemas.get(tool.downstreamName) ?? null : null;
+  }
+
   listForBinding({ installation, binding, connection } = {}) {
     const slot = this.#currentSlot({ installation, binding, connection });
     if (!slot) return null;
@@ -91,9 +113,12 @@ class PluginToolCatalogRegistry {
       ...(slot.referenceCoverage ? { referenceCoverage: slot.referenceCoverage } : {}) });
   }
 
-  invalidate(connectionId) {
-    if (!ID.test(connectionId)) fail();
-    this.#slots.delete(connectionId);
+  invalidate(connectionId, expectedCatalogRevision = null) {
+    if (!ID.test(connectionId) || (expectedCatalogRevision !== null
+      && (typeof expectedCatalogRevision !== "string" || expectedCatalogRevision.length > 128))) fail();
+    if (expectedCatalogRevision !== null
+      && this.#slots.get(connectionId)?.catalogRevision !== expectedCatalogRevision) return false;
+    return this.#slots.delete(connectionId);
   }
 
   clear() { this.#slots.clear(); }

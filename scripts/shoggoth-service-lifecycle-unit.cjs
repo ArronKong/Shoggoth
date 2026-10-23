@@ -8,6 +8,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { AccountAuthManager } = require("../app/agent-service/account-auth-manager");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -18,6 +19,14 @@ function resolveElectronBinary() {
     }).trim();
     return require(path.join(path.dirname(path.resolve(ROOT, commonGitDir)), "node_modules", "electron"));
   }
+}
+
+function packagedResources(root) {
+  const resourcesPath = path.join(root, "Resources"), catalogRoot = path.join(resourcesPath, "bundled-plugins");
+  fs.mkdirSync(catalogRoot, { recursive: true });
+  fs.writeFileSync(path.join(catalogRoot, "catalog.json"), JSON.stringify({ version: 4,
+    batchDigest: crypto.createHash("sha256").update("[]").digest("hex"), packages: [] }));
+  return resourcesPath;
 }
 
 const tests = [];
@@ -491,6 +500,25 @@ test("Service 分派不会加载 UI 组合根", () => {
   assert.deepEqual(loaded, ["service"]);
 });
 
+test("真实 Service 模块加载通过角色隔离，不带入 OpenClaw/Hermes 产品模块", () => {
+  const script = [
+    'const bootstrap = require("./app/bootstrap-role")',
+    'bootstrap.assertServiceRoleIsolation()',
+    'require("./app/agent-service")',
+    'require("./app/agent-service/external-provider-credential-rpc")',
+    'require("./app/managed-openclaw-provider-credential-schema")',
+    'bootstrap.assertServiceRoleIsolation()',
+    'if (require.cache[require.resolve("./app/managed-openclaw-auth-profile-scope")]) throw Error("Service loaded the Main/Worker credential scope calculator")',
+  ].join(";");
+  assert.doesNotThrow(() => execFileSync(process.execPath, ["-e", script], {
+    cwd: ROOT,
+    encoding: "utf8",
+    timeout: 5_000,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    stdio: "pipe",
+  }));
+});
+
 test("MCP 分派不会加载 UI 或 Service 组合根", () => {
   const loaded = [];
   bootstrap.dispatchRole("mcp", {
@@ -712,7 +740,7 @@ function openJsonlConversation(socketPath) {
 }
 
 async function requestFromMaliciousServer(responseFactory, timeoutMs = 100) {
-  const root = fs.mkdtempSync("/tmp/sgmc-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sgmc-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   fs.mkdirSync(paths.runtimeDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(paths.runtimeDir, 0o700);
@@ -1073,7 +1101,7 @@ test("Service start 将 lock acquisition 纳入清理边界且失败不残留 ow
 });
 
 test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认 profile 不回归", async () => {
-  assert.equal(PROTOCOL_VERSION, 9);
+  assert.equal(PROTOCOL_VERSION, 13);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-store-lifecycle-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   for (let restart = 0; restart < 2; restart += 1) {
@@ -1179,6 +1207,7 @@ test("Service 拥有 SecretStore/Provider bridge，按 secret→product→provid
     get() { assert.fail("empty plugin catalog must not read credentials"); },
     putIfRevision() { assert.fail("empty plugin catalog must not write credentials"); },
     getCredentialRevision() { assert.fail("empty plugin catalog must not inspect credentials"); },
+    getCredentialFingerprint() { assert.fail("empty plugin catalog must not inspect credential fingerprints"); },
     listMetadata() { return secretMetadata.map((entry) => ({ ...entry })); },
     async delete(credentialRef) {
       order.push(`secret.delete:${credentialRef}`);
@@ -1214,13 +1243,15 @@ test("Service 拥有 SecretStore/Provider bridge，按 secret→product→provid
       throw Object.assign(new Error("auth state close fixture"), { code: "AUTH_STATE_CLOSE_FAILED" });
     },
   };
-  const accountAuthManager = {
+  const accountAuthManager = Object.assign(new AccountAuthManager({ stateStore: accountAuthStateStore,
+    runtimeManager: { acquire() { assert.fail("lifecycle fixture must not acquire an auth runtime"); },
+      stop() { assert.fail("lifecycle fixture must not stop an auth runtime"); } } }), {
     open() { order.push("auth-manager.open"); },
     async close() {
       order.push("auth-manager.close");
       throw Object.assign(new Error("auth manager close fixture"), { code: "AUTH_MANAGER_CLOSE_FAILED" });
     },
-  };
+  });
   const service = createAgentService({
     paths,
     version: "provider-owner",
@@ -1271,7 +1302,9 @@ test("Service auth.* IPC 严格校验并拥有 AuthState/Manager 生命周期", 
     open() { order.push("auth-state.open"); },
     async close() { order.push("auth-state.close"); },
   };
-  const accountAuthManager = {
+  const accountAuthManager = Object.assign(new AccountAuthManager({ stateStore: accountAuthStateStore,
+    runtimeManager: { acquire() { assert.fail("auth IPC fixture must not acquire an auth runtime"); },
+      stop() { assert.fail("auth IPC fixture must not stop an auth runtime"); } } }), {
     open() { order.push("auth-manager.open"); },
     async close() { order.push("auth-manager.close"); },
     async read(params) {
@@ -1321,7 +1354,7 @@ test("Service auth.* IPC 严格校验并拥有 AuthState/Manager 生命周期", 
       calls.push(["logout", params]);
       return { loggedOut: true };
     },
-  };
+  });
   const runtimePool = {
     get() { assert.fail("Service 不应在没有 Work Run 时 spawn Codex runtime"); },
     async stopAll() { order.push("runtime.close"); },
@@ -1498,7 +1531,7 @@ test("Provider IPC 严格分派 list/save/delete/secret set-clear/protocol valid
     async clearSecret(value) { calls.push(["clearSecret", value]); return provider; },
     async validate(value) {
       calls.push(["validate", value]);
-      return { providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.149.0" };
+      return { providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.159.2" };
     },
   };
   const service = createAgentService({ paths, version: "provider-ipc", providerService });
@@ -1545,7 +1578,7 @@ test("Provider IPC 严格分派 list/save/delete/secret set-clear/protocol valid
       method: "provider.validate",
       params: { providerId: provider.id, level: "protocol" },
     }), {
-      providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.149.0",
+      providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.159.2",
     });
     const response = await rawJsonRequest(paths.socketPath, {
       id: "provider-invalid",
@@ -1919,7 +1952,7 @@ test("Service 仅在 private MCP transport ready 后启动 Coordinator/Kanban/Cr
 });
 
 test("domain background fatal 仅隔离对应领域，Service 与另一领域继续可用", async () => {
-  const root = fs.mkdtempSync("/tmp/sg-domain-fatal-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sg-domain-fatal-"));
   const paths = resolveServicePaths({
     trustedRoot: root,
     stateRoot: path.join(root, "state"),
@@ -1998,7 +2031,7 @@ test("domain background fatal 仅隔离对应领域，Service 与另一领域继
 });
 
 test("旧 generation 延迟 domain fatal 在显式 stop 后不得报告或干扰 restart", async () => {
-  const root = fs.mkdtempSync("/tmp/sg-domain-fatal-generation-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sg-domain-fatal-generation-"));
   const paths = resolveServicePaths({
     trustedRoot: root,
     stateRoot: path.join(root, "state"),
@@ -2075,7 +2108,7 @@ test("Native domain store commit-uncertain 在 listen 前 health probe fail clos
 test("locked matcher 只降级含非空数据的领域并保留文件，解锁后下一代恢复", async () => {
   for (const lockedDomain of ["kanban", "cron"]) {
     // macOS sockaddr_un 只容纳短路径；这里测试领域锁降级，不让长 temp 根干扰目标 RED。
-    const root = fs.mkdtempSync(`/tmp/sg-domain-locked-${lockedDomain}-`);
+    const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), `sg-domain-locked-${lockedDomain}-`));
     const paths = resolveServicePaths({
       trustedRoot: root,
       stateRoot: path.join(root, "state"),
@@ -2188,7 +2221,7 @@ test("locked matcher 只降级含非空数据的领域并保留文件，解锁�
 
 test("recovery uncertain 在 locked matcher 下仍优先阻止 Service listen 并保留证据", async () => {
   for (const uncertainDomain of ["kanban", "cron"]) {
-    const root = fs.mkdtempSync(`/tmp/sg-domain-uncertain-${uncertainDomain}-`);
+    const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), `sg-domain-uncertain-${uncertainDomain}-`));
     const paths = resolveServicePaths({
       trustedRoot: root,
       stateRoot: path.join(root, "state"),
@@ -2267,7 +2300,7 @@ test("recovery uncertain 在 locked matcher 下仍优先阻止 Service listen �
 });
 
 test("同一 Service 对象并发 start 共享同一个启动 promise 且只建立一个实例", async () => {
-  const root = fs.mkdtempSync("/tmp/sg-start-sf-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sg-start-sf-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   const service = createAgentService({ paths, version: "start-singleflight" });
   const firstStart = service.start();
@@ -2287,7 +2320,7 @@ test("同一 Service 对象并发 start 共享同一个启动 promise 且只建�
 });
 
 test("coordinator.open 挂起时 stop 会封住启动续体并等待其退出后完整清理", async () => {
-  const root = fs.mkdtempSync("/tmp/sg-stop-start-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sg-stop-start-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   const openEntered = deferred();
   const releaseOpen = deferred();
@@ -2334,7 +2367,7 @@ test("coordinator.open 挂起时 stop 会封住启动续体并等待其退出后
 });
 
 test("stop 清理中 start 稳定拒绝且不会在清理尾部偷偷重启", async () => {
-  const root = fs.mkdtempSync("/tmp/sg-start-stop-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sg-start-stop-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   const stopAllEntered = deferred();
   const releaseStopAll = deferred();
@@ -2371,9 +2404,10 @@ test("stop 清理中 start 稳定拒绝且不会在清理尾部偷偷重启", as
   const stopping = service.stop({ notify: false });
   await stopAllEntered.promise;
   const startDuringStop = service.start();
+  const refused = assert.rejects(startDuringStop, (error) => error.code === "SERVICE_STOPPING");
   releaseStopAll.resolve();
   await stopping;
-  await assert.rejects(startDuringStop, (error) => error.code === "SERVICE_STOPPING");
+  await refused;
   assert.equal(openCalls, 1);
   assert.equal(fs.existsSync(paths.socketPath), false);
   assert.equal(fs.existsSync(paths.lockPath), false);
@@ -2616,7 +2650,7 @@ test("Electron utility 入口在 ready 前建立并注入独立 profile/cache", 
     version: "fixture",
     runtimePool,
     safeStorage: electronSafeStorage,
-    resourcesPath: path.join(root, "Resources"),
+    resourcesPath: packagedResources(root),
     platform: "darwin",
     shell: electronShell,
     homeDirectory: hostHome,
@@ -2662,7 +2696,7 @@ test("Electron utility 入口在 ready 前建立并注入独立 profile/cache", 
 
 test("Computer Use 随 Service 生命周期启停，锁屏与睡眠只暂停且解锁不自动恢复", async () => {
   const { EventEmitter } = require("node:events");
-  const root = fs.mkdtempSync("/tmp/sgcu-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sgcu-"));
   const paths = resolveServicePaths({
     stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache"),
   });
@@ -2732,6 +2766,7 @@ test("后台 Service 收到 macOS activate 时单飞拉起独立 UI，停止后�
     paths,
     electronApp,
     version: "activate-fixture",
+    resourcesPath: packagedResources(root),
     openUiApp() {
       openCalls += 1;
       return openCalls === 1 ? firstOpen.promise : Promise.resolve();
@@ -2756,7 +2791,7 @@ test("后台 Service 收到 macOS activate 时单飞拉起独立 UI，停止后�
 test("SIGTERM/SIGINT 清理失败采用确定非零退出且不产生 unhandled rejection", async () => {
   const { EventEmitter } = require("node:events");
   for (const signal of ["SIGTERM", "SIGINT"]) {
-    const root = fs.mkdtempSync("/tmp/sgsig-");
+    const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sgsig-"));
     const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
     const signalEmitter = new EventEmitter();
     const exitCodes = [];
@@ -3113,7 +3148,7 @@ test("stop 分阶段 best-effort 聚合主错误与清理错误，失败后仍�
 });
 
 test("stop 对永不回调的 server.close 有界并继续清理 lock", async () => {
-  const root = fs.mkdtempSync("/tmp/sgclose-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sgclose-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   let runtimeServer = null;
   let releaseClose = null;
@@ -3157,7 +3192,7 @@ test("accepted socket ECONNRESET/EPIPE 只清理连接，不升级成未捕获�
 });
 
 test("监听期 server error 进入受控 shutdown，无进程级未捕获且释放资源", async () => {
-  const root = fs.mkdtempSync("/tmp/sgrt-");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sgrt-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   let runtimeServer = null;
   const runtimeFaults = [];
@@ -3883,7 +3918,7 @@ test("launcher 与独立 client 真正退出后 Service 仍健康并脱离原父
 test("真实 Electron bootstrap 可有界启动 Service role 且不创建 BrowserWindow", async () => {
   if (process.platform !== "darwin") return;
   // Darwin sockaddr_un 只有 104 bytes；使用短 HOME 模拟真实 /Users/<name> 路径。
-  const homeDir = fs.mkdtempSync("/tmp/sgel-");
+  const homeDir = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "sgel-"));
   const paths = resolveServicePaths({ homeDir });
   const electronBinary = resolveElectronBinary();
   const gatePath = path.join(homeDir, "role-gate.json");
@@ -4218,15 +4253,20 @@ test("LaunchAgent 串行所有 mutation、同种调用共享 Promise，冷启动
   const repairTwo = fixture.controller.repair();
   const stopOne = fixture.controller.stop();
   const stopTwo = fixture.controller.stop();
+  let idle = false;
+  const drained = fixture.controller.whenIdle().then(() => { idle = true; });
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
   const callsBeforeRelease = fixture.calls.map((args) => [...args]);
   const plistExistedBeforeRelease = fs.existsSync(fixture.controller.paths.plistPath);
+  assert.equal(idle, false, "whenIdle must wait for every already queued LaunchAgent mutation");
   firstStateQuery.resolve(undefined);
   const settled = await Promise.allSettled([
     startOne, startTwo, installOne, installTwo, repairOne, repairTwo, stopOne, stopTwo,
   ]);
+  await drained;
+  assert.equal(idle, true);
 
   assert.strictEqual(startOne, startTwo);
   assert.strictEqual(installOne, installTwo);

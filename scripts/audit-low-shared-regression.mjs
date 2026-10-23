@@ -234,6 +234,7 @@ const i18nStub = {
           export const useState = (value) => [typeof value === "function" ? value() : value, (next) => globalThis.__sharedAuditSetters.push(next)];
           export const useEffect = (fn) => globalThis.__sharedAuditEffects.push(fn);
           export const useCallback = (fn) => fn;
+          export const useSyncExternalStore = (_subscribe, getSnapshot) => getSnapshot();
         `,
       }));
     },

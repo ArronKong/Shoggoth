@@ -16,7 +16,18 @@ try {
   execFileSync(path.join(root, "app/manage-ui/node_modules/.bin/esbuild"), [
     helper, "--bundle", "--platform=node", "--format=cjs", `--outfile=${outfile}`,
   ], { stdio: "pipe" });
-  const { findChatSearchGroupKey, keyedChatGroups } = createRequire(import.meta.url)(outfile);
+  const { findChatSearchGroupKey, keyedChatGroups, keyedChatMessages } = createRequire(import.meta.url)(outfile);
+  const slashPending = { localSlashId: "command-1", role: "system", ts: 100, parts: [{ type: "text", text: "Running" }] };
+  const slashDone = { ...slashPending, ts: 200, parts: [{ type: "text", text: "Done" }] };
+  assert.equal(keyedChatMessages([slashPending])[0].key, keyedChatMessages([slashDone])[0].key,
+    "updating a command result retains its React key and hide/pin identity");
+  assert.equal(keyedChatGroups([{ msgs: [slashPending] }])[0].key, keyedChatGroups([{ msgs: [slashDone] }])[0].key,
+    "command completion cannot remount its visual group");
+  assert.notEqual(keyedChatMessages([slashPending])[0].key, keyedChatMessages([{ ...slashPending, role: "user" }])[0].key);
+  const liveGroup = (parts) => keyedChatGroups([{ role: "assistant", msgs: [{ role: "assistant", ts: 100, parts }] }])[0].key;
+  assert.equal(liveGroup([{ type: "text", text: "progress" }]), liveGroup([
+    { type: "timeline", steps: [{ kind: "error", text: "stopped" }] }, { type: "text", text: "progress" },
+  ]), "settling process details must not remount a live group or reset its expanded state");
 
   const groups = keyedChatGroups([
     {

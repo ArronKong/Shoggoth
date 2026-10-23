@@ -8,6 +8,7 @@ const { waitUntil } = require("./shoggoth-work-run-coordinator-unit.cjs");
 const { requestService, readClientToken } = require("../app/agent-service/client");
 const { PROTOCOL_VERSION } = require("../app/agent-service/server");
 
+// Shoggoth Memory, the default memory owner, has an async propose/delete API.
 function disableProductCompaction(f) {
   const config = f.service.nativeRuntimeConfig.read();
   f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
@@ -26,10 +27,10 @@ test("chat forget renews a checkpoint-free native thread once with compaction di
     assert.equal(f.service.conversationCheckpointStore.get(session.profileId, session.id), null);
     const source = f.service.transcriptStore.listEvents(session.profileId, session.id)
       .find(event => event.kind === "user" && event.runId === first.id);
-    const item = f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
+    const item = await f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
       type: "semantic", content: "我的代号是蓝鲸", sourceRefs: [source.id, first.id],
       classification: "explicit" });
-    f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
+    await f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
       reason: "forgotten", operationId: "native-forget-action" });
     const second = await f.send(session.sessionKey, "native-forget-second", "继续处理当前任务");
     assert.equal(second.status, "running", second.errorCode);
@@ -73,10 +74,10 @@ test("Inspiration Run also renews its checkpoint-free native thread after a Prof
     await f.complete(first.run);
     const session = f.service.chatSessionStore.getSession(first.sessionKey);
     assert.equal(f.service.conversationCheckpointStore.get(session.profileId, session.id), null);
-    const item = f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
+    const item = await f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
       type: "semantic", content: "蓝鲸是我的项目代号", sourceRefs: ["user-edit:manual"],
       classification: "explicit" });
-    f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
+    await f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
       reason: "user_deleted", operationId: "native-inspiration-forget" });
     const second = await start();
     assert.equal(second.run.status, "running", second.run.errorCode);
@@ -91,7 +92,7 @@ test("a forget after admission but before turnStart rejects the frozen memory co
   try {
     disableProductCompaction(f);
     const session = f.createSession();
-    const item = f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
+    const item = await f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
       type: "semantic", content: "用户的代号是蓝鲸", sourceRefs: ["user-edit:manual"],
       classification: "explicit" });
     const manager = f.service.workRunCoordinator.runtimeManager;
@@ -101,7 +102,7 @@ test("a forget after admission but before turnStart rejects the frozen memory co
       const handle = await acquire(...args);
       if (!withdrawn) {
         withdrawn = true;
-        f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
+        await f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
           reason: "user_deleted", operationId: "native-before-send-forget" });
       }
       return handle;
@@ -138,13 +139,16 @@ test("a queued compaction never sends a prompt after its source was withdrawn", 
     const config = f.service.nativeRuntimeConfig.read();
     f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
       flags: { ...config.flags, runtimeContextLifecycleV1: true } });
+    // The pre-compaction memory flush needs an isolated Codex generation the
+    // fixture transport cannot provide; this test covers the compaction prompt.
+    f.service.workRunCoordinator.beforeMemoryCompaction = null;
     const session = f.createSession();
     const first = await f.send(session.sessionKey, "compaction-before-forget", "请记住蓝鲸代号");
     assert.equal(first.status, "running", first.errorCode);
     await f.complete(first);
     const source = f.service.transcriptStore.listEvents(session.profileId, session.id)
       .find(event => event.kind === "user" && event.runId === first.id);
-    const item = f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
+    const item = await f.service.memoryEngine.propose({ profileId: session.profileId, scope: "user",
       type: "semantic", content: "我的代号是蓝鲸", sourceRefs: [source.id, first.id],
       classification: "explicit" });
     const manager = f.service.workRunCoordinator.runtimeManager;
@@ -154,7 +158,7 @@ test("a queued compaction never sends a prompt after its source was withdrawn", 
     manager.acquire = async (binding, options) => {
       const handle = await acquire(binding, options);
       if (options.executionContract?.source !== "compaction") return handle;
-      f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
+      await f.service.memoryEngine.delete({ profileId: session.profileId, id: item.id,
         reason: "forgotten", operationId: "compaction-inflight-forget" });
       const facade = Object.create(handle);
       Object.defineProperties(facade, {

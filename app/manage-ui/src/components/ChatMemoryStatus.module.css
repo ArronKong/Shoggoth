@@ -1,0 +1,10 @@
+.trigger { padding: 2px 0; border: 0; background: transparent; color: var(--ui-text-2); font: inherit; font-size: 12px; text-align: start; cursor: pointer; }
+.trigger:hover { color: var(--ui-text-1); }
+:global(body[data-immersive]) .trigger { color: rgba(255, 255, 255, .7); text-shadow: 0 1px 6px rgba(0, 0, 0, .5); }
+:global(body[data-immersive]) .trigger:hover { color: #fff; }
+.trigger:focus-visible { outline: 2px solid var(--ui-accent, #3869ff); outline-offset: 3px; border-radius: 3px; }
+.details { display: grid; gap: 12px; color: var(--ui-text-1); }
+.details p, .details h4 { margin: 0; }
+.details time { color: var(--ui-text-2); font-size: 12px; }
+.details pre { margin: 0; font: inherit; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.details section { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--ui-hairline); }

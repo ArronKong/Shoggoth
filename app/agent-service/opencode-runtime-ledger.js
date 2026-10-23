@@ -21,6 +21,7 @@ function validateLedger(value, profileId, accountId, shardId) {
     || value.workspaceShardId !== shardId || !Array.isArray(value.sessions)
     || value.sessions.length > 4096) throw fail();
   const sessionIds = new Set(), sources = new Set();
+  const nativeIds = new Set();
   for (const session of value.sessions) {
     if (!session || !/^ses_[A-Za-z0-9_-]{8,128}$/u.test(session.id)
       || !safe(session.source, 256) || !safe(session.cwd, 4096)
@@ -29,7 +30,13 @@ function validateLedger(value, profileId, accountId, shardId) {
       || typeof session.created !== "boolean" || typeof session.archived !== "boolean"
       || (session.title !== null && !safe(session.title, 1024))
       || !Array.isArray(session.turns) || session.turns.length > 8192
-      || sessionIds.has(session.id) || sources.has(session.source)) throw fail();
+      || sessionIds.has(session.id) || sources.has(session.source)
+      || (session.attachmentSessionId !== undefined && (!/^ses_[A-Za-z0-9_-]{8,128}$/u.test(session.attachmentSessionId)
+        || session.attachmentSessionId === session.id))) throw fail();
+    for (const id of [session.id, session.attachmentSessionId].filter(Boolean)) {
+      if (nativeIds.has(id)) throw fail();
+      nativeIds.add(id);
+    }
     sessionIds.add(session.id); sources.add(session.source);
     const operationIds = new Set(), turnIds = new Set(), messageIds = new Set();
     for (const turn of session.turns) {

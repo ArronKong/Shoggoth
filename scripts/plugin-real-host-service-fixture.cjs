@@ -24,6 +24,9 @@ function createFixture(root, backendId, serviceOptions = {}) {
   })}\n`);
   fs.writeFileSync(path.join(source, "SKILL.md"),
     "# Host probe\nRead this installed public Skill only through Shoggoth Service.\n");
+  fs.mkdirSync(path.join(source, "references"));
+  fs.writeFileSync(path.join(source, "references", "host-guide.md"),
+    "Shared native host guide 😀\n");
   const credential = ensureCredential(paths, backendId);
   let service = null;
   const start = async () => {
@@ -53,6 +56,15 @@ function createFixture(root, backendId, serviceOptions = {}) {
       const pluginSource = path.join(root, "plugin-source");
       fs.cpSync(path.join(__dirname, "fixtures/plugins/project-assistant"), pluginSource,
         { recursive: true });
+      fs.mkdirSync(path.join(pluginSource, "skills", "issue-summary", "references"));
+      fs.writeFileSync(path.join(pluginSource, "skills", "issue-summary", "references", "guide.md"),
+        "Shared plugin host guide 😀\n");
+      const echoSkill = path.join(pluginSource, "skills", "echo-workflow");
+      fs.mkdirSync(echoSkill);
+      fs.writeFileSync(path.join(echoSkill, "SKILL.md"),
+        "---\nname: echo-workflow\ndescription: Echo workflow requires the granted echo tool.\n"
+        + "x-shoggoth:\n  requiredTools:\n    - echo\n---\n"
+        + "# Echo workflow\nCall the authorized echo tool once.\n");
       fs.copyFileSync(path.join(__dirname, "fixtures/plugins/mcp-sdk-fixture.cjs"),
         path.join(pluginSource, "bin", "mcp-sdk-fixture.cjs"));
       fs.writeFileSync(path.join(pluginSource, "bin", "issue-fixture"),

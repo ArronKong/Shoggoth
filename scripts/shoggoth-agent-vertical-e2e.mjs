@@ -176,8 +176,10 @@ function browserPageAction(command, phase) {
     for (const label of command.answerLabels) {
       if (!text.includes(label)) throw new Error(`missing option label ${label}`);
     }
+    // Option descriptions are button tooltips since 417d124d, not visible text.
+    const titles = [...card.querySelectorAll("button[title]")].map((button) => button.title);
     for (const description of command.descriptions) {
-      if (!text.includes(description)) throw new Error(`missing option description ${description}`);
+      if (!titles.includes(description)) throw new Error(`missing option description ${description}`);
     }
     return text;
   };
@@ -431,7 +433,7 @@ function createCapabilityAdapters() {
         status: "ready",
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        expiresAt: Date.now() + (input.expiresInSeconds * 1_000),
+        expiresAt: null,
         pauseReason: null,
       };
       computerSessions.set(session.id, session);
@@ -768,7 +770,7 @@ try {
     jsonrpc: "2.0", id: 1, method: "initialize", params: {
       protocolVersion: "2025-06-18",
       capabilities: { elicitation: {} },
-      clientInfo: { name: "vertical-fake-codex", version: "0.149.0" },
+      clientInfo: { name: "vertical-fake-codex", version: "0.159.2" },
     },
   })}\n`);
   assert.equal((await nextHelperLine((message) => message.id === 1, "helper initialize"))
@@ -831,7 +833,7 @@ try {
     const openedComputer = await callProductTool("computer_session_open", {
       ...source,
       allowedApplications: ["com.shoggoth.Fixture"],
-      expiresInSeconds: 120,
+
     }, { confirm: true });
     const computerBase = {
       ...source,

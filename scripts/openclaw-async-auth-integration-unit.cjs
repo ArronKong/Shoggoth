@@ -118,13 +118,14 @@ test("status awaits identity and does not reconnect after stop during auth", asy
 });
 function brokerFixture(t) {
   Socket.instances.length = 0; const f = resolverFixture(), server = new EventEmitter(); server.address = () => ({ port: 12345 });
-  let gatewayUrl = "ws://gateway-a.invalid"; f.resolver.getGatewayUrl = () => gatewayUrl;
+  let gatewayUrl = "ws://gateway-a.invalid", generation = null;
+  f.resolver.getGatewayUrl = () => gatewayUrl; f.resolver.getGatewayGeneration = () => generation;
   attachChatBroker(server, { getUpstreamUrl: () => "ws://proxy.invalid", authResolver: f.resolver });
   const client = new EventEmitter(); Object.assign(client, { readyState: 1, sent: [], send(raw) { this.sent.push(JSON.parse(raw)); },
     close(code, reason) { if (this.readyState !== 1) return; this.readyState = 3; this.closeReason = reason; this.emit("close", code, reason); } });
   t.after(() => client.close());
   server.emit("upgrade", { url: "/__chatws", headers: { host: "127.0.0.1:12345", origin: "http://127.0.0.1:12345" } }, { client }, Buffer.alloc(0));
-  return { ...f, client, changeEndpoint() { gatewayUrl = "ws://gateway-b.invalid"; } };
+  return { ...f, client, changeEndpoint(url = "ws://gateway-b.invalid", value = null) { gatewayUrl = url; generation = value; } };
 }
 test("broker queues browser frames during auth and freezes the real gateway token namespace", async t => {
   const f = brokerFixture(t);
@@ -145,5 +146,37 @@ test("broker creates no upstream after browser closes or gateway changes during 
 test("broker refuses an old auth challenge after the real endpoint changes behind a fixed proxy", async t => {
   const f = brokerFixture(t); f.pending[0].resolve(auth); await tick(); const socket = Socket.instances[0];
   f.changeEndpoint(); socket.receive({ type: "event", event: "connect.challenge", payload: { nonce: "nonce" } });
-  assert.equal(socket.sent.length, 0); assert.equal(socket.readyState, 3); assert.deepEqual(f.stored, []);
+  assert.equal(socket.sent.length, 0); assert.equal(socket.readyState, 1); assert.equal(f.client.readyState, 1); assert.deepEqual(f.stored, []);
+});
+
+const { endpointDigest } = require("../app/core/upstream-endpoint-generation");
+test("broker refresh rejects a late old resolver without closing native transport or sending the old credential", async t => {
+  const f = brokerFixture(t); f.pending[0].resolve(auth); await tick(); const socket = Socket.instances[0]; await authenticate(socket);
+  f.changeEndpoint("ws://gateway-b.invalid", 2);
+  socket.receive({ type: "event", event: "connect.challenge", payload: { nonce: "b", gatewayBinding: endpointDigest("ws://gateway-b.invalid", 2) } });
+  await tick(); assert.equal(f.pending.length, 2);
+  f.changeEndpoint("ws://gateway-c.invalid", 3);
+  f.pending[1].resolve({ ...auth, token: "must-not-be-sent-after-change" }); await tick();
+  assert.equal(socket.sent.length, 1); assert.equal(f.client.readyState, 1);
+  socket.receive({ type: "event", event: "connect.challenge", payload: { nonce: "c", gatewayBinding: endpointDigest("ws://gateway-c.invalid", 3) } });
+  await tick(); f.pending[2].resolve({ ...auth, token: "current-fixture-token" }); await tick();
+  assert.equal(socket.sent.at(-1).params.auth.token, "current-fixture-token");
+  assert.equal(JSON.stringify(socket.sent).includes("must-not-be-sent-after-change"), false);
+});
+test("broker ignores an old hello and forged source generation before persisting the exact new namespace token", async t => {
+  const f = brokerFixture(t); f.pending[0].resolve(auth); await tick(); const socket = Socket.instances[0]; await authenticate(socket);
+  f.changeEndpoint("ws://gateway-b.invalid", 2);
+  socket.receive({ type: "event", event: "connect.challenge", payload: { nonce: "b", gatewayBinding: endpointDigest("ws://gateway-b.invalid", 2) } });
+  await tick(); f.pending[1].resolve(auth); await tick(); const oldRequest = socket.sent.at(-1);
+  f.changeEndpoint("ws://gateway-c.invalid", 3);
+  socket.receive({ type: "event", event: "connect.challenge", payload: { nonce: "forged", gatewayBinding: endpointDigest("ws://gateway-c.invalid", 2) } });
+  await tick(); assert.equal(f.pending.length, 2);
+  socket.receive({ type: "event", event: "connect.challenge", payload: { nonce: "c", gatewayBinding: endpointDigest("ws://gateway-c.invalid", 3) } });
+  await tick(); f.pending[2].resolve(auth); await tick(); const currentRequest = socket.sent.at(-1);
+  assert.notEqual(currentRequest.id, oldRequest.id);
+  socket.receive({ type: "res", id: oldRequest.id, ok: true, payload: hello }); await tick();
+  assert.deepEqual(f.stored, [["issued-fixture-token", 1, "ws://gateway-a.invalid"]]);
+  socket.receive({ type: "res", id: currentRequest.id, ok: true, payload: hello }); await tick();
+  assert.deepEqual(f.stored, [["issued-fixture-token", 1, "ws://gateway-a.invalid"], ["issued-fixture-token", 1, "ws://gateway-c.invalid"]]);
+  assert.equal(f.client.readyState, 1);
 });

@@ -26,3 +26,13 @@ test("crypto diagnostics measure actual await time and never record arguments or
   assert.equal(await observeCryptoBroker(new Broker(), telemetry).encrypt("private argument"), "private result");
   const snapshot = telemetry.snapshot(); assert.ok(snapshot.cryptoWaitMs >= 10); assert.doesNotMatch(JSON.stringify(snapshot), /private result|private argument/u);
 });
+
+test("a cleanup failure reported after cancellation retains the unconfirmed-stop error", async () => {
+  const controller = new AbortController(); let ready;
+  const started = new Promise(resolve => { ready = resolve; });
+  const pending = runBoundedModelOnly({ ...input, signal: controller.signal }, signal => new Promise((_, reject) => {
+    signal.addEventListener("abort", () => setImmediate(() => reject(Object.assign(new Error(), { code: "RUNTIME_STOP_UNCONFIRMED" }))));
+    ready();
+  }));
+  await started; controller.abort(); await assert.rejects(pending, { code: "RUNTIME_STOP_UNCONFIRMED" });
+});

@@ -3,6 +3,7 @@
 const MAX_FIELDS = 32;
 const MAX_OPTIONS = 32;
 const MAX_TEXT_BYTES = 16 * 1024;
+const MAX_COMMAND_BYTES = 24 * 1024;
 const MAX_MESSAGE_BYTES = 4 * 1024;
 const MAX_SCHEMA_BYTES = 64 * 1024;
 // Keep enough headroom for the federation event envelope. Run events and the
@@ -175,7 +176,9 @@ function normalizeFields(schema) {
   return fields;
 }
 
-const APPROVAL_DETAIL_KEYS = ["kind", "toolName", "serverName", "command", "cwd", "grantRoot", "input", "permissions"];
+const APPROVAL_DETAIL_KEYS = ["kind", "toolName", "serverName", "command", "cwd", "grantRoot", "input", "permissions",
+  "actions", "networkHost"];
+const MAX_COMMAND_ACTIONS = 16;
 
 function validInteractiveApprovalChoice(choice) {
   return ["once", "session", "deny", "cancel"].includes(choice)
@@ -205,14 +208,25 @@ function interactiveApprovalCanAllow(request) {
 function validInteractiveApprovalDetails(value) {
   return ownDataObject(value) && Object.keys(value).length > 0
     && Object.keys(value).every((key) => APPROVAL_DETAIL_KEYS.includes(key)
-      && safeString(value[key], MAX_TEXT_BYTES))
+      && safeString(value[key], key === "command" ? MAX_COMMAND_BYTES : MAX_TEXT_BYTES))
     && (!value.kind || ["command", "file_change", "permissions"].includes(value.kind))
     && Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_RENDERABLE_APPROVAL_PAYLOAD_BYTES;
 }
 
+// Codex parses a command into read/list/search actions for display; keep only
+// what describes the action.
+function commandActions(value) {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  return JSON.stringify(value.slice(0, MAX_COMMAND_ACTIONS).map((action) => ({
+    type: typeof action?.type === "string" ? action.type : "unknown",
+    ...(typeof action?.path === "string" ? { path: action.path } : {}),
+    ...(typeof action?.query === "string" ? { query: action.query } : {}),
+  })));
+}
+
 function approvalDetails(payload) {
   const details = {};
-  for (const key of ["kind", "toolName", "command", "cwd", "grantRoot"]) {
+  for (const key of ["kind", "toolName", "command", "cwd", "grantRoot", "networkHost"]) {
     if (payload[key] === undefined || payload[key] === null || payload[key] === "") continue;
     if (key === "kind" && !["command", "file_change", "permissions"].includes(payload.kind)) continue;
     details[key] = payload[key];
@@ -222,6 +236,8 @@ function approvalDetails(payload) {
       details[key] = JSON.stringify(payload[source]);
     }
   }
+  const actions = commandActions(payload.commandActions);
+  if (actions) details.actions = actions;
   if (Object.keys(details).length === 0) return null;
   if (!validInteractiveApprovalDetails(details)) throw interactionError();
   return details;
@@ -308,15 +324,19 @@ function normalizeInteractiveRequestV1(input) {
     });
   }
   const fields = normalizeFields(payload.requestedSchema);
+  const productConfirmation = fields.some((field) => field.id === "confirm_product_action");
+  // A product operation can include the complete 32-member roster and message.
+  // Never replace oversized approval details with a generic, actionable form.
+  if (productConfirmation && !safeString(payload.message, MAX_TEXT_BYTES)) throw interactionError();
   return deepFreeze({
     version: 1,
     requestId: payload.requestId,
     runId: input.runId,
-    kind: fields.some((field) => field.id === "confirm_product_action")
+    kind: productConfirmation
       ? "product_confirmation" : "user_input",
-    title: fields.some((field) => field.id === "confirm_product_action")
+    title: productConfirmation
       ? "确认产品操作" : "需要补充信息",
-    message: text(payload.message, "请完成以下字段", MAX_MESSAGE_BYTES),
+    message: text(payload.message, "请完成以下字段", productConfirmation ? MAX_TEXT_BYTES : MAX_MESSAGE_BYTES),
     fields,
     approvalChoices: [],
     expiresAt,

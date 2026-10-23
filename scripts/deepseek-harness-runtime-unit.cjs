@@ -549,6 +549,18 @@ async function main() {
   await bridge.failTurn({ sessionId: "session-auth", turnId: "turn-auth" }, { code: "AUTH", status: 401 });
   assert.equal(failedEvents[0].event.errorCode, "RUNTIME_AUTH_REQUIRED");
 
+  const approvals = [];
+  bridge.serverRequest = async (method, params) => { approvals.push({ method, params }); return { decision: "accept" }; };
+  bridge.activeTurns.set("agent-approval", { settled: false, sessionId: "session-approval", turnId: "turn-approval",
+    agent: { session: { header: { cwd: "/workspace" } } },
+    toolCalls: new Map([["call-shell", { name: "shell", arguments: JSON.stringify({ command: "npm test" }) }]]) });
+  assert.equal(await bridge.onApprovalRequest({ agent: { id: "agent-approval" }, callId: "call-shell", toolName: "shell" }),
+    "allowed-once");
+  assert.deepEqual(approvals[0], { method: "item/commandExecution/requestApproval", params: {
+    sessionId: "session-approval", turnId: "turn-approval", itemId: "call-shell", command: "npm test",
+    cwd: "/workspace", toolName: "shell", toolInput: { command: "npm test" }, sessionApprovalAvailable: true,
+  } }, "the tool and its arguments are sent structured; no reason is invented");
+
   assert.deepEqual(DEFAULT_DEEPSEEK_HARNESS_PERMISSION_POLICY, {
     approvalPolicy: "on-request",
     sandbox: "danger-full-access",

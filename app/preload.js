@@ -122,6 +122,46 @@ if (process.platform === "darwin") {
 }
 
 contextBridge.exposeInMainWorld("openclawDesktop", {
+  // Main owns this ledger so a loopback port change never loses the original send identity.
+  // No paths, credentials, attachment bytes or group execution methods cross this bridge.
+  groupSendJournal: Object.freeze({
+    call: (method, value) => ipcRenderer.invoke("shoggoth:group-send-journal", { method, value }),
+    subscribe: listener => {
+      const handler = (_event, value) => {
+        if (typeof value?.ownerScope === "string" && typeof value?.groupId === "string") listener({ ownerScope: value.ownerScope, groupId: value.groupId });
+      };
+      ipcRenderer.on("shoggoth:group-send-journal:changed", handler);
+      return () => ipcRenderer.removeListener("shoggoth:group-send-journal:changed", handler);
+    },
+  }),
+  chatUi: Object.freeze({
+    mount: value => ipcRenderer.invoke("shoggoth:chat-ui:mount", value),
+    layout: value => ipcRenderer.invoke("shoggoth:chat-ui:layout", value),
+    theme: value => ipcRenderer.invoke("shoggoth:chat-ui:theme", value),
+    release: value => ipcRenderer.invoke("shoggoth:chat-ui:release", value),
+    action: value => ipcRenderer.invoke("shoggoth:chat-ui:action", value),
+    operation: value => ipcRenderer.invoke("shoggoth:chat-ui:operation", value),
+    subscribe: listener => { const handler = (_event, value) => listener(value);
+      ipcRenderer.on("shoggoth:chat-ui:event", handler);
+      return () => ipcRenderer.removeListener("shoggoth:chat-ui:event", handler);
+    },
+  }),
+  onSystemIssue: (cb) => {
+    const handler = (_event, notice) => {
+      if (!notice || !["STORAGE_FULL", "UI_RESOURCE_UNAVAILABLE"].includes(notice.code)) return;
+      try { cb({ code: notice.code }); } catch { /* best-effort */ }
+    };
+    ipcRenderer.on("shoggoth:system-issue", handler);
+    ipcRenderer.send("shoggoth:system-issue:ready");
+    return () => ipcRenderer.removeListener("shoggoth:system-issue", handler);
+  },
+  // Only safe model-operation identities cross this bridge. Main verifies the
+  // current window/frame and actual journal outcome before acknowledging.
+  modelOperationRecovery: {
+    read: () => ipcRenderer.invoke("shoggoth:model-operation-recovery:read"),
+    retain: value => ipcRenderer.invoke("shoggoth:model-operation-recovery:retain", value),
+    ack: identity => ipcRenderer.invoke("shoggoth:model-operation-recovery:ack", identity),
+  },
   readClipboardFiles: () => ipcRenderer.invoke("shoggoth:chat:clipboard-files"),
   requestMicrophoneAccess: () => ipcRenderer.invoke("shoggoth:microphone:request"),
   getMicrophoneAccessStatus: () => ipcRenderer.invoke("shoggoth:microphone:status"),
@@ -178,7 +218,11 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
     "shoggoth:board-widget:revoke", { ticketId },
   ),
   getComputerPermissions: () => ipcRenderer.invoke("shoggoth:computer:permissions-status"),
+  getComputerState: () => ipcRenderer.invoke("shoggoth:computer:state"),
+  getBrowserState: () => ipcRenderer.invoke("shoggoth:browser:state"),
   requestComputerPermissions: () => ipcRenderer.invoke("shoggoth:computer:permissions-request"),
+  reloadComputerPermissions: () => ipcRenderer.invoke("shoggoth:computer:permissions-reload"),
+  openComputerAccessibilitySettings: () => ipcRenderer.invoke("shoggoth:computer:open-accessibility-settings"),
   openComputerScreenRecordingSettings: () => ipcRenderer.invoke(
     "shoggoth:computer:open-screen-recording-settings",
   ),

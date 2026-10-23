@@ -1,0 +1,613 @@
+--- a/dist/sessions-DqDwh-oU.mjs
++++ b/dist/sessions-DqDwh-oU.mjs
+@@ -3683,6 +3683,14 @@
+ 	issuedAtMs: Type.Integer({ minimum: 0 })
+ });
+ /** User-to-agent send request; idempotency key lets clients safely retry transport failures. */
++const CapabilitySelectionSchema = closedObject({
++	version: Type.Literal(1),
++	operationId: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
++	dispatchRef: Type.String({ minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }),
++	selectionDigest: Type.String({ pattern: "^[a-f0-9]{64}$" }),
++	requiredAdapterId: Type.String({ minLength: 1, maxLength: 128, pattern: "^[a-z0-9][a-z0-9._-]*$" }),
++	adapterGeneration: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" })
++});
+ const ChatSendParamsSchema = closedObject({
+ 	sessionKey: ChatSendSessionKeyString,
+ 	agentId: Type.Optional(NonEmptyString),
+@@ -3702,6 +3710,7 @@
+ 	replyToId: Type.Optional(NonEmptyString),
+ 	attachments: Type.Optional(ChatAttachmentsSchema),
+ 	toolBindings: Type.Optional(RunToolBindingsSchema),
++	capabilitySelection: Type.Optional(CapabilitySelectionSchema),
+ 	timeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+ 	systemInputProvenance: Type.Optional(InputProvenanceSchema),
+ 	systemProvenanceReceipt: Type.Optional(Type.String()),
+--- a/dist/setup-registry-C0Jco-hC.mjs
++++ b/dist/setup-registry-C0Jco-hC.mjs
+@@ -284,6 +284,7 @@
+ const noopEntries = Object.entries({
+ 	registerCli: () => {},
+ 	registerTool: () => {},
++	registerCapabilitySelectionGate: () => { throw new Error("CAPABILITY_SELECTION_API_UNAVAILABLE"); },
+ 	registerHook: () => {},
+ 	registerHttpRoute: () => {},
+ 	registerHostedMediaResolver: () => {},
+--- a/dist/loader-runtime-load-CdQ5OcQq.mjs
++++ b/dist/loader-runtime-load-CdQ5OcQq.mjs
+@@ -1,3 +1,4 @@
++import { registerSelectionGate } from "./shoggoth-capability-selection.mjs";
+ import { D as resolveExpiresAtMsFromDurationMs, R as timestampMsToIsoString } from "./number-coercion-CLj0HTDM.mjs";
+ import { S as retirePluginCacheInstance, T as withPluginCache, a as createPluginCache, o as getPluginCache, x as retirePluginCache } from "./plugin-cache-DOmG_50T.mjs";
+ import { c as isRecord } from "./record-coerce-DItp3I4t.mjs";
+@@ -2003,6 +2004,7 @@
+ 			handlers: {
+ 				...registrationCapabilities.capabilityHandlers ? {
+ 					...bound,
++					registerCapabilitySelectionGate: (handler, metadata) => registerSelectionGate(record, handler, metadata),
+ 					registerHook: (events, handler, opts) => bound.registerHook(events, handler, opts, params.config, params.pluginConfig),
+ 					registerSpeechProvider: (entry) => {
+ 						const provider = resolveCapabilityProviderRegistration(entry, registryParams.resolveCapabilityCatalogContext);
+--- a/dist/chat-send-handler-BBsH-uIk.mjs
++++ b/dist/chat-send-handler-BBsH-uIk.mjs
+@@ -1,3 +1,5 @@
++import { validateSelectionEnvelope, assertSelectionRegistration, replaySelectionRequest, acceptSelection, markSelection } from "./shoggoth-capability-selection.mjs";
++import { l as getSelectionRegistrationRegistry } from "./runtime-D_mv_Ppq.mjs";
+ import { g as isFutureDateTimestampMs } from "./number-coercion-CLj0HTDM.mjs";
+ import "./src-CZ2wJvNB.mjs";
+ import { t as expectDefined } from "./expect-CyE8FADM.mjs";
+@@ -2665,6 +2667,7 @@
+ 			});
+ 			if (enqueued && !releaseWorkAdmission) releaseWorkAdmission = params.retainWorkAdmission();
+ 			if (enqueued) lateFollowup.recordQueued();
++			if (enqueued) markSelection(params.capabilitySelection, "queued");
+ 			return enqueued;
+ 		},
+ 		onCancellationRetired: () => {
+@@ -3132,6 +3135,7 @@
+ 		originatingChannel: admission.originatingRoute.originatingChannel,
+ 		session,
+ 		hasCronCreatorAuthority: cronCreatorAuthority !== void 0,
++		capabilitySelection: p.capabilitySelection,
+ 		retainWorkAdmission: retainGatewayWorkAdmission
+ 	});
+ 	let acceptedMessageInjection = false;
+@@ -3277,6 +3281,7 @@
+ 					thinkingLevelOverride: p.thinking,
+ 					fastModeOverride: p.fastMode,
+ 					queueModeOverride: p.queueMode,
++					capabilitySelection: p.capabilitySelection,
+ 					userTurnTranscriptRecorder: userTurnRecorder,
+ 					...p.queueMode === "steer" ? { messageInjectionDisposition: "rejected" } : {},
+ 					...restartSafeAdmission ? { suppressNextUserMessagePersistence: true } : {},
+@@ -3428,7 +3433,7 @@
+ 			sessionKey,
+ 			agentId
+ 		});
+-	}).catch(dispatchErrorLifecycle.handleError);
++	}).catch((error) => { markSelection(p.capabilitySelection, "failed"); return dispatchErrorLifecycle.handleError(error); });
+ 	(async () => {
+ 		try {
+ 			await dispatch;
+@@ -4111,7 +4116,7 @@
+ 	const restartSafeRequest = createRestartSafeChatRequest({
+ 		goalRequestFingerprint: request.goalOperation?.requestFingerprint,
+ 		cfg,
+-		eligible: isBrowserOperatorUiClient(request.clientInfo) && turnKind === "main" && normalizedAttachments.length === 0 && !request.reconnectResumeRequested && explicitOrigin === void 0 && p.deliver !== true && p.thinking === void 0 && p.fastMode === void 0 && p.fastAutoOnSeconds === void 0 && p.timeoutMs === void 0 && request.systemInputProvenance === void 0 && request.systemProvenanceReceipt === void 0 && !request.suppressCommandInterpretation,
++		eligible: !p.capabilitySelection && isBrowserOperatorUiClient(request.clientInfo) && turnKind === "main" && normalizedAttachments.length === 0 && !request.reconnectResumeRequested && explicitOrigin === void 0 && p.deliver !== true && p.thinking === void 0 && p.fastMode === void 0 && p.fastAutoOnSeconds === void 0 && p.timeoutMs === void 0 && request.systemInputProvenance === void 0 && request.systemProvenanceReceipt === void 0 && !request.suppressCommandInterpretation,
+ 		message: rawMessage,
+ 		mentions: p.mentions,
+ 		senderIsOwner: hasGatewayAdminScope(client)
+@@ -4736,7 +4741,13 @@
+ 		ok: false,
+ 		error: `invalid chat.send params: ${formatValidationErrors(validateChatSendParams.errors)}`
+ 	};
+-	const p = controlUiReconnectResume.params;
++	let p = controlUiReconnectResume.params;
++	if (p.capabilitySelection) {
++		try { validateSelectionEnvelope(p.capabilitySelection, p.idempotencyKey); }
++		catch (error) { return { ok: false, error: error.code }; }
++		if (p.queueMode !== void 0 && p.queueMode !== "followup" || p.intent || params.goalResume || p.toolBindings || p.message.trimStart().startsWith("/") || p.message.trimStart().startsWith("!") || isChatStopCommandText(p.message) || isBtwRequestText(p.message)) return { ok: false, error: "CAPABILITY_SELECTION_PATH_UNSUPPORTED" };
++		p = { ...p, queueMode: "followup", capabilitySelection: validateSelectionEnvelope(p.capabilitySelection, p.idempotencyKey) };
++	}
+ 	const suppressCommandInterpretation = p.suppressCommandInterpretation === true;
+ 	const explicitOriginResult = normalizeExplicitChatSendOrigin({
+ 		originatingChannel: p.originatingChannel,
+@@ -4807,7 +4818,7 @@
+ 		profileId,
+ 		start,
+ 		end
+-	]) ?? []])).digest("hex");
++	]) ?? [], p.capabilitySelection ?? null])).digest("hex");
+ 	return {
+ 		ok: true,
+ 		value: {
+@@ -4859,6 +4870,16 @@
+ 		respond(false, void 0, typeof preparedSession.error === "string" ? errorShape(ErrorCodes.INVALID_REQUEST, preparedSession.error) : preparedSession.error);
+ 		return;
+ 	}
++	try {
++		assertCurrent?.();
++		const selectedRequest = normalizedRequest.value;
++		const selectedSession = preparedSession.value;
++		const replay = replaySelectionRequest({ envelope: selectedRequest.p.capabilitySelection, operationId: selectedSession.clientRunId,
++			requestIdentity: selectedRequest.requestIdentity, sessionKey: selectedSession.sessionKey,
++			agentId: selectedSession.selectedAgent.agentId ?? selectedSession.agentId, client });
++		if (replay) { respond(true, replay); return; }
++		assertSelectionRegistration(selectedRequest.p.capabilitySelection, getSelectionRegistrationRegistry());
++	} catch (error) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, error.code || "CAPABILITY_SELECTION_ADMISSION_FAILED")); return; }
+ 	if (normalizedRequest.value.mentions) {
+ 		const mentions = context.mentionInbox?.validateRecipients(client, preparedSession.value.entry ? {
+ 			sessionKey: preparedSession.value.sessionKey,
+@@ -5365,7 +5386,10 @@
+ 			...chatSendTiming ? { chatSendTiming } : {}
+ 		});
+ 		const receipt = userTurnRecorder.getAdmissionReceipt?.();
++		const selectionReceipt = acceptSelection({ envelope: p.capabilitySelection, requestIdentity: normalizedRequest.value.requestIdentity,
++			identity: { operationId: clientRunId, agentId: selectedAgent.agentId ?? preparedSession.value.agentId, sessionKey, sessionId: admittedSessionId }, client });
+ 		const ackPayload = {
++			...selectionReceipt ? { capabilitySelection: selectionReceipt } : {},
+ 			...goalResult,
+ 			runId: clientRunId,
+ 			status: "started",
+--- a/dist/get-reply-DN4OcavF.mjs
++++ b/dist/get-reply-DN4OcavF.mjs
+@@ -4442,6 +4442,7 @@
+ 			clientCaps: ctx.GatewayClientCaps,
+ 			gatewayUiCommandTarget: ctx.GatewayUiCommandTarget,
+ 			toolBindings: ctx.GatewayRunToolBindings,
++			capabilitySelection: opts?.capabilitySelection,
+ 			chatType: replyRoute.chatType,
+ 			agentAccountId: replyRoute.accountId,
+ 			conversationRoutePeerId: sessionCtx.ConversationRoutePeerId,
+--- a/dist/agent-runner.runtime-DRp6jmuv.mjs
++++ b/dist/agent-runner.runtime-DRp6jmuv.mjs
+@@ -1,3 +1,5 @@
++import { enforceSelection, finishSelection, markSelection, rejectSelectionRuntime } from "./shoggoth-capability-selection.mjs";
++import { l as getSelectionRegistrationRegistry } from "./runtime-D_mv_Ppq.mjs";
+ import { S as parseStrictInteger, f as asSafeIntegerInRange, l as asNonNegativeFiniteNumber, s as asFiniteNumber } from "./number-coercion-CLj0HTDM.mjs";
+ import "./src-CZ2wJvNB.mjs";
+ import { n as estimateStringChars } from "./cjk-chars-6ld30jSx.mjs";
+@@ -1697,6 +1699,7 @@
+ //#region src/auto-reply/reply/agent-runner-cli-candidate.ts
+ async function runCliFallbackCandidate(params) {
+ 	const turn = params.turn;
++	rejectSelectionRuntime(turn.followupRun.run.capabilitySelection, "cli-fallback");
+ 	const expectedLifecycleRevision = turn.getActiveSessionEntry()?.lifecycleRevision;
+ 	const selectedModelEntry = findModelInCatalog(params.candidateRun.thinkingCatalog ?? [], params.provider, params.model);
+ 	const modelHasVision = await resolveRunModelHasVision({
+@@ -2293,6 +2296,8 @@
+ 		agentId: turn.followupRun.run.agentId,
+ 		sessionKey: turn.followupRun.run.runtimePolicySessionKey ?? turn.sessionKey
+ 	});
++	if (turn.followupRun.run.capabilitySelection && agentHarnessPolicy.runtime !== "openclaw") rejectSelectionRuntime(turn.followupRun.run.capabilitySelection, agentHarnessPolicy.runtime);
++	if (turn.followupRun.run.capabilitySelection && resolveSessionPinnedHarnessId(turn.getActiveSessionEntry()) && resolveSessionPinnedHarnessId(turn.getActiveSessionEntry()) !== "openclaw") rejectSelectionRuntime(turn.followupRun.run.capabilitySelection, "pinned-harness");
+ 	const embeddedRunProvider = resolveOpenAIRuntimeProvider({
+ 		provider: params.provider,
+ 		harnessRuntime: agentHarnessPolicy.runtime,
+@@ -3241,6 +3246,9 @@
+ 		liveModelSwitchRuntimeEntry = { agentRuntimeOverride: err.agentRuntimeOverride };
+ 	};
+ 	const runId = params.opts?.runId ?? crypto.randomUUID();
++	await enforceSelection(params.followupRun.run.capabilitySelection, { operationId: params.followupRun.run.capabilitySelection?.operationId,
++		agentId: params.followupRun.run.agentId, sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,
++		sessionId: params.followupRun.run.sessionId, actualRunId: runId }, getSelectionRegistrationRegistry());
+ 	const agentTurnTiming = createAgentTurnTimingTracker({ profilerEnabled: isReplyProfilerEnabled({ config: runtimeConfig }) });
+ 	const shouldSurfaceToControlUi = isInternalMessageChannel(params.followupRun.run.messageProvider ?? params.sessionCtx.Surface ?? params.sessionCtx.Provider);
+ 	let lifecycleGeneration = captureAgentRunLifecycleGeneration(runId);
+@@ -3522,7 +3530,12 @@
+ 		abortSignal: params.replyOperation?.abortSignal ?? params.opts?.abortSignal
+ 	});
+ 	try {
+-		return await executeAgentTurnInternalLoop(params, commitTerminalOutcome, commitMcpAppModelContext, preparedRunAdmission, admittedRunContext, deferredLifecycle, compaction);
++		const result = await executeAgentTurnInternalLoop(params, commitTerminalOutcome, commitMcpAppModelContext, preparedRunAdmission, admittedRunContext, deferredLifecycle, compaction);
++		await finishSelection(params.followupRun.run.capabilitySelection, result.kind === "aborted" ? "aborted" : result.terminalRunFailed ? "failed" : "completed", getSelectionRegistrationRegistry());
++		return result;
++	} catch (error) {
++		markSelection(params.followupRun.run.capabilitySelection, "failed", error.code);
++		throw error;
+ 	} finally {
+ 		try {
+ 			await deferredLifecycle.complete();
+--- a/dist/builtin-openclaw-C7-lQJ2Z.mjs
++++ b/dist/builtin-openclaw-C7-lQJ2Z.mjs
+@@ -1,3 +1,5 @@
++import { assertSelectionRun, selectionSystemContext } from "./shoggoth-capability-selection.mjs";
++import { l as getSelectionRegistrationRegistry } from "./runtime-D_mv_Ppq.mjs";
+ import { D as resolveExpiresAtMsFromDurationMs, F as resolveTimerTimeoutMs, g as isFutureDateTimestampMs, h as finiteSecondsToTimerSafeMilliseconds, m as clampTimerTimeoutMs, o as asDateTimestampMs, s as asFiniteNumber, v as parseDateFirstTimestampMs, w as parseStrictPositiveInteger, y as parseDateStringTimestampMs } from "./number-coercion-CLj0HTDM.mjs";
+ import { r as consumeRootOptionToken } from "./cli-root-options-D4DzNt3r.mjs";
+ import { l as toErrorObject } from "./error-coercion-9cgpvoEN.mjs";
+@@ -5638,6 +5640,8 @@
+ * Runs the fail-closed before_agent_run gate and persists blocked turns.
+ */
+ async function runEmbeddedAttemptBeforeAgentRun(input) {
++	try { assertSelectionRun(input.attempt.runId, { agentId: input.hookContext.agentId, sessionKey: input.attempt.sessionKey, sessionId: input.attempt.sessionId }, getSelectionRegistrationRegistry()); }
++	catch (error) { return { blockedBy: "capabilitySelection", promptError: new Error(error.code || "CAPABILITY_SELECTION_GATE_FAILED") }; }
+ 	if (!input.hookRunner?.hasHooks("before_agent_run")) return;
+ 	const persistBlockedBeforeAgentRun = async (block) => {
+ 		const idempotencyKey = `hook-block:before_agent_run:user:${input.attempt.runId}`;
+@@ -6885,6 +6889,8 @@
+ 		setSystemPrompt(composedSystemPrompt);
+ 		log$6.debug(`hooks: applied prependSystemContext/appendSystemContext (${hookResult?.prependSystemContext?.trim().length ?? 0}+${hookResult?.appendSystemContext?.trim().length ?? 0} chars)`);
+ 	}
++	const selectionContext = selectionSystemContext(attempt.runId, { agentId: input.hookAgentId, sessionKey: attempt.sessionKey, sessionId: attempt.sessionId }, getSelectionRegistrationRegistry());
++	if (selectionContext) setSystemPrompt(composeSystemPromptWithHookContext({ baseSystemPrompt: systemPromptText, prependSystemContext: selectionContext }));
+ 	const modelAwareSystemPrompt = isSettledTurnFinalization ? systemPromptText : appendModelIdentitySystemPrompt({
+ 		systemPrompt: buildModelIdentityPromptLine(input.runtimeModel) && systemPromptText.trim().length > 0 ? ensureSystemPromptCacheBoundary(systemPromptText) : systemPromptText,
+ 		model: input.runtimeModel
+--- a/dist/dispatch-from-config-CTQQ29Us.mjs
++++ b/dist/dispatch-from-config-CTQQ29Us.mjs
+@@ -1,3 +1,5 @@
++import { rejectSelectionRuntime } from "./shoggoth-capability-selection.mjs";
++import { t as getSelectionDispatchHooks } from "./hook-runner-global-CN2-D2Rq.mjs";
+ import { o as asDateTimestampMs } from "./number-coercion-CLj0HTDM.mjs";
+ import { i as resolveGlobalSingleton } from "./global-singleton-Dc_stLtU.mjs";
+ import { c as normalizeOptionalLowercaseString, l as normalizeOptionalString, o as normalizeLowercaseStringOrEmpty } from "./string-coerce-CIXf7egm.mjs";
+@@ -2073,6 +2075,7 @@
+ 		SessionKey: boundAcpDispatchSessionKey
+ 	}, cfg) : initialSessionStoreEntry;
+ 	const dispatchKind = resolveSessionDispatchKind(acpDispatchSessionKey, sessionStoreEntry.entry);
++	if (params.replyOptions?.capabilitySelection && (dispatchKind !== "agent" || getSelectionDispatchHooks()?.hasHooks("reply_dispatch") || getSelectionDispatchHooks()?.hasHooks("before_dispatch"))) rejectSelectionRuntime(params.replyOptions.capabilitySelection, "dispatch-takeover");
+ 	let preparedSessionBinding = sessionStoreEntry.sessionKey && sessionStoreEntry.entry?.sessionId ? {
+ 		sessionKey: sessionStoreEntry.sessionKey,
+ 		sessionId: sessionStoreEntry.entry.sessionId,
+@@ -3421,6 +3424,7 @@
+ 		};
+ 	};
+ 	if (pluginOwnedBinding) {
++		rejectSelectionRuntime(params.replyOptions?.capabilitySelection, "plugin-bound-dispatch");
+ 		if (isPreDispatchOperationAborted()) return {
+ 			status: "complete",
+ 			result: finishReplyOperationAbortedDispatch()
+--- a/dist/chat-BQ5bS4bL.mjs
++++ b/dist/chat-BQ5bS4bL.mjs
+@@ -1,3 +1,6 @@
++import { querySelection, selectionCapabilities } from "./shoggoth-capability-selection.mjs";
++import { l as getSelectionRegistrationRegistry } from "./runtime-D_mv_Ppq.mjs";
++import { t as selectionSessionCreateHandlers } from "./sessions-create-DCdsbk-U.mjs";
+ import "./session-key-CPlMYURm.mjs";
+ import { t as isIncognitoSessionKey } from "./incognito-session-key-BFBUGcnf.mjs";
+ import { _ as resolveSessionAgentId } from "./agent-scope-PkvoRuZC.mjs";
+@@ -243,6 +246,27 @@
+ 			disabled: true
+ 		});
+ 	},
++	"chat.selection.capabilities": async (options) => {
++		const { params, respond } = options;
++		if (params && (Object.keys(params).some(key => !["sessionKey", "agentId"].includes(key)) || params.sessionKey !== void 0 && (typeof params.sessionKey !== "string" || params.sessionKey.length < 1 || params.sessionKey.length > 512) || params.agentId !== void 0 && (typeof params.agentId !== "string" || params.agentId.length < 1 || params.agentId.length > 128))) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, "CAPABILITY_SELECTION_QUERY_INVALID")); return; }
++		let subject;
++		if (params?.sessionKey) {
++			const requestedAgent = resolveRequestedSessionAgentId(options.context.getRuntimeConfig(), params.sessionKey, params.agentId);
++			if (!requestedAgent.ok) { respond(false, void 0, requestedAgent.error); return; }
++			let creationError;
++			await selectionSessionCreateHandlers["sessions.create"]({ ...options, params: { key: params.sessionKey, ...params.agentId ? { agentId: params.agentId } : {} }, respond: (ok, payload, error) => {
++				if (!ok) { creationError = error; return; }
++				if (payload?.key !== params.sessionKey || typeof payload?.sessionId !== "string" || payload.runStarted === true) { creationError = errorShape(ErrorCodes.INVALID_REQUEST, "CAPABILITY_SELECTION_SESSION_MISMATCH"); return; }
++				subject = { sessionKey: payload.key, sessionId: payload.sessionId, agentId: requestedAgent.agentId };
++			} });
++			if (creationError || !subject) { respond(false, void 0, creationError ?? errorShape(ErrorCodes.UNAVAILABLE, "CAPABILITY_SELECTION_SESSION_UNAVAILABLE")); return; }
++		}
++		respond(true, { ...selectionCapabilities(getSelectionRegistrationRegistry()), ...subject ? { subject } : {} });
++	},
++	"chat.selection.get": async ({ params, client, respond }) => {
++		try { respond(true, querySelection(params, client)); }
++		catch (error) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, error.code || "CAPABILITY_SELECTION_QUERY_FAILED")); }
++	},
+ 	"chat.send": handleDirectExternalChatSend,
+ 	"chat.inject": async ({ params, respond, context }) => {
+ 		if (!assertValidParams(params, validateChatInjectParams, "chat.inject", respond)) return;
+--- a/dist/method-scopes-CF6Mdynq.mjs
++++ b/dist/method-scopes-CF6Mdynq.mjs
+@@ -1807,6 +1807,8 @@
+ 		"operator.write",
+ 		"<=2026.7"
+ 	],
++	[ "chat.selection.capabilities", "chat", "operator.write", "2026.9.5-shoggoth-v1" ],
++	[ "chat.selection.get", "chat", "operator.write", "2026.9.5-shoggoth-v1" ],
+ 	[
+ 		"chat.send",
+ 		"chat",
+--- a/dist/agent-tools.before-tool-call-ya9NNSXc.mjs
++++ b/dist/agent-tools.before-tool-call-ya9NNSXc.mjs
+@@ -1,3 +1,4 @@
++import { selectionToolContext } from "./shoggoth-capability-selection.mjs";
+ import { a as addTimerTimeoutGraceMs } from "./number-coercion-CLj0HTDM.mjs";
+ import { t as createDeferredCore } from "./deferred-D0La5CRk.mjs";
+ import { i as resolveGlobalSingleton } from "./global-singleton-Dc_stLtU.mjs";
+@@ -2783,6 +2784,7 @@
+ 	});
+ }
+ async function runBeforeToolCallHook(args) {
++	selectionToolContext(args.ctx?.runId, args.ctx, getActivePluginRegistry());
+ 	const toolName = normalizeToolPolicyName(args.toolName || "tool");
+ 	const params = args.params;
+ 	let loopWarning;
+@@ -2878,7 +2880,7 @@
+ 			...args.toolKind && { toolKind: args.toolKind },
+ 			...args.toolInputKind && { toolInputKind: args.toolInputKind }
+ 		};
+-		const buildToolContext = (identity) => ({
++		const buildToolContext = (identity) => selectionToolContext(args.ctx?.runId, {
+ 			toolName,
+ 			...identity,
+ 			...args.ctx?.agentId && { agentId: args.ctx.agentId },
+@@ -2890,7 +2892,7 @@
+ 			...args.toolCallId && { toolCallId: args.toolCallId },
+ 			...args.ctx?.channelId && { channelId: args.ctx.channelId },
+ 			...args.ctx?.requester ? { requester: args.ctx.requester } : {}
+-		});
++		}, getActivePluginRegistry());
+ 		const toolContext = buildToolContext(toolIdentity);
+ 		let trustedPolicyParams = normalizedParams;
+ 		const trustedPolicyResult = shouldRunTrustedPolicies ? await runTrustedToolPolicies({
+@@ -3591,6 +3593,7 @@
+ 			});
+ 			signal?.throwIfAborted();
+ 			assertAgentPluginRuntimeCurrent();
++			selectionToolContext(ctx?.runId, ctx, getActivePluginRegistry());
+ 			runAgentToolSourceExecutionGuard(tool);
+ 			admitExecution?.();
+ 			onImplementationStart?.();
+--- /dev/null
++++ b/dist/shoggoth-capability-selection.mjs
+@@ -0,0 +1,260 @@
++// Shoggoth compatibility contract v1. This module is host control data only.
++// No selection envelope, dispatch reference, proof, or journal enters model input.
++import fs from 'node:fs';
++import path from 'node:path';
++import os from 'node:os';
++import { createHash, randomUUID } from 'node:crypto';
++import { l as isPluginRecordActive } from './registry-lifecycle-FQWvWEID.mjs';
++
++const registrations = new WeakMap();
++const runtimeInstanceId = randomUUID();
++const runBindings = new Map();
++const opaque = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
++const reference = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
++const envelopeKeys = ['version', 'operationId', 'dispatchRef', 'selectionDigest', 'requiredAdapterId', 'adapterGeneration'];
++const digest = text => createHash('sha256').update(text).digest('hex');
++const failure = code => Object.assign(new Error(code), { code });
++const recordObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
++
++export function validateSelectionEnvelope(value, operationId) {
++  if (!recordObject(value) || Object.keys(value).length !== envelopeKeys.length
++      || !envelopeKeys.every(key => Object.hasOwn(value, key)) || value.version !== 1
++      || !opaque.test(value.operationId) || value.operationId !== operationId
++      || !reference.test(value.dispatchRef) || !/^[a-f0-9]{64}$/.test(value.selectionDigest)
++      || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(value.requiredAdapterId)
++      || !opaque.test(value.adapterGeneration)) throw failure('CAPABILITY_SELECTION_INVALID');
++  return Object.freeze(Object.fromEntries(envelopeKeys.map(key => [key, value[key]])));
++}
++
++function trustMatches(record) {
++  try {
++    const trustFile = process.env.OPENCLAW_SELECTION_TRUST_PATH;
++    if (!trustFile || fs.statSync(trustFile).size > 4096) return false;
++    const trust = JSON.parse(fs.readFileSync(trustFile, 'utf8'));
++    const source = fs.realpathSync(record.source);
++    return trust.version === 1 && trust.adapterId === record.id
++      && source === fs.realpathSync(trust.sourcePath)
++      && /^[a-f0-9]{64}$/.test(trust.sourceSha256)
++      && digest(fs.readFileSync(source)) === trust.sourceSha256;
++  } catch { return false; }
++}
++
++// Called by the actual host plugin API builder with its own plugin record.
++// The caller cannot choose another record, ID, or registration generation.
++export function registerSelectionGate(record, handler, metadata) {
++  if (!recordObject(metadata) || Object.keys(metadata).some(key => !["instanceId", "onTerminal"].includes(key)) || !opaque.test(metadata.instanceId) || typeof metadata.onTerminal !== "function") throw failure("CAPABILITY_SELECTION_ADAPTER_METADATA_INVALID");
++  if (typeof handler !== 'function' || !trustMatches(record)) throw failure('CAPABILITY_SELECTION_ADAPTER_UNTRUSTED');
++  if (registrations.has(record)) throw failure('CAPABILITY_SELECTION_ADAPTER_DUPLICATE');
++  const registration = Object.freeze({ adapterId: record.id, adapterGeneration: randomUUID(), instanceId: metadata.instanceId, handler, onTerminal: metadata.onTerminal });
++  registrations.set(record, registration);
++  return Object.freeze({ version: 1, adapterId: registration.adapterId, adapterGeneration: registration.adapterGeneration, instanceId: registration.instanceId });
++}
++
++function currentRegistration(registry, adapterId) {
++  const records = registry?.plugins?.filter(item => item.id === adapterId && item.status === 'loaded' && isPluginRecordActive(registry, item)) ?? [];
++  if (records.length !== 1 || !trustMatches(records[0])) throw failure('CAPABILITY_SELECTION_ADAPTER_UNAVAILABLE');
++  const registration = registrations.get(records[0]);
++  if (!registration) throw failure('CAPABILITY_SELECTION_ADAPTER_UNAVAILABLE');
++  return registration;
++}
++
++export function selectionCapabilities(registry) {
++  const adapters = [];
++  for (const record of registry?.plugins ?? []) {
++    try {
++      const registration = currentRegistration(registry, record.id);
++      adapters.push({ adapterId: registration.adapterId, adapterGeneration: registration.adapterGeneration, instanceId: registration.instanceId });
++    } catch { /* Untrusted or absent registrations are never advertised. */ }
++  }
++  return { version: 1, host: 'openclaw', hostVersion: '2026.9.5', wire: 'capabilitySelection',
++    receiptMethod: 'chat.selection.get', supportedQueueModes: ['followup'], supportedHarnesses: ['openclaw'], adapters };
++}
++
++export function assertSelectionRegistration(envelope, registry) {
++  if (!envelope) return;
++  const registration = currentRegistration(registry, envelope.requiredAdapterId);
++  if (registration.adapterGeneration !== envelope.adapterGeneration) throw failure('CAPABILITY_SELECTION_GENERATION_CHANGED');
++}
++
++function journalDirectory() {
++  const state = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), '.openclaw');
++  const directory = path.join(state, 'shoggoth-capability-selection-v1');
++  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
++  return directory;
++}
++function journalFile(operationId) { return path.join(journalDirectory(), `${digest(operationId)}.json`); }
++function readRecord(operationId) {
++  if (!opaque.test(operationId)) throw failure('CAPABILITY_SELECTION_OPERATION_INVALID');
++  const file = journalFile(operationId);
++  if (!fs.existsSync(file)) return null;
++  if (fs.statSync(file).size > 16384) throw failure('CAPABILITY_SELECTION_JOURNAL_INVALID');
++  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
++  if (record.version !== 1 || record.envelope?.operationId !== operationId) throw failure('CAPABILITY_SELECTION_JOURNAL_INVALID');
++  validateSelectionEnvelope(record.envelope, operationId);
++  return record;
++}
++function writeRecord(record) {
++  const file = journalFile(record.envelope.operationId);
++  if (!fs.existsSync(file) && fs.readdirSync(journalDirectory()).filter(name => name.endsWith('.json')).length >= 10000)
++    throw failure('CAPABILITY_SELECTION_JOURNAL_FULL');
++  const temporary = `${file}.${randomUUID()}.tmp`;
++  const fd = fs.openSync(temporary, 'wx', 0o600);
++  try { fs.writeFileSync(fd, JSON.stringify(record)); fs.fsyncSync(fd); }
++  finally { fs.closeSync(fd); }
++  try { fs.renameSync(temporary, file); }
++  finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
++  const directoryFd = fs.openSync(journalDirectory(), 'r');
++  try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
++}
++function canRead(record, client) {
++  const device = client?.connect?.device?.id;
++  return record.ownerDeviceId ? typeof device === 'string' && device === record.ownerDeviceId
++    : typeof client?.connId === 'string' && client.connId === record.ownerConnId;
++}
++function receipt(record) {
++  return { ...record.envelope, agentId: record.agentId, sessionKey: record.sessionKey,
++    sessionId: record.sessionId, clientRunId: record.clientRunId, actualRunId: record.actualRunId,
++    ...record.errorCode ? { errorCode: record.errorCode } : {}, status: record.runtimeInstanceId !== runtimeInstanceId && !['completed', 'blocked', 'failed', 'aborted'].includes(record.status)
++      ? 'needs-verification' : record.status, acceptedAt: record.acceptedAt, updatedAt: record.updatedAt };
++}
++
++// Durable retry protection runs before native admission, including omitted envelopes.
++export function replaySelectionRequest({ envelope, operationId, requestIdentity, sessionKey, agentId, client }) {
++  if (!opaque.test(operationId)) { if (envelope) throw failure('CAPABILITY_SELECTION_OPERATION_INVALID'); return null; }
++  const existing = readRecord(operationId);
++  if (!existing) return null;
++  if (!envelope || existing.requestIdentity !== requestIdentity || JSON.stringify(existing.envelope) !== JSON.stringify(envelope)
++      || existing.sessionKey !== sessionKey || existing.agentId !== agentId || !canRead(existing, client))
++    throw failure('CAPABILITY_SELECTION_OPERATION_CONFLICT');
++  return { runId: existing.clientRunId, status: 'accepted', replayed: true, capabilitySelection: receipt(existing) };
++}
++
++export function acceptSelection({ envelope, requestIdentity, identity, client }) {
++  if (!envelope) return null;
++  validateSelectionEnvelope(envelope, identity.operationId);
++  if (!identity.agentId || !identity.sessionId || !identity.sessionKey || !client?.connId)
++    throw failure('CAPABILITY_SELECTION_IDENTITY_UNAVAILABLE');
++  const existing = readRecord(envelope.operationId);
++  if (existing) throw failure('CAPABILITY_SELECTION_OPERATION_CONFLICT');
++  const now = Date.now();
++  const record = { version: 1, envelope, requestIdentity, ...identity, clientRunId: identity.operationId,
++    actualRunId: null, status: 'accepted', ownerConnId: client.connId,
++    ownerDeviceId: client.connect?.device?.id ?? null, runtimeInstanceId, acceptedAt: now, updatedAt: now };
++  writeRecord(record);
++  return receipt(record);
++}
++
++export function querySelection(params, client) {
++  if (!recordObject(params) || Object.keys(params).some(key => !['operationId', 'sessionKey', 'agentId'].includes(key))
++      || !opaque.test(params.operationId) || typeof params.sessionKey !== 'string') throw failure('CAPABILITY_SELECTION_QUERY_INVALID');
++  const record = readRecord(params.operationId);
++  if (!record) return null;
++  if (record.sessionKey !== params.sessionKey || params.agentId && record.agentId !== params.agentId || !canRead(record, client))
++    throw failure('CAPABILITY_SELECTION_QUERY_FORBIDDEN');
++  return receipt(record);
++}
++
++export function markSelection(envelope, status, errorCode) {
++  if (!envelope) return;
++  const record = readRecord(envelope.operationId);
++  if (!record || JSON.stringify(record.envelope) !== JSON.stringify(envelope)) throw failure('CAPABILITY_SELECTION_OPERATION_CONFLICT');
++  if (['completed', 'blocked', 'failed', 'aborted'].includes(record.status)) return;
++  record.status = status; if (typeof errorCode === "string" && /^[A-Za-z0-9_.:-]{1,200}$/.test(errorCode)) record.errorCode = errorCode; record.updatedAt = Date.now(); writeRecord(record);
++}
++
++function assertIdentity(record, identity) {
++  if (record.agentId !== identity.agentId || record.sessionKey !== identity.sessionKey || record.sessionId !== identity.sessionId
++      || record.envelope.operationId !== identity.operationId || !opaque.test(identity.actualRunId))
++    throw failure('CAPABILITY_SELECTION_IDENTITY_MISMATCH');
++  if (record.actualRunId && record.actualRunId !== identity.actualRunId) throw failure('CAPABILITY_SELECTION_RUN_CONFLICT');
++}
++
++export async function enforceSelection(envelope, identity, registry) {
++  if (!envelope) return;
++  envelope = validateSelectionEnvelope(envelope, identity.operationId);
++  const record = readRecord(envelope.operationId);
++  if (!record || JSON.stringify(record.envelope) !== JSON.stringify(envelope) || record.runtimeInstanceId !== runtimeInstanceId)
++    throw failure('CAPABILITY_SELECTION_DISPATCH_UNAVAILABLE');
++  assertIdentity(record, identity);
++  record.actualRunId = identity.actualRunId; record.status = 'binding'; record.updatedAt = Date.now(); writeRecord(record);
++  try {
++    assertSelectionRegistration(envelope, registry);
++    const registration = currentRegistration(registry, envelope.requiredAdapterId);
++    const proofExpected = Object.freeze({ ...envelope, ...identity });
++    const gateRequest = Object.freeze({ capabilitySelection: envelope, identity: Object.freeze({ ...identity }) });
++    let timer;
++    const result = await Promise.race([Promise.resolve().then(() => registration.handler(gateRequest)),
++      new Promise((_, reject) => { timer = setTimeout(() => reject(failure('CAPABILITY_SELECTION_GATE_TIMEOUT')), 5000); })])
++      .finally(() => clearTimeout(timer));
++    if (!recordObject(result) || Object.keys(result).length !== 2 || !Object.hasOwn(result, 'proof') || !Object.hasOwn(result, 'prependSystemContext') || typeof result.prependSystemContext !== 'string' || result.prependSystemContext.trim().length < 1 || result.prependSystemContext.length > 8192) throw failure('CAPABILITY_SELECTION_RESULT_INVALID');
++    const proof = result.proof;
++    if (!recordObject(proof) || Object.keys(proof).length !== Object.keys(proofExpected).length
++        || !Object.entries(proofExpected).every(([key, value]) => proof[key] === value)) throw failure('CAPABILITY_SELECTION_PROOF_INVALID');
++    assertSelectionRegistration(envelope, registry);
++    const current = readRecord(envelope.operationId);
++    if (!current || current.status !== 'binding' || current.actualRunId !== identity.actualRunId)
++      throw failure('CAPABILITY_SELECTION_DISPATCH_CHANGED');
++    current.status = 'bound'; current.updatedAt = Date.now(); writeRecord(current);
++    runBindings.set(identity.actualRunId, Object.freeze({ envelope, identity: Object.freeze({ ...identity }),
++      selectionAdapterInstanceId: registration.instanceId, prependSystemContext: result.prependSystemContext }));
++  } catch (error) {
++    markSelection(envelope, 'blocked', error?.code || 'CAPABILITY_SELECTION_GATE_FAILED');
++    throw failure(error?.code || 'CAPABILITY_SELECTION_GATE_FAILED');
++  }
++}
++
++// Recheck after asynchronous preparation and before every built-in model submit.
++export function assertSelectionRun(runId, identity, registry) {
++  const binding = runBindings.get(runId);
++  if (!binding) return; // Ordinary turns have no selection contract.
++  const record = readRecord(binding.envelope.operationId);
++  if (!record || record.status !== 'bound') throw failure('CAPABILITY_SELECTION_DISPATCH_CHANGED');
++  assertIdentity(record, { ...binding.identity, ...identity, actualRunId: runId });
++  assertSelectionRegistration(binding.envelope, registry);
++}
++
++// The canonical Gateway gate owns this identity. Per-model plugin forks must
++// never replace it with their own freshly generated adapter instance UUID.
++export function selectionToolContext(runId, context, registry) {
++  const binding = runBindings.get(runId);
++  if (!binding) return context; // Ordinary turns retain their existing hook context.
++  if (!recordObject(context) || !['agentId', 'sessionKey', 'sessionId'].every(key => typeof context[key] === 'string' && context[key].length > 0))
++    throw failure('CAPABILITY_SELECTION_TOOL_IDENTITY_UNAVAILABLE');
++  assertSelectionRun(runId, { agentId: context.agentId, sessionKey: context.sessionKey, sessionId: context.sessionId }, registry);
++  const registration = currentRegistration(registry, binding.envelope.requiredAdapterId);
++  if (registration.instanceId !== binding.selectionAdapterInstanceId) throw failure('CAPABILITY_SELECTION_ADAPTER_INSTANCE_CHANGED');
++  return Object.freeze({ ...context, capabilitySelection: binding.envelope,
++    selectionAdapterInstanceId: binding.selectionAdapterInstanceId });
++}
++
++export function rejectSelectionRuntime(envelope, runtime) {
++  if (!envelope) return;
++  markSelection(envelope, 'blocked');
++  throw failure(`CAPABILITY_SELECTION_RUNTIME_UNSUPPORTED:${runtime}`);
++}
++
++// Only the trusted gate can contribute bounded preference context to this run.
++export function selectionSystemContext(runId, identity, registry) {
++  assertSelectionRun(runId, identity, registry);
++  return runBindings.get(runId)?.prependSystemContext ?? null;
++}
++
++// A failed terminal confirmation is observation-only; selected work is never replayed.
++export async function finishSelection(envelope, status, registry) {
++  if (!envelope) return;
++  const record = readRecord(envelope.operationId);
++  if (!record || ['completed', 'blocked', 'failed', 'aborted'].includes(record.status)) return;
++  const binding = record.actualRunId ? runBindings.get(record.actualRunId) : null;
++  if (!binding) { markSelection(envelope, status); return; }
++  try {
++    assertSelectionRegistration(envelope, registry);
++    const registration = currentRegistration(registry, envelope.requiredAdapterId);
++    if (typeof registration.onTerminal !== 'function') throw failure('CAPABILITY_SELECTION_TERMINAL_HANDLER_MISSING');
++    let timer;
++    await Promise.race([Promise.resolve().then(() => registration.onTerminal(Object.freeze({
++      capabilitySelection: envelope, identity: binding.identity, status,
++    }))), new Promise((_, reject) => { timer = setTimeout(() => reject(failure('CAPABILITY_SELECTION_TERMINAL_TIMEOUT')), 5000); })])
++      .finally(() => clearTimeout(timer));
++    markSelection(envelope, status);
++  } catch (error) { markSelection(envelope, 'needs-verification', error?.code || 'CAPABILITY_SELECTION_TERMINAL_FAILED'); }
++}

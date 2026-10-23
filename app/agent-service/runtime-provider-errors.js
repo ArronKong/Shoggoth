@@ -9,6 +9,7 @@ const RATE_PATTERN = /\brate[\s_-]*limit(?:ed|s)?\b|\btoo[\s_-]many[\s_-]request
 const SETTINGS_PATTERN = /\b(?:unsupported(?:_value)?|invalid|not supported)\b[^\r\n]{0,512}\b(?:reasoning[._ -]effort|model_reasoning_effort|service_tier)\b|\b(?:reasoning[._ -]effort|model_reasoning_effort|service_tier)\b[^\r\n]{0,256}\b(?:unsupported|invalid|not supported)\b/iu;
 const MODEL_PATTERN = /\b(?:model_not_found|unsupported_model)\b|\bmodel\b[^\r\n]{0,256}\b(?:not supported|does not exist|not found|not available|unavailable)\b/iu;
 const CAPACITY_PATTERN = /\bserver[_ -]?overloaded\b|\bselected model\b[^\r\n]{0,128}\bat capacity\b|\b(?:service|server)\b[^\r\n]{0,80}\b(?:overloaded|temporarily unavailable)\b/iu;
+const ATTACHMENT_PATTERN = /\bfile part media type\b[^\r\n]{0,256}\b(?:not supported|unsupported)\b/iu;
 
 function classifyProviderLimit(...texts) {
   let rateLimited = false;
@@ -30,6 +31,7 @@ function classifyProviderFailure(...texts) {
   if (bounded.some(text => SETTINGS_PATTERN.test(text))) return "RUNTIME_MODEL_SETTINGS_INVALID";
   if (bounded.some(text => MODEL_PATTERN.test(text))) return "RUNTIME_MODEL_UNAVAILABLE";
   if (bounded.some(text => CAPACITY_PATTERN.test(text))) return "RUNTIME_UPSTREAM_UNAVAILABLE";
+  if (bounded.some(text => ATTACHMENT_PATTERN.test(text))) return "RUNTIME_ATTACHMENT_UNSUPPORTED";
   return null;
 }
 

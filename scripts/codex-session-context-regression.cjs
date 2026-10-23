@@ -105,12 +105,13 @@ async function runtime() {
   return new CodexRuntimeAdapter({ runtimePool: { get: async () => host } }).acquire(binding);
 }
 
-async function turn(handle, id, prompt, context) {
+async function turn(handle, id, prompt, context, turnDeveloperInstructions) {
   const events = [];
   const unsubscribe = host.subscribe(event => events.push(event));
   try {
     const receipt = await handle.turnStart({ sessionId: id, prompt, operationId: `op-${serial}-${Date.now()}`,
       ...(context ? { context } : {}),
+      ...(turnDeveloperInstructions ? { turnDeveloperInstructions } : {}),
       permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
     const until = Date.now() + 10000;
     while (!events.some(event => event.method === "turn/completed" && event.turnId === receipt.turn.id)) {
@@ -135,7 +136,7 @@ async function turn(handle, id, prompt, context) {
   let handle = await runtime();
   const first = await handle.sessionStart({ cwd: scratch, developerInstructions: policy("OLD"),
     permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
-  await turn(handle, first.session.id, "Remember this first user message.");
+  const initial = await turn(handle, first.session.id, "Remember this first user message.");
   await host.stop();
   handle = await runtime();
   await handle.sessionResume({ sessionId: first.session.id, cwd: scratch, developerInstructions: policy("NEW") });
@@ -145,8 +146,17 @@ async function turn(handle, id, prompt, context) {
   assert.match(dev.at(-1), /supersede earlier Shoggoth developer instructions/u);
   assert.match(JSON.stringify(resumed.input), /Remember this first user message/u);
   await handle.sessionResume({ sessionId: first.session.id, developerInstructions: policy("NEW") });
-  const next = await turn(handle, first.session.id, "Third user message.");
+  const next = await turn(handle, first.session.id, "Third user message.", undefined, "CURRENT_RUN_3: retain long-tail tool capabilities.");
   assert.equal(developerTexts(next).filter(text => text.includes("SHOGGOTH_POLICY_NEW")).length, 1);
+  assert.match(developerTexts(next).at(-1), /CURRENT_RUN_3/u);
+  await handle.sessionResume({ sessionId: first.session.id, developerInstructions: policy("NEW") });
+  const fourth = await turn(handle, first.session.id, "Fourth user message.", undefined, "CURRENT_RUN_4: this supersedes current Run data.");
+  assert.equal(developerTexts(fourth).filter(text => text.includes("SHOGGOTH_POLICY_NEW")).length, 1);
+  assert.match(developerTexts(fourth).at(-1), /CURRENT_RUN_4/u);
+  assert.match(JSON.stringify(fourth.input), /Remember this first user message/u);
+  // This synthetic provider may advertise no tools. Preserve exactly the
+  // native configuration of the initial request rather than inventing tools.
+  for (const key of ["tools", "tool_choice", "parallel_tool_calls"]) assert.deepEqual(fourth[key], initial[key]);
   const fresh = await handle.sessionStart({ cwd: scratch, developerInstructions: policy("FRESH") });
   const freshBody = await turn(handle, fresh.session.id, "Fresh user message.");
   assert.equal(JSON.stringify(freshBody).includes("SHOGGOTH_POLICY_NEW"), false);
@@ -168,7 +178,7 @@ async function turn(handle, id, prompt, context) {
     assert.ok(JSON.stringify(received.input).includes(JSON.stringify(fitting).slice(1, -1)), "fitting input arrives without truncation");
     console.log(`PASS real Codex: verified 1048576-character input guard, no model call on rejection, ${Buffer.byteLength(fitting)} bytes arrived intact; remote capacity is not measured`);
   }
-  console.log("PASS real Codex: proxy inheritance, resumed developer policy, retained history, no repeated injection, separate and concurrent sessions");
+  console.log("PASS real Codex: proxy inheritance, resumed developer policy, retained history, no repeated stable injection, current Run developer data, unchanged native tool configuration, separate and concurrent sessions");
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
   try { await host?.stop(); } finally {
     server.closeAllConnections();

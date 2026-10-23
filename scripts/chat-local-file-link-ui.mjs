@@ -14,7 +14,8 @@ let serving = false;
 try {
   await build({
     entryPoints: [path.join(root, "scripts/fixtures/chat-local-file-links.tsx")], bundle: true, format: "esm",
-    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl" },
+    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".png": "dataurl", ".webp": "dataurl" },
+    external: ["/fonts/*"],
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
   });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><title>Chat 本地文件路径预览</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
@@ -35,8 +36,10 @@ try {
     const main = path.join(temp, "main.cjs");
     fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
-app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1360,height:950,webPreferences:{backgroundThrottling:false}});let passed=false;
-try{await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))});console.log(JSON.stringify(await w.webContents.executeJavaScript('window.runFixture()')));passed=true;}catch(e){console.error(e);}finally{w.destroy();app.exit(passed?0:1);}});`);
+app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:${Number(process.env.CHAT_FILE_LINK_WIDTH || 1360)},height:950,webPreferences:{backgroundThrottling:false}});let passed=false;
+try{await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))});console.log(JSON.stringify(await w.webContents.executeJavaScript('window.runFixture()')));
+if(${JSON.stringify(process.env.CHAT_FILE_LINK_SCREENSHOT || "")})require('node:fs').writeFileSync(${JSON.stringify(process.env.CHAT_FILE_LINK_SCREENSHOT || "")},(await w.webContents.capturePage()).toPNG());
+passed=true;}catch(e){console.error(e);}finally{w.destroy();app.exit(passed?0:1);}});`);
     const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], {
       encoding: "utf8", timeout: 30_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
     });

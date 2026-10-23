@@ -420,7 +420,13 @@ function createOpenClawModelChange({
   runtimeApply,
   scan = scanOpenClawReferences,
   acquireLeases = acquireReferenceMutationLeases,
+  credentialApply,
+  configurationMode,
+  requiresRuntimeLease = false,
 } = {}) {
+  if (configurationMode === "native-config") {
+    return require("./openclaw-native-model-change").createNativeOpenClawModelChange({ backend, runtimeApply, credentialApply, requiresRuntimeLease });
+  }
   validateDependencies({ backend, scanners, runtimeApply });
   if (typeof scan !== "function" || typeof acquireLeases !== "function") {
     throw new OpenClawModelChangeError(
@@ -429,6 +435,19 @@ function createOpenClawModelChange({
       { status: 500 },
     );
   }
+
+  // Node-private composition hooks; safeSpec, journals and public RPC never
+  // carry these callbacks or the secret held by the Main broker.
+  if (credentialApply !== undefined && (!credentialApply
+    || ["hasSecretIntent", "wasCandidateApplied", "withPhase"].some(key => typeof credentialApply[key] !== "function"))) {
+    throw new OpenClawModelChangeError("invalid_credential_apply_dependency", "凭据事务依赖不完整", { status: 500 });
+  }
+  const hasSecretIntent = secretEnvelope => Boolean(secretEnvelope?.apiKey)
+    || credentialApply?.hasSecretIntent() === true;
+  const candidateSecretApplied = secretEnvelope => Boolean(secretEnvelope?.apiKey)
+    || credentialApply?.wasCandidateApplied() === true;
+  const withCredentialPhase = (phase, action) => credentialApply
+    ? credentialApply.withPhase(phase, action) : action();
 
   /** 返回当前实时能力；unknown 仍可预检，但 apply 会在首写前要求安全 runtime lease。 */
   const getCapabilities = async () => {
@@ -637,9 +656,11 @@ function createOpenClawModelChange({
       for (const field of ["baseUrl", "api"]) {
         if (Object.prototype.hasOwnProperty.call(safeSpec.patch || {}, field)) providerPatch[field] = safeSpec.patch[field];
       }
-      if (secretEnvelope?.apiKey) providerPatch.apiKey = secretEnvelope.apiKey;
+      if (safeSpec.patch?.clearApiKey === true) providerPatch.apiKey = null;
+      else if (secretEnvelope?.apiKey) providerPatch.apiKey = secretEnvelope.apiKey;
       nextProvider = { ...clone(provider), ...providerPatch };
       if (providerPatch.baseUrl === null) delete nextProvider.baseUrl;
+      if (providerPatch.apiKey === null) delete nextProvider.apiKey;
       patch = { models: { providers: { [safeSpec.providerKey]: providerPatch } } };
     } else {
       throw new OpenClawModelChangeError("invalid_change_kind", "kind 不支持 stage-target");
@@ -648,7 +669,7 @@ function createOpenClawModelChange({
   };
 
   /** 用 fresh baseHash 恢复 Provider 与 Agent 配置；新 Provider 仅在未被外部扩展时整项删除。 */
-  const undoStagePatch = async (safeSpec, context, originalSnapshot, stagedProvider) => {
+  const undoStagePatch = async (safeSpec, context, originalSnapshot, stagedProvider) => withCredentialPhase("previous", async () => {
     const fresh = await getConfigSnapshot(backend);
     const currentProvider = providerState(fresh.parsed, safeSpec.providerKey).provider;
     if (originalSnapshot.parsed?.models?.providers?.[safeSpec.providerKey] == null
@@ -667,7 +688,7 @@ function createOpenClawModelChange({
       ...agentConfigArrayReplacePaths(originalSnapshot.parsed),
     ]);
     return { ok: true, manualCleanup: false };
-  };
+  });
 
   /** rename 五阶段；所有 precommit 错误都逆序补偿，source retire 前保持存在。 */
   const applyRename = async (safeSpec, context, secretEnvelope, initialPreview) => {
@@ -700,7 +721,7 @@ function createOpenClawModelChange({
 
         const staged = stagePatch(safeSpec, initialPreview, originalSnapshot, secretEnvelope);
         stagedProvider = staged.nextProvider;
-        await patchConfig(backend, context, originalSnapshot, staged.patch, staged.replacePaths);
+        await withCredentialPhase("candidate", () => patchConfig(backend, context, originalSnapshot, staged.patch, staged.replacePaths));
         await context.recordStage?.("stage-target", { fingerprints: initialPreview.fingerprints });
         for (const reference of references.filter((item) => item.store === "config" && item.definition !== true)) {
           await context.recordStep?.(journalStep(reference, "verified"));
@@ -771,7 +792,7 @@ function createOpenClawModelChange({
     if (safeSpec.kind === "create"
       && safeSpec.providerMode === "new"
       && context.journalEntry?.secretStep === "pending"
-      && !secretEnvelope?.apiKey) {
+      && !hasSecretIntent(secretEnvelope)) {
       return { status: "needs_secret", code: "secret_required", stage: "stage-target" };
     }
     let runtimeLease = null;
@@ -779,9 +800,10 @@ function createOpenClawModelChange({
     let stagedProvider = null;
     try {
       const fresh = await scanForKind(scan, backend, safeSpec, initialPreview._snapshot?.parsed);
-      // 旧版本的待恢复 create journal 包含 Session/Cron 指纹；新增已不依赖这两项，
+      // 旧版本的待恢复字段编辑 journal 包含 Session/Cron 指纹；不改身份已不依赖这两项，
       // 续提凭据时同样只移除它们，保留配置及其它指纹的严格比较。
-      const expectedFingerprints = safeSpec.kind === "create"
+      const expectedFingerprints = (safeSpec.kind === "create" || safeSpec.kind === "update"
+        || safeSpec.kind === "update-provider" && !safeSpec.patch?.renameTo)
         && !Object.hasOwn(fresh.fingerprints, "sessions")
         && !Object.hasOwn(fresh.fingerprints, "cron")
         ? Object.fromEntries(Object.entries(context.journalEntry?.fingerprints || {})
@@ -796,11 +818,11 @@ function createOpenClawModelChange({
       await context.recordStage?.("preflight", { fingerprints: initialPreview.fingerprints });
       const staged = stagePatch(safeSpec, initialPreview, originalSnapshot, secretEnvelope);
       stagedProvider = staged.nextProvider;
-      await patchConfig(backend, context, originalSnapshot, staged.patch, staged.replacePaths);
+      await withCredentialPhase("candidate", () => patchConfig(backend, context, originalSnapshot, staged.patch, staged.replacePaths));
       await context.recordStage?.("stage-target", {
         fingerprints: initialPreview.fingerprints,
         ...(safeSpec.kind === "create" && safeSpec.providerMode === "new" ? { createdProvider: true } : {}),
-        ...(secretEnvelope?.apiKey ? { secretStep: "applied" } : {}),
+        ...(candidateSecretApplied(secretEnvelope) ? { secretStep: "applied" } : {}),
       });
       if (safeSpec.kind !== "update-provider") {
         if (await runtimeLease.verifyTarget(safeSpec, {}) !== true) {
@@ -812,7 +834,7 @@ function createOpenClawModelChange({
       await context.markCommitting?.({ fingerprints: initialPreview.fingerprints });
       await context.markCommitted?.({
         fingerprints: initialPreview.fingerprints,
-        ...(secretEnvelope?.apiKey ? { secretStep: "applied" } : {}),
+        ...(candidateSecretApplied(secretEnvelope) ? { secretStep: "applied" } : {}),
       });
       return { status: "applied", stage: "verify-ready" };
     } catch (error) {

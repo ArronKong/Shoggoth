@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { OAuthProvider, OAuthStartSession } from "../../types";
+import type { OAuthLoginTarget, OAuthProvider, OAuthStartSession } from "../../types";
 import {
   cancelOAuthSession,
   listOAuthProviders,
   pollOAuthSession,
   runProviderCommandInTerminal,
+  saveOAuthApiKey,
   startOAuthLogin,
   submitOAuthCode,
 } from "../../api/client";
 import { TextInput } from "../../components/Field";
 import Modal from "../../components/Modal";
 import { useConfirm, useToast } from "../../components/ui";
+import ProviderLoginPicker from "./ProviderLoginPicker";
 import styles from "./KeysPanel.module.css";
 
 // OAuth 登录弹窗（对齐官方）：pkce = 开授权页 → 粘贴 code → 提交；
@@ -28,6 +30,7 @@ import styles from "./KeysPanel.module.css";
 // start_oauth_login 显式拒绝 flow=external），所以这一支不发任何登录请求——
 // 给出命令让用户去终端跑，回来点「我已登录」重读一次目录来确认。
 type Phase =
+  | "choose"
   | "starting"
   | "awaiting"
   | "submitting"
@@ -50,6 +53,8 @@ export default function OAuthLoginModal({
   const toast = useToast();
   const confirm = useConfirm();
   const isExternal = provider.flow === "external";
+  // flow "providers": pick what to sign into before anything starts.
+  const isProviders = provider.flow === "providers";
   const [phase, setPhase] = useState<Phase>(isExternal ? "external" : "starting");
   const [session, setSession] = useState<OAuthStartSession | null>(null);
   const [code, setCode] = useState("");
@@ -58,9 +63,13 @@ export default function OAuthLoginModal({
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
+  // browser flow: the sign-in page and the step the backend's sign-in is on.
+  const [browser, setBrowser] = useState<{ authUrl: string | null; stage: string | null;
+    instructions: string | null; codeRequired: boolean }>({ authUrl: null, stage: null, instructions: null, codeRequired: false });
+  const openedUrl = useRef<string | null>(null);
   const alive = useRef(true);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (target?: OAuthLoginTarget) => {
     // external 不走登录接口——服务端会 400。直接进命令面板。
     if (isExternal) {
       setPhase("external");
@@ -68,24 +77,51 @@ export default function OAuthLoginModal({
       setNotice(null);
       return;
     }
+    if (isProviders && !target) {
+      setPhase("choose");
+      setError(null);
+      setSession(null);
+      return;
+    }
     setPhase("starting");
     setError(null);
     setSession(null);
     setCode("");
     try {
-      const s = await startOAuthLogin(backend, provider.id, undefined);
+      const s = await startOAuthLogin(backend, provider.id, undefined, target);
       if (!alive.current) return;
       setSession(s);
       setSecondsLeft(s.expiresIn || null);
-      setPhase(s.flow === "device_code" ? "polling" : "awaiting");
-      const url = s.flow === "pkce" ? s.authUrl : s.verificationUrl;
-      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      setBrowser({ authUrl: s.authUrl, stage: null, instructions: null, codeRequired: false });
+      setPhase(s.flow === "device_code" || s.flow === "browser" ? "polling" : "awaiting");
+      const url = s.flow === "device_code" ? s.verificationUrl : s.authUrl;
+      if (url) {
+        openedUrl.current = url;
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
     } catch (e) {
       if (!alive.current) return;
       setPhase("error");
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [provider.id, isExternal]);
+  }, [provider.id, isExternal, isProviders]);
+
+  // flow "providers": an API key is saved directly, no sign-in session.
+  const saveKey = async (target: OAuthLoginTarget, key: string) => {
+    setPhase("submitting");
+    setError(null);
+    try {
+      await saveOAuthApiKey(backend, provider.id, target, key);
+      if (!alive.current) return;
+      setPhase("approved");
+      toast.success(t("keys.oauthConnectedToast", { name: provider.name }));
+      window.setTimeout(() => alive.current && onClose(), 1500);
+    } catch (e) {
+      if (!alive.current) return;
+      setPhase("error");
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   useEffect(() => {
     alive.current = true;
@@ -113,11 +149,21 @@ export default function OAuthLoginModal({
 
   // device_code：每 2s 问一次后端，approved 后 1.5s 自动关闭。
   useEffect(() => {
-    if (!session || session.flow !== "device_code" || phase !== "polling") return;
+    if (!session || !["device_code", "browser"].includes(session.flow) || phase !== "polling") return;
     const timer = window.setInterval(async () => {
       try {
         const r = await pollOAuthSession(backend, provider.id, session.sessionId, undefined);
         if (!alive.current) return;
+        if (session.flow === "browser") {
+          const authUrl = r.authUrl || session.authUrl || null;
+          setBrowser({ authUrl, stage: r.stage ?? null, instructions: r.instructions ?? null,
+            codeRequired: r.codeRequired === true });
+          // Open the page once unless the runtime already opened the browser itself.
+          if (authUrl && r.browserOpened === false && openedUrl.current !== authUrl) {
+            openedUrl.current = authUrl;
+            window.open(authUrl, "_blank", "noopener,noreferrer");
+          }
+        }
         if (r.status === "approved") {
           window.clearInterval(timer);
           setPhase("approved");
@@ -139,7 +185,9 @@ export default function OAuthLoginModal({
   }, [session, phase, provider.id, provider.name, onClose, toast, t]);
 
   const submit = async () => {
-    if (!session || session.flow !== "pkce" || !code.trim()) return;
+    // pkce, or a browser sign-in whose provider hands back a code to paste.
+    if (!session || !(session.flow === "pkce" || (session.flow === "browser" && browser.codeRequired))
+      || !code.trim()) return;
     setPhase("submitting");
     setError(null);
     try {
@@ -343,6 +391,48 @@ export default function OAuthLoginModal({
           </>
         )}
 
+        {session?.flow === "browser" && phase === "polling" && (
+          <>
+            <p className={styles.cardDesc}>
+              {t(browser.stage === "installing" ? "keys.oauthBrowserInstalling"
+                : browser.stage === "waiting" || browser.authUrl ? "keys.oauthBrowserWaiting" : "keys.oauthBrowserStarting")}
+            </p>
+            {browser.instructions && <pre className={styles.instructions}>{browser.instructions}</pre>}
+            {browser.authUrl && (
+              <a className={styles.getKey} href={browser.authUrl} target="_blank" rel="noreferrer">
+                {t("keys.oauthReopen")} ↗
+              </a>
+            )}
+            {browser.codeRequired ? (
+              <>
+                <p className={styles.cardDesc}>{t("keys.oauthCodePrompt")}</p>
+                <TextInput
+                  className="field-input field-mono"
+                  value={code}
+                  autoComplete="off"
+                  placeholder={t("keys.oauthPasteCode")}
+                  onChange={(e) => setCode(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submit();
+                  }}
+                />
+                <div className={styles.modalFoot}>
+                  <span />
+                  <button className={styles.smallBtn} disabled={!code.trim()} onClick={submit}>
+                    {t("keys.oauthSubmitCode")}
+                  </button>
+                </div>
+              </>
+            ) : <p className="muted">{t("keys.oauthWaiting")}</p>}
+          </>
+        )}
+
+        {phase === "choose" && (
+          <ProviderLoginPicker backend={backend} providerId={provider.id} busy={false}
+            onOAuth={(target) => { void start(target); }}
+            onApiKey={(target, key) => { void saveKey(target, key); }} />
+        )}
+
         {phase === "approved" && <p className={styles.modalOk}>{t("keys.oauthApproved")}</p>}
 
         {phase === "error" && (
@@ -352,7 +442,12 @@ export default function OAuthLoginModal({
               <button className={styles.smallBtn} onClick={close}>
                 {t("common.close")}
               </button>
-              <button className={styles.smallBtn} onClick={start}>
+              {provider.flow === "browser" && hasCliCommand && provider.cliRunnable !== false && (
+                <button className={styles.smallBtn} onClick={runInTerminal}>
+                  {t("keys.oauthRunInTerminal")}
+                </button>
+              )}
+              <button className={styles.smallBtn} onClick={() => { void start(); }}>
                 {t("keys.oauthRetry")}
               </button>
             </div>

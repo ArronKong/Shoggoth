@@ -14,6 +14,7 @@ const SUPPORT_KEYS: Record<string, string> = {
 };
 
 export function sessionRuntimeSupportKey(code: string | undefined): string | null {
+  if (code === "RUNTIME_INCOMPATIBLE") return "settings.runtimeIncompatible";
   const key = code ? SUPPORT_KEYS[code] : undefined;
   return key ? `agents.${key}` : null;
 }

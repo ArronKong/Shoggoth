@@ -13,6 +13,19 @@
 }
 .dialog[open] { display: flex; flex-direction: column; }
 .dialog::backdrop { background: rgb(13 17 24 / 58%); }
+.embedded { min-width: 0; }
+.embedded .scroll { overflow: visible; }
+.embedded .header { padding: 0; }
+.embedded .identity { flex-direction: column; gap: 18px; }
+.embedded .headerActions { padding-top: 76px; }
+.headerActions { display: flex; flex: none; align-items: center; gap: 8px; }
+.embedded .close { margin: 0; padding: 0; }
+.embedded button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
+.embedded .statusLine { padding-inline: 0; }
+.embedded :is(.description, .adapterNotice, .sourceNotice, .registrationPanel, .promptPanel, .section) {
+  margin-inline: 0;
+}
+.embedded .footer { padding-inline: 0; padding-bottom: 0; }
 .scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .header {
   display: flex;
@@ -34,6 +47,7 @@
   object-fit: contain;
   background: var(--ui-surface-2);
 }
+.icon[src$="/github"] { background: #24292f; }
 .iconFallback {
   display: grid;
   place-items: center;
@@ -71,17 +85,18 @@
 .sourceNotice p { margin: 6px 0 0; }
 .sourceNotice ul { margin: 7px 0; padding-left: 19px; }
 .sourceNotice code { font-size: 11px; overflow-wrap: anywhere; }
+.registrationPanel { margin: 18px 34px 0; }
+.registrationPanel > section { max-width: none; }
 .promptPanel {
   display: grid;
-  gap: 0;
+  gap: 10px;
   margin: 26px 34px 3px;
-  padding: 17px 20px 9px;
+  padding: 20px;
   border-radius: 15px;
   background: color-mix(in srgb, var(--ui-focus) 8%, var(--ui-surface-2));
 }
 .panelLabel { color: var(--ui-text-2); font-size: 11px; font-weight: 600; letter-spacing: .035em; }
-.promptPanel p { display: flex; gap: 14px; margin: 0; padding: 10px 0; color: var(--ui-text-1); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
-.promptPanel p + p { border-top: 1px solid var(--ui-hairline); }
+.promptPanel p { display: flex; gap: 12px; margin: 0; padding: 13px 16px; border-radius: 12px; background: color-mix(in srgb, var(--ui-surface-1) 80%, transparent); color: var(--ui-text-1); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .promptPanel p span { flex: none; color: var(--ui-text-2); font-variant-numeric: tabular-nums; }
 .section { margin: 34px 34px 0; padding-top: 23px; border-top: 1px solid var(--ui-hairline); }
 .sectionTitle { display: flex; align-items: baseline; gap: 9px; }
@@ -112,6 +127,9 @@
 .dialog button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 
 @media (max-width: 600px) {
+  .embedded .header { flex-direction: column; gap: 16px; }
+  .embedded .headerActions { padding-top: 0; width: 100%; }
+  .embedded .headerActions button { flex: 1; }
   .dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); border-radius: 14px; }
   .header { padding: 22px 20px 0; }
   .identity { gap: 12px; }
@@ -121,6 +139,7 @@
   .description { margin: 22px 20px 0; }
   .adapterNotice { margin: 16px 20px 0; }
   .sourceNotice { margin: 16px 20px 0; }
+  .registrationPanel { margin: 16px 20px 0; }
   .promptPanel { margin: 22px 20px 0; padding: 14px 15px 6px; }
   .section { margin: 28px 20px 0; padding-top: 19px; }
   .componentList li { grid-template-columns: 20px minmax(0, 1fr); gap: 8px; }

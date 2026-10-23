@@ -11,6 +11,7 @@ const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { nativeChatGptTokens } = require("./codex-native-auth");
 const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 const { CODEX_SESSION_START_TIMEOUT_MS } = require("./codex-startup-timeouts");
+const { recordCodexSessionFailure } = require("./codex-session-diagnostics");
 const {
   DEFAULT_SERVER_REQUEST_TIMEOUT_MS,
   isApprovalRequestMethod,
@@ -80,8 +81,16 @@ function safeAccountUrl(value) {
 }
 
 function normalizeAccountReadResponse(response) {
-  if (!exactObject(response, ["account", "requiresOpenaiAuth"], ["requiresOpenaiAuth"])
+  if (!exactObject(response, ["account", "requiresOpenaiAuth", "workspaceRouting"], ["requiresOpenaiAuth"])
     || typeof response.requiresOpenaiAuth !== "boolean") throw accountProtocolError();
+  // 0.159.2 emits this experimental field even without experimentalApi.
+  // Its generated definition is checked by the contract; keep it Host-private.
+  const routing = response.workspaceRouting;
+  if (routing !== undefined && routing !== null && (!exactObject(routing,
+    ["chatgptAccountId", "backendOrigin", "accountRoutingOverride"])
+    || !wellFormedString(routing.chatgptAccountId, 256)
+    || !wellFormedString(routing.backendOrigin, 4096)
+    || !wellFormedString(routing.accountRoutingOverride, 128))) throw accountProtocolError();
   const account = response.account ?? null;
   if (account === null) return { account: null, requiresOpenaiAuth: response.requiresOpenaiAuth };
   if (!account || typeof account !== "object" || Array.isArray(account)) throw accountProtocolError();
@@ -277,6 +286,7 @@ class CodexRuntimeHost {
       throw runtimeError("CODEX_RUNTIME_PREPARE_INVALID", "Codex runtime preparation is invalid");
     }
     const preparedSpawnEnv = prepared?.spawnEnv || {};
+    this.modelProviderKind = prepared?.runtimeConfig?.provider?.kind ?? "chatgpt";
     if (prepared?.runtimeConfig?.provider
       && prepared.runtimeConfig.provider.kind !== "chatgpt") this.nativeAuthEligible = false;
     const explicitSpawnEnv = this.options.spawnEnv || {};
@@ -304,6 +314,9 @@ class CodexRuntimeHost {
       throw runtimeError("CODEX_RUNTIME_PREPARE_INVALID", "Codex app-server launch is invalid");
     }
     launchArgs.splice(commandIndex, 0, ...(prepared?.configArgs || []));
+    this.groupMcpBootstrap = require("./codex-runtime-config").validMcpBootstrapReceipt(prepared?.mcpBootstrap, {
+      binding: this.binding, configArgs: prepared?.configArgs ?? [],
+    }) ? prepared.mcpBootstrap : null;
     prepared?.assertCurrent?.();
     this.assertExecutionProviderCurrent = prepared?.assertCurrent || (() => {});
     const child = this.spawnProcess(this.runtimeEnvironment.binaryPath, launchArgs, {
@@ -314,10 +327,16 @@ class CodexRuntimeHost {
       windowsHide: true,
     });
     if (!Number.isSafeInteger(child?.pid) || child.pid <= 1) {
+      require("./failed-spawn").retireFailedSpawn(child);
       throw runtimeError("CODEX_PROCESS_INVALID", "Codex app-server did not provide a safe pid");
     }
     this.child = child;
-    this.childClose = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+    this.cleanupPid = child.pid;
+    this.childCloseObserved = false;
+    this.childClose = new Promise((resolve) => child.once("close", (code, signal) => {
+      this.childCloseObserved = true;
+      resolve({ code, signal });
+    }));
     this.rpc = new CodexJsonlRpcClient(child, {
       requestTimeoutMs: this.requestTimeoutMs,
       writeTimeoutMs: this.options.writeTimeoutMs,
@@ -469,12 +488,21 @@ class CodexRuntimeHost {
   async _request(operationName, params, options) {
     this._assertReady();
     const operation = this.schemaContract.operations[operationName];
-    this.schemaContract.validateParams(operationName, params);
-    const response = await this.rpc.request(operation.method, params, options);
+    let phase = "request_schema";
+    let response;
     try {
+      this.schemaContract.validateParams(operationName, params);
+      phase = "rpc";
+      response = await this.rpc.request(operation.method, params, options);
+      phase = "response_schema";
       this.schemaContract.validateResponse(operationName, response);
     } catch (error) {
-      await this._markFatal(error);
+      if (operationName === "threadStart" || operationName === "threadResume") {
+        recordCodexSessionFailure({
+          paths: this.paths, binding: this.binding, operationName, params, phase, error,
+        });
+      }
+      if (phase === "response_schema") await this._markFatal(error);
       throw error;
     }
     return response;
@@ -483,10 +511,19 @@ class CodexRuntimeHost {
   threadStart(params, options) {
     return this._request("threadStart", params, { timeoutMs: this.sessionStartTimeoutMs, ...options });
   }
+  threadUnsubscribe(params, options) { return this._request("threadUnsubscribe", params, options); }
   threadResume(params, options) {
     return this._request("threadResume", params, { timeoutMs: this.sessionStartTimeoutMs, ...options });
   }
-  threadRead(params, options) { return this._request("threadRead", params, options); }
+  async threadRead(params, options) {
+    if (params?.includeTurns !== true) return this._request("threadRead", params, options);
+    const metadata = await this._request("threadRead", { ...params, includeTurns: false }, options);
+    return metadata.thread.historyMode === "paginated"
+      ? require("./codex-thread-history-reader").readCodexPaginatedThread(this, metadata, options)
+      : this._request("threadRead", params, options);
+  }
+  threadTurnsList(params, options) { return this._request("threadTurnsList", params, options); }
+  threadItemsList(params, options) { return this._request("threadItemsList", params, options); }
   threadInjectItems(params, options) { return this._request("threadInjectItems", params, options); }
   threadList(params, options) { return this._request("threadList", params, options); }
   threadSetName(params, options) { return this._request("threadSetName", params, options); }
@@ -501,7 +538,10 @@ class CodexRuntimeHost {
   turnSteer(params, options) { return this._request("turnSteer", params, options); }
   turnInterrupt(params, options) { return this._request("turnInterrupt", params, options); }
   modelList(params, options) { return this._request("modelList", params, options); }
+  configRead(params, options) { return this._request("configRead", params, options); }
   mcpServerStatusList(params, options) { return this._request("mcpServerStatusList", params, options); }
+  experimentalFeatureList(params, options) { return this._request("experimentalFeatureList", params, options); }
+  mcpServerToolCall(params, options) { return this._request("mcpServerToolCall", params, options); }
   skillsList(params, options) { return this._request("skillsList", params, options); }
 
   async _accountRequest(operationName, params, options, normalize) {
@@ -587,9 +627,22 @@ class CodexRuntimeHost {
     if (enabled) {
       try {
         tokens = await this.nativeAuth.read({ previousAccountId: this.nativeAccountId });
-      } catch {
-        // Missing, expired, locked or incompatible native auth falls back to
-        // the existing independent login. Raw upstream errors are not exposed.
+      } catch (error) {
+        // A failed status lookup is not proof that the borrowed sign-in was
+        // revoked. Logging out here cancels the CLI's network permission and
+        // kills active turns. Reject this check (and new turn admission), but
+        // leave the existing runtime auth alone until its state is confirmed.
+        // Explicit opt-out and confirmed identity loss still revoke below.
+        // This also applies before the first successful borrow: reporting an
+        // empty independent Home as logged out would hide a source read error.
+        if (error?.code !== "RUNTIME_AUTH_REQUIRED"
+          && this.nativeAuth.enabled(this.runtimeEnvironment.home)) {
+          this._assertReady();
+          const cleanupFailed = error && typeof error === "object"
+            && Object.getOwnPropertyDescriptor(error, "code")?.value === "CODEX_RUNTIME_CLEANUP_INCOMPLETE";
+          throw runtimeError(cleanupFailed ? "CODEX_RUNTIME_CLEANUP_INCOMPLETE" : "CODEX_NATIVE_AUTH_READ_FAILED",
+            "Local Codex sign-in status is temporarily unavailable");
+        }
       }
     }
     this._assertReady();
@@ -623,7 +676,8 @@ class CodexRuntimeHost {
       ));
     }
     this.nativeAuth?.disable(this.runtimeEnvironment.home);
-    if (this.nativeAuthPending) await this.nativeAuthPending;
+    // An unrelated failed status check must not cancel an explicit sign-in.
+    if (this.nativeAuthPending) await this.nativeAuthPending.catch(() => {});
     if (this.nativeAccessToken) await this._logoutAccount();
     this.nativeAccessToken = null;
     return this._accountRequest("accountLoginStart", params, options, normalizeAccountLoginResponse);
@@ -665,7 +719,8 @@ class CodexRuntimeHost {
 
   async accountLogout(options) {
     this.nativeAuth?.disable(this.runtimeEnvironment.home);
-    if (this.nativeAuthPending) await this.nativeAuthPending;
+    // Still perform the explicit logout if an in-flight status lookup failed.
+    if (this.nativeAuthPending) await this.nativeAuthPending.catch(() => {});
     const result = await this._logoutAccount(options);
     this.nativeAccessToken = null;
     return result;
@@ -736,6 +791,19 @@ class CodexRuntimeHost {
     }
   }
 
+  async confirmStoppedCleanup() {
+    if (!this.cleanupIncomplete) return this.child === null && this.rpc === null;
+    if (!this.stopping) return false;
+    await this.stopping.catch(() => {});
+    // Only recheck the already-owned process group; never signal a recycled PID.
+    if (!this.childCloseObserved || this.rpc !== null || !Number.isSafeInteger(this.cleanupPid)) return false;
+    try { if (this.processGroupExists(this.cleanupPid)) return false; } catch { return false; }
+    this.cleanupIncomplete = false;
+    this.child = null;
+    this.cleanupPid = null;
+    return true;
+  }
+
   _stop(fromFatal) {
     if (this.stopping) return this.stopping;
     if (!fromFatal) {
@@ -759,6 +827,7 @@ class CodexRuntimeHost {
       const child = this.child;
       const rpc = this.rpc;
       let processClosed = !child?.pid;
+      let groupClosed = !child?.pid && !this.cleanupIncomplete;
       try {
         if (pendingStartup) await pendingStartup.catch(() => {});
         try { await rpc?.terminate("host stopping"); } catch (error) { errors.push(error); }
@@ -777,6 +846,7 @@ class CodexRuntimeHost {
           let groupExists = true;
           try {
             groupExists = this.processGroupExists(child.pid);
+            groupClosed = !groupExists;
           } catch {
             this.cleanupIncomplete = true;
             errors.push(runtimeError("CODEX_PROCESS_GROUP_PROBE_FAILED", "Codex process group cleanup could not be verified"));
@@ -791,7 +861,7 @@ class CodexRuntimeHost {
           }
           if (groupExists) {
             try {
-              const groupClosed = await this._waitForProcessGroupExit(child.pid);
+              groupClosed = await this._waitForProcessGroupExit(child.pid);
               if (!groupClosed) {
                 this.cleanupIncomplete = true;
                 errors.push(runtimeError(
@@ -817,6 +887,9 @@ class CodexRuntimeHost {
       } catch (error) {
         errors.push(error);
       } finally {
+        // Earlier signal/probe failures are still reported, but final positive
+        // reaping proof must not permanently poison subsequent auth-only reads.
+        if (processClosed && groupClosed) { this.cleanupIncomplete = false; this.cleanupPid = null; }
         this.child = processClosed ? null : child;
         this.rpc = null;
         this._clearSecretReferences();

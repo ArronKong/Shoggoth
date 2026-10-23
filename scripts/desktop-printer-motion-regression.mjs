@@ -134,14 +134,14 @@ app.whenReady().then(async () => {
     const start = await execute('__desktopPrinterFixture.at(0)');
     const machine = await execute('__desktopPrinterFixture.at(100)');
     const feed = await execute('__desktopPrinterFixture.at(220)');
-    const end = await execute('__desktopPrinterFixture.at(540)');
+    const end = await execute('__desktopPrinterFixture.at(620)');
     assert.ok(machine.machine.bottom > start.machine.bottom && machine.machine.bottom < end.machine.bottom, 'machine continuously slides down');
     assert.ok(machine.paper.bottom < machine.outlet.top, 'paper remains inside while the machine enters');
     assert.ok(feed.paper.bottom > feed.outlet.top && feed.paper.bottom < end.paper.bottom, 'paper emerges from the clipped outlet');
     assert.ok(Math.abs(end.paper.top - end.outlet.top) < 1, 'paper lands at the unchanged default position');
     assert.equal(end.focused, 'TEXTAREA', 'typing is available without waiting for the animation');
     assert.equal(end.draft, '记下一闪而过的想法。');
-    const frames = [start, machine, feed, end].map((value, i) => ({ ms: [0,100,220,540][i], machineBottom: value.machine.bottom, paperBottom: value.paper.bottom, outletTop: value.outlet.top }));
+    const frames = [start, machine, feed, end].map((value, i) => ({ ms: [0,100,220,620][i], machineBottom: value.machine.bottom, paperBottom: value.paper.bottom, outletTop: value.outlet.top }));
     console.log('FRAMES ' + JSON.stringify(frames));
     const waitExit = () => wait('__desktopPrinterFixture.inspect().animations.some(a=>a.id==="desktop-printer-exit")');
     const sameFrame = (a, b, message) => {
@@ -157,12 +157,15 @@ app.whenReady().then(async () => {
     assert.ok(retract.paper.bottom > retract.outlet.top && retract.paper.bottom < end.paper.bottom, 'paper slides back through the outlet');
     const exitMiddle = await execute('__desktopPrinterFixture.at(200)');
     assert.ok(exitMiddle.machine.bottom < end.machine.bottom && exitMiddle.machine.bottom > -48, 'machine then slides upward continuously');
-    assert.ok(exitMiddle.paper.bottom < exitMiddle.outlet.top, 'paper is inside before the machine leaves');
-    const exitEnd = await execute('__desktopPrinterFixture.at(300)');
+    assert.ok(exitMiddle.paper.bottom < retract.paper.bottom, 'the sheet keeps sliding in as the machine starts to lift');
+    const exitTucked = await execute('__desktopPrinterFixture.at(290)');
+    assert.ok(exitTucked.paper.bottom <= exitTucked.outlet.top + .5, 'paper is inside before the machine leaves');
+    assert.ok(exitTucked.machine.bottom < exitMiddle.machine.bottom, 'the machine carries on without a pause');
+    const exitEnd = await execute('__desktopPrinterFixture.at(360)');
     assert.ok(exitEnd.machine.bottom < 0 && exitEnd.paper.bottom < 0, 'both layers clear the screen before native hide');
     await execute('document.querySelector("textarea").dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))');
     assert.equal(await execute('__desktopPrinterFixture.inspect().saved'), 0, 'Enter cannot submit a note while closing');
-    console.log('EXIT_FRAMES ' + JSON.stringify([exitStart, retract, exitMiddle, exitEnd].map((value, i) => ({ ms: [0,60,200,300][i], machineBottom: value.machine.bottom, paperBottom: value.paper.bottom, outletTop: value.outlet.top }))));
+    console.log('EXIT_FRAMES ' + JSON.stringify([exitStart, retract, exitMiddle, exitTucked, exitEnd].map((value, i) => ({ ms: [0,60,200,290,360][i], machineBottom: value.machine.bottom, paperBottom: value.paper.bottom, outletTop: value.outlet.top }))));
     await execute('__desktopPrinterFixture.finish()'); await wait('!__desktopPrinterFixture.inspect().active');
     assert.equal(await execute('__desktopPrinterFixture.inspect().draft'), end.draft, 'exit preserves the unsaved draft');
     assert.equal(await execute('__desktopPrinterFixture.inspect().visible'), false);

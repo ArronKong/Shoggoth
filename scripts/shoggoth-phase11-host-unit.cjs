@@ -1040,7 +1040,62 @@ async function testAuthenticatedCodexDefaultModelDoesNotRequireProviderSetup() {
   }
 }
 
+async function testConfirmedStorageRecoveryIsClosedSafeStickyAndNeverRestartsFromStatus() {
+  let mode = "recovery", actions = 0, getterCalls = 0;
+  const host = createProductHostController({
+    serviceRequest: async () => {
+      if (mode === "healthy") return healthyServiceStatus();
+      const error = new Error("private path and secret must stay private");
+      if (mode === "getter") Object.defineProperty(error, "code", { get() { getterCalls++; return "SERVICE_RECOVERY_REQUIRED"; } });
+      else error.code = mode === "recovery" ? "SERVICE_RECOVERY_REQUIRED" : mode;
+      throw error;
+    },
+    launchAgent: { async status() { return { supported: true, installed: true, loaded: true, enabled: true, needsRepair: false }; },
+      async start() { actions++; }, async stop() { actions++; } },
+  });
+  const failed = await host.getStatus();
+  assert.equal(failed.service.healthy, false);
+  assert.equal(failed.service.recoveryCode, "SERVICE_RECOVERY_REQUIRED");
+  assert.equal(failed.service.pendingCommandsLocked, true);
+  assert.ok(!JSON.stringify(failed).includes("private path"));
+  mode = "REQUEST_TIMEOUT";
+  assert.equal((await host.getStatus()).service.recoveryCode, "SERVICE_RECOVERY_REQUIRED");
+  mode = "healthy";
+  assert.equal((await host.getStatus()).service.recoveryCode, undefined);
+  for (mode of ["REQUEST_TIMEOUT", "STORE_COMMIT_UNCERTAIN", "SERVICE_RECOVERY_REQUIRED_EXTRA", "getter"]) {
+    assert.equal((await host.getStatus()).service.recoveryCode, undefined);
+  }
+  assert.equal(getterCalls, 0);
+  assert.equal(actions, 0);
+}
+
+async function testLateStorageStatusSamplesCannotUndoNewerRecoveryEvidence() {
+  for (const oldHealthy of [true, false]) {
+    const gate = deferred(); let calls = 0;
+    const fault = () => Object.assign(new Error("private old status"), { code: "SERVICE_RECOVERY_REQUIRED" });
+    const host = createProductHostController({
+      serviceRequest: async () => {
+        const call = ++calls;
+        if (call === 1) { await gate.promise; if (oldHealthy) return healthyServiceStatus(); throw fault(); }
+        if (call === 2) { if (!oldHealthy) return healthyServiceStatus(); throw fault(); }
+        throw Object.assign(new Error("later unavailable"), { code: "REQUEST_TIMEOUT" });
+      },
+      launchAgent: { async status() { return { supported: true, installed: true, loaded: true, enabled: true, needsRepair: false }; } },
+    });
+    const old = host.getStatus();
+    const latest = await host.getStatus();
+    assert.equal(latest.service.recoveryCode, oldHealthy ? "SERVICE_RECOVERY_REQUIRED" : undefined);
+    gate.resolve();
+    const late = await old;
+    assert.equal(late.service.recoveryCode, oldHealthy ? "SERVICE_RECOVERY_REQUIRED" : undefined);
+    if (oldHealthy) assert.equal(late.service.healthy, false);
+    assert.equal((await host.getStatus()).service.recoveryCode, oldHealthy ? "SERVICE_RECOVERY_REQUIRED" : undefined);
+  }
+}
+
 const tests = [
+  testLateStorageStatusSamplesCannotUndoNewerRecoveryEvidence,
+  testConfirmedStorageRecoveryIsClosedSafeStickyAndNeverRestartsFromStatus,
   testAuthenticatedCodexDefaultModelDoesNotRequireProviderSetup,
   testSafeProviderProjectionNeverLeaksStorageFieldsOrUrlSecrets,
   testCustomEndpointEditorReceivesOnlySafeApiRoots,

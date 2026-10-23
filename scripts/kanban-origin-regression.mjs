@@ -52,16 +52,13 @@ upstreamWss.on("connection", (socket) => {
 
 const upstreamPort = await listen(upstreamHttp);
 const brokerHttp = http.createServer();
-const brokerWss = attachKanbanBroker(brokerHttp, {
-  registry: {
-    getBackend() {
-      return {
-        getKanbanEventsTarget() {
-          return { wsUrl: `ws://127.0.0.1:${upstreamPort}/events`, token: "secret" };
-        },
-      };
-    },
+const backend = {
+  getKanbanEventsTarget() {
+    return { wsUrl: `ws://127.0.0.1:${upstreamPort}/events`, token: "secret" };
   },
+};
+const brokerWss = attachKanbanBroker(brokerHttp, {
+  registry: { getBackend: () => backend },
 });
 const brokerPort = await listen(brokerHttp);
 const brokerUrl = `ws://127.0.0.1:${brokerPort}/__kanbanws`;

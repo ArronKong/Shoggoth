@@ -134,7 +134,7 @@ test("MCP tool approvals are hidden while clarification questions and answers st
   const run = await f.running(idea);
   const before = await history(f, idea.latestExecution.sessionKey);
   const permission = f.host.request("mcpServer/elicitation/request", {
-    threadId: run.codexThreadId, turnId: run.codexTurnId, serverName: "fixture", mode: "form",
+    threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, serverName: "fixture", mode: "form",
     message: 'Allow the fixture MCP server to run tool "read_news"?',
     requestedSchema: { type: "object", properties: {}, additionalProperties: false },
   });
@@ -186,7 +186,7 @@ test("product confirmations keep one live card without a duplicate history bubbl
   const session = f.sessions.getSession(idea.latestExecution.sessionKey);
   const before = await history(f, session.sessionKey);
   const confirmation = f.host.request("mcpServer/elicitation/request", {
-    threadId: run.codexThreadId, turnId: run.codexTurnId, serverName: "shoggoth", mode: "form",
+    threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, serverName: "shoggoth", mode: "form",
     message: "Shoggoth 将操作 Computer Use 会话。是否继续？",
     requestedSchema: { type: "object", required: ["confirm_product_action"], properties: {
       confirm_product_action: { type: "string", title: "确认修改", enum: ["确认执行", "取消"] },

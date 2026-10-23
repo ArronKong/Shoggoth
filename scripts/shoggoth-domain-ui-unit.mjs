@@ -374,7 +374,8 @@ async function compileTarget(relativePath, name) {
       const codexInput = nativeCronInputFromDraft({ ...codex, name: "Codex", prompt: "Build" });
       check("Native Cron 保留 descriptor 选择的 backend owner", codexInput.backendId === "codex" && codexInput.agentId === "shoggoth-codex");
       const empty = emptyShoggothDraft("shoggoth-default");
-      check("Shoggoth Cron 默认策略保守", empty.agentId === "shoggoth-default" && empty.misfirePolicy === "latest" && empty.maxCatchUp === 1 && empty.overlapPolicy === "skip" && empty.threadPolicy === "new");
+      check("Shoggoth Cron 默认复用任务会话并保留补跑和重叠策略", empty.agentId === "shoggoth-default" && empty.misfirePolicy === "latest" && empty.maxCatchUp === 1 && empty.overlapPolicy === "skip" && empty.threadPolicy === "continue");
+      check("Native Cron 默认请求复用会话且无需指定 threadId", codexInput.threadPolicy === "continue" && codexInput.threadId === null);
 
       const continuation = { ...empty, name: "Continue", prompt: "Resume", threadPolicy: "continue", threadId: "" };
       check("continue 自动复用任务固定上下文且不要求内部 threadId", validateShoggothDraft(continuation) === null && shoggothInputFromDraft(continuation).threadId === null);

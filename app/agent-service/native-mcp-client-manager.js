@@ -2,6 +2,7 @@
 
 const { spawn } = require("node:child_process");
 const { serviceError } = require("./security");
+const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
 
 const PROTOCOL_VERSION = "2024-11-05";
 const START_TIMEOUT_MS = 15_000;
@@ -167,9 +168,10 @@ class StdioMcpClient {
     } while (cursor !== null);
     return boundedJson(tools);
   }
-  async callTool(name, args) {
+  async callTool(name, args, { assertCurrent } = {}) {
     await this.start();
-    return boundedJson(await this.request("tools/call", { name, arguments: args }));
+    assertCurrent?.();
+    return boundedJson(await this.request("tools/call", { name, arguments: args }, EXECUTION_TIMEOUT_MS));
   }
   async close() {
     if (this.closed) return;
@@ -219,7 +221,7 @@ class NativeMcpClientManager {
     }
   }
   async listTools(id) { return this._use(id, (client) => client.listTools()); }
-  async callTool(id, name, args) { return this._use(id, (client) => client.callTool(name, args)); }
+  async callTool(id, name, args, options) { return this._use(id, (client) => client.callTool(name, args, options)); }
   async closeServer(id) {
     const existing = this.clients.get(id);
     this.clients.delete(id);

@@ -5,10 +5,10 @@ import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { test } from "node:test";
-import ts from "typescript";
 
 const root = path.resolve(import.meta.dirname, "..");
 const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
+const ts = uiRequire("typescript");
 const React = uiRequire("react");
 const renderer = uiRequire("react-test-renderer");
 const text = node => typeof node === "string" ? node : Array.isArray(node)
@@ -24,7 +24,8 @@ function load(relative, require, window = {}) {
   });
   return module.exports;
 }
-const dictionary = load("app/manage-ui/src/i18n/locales/zh-CN.ts", uiRequire).default;
+const { load: loadUiSource } = uiRequire(path.join(root, "scripts/fixtures/load-ui-typescript.cjs"));
+const dictionary = loadUiSource("i18n/locales/zh-CN.ts").default;
 const translate = (key, params = {}) => String(key.split(".").reduce((value, part) => value?.[part], dictionary) ?? key)
   .replace(/\{\{(\w+)\}\}/gu, (_, name) => String(params[name] ?? ""));
 const snapshot = (revision = "a", runs = []) => ({ availability: "available", revision: revision.repeat(64), totalCount: runs.length, runs });
@@ -67,7 +68,9 @@ function fixture() {
 test("dialog shows actual task, source and approval state; cancel never stops", async () => {
   const f = fixture(); await f.mount();
   const body = text(f.tree.toJSON());
-  for (const label of ["整理发布说明", "Grok", "灵感", "等待授权", "以下 1 个任务", "按规则调度"]) assert.ok(body.includes(label), label);
+  for (const label of ["整理发布说明", "Grok", "灵感", "等你授权", "停止后台（1）", "任务中断，待处理请求失效，记录保留"]) assert.ok(body.includes(label), label);
+  assert.equal(f.tree.root.findAllByType("p").length, 1, "consequences must stay in one paragraph");
+  assert.ok([...text(f.tree.root.findByType("p").props.children)].length <= 20, "whole consequence paragraph must fit 20 characters");
   await f.click("取消");
   assert.equal(f.cancelled, 1); assert.equal(f.stops.length, 0);
   f.unmount(); assert.equal(f.timer, null);
@@ -86,12 +89,16 @@ test("loading cannot stop and a late result after unmount has no effects", async
 
 test("known empty and unknown remain distinct; unknown requires explicit Stop anyway", async () => {
   const f = fixture(); f.impact = snapshot(); await f.mount();
-  assert.ok(text(f.tree.toJSON()).includes("当前没有会被中断"));
+  assert.ok(text(f.tree.toJSON()).includes("无任务中断，排队和定时重启后恢复"));
+  assert.equal(f.tree.root.findAllByType("p").length, 1);
+  assert.ok([...text(f.tree.root.findByType("p").props.children)].length <= 20);
   f.impact = { availability: "unavailable", revision: "unavailable", totalCount: null, runs: [] };
   await renderer.act(async () => f.timer());
   const body = text(f.tree.toJSON());
-  assert.ok(body.includes("无法确认当前任务状态"));
-  assert.ok(!body.includes("当前没有会被中断"));
+  assert.ok(body.includes("任务状态未确认，停止可能中断任务"));
+  assert.ok(!body.includes("无任务中断，排队和定时重启后恢复"));
+  assert.equal(f.tree.root.findAllByType("p").length, 1);
+  assert.ok([...text(f.tree.root.findByType("p").props.children)].length <= 20);
   await f.click("仍然停止");
   assert.deepEqual(f.stops, [{ action: "stop", revision: "unavailable" }]);
   assert.equal(f.stopped, 1); f.unmount();
@@ -128,7 +135,7 @@ test("double click sends one stop and completion after unmount is ignored", asyn
 
 test("a failed read offers retry instead of showing zero or allowing a stale stop", async () => {
   const f = fixture(); f.read = async () => { throw Error("network"); }; await f.mount();
-  assert.ok(text(f.tree.toJSON()).includes("暂时无法完成检查"));
+  assert.ok(text(f.tree.toJSON()).includes("未能检查或停止后台，请重试"));
   assert.equal(f.button("停止后台"), undefined);
   f.read = null; await f.click("重试");
   assert.equal(f.button("停止后台").props.disabled, false);

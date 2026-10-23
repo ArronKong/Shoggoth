@@ -86,7 +86,7 @@ export default function ApprovalRow({ item, running, agentName, canRespond, onRe
     && !!detailItem.backendId && !!detailItem.runId && !!detailItem.requestId && ["approval", "input"].includes(detailItem.kind || "");
   const detailAccepted = accepted.has(detailKey);
   useLayoutEffect(() => {
-    const content = expansion.current?.querySelector<HTMLElement>(".chat-prompt__content, .chat-prompt--input, [data-approval-content]");
+    const content = expansion.current?.querySelector<HTMLElement>(".chat-prompt__content, [data-approval-content]");
     if (!content) { setContentHeight(0); return; }
     const measure = () => setContentHeight(content.getBoundingClientRect().height);
     measure();
@@ -185,7 +185,7 @@ export default function ApprovalRow({ item, running, agentName, canRespond, onRe
       <div className={styles.clip}><div ref={expansion} className={styles.expansion}>
       {prompt && (canRenderActions ? <ChatPromptCard
         key={`${detailKey}:${detailAccepted}`}
-        entry={prompt} compactApproval onRespond={respond} />
+        entry={prompt} compactApproval compactInput agentName={agentName} onRespond={respond} />
         : <div className={styles.readonly} data-approval-content>
           {prompt.message && <p>{prompt.message}</p>}
           {command && <pre>{command}</pre>}

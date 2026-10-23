@@ -151,6 +151,7 @@ function fixture(options = {}) {
           : {
               async accountRead() {
                 calls.push(["runtime.accountRead"]);
+                if (options.runtimeReadError) throw options.runtimeReadError;
                 return structuredClone(options.runtimeAccountResult || {
                   account: { type: "chatgpt", planType: "plus" },
                   requiresOpenaiAuth: true,
@@ -486,6 +487,18 @@ async function testRuntimeAuthStatusIsVerifiedByOwningRuntime() {
     profileId: grokProfile.id,
   }), { status: "unauthenticated" });
 
+  for (const code of ["CODEX_NATIVE_AUTH_READ_FAILED", "CODEX_RUNTIME_CLEANUP_INCOMPLETE"]) {
+    const failed = fixture({ runtimeReadError: Object.assign(new Error("private upstream data"), { code }) });
+    await assert.rejects(failed.controller.handle("profile.auth.read", { profileId: DEFAULT_AGENT_PROFILE_ID }),
+      error => error.code === code && !error.message.includes("private upstream"));
+  }
+  for (const code of ["CODEX_RUNTIME_VERSION_MISMATCH", "CLAUDE_CODE_VERSION_UNSUPPORTED",
+    "PI_VERSION_UNSUPPORTED", "GROK_ACP_INITIALIZE_INVALID", "OPENCODE_VERSION_UNSUPPORTED",
+    "DEEPSEEK_HARNESS_PROTOCOL_UNSUPPORTED", "ANTIGRAVITY_ACP_INITIALIZE_INVALID"]) {
+    const failed = fixture({ runtimeReadError: Object.assign(new Error("private upstream data"), { code }) });
+    await assert.rejects(failed.controller.handle("profile.auth.read", { profileId: DEFAULT_AGENT_PROFILE_ID }),
+      error => error.code === "RUNTIME_INCOMPATIBLE" && !error.message.includes("private upstream"));
+  }
   const malformed = fixture({
     runtimeAccountResult: { account: null, requiresOpenaiAuth: "yes", login: null },
   });

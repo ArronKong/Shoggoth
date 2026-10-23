@@ -3,6 +3,7 @@
 
 const assert = require("node:assert/strict");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { bindingId } = require("../app/agent-service/agent-runtime-binding");
 
 const INTERACTION_COUNT = 1_000;
 const RSS_GROWTH_BUDGET_BYTES = 512 * 1024 * 1024;
@@ -34,7 +35,7 @@ const session = {
   id: SESSION_ID,
   sessionKey: SESSION_ID,
   profileId: PROFILE_ID,
-  codexThreadId: null,
+  runtimeSessionId: null,
   workspace: "/tmp/shoggoth-interaction-capacity",
   title: "Capacity",
   modelOverride: null,
@@ -57,8 +58,11 @@ function run(index, status) {
     profileId: PROFILE_ID,
     workspace: session.workspace,
     status,
-    codexThreadId: "thread-capacity",
-    codexTurnId: `turn-${index}`,
+    contextSnapshotId: null,
+    runtimeSessionRef: { runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId, sessionId: "thread-capacity" },
+    runtimeTurnRef: { runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId, sessionId: "thread-capacity", turnId: `turn-${index}` },
     eventSeq: status === "waiting_input" ? 1 : 2,
     waitingRequestId: status === "waiting_input" ? `request-${index}` : null,
     startedAt: 100 + index,
@@ -79,6 +83,13 @@ const backend = new ShoggothBackend({
       return { healthy: true, pendingCommandsLocked: false, mcpCredentialsLocked: false };
     }
     if (request.method === "profile.list") return page("profiles", [profile]);
+    // Startup reconciles each Agent's Runtime bindings before listing sessions.
+    if (request.method === "agent.binding.sync") {
+      const binding = { id: bindingId(PROFILE_ID, profile.runtimeProfileId), profileId: PROFILE_ID, runtime: profile.runtime,
+        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId, label: null,
+        enabled: true, revision: 1, createdAt: 100, updatedAt: 100 };
+      return { bindings: [binding], defaultBindingId: binding.id, revision: 1, canAdd: true };
+    }
     if (request.method === "chat.session.list") return page("sessions", [session]);
     if (request.method === "run.input.respond") {
       const index = Number(request.params.runId.slice("run-".length));

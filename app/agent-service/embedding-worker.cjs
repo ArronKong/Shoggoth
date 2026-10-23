@@ -5,7 +5,7 @@ const { NativeSemanticIndex, validateDocument } = require("./native-semantic-ind
 
 let encoder, index, draining = false, closing = false;
 const high = [], low = [];
-const priorityMethods = new Set(["init", "query", "stats", "cancel", "reset", "close"]);
+const priorityMethods = new Set(["init", "query", "encode-query", "stats", "cancel", "reset", "close"]);
 
 function reply(message, result, error = null) {
   if (!process.connected) return;
@@ -30,6 +30,11 @@ async function handle(message) {
     return { closed: true };
   }
   if (!index) throw embeddingError("E5_WORKER_NOT_READY");
+  if (method === "encode-query" || method === "encode-passage") {
+    if (typeof args.text !== "string" || !args.text.isWellFormed() || args.text.includes("\0")
+      || Buffer.byteLength(args.text) > 64 * 1024) throw embeddingError("E5_INPUT_INVALID");
+    return encoder.encode(args.text, method === "encode-query" ? "query" : "passage");
+  }
   if (method === "stats") return { rssBytes: process.memoryUsage().rss,
     peakRssBytes: process.resourceUsage().maxRSS * 1024, modelIdentity: encoder.identity };
   if (method === "ready") return { ready: index.ready(args.profileId, args.domain, args.stamp) };

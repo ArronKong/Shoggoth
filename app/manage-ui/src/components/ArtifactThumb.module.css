@@ -1,0 +1,30 @@
+/* 缩略图区：relative 容器（放类别图标）+ 后缀叠加。 */
+.thumb {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 所有产出：按 6 大类的拟物文件夹图标（PNG 自带留白，contain 居中）。 */
+.icon {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 后缀标签：印在文件夹前壁左下角。图标 PNG 满幅、文件夹实体在 112 容器内约 (21,25)→(91,85)，
+   故文字落点按实体定位（左 34 / 下 30），不是设计稿的居中小文件夹坐标。颜色随类别（JSX inline）。 */
+.extension {
+  position: absolute;
+  left: 34px;
+  bottom: 30px;
+  font-size: var(--ui-fs-body);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  color: rgba(0, 0, 0, 0.34); /* 兜底；由 JSX inline 按类别覆盖 */
+  pointer-events: none;
+}

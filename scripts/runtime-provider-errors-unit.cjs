@@ -11,6 +11,7 @@ test("real model and capacity failures produce finite public codes", () => {
     ["server_overloaded: Selected model is at capacity", "RUNTIME_UPSTREAM_UNAVAILABLE"],
     ["Rate limit reached for this API key, please retry later", "RUNTIME_RATE_LIMITED"],
     ["insufficient_quota: You exceeded your current quota", "RUNTIME_QUOTA_EXHAUSTED"],
+    ["'file part media type application/octet-stream' functionality not supported.", "RUNTIME_ATTACHMENT_UNSUPPORTED"],
     ["Unexpected provider error", null],
   ]) assert.equal(classifyProviderFailure(text), expected, text);
 });

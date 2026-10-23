@@ -218,6 +218,7 @@ function toolDescriptor(item) {
     tool.input = item.arguments;
     tool.output = item.result ?? item.error;
     tool.error = item.error;
+    if (item.result?.isError === true) tool.success = false;
   } else if (item.type === "dynamicToolCall") {
     tool.name = item.namespace ? `${item.namespace}/${item.tool}` : item.tool;
     tool.input = item.arguments;
@@ -227,6 +228,16 @@ function toolDescriptor(item) {
     tool.name = "webSearch";
     tool.input = item.query;
     tool.output = item.results;
+  } else if (item.type === "imageView") {
+    tool.name = "imageView";
+    tool.input = { path: item.path };
+  } else if (item.type === "imageGeneration") {
+    tool.name = "imageGeneration";
+    if (item.failure != null) {
+      tool.error = item.failure;
+      tool.output = item.failure;
+      tool.success = false;
+    }
   } else {
     tool.name = item.tool ?? item.type;
   }
@@ -371,6 +382,13 @@ function normalizeCodexEvent(message, rawOptions = {}) {
     return known("complete", {
       turnId: safeId(params.turn?.id ?? params.turnId, options),
       status: params.turn?.status ?? "completed",
+      // Only explicit native status/identity can prove a live turn ended when
+      // canonical history is unavailable; a default status is not evidence.
+      terminalEvidence: typeof params.turn?.id === "string"
+        && ["completed", "failed", "interrupted", "canceled"].includes(params.turn?.status)
+        ? compact({ id: safeId(params.turn.id, options), status: params.turn.status,
+          error: ["unauthorized", "usageLimitExceeded", "serverOverloaded"].includes(params.turn.error?.codexErrorInfo)
+            ? { codexErrorInfo: params.turn.error.codexErrorInfo } : undefined }) : undefined,
     });
   }
   if (method === "thread/tokenUsage/updated") {

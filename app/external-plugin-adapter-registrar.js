@@ -8,6 +8,7 @@ const { execFile } = require("node:child_process");
 const { atomicWritePrivateFile } = require("./agent-service/private-file");
 const { ensurePrivateDirectoryTree } = require("./agent-service/security");
 const { ensureCredential } = require("./agent-service/external-plugin-adapter-auth");
+const { assertAdapterProtocol } = require("./external-plugin-adapter-protocol");
 const { discoverHermesProfiles } = require("./federation-mcp-registrar");
 
 const FILES = Object.freeze({
@@ -15,11 +16,13 @@ const FILES = Object.freeze({
   hermes: ["__init__.py", "transport.py", "plugin.yaml"],
 });
 const HERMES_PLUGIN = "shoggoth_shared_capabilities";
+const OPENCLAW_PLUGIN = "shoggoth-shared-capabilities";
 const HERMES_PROFILE = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const COMMAND_TIMEOUT_MS = 15_000;
 const OPENCLAW_TOOLS = Object.freeze([
+  "group_member_role_read", "group_messages_read", "group_task", "group_collaborate",
   "shoggoth_capability_search", "shoggoth_skill_read",
-  "shoggoth_skill_file_read", "shoggoth_plugin_call",
+  "shoggoth_skill_file_read", "shoggoth_plugin_resource_read", "shoggoth_plugin_call",
 ]);
 
 function readPackagedFiles(root, backend) {
@@ -28,7 +31,7 @@ function readPackagedFiles(root, backend) {
   if (JSON.stringify(actual) !== JSON.stringify([...FILES[backend]].sort())) {
     throw new Error(`Shoggoth ${backend} adapter resource changed`);
   }
-  return FILES[backend].map(name => {
+  const files = FILES[backend].map(name => {
     const file = path.join(directory, name);
     const before = fs.lstatSync(file);
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
@@ -41,6 +44,8 @@ function readPackagedFiles(root, backend) {
     }
     return [name, bytes];
   });
+  assertAdapterProtocol(backend, files.find(([name]) => name.startsWith("transport."))[1].toString("utf8"));
+  return files;
 }
 
 function materialize(paths, resourcesRoot, backend) {
@@ -79,18 +84,21 @@ function run(command, args, options) {
   });
 }
 
-function parseOptionalList(output, key, valid) {
+function parseOptionalConfig(output, key, valid, unset) {
   let data;
   try { data = JSON.parse(output); } catch { throw new Error(`OpenClaw ${key} response invalid`); }
-  if (Array.isArray(data) && data.length <= 1024 && data.every(valid)) {
-    return data;
-  }
   if (data?.ok === false && data.error?.type === "cli_error"
     && typeof data.error.message === "string"
     && data.error.message.startsWith(`Config path is valid but unset: ${key}.`)) {
-    return [];
+    return unset;
   }
+  if (data?.ok !== false && valid(data)) return data;
   throw new Error(`OpenClaw ${key} response invalid`);
+}
+
+function parseOptionalList(output, key, valid) {
+  return parseOptionalConfig(output, key,
+    data => Array.isArray(data) && data.length <= 1024 && data.every(valid), []);
 }
 
 function parsePaths(output) {
@@ -101,6 +109,33 @@ function parsePaths(output) {
 function parseToolAllowList(output) {
   return parseOptionalList(output, "tools.alsoAllow",
     item => typeof item === "string" && item.length > 0 && item.length <= 128);
+}
+
+function parsePluginPolicy(output) {
+  const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  const plugins = parseOptionalConfig(output, "plugins", record, {});
+  const invalid = () => { throw new Error("OpenClaw plugins policy response invalid"); };
+  if (plugins.enabled !== undefined && typeof plugins.enabled !== "boolean") invalid();
+  for (const key of ["allow", "deny"]) {
+    if (plugins[key] !== undefined && (!Array.isArray(plugins[key]) || plugins[key].length > 1024
+      || !plugins[key].every(item => typeof item === "string" && item.trim().length > 0
+        && item.length <= 128))) invalid();
+  }
+  if (plugins.entries !== undefined && !record(plugins.entries)) invalid();
+  const ownEntries = Object.entries(plugins.entries || {})
+    .filter(([id]) => id.trim().toLowerCase() === OPENCLAW_PLUGIN);
+  if (ownEntries.some(([, entry]) => !record(entry)
+    || (entry.enabled !== undefined && typeof entry.enabled !== "boolean"))) invalid();
+  const blockedBy = plugins.enabled === false ? "plugins.enabled=false"
+    : (plugins.deny || []).some(id => id.trim().toLowerCase() === OPENCLAW_PLUGIN) ? "plugins.deny"
+      : ownEntries.some(([, entry]) => entry.enabled === false) ? `plugins.entries.${OPENCLAW_PLUGIN}.enabled=false`
+        : null;
+  if (blockedBy) throw new Error(`OpenClaw ${OPENCLAW_PLUGIN} blocked by ${blockedBy}`);
+  return plugins.allow || [];
+}
+
+function includesOpenClawPlugin(allow) {
+  return allow.some(id => id.trim().toLowerCase() === OPENCLAW_PLUGIN);
 }
 
 function symlinkHermes(profileHome, target, managedRoot) {
@@ -140,17 +175,23 @@ function symlinkHermes(profileHome, target, managedRoot) {
 function createExternalPluginAdapterRegistrar(options = {}) {
   if (!options.paths?.stateDir || !options.paths?.trustedRoot
     || typeof options.resourcesRoot !== "string" || !path.isAbsolute(options.resourcesRoot)
-    || (options.getHermesMode !== undefined && typeof options.getHermesMode !== "function")) {
+    || (options.getHermesMode !== undefined && typeof options.getHermesMode !== "function")
+    || (options.getOpenClawMode !== undefined && typeof options.getOpenClawMode !== "function")) {
     throw new TypeError("External plugin adapter registrar 配置无效");
   }
   const settings = { openclawBin: "openclaw", hermesBin: "hermes",
     hermesHome: path.join(os.homedir(), ".hermes"), ...options };
   const execute = (command, args) => run(command, args, settings);
+  const readPluginPolicy = () => execute(settings.openclawBin, ["config", "get", "plugins", "--json"])
+    .then(result => parsePluginPolicy(result.stdout),
+      error => parsePluginPolicy(String(error.stdout || error.stderr || "")));
   return Object.freeze({
     async reconcile() {
       if (settings.packaged !== true) return { skipped: "not-packaged", openclaw: false, hermes: [] };
       const outcome = { skipped: null, openclaw: false, hermes: [], errors: {} };
-      try {
+      if (settings.getOpenClawMode?.() !== "managed") try {
+        // Respect explicit user refusals before registering paths or tool grants.
+        const pluginAllow = await readPluginPolicy();
         const existing = await execute(settings.openclawBin, ["config", "get", "plugins.load.paths", "--json"])
           .then(result => parsePaths(result.stdout), error => parsePaths(String(error.stdout || error.stderr || "")));
         const target = materialize(settings.paths, settings.resourcesRoot, "openclaw");
@@ -159,6 +200,14 @@ function createExternalPluginAdapterRegistrar(options = {}) {
         ensureCredential(settings.paths, "openclaw");
         if (JSON.stringify(existing) !== JSON.stringify(paths)) {
           await execute(settings.openclawBin, ["config", "set", "plugins.load.paths", JSON.stringify(paths)]);
+        }
+        // An absent/empty list is unrestricted. Creating a one-plugin allowlist
+        // there would disable unrelated plugins. Extend only an existing list,
+        // and fail on concurrent edits so the next reconcile can read them anew.
+        if (pluginAllow.length > 0 && !includesOpenClawPlugin(pluginAllow)) {
+          await execute(settings.openclawBin, ["config", "set", "plugins.allow",
+            JSON.stringify([...pluginAllow, OPENCLAW_PLUGIN]), "--strict-json",
+            "--expect-current-json", JSON.stringify(pluginAllow)]);
         }
         // A loaded plugin can still be absent from a limited profile's model
         // tool surface. Add only our exact tool names; explicit deny and
@@ -172,10 +221,14 @@ function createExternalPluginAdapterRegistrar(options = {}) {
           await execute(settings.openclawBin,
             ["config", "set", "tools.alsoAllow", JSON.stringify(nextAllowed)]);
         }
+        const verifiedPluginAllow = await readPluginPolicy();
+        if (verifiedPluginAllow.length > 0 && !includesOpenClawPlugin(verifiedPluginAllow)) {
+          throw new Error(`OpenClaw ${OPENCLAW_PLUGIN} missing from plugins.allow after registration`);
+        }
         outcome.openclaw = true;
       } catch (error) { outcome.errors.openclaw = error.message; }
 
-      if ((settings.getHermesMode?.() || "local") !== "remote") {
+      if (!["remote", "managed"].includes(settings.getHermesMode?.() || "local")) {
         try { await execute(settings.hermesBin, ["plugins", "--help"]); }
         catch (error) {
           outcome.errors.hermes = error.message;

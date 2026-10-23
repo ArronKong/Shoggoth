@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import App from "./App";
 import { UiProvider } from "./components/ui";
+import SystemIssueToasts from "./components/SystemIssueToasts";
+import LocalFileLinks from "./components/LocalFileLinks";
 import { applyConfiguredLocale } from "./i18n";
 import "./styles.css";
 // 管理面聊天质感皮肤（R68）：靠 import 顺序覆盖 styles.css，须在其后。
@@ -11,6 +13,7 @@ import "./manage-skin.css";
 import "./debug-overrides.css";
 import { initThemeFromCache, setTheme } from "./lib/theme";
 import { getConfig } from "./api/client";
+import { readChatUnread } from "./lib/chatUnread";
 import { NavigationGuardProvider } from "./lib/navigation-guard";
 import { loadInspirationFonts } from "./pages/inspiration-fonts";
 const DesktopInspiration = lazy(async () => {
@@ -24,6 +27,7 @@ if (desktopInspiration) document.documentElement.setAttribute('data-desktop-insp
 // Apply the cached theme before first render (index.html already seeded the
 // attribute pre-paint); then re-sync from config — the source of truth.
 async function bootstrap() {
+  if (!desktopInspiration) readChatUnread(localStorage);
   initThemeFromCache();
   try {
     const config = await getConfig();
@@ -38,6 +42,8 @@ async function bootstrap() {
       <HashRouter>
         <NavigationGuardProvider>
           <UiProvider>
+            <SystemIssueToasts />
+            <LocalFileLinks />
             {desktopInspiration ? <Suspense fallback={null}><DesktopInspiration /></Suspense> : <App />}
           </UiProvider>
         </NavigationGuardProvider>

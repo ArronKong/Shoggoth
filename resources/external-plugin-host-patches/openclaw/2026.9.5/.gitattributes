@@ -1,0 +1,2 @@
+# Unified diff context preserves its required prefix before upstream tabs.
+openclaw-2026.9.5-selection.patch -whitespace

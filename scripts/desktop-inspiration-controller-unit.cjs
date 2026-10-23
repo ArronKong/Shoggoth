@@ -48,7 +48,8 @@ const main = new Window(); main.minimized = true;
 let config = normalizeConfig({}), failWrite = false, shown = 0, quits = 0, backendStops = 0, finishStop, tray, locale = 'zh-CN';
 const controller = createDesktopInspirationController({ BrowserWindow: Window,
   Tray: class extends StatusItem { constructor(image) { super(image); tray = this; } }, Menu: { buildFromTemplate: x => x },
-  nativeImage: { createFromPath: file => ({ file, width: 14, height: 14 }) }, globalShortcut, screen, ipcMain,
+  nativeImage: { createFromPath: file => ({ file, width: 14, height: 14, template: false,
+    setTemplateImage(value) { this.template = value; } }) }, globalShortcut, screen, ipcMain,
   configStore: { read: () => config, write: patch => { if (failWrite) throw new Error('disk full'); config = normalizeConfig({ ...config, ...patch }); } },
   getMainWindow: () => main, showMainWindow: () => { shown++; main.minimized = false; main.show(); },
   getUiOrigin: () => 'http://127.0.0.1:18799', getLocale: () => locale, quit() { quits++; },
@@ -64,6 +65,7 @@ const conceal = panel => call('conceal', panel, panel.messages.findLast(([channe
   for (const value of ['S', 'Shift+S', 'Alt+Alt+S', 'Alt+/', 'Alt+F25', {}, 'Alt+S+K']) assert.equal(normalizeInspirationShortcut(value), null);
   assert.equal(tray.image.width, 14);
   assert.ok(tray.image.file.endsWith('/assets/tray/shoggoth.png'));
+  assert.equal(tray.image.template, process.platform === 'darwin', 'macOS chooses the tray color for light and dark menu bars');
   tray.emit('click');
   assert.equal(controller.getWindow(), null, 'a tray click must not create the inspiration printer');
   assert.equal(main.visible, true); assert.equal(main.minimized, false); assert.equal(shown, 1);

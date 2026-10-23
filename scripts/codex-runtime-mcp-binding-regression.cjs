@@ -23,6 +23,7 @@ const { resolveCodexRuntimeLayout, CODEX_APP_SERVER_ARGS } = require("../app/age
 const repo = path.resolve(__dirname, "..");
 const root = fs.realpathSync(fs.mkdtempSync("/tmp/sgcmb-"));
 const candidate = process.argv.includes("--candidate");
+const appState = process.argv.includes("--app-state");
 const home = path.join(root, "codex");
 fs.mkdirSync(home, { mode: 0o700 });
 const paths = candidate ? resolveCanonicalServicePaths({ userInfo: () => ({ homedir: root }) })
@@ -45,8 +46,8 @@ const provider = http.createServer((req, res) => {
       const tools = body.tools || body.input.filter(item => item.type === "additional_tools").flatMap(item => item.tools);
       const flatten = (items, namespace) => items.flatMap(item => item.tools ? flatten(item.tools, item.name)
         : [{ ...item, ...(namespace ? { namespace } : {}) }]);
-      const toolName = candidate ? "mcp_server_call" : "mcp_server_list";
-      const toolArguments = candidate ? pluginArguments : {};
+      const toolName = candidate ? "mcp_server_call" : appState ? "app_state_get" : "mcp_server_list";
+      const toolArguments = candidate ? pluginArguments : appState ? { section: "cron", cursor: null, limit: 50 } : {};
       const tool = flatten(tools).find(item => item.name?.endsWith(toolName));
       const codeMode = flatten(tools).some(item => item.type === "custom" && item.name === "exec");
       if (!tool && !codeMode) { res.writeHead(500); res.end("missing fixture tools"); return; }
@@ -78,7 +79,7 @@ const provider = http.createServer((req, res) => {
 
 (async () => {
   await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
-  const binary = resolveCodexRuntimeLayout({ repoRoot: repo }).runtimePath;
+  const binary = process.env.SHOGGOTH_TEST_CODEX_BINARY || resolveCodexRuntimeLayout({ repoRoot: repo }).runtimePath;
   const environment = binding => Object.freeze({ runtime: "codex", runtimeAccountId: binding.runtimeAccountId,
     kind: "shoggoth-managed", installationKind: "bundled", homeKind: "managed-shared", strategy: "managed-shared",
     home, nativeHome: null, integrationRoot: null, binaryPath: binary,
@@ -107,6 +108,14 @@ const provider = http.createServer((req, res) => {
     parentEnv: {}, version: "codex-run-binding-fixture" });
   await service.start();
   const profile = service.productStore.listAgentProfiles().find(item => item.enabled);
+  if (appState) {
+    const foreign = { ...profile, id: "22222222-2222-4222-8222-222222222222", agentId: "foreign-agent", name: "Foreign Agent",
+      runtimeProfileId: "foreign-runtime", isDefault: false };
+    service.productStore.putAgentProfile(foreign);
+    await service.nativeDomainServiceController.handle("cron.job.create", { operationId: "codex-foreign-cron", profileId: foreign.id,
+      name: "Foreign Cron", prompt: "Fixture instructions", workspace: null, enabled: false, schedule: { kind: "every", everyMs: 60_000, anchorMs: 0 },
+      misfirePolicy: "latest", maxCatchUp: 1, overlapPolicy: "skip", threadPolicy: "new", threadId: null, createdAt: Date.now() });
+  }
   if (candidate) {
     const installer = new PluginPackageInstaller({ store: service.pluginStore });
     const sourcePath = path.join(repo, "examples/plugins/local-notes");
@@ -178,7 +187,7 @@ required = true
   assert.equal(new Set(bindings.map(value => value.params.threadId)).size, 3);
   assert(bindings.every(value => typeof value.params.turnId === "string"));
   assert.equal(results.length, 3);
-  assert(results.every(output => JSON.stringify(output).includes(candidate ? "shoggothPluginApp" : "servers")), JSON.stringify(results));
+  assert(results.every(output => JSON.stringify(output).includes(candidate ? "shoggothPluginApp" : appState ? "Foreign Cron" : "servers")), JSON.stringify(results));
   assert(!JSON.stringify(results).includes("mcp_session_invalid"));
   if (candidate) {
     for (let index = 0; index < acks.length; index += 1) {
@@ -196,7 +205,7 @@ required = true
       assert(opened.descriptor.resource.byteLength > 0, "real stdio resources/read initializes the App");
     }
   }
-  console.log(`PASS real bundled Codex + local Responses + production helper + Service: 3 concurrent thread/turn bindings and ${candidate ? "default local-notes read + App receipt" : "default product MCP calls"}`);
+  console.log(`PASS real bundled Codex + local Responses + production helper + Service: 3 concurrent thread/turn bindings and ${candidate ? "default local-notes read + App receipt" : appState ? "foreign-Profile app_state_get" : "default product MCP calls"}`);
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
   try { await service?.stop({ notify: false }); } finally {
     try { await host?.stop(); } finally {
@@ -204,7 +213,7 @@ required = true
       fs.rmSync(root, { recursive: true, force: true });
     }
   }
-  if (!candidate && !process.exitCode) {
+  if (!candidate && !appState && !process.exitCode) {
     const child = spawn(process.execPath, [__filename, "--candidate"], { stdio: "inherit" });
     const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
     if (code !== 0) process.exitCode = 1;

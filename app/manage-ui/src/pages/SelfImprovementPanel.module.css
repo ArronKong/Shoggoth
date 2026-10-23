@@ -1,0 +1,30 @@
+.panel { margin: 0 0 22px; padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel-bg, var(--bg)); min-width: 0; }
+.head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.head > div:first-child { flex: 1; min-width: 200px; }
+.head h2, .head h3 { margin: 0; font-size: 16px; }
+.head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.preview, .badge { display: inline-block; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; font-size: 11px; font-weight: 400; }
+.preview { margin-left: 6px; }
+.tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin: 18px 0; }
+.tabs button { appearance: none; padding: 8px 0 11px; background: none; color: var(--muted); border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
+.tabs button[aria-current] { color: var(--fg); border-bottom-color: var(--accent); }
+.settings { max-width: 780px; display: grid; gap: 16px; }
+.note, .empty { color: var(--muted); line-height: 1.7; font-size: 13px; margin: 4px 0; }
+.empty { padding: 14px 0; }
+.columns, .diff { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.toolbar, .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+.list { display: grid; gap: 8px; margin: 12px 0; }
+.item, .history { padding: 13px 15px; border: 1px solid var(--border); border-radius: 9px; background: transparent; color: var(--fg); text-align: left; min-width: 0; }
+.item { display: grid; gap: 6px; cursor: pointer; }
+.item:hover:not(:disabled) { border-color: var(--accent); }
+.item span, .item small, .history small { color: var(--muted); line-height: 1.5; }
+.item:disabled { opacity: .65; cursor: default; }
+.history p { font-size: 13px; line-height: 1.6; }
+.history > button { display: block; margin-top: 10px; }
+.detail { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); min-width: 0; }
+.detail h3, .detail h4 { font-size: 14px; }
+.detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; font: inherit; font-size: 13px; line-height: 1.7; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
+.detail details { margin: 14px 0; }
+.detail summary { cursor: pointer; font-size: 13px; }
+.detail code { overflow-wrap: anywhere; }
+@media (max-width: 700px) { .panel { padding: 14px; } .columns, .diff { grid-template-columns: 1fr; } .tabs { gap: 14px; } }

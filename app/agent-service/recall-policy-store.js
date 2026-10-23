@@ -50,7 +50,7 @@ function fileIdentity(stat) { return `${stat.dev}:${stat.ino}:${stat.size}:${sta
 function sourceRefs(item) {
   // Product saves use [source event, run, optional workspace]. Older imports
   // and UI writes have no transcript identity; their content is matched below.
-  return item.sourceRefs.filter((ref) => !/^(?:workspace:|user-edit:|codex-memory:)/u.test(ref));
+  return item.sourceRefs.filter((ref) => !/^(?:workspace:|user-edit:|codex-memory:|untrusted:|consolidated:)/u.test(ref));
 }
 
 class RecallPolicyStore {
@@ -65,12 +65,43 @@ class RecallPolicyStore {
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.states = new Map();
     this.onChange = null;
+    this.changeSubscriptions = new Set();
+    this.changeGeneration = 0;
     this.indexPending = new Set();
     this.opened = false;
   }
   setOnChange(callback) {
     if (callback !== null && typeof callback !== "function") throw new TypeError("RecallPolicy callback 无效");
     this.onChange = callback;
+  }
+  subscribeChanges(listener, { signal } = {}) {
+    if (typeof listener !== "function") throw new TypeError("RecallPolicy listener 无效");
+    if (signal && (typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function")) {
+      throw new TypeError("RecallPolicy subscription signal 无效");
+    }
+    const subscription = { listener, unsubscribe: () => {
+      this.changeSubscriptions.delete(subscription);
+      signal?.removeEventListener("abort", subscription.unsubscribe);
+    } };
+    if (signal?.aborted) return subscription.unsubscribe;
+    this.changeSubscriptions.add(subscription);
+    signal?.addEventListener("abort", subscription.unsubscribe, { once: true });
+    return subscription.unsubscribe;
+  }
+  _notifyChanges(profileId, revision, change, reason = null) {
+    if (!this.changeSubscriptions.size) return;
+    const event = { type: "recall-policy.changed", profileId, revision, change, reason, committed: true };
+    const generation = this.changeGeneration, recipients = [...this.changeSubscriptions];
+    // Reconciliation may append before _load installs its verified state. A
+    // later microtask also avoids listener reentry during the durable append.
+    queueMicrotask(() => {
+      if (!this.opened || generation !== this.changeGeneration) return;
+      for (const subscription of recipients) {
+        if (!this.opened || generation !== this.changeGeneration) return;
+        if (!this.changeSubscriptions.has(subscription)) continue;
+        try { Promise.resolve(subscription.listener(structuredClone(event))).catch(() => {}); } catch {}
+      }
+    });
   }
   _notifyIndex(profileId) {
     if (!this.onChange) return;
@@ -79,6 +110,7 @@ class RecallPolicyStore {
   }
   open(profileIds = []) {
     if (this.opened) return;
+    this.changeGeneration += 1;
     this.opened = true;
     // A damaged Profile must not stop the user's audit/repair UI or healthy
     // Profiles from starting. Its own Agent reads still fail closed.
@@ -87,7 +119,11 @@ class RecallPolicyStore {
       catch (error) { if (error.code !== "RECALL_POLICY_UNAVAILABLE") throw error; }
     }
   }
-  close() { this.opened = false; this.states.clear(); this.indexPending.clear(); }
+  close() {
+    this.changeGeneration += 1;
+    for (const subscription of this.changeSubscriptions) subscription.unsubscribe();
+    this.opened = false; this.states.clear(); this.indexPending.clear();
+  }
   forgetProfile(profileId) {
     this.states.delete(profileId); this.indexPending.delete(profileId);
     // Called only by the full Profile purge, after its authority data is gone.
@@ -110,6 +146,7 @@ class RecallPolicyStore {
       }
       this.fs.fsyncSync(fd);
     } finally { this.fs.closeSync(fd); }
+    this._notifyChanges(profileId, null, "profile-forgotten");
   }
   _paths(profileId) {
     const profileDir = path.join(this.paths.agentsDir, assertId(profileId, "profileId"));
@@ -481,6 +518,8 @@ class RecallPolicyStore {
     state.markerIdentity = fileIdentity(validatePrivateStat(this.fs.lstatSync(targets.marker), targets.marker));
     state.installationIdentity = fileIdentity(validatePrivateStat(
       this.fs.lstatSync(targets.installation), targets.installation));
+    this._notifyChanges(state.profileId, record.seq,
+      record.type === "recall.expiry_commit" || record.reason === "expired" ? "expiry" : "withdrawal", record.reason || "expired");
     if (SUPPRESSING_REASONS.has(record.reason)) this._notifyIndex(state.profileId);
   }
   _reconcile(state, targets) {
@@ -660,6 +699,16 @@ class RecallPolicyStore {
     return this._hasFreshExplicitSource(state, item.sourceRefs, cutoff.createdAt);
   }
   isMemoryVisible(profileId, item) { return this._isMemoryVisible(this.assertReady(profileId), profileId, item); }
+  // Another Agent's shared copy, seen by this Agent: this Agent's revoked
+  // sources and forgotten contents still apply. A copy written before the
+  // forget stays hidden; only a later save through another Agent shows again.
+  _isForeignMemoryVisible(state, profileId, item) {
+    if (!item || item.profileId === profileId) return false;
+    if (!state.hasSuppressions) return true;
+    if (item.sourceRefs.some((ref) => state.suppressedRefs.has(ref))) return false;
+    const cutoff = state.contentCutoffs.get(normalizeContent(item.content));
+    return !cutoff || item.createdAt > cutoff.createdAt;
+  }
   _reauthorizedContents(state) {
     const memoryRevision = this.memoryStore.getRevision(state.profileId);
     const sourceRevision = state.derivedSourceRevision;
@@ -736,10 +785,17 @@ class RecallPolicyStore {
     // revoked event or Run must not launder the old source back into memory.
     return refs.every((ref) => typeof ref === "string" && !state.suppressedRefs.has(ref));
   }
-  hasRevokedContent(profileId, content) {
+  hasRevokedContent(profileId, content, { memoryItem = null } = {}) {
     const state = this.assertReady(profileId);
     const normalized = normalizeContent(content);
-    for (const forgotten of state.forgottenContents) if (normalized.includes(forgotten)) return true;
+    // Only a bound item can reauthorize its own exact fact, using the same
+    // revision, creation cutoff and fresh-source checks as memory visibility.
+    // Wrappers and other forgotten facts in the text remain blocked.
+    const authorizedContent = memoryItem && this._isMemoryVisible(state, profileId, memoryItem)
+      ? normalizeContent(memoryItem.content) : null;
+    for (const forgotten of state.forgottenContents) {
+      if (normalized.includes(forgotten) && forgotten !== authorizedContent) return true;
+    }
     return false;
   }
   snapshot(profileId) {
@@ -747,6 +803,7 @@ class RecallPolicyStore {
     return Object.freeze({ revision: state.revision,
       hasRevocations: state.hasSuppressions,
       isMemoryVisible: (item) => this._isMemoryVisible(state, profileId, item),
+      isForeignMemoryVisible: (item) => this._isForeignMemoryVisible(state, profileId, item),
       isEventVisible: (event) => this._isEventVisible(state, event) });
   }
   recordReason({ profileId, item, relatedItems = [], reason, operationId = this.randomUUID(),

@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const {
   atomicWritePrivateFile,
   preparePrivateParent,
@@ -18,6 +19,9 @@ const MAX_PLAINTEXT_BYTES = 64 * 1024;
 const CUSTOM_PROVIDER_SECRET_KINDS = new Set([
   "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses", "runtime-worker-token",
   "mcp-oauth", "mcp-bearer", "microsoft-graph-oauth",
+  "zoom-oauth-client", "dropbox-oauth-client",
+  "external-provider-api-key",
+  "plugin-secret", "web-provider-api-key",
 ]);
 
 function secretError(code, message = code) {
@@ -167,6 +171,18 @@ class EncryptedSecretStore {
     return Object.hasOwn(this.container.credentials, credentialRef) ? this.container.revision : null;
   }
 
+  // Per-entry fence for a long-running OAuth login. Unlike the container's
+  // revision, an unrelated token write cannot invalidate the client secret.
+  getCredentialFingerprint(credentialRef) {
+    this.#assertOpen();
+    assertCredentialRef(credentialRef);
+    const entry = this.container.credentials[credentialRef];
+    if (!entry) return null;
+    return crypto.createHash("sha256").update(JSON.stringify([
+      credentialRef, entry.kind, entry.ciphertext,
+    ])).digest("hex");
+  }
+
   matchesPlaintext(candidate) {
     if (typeof candidate !== "string") {
       throw secretError("SECRET_MATCH_VALUE_INVALID", "敏感值匹配输入必须是字符串");
@@ -253,6 +269,9 @@ class EncryptedSecretStore {
     }
     let plaintext = plaintextValue;
     const result = this.#enqueue(async () => {
+      // Admission may predate an uncertain earlier queued commit. Do not
+      // append another mutation until a fresh open has resolved that state.
+      if (this.commitUncertain) throw lockedError();
       if (expectedRevision !== undefined
         && (Object.hasOwn(this.container.credentials, credentialRef)
           ? this.container.revision : null) !== expectedRevision) {
@@ -298,11 +317,69 @@ class EncryptedSecretStore {
     });
   }
 
+  deleteIfFingerprint(credentialRef, expected) {
+    this.#assertOpen();
+    assertCredentialRef(credentialRef);
+    const isDataRecord = (value, keys) => assertExactKeys(value, keys)
+      && Reflect.ownKeys(value).length === keys.length
+      && keys.every(key => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        return descriptor?.enumerable && Object.hasOwn(descriptor, "value");
+      });
+    const hasFingerprint = value => CUSTOM_PROVIDER_SECRET_KINDS.has(value.kind)
+      && typeof value.fingerprint === "string" && /^[a-f0-9]{64}$/u.test(value.fingerprint);
+    const invalid = () => Promise.reject(secretError("SECRET_REVISION_CONFLICT", "凭据删除证明无效"));
+    const keys = expected && Object.hasOwn(expected, "retained")
+      ? ["kind", "fingerprint", "retained"] : ["kind", "fingerprint"];
+    if (!isDataRecord(expected, keys) || !hasFingerprint(expected)) return invalid();
+    const retained = [];
+    if (keys.length === 3) {
+      const rows = expected.retained;
+      if (!Array.isArray(rows) || Object.getPrototypeOf(rows) !== Array.prototype
+        || rows.length > 128 || Reflect.ownKeys(rows).length !== rows.length + 1) return invalid();
+      const seen = new Set([credentialRef]);
+      for (let index = 0; index < rows.length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(rows, String(index));
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) return invalid();
+        const row = descriptor.value;
+        if (!isDataRecord(row, ["credentialRef", "kind", "fingerprint"]) || !hasFingerprint(row)) return invalid();
+        try { assertCredentialRef(row.credentialRef); } catch { return invalid(); }
+        if (seen.has(row.credentialRef)) return invalid();
+        seen.add(row.credentialRef);
+        retained.push({ credentialRef: row.credentialRef, kind: row.kind, fingerprint: row.fingerprint });
+      }
+    }
+    // Capture immutable values before joining the Store's mutation queue. Both
+    // the deletion target and its replacement must still match at the write.
+    return this.#delete(credentialRef, { kind: expected.kind, fingerprint: expected.fingerprint, retained });
+  }
+
   delete(credentialRef) {
+    return this.#delete(credentialRef);
+  }
+
+  #delete(credentialRef, expected) {
     this.#assertOpen();
     assertCredentialRef(credentialRef);
     return this.#enqueue(async () => {
-      if (!Object.prototype.hasOwnProperty.call(this.container.credentials, credentialRef)) return false;
+      // An earlier queued commit may have become uncertain after admission.
+      // Keep all deletion evidence until the Store has been safely reopened.
+      if (this.commitUncertain) throw lockedError();
+      const entry = Object.hasOwn(this.container.credentials, credentialRef) ? this.container.credentials[credentialRef] : null;
+      if (!entry) return false;
+      if (expected) {
+        const matches = (ref, proof) => {
+          const current = Object.hasOwn(this.container.credentials, ref) ? this.container.credentials[ref] : null;
+          if (!current || current.kind !== proof.kind) return false;
+          return crypto.createHash("sha256").update(JSON.stringify([
+            ref, current.kind, current.ciphertext,
+          ])).digest("hex") === proof.fingerprint;
+        };
+        if (!matches(credentialRef, expected)
+          || expected.retained.some(proof => !matches(proof.credentialRef, proof))) {
+          throw secretError("SECRET_REVISION_CONFLICT", "凭据已变化");
+        }
+      }
       const credentials = { ...this.container.credentials };
       delete credentials[credentialRef];
       const candidate = {

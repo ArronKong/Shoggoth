@@ -24,20 +24,33 @@ export default function TurnProcess({
     agentId?: string; sessionId?: string; duplicateToolCallIds?: ReadonlySet<string> };
 }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(!!defaultOpen);
   const stats = useMemo(() => {
-    const tools = steps.filter((s) => s.kind === "tool");
-    const errs = steps.filter((s) => s.status === "error" || s.isError).length;
+    const all: TurnStep[] = [];
+    let taskErrors = 0, running = false;
+    const visit = (items: TurnStep[]) => {
+      for (const step of items) {
+        all.push(step);
+        if (!step.subagent) continue;
+        running ||= step.subagent.status === "running";
+        if (["failed", "timeout"].includes(step.subagent.status)
+          && !step.subagent.steps.some(child => child.status === "error" || child.isError)) taskErrors++;
+        visit(step.subagent.steps);
+      }
+    };
+    visit(steps);
+    const tools = all.filter((s) => s.kind === "tool");
+    const errs = taskErrors + all.filter((s) => s.status === "error" || s.isError).length;
     const dur = tools.reduce((a, s) => a + (s.durationS ?? 0), 0);
-    return { total: steps.length, tools: tools.length, errs, dur };
+    return { total: all.length, tools: tools.length, errs, dur, running };
   }, [steps]);
+  const [open, setOpen] = useState(!!defaultOpen || stats.running);
   const showDurations = useMemo(() => steps.some((s) => typeof s.durationS === "number" && s.durationS > 0), [steps]);
   if (!steps.length) return null;
   return (
-    <div className={styles.proc}>
+    <div className={styles.proc} data-chat-process>
       <div className={styles.procRow}>
         <button type="button" className={styles.procHead} onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-          <span className={styles.procIco} data-live={live ? "1" : undefined} data-err={stats.errs ? "1" : undefined}>
+          <span className={styles.procIco} data-live={live || stats.running ? "1" : undefined} data-err={stats.errs ? "1" : undefined}>
             <IconTrajectory />
           </span>
           <span className={styles.procLabel}>{t("turnLab.processLabel")}</span>
@@ -59,7 +72,7 @@ export default function TurnProcess({
       <div className={styles.bodyClip} data-open={open ? "1" : undefined}>
         <div className={styles.bodyInner}>
           {open ? (
-            <TurnTimeline steps={steps} status={live ? "running" : "done"} showDurations={showDurations} autoFollow={!!live} className={styles.procTimeline} pluginConversation={pluginConversation} />
+            <TurnTimeline steps={steps} status={live || stats.running ? "running" : "done"} showDurations={showDurations} autoFollow={!!live || stats.running} className={styles.procTimeline} pluginConversation={pluginConversation} />
           ) : (
             <div />
           )}

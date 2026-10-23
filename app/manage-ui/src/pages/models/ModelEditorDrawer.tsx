@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useReducer, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Modal, { ModalSection } from "../../components/Modal";
-import { Field, Option, Select, Switch, TextInput } from "../../components/Field";
+import { Field, Option, Select, Switch, TextInput, TextArea } from "../../components/Field";
 import { ApiError, applyModelChange, previewModelChange } from "../../api/client";
 import type {
   CustomModelProvider,
@@ -22,6 +22,7 @@ import {
 } from "./model-editor-state";
 import styles from "./ModelEditorDrawer.module.css";
 import { useNavigationGuard } from "../../lib/navigation-guard";
+import { useToast } from "../../components/ui";
 
 export interface ModelEditorDrawerProps {
   mode: ModelEditorMode;
@@ -112,6 +113,7 @@ export default function ModelEditorDrawer({
   onOpenChangeComplete,
 }: ModelEditorDrawerProps) {
   const { t } = useTranslation();
+  const toast = useToast();
   // auth 型(凭证在 auth-profiles、模型条目=allowlist 键)也可挂新模型 ID
   const editableProviders = useMemo(
     () => providers.filter((provider) => provider.source === "config" || provider.source === "auth"),
@@ -163,6 +165,7 @@ export default function ModelEditorDrawer({
       case "base_url_invalid": return t("models.validationBaseUrlInvalid");
       case "context_positive_integer": return t("models.validationContextPositive");
       case "max_tokens_positive_integer": return t("models.validationMaxTokensPositive");
+      case "invalid_json": return t("models.validationAdvancedJson");
       default: return undefined;
     }
   }
@@ -230,6 +233,13 @@ export default function ModelEditorDrawer({
   // applied 必须先同步共享目录与页面复合状态，确认 synced 后才关闭弹窗。
   async function finishApplied(result: ModelChangeApplyResult): Promise<void> {
     if (result.activation) onActivation?.(result.activation);
+    if (result.configSaved === true) {
+      if (result.catalog) await onApplied(result.catalog).catch(() => "sync-pending");
+      dispatch({ type: "apply-result", result });
+      if (result.warnings?.length) toast.info(result.warnings.join("；"));
+      onRequestClose();
+      return;
+    }
     if (!result.catalog) {
       dispatch({
         type: "apply-result",
@@ -322,7 +332,7 @@ export default function ModelEditorDrawer({
     // 一视同仁)不逐发网关,收集进页面草稿队列,由「提交更改」一次合并写。
     // providerMode:"new"(新建 provider,带端点/凭证)与编辑元数据保持即时路径。
     const draftable = idOnly || (mode === "create" && state.values.providerMode === "existing");
-    if (onDraft && draftable) {
+    if (onDraft && draftable && !capabilities.configurationDraft) {
       const modelId = state.values.id.trim();
       if (!modelId) return;
       if (mode === "edit" && state.sourceModelId === modelId) {
@@ -590,6 +600,12 @@ export default function ModelEditorDrawer({
             />
           </Field>
         )}
+        {capabilities.configurationDraft && !idOnly && <Field label={t("models.advancedModelConfig")}
+          hint={t("models.advancedModelConfigHint")} error={fieldError("advanced")}>
+          <TextArea value={state.values.advanced} rows={7} disabled={!supported}
+            aria-label={t("models.advancedModelConfig")} onChange={event => setField("advanced", event.target.value)}
+            placeholder={'{"input":["text","image"],"contextTokens":64000}'} />
+        </Field>}
       </ModalSection>
 
       {state.preview && (state.preview.references.length > 0 || state.preview.runtimeApply) && (

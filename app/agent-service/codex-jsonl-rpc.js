@@ -11,7 +11,8 @@ const {
   validateRegisteredSecrets,
   validRequestId,
 } = require("./codex-rpc-safety");
-const { CodexRpcWriteQueue } = require("./codex-rpc-write-queue");
+const { CodexRpcWriteQueue, isCodexRpcSendRejection } = require("./codex-rpc-write-queue");
+const { classifyCodexSessionRemoteError } = require("./codex-session-diagnostics");
 
 class CodexJsonlRpcClient {
   constructor(child, options = {}) {
@@ -145,6 +146,11 @@ class CodexJsonlRpcClient {
     this.nextId += 1;
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
     const signal = options.signal;
+    const beforeSend = options.beforeSend;
+    if (beforeSend !== undefined && typeof beforeSend !== "function") {
+      this._retireRequestId(id);
+      throw rpcError("RPC_INVALID_SEND_GUARD", "Invalid final send guard");
+    }
     if (signal?.aborted) {
       this._retireRequestId(id);
       throw rpcError("RPC_REQUEST_ABORTED", "Codex RPC request was aborted");
@@ -170,8 +176,33 @@ class CodexJsonlRpcClient {
       signal?.addEventListener("abort", abortListener, { once: true });
       this.pending.set(id, { method, resolve, reject, timer, signal, abortListener });
     });
+    const pendingRecord = this.pending.get(id);
+    const assertPending = () => {
+      if (this.fatalError) throw this.fatalError;
+      if (this.ended) throw rpcError("RPC_TERMINATED", "Codex RPC client is terminated");
+      if (this.pending.get(id) !== pendingRecord || signal?.aborted) {
+        throw rpcError("RPC_REQUEST_RETIRED", "Codex RPC request was retired before sending");
+      }
+    };
     const message = params === undefined ? { id, method } : { id, method, params };
-    this._write(message).catch((error) => this._fail(error));
+    this._write(message, { beforeSend: (frame) => {
+      assertPending();
+      const checked = beforeSend?.(frame);
+      assertPending();
+      return checked;
+    } }).catch((error) => {
+      if (!isCodexRpcSendRejection(error)) {
+        this._fail(error);
+        return;
+      }
+      // Refusing one queued request must preserve unrelated requests and the Host.
+      if (this.pending.get(id) !== pendingRecord) return;
+      this.pending.delete(id);
+      this._retireRequestId(id);
+      clearTimeout(pendingRecord.timer);
+      pendingRecord.signal?.removeEventListener("abort", pendingRecord.abortListener);
+      pendingRecord.reject(error);
+    });
     return result;
   }
 
@@ -366,7 +397,8 @@ class CodexJsonlRpcClient {
       // the JSON-RPC response rather than forwarding helper stderr to this pipe.
       if ((pending.method === "thread/start" || pending.method === "thread/resume")
         && typeof message.error?.message === "string") {
-        const diagnostic = message.error.message.match(/\b(?:BOOTSTRAP_ROLE_REJECTED|BOOTSTRAP_CODE_IDENTITY_(?:TIMEOUT|INVALID)|BOOTSTRAP_MCP_START_FAILED|MCP_HELPER_(?:ARGUMENTS_INVALID|AUTH_FAILED|FAILED))\b/u)?.[0];
+        error.remoteClassification = classifyCodexSessionRemoteError(message.error.message);
+        const diagnostic = message.error.message.match(/\b(?:BOOTSTRAP_ROLE_REJECTED|BOOTSTRAP_CODE_IDENTITY_(?:TIMEOUT|INVALID)|BOOTSTRAP_MCP_START_FAILED|MCP_HELPER_(?:ARGUMENTS_INVALID|AUTH_FAILED|SERVICE_UNAVAILABLE|SERVICE_RECOVERY_REQUIRED|FAILED))\b/u)?.[0];
         if (diagnostic) error.startupDiagnostic = diagnostic;
         else if (/(?:required MCP servers failed to initialize|handshaking with MCP server failed)/iu.test(message.error.message)) {
           error.startupDiagnostic = "MCP_INITIALIZE_FAILED";
@@ -441,7 +473,7 @@ class CodexJsonlRpcClient {
     }
   }
 
-  _write(message) {
+  _write(message, options = {}) {
     if (this.fatalError) return Promise.reject(this.fatalError);
     if (this.ended || !this.child.stdin.writable) {
       return Promise.reject(rpcError("RPC_STDIN_CLOSED", "Codex stdin is closed"));
@@ -455,7 +487,7 @@ class CodexJsonlRpcClient {
     if (Buffer.byteLength(frame) > this.maxFrameBytes) {
       return Promise.reject(rpcError("RPC_OUTBOUND_FRAME_TOO_LARGE", "RPC request exceeded its byte limit"));
     }
-    return this.writeQueue.enqueue(frame);
+    return this.writeQueue.enqueue(frame, options);
   }
 
   _handleStdoutEnd() {

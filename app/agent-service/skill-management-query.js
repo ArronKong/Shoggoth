@@ -34,6 +34,7 @@ function querySkillManagementCatalog({ catalog, usage, query, status, pageIndex,
     if (!term) return true;
     const category = item.category || (item.source === "builtin" ? "Shoggoth built-in" : "Shoggoth native");
     return item.name.toLowerCase().includes(term)
+      || (item.title || "").toLowerCase().includes(term)
       || item.description.toLowerCase().includes(term)
       || category.toLowerCase().includes(term);
   }).sort((a, b) => {

@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import type { CustomEndpoint, CustomEndpointsSnapshot } from "../../types";
+import type { CustomEndpoint } from "../../types";
 import { useConfirm, useToast } from "../../components/ui";
 import EndpointModal from "./EndpointModal";
 import {
@@ -12,13 +12,20 @@ import {
   type EndpointMutationOutcome,
   type EndpointSafeReference,
 } from "./endpoint-controller";
+import { getModelOperationRecoverySnapshot, modelOperationRecoveryBlocks, subscribeModelOperationRecovery } from "./model-operation-recovery";
+import { useSlowPending } from "./useSlowPending";
+import { usePageCache } from "../../lib/usePageCache";
+import { endpointMutationNotice } from "./endpoint-mutation-state";
 import styles from "./CustomEndpointsPanel.module.css";
-
-type SnapshotState = {
-  controller: EndpointController;
-  backend: string;
-  value: CustomEndpointsSnapshot;
-};
+// Custom/fixture controllers stay isolated unless they explicitly share a snapshot scope.
+const controllerKeys = new WeakMap<EndpointController, string>();
+let controllerSequence = 0;
+function snapshotKey(controller: EndpointController): string {
+  if (controller.cacheKey) return controller.cacheKey;
+  let key = controllerKeys.get(controller);
+  if (!key) { key = `models:endpoints:controller:${++controllerSequence}`; controllerKeys.set(controller, key); }
+  return key;
+}
 
 type DeleteRecovery = {
   endpoint: CustomEndpoint;
@@ -42,6 +49,7 @@ export default function CustomEndpointsPanel({
   description,
   onChanged,
   onActivation,
+  refreshKey = 0,
 }: {
   controller: EndpointController;
   active: boolean;
@@ -51,16 +59,22 @@ export default function CustomEndpointsPanel({
   /** 完整保存/删除后通知页面刷新（端点进出会改目录）。 */
   onChanged: () => void;
   onActivation?: (activation?: { kind: string; available?: boolean } | null) => void;
+  refreshKey?: number;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
   const confirm = useConfirm();
+  const recovery = useSyncExternalStore(subscribeModelOperationRecovery,
+    () => getModelOperationRecoverySnapshot(controller.backend));
+  const recoveryUnknown = recovery.required && (recovery.journal !== "ready" || !recovery.storageVerified);
 
-  const [snapshotState, setSnapshotState] = useState<SnapshotState | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
+  const { data: snapshot, loading, error: listError, refresh, replace } = usePageCache(
+    snapshotKey(controller), () => controller.list(), { staleTime: 30_000, enabled: active },
+  );
   const [mutationNote, setMutationNote] = useState<string | null>(null);
+  const [deleteBlocked, setDeleteBlocked] = useState<{ endpoint: CustomEndpoint; outcome: EndpointMutationOutcome } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const slowDelete = useSlowPending(deleting !== null);
   const [deleteRecovery, setDeleteRecovery] = useState<DeleteRecovery | null>(null);
   const [modal, setModal] = useState<{
     endpoint: CustomEndpoint | null;
@@ -68,18 +82,21 @@ export default function CustomEndpointsPanel({
   } | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const modalGeneration = useRef(0);
-  const listEpoch = useRef(0);
   const mutationEpoch = useRef(0);
   const controllerRef = useRef(controller);
   const deleteRecoveryRef = useRef<DeleteRecovery | null>(null);
   deleteRecoveryRef.current = deleteRecovery;
 
-  // 快照同时带 controller 身份；即使 effect 尚未来得及执行，也不会把旧后端内容
-  // 暂时投影成新后端的列表。
-  const snapshot = (
-    snapshotState?.controller === controller
-    && snapshotState.backend === controller.backend
-  ) ? snapshotState.value : null;
+  useEffect(() => {
+    if (snapshot) controller.adoptSnapshot?.(snapshot);
+  }, [controller, snapshot]);
+
+  const previousRefreshKey = useRef(refreshKey);
+  useEffect(() => {
+    if (previousRefreshKey.current === refreshKey) return;
+    previousRefreshKey.current = refreshKey;
+    if (active) void refresh();
+  }, [active, refresh, refreshKey]);
 
   useEffect(() => {
     const identityChanged = controllerRef.current !== controller;
@@ -91,41 +108,13 @@ export default function CustomEndpointsPanel({
       setDeleteRecovery(null);
       setModalOpen(false);
       setModal(null);
-      setListError(null);
       setMutationNote(null);
+      setDeleteBlocked(null);
     }
 
-    const epoch = ++listEpoch.current;
     if (!active) {
       mutationEpoch.current += 1;
-      setLoading(false);
-      return;
     }
-    const abort = new AbortController();
-    setLoading(true);
-    setListError(null);
-    controller.list(abort.signal)
-      .then((next) => {
-        if (epoch !== listEpoch.current) return;
-        setSnapshotState({ controller, backend: controller.backend, value: next });
-      })
-      .catch((error) => {
-        if (epoch !== listEpoch.current || abort.signal.aborted) return;
-        const message = error instanceof Error ? error.message : String(error);
-        // 同一 controller 的瞬时失败保留最后一份可信快照；身份切换时旧快照因上面的
-        // controller 标记不会显示，也不会被伪装成 supported:false/空列表。
-        setListError(message);
-        toast.error(message);
-      })
-      .finally(() => {
-        if (epoch === listEpoch.current) setLoading(false);
-      });
-    return () => {
-      abort.abort();
-      if (epoch === listEpoch.current) listEpoch.current += 1;
-    };
-    // toast 身份不稳定，纳入依赖会让父级重渲染触发无意义重拉。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, controller]);
 
   useEffect(() => () => {
@@ -139,13 +128,39 @@ export default function CustomEndpointsPanel({
   };
 
   const completeDelete = (endpoint: CustomEndpoint, outcome: EndpointMutationOutcome) => {
+    if (outcome.status === "applied" && outcome.configSaved === true) {
+      if (outcome.snapshot) replace(outcome.snapshot);
+      setMutationNote(null); setDeleteBlocked(null); setDeleteRecovery(null);
+      toast.success(t("models.settings.endpoints.nativeDeleteOk", { name: endpoint.name }));
+      if (outcome.warnings?.length) toast.info(outcome.warnings.join("；"));
+      else if (outcome.sync === "pending") toast.info(t("models.dirManagedRefreshFailed"));
+      onChanged();
+      return true;
+    }
     if (!isEndpointMutationComplete(outcome)) return false;
-    setSnapshotState({ controller, backend: controller.backend, value: outcome.snapshot });
+    replace(outcome.snapshot);
     setMutationNote(null);
+    setDeleteBlocked(null);
     setDeleteRecovery(null);
     if (outcome.snapshot.warnings?.length) toast.error(outcome.snapshot.warnings.join("; "));
     else toast.success(t("models.settings.endpoints.deleteOk", { name: endpoint.name }));
     onChanged();
+    return true;
+  };
+
+  const retainDeleteOutcome = (endpoint: CustomEndpoint, session: DeleteRecovery["session"], outcome: EndpointMutationOutcome) => {
+    if (outcome.snapshot) replace(outcome.snapshot);
+    // A proven zero-write rejection has no operation to resume. Keep the reason
+    // visible, release the plan and let the user edit this or another endpoint.
+    if (endpointMutationNotice(outcome) === "preflightBlocked" && outcome.recovery?.locked === false) {
+      setDeleteRecovery(null);
+      setDeleteBlocked({ endpoint, outcome });
+      setMutationNote(null);
+      return false;
+    }
+    setMutationNote(t(`models.settings.endpoints.${endpointMutationNotice(outcome)}`));
+    toast.error(t("models.settings.endpoints.operationIncomplete"));
+    setDeleteRecovery({ endpoint, session, outcome });
     return true;
   };
 
@@ -195,6 +210,7 @@ export default function CustomEndpointsPanel({
     let retainSession = false;
     setDeleting(endpoint.id);
     setMutationNote(null);
+    setDeleteBlocked(null);
     try {
       const first = previous?.outcome.recovery?.locked && controller.retry
         ? await controller.retry(session)
@@ -218,33 +234,18 @@ export default function CustomEndpointsPanel({
         });
         if (epoch !== mutationEpoch.current || controllerRef.current !== activeController) return;
         if (!force) {
-          retainSession = true;
-          setDeleteRecovery({ endpoint, session, outcome: first });
+          retainSession = retainDeleteOutcome(endpoint, session, first);
           return;
         }
         const forced = await controller.remove(endpoint, session, true);
         if (epoch !== mutationEpoch.current || controllerRef.current !== activeController) return;
         noteOutcome(forced);
         if (completeDelete(endpoint, forced)) return;
-        setMutationNote(t("models.settings.endpoints.mutationIncomplete", {
-          status: forced.status,
-          code: forced.code ?? forced.recovery?.code ?? "—",
-          stage: forced.stage ?? forced.recovery?.stage ?? "—",
-        }));
-        toast.error(t("models.settings.endpoints.operationIncomplete"));
-        retainSession = true;
-        setDeleteRecovery({ endpoint, session, outcome: forced });
+        retainSession = retainDeleteOutcome(endpoint, session, forced);
         return;
       }
 
-      setMutationNote(t("models.settings.endpoints.mutationIncomplete", {
-        status: first.status,
-        code: first.code ?? first.recovery?.code ?? "—",
-        stage: first.stage ?? first.recovery?.stage ?? "—",
-      }));
-      toast.error(t("models.settings.endpoints.operationIncomplete"));
-      retainSession = true;
-      setDeleteRecovery({ endpoint, session, outcome: first });
+      retainSession = retainDeleteOutcome(endpoint, session, first);
     } catch (error) {
       if (epoch !== mutationEpoch.current || controllerRef.current !== activeController) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -259,9 +260,20 @@ export default function CustomEndpointsPanel({
   };
 
   const endpoints = snapshot?.endpoints ?? [];
+  const blockedReferences = deleteBlocked ? safeReferences(deleteBlocked.outcome) : [];
+  const primaryOwners = [...new Set(blockedReferences.flatMap((reference) => {
+    if (reference.store !== "config") return [];
+    if (reference.referenceKey === "agents.defaults.model.primary") return [t("models.settings.endpoints.primaryDefaultScope")];
+    const agent = reference.referenceKey?.match(/^agents\.entries\.(.+)\.model\.primary$/)?.[1];
+    return agent ? [agent] : [];
+  }))];
+  const cronReferences = blockedReferences.filter((reference) => reference.store === "cron");
   const missingIn = (endpoint: CustomEndpoint) =>
     (snapshot?.profiles ?? []).filter((profile) => !(endpoint.profiles ?? []).includes(profile));
   const openModal = (endpoint: CustomEndpoint | null) => {
+    if (recoveryUnknown || endpoint && modelOperationRecoveryBlocks(controller.backend, endpoint.id)) {
+      toast.info(t("models.dirManagedPending")); return;
+    }
     const generation = ++modalGeneration.current;
     setModal({ endpoint, generation });
     setModalOpen(true);
@@ -274,16 +286,24 @@ export default function CustomEndpointsPanel({
         {endpoints.length > 0 && <span className="ui-count">{endpoints.length}</span>}
         {snapshot?.supported && (
           <span className={styles.headActions}>
-            <button className="ui-cbtn ui-cbtn--gold" onClick={() => openModal(null)}>
+            <button className="ui-cbtn ui-cbtn--gold" disabled={recoveryUnknown} onClick={() => openModal(null)}>
               {t("models.settings.endpoints.addBtn")}
             </button>
           </span>
         )}
       </div>
-      <p className="ui-hint">{description ?? t("models.settings.endpoints.subtitle")}</p>
+      <p className="ui-hint">{description ?? t(snapshot?.form?.configurationDraft
+        ? "models.settings.endpoints.nativeSubtitle" : "models.settings.endpoints.subtitle")}</p>
       {loading && !snapshot && <p className="ui-hint">{t("common.loading")}</p>}
       {listError && <p className={styles.recoveryNote} role="status">{listError}</p>}
       {mutationNote && <p className={styles.recoveryNote} role="status">{mutationNote}</p>}
+      {deleteBlocked && <div className={styles.recoveryNote} role="alert">
+        <p>{t("models.settings.endpoints.deleteBlocked", { name: deleteBlocked.endpoint.name })}</p>
+        {primaryOwners.length > 0 && <p>{t("models.settings.endpoints.deletePrimaryOwners", { names: primaryOwners.join("、") })}</p>}
+        {cronReferences.length > 0 && <p>{t("models.settings.endpoints.deleteCronReferences", { count: cronReferences.length })}</p>}
+        <button className="ui-cbtn ui-cbtn--sm" onClick={() => setDeleteBlocked(null)}>{t("common.close")}</button>
+      </div>}
+      {slowDelete && <p className={styles.recoveryNote} role="status">{t("models.savingSlow")}</p>}
       {snapshot && !snapshot.supported && (
         <p className="ui-hint">{t("models.settings.endpoints.unsupported")}</p>
       )}
@@ -297,7 +317,7 @@ export default function CustomEndpointsPanel({
               <button
                 type="button"
                 className={styles.endpointMain}
-                disabled={Boolean(deleteRecovery)}
+                disabled={Boolean(deleteRecovery) || modelOperationRecoveryBlocks(controller.backend, endpoint.id)}
                 onClick={() => openModal(endpoint)}
               >
                 <span className={styles.endpointName}>
@@ -335,7 +355,7 @@ export default function CustomEndpointsPanel({
                     className="btn-danger"
                     onClick={() => void doDelete(endpoint)}
                     disabled={Boolean(
-                      deleting === endpoint.id
+                      deleting === endpoint.id || !deleteRecovery && modelOperationRecoveryBlocks(controller.backend, endpoint.id)
                       || (deleteRecovery && deleteRecovery.endpoint.id !== endpoint.id)
                     )}
                   >
@@ -363,10 +383,10 @@ export default function CustomEndpointsPanel({
           }}
           onActivation={onActivation}
           onSnapshot={(next) => {
-            setSnapshotState({ controller, backend: controller.backend, value: next });
+            replace(next);
           }}
           onSaved={(next) => {
-            setSnapshotState({ controller, backend: controller.backend, value: next });
+            if (next) replace(next);
             setModalOpen(false);
             onChanged();
           }}

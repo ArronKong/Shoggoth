@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { pathToFileURL } = require("node:url");
 const {
   federationInputProvenanceForOperationId,
 } = require("../federation-chat-provenance");
@@ -600,6 +601,23 @@ function turnMetadata(thread, turn, item, itemIndex, options) {
   };
 }
 
+function userDisplayText(text) {
+  // Codex Desktop stores question-card answers as a user transport envelope.
+  // Decode only a complete, well-formed envelope; quoted/code/malformed input
+  // remains user text. This projection does not change model/native history.
+  const match = /^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/u.exec(text.trim());
+  if (!match) return text;
+  try {
+    const replies = JSON.parse(match[1]);
+    if (!Array.isArray(replies) || replies.length === 0 || !replies.every(reply =>
+      reply && typeof reply === "object" && !Array.isArray(reply)
+      && Object.keys(reply).length === 3
+      && typeof reply.questionItemId === "string" && reply.questionItemId.length > 0
+      && typeof reply.question === "string" && typeof reply.answer === "string")) return text;
+    return replies.map(reply => `${reply.question}\n${reply.answer}`).join("\n\n");
+  } catch { return text; }
+}
+
 function mapItem(thread, turn, item, itemIndex, options) {
   const base = turnMetadata(thread, turn, item, itemIndex, options);
   if (item.type === "userMessage") {
@@ -609,7 +627,7 @@ function mapItem(thread, turn, item, itemIndex, options) {
       role: "user",
       ...(provenance ? { provenance } : {}),
       content: item.content.map((entry) => entry.type === "text"
-        ? { type: "text", text: entry.text }
+        ? { type: "text", text: userDisplayText(entry.text) }
         : {
           type: "text",
           text: `[${entry.type}] ${entry.url ?? entry.path ?? entry.name ?? ""}`.trim(),
@@ -698,7 +716,7 @@ function mapItem(thread, turn, item, itemIndex, options) {
           type: "tool_result",
           name: toolName,
           content: result,
-          is_error: error !== null || item.status === "failed",
+          is_error: error !== null || item.status === "failed" || resultValue?.isError === true,
           status: item.status,
           durationMs: item.durationMs,
         },
@@ -834,6 +852,8 @@ function mapItem(thread, turn, item, itemIndex, options) {
           is_error: failure !== null || item.status === "failed",
           status: item.status,
         },
+        ...(failure === null && item.status === "completed" && typeof item.savedPath === "string"
+          ? [{ type: "text", text: `![Generated image](${pathToFileURL(item.savedPath).href})` }] : []),
       ],
     };
   }
@@ -1023,5 +1043,6 @@ module.exports = {
   MAX_HISTORY_MESSAGE_BYTES,
   MAX_HISTORY_PAGE_BYTES,
   createCodexChatHistoryMapper,
+  fragmentCodexChatHistoryMessage: fragmentMessage,
   reassembleCodexHistoryFragments,
 };

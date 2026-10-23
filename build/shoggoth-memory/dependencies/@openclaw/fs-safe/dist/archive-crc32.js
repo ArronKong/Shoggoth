@@ -1,0 +1,19 @@
+import zlib from "node:zlib";
+const nativeCrc32 = zlib.crc32;
+// Node 22.0–22.1 are supported but predate zlib.crc32.
+const CRC32_TABLE = nativeCrc32 ? undefined : Array.from({ length: 256 }, (_, index) => {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+        value = (value & 1) !== 0 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    return value >>> 0;
+});
+export function updateCrc32(previous, buffer) {
+    if (nativeCrc32)
+        return nativeCrc32(buffer, previous >>> 0);
+    let crc = previous ^ -1;
+    for (const byte of buffer) {
+        crc = (crc >>> 8) ^ (CRC32_TABLE[(crc ^ byte) & 0xff] ?? 0);
+    }
+    return (crc ^ -1) >>> 0;
+}

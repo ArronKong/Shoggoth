@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ImmersivePhase } from "./immersiveBg";
-import { toolLabelKey } from "../../lib/turnTimeline";
+import { toolActivityTitle } from "../../lib/turnTimeline";
 import { ChatRunWait, type ChatRunWaitState } from "../../components/ChatRunWait";
 import styles from "./ImmersiveStatusLine.module.css";
 
@@ -12,7 +12,7 @@ import styles from "./ImmersiveStatusLine.module.css";
 
 export interface ImmersiveLiveTool {
   name: string;
-  title?: string; // formatToolTitle 的产品化标题（url/query 摘要）
+  title?: string; // Shared, localized action headline from toolActivityTitle.
   done: boolean;
   isError?: boolean;
   durationS?: number;
@@ -59,18 +59,13 @@ export default function ImmersiveStatusLine({ phase, live }: { phase: ImmersiveP
   if (!shown || live?.wait?.kind === "retrying") return null;
   if (shown.wait?.kind === "retrying") return null;
   if (shown.wait && live?.wait) return <div className={styles.wrap}><ChatRunWait state={live.wait} /></div>;
-  // 工具显示名(R340):中文模式映射成人话,未收录/英文模式回退原标识符。
-  const toolDisp = (name?: string): string => {
-    const raw = (name || "").trim();
-    if (!raw) return t("chat.tool");
-    return t(toolLabelKey(raw), { defaultValue: "" }) || raw;
-  };
+  const toolTitle = (tool: ImmersiveLiveTool) => tool.title || toolActivityTitle(tool.name, undefined, t);
   const runningTool = [...shown.tools].reverse().find((x) => !x.done);
   const thinkingLines = (shown.thinkingText || "").trim().split("\n").filter(Boolean);
   const preview = thinkingLines[thinkingLines.length - 1]?.slice(0, 48) ?? "";
   const label =
     phase === "tool" && runningTool
-      ? t("chat.liveToolRun", { tool: toolDisp(runningTool.name) })
+      ? toolTitle(runningTool)
       : phase === "thinking" || (!shown.tools.length && shown.thinkingText)
         ? preview
           ? `${t("chat.liveThinking")} · ${preview}`
@@ -97,8 +92,7 @@ export default function ImmersiveStatusLine({ phase, live }: { phase: ImmersiveP
                   <div key={i} className={x.isError ? `${styles.toolRow} ${styles.toolErr}` : styles.toolRow}>
                     <span className={styles.toolMark}>{x.isError ? "✗" : x.done ? "✓" : "▸"}</span>
                     <span className={styles.toolName} title={x.name || undefined}>
-                      {toolDisp(x.name)}
-                      {x.title ? <span className={styles.toolTitle}> · {x.title}</span> : null}
+                      {toolTitle(x)}
                     </span>
                     {x.durationS != null && (
                       <span className={styles.toolDur}>{x.durationS >= 10 ? Math.round(x.durationS) : x.durationS.toFixed(1)}s</span>

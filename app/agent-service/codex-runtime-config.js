@@ -277,6 +277,43 @@ function configOverridesFor(runtimeConfig, mcp = null) {
   return Object.freeze(overrides);
 }
 
+// This receipt contains only the helper configuration applied to one Binding.
+// Provider configuration and credentials never enter capability observations.
+const MCP_BOOTSTRAP_RECEIPTS = new WeakSet();
+function mcpBootstrapReceipt({ runtimeProfileId, runtimeAccountId, launch }) {
+  const helperLaunch = normalizeMcpHelperLaunch(launch);
+  const overrides = configOverridesFor(null, { runtimeProfileId, runtimeAccountId, launch: helperLaunch })
+    .filter(value => value.startsWith("mcp_servers.shoggoth."));
+  const receipt = Object.freeze({ version: 1, runtimeProfileId, runtimeAccountId, helperLaunch,
+    overrides: Object.freeze(overrides) });
+  MCP_BOOTSTRAP_RECEIPTS.add(receipt);
+  return receipt;
+}
+function validMcpBootstrapReceipt(receipt, { binding, configArgs = null, launch = null } = {}) {
+  try {
+    if (!receipt || !MCP_BOOTSTRAP_RECEIPTS.has(receipt) || receipt.version !== 1 || receipt.runtimeProfileId !== binding?.runtimeProfileId
+      || receipt.runtimeAccountId !== binding?.runtimeAccountId) return false;
+    const expected = mcpBootstrapReceipt({ ...binding, launch: launch ?? receipt.helperLaunch });
+    if (JSON.stringify(receipt.helperLaunch) !== JSON.stringify(expected.helperLaunch)
+      || JSON.stringify(receipt.overrides) !== JSON.stringify(expected.overrides)) return false;
+    if (configArgs !== null) {
+      if (!Array.isArray(configArgs) || configArgs.length % 2 !== 0) return false;
+      const actual = new Map();
+      for (let index = 0; index < configArgs.length; index += 2) {
+        if (configArgs[index] !== "-c" || typeof configArgs[index + 1] !== "string") return false;
+        const value = configArgs[index + 1];
+        if (value.startsWith("mcp_servers.shoggoth.")) actual.set(value.split("=", 1)[0], value);
+      }
+      const allowed = new Set(expected.overrides.map(value => value.split("=", 1)[0]));
+      if (actual.has("mcp_servers.shoggoth.enabled") && actual.get("mcp_servers.shoggoth.enabled") !== "mcp_servers.shoggoth.enabled=true") return false;
+      allowed.add("mcp_servers.shoggoth.enabled");
+      if ([...actual.keys()].some(key => !allowed.has(key))
+        || expected.overrides.some(value => actual.get(value.split("=", 1)[0]) !== value)) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
 function importedCodexPreferences(fileSystem, codexHome, runtimeConfig) {
   const target = path.join(codexHome, IMPORTED_CONFIG_RELATIVE_PATH);
   let stat;
@@ -539,6 +576,7 @@ class CodexRuntimeConfigWriter {
     return Object.freeze({
       args: Object.freeze(overrides.flatMap((value) => ["-c", value])),
       runtimeConfig: normalized,
+      mcpBootstrap: mcpBootstrapReceipt({ runtimeProfileId, runtimeAccountId, launch: this.mcpHelperLaunch }),
     });
   }
 }
@@ -551,6 +589,8 @@ module.exports = {
   OPENAI_RESPONSES_BASE_URL,
   PROVIDER_ENV_PATTERN,
   configOverridesFor,
+  mcpBootstrapReceipt,
+  validMcpBootstrapReceipt,
   managedConfigFor,
   importedCodexPreferences,
   providerConfigAlias,

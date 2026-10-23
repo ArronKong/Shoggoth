@@ -29,14 +29,16 @@ class InspirationRuntime {
     const thread = { id: `inspiration-session-${this.threads.length + 1}`,
       threadSource: params.threadSource, archived: false, turns: [] };
     this.threads.push(thread);
-    return { thread: structuredClone(thread) };
+    return { thread: structuredClone(thread), approvalsReviewer: params.approvalsReviewer };
   }
   async threadRead(params) {
     const thread = this.threads.find((item) => item.id === params.threadId);
     if (!thread) throw Object.assign(new Error("Unknown Runtime session"), { code: "THREAD_NOT_FOUND" });
     return { thread: structuredClone(thread) };
   }
-  threadResume(params) { return this.threadRead(params); }
+  async threadResume(params) {
+    return { ...await this.threadRead(params), approvalsReviewer: params.approvalsReviewer };
+  }
   async threadInjectItems(params) {
     await this.threadRead(params);
     this.lastInjectedItems = structuredClone(params);

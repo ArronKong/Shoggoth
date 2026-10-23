@@ -1,0 +1,19 @@
+.panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 12px;
+  background: var(--ui-surface-2);
+}
+.header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.components { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.components li { display: flex; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
+.components code { overflow-wrap: anywhere; color: var(--ui-text-2); font-family: var(--mono); font-size: 12px; }
+.secrets { display: grid; gap: 10px; min-width: 0; }
+.secret { display: grid; gap: 6px; width: min(100%, 420px); min-width: 0; }
+.secret input { width: 100%; min-width: 0; }
+.hint { color: var(--ui-text-2); line-height: 1.45; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }

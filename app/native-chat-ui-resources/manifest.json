@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "bundleId": "native-chat-ui-v1",
+  "bridgeApiVersion": 1,
+  "source": "https://github.com/openai/codex/tree/rust-v0.162.0/codex-rs/tui/assets/inline_visualization",
+  "license": "Apache-2.0",
+  "files": {
+    "visualize.css": "4b1d492f1e67394f80dc83fe7e9d3a508648dbeffe7a5152b27a567da972c50f"
+  }
+}

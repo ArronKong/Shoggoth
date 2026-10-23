@@ -29,14 +29,31 @@ function validateRuntimeContextCapabilities(value) {
   if (Object.values(item).some((value) => typeof value !== "boolean")) invalid();
   return Object.freeze(item);
 }
+// How Shoggoth asks a CLI to compact its own conversation. "command": a native
+// command outside any turn, finished by the CLI's compacted notice (Codex
+// thread/compact, OpenCode session summarize). "turn": `/compact` sent as one
+// turn (Pi RPC compact, Grok Build built-in command). automatic: the admission
+// budget requests it when no product summary is available. Pi's automatic path
+// is the product summary; its native command stays user-invoked.
+const NATIVE_COMPACTION = Object.freeze({
+  codex: Object.freeze({ mode: "command", automatic: true }),
+  opencode: Object.freeze({ mode: "command", automatic: true }),
+  "grok-build": Object.freeze({ mode: "turn", automatic: true }),
+  pi: Object.freeze({ mode: "turn", automatic: false }),
+});
+function nativeCompaction(runtime) { return Object.hasOwn(NATIVE_COMPACTION, runtime) ? NATIVE_COMPACTION[runtime] : null; }
+// The CLI compacts internally and exposes no command to trigger it (the
+// Antigravity ACP server advertises only /plan). Admission leaves the planning
+// budget to the CLI; transport limits still apply.
+function selfManagedCompaction(runtime) { return runtime === "antigravity"; }
 function runtimeContextCapabilities(runtime) {
   return validateRuntimeContextCapabilities({
     "context.usage.exact": runtime === "codex" || runtime === "grok-build",
     "context.usage.estimated": ["pi", "claude-code", "deepseek-harness"].includes(runtime),
-    "context.compact.native": runtime === "codex" || runtime === "pi",
+    "context.compact.native": nativeCompaction(runtime) !== null,
     // Capability describes what the CLI supports, not a guarantee that the
     // user's CLI configuration currently enables automatic compaction.
-    "context.compact.auto": runtime === "codex" || runtime === "pi",
+    "context.compact.auto": ["codex", "pi", "opencode", "grok-build", "antigravity"].includes(runtime),
   });
 }
 function unknownRuntimeContextUsage(runtimeSessionId, { contextWindow = null, observedAt = Date.now(), source = "runtime_event" } = {}) {
@@ -74,5 +91,5 @@ function claudeRuntimeContextUsage(sessionId, usage, contextWindow, observedAt =
 }
 
 module.exports = { CONTEXT_CAPABILITY_KEYS, validateRuntimeContextUsage, validateRuntimeContextCapabilities,
-  runtimeContextCapabilities, unknownRuntimeContextUsage, codexRuntimeContextUsage, piRuntimeContextUsage,
-  claudeRuntimeContextUsage };
+  runtimeContextCapabilities, nativeCompaction, selfManagedCompaction, unknownRuntimeContextUsage,
+  codexRuntimeContextUsage, piRuntimeContextUsage, claudeRuntimeContextUsage };

@@ -32,8 +32,14 @@ async function startInspirationFixture(options = {}) {
     profileRoot: path.join(root, 'profiles'), cacheRoot: path.join(root, 'cache') });
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (value) => Buffer.from(value), decryptString: (value) => Buffer.from(value).toString() };
   const responsesPath = path.join(root, 'responses.jsonl');
-  const runtimePool = new CodexRuntimePool({ paths, repoRoot: ROOT, failureThreshold: 100,
-    runtimeAccountResolver: { resolve(binding, account) {
+  const groupControlPath = options.groupControlledRuntime ? path.join(root, 'group-control') : null;
+  if (groupControlPath) fs.mkdirSync(groupControlPath, { mode: 0o700 });
+  // The Host consumes the Pool's parentEnv, not the resolver's copy. Keep the
+  // fake runtime isolated from ambient homes and conflicting proxy aliases.
+  const parentEnv = { HOME: root, PATH: process.env.PATH, TMPDIR: root, NO_PROXY: '127.0.0.1,localhost,::1' };
+  const runtimePool = new CodexRuntimePool({ paths, repoRoot: ROOT, failureThreshold: 100, parentEnv,
+    runtimeAccountResolver: { parentEnv: { ...parentEnv, CODEX_HOME: path.join(root, 'isolated-codex-home') }, userHome: root,
+      resolve(binding, account) {
       const home = prepareCodexRuntimeAccountHome(paths, binding.runtimeAccountId);
       return Object.freeze({ runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId,
         kind: account.kind, installationKind: 'bundled', homeKind: account.homeKind, strategy: 'managed-shared',
@@ -42,17 +48,24 @@ async function startInspirationFixture(options = {}) {
     } },
     hostFactory: (hostOptions) => new CodexRuntimeHost({ ...hostOptions, repoRoot: ROOT,
       packageVersion: '0.8.79', probeBinary: async () => {},
-      spawnEnv: { CODEX_FAKE_BEHAVIOR: 'mcp-elicitation',
+      prepareRuntime: input => service.providerRuntimeBridge.prepareRuntime(input),
+      spawnEnv: { ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}), CODEX_FAKE_BEHAVIOR: 'mcp-elicitation',
         CODEX_FAKE_PROFILE: options.agentCount > 1 ? `inspiration-${hostOptions.runtimeProfileId}` : 'inspiration-ui',
         CODEX_FAKE_ID_NAMESPACE: options.agentCount > 1 ? hostOptions.runtimeProfileId : '',
         CODEX_FAKE_ELICITATION_MODE: 'valid', CODEX_FAKE_ELICITATION_RESPONSE_PATH: responsesPath,
         CODEX_FAKE_ELICITATION_REPEAT: '1', CODEX_FAKE_COMPLETE_AFTER_ELICITATION: '1',
-        CODEX_FAKE_INDEPENDENT_IDS: '1', CODEX_FAKE_INSPIRATION_APPROVALS: '1' },
+        CODEX_FAKE_INDEPENDENT_IDS: '1', CODEX_FAKE_INSPIRATION_APPROVALS: '1', ...options.codexFakeEnv },
+      ...(groupControlPath ? { spawnEnv: {
+        ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}), CODEX_FAKE_BEHAVIOR: 'mcp-elicitation',
+        CODEX_FAKE_PROFILE: `inspiration-${hostOptions.runtimeProfileId}`, CODEX_FAKE_ID_NAMESPACE: hostOptions.runtimeProfileId,
+        CODEX_FAKE_ELICITATION_MODE: 'valid', CODEX_FAKE_ELICITATION_RESPONSE_PATH: responsesPath,
+        CODEX_FAKE_INDEPENDENT_IDS: '1', CODEX_FAKE_GROUP_CONTROLLED: '1', CODEX_FAKE_GROUP_CONTROL_PATH: groupControlPath,
+      } } : {}),
       spawnProcess(_cmd, _args, options) { return spawn(process.execPath, [path.join(ROOT, 'scripts/fixtures/codex-app-server-fake.cjs')], options); },
       requestTimeoutMs: 2000, initializeTimeoutMs: 2000, serverRequestTimeoutMs: 300000,
       shutdownGraceMs: 100, killGraceMs: 100,
     }) });
-  const service = createAgentService({ paths, safeStorage, runtimePool, version: 'inspiration-l2' });
+  const service = createAgentService({ paths, safeStorage, runtimePool, version: 'inspiration-l2', ...options.serviceOptions });
   await service.start();
   const token = readClientToken(paths);
   const ipc = (method, params) => requestService(paths, { id: crypto.randomUUID(), token, version: PROTOCOL_VERSION, method, params });
@@ -69,11 +82,22 @@ async function startInspirationFixture(options = {}) {
     return session;
   };
   const session = await loadSession();
-  const backend = new ShoggothBackend({ paths, pollIntervalMs: 15, readinessIntervalMs: 10, readinessTimeoutMs: 5000 });
-  const registry = new BackendRegistry(); registry.register(backend); registry.setInspirationOwner(backend);
+  const registry = new BackendRegistry();
+  const memoryConfig = options.configStore ? require('../../app/core/native-memory-config-controller')
+    .createNativeMemoryConfigController({ configStore: options.configStore, registry }) : null;
+  const backend = new ShoggothBackend({ paths, pollIntervalMs: 15, readinessIntervalMs: 10, readinessTimeoutMs: 5000,
+    ...(memoryConfig ? {
+      getNativeMemoryConfig: () => require('../../app/core/config-store').projectNativeMemoryConfig(options.configStore.read()),
+      getNativeMemorySharingConfig: () => require('../../app/core/config-store').projectNativeMemorySharingConfig(options.configStore.read()),
+      updateNativeMemoryConfig: input => memoryConfig.update(input),
+    } : {}) });
+  registry.register(backend); registry.setInspirationOwner(backend);
+  for (const extra of options.extraBackends || []) registry.register(extra);
   // Registry installs the same session/activity observers as the desktop app.
   if ((await registry.start()).get(backend.id) !== true) { await service.stop(); throw new Error('Fixture backend did not start'); }
-  const desktopHost = createFederationHostServer({ paths, registry });
+  const desktopHost = createFederationHostServer({ paths, registry,
+    ...(options.groupRunner ? { groupRunner: options.groupRunner(registry) } : {}),
+    ...(options.groupToolCapability ? { groupToolCapability: options.groupToolCapability } : {}) });
   try { await desktopHost.start(); }
   catch (error) { session.close?.(); await backend.stop(); await service.stop(); fs.rmSync(root, { recursive: true, force: true }); throw error; }
   const upstream = http.createServer();
@@ -96,6 +120,7 @@ async function startInspirationFixture(options = {}) {
     registry, workAdmissionGate: createWorkAdmissionGate() });
   const identity = generateIdentity();
   const staticServer = await startStaticServer(options.port || 0, { registry, chatUpstreamUrl: proxy.url, chatOrigin: 'http://127.0.0.1',
+    homeDir: root, userDataRoot: path.join(root, 'desktop-assets'),
     hostOps: options.hostOps,
     configStore: options.configStore,
     authResolver: { resolveConnectAuth: () => ({ ...identity, token: 'inspiration-fixture', scopes: DEFAULT_OPERATOR_SCOPES }), storeDeviceToken() {} } });
@@ -135,7 +160,8 @@ async function startInspirationFixture(options = {}) {
 module.exports = { startInspirationFixture };
 
 if (require.main === module) {
-  startInspirationFixture({ agentCount: Number(process.env.INSPIRATION_FIXTURE_AGENTS || 1) }).then((fixture) => {
+  startInspirationFixture({ agentCount: Number(process.env.INSPIRATION_FIXTURE_AGENTS || 1),
+    ...(process.env.CODEX_FAKE_AUTOCOMPLETE_ALL === '1' ? { codexFakeEnv: { CODEX_FAKE_AUTOCOMPLETE_ALL: '1' } } : {}) }).then((fixture) => {
     const control = http.createServer(async (req, res) => {
       try { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(await fixture.inspect())); }
       catch (error) { res.statusCode = 500; res.end(JSON.stringify({ error: String(error.stack || error) })); }

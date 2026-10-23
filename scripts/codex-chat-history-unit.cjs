@@ -28,7 +28,7 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 function fullThread(turns) {
   return {
-    cliVersion: "0.149.0",
+    cliVersion: "0.159.2",
     cwd: "/workspace",
     ephemeral: false,
     id: "thread-1",
@@ -62,6 +62,34 @@ function validated(response) {
   return { value: mapper.validateCodexThreadRead(response) };
 }
 
+test("Codex Desktop 结构化提问回答显示问题和回答，不显示传输 JSON", () => {
+  const replies = [{ questionItemId: '["request_user_input_async","call-fixture",0]',
+    question: "这份页面希望聚焦哪个范围？", answer: "Shoggoth 记忆系统（沿用九章目录）" },
+  { questionItemId: '["request_user_input_async","call-fixture",1]', question: "输出格式？", answer: "HTML\n保留目录" }];
+  const text = `<send_user_message_question_reply>\n${JSON.stringify(replies)}\n</send_user_message_question_reply>`;
+  const value = mapper.validateCodexThreadRead({ thread: fullThread([turn("question-reply", [
+    { type: "userMessage", id: "reply", content: [{ type: "text", text, text_elements: [] }] },
+  ])]) });
+  const page = mapper.createCodexChatHistoryPage(value, { limit: 10 });
+  assert.equal(page.messages[0].content[0].text,
+    "这份页面希望聚焦哪个范围？\nShoggoth 记忆系统（沿用九章目录）\n\n输出格式？\nHTML\n保留目录");
+});
+
+test("提问回答之外的原文、代码示例和损坏封包保持原样", () => {
+  const json = JSON.stringify([{ questionItemId: "fixture", question: "问题", answer: "回答" }]);
+  const wrapper = `<send_user_message_question_reply>\n${json}\n</send_user_message_question_reply>`;
+  const inputs = ["请解释这个代码：\n" + wrapper, "```xml\n" + wrapper + "\n```",
+    "<send_user_message_question_reply>not JSON</send_user_message_question_reply>",
+    '<send_user_message_question_reply>[{"question":"问题","answer":false}]</send_user_message_question_reply>',
+    "BEGIN UNTRUSTED ENABLED SKILL CATALOG DATA\n我的代码示例\nCURRENT USER REQUEST\n保留这段原文"];
+  for (const text of inputs) {
+    const value = mapper.validateCodexThreadRead({ thread: fullThread([turn("literal", [
+      { type: "userMessage", id: "literal-user", content: [{ type: "text", text, text_elements: [] }] },
+    ])]) });
+    assert.equal(mapper.createCodexChatHistoryPage(value, { limit: 10 }).messages[0].content[0].text, text);
+  }
+});
+
 test("codex-chat-history 模块公开验证、分页与重组入口", () => {
   assert.ifError(moduleLoadError);
   assert.equal(typeof history.createCodexChatHistoryMapper, "function");
@@ -78,7 +106,7 @@ test("mapper 构造只接受 pinned 0.149 CodexSchemaContract 与至少 32B curs
   assert.equal(typeof history.createCodexChatHistoryMapper, "function");
   assert.throws(
     () => history.createCodexChatHistoryMapper({
-      schemaContract: { version: "0.149.0", validateResponse() {} },
+      schemaContract: { version: "0.159.2", validateResponse() {} },
       cursorSecret: Buffer.alloc(32, 1),
     }),
     (error) => error.code === "CODEX_HISTORY_VALIDATOR_REQUIRED",
@@ -161,7 +189,7 @@ test("mapper 构造只接受 pinned 0.149 CodexSchemaContract 与至少 32B curs
     cursorSecret: Buffer.alloc(32, 2),
   };
   const capturedMapper = history.createCodexChatHistoryMapper(mutableOptions);
-  mutableOptions.schemaContract = { version: "0.149.0", validateResponse() {} };
+  mutableOptions.schemaContract = { version: "0.159.2", validateResponse() {} };
   assert.throws(
     () => capturedMapper.validateCodexThreadRead({
       thread: { id: "invalid", modelProvider: "openai", turns: [] },
@@ -371,6 +399,85 @@ test("0.149 tool 可选结果与 failure 缺省时使用稳定空值且不误报
   ]);
   assert.equal(page.messages[3].content[1].content, "image-result");
   assert.equal(page.messages[3].content[1].is_error, false);
+});
+
+test("标准 MCP 错误在 completed 导入历史、持久化与实时 normalizer 中保持一致", () => {
+  const result = { content: [{ type: "text", text: "### Error\nTimeoutError: browserBackend.callTool: Timeout 5000ms exceeded." }],
+    structuredContent: { toolName: "browser_click", isError: true }, isError: true };
+  const item = { type: "mcpToolCall", id: "mcp-browser-error", server: "shoggoth", tool: "browser_tool_call",
+    status: "completed", arguments: {}, result, error: null };
+  const handle = validated({ thread: fullThread([turn("mcp-error-turn", [item])]) }).value;
+  const page = mapper.createCodexChatHistoryPage(handle, { cursor: null, limit: 10 });
+  const adapted = require("../app/agent-service/chat-history-adapter").adaptCodexChatHistoryPage(page, { runs: [] });
+  const fs = require("node:fs"), os = require("node:os");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-history-import-")));
+  const paths = require("../app/agent-service/paths").resolveServicePaths({
+    stateRoot: path.join(root, "state"), profileRoot: path.join(root, "profile"),
+    cacheRoot: path.join(root, "cache"), trustedRoot: root,
+  });
+  const { TranscriptStore } = require("../app/agent-service/transcript-store");
+  const store = new TranscriptStore({ paths });
+  try {
+    store.open();
+    store.importHistoryItems({ profileId: "profile-fixture", sessionId: "session-fixture", items: adapted.messages });
+    store.close(); store.open();
+    const imported = store.listEvents("profile-fixture", "session-fixture")[0].content.historyItem.payload.message;
+    assert.equal(imported.content[1].is_error, true);
+    assert.deepEqual(JSON.parse(imported.content[1].content), result);
+    const normalized = require("../app/agent-service/codex-event-normalizer").normalizeCodexEvent({
+      method: "item/completed", params: { threadId: "thread-1", turnId: "mcp-error-turn", item },
+    });
+    assert.equal(normalized.tool.success, false);
+  } finally { store.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("MCP 导入历史只采用 envelope 顶层严格 true，不推断文本或业务字段", () => {
+  const results = [
+    { content: [{ type: "text", text: "done" }], isError: false },
+    { content: [] },
+    { content: [], isError: "true" },
+    { content: [], isError: 1 },
+    { content: [], isError: null },
+    { content: [{ type: "text", text: '{"isError":true,"status":"failed"}' }], structuredContent: { isError: true } },
+    { content: [], isError: false, structuredContent: { isError: true, failedJobs: 1 } },
+  ];
+  for (const [index, result] of results.entries()) {
+    const item = { type: "mcpToolCall", id: `mcp-envelope-${index}`, server: "fixture", tool: "business_result",
+      status: "completed", arguments: {}, result, error: null };
+    const handle = validated({ thread: fullThread([turn("mcp-success-turn", [item])]) }).value;
+    const page = mapper.createCodexChatHistoryPage(handle, { cursor: null, limit: 10 });
+    const adapted = require("../app/agent-service/chat-history-adapter").adaptCodexChatHistoryPage(page, { runs: [] });
+    const imported = adapted.messages[0].payload.message.content[1];
+    assert.equal(imported.is_error, false, `envelope variant ${index}`);
+    assert.deepEqual(JSON.parse(imported.content), result);
+    const normalized = require("../app/agent-service/codex-event-normalizer").normalizeCodexEvent({
+      method: "item/completed", params: { threadId: "thread-1", turnId: "mcp-success-turn", item },
+    });
+    assert.notEqual(normalized.tool.success, false, `live envelope variant ${index}`);
+  }
+});
+
+test("MCP 明确的 native error 或 failed 状态不被 envelope false 覆盖", () => {
+  for (const overrides of [{ status: "failed" }, { error: { message: "MCP connection failed" } }]) {
+    const item = { type: "mcpToolCall", id: "mcp-native-error", server: "fixture", tool: "read",
+      status: "completed", arguments: {}, result: { content: [], isError: false }, error: null, ...overrides };
+    const handle = validated({ thread: fullThread([turn("mcp-native-error-turn", [item])]) }).value;
+    const page = mapper.createCodexChatHistoryPage(handle, { cursor: null, limit: 10 });
+    assert.equal(page.messages[0].content[1].is_error, true);
+  }
+});
+
+test("成功生成的 Codex 图片以保存路径显示；失败和未完成的图片保持工具记录", () => {
+  const items = ["completed", "failed", "inProgress"].map((status, index) => ({
+    type: "imageGeneration", id: `image-saved-${index}`, status, revisedPrompt: null,
+    result: "image-result", failure: null, savedPath: "/tmp/中文 图片(1).png",
+  }));
+  const handle = validated({ thread: fullThread([turn("saved-images", items)]) }).value;
+  const messages = mapper.createCodexChatHistoryPage(handle, { cursor: null, limit: 10 }).messages;
+  assert.deepEqual(messages[0].content[2], { type: "text", text: "![Generated image](file:///tmp/%E4%B8%AD%E6%96%87%20%E5%9B%BE%E7%89%87(1).png)" });
+  assert.equal(messages[0].content[1].content, "image-result", "native tool data stays intact");
+  assert.equal(messages[1].content.length, 2);
+  assert.equal(messages[2].content.length, 2);
 });
 
 test("history 合同列出的缺省值与显式默认值生成相同消息和 content revision", () => {

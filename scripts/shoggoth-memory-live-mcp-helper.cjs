@@ -51,7 +51,9 @@ const observe = (direction) => {
       } catch {}
     }
     if (pending.length>1024*1024) pending="";
-    done(null,chunk);
+    // The product writer zeroes its frame after this Transform acknowledges
+    // write(). stdout can still be draining it, so retain an independent copy.
+    done(null,Buffer.from(chunk));
   } });
 };
 const input = observe("client"), output = observe("helper");

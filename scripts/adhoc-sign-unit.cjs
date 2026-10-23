@@ -173,6 +173,13 @@ assert.equal(
   "electron-builder 必须禁用自动证书发现，签名只允许由 afterPack 完成",
 );
 
+const hookSource = fs.readFileSync(path.join(__dirname, "adhoc-sign.cjs"), "utf8");
+const firstCodesign = hookSource.indexOf('execFileSync("codesign"');
+for (const check of ["checkPackagedDependencies(", "checkBundledPlugins("]) {
+  assert.ok(hookSource.indexOf(check) > 0 && hookSource.indexOf(check) < firstCodesign,
+    `${check} must reject an incomplete App before any signing command`);
+}
+
 const blockedApp = path.join(__dirname, ".adhoc-sign-blocked-fixture", "Shoggoth.app");
 try {
   fs.mkdirSync(path.join(blockedApp, "Contents", "Resources"), { recursive: true });

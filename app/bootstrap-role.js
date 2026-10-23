@@ -11,7 +11,7 @@ const {
   CODEX_TEAM_IDENTIFIER,
   assertCodeIdentity,
 } = require("./agent-service/code-identity");
-const { resolveCanonicalServicePaths } = require("./agent-service/paths");
+const { resolveCanonicalServicePaths, resolveServicePaths } = require("./agent-service/paths");
 const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./agent-service/runtime-account");
 const { resolveCodexMcpParentBinaries } = require("./agent-service/codex-runtime-paths");
 const { CODEX_PARENT_VERIFY_TIMEOUT_MS } = require("./agent-service/codex-startup-timeouts");
@@ -31,11 +31,15 @@ const PUBLIC_BOOTSTRAP_FAILURE_CODES = new Set([
   "BOOTSTRAP_MCP_START_FAILED",
   "MCP_HELPER_ARGUMENTS_INVALID",
   "MCP_HELPER_AUTH_FAILED",
+  "MCP_HELPER_SERVICE_UNAVAILABLE",
+  "MCP_HELPER_SERVICE_RECOVERY_REQUIRED",
   "MCP_HELPER_FAILED",
 ]);
 
-function bootstrapFailure(code) {
-  const error = new Error(code);
+// `cause` keeps the specific refusal; diagnostics persist only its code and
+// application source coordinates, never the message.
+function bootstrapFailure(code, cause) {
+  const error = new Error(code, cause === undefined ? undefined : { cause });
   Object.defineProperty(error, "code", { value: code, enumerable: true });
   return error;
 }
@@ -76,6 +80,14 @@ function verifyTestRoleGate(env, runtime) {
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
+}
+
+function resolveTestRolePaths(env = process.env, runtime = {}) {
+  if (!verifyTestRoleGate(env, {
+    defaultApp: runtime.defaultApp ?? process.defaultApp,
+    ppid: runtime.ppid ?? process.ppid,
+  })) return null;
+  return resolveServicePaths({ homeDir: path.dirname(env.SHOGGOTH_TEST_ROLE_GATE_FILE) });
 }
 
 function validateInternalRoleGate(env, runtime = {}) {
@@ -123,9 +135,24 @@ function mcpParentFields(pid) {
       command: execFileSync("/bin/ps", ["-p", String(pid), "-o", "command="], {
         encoding: "utf8", timeout: 500, maxBuffer: 16 * 1024,
       }).trim(),
+      ppid: Number(execFileSync("/bin/ps", ["-p", String(pid), "-o", "ppid="], {
+        encoding: "utf8", timeout: 500, maxBuffer: 4096,
+      }).trim()),
     };
   } catch {
     throw new Error("MCP helper direct parent 无法验证");
+  }
+}
+
+function mcpAncestorFields(pid) {
+  try {
+    return {
+      executable: execFileSync("/bin/ps", ["-p", String(pid), "-o", "comm="], {
+        encoding: "utf8", timeout: 500, maxBuffer: 4096,
+      }).trim(),
+    };
+  } catch {
+    throw new Error("MCP helper runtime ancestor 无法验证");
   }
 }
 
@@ -165,6 +192,7 @@ function validatedRuntimeServicePaths(value, canonicalPaths) {
   return Object.freeze({ ...value });
 }
 
+// Returns the gate context, or the code naming why this runtime gate was refused.
 function validateRuntimeMcpRoleGate(env, actual, runtime, argv) {
   const gatePath = env.SHOGGOTH_RUNTIME_MCP_GATE_FILE;
   const expectedNonce = env.SHOGGOTH_RUNTIME_MCP_GATE_NONCE;
@@ -173,46 +201,70 @@ function validateRuntimeMcpRoleGate(env, actual, runtime, argv) {
   if (env.ELECTRON_RUN_AS_NODE !== "1"
     || !path.isAbsolute(gatePath || "") || !/^[a-f0-9]{64}$/u.test(expectedNonce || "")
     || !runtimeProfileId || !runtimeAccountId
-    || !Number.isSafeInteger(actual.ppid) || actual.ppid <= 1) return false;
+    || !Number.isSafeInteger(actual.ppid) || actual.ppid <= 1) return "RUNTIME_MCP_GATE_ARGUMENTS_INVALID";
   let canonicalPaths;
   try {
     canonicalPaths = resolveCanonicalServicePaths({ userInfo: runtime.userInfo });
   } catch {
-    return false;
+    return "RUNTIME_MCP_GATE_PATHS_INVALID";
   }
   const gateRoot = path.join(canonicalPaths.runtimeDir, "mcp-gates");
   if (path.dirname(path.resolve(gatePath)) !== gateRoot
     || path.basename(gateRoot) !== "mcp-gates"
-    || !/^mcp-[a-f0-9]{64}\.gate$/u.test(path.basename(gatePath))) return false;
+    || !/^mcp-[a-f0-9]{64}\.gate$/u.test(path.basename(gatePath))) return "RUNTIME_MCP_GATE_PATHS_INVALID";
   const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
   let fd;
   try {
     const rootStat = fs.lstatSync(gateRoot);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o077) !== 0
-      || (typeof process.getuid === "function" && rootStat.uid !== process.getuid())) return false;
-    fd = fs.openSync(gatePath, flags);
+      || (typeof process.getuid === "function" && rootStat.uid !== process.getuid())) return "RUNTIME_MCP_GATE_UNSAFE";
+    try {
+      fd = fs.openSync(gatePath, flags);
+    } catch (error) {
+      if (error?.code === "ENOENT") return "RUNTIME_MCP_GATE_MISSING";
+      throw error;
+    }
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0
       || stat.size <= 0 || stat.size > 4096
-      || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return false;
-    if (path.dirname(fs.realpathSync(gatePath)) !== fs.realpathSync(gateRoot)) return false;
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return "RUNTIME_MCP_GATE_UNSAFE";
+    if (path.dirname(fs.realpathSync(gatePath)) !== fs.realpathSync(gateRoot)) return "RUNTIME_MCP_GATE_UNSAFE";
     const gate = JSON.parse(fs.readFileSync(fd, "utf8"));
-    const expectedKeys = "expiresAt,nonce,parentExecutable,parentPid,runtimeAccountId,runtimeProfileId,schemaVersion,servicePaths";
-    if (!gate || Object.keys(gate).sort().join(",") !== expectedKeys
-      || gate.schemaVersion !== 2 || gate.parentPid !== actual.ppid
+    const keys = gate && typeof gate === "object" ? Object.keys(gate).sort().join(",") : "";
+    const directKeys = "expiresAt,nonce,parentExecutable,parentPid,runtimeAccountId,runtimeProfileId,schemaVersion,servicePaths";
+    const harnessKeys = "ancestorExecutable,ancestorPid,expiresAt,nonce,parentExecutable,parentPid,runtimeAccountId,runtimeProfileId,schemaVersion,servicePaths";
+    // v3: the runtime process (ancestor) delegates MCP launch to one signed
+    // harness child. Only that executable, directly under the bound ancestor, qualifies.
+    const harnessChild = gate?.schemaVersion === 3 && keys === harnessKeys;
+    if (!gate || (!(gate.schemaVersion === 2 && keys === directKeys) && !harnessChild)
+      || (harnessChild
+        && (gate.parentPid !== null || !Number.isSafeInteger(gate.ancestorPid) || gate.ancestorPid <= 1
+          || typeof gate.ancestorExecutable !== "string" || !path.isAbsolute(gate.ancestorExecutable)))
       || gate.runtimeProfileId !== runtimeProfileId
       || gate.runtimeAccountId !== runtimeAccountId
       || !secureEqual(gate.nonce, expectedNonce)
       || typeof gate.parentExecutable !== "string" || !path.isAbsolute(gate.parentExecutable)
-      || !Number.isSafeInteger(gate.expiresAt) || gate.expiresAt < actual.now()
-      || gate.expiresAt > actual.now() + 60_000) return false;
+      || !Number.isSafeInteger(gate.expiresAt)) return "RUNTIME_MCP_GATE_INVALID";
+    if (!harnessChild && gate.parentPid !== actual.ppid) return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
+    if (gate.expiresAt < actual.now() || gate.expiresAt > actual.now() + 60_000) return "RUNTIME_MCP_GATE_EXPIRED";
     const servicePaths = validatedRuntimeServicePaths(gate.servicePaths, canonicalPaths);
-    if (!servicePaths) return false;
-    const parent = runtime.parent || mcpParentFields(actual.ppid);
+    if (!servicePaths) return "RUNTIME_MCP_GATE_PATHS_INVALID";
+    let parent;
+    try { parent = runtime.parent || mcpParentFields(actual.ppid); } catch { return "RUNTIME_MCP_GATE_PARENT_MISMATCH"; }
     if (path.resolve(parent.executable || "") !== path.resolve(gate.parentExecutable)
-      || typeof parent.command !== "string" || parent.command.length === 0) return false;
+      || typeof parent.command !== "string" || parent.command.length === 0) return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
+    if (harnessChild) {
+      if (parent.ppid !== gate.ancestorPid) return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
+      let ancestor;
+      try { ancestor = runtime.ancestor || mcpAncestorFields(gate.ancestorPid); } catch {
+        return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
+      }
+      if (path.resolve(ancestor.executable || "") !== path.resolve(gate.ancestorExecutable)) {
+        return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
+      }
+    }
     const current = fs.lstatSync(gatePath);
-    if (current.dev !== stat.dev || current.ino !== stat.ino) return false;
+    if (current.dev !== stat.dev || current.ino !== stat.ino) return "RUNTIME_MCP_GATE_REPLACED";
     // 外部 Runtime 的 OS sandbox 只允许 Relay 读取 Service-private gate，
     // 不能在这里 unlink。Relay 先通过本地 Service bridge 原子消费；
     // Service 再按签发时保存的 inode/PID identity 删除门票并升级同一 socket。
@@ -225,7 +277,7 @@ function validateRuntimeMcpRoleGate(env, actual, runtime, argv) {
       servicePaths,
     });
   } catch {
-    return false;
+    return "RUNTIME_MCP_GATE_INVALID";
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -277,7 +329,10 @@ function validateMcpRoleGate(env, runtime = {}, argv = process.argv.slice(1)) {
     now: runtime.now || Date.now,
   };
   const runtimeContext = validateRuntimeMcpRoleGate(env, actual, runtime, argv);
-  if (runtimeContext) return runtimeContext;
+  if (typeof runtimeContext === "object") return runtimeContext;
+  // A helper carrying a runtime gate can only proceed through that gate. The
+  // Codex parent checks below would just replace its reason with an unrelated one.
+  if (env.SHOGGOTH_RUNTIME_MCP_GATE_FILE !== undefined) throw bootstrapFailure(runtimeContext);
   if (env.SHOGGOTH_FEDERATION_MCP_CLIENT !== undefined
     || env.SHOGGOTH_FEDERATION_MCP_AUTH_FILE !== undefined) {
     const federationContext = validateExternalFederationMcpRoleGate(
@@ -423,10 +478,8 @@ function dispatchRole(role, loaders = {}, runtimeMcpBridge = null) {
     // The existing defaultApp-only fixture gate owns its isolated directory.
     // Do not let a test that replaces HOME fall through to the real account's
     // selected production root after canonical path resolution is enabled.
-    if (verifyTestRoleGate(process.env, { defaultApp: process.defaultApp, ppid: process.ppid })) {
-      const fixturePaths = require("./agent-service/paths").resolveServicePaths({
-        homeDir: path.dirname(process.env.SHOGGOTH_TEST_ROLE_GATE_FILE),
-      });
+    const fixturePaths = resolveTestRolePaths();
+    if (fixturePaths) {
       return serviceModule.startAgentServiceProcess({ paths: fixturePaths, electronApp: require("electron").app });
     }
     return serviceModule.startAgentServiceProcess();
@@ -467,7 +520,8 @@ function main(argv, env, runtime, loaders) {
       try { console.error(`[bootstrap-test] role gate failed: ${error?.message || "unknown"}`); } catch {}
     }
     const code = bootstrapFailureCode(error);
-    throw bootstrapFailure(code.startsWith("BOOTSTRAP_CODE_IDENTITY_") ? code : "BOOTSTRAP_ROLE_REJECTED");
+    throw code.startsWith("BOOTSTRAP_CODE_IDENTITY_") ? bootstrapFailure(code)
+      : bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error);
   }
   const dispatch = (runtimeMcpBridge = null) => {
     try {
@@ -490,14 +544,14 @@ function main(argv, env, runtime, loaders) {
     let context;
     try {
       context = validateMcpRoleGate(actualEnv, runtime, argv || process.argv.slice(1));
-    } catch {
-      throw bootstrapFailure("BOOTSTRAP_ROLE_REJECTED");
+    } catch (error) {
+      throw bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error);
     }
     const openBridge = runtime?.openRuntimeMcpBridge
       || require("./runtime-mcp-relay").openRuntimeMcpBridge;
     return Promise.resolve()
       .then(() => openBridge(context, runtime?.runtimeMcpBridgeOptions))
-      .catch(() => { throw bootstrapFailure("BOOTSTRAP_ROLE_REJECTED"); })
+      .catch((error) => { throw bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error); })
       .then((bridge) => {
         delete actualEnv.SHOGGOTH_RUNTIME_MCP_GATE_FILE;
         delete actualEnv.SHOGGOTH_RUNTIME_MCP_GATE_NONCE;
@@ -517,6 +571,7 @@ module.exports = {
   dispatchRole,
   main,
   resolveRole,
+  resolveTestRolePaths,
   validateInternalRoleGate,
   validateExternalFederationMcpRoleGate,
   validateMcpRoleGate,

@@ -1,0 +1,597 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shoggoth.app/schemas/hooks/1.0.0/plugin-hooks.schema.json",
+  "title": "Shoggoth Plugin Hooks V1",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "https://shoggoth.app/schemas/hooks/1.0.0/plugin-hooks.schema.json"
+    },
+    "hooks": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "session.created",
+              "session.closed",
+              "run.before",
+              "context.prepare",
+              "run.started",
+              "tool.before",
+              "tool.after",
+              "tool.result.transform",
+              "approval.requested",
+              "approval.resolved",
+              "context.checkpoint.before",
+              "context.checkpoint.after",
+              "run.completed",
+              "run.failed",
+              "run.canceled",
+              "run.interrupted",
+              "run.skipped",
+              "model.request.before",
+              "model.request.after",
+              "context.native_compacted",
+              "subagent.started",
+              "subagent.finished"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "observe",
+              "guard",
+              "transform",
+              "action"
+            ]
+          },
+          "scope": {
+            "type": "object",
+            "properties": {
+              "workspace": {
+                "type": "string",
+                "enum": [
+                  "current",
+                  "profile"
+                ]
+              },
+              "sources": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "chat",
+                    "cron",
+                    "kanban",
+                    "inspiration"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "workspace",
+              "sources"
+            ],
+            "additionalProperties": false
+          },
+          "matcher": {
+            "type": "object",
+            "properties": {
+              "toolScopes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "product",
+                    "native_mcp",
+                    "plugin_mcp",
+                    "runtime_builtin",
+                    "runtime_mcp"
+                  ]
+                }
+              },
+              "toolNames": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              },
+              "serverId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "componentId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "handler": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "guard.block"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "reason": {
+                        "type": "string",
+                        "maxLength": 1024
+                      }
+                    },
+                    "required": [
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "guard.require_approval"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "reason": {
+                        "type": "string",
+                        "maxLength": 1024
+                      }
+                    },
+                    "required": [
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "guard.condition"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "conditions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "maxLength": 256
+                            },
+                            "op": {
+                              "type": "string",
+                              "enum": [
+                                "eq",
+                                "ne",
+                                "gt",
+                                "gte",
+                                "lt",
+                                "lte",
+                                "contains",
+                                "in",
+                                "exists"
+                              ]
+                            },
+                            "value": {}
+                          },
+                          "required": [
+                            "path",
+                            "op"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "decision": {
+                        "type": "string",
+                        "enum": [
+                          "block",
+                          "require_approval"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "all",
+                          "any"
+                        ]
+                      },
+                      "missing": {
+                        "type": "string",
+                        "enum": [
+                          "block",
+                          "ignore"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "conditions",
+                      "decision",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "arguments.patch"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "patch": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "patch"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "result.redact"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "patterns": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "phone",
+                            "card",
+                            "email"
+                          ]
+                        }
+                      },
+                      "replacement": {
+                        "type": "string",
+                        "maxLength": 64
+                      }
+                    },
+                    "required": [
+                      "patterns"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "context.literal"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "maxLength": 4096
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "context.file"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "relativePath": {
+                        "type": "string",
+                        "maxLength": 1024
+                      }
+                    },
+                    "required": [
+                      "relativePath"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "observe.record"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "tags": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 64
+                        }
+                      }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "builtin"
+                  },
+                  "name": {
+                    "type": "string",
+                    "const": "workspace.copy"
+                  },
+                  "config": {
+                    "type": "object",
+                    "properties": {
+                      "from": {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      "to": {
+                        "type": "string",
+                        "maxLength": 1024
+                      }
+                    },
+                    "required": [
+                      "from",
+                      "to"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "name",
+                  "config"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "script"
+                  },
+                  "language": {
+                    "type": "string",
+                    "enum": [
+                      "javascript",
+                      "python"
+                    ]
+                  },
+                  "access": {
+                    "type": "object",
+                    "properties": {
+                      "workspaceRead": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                  },
+                  "relativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "compatibility": {
+                    "type": "string",
+                    "enum": [
+                      "claude-code-pretooluse-v1",
+                      "cursor-tool-permission-v1"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "language",
+                  "relativePath",
+                  "sha256"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": -10000,
+            "maximum": 10000
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60000
+          },
+          "failurePolicy": {
+            "type": "string",
+            "enum": [
+              "block",
+              "continue"
+            ]
+          },
+          "requiresConnections": {
+            "type": "array",
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            }
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "name",
+          "event",
+          "kind",
+          "scope",
+          "matcher",
+          "handler"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "$schema",
+    "hooks"
+  ],
+  "additionalProperties": false
+}

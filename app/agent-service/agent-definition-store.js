@@ -14,6 +14,7 @@ const {
 } = require("./security");
 const { DEFAULT_DOCUMENTS, DEFAULT_TEMPLATE_VERSION, V3_DEFAULT_AGENTS,
   createDefaultDocuments } = require("./agent-definition-defaults");
+const { createLegacyV4Identity, LEGACY_INITIAL_IDENTITY_HEADING } = require("./agent-definition-legacy-defaults");
 const { BUILTIN_CLI_AGENT_PROFILES } = require("./builtin-cli-profiles");
 
 const DEFINITION_SCHEMA_VERSION = 1;
@@ -247,18 +248,21 @@ class AgentDefinitionStore {
         || Buffer.byteLength(input.initialIdentity, "utf8") > 8192) {
         throw definitionError("DEFINITION_DOCUMENT_INVALID", "Initial Agent identity is invalid");
       }
-      defaults.IDENTITY += `\n## 用户指定的身份与职责\n\n${input.initialIdentity}\n`;
+      defaults.IDENTITY += `\n## User-provided identity and responsibilities\n\n${input.initialIdentity}\n`;
     }
     const existing = lstatIfExists(this._rootManifestPath(profileId));
     if (existing) {
       const current = this.get(profileId);
       if (input.initialIdentity !== undefined) {
-        if (current.documents.IDENTITY === defaults.IDENTITY) return current;
+        const legacyIdentity = createLegacyV4Identity(input.profileName);
+        if (current.documents.IDENTITY === defaults.IDENTITY
+          || current.documents.IDENTITY === legacyIdentity + LEGACY_INITIAL_IDENTITY_HEADING + input.initialIdentity + "\n") return current;
         // Startup may bootstrap the default after a crash between Profile
         // creation and definition initialization. Complete only an untouched
         // default; never overwrite a user's intervening identity edit/restore.
-        if (current.documents.IDENTITY !== defaultIdentity || this.history(profileId).some(revision =>
-          revision.documents.IDENTITY.contentHash !== sha256(defaultIdentity)
+        const untouchedDefault = [defaultIdentity, legacyIdentity].find(value => value === current.documents.IDENTITY);
+        if (!untouchedDefault || this.history(profileId).some(revision =>
+          revision.documents.IDENTITY.contentHash !== sha256(untouchedDefault)
           || ["import", "restore"].includes(revision.actor))) {
           throw definitionError("DEFINITION_REVISION_CONFLICT", "Initial Agent identity conflicts with saved changes");
         }

@@ -10,12 +10,14 @@ const esbuild = require("esbuild");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-skills-ui-"));
 const output = path.join(temporary, "test.cjs");
 const mocks = {
+  "./SelfImprovementPanel": "export default function SelfImprovementPanel() { return null; }",
   "../api/client": `
     export class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
     export const getSkillUsage = async () => [];
     export const installSkill = async () => ({ canceled: true });
     export const listAgents = async () => [];
     export const listSkills = async () => [];
+    export const selfImprovement = async () => ({ supported: false });
     export const listDisabledStandaloneMcp = async () => ({ revision: 1, totalDisabled: 0,
       items: [], nextCursor: 0, hasMore: false });
     export const rebindStandaloneMcp = async () => { throw new Error('not expected'); };

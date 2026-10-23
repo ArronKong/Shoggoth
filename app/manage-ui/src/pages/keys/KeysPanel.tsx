@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { usePageCache } from "../../lib/usePageCache";
 import { useTranslation } from "react-i18next";
 import type { EnvVar } from "../../types";
 import { deleteEnvVar, listEnvVars, revealEnvVar, setEnvVar, validateProviderCredential } from "../../api/client";
@@ -188,28 +189,22 @@ export default function KeysPanel({
   id,
   /** 插在「模型 Provider」与「工具密钥」之间的卡片（自定义端点面板走这里） */
   endpointsSlot,
-}: { id?: string; endpointsSlot?: ReactNode } = {}) {
+  refreshKey = 0,
+}: { id?: string; endpointsSlot?: ReactNode; refreshKey?: number } = {}) {
   const { t } = useTranslation();
   const toast = useToast();
   const confirm = useConfirm();
-  const [vars, setVars] = useState<EnvVar[] | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const { data: vars, error: loadFailed, loading, refresh } = usePageCache("models:keys:hermes",
+    () => listEnvVars("hermes"), { staleTime: 30_000 });
   const [busy, setBusy] = useState<string | null>(null);
   const [showAllProviders, setShowAllProviders] = useState(false); // 未配置的 provider 默认折起
 
-  const refresh = useCallback(async () => {
-    try {
-      setVars(await listEnvVars("hermes"));
-      setLoadFailed(false);
-    } catch {
-      // 读失败 ≠「没配任何密钥」——Hermes dashboard 可能只是没起来。
-      setVars([]);
-      setLoadFailed(true);
-    }
-  }, []);
+  const previousRefreshKey = useRef(refreshKey);
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (previousRefreshKey.current === refreshKey) return;
+    previousRefreshKey.current = refreshKey;
+    void refresh();
+  }, [refresh, refreshKey]);
 
   const onSave = async (key: string, explicitValue?: string): Promise<boolean> => {
     const value = explicitValue;
@@ -354,9 +349,6 @@ export default function KeysPanel({
   }, [vars, t]);
 
 
-  if (vars === null) return <p className="muted">{t("common.loading")}</p>;
-  if (loadFailed) return <p className="status-error">{t("keys.loadFailed")}</p>;
-
   // 默认只摆「已配置」的那几家，其余折起来——31 家全列开会把这一页拉成长条，
   // 而绝大多数人只配了一两家。一家都没配时给前 3 家当引子，否则页面会是空的。
   const configured = providerGroups.filter((g) => g.hasAnySet);
@@ -370,7 +362,7 @@ export default function KeysPanel({
 
   return (
     <div className={styles.panel} id={id}>
-      <OAuthProvidersCard id="keys-oauth" />
+      <OAuthProvidersCard id="keys-oauth" refreshKey={refreshKey} />
 
       <section className={styles.card} id="keys-providers">
         <div className={styles.cardHead}>
@@ -392,6 +384,8 @@ export default function KeysPanel({
           </p>
         </div>
         <div className={`${styles.cardBody} ${styles.cardBodyFlush}`}>
+          {loading && !vars && <p className="muted">{t("common.loading")}</p>}
+          {loadFailed && <p className="status-error" role="alert">{t("keys.loadFailed")}</p>}
           {visibleGroups.map((g) => (
             <ProviderGroupCard key={g.name} group={g} rowProps={rowProps} />
           ))}

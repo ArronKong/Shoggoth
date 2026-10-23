@@ -331,3 +331,19 @@ test("unbound recovered intent fails before dispatch and preserves the editable 
   assert.equal(f.calls.length, 0);
   assert.equal(f.service.view(idea.id).body, idea.body);
 });
+
+
+test("ordinary-chat routing can read durable ownership while inspiration workers are closed", async t => {
+  const f = fixture(t);
+  const idea = await f.create(), { idea: started } = await f.call("start", f.params(idea));
+  await f.settle(started.latestExecution.runId);
+  const execution = f.store.executionForRun(started.latestExecution.runId);
+  f.service.close();
+  const binding = { backendId: "hermes", agentId: "main", sessionKey: execution.sessionKey };
+  assert.equal((await f.call("session.get", binding)).origin.inspirationId, idea.id,
+    "a bound inspiration session must never become ordinary chat");
+  assert.equal((await f.call("session.get", { ...binding, sessionKey: "agent:main:ordinary-chat" })).origin, null);
+  await assert.rejects(f.call("create", { operationId: id(), body: "workers are stopped" }), { code: "INSPIRATION_UNAVAILABLE" });
+  f.store.close();
+  await assert.rejects(f.call("session.get", binding), { code: "INSPIRATION_UNAVAILABLE" }, "missing durable authority stays unknown");
+});

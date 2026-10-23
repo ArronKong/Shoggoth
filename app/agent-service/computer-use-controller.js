@@ -9,8 +9,11 @@ const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./s
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,255}$/u;
 const MAX_SESSIONS = 2;
-const MAX_SESSION_SECONDS = 900;
-const MIN_SESSION_SECONDS = 60;
+// CUA 0.22 bounded grants require finite lifetimes. These are replaceable
+// worker grants, not a deadline on the owning WorkRun or public session.
+const DRIVER_GRANT_SECONDS = 900;
+const DRIVER_RENEW_MARGIN_MS = 60_000;
+const WORKER_IDLE_MS = 120_000;
 const MAX_ELEMENTS = 300;
 const MAX_TREE_BYTES = 64 * 1024;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -77,11 +80,11 @@ function validateDriverBinary(binaryPath, manifest) {
   }
 }
 
-function makeCapabilityManifest(allowedApplications, expiresInSeconds) {
+function makeCapabilityManifest(allowedApplications) {
   return {
     version: 3,
-    expires_after: `${expiresInSeconds}s`,
-    idle_timeout: `${Math.min(expiresInSeconds, 120)}s`,
+    expires_after: `${DRIVER_GRANT_SECONDS}s`,
+    idle_timeout: `${DRIVER_GRANT_SECONDS}s`,
     allow: { tools: [...ALLOWED_CUA_TOOLS] },
     resources: {
       apps: allowedApplications.map((bundleId) => ({
@@ -153,7 +156,7 @@ function publicSession(record) {
     status: record.status,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
-    expiresAt: record.expiresAt,
+    expiresAt: null,
     pauseReason: record.pauseReason,
   };
 }
@@ -161,7 +164,8 @@ function publicSession(record) {
 class ComputerUseController {
   constructor(options = {}) {
     if (!options.paths?.computerEphemeralDir || !options.paths?.computerArtifactsDir
-      || !options.paths?.trustedRoot || !path.isAbsolute(options.binaryPath || "")) {
+      || !options.paths?.trustedRoot || !path.isAbsolute(options.binaryPath || "")
+      || typeof options.isAuthorized !== "function") {
       throw new TypeError("ComputerUseController 配置无效");
     }
     this.paths = options.paths;
@@ -174,8 +178,8 @@ class ComputerUseController {
     this.getSystemIdleTime = options.getSystemIdleTime || (() => Number.POSITIVE_INFINITY);
     this.isScreenLocked = options.isScreenLocked || (() => false);
     this.imageTransformer = options.imageTransformer || null;
-    this.scheduleExpiry = options.scheduleExpiry || setTimeout;
-    this.cancelExpiry = options.cancelExpiry || clearTimeout;
+    this.isAuthorized = options.isAuthorized;
+    this.timer = null;
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.maxSessions = options.maxSessions || MAX_SESSIONS;
@@ -199,7 +203,38 @@ class ComputerUseController {
       this.availabilityCode = typeof error?.code === "string" && error.code.startsWith("COMPUTER_")
         ? error.code : "COMPUTER_DRIVER_UNAVAILABLE";
     }
+    clearInterval(this.timer);
+    this.timer = setInterval(() => { void this.reconcile().catch(() => {}); }, 1000);
+    this.timer.unref?.();
     return this;
+  }
+
+  async reconcile() {
+    await Promise.allSettled([...this.sessions.values()].map(async record => {
+      if (!this.opened || !this.isAuthorized(record) || ["failed", "close_failed"].includes(record.status)) {
+        return this.#closeRecord(record);
+      }
+      // Reclaim idle workers without ending the task's authorized session.
+      // An in-flight operation owns the worker until its outcome is settled.
+      if (!record.busy && !record.closing && !record.maintenance && record.driver
+        && this.now() - record.lastUsedAt >= WORKER_IDLE_MS) {
+        record.maintenance = this.#stopWorker(record).catch(error => {
+          record.status = "failed";
+          record.pauseReason = "driver_shutdown_failed";
+          throw error;
+        });
+        try { await record.maintenance; } finally { record.maintenance = null; }
+      }
+    }));
+  }
+
+  #assertCurrent(record) {
+    this.#assertOpen();
+    if (this.sessions.get(record.id) !== record || record.closing
+      || !["starting", "ready", "paused"].includes(record.status)) {
+      throw computerError("COMPUTER_SESSION_NOT_FOUND");
+    }
+    if (!this.isAuthorized(record)) throw computerError("COMPUTER_SESSION_FORBIDDEN");
   }
 
   #assertOpen() {
@@ -272,6 +307,19 @@ class ComputerUseController {
     };
   }
 
+  async requestPermissions() {
+    this.#assertAvailable();
+    const sdk = await this.#loadSdk();
+    if (typeof sdk.requestMacOsPermissions !== "function") {
+      throw computerError("COMPUTER_DRIVER_UNAVAILABLE");
+    }
+    try { await sdk.requestMacOsPermissions(); }
+    catch { throw computerError("COMPUTER_PERMISSION_REQUEST_FAILED"); }
+    // Prompting and checking must share the host that spawns private workers.
+    // A prompt's return value is not proof that macOS has applied the grant.
+    return this.#permissions();
+  }
+
   list(profileId = null) {
     this.#assertOpen();
     if (this.availabilityCode) return [];
@@ -287,15 +335,7 @@ class ComputerUseController {
     if (workRunId !== undefined && record.workRunId !== workRunId) {
       throw computerError("COMPUTER_SESSION_FORBIDDEN");
     }
-    if (this.now() >= record.expiresAt) {
-      this.sessions.delete(record.id);
-      record.status = "closed";
-      record.snapshot = null;
-      if (record.expiryTimer) this.cancelExpiry(record.expiryTimer);
-      Promise.resolve(record.driver.shutdown()).catch(() => {});
-      try { removePrivateTree(record.sessionRoot); } catch {}
-      throw computerError("COMPUTER_SESSION_EXPIRED");
-    }
+    this.#assertCurrent(record);
     return record;
   }
 
@@ -304,97 +344,135 @@ class ComputerUseController {
     if (!input || !SAFE_ID.test(input.profileId || "") || !SAFE_ID.test(input.workRunId || "")
       || !Array.isArray(input.allowedApplications) || input.allowedApplications.length < 1
       || input.allowedApplications.length > 8
-      || input.allowedApplications.some((value) => !BUNDLE_ID.test(value))
-      || new Set(input.allowedApplications).size !== input.allowedApplications.length
-      || !Number.isSafeInteger(input.expiresInSeconds)
-      || input.expiresInSeconds < MIN_SESSION_SECONDS
-      || input.expiresInSeconds > MAX_SESSION_SECONDS) {
+      || input.allowedApplications.some(value => !BUNDLE_ID.test(value))
+      || new Set(input.allowedApplications).size !== input.allowedApplications.length) {
       throw computerError("COMPUTER_ARGUMENTS_INVALID");
     }
     if (this.sessions.size >= this.maxSessions) throw computerError("COMPUTER_SESSION_CAPACITY");
+    const id = this.randomUUID();
+    if (!SAFE_ID.test(id) || this.sessions.has(id)) throw computerError("COMPUTER_SESSION_CAPACITY");
+    const createdAt = this.now(), sessionRoot = path.join(this.paths.computerEphemeralDir, id);
+    const record = {
+      id, profileId: input.profileId, workRunId: input.workRunId,
+      allowedApplications: [...input.allowedApplications], status: "starting", pauseReason: null,
+      createdAt, updatedAt: createdAt, sessionRoot,
+      manifestPath: path.join(sessionRoot, "capabilities.yaml"), sessionLabel: `shoggoth-${id}`,
+      driver: null, sdk: null, snapshot: null, idleSeconds: this.getSystemIdleTime(),
+      lastUsedAt: createdAt, driverExpiresAt: null, busy: true, closing: null, maintenance: null,
+    };
+    // Reserve capacity and ownership before any asynchronous startup work.
+    this.sessions.set(id, record);
+    let release, failure;
+    record.pending = new Promise(resolve => { release = resolve; });
+    try {
+      this.#assertCurrent(record);
+      await this.#ensureWorker(record);
+      this.#assertCurrent(record);
+      if (record.status === "starting") record.status = "ready";
+      return publicSession(record);
+    } catch (error) { failure = error; }
+    finally { record.busy = false; record.pending = null; release(); }
+    await this.#closeRecord(record).catch(() => {});
+    if (typeof failure?.code === "string" && failure.code.startsWith("COMPUTER_")) throw failure;
+    throw computerError("COMPUTER_DRIVER_START_FAILED");
+  }
+
+  async #ensureWorker(record) {
+    await record.maintenance;
+    this.#assertCurrent(record);
+    if (record.driver && (this.now() + DRIVER_RENEW_MARGIN_MS >= record.driverExpiresAt
+      || this.now() - record.lastUsedAt >= WORKER_IDLE_MS)) {
+      await this.#stopWorker(record);
+      this.#assertCurrent(record);
+    }
     const permissions = await this.#permissions();
+    this.#assertCurrent(record);
     if (!permissions.accessibility || !permissions.screenRecording) {
       throw computerError("COMPUTER_PERMISSION_REQUIRED", "请先在 Shoggoth 设置中授予辅助功能和屏幕录制权限");
     }
+    if (record.driver) return;
     const sdk = await this.#loadSdk();
-    const sessionId = this.randomUUID();
-    if (!SAFE_ID.test(sessionId) || this.sessions.has(sessionId)) throw computerError("COMPUTER_SESSION_CAPACITY");
-    const sessionRoot = path.join(this.paths.computerEphemeralDir, sessionId);
-    ensurePrivateDirectoryTree(sessionRoot, this.paths.trustedRoot);
-    const manifestPath = path.join(sessionRoot, "capabilities.yaml");
-    atomicWritePrivateFile(manifestPath, `${JSON.stringify(
-      makeCapabilityManifest(input.allowedApplications, input.expiresInSeconds), null, 2,
+    this.#assertCurrent(record);
+    ensurePrivateDirectoryTree(record.sessionRoot, this.paths.trustedRoot);
+    atomicWritePrivateFile(record.manifestPath, `${JSON.stringify(
+      makeCapabilityManifest(record.allowedApplications), null, 2,
     )}\n`, { trustedRoot: this.paths.trustedRoot });
-    let driver;
+    const authorization = sdk.RuntimeAuthorizationOptions.new({
+      allowedModes: [sdk.SessionPermissionMode.Bounded],
+      compatibilityMode: sdk.SessionPermissionMode.Bounded,
+      compatibilityCapabilityManifestPath: record.manifestPath,
+      unrestrictedAcknowledged: false,
+      maxSessionTtlSeconds: BigInt(DRIVER_GRANT_SECONDS),
+      maxIdleTtlSeconds: BigInt(DRIVER_GRANT_SECONDS),
+    });
+    record.sdk = sdk;
+    record.driverExpiresAt = this.now() + DRIVER_GRANT_SECONDS * 1000;
+    record.driver = sdk.CuaDriver.createPrivateWorker(sdk.PrivateWorkerOptions.new({
+      binaryPath: this.binaryPath, hostBundleId: this.hostBundleId,
+      startupTimeoutMs: 10_000n, shutdownTimeoutMs: 3_000n,
+      configuredDriver: sdk.ConfiguredDriverOptions.new({ claudeCodeCompatibility: false, authorization }),
+      environment: [sdk.EmbeddedEnvironmentVariable.new({ name: "CUA_DRIVER_RS_TELEMETRY_ENABLED", value: "false" })],
+      inheritStderr: process.env.NODE_ENV === "test",
+    }));
+    const metadata = await record.driver.metadata();
+    this.#assertCurrent(record);
+    if (!metadata || metadata.driverVersion !== (this.binaryManifest?.version || "0.22.0")
+      || metadata.contractVersion !== (this.binaryManifest?.contractVersion || "0.7.0")
+      || metadata.embedded !== true || !Number.isSafeInteger(metadata.pid) || metadata.pid <= 0) {
+      throw computerError("COMPUTER_DRIVER_INVALID");
+    }
+    await record.driver.startSession(sdk.StartSessionInput.new({ session: record.sessionLabel }));
+    this.#assertCurrent(record);
+    record.lastUsedAt = this.now();
+  }
+
+  async #stopWorker(record) {
+    record.snapshot = null;
+    const driver = record.driver;
+    if (!driver) return;
+    try { await driver.endSession(record.sdk.EndSessionInput.new({ session: record.sessionLabel })); } catch {}
+    // Do not replace a worker or release capacity until its exit is confirmed.
+    try { await driver.shutdown(); } catch { throw computerError("COMPUTER_DRIVER_SHUTDOWN_FAILED"); }
+    record.driver = null;
+    record.driverExpiresAt = null;
+  }
+
+  async #withSession(input, operation) {
+    const record = this.#record(input.sessionId, input.profileId, input.workRunId);
+    if (record.busy) throw computerError("COMPUTER_SESSION_BUSY");
+    record.busy = true;
+    let release;
+    record.pending = new Promise(resolve => { release = resolve; });
     try {
-      const authorization = sdk.RuntimeAuthorizationOptions.new({
-        allowedModes: [sdk.SessionPermissionMode.Bounded],
-        compatibilityMode: sdk.SessionPermissionMode.Bounded,
-        compatibilityCapabilityManifestPath: manifestPath,
-        unrestrictedAcknowledged: false,
-        maxSessionTtlSeconds: BigInt(input.expiresInSeconds),
-        maxIdleTtlSeconds: BigInt(Math.min(input.expiresInSeconds, 120)),
-      });
-      const configuredDriver = sdk.ConfiguredDriverOptions.new({
-        claudeCodeCompatibility: false,
-        authorization,
-      });
-      const environment = [
-        ["CUA_DRIVER_RS_TELEMETRY_ENABLED", "false"],
-      ].map(([name, value]) => sdk.EmbeddedEnvironmentVariable.new({ name, value }));
-      driver = sdk.CuaDriver.createPrivateWorker(sdk.PrivateWorkerOptions.new({
-        binaryPath: this.binaryPath,
-        hostBundleId: this.hostBundleId,
-        startupTimeoutMs: 10_000n,
-        shutdownTimeoutMs: 3_000n,
-        configuredDriver,
-        environment,
-        inheritStderr: process.env.NODE_ENV === "test",
-      }));
-      const metadata = await driver.metadata();
-      if (!metadata || metadata.driverVersion !== (this.binaryManifest?.version || "0.22.0")
-        || metadata.contractVersion !== (this.binaryManifest?.contractVersion || "0.7.0")
-        || metadata.embedded !== true || !Number.isSafeInteger(metadata.pid) || metadata.pid <= 0) {
-        throw computerError("COMPUTER_DRIVER_INVALID");
+      try { await this.#ensureWorker(record); }
+      catch (error) {
+        if (!record.closing) { record.status = "failed"; record.pauseReason = "driver_failed"; }
+        if (typeof error?.code === "string" && error.code.startsWith("COMPUTER_")) throw error;
+        throw computerError("COMPUTER_DRIVER_START_FAILED");
       }
-      const sessionLabel = `shoggoth-${sessionId}`;
-      await driver.startSession(sdk.StartSessionInput.new({ session: sessionLabel }));
-      const createdAt = this.now();
-      const record = {
-        id: sessionId,
-        profileId: input.profileId,
-        workRunId: input.workRunId,
-        allowedApplications: [...input.allowedApplications],
-        status: "ready",
-        pauseReason: null,
-        createdAt,
-        updatedAt: createdAt,
-        expiresAt: createdAt + input.expiresInSeconds * 1000,
-        sessionRoot,
-        manifestPath,
-        sessionLabel,
-        driver,
-        sdk,
-        snapshot: null,
-        idleSeconds: this.getSystemIdleTime(),
-        expiryTimer: null,
-      };
-      this.sessions.set(sessionId, record);
-      record.expiryTimer = this.scheduleExpiry(() => {
-        Promise.resolve(this.closeSession({ sessionId: record.id, profileId: record.profileId }))
-          .catch(() => {});
-      }, input.expiresInSeconds * 1000);
-      record.expiryTimer?.unref?.();
-      return publicSession(record);
+      const value = await operation(record);
+      this.#assertCurrent(record);
+      return value;
     } catch (error) {
-      try { if (driver) await driver.shutdown(); } catch {}
-      try { removePrivateTree(sessionRoot); } catch {}
-      if (typeof error?.code === "string" && error.code.startsWith("COMPUTER_")) throw error;
-      throw computerError("COMPUTER_DRIVER_START_FAILED");
+      if (["COMPUTER_PERMISSION_REQUIRED", "COMPUTER_SESSION_FORBIDDEN"].includes(error?.code)) {
+        void this.#closeRecord(record).catch(() => {});
+      } else if (!["ready", "paused", "closing", "close_failed"].includes(record.status)
+        || error?.code === "COMPUTER_DRIVER_SHUTDOWN_FAILED") {
+        record.status = "failed";
+        record.pauseReason = "driver_failed";
+        record.snapshot = null;
+      }
+      throw error;
+    } finally {
+      record.lastUsedAt = this.now();
+      record.busy = false;
+      record.pending = null;
+      release();
     }
   }
 
   async #call(record, name, args) {
+    this.#assertCurrent(record);
     let result;
     try { result = await record.driver.callTool(name, JSON.stringify(args)); } catch {
       record.status = "failed";
@@ -402,6 +480,7 @@ class ComputerUseController {
       record.snapshot = null;
       throw computerError("COMPUTER_DRIVER_CRASHED");
     }
+    this.#assertCurrent(record);
     try {
       return { result, value: parseStructured(result) };
     } catch (error) {
@@ -425,18 +504,19 @@ class ComputerUseController {
   }
 
   async applicationList(input) {
-    const record = this.#record(input.sessionId, input.profileId, input.workRunId);
-    const apps = await this.#allowedApps(record);
-    return {
-      sessionId: record.id,
-      applications: apps.slice(0, 100).map((app) => ({
-        name: boundedString(app.name, 256),
-        bundleId: app.bundle_id,
-        pid: app.pid,
-        running: app.running === true,
-        active: app.active === true,
-      })),
-    };
+    return this.#withSession(input, async record => {
+      const apps = await this.#allowedApps(record);
+      return {
+        sessionId: record.id,
+        applications: apps.slice(0, 100).map((app) => ({
+          name: boundedString(app.name, 256),
+          bundleId: app.bundle_id,
+          pid: app.pid,
+          running: app.running === true,
+          active: app.active === true,
+        })),
+      };
+    });
   }
 
   async #allowedWindows(record, onScreenOnly = false) {
@@ -451,19 +531,20 @@ class ComputerUseController {
   }
 
   async windowList(input) {
-    const record = this.#record(input.sessionId, input.profileId, input.workRunId);
-    const windows = await this.#allowedWindows(record, input.onScreenOnly === true);
-    return {
-      sessionId: record.id,
-      windows: windows.slice(0, 100).map((window) => ({
-        pid: window.pid,
-        windowId: window.window_id,
-        application: boundedString(window.app_name, 256),
-        title: boundedString(window.title, 512),
-        bounds: normalizePublic(window.bounds || null),
-        onScreen: window.is_on_screen === true,
-      })),
-    };
+    return this.#withSession(input, async record => {
+      const windows = await this.#allowedWindows(record, input.onScreenOnly === true);
+      return {
+        sessionId: record.id,
+        windows: windows.slice(0, 100).map((window) => ({
+          pid: window.pid,
+          windowId: window.window_id,
+          application: boundedString(window.app_name, 256),
+          title: boundedString(window.title, 512),
+          bounds: normalizePublic(window.bounds || null),
+          onScreen: window.is_on_screen === true,
+        })),
+      };
+    });
   }
 
   async #assertWindow(record, pid, windowId) {
@@ -477,64 +558,65 @@ class ComputerUseController {
   }
 
   async snapshot(input) {
-    const record = this.#record(input.sessionId, input.profileId, input.workRunId);
-    if (this.isScreenLocked()) {
-      this.#pause(record, "screen_locked");
-      throw computerError("COMPUTER_SCREEN_LOCKED");
-    }
-    if (record.status !== "ready") throw computerError("COMPUTER_SESSION_PAUSED");
-    await this.#assertWindow(record, input.pid, input.windowId);
-    const { result, value } = await this.#call(record, "get_window_state", {
-      session: record.sessionLabel,
-      pid: input.pid,
-      window_id: input.windowId,
-      max_elements: MAX_ELEMENTS,
-      max_depth: 20,
-      include_screenshot: true,
-    });
-    if (!Array.isArray(value.elements) || value.elements.length > MAX_ELEMENTS
-      || typeof value.snapshot_id !== "string") {
-      throw computerError("COMPUTER_DRIVER_RESPONSE_INVALID");
-    }
-    const revision = this.randomUUID();
-    const refs = new Map();
-    const elements = value.elements.map((element, index) => {
-      const ref = `c${index + 1}`;
-      const secure = isSecureElement(element);
-      refs.set(ref, {
-        token: typeof element.element_token === "string" ? element.element_token : null,
-        index: Number.isSafeInteger(element.element_index) ? element.element_index : null,
-        secure,
+    return this.#withSession(input, async record => {
+      if (this.isScreenLocked()) {
+        this.#pause(record, "screen_locked");
+        throw computerError("COMPUTER_SCREEN_LOCKED");
+      }
+      if (record.status !== "ready") throw computerError("COMPUTER_SESSION_PAUSED");
+      await this.#assertWindow(record, input.pid, input.windowId);
+      const { result, value } = await this.#call(record, "get_window_state", {
+        session: record.sessionLabel,
+        pid: input.pid,
+        window_id: input.windowId,
+        max_elements: MAX_ELEMENTS,
+        max_depth: 20,
+        include_screenshot: true,
       });
+      if (!Array.isArray(value.elements) || value.elements.length > MAX_ELEMENTS
+        || typeof value.snapshot_id !== "string") {
+        throw computerError("COMPUTER_DRIVER_RESPONSE_INVALID");
+      }
+      const revision = this.randomUUID();
+      const refs = new Map();
+      const elements = value.elements.map((element, index) => {
+        const ref = `c${index + 1}`;
+        const secure = isSecureElement(element);
+        refs.set(ref, {
+          token: typeof element.element_token === "string" ? element.element_token : null,
+          index: Number.isSafeInteger(element.element_index) ? element.element_index : null,
+          secure,
+        });
+        return {
+          ref,
+          role: boundedString(element.role, 128),
+          label: boundedString(element.label, 512),
+          value: secure ? "" : boundedString(element.value, 1024),
+          frame: normalizePublic(element.frame || null),
+          secure,
+        };
+      });
+      record.snapshot = {
+        revision,
+        cuaSnapshotId: value.snapshot_id,
+        pid: input.pid,
+        windowId: input.windowId,
+        refs,
+      };
+      record.updatedAt = this.now();
+      record.idleSeconds = this.getSystemIdleTime();
+      const image = await this.#storeSnapshotImage(record, result.images);
       return {
-        ref,
-        role: boundedString(element.role, 128),
-        label: boundedString(element.label, 512),
-        value: secure ? "" : boundedString(element.value, 1024),
-        frame: normalizePublic(element.frame || null),
-        secure,
+        sessionId: record.id,
+        snapshotRevision: revision,
+        pid: input.pid,
+        windowId: input.windowId,
+        tree: boundedString(value.tree_markdown, MAX_TREE_BYTES),
+        elements,
+        degraded: value.degraded === true || result.degraded === true,
+        image,
       };
     });
-    record.snapshot = {
-      revision,
-      cuaSnapshotId: value.snapshot_id,
-      pid: input.pid,
-      windowId: input.windowId,
-      refs,
-    };
-    record.updatedAt = this.now();
-    record.idleSeconds = this.getSystemIdleTime();
-    const image = await this.#storeSnapshotImage(record, result.images);
-    return {
-      sessionId: record.id,
-      snapshotRevision: revision,
-      pid: input.pid,
-      windowId: input.windowId,
-      tree: boundedString(value.tree_markdown, MAX_TREE_BYTES),
-      elements,
-      degraded: value.degraded === true || result.degraded === true,
-      image,
-    };
   }
 
   async #storeSnapshotImage(record, images) {
@@ -598,6 +680,7 @@ class ComputerUseController {
   }
 
   #pause(record, reason) {
+    if (!["starting", "ready", "paused"].includes(record.status) || record.closing) return;
     record.status = "paused";
     record.pauseReason = reason;
     record.snapshot = null;
@@ -631,97 +714,101 @@ class ComputerUseController {
   }
 
   async action(input) {
-    const record = this.#record(input.sessionId, input.profileId, input.workRunId);
-    const snapshot = this.#assertActionReady(record, input);
-    let name;
-    let args;
-    try {
-      if (input.action === "click" || input.action === "double_click") {
-        name = input.action;
-        args = this.#targetArgs(snapshot, { ...input, sessionLabel: record.sessionLabel });
-      } else if (input.action === "drag") {
-        name = "drag";
-        args = {
-          session: record.sessionLabel, pid: snapshot.pid, window_id: snapshot.windowId,
-          delivery_mode: "background", from_x: input.fromX, from_y: input.fromY,
-          to_x: input.toX, to_y: input.toY, duration_ms: input.durationMs,
+    return this.#withSession(input, async record => {
+      const snapshot = this.#assertActionReady(record, input);
+      let name;
+      let args;
+      try {
+        if (input.action === "click" || input.action === "double_click") {
+          name = input.action;
+          args = this.#targetArgs(snapshot, { ...input, sessionLabel: record.sessionLabel });
+        } else if (input.action === "drag") {
+          name = "drag";
+          args = {
+            session: record.sessionLabel, pid: snapshot.pid, window_id: snapshot.windowId,
+            delivery_mode: "background", from_x: input.fromX, from_y: input.fromY,
+            to_x: input.toX, to_y: input.toY, duration_ms: input.durationMs,
+          };
+        } else if (input.action === "scroll") {
+          name = "scroll";
+          args = input.ref ? this.#targetArgs(snapshot, {
+            ...input, sessionLabel: record.sessionLabel,
+          }) : {
+            session: record.sessionLabel, pid: snapshot.pid, window_id: snapshot.windowId,
+            delivery_mode: "background",
+          };
+          Object.assign(args, { direction: input.direction, amount: input.amount, by: input.by });
+        } else if (input.action === "type") {
+          name = "type_text";
+          args = this.#targetArgs(snapshot, { ...input, sessionLabel: record.sessionLabel }, {
+            allowCoordinates: false, requireRef: true,
+          });
+          if (args._secure) throw computerError("COMPUTER_SECURE_INPUT_FORBIDDEN");
+          args.text = input.text;
+        } else if (input.action === "key") {
+          name = input.modifiers.length > 0 ? "hotkey" : "press_key";
+          args = input.ref ? this.#targetArgs(snapshot, {
+            ...input, sessionLabel: record.sessionLabel,
+          }) : {
+            session: record.sessionLabel, pid: snapshot.pid, window_id: snapshot.windowId,
+            delivery_mode: "background",
+          };
+          if (name === "hotkey") args.keys = [...input.modifiers, input.key];
+          else args.key = input.key;
+        } else {
+          throw computerError("COMPUTER_ARGUMENTS_INVALID");
+        }
+        delete args._secure;
+        const { result } = await this.#call(record, name, args);
+        return {
+          sessionId: record.id,
+          action: input.action,
+          attempted: true,
+          result: normalizePublic(result.action || null),
+          degraded: result.degraded === true,
+          requiresFreshSnapshot: true,
         };
-      } else if (input.action === "scroll") {
-        name = "scroll";
-        args = input.ref ? this.#targetArgs(snapshot, {
-          ...input, sessionLabel: record.sessionLabel,
-        }) : {
-          session: record.sessionLabel, pid: snapshot.pid, window_id: snapshot.windowId,
-          delivery_mode: "background",
-        };
-        Object.assign(args, { direction: input.direction, amount: input.amount, by: input.by });
-      } else if (input.action === "type") {
-        name = "type_text";
-        args = this.#targetArgs(snapshot, { ...input, sessionLabel: record.sessionLabel }, {
-          allowCoordinates: false, requireRef: true,
-        });
-        if (args._secure) throw computerError("COMPUTER_SECURE_INPUT_FORBIDDEN");
-        args.text = input.text;
-      } else if (input.action === "key") {
-        name = input.modifiers.length > 0 ? "hotkey" : "press_key";
-        args = input.ref ? this.#targetArgs(snapshot, {
-          ...input, sessionLabel: record.sessionLabel,
-        }) : {
-          session: record.sessionLabel, pid: snapshot.pid, window_id: snapshot.windowId,
-          delivery_mode: "background",
-        };
-        if (name === "hotkey") args.keys = [...input.modifiers, input.key];
-        else args.key = input.key;
-      } else {
-        throw computerError("COMPUTER_ARGUMENTS_INVALID");
+      } finally {
+        record.snapshot = null;
+        record.updatedAt = this.now();
+        record.idleSeconds = this.getSystemIdleTime();
       }
-      delete args._secure;
-      const { result } = await this.#call(record, name, args);
-      return {
-        sessionId: record.id,
-        action: input.action,
-        attempted: true,
-        result: normalizePublic(result.action || null),
-        degraded: result.degraded === true,
-        requiresFreshSnapshot: true,
-      };
-    } finally {
-      record.snapshot = null;
-      record.updatedAt = this.now();
-      record.idleSeconds = this.getSystemIdleTime();
-    }
+    });
   }
 
   async focus(input) {
-    const record = this.#record(input.sessionId, input.profileId, input.workRunId);
-    if (this.isScreenLocked()) {
-      this.#pause(record, "screen_locked");
-      throw computerError("COMPUTER_SCREEN_LOCKED");
-    }
-    const apps = await this.#allowedApps(record);
-    const app = apps.find((entry) => entry.bundle_id === input.bundleId && entry.pid === input.pid
-      && entry.running === true);
-    if (!app) throw computerError("COMPUTER_TARGET_FORBIDDEN");
-    if (input.windowId !== null) await this.#assertWindow(record, input.pid, input.windowId);
-    const { result } = await this.#call(record, "bring_to_front", {
-      pid: input.pid,
-      ...(input.windowId === null ? {} : { window_id: input.windowId }),
+    return this.#withSession(input, async record => {
+      if (this.isScreenLocked()) {
+        this.#pause(record, "screen_locked");
+        throw computerError("COMPUTER_SCREEN_LOCKED");
+      }
+      if (record.status !== "ready") throw computerError("COMPUTER_SESSION_PAUSED");
+      const apps = await this.#allowedApps(record);
+      const app = apps.find((entry) => entry.bundle_id === input.bundleId && entry.pid === input.pid
+        && entry.running === true);
+      if (!app) throw computerError("COMPUTER_TARGET_FORBIDDEN");
+      if (input.windowId !== null) await this.#assertWindow(record, input.pid, input.windowId);
+      const { result } = await this.#call(record, "bring_to_front", {
+        pid: input.pid,
+        ...(input.windowId === null ? {} : { window_id: input.windowId }),
+      });
+      record.snapshot = null;
+      record.updatedAt = this.now();
+      record.idleSeconds = this.getSystemIdleTime();
+      return {
+        sessionId: record.id,
+        bundleId: input.bundleId,
+        pid: input.pid,
+        windowId: input.windowId,
+        result: normalizePublic(result.action || null),
+        requiresFreshSnapshot: true,
+      };
     });
-    record.snapshot = null;
-    record.updatedAt = this.now();
-    record.idleSeconds = this.getSystemIdleTime();
-    return {
-      sessionId: record.id,
-      bundleId: input.bundleId,
-      pid: input.pid,
-      windowId: input.windowId,
-      result: normalizePublic(result.action || null),
-      requiresFreshSnapshot: true,
-    };
   }
 
   resume(input) {
     const record = this.#record(input.sessionId, input.profileId, input.workRunId);
+    if (record.busy) throw computerError("COMPUTER_SESSION_BUSY");
     if (this.isScreenLocked()) throw computerError("COMPUTER_SCREEN_LOCKED");
     if (record.status !== "paused") throw computerError("COMPUTER_SESSION_STATE_INVALID");
     record.status = "ready";
@@ -737,49 +824,57 @@ class ComputerUseController {
     for (const record of this.sessions.values()) this.#pause(record, reason);
   }
 
+  async #closeRecord(record) {
+    if (record.closing) return record.closing;
+    record.status = "closing";
+    record.snapshot = null;
+    record.closing = (async () => {
+      try {
+        await record.pending;
+        await record.maintenance?.catch(() => {});
+        await this.#stopWorker(record);
+        record.status = "closed";
+        if (this.sessions.get(record.id) === record) this.sessions.delete(record.id);
+        try { removePrivateTree(record.sessionRoot); } catch {}
+      } catch (error) {
+        record.status = "close_failed";
+        record.pauseReason = "driver_shutdown_failed";
+        throw error;
+      } finally { record.closing = null; }
+    })();
+    return record.closing;
+  }
+
   async closeSession(input) {
     this.#assertOpen();
     const record = this.sessions.get(input.sessionId);
-    if (!record || record.profileId !== input.profileId) {
-      throw computerError("COMPUTER_SESSION_NOT_FOUND");
+    if (!record || record.profileId !== input.profileId) throw computerError("COMPUTER_SESSION_NOT_FOUND");
+    if (input.workRunId !== undefined && input.workRunId !== record.workRunId) {
+      throw computerError("COMPUTER_SESSION_FORBIDDEN");
     }
-    this.sessions.delete(record.id);
-    record.status = "closed";
-    record.snapshot = null;
-    if (record.expiryTimer) this.cancelExpiry(record.expiryTimer);
-    record.expiryTimer = null;
-    try { await record.driver.endSession(record.sdk.EndSessionInput.new({ session: record.sessionLabel })); } catch {}
-    try { await record.driver.shutdown(); } catch {}
-    try { removePrivateTree(record.sessionRoot); } catch {}
+    await this.#closeRecord(record);
     return { sessionId: record.id, closed: true };
   }
 
   async closeForWorkRun(profileId, workRunId) {
     if (!this.opened) return;
-    const records = [...this.sessions.values()].filter((record) => (
-      record.profileId === profileId && record.workRunId === workRunId
-    ));
-    await Promise.allSettled(records.map((record) => this.closeSession({
-      sessionId: record.id, profileId: record.profileId,
-    })));
+    await Promise.allSettled([...this.sessions.values()].filter(record => record.profileId === profileId
+      && record.workRunId === workRunId).map(record => this.#closeRecord(record)));
   }
 
   async closeForProfile(profileId) {
     if (!this.opened) return;
-    const records = [...this.sessions.values()].filter((record) => record.profileId === profileId);
-    await Promise.allSettled(records.map((record) => this.closeSession({
-      sessionId: record.id, profileId: record.profileId,
-    })));
+    const results = await Promise.allSettled([...this.sessions.values()].filter(record => record.profileId === profileId)
+      .map(record => this.#closeRecord(record)));
+    if (results.some(result => result.status === "rejected")) throw computerError("COMPUTER_DRIVER_SHUTDOWN_FAILED");
   }
 
   async close() {
-    if (!this.opened) return;
-    const records = [...this.sessions.values()];
-    await Promise.allSettled(records.map((record) => this.closeSession({
-      sessionId: record.id, profileId: record.profileId,
-    })));
-    this.sessions.clear();
     this.opened = false;
+    clearInterval(this.timer);
+    this.timer = null;
+    const results = await Promise.allSettled([...this.sessions.values()].map(record => this.#closeRecord(record)));
+    if (results.some(result => result.status === "rejected")) throw computerError("COMPUTER_DRIVER_SHUTDOWN_FAILED");
   }
 }
 

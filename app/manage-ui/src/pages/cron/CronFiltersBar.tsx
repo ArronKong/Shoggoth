@@ -58,6 +58,7 @@ export default function CronFiltersBar({
           { value: "all", label: t("cronForm.filtersAllSchedules") },
           // 值仍是后端认的 "cron"，只把展示文案首字母大写，和同排其它标签统一。
           { value: "cron", label: "Cron" },
+          { value: "rrule", label: t("codexAutomation.source") },
           { value: "every", label: t("cronForm.filtersEvery") },
           { value: "at", label: t("cronForm.filtersAt") },
           { value: "on-exit", label: t("cronForm.filtersOnExit") },

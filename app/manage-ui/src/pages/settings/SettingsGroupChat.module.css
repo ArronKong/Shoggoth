@@ -1,0 +1,7 @@
+.copy { display: flex; flex-direction: column; gap: 4px; }
+.copy small { font-size: 12px; font-weight: 400; line-height: 1.6; color: var(--settings-muted-surface-1); }
+.footer { display: flex; flex-direction: column; gap: 10px; padding: 18px 0; border-top: 1px solid var(--ui-hairline); }
+.footer p { margin: 0; }
+.statusRow { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.statusRow > button { flex-shrink: 0; }
+.detail { color: var(--settings-muted-surface-1); font-size: 11px; overflow-wrap: anywhere; }

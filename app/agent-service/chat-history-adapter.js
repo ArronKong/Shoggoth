@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 
 const MAX_HISTORY_ITEM_BYTES = 48 * 1024;
-const FRAGMENT_DATA_BYTES = 24 * 1024;
+const FRAGMENT_DATA_BYTES = 20 * 1024;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const ROLES = new Set(["user", "assistant", "toolResult", "system"]);
 const TOOL_ITEM_TYPES = new Set([
@@ -178,4 +178,47 @@ function adaptCodexChatHistoryPage(rawPage, options = {}) {
   });
 }
 
-module.exports = { adaptCodexChatHistoryPage };
+function reassembleHistoryItems(items) {
+  if (!Array.isArray(items)) throw adapterError("history items 无效");
+  const result = [], seen = new Set(); let totalBytes = 0;
+  for (let i = 0; i < items.length;) {
+    const item = items[i]; let message;
+    if (item.fragment === null) {
+      if (!item.payload || Object.keys(item.payload).join(",") !== "message") throw adapterError("history payload 无效");
+      message = cloneJson(item.payload.message); i += 1;
+    } else {
+      const f = item.fragment, p = item.payload;
+      if (!f || f.index !== 0 || !Number.isSafeInteger(f.count) || f.count < 2 || f.count > 1024
+        || !p || p.encoding !== "gateway-message-json-utf8" || !/^[a-f0-9]{64}$/u.test(p.sha256)
+        || i + f.count > items.length) throw adapterError("history fragment 不完整");
+      const chunks = [];
+      for (let j = 0; j < f.count; j += 1) {
+        const next = items[i + j];
+        if (next.fragment?.messageId !== f.messageId || next.fragment?.index !== j || next.fragment?.count !== f.count
+          || next.runId !== item.runId || next.role !== item.role || next.type !== item.type
+          || next.payload?.encoding !== p.encoding || next.payload?.sha256 !== p.sha256
+          || typeof next.payload?.data !== "string" || !next.payload.data.isWellFormed()
+          || jsonlBytes(next) > MAX_HISTORY_ITEM_BYTES) throw adapterError("history fragment 无效");
+        chunks.push(next.payload.data);
+      }
+      const serialized = chunks.join("");
+      if (Buffer.byteLength(serialized) > 8 * 1024 * 1024 || crypto.createHash("sha256").update(serialized).digest("hex") !== p.sha256)
+        throw adapterError("history fragment 校验失败");
+      try { message = JSON.parse(serialized); } catch { throw adapterError("history fragment JSON 无效"); }
+      if (message.id !== f.messageId) throw adapterError("history fragment 身份无效");
+      i += f.count;
+    }
+    if (!message || !OPAQUE_ID_PATTERN.test(message.id) || !ROLES.has(message.role) || !Array.isArray(message.content)
+      || seen.has(message.id)) throw adapterError("history message 无效");
+    seen.add(message.id); totalBytes += Buffer.byteLength(JSON.stringify(message));
+    if (totalBytes > 8 * 1024 * 1024) throw adapterError("history 总容量超限");
+    result.push({ id: item.fragment === null ? item.id : message.id, runId: item.runId, role: item.role, type: item.type,
+      payload: { message }, createdAt: item.createdAt, fragment: null });
+  }
+  return result;
+}
+function fragmentHistoryItem(item) {
+  return jsonlBytes(item) <= MAX_HISTORY_ITEM_BYTES ? [item]
+    : fragmentNormalMessage(item.payload.message, item.runId, item.role, item.type, item.createdAt);
+}
+module.exports = { adaptCodexChatHistoryPage, fragmentHistoryItem, reassembleHistoryItems };

@@ -1,0 +1,9 @@
+export function normalizeMaxBytes(value, options = {}) {
+    const selected = value === undefined ? options.defaultValue : value;
+    if (selected === undefined || selected === Number.POSITIVE_INFINITY)
+        return selected;
+    if (!Number.isSafeInteger(selected) || selected < 0) {
+        throw new RangeError("maxBytes must be a non-negative safe integer or Infinity");
+    }
+    return selected;
+}

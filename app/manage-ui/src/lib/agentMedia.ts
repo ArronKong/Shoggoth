@@ -15,7 +15,12 @@
 // Own-line marker, mirroring OpenClaw's line-level directive (leading whitespace + the
 // `MEDIA:` prefix). The `m` flag anchors ^/$ per line; the capture is the trimmed ref.
 const MEDIA_LINE_RE = /^[ \t]*MEDIA:[ \t]*(\S[^\n]*?)[ \t]*$/gim;
-const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|bmp)$/i;
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|bmp|avif)$/i;
+
+export interface AgentMediaContext {
+  backendId: string;
+  sessionKey: string;
+}
 
 export interface AgentMedia {
   /** Message text with resolved MEDIA: directive lines removed. */
@@ -24,12 +29,12 @@ export interface AgentMedia {
   srcs: string[];
 }
 
-export function extractAgentMedia(text: string): AgentMedia {
+export function extractAgentMedia(text: string, context?: AgentMediaContext): AgentMedia {
   // 与后续 /i 正则保持一致，避免小写 media: 被快速路径提前漏掉。
   if (!text || !/MEDIA:/i.test(text)) return { text, srcs: [] };
   const srcs: string[] = [];
   const stripped = text.replace(MEDIA_LINE_RE, (match, ref: string) => {
-    const src = mediaRefToSrc(ref);
+    const src = mediaRefToSrc(ref, context);
     if (!src) return match; // unresolvable → keep the original line
     srcs.push(src);
     return ""; // resolved → drop the directive line from the visible text
@@ -40,26 +45,32 @@ export function extractAgentMedia(text: string): AgentMedia {
   return { text: cleaned, srcs };
 }
 
-function mediaRefToSrc(ref: string): string | null {
+export function mediaRefToSrc(ref: string, context?: AgentMediaContext): string | null {
   const r = ref.trim();
-  if (!r) return null;
+  if (!r || /[\u0000-\u001f\u007f]/.test(r)) return null;
   if (/^https?:\/\//i.test(r)) return r;
-  if (/^data:image\//i.test(r)) return r;
-  if (r.startsWith("file://")) {
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(r)) return r;
+  if (/^file:\/\//i.test(r)) {
     try {
-      return localPathSrc(decodeURIComponent(new URL(r).pathname));
+      const url = new URL(r);
+      if (url.hostname && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) return null;
+      return localPathSrc(decodeURIComponent(url.pathname), context);
     } catch {
       return null;
     }
   }
-  if (r.startsWith("/")) return localPathSrc(r);
+  if (r.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(r)) return null;
+  if (context || r.startsWith("/")) return localPathSrc(r, context);
   return null;
 }
 
 // Forward only genuine image paths to the /__media route. The static server enforces the
 // real containment + type guard; this is just a cheap client-side filter so non-image
 // MEDIA lines stay as text.
-function localPathSrc(absPath: string): string | null {
-  if (!IMAGE_EXT_RE.test(absPath)) return null;
+function localPathSrc(absPath: string, context?: AgentMediaContext): string | null {
+  if (!IMAGE_EXT_RE.test(absPath) || /[\u0000-\u001f\u007f]/.test(absPath)) return null;
+  if (context) {
+    return `/__api/sessions/image?${new URLSearchParams({ backend: context.backendId, key: context.sessionKey, ref: absPath })}`;
+  }
   return `/__media?path=${encodeURIComponent(absPath)}`;
 }

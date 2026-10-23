@@ -87,6 +87,22 @@ test("all shared bindings and grants fence atomically; other accounts and encryp
   assert.throws(() => f.controller.operation({ profileId: "profile-b", operationId: f.input.operationId }), { code: "PLUGIN_BINDING_INVALID" });
 }));
 
+test("shared encrypted account disposition survives consent preview and durable receipt validation", async () => fixture(async f => {
+  const controller = f.make({ credentialDispositionForConnection: ({ installation, connection }) => {
+    assert.equal(installation.installationId, f.bindings[0].installationId);
+    assert.equal(connection.connectionId, "connection-a");
+    return "retained_encrypted_shared";
+  } });
+  const prepared = controller.prepare({ ...f.input, operationId: "shared-disposition" });
+  validate("plugins.connections.prepare", prepared);
+  assert.equal(prepared.summary.credentialDisposition, "retained_encrypted_shared");
+  const result = await controller.commit({ challenge: prepared.challenge, approved: true });
+  validate("plugins.connections.commit", result);
+  assert.equal(result.receipt.credentialDisposition, "retained_encrypted_shared");
+  validate("plugins.connections.operation", controller.operation({
+    profileId: f.input.profileId, operationId: "shared-disposition" }));
+}));
+
 test("already disabled bindings still advance; response loss and cleanup failure keep durable authority fence", async () => fixture(async f => {
   const before = f.store.setBindingEnabled({ bindingId: f.input.bindingId, enabled: false, expectedRevision: f.input.expectedRevision });
   const input = { ...f.input, expectedRevision: before.revision };

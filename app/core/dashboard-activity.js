@@ -25,8 +25,11 @@ function cronSeverity(status) {
 function cronRunToActivity(run) {
   const occurredAt = Number.isFinite(run.finishedAt) ? run.finishedAt
     : Number.isFinite(run.startedAt) ? run.startedAt : 0;
+  // Admission/claim time is replaced when execution actually starts. A durable
+  // run identity must not include that mutable timestamp.
+  const runId = run.runId || run.id;
   return {
-    id: `cron:${run.backendId}:${run.jobId}:${run.startedAt ?? occurredAt}:${run.runId || run.id || ""}`,
+    id: `cron:${run.backendId}:${run.jobId}:${runId ? `run:${runId}` : `${run.startedAt ?? occurredAt}:`}`,
     backendId: run.backendId,
     kind: "cron",
     occurredAt,

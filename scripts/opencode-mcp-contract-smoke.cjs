@@ -50,6 +50,9 @@ async function main() {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     assert.equal(state, "connected", "OpenCode must connect to the authenticated Shoggoth MCP gate");
+    // The real /config reports the injected server, so Shoggoth's own tools skip
+    // OpenCode's duplicate prompt.
+    assert.equal(host.answersShoggothToolPrompts, true, "OpenCode /config must list the shoggoth MCP server");
     console.log("PASS OpenCode MCP contract: isolated helper and authenticated Service bridge connected");
   } finally {
     await service.stop({ notify: false }).catch(() => {});

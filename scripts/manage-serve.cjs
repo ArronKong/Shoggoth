@@ -71,8 +71,15 @@ async function main() {
   const openclawModelChange = createOpenClawModelChange({
     backend: openclawBackend,
     runtimeApply: openclawRuntimeApply,
+    configurationMode: "native-config",
   });
-  openclawBackend.attachModelChangeAdapter(openclawModelChange);
+  const legacyOpenClawModelChange = createOpenClawModelChange({ backend: openclawBackend, runtimeApply: openclawRuntimeApply });
+  openclawBackend.attachModelChangeAdapter({ ...openclawModelChange,
+    apply: (spec, context, secret) => context.journalEntry?.mode === "native-config"
+      ? openclawModelChange.apply(spec, context, secret) : legacyOpenClawModelChange.apply(spec, context, secret),
+    recover: (entry, context) => entry.mode === "native-config"
+      ? openclawModelChange.recover(entry, context) : legacyOpenClawModelChange.recover(entry, context),
+  });
   const registry = new BackendRegistry();
   registry.register(openclawBackend);
   registry.register(hb);

@@ -41,6 +41,11 @@ function startFakeGateway() {
   };
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url || "/", "http://x").pathname;
+    if (pathname === "/api/model/info") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ model: "fixture-default", provider: "builtin" }));
+      return;
+    }
     const deleteMatch = req.method === "DELETE" && /^\/api\/sessions\/([^/]+)$/.exec(pathname);
     if (deleteMatch) {
       const sessionId = decodeURIComponent(deleteMatch[1]);
@@ -90,6 +95,9 @@ function startFakeGateway() {
         sock.send(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code, message } }));
       const handler = state.behavior.get(msg.method);
       if (handler) handler(msg.params || {}, reply, emit, replyErr);
+      // This suite models the legacy notification/respond protocol. New peers
+      // are exercised by hermes-server-requests-regression.cjs.
+      else if (msg.method === "client.capabilities") replyErr(-32601, "Method not found");
       else reply({});
     });
   });
@@ -167,6 +175,8 @@ async function main() {
       model: "google/gemini-3",
     }];
     const rows = await be.refreshSessions();
+    check("S0: Hermes 初始审批模式跟随配置", be.getChatCapabilities("hermes-t").permissions.defaultMode === "inherit"
+      && rows.find(row => row.key === key)?.permissionMode === "inherit");
     check(
       "S0: REST refresh 与 canonical key 收敛且不重复",
       rows.filter((row) => row.key === key).length === 1 && !rows.some((row) => row.key !== key),
@@ -259,6 +269,8 @@ async function main() {
       );
       const deletesBefore = state.restDeletes.length;
       const discardedKey = await be.createSession("hermes-t");
+      check("S0b: ACP 新会话继承当前默认模型", modelSelections.at(-1)?.sessionId === "acp-canonical-2"
+        && modelSelections.at(-1)?.modelId === "builtin:fixture-default");
       await be.deleteSession(discardedKey);
       check(
         "S0b: ACP fresh 删除清理已持久化 session",
@@ -278,7 +290,7 @@ async function main() {
       await be.setSessionModel(key, { provider: "nous", model: "tencent/hy3:free" });
       check(
         "S0b: ACP fresh 会话切模型仍留在 ACP",
-        modelSelections[1]?.modelId === "nous:tencent/hy3:free"
+        modelSelections.at(-1)?.modelId === "nous:tencent/hy3:free"
           && state.frames.length === gatewayFramesBeforeSettings,
         JSON.stringify(modelSelections),
       );
@@ -360,6 +372,7 @@ async function main() {
         newSessionCalls += 1;
         return `acp-lost-${newSessionCalls}`;
       },
+      setSessionModel: async () => ({}),
       prompt: async () => ({ stopReason: "end_turn" }),
     };
     be._clientForProfile = () => fakeClient;
@@ -433,6 +446,13 @@ async function main() {
           inline_diff: "@@ -1 +1 @@\n-x\n+y",
           todos: [{ content: "step 1", status: "completed" }],
         });
+        emit("tool.start", "rt1", { tool_id: "t2", name: "terminal",
+          args: { command: "python3 report.py" }, args_text: '{"command":"stale preview"}' });
+        emit("tool.complete", "rt1", { tool_id: "t2", name: "terminal",
+          args: { command: "python3 report.py" }, result: { exit_code: 1, output: "fixture error" } });
+        emit("tool.start", "rt1", { tool_id: "t3", name: "cronjob_manage", args: { action: "list" } });
+        emit("tool.complete", "rt1", { tool_id: "t3", name: "cronjob_manage",
+          result: { jobs: [{ status: "error" }], success: true } });
         emit("status.update", "rt1", { kind: "compacting", text: "…" });
         emit("message.complete", "rt1", {
           text: "Hello world",
@@ -449,9 +469,12 @@ async function main() {
     check("S1: thinking 转发", log.thinking.length === 1 && log.thinking[0] === "think…");
     check(
       "S1: tool start+result 富化（duration/diffText）",
-      log.tools.length === 2 && log.tools[1].phase === "result" && log.tools[1].durationS === 1.5 && /@@/.test(log.tools[1].diffText || ""),
+      log.tools.length === 6 && log.tools[1].phase === "result" && log.tools[1].durationS === 1.5 && /@@/.test(log.tools[1].diffText || ""),
       JSON.stringify(log.tools),
     );
+    check("S1: 非 verbose 的完整 args 优先于预览文本", log.tools[2]?.args?.command === "python3 report.py");
+    check("S1: terminal 非零退出码保留真实失败", log.tools[3]?.isError === true);
+    check("S1: 成功查询中的失败任务不污染工具状态", log.tools[5]?.isError === false);
     check("S1: todos → plan hook", log.plans.length === 1 && log.plans[0][0].content === "step 1");
     check("S1: 压缩状态 → status hook", log.statuses.length === 1 && log.statuses[0].kind === "compacting");
     check(
@@ -523,7 +546,8 @@ async function main() {
       setTimeout(() => emit("approval.request", "rt3", { command: "rm -rf /tmp/x", allow_permanent: true, choices: ["once", "session", "always", "deny"] }), 5);
     });
     const sendP = be.sendMessage("agent:hermes-t:main", "do it", "r", hooks, {});
-    await wait(80);
+    const approvalDeadline = Date.now() + 2000;
+    while (!log.prompts.length && Date.now() < approvalDeadline) await wait(10);
     check(
       "S3: approval.request → prompt hook（kind/choices/command）",
       log.prompts.length === 1 && log.prompts[0].kind === "approval" && log.prompts[0].choices.length === 4 && /rm -rf/.test(log.prompts[0].command),
@@ -696,6 +720,13 @@ async function main() {
       "S8: 权限模式即时投影回会话行",
       be.sessionLiveMeta.get("agent:hermes-t:20260531_x")?.permissionMode === "yolo",
     );
+    state.restSessions = [{ id: "20260531_x", yolo: true }, { id: "other", yolo: false }];
+    const restored = makeBackend(gw.port);
+    const restoredRows = await restored.refreshSessions();
+    check("S8: 新 Backend 从持久会话恢复用户审批选择",
+      restoredRows.find(row => row.key === "agent:hermes-t:20260531_x")?.permissionMode === "yolo"
+      && restoredRows.find(row => row.key === "agent:hermes-t:other")?.permissionMode === "inherit");
+    state.restSessions = [];
 
     // 网关在 in-place 切换后追加的标记行 → 时间线 notice，不是 system 报错文本
     state.restMessages = [
@@ -946,6 +977,54 @@ async function main() {
     await wait(40);
     check("S11: stop 后无迟到 hook", JSON.stringify(collector.log) === before);
     await be.stop();
+  }
+
+  // S12: true steering stays on the live turn; future config never mutates it.
+  {
+    const be = makeBackend(gw.port), key = "agent:hermes-t:main";
+    let finish;
+    state.behavior.set("session.create", (_p, reply) => reply({ session_id: "rt-steer", stored_session_id: "st-steer" }));
+    state.behavior.set("prompt.submit", (_p, reply, emit) => {
+      reply({ status: "streaming" });
+      finish = () => emit("message.complete", "rt-steer", { text: "answer after steer", status: "complete" });
+      emit("message.delta", "rt-steer", { text: "still working" });
+    });
+    state.behavior.set("session.steer", (params, reply) => reply({ status: "queued", text: params.text }));
+    state.behavior.set("config.set", (params, reply) => reply({ value: params.value }));
+    const first = be.sendMessage(key, "first prompt", "steer-live", collectHooks().hooks, {});
+    for (let i = 0; !finish && i < 100; i++) await wait(5);
+    const before = state.frames.length;
+    const receipt = await be.steerChat(key, "focus on the result");
+    check("S12: gateway steering advertised and queued by exact native RPC", be.getChatCapabilities("hermes-t").steer && receipt.accepted
+      && state.frames.at(-1)?.method === "session.steer" && state.frames.at(-1)?.params.session_id === "rt-steer");
+    await be.setSessionModel(key, { model: "custom-next", provider: "xiaomi", acpProviderRef: "custom:xiaomi" });
+    await be.setSessionThinking(key, { level: "high" });
+    await be.setSessionFast(key, { fast: true });
+    await be.setSessionPermission(key, { mode: "yolo" });
+    be._gwApplySessionInfo(key, { model: "old-model", reasoning_effort: "low", fast: false, yolo: false });
+    check("S12: current turn untouched; no abort, new prompt, resume or config.set", state.frames.slice(before).every(f => f.method === "session.steer"));
+    check("S12: old live metadata cannot overwrite next-turn pick", be.sessionLiveMeta.get(key)?.model === "custom-next" && be.sessionLiveMeta.get(key)?.fast === true);
+    state.behavior.set("session.steer", (_p, reply) => reply({ status: "rejected", text: "not accepted" }));
+    let rejected = false; try { await be.steerChat(key, "rejected guidance"); } catch { rejected = true; }
+    check("S12: rejection never replays as a prompt or interruption", rejected && state.frames.slice(before).every(f => f.method === "session.steer"));
+    finish(); await first;
+    let idleRejected = false; try { await be.steerChat(key, "already finished"); } catch { idleRejected = true; }
+    check("S12: idle steering cannot create/resume a session", idleRejected);
+    const secondBefore = state.frames.length;
+    state.behavior.set("config.set", (params, reply) => {
+      if (params.key === "yolo") void be.setSessionThinking(key, { level: "low" });
+      reply({ value: params.value });
+    });
+    state.behavior.set("prompt.submit", (_p, reply, emit) => { reply({ status: "streaming" }); setTimeout(() => emit("message.complete", "rt-steer", { text: "next answer", status: "complete" }), 5); });
+    await be.sendMessage(key, "second prompt", "steer-next", collectHooks().hooks, {});
+    const next = state.frames.slice(secondBefore);
+    check("S12: next turn applies model, reasoning, fast, permission before submit", next.map(f => f.method).join(",") === "config.set,config.set,config.set,config.set,config.set,prompt.submit"
+      && next.slice(0,4).map(f => f.params.key).join(",") === "model,reasoning,fast,yolo"
+      && next[0].params.value.includes("custom:xiaomi") && be.nextTurnConfigs.size === 0);
+    check("S12: edit made during a later config RPC is retained and applied before prompt", next[4].params.key === "reasoning"
+      && next[4].params.value === "low" && be.sessionLiveMeta.get(key)?.reasoningEffort === "low");
+    await be.stop();
+    state.behavior.delete("session.steer"); state.behavior.delete("config.set");
   }
 
   gw.wss.close();

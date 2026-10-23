@@ -13,8 +13,9 @@ const { handle } = require("./fixtures/plugins/mcp-sdk-fixture.cjs");
 
 async function localServer(version, { redirect = false, noCallResponse = false,
   oversizedCall = false, sseCall = false, accounts = null, delayCallMs = 0,
-  inputRequired = false } = {}) {
-  const state = { calls: 0, methods: [], principals: [], rejectedAuth: 0 };
+  inputRequired = false, githubHeaderSchema = false } = {}) {
+  const state = { calls: 0, methods: [], principals: [], rejectedAuth: 0,
+    githubHeaderCalls: [] };
   const server = http.createServer(async (request, response) => {
     if (redirect) { response.writeHead(302, { location: "https://example.com/mcp" }); response.end(); return; }
     if (request.url !== "/mcp" || request.method !== "POST") {
@@ -32,6 +33,12 @@ async function localServer(version, { redirect = false, noCallResponse = false,
     }
     const message = JSON.parse(body);
     state.methods.push(message.method);
+    if (githubHeaderSchema && message.method === "tools/call") {
+      state.githubHeaderCalls.push({ owner: request.headers["mcp-param-owner"] ?? null,
+        repo: request.headers["mcp-param-repo"] ?? null,
+        bodyOwner: message.params?.arguments?.owner ?? null,
+        bodyRepo: message.params?.arguments?.repo ?? null });
+    }
     if (noCallResponse && message.method === "tools/call") return;
     const result = inputRequired && message.method === "tools/call"
       ? message.params?.requestState === "fixture-state"
@@ -46,6 +53,14 @@ async function localServer(version, { redirect = false, noCallResponse = false,
               requestedSchema: { type: "object", properties: { name: { type: "string" } },
                 required: ["name"] } } } }, requestState: "fixture-state" } }
       : handle(message, version, state);
+    if (githubHeaderSchema && message.method === "tools/list") {
+      result.result.tools = [{ name: "get_file_contents", description: "Repository read fixture",
+        inputSchema: { type: "object", properties: {
+          owner: { type: "string", "x-mcp-header": "owner" },
+          repo: { type: "string", "x-mcp-header": "repo" },
+          path: { type: "string" },
+        }, required: ["owner", "repo", "path"], additionalProperties: false } }];
+    }
     if (inputRequired && message.method === "tools/call") state.calls += 1;
     if (oversizedCall && message.method === "tools/call") {
       result.result.structuredContent.payload = "x".repeat(300_000);
@@ -103,6 +118,29 @@ async function main() {
         ["agent-a", "agent-b"]);
       assert.equal(admissions, 4);
     } finally { await connection.close(); }
+  }
+  const deadlines = await localServer("2025-11-25");
+  const deadlineClient = await PluginMcpClient.connectHttp({ url: deadlines.url, allowLoopback: true,
+    connectionId: "deadline-contract", principalIdentity: "fixture-account", authorizeEgress: () => true,
+    timeoutMs: 3000 });
+  const originalSetTimeout = global.setTimeout;
+  const installedDeadlines = [];
+  try {
+    global.setTimeout = (callback, ms, ...args) => {
+      if (ms > 120_000) installedDeadlines.push(ms);
+      return originalSetTimeout(callback, ms, ...args);
+    };
+    await deadlineClient.callTool("echo", { value: "ordinary" }, { runId: "ordinary" });
+    assert.ok(installedDeadlines.some(ms => ms > 30 * 60_000 - 1000 && ms <= 30 * 60_000),
+      "the connection's short control timeout must not cut off tool execution");
+    installedDeadlines.length = 0;
+    await deadlineClient.callTool("echo", { value: "interactive" }, { runId: "interactive" },
+      { onElicitation: async () => ({ action: "cancel" }), assertCurrent: () => true });
+    assert.ok(installedDeadlines.some(ms => ms > 30 * 60_000 && ms <= 30 * 60_000 + 30_000),
+      "interactive tool execution covers the full input window plus reply grace");
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    await deadlineClient.close(); await deadlines.close();
   }
   const interactive = await PluginMcpClient.connectStdio({ command: process.execPath,
     args: [fixture, "2025-11-25", "elicit"], cwd: __dirname,
@@ -200,6 +238,49 @@ async function main() {
       assert.equal(admissions, 2);
     } finally { await connection.close(); await fixtureServer.close(); }
   }
+  for (const version of ["2025-11-25", "2026-07-28"]) {
+    const fixtureServer = await localServer(version, { githubHeaderSchema: true,
+      accounts: new Map([["Bearer fixture-github-token", "fixture-account"]]) });
+    const credentialProvider = async () => ({ accessToken: "fixture-github-token",
+      principalIdentity: "fixture-account", authRevision: 1 });
+    credentialProvider.assertCurrent = () => true;
+    const connection = await PluginMcpClient.connectHttp({
+      url: "https://api.githubcopilot.com/mcp/", fetchImpl: (_target, init) =>
+        fetch(fixtureServer.url, init), connectionId: `github-headers-${version}`,
+      principalIdentity: "fixture-account", authRevision: 1, credentialProvider,
+      authorizeEgress: () => true, timeoutMs: 3000 });
+    try {
+      assert.equal(connection.getProtocol().version, version);
+      assert.deepEqual((await connection.listTools()).map(tool => tool.name), ["get_file_contents"]);
+      const args = { owner: "ArronKong", repo: "shoggoth-plugin-acceptance-2026-09-27",
+        path: "README.md" };
+      await connection.callTool("get_file_contents", args, { runId: "header-fixture" });
+      assert.deepEqual(fixtureServer.state.githubHeaderCalls, [{
+        owner: args.owner, repo: args.repo, bodyOwner: args.owner, bodyRepo: args.repo,
+      }], "both protocol eras mirror only the schema-declared repository fields");
+      assert.deepEqual(fixtureServer.state.principals, ["fixture-account"],
+        "adding repository headers keeps the authenticated transport intact");
+      if (version === "2025-11-25") {
+        await assert.rejects(connection.callTool("get_file_contents", {
+          ...args, owner: "ArronKong\r\nInjected: yes",
+        }, { runId: "header-fixture" }), error => error.code === "MCP_SERVER_REQUEST_INVALID");
+        assert.equal(fixtureServer.state.githubHeaderCalls.length, 1,
+          "unsafe header values fail before any HTTP request");
+      }
+    } finally { await connection.close(); await fixtureServer.close(); }
+  }
+  const otherEndpointServer = await localServer("2025-11-25", { githubHeaderSchema: true });
+  const otherEndpoint = await PluginMcpClient.connectHttp({ url: otherEndpointServer.url,
+    allowLoopback: true, connectionId: "other-endpoint-headers",
+    principalIdentity: "fixture-account", authorizeEgress: () => true, timeoutMs: 3000 });
+  try {
+    await otherEndpoint.listTools();
+    await otherEndpoint.callTool("get_file_contents", { owner: "fixture", repo: "fixture",
+      path: "README.md" }, { runId: "other-endpoint" });
+    assert.deepEqual(otherEndpointServer.state.githubHeaderCalls, [{
+      owner: null, repo: null, bodyOwner: "fixture", bodyRepo: "fixture",
+    }], "legacy compatibility headers never leak to another endpoint");
+  } finally { await otherEndpoint.close(); await otherEndpointServer.close(); }
   const modernInputServer = await localServer("2026-07-28", { inputRequired: true });
   const modernInput = await PluginMcpClient.connectHttp({ url: modernInputServer.url,
     allowLoopback: true, connectionId: "http-modern-input",

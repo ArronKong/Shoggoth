@@ -53,4 +53,4 @@ app.whenReady().then(async () => {
     clearTimeout(timer);
   }
 }).then(() => app.quit()).catch(error => { console.error(error); app.exit(1); });
-app.on('will-quit', () => fs.rmSync(root, { recursive: true, force: true }));
+app.on('will-quit', () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));

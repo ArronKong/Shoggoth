@@ -1,0 +1,58 @@
+.details {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  margin: 36px var(--page-inset-right) 36px var(--skin-gutter);
+  overflow: hidden;
+  border: 1px solid var(--skin-card-border);
+  border-radius: 32px;
+  background:
+    url("../assets/figma/group-chat/details-wash.png") center / 100% 100% no-repeat,
+    url("../assets/figma/group-chat/details-sheen.png") center / 100% 100% no-repeat,
+    #f3f3f3;
+  box-shadow: var(--skin-shadow-card);
+  color: var(--chat-text);
+  container: group-details / inline-size;
+}
+.header { display: flex; flex: none; align-items: center; gap: 12px; min-width: 0; padding: 11px 15px 0 39px; }
+.title { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; font-size: 17px; font-weight: 400; line-height: 22px; }
+.tools { display: flex; align-items: center; flex: none; gap: 4px; }
+.iconButton { display: grid; place-items: center; flex: none; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.iconButton > img, .addMember > img { display: block; flex: none; }
+.iconButton:hover { background: var(--bg-hover); color: inherit; }
+.moreIcon { display: block; margin-top: -7px; font-size: 26px; line-height: 40px; letter-spacing: 1px; }
+.members { display: flex; flex: none; align-items: flex-start; gap: 40px; min-width: 0; min-height: 171px; padding: 45px 39px 0; overflow-x: auto; overscroll-behavior-x: contain; }
+.member { display: flex; flex: none; flex-direction: column; align-items: center; gap: 4px; width: 80px; margin: 10px 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.member:hover { color: inherit; }
+.avatar { box-sizing: border-box; width: 80px; height: 80px; border-radius: 50%; }
+.selected { width: 100px; margin-top: 0; }
+.selected .avatar { width: 100px; height: 100px; border: 2px solid var(--chat-text); }
+.memberName { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font-size: 14px; font-weight: 400; line-height: 22px; }
+.addMember { display: grid; flex: none; place-items: center; box-sizing: border-box; width: 80px; height: 80px; margin-top: 10px; padding: 0; border: 1px solid var(--chat-text); border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.addMember:hover { background: var(--bg-hover); }
+.member:focus-visible, .iconButton:focus-visible, .addMember:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
+.role { flex: 1 1 0; min-width: 0; min-height: 0; margin-top: 50px; padding: 0 39px 31px; overflow-y: auto; overflow-wrap: anywhere; font-size: 14px; font-weight: 300; line-height: 20px; }
+.role:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -3px; }
+.secondaryInfo { margin-top: 20px; color: var(--muted-fg); font-size: 12px; font-weight: 400; line-height: 18px; }
+.secondaryInfo > summary { width: fit-content; cursor: pointer; }
+.secondaryInfo > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+.secondaryInfo p { max-width: 680px; margin: 10px 0 0; }
+.menuPositioner { z-index: 300; }
+.menu { min-width: 180px; max-height: min(24rem, var(--available-height)); overflow-y: auto; padding: 6px; border: 1px solid var(--ui-hairline); border-radius: var(--ui-radius-compact); background: var(--ui-surface-1); box-shadow: var(--ui-shadow-hover); }
+.menuItem { padding: 8px 10px; border-radius: 10px; color: var(--ui-text-1); font-size: 13px; line-height: 20px; cursor: pointer; user-select: none; }
+.menuItem[data-highlighted] { background: var(--ui-surface-2); outline: none; }
+.menuItem[data-disabled] { opacity: 0.45; cursor: default; }
+.deleteItem { color: var(--danger, #d33); }
+:global(:root[data-theme="dark"]) .details { background: var(--skin-card); }
+:global(:root[data-theme="dark"]) .iconButton > img,
+:global(:root[data-theme="dark"]) .addMember > img { filter: invert(1); }
+@container group-details (max-width: 640px) {
+  .header { padding-left: 23px; }
+  .members { gap: 24px; padding-inline: 23px; }
+  .role { padding-inline: 23px; }
+}
+@media (max-width: 640px) {
+  .details { margin-block: 20px; }
+}

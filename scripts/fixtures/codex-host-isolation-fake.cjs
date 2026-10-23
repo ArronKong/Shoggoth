@@ -11,7 +11,7 @@ const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const makeThread = (id, source = null) => {
   if (!threads.has(id)) threads.set(id, { id, preview: "", modelProvider: "fake",
     createdAt: 1, updatedAt: 1, status: { type: "idle" }, ephemeral: true, turns: [],
-    cwd: process.cwd(), cliVersion: "0.149.0", source: "appServer", sessionId: `session-${id}`,
+    cwd: process.cwd(), cliVersion: "0.159.2", source: "appServer", sessionId: `session-${id}`,
     projectId: null, threadSource: source });
   return threads.get(id);
 };
@@ -30,7 +30,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
     }
     return;
   }
-  if (method === "initialize") send({ id, result: { userAgent: "codex/0.149.0",
+  if (method === "initialize") send({ id, result: { userAgent: "codex/0.159.2",
     codexHome: process.env.CODEX_HOME, platformFamily: "unix", platformOs: "macos" } });
   else if (method === "account/read") send({ id, result: {
     account: { type: "chatgpt", email: null, planType: "plus" }, requiresOpenaiAuth: true } });

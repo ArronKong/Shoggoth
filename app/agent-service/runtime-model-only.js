@@ -8,11 +8,15 @@ function validateModelOnlyInput(input) {
     || (input.model !== null && (typeof input.model !== "string" || !input.model.length || input.model.length > 512
       || !input.model.isWellFormed() || /[\u0000-\u001f\u007f]/u.test(input.model)))
     || typeof input.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(input.operationId)
+    || (input.onText !== undefined && typeof input.onText !== "function")
+    || (input.assertCurrent !== undefined && typeof input.assertCurrent !== "function")
     || (input.signal !== undefined && !(input.signal instanceof AbortSignal))) throw fail("MODEL_ONLY_INVALID");
   if (input.signal?.aborted) throw fail("MODEL_ONLY_CANCELED");
+  if (input.execution !== undefined) require("./memory-model-settings").validateMemoryModelExecution(input.execution);
 }
 async function runBoundedModelOnly(input, task, { timeoutMs = 180_000, cleanupMs = 5_000 } = {}) {
   validateModelOnlyInput(input);
+  input.assertCurrent?.();
   const controller = new AbortController();
   let timer, onAbort;
   const interrupted = new Promise((_, reject) => {
@@ -31,7 +35,9 @@ async function runBoundedModelOnly(input, task, { timeoutMs = 180_000, cleanupMs
     clearTimeout(timer); input.signal?.removeEventListener("abort", onAbort); controller.abort();
     // Do not release the admission slot while a canceled child is still alive.
     let cleanup;
-    try { await Promise.race([pending.then(() => {}, () => {}), new Promise((_, reject) => {
+    try { await Promise.race([pending.then(() => {}, error => {
+      if (error?.code === "RUNTIME_STOP_UNCONFIRMED") throw error;
+    }), new Promise((_, reject) => {
       cleanup = setTimeout(() => reject(fail("RUNTIME_STOP_UNCONFIRMED")), cleanupMs);
     })]); } finally { clearTimeout(cleanup); }
   }

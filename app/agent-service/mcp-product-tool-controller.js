@@ -1,5 +1,13 @@
 "use strict";
 
+const { PROACTIVE_RESPONSE_TOOL, validProactiveResponse } = require("./proactive-response-tools");
+const { HEARTBEAT_SETTINGS_TOOL_NAMES, HEARTBEAT_SETTINGS_TOOL_DEFINITIONS, validateHeartbeatSettingsArguments } = require("./heartbeat-settings-tools");
+const { PUBLIC_MESSAGES: PROACTIVE_PUBLIC_MESSAGES } = require("./proactive-messages");
+const { WEB_TOOL_NAMES, WEB_TOOL_DEFINITIONS, WEB_PUBLIC_MESSAGES, validateWebArguments } = require("./web-tools");
+
+const { WEB_PREFERENCE_TOOL_NAMES, WEB_PREFERENCE_TOOL_DEFINITIONS, validateWebPreferenceArguments } = require("./web-preference-tools");
+const { PUBLIC_MESSAGES: WEB_SETTINGS_PUBLIC_MESSAGES } = require("./web-settings-protocol");
+
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -10,16 +18,41 @@ const {
   productToolDescription,
   publicProductCapabilities,
 } = require("./product-capability-manifest");
+const { APP_STATE_SECTIONS, APP_STATE_MAX_LIMIT, validAppStateArguments } = require("./app-state-contract");
+const { APP_MANAGE_OPERATIONS, EXTERNAL_MANAGE_BACKENDS, validAppManageArguments } = require("./app-manage-contract");
+const { resourceRevision } = require("./app-state-projection");
 const { PermissionEngine } = require("./permission-engine");
+const { WORKSPACE_EXECUTION_TOOL, workspaceAutoExecution,
+  validWorkspaceExecutionArguments } = require("./workspace-execution-tools");
 const { ToolRegistry } = require("./tool-registry");
+const { withActivityTitle, splitActivityArguments } = require("./tool-activity");
 const { PLUGIN_SERVER_PATTERN } = require("./plugin-runtime-tool-service");
 const { INSPIRATION_MCP_TOOL_DEFINITIONS, INSPIRATION_MCP_WRITE_TOOLS,
   inspirationMcpMethod, inspirationMcpParams, inspirationMcpResult,
   validateInspirationMcpArguments } = require("./inspiration-mcp-tools");
 const { MEMORY_MCP_TOOL_DEFINITIONS, MEMORY_MCP_WRITE_TOOLS,
   isMemoryMcpTool, validateMemoryMcpArguments } = require("./memory-mcp-tools");
+const { GROUP_MCP_TOOL_DEFINITIONS, isGroupMcpTool, validateGroupMcpArguments, explainGroupMcpArguments } = require("./group-mcp-tools");
+const { GROUP_CHAT_AGENT_TOOL_DEFINITIONS, GROUP_CHAT_AGENT_READ_TOOLS, GROUP_CHAT_AGENT_WRITE_TOOLS, isGroupChatAgentTool,
+  validateGroupChatAgentArguments } = require("./group-chat-agent-tools");
+const { isGroupChatRun } = require("./group-chat-run");
 const { DEFINITION_MCP_TOOL_DEFINITIONS, isDefinitionMcpTool,
   validateDefinitionMcpArguments } = require("./definition-mcp-tools");
+const { BROWSER_MCP_TOOL_DEFINITIONS, BROWSER_MCP_TOOL_NAMES,
+  validateBrowserMcpArguments } = require("./browser-mcp-tools");
+const { CHAT_UI_MCP_TOOL_DEFINITIONS, CHAT_UI_MCP_WRITE_TOOLS, isChatUiMcpTool,
+  validateChatUiMcpArguments } = require("./chat-ui-mcp-tools");
+const { MESSAGES: CHAT_UI_PUBLIC_MESSAGES } = require("./chat-ui-messages");
+const { serviceError } = require("./security");
+const { validateHookToolArguments } = require("./hook-tool-schema");
+const { HOOK_TOOL_NAMES, HOOK_MCP_TOOL_DEFINITIONS, validateHookArguments } = require("./hook-service-protocol");
+const { BROWSER_PUBLIC_MESSAGES } = require("./browser-use-protocol");
+const { FEDERATION_RUN_PUBLIC_MESSAGES } = require("../federation-run-error");
+const { FEDERATION_TASK_MAX_TIMEOUT_MS } = require("../federation-task-timeout");
+const { searchProductHelp } = require("./product-help-catalog");
+const { ProductHelpService } = require("./product-help-service");
+const { PLUGIN_AUTHORING_TOOL_DEFINITIONS, PLUGIN_SETUP_TOOL_DEFINITIONS, PLUGIN_SETUP_TOOL_NAMES,
+  validatePluginAuthoringArguments } = require("./plugin-authoring-protocol");
 
 // MCP helper 进程只需要工具 schema 与参数校验，不能因为共享常量而加载
 // Native Store / ProductStore。这里固定的值就是对外 MCP 协议上限；领域
@@ -43,11 +76,17 @@ const MCP_PRODUCT_TOOL_NAMES = Object.freeze(PRODUCT_CAPABILITIES
 
 const MCP_PRODUCT_TOOL_NAME_SET = new Set(INTERNAL_MCP_PRODUCT_TOOL_NAMES);
 function isNativeOnlyMcpTool(name) {
-  return name.startsWith("computer_") || name.startsWith("native_agent_")
-    || isMemoryMcpTool(name) || isDefinitionMcpTool(name);
+  return name === "workspace_execute" || name === "skill_learn" || HEARTBEAT_SETTINGS_TOOL_NAMES.has(name) || WEB_PREFERENCE_TOOL_NAMES.has(name) || name === "app_manage" || name === "plugin_secret_request" || name === "plugin_activate"
+    || name.startsWith("computer_") || name.startsWith("browser_") || name.startsWith("native_agent_")
+    || isChatUiMcpTool(name) || HOOK_TOOL_NAMES.includes(name) || isMemoryMcpTool(name) || isDefinitionMcpTool(name);
 }
 const DURABLE_WRITE_TOOL_NAMES = new Set([
+  "workspace_execute",
+  "skill_learn",
+  ...GROUP_CHAT_AGENT_WRITE_TOOLS,
+  "app_manage",
   "native_agent_create", "native_agent_update", "native_agent_archive",
+  ...CHAT_UI_MCP_WRITE_TOOLS,
   ...INSPIRATION_MCP_WRITE_TOOLS,
   ...MEMORY_MCP_WRITE_TOOLS,
   "agent_definition_update",
@@ -61,12 +100,13 @@ const DURABLE_WRITE_TOOL_NAMES = new Set([
   "external_agent_file_write", "external_agent_run",
   "federation_agent_run", "federation_agent_message", "federation_task_cancel",
 ]);
+const LIVE_HELP_TOOL_NAMES = new Set(["app_help_get", "heartbeat_settings_get", "web_settings_get", "app_capabilities", "plugin_status", "plugin_setup_get", ...GROUP_CHAT_AGENT_READ_TOOLS]);
 // These reads depend on mutable memory, transcript, and recall-policy state.
 // An exact callId replay must recheck current visibility after a forget.
 const MEMORY_READ_TOOL_NAMES = new Set(["memory_search", "memory_get", "memory_explain"]);
 const CONVERSATION_READ_TOOL_NAMES = new Set(["conversation_search", "conversation_get"]);
 const REVOCABLE_READ_TOOL_NAMES = new Set([
-  ...MEMORY_READ_TOOL_NAMES, ...CONVERSATION_READ_TOOL_NAMES,
+  ...MEMORY_READ_TOOL_NAMES, ...CONVERSATION_READ_TOOL_NAMES, "get_ui_state",
 ]);
 const ACTIVE_RUN_STATUSES = new Set(["starting", "running", "waiting_approval", "waiting_input"]);
 const WORK_RUN_STATUSES = new Set([
@@ -110,6 +150,26 @@ const COMPUTER_SAFE_KEYS = new Set([
 ]);
 const COMPUTER_MODIFIERS = new Set(["cmd", "shift", "option", "alt", "ctrl", "fn"]);
 const PUBLIC_MESSAGES = Object.freeze({
+  WORKSPACE_EXECUTION_UNAVAILABLE: "工作区执行沙箱不可用，本次没有扩大执行权限",
+  WORKSPACE_EXECUTION_SCOPE_INVALID: "工作区命令不属于当前已授权的执行范围",
+  WORKSPACE_EXECUTION_TIMEOUT: "工作区命令已超时停止；请检查部分执行结果，不要自动重试",
+  WORKSPACE_EXECUTION_OUTPUT_LIMIT: "工作区命令输出超限并已停止；请检查部分执行结果",
+  WORKSPACE_EXECUTION_CLEANUP_FAILED: "无法确认工作区命令已停止，请核对执行状态",
+  WORKSPACE_EXECUTION_APPROVAL_REQUIRED: "扩大工作区命令的访问范围需要本次用户批准",
+  WORKSPACE_EXECUTION_APPROVAL_DENIED: "用户未批准扩大本次工作区命令的访问范围",
+  ...PROACTIVE_PUBLIC_MESSAGES,
+  ...WEB_PUBLIC_MESSAGES,
+  ...WEB_SETTINGS_PUBLIC_MESSAGES,
+  ...CHAT_UI_PUBLIC_MESSAGES,
+  ...BROWSER_PUBLIC_MESSAGES,
+  ...FEDERATION_RUN_PUBLIC_MESSAGES,
+  APP_MANAGE_RESOURCE_CHANGED: "目标已变化，请重新读取全局状态并核对本次修改",
+  APP_MANAGE_OUTCOME_UNKNOWN: "操作结果尚未确认，请读取目标状态核实，不能自动重新执行",
+  APP_MANAGE_OPERATION_UNSUPPORTED: "目标后端或系统资源不支持此操作，本次未执行",
+  APP_MANAGE_CAPACITY: "管理操作记录达到上限，本次未执行",
+  APP_STATE_CURSOR_INVALID: "状态查询游标不属于当前 Agent 或查询项，请从 cursor=null 重新读取",
+  APP_STATE_CURSOR_EXPIRED: "状态快照已过期，请从 cursor=null 重新读取",
+  APP_STATE_RESPONSE_TOO_LARGE: "状态快照超过读取上限，请缩小查询范围",
   MCP_TOOL_INVALID_ARGUMENTS: "工具参数无效",
   MCP_TOOL_NOT_FOUND: "请求的资源不存在",
   MCP_TOOL_STATE_CONFLICT: "当前状态不允许该工具操作",
@@ -133,6 +193,17 @@ const PUBLIC_MESSAGES = Object.freeze({
   COMPUTER_DRIVER_UNAVAILABLE: "Computer Use 驱动未能加载，请检查 Shoggoth 安装并重启 Agent Service。",
   COMPUTER_DRIVER_INVALID: "Computer Use 驱动完整性校验失败，请重新安装 Shoggoth。",
   COMPUTER_DRIVER_START_FAILED: "Computer Use 驱动启动失败，请重启 Shoggoth Agent Service 后重试。",
+  COMPUTER_SESSION_BUSY: "Computer Use 会话正在执行操作，请等待结果后继续。",
+  COMPUTER_SNAPSHOT_STALE: "电脑操作快照已失效。请重新调用 computer_snapshot，再使用新的 snapshotRevision 和 ref；不要重放结果未确认的操作。",
+  COMPUTER_SESSION_PAUSED: "电脑操作会话已暂停，原因见 computer_status 返回的 pauseReason。需要继续时调用 computer_session_resume（需要用户确认），再重新 computer_snapshot；不要重放结果未确认的操作。",
+  COMPUTER_USER_TAKEOVER: "检测到用户正在使用鼠标或键盘，电脑操作会话已暂停。等用户操作结束后调用 computer_session_resume（需要用户确认），再重新 computer_snapshot；不要重放结果未确认的操作。",
+  COMPUTER_SCREEN_LOCKED: "屏幕已锁定或进入休眠，电脑操作会话已暂停。等用户解锁后调用 computer_session_resume（需要用户确认），再重新 computer_snapshot。",
+  COMPUTER_SESSION_STATE_INVALID: "会话当前不是暂停状态，不需要恢复；请用 computer_status 查看会话状态。",
+  COMPUTER_ARGUMENTS_INVALID: "电脑操作参数无效：ref 必须来自最近一次 computer_snapshot 的元素列表（如 c12），坐标必须是数字，pid 和 windowId 必须与该快照一致。",
+  COMPUTER_TARGET_FORBIDDEN: "目标应用或窗口不在本会话允许的应用内，或已关闭、pid/windowId 已变化。请调用 computer_application_list 和 computer_window_list 取得当前值。",
+  COMPUTER_SECURE_INPUT_FORBIDDEN: "不能向安全输入框（例如密码框）输入内容，请让用户自己输入。",
+  COMPUTER_ACTION_FAILED: "这次桌面操作没有确认成功。请先 computer_snapshot 查看当前界面再决定下一步，不要直接重放；聚焦整个应用失败时可改用 computer_window_focus 指定窗口。",
+  COMPUTER_DRIVER_SHUTDOWN_FAILED: "Computer Use 驱动退出尚未确认，会话资源暂时保留。请检查状态，不要自动重复桌面操作。",
   COMPUTER_DRIVER_CRASHED: "Computer Use 驱动已退出，请重新打开电脑操作会话。",
   AGENT_PROFILE_CONFLICT: "助理配置已变化，请重新读取 native_agent_get 后确认操作。",
   AGENT_PROTECTED: "内置助理不可归档。",
@@ -142,8 +213,21 @@ const PUBLIC_MESSAGES = Object.freeze({
   AGENT_SERVICE_CLOSED: "本地助理管理服务暂不可用。",
   AGENT_BACKEND_NOT_SUPPORTED: "当前后端不支持创建本地助理。",
   AGENT_INITIALIZATION_FAILED: "助理初始化未完成，请使用同一次操作重试，不能报告创建成功。",
+  PLUGIN_SECRET_REQUIRED: "插件凭据尚未配置。调用 plugin_secret_request 让用户在 Shoggoth 卡片中填写，不要在对话里索取。",
+  PLUGIN_SECRET_NOT_DECLARED: "插件没有声明这个凭据名。请先在 .mcp.json 用 ${secret:NAME} 声明，重新安装后再请求。",
+  PLUGIN_SECRET_VALUE_INVALID: "凭据需为 8 个字符以上的单行文本，且不超过 16 KiB。",
+  PLUGIN_SECRET_REJECTED: "插件的 MCP 服务拒绝了已保存的凭据（401/403）。请用 plugin_secret_request 让用户更新，不要用同一个值重试。",
+  PLUGIN_SECRET_INPUT_UNAVAILABLE: "当前执行不能弹出凭据输入卡片。请让用户在插件页为该插件填写凭据。",
+  PLUGIN_INSTALLATION_INVALID: "插件安装不存在，请先用 plugin_status 或插件页确认 installationId。",
+  PLUGIN_ROLLBACK_REQUIRES_PREVIEW: "新内容与此插件用过的旧版本完全相同。提高 version 后重新 plugin_create，再安装。",
+  ACTIVATION_DEFERRED: "插件仍有进行中的调用或连接正在关闭，请稍后用相同参数重试。",
+  MEMORY_SHARED_REFERENCE_INVALID: "借阅引用已过期或不属于当前对话，请重新检索。",
+  MEMORY_SHARED_SOURCE_REVOKED: "借阅来源或权限已撤回，本轮不能继续使用。",
+  MEMORY_SOURCE_CHANGED: "借阅原文片段已变化，请重新检索。",
+  MEMORY_SHARED_SOURCE_UNAVAILABLE: "来源助理未参与互查或暂不可读取。",
+  MEMORY_SHARED_READ_INVALID: "此运行不能借阅其他助理记忆。",
+  MEMORY_BORROWED_READ_ONLY: "借阅内容不能在当前助理中保存、替代或修改原文。",
 });
-
 const PUBLIC_CODES = new Set(Object.keys(PUBLIC_MESSAGES));
 
 function deepFreeze(value) {
@@ -208,7 +292,7 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
   },
   {
     name: "skill_catalog",
-    description: "Search enabled and eligible Skills by task; returns a bounded page and cursor.",
+    description: "Search enabled and eligible Skills by task; returns a bounded page, cursor, and registryVersion for skill_install_global.expectedRevision.",
     inputSchema: {
       type: "object",
       properties: {
@@ -219,6 +303,10 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
       required: ["cursor"],
       additionalProperties: false,
     },
+  },
+  {
+    name: "skill_learn",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "skill_read",
@@ -236,8 +324,40 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "skill_file_read",
+    description: "Read a bounded UTF-8 chunk of a file belonging to one enabled Skill. This does not execute scripts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,63}$" },
+        contentHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        relativePath: { type: "string", minLength: 1, maxLength: 1024 },
+        cursor: { type: "integer", minimum: 0 },
+        maxBytes: { type: "integer", minimum: 1, maximum: MAX_CONTENT_READ_BYTES },
+      },
+      required: ["name", "contentHash", "relativePath", "cursor", "maxBytes"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "plugin_resource_read",
+    description: "Read a bounded UTF-8 resource from the installed package of one eligible plugin Skill. Use a package-root-relative path such as shared/guide.md; traversal and other Skills are unavailable. This does not execute scripts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,63}$" },
+        contentHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        relativePath: { type: "string", minLength: 1, maxLength: 1024 },
+        cursor: { type: "integer", minimum: 0 },
+        maxBytes: { type: "integer", minimum: 1, maximum: MAX_CONTENT_READ_BYTES },
+      },
+      required: ["name", "contentHash", "relativePath", "cursor", "maxBytes"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "skill_install_global",
-    description: "Install a validated local Skill package for every current and future native Agent Profile.",
+    description: "Install a local Skill directory, ZIP, or SKILL.md with standard YAML frontmatter for every current and future native Agent Profile. Use skill_catalog.registryVersion as expectedRevision.",
     inputSchema: {
       type: "object",
       properties: {
@@ -248,6 +368,8 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
       additionalProperties: false,
     },
   },
+  ...PLUGIN_AUTHORING_TOOL_DEFINITIONS,
+  ...PLUGIN_SETUP_TOOL_DEFINITIONS,
   {
     name: "mcp_server_list",
     description: "List MCP servers in Shoggoth's shared extension host.",
@@ -371,7 +493,7 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
   },
   {
     name: "computer_session_open",
-    description: "Open a short-lived Computer Use session scoped to exact bundle IDs.",
+    description: "Open a Computer Use session scoped to exact bundle IDs for the current task, with no fixed total duration. The session closes when the task ends.",
     inputSchema: {
       type: "object",
       properties: {
@@ -380,9 +502,8 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
           type: "array", minItems: 1, maxItems: 8, uniqueItems: true,
           items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9.-]{0,255}$" },
         },
-        expiresInSeconds: { type: "integer", minimum: 60, maximum: 900 },
       },
-      required: ["source", "sourceId", "allowedApplications", "expiresInSeconds"],
+      required: ["source", "sourceId", "allowedApplications"],
       additionalProperties: false,
     },
   },
@@ -711,7 +832,24 @@ const externalAgentPatchProperties = {
 
 const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
   { name: "app_capabilities", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "app_help_search", inputSchema: { type: "object", properties: {
+    query: { type: "string", maxLength: 512 }, limit: { type: "integer", minimum: 1, maximum: 20 },
+    locale: { type: "string", enum: ["zh-CN", "en"] },
+  }, required: ["query"], additionalProperties: false } },
+  { name: "app_help_get", inputSchema: { type: "object", properties: {
+    featureId: { type: "string", maxLength: 64 }, backendId: { type: "string", maxLength: 128 },
+    locale: { type: "string", enum: ["zh-CN", "en"] },
+  }, required: ["featureId"], additionalProperties: false } },
   { name: "app_status", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "app_manage", inputSchema: { type: "object", properties: {
+    operation: { type: "string", enum: [...APP_MANAGE_OPERATIONS] },
+    backendId: { type: "string", maxLength: 128 }, targetProfileId: nullableString(128), expectedRevision: nullableString(64),
+    arguments: { type: "object", additionalProperties: true },
+  }, required: ["operation", "backendId", "targetProfileId", "expectedRevision", "arguments"], additionalProperties: false } },
+  { name: "app_state_get", inputSchema: { type: "object", properties: {
+    section: { type: "string", enum: [...APP_STATE_SECTIONS] },
+    cursor: nullableString(MAX_CURSOR_BYTES), limit: { type: "integer", minimum: 1, maximum: APP_STATE_MAX_LIMIT },
+  }, required: ["section", "cursor", "limit"], additionalProperties: false } },
   {
     name: "usage_get",
     inputSchema: {
@@ -835,10 +973,12 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
         misfirePolicy: { type: "string", enum: [...MISFIRE_POLICIES] },
         maxCatchUp: { type: "integer", minimum: 1, maximum: 100 },
         overlapPolicy: { type: "string", enum: [...OVERLAP_POLICIES] },
-        threadPolicy: { type: "string", enum: [...THREAD_POLICIES] },
-        threadId: { ...nullableString(256), description: "JSON null when threadPolicy is new." },
+        threadPolicy: { type: "string", enum: [...THREAD_POLICIES], default: "continue",
+          description: "Defaults to continue: reuse this job's conversation across runs." },
+        threadId: { ...nullableString(256), default: null,
+          description: "Omit or use JSON null to let the job create and reuse its own conversation. Must be null when threadPolicy is new." },
       },
-      required: ["name", "prompt", "workspace", "schedule", "enabled", "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId"],
+      required: ["name", "prompt", "workspace", "schedule", "enabled", "misfirePolicy", "maxCatchUp", "overlapPolicy"],
       additionalProperties: false,
     },
   },
@@ -923,7 +1063,8 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
         backendId: { type: "string", pattern: "^[a-z][a-z0-9-]{0,63}$" },
         agentId: { type: "string", maxLength: 128 },
         prompt: { type: "string", maxLength: MAX_DELEGATE_PROMPT_BYTES },
-        timeoutMs: { type: "integer", minimum: 5_000, maximum: 120_000 },
+        timeoutMs: { type: "integer", minimum: 5_000, maximum: FEDERATION_TASK_MAX_TIMEOUT_MS,
+          description: "OpenClaw/Hermes hard execution deadline including startup, not RPC wait time. Use 1800000ms (30 minutes) unless the user sets a shorter limit. Native tasks follow their Runtime's execution policy." },
       },
       required: ["backendId", "agentId", "prompt", "timeoutMs"], additionalProperties: false,
     },
@@ -935,7 +1076,8 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
       properties: {
         handle: { type: "string", maxLength: MAX_FEDERATION_HANDLE_BYTES },
         message: { type: "string", maxLength: MAX_DELEGATE_PROMPT_BYTES },
-        timeoutMs: { type: "integer", minimum: 5_000, maximum: 120_000 },
+        timeoutMs: { type: "integer", minimum: 5_000, maximum: FEDERATION_TASK_MAX_TIMEOUT_MS,
+          description: "Hard execution deadline for OpenClaw/Hermes, including startup. Use 1800000ms (30 minutes) unless the user sets a shorter limit. Native tasks follow their Runtime's execution policy." },
       },
       required: ["handle", "message", "timeoutMs"], additionalProperties: false,
     },
@@ -1039,7 +1181,7 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
       type: "object",
       properties: {
         backendId: { type: "string", enum: [...EXTERNAL_BACKENDS] }, agentId: { type: "string", maxLength: 128 },
-        prompt: { type: "string", maxLength: MAX_DELEGATE_PROMPT_BYTES }, timeoutMs: { type: "integer", minimum: 5_000, maximum: 120_000 },
+        prompt: { type: "string", maxLength: MAX_DELEGATE_PROMPT_BYTES }, timeoutMs: { type: "integer", minimum: 5_000, maximum: FEDERATION_TASK_MAX_TIMEOUT_MS },
       },
       required: ["backendId", "agentId", "prompt", "timeoutMs"], additionalProperties: false,
     },
@@ -1047,13 +1189,23 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
 ];
 
 const MCP_TOOL_DEFINITION_BY_NAME = new Map([
+  WORKSPACE_EXECUTION_TOOL,
+  PROACTIVE_RESPONSE_TOOL,
+  ...HEARTBEAT_SETTINGS_TOOL_DEFINITIONS,
+  ...WEB_TOOL_DEFINITIONS,
+  ...WEB_PREFERENCE_TOOL_DEFINITIONS,
   ...BASE_MCP_PRODUCT_TOOL_DEFINITIONS,
   ...ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS,
   ...INSPIRATION_MCP_TOOL_DEFINITIONS,
   ...MEMORY_MCP_TOOL_DEFINITIONS,
   ...DEFINITION_MCP_TOOL_DEFINITIONS,
+  ...GROUP_MCP_TOOL_DEFINITIONS,
+  ...GROUP_CHAT_AGENT_TOOL_DEFINITIONS,
+  ...BROWSER_MCP_TOOL_DEFINITIONS,
+  ...HOOK_MCP_TOOL_DEFINITIONS,
+  ...CHAT_UI_MCP_TOOL_DEFINITIONS,
 ].map((definition) => [definition.name, definition]));
-const MCP_PRODUCT_TOOL_DEFINITION_INPUTS = INTERNAL_MCP_PRODUCT_TOOL_NAMES.map((name) => ({
+const MCP_PRODUCT_TOOL_DEFINITION_INPUTS = INTERNAL_MCP_PRODUCT_TOOL_NAMES.map((name) => withActivityTitle({
   ...MCP_TOOL_DEFINITION_BY_NAME.get(name),
   description: productToolDescription(name),
   annotations: productToolAnnotations(name),
@@ -1274,10 +1426,26 @@ function validateQuestions(value) {
   });
 }
 
-function validateMcpProductToolArguments(name, args) {
+function validateMcpProductToolArguments(name, value) {
+  const activity = splitActivityArguments(value);
+  return activity.valid && validateProductOperationArguments(name, activity.arguments);
+}
+
+function validateProductOperationArguments(name, args) {
+  if (name === "workspace_execute") return validWorkspaceExecutionArguments(args);
+  if (name === "skill_learn") return exactObject(args, []);
+  if (HEARTBEAT_SETTINGS_TOOL_NAMES.has(name)) return validateHeartbeatSettingsArguments(name, args);
+  if (WEB_PREFERENCE_TOOL_NAMES.has(name)) return validateWebPreferenceArguments(name, args);
+  if (WEB_TOOL_NAMES.has(name)) return validateWebArguments(name, args);
+  if (isChatUiMcpTool(name)) return validateChatUiMcpArguments(name, args);
+  if (HOOK_TOOL_NAMES.includes(name)) return validateHookArguments(name, args);
+  if (name === "proactive_respond") return validProactiveResponse(args);
+  if (BROWSER_MCP_TOOL_NAMES.has(name)) return validateBrowserMcpArguments(name, args);
   if (!MCP_PRODUCT_TOOL_NAME_SET.has(name)) return false;
   if (isMemoryMcpTool(name)) return validateMemoryMcpArguments(name, args);
   if (isDefinitionMcpTool(name)) return validateDefinitionMcpArguments(name, args);
+  if (isGroupMcpTool(name)) return validateGroupMcpArguments(name, args);
+  if (isGroupChatAgentTool(name)) return validateGroupChatAgentArguments(name, args);
   if (inspirationMcpMethod(name)) return validateInspirationMcpArguments(name, args);
   if (name === "native_agent_create") {
     if (!ownDataObject(args)) return false;
@@ -1310,6 +1478,17 @@ function validateMcpProductToolArguments(name, args) {
   if (["app_capabilities", "app_status", "profile_get", "backend_status"].includes(name)) {
     return exactObject(args, []);
   }
+  if (name === "app_state_get") return validAppStateArguments(args);
+  if (name === "app_help_search" || name === "app_help_get") {
+    const primary = name === "app_help_search" ? "query" : "featureId";
+    const optional = name === "app_help_search" ? ["limit", "locale"] : ["backendId", "locale"];
+    return ownDataObject(args) && Object.keys(args).every(key => key === primary || optional.includes(key))
+      && validText(args[primary], primary === "query" ? 512 : 64, { allowEmpty: primary === "query" })
+      && (!Object.hasOwn(args, "locale") || ["zh-CN", "en"].includes(args.locale))
+      && (!Object.hasOwn(args, "limit") || (Number.isSafeInteger(args.limit) && args.limit >= 1 && args.limit <= 20))
+      && (!Object.hasOwn(args, "backendId") || (validText(args.backendId, 128) && OPAQUE_ID_PATTERN.test(args.backendId)));
+  }
+  if (name === "app_manage") return validAppManageArguments(args, validateProductOperationArguments);
   if (name === "runtime_context_get") {
     return (exactObject(args, ["source", "sourceId"])
         && ["chat", "kanban", "cron", "inspiration"].includes(args.source)
@@ -1334,10 +1513,25 @@ function validateMcpProductToolArguments(name, args) {
       && Number.isSafeInteger(args.cursor) && args.cursor >= 0
       && validMaxBytes(args.maxBytes);
   }
+  if (name === "skill_file_read" || name === "plugin_resource_read") {
+    return exactObject(args, ["name", "contentHash", "relativePath", "cursor", "maxBytes"])
+      && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(args.name)
+      && SHA256_PATTERN.test(args.contentHash)
+      && validText(args.relativePath, 1024)
+      && !args.relativePath.includes("\\")
+      && !path.posix.isAbsolute(args.relativePath)
+      && args.relativePath !== "SKILL.md"
+      && args.relativePath.split("/").every(part => part && part !== "." && part !== "..")
+      && Number.isSafeInteger(args.cursor) && args.cursor >= 0
+      && validMaxBytes(args.maxBytes);
+  }
   if (name === "skill_install_global") {
     return exactObject(args, ["sourcePath", "expectedRevision"])
       && validText(args.sourcePath, 4096) && path.isAbsolute(args.sourcePath)
       && Number.isSafeInteger(args.expectedRevision) && args.expectedRevision >= 1;
+  }
+  if (["plugin_create", "plugin_install", "plugin_status", ...PLUGIN_SETUP_TOOL_NAMES].includes(name)) {
+    return validatePluginAuthoringArguments(name, args);
   }
   if (name === "mcp_server_list") return exactObject(args, []);
   if (name === "mcp_server_register") {
@@ -1394,15 +1588,13 @@ function validateMcpProductToolArguments(name, args) {
       return false;
     }
     if (name === "computer_session_open") {
-      return exactObject(args, [...source, "allowedApplications", "expiresInSeconds"])
+      return exactObject(args, [...source, "allowedApplications"])
         && Array.isArray(args.allowedApplications) && args.allowedApplications.length >= 1
         && args.allowedApplications.length <= 8
         && new Set(args.allowedApplications).size === args.allowedApplications.length
         && args.allowedApplications.every((value) => (
           typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9.-]{0,255}$/u.test(value)
-        ))
-        && Number.isSafeInteger(args.expiresInSeconds)
-        && args.expiresInSeconds >= 60 && args.expiresInSeconds <= 900;
+        ));
     }
     const base = [...source, "sessionId"];
     if (!validOpaqueId(args.sessionId)) return false;
@@ -1545,6 +1737,8 @@ function validateMcpProductToolArguments(name, args) {
       && UUID_PATTERN.test(args.jobId) && validCursor(args.cursor) && validMaxBytes(args.maxBytes);
   }
   if (name === "cron_create") {
+    if (!ownDataObject(args)) return false;
+    args = { threadPolicy: "continue", threadId: null, ...args };
     return exactObject(args, [
       "name", "prompt", "workspace", "schedule", "enabled", "misfirePolicy",
       "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId",
@@ -1621,7 +1815,7 @@ function validateMcpProductToolArguments(name, args) {
   if (name === "external_agent_run") {
     return exactObject(args, ["backendId", "agentId", "prompt", "timeoutMs"])
       && validExternalTarget(args) && validText(args.prompt, MAX_DELEGATE_PROMPT_BYTES)
-      && Number.isSafeInteger(args.timeoutMs) && args.timeoutMs >= 5_000 && args.timeoutMs <= 120_000;
+      && Number.isSafeInteger(args.timeoutMs) && args.timeoutMs >= 5_000 && args.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS;
   }
   if (name === "federation_agent_list") {
     return exactObject(args, []) || (exactObject(args, ["backendId"])
@@ -1636,14 +1830,14 @@ function validateMcpProductToolArguments(name, args) {
       && FEDERATION_BACKEND_PATTERN.test(args.backendId) && validOpaqueId(args.agentId)
       && validText(args.prompt, MAX_DELEGATE_PROMPT_BYTES)
       && Number.isSafeInteger(args.timeoutMs) && args.timeoutMs >= 5_000
-      && args.timeoutMs <= 120_000;
+      && args.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS;
   }
   if (name === "federation_agent_message") {
     return exactObject(args, ["handle", "message", "timeoutMs"])
       && validText(args.handle, MAX_FEDERATION_HANDLE_BYTES)
       && validText(args.message, MAX_DELEGATE_PROMPT_BYTES)
       && Number.isSafeInteger(args.timeoutMs) && args.timeoutMs >= 5_000
-      && args.timeoutMs <= 120_000;
+      && args.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS;
   }
   if (["federation_task_get", "federation_task_cancel"].includes(name)) {
     return exactObject(args, ["handle"]) && validText(args.handle, MAX_FEDERATION_HANDLE_BYTES);
@@ -1667,6 +1861,101 @@ function validateMcpProductToolArguments(name, args) {
     && exactObject(args, ["runId", "title", "body"])
     && validOpaqueId(args.runId) && validText(args.title, MAX_NOTIFICATION_TITLE_BYTES)
     && validText(args.body, MAX_NOTIFICATION_BODY_BYTES);
+}
+
+const COMPUTER_REF_OR_POINT_HINT = "按元素操作时传最近一次 computer_snapshot 的 ref（如 \"c12\"），并把 x、y 设为 null；按坐标操作时把 ref 设为 null，x、y 传数字。";
+const COMPUTER_ARGUMENT_HINTS = Object.freeze({
+  computer_click: COMPUTER_REF_OR_POINT_HINT,
+  computer_double_click: COMPUTER_REF_OR_POINT_HINT,
+  computer_type: "ref 必须是最近一次 computer_snapshot 中可输入元素的编号（如 \"c12\"）。",
+  computer_key: `key 只能是 ${[...COMPUTER_SAFE_KEYS].join("、")} 或单个小写字母/数字；`
+    + `modifiers 只能从 ${[...COMPUTER_MODIFIERS].join("、")} 中选，且不重复。`,
+});
+const COMPUTER_ACTION_TOOLS = new Set([
+  "computer_click", "computer_double_click", "computer_drag", "computer_scroll", "computer_type", "computer_key",
+]);
+
+function jsonValueType(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (Number.isInteger(value)) return "integer";
+  return typeof value;
+}
+
+function describeSchemaType(schema) {
+  if (Array.isArray(schema?.anyOf)) return schema.anyOf.map(describeSchemaType).join(" 或 ");
+  if (Array.isArray(schema?.enum)) return schema.enum.map((value) => JSON.stringify(value)).join("、");
+  return schema?.type || "有效值";
+}
+
+// Mirrors the subset of JSON Schema the product tool definitions use. It only
+// names fields and types, never echoes values, so the model can correct its call.
+function collectSchemaProblems(schema, value, path, problems) {
+  if (!schema || typeof schema !== "object" || problems.length >= 6) return;
+  const name = path || "参数";
+  if (Array.isArray(schema.anyOf)) {
+    if (!schema.anyOf.some((option) => {
+      const optionProblems = [];
+      collectSchemaProblems(option, value, path, optionProblems);
+      return optionProblems.length === 0;
+    })) problems.push(`${name} 应为 ${describeSchemaType(schema)}，收到 ${jsonValueType(value)}`);
+    return;
+  }
+  const actual = jsonValueType(value);
+  if (schema.type !== undefined && actual !== schema.type
+    && !(schema.type === "number" && actual === "integer")) {
+    problems.push(`${name} 应为 ${schema.type}，收到 ${actual}`);
+    return;
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    problems.push(`${name} 只能是 ${describeSchemaType({ enum: schema.enum })}`);
+    return;
+  }
+  if (actual === "string") {
+    let matches = true;
+    try { matches = !schema.pattern || new RegExp(schema.pattern, "u").test(value); } catch {}
+    if (schema.maxLength !== undefined && value.length > schema.maxLength) problems.push(`${name} 超过 ${schema.maxLength} 个字符`);
+    else if (schema.minLength !== undefined && value.length < schema.minLength) problems.push(`${name} 至少需要 ${schema.minLength} 个字符`);
+    else if (!matches) problems.push(`${name} 格式不符合要求`);
+  } else if (actual === "integer" || actual === "number") {
+    if ((schema.minimum !== undefined && value < schema.minimum)
+      || (schema.maximum !== undefined && value > schema.maximum)) {
+      problems.push(`${name} 应在 ${schema.minimum ?? "-∞"} 到 ${schema.maximum ?? "∞"} 之间`);
+    }
+  } else if (actual === "array") {
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) problems.push(`${name} 最多 ${schema.maxItems} 项`);
+    if (schema.minItems !== undefined && value.length < schema.minItems) problems.push(`${name} 至少需要 ${schema.minItems} 项`);
+    if (schema.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length) {
+      problems.push(`${name} 不能有重复项`);
+    }
+    value.slice(0, 50).forEach((item, index) => collectSchemaProblems(schema.items, item, `${name}[${index}]`, problems));
+  } else if (actual === "object") {
+    const properties = schema.properties || {};
+    const prefix = path ? `${path}.` : "";
+    for (const key of schema.required || []) {
+      if (!Object.hasOwn(value, key)) problems.push(`缺少 ${prefix}${key}`);
+    }
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) {
+        if (!Object.hasOwn(properties, key)) problems.push(`不支持参数 ${prefix}${key.slice(0, 64)}`);
+      }
+    }
+    for (const [key, child] of Object.entries(properties)) {
+      if (Object.hasOwn(value, key)) collectSchemaProblems(child, value[key], `${prefix}${key}`, problems);
+    }
+  }
+}
+
+function explainMcpProductToolArguments(name, args) {
+  if (isGroupMcpTool(name)) return explainGroupMcpArguments(name, args);
+  const definition = MCP_PRODUCT_TOOL_DEFINITIONS.find((entry) => entry.name === name);
+  const problems = [];
+  if (definition) collectSchemaProblems(definition.inputSchema, args, "", problems);
+  const hints = [
+    ...(COMPUTER_ARGUMENT_HINTS[name] ? [COMPUTER_ARGUMENT_HINTS[name]] : []),
+    ...(COMPUTER_ACTION_TOOLS.has(name) ? ["snapshotRevision、pid、windowId 必须来自同一次 computer_snapshot。"] : []),
+  ];
+  return { problems: problems.slice(0, 6), hints };
 }
 
 function validateAuthority(value) {
@@ -1946,6 +2235,7 @@ function requireMethods(value, methods, label) {
 
 function mapToolError(error) {
   const codeProbe = ownValue(error, "code");
+  if (codeProbe.ok && /^HOOK_[A-Z_]+$/u.test(codeProbe.value || "")) return serviceError(codeProbe.value, "Hook 规则或执行状态需要核对");
   // 依赖即使伪造了公开 code，也绝不能借此透传自带 message/stack/cause。
   if (codeProbe.ok && codeProbe.found && PUBLIC_CODES.has(codeProbe.value)) {
     return toolError(codeProbe.value);
@@ -1962,16 +2252,10 @@ function mapToolError(error) {
   }
   if (code.includes("REFERENCE") || code.includes("CONFLICT")
     || code.includes("TRANSITION") || code.includes("NOT_ACTIVE")
-    || code.includes("COMPLETION_REQUEST") || code.includes("AMBIGUOUS")
-    || code === "COMPUTER_SNAPSHOT_STALE"
-    || code === "COMPUTER_SESSION_PAUSED" || code === "COMPUTER_USER_TAKEOVER"
-    || code === "COMPUTER_SCREEN_LOCKED" || code === "COMPUTER_SESSION_EXPIRED") {
+    || code.includes("COMPLETION_REQUEST") || code.includes("AMBIGUOUS")) {
     return toolError("MCP_TOOL_STATE_CONFLICT");
   }
-  if (code === "COMPUTER_SESSION_FORBIDDEN"
-    || code === "COMPUTER_TARGET_FORBIDDEN" || code === "COMPUTER_SECURE_INPUT_FORBIDDEN") {
-    return toolError("MCP_TOOL_FORBIDDEN");
-  }
+  if (code === "COMPUTER_SESSION_FORBIDDEN") return toolError("MCP_TOOL_FORBIDDEN");
   if (code === "FEDERATION_HANDLE_FORBIDDEN") return toolError("MCP_TOOL_FORBIDDEN");
   if (["CAPABILITY_FORBIDDEN", "GRANT_REVOKED", "HOST_CAPABILITY_REVOKED"].includes(code)) {
     return toolError("MCP_TOOL_FORBIDDEN");
@@ -2024,6 +2308,16 @@ class McpProductToolController {
     if (options.pluginRuntimeToolService !== undefined && options.pluginRuntimeToolService !== null) {
       requireMethods(options.pluginRuntimeToolService, ["listServers", "listTools", "callTool"], "PluginRuntimeToolService");
     }
+    if (options.pluginAuthoringService !== undefined && options.pluginAuthoringService !== null) {
+      requireMethods(options.pluginAuthoringService, ["create", "install", "status"], "PluginAuthoringService");
+    }
+    if (options.pluginQuickSetup !== undefined && options.pluginQuickSetup !== null) {
+      requireMethods(options.pluginQuickSetup, ["inspect", "activate", "requestSecret"], "PluginQuickSetup");
+    }
+    if (options.requestPluginSecretInput !== undefined && options.requestPluginSecretInput !== null
+      && typeof options.requestPluginSecretInput !== "function") {
+      throw new TypeError("requestPluginSecretInput 必须是函数");
+    }
     if (options.inspirationService !== undefined) requireMethods(options.inspirationService, ["handle"], "InspirationService");
     if (options.conversationMemoryService !== undefined) requireMethods(options.conversationMemoryService,
       ["bind", "search", "get", "explain", "write"], "ConversationMemoryService");
@@ -2042,10 +2336,15 @@ class McpProductToolController {
         "snapshot", "focus", "action",
       ], "ComputerUseController");
     }
+    if (options.browserUseController !== undefined && options.browserUseController !== null) {
+      requireMethods(options.browserUseController, ["status", "create", "closeSession", "listTools", "callTool"], "BrowserUseController");
+    }
     if (typeof options.notificationSender !== "function"
       || typeof options.isSensitiveValue !== "function"
       || (options.getRuntimeContext !== undefined && typeof options.getRuntimeContext !== "function")
       || (options.getServiceStatus !== undefined && typeof options.getServiceStatus !== "function")
+      || (options.getProductHelpContext !== undefined && typeof options.getProductHelpContext !== "function")
+      || (options.requestBrowserUserInput !== undefined && typeof options.requestBrowserUserInput !== "function")
       || (options.onFatalError !== undefined && typeof options.onFatalError !== "function")
       || (options.now !== undefined && typeof options.now !== "function")
       || (options.randomUUID !== undefined && typeof options.randomUUID !== "function")
@@ -2058,6 +2357,9 @@ class McpProductToolController {
     this.kanbanRunService = options.kanbanRunService;
     this.cronStore = options.cronStore;
     this.workDispatcher = options.workDispatcher;
+    this.workspaceExecutionService = options.workspaceExecutionService || null;
+    this.getExecutionContract = options.getExecutionContract || null;
+    this.workspaceExecutionCalls = new Map();
     this.usageStore = options.usageStore || null;
     this.federationClient = options.federationClient || null;
     this.federationCoordinator = options.federationCoordinator || null;
@@ -2065,13 +2367,28 @@ class McpProductToolController {
     this.nativeMcpStore = options.nativeMcpStore || null;
     this.nativeMcpClientManager = options.nativeMcpClientManager || null;
     this.pluginRuntimeToolService = options.pluginRuntimeToolService || null;
+    this.pluginAuthoringService = options.pluginAuthoringService || null;
+    this.pluginQuickSetup = options.pluginQuickSetup || null;
+    this.requestPluginSecretInput = options.requestPluginSecretInput || null;
     this.inspirationService = options.inspirationService || null;
+    this.proactiveService = options.proactiveService || null;
+    this.learningService = options.learningService || null;
     this.conversationMemoryService = options.conversationMemoryService || null;
     this.conversationRecallService = options.conversationRecallService || null;
     this.conversationDefinitionService = options.conversationDefinitionService || null;
+    this.getGroupChatService = options.getGroupChatService || null;
+    if (options.onNativeGroupToolExposure !== undefined && typeof options.onNativeGroupToolExposure !== "function") throw new TypeError("onNativeGroupToolExposure must be a function");
+    this.onNativeGroupToolExposure = options.onNativeGroupToolExposure || null;
+    this.chatUiController = options.chatUiController || null;
     this.agentLifecycleService = options.agentLifecycleService || null;
     this.systemHostController = options.systemHostController || null;
     this.computerUseController = options.computerUseController || null;
+    this.browserUseController = options.browserUseController || null;
+    this.webService = options.webService || null;
+    this.webSettings = options.webSettings || null;
+    this.requestBrowserUserInput = options.requestBrowserUserInput || null;
+    this.appStateService = options.appStateService || null;
+    if (this.appStateService) requireMethods(this.appStateService, ["get"], "AppStateReadService");
     this.getServiceStatus = options.getServiceStatus || null;
     this.getRuntimeContext = options.getRuntimeContext || null;
     this.notificationSender = options.notificationSender;
@@ -2093,21 +2410,106 @@ class McpProductToolController {
     if (typeof this.permissionEngine.authorize !== "function") {
       throw new TypeError("McpProductToolController PermissionEngine 无效");
     }
+    this.hookService = options.hookService || null;
+    this.hookToolExecution = options.hookToolExecution || null;
     this.poisonError = null;
     this.notificationRunWindows = new Map();
     this.notificationProfileWindows = new Map();
     this.ephemeralCalls = new Map();
     this.executionContext = new (require("node:async_hooks").AsyncLocalStorage)();
+    this.productHelpService = new ProductHelpService({
+      toolRegistry: this.toolRegistry, permissionEngine: this.permissionEngine,
+      isNativeOnlyTool: isNativeOnlyMcpTool, now: this.now,
+      getRuntimeContext: (profileId, scope) => options.getProductHelpContext?.(profileId, scope?.runId),
+      getBackendStatuses: async () => (await this.#federationRequest("backend.status", {})).backends,
+      getServiceStatus: this.getServiceStatus,
+      toolAvailable: (name) => {
+        if (name === "workspace_execute") {
+          const runId = this.executionContext.getStore()?.runId;
+          return !!this.workspaceExecutionService && !!runId && !!this.getExecutionContract
+            && workspaceAutoExecution(this.getExecutionContract(runId));
+        }
+        if (isGroupChatAgentTool(name)) return !!this.getGroupChatService?.()?.agentAccess;
+        if (isChatUiMcpTool(name)) return this.chatUiController?.enabled() === true;
+        if (name === "app_state_get") return !!this.appStateService;
+        if (name === "runtime_context_get") return !!this.getRuntimeContext;
+        if (name.startsWith("inspiration_")) return !!this.inspirationService;
+        if (name.startsWith("native_agent_")) return !!this.agentLifecycleService;
+        if (isMemoryMcpTool(name)) return name.startsWith("conversation_") ? !!this.conversationRecallService : !!this.conversationMemoryService;
+        if (isDefinitionMcpTool(name)) return !!this.conversationDefinitionService;
+        if (name === "skill_install_global") return typeof this.skillStore?.installGlobalFromDirectory === "function";
+        if (name === "skill_file_read") return typeof this.skillStore?.readFile === "function";
+        if (name === "plugin_resource_read") return typeof this.skillStore?.readResource === "function";
+        if (["plugin_create", "plugin_install", "plugin_status"].includes(name)) return !!this.pluginAuthoringService;
+        if (PLUGIN_SETUP_TOOL_NAMES.includes(name)) return !!this.pluginQuickSetup
+          && (name !== "plugin_secret_request" || typeof this.requestPluginSecretInput === "function");
+        if (["skill_catalog", "skill_read"].includes(name)) return !!this.skillStore;
+        if (name === "skill_learn") return !!this.learningService;
+        if (name.startsWith("mcp_server_")) return !!this.nativeMcpStore
+          && (["mcp_server_tools", "mcp_server_call"].includes(name) ? !!this.nativeMcpClientManager : true);
+        if (name.startsWith("federation_")) return !!this.federationCoordinator;
+        if (name === "backend_status" || name === "external_cron_list") return !!this.federationClient;
+        if (WEB_PREFERENCE_TOOL_NAMES.has(name)) return !!this.webSettings;
+        if (HEARTBEAT_SETTINGS_TOOL_NAMES.has(name)) return !!this.proactiveService;
+        if (WEB_TOOL_NAMES.has(name)) return !!this.webService;
+        if (name.startsWith("browser_")) return !!this.browserUseController;
+        if (name.startsWith("computer_")) return !!this.computerUseController;
+        return true;
+      },
+    });
   }
 
   async handle(name, rawArgs, authority, executionScope) {
     if (executionScope) return this.executionContext.run(executionScope, () => this.handle(name, rawArgs, authority));
+    if (!validateAuthority(authority) || !validateMcpProductToolArguments(name, rawArgs)) throw toolError("MCP_TOOL_INVALID_ARGUMENTS");
+    rawArgs = splitActivityArguments(rawArgs).arguments;
+    const scope = this.executionContext.getStore();
+    const run = scope?.runId ? this.workDispatcher.getRun(scope.runId) : null;
+    if (this.hookToolExecution && run && !authority.federationClient && !["compaction", "proactive"].includes(run.source)
+      && !HOOK_TOOL_NAMES.includes(name) && name !== "mcp_server_call") {
+      const profile = this.#requireProfile(authority.profileId);
+      this.permissionEngine.authorize({ name, profileId: profile.id, profile, run, workspace: run.workspace,
+        confirmed: authority.confirmation === true });
+      try {
+        return await this.hookToolExecution.execute({ run, profile, tool: { scope: "product", name }, args: rawArgs,
+          scope, callId: authority.callId, validateArguments: args => validateMcpProductToolArguments(name, args) },
+        async (args, prepared) => {
+          let effectiveAuthority = authority;
+          if (prepared.changed && !prepared.requiresApproval && authority.confirmation === true) {
+            await this.hookToolExecution.approve(prepared.token);
+          }
+          this.hookToolExecution.assertCurrent(prepared.token);
+          return this.#handleCore(name, args, effectiveAuthority);
+        });
+      } catch (error) {
+        if (/^HOOK_[A-Z_]+$/u.test(error?.code || "")) throw serviceError(error.code, "Hook 规则未允许此操作或需要核对执行记录");
+        throw error;
+      }
+    }
+    return this.#handleCore(name, rawArgs, authority);
+  }
+
+  async #handleCore(name, rawArgs, authority) {
     this.executionContext.getStore()?.assertCurrent();
     if (!validateAuthority(authority) || !validateMcpProductToolArguments(name, rawArgs)
       || name === "request_user_input") {
       throw toolError("MCP_TOOL_INVALID_ARGUMENTS");
     }
+    rawArgs = splitActivityArguments(rawArgs).arguments;
     if (this.poisonError) throw this.poisonError;
+    const scope = this.executionContext.getStore();
+    const scopedRun = scope?.runId ? this.workDispatcher.getRun(scope.runId) : null;
+    if (scopedRun?.source === "proactive" && name !== "proactive_respond") throw toolError("MCP_TOOL_FORBIDDEN");
+    if (name === "proactive_respond") {
+      if (!scopedRun || scopedRun.source !== "proactive" || scopedRun.profileId !== authority.profileId
+        || rawArgs.runId !== scopedRun.id || !this.proactiveService) throw toolError("MCP_TOOL_FORBIDDEN");
+      this.permissionEngine.authorize({ name, profileId: authority.profileId, confirmed: false });
+      this.#assertSecretSafe(rawArgs.body);
+      this.#assertSecretSafe(rawArgs.reason);
+      if (rawArgs.scratch !== undefined) this.#assertSecretSafe(rawArgs.scratch);
+      try { const result = this.proactiveService.respond(scopedRun, rawArgs); scope.assertCurrent(); return safeJsonClone(result); }
+      catch { throw toolError("MCP_TOOL_STATE_CONFLICT"); }
+    }
     // External sessions bind a native product Profile for federation operations,
     // but never inherit that Profile's personal definitions, memory or desktop UI.
     if (authority.federationClient && isNativeOnlyMcpTool(name)) throw toolError("MCP_TOOL_FORBIDDEN");
@@ -2134,10 +2536,10 @@ class McpProductToolController {
       // memory_explain may include a verified transcript quote, so its result
       // also depends on the source session and event remaining visible.
       const readConversationRevision = (CONVERSATION_READ_TOOL_NAMES.has(name)
-        || name === "memory_explain")
+        || MEMORY_READ_TOOL_NAMES.has(name))
         ? this.conversationRecallService?.getVisibilityRevision?.(authority.profileId) ?? null
         : null;
-      const provenance = name === "memory_explain"
+      const provenance = name === "memory_explain" && !this.conversationMemoryService?.engine?.sharing?.recognizes(rawArgs.id)
         ? this.conversationMemoryService?.provenance : null;
       if (provenance && typeof provenance.getEvidenceRevision !== "function") {
         throw toolError("MCP_TOOL_UNAVAILABLE");
@@ -2164,6 +2566,10 @@ class McpProductToolController {
         // 已登记调用的 durable owner/binding 先于可变 Profile/Card 状态；否则响应丢失后
         // Profile 被禁用或实体被删除会破坏 exact replay / pending 对账。
         result = await this.#handleDurable(name, rawArgs, authority, fingerprint, memoryBinding);
+        if (CHAT_UI_MCP_WRITE_TOOLS.includes(name)) {
+          if (!this.chatUiController) throw toolError("MCP_TOOL_UNAVAILABLE");
+          result = this.chatUiController.revalidateResult(authority.profileId, result, this.executionContext.getStore());
+        }
         if (name === "memory_save" || name === "memory_forget") {
           if (typeof this.conversationMemoryService?.revalidateWriteResult !== "function") {
             throw toolError("MCP_TOOL_UNAVAILABLE");
@@ -2190,20 +2596,27 @@ class McpProductToolController {
         throw toolError("MCP_TOOL_STATE_CONFLICT");
       }
       if (readMemoryStore) {
-        const items = name === "memory_search" ? result?.items : [result?.item];
+        const items = Array.isArray(result?.items) ? result.items : [result?.item];
         const engine = this.conversationMemoryService?.engine;
         const now = engine?.now?.() ?? this.now();
-        if (typeof engine?.isReviewCommitted !== "function"
+        if (typeof engine?.isRecallCommitted !== "function"
           || !Array.isArray(items) || !Number.isSafeInteger(now)
           || items.some((item) => !item || item.status !== "active"
             || (item.validFrom !== undefined && item.validFrom > now)
             || (item.validUntil !== undefined && item.validUntil !== null
               && item.validUntil <= now)
-            || !engine.isReviewCommitted(authority.profileId, item))) {
+            || !engine.isRecallCommitted(authority.profileId, item))) {
           throw toolError("MCP_TOOL_STATE_CONFLICT");
         }
       }
+      if (MEMORY_READ_TOOL_NAMES.has(name) && this.conversationMemoryService?.revalidateReadResult) {
+        const run = await this.#currentInteractiveRun(rawArgs, authority);
+        result = this.conversationMemoryService.revalidateReadResult(authority.profileId, result, run);
+      }
       let safe = safeJsonClone(result);
+      if (LIVE_HELP_TOOL_NAMES.has(name)) this.permissionEngine.authorize({
+        name, profileId: authority.profileId, confirmed: false,
+      });
       this.executionContext.getStore()?.assertCurrent();
       if (name === "computer_snapshot") safe = compactComputerSnapshotForFrame(safe);
       const frame = JSON.stringify({ id: MAX_RESPONSE_ID_RESERVATION, ok: true, result: safe });
@@ -2250,8 +2663,8 @@ class McpProductToolController {
       if (existing.name !== name || existing.fingerprint !== fingerprint) {
         throw toolError("MCP_TOOL_STATE_CONFLICT");
       }
-      if (REVOCABLE_READ_TOOL_NAMES.has(name)
-        && (existing.settled || existing.policyRevision !== policyRevision)) {
+      if ((LIVE_HELP_TOOL_NAMES.has(name) && existing.settled) || (REVOCABLE_READ_TOOL_NAMES.has(name)
+        && (existing.settled || existing.policyRevision !== policyRevision))) {
         existing.settled = false;
         existing.policyRevision = policyRevision;
         const next = Promise.resolve().then(() => this.#routeEphemeral(name, args, authority))
@@ -2279,6 +2692,26 @@ class McpProductToolController {
     }
     const lookup = { profileId: authority.profileId, callId: authority.callId, name, fingerprint };
     let call = this.productStore.lookupMcpToolCall(lookup);
+    if (name === "workspace_execute") {
+      const binding = this.#workspaceExecutionBinding(authority);
+      if (call && canonicalJson(call.binding) !== canonicalJson(binding)) throw toolError("MCP_TOOL_FORBIDDEN");
+      if (call?.status !== "completed" && call && !this.workspaceExecutionCalls.has(call.id)) {
+        // A prior Service may have started this command. A pending receipt is
+        // an unknown outcome, never permission to replay an arbitrary script.
+        throw toolError("MCP_TOOL_STATE_CONFLICT");
+      }
+    }
+    if (name === "skill_learn") {
+      const scope = this.executionContext.getStore();
+      if (authority.federationClient || !scope?.runId || typeof scope.assertCurrent !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
+      scope.assertCurrent();
+      const run = this.#requireRun(scope.runId, authority.profileId);
+      if (!ACTIVE_RUN_STATUSES.has(run.status) || call && call.binding?.runId !== run.id) throw toolError("MCP_TOOL_FORBIDDEN");
+    }
+    if (GROUP_CHAT_AGENT_WRITE_TOOLS.includes(name) && call && call.binding?.callerKey !==
+      (authority.federationClient ? `external:${authority.federationClient}` : `native:${authority.profileId}`)) {
+      throw toolError("MCP_TOOL_FORBIDDEN");
+    }
     if (call && memoryBinding && canonicalJson(call.binding) !== canonicalJson(memoryBinding)) {
       throw toolError("MCP_TOOL_FORBIDDEN");
     }
@@ -2293,6 +2726,10 @@ class McpProductToolController {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
       call = this.productStore.beginMcpToolCall({ ...lookup, binding, createdAt });
+      if (name === "workspace_execute") {
+        if (canonicalJson(call.binding) !== canonicalJson(binding)) throw toolError("MCP_TOOL_FORBIDDEN");
+        if (call.status !== "completed" && !this.workspaceExecutionCalls.has(call.id)) this.workspaceExecutionCalls.set(call.id, null);
+      }
       if (memoryBinding && canonicalJson(call.binding) !== canonicalJson(memoryBinding)) {
         throw toolError("MCP_TOOL_FORBIDDEN");
       }
@@ -2304,11 +2741,16 @@ class McpProductToolController {
       const completed = this.productStore.completeMcpToolCall({
         id: call.id, outcome: { ok: true, result },
       });
+      if (name === "workspace_execute") this.workspaceExecutionCalls.delete(call.id);
       return this.#replayOutcome(completed.result);
     } catch (error) {
       // An effect may have been accepted while its caller was canceled. Keep
       // the durable receipt pending for reconciliation, never replay it blindly.
-      if (error?.code === "HOST_CAPABILITY_REVOKED") throw error;
+      if (error?.code === "HOST_CAPABILITY_REVOKED" || (name === "workspace_execute" && error?.code === "WORKSPACE_EXECUTION_CLEANUP_FAILED")
+        || (CHAT_UI_MCP_WRITE_TOOLS.includes(name) && error?.code === "UI_COMMIT_UNCERTAIN")) {
+        if (name === "workspace_execute") this.workspaceExecutionCalls.delete(call.id);
+        throw error;
+      }
       if (this.#isFatal(error)) throw error;
       const safe = mapToolError(error);
       // The lifecycle service retains these operations for recovery. Preserve
@@ -2323,6 +2765,7 @@ class McpProductToolController {
       } catch (completionError) {
         throw completionError;
       }
+      if (name === "workspace_execute") this.workspaceExecutionCalls.delete(call.id);
       return this.#replayOutcome(completed.result);
     }
   }
@@ -2343,6 +2786,7 @@ class McpProductToolController {
     const codeProbe = ownValue(error, "code");
     if (!codeProbe.ok) return true;
     const code = codeProbe.found && typeof codeProbe.value === "string" ? codeProbe.value : "";
+    if (code.startsWith("UI_")) return false;
     if (code.endsWith("COMMIT_UNCERTAIN") || code.endsWith("POISONED")) return true;
     for (const dependency of [this.productStore, this.kanbanStore]) {
       const probe = ownValue(dependency, "commitUncertain");
@@ -2392,6 +2836,20 @@ class McpProductToolController {
     return value;
   }
 
+  #workspaceExecutionBinding(authority) {
+    const scope = this.executionContext.getStore();
+    if (authority.federationClient || !scope?.runId || typeof scope.assertCurrent !== "function"
+      || !this.workspaceExecutionService || typeof this.getExecutionContract !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
+    scope.assertCurrent();
+    const run = this.#requireRun(scope.runId, authority.profileId);
+    const contract = this.getExecutionContract(run.id);
+    if (!ACTIVE_RUN_STATUSES.has(run.status) || !workspaceAutoExecution(contract)
+      || contract.runId !== run.id || contract.profileId !== authority.profileId || contract.workspace !== run.workspace) throw toolError("MCP_TOOL_FORBIDDEN");
+    this.permissionEngine.authorize({ name: "workspace_execute", profileId: authority.profileId,
+      profile: this.#requireProfile(authority.profileId), run, workspace: run.workspace });
+    return { runId: run.id, profileId: authority.profileId, workspace: run.workspace };
+  }
+
   async #currentInteractiveRun(args, authority) {
     if (!this.getRuntimeContext) throw toolError("MCP_TOOL_UNAVAILABLE");
     const context = await this.getRuntimeContext(authority.profileId, {
@@ -2407,6 +2865,18 @@ class McpProductToolController {
     }
     const run = this.#requireRun(context.runId, authority.profileId);
     if (!ACTIVE_RUN_STATUSES.has(run.status)) throw toolError("MCP_TOOL_STATE_CONFLICT");
+    return run;
+  }
+
+  async #groupDispatchRun(args, authority) {
+    if (authority.federationClient) {
+      if (args.source !== undefined || args.sourceId !== undefined) throw toolError("MCP_TOOL_FORBIDDEN");
+      return null; // External requests are attributed to the confirmed client, never the native default Agent.
+    }
+    if (args.source !== "chat" || !args.sourceId) throw toolError("MCP_TOOL_FORBIDDEN");
+    const run = await this.#currentInteractiveRun(args, authority);
+    if (run.source !== "chat" || isGroupChatRun(run)
+      || /^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey || "")) throw toolError("MCP_TOOL_FORBIDDEN");
     return run;
   }
 
@@ -2476,7 +2946,57 @@ class McpProductToolController {
     return agent;
   }
 
+  #managedNativeTarget(args) {
+    const { operation, arguments: input } = args;
+    let resource = null, kind = null, profileId = args.targetProfileId;
+    if (operation.startsWith("cron_") && operation !== "cron_create") { resource = this.cronStore.getJob(input.jobId); kind = "cron"; }
+    else if (operation === "kanban_board_update" || operation === "kanban_card_create") { resource = this.kanbanStore.getBoard(input.boardId); kind = "board"; }
+    else if (operation.startsWith("kanban_") && operation !== "kanban_board_create") { resource = this.kanbanStore.getCard(input.cardId); kind = "card"; }
+    if (kind && !resource) throw toolError("MCP_TOOL_NOT_FOUND");
+    if (resource) {
+      if (profileId !== null && profileId !== resource.profileId) throw toolError("MCP_TOOL_FORBIDDEN");
+      profileId = resource.profileId;
+      if (args.expectedRevision !== null && args.expectedRevision !== resourceRevision(kind, resource)) throw toolError("APP_MANAGE_RESOURCE_CHANGED");
+    }
+    const profile = this.productStore.getAgentProfile(profileId);
+    if (!profile || profile.id !== profileId || profile.backendId !== args.backendId) throw toolError("MCP_TOOL_NOT_FOUND");
+    if ((operation.endsWith("create") || ["cron_run_now", "cron_run_retry", "kanban_run_dispatch", "kanban_run_retry"].includes(operation))
+      && profile.enabled !== true) throw toolError("MCP_TOOL_FORBIDDEN");
+    return { profileId };
+  }
+
   async #preflightDurable(name, args, authority) {
+    if (name === "workspace_execute") return this.#workspaceExecutionBinding(authority);
+    if (name === "skill_learn") {
+      if (!this.learningService) throw toolError("MCP_TOOL_UNAVAILABLE");
+      return { runId: this.executionContext.getStore().runId };
+    }
+    if (GROUP_CHAT_AGENT_WRITE_TOOLS.includes(name)) {
+      const access = this.getGroupChatService?.()?.agentAccess;
+      if (!access) throw toolError("MCP_TOOL_UNAVAILABLE");
+      this.#assertSecretSafe(JSON.stringify(args));
+      const run = await this.#groupDispatchRun(args, authority);
+      return name === "group_chat_dispatch" ? access.prepareDispatch(args, authority, run?.id ?? null)
+        : access.prepareManagement(name, args, authority, run?.id ?? null);
+    }
+    if (CHAT_UI_MCP_WRITE_TOOLS.includes(name)) {
+      if (!this.chatUiController) throw toolError("MCP_TOOL_UNAVAILABLE");
+      return this.chatUiController.bind(name, args, authority, this.executionContext.getStore(), fingerprintMcpToolCall(name, args));
+    }
+    if (name === "app_manage") {
+      this.#assertSecretSafe(JSON.stringify(args));
+      const permissionName = args.operation === "kanban_card_archive" ? "kanban_card_update"
+        : args.operation === "kanban_card_delete" ? "kanban_card_update" : args.operation;
+      this.permissionEngine.authorize({ name: permissionName, profileId: authority.profileId, confirmed: authority.confirmation === true });
+      if (EXTERNAL_MANAGE_BACKENDS.has(args.backendId)) {
+        await this.#federationRequest("backend.require", { backendId: args.backendId });
+        return { profileId: null, innerBinding: null };
+      }
+      const target = this.#managedNativeTarget(args);
+      const innerBinding = args.operation === "kanban_card_archive" ? null : await this.#preflightDurable(
+        args.operation, args.arguments, { ...authority, profileId: target.profileId });
+      return { ...target, innerBinding };
+    }
     if (name === "native_agent_create") {
       await this.#currentInteractiveRun(args, authority);
       if (!this.agentLifecycleService) throw toolError("AGENT_SERVICE_CLOSED");
@@ -2645,6 +3165,32 @@ class McpProductToolController {
 
   async #route(name, args, authority, call) {
     this.executionContext.getStore()?.assertCurrent();
+    if (name === "workspace_execute") {
+      this.#workspaceExecutionBinding(authority);
+      let execution = this.workspaceExecutionCalls.get(call.id);
+      if (!execution) {
+        const scope = this.executionContext.getStore();
+        const run = this.#requireRun(scope.runId, authority.profileId);
+        const contract = this.getExecutionContract(run.id);
+        execution = Promise.resolve().then(() => this.workspaceExecutionService.execute({ contract, run, args,
+          scope: { ...scope, assertCurrent: () => {
+            scope.assertCurrent(); this.#workspaceExecutionBinding(authority);
+          } } }));
+        this.workspaceExecutionCalls.set(call.id, execution);
+      }
+      return execution;
+    }
+    if (isChatUiMcpTool(name)) {
+      if (!this.chatUiController) throw toolError("MCP_TOOL_UNAVAILABLE");
+      const scope = this.executionContext.getStore();
+      return name === "get_ui_state" ? this.chatUiController.getState(args, authority, scope)
+        : this.chatUiController.publish(name, args, authority, scope, call?.binding);
+    }
+    if (HOOK_TOOL_NAMES.includes(name)) {
+      if (!this.hookService) throw toolError("MCP_TOOL_UNAVAILABLE");
+      this.#assertSecretSafe(JSON.stringify(args));
+      return this.hookService.handleTool(name, args, authority, this.executionContext.getStore());
+    }
     if (name === "native_agent_create") {
       if (!this.agentLifecycleService || !call?.binding) throw toolError("AGENT_SERVICE_CLOSED");
       const result = await this.agentLifecycleService.handle("agent.create", {
@@ -2681,13 +3227,81 @@ class McpProductToolController {
       if (authority.federationClient) {
         projection.capabilities = projection.capabilities.filter((item) => !isNativeOnlyMcpTool(item.tool));
       }
+      projection.currentAgent = await this.productHelpService.currentCapabilities(authority, this.executionContext.getStore());
       return projection;
     }
+    if (name === "app_help_search") return searchProductHelp(args);
+    if (name === "app_help_get") return this.productHelpService.get(args, authority, this.executionContext.getStore());
     if (name === "app_status") {
       if (!this.getServiceStatus) throw toolError("MCP_TOOL_UNAVAILABLE");
       return { service: safeJsonClone(await this.getServiceStatus()) };
     }
+    if (name === "app_manage") {
+      this.#assertSecretSafe(JSON.stringify(args));
+      const permissionName = ["kanban_card_archive", "kanban_card_delete"].includes(args.operation) ? "kanban_card_update" : args.operation;
+      this.permissionEngine.authorize({ name: permissionName, profileId: authority.profileId, confirmed: authority.confirmation === true });
+      if (EXTERNAL_MANAGE_BACKENDS.has(args.backendId)) {
+        try { return await this.#federationRequest("app.manage", { ...args, operationId: call.operationId, createdAt: call.createdAt }); }
+        catch (error) { if (error?.code === "FEDERATION_COMMIT_UNCERTAIN") throw toolError("APP_MANAGE_OUTCOME_UNKNOWN"); throw error; }
+      }
+      if (!call.binding || !validOpaqueId(call.binding.profileId)) throw toolError("MCP_TOOL_RESPONSE_INVALID");
+      const store = args.operation.startsWith("cron_") ? this.cronStore : this.kanbanStore;
+      if (!store.getOperation?.(call.operationId)) {
+        const target = this.#managedNativeTarget(args);
+        if (target.profileId !== call.binding.profileId) throw toolError("MCP_TOOL_FORBIDDEN");
+      }
+      if (args.operation === "kanban_card_archive") return this.domainController.handle("kanban.card.archived.set", {
+        operationId: call.operationId, cardId: args.arguments.cardId, archived: args.arguments.archived, createdAt: call.createdAt,
+      });
+      return this.#route(args.operation, args.arguments, { ...authority, profileId: call.binding.profileId, auditProfileId: authority.profileId },
+        { ...call, binding: call.binding.innerBinding });
+    }
+    if (name === "app_state_get") {
+      if (!this.appStateService) throw toolError("MCP_TOOL_UNAVAILABLE");
+      const result = await this.appStateService.get(args, authority);
+      this.#assertSecretSafe(JSON.stringify(result));
+      return result;
+    }
     if (name === "profile_get") return sanitizeProfile(this.#requireProfile(authority.profileId));
+    if (isGroupChatAgentTool(name)) {
+      const access = this.getGroupChatService?.()?.agentAccess;
+      if (!access) throw toolError("MCP_TOOL_UNAVAILABLE");
+      this.#assertSecretSafe(JSON.stringify(args));
+      try {
+        let result;
+        if (GROUP_CHAT_AGENT_WRITE_TOOLS.includes(name)) {
+          const run = await this.#groupDispatchRun(args, authority);
+          if (!call?.binding || call.binding.runId !== (run?.id ?? null)) throw toolError("MCP_TOOL_FORBIDDEN");
+          const assertCurrent = () => this.executionContext.getStore()?.assertCurrent();
+          result = name === "group_chat_dispatch" ? access.dispatch(args, authority, call.binding, assertCurrent)
+            : await access.manage(name, args, authority, call.binding, assertCurrent);
+        } else result = await access.query(name, args, authority);
+        this.#assertSecretSafe(JSON.stringify(result));
+        return result;
+      } catch (error) {
+        const failure = require("./group-chat-agent-access").GroupChatAgentAccess.publicFailure(error);
+        if (failure) return failure;
+        throw error;
+      }
+    }
+    if (isGroupMcpTool(name)) {
+      const groupChat = this.getGroupChatService?.();
+      if (!groupChat) throw toolError("MCP_TOOL_UNAVAILABLE");
+      this.#assertSecretSafe(JSON.stringify(args));
+      // 原生回合按当前运行确定调用者；外部成员（D2）只凭本轮令牌，不用联邦绑定的原生 Profile。
+      let result;
+      if (authority.federationClient) {
+        if (!Object.hasOwn(args, "groupToken")) throw toolError("MCP_TOOL_FORBIDDEN");
+        result = await groupChat.callTool(name, args, null, null, authority.callId, authority.federationClient);
+      } else {
+        if (Object.hasOwn(args, "groupToken")) throw toolError("MCP_TOOL_FORBIDDEN");
+        const run = await this.#currentInteractiveRun(args, authority);
+        if (name === "group_collaborate") await this.onNativeGroupToolExposure?.({ profileId: authority.profileId, runId: run.id, name });
+        result = await groupChat.callTool(name, args, run, authority.profileId, authority.callId);
+      }
+      this.#assertSecretSafe(JSON.stringify(result));
+      return result;
+    }
     if (isDefinitionMcpTool(name)) {
       if (!this.conversationDefinitionService) throw toolError("MCP_TOOL_UNAVAILABLE");
       this.#assertSecretSafe(JSON.stringify(args));
@@ -2718,7 +3332,8 @@ class McpProductToolController {
         const run = await this.#currentInteractiveRun(args, authority);
         this.conversationRecallService.assertCaller({ profileId: authority.profileId, run });
         const result = name === "memory_get"
-          ? this.conversationMemoryService.get(authority.profileId, args.id, run)
+          ? (args.path ? this.conversationMemoryService.getFile(authority.profileId, args, run)
+            : this.conversationMemoryService.get(authority.profileId, args.id, run))
           : this.conversationMemoryService.explain(authority.profileId, args.id, run);
         this.#assertSecretSafe(JSON.stringify(result));
         return result;
@@ -2761,6 +3376,85 @@ class McpProductToolController {
       }
       return systemHostResult(name, value);
     }
+    if (HEARTBEAT_SETTINGS_TOOL_NAMES.has(name)) {
+      if (!this.proactiveService) throw toolError("MCP_TOOL_UNAVAILABLE");
+      const scope = this.executionContext.getStore();
+      const assertCurrent = () => {
+        if (!scope?.runId || typeof scope.assertCurrent !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
+        scope.assertCurrent();
+        const profile = this.#requireProfile(authority.profileId), run = this.#requireRun(scope.runId, profile.id);
+        if (!ACTIVE_RUN_STATUSES.has(run.status) || ["proactive", "compaction"].includes(run.source)) throw toolError("MCP_TOOL_FORBIDDEN");
+        this.permissionEngine.authorize({ name, profileId: profile.id, profile, run,
+          workspace: run.workspace, confirmed: authority.confirmation === true });
+      };
+      assertCurrent();
+      return this.proactiveService.handleSettingsTool(name, authority.profileId, args, {
+        operationId: "heartbeat-mcp-" + crypto.createHash("sha256").update(JSON.stringify([authority.profileId, authority.callId])).digest("hex"),
+        assertCurrent,
+      });
+    }
+    if (name === "skill_learn") {
+      if (!this.learningService) throw toolError("MCP_TOOL_UNAVAILABLE");
+      const scope = this.executionContext.getStore();
+      if (authority.federationClient || !scope?.runId || typeof scope.assertCurrent !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
+      scope.assertCurrent();
+      const profile = this.#requireProfile(authority.profileId), run = this.#requireRun(scope.runId, profile.id);
+      if (!ACTIVE_RUN_STATUSES.has(run.status)) throw toolError("MCP_TOOL_FORBIDDEN");
+      this.permissionEngine.authorize({ name, profileId: profile.id, profile, run,
+        workspace: run.workspace, confirmed: authority.confirmation === true });
+      return safeJsonClone(this.learningService.request(profile.id, run.id));
+    }
+    if (WEB_PREFERENCE_TOOL_NAMES.has(name)) {
+      if (!this.webSettings) throw toolError("MCP_TOOL_UNAVAILABLE");
+      const scope = this.executionContext.getStore();
+      const assertCurrent = () => {
+        if (!scope?.runId || typeof scope.assertCurrent !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
+        scope.assertCurrent();
+        const profile = this.#requireProfile(authority.profileId), run = this.#requireRun(scope.runId, profile.id);
+        if (!ACTIVE_RUN_STATUSES.has(run.status) || ["proactive", "compaction"].includes(run.source)) throw toolError("MCP_TOOL_FORBIDDEN");
+        this.permissionEngine.authorize({ name, profileId: profile.id, profile, run,
+          workspace: run.workspace, confirmed: authority.confirmation === true });
+      };
+      assertCurrent();
+      // Selector changes use CAS, like inspiration_growth_set. After an unknown
+      // result, read live settings; a stale retry cannot overwrite newer choices.
+      return this.webSettings.handleTool(name, authority.profileId, args, { assertCurrent });
+    }
+    if (WEB_TOOL_NAMES.has(name)) {
+      if (!this.webService) throw toolError("WEB_UNAVAILABLE");
+      this.#assertSecretSafe(JSON.stringify(args));
+      const scope = this.executionContext.getStore();
+      scope?.assertCurrent();
+      const result = await this.webService.call(name, args, { signal: scope?.signal, profileId: authority.federationClient ? null : authority.profileId });
+      scope?.assertCurrent();
+      return safeJsonClone(result);
+    }
+    if (BROWSER_MCP_TOOL_NAMES.has(name)) {
+      if (!this.browserUseController) throw toolError("BROWSER_SERVICE_UNAVAILABLE");
+      if (name === "browser_status") return safeJsonClone(await this.browserUseController.status(authority.profileId));
+      const run = await this.#currentInteractiveRun(args, authority);
+      const common = { profileId: authority.profileId, workRunId: run.id, sessionId: args.sessionId };
+      if (name === "browser_session_open") {
+        const session = await this.browserUseController.create({ profileId: authority.profileId, workRunId: run.id,
+          workspace: run.workspace });
+        return safeJsonClone({ ...session, sessionId: session.id });
+      }
+      if (name === "browser_session_close") return safeJsonClone(await this.browserUseController.closeSession(common));
+      if (name === "browser_session_wait_for_user") {
+        const scope = this.executionContext.getStore();
+        if (!scope || scope.runId !== run.id || typeof scope.assertCurrent !== "function"
+          || typeof this.requestBrowserUserInput !== "function"
+          || typeof this.browserUseController.waitForUser !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
+        this.#assertSecretSafe(args.instructions);
+        return safeJsonClone(await this.browserUseController.waitForUser(common, signal => {
+          scope.assertCurrent();
+          return this.requestBrowserUserInput({ run, scope, instructions: args.instructions,
+            signal: scope.signal ? AbortSignal.any([scope.signal, signal]) : signal });
+        }));
+      }
+      if (name === "browser_tool_list") return safeJsonClone(await this.browserUseController.listTools(common));
+      return safeJsonClone(await this.browserUseController.callTool({ ...common, toolName: args.toolName, arguments: args.arguments }));
+    }
     if (COMPUTER_TOOL_NAMES.has(name)) {
       if (!this.computerUseController) throw toolError("MCP_TOOL_UNAVAILABLE");
       if (name === "computer_status") {
@@ -2777,7 +3471,6 @@ class McpProductToolController {
           profileId: authority.profileId,
           workRunId: run.id,
           allowedApplications: args.allowedApplications,
-          expiresInSeconds: args.expiresInSeconds,
         }));
       }
       if (name === "computer_session_resume") {
@@ -2834,6 +3527,40 @@ class McpProductToolController {
           .filter((profile) => profile && typeof profile.id === "string")
           .map((profile) => profile.id),
       }));
+    }
+    if (["plugin_create", "plugin_install", "plugin_status"].includes(name)) {
+      if (!this.pluginAuthoringService) throw toolError("MCP_TOOL_UNAVAILABLE");
+      this.#assertSecretSafe(JSON.stringify(args));
+      const result = await this.pluginAuthoringService[
+        { plugin_create: "create", plugin_install: "install", plugin_status: "status" }[name]
+      ](args, authority);
+      this.#assertSecretSafe(JSON.stringify(result));
+      return safeJsonClone(result);
+    }
+    if (PLUGIN_SETUP_TOOL_NAMES.includes(name)) {
+      if (!this.pluginQuickSetup) throw toolError("MCP_TOOL_UNAVAILABLE");
+      this.#assertSecretSafe(JSON.stringify(args));
+      const request = { profileId: authority.profileId, installationId: args.installationId };
+      let result;
+      if (name === "plugin_setup_get") result = this.pluginQuickSetup.inspect(request);
+      else if (name === "plugin_activate") {
+        result = await this.pluginQuickSetup.activate({ ...request, releaseDigest: args.releaseDigest,
+          callId: authority.callId });
+      } else {
+        // The card is raised by the Service for the exact current Run; the
+        // typed value never returns through the Runtime or to the model.
+        const scope = this.executionContext.getStore();
+        const run = scope?.runId && !authority.federationClient ? this.#requireRun(scope.runId, authority.profileId) : null;
+        if (!run || !ACTIVE_RUN_STATUSES.has(run.status) || typeof scope.assertCurrent !== "function"
+          || typeof this.requestPluginSecretInput !== "function") throw toolError("PLUGIN_SECRET_INPUT_UNAVAILABLE");
+        result = await this.pluginQuickSetup.requestSecret({ ...request, name: args.name, reason: args.reason,
+          ask: card => {
+            scope.assertCurrent();
+            return this.requestPluginSecretInput({ run, scope, card, signal: scope.signal || null });
+          } });
+      }
+      this.#assertSecretSafe(JSON.stringify(result));
+      return safeJsonClone(result);
     }
     if (["mcp_server_list", "mcp_server_register", "mcp_server_tools",
       "mcp_server_call", "mcp_server_remove"].includes(name)) {
@@ -2897,9 +3624,27 @@ class McpProductToolController {
       }
       if (name === "mcp_server_call") {
         this.#assertSecretSafe(JSON.stringify(args.arguments));
-        const result = await this.nativeMcpClientManager.callTool(
-          args.serverId, args.toolName, safeJsonClone(args.arguments),
-        );
+        const scope = this.executionContext.getStore();
+        const run = scope?.runId ? this.workDispatcher.getRun(scope.runId) : null;
+        const signature = JSON.stringify(this.nativeMcpStore.get(args.serverId));
+        const nativeScope = scope ? { ...scope, assertCurrent: () => {
+          scope.assertCurrent();
+          if (signature !== JSON.stringify(this.nativeMcpStore.get(args.serverId))) throw serviceError("HOOK_TOOL_REVOKED", "MCP 工具所属配置已变化");
+        } } : null;
+        const contract = this.hookToolExecution && run && !authority.federationClient
+          ? (await this.nativeMcpClientManager.listTools(args.serverId)).find(tool => tool.name === args.toolName) : null;
+        nativeScope?.assertCurrent();
+        const invoke = async (callArgs, prepared) => {
+          if (prepared?.changed && !prepared.requiresApproval && authority.confirmation === true) await this.hookToolExecution.approve(prepared.token);
+          if (prepared) this.hookToolExecution.assertCurrent(prepared.token);
+          return this.nativeMcpClientManager.callTool(args.serverId, args.toolName, safeJsonClone(callArgs),
+            { assertCurrent: () => { nativeScope?.assertCurrent(); if (prepared) this.hookToolExecution.assertCurrent(prepared.token); } });
+        };
+        const result = this.hookToolExecution && run && !authority.federationClient
+          ? await this.hookToolExecution.execute({ run, profile: this.#requireProfile(authority.profileId),
+            tool: { scope: "native_mcp", name: args.toolName, serverId: args.serverId },
+            args: args.arguments, scope: nativeScope, callId: authority.callId, validateArguments: callArgs => validateHookToolArguments(contract?.inputSchema, callArgs) }, invoke)
+          : await invoke(args.arguments);
         this.#assertSecretSafe(JSON.stringify(result));
         return { serverId: args.serverId, toolName: args.toolName, result: safeJsonClone(result) };
       }
@@ -2909,11 +3654,12 @@ class McpProductToolController {
       await this.nativeMcpClientManager.closeServer(args.id);
       return safeJsonClone(result);
     }
-    if (name === "skill_catalog" || name === "skill_read") {
+    if (["skill_catalog", "skill_read", "skill_file_read", "plugin_resource_read"].includes(name)) {
       if (!this.skillStore) throw toolError("MCP_TOOL_UNAVAILABLE");
       const profile = this.#requireProfile(authority.profileId);
       const projection = this.permissionEngine.profileProjection(authority.profileId);
       const options = {
+        ...(this.executionContext.getStore()?.runId ? { runId: this.executionContext.getStore().runId } : {}),
         availableTools: projection.tools.filter((tool) => tool.enabled).map((tool) => tool.name),
         allowedTools: projection.tools.filter((tool) => tool.enabled && tool.effect !== "deny").map((tool) => tool.name),
         // A federation client is authenticated as a client, not as the native
@@ -2925,12 +3671,17 @@ class McpProductToolController {
           : ["grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness"]
             .includes(profile.runtime)
             ? ["mcp", "filesystem", "shell"] : [],
+        pluginToolProjection: !authority.federationClient
+          && typeof this.pluginRuntimeToolService?.skillToolProjection === "function"
+          ? this.pluginRuntimeToolService.skillToolProjection(
+            authority, this.executionContext.getStore()) : [],
       };
       const catalog = this.skillStore.catalog(authority.profileId, options);
       if (name === "skill_catalog") {
         const query = typeof args.query === "string" ? args.query.trim().toLocaleLowerCase() : "";
         const words = query.split(/\s+/u).filter(Boolean);
-        const matches = words.length === 0 ? catalog.items : catalog.items
+        const visible = [...catalog.items, ...catalog.ineligible];
+        const matches = words.length === 0 ? visible : visible
           .map((skill) => {
             const title = skill.name.toLocaleLowerCase();
             const body = `${title} ${skill.description}`.toLocaleLowerCase();
@@ -2952,10 +3703,15 @@ class McpProductToolController {
           contentHash: skill.contentHash,
           requiredTools: skill.requiredTools,
           requiredRuntimeCapabilities: skill.requiredRuntimeCapabilities,
+          eligible: skill.eligible !== false,
+          reason: skill.reason || skill.ineligibleReason || null,
+          dependency: skill.dependency || null,
+          assessment: skill.assessment || "declared_dependencies_only",
         }));
         const nextCursor = args.cursor + items.length;
         return {
           registryRevision: catalog.registryRevision,
+          ...(Number.isSafeInteger(catalog.registryVersion) ? { registryVersion: catalog.registryVersion } : {}),
           profileRevision: catalog.profileRevision,
           items,
           nextCursor,
@@ -2966,12 +3722,21 @@ class McpProductToolController {
         skill.name === args.name && skill.contentHash === args.contentHash
       ));
       if (!selected) throw toolError("MCP_TOOL_NOT_FOUND");
-      const skill = this.skillStore.read({
-        profileId: authority.profileId,
-        name: args.name,
-        contentHash: args.contentHash,
-        recordUsage: args.cursor === 0,
-      });
+      if (name === "skill_file_read" && typeof this.skillStore.readFile !== "function"
+        || name === "plugin_resource_read" && typeof this.skillStore.readResource !== "function") {
+        throw toolError("MCP_TOOL_UNAVAILABLE");
+      }
+      const skill = name === "skill_file_read"
+        ? this.skillStore.readFile({ profileId: authority.profileId,
+          name: args.name, contentHash: args.contentHash,
+          relativePath: args.relativePath, ...options })
+        : name === "plugin_resource_read"
+          ? this.skillStore.readResource({ profileId: authority.profileId,
+            name: args.name, contentHash: args.contentHash,
+            relativePath: args.relativePath, ...options })
+        : this.skillStore.read({ profileId: authority.profileId,
+          name: args.name, contentHash: args.contentHash,
+          recordUsage: args.cursor === 0, ...options });
       const points = [...skill.content];
       if (args.cursor > points.length) throw toolError("MCP_TOOL_INVALID_ARGUMENTS");
       let content = "";
@@ -2992,6 +3757,9 @@ class McpProductToolController {
         version: skill.version,
         source: skill.source,
         contentHash: skill.contentHash,
+        ...(["skill_file_read", "plugin_resource_read"].includes(name) ? {
+          relativePath: skill.relativePath, fileHash: skill.fileHash,
+        } : {}),
         content,
         nextCursor,
         hasMore: nextCursor < points.length,
@@ -3122,7 +3890,7 @@ class McpProductToolController {
         operationId: call.operationId,
         cardId: args.cardId,
         authorType: "agent",
-        authorId: authority.profileId,
+        authorId: authority.auditProfileId || authority.profileId,
         body: args.body,
         createdAt: call.createdAt,
       });
@@ -3202,8 +3970,8 @@ class McpProductToolController {
         misfirePolicy: args.misfirePolicy,
         maxCatchUp: args.maxCatchUp,
         overlapPolicy: args.overlapPolicy,
-        threadPolicy: args.threadPolicy,
-        threadId: args.threadId,
+        threadPolicy: args.threadPolicy ?? "continue",
+        threadId: args.threadId ?? null,
         createdAt: call.createdAt,
       }));
     }
@@ -3374,12 +4142,14 @@ class McpProductToolController {
   async #sendNotification(runValue, args, authority) {
     this.#consumeNotificationQuota(authority.profileId, runValue.id);
     try {
-      await this.notificationSender(Object.freeze({
+      const receipt = await this.notificationSender(Object.freeze({
         profileId: authority.profileId,
         runId: runValue.id,
+        category: runValue.source === "cron" ? "cron" : runValue.source === "chat" ? "chat" : "task",
         title: args.title,
         body: args.body,
       }));
+      if (receipt?.state === "suppressed") return { delivered: false };
     } catch {
       throw toolError("NOTIFICATION_FAILED");
     }
@@ -3786,6 +4556,7 @@ module.exports = {
   PUBLIC_MESSAGES,
   McpProductToolController,
   assertValidDownstreamMcpTools,
+  explainMcpProductToolArguments,
   fingerprintMcpToolCall,
   isNativeOnlyMcpTool,
   sanitizeMcpProfile: sanitizeProfile,

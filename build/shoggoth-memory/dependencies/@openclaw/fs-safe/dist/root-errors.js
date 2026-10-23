@@ -1,0 +1,147 @@
+import { FsSafeError } from "./errors.js";
+import { hasNodeErrorCode, isNodeError, isNotFoundPathError } from "./path.js";
+const REMOVE_NOT_EMPTY_CODES = new Set(["ENOTEMPTY", "EEXIST"]);
+const PINNED_WRITE_ERRNO_MESSAGES = new Map([
+    ["EACCES", "permission denied"],
+    ["EPERM", "permission denied"],
+    ["EROFS", "read-only filesystem"],
+    ["ENOSPC", "no space left on device"],
+]);
+export function fileNotFoundError(cause, details) {
+    return cause === undefined
+        ? new FsSafeError("not-found", "file not found", { details })
+        : new FsSafeError("not-found", "file not found", { cause, details });
+}
+export function outsideWorkspaceError() {
+    return new FsSafeError("outside-workspace", "file is outside workspace root");
+}
+export function rootPathChangedError(cause) {
+    return new FsSafeError("path-mismatch", "root path changed during operation", { cause });
+}
+export function directoryComponentNotDirectoryError(cause) {
+    return cause === undefined
+        ? new FsSafeError("not-file", "directory component must be a directory")
+        : new FsSafeError("not-file", "directory component must be a directory", { cause });
+}
+export function hardlinkedPathNotAllowedError() {
+    return new FsSafeError("hardlink", "hardlinked path not allowed");
+}
+export function isAlreadyExistsError(error) {
+    return hasNodeErrorCode(error, "EEXIST") || /File exists|EEXIST/i.test(String(error));
+}
+function resourceExhaustion(error) {
+    const pending = [error];
+    let details;
+    let code;
+    const seen = new Set();
+    while (pending.length) {
+        const current = pending.pop();
+        if (!(current instanceof Error) || seen.has(current))
+            continue;
+        seen.add(current);
+        // Keep boundary/policy failures primary, including combined failures.
+        if (current instanceof FsSafeError && current.code !== "helper-failed" && current.code !== "not-removable")
+            return;
+        const diagnostic = current;
+        if (current instanceof FsSafeError && (!details || current.details?.cleanup))
+            details = current.details ?? details;
+        if (diagnostic.code === "EMFILE" || diagnostic.code === "ENFILE") {
+            if (!code || code === "ENOSPC")
+                code = diagnostic.code;
+        }
+        else if (diagnostic.code === "ENOSPC")
+            code ??= diagnostic.code;
+        if (diagnostic.name === "SuppressedError")
+            pending.push(diagnostic.suppressed, diagnostic.error);
+        if (current instanceof AggregateError)
+            pending.push(...current.errors);
+        pending.push(current.cause);
+    }
+    if (!code)
+        return;
+    // Disk-space diagnostics retain the published direct-write code and already-classified errors.
+    if (code === "ENOSPC" && error instanceof FsSafeError)
+        return;
+    const cleanup = details?.cleanup;
+    const publication = details?.publication;
+    const preserved = cleanup?.status === "preserved" && publication?.status === "indeterminate";
+    const message = code === "ENOSPC" ? PINNED_WRITE_ERRNO_MESSAGES.get(code) : "filesystem write failed: too many open files";
+    return new FsSafeError(code === "ENOSPC" ? "invalid-path" : "helper-failed", `${message} (${code})${preserved ? "; publication outcome is indeterminate; staged file preserved" : ""}`, { cause: error, details });
+}
+export function normalizePinnedWriteError(error) {
+    const exhausted = resourceExhaustion(error);
+    if (exhausted)
+        return exhausted;
+    // Disposal retains cleanup evidence, but the failed publication remains primary.
+    let primary = error;
+    const seen = new Set();
+    try {
+        while (primary instanceof Error && primary.name === "SuppressedError" && !seen.has(primary)) {
+            seen.add(primary);
+            primary = primary.suppressed;
+        }
+        if (primary !== error && primary instanceof FsSafeError && primary.details?.phase === "publish") {
+            return new FsSafeError(primary.code, primary.message, { cause: error, details: primary.details });
+        }
+    }
+    catch { /* Unreadable diagnostics retain the original failure. */ }
+    if (error instanceof FsSafeError) {
+        return error;
+    }
+    if (isNotFoundPathError(error)) {
+        return fileNotFoundError(error instanceof Error ? error : undefined);
+    }
+    const code = isNodeError(error) && typeof error.code === "string" && /^E[A-Z0-9_]+$/.test(error.code)
+        ? error.code : undefined;
+    const message = code
+        ? `${PINNED_WRITE_ERRNO_MESSAGES.get(code) ?? "filesystem write failed"} (${code})`
+        : "path is not a regular file under root";
+    return new FsSafeError("invalid-path", message, errorCauseOptions(error));
+}
+export function normalizePinnedPathError(error, details) {
+    if (error instanceof FsSafeError) {
+        return error;
+    }
+    return new FsSafeError("path-alias", "path is not under root", {
+        cause: error instanceof Error ? error : undefined,
+        details,
+    });
+}
+export function normalizeRemoveGuardError(error, details) {
+    if (error instanceof FsSafeError) {
+        return error;
+    }
+    if (isNotFoundPathError(error)) {
+        return fileNotFoundError(error instanceof Error ? error : undefined, details);
+    }
+    return normalizePinnedPathError(error, details);
+}
+export function normalizeRemovePathError(error, details) {
+    if (error instanceof FsSafeError) {
+        return error;
+    }
+    if (!isNodeError(error) || typeof error.code !== "string") {
+        return normalizePinnedPathError(error, details);
+    }
+    const cause = error instanceof Error ? error : undefined;
+    if (isNotFoundPathError(error)) {
+        return fileNotFoundError(cause, details);
+    }
+    if (REMOVE_NOT_EMPTY_CODES.has(error.code)) {
+        return new FsSafeError("not-empty", "directory is not empty", { cause, details });
+    }
+    return new FsSafeError("not-removable", "path could not be removed", { cause, details });
+}
+export function throwFsSafeReadError(error, label) {
+    if (error instanceof FsSafeError) {
+        throw error;
+    }
+    if (isNodeError(error)) {
+        throw new FsSafeError("read-failed", `${label} target could not be read`, { cause: error });
+    }
+    throw error;
+}
+/** Existing boundaries retain only Error instances as their cause. */
+export function errorCauseOptions(error) {
+    return { cause: error instanceof Error ? error : undefined };
+}

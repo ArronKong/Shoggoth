@@ -6,6 +6,10 @@ const path = require("node:path");
 
 const ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
+const GRAPH_READ_ONLY_IDS = new Set(["outlook-calendar", "outlook-email", "sharepoint", "teams"]);
+const LOVABLE_OFFICIAL_ID = "lovable";
+const SLACK_OFFICIAL_ID = "slack";
+const GMAIL_GOGCLI_ID = "gmail";
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
 const MIXPANEL_SETUP_REFERENCES = Object.freeze([
   { link: "../mixpanelyst/references/analytical-frameworks.md",
@@ -129,6 +133,11 @@ class BundledPluginCatalog {
       components: item.components, converted: item.converted,
       unconvertedMcp: item.unconvertedMcp,
       importStatus: item.importStatus,
+      ...(GRAPH_READ_ONLY_IDS.has(item.id) ? { localAdapter: "shoggoth-graph-read-only" } : {}),
+      ...(item.id === LOVABLE_OFFICIAL_ID ? { localAdapter: "shoggoth-lovable-official-mcp" } : {}),
+      ...(item.id === SLACK_OFFICIAL_ID ? { localAdapter: "shoggoth-slack-official-mcp" } : {}),
+      ...(item.id === GMAIL_GOGCLI_ID ? { localAdapter: "shoggoth-gogcli-gmail-mcp" } : {}),
+      ...(item.id === "codex-security" ? { localAdapter: "shoggoth-codex-security-native" } : {}),
     })) };
   }
 
@@ -143,7 +152,12 @@ class BundledPluginCatalog {
       category: item.category, version: item.version, iconAvailable: item.icon !== null,
       license: item.license, components: item.components, converted: item.converted,
       unconvertedMcp: item.unconvertedMcp, importStatus: item.importStatus,
-      ...item.details, sourceWarnings: sourceWarnings(this.packagePath(id), item) };
+      ...item.details, sourceWarnings: sourceWarnings(this.packagePath(id), item),
+      ...(GRAPH_READ_ONLY_IDS.has(id) ? { localAdapter: "shoggoth-graph-read-only" } : {}),
+      ...(id === LOVABLE_OFFICIAL_ID ? { localAdapter: "shoggoth-lovable-official-mcp" } : {}),
+      ...(id === SLACK_OFFICIAL_ID ? { localAdapter: "shoggoth-slack-official-mcp" } : {}),
+      ...(id === GMAIL_GOGCLI_ID ? { localAdapter: "shoggoth-gogcli-gmail-mcp" } : {}),
+      ...(id === "codex-security" ? { localAdapter: "shoggoth-codex-security-native" } : {}) };
   }
 
   packagePath(id) {

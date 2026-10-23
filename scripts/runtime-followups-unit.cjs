@@ -10,7 +10,7 @@ const { RuntimeQueueClock, RuntimeTelemetry } = require("../app/agent-service/ru
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const policy = { sandbox: "danger-full-access", approvalPolicy: "never" };
 const binding = { runtime: "ext-fixture", runtimeProfileId: "fixture-profile", runtimeAccountId: "fixture-account" };
-function fixture() { const root = fs.mkdtempSync("/tmp/runtime-followups-");
+function fixture() { const root = fs.realpathSync(fs.mkdtempSync("/tmp/runtime-followups-"));
   return { root, paths: resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     cacheRoot: path.join(root, "cache"), profileRoot: path.join(root, "profile") }), cleanup: () => fs.rmSync(root, { recursive: true, force: true }) }; }
 function signed(transport) {
@@ -123,6 +123,8 @@ for (const transport of ["stdio", "acp"]) test(`an explicitly installed signed $
       runtime: binding.runtime, runtimeProfileId: "extension-runtime-profile", runtimeAccountId: "extension-ext-fixture",
       isDefault: false, enabled: true, defaultModel: null, defaultCwd: f.root, permissionPolicy: policy });
     service.agentDefinitionStore.ensureProfile({ profileId: profile.id, profileName: profile.name });
+    // As Agent lifecycle initialization does: Shoggoth Memory must own the Profile before a send.
+    service.memoryStore.ensureProfile(profile.id);
     const session = service.chatSessionStore.createSession({ operationId: "extension-create", profileId: profile.id, workspace: f.root, createdAt: Date.now() });
     const ack = await service.workRunCoordinator.send({ sessionKey: session.sessionKey, operationId: "extension-send", prompt: "fixture task" });
     let timer;

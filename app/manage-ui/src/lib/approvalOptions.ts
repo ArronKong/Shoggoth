@@ -40,10 +40,26 @@ export function approvalOptionLabel(option: InteractiveApprovalOption, t: Transl
   const label = t(key);
   const alternatives = peers.filter((item) => labelKey(item) === key);
   if (alternatives.length < 2) return label;
-  // Number different native rules that share a preset. The existing hover text
-  // preserves their original scope, and each button retains its own choice.
-  const index = alternatives.findIndex((item) => item.choice === option.choice);
-  return index < 0 ? label : `${label} (${index + 1})`;
+  // A runtime can encode different answers or rules with the same approval kind.
+  // Keep their meaning visible instead of replacing it with numbered presets.
+  return option.label;
+}
+
+export function approvalOptionsNeedSelection(options: InteractiveApprovalOption[]): boolean {
+  const keys = options.filter((option) => option.kind.startsWith("allow_")).map(labelKey);
+  return new Set(keys).size < keys.length;
+}
+
+/** A choice as its control reads, never the internal choice id. */
+export function approvalChoiceLabel(choice: string, t: Translate,
+  options: InteractiveApprovalOption[] = [], permissions = false): string {
+  const option = options.find((item) => item.choice === choice);
+  if (option) return approvalOptionLabel(option, t, options);
+  return choice === "once" ? t(permissions ? "chat.promptAllowTurn" : "chat.promptAllowOnce")
+    : choice === "session" ? t("chat.promptAllowSession")
+      : choice === "always" ? t("chat.promptAllowAlways")
+        : choice === "deny" ? t("chat.promptDenyOperation")
+          : choice === "cancel" ? t("common.cancel") : choice;
 }
 
 export function approvalOptionHint(option: InteractiveApprovalOption, t: Translate): string {
@@ -54,5 +70,6 @@ export function approvalOptionHint(option: InteractiveApprovalOption, t: Transla
     session_files: "chat.promptSessionFilesScopeHint",
     all_operations: "chat.promptAllOperationsScopeHint",
   }[scope];
-  return key ? t(key) : option.label;
+  if (key) return t(key);
+  return option.kind === "allow_always" ? `${option.label}\n${t("chat.promptAlwaysScopeHint")}` : option.label;
 }

@@ -75,7 +75,24 @@ class NativeCodexAuth {
   }
 
   async read({ refreshToken = false, previousAccountId = null } = {}) {
-    if (this.closed || this.cleanupIncomplete) throw authUnavailable();
+    // A stopped reader or unverified process cleanup says nothing about the
+    // user's credentials. Keep these operational failures distinct from logout.
+    if (this.closed) throw serviceError("CODEX_NATIVE_AUTH_READ_FAILED", "Codex auth reader is stopped");
+    if (this.cleanupIncomplete) {
+      if (!this.cleanupVerification) {
+        const host = this.host;
+        this.cleanupVerification = Promise.resolve().then(() => host?.confirmStoppedCleanup?.())
+          .then(confirmed => {
+            if (confirmed === true && this.host === host && host.cleanupIncomplete === false && host.child === null && host.rpc === null) {
+              this.cleanupIncomplete = false;
+              this.host = null;
+            }
+          }).catch(() => {}).finally(() => { this.cleanupVerification = null; });
+      }
+      await this.cleanupVerification;
+      if (this.cleanupIncomplete) throw serviceError("CODEX_RUNTIME_CLEANUP_INCOMPLETE", "Codex auth process cleanup failed");
+      if (this.closed) throw serviceError("CODEX_NATIVE_AUTH_READ_FAILED", "Codex auth reader is stopped");
+    }
     // Share an in-flight read across Profiles. A forced refresh must not be
     // satisfied by a concurrent metadata read that still has the rejected JWT.
     if (this.pending) {
@@ -96,8 +113,9 @@ class NativeCodexAuth {
 
   _matching(tokens, previousAccountId) {
     const expectedAccountId = previousAccountId || this.accountId;
-    if (this.closed || (tokens && expectedAccountId
-      && tokens.chatgptAccountId !== expectedAccountId)) throw authUnavailable();
+    if (this.closed) throw serviceError("CODEX_NATIVE_AUTH_READ_FAILED", "Codex auth reader is stopped");
+    if (tokens && expectedAccountId
+      && tokens.chatgptAccountId !== expectedAccountId) throw authUnavailable();
     return tokens;
   }
 
@@ -143,7 +161,7 @@ class NativeCodexAuth {
     this.host = host;
     try {
       await host.initialize();
-      if (this.closed) throw authUnavailable();
+      if (this.closed) throw serviceError("CODEX_NATIVE_AUTH_READ_FAILED", "Codex auth reader is stopped");
       let tokens = this._matching(await host.readNativeChatGptTokens(false), previousAccountId);
       if (tokens && (refreshToken || tokens.expiresAt <= this.now() + REFRESH_MARGIN_MS)) {
         tokens = this._matching(await host.readNativeChatGptTokens(true), previousAccountId);
@@ -151,10 +169,15 @@ class NativeCodexAuth {
       return tokens && tokens.expiresAt > this.now() ? tokens : null;
     } finally {
       try { await host.stop(); } catch {
-        this.cleanupIncomplete = true;
-        throw serviceError("CODEX_RUNTIME_CLEANUP_INCOMPLETE", "Codex auth process cleanup failed");
+        // stop() may reject after the process and its group have been reaped
+        // (for example an RPC shutdown error). Only unverified cleanup blocks
+        // later readers; never turn a transient transport error into a latch.
+        this.cleanupIncomplete = !(host.cleanupIncomplete === false && host.child === null && host.rpc === null);
+        throw this.cleanupIncomplete
+          ? serviceError("CODEX_RUNTIME_CLEANUP_INCOMPLETE", "Codex auth process cleanup failed")
+          : serviceError("CODEX_NATIVE_AUTH_READ_FAILED", "Codex auth status is temporarily unavailable");
       } finally {
-        if (this.host === host) this.host = null;
+        if (this.host === host && !this.cleanupIncomplete) this.host = null;
       }
     }
   }

@@ -51,7 +51,6 @@ test("AccountAuthStateStore 模块与固定非敏感状态路径可用", () => {
   assert.ifError(moduleLoadError);
   assert.equal(typeof AccountAuthStateStore, "function");
   const paths = fixturePaths();
-  assert.equal(paths.accountAuthStatePath, path.join(paths.stateDir, "account-auth-state.json"));
   assert.equal(paths.accountAuthStateV2Path, path.join(paths.stateDir, "account-auth-state-v2.json"));
 });
 
@@ -99,110 +98,6 @@ test("状态容器仅保存严格非敏感摘要并以 0600 原子跨重启恢�
   assert.deepEqual(third.get("runtime-auth"), restarted.get("runtime-auth"));
   assert.equal(fs.readFileSync(paths.accountAuthStateV2Path, "utf8"), afterRecovery);
   await third.close();
-});
-
-test("v1 Profile 状态只读保留并确定性合并为 v2 Account 状态", async () => {
-  const paths = fixturePaths("shoggoth-account-v1-migration-");
-  fs.mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
-  const legacy = {
-    version: 1,
-    revision: 7,
-    sessions: {
-      "profile-newer": {
-        requestId: "request-newer",
-        runtimeProfileId: "profile-newer",
-        mode: "deviceCode",
-        status: "waiting",
-        createdAt: 200,
-        updatedAt: 300,
-        errorCode: null,
-      },
-      "profile-older": {
-        requestId: "request-older",
-        runtimeProfileId: "profile-older",
-        mode: "browser",
-        status: "succeeded",
-        createdAt: 100,
-        updatedAt: 150,
-        errorCode: null,
-      },
-      "profile-separate": {
-        requestId: "request-separate",
-        runtimeProfileId: "profile-separate",
-        mode: "browser",
-        status: "failed",
-        createdAt: 120,
-        updatedAt: 160,
-        errorCode: "LOGIN_START_FAILED",
-      },
-    },
-  };
-  const legacyBytes = `${JSON.stringify(legacy)}\n`;
-  fs.writeFileSync(paths.accountAuthStatePath, legacyBytes, { mode: 0o600 });
-
-  const store = new AccountAuthStateStore({
-    paths,
-    now: () => 350,
-    resolveRuntimeAccountId(runtimeProfileId) {
-      return runtimeProfileId === "profile-separate" ? "account-separate" : "account-shared";
-    },
-  });
-  store.open();
-  assert.deepEqual(store.list(), [{
-    requestId: "request-separate",
-    runtimeAccountId: "account-separate",
-    mode: "browser",
-    status: "failed",
-    createdAt: 120,
-    updatedAt: 160,
-    errorCode: "LOGIN_START_FAILED",
-  }, {
-    requestId: "request-newer",
-    runtimeAccountId: "account-shared",
-    mode: "deviceCode",
-    status: "interrupted",
-    createdAt: 200,
-    updatedAt: 350,
-    errorCode: "SERVICE_RESTARTED",
-  }]);
-  assert.equal(fs.readFileSync(paths.accountAuthStatePath, "utf8"), legacyBytes);
-  assert.deepEqual(JSON.parse(fs.readFileSync(paths.accountAuthStateV2Path, "utf8")), {
-    version: 2,
-    revision: 8,
-    sessions: Object.fromEntries(store.list().map((session) => [session.runtimeAccountId, session])),
-  });
-  await store.close();
-
-  const reopened = new AccountAuthStateStore({ paths });
-  reopened.open();
-  assert.equal(reopened.get("account-shared").status, "interrupted");
-  assert.equal(fs.readFileSync(paths.accountAuthStatePath, "utf8"), legacyBytes);
-  await reopened.close();
-});
-
-test("v1 存在但缺少 Profile→Account resolver 时 fail closed 且不创建 v2", () => {
-  const paths = fixturePaths("shoggoth-account-v1-no-resolver-");
-  fs.mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(paths.accountAuthStatePath, `${JSON.stringify({
-    version: 1,
-    revision: 1,
-    sessions: {
-      "profile-only": {
-        requestId: "request-only",
-        runtimeProfileId: "profile-only",
-        mode: "browser",
-        status: "succeeded",
-        createdAt: 1,
-        updatedAt: 2,
-        errorCode: null,
-      },
-    },
-  })}\n`, { mode: 0o600 });
-  assert.throws(
-    () => new AccountAuthStateStore({ paths }).open(),
-    (error) => error.code === "AUTH_STATE_MIGRATION_RESOLVER_REQUIRED",
-  );
-  assert.equal(fs.existsSync(paths.accountAuthStateV2Path), false);
 });
 
 test("状态文件损坏、symlink 与 hardlink 均 fail closed 并保留证据", () => {
@@ -1209,10 +1104,10 @@ test("Service 默认 auth invalidator 会停止共享 RuntimeAccount 且不波�
   service.accountAuthManager.open();
   try {
     ensureBuiltinCliAgentProfiles(productStore, new Set(Object.values(
-      require("../app/agent-service/runtime-account").DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME)));
+      require("../app/agent-service/runtime-account").DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME)), { isSeeded: () => false, markSeeded() {} });
     const defaultProfile = productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
-    const nativeCodexProfile = productStore.listAgentProfiles()
-      .find((profile) => profile.backendId === "codex");
+    const nativeCodexProfile = productStore.listAgentProfiles().find((profile) => profile.runtimeAccountId
+      === require("../app/agent-service/runtime-account").NATIVE_CODEX_RUNTIME_ACCOUNT_ID);
     assert.ok(nativeCodexProfile);
     const peer = productStore.putAgentProfile({
       ...defaultProfile,

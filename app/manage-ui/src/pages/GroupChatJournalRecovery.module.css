@@ -1,0 +1,5 @@
+.root { min-width: 0; overflow-wrap: anywhere; }
+.root > p { margin: 10px 0; color: var(--muted); }
+.root article { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 12px; }
+.root small { display: block; color: var(--muted); margin: 6px 0; }
+.root textarea { display: block; width: 100%; box-sizing: border-box; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: inherit; resize: vertical; }

@@ -68,8 +68,9 @@ export function supportsBackendSlash(
 const LIVE_CHAT_STATES = new Set(["delta", "interim", "thinking", "plan", "status", "prompt"]);
 
 /** 非终态事件可由重连后的 Service stream replay 首次到达，用它恢复本地运行态。 */
-export function isLiveChatState(state: unknown): boolean {
-  return typeof state === "string" && LIVE_CHAT_STATES.has(state);
+export function isLiveChatState(state: unknown, statusKind?: unknown): boolean {
+  return typeof state === "string" && LIVE_CHAT_STATES.has(state)
+    && !(state === "status" && statusKind === "idle");
 }
 
 /**

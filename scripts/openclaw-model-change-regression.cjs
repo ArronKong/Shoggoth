@@ -624,6 +624,28 @@ test("delete-provider 扫描全部精确/wildcard policy ref，但不把 models 
   assert.deepEqual(config.agents.defaults.models, aliases);
 });
 
+test("同名模型的 Provider 定义已有明确归属，不阻断端点删除或改名", async () => {
+  const config = baseConfig({ models: { providers: {
+    alpha: { models: [{ id: "old" }] }, beta: { models: [{ id: "old" }] },
+  } } });
+  const result = await scanOpenClawReferences(createFakeRpc({ config }), renameSpec());
+  assert.deepEqual(result.blockers, []);
+  const definitions = result.references.filter((reference) => reference.definition);
+  assert.equal(definitions.length, 1);
+  assert.equal(definitions[0].referenceKey, "models.providers.alpha.models[0].id");
+  assert.equal(definitions[0].before, "old");
+  assert.equal(definitions[0].after, "new");
+  assert.equal(config.models.providers.beta.models[0].id, "old");
+  const adapter = createOpenClawModelChange({ backend: createFakeRpc({ config }), runtimeApply: {
+    async inspect() { return { mode: "unsupported", safeApply: false }; },
+    async acquireForApply() { throw new Error("preview must not write"); },
+    async recoverLease() {},
+  } });
+  const deletion = await adapter.preview({ kind: "delete-provider", providerKey: "alpha", sourceModelId: null });
+  assert.deepEqual(deletion.blockers.map((item) => item.code), ["runtime_apply_unsupported"]);
+  assert.deepEqual(deletion.references, []);
+});
+
 test("同 ID 多 Provider 时不迁移裸引用，schema 外模型路径 fail-closed", async () => {
   const config = {
     models: {
@@ -649,6 +671,66 @@ test("同 ID 多 Provider 时不迁移裸引用，schema 外模型路径 fail-cl
       .map((blocker) => blocker.referenceKey),
     ["plugins.custom.model"],
   );
+});
+
+test("Session sampling timestamp 不改变 store fingerprint，完整引用及条件版本仍保留", async () => {
+  const row = { ...sessionRows(1)[0], snapshotAt: 1, updatedAt: 50, activitySummary: { status: "idle" } };
+  const rpc = createFakeRpc({ capabilities: { conditionalVersions: { sessions: true } },
+    handler(method) { if (method === "sessions.list") return { sessions: [row], hasMore: false }; },
+  });
+  const first = await scanOpenClawReferences(rpc, renameSpec());
+  row.snapshotAt = 2;
+  const second = await scanOpenClawReferences(rpc, renameSpec());
+  assert.equal(first.fingerprints.sessions, second.fingerprints.sessions);
+  assert.deepEqual(first.blockers, []);
+  const reference = first.references.find(value => value.store === "sessions");
+  assert.equal(reference.before.snapshotAt, 1);
+  assert.equal(reference.after.snapshotAt, 1);
+  assert.equal(reference.expectedVersion, "v-0");
+  assert.equal(row.snapshotAt, 2, "fingerprint projection must not mutate RPC rows");
+  let writes = 0;
+  const lease = await acquireReferenceMutationLeases(rpc, first.references, {
+    expectedFingerprints: first.fingerprints,
+    rescan: () => scanOpenClawReferences(rpc, renameSpec()),
+  });
+  await lease.run(async () => { writes += 1; });
+  assert.equal(writes, 1, "a later sampling-only read may enter the existing conditional-write boundary");
+  assert.equal(rpc.writes.length, 0, "enumeration/recheck must not write to the gateway");
+});
+
+test("Session fingerprint 仅豁免顶层有效 snapshotAt，业务字段、未知字段与嵌套时间仍阻止首写", async () => {
+  const baseline = { ...sessionRows(1)[0], snapshotAt: 1, updatedAt: 50, activitySummary: { status: "idle", snapshotAt: 1 } };
+  const mutations = {
+    key: row => { row.key += "-changed"; },
+    version: row => { row.version = "v-next"; },
+    revision: row => { row.revision = 2; },
+    etag: row => { row.etag = "other"; },
+    updatedAt: row => { row.updatedAt += 1; },
+    modelOverride: row => { row.modelOverride = "other"; },
+    providerOverride: row => { row.providerOverride = "other"; },
+    model: row => { row.model = "alpha/other"; },
+    activity: row => { row.activitySummary.status = "running"; },
+    nestedSampling: row => { row.activitySummary.snapshotAt = 2; },
+    unknown: row => { row.futureVersionField = "must-remain-guarded"; },
+    malformedSampling: row => { row.snapshotAt = "unrecognized"; },
+  };
+  for (const [name, mutate] of Object.entries(mutations)) {
+    let row = JSON.parse(JSON.stringify(baseline));
+    const rpc = createFakeRpc({ capabilities: { conditionalVersions: { sessions: true } },
+      handler(method) { if (method === "sessions.list") return { sessions: [row], hasMore: false }; },
+    });
+    const first = await scanOpenClawReferences(rpc, renameSpec());
+    row.snapshotAt = 2; mutate(row);
+    const changed = await scanOpenClawReferences(rpc, renameSpec());
+    assert.notEqual(first.fingerprints.sessions, changed.fingerprints.sessions, name);
+    let writes = 0;
+    const lease = await acquireReferenceMutationLeases(rpc, first.references, {
+      expectedFingerprints: first.fingerprints,
+      rescan: () => scanOpenClawReferences(rpc, renameSpec()),
+    });
+    await assert.rejects(lease.run(async () => { writes += 1; }), error => error.code === "reference_fingerprint_changed", name);
+    assert.equal(writes, 0, `${name}: real changes must block before the first write`);
+  }
 });
 
 test("Session offset-v1 翻过 200 条且按 key 去重", async () => {
@@ -2582,6 +2664,30 @@ test("create 旧 full journal 仍拒绝真实配置变化和 scanner 版本变�
     assert.equal(result.code, "reference_fingerprint_changed", drift);
     assert.equal(harness.state.patchCalls.length, 0, drift);
     assert.equal(harness.state.runtimeAcquires, 0, drift);
+  }
+});
+
+test("字段编辑续提兼容旧动态指纹，但仍严格检查配置与 scanner 版本", async () => {
+  for (const kind of ["update", "update-provider"]) for (const drift of [null, "config", "scannerVersion"]) {
+    const harness = createModelChangeHarness();
+    const adapter = createOpenClawModelChange({ backend: harness.backend, runtimeApply: harness.runtimeApply });
+    const spec = kind === "update"
+      ? { kind, providerKey: "alpha", sourceModelId: "old", model: { id: "old", name: "Edited" } }
+      : { kind, providerKey: "alpha", patch: { baseUrl: "https://changed.example.test/v1" } };
+    const preview = await adapter.preview(spec);
+    const { context } = createModelChangeContext(`legacy-${kind}-${drift}`);
+    context.journalEntry = { mode: "full", status: "needs_secret", secretStep: "pending", fingerprints: {
+      ...preview.fingerprints, sessions: "legacy-session-metadata", cron: "legacy-cron-metadata",
+    } };
+    if (drift === "config") {
+      harness.state.config.models.providers.alpha.models[0].name = "Concurrent edit";
+      harness.state.hash = "concurrently-changed-config";
+    } else if (drift === "scannerVersion") context.journalEntry.fingerprints.scannerVersion++;
+    const result = await adapter.apply(spec, context, { apiKey: "fake-test-key" });
+    assert.equal(result.status, drift ? "blocked" : "applied", `${kind}: ${drift}`);
+    assert.equal(harness.state.patchCalls.length, drift ? 0 : 1);
+    assert.deepEqual(harness.state.referenceWrites, []);
+    if (drift) assert.equal(result.code, "reference_fingerprint_changed");
   }
 });
 

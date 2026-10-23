@@ -10,6 +10,7 @@ const HOST_CAPABILITIES = Object.freeze([
   { id: "ui.open-external-link", owner: "ui-process", exposure: "ui-only", hostOp: "openExternal" },
   { id: "ui.select-skill-package", owner: "ui-process", exposure: "ui-only", hostOp: "selectSkillPackage" },
   { id: "ui.select-plugin-package", owner: "ui-process", exposure: "ui-only", hostOp: "selectPluginPackage" },
+  { id: "ui.select-plugin-gmail-credentials", owner: "ui-process", exposure: "ui-only", hostOp: "selectPluginGmailCredentials" },
   { id: "ui.select-plugin-dependency", owner: "ui-process", exposure: "ui-only", hostOp: "selectPluginDependency" },
   { id: "ui.confirm-plugin-capability", owner: "ui-process", exposure: "ui-only", hostOp: "confirmPluginCapability" },
   { id: "ui.open-plugin-app", owner: "ui-process", exposure: "ui-only", hostOp: "openPluginApp" },

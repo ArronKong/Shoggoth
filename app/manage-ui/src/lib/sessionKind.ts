@@ -2,7 +2,7 @@
 //
 // 输入是网关的 session key（`agent:<id>:<tail>`）及后端声明的类型。原先 ChatPage 里
 // 的 `isHiddenSession` 把 cron/subagent/dream/heartbeat 从切换器里整片抹掉，
-// R266 起改为「全部显示 + 按类型分流」：类型判定收敛到这里一处，ChatPage 与
+// 类型判定收敛到这里一处，ChatPage 与
 // 沉浸模式共用，UI 侧不再各自写正则。
 //
 // 与 lib/notify.ts 的 `sessionTailKind` 分工：那个是「要不要弹桌面通知」的粗四
@@ -26,7 +26,7 @@ export function sessionTail(key: string): string {
 }
 
 export function sessionKindOf(key: string, declaredKind?: string): SessionKind {
-  if (declaredKind === "cron") return "cron";
+  if (declaredKind === "cron" || declaredKind === "subagent") return declaredKind;
   const tail = sessionTail(key);
   if (!tail || tail === "main") return "main";
   // 心跳记账会话（`main:heartbeat`，R153 的 phantom）——只匹配「段名恰为
@@ -42,23 +42,31 @@ export function sessionKindOf(key: string, declaredKind?: string): SessionKind {
   return "other";
 }
 
-/** 展示分类独立于后台会话判定，避免改菜单时改变未读和代表会话的选择。 */
-export type SessionCategory = "app" | "task" | "inspiration" | "channel" | "subagent" | "dream" | "system" | "other";
+/** 展示分类独立于代表会话和未读判定。 */
+export type SessionCategory = "app" | "codex-desktop" | "task" | "inspiration" | "channel" | "subagent" | "dream" | "system" | "other";
 
 export const SESSION_CATEGORY_ORDER: SessionCategory[] = [
-  "app", "task", "inspiration", "channel", "subagent", "dream", "system", "other",
+  "app", "codex-desktop", "task", "inspiration", "channel", "subagent", "dream", "system", "other",
 ];
 
 export interface SessionCategoryRow {
   key: string;
   kind?: string;
   source?: string;
+  codexDesktopSourceError?: string;
   inspirationId?: string;
   title?: string;
   sub?: string;
 }
 
+/** Keep external records and child history; hide only their session-list projection. */
+export function isVisibleSession(row?: Pick<SessionCategoryRow, "source"> & Partial<Pick<SessionCategoryRow, "key" | "kind">>): boolean {
+  return row?.source !== "codex-desktop" && row?.source !== "subagent"
+    && (!row?.key || sessionKindOf(row.key, row.kind) !== "subagent");
+}
+
 export function sessionCategoryOf(row: SessionCategoryRow): SessionCategory {
+  if (row.source === "codex-desktop") return "codex-desktop";
   const tail = sessionTail(row.key);
   const sources = [row.kind, row.source].map((value) => value?.toLowerCase());
   if (row.inspirationId || sources.includes("inspiration")
@@ -83,10 +91,8 @@ export function sessionCategoryOf(row: SessionCategoryRow): SessionCategory {
  * 「后台会话」= 不该代表一个 agent 露面的那些。
  *
  * R266 之前这个判定叫 isHiddenSession，用途是把它们从切换器里删掉；现在切换器全量
- * 显示，它只剩两个用途，都不是「藏起来」：
- *  1. 挑 agent 行的代表会话 / 行时间（心跳 phantom 当代表 = 行反复浮顶、点开永远
- *     空白，Vincent 事故，R153）；
- *  2. 未读红点（后台 final 也会广播过来，点亮的红点点开全是旧消息，R245）。
+ * 显示；本判定约束未经正文确认的代表会话、行时间与排序。Cron 真实结果经独立
+ * 的逐会话回复记录加入代表会话与未读；心跳和内部会话不靠 metadata 冒充新消息。
  */
 export function isBackgroundSession(key: string, declaredKind?: string): boolean {
   const kind = sessionKindOf(key, declaredKind);

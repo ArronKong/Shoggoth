@@ -3,14 +3,27 @@
 const crypto = require("node:crypto");
 const { auth } = require("@modelcontextprotocol/client");
 const { endpointOf } = require("./plugin-mcp-client");
+const { SERVER: SLACK_MCP_SERVER } = require("./plugin-slack-oauth");
 const { serviceError } = require("./security");
 
 const DEFAULT_LIFETIME_MS = 5 * 60_000;
 const MAX_SESSIONS = 16;
 const SCOPE = /^[\x21\x23-\x5B\x5D-\x7E]+$/u;
+const SLACK_LOCALHOST_CALLBACK = /^http:\/\/localhost:([1-9][0-9]{0,4})\/oauth\/callback$/u;
 
 function fail(code, message) { throw serviceError(code, message); }
-function callbackOf(value, allowLoopback) {
+function callbackOf(value, allowLoopback, allowSlackLocalhostCallback) {
+  // Slack documents `localhost` as a desktop PKCE redirect. This exception is
+  // only supplied by the trusted Slack provider path; it does not relax HTTP
+  // MCP endpoints, OAuth metadata URLs, or generic caller-provided callbacks.
+  if (allowSlackLocalhostCallback) {
+    const match = SLACK_LOCALHOST_CALLBACK.exec(value);
+    if (!allowLoopback || !match || Number(match[1]) < 1024
+      || Number(match[1]) > 65535 || new URL(value).href !== value) {
+      fail("CONNECTION_AUTH_REQUIRED", "OAuth 回调地址无效");
+    }
+    return new URL(value);
+  }
   const url = endpointOf(value, allowLoopback);
   if (url.search) {
     fail("CONNECTION_AUTH_REQUIRED", "OAuth 回调地址无效");
@@ -50,7 +63,8 @@ class PluginOAuthSessionManager {
   }
 
   async start({ connectionId, serverUrl, redirectUrl, clientId,
-    scope, allowLoopback = false } = {}) {
+    scope, allowLoopback = false, allowSlackLocalhostCallback = false,
+    clientSecret = null, expectedIssuer = null } = {}) {
     const createdAt = this.#now();
     if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
       fail("CONNECTION_AUTH_REQUIRED", "OAuth 会话时钟无效");
@@ -63,8 +77,14 @@ class PluginOAuthSessionManager {
       || typeof redirectUrl !== "string" || redirectUrl.length > 4096
       || typeof clientId !== "string" || !clientId || clientId.length > 512
       || typeof scope !== "string" || !scope || scope.length > 2048
+      || (clientSecret !== null && (typeof clientSecret !== "string"
+        || clientSecret.length < 8 || clientSecret.length > 512
+        || !/^[\x21-\x7e]+$/u.test(clientSecret) || expectedIssuer === null))
       || this.#sessions.has(connectionId)) {
       fail("CONNECTION_AUTH_REQUIRED", "OAuth 会话参数无效或连接已占用");
+    }
+    if (allowSlackLocalhostCallback && serverUrl !== SLACK_MCP_SERVER) {
+      fail("CONNECTION_AUTH_REQUIRED", "Slack OAuth 回调只允许官方 MCP 服务");
     }
     const requestedScopes = scope.split(" ");
     if (requestedScopes.length > 128 || requestedScopes.some((item) =>
@@ -76,12 +96,16 @@ class PluginOAuthSessionManager {
       fail("PLUGIN_CONNECTION_LIMIT", "OAuth 待处理会话已达上限");
     }
     const server = endpointOf(serverUrl, allowLoopback);
-    const redirect = callbackOf(redirectUrl, allowLoopback);
+    const redirect = callbackOf(redirectUrl, allowLoopback, allowSlackLocalhostCallback);
+    const issuer = expectedIssuer === null ? null : endpointOf(expectedIssuer, allowLoopback);
     const state = crypto.randomBytes(32).toString("base64url");
     const session = { state, serverUrl: server.href, redirectUrl: redirect.href,
       requestedScopes,
       expiresAt: createdAt + this.#lifetimeMs, phase: "starting", url: null,
-      discovery: null, verifier: null, clientInformation: { client_id: clientId },
+      discovery: null, verifier: null, clientInformation: { client_id: clientId,
+        ...(issuer ? { issuer: issuer.href } : {}),
+        ...(clientSecret === null ? {} : { client_secret: clientSecret,
+          token_endpoint_auth_method: "client_secret_basic" }) },
       tokens: null };
     const provider = {
       get redirectUrl() { return redirect.href; },
@@ -90,12 +114,20 @@ class PluginOAuthSessionManager {
         redirect_uris: [redirect.href],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
-        token_endpoint_auth_method: "none",
+        token_endpoint_auth_method: clientSecret === null ? "none" : "client_secret_basic",
       }; },
       state: () => state,
       clientInformation: (context) => ({ ...session.clientInformation,
         issuer: session.clientInformation.issuer ?? context?.issuer }),
-      saveClientInformation: (value) => { session.clientInformation = value; },
+      saveClientInformation: (value) => {
+        if (clientSecret !== null && (value?.client_id !== clientId
+          || value.client_secret !== clientSecret
+          || value.token_endpoint_auth_method !== "client_secret_basic"
+          || value.issuer !== issuer.href)) {
+          fail("CONNECTION_AUTH_REQUIRED", "OAuth 注册客户端身份变化");
+        }
+        session.clientInformation = value;
+      },
       tokens: () => session.tokens ?? undefined,
       saveTokens: (value) => { session.tokens = value; },
       redirectToAuthorization: (url) => { session.url = url.href; },

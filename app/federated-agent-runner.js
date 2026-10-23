@@ -2,6 +2,8 @@
 
 const crypto = require("node:crypto");
 const { WebSocket } = require("ws");
+const { federationRunErrorCode } = require("./federation-run-error");
+const { FEDERATION_TASK_MAX_TIMEOUT_MS } = require("./federation-task-timeout");
 const {
   FEDERATION_AGENT_MESSAGE_SOURCE_TOOL,
   FEDERATION_AGENT_RUN_SOURCE_TOOL,
@@ -35,7 +37,7 @@ function runFederatedAgentViaBroker(options = {}) {
     || typeof options.agentId !== "string" || !options.agentId
     || typeof options.prompt !== "string" || !options.prompt
     || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 5_000
-    || options.timeoutMs > 120_000) {
+    || options.timeoutMs > FEDERATION_TASK_MAX_TIMEOUT_MS) {
     return Promise.reject(runnerError("AGENT_OPERATION_FAILED"));
   }
   return new Promise((resolve, reject) => {
@@ -84,7 +86,7 @@ function runFederatedAgentViaBroker(options = {}) {
         const entry = pending.get(String(frame.id));
         if (!entry) return;
         pending.delete(String(frame.id));
-        if (frame.ok === false) entry.reject(runnerError("AGENT_OPERATION_FAILED"));
+        if (frame.ok === false) entry.reject(runnerError(federationRunErrorCode(frame.error)));
         else entry.resolve(frame);
         return;
       }
@@ -93,7 +95,7 @@ function runFederatedAgentViaBroker(options = {}) {
       if (frame.payload.state === "final") {
         finish(null, { sessionKey, text: terminalText(frame.payload) });
       } else if (frame.payload.state === "error") {
-        finish(runnerError("AGENT_OPERATION_FAILED"));
+        finish(runnerError(federationRunErrorCode(frame.payload)));
       } else if (frame.payload.state === "prompt") {
         // 联邦委派没有可靠的嵌套确认通道；需要交互时严格失败，不替用户作答。
         finish(runnerError("AGENT_OPERATION_FAILED"));
@@ -159,6 +161,10 @@ class FederatedAgentTaskRunner {
       startSettled: false,
       resolveStart: null,
       rejectStart: null,
+      runIds: new Set(),
+      nativeRunId: null,
+      admitted: false,
+      deferredEvents: [],
     };
     this.tasks.set(taskId, task);
     const started = new Promise((resolve, reject) => {
@@ -177,6 +183,9 @@ class FederatedAgentTaskRunner {
 
   async message(input) {
     const task = this.#task(input);
+    if (typeof input.prompt !== "string" || !input.prompt
+      || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 5_000
+      || input.timeoutMs > FEDERATION_TASK_MAX_TIMEOUT_MS) throw runnerError("AGENT_OPERATION_FAILED");
     if (!Number.isSafeInteger(input.expectedTurn) || input.expectedTurn !== task.turn) {
       throw runnerError("FEDERATION_TASK_STATE_CONFLICT");
     }
@@ -193,14 +202,7 @@ class FederatedAgentTaskRunner {
     task.timeoutMs = input.timeoutMs;
     this.#arm(task);
     try {
-      await this.#rpc(task, "chat.send", {
-        sessionKey: task.sessionKey,
-        message: input.prompt,
-        idempotencyKey: this.randomUUID(),
-        systemInputProvenance: createFederationInputProvenance(
-          FEDERATION_AGENT_MESSAGE_SOURCE_TOOL,
-        ),
-      });
+      await this.#sendTurn(task, input.prompt, FEDERATION_AGENT_MESSAGE_SOURCE_TOOL);
     } catch (error) {
       this.#fail(task, error?.code || "AGENT_OPERATION_FAILED");
       throw error?.code ? error : runnerError("AGENT_OPERATION_FAILED");
@@ -252,7 +254,7 @@ class FederatedAgentTaskRunner {
       && typeof input.agentId === "string" && input.agentId.length > 0
       && typeof input.prompt === "string" && input.prompt.length > 0
       && Number.isSafeInteger(input.timeoutMs) && input.timeoutMs >= 5_000
-      && input.timeoutMs <= 120_000;
+      && input.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS;
   }
 
   #task(input) {
@@ -283,14 +285,7 @@ class FederatedAgentTaskRunner {
           throw runnerError("AGENT_OPERATION_FAILED");
         }
         task.status = "running";
-        await this.#rpc(task, "chat.send", {
-          sessionKey: task.sessionKey,
-          message: task.initialPrompt,
-          idempotencyKey: this.randomUUID(),
-          systemInputProvenance: createFederationInputProvenance(
-            FEDERATION_AGENT_RUN_SOURCE_TOOL,
-          ),
-        });
+        await this.#sendTurn(task, task.initialPrompt, FEDERATION_AGENT_RUN_SOURCE_TOOL);
         this.#resolveStart(task);
       } catch (error) {
         this.#fail(task, error?.code || "AGENT_OPERATION_FAILED");
@@ -311,22 +306,59 @@ class FederatedAgentTaskRunner {
       const pending = task.pending.get(String(frame.id));
       if (!pending) return;
       task.pending.delete(String(frame.id));
-      if (frame.ok === false) pending.reject(runnerError("AGENT_OPERATION_FAILED"));
+      if (frame.ok === false) pending.reject(runnerError(federationRunErrorCode(frame.error)));
       else pending.resolve(frame);
       return;
     }
     if (frame?.type !== "event" || frame.event !== "chat"
       || frame.payload?.sessionKey !== task.sessionKey) return;
+    if (TASK_TERMINAL_STATUSES.has(task.status)) return;
+    if (!["final", "error", "aborted", "prompt"].includes(frame.payload.state)) return;
+    // OpenClaw may publish the native run before acknowledging chat.send. Hold
+    // only control events until that ACK identifies this turn; never let an old
+    // turn's delayed final settle a continuation in the same session.
+    if (!task.admitted) {
+      if (task.deferredEvents.length < 8) task.deferredEvents.push(frame);
+      return;
+    }
+    const runId = frame.payload.runId;
+    if (typeof runId === "string" ? !task.runIds.has(runId)
+      : task.turn !== 1 || task.nativeRunId !== null) return;
     if (frame.payload.state === "final") {
       this.#finish(task, "completed", boundedOutput(terminalText(frame.payload)), null);
     } else if (frame.payload.state === "error") {
-      this.#fail(task, "AGENT_OPERATION_FAILED");
+      this.#fail(task, federationRunErrorCode(frame.payload));
+    } else if (frame.payload.state === "aborted") {
+      this.#finish(task, "canceled", null, null);
     } else if (frame.payload.state === "prompt") {
       clearTimeout(task.timer);
       task.timer = null;
       task.status = "waiting_input";
       this.#resolveStart(task);
     }
+  }
+
+  async #sendTurn(task, prompt, sourceTool) {
+    const clientRunId = this.randomUUID();
+    task.runIds = new Set([clientRunId]);
+    task.nativeRunId = null;
+    task.admitted = false;
+    task.deferredEvents = [];
+    const response = await this.#rpc(task, "chat.send", {
+      sessionKey: task.sessionKey,
+      message: prompt,
+      idempotencyKey: clientRunId,
+      systemInputProvenance: createFederationInputProvenance(sourceTool),
+    });
+    if (TASK_TERMINAL_STATUSES.has(task.status)) return;
+    if (typeof response?.payload?.runId === "string" && response.payload.runId) {
+      task.nativeRunId = response.payload.runId;
+      task.runIds.add(task.nativeRunId);
+    }
+    task.admitted = true;
+    const deferred = task.deferredEvents;
+    task.deferredEvents = [];
+    for (const frame of deferred) this.#onMessage(task, JSON.stringify(frame));
   }
 
   #rpc(task, method, params, timeoutMs = null) {
@@ -363,10 +395,13 @@ class FederatedAgentTaskRunner {
   #arm(task) {
     clearTimeout(task.timer);
     task.timer = setTimeout(() => {
-      if (task.sessionKey && task.socket?.readyState === this.WebSocket.OPEN) {
-        void this.#rpc(task, "chat.abort", { sessionKey: task.sessionKey }).catch(() => {});
-      }
       this.#fail(task, "AGENT_RUN_TIMEOUT");
+      if (task.sessionKey && task.socket?.readyState === this.WebSocket.OPEN) {
+        void this.#rpc(task, "chat.abort", {
+          sessionKey: task.sessionKey,
+          ...(task.nativeRunId ? { runId: task.nativeRunId } : {}),
+        }, CONTROL_RPC_TIMEOUT_MS).catch(() => {});
+      }
     }, task.timeoutMs);
   }
 
@@ -377,8 +412,10 @@ class FederatedAgentTaskRunner {
   }
 
   #finish(task, status, result, errorCode) {
+    if (TASK_TERMINAL_STATUSES.has(task.status)) return;
     clearTimeout(task.timer);
     task.timer = null;
+    task.deferredEvents = [];
     task.status = status;
     task.result = result;
     task.errorCode = errorCode;
@@ -389,6 +426,7 @@ class FederatedAgentTaskRunner {
     if (TASK_TERMINAL_STATUSES.has(task.status)) return;
     clearTimeout(task.timer);
     task.timer = null;
+    task.deferredEvents = [];
     task.status = "failed";
     task.result = null;
     task.errorCode = code;

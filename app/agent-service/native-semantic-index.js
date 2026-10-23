@@ -271,8 +271,8 @@ class NativeSemanticIndex {
         if (source.sensitivity > (filter.maxSensitivity ?? 0) || source.validFrom > now
           || (source.validUntil !== null && source.validUntil <= now)
           || (filter.scopes && !filter.scopes.includes(source.scope))
-          || (["project", "workspace"].includes(source.scope) && filter.workspaceRef !== undefined
-            && !source.workspaceRefs.includes(filter.workspaceRef))) continue;
+          || (["project", "workspace"].includes(source.scope) && Array.isArray(filter.workspaceRefs)
+            && !filter.workspaceRefs.some(ref => source.workspaceRefs.includes(ref)))) continue;
       } else if (source.workspace !== filter.workspace || source.runId === filter.excludeRunId
         || (filter.sessionId && source.sessionId !== filter.sessionId)) continue;
       let score = 0;

@@ -152,6 +152,18 @@ test("blocked、cleanup_pending 与 needs_secret 都保留 operationId 供同请
   }
 });
 
+test("官方配置编辑可以清除可选参数，同时保留高级参数并禁止转入旧草稿路径", () => {
+  let state = createInitialModelEditorState("edit", { providers, model: { providerKey: "alpha", id: "old", name: "Named", contextWindow: 8192,
+    advanced: { input: ["text", "image"], contextTokens: 64000, cost: { input: 3, output: 8 } } } }, { ...capabilities, configurationDraft: true });
+  state = modelEditorReducer(state, { type: "field", field: "contextWindow", value: "" });
+  const spec = toModelChangeSpec(state);
+  assert.equal(spec.model.advanced.contextWindow, null);
+  assert.deepEqual(spec.model.advanced.input, ["text", "image"]);
+  assert.deepEqual(spec.model.advanced.cost, { input: 3, output: 8 });
+  state = modelEditorReducer(state, { type: "field", field: "advanced", value: "[]" });
+  assert.equal(validateModelEditor(state).advanced, "invalid_json");
+});
+
 const failures = [];
 for (const { name, run } of tests) {
   try { await run(); } catch (error) { failures.push(`${name}: ${error.stack || error}`); }

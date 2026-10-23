@@ -1,6 +1,7 @@
 "use strict";
 
 const { modelCapabilities } = require("./chat-model-settings");
+const { isRuntimeIncompatible } = require("./runtime-compatibility");
 
 const crypto = require("node:crypto");
 const {
@@ -27,6 +28,17 @@ const MAX_MODEL_BYTES = 1024 * 1024;
 
 function profileError(code, message) {
   return serviceError(code, message);
+}
+
+function runtimeReadError(error, fallback, message) {
+  if (isRuntimeIncompatible(error)) return profileError("RUNTIME_INCOMPATIBLE", PUBLIC_MESSAGES.RUNTIME_INCOMPATIBLE);
+  const codes = new Set(["CODEX_NATIVE_AUTH_READ_FAILED", "CODEX_RUNTIME_CLEANUP_INCOMPLETE"]);
+  for (let current = error, depth = 0; current && depth < 4; depth += 1) {
+    const code = dataErrorCode(current);
+    if (codes.has(code)) return profileError(code, PUBLIC_MESSAGES[code]);
+    try { current = Object.getOwnPropertyDescriptor(current, "cause")?.value; } catch { break; }
+  }
+  return profileError(fallback, message);
 }
 
 function operationIdentity(method, params) {
@@ -260,8 +272,8 @@ function createProfileServiceController(options = {}) {
     let auth;
     try {
       auth = await accountAuthManager.read({ runtimeProfileId: profile.runtimeProfileId });
-    } catch {
-      throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "ChatGPT authority could not be read");
+    } catch (error) {
+      throw runtimeReadError(error, "PROFILE_MODEL_CATALOG_UNAVAILABLE", "ChatGPT authority could not be read");
     }
     assertProfileStillCurrent(profile, generation);
     if (auth?.account?.type !== "chatgpt") {
@@ -283,8 +295,8 @@ function createProfileServiceController(options = {}) {
         limit: pageParams.limit,
         includeHidden: false,
       });
-    } catch {
-      throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Codex model catalog is unavailable");
+    } catch (error) {
+      throw runtimeReadError(error, "PROFILE_MODEL_CATALOG_UNAVAILABLE", "Codex model catalog is unavailable");
     }
     assertProfileStillCurrent(profile, generation);
     return normalizeModelPage(raw);
@@ -331,8 +343,8 @@ function createProfileServiceController(options = {}) {
         limit: pageParams.limit,
         includeHidden: false,
       });
-    } catch {
-      throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog is unavailable");
+    } catch (error) {
+      throw runtimeReadError(error, "PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog is unavailable");
     }
     assertProfileStillCurrent(profile, generation);
     return normalizeModelPage(raw);
@@ -351,8 +363,8 @@ function createProfileServiceController(options = {}) {
       if (auth.status === "unsupported") {
         throw profileError("PROFILE_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
       }
-    } catch {
-      throw profileError("PROFILE_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
+    } catch (error) {
+      throw runtimeReadError(error, "PROFILE_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
     }
     assertProfileStillCurrent(profile, generation);
     return validateProfileServiceResult("profile.auth.read", { status: auth.status });
@@ -603,20 +615,21 @@ function createProfileServiceController(options = {}) {
       } catch (error) {
         return Promise.reject(error);
       }
-      if (method === "profile.models.list" || method === "profile.binding.models.list" || method === "profile.auth.read") {
+      if (["profile.models.list", "profile.binding.models.list", "profile.auth.read", "profile.binding.auth.read"]
+        .includes(method)) {
         let generation;
         let profile;
         try {
           generation = lifecycleGeneration;
           assertAccepting(generation);
           profile = loadEnabledProfile(params.profileId);
-          if (method === "profile.binding.models.list") {
+          if (method === "profile.binding.models.list" || method === "profile.binding.auth.read") {
             profile = productStore.resolveAgentRuntimeProfile(profile.id, params.bindingId);
           }
         } catch (error) {
           return Promise.reject(error);
         }
-        const read = method !== "profile.auth.read"
+        const read = method.endsWith(".models.list")
           ? readRuntimeModelPage(profile, params, generation)
           : readRuntimeAuth(profile, generation);
         return read

@@ -21,7 +21,7 @@ const MAX_MODEL_ROWS = 24;
 const MAX_AGENT_ROWS = 32;
 const MAX_MODEL_TIMELINE_ROWS = 240;
 const MAX_PROFILE_SCOPE_SIZE = 8192;
-const SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction"]);
+const SOURCES = new Set(["chat", "kanban", "cron", "inspiration", "compaction", "proactive"]);
 const BACKEND_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const USAGE_FIELDS = Object.freeze([
   "totalTokens", "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",

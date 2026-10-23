@@ -5,6 +5,7 @@
 // 因每次构建的 cdhash 改变而反复触发钥匙串授权。开发/本机交付时允许通过
 // SHOGGOTH_CODESIGN_IDENTITY 指定一张固定本地证书；未指定时才退回 ad-hoc。
 const { execFileSync, spawnSync } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { releaseDistribution } = require("./release-distribution.cjs");
@@ -30,6 +31,35 @@ function verifyPackagedSqlite(appPath) {
   for (const file of ["sqlite/better_sqlite3.node", "legal/BETTER-SQLITE3-LICENSE.txt"]) {
     if (!fs.statSync(path.join(resources, file)).isFile()) throw new Error(`SQLite resource missing: ${file}`);
   }
+}
+
+function verifyPackagedGogSource(appPath, arch) {
+  const { verifiedGogBinary } = require("../app/agent-service/plugin-gogcli-gmail-runtime");
+  const source = verifiedGogBinary({ repoRoot: path.resolve(__dirname, ".."), arch });
+  const packaged = path.join(appPath, "Contents", "Resources", "gogcli", "gog");
+  const sha = file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  if (sha(packaged) !== sha(source)) {
+    throw new Error("PACKAGED_GOG_SOURCE_MISMATCH: bundled gog differs from pinned v0.42.0 binary");
+  }
+  return packaged;
+}
+
+function verifySignedPackagedGog(appPath, arch) {
+  const { verifiedGogBinary } = require("../app/agent-service/plugin-gogcli-gmail-runtime");
+  const resourcesPath = path.join(appPath, "Contents", "Resources");
+  return verifiedGogBinary({ packaged: true, resourcesPath, arch });
+}
+
+function packagedWorkspaceManifest(appPath, update = false) {
+  const directory = path.join(appPath, "Contents", "Resources", "workspace-execution");
+  const manifestPath = path.join(directory, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const executable = path.join(directory, "process-owner");
+  const sha256 = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
+  if (manifest.version !== 1 || !/^[a-f0-9]{64}$/u.test(manifest.sourceSha256)
+    || (!update && manifest.sha256 !== sha256)) throw new Error("Workspace execution native helper identity mismatch");
+  if (update) fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, sha256 }, null, 2) + "\n");
+  return executable;
 }
 
 function appendSigningScope(args, keychainPath) {
@@ -169,7 +199,6 @@ exports.default = function adhocSign(context) {
   const { fileCount } = require("./check-release-private-keys.cjs").scanDirectory(appPath);
   console.log(`  • private-key check passed before signing (${fileCount} files)`);
   verifyPackagedSqlite(appPath);
-  require("./prepare-native-terminal.cjs").verifyPackagedNativeTerminal(appPath);
   const entitlementsPath = path.resolve(__dirname, "..", "build", "entitlements.mac.plist");
   const identity = process.env.SHOGGOTH_CODESIGN_IDENTITY || "-";
   const keychainPath = process.env.SHOGGOTH_CODESIGN_KEYCHAIN || undefined;
@@ -179,6 +208,12 @@ exports.default = function adhocSign(context) {
     || (mode === "adhoc") !== (identity === "-")
     || (mode === "developer-id" && !keychainPath)) {
     throw new TypeError("SHOGGOTH_CODESIGN_MODE/IDENTITY/KEYCHAIN combination is invalid");
+  }
+  if (distribution === "official") {
+    require("./check-bundled-plugin-public-release.cjs").checkPublicBundledPluginRelease(
+      path.resolve(__dirname, ".."),
+      path.join(appPath, "Contents", "Resources", "bundled-plugins", "catalog.json"),
+    );
   }
   const timestamp = mode === "developer-id";
   // Electron 下载缓存可能把 com.apple.provenance 复制进 Framework；Ventura+
@@ -192,6 +227,22 @@ exports.default = function adhocSign(context) {
   for (const target of nestedHostOptionalDependencyPaths(appPath)) {
     if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: false });
   }
+  // electron-builder exits 0 even when it drops transitive dependencies (for
+  // example behind a symlinked node_modules) or a dotfile a bundled plugin's
+  // frozen digest covers. Either leaves an App that fails at runtime.
+  const { checkBundledPlugins, checkPackagedDependencies } = require("./release-package-checks.cjs");
+  const incomplete = [
+    ...require("../app/external-plugin-adapter-protocol").checkAdapterProtocols(
+      path.join(appPath, "Contents", "Resources", "external-plugin-adapters")),
+    ...checkPackagedDependencies(appPath, { arch: require("builder-util").Arch[context.arch] }),
+    ...checkBundledPlugins(path.join(appPath, "Contents", "Resources", "bundled-plugins"),
+      { packaged: true }),
+  ];
+  if (incomplete.length) throw new Error(`PACKAGED_APP_INCOMPLETE: ${incomplete.join("; ")}`);
+  const targetArch = require("builder-util").Arch[context.arch];
+  verifyPackagedGogSource(appPath, targetArch);
+  packagedWorkspaceManifest(appPath);
+  console.log("  • packaged dependencies and bundled plugins verified before signing");
   // This marker is covered by the final App signature. Runtime update checks are
   // enabled only when it says this is an official Developer ID build.
   writeReleaseMarker(appPath, { mode, distribution, version: context.packager.appInfo.version });
@@ -216,6 +267,9 @@ exports.default = function adhocSign(context) {
       targetPath, identity, keychainPath, timestamp,
     }), { stdio: "inherit" });
   }
+  // Re-signing the first-party helper changes its whole-file hash. Seal the
+  // final helper hash into the App resource manifest before signing the App.
+  packagedWorkspaceManifest(appPath, true);
   // macOS can reattach provenance while nested binaries are being signed.
   // Clear it again before sealing the final Framework/App bundles.
   execFileSync("xattr", ["-cr", appPath], { stdio: "inherit" });
@@ -226,6 +280,10 @@ exports.default = function adhocSign(context) {
     keychainPath,
     timestamp,
   }), { stdio: "inherit" });
+  // The upstream gog release carries an invalid embedded signature and must
+  // be re-signed. Its whole-file hash consequently changes; reject any changed
+  // executable payload or invalid final signature before builder emits a ZIP.
+  verifySignedPackagedGog(appPath, targetArch);
   console.log(`  • ${mode} signed  ${appPath}`);
 };
 
@@ -239,3 +297,6 @@ exports.writeReleaseMarker = writeReleaseMarker;
 exports.shouldSignMachO = shouldSignMachO;
 exports.inspectCodeSignature = inspectCodeSignature;
 exports.verifyPackagedSqlite = verifyPackagedSqlite;
+exports.verifyPackagedGogSource = verifyPackagedGogSource;
+exports.verifySignedPackagedGog = verifySignedPackagedGog;
+exports.packagedWorkspaceManifest = packagedWorkspaceManifest;

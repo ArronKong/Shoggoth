@@ -6,7 +6,7 @@ import { ApiError, getPluginCatalogPage, getPluginMcpStatus, getPluginMcpTools,
   getPluginOperation,
   requestPluginMcpConsent, discoverPluginMcpTools, previewPluginUninstall, uninstallPlugin,
   installSelectedPlugin, listAgents, revokeAllPluginMcpGrants,
-  revokePluginMcpGrant, selectPluginPackage, selectRemotePluginPackage,
+  revokePluginMcpGrant,
   selectPluginAccount,
   setPluginInstallationState,
   type PluginCatalogItem, type PluginCatalogPage, type PluginInstallPreview,
@@ -14,22 +14,31 @@ import { ApiError, getPluginCatalogPage, getPluginMcpStatus, getPluginMcpTools,
   type PluginUninstallPreview } from "../api/client";
 import type { BundledPluginItem } from "../api/client";
 import { PageHead } from "../components/PageHead";
+import Modal from "../components/Modal";
 import BackendTabs from "../components/BackendTabs";
 import { useBackendCatalog, useBackendState } from "../lib/backends";
-import { useNavigationRequest } from "../lib/navigation-guard";
 import styles from "./PluginsPage.module.css";
 import { ExternalPluginsPanel } from "./ExternalPluginsPanel";
 import { PluginOAuthConnect } from "./PluginOAuthConnect";
 import { PluginBearerConnect } from "./PluginBearerConnect";
+import { PluginZoomRegistration } from "./PluginZoomRegistration";
+import { PluginDropboxRegistration } from "./PluginDropboxRegistration";
+import { PluginGraphRegistration, isGraphRegistrationPackage } from "./PluginGraphRegistration";
+import { PluginLovableRegistration } from "./PluginLovableRegistration";
+import { PluginHiggsfieldRegistration } from "./PluginHiggsfieldRegistration";
+import { PluginSlackRegistration } from "./PluginSlackRegistration";
+import { PluginGmailRegistration } from "./PluginGmailRegistration";
+import { PluginGmailConnect } from "./PluginGmailConnect";
 import { PluginDependencyControl } from "./PluginDependencyControl";
 import { PluginRollbackControl } from "./PluginRollbackControl";
+import { PluginQuickSetup } from "./PluginQuickSetup";
 import { PluginConnectionControl } from "./PluginConnectionControl";
 import { PluginExternalActivity } from "./PluginExternalActivity";
 import { BundledPluginDetailDialog } from "./BundledPluginDetailDialog";
+import { graphReadOnlyCopy } from "./graphReadOnlyCopy";
 
 const PENDING_INSTALL_KEY = "shoggoth.plugin.pending-install.v1";
 const PENDING_MANAGEMENT_KEY = "shoggoth.plugin.pending-management.v1";
-const LIBRARY_VIEW_KEY = "shoggoth.plugin.library-view.v1";
 const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const INSTALLATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const BUNDLED_GROUPS = [
@@ -114,6 +123,7 @@ function installationStatusKey(item: PluginCatalogItem): string {
   if (item.components.some(component => component.state === "ready")) return "plugins.capabilityReady";
   if (item.components.some(component => component.state === "permission_required")) return "plugins.capabilityPermissionRequired";
   if (item.components.some(component => component.state === "connection_required")) return "plugins.capabilityConnectionRequired";
+  if (item.components.some(component => component.state === "secret_required")) return "plugins.capabilitySecretRequired";
   return "plugins.adapterPending";
 }
 
@@ -146,6 +156,7 @@ export default function PluginsPage() {
   const targetInstallationId = requestedId && INSTALLATION_ID.test(requestedId) ? requestedId : null;
   const focusApprovals = new URLSearchParams(location.search).get("focus") === "approvals";
   const [backend, setBackend] = useBackendState("plugins");
+  const [installDialogOpen, setInstallDialogOpen] = useState(() => Boolean(storedInstallOperation()));
   const backends = useBackendCatalog();
   const backendName = backends.find(item => item.id === backend)?.name || backend;
   useEffect(() => {
@@ -159,32 +170,29 @@ export default function PluginsPage() {
     {/* Keep pending consent, connection and install receipts mounted across tabs. */}
     <div hidden={backend !== "shoggoth"} data-plugin-host="shoggoth">
       <NativePluginsPanel targetInstallationId={targetInstallationId}
-        focusApprovals={focusApprovals} active={backend === "shoggoth"} />
+        focusApprovals={focusApprovals} active={backend === "shoggoth"}
+        installDialogOpen={installDialogOpen} onInstallDialogOpenChange={setInstallDialogOpen} />
     </div>
     {backend !== "shoggoth" && <ExternalPluginsPanel key={backend} backend={backend} backendName={backendName} />}
   </div>;
 }
 
-function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
+function NativePluginsPanel({ targetInstallationId, focusApprovals, active,
+  installDialogOpen, onInstallDialogOpenChange }: {
   targetInstallationId: string | null; focusApprovals: boolean; active: boolean;
+  installDialogOpen: boolean; onInstallDialogOpenChange: (open: boolean) => void;
 }) {
   const mcpStatusAgentId = useRef("");
   const { t } = useTranslation();
-  const navigate = useNavigationRequest();
   const [catalog, setCatalog] = useState<PluginCatalogPage | null>(null);
   const [bundled, setBundled] = useState<BundledPluginItem[]>([]);
+  const [bundledLoading, setBundledLoading] = useState(true);
   const [bundledError, setBundledError] = useState(false);
   const [detailItem, setDetailItem] = useState<BundledPluginItem | null>(null);
   const detailOpener = useRef<HTMLButtonElement | null>(null);
   const targetItemRef = useRef<HTMLLIElement | null>(null);
   const [managementTarget, setManagementTarget] = useState(targetInstallationId);
-  const [libraryView, setLibraryView] = useState<"available" | "installed">(() => {
-    if (targetInstallationId || focusApprovals) return "installed";
-    try { return localStorage.getItem(LIBRARY_VIEW_KEY) === "installed" ? "installed" : "available"; }
-    catch { return "available"; }
-  });
-  const [libraryQuery, setLibraryQuery] = useState("");
-  const [libraryCategory, setLibraryCategory] = useState("");
+  const [managedPluginId, setManagedPluginId] = useState<string | null>(targetInstallationId);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(false);
@@ -193,11 +201,10 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
   } | null>(null);
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const [previewing, setPreviewing] = useState(false);
-  const [gitSourceOpen, setGitSourceOpen] = useState(false);
-  const [gitUrl, setGitUrl] = useState("");
-  const [gitCommit, setGitCommit] = useState("");
-  const [gitSubdir, setGitSubdir] = useState("");
   const [installing, setInstalling] = useState(false);
+  const [installName, setInstallName] = useState("");
+  const [checkingOperation, setCheckingOperation] = useState(false);
+  const installStatusRef = useRef<HTMLDivElement>(null);
   const [lastOperationId, setLastOperationId] = useState(storedInstallOperation);
   const [installNotice, setInstallNotice] = useState<"completed" | "failed"
     | "updateRequiresDisable" | "unknown" | null>(
@@ -224,35 +231,44 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
     && catalog.reasonCode !== "PLUGIN_UNSUPPORTED");
 
   useEffect(() => {
-    try { localStorage.setItem(LIBRARY_VIEW_KEY, libraryView); }
-    catch { /* The in-memory tab selection remains usable. */ }
-  }, [libraryView]);
-
-  useEffect(() => {
     setManagementTarget(targetInstallationId);
-    if (targetInstallationId) setLibraryView("installed");
+    if (targetInstallationId) {
+      setManagedPluginId(targetInstallationId);
+      setDetailItem(null);
+      onInstallDialogOpenChange(true);
+    }
   }, [targetInstallationId]);
   useEffect(() => {
-    if (!focusApprovals) return;
-    setLibraryView("installed");
-    if (!active || libraryView !== "installed") return;
+    if (!focusApprovals || !active) return;
     const frame = requestAnimationFrame(() => {
       document.getElementById("plugins-external-approvals")?.scrollIntoView({ block: "start" });
     });
     return () => cancelAnimationFrame(frame);
-  }, [focusApprovals, active, libraryView]);
+  }, [focusApprovals, active]);
 
   useEffect(() => {
-    if (libraryView !== "installed" || !targetItemRef.current) return;
+    if (!active || !installDialogOpen || !managedPluginId || !targetItemRef.current) return;
+    const details = targetItemRef.current.querySelector("details");
+    if (details) details.open = true;
     targetItemRef.current.scrollIntoView({ block: "center" });
     targetItemRef.current.focus({ preventScroll: true });
-  }, [libraryView, managementTarget, catalog?.items]);
+  }, [active, installDialogOpen, managedPluginId, managementTarget, catalog?.items]);
+
+  useEffect(() => {
+    if (!active || !installDialogOpen) return;
+    const frame = requestAnimationFrame(() => {
+      if (previewing || installing || installNotice) installStatusRef.current?.focus();
+      else if (selection) previewPanelRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, installDialogOpen, previewing, installing, installNotice, selection]);
 
   useEffect(() => {
     let active = true;
     void getBundledPlugins().then(result => {
       if (active) { setBundled(result.items); setBundledError(false); }
-    }).catch(() => { if (active) setBundledError(true); });
+    }).catch(() => { if (active) setBundledError(true); })
+      .finally(() => { if (active) setBundledLoading(false); });
     return () => { active = false; };
   }, []);
 
@@ -274,19 +290,12 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
   useEffect(() => {
     if (!lastOperationId || installNotice !== "unknown") return;
     let active = true;
-    void getPluginOperation(lastOperationId).then((receipt) => {
+    void getPluginOperation(lastOperationId).then(async (receipt) => {
       if (!active) return;
       if (receipt.operation?.phase === "completed") {
-        setInstallNotice("completed");
-        saveInstallOperation(null);
-        setLastOperationId(null);
-        void catalogThroughInstallation(managementTarget).then((page) => {
-          if (active) setCatalog(page);
-        }).catch(() => { if (active) setError(true); });
+        await finishInstall("completed");
       } else if (receipt.operation?.phase === "failed") {
-        setInstallNotice(installFailureNotice(receipt.operation));
-        saveInstallOperation(null);
-        setLastOperationId(null);
+        await finishInstall(installFailureNotice(receipt.operation));
       }
     }).catch(() => { /* Keep the receipt action available. */ });
     return () => { active = false; };
@@ -384,12 +393,15 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
   };
 
   const refreshCatalog = async () => {
-    const [page, bundledPage] = await Promise.all([
+    const [page, bundledPage] = await Promise.allSettled([
       catalogThroughInstallation(managementTarget), getBundledPlugins(),
     ]);
-    setCatalog(page);
-    setBundled(bundledPage.items);
-    setBundledError(false);
+    if (bundledPage.status === "fulfilled") {
+      setBundled(bundledPage.value.items);
+      setBundledError(false);
+    } else setBundledError(true);
+    if (page.status === "rejected") throw page.reason;
+    setCatalog(page.value);
     setError(false);
   };
 
@@ -557,62 +569,99 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
         expectedRevision, operationId }));
   };
 
-  const choosePackage = async (remote = false) => {
-    if (previewing || installing || installNotice === "unknown" || managementPending) return;
-    setPreviewing(true);
-    setInstallNotice(null);
-    try {
-      const chosen = remote ? await selectRemotePluginPackage({ repositoryUrl: gitUrl.trim(),
-        commit: gitCommit.trim(), subdir: gitSubdir.trim() || null }) : await selectPluginPackage();
-      if (!chosen.canceled && chosen.preview) {
-        setSelection({ handle: chosen.selectionHandle ?? null, preview: chosen.preview });
-      }
-    } catch {
-      setInstallNotice("failed");
-    } finally {
-      setPreviewing(false);
+  const focusDialogBeforeStep = () => {
+    // Keep focus on a mounted element while replacing the popup's contents.
+    // Base UI otherwise recovers focus from a removed button after our step focus.
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.closest<HTMLElement>('[role="dialog"]')?.focus();
     }
   };
 
   const chooseBundled = async (packageId: string) => {
     if (previewing || installing || installNotice === "unknown" || managementPending) return;
+    focusDialogBeforeStep();
+    setDetailItem(null);
+    setManagedPluginId(null);
+    onInstallDialogOpenChange(true);
     setPreviewing(true);
     setInstallNotice(null);
+    setInstallName("");
+    setSelection(null);
     try {
       const chosen = await previewBundledPlugin(packageId);
       if (!chosen.canceled && chosen.preview) {
         setSelection({ handle: chosen.selectionHandle, preview: chosen.preview, bundleId: packageId });
-        setLibraryView("installed");
-        requestAnimationFrame(() => previewPanelRef.current?.focus());
       }
     } catch { setInstallNotice("failed"); }
-    finally { setPreviewing(false); }
+    finally { focusDialogBeforeStep(); setPreviewing(false); }
   };
 
-  const selectedBundle = selection?.bundleId
+  const withInstallationState = (item: BundledPluginItem): BundledPluginItem => {
+    const installed = catalog?.items.find(entry => entry.installationId === item.installationId
+      || entry.sourceKind === "bundled" && entry.packageName === item.id);
+    return installed ? { ...item, installationState: installed.desiredState } : item;
+  };
+  const selectedBundleItem = selection?.bundleId
     ? bundled.find(item => item.id === selection.bundleId) : null;
+  const selectedBundle = selectedBundleItem ? withInstallationState(selectedBundleItem) : null;
   const bundledCurrent = Boolean(selectedBundle?.installedReleaseDigest
     && selectedBundle.installedReleaseDigest === selection?.preview.previewDigest);
   const bundledNeedsDisable = Boolean(selectedBundle?.installationState === "enabled"
     && !bundledCurrent);
 
+  const finishInstall = async (notice: "completed" | "failed" | "updateRequiresDisable") => {
+    setInstallNotice(notice);
+    saveInstallOperation(null);
+    setLastOperationId(null);
+    if (notice === "completed") {
+      try { await refreshCatalog(); }
+      catch { setError(true); }
+    }
+  };
+
+  const closeInstallDialog = () => {
+    if (installing || previewing || checkingOperation) return;
+    onInstallDialogOpenChange(false);
+    setDetailItem(null);
+    setManagedPluginId(null);
+    setSelection(null);
+    setUninstallPreview(null);
+    if (installNotice !== "unknown") setInstallNotice(null);
+  };
+
+  const backToLibrary = () => {
+    setSelection(null);
+    setDetailItem(null);
+    setInstallNotice(null);
+    closeInstallDialog();
+  };
+
+  const openManagement = (installationId: string, opener?: HTMLButtonElement) => {
+    if (opener) detailOpener.current = opener;
+    setDetailItem(null);
+    setManagementTarget(installationId);
+    setManagedPluginId(installationId);
+    onInstallDialogOpenChange(true);
+  };
+
   const installPackage = async () => {
-    if (!selection?.handle || !selection.preview.installable || installing
-      || managementPending || bundledCurrent || bundledNeedsDisable) return;
+    if (!selection?.handle || !selection.preview.installable || installing || previewing
+      || installNotice === "unknown" || managementPending || bundledCurrent || bundledNeedsDisable) return;
+    focusDialogBeforeStep();
     const operationId = window.crypto.randomUUID();
     setLastOperationId(operationId);
     saveInstallOperation(operationId);
     setInstalling(true);
+    setInstallName(selection.preview.name);
     setInstallNotice(null);
     try {
       const result = await installSelectedPlugin({ selectionHandle: selection.handle,
         previewDigest: selection.preview.previewDigest,
         expectedRevision: selection.preview.expectedRevision, operationId });
       if (result.operation.phase === "completed") {
-        setInstallNotice("completed");
-        saveInstallOperation(null);
-        setLastOperationId(null);
-        await refreshCatalog();
+        await finishInstall("completed");
+      } else if (result.operation.phase === "failed") {
+        await finishInstall(installFailureNotice(result.operation));
       } else setInstallNotice("unknown");
     } catch (failure) {
       // A transport failure after Service acceptance has an unknown outcome.
@@ -620,205 +669,426 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
       try {
         const receipt = await getPluginOperation(operationId);
         if (receipt.operation?.phase === "completed") {
-          setInstallNotice("completed");
-          saveInstallOperation(null);
-          setLastOperationId(null);
-          await refreshCatalog();
+          await finishInstall("completed");
         } else if (receipt.operation?.phase === "failed") {
-          setInstallNotice(installFailureNotice(receipt.operation));
-          saveInstallOperation(null);
-          setLastOperationId(null);
+          await finishInstall(installFailureNotice(receipt.operation));
         } else if (failure instanceof ApiError
           && [400, 403, 404, 409, 413].includes(failure.status)) {
-          setInstallNotice(failure.code === "PLUGIN_UPDATE_REQUIRES_DISABLE"
+          await finishInstall(failure.code === "PLUGIN_UPDATE_REQUIRES_DISABLE"
             ? "updateRequiresDisable" : "failed");
-          saveInstallOperation(null);
-          setLastOperationId(null);
         } else setInstallNotice("unknown");
       } catch {
         setInstallNotice("unknown");
       }
     } finally {
+      focusDialogBeforeStep();
       setSelection(null);
       setInstalling(false);
     }
   };
 
   const checkOperation = async () => {
-    if (!lastOperationId) return;
+    if (!lastOperationId || checkingOperation) return;
+    setCheckingOperation(true);
     try {
       const receipt = await getPluginOperation(lastOperationId);
       if (receipt.operation?.phase === "completed") {
-        setInstallNotice("completed");
-        saveInstallOperation(null);
-        setLastOperationId(null);
-        await refreshCatalog();
+        await finishInstall("completed");
       } else if (receipt.operation?.phase === "failed") {
-        setInstallNotice(installFailureNotice(receipt.operation));
-        saveInstallOperation(null);
-        setLastOperationId(null);
+        await finishInstall(installFailureNotice(receipt.operation));
       }
       else setInstallNotice("unknown");
     } catch {
       setInstallNotice("unknown");
-    }
+    } finally { setCheckingOperation(false); }
   };
 
-  const normalizedLibraryQuery = libraryQuery.trim().toLocaleLowerCase();
   const bundledGroups = BUNDLED_GROUPS.map(group => {
-    const items = bundled.filter(item => bundledGroupId(item.category) === group.id);
-    const label = t(group.label);
-    return { id: group.id, label, items, visible: items.filter(item =>
-      (!libraryCategory || libraryCategory === group.id)
-      && `${item.displayName} ${item.shortDescription} ${item.category} ${label}`
-        .toLocaleLowerCase().includes(normalizedLibraryQuery))
-      .sort((left, right) => left.displayName.localeCompare(right.displayName, "en")) };
+    const items = bundled.filter(item => bundledGroupId(item.category) === group.id)
+      .sort((left, right) => left.displayName.localeCompare(right.displayName, "en"));
+    return { id: group.id, label: t(group.label), items };
   }).filter(group => group.items.length > 0);
-  const visibleBundledCount = bundledGroups.reduce((count, group) => count + group.visible.length, 0);
+
+  const installBusy = previewing || installing || checkingOperation;
+  const unlistedInstalled = catalog?.supported ? catalog.items.filter(item =>
+    !bundled.some(bundle => bundle.installationId === item.installationId
+      || item.sourceKind === "bundled" && item.packageName === bundle.id)) : [];
+  const currentDetail = detailItem && withInstallationState(bundled.find(item => item.id === detailItem.id) || detailItem);
+  const managementItem = catalog?.items.find(item => item.installationId === managedPluginId);
 
   return <>
-      <div className={styles.libraryTabs} role="tablist" aria-label={t("plugins.libraryTabsLabel")}
-        onKeyDown={event => {
-          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          event.preventDefault();
-          const next = libraryView === "available" ? "installed" : "available";
-          setLibraryView(next);
-          const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>("button[role=tab]");
-          buttons[next === "available" ? 0 : 1]?.focus();
-        }}>
-        <button type="button" role="tab" aria-selected={libraryView === "available"}
-          tabIndex={libraryView === "available" ? 0 : -1}
-          onClick={() => setLibraryView("available")}>{t("plugins.availableLibrary")}</button>
-        <button type="button" role="tab" aria-selected={libraryView === "installed"}
-          tabIndex={libraryView === "installed" ? 0 : -1}
-          onClick={() => setLibraryView("installed")}>{t("plugins.installedLibrary")}</button>
-      </div>
-      {libraryView === "available" && <section className={styles.bundledLibrary} aria-label={t("plugins.availableLibrary")}>
-        <p className={styles.libraryIntro}>{t("plugins.bundledIntro", { count: bundled.length })}</p>
-        <div className={styles.libraryFilters}>
-          <label className={styles.librarySearch} htmlFor="plugin-library-search">
-            <span>{t("plugins.searchLibrary")}</span>
-            <input id="plugin-library-search" type="search" value={libraryQuery}
-              onChange={event => setLibraryQuery(event.target.value)} placeholder={t("plugins.searchLibraryPlaceholder")} />
-          </label>
-          <label className={styles.libraryCategory} htmlFor="plugin-library-category">
-            <span>{t("plugins.filterCategory")}</span>
-            <select id="plugin-library-category" value={libraryCategory}
-              onChange={event => setLibraryCategory(event.target.value)}>
-              <option value="">{t("plugins.allCategories")}</option>
-              {bundledGroups.map(group => <option key={group.id} value={group.id}>
-                {group.label} ({group.items.length})
-              </option>)}
-            </select>
-          </label>
-        </div>
-        {bundledError && <p role="status">{t("plugins.bundledUnavailable")}</p>}
-        {!bundledError && bundled.length > 0 && visibleBundledCount === 0
-          && <p className={styles.libraryEmpty} role="status">{t("plugins.libraryNoResults")}</p>}
-        <div className={styles.bundledGroups}>
-          {bundledGroups.filter(group => group.visible.length > 0).map(group =>
-            <section className={styles.bundledGroup} key={group.id} data-plugin-group={group.id}
-              aria-labelledby={`plugin-group-${group.id}`}>
-              <div className={styles.bundledGroupHeading}>
-                <h2 id={`plugin-group-${group.id}`}>{group.label}</h2>
-                <span aria-label={t("plugins.bundledGroupCount", { count: group.visible.length })}>
-                  {group.visible.length}
-                </span>
-              </div>
-              <div className={styles.bundledGrid}>
-                {group.visible.map(item => <article className={styles.bundledCard} key={item.id}>
-                  <button className={styles.bundledCardOpen} type="button"
-                    aria-label={t("plugins.detailOpen", { name: item.displayName })}
-                    onClick={event => { detailOpener.current = event.currentTarget; setDetailItem(item); }}>
-                    <div className={styles.bundledCardTop}>
-                      {item.iconAvailable
-                        ? <img className={styles.bundledIcon} src={`/__api/plugins/bundled-icon/${item.id}`}
-                          alt="" loading="lazy" />
-                        : <span className={styles.bundledIconFallback} aria-hidden="true" />}
-                      <div className={styles.bundledTitle}><strong>{item.displayName}</strong><span>{item.category}</span></div>
-                    </div>
-                    <p>{item.shortDescription}</p>
-                    <div className={styles.bundledMeta}>
-                      {item.components.skills > 0 && item.converted && <span>{t("plugins.bundledSkillCoverage", {
-                        converted: item.converted.skills, total: item.components.skills })}</span>}
-                      {item.components.mcp > 0 && item.converted && <span>{t("plugins.bundledMcpCoverage", {
-                        converted: item.converted.mcp, total: item.components.mcp })}</span>}
-                      {item.components.apps > 0 && <span>{t("plugins.bundledConnectorPending", {
-                        count: item.components.apps })}</span>}
-                    </div>
-                    <span className={styles.bundledCardHint}>{t("plugins.detailView")}
-                      <span aria-hidden="true"> ↗</span></span>
-                  </button>
-                  <div className={styles.bundledCardBottom}>
-                    <span>{item.installationState === "not-installed"
-                      ? t("plugins.notInstalled") : item.installationState === "enabled"
-                        ? t("plugins.desiredEnabled") : t("plugins.disabled")}</span>
-                    <button className="btn-secondary" type="button"
-                      disabled={item.importStatus !== "previewable" || previewing || installing
-                        || installNotice === "unknown" || managementPending !== null}
-                      onClick={() => void chooseBundled(item.id)}>
-                      {item.importStatus !== "previewable" ? t("plugins.adapterPending")
-                        : item.installationState !== "not-installed" ? t("plugins.checkBundledUpdate")
-                          : t("plugins.installBundled")}
-                    </button>
-                  </div>
-                </article>)}
-              </div>
-            </section>)}
-        </div>
-      </section>}
-      {detailItem && <BundledPluginDetailDialog key={detailItem.id} item={detailItem}
-        busy={previewing || installing || installNotice === "unknown" || managementPending !== null}
-        returnFocusTo={detailOpener.current} onClose={() => setDetailItem(null)}
-        onPreview={id => { setDetailItem(null); void chooseBundled(id); }}
-        onManage={installationId => {
-          setDetailItem(null);
-          setManagementTarget(installationId);
-          setLibraryView("installed");
-        }} />}
-      <div className={styles.grid} hidden={libraryView !== "installed"}>
-        <section className={styles.card} aria-labelledby="plugins-skills-heading">
-          <div className={styles.cardHeading}>
-            <h2 id="plugins-skills-heading">{t("plugins.skillsTitle")}</h2>
-            <span className={styles.available}>{t("plugins.available")}</span>
+      <Modal open={active && installDialogOpen}
+        title={uninstallPreview ? t("plugins.uninstallTitle") : detailItem
+          ? t("plugins.pluginDetails") : managedPluginId
+            ? managementItem?.packageName || t("plugins.managePlugin") : t("plugins.installDialogTitle")}
+        width={880} className={styles.installDialog}
+        dismissible={!installBusy} onClose={closeInstallDialog}
+        onOpenChangeComplete={open => {
+          if (!open) {
+            const opener = detailOpener.current;
+            detailOpener.current = null;
+            if (opener?.isConnected) opener.focus();
+          }
+        }}
+        footer={uninstallPreview ? <>
+          <button className="btn-secondary" type="button" onClick={() => setUninstallPreview(null)}>
+            {t("plugins.cancelPreview")}</button>
+          <button className="btn-danger" type="button"
+            disabled={uninstallPreview.requiresDisable || managementPending !== null}
+            onClick={() => void confirmUninstall()}>{t("plugins.uninstallConfirm")}</button>
+        </> : !previewing && !installing && !detailItem && !managedPluginId && (selection && !installNotice
+          ? <>
+            <button className="btn-secondary" type="button" onClick={backToLibrary}>
+              {t("plugins.backToLibrary")}</button>
+            <button className="btn-primary" type="button"
+              disabled={!selection.handle || !selection.preview.installable || installBusy
+                || managementPending !== null || bundledCurrent || bundledNeedsDisable}
+              onClick={() => void installPackage()}>
+              {t(selection.preview.sourceKind === "bundled"
+                ? selectedBundle?.installationState !== "not-installed"
+                  ? "plugins.installBundledUpdate" : "plugins.installBundledConfirm"
+                : "plugins.installDisabled")}
+            </button>
+          </>
+          : installNotice && <>
+            {installNotice === "unknown"
+              ? <button className="btn-primary" type="button" disabled={checkingOperation}
+                  onClick={() => void checkOperation()}>
+                  {t(checkingOperation ? "plugins.checkingOperation" : "plugins.checkOperation")}</button>
+              : <button className="btn-secondary" type="button" onClick={backToLibrary}>
+                  {t(installNotice === "completed" ? "plugins.installAnother" : "plugins.retryInstall")}</button>}
+            <button className={installNotice === "completed" ? "btn-primary" : "btn-secondary"}
+              type="button" disabled={checkingOperation} onClick={closeInstallDialog}>
+              {t(installNotice === "completed" ? "plugins.installDone" : "common.close")}</button>
+          </>)}>
+        {uninstallPreview && <>
+          <p>{t("plugins.uninstallImpact", { agents: uninstallPreview.affectedAgentCount,
+            bindings: uninstallPreview.bindingCount })}</p>
+          <p>{t("plugins.uninstallRetained")}</p>
+          {uninstallPreview.requiresDisable && <p>{t("plugins.uninstallDisableFirst")}</p>}
+        </>}
+        {!uninstallPreview && managedPluginId && !installNotice && <>
+          <div className={styles.grid}>
+            <section className={styles.installedCatalog} aria-label={t("plugins.myPlugins")}>
+              {managementNotice && <div className={styles.catalogMessage} role="status">
+                {managementNotice === "completed" ? t("plugins.managementCompleted")
+                  : managementNotice === "deferred" ? t(managementPending?.kind === "uninstall"
+                    ? "plugins.uninstallDeferred" : "plugins.managementDeferred")
+                    : managementNotice === "closeFailed" ? t("plugins.managementCloseFailed")
+                  : managementNotice === "failed" ? t("plugins.managementFailed")
+                    : t("plugins.managementUnknown")}
+                {managementNotice === "unknown" && <button className="btn-secondary" type="button"
+                  onClick={() => void checkManagementOperation()}>
+                  {t("plugins.checkOperation")}
+                </button>}
+                {(managementNotice === "deferred" || managementNotice === "closeFailed")
+                  && (managementPending?.installation?.desiredState === "disabled" || managementPending?.uninstall)
+                  && <button className="btn-secondary" type="button"
+                    disabled={managementRetrying}
+                    onClick={() => void retryManagement()}>
+                    {managementRetrying ? t("plugins.retryingDisable") : managementPending?.uninstall
+                      ? t("plugins.retryUninstall") : t("plugins.retryDisable")}
+                  </button>}
+              </div>}
+              {loading && <div className={styles.catalogMessage}>{t("plugins.loading")}</div>}
+              {catalogUnavailable && <div className={styles.catalogMessage} role="status">
+                {t("plugins.catalogUnavailable")}
+              </div>}
+              {!loading && managementTarget && catalog?.supported && catalog.nextCursor === null
+                && !catalog.items.some(item => item.installationId === managementTarget)
+                && <div className={styles.catalogMessage} role="status">
+                  {t("plugins.managementTargetMissing")}
+                </div>}
+              {!loading && catalog?.supported && managedPluginId
+                && !catalog.items.some(item => item.installationId === managedPluginId)
+                && <p className={styles.catalogMessage}>{t("plugins.managementTargetMissing")}</p>}
+              {catalog?.supported && catalog.items.length > 0 && (
+                <div className={styles.agentChoice}>
+                  {selectedAgentId ? t("plugins.globalMcpConnections") : t("plugins.noAgentsForConnection")}
+                </div>)}
+              {catalog?.supported && catalog.items.length > 0 && (
+                <ul className={styles.packageList}>
+                  {catalog.items.filter(item => item.installationId === managedPluginId).map((item) => (
+                    <li className={styles.packageItem} key={item.installationId}
+                      ref={managementTarget === item.installationId ? targetItemRef : undefined}
+                      tabIndex={managementTarget === item.installationId ? -1 : undefined}
+                      data-targeted={managementTarget === item.installationId ? "true" : undefined}>
+                      <div className={styles.packageHeading}>
+                        <strong>{item.packageName}</strong>
+                        <span>{t(installationStatusKey(item))}</span>
+                      </div>
+                      <div className={styles.packageMeta}>
+                        {item.sourceKind === "bundled" ? t("plugins.bundledSource")
+                          : item.sourceKind === "first-party" ? t("plugins.firstPartySource")
+                          : item.sourceKind === "legacy-directory" ? t("plugins.legacySource")
+                          : ["git", "remote-git"].includes(item.sourceKind) ? t("plugins.gitSource")
+                          : t("plugins.localSource")}
+                        {item.declaredVersion ? ` · ${item.declaredVersion}` : ""}
+                        {` · ${t("plugins.componentCount", { count: item.components.length })}`}
+                      </div>
+                      <button className="btn-secondary btn-sm" type="button"
+                        disabled={managementPending !== null || installing || previewing
+                          || installNotice === "unknown"}
+                        onClick={() => void togglePackage(item)}>
+                        {item.desiredState === "enabled" ? t("plugins.disablePackage")
+                          : t("plugins.enablePackage")}
+                      </button>
+                      <button className="btn-secondary btn-sm" type="button"
+                        disabled={managementPending !== null || installing || previewing || installNotice === "unknown"}
+                        onClick={() => void inspectUninstall(item)}>{t("plugins.uninstallTitle")}</button>
+                      <details className={styles.packageDetails} open>
+                        <summary>{t("plugins.managePlugin")}</summary>
+                      <PluginRollbackControl installationId={item.installationId} revision={item.revision}
+                        enabled={item.desiredState === "enabled"} disabled={managementPending !== null || installing || previewing || installNotice === "unknown"}
+                        onChanged={refreshCatalog} />
+                      {selectedAgentId && <PluginQuickSetup agentId={selectedAgentId} installationId={item.installationId}
+                        revision={item.revision} disabled={managementPending !== null || installing || previewing || installNotice === "unknown"}
+                        onChanged={() => { void refreshCatalog().catch(() => setError(true)); }} />}
+                      <ul className={styles.componentList}>
+                        {item.components.slice(0, 6).map((component) => (
+                          <li key={component.componentId}>{component.title}</li>
+                        ))}
+                      </ul>
+                      {item.sourceKind === "bundled" && item.packageName === "zoom"
+                        && <PluginZoomRegistration />}
+                      {item.sourceKind === "bundled" && item.packageName === "dropbox"
+                        && <PluginDropboxRegistration />}
+                      {item.sourceKind === "bundled" && ["google-calendar", "google-drive"].includes(item.packageName)
+                        && <p id={`plugin-oauth-deferred-${item.installationId}`}>{t("plugins.googleWorkspaceDeferred")}</p>}
+                      {item.sourceKind === "bundled" && item.packageName === "higgsfield"
+                        && <><p>{t("plugins.higgsfieldAcceptancePending")}</p>
+                          <PluginHiggsfieldRegistration /></>}
+                      {item.sourceKind === "bundled" && item.packageName === "shopify"
+                        && <p id={`plugin-oauth-deferred-${item.installationId}`}>{t("plugins.shopifyAuthorizationPending")}</p>}
+                      {item.sourceKind === "bundled" && isGraphRegistrationPackage(item.packageName)
+                        && <PluginGraphRegistration packageId={item.packageName} />}
+                      {selectedAgentId && item.components.some((component) =>
+                        component.kind === "mcp-server") && <ul className={styles.mcpStatusList}>
+                        {item.components.filter((component) => component.kind === "mcp-server")
+                          .map((component) => {
+                            const status = mcpStatuses[item.installationId];
+                            const current = status?.items.find((entry) =>
+                              entry.componentId === component.componentId);
+                            const oauthDeferred = item.sourceKind === "bundled"
+                              && ["google-calendar", "google-drive", "shopify"]
+                                .includes(item.packageName);
+                            return <li key={component.componentId}>
+                              <strong>{component.title}</strong>
+                              {item.sourceKind === "bundled" && item.packageName === "figma"
+                                && <p>{t("plugins.figmaDesktopMcpSetup")}</p>}
+                              {component.transport === "stdio" && <PluginDependencyControl
+                                installationId={item.installationId} componentId={component.componentId} revision={item.revision}
+                                enabled={item.desiredState === "enabled"}
+                                disabled={managementPending !== null || installing || previewing} />}
+                              <span>{status === undefined ? t("plugins.mcpStatusLoading")
+                                : !current ? t("plugins.mcpStatusUnavailable")
+                                  : t("plugins.mcpVerifiedConnections", {
+                                    count: current.connections.verified })}</span>
+                              {current && <span>{current.binding
+                                ? `${t(current.binding.enabled ? "plugins.mcpBindingEnabled"
+                                  : "plugins.mcpBindingDisabled")} · ${t(
+                                    current.binding.connectionState === "ready"
+                                      ? "plugins.mcpSelectedVerified"
+                                      : "plugins.mcpSelectedUnverified")}`
+                                : t("plugins.mcpUnbound")}</span>}
+                              {current?.binding && current.accounts.length > 0 && <div className={styles.accountChoices}>
+                                <span>{t("plugins.selectedAccount", { account:
+                                  current.accounts.find(account => account.connectionId === current.binding!.connectionId)?.label
+                                    || t("plugins.mcpSelectedUnverified") })}</span>
+                                {current.accounts.filter(account => account.connectionId !== current.binding!.connectionId)
+                                  .map(account => <button className="btn-secondary" type="button"
+                                    key={account.connectionId}
+                                    disabled={managementPending !== null || installing || previewing
+                                      || item.desiredState !== "enabled"}
+                                    onClick={() => void selectAccount(current.binding!.bindingId,
+                                      account.connectionId, current.binding!.revision)}>
+                                    {t("plugins.selectAccount", { account: account.label })}
+                                  </button>)}
+                              </div>}
+                              {(component.transport === "stdio"
+                                && !(item.sourceKind === "bundled" && item.packageName === "gmail")
+                                || component.transport === "streamable-http"
+                                && item.sourceKind === "bundled" && item.packageName === "figma")
+                                && (!current?.binding?.enabled
+                                || current.binding.connectionState !== "ready") && <button className="btn-secondary" type="button"
+                                disabled={item.desiredState !== "enabled" || managementPending !== null || installing || previewing}
+                                onClick={() => void connectMcp(item, component.componentId)}>{t("plugins.mcpConnect")}</button>}
+                              {component.transport === "shoggoth-gogcli-gmail-mcp"
+                                && item.sourceKind === "bundled" && item.packageName === "gmail"
+                                && <PluginGmailRegistration showCapabilities
+                                  onCapabilitiesChanged={() => { setExpandedMcpBinding(null); setMcpTools(null);
+                                    void refreshCatalog().catch(() => setError(true)); }}>
+                                  <PluginGmailConnect key={`${selectedAgentId}:${component.componentId}`}
+                                    agentId={selectedAgentId} installationId={item.installationId}
+                                    componentId={component.componentId} revision={item.revision}
+                                    disabled={item.desiredState !== "enabled" || managementPending !== null
+                                      || installing || previewing}
+                                    connected={current?.binding?.connectionState === "ready"}
+                                    onReady={() => { void refreshCatalog().catch(() => setError(true)); }} />
+                                </PluginGmailRegistration>}
+                              {component.transport === "streamable-http"
+                                && item.sourceKind === "bundled" && item.packageName === "github"
+                                && component.title === "github" && <PluginBearerConnect
+                                key={`${selectedAgentId}:${component.componentId}`} agentId={selectedAgentId}
+                                installationId={item.installationId} componentId={component.componentId} revision={item.revision}
+                                disabled={item.desiredState !== "enabled" || managementPending !== null || installing || previewing}
+                                connected={current?.binding?.connectionState === "ready"}
+                                onReady={() => { void refreshCatalog().catch(() => setError(true)); }} />}
+                              {component.transport === "streamable-http"
+                                && item.sourceKind === "bundled" && item.packageName === "cloudflare"
+                                && component.title === "cloudflare-api" && <PluginBearerConnect
+                                key={`${selectedAgentId}:${component.componentId}`} agentId={selectedAgentId}
+                                installationId={item.installationId} componentId={component.componentId} revision={item.revision}
+                                provider="cloudflare"
+                                disabled={item.desiredState !== "enabled" || managementPending !== null || installing || previewing}
+                                connected={current?.binding?.connectionState === "ready"}
+                                onReady={() => { void refreshCatalog().catch(() => setError(true)); }} />}
+                              {component.transport === "shoggoth-graph" && <PluginOAuthConnect
+                                key={`${selectedAgentId}:${component.componentId}`} agentId={selectedAgentId}
+                                installationId={item.installationId} componentId={component.componentId} revision={item.revision}
+                                disabled={oauthDeferred || item.desiredState !== "enabled"
+                                  || managementPending !== null || installing || previewing}
+                                disabledReasonId={oauthDeferred ? `plugin-oauth-deferred-${item.installationId}` : undefined}
+                                connected={current?.binding?.connectionState === "ready"}
+                                onReady={() => { void refreshCatalog().catch(() => setError(true)); }} />}
+                              {component.transport === "streamable-http"
+                                && !(item.sourceKind === "bundled" && item.packageName === "github"
+                                  && component.title === "github")
+                                && !(item.sourceKind === "bundled" && item.packageName === "cloudflare"
+                                  && component.title === "cloudflare-api")
+                                && !(item.sourceKind === "bundled" && item.packageName === "figma")
+                                && <PluginOAuthConnect
+                                key={`${selectedAgentId}:${component.componentId}`} agentId={selectedAgentId}
+                                installationId={item.installationId} componentId={component.componentId} revision={item.revision}
+                                disabled={oauthDeferred || item.desiredState !== "enabled"
+                                  || managementPending !== null || installing || previewing}
+                                disabledReasonId={oauthDeferred ? `plugin-oauth-deferred-${item.installationId}` : undefined}
+                                connected={current?.binding?.connectionState === "ready"}
+                                onReady={() => { void refreshCatalog().catch(() => setError(true)); }} />}
+                              {current?.binding && <span>{t("plugins.mcpSavedGrants", {
+                                allow: current.binding.grants.allow,
+                                deny: current.binding.grants.deny })}</span>}
+                              {current?.binding && <PluginConnectionControl
+                                key={`${selectedAgentId}:${current.binding.bindingId}`} agentId={selectedAgentId}
+                                bindingId={current.binding.bindingId} revision={current.binding.revision}
+                                connected={current.binding.connectionState === "ready"}
+                                disabled={managementPending !== null || installing || previewing}
+                                onDisconnected={() => { setExpandedMcpBinding(null); setMcpTools(null);
+                                  void refreshCatalog().catch(() => setError(true)); }} />}
+                              {current?.binding && current.binding.grants.allow > 0
+                                && <button className="btn-secondary" type="button"
+                                  disabled={managementPending !== null || installing || previewing
+                                    || installNotice === "unknown"}
+                                  onClick={() => void revokeAllToolGrants(
+                                    current.binding!.bindingId, current.binding!.revision)}>
+                                  {t("plugins.mcpRevokeAllGrants")}
+                                </button>}
+                              {current?.binding && <button className="btn-secondary" type="button"
+                                disabled={mcpToolsLoading}
+                                onClick={() => void toggleMcpTools(current.binding!.bindingId)}>
+                                {expandedMcpBinding === current.binding.bindingId
+                                  ? t("plugins.mcpHideTools") : t("plugins.mcpShowTools")}
+                              </button>}
+                              {current?.binding && expandedMcpBinding === current.binding.bindingId
+                                && <div className={styles.mcpTools}>
+                                  {mcpToolsLoading && <span>{t("plugins.mcpToolsLoading")}</span>}
+                                  {mcpToolsError && <span role="status">
+                                    {t("plugins.mcpToolsUnavailable")}</span>}
+                                  {mcpTools && !mcpTools.available && <span>
+                                    {t("plugins.mcpCatalogNotReady")}</span>}
+                                  {mcpTools?.available && mcpTools.items.length === 0 && <span>
+                                    {t("plugins.mcpNoTools")}</span>}
+                                  {mcpTools?.available && item.sourceKind === "bundled"
+                                    && item.packageName === "github" && component.title === "github"
+                                    && <p className={styles.packageMeta}>
+                                      {mcpTools.referenceCoverage?.operations.length
+                                        ? <>{t("plugins.githubMcpPortableScope")}{" "}
+                                          {mcpTools.referenceCoverage.operations.map(capability =>
+                                            capability.id === "repository-file-read"
+                                              ? t("plugins.githubMcpFileRead")
+                                              : capability.id === "repository-file-write"
+                                                ? t("plugins.githubMcpFileWrite")
+                                                : capability.id === "repository-issue-read"
+                                                  ? t("plugins.githubMcpIssueRead")
+                                                  : capability.id === "repository-issue-comment"
+                                                    ? t("plugins.githubMcpIssueComment") : capability.id).join("、")}</>
+                                        : t("plugins.githubMcpNoFileOperations")}
+                                    </p>}
+                                  {mcpTools?.available && mcpTools.items.length > 0 &&
+                                    <ul className={styles.mcpToolList}>
+                                      {mcpTools.items.map((tool) => <li key={tool.toolIdentity}>
+                                        <span>{tool.name}</span>
+                                        {(!tool.savedGrant || tool.savedGrant.effect !== "allow"
+                                          || !tool.savedGrant.matchesCurrentContract || tool.savedGrant.expired)
+                                          && <><button className="btn-secondary" type="button"
+                                            disabled={managementPending !== null || installing || previewing}
+                                            onClick={() => void allowTool(current.binding!.bindingId, tool, "each-call")}>
+                                            {t("plugins.mcpAllowEachCall")}</button>
+                                            <button className="btn-secondary" type="button"
+                                              disabled={managementPending !== null || installing || previewing}
+                                              onClick={() => void allowTool(current.binding!.bindingId, tool, "always")}>
+                                              {t("plugins.mcpAllowTool")}</button></>}
+                                        <span>{!tool.savedGrant
+                                          ? t("plugins.mcpGrantNone")
+                                          : !tool.savedGrant.matchesCurrentContract
+                                            ? t("plugins.mcpGrantStale")
+                                            : tool.savedGrant.expired
+                                              ? t("plugins.mcpGrantExpired")
+                                            : tool.savedGrant.effect === "allow"
+                                              ? t(tool.savedGrant.approvalMode === "each-call"
+                                                ? "plugins.mcpGrantEachCall"
+                                                : "plugins.mcpGrantAllow")
+                                              : t("plugins.mcpGrantDeny")}</span>
+                                        {tool.savedGrant?.effect === "allow" &&
+                                          <button className="btn-secondary" type="button"
+                                            disabled={managementPending !== null || installing || previewing
+                                              || installNotice === "unknown"}
+                                            onClick={() => void revokeToolGrant(
+                                              current.binding!.bindingId, tool.toolIdentity,
+                                              tool.savedGrant!.revision)}>
+                                            {t("plugins.mcpRevokeGrant")}
+                                          </button>}
+                                      </li>)}
+                                    </ul>}
+                                </div>}
+                            </li>;
+                          })}
+                      </ul>}
+                      {item.components.some(component => component.kind === "skill")
+                        && <div className={styles.packageMeta}>{t("plugins.globalPluginSkills")}</div>}
+                      {item.components.length > 6 && <div className={styles.packageMeta}>
+                        {t("plugins.moreComponents", { count: item.components.length - 6 })}
+                      </div>}
+                      {item.diagnosticCount > 0 && <div className={styles.packageMeta}>
+                        {t("plugins.diagnostics", { count: item.diagnosticCount })}
+                      </div>}
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
           </div>
-          <p>{t("plugins.skillsDescription")}</p>
-          <button className="btn-secondary" type="button" onClick={() => navigate("/skills")}>
-            {t("plugins.openSkills")}
-          </button>
-        </section>
-        <section className={`${styles.card} ${styles.packages}`} aria-labelledby="plugins-packages-heading">
-          <div className={styles.cardHeading}>
-            <h2 id="plugins-packages-heading">{t("plugins.packagesTitle")}</h2>
-            <span className={styles.pending}>{catalog?.supported
-              ? t("plugins.localCatalog") : t("plugins.serviceUnavailable")}</span>
-          </div>
-          <p>{t("plugins.packagesDescription")}</p>
-          {catalog?.supported && <div className={styles.previewActions}><button className="btn-secondary" type="button"
-            disabled={previewing || installing || installNotice === "unknown"
-              || managementPending !== null}
-            onClick={() => void choosePackage()}>
-            {previewing ? t("plugins.choosing") : t("plugins.choosePackage")}
-          </button>
-          <button className="btn-secondary" type="button" aria-expanded={gitSourceOpen}
-            disabled={previewing || installing || installNotice === "unknown" || managementPending !== null}
-            onClick={() => setGitSourceOpen(value => !value)}>{t("plugins.gitAdd")}</button></div>}
-          {catalog?.supported && gitSourceOpen && <form className={styles.gitSourceForm} onSubmit={event => {
-            event.preventDefault(); void choosePackage(true);
-          }}>
-            <label htmlFor="plugin-git-url">{t("plugins.gitUrl")}</label>
-            <input id="plugin-git-url" type="url" value={gitUrl} required maxLength={2048} placeholder="https://example.org/team/plugin.git"
-              onChange={event => setGitUrl(event.target.value)} disabled={previewing || installing} />
-            <label htmlFor="plugin-git-commit">{t("plugins.gitCommit")}</label>
-            <input id="plugin-git-commit" value={gitCommit} required pattern="(?:[a-f0-9]{40}|[a-f0-9]{64})" maxLength={64}
-              onChange={event => setGitCommit(event.target.value)} disabled={previewing || installing} />
-            <label htmlFor="plugin-git-subdir">{t("plugins.gitSubdir")}</label>
-            <input id="plugin-git-subdir" value={gitSubdir} maxLength={512} placeholder="plugins/example"
-              onChange={event => setGitSubdir(event.target.value)} disabled={previewing || installing} />
-            <p>{t("plugins.gitScope")}</p>
-            <button className="btn-secondary" type="submit" disabled={previewing || installing || installNotice === "unknown"
-              || managementPending !== null}>{previewing ? t("plugins.choosing") : t("plugins.gitPreview")}</button>
-          </form>}
+        </>}
+        {(previewing || installing) && <div ref={installStatusRef} tabIndex={-1}
+          className={styles.installStatus} role="status" aria-live="polite">
+          <span className={styles.installSpinner} aria-hidden="true" />
+          <h3>{t(installing ? "plugins.installing" : "plugins.preparingInstall")}</h3>
+          <p>{installing ? installName : t("plugins.preparingInstallHint")}</p>
+        </div>}
+        {!previewing && !installing && installNotice && <div ref={installStatusRef} tabIndex={-1}
+          className={styles.installStatus} data-result={installNotice} role="status" aria-live="polite">
+          <span className={styles.installResultIcon} aria-hidden="true">
+            {installNotice === "completed" ? "✓" : installNotice === "unknown" ? "…" : "!"}</span>
+          <h3>{t(installNotice === "completed" ? "plugins.installSuccessTitle"
+            : installNotice === "unknown" ? "plugins.installUnknownTitle" : "plugins.installFailureTitle")}</h3>
+          {installName && <strong>{installName}</strong>}
+          <p>{installNotice === "completed" ? t("plugins.installCompleted")
+            : installNotice === "updateRequiresDisable" ? t("plugins.updateRequiresDisable")
+            : installNotice === "failed" ? t("plugins.installFailed") : t("plugins.installUnknown")}</p>
+          {installNotice === "completed" && error && <p>{t("plugins.installedListRefreshFailed")}</p>}
+        </div>}
+        {!previewing && !installing && !installNotice && <>
           {selection && <div ref={previewPanelRef} tabIndex={-1} className={styles.previewPanel}>
             <h3>{selection.preview.name}</h3>
             {selectedBundle?.installationState !== "not-installed" && selectedBundle &&
@@ -826,7 +1096,7 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
                 : bundledNeedsDisable ? t("plugins.bundledDisableBeforeUpdate")
                   : t("plugins.bundledUpdateReady")}</p>}
             <div className={styles.packageMeta}>
-              {t("plugins.previewComponents", { count:
+              {t(selection.preview.sourceKind === "bundled" ? "plugins.previewBundledComponents" : "plugins.previewComponents", { count:
                 selection.preview.components.skills.length
                   + selection.preview.components.mcpServers.length })}
             </div>
@@ -846,287 +1116,137 @@ function NativePluginsPanel({ targetInstallationId, focusApprovals, active }: {
                 {selection.preview.diagnostics.map((item, index) => <li key={`${index}-${item.reasonCode}`}>
                   {item.name ? `${item.scope} · ${item.name}` : item.scope}
                   {` · ${item.reasonCode === "CODEX_OAUTH_CLIENT_REGISTRATION_REQUIRED"
-                    ? t("plugins.oauthClientRegistrationRequired")
+                    ? t(selectedBundle?.id === "zoom" ? "plugins.zoomRegistrationIntro"
+                      : "plugins.oauthClientRegistrationRequired")
                     : item.reasonCode === "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED"
                       ? t("plugins.googleDesktopOAuthRequired") : item.reasonCode}`}
                 </li>)}
               </ul>
             </>}
-            <div className={styles.previewActions}>
-              <button className="btn-secondary" type="button"
-                disabled={!selection.handle || !selection.preview.installable || installing
-                  || managementPending !== null || bundledCurrent || bundledNeedsDisable}
-                onClick={() => void installPackage()}>
-                {installing ? t("plugins.installing") : t(selection.preview.sourceKind === "bundled"
-                  ? selectedBundle?.installationState !== "not-installed"
-                    ? "plugins.installBundledUpdate" : "plugins.installBundledConfirm"
-                  : "plugins.installDisabled")}
-              </button>
-              <button className="btn-secondary" type="button" disabled={installing}
-                onClick={() => setSelection(null)}>{t("plugins.cancelPreview")}</button>
+            {selectedBundle?.id === "zoom" && selectedBundle.installationState === "not-installed"
+              && <PluginZoomRegistration />}
+            {selectedBundle?.id === "dropbox" && selectedBundle.installationState === "not-installed"
+              && <PluginDropboxRegistration />}
+            {selectedBundle?.id === "figma" && <p>{t("plugins.figmaDesktopMcpSetup")}</p>}
+            {selectedBundle && ["google-calendar", "google-drive"].includes(selectedBundle.id)
+              && <p>{t("plugins.googleWorkspaceDeferred")}</p>}
+            {selectedBundle?.id === "higgsfield" && <p>{t("plugins.higgsfieldAcceptancePending")}</p>}
+            {selectedBundle?.id === "higgsfield" && <PluginHiggsfieldRegistration />}
+            {selectedBundle?.id === "shopify" && <p>{t("plugins.shopifyAuthorizationPending")}</p>}
+            {selectedBundle?.localAdapter === "shoggoth-graph-read-only"
+              && isGraphRegistrationPackage(selectedBundle.id)
+              && <PluginGraphRegistration packageId={selectedBundle.id} />}
+            {selectedBundle?.localAdapter === "shoggoth-lovable-official-mcp"
+              && <PluginLovableRegistration />}
+            {selectedBundle?.localAdapter === "shoggoth-slack-official-mcp"
+              && <PluginSlackRegistration />}
+            {selectedBundle?.localAdapter === "shoggoth-gogcli-gmail-mcp"
+              && <PluginGmailRegistration />}
+          </div>}
+        </>}
+        {!previewing && !installNotice && detailItem && <BundledPluginDetailDialog embedded
+          key={detailItem.id} item={currentDetail!} nativeAgentId={selectedAgentId || null}
+          busy={installBusy || managementPending !== null} returnFocusTo={detailOpener.current}
+          onClose={closeInstallDialog}
+          onPreview={id => void chooseBundled(id)}
+          onManage={installationId => openManagement(installationId)} />}
+      </Modal>
+      <section className={styles.bundledLibrary} aria-label={t("plugins.myPlugins")}>
+        {(bundledLoading || loading) && <p className={styles.catalogMessage} role="status">{t("plugins.loading")}</p>}
+        {bundledError && <p className={styles.catalogMessage} role="status">{t("plugins.bundledUnavailable")}</p>}
+        {catalogUnavailable && <p className={styles.catalogMessage} role="status">{t("plugins.catalogUnavailable")}</p>}
+        {managementPending && <p className={styles.catalogMessage} role="status">
+          {t("plugins.managementUnknown")}
+          <button className="btn-secondary btn-sm" type="button" onClick={() => void checkManagementOperation()}>
+            {t("plugins.checkOperation")}</button>
+        </p>}
+        {!bundledLoading && !loading && !bundledError && !catalogUnavailable && bundled.length + unlistedInstalled.length === 0
+          && <p className={styles.libraryEmpty} role="status">{t("plugins.libraryEmpty")}</p>}
+        <div className={styles.bundledGroups}>
+          {bundledGroups.map(group =>
+            <section className={styles.bundledGroup} key={group.id} data-plugin-group={group.id}
+              aria-labelledby={`plugin-group-${group.id}`}>
+              <div className={styles.bundledGroupHeading}>
+                <h2 id={`plugin-group-${group.id}`}>{group.label}</h2>
+                <span aria-label={t("plugins.bundledGroupCount", { count: group.items.length })}>{group.items.length}</span>
+              </div>
+              <div className={styles.bundledGrid}>
+                {group.items.map(bundle => {
+                  const item = withInstallationState(bundle);
+                  const installed = item.installationState !== "not-installed";
+                  const installable = item.importStatus === "previewable" || Boolean(item.localAdapter);
+                  return <article className={styles.bundledCard} key={item.id} data-plugin-id={item.id}
+                    data-installed={installed ? "true" : "false"}
+                    data-installation-id={installed ? item.installationId : undefined}>
+                    <button id={`plugin-card-${item.id}`} className={styles.bundledCardOpen} type="button"
+                      aria-label={t("plugins.detailOpen", { name: item.displayName })}
+                      disabled={installBusy || installNotice === "unknown"}
+                      onClick={event => {
+                        detailOpener.current = event.currentTarget;
+                        setManagedPluginId(null); setDetailItem(item); onInstallDialogOpenChange(true);
+                      }}>
+                      {item.iconAvailable
+                        ? <img className={styles.bundledIcon} src={`/__api/plugins/bundled-icon/${item.id}`} alt="" loading="lazy" />
+                        : <span className={styles.bundledIconFallback} aria-hidden="true">{item.displayName.slice(0, 1)}</span>}
+                      <span className={styles.bundledTitle}>
+                        <span className={styles.bundledName}><strong>{item.displayName}</strong>
+                          {installed && <span className={styles.installedMark}>{t("plugins.installed")}</span>}</span>
+                        <span className={styles.bundledDescription}>{item.localAdapter === "shoggoth-graph-read-only"
+                          ? t(graphReadOnlyCopy(item.id).short)
+                          : item.localAdapter === "shoggoth-lovable-official-mcp" ? t("plugins.lovableOfficialShort")
+                            : item.localAdapter === "shoggoth-slack-official-mcp" ? t("plugins.slackOfficialShort")
+                              : item.localAdapter === "shoggoth-gogcli-gmail-mcp" ? t("plugins.gmailGogcliShort") : item.shortDescription}</span>
+                      </span>
+                    </button>
+                    <button className={styles.rowAction} type="button" data-plugin-action={installed ? "manage" : "install"}
+                      disabled={installBusy || installNotice === "unknown" || !installed && (!installable || !catalog?.supported
+                        || managementPending !== null)}
+                      aria-label={t(installed ? "plugins.manageNamedPlugin" : installable
+                        ? "plugins.installNamedPlugin" : "plugins.adapterPending", { name: item.displayName })}
+                      title={t(installed ? "plugins.manageNamedPlugin" : installable
+                        ? "plugins.installNamedPlugin" : "plugins.adapterPending", { name: item.displayName })}
+                      onClick={event => {
+                        detailOpener.current = event.currentTarget;
+                        if (installed) openManagement(item.installationId);
+                        else void chooseBundled(item.id);
+                      }}>
+                      <span aria-hidden="true">{installed ? "…" : "+"}</span>
+                    </button>
+                  </article>;
+                })}
+              </div>
+            </section>)}
+          {unlistedInstalled.length > 0 && <section className={styles.bundledGroup} data-plugin-group="local"
+            aria-labelledby="plugin-group-local">
+            <div className={styles.bundledGroupHeading}>
+              <h2 id="plugin-group-local">{t("plugins.localPlugins")}</h2><span>{unlistedInstalled.length}</span>
             </div>
-          </div>}
-          {installNotice && <div className={styles.catalogMessage} role="status">
-            {installNotice === "completed" ? t("plugins.installCompleted")
-              : installNotice === "updateRequiresDisable"
-                ? t("plugins.updateRequiresDisable")
-              : installNotice === "failed" ? t("plugins.installFailed")
-                : t("plugins.installUnknown")}
-            {installNotice === "unknown" && <button className="btn-secondary" type="button"
-              onClick={() => void checkOperation()}>{t("plugins.checkOperation")}</button>}
-          </div>}
-          {uninstallPreview && <div className={styles.previewPanel}>
-            <h3>{t("plugins.uninstallTitle")}</h3>
-            <p>{t("plugins.uninstallImpact", { agents: uninstallPreview.affectedAgentCount,
-              bindings: uninstallPreview.bindingCount })}</p>
-            <p>{t("plugins.uninstallRetained")}</p>
-            {uninstallPreview.requiresDisable && <p>{t("plugins.uninstallDisableFirst")}</p>}
-            <button className="btn-secondary" type="button"
-              disabled={uninstallPreview.requiresDisable || managementPending !== null}
-              onClick={() => void confirmUninstall()}>{t("plugins.uninstallConfirm")}</button>
-            <button className="btn-secondary" type="button"
-              onClick={() => setUninstallPreview(null)}>{t("plugins.cancelPreview")}</button>
-          </div>}
-          {managementNotice && <div className={styles.catalogMessage} role="status">
-            {managementNotice === "completed" ? t("plugins.managementCompleted")
-              : managementNotice === "deferred" ? t(managementPending?.kind === "uninstall"
-                ? "plugins.uninstallDeferred" : "plugins.managementDeferred")
-                : managementNotice === "closeFailed" ? t("plugins.managementCloseFailed")
-              : managementNotice === "failed" ? t("plugins.managementFailed")
-                : t("plugins.managementUnknown")}
-            {managementNotice === "unknown" && <button className="btn-secondary" type="button"
-              onClick={() => void checkManagementOperation()}>
-              {t("plugins.checkOperation")}
-            </button>}
-            {(managementNotice === "deferred" || managementNotice === "closeFailed")
-              && (managementPending?.installation?.desiredState === "disabled" || managementPending?.uninstall)
-              && <button className="btn-secondary" type="button"
-                disabled={managementRetrying}
-                onClick={() => void retryManagement()}>
-                {managementRetrying ? t("plugins.retryingDisable") : managementPending?.uninstall
-                  ? t("plugins.retryUninstall") : t("plugins.retryDisable")}
-              </button>}
-          </div>}
-          {loading && <div className={styles.catalogMessage}>{t("plugins.loading")}</div>}
-          {catalogUnavailable && <div className={styles.catalogMessage} role="status">
-            {t("plugins.catalogUnavailable")}
-          </div>}
-          {!loading && managementTarget && catalog?.supported && catalog.nextCursor === null
-            && !catalog.items.some(item => item.installationId === managementTarget)
-            && <div className={styles.catalogMessage} role="status">
-              {t("plugins.managementTargetMissing")}
-            </div>}
-          {!loading && catalog?.supported && catalog.items.length === 0 && (
-            <div className={styles.catalogMessage}>{t("plugins.noPackages")}</div>
-          )}
-          {catalog?.supported && catalog.items.length > 0 && (
-            <div className={styles.agentChoice}>
-              {selectedAgentId ? t("plugins.globalMcpConnections") : t("plugins.noAgentsForConnection")}
-            </div>)}
-          {catalog?.supported && catalog.items.length > 0 && (
-            <ul className={styles.packageList}>
-              {catalog.items.map((item) => (
-                <li className={styles.packageItem} key={item.installationId}
-                  ref={managementTarget === item.installationId ? targetItemRef : undefined}
-                  tabIndex={managementTarget === item.installationId ? -1 : undefined}
-                  data-targeted={managementTarget === item.installationId ? "true" : undefined}>
-                  <div className={styles.packageHeading}>
-                    <strong>{item.packageName}</strong>
-                    <span>{t(installationStatusKey(item))}</span>
-                  </div>
-                  <div className={styles.packageMeta}>
-                    {item.sourceKind === "bundled" ? t("plugins.bundledSource")
-                      : item.sourceKind === "legacy-directory" ? t("plugins.legacySource")
-                      : ["git", "remote-git"].includes(item.sourceKind) ? t("plugins.gitSource")
-                      : t("plugins.localSource")}
-                    {item.declaredVersion ? ` · ${item.declaredVersion}` : ""}
-                    {` · ${t("plugins.componentCount", { count: item.components.length })}`}
-                  </div>
-                  <button className="btn-secondary" type="button"
-                    disabled={managementPending !== null || installing || previewing
-                      || installNotice === "unknown"}
-                    onClick={() => void togglePackage(item)}>
-                    {item.desiredState === "enabled" ? t("plugins.disablePackage")
-                      : t("plugins.enablePackage")}
-                  </button>
-                  <button className="btn-secondary" type="button"
-                    disabled={managementPending !== null || installing || previewing || installNotice === "unknown"}
-                    onClick={() => void inspectUninstall(item)}>{t("plugins.uninstallTitle")}</button>
-                  <PluginRollbackControl installationId={item.installationId} revision={item.revision}
-                    enabled={item.desiredState === "enabled"} disabled={managementPending !== null || installing || previewing || installNotice === "unknown"}
-                    onChanged={refreshCatalog} />
-                  <ul className={styles.componentList}>
-                    {item.components.slice(0, 6).map((component) => (
-                      <li key={component.componentId}>{component.title}</li>
-                    ))}
-                  </ul>
-                  {selectedAgentId && item.components.some((component) =>
-                    component.kind === "mcp-server") && <ul className={styles.mcpStatusList}>
-                    {item.components.filter((component) => component.kind === "mcp-server")
-                      .map((component) => {
-                        const status = mcpStatuses[item.installationId];
-                        const current = status?.items.find((entry) =>
-                          entry.componentId === component.componentId);
-                        return <li key={component.componentId}>
-                          <strong>{component.title}</strong>
-                          {component.transport === "stdio" && <PluginDependencyControl
-                            installationId={item.installationId} componentId={component.componentId} revision={item.revision}
-                            enabled={item.desiredState === "enabled"}
-                            disabled={managementPending !== null || installing || previewing} />}
-                          <span>{status === undefined ? t("plugins.mcpStatusLoading")
-                            : !current ? t("plugins.mcpStatusUnavailable")
-                              : t("plugins.mcpVerifiedConnections", {
-                                count: current.connections.verified })}</span>
-                          {current && <span>{current.binding
-                            ? `${t(current.binding.enabled ? "plugins.mcpBindingEnabled"
-                              : "plugins.mcpBindingDisabled")} · ${t(
-                                current.binding.connectionState === "ready"
-                                  ? "plugins.mcpSelectedVerified"
-                                  : "plugins.mcpSelectedUnverified")}`
-                            : t("plugins.mcpUnbound")}</span>}
-                          {current?.binding && current.accounts.length > 0 && <div className={styles.accountChoices}>
-                            <span>{t("plugins.selectedAccount", { account:
-                              current.accounts.find(account => account.connectionId === current.binding!.connectionId)?.label
-                                || t("plugins.mcpSelectedUnverified") })}</span>
-                            {current.accounts.filter(account => account.connectionId !== current.binding!.connectionId)
-                              .map(account => <button className="btn-secondary" type="button"
-                                key={account.connectionId}
-                                disabled={managementPending !== null || installing || previewing
-                                  || item.desiredState !== "enabled"}
-                                onClick={() => void selectAccount(current.binding!.bindingId,
-                                  account.connectionId, current.binding!.revision)}>
-                                {t("plugins.selectAccount", { account: account.label })}
-                              </button>)}
-                          </div>}
-                          {component.transport === "stdio" && (!current?.binding?.enabled
-                            || current.binding.connectionState !== "ready") && <button className="btn-secondary" type="button"
-                            disabled={item.desiredState !== "enabled" || managementPending !== null || installing || previewing}
-                            onClick={() => void connectMcp(item, component.componentId)}>{t("plugins.mcpConnect")}</button>}
-                          {component.transport === "streamable-http"
-                            && item.sourceKind === "bundled" && item.packageName === "github"
-                            && component.title === "github" && <PluginBearerConnect
-                            key={`${selectedAgentId}:${component.componentId}`} agentId={selectedAgentId}
-                            installationId={item.installationId} componentId={component.componentId} revision={item.revision}
-                            disabled={item.desiredState !== "enabled" || managementPending !== null || installing || previewing}
-                            connected={current?.binding?.connectionState === "ready"}
-                            onReady={() => { void refreshCatalog().catch(() => setError(true)); }} />}
-                          {component.transport === "streamable-http"
-                            && !(item.sourceKind === "bundled" && item.packageName === "github"
-                              && component.title === "github") && <PluginOAuthConnect
-                            key={`${selectedAgentId}:${component.componentId}`} agentId={selectedAgentId}
-                            installationId={item.installationId} componentId={component.componentId} revision={item.revision}
-                            disabled={item.desiredState !== "enabled" || managementPending !== null || installing || previewing}
-                            connected={current?.binding?.connectionState === "ready"}
-                            onReady={() => { void refreshCatalog().catch(() => setError(true)); }} />}
-                          {current?.binding && <span>{t("plugins.mcpSavedGrants", {
-                            allow: current.binding.grants.allow,
-                            deny: current.binding.grants.deny })}</span>}
-                          {current?.binding && <PluginConnectionControl
-                            key={`${selectedAgentId}:${current.binding.bindingId}`} agentId={selectedAgentId}
-                            bindingId={current.binding.bindingId} revision={current.binding.revision}
-                            connected={current.binding.connectionState === "ready"}
-                            disabled={managementPending !== null || installing || previewing}
-                            onDisconnected={() => { setExpandedMcpBinding(null); setMcpTools(null);
-                              void refreshCatalog().catch(() => setError(true)); }} />}
-                          {current?.binding && current.binding.grants.allow > 0
-                            && <button className="btn-secondary" type="button"
-                              disabled={managementPending !== null || installing || previewing
-                                || installNotice === "unknown"}
-                              onClick={() => void revokeAllToolGrants(
-                                current.binding!.bindingId, current.binding!.revision)}>
-                              {t("plugins.mcpRevokeAllGrants")}
-                            </button>}
-                          {current?.binding && <button className="btn-secondary" type="button"
-                            disabled={mcpToolsLoading}
-                            onClick={() => void toggleMcpTools(current.binding!.bindingId)}>
-                            {expandedMcpBinding === current.binding.bindingId
-                              ? t("plugins.mcpHideTools") : t("plugins.mcpShowTools")}
-                          </button>}
-                          {current?.binding && expandedMcpBinding === current.binding.bindingId
-                            && <div className={styles.mcpTools}>
-                              {mcpToolsLoading && <span>{t("plugins.mcpToolsLoading")}</span>}
-                              {mcpToolsError && <span role="status">
-                                {t("plugins.mcpToolsUnavailable")}</span>}
-                              {mcpTools && !mcpTools.available && <span>
-                                {t("plugins.mcpCatalogNotReady")}</span>}
-                              {mcpTools?.available && mcpTools.items.length === 0 && <span>
-                                {t("plugins.mcpNoTools")}</span>}
-                              {mcpTools?.available && item.sourceKind === "bundled"
-                                && item.packageName === "github" && component.title === "github"
-                                && <p className={styles.packageMeta}>
-                                  {mcpTools.referenceCoverage?.operations.length
-                                    ? <>{t("plugins.githubMcpPortableScope")}{" "}
-                                      {mcpTools.referenceCoverage.operations.map(capability =>
-                                        capability.id === "repository-file-read"
-                                          ? t("plugins.githubMcpFileRead")
-                                          : capability.id === "repository-file-write"
-                                            ? t("plugins.githubMcpFileWrite")
-                                            : capability.id === "repository-issue-read"
-                                              ? t("plugins.githubMcpIssueRead")
-                                              : capability.id === "repository-issue-comment"
-                                                ? t("plugins.githubMcpIssueComment") : capability.id).join("、")}</>
-                                    : t("plugins.githubMcpNoFileOperations")}
-                                </p>}
-                              {mcpTools?.available && mcpTools.items.length > 0 &&
-                                <ul className={styles.mcpToolList}>
-                                  {mcpTools.items.map((tool) => <li key={tool.toolIdentity}>
-                                    <span>{tool.name}</span>
-                                    {(!tool.savedGrant || tool.savedGrant.effect !== "allow"
-                                      || !tool.savedGrant.matchesCurrentContract || tool.savedGrant.expired)
-                                      && <><button className="btn-secondary" type="button"
-                                        disabled={managementPending !== null || installing || previewing}
-                                        onClick={() => void allowTool(current.binding!.bindingId, tool, "each-call")}>
-                                        {t("plugins.mcpAllowEachCall")}</button>
-                                        <button className="btn-secondary" type="button"
-                                          disabled={managementPending !== null || installing || previewing}
-                                          onClick={() => void allowTool(current.binding!.bindingId, tool, "always")}>
-                                          {t("plugins.mcpAllowTool")}</button></>}
-                                    <span>{!tool.savedGrant
-                                      ? t("plugins.mcpGrantNone")
-                                      : !tool.savedGrant.matchesCurrentContract
-                                        ? t("plugins.mcpGrantStale")
-                                        : tool.savedGrant.expired
-                                          ? t("plugins.mcpGrantExpired")
-                                        : tool.savedGrant.effect === "allow"
-                                          ? t(tool.savedGrant.approvalMode === "each-call"
-                                            ? "plugins.mcpGrantEachCall"
-                                            : "plugins.mcpGrantAllow")
-                                          : t("plugins.mcpGrantDeny")}</span>
-                                    {tool.savedGrant?.effect === "allow" &&
-                                      <button className="btn-secondary" type="button"
-                                        disabled={managementPending !== null || installing || previewing
-                                          || installNotice === "unknown"}
-                                        onClick={() => void revokeToolGrant(
-                                          current.binding!.bindingId, tool.toolIdentity,
-                                          tool.savedGrant!.revision)}>
-                                        {t("plugins.mcpRevokeGrant")}
-                                      </button>}
-                                  </li>)}
-                                </ul>}
-                            </div>}
-                        </li>;
-                      })}
-                  </ul>}
-                  {item.components.some(component => component.kind === "skill")
-                    && <div className={styles.packageMeta}>{t("plugins.globalPluginSkills")}</div>}
-                  {item.components.length > 6 && <div className={styles.packageMeta}>
-                    {t("plugins.moreComponents", { count: item.components.length - 6 })}
-                  </div>}
-                  {item.diagnosticCount > 0 && <div className={styles.packageMeta}>
-                    {t("plugins.diagnostics", { count: item.diagnosticCount })}
-                  </div>}
-                </li>
-              ))}
-            </ul>
-          )}
-          {catalog?.supported && catalog.nextCursor !== null && !catalogUnavailable && (
-            <button className="btn-secondary" type="button" disabled={loadingMore}
-              onClick={() => void loadMore()}>
-              {loadingMore ? t("plugins.loading") : t("plugins.loadMore")}
-            </button>
-          )}
-        </section>
-      </div>
-      <PluginExternalActivity active={active && libraryView === "installed"} />
+            <div className={styles.bundledGrid}>{unlistedInstalled.map(item =>
+              <article className={styles.bundledCard} key={item.installationId} data-installed="true"
+                data-installation-id={item.installationId}>
+                <button className={styles.bundledCardOpen} type="button"
+                  aria-label={t("plugins.detailOpen", { name: item.packageName })}
+                  disabled={installBusy || installNotice === "unknown"}
+                  onClick={event => openManagement(item.installationId, event.currentTarget)}>
+                  <span className={styles.bundledIconFallback} aria-hidden="true">{item.packageName.slice(0, 1)}</span>
+                  <span className={styles.bundledTitle}>
+                    <span className={styles.bundledName}><strong>{item.packageName}</strong>
+                      <span className={styles.installedMark}>{t("plugins.installed")}</span></span>
+                    <span className={styles.bundledDescription}>{t(installationStatusKey(item))}
+                      {item.declaredVersion ? ` · ${item.declaredVersion}` : ""}</span>
+                  </span>
+                </button>
+                <button className={styles.rowAction} type="button" data-plugin-action="manage"
+                  aria-label={t("plugins.manageNamedPlugin", { name: item.packageName })}
+                  disabled={installBusy || installNotice === "unknown"}
+                  onClick={event => openManagement(item.installationId, event.currentTarget)}><span aria-hidden="true">…</span></button>
+              </article>)}</div>
+          </section>}
+        </div>
+        {catalog?.supported && catalog.nextCursor !== null && !catalogUnavailable && <button
+          className="btn-secondary" type="button" disabled={loadingMore} onClick={() => void loadMore()}>
+          {loadingMore ? t("plugins.loading") : t("plugins.loadMore")}</button>}
+      </section>
+      <PluginExternalActivity active={active} />
   </>;
 }

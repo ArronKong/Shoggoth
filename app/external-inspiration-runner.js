@@ -1,18 +1,22 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { validResponseMetadata } = require("./chat-response-metadata");
+const { resultPage, validText } = require("./group-result-content");
 const { OpenClawInspirationAdapter } = require("./core/openclaw-inspiration-adapter");
 const { HermesInspirationAdapter } = require("./core/hermes-inspiration-adapter");
 const { validateInteractiveResponseV1 } = require("./core/shoggoth-interaction-contract");
 const { canonicalJson } = require("./agent-service/inspiration-store");
 const { EXTERNAL_TERMINAL, validExternalSnapshot, validateExternalInspirationParams,
-  validateExternalInspirationResult } = require("./external-inspiration-protocol");
+  validateExternalInspirationResult, validateGroupExternalResultParams } = require("./external-inspiration-protocol");
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const hash = value => crypto.createHash("sha256").update(canonicalJson(value)).digest("hex");
 const identity = input => Object.fromEntries(["executionId", "runId", "backendId", "agentId"]
   .map(key => [key, input[key]]));
 const binding = input => Object.fromEntries(["sessionKey", "workspace", "mode"].map(key => [key, input[key]]));
+const { GroupActivityProjection, safeValue } = require("./agent-service/group-activity");
+const { groupCapabilities } = require("./agent-service/group-capabilities");
 
 function boundedText(value) {
   if (typeof value !== "string") return null;
@@ -28,11 +32,13 @@ function boundedText(value) {
 
 /** Live transport observations only. Durable identity and results belong to the Service. */
 class ExternalInspirationRunner {
-  constructor({ registry, origin, adapters = {}, now = Date.now, randomUUID = crypto.randomUUID } = {}) {
+  constructor({ registry, origin, adapters = {}, adapterOptions = {}, now = Date.now, randomUUID = crypto.randomUUID, onSnapshot = () => {} } = {}) {
     if (!registry || typeof registry.getBackend !== "function") throw new TypeError("registry required");
+    this.onSnapshot = onSnapshot;
     this.registry = registry;
     this.origin = origin;
     this.adapters = adapters;
+    this.adapterOptions = adapterOptions;
     this.now = now;
     this.randomUUID = randomUUID;
     this.hostId = randomUUID();
@@ -41,7 +47,10 @@ class ExternalInspirationRunner {
   }
 
   #validate(method, input) {
-    if (!validateExternalInspirationParams(`inspiration.external.${method}`, input)) fail("INVALID_PARAMS");
+    const plain = { ...input };
+    if (this.adapterOptions.sessionPurpose === "group" && method === "prepare") delete plain.context;
+    const family = this.adapterOptions.sessionPurpose === "group" ? "group" : "inspiration";
+    if (!validateExternalInspirationParams(`${family}.external.${method}`, plain)) fail("INVALID_PARAMS");
   }
 
   #driver(backendId) {
@@ -50,8 +59,8 @@ class ExternalInspirationRunner {
     const cached = this.drivers.get(backendId);
     if (cached?.backend === backend) return cached.driver;
     const driver = this.adapters[backendId] || (backendId === "openclaw"
-      ? new OpenClawInspirationAdapter({ backend, now: this.now })
-      : new HermesInspirationAdapter({ backend, now: this.now }));
+      ? new OpenClawInspirationAdapter({ ...this.adapterOptions, backend, now: this.now })
+      : new HermesInspirationAdapter({ ...this.adapterOptions, backend, now: this.now }));
     this.drivers.set(backendId, { backend, driver });
     return driver;
   }
@@ -102,6 +111,7 @@ class ExternalInspirationRunner {
     if (record.snapshot && ["status", "resultSummary", "errorCode", "attention"]
       .every(key => hash(record.snapshot[key]) === hash(next[key]))) return;
     record.snapshot = next;
+    try { this.onSnapshot(structuredClone(record.identity), structuredClone(next)); } catch { /* Durable host observers report failures through their own health checks. */ }
   }
 
   #assertCurrent(record) {
@@ -120,11 +130,15 @@ class ExternalInspirationRunner {
     const previous = record.operations.get(key);
     if (previous) {
       if (previous.fingerprint !== fingerprint) fail("INSPIRATION_OPERATION_CONFLICT");
-      return previous.promise.then(() => this.#result(record));
+      if (method !== "cancel" || !previous.settled || EXTERNAL_TERMINAL.has(record.snapshot.status)) {
+        return previous.promise.then(() => this.#result(record));
+      }
     }
-    if (record.operations.size >= 1024) fail("APP_HOST_CAPACITY");
-    const promise = Promise.resolve().then(() => { this.#assertCurrent(record); return action(); });
-    record.operations.set(key, { fingerprint, promise });
+    if (!previous && record.operations.size >= 1024) fail("APP_HOST_CAPACITY");
+    const operation = { fingerprint, promise: null, settled: false };
+    const promise = Promise.resolve().then(() => { this.#assertCurrent(record); return action(); })
+      .finally(() => { operation.settled = true; });
+    operation.promise = promise; record.operations.set(key, operation);
     return promise.then(() => this.#result(record));
   }
 
@@ -142,6 +156,7 @@ class ExternalInspirationRunner {
       this.#assertCurrent(record);
       return record.driver.prepare({
         agentId: input.agentId, sessionId: input.executionId, sessionKey: input.sessionKey, workspace: input.workspace,
+        ...(Object.hasOwn(input, "modelSelection") ? { modelSelection: input.modelSelection } : {}),
       });
     }).then(prepared => {
       this.#assertCurrent(record);
@@ -198,6 +213,82 @@ class ExternalInspirationRunner {
     return this.#result(record);
   }
 
+  /** 群聊：已开始执行的当前草稿（只读、来自传输适配器的累积文本；不支持的后端为 null）。 */
+  async draft(input) {
+    if (!validateExternalInspirationParams("group.external.get", input)) fail("INVALID_PARAMS");
+    const record = this.#record(input, false);
+    this.#assertCurrent(record);
+    let value = null;
+    try {
+      // OpenClaw observes one socket/run/session/Agent binding; its draft read requires that same identity.
+      value = record.driver.draft?.(record.identity.backendId === "openclaw" ? input : input.runId) ?? null;
+    } catch { value = null; }
+    return { hostId: this.hostId, draft: typeof value === "string" ? boundedText(value) : null };
+  }
+
+  /** Only read activity from this exact transport incarnation; never resume/start. */
+  async activity(input) {
+    if (!validateExternalInspirationParams("group.external.get", input)) fail("INVALID_PARAMS");
+    const record = this.#record(input, false); this.#assertCurrent(record);
+    const raw = await record.driver.activity?.(input) ?? null;
+    this.#assertCurrent(record);
+    record.activity ??= new GroupActivityProjection({ runId: input.runId, executionGeneration: this.hostId }, { now: this.now });
+    if (raw) record.activity.adopt(raw);
+    record.activity.observeStatus(record.snapshot?.status ?? "unknown", { at: record.snapshot?.finishedAt ?? this.now(),
+      cancelRequested: record.cancelRequested });
+    return { hostId: this.hostId, activity: record.activity.snapshot() };
+  }
+
+  async capabilities(input) {
+    const driver = this.#driver(input.backendId);
+    const value = await driver.probe?.(input) ?? {};
+    return groupCapabilities({ ...value, groupTools: false, collaborationActions: false,
+      source: "external-binding", checkedAt: this.now() });
+  }
+
+  /** 群聊的完整最终正文；适配器必须按本次运行取结果，不能回退到历史消息或有界摘要。 */
+  async result(input) {
+    if (!validateGroupExternalResultParams(input)) fail("INVALID_PARAMS");
+    const { offset, digest, part, ...bound } = input;
+    // Historical content reads must not reserve a recovered live execution or
+    // publish an unknown status over the durable Host's terminal receipt.
+    const record = this.records.has(bound.executionId) ? this.#record(bound) : null;
+    const hostId = this.hostId, driver = record?.driver ?? this.#driver(bound.backendId);
+    const assertCurrent = () => {
+      if (hostId !== this.hostId) fail("APP_HOST_UNAVAILABLE");
+      if (record) this.#assertCurrent(record);
+      else if (this.records.has(bound.executionId)) fail("APP_HOST_UNAVAILABLE");
+    };
+    if (part === "progress") {
+      const value = await driver.publicProgress?.(bound);
+      assertCurrent();
+      return { hostId: this.hostId, page: validText(value) ? resultPage(value, { offset, digest }) : null };
+    }
+    let text = record?.finalText;
+    if (text === undefined) {
+      const value = await driver.fullResult?.(bound);
+      assertCurrent();
+      if (!validText(value) || !value.trim()) return { hostId: this.hostId, page: null };
+      text = value;
+      if (record) record.finalText = value;
+    }
+    return { hostId: this.hostId, page: resultPage(text, { offset, digest }) };
+  }
+
+  /** Optional facts from this execution's final callback; never latest-session usage. */
+  async metadata(input) {
+    if (!validateExternalInspirationParams("group.external.get", input)) fail("INVALID_PARAMS");
+    if (input.hostId !== this.hostId) fail("APP_HOST_UNAVAILABLE");
+    const record = this.#record(input, false); this.#assertCurrent(record);
+    if (!EXTERNAL_TERMINAL.has(record.snapshot?.status)) return { hostId: this.hostId, responseMetadata: null };
+    if (!Object.hasOwn(record, "responseMetadata")) {
+      const value = await record.driver.responseMetadata?.(input);
+      this.#assertCurrent(record);
+      record.responseMetadata = validResponseMetadata(value) ? structuredClone(value) : null;
+    }
+    return { hostId: this.hostId, responseMetadata: record.responseMetadata };
+  }
+
   async respond(input) {
     this.#validate("respond", input);
     if (input.hostId !== this.hostId) fail("APP_HOST_UNAVAILABLE");
@@ -219,7 +310,7 @@ class ExternalInspirationRunner {
     });
   }
 
-  async cancel(input) {
+  async cancel(input, { groupDeleted = false } = {}) {
     this.#validate("cancel", input);
     if (input.hostId !== this.hostId) fail("APP_HOST_UNAVAILABLE");
     const record = this.#record(input, true);
@@ -232,7 +323,7 @@ class ExternalInspirationRunner {
       if (EXTERNAL_TERMINAL.has(record.snapshot.status)) return;
       const version = record.observationVersion;
       try {
-        const value = await record.driver.cancel(input);
+        const value = await record.driver.cancel(input, { groupDeleted });
         if (record.observationVersion === version || EXTERNAL_TERMINAL.has(value?.status)) this.#publish(record, value);
       } catch {
         if (record.observationVersion === version) this.#publish(record, { status: "unknown", errorCode: "EXTERNAL_CANCEL_UNCONFIRMED" });

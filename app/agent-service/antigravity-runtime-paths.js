@@ -1,9 +1,8 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { execFileSync: defaultExecFileSync } = require("node:child_process");
+const { execFile: defaultExecFile, execFileSync: defaultExecFileSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const {
   assertPrivateRegularFile,
@@ -11,10 +10,10 @@ const {
   lstatIfExists,
   serviceError,
 } = require("./security");
-const { validRuntimeAccountId, validRuntimeProfileId } = require("./runtime-adapter");
+const { validRuntimeAccountId } = require("./runtime-adapter");
+const { resolveAntigravityAcpServer } = require("./antigravity-acp-distribution");
 
 const ANTIGRAVITY_RUNTIME = "antigravity";
-const MIN_ANTIGRAVITY_VERSION = Object.freeze([1, 1, 16]);
 const DEFAULT_ANTIGRAVITY_PERMISSION_POLICY = Object.freeze({
   approvalPolicy: "on-request",
   sandbox: "danger-full-access",
@@ -27,33 +26,6 @@ const MAX_KEYCHAIN_OUTPUT_BYTES = 64 * 1024;
 
 function runtimeError(code, message) {
   return serviceError(code, message);
-}
-
-function prepareAntigravityHome(paths, runtimeProfileId) {
-  if (!validRuntimeProfileId(runtimeProfileId)) {
-    throw runtimeError("ANTIGRAVITY_RUNTIME_PROFILE_INVALID", "Antigravity runtime profile id is invalid");
-  }
-  const profileId = runtimeProfileId;
-  if (!paths || typeof paths.stateDir !== "string" || !path.isAbsolute(paths.stateDir)
-    || typeof paths.trustedRoot !== "string" || !path.isAbsolute(paths.trustedRoot)) {
-    throw runtimeError("ANTIGRAVITY_PATHS_INVALID", "Antigravity runtime paths are invalid");
-  }
-  const base = path.join(paths.stateDir, ANTIGRAVITY_RUNTIME);
-  const home = path.join(base, profileId);
-  const relative = path.relative(base, home);
-  if (relative !== profileId || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw runtimeError(
-      "ANTIGRAVITY_RUNTIME_PROFILE_INVALID",
-      "Antigravity runtime profile path escapes its root",
-    );
-  }
-  ensurePrivateDirectoryTree(paths.stateDir, paths.trustedRoot);
-  ensurePrivateDirectoryTree(base, paths.trustedRoot);
-  ensurePrivateDirectoryTree(home, paths.trustedRoot);
-  ensurePrivateDirectoryTree(path.join(home, ".gemini"), paths.trustedRoot);
-  ensurePrivateDirectoryTree(path.join(home, ".gemini", "config"), paths.trustedRoot);
-  ensurePrivateDirectoryTree(path.join(home, ".gemini", "antigravity-cli"), paths.trustedRoot);
-  return home;
 }
 
 function prepareAntigravityRuntimeAccountHome(paths, runtimeAccountId) {
@@ -192,10 +164,9 @@ function readKeychainPaths(execute, home, args, allowFailure = false) {
   }
 }
 
-function prepareAntigravityKeychainContext(options = {}) {
+function* keychainContextSteps(options, execute) {
   if ((options.platform || process.platform) !== "darwin") return;
   const { home, userHome, trustedRoot } = options;
-  const execute = options.execFileSync || defaultExecFileSync;
   if (typeof home !== "string" || !path.isAbsolute(home) || path.resolve(home) !== home
     || typeof userHome !== "string" || !path.isAbsolute(userHome)
     || path.resolve(userHome) !== userHome || typeof trustedRoot !== "string"
@@ -213,11 +184,7 @@ function prepareAntigravityKeychainContext(options = {}) {
     ensurePrivateDirectoryTree(preferences, trustedRoot);
     tightenKeychainPreferences(preferencesPath);
 
-    const sourceDefault = readKeychainPaths(
-      execute,
-      userHome,
-      ["default-keychain", "-d", "user"],
-    );
+    const sourceDefault = yield { read: true, home: userHome, args: ["default-keychain", "-d", "user"] };
     if (sourceDefault.length !== 1) {
       throw runtimeError(
         "ANTIGRAVITY_KEYCHAIN_CONTEXT_UNAVAILABLE",
@@ -225,42 +192,16 @@ function prepareAntigravityKeychainContext(options = {}) {
       );
     }
     const expected = sourceDefault[0];
-    const managedDefault = readKeychainPaths(
-      execute,
-      home,
-      ["default-keychain", "-d", "user"],
-      true,
-    );
-    const managedSearchList = readKeychainPaths(
-      execute,
-      home,
-      ["list-keychains", "-d", "user"],
-      true,
-    );
+    const managedDefault = yield { read: true, home, args: ["default-keychain", "-d", "user"], allowFailure: true };
+    const managedSearchList = yield { read: true, home, args: ["list-keychains", "-d", "user"], allowFailure: true };
     if (managedDefault?.length === 1 && managedDefault[0] === expected
       && managedSearchList?.length === 1 && managedSearchList[0] === expected
       && tightenKeychainPreferences(preferencesPath)) return;
 
-    runKeychainCommand(
-      execute,
-      home,
-      ["list-keychains", "-d", "user", "-s", expected],
-    );
-    runKeychainCommand(
-      execute,
-      home,
-      ["default-keychain", "-d", "user", "-s", expected],
-    );
-    const verifiedDefault = readKeychainPaths(
-      execute,
-      home,
-      ["default-keychain", "-d", "user"],
-    );
-    const verifiedSearchList = readKeychainPaths(
-      execute,
-      home,
-      ["list-keychains", "-d", "user"],
-    );
+    yield { home, args: ["list-keychains", "-d", "user", "-s", expected] };
+    yield { home, args: ["default-keychain", "-d", "user", "-s", expected] };
+    const verifiedDefault = yield { read: true, home, args: ["default-keychain", "-d", "user"] };
+    const verifiedSearchList = yield { read: true, home, args: ["list-keychains", "-d", "user"] };
     if (verifiedDefault.length !== 1 || verifiedDefault[0] !== expected
       || verifiedSearchList.length !== 1 || verifiedSearchList[0] !== expected
       || !tightenKeychainPreferences(preferencesPath)) {
@@ -275,6 +216,65 @@ function prepareAntigravityKeychainContext(options = {}) {
       "ANTIGRAVITY_KEYCHAIN_CONTEXT_UNAVAILABLE",
       "The macOS keychain context could not be prepared",
     );
+  }
+}
+
+function prepareAntigravityKeychainContext(options = {}) {
+  const execute = options.execFileSync || defaultExecFileSync;
+  const steps = keychainContextSteps(options, execute);
+  let step = steps.next();
+  while (!step.done) {
+    const { read, home, args, allowFailure } = step.value;
+    try {
+      step = steps.next((read ? readKeychainPaths : runKeychainCommand)(execute, home, args, allowFailure));
+    } catch (error) { step = steps.throw(error); }
+  }
+}
+
+// Runtime discovery shares the Service event loop with health, chat and group
+// reads. Waiting for macOS must yield without weakening the same context checks.
+async function prepareAntigravityKeychainContextAsync(options = {}) {
+  const execute = options.execFile || (options.execFileSync
+    ? (command, args, config, callback) => {
+      try { callback(null, options.execFileSync(command, args, config)); }
+      catch (error) { callback(error); }
+    } : defaultExecFile);
+  const steps = keychainContextSteps(options, execute);
+  let step = steps.next();
+  while (!step.done) {
+    const { read, home, args, allowFailure } = step.value;
+    try {
+      if (options.signal?.aborted) throw runtimeError("ANTIGRAVITY_KEYCHAIN_CONTEXT_UNAVAILABLE",
+        "The macOS keychain context could not be prepared");
+      const output = await new Promise((resolve, reject) => {
+        let child, returned = false, closed = false, result;
+        const finish = () => {
+          if (!returned || !result || child?.once && !closed) return;
+          const [error, stdout] = result;
+          if (error && !allowFailure) reject(runtimeError("ANTIGRAVITY_KEYCHAIN_CONTEXT_UNAVAILABLE",
+            "The macOS keychain context could not be prepared"));
+          else resolve(error ? null : stdout);
+        };
+        child = execute(SECURITY_COMMAND, args, {
+          encoding: "utf8", env: { HOME: home, PATH: "/usr/bin:/bin", LANG: "C" },
+          maxBuffer: MAX_KEYCHAIN_OUTPUT_BYTES, stdio: ["ignore", "pipe", "pipe"],
+          timeout: KEYCHAIN_COMMAND_TIMEOUT_MS, signal: options.signal,
+        }, (error, stdout) => {
+          result = [error, stdout]; finish();
+        });
+        returned = true;
+        // Abort may report an error before the process exits. Do not release a
+        // stopping host while its keychain command can still change the context.
+        child?.once?.("close", () => { closed = true; finish(); });
+        finish();
+      });
+      let result = output;
+      if (read && output !== null) {
+        try { result = parseKeychainPaths(output); }
+        catch (error) { if (!allowFailure) throw error; result = null; }
+      }
+      step = steps.next(result);
+    } catch (error) { step = steps.throw(error); }
   }
 }
 
@@ -306,6 +306,26 @@ function resolveAntigravityExecutable(candidate, options = {}) {
   return resolved;
 }
 
+// The ACP server is installed by the Antigravity sign-in. Models offers that
+// sign-in once this Mac already uses Antigravity, shown by its `agy` command or
+// its app; neither is executed. Its built-in Agent waits for the server.
+function antigravityUsedOnThisMac(options = {}) {
+  const fileSystem = options.fs || fs;
+  const home = typeof options.homedir === "string" && path.isAbsolute(options.homedir) ? options.homedir : null;
+  const pathValue = options.parentEnv?.PATH;
+  const commands = [
+    ...(typeof pathValue === "string" ? pathValue.split(path.delimiter).filter((entry) => path.isAbsolute(entry)) : []),
+    ...(home ? [path.join(home, ".local", "bin")] : []),
+    "/opt/homebrew/bin", "/usr/local/bin",
+  ].map((directory) => path.join(directory, "agy"));
+  if (commands.some((candidate) => executableRealpath(candidate, fileSystem))) return true;
+  return ["/Applications", ...(home ? [path.join(home, "Applications")] : [])].some((directory) => {
+    try { return fileSystem.statSync(path.join(directory, "Antigravity.app")).isDirectory(); } catch { return false; }
+  });
+}
+
+// The Antigravity runtime executes Google's official ACP server installed by
+// Shoggoth (see antigravity-acp-distribution.js); the agy CLI is not used.
 function resolveAntigravityBinary(options = {}) {
   const fileSystem = options.fs || fs;
   if (options.binaryPath !== undefined) {
@@ -315,41 +335,7 @@ function resolveAntigravityBinary(options = {}) {
       message: "Antigravity binaryPath must be an absolute executable regular file",
     });
   }
-  const parentEnv = options.parentEnv || process.env;
-  const userHome = options.homedir || os.homedir();
-  const candidates = [];
-  for (const entry of String(parentEnv.PATH || "").split(path.delimiter)) {
-    if (entry.length > 0 && path.isAbsolute(entry) && !entry.includes("\0")) {
-      candidates.push(path.join(entry, "agy"));
-    }
-  }
-  if (typeof userHome === "string" && path.isAbsolute(userHome) && !userHome.includes("\0")) {
-    candidates.push(path.join(userHome, ".local", "bin", "agy"));
-  }
-  candidates.push("/opt/homebrew/bin/agy", "/usr/local/bin/agy");
-  for (const candidate of [...new Set(candidates)]) {
-    const resolved = executableRealpath(candidate, fileSystem);
-    if (resolved) return resolved;
-  }
-  throw runtimeError("ANTIGRAVITY_BINARY_NOT_FOUND", "Antigravity CLI executable was not found");
-}
-
-function parseAntigravityVersion(value) {
-  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 1024) return null;
-  const match = value.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/u);
-  if (!match) return null;
-  const parts = match.slice(1).map(Number);
-  return parts.every((part) => Number.isSafeInteger(part)) ? Object.freeze(parts) : null;
-}
-
-function supportsAntigravityVersion(value) {
-  const version = Array.isArray(value) ? value : parseAntigravityVersion(value);
-  if (!version || version.length !== 3) return false;
-  for (let index = 0; index < MIN_ANTIGRAVITY_VERSION.length; index += 1) {
-    if (version[index] > MIN_ANTIGRAVITY_VERSION[index]) return true;
-    if (version[index] < MIN_ANTIGRAVITY_VERSION[index]) return false;
-  }
-  return true;
+  return resolveAntigravityAcpServer({ paths: options.paths, fs: fileSystem }).serverPath;
 }
 
 function normalizeAntigravityPermissionPolicy(value = DEFAULT_ANTIGRAVITY_PERMISSION_POLICY) {
@@ -392,51 +378,17 @@ function antigravityWorkspaceShardId({ controlInstance = false, workspace = null
   ])).digest("hex");
 }
 
-function buildAntigravityTurnArgs({ permissionPolicy, permissionMode = null, model = null, conversationId = null, allowSlashCommands = false } = {}) {
-  const policy = normalizeAntigravityPermissionPolicy(permissionPolicy);
-  const mode = permissionMode || (policy.sandbox === "read-only" ? "plan"
-    : policy.sandbox === "danger-full-access" && policy.approvalPolicy === "never"
-      ? "full" : "accept-edits");
-  if (!["plan", "accept-edits", "full"].includes(mode)) {
-    throw runtimeError("ANTIGRAVITY_PERMISSION_POLICY_INVALID", "Antigravity permission mode is invalid");
-  }
-  if (model !== null && (typeof model !== "string" || model.length === 0
-    || model.includes("\0") || Buffer.byteLength(model, "utf8") > 512)) {
-    throw runtimeError("RUNTIME_MODEL_UNAVAILABLE", "Antigravity model is invalid");
-  }
-  if (conversationId !== null && (typeof conversationId !== "string" || conversationId.length === 0
-    || conversationId.includes("\0") || Buffer.byteLength(conversationId, "utf8") > 512)) {
-    throw runtimeError("RUNTIME_SESSION_NOT_FOUND", "Antigravity conversation id is invalid");
-  }
-  const args = [
-    "--input-format", "stream-json",
-    "--output-format", "stream-json",
-    ...(allowSlashCommands ? [] : ["--disable-slash-commands"]),
-    "--print-timeout", "5m",
-    "--mode", mode === "plan" ? "plan" : "accept-edits",
-  ];
-  if (mode === "full") args.push("--dangerously-skip-permissions");
-  else args.push("--sandbox");
-  if (model !== null) args.push("--model", model);
-  if (conversationId === null) args.push("--new-project");
-  else args.push("--conversation", conversationId);
-  return Object.freeze(args);
-}
-
 module.exports = {
+  antigravityUsedOnThisMac,
   ANTIGRAVITY_RUNTIME,
   DEFAULT_ANTIGRAVITY_PERMISSION_POLICY,
-  MIN_ANTIGRAVITY_VERSION,
   antigravityPermissionFingerprint,
   antigravityWorkspaceShardId,
-  buildAntigravityTurnArgs,
   normalizeAntigravityPermissionPolicy,
   normalizeAntigravityWorkspace,
-  parseAntigravityVersion,
-  prepareAntigravityHome,
   prepareAntigravityKeychainContext,
+  prepareAntigravityKeychainContextAsync,
   prepareAntigravityRuntimeAccountHome,
   resolveAntigravityBinary,
   resolveAntigravityExecutable,
-  supportsAntigravityVersion,
 };

@@ -22,6 +22,9 @@
 //                  非布尔脏值 fail-closed 为 false（不能被脏值带成开）。
 //                  只在「app 正常退出」这一条路径生效；断开连接/自更新/模式切换
 //                  仍然真杀（语义不同，见 ARCHITECTURE §9）。
+//   groupChatEnabled  true (default) → 聊天页显示多 Agent 群聊入口。false → 隐藏入口、拒绝新建群 / 发消息 /
+//                  重试，并在关闭那一刻停掉进行中的发言与后台工作；群与历史都保留，重新打开即恢复。
+//                  缺字段或脏值视为 true（群数据不能因为配置损坏而看不见）。
 //   disabledBackends  backend id 列表（如 ["hermes"]）：用户在设置页「断开连接」
 //                  的后端。registry 聚合/路由跳过它们，UI 隐藏对应切换项。
 //   notifications  { chat, cron, task } per-category desktop-notification toggles
@@ -34,12 +37,27 @@
 //   nativeConcurrency { maxActive: 1..100, startupConcurrency: 1..16, revision }
 //   runtimeFrameworkFlags four explicit booleans; new installs enable the shipped framework, revisioned with
 //                  nativeConcurrency and projected to the Service over IPC.
+//   nativeMemory { revision, config } policy for the separately selected memory
+//                  owner; CAS updates and an authenticated Service projection.
+//   nativeMemorySharing { revision, config: { enabled, excludedProfiles } }
+//                  independent read-only sharing policy; enabled native Profiles
+//                  participate dynamically, exclusions apply in both directions.
 
 const fs = require("node:fs");
 const path = require("node:path");
 const { normalizeInspirationShortcut, DEFAULT_INSPIRATION_SHORTCUT } = require("../desktop-inspiration-shortcut");
 const { DEFAULT_RUNTIME_FRAMEWORK_FLAGS, resolveRuntimeFrameworkFlags } = require("../agent-service/runtime-framework-flags");
 const { validateNativeRuntimeConfigProjection, NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES } = require("../agent-service/native-runtime-config-protocol");
+const { validateNativeMemoryConfigProjection, nativeMemoryConfigError } = require("../agent-service/native-memory-config-protocol");
+const { defaultNativeMemoryProjection } = require("../agent-service/active-memory-defaults");
+const { nativeMemorySharingError } = require("../agent-service/native-memory-sharing-protocol");
+
+const { validateChatUiConfig } = require("../agent-service/chat-ui-protocol");
+function projectNativeChatUiConfig(config) { return validateChatUiConfig(config.nativeChatUi); }
+function normalizeNativeChatUiConfig(value) {
+  if (value === undefined) return { revision: 1, config: { nativeChatUiV1: false } };
+  try { return validateChatUiConfig(value); } catch { return null; }
+}
 
 const SUPPORTED_LOCALES = new Set(["", "zh-CN", "en"]);
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
@@ -47,6 +65,19 @@ const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 const DEFAULT_WINDOW_BOUNDS = { width: 1728, height: 1117 };
 const MIN_WINDOW_BOUNDS = { width: 720, height: 560 };
 const DEFAULT_NATIVE_CONCURRENCY = Object.freeze({ maxActive: 32, startupConcurrency: 8, revision: 0 });
+const DEFAULT_BROWSER_USE = Object.freeze({ enabled: true, browser: "chrome", headless: false, isolated: true });
+
+function normalizeBrowserUse(raw) {
+  if (raw === undefined) return { ...DEFAULT_BROWSER_USE };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)
+    || typeof raw.enabled !== "boolean" || !["chrome", "msedge"].includes(raw.browser)
+    || typeof raw.headless !== "boolean" || typeof raw.isolated !== "boolean") {
+    return { ...DEFAULT_BROWSER_USE, enabled: false };
+  }
+  // Current macOS release uses Chrome. The browser picker stays hidden until
+  // additional desktop platforms are supported.
+  return { enabled: raw.enabled, browser: "chrome", headless: raw.headless, isolated: raw.isolated };
+}
 // These features are part of the current unpublished App baseline. Low-level
 // Service defaults remain disabled until Core supplies its authenticated config.
 // Preserve explicit saved choices and keep invalid configuration fail-closed.
@@ -62,6 +93,55 @@ function projectNativeRuntimeConfig(config) {
     ...config.nativeConcurrency,
     flags: config.runtimeFrameworkFlags,
   });
+}
+
+// Product settings schema, defaults and closed validation have one authority.
+// Missing fields mean a fresh install. Invalid saved values never enable sharing.
+function validateNativeMemorySharingProjection(value) {
+  const fail = () => { throw nativeMemorySharingError("NATIVE_MEMORY_SHARING_INVALID"); };
+  const plain = (input, keys) => {
+    if (!input || Object.getPrototypeOf(input) !== Object.prototype || Reflect.ownKeys(input).length !== keys.length
+      || keys.some(key => !Object.hasOwn(input, key))) fail();
+    for (const key of keys) {
+      const field = Object.getOwnPropertyDescriptor(input, key);
+      if (!field?.enumerable || !Object.hasOwn(field, "value")) fail();
+    }
+  };
+  plain(value, ["revision", "config"]);
+  if (!Number.isSafeInteger(value.revision) || value.revision < 0) fail();
+  plain(value.config, ["enabled", "excludedProfiles"]);
+  const excluded = value.config.excludedProfiles;
+  if (typeof value.config.enabled !== "boolean" || !Array.isArray(excluded)
+    || Object.getPrototypeOf(excluded) !== Array.prototype || excluded.length > 256
+    || Reflect.ownKeys(excluded).length !== excluded.length + 1) fail();
+  const excludedProfiles = Array.from({ length: excluded.length }, (_, index) => {
+    const field = Object.getOwnPropertyDescriptor(excluded, String(index));
+    if (!field?.enumerable || !Object.hasOwn(field, "value")) fail();
+    const profile = field.value;
+    if (typeof profile !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(profile)
+      || ["__proto__", "prototype", "constructor"].includes(profile)) fail();
+    return profile;
+  });
+  if (new Set(excludedProfiles).size !== excludedProfiles.length) fail();
+  return Object.freeze({ revision: value.revision, config: Object.freeze({ enabled: value.config.enabled,
+    excludedProfiles: Object.freeze(excludedProfiles.sort()) }) });
+}
+function defaultNativeMemorySharingProjection() {
+  return validateNativeMemorySharingProjection({ revision: 0, config: { enabled: true, excludedProfiles: [] } });
+}
+function projectNativeMemorySharingConfig(config) { return validateNativeMemorySharingProjection(config.nativeMemorySharing); }
+function normalizeNativeMemorySharingConfig(value) {
+  if (value === undefined) return defaultNativeMemorySharingProjection();
+  try { return validateNativeMemorySharingProjection(value); } catch { return null; }
+}
+
+function projectNativeMemoryConfig(config) {
+  return validateNativeMemoryConfigProjection(config.nativeMemory);
+}
+function normalizeNativeMemoryConfig(raw) {
+  if (raw === undefined) return defaultNativeMemoryProjection();
+  try { return validateNativeMemoryConfigProjection(raw); }
+  catch { return null; } // Never replace damaged policy with enabled defaults.
 }
 
 function normalizeNativeRuntimeConfig(parsed) {
@@ -145,7 +225,19 @@ function sanitizeNotifications(raw) {
     chat: typeof n.chat === "boolean" ? n.chat : true,
     cron: taskAndCron,
     task: taskAndCron,
+    proactive: typeof n.proactive === "boolean" ? n.proactive : true,
   };
+}
+
+function sanitizeNotificationPolicy(raw) {
+  const value = raw && typeof raw === "object" ? raw : {};
+  const quiet = value.quietHours;
+  const validTime = time => typeof time === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(time);
+  let validZone = false;
+  try { if (typeof quiet?.timezone === "string") { new Intl.DateTimeFormat("en", { timeZone: quiet.timezone }); validZone = true; } } catch {}
+  return { suppressWhileFocused: value.suppressWhileFocused !== false,
+    quietHours: quiet && validZone && validTime(quiet.start) && validTime(quiet.end) && quiet.start !== quiet.end
+      ? { start: quiet.start, end: quiet.end, timezone: quiet.timezone } : null };
 }
 
 // 只接受不小于窗口下限的有限数；坏值/缺字段一律回落默认，绝不让窗口开成 0×0。
@@ -160,6 +252,10 @@ function sanitizeWindowBounds(raw) {
 }
 
 // Normalize any parsed object to the full, defaulted schema. Never throws.
+function normalizeGroupRuntimeHosts(value) {
+  try { return require("../group-runtime-host-protocol").normalizePeers(value); } catch { return []; }
+}
+
 function normalizeConfig(parsed) {
   const p = parsed && typeof parsed === "object" ? parsed : {};
   const localeRaw = typeof p.locale === "string" ? p.locale : "";
@@ -167,6 +263,8 @@ function normalizeConfig(parsed) {
   return {
     gatewayUrl: typeof p.gatewayUrl === "string" ? p.gatewayUrl : "",
     token: typeof p.token === "string" ? p.token : "",
+    openclawPluginHostMode: p.openclawPluginHostMode === "managed" ? "managed" : "existing",
+    hermesPluginHostMode: p.hermesPluginHostMode === "managed" ? "managed" : "existing",
     locale: SUPPORTED_LOCALES.has(localeRaw) ? localeRaw : "",
     theme: p.theme === "dark" || p.theme === "system" ? p.theme : "light",
     hermesMode: p.hermesMode === "remote" ? "remote" : "local",
@@ -174,13 +272,20 @@ function normalizeConfig(parsed) {
     hermesKeepAlive: typeof p.hermesKeepAlive === "boolean"
       ? p.hermesKeepAlive
       : !Object.prototype.hasOwnProperty.call(p, "hermesKeepAlive"),
+    groupChatEnabled: p.groupChatEnabled !== false,
+    groupRuntimeHosts: normalizeGroupRuntimeHosts(p.groupRuntimeHosts),
     disabledBackends: sanitizeDisabledBackends(p.disabledBackends),
     notifications: sanitizeNotifications(p.notifications),
+    notificationPolicy: sanitizeNotificationPolicy(p.notificationPolicy),
     setupCompletedAt: Number.isFinite(p.setupCompletedAt) && p.setupCompletedAt > 0 ? p.setupCompletedAt : 0,
     windowBounds: sanitizeWindowBounds(p.windowBounds),
     inspirationShortcut: normalizeInspirationShortcut(p.inspirationShortcut) || DEFAULT_INSPIRATION_SHORTCUT,
     nativeConcurrency: { maxActive: native.maxActive, startupConcurrency: native.startupConcurrency, revision: native.revision },
     runtimeFrameworkFlags: { ...native.flags },
+    browserUse: normalizeBrowserUse(p.browserUse),
+    nativeChatUi: normalizeNativeChatUiConfig(p.nativeChatUi),
+    nativeMemory: normalizeNativeMemoryConfig(p.nativeMemory),
+    nativeMemorySharing: normalizeNativeMemorySharingConfig(p.nativeMemorySharing),
   };
 }
 
@@ -202,6 +307,10 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
       const missing = error?.code === "ENOENT";
       return { config: normalizeConfig(missing ? {} : {
         runtimeFrameworkFlags: DEFAULT_RUNTIME_FRAMEWORK_FLAGS,
+        browserUse: null,
+        nativeChatUi: null,
+        nativeMemory: null,
+        nativeMemorySharing: null,
       }), corrupt: !missing };
     }
     try {
@@ -209,7 +318,7 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
       return { config: normalizeConfig(parsed), corrupt: false };
     } catch {
-      return { config: normalizeConfig({ runtimeFrameworkFlags: DEFAULT_RUNTIME_FRAMEWORK_FLAGS }), corrupt: true };
+      return { config: normalizeConfig({ runtimeFrameworkFlags: DEFAULT_RUNTIME_FRAMEWORK_FLAGS, browserUse: null, nativeChatUi: null, nativeMemory: null, nativeMemorySharing: null }), corrupt: true };
     }
   }
 
@@ -244,6 +353,7 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
 
   // Partial update: provided fields override current, everything else persists.
   function write(patch) {
+    if (patch && Object.hasOwn(patch, "groupRuntimeHosts")) require("../group-runtime-host-protocol").normalizePeers(patch.groupRuntimeHosts);
     const { config: current, corrupt } = readParsed();
     if (corrupt) {
       // The values may still be recoverable by hand; discarding a user's operator
@@ -296,6 +406,33 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     });
   }
 
+  function writeNativeMemoryConfig(input) {
+    const { config: current, corrupt } = readParsed();
+    if (corrupt || current.nativeMemory === null) throw nativeMemoryConfigError("NATIVE_MEMORY_CONFIG_INVALID");
+    if (!input || Object.getPrototypeOf(input) !== Object.prototype
+      || Object.keys(input).sort().join(",") !== "config,expectedRevision") throw nativeMemoryConfigError("NATIVE_MEMORY_CONFIG_INVALID");
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== current.nativeMemory.revision) {
+      throw nativeMemoryConfigError("NATIVE_MEMORY_CONFIG_STALE");
+    }
+    const next = validateNativeMemoryConfigProjection({ revision: current.nativeMemory.revision + 1, config: input.config });
+    return write({ nativeMemory: next });
+  }
+
+  function writeNativeMemorySharingConfig(input) {
+    const { config: current, corrupt } = readParsed();
+    if (corrupt || current.nativeMemorySharing === null) throw nativeMemorySharingError("NATIVE_MEMORY_SHARING_INVALID");
+    if (!input || Object.getPrototypeOf(input) !== Object.prototype || Reflect.ownKeys(input).length !== 2
+      || ["config", "expectedRevision"].some(key => {
+        const field = Object.getOwnPropertyDescriptor(input, key);
+        return !field?.enumerable || !Object.hasOwn(field, "value");
+      })) throw nativeMemorySharingError("NATIVE_MEMORY_SHARING_INVALID");
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== current.nativeMemorySharing.revision) {
+      throw nativeMemorySharingError("NATIVE_MEMORY_SHARING_STALE");
+    }
+    const next = validateNativeMemorySharingProjection({ revision: current.nativeMemorySharing.revision + 1, config: input.config });
+    return write({ nativeMemorySharing: next });
+  }
+
   // First run: drop an editable file with the default gateway pre-filled.
   function ensure() {
     if (fs.existsSync(configPath)) return;
@@ -311,7 +448,7 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     }
   }
 
-  return { read, write, writeNativeRuntimeConfig, ensure, getReadStatus, path: configPath };
+  return { read, write, writeNativeRuntimeConfig, writeNativeMemoryConfig, writeNativeMemorySharingConfig, ensure, getReadStatus, path: configPath };
 }
 
 module.exports = {
@@ -328,4 +465,9 @@ module.exports = {
   MIN_WINDOW_BOUNDS,
   DEFAULT_NATIVE_CONCURRENCY,
   projectNativeRuntimeConfig,
+  projectNativeMemoryConfig,
+  projectNativeChatUiConfig,
+  projectNativeMemorySharingConfig, validateNativeMemorySharingProjection, defaultNativeMemorySharingProjection,
+  DEFAULT_BROWSER_USE,
+  normalizeBrowserUse,
 };

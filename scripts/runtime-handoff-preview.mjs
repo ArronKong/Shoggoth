@@ -13,7 +13,8 @@ assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--output" && p
 const output = args[1] || path.join(repo, ".artifacts/runtime-v2-s6-preview/handoff-continuous");
 assert.ok(!fs.existsSync(output), "output directory must be new; retain any earlier attempt");
 fs.mkdirSync(output, { recursive: true, mode: 0o700 });
-const root = fs.mkdtempSync("/tmp/sghui-");
+// The handoff fixture canonicalizes its root (/tmp is a symlink on macOS).
+const root = fs.realpathSync(fs.mkdtempSync("/tmp/sghui-"));
 // No inherited credentials, proxy, installed paths or Electron AS_NODE mode.
 for (const key of Object.keys(process.env)) delete process.env[key];
 Object.assign(process.env, { HOME: root, TMPDIR: root, TMP: root, TEMP: root,
@@ -28,7 +29,10 @@ let childExited = false, outcome, failure, origin;
 const owned = new Map(), requests = [], rounds = [];
 const cleanup = {};
 try {
-  fixture = await openHandoffFixture({ root });
+  // Codex resolves an inherited effort from its catalog when a model is
+  // selected, so the override must exist in the fixture catalog.
+  fixture = await openHandoffFixture({ root, catalogs: Object.fromEntries(["codex", "pi", "deepseek-harness"]
+    .map(runtime => [runtime, ["fixture-needs-explicit-clear", "fixture-model"]])) });
   for (const value of Object.values(fixture.paths)) {
     if (typeof value === "string" && path.isAbsolute(value)) assert.ok(value === root || value.startsWith(`${root}/`), "Service paths remain isolated");
   }

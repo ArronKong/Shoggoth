@@ -6,11 +6,16 @@ require("./background-role-activation").prepareBackgroundRoleActivation();
 
 // Electron 的 package main 不是普通 Node CLI，不能依赖 require.main 判定。
 // 正式入口加载即分派；可测试的纯函数放在 bootstrap-role，避免测试误启 UI。
-const { bootstrapFailureCode, main } = require("./bootstrap-role");
+const { bootstrapFailureCode, main, resolveTestRolePaths } = require("./bootstrap-role");
 
 Promise.resolve()
   .then(main)
   .catch((error) => {
+    try {
+      require("./bootstrap-diagnostics").recordBootstrapFailure(error, { paths: resolveTestRolePaths() });
+    } catch {
+      // Startup diagnostics cannot replace the original failure or exit.
+    }
     console.error(`[bootstrap] startup failure: ${bootstrapFailureCode(error)}`);
     try {
       require("electron").app.exit(1);

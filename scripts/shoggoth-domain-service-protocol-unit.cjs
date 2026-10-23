@@ -149,6 +149,10 @@ function cardRunLink(overrides = {}) {
   };
 }
 
+const RUN_RUNTIME = {
+  runtime: "codex", runtimeProfileId: "shoggoth-profile", runtimeAccountId: "shoggoth-internal-codex-default-v1",
+};
+
 function workRun(overrides = {}) {
   return {
     id: RUN_ID,
@@ -158,8 +162,9 @@ function workRun(overrides = {}) {
     profileId: PROFILE_ID,
     workspace: null,
     status: "queued",
-    codexThreadId: null,
-    codexTurnId: null,
+    contextSnapshotId: null,
+    runtimeSessionRef: null,
+    runtimeTurnRef: null,
     eventSeq: 1,
     waitingRequestId: null,
     startedAt: null,
@@ -320,6 +325,20 @@ test("每个 method 接受自身 exact params 并返回无别名 canonical clone
     const output = validateDomainServiceParams(method, params);
     assert.deepEqual(output, params, method);
     assert.notEqual(output, params, method);
+  }
+});
+
+test("Cron create defaults to one job conversation without accepting invalid explicit bindings", () => {
+  const { threadPolicy, threadId, ...input } = VALID_PARAMS.get("cron.job.create");
+  assert.deepEqual(validateDomainServiceParams("cron.job.create", input),
+    { ...input, threadPolicy: "continue", threadId: null });
+  assert.equal(Object.hasOwn(input, "threadPolicy"), false);
+  assert.deepEqual(validateDomainServiceParams("cron.job.create", { ...input, threadPolicy: "continue" }),
+    validateDomainServiceParams("cron.job.create", input));
+  assert.equal(validateDomainServiceParams("cron.job.create", { ...input, threadPolicy: "new" }).threadId, null);
+  for (const patch of [{ threadPolicy: undefined }, { threadPolicy: null }, { threadPolicy: "invalid" },
+    { threadId: undefined }, { threadId: "" }, { threadPolicy: "new", threadId: "other-thread" }]) {
+    expectCode(() => validateDomainServiceParams("cron.job.create", { ...input, ...patch }), "INVALID_PARAMS");
   }
 });
 
@@ -706,6 +725,19 @@ test("cron.run.list 使用 exact run/kind/createdAt item 并锁定 retry lineage
   }
 });
 
+test("cron output disposition is versioned and bound to authoritative terminal status", () => {
+  const params = { ...VALID_PARAMS.get("cron.run.list"), status: null };
+  const item = cronRunListItem({ run: workRun({ source: "cron", sourceId: JOB_ID, status: "completed", startedAt: 113, finishedAt: 114 }) });
+  const page = value => ({ runs: [value], nextCursor: null, hasMore: false });
+  const cronOutput = { version: 1, disposition: "silent", reason: "token" };
+  assert.deepEqual(validateDomainServiceResult("cron.run.list", page({ ...item, cronOutput }), params).runs[0].cronOutput, cronOutput);
+  for (const output of [{ ...cronOutput, version: 2 }, { ...cronOutput, disposition: "pending", reason: null },
+    { ...cronOutput, reason: null }, { ...cronOutput, extra: true }]) {
+    expectCode(() => validateDomainServiceResult("cron.run.list", page({ ...item, cronOutput: output }), params), "DOMAIN_RESPONSE_INVALID");
+  }
+  expectCode(() => validateDomainServiceResult("cron.run.list", page({ ...cronRunListItem(), cronOutput }), params), "DOMAIN_RESPONSE_INVALID");
+});
+
 test("run.list direct validator 与 paginator 都按 params 绑定实体和非空 status", () => {
   const cronParams = { ...VALID_PARAMS.get("cron.run.list"), status: null };
   const kanbanParams = VALID_PARAMS.get("kanban.run.list");
@@ -847,8 +879,8 @@ test("WorkRun DTO 复用 Product Store contract 且额外要求所有字段显�
       id: "r".repeat(128),
       idempotencyKey: "i".repeat(256),
       workspace: "w".repeat(4_096),
-      codexThreadId: "t".repeat(256),
-      codexTurnId: "u".repeat(256),
+      runtimeSessionRef: { ...RUN_RUNTIME, sessionId: "t".repeat(256) },
+      runtimeTurnRef: { ...RUN_RUNTIME, sessionId: "t".repeat(256), turnId: "u".repeat(256) },
       resultSummary: "s".repeat(16 * 1_024),
       retryOf: "p".repeat(128),
     })],
@@ -875,8 +907,11 @@ test("WorkRun DTO 复用 Product Store contract 且额外要求所有字段显�
     workRun({ profileId: "profile-1" }),
     workRun({ workspace: "w".repeat(4_097) }),
     workRun({ workspace: "\uD800" }),
-    workRun({ codexThreadId: "t".repeat(257) }),
-    workRun({ codexThreadId: "thread", codexTurnId: "u".repeat(257) }),
+    workRun({ runtimeSessionRef: { ...RUN_RUNTIME, sessionId: "t".repeat(257) } }),
+    workRun({
+      runtimeSessionRef: { ...RUN_RUNTIME, sessionId: "thread" },
+      runtimeTurnRef: { ...RUN_RUNTIME, sessionId: "thread", turnId: "u".repeat(257) },
+    }),
     workRun({
       status: "waiting_input", startedAt: 100, waitingRequestId: "q".repeat(129),
     }),
@@ -903,8 +938,6 @@ test("current WorkRun 投影可被 Domain Service 边界重复校验", () => {
     runtimeSessionRef: null,
     runtimeTurnRef: null,
   });
-  delete current.codexThreadId;
-  delete current.codexTurnId;
   const params = VALID_PARAMS.get("cron.run.trigger");
   const first = validateDomainServiceResult("cron.run.trigger", { run: current }, params);
   assert.deepEqual(

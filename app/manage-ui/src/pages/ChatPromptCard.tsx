@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import "../i18n/promptCardResources";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import ChatApprovalCard from "./ChatApprovalCard";
+import ChatPromptChoices from "./ChatPromptChoices";
 import "./ChatPromptCard.css";
 import type {
   InteractiveFieldV1,
@@ -94,11 +96,23 @@ function directConfirmationField(request: InteractiveRequestV1 | null): Interact
     ? field : null;
 }
 
-// Interactive card for a blocking agent prompt (Hermes gateway approval /
-// clarify / sudo / secret). Approval renders choice buttons (once/session/
-// always/deny); clarify renders its choices + a free-text answer; sudo/secret
-// render a single input (masked for sudo — the value is relayed verbatim to
-// the local gateway, never stored here). Answering removes the card.
+function PromptAnswerInput({ secret, label, value, disabled, placeholder, onChange, onSubmit }: {
+  secret?: boolean; label: string; value: string; disabled: boolean; placeholder: string;
+  onChange: (value: string) => void; onSubmit?: () => void;
+}) {
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.nativeEvent.isComposing && (secret || event.metaKey || event.ctrlKey) && onSubmit) {
+      event.preventDefault(); onSubmit();
+    }
+  };
+  const props = { className: "chat-prompt__input", "aria-label": label, value, disabled, placeholder,
+    autoComplete: "off", onKeyDown };
+  return secret ? <input {...props} type="password" onChange={(event) => onChange(event.target.value)} />
+    : <textarea {...props} rows={3} onChange={(event) => onChange(event.target.value)} />;
+}
+
+// Choices remain editable until explicit submission; secret answers stay masked
+// and are excluded from persisted drafts.
 const inputDrafts = new Map<string, Record<string, string>>();
 
 export default function ChatPromptCard({
@@ -106,16 +120,19 @@ export default function ChatPromptCard({
   onRespond,
   draftKey,
   compactApproval = false,
+  agentName,
   compactInput = false,
 }: {
   entry: ChatPromptEntry;
   draftKey?: string;
   compactApproval?: boolean;
+  agentName?: string;
   compactInput?: boolean;
   onRespond: (entry: ChatPromptEntry, data: ChatPromptResponse) => void | Promise<void>;
 }) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
+  const [legacySelection, setLegacySelection] = useState("");
   const [answers, setAnswers] = useState<Record<string, string>>(() => draftKey ? inputDrafts.get(draftKey) || {} : {});
   useEffect(() => {
     if (!draftKey || !("version" in entry) || entry.version !== 1) return;
@@ -127,6 +144,7 @@ export default function ChatPromptCard({
   const [questionFreeText, setQuestionFreeText] = useState<Record<string, string>>({});
   const [expiredQuestionId, setExpiredQuestionId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [dismissedApprovalId, setDismissedApprovalId] = useState<string | null>(null);
   const submittingRef = useRef(false);
   const openClawQuestion = isOpenClawQuestionPromptEntry(entry) ? entry : null;
   useEffect(() => {
@@ -155,15 +173,18 @@ export default function ChatPromptCard({
     return () => window.clearTimeout(timer);
   }, [openClawQuestion?.expiresAtMs, openClawQuestion?.id, openClawQuestion?.status]);
   const respond = async (data: ChatPromptResponse) => {
-    if (submittingRef.current || ("interrupted" in entry && entry.interrupted)) return;
+    if (submittingRef.current || dismissedApprovalId === entry.id || ("interrupted" in entry && entry.interrupted)) return;
     submittingRef.current = true;
     setSubmitting(true);
+    // Hide approvals on click; keep the request until its owner acknowledges it.
+    // Retain dismissal after success so a delayed projection cannot flash it back.
+    if (isApprovalPrompt(entry)) setDismissedApprovalId(entry.id);
     try {
       await onRespond(entry, data);
       if (draftKey) inputDrafts.delete(draftKey);
     } catch {
-      // ChatPage owns the visible error toast. Keeping the card mounted here
-      // lets the user retry the same still-authoritative request.
+      // The owner shows the error; restore the same request for an explicit retry.
+      setDismissedApprovalId(current => current === entry.id ? null : current);
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -216,52 +237,31 @@ export default function ChatPromptCard({
       void respond({ action: "submit", questionAnswers: submitted });
     };
     return (
-      <div className="chat-prompt">
+      <section className="chat-prompt chat-prompt--input" aria-busy={submitting}>
+        <div className="chat-prompt__content">
         <div className="chat-prompt__head">
           <span className="chat-prompt__badge">{t("chat.promptClarify")}</span>
         </div>
         {openClawQuestion.questions.map((question) => (
-          <div key={question.questionId} className="chat-prompt__field">
-            <span className="chat-prompt__q">{question.header}</span>
+          <fieldset key={question.questionId} className="chat-prompt__field">
+            <legend className="chat-prompt__field-label">{question.header}</legend>
             <span className="chat-prompt__desc">{question.question}</span>
             {pending ? (
               <>
                 {question.options.length > 0 ? (
-                  <span
-                    className="chat-prompt__options"
-                    role={question.multiSelect ? "group" : "radiogroup"}
-                    aria-label={question.header}
-                  >
-                    {question.options.map((option) => {
-                      const selected = (questionSelections[question.questionId] ?? []).includes(option.label);
-                      return (
-                        <span key={option.label} className="chat-prompt__field">
-                          <button
-                            type="button"
-                            className={selected ? "chat-prompt__btn is-primary" : "chat-prompt__btn"}
-                            role={question.multiSelect ? "checkbox" : "radio"}
-                            aria-checked={selected}
-                            title={option.description || undefined}
-                            disabled={submitting}
-                            onClick={() => toggleOption(question, option.label)}
-                          >
-                            {option.label}
-                          </button>
-                        </span>
-                      );
-                    })}
-                  </span>
+                  <ChatPromptChoices label={question.header} multiple={question.multiSelect}
+                    options={question.options.map((option) => ({ ...option, value: option.label }))}
+                    selected={questionSelections[question.questionId] ?? []} disabled={submitting}
+                    onChoose={(label) => toggleOption(question, label)} />
                 ) : null}
                 {question.isOther || question.options.length === 0 ? (
-                  <input
-                    className="chat-prompt__input"
-                    type={question.isSecret ? "password" : "text"}
-                    autoComplete="off"
-                    aria-label={question.header}
+                  <PromptAnswerInput
+                    secret={question.isSecret}
+                    label={question.options.length > 0 ? `${question.header} · ${t("models.other")}` : question.header}
                     value={questionFreeText[question.questionId] ?? ""}
                     disabled={submitting}
                     placeholder={question.options.length > 0 ? t("models.other") : t("chat.promptPlaceholder")}
-                    onChange={(event) => updateOther(question, event.target.value)}
+                    onChange={(nextValue) => updateOther(question, nextValue)}
                   />
                 ) : null}
                 {question.secretStore ? (
@@ -280,10 +280,11 @@ export default function ChatPromptCard({
                 ) : null}
               </>
             ) : null}
-          </div>
+          </fieldset>
         ))}
+        </div>
         {pending ? (
-          <div className="chat-prompt__row">
+          <div className="chat-prompt__row chat-prompt__actions">
             <button
               type="button"
               className="chat-prompt__btn is-primary"
@@ -306,15 +307,15 @@ export default function ChatPromptCard({
             {expired ? t("dashboard.expired") : openClawQuestion.status}
           </div>
         )}
-      </div>
+      </section>
     );
   }
 
   const canonical = "version" in entry && entry.version === 1 ? entry : null;
   const legacy = canonical ? null : entry as LegacyChatPromptEntry;
   const isApproval = isApprovalPrompt(entry);
-  if (isApproval) return <ChatApprovalCard entry={entry} submitting={submitting} compact={compactApproval}
-    onChoose={(choice) => { void respond({ choice }); }} />;
+  if (isApproval) return dismissedApprovalId === entry.id ? null : <ChatApprovalCard entry={entry} submitting={submitting} compact={compactApproval}
+    agentName={agentName} onChoose={(choice) => { void respond({ choice }); }} />;
   const heading =
     (canonical?.kind === "product_confirmation" ? t("chat.promptProductConfirmation")
       : canonical?.kind === "user_input" ? t("chat.promptNeedsInput") : canonical?.title)
@@ -391,121 +392,62 @@ export default function ChatPromptCard({
       ? { action: "submit", answers: submitted }
       : { answers: submitted });
   };
-  const compactQuestion = compactInput && canonical && questions.length > 0;
-  const questionActions = <div className={`chat-prompt__row${compactQuestion ? " chat-prompt__actions" : ""}`}>
-    <button
-      type="button"
-      className="chat-prompt__btn is-primary"
-      disabled={submitting || !multiAnswerReady}
-      onClick={submitAnswers}
-    >
+  const legacyAnswer = legacySelection || value;
+  const questionActions = <div className="chat-prompt__row chat-prompt__actions">
+    <button type="button" className="chat-prompt__btn is-primary"
+      disabled={submitting || (questions.length > 0 ? !multiAnswerReady : !legacyAnswer.trim())}
+      onClick={() => { if (questions.length > 0) submitAnswers(); else void respond({ value: legacyAnswer }); }}>
       {t("chat.promptSubmit")}
     </button>
-    {canonical ? (
-      <button
-        type="button"
-        className="chat-prompt__btn is-deny"
-        disabled={submitting}
-        onClick={() => { void respond({ action: "cancel", answers: {} }); }}
-      >
-        {t("common.cancel")}
-      </button>
-    ) : null}
+    {canonical ? <button type="button" className="chat-prompt__btn is-deny" disabled={submitting}
+      onClick={() => { void respond({ action: "cancel", answers: {} }); }}>{t("common.cancel")}</button> : null}
   </div>;
-  const inputContent = <>
-      <div className="chat-prompt__head">
-        <span className="chat-prompt__badge">{heading}</span>
-        {legacy?.description ? <span className="chat-prompt__desc">{legacy.description}</span> : null}
-      </div>
-      {legacy?.command ? <pre className="chat-prompt__cmd">{legacy.command}</pre> : null}
-      {(canonical?.message || legacy?.question)
-        ? <div className="chat-prompt__q">{canonical?.message || legacy?.question}</div> : null}
-      <>
-          {legacy?.kind === "clarify" && legacy.choices?.length ? (
-            <div className="chat-prompt__row">
-              {legacy.choices.map((c) => (
-                <button key={c} type="button" className="chat-prompt__btn" disabled={submitting} onClick={() => { void respond({ value: c }); }}>
-                  {c}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {needsInput && questions.length > 0 ? (
-            <div className="chat-prompt__fields">
-              {questions.map((question) => {
-                const label = question.label;
-                return (
-                  <label key={question.id} className="chat-prompt__field">
-                    <span className="chat-prompt__q">{label}</span>
-                    {question.description ? <span className="chat-prompt__desc">{question.description}</span> : null}
-                    {question.type === "choice" ? (
-                      <span className="chat-prompt__options">
-                        {question.options.map((option) => (
-                          <span key={option.value} className="chat-prompt__field">
-                            <button
-                              type="button"
-                              className={answers[question.id] === option.value
-                                ? "chat-prompt__btn is-primary" : "chat-prompt__btn"}
-                              disabled={submitting}
-                              aria-pressed={answers[question.id] === option.value}
-                              title={option.description || undefined}
-                              onClick={() => setAnswers((previous) => ({
-                                ...previous, [question.id]: option.value,
-                              }))}
-                            >
-                              {option.label}
-                            </button>
-                          </span>
-                        ))}
-                      </span>
-                    ) : (
-                      <input
-                        className="chat-prompt__input"
-                        type={question.secret ? "password" : "text"}
-                        aria-label={label}
-                        value={answers[question.id] ?? ""}
-                        disabled={submitting}
-                        placeholder={t("chat.promptPlaceholder")}
-                        onChange={(event) => {
-                          const nextValue = event.target.value;
-                          setAnswers((previous) => ({ ...previous, [question.id]: nextValue }));
-                        }}
-                      />
-                    )}
-                  </label>
-                );
-              })}
-              {!compactQuestion && questionActions}
-            </div>
-          ) : needsInput ? (
-            <div className="chat-prompt__row">
-              <input
-                className="chat-prompt__input"
-                type={legacy?.kind === "sudo" ? "password" : "text"}
-                value={value}
-                disabled={submitting}
-                placeholder={t("chat.promptPlaceholder")}
-                onChange={(e) => setValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && value.trim()) void respond({ value });
-                }}
-              />
-              <button
-                type="button"
-                className="chat-prompt__btn is-primary"
-                disabled={submitting || !value.trim()}
-                onClick={() => { void respond({ value }); }}
-              >
-                {t("chat.promptSubmit")}
-              </button>
-            </div>
-          ) : null}
-      </>
-  </>;
   return (
-    <div className="chat-prompt chat-prompt--input">
-      {compactQuestion ? <div className="chat-prompt__content">{inputContent}</div> : inputContent}
-      {compactQuestion && questionActions}
-    </div>
+    <section className={`chat-prompt chat-prompt--input${compactInput ? " chat-prompt--compact" : ""}`} aria-busy={submitting}>
+      <div className="chat-prompt__content">
+        <div className="chat-prompt__head">
+          <span className="chat-prompt__badge">{heading}</span>
+          {legacy?.description ? <span className="chat-prompt__desc">{legacy.description}</span> : null}
+        </div>
+        {legacy?.command ? <pre className="chat-prompt__cmd">{legacy.command}</pre> : null}
+        {(canonical?.message || legacy?.question)
+          ? <div className="chat-prompt__q">{canonical?.message || legacy?.question}</div> : null}
+        {legacy?.kind === "clarify" && legacy.choices?.length ? (
+          <ChatPromptChoices label={legacy.question || heading}
+            options={legacy.choices.map((choice) => ({ value: choice, label: choice }))}
+            selected={legacySelection ? [legacySelection] : []} disabled={submitting}
+            onChoose={(choice) => { setLegacySelection(choice); setValue(""); }} />
+        ) : null}
+        {questions.length > 0 ? (
+          <div className="chat-prompt__fields">
+            {questions.map((question) => (
+              <fieldset key={question.id} className="chat-prompt__field">
+                <legend className="chat-prompt__field-label">{question.label}
+                  {question.required === false ? <span className="chat-prompt__optional">{t("chat.promptOptional")}</span> : null}
+                </legend>
+                {question.description ? <span className="chat-prompt__desc">{question.description}</span> : null}
+                {question.type === "choice" ? (
+                  <ChatPromptChoices label={question.label} options={question.options}
+                    selected={answers[question.id] === undefined ? [] : [answers[question.id]]} disabled={submitting}
+                    onChoose={(choice) => setAnswers((previous) => ({ ...previous, [question.id]: choice }))} />
+                ) : (
+                  <PromptAnswerInput secret={question.secret} label={question.label} value={answers[question.id] ?? ""}
+                    disabled={submitting} placeholder={t("chat.promptPlaceholder")}
+                    onChange={(nextValue) => setAnswers((previous) => ({ ...previous, [question.id]: nextValue }))} />
+                )}
+              </fieldset>
+            ))}
+          </div>
+        ) : needsInput ? (
+          <PromptAnswerInput secret={legacy?.kind === "sudo" || legacy?.kind === "secret"}
+            label={legacy?.choices?.length ? t("models.other") : legacy?.question || heading}
+            value={value} disabled={submitting}
+            placeholder={legacy?.choices?.length ? t("chat.promptOtherPlaceholder") : t("chat.promptPlaceholder")}
+            onChange={(nextValue) => { setValue(nextValue); setLegacySelection(""); }}
+            onSubmit={legacyAnswer.trim() ? () => { void respond({ value: legacyAnswer }); } : undefined} />
+        ) : null}
+      </div>
+      {questionActions}
+    </section>
   );
 }

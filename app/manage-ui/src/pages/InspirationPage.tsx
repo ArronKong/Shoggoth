@@ -131,8 +131,10 @@ function DeleteIdeaButton({ idea, disabled, compact = false, onDeleted }: {
   </span>;
 }
 
-function Attention({ ideaId, execution, onChange, compact = false }: {
+function Attention({ ideaId, execution, onChange, compact = false, agentName }: {
   ideaId: string; execution: InspirationExecution; onChange: () => Promise<void>; compact?: boolean;
+  /** The execution's agent, the subject of its approval card. */
+  agentName?: string;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
@@ -165,7 +167,7 @@ function Attention({ ideaId, execution, onChange, compact = false }: {
     {attention.active ? <ChatPromptCard key={attention.request.requestId}
       compactApproval={compact}
       compactInput={compact}
-      draftKey={`inspiration:${execution.runId}:${attention.request.requestId}`}
+      draftKey={`inspiration:${execution.runId}:${attention.request.requestId}`} agentName={agentName}
       entry={{ ...attention.request, id: attention.request.requestId }} onRespond={(_entry, data) => respond(data)} />
       : <><strong>{t('inspiration.expired')}</strong><p>{attention.request.message}</p>
         {attention.request.fields.map((field) => <p key={field.id}>{field.label}</p>)}
@@ -196,6 +198,8 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, onOpen, onChan
   };
   const paperTone = paperToneOf(idea);
   const latest = execution?.runId === idea.latestExecution?.runId ? execution : idea.latestExecution;
+  const agentNameOf = (value?: InspirationExecution) => value && agent?.id === value.agentId
+    && agent.backendId === value.backendId ? agent.name : undefined;
   const rooting = Boolean(latest && idea.archivedAt === null
     && ['queued', 'starting', 'running', 'waiting_input', 'waiting_approval', 'failed', 'canceled', 'interrupted', 'unknown'].includes(idea.status));
   return <article className={`${paperStyles.surface} ${styles.card}`} data-inspiration-id={idea.id} data-paper={paperTone} data-has-media={Boolean(idea.attachments?.length) || undefined}
@@ -213,7 +217,7 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, onOpen, onChan
       <DeleteIdeaButton idea={idea} compact disabled={busy} onDeleted={onChange} />
     </div>
     {rooting && latest && <InspirationRunBar ideaId={idea.id} execution={latest} agent={agent} onOpen={() => onOpen(idea.id)}
-      attention={<Attention ideaId={idea.id} execution={latest} onChange={onChange} compact />} />}
+      attention={<Attention ideaId={idea.id} execution={latest} onChange={onChange} compact agentName={agentNameOf(latest)} />} />}
     <div className={styles.cardContent}>
       <InspirationContent body={idea.body} attachments={idea.attachments} compact onOpen={() => onOpen(idea.id)}
         renderText={(text, index) => ((index === 0 && idea.title) || text || !idea.attachments?.length) && <button className={styles.bodyButton} data-inspiration-body type="button"
@@ -221,7 +225,7 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, onOpen, onChan
         {index === 0 && idea.title && <h2>{idea.title}</h2>}<p>{text}</p>
       </button>} />
     </div>
-    {!rooting && execution && <Attention ideaId={idea.id} execution={execution} onChange={onChange} />}
+    {!rooting && execution && <Attention ideaId={idea.id} execution={execution} onChange={onChange} agentName={agentNameOf(execution)} />}
     {!rooting && idea.latestExecution?.resultSummary && <div className={styles.resultPreview}>
       <span className={styles.meta}>{t('inspiration.result')}</span>
       <p>{idea.latestExecution.resultSummary}</p>
@@ -409,8 +413,8 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
             <h3>{running && <span className={styles.liveDot} data-still={tone !== 'live' || undefined} aria-hidden="true" />}{t(idea.status === 'completed' ? 'inspiration.result' : 'inspiration.currentRun')}</h3>
             <SessionLink execution={latest} />
           </div>
-          {latest.attention ? <Attention ideaId={id} execution={latest} onChange={refresh} />
-            : latest.resultSummary ? <div className={styles.markdown} dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(latest.resultSummary) }} />
+          {latest.attention ? <Attention ideaId={id} execution={latest} onChange={refresh} agentName={agentName(latest)} />
+            : latest.resultSummary ? <div className={styles.markdown} dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(latest.resultSummary, true) }} />
               : <p className={styles.progressHint}>{t(`inspiration.progressHint.${idea.status}`)}</p>}
           {failure && <p className={styles.runFailure}><span className={styles.runFailureMark} aria-hidden="true">!</span>
             <span className={styles.runFailureText}>{failure.reason && <span>{failure.reason}</span>}{failure.code && <code>{failure.code}</code>}</span></p>}
@@ -465,7 +469,7 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
                 <InspirationActionIcon name="chevron" />
               </summary>
               <div className={styles.runBody}>
-                {execution.resultSummary && <div className={styles.markdown} dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(execution.resultSummary) }} />}
+                {execution.resultSummary && <div className={styles.markdown} dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(execution.resultSummary, true) }} />}
                 {execution.errorCode && <p className={styles.error}>{failureOf(execution, false)?.reason} · <code>{execution.errorCode}</code></p>}
                 <SessionLink execution={execution} />
                 {execution.runId !== latest?.runId && expandedRuns.has(execution.id)

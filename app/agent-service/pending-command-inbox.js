@@ -74,6 +74,15 @@ function fingerprintCommand(input) {
   ])).digest("hex");
 }
 
+// A domain-separated fingerprint records a never-admitted operation without a
+// prompt, synthetic Run, or a new on-disk shape. Older readers still fence it as
+// a canceled tombstone and cannot enqueue it again.
+function rejectionFingerprint(operationId, sessionKey, createdAt) {
+  return crypto.createHash("sha256").update(JSON.stringify([
+    "shoggoth:never-admitted:v1", operationId, sessionKey, createdAt,
+  ])).digest("hex");
+}
+
 function commandFields(input, base) {
   const fields = [...attachmentFields(input, base)];
   if (input?.pluginSelection !== undefined) fields.push("pluginSelection");
@@ -221,6 +230,8 @@ class PendingCommandInbox {
 
   async open() {
     if (this.opened) return this;
+    this.openedAt = this.#currentTime();
+    this.loadedFromDisk = false;
     const openGeneration = this.lifecycleGeneration + 1;
     this.lifecycleGeneration = openGeneration;
     preparePrivateParent(this.filePath, this.paths.trustedRoot, this.fs);
@@ -317,6 +328,7 @@ class PendingCommandInbox {
       if (!this.commitUncertain && !this.contentLocked) {
         await this.#refreshWindow(this.#currentTime(), Boolean(stat));
       }
+      this.loadedFromDisk = Boolean(stat);
       this.writerLease = lease;
       this.cleanupPending = false;
       this.opened = true;
@@ -427,6 +439,40 @@ class PendingCommandInbox {
       throw inboxError("PENDING_COMMAND_INVALID", "operationId 无效");
     }
     return clone(this.activeCommands[operationId] || this.tombstones[operationId] || null);
+  }
+
+  isUnadmittedRejection(operationId, sessionKey) {
+    const entry = this.get(operationId);
+    return entry?.state === "canceled" && entry.fingerprint === rejectionFingerprint(
+      operationId, sessionKey, entry.createdAt);
+  }
+
+  rejectUnadmitted({ operationId, sessionKey, createdAt }) {
+    this.#assertOpen();
+    if (!validOpaqueId(operationId) || !UUID_PATTERN.test(sessionKey)
+      || !Number.isSafeInteger(createdAt) || createdAt <= 0) {
+      throw inboxError("PENDING_COMMAND_INVALID", "原发送观察记录无效");
+    }
+    return this.#enqueueMutation(async () => {
+      const time = this.#currentTime();
+      await this.#refreshWindow(time);
+      const existing = this.activeCommands[operationId] || this.tombstones[operationId];
+      const fingerprint = rejectionFingerprint(operationId, sessionKey, createdAt);
+      if (existing) return existing.state === "canceled" && existing.fingerprint === fingerprint;
+      // The coordinator serializes this with same-session admission; this
+      // mutation also fences any late enqueue before reporting non-admission.
+      // Retained state covers the full window. A fresh Inbox only covers sends
+      // created since it opened; it cannot prove absence in missing old state.
+      if ((!this.loadedFromDisk && createdAt < this.openedAt) || createdAt > time
+        || createdAt <= this.idempotencyFloorMs) return false;
+      if (Object.keys(this.tombstones).length >= this.maxTombstones) {
+        throw inboxError("PENDING_COMMAND_CAPACITY", "PendingCommand 幂等窗口容量已满");
+      }
+      const rejected = normalizeTombstone({ operationId, fingerprint, state: "canceled",
+        createdAt, finishedAt: time });
+      await this.#commit(this.activeCommands, { ...this.tombstones, [operationId]: rejected });
+      return true;
+    });
   }
 
   list(query = {}) {

@@ -8,6 +8,9 @@ const META = "shoggoth/runtime-call-binding";
 const MESSAGE = "Shoggoth internal Runtime call binding v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
+// A future host-specific adapter must require this process-local brand before
+// using a Codex thread; copied JSON or tool arguments cannot create it.
+const trustedCodexTurns = new WeakSet();
 const plain = value => value && Object.getPrototypeOf(value) === Object.prototype;
 const exact = (value, keys) => plain(value) && Reflect.ownKeys(value).length === keys.length
   && keys.every(key => Object.hasOwn(value, key));
@@ -15,6 +18,19 @@ function fail() { throw serviceError("MCP_SESSION_INVALID", "mcp_session_invalid
 function checkLive(assertCurrent) {
   const value = assertCurrent();
   if (value === false || (value && typeof value.then === "function")) fail();
+}
+function validCodexTurn(value) {
+  return exact(value, ["threadId", "turnId"])
+    && [value.threadId, value.turnId].every(id => typeof id === "string"
+      && id.length > 0 && id.length <= 256);
+}
+function assertTrustedCodexTurn(scope, expectedRunId) {
+  const turn = scope?.trustedCodexTurn;
+  if (!turn || !trustedCodexTurns.has(turn)
+    || typeof expectedRunId !== "string" || !expectedRunId
+    || scope.runId !== expectedRunId || turn.runId !== expectedRunId) fail();
+  checkLive(turn.assertCurrent);
+  return turn;
 }
 function fingerprint(name, args, confirmation = false) {
   if (typeof name !== "string" || !name || name.length > 64 || !plain(args)
@@ -54,6 +70,7 @@ function parseBindingElicitation(params) {
 class RuntimeMcpCallBindings {
   #pending = new Map();
   #used = new Map();
+  #issuedTurns = new Map();
   constructor({ now = Date.now, ttlMs = 60_000, maxPending = 256 } = {}) {
     if (typeof now !== "function" || !Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 60_000
       || !Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > 1024) throw new TypeError("Invalid Runtime binding options");
@@ -64,14 +81,16 @@ class RuntimeMcpCallBindings {
     for (const [id, record] of this.#pending) if (record.expiresAt <= now) this.#pending.delete(id);
     return now;
   }
-  register({ proof, runId, profileId, runtimeProfileId, runtimeAccountId, assertCurrent }) {
+  register({ proof, runId, profileId, runtimeProfileId, runtimeAccountId, assertCurrent,
+    codexTurn }) {
     const now = this.#sweep();
     const previous = this.#pending.get(proof?.callId);
     if (!proof || typeof proof.callId !== "string" || !UUID.test(proof.callId)
       || typeof proof.fingerprint !== "string" || !HASH.test(proof.fingerprint)
       || typeof proof.sessionIdentity !== "string" || !HASH.test(proof.sessionIdentity)
       || [runId, profileId, runtimeProfileId, runtimeAccountId].some(value => typeof value !== "string" || !value)
-      || typeof assertCurrent !== "function" || this.#used.has(proof.callId)
+      || typeof assertCurrent !== "function" || (codexTurn !== undefined && !validCodexTurn(codexTurn))
+      || this.#used.has(proof.callId)
       || (!previous && this.#pending.size >= this.maxPending) || this.#used.size >= 4096) fail();
     // Authentication can rotate before consume. Only the same trusted native
     // call may rebind its still-pending proof; consumed IDs never re-enter.
@@ -79,12 +98,17 @@ class RuntimeMcpCallBindings {
       if (previous.sessionIdentity === proof.sessionIdentity || previous.name !== proof.name
         || previous.fingerprint !== proof.fingerprint || previous.runId !== runId
         || previous.profileId !== profileId || previous.runtimeProfileId !== runtimeProfileId
-        || previous.runtimeAccountId !== runtimeAccountId) fail();
+        || previous.runtimeAccountId !== runtimeAccountId
+        || !!previous.codexTurn !== !!codexTurn
+        || (codexTurn && (previous.codexTurn.threadId !== codexTurn.threadId
+          || previous.codexTurn.turnId !== codexTurn.turnId))) fail();
       checkLive(previous.assertCurrent);
     }
     checkLive(assertCurrent);
     this.#pending.set(proof.callId, { ...proof, runId, profileId, runtimeProfileId,
-      runtimeAccountId, assertCurrent, expiresAt: previous?.expiresAt ?? now + this.ttlMs });
+      runtimeAccountId, assertCurrent,
+      codexTurn: codexTurn && Object.freeze({ ...codexTurn }),
+      expiresAt: previous?.expiresAt ?? now + this.ttlMs });
   }
   consume({ callId, name, arguments: args, confirmation = false, profileId, runtimeProfileId, runtimeAccountId, sessionToken }) {
     this.#sweep();
@@ -98,15 +122,35 @@ class RuntimeMcpCallBindings {
     // refresh after expiry must never revive an already-consumed call ID.
     this.#used.set(callId, record.runId);
     checkLive(record.assertCurrent);
-    return { runId: record.runId, assertCurrent: record.assertCurrent };
+    const trustedCodexTurn = record.codexTurn && Object.freeze({
+      ...record.codexTurn, runId: record.runId, assertCurrent: record.assertCurrent,
+    });
+    if (trustedCodexTurn) {
+      trustedCodexTurns.add(trustedCodexTurn);
+      let turns = this.#issuedTurns.get(record.runId);
+      if (!turns) { turns = new Set(); this.#issuedTurns.set(record.runId, turns); }
+      turns.add(trustedCodexTurn);
+    }
+    return { runId: record.runId, assertCurrent: record.assertCurrent,
+      ...(trustedCodexTurn ? { trustedCodexTurn } : {}) };
   }
   releaseRun(runId) {
     for (const [id, record] of this.#pending) if (record.runId === runId) {
       this.#pending.delete(id);
     }
     for (const [id, owner] of this.#used) if (owner === runId) this.#used.delete(id);
+    for (const turn of this.#issuedTurns.get(runId) || []) trustedCodexTurns.delete(turn);
+    this.#issuedTurns.delete(runId);
   }
-  clear() { this.#pending.clear(); this.#used.clear(); }
+  clear() {
+    for (const turns of this.#issuedTurns.values()) {
+      for (const turn of turns) trustedCodexTurns.delete(turn);
+    }
+    this.#issuedTurns.clear();
+    this.#pending.clear();
+    this.#used.clear();
+  }
 }
 
-module.exports = { RuntimeMcpCallBindings, bindingElicitation, parseBindingElicitation };
+module.exports = { RuntimeMcpCallBindings, bindingElicitation, parseBindingElicitation,
+  assertTrustedCodexTurn };

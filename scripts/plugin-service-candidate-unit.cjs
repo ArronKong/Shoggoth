@@ -9,7 +9,7 @@ const { resolveServicePaths } = require(
   "../app/agent-service/paths",
 );
 const { JsonlProductStore, snapshotChecksum } = require("../app/agent-service/product-store");
-const { PluginStore, PLUGIN_STORE_SCHEMA_VERSION } = require(
+const { PluginStore } = require(
   "../app/agent-service/plugin-store",
 );
 const { PluginPackageInstaller } = require(
@@ -696,7 +696,7 @@ async function main() {
     new JsonlProductStore({ paths: unsupported }).open().close();
     new PluginStore({ paths: unsupported }).open().close();
     const raw = new Database(unsupported.pluginCatalogPath);
-    raw.pragma(`user_version = ${PLUGIN_STORE_SCHEMA_VERSION - 2}`);
+    raw.pragma("user_version = 1");
     raw.close();
     const before = {
       snapshot: digest(unsupported.stateSnapshotPath),

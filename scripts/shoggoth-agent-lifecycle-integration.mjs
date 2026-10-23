@@ -111,10 +111,11 @@ function controllerFor({ root, store, point = null, crashEnabled = false }) {
 }
 
 function createParams(round, point) {
-  const backendId = round % 3 === 0 ? "shoggoth" : round % 3 === 1 ? "codex" : "grok-build";
   return {
     operationId: `create-${round}-${point}`,
-    backendId,
+    // Native long-lived Agents have one Product backend. Runtime selection is
+    // a separate binding; removed backend aliases cannot reach a crash point.
+    backendId: "shoggoth",
     name: `Recovery ${round} ${point}`,
     defaultCwd: null,
     createdAt: CLOCK,

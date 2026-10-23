@@ -3,17 +3,20 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { pathToFileURL } = require("node:url");
 const { spawn } = require("node:child_process");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
-const { openRuntimeLedger } = require("./runtime-shared-ledger");
+const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
 const { OpenCodeRuntimeLedger } = require("./opencode-runtime-ledger");
 const { OpenCodeHttpClient } = require("./opencode-http-client");
+const { IMAGE_TYPES, nativeAttachmentParts, legacyAttachmentText } = require("./opencode-attachments");
 const { validateRegisteredSecrets } = require("./codex-rpc-safety");
 const { contextToolContent } = require("./context-tool-content");
-const { classifyProviderLimit } = require("./runtime-provider-errors");
+const { classifyProviderFailure, classifyProviderLimit } = require("./runtime-provider-errors");
+const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
+const { unknownRuntimeContextUsage } = require("./runtime-context-usage");
+const { DEFAULT_MCP_TOOL_TIMEOUT_MS } = require("./interactive-timeouts");
 const {
   OPENCODE_RUNTIME, normalizeOpenCodePermissionPolicy, normalizeOpenCodeWorkspace,
   openCodeWorkspaceShardId, parseOpenCodeVersion, supportsOpenCodeVersion,
@@ -29,6 +32,50 @@ const turnById = (session, id) => session?.turns.find(turn => turn.id === id);
 const turnByOperation = (session, id) => session?.turns.find(turn => turn.operationId === id);
 const MAX_CONTROL_BYTES = 64 * 1024;
 const MODEL_LIMIT = 2048;
+const OPENCODE_COMMANDS = normalizeRuntimeCommands([{ name: "compact", description: "Compact conversation history",
+  source: "OpenCode runtime", execution: "runtime" }]);
+const unsupportedFilePart = part => part?.type === "file" && !IMAGE_TYPES.has(part.mime);
+const copiedMessageContent = messages => JSON.stringify(messages.map(message => ({
+  role: message.info.role, error: message.info.error ?? null,
+  parts: message.parts.map(({ id, sessionID, messageID, ...content }) => content),
+})));
+// Settings sign-in into model providers (OpenCode's own provider auth API).
+const LOGIN_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const LOGIN_PROMPT_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
+const LOGIN_PROVIDER_LIMIT = 600;
+const LOGIN_CALLBACK_TIMEOUT_MS = 15 * 60_000;
+
+function loginProvider(value) {
+  if (typeof value !== "string" || !LOGIN_PROVIDER_ID.test(value)) {
+    throw error("RUNTIME_LOGIN_PARAMS_INVALID", "OpenCode provider id is invalid");
+  }
+  return value;
+}
+
+function loginPrompt(value) {
+  if (!value || !["text", "select"].includes(value.type) || typeof value.key !== "string"
+    || !LOGIN_PROMPT_KEY.test(value.key) || !safe(value.message, 512)) return null;
+  const when = value.when && typeof value.when.key === "string" && LOGIN_PROMPT_KEY.test(value.when.key)
+    && ["eq", "neq"].includes(value.when.op) && safe(value.when.value, 256, true)
+    ? { key: value.when.key, op: value.when.op, value: value.when.value } : null;
+  const options = value.type === "select" && Array.isArray(value.options)
+    ? value.options.filter(option => safe(option?.label, 256) && safe(option?.value, 256, true)).slice(0, 32)
+      .map(option => ({ label: option.label, value: option.value, hint: safe(option.hint, 256) ? option.hint : null }))
+    : [];
+  if (value.type === "select" && options.length === 0) return null;
+  return { type: value.type, key: value.key, message: value.message,
+    placeholder: safe(value.placeholder, 256) ? value.placeholder : null, options, when };
+}
+
+// A provider without its own methods signs in with an API key. `index` stays
+// the position OpenCode expects back.
+function loginMethods(raw) {
+  const methods = Array.isArray(raw) ? raw : [{ type: "api", label: "API Key" }];
+  return methods.slice(0, 8).flatMap((method, index) => (
+    !method || !["oauth", "api"].includes(method.type) || !safe(method.label, 256) ? []
+      : [{ index, type: method.type, label: method.label,
+        prompts: Array.isArray(method.prompts) ? method.prompts.slice(0, 8).map(loginPrompt).filter(Boolean) : [] }]));
+}
 const OUTCOME_UNKNOWN = "RUNTIME_TURN_OUTCOME_UNKNOWN";
 // OpenCode honors provider retry-after for up to days; a retry this far away
 // is a limit, not a hiccup, so the turn is stopped instead of held.
@@ -43,6 +90,7 @@ const LIVE_TURNS = new WeakMap();
 function fingerprint(input) {
   return crypto.createHash("sha256").update(JSON.stringify({
     prompt: input.prompt, context: input.context ?? null, model: input.model ?? null,
+    ...require("./native-instruction-delivery").turnInstructionFingerprint(input),
     cwd: input.cwd ?? null, permissionPolicy: input.permissionPolicy ?? null,
     permissionMode: input.permissionMode ?? null,
     attachments: input.attachments?.map(item => ({ id: item.id, name: item.name,
@@ -83,7 +131,15 @@ function openCodeRateLimited(value) {
 function openCodeFailureCode(nativeError) {
   if (classifyProviderLimit(nativeError?.data?.responseBody, nativeError?.data?.message,
     nativeError?.message) === "RUNTIME_QUOTA_EXHAUSTED") return "RUNTIME_QUOTA_EXHAUSTED";
-  return openCodeRateLimited(nativeError) ? "RUNTIME_RATE_LIMITED" : "OPENCODE_TURN_FAILED";
+  if (openCodeRateLimited(nativeError)) return "RUNTIME_RATE_LIMITED";
+  const statusCode = nativeError?.data?.statusCode ?? nativeError?.statusCode;
+  if (Number.isInteger(statusCode) && statusCode >= 500 && statusCode <= 599) {
+    return "RUNTIME_UPSTREAM_UNAVAILABLE";
+  }
+  if (classifyProviderFailure(nativeError?.data?.message, nativeError?.message) === "RUNTIME_ATTACHMENT_UNSUPPORTED") {
+    return "RUNTIME_ATTACHMENT_UNSUPPORTED";
+  }
+  return "OPENCODE_TURN_FAILED";
 }
 
 function openCodeRetryLimit(status, now, deadline) {
@@ -113,7 +169,21 @@ function projectedSession(session, includeTurns = false) {
     })) } : {}) };
 }
 
-function commandEnvironment(parentEnv, runtimeEnvironment, privateConfig, password, policy, gate) {
+function nativePermissionRules(policy, workspaceExecutionVersion = null) {
+  if (workspaceExecutionVersion === 1) return [
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "shoggoth_*", pattern: "*", action: "ask" },
+  ];
+  const rules = [{ permission: "*", pattern: "*", action: policy.approvalPolicy === "never" ? "deny" : "ask" }];
+  if (policy.sandbox === "read-only") rules.push(
+    { permission: "edit", pattern: "*", action: "deny" },
+    { permission: "bash", pattern: "*", action: "deny" });
+  if (policy.sandbox !== "danger-full-access") rules.push(
+    { permission: "external_directory", pattern: "*", action: "deny" });
+  return rules;
+}
+
+function commandEnvironment(parentEnv, runtimeEnvironment, privateConfig, password, policy, gate, workspaceExecutionVersion = null) {
   const env = Object.create(null);
   for (const key of ["LANG", "LC_ALL", "LC_CTYPE", "PATH", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
@@ -130,14 +200,27 @@ function commandEnvironment(parentEnv, runtimeEnvironment, privateConfig, passwo
   env.XDG_STATE_HOME = path.join(privateConfig, "state");
   env.OPENCODE_SERVER_PASSWORD = password;
   env.OPENCODE_DISABLE_AUTOUPDATE = "1";
-  const permission = { "*": policy.approvalPolicy === "never" ? "deny" : "ask" };
+  // HOME is the user's real home, so OpenCode would otherwise load the user's
+  // Claude Code ~/.claude/CLAUDE.md as global Agent instructions. Grok's Claude
+  // rules compatibility is disabled for the same reason.
+  env.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT = "1";
+  if (workspaceExecutionVersion === 1) {
+    env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+    env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+    env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
+    env.OPENCODE_DISABLE_LSP_DOWNLOAD = "1";
+  }
+  const permission = { "*": workspaceExecutionVersion === 1 ? "deny"
+    : policy.approvalPolicy === "never" ? "deny" : "ask" };
   if (policy.sandbox === "read-only") {
     permission.edit = "deny";
     permission.bash = "deny";
   }
   if (policy.sandbox !== "danger-full-access") permission.external_directory = "deny";
+  if (workspaceExecutionVersion === 1) permission["shoggoth_*"] = "ask";
   env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ autoupdate: false, permission,
     ...(gate ? { mcp: { shoggoth: { type: "local",
+      timeout: DEFAULT_MCP_TOOL_TIMEOUT_MS,
       command: [gate.command, ...gate.args],
       environment: Object.fromEntries(gate.env.map(entry => [entry.name, entry.value])),
     } } } : {}),
@@ -145,7 +228,55 @@ function commandEnvironment(parentEnv, runtimeEnvironment, privateConfig, passwo
   return env;
 }
 
-function preparePrivateOpenCodeConfig(fileSystem, sourceHome, privateConfig, trustedRoot) {
+// OpenCode names MCP tools `<server>_<tool>`. Only when Shoggoth's injected
+// server is the one server whose name starts with "shoggoth" can no other MCP
+// server produce a `shoggoth_` tool name.
+function answersShoggothToolPrompts(configuration) {
+  const servers = configuration?.mcp && typeof configuration.mcp === "object" ? Object.keys(configuration.mcp) : [];
+  return servers.includes("shoggoth") && servers.every((name) => name === "shoggoth" || !/^shoggoth/iu.test(name));
+}
+
+function modelConnectionConfig(content) {
+  // OpenCode accepts JSON with comments and trailing commas. Preserve string
+  // bytes (URLs, escaped quotes and credential placeholders included) while
+  // removing only JSONC syntax, then retain the model connection fields. Native
+  // MCP, hooks/plugins, shell commands and file-based instructions are not part
+  // of the model connection and must not execute before the tool guard exists.
+  const text = content.toString("utf8").replace(/^\uFEFF/u, "");
+  let json = "", quoted = false, escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index], next = text[index + 1];
+    if (quoted) {
+      json += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') { quoted = true; json += char; }
+    else if (char === "/" && next === "/") {
+      index += 2; while (index < text.length && !/[\r\n]/u.test(text[index])) index++;
+      json += "\n";
+    } else if (char === "/" && next === "*") {
+      const end = text.indexOf("*/", index + 2);
+      if (end < 0) throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config has an unterminated comment");
+      index = end + 1; json += " ";
+    } else json += char;
+  }
+  let prepared = ""; quoted = false; escaped = false;
+  for (let index = 0; index < json.length; index++) {
+    const char = json[index];
+    if (!quoted && char === "," && /^[\s]*[}\]]/u.test(json.slice(index + 1))) continue;
+    prepared += char;
+    if (quoted) { if (escaped) escaped = false; else if (char === "\\") escaped = true; else if (char === '"') quoted = false; }
+    else if (char === '"') quoted = true;
+  }
+  let parsed;
+  try { parsed = JSON.parse(prepared); } catch { throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config is malformed"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw error("OPENCODE_NATIVE_CONFIG_INVALID", "Native OpenCode config must be an object");
+  return JSON.stringify(Object.fromEntries(["provider", "model", "small_model", "enabled_providers", "disabled_providers"]
+    .filter(key => Object.hasOwn(parsed, key)).map(key => [key, parsed[key]]))) + "\n";
+}
+
+function preparePrivateOpenCodeConfig(fileSystem, sourceHome, privateConfig, trustedRoot, workspaceExecutionVersion = null) {
   const destination = path.join(privateConfig, "config", "opencode");
   ensurePrivateDirectoryTree(destination, trustedRoot);
   const source = path.join(sourceHome, "opencode");
@@ -180,6 +311,7 @@ function preparePrivateOpenCodeConfig(fileSystem, sourceHome, privateConfig, tru
       }
       content = fileSystem.readFileSync(file);
     } finally { fileSystem.closeSync(file); }
+    if (workspaceExecutionVersion === 1) content = modelConnectionConfig(content);
     const temporary = path.join(destination, `.${name}.${crypto.randomBytes(8).toString("hex")}.tmp`);
     try {
       fileSystem.writeFileSync(temporary, content, { flag: "wx", mode: 0o600 });
@@ -200,6 +332,7 @@ class OpenCodeRuntimeHost {
     this.runtimeAccountId = this.binding.runtimeAccountId;
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeOpenCodePermissionPolicy(options.permissionPolicy);
+    this.workspaceExecutionVersion = options.workspaceExecutionVersion === 1 ? 1 : null;
     this.controlInstance = options.controlInstance === true;
     this.workspace = this.controlInstance ? null : normalizeOpenCodeWorkspace(options.workspace);
     this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
@@ -213,6 +346,7 @@ class OpenCodeRuntimeHost {
     this.listeners = new Set();
     this.serverRequestHandlers = new Map();
     this.activeTurns = new Map();
+    this.compactions = new Set();
     this.sessionConfigs = new Map();
     this.state = "new";
     this.child = null;
@@ -252,7 +386,7 @@ class OpenCodeRuntimeHost {
 
   beginAcquire() { this.#assertReady(); }
   canRetireIdle() {
-    return this.state === "ready" && this.activeTurns.size === 0 && this.childClosed === false;
+    return this.state === "ready" && this.activeTurns.size === 0 && this.compactions.size === 0 && this.childClosed === false;
   }
   subscribe(listener) {
     if (typeof listener !== "function") throw error("RUNTIME_EVENT_LISTENER_INVALID", "OpenCode listener is invalid");
@@ -263,6 +397,21 @@ class OpenCodeRuntimeHost {
     if (!safe(method, 128) || typeof handler !== "function") throw error("RUNTIME_SERVER_REQUEST_HANDLER_INVALID", "OpenCode handler is invalid");
     this.serverRequestHandlers.set(method, handler);
     return () => { if (this.serverRequestHandlers.get(method) === handler) this.serverRequestHandlers.delete(method); };
+  }
+  pauseManagedToolTimeout({ sessionId, turnId }) {
+    const active = this.activeTurns.get(sessionId);
+    if (!active || active.turnId !== turnId || active.done) throw error("RUNTIME_SESSION_BUSY", "OpenCode turn is not active");
+    active.managedToolWaitDepth = (active.managedToolWaitDepth || 0) + 1;
+    if (active.managedToolWaitDepth === 1) active.managedToolWaitStarted = this.now();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true; active.managedToolWaitDepth--;
+      if (active.managedToolWaitDepth === 0) {
+        active.managedToolWaitMs = (active.managedToolWaitMs || 0) + Math.max(0, this.now() - active.managedToolWaitStarted);
+        active.managedToolWaitStarted = null;
+      }
+    };
   }
   #publish(event) { for (const listener of this.listeners) { try { listener(event); } catch {} } }
   #assertReady() { if (this.state !== "ready") throw error("RUNTIME_HOST_TERMINATED", "OpenCode host is unavailable"); }
@@ -303,11 +452,12 @@ class OpenCodeRuntimeHost {
 
   async authenticationState() {
     this.#assertReady();
-    try {
-      const provider = (await this.client.request("GET", "/provider")).data;
-      const configured = Array.isArray(provider?.connected) && provider.connected.length > 0;
-      return { authenticated: configured, credentialPresent: configured };
-    } catch { return { authenticated: false, credentialPresent: false }; }
+    const provider = (await this.client.request("GET", "/provider")).data;
+    if (!Array.isArray(provider?.connected) || provider.connected.some(id => typeof id !== "string")) {
+      throw error("OPENCODE_PROTOCOL_UNSUPPORTED", "OpenCode provider status protocol is unavailable");
+    }
+    const configured = provider.connected.length > 0;
+    return { authenticated: configured, credentialPresent: configured };
   }
 
   async modelsList(input = {}) {
@@ -346,6 +496,52 @@ class OpenCodeRuntimeHost {
       nextCursor: offset + limit < models.length ? String(offset + limit) : null };
   }
 
+  // ---- Settings sign-in into model providers ----
+  async providerLoginOptions() {
+    this.#assertReady();
+    const [catalog, methods] = await Promise.all([
+      this.client.request("GET", "/provider").then(response => response.data),
+      this.client.request("GET", "/provider/auth").then(response => response.data),
+    ]);
+    if (!Array.isArray(catalog?.all) || !Array.isArray(catalog.connected)) {
+      throw error("RUNTIME_LOGIN_OPTIONS_INVALID", "OpenCode provider catalog is invalid");
+    }
+    const connected = new Set(catalog.connected);
+    return { providers: catalog.all
+      .filter(provider => typeof provider?.id === "string" && LOGIN_PROVIDER_ID.test(provider.id))
+      .slice(0, LOGIN_PROVIDER_LIMIT)
+      .map(provider => ({ id: provider.id, name: safe(provider.name, 256) ? provider.name : provider.id,
+        connected: connected.has(provider.id), methods: loginMethods(methods?.[provider.id]) })) };
+  }
+
+  async providerLoginAuthorize({ providerId, method, inputs }) {
+    this.#assertReady();
+    const result = (await this.client.request("POST",
+      `/provider/${encodeURIComponent(loginProvider(providerId))}/oauth/authorize`, { method, inputs })).data;
+    if (!safe(result?.url, 4096) || !["auto", "code"].includes(result.method)) {
+      throw error("RUNTIME_LOGIN_FAILED", "OpenCode returned an invalid authorization");
+    }
+    return { url: result.url, mode: result.method,
+      instructions: safe(result.instructions, 2048, true) ? result.instructions : "" };
+  }
+
+  // "auto" waits here until the browser finishes; "code" sends the pasted code.
+  async providerLoginCallback({ providerId, method, code, signal }) {
+    this.#assertReady();
+    const result = (await this.client.request("POST",
+      `/provider/${encodeURIComponent(loginProvider(providerId))}/oauth/callback`,
+      code === undefined ? { method } : { method, code },
+      { signal, timeoutMs: LOGIN_CALLBACK_TIMEOUT_MS })).data;
+    return result === true;
+  }
+
+  async providerLoginApiKey({ providerId, key, metadata }) {
+    this.#assertReady();
+    const body = { type: "api", key, ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}) };
+    return (await this.client.request("PUT", `/auth/${encodeURIComponent(loginProvider(providerId))}`, body))
+      .data === true;
+  }
+
   async sessionStart(input) {
     this.#assertExecution();
     if (!input || !safe(input.source, 256) || !safe(input.developerInstructions ?? "", 1024 * 1024, true)) {
@@ -382,14 +578,7 @@ class OpenCodeRuntimeHost {
   }
 
   #sessionPermissionRules() {
-    const effect = this.permissionPolicy.approvalPolicy === "never" ? "deny" : "ask";
-    const rules = [{ permission: "*", pattern: "*", action: effect }];
-    if (this.permissionPolicy.sandbox === "read-only") rules.push(
-      { permission: "edit", pattern: "*", action: "deny" },
-      { permission: "bash", pattern: "*", action: "deny" });
-    if (this.permissionPolicy.sandbox !== "danger-full-access") rules.push(
-      { permission: "external_directory", pattern: "*", action: "deny" });
-    return rules;
+    return nativePermissionRules(this.permissionPolicy, this.workspaceExecutionVersion);
   }
 
   async #assertModelAvailable(value) {
@@ -404,13 +593,110 @@ class OpenCodeRuntimeHost {
   }
 
   async #ensureNativeSession(session) {
-    const found = await this.client.request("GET", `/session/${encodeURIComponent(session.id)}`);
+    const found = await this.client.request("GET", this.#sessionRoute(session.id));
     const native = found.data;
-    if (native?.id !== session.id || native.directory !== session.cwd
-      || JSON.stringify(native.permission) !== JSON.stringify(this.#sessionPermissionRules())) {
+    if (native?.id !== this.#nativeSessionId(session.id) || native.directory !== session.cwd) {
       throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode session identity changed");
     }
+    const desired = this.#sessionPermissionRules(), actual = JSON.stringify(native.permission);
+    if (actual !== JSON.stringify(desired)) {
+      const guarded = JSON.stringify(nativePermissionRules(this.permissionPolicy, 1));
+      const known = ["read-only", "workspace-write", "danger-full-access"].flatMap(sandbox =>
+        ["never", "on-request"].map(approvalPolicy => JSON.stringify(nativePermissionRules({ sandbox, approvalPolicy }))));
+      // A new Run may enter or leave managed workspace execution. Change only
+      // our exact known rules on an idle session; an unknown native policy is
+      // still an identity error, and no in-flight native operation is replayed.
+      if (!((this.workspaceExecutionVersion === 1 && known.includes(actual)) || actual === guarded)) {
+        throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode effective session permissions changed");
+      }
+      const status = (await this.client.request("GET", "/session/status")).data?.[native.id];
+      if (status && status.type !== "idle") throw error("RUNTIME_SESSION_BUSY", "OpenCode session is active");
+      const updated = (await this.client.request("PATCH", this.#sessionRoute(session.id), { permission: desired })).data;
+      if (updated?.id !== native.id || updated.directory !== session.cwd
+        || JSON.stringify(updated.permission) !== JSON.stringify(desired)) {
+        throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode did not confirm the managed tool boundary");
+      }
+      return updated;
+    }
     return native;
+  }
+
+  #nativeSessionId(sessionId) {
+    return this.#requireSession(sessionId).attachmentSessionId ?? sessionId;
+  }
+
+  #sessionRoute(sessionId, suffix = "") {
+    return `/session/${encodeURIComponent(this.#nativeSessionId(sessionId))}${suffix}`;
+  }
+
+  // Older Hosts sent ordinary files as native multimodal parts. OpenCode then
+  // carries those parts into every later prompt, even after a failed turn. Only
+  // a new, explicit operation may continue: fork the idle session, keep the
+  // original history intact and normalize file references in the copy. No model
+  // request, tool execution or retry is made while preparing that copy.
+  async #prepareAttachmentContinuation(sessionId) {
+    const session = this.#requireSession(sessionId);
+    if (!session.turns.some(turn => turn.status === "failed"
+      && ["OPENCODE_TURN_FAILED", "RUNTIME_ATTACHMENT_UNSUPPORTED"].includes(turn.errorCode))) return;
+    await this.#ensureNativeSession(session);
+    const nativeId = this.#nativeSessionId(sessionId);
+    const statuses = (await this.client.request("GET", "/session/status")).data;
+    if (!statuses || typeof statuses !== "object" || Array.isArray(statuses)) {
+      throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode session status is invalid");
+    }
+    if (statuses[nativeId] && statuses[nativeId].type !== "idle") {
+      throw error("RUNTIME_SESSION_BUSY", "OpenCode attachment history is still active");
+    }
+    let messages;
+    const hasFiles = () => messages.some(message => message.info.role === "user" && message.parts.some(unsupportedFilePart));
+    try {
+      messages = await this.#messages(sessionId, null, true);
+      if (!hasFiles()) return;
+      if (!session.attachmentSessionId) {
+        const fork = (await this.client.request("POST", this.#sessionRoute(sessionId, "/fork"), {})).data;
+        if (!/^ses_[A-Za-z0-9_-]{8,128}$/u.test(fork?.id) || fork.id === sessionId
+          || fork.directory !== session.cwd || this.ledger.snapshot().sessions.some(item =>
+            item.id === fork.id || item.attachmentSessionId === fork.id)) {
+          throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode attachment copy is invalid");
+        }
+        const permission = this.#sessionPermissionRules();
+        const configured = (await this.client.request("PATCH", `/session/${fork.id}`, { permission })).data;
+        if (configured?.id !== fork.id || configured.directory !== session.cwd
+          || JSON.stringify(configured.permission) !== JSON.stringify(permission)) {
+          throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode attachment copy permissions differ");
+        }
+        const copied = await this.#messages(sessionId, null, true, fork.id);
+        if (copiedMessageContent(copied) !== copiedMessageContent(messages)) {
+          throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode attachment copy lost history");
+        }
+        // Persist before normalizing: an interrupted preparation resumes on the
+        // same copy, and cannot execute the unmodified original by accident.
+        this.ledger.update(data => { sessionById(data, sessionId).attachmentSessionId = fork.id; });
+        messages = copied;
+      }
+      for (const message of messages.filter(item => item.info.role === "user")) {
+        for (const part of message.parts.filter(unsupportedFilePart)) {
+          if (!/^prt_[A-Za-z0-9_-]{8,128}$/u.test(part.id)
+            || part.messageID !== message.info.id || part.sessionID !== this.#nativeSessionId(sessionId)) {
+            throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode attachment part identity differs");
+          }
+          const text = legacyAttachmentText({ ...part,
+            filename: safe(part.filename, 1024) ? part.filename : "attachment",
+            mime: safe(part.mime, 256) ? part.mime : "application/octet-stream" });
+          const replacement = { id: part.id, sessionID: part.sessionID, messageID: part.messageID, type: "text", text };
+          const updated = (await this.client.request("PATCH", this.#sessionRoute(sessionId,
+            `/message/${encodeURIComponent(message.info.id)}/part/${encodeURIComponent(part.id)}`), replacement)).data;
+          if (updated?.id !== part.id || updated.sessionID !== part.sessionID
+            || updated.messageID !== part.messageID || updated.type !== "text" || updated.text !== text) {
+            throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode attachment update was not confirmed");
+          }
+        }
+      }
+      messages = await this.#messages(sessionId, null, true);
+      if (hasFiles()) throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode attachment history is still incompatible");
+    } catch {
+      throw error("RUNTIME_ATTACHMENT_RECOVERY_REQUIRED", "OpenCode attachment history could not be safely prepared");
+    }
   }
 
   async sessionResume(input) {
@@ -436,6 +722,8 @@ class OpenCodeRuntimeHost {
   }
 
   async sessionRead(input) {
+    const settled = settledRuntimeSession(this, input?.sessionId);
+    if (settled) return { session: projectedSession(settled, input?.includeTurns === true) };
     this.#assertReady();
     const session = this.#requireSession(input?.sessionId);
     await this.#reconcileSession(session.id);
@@ -467,8 +755,8 @@ class OpenCodeRuntimeHost {
     this.#assertReady();
     if (!safe(input?.name, 1024)) throw error("RUNTIME_SESSION_PARAMS_INVALID", "OpenCode title is invalid");
     const session = this.#requireSession(input.sessionId);
-    const response = await this.client.request("PATCH", `/session/${encodeURIComponent(session.id)}`, { title: input.name });
-    if (response.data?.id !== session.id) throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode rename returned another session");
+    const response = await this.client.request("PATCH", this.#sessionRoute(session.id), { title: input.name });
+    if (response.data?.id !== this.#nativeSessionId(session.id)) throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode rename returned another session");
     this.ledger.update(data => { const current = sessionById(data, session.id);
       current.title = input.name; current.updatedAt = Math.max(current.updatedAt, this.now()); });
     return {};
@@ -487,11 +775,61 @@ class OpenCodeRuntimeHost {
     this.#assertReady();
     const session = this.#requireSession(input?.sessionId);
     if (this.activeTurns.has(session.id)) throw error("RUNTIME_SESSION_BUSY", "OpenCode session is active");
-    const result = await this.client.request("DELETE", `/session/${encodeURIComponent(session.id)}`);
-    if (result.data !== true) throw error("OPENCODE_SESSION_DELETE_UNCONFIRMED", "OpenCode did not confirm deletion");
+    for (const nativeId of new Set([session.attachmentSessionId, session.id].filter(Boolean))) {
+      const result = await this.client.request("DELETE", `/session/${encodeURIComponent(nativeId)}`, undefined, { accept: [404] });
+      if (result.status !== 404 && result.data !== true) throw error("OPENCODE_SESSION_DELETE_UNCONFIRMED", "OpenCode did not confirm deletion");
+    }
     this.ledger.update(data => { data.sessions.splice(data.sessions.findIndex(item => item.id === session.id), 1); });
     this.sessionConfigs.delete(session.id);
     return {};
+  }
+
+  commandsList(input = {}) {
+    this.#assertReady();
+    if (!input || typeof input !== "object" || (input.sessionId !== undefined && input.sessionId !== null && !safe(input.sessionId))) {
+      return Promise.reject(error("RUNTIME_COMMAND_PARAMS_INVALID", "OpenCode command catalog input is invalid"));
+    }
+    if (input.sessionId) this.#requireSession(input.sessionId);
+    return Promise.resolve({ supported: true, reason: null, commands: OPENCODE_COMMANDS });
+  }
+
+  // `/compact` runs OpenCode's own session summarize outside any turn. The
+  // request returns after the compaction finishes; the compacted notice is the
+  // completion fact the coordinator waits for.
+  async commandExecute(input) {
+    this.#assertExecution();
+    if (!input || typeof input !== "object" || (input.sessionId !== null && !safe(input.sessionId))
+      || !safe(input.text, 64 * 1024)) {
+      throw error("RUNTIME_COMMAND_PARAMS_INVALID", "OpenCode command input is invalid");
+    }
+    const parsed = parseRuntimeCommand(input.text, OPENCODE_COMMANDS);
+    if (!parsed) throw error("RUNTIME_COMMAND_NOT_FOUND", "OpenCode command is not available");
+    if (parsed.args) throw error("RUNTIME_COMMAND_PARAMS_INVALID", "Usage: /compact");
+    if (!input.sessionId) throw error("RUNTIME_COMMAND_SESSION_REQUIRED", "Start the OpenCode conversation before using this command");
+    this.#cwd(input.cwd);
+    const session = this.#requireSession(input.sessionId);
+    if (session.archived) throw error("RUNTIME_SESSION_ARCHIVED", "OpenCode session is archived");
+    if (this.activeTurns.has(session.id) || this.compactions.has(session.id)
+      || session.turns.some(turn => turn.status === "inProgress")) {
+      throw error("RUNTIME_SESSION_BUSY", "OpenCode session is active");
+    }
+    this.compactions.add(session.id);
+    try {
+      let model = modelRef(this.sessionConfigs.get(session.id)?.model ?? null);
+      if (!model) {
+        const last = (await this.#messages(session.id, null)).findLast(message => message.info.role === "assistant"
+          && safe(message.info.providerID, 128) && safe(message.info.modelID, 384));
+        if (last) model = { providerID: last.info.providerID, id: last.info.modelID };
+      }
+      if (!model) throw error("RUNTIME_MODEL_UNAVAILABLE", "OpenCode compaction requires a model");
+      const response = await this.client.request("POST", this.#sessionRoute(session.id, "/summarize"),
+        { providerID: model.providerID, modelID: model.id }, { timeoutMs: 10 * 60_000 });
+      if (response.data !== true) throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode summarize response is invalid");
+      this.#publish({ known: true, method: "opencode/session.summarize", type: "context_compacted",
+        sessionId: session.id, turnId: null,
+        contextUsage: unknownRuntimeContextUsage(session.id, { observedAt: this.now(), source: "runtime_event" }) });
+      return { kind: "output", text: "OpenCode conversation compacted.", warning: null };
+    } finally { this.compactions.delete(session.id); }
   }
 
   async turnStart(input) {
@@ -504,7 +842,9 @@ class OpenCodeRuntimeHost {
     this.#cwd(input.cwd);
     const session = this.#requireSession(input.sessionId);
     if (session.archived) throw error("RUNTIME_SESSION_ARCHIVED", "OpenCode session is archived");
-    if (this.activeTurns.has(session.id)) throw error("RUNTIME_SESSION_BUSY", "OpenCode session is active");
+    if (this.activeTurns.has(session.id) || this.compactions.has(session.id)) {
+      throw error("RUNTIME_SESSION_BUSY", "OpenCode session is active");
+    }
     const model = input.model ?? this.sessionConfigs.get(session.id)?.model ?? null;
     await this.#assertModelAvailable(model);
     const hash = fingerprint({ ...input, model });
@@ -530,6 +870,16 @@ class OpenCodeRuntimeHost {
     if (currentSession.turns.some(turn => turn.status === "inProgress")) {
       throw error("RUNTIME_SESSION_BUSY", "A prior OpenCode turn is still running");
     }
+    for (const item of input.attachments || []) {
+      if (!safe(item.path, 4096) || !path.isAbsolute(item.path) || !safe(item.name, 1024) || !safe(item.mimeType, 256)) {
+        throw error("RUNTIME_ATTACHMENT_INVALID", "OpenCode attachment is invalid");
+      }
+    }
+    // Submitted UTF-8 text can be read even when its private saved copy is
+    // outside a restricted workspace. Other files keep scoped references;
+    // ordinary MIME types never become native multimodal file inputs.
+    const files = nativeAttachmentParts(input.attachments || []);
+    await this.#prepareAttachmentContinuation(session.id);
     const now = this.now(), id = `opencode-turn-${this.randomUUID()}`;
     const messageId = `msg_${crypto.randomBytes(16).toString("hex")}`;
     this.ledger.update(data => { const current = sessionById(data, session.id);
@@ -541,26 +891,20 @@ class OpenCodeRuntimeHost {
       model, abort: new AbortController() };
     this.activeTurns.set(session.id, active);
     try {
+      // The per-turn Run ID goes with the user message so the system prompt
+      // stays identical across turns unless rules or memory actually change.
+      const turn = require("./native-instruction-delivery").splitTurnInstructions(
+        require("./native-instruction-delivery").turnInstructions(input));
       const system = [this.sessionConfigs.get(session.id)?.developerInstructions,
-        input.context].filter(Boolean).join("\n\n");
-      const files = (input.attachments || []).map(item => {
-        if (!safe(item.path, 4096) || !path.isAbsolute(item.path) || !safe(item.name, 1024)) {
-          throw error("RUNTIME_ATTACHMENT_INVALID", "OpenCode attachment is invalid");
-        }
-        if (item.mimeType === "application/pdf") {
-          throw error("RUNTIME_ATTACHMENT_UNSUPPORTED", "OpenCode does not send PDF content to models");
-        }
-        return { type: "file", url: pathToFileURL(item.path).href,
-          mime: item.mimeType, filename: item.name };
-      });
+        turn.rules, input.context].filter(Boolean).join("\n\n");
       active.dispatched = true;
       this.#markLive(id);
-      const response = await this.client.request("POST", `/session/${session.id}/prompt_async`, {
+      const response = await this.client.request("POST", this.#sessionRoute(session.id, "/prompt_async"), {
         messageID: messageId,
         ...(model ? { model: { providerID: modelRef(model).providerID,
           modelID: modelRef(model).id } } : {}),
         ...(system ? { system } : {}),
-        parts: [{ type: "text", text: input.prompt }, ...files],
+        parts: [{ type: "text", text: input.prompt }, ...(turn.run ? [{ type: "text", text: turn.run }] : []), ...files],
       }, { timeoutMs: 30_000 });
       if (response.status !== 204) {
         throw error("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "OpenCode prompt receipt is invalid");
@@ -591,7 +935,7 @@ class OpenCodeRuntimeHost {
   }
 
   async #reconcileAcceptance(active) {
-    const route = `/session/${active.sessionId}/message/${active.messageId}`;
+    const route = this.#sessionRoute(active.sessionId, `/message/${active.messageId}`);
     const found = await this.client.request("GET", route, undefined, { accept: [404] });
     if (found.status !== 200 || found.data?.info?.id !== active.messageId) return false;
     this.ledger.update(data => { turnById(sessionById(data, active.sessionId), active.turnId).acceptance = "accepted"; });
@@ -611,14 +955,16 @@ class OpenCodeRuntimeHost {
       if (!statuses || typeof statuses !== "object" || Array.isArray(statuses)) {
         throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode session status is invalid");
       }
-      const nativeStatus = statuses[active.sessionId];
+      const nativeStatus = statuses[this.#nativeSessionId(active.sessionId)];
       const status = nativeStatus?.type ?? "idle";
+      const currentDeadline = deadline + (active.managedToolWaitMs || 0)
+        + (active.managedToolWaitDepth > 0 ? Math.max(0, this.now() - active.managedToolWaitStarted) : 0);
       if (status === "retry") {
         // OpenCode can retry a provider error for a long time without writing
         // a completed assistant message. A short retry keeps the turn with a
         // safe reason; a quota or a far-away retry stops and settles it.
         // Provider text never leaves the host.
-        const limit = openCodeRetryLimit(nativeStatus, this.now(), deadline);
+        const limit = openCodeRetryLimit(nativeStatus, this.now(), currentDeadline);
         if (limit.giveUp) {
           throw error(limit.code || "RUNTIME_UPSTREAM_UNAVAILABLE", "OpenCode provider retry cannot settle this turn");
         }
@@ -634,14 +980,14 @@ class OpenCodeRuntimeHost {
         this.#publish({ known: true, method: "opencode/session.status", type: "status",
           sessionId: active.sessionId, turnId: active.turnId, status: "running" });
       }
-      if (status === "idle") {
+      if (status === "idle" && !(active.managedToolWaitDepth > 0)) {
         await this.#finishFromMessages(active, messages);
         active.idleSince ??= this.now();
         if (!active.done && this.now() - active.idleSince >= 60_000) {
           throw error("RUNTIME_TURN_OUTCOME_UNKNOWN", "OpenCode became idle without a completed assistant message");
         }
       } else active.idleSince = null;
-      if (this.now() >= deadline) throw error("OPENCODE_TURN_TIMEOUT", "OpenCode turn did not settle");
+      if (this.now() >= currentDeadline) throw error("OPENCODE_TURN_TIMEOUT", "OpenCode turn did not settle");
       await sleep(250);
     }
   }
@@ -664,19 +1010,28 @@ class OpenCodeRuntimeHost {
             itemId: part.id, delta });
         } else if (part?.type === "tool" && safe(part.id) && safe(part.callID)) {
           const previous = active.toolSeen.get(part.id);
-          if (!previous) this.#publish({ ...base, type: "tool_start", itemId: part.id,
-            toolCallId: part.callID, tool: { name: part.tool, kind: part.tool, input: part.state?.input ?? {} },
-            input: part.state?.input ?? {},
-            ...contextToolContent({ input: part.state?.input ?? {} }, this.registeredSecrets) });
+          const input = part.state?.input ?? {};
+          const inputSignature = JSON.stringify(input);
           const status = part.state?.status;
-          if (status !== previous && ["completed", "error"].includes(status)) {
+          const activityTitle = safe(part.state?.title, 256) ? part.state.title : undefined;
+          if (!previous) this.#publish({ ...base, type: "tool_start", itemId: part.id,
+            toolCallId: part.callID, tool: { name: part.tool, kind: part.tool, input, activityTitle },
+            input,
+            ...contextToolContent({ input }, this.registeredSecrets) });
+          else if ((previous.inputSignature !== inputSignature || previous.activityTitle !== activityTitle)
+            && !["completed", "error"].includes(status)) {
+            this.#publish({ ...base, type: "tool_update", itemId: part.id, toolCallId: part.callID,
+              tool: { name: part.tool, kind: part.tool, input, activityTitle },
+              ...contextToolContent({ input }, this.registeredSecrets) });
+          }
+          if (status !== previous?.status && ["completed", "error"].includes(status)) {
             this.#publish({ ...base, type: "tool_result", itemId: part.id, toolCallId: part.callID,
               tool: { name: part.tool, kind: part.tool, status: status === "error" ? "failed" : "completed",
-                output: part.state?.output ?? part.state?.error ?? "" },
+                input, activityTitle, output: part.state?.output ?? part.state?.error ?? "" },
               output: part.state?.output ?? part.state?.error ?? "",
               ...contextToolContent({ output: part.state?.output ?? part.state?.error ?? "" }, this.registeredSecrets) });
           }
-          active.toolSeen.set(part.id, status);
+          active.toolSeen.set(part.id, { status, inputSignature, activityTitle });
         }
       }
     }
@@ -687,7 +1042,7 @@ class OpenCodeRuntimeHost {
       ["question", "mcpServer/elicitation/request"]]) {
       const result = (await this.client.request("GET", `/${kind}`)).data;
       if (!Array.isArray(result)) throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode interaction list is invalid");
-      for (const request of result.filter(item => item?.sessionID === active.sessionId)) {
+      for (const request of result.filter(item => item?.sessionID === this.#nativeSessionId(active.sessionId))) {
         if (!safe(request?.id) || active.pending.has(request.id) || active.responded.has(request.id)) continue;
         active.pending.add(request.id);
         void this.#replyInteraction(active, kind, method, request).catch(cause => {
@@ -699,22 +1054,34 @@ class OpenCodeRuntimeHost {
 
   async #replyInteraction(active, kind, method, request) {
     if (kind === "permission") {
+      // Shoggoth's own product tools are admitted by their per-run lease and
+      // approval flow; the runtime prompt would only duplicate that decision.
+      // "once" only: OpenCode saves an "always" reply for the whole project.
+      if (!active.done && this.answersShoggothToolPrompts
+        && typeof request.permission === "string" && request.permission.startsWith("shoggoth_")) {
+        await this.client.request("POST", `/permission/${request.id}/reply`, { reply: "once" });
+        active.responded.add(request.id);
+        return;
+      }
       const action = safe(request.permission, 128) ? request.permission : "tool";
       const resource = Array.isArray(request.patterns) ? request.patterns.join("\n").slice(0, 16 * 1024) : "";
       const fileChange = action === "edit";
       const routedMethod = fileChange ? "item/fileChange/requestApproval" : method;
       const handler = this.serverRequestHandlers.get(routedMethod);
+      // The permission names the tool; its patterns are the command, URL or path.
+      const argument = { bash: "command", webfetch: "url", edit: "path", external_directory: "path" }[action] || "pattern";
+      const toolInput = resource ? { [argument]: resource } : undefined;
       let decision = "reject";
       if (handler && !active.done) {
         try {
           const reply = await handler(fileChange ? {
             sessionId: active.sessionId, turnId: active.turnId, itemId: request.id,
-            grantRoot: this.workspace, reason: `${action}: ${resource}`,
+            grantRoot: this.workspace, toolName: action, ...(toolInput ? { toolInput } : {}),
             sessionApprovalAvailable: false,
           } : {
             sessionId: active.sessionId, turnId: active.turnId, itemId: request.id,
-            command: resource || action, cwd: this.workspace,
-            reason: `${action}: ${resource}`, sessionApprovalAvailable: false,
+            ...(action === "bash" && resource ? { command: resource } : {}), cwd: this.workspace,
+            toolName: action, ...(toolInput ? { toolInput } : {}), sessionApprovalAvailable: false,
           }, { method: routedMethod, sourceMethod: "opencode.permission" });
           if (["accept", "acceptForSession"].includes(reply?.decision)) decision = "once";
         } catch {}
@@ -753,20 +1120,20 @@ class OpenCodeRuntimeHost {
     active.responded.add(request.id);
   }
 
-  async #messages(sessionId, targetMessageId) {
+  async #messages(sessionId, targetMessageId, all = false, nativeId = this.#nativeSessionId(sessionId)) {
     const messages = [];
     let before = null;
     for (let page = 0; page < 20; page += 1) {
-      const route = `/session/${sessionId}/message?limit=100${before ? `&before=${encodeURIComponent(before)}` : ""}`;
+      const route = `/session/${encodeURIComponent(nativeId)}/message?limit=100${before ? `&before=${encodeURIComponent(before)}` : ""}`;
       const batch = (await this.client.request("GET", route)).data;
       if (!Array.isArray(batch) || batch.length > 100
-        || batch.some(message => message?.info?.sessionID !== sessionId
+        || batch.some(message => message?.info?.sessionID !== nativeId
           || !safe(message.info.id) || !Array.isArray(message.parts))) {
         throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode messages are invalid");
       }
       if (!batch.length) return messages;
       messages.unshift(...batch);
-      if (!targetMessageId || batch.some(message => message.info.id === targetMessageId)) return messages;
+      if (!all && (!targetMessageId || batch.some(message => message.info.id === targetMessageId))) return messages;
       const next = batch[0].info.id;
       if (next === before) throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode message cursor did not advance");
       before = next;
@@ -867,7 +1234,7 @@ class OpenCodeRuntimeHost {
 
   async #stopAndSettle(active, cause) {
     try {
-      const response = await this.client.request("POST", `/session/${active.sessionId}/abort`, {},
+      const response = await this.client.request("POST", this.#sessionRoute(active.sessionId, "/abort"), {},
         { timeoutMs: 5000 });
       if (response.data === true && await this.#waitIdle(active.sessionId)
         && await this.#settleStopped(active, cause)) return;
@@ -878,7 +1245,8 @@ class OpenCodeRuntimeHost {
   async #waitIdle(sessionId) {
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const statuses = (await this.client.request("GET", "/session/status")).data;
-      if (!statuses?.[sessionId] || statuses[sessionId].type === "idle") return true;
+      const nativeId = this.#nativeSessionId(sessionId);
+      if (!statuses?.[nativeId] || statuses[nativeId].type === "idle") return true;
       await sleep(100);
     }
     return false;
@@ -953,7 +1321,7 @@ class OpenCodeRuntimeHost {
     }
     // A failing turn is already being stopped natively and settles on its own.
     if (active.done) return {};
-    const response = await this.client.request("POST", `/session/${session.id}/abort`, {});
+    const response = await this.client.request("POST", this.#sessionRoute(session.id, "/abort"), {});
     if (response.data !== true) throw error("RUNTIME_TURN_CANCEL_UNKNOWN", "OpenCode did not accept interruption");
     if (!await this.#waitIdle(session.id)) throw error("RUNTIME_TURN_CANCEL_UNKNOWN", "OpenCode did not become idle");
     active.done = true;
@@ -1017,17 +1385,18 @@ class OpenCodeRuntimeHost {
       ensurePrivateDirectoryTree(path.join(privateConfig, name), this.paths.trustedRoot);
     }
     preparePrivateOpenCodeConfig(this.fs, this.runtimeEnvironment.configSourceHome,
-      privateConfig, this.paths.trustedRoot);
+      privateConfig, this.paths.trustedRoot, this.workspaceExecutionVersion);
     const password = crypto.randomBytes(32).toString("hex");
     let gate = null;
     if (!this.controlInstance && this.mcpGateIssuer) {
       gate = this.mcpGateIssuer.reserveMcpServer({ runtimeProfileId: this.runtimeProfileId,
         runtimeAccountId: this.runtimeAccountId, executionRunId: this.mcpExecutionRunId,
-        parentExecutable: this.runtimeEnvironment.binaryPath });
+        parentExecutable: this.runtimeEnvironment.binaryPath,
+        toolExposure: require("./product-tool-exposure").toolExposureFor("opencode") });
       this.reservationId = gate.reservationId;
     }
     const env = commandEnvironment(this.parentEnv, this.runtimeEnvironment, privateConfig, password,
-      this.permissionPolicy, gate);
+      this.permissionPolicy, gate, this.workspaceExecutionVersion);
     this.registeredSecrets = validateRegisteredSecrets([password,
       ...(gate?.env || []).filter(entry => /(?:authorization|credential|nonce|password|secret|token|api[_-]?key)/iu
         .test(entry.name) && typeof entry.value === "string" && Buffer.byteLength(entry.value, "utf8") >= 4)
@@ -1080,9 +1449,15 @@ class OpenCodeRuntimeHost {
           throw error("OPENCODE_PROTOCOL_UNSUPPORTED", "OpenCode V1 session protocol is unavailable");
         }
         const configuration = (await client.request("GET", "/config")).data;
-        if (configuration?.permission?.["*"] !== (this.permissionPolicy.approvalPolicy === "never" ? "deny" : "ask")) {
+        if (configuration?.permission?.["*"] !== (this.workspaceExecutionVersion === 1
+          || this.permissionPolicy.approvalPolicy === "never" ? "deny" : "ask")
+          || (this.workspaceExecutionVersion === 1 && configuration.permission["shoggoth_*"] !== "ask")) {
           throw error("OPENCODE_PERMISSION_UNSAFE", "OpenCode effective tool permissions differ from Shoggoth policy");
         }
+        if (this.workspaceExecutionVersion === 1 && Object.keys(configuration?.mcp || {}).some(name => name !== "shoggoth")) {
+          throw error("WORKSPACE_RUNTIME_GUARD_UNSAFE", "OpenCode loaded an unmanaged native MCP server");
+        }
+        this.answersShoggothToolPrompts = answersShoggothToolPrompts(configuration);
         this.client = client;
         return;
       }
@@ -1092,5 +1467,5 @@ class OpenCodeRuntimeHost {
   }
 }
 
-module.exports = { OpenCodeRuntimeHost, commandEnvironment, modelRef, usageFromTokens,
-  preparePrivateOpenCodeConfig };
+module.exports = { OpenCodeRuntimeHost, answersShoggothToolPrompts, commandEnvironment, modelRef,
+  usageFromTokens, preparePrivateOpenCodeConfig, nativePermissionRules, modelConnectionConfig };

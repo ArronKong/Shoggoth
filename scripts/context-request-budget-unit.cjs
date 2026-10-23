@@ -35,6 +35,24 @@ test("whole-request accounting includes instructions, tools, current input and i
   assert.ok(large.fixedTokens > large.limitTokens);
 });
 
+test("tool input schemas, not only names and descriptions, count toward the request budget", () => {
+  const resident = contextFixture({ runtime: "pi" });
+  let residentTokens;
+  try { residentTokens = compile(resident, 1000000).report.request.fixedTokens; } finally { resident.cleanup(); }
+  const f = contextFixture({ runtime: "codex" });
+  try {
+    const before = compile(f, 1000000).report.request.fixedTokens;
+    assert.ok(residentTokens + 15000 < before, `resident-exposure Pi counts only core tools (${residentTokens} vs ${before})`);
+    const registry = f.compiler.toolRegistry;
+    f.compiler.toolRegistry = Object.assign(Object.create(Object.getPrototypeOf(registry)), registry, {
+      list: () => registry.list().map(tool => ({ ...tool, definition: { ...tool.definition,
+        inputSchema: { ...tool.definition.inputSchema, description: "schema words ".repeat(40) } } })),
+    });
+    const after = compile(f, 1000000).report.request.fixedTokens;
+    assert.ok(after > before + 5000, `larger schemas must raise the estimate (${before} -> ${after})`);
+  } finally { f.cleanup(); }
+});
+
 test("an already compacted native meter does not count the entire stored transcript again", () => {
   const result = requestBudget({ budget: budget(64000), developerInstructions: "a".repeat(4000),
     context: "added", prompt: "continue", nativeUsage: { usedTokens: 10000 }, fresh: false });
@@ -66,10 +84,12 @@ test("large tool results are kept outside the display journal and verified on re
     assert.deepEqual(f.transcripts.contextEvent(f.profile.id, f.transcriptSessionId, saved).content, content);
     f.transcripts.close(); f.transcripts.open();
     f.append({ id: "current", kind: "user", content: { text: "continue", operationId: "current" } });
+    // A fresh native session gets a one-line record; the verified body stays readable above.
     const snapshot = compile(f, 1000000);
-    assert.match(snapshot.dynamicContext, /LAST_DETAIL/u);
+    assert.match(snapshot.dynamicContext, /TOOL_RESULT: read_file completed \(output omitted\)/u);
+    assert.doesNotMatch(snapshot.dynamicContext, /LAST_DETAIL/u);
     f.transcripts.setContextExcluded({ profileId: f.profile.id, sessionId: f.transcriptSessionId, eventId: "tool", contextExcluded: true });
-    assert.doesNotMatch(compile(f, 1000000).dynamicContext, /LAST_DETAIL/u);
+    assert.doesNotMatch(compile(f, 1000000).dynamicContext, /read_file/u);
   } finally { f.cleanup(); }
 });
 

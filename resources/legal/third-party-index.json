@@ -115,31 +115,45 @@
     },
     {
       "name": "@modelcontextprotocol/client",
-      "version": "2.1.0",
-      "license": "MIT",
-      "integrity": "sha512-mDVhoy5WjDb0U+4dQPzLcciC2erSex/GRVQqnoZdiuMoE3YiTZdiS7ezNcFwX4XEOWOaj7jZr0kLYnILnL8orA==",
+      "version": "2.3.1",
+      "license": "Apache-2.0",
+      "integrity": "sha512-mIGZXpHsjnZ6lD+gD/WCMpR5k8yVQQ8nNFH1N0Srf7AvnwTUMYD6pvTY8ng2+He5FfV7YMZLmrjL7cLa/cc3dQ==",
       "distributed": true,
       "scopes": [
         "desktop"
       ],
       "licenseFiles": [
-        "licenses/npm/_modelcontextprotocol_client@2.1.0/LICENSE"
+        "licenses/npm/_modelcontextprotocol_client@2.3.1/LICENSE"
       ],
-      "source": "https://registry.npmjs.org/@modelcontextprotocol/client/-/client-2.1.0.tgz"
+      "source": "https://registry.npmjs.org/@modelcontextprotocol/client/-/client-2.3.1.tgz"
     },
     {
       "name": "@modelcontextprotocol/core",
-      "version": "2.1.0",
-      "license": "MIT",
-      "integrity": "sha512-YdFj5gMRHr0gYNAhTbQDgjLHiEJdIAUYxomhKseUNye7ZGlISQmUoLh2sveFFCiQ7j2YMffT1kgSND0FSfIFjQ==",
+      "version": "2.3.1",
+      "license": "Apache-2.0",
+      "integrity": "sha512-laVmIhPGpWi7rG9q+0UigblRN0Hws/Yjlb6qLFtVqryXVLkc4h+yN8z731POD2LnAGQlFe7/tXhUm7Bi0YB91g==",
       "distributed": true,
       "scopes": [
         "desktop"
       ],
       "licenseFiles": [
-        "licenses/npm/_modelcontextprotocol_core@2.1.0/LICENSE"
+        "licenses/npm/_modelcontextprotocol_core@2.3.1/LICENSE"
       ],
-      "source": "https://registry.npmjs.org/@modelcontextprotocol/core/-/core-2.1.0.tgz"
+      "source": "https://registry.npmjs.org/@modelcontextprotocol/core/-/core-2.3.1.tgz"
+    },
+    {
+      "name": "@playwright/mcp",
+      "version": "0.0.82",
+      "license": "Apache-2.0",
+      "integrity": "sha512-OCqftfb8H4dnqm/njbTBRk3seUvUPttOlJUxCtEzXGETYOlRH5Qt3bbXIjmZIuWAxD9RF+yg1ASrPeXvm0y5cA==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/_playwright_mcp@0.0.82/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/@playwright/mcp/-/mcp-0.0.82.tgz"
     },
     {
       "name": "@trycua/cua-driver-darwin-arm64",
@@ -336,20 +350,6 @@
         "RUNTIME-LICENSE-SOURCES.md"
       ],
       "source": "https://github.com/jhugman/uniffi-bindgen-react-native"
-    },
-    {
-      "name": "@xterm/headless",
-      "version": "6.0.0",
-      "license": "MIT",
-      "integrity": "sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw==",
-      "distributed": true,
-      "scopes": [
-        "desktop"
-      ],
-      "licenseFiles": [
-        "XTERM-LICENSE.txt"
-      ],
-      "source": "https://github.com/xtermjs/xterm.js/tree/6.0.0"
     },
     {
       "name": "adm-zip",
@@ -564,18 +564,18 @@
     },
     {
       "name": "dompurify",
-      "version": "3.4.15",
+      "version": "3.4.17",
       "license": "(MPL-2.0 OR Apache-2.0)",
-      "integrity": "sha512-EUBjM+B+lkDE41iE82DDSCfkoPGfXx8IxFxPMjNzm/Uk4xDet77rTN9wqlxlVg71kK7XGuUMv6wUxJUwwv+Xyw==",
+      "integrity": "sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==",
       "distributed": true,
       "scopes": [
         "frontend"
       ],
       "licenseFiles": [
-        "licenses/npm/dompurify@3.4.15/LICENSE",
-        "licenses/npm/dompurify@3.4.15/LICENSE-MPL"
+        "licenses/npm/dompurify@3.4.17/LICENSE",
+        "licenses/npm/dompurify@3.4.17/LICENSE-MPL"
       ],
-      "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.15.tgz",
+      "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz",
       "selectedLicense": "Apache-2.0"
     },
     {
@@ -594,17 +594,17 @@
     },
     {
       "name": "electron",
-      "version": "44.4.2",
+      "version": "44.9.3",
       "license": "MIT",
-      "integrity": "sha512-872t/+8M8TyribWm2cYpRwHY2aDlyDHOn+CHnhN9kHQStVW8pAijIhFolYA/qQyDdri28Xp8Mi3HEj5kFvajCw==",
+      "integrity": "sha512-Cv9/yMnZxNWsMlIe8T4v//NKHdUvbeyoTJoXE3BIcRxus2meeFaO9h/P3zB5d4cBXum51IgAYrT2QjpIDWKpJA==",
       "distributed": true,
       "scopes": [
         "desktop"
       ],
       "licenseFiles": [
-        "licenses/npm/electron@44.4.2/LICENSE"
+        "licenses/npm/electron@44.9.3/LICENSE"
       ],
-      "source": "https://registry.npmjs.org/electron/-/electron-44.4.2.tgz"
+      "source": "https://registry.npmjs.org/electron/-/electron-44.9.3.tgz"
     },
     {
       "name": "entities",
@@ -1099,17 +1099,17 @@
     },
     {
       "name": "markdown-it",
-      "version": "14.2.0",
+      "version": "14.3.3",
       "license": "MIT",
-      "integrity": "sha512-1TGiQiJVRQ3NPmZH6sx5Cfnmg6GQm9jvC1ch4TK511NjSJvjzKLzn5pPfZRNZkRPZP0HqCioSndqH8v2nRaWVQ==",
+      "integrity": "sha512-L//tDAkjTjJCU6pBUSBTgs3Kg4InVaZuUZog/b6V12UKhcDQ7S78877ibbCanRExwPuYP1CZD7Gd2dxSy1GXRg==",
       "distributed": true,
       "scopes": [
         "frontend"
       ],
       "licenseFiles": [
-        "licenses/npm/markdown-it@14.2.0/LICENSE"
+        "licenses/npm/markdown-it@14.3.3/LICENSE"
       ],
-      "source": "https://registry.npmjs.org/markdown-it/-/markdown-it-14.2.0.tgz"
+      "source": "https://registry.npmjs.org/markdown-it/-/markdown-it-14.3.3.tgz"
     },
     {
       "name": "matcher",
@@ -1155,20 +1155,6 @@
     },
     {
       "name": "node-addon-api",
-      "version": "7.1.1",
-      "license": "MIT",
-      "integrity": "sha512-5m3bsyrjFWE1xf7nz7YXdN4udnVtXK6/Yfgn5qnahL6bCkf2yKt4k3nuTKAtT4r3IG8JNR2ncsIMdZuAzJjHQQ==",
-      "distributed": true,
-      "scopes": [
-        "desktop"
-      ],
-      "licenseFiles": [
-        "licenses/npm/node-addon-api@7.1.1/LICENSE.md"
-      ],
-      "source": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-7.1.1.tgz"
-    },
-    {
-      "name": "node-addon-api",
       "version": "8.9.2",
       "license": "MIT",
       "integrity": "sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==",
@@ -1180,20 +1166,6 @@
         "licenses/npm/node-addon-api@8.9.2/LICENSE.md"
       ],
       "source": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.2.tgz"
-    },
-    {
-      "name": "node-pty",
-      "version": "1.1.0",
-      "license": "MIT",
-      "integrity": "sha512-20JqtutY6JPXTUnL0ij1uad7Qe1baT46lyolh2sSENDd4sTzKZ4nmAFkeAARDKwmlLjPx6XKRlwRUxwjOy+lUg==",
-      "distributed": true,
-      "scopes": [
-        "desktop"
-      ],
-      "licenseFiles": [
-        "licenses/npm/node-pty@1.1.0/LICENSE"
-      ],
-      "source": "https://registry.npmjs.org/node-pty/-/node-pty-1.1.0.tgz"
     },
     {
       "name": "object-keys",
@@ -1279,6 +1251,36 @@
         "licenses/npm/pkce-challenge@5.0.1/LICENSE"
       ],
       "source": "https://registry.npmjs.org/pkce-challenge/-/pkce-challenge-5.0.1.tgz"
+    },
+    {
+      "name": "playwright-core",
+      "version": "1.64.0-alpha-1789764292000",
+      "license": "Apache-2.0",
+      "integrity": "sha512-ZgRaybFv4rRy7QMGnYprEGFdNJnvapNqcaER2w96bDQA+40BWIle1el1Yh9KHD3E6XYmieMB+r+UxFTCauTGGQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/playwright-core@1.64.0-alpha-1789764292000/LICENSE",
+        "licenses/npm/playwright-core@1.64.0-alpha-1789764292000/NOTICE"
+      ],
+      "source": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.0-alpha-1789764292000.tgz"
+    },
+    {
+      "name": "playwright",
+      "version": "1.64.0-alpha-1789764292000",
+      "license": "Apache-2.0",
+      "integrity": "sha512-3Ngs4ERGdC912uW3srEDtNVey4u1wSaQ/EFcKhxMpz0by0K6nidaJgM087pLpJc1osytiVnL7ack5gvgPArPNw==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/playwright@1.64.0-alpha-1789764292000/LICENSE",
+        "licenses/npm/playwright@1.64.0-alpha-1789764292000/NOTICE"
+      ],
+      "source": "https://registry.npmjs.org/playwright/-/playwright-1.64.0-alpha-1789764292000.tgz"
     },
     {
       "name": "punycode.js",
@@ -1407,6 +1409,21 @@
       "source": "https://registry.npmjs.org/roarr/-/roarr-2.15.4.tgz"
     },
     {
+      "name": "rrule",
+      "version": "2.8.1",
+      "license": "BSD-3-Clause",
+      "integrity": "sha512-hM3dHSBMeaJ0Ktp7W38BJZ7O1zOgaFEsn41PDk+yHoEtfLV+PoJt9E9xAlZiWgf/iqEqionN0ebHFZIDAp+iGw==",
+      "distributed": true,
+      "scopes": [
+        "desktop",
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/rrule@2.8.1/LICENCE"
+      ],
+      "source": "https://registry.npmjs.org/rrule/-/rrule-2.8.1.tgz"
+    },
+    {
       "name": "sax",
       "version": "1.6.1",
       "license": "BlueOak-1.0.0",
@@ -1533,6 +1550,20 @@
       "source": "https://registry.npmjs.org/shebang-regex/-/shebang-regex-3.0.0.tgz"
     },
     {
+      "name": "smol-toml",
+      "version": "1.9.0",
+      "license": "BSD-3-Clause",
+      "integrity": "sha512-hpd+HLON7HdZXqYchMM/+LaTTbdK0AU3NngIJ4KVyWbY9bfQqdL9cD+4yf6dUoU2Ap4VsU0JkQi6FxAI1B2mXQ==",
+      "distributed": true,
+      "scopes": [
+        "desktop"
+      ],
+      "licenseFiles": [
+        "licenses/npm/smol-toml@1.9.0/LICENSE"
+      ],
+      "source": "https://registry.npmjs.org/smol-toml/-/smol-toml-1.9.0.tgz"
+    },
+    {
       "name": "sprintf-js",
       "version": "1.1.3",
       "license": "BSD-3-Clause",
@@ -1573,6 +1604,21 @@
         "licenses/npm/tiny-typed-emitter@2.1.0/LICENSE"
       ],
       "source": "https://registry.npmjs.org/tiny-typed-emitter/-/tiny-typed-emitter-2.1.0.tgz"
+    },
+    {
+      "name": "tslib",
+      "version": "2.8.1",
+      "license": "0BSD",
+      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
+      "distributed": true,
+      "scopes": [
+        "desktop",
+        "frontend"
+      ],
+      "licenseFiles": [
+        "licenses/npm/tslib@2.8.1/LICENSE.txt"
+      ],
+      "source": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz"
     },
     {
       "name": "type-fest",
@@ -1688,20 +1734,84 @@
     },
     {
       "name": "zod",
-      "version": "4.6.5",
+      "version": "4.6.7",
       "license": "MIT",
-      "integrity": "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==",
+      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
       "distributed": true,
       "scopes": [
         "desktop"
       ],
       "licenseFiles": [
-        "licenses/npm/zod@4.6.5/LICENSE"
+        "licenses/npm/zod@4.6.7/LICENSE"
       ],
-      "source": "https://registry.npmjs.org/zod/-/zod-4.6.5.tgz"
+      "source": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz"
     }
   ],
   "components": [
+    {
+      "name": "OpenClaw memory core and bundled source dependencies",
+      "license": "MIT",
+      "source": "https://github.com/openclaw/openclaw/tree/c10679395819ede78bb073f979f95c157e165bfa",
+      "revision": "c10679395819ede78bb073f979f95c157e165bfa; per-file SHA-256 in build/shoggoth-memory/manifest.json",
+      "localFiles": [
+        "app/agent-service/shoggoth-memory/core.cjs",
+        "build/shoggoth-memory"
+      ],
+      "licenseFiles": [
+        "licenses/source/openclaw-memory/OPENCLAW.txt",
+        "licenses/source/openclaw-memory/fs-safe.txt",
+        "licenses/source/openclaw-memory/p-limit.txt",
+        "licenses/source/openclaw-memory/p-map.txt",
+        "licenses/source/openclaw-memory/kysely.txt",
+        "licenses/source/openclaw-memory/ipaddr.js.txt",
+        "licenses/source/openclaw-memory/undici.txt",
+        "licenses/source/openclaw-memory/yocto-queue.txt",
+        "licenses/source/openclaw-memory/ansi-regex.txt",
+        "licenses/source/openclaw-memory/get-east-asian-width.txt",
+        "licenses/source/openclaw-memory/string-width.txt",
+        "licenses/source/openclaw-memory/strip-ansi.txt",
+        "licenses/source/openclaw-memory/typebox.txt"
+      ],
+      "notes": "Pinned upstream algorithm bodies are bundled from byte-identical source inputs. An export-only build transform exposes the private Dreaming runner. Shoggoth host adapters provide Profile, file, session, SQLite, model and embedding ownership; the network module loader resolves bundled Undici instead of optional desktop dependencies. fs-safe 0.24.0, p-limit 7.3.3, p-map 7.0.8, yocto-queue 1.2.2, kysely 0.29.6, ipaddr.js 2.5.0, undici 8.11.2, ansi-regex 6.4.0, get-east-asian-width 1.7.0, string-width 8.2.2, strip-ansi 7.2.0 and typebox 1.3.34 retain their original MIT notices. OpenAI/Mistral/Voyage/Google/Ollama provider source is included but has no Product credential or production selection binding. No external OpenClaw installation or Gateway is used."
+    },
+    {
+      "name": "Memory MIME detection and AI option dependencies",
+      "license": "MIT AND BSD-3-Clause",
+      "source": "https://github.com/openclaw/openclaw/blob/c10679395819ede78bb073f979f95c157e165bfa/pnpm-lock.yaml",
+      "revision": "file-type 22.1.1; dependency versions and per-file SHA-256 in build/shoggoth-memory/manifest.json",
+      "localFiles": [
+        "app/agent-service/shoggoth-memory/core.cjs",
+        "build/shoggoth-memory/dependencies"
+      ],
+      "licenseFiles": [
+        "licenses/source/openclaw-memory/file-type.txt",
+        "licenses/source/openclaw-memory/inflate.txt",
+        "licenses/source/openclaw-memory/strtok3.txt",
+        "licenses/source/openclaw-memory/token-types.txt",
+        "licenses/source/openclaw-memory/uint8array-extras.txt",
+        "licenses/source/openclaw-memory/debug.txt",
+        "licenses/source/openclaw-memory/text-codec.txt",
+        "licenses/source/openclaw-memory/ieee754.txt",
+        "licenses/source/openclaw-memory/ms.txt",
+        "licenses/source/openclaw-memory/partial-json.txt"
+      ],
+      "notes": "Original dependencies are bundled from byte-identical package source inputs. Versions and package tarball integrity match the pinned OpenClaw lockfile. file-type 22.1.1, @tokenizer/inflate 0.4.1, strtok3 10.3.5, token-types 6.1.2, uint8array-extras 1.5.0, debug 4.4.3, @borewit/text-codec 0.2.2, ms 2.1.3 and partial-json 0.1.7 retain MIT notices; ieee754 1.2.1 retains BSD-3-Clause. partial-json is in the original AI options module's parsing closure. This component does not enable remote media upload, legacy Claude thinking or production multimodal configuration."
+    },
+    {
+      "name": "gogcli Gmail MCP runtime",
+      "license": "MIT",
+      "source": "https://github.com/openclaw/gogcli/tree/v0.42.0",
+      "revision": "v0.42.0 (commit 792107a); arm64 and x64 release binaries pinned by SHA-256 in build/gog-runtime-manifest.json",
+      "localFiles": [
+        "app/agent-service/plugin-gogcli-gmail-runtime.js",
+        "build/gog-runtime-manifest.json",
+        "scripts/fetch-gog-runtime.mjs"
+      ],
+      "licenseFiles": [
+        "licenses/source/GOGCLI.txt"
+      ],
+      "notes": "Unmodified upstream gogcli executable; Shoggoth adds a separate Service-owned account, tool, and permission adapter. The MIT notice text is retained with the distributed binary."
+    },
     {
       "name": "Multilingual E5-small bundled embedding model",
       "license": "MIT",
@@ -1793,10 +1903,10 @@
     {
       "name": "OpenAI Codex",
       "license": "Apache-2.0",
-      "source": "https://github.com/openai/codex/tree/rust-v0.149.0",
-      "revision": "0.149.0",
+      "source": "https://github.com/openai/codex/tree/rust-v0.159.2",
+      "revision": "0.159.2",
       "localFiles": [
-        "schemas/codex-app-server/0.149.0",
+        "schemas/codex-app-server/0.159.2",
         "build/codex-runtime-manifest.json"
       ],
       "licenseFiles": [
@@ -1804,6 +1914,27 @@
         "CODEX-NOTICE.txt"
       ],
       "notes": "Pinned unmodified runtime; generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately."
+    },
+    {
+      "name": "Codex native voice libraries",
+      "license": "LGPL-2.1-or-later AND MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib",
+      "source": "https://github.com/openai/codex/tree/rust-v0.159.2/third_party/voice",
+      "revision": "Codex 0.159.2; library versions and source archive hashes in codex-voice/sources.json",
+      "localFiles": [
+        ".vendor/codex/arm64/package/codex-resources/voice",
+        ".vendor/codex/x64/package/codex-resources/voice"
+      ],
+      "licenseFiles": [
+        "licenses/source/codex-voice/NOTICE.md",
+        "licenses/source/codex-voice/LGPL-2.1.txt",
+        "licenses/source/codex-voice/Opus.txt",
+        "licenses/source/codex-voice/PCRE2.md",
+        "licenses/source/codex-voice/libffi.txt",
+        "licenses/source/codex-voice/proxy-libintl.txt",
+        "licenses/source/codex-voice/sljit.txt",
+        "licenses/source/codex-voice/zlib.txt"
+      ],
+      "notes": "Unmodified upstream dynamic libraries and selected GStreamer plugins. Complete upstream notices and licenses are retained here and in the runtime package. Corresponding source archive URLs, versions and SHA-256 digests are retained in codex-voice/sources.json; build source and commit are identified in codex-voice/manifest.json. Build tools in sources.json are not bundled runtime libraries."
     },
     {
       "name": "ChillKai",
@@ -1883,6 +2014,21 @@
         "licenses/source/ZSH.txt"
       ],
       "notes": "Preserved zsh upstream redistribution terms. Shell shipped unchanged as part of the pinned Codex package; upstream package does not identify a separate zsh source commit."
+    },
+    {
+      "name": "Codex inline visualization stylesheet",
+      "license": "Apache-2.0",
+      "source": "https://github.com/openai/codex/tree/rust-v0.162.0/codex-rs/tui/assets/inline_visualization",
+      "revision": "rust-v0.162.0; stylesheet SHA-256 4b1d492f1e67394f80dc83fe7e9d3a508648dbeffe7a5152b27a567da972c50f",
+      "localFiles": [
+        "app/native-chat-ui-resources/visualize.css",
+        "app/native-chat-ui-resources/manifest.json"
+      ],
+      "licenseFiles": [
+        "CODEX-LICENSE.txt",
+        "CODEX-NOTICE.txt"
+      ],
+      "notes": "The upstream stylesheet is vendored without changes. Shoggoth supplies its own isolated HTML host, state SDK and trusted action controls. The copied style does not upgrade the bundled Codex Runtime."
     }
   ]
 }

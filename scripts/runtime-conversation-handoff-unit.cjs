@@ -51,6 +51,35 @@ test("real stores preserve one conversation across Codex → Pi → DSH → Code
   } finally { await f.close(); }
 });
 
+test("a native session from a retired transport is replaced before the next send and keeps the conversation", async () => {
+  const f = await openHandoffFixture();
+  try {
+    const session = f.createSession();
+    await f.switch(session.sessionKey, "pi");
+    const first = await f.send(session.sessionKey, "retired-first", "UNIQUE RETIRED MARKER");
+    assert.equal(first.status, "running", first.errorCode);
+    await f.complete(first, "RETIRED ANSWER");
+    const legacy = first.runtimeSessionRef.sessionId;
+    f.transport.retired = (runtime, sessionId) => runtime === "pi" && sessionId === legacy;
+    const pi = f.transport.hosts.get("pi");
+    const resumes = pi.resumeCalls;
+    const second = await f.send(session.sessionKey, "retired-second", "AFTER RETIREMENT");
+    assert.equal(second.status, "running", second.errorCode);
+    assert.notEqual(second.runtimeSessionRef.sessionId, legacy, "a retired native session is never resumed");
+    assert.equal(pi.resumeCalls, resumes);
+    const renewed = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(renewed.runtimeBindingId, f.binding("pi").id, "the conversation keeps its Binding");
+    assert.equal(renewed.retiredRuntimeSessions.at(-1).runtimeSessionId, legacy);
+    const execution = f.transport.acquisitions.at(-1).options.executionContract;
+    assert.match(execution.dynamicContext, /UNTRUSTED RUNTIME HANDOFF DATA/u);
+    assert.match(execution.dynamicContext, /UNIQUE RETIRED MARKER/u, "the fresh session is seeded from the transcript");
+    await f.complete(second);
+    const audits = f.service.transcriptStore.listEvents(session.profileId, session.id)
+      .filter(e => e.content.transcriptType === "runtime.switched");
+    assert.ok(audits.at(-1).contextExcluded);
+  } finally { await f.close(); }
+});
+
 test("busy and pending approval forbid switching; cancel does not transfer approval to the fresh session", async () => {
   const f = await openHandoffFixture();
   try {

@@ -30,7 +30,6 @@ const {
   parsePiVersion,
   preparePiHome,
   resolvePiLaunch,
-  supportsPiVersion,
 } = require(path.join(ROOT, "app", "agent-service", "pi-runtime-paths.js"));
 const {
   NATIVE_PI_RUNTIME_ACCOUNT_ID,
@@ -170,6 +169,14 @@ function rpcFixture(behavior = {}) {
           buffered = buffered.slice(newline + 1);
           const command = JSON.parse(line);
           if (command.type === "get_state") {
+            if (!turn && behavior.controlFailure) {
+              current.send({ id: command.id, type: "response", command: command.type, success: false, error: behavior.controlFailure });
+              continue;
+            }
+            if (!turn && behavior.incompatibleState) {
+              current.send({ id: command.id, type: "response", command: command.type, success: true, data: { model: null } });
+              continue;
+            }
             if (turn && behavior.holdState) continue;
             if (turn && behavior.closeBeforeState) {
               current.finish(1);
@@ -223,6 +230,25 @@ function rpcFixture(behavior = {}) {
             if (behavior.holdPromptAck) continue;
             current.send({ id: command.id, type: "response", command: "prompt", success: true });
             queueMicrotask(() => {
+              if (behavior.modelOnly) { settle(current); return; }
+              // Pi includes a growing assistant snapshot alongside small deltas.
+              // Repeated snapshots can exceed a lifetime wire budget while every
+              // individual frame and retained assistant message stay small.
+              if (behavior.snapshotUpdates) current.send({ type: "message_start", message: { role: "assistant", content: [] } });
+              for (let index = 0; index < (behavior.snapshotUpdates || 0); index++) {
+                current.send({ type: "message_update",
+                  message: { role: "assistant", content: [{ type: "thinking", thinking: "x".repeat(256 * 1024) }] },
+                  assistantMessageEvent: { type: "thinking_delta", delta: "." } });
+              }
+              for (const text of behavior.progressTexts || []) {
+                const message = { role: "assistant", content: [{ type: "text", text },
+                  { type: "toolCall", id: "progress-tool", name: "web_search", arguments: {} }],
+                  stopReason: "toolUse" };
+                messages.push(message);
+                current.send({ type: "message_start", message: { role: "assistant", content: [] } });
+                current.send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+                current.send({ type: "message_end", message });
+              }
               current.send({ type: "message_start", message: { role: "assistant", content: [] } });
               current.send({
                 type: "message_update",
@@ -255,7 +281,8 @@ function rpcFixture(behavior = {}) {
                   id: "confirmation-one",
                   method: "confirm",
                   title: "Allow Pi edit?",
-                  message: "edit file",
+                  // What resources/pi/shoggoth-pi-extension.mjs sends for non-bash tools.
+                  message: JSON.stringify({ path: "src/app.js", oldText: "a", newText: "b" }),
                 });
                 return;
               }
@@ -282,12 +309,18 @@ function rpcFixture(behavior = {}) {
               data: { steering: [], followUp: [] },
             });
           } else if (command.type === "abort") {
+            if (behavior.partialOnAbort) {
+              const message = { role: "assistant", content: [{ type: "text", text: "完成" }], stopReason: "aborted" };
+              messages.push(message);
+              current.send({ type: "message_end", message });
+            }
             current.send({ id: command.id, type: "response", command: "abort", success: true });
             current.send({ type: "agent_settled" });
           }
         }
       },
       onInputEnd(current) {
+        if (!turn && behavior.lingerControl) return;
         if (!turn || !behavior.lingerAfterSettledTurn) current.finish(0);
       },
     });
@@ -330,8 +363,10 @@ function rpcFixture(behavior = {}) {
     } else if (command === binaryPath && args[0] === "auth") {
       child = new FakeChild({ ignoreInput: true });
       queueMicrotask(() => {
-        child.stdout.write('{"status":"ready","provider":"openai"}\n');
-        child.finish(0);
+        behavior.onAuthCheck?.();
+        if (behavior.holdAuthCheck) return;
+        child.stdout.write(JSON.stringify({ status: behavior.authReady === false ? "not_ready" : "ready", provider: "openai" }) + "\n");
+        child.finish(behavior.authReady === false ? 1 : 0);
       });
     } else if (command === binaryPath) {
       child = rpcChild(options);
@@ -344,7 +379,10 @@ function rpcFixture(behavior = {}) {
     }
     children.push(child);
     if (behavior.ignoreKill && command === "/bin/sh") child.kill = () => false;
-    spawns.push({ command, args, options, child });
+    if (behavior.lingerControl && command === binaryPath && args.includes("rpc")) child.kill = () => false;
+    const contextIndex = args.indexOf("--append-system-prompt");
+    spawns.push({ command, args, options, child,
+      systemAppend: contextIndex < 0 ? null : fs.readFileSync(args[contextIndex + 1], "utf8") });
     return child;
   };
   const pool = new PiRuntimePool({
@@ -357,7 +395,7 @@ function rpcFixture(behavior = {}) {
     mcpGateIssuer,
     acceptanceTimeoutMs: 1_000,
     requestTimeoutMs: 1_000,
-    promptTimeoutMs: behavior.promptTimeoutMs || 2_000,
+    ...(behavior.defaultPromptTimeout ? {} : { promptTimeoutMs: behavior.promptTimeoutMs || 2_000 }),
     shutdownGraceMs: 100,
     killGraceMs: 100,
     now: behavior.now,
@@ -397,6 +435,66 @@ async function waitFor(predicate, label, timeoutMs = 1_000) {
   }
   assert.fail(`timed out waiting for ${label}`);
 }
+
+for (const interrupted of [false, true]) test(`Pi settles progress messages live without terminal replay (${interrupted ? "stop" : "complete"})`, async () => {
+  const progressTexts = ["准备检查页面。", "已完成第一阶段。", "继续核对第二阶段。"];
+  // A tool-only assistant still consumes a native message identity.
+  const value = rpcFixture({ progressTexts: ["", ...progressTexts], requestConfirmation: interrupted, partialOnAbort: interrupted });
+  try {
+    const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    const { session } = await runtime.sessionStart({ source: "chat:long-progress", cwd: value.workspace,
+      model: "openai/gpt-5.6", permissionPolicy });
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    let waiting = false;
+    if (interrupted) runtime.registerServerRequestHandler("item/fileChange/requestApproval", () => {
+      waiting = true;
+      return new Promise(() => {});
+    });
+    const receipt = await runtime.turnStart({ sessionId: session.id, operationId: "long-progress", prompt: "check stages",
+      cwd: value.workspace, model: "openai/gpt-5.6", permissionPolicy });
+    if (interrupted) {
+      await waitFor(() => waiting, "pending confirmation");
+      assert.deepEqual(events.filter((event) => event.type === "text").map((event) => event.text), progressTexts,
+        "every finished message must be sealed before the user stops the task");
+      await runtime.turnInterrupt({ sessionId: session.id, turnId: receipt.turn.id });
+    }
+    await waitFor(() => runtime.host.turnProcesses.size === 0, "Pi terminal exit");
+    const texts = events.filter((event) => event.type === "text");
+    assert.deepEqual(texts.map((event) => event.text), [...progressTexts, "完成"], "terminal must not replay progress");
+    assert(texts.every((event) => event.method === "pi/message_end"));
+    assert.deepEqual(texts.map((event) => event.phase), ["commentary", "commentary", "commentary", "final_answer"]);
+    const read = await runtime.sessionRead({ sessionId: session.id, includeTurns: true });
+    const turn = read.session.turns[0];
+    assert.equal(turn.status, interrupted ? "interrupted" : "completed");
+    assert.deepEqual(turn.items.filter((item) => item.type === "agentMessage").map((message) => message.id), texts.map((event) => event.itemId),
+      "history and live output must keep the same message identities");
+    await value.adapter.stopAll();
+  } finally { value.cleanup(); }
+});
+
+test("Pi completes the original turn after more than 32 MiB of streaming snapshots", async () => {
+  const value = rpcFixture({ snapshotUpdates: 140 });
+  try {
+    const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    const { session } = await runtime.sessionStart({ source: "chat:large-wire", cwd: value.workspace,
+      model: "openai/gpt-5.6", permissionPolicy });
+    let reasoning = 0, completed = 0;
+    runtime.subscribe(event => { if (event.type === "reasoning_delta") reasoning++;
+      if (event.type === "complete") completed++; });
+    const receipt = await runtime.turnStart({ sessionId: session.id, operationId: "large-wire-original", prompt: "complete once",
+      cwd: value.workspace, model: "openai/gpt-5.6", permissionPolicy });
+    await waitFor(() => runtime.host.turnProcesses.size === 0, "long-wire Pi terminal exit");
+    const read = await runtime.sessionRead({ sessionId: session.id, includeTurns: true });
+    assert.equal(read.session.turns.length, 1);
+    assert.equal(read.session.turns[0].id, receipt.turn.id);
+    assert.equal(read.session.turns[0].status, "completed");
+    assert.equal(reasoning, 140);
+    assert.equal(completed, 1);
+  } finally { await value.adapter.stopAll(); value.cleanup(); }
+});
 
 test("Pi carries only explicit Node environment-proxy booleans and never NODE_OPTIONS", async () => {
   for (const value of ["1", "0", "invalid"]) {
@@ -523,16 +621,15 @@ test("strict Pi JSONL and version/model helpers reject malformed input", () => {
     maxStreamBytes: 4096,
   }).push(malformedUtf8), { code: "PI_RPC_FRAME_INVALID" });
   assert.deepEqual(parsePiVersion("0.84.4\n"), [0, 84, 4]);
-  assert.equal(supportsPiVersion("0.84.3"), false);
-  assert.equal(supportsPiVersion("0.84.4"), true);
-  assert.equal(supportsPiVersion("0.85.0"), false);
+  assert.deepEqual(parsePiVersion("1.2.0"), [1, 2, 0]);
+  assert.equal(parsePiVersion("unknown"), null);
   assert.deepEqual(parsePiModelRef("openrouter/anthropic/claude-sonnet"), {
     provider: "openrouter",
     modelId: "anthropic/claude-sonnet",
   });
 });
 
-test("Pi args retain skill/template discovery, isolate extensions and map tool permissions", () => {
+test("Pi args keep templates, load native skills only for a skill command, isolate extensions and map tool permissions", () => {
   assert.deepEqual(DEFAULT_PI_PERMISSION_POLICY, {
     approvalPolicy: "on-request",
     sandbox: "danger-full-access",
@@ -548,7 +645,11 @@ test("Pi args retain skill/template discovery, isolate extensions and map tool p
     model: "openai/gpt-5.6",
   });
   assert.ok(args.includes("--no-extensions"));
-  assert.equal(args.includes("--no-skills"), false);
+  assert.equal(args.includes("--no-skills"), true, "ordinary turns omit Pi's native skill index");
+  assert.equal(buildPiRpcArgs({ permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" },
+    sessionId: "11111111-1111-4111-8111-111111111111", sessionDir: path.join(home, "sessions"),
+    extensionPath: path.join(trustedRoot, "extension.mjs"), nativeSkills: true }).includes("--no-skills"), false,
+  "a /skill:name turn keeps native skills so the command expands");
   assert.equal(args.includes("--no-prompt-templates"), false);
   assert.equal(args[args.indexOf("--exclude-tools") + 1], "bash,powershell");
   assert.equal(args[args.indexOf("--provider") + 1], "openai");
@@ -566,7 +667,7 @@ test("Pi discovers workspace commands and executes built-ins as RPC, skills as r
     const catalog = await runtime.commandsList({ cwd: value.workspace });
     assert.equal(catalog.commands.find((command) => command.name === "skill:project-check").source, "Pi skill");
     assert.equal(catalog.commands.find((command) => command.name === "tree").execution, "cli");
-    const discovery = value.spawns.find((entry) => entry.child.input.includes('"get_commands"'));
+    const discovery = value.spawns.find((entry) => entry.child.input.includes('"get_commands"') && !entry.args.includes("--no-skills"));
     assert.equal(discovery.options.cwd, value.workspace);
     assert.equal(discovery.args.includes("--no-skills"), false);
     assert.equal(discovery.args.includes("--no-extensions"), true);
@@ -588,11 +689,42 @@ test("Pi discovers workspace commands and executes built-ins as RPC, skills as r
       const inputs = turnSpawn.child.input.trim().split("\n").map((line) => JSON.parse(line));
       if (index < 3) assert.equal(inputs.some((input) => input.type === "prompt"), false, "built-ins cannot become model prompts");
       else assert.equal(inputs.find((input) => input.type === "prompt").message, prompt, "skill invocation must stay at the start");
+      assert.equal(turnSpawn.args.includes("--no-skills"), index < 3, "only a /skill: turn loads Pi's native skills");
       if (index === 0) assert.equal(inputs.find((input) => input.type === "compact").customInstructions, "preserve APIs");
       if (index === 1) assert.equal(inputs.find((input) => input.type === "set_thinking_level").level, "high");
       const contextPath = turnSpawn.args[turnSpawn.args.indexOf("--append-system-prompt") + 1];
       assert.match(contextPath, /\.shoggoth-command-/);
       assert.equal(fs.existsSync(contextPath), false, "private command context must be cleaned after completion");
+    }
+    await value.adapter.stopAll();
+  } finally { value.cleanup(); }
+});
+
+test("Pi normal turns append complete policy to the native system prompt and keep history free of policy copies", async () => {
+  const value = rpcFixture({ defaultPromptTimeout: true });
+  try {
+    const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    assert.equal(runtime.host.promptTimeoutMs, 30 * 60_000, "ordinary turns retain a finite thirty-minute budget");
+    const started = await runtime.sessionStart({ source: "chat:system-policy", cwd: value.workspace,
+      model: "openai/gpt-5.6", permissionPolicy, developerInstructions: "FULL_POLICY_WITH_RARE_CAPABILITY" });
+    const events = [];
+    runtime.subscribe(event => events.push(event));
+    for (let index = 1; index <= 2; index++) {
+      const result = await runtime.turnStart({ sessionId: started.session.id, operationId: `system-${index}`,
+        prompt: `USER_${index}`, context: "DYNAMIC_DATA", turnDeveloperInstructions: `RUN_${index}`,
+        model: "openai/gpt-5.6", cwd: value.workspace, permissionPolicy });
+      await waitFor(() => events.some(event => event.type === "complete" && event.turnId === result.turn.id), "normal turn completion");
+      const spawned = value.spawns.filter(entry => entry.command === "/bin/sh").at(-1);
+      assert.equal(spawned.systemAppend, `FULL_POLICY_WITH_RARE_CAPABILITY\n\nRUN_${index}`);
+      assert.equal(spawned.args.includes("--system-prompt"), false, "native system prompt must remain enabled");
+      assert.equal(spawned.args.includes("--no-skills"), true, "ordinary turns do not carry Pi's native skill index");
+      const message = spawned.child.input.trim().split("\n").map(line => JSON.parse(line)).find(input => input.type === "prompt").message;
+      // Unchanged dynamic data already sits in the native history after turn 1.
+      assert.equal(message, `${index === 1 ? "DYNAMIC_DATA"
+        : require("../app/agent-service/native-instruction-delivery").unchangedBlocksNotice(["context"])}`
+        + `\n\nCURRENT USER REQUEST\nUSER_${index}`);
+      assert.equal(fs.existsSync(spawned.args[spawned.args.indexOf("--append-system-prompt") + 1]), false);
     }
     await value.adapter.stopAll();
   } finally { value.cleanup(); }
@@ -804,6 +936,9 @@ test("adapter executes durable Pi RPC turn with models, MCP, elicitation and del
     assert.equal(requests[0].sessionId, started.session.id);
     assert.equal(requests[0].itemId, "confirmation-one");
     assert.equal(requests[0].grantRoot, value.workspace);
+    assert.equal(requests[0].toolName, "edit");
+    assert.deepEqual(requests[0].toolInput, { path: "src/app.js", oldText: "a", newText: "b" });
+    assert.equal(requests[0].reason, undefined, "the confirm title only restates the tool");
     const turnSpawn = value.spawns.find((entry) => entry.command === "/bin/sh");
     assert.ok(turnSpawn);
     assert.equal(turnSpawn.options.env.PI_CODING_AGENT_DIR,
@@ -968,19 +1103,56 @@ test("Pi product confirmation preserves its field identity and pauses the active
   }
 });
 
-test("unsupported Pi versions fail before an RPC session starts", async () => {
-  const value = rpcFixture({ version: "0.85.0" });
+for (const version of ["0.84.4", "0.85.0", "1.2.0", "2.0.0", "next-dev"]) test(`Pi admits ${version} by its read-only RPC contract`, async () => {
+  const value = rpcFixture({ version });
   try {
-    await assert.rejects(value.adapter.acquire(PI_BINDING, {
+    const runtime = await value.adapter.acquire(PI_BINDING, {
       workspace: value.workspace,
       permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" },
-    }), { code: "PI_VERSION_UNSUPPORTED" });
-    assert.equal(value.spawns.filter((entry) => entry.command === "/bin/sh").length, 0);
+    });
+    assert.equal((await runtime.authenticationState()).authenticated, true);
+    assert.ok(value.spawns.some(entry => entry.child.input.includes('"get_state"')));
+    assert.ok(!value.spawns.some(entry => entry.child.input.includes('"prompt"')));
+    assert.equal(value.reservations.length, 0);
   } finally {
     await value.pool.stopAll().catch(() => {});
     value.cleanup();
   }
 });
+
+test("incompatible Pi protocol fails before a turn or MCP reservation", async () => {
+  const value = rpcFixture({ version: "0.84.4", incompatibleState: true });
+  try {
+    await assert.rejects(value.adapter.acquire(PI_BINDING, {
+      workspace: value.workspace,
+      permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" },
+    }), { code: "RUNTIME_INCOMPATIBLE" });
+    assert.equal(value.spawns.filter((entry) => entry.command === "/bin/sh").length, 0);
+    assert.equal(value.reservations.length, 0);
+  } finally {
+    await value.pool.stopAll().catch(() => {});
+    value.cleanup();
+  }
+});
+
+test("an unclosed compatibility probe blocks admission and repeated spawning", async () => {
+  const value = rpcFixture({ lingerControl: true });
+  try {
+    await assert.rejects(value.adapter.acquire(PI_BINDING), { code: "PI_PROCESS_CLOSE_TIMEOUT" });
+    const spawns = value.spawns.length;
+    await assert.rejects(value.adapter.acquire(PI_BINDING), { code: "PI_RUNTIME_CLEANUP_INCOMPLETE" });
+    assert.equal(value.spawns.length, spawns);
+    assert.equal(value.reservations.length, 0);
+  } finally { await value.pool.stopAll().catch(() => {}); value.cleanup(); }
+});
+
+for (const [failure, code] of [["Unknown command: get_state", "RUNTIME_INCOMPATIBLE"], ["Temporary failure", "PI_RPC_REQUEST_FAILED"]]) {
+  test(`Pi protocol probe distinguishes ${failure}`, async () => {
+    const value = rpcFixture({ controlFailure: failure });
+    try { await assert.rejects(value.adapter.acquire(PI_BINDING), { code }); }
+    finally { await value.pool.stopAll().catch(() => {}); value.cleanup(); }
+  });
+}
 
 test("authentication state degrades to logged-out before Pi has a model catalog", async () => {
   const value = rpcFixture({ noModels: true });
@@ -1201,6 +1373,99 @@ test("Pi surfaces provider authentication errors without locking the conversatio
     }
     await value.adapter.stopAll();
   } finally { value.cleanup(); }
+});
+
+test("model-only worker checks its default or explicit model before any prompt", async () => {
+  for (const model of [null, "openai/gpt-5.6"]) {
+    const value = rpcFixture({ authReady: false });
+    try {
+      const worker = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+        permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+        executionContract: { runId: "summary-auth", source: "compaction" } });
+      await assert.rejects(worker.generateModelOnly({ model, prompt: "Summarize", operationId: "summary-auth" }), { code: "AUTH_REQUIRED" });
+      const check = value.spawns.find(entry => entry.args[0] === "auth");
+      assert.ok(check.args.includes("--no-refresh"));
+      assert.equal(check.args[check.args.indexOf("--model") + 1], model || "openai/gpt-5.6");
+      assert.equal(value.spawns.some(entry => /"type":"prompt"/u.test(entry.child.input)), false, "no prompt is sent");
+      await value.adapter.stopAll();
+    } finally { value.cleanup(); }
+  }
+});
+
+test("Pi default discovery reads its actual no-tools worker and reaps it without a prompt", async () => {
+  const value = rpcFixture({});
+  try {
+    const worker = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+      permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+      executionContract: { runId: "discover-model", source: "memory_extraction" } });
+    assert.deepEqual(await worker.resolveModelOnly({ operationId: "discover-model" }), {
+      model: "openai/gpt-5.6", provider: "openai" });
+    const spawns = value.spawns.filter(entry => entry.args.includes("rpc"));
+    assert.ok(spawns.length > 0);
+    for (const entry of spawns) {
+      assert.ok(entry.args.includes("--no-tools")); assert.ok(entry.args.includes("--no-session"));
+      assert.doesNotMatch(entry.child.input, /"type":"prompt"/u); assert.ok(entry.child.closed);
+    }
+    assert.equal(worker.host.controlProcesses.size, 0);
+    await value.adapter.stopAll();
+  } finally { value.cleanup(); }
+});
+
+test("Pi explicit discovery passes the requested route to its worker and returns the worker's actual selection", async () => {
+  const value = rpcFixture({});
+  try {
+    const worker = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+      permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+      executionContract: { runId: "discover-explicit", source: "memory_extraction" } });
+    assert.deepEqual(await worker.resolveModelOnly({ operationId: "discover-explicit", model: "openai/fixture-alias" }),
+      { model: "openai/gpt-5.6", provider: "openai" });
+    const control = value.spawns.find(entry => entry.args.includes("--model") && entry.args.includes("fixture-alias"));
+    assert.ok(control); assert.equal(control.args[control.args.indexOf("--provider") + 1], "openai");
+    assert.equal(control.args[control.args.indexOf("--model") + 1], "fixture-alias");
+    assert.doesNotMatch(control.child.input, /"type":"prompt"/u); assert.ok(control.child.closed);
+    assert.equal(worker.host.controlProcesses.size, 0);
+    await value.adapter.stopAll();
+  } finally { value.cleanup(); }
+});
+
+test("authenticated tool-free worker preserves provider failure classification and completes normally", async () => {
+  for (const [assistantError, code] of [[undefined, null], ["No API key configured", "AUTH_REQUIRED"],
+    ["model_not_found", "RUNTIME_MODEL_UNAVAILABLE"], ["rate limit exceeded", "RUNTIME_RATE_LIMITED"]]) {
+    const value = rpcFixture({ modelOnly: true, assistantError });
+    try {
+      const worker = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+        permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+        executionContract: { runId: "summary-result", source: "compaction" } });
+      const result = worker.generateModelOnly({ model: "openai/gpt-5.6", prompt: "Summarize", operationId: "summary-result" });
+      if (code) await assert.rejects(result, { code });
+      else assert.equal((await result).text, "完成");
+      assert.equal(worker.host.controlProcesses.size, 0);
+      await value.adapter.stopAll();
+    } finally { value.cleanup(); }
+  }
+});
+
+test("summary preflight fences changed Pi model storage and reaps cancellation", async () => {
+  for (const cancel of [false, true]) {
+    const behavior = { holdAuthCheck: cancel };
+    const value = rpcFixture(behavior);
+    try {
+      const worker = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace,
+        permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+        executionContract: { runId: "summary-preflight", source: "compaction" } });
+      behavior.onAuthCheck = () => fs.writeFileSync(path.join(worker.host.home, "models-store.json"), "{}\n", { mode: 0o600 });
+      const controller = new AbortController();
+      const result = worker.generateModelOnly({ model: null, prompt: "Summarize", operationId: "summary-preflight", signal: controller.signal });
+      if (cancel) {
+        await waitFor(() => value.spawns.some(entry => entry.args[0] === "auth"), "preflight started");
+        controller.abort();
+      }
+      await assert.rejects(result, { code: cancel ? "MODEL_ONLY_CANCELED" : "RUNTIME_MODEL_CATALOG_CHANGED" });
+      assert.equal(value.spawns.some(entry => /"type":"prompt"/u.test(entry.child.input)), false);
+      assert.equal(worker.host.controlProcesses.size, 0);
+      await value.adapter.stopAll();
+    } finally { value.cleanup(); }
+  }
 });
 
 test("a read-only model worker is isolated from a warm writable chat Runtime", async () => {

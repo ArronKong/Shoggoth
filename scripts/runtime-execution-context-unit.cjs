@@ -5,6 +5,22 @@ const { openFixture, sendAndDrain, SESSION_KEY } = require("./shoggoth-work-run-
 const { defaultNativeRuntimeConfig } = require("../app/agent-service/native-runtime-config");
 const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
 
+test("product help reads only the frozen active Runtime and cannot inspect another Profile or a retired Run", async () => {
+  const f = await openFixture();
+  try {
+    const { ack } = await sendAndDrain(f, { operationId: "product-help-runtime" });
+    const run = f.coordinator.getRun(ack.run.id);
+    const context = f.coordinator.getProductHelpContext(run.profileId, run.id);
+    assert.ok(context); assert.equal(context.runtime, "codex");
+    assert.equal(context.source, "chat");
+    assert.equal(f.coordinator.getProductHelpContext("another-profile", run.id), null);
+    assert.equal(f.coordinator.getProductHelpContext(run.profileId, "missing-run"), null);
+    assert.equal(Object.isFrozen(context.capabilities), true);
+    f.coordinator.runHostAssignments.delete(run.id);
+    assert.equal(f.coordinator.getProductHelpContext(run.profileId, run.id), null);
+  } finally { await f.coordinator.close(); }
+});
+
 test("a provider change during encrypted persistence fails before Runtime acquisition", async () => {
   let current = true;
   const f = await openFixture({
@@ -42,10 +58,16 @@ test("a resumed native session receives fresh memory but never repeats the trans
     });
     try {
       await sendAndDrain(f, { operationId: "current-operation", prompt: "current-user-message" });
-      const text = f.host.lastTurnStartParams.input.map(item => item.text || "").join("\n");
-      assert.match(text, /fresh-memory/);
-      assert.match(text, /current-user-message/);
-      assert.equal(text.includes("prior-transcript-seed"), !resumed);
+      const turn = f.host.lastTurnStartParams;
+      assert.equal(f.host.turnStartCalls, 1);
+      assert.deepEqual(turn.input, [{ type: "text", text: "current-user-message", text_elements: [] }]);
+      assert.deepEqual(f.host.lastInjectedItems, {
+        threadId: turn.threadId,
+        items: [{ type: "message", role: "user", content: [{ type: "input_text",
+          text: resumed ? "fresh-memory" : "fresh-memory\nprior-transcript-seed" }] }],
+      });
+      assert.ok(f.log.lastIndexOf("host.threadInjectItems") < f.log.indexOf("host.turnStart"),
+        "the current memory and first-session transcript seed must arrive before the user turn");
     } finally { await f.coordinator.close(); }
   }
 });
@@ -122,5 +144,74 @@ test("Cron handoff carries prior dialogue and shares the total byte budget with 
     assert.match(prior.content, /completed-cron-49/);
     assert.doesNotMatch(prior.content, /current-cron-prompt/);
     assert.ok(prior.content.endsWith("END UNTRUSTED PRIOR TRANSCRIPT DATA"));
+  } finally { f.cleanup(); }
+});
+
+test("a new Agent's greeting reaches the first turn as prior dialogue", () => {
+  const f = contextFixture();
+  try {
+    f.append({ id: "agent-greeting", kind: "assistant", runId: null,
+      content: { text: "你好，我是 Grok，由你本机的 Grok 驱动。想让我帮你做什么？" } });
+    f.append({ id: "first", kind: "user", content: { text: "first-user-request", operationId: "first" } });
+    const snapshot = f.compiler.compile({ profile: f.profile, run: f.run,
+      transcriptSessionId: f.transcriptSessionId, contextLifecycleV1: true, currentOperationId: "first" });
+    const prior = snapshot.blocks.find(block => block.kind === "transcript");
+    assert.match(prior.content, /你好，我是 Grok，由你本机的 Grok 驱动。/u);
+    assert.doesNotMatch(prior.content, /first-user-request/);
+  } finally { f.cleanup(); }
+});
+
+// Regression for a rebuilt Antigravity session that resumed an old 3D task
+// after the user had moved on to news: old tool output filled the input.
+function topicShiftHistory(f) {
+  let seq = 0;
+  const at = minute => Date.UTC(2026, 9, 21, 2, minute);
+  f.append({ id: "build", kind: "user", occurredAt: at(0), content: { text: "构建 Gummy Bears 3D 页面" } });
+  for (let i = 0; i < 40; i++) {
+    const toolCallId = `call-${++seq}`;
+    f.append({ id: `${toolCallId}-start`, kind: "tool_call", occurredAt: at(1), content: { transcriptType: "tool.start",
+      toolCallId, tool: { name: "view_file", status: "in_progress",
+        arguments: { AbsolutePath: "/workspace/index.html", StartLine: i * 90, toolSummary: "View lighting" } } } });
+    f.append({ id: `${toolCallId}-result`, kind: "tool_result", occurredAt: at(1), content: { transcriptType: "tool.result",
+      toolCallId, tool: { name: "view_file", status: "completed", success: true,
+        output: `OLD_FILE_BODY_${i} ${"const gummyBear = new THREE.Mesh(geometry, material);\n".repeat(150)}` } } });
+  }
+  f.append({ id: "denied-start", kind: "tool_call", occurredAt: at(2), content: { transcriptType: "tool.start",
+    toolCallId: "denied", tool: { name: "run_command", status: "in_progress", arguments: { CommandLine: "chrome --screenshot" } } } });
+  f.append({ id: "denied-result", kind: "tool_result", occurredAt: at(2), content: { transcriptType: "tool.result",
+    toolCallId: "denied", tool: { name: "run_command", status: "failed", success: false, output: "Denied by user (*)." } } });
+  f.append({ id: "bear-done", kind: "assistant", occurredAt: at(3), content: { text: "软糖熊已改成软糖猫。" } });
+  f.append({ id: "news", kind: "user", occurredAt: at(10), content: { text: "这几天有什么AI新闻" } });
+  f.append({ id: "news-answer", kind: "assistant", occurredAt: at(11), content: { text: "以下是最近的 AI 新闻……" } });
+  f.append({ id: "news-preference", kind: "user", occurredAt: at(12),
+    content: { text: "以后让你查新闻要注意时效性，要每个新闻写出日期，写出来源" } });
+  f.append({ id: "current", kind: "user", occurredAt: at(20), content: { text: "重新整理一份新闻", operationId: "current" } });
+}
+
+test("a fresh native session replays tool calls as short lines and restates the latest requests", () => {
+  const f = contextFixture({ runtime: "antigravity" });
+  try {
+    topicShiftHistory(f);
+    const compile = freshSession => f.compiler.compile({ profile: f.profile, run: f.run,
+      transcriptSessionId: f.transcriptSessionId, contextLifecycleV1: true, currentOperationId: "current",
+      transcriptTokenBudget: 500000, freshSession });
+    const fresh = compile(true);
+    const prior = fresh.blocks.find(block => block.kind === "transcript").content;
+    assert.doesNotMatch(prior, /OLD_FILE_BODY|new THREE\.Mesh/u, "old tool output is not replayed");
+    assert.match(prior, /TOOL_CALL: view_file \{"AbsolutePath":"\/workspace\/index\.html".*\} -> completed/u);
+    assert.match(prior, /TOOL_RESULT: run_command failed: Denied by user/u);
+    assert.doesNotMatch(prior, /TOOL_RESULT: view_file/u, "a successful result is folded into its call line");
+    assert.ok(Buffer.byteLength(prior) < 16 * 1024, `replayed history stays small: ${Buffer.byteLength(prior)} bytes`);
+    const recap = prior.slice(prior.indexOf("BEGIN UNTRUSTED RECENT USER REQUESTS DATA"));
+    assert.ok(prior.indexOf("END UNTRUSTED PRIOR TRANSCRIPT DATA") < prior.indexOf("BEGIN UNTRUSTED RECENT USER REQUESTS DATA"),
+      "the recap is the last block before the current request");
+    assert.match(recap, /\[2026-10-21T02:00Z\] 构建 Gummy Bears 3D 页面\n\[2026-10-21T02:10Z\] 这几天有什么AI新闻\n\[2026-10-21T02:12Z\] 以后让你查新闻/u);
+    assert.doesNotMatch(recap, /重新整理一份新闻/u, "the current request is delivered separately");
+    assert.ok(fresh.dynamicContext.endsWith("END UNTRUSTED RECENT USER REQUESTS DATA"));
+    assert.match(fresh.turnDeveloperInstructions, /started fresh from saved conversation history/u);
+    const continuing = compile(false);
+    assert.doesNotMatch(continuing.dynamicContextWithoutTranscript, /RECENT USER REQUESTS|PRIOR TRANSCRIPT/u);
+    assert.doesNotMatch(continuing.turnDeveloperInstructions, /started fresh/u,
+      "a continuing native session already holds its own history");
   } finally { f.cleanup(); }
 });

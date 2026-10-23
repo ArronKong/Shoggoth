@@ -11,6 +11,11 @@ const yaml = require("js-yaml");
 const manifestSchema = require("../../schemas/agent-plugins/1.0.0/plugin.schema.json");
 const mcpSchema = require("../../schemas/agent-plugins/1.0.0/mcp.schema.json");
 const { serviceError } = require("./security");
+const { secretReference, declaredSecrets } = require("../core/plugin-secret-placeholders");
+const { componentFor: graphComponentFor, TRANSPORT: GRAPH_TRANSPORT } =
+  require("./plugin-microsoft-graph-sidecar");
+const { SOURCE_IDENTITY: GOG_GMAIL_SOURCE, COMPONENT_NAME: GOG_GMAIL_COMPONENT,
+  TRANSPORT: GOG_GMAIL_TRANSPORT } = require("./plugin-gogcli-gmail-sidecar");
 
 const MAX_FILES = 256;
 const MAX_ENTRIES = 512;
@@ -205,6 +210,11 @@ function parseSkill(target, directoryName) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(text);
   if (!match) return null;
   const frontmatter = yaml.load(match[1], { schema: yaml.JSON_SCHEMA });
+  const requirements = frontmatter?.["x-shoggoth"];
+  const requirementNames = (value) => Array.isArray(value) && value.length <= 32
+    && value.every((item) => typeof item === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(item))
+    && new Set(value).size === value.length;
   if (!own(frontmatter) || !SKILL_NAME.test(frontmatter.name)
     || frontmatter.name.length > 64 || frontmatter.name !== directoryName
     || typeof frontmatter.description !== "string"
@@ -213,9 +223,16 @@ function parseSkill(target, directoryName) {
       && (typeof frontmatter.compatibility !== "string" || frontmatter.compatibility.length < 1
         || frontmatter.compatibility.length > 500))
     || (Object.hasOwn(frontmatter, "metadata") && (!own(frontmatter.metadata)
-      || Object.values(frontmatter.metadata).some((value) => typeof value !== "string")))) return null;
+      || Object.values(frontmatter.metadata).some((value) => typeof value !== "string")))
+    || (requirements !== undefined && (!own(requirements)
+      || Object.keys(requirements).some((key) => !["requiredTools", "requiredRuntimeCapabilities"].includes(key))
+      || !requirementNames(requirements.requiredTools ?? [])
+      || !requirementNames(requirements.requiredRuntimeCapabilities ?? [])))) return null;
   return { name: frontmatter.name, description: frontmatter.description,
-    descriptorDigest: hash(bytes) };
+    descriptorDigest: hash(bytes),
+    requiredTools: requirements?.requiredTools || [],
+    requiredRuntimeCapabilities: requirements?.requiredRuntimeCapabilities || [],
+    declaredAllowedTools: Object.hasOwn(frontmatter, "allowed-tools") };
 }
 function discoverSkills(root, diagnostics) {
   const base = fixedPath(root, "skills", "directory");
@@ -277,14 +294,25 @@ function validateHttp(record) {
   const seen = new Set();
   for (const [name, value] of Object.entries(headers)) {
     const key = name.toLowerCase();
-    if (seen.has(key) || ["authorization", "cookie", "proxy-authorization"].includes(key)) return false;
+    // A literal credential header is never package content; only a
+    // `${secret:NAME}` reference resolved by the Service may supply one.
+    if (seen.has(key) || ["cookie", "proxy-authorization"].includes(key)
+      || (key === "authorization" && !secretReference(value, { allowBearer: true }))) return false;
     seen.add(key);
     try { http.validateHeaderName(name); http.validateHeaderValue(name, value); }
     catch { return false; }
   }
   return true;
 }
-function discoverMcp(root, diagnostics, oauthResources = {}) {
+function discoverMcp(root, diagnostics, oauthResources = {}, allowGraphSidecar = false,
+  nativeSourceIdentity = null) {
+  // Internal transport admission is scoped to the fixed bundled source. Loading
+  // lazily avoids the Host-plan/resolver/parser cycle; the public schema is unchanged.
+  const nativeComponent = nativeSourceIdentity === "bundled:codex-security"
+    ? require("./plugin-codex-security-native-component").readCodexSecurityNativeComponent(root) : null;
+  const gogGmailComponent = nativeSourceIdentity === GOG_GMAIL_SOURCE ? GOG_GMAIL_COMPONENT : null;
+  const graphComponent = graphComponentFor(allowGraphSidecar === true
+    ? "outlook-calendar" : allowGraphSidecar);
   const file = fixedPath(root, "mcp.json", "file");
   if (file.status === "missing") {
     if (Object.keys(oauthResources).length) fail("PACKAGE_INVALID", "插件 OAuth 资源缺少 MCP 声明");
@@ -328,7 +356,13 @@ function discoverMcp(root, diagnostics, oauthResources = {}) {
   const servers = [];
   for (const [name, record] of Object.entries(config.mcpServers)) {
     let reasonCode = null;
-    if (!validateMcpEntry(record)) reasonCode = "COMPONENT_INVALID";
+    const internalGraph = graphComponent !== null && name === graphComponent
+      && own(record) && Object.keys(record).length === 1 && record.type === GRAPH_TRANSPORT;
+    const internalNative = nativeComponent !== null && name === nativeComponent.name
+      && nativeComponent.descriptorDigest === hash(canonical(record));
+    const internalGogGmail = gogGmailComponent !== null && name === gogGmailComponent
+      && own(record) && Object.keys(record).length === 1 && record.type === GOG_GMAIL_TRANSPORT;
+    if (!internalGraph && !internalNative && !internalGogGmail && !validateMcpEntry(record)) reasonCode = "COMPONENT_INVALID";
     else if (record.type === "sse") reasonCode = "COMPONENT_UNSUPPORTED";
     else if (record.type === "stdio") {
       const command = record.command;
@@ -336,7 +370,8 @@ function discoverMcp(root, diagnostics, oauthResources = {}) {
         || (record.cwd !== undefined && !validateCwd(root, record.cwd))) {
         reasonCode = "COMPONENT_INVALID";
       }
-    } else if (!validateHttp(record)) reasonCode = "COMPONENT_INVALID";
+    } else if (!internalGraph && !internalNative && !internalGogGmail && !validateHttp(record)) reasonCode = "COMPONENT_INVALID";
+    if (!reasonCode && declaredSecrets(record) === null) reasonCode = "COMPONENT_INVALID";
     if (reasonCode) {
       if (Object.hasOwn(oauthResources, name)) fail("PACKAGE_INVALID", "插件 OAuth 资源对应的 MCP 组件无效");
       diagnostics.push({ scope: "mcp-server", name, reasonCode });
@@ -348,12 +383,14 @@ function discoverMcp(root, diagnostics, oauthResources = {}) {
   }
   return servers;
 }
-function readPluginMcpServer(root, name) {
+function readPluginMcpServer(root, name, { allowGraphSidecar = false,
+  nativeSourceIdentity = null } = {}) {
   const file = fixedPath(root, "mcp.json", "file");
   if (file.status !== "valid") fail("PACKAGE_CHANGED", "插件 MCP 配置已消失或变为不安全路径");
   const config = parseJsonFile(file.path);
   const { oauthResources } = validateManifest(root, []);
-  const server = discoverMcp(root, [], oauthResources).find((item) => item.name === name);
+  const server = discoverMcp(root, [], oauthResources, allowGraphSidecar, nativeSourceIdentity)
+    .find((item) => item.name === name);
   const record = config?.mcpServers?.[name];
   const oauthResource = oauthResources[name] || null;
   if (!server || !own(record) || server.descriptorDigest !== hash(canonical(
@@ -362,7 +399,8 @@ function readPluginMcpServer(root, name) {
   }
   return { ...server, spec: structuredClone(record), oauthResource };
 }
-function previewPluginDirectory(directory, { trustedBundled = false } = {}) {
+function previewPluginDirectory(directory, { trustedBundled = false,
+  allowGraphSidecar = false, nativeSourceIdentity = null } = {}) {
   const root = path.resolve(directory);
   let stat;
   try { stat = fs.lstatSync(root); }
@@ -377,7 +415,9 @@ function previewPluginDirectory(directory, { trustedBundled = false } = {}) {
     diagnostics.push({ scope: "path", name: relative, reasonCode: "PACKAGE_PATH_INVALID" });
   }
   const skills = discoverSkills(resolvedRoot, diagnostics);
-  const mcpServers = discoverMcp(resolvedRoot, diagnostics, oauthResources);
+  const mcpServers = discoverMcp(resolvedRoot, diagnostics, oauthResources,
+    trustedBundled && allowGraphSidecar, trustedBundled ? nativeSourceIdentity : null);
+  const hooks = require("./plugin-hook-parser").discoverPluginHooks(resolvedRoot, mcpServers, files);
   const contentDigest = hash(canonical(files));
   return Object.freeze({
     specVersion: SCHEMA_VERSION,
@@ -388,6 +428,7 @@ function previewPluginDirectory(directory, { trustedBundled = false } = {}) {
     files,
     skills,
     mcpServers,
+    hooks,
     diagnostics,
     installable: unsafe.length === 0,
   });

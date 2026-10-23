@@ -75,7 +75,7 @@ export function IconPulse() {
 
 /** Shared read/reveal/edit presentation for Provider keys and endpoint dialogs. */
 export function ProviderSecretField({
-  secret, editValue, revealedValue, busy, canReveal, canClear, editDisabled = false,
+  secret, editValue, revealedValue, busy, canReveal, canClear, editDisabled = false, canEdit = true,
   onBeginEdit, onChange, onSave, onCancel, onReveal, onClear, onValidate, clearLabel,
 }: {
   secret: EditableFieldValue;
@@ -83,6 +83,7 @@ export function ProviderSecretField({
   revealedValue: string | null;
   busy: boolean;
   editDisabled?: boolean;
+  canEdit?: boolean;
   canReveal: boolean;
   canClear: boolean;
   onBeginEdit(): void;
@@ -146,7 +147,7 @@ export function ProviderSecretField({
             type="button"
             className={`field-input ${styles.fieldBox} ${styles.fieldBoxBtn} ${secret.configured ? "" : styles.fieldBoxEmpty}`}
             title={secret.title}
-            disabled={busy}
+            disabled={busy || !canEdit}
             aria-label={secret.ariaLabel
               ? `${secret.ariaLabel} — ${secret.configured ? t("keys.replace") : t("keys.set")}`
               : (secret.configured ? t("keys.replace") : t("keys.set"))}
@@ -199,6 +200,8 @@ export function ProviderCredentialFields({
   capabilities: {
     editBaseUrl: boolean;
     clearBaseUrl: boolean;
+    /** Omitted preserves existing provider editing behavior. */
+    editSecret?: boolean;
     revealSecret: boolean;
     validateSecret: boolean;
     clearSecret: boolean;
@@ -287,7 +290,7 @@ export function ProviderCredentialFields({
 
   const saveSecret = async () => {
     const value = secretEdit?.trim();
-    if (!value || busy) return;
+    if (!value || busy || capabilities.editSecret === false) return;
     setPending("secret");
     try {
       const result = await onSaveSecret(value);
@@ -406,9 +409,11 @@ export function ProviderCredentialFields({
         editValue={secretEdit}
         revealedValue={revealedSecret}
         busy={isBusy}
+        editDisabled={capabilities.editSecret === false}
+        canEdit={capabilities.editSecret !== false}
         canReveal={capabilities.revealSecret}
         canClear={capabilities.clearSecret}
-        onBeginEdit={() => setSecretEdit("")}
+        onBeginEdit={() => { if (capabilities.editSecret !== false) setSecretEdit(""); }}
         onChange={setSecretEdit}
         onSave={() => void saveSecret()}
         onCancel={cancelSecretEdit}

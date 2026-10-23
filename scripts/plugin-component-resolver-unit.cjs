@@ -18,6 +18,10 @@ const store = new PluginStore({ paths }).open();
 try {
   const source = path.join(temp, "source");
   fs.cpSync(fixture, source, { recursive: true });
+  fs.mkdirSync(path.join(source, "shared"));
+  fs.writeFileSync(path.join(source, "shared", "workflow.md"),
+    "Shared package workflow 😀\n");
+  fs.writeFileSync(path.join(source, "shared", "binary.bin"), Buffer.from([65, 0, 66]));
   const installer = new PluginPackageInstaller({ store });
   const preview = installer.preview(source);
   const installed = installer.install({ sourcePath: source, previewDigest: preview.contentDigest,
@@ -33,6 +37,8 @@ try {
   const stdioInput = inputFor("mcp-server", "local-issues");
   const httpInput = inputFor("mcp-server", "remote-issues");
   assert.throws(() => resolver.inspectSkill(skillInput),
+    (error) => error.code === "PLUGIN_COMPONENT_INACTIVE");
+  assert.throws(() => resolver.inspectPackageResource(skillInput, "shared/workflow.md"),
     (error) => error.code === "PLUGIN_COMPONENT_INACTIVE");
   const enabled = store.setInstallationDesiredState({ installationId: installed.installationId,
     desiredState: "enabled", expectedRevision: installed.revision });
@@ -62,6 +68,31 @@ try {
   const skill = resolver.inspectSkill(skillInput);
   assert.equal(skill.source, "plugin");
   assert.match(skill.content, /issue-summary/u);
+  const resource = resolver.inspectPackageResource(skillInput, "shared/workflow.md");
+  assert.equal(resource.content, "Shared package workflow 😀\n");
+  assert.match(resource.fileHash, /^[a-f0-9]{64}$/u);
+  for (const relativePath of ["../shared/workflow.md", "/private/secret",
+    "skills/other/SKILL.md", "Skills/other/SKILL.md",
+    "skills/issue-summary/SKILL.md", "skills/issue-summary/skill.md",
+    ".codex-plugin/plugin.json", "shared/../shared/workflow.md"] ) {
+    assert.throws(() => resolver.inspectPackageResource(skillInput, relativePath),
+      (error) => error.code === "PLUGIN_COMPONENT_INVALID");
+  }
+  assert.throws(() => resolver.inspectPackageResource(skillInput, "shared/binary.bin"),
+    (error) => error.code === "PACKAGE_CHANGED");
+  const installedRoot = path.join(paths.pluginPackagesDir, installed.releaseDigest);
+  fs.symlinkSync(path.join(source, "shared", "workflow.md"),
+    path.join(installedRoot, "shared", "link.md"));
+  assert.throws(() => resolver.inspectPackageResource(skillInput, "shared/link.md"),
+    (error) => error.code === "PACKAGE_CHANGED");
+  fs.unlinkSync(path.join(installedRoot, "shared", "link.md"));
+  const installedResource = path.join(installedRoot, "shared", "workflow.md");
+  fs.writeFileSync(installedResource, "Mutated workflow\n");
+  assert.throws(() => resolver.inspectPackageResource(skillInput, "shared/workflow.md"),
+    (error) => error.code === "PACKAGE_CHANGED");
+  fs.copyFileSync(path.join(source, "shared", "workflow.md"), installedResource);
+  assert.equal(resolver.inspectPackageResource(skillInput, "shared/workflow.md").content,
+    resource.content);
   const stdio = resolver.inspectMcpServer(stdioInput);
   assert.equal(stdio.transport, "stdio");
   assert.deepEqual(stdio.spec.args, ["--data", "${PLUGIN_DATA}/issues"]);

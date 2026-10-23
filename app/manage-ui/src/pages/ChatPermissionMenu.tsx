@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { ChatPermissionModeOption } from "../types";
+import { displayedPermissionMode } from "../lib/permissionModeText";
 import "./ChatPermissionMenu.css";
 
 export default function ChatPermissionMenu({
@@ -24,7 +25,11 @@ export default function ChatPermissionMenu({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const [popupStyle, setPopupStyle] = useState<CSSProperties>({});
-  const active = options.find((option) => option.id === activeMode) || options[0];
+  const displayedMode = displayedPermissionMode(activeMode);
+  const active = options.find((option) => option.id === activeMode)
+    || options.find((option) => option.id === displayedMode) || options[0];
+  const legacy = options.some(option => option.id === "request-approval")
+    && activeMode !== displayedMode;
 
   useEffect(() => {
     if (!open) return;
@@ -114,7 +119,7 @@ export default function ChatPermissionMenu({
               onClick={() => {
                 setOpen(false);
                 triggerRef.current?.focus();
-                if (option.id !== active.id) onSelect(option);
+                if (option.id !== activeMode) onSelect(option);
               }}
             >
               <span className="permission-menu__copy">
@@ -124,7 +129,10 @@ export default function ChatPermissionMenu({
               {option.id === active.id && <span className="permission-menu__check">✓</span>}
             </button>
           ))}
-          <div className="permission-menu__foot">{t("chat.permissionAppliesNextTurn")}</div>
+          <div className="permission-menu__foot">
+            {legacy && <p>{t("chat.permissionLegacyRetained")}</p>}
+            {t("chat.permissionAppliesNextTurn")}
+          </div>
         </div>,
         document.body,
       )}

@@ -43,11 +43,13 @@ export function PluginDependencyControl({ installationId, componentId, revision,
     } finally { if (generation.current === current) setBusy(false); }
   };
   if (unsupported) return null;
+  // The first pin cannot affect a running server; replacing one needs a disable.
+  const blocked = enabled && state?.status !== "missing";
   return <>
     {state && <span>{state.status === "ready" ? `${state.interpreter} ${state.version} · ${t("plugins.dependencyReady")}`
       : t("plugins.dependencyNeeded")}</span>}
-    {enabled && <span>{t("plugins.dependencyDisableFirst")}</span>}
-    <button className="btn-secondary" type="button" disabled={enabled || disabled || busy} onClick={() => void change("prepare")}>
+    {blocked && <span>{t("plugins.dependencyDisableFirst")}</span>}
+    <button className="btn-secondary" type="button" disabled={blocked || disabled || busy} onClick={() => void change("prepare")}>
       {t("plugins.dependencyPrepare")}
     </button>
     {state && state.revision > 0 && state.status !== "revoked" && <button className="btn-secondary" type="button"

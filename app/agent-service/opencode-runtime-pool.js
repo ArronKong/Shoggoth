@@ -42,7 +42,8 @@ class OpenCodeRuntimePool {
     const workspace = controlInstance ? null : normalizeOpenCodeWorkspace(options.workspace);
     const executionRunId = executionRunIdForPool(options);
     const policy = normalizeOpenCodePermissionPolicy(options.permissionPolicy);
-    const fingerprint = JSON.stringify(policy);
+    const workspaceExecutionVersion = require("./workspace-execution-tools").workspaceAutoExecution(options.executionContract) ? 1 : null;
+    const fingerprint = JSON.stringify([policy, workspaceExecutionVersion]);
     const key = JSON.stringify([profileId, binding.runtimeAccountId,
       controlInstance ? "control" : "execution", workspace, executionRunId]);
     const conflicting = [...this.entries.values()].find(entry => entry.runtimeProfileId === profileId
@@ -70,6 +71,7 @@ class OpenCodeRuntimePool {
     const host = this.hostFactory({ ...this.hostOptions, ...this.options,
       runtimeBinding: binding, runtimeEnvironment, permissionPolicy: policy,
       controlInstance, workspace, mcpExecutionRunId: executionRunId,
+      workspaceExecutionVersion,
       ledgerSlot, paths: this.options.paths ?? this.hostOptions.paths });
     const entry = { host, key, ledgerKey, ledgerSlot, policyFingerprint: fingerprint,
       runtimeProfileId: profileId, runtimeAccountId: binding.runtimeAccountId,

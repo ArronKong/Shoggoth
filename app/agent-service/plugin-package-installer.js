@@ -8,13 +8,41 @@ const { PluginRemoteGitFetcher, identifyRemoteGitSource } = require("./plugin-re
 const { identifyLegacySource, scanLegacySource, materializeLegacySource,
   assertLegacySourceCurrent } = require("./plugin-legacy-source");
 const { previewPluginDirectory } = require("./plugin-package-parser");
+const { isGraphSidecar, materializeGraphSidecar } =
+  require("./plugin-microsoft-graph-sidecar");
+const { PACKAGE_ID: LOVABLE_PACKAGE_ID, materializeLovableOfficialSidecar } =
+  require("./plugin-lovable-official-sidecar");
+const { PACKAGE_ID: HIGGSFIELD_PACKAGE_ID, applyHiggsfieldOfficialOverlay } =
+  require("./plugin-higgsfield-official-overlay");
+const { PACKAGE_ID: SLACK_PACKAGE_ID } = require("./plugin-slack-official-sidecar");
+const { materializeSlackMcpPlugin } = require("./plugin-slack-official-plugin");
+const { PACKAGE_ID: GOG_GMAIL_PACKAGE_ID, SOURCE_IDENTITY: GOG_GMAIL_SOURCE_IDENTITY,
+  materializeGogGmailSidecar } = require("./plugin-gogcli-gmail-sidecar");
+const { PACKAGE_ID: SECURITY_PACKAGE_ID, SOURCE_IDENTITY: SECURITY_SOURCE_IDENTITY,
+  materializeCodexSecurityNativeComponent } = require("./plugin-codex-security-native-component");
 const { serviceError, assertPrivateDirectory } = require("./security");
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const OPERATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const FIRST_PARTY_ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const FIRST_PARTY_COMPONENTS = Object.freeze(["skills", "mcp-servers"]);
 
 function fail(code, message) { throw serviceError(code, message); }
 function hash(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
+function isBundledSidecar(packageId) {
+  return isGraphSidecar(packageId) || packageId === LOVABLE_PACKAGE_ID
+    || packageId === SLACK_PACKAGE_ID || packageId === SECURITY_PACKAGE_ID
+    || packageId === GOG_GMAIL_PACKAGE_ID;
+}
+function materializeBundledSidecar(destination, packageId, digest, bundledCatalog) {
+  if (packageId === SECURITY_PACKAGE_ID) return materializeCodexSecurityNativeComponent(destination, { bundledCatalog });
+  if (packageId === GOG_GMAIL_PACKAGE_ID) return materializeGogGmailSidecar(destination, digest);
+  return packageId === LOVABLE_PACKAGE_ID
+    ? materializeLovableOfficialSidecar(destination, digest)
+    : packageId === SLACK_PACKAGE_ID
+      ? materializeSlackMcpPlugin(destination, digest)
+      : materializeGraphSidecar(destination, packageId, digest);
+}
 function within(root, target) {
   const relative = path.relative(root, target);
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`)
@@ -72,7 +100,8 @@ function writeStagedFile(target, bytes, executable) {
   }
   finally { fs.closeSync(fd); }
 }
-function stagePackage(preview, stagingPath, trustedBundled = false) {
+function stagePackage(preview, stagingPath, trustedBundled = false, allowGraphSidecar = false,
+  nativeSourceIdentity = null) {
   fs.mkdirSync(stagingPath, { mode: 0o700 });
   const directories = new Set([stagingPath]);
   for (const file of preview.files) {
@@ -92,14 +121,14 @@ function stagePackage(preview, stagingPath, trustedBundled = false) {
     fs.chmodSync(directory, 0o700);
     fsyncDirectory(directory);
   }
-  const staged = previewPluginDirectory(stagingPath, { trustedBundled });
+  const staged = previewPluginDirectory(stagingPath, { trustedBundled, allowGraphSidecar, nativeSourceIdentity });
   if (!staged.installable || staged.contentDigest !== preview.contentDigest) {
     fail("PACKAGE_CHANGED", "插件暂存摘要不匹配");
   }
 }
 
 class PluginPackageInstaller {
-  constructor({ store, onPhase = null, remoteGitFetcher = null, bundledCatalog = null } = {}) {
+  constructor({ store, onPhase = null, remoteGitFetcher = null, bundledCatalog = null, firstPartyRoot = null } = {}) {
     if (!store?.paths?.pluginPackagesDir || typeof store.beginInstall !== "function"
       || typeof store.hasPendingInstallationDisable !== "function") {
       throw new TypeError("PluginPackageInstaller requires PluginStore");
@@ -108,6 +137,61 @@ class PluginPackageInstaller {
     this.onPhase = onPhase;
     this.remoteGitFetcher = remoteGitFetcher || new PluginRemoteGitFetcher({ paths: store.paths });
     this.bundledCatalog = bundledCatalog;
+    this.firstPartyRoot = firstPartyRoot;
+  }
+  // First-party packages ship inside the signed App. Their identity is the
+  // directory name, not its path, so moving or updating the App keeps one
+  // installation; contents get the same checks as any user package.
+  _firstPartySource(packageId) {
+    if (!this.firstPartyRoot || typeof packageId !== "string" || !FIRST_PARTY_ID.test(packageId)) {
+      fail("FIRST_PARTY_PLUGIN_NOT_FOUND", "Shoggoth 内置插件不存在");
+    }
+    const sourcePath = path.join(this.firstPartyRoot, packageId);
+    const codex = fs.existsSync(path.join(sourcePath, ".codex-plugin", "plugin.json"));
+    if (!codex && !fs.existsSync(path.join(sourcePath, "plugin.json"))) {
+      fail("FIRST_PARTY_PLUGIN_NOT_FOUND", "Shoggoth 内置插件不存在");
+    }
+    return { sourcePath, codex, sourceIdentity: `first-party:${packageId}` };
+  }
+  previewFirstParty(packageId) {
+    const { sourcePath, codex, sourceIdentity } = this._firstPartySource(packageId);
+    const expectedRevision = this.store.getBySource(sourceIdentity)?.revision || 0;
+    if (!codex) {
+      const { root: _root, ...preview } = previewPluginDirectory(sourcePath);
+      return { ...preview, sourceIdentity, expectedRevision };
+    }
+    const { provenance: _provenance, ...preview } = this.previewLegacy({ sourcePath,
+      format: "codex-plugin", components: FIRST_PARTY_COMPONENTS });
+    return { ...preview, sourceIdentity, expectedRevision };
+  }
+  installFirstParty({ packageId, previewDigest, operationId, expectedRevision, activateOnInstall = false } = {}) {
+    if (!HASH_PATTERN.test(previewDigest) || !OPERATION_PATTERN.test(operationId)
+      || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || typeof activateOnInstall !== "boolean") {
+      fail("PLUGIN_OPERATION_INVALID", "内置插件安装请求无效");
+    }
+    const { sourcePath, codex, sourceIdentity } = this._firstPartySource(packageId);
+    if (!codex) {
+      return this._install({ root: sourcePath, sourceIdentity, previewDigest, operationId,
+        expectedRevision, activateOnInstall });
+    }
+    const source = this._identifyLegacySource({ sourcePath, format: "codex-plugin", components: FIRST_PARTY_COMPONENTS });
+    const fingerprint = hash(JSON.stringify({ sourceIdentity, previewDigest, expectedRevision }));
+    const existing = this.store.beginInstall({ operationId, fingerprint });
+    if (existing.phase === "completed") return existing.result;
+    if (existing.phase === "failed") fail("PLUGIN_OPERATION_FAILED", "此前安装已失败，请新建操作");
+    const temporary = path.join(this.store.paths.pluginStagingDir, `first-party-${crypto.randomUUID()}`);
+    try {
+      const snapshot = scanLegacySource(source);
+      if (!snapshot.conversion.installable) fail("LEGACY_CONTENT_UNSUPPORTED", "所选历史组件无法转换");
+      const materialized = materializeLegacySource(snapshot, temporary);
+      assertLegacySourceCurrent(snapshot);
+      return this._install({ root: materialized.root, sourceIdentity, previewDigest, operationId,
+        expectedRevision, diagnostics: snapshot.conversion.diagnostics,
+        validateSource: () => assertLegacySourceCurrent(snapshot), activateOnInstall });
+    } catch (failure) {
+      if (failure?.code !== "PLUGIN_SIMULATED_CRASH") this.store.markFailed(operationId, failure?.code || "PACKAGE_INVALID");
+      throw failure;
+    } finally { safeRemoveTree(temporary); }
   }
   previewUninstall(input) {
     return this.store.previewInstallationUninstall(input);
@@ -188,6 +272,20 @@ class PluginPackageInstaller {
   previewBundled(packageId) {
     const entry = this.bundledCatalog?.assertCurrent(packageId);
     if (!entry) fail("BUNDLED_PLUGIN_NOT_FOUND", "内置插件不存在");
+    if (isBundledSidecar(packageId)) {
+      const temporary = path.join(this.store.paths.pluginStagingDir,
+        `bundled-sidecar-preview-${crypto.randomUUID()}`);
+      try {
+        materializeBundledSidecar(temporary, packageId, entry.sourceDigest, this.bundledCatalog);
+        const { root: _root, ...preview } = previewPluginDirectory(temporary,
+          { trustedBundled: true, allowGraphSidecar: isGraphSidecar(packageId) ? packageId : false,
+            nativeSourceIdentity: packageId === SECURITY_PACKAGE_ID ? SECURITY_SOURCE_IDENTITY
+              : packageId === GOG_GMAIL_PACKAGE_ID ? GOG_GMAIL_SOURCE_IDENTITY : null });
+        const sourceIdentity = `bundled:${packageId}`;
+        return { ...preview, sourceIdentity,
+          expectedRevision: this.store.getBySource(sourceIdentity)?.revision || 0 };
+      } finally { safeRemoveTree(temporary); }
+    }
     if (entry.importStatus !== "previewable") {
       fail("BUNDLED_PLUGIN_ADAPTER_REQUIRED", "内置插件仍需能力适配");
     }
@@ -199,6 +297,9 @@ class PluginPackageInstaller {
     const temporary = path.join(this.store.paths.pluginStagingDir, `bundled-preview-${crypto.randomUUID()}`);
     try {
       const materialized = materializeLegacySource(snapshot, temporary);
+      if (packageId === HIGGSFIELD_PACKAGE_ID) {
+        applyHiggsfieldOfficialOverlay(materialized.root, entry.sourceDigest);
+      }
       const { root: _root, ...preview } = previewPluginDirectory(materialized.root,
         { trustedBundled: true });
       const sourceIdentity = `bundled:${packageId}`;
@@ -214,8 +315,32 @@ class PluginPackageInstaller {
       fail("PLUGIN_OPERATION_INVALID", "内置插件安装请求无效");
     }
     const entry = this.bundledCatalog?.assertCurrent(packageId);
-    if (!entry || entry.importStatus !== "previewable") {
+    if (!entry || (entry.importStatus !== "previewable" && !isBundledSidecar(packageId))) {
       fail("BUNDLED_PLUGIN_ADAPTER_REQUIRED", "内置插件仍需能力适配");
+    }
+    if (isBundledSidecar(packageId)) {
+      const sourceIdentity = `bundled:${packageId}`;
+      const fingerprint = hash(JSON.stringify({ sourceIdentity, previewDigest, expectedRevision }));
+      const existing = this.store.beginInstall({ operationId, fingerprint });
+      if (existing.phase === "completed") return existing.result;
+      if (existing.phase === "failed") fail("PLUGIN_OPERATION_FAILED", "此前安装已失败，请新建操作");
+      const temporary = path.join(this.store.paths.pluginStagingDir,
+        `bundled-sidecar-${crypto.randomUUID()}`);
+      try {
+        materializeBundledSidecar(temporary, packageId, entry.sourceDigest, this.bundledCatalog);
+        this.bundledCatalog.assertCurrent(packageId);
+        return this._install({ root: temporary, sourceIdentity, previewDigest,
+          operationId, expectedRevision, trustedBundled: true,
+          allowGraphSidecar: isGraphSidecar(packageId) ? packageId : false,
+          activateOnInstall: isGraphSidecar(packageId) || packageId === SECURITY_PACKAGE_ID
+            || packageId === GOG_GMAIL_PACKAGE_ID,
+          validateSource: () => this.bundledCatalog.assertCurrent(packageId) });
+      } catch (failure) {
+        if (failure?.code !== "PLUGIN_SIMULATED_CRASH") {
+          this.store.markFailed(operationId, failure?.code || "PACKAGE_INVALID");
+        }
+        throw failure;
+      } finally { safeRemoveTree(temporary); }
     }
     const source = this._identifyLegacySource({
       sourcePath: this.bundledCatalog.packagePath(packageId), format: "codex-plugin",
@@ -231,6 +356,9 @@ class PluginPackageInstaller {
       const snapshot = scanLegacySource(source);
       if (!snapshot.conversion.installable) fail("BUNDLED_PLUGIN_ADAPTER_REQUIRED", "内置插件仍需能力适配");
       const materialized = materializeLegacySource(snapshot, temporary);
+      if (packageId === HIGGSFIELD_PACKAGE_ID) {
+        applyHiggsfieldOfficialOverlay(materialized.root, entry.sourceDigest);
+      }
       this.onPhase?.("bundled-materialized", { operationId });
       assertLegacySourceCurrent(snapshot);
       this.bundledCatalog.assertCurrent(packageId);
@@ -343,7 +471,7 @@ class PluginPackageInstaller {
   }
   _install({ root, sourceIdentity, previewDigest, operationId, expectedRevision,
     diagnostics = [], validateSource = null, activateOnInstall = false,
-    trustedBundled = false }) {
+    trustedBundled = false, allowGraphSidecar = false }) {
     if (!HASH_PATTERN.test(previewDigest) || !OPERATION_PATTERN.test(operationId)
       || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       fail("PLUGIN_OPERATION_INVALID", "安装请求无效");
@@ -353,9 +481,12 @@ class PluginPackageInstaller {
     if (existingOperation.phase === "completed") return existingOperation.result;
     if (existingOperation.phase === "failed") fail("PLUGIN_OPERATION_FAILED", "此前安装已失败，请新建操作");
     const stagingPath = path.join(this.store.paths.pluginStagingDir, operationId);
+    const nativeSourceIdentity = trustedBundled
+      && [SECURITY_SOURCE_IDENTITY, GOG_GMAIL_SOURCE_IDENTITY].includes(sourceIdentity)
+      ? sourceIdentity : null;
     let published = false;
     try {
-      const parsed = previewPluginDirectory(root, { trustedBundled });
+      const parsed = previewPluginDirectory(root, { trustedBundled, allowGraphSidecar, nativeSourceIdentity });
       const preview = { ...parsed, diagnostics: [...diagnostics, ...parsed.diagnostics] };
       if (!preview.installable || preview.contentDigest !== previewDigest) {
         fail("PACKAGE_CHANGED", "插件与预览不一致或包含不安全路径");
@@ -376,12 +507,12 @@ class PluginPackageInstaller {
         fail("PLUGIN_ROLLBACK_REQUIRES_PREVIEW", "恢复已使用的代码版本须先核对数据回退预览");
       }
       safeRemoveTree(stagingPath);
-      stagePackage(preview, stagingPath, trustedBundled);
+      stagePackage(preview, stagingPath, trustedBundled, allowGraphSidecar, nativeSourceIdentity);
       this.onPhase?.("staged", { operationId });
       validateSource?.();
       const packagePath = path.join(this.store.paths.pluginPackagesDir, preview.contentDigest);
       if (fs.existsSync(packagePath)) {
-        const existing = previewPluginDirectory(packagePath, { trustedBundled });
+        const existing = previewPluginDirectory(packagePath, { trustedBundled, allowGraphSidecar, nativeSourceIdentity });
         if (!existing.installable || existing.contentDigest !== preview.contentDigest) {
           fail("PACKAGE_INVALID", "已有同摘要包目录不匹配");
         }

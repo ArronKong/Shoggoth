@@ -2,9 +2,16 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+
+// The packaged App keeps these sources inside app.asar, which the plain Node
+// child cannot import: record what the child is given.
+const launches = [];
+const execFile = childProcess.execFile;
+childProcess.execFile = (file, args, ...rest) => { launches.push(args); return execFile(file, args, ...rest); };
 const { projectKeyDigests, readCanonicalKeyDigests } = require("../app/core/openclaw-key-digests");
 
 const config = { models: { providers: {
@@ -40,6 +47,10 @@ const expected = new Map([
     const sdk = path.join(home, "fixture-sdk.mjs");
     fs.writeFileSync(sdk, `export function loadAuthProfileStoreForSecretsRuntime() { return ${JSON.stringify(store)}; }`);
     assert.deepEqual(await readCanonicalKeyDigests({ sdk, home, agentId: "main" }), expected);
+    const [, script, ...argv] = launches[0].slice(launches[0].indexOf("-e"));
+    const appRoot = path.resolve(__dirname, "..", "app");
+    assert.equal(argv.some(arg => path.resolve(arg).startsWith(appRoot)), false, "no App file reaches the child");
+    assert.deepEqual(script.match(/import\(/g), ["import("], "the SDK is the only module the child imports");
     fs.writeFileSync(sdk, 'throw new Error("private-error-must-not-leak");');
     await assert.rejects(readCanonicalKeyDigests({ sdk, home, agentId: "main" }),
       error => error.message === "Provider key previews unavailable" && !JSON.stringify(error).includes("private-error"));

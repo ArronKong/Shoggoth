@@ -1,0 +1,140 @@
+import path from "node:path";
+import { FsSafeError } from "./errors.js";
+import { hasWindowsDrivePrefix, rootedWindowsDriveColonIndex, windowsNamespaceMarker, windowsSegmentsClimbAbove, windowsShareOrDeviceRoot, } from "./windows-path-syntax.js";
+function isExactlyUnderWindowsPath(trusted, value) {
+    const root = trusted.replaceAll("/", "\\").replace(/(?<=.)\\+$/, "");
+    const candidate = value.replaceAll("/", "\\");
+    if (candidate !== root && !candidate.startsWith(root.endsWith("\\") ? root : `${root}\\`))
+        return false;
+    return !windowsSegmentsClimbAbove(candidate.slice(root.length).split("\\"));
+}
+/**
+ * True when a Windows path could reach a UNC share or device namespace that
+ * none of the trusted boundary paths live on: its share or device differs from
+ * theirs or cannot be identified from its spelling, and it is not spelled
+ * exactly under one of them. Reject such input before any filesystem call:
+ * even lstat on `\\host\share\x` makes Windows contact host.
+ */
+export function isForeignWindowsShareOrDevicePath(value, trustedPaths, platform = process.platform) {
+    if (platform !== "win32")
+        return false;
+    const key = windowsShareOrDeviceRoot(value);
+    if (key === undefined)
+        return false;
+    return !trustedPaths.some(trusted => trusted !== undefined && ((key !== null && windowsShareOrDeviceRoot(trusted) === key) || isExactlyUnderWindowsPath(trusted, value)));
+}
+function isBareWindowsNamespaceDrive(value) {
+    return value.length === 6 && windowsNamespaceMarker(value) !== undefined &&
+        hasWindowsDrivePrefix(value, 4);
+}
+/**
+ * Capture an ordinary Windows drive-relative path without normalizing its raw
+ * suffix. This is only for public APIs whose existing contract accepts such
+ * paths; callers must still run namespace-alias admission on the result.
+ */
+export function anchorWindowsDriveRelativePath(value) {
+    if (process.platform !== "win32" || path.isAbsolute(value))
+        return value;
+    if (!hasWindowsDrivePrefix(value)) {
+        return value;
+    }
+    const drive = value.slice(0, 2);
+    const base = path.resolve(drive);
+    return `${base}${path.sep}${value.slice(2)}`;
+}
+/**
+ * Resolve a path without letting Node erase the separator from an exact
+ * extended-length drive root such as `\\?\C:\`. Bare `\\?\C:` input remains
+ * unchanged so the surrounding alias admission rejects it.
+ */
+export function resolvePathPreservingWindowsRoot(value) {
+    if (value.length === 7 &&
+        process.platform === "win32" &&
+        rootedWindowsDriveColonIndex(value) === 5) {
+        return value.includes("/") ? value.replaceAll("/", "\\") : value;
+    }
+    const resolved = path.resolve(value);
+    return repairResolvedWindowsRoot(value, resolved);
+}
+/**
+ * Preserve a namespaced drive root after a caller has already resolved the
+ * input. This lets admission fast paths keep exactly one live path.resolve
+ * call while retaining the same root-repair behavior as the general helper.
+ */
+export function repairResolvedWindowsRoot(value, resolved) {
+    if (resolved.length === 6 &&
+        process.platform === "win32" &&
+        isBareWindowsNamespaceDrive(resolved) &&
+        !hasWindowsPathAlias(value, "filesystem")) {
+        return `${resolved}\\`;
+    }
+    return resolved;
+}
+/**
+ * Resolve path segments against a base while preserving a namespaced drive
+ * root when Node normalizes a legitimate rooted input back to that root.
+ * Raw bare namespace drives stay bare so admission checks still reject them.
+ */
+export function resolvePathFromBasePreservingWindowsRoot(base, ...segments) {
+    const resolved = path.resolve(base, ...segments);
+    if (resolved.length !== 6 ||
+        process.platform !== "win32" ||
+        !isBareWindowsNamespaceDrive(resolved)) {
+        return resolved;
+    }
+    if (hasWindowsPathAlias(base, "filesystem") ||
+        segments.some((segment) => hasWindowsPathAlias(segment, "filesystem"))) {
+        return resolved;
+    }
+    return `${resolved}\\`;
+}
+/**
+ * Adapt an admitted namespaced drive root for Node's Windows filesystem layer.
+ * Node removes the root separator from these paths during filesystem dispatch,
+ * so use the equivalent ordinary drive root for the operation. This is not an
+ * admission check: callers must validate attacker-controlled input first.
+ */
+export function pathForWindowsFilesystem(value) {
+    if (process.platform !== "win32" ||
+        rootedWindowsDriveColonIndex(value) !== 5) {
+        return value;
+    }
+    if (value.length === 7) {
+        return `${value[4]}:\\`;
+    }
+    const resolved = path.resolve(value);
+    if (isBareWindowsNamespaceDrive(resolved) &&
+        !hasWindowsPathAlias(value, "filesystem")) {
+        return `${resolved[4]}:\\`;
+    }
+    return value;
+}
+/** Returns true when a Windows pathname can address an alternate filesystem namespace. */
+export function hasWindowsPathAlias(value, kind, platform = process.platform) {
+    if (platform !== "win32")
+        return false;
+    const firstColon = value.indexOf(":");
+    if (firstColon === -1)
+        return false;
+    if (kind === "relative")
+        return true;
+    return firstColon !== rootedWindowsDriveColonIndex(value) || value.indexOf(":", firstColon + 1) !== -1;
+}
+export function assertNoWindowsPathAliasForPlatform(value, kind, message, platform) {
+    if (hasWindowsPathAlias(value, kind, platform)) {
+        throw new FsSafeError("invalid-path", message, {
+            details: { reason: "windows-path-alias" },
+        });
+    }
+}
+export function assertNoWindowsPathAlias(value, kind = "filesystem", message = "path uses a Windows filesystem namespace alias", platform = process.platform) {
+    assertNoWindowsPathAliasForPlatform(value, kind, message, platform);
+}
+export function isWindowsPathAliasError(error) {
+    return error instanceof FsSafeError && error.details?.reason === "windows-path-alias";
+}
+export function admitStandalonePublicationPath(value, message) {
+    const admittedPath = anchorWindowsDriveRelativePath(value);
+    assertNoWindowsPathAlias(admittedPath, "filesystem", message);
+    return admittedPath;
+}

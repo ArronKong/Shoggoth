@@ -290,9 +290,16 @@ test("native history without any product checkpoint is renewed after each correc
     assert.equal(store.nativeSessionStale(profileId, sessionId, "native-1", "binding"), false);
     const blue = f.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
       content: "用户喜欢蓝色", sourceRefs: ["user-1"], classification: "explicit" });
-    assert.equal(store.nativeSessionStale(profileId, sessionId, "native-1", "binding"), true);
-    assert.equal(store.recordNativeSession(profileId, sessionId, "native-2", "binding", initial), false,
+    assert.equal(store.nativeSessionStale(profileId, sessionId, "native-1", "binding"), false,
+      "a new memory item reaches the native session through the current memory block");
+    assert.equal(store.recordNativeSession(profileId, sessionId, "native-1", "binding", initial), false,
       "a stale execution contract cannot launder an older native thread");
+    assert.equal(store.recordNativeSession(profileId, sessionId, "native-1", "binding",
+      store.nativeMemoryVersion(profileId)), true, "the same native session continues after an addition");
+    f.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+      content: "用户喜欢红色", sourceRefs: ["user-2"], classification: "explicit", supersedes: blue.id });
+    assert.equal(store.nativeSessionStale(profileId, sessionId, "native-1", "binding"), true,
+      "a correction retires history that may contain the old fact");
     const updated = store.nativeMemoryVersion(profileId);
     assert.equal(store.recordNativeSession(profileId, sessionId, "native-2", "binding", updated), true);
     assert.equal(store.nativeSessionStale(profileId, sessionId, "native-2", "binding"), false);
@@ -310,6 +317,66 @@ test("native history without any product checkpoint is renewed after each correc
     fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace('"native-3"', '"native-4"'));
     assert.throws(() => store.nativeSessionStale(profileId, sessionId, "native-3", "binding"),
       { code: "CHECKPOINT_STORE_CORRUPT" });
+  } finally { store.close(); f.cleanup(); }
+});
+
+test("version 2 native anchors stay valid after upgrade and keep the full-revision check", () => {
+  const f = contextFixture();
+  const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts,
+    memoryStore: f.memoryStore, recallPolicy: f.memoryEngine.recallPolicy });
+  store.open();
+  try {
+    const profileId = f.profile.id, sessionId = f.transcriptSessionId;
+    const crypto = require("node:crypto");
+    const stable = value => Array.isArray(value) ? `[${value.map(stable).join(",")}]`
+      : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`
+      : JSON.stringify(value);
+    const file = path.join(f.paths.agentsDir, profileId, "conversation-checkpoints",
+      `${crypto.createHash("sha256").update(sessionId).digest("hex")}.native-memory-anchor.json`);
+    const downgrade = () => {
+      const { checksum, memoryInvalidationRevision, ...body } = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert.equal(body.version, 3);
+      const old = { ...body, version: 2 };
+      fs.writeFileSync(file, `${stable({ ...old, checksum: crypto.createHash("sha256").update(stable(old)).digest("hex") })}\n`);
+    };
+    assert.equal(store.recordNativeSession(profileId, sessionId, "native-1", "binding", store.nativeMemoryVersion(profileId)), true);
+    downgrade();
+    assert.equal(store.nativeSessionStale(profileId, sessionId, "native-1", "binding"), false,
+      "an unchanged memory state does not retire every session at upgrade");
+    assert.equal(store.recordNativeSession(profileId, sessionId, "native-1", "binding", store.nativeMemoryVersion(profileId)), true);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).version, 3, "the next turn upgrades the anchor");
+    downgrade();
+    f.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+      content: "用户喜欢蓝色", sourceRefs: ["user-1"], classification: "explicit" });
+    assert.equal(store.nativeSessionStale(profileId, sessionId, "native-1", "binding"), true,
+      "a version 2 anchor cannot tell an addition from a correction");
+  } finally { store.close(); f.cleanup(); }
+});
+
+test("a product checkpoint and its native session survive a memory addition but not a correction", () => {
+  const f = contextFixture();
+  const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts,
+    memoryStore: f.memoryStore, recallPolicy: f.memoryEngine.recallPolicy });
+  store.open();
+  try {
+    const profileId = f.profile.id, sessionId = f.transcriptSessionId;
+    f.append({ id: "user-1", kind: "user", content: { text: "继续" } });
+    const blue = f.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+      content: "用户喜欢蓝色", sourceRefs: ["user-1"], classification: "explicit" });
+    const saved = checkpoint(f, store, "用户喜欢蓝色");
+    f.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+      content: "新闻要写日期和来源", sourceRefs: ["user-2"], classification: "explicit" });
+    assert.equal(store.compatible(profileId, sessionId)?.id, saved.id, "an addition leaves the summary valid");
+    assert.equal(store.invalidation(profileId, sessionId, "native-1", "binding"), null);
+    f.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+      content: "用户喜欢红色", sourceRefs: ["user-3"], classification: "explicit", supersedes: blue.id });
+    assert.equal(store.compatible(profileId, sessionId), null);
+    const first = store.invalidation(profileId, sessionId, "native-1", "binding");
+    assert.equal(first.nativeSessionId, "native-1");
+    f.memoryEngine.propose({ profileId, scope: "user", type: "semantic",
+      content: "新闻要附原文链接", sourceRefs: ["user-4"], classification: "explicit" });
+    assert.deepEqual(store.invalidation(profileId, sessionId, "native-2", "binding"), first,
+      "a later addition does not retire the replacement native session again");
   } finally { store.close(); f.cleanup(); }
 });
 

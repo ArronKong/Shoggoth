@@ -6,6 +6,7 @@ const RUNTIME_CAPABILITY_KEYS = Object.freeze([
   "session.start",
   "session.resume",
   "session.read",
+  "session.read.scoped",
   "session.list",
   "session.rename",
   "session.archive",
@@ -26,7 +27,11 @@ const RUNTIME_CAPABILITY_KEYS = Object.freeze([
   "context.usage.estimated",
   "context.compact.native",
   "context.compact.auto",
+  "model.session.release",
   "model.generate.toolFree",
+  "model.generate.settings",
+  "model.resolve.toolFree",
+  "model.resolve.explicit",
 ]);
 
 function runtimeError(code, message) {
@@ -112,6 +117,21 @@ function authenticationState(status) {
   return Object.freeze({ status });
 }
 
+function authenticationReadError(cause) {
+  const error = runtimeError("RUNTIME_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
+  // Preserve only a trusted own code, never a getter or upstream error text.
+  let code;
+  try {
+    const descriptor = cause && (typeof cause === "object" || typeof cause === "function")
+      ? Object.getOwnPropertyDescriptor(cause, "code") : null;
+    if (descriptor && Object.prototype.hasOwnProperty.call(descriptor, "value")) code = descriptor.value;
+  } catch {}
+  if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,95}$/u.test(code)) {
+    Object.defineProperty(error, "cause", { value: Object.freeze({ code }) });
+  }
+  return error;
+}
+
 async function readRuntimeAuthenticationState(handle, { allowDeferred = false } = {}) {
   if (!handle || (typeof handle !== "object" && typeof handle !== "function")) {
     throw runtimeError("RUNTIME_AUTH_STATUS_INVALID", "Runtime auth status is invalid");
@@ -128,8 +148,8 @@ async function readRuntimeAuthenticationState(handle, { allowDeferred = false } 
     let raw;
     try {
       raw = await accountRead.call(handle, { refreshToken: false });
-    } catch {
-      throw runtimeError("RUNTIME_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
+    } catch (error) {
+      throw authenticationReadError(error);
     }
     const account = ownDataValue(raw, "account");
     const requiresOpenaiAuth = ownDataValue(raw, "requiresOpenaiAuth");
@@ -144,8 +164,8 @@ async function readRuntimeAuthenticationState(handle, { allowDeferred = false } 
     let raw;
     try {
       raw = await runtimeAuthenticationState.call(handle, { allowDeferred });
-    } catch {
-      throw runtimeError("RUNTIME_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
+    } catch (error) {
+      throw authenticationReadError(error);
     }
     // An adapter may let its executing CLI authenticate the request instead
     // of doing a second network login check. Settings still require an actual

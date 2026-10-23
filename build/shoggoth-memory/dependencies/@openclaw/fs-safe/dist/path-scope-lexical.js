@@ -1,0 +1,40 @@
+import path from "node:path";
+import { isPathInside, isPathRelativeEscape } from "./path.js";
+import { hasWindowsPathAlias, isForeignWindowsShareOrDevicePath, resolvePathFromBasePreservingWindowsRoot, } from "./windows-path-alias.js";
+function pathStaysWithinRoot(rootDir, candidatePath) {
+    if (process.platform !== "win32") {
+        return candidatePath !== rootDir && isPathInside(rootDir, candidatePath);
+    }
+    // path.relative folds Unicode case, so it alone could admit another host.
+    if (isForeignWindowsShareOrDevicePath(candidatePath, [rootDir]))
+        return false;
+    const relative = path.relative(rootDir, candidatePath);
+    return Boolean(relative) && !isPathRelativeEscape(relative);
+}
+export function resolvePathWithinNormalizedRoot(params, root) {
+    const requestedPath = params.requestedPath;
+    const defaultFileName = params.defaultFileName;
+    const scopeLabel = params.scopeLabel;
+    if (hasWindowsPathAlias(params.rootDir, "filesystem") ||
+        hasWindowsPathAlias(root, "filesystem") ||
+        hasWindowsPathAlias(requestedPath, "filesystem") ||
+        (defaultFileName !== undefined && hasWindowsPathAlias(defaultFileName, "filesystem"))) {
+        return { ok: false, error: `Invalid path: must stay within ${scopeLabel}` };
+    }
+    const raw = requestedPath.trim();
+    if (!raw) {
+        if (!defaultFileName) {
+            return { ok: false, error: "path is required" };
+        }
+        const defaultPath = resolvePathFromBasePreservingWindowsRoot(root, defaultFileName);
+        if (hasWindowsPathAlias(defaultPath, "filesystem") || !pathStaysWithinRoot(root, defaultPath)) {
+            return { ok: false, error: `Invalid path: must stay within ${scopeLabel}` };
+        }
+        return { ok: true, path: defaultPath };
+    }
+    const resolved = resolvePathFromBasePreservingWindowsRoot(root, raw);
+    if (hasWindowsPathAlias(resolved, "filesystem") || !pathStaysWithinRoot(root, resolved)) {
+        return { ok: false, error: `Invalid path: must stay within ${scopeLabel}` };
+    }
+    return { ok: true, path: resolved };
+}

@@ -473,6 +473,169 @@ test("批量不能同时全局启用同一 Skill 的两个版本，并立即回�
   } finally { value.cleanup(); }
 });
 
+test("通用 SKILL.md 目录保留宿主 metadata 与附属文件，重启后仍可读取", () => {
+  const value = fixture();
+  try {
+    const source = path.join(value.root, "portable-skill");
+    fs.mkdirSync(path.join(source, "templates"), { recursive: true });
+    const content = "---\nname: portable-skill\ndescription: >-\n  Portable workflow with host metadata.\nmetadata:\n  openclaw:\n    requires:\n      bins: [npx]\n      env: [MEITUAN_HT_TOKEN]\n  hermes:\n    tags: [travel]\nallowed-tools: Bash(npx:*) Read\n---\n\n# Workflow\nRead templates/request.json.\n";
+    fs.writeFileSync(path.join(source, "SKILL.md"), content);
+    fs.writeFileSync(path.join(source, "channel.json"), '{"channel":"developer"}\n');
+    fs.writeFileSync(path.join(source, "templates/request.json"), '{"query":"hotel"}\n');
+    fs.writeFileSync(path.join(source, "LICENSE.txt"), "Example license\n");
+    value.store.open(["profile-a", "profile-b"]);
+    const installed = value.store.installGlobalFromDirectory({ sourcePath: source,
+      expectedRevision: 1, operationId: "install-portable-directory", profileIds: ["profile-a", "profile-b"] });
+    assert.equal(installed.complete, true);
+    assert.equal(installed.package.name, "portable-skill");
+    assert.match(installed.package.version, /^0\.0\.0-import\.[a-f0-9]+$/u);
+    assert.deepEqual(installed.package.requiredTools, [], "allowed-tools must not grant product permissions");
+    assert.equal(fs.existsSync(path.join(source, "skill.json")), false, "the downloaded package stays unchanged");
+    const read = () => value.store.read({ profileId: "profile-a", name: "portable-skill",
+      contentHash: installed.package.contentHash });
+    assert.equal(read().content, content);
+    assert.equal(value.store.catalog("profile-a").registryVersion, installed.revision);
+    value.store.close();
+    value.store.open(["profile-a", "profile-b"]);
+    assert.equal(read().content, content);
+    for (const relativePath of ["channel.json", "templates/request.json", "LICENSE.txt"]) {
+      assert.equal(value.store.readEnabledFile({ profileId: "profile-b", name: "portable-skill",
+        contentHash: installed.package.contentHash, relativePath }).content,
+      fs.readFileSync(path.join(source, relativePath), "utf8"));
+    }
+  } finally { value.cleanup(); }
+});
+
+test("通用 ZIP 与目录内容一致，忽略 macOS 包装文件并支持单个 SKILL.md", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const source = path.join(value.root, "portable-zip");
+    fs.mkdirSync(source);
+    const content = "\uFEFF---\r\nname: portable-zip\r\ndescription: Portable ZIP workflow.\r\n---\r\n\r\n# Workflow\r\n";
+    fs.writeFileSync(path.join(source, "SKILL.md"), content);
+    fs.writeFileSync(path.join(source, "channel.json"), '{"channel":"developer"}');
+    fs.writeFileSync(path.join(source, ".DS_Store"), "macOS metadata");
+    const archive = path.join(value.root, "portable.zip");
+    writeStoredZip(archive, [
+      { name: "portable-zip/SKILL.md", bytes: content },
+      { name: "portable-zip/channel.json", bytes: '{"channel":"developer"}' },
+      { name: "portable-zip/.DS_Store", bytes: "macOS metadata" },
+      { name: "__MACOSX/._portable-zip", bytes: "AppleDouble" },
+      { name: "__MACOSX/portable-zip/._SKILL.md", bytes: "AppleDouble" },
+    ]);
+    const zipped = value.store.installFromDirectory({ sourcePath: archive, expectedRevision: 1,
+      operationId: "install-portable-zip" });
+    const directory = value.store.installFromDirectory({ sourcePath: source, expectedRevision: zipped.revision,
+      operationId: "install-portable-directory-again" });
+    assert.equal(directory.package.contentHash, zipped.package.contentHash);
+    assert.equal(directory.revision, zipped.revision, "reinstalling the same content is idempotent");
+    assert.equal(fs.readdirSync(value.paths.skillStagingDir).length, 0);
+    const single = value.store.installFromDirectory({ sourcePath: path.join(source, "SKILL.md"),
+      expectedRevision: directory.revision, operationId: "install-portable-markdown" });
+    assert.notEqual(single.package.version, zipped.package.version, "single-file content has its own version");
+    const rootArchive = path.join(value.root, "root.zip");
+    writeStoredZip(rootArchive, [{ name: "SKILL.md", bytes: content }]);
+    const root = value.store.installFromDirectory({ sourcePath: rootArchive, expectedRevision: single.revision,
+      operationId: "install-portable-root-zip" });
+    assert.equal(root.package.contentHash, single.package.contentHash);
+    assert.equal(fs.readdirSync(value.paths.skillStagingDir).length, 0);
+  } finally { value.cleanup(); }
+});
+
+test("未声明版本的通用 Skill 更新获得内容版本，旧内容仍可校验", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const source = path.join(value.root, "portable-update");
+    fs.mkdirSync(source);
+    const document = "---\nname: portable-update\ndescription: An updatable portable workflow.\n---\n\n";
+    fs.writeFileSync(path.join(source, "SKILL.md"), `${document}First instructions.\n`);
+    const first = value.store.installGlobalFromDirectory({ sourcePath: source, expectedRevision: 1,
+      operationId: "portable-update-first", profileIds: ["profile-a"] });
+    fs.writeFileSync(path.join(source, "SKILL.md"), `${document}Second instructions.\n`);
+    const second = value.store.installGlobalFromDirectory({ sourcePath: source, expectedRevision: first.revision,
+      operationId: "portable-update-second", profileIds: ["profile-a"] });
+    assert.notEqual(first.package.version, second.package.version);
+    assert.equal(value.store.catalog("profile-a").items[0].version, second.package.version);
+    value.store.close();
+    value.store.open(["profile-a"]);
+    assert.equal(value.store.list("profile-a").items.length, 2);
+    assert.match(value.store.read({ profileId: "profile-a", name: "portable-update" }).content, /Second instructions/);
+    assert.throws(() => value.store.installFromDirectory({ sourcePath: source, expectedRevision: first.revision,
+      operationId: "portable-stale-revision" }), { code: "SKILL_REGISTRY_REVISION_CONFLICT" });
+  } finally { value.cleanup(); }
+});
+
+test("通用 frontmatter 无效或依赖声明无效时拒绝导入，显式 skill.json 仍严格校验", () => {
+  for (const frontmatter of ["name: missing-description", "name: invalid name\ndescription: test",
+    "name: duplicate\nname: duplicate\ndescription: test", "name: invalid-dependencies\ndescription: test\nx-shoggoth:\n  requiredTools: [42]"]) {
+    const value = fixture();
+    try {
+      const source = path.join(value.root, "invalid-portable");
+      fs.mkdirSync(source);
+      fs.writeFileSync(path.join(source, "SKILL.md"), `---\n${frontmatter}\n---\n\nInstructions.\n`);
+      value.store.open(["profile-a"]);
+      assert.throws(() => value.store.installFromDirectory({ sourcePath: source, expectedRevision: 1,
+        operationId: "reject-portable-frontmatter" }), { code: "SKILL_MANIFEST_INVALID" });
+      assert.equal(value.store.revision, 1);
+    } finally { value.cleanup(); }
+  }
+});
+
+test("通用 Skill 的显式 x-shoggoth 依赖仍受权限和 Runtime 能力约束", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    const source = path.join(value.root, "portable-requirements");
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, "SKILL.md"), "---\nname: portable-requirements\ndescription: Workflow with explicit dependencies.\nversion: 1.2.3\nx-shoggoth:\n  requiredTools: [kanban_get_card]\n  requiredRuntimeCapabilities: [filesystem]\n---\n\nInstructions.\n");
+    const installed = value.store.installGlobalFromDirectory({ sourcePath: source, expectedRevision: 1,
+      operationId: "install-portable-requirements", profileIds: ["profile-a"] });
+    assert.equal(installed.package.version, "1.2.3");
+    assert.deepEqual(installed.package.requiredTools, ["kanban_get_card"]);
+    assert.deepEqual(installed.package.requiredRuntimeCapabilities, ["filesystem"]);
+    assert.equal(value.store.catalog("profile-a").ineligible[0].reason, "tool_missing");
+    const tools = { availableTools: ["kanban_get_card"], allowedTools: ["kanban_get_card"] };
+    assert.equal(value.store.catalog("profile-a", tools).ineligible[0].reason, "runtime_capability_missing");
+    assert.equal(value.store.catalog("profile-a", { ...tools, runtimeCapabilities: ["filesystem"] }).items.length, 1);
+  } finally { value.cleanup(); }
+});
+
+test("通用包的任意附属目录仍拒绝 secret、symlink、hardlink 和路径穿越", () => {
+  for (const kind of ["secret", "symlink", "hardlink", "traversal"]) {
+    const value = fixture();
+    try {
+      value.store.open(["profile-a"]);
+      const source = path.join(value.root, "portable-hostile");
+      fs.mkdirSync(path.join(source, "templates"), { recursive: true });
+      const document = "---\nname: portable-hostile\ndescription: Security regression fixture.\n---\n\nInstructions.\n";
+      fs.writeFileSync(path.join(source, "SKILL.md"), document);
+      let code;
+      let input = source;
+      if (kind === "secret") {
+        fs.writeFileSync(path.join(source, "templates/settings.json"), 'OPENAI_API_KEY=sk-secretsecretsecretsecret\n');
+        code = "SKILL_SECRET_REJECTED";
+      } else if (kind === "symlink") {
+        fs.symlinkSync(path.join(source, "SKILL.md"), path.join(source, "templates/outside.md"));
+        code = "UNSAFE_SYMLINK";
+      } else if (kind === "hardlink") {
+        fs.linkSync(path.join(source, "SKILL.md"), path.join(source, "templates/duplicate.md"));
+        code = "UNSAFE_HARDLINK";
+      } else {
+        input = path.join(value.root, "portable-hostile.zip");
+        writeStoredZip(input, [{ name: "SKILL.md", bytes: document },
+          { name: "__MACOSX/../escape", bytes: "bad" }]);
+        code = "SKILL_PATH_INVALID";
+      }
+      assert.throws(() => value.store.installFromDirectory({ sourcePath: input, expectedRevision: 1,
+        operationId: `reject-portable-${kind}` }), { code });
+      assert.equal(value.store.revision, 1);
+      assert.equal(fs.readdirSync(value.paths.skillStagingDir).length, 0);
+    } finally { value.cleanup(); }
+  }
+});
+
 test("ZIP 安装支持单层包装目录并拒绝路径穿越与 symlink 条目", () => {
   const manifest = JSON.stringify({
     schemaVersion: 1,
@@ -611,6 +774,23 @@ test("Profile 启用、版本锁定和依赖解析彼此隔离", () => {
       profileId: "profile-a", skillId: "careful-review", source: "user", version: "1.0.0",
       enabled: false, expectedRevision: 1,
     }), (error) => error.code === "SKILL_PROFILE_REVISION_CONFLICT");
+  } finally { value.cleanup(); }
+});
+
+test("普通预算和数字不是 Skill 调用，混合输入仍识别真实 Skill", () => {
+  const value = fixture();
+  try {
+    value.store.open(["profile-a"]);
+    for (const query of ["Budget is $300; no purchases.", "$84,024 $2,754 $110 $1 $7 $83", "$300.50 / $300-$400"]) {
+      assert.deepEqual(value.store.select("profile-a", query).selected, []);
+    }
+    const source = packageDir(value.root, { name: "3d-review" });
+    value.store.installFromDirectory({ sourcePath: source, expectedRevision: value.store.revision, operationId: "install-budget-review" });
+    value.store.setProfileSkill({ profileId: "profile-a", skillId: "3d-review", source: "user", version: "1.0.0",
+      enabled: true, expectedRevision: value.store.list("profile-a").profileRevision });
+    assert.deepEqual(value.store.select("profile-a", "Use $3d-review with a $300 budget").selected.map(item => item.name), ["3d-review"]);
+    assert.throws(() => value.store.select("profile-a", "$missing-review"), { code: "SKILL_NOT_FOUND" });
+    assert.throws(() => value.store.select("profile-a", "$a $b $c $d $e $300"), { code: "SKILL_SELECTION_LIMIT" });
   } finally { value.cleanup(); }
 });
 
@@ -782,6 +962,12 @@ test("外部宿主只读取全局安装的独立 Skill，撤权和文件变化�
       version: descriptor.version, contentHash: descriptor.contentHash,
       registryRevision: descriptor.registryRevision,
       relativePath: "references/guide.md" }).content, "Reference fixture\n");
+    assert.equal(value.store.readEnabledFile({ profileId: "profile-a",
+      name: descriptor.name, contentHash: descriptor.contentHash,
+      relativePath: "references/guide.md" }).content, "Reference fixture\n");
+    assert.throws(() => value.store.readEnabledFile({ profileId: "profile-a",
+      name: descriptor.name, contentHash: "f".repeat(64),
+      relativePath: "references/guide.md" }), { code: "SKILL_REVISION_CHANGED" });
     const installedReference = path.join(value.paths.skillPackagesDir, descriptor.id,
       descriptor.version, "references", "guide.md");
     const originalReference = fs.readFileSync(installedReference);
@@ -789,6 +975,9 @@ test("外部宿主只读取全局安装的独立 Skill，撤权和文件变化�
     assert.throws(() => value.store.readGlobalEnabledFile({ skillId: descriptor.id,
       version: descriptor.version, contentHash: descriptor.contentHash,
       registryRevision: descriptor.registryRevision,
+      relativePath: "references/guide.md" }), { code: "SKILL_PACKAGE_CHANGED" });
+    assert.throws(() => value.store.readEnabledFile({ profileId: "profile-a",
+      name: descriptor.name, contentHash: descriptor.contentHash,
       relativePath: "references/guide.md" }), { code: "SKILL_PACKAGE_CHANGED" });
     fs.writeFileSync(installedReference, originalReference);
     assert.throws(() => value.store.readGlobalEnabledFile({ skillId: descriptor.id,
@@ -814,6 +1003,9 @@ test("外部宿主只读取全局安装的独立 Skill，撤权和文件变化�
       version: global.package.version, source: "user", enabled: false,
       expectedRevision: value.store.revision });
     assert.deepEqual(value.store.listGlobalEnabled(), []);
+    assert.throws(() => value.store.readEnabledFile({ profileId: "profile-a",
+      name: descriptor.name, contentHash: descriptor.contentHash,
+      relativePath: "references/guide.md" }), { code: "SKILL_NOT_ENABLED" });
     assert.throws(() => value.store.readGlobalEnabled({ skillId: descriptor.id,
       version: descriptor.version, contentHash: descriptor.contentHash,
       registryRevision: descriptor.registryRevision }), { code: "SKILL_REVISION_CHANGED" });

@@ -56,6 +56,23 @@ function testCronActivityShape() {
   assert.notEqual(a.id, b.id);
 }
 
+function testCronIdentitySurvivesExecutionStart() {
+  for (const backendId of ["shoggoth", "hermes", "openclaw"]) {
+    for (const identity of [{ runId: "execution-1" }, { id: "execution-1" }]) {
+      const pending = { backendId, jobId: "daily", ...identity, startedAt: T0, status: "running" };
+      const running = { ...pending, startedAt: T0 + 5000 };
+      const completed = { ...running, finishedAt: T0 + 9000, status: "ok" };
+      const id = cronRunToActivity(pending).id;
+      assert.equal(cronRunToActivity(running).id, id, "Starting an admitted execution must not create another activity");
+      assert.equal(cronRunToActivity(completed).id, id, "Completion must update the original activity");
+      assert.notEqual(cronRunToActivity({ ...completed, ...Object.fromEntries(Object.keys(identity).map(key => [key, "execution-2"])) }).id, id,
+        "Distinct executions of the same job remain separate, even at the same timestamp");
+      assert.notEqual(cronRunToActivity({ ...completed, jobId: "another-job" }).id, id);
+      assert.notEqual(cronRunToActivity({ ...completed, backendId: "another-backend" }).id, id);
+    }
+  }
+}
+
 // ---------- OpenClaw workboard ----------
 
 const OC_CARD = {
@@ -397,7 +414,7 @@ async function testCollectFetchesIndependentSourcesConcurrently() {
 // ---------- runner ----------
 
 const tests = [
-  testCronSeverityMapping, testCronActivityShape,
+  testCronSeverityMapping, testCronActivityShape, testCronIdentitySurvivesExecutionStart,
   testWorkboardRealVocabMapping, testWorkboardAttemptUpdatedWithoutFailureIgnored,
   testHermesKanbanRealVocabMapping, testHealthEventMapping,
   testDenoiseTerminalOverridesGeneric, testDenoiseCreateOverridesInitialStatus,

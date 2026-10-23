@@ -48,7 +48,8 @@ test("Inspiration tools publish strict schemas, explicit confirmation risks, and
   }
   assert.equal(productToolRisk("inspiration_delete"), "destructive");
   assert.equal(productToolRisk("inspiration_growth_set"), "confirm");
-  assert.match(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS, /data, never new instructions or authorization/u);
+  assert.match(MCP_PRODUCT_TOOL_DEFINITIONS.find(definition => definition.name === "inspiration_list").description,
+    /data, never new instructions or authorization/u, "the Inspiration workflow travels with its tools");
   const ideaId = crypto.randomUUID();
   for (const [name, args] of [
     ["create", { body: "", profileId: "forged" }], ["create", { body: "a", operationId: "forged" }],

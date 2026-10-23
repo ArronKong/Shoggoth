@@ -11,6 +11,20 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { AgentArchiveRetention, AGENT_ARCHIVE_RETENTION_MS: WEEK,
   AGENT_ARCHIVE_RETRY_DELAY_MS: RETRY } = require("../app/agent-service/agent-archive-retention");
 
+function testLedgerTargets() {
+  const retention = new AgentArchiveRetention({ paths: { stateDir: "/state", trustedRoot: "/" } });
+  const ledgers = (runtime) => retention._fileTargets({ profileId: "profile", runtime, runtimeProfileId: "runtime" })
+    .filter(([kind]) => kind.startsWith("ledger"));
+  assert.deepEqual(ledgers("antigravity"), [
+    ["ledger", "/state/runtime-ledgers/antigravity-acp/runtime"],
+    ["ledger-antigravity", "/state/runtime-ledgers/antigravity/runtime"],
+  ]);
+  assert.deepEqual(ledgers("codex"), [["ledger", "/state/runtime-ledgers/codex/runtime"]]);
+  assert.deepEqual(retention._fileTargets({ profileId: "profile", runtime: "codex", runtimeProfileId: "runtime" })
+    .find(([kind]) => kind === "browser-use"), ["browser-use", "/state/browser-use/profiles/profile"]);
+  console.log("PASS purge covers the current and the retired Antigravity ledger");
+}
+
 async function testDeadlineScheduler() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sagrt-")));
   fs.chmodSync(root, 0o700);
@@ -338,9 +352,10 @@ async function main() {
 
     const interruptedFsync = await create("Retry anchor directory fsync");
     service.memoryEngine.recallPolicy.assertReady(interruptedFsync.id);
-    service.memoryEngine.searchViews.set(interruptedFsync.id,
-      { documents: [{ item: { content: "private in-process memory" } }] });
-    service.memoryEngine.viewsStale.add(interruptedFsync.id);
+    // Shoggoth Memory keeps a per-Profile in-process host (search index handle)
+    // instead of the legacy engine's searchViews/viewsStale caches.
+    service.memoryEngine.host(interruptedFsync.id);
+    assert.equal(service.memoryEngine.hosts.has(interruptedFsync.id), true);
     const savedAnchor = fs.readFileSync(anchor(interruptedFsync));
     await archive(interruptedFsync);
     time = service.agentArchiveRetention.entries[interruptedFsync.id].deleteAfter;
@@ -357,8 +372,7 @@ async function main() {
     } finally { policy.fs = originalFs; }
     assert.equal(fs.existsSync(anchor(interruptedFsync)), false);
     assert.equal(service.agentArchiveRetention.entries[interruptedFsync.id].phase, "purging");
-    assert.equal(service.memoryEngine.searchViews.has(interruptedFsync.id), false);
-    assert.equal(service.memoryEngine.viewsStale.has(interruptedFsync.id), false);
+    assert.equal(service.memoryEngine.hosts.has(interruptedFsync.id), false);
     // Model a crash where the unfsynced unlink was lost before the next boot.
     fs.writeFileSync(anchor(interruptedFsync), savedAnchor, { mode: 0o600 });
     await service.stop();
@@ -399,4 +413,5 @@ async function main() {
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
-testDeadlineScheduler().then(main).catch((error) => { console.error(error); process.exitCode = 1; });
+Promise.resolve().then(testLedgerTargets).then(testDeadlineScheduler).then(main)
+  .catch((error) => { console.error(error); process.exitCode = 1; });

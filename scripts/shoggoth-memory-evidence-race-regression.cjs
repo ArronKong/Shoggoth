@@ -15,7 +15,7 @@ let resolveReplay;
 const replay = new Promise((resolve) => { resolveReplay = resolve; });
 let controller;
 const memory = {
-  engine: { recallPolicy: { getRevision: () => 0 }, now: () => 100, isReviewCommitted: () => true },
+  engine: { recallPolicy: { getRevision: () => 0 }, now: () => 100, isRecallCommitted: () => true },
   store: { getRevision: () => 1 },
   bind: noop, search: noop, get: noop, write: noop,
   explain() {

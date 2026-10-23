@@ -13,7 +13,7 @@ const ts = uiRequire("typescript");
 const React = uiRequire("react");
 const TestRenderer = uiRequire("react-test-renderer");
 
-function loadComponent(filePath) {
+function loadComponent(filePath, mocks = {}) {
 const javaScript = ts.transpileModule(fs.readFileSync(filePath, "utf8"), {
   compilerOptions: {
     esModuleInterop: true,
@@ -26,14 +26,18 @@ const javaScript = ts.transpileModule(fs.readFileSync(filePath, "utf8"), {
 
 const module = { exports: {} };
 const localRequire = (specifier) => {
+  if (specifier.endsWith("/i18n/promptCardResources")) return {};
+  if (Object.hasOwn(mocks, specifier)) return mocks[specifier];
   if (specifier.endsWith(".css")) return {};
   if (specifier.startsWith(".")) {
     const target = path.resolve(path.dirname(filePath), specifier);
-    return loadComponent(fs.existsSync(`${target}.tsx`) ? `${target}.tsx` : `${target}.ts`);
+    return loadComponent(fs.existsSync(`${target}.tsx`) ? `${target}.tsx` : `${target}.ts`, mocks);
   }
   if (specifier === "react-i18next") return {
     useTranslation: () => ({
-      t: (key, values) => values?.hosts ? `${key}:${values.hosts}` : key,
+      // Interpolated values stay visible so composed headlines can be asserted.
+      t: (key, values) => values?.hosts ? `${key}:${values.hosts}`
+        : values ? `${key}:${Object.values(values).join("|")}` : key,
     }),
   };
   return uiRequire(specifier);
@@ -43,6 +47,7 @@ vm.runInNewContext(`(function(require, module, exports) { ${javaScript}\n})(requ
   module,
   exports: module.exports,
   window: { setTimeout, clearTimeout },
+  setTimeout, clearTimeout, crypto, Error,
 });
 return module.exports;
 }
@@ -136,13 +141,14 @@ TestRenderer.act(() => {
   }));
 });
 
-const inputs = renderer.root.findAllByType("input");
-assert.equal(inputs.length, 1, "choice 必须渲染明确选项，不能退化成自由文本");
+const inputs = renderer.root.findAllByType("textarea");
+assert.equal(inputs.length, 1, "只有自由文本字段使用多行输入区");
+assert.equal(renderer.root.findAllByType("input").filter(input => input.props.type === "radio").length, 2);
+assert.ok(visibleTextOf(renderer.toJSON()).includes("北京区域"), "选项说明必须直接显示");
 assert.deepEqual(inputs.map((input) => input.props["aria-label"]), ["项目"]);
-const regionButton = renderer.root.findAllByType("button")
-  .find((button) => button.children.join("") === "华北");
+const regionButton = renderer.root.findByProps({ "aria-label": "华北" });
 assert.ok(regionButton, "choice label 必须显示给用户");
-TestRenderer.act(() => regionButton.props.onClick());
+TestRenderer.act(() => regionButton.props.onChange());
 const submit = renderer.root.findAllByType("button")
   .find((button) => button.children.join("") === "chat.promptSubmit");
 assert.equal(submit.props.disabled, false);
@@ -153,6 +159,27 @@ TestRenderer.act(() => {
 assert.deepEqual(structuredClone(replies.map(({ data }) => data)), [{
   action: "submit", answers: { region: "cn-north" },
 }], "UI 必须提交 option value，且同事件循环双击只能响应一次");
+renderer.unmount();
+
+// Legacy questions now use the same explicit selection flow, with free text
+// remaining an alternative rather than an extra selected answer.
+const legacyChoices = [];
+TestRenderer.act(() => { renderer = TestRenderer.create(React.createElement(ChatPromptCard, {
+  entry: { id: "legacy-options", kind: "clarify", question: "执行范围", choices: ["本周", "本月"] },
+  onRespond: (_entry, data) => { legacyChoices.push(data); },
+})); });
+TestRenderer.act(() => renderer.root.findByProps({ "aria-label": "本周" }).props.onChange());
+assert.equal(legacyChoices.length, 0);
+assert.equal(renderer.root.findByProps({ "aria-label": "本周" }).props.checked, true);
+TestRenderer.act(() => renderer.root.findByType("textarea").props.onChange({ target: { value: "仅周一\n保留原始换行" } }));
+assert.equal(renderer.root.findByProps({ "aria-label": "本周" }).props.checked, false);
+let enterPrevented = false;
+TestRenderer.act(() => renderer.root.findByType("textarea").props.onKeyDown({ key: "Enter", nativeEvent: { isComposing: false },
+  preventDefault: () => { enterPrevented = true; } }));
+assert.equal(enterPrevented, false, "plain Enter in a multiline answer must insert a newline");
+assert.equal(legacyChoices.length, 0);
+await TestRenderer.act(async () => renderer.root.findAllByType("button")[0].props.onClick());
+assert.deepEqual(structuredClone(legacyChoices), [{ value: "仅周一\n保留原始换行" }]);
 renderer.unmount();
 
 const confirmationMessage = "删除后其配置可能无法恢复，确定要删除吗？";
@@ -226,7 +253,7 @@ for (const fields of [
   });
   assert.ok(renderer.root.findAllByType("button").some((button) => visibleTextOf(button) === "chat.promptSubmit"),
     "ordinary choices, secret fields and multi-field forms must keep explicit submission");
-  TestRenderer.act(() => renderer.root.findAllByType("button")[0].props.onClick());
+  TestRenderer.act(() => renderer.root.findAllByType("input").find(input => input.props.type === "radio").props.onChange());
   assert.equal(responses.length, 0, "ordinary form selections must not submit the form");
   renderer.unmount();
 }
@@ -254,16 +281,17 @@ TestRenderer.act(() => {
     onRespond: (entry, data) => replies.push({ entry, data }),
   }));
 });
-const questionButtons = renderer.root.findAllByType("button");
-const macOption = questionButtons.find((button) => button.children.join("") === "macOS");
-const webOption = questionButtons.find((button) => button.children.join("") === "Web");
+const macOption = renderer.root.findByProps({ "aria-label": "macOS" });
+const webOption = renderer.root.findByProps({ "aria-label": "Web" });
+assert.equal(macOption.props.type, "checkbox");
+assert.ok(visibleTextOf(renderer.toJSON()).includes("桌面应用"));
 assert.ok(macOption && webOption, "OpenClaw question options must render by label");
 TestRenderer.act(() => {
-  macOption.props.onClick();
-  webOption.props.onClick();
+  macOption.props.onChange();
+  webOption.props.onChange();
 });
-const otherInput = renderer.root.findByType("input");
-assert.equal(otherInput.props.type, "text");
+const otherInput = renderer.root.findByType("textarea");
+assert.equal(otherInput.props.rows, 3);
 TestRenderer.act(() => otherInput.props.onChange({ target: { value: "CLI" } }));
 const questionSubmit = renderer.root.findAllByType("button")
   .find((button) => button.children.join("") === "chat.promptSubmit");
@@ -342,11 +370,11 @@ TestRenderer.act(() => {
     onRespond: (entry, data) => replies.push({ entry, data }),
   }));
 });
-const singleQuestionOptions = renderer.root.findAllByType("button")
-  .filter((button) => button.props.role === "radio");
+const singleQuestionOptions = renderer.root.findAllByType("input")
+  .filter((input) => input.props.type === "radio");
 TestRenderer.act(() => {
-  singleQuestionOptions[0].props.onClick();
-  singleQuestionOptions[1].props.onClick();
+  singleQuestionOptions[0].props.onChange();
+  singleQuestionOptions[1].props.onChange();
 });
 const singleQuestionSubmit = renderer.root.findAllByType("button")
   .find((button) => button.children.join("") === "chat.promptSubmit");
@@ -413,7 +441,7 @@ TestRenderer.act(() => {
     onRespond: (entry, data) => replies.push({ entry, data }),
   }));
 });
-const singleInput = renderer.root.findByType("input");
+const singleInput = renderer.root.findByType("textarea");
 TestRenderer.act(() => singleInput.props.onChange({ target: { value: "继续" } }));
 const singleSubmit = renderer.root.findAllByType("button").find((button) => button.props.className.includes("is-primary"));
 TestRenderer.act(() => singleSubmit.props.onClick());
@@ -462,6 +490,8 @@ TestRenderer.act(() => {
 });
 assert.ok(visibleTextOf(renderer.toJSON()).includes('Allow Figma to run tool "figma.use_figma"?'),
   "the app name and exact requested tool must remain visible before consent");
+assert.ok(visibleTextOf(renderer.toJSON()).includes("chat.approvalDo.appTool:figma|use_figma"),
+  "the headline names the app from the validated tool name, never the codex_apps server");
 assert.deepEqual(renderer.root.findAllByType("button").map(visibleTextOf), [
   "chat.promptAllowOnce", "chat.promptDenyOperation",
 ]);
@@ -589,14 +619,24 @@ const grokSessionEdits = { ...approvalEntry,
 };
 mountApproval(grokSessionEdits);
 assert.deepEqual(renderer.root.findAllByType("button").map(visibleTextOf), [
-  "chat.promptAllowSession", "chat.promptAllowOnce", "chat.promptDenyOperation",
-], "existing Grok approvals without scope metadata must localize the known session-edit option");
-TestRenderer.act(() => renderer.root.findAllByType("button")[0].props.onClick());
+  "chat.promptAllowOnce", "chat.promptAllowSession", "chat.promptDenyOperation",
+], "existing Grok approvals without scope metadata must localize the known session-edit option; Allow comes first");
+TestRenderer.act(() => renderer.root.findAllByType("button")
+  .find((button) => visibleTextOf(button) === "chat.promptAllowSession").props.onClick());
 assert.deepEqual(structuredClone(replies.at(-1).data), { choice: "runtime:0" },
   "localization must preserve the exact native choice");
 renderer.unmount();
 
-const { approvalOptionLabel, approvalOptionHint, approvalOptionIsVisible } = loadComponent(path.join(ROOT, "app/manage-ui/src/lib/approvalOptions.ts"));
+const { approvalChoiceLabel, approvalOptionLabel, approvalOptionHint, approvalOptionIsVisible } = loadComponent(path.join(ROOT, "app/manage-ui/src/lib/approvalOptions.ts"));
+// The live activity names an answered choice exactly as the card's button did.
+assert.equal(approvalChoiceLabel("runtime:0", (key) => key, grokSessionEdits.approvalOptions), "chat.promptAllowSession",
+  "a native choice reads as its localized button");
+assert.deepEqual(["once", "session", "always", "deny", "cancel"].map((choice) => approvalChoiceLabel(choice, (key) => key)),
+  ["chat.promptAllowOnce", "chat.promptAllowSession", "chat.promptAllowAlways", "chat.promptDenyOperation", "common.cancel"],
+  "canonical choices never show their internal ids");
+assert.equal(approvalChoiceLabel("once", (key) => key, [], true), "chat.promptAllowTurn",
+  "a permissions grant reads as its per-turn button");
+assert.equal(approvalChoiceLabel("允许一次", (key) => key), "允许一次", "an unknown choice is shown as given");
 for (const locale of ["zh-CN", "en"]) {
   const dictionary = loadComponent(path.join(ROOT, `app/manage-ui/src/i18n/locales/${locale}.ts`)).default;
   const t = (key) => key.split(".").reduce((value, part) => value[part], dictionary);
@@ -624,8 +664,10 @@ const grokBashEntry = { ...approvalEntry,
 };
 mountApproval(grokBashEntry);
 assert.deepEqual(renderer.root.findAllByType("button").map(visibleTextOf), [
-  "chat.promptAllowAlways", "chat.promptAllowOnce", "chat.promptDenyOperation",
-], "native approvals must use localized presets and show only one denial");
+  "chat.promptAllowOnce", "chat.promptAllowAlways", "chat.promptDenyOperation",
+], "native approvals must use localized presets, lead with Allow and show only one denial");
+assert.deepEqual(renderer.root.findAllByType("button").map((button) => button.props.className.includes("is-primary")),
+  [true, false, false], "only the one-time Allow is the primary action");
 TestRenderer.act(() => renderer.root.findAllByType("button")[2].props.onClick());
 assert.deepEqual(structuredClone(replies.at(-1).data), { choice: "deny" },
   "the single Deny button must reject once, never persist a denial");
@@ -639,7 +681,7 @@ mountApproval({ ...grokBashEntry,
   approvalOptions: grokBashEntry.approvalOptions.filter((option) => option.kind !== "reject_once"),
 });
 assert.deepEqual(renderer.root.findAllByType("button").map(visibleTextOf), [
-  "chat.promptAllowAlways", "chat.promptAllowOnce", "chat.promptDenyOperation",
+  "chat.promptAllowOnce", "chat.promptAllowAlways", "chat.promptDenyOperation",
 ], "a request without native reject_once still retains the canonical safe Deny action");
 renderer.unmount();
 for (const locale of ["zh-CN", "en"]) {
@@ -652,15 +694,64 @@ for (const locale of ["zh-CN", "en"]) {
   for (const [index, option] of grokBashEntry.approvalOptions.entries()) {
     const unfamiliar = { ...option, choice: `runtime:${index}`, label: `Unfamiliar provider wording ${index}` };
     assert.equal(approvalOptionLabel(unfamiliar, t), expected[index], "new provider wording must still use the same preset");
-    assert.equal(approvalOptionHint(unfamiliar, t), unfamiliar.label, "native scope must remain available in existing hover text");
+    assert.equal(approvalOptionHint(unfamiliar, t), option.kind === "allow_always"
+      ? `${unfamiliar.label}\n${dictionary.chat.promptAlwaysScopeHint}` : unfamiliar.label,
+    "native wording is preserved and an unspecified persistent rule does not imply all future commands");
   }
 }
 const alternativeRules = ["npm test", "npm test --unit"].map((rule, index) => ({
   choice: `runtime:${index}`, kind: "allow_always", label: `Always allow: ${rule}`,
 }));
 assert.deepEqual(alternativeRules.map((option) => approvalOptionLabel(option, (key) => key, alternativeRules)),
-  ["chat.promptAllowAlways (1)", "chat.promptAllowAlways (2)"],
-  "different native rules must remain distinct without putting commands on the buttons");
+  ["Always allow: npm test", "Always allow: npm test --unit"],
+  "different native rules must expose their meaning without requiring hover");
+
+// ACP also carries questions through permission requests. Labels are answers,
+// not interchangeable grants, even when every answer is tagged allow_once.
+const taskOptions = [
+  { choice: "once", kind: "allow_once", label: "(Recommended) macOS 系统原生后台服务 (Launchd 脚本)" },
+  { choice: "runtime:1", kind: "allow_once", label: "Shoggoth 应用内 Cron 任务 (到点唤醒 Agent 执行)" },
+  { choice: "runtime:2", kind: "allow_once", label: "使用已有的定时任务" },
+  { choice: "runtime:3", kind: "allow_once", label: "先说明两种方案的区别" },
+];
+for (const count of [2, 4]) {
+  const options = taskOptions.slice(0, count);
+  for (const locale of ["zh-CN", "en"]) {
+    const dictionary = loadComponent(path.join(ROOT, `app/manage-ui/src/i18n/locales/${locale}.ts`)).default;
+    const t = (key) => key.split(".").reduce((value, part) => value[part], dictionary);
+    assert.deepEqual(options.map(option => approvalChoiceLabel(option.choice, t, options)),
+      options.map(option => option.label), "both buttons and answered activity must retain every native answer");
+  }
+  for (const compact of [false, true]) {
+    for (const selected of [...options, { choice: "deny", label: "chat.promptDenyOperation" }]) {
+      TestRenderer.act(() => { renderer = TestRenderer.create(React.createElement(ChatPromptCard, {
+        entry: { ...approvalEntry, approvalChoices: [...options.map(option => option.choice), "deny", "cancel"],
+          approvalOptions: options, approvalDetails: { kind: "command", toolName: "你希望采用哪种方式实现该定时任务？" } },
+        compactApproval: compact, onRespond: (_entry, data) => replies.push({ data }),
+      })); });
+      const radios = renderer.root.findAllByType("input");
+      assert.deepEqual(radios.map(input => input.props["aria-label"]), options.map(option => option.label),
+        "normal and compact approval cards must show every answer in selectable rows");
+      assert.ok(radios.every(input => input.props.type === "radio" && !input.props.checked), "never preselect a native answer");
+      const confirm = () => renderer.root.findAllByType("button").find(button => visibleTextOf(button) === "chat.promptConfirmChoice");
+      assert.equal(confirm().props.disabled, true);
+      const before = replies.length;
+      if (selected.choice !== "deny") {
+        TestRenderer.act(() => radios.find(input => input.props.value === selected.choice).props.onChange());
+        assert.equal(replies.length, before, "reading/selecting a row must not submit");
+        assert.equal(confirm().props.disabled, false);
+        TestRenderer.act(() => { confirm().props.onClick(); });
+      } else {
+        TestRenderer.act(() => renderer.root.findAllByType("button")
+          .find(button => visibleTextOf(button) === selected.label).props.onClick());
+      }
+      assert.equal(renderer.toJSON(), null, "confirmation or denial still dismisses immediately");
+      assert.deepEqual(structuredClone(replies.at(-1).data), { choice: selected.choice },
+        "a readable native answer must submit only its original choice id");
+      renderer.unmount();
+    }
+  }
+}
 
 let finishResponse;
 const grokEntry = { ...approvalEntry,
@@ -686,12 +777,158 @@ assert.deepEqual(renderer.root.findAllByType("button").map(visibleTextOf), ["cha
 assert.ok(!visibleTextOf(renderer.toJSON()).includes("Remember this idea"), "stale native allow options must not restore hidden details");
 renderer.unmount();
 
-mountApproval(approvalEntry, () => new Promise((_resolve, reject) => { finishResponse = reject; }));
-TestRenderer.act(() => renderer.root.findAllByType("button")[0].props.onClick());
-assert.ok(renderer.root.findAllByType("button").every((button) => button.props.disabled));
+const failedApprovalResponses = [];
+mountApproval(approvalEntry, (_entry, data) => {
+  failedApprovalResponses.push(data);
+  return new Promise((_resolve, reject) => { finishResponse = reject; });
+});
+const firstApprovalClick = renderer.root.findAllByType("button")[0].props.onClick;
+TestRenderer.act(() => { firstApprovalClick(); firstApprovalClick(); });
+assert.equal(renderer.toJSON(), null, "an approval must disappear before the response completes");
+assert.deepEqual(structuredClone(failedApprovalResponses), [{ choice: "once" }],
+  "hiding the approval must retain duplicate-click protection and the original choice");
 await TestRenderer.act(async () => { finishResponse(new Error("relay unavailable")); });
+assert.equal(renderer.root.findAllByType("button").length, 3,
+  "a failed response must restore the same approval and all of its choices");
 assert.ok(renderer.root.findAllByType("button").every((button) => !button.props.disabled),
   "a failed response must leave the same card available for retry");
+TestRenderer.act(() => renderer.root.findAllByType("button")[2].props.onClick());
+assert.equal(renderer.toJSON(), null, "retrying with Deny must immediately dismiss the approval too");
+assert.deepEqual(structuredClone(failedApprovalResponses), [{ choice: "once" }, { choice: "deny" }]);
+await TestRenderer.act(async () => { finishResponse(new Error("relay unavailable")); });
+renderer.unmount();
+
+for (const compactApproval of [false, true]) {
+  for (const entry of [
+    approvalEntry,
+    { ...approvalEntry, id: "mcp-approval", kind: "mcp_permission" },
+    { ...approvalEntry, id: "product-approval", kind: "product_confirmation" },
+    { id: "legacy-approval", kind: "approval", choices: ["once", "session", "deny"] },
+    { id: "legacy-mcp-approval", kind: "mcp_tool_approval", choices: ["once", "deny"] },
+  ]) {
+    let acknowledge;
+    const responses = [];
+    const onRespond = (request, data) => {
+      responses.push({ id: request.id, data });
+      return new Promise(resolve => { acknowledge = resolve; });
+    };
+    TestRenderer.act(() => {
+      renderer = TestRenderer.create(React.createElement(ChatPromptCard, { entry, compactApproval, onRespond }));
+    });
+    const button = renderer.root.findAllByType("button")[0];
+    TestRenderer.act(() => { button.props.onClick(); button.props.onClick(); });
+    assert.equal(renderer.toJSON(), null, `${entry.kind}/${compactApproval}: hide immediately without submitting text`);
+    TestRenderer.act(() => renderer.update(React.createElement(ChatPromptCard,
+      { entry: { ...entry }, compactApproval, onRespond })));
+    assert.equal(renderer.toJSON(), null, "an unchanged pending projection must not restore the card");
+    await TestRenderer.act(async () => { acknowledge(); });
+    assert.equal(renderer.toJSON(), null, "a successful response must stay dismissed while awaiting projection refresh");
+    assert.deepEqual(structuredClone(responses), [{ id: entry.id, data: { choice: "once" } }]);
+    TestRenderer.act(() => renderer.update(React.createElement(ChatPromptCard,
+      { entry: { ...entry, id: `${entry.id}-next`, requestId: "next-request" }, compactApproval, onRespond })));
+    assert.ok(renderer.root.findAllByType("button").length > 0, "a new request must remain visible and actionable");
+    assert.ok(renderer.root.findAllByType("button").every(button => !button.props.disabled));
+    renderer.unmount();
+  }
+}
+
+// Cron owns its error display, but must still reject the card's response so it
+// can restore an approval after failure or a concurrent Stop operation.
+let settleCronControl;
+const cronControls = [];
+const CodexCronRunResult = loadComponent(path.join(ROOT, "app/manage-ui/src/pages/cron/CodexCronRunResult.tsx"), {
+  "../../api/client": {
+    getCodexCronRunResult: async () => ({ executionOrigin: "shoggoth", executionStatus: "waiting_approval",
+      available: false, interaction: { type: "approval", payload: approvalEntry } }),
+    controlCodexCronRun: (_id, input) => {
+      cronControls.push(input);
+      return new Promise((resolve, reject) => { settleCronControl = { resolve, reject }; });
+    },
+  },
+  "../../lib/markdown": { toSanitizedMarkdownHtml: value => value },
+}).default;
+await TestRenderer.act(async () => {
+  renderer = TestRenderer.create(React.createElement(CodexCronRunResult, {
+    job: { id: "cron-job", name: "Cron Agent" }, run: { runId: "cron-run" },
+    onClose: () => {}, onChanged: () => {},
+  }));
+});
+const cronApprovalButtons = () => renderer.root.findAllByType("button")
+  .filter(button => button.props.className?.includes("chat-prompt__btn"));
+const cronStopButton = () => renderer.root.findAllByType("button")
+  .find(button => visibleTextOf(button) === "codexAutomation.stopRun");
+TestRenderer.act(() => cronApprovalButtons()[0].props.onClick());
+assert.equal(cronApprovalButtons().length, 0, "the real Cron result panel must hide approvals before control responds");
+assert.equal(cronControls.length, 1);
+assert.equal(cronControls[0].action, "approval");
+assert.equal(cronControls[0].requestId, approvalEntry.requestId);
+await TestRenderer.act(async () => { settleCronControl.reject(new Error("relay unavailable")); });
+assert.equal(cronApprovalButtons().length, 3, "Cron control failure must restore the approval, not treat it as accepted");
+assert.equal(visibleTextOf(renderer.root.findByProps({ role: "alert" })), "relay unavailable");
+TestRenderer.act(() => cronStopButton().props.onClick());
+await TestRenderer.act(async () => { cronApprovalButtons()[0].props.onClick(); });
+assert.equal(cronControls.length, 2, "an approval must not be sent while the run's Stop response is pending");
+assert.equal(cronControls[1].action, "stop");
+assert.equal(cronApprovalButtons().length, 3, "a locally refused response must not permanently dismiss its approval");
+await TestRenderer.act(async () => { settleCronControl.reject(new Error("stop unavailable")); });
+assert.equal(cronStopButton().props.disabled, false, "a failed Stop must remain retryable without an unhandled rejection");
+TestRenderer.act(() => renderer.unmount());
+
+// Plain-language cards, built only from the structured request.
+function mountNamed(entry) {
+  TestRenderer.act(() => { renderer = TestRenderer.create(React.createElement(ChatPromptCard,
+    { entry, agentName: "Antigravity", onRespond: (_entry, data) => replies.push({ data }) })); });
+  return visibleTextOf(renderer.toJSON());
+}
+const antigravityOptions = [
+  { choice: "runtime:0", kind: "allow_always", label: "Allow Always (risky) — Allowing always can be risky" },
+  { choice: "once", kind: "allow_once", label: "Allow" },
+  { choice: "deny", kind: "reject_once", label: "Deny" },
+];
+const antigravityFetch = { ...approvalEntry, message: "需要用户授权",
+  approvalChoices: ["runtime:0", "once", "deny", "cancel"], approvalOptions: antigravityOptions,
+  approvalDetails: { kind: "command", toolName: "read_url_content", cwd: "/workspace",
+    input: JSON.stringify({ url: "https://example.com/page" }) } };
+let text = mountNamed(antigravityFetch);
+assert.ok(text.includes("chat.promptAlwaysScopeHint"), "Antigravity's unspecified native rule scope is visible before choosing Always allow");
+assert.ok(text.includes("chat.approvalWants:Antigravity|chat.approvalDo.fetch:example.com"),
+  `the headline names who asks and what it opens: ${text}`);
+assert.equal(renderer.root.findAllByProps({ className: "chat-prompt__cmd" })[0].children.join(""), "https://example.com/page");
+assert.deepEqual(renderer.root.findAllByProps({ className: "chat-prompt__risk" }).map(visibleTextOf),
+  ["chat.approvalRisk.web", "chat.approvalRisk.alwaysWeb"]);
+assert.ok(!text.includes("Run read_url_content"), "the server's title sentence is never shown");
+assert.ok(text.includes("chat.approvalTechnical:read_url_content · url=https://example.com/page"));
+assert.equal(renderer.root.findAllByType("details").length, 0, "technical facts stay visible, not collapsed");
+assert.deepEqual(renderer.root.findAllByType("button").map(visibleTextOf),
+  ["chat.promptAllowOnce", "chat.promptAllowAlways", "chat.promptDenyOperation"]);
+renderer.unmount();
+
+text = mountNamed({ ...antigravityFetch, approvalDetails: { kind: "command", toolName: "list_resources",
+  input: JSON.stringify({ server: "shoggoth" }) } });
+assert.ok(text.includes("chat.approvalDo.listResources:shoggoth") && text.includes("chat.approvalReadOnly"));
+assert.equal(renderer.root.findAllByProps({ className: "chat-prompt__risk" }).length, 0);
+renderer.unmount();
+
+text = mountNamed({ ...approvalEntry, message: "Needs network access to install dependencies",
+  approvalDetails: { kind: "command", command: "npm install", cwd: "/workspace/app", networkHost: "registry.npmjs.org" } });
+assert.ok(text.includes("chat.approvalDo.runCommandNetwork"));
+assert.ok(text.includes("chat.approvalRunsIn:/workspace/app"));
+assert.ok(text.includes("chat.approvalSays:Needs network access to install dependencies"),
+  "the runtime's own explanation is attributed to it");
+assert.ok(text.includes("chat.approvalRisk.network:registry.npmjs.org"));
+renderer.unmount();
+
+text = mountNamed({ ...approvalEntry, message: "",
+  approvalDetails: { kind: "command", command: "cat /etc/hosts", cwd: "/workspace",
+    actions: JSON.stringify([{ type: "read", path: "/etc/hosts" }]) } });
+assert.ok(text.includes("chat.approvalDo.readFile:hosts") && text.includes("chat.approvalReadOnly"));
+assert.equal(renderer.root.findAllByProps({ className: "chat-prompt__cmd" })[0].children.join(""), "cat /etc/hosts");
+renderer.unmount();
+
+text = mountNamed({ ...approvalEntry, message: "",
+  approvalDetails: { kind: "file_change", toolName: "edit", grantRoot: "/workspace",
+    input: JSON.stringify({ path: "/elsewhere/notes.md" }) } });
+assert.ok(text.includes("chat.approvalDo.editFile:notes.md") && text.includes("chat.approvalRisk.outside"));
 renderer.unmount();
 
 console.log("chat prompt card: PASS");

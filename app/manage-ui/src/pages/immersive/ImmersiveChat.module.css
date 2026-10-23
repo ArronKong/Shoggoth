@@ -106,9 +106,9 @@
   max-height: 60vh;
   /* Tab 行钉住不滚，只有列表行滚 —— 单一滚动条（同模型菜单的 grid 结构）。
      列锁到 minmax(0,1fr)：否则单列默认 auto=max-content，不换行的 Tab 行会把浮层撑宽。
-     三行显式指派（tabs/list/actions 各占固定行）：Tab 条件渲染时行号不因缺席漂移。 */
+     四行显式指派（search/tabs/list/actions 各占固定行）：Tab 条件渲染时行号不因缺席漂移。 */
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   grid-template-columns: minmax(0, 1fr);
   gap: 4px;
   overflow: hidden;
@@ -126,18 +126,21 @@
   --ft-color: rgba(255, 255, 255, 0.6);
   --ft-font-size: 12px;
   padding: 2px 2px 0;
-  grid-row: 1;
+  grid-row: 2;
 }
+.pickerSearch { grid-row: 1; width: 100%; padding: 10px 12px; box-sizing: border-box; border: 0; border-radius: 12px; color: inherit; background: rgba(128, 128, 128, .12); font: inherit; }
+.pickerSource { flex-shrink: 0; font-size: 10px; opacity: .65; white-space: nowrap; }
+.pickerList > .pickerSource { white-space: normal; }
 .pickerList {
   display: flex;
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
-  grid-row: 2;
+  grid-row: 3;
 }
 /* 当前会话动作行（刷新/重命名/删除，S2 自右上角收纳） */
 .pickerActions {
-  grid-row: 3;
+  grid-row: 4;
   display: flex;
   gap: 6px;
   padding: 6px 4px 2px;
@@ -175,11 +178,13 @@
   text-align: left;
 }
 .pickerTop {
+  position: relative;
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+  padding-right: 16px;
 }
 .pickerTime {
   flex: 0 0 auto;
@@ -189,9 +194,15 @@
 .pickerItem:hover {
   background: rgba(255, 255, 255, 0.08);
 }
-.pickerItemActive {
-  background: rgba(255, 255, 255, 0.14);
+.pickerItemActive,
+.pickerItemActive:hover {
+  border-radius: 999px;
+  background: #000;
+  color: #fff;
 }
+.pickerItemActive .pickerSource { opacity: 1; }
+.pickerItemActive .pickerTime,
+.pickerItemActive .writerState { color: #fff; }
 /* 会话标题单行省略，时间保持可见。 */
 .pickerName {
   min-width: 0;
@@ -361,12 +372,34 @@
 }
 
 /* ── 折射玻璃 composer：左列，背景透明（折射由下层 WebGL 提供）。Figma rounded-24 / w617。 ── */
-.composer {
+.composerDock {
   position: absolute;
   left: 112px;
   bottom: 36px;
   width: var(--imm-colw);
   z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.composerDock :global(.chat-plan-dock) {
+  --plan-fg: #edf0f5;
+  --plan-muted: #aab2c1;
+  --plan-surface: rgba(20, 26, 38, .94);
+  --plan-border: rgba(255, 255, 255, .14);
+  --bg-muted: #202733;
+  --bg-accent: #242c3a;
+  --bg-hover: #303848;
+  --border: var(--plan-border);
+  --border-strong: rgba(255, 255, 255, .18);
+  --muted: var(--plan-muted);
+  --muted-fg: var(--plan-muted);
+  --muted-strong: #c3cad7;
+  --ui-focus: #9cc6ff;
+  --chat-text: var(--plan-fg);
+}
+.composer {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -441,8 +474,16 @@
   flex: 1 1 auto;
   overflow: hidden; /* 窄视口下左组 pills 裁剪而不是叠到右组图标上 */
 }
-.barLeft:has(:global(.model-menu)) { overflow: visible; }
-.composer:has(:global(.model-menu)) { z-index: 6; }
+.modelControls {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  --chat-text: #fff;
+}
+.barLeft:has(:global(.model-menu), :global([role="dialog"])) { overflow: visible; }
+.composerDock:has(:global(.model-menu), :global([role="dialog"])) { z-index: 6; }
 .barRight {
   display: flex;
   align-items: center;
@@ -514,10 +555,10 @@
   display: inline-flex;
   min-width: 0;
 }
-.bar :global(.chat-pill--model) {
+.bar :global(.chat-pill--icon-label) {
   height: 32px;
   max-width: 200px;
-  padding: 0 12px;
+  padding: 0 12px 0 32px;
   border-radius: 15px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.08);
@@ -529,7 +570,7 @@
   white-space: nowrap;
 }
 /* The same catalog layout sits on a dark surface in immersive mode. */
-.bar :global(.model-menu.model-menu--catalog) {
+.bar :global(.chat-composer-menu-surface) {
   --model-menu-ink: #fff;
   --model-menu-selected-text: #171717;
   --model-menu-text: #e8ebf0;
@@ -544,7 +585,7 @@
   position: absolute;
   left: 112px;
   top: 112px;
-  bottom: 180px;
+  bottom: var(--imm-dock-clearance, 180px);
   width: var(--imm-colw);
   overflow-y: auto;
   display: flex;
@@ -581,6 +622,21 @@
   background: transparent;
   color: #f3f5f9;
 }
+.processCard {
+  width: 100%;
+  min-width: 0;
+  border-radius: 24px;
+  color: #f3f5f9;
+  color-scheme: dark;
+}
+/* Structured cards must fit the conversation column; long sibling content
+   must not push their native slot or trusted action controls out of view. */
+.contentCard {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
 /* 用户气泡与 assistant 卡同底：背景透明，折射由下层 WebGL 提供（data-glass-panel）。 */
 .userBubble {
   padding: 16px 20px;
@@ -589,11 +645,26 @@
   color: #f3f5f9;
 }
 .footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 8px;
   font-size: 11px;
   color: rgba(255, 255, 255, 0.5);
   padding: 0 6px;
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
 }
+.footer :global(.chat-response-model) {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+.footer > :global(.chat-response-model):first-child > :global(.dot) { display: none; }
 /* markdown 内容基本排版（沉浸不在 .chat-shell，需自带） */
 .md {
   font-size: 15px;
@@ -689,9 +760,11 @@
   border-radius: 8px;
 }
 .md :global(.markdown-inline-image) {
-  max-width: 380px;
+  max-width: min(380px, 100%);
   max-height: 300px;
+  object-fit: contain;
   margin: 0.4em 0;
+  cursor: zoom-in;
 }
 /* 代码块 chrome（markdown.ts 产出的 header/复制键/JSON 折叠）——.chat-md 那套是亮色皮肤，
    这里给沉浸自己的暗玻璃版。复制键的点击代理在 document 上，沉浸内直接可用。 */
@@ -811,42 +884,6 @@
   font-size: 22px;
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
 }
-.attChip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 240px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: rgba(255, 255, 255, 0.85);
-  font: inherit;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.attChip:hover, .attChip:focus-visible { background: rgba(0, 0, 0, 0.05); }
-.attChip:focus-visible { outline: none; }
-.attName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pendFile {
-  display: inline-flex; align-items: center; gap: 4px; max-width: 260px;
-  border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 999px; background: transparent;
-}
-.pendFile:hover, .pendFile:focus-within { background: rgba(0, 0, 0, 0.05); }
-.pendFile .attChip { min-width: 0; max-width: 100%; padding-right: 0; border: 0; background: transparent; }
-.pendFile .pendX {
-  position: static; inset: auto; display: inline-flex; align-items: center; justify-content: center;
-  flex: 0 0 24px; width: 24px; height: 24px; margin-right: 4px;
-  background: transparent; color: #fff; font-size: 14px; line-height: 1;
-}
-.pendFile .pendX > span { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; }
-.pendFile .pendX:focus-visible { outline: none; }
-.pendFile .pendX:hover, .pendFile .pendX:focus-visible { background: rgba(0, 0, 0, 0.05); }
-.pendFile:has(.pendX:hover, .pendX:focus-visible) { background: transparent; }
-
 /* ── 分隔线（封存边界 / 模型切换提示行）── */
 .divider {
   display: flex;
@@ -996,10 +1033,18 @@
   pointer-events: none;
 }
 .userRow:hover .rowActions,
-.asstRow:hover .rowActions {
+.asstRow:hover .rowActions,
+.userRow:focus-within .rowActions,
+.asstRow:focus-within .rowActions {
   opacity: 1;
   pointer-events: auto;
 }
+.userRow:hover .footer :global(.chat-response-model),
+.asstRow:hover .footer :global(.chat-response-model) { opacity: 1; }
+.userRow:focus-within .rowActions,
+.asstRow:focus-within .rowActions,
+.userRow:focus-within .footer :global(.chat-response-model),
+.asstRow:focus-within .footer :global(.chat-response-model) { opacity: 1; transition: none; }
 .actBtn {
   width: 26px;
   height: 26px;
@@ -1066,7 +1111,7 @@
   position: absolute;
   left: calc(112px + var(--imm-colw) / 2);
   transform: translateX(-50%);
-  bottom: 190px;
+  bottom: calc(var(--imm-dock-clearance, 180px) + 10px);
   z-index: 6;
   padding: 6px 14px;
   border-radius: 999px;
@@ -1224,4 +1269,25 @@
 .tool svg * {
   vector-effect: non-scaling-stroke;
   stroke-width: 1.2;
+}
+.writerState { flex-shrink: 0; color: rgba(255,255,255,.72); font-size: 11px; }
+.writerHint { padding: 8px 18px 0; color: rgba(255,255,255,.8); font-size: 12px; line-height: 1.5; }
+.writerHintEmpty { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.unreadDot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: var(--accent);
+}
+/* 会话行始终保留时间右侧的状态位置，红点不参与宽度分配。 */
+.pickerTop .unreadDot {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  margin-left: 0;
+  transform: translateY(-50%);
 }

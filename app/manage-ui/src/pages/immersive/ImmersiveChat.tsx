@@ -1,11 +1,13 @@
+import { anchorUnreadMessage } from "../../lib/chatUnread";
 import AgentAvatarView from "../../components/AgentAvatar";
 import { ChatRunWait } from "../../components/ChatRunWait";
+import ChatFileButton from "../../components/ChatFileButton";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, WheelEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useGlassRenderer } from "./useGlassRenderer";
 import FilterTabs from "../../components/FilterTabs";
-import { SESSION_CATEGORY_ORDER, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../../lib/sessionKind";
+import { SESSION_CATEGORY_ORDER, isVisibleSession, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../../lib/sessionKind";
 import ChatModelMenu, { type ModelMenuChoice } from "../ChatModelMenu";
 import ChatPermissionMenu from "../ChatPermissionMenu";
 import type { ChatPermissionModeOption } from "../../types";
@@ -19,18 +21,22 @@ import ImmersiveKanbanPanel from "./ImmersiveKanbanPanel";
 import ImmersiveProfilePanel from "./ImmersiveProfilePanel";
 import { type ImmersivePhase } from "./immersiveBg";
 import type { MediaSource } from "../glass/scene";
-import { IconSend, IconClip, IconAttachmentFolder, IconClock, IconArchive, IconMic, IconStop, IconPencil, IconActivity, IconBoard, IconUser, IconImmersiveExit } from "../chatIcons";
+import { IconSend, IconClip, IconClock, IconArchive, IconMic, IconStop, IconPencil, IconActivity, IconBoard, IconUser, IconImmersiveExit } from "../chatIcons";
 import styles from "./ImmersiveChat.module.css";
+import type { CodexDesktopWriterState } from "../../lib/codexDesktopWriter";
 
 // 聊天列宽持久化键（右缘把手拖出的宽度，px；无键=Figma 默认）
 const COL_W_KEY = "shoggoth.chat.immersive.colw.v1";
 
 // 一条会话（切换浮层用）。用纯字符串而非 ChatPage 内部 SessionRow，避免类型耦合 / 循环 import。
 export interface ImmersiveSessionRow extends SessionCategoryRow {
+  unread?: boolean;
+  codexDesktopWriter?: CodexDesktopWriterState;
   title: string;
   sub: string;
   /** 已格式化的相对时间（"3m"），空串 = 不显示。 */
   time?: string;
+  ts?: number;
   active: boolean;
 }
 
@@ -42,12 +48,16 @@ export interface ImmersiveMessage {
   id: string;
   role: string; // "user" → 右侧气泡；其余 → 左侧折射玻璃卡
   kind?: "chat" | "injected" | "divider" | "error" | "local";
+  content?: ReactNode[];
+  process?: ReactNode;
   html: string; // 已 sanitize 的 markdown（injected = 展开后的全文；divider/error 不用）
   images: string[]; // user 自发图（base64）/ agent MEDIA 图（/__media 或 URL）
   // 非图附件（视频/PDF/文件）。带 src 的视频渲染成可点开灯箱的预览窗，其余是文件 chip。
   files?: { name: string; kind: string; src?: string; path?: string }[];
   pluginSelectionLabel?: string;
   footer: string;
+  footerModel?: ReactNode;
+  unreadStart?: boolean;
   pending?: boolean; // 流式中 → 正文尾部渲染光标
   prompts?: ChatPromptEntry[]; // 阻塞等答的审批/澄清/sudo/密钥卡（挂在 pending 泡上）
   injectedHead?: string; // kind=injected：折叠单行预览
@@ -79,6 +89,8 @@ export interface ImmersiveBundle {
   sendSeq: number;
   /** 滚近顶部时触发加载封存历史（幂等/节流由 ChatPage 的 archive 状态机自守）。 */
   onNearTop: () => void;
+  historyControl?: ReactNode;
+  unreadAnchor?: { key: string; messageId: string | null; pending: boolean };
   /** 拖拽文件到 composer 上传（与普通模式同一 handler）。 */
   onDropFiles: (e: DragEvent<HTMLDivElement>) => void;
   // 中央消息流
@@ -92,14 +104,16 @@ export interface ImmersiveBundle {
   onInputPaste: (e: ClipboardEvent<HTMLTextAreaElement>) => void;
   submit: (overrideText?: string) => void;
   sending: boolean;
-  canSteer: boolean;
   abortActive: () => void;
   hasActiveSession: boolean;
   canSend: boolean;
+  writerHint?: string | null;
   // slash 命令菜单：节点由 ChatPage 构建（与普通模式同一份 JSX），渲染进沉浸 composer。
   slashMenu: ReactNode;
   slashOpen: boolean;
   pluginPicker?: ReactNode;
+  /** Shared session plan, anchored above the input in both chat layouts. */
+  planDock?: ReactNode;
   // composer：工具行
   models: ModelMenuChoice[];
   displayModel: string;
@@ -132,8 +146,9 @@ export interface ImmersiveBundle {
   sessionTitle: string;
   sessionMeta: string;
   // 身份区状态点：与普通模式 header 状态点同口径（statusOf：running=前台轮次在跑）。
-  // reconnecting（网关重启/后端启动中，正在自愈）沿用离线的灰点皮肤，只有 title 文案不同。
-  liveStatusKind: "running" | "online" | "offline" | "reconnecting";
+  // 初次连接和重连沿用灰点皮肤，title 分别说明当前状态。
+  liveStatusKind: "queued" | "running" | "online" | "offline" | "connecting" | "reconnecting";
+  recoveryNotice?: string | null;
   activeAgentId: string | null;
   activeBackendId: string;
   avatarVersion: number;
@@ -146,7 +161,7 @@ export interface ImmersiveBundle {
   onDelete: () => void;
   // 灯箱：复用 ChatPage 的（其 z-index 高于本层）。kind 缺省 image；视频附件传 "video"。
   openLightbox: (src: string, kind?: "image" | "video") => void;
-  openAttachmentFile?: (file: { name: string; src?: string; path?: string }) => void;
+  revealAttachmentFile?: (file: { name: string; src?: string; path?: string }) => void;
   lightboxOpen: boolean;
   // 回答阻塞式 agent 请求卡（approval/clarify/sudo/secret）→ ChatPage 的 chat.respond
   onRespondPrompt: (entry: ChatPromptEntry, data: ChatPromptResponse) => void;
@@ -154,21 +169,23 @@ export interface ImmersiveBundle {
 
 export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
-    onExit, phase, live, sendSeq, onNearTop, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
-    submit, sending, canSteer, abortActive, hasActiveSession, canSend, slashMenu, slashOpen, pluginPicker,
+    onExit, phase, live, sendSeq, onNearTop, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
+    submit, sending, abortActive, hasActiveSession, canSend, writerHint, slashMenu, slashOpen, pluginPicker, planDock,
     models, displayModel, changeModel, activeBindingId, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
     attachments, removeAttachment, quoteText, clearQuote,
-    sessionTitle, sessionMeta, liveStatusKind, activeAgentId, activeBackendId, avatarVersion, sessions, openSession,
+    sessionTitle, sessionMeta, liveStatusKind, recoveryNotice, activeAgentId, activeBackendId, avatarVersion, sessions: allSessions, openSession,
     onRefresh, sessionLabel, onRenameSubmit, onDelete,
-    openLightbox, openAttachmentFile, lightboxOpen, onRespondPrompt,
+    openLightbox, revealAttachmentFile, lightboxOpen, onRespondPrompt,
   } = props;
+  const sessions = useMemo(() => allSessions.filter(isVisibleSession), [allSessions]);
   const { t } = useTranslation();
   // 背景媒体层的前台元素（视频/图片），由 Backdrop 维护——GL 折射纹理源。
   const bgSourceRef = useRef<MediaSource | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
+  const composerDockRef = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState(false);
   // 视图：聊天 / 今日动态（聊天收起成左下胶囊）。纯呈现态，进入沉浸恒为 chat。
   const [view, setView] = useState<"chat" | "activity">("chat");
@@ -178,6 +195,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   // 会话类型筛选（null = 全部）。R266 起会话列表不再按类型隐藏 cron/子代理/dream，
   // 靠这排 Tab 分流——与普通模式的 ChatSessionMenu 同一个分类函数、同一个组件。
   const [pickerKind, setPickerKind] = useState<SessionCategory | null>(null);
+  const [pickerQuery, setPickerQuery] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   // 聊天列宽（px）：右缘把手拖出的用户宽度，null=未拖过（走 Figma 默认 min(617px,46vw)）。
@@ -230,6 +248,9 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   // 只有用户本来就贴在底部（<80px）时新消息才自动滚底——
   // 往上翻历史时流式输出不再把人拽回底部。
   const stickRef = useRef(true);
+  const landedUnreadRef = useRef<string | null>(null);
+  const unreadCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => unreadCleanupRef.current?.(), []);
   // ── R280 mirror — keep in sync with ChatPage 普通线程的锚定编排（sizeStreamSpacer +
   //    useLayoutEffect 分支）。发送即锚定：自己的消息停在视口上方（留 ~280px 上文），
   //    末尾 spacer 预留一屏站位，回复流入时 1:1 收缩 → scrollHeight 不变视口不动；
@@ -238,8 +259,22 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const spacerRef = useRef<HTMLDivElement | null>(null);
   const lastSendSeqRef = useRef(sendSeq);
   const lastScrollHeightRef = useRef(0);
+  const previousFirstRef = useRef<string>();
+  const prependAnchorRef = useRef<{ id: string; top: number } | null>(null);
+  const captureHistoryAnchor = () => {
+    const el = threadRef.current;
+    if (!el) return;
+    const bounds = el.getBoundingClientRect();
+    const node = Array.from(el.querySelectorAll<HTMLElement>("[data-immersive-message]")).find(row => {
+      const rect = row.getBoundingClientRect();
+      return rect.bottom > bounds.top && rect.top < bounds.bottom;
+    });
+    prependAnchorRef.current = node ? { id: node.dataset.immersiveMessage!, top: node.getBoundingClientRect().top } : null;
+    if (node) { stickRef.current = false; anchoredRef.current = false; }
+  };
   const [showJump, setShowJump] = useState(false);
   const clearAnchor = () => {
+    unreadCleanupRef.current?.(); unreadCleanupRef.current = null;
     anchoredRef.current = false;
     if (spacerRef.current) spacerRef.current.style.height = "0px";
     setShowJump(false);
@@ -266,8 +301,36 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   // 滚轮到顶继续上滚 → 触发封存历史加载（前插补偿在下方 layout effect）
   const onThreadWheel = (e: WheelEvent<HTMLDivElement>) => {
     const el = threadRef.current;
-    if (el && e.deltaY < 0 && el.scrollTop < 400) onNearTop();
+    if (el && e.deltaY < 0 && el.scrollTop < 400) { captureHistoryAnchor(); onNearTop(); }
   };
+  useLayoutEffect(() => {
+    const dock = composerDockRef.current;
+    const root = dock?.parentElement;
+    if (!dock || !root || view !== "chat") return;
+    const measure = () => {
+      const inputTop = dock.querySelector<HTMLElement>("[data-chat-composer]")?.getBoundingClientRect().top;
+      if (inputTop != null && threadRef.current) {
+        const space = Math.max(0, inputTop - threadRef.current.getBoundingClientRect().top);
+        dock.style.setProperty("--chat-plan-body-max", `${Math.max(24, Math.floor(space - 54 - Math.min(220, space * .7)))}px`);
+      }
+      const clearance = Math.ceil(root.getBoundingClientRect().bottom - dock.getBoundingClientRect().top + 12);
+      const value = `${clearance}px`;
+      if (root.style.getPropertyValue("--imm-dock-clearance") === value) return;
+      root.style.setProperty("--imm-dock-clearance", value);
+      if (stickRef.current && !anchoredRef.current && threadRef.current) {
+        threadRef.current.scrollTop = threadRef.current.scrollHeight;
+      }
+    };
+    measure();
+    let frame: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => { frame = null; measure(); });
+    });
+    observer.observe(dock);
+    observer.observe(root);
+    return () => { observer.disconnect(); if (frame !== null) cancelAnimationFrame(frame); };
+  }, [view]);
   useGlassRenderer({
     getSource: () => bgSourceRef.current,
     canvasRef,
@@ -288,18 +351,23 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     return SESSION_CATEGORY_ORDER.filter((k) => count.has(k)).map((k) => ({ kind: k, count: count.get(k) ?? 0 }));
   }, [sessions]);
   const pickerSessions = useMemo(
-    () => (pickerKind ? sessions.filter((s) => sessionCategoryOf(s) === pickerKind) : sessions),
-    [sessions, pickerKind],
+    () => sessions.filter(s => (!pickerKind || sessionCategoryOf(s) === pickerKind)
+      && `${s.title} ${s.sub ?? ""} ${t(`chat.sessionFilter.${sessionCategoryOf(s)}`)}`.toLowerCase().includes(pickerQuery.trim().toLowerCase()))
+      .slice().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)),
+    [sessions, pickerKind, pickerQuery, t],
   );
   // 关掉浮层就把筛选清回「全部」（下次打开是干净的，与模型菜单同一收尾）。
   useEffect(() => {
-    if (!pickerOpen) setPickerKind(null);
+    if (!pickerOpen) { setPickerKind(null); setPickerQuery(""); }
   }, [pickerOpen]);
-  useEffect(() => {
-    stickRef.current = true;
+  useLayoutEffect(() => {
+    stickRef.current = !(unreadAnchor?.key === activeSessKey && (unreadAnchor.pending || unreadAnchor.messageId));
+    landedUnreadRef.current = null;
+    prependAnchorRef.current = null;
+    previousFirstRef.current = messages[0]?.id;
     clearAnchor();
     const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
     lastScrollHeightRef.current = el?.scrollHeight ?? 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessKey]);
@@ -309,6 +377,23 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     const el = threadRef.current;
     const spacer = spacerRef.current;
     if (!el || !spacer || !el.clientHeight) return;
+    if (unreadAnchor?.key === activeSessKey) {
+      if (unreadAnchor.pending) { stickRef.current = false; return; }
+      const anchorId = `${activeSessKey}:${unreadAnchor.messageId}`;
+      if (unreadAnchor.messageId && landedUnreadRef.current !== anchorId) {
+        const node = el.querySelector<HTMLElement>("[data-unread-start]");
+        if (node) {
+          clearAnchor(); stickRef.current = false;
+          landedUnreadRef.current = anchorId;
+          unreadCleanupRef.current = anchorUnreadMessage(el, node);
+          previousFirstRef.current = messages[0]?.id;
+          lastScrollHeightRef.current = el.scrollHeight;
+          return;
+        }
+      } else if (!unreadAnchor.messageId && landedUnreadRef.current === null) {
+        stickRef.current = true; landedUnreadRef.current = anchorId;
+      }
+    }
     const lastUserRow = (): HTMLElement | null => {
       const rows = el.querySelectorAll<HTMLElement>("[data-user-row]");
       return rows.length ? rows[rows.length - 1] : null;
@@ -326,10 +411,22 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       return target;
     };
     // 顶部前插（封存历史）补偿：视口在上方且非贴底时，把高度差原样加回 scrollTop
+    const anchor = prependAnchorRef.current;
+    const anchorNode = anchor && el.querySelector<HTMLElement>(`[data-immersive-message="${CSS.escape(anchor.id)}"]`);
+    const prepended = previousFirstRef.current && previousFirstRef.current !== messages[0]?.id
+      && messages.some(message => message.id === previousFirstRef.current);
     const grown = el.scrollHeight - lastScrollHeightRef.current;
-    if (grown > 0 && !stickRef.current && !anchoredRef.current && el.scrollTop < 400) {
+    if (prepended && anchor && anchorNode) {
+      el.scrollTop += anchorNode.getBoundingClientRect().top - anchor.top;
+      stickRef.current = false;
+      anchoredRef.current = false;
+    } else if (prepended && grown > 0 && !stickRef.current && !anchoredRef.current && el.scrollTop < 400) {
       el.scrollTop += grown;
     }
+    previousFirstRef.current = messages[0]?.id;
+    // The loading/disabled render can rebuild the message projection before
+    // any history arrives. Retain the click-time anchor through that render.
+    if (prepended) prependAnchorRef.current = null;
     if (sendSeq !== lastSendSeqRef.current) {
       lastSendSeqRef.current = sendSeq;
       const anchor = lastUserRow();
@@ -346,7 +443,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       el.scrollTop = el.scrollHeight;
     }
     lastScrollHeightRef.current = el.scrollHeight;
-  }, [messages, sendSeq]);
+  }, [messages, sendSeq, activeSessKey, unreadAnchor]);
 
   // Esc：优先关内部浮层（灯箱由 ChatPage 自己关、slash 菜单由 composer 键盘处理关、
   // 状态行详情浮层在 capture 阶段自拦），再退动态视图回聊天，都没有才退出沉浸模式。
@@ -377,6 +474,13 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     setRenameOpen(true);
   };
 
+  const footerFor = (m: ImmersiveMessage) => m.footer || m.footerModel ? (
+    <div className={styles.footer} data-immersive-message-footer>
+      {m.footer && <span>{m.footer}</span>}
+      {m.footerModel}
+    </div>
+  ) : null;
+
   // 消息悬浮操作条（复制/置顶/本地删除；重试在错误卡内）——hover 淡入，动作闭包来自 ChatPage
   const actionsFor = (m: ImmersiveMessage) =>
     m.onCopy || m.onPin || m.onDelete ? (
@@ -405,26 +509,28 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     ) : null;
 
   return (
-    <div data-testid="immersive-chat" className={styles.root} style={colW != null ? ({ "--imm-col": `${colW}px` } as CSSProperties) : undefined}>
+    <div data-testid="immersive-chat" data-native-ui-surface className={styles.root} style={colW != null ? ({ "--imm-col": `${colW}px` } as CSSProperties) : undefined}>
       <ImmersiveBackdrop phase={phase} sourceRef={bgSourceRef} />
       <canvas ref={canvasRef} className={styles.gl} aria-hidden="true" />
 
       {/* 左上角：身份（会话名 + 状态）+ 点击展开同一 agent 的会话切换浮层。
           动态视图下让位给 ActivityView 自己的标题区（Figma 6677）。 */}
       {view === "chat" && (
-      <div className={styles.topleft}>
+      <div className={styles.topleft} data-native-ui-clip-edge="top">
         <button type="button" className={styles.identity} onClick={() => setPickerOpen((v) => !v)} disabled={!hasActiveSession}>
           {activeAgentId && (
             <AgentAvatarView agentId={activeAgentId} version={avatarVersion} className={styles.avatar} />
           )}
           <span className={styles.idText}>
-            <span className={styles.idName}>{sessionTitle || t("chat.immersiveEnter")}</span>
+            <span className={styles.idName}>{sessionTitle || t("chat.immersiveEnter")}
+              {sessions.some(s => s.unread) && <span className={styles.unreadDot} role="img" aria-label={t("chat.unread")} />}
+            </span>
             <span className={styles.idMeta}>
               <span
                 className={`${styles.statusDot} ${
                   liveStatusKind === "running" ? styles.statusRunning : liveStatusKind === "online" ? styles.statusOnline : styles.statusOffline
                 }`}
-                title={t(`chat.liveStatus.${liveStatusKind}`)}
+                title={recoveryNotice || t(`chat.liveStatus.${liveStatusKind}`)}
               />
               {sessionMeta}
             </span>
@@ -434,6 +540,8 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           <>
             <div className={styles.backdrop} onMouseDown={() => setPickerOpen(false)} />
             <div className={styles.picker}>
+              <input className={styles.pickerSearch} placeholder={t("chat.sessionSearchPlaceholder")}
+                value={pickerQuery} onChange={e => setPickerQuery(e.target.value)} autoFocus />
               {pickerKinds.length > 1 && (
                 <FilterTabs
                   className={styles.pickerTabs}
@@ -453,6 +561,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                 />
               )}
               <div className={styles.pickerList}>
+                {pickerSessions.length === 0 && <div className={styles.pickerSource}>{t("chat.noSessionMatch")}</div>}
                 {pickerSessions.map((s) => (
                   <button
                     key={s.key}
@@ -465,8 +574,10 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                     }}
                   >
                     <span className={styles.pickerTop}>
+                      {!pickerKind && <span className={styles.pickerSource}>{t(`chat.sessionFilter.${sessionCategoryOf(s)}`)}</span>}
                       <span className={styles.pickerName}>{s.title}</span>
                       {s.time && <span className={styles.pickerTime}>{s.time}</span>}
+                      {s.unread && <span className={styles.unreadDot} role="img" aria-label={t("chat.unread")} />}
                     </span>
                   </button>
                 ))}
@@ -557,7 +668,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       )}
 
       {/* 右上角：工具 + 退出 */}
-      <div className={styles.topright}>
+      <div className={styles.topright} data-native-ui-clip-edge="top">
         <button
           type="button"
           className={view === "activity" ? `${styles.tool} ${styles.toolActive}` : styles.tool}
@@ -608,9 +719,10 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         onWheel={onThreadWheel}
         data-glass-clip
       >
-        {messages.length === 0 && (
+        <div onClickCapture={captureHistoryAnchor}>{historyControl}</div>
+        {!hasActiveSession && messages.length === 0 && (
           <div className={styles.empty}>
-            {hasActiveSession ? t("chat.emptyHistory") : t("chat.emptySelect")}
+            {t("chat.emptySelect")}
           </div>
         )}
         {messages.map((m) => {
@@ -618,7 +730,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           // 封存/模型切换分隔线：安静的一行居中文案
           if (kind === "divider") {
             return (
-              <div key={m.id} className={styles.divider}>
+              <div key={m.id} className={styles.divider} data-immersive-message={m.id}>
                 <span className={styles.dividerLabel} title={m.dividerTitle}>{m.dividerLabel}</span>
               </div>
             );
@@ -627,7 +739,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           if (kind === "injected") {
             const open = injectedOpen.has(m.id);
             return (
-              <div key={m.id} className={styles.injectedWrap}>
+              <div key={m.id} className={styles.injectedWrap} data-immersive-message={m.id}>
                 <button
                   type="button"
                   className={open ? `${styles.sysline} ${styles.syslineOpen}` : styles.sysline}
@@ -644,14 +756,14 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                     <div className={styles.md} dangerouslySetInnerHTML={{ __html: m.html }} />
                   </div>
                 )}
-                {m.footer && <div className={styles.footer}>{m.footer}</div>}
+                {footerFor(m)}
               </div>
             );
           }
           // 失败轮次：红调卡 + ×N 重复徽标 + hover 原文 + 重试
           if (kind === "error") {
             return (
-              <div key={m.id} className={styles.asstRow} onContextMenu={m.onCtx}>
+              <div key={m.id} className={styles.asstRow} data-immersive-message={m.id} data-unread-start={m.unreadStart || undefined} onContextMenu={m.onCtx}>
                 <div className={styles.errCard} title={m.errorRaw}>
                   <span className={styles.errText}>{m.errorText}</span>
                   {(m.errorRepeat ?? 1) > 1 && (
@@ -665,7 +777,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                     </button>
                   )}
                 </div>
-                {m.footer && <div className={styles.footer}>{m.footer}</div>}
+                {footerFor(m)}
                 {actionsFor(m)}
               </div>
             );
@@ -687,33 +799,35 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                       <span className={styles.attPlay}>▶</span>
                     </span>
                   ) : (
-                    <button key={`f${i}`} type="button" className={styles.attChip} title={f.name}
-                      onClick={() => openAttachmentFile?.(f)} disabled={!openAttachmentFile}>
-                      <IconAttachmentFolder /><span className={styles.attName}>{f.name}</span>
-                    </button>
+                    <ChatFileButton key={`f${i}`} name={f.name}
+                      title={`${t("chat.artifactsRevealInFolder")} · ${f.name}`}
+                      onClick={() => revealAttachmentFile?.(f)} disabled={!revealAttachmentFile} />
                   ),
                 )}
               </div>
             ) : null;
           if (m.role === "user") {
             return (
-              <div key={m.id} className={styles.userRow} data-user-row="" onContextMenu={m.onCtx}>
+              <div key={m.id} className={styles.userRow} data-user-row="" data-immersive-message={m.id} data-unread-start={m.unreadStart || undefined} onContextMenu={m.onCtx}>
                 {attRow}
                 {m.pluginSelectionLabel && <div className={styles.pluginSelectionBadge} title={t("chat.pluginChosenHint")}>{m.pluginSelectionLabel}</div>}
-                {m.html && (
+                {m.content?.length ? <div className={styles.md}>{m.content}</div> : m.html && (
                   <div className={styles.userBubble} data-glass-panel>
                     <div className={styles.md} dangerouslySetInnerHTML={{ __html: m.html }} />
                   </div>
                 )}
-                {m.footer && <div className={styles.footer}>{m.footer}</div>}
+                {footerFor(m)}
                 {actionsFor(m)}
               </div>
             );
           }
           return (
-            <div key={m.id} className={styles.asstRow} onContextMenu={m.onCtx}>
+            <div key={m.id} className={styles.asstRow} data-immersive-message={m.id} data-unread-start={m.unreadStart || undefined} onContextMenu={m.onCtx}>
+              {m.process && <div className={styles.processCard} data-glass-panel>{m.process}</div>}
               {attRow}
-              {m.html && (
+              {m.content?.length ? (
+                <div className={`${styles.asstCard} ${styles.contentCard}`} data-glass-panel><div className={styles.md}>{m.content}</div></div>
+              ) : m.html && (
                 <div className={kind === "local" ? `${styles.asstCard} ${styles.localCard}` : styles.asstCard} data-glass-panel>
                   <div className={styles.md} dangerouslySetInnerHTML={{ __html: m.html }} />
                   {m.pending && <span className={styles.cursor} aria-hidden="true" />}
@@ -722,11 +836,11 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
               {prompts.length > 0 && (
                 <div className={`${styles.asstCard} ${styles.promptCard}`} data-glass-panel>
                   {prompts.map((p) => (
-                    <ChatPromptCard key={p.id} entry={p} onRespond={onRespondPrompt} />
+                    <ChatPromptCard key={p.id} entry={p} onRespond={onRespondPrompt} agentName={sessionTitle || undefined} />
                   ))}
                 </div>
               )}
-              {m.footer && <div className={styles.footer}>{m.footer}</div>}
+              {footerFor(m)}
               {actionsFor(m)}
             </div>
           );
@@ -770,7 +884,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       )}
 
       {view === "chat" && showJump && (
-        <button type="button" className={styles.jump} onClick={jumpToLatest} title={t("chat.jumpToLatest")}>
+        <button type="button" className={styles.jump} data-native-ui-clip-edge="bottom" onClick={jumpToLatest} title={t("chat.jumpToLatest")}>
           ↓ {t("chat.jumpToLatest")}
         </button>
       )}
@@ -816,6 +930,9 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       {/* 折射玻璃 composer：两行（输入框 + 工具行），对齐 Figma。data-glass-panel 让 WebGL 折射，
           DOM 背景透明；WebGL 不可用时回退 CSS 毛玻璃（fallback）。 */}
       {view === "chat" && (
+      <div ref={composerDockRef} className={styles.composerDock} data-chat-composer-dock data-native-ui-clip-edge="bottom">
+      {recoveryNotice && <div className={styles.errCard} role="alert">{recoveryNotice}</div>}
+      {planDock}
       <div
         className={failed ? `${styles.composer} ${styles.fallback}` : styles.composer}
         data-chat-composer
@@ -824,6 +941,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         onDragOver={supportsAttachments ? (e) => e.preventDefault() : undefined}
       >
         {slashMenu}
+        {writerHint && <div role="status" className={input ? styles.writerHint : styles.writerHintEmpty}>{writerHint}</div>}
         {quoteText != null && (
           <div className={styles.quoteBar}>
             <span className={styles.quoteIco}>↩</span>
@@ -840,18 +958,17 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           </div>
         )}
         {attachments.length > 0 && (
-          <div className={styles.pendRow}>
+          <div className={`${styles.pendRow} chat-att-row--pending`}>
             {attachments.map((a) => (
-              <div key={a.id} className={a.kind && a.kind !== "image" && a.kind !== "video" ? styles.pendFile : styles.pendChip}>
+              <div key={a.id} className={a.kind && a.kind !== "image" && a.kind !== "video" ? "chat-att-chip chat-att-chip--file" : styles.pendChip}>
                 {a.kind && a.kind !== "image" && a.kind !== "video" ? (
-                  <button type="button" className={styles.attChip} title={a.name} disabled={!openAttachmentFile}
-                    onClick={() => openAttachmentFile?.({ name: a.name, src: a.dataUrl })}>
-                    <IconAttachmentFolder /><span className={styles.attName}>{a.name}</span>
-                  </button>
+                  <ChatFileButton name={a.name} className="chat-att-chip__open"
+                    title={`${t("chat.artifactsRevealInFolder")} · ${a.name}`} disabled={!revealAttachmentFile}
+                    onClick={() => revealAttachmentFile?.({ name: a.name, src: a.dataUrl })} />
                 ) : a.kind === "video" ? (
                   <video src={a.dataUrl} title={a.name} preload="metadata" muted playsInline />
                 ) : <img src={a.dataUrl} alt={a.name} />}
-                <button type="button" className={styles.pendX} onClick={() => removeAttachment(a.id)}
+                <button type="button" className={a.kind && a.kind !== "image" && a.kind !== "video" ? "chat-att-x" : styles.pendX} onClick={() => removeAttachment(a.id)}
                   title={t("common.remove")} aria-label={`${t("common.remove")} ${a.name}`}>
                   <span aria-hidden="true">{a.kind && a.kind !== "image" && a.kind !== "video" ? "✕" : "×"}</span>
                 </button>
@@ -866,29 +983,31 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onInputKeyDown}
           onPaste={supportsAttachments ? onInputPaste : undefined}
-          placeholder={t("chat.immersivePlaceholder")}
+          placeholder={writerHint || t("chat.immersivePlaceholder")}
           rows={2}
           disabled={!hasActiveSession}
         />
-        {pluginPicker}
         <div className={styles.bar}>
           <div className={styles.barLeft}>
-            {hasActiveSession && (
-              <span className={listLive ? styles.modelWrap : `${styles.modelWrap} ${styles.stale}`}>
-                <ChatModelMenu
-                  models={models}
-                  activeModel={displayModel}
-                  activeProvider={activeModelProvider}
-                  activeBindingId={activeBindingId}
-                  runtimeGroups={runtimeGroups}
-                  onSelect={changeModel}
-                  loading={modelsLoading}
-                  loadError={modelsError}
-                  onRefresh={refreshModels}
-                  disabled={modelSelectionDisabled}
-                />
-              </span>
-            )}
+            <div className={styles.modelControls}>
+              {pluginPicker}
+              {hasActiveSession && (
+                <span className={listLive ? styles.modelWrap : `${styles.modelWrap} ${styles.stale}`}>
+                  <ChatModelMenu
+                    models={models}
+                    activeModel={displayModel}
+                    activeProvider={activeModelProvider}
+                    activeBindingId={activeBindingId}
+                    runtimeGroups={runtimeGroups}
+                    onSelect={changeModel}
+                    loading={modelsLoading}
+                    loadError={modelsError}
+                    onRefresh={refreshModels}
+                    disabled={modelSelectionDisabled}
+                  />
+                </span>
+              )}
+            </div>
             <ChatPermissionMenu
               options={permissionOptions}
               activeMode={permissionMode}
@@ -909,18 +1028,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                 <IconClip />
               </button>
             )}
-            {sending && canSteer && (
-              <button
-                type="button"
-                className={styles.send}
-                data-send-entry="immersiveButton"
-                onClick={() => submit()}
-                disabled={!hasActiveSession || !canSend || (!input.trim() && attachments.length === 0)}
-                title={t(attachments.length ? "chat.send" : "chat.steerCurrentTurn")}
-              >
-                <IconSend />
-              </button>
-            )}
             {sending ? (
               <button type="button" className={`${styles.send} ${styles.stop}`} onClick={abortActive} title={t("chat.stopGenerating")}>
                 <IconStop />
@@ -939,6 +1046,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             )}
           </div>
         </div>
+      </div>
       </div>
       )}
     </div>

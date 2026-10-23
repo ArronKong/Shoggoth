@@ -31,6 +31,8 @@ function identityOf(options = {}) {
     command: options.command, args: options.args, cwd: options.cwd,
     env: options.env, timeoutMs: options.timeoutMs, appSupport: options.appSupport === true,
     dependencyFingerprint: options.dependencyFingerprint || null,
+    // A changed user credential must start a new process, never reuse the old one.
+    secretEnv: options.secretEnv || null,
   })).digest("hex");
   return { scopeKey, fingerprint };
 }
@@ -58,6 +60,7 @@ function httpIdentityOf(options = {}) {
     principalIdentity: options.principalIdentity, authRevision: options.authRevision,
     allowLoopback: options.allowLoopback === true, timeoutMs: options.timeoutMs,
     versionMode: options.versionMode, appSupport: options.appSupport === true,
+    staticHeaders: options.staticHeaders || null,
   })).digest("hex");
   return { connectionKey, fingerprint,
     credentialProvider: options.credentialProvider ?? null,

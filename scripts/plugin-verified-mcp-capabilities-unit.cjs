@@ -1,12 +1,14 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { componentId } = require("../app/agent-service/plugin-component-catalog");
 const { PluginToolCatalogRegistry } = require("../app/agent-service/plugin-tool-catalog-registry");
 const { verifiedMcpCapabilities, managedReferenceCoverage } =
   require("../app/agent-service/plugin-verified-mcp-capabilities");
 const { validatePluginManagementResult } = require("../app/core/plugin-management-dto");
-const { loadAudit } = require("./plugin-managed-connector-audit.cjs");
+const { BundledPluginCatalog, bundledRoot } = require("../app/core/bundled-plugin-catalog");
 
 const installationId = "github-fixture";
 const mcpComponentId = componentId(installationId, "mcp-server", "github");
@@ -46,23 +48,72 @@ async function main() {
     { id: "repository-issue-read", toolName: "issue_read" },
     { id: "repository-issue-comment", toolName: "add_issue_comment" },
   ]);
+  const headerTools = tools.map(tool => ({ ...tool, inputSchema: {
+    ...tool.inputSchema, properties: {
+      ...tool.inputSchema.properties,
+      owner: { ...tool.inputSchema.properties.owner, "x-mcp-header": "owner" },
+      repo: { ...tool.inputSchema.properties.repo, "x-mcp-header": "repo" },
+    },
+  } }));
+  assert.deepEqual(verifiedMcpCapabilities({ installation, connection,
+    tools: headerTools }), verifiedMcpCapabilities({ installation, connection, tools }),
+  "exact owner/repo transport header annotations preserve the reviewed operations");
+  for (const altered of [
+    { owner: { type: "string", "x-mcp-header": "other" } },
+    { owner: { type: "string", "x-mcp-header": true } },
+    { owner: { type: "string", "x-mcp-header": "owner", pattern: "^blocked$" } },
+    { path: { type: "string", "x-mcp-header": "path" } },
+  ]) {
+    assert.deepEqual(verifiedMcpCapabilities({ installation, connection,
+      tools: [{ ...headerTools[0], inputSchema: {
+        ...headerTools[0].inputSchema, properties: {
+          ...headerTools[0].inputSchema.properties, ...altered,
+        },
+      } }] }), [],
+    "unreviewed header names, types, fields, and constraints still fail closed");
+  }
   const coverage = managedReferenceCoverage({ installation, connection, tools });
   assert.deepEqual(coverage, { packageId: "github", referenceName: "github",
     managedAppId: "connector_76869538009648d5b282a4bb21c3d157",
     relationship: "functional-overlap", equivalence: "unverified",
     operations: verifiedMcpCapabilities({ installation, connection, tools }) });
-  const frozen = loadAudit();
-  assert.equal(frozen.references.length, 73);
-  assert.equal(frozen.references.find(item => item.packageId === "github"
-    && item.name === "github").id, coverage.managedAppId);
-  assert.notEqual(frozen.references.find(item => item.packageId === "github"
-    && item.name === "github-enterprise").id, coverage.managedAppId,
+  const source = new BundledPluginCatalog(bundledRoot());
+  source.assertCurrent("github");
+  const apps = JSON.parse(fs.readFileSync(path.join(source.packagePath("github"), ".app.json"), "utf8")).apps;
+  assert.equal(apps.github.id, coverage.managedAppId);
+  assert.notEqual(apps["github-enterprise"].id, coverage.managedAppId,
   "GitHub Enterprise's templated managed ID is outside this GitHub.com projection");
   assert.deepEqual(verifiedMcpCapabilities({ installation, connection, tools: [] }), [],
     "tool names absent from the authenticated live catalog cannot be claimed");
   assert.deepEqual(verifiedMcpCapabilities({ installation, connection, tools: [readTool] }),
     [{ id: "repository-file-read", toolName: "get_file_contents" }],
     "read-only catalogs cannot claim file-write capability");
+  const githubSnapshotReadTool = { ...readTool, inputSchema: {
+    type: "object", properties: {
+      owner: { description: "Repository owner (username or organization)", type: "string" },
+      repo: { description: "Repository name", type: "string" },
+      path: { default: "/", description: "Path to file/directory", type: "string" },
+      ref: { description: "Optional git ref", type: "string" },
+      sha: { description: "Optional commit SHA", type: "string" },
+      fields: { type: "array", items: { type: "string" } },
+    }, required: ["owner", "repo"],
+  } };
+  assert.deepEqual(verifiedMcpCapabilities({ installation, connection,
+    tools: [githubSnapshotReadTool] }),
+  [{ id: "repository-file-read", toolName: "get_file_contents" }],
+  "GitHub's current file-read snapshot defaults path to root while accepting an explicit path");
+  for (const pathSchema of [
+    { type: "string", default: "fixtures/other.txt" },
+    { type: "string", default: "/", pattern: "^blocked$" },
+  ]) {
+    assert.deepEqual(verifiedMcpCapabilities({ installation, connection,
+      tools: [{ ...githubSnapshotReadTool, inputSchema: {
+        ...githubSnapshotReadTool.inputSchema, properties: {
+          ...githubSnapshotReadTool.inputSchema.properties, path: pathSchema,
+        },
+      } }] }), [],
+    "only GitHub's exact harmless root-path default is compatible");
+  }
   for (const changed of [
     { installation: { ...installation, sourceIdentity: "bundled:codex-security" } },
     { connection: { ...connection, componentId: componentId(installationId, "mcp-server", "other") } },

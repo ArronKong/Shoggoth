@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import "./ChatThinkFastMenu.css";
@@ -30,9 +30,10 @@ function BrainIcon() {
 }
 
 // Figma 309:16240 / asset f5d048590c…svg — 原路径，勿改形。
-function BoltIcon() {
+function BoltIcon({ iconRef }: { iconRef?: Ref<SVGSVGElement> }) {
   return (
     <svg
+      ref={iconRef}
       width="11"
       height="13"
       viewBox="0 0 11 13"
@@ -50,7 +51,7 @@ function BoltIcon() {
 }
 
 export default function ChatThinkFastMenu({
-  levels,
+  levels: supportedLevels,
   value,
   defaultValue,
   defaultLabel,
@@ -70,7 +71,7 @@ export default function ChatThinkFastMenu({
   levelLabel: (level: string) => string;
   fastCapable: boolean;
   fastOn: boolean;
-  onChangeThinking: (level: string) => void;
+  onChangeThinking: (level: string) => void | Promise<unknown>;
   onChangeFast: (next: boolean) => void;
   disabled?: boolean;
   triggerClassName?: string;
@@ -96,17 +97,77 @@ export default function ChatThinkFastMenu({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const thumbRef = useRef<HTMLDivElement>(null);
+  const thumbFillRef = useRef<HTMLSpanElement>(null);
+  const shapeAnimationRef = useRef<Animation | null>(null);
+  const faceBoltRef = useRef<SVGSVGElement>(null);
+  const popupBoltRef = useRef<SVGSVGElement>(null);
+  const fastAnimationsRef = useRef<Animation[]>([]);
+  const previousFastRef = useRef(fastOn);
   const [popupStyle, setPopupStyle] = useState<CSSProperties>({});
-  const draggingRef = useRef(false);
+  const [dragPosition, setDragPosition] = useState<number | null>(null);
+  const [pendingLevel, setPendingLevel] = useState<string | null>(null);
+  const [animateThumb, setAnimateThumb] = useState(true);
+  const draggingRef = useRef<{ pointerId: number; startX: number; offset: number; thumb: boolean; moved: boolean; index: number } | null>(null);
+  const savingRef = useRef(false);
+  const queuedLevelRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const stopMotion = () => {
+      if (!reduced.matches) return;
+      shapeAnimationRef.current?.cancel();
+      fastAnimationsRef.current.forEach(animation => animation.cancel());
+    };
+    reduced.addEventListener("change", stopMotion);
+    return () => {
+      mountedRef.current = false;
+      queuedLevelRef.current = null;
+      shapeAnimationRef.current?.cancel();
+      fastAnimationsRef.current.forEach(animation => animation.cancel());
+      reduced.removeEventListener("change", stopMotion);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const enabled = fastOn && !previousFastRef.current;
+    previousFastRef.current = fastOn;
+    fastAnimationsRef.current.forEach(animation => animation.cancel());
+    fastAnimationsRef.current = [];
+    if (!enabled || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    for (const icon of [faceBoltRef.current, popupBoltRef.current]) {
+      if (!icon) continue;
+      fastAnimationsRef.current.push(icon.animate([
+        { transform: "translateY(1px) scale(.88) rotate(-8deg)", opacity: .55 },
+        { transform: "translateY(-1px) scale(1.12) rotate(3deg)", opacity: 1, offset: .38 },
+        { transform: "none", opacity: 1 },
+      ], { duration: 340, easing: "cubic-bezier(.22, .61, .36, 1)" }));
+    }
+  }, [fastOn]);
+
+  useEffect(() => {
+    if (!open || disabled) {
+      draggingRef.current = null;
+      setDragPosition(null);
+    }
+    if (disabled) queuedLevelRef.current = null;
+  }, [open, disabled]);
 
   const normalized = value ?? "";
-  const faceLabel = !normalized ? defaultLabel : levelLabel(normalized);
+  const effectiveLevel = normalized || defaultValue || "";
+  const faceLabel = effectiveLevel ? levelLabel(effectiveLevel) : defaultLabel;
+  // Inheritance uses the effective mode's existing stop, never an extra option.
+  const levels = supportedLevels.filter(Boolean);
   const stepCount = levels.length;
-  // Inherited effort keeps its label and storage value, but uses the effective level's position.
-  const rawIndex = stepCount > 0 ? levels.indexOf(normalized || defaultValue || "") : -1;
+  const displayedLevel = pendingLevel ?? effectiveLevel;
+  const rawIndex = stepCount > 0 ? levels.indexOf(displayedLevel) : -1;
   const activeIndex = rawIndex >= 0 ? rawIndex : 0;
+  const previewIndex = draggingRef.current?.moved ? draggingRef.current.index : activeIndex;
   // Prefer the session face label so a stale value (not in current levels) still echoes correctly.
-  const currentStepLabel = faceLabel;
+  const previewLevel = draggingRef.current?.moved ? levels[previewIndex] : displayedLevel;
+  const currentStepLabel = previewLevel ? levelLabel(previewLevel) : defaultLabel;
   const fastTitle = `${t("chat.fastLabel")} — ${t("chat.fastQuotaHint")}`;
 
   useEffect(() => {
@@ -158,41 +219,105 @@ export default function ChatThinkFastMenu({
 
   if (stepCount === 0 && !fastCapable) return null;
 
-  const pickIndex = (clientX: number) => {
-    const track = trackRef.current;
-    if (!track || stepCount <= 0) return;
-    const rect = track.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    const nextIndex = stepCount === 1 ? 0 : Math.round(ratio * (stepCount - 1));
-    const next = levels[nextIndex] ?? "";
-    if (next !== normalized) onChangeThinking(next);
-  };
-
-  const onTrackPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (disabled || stepCount === 0) return;
-    event.preventDefault();
-    draggingRef.current = true;
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    pickIndex(event.clientX);
-  };
-
-  const onTrackPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!draggingRef.current) return;
-    pickIndex(event.clientX);
-  };
-
-  const onTrackPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!draggingRef.current) return;
-    draggingRef.current = false;
+  // Keep the thumb responsive while a session patch is pending. Serialize final
+  // choices and coalesce rapid repeats so an older reply cannot win the race.
+  const commitLevel = async (level: string) => {
+    if (level === displayedLevel) return;
+    setPendingLevel(level);
+    queuedLevelRef.current = level;
+    if (savingRef.current) return;
+    savingRef.current = true;
     try {
-      (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+      while (mountedRef.current && queuedLevelRef.current !== null) {
+        const next = queuedLevelRef.current;
+        queuedLevelRef.current = null;
+        await onChangeThinking(next);
+      }
     } catch {
-      /* ignore */
+      // The caller owns save errors; restore the last confirmed session value.
+      queuedLevelRef.current = null;
+    } finally {
+      savingRef.current = false;
+      if (mountedRef.current) setPendingLevel(null);
     }
   };
 
-  const fillPct = stepCount <= 1 ? 0 : (activeIndex / (stepCount - 1)) * 100;
+  const pointerPosition = (clientX: number, offset = 0) => {
+    const track = trackRef.current;
+    if (!track || stepCount <= 1) return 0;
+    const rect = track.getBoundingClientRect();
+    return rect.width > 0 ? Math.min(1, Math.max(0, (clientX - offset - rect.left) / rect.width)) : 0;
+  };
+
+  // The same leading-edge / trailing-shape motion as PillTabs and NavActiveBlob,
+  // capped for a 12px dot: position never overshoots the chosen stop.
+  const animateLiquidThumb = (index: number) => {
+    const fill = thumbFillRef.current;
+    const thumb = thumbRef.current?.getBoundingClientRect();
+    const track = trackRef.current?.getBoundingClientRect();
+    if (!fill || !thumb || !track || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const distance = track.left + (stepCount <= 1 ? 0 : index / (stepCount - 1)) * track.width - (thumb.left + thumb.width / 2);
+    const from = getComputedStyle(fill).transform;
+    shapeAnimationRef.current?.cancel();
+    const stretch = Math.min(Math.abs(distance) * .32, 6) / 12;
+    fill.style.transformOrigin = distance >= 0 ? "right center" : "left center";
+    shapeAnimationRef.current = fill.animate([
+      { transform: from },
+      { transform: `scaleX(${1 + stretch}) scaleY(${1 - stretch * .24})`, offset: .19 },
+      { transform: "scale(1)" },
+    ], { duration: 330, easing: "ease-in-out" });
+  };
+
+  const onTrackPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (disabled || stepCount === 0 || draggingRef.current || !event.isPrimary || event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    const thumb = !!thumbRef.current?.contains(event.target as Node);
+    const rect = thumbRef.current?.getBoundingClientRect();
+    // The generous grab halo must not introduce a half-step pointer offset.
+    const offset = thumb && rect ? Math.max(-6, Math.min(6, event.clientX - (rect.left + rect.width / 2))) : 0;
+    draggingRef.current = { pointerId: event.pointerId, startX: event.clientX, offset, thumb, moved: false, index: activeIndex };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    shapeAnimationRef.current?.cancel();
+    setAnimateThumb(true);
+    if (thumb) setDragPosition(pointerPosition(event.clientX, offset));
+  };
+
+  const onTrackPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = draggingRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const delta = event.clientX - drag.startX;
+    drag.moved ||= Math.abs(delta) >= 3;
+    if (drag.moved) {
+      const position = pointerPosition(event.clientX, drag.offset);
+      // A quarter-step toward a neighbour is enough. Apply the same generous
+      // target during preview and release, rather than changing it on lift.
+      const bias = drag.thumb && Math.abs(delta) >= 3 ? Math.sign(delta) * .25 : 0;
+      const target = position * Math.max(0, stepCount - 1) + bias;
+      const index = bias < 0 ? Math.ceil(target - .5) : Math.floor(target + .5);
+      drag.index = Math.max(0, Math.min(stepCount - 1, index));
+      setDragPosition(position);
+    }
+  };
+
+  const finishDrag = (event: ReactPointerEvent<HTMLDivElement>, commit: boolean) => {
+    const drag = draggingRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    draggingRef.current = null;
+    setDragPosition(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (commit && !disabled) {
+      const index = drag.moved ? drag.index : Math.round(pointerPosition(event.clientX) * Math.max(0, stepCount - 1));
+      // A tap on the resting thumb preserves inheritance. A click that
+      // interrupts its travel still selects the point under the pointer.
+      if (drag.moved || !drag.thumb || index !== activeIndex) {
+        animateLiquidThumb(index);
+        void commitLevel(levels[index] ?? "");
+      }
+    }
+  };
+
+  const fillPct = (dragPosition ?? (stepCount <= 1 ? 0 : activeIndex / (stepCount - 1))) * 100;
 
   return (
     <span className="chat-think-fast-menu">
@@ -206,6 +331,7 @@ export default function ChatThinkFastMenu({
         aria-expanded={open}
         title={`${t("chat.effortLabel")}: ${faceLabel}${fastOn ? ` · ${t("chat.fastLabel")}` : ""}`}
       >
+        {fastOn && <span className="chat-pill--think-fast__bolt" aria-hidden="true"><BoltIcon iconRef={faceBoltRef} /></span>}
         <span className="chat-pill--think-fast__label">{faceLabel}</span>
       </button>
       {open && createPortal(
@@ -233,7 +359,7 @@ export default function ChatThinkFastMenu({
                 disabled={disabled}
                 onClick={() => onChangeFast(!fastOn)}
               >
-                <BoltIcon />
+                <BoltIcon iconRef={popupBoltRef} />
               </button>
             )}
           </div>
@@ -242,20 +368,23 @@ export default function ChatThinkFastMenu({
               <div
                 ref={trackRef}
                 className="think-fast-menu__slider"
+                data-dragging={dragPosition !== null || undefined}
+                data-animate={animateThumb || undefined}
                 role="slider"
                 tabIndex={disabled ? -1 : 0}
                 aria-valuemin={0}
                 aria-valuemax={Math.max(0, stepCount - 1)}
-                aria-valuenow={activeIndex}
+                aria-valuenow={previewIndex}
                 aria-valuetext={currentStepLabel}
                 aria-label={t("chat.effortLabel")}
                 aria-disabled={disabled || undefined}
                 onPointerDown={onTrackPointerDown}
                 onPointerMove={onTrackPointerMove}
-                onPointerUp={onTrackPointerUp}
-                onPointerCancel={onTrackPointerUp}
+                onPointerUp={(event) => finishDrag(event, true)}
+                onPointerCancel={(event) => finishDrag(event, false)}
+                onLostPointerCapture={(event) => finishDrag(event, false)}
                 onKeyDown={(event) => {
-                  if (disabled || stepCount === 0) return;
+                  if (disabled || stepCount === 0 || draggingRef.current) return;
                   let next = activeIndex;
                   if (event.key === "ArrowLeft" || event.key === "ArrowDown" || event.key === "Home") {
                     event.preventDefault();
@@ -266,21 +395,27 @@ export default function ChatThinkFastMenu({
                   } else {
                     return;
                   }
+                  shapeAnimationRef.current?.cancel();
+                  setAnimateThumb(false);
                   const level = levels[next] ?? "";
-                  if (level !== normalized) onChangeThinking(level);
+                  void commitLevel(level);
                 }}
               >
                 <div className="think-fast-menu__track" />
-                <div className="think-fast-menu__fill" style={{ width: `${fillPct}%` }} />
                 <div className="think-fast-menu__dots" aria-hidden="true">
                   {levels.map((lvl, i) => (
-                    <i key={`${lvl || "default"}-${i}`} className={i <= activeIndex ? "is-lit" : undefined} />
+                    <i key={`${lvl || "default"}-${i}`} />
                   ))}
                 </div>
                 <div
-                  className="think-fast-menu__thumb"
-                  style={{ left: `${fillPct}%` }}
-                />
+                  className="think-fast-menu__thumb-position"
+                  style={{ transform: `translateX(${fillPct}%)` }}
+                  aria-hidden="true"
+                >
+                  <div ref={thumbRef} className="think-fast-menu__thumb">
+                    <span ref={thumbFillRef} className="think-fast-menu__thumb-fill" />
+                  </div>
+                </div>
               </div>
             </div>
           )}

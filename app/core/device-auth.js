@@ -18,6 +18,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
+const { resolveOpenclawBin, resolveOpenclawProgram } = require("../cli-runtime/openclaw");
 
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 const CLIENT_ID = "openclaw-control-ui";
@@ -116,10 +117,53 @@ function normalizeGatewayUrl(url) {
  * 形状:{ version:1, identity:{...,createdAtMs}, deviceTokens:{[url]:{token,issuedAtMs}} }
  * SECURITY: 内容含私钥与设备令牌,绝不日志。
  */
-function createCredentialsStore(credentialsDir) {
+function createCredentialsStore(credentialsDir, { strictPrivateFiles = false } = {}) {
   const file = path.join(credentialsDir, "device-credentials.json");
 
+  function assertPrivateDirectory(create = false) {
+    if (!strictPrivateFiles) return;
+    if (!path.isAbsolute(credentialsDir) || path.resolve(credentialsDir) !== credentialsDir) {
+      throw Object.assign(new Error("Managed credentials path is unsafe"), { code: "MANAGED_HOST_PRIVATE_PATH_UNSAFE" });
+    }
+    let current = path.parse(credentialsDir).root;
+    for (const part of credentialsDir.slice(current.length).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part);
+      let stat;
+      try { stat = fs.lstatSync(current); } catch (error) {
+        if (error.code !== "ENOENT" || !create) throw error;
+        fs.mkdirSync(current, { mode: 0o700 }); stat = fs.lstatSync(current);
+      }
+      if (!stat.isDirectory() || stat.isSymbolicLink()
+        || (current === credentialsDir && ((stat.mode & 0o077) !== 0
+          || (process.getuid && stat.uid !== process.getuid())))) {
+        throw Object.assign(new Error("Managed credentials path is unsafe"), { code: "MANAGED_HOST_PRIVATE_PATH_UNSAFE" });
+      }
+    }
+  }
+  function assertPrivateFile(stat) {
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 1024 * 1024
+      || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+      throw Object.assign(new Error("Managed credentials file is unsafe"), { code: "MANAGED_HOST_PRIVATE_FILE_UNSAFE" });
+    }
+  }
   function readFile() {
+    if (strictPrivateFiles) {
+      assertPrivateDirectory(true);
+      let before;
+      try { before = fs.lstatSync(file); } catch (error) { if (error.code === "ENOENT") return {}; throw error; }
+      assertPrivateFile(before);
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      try {
+        const start = fs.fstatSync(fd); assertPrivateFile(start);
+        if (start.dev !== before.dev || start.ino !== before.ino) throw Object.assign(new Error("Managed identity changed"), { code: "MANAGED_HOST_FILE_CHANGED" });
+        const raw = fs.readFileSync(fd, "utf8"), after = fs.fstatSync(fd);
+        if (after.size !== start.size || after.ctimeMs !== start.ctimeMs || after.mtimeMs !== start.mtimeMs) {
+          throw Object.assign(new Error("Managed identity changed"), { code: "MANAGED_HOST_FILE_CHANGED" });
+        }
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } finally { fs.closeSync(fd); }
+    }
     try {
       const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
       return parsed && typeof parsed === "object" ? parsed : {};
@@ -129,6 +173,20 @@ function createCredentialsStore(credentialsDir) {
   }
 
   function writeFile(data) {
+    if (strictPrivateFiles) {
+      assertPrivateDirectory(true);
+      // Existing keys must be safe before atomic replacement as well.
+      if (fs.existsSync(file)) readFile();
+      const temporary = path.join(credentialsDir, `.device-credentials-${crypto.randomUUID()}`);
+      const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+      try { fs.writeFileSync(fd, JSON.stringify(data, null, 2)); fs.fsyncSync(fd); }
+      finally { fs.closeSync(fd); }
+      try { fs.renameSync(temporary, file); }
+      catch (error) { try { fs.unlinkSync(temporary); } catch {} throw error; }
+      const dir = fs.openSync(credentialsDir, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+      return;
+    }
     fs.mkdirSync(credentialsDir, { recursive: true, mode: 0o700 });
     const tmpFile = `${file}.tmp`;
     try {
@@ -290,41 +348,15 @@ const localTokenReveals = new Map();
 
 function resolveOpenclawBinForTokenReveal(injected) {
   if (injected) return injected;
-  const candidates = [
-    process.env.OPENCLAW_BIN,
-    "/opt/homebrew/bin/openclaw",
-    "/usr/local/bin/openclaw",
-    path.join(os.homedir(), ".npm-global", "bin", "openclaw"),
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    try {
-      if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      /* try next candidate */
-    }
-  }
-  const searchPath = [
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    path.join(os.homedir(), ".npm-global", "bin"),
-    ...(process.env.PATH || "").split(":"),
-  ];
-  for (const dir of searchPath) {
-    const candidate = path.join(dir, "openclaw");
-    try {
-      if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      /* try next candidate */
-    }
-  }
-  return null;
+  const bin = resolveOpenclawBin();
+  return path.isAbsolute(bin) ? bin : null;
 }
 
 function gatewayTokenRevealProgram(bin) {
   let entry;
   let authModuleUrl = null;
   try {
-    entry = fs.realpathSync(bin);
+    entry = resolveOpenclawProgram(bin).entryPath;
     const dist = path.join(path.dirname(entry), "dist");
     const authModule = fs
       .readdirSync(dist)
@@ -354,14 +386,16 @@ function gatewayTokenRevealProgram(bin) {
 function tokenRevealInvocation(configPath, openclawBin) {
   const bin = resolveOpenclawBinForTokenReveal(openclawBin);
   if (!bin) return null;
+  const { interpreterPath } = resolveOpenclawProgram(bin);
   const extraPath = [
+    ...(interpreterPath ? [path.dirname(interpreterPath)] : []),
     path.dirname(bin),
     "/opt/homebrew/bin",
-    "/opt/homebrew/opt/node@22/bin",
     "/usr/local/bin",
   ];
   return {
-    command: "/usr/bin/env", args: ["node", "-e", gatewayTokenRevealProgram(bin)],
+    command: interpreterPath || "/usr/bin/env",
+    args: [...(interpreterPath ? [] : ["node"]), "-e", gatewayTokenRevealProgram(bin)],
     options: {
       encoding: "utf8",
       timeout: TOKEN_REVEAL_TIMEOUT_MS,
@@ -512,8 +546,9 @@ function createAuthResolver({
   credentialsDir,
   operatorIdentityDir = path.join(os.homedir(), ".openclaw", "identity"),
   localGatewayConfigPath = path.join(os.homedir(), ".openclaw", "openclaw.json"),
+  strictPrivateFiles = false,
 } = {}) {
-  const store = createCredentialsStore(credentialsDir);
+  const store = createCredentialsStore(credentialsDir, { strictPrivateFiles });
 
   function configuredGatewayUrl() {
     const cfg = getConfig ? getConfig() : {};
@@ -540,7 +575,10 @@ function createAuthResolver({
   }
 
   function authWithSharedToken(url, sharedToken) {
-    const operator = loadOperatorAuth(operatorIdentityDir);
+    // A managed shared-token connection owns its fresh App identity only.
+    // Do not inspect a CLI identity or silently swallow private-file failures.
+    if (strictPrivateFiles && !sharedToken) throw Object.assign(new Error("Managed Gateway token missing"), { code: "MANAGED_HOST_ENDPOINT_UNVERIFIED" });
+    const operator = strictPrivateFiles ? null : loadOperatorAuth(operatorIdentityDir);
     // 有真共享密钥时用 app 自己的身份,不复用 CLI 身份(R126):CLI 设备在网关里
     // 带着旧审批基线(常被探测收窄),满额请求会触发"scope 升级审批"卡人工;
     // 全新身份 + token 走网关自动注册,基线即所请求,零审批(S1 live 实测)。
@@ -549,7 +587,8 @@ function createAuthResolver({
     if (!identity) {
       try {
         identity = store.loadOrCreateIdentity();
-      } catch {
+      } catch (error) {
+        if (strictPrivateFiles) throw error;
         return null; // 磁盘不可写等极端情况;调用方保留错误路径
       }
     }

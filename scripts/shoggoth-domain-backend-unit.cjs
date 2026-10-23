@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const test = require("node:test");
 
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { bindingId } = require("../app/agent-service/agent-runtime-binding");
 const {
   MAX_CONTENT_READ_BYTES,
   createContentMeta,
@@ -52,10 +53,11 @@ function chatSession(profileId, index) {
     id,
     sessionKey: id,
     profileId,
-    codexThreadId: null,
+    runtimeSessionId: null,
     workspace: null,
     title: `Session ${index + 1}`,
     modelOverride: null,
+    permissionMode: null,
     status: "draft",
     createdAt: 100,
     updatedAt: 100,
@@ -145,6 +147,10 @@ function artifact(overrides = {}) {
   };
 }
 
+const RUN_RUNTIME = {
+  runtime: "codex", runtimeProfileId: "shoggoth-profile", runtimeAccountId: "shoggoth-internal-codex-default-v1",
+};
+
 function workRun(overrides = {}) {
   const status = overrides.status || "queued";
   const terminal = ["completed", "failed", "canceled", "interrupted", "skipped"].includes(status);
@@ -157,8 +163,9 @@ function workRun(overrides = {}) {
     profileId: PROFILE_ID,
     workspace: null,
     status,
-    codexThreadId: active || terminal ? "thread-private" : null,
-    codexTurnId: active || terminal ? "turn-private" : null,
+    contextSnapshotId: null,
+    runtimeSessionRef: active || terminal ? { ...RUN_RUNTIME, sessionId: "thread-private" } : null,
+    runtimeTurnRef: active || terminal ? { ...RUN_RUNTIME, sessionId: "thread-private", turnId: "turn-private" } : null,
     eventSeq: 1,
     waitingRequestId: null,
     startedAt: active || terminal ? 110 : null,
@@ -206,6 +213,23 @@ function fakeBackend(handler, options = {}) {
     paths: { tokenPath: "/private/client.token" },
     readToken: () => "fresh-private-token",
     requestService: async (_paths, request) => {
+      if (request.method === "agent.binding.sync") {
+        const profile = profiles.find(value => value.id === request.params.profileId);
+        assert.ok(profile, "binding sync stays within the fixture profiles");
+        const id = bindingId(profile.id, profile.runtimeProfileId);
+        return {
+          bindings: [{ id, profileId: profile.id, runtime: profile.runtime,
+            runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId,
+            label: null, enabled: true, revision: 1, createdAt: 1, updatedAt: 1 }],
+          defaultBindingId: id, revision: 1, canAdd: false,
+        };
+      }
+      if (request.method === "codex.automation.owner") return { ownerProfileId: null, ownerAgentId: null };
+      if (request.method === "codex.automation.source") return {
+        origin: "codex-desktop", ownerProfileId: null, ownerAgentId: null, backendId: "shoggoth",
+        timeZone: "UTC", scheduler: "codex-desktop", clientRefreshRequired: true,
+        available: false, canCreate: false, reason: "CODEX_AUTOMATION_OWNER_UNAVAILABLE", unavailable: [],
+      };
       calls.push(structuredClone(request));
       if (request.method === "service.status") {
         return {
@@ -951,16 +975,8 @@ test("board creation rejects undeclared capabilities before contacting Service",
   assert.equal(fixture.calls.some((call) => call.method === "kanban.board.create"), false);
 });
 
-test("peer native facade stamps canonical Cron ids and probes legacy resource ownership by profile", async () => {
-  const codexProfile = chatProfile({
-    backendId: "codex",
-    agentId: "shoggoth-codex",
-    name: "Codex",
-    runtimeProfileId: "runtime-codex",
-    providerRef: null,
-    defaultModel: null,
-    isDefault: false,
-  });
+// Per-runtime peer facades were retired in 0.8.136; the single facade still probes ownership by profile.
+test("native facade stamps canonical Cron ids and probes resource ownership by profile", async () => {
   let foreign = false;
   const fixture = await readyBackend((request) => {
     const profileId = foreign ? OTHER_PROFILE_ID : PROFILE_ID;
@@ -970,17 +986,11 @@ test("peer native facade stamps canonical Cron ids and probes legacy resource ow
     if (request.method === "kanban.card.get") return { card: card({ profileId }) };
     if (request.method === "run.get") return { run: workRun({ profileId }) };
     throw new Error(`unexpected ${request.method}`);
-  }, {
-    id: "codex",
-    name: "Codex",
-    connectionMode: "native-runtime",
-    claimsAgentId: (agentId) => agentId === "shoggoth-codex",
-    profiles: [codexProfile],
   });
   const [job] = await fixture.backend.getCronJobs();
-  assert.equal(job.id, `codex:${JOB_ID}`);
-  assert.equal(job.backendId, "codex");
-  assert.equal((await fixture.backend.getCronJob(`shoggoth:${JOB_ID}`)).id, `codex:${JOB_ID}`);
+  assert.equal(job.id, `shoggoth:${JOB_ID}`);
+  assert.equal(job.backendId, "shoggoth");
+  assert.equal((await fixture.backend.getCronJob(`shoggoth:${JOB_ID}`)).id, `shoggoth:${JOB_ID}`);
   assert.equal(await fixture.backend.ownsResourceId("cron", `shoggoth:${JOB_ID}`), true);
   assert.equal(await fixture.backend.ownsResourceId("kanban", CARD_ID), true);
   assert.equal(await fixture.backend.ownsResourceId("dashboard-run", "run-current"), true);
@@ -1156,7 +1166,7 @@ test("Cron mutations preserve exact profile identity and reverse ISO at schedule
   const createCall = fixture.calls.find((call) => call.method === "cron.job.create");
   assert.equal(createCall.params.profileId, PROFILE_ID);
   assert.deepEqual(createCall.params.schedule, { kind: "at", at: Date.parse(iso) });
-  assert.equal(createCall.params.threadPolicy, "new");
+  assert.equal(createCall.params.threadPolicy, "continue");
   assert.equal(createCall.params.threadId, null);
 
   await fixture.backend.createCronJob({

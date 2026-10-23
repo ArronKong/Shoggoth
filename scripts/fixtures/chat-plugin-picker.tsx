@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import ChatPluginPicker, { type ChatPluginSelection } from "../../app/manage-ui/src/pages/ChatPluginPicker";
+import { usePluginSelectionReadiness } from "../../app/manage-ui/src/lib/usePluginSelectionReadiness";
 import { applyConfiguredLocale } from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
@@ -18,11 +19,14 @@ const rows = [
   { installationId: "omega", revision: 6, packageName: "Omega long plugin name that must not force horizontal scrolling", desiredState: "enabled", components: [{ title: "Writer", kind: "skill", state: "ready" }] },
 ];
 scope.fixtureReads = [];
+scope.probeRequests = [];
 window.fetch = async input => {
   const route = String(input);
   scope.fixtureReads.push(route);
   let body: unknown;
-  if (route.startsWith("/__api/plugins?")) {
+  if (route.startsWith("/__api/plugins/selection-readiness?")) {
+    return new Promise<Response>(resolve => scope.probeRequests.push({ route, resolve }));
+  } else if (route.startsWith("/__api/plugins?")) {
     const params = new URL(route, "https://fixture.invalid").searchParams;
     const cursor = Number(params.get("cursor"));
     body = { page: { supported: true, catalogRevision: "fixed-revision", items: rows.slice(cursor, cursor + 3),
@@ -37,13 +41,24 @@ window.fetch = async input => {
   return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 };
 applyConfiguredLocale("zh-CN");
+function Probe() {
+  const [context, setContext] = useState({ backend: "openclaw", agent: "main", sessionKey: "agent:main:first", connected: true });
+  const [selected, setSelected] = useState<ChatPluginSelection[]>([]);
+  const readiness = usePluginSelectionReadiness(context.backend, context.agent, context.sessionKey, context.connected);
+  scope.setProbeContext = setContext; scope.refreshProbe = readiness.refresh;
+  scope.probeState = readiness;
+  return <div id="probe"><ChatPluginPicker backendId={context.backend} sessionKey={context.sessionKey}
+    selectionSupported={readiness.supported} selectionChecking={readiness.checking} onRetryReadiness={readiness.refresh}
+    selected={selected} onChange={setSelected} onBrowse={() => {}} /></div>;
+}
 function Fixture() {
   const [selected, setSelected] = useState<ChatPluginSelection[]>([]);
   return <main style={{ maxWidth: 860, margin: "0 auto", padding: "450px 16px 24px" }}>
-    <div id="normal"><ChatPluginPicker sessionKey="agent:shoggoth:one" backendId="shoggoth"
+    <Probe />
+    <div id="normal"><ChatPluginPicker sessionKey="agent:shoggoth:one" backendId="shoggoth" selectionSupported={true}
       selected={selected} onChange={setSelected} onBrowse={id => { scope.browsed = id ?? "catalog"; }} /></div>
     <div id="immersive" style={{ marginTop: 28, color: "#eee", background: "#252932", padding: 16, borderRadius: 16 }}>
-      <ChatPluginPicker sessionKey="agent:shoggoth:one" backendId="shoggoth"
+      <ChatPluginPicker sessionKey="agent:shoggoth:one" backendId="shoggoth" selectionSupported={true}
         selected={selected} onChange={setSelected} onBrowse={id => { scope.browsed = id ?? "catalog"; }} />
     </div>
     <div id="external" style={{ marginTop: 28 }}><ChatPluginPicker sessionKey="agent:hermes:one"
@@ -96,7 +111,42 @@ scope.runChatPluginPickerFixture = async () => {
   await wait(() => scope.browsed === "beta" && !document.querySelector("#normal [role=dialog]"));
   trigger.click();
   await wait(() => !!document.querySelector("#normal [role=dialog]"));
-  return { sharedSelection: true, pagination: true, disabledHost: true,
+  await wait(() => scope.probeRequests.length === 1);
+  const resolveProbe = (index: number, body: unknown, status = 200) => scope.probeRequests[index].resolve(
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
+  const probeTrigger = () => document.querySelector<HTMLButtonElement>("#probe button")!;
+  if (!probeTrigger().disabled || !scope.probeState.checking) throw Error("readiness initially assumed true");
+  resolveProbe(0, { version: 1, supported: true });
+  await wait(() => !probeTrigger().disabled);
+  probeTrigger().click(); await wait(() => document.querySelectorAll("#probe label").length === 5);
+  document.querySelector<HTMLInputElement>("#probe label input")!.click();
+  await wait(() => document.querySelector("#probe")?.textContent?.includes("Alpha 设计工具"));
+  const requestsBeforeSwitch = scope.fixtureReads.length;
+  scope.setProbeContext({ backend: "hermes", agent: "hermes-one", sessionKey: "agent:hermes-one:second", connected: true });
+  await wait(() => scope.probeRequests.length === 2 && probeTrigger().disabled && !document.querySelector("#probe [role=dialog]"));
+  scope.setProbeContext({ backend: "openclaw", agent: "main", sessionKey: "agent:main:third", connected: true });
+  await wait(() => scope.probeRequests.length === 3);
+  resolveProbe(1, { version: 1, supported: true }); await pause(60);
+  if (!probeTrigger().disabled || !scope.probeState.checking) throw Error("old Host response enabled new scope");
+  resolveProbe(2, { version: 1, supported: false }); await wait(() => !scope.probeState.checking);
+  if (!probeTrigger().disabled) throw Error("unsupported Host picker opened");
+  const remove = Array.from(document.querySelectorAll<HTMLButtonElement>("#probe button")).find(button => button.getAttribute("aria-label")?.includes("移除"));
+  if (!remove) throw Error("unsupported Host hides removable existing draft chip");
+  remove.click(); await wait(() => !document.querySelector("#probe")?.textContent?.includes("Alpha 设计工具"));
+  const retry = Array.from(document.querySelectorAll<HTMLButtonElement>("#probe button")).find(button => button.textContent?.includes("重新检测"));
+  if (!retry || retry.disabled) throw Error("failed readiness has no retry");
+  retry.click(); await wait(() => scope.probeRequests.length === 4);
+  if (!probeTrigger().disabled) throw Error("retry retained prior readiness");
+  resolveProbe(3, { version: 1, supported: true, token: "must not qualify" }); await wait(() => !scope.probeState.checking);
+  if (!probeTrigger().disabled) throw Error("invalid readiness response enabled picker");
+  scope.refreshProbe(); await wait(() => scope.probeRequests.length === 5);
+  resolveProbe(4, { version: 1, supported: true }); await wait(() => !probeTrigger().disabled);
+  scope.setProbeContext({ backend: "openclaw", agent: "main", sessionKey: "agent:main:third", connected: false });
+  await wait(() => probeTrigger().disabled && !scope.probeState.checking);
+  if (scope.fixtureReads.slice(requestsBeforeSwitch).some((read: string) => read.startsWith("/__api/plugins?") && !read.includes("backend=shoggoth")))
+    throw Error("external picker used a per-Agent catalog");
+  return { readinessRace: true, supportedExternalPicker: true, invalidReadinessFailsClosed: true,
+    removableUnsupportedChip: true, disconnectedHost: true, sharedSelection: true, pagination: true, disabledHost: true,
     unavailableMcp: true, setupRoute: true, keyboardClose: true };
 };
 scope.captureChatPluginPicker = (theme: string) => {

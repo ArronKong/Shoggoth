@@ -1,0 +1,35 @@
+// deno-fmt-ignore-file
+// deno-lint-ignore-file
+import { EnableParseErrors, DisableParseErrors } from '../system/settings/internal.mjs';
+import { Arguments } from '../system/arguments/index.mjs';
+import { Check } from './check.mjs';
+import { Errors } from './errors.mjs';
+// ------------------------------------------------------------------
+// ParseError
+// ------------------------------------------------------------------
+export class ParseError {
+    constructor(schema, value, errors) {
+        this.schema = schema;
+        this.value = value;
+        this.errors = errors;
+    }
+}
+// ------------------------------------------------------------------
+// ThrowParseError
+// ------------------------------------------------------------------
+export function ThrowParseError(context, schema, value) {
+    EnableParseErrors();
+    const result = Errors(context, schema, value);
+    DisableParseErrors();
+    throw new ParseError(schema, value, result[1]);
+}
+/** Parses a value against the provided schema */
+export function Parse(...args) {
+    const [context, schema, value] = Arguments.Match(args, {
+        3: (context, schema, value) => [context, schema, value],
+        2: (schema, value) => [{}, schema, value]
+    });
+    if (Check(context, schema, value))
+        return value;
+    ThrowParseError(context, schema, value);
+}

@@ -212,6 +212,20 @@ class RuntimeAccountAdmission {
     return true;
   }
 
+  // A count of active runs cannot prove that this exact Run is still admitted.
+  // This only observes the current authority; it never occupies or renews a slot.
+  assertRunAdmitted(input) {
+    this.assertGeneration(input);
+    if (!validOpaqueId(input?.runId)) {
+      throw admissionError("RUNTIME_ACCOUNT_ADMISSION_INVALID", "Runtime account run id is invalid");
+    }
+    const state = this.#state(input.runtimeAccountId);
+    if (state.mutation !== null || !state.active.has(input.runId)) {
+      throw admissionError("RUNTIME_ACCOUNT_RUN_NOT_ADMITTED", "Runtime account Run is no longer admitted");
+    }
+    return true;
+  }
+
   read(runtimeAccountId) {
     const account = this.#account(runtimeAccountId);
     const state = this.#state(account.id);

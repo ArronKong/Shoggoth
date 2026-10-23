@@ -5,13 +5,13 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const { TextDecoder } = require("node:util");
 const { lstatIfExists, serviceError } = require("./security");
+const { isSkillPackagingArtifact } = require("./skill-package-format");
 
 const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_PACKAGE_FILES = 256;
 const MAX_PACKAGE_DEPTH = 8;
-const ROOT_ENTRIES = new Set(["SKILL.md", "skill.json", "scripts", "references", "assets"]);
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_SIGNATURE = 0x02014b50;
 const LOCAL_SIGNATURE = 0x04034b50;
@@ -54,11 +54,10 @@ function canonicalName(name) {
   return { name: trimmed, parts, directory };
 }
 function packagePath(parts) {
-  if (parts.length === 0 || parts.length > MAX_PACKAGE_DEPTH || !ROOT_ENTRIES.has(parts[0])) {
-    throw archiveError("SKILL_PATH_INVALID", "ZIP 包含未知根条目或嵌套过深");
-  }
-  if (parts.length === 1 && !["SKILL.md", "skill.json", "scripts", "references", "assets"].includes(parts[0])) {
-    throw archiveError("SKILL_PATH_INVALID", "ZIP 根目录结构无效");
+  if (parts.length === 0 || parts.length > MAX_PACKAGE_DEPTH
+    || parts.some(part => Buffer.byteLength(part, "utf8") > 255)
+    || Buffer.byteLength(parts.join("/"), "utf8") > 1024) {
+    throw archiveError("SKILL_PATH_INVALID", "ZIP 包含无效路径或嵌套过深");
   }
   return parts.join("/");
 }
@@ -140,14 +139,15 @@ function parseEntries(bytes) {
   return { entries, centralOffset };
 }
 function stripPackageRoot(entries) {
+  entries = entries.filter(entry => !isSkillPackagingArtifact(entry.parts));
   const fileNames = new Set(entries.filter((entry) => !entry.directory).map((entry) => entry.name));
   let prefix = "";
-  if (!fileNames.has("skill.json") || !fileNames.has("SKILL.md")) {
+  if (!fileNames.has("SKILL.md")) {
     const roots = new Set(entries.map((entry) => entry.parts[0]));
     if (roots.size !== 1) throw archiveError("SKILL_MANIFEST_INVALID", "ZIP 缺少根级 Skill 清单");
     prefix = `${[...roots][0]}/`;
-    if (!fileNames.has(`${prefix}skill.json`) || !fileNames.has(`${prefix}SKILL.md`)) {
-      throw archiveError("SKILL_MANIFEST_INVALID", "ZIP 缺少 skill.json 或 SKILL.md");
+    if (!fileNames.has(`${prefix}SKILL.md`)) {
+      throw archiveError("SKILL_MANIFEST_INVALID", "ZIP 缺少根级 SKILL.md");
     }
   }
   const normalized = [];

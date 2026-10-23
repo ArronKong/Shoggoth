@@ -31,6 +31,7 @@ function assertCurrentStorageBaseline(paths) {
   }
   for (const [relative, field, version] of [
     ["chat-sessions.json", "version", 8], ["native-cron.json", "version", 3],
+    ["cron-authorizations-v1.json", "version", 1],
     ["native-kanban.json", "version", 4], ["account-auth-state-v2.json", "version", 2],
     ["runtime-session-ownership/ownership-v1.json", "version", 2],
     ["skills/registry.json", "schemaVersion", 2],
@@ -54,6 +55,16 @@ function assertCurrentStorageBaseline(paths) {
     "account-auth-state.json", "runtime-account-migration-v1.json",
     "memory-authority-v1.json", "native-runtime-imports", "legacy-runtime-homes"]) {
     if (statIfExists(fs, path.join(paths.stateDir, name))) resetRequired();
+  }
+  const hookPath = paths.hookDatabasePath || path.join(paths.stateDir, "hooks", "hooks.sqlite");
+  if (statIfExists(fs, hookPath)) {
+    const db = require("./inspiration-database").openDatabase(hookPath, { readOnly: true });
+    try {
+      if (db.prepare("PRAGMA user_version").get().user_version !== 1
+        || db.prepare("PRAGMA quick_check").get().quick_check !== "ok") {
+        throw serviceError("HOOK_STORE_CORRUPT", "Hooks 存储版本或完整性无效");
+      }
+    } finally { db.close(); }
   }
   assertPluginCatalogBaseline(paths);
 }

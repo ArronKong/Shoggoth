@@ -12,4 +12,19 @@ function openRuntimeLedger(slot, create) {
   return slot.promise;
 }
 
-module.exports = { poolLedgerSlot, openRuntimeLedger };
+// A dead execution process must not hide an already committed terminal. This
+// is observation only: never open a ledger, resume work, or contact the CLI.
+// Uncertain writes leave the old in-progress snapshot, which cannot pass here.
+function settledRuntimeSession(host, sessionId) {
+  if (!["failed", "stopping", "stopped"].includes(host.state) || !host.ledger
+    || typeof sessionId !== "string") return null;
+  const session = host.ledger.snapshot().sessions.find(item => item.id === sessionId);
+  if (!session || !session.turns.every(turn => (
+    ["accepted", "failed"].includes(turn.acceptance)
+    && ["completed", "failed", "interrupted", "canceled"].includes(turn.status)
+    && !["RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "RUNTIME_TURN_OUTCOME_UNKNOWN"].includes(turn.errorCode)
+  ))) return null;
+  return session;
+}
+
+module.exports = { poolLedgerSlot, openRuntimeLedger, settledRuntimeSession };

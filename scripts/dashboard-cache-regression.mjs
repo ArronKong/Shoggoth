@@ -305,7 +305,7 @@ for (const [field, invalid] of [
 
 for (const [field, invalid] of [
   ["path", {}], ["name", {}], ["area", {}], ["mtimeMs", Infinity], ["kind", {}],
-  ["agentId", {}], ["ext", {}], ["size", {}],
+  ["agentId", {}], ["agentName", {}], ["ext", {}], ["size", {}],
 ]) {
   test(`artifact items 拒绝不安全字段 ${field}`, () => {
     const item = { path: "/tmp/report.txt", name: "report.txt", area: "workspace", mtimeMs: TODAY_NOON, kind: "doc", [field]: invalid };
@@ -313,6 +313,17 @@ for (const [field, invalid] of [
     assert.equal(encodeDashboardCache(makeSummary({ artifacts }), TODAY_NOON), null);
   });
 }
+
+test("native file source keeps Agent names and partial status through the Dashboard cache", () => {
+  const artifacts = [{ backend: "shoggoth", supported: true, partial: true, items: [{
+    path: "/tmp/native.txt", name: "native.txt", area: "session-reference", mtimeMs: TODAY_NOON,
+    kind: "doc", agentId: "writer", agentName: "Writer",
+  }] }];
+  const raw = encodeDashboardCache(makeSummary({ artifacts }), TODAY_NOON);
+  assert.ok(raw);
+  assert.deepEqual(decodeDashboardCache(raw, TODAY_NOON).artifacts, artifacts);
+  assert.equal(encodeDashboardCache(makeSummary({ artifacts: [{ ...artifacts[0], partial: "yes" }] }), TODAY_NOON), null);
+});
 
 for (const [field, invalid] of [
   ["backend", {}], ["error", {}],
@@ -552,6 +563,19 @@ test("Dashboard 页面接入持久缓存并按统一视图状态渲染", () => {
 });
 
 let passed = 0;
+test("group file cache preserves source metadata and rejects invalid media or a changed backend scope", () => {
+  const item = { attachment: { id: "file-1", name: "报告.txt", mimeType: "text/plain", size: 10 },
+    groupId: "group", groupName: "写作群", messageSeq: 2, backendId: "openclaw", agentId: "writer", agentName: "写手", createdAt: TODAY_NOON };
+  const summary = makeSummary({ groupArtifacts: { supported: true, partial: false, truncated: false, items: [item] } });
+  const raw = encodeDashboardCache(summary, TODAY_NOON);
+  assert.ok(raw);
+  assert.deepEqual(decodeDashboardCache(raw, TODAY_NOON).groupArtifacts.items, [item]);
+  assert.equal(resolveDashboardViewState(undefined, summary, true, null, ["shoggoth"]).data, undefined);
+  for (const bad of [{ ...item, attachment: null }, { ...item, agentName: {} }, { ...item, createdAt: "now" },
+    { ...item, attachment: { ...item.attachment, size: 0 } }]) {
+    assert.equal(encodeDashboardCache(makeSummary({ groupArtifacts: { supported: true, items: [bad] } }), TODAY_NOON), null);
+  }
+});
 for (const { name, run } of tests) {
   try {
     run();

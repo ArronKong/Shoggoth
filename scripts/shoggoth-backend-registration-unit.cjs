@@ -90,7 +90,7 @@ test("registry exposes external backends and one native Shoggoth authority", () 
   })), [
     { id: "openclaw", name: "OpenClaw", connectionMode: "gateway", disconnectable: true },
     { id: "hermes", name: "Hermes", connectionMode: "managed-service", disconnectable: true },
-    { id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service", disconnectable: false },
+    { id: "shoggoth", name: "Shoggoth", connectionMode: "builtin-service", disconnectable: true },
   ]);
   assert.deepEqual(descriptors.find(({ id }) => id === "shoggoth").surfaces, {
     chat: true, agents: true, models: true, skills: true, usage: true, oauth: true,
@@ -103,10 +103,12 @@ test("registry exposes external backends and one native Shoggoth authority", () 
   });
   for (const remaining of descriptors) {
     registry.setDisabledBackendsProvider(() => descriptors.filter(({ id }) => id !== remaining.id).map(({ id }) => id));
-    assert.deepEqual(registry._activeBackends().map(({ id }) => id), descriptors
-      .filter(descriptor => descriptor.id === remaining.id || descriptor.disconnectable === false).map(({ id }) => id));
-    for (const { id } of descriptors) {
-      assert.equal(registry.getBackend(id)?.id || null, id === remaining.id || id === "shoggoth" ? id : null);
+    assert.deepEqual(registry._activeBackends().map(({ id }) => id), [remaining.id]);
+    for (const { id, connectionMode } of descriptors) {
+      assert.equal(registry.getBackend(id)?.id || null, id === remaining.id ? id : null);
+      // A disconnected built-in service is hidden but keeps serving plugins and Inspiration.
+      assert.equal(registry.getServiceBackend(id)?.id || null,
+        id === remaining.id || connectionMode === "builtin-service" ? id : null);
     }
   }
 });

@@ -1,0 +1,2552 @@
+--- /dev/null
++++ b/tui_gateway/selection_dispatch.py
+@@ -0,0 +1,411 @@
++"""Mandatory, non-model-visible selection admission for normal Desktop turns.
++
++Compatibility proof only: explicit opt-in gate owners, an immutable SQLite receipt,
++and a turn-local context. No ordinary hook may stand in for this admission.
++"""
++from __future__ import annotations
++
++import contextlib
++import contextvars
++import hashlib
++import json
++import re
++import sqlite3
++import threading
++import uuid
++from pathlib import Path
++from types import MappingProxyType
++
++_PROCESS = uuid.uuid4().hex
++_ACTIVE = contextvars.ContextVar("hermes_required_selection_dispatch", default=None)
++_EVENT = contextvars.ContextVar("hermes_selected_event_owner", default=None)
++_FIELDS = {"version", "operation_id", "dispatch_ref", "selection_digest",
++           "required_adapter_id", "adapter_generation"}
++_OPAQUE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
++
++
++class SelectionDispatchError(RuntimeError):
++    def __init__(self, code, message):
++        super().__init__(message)
++        self.code = code
++
++
++def normalize(envelope):
++    if not isinstance(envelope, dict) or set(envelope) != _FIELDS or envelope.get("version") != 1:
++        raise SelectionDispatchError("SELECTION_INVALID", "Invalid selection dispatch envelope")
++    if isinstance(envelope["version"], bool):
++        raise SelectionDispatchError("SELECTION_INVALID", "Invalid selection dispatch version")
++    for key in _FIELDS - {"version", "selection_digest"}:
++        if not isinstance(envelope[key], str) or not _OPAQUE.fullmatch(envelope[key]):
++            raise SelectionDispatchError("SELECTION_INVALID", "Invalid selection dispatch reference")
++    if not isinstance(envelope["selection_digest"], str) or not re.fullmatch(r"[a-f0-9]{64}", envelope["selection_digest"]):
++        raise SelectionDispatchError("SELECTION_INVALID", "Invalid selection digest")
++    return dict(envelope)
++
++
++def register_gate(ctx, callback, *, metadata, finish):
++    from hermes_cli.plugins import _plugin_home_scope, _plugin_settings_entry, load_config_readonly
++    with _plugin_home_scope(ctx._manager.home_path):
++        config = load_config_readonly() or {}
++    if (_plugin_settings_entry(config, ctx.plugin_id) or {}).get("allow_selection_dispatch_gate") is not True:
++        raise SelectionDispatchError("SELECTION_ADAPTER_UNTRUSTED", "Selection gate owner needs operator consent")
++    if not callable(callback) or not callable(finish):
++        raise TypeError("Selection dispatch gate and finish must be callable")
++    if not isinstance(metadata, dict) or set(metadata) != {"instance_id", "agent_id"} or not all(
++        isinstance(value, str) and _OPAQUE.fullmatch(value) for value in metadata.values()
++    ):
++        raise SelectionDispatchError("SELECTION_ADAPTER_METADATA_INVALID", "Selection gate owner metadata is invalid")
++    gates = ctx._manager._selection_dispatch_gates
++    if ctx.plugin_id in gates:
++        raise SelectionDispatchError("SELECTION_ADAPTER_DUPLICATE", "Selection gate already registered")
++    entry = {"callback": callback, "generation": uuid.uuid4().hex, "plugin_id": ctx.plugin_id, "metadata": dict(metadata), "finish": finish}
++    handle = ctx._track_mapping_entry("selection_dispatch_gate", ctx.plugin_id, gates, entry, None)
++    # Registration metadata is issued by the host and immutable to its owner.
++    # It is outside model arguments and does not replace the unload lease.
++    handle.selection_dispatch = MappingProxyType({"version": 1,
++        "required_adapter_id": ctx.plugin_id, "adapter_generation": entry["generation"],
++        **entry["metadata"]})
++    return handle
++
++
++def _manager(home):
++    from hermes_cli.plugins import _plugin_home_scope, _ensure_plugins_discovered
++    with _plugin_home_scope(Path(home)):
++        return _ensure_plugins_discovered()
++
++
++def _gate(home, envelope):
++    from hermes_cli.plugins import _plugin_home_scope, _plugin_settings_entry, load_config_readonly
++    manager = _manager(home)
++    owner = envelope["required_adapter_id"]
++    entry = manager._selection_dispatch_gates.get(owner)
++    loaded = manager._plugins.get(owner)
++    with _plugin_home_scope(Path(home)):
++        config = load_config_readonly() or {}
++    trusted = (_plugin_settings_entry(config, owner) or {}).get("allow_selection_dispatch_gate") is True
++    if not trusted or not entry or not loaded or not loaded.enabled or loaded.error or loaded.module is None:
++        raise SelectionDispatchError("SELECTION_ADAPTER_UNAVAILABLE", "Required trusted selection adapter is unavailable")
++    if entry["generation"] != envelope["adapter_generation"]:
++        raise SelectionDispatchError("SELECTION_ADAPTER_STALE", "Selection adapter generation changed")
++    return manager, entry
++
++
++def capabilities(home):
++    manager = _manager(home)
++    result = []
++    for owner, entry in list(manager._selection_dispatch_gates.items()):
++        probe = {"required_adapter_id": owner, "adapter_generation": entry["generation"]}
++        try:
++            _gate(home, probe)
++        except SelectionDispatchError:
++            continue
++        result.append({"required_adapter_id": owner, "adapter_generation": entry["generation"], **entry["metadata"]})
++    return {"version": 1, "adapters": result}
++
++
++@contextlib.contextmanager
++def _db(home):
++    root = Path(home).resolve(strict=True)
++    target = root / "selection-dispatches.sqlite"
++    if target.is_symlink():
++        raise SelectionDispatchError("SELECTION_STORAGE_UNAVAILABLE", "Selection receipt storage is unsafe")
++    connection = sqlite3.connect(target, timeout=5)
++    target.chmod(0o600)
++    connection.row_factory = sqlite3.Row
++    try:
++        connection.execute("PRAGMA journal_mode=WAL")
++        connection.execute("""CREATE TABLE IF NOT EXISTS selection_dispatches(
++          dispatch_id TEXT PRIMARY KEY, ui_session_id TEXT NOT NULL, owner_session_id TEXT NOT NULL, operation_id TEXT NOT NULL,
++          fingerprint TEXT NOT NULL, envelope TEXT NOT NULL, process_generation TEXT NOT NULL,
++          state TEXT NOT NULL, actual_session_id TEXT, actual_task_id TEXT, actual_turn_id TEXT,
++          error_code TEXT, UNIQUE(owner_session_id, operation_id), UNIQUE(ui_session_id, operation_id))""")
++        with connection:
++            yield connection
++    finally:
++        connection.close()
++
++
++def _receipt(row):
++    envelope = json.loads(row["envelope"])
++    return {"version": 1, "dispatch_id": row["dispatch_id"], **envelope, "state": row["state"],
++            "actual_session_id": row["actual_session_id"], "actual_task_id": row["actual_task_id"],
++            "actual_turn_id": row["actual_turn_id"], "error_code": row["error_code"]}
++
++
++def _recover(db, row):
++    if row["process_generation"] != _PROCESS and row["state"] in {"accepted", "queued", "binding", "bound"}:
++        state = "unknown" if row["state"] in {"binding", "bound"} else "interrupted"
++        db.execute("UPDATE selection_dispatches SET state=?, error_code=? WHERE dispatch_id=?",
++                   (state, "SELECTION_HOST_RESTARTED", row["dispatch_id"]))
++        row = db.execute("SELECT * FROM selection_dispatches WHERE dispatch_id=?", (row["dispatch_id"],)).fetchone()
++    return row
++
++
++def accept(home, ui_session_id, text, envelope, *, owner_session_id):
++    envelope = normalize(envelope)
++    if not isinstance(owner_session_id, str) or not 0 < len(owner_session_id) <= 256:
++        raise SelectionDispatchError("SELECTION_IDENTITY_UNAVAILABLE", "Exact host session owner is unavailable")
++    fingerprint = hashlib.sha256(json.dumps({"text": text, "envelope": envelope},
++        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
++    with _db(home) as db:
++        db.execute("BEGIN IMMEDIATE")
++        row = db.execute("SELECT * FROM selection_dispatches WHERE owner_session_id=? AND operation_id=?",
++                         (owner_session_id, envelope["operation_id"])).fetchone()
++        if row:
++            if row["fingerprint"] != fingerprint:
++                raise SelectionDispatchError("SELECTION_CONFLICT", "Selection operation was used for different input")
++            return _receipt(_recover(db, row)), True
++        _gate(home, envelope)
++        dispatch_id = uuid.uuid4().hex
++        db.execute("INSERT INTO selection_dispatches VALUES(?,?,?,?,?,?,?,?,NULL,NULL,NULL,NULL)",
++            (dispatch_id, ui_session_id, owner_session_id, envelope["operation_id"], fingerprint,
++             json.dumps(envelope, sort_keys=True), _PROCESS, "accepted"))
++        row = db.execute("SELECT * FROM selection_dispatches WHERE dispatch_id=?", (dispatch_id,)).fetchone()
++        return _receipt(row), False
++
++
++def get(home, ui_session_id, operation_id, *, owner_session_id=None):
++    with _db(home) as db:
++        owner_key = "ui_session_id" if owner_session_id is None else "owner_session_id"
++        owner = ui_session_id if owner_session_id is None else owner_session_id
++        row = db.execute(f"SELECT * FROM selection_dispatches WHERE {owner_key}=? AND operation_id=?",
++                         (owner, operation_id)).fetchone()
++        if not row:
++            raise SelectionDispatchError("SELECTION_NOT_FOUND", "Selection dispatch not found for this session")
++        return _receipt(_recover(db, row))
++
++
++def state(home, ui_session_id, envelope, value, error_code=None):
++    with _db(home) as db:
++        db.execute("UPDATE selection_dispatches SET state=?, error_code=? WHERE ui_session_id=? AND operation_id=? AND process_generation=?",
++                   (value, error_code, ui_session_id, envelope["operation_id"], _PROCESS))
++    event_owner = _EVENT.get()
++    if event_owner is not None and event_owner["sid"] == ui_session_id and event_owner["envelope"] == envelope:
++        event_owner["receipt"] = _event_snapshot(home, ui_session_id, envelope)
++
++
++
++
++def _event_snapshot(home, ui_session_id, envelope):
++    with _db(home) as db:
++        row = db.execute("SELECT * FROM selection_dispatches WHERE ui_session_id=? AND operation_id=?",
++                         (ui_session_id, envelope["operation_id"])).fetchone()
++        if row is None or json.loads(row["envelope"]) != envelope:
++            raise SelectionDispatchError("SELECTION_NOT_FOUND", "Selected event owner is unavailable")
++        return {**_receipt(row), "runtime_session_id": row["owner_session_id"]}
++
++
++@contextlib.contextmanager
++def event_scope(home, ui_session_id, envelope, *, emit=None):
++    """Own event identity across a whole normal worker, including terminal frames.
++
++    Never use the session's latest active marker: a queued turn must not label
++    its predecessor's events. Shared snapshot is refreshed only by core state.
++    """
++    owner = None
++    if envelope is not None:
++        envelope = normalize(envelope)
++        owner = {"home": str(home), "sid": ui_session_id, "envelope": envelope,
++                 "receipt": _event_snapshot(home, ui_session_id, envelope), "emit": emit}
++    token = _EVENT.set(owner)
++    try:
++        yield
++    finally:
++        _EVENT.reset(token)
++
++
++def event_sideband(ui_session_id):
++    owner = _EVENT.get()
++    return None if owner is None or owner["sid"] != ui_session_id else dict(owner["receipt"])
++
++
++@contextlib.contextmanager
++def turn_scope(home, ui_session_id, envelope):
++    token = _ACTIVE.set(None if envelope is None else {
++        "home": str(home), "ui_session_id": ui_session_id, "envelope": normalize(envelope)})
++    try:
++        yield
++    finally:
++        _ACTIVE.reset(token)
++
++
++def before_model(agent, task_id, turn_id, *, unsupported_runtime=False):
++    selected = _ACTIVE.get()
++    if selected is None:
++        return ""
++    home, sid, envelope = selected["home"], selected["ui_session_id"], selected["envelope"]
++    actual_session = getattr(agent, "session_id", "")
++    identity = {"runtime_session_id": actual_session, "task_id": task_id, "turn_id": turn_id}
++    try:
++        if not all(isinstance(value, str) and 0 < len(value) <= 256 for value in identity.values()):
++            raise SelectionDispatchError("SELECTION_IDENTITY_UNAVAILABLE", "Exact host turn identity is unavailable")
++        if unsupported_runtime or getattr(agent, "api_mode", None) == "codex_app_server":
++            raise SelectionDispatchError("SELECTION_RUNTIME_UNSUPPORTED", "This selected model runtime is unsupported")
++        from tui_gateway.selection_input import verify_before_model
++        verify_before_model(home, actual_session, envelope["operation_id"])
++        manager, entry = _gate(home, envelope)
++        with _db(home) as db:
++            db.execute("BEGIN IMMEDIATE")
++            row = db.execute("SELECT * FROM selection_dispatches WHERE ui_session_id=? AND operation_id=?", (sid, envelope["operation_id"])).fetchone()
++            if not row or row["process_generation"] != _PROCESS or row["state"] not in {"accepted", "queued"} or json.loads(row["envelope"]) != envelope:
++                raise SelectionDispatchError("SELECTION_ALREADY_CONSUMED", "Selection dispatch cannot run again")
++            if row["owner_session_id"] != actual_session:
++                raise SelectionDispatchError("SELECTION_IDENTITY_CHANGED", "Selected session owner changed before admission")
++            db.execute("UPDATE selection_dispatches SET state='binding', actual_session_id=?, actual_task_id=?, actual_turn_id=? WHERE dispatch_id=?",
++                       (actual_session, task_id, turn_id, row["dispatch_id"]))
++        selected["identity"] = identity
++        selected["entry"] = entry
++        done, result = threading.Event(), {}
++        def invoke():
++            try:
++                result["proof"] = entry["callback"](selection=MappingProxyType(dict(envelope)), identity=MappingProxyType(identity))
++            except BaseException:
++                result["failed"] = True
++            finally:
++                done.set()
++        callback_context = contextvars.copy_context()
++        threading.Thread(target=lambda: callback_context.run(invoke), daemon=True, name="selection-dispatch-gate").start()
++        if not done.wait(2.0):
++            raise SelectionDispatchError("SELECTION_GATE_TIMEOUT", "Selection gate did not accept this turn")
++        if result.get("failed"):
++            raise SelectionDispatchError("SELECTION_GATE_FAILED", "Selection gate rejected this turn")
++        proof = result.get("proof")
++        if not isinstance(proof, dict) or set(proof) != {"dispatch_ref", "selection_digest", "adapter_generation", "context"}:
++            raise SelectionDispatchError("SELECTION_PROOF_INVALID", "Selection gate returned invalid proof")
++        if any(proof[key] != envelope[key] for key in ("dispatch_ref", "selection_digest", "adapter_generation")):
++            raise SelectionDispatchError("SELECTION_PROOF_INVALID", "Selection gate proof does not match this dispatch")
++        context = proof["context"]
++        if not isinstance(context, str) or not context.strip() or len(context) > 8192 or any(
++            envelope[key] in context for key in ("dispatch_ref", "operation_id", "selection_digest", "adapter_generation")
++        ):
++            raise SelectionDispatchError("SELECTION_PROOF_INVALID", "Selection context is invalid")
++        current_manager, current_entry = _gate(home, envelope)
++        if current_manager is not manager or current_entry is not entry:
++            raise SelectionDispatchError("SELECTION_ADAPTER_STALE", "Selection gate owner changed during admission")
++        selected["identity"] = identity
++        selected["context"] = context
++        state(home, sid, envelope, "bound")
++        owner = _EVENT.get()
++        if owner is not None and owner["sid"] == sid and owner["envelope"] == envelope and callable(owner["emit"]):
++            owner["emit"]("selection.dispatch.bound", sid)
++        return context
++    except SelectionDispatchError as exc:
++        state(home, sid, envelope, "failed", exc.code)
++        raise
++
++
++def verify_identity(agent, task_id, turn_id):
++    selected = _ACTIVE.get()
++    if selected is None:
++        return
++    if selected.get("identity") != {"runtime_session_id": agent.session_id, "task_id": task_id, "turn_id": turn_id}:
++        state(selected["home"], selected["ui_session_id"], selected["envelope"], "failed", "SELECTION_IDENTITY_CHANGED")
++        raise SelectionDispatchError("SELECTION_IDENTITY_CHANGED", "Selected host identity changed before model execution")
++
++
++
++def required_multimodal_context():
++    """Only the bound mandatory scope can request multipart API injection."""
++    selected = _ACTIVE.get()
++    if selected is None:
++        return None
++    context = selected.get("context")
++    if "identity" not in selected or not isinstance(context, str) or not context.strip():
++        raise SelectionDispatchError("SELECTION_CONTEXT_MISSING", "Selected multipart context is unavailable")
++    return context
++
++
++def verify_request(agent, task_id, turn_id, request):
++    """Core call boundary, after skippable LLM middleware and before provider IO."""
++    selected = _ACTIVE.get()
++    if selected is None:
++        return
++    home, sid, envelope = selected["home"], selected["ui_session_id"], selected["envelope"]
++    try:
++        verify_identity(agent, task_id, turn_id)
++        _gate(home, envelope)
++        receipt = get(home, sid, envelope["operation_id"])
++        if receipt["state"] != "bound":
++            raise SelectionDispatchError("SELECTION_TURN_NOT_BOUND", "Selection dispatch is not bound")
++        def has_context(value):
++            if isinstance(value, str):
++                return selected["context"] in value
++            if isinstance(value, dict):
++                return any(has_context(item) for item in value.values())
++            if isinstance(value, (list, tuple)):
++                return any(has_context(item) for item in value)
++            return False
++        if selected.get("context") and not has_context(request):
++            raise SelectionDispatchError("SELECTION_CONTEXT_MISSING", "Selected context was removed before model execution")
++    except SelectionDispatchError as exc:
++        state(home, sid, envelope, "failed", exc.code)
++        raise
++
++
++def tool_context(agent, task_id, turn_id):
++    """Mandatory core-owned metadata, propagated to actual tool worker threads."""
++    selected = _ACTIVE.get()
++    if selected is None:
++        return {}
++    home, sid, envelope = selected["home"], selected["ui_session_id"], selected["envelope"]
++    try:
++        verify_identity(agent, task_id, turn_id)
++        _manager_current, entry = _gate(home, envelope)
++        if entry is not selected.get("entry"):
++            raise SelectionDispatchError("SELECTION_ADAPTER_STALE", "Selected tool adapter owner changed")
++        receipt = get(home, sid, envelope["operation_id"])
++        if receipt["state"] != "bound":
++            raise SelectionDispatchError("SELECTION_TURN_NOT_BOUND", "Selected tool turn is not bound")
++        return {"selection_dispatch": MappingProxyType(dict(envelope)),
++                "selection_adapter_instance_id": entry["metadata"]["instance_id"]}
++    except SelectionDispatchError as exc:
++        state(home, sid, envelope, "failed", exc.code)
++        raise
++
++
++def finish_turn(agent, outcome):
++    """Mandatory final receipt for the exact admitted identity; failure is never replayed."""
++    selected = _ACTIVE.get()
++    if selected is None or "entry" not in selected or "context" not in selected:
++        return  # No successful mandatory admission exists to finish.
++    home, sid, envelope = selected["home"], selected["ui_session_id"], selected["envelope"]
++    entry, identity = selected["entry"], selected["identity"]
++    try:
++        if outcome not in {"complete", "stopped", "failed"} or agent.session_id != identity["runtime_session_id"]:
++            raise SelectionDispatchError("SELECTION_FINISH_UNCONFIRMED", "Selected turn completion identity changed")
++        done, result = threading.Event(), {}
++        def invoke():
++            try:
++                result["proof"] = entry["finish"](selection=MappingProxyType(dict(envelope)),
++                    identity=MappingProxyType(dict(identity)), outcome=outcome)
++            except BaseException:
++                result["failed"] = True
++            finally:
++                done.set()
++        callback_context = contextvars.copy_context()
++        threading.Thread(target=lambda: callback_context.run(invoke), daemon=True, name="selection-dispatch-finish").start()
++        if not done.wait(2.0) or result.get("failed"):
++            raise SelectionDispatchError("SELECTION_FINISH_UNCONFIRMED", "Selected turn completion was not confirmed")
++        proof = result.get("proof")
++        if not isinstance(proof, dict) or set(proof) != {"dispatch_ref", "selection_digest", "adapter_generation"} or any(
++            proof[key] != envelope[key] for key in proof
++        ):
++            raise SelectionDispatchError("SELECTION_FINISH_UNCONFIRMED", "Selected turn completion proof is invalid")
++        receipt = get(home, sid, envelope["operation_id"])
++        if receipt["state"] == "bound":
++            state(home, sid, envelope, "complete" if outcome == "complete" else "stopped" if outcome == "stopped" else "failed")
++    except SelectionDispatchError as exc:
++        state(home, sid, envelope, "unknown", exc.code)
++        raise
++
++
++def cancel_pending(home, ui_session_id, envelopes):
++    """Only accepted/queued snapshots are cancelled; a bound turn needs exact finish."""
++    if not envelopes:
++        return
++    with _db(home) as db:
++        db.execute("BEGIN IMMEDIATE")
++        for envelope in envelopes:
++            envelope = normalize(envelope)
++            db.execute("UPDATE selection_dispatches SET state='cancelled', error_code='SELECTION_CANCELLED' WHERE ui_session_id=? AND operation_id=? AND envelope=? AND process_generation=? AND state IN ('accepted','queued')",
++                (ui_session_id, envelope["operation_id"], json.dumps(envelope, sort_keys=True), _PROCESS))
+--- a/tui_gateway/contracts/prompt_voice.py
++++ b/tui_gateway/contracts/prompt_voice.py
+@@ -7,6 +7,8 @@
+ 
+ from __future__ import annotations
+ 
++from typing import Literal
++
+ from pydantic import Field
+ 
+ from .base import JsonValue, Params, Result, WireEnum
+@@ -21,6 +23,97 @@
+ 
+     hud = "hud"
+     voice_live = "voice-live"
++
++
++class SelectionDispatchEnvelope(Params):
++    version: Literal[1]
++    operation_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
++    dispatch_ref: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
++    selection_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
++    required_adapter_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
++    adapter_generation: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
++
++
++class SelectionDispatchReceipt(SelectionDispatchEnvelope, Result):
++    dispatch_id: str
++    state: str
++    actual_session_id: str | None = None
++    actual_task_id: str | None = None
++    actual_turn_id: str | None = None
++    error_code: str | None = None
++
++
++class PromptSelectionGetParams(SessionParams):
++    operation_id: str
++
++
++class PromptSelectionGetResult(Result):
++    selection_dispatch: SelectionDispatchReceipt
++
++
++class SelectionDispatchAdapter(Result):
++    required_adapter_id: str
++    adapter_generation: str
++    instance_id: str
++    agent_id: str
++
++
++class SelectionInputCapability(Result):
++    version: Literal[1]
++    max_bytes: int
++    max_items: int
++    kinds: list[str]
++
++
++class SelectionInputAttachment(Result):
++    kind: Literal["image", "pdf", "file"]
++    name: str
++    mime_type: str
++    size: int
++    sha256: str
++
++
++class SelectionInputReceipt(Result):
++    version: Literal[1]
++    owner_session_id: str
++    operation_id: str
++    input_digest: str
++    message_digest: str
++    attachment_digest: str
++    attachments: list[SelectionInputAttachment]
++    expires_at: int
++
++
++class SelectionInputStageAttachment(SelectionInputAttachment):
++    data_base64: str
++
++
++class SelectionInputGetParams(PromptSelectionGetParams):
++    owner_session_id: str
++
++
++class SelectionInputStageParams(SelectionInputGetParams):
++    text: str
++    attachments: list[SelectionInputStageAttachment]
++
++
++class SelectionInputResult(Result):
++    selection_input: SelectionInputReceipt | None
++
++
++method("prompt.selection.input.get", params=SelectionInputGetParams, result=SelectionInputResult)
++method("prompt.selection.input.stage", params=SelectionInputStageParams, result=SelectionInputResult)
++
++
++class PromptSelectionCapabilitiesResult(Result):
++    version: Literal[1]
++    runtime_session_id: str
++    adapters: list[SelectionDispatchAdapter]
++    selection_inputs: SelectionInputCapability | None = None
++
++
++method("prompt.selection.get", params=PromptSelectionGetParams, result=PromptSelectionGetResult)
++method("prompt.selection.capabilities", params=SessionParams, result=PromptSelectionCapabilitiesResult)
+ 
+ 
+ class PromptSubmitParams(SessionParams):
+@@ -29,6 +122,8 @@
+     consent: ``confirm_truncate`` plus one durable target (``truncate_before_row_id`` preferred,
+     ``truncate_before_message_id``, or the legacy ``truncate_before_user_ordinal``)."""
+ 
++    selection_dispatch: SelectionDispatchEnvelope | None = None
++    selection_input_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+     text: JsonValue = ""
+     display_kind: str | None = None  # only "hidden" is honoured; anything else renders as a user row
+     interrupted: bool | None = None  # client-side barge-in: the turn's model message carries the note
+@@ -63,6 +158,8 @@
+     truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map
+     entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch."""
+ 
++    selection_dispatch: SelectionDispatchReceipt | None = None
++    replayed: bool | None = None
+     status: PromptSubmitStatus | None = None
+     voice_stopped: bool | None = None
+     survivor_user_row_ids: list[int | None] | None = None
+--- a/tui_gateway/methods_prompt.py
++++ b/tui_gateway/methods_prompt.py
+@@ -488,7 +488,7 @@
+ 
+ 
+ def _run_after_agent_ready(
+-    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None
++    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None, selection_dispatch=None, image_paths=None
+ ):
+     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
+     accepted in-flight message), then run."""
+@@ -497,6 +497,9 @@
+     # expires. See #63078.
+     err = _wait_agent_for_prompt(session, rid, sid)
+     if err:
++        if selection_dispatch is not None:
++            from tui_gateway.selection_dispatch import state
++            state(_selection_home(session), sid, selection_dispatch, "failed", "SELECTION_AGENT_UNAVAILABLE")
+         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
+         # the only way resume shows this to a disconnected client.
+         _emit_terminal_turn_error(
+@@ -509,6 +512,9 @@
+         return
+     with session["history_lock"]:
+         if session.get("_turn_cancel_requested") or not session.get("running"):
++            if selection_dispatch is not None:
++                from tui_gateway.selection_dispatch import state
++                state(_selection_home(session), sid, selection_dispatch, "failed", "SELECTION_CANCELLED")
+             session["running"] = False
+             _clear_inflight_turn(session)
+             # Without this emit the turn vanishes silently after {"status": "streaming"}.
+@@ -519,7 +525,8 @@
+             return
+     _run_prompt_submit(
+         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
+-        terminal_callback=hosted_terminal_callback, turn_author=turn_author)
++        terminal_callback=hosted_terminal_callback, turn_author=turn_author,
++        selection_dispatch=selection_dispatch, image_paths=image_paths)
+ 
+ 
+ _TRUNCATION_PARAMS = (
+@@ -527,7 +534,7 @@
+ 
+ 
+ def _lock_in_submit_turn(
+-    rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind):
++    rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind, selection_dispatch=None):
+     """Under ``history_lock``: refuse watch-child races / malformed truncation, apply the
+     cut, mark the turn running + in flight.  Returns ``(err, survivor_fields)``."""
+     fields = {}
+@@ -544,11 +551,14 @@
+                 "confirm_truncate requires truncate_before_user_ordinal, truncate_before_message_id, or truncate_before_row_id",
+             ), fields
+         if has_truncation:
++            if (selection_error := _selection_active_error(rid, session)) is not None:
++                return selection_error, {}
+             err, fields = _truncate_history_for_submit(
+                 rid, sid, session, params, requested_rebind_ids)
+             if err is not None:
+                 return err, {}
+         session["running"] = True
++        session["_active_selection_dispatch"] = dict(selection_dispatch) if selection_dispatch is not None else None
+         session["_turn_cancel_requested"] = False
+         session["last_active"] = time.time()
+         if hosted_task is not None:
+@@ -559,6 +569,93 @@
+ 
+ # Per-turn client surfaces that carry a model-bound note (session_notifications._surface_note).
+ _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
++
++
++def _selection_home(session):
++    from hermes_constants import get_hermes_home
++    return str(session.get("profile_home") or get_hermes_home())
++
++
++def _selection_owner(session):
++    from tui_gateway.selection_dispatch import SelectionDispatchError
++    value = getattr(session.get("agent"), "session_id", None)
++    if not isinstance(value, str) or not value:
++        raise SelectionDispatchError("SELECTION_IDENTITY_UNAVAILABLE", "Exact host session identity is unavailable")
++    return value
++
++
++def _selection_active_error(rid, session):
++    if session.get("running") and session.get("_active_selection_dispatch") is not None:
++        from tui_gateway.selection_dispatch import SelectionDispatchError
++        return _selection_error(rid, SelectionDispatchError("SELECTION_ACTIVE_MUTATION_UNSUPPORTED",
++            "An active selected turn cannot be steered, redirected or rewound"))
++    return None
++
++
++def _selection_error(rid, exc):
++    return _err(rid, 4096, str(exc), {"code": getattr(exc, "code", "SELECTION_UNAVAILABLE")})
++
++
++@method("prompt.selection.capabilities")
++def _(rid, params):
++    session, err = _sess(params, rid)
++    if err:
++        return err
++    from tui_gateway.selection_dispatch import capabilities, SelectionDispatchError
++    try:
++        from tui_gateway.selection_input import CAPABILITY
++        return _ok(rid, {**capabilities(_selection_home(session)), "runtime_session_id": _selection_owner(session), "selection_inputs": CAPABILITY})
++    except SelectionDispatchError as exc:
++        return _selection_error(rid, exc)
++
++
++@method("prompt.selection.get")
++def _(rid, params):
++    session, err = _sess(params, rid)
++    if err:
++        return err
++    from tui_gateway.selection_dispatch import get, SelectionDispatchError
++    try:
++        return _ok(rid, {"selection_dispatch": get(_selection_home(session), params["session_id"], params.get("operation_id", ""), owner_session_id=_selection_owner(session))})
++    except SelectionDispatchError as exc:
++        return _selection_error(rid, exc)
++
++
++@method("prompt.selection.input.get")
++def _(rid, params):
++    session, err = _sess(params, rid)
++    if err:
++        return err
++    from tui_gateway.selection_input import get
++    from tui_gateway.selection_dispatch import SelectionDispatchError
++    try:
++        if set(params) - {"session_id", "profile", "operation_id", "owner_session_id"} or params.get("owner_session_id") != _selection_owner(session):
++            raise SelectionDispatchError("SELECTION_INPUT_OWNER_CHANGED", "Selected input owner cannot be verified")
++        return _ok(rid, {"selection_input": get(_selection_home(session), _selection_owner(session), params.get("operation_id", ""))})
++    except SelectionDispatchError as exc:
++        return _selection_error(rid, exc)
++
++
++@method("prompt.selection.input.stage")
++def _(rid, params):
++    session, err = _sess(params, rid)
++    if err:
++        return err
++    from tui_gateway.selection_input import stage
++    from tui_gateway.selection_dispatch import SelectionDispatchError
++    try:
++        if set(params) - {"session_id", "profile", "operation_id", "owner_session_id", "text", "attachments"}:
++            raise SelectionDispatchError("SELECTION_INPUT_INVALID", "Unexpected selected input fields")
++        if params.get("owner_session_id") != _selection_owner(session):
++            raise SelectionDispatchError("SELECTION_INPUT_OWNER_CHANGED", "Selected input owner cannot be verified")
++        if _session_uses_compute_host(session, _load_dashboard_process_isolation_config()):
++            raise SelectionDispatchError("SELECTION_PATH_UNSUPPORTED", "Selected compute input is unsupported")
++        return _ok(rid, {"selection_input": stage(_selection_home(session), _selection_owner(session), params.get("operation_id", ""),
++            _session_cwd(session), params.get("text", ""), params.get("attachments"))})
++    except SelectionDispatchError as exc:
++        return _selection_error(rid, exc)
++    except Exception:
++        return _selection_error(rid, SelectionDispatchError("SELECTION_INPUT_STORAGE_UNAVAILABLE", "Selected input storage is unavailable"))
+ 
+ 
+ @method("prompt.submit")
+@@ -576,15 +673,31 @@
+         if isinstance(title_preview, str) and title_preview.strip()
+         else None
+     )
+-    if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
++    selection = None
++    selected_images = None
++    if "selection_dispatch" not in params and params.get("selection_input_digest") is not None:
++        from tui_gateway.selection_dispatch import SelectionDispatchError
++        return _selection_error(rid, SelectionDispatchError("SELECTION_INPUT_INVALID", "Selected input requires a selected operation"))
++    if "selection_dispatch" in params:
++        from tui_gateway.selection_dispatch import normalize, SelectionDispatchError
++        try:
++            selection = normalize(params["selection_dispatch"])
++        except SelectionDispatchError as exc:
++            return _selection_error(rid, exc)
++    if selection is None and (stopped := _typed_stop_phrase_response(rid, text)) is not None:
+         return stopped
+     if params.get("interrupted"):
+         # Client-side barge-in: latch so this turn's model message carries the note.
+         from tools.tts_streaming import mark_speech_interrupted
+         mark_speech_interrupted()
+-    session, err = _sess_nowait(params, rid)
+-    if err:
+-        return err
++    session, err = _sess(params, rid) if selection is not None else _sess_nowait(params, rid)
++    if err:
++        return err
++    with session["history_lock"]:
++        if selection is None and (not params.get("queued") and _load_busy_input_mode() != "queue"
++                or any(params.get(key) is not None for key in _TRUNCATION_PARAMS)):
++            if (selection_error := _selection_active_error(rid, session)) is not None:
++                return selection_error
+     from tools.bot_relay import DeliveryAuthor
+ 
+     # Only the relay handler can build a DeliveryAuthor. A dict here is a client claiming a sender.
+@@ -613,6 +726,8 @@
+     session["voice_live_context"] = (
+         voice_context[:6000] if session["client_surface"] == "voice-live" and isinstance(voice_context, str) else "")
+     has_truncation = any(params.get(k) is not None for k in _TRUNCATION_PARAMS)
++    if has_truncation and (selection_error := _selection_active_error(rid, session)) is not None:
++        return selection_error
+     if has_truncation and isinstance(text, str):
+         # A rewind replays what the transcript shows: re-expand a skill invocation or
+         # `/work fix it` sends nine literal chars.
+@@ -620,11 +735,32 @@
+     turn_isolation = _session_uses_compute_host(session, _load_dashboard_process_isolation_config())
+     if internal_hosted_submit and turn_isolation:
+         return _err(rid, 4121, "hosted room turns do not support isolated compute workers yet")
++    if selection is not None:
++        from tui_gateway.selection_dispatch import accept, SelectionDispatchError
++        if turn_isolation or internal_hosted_submit or has_truncation or not isinstance(text, str) or text.lstrip().startswith("/"):
++            return _selection_error(rid, SelectionDispatchError("SELECTION_PATH_UNSUPPORTED", "This selected prompt path is unsupported"))
++        try:
++            from tui_gateway.selection_input import for_submit
++            scoped_text, selected_images = for_submit(_selection_home(session), _selection_owner(session), selection["operation_id"],
++                _session_cwd(session), raw_text, params.get("selection_input_digest"))
++            text = sanitize_user_prompt_text(scoped_text)
++            receipt, replayed = accept(_selection_home(session), sid, text, selection, owner_session_id=_selection_owner(session))
++        except SelectionDispatchError as exc:
++            return _selection_error(rid, exc)
++        if replayed:
++            return _ok(rid, {"status": "queued" if receipt["state"] == "queued" else "streaming", "selection_dispatch": receipt, "replayed": True})
++        if session.get("running") and not params.get("queued") and _load_busy_input_mode() != "queue":
++            from tui_gateway.selection_dispatch import state
++            state(_selection_home(session), sid, selection, "failed", "SELECTION_STEER_UNSUPPORTED")
++            return _selection_error(rid, SelectionDispatchError("SELECTION_STEER_UNSUPPORTED", "Selected turns cannot steer or redirect an active turn"))
+     # Re-bind to the current transport: streaming must stay on the active websocket even
+     # if a disconnect/fallback moved the session to stdio. Through _rebind_live_transport so a
+     # socket that already closed cannot cancel the orphan reap without coming back (#116464).
+     with _session_resume_lock:
+         if (refusal := _reattach_refusal(rid, sid, session)) is not None:
++            if selection is not None:
++                from tui_gateway.selection_dispatch import state
++                state(_selection_home(session), sid, selection, "failed", "SELECTION_TRANSPORT_UNAVAILABLE")
+             return refusal
+         if (t := current_transport()) is not None:
+             _rebind_live_transport(sid, session, t)
+@@ -648,17 +784,31 @@
+             # built for exactly this race — see desktop's `runRewindSubmit`) waits
+             # for `running` to clear and resubmits with the truncation intact.
+             return _err(rid, 4009, "session busy")
+-        busy_response = _handle_busy_submit(
+-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author)
++        try:
++            busy_response = _handle_busy_submit(
++                rid, sid, session, text, busy_transport, queued=bool(params.get("queued")),
++                turn_author=turn_author, selection_dispatch=selection, selection_image_paths=selected_images)
++        except Exception as exc:
++            if selection is None:
++                raise
++            from tui_gateway.selection_dispatch import state
++            state(_selection_home(session), sid, selection, "failed", getattr(exc, "code", "SELECTION_QUEUE_FAILED"))
++            return _selection_error(rid, exc)
+         if busy_response is not None:
++            if selection is not None:
++                from tui_gateway.selection_dispatch import get
++                busy_response["result"]["selection_dispatch"] = get(_selection_home(session), sid, selection["operation_id"])
+             return busy_response
+     raw_rebind_ids = params.get("rebind_survivor_row_ids")
+     requested_rebind_ids = (
+         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
+         if isinstance(raw_rebind_ids, list) else None)
+     err, survivor_fields = _lock_in_submit_turn(
+-        rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
++        rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind, selection)
+     if err is not None:
++        if selection is not None:
++            from tui_gateway.selection_dispatch import state
++            state(_selection_home(session), sid, selection, "failed", "SELECTION_ADMISSION_FAILED")
+         return err
+     if turn_isolation:
+         if turn_author:
+@@ -682,17 +832,23 @@
+             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
+             isolated_response["error"].get("message", "unknown error"))
+     if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
++        if selection is not None:
++            from tui_gateway.selection_dispatch import state
++            state(_selection_home(session), sid, selection, "failed", "SELECTION_STORAGE_UNAVAILABLE")
+         return err
+     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
+     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
+         _start_agent_build(sid, session)
+     run_thread = threading.Thread(
+         target=lambda: _run_after_agent_ready(
+-            rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
++            rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author, selection, selected_images),
+         daemon=True)
+     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
+     session["_run_thread"] = run_thread
+     run_thread.start()
++    if selection is not None:
++        from tui_gateway.selection_dispatch import get
++        survivor_fields["selection_dispatch"] = get(_selection_home(session), sid, selection["operation_id"])
+     return _ok(rid, {"status": "streaming", **survivor_fields})
+ 
+ 
+--- a/tui_gateway/session_auto_continue.py
++++ b/tui_gateway/session_auto_continue.py
+@@ -134,7 +134,7 @@
+ 
+ 
+ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
+-                    turn_author: dict | None = None) -> None:
++                    turn_author: dict | None = None, selection_dispatch=None) -> None:
+     """Queue a message for the next turn. Text-only arrivals share a slot and merge losslessly (like the
+     consecutive-user merge in ``repair_message_sequence``); image-bearing and authored ones stay separate
+     envelopes so attachment chronology and the sender survive. ``transport`` is pinned so the drained turn
+@@ -143,15 +143,17 @@
+     # Scrub live-turn self-duplicates first so the text merge below can't glue "{original}\n\n{later}" and re-fire the
+     # original after a correction settles.
+     # See #84417.
+-    _drop_queued_duplicates_of_inflight_user(session)
++    if selection_dispatch is None:
++        _drop_queued_duplicates_of_inflight_user(session)
+     text_only = not image_paths and isinstance(text, str)
+     # A text-only self-copy of the live prompt would restart it on drain; an authored copy is another sender's message.
+-    if text_only and not turn_author and text.strip() == _ac_inflight_original(session) != "":
++    if selection_dispatch is None and text_only and not turn_author and text.strip() == _ac_inflight_original(session) != "":
+         return
+     queued = {"text": text, "transport": transport, **({"image_paths": image_paths} if image_paths else {}),
+-              **({"turn_author": turn_author} if turn_author else {})}
++              **({"turn_author": turn_author} if turn_author else {}),
++              **({"selection_dispatch": dict(selection_dispatch)} if selection_dispatch is not None else {})}
+     existing = session.get("queued_prompt")
+-    if (existing and text_only and not turn_author and isinstance(existing.get("text"), str)
++    if (selection_dispatch is None and existing and not existing.get("selection_dispatch") and text_only and not turn_author and isinstance(existing.get("text"), str)
+             and not existing.get("image_paths") and not existing.get("turn_author")
+             and not session.get("queued_prompts")):
+         prev = existing["text"]
+@@ -174,7 +176,7 @@
+     if not isinstance(entry, dict):
+         return None
+     text = entry.get("text")
+-    if not original or entry.get("image_paths") or entry.get("turn_author") or not isinstance(text, str):
++    if not original or entry.get("selection_dispatch") or entry.get("image_paths") or entry.get("turn_author") or not isinstance(text, str):
+         return entry
+     # A lossless text-merge may have glued the live original onto a later follow-up: keep the remainder.
+     rest = next((text[len(original + sep):] for sep in ("\n\n", "\n") if text.startswith(original + sep)), text).strip()
+@@ -198,6 +200,19 @@
+     _ac_set_queue(session, [c for c in cleaned if c is not None])
+ 
+ 
++
++def _cancel_queued_selected(sid: str, session: dict) -> None:
++    entries = ([session["queued_prompt"]] if session.get("queued_prompt") else []) + list(session.get("queued_prompts") or [])
++    envelopes = [item["selection_dispatch"] for item in entries if isinstance(item, dict) and item.get("selection_dispatch")]
++    if not envelopes:
++        return
++    try:
++        from tui_gateway.selection_dispatch import cancel_pending
++        cancel_pending(_selection_home(session), sid, envelopes)
++    except Exception:
++        # Stop/close must still stop the actual host when local receipt storage is unavailable.
++        logger.warning("Selected queued receipt cancellation could not be confirmed")
++
+ def _ac_set_queue(session: dict, entries: list) -> None:
+     """Write ``entries`` back as queued_prompt (head) + queued_prompts (rest)."""
+     session["queued_prompt"] = entries[0] if entries else None
+@@ -221,6 +236,9 @@
+ 
+     def interrupt() -> None:
+         try:
++            with session["history_lock"]:
++                if session.get("running") and session.get("_active_selection_dispatch") is not None:
++                    return
+             with contextlib.suppress(Exception):
+                 agent.interrupt() if use_agent else _get_compute_host_supervisor().interrupt(sid)
+         finally:
+@@ -233,12 +251,14 @@
+     """Apply ``agent.<method>(plain_text)`` (steer/redirect); on acceptance record the correction, scrub stale
+     self-duplicates so the live turn's original text is not re-fired after settle, and return the ``status`` reply.
+     None → caller falls through to the queue path."""
+-    try:
+-        if not getattr(agent, method)(plain_text):
++    with session["history_lock"]:
++        if (selection_error := _selection_active_error(rid, session)) is not None:
++            return selection_error
++        try:
++            if not getattr(agent, method)(plain_text):
++                return None
++        except Exception:
+             return None
+-    except Exception:
+-        return None
+-    with session["history_lock"]:
+         _record_inflight_correction(session, plain_text)
+         _drop_queued_duplicates_of_inflight_user(session)
+         session["last_active"] = time.time()
+@@ -246,18 +266,23 @@
+ 
+ 
+ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False,
+-                        turn_author: dict | None = None) -> dict | None:
++                        turn_author: dict | None = None, selection_dispatch=None, selection_image_paths=None) -> dict | None:
+     """Apply ``display.busy_input_mode`` to a mid-turn prompt instead of rejecting it (rejection made clients busy-retry
+     and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt + queue; ``queue`` → queue only;
+     ``steer`` → inject after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
+     after" message must NEVER become a live correction."""
+     mode = "queue" if queued else _load_busy_input_mode()
++    if selection_dispatch is not None and mode != "queue":
++        from tui_gateway.selection_dispatch import SelectionDispatchError
++        raise SelectionDispatchError("SELECTION_STEER_UNSUPPORTED", "Selected turns cannot steer or redirect an active turn")
+     agent = session.get("agent")
+     with session["history_lock"]:
+         if not session.get("running"):
+             return None  # turn ended since prompt.submit's busy check; caller retries on the idle session
+-        image_paths = list(session.get("attached_images", []))
+-        if image_paths:
++        if mode != "queue" and (selection_error := _selection_active_error(rid, session)) is not None:
++            return selection_error
++        image_paths = list(selection_image_paths or []) if selection_dispatch is not None else list(session.get("attached_images", []))
++        if image_paths and selection_dispatch is None:
+             session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
+     plain_text = _coerce_message_text(text).strip() if not image_paths and _is_text_only_busy_payload(text) else ""
+     # Text-only corrections steer/redirect in place when supported; media payloads and older agents fall through to
+@@ -274,10 +299,14 @@
+     # interrupt can wait behind the op it cancels.
+     with session["history_lock"]:
+         if not session.get("running"):
+-            if image_paths:
++            if image_paths and selection_dispatch is None:
+                 session["attached_images"] = image_paths + list(session.get("attached_images", []))
+             return None
+-        _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author)
++        if selection_dispatch is not None:
++            from tui_gateway.selection_dispatch import state
++            state(_selection_home(session), sid, selection_dispatch, "queued")
++        _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author,
++                        selection_dispatch=selection_dispatch)
+         session["last_active"] = time.time()
+     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
+     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
+@@ -300,6 +329,7 @@
+         queue_generation = int(session.get("_queued_prompt_generation", 0))
+         _ac_set_queue(session, session.get("queued_prompts") or [])
+         session["running"] = True
++        session["_active_selection_dispatch"] = dict(queued["selection_dispatch"]) if queued.get("selection_dispatch") is not None else None
+         queued_transport = queued.get("transport")
+         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
+         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
+@@ -318,6 +348,15 @@
+             session["running"] = False
+             return True
+     kwargs: dict = {"queued_prompt_generation": queue_generation}
++    if queued.get("selection_dispatch") is not None:
++        if use_compute_host:
++            from tui_gateway.selection_dispatch import state
++            state(_selection_home(session), sid, queued["selection_dispatch"], "failed", "SELECTION_PATH_UNSUPPORTED")
++            _notif_release_turn(session)
++            _emit("error", sid, {"message": "Selected compute-host turns are unsupported"})
++            return True
++        kwargs["selection_dispatch"] = queued["selection_dispatch"]
++        kwargs["image_paths"] = list(queued.get("image_paths") or [])
+     if queued.get("image_paths"):
+         kwargs["image_paths"] = queued["image_paths"]
+     # The compute-host frame has no author field, so only the inline runner receives it.
+--- a/tui_gateway/prompt_turn.py
++++ b/tui_gateway/prompt_turn.py
+@@ -611,7 +611,7 @@
+ def _invoke_agent(
+     sid: str, session: dict, st: _TurnRun, prompt: Any, run_message: Any, streamer,
+     images: list[str], display_kind: str | None, display_metadata: dict | None,
+-    turn_author: dict | None = None, text: Any = None) -> None:
++    turn_author: dict | None = None, text: Any = None, selection_dispatch=None) -> None:
+     """Wire the streaming callbacks and run the conversation into ``st.result``.
+     ``text`` is the turn's raw submit, matched against the row staged by prompt.submit."""
+     agent = st.agent
+@@ -674,8 +674,17 @@
+     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
+     try:
+         from agent.notification_presentation import notification_turn, event_presentation_muted
+-        with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
+-            st.result = agent.run_conversation(run_message, **st.run_kwargs)
++        from tui_gateway.selection_dispatch import turn_scope, finish_turn
++        with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid), turn_scope(
++                _selection_home(session), sid, selection_dispatch):
++            try:
++                st.result = agent.run_conversation(run_message, **st.run_kwargs)
++            except BaseException:
++                finish_turn(agent, "failed")
++                raise
++            else:
++                result_status = _result_status(st.result) if isinstance(st.result, dict) else "error"
++                finish_turn(agent, "complete" if result_status == "complete" else "stopped" if result_status == "interrupted" else "failed")
+     finally:
+         # Stop AND join before anything emits: a tick surviving past message.complete would
+         # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
+@@ -917,7 +926,21 @@
+     display_metadata: dict | None = None, image_paths: list[str] | None = None,
+     queued_prompt_generation: int | None = None,
+     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
+-    turn_author: dict | None = None) -> bool:
++    turn_author: dict | None = None, selection_dispatch=None) -> bool:
++    from tui_gateway.selection_dispatch import event_scope
++    with event_scope(_selection_home(session), sid, selection_dispatch, emit=_emit):
++        return _run_prompt_submit_owned(rid, sid, session, text, display_kind=display_kind,
++            display_metadata=display_metadata, image_paths=image_paths,
++            queued_prompt_generation=queued_prompt_generation, terminal_callback=terminal_callback,
++            turn_author=turn_author, selection_dispatch=selection_dispatch)
++
++
++def _run_prompt_submit_owned(
++    rid, sid: str, session: dict, text: Any, *, display_kind: str | None = None,
++    display_metadata: dict | None = None, image_paths: list[str] | None = None,
++    queued_prompt_generation: int | None = None,
++    terminal_callback: Callable[[dict[str, Any]], None] | None = None,
++    turn_author: dict | None = None, selection_dispatch=None) -> bool:
+     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
+     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
+     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
+@@ -929,6 +952,9 @@
+     admitted = _admit_prompt_turn(
+         sid, session, text, image_paths, queued_prompt_generation, display_kind, display_metadata)
+     if admitted is None:
++        if selection_dispatch is not None:
++            from tui_gateway.selection_dispatch import cancel_pending
++            cancel_pending(_selection_home(session), sid, [selection_dispatch])
+         return False
+     images, agent = admitted
+     from gateway.warning_notifications import diagnostic_turn_muted
+@@ -963,7 +989,7 @@
+         st = _TurnRun(
+             session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
+             receipt_committed=terminal_callback is None)
+-        st.marker_key = _record_turn_marker(session, text, auto_continue=terminal_callback is None,
++        st.marker_key = _record_turn_marker(session, text, auto_continue=terminal_callback is None and selection_dispatch is None,
+             notification_category=(display_metadata or {}).get("notification_category"))
+         goal_followup = None
+         try:
+@@ -978,7 +1004,7 @@
+             prompt, run_message, cols, streamer = prepared
+             _invoke_agent(
+                 sid, session, st, prompt, run_message, streamer, images, display_kind,
+-                display_metadata, turn_author, text)
++                display_metadata, turn_author, text, selection_dispatch)
+             status_note = _absorb_turn_result(
+                 sid, session, st, text, display_kind, display_metadata)
+             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
+@@ -993,12 +1019,21 @@
+             _recover_turn_exception(sid, session, st, e)
+         finally:
+             _finish_turn(sid, session, st)
++            if selection_dispatch is not None:
++                from tui_gateway.selection_dispatch import state, get
++                receipt = get(_selection_home(session), sid, selection_dispatch["operation_id"])
++                if receipt["state"] not in {"complete", "stopped", "failed", "unknown", "interrupted"}:
++                    status = _result_status(st.result) if isinstance(st.result, dict) else ("error" if st.error_retained else "complete")
++                    state(_selection_home(session), sid, selection_dispatch,
++                        "complete" if receipt["state"] == "bound" and status == "complete" else "failed",
++                        None if receipt["state"] == "bound" else "SELECTION_TURN_NOT_BOUND")
+             _current_runtime_session_record.reset(runtime_session_token)
+             reset_transport(transport_token)
+             # A stale interim closure must not fire during a later turn.
+             st.agent.interim_assistant_callback = None
+             with session["history_lock"]:
+                 session["running"] = False
++                session.pop("_active_selection_dispatch", None)
+                 session["last_active"] = time.time()
+                 if not st.error_retained:
+                     _clear_inflight_turn(session)
+@@ -1031,7 +1066,9 @@
+         # _prepare_turn_input owns profile binding for the worker. The context
+         # here only gates presentation; do not introduce a second runtime scope.
+         from agent.notification_presentation import notification_policy_snapshot
+-        with notification_policy_snapshot(agent, "tui", notification_config), notification_turn(agent, muted=muted, session_id=sid):
++        from tui_gateway.selection_dispatch import event_scope
++        with notification_policy_snapshot(agent, "tui", notification_config), notification_turn(agent, muted=muted, session_id=sid), event_scope(
++                _selection_home(session), sid, selection_dispatch, emit=_emit):
+             followup = run_body()
+         if followup is not None:
+             _run_post_turn_followups(rid, sid, session, *followup)
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -79,14 +79,25 @@
+ 
+ 
+ def compose_user_api_content(
+-    content: Any, ext_prefetch_cache: str, plugin_user_context: str
+-) -> Optional[str]:
++    content: Any, ext_prefetch_cache: str, plugin_user_context: str, *, selection_multimodal: bool = False
++) -> Optional[Any]:
+     """Compose the API-bound content of the current turn's user message.
+ 
+     Single source for the ``api_content`` sidecar and the wire bytes so they never drift
+     (what turn N sends is what turn N+1 replays). ``None`` when nothing is injected."""
+     if not isinstance(content, str):
+-        return None
++        if not selection_multimodal or not isinstance(content, list):
++            return None
++        from tui_gateway.selection_dispatch import required_multimodal_context, SelectionDispatchError
++        required = required_multimodal_context()
++        if required is None:
++            return None  # Ordinary multipart chat preserves its original behavior.
++        if not isinstance(plugin_user_context, str) or required not in plugin_user_context:
++            raise SelectionDispatchError("SELECTION_CONTEXT_MISSING", "Selected multipart context is unavailable")
++        fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
++        injections = [part for part in (fenced, plugin_user_context) if part]
++        # API copy only: never rewrite canonical attachments or persist raw refs.
++        return [*content, {"type": "text", "text": "\n\n".join(injections)}]
+     fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
+     injections = [part for part in (fenced, plugin_user_context) if part]
+     if not injections:
+@@ -976,6 +987,9 @@
+         agent, task_id, stream_callback, persist_user_message,
+         persist_user_timestamp, persist_user_platform_id,
+     )
++    # Required selected-turn gate precedes compaction and every provider call.
++    from tui_gateway.selection_dispatch import before_model
++    required_selection_context = before_model(agent, effective_task_id, turn_id, unsupported_runtime=moa_active)
+     _reset_per_turn_agent_state(agent)
+ 
+     _preview_text = summarize_user_message_for_log(user_message)
+@@ -1055,6 +1069,8 @@
+     conversation_history = compaction.conversation_history
+     current_turn_user_idx = compaction.current_turn_user_idx
+ 
++    from tui_gateway.selection_dispatch import verify_identity
++    verify_identity(agent, effective_task_id, turn_id)
+     plugin_user_context = _collect_pre_llm_call_context(
+         agent, effective_task_id=effective_task_id, turn_id=turn_id,
+         original_user_message=original_user_message, messages=messages,
+@@ -1063,6 +1079,7 @@
+     plugin_user_context = _merge_gateway_notes(
+         agent, messages, current_turn_user_idx, plugin_user_context
+     )
++    plugin_user_context = "\n\n".join(part for part in (required_selection_context, plugin_user_context) if part)
+ 
+     _bind_interrupt_scope(agent, ra)
+     ext_prefetch_cache = _memory_turn_start_and_prefetch(agent, original_user_message, turn_author)
+@@ -1171,7 +1188,7 @@
+             else:
+                 # Callers that bypass the prologue stamping: compose live.
+                 _composed = compose_user_api_content(
+-                    api_msg.get("content", ""), ext_prefetch_cache, plugin_user_context
++                    api_msg.get("content", ""), ext_prefetch_cache, plugin_user_context, selection_multimodal=True
+                 )
+                 if _composed is not None:
+                     api_msg["content"] = _composed
+--- a/agent/turn_api_call.py
++++ b/agent/turn_api_call.py
+@@ -87,6 +87,8 @@
+     _use_streaming = _should_stream(agent)
+ 
+     def _perform_api_call(next_api_kwargs):
++        from tui_gateway.selection_dispatch import verify_request
++        verify_request(agent, effective_task_id, turn_id, next_api_kwargs)
+         if agent.api_mode == "codex_responses":
+             next_api_kwargs = agent._get_transport().preflight_kwargs(
+                 next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -431,6 +431,13 @@
+         logger.debug("Plugin %s spawned supervised task: %s", self.manifest.name, task_name)
+         return task
+ 
++    def register_selection_dispatch_gate(self, callback: Callable, *, metadata: dict, finish: Callable) -> PluginRegistration:
++        """Register this operator-trusted plugin's mandatory selected-turn admission gate.
++        The host owns registration generation; unload removes it. Ordinary hooks are not gates.
++        """
++        from tui_gateway.selection_dispatch import register_gate
++        return register_gate(self, callback, metadata=metadata, finish=finish)
++
+     def register_approval_transport(self, name: str, present_fn: Callable) -> None:
+         """Register a human approval transport, inactive until ``security.approval.transport:
+         <name>`` selects it. It receives a redacted ``ApprovalRequest`` and returns only a
+@@ -1162,6 +1169,7 @@
+         self._portable_mcp_servers: Dict[str, Dict[str, Any]] = {}
+         self._aux_tasks: Dict[str, Dict[str, Any]] = {}
+         self._approval_transports: Dict[str, Any] = {}
++        self._selection_dispatch_gates: Dict[str, Any] = {}
+         self._slack_action_handlers: List[tuple] = []
+         self._platform_handler_factories: Dict[str, List[tuple]] = {}
+         # Event bus: owner-tagged subscriptions (unload removes zombies); one daemon worker keeps
+--- a/hermes_cli/plugins_ledger.py
++++ b/hermes_cli/plugins_ledger.py
+@@ -290,6 +290,7 @@
+             self._plugin_tool_names, self._plugin_platform_names, self._cli_commands,
+             self._plugin_commands, self._plugin_skills, self._portable_mcp_servers,
+             self._aux_tasks, self._system_prompt_sections, self._approval_transports,
++            self._selection_dispatch_gates,
+             self._slack_action_handlers, self._predeclared_modules, self._predeclared_tools,
+             self._platform_handler_factories,
+         ):
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -2142,10 +2142,94 @@
+   ok: boolean
+   scale: number
+ }
++export interface SelectionInputGetParams {
++  session_id: string
++  profile?: string | null
++  operation_id: string
++  owner_session_id: string
++}
++export interface SelectionInputResult {
++  selection_input: SelectionInputReceipt | null
++}
++export interface SelectionInputReceipt {
++  version: 1
++  owner_session_id: string
++  operation_id: string
++  input_digest: string
++  message_digest: string
++  attachment_digest: string
++  attachments: SelectionInputAttachment[]
++  expires_at: number
++}
++export interface SelectionInputAttachment {
++  kind: 'image' | 'pdf' | 'file'
++  name: string
++  mime_type: string
++  size: number
++  sha256: string
++}
++export interface SelectionInputStageParams {
++  session_id: string
++  profile?: string | null
++  operation_id: string
++  owner_session_id: string
++  text: string
++  attachments: SelectionInputStageAttachment[]
++}
++export interface SelectionInputStageAttachment {
++  kind: 'image' | 'pdf' | 'file'
++  name: string
++  mime_type: string
++  size: number
++  sha256: string
++  data_base64: string
++}
++export interface PromptSelectionGetParams {
++  session_id: string
++  profile?: string | null
++  operation_id: string
++}
++export interface PromptSelectionGetResult {
++  selection_dispatch: SelectionDispatchReceipt
++}
++export interface SelectionDispatchReceipt {
++  version: 1
++  operation_id: string
++  dispatch_ref: string
++  selection_digest: string
++  required_adapter_id: string
++  adapter_generation: string
++  dispatch_id: string
++  state: string
++  actual_session_id?: string | null
++  actual_task_id?: string | null
++  actual_turn_id?: string | null
++  error_code?: string | null
++}
++export interface PromptSelectionCapabilitiesResult {
++  version: 1
++  runtime_session_id: string
++  adapters: SelectionDispatchAdapter[]
++  selection_inputs?: SelectionInputCapability | null
++}
++export interface SelectionDispatchAdapter {
++  required_adapter_id: string
++  adapter_generation: string
++  instance_id: string
++  agent_id: string
++}
++export interface SelectionInputCapability {
++  version: 1
++  max_bytes: number
++  max_items: number
++  kinds: string[]
++}
+ /** ``text`` is normally a string; the relay / hosted paths may hand a structured (parts list) payload, and the busy path renders it. Truncation (rewind / edit / regenerate) needs explicit consent: ``confirm_truncate`` plus one durable target (``truncate_before_row_id`` preferred, ``truncate_before_message_id``, or the legacy ``truncate_before_user_ordinal``). */
+ export interface PromptSubmitParams {
+   session_id: string
+   profile?: string | null
++  selection_dispatch?: SelectionDispatchEnvelope | null
++  selection_input_digest?: string | null
+   text?: unknown
+   display_kind?: string | null
+   interrupted?: boolean | null
+@@ -2160,8 +2244,18 @@
+   confirm_empty_truncate?: boolean | null
+   rebind_survivor_row_ids?: number[] | null
+ }
++export interface SelectionDispatchEnvelope {
++  version: 1
++  operation_id: string
++  dispatch_ref: string
++  selection_digest: string
++  required_adapter_id: string
++  adapter_generation: string
++}
+ /** ``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a truncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map entries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch. */
+ export interface PromptSubmitResult {
++  selection_dispatch?: SelectionDispatchReceipt | null
++  replayed?: boolean | null
+   status?: PromptSubmitStatus | null
+   voice_stopped?: boolean | null
+   survivor_user_row_ids?: (number | null)[] | null
+@@ -4493,6 +4587,10 @@
+   'prompt.background': { params: SideAgentParams; result: TaskIdResult }
+   /** Side question over a snapshot of the live conversation; the answer arrives as btw.complete. */
+   'prompt.btw': { params: SideAgentParams; result: TaskIdResult }
++  'prompt.selection.capabilities': { params: SessionParams; result: PromptSelectionCapabilitiesResult }
++  'prompt.selection.get': { params: PromptSelectionGetParams; result: PromptSelectionGetResult }
++  'prompt.selection.input.get': { params: SelectionInputGetParams; result: SelectionInputResult }
++  'prompt.selection.input.stage': { params: SelectionInputStageParams; result: SelectionInputResult }
+   /** Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. */
+   'prompt.submit': { params: PromptSubmitParams; result: PromptSubmitResult }
+   /** Re-read ~/.hermes/.env (CLI /reload parity); built agents keep their pool until /new. */
+@@ -4794,6 +4892,10 @@
+   'projects.update',
+   'prompt.background',
+   'prompt.btw',
++  'prompt.selection.capabilities',
++  'prompt.selection.get',
++  'prompt.selection.input.get',
++  'prompt.selection.input.stage',
+   'prompt.submit',
+   'reload.env',
+   'reload.mcp',
+@@ -5002,6 +5104,8 @@
+   'request.cancel': RequestCancelPayload
+   /** Background review of the last turn finished. */
+   'review.summary': ReviewSummaryPayload
++  /** A mandatory selected normal turn is bound before model IO; exact receipt travels in params.selection_dispatch sideband. */
++  'selection.dispatch.bound': Record<string, never>
+   /** Persisted goal / loop / heartbeat state changed. */
+   'session.control.update': SessionControlUpdatePayload
+   /** Live session settings snapshot (``server._session_info``); also the ``info`` of create/resume/activate. */
+@@ -5102,6 +5206,7 @@
+   'reasoning.delta',
+   'request.cancel',
+   'review.summary',
++  'selection.dispatch.bound',
+   'session.control.update',
+   'session.info',
+   'session.reclaimed',
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -2527,6 +2527,78 @@
+       }
+     },
+     {
++      "name": "prompt.selection.capabilities",
++      "summary": "",
++      "params": [
++        {
++          "name": "params",
++          "schema": {
++            "$ref": "#/components/schemas/SessionParams"
++          }
++        }
++      ],
++      "result": {
++        "name": "result",
++        "schema": {
++          "$ref": "#/components/schemas/PromptSelectionCapabilitiesResult"
++        }
++      }
++    },
++    {
++      "name": "prompt.selection.get",
++      "summary": "",
++      "params": [
++        {
++          "name": "params",
++          "schema": {
++            "$ref": "#/components/schemas/PromptSelectionGetParams"
++          }
++        }
++      ],
++      "result": {
++        "name": "result",
++        "schema": {
++          "$ref": "#/components/schemas/PromptSelectionGetResult"
++        }
++      }
++    },
++    {
++      "name": "prompt.selection.input.get",
++      "summary": "",
++      "params": [
++        {
++          "name": "params",
++          "schema": {
++            "$ref": "#/components/schemas/SelectionInputGetParams"
++          }
++        }
++      ],
++      "result": {
++        "name": "result",
++        "schema": {
++          "$ref": "#/components/schemas/SelectionInputResult"
++        }
++      }
++    },
++    {
++      "name": "prompt.selection.input.stage",
++      "summary": "",
++      "params": [
++        {
++          "name": "params",
++          "schema": {
++            "$ref": "#/components/schemas/SelectionInputStageParams"
++          }
++        }
++      ],
++      "result": {
++        "name": "result",
++        "schema": {
++          "$ref": "#/components/schemas/SelectionInputResult"
++        }
++      }
++    },
++    {
+       "name": "prompt.submit",
+       "summary": "Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing.",
+       "params": [
+@@ -21985,9 +22057,47 @@
+         "title": "ProjectsUpdateParams",
+         "type": "object"
+       },
+-      "PromptSubmitParams": {
+-        "additionalProperties": false,
+-        "description": "``text`` is normally a string; the relay / hosted paths may hand a structured (parts list)\npayload, and the busy path renders it. Truncation (rewind / edit / regenerate) needs explicit\nconsent: ``confirm_truncate`` plus one durable target (``truncate_before_row_id`` preferred,\n``truncate_before_message_id``, or the legacy ``truncate_before_user_ordinal``).",
++      "PromptSelectionCapabilitiesResult": {
++        "additionalProperties": false,
++        "properties": {
++          "version": {
++            "const": 1,
++            "title": "Version",
++            "type": "integer"
++          },
++          "runtime_session_id": {
++            "title": "Runtime Session Id",
++            "type": "string"
++          },
++          "adapters": {
++            "items": {
++              "$ref": "#/components/schemas/SelectionDispatchAdapter"
++            },
++            "title": "Adapters",
++            "type": "array"
++          },
++          "selection_inputs": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/SelectionInputCapability"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null
++          }
++        },
++        "required": [
++          "version",
++          "runtime_session_id",
++          "adapters"
++        ],
++        "title": "PromptSelectionCapabilitiesResult",
++        "type": "object"
++      },
++      "PromptSelectionGetParams": {
++        "additionalProperties": false,
+         "properties": {
+           "session_id": {
+             "title": "Session Id",
+@@ -22004,6 +22114,75 @@
+             ],
+             "default": null,
+             "title": "Profile"
++          },
++          "operation_id": {
++            "title": "Operation Id",
++            "type": "string"
++          }
++        },
++        "required": [
++          "session_id",
++          "operation_id"
++        ],
++        "title": "PromptSelectionGetParams",
++        "type": "object"
++      },
++      "PromptSelectionGetResult": {
++        "additionalProperties": false,
++        "properties": {
++          "selection_dispatch": {
++            "$ref": "#/components/schemas/SelectionDispatchReceipt"
++          }
++        },
++        "required": [
++          "selection_dispatch"
++        ],
++        "title": "PromptSelectionGetResult",
++        "type": "object"
++      },
++      "PromptSubmitParams": {
++        "additionalProperties": false,
++        "description": "``text`` is normally a string; the relay / hosted paths may hand a structured (parts list)\npayload, and the busy path renders it. Truncation (rewind / edit / regenerate) needs explicit\nconsent: ``confirm_truncate`` plus one durable target (``truncate_before_row_id`` preferred,\n``truncate_before_message_id``, or the legacy ``truncate_before_user_ordinal``).",
++        "properties": {
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "profile": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Profile"
++          },
++          "selection_dispatch": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/SelectionDispatchEnvelope"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null
++          },
++          "selection_input_digest": {
++            "anyOf": [
++              {
++                "pattern": "^[a-f0-9]{64}$",
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Selection Input Digest"
+           },
+           "text": {
+             "default": "",
+@@ -22167,6 +22346,29 @@
+         "additionalProperties": false,
+         "description": "``status`` is absent only on the typed-stop-phrase reply (``voice_stopped``). After a\ntruncation the survivor row ids let the client rebind its cached ``rowId``s (``None`` map\nentries: drop the cached id). ``turn_isolation`` marks a compute-host dispatch.",
+         "properties": {
++          "selection_dispatch": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/SelectionDispatchReceipt"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null
++          },
++          "replayed": {
++            "anyOf": [
++              {
++                "type": "boolean"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Replayed"
++          },
+           "status": {
+             "anyOf": [
+               {
+@@ -24009,6 +24211,473 @@
+           "role"
+         ],
+         "title": "SeedMessage",
++        "type": "object"
++      },
++      "SelectionDispatchAdapter": {
++        "additionalProperties": false,
++        "properties": {
++          "required_adapter_id": {
++            "title": "Required Adapter Id",
++            "type": "string"
++          },
++          "adapter_generation": {
++            "title": "Adapter Generation",
++            "type": "string"
++          },
++          "instance_id": {
++            "title": "Instance Id",
++            "type": "string"
++          },
++          "agent_id": {
++            "title": "Agent Id",
++            "type": "string"
++          }
++        },
++        "required": [
++          "required_adapter_id",
++          "adapter_generation",
++          "instance_id",
++          "agent_id"
++        ],
++        "title": "SelectionDispatchAdapter",
++        "type": "object"
++      },
++      "SelectionDispatchEnvelope": {
++        "additionalProperties": false,
++        "properties": {
++          "version": {
++            "const": 1,
++            "title": "Version",
++            "type": "integer"
++          },
++          "operation_id": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Operation Id",
++            "type": "string"
++          },
++          "dispatch_ref": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Dispatch Ref",
++            "type": "string"
++          },
++          "selection_digest": {
++            "pattern": "^[a-f0-9]{64}$",
++            "title": "Selection Digest",
++            "type": "string"
++          },
++          "required_adapter_id": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Required Adapter Id",
++            "type": "string"
++          },
++          "adapter_generation": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Adapter Generation",
++            "type": "string"
++          }
++        },
++        "required": [
++          "version",
++          "operation_id",
++          "dispatch_ref",
++          "selection_digest",
++          "required_adapter_id",
++          "adapter_generation"
++        ],
++        "title": "SelectionDispatchEnvelope",
++        "type": "object"
++      },
++      "SelectionDispatchReceipt": {
++        "additionalProperties": false,
++        "properties": {
++          "version": {
++            "const": 1,
++            "title": "Version",
++            "type": "integer"
++          },
++          "operation_id": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Operation Id",
++            "type": "string"
++          },
++          "dispatch_ref": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Dispatch Ref",
++            "type": "string"
++          },
++          "selection_digest": {
++            "pattern": "^[a-f0-9]{64}$",
++            "title": "Selection Digest",
++            "type": "string"
++          },
++          "required_adapter_id": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Required Adapter Id",
++            "type": "string"
++          },
++          "adapter_generation": {
++            "maxLength": 128,
++            "minLength": 1,
++            "pattern": "^[A-Za-z0-9._:-]+$",
++            "title": "Adapter Generation",
++            "type": "string"
++          },
++          "dispatch_id": {
++            "title": "Dispatch Id",
++            "type": "string"
++          },
++          "state": {
++            "title": "State",
++            "type": "string"
++          },
++          "actual_session_id": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Actual Session Id"
++          },
++          "actual_task_id": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Actual Task Id"
++          },
++          "actual_turn_id": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Actual Turn Id"
++          },
++          "error_code": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Error Code"
++          }
++        },
++        "required": [
++          "version",
++          "operation_id",
++          "dispatch_ref",
++          "selection_digest",
++          "required_adapter_id",
++          "adapter_generation",
++          "dispatch_id",
++          "state"
++        ],
++        "title": "SelectionDispatchReceipt",
++        "type": "object"
++      },
++      "SelectionInputAttachment": {
++        "additionalProperties": false,
++        "properties": {
++          "kind": {
++            "enum": [
++              "image",
++              "pdf",
++              "file"
++            ],
++            "title": "Kind",
++            "type": "string"
++          },
++          "name": {
++            "title": "Name",
++            "type": "string"
++          },
++          "mime_type": {
++            "title": "Mime Type",
++            "type": "string"
++          },
++          "size": {
++            "title": "Size",
++            "type": "integer"
++          },
++          "sha256": {
++            "title": "Sha256",
++            "type": "string"
++          }
++        },
++        "required": [
++          "kind",
++          "name",
++          "mime_type",
++          "size",
++          "sha256"
++        ],
++        "title": "SelectionInputAttachment",
++        "type": "object"
++      },
++      "SelectionInputCapability": {
++        "additionalProperties": false,
++        "properties": {
++          "version": {
++            "const": 1,
++            "title": "Version",
++            "type": "integer"
++          },
++          "max_bytes": {
++            "title": "Max Bytes",
++            "type": "integer"
++          },
++          "max_items": {
++            "title": "Max Items",
++            "type": "integer"
++          },
++          "kinds": {
++            "items": {
++              "type": "string"
++            },
++            "title": "Kinds",
++            "type": "array"
++          }
++        },
++        "required": [
++          "version",
++          "max_bytes",
++          "max_items",
++          "kinds"
++        ],
++        "title": "SelectionInputCapability",
++        "type": "object"
++      },
++      "SelectionInputGetParams": {
++        "additionalProperties": false,
++        "properties": {
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "profile": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Profile"
++          },
++          "operation_id": {
++            "title": "Operation Id",
++            "type": "string"
++          },
++          "owner_session_id": {
++            "title": "Owner Session Id",
++            "type": "string"
++          }
++        },
++        "required": [
++          "session_id",
++          "operation_id",
++          "owner_session_id"
++        ],
++        "title": "SelectionInputGetParams",
++        "type": "object"
++      },
++      "SelectionInputReceipt": {
++        "additionalProperties": false,
++        "properties": {
++          "version": {
++            "const": 1,
++            "title": "Version",
++            "type": "integer"
++          },
++          "owner_session_id": {
++            "title": "Owner Session Id",
++            "type": "string"
++          },
++          "operation_id": {
++            "title": "Operation Id",
++            "type": "string"
++          },
++          "input_digest": {
++            "title": "Input Digest",
++            "type": "string"
++          },
++          "message_digest": {
++            "title": "Message Digest",
++            "type": "string"
++          },
++          "attachment_digest": {
++            "title": "Attachment Digest",
++            "type": "string"
++          },
++          "attachments": {
++            "items": {
++              "$ref": "#/components/schemas/SelectionInputAttachment"
++            },
++            "title": "Attachments",
++            "type": "array"
++          },
++          "expires_at": {
++            "title": "Expires At",
++            "type": "integer"
++          }
++        },
++        "required": [
++          "version",
++          "owner_session_id",
++          "operation_id",
++          "input_digest",
++          "message_digest",
++          "attachment_digest",
++          "attachments",
++          "expires_at"
++        ],
++        "title": "SelectionInputReceipt",
++        "type": "object"
++      },
++      "SelectionInputResult": {
++        "additionalProperties": false,
++        "properties": {
++          "selection_input": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/SelectionInputReceipt"
++              },
++              {
++                "type": "null"
++              }
++            ]
++          }
++        },
++        "required": [
++          "selection_input"
++        ],
++        "title": "SelectionInputResult",
++        "type": "object"
++      },
++      "SelectionInputStageAttachment": {
++        "additionalProperties": false,
++        "properties": {
++          "kind": {
++            "enum": [
++              "image",
++              "pdf",
++              "file"
++            ],
++            "title": "Kind",
++            "type": "string"
++          },
++          "name": {
++            "title": "Name",
++            "type": "string"
++          },
++          "mime_type": {
++            "title": "Mime Type",
++            "type": "string"
++          },
++          "size": {
++            "title": "Size",
++            "type": "integer"
++          },
++          "sha256": {
++            "title": "Sha256",
++            "type": "string"
++          },
++          "data_base64": {
++            "title": "Data Base64",
++            "type": "string"
++          }
++        },
++        "required": [
++          "kind",
++          "name",
++          "mime_type",
++          "size",
++          "sha256",
++          "data_base64"
++        ],
++        "title": "SelectionInputStageAttachment",
++        "type": "object"
++      },
++      "SelectionInputStageParams": {
++        "additionalProperties": false,
++        "properties": {
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "profile": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Profile"
++          },
++          "operation_id": {
++            "title": "Operation Id",
++            "type": "string"
++          },
++          "owner_session_id": {
++            "title": "Owner Session Id",
++            "type": "string"
++          },
++          "text": {
++            "title": "Text",
++            "type": "string"
++          },
++          "attachments": {
++            "items": {
++              "$ref": "#/components/schemas/SelectionInputStageAttachment"
++            },
++            "title": "Attachments",
++            "type": "array"
++          }
++        },
++        "required": [
++          "session_id",
++          "operation_id",
++          "owner_session_id",
++          "text",
++          "attachments"
++        ],
++        "title": "SelectionInputStageParams",
+         "type": "object"
+       },
+       "SessionActivateParams": {
+@@ -34500,6 +35169,19 @@
+       ]
+     },
+     {
++      "name": "selection.dispatch.bound",
++      "summary": "A mandatory selected normal turn is bound before model IO; exact receipt travels in params.selection_dispatch sideband.",
++      "params": [
++        {
++          "name": "payload",
++          "schema": {
++            "type": "object",
++            "additionalProperties": false
++          }
++        }
++      ]
++    },
++    {
+       "name": "session.control.update",
+       "summary": "Persisted goal / loop / heartbeat state changed.",
+       "params": [
+--- a/tui_gateway/session_lifecycle.py
++++ b/tui_gateway/session_lifecycle.py
+@@ -510,6 +510,8 @@
+     """Finish a close after the caller has atomically detached the session."""
+     if session is None:
+         return False
++    with session["history_lock"]:
++        _cancel_queued_selected(_lifecycle_own_sid(session), session)
+     run_thread = session.get("_run_thread")
+     if end_reason != "tui_shutdown" and run_thread is not None and run_thread is not threading.current_thread():
+         try:
+@@ -602,6 +604,7 @@
+         run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
+     with session["history_lock"]:
+         session["_turn_cancel_requested"] = True
++        _cancel_queued_selected(sid, session)
+         session["queued_prompt"] = None
+         session.pop("queued_prompts", None)
+         session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
+--- a/tui_gateway/methods_session.py
++++ b/tui_gateway/methods_session.py
+@@ -1788,6 +1788,9 @@
+ @_session_method("session.undo", live=True)
+ def _(rid, params: dict, session: dict) -> dict:
+     # Under a running turn the post-run write would clobber the undo — stop the reply first.
++    with session["history_lock"]:
++        if (selection_error := _selection_active_error(rid, session)) is not None:
++            return selection_error
+     busy = _err(rid, 4009, busy_message("undo"))
+     if session.get("running"):
+         return busy
+@@ -2099,12 +2102,14 @@
+ def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status: str) -> dict:
+     """``agent.<verb>(text)``; on acceptance record it on the live turn (mid-turn resume rebuilds the bubble)
+     and purge queued self-copies so post-turn drain cannot re-fire the old prompt."""
+-    try:
+-        accepted = getattr(session["agent"], verb)(text)
+-    except Exception as exc:
+-        return _err(rid, 5000, f"{verb} failed: {exc}")
+-    if accepted:
+-        with session["history_lock"]:
++    with session["history_lock"]:
++        if (selection_error := _selection_active_error(rid, session)) is not None:
++            return selection_error
++        try:
++            accepted = getattr(session["agent"], verb)(text)
++        except Exception as exc:
++            return _err(rid, 5000, f"{verb} failed: {exc}")
++        if accepted:
+             _record_inflight_correction(session, text)
+             # #84417: steer does not cancel the live original, but a server queue self-copy of that original
+             # must still not re-fire after settle (same class as redirect).
+@@ -2125,6 +2130,9 @@
+         session, err = _sess_nowait(params, rid)
+         if err:
+             return err
++        with session["history_lock"]:
++            if (selection_error := _selection_active_error(rid, session)) is not None:
++                return selection_error
+         agent = session.get("agent")
+         # Redirect during the turn-build window (running=True, agent None): queue for the next turn instead of
+         # a misleading 4010 the client swallows into a lost follow-up.
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -739,11 +739,16 @@
+         run_tool_execution_middleware,
+     )
+ 
++    from tui_gateway.selection_dispatch import tool_context
++    selection_context = tool_context(agent, effective_task_id, getattr(agent, "_current_turn_id", "") or "")
+     trace = middleware_trace if middleware_trace is not None else []
+     state = _ManagedToolResult(result=None, args=function_args, middleware_trace=trace, blocked=False, dispatched=False)
+     dispatch_lock = threading.Lock()
+ 
+     def _authorized_dispatch(final_args: dict[str, Any]) -> Any:
++        # A skippable middleware cannot restore a stale selection or downgrade
++        # a selected turn to an ordinary adapter lease before its real handler.
++        tool_context(agent, effective_task_id, getattr(agent, "_current_turn_id", "") or "")
+         with dispatch_lock:
+             if state.dispatched:
+                 raise RuntimeError("Hermes tool execution callback invoked more than once")
+@@ -780,6 +785,7 @@
+             lambda next_args: _authorized_dispatch(next_args if isinstance(next_args, dict) else request_args),
+             original_args=function_args,
+             **tool_hook_ids(agent, effective_task_id, tool_call_id),
++            **selection_context,
+         )
+ 
+     state.result, _relay_args = relay_tools.execute(
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -648,6 +648,10 @@
+ def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
+     _contracts.check_payload(event, payload)
+     params: dict = {"type": event, "session_id": sid, **({"payload": payload} if payload is not None else {})}
++    from tui_gateway.selection_dispatch import event_sideband
++    selected = event_sideband(sid)
++    if selected is not None:
++        params["selection_dispatch"] = selected
+     return {"jsonrpc": "2.0", "method": "event", "params": params}
+ 
+ 
+@@ -3162,7 +3166,9 @@
+                 if stop.is_set():
+                     break  # turn ended while snapshotting; message.complete carries the authoritative usage
+                 _emit("session.usage", sid, {"usage": usage})
+-    thread = _RealThread(target=_loop, daemon=True)
++    from contextvars import copy_context
++    event_context = copy_context()
++    thread = _RealThread(target=lambda: event_context.run(_loop), daemon=True)
+     thread.start()
+     return stop, thread
+ 
+--- a/tui_gateway/contracts/events.py
++++ b/tui_gateway/contracts/events.py
+@@ -693,6 +693,8 @@
+ event("bot_relay.outbox.pending", ChangeSignalPayload, doc="A bot-relay outbox envelope is queued; drain it.")
+ 
+ 
++event("selection.dispatch.bound", doc="A mandatory selected normal turn is bound before model IO; exact receipt travels in params.selection_dispatch sideband.")
++
+ __all__ = [
+     "BillingBlock", "BillingStepUpVerificationPayload", "BrowserControllerCancelPayload",
+     "BrowserControllerCommandPayload", "BrowserProgressPayload", "ChangeSignalPayload", "ErrorPayload",
+--- /dev/null
++++ b/tui_gateway/selection_input.py
+@@ -0,0 +1,313 @@
++"""Immutable operation-scoped attachments for selected normal Gateway turns.
++
++Canonical digests are SHA-256 of UTF-8 compact JSON arrays (ensure_ascii=False),
++identical to JS JSON.stringify. File bytes and paths never enter a receipt.
++"""
++import base64
++import hashlib
++import json
++import os
++import re
++import shutil
++import stat
++import subprocess
++import tempfile
++import threading
++import time
++from pathlib import Path
++from .selection_dispatch import SelectionDispatchError, _db
++
++MAX_BYTES = 25 * 1024 * 1024
++MAX_ITEMS = 16
++MAX_RETAINED_BYTES = 256 * 1024 * 1024
++MAX_OPERATIONS = 64
++TTL_SECONDS = 15 * 60
++CAPABILITY = {"version": 1, "max_bytes": MAX_BYTES, "max_items": MAX_ITEMS, "kinds": ["image", "pdf", "file"]}
++_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
++_HEX = re.compile(r"^[a-f0-9]{64}$")
++_META = {"kind", "name", "mime_type", "size", "sha256"}
++_STAGE_SLOTS = threading.BoundedSemaphore(1)
++
++
++def fail(code="SELECTION_INPUT_INVALID"):
++    raise SelectionDispatchError(code, "Selected operation input cannot be verified; do not upload or submit again")
++
++
++def sha(value):
++    return hashlib.sha256(value).hexdigest()
++
++
++def digest(value):
++    return sha(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
++
++
++def identity(owner, operation):
++    if not isinstance(owner, str) or not 0 < len(owner) <= 256 or not isinstance(operation, str) or not _ID.fullmatch(operation):
++        fail()
++
++
++def metadata(attachments):
++    if not isinstance(attachments, list) or not 1 <= len(attachments) <= MAX_ITEMS:
++        fail()
++    total = 0
++    for row in attachments:
++        if (not isinstance(row, dict) or set(row) != _META
++                or row["kind"] not in CAPABILITY["kinds"] or not isinstance(row["name"], str)
++                or not 0 < len(row["name"].encode("utf-8")) <= 255 or row["name"] in {".", ".."}
++                or re.search(r"[\\/\x00-\x1f\x7f]", row["name"])
++                or not isinstance(row["mime_type"], str) or not re.fullmatch(r"[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+", row["mime_type"])
++                or len(row["mime_type"]) > 128 or type(row["size"]) is not int or not 0 <= row["size"] <= MAX_BYTES
++                or not isinstance(row["sha256"], str) or not _HEX.fullmatch(row["sha256"])
++                or row["kind"] == "image" and row["mime_type"] not in {"image/png", "image/jpeg", "image/gif", "image/webp"}
++                or row["kind"] == "pdf" and row["mime_type"] != "application/pdf"):
++            fail()
++        total += row["size"]
++    if total > MAX_BYTES:
++        fail("SELECTION_INPUT_TOO_LARGE")
++    return digest([[r[k] for k in ("kind", "name", "mime_type", "size", "sha256")] for r in attachments])
++
++
++def text_digest(text):
++    if not isinstance(text, str) or "\0" in text or len(text.encode("utf-8")) > 1024 * 1024:
++        fail()
++    return sha(text.encode("utf-8"))
++
++
++def table(db):
++    db.execute("""CREATE TABLE IF NOT EXISTS selection_inputs(
++      owner_session_id TEXT NOT NULL, operation_id TEXT NOT NULL, workspace TEXT NOT NULL,
++      input_digest TEXT NOT NULL, message_digest TEXT NOT NULL, attachment_digest TEXT NOT NULL,
++      attachments TEXT NOT NULL, files TEXT NOT NULL, expires_at INTEGER NOT NULL, bytes INTEGER NOT NULL,
++      PRIMARY KEY(owner_session_id, operation_id))""")
++
++
++def receipt(row):
++    return {"version": 1, "owner_session_id": row["owner_session_id"], "operation_id": row["operation_id"], "input_digest": row["input_digest"],
++            "message_digest": row["message_digest"], "attachment_digest": row["attachment_digest"],
++            "attachments": json.loads(row["attachments"]), "expires_at": row["expires_at"]}
++
++
++def get(home, owner, operation):
++    identity(owner, operation)
++    with _db(home) as db:
++        table(db)
++        row = db.execute("SELECT * FROM selection_inputs WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone()
++        return receipt(row) if row else None
++
++
++def private_root(workspace, owner, *, create=True):
++    base = Path(workspace).resolve(strict=True)
++    if not base.is_dir():
++        fail("SELECTION_INPUT_STORAGE_UNAVAILABLE")
++    root = base
++    for name in (".shoggoth-selection-inputs", sha(owner.encode())):
++        root = root / name
++        if create:
++            try:
++                root.mkdir(mode=0o700)
++            except FileExistsError:
++                pass
++        found = root.lstat()
++        if not stat.S_ISDIR(found.st_mode) or found.st_uid != os.getuid() or stat.S_IMODE(found.st_mode) != 0o700:
++            fail("SELECTION_INPUT_STORAGE_UNAVAILABLE")
++    return root
++
++
++def verified_files(row, workspace=None):
++    base = Path(row["workspace"]).resolve(strict=True)
++    if workspace is not None and base != Path(workspace).resolve(strict=True):
++        fail("SELECTION_INPUT_OWNER_CHANGED")
++    root = private_root(str(base), row["owner_session_id"], create=False) / sha(row["operation_id"].encode())
++    if root.is_symlink() or not root.is_dir():
++        fail("SELECTION_INPUT_STORAGE_UNAVAILABLE")
++    files = json.loads(row["files"])
++    for item in files:
++        target = root / item["name"]
++        if (target.is_symlink() or target.parent != root or not target.is_file()
++                or target.stat().st_size != item["size"] or sha(target.read_bytes()) != item["sha256"]):
++            fail("SELECTION_INPUT_CHANGED")
++    return root, files
++
++
++def cleanup_expired_files(home):
++    """Reclaim only expired, never-dispatched or durably terminal own files.
++
++    Digest receipts remain for immutable retries. Active/unknown dispatches and
++    corrupt/unrecognised directories retain their capacity and fail closed.
++    """
++    now = int(time.time())
++    with _db(home) as db:
++        table(db)
++        rows = db.execute("""SELECT i.* FROM selection_inputs i LEFT JOIN selection_dispatches d
++          ON d.owner_session_id=i.owner_session_id AND d.operation_id=i.operation_id
++          WHERE i.bytes>0 AND i.expires_at<=? AND
++          (d.operation_id IS NULL OR d.state IN ('complete','stopped','failed','canceled','cancelled'))
++          ORDER BY i.expires_at LIMIT 8""", (now,)).fetchall()
++    for row in rows:
++        try:
++            root, files = verified_files(row)
++            if {item.name for item in root.iterdir()} != {item["name"] for item in files}:
++                continue
++            with _db(home) as db:
++                db.execute("BEGIN IMMEDIATE")
++                current = db.execute("SELECT i.bytes,d.state FROM selection_inputs i LEFT JOIN selection_dispatches d ON d.owner_session_id=i.owner_session_id AND d.operation_id=i.operation_id WHERE i.owner_session_id=? AND i.operation_id=? AND i.input_digest=?", (row["owner_session_id"],row["operation_id"],row["input_digest"])).fetchone()
++                if current is None or current["bytes"] == 0 or current["state"] not in {None,'complete','stopped','failed','canceled','cancelled'}:
++                    continue
++                # Exact files were created here and verified before deletion.
++                shutil.rmtree(root)
++                db.execute("UPDATE selection_inputs SET bytes=0 WHERE owner_session_id=? AND operation_id=? AND input_digest=?", (row["owner_session_id"],row["operation_id"],row["input_digest"]))
++        except (SelectionDispatchError,OSError):
++            continue
++
++
++def stage(home, owner, operation, workspace, text, attachments):
++    if not _STAGE_SLOTS.acquire(blocking=False):
++        fail("SELECTION_INPUT_BUSY")
++    try:
++        return _stage(home, owner, operation, workspace, text, attachments)
++    finally:
++        _STAGE_SLOTS.release()
++
++
++def _stage(home, owner, operation, workspace, text, attachments):
++    identity(owner, operation)
++    if not isinstance(attachments, list):
++        fail()
++    rows, payloads = [], []
++    for item in attachments:
++        if not isinstance(item, dict) or set(item) != _META | {"data_base64"} or not isinstance(item["data_base64"], str) or len(item["data_base64"]) > (MAX_BYTES * 4 // 3 + 8):
++            fail()
++        row = {key: item[key] for key in _META}
++        try:
++            payload = base64.b64decode(item["data_base64"], validate=True)
++        except Exception:
++            fail()
++        if len(payload) != row.get("size") or sha(payload) != row.get("sha256"):
++            fail("SELECTION_INPUT_CHANGED")
++        rows.append(row); payloads.append(payload)
++    attachment_hash, message_hash = metadata(rows), text_digest(text)
++    input_hash = digest([1, message_hash, attachment_hash])
++    cleanup_expired_files(home)
++    with _db(home) as db:
++        table(db)
++        dispatch = db.execute("SELECT state FROM selection_dispatches WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone()
++        if dispatch:
++            fail("SELECTION_INPUT_ALREADY_DISPATCHED")
++        existing = db.execute("SELECT * FROM selection_inputs WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone()
++        if existing:
++            if existing["input_digest"] != input_hash:
++                fail("SELECTION_INPUT_CONFLICT")
++            if existing["expires_at"] <= int(time.time()):
++                fail("SELECTION_INPUT_EXPIRED")
++            verified_files(existing, workspace)
++            return receipt(existing)
++        capacity = db.execute("SELECT COUNT(*), COALESCE(SUM(bytes),0) FROM selection_inputs WHERE bytes>0").fetchone()
++        if capacity[0] >= MAX_OPERATIONS or capacity[1] + sum(map(len, payloads)) > MAX_RETAINED_BYTES:
++            fail("SELECTION_INPUT_CAPACITY")
++    root = private_root(workspace, owner)
++    target = root / sha(operation.encode())
++    if target.exists() or target.is_symlink():
++        fail("SELECTION_INPUT_STORAGE_UNAVAILABLE")
++    temporary = Path(tempfile.mkdtemp(prefix=".pending-", dir=root))
++    files = []
++    published = False
++    try:
++        render_deadline, total_pages, retained_bytes = time.monotonic() + 30, 0, 0
++        for index, (row, payload) in enumerate(zip(rows, payloads)):
++            name = f"{index:02d}-" + row["name"]
++            file = temporary / name
++            with file.open("xb") as output:
++                os.chmod(file, 0o400); output.write(payload); output.flush(); os.fsync(output.fileno())
++            files.append({"name": name, "kind": row["kind"], "size": len(payload), "sha256": sha(payload)})
++            retained_bytes += len(payload)
++            if retained_bytes > 64 * 1024 * 1024:
++                fail("SELECTION_INPUT_TOO_LARGE")
++            if row["kind"] == "pdf":
++                if not payload.startswith(b"%PDF-") or shutil.which("pdftoppm") is None or shutil.which("pdfinfo") is None:
++                    fail("SELECTION_INPUT_PDF_UNAVAILABLE")
++                try:
++                    remaining = render_deadline - time.monotonic()
++                    if remaining <= 0:
++                        fail("SELECTION_INPUT_PDF_UNAVAILABLE")
++                    info = subprocess.run(["pdfinfo", str(file)], timeout=min(5, remaining), check=True, capture_output=True, text=True)
++                    count = re.search(r"^Pages:\s+(\d+)\s*$", info.stdout, re.MULTILINE)
++                    if count is None or not 1 <= int(count[1]) <= 40 or total_pages + int(count[1]) > 40:
++                        fail("SELECTION_INPUT_PDF_UNAVAILABLE")
++                    total_pages += int(count[1])
++                    for page_number in range(1, int(count[1]) + 1):
++                        remaining = render_deadline - time.monotonic()
++                        if remaining <= 0:
++                            fail("SELECTION_INPUT_PDF_UNAVAILABLE")
++                        prefix = temporary / f"{index:02d}-page-{page_number:03d}"
++                        # One bounded page at a time; no unbounded whole-document
++                        # output can fill disk before the publication limit check.
++                        subprocess.run(["pdftoppm", "-png", "-r", "96", "-scale-to", "1600", "-singlefile", "-f", str(page_number), "-l", str(page_number), str(file), str(prefix)],
++                                       timeout=remaining, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++                        page = prefix.with_suffix(".png")
++                        if not page.is_file() or page.stat().st_size > 12 * 1024 * 1024:
++                            fail("SELECTION_INPUT_TOO_LARGE")
++                        body = page.read_bytes(); os.chmod(page, 0o400)
++                        retained_bytes += len(body)
++                        if retained_bytes > 64 * 1024 * 1024:
++                            fail("SELECTION_INPUT_TOO_LARGE")
++                        files.append({"name": page.name, "kind": "image", "size": len(body), "sha256": sha(body)})
++                except SelectionDispatchError:
++                    raise
++                except Exception:
++                    fail("SELECTION_INPUT_PDF_UNAVAILABLE")
++        total_bytes = sum(item["size"] for item in files)
++        if total_bytes > 64 * 1024 * 1024:
++            fail("SELECTION_INPUT_TOO_LARGE")
++        expires = int(time.time()) + TTL_SECONDS
++        with _db(home) as db:
++            table(db); db.execute("BEGIN IMMEDIATE")
++            if db.execute("SELECT 1 FROM selection_dispatches WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone():
++                fail("SELECTION_INPUT_ALREADY_DISPATCHED")
++            existing = db.execute("SELECT * FROM selection_inputs WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone()
++            if existing:
++                if existing["input_digest"] != input_hash:
++                    fail("SELECTION_INPUT_CONFLICT")
++                if existing["expires_at"] <= int(time.time()):
++                    fail("SELECTION_INPUT_EXPIRED")
++                verified_files(existing, workspace); return receipt(existing)
++            capacity = db.execute("SELECT COUNT(*), COALESCE(SUM(bytes),0) FROM selection_inputs WHERE bytes>0").fetchone()
++            if capacity[0] >= MAX_OPERATIONS or capacity[1] + total_bytes > MAX_RETAINED_BYTES:
++                fail("SELECTION_INPUT_CAPACITY")
++            if target.exists() or target.is_symlink():
++                fail("SELECTION_INPUT_STORAGE_UNAVAILABLE")
++            os.rename(temporary, target); published = True
++            db.execute("INSERT INTO selection_inputs VALUES(?,?,?,?,?,?,?,?,?,?)", (owner, operation, str(Path(workspace).resolve(strict=True)),
++                input_hash, message_hash, attachment_hash, json.dumps(rows, ensure_ascii=False), json.dumps(files), expires, total_bytes))
++            row = db.execute("SELECT * FROM selection_inputs WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone()
++            return receipt(row)
++    finally:
++        if not published:
++            shutil.rmtree(temporary, ignore_errors=True)
++
++
++def for_submit(home, owner, operation, workspace, text, input_hash):
++    identity(owner, operation)
++    with _db(home) as db:
++        table(db)
++        row = db.execute("SELECT * FROM selection_inputs WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone()
++        if row is None:
++            if input_hash is not None:
++                fail("SELECTION_INPUT_NOT_FOUND")
++            return text, []
++        if not isinstance(input_hash, str) or row["input_digest"] != input_hash or row["message_digest"] != text_digest(text):
++            fail("SELECTION_INPUT_CONFLICT")
++        if row["expires_at"] <= int(time.time()) and not db.execute("SELECT 1 FROM selection_dispatches WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone():
++            fail("SELECTION_INPUT_EXPIRED")
++        root, files = verified_files(row, workspace)
++        images = [str(root / item["name"]) for item in files if item["kind"] == "image"]
++        rendered = text + "".join("\n\n@file:" + json.dumps(str(root / item["name"]), ensure_ascii=False)
++                                  for item in files if item["kind"] == "file")
++        return rendered, images
++
++
++def verify_before_model(home, owner, operation):
++    with _db(home) as db:
++        table(db)
++        row = db.execute("SELECT * FROM selection_inputs WHERE owner_session_id=? AND operation_id=?", (owner, operation)).fetchone()
++        if row is not None:
++            verified_files(row)

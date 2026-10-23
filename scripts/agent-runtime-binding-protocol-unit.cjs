@@ -44,9 +44,11 @@ test("Backend resolves Agent authority, validates before IPC and isolates unsafe
   backend._assertDomainReady = () => {};
   backend._profilesByAgent.set("agent-one", { id: "profile-one" });
   assert.deepEqual(await backend.getAgentRuntimeBindings("agent-one"), { ...snapshot(), availability: [{ bindingId: binding().id, available: true, reason: null }] });
+  assert.equal(calls[0].method, "agent.binding.sync");
   assert.equal(calls[0].params.profileId, "profile-one");
+  assert.deepEqual(calls[0].params.runtimeAccountIds, [], "binding sync also runs without native CLIs");
   await assert.rejects(() => backend.addAgentRuntimeBinding("agent-one", { runtime: "pi", runtimeAccountId: "account-pi" }, { operationId: "op" }), { code: "AGENT_BINDING_INVALID" });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   await assert.rejects(() => backend.getAgentRuntimeBindings("other"), { code: "AGENT_NOT_FOUND" });
   backend.requestService = async () => { throw Object.assign(Error("secret filesystem path"), { code: "AGENT_BINDING_REVISION_CONFLICT" }); };
   await assert.rejects(() => backend.getAgentRuntimeBindings("agent-one"), (error) => error.code === "AGENT_BINDING_REVISION_CONFLICT" && !error.message.includes("secret"));

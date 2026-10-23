@@ -2,6 +2,8 @@
 
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
+const { validateHookToolArguments } = require("./hook-tool-schema");
+const { glob } = require("./hook-contract");
 const { buildPluginToolCatalog } = require("./plugin-tool-contract");
 const { componentId } = require("./plugin-component-catalog");
 
@@ -26,6 +28,7 @@ class PluginRuntimeToolService {
   #dispatcher;
   #policy;
   #requestApproval;
+  #hookToolExecution;
   #requestElicitation;
   #recordAppCall;
   #acquire;
@@ -33,7 +36,7 @@ class PluginRuntimeToolService {
 
   constructor({ store, productStore, getRun, toolCatalogRegistry,
     capabilityDispatcher, permissionEngine, acquireConnection, requestApproval = null,
-    requestElicitation = null, recordAppCall = null } = {}) {
+    requestElicitation = null, recordAppCall = null, hookToolExecution = null } = {}) {
     if (typeof store?.listBindingsForProfile !== "function"
       || typeof store?.listGlobalBindings !== "function"
       || typeof store?.getCapabilityRecords !== "function"
@@ -60,6 +63,7 @@ class PluginRuntimeToolService {
     this.#dispatcher = capabilityDispatcher;
     this.#policy = permissionEngine;
     this.#requestApproval = requestApproval;
+    this.#hookToolExecution = hookToolExecution;
     this.#requestElicitation = requestElicitation;
     this.#recordAppCall = recordAppCall;
     this.#acquire = acquireConnection;
@@ -126,6 +130,16 @@ class PluginRuntimeToolService {
     return { serverCount: servers.size };
   }
 
+  hookToolTargets(run, matcher) {
+    const snapshot = this.#runs.get(run.id);
+    if (!snapshot || snapshot.profileId !== run.profileId || snapshot.workspace !== run.workspace) return [];
+    return [...snapshot.servers].flatMap(([serverId, server]) => [...server.tools].filter(([name, entry]) =>
+      matcher.toolNames.some(pattern => glob(pattern, name))
+      && (!matcher.serverId || matcher.serverId === serverId)
+      && (!matcher.componentId || matcher.componentId === entry.envelope.componentId))
+      .map(([name, entry]) => ({ serverId, name, componentId: entry.envelope.componentId })));
+  }
+
   releaseRun(runId) { this.#runs.delete(runId); }
   clear() { this.#runs.clear(); }
 
@@ -180,6 +194,45 @@ class PluginRuntimeToolService {
       } catch { return false; }
     });
     return { entries, records: firstRecords };
+  }
+
+  #skillToolProjection(snapshot) {
+    const productTool = this.#policy.profileProjection(snapshot.profileId).tools
+      .find((tool) => tool.name === "mcp_server_call");
+    if (!productTool?.enabled || productTool.effect !== "allow") return [];
+    const tools = [];
+    for (const server of snapshot.servers.values()) {
+      const { entries, records } = this.#currentEntries(server);
+      if (!records) continue;
+      for (const entry of entries) {
+        if (this.#catalog.resolve({ ...records, toolIdentity: entry.toolIdentity })
+          ?.catalogRevision !== entry.catalogRevision) continue;
+        tools.push({ name: entry.downstreamName,
+          installationId: entry.envelope.installationId,
+          sourceIdentity: records.installation.sourceIdentity,
+          toolIdentity: entry.toolIdentity });
+      }
+    }
+    return tools;
+  }
+
+  // Only the tools captured at admission may satisfy a Skill dependency.
+  // Current records may revoke them, but a later Grant cannot add to this Run.
+  skillToolProjectionForRun(run) {
+    const snapshot = this.#runs.get(run?.id);
+    const current = this.#getRun(run?.id);
+    const profile = this.#productStore.getAgentProfile(run?.profileId);
+    if (!snapshot || snapshot.profileId !== run.profileId
+      || snapshot.workspace !== run.workspace || current?.id !== run.id
+      || current.profileId !== run.profileId || current.workspace !== run.workspace
+      || !ACTIVE.has(current.status) || profile?.enabled !== true) return [];
+    return this.#skillToolProjection(snapshot);
+  }
+
+  skillToolProjection(authority, scope) {
+    if (!this.#runs.has(scope?.runId)) return [];
+    const { snapshot } = this.#context(authority, scope);
+    return this.#skillToolProjection(snapshot);
   }
 
   listServers(authority, scope) {
@@ -248,20 +301,33 @@ class PluginRuntimeToolService {
     if (this.#store.getCapabilityCall(callId)) fail("CALL_ALREADY_RECORDED");
     this.#policy.authorize({ name: "mcp_server_call", profileId: profile.id, profile,
       run, workspace: run.workspace, confirmed: authority.confirmation === true });
-    const callArgs = structuredClone(args);
+    let callArgs = structuredClone(args);
+    const hooks = typeof this.#hookToolExecution === "function" ? this.#hookToolExecution() : this.#hookToolExecution;
+    const hookCall = hooks ? await hooks.before({ run, profile,
+      tool: { scope: "plugin_mcp", name: toolName, serverId, componentId: records.binding.componentId },
+      args: callArgs, scope, callId: authority.callId, validateArguments: value => validateHookToolArguments(
+        this.#catalog.inputSchema({ ...records, toolIdentity: entry.toolIdentity }), value) }) : null;
+    if (hookCall) callArgs = hookCall.arguments;
+    const authorizationIdentity = { serverId, bindingId: records.binding.bindingId,
+      releaseDigest: records.installation.activeReleaseDigest, contractDigest: entry.contractDigest,
+      grantEpoch: records.grant.epoch, authRevision: records.connection.authRevision,
+      ...(hookCall?.authorizationIdentity || {}) };
     const client = await this.#acquire({ ...records, run });
     let approvalReceipt = null;
     try {
       this.#context(authority, scope);
       this.#current(entry);
-      if (records.grant.approvalMode === "each-call") {
+      if (records.grant.approvalMode === "each-call" || hookCall?.requiresApproval || hookCall?.changed && authority.confirmation === true) {
         if (!this.#requestApproval) fail();
         const response = await this.#requestApproval({ runId: run.id, profileId: profile.id,
           packageName: server.name, toolName, arguments: structuredClone(callArgs),
+          authorizationIdentity,
+          reason: hookCall?.reason ?? undefined,
           signal: scope.signal, assertCurrent: () => {
             this.#context(authority, scope); this.#current(entry);
           } });
         if (response?.approved !== true) fail();
+        if (hookCall) hooks.markApproved(hookCall.token);
         this.#context(authority, scope);
         this.#current(entry);
       }
@@ -281,17 +347,21 @@ class PluginRuntimeToolService {
         onElicitation: this.#requestElicitation ? request =>
           this.#requestElicitation({ runId: run.id, profileId: profile.id,
             packageName: server.name, serverName: serverId, request,
+            authorizationIdentity: { ...authorizationIdentity, toolName, arguments: structuredClone(callArgs) },
             signal: scope.signal, assertCurrent: () => {
               this.#context(authority, scope); this.#current(entry);
             } }) : undefined,
         assertCurrent: () => {
           this.#context(authority, scope); this.#current(entry);
+          if (hookCall) hooks.assertCurrent(hookCall.token);
           this.#policy.authorize({ name: "mcp_server_call", profileId: profile.id, profile,
             run, workspace: run.workspace, confirmed: authority.confirmation === true });
         },
       };
       if (records.grant.approvalMode === "each-call") approvalReceipt = this.#dispatcher.approveCall(input);
-      const result = await this.#dispatcher.dispatch({ client, ...input, approvalReceipt });
+      if (hookCall) hooks.assertCurrent(hookCall.token);
+      const originalResult = await this.#dispatcher.dispatch({ client, ...input, approvalReceipt });
+      const result = hookCall ? await hooks.after(hookCall.token, originalResult) : originalResult;
       let appCall = null;
       if (entry.ui?.resourceUri && run.source === "chat" && this.#recordAppCall) {
         // A UI seed is optional. Its bounds or retention cannot turn a confirmed

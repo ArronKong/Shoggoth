@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import type { CustomEndpoint, CustomEndpointInput, CustomEndpointsSnapshot } from "../../types";
-import { Field, Option, Select, TextInput } from "../../components/Field";
+import { Field, Option, Select, TextInput, TextArea } from "../../components/Field";
 import Modal from "../../components/Modal";
 import { useConfirm, useToast } from "../../components/ui";
 import { ProviderSecretField } from "../keys/ProviderCredentialFields";
@@ -12,8 +12,10 @@ import {
   type EndpointController,
   type EndpointMutationOutcome,
 } from "./endpoint-controller";
+import { getModelOperationRecoverySnapshot, modelOperationRecoveryBlocks, subscribeModelOperationRecovery } from "./model-operation-recovery";
 import styles from "./CustomEndpointsPanel.module.css";
 import { endpointMutationNotice } from "./endpoint-mutation-state";
+import { useSlowPending } from "./useSlowPending";
 
 function IconSearch() {
   return (
@@ -55,7 +57,7 @@ export default function EndpointModal({
   endpoint: CustomEndpoint | null;
   onClose: () => void;
   onOpenChangeComplete: (open: boolean) => void;
-  onSaved: (snapshot: CustomEndpointsSnapshot) => void;
+  onSaved: (snapshot?: CustomEndpointsSnapshot) => void;
   onSnapshot?: (snapshot: CustomEndpointsSnapshot) => void;
   onActivation?: (activation?: { kind: string; available?: boolean } | null) => void;
 }) {
@@ -64,6 +66,9 @@ export default function EndpointModal({
   const confirm = useConfirm();
   const editing = Boolean(endpoint);
   const form = snapshot.form;
+  const formalOperations = form?.singleModelMutations === true || form?.configurationDraft === true;
+  const modelRecovery = useSyncExternalStore(subscribeModelOperationRecovery,
+    () => getModelOperationRecoverySnapshot(controller.backend));
   const nameIsProviderId = form?.nameIsProviderId === true;
   const providerIdReadOnly = editing && form?.providerIdEditable !== true;
   const nameReadOnly = editing && form?.nameEditable === false;
@@ -81,6 +86,13 @@ export default function EndpointModal({
   const providerIdInvalid = Boolean(providerId) && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(providerId);
   const [baseUrl, setBaseUrl] = useState(endpoint?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [baseHash] = useState(form?.configRevision);
+  const [advanced, setAdvanced] = useState(endpoint?.advanced && Object.keys(endpoint.advanced).length ? JSON.stringify(endpoint.advanced, null, 2) : "");
+  const advancedDraft = useMemo(() => {
+    try { const value = advanced.trim() ? JSON.parse(advanced) : undefined;
+      return { valid: value === undefined || !!value && typeof value === "object" && !Array.isArray(value), value }; }
+    catch { return { valid: false, value: undefined }; }
+  }, [advanced]);
   const [keyEditing, setKeyEditing] = useState(false);
   const keyBeforeEdit = useRef("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
@@ -96,6 +108,7 @@ export default function EndpointModal({
   const [manual, setManual] = useState("");
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const slowSave = useSlowPending(saving || clearing);
   const [mutationOutcome, setMutationOutcome] = useState<EndpointMutationOutcome | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const primaryUsage = (mutationOutcome?.recovery?.baseline ?? endpoint)?.primaryModelUsage ?? [];
@@ -128,8 +141,13 @@ export default function EndpointModal({
       discoverModels: false,
     };
     if (apiKey.trim()) input.apiKey = apiKey.trim();
+    if (form?.configurationDraft) {
+      input.credentialScope = "provider";
+      input.baseHash = baseHash;
+      if (advancedDraft.value) input.advanced = advancedDraft.value;
+    }
     // 仅在用户修改协议后提交 api，否则由 controller/后端保留原值。
-    if (apiChanged && api) input.api = api;
+    if (api && (apiChanged || !editing)) input.api = api;
     return input;
   };
 
@@ -137,7 +155,7 @@ export default function EndpointModal({
     const epoch = ++fetchEpoch.current;
     setFetched([]);
     setFetchNote(null);
-    if (!open || !fetchableUrl(baseUrl)) {
+    if (!open || form?.configurationDraft || !fetchableUrl(baseUrl)) {
       setFetching(false);
       return;
     }
@@ -172,7 +190,7 @@ export default function EndpointModal({
     };
     // name/selected/id 不触发目录探测；它们不改变远端连接身份。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller, open, baseUrl, apiKey, api, apiChanged]);
+  }, [controller, open, baseUrl, apiKey, api, apiChanged, form?.configurationDraft]);
 
   useEffect(() => () => {
     fetchEpoch.current += 1;
@@ -223,6 +241,17 @@ export default function EndpointModal({
     successMessage: string,
   ): boolean => {
     noteOutcome(outcome);
+    if (outcome.status === "applied" && outcome.configSaved === true) {
+      setMutationOutcome(null);
+      setMutationError(null);
+      setApiKey("");
+      controller.release?.(outcome.operationId === clearSession.rootOperationId ? clearSession : saveSession.current);
+      toast.success(outcome.operationId === clearSession.rootOperationId ? successMessage : t("models.settings.endpoints.nativeSaveOk"));
+      if (outcome.warnings?.length) toast.info(outcome.warnings.join("；"));
+      else if (outcome.sync === "pending") toast.info(t("models.dirManagedRefreshFailed"));
+      onSaved(outcome.snapshot);
+      return true;
+    }
     if (!isEndpointMutationComplete(outcome)) {
       retainIncomplete(outcome);
       return false;
@@ -248,12 +277,16 @@ export default function EndpointModal({
     && mutationOutcome?.recovery?.retryable !== false
     && Boolean(controller.retry)
     && (!recoveryNeedsSecret || Boolean(apiKey.trim()));
+  const pendingOriginal = formalOperations && (!modelRecovery.storageVerified || modelRecovery.required
+    && (modelRecovery.journal !== "ready"
+      || modelRecovery.operations.some((row) => row.providerKey === providerId || row.providerKey === endpoint?.id)));
   const canSave = Boolean(
-    !saving
+    !(formalOperations && recoveryLocked) && !pendingOriginal && !saving
     && !clearing
+    && (!form?.configurationDraft || advancedDraft.valid)
     && (recoveryLocked
       ? canRetry
-      : endpointName && !providerIdInvalid && baseUrl.trim() && selected.length > 0),
+      : endpointName && !providerIdInvalid && baseUrl.trim() && (selected.length > 0 || form?.allowEmptyModels === true)),
   );
 
   const confirmBlockedModelRemoval = async (
@@ -375,21 +408,24 @@ export default function EndpointModal({
   };
 
   const doClear = async () => {
-    if (!endpoint || !controller.clearApiKey || clearing) return;
+    if (!endpoint || !controller.clearApiKey || clearing || pendingOriginal) return;
     const guardEpoch = mutationEpoch.current;
     const approved = await confirm({
       title: t("models.settings.endpoints.clearKeyTitle", { name: endpoint.name }),
-      message: t("models.settings.endpoints.clearKeyConfirm", { name: endpoint.name }),
+      message: t(form?.configurationDraft ? "models.dirClearProviderKeyMessage"
+        : "models.settings.endpoints.clearKeyConfirm", { name: endpoint.name }),
       confirmLabel: t("models.settings.endpoints.clearKey"),
       danger: true,
     });
-    if (!approved || guardEpoch !== mutationEpoch.current) return;
+    if (!approved || guardEpoch !== mutationEpoch.current || formalOperations
+      && modelOperationRecoveryBlocks(controller.backend, endpoint.id)) return;
     const epoch = ++mutationEpoch.current;
     const activeController = controller;
     setClearing(true);
     setMutationError(null);
     try {
-      const outcome = await controller.clearApiKey(endpoint, clearSession);
+      const outcome = await controller.clearApiKey(endpoint, clearSession,
+        form?.configurationDraft ? { credentialScope: "provider", baseHash } : undefined);
       if (epoch !== mutationEpoch.current || activeController !== controller) return;
       finishOutcome(outcome, t("models.settings.endpoints.clearKeyOk"));
     } catch (error) {
@@ -474,6 +510,8 @@ export default function EndpointModal({
             }}
           />
         </Field>
+        {form?.configurationDraft && editing && providerId !== endpoint?.id &&
+          <p className="ui-hint">{t("models.settings.endpoints.nativeRenameHint")}</p>}
         {nameIsProviderId && apiProtocolField}
         <Field label={t("models.settings.endpoints.url")}>
           <TextInput
@@ -485,21 +523,27 @@ export default function EndpointModal({
             onChange={(event) => setBaseUrl(event.target.value)}
           />
         </Field>
+        {form?.configurationDraft && <Field label={t("models.advancedProviderConfig")}
+          hint={t("models.advancedProviderConfigHint")} error={advancedDraft.valid ? undefined : t("models.validationAdvancedJson")}>
+          <TextArea value={advanced} rows={4} disabled={recoveryLocked || saving || clearing}
+            aria-label={t("models.advancedProviderConfig")} onChange={event => setAdvanced(event.target.value)} />
+        </Field>}
         <Field label={t("models.settings.endpoints.apiKey")}>
           <ProviderSecretField
             secret={{
               value: null,
-              configured: Boolean(apiKey.trim() || endpoint?.hasApiKey),
+              configured: Boolean(apiKey.trim() || endpoint?.hasApiKey || endpoint?.apiKeyStatusUnknown),
               preview: apiKey.trim()
                 ? (apiKey.trim().length >= 10 ? `${apiKey.trim().slice(0, 4)}...${apiKey.trim().slice(-4)}` : "••••••")
-                : endpoint?.apiKeyPreview || t("models.settings.endpoints.apiKeySet"),
+                : endpoint?.apiKeyStatusUnknown && !endpoint.hasApiKey ? t("models.dirNativeKeyStatusUnknown")
+                  : endpoint?.apiKeyPreview || t("models.settings.endpoints.apiKeySet"),
               placeholder: t("models.settings.endpoints.apiKeyOptional"),
               ariaLabel: t("models.settings.endpoints.apiKey"),
             }}
             editValue={keyEditing || recoveryNeedsSecret ? apiKey : null}
             revealedValue={revealedKey}
-            busy={saving || clearing || revealing || (recoveryLocked && !recoveryNeedsSecret)}
-            editDisabled={recoveryLocked && !recoveryNeedsSecret}
+            busy={saving || clearing || revealing || pendingOriginal || (recoveryLocked && !recoveryNeedsSecret)}
+            editDisabled={form?.canEditApiKey === false || pendingOriginal || recoveryLocked && !recoveryNeedsSecret}
             canReveal={Boolean(apiKey.trim()) || canRevealKey}
             canClear={canClearKey || (!endpoint?.hasApiKey && Boolean(apiKey.trim()))}
             clearLabel={t("models.settings.endpoints.clearKey")}
@@ -531,6 +575,12 @@ export default function EndpointModal({
         </Field>
         {!nameIsProviderId && apiProtocolField}
       </div>
+
+      {(pendingOriginal || form?.singleModelMutations === true && recoveryLocked) && <div className={styles.recoveryBox} role="status" data-endpoint-original-operation-lock>
+        <p>{t("models.dirManagedPending")}</p>
+      </div>}
+
+      {slowSave && <p className={styles.recoveryNote} role="status">{t("models.savingSlow")}</p>}
 
       {(mutationOutcome || mutationError) && (
         <div className={styles.recoveryBox} role="status">
@@ -587,7 +637,7 @@ export default function EndpointModal({
           )}
         </div>
         <p className={styles.modelsHint}>
-          {t(firstModelIsDefault
+          {t(form?.configurationDraft ? "models.settings.endpoints.nativeModelsHint" : firstModelIsDefault
             ? "models.settings.endpoints.modelsHint"
             : "models.settings.endpoints.modelsHintNoDefault")}
         </p>

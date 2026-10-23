@@ -26,6 +26,9 @@ const DEEPSEEK_HARNESS_CAPABILITIES = runtimeCapabilities({
   serverRequests: true,
   "context.usage.estimated": true,
   "model.generate.toolFree": true,
+  "model.generate.settings": true,
+  "model.resolve.toolFree": true,
+  "model.resolve.explicit": true,
 });
 
 function adapterError(code, message) {
@@ -49,6 +52,7 @@ class DeepSeekHarnessRuntimeHandle {
   }
   authenticationState() { return this.host.authenticationState(); }
   generateModelOnly(input) { return this.host.generateModelOnly(input); }
+  resolveModelOnly(input) { return this.host.resolveModelOnly(input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);

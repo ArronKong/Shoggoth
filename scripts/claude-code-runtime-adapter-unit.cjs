@@ -109,6 +109,10 @@ class FakeQuery {
     ]);
   }
 
+  getSettings() {
+    return Promise.resolve({ model: "sonnet", applied: { model: "claude-fixture-actual" } });
+  }
+
   supportedCommands() {
     return Promise.resolve([
       {
@@ -558,10 +562,14 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
     assert.equal(runtime.capabilities["turn.steer"], true);
     assert.equal(runtime.capabilities["commands.list"], true);
     assert.equal(runtime.capabilities["commands.execute"], true);
+    assert.equal(runtime.capabilities["model.resolve.toolFree"], true);
     assert.equal(runtime.capabilities.serverRequests, true);
     assert.deepEqual(await runtime.authenticationState(), {
       authenticated: true,
       credentialPresent: true,
+    });
+    assert.deepEqual(await runtime.resolveModelOnly({ operationId: "claude-control-model" }), {
+      model: "claude-fixture-actual", provider: "claude-code",
     });
     const catalog = await runtime.modelsList({ limit: 100 });
     assert.deepEqual(catalog.data.map((model) => model.model), ["sonnet", "opus"]);
@@ -603,6 +611,7 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
       sessionId: started.session.id,
       operationId: "operation-one",
       prompt: "运行 pwd",
+      turnDeveloperInstructions: "CURRENT_RUN_ONLY",
       attachments: [image],
       thinkingLevel: "high",
       context: "上下文",
@@ -642,6 +651,7 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
       sessionId: started.session.id,
       operationId: "operation-one",
       prompt: "运行 pwd",
+      turnDeveloperInstructions: "CURRENT_RUN_ONLY",
       thinkingLevel: "high",
       context: "上下文",
       cwd: ctx.workspace,
@@ -682,7 +692,7 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
     assert.deepEqual(turnQuery.options.systemPrompt, {
       type: "preset",
       preset: "claude_code",
-      append: "只修改当前工作区",
+      append: "只修改当前工作区\n\nCURRENT_RUN_ONLY",
     });
     assert.equal(turnQuery.options.strictMcpConfig, true);
     assert.deepEqual(turnQuery.options.settingSources, []);

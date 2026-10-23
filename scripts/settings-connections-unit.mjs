@@ -36,8 +36,8 @@ const loadBackends = () => load("app/manage-ui/src/lib/backends.ts", {
 const { FALLBACK_BACKEND_DESCRIPTORS } = loadBackends();
 assert.deepEqual(Array.from(FALLBACK_BACKEND_DESCRIPTORS, d => d.id), ids);
 const toggleIds = Array.from(FALLBACK_BACKEND_DESCRIPTORS.filter(d => d.disconnectable), d => d.id);
-assert.deepEqual(toggleIds, ["openclaw", "hermes"].filter(id => ids.includes(id)));
-assert.equal(FALLBACK_BACKEND_DESCRIPTORS.find(d => d.id === "shoggoth")?.disconnectable, false);
+assert.deepEqual(toggleIds, ids);
+assert.equal(FALLBACK_BACKEND_DESCRIPTORS.find(d => d.id === "shoggoth")?.disconnectable, true);
 const Overview = load("app/manage-ui/src/pages/settings/BackendOverview.tsx", {
   "react-i18next": { useTranslation: () => ({ t: key => key }) },
   "../../lib/connectionOptions": { REMOTE_CONNECTIONS_ENABLED: false },
@@ -61,15 +61,14 @@ const row = (renderer, id) => renderer.root.findAllByType("article")
   .find(node => node.findByType("h4").children.join("") === id);
 const toggle = (renderer, id) => row(renderer, id).findAllByType("button")
   .find(node => ["settings.disconnect", "settings.reconnect"].includes(node.children.join("")));
-// The guard follows the enabled count supplied by Settings; the built-in
-// Shoggoth service itself does not expose a disconnect button.
+// The guard follows the enabled count supplied by Settings, including for the
+// built-in Shoggoth service, which can be disconnected like the others.
 {
   const renderer = await render([], { enabledCount: 1 });
   for (const id of toggleIds) {
     assert.equal(toggle(renderer, id).props.disabled, true, `protect last connection ${id}`);
     assert.equal(toggle(renderer, id).props.title, "settings.disconnectLastHint");
   }
-  assert.equal(toggle(renderer, "shoggoth"), undefined);
   await act(async () => renderer.unmount());
 }
 for (const disconnected of toggleIds) {
@@ -89,8 +88,11 @@ for (const disconnected of toggleIds) {
 }
 for (const disabled of [[], ["hermes"], ["openclaw"], ["openclaw", "hermes"]]) {
   const renderer = await render(disabled);
-  for (const id of toggleIds) assert.equal(toggle(renderer, id).props.disabled, false);
-  assert.equal(toggle(renderer, "shoggoth"), undefined);
+  // Only the last enabled connection is locked; reconnect always stays available.
+  const lastEnabled = ids.length - disabled.length <= 1;
+  for (const id of toggleIds) {
+    assert.equal(toggle(renderer, id).props.disabled, lastEnabled && !disabled.includes(id));
+  }
   await act(async () => renderer.unmount());
 }
 for (const blocked of [{ loading: true }, { configFailed: true }]) {
@@ -149,19 +151,28 @@ const backends = new Map(ids.map(id => [id, {
   stop: async () => calls.push([id, "stop"]), start: async () => calls.push([id, "start"]),
 }]));
 const context = vm.createContext({ configStore: { read: () => config }, appliedConfig: config,
-  appBackendRegistry: { backends, start: id => backends.get(id).start() }, nativeTheme: {}, buildMenu() {},
+  configApplyQueue: Promise.resolve(), managedOpenClawProductHost: null, managedHermesProductHost: null,
+  openClawEndpointGeneration: 0, gatewayProxy: null,
+  appBackendRegistry: { backends, start: id => backends.get(id).start(),
+    keepsRunningWhenDisconnected: id => descriptors.get(id).connectionMode === "builtin-service",
+    notifyConnectionsChanged: () => calls.push(["registry", "notify"]) }, nativeTheme: {}, buildMenu() {},
   mainWindow: { webContents: { reload: () => calls.push(["window", "reload"]) } }, console,
 });
 vm.runInContext(functions, context);
 for (const id of toggleIds) {
+  // A disconnected built-in service is only hidden: it keeps running because
+  // other backends use its plugins and Inspiration.
+  const keepsRunning = descriptors.get(id).connectionMode === "builtin-service";
   config = { ...config, disabledBackends: [id] };
   calls.length = 0;
   await context.applyConfigChange();
-  assert.deepEqual(calls, [[id, "stop"]], "disconnect must not reload the settings page");
+  assert.deepEqual(calls, [...(keepsRunning ? [] : [[id, "stop"]]), ["registry", "notify"]],
+    "disconnect must not reload the settings page");
   config = { ...config, disabledBackends: [] };
   calls.length = 0;
   await context.applyConfigChange();
-  assert.deepEqual(calls, [[id, "start"]], "reconnect must not reload the settings page");
+  assert.deepEqual(calls, [...(keepsRunning ? [] : [[id, "start"]]), ["registry", "notify"]],
+    "reconnect must not reload the settings page");
 }
 // Endpoint autosaves refresh the affected transport without reloading the form.
 config = { ...config, gatewayUrl: "ws://127.0.0.1:18793" };
@@ -173,4 +184,4 @@ config = { ...config, hermesMode: "remote" };
 calls.length = 0;
 await context.applyConfigChange();
 assert.deepEqual(calls, [["hermes", "reconfigure"]]);
-console.log(`PASS settings: ${toggleIds.length} disconnectable backend controls, built-in service protection, final connection guard, reconnect, backend filtering and live endpoint changes`);
+console.log(`PASS settings: ${toggleIds.length} disconnectable backend controls, built-in service kept running when hidden, final connection guard, reconnect, backend filtering and live endpoint changes`);

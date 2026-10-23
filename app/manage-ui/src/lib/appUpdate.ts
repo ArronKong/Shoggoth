@@ -5,6 +5,8 @@ export type AppUpdateStatus =
   | "available"
   | "downloading"
   | "downloaded"
+  | "preparing"
+  | "recovering"
   | "up-to-date"
   | "error"
   | "installing";
@@ -20,6 +22,7 @@ export type AppUpdateState = {
   progress: number | null;
   canCheck: boolean;
   canInstall: boolean;
+  installBlockReason: string | null;
 };
 
 export type DesktopAppUpdateBridge = {

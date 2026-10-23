@@ -13,9 +13,12 @@ const compiled = ts.transpileModule(fs.readFileSync(file, "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 vm.runInNewContext(compiled, { exports: mod.exports });
-const { sessionCategoryOf, isBackgroundSession } = mod.exports;
+const { sessionCategoryOf, isBackgroundSession, isVisibleSession } = mod.exports;
 const uuid = "8b997cf2-6b82-4f14-a221-111111111111";
 const cases = [
+  [{ key: `agent:native:${uuid}`, kind: "direct", source: "codex-desktop" }, "codex-desktop"],
+  [{ key: `agent:native:${uuid}`, kind: "direct", source: "codex-desktop", title: "work kanban task t_123" }, "codex-desktop"],
+  [{ key: `agent:native:${uuid}`, kind: "direct", title: "Codex Desktop" }, "app"],
   [{ key: "agent:main:main" }, "app"],
   [{ key: `agent:main:dashboard:${uuid}` }, "app"],
   [{ key: `agent:native:${uuid}`, kind: "direct" }, "app"],
@@ -40,8 +43,16 @@ const cases = [
   [{ key: `agent:horse:${uuid}`, kind: "direct", title: "讨论 kanban 任务和灵感便签", sub: "请介绍 inspiration task" }, "app"],
 ];
 for (const [row, category] of cases) assert.equal(sessionCategoryOf(row), category, JSON.stringify(row));
+const snapshot = cases.map(([row]) => row);
+const original = JSON.stringify(snapshot);
+assert.deepEqual(Array.from(snapshot.filter(isVisibleSession)), snapshot.filter((_, index) => ![0, 1, 9, 19].includes(index)),
+  "Desktop and child session projections are hidden; ordinary chats and cron remain visible");
+assert.equal(isVisibleSession({ key: `agent:native:${uuid}`, kind: "subagent" }), false);
+assert.equal(isVisibleSession({ key: "agent:main:subagent:new-unlisted" }), false, "cold child links cannot create a visible placeholder");
+assert.equal(JSON.stringify(snapshot), original, "hiding a projection preserves the session records");
+assert.equal(isVisibleSession(), true, "unknown deep links are not classified by their opaque keys");
 
-// 菜单分类不改变后台会话的未读/代表会话语义。
+// 菜单分类不改变后台会话的代表会话语义；未读有独立回归。
 assert.equal(isBackgroundSession("agent:main:subagent:workboard-default-card-123"), true);
 assert.equal(isBackgroundSession(`agent:native:${uuid}`, "cron"), true);
 assert.equal(isBackgroundSession(`agent:native:${uuid}`, "direct"), false);

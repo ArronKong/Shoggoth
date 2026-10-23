@@ -710,7 +710,7 @@ export default function UsagePage() {
                   {/* chat-md = 聊天页 markdown 显示规则（全局类）；本地类只供变量包+排版 */}
                   <div
                     className="chat-md usage-chatmsg-md"
-                    dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(m.text) }}
+                    dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(m.text, true) }}
                   />
                   {m.timestamp ? <div className="usage-chatmsg-ts">{fmtWhen(m.timestamp)}</div> : null}
                 </div>

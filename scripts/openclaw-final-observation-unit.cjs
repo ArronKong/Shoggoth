@@ -125,6 +125,32 @@ test("ordinary RPC behavior stays one-response and observer exceptions stay isol
   assert.equal(backend._finalObservers.size, 0);
 });
 
+test("assistant drafts are bound to the original run and socket with ordered snapshots, excluding reasoning", async t => {
+  const { backend, socket, receive } = fixture();
+  t.after(() => backend.stop());
+  const drafts = [];
+  const response = backend.requestWithFinalObservation("agent", PARAMS,
+    { onFinal() {}, onAssistant: data => drafts.push(data) });
+  receive(accepted()); await response;
+  const event = (seq, extra = {}, data = { text: "正在核对", delta: "核对" }) => ({ type: "event", event: "agent",
+    payload: { runId: PARAMS.idempotencyKey, sessionKey: PARAMS.sessionKey, stream: "assistant", seq, data, ...extra } });
+  backend._observeAssistantEvent(event(1), {});
+  backend._observeAssistantEvent(event(1, { runId: "other" }), socket);
+  backend._observeAssistantEvent(event(1, { sessionKey: "other" }), socket);
+  backend._observeAssistantEvent(event(1, { agentId: "other" }), socket);
+  backend._observeAssistantEvent(event(1, { stream: "thinking" }), socket);
+  backend._observeAssistantEvent(event(1, {}, { text: "私有推理", phase: "analysis" }), socket);
+  assert.equal(drafts.length, 0);
+  backend._observeAssistantEvent(event(2), socket);
+  backend._observeAssistantEvent(event(2), socket);
+  backend._observeAssistantEvent(event(1), socket);
+  backend._observeAssistantEvent(event(3, {}, { replace: true, text: "" }), socket);
+  assert.deepEqual(drafts, [{ text: "正在核对", delta: "核对" }, { replace: true, text: "" }]);
+  receive(final());
+  backend._observeAssistantEvent(event(4), socket);
+  assert.equal(drafts.length, 2, "terminal response removes its draft observer");
+});
+
 test("direct OpenClaw chat RPC rejects unsupported plugin selection before sending a frame", async t => {
   const { backend, sent, receive } = fixture();
   t.after(() => backend.stop());
