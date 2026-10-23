@@ -18,7 +18,8 @@ if (!process.versions.electron) {
       cwd: path.resolve(__dirname, ".."), env: { ELECTRON_RUN_AS_NODE: "1" }, timeout: 55000, maxBuffer: 512 * 1024,
     });
     assert.match(stdout, /# fail 0/u);
-    assert.match(stdout, /"electron":"44\.4\.2"/u);
+    assert.ok(stdout.includes(`"electron":${JSON.stringify(require("../package.json").devDependencies.electron)}`),
+      "the child must run the exact Electron version pinned for this release");
     assert.match(stdout, /"physicalCleanup":true/u);
     t.diagnostic(stdout.trim());
     if (stderr.trim()) t.diagnostic(stderr.trim());
