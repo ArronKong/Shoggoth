@@ -8,6 +8,8 @@ const { once } = require("node:events");
 const core = require("../app/agent-service/shoggoth-memory/core.cjs");
 const { MemoryRemoteProviderResources } = require("../app/agent-service/shoggoth-memory/remote-provider-resources.cjs");
 const { withMemoryHost } = require("../app/agent-service/shoggoth-memory/host-bridge.cjs");
+// Keep macOS Unix socket paths short; Linux does not have /private/tmp.
+const fixtureTmpDir = process.platform === "darwin" ? "/private/tmp" : os.tmpdir();
 const tick = () => new Promise(done => setImmediate(done));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const key = "invented-remote-memory-fixture-key", text = "Fictional amber telescope catalogue.";
@@ -61,7 +63,7 @@ async function productFixture(t) {
   const { createAgentService } = require("../app/agent-service/server");
   const { resolveServicePaths } = require("../app/agent-service/paths");
   const { DEFAULT_AGENT_PROFILE_ID: id } = require("../app/agent-service/product-store");
-  const root = fs.mkdtempSync(path.join("/private/tmp", "shoggoth-rsrc-")); fs.chmodSync(root, 0o700);
+  const root = fs.mkdtempSync(path.join(fixtureTmpDir, "shoggoth-rsrc-")); fs.chmodSync(root, 0o700);
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"), profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
   const config = { memory: { search: { provider: "none", providerRefs: { openai: "owner-one" } } } };
   const lookups = [], privateResources = { resolveOwner: packet => { lookups.push(packet); return { ownerRef: "owner-one", profileId: id, providerId: "openai",

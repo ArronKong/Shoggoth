@@ -6,6 +6,8 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
 const http = require("node:http"), { once } = require("node:events"), { spawn } = require("node:child_process");
 const ROOT = path.resolve(__dirname, "..");
+// Keep macOS Unix socket paths short; Linux does not have /private/tmp.
+const fixtureTmpDir = process.platform === "darwin" ? "/private/tmp" : require("node:os").tmpdir();
 const load = relative => require(path.join(ROOT, relative));
 const { createAgentService, PROTOCOL_VERSION } = load("app/agent-service/server.js");
 const { requestService, readClientToken } = load("app/agent-service/client.js");
@@ -31,7 +33,7 @@ function broker(key) { return {
 function pathsFor(root) { return resolveServicePaths({ trustedRoot: root, homeDir: root, userDataRoot: root,
   stateRoot: path.join(root, "state"), profileRoot: path.join(root, "profiles"), cacheRoot: path.join(root, "cache") }); }
 async function fixture(t, options = {}) {
-  const root = fs.mkdtempSync("/private/tmp/sg-owner-service-"); fs.chmodSync(root, 0o700);
+  const root = fs.mkdtempSync(path.join(fixtureTmpDir, "sg-owner-service-")); fs.chmodSync(root, 0o700);
   const paths = pathsFor(root), aes = crypto.randomBytes(32), cryptoBroker = broker(aes);
   const allowed = new Set(), requests = [], originalFetch = globalThis.fetch;
   let gate = null;
@@ -327,7 +329,7 @@ async function stoppedArtifact(f, mode) {
         method:'memory.provider.owner.apply',params:${JSON.stringify(creation({ operationId: `startup-${mode}` }))}},{timeoutMs:30000});
       if(mode==='crash')await pending;else {await assert.rejects(pending);fs.writeSync=write;fs.openSync=open;fs.closeSync=close;await service.stop({notify:false});key.fill(0);process.stdout.write('catalog-closed-ready\\n');}
     })().catch(error=>{console.error('owned child failure',error.code||error.name);process.exitCode=1;});`;
-  const child = spawn(process.execPath, ["-e", code], { env: { PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", TMPDIR: "/private/tmp",
+  const child = spawn(process.execPath, ["-e", code], { env: { PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", TMPDIR: fixtureTmpDir,
     ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
   const exited = once(child, "exit"); let stdout = "", stderr = "";
   const arrived = deferred(); child.stdout.on("data", chunk => { stdout += chunk.toString();

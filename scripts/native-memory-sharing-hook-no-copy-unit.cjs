@@ -9,6 +9,9 @@ const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { AGENT_PROFILE_FIELDS } = require("../app/agent-service/product-store");
 const { validateDefinition } = require("../app/agent-service/hook-contract");
+// The real Hook host requires sandbox-exec. These cases are mandatory in the
+// macos-hook-checks CI job; Linux still runs the rest of the memory suite.
+const sandboxSkip = process.platform === "darwin" ? false : "requires macOS sandbox-exec; covered by macos-hook-checks";
 const MARKER = "BORROWED_HOOK_EVENT_COPY_914857";
 const FACT = `The telescope code is ${MARKER}.`;
 const OWN = "OWN_HOOK_CONTROL_BODY_769131";
@@ -70,7 +73,7 @@ async function assertNoHookCopy(f) {
     "reader recall/diagnostics remain body-free when tool query contains borrowed text");
 }
 
-test("payload observers and result transforms cannot persist borrowed memory through tool results or later arguments", { timeout: 40000 }, async () => {
+test("payload observers and result transforms cannot persist borrowed memory through tool results or later arguments", { timeout: 40000, skip: sandboxSkip }, async () => {
   const f = await fixture();
   try {
     const before = sourceState(f);
@@ -107,7 +110,7 @@ test("payload observers and result transforms cannot persist borrowed memory thr
   }
 });
 
-test("a body-free pending borrowed Hook observer recovers with the same durable event identity", { timeout: 30000 }, async () => {
+test("a body-free pending borrowed Hook observer recovers with the same durable event identity", { timeout: 30000, skip: sandboxSkip }, async () => {
   const f = await fixture();
   try {
     install(f, { event: "tool.after", kind: "observe", source: "module.exports = event => ({ payload: event.payload });" });
@@ -137,7 +140,7 @@ test("a body-free pending borrowed Hook observer recovers with the same durable 
   }
 });
 
-test("borrowed model text in Hook test diagnostics is not copied into durable Product receipts", { timeout: 30000 }, async () => {
+test("borrowed model text in Hook test diagnostics is not copied into durable Product receipts", { timeout: 30000, skip: sandboxSkip }, async () => {
   const f = await fixture();
   try {
     const observer = install(f, { event: "tool.after", kind: "observe", source: "module.exports = event => ({ payload: event.payload });" });
@@ -157,7 +160,7 @@ test("borrowed model text in Hook test diagnostics is not copied into durable Pr
   }
 });
 
-test("the first cross-owner search query cannot persist source text through a guard before refs exist", { timeout: 30000 }, async () => {
+test("the first cross-owner search query cannot persist source text through a guard before refs exist", { timeout: 30000, skip: sandboxSkip }, async () => {
   const f = await fixture();
   try {
     const before = sourceState(f);

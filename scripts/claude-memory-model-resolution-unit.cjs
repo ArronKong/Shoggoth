@@ -164,9 +164,9 @@ test("pre-canceled and malformed discovery requests cannot start the SDK", async
 
 test("Claude discovery releases an actual isolated control process before resolving", async t => {
   const ctx = fixture(); let child;
-  ctx.host.userHome = "/private/tmp";
+  ctx.host.userHome = require("node:os").tmpdir();
   ctx.host.killGraceMs = 500;
-  ctx.host._spawnEnvironment = () => ({ ELECTRON_RUN_AS_NODE: "1", HOME: "/private/tmp" });
+  ctx.host._spawnEnvironment = () => ({ ELECTRON_RUN_AS_NODE: "1", HOME: ctx.host.userHome });
   ctx.host.spawnProcess = (...args) => (child = spawn(...args));
   ctx.host.killProcessGroup = (pid, signal) => process.kill(-pid, signal);
   t.after(() => {

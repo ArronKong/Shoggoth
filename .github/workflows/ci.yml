@@ -21,6 +21,8 @@ jobs:
         run: npm run test:hooks
       - name: Static UI ASAR disk-write failure regressions
         run: node --test scripts/static-ui-assets-regression.cjs scripts/system-issue-unit.cjs
+      - name: Borrowed-memory Hook isolation in the real macOS sandbox
+        run: node --test scripts/native-memory-sharing-hook-no-copy-unit.cjs
       - name: Install the version-pinned Pi test SDK without lifecycle scripts
         run: npm install --prefix "$RUNNER_TEMP/shoggoth-hooks-pi" --ignore-scripts --no-audit --no-fund --save-exact @earendil-works/pi-coding-agent@0.84.4
       - name: Actual Pi tool loop with controlled model input

@@ -173,9 +173,13 @@ for (const kind of Object.keys(adapters)) {
   });
   test(`${kind} unfinished jobs honor the original total polling timeout`, async t => {
     const server = await fixture(t, kind, { wait: true, poll: (_request, res, job, states) => { json(res, states.pending(job)); return true; } });
-    const { runtime } = await create(kind, server), started = Date.now();
-    await assert.rejects(runtime.batchEmbed({ ...controls, timeoutMs: 50, pollIntervalMs: 1000 }), error => /timed out/u.test(error.message));
-    assert.ok(Date.now() - started < 2000); assert.equal(server.requests.filter(row => row.method === "GET").length, 0);
+    const { runtime } = await create(kind, server), started = Date.now(), pollIntervalMs = 1000;
+    await assert.rejects(runtime.batchEmbed({ ...controls, timeoutMs: 50, pollIntervalMs }), error => /timed out/u.test(error.message));
+    assert.ok(Date.now() - started < pollIntervalMs, "the total deadline stops before a full polling interval");
+    // Timer wake-up and Date.now() can differ at the deadline boundary. A last
+    // status read with remaining time is valid; an unfinished job has no output.
+    assert.ok(server.requests.filter(row => row.method === "GET").every(row => row.pathname.includes("/batches/")),
+      "an unfinished batch never downloads result or error files");
   });
   test(`${kind} error and output files cannot leak reflected memory through the adapter or debug callback`, async t => {
     for (const mode of ["output", "terminal"]) {
