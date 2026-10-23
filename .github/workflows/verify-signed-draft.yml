@@ -27,6 +27,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.tag }}
+
+      - name: Confirm immutable release source
+        run: |
+          test "$(git rev-parse HEAD)" = e91127505eed791fdd109b28f91374b3016b0a6a
+          test "$RELEASE_TAG" = v0.8.244
 
       - uses: actions/setup-node@v4
         with:
@@ -99,6 +105,31 @@ jobs:
             awk -v name="Shoggoth-${VERSION}-x64.dmg" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
           )
           ditto -x -k "dist/Shoggoth-${VERSION}-mac.zip" dist/mac
+
+      - name: Inspect Apple notarization responses
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcrun --find stapler
+          python3 - <<'PY'
+          import pathlib, re, subprocess, sys
+          root = pathlib.Path.cwd()
+          artifacts = [root / "dist/mac/Shoggoth.app", root / "dist/Shoggoth-0.8.244-x64.dmg"]
+          failed = False
+          for artifact in artifacts:
+              print(f"Validating existing ticket: {artifact.name}", flush=True)
+              result = subprocess.run(["/usr/bin/xcrun", "stapler", "validate", "-v", str(artifact)],
+                                      capture_output=True, text=True, timeout=180)
+              for line in (result.stdout + result.stderr).splitlines():
+                  if "userRecordName" in line or "deviceID" in line:
+                      continue
+                  line = re.sub(r"[A-Za-z0-9+/]{160,}={0,2}", "[public ticket data omitted]", line)
+                  print(line)
+              print(f"stapler exit code: {result.returncode}", flush=True)
+              failed = failed or result.returncode != 0
+          sys.exit(1 if failed else 0)
+          PY
 
       - name: Verify Intel App and DMG on Intel hardware
         shell: bash
