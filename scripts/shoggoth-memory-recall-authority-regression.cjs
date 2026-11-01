@@ -181,6 +181,11 @@ for (const mutation of ["transcript append", "session timestamp", "source exclus
     const input = f.turn("What did we say about the amber telescope?"), other = f.session();
     bind(input.session, "current");
     const recall = f.service.mcpProductToolController.conversationRecallService;
+    // Exercise source authority after the derived index is ready. A cold
+    // search may legitimately return rebuilding before it has any results.
+    recall.prebuildProfile(A);
+    await recall.whenIndexReady(A);
+    assert.equal(recall.prebuildProfile(A), "ready");
     const search = recall.searchWithSemantic.bind(recall); let observed = 0;
     recall.searchWithSemantic = async (...args) => {
       const result = await search(...args); observed = result.results.length;

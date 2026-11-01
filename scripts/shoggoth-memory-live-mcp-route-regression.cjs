@@ -12,6 +12,24 @@ const { FakeHost } = require("./shoggoth-work-run-coordinator-unit.cjs");
 const { isolatedEnv } = require("./runtime-v2-live-acceptance.cjs");
 const { writeLiveMcpLauncher } = require("./shoggoth-memory-repair-live-worker.cjs");
 
+// This relay fixture also runs on Linux CI. Linux ps comm is a short name,
+// while the macOS product inspector expects an absolute executable path.
+// Read the live kernel process data rather than replacing identity checks.
+const processInspection = process.platform === "linux" ? {
+  getProcessIdentity(pid) {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/u);
+    assert.match(fields[19], /^\d+$/u);
+    return `linux:${pid}:${fields[19]}`;
+  },
+  getProcessLink(pid) {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/u);
+    return { ppid: Number(fields[1]), executable: fs.realpathSync(`/proc/${pid}/exe`),
+      command: fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim() };
+  },
+} : {};
+
 function peer(child) {
   const pending = new Map();
   const reader = readline.createInterface({ input: child.stdout });
@@ -39,7 +57,8 @@ for (const protectedHome of [false, true]) test(`memory acceptance uses the actu
   fs.writeFileSync(path.join(root, "mcp-key.bin"), crypto.randomBytes(32), { mode: 0o600 });
   const helperCommand = writeLiveMcpLauncher(root), nativeHome = protectedHome ? path.join(root, "private-runtime-home") : root;
   if (protectedHome) fs.mkdirSync(nativeHome, { mode: 0o700 });
-  const issuer = new RuntimeMcpGateIssuer({ paths, mcpHelperLaunch: { command: helperCommand }, bootstrapPath: helper });
+  const issuer = new RuntimeMcpGateIssuer({ paths, mcpHelperLaunch: { command: helperCommand }, bootstrapPath: helper,
+    ...processInspection });
   const host = new FakeHost([]), children = [];
   const service = createAgentService({ paths, runtimeStorageHomedir: root, parentEnv: isolatedEnv(root),
     version: "memory-route-fixture", prewarmMcpAuth: false, runtimeMcpGateIssuer: issuer,
