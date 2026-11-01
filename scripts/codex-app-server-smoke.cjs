@@ -69,6 +69,13 @@ function codexHostRuntimeOptions({
   };
 }
 
+function bundledPoolFixture(options) {
+  return new CodexRuntimePool({
+    ...options,
+    hostOptions: { platform: "darwin", ...options.hostOptions },
+  });
+}
+
 function rejectsCode(action, code) {
   assert.throws(action, (error) => error?.code === code, `expected ${code}`);
 }
@@ -834,7 +841,7 @@ async function testVersionProbeRunsBeforePrepareAndNeverReceivesProviderEnvironm
   const poolFixture = servicePathsFixture();
   let poolSpawns = 0;
   let poolProbes = 0;
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: poolFixture.paths,
     hostFactory: (options) => new CodexRuntimeHost({
       ...options,
@@ -1642,7 +1649,7 @@ async function testProcessGroupProbeFailureFailsClosedAndLeavesTombstone() {
   const fixture = servicePathsFixture();
   const child = new FakeAppServer();
   const kills = [];
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: (options) => new CodexRuntimeHost({
       ...options,
@@ -1680,7 +1687,7 @@ async function testStopCancelsPendingStartupBeforeSpawnAndGatesPoolReplacement()
   const probeGate = new Promise((resolve) => { releaseProbe = resolve; });
   let factoryCalls = 0;
   let spawnCalls = 0;
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: (options) => {
       factoryCalls += 1;
@@ -1728,7 +1735,7 @@ async function testStopCancelsPendingStartupBeforeSpawnAndGatesPoolReplacement()
 async function testUnconfirmedStartupProbeCleanupLeavesPoolTombstone() {
   const fixture = servicePathsFixture();
   let factoryCalls = 0;
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: (options) => {
       factoryCalls += 1;
@@ -1939,7 +1946,7 @@ async function testPoolSingleFlightIsolationAndCircuitBreaker() {
   const stops = [];
   let release;
   const startGate = new Promise((resolve) => { release = resolve; });
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: (options) => ({
       runtimeProfileId: options.runtimeProfileId,
@@ -1961,7 +1968,7 @@ async function testPoolSingleFlightIsolationAndCircuitBreaker() {
 
   let now = 1_000;
   let attempts = 0;
-  const circuit = new CodexRuntimePool({
+  const circuit = bundledPoolFixture({
     paths: fixture.paths,
     now: () => now,
     failureThreshold: 3,
@@ -1987,7 +1994,7 @@ async function testPoolSingleFlightIsolationAndCircuitBreaker() {
   assert.equal(attempts, 4);
 
   let resetAttempts = 0;
-  const resetting = new CodexRuntimePool({
+  const resetting = bundledPoolFixture({
     paths: fixture.paths,
     now: () => now,
     failureThreshold: 3,
@@ -2012,7 +2019,7 @@ async function testPoolSingleFlightIsolationAndCircuitBreaker() {
 async function testPoolEvictsTerminatedHost() {
   const fixture = servicePathsFixture();
   const hosts = [];
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: () => {
       let rejectTerminated;
@@ -2043,7 +2050,7 @@ async function testPoolStopInterruptsInitializeAndGatesReplacement() {
   let rejectInitialize;
   let stopStarted;
   const stopGate = new Promise((resolve) => { stopStarted = resolve; });
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: () => ({
       initialize() { return new Promise((_, reject) => { rejectInitialize = reject; }); },
@@ -2068,7 +2075,7 @@ async function testPoolStopAllIsSingleFlightAndReusable() {
   let factoryCalls = 0;
   let releaseStop;
   const stopGate = new Promise((resolve) => { releaseStop = resolve; });
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: () => {
       factoryCalls += 1;
@@ -2092,7 +2099,7 @@ async function testPoolStopAllIsSingleFlightAndReusable() {
 
   const failureFixture = servicePathsFixture();
   const stopFailure = Object.assign(new Error("fixed stop failure"), { code: "STOP_FAILURE" });
-  const failing = new CodexRuntimePool({
+  const failing = bundledPoolFixture({
     paths: failureFixture.paths,
     hostFactory: () => ({ async initialize() {}, async stop() { throw stopFailure; } }),
   });
@@ -2110,7 +2117,7 @@ async function testFatalCleanupTimeoutLeavesPoolTombstone() {
   const fixture = servicePathsFixture();
   const child = new FakeAppServer();
   let factoryCalls = 0;
-  const pool = new CodexRuntimePool({
+  const pool = bundledPoolFixture({
     paths: fixture.paths,
     hostFactory: (options) => {
       factoryCalls += 1;
@@ -2149,7 +2156,7 @@ async function testManualCleanupTimeoutLeavesPoolTombstone() {
     const fixture = servicePathsFixture();
     const children = [];
     let factoryCalls = 0;
-    const pool = new CodexRuntimePool({
+    const pool = bundledPoolFixture({
       paths: fixture.paths,
       hostFactory: (options) => {
         factoryCalls += 1;
