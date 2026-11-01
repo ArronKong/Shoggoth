@@ -25,14 +25,15 @@ function inside(root, target) {
   const relative = path.relative(root, target);
   return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
-function mainProcesses(binary) {
+function mainProcessRecords(binary) {
   return command("/bin/ps", ["-axo", "pid=,args="]).trim().split("\n").flatMap(line => {
     const match = line.trim().match(/^(\d+)\s+(.+)$/u);
     if (!match || (match[2] !== binary && !match[2].startsWith(`${binary} `))
       || match[2].includes("--shoggoth-internal-role=")) return [];
-    return [Number(match[1])];
+    return [{ pid: Number(match[1]), command: match[2] }];
   });
 }
+function mainProcesses(binary) { return mainProcessRecords(binary).map(item => item.pid); }
 const ORDINARY_OPEN_SCRIPT = `tell application "System Events"
   if exists process "CoreServicesUIAgent" then
     tell process "CoreServicesUIAgent"
@@ -46,6 +47,31 @@ const ORDINARY_OPEN_SCRIPT = `tell application "System Events"
   end if
   return "no-ordinary-open-prompt"
 end tell`;
+
+function quitScript(pid) {
+  assert.ok(Number.isInteger(pid) && pid > 0 && pid <= 2147483647, "Invalid verified GUI PID");
+  return `tell application "System Events"
+  set targetProcess to first process whose unix id is ${pid}
+  set frontmost of targetProcess to true
+  tell targetProcess
+    keystroke "q" using command down
+  end tell
+end tell`;
+}
+
+async function quitAndWait(binary, pid, evidence, dependencies = {}) {
+  const readProcesses = dependencies.readProcesses || mainProcesses;
+  const runCommand = dependencies.runCommand || command;
+  const wait = dependencies.wait || delay;
+  const script = quitScript(pid);
+  assert.deepEqual(readProcesses(binary), [pid], "Quit target is not the sole verified GUI process");
+  evidence.quitMethod = "System Events Cmd+Q to verified GUI PID";
+  evidence.quitTargetPid = pid;
+  runCommand("/usr/bin/osascript", ["-e", script]);
+  for (let attempt = 0; attempt < 120 && readProcesses(binary).length; attempt++) await wait(500);
+  assert.deepEqual(readProcesses(binary), [], "GUI failed to quit normally");
+  evidence.naturalGuiExit = true;
+}
 
 async function launchAndWait(app, binary, evidence, dependencies = {}) {
   const spawnProcess = dependencies.spawnProcess || spawn;
@@ -130,7 +156,7 @@ async function main() {
     account: "empty disposable GitHub-hosted runner", gatekeeper, installedApp: app,
     downloadProvenance: "exact draft download copied to the disposable runner Applications directory with controlled quarantine",
     browserDownloadVerified: false, quarantineRemoved: false, normalOpenConfirmation: false, verified: false };
-  let launched = false;
+  let launched = false, guiPid;
   const screenshot = () => {
     try { command("/usr/sbin/screencapture", ["-x", path.join(output, "first-launch.png")]); } catch { /* keep the original failure */ }
   };
@@ -150,6 +176,7 @@ async function main() {
     evidence.quarantineBefore = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
     launched = true;
     const pid = await launchAndWait(app, binary, evidence);
+    guiPid = pid;
     await delay(10000);
     assert.deepEqual(mainProcesses(binary), [pid]);
     const renderer = command("/bin/ps", ["-axo", "ppid=,args="]).split("\n")
@@ -178,23 +205,25 @@ async function main() {
     evidence.rendererPresent = true;
     evidence.productServiceHealthy = true;
     evidence.quarantineAfter = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
-    command("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]);
-    for (let attempt = 0; attempt < 120 && mainProcesses(binary).length; attempt++) await delay(500);
-    assert.deepEqual(mainProcesses(binary), [], "GUI failed to quit normally");
-    evidence.naturalGuiExit = true;
+    evidence.processesBeforeQuit = mainProcessRecords(binary);
+    await quitAndWait(binary, pid, evidence);
+    evidence.processesAfterQuit = mainProcessRecords(binary);
     evidence.verified = true;
   } catch (error) {
+    try { evidence.processesAtFailure = mainProcessRecords(binary); } catch { evidence.processSnapshotFailed = true; }
     screenshot();
     evidence.failure = String(error.message).slice(0,1000);
     throw error;
   } finally {
     fs.writeFileSync(path.join(output, "result.json"), JSON.stringify(evidence, null, 2) + "\n", { mode: 0o600 });
-    if (launched && mainProcesses(binary).length) {
-      try { command("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]); } catch { /* failure remains visible */ }
+    if (launched && guiPid) {
+      try {
+        if (mainProcesses(binary).includes(guiPid)) command("/usr/bin/osascript", ["-e", quitScript(guiPid)]);
+      } catch { /* failure remains visible */ }
     }
   }
   console.log(JSON.stringify(evidence));
 }
 
-module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT };
+module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait };
 if (require.main === module) main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });

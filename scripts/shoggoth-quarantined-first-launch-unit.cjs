@@ -4,12 +4,14 @@ const { EventEmitter } = require("node:events");
 const { test } = require("node:test");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
 const { execFileSync } = require("node:child_process");
-const { launchAndWait, ORDINARY_OPEN_SCRIPT } = require("./shoggoth-quarantined-first-launch.cjs");
+const { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait } = require("./shoggoth-quarantined-first-launch.cjs");
 
 test("the exact ordinary Open script compiles with the macOS System Events dictionary", { skip: process.platform !== "darwin" }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-open-script-"));
   try {
-    execFileSync("/usr/bin/osacompile", ["-o", path.join(directory, "ordinary-open.scpt"), "-e", ORDINARY_OPEN_SCRIPT], { timeout: 15000 });
+    for (const [index, source] of [ORDINARY_OPEN_SCRIPT, quitScript(123)].entries()) {
+      execFileSync("/usr/bin/osacompile", ["-o", path.join(directory, `normal-ui-${index}.scpt`), "-e", source], { timeout: 15000 });
+    }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -107,4 +109,48 @@ test("successful open without a GUI retains the original 60 second PID budget", 
   await assert.rejects(f.run(), /Normal quarantined GUI did not launch/u);
   assert.equal(f.state.ticks, 120);
   assert.equal(f.evidence.normalOpenConfirmation, false);
+});
+
+test("quit script accepts only a validated PID", () => {
+  for (const pid of [0, -1, 1.5, NaN, Infinity, "123", 2147483648]) assert.throws(() => quitScript(pid), /Invalid verified GUI PID/u);
+});
+
+test("normal Quit targets the verified process and waits for natural disappearance", async () => {
+  let ticks = 0, commands = 0;
+  const evidence = {};
+  await quitAndWait("fixture-binary", 123, evidence, {
+    readProcesses: () => ticks ? [] : [123],
+    runCommand: (file, args) => {
+      commands++;
+      assert.equal(file, "/usr/bin/osascript");
+      assert.match(args[1], /first process whose unix id is 123/u);
+      assert.match(args[1], /keystroke "q" using command down/u);
+      assert.doesNotMatch(args[1], /tell application "\/Applications\/|kill|terminate/u);
+    },
+    wait: async ms => { assert.equal(ms, 500); ticks++; },
+  });
+  assert.equal(commands, 1);
+  assert.equal(evidence.quitTargetPid, 123);
+  assert.equal(evidence.naturalGuiExit, true);
+});
+
+test("Quit refuses a replaced or duplicated GUI process before UI interaction", async () => {
+  for (const pids of [[456], [123, 456], []]) {
+    let commands = 0;
+    await assert.rejects(quitAndWait("fixture-binary", 123, {}, {
+      readProcesses: () => pids, runCommand: () => { commands++; }, wait: async () => {},
+    }), /Quit target is not the sole verified GUI process/u);
+    assert.equal(commands, 0);
+  }
+});
+
+test("a GUI that ignores normal Quit retains the original 60 second failure budget", async () => {
+  let ticks = 0;
+  const evidence = {};
+  await assert.rejects(quitAndWait("fixture-binary", 123, evidence, {
+    readProcesses: () => [123], runCommand: () => {},
+    wait: async ms => { assert.equal(ms, 500); ticks++; },
+  }), /GUI failed to quit normally/u);
+  assert.equal(ticks, 120);
+  assert.equal(evidence.naturalGuiExit, undefined);
 });
