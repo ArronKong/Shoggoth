@@ -19,27 +19,28 @@ test("the exact ordinary Open script compiles with the macOS System Events dicti
 
 function fixture(options = {}) {
   const child = new EventEmitter();
-  const state = { ticks: 0, prompts: 0, confirmed: false, killed: false, spawnCalls: 0 };
+  const state = { ticks: 0, clockMs: 0, prompts: 0, confirmed: false, killed: false, spawnCalls: 0 };
   child.kill = signal => { assert.equal(signal, "SIGTERM"); state.killed = true; };
   const dependencies = {
     spawnProcess(executable, args, settings) {
       state.spawnCalls++;
       assert.equal(executable, "/usr/bin/open");
       assert.deepEqual(args, ["-n", "/Applications/Shoggoth.app"]);
-      assert.equal(settings.timeout, 15000);
+      assert.equal(settings.timeout, 60000);
       return child;
     },
     readProcesses(binary) {
       assert.equal(binary, "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth");
       return options.processes ? options.processes(state) : state.confirmed ? [123] : [];
     },
-    runCommand(executable, args) {
+    runCommand(executable, args, timeout) {
       state.prompts++;
       assert.equal(executable, "/usr/bin/osascript");
       assert.equal(args[0], "-e");
       assert.match(args[1], /process "CoreServicesUIAgent"/u);
       assert.deepEqual([...args[1].matchAll(/button "([^"]+)"/gu)].map(x => x[1]), ["Open", "Open"]);
-      if (options.noOrdinaryPrompt) return "no-ordinary-open-prompt";
+      assert.ok(timeout > 0 && timeout <= 15000);
+      if (options.noOrdinaryPrompt || (options.promptAvailable && !options.promptAvailable(state))) return "no-ordinary-open-prompt";
       state.confirmed = true;
       child.emit("close", 0, null);
       return "ordinary-open-confirmed";
@@ -47,8 +48,10 @@ function fixture(options = {}) {
     async wait(milliseconds) {
       assert.equal(milliseconds, 500);
       state.ticks++;
+      state.clockMs += milliseconds;
       options.onTick?.(state, child);
     },
+    now: () => state.clockMs,
   };
   const evidence = { normalOpenConfirmation: false };
   return { state, evidence, run: () => launchAndWait("/Applications/Shoggoth.app", "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth", evidence, dependencies) };
@@ -58,7 +61,7 @@ test("confirms the ordinary prompt while open remains pending, including an earl
   const f = fixture({ processes: () => [123] });
   assert.equal(await f.run(), 123);
   assert.equal(f.state.prompts, 1);
-  assert.equal(f.state.ticks, 21);
+  assert.equal(f.state.ticks, 3);
   assert.equal(f.evidence.normalOpenConfirmation, true);
   assert.deepEqual(f.evidence.launcherNaturalExit, { code: 0, signal: null });
   assert.equal(f.state.spawnCalls, 1);
@@ -100,7 +103,7 @@ test("without a normal Open prompt, a pending launch still times out", async () 
     if (state.ticks === 30) child.emit("close", null, "SIGTERM");
   } });
   await assert.rejects(f.run(), /LaunchServices open failed or timed out/u);
-  assert.equal(f.state.prompts, 1);
+  assert.ok(f.state.prompts > 0);
   assert.equal(f.evidence.normalOpenConfirmation, false);
 });
 
@@ -169,4 +172,19 @@ test("other script paths, extra Worker arguments and duplicate bare GUI processe
     `${binary} /Applications/Shoggoth.app/Contents/Resources/app.asar/app/agent-service/embedding-worker.cjs --unexpected`]) {
     assert.deepEqual(guiProcessRecords(`8918 ${binary}\n9811 ${second}`, binary), [{ pid: 8918, command: binary }, { pid: 9811, command: second }]);
   }
+});
+
+test("Gatekeeper verification longer than a utility timeout still fits the original startup budget", async () => {
+  const f = fixture({ promptAvailable: state => state.clockMs >= 20000 });
+  assert.equal(await f.run(), 123);
+  assert.ok(f.state.clockMs >= 20000 && f.state.clockMs < 60000);
+  assert.equal(f.evidence.normalOpenConfirmation, true);
+  assert.equal(f.evidence.startupBudgetMs, 60000);
+});
+
+test("process-query time counts toward the same hard startup deadline", async () => {
+  const f = fixture({ processes: state => { state.clockMs += 40000; return [123]; },
+    onTick: (state, child) => child.emit("close", 0, null) });
+  await assert.rejects(f.run(), /did not launch within 60 seconds/u);
+  assert.equal(f.evidence.launcherNaturalExit, undefined);
 });

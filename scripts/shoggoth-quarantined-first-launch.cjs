@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
 const { execFileSync, spawn } = require("node:child_process");
 const { randomUUID, createHash } = require("node:crypto");
+const { performance } = require("node:perf_hooks");
 const { setTimeout: delay } = require("node:timers/promises");
 
 function command(executable, args, timeout = 15000) {
@@ -91,14 +92,18 @@ async function launchAndWait(app, binary, evidence, dependencies = {}) {
   const readProcesses = dependencies.readProcesses || mainProcesses;
   const runCommand = dependencies.runCommand || command;
   const wait = dependencies.wait || delay;
+  const now = dependencies.now || (() => performance.now());
+  const startupBudgetMs = 60000;
+  const deadline = now() + startupBudgetMs;
   // LaunchServices can keep `open` pending until the ordinary download prompt
-  // is confirmed. Keep the existing 15s command budget while polling that UI.
-  const launcher = spawnProcess("/usr/bin/open", ["-n", app], { stdio: "ignore", timeout: 15000 });
+  // is confirmed. Gatekeeper, open and the PID share the existing 60s startup
+  // budget; a short utility-command timer must not cut that budget off early.
+  const launcher = spawnProcess("/usr/bin/open", ["-n", app], { stdio: "ignore", timeout: startupBudgetMs });
   let result;
   launcher.once("error", error => { result = { error }; });
   launcher.once("close", (code, signal) => { result = { ...result, code, signal }; });
   try {
-    for (let attempt = 0; attempt < 120; attempt++) {
+    for (let attempt = 0; attempt < 120 && now() < deadline; attempt++) {
       if (result?.error) throw result.error;
       if (result && Object.hasOwn(result, "code")) {
         assert.equal(result.code, 0, "LaunchServices open failed or timed out");
@@ -106,19 +111,21 @@ async function launchAndWait(app, binary, evidence, dependencies = {}) {
       }
       const candidates = readProcesses(binary);
       assert.ok(candidates.length <= 1, "Unexpected duplicate GUI process");
+      assert.ok(now() < deadline, "Normal quarantined GUI did not launch within 60 seconds");
       if (candidates.length === 1 && result?.code === 0 && result.signal === null) {
         evidence.launcherNaturalExit = { code: result.code, signal: result.signal };
+        evidence.startupBudgetMs = startupBudgetMs;
         return candidates[0];
       }
-      if (attempt === 20) {
+      if (attempt % 4 === 2 && evidence.normalOpenConfirmation !== true) {
         // Accept only the ordinary Internet-download Open prompt. A damaged,
         // untrusted, or privacy-permission dialog has no matching action here.
         try {
-          const answer = runCommand("/usr/bin/osascript", ["-e", ORDINARY_OPEN_SCRIPT]);
+          const answer = runCommand("/usr/bin/osascript", ["-e", ORDINARY_OPEN_SCRIPT], Math.max(1, Math.min(15000, deadline - now())));
           evidence.normalOpenConfirmation = answer.trim() === "ordinary-open-confirmed";
         } catch { evidence.ordinaryOpenAutomationFailed = true; }
       }
-      await wait(500);
+      await wait(Math.min(500, Math.max(0, deadline - now())));
     }
     assert.fail("Normal quarantined GUI did not launch");
   } finally {
