@@ -38,7 +38,10 @@ function codexHostRuntimeOptions({
   platform,
 }) {
   const home = prepareCodexHome(paths, runtimeProfileId);
-  const layout = resolveCodexRuntimeLayout({ repoRoot, packaged, resourcesPath, platform });
+  // The checked-in release manifest contains macOS bundles. Synthetic
+  // per-host manifests created by writeRuntimeFixture keep the host platform.
+  const manifestPlatform = platform ?? (packaged || repoRoot === REPO_ROOT ? "darwin" : process.platform);
+  const layout = resolveCodexRuntimeLayout({ repoRoot, packaged, resourcesPath, platform: manifestPlatform });
   const runtimeBinding = Object.freeze({
     runtime: "codex",
     runtimeProfileId,
@@ -690,6 +693,7 @@ function hostFixture(overrides = {}) {
     repoRoot: overrides.hostOptions?.repoRoot || REPO_ROOT,
     packaged: overrides.hostOptions?.packaged,
     resourcesPath: overrides.hostOptions?.resourcesPath,
+    platform: overrides.hostOptions?.platform,
   });
   const host = new CodexRuntimeHost({
     ...runtimeOptions,
