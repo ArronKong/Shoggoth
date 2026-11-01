@@ -14,6 +14,41 @@ async function recall(f) {
 }
 const textFree = records => assert.doesNotMatch(JSON.stringify(records), /amber|telescope|calibrat/u);
 
+function controlledRecallDeadline(t, timeoutMs) {
+  const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+  const schedule = globalThis.setTimeout, cancel = globalThis.clearTimeout;
+  const preflight = [], watchdogs = [], handles = new Map();
+  t.mock.method(AbortSignal, "timeout", delay => {
+    if (delay !== timeoutMs) return nativeTimeout(delay);
+    const controller = new AbortController(); preflight.push({ delay, controller });
+    return controller.signal;
+  });
+  t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) => {
+    if (delay !== timeoutMs) return schedule(callback, delay, ...args);
+    const handle = { unref() { return this; } };
+    const entry = { delay, callback, args, cancelled: false, fired: false };
+    handles.set(handle, entry); watchdogs.push(entry); return handle;
+  });
+  t.mock.method(globalThis, "clearTimeout", handle => {
+    const entry = handles.get(handle);
+    if (entry) entry.cancelled = true;
+    else cancel(handle);
+  });
+  return {
+    expirePreflight() {
+      assert.equal(preflight.length, 1); assert.equal(preflight[0].delay, timeoutMs);
+      preflight[0].controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    },
+    expireRecall() {
+      assert.equal(preflight.length, 1); assert.equal(watchdogs.length, 1);
+      const timer = watchdogs[0]; assert.equal(timer.delay, timeoutMs);
+      assert.equal(timer.cancelled, false); assert.equal(timer.fired, false);
+      timer.fired = true; timer.callback(...timer.args);
+    },
+    watchdogs,
+  };
+}
+
 for (const sample of [
   { name: "non-JSON response", text: "amber telescope response", code: "MEMORY_ACTIVE_RESPONSE_INVALID", calls: 1 },
   { name: "sentinel with appended action", text: 'NONE\n{"tool":"exec","arguments":{}}', code: "MEMORY_ACTIVE_RESPONSE_INVALID", calls: 1 },
@@ -61,11 +96,31 @@ test("a failing recall tool leaves its code", { timeout: 60000 }, async t => {
 
 test("a timed-out recall is recorded as a timeout", { timeout: 60000 }, async t => {
   const f = await fixture(t, { mode: "always", activeMemory: { timeoutMs: 400, setupGraceTimeoutMs: 0 } }); await f.saveUser(FACT);
-  f.model = ({ signal }) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
-  await recall(f);
+  const deadline = controlledRecallDeadline(t, 400);
+  let entered; const modelEntered = new Promise(resolve => { entered = resolve; });
+  f.model = ({ signal }) => new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true }); entered();
+  });
+  // This case targets model diagnostics, not cold index preparation. Keep the
+  // actual Service, index and model route, then expire its original 400ms
+  // watchdog only after the controlled model has really been entered.
+  const operation = recall(f); await modelEntered; deadline.expireRecall(); await operation;
+  assert.equal(f.modelCalls(), 1);
   const records = f.diagnostics();
   assert.ok(records.some(record => record.stage === "recall-model" && ["TIMEOUT", "ABORTED"].includes(record.code)), JSON.stringify(records));
   assert.ok(records.some(record => record.stage === "recall-result" && record.outcome === "timeout"), JSON.stringify(records));
+  assert.ok(!records.some(record => record.stage === "preflight" && record.outcome === "error"), JSON.stringify(records));
+  textFree(records);
+});
+
+test("a preflight timeout is recorded before entering the recall model", { timeout: 60000 }, async t => {
+  const f = await fixture(t, { mode: "always", activeMemory: { timeoutMs: 400, setupGraceTimeoutMs: 0 } }); await f.saveUser(FACT);
+  const deadline = controlledRecallDeadline(t, 400);
+  const operation = recall(f); deadline.expirePreflight(); await operation;
+  assert.equal(f.modelCalls(), 0); assert.equal(deadline.watchdogs.length, 0);
+  const records = f.diagnostics();
+  assert.ok(records.some(record => record.stage === "preflight" && record.code === "TIMEOUT"), JSON.stringify(records));
+  assert.ok(!records.some(record => record.stage === "recall-model"), JSON.stringify(records));
   textFree(records);
 });
 
