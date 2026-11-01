@@ -141,6 +141,7 @@ function fixture(options = {}) {
     async get(runtimeProfileId) {
       calls.push(["runtime.get", runtimeProfileId]);
       return {
+        capabilityEvidence: options.capabilityEvidence,
         ...(options.authenticationState
           ? {
               authenticationState() {
@@ -937,7 +938,27 @@ async function testKnownFailureIsDurablyReplayedAsFixedPublicCode() {
   assert.equal(restarted.nowCalls, 0);
 }
 
+async function testRuntimeFeaturesAreScopedReadOnlyAndExact() {
+  const evidence = { version: 1, scope: { secret: "must stay internal" }, observations: {
+    "attachment.file": { state: "supported" }, "session.resume": { state: "unsupported" },
+    "context.compact.native": { state: "unverified" }, "turn.steer": { state: "unsupported" },
+  } };
+  const ctx = fixture({ capabilityEvidence: evidence });
+  const params = { profileId: DEFAULT_AGENT_PROFILE_ID };
+  const result = await ctx.controller.handle("profile.capabilities.read", params);
+  assert.deepEqual(result, { attachments: ["file"], resume: "unsupported", compact: "unverified", steer: "unsupported" });
+  assert.equal(ctx.calls.some(([kind]) => /auth|modelList|bootstrap|runtime.stop|ledger/u.test(kind)), false);
+  for (const bad of [{ ...result, scope: evidence.scope }, { ...result, attachments: ["image", "image"] },
+    { ...result, resume: true }]) assert.throws(() => validateProfileServiceResult("profile.capabilities.read", bad),
+      { code: "PROFILE_RESPONSE_INVALID" });
+  assert.deepEqual(validateProfileServiceParams("profile.binding.capabilities.read", { ...params, bindingId: "binding" }),
+    { ...params, bindingId: "binding" });
+  assert.throws(() => validateProfileServiceParams("profile.binding.capabilities.read", params), { code: "INVALID_PARAMS" });
+  await ctx.controller.close();
+}
+
 const tests = [
+  testRuntimeFeaturesAreScopedReadOnlyAndExact,
   testProtocolIsExactDescriptorSafeAndNeverReturnsSecrets,
   testChatGptModelCatalogAndBindingUseSameRuntimeAuthority,
   testNonCodexProfileModelCatalogUsesBoundRuntimeWithoutChatGptAuthority,

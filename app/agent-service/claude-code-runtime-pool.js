@@ -1,5 +1,6 @@
 "use strict";
 const { poolLedgerSlot } = require("./runtime-shared-ledger");
+const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 
 const { ClaudeCodeRuntimeHost } = require("./claude-code-runtime-host");
 const {
@@ -82,6 +83,8 @@ class ClaudeCodeRuntimePool {
     this.stopAllPromise = null;
   }
 
+  runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }
+
   get(value, options = {}) {
     let binding;
     try { binding = poolBinding(value); } catch (error) { return Promise.reject(error); }
@@ -121,7 +124,7 @@ class ClaudeCodeRuntimePool {
           "Stop the Claude Code runtime before changing its permission policy",
         ));
       }
-      return existing.promise.then((host) => {
+      return reusePoolHost(this, existing, options, () => this.get(binding, options)).then((host) => {
         host.beginAcquire();
         return host;
       });
@@ -131,9 +134,12 @@ class ClaudeCodeRuntimePool {
     if (this.entries.size >= hostLimit) {
       return retirePoolHost(this).then(() => this.get(binding, options));
     }
+    let executableIdentity;
+    try { executableIdentity = poolRuntimeIdentityKey(this, binding, options); } catch (error) { return Promise.reject(error); }
     let profileState = this.profileStates.get(accountId);
-    if (!profileState) {
+    if (!profileState || profileState.runtimeExecutableIdentity !== executableIdentity) {
       profileState = {
+        runtimeExecutableIdentity: executableIdentity,
         authenticated: false,
         credentialPresent: false,
         authCheckedAt: 0,
@@ -186,17 +192,22 @@ class ClaudeCodeRuntimePool {
       profileState,
     });
     const entry = {
+      runtimeEnvironment,
       ledgerKey, ledgerSlot,
       host, key, runtimeProfileId: id, runtimeAccountId: accountId, policyFingerprint, promise: null,
     };
     trackPoolHost(entry, binding);
-    entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+    entry.promise = Promise.resolve().then(async () => {
+      await preparePoolHostIdentity(this, entry, binding, options);
+      await host.initialize();
+      host.assertRuntimeIdentityCurrent?.();
+    }).then(() => {
       entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
-          () => { if (this.entries.get(key) === entry) this.entries.delete(key); },
+          () => { if (this.entries.get(key) === entry && !entry.retiring) this.entries.delete(key); },
           () => {
-            if (this.entries.get(key) !== entry) return;
+            if (this.entries.get(key) !== entry || entry.retiring) return;
             if (host.cleanupIncomplete) this.blockedProfiles.add(id);
             this.entries.delete(key);
           },
@@ -204,9 +215,7 @@ class ClaudeCodeRuntimePool {
       }
       return host;
     }).catch(async (error) => {
-      try { await host.stop(); } catch {}
-      if (this.entries.get(key) === entry) this.entries.delete(key);
-      if (host.cleanupIncomplete) this.blockedProfiles.add(id);
+      await cleanupFailedPoolHost(this, entry, id);
       throw error;
     });
     this.entries.set(key, entry);

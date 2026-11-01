@@ -58,9 +58,38 @@ const {
 const { readHermesUsageHistory } = require("./hermes-usage-history");
 const { estimateUsageCost } = require("./usage-cost");
 const { readHermesCronHistory } = require("./hermes-cron-history");
+const { syncHermesSharedAdapter } = require("./hermes-shared-adapter-sync");
 
 const DEFAULT_PORT = 9119;
 const HERMES_CATALOG_UNAVAILABLE_CODE = "ERR_HERMES_CATALOG_UNAVAILABLE";
+// Hermes CustomEndpointUpdate's HTTP transports; an empty mode delegates to runtime detection.
+const HERMES_CUSTOM_ENDPOINT_APIS = Object.freeze(["", "chat_completions", "codex_responses", "anthropic_messages"]);
+const HERMES_ENDPOINT_API_ALIASES = Object.freeze({
+  openai: "chat_completions", openai_chat: "chat_completions", "openai-chat": "chat_completions",
+  "chat-completions": "chat_completions", chatcompletions: "chat_completions",
+  responses: "codex_responses", openai_responses: "codex_responses", "openai-responses": "codex_responses",
+  anthropic: "anthropic_messages", "anthropic-messages": "anthropic_messages", messages: "anthropic_messages",
+});
+const canonicalHermesEndpointApi = (value) => {
+  const mode = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return Object.hasOwn(HERMES_ENDPOINT_API_ALIASES, mode) ? HERMES_ENDPOINT_API_ALIASES[mode] : mode;
+};
+const HERMES_CHAT_FAILURE_COPY = Object.freeze({
+  rate_limit: "模型接口被限流（HTTP 429），本轮对话已失败结束。请稍后重新发送，或切换当前会话的模型。",
+  auth: "模型接口鉴权失败，本轮对话已结束。请检查当前会话使用的模型账号和密钥。",
+  billing: "模型额度或余额不足，本轮对话已失败结束。请检查当前会话的模型账号额度。",
+  connection: "模型连接失败或超时，本轮对话已结束。请检查连接后重新发送。",
+  empty: "模型没有返回任何内容，本轮对话已结束。请检查当前会话的模型配置后重新发送。",
+  error: "Hermes 本轮对话失败，未生成最终回复。请检查模型配置和连接后重新发送。",
+});
+function hermesChatFailureCode(payload) {
+  const detail = [payload.error, payload.text, payload.message, payload.failure_reason, payload.error_surface?.code].join(" ");
+  if (/\b429\b|rate.?limit|concurrency.limit/iu.test(detail)) return "rate_limit";
+  if (/billing|credits?.*(?:exhaust|insufficient)|out of (?:funds|credits)/iu.test(detail)) return "billing";
+  if (/\b40[13]\b|unauthor|authentication|invalid.api.key/iu.test(detail)) return "auth";
+  if (/timeout|timed.out|connection|network|ECONN/iu.test(detail)) return "connection";
+  return "error";
+}
 
 // ---- gateway chat (S2) constants ----
 // `source` stamps who created/resumed the session; "desktop" keeps our sessions
@@ -69,7 +98,6 @@ const GW_SOURCE = "desktop";
 const GW_COLS = 120; // server renders/wraps some output to this width
 // prompt.submit acks immediately; the TURN completes via events. Safety net for
 // a completion event that never arrives (official desktop allows 30 min).
-const GW_TURN_TIMEOUT_MS = 30 * 60_000;
 // After a transport-level gateway failure, sends fall back to ACP and the
 // gateway is re-probed after this long.
 const GW_CHAT_RETRY_MS = 60_000;
@@ -671,6 +699,7 @@ function normalizeHermesCronJob(job, agentId) {
         // execution ledger are irrelevant to the management UI.
         latest_execution: job.latest_execution && typeof job.latest_execution === "object"
           ? {
+              id: job.latest_execution.id,
               status: job.latest_execution.status,
               claimed_at: job.latest_execution.claimed_at,
               started_at: job.latest_execution.started_at,
@@ -695,6 +724,8 @@ function normalizeHermesRunRow(row) {
     finishedAt: endedRaw ? (endedRaw > 1e12 ? endedRaw : endedRaw * 1000) : undefined,
     summary: row.preview || undefined,
     sessionKey: row.id != null ? String(row.id) : undefined,
+    runId: row.id != null ? String(row.id) : undefined,
+    runIdAliases: row.id != null ? [String(row.id)] : undefined,
   };
 }
 
@@ -728,6 +759,7 @@ function synthesizeHermesLastRun(job) {
     && lastRunAt <= executionFinishedAt + HERMES_CRON_EXECUTION_CLOCK_GRACE_MS
   );
   const run = {
+    runId: executionBacked && typeof execution.id === "string" ? execution.id : undefined,
     startedAt: executionBacked ? executionStartedAt : lastRunAt || undefined,
     finishedAt: executionBacked ? executionFinishedAt : lastRunAt || undefined,
     status,
@@ -743,29 +775,33 @@ function synthesizeHermesLastRun(job) {
 // job.last_run_at is written when execution bookkeeping finishes, while a
 // session row spans started_at..ended_at. New Hermes supplies a matching
 // execution interval; older versions get a conservative ended-row + short
-// grace fallback. An open row is never proof of identity (real stale NULL-ended
-// rows exist), and a long ambiguous legacy delivery may duplicate a row rather
-// than corrupt an unrelated historical run.
+// grace fallback. An open row needs a unique match inside a proven execution
+// interval; legacy NULL-ended rows cannot absorb a later execution's outcome.
 function mergeHermesLatestExecution(runs, latest) {
   if (!latest) return false;
   const latestStartedAt = Number(latest.startedAt);
   const latestFinishedAt = Number(latest.finishedAt);
-  const match = runs.find((run) => {
+  const matches = runs.filter((run) => {
     const startedAt = Number(run?.startedAt);
     const finishedAt = Number(run?.finishedAt);
-    if (!(Number.isFinite(startedAt) && startedAt > 0
-      && Number.isFinite(finishedAt) && finishedAt > 0)) return false;
+    if (!(Number.isFinite(startedAt) && startedAt > 0)) return false;
     if (latest.executionBacked) {
       return startedAt >= latestStartedAt - HERMES_CRON_EXECUTION_CLOCK_GRACE_MS
         && startedAt <= latestFinishedAt + HERMES_CRON_EXECUTION_CLOCK_GRACE_MS;
     }
-    return Number.isFinite(latestStartedAt) && latestStartedAt > 0
+    return Number.isFinite(finishedAt) && finishedAt > 0
+      && Number.isFinite(latestStartedAt) && latestStartedAt > 0
       && latestStartedAt >= startedAt
       && latestStartedAt <= finishedAt + HERMES_CRON_LAST_RUN_GRACE_MS;
   });
-  if (match) {
-    for (const field of ["status", "error", "deliveryStatus", "deliveryError"]) {
+  if (matches.length === 1) {
+    const match = matches[0];
+    for (const field of ["runId", "status", "error", "deliveryStatus", "deliveryError"]) {
       if (latest[field] !== undefined) match[field] = latest[field];
+    }
+    if (latest.executionBacked && !match.finishedAt) {
+      match.finishedAt = latestFinishedAt;
+      match.durationMs = latestFinishedAt - match.startedAt;
     }
     return false;
   }
@@ -1044,10 +1080,10 @@ class HermesBackend extends AgentBackend {
     };
   }
 
-  constructor({ port = DEFAULT_PORT, bin = HERMES_BIN, getConfig, modelMutationGate, externalPluginSelectionService = null, getManagedExecution = null, getManagedEndpoint = null } = {}) {
+  constructor({ port = DEFAULT_PORT, bin = HERMES_BIN, getConfig, modelMutationGate, connectorService = null, getManagedExecution = null, getManagedEndpoint = null } = {}) {
     super();
     this._localRuntime = createHermesLocalRuntimeScope({ getManagedExecution, getManagedEndpoint });
-    this._externalPluginSelectionService = externalPluginSelectionService;
+    this._retiredConnectorService = connectorService;
     // 所有 Provider/Main/Aux/Cron 模型写共享一个 per-profile gate；条件快照只在
     // fresh GET 后建立，dashboard 拓扑变化或缺 header 时保持 fail-closed。
     this._modelMutationGate = modelMutationGate || createHermesModelMutationGate();
@@ -1073,6 +1109,10 @@ class HermesBackend extends AgentBackend {
     this._cronRunSummaryInflight = new Map(); // 同 key 的并发请求单飞
     // One dashboard per profile: profileName -> { port, token, proc, spawned }.
     this.dashboards = new Map();
+    this._sharedAdapterPending = new Map();
+    this._sharedAdapterSyncs = new Map();
+    this._sharedAdapterVerified = new WeakMap();
+    this._sharedAdapterRetryTimer = null;
     // 最近一次 start 失败原因（如「未找到 hermes 命令」），getStatus 在未连通时
     // 透出为 info.error，SetupOverlay/设置页据此给指引；连通后清空。
     this.lastError = null;
@@ -1105,6 +1145,7 @@ class HermesBackend extends AgentBackend {
     this.gwKeyByRuntime = new Map();  // runtimeId -> sessionKey (event routing)
     this.gwTurns = new Map();         // runtimeId -> live turn state (hooks, accumulators)
     this.gwUsageByKey = new Map();    // sessionKey -> last cumulative usage snapshot (per-turn deltas)
+    this.gwChatFailures = new Map(); // typed terminal diagnostics; never model context or execution authority
     this.gwChatDisabledUntil = new Map(); // profile -> ts;网关拨号失败后的 ACP 降级 TTL
     this.nextTurnConfigs = new Map(); // sessionKey -> config.set picks waiting for the current reply
     this.sessionLiveMeta = new Map(); // sessionKey -> {model, reasoningEffort, fast, contextUsed, contextMax} (session.info)
@@ -1277,6 +1318,72 @@ class HermesBackend extends AgentBackend {
 
   _hermesHomeForProfile(profile) { return this._localRuntime.profileHome(profile); }
 
+  async reconcileSharedCapabilityAdapter(options) {
+    if (this._localRuntime.isManaged() || this._getConfig().hermesMode === "remote") {
+      return { state: "unsupported" };
+    }
+    const { profile, expectedTools, forceRefresh = false, adapterRevision = "current" } = options;
+    const dash = this.dashboards.get(profile);
+    if (!dash) return { state: "unavailable", reason: "host_unavailable" };
+    if (this._sharedAdapterSyncs.has(profile)) return this._sharedAdapterSyncs.get(profile);
+    const generation = this._lifecycleGeneration;
+    const assertCurrent = () => {
+      if (generation !== this._lifecycleGeneration || this.dashboards.get(profile) !== dash) {
+        throw new Error("Hermes adapter Host changed");
+      }
+      return true;
+    };
+    const pending = { profile, expectedTools: [...expectedTools], forceRefresh, adapterRevision };
+    const promise = syncHermesSharedAdapter({
+      home: this._hermesHomeForProfile(profile), expectedTools,
+      // A matching catalog cannot attest a cached Python transport's protocol.
+      // Verify once per live descriptor/revision, including after a failed upgrade.
+      forceRefresh: forceRefresh || this._sharedAdapterVerified.get(dash) !== adapterRevision,
+      isCurrent: () => generation === this._lifecycleGeneration && this.dashboards.get(profile) === dash,
+      isBusy: () => this.gwTurns.size > 0 || this.sendQueues.size > 0,
+      rpc: async (method, params) => {
+        assertCurrent();
+        const result = await gatewayRpc(dash, method, params, { timeoutMs: 10_000 });
+        assertCurrent();
+        return result;
+      },
+      activate: async body => {
+        assertCurrent();
+        const response = await this._httpRequest("POST", `${dash.baseUrl}/api/dashboard/agent-plugins/activate`, {
+          token: dash.token, body, timeoutMs: 60_000, assertCurrent,
+        }, dash);
+        assertCurrent();
+        if (response.status !== 200) throw new Error("Hermes adapter activation unavailable");
+        return JSON.parse(response.body);
+      },
+    }).then(result => {
+      assertCurrent();
+      if (result.state === "ready") this._sharedAdapterVerified.set(dash, adapterRevision);
+      if (result.state === "deferred") {
+        this._sharedAdapterPending.set(profile, pending);
+        if (!this._sharedAdapterRetryTimer) {
+          this._sharedAdapterRetryTimer = setTimeout(() => {
+            this._sharedAdapterRetryTimer = null;
+            const entries = [...this._sharedAdapterPending.values()];
+            this._sharedAdapterPending.clear();
+            for (const entry of entries) void this.reconcileSharedCapabilityAdapter(entry).catch(() => {});
+          }, 10_000);
+          this._sharedAdapterRetryTimer.unref?.();
+        }
+      } else this._sharedAdapterPending.delete(profile);
+      return result;
+    }).finally(() => {
+      if (this._sharedAdapterSyncs.get(profile) === promise) this._sharedAdapterSyncs.delete(profile);
+    });
+    this._sharedAdapterSyncs.set(profile, promise);
+    return promise;
+  }
+
+  async _waitForSharedCapabilityAdapter(profile) {
+    const pending = this._sharedAdapterSyncs.get(profile);
+    if (pending) await pending.catch(() => {});
+  }
+
   _ownedHttpOptions(url, options, dashboard) {
     if (!this._localRuntime.isManaged() && !dashboard?.managed) return { url, options };
     const dash = dashboard || this.dashboards.get(new URL(url).searchParams.get("profile") || "default");
@@ -1308,8 +1415,12 @@ class HermesBackend extends AgentBackend {
     // One owned serve process multiplexes the profiles in its private data root.
     const dash = this._localRuntime.bindDashboard("default");
     this.dashboards.set("default", dash);
-    const { status } = await this._httpGet(`${dash.baseUrl}/api/status`, { token: dash.token, timeoutMs: 5000 }, dash);
-    if (status !== 200) throw Object.assign(new Error("Hermes 受管运行环境未就绪"), { code: "MANAGED_HERMES_HOST_UNAVAILABLE" });
+    // The pinned host's health endpoint proves HTTP readiness without the
+    // unrelated gateway topology and storage scans performed by /api/status.
+    const { status, body } = await this._httpGet(`${dash.baseUrl}/api/health`, { token: dash.token, timeoutMs: 5000 }, dash);
+    let healthy = false;
+    try { healthy = status === 200 && JSON.parse(body)?.ok === true; } catch {}
+    if (!healthy) throw Object.assign(new Error("Hermes 受管运行环境未就绪"), { code: "MANAGED_HERMES_HOST_UNAVAILABLE" });
     await this._refreshAgentsFor(dash, generation);
     if (generation !== this._lifecycleGeneration) return false;
     this._localRuntime.assertDashboard(dash);
@@ -1543,7 +1654,7 @@ class HermesBackend extends AgentBackend {
   // Probe a candidate connection without persisting (设置 page Test button).
   async testConnection(spec = {}) {
     if (this._localRuntime.isManaged()) {
-      throw Object.assign(new Error("受管 Hermes 连接由 App 验证，请使用插件后台状态"), {
+      throw Object.assign(new Error("受管 Hermes 连接由 App 验证，请查看运行时状态"), {
         code: "MANAGED_HERMES_LEGACY_CONNECTION_UNSUPPORTED", status: 409,
       });
     }
@@ -2341,8 +2452,82 @@ class HermesBackend extends AgentBackend {
     return this.sessionRows;
   }
 
+  async resolveMcpConnectionSession({ agentId, sessionId } = {}) {
+    if (typeof agentId !== "string" || typeof sessionId !== "string" || !sessionId || sessionId.length > 512
+      || /[\0\r\n]/u.test(sessionId) || this._sessionRowsComplete !== true) return null;
+    const profile = this.profileById.get(agentId), generation = this._lifecycleGeneration;
+    if (!profile || this.getAgents().filter(agent => agent.id === agentId && agent.enabled !== false).length !== 1) return null;
+    const candidates = new Set();
+    for (const row of this.sessionRows) if (row.agentId === agentId && (row.key === sessionId || row.sessionId === sessionId)) candidates.add(row.key);
+    for (const [key, mapping] of this.gwRuntimeByKey) {
+      if (mapping.profile !== profile || ![key, mapping.runtimeId, mapping.storedId].includes(sessionId)) continue;
+      const socket = this.gwSockets.get(profile);
+      if (!socket || mapping.generation !== socket.generation) return null;
+      candidates.add(key);
+    }
+    if (candidates.size !== 1 || generation !== this._lifecycleGeneration) return null;
+    const key = [...candidates][0], matches = this.sessionRows.filter(row => row.key === key);
+    if (matches.length !== 1) return null;
+    const row = matches[0];
+    if (row.agentId !== agentId || row.backendId !== "hermes" || row.kind !== "direct" || !row.sessionId
+      || row.archived === true || row.groupId || row.parentSessionKey
+      || ["cron", "group", "group_chat", "subagent"].includes(row.source)
+      || /:(?:cron|group|subagent)(?::|$)/u.test(row.key)) return null;
+    const mapping = this.gwRuntimeByKey.get(row.key);
+    return { sessionKey: row.key, kind: "direct", idle: !this.sendQueues.has(row.key)
+      && !(mapping && this.gwTurns.has(mapping.runtimeId)) && row.hasActiveRun !== true && row.status !== "running" };
+  }
+
   getSessionRowsSnapshot() {
     return { rows: this.sessionRows, complete: this._sessionRowsComplete };
+  }
+
+  async resolveModelProjectionSession({ agentId, sessionId } = {}) {
+    if (typeof agentId !== "string" || typeof sessionId !== "string" || !sessionId
+      || sessionId.length > 512 || /[\u0000-\u001f\u007f]/u.test(sessionId)) return null;
+    const profile = this.profileById.get(agentId), generation = this._lifecycleGeneration;
+    if (!profile || this.getAgents().filter(agent => agent.id === agentId && agent.enabled !== false).length !== 1) return null;
+    let entries = [...this.gwRuntimeByKey].filter(([key, mapping]) => mapping.profile === profile
+      && [key, mapping.runtimeId, mapping.storedId].includes(sessionId));
+    if (entries.length > 1) return null;
+    const socket = this.gwSockets.get(profile), socketGeneration = socket?.generation;
+    const current = () => generation === this._lifecycleGeneration && this.profileById.get(agentId) === profile
+      && this.gwSockets.get(profile) === socket && socket?.generation === socketGeneration;
+    try {
+      // A newly created native session precedes the asynchronous chat-list
+      // refresh. Verify the actual live process instead of trusting that cache.
+      if (socket) {
+        const snapshot = await socket.request("session.active_list", {});
+        if (!current() || !Array.isArray(snapshot?.sessions)) return null;
+        if (!entries.length) {
+          // Native compression may rotate the stored id while retaining the
+          // live session. Its existing product scope must not rotate with it.
+          const rows = snapshot.sessions.filter(row => row?.session_key === sessionId || row?.id === sessionId);
+          if (rows.length > 1) return null;
+          if (rows.length === 1) entries = [...this.gwRuntimeByKey].filter(([key, mapping]) =>
+            mapping.profile === profile && mapping.generation === socketGeneration && mapping.runtimeId === rows[0].id);
+        }
+        if (entries.length) {
+          if (entries.length !== 1) return null;
+          const [key, mapping] = entries[0];
+          if (this.gwRuntimeByKey.get(key) !== mapping || mapping.generation !== socketGeneration || !mapping.runtimeId
+            || !mapping.storedId || !key.startsWith(`agent:${agentId}:`)) return null;
+          const matches = snapshot.sessions.filter(row => row?.id === mapping.runtimeId || row?.session_key === mapping.storedId);
+          if (matches.length !== 1 || matches[0].id !== mapping.runtimeId || typeof matches[0].session_key !== "string"
+            || !matches[0].session_key || /[\u0000-\u001f\u007f]/u.test(matches[0].session_key)) return null;
+          return { sessionKey: key };
+        }
+      }
+      // Reading an existing chat before it resumes, or an independently owned
+      // derived task, requires an exact native record in the selected profile.
+      const prefix = `agent:${agentId}:`, id = sessionId.startsWith(prefix) ? sessionId.slice(prefix.length) : sessionId;
+      if (!id || id.startsWith("agent:")) return null;
+      const dash = this.dashboards.get(profile); if (!dash) return null;
+      const row = await this._settingsGet(dash, `/api/sessions/${encodeURIComponent(id)}?profile=${encodeURIComponent(profile)}`);
+      if (!current() || this.dashboards.get(profile) !== dash || row?.id !== id || row.profile !== profile
+        || row.profile_name != null && row.profile_name !== profile || row.archived === true) return null;
+      return { sessionKey: `${prefix}${id}` };
+    } catch { return null; }
   }
 
   getModelChoices() {
@@ -4270,6 +4455,7 @@ class HermesBackend extends AgentBackend {
       apiKeyPreview: typeof e?.api_key_preview === "string" ? e.api_key_preview : null,
       contextLength: typeof e?.context_length === "number" ? e.context_length : null,
       discoverModels: e?.discover_models !== false,
+      ...(typeof e?.api_mode === "string" ? { api: canonicalHermesEndpointApi(e.api_mode) } : {}),
       isCurrent: e?.is_current === true,
       ...(typeof e?.source === "string" && e.source ? { source: e.source } : {}),
     };
@@ -4287,16 +4473,22 @@ class HermesBackend extends AgentBackend {
           }
         : undefined,
       endpoints: (Array.isArray(j?.endpoints) ? j.endpoints : []).map((e) => this._customEndpointToCamel(e)),
+      form: { apiOptions: [...HERMES_CUSTOM_ENDPOINT_APIS], defaultApi: "" },
     };
   }
 
   _customEndpointToSnake(endpoint = {}) {
     const contextLength = Number(endpoint.contextLength);
+    const api = canonicalHermesEndpointApi(endpoint.api);
+    if (endpoint.api !== undefined && (typeof endpoint.api !== "string" || !HERMES_CUSTOM_ENDPOINT_APIS.includes(api))) {
+      throw Object.assign(new Error("不支持的 Hermes API 协议。"), { code: "INVALID_PARAMS", statusCode: 400 });
+    }
     return {
       ...(typeof endpoint.id === "string" && endpoint.id.trim() ? { id: endpoint.id.trim() } : {}),
       name: String(endpoint.name || "").trim(),
       base_url: String(endpoint.baseUrl || "").trim(),
       model: String(endpoint.model || "").trim(),
+      ...(endpoint.api !== undefined ? { api_mode: api } : {}),
       ...(typeof endpoint.apiKey === "string" && endpoint.apiKey.trim()
         ? { api_key: endpoint.apiKey.trim() }
         : {}),
@@ -4360,6 +4552,7 @@ class HermesBackend extends AgentBackend {
       current: live[0].snap.current,
       profiles: live.map((e) => e.name),
       endpoints: [...byId.values()],
+      form: { apiOptions: [...HERMES_CUSTOM_ENDPOINT_APIS], defaultApi: "" },
     };
   }
 
@@ -4416,6 +4609,12 @@ class HermesBackend extends AgentBackend {
             ...(base.api_key ? { api_key: base.api_key } : {}),
             ...(base.context_length ? { context_length: base.context_length } : {}),
           };
+          // Omission keeps a hand-written transport; an explicit empty mode restores automatic detection.
+          if (base.api_mode !== undefined) {
+            delete entry.transport;
+            if (base.api_mode) entry.api_mode = base.api_mode;
+            else delete entry.api_mode;
+          }
           await this._putProviderEntry(dash, id, entry, opts);
         } catch (err) {
           if (err?.code === "hermes_conditional_write_unsupported" || err?.code === "hermes_write_conflict") throw err;
@@ -6796,7 +6995,7 @@ class HermesBackend extends AgentBackend {
    * converges on the same identity (ACP persists at session/new; gateway may
    * expose its row only after the first accepted prompt).
    * @param {string} agentId  e.g. "hermes-default"
-   * @param {{model?: string, provider?: string, acpProviderRef?: string, workspace?: string|null, freezeWorkspace?: boolean}} [options]
+   * @param {{model?: string, provider?: string, acpProviderRef?: string, parentSessionKey?: string, workspace?: string|null, freezeWorkspace?: boolean}} [options]
    * @returns {Promise<string>} canonical new sessionKey
    */
   async _setPreparedGroupWorkspace(sessionKey, workspace) {
@@ -6869,7 +7068,7 @@ class HermesBackend extends AgentBackend {
     const generation = this._lifecycleGeneration;
     let model = String(options?.model || "").trim();
     let provider = String(options?.provider || "").trim();
-    const acpProviderRef = String(options?.acpProviderRef || "").trim();
+    let acpProviderRef = String(options?.acpProviderRef || "").trim();
     const workspace = options?.workspace == null ? null : options.workspace;
     const freezeWorkspace = options?.freezeWorkspace === true;
     if (workspace !== null && (typeof workspace !== "string" || !path.isAbsolute(workspace)
@@ -6888,6 +7087,30 @@ class HermesBackend extends AgentBackend {
       }
       model = String(info.model || "").trim();
       provider = String(info.provider || "").trim();
+    }
+
+    if (options.parentSessionKey && model && !provider && !acpProviderRef) {
+      // Legacy session rows may contain only a model id. A model-only override
+      // would combine that inherited model with today's profile provider. Read
+      // this profile's catalog rather than guessing from the merged UI cache.
+      const catalog = await this._settingsGet(dash, "/api/model/options", 20000);
+      if (generation !== this._lifecycleGeneration || this.profileById.get(agentId) !== profile
+        || this.dashboards.get(profile) !== dash) {
+        throw new Error("hermes: 读取继承模型期间连接配置已变化，请重试");
+      }
+      const routes = new Map();
+      for (const entry of Array.isArray(catalog?.providers) ? catalog.providers : []) {
+        const slug = String(entry.slug || entry.name || "").trim();
+        if (!slug || entry.authenticated === false || entry.unavailable_models?.includes(model)
+          || !Array.isArray(entry.models) || !entry.models.some(value => normalizeModelId(value) === model)) continue;
+        const ref = entry.is_user_defined === true || entry.source === "user-config"
+          ? (slug.startsWith("custom:") ? slug : `custom:${slug}`) : slug;
+        routes.set(ref, slug);
+      }
+      if (routes.size !== 1) throw Object.assign(new Error(
+        "hermes: 无法唯一确认继承模型的服务商，请先在原会话明确选择模型和服务商，再新建会话",
+      ), { code: "HERMES_MODEL_PROVIDER_UNRESOLVED" });
+      [acpProviderRef, provider] = routes.entries().next().value;
     }
 
     if (this._gatewayChatEnabled(profile)) {
@@ -7042,7 +7265,7 @@ class HermesBackend extends AgentBackend {
     if (hasMore) rows.shift();
     const nextOffset = (position?.offset ?? 0) + rows.length;
     const messages = this._mapHistoricalMessages(rows);
-    return historyPage(position ? messages : this._stitchLastFinalMeta(sessionKey, messages), hasMore,
+    return historyPage(position ? messages : this._stitchChatFailure(sessionKey, this._stitchLastFinalMeta(sessionKey, messages)), hasMore,
       hasMore ? encodeHistoryCursor(this, scope, { offset: nextOffset, anchor: historyRowId(rows[0]), sessionId: parsed.session_id }) : null,
       historySource(sessionKey, parsed.session_id || serverId, this.getChatCacheScope()));
   }
@@ -7061,7 +7284,8 @@ class HermesBackend extends AgentBackend {
       // ":main" and eagerly-created keys bind to their stored session through
       // gateway/ACP mappings. Resolving the server id here lets post-final cache
       // invalidation refetch canonical history (including tool/thinking rows).
-      const seed = serverTail === "main" ? [] : this._stitchLastFinalMeta(sessionKey, await this._fetchHistoricalMessages(sessionKey, serverTail));
+      const seed = serverTail === "main" ? [] : this._stitchChatFailure(sessionKey,
+        this._stitchLastFinalMeta(sessionKey, await this._fetchHistoricalMessages(sessionKey, serverTail)));
       // 历史读取跨过 stop/reconfigure 时明确失败且不缓存，下一代可重新读取。
       if (generation !== this._lifecycleGeneration) {
         throw new Error("hermes: history lifecycle changed while loading");
@@ -7399,14 +7623,7 @@ class HermesBackend extends AgentBackend {
   async abortChat(sessionKey) {
     const gw = this.gwRuntimeByKey.get(sessionKey);
     const sock = gw ? this.gwSockets.get(gw.profile) : null;
-    if (gw && sock && this._externalPluginSelectionService) {
-      try {
-        await require("./hermes-plugin-selection").cancelHermesPluginSelectionSession({ runtimeId: gw.runtimeId,
-          agentId: /^agent:([^:]+)/u.exec(sessionKey)?.[1], requestHost: (method, params) => sock.request(method, params),
-          service: this._externalPluginSelectionService });
-      } catch { /* The actual Host interrupt must still run. */ }
-    }
-    if (gw && sock && (this.gwTurns.has(gw.runtimeId) || this._externalPluginSelectionService)) {
+    if (gw && sock && this.gwTurns.has(gw.runtimeId)) {
       try {
         await sock.request("session.interrupt", { session_id: gw.runtimeId });
         return;
@@ -8026,61 +8243,31 @@ class HermesBackend extends AgentBackend {
     return next;
   }
 
-  attachExternalPluginSelectionService(service) { this._externalPluginSelectionService = service; }
-  supportsExternalChatSelection() { return typeof this._externalPluginSelectionService?.prepareExternalPluginSelection === "function"; }
-  async getPluginSelectionReadiness({ agentId, sessionKey } = {}) {
-    if (typeof agentId !== "string" || !agentId || typeof sessionKey !== "string"
-      || !sessionKey.startsWith(`agent:${agentId}:`) || !this.supportsExternalChatSelection()) return false;
-    const generation = this._lifecycleGeneration;
-    try {
-      const profile = this.profileById.get(agentId);
-      const mapping = this.gwRuntimeByKey.get(sessionKey);
-      const dashboard = profile && this.dashboards.get(profile);
-      if (!profile || !dashboard || !mapping || mapping.profile !== profile
-        || this.freshSessionTransports.get(sessionKey) === "acp") return false;
-      // A readiness GET must not resume a crashed ordinary turn: session.resume
-      // can execute recovery. Probe only the current established Gateway owner.
-      const socket = this._gwSocket(profile, dashboard);
-      if (mapping.generation !== socket.generation) return false;
-      const capabilities = await socket.request("prompt.selection.capabilities", { session_id: mapping.runtimeId });
-      require("./hermes-plugin-selection").trustedHermesSelectionSubject(capabilities, agentId);
-      return generation === this._lifecycleGeneration && this.gwRuntimeByKey.get(sessionKey) === mapping
-        && this.gwSockets.get(profile) === socket && mapping.generation === socket.generation;
-    } catch { return false; }
-  }
-  async getChatOperation(sessionKey, operationId) {
-    const { m, sock } = await this._gwEnsureRuntime(sessionKey, { eagerBuild: true });
-    return require("./hermes-plugin-selection").readHermesPluginSelectionOperation({ runtimeId: m.runtimeId,
-      agentId: /^agent:([^:]+)/u.exec(sessionKey)?.[1], sessionKey, operationId,
-      requestHost: (method, params) => sock.request(method, params) });
-  }
+  async getChatOperation() { throw Object.assign(new Error("OpenConnector 已退役，旧连接器操作结果保持待核对，请读取会话历史"),{code:"OPEN_CONNECTOR_RETIRED"}); }
 
-  sendMessage(sessionKey, message, idempotencyKey, hooks = {}, opts = {}) {
-    // Capture a selected submission before queueing it. It must negotiate the
-    // Host's actual physical session and mandatory gate through the Gateway;
-    // silently falling back to ACP would lose the selected-turn authority.
-    if (opts && Object.prototype.hasOwnProperty.call(opts, "pluginSelection")) {
-      if (!this._externalPluginSelectionService || typeof idempotencyKey !== "string" || !idempotencyKey) {
-        const error = new Error("Hermes 尚无法将插件选择绑定到本次真实执行回合");
-        error.code = "PLUGIN_SELECTION_UNAVAILABLE";
-        return Promise.reject(error);
-      }
-      opts = { ...opts, pluginSelection: structuredClone(opts.pluginSelection),
-        attachments: opts.attachments && structuredClone(opts.attachments), requiredTransport: "gateway" };
+  async sendMessage(sessionKey, message, idempotencyKey, hooks = {}, opts = {}) {
+    if (this._chatSecretOwner) {
+      idempotencyKey ||= require("node:crypto").randomUUID();
+      const agentId = /^agent:([^:]+):/u.exec(sessionKey)?.[1];
+      message = (await this.prepareChatSendInput(agentId, sessionKey, { operationId: idempotencyKey, text: message })).text;
     }
+    if (opts && Object.hasOwn(opts, "pluginSelection")) return Promise.reject(
+      Object.assign(new Error("旧插件选择已停用，请重新选择连接器账号"), { code: "PLUGIN_PLATFORM_RETIRED" }));
+    if (opts && Object.hasOwn(opts,"connectorSelection")) return Promise.reject(
+      Object.assign(new Error("OpenConnector 已退役，请使用 MCP 连接器"),{code:"OPEN_CONNECTOR_RETIRED"}));
     if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
       return this._enqueueMessage(sessionKey, message, undefined, hooks, opts);
     }
     const cacheKey = JSON.stringify([sessionKey, idempotencyKey]);
     const fingerprint = createHash("sha256").update(JSON.stringify([message, opts.attachments || null,
-      normalizeFederationInputProvenance(opts.inputProvenance), opts.pluginSelection || null])).digest("hex");
+      normalizeFederationInputProvenance(opts.inputProvenance)])).digest("hex");
     const existing = this._idempotentSends.get(cacheKey);
     if (
       existing
       && (!existing.settledAt || Date.now() - existing.settledAt < HERMES_IDEMPOTENCY_TTL_MS)
     ) {
       if (existing.fingerprint && existing.fingerprint !== fingerprint) {
-        return Promise.reject(Object.assign(new Error("同一消息操作不能更换内容或插件选择"), { code: "PLUGIN_SELECTION_CONFLICT" }));
+        return Promise.reject(Object.assign(new Error("同一消息操作不能更换内容"), { code: "CONNECTOR_SELECTION_CONFLICT" }));
       }
       // Map insertion order is the LRU order. Refresh a hit before capacity eviction.
       this._idempotentSends.delete(cacheKey);
@@ -8214,7 +8401,7 @@ class HermesBackend extends AgentBackend {
   }
 
   async steerChat(sessionKey, message) {
-    const text = String(message || "").trim();
+    let text = String(message || "").trim();
     if (!text) throw new Error("hermes: 引导消息不能为空");
     const { profile, dash } = this._sessionTarget(sessionKey);
     const lease = this._captureGatewayDashboard(dash);
@@ -8224,10 +8411,19 @@ class HermesBackend extends AgentBackend {
     const turn = mapping && this.gwTurns.get(mapping.runtimeId);
     // Do not create/resume a session for steering: either may start fresh work.
     if (!mapping || mapping.generation !== sock.generation || !turn || turn.ended
-      || turn.sessionKey !== sessionKey || turn.selection) {
+      || turn.sessionKey !== sessionKey) {
       throw new Error("Hermes 当前没有可接收引导的执行回合");
     }
     const socketGeneration = sock.generation;
+    if (this._chatSecretOwner) {
+      const agentId = /^agent:([^:]+):/u.exec(sessionKey)?.[1];
+      text = (await this.prepareChatSendInput(agentId, sessionKey, {
+        operationId: `steer:${require("node:crypto").randomUUID()}`, text,
+      })).text;
+      lease.assertCurrent?.();
+      if (generation !== this._lifecycleGeneration || socketGeneration !== sock.generation
+        || this.gwRuntimeByKey.get(sessionKey) !== mapping || turn.ended) throw new Error("Hermes 引导所属轮次已失效");
+    }
     const result = await sock.request("session.steer", { session_id: mapping.runtimeId, text });
     lease.assertCurrent?.();
     if (generation !== this._lifecycleGeneration || socketGeneration !== sock.generation
@@ -8363,7 +8559,7 @@ class HermesBackend extends AgentBackend {
         { session_id: m.runtimeId, command: wireCommand },
         // Manual compression can spend several minutes summarizing; Hermes'
         // compute-host waiter allows 630 seconds. Keep a bounded margin above it.
-        { timeoutMs: /^\/compress(?:\s|$)/i.test(wireCommand) ? 660_000 : 60_000 },
+        { timeoutMs: /^\/compress(?:\s|$)/i.test(wireCommand) ? 45 * 60_000 : 60_000 },
       );
     } catch (error) {
       if (error?.executionUncertain !== true) throw error;
@@ -8465,6 +8661,12 @@ class HermesBackend extends AgentBackend {
           m.generation = sock.generation;
           sock.restoreServerRequests(res?.open_requests, m.runtimeId);
           sock.replayServerRequests(m.runtimeId);
+          // A terminal frame can be lost with the old connection. Resuming
+          // observation must consume the retained failure, never resubmit it.
+          if (!turn.ended && res?.inflight?.status === "error") {
+            this._gwComplete(turn.sessionKey, m.runtimeId, turn, { ...res.inflight,
+              text: "", error: res.inflight.error, status: "error" });
+          }
         })
         .catch(() => { /* 轮次超时兜底会收尾 */ });
     }
@@ -8509,17 +8711,6 @@ class HermesBackend extends AgentBackend {
     const turn = this.gwTurns.get(sid);
     if (!mapping || mapping.profile !== profile || mapping.runtimeId !== sid
       || mapping.generation !== sock?.generation || !turn || turn.sessionKey !== sessionKey) return false;
-    if (turn.selection) {
-      try {
-        const proof = require("./hermes-plugin-selection").validateHermesSelectionReceipt(frame.params.selection_dispatch, turn.selection, true);
-        const identity = [proof.actual_session_id, proof.actual_task_id, proof.actual_turn_id];
-        if (["unknown", "interrupted"].includes(proof.state) || identity.some(value => value === null)
-          || (turn.selectionIdentity && identity.some((value, index) => turn.selectionIdentity[index] !== value))) throw new Error();
-        turn.selectionIdentity = identity;
-      } catch {
-        throw Object.assign(new Error("Hermes request does not prove selected-turn ownership"), { code: "HERMES_REQUEST_OWNER_UNVERIFIED" });
-      }
-    }
     const prompt = require("./hermes-server-requests").promptForRequest(frame);
     if (!prompt || typeof turn.hooks.prompt !== "function") return false;
     turn.hooks.prompt(prompt);
@@ -8572,22 +8763,6 @@ class HermesBackend extends AgentBackend {
     }
     const turn = this.gwTurns.get(sid);
     if (!turn) return;
-    if (turn.selection) {
-      if (!params?.selection_dispatch || params.selection_dispatch.operation_id !== turn.selection.operationId) return;
-      let proof;
-      try { proof = require("./hermes-plugin-selection").validateHermesSelectionReceipt(params.selection_dispatch, turn.selection, true); }
-      catch { turn.failObservation?.("Hermes 插件回合事件身份无法核实"); return; }
-      if (["unknown", "interrupted"].includes(proof.state)) {
-        turn.failObservation?.("Hermes 原插件回合结果需要核实，不能自动重发"); return;
-      }
-      if (proof.actual_task_id === null || proof.actual_turn_id === null) return;
-      const identity = [proof.actual_session_id, proof.actual_task_id, proof.actual_turn_id];
-      if (turn.selectionIdentity && identity.some((value, index) => turn.selectionIdentity[index] !== value)) {
-        turn.failObservation?.("Hermes 插件回合身份发生变化"); return;
-      }
-      turn.selectionIdentity = identity;
-      if (type === "selection.dispatch.bound") return;
-    }
     const hooks = turn.hooks;
     switch (type) {
       case "message.delta":
@@ -8818,6 +8993,51 @@ class HermesBackend extends AgentBackend {
     turn.resolve = null;
   }
 
+  _chatFailureKey(sessionKey) {
+    try {
+      const { profile, dash } = this._sessionTarget(sessionKey);
+      const remote = this._getConfig().hermesMode === "remote";
+      return createHash("sha256").update(JSON.stringify([sessionKey, dash.baseUrl,
+        remote ? dash.token : this._hermesHomeForProfile(profile)])).digest("hex");
+    } catch { return null; }
+  }
+
+  _rememberChatFailure(sessionKey, turn, payload, code = hermesChatFailureCode(payload)) {
+    const key = this._chatFailureKey(sessionKey);
+    if (!key) return code;
+    const user = this.transcripts.get(sessionKey)?.findLast(row => row.role === "user");
+    const userRowId = payload.persisted_turn?.user_row_id;
+    const record = { code, at: Date.now(), userAt: turn.userTimestamp || user?.timestamp || 0,
+      userRowId: Number.isSafeInteger(userRowId) && userRowId > 0 ? userRowId : null };
+    this.gwChatFailures.set(key, record);
+    if (this.gwChatFailures.size > 256) this.gwChatFailures.delete(this.gwChatFailures.keys().next().value);
+    this._dashboardJournal?.recordChatFailure?.(key, record);
+    return code;
+  }
+
+  _stitchChatFailure(sessionKey, messages) {
+    const key = this._chatFailureKey(sessionKey);
+    const failure = key && (this.gwChatFailures.get(key) || this._dashboardJournal?.getChatFailure?.(key));
+    if (!failure || !Array.isArray(messages) || !messages.length) return messages;
+    const lastUser = messages.findLastIndex(row => row.role === "user");
+    const user = messages[lastUser];
+    if (user) {
+      if (user.timestamp > failure.at || failure.userAt && user.timestamp < failure.userAt - 1000) return messages;
+      if (failure.userRowId !== null ? user.id !== `hermes-msg-${failure.userRowId}`
+        : !failure.userAt || user.timestamp < failure.userAt - 1000 || user.timestamp > failure.at) return messages;
+    } else if (!failure.userAt || !messages.every(row => row.timestamp >= failure.userAt && row.timestamp <= failure.at)) {
+      // A latest page can contain only a long tool tail; older unrelated pages
+      // cannot acquire a diagnostic from another turn.
+      return messages;
+    }
+    const tail = messages.slice(lastUser + 1);
+    if (tail.some(row => row.stopReason === "error" || row.errorMessage
+      || row.role === "assistant" && row.timestamp > failure.at)) return messages;
+    const text = HERMES_CHAT_FAILURE_COPY[failure.code] || HERMES_CHAT_FAILURE_COPY.error;
+    return [...messages, { id: `hermes-error-${key}-${failure.at}`, role: "assistant", timestamp: failure.at,
+      content: [{ type: "text", text }], stopReason: "error", errorMessage: text, historySource: "hermes" }];
+  }
+
   _gwComplete(sessionKey, runtimeId, turn, payload) {
     const status = String(payload.status || "complete");
     const text = String(payload.text ?? "");
@@ -8826,12 +9046,14 @@ class HermesBackend extends AgentBackend {
     const transcript = this.transcripts.get(sessionKey);
     const stamp = meta ? { usage: meta.usage, ...(meta.model ? { model: meta.model } : {}) } : {};
     if (status === "error") {
+      const code = this._rememberChatFailure(sessionKey, turn, payload);
       // 按信息量排序，不按字段名排：text 是网关拼好的全文（额度墙时含 provider
       // 原话 + 充值链接），billing.message 是同一段文案的结构化副本，
       // failure_reason 只是裸枚举（"billing" / "rate_limit"…）且只在额度墙时才有
       // ——它排第一会把唯一数据最全的一类错误压成一个单词。
       const reason = String(
-        text.trim() || payload?.billing?.message || payload.failure_reason || "assistant 轮次失败",
+        ["rate_limit", "auth", "connection"].includes(code) ? `${payload.partial === true && text.trim() ? `${text.trim()}\n\n` : ""}${HERMES_CHAT_FAILURE_COPY[code]}`
+          : text.trim() || payload.error || payload?.billing?.message || payload.failure_reason || HERMES_CHAT_FAILURE_COPY.error,
       );
       // stopReason:"error" 让重载后的历史行仍按红色错误气泡渲染——error hook 的
       // 红气泡只是内存态，下一次 loadHistory 会被这里的转录行整体替换。
@@ -8852,6 +9074,7 @@ class HermesBackend extends AgentBackend {
       // Empty successful turn → surface as error (an empty chat:final would
       // loop the UI's reload-on-final; same policy as the ACP path).
       const reason = String(payload.warning || "模型没有返回任何内容（可能是模型配置或额度问题）。");
+      this._rememberChatFailure(sessionKey, turn, payload, "empty");
       transcript?.push({ role: "assistant", content: [{ type: "text", text: `[${reason}]` }], timestamp: Date.now(), stopReason: "error" });
       turn.hooks.error?.(reason);
       this._gwEndTurn(runtimeId, turn);
@@ -8870,6 +9093,8 @@ class HermesBackend extends AgentBackend {
   }
 
   _gwTurnError(sessionKey, runtimeId, turn, message) {
+    const code = this._rememberChatFailure(sessionKey, turn, { message });
+    if (["rate_limit", "auth", "connection"].includes(code)) message = HERMES_CHAT_FAILURE_COPY[code];
     this.transcripts.get(sessionKey)?.push({ role: "assistant", content: [{ type: "text", text: `[${message}]` }], timestamp: Date.now(), stopReason: "error" });
     turn.hooks.error?.(message);
     this._gwEndTurn(runtimeId, turn);
@@ -8883,6 +9108,15 @@ class HermesBackend extends AgentBackend {
     const sock = m ? this.gwSockets.get(m.profile) : null;
     if (!m || !sock) throw new Error("hermes: 该会话没有进行中的网关轮次，无法回应");
     const kind = String(data.kind || "");
+    if (kind === "clarify" && data.action !== "cancel" && this._chatSecretOwner) {
+      const agentId = /^agent:([^:]+):/u.exec(sessionKey)?.[1];
+      const payload = data.answers && typeof data.answers === "object" ? { answers: data.answers } : { value: data.value };
+      const prepared = await this.prepareChatSendInput(agentId, sessionKey, {
+        operationId: `answer:${String(data.requestId || "")}`, text: JSON.stringify(payload),
+      });
+      data = { ...data, ...JSON.parse(prepared.text) };
+      if (this.gwRuntimeByKey.get(sessionKey) !== m || this.gwSockets.get(m.profile) !== sock) throw new Error("Hermes 请求所属轮次已失效");
+    }
     if (sock.serverRequestsSupported || String(data.requestId || "").startsWith("srq-")) {
       if (m.generation !== sock.generation || !this.gwTurns.has(m.runtimeId)) throw new Error("Hermes 请求所属轮次已失效");
       return sock.respondServerRequest(m.runtimeId, data);
@@ -9050,7 +9284,7 @@ class HermesBackend extends AgentBackend {
   // shows it.
   async compactSession(sessionKey) {
     const { m, sock } = await this._gwEnsureRuntime(sessionKey);
-    const res = await sock.request("session.compress", { session_id: m.runtimeId }, { timeoutMs: 130_000 });
+    const res = await sock.request("session.compress", { session_id: m.runtimeId }, { timeoutMs: 45 * 60_000 });
     this._gwInvalidateTranscript(sessionKey);
     const summary = res?.summary && typeof res.summary === "object" ? res.summary : {};
     return {
@@ -9060,7 +9294,9 @@ class HermesBackend extends AgentBackend {
   }
 
   async _sendViaGateway({ sessionKey, message, hooks, atts, transcript, profile, assertCurrentGeneration,
-    requiredTransport, pluginSelection, operationId, selectedAttachments }, retried = false) {
+    requiredTransport, operationId }, retried = false) {
+    await this._waitForSharedCapabilityAdapter(profile);
+    assertCurrentGeneration();
     const { tail, dash } = this._sessionTarget(sessionKey);
     const sock = this._gwSocket(profile, dash);
     const unavailable = (err) => {
@@ -9071,7 +9307,7 @@ class HermesBackend extends AgentBackend {
     // —— ensure a runtime session (create for main/fresh keys, resume otherwise)
     let m = this.gwRuntimeByKey.get(sessionKey);
     if (m && m.generation !== (this.gwSockets.get(profile)?.generation ?? -1)) m = null;
-    if (!m && requiredTransport === "gateway" && pluginSelection === undefined) {
+    if (!m && requiredTransport === "gateway") {
       // session.resume can execute a crash-recovery continuation by itself.
       // An inspiration turn must keep its prepared runtime identity and cannot
       // silently recover that session before submitting another prompt.
@@ -9127,15 +9363,6 @@ class HermesBackend extends AgentBackend {
       await this._gwRequireAgent(m, sock);
       assertCurrentGeneration();
     }
-    let selected = null;
-    if (pluginSelection !== undefined) {
-      selected = await require("./hermes-selection-input").prepareHermesSelectedInput({
-        runtimeId: m.runtimeId, agentId: /^agent:([^:]+)/u.exec(sessionKey)?.[1], operationId, pluginSelection,
-        message, attachments: selectedAttachments || [],
-        requestHost: (method, params, options) => sock.request(method, params, options), service: this._externalPluginSelectionService,
-        assertCurrent: assertCurrentGeneration,
-      });
-    }
     // —— attachments: upload-then-submit (official style). Images/PDF pages
     // queue into this turn server-side; files stage under the workspace and
     // return an @file: ref that must ride the prompt TEXT.
@@ -9155,7 +9382,7 @@ class HermesBackend extends AgentBackend {
     // 而 dashboard 冷启动期还并行着模型目录抓取（/api/model/options 可达 20s），
     // 排队后极易超过默认 30s——真机实测「file.attach 超时」即出自此，同一调用在
     // 暖机后只要 3s。
-    for (const img of selected ? [] : atts.images) {
+    for (const img of atts.images) {
       try {
         const ext = /\/(\w+)/.exec(String(img.mimeType || ""))?.[1] || "png";
         await sock.request("image.attach_bytes", {
@@ -9169,7 +9396,7 @@ class HermesBackend extends AgentBackend {
         return;
       }
     }
-    for (const pdf of selected ? [] : atts.pdfs) {
+    for (const pdf of atts.pdfs) {
       try {
         // pdftoppm renders each page to an image server-side — minutes-scale on
         // big documents; give it room.
@@ -9180,7 +9407,7 @@ class HermesBackend extends AgentBackend {
         return;
       }
     }
-    for (const f of selected ? [] : atts.files) {
+    for (const f of atts.files) {
       try {
         const r = await sock.request("file.attach", {
           session_id: m.runtimeId,
@@ -9199,6 +9426,7 @@ class HermesBackend extends AgentBackend {
     // then wait for message.complete/error via the turn promise.
     const turn = {
       sessionKey,
+      userTimestamp: transcript.findLast(row => row.role === "user")?.timestamp,
       operationId,
       requiredTransport,
       hooks,
@@ -9209,7 +9437,6 @@ class HermesBackend extends AgentBackend {
       usageBefore: this.gwUsageByKey.get(sessionKey) || null,
       resolve: null,
       timer: null,
-      ...(selected ? { selection: selected.selection } : {}),
     };
     const originalHooks = turn.hooks;
     turn.hooks = Object.fromEntries(CHAT_HOOK_METHODS.map(name => [name, (...args) => {
@@ -9237,39 +9464,22 @@ class HermesBackend extends AgentBackend {
       };
     }
     const doneP = new Promise((resolve) => { turn.resolve = resolve; });
-    turn.timer = setTimeout(() => {
-      if (turn.failObservation) return turn.failObservation("轮次超时：30 分钟内未收到完成事件。");
-      hooks.error?.("轮次超时：30 分钟内未收到完成事件。", { executionUncertain: true });
-      this._gwEndTurn(m.runtimeId, turn);
-    }, GW_TURN_TIMEOUT_MS);
+    // Observe until a real terminal event, cancellation, or gateway retirement.
+    turn.timer = null;
     this.gwTurns.set(m.runtimeId, turn);
     sock.restoreServerRequests(m.openRequests, m.runtimeId); delete m.openRequests;
     sock.replayServerRequests(m.runtimeId);
     try {
       // @file: refs (staged uploads) ride the prompt text — that's how the
       // agent learns about them (official desktop inlines them the same way).
-      const acknowledgement = await sock.request("prompt.submit", { session_id: m.runtimeId, text: `${message}${fileRefs}`,
-        ...(selected ? { selection_dispatch: selected.wire, queued: true, ...(selected.inputDigest ? { selection_input_digest: selected.inputDigest } : {}) } : {}) }, { operationId });
+      const acknowledgement = await sock.request("prompt.submit", { session_id: m.runtimeId, text: `${message}${fileRefs}` }, { operationId });
       if (requiredTransport === "gateway") {
         if (turn.submissionState === "rejected") return;
-        if (selected) {
-          const receipt = require("./hermes-plugin-selection").validateHermesSelectionAcknowledgement(acknowledgement, selected.selection);
-          if (["complete", "stopped", "failed", "canceled", "cancelled"].includes(receipt.state)
-            && (acknowledgement.replayed === true || receipt.actual_turn_id === null || pendingHooks.length === 0)) {
-            // Finished replays and failures before a physical turn have no live
-            // stream. Observe the original operation instead of waiting thirty
-            // minutes or consuming a new draft. A buffered exact completion may
-            // still precede the first ACK and is released by normal acceptance.
-            turn.failObservation("原插件任务已结束，请核验原任务并同步历史记录");
-            return;
-          }
-        }
-        if (acknowledgement?.status !== "streaming" && !(selected && acknowledgement?.status === "queued")) {
+        if (acknowledgement?.status !== "streaming") {
           turn.failObservation("Hermes 未确认本轮独立执行，需要核对运行状态");
           return;
         }
         turn.submissionState = "accepted";
-        if (selected) hooks.accepted?.();
         for (const notify of pendingHooks.splice(0)) notify();
       }
       // Hermes starts persisting the canonical stored session once the prompt
@@ -9392,9 +9602,7 @@ class HermesBackend extends AgentBackend {
           profile,
           assertCurrentGeneration,
           requiredTransport,
-          pluginSelection: opts.pluginSelection,
           operationId: idempotencyKey,
-          selectedAttachments: opts.attachments,
         });
       } catch (err) {
         if (err?.code !== "GW_UNAVAILABLE" || err?.noAcpFallback === true || this._localRuntime.isManaged()) throw err;
@@ -9424,6 +9632,8 @@ class HermesBackend extends AgentBackend {
   // ---- chat send via ACP (fallback transport) ----
 
   async _sendViaAcp({ sessionKey, message, hooks, atts, transcript, profile, generation, assertCurrentGeneration }) {
+    await this._waitForSharedCapabilityAdapter(profile);
+    assertCurrentGeneration();
     // ACP prompt 只有 image block 一种附件载体 — PDF/文件是网关上传 RPC 的能力，
     // 降级窗口里明确拒绝（能力接口也同步收窄，见 getChatCapabilities）。
     if (atts.pdfs.length || atts.files.length) {
@@ -9875,7 +10085,10 @@ class HermesBackend extends AgentBackend {
               if (matches.length !== 1) continue;
               const run = matches[0];
               if (sessions.filter(candidate => candidate.startedAt >= run.startedAt
-                && candidate.startedAt <= (run.finishedAt ?? Date.now())).length === 1) run.sessionKey = session.sessionKey;
+                && candidate.startedAt <= (run.finishedAt ?? Date.now())).length === 1) {
+                run.sessionKey = session.sessionKey;
+                run.runIdAliases = session.runIdAliases;
+              }
             }
             return;
           }
@@ -10366,6 +10579,11 @@ class HermesBackend extends AgentBackend {
   async stop({ keepProcesses = false } = {}) {
     // 先切代际并清空所有跨模式聊天状态；后续迟到的旧异步任务会据此放弃回写。
     this._lifecycleGeneration += 1;
+    clearTimeout(this._sharedAdapterRetryTimer);
+    this._sharedAdapterRetryTimer = null;
+    this._sharedAdapterPending.clear();
+    this._sharedAdapterSyncs.clear();
+    this._sharedAdapterVerified = new WeakMap();
     this._cliUsageCache = null;
     this._cliUsageScanInFlight = null;
     this._skillUsageCache = null;
@@ -10390,6 +10608,7 @@ class HermesBackend extends AgentBackend {
     this.gwKeyByRuntime.clear();
     this.gwTurns.clear();
     this.gwUsageByKey.clear();
+    this.gwChatFailures.clear();
     this.gwChatDisabledUntil.clear();
     this.sessionLiveMeta.clear();
     this.nextTurnConfigs.clear();

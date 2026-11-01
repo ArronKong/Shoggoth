@@ -36,6 +36,8 @@ function conversation(socketPath) {
           reject: error => { clearTimeout(timer); no(error); } };
       }),
       close: () => socket.destroy(),
+      end: () => socket.end(),
+      isClosed: () => socket.destroyed,
     }));
   });
 }

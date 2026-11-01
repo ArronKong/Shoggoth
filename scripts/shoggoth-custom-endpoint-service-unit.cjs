@@ -4,7 +4,7 @@ const test = require("node:test");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { JsonlProductStore, DEFAULT_AGENT_PROFILE_ID, STORE_SCHEMA_VERSION, snapshotChecksum, eventChecksum } = require("../app/agent-service/product-store");
+const { JsonlProductStore, DEFAULT_AGENT_PROFILE_ID, STORE_SCHEMA_VERSION, snapshotChecksum } = require("../app/agent-service/product-store");
 const { ProviderService } = require("../app/agent-service/codex-provider-service");
 const { CustomEndpointService } = require("../app/agent-service/custom-endpoint-service");
 const { validateCustomEndpointResult } = require("../app/agent-service/custom-endpoint-protocol");
@@ -23,6 +23,7 @@ function fixture() {
     get: async (id) => secrets.get(id)?.value,
     delete: async (id) => secrets.delete(id),
     listMetadata: () => [...secrets].map(([credentialRef, { kind }]) => ({ credentialRef, kind })),
+    getCredentialRevision: (id) => (secrets.has(id) ? 1 : undefined),
   };
   const providerService = new ProviderService({ productStore, secretStore,
     protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }), runtimePool: { stop: async () => {} } });
@@ -38,13 +39,17 @@ function fixture() {
 const input = { id: "custom-one", name: "custom one", baseUrl: "https://gateway.example/v1", api: "openai-responses",
   model: "model-a", models: ["model-a", "model-b"], apiKey: "fixture-only-endpoint-key" };
 
-test("schema 9 single-model providers remain readable before upgrading to selected models", async () => {
+// The ProductStore reads its current schema and the one legacy schema it
+// migrates (15); single-model providers in that legacy form stay readable.
+const LEGACY_SCHEMA_VERSION = 15;
+
+test("legacy single-model providers remain readable before upgrading to selected models", async () => {
   const f = fixture();
   try {
     await f.providerService.save({ id: "legacy", kind: "custom-responses", name: "legacy", baseUrl: input.baseUrl, model: "legacy-model" });
     f.productStore.close();
     const snapshot = JSON.parse(fs.readFileSync(f.paths.stateSnapshotPath, "utf8"));
-    snapshot.schemaVersion = 9; snapshot.checksum = snapshotChecksum(snapshot);
+    snapshot.schemaVersion = LEGACY_SCHEMA_VERSION; snapshot.checksum = snapshotChecksum(snapshot);
     fs.writeFileSync(f.paths.stateSnapshotPath, JSON.stringify(snapshot));
     f.productStore.open();
     assert.deepEqual(f.service.list().endpoints[0].models, ["legacy-model"]);
@@ -57,69 +62,88 @@ test("schema 9 single-model providers remain readable before upgrading to select
   } finally { await f.close(); }
 });
 
-test("schema upgrades keep both schema 9 and schema 10 downgrade barriers", async () => {
-  for (const authority of [9, STORE_SCHEMA_VERSION]) {
-    for (const fromSnapshot of [true, false]) {
-      const f = fixture();
-      try {
-        f.productStore.close();
-        const snapshot = JSON.parse(fs.readFileSync(f.paths.stateSnapshotPath, "utf8"));
-        snapshot.schemaVersion = fromSnapshot ? authority : authority - 1;
-        snapshot.checksum = snapshotChecksum(snapshot);
-        fs.writeFileSync(f.paths.stateSnapshotPath, JSON.stringify(snapshot));
-        const profile = snapshot.agentProfiles[0];
-        const versions = fromSnapshot ? [authority - 1] : [authority, authority - 1];
-        const events = versions.map((schemaVersion, index) => {
-          const event = { schemaVersion, seq: snapshot.lastSeq + index + 1, aggregateId: profile.id,
-            type: "agent_profile.put", time: profile.updatedAt, payload: { profile } };
-          return { ...event, checksum: eventChecksum(event) };
-        });
-        fs.appendFileSync(f.paths.eventLogPath, `${events.map(JSON.stringify).join("\n")}\n`);
-        assert.throws(() => f.productStore.open(), { code: "STORE_CORRUPT_EVENT_LOG" });
-      } finally { await f.close(); }
-    }
+// Since the Product schema 15 -> 16 consolidation the store reads exactly
+// those two versions; anything older (e.g. the schema 9/10 era) is refused.
+test("retired Product schemas are refused instead of being read", async () => {
+  assert.equal(STORE_SCHEMA_VERSION - 1, LEGACY_SCHEMA_VERSION);
+  for (const retired of [9, 10, LEGACY_SCHEMA_VERSION - 1]) {
+    const f = fixture();
+    try {
+      f.productStore.close();
+      const snapshot = JSON.parse(fs.readFileSync(f.paths.stateSnapshotPath, "utf8"));
+      snapshot.schemaVersion = retired; snapshot.checksum = snapshotChecksum(snapshot);
+      fs.writeFileSync(f.paths.stateSnapshotPath, JSON.stringify(snapshot));
+      assert.throws(() => f.productStore.open(), { code: "STORE_SCHEMA_UNSUPPORTED" });
+    } finally { await f.close(); }
   }
 });
 
-test("shared endpoint CRUD persists all selected models, keeps an omitted key and isolates Profile activation", async () => {
+test("shared endpoint CRUD persists all selected models, keeps an omitted key and never replaces the default source", async () => {
   const f = fixture();
+  const profileOf = (id) => f.productStore.getAgentProfile(id);
   try {
     await f.profileServiceController.open();
     const first = await f.service.save(null, input);
     assert.equal(first.endpoints.length, 1);
     assert.deepEqual(first.endpoints[0].models, input.models);
     assert.equal(first.endpoints[0].hasApiKey, true);
+    assert.equal(first.endpoints[0].isCurrent, false);
+    assert.deepEqual(first.endpoints[0].activeIn, []);
+    assert.equal(first.form.firstModelIsDefault, false);
     assert.equal(JSON.stringify(first).includes(input.apiKey), false);
     assert.deepEqual(validateCustomEndpointResult("provider.endpoints.save", first), first);
+    assert.equal(profileOf(DEFAULT_AGENT_PROFILE_ID).providerRef, null, "saving never replaces the default source");
     const originalKey = f.productStore.getModelProvider(input.id).credentialRef;
     await f.service.save(null, { ...input, apiKey: undefined, models: ["model-b", "model-c"], model: "model-b" });
     assert.equal(f.productStore.getModelProvider(input.id).credentialRef, originalKey);
-    assert.equal(f.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).defaultModel, "model-b");
-    const other = { ...f.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID), id: "endpoint-profile-two", agentId: "endpoint-agent-two",
+    assert.equal(profileOf(DEFAULT_AGENT_PROFILE_ID).providerRef, null);
+    // Choosing an endpoint as default is explicit. A later save keeps that
+    // default model while the endpoint still offers it, else its first model.
+    await f.profileServiceController.handle("profile.bind", { operationId: "choose-endpoint-default",
+      profileId: DEFAULT_AGENT_PROFILE_ID, providerRef: input.id, defaultModel: "model-c", createdAt: Date.now() });
+    await f.service.save(null, { ...input, apiKey: undefined, models: ["model-c", "model-d"], model: "model-c" });
+    assert.equal(profileOf(DEFAULT_AGENT_PROFILE_ID).defaultModel, "model-c");
+    await f.service.save(null, { ...input, apiKey: undefined, models: ["model-d"], model: "model-d" });
+    assert.equal(profileOf(DEFAULT_AGENT_PROFILE_ID).providerRef, input.id);
+    assert.equal(profileOf(DEFAULT_AGENT_PROFILE_ID).defaultModel, "model-d");
+    const other = { ...profileOf(DEFAULT_AGENT_PROFILE_ID), id: "endpoint-profile-two", agentId: "endpoint-agent-two",
       name: "Second", runtimeProfileId: "endpoint-runtime-two", isDefault: false, providerRef: null, defaultModel: null };
     f.productStore.putAgentProfile(other);
     await f.service.save(other.id, { ...input, id: "custom-two", name: "custom two" });
-    assert.equal(f.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).providerRef, input.id);
-    assert.equal(f.productStore.getAgentProfile(other.id).providerRef, "custom-two");
+    assert.equal(profileOf(other.id).providerRef, null);
     assert.equal(f.service.list(other.id).endpoints.length, 2);
     await f.profileServiceController.handle("profile.bind", { operationId: "choose-second-model", profileId: other.id,
       providerRef: "custom-two", defaultModel: "model-b", createdAt: Date.now() });
-    const page = await f.profileServiceController.handle("profile.models.list", { profileId: other.id, cursor: null, limit: 1 });
-    assert.deepEqual(page.models.map(item => item.id), ["model-a"]);
-    assert.equal(page.models[0].isDefault, false);
-    const second = await f.profileServiceController.handle("profile.models.list", { profileId: other.id, cursor: page.nextCursor, limit: 1 });
-    assert.deepEqual(second.models.map(item => item.id), ["model-b"]);
-    assert.equal(second.models[0].isDefault, true);
-    assert.equal(second.hasMore, false);
+    // A signed-out ChatGPT catalog never hides endpoints; each row names its
+    // source (absent = the Profile default source).
+    const rows = [];
+    let cursor = null;
+    do {
+      const page = await f.profileServiceController.handle("profile.models.list", { profileId: other.id, cursor, limit: 1 });
+      rows.push(...page.models); cursor = page.nextCursor;
+    } while (cursor);
+    assert.deepEqual(rows.map(row => [row.modelProviderRef ?? null, row.id, row.isDefault, row.sourceName]), [
+      ["custom-one", "model-d", false, "custom one"],
+      [null, "model-a", false, "custom two"],
+      [null, "model-b", true, "custom two"],
+    ]);
+    // One Codex process declares ChatGPT (process default) and every endpoint.
     const bridge = new ProviderRuntimeBridge({ productStore: f.productStore, secretStore: f.service.secretStore,
       configWriter: { overlay: () => ({ args: [] }) } });
     const runtime = await bridge.prepareRuntime({ runtimeProfileId: other.runtimeProfileId, runtimeAccountId: other.runtimeAccountId });
-    assert.equal(runtime.runtimeConfig.provider.model, "model-b");
+    assert.equal(runtime.runtimeConfig.provider, null);
+    assert.deepEqual(runtime.runtimeConfig.extraProviders.map(entry => [entry.id, entry.model]),
+      [["custom-one", "model-d"], ["custom-two", "model-a"]]);
+    assert.equal(Object.keys(runtime.spawnEnv).length, 2);
+    assert.equal(runtime.registeredSecrets.length, 1, "both fixture endpoints share one key value");
+    runtime.assertCurrent();
+    await f.service.save(null, { ...input, apiKey: undefined, models: ["model-d", "model-e"], model: "model-d" });
+    assert.throws(() => runtime.assertCurrent(), { code: "EXECUTION_CONTRACT_STALE" }, "an endpoint change retires the host");
     f.productStore.close(); f.productStore.open();
-    assert.deepEqual(f.service.list(other.id).endpoints.find(item => item.id === input.id).models, ["model-b", "model-c"]);
+    assert.deepEqual(f.service.list(other.id).endpoints.find(item => item.id === input.id).models, ["model-d", "model-e"]);
     await f.service.remove(other.id, "custom-two");
-    assert.equal(f.productStore.getAgentProfile(other.id).providerRef, null);
-    assert.equal(f.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).providerRef, input.id);
+    assert.equal(profileOf(other.id).providerRef, null);
+    assert.equal(profileOf(DEFAULT_AGENT_PROFILE_ID).providerRef, input.id);
     assert.equal(f.secrets.size, 1);
   } finally { await f.close(); }
 });

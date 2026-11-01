@@ -95,6 +95,7 @@ export interface TurnStep {
   promptOutcome?: "answered" | "expired";
   promptChoice?: string;
   statusKind?: string;
+  startupWait?: import("./chatRunWait").ChatRunWaitState; // transient presentation only; never persisted as an activity
   model?: string;
   usage?: { input?: number; output?: number; contextUsed?: number; contextMax?: number; contextPercent?: number };
 }

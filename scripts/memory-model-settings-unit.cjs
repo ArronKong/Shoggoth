@@ -121,7 +121,8 @@ async function deepSeekFixture() {
       },
       stream() { assert.fail("settings call must use native prepared dispatch"); },
     } });
-  const host = f.host = { _assertReady() {}, modelTextObservers: new Map(), process: {
+  const host = f.host = { _assertReady() {}, modelTextObservers: new Map(), modelSecretScopes: new Map(),
+    _bindModelScope: DeepSeekHarnessRuntimeHost.prototype._bindModelScope, process: {
     async request(method, params) { f.calls.push({ method, params }); return bridge.dispatch(method, params); },
   } };
   f.generate = extra => DeepSeekHarnessRuntimeHost.prototype.generateModelOnly.call(host, { ...input, ...extra });

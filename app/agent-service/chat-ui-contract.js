@@ -2,7 +2,6 @@
 
 const crypto = require("node:crypto");
 const { normalizeBorrowedMemoryRefs } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
-const { normalizePluginSelection } = require("./plugin-chat-selection");
 
 const VERSION = 1;
 const RESOURCE_BUNDLE_ID = "native-chat-ui-v1";
@@ -197,16 +196,18 @@ function assertDirectChatEligibility({ profileId, scope, run, session, origins, 
   return session;
 }
 function normalizeUiRequest(method, value) {
+  if (method === "chat.ui.action" && value && Object.hasOwn(value, "pluginSelection")) fail("UI_PLUGIN_PLATFORM_RETIRED");
+  if (method === "chat.ui.action" && value && Object.hasOwn(value, "connectorSelection")) fail("UI_OPEN_CONNECTOR_RETIRED");
   const common = ["profileId", "sessionKey"];
   const byMethod = {
     "chat.ui.describe": ["artifactId", "revision", "sourceEventId"], "chat.ui.open": ["artifactId", "revision", "sourceEventId", "mountId"],
     "chat.ui.read": ["leaseId", "offset"], "chat.ui.state.save": ["leaseId", "baseStateRevision", "patch"],
-    "chat.ui.action": ["leaseId", "actionRequestId", "actionId", "stateRevision", "snapshot", "hostProof", "pluginSelection"],
+    "chat.ui.action": ["leaseId", "actionRequestId", "actionId", "stateRevision", "snapshot", "hostProof"],
     "chat.ui.operation.get": ["actionRequestId", "operationId"], "chat.ui.close": ["leaseId"], "chat.ui.renew": ["leaseId"],
     "chat.ui.import": ["sourceEventId", "blockIndex"], "chat.ui.export": ["artifactId", "revision", "sourceEventId", "offset"],
   };
   if (!Object.hasOwn(byMethod, method)) fail("UI_REQUEST_INVALID");
-  const optional = method === "chat.ui.action" ? ["pluginSelection"] : method === "chat.ui.operation.get" ? ["actionRequestId", "operationId"] : [];
+  const optional = method === "chat.ui.operation.get" ? ["actionRequestId", "operationId"] : [];
   fields(value, [...common, ...byMethod[method]], [...common, ...byMethod[method].filter(key => !optional.includes(key))]);
   const result = bounded(jsonValue(value, "UI_REQUEST_INVALID"), LIMITS.publication);
   for (const key of [...common, "artifactId", "sourceEventId", "mountId", "leaseId", "actionRequestId", "operationId", "actionId", "hostProof"]) if (result[key] !== undefined) id(result[key]);
@@ -214,10 +215,43 @@ function normalizeUiRequest(method, value) {
   if (method === "chat.ui.operation.get" && Number(Object.hasOwn(result, "actionRequestId")) + Number(Object.hasOwn(result, "operationId")) !== 1) fail("UI_REQUEST_INVALID");
   if (result.patch !== undefined) bounded(record(result.patch), LIMITS.patch);
   if (result.snapshot !== undefined) bounded(record(result.snapshot), LIMITS.state);
-  if (result.pluginSelection !== undefined) result.pluginSelection = normalizePluginSelection(result.pluginSelection);
   return result;
 }
-module.exports = { VERSION, RESOURCE_BUNDLE_ID, LIMITS, MESSAGES, METHODS, uiError, record,
+
+// Connection requests contain public setup metadata only. Values are submitted
+// through the connector credential endpoint and never enter this journal.
+function normalizeConnectionRequest(value) {
+  const keys = ["requestId", "kind", "serverId", "registryName", "url", "title", "purpose", "status", "requiredFields", "expiresAt", "createdAt", "updatedAt"];
+  fields(value, [...keys, "serverIds", "continuation"], keys);
+  id(value.requestId);
+  if (!["connection", "secret", "setup"].includes(value.kind) || !["pending", "completed", "expired"].includes(value.status)) fail("UI_REQUEST_INVALID");
+  if (value.kind === "setup") {
+    if (!Array.isArray(value.serverIds) || !value.serverIds.length || value.serverIds.length > 64
+      || new Set(value.serverIds).size !== value.serverIds.length || value.serverIds[0] !== value.serverId
+      || !["waiting", "scheduled", "unknown"].includes(value.continuation)) fail("UI_REQUEST_INVALID");
+    for (const serverId of value.serverIds) id(serverId);
+  } else if (Object.hasOwn(value, "serverIds") || Object.hasOwn(value, "continuation")) fail("UI_REQUEST_INVALID");
+  if (value.serverId !== null) id(value.serverId);
+  for (const key of ["registryName", "url"]) if (value[key] !== null) text(value[key], 2048, 8192);
+  if (value.url !== null) {
+    let url; try { url = new URL(value.url); } catch { fail("UI_REQUEST_INVALID"); }
+    if (url.username || url.password || url.search || url.hash) fail("UI_REQUEST_INVALID");
+  }
+  text(value.title, 240, 960); text(value.purpose, 1200, 4800, "UI_REQUEST_INVALID", true);
+  if (!Array.isArray(value.requiredFields) || value.requiredFields.length > 64) fail("UI_REQUEST_INVALID");
+  const names = new Set();
+  for (const field of value.requiredFields) {
+    fields(field, ["name", "label", "kind"], ["name", "label", "kind"]);
+    text(field.name, 128, 512); text(field.label, 240, 960);
+    if (!["env", "header", "oauthClient"].includes(field.kind) || names.has(`${field.kind}:${field.name}`)) fail("UI_REQUEST_INVALID");
+    names.add(`${field.kind}:${field.name}`);
+  }
+  for (const key of ["createdAt", "updatedAt", "expiresAt"]) positive(value[key]);
+  if (value.updatedAt < value.createdAt || value.expiresAt <= value.createdAt || value.expiresAt - value.createdAt > 24 * 60 * 60 * 1000) fail("UI_REQUEST_INVALID");
+  return bounded(structuredClone(value), 16 * 1024);
+}
+
+module.exports = { normalizeConnectionRequest, VERSION, RESOURCE_BUNDLE_ID, LIMITS, MESSAGES, METHODS, uiError, record,
   fields, id, positive, text, jsonValue, bounded, canonical, hash, sensitive, normalizeSchema,
   normalizeState, normalizePatch, normalizePublication, normalizePart, normalizeProvenance,
   assertDirectChatEligibility, normalizeUiRequest };

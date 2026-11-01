@@ -53,7 +53,7 @@
 .chat-pill__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-menu { position: relative; display: inline-flex; min-width: 0; }
 
-/* Model and plugin menus share one surface, including their theme variables. */
+/* Model and connector menus share one surface, including theme variables. */
 .chat-composer-menu-surface {
   --model-menu-ink: light-dark(#000, #fff);
   --model-menu-selected-text: light-dark(#fff, #171717);
@@ -62,6 +62,7 @@
   --model-menu-hover: var(--ui-surface-2);
 }
 .model-menu.chat-composer-menu-surface,
+.chat-connector-menu.chat-composer-menu-surface,
 .chat-plugin-menu.chat-composer-menu-surface {
   width: min(424px, 84vw);
   height: min(84vh, 440px);
@@ -257,6 +258,7 @@
 
 @media (max-width: 720px) {
   .model-menu.model-menu--catalog:not(.model-menu--portal),
+  .chat-connector-menu.chat-composer-menu-surface,
   .chat-plugin-menu.chat-composer-menu-surface {
     position: fixed;
     left: 18px;

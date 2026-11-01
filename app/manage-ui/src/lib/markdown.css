@@ -11,3 +11,20 @@
   background: #fff;
   border-radius: 2px;
 }
+
+/* A QR code needs a stable white quiet zone in both appearance modes. */
+img.markdown-inline-image.markdown-qr-preview {
+  display: block;
+  width: 220px;
+  height: auto;
+  max-width: 100%;
+  max-height: 260px;
+  box-sizing: border-box;
+  padding: 12px;
+  margin: 12px 0 0;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 12px;
+  cursor: zoom-in;
+}
+img.markdown-qr-preview[hidden] { display: none; }

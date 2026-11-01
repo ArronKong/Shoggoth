@@ -1,5 +1,4 @@
 import AgentAvatarView from "../components/AgentAvatar";
-import RuntimeUsageBreakdown from "../components/RuntimeUsageBreakdown";
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
@@ -397,7 +396,6 @@ export default function UsagePage() {
   // —— hero 统计（缓存=读+写合并，设计稿口径）——
   const tot = series?.totals;
   const usageUnavailable = series?.availability === "unavailable";
-  const usagePartial = series?.availability === "partial" || breakdown?.availability === "partial";
   const cacheTotal = (tot?.cacheReadTokens ?? 0) + (tot?.cacheWriteTokens ?? 0);
   const cacheDen = (tot?.inputTokens ?? 0) + (tot?.cacheReadTokens ?? 0);
   const cacheHit = cacheDen > 0 ? (tot?.cacheReadTokens ?? 0) / cacheDen : null;
@@ -475,7 +473,6 @@ export default function UsagePage() {
 
       {err && <div className="error">{t("usage.error", { msg: err })}</div>}
       {usageUnavailable && <div className="error" role="alert">{t(series?.availabilityReason === "unsupported-range" ? "usage.rangeUnavailable" : "usage.dataUnavailable")}</div>}
-      {!usageUnavailable && usagePartial && <div className="usage-hint" role="status">{t("usage.dataPartial")}</div>}
       {refreshing && <div className="usage-hint">{t("usage.refreshing")}</div>}
 
       {!usageUnavailable && <>
@@ -562,7 +559,6 @@ export default function UsagePage() {
         </section>
       )}
 
-      {breakdown?.runtimes !== undefined && <section className="usage-section"><RuntimeUsageBreakdown data={breakdown} /></section>}
       <div className="usage-row usage-row--split">
         <section className="usage-section">
           <div className="usage-section-head">

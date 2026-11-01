@@ -17,6 +17,7 @@ import i18n from "../i18n";
 import { internalAppHashFromHref } from "./appLinks";
 import { findLocalFileLinks, localFilePathFromHref } from "./sessionArtifacts";
 import { mediaRefToSrc, type AgentMediaContext } from "./agentMedia";
+import notionLogo from "../assets/mcp-logos/notion.png?inline";
 
 function truncateText(value: string, limit: number): { text: string; truncated: boolean; total: number } {
   if (value.length <= limit) return { text: value, truncated: false, total: value.length };
@@ -81,6 +82,9 @@ function installHooks() {
     const image = event.target;
     if (image instanceof HTMLImageElement && image.classList.contains(WEB_LINK_ICON_CLASS)
       && image.getAttribute("src") !== WEB_LINK_FALLBACK_ICON) image.src = WEB_LINK_FALLBACK_ICON;
+    // Some QR destinations are HTML pages or have expired. Keep their original
+    // link and remove only the failed preview, without a broken-image placeholder.
+    if (image instanceof HTMLImageElement && image.classList.contains("markdown-qr-preview")) image.hidden = true;
   }, true);
   DOMPurify.addHook("afterSanitizeAttributes", (node) => {
     if (!(node instanceof HTMLAnchorElement)) return;
@@ -147,7 +151,9 @@ md.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
   try {
     const url = new URL(href, typeof window === "undefined" ? undefined : window.location.href);
     if (!/^https?:$/.test(url.protocol) || (typeof window !== "undefined" && url.origin === window.location.origin)) return opening;
-    return `${opening}<img class="${WEB_LINK_ICON_CLASS}" src="${escapeHtml(`${url.origin}/favicon.ico`)}" alt="" aria-hidden="true" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
+    // Bundle official artwork for Notion page hosts so the logo also works offline.
+    const icon = /(^|\.)notion\.(com|so|site)\.?$/i.test(url.hostname) ? notionLogo : `${url.origin}/favicon.ico`;
+    return `${opening}<img class="${WEB_LINK_ICON_CLASS}" src="${escapeHtml(icon)}" alt="" aria-hidden="true" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
   } catch {
     return opening;
   }
@@ -228,6 +234,33 @@ md.core.ruler.after("linkify", "linkify-cjk-trim", (state) => {
       }
     }
   }
+});
+
+// QR links often return image/png without an image extension. Inspect parsed
+// links, so code examples and incomplete streamed Markdown never become images.
+// Keep the destination unchanged; never generate a different payment QR code.
+md.core.ruler.after("linkify-cjk-trim", "qr-link-previews", (state) => {
+  if (!state.env?.localFiles) return;
+  const images = new Set<string>();
+  const links = new Map<string, string>();
+  for (const block of state.tokens) for (const [index, token] of (block.children ?? []).entries()) {
+    if (token.type === "image") images.add(token.attrGet("src") ?? "");
+    if (token.type !== "link_open") continue;
+    const children = block.children!;
+    let label = "";
+    for (let next = index + 1; next < children.length && children[next].type !== "link_close"; next++) {
+      if (children[next].type === "text") label += children[next].content;
+    }
+    const href = token.attrGet("href") ?? "";
+    try {
+      const url = new URL(href);
+      if (!/^https?:$/.test(url.protocol) || url.username || url.password) continue;
+      if (!/(?:二维码|\bqr(?:[\s_-]*code)?\b)/iu.test(label)
+        && !/(?:^|[/_.-])qr[_.-]?code(?:[/_.-]|$)/iu.test(url.pathname)) continue;
+      links.set(href, label || "QR code");
+    } catch { /* Relative, local and non-web destinations are not QR previews. */ }
+  }
+  state.env.qrPreviews = [...links].filter(([href]) => !images.has(href)).slice(0, 4);
 });
 
 export function localFileLabel(path: string): string {
@@ -312,7 +345,9 @@ md.renderer.rules.html_inline = (tokens, idx) => {
 md.renderer.rules.image = (tokens, idx, _options, env) => {
   const token = tokens[idx];
   const ref = token.attrGet("src")?.trim() ?? "";
-  const alt = normalizeMarkdownImageLabel(token.content);
+  // Parsed text includes escaped punctuation without its Markdown backslashes.
+  const label = token.children?.map(child => child.type === "softbreak" ? " " : child.content).join("") ?? token.content;
+  const alt = normalizeMarkdownImageLabel(label);
   let decoded = ref;
   if (!/^[a-z][a-z0-9+.-]*:/i.test(ref)) {
     try { decoded = decodeURIComponent(ref); } catch { return escapeHtml(alt); }
@@ -404,7 +439,9 @@ export function toSanitizedMarkdownHtml(markdown: string, localFiles = false, im
   }
   let rendered: string;
   try {
-    rendered = md.render(`${truncated.text}${suffix}`, { localFiles, imageContext, htmlArtifactPolicy });
+    const env = { localFiles, imageContext, htmlArtifactPolicy, qrPreviews: [] as [string, string][] };
+    rendered = md.render(`${truncated.text}${suffix}`, env);
+    for (const [src, label] of env.qrPreviews) rendered += `<img class="markdown-inline-image markdown-qr-preview" src="${escapeHtml(src)}" alt="${escapeHtml(label)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
   } catch (err) {
     console.warn("[markdown] md.render failed, falling back to plain text:", err);
     rendered = `<pre class="code-block">${escapeHtml(`${truncated.text}${suffix}`)}</pre>`;

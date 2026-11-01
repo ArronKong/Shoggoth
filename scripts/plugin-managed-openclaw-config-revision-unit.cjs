@@ -4,7 +4,7 @@ const {fork}=require('node:child_process');const {matchesManagedConfigRevision}=
 const node=(process.env.SHOGGOTH_TEST_OPENCLAW_NODE || require('node:path').join(require('node:os').homedir(), '.local', 'share', 'node', 'v24.21.0', 'bin', 'node'));const root=fs.realpathSync(fs.mkdtempSync('/private/tmp/sg-config-revision-'));fs.chmodSync(root,0o700);
 const mkdir=value=>{fs.mkdirSync(value,{recursive:true,mode:0o700});return value;};const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const runtimeRoot=mkdir(path.join(root,'runtime'));mkdir(path.join(runtimeRoot,'dist'));const revisionFile=path.join(runtimeRoot,'dist/config-revision-token-BE5gb7qW.mjs');
-fs.copyFileSync('/opt/homebrew/lib/node_modules/openclaw/dist/config-revision-token-BE5gb7qW.mjs',revisionFile);
+fs.copyFileSync(path.join(process.env.SHOGGOTH_TEST_OPENCLAW_SOURCE_ROOT||'/opt/homebrew/lib/node_modules/openclaw','dist/config-revision-token-BE5gb7qW.mjs'),revisionFile);
 const keeper=path.join(root,'keeper.cjs');fs.writeFileSync(keeper,`process.umask(0o077);const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[2]);db.exec('PRAGMA journal_mode=WAL');
 if(process.argv[3]==='missing'){db.exec('CREATE TABLE only_fixture(id INTEGER PRIMARY KEY)');db.exec('INSERT INTO only_fixture VALUES(1)');}
 else{db.exec('CREATE TABLE config_revision_keys(id INTEGER PRIMARY KEY, hmac_key BLOB)');db.prepare('INSERT INTO config_revision_keys VALUES(1,?)').run(Buffer.alloc(process.argv[3]==='short'?31:32,7));}

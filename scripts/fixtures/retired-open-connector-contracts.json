@@ -1,0 +1,317 @@
+{
+  "schemaVersion": 1,
+  "removed": [
+    {
+      "path": "app/agent-service/connector-controller.js",
+      "sha256": "347d3209e01e00e2a934416cba45dd42fb93f2464a025b69465c645aea7d1f07"
+    },
+    {
+      "path": "app/agent-service/connector-files.js",
+      "sha256": "0ad1d08a85617acb44c4a79bc3902f34082e4569ea50bf2c62c9c549d92a3d62"
+    },
+    {
+      "path": "app/agent-service/connector-oauth-callback.js",
+      "sha256": "ec1c1863dbd349727cd5efbf3d8929eeb59cfc15844ea855c43310c25fcec567"
+    },
+    {
+      "path": "app/agent-service/connector-profile-revocations.js",
+      "sha256": "47fbe49370ba06a5ee5621a31cc4bf795f41ce59d382eb6c7a4d15a97ad25fce"
+    },
+    {
+      "path": "app/agent-service/connector-runtime-identity.js",
+      "sha256": "963340305d92777d03adc458fcac1da80bad7a9b7014243612497646e470806f"
+    },
+    {
+      "path": "app/agent-service/connector-runtime-state.js",
+      "sha256": "1a31a05ca9c9b216cc8bf3a870c0286b5471a676a1412cf846f98196b7dc31e1"
+    },
+    {
+      "path": "app/agent-service/connector-runtime-supervisor.js",
+      "sha256": "796de8d99b52c2314adaea85352757ba09c918f0fe934a7b68d182b63e7495a5"
+    },
+    {
+      "path": "app/agent-service/connector-selection.js",
+      "sha256": "fe75cb370b56da5a83a46150553aa7fecc860ee46cda4ddaddce464795b9e0f1"
+    },
+    {
+      "path": "app/agent-service/connector-store.js",
+      "sha256": "a76f734f2201451485e18266232477052cfd9e45d1121d22fb2da982b8c70ce9"
+    },
+    {
+      "path": "app/agent-service/connector-tool-service.js",
+      "sha256": "5850664b767a200c0176f544a275b212bd8d037c2d81c6ac02896e2dc8afc9c4"
+    },
+    {
+      "path": "app/agent-service/connector-tools.js",
+      "sha256": "061e6d547894fdf7d8161a3e5d319ad615e45890dea88fbc6ce98c890517f936"
+    },
+    {
+      "path": "app/agent-service/external-connector-approval-broker.js",
+      "sha256": "69a403a1f4f2b143dd628e073fe03f627e7bf15eac6e48eae0a85a9cd6c705e2"
+    },
+    {
+      "path": "app/agent-service/external-connector-lease.js",
+      "sha256": "1f9a6cc0b25959c744bd0a3b4db8419944e8317a61acb23c268c722900ac55a1"
+    },
+    {
+      "path": "app/agent-service/external-connector-selection-dispatch.js",
+      "sha256": "c5a3e648a6f9a2f41eb295e4f7aa0bcce61ee6730ac11d795992e0c93a101608"
+    },
+    {
+      "path": "app/agent-service/external-connector-tool-service.js",
+      "sha256": "9ad701179d9844f0086a6c1e19a9e06d3445a3e7beba9113b31892cd26e9cb9b"
+    },
+    {
+      "path": "app/core/connector-approval-display.js",
+      "sha256": "72413400fefcc95758e205df596b2609826dae4e56dab76a5f3e5b8c72f74a25"
+    },
+    {
+      "path": "app/core/connector-execution-outcome.js",
+      "sha256": "3d8f6b10862b3b9b2f59f8471d46f80b18af18d3502bc0df84c19d3eb861b64b"
+    },
+    {
+      "path": "app/core/connector-external-selection-dto.js",
+      "sha256": "fe931734cbfb051971904929877e677b708dfe8b1196ca080c2503b3753b338f"
+    },
+    {
+      "path": "app/core/connector-selection-readiness-dto.js",
+      "sha256": "e408235b269096985adeb89dcb10ad42a8a706f00ae9ff29e0b0949f51f4c52c"
+    },
+    {
+      "path": "app/core/connector-selection.js",
+      "sha256": "85684ad8e4f09f3ec78c3b2ba3d191793790e87ca8a7c5758390a89c8612e103"
+    },
+    {
+      "path": "app/core/hermes-connector-contract.js",
+      "sha256": "d4b32121a5ec23c334b09b8b8d54b4ff7e046b6f24b86700a5c32f23156cea0e"
+    },
+    {
+      "path": "app/core/hermes-connector-input.js",
+      "sha256": "d7c2f7e4f9a4960d186fa0eccb4acc34e8ad531706d604b4a176ea5d550ae1bc"
+    },
+    {
+      "path": "app/core/hermes-connector-selection.js",
+      "sha256": "c4737c6e2d6c09b310198bd22e4c17dd882b60f74819f30e9f1a1bb8ec480335"
+    },
+    {
+      "path": "app/core/openclaw-connector-selection.js",
+      "sha256": "beb46e7ff3a5868f2d9bb1f930ec1207d228cba4476da2ddfc362647f9a26bc3"
+    },
+    {
+      "path": "app/manage-ui/src/api/connectors.ts",
+      "sha256": "bf93e422e7a985c58752bb1a6f421be5b50c8668a8ff9cba1c37bb2bd029cb05"
+    },
+    {
+      "path": "app/manage-ui/src/components/ConnectorApprovalInbox.module.css",
+      "sha256": "ef4110d607ecb4116fdd136bc25189cb48b12fd2c59fdcd6e53dd979e5ddfa63"
+    },
+    {
+      "path": "app/manage-ui/src/components/ConnectorApprovalInbox.tsx",
+      "sha256": "2e9f1d2fb5bf69934413e2e6f71e3036c8fa5e9be8e2ba625d9fa059673e9bc3"
+    },
+    {
+      "path": "app/manage-ui/src/lib/connectorOperations.ts",
+      "sha256": "9434c223a9648aeb10c916ba836cb634472f5fd77a3b0b994e62a5babfee9e9e"
+    },
+    {
+      "path": "app/manage-ui/src/lib/useConnectorSelectionReadiness.ts",
+      "sha256": "6560409426b024db29e3047d3acc86354f8b5c531aaebd068d82d36ae1297411"
+    },
+    {
+      "path": "app/manage-ui/src/pages/ChatConnectorPicker.module.css",
+      "sha256": "a0cf2e79b2e15fad404d906b15a7c50e1e14711c64a148a31f4f98c7ef3558a0"
+    },
+    {
+      "path": "app/manage-ui/src/pages/ChatConnectorPicker.tsx",
+      "sha256": "c6d1c8d51d150b16d73aa8d5795e61b3e8b6e90c2c1d16cb6170d93651ddfc7e"
+    },
+    {
+      "path": "app/manage-ui/src/pages/ConnectorDetail.tsx",
+      "sha256": "16bfe7c4311578ceccb717f355e06fdb422d726b3a100b80b6a109ada207c31b"
+    },
+    {
+      "path": "app/manage-ui/src/pages/ConnectorFields.tsx",
+      "sha256": "d4845fe078a798b98570db8c424df7d9c4e107209efc77702470b79fb3f3166f"
+    },
+    {
+      "path": "app/manage-ui/src/pages/StandaloneMcpRepair.tsx",
+      "sha256": "c8e1807aaafd427ae18d1f9c0edd4b02df015f926cbaa6c2d0a3fb291591a437"
+    },
+    {
+      "path": "build/open-connector-runtime-lock.json",
+      "sha256": "58ac92fb3fcd94d312472abd2d096ee90e41cacea1403fd2c69bb23d1ce28a28"
+    },
+    {
+      "path": "resources/external-plugin-adapters/hermes/connector-tools.json",
+      "sha256": "76bcb3e2a5f58ef6ea0f02e10b1654dfdb22fec722d89228f9a00f6faedcf4be"
+    },
+    {
+      "path": "resources/external-plugin-adapters/openclaw/connector-tools.json",
+      "sha256": "76bcb3e2a5f58ef6ea0f02e10b1654dfdb22fec722d89228f9a00f6faedcf4be"
+    },
+    {
+      "path": "resources/open-connector-runtime/REBUILD.md",
+      "sha256": "a21fa76073247bb74cc3f806f4a1de1fd0716b432d0c891d2deef2bf3bc52532"
+    },
+    {
+      "path": "resources/open-connector-runtime/compile.mjs",
+      "sha256": "a4e56ea09dd3951e6f575faf84e8493dfc6190c249546d456b7a516728f08377"
+    },
+    {
+      "path": "resources/open-connector-runtime/connection-summary-proof.mjs",
+      "sha256": "fc7791d3f315ee0827148ca2ce7831fc261afa885e57d9ecd9efbcb3e8a7ad47"
+    },
+    {
+      "path": "resources/open-connector-runtime/entry.mjs",
+      "sha256": "9105221946bdbea662b4b73c0642e4776bec0d6d82d69ca9a52f26131af150bc"
+    },
+    {
+      "path": "resources/open-connector-runtime/file-authority.mjs",
+      "sha256": "755c32988ad1d0db5a78e4be7a47960c547083eb4499b48af81086879cd02752"
+    },
+    {
+      "path": "resources/open-connector-runtime/package-lock.json",
+      "sha256": "0304abaf2a57acc81e080c93c3f9b82581462d7ff8c46986592ea0e80a606ba4"
+    },
+    {
+      "path": "resources/open-connector-runtime/package.json",
+      "sha256": "650d196969f2ba94c5c9663265bc8b79a6788313c17f6372f9a36bfc5851fc83"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/aws-sdk-LICENSE.txt",
+      "sha256": "4186c3f89c23f27b4c0caab574737c49ee5137c36a3c103484feaca4aeec2310"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/bun-1.4.0-LICENSE.txt",
+      "sha256": "51402e15bdab948668eb5bcca05c096bc8c47beaf96f0db4b41777faf546ba4f"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/cfworker-LICENSE.txt",
+      "sha256": "376944252ab78ca6b41aee44ddea8894927ee67891e77e61eb9d59af63e35094"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/copy-to-LICENSE.txt",
+      "sha256": "7a5268124f117560232bdf83dd2a7c438baa20c8713ef011c5d313b8cb7e2c0d"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/license-sources.json",
+      "sha256": "1ed7fcb1996c5e804276a383a3263307986a22f3d7949a8f88ae59cf1007ffb4"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/nodable-builders-LICENSE.txt",
+      "sha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/nodable-entities-2-LICENSE.txt",
+      "sha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/nodable-entities-3-LICENSE.txt",
+      "sha256": "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/os-name-LICENSE.txt",
+      "sha256": "6fb9754611c20f6649f68805e8c990e83261f29316e29de9e6cedae607b8634c"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/scalar-LICENSE.txt",
+      "sha256": "380cd0a6ad700e1f821f2a509f0dd9ff835041cee2d43daf5dedc1adb2bcc620"
+    },
+    {
+      "path": "resources/open-connector-runtime/third-party/sdk-base-LICENSE.txt",
+      "sha256": "fa4b1ab7cb415d8868299b9527d12f8bf5f57c6765cacdd6f73935bdd652e71d"
+    },
+    {
+      "path": "scripts/build-open-connector-runtime.mjs",
+      "sha256": "3a112db9121201f9d8d8f55a9101c4535bd8bee4dc78bc2ef69cdf079606b38a"
+    },
+    {
+      "path": "scripts/connector-authority-backup-unit.cjs",
+      "sha256": "6bfd57eb0bda02f8ccc0e37b54b4ac82feb5c9491178e48e2ef0bc4576273fce"
+    },
+    {
+      "path": "scripts/connector-compiled-runtime-smoke.cjs",
+      "sha256": "f5b42e8103dc91f0da00a8a88e2b65a8c4344bf38163770f45509fbf403a1b08"
+    },
+    {
+      "path": "scripts/connector-files-unit.cjs",
+      "sha256": "e0a74909aa67236e860471259bd02747b0234cef9414efc7fcce43a24dd5d86a"
+    },
+    {
+      "path": "scripts/connector-hermes-adapter-unit.py",
+      "sha256": "8700e854f708ca31225f2304c0c850b69ca2cc6600d1276d01afcf02ffc87d0d"
+    },
+    {
+      "path": "scripts/connector-license-inventory.mjs",
+      "sha256": "70e64efc5e7d39db9fe8ebef328aa6ccb2216829f9b884f26040a51b50dfbfc7"
+    },
+    {
+      "path": "scripts/connector-native-runtime-flow-unit.cjs",
+      "sha256": "610b39daa23a3f1e56f4868370badba8d70b8a84dc538a2ebf7cfb7cebf79d85"
+    },
+    {
+      "path": "scripts/connector-openclaw-adapter-unit.mjs",
+      "sha256": "dfcd2f25b950ba3c0f07a9a8959ce04238d6c5a83409443fca08c1284adc20b4"
+    },
+    {
+      "path": "scripts/connector-runtime-identity-unit.cjs",
+      "sha256": "6b7dc2292c0492ce10be88da109e26a209ee2abcbac47cd9aac40b0d79a6d891"
+    },
+    {
+      "path": "scripts/connector-runtime-state-unit.cjs",
+      "sha256": "55e7b19ba59ff000888bb6c08326121c8d25e1ac1e6199c88d73876702d06214"
+    },
+    {
+      "path": "scripts/connector-runtime-supervisor-unit.cjs",
+      "sha256": "9bf860c0a3e7b4d67007b17f2eb45ad766034317fa9cb092be3e884a1792d160"
+    },
+    {
+      "path": "scripts/connector-service-flow-unit.cjs",
+      "sha256": "7901ea6a06b06a0019705072d180396b1d5abb55f50756d107feda9fd91c38e0"
+    },
+    {
+      "path": "scripts/connector-store-unit.cjs",
+      "sha256": "74901c2df3251d81c07e2edcd445dcbf7499979575fd5cdeeee5d49641d97140"
+    },
+    {
+      "path": "scripts/connector-tool-service-unit.cjs",
+      "sha256": "f69f9e6c02cac4f9bddb08114f1d712b26af2cd50e077dc85f417fb281428e71"
+    },
+    {
+      "path": "scripts/connector-upstream-contract.mjs",
+      "sha256": "57f48ca9fa0a8b6511bb9c51dd3a2857e1c20df09c60dbf723892ab7dba191bf"
+    },
+    {
+      "path": "scripts/connectors-ui-regression.mjs",
+      "sha256": "a88fdb534b1a2d4287f3b9770492715038580dd38247ed5aa8fa3442f2fccda7"
+    },
+    {
+      "path": "scripts/fixtures/connector-runtime-child.cjs",
+      "sha256": "da61c40afff3be60db46bebb7af435b9218af3d3cd8e9add9d53cd284d61a56d"
+    },
+    {
+      "path": "scripts/fixtures/connector-runtime-test-transport.mjs",
+      "sha256": "103e02aee2f3db9892946139a6069688076eab0aff8947047452e809525cc640"
+    },
+    {
+      "path": "scripts/fixtures/connector-source-loader.mjs",
+      "sha256": "fdf20be63f2e6fdd6fb778982dfcd9576305f8047ac5773be98348763d7d3cbc"
+    },
+    {
+      "path": "scripts/fixtures/connectors-ui.tsx",
+      "sha256": "34d458becb141560f342c533156b358993a3a2209691c5343d55013607bf785d"
+    },
+    {
+      "path": "scripts/hermes-connector-contract-unit.cjs",
+      "sha256": "1c386d6efecbc21643f5d148099383f80f978bd0634b3780d0f248a8ed2c37dc"
+    },
+    {
+      "path": "scripts/prepare-connector-compiler.mjs",
+      "sha256": "361c72f7556ef2aaa9ab2e7ece85c1bc37b26b9c1056a40e683fae6902dcfb67"
+    },
+    {
+      "path": "scripts/sync-connector-adapter-contract.cjs",
+      "sha256": "55f78784e88f97ba93f83cc5ba82f9858c8d7d43bfda4c88a51db9fd3f65db0b"
+    }
+  ]
+}

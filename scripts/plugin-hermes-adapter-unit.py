@@ -112,6 +112,7 @@ class Context:
 
 adapter.register(Context())
 assert registered == [("middleware", "tool_execution"),
+                      ("middleware", "llm_execution"),
                       ("hook", "agent_loop_stopped"),
                       *[("tool", name) for name in module.NAMES]]
 

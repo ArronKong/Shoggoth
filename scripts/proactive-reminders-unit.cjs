@@ -27,7 +27,7 @@ function idea(status = "completed", patch = {}) {
 function reviewConfig() { return { ...defaultConfig("inspiration", profile.id, NOW, "UTC"), enabled: true }; }
 function candidate(value, config = reviewConfig(), now = NOW) { return inspirationReminderCandidate(value, config, now).candidate; }
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sg-proactive-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sg-proactive-"));
   const clock = { value: NOW };
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"), profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
   const store = new ProactiveStore({ paths, now: () => clock.value }).open();
@@ -65,7 +65,17 @@ test("only live matching approval/input requests and definite failure become att
   const unknown = idea("failed"); unknown.latestExecution.errorCode = "RUNTIME_ACCEPTANCE_UNCERTAIN";
   assert.equal(inspirationReminderCandidate(unknown, reviewConfig(), NOW).unknown.reason, "execution_needs_verification");
   assert.equal(candidate(idea("saved")).group, "seed");
-  assert.equal(candidate(idea("saved", { createdAt: NOW - DAY_MS + 1 })), null);
+  assert.equal(candidate(idea("saved", { createdAt: NOW - DAY_MS + 1 })).group, "seed");
+});
+test("seeds are eligible immediately regardless of legacy minimum age; invalid future dates remain unknown", () => {
+  const config = { ...reviewConfig(), review: { ...reviewConfig().review, seedAgeDays: 365 } };
+  for (const age of [0, 1, DAY_MS - 1, DAY_MS, 2 * DAY_MS, 3 * DAY_MS + 1]) {
+    const item = candidate(idea("saved", { createdAt: NOW - age }), config);
+    assert.equal(item.group, "seed"); assert.equal(item.enteredAt, NOW - age);
+    assert.equal(item.ageDays, Math.floor(age / DAY_MS));
+  }
+  const future = inspirationReminderCandidate(idea("saved", { createdAt: NOW + 1 }), config, NOW);
+  assert.equal(future.candidate, null); assert.equal(future.unknown.reason, "stage_time_unknown");
 });
 test("exact seven-day cooldown survives reboot, changes of Agent/category/timezone and note controls", t => {
   const ctx = fixture(t), config = reviewConfig(), note = idea(), item = candidate(note);
@@ -117,6 +127,7 @@ test("notice outbox recovers exactly one app event and never retries uncertain n
   const ctx = fixture(t), f = deliveryFixture(ctx, async () => undefined);
   await f.delivery.deliver(f.notice.id); await f.delivery.recover();
   assert.equal(f.events.length, 1); assert.equal(f.calls.length, 1);
+  assert.equal(f.events[0].contextExcluded, false, "the public reminder belongs to subsequent conversation history");
   assert.equal(ctx.store.getNotice(f.notice.id).systemState, "needs_verification");
   ctx.store.updateNotice(f.notice.id, { appState: "publishing", systemState: "submitting" });
   await f.delivery.recover();

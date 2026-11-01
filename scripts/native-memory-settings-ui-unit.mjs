@@ -352,3 +352,31 @@ await act(async () => { renderer.unmount(); }); policyCases++;
 assert.equal(pending.length, 0);
 console.log(`PASS active memory participation: ${policyCases} rendered policy scenarios (default/new Profiles, persistent exclusions, legacy empty/partial, explicit off preservation, conflict guards)`);
 console.log("PASS native memory settings: lazy owner gate, Profile identity, scoped edits, alias drafts and inheritance, CAS, validation, conflict retention, unmount/write races, GGUF resource round-trip and provider/source inheritance");
+
+
+// Persist independent text-model selection through the same CAS form. Per-Agent
+// inheritance remains explicit and unrelated search settings stay intact.
+const modelContext = { ...context, textModelRoutes: [{ profileId: "profile-b", bindingId: "binding-b", name: "Agent B",
+  runtime: "codex", accountName: "Saved account", defaultModel: "default-model", supported: true }] };
+await policyLoad({ memory: { search: { provider: "none" } } }, 150, modelContext);
+await choose("nativeMemory.textModelRoute", "local");
+let savedModelConfig = await policySave(150);
+assert.deepEqual(savedModelConfig.memory.textModel, { source: "local" });
+await choose("nativeMemory.textModelScope", "profile-a");
+await choose("nativeMemory.textModelRoute", JSON.stringify(["profile-b", "binding-b"]));
+await edit("agents-entries-profile-a-memory-textModel-model", "explicit-model");
+savedModelConfig = await policySave(151);
+assert.deepEqual(savedModelConfig.agents.entries["profile-a"].memory.textModel,
+  { source: "binding", profileId: "profile-b", bindingId: "binding-b", model: "explicit-model" });
+assert.equal(savedModelConfig.memory.textModel.source, "local");
+assert.deepEqual(savedModelConfig.memory.search, { provider: "none" });
+await choose("nativeMemory.textModelRoute", "agent-default");
+savedModelConfig = await policySave(152);
+assert.deepEqual(savedModelConfig.agents.entries["profile-a"].memory.textModel, { source: "agent-default" });
+await choose("nativeMemory.textModelRoute", "");
+savedModelConfig = await policySave(153);
+assert.equal(savedModelConfig.agents?.entries?.["profile-a"]?.memory?.textModel, undefined);
+assert.equal(savedModelConfig.memory.textModel.source, "local");
+await act(async () => renderer.unmount());
+assert.equal(pending.length, 0);
+console.log("PASS independent text model: global local-only, explicit account and model, Agent default, inherited policy, preserved search");

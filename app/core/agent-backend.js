@@ -330,6 +330,11 @@ class AgentBackend {
    */
   onConnectionsChanged() {}
 
+  /** Reconcile a locally registered shared capability adapter with a live Host.
+   * Registration alone does not prove a long-lived Host loaded the new tools.
+   * Never starts a model turn or interrupts an active task. */
+  async reconcileSharedCapabilityAdapter(_options) { return { state: "unsupported" }; }
+
   /** Apply a validated revisioned core config projection to the native Service. */
   async applyNativeRuntimeConfig(projection) { throw new Error(`${this.id}: applyNativeRuntimeConfig() not supported`); }
   async applyNativeMemoryConfig(projection) { throw new Error(`${this.id}: applyNativeMemoryConfig() not supported`); }
@@ -699,6 +704,23 @@ class AgentBackend {
     };
   }
 
+  /**
+   * Resolve a trusted external MCP Host session identity to one existing private
+   * chat. Implementations must validate the Agent and uniquely map physical or
+   * canonical IDs through their own current directory; no guessed key creation.
+   * `idle:true` is an authoritative current idle observation used to release
+   * Agent-installed connector continuations; unknown activity must omit it.
+   * @returns {Promise<{sessionKey:string,kind:"direct",idle?:boolean}|null>}
+   */
+  async resolveMcpConnectionSession({ agentId, sessionId }) { return null; }
+
+  /** Resolve model-input ownership using the backend's current native session
+   * identity. Unlike connector setup this read-only operation also supports
+   * owned derived sessions; it never authorizes a tool call or a continuation.
+   * @returns {Promise<{sessionKey:string}|null>}
+   */
+  async resolveModelProjectionSession({ agentId, sessionId }) { return null; }
+
   /** Read one exact session's advanced metadata projection. */
   async describeSession(agentId, sessionKey) {
     return { ...unsupportedAdvancedSessionResult(), session: null };
@@ -827,6 +849,9 @@ class AgentBackend {
    *                                 contextUsed, contextMax, contextPercent},
    *                                 model? } rides onto the emitted message so
    *                                 the footer/context meter light up.
+   *                                 meta.stopReason="aborted"/"cancelled" marks
+   *                                 a deliberate stop; keep partial content and
+   *                                 deliver an aborted terminal, never an error.
    *   error(msg)                  — turn failed (no final follows). A resolved
    *                                 send emits exactly one terminal callback;
    *                                 rejection is the alternate failure terminal.
@@ -855,6 +880,8 @@ class AgentBackend {
    * @param {{ delta?: Function, final?: Function, error?: Function, interim?: Function,
    *           thinking?: Function, tool?: Function, plan?: Function, status?: Function,
    *           prompt?: Function, promptExpire?: Function }} hooks
+   *        status may include stage: preparing | context | capabilities | connecting | restoring | opening | waiting.
+   *        Stages describe observed startup work, never a predicted completion time.
    * @param {{ attachments?: Array<{type: string, mimeType?: string, fileName?: string,
    *          content?: string, source?: {type: string, media_type?: string, data?: string}}>,
    *          inputProvenance?: {kind: "inter_session", sourceTool: string} }} [opts]
@@ -866,6 +893,42 @@ class AgentBackend {
    */
   async sendMessage(sessionKey, message, idempotencyKey, hooks, opts) {
     throw new Error("AgentBackend subclass must implement sendMessage()");
+  }
+
+  /** Local credential mediation. The owner is injected by BackendRegistry;
+   * preparation never sends a message or retries an operation. References are
+   * scoped to this backend's verified agent/session and expire locally.
+   * Returned text is the only text a client may persist or send to a Runtime.
+   * No method on this contract returns a credential's plaintext.
+   */
+  setChatSecretOwner(owner) { this._chatSecretOwner = owner || null; }
+
+  getChatSecretCapabilities() {
+    return require("./chat-secret-contract").secretCapability({ input: !!this._chatSecretOwner,
+      productTools: !!this._chatSecretOwner });
+  }
+
+  async prepareChatInput(agentId, sessionKey, input) {
+    if (!this._chatSecretOwner) throw Object.assign(new Error("Local credential processing is unavailable"), { code: "SECRET_PROCESSING_UNAVAILABLE" });
+    return this._chatSecretOwner.chatSecretRequest("prepare", { ...input, backendId: this.id, agentId, sessionKey });
+  }
+
+  // Automatic sends can continue with their original input on local masking
+  // failure. Manual input review remains strict and never claims false success.
+  async prepareChatSendInput(agentId, sessionKey, input) {
+    return require("./chat-secret-fallback").processOrOriginal(
+      () => this.prepareChatInput(agentId, sessionKey, input),
+      { text: input.text, references: [], version: 1 });
+  }
+
+  async listChatSecrets(agentId, sessionKey) {
+    if (!this._chatSecretOwner) return { items: [] };
+    return this._chatSecretOwner.chatSecretRequest("list", { backendId: this.id, agentId, sessionKey });
+  }
+
+  async revokeChatSecret(agentId, sessionKey, reference) {
+    if (!this._chatSecretOwner) throw Object.assign(new Error("Local credential processing is unavailable"), { code: "SECRET_PROCESSING_UNAVAILABLE" });
+    return this._chatSecretOwner.chatSecretRequest("revoke", { backendId: this.id, agentId, sessionKey, reference });
   }
 
   /**
@@ -988,6 +1051,11 @@ class AgentBackend {
    * Shoggoth accepts an exact requestId plus either a canonical {choice} or
    * {action:"submit"|"cancel", answers}; legacy backends retain their existing
    * response shapes. Backends without blocking prompts keep the default throw.
+   * Canonical choice_or_text fields accept either a suggestion or the user's
+   * verbatim text in answers[field.id]; closed choice fields still enforce options.
+   * An acknowledged response may include `messages`: the canonical question
+   * and user answer in history order, with stable message IDs. These are safe
+   * display records from history, never the unfiltered submitted form values.
    * @param {string} sessionKey
    * @param {{kind: string, requestId?: string, choice?: string, all?: boolean, value?: string}} data
    * @returns {Promise<object>}
@@ -1291,7 +1359,11 @@ class AgentBackend {
    * feed. Entry shape (jobId is the FULL unified id so the UI can deep-link
    * /cron?job=): { backendId, jobId, jobName?, agentId?, startedAt?,
    * finishedAt?, status?, error?, summary?, durationMs?, deliveryStatus?,
-   * model?, sessionKey?, synthesized? }.
+   * model?, sessionKey?, runId?, runIdAliases?, synthesized? }. runId is the stable execution
+   * identity across refreshes and history-source changes. A session-backed
+   * adapter may use its per-execution session id when no ledger id is known;
+   * never use a shared conversation id for multiple executions. runIdAliases
+   * declares proven alternative execution IDs for reconciling older snapshots.
    * Default implementation synthesizes ≤1 entry per job from getCronJobs()'
    * lastRunAt/lastStatus/lastError, marked `synthesized: true` (no per-run
    * summary/transcript behind it) — right for backends without a run log
@@ -1451,6 +1523,16 @@ class AgentBackend {
    * opts: {agentId?, id?, source?, version?}; ambiguous identities must be rejected. */
   async previewSkill(_name, _opts = {}) { throw new Error(`${this.id}: previewSkill() not supported`); }
 
+  /** Shared Service management surface, also available while native Agents are hidden. */
+  async getConnectorSelectionReadiness(_input) { return false; }
+
+  /** Shared MCP, official Skill/CLI and Apple device connector management, including read-only discovered tool descriptions. Legacy OpenConnector methods are retired. */
+  async connectorRequest(_method, _params = {}) {
+    const error = new Error("Connectors are not supported by this backend");
+    error.code = "CONNECTOR_UNAVAILABLE";
+    throw error;
+  }
+
   /** Bounded, read-only plugin catalog page. Unsupported backends expose no installations. */
   async getExternalPluginCapabilities() {
     return { supported: false, reasonCode: "PLUGIN_UNSUPPORTED" };
@@ -1458,74 +1540,8 @@ class AgentBackend {
   async getExternalPluginCatalog(_query = {}) {
     return { supported: false, reasonCode: "PLUGIN_UNSUPPORTED", items: [] };
   }
-  async getPluginCapabilitiesPage(_query = {}) {
-    return { supported: false, reasonCode: "PLUGIN_UNSUPPORTED",
-      catalogRevision: null, items: [], nextCursor: null };
-  }
-  /** Shoggoth-owned external tool calls and pending approvals; other backends have no authority. */
-  async getPluginExternalCalls(_query = {}) { throw new Error(`${this.id}: external plugin calls not supported`); }
-  async getExternalPluginApprovals(_query = {}) { throw new Error(`${this.id}: external plugin approvals not supported`); }
-  async prepareExternalPluginApproval(_input) { throw new Error(`${this.id}: external plugin approvals not supported`); }
-  async commitExternalPluginApproval(_input) { throw new Error(`${this.id}: external plugin approvals not supported`); }
-  async previewPluginInstall(_source) { throw new Error(`${this.id}: plugin install not supported`); }
-  async listBundledPlugins() { throw new Error(`${this.id}: bundled plugins not supported`); }
-  async listFirstPartyPlugins() { throw new Error(`${this.id}: first-party plugins not supported`); }
-  async installFirstPartyPlugin(_packageId) { throw new Error(`${this.id}: first-party plugins not supported`); }
-  async previewPluginUninstall(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
-  async uninstallPlugin(_input) { throw new Error(`${this.id}: plugin uninstall not supported`); }
-  async preparePluginMcpConsent(_input) { throw new Error(`${this.id}: plugin consent not supported`); }
-  async preparePluginOAuth(_input) { throw new Error(`${this.id}: plugin OAuth not supported`); }
-  async preparePluginDisconnect(_input) { throw new Error(`${this.id}: plugin disconnect not supported`); }
-  async commitPluginDisconnect(_input) { throw new Error(`${this.id}: plugin disconnect not supported`); }
-  async preparePluginAccountSelection(_input) { throw new Error(`${this.id}: plugin account selection not supported`); }
-  async commitPluginAccountSelection(_input) { throw new Error(`${this.id}: plugin account selection not supported`); }
-  async getPluginDisconnectOperation(_agentId, _operationId) { throw new Error(`${this.id}: plugin disconnect not supported`); }
-  async previewPluginDependency(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
-  async commitPluginDependency(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
-  async getPluginDependencyStatus(_input) { throw new Error(`${this.id}: plugin dependencies not supported`); }
-  async getPluginDependencyOperation(_operationId) { throw new Error(`${this.id}: plugin dependencies not supported`); }
-  async commitPluginOAuth(_input) { throw new Error(`${this.id}: plugin OAuth not supported`); }
-  async preparePluginBearer(_input) { throw new Error(`${this.id}: plugin bearer not supported`); }
-  async commitPluginBearer(_input) { throw new Error(`${this.id}: plugin bearer not supported`); }
-  /** Plugin setup (one-confirmation enable) and `${secret:NAME}` credentials; Service-owned only. */
-  async getPluginSetup(_input) { throw new Error(`${this.id}: plugin setup not supported`); }
-  async preparePluginSetup(_input) { throw new Error(`${this.id}: plugin setup not supported`); }
-  async commitPluginSetup(_input) { throw new Error(`${this.id}: plugin setup not supported`); }
-  async getPluginSecrets(_input) { throw new Error(`${this.id}: plugin secrets not supported`); }
-  async preparePluginSecret(_input) { throw new Error(`${this.id}: plugin secrets not supported`); }
-  async commitPluginSecret(_input) { throw new Error(`${this.id}: plugin secrets not supported`); }
-  async getPluginOAuthStatus(_agentId, _flowId) { throw new Error(`${this.id}: plugin OAuth not supported`); }
-  async cancelPluginOAuth(_agentId, _flowId) { throw new Error(`${this.id}: plugin OAuth not supported`); }
-  async preparePluginApp(_sessionKey, _callId) { throw new Error(`${this.id}: plugin Apps not supported`); }
-  async commitPluginApp(_input) { throw new Error(`${this.id}: plugin Apps not supported`); }
-  async readPluginAppChunk(_transport, _index) { throw new Error(`${this.id}: plugin Apps not supported`); }
-  async messagePluginApp(_transport, _message) { throw new Error(`${this.id}: plugin Apps not supported`); }
-  async closePluginApp(_transport) { throw new Error(`${this.id}: plugin Apps not supported`); }
-  async commitPluginMcpConsent(_input) { throw new Error(`${this.id}: plugin consent not supported`); }
-  async discoverPluginMcpTools(_agentId, _bindingId) { throw new Error(`${this.id}: plugin discovery not supported`); }
-  async installPlugin(_input) { throw new Error(`${this.id}: plugin install not supported`); }
-  async getPluginOperation(_operationId) { return { found: false, operation: null }; }
-  async setPluginInstallationState(_input) {
-    throw new Error(`${this.id}: plugin installation state not supported`);
-  }
-  async getPluginSkillBindings(_agentId) {
-    throw new Error(`${this.id}: plugin Skill bindings not supported`);
-  }
-  async getPluginMcpStatus(_agentId, _installationId) {
-    throw new Error(`${this.id}: plugin MCP status not supported`);
-  }
-  async getPluginMcpTools(_agentId, _bindingId) {
-    throw new Error(`${this.id}: plugin MCP tools not supported`);
-  }
-  async revokePluginMcpGrant(_input) {
-    throw new Error(`${this.id}: plugin MCP grant revocation not supported`);
-  }
-  async revokeAllPluginMcpGrants(_input) {
-    throw new Error(`${this.id}: plugin MCP grant revocation not supported`);
-  }
-  async setPluginSkillBinding(_input) {
-    throw new Error(`${this.id}: plugin Skill bindings not supported`);
-  }
+  /** Retired call history is projected by the shared Service only. */
+  async getPluginExternalCalls(_query = {}) { throw new Error(`${this.id}: retired call history not supported`); }
 
   // ---- models (management UI) ----
 
@@ -1704,11 +1720,13 @@ class AgentBackend {
    * （运行时就绪）的分层。
    * `manageAuthProfiles` 是授权 profile 管理面是否存在的静态能力；UI 不得从
    * provider 缺少 config 条目推断 OAuth/CLI 凭证可管理。默认 false。
+   * `providerManagedCatalog` 也是静态事实：模型目录完全由账号登录与自定义端点
+   * 提供（没有可编辑的目录条目），UI 不显示目录增改入口与只读提示。默认 false。
    * `configurationDraft` 表示由后端的官方配置编辑语义写定义，引用保持原值。
    * `mutationSemantics: "native-config"` 的 applied/configSaved 只确认配置保存；
    * catalogPending/warnings 表示后续目录刷新，不改变保存回执或授权重复写入。
    * 其它后端及旧 journal 继续执行原有迁移、运行态收敛与恢复协议。
-   * @returns {Promise<{supported: boolean, create: boolean, update: boolean, rename: boolean, delete: boolean, updateProvider: boolean, configurationDraft?: boolean, mutationSemantics?: string, credentialManagement?: boolean, perAgentModelSettings?: boolean, manageAuthProfiles?: boolean, blockers: string[]}>}
+   * @returns {Promise<{supported: boolean, create: boolean, update: boolean, rename: boolean, delete: boolean, updateProvider: boolean, configurationDraft?: boolean, mutationSemantics?: string, credentialManagement?: boolean, perAgentModelSettings?: boolean, manageAuthProfiles?: boolean, providerManagedCatalog?: boolean, blockers: string[]}>}
    */
   async getModelChangeCapabilities() {
     return { supported: false, create: false, update: false, rename: false, delete: false, updateProvider: false, manageAuthProfiles: false, blockers: ["unsupported"] };
@@ -2032,9 +2050,12 @@ class AgentBackend {
    * Unsupported backends return supported:false through this shared contract. */
   async getSessionMemoryStatus(_id, _key, _includeTrace = false) { return { supported: false }; }
   async switchSessionRuntime(_id, _key, _input) { throw new Error(`${this.id}: session runtime switching not supported`); }
-  /** Connected CLI catalogs for this Agent's conversation; choices retain their Runtime Binding identity. */
+  /** Connected CLI catalogs for this Agent's conversation; choices retain their Runtime Binding identity.
+   * A choice may carry `modelProviderRef` when one Binding offers several model sources; it is
+   * opaque to the UI and is echoed back on selection (the snapshot reports the current one). */
   async getSessionRuntimeModels(_id, _key) { throw new Error(`${this.id}: session runtime models not supported`); }
-  /** Atomically select the conversation's Runtime and model, without changing the Agent default. */
+  /** Atomically select the conversation's Runtime and model, without changing the Agent default.
+   * input: `{ bindingId, model, revision, acceptAdjustments, modelProviderRef? }`. */
   async selectSessionRuntimeModel(_id, _key, _input) { throw new Error(`${this.id}: session runtime models not supported`); }
 
   /**
@@ -2051,7 +2072,9 @@ class AgentBackend {
    * 链接条目读的是链接目标的内容。
    * @param {string} id
    * @param {string} file e.g. "soul.md"
-   * @returns {Promise<{name: string, content: string}>}
+   * Operational review documents use this same editor contract. A backend lists
+   * them only on their owning agent; writes carry the revision returned by read.
+   * @returns {Promise<{name: string, content: string, revision?: string, readOnly?: boolean}>}
    */
   async getAgentFile(id, file) { throw new Error(`${this.id}: getAgentFile() not supported`); }
 
@@ -2064,7 +2087,7 @@ class AgentBackend {
    * @param {string} content
    * @returns {Promise<object>}
    */
-  async setAgentFile(id, file, content) { throw new Error(`${this.id}: setAgentFile() not supported`); }
+  async setAgentFile(id, file, content, options = {}) { throw new Error(`${this.id}: setAgentFile() not supported`); }
 
   /** Structured persistent-Agent controls. External backends remain unsupported. */
   async getAgentDefinition(_id) { return { supported: false, reason: "unsupported" }; }

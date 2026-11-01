@@ -16,16 +16,38 @@ permissions:
   contents: write
 
 jobs:
-  intel:
-    runs-on: macos-15-intel
+  macos:
+    name: Native ${{ matrix.arch }} draft verification
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+            app_dir: mac
+            zip_suffix: mac
+            binary_arch: x86_64
+            evidence: intel
+          - arch: arm64
+            runner: macos-latest
+            app_dir: mac-arm64
+            zip_suffix: arm64-mac
+            binary_arch: arm64
+            evidence: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
       RELEASE_TAG: ${{ inputs.tag }}
       SHOGGOTH_EXPECT_TEAM_ID: MK3JHXWR7H
       SHOGGOTH_EXPECT_NOTARIZED: "1"
+      SHOGGOTH_DRAFT_ARCH: ${{ matrix.arch }}
+      SHOGGOTH_DRAFT_APP_SUBDIR: ${{ matrix.app_dir }}
+      SHOGGOTH_DRAFT_ZIP_SUFFIX: ${{ matrix.zip_suffix }}
+      SHOGGOTH_DRAFT_BINARY_ARCH: ${{ matrix.binary_arch }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -35,6 +57,7 @@ jobs:
 
       - name: Install dependencies and pinned runtimes
         run: |
+          node -e 'require("node:assert/strict").equal(process.arch, process.env.SHOGGOTH_DRAFT_ARCH, "Draft verification requires native hardware")'
           npm ci --ignore-scripts
           npm run prepare:runtimes
 
@@ -47,15 +70,19 @@ jobs:
           set -euo pipefail
           VERSION="$(node -p 'require("./package.json").version')"
           test "$RELEASE_TAG" = "v$VERSION"
-          mkdir -p dist/mac
+          mkdir -p "dist/$SHOGGOTH_DRAFT_APP_SUBDIR"
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import { createHash } from 'node:crypto';
           import { createReadStream, createWriteStream, statSync } from 'node:fs';
           import { pipeline } from 'node:stream/promises';
+          import { execFileSync } from 'node:child_process';
           import { Readable } from 'node:stream';
 
           const version = JSON.parse((await import('node:fs')).readFileSync('package.json', 'utf8')).version;
+          const arch = process.env.SHOGGOTH_DRAFT_ARCH;
+          assert.ok(['arm64', 'x64'].includes(arch));
+          const zipSuffix = arch === 'arm64' ? 'arm64-mac' : 'mac';
           const base = `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}`;
           const headers = {
             Authorization: `Bearer ${process.env.GH_TOKEN}`,
@@ -74,7 +101,10 @@ jobs:
           assert.ok(release, 'Draft release is not visible to the workflow token');
           assert.equal(release.tag_name, process.env.RELEASE_TAG, 'Release ID does not match requested tag');
           assert.equal(release.draft, true, 'Release is already published');
-          for (const name of [`Shoggoth-${version}-mac.zip`, `Shoggoth-${version}-x64.dmg`, 'SHA256SUMS.txt']) {
+          const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          assert.match(sourceCommit, /^[a-f0-9]{40}$/);
+          assert.equal(release.target_commitish, sourceCommit, 'Draft target differs from the checked out version tag');
+          for (const name of [`Shoggoth-${version}-${zipSuffix}.zip`, `Shoggoth-${version}-${arch}.dmg`, 'SHA256SUMS.txt']) {
             const asset = release.assets.find(item => item.name === name);
             assert.ok(asset, `Missing draft asset: ${name}`);
             const response = await fetch(`${base}/releases/assets/${asset.id}`, {
@@ -95,30 +125,43 @@ jobs:
           NODE
           (
             cd dist
-            awk -v name="Shoggoth-${VERSION}-mac.zip" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
-            awk -v name="Shoggoth-${VERSION}-x64.dmg" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
+            awk -v name="Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ZIP_SUFFIX}.zip" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
+            awk -v name="Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ARCH}.dmg" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
           )
-          ditto -x -k "dist/Shoggoth-${VERSION}-mac.zip" dist/mac
+          ditto -x -k "dist/Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ZIP_SUFFIX}.zip" "dist/$SHOGGOTH_DRAFT_APP_SUBDIR"
 
-      - name: Verify Intel App and DMG on Intel hardware
+      - name: Verify App and DMG on native hardware
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p 'require("./package.json").version')"
-          APP="$GITHUB_WORKSPACE/dist/mac/Shoggoth.app"
-          DMG="dist/Shoggoth-${VERSION}-x64.dmg"
-          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-x64
-          node scripts/shoggoth-memory-e5-packaged.cjs --app "$APP" --output "$RUNNER_TEMP/e5-intel-result.json"
+          APP="$GITHUB_WORKSPACE/dist/$SHOGGOTH_DRAFT_APP_SUBDIR/Shoggoth.app"
+          DMG="dist/Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ARCH}.dmg"
+          node scripts/shoggoth-packaged-runtime-smoke.mjs "--spike-$SHOGGOTH_DRAFT_ARCH"
+          node scripts/shoggoth-memory-e5-packaged.cjs --app "$APP" --output "$RUNNER_TEMP/e5-$SHOGGOTH_DRAFT_ARCH-result.json"
           hdiutil verify "$DMG"
           xcrun stapler validate "$DMG"
-          MOUNT="$RUNNER_TEMP/shoggoth-x64-dmg"
+          MOUNT="$RUNNER_TEMP/shoggoth-$SHOGGOTH_DRAFT_ARCH-dmg"
           mkdir -p "$MOUNT"
           trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true' EXIT
           hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$DMG"
-          test "$(lipo -archs "$MOUNT/Shoggoth.app/Contents/MacOS/Shoggoth")" = x86_64
+          test "$(lipo -archs "$MOUNT/Shoggoth.app/Contents/MacOS/Shoggoth")" = "$SHOGGOTH_DRAFT_BINARY_ARCH"
           codesign --verify --deep --strict "$MOUNT/Shoggoth.app"
           codesign -dv --verbose=4 "$MOUNT/Shoggoth.app" 2>&1 |
             grep -Fx "TeamIdentifier=$SHOGGOTH_EXPECT_TEAM_ID"
           xcrun stapler validate "$MOUNT/Shoggoth.app"
           spctl --assess --type execute --verbose=4 "$MOUNT/Shoggoth.app"
           cmp "$APP/Contents/Resources/app.asar" "$MOUNT/Shoggoth.app/Contents/Resources/app.asar"
+
+      - name: Normal quarantined first launch on the empty hosted account
+        run: node scripts/shoggoth-quarantined-first-launch.cjs --app "$GITHUB_WORKSPACE/dist/$SHOGGOTH_DRAFT_APP_SUBDIR/Shoggoth.app" --output "$RUNNER_TEMP/shoggoth-first-launch"
+
+      - name: Preserve first-launch evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.evidence }}-quarantined-first-launch
+          path: |
+            ${{ runner.temp }}/shoggoth-first-launch/
+            ${{ runner.temp }}/e5-${{ matrix.arch }}-result.json
+          if-no-files-found: error

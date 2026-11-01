@@ -60,6 +60,7 @@ class RecallPolicyStore {
     this.transcriptStore = options.transcriptStore || null;
     this.chatSessionStore = options.chatSessionStore || null;
     this.strictSourceResolution = options.strictSourceResolution === true;
+    this.requireOwnMemoryProvenance = options.requireOwnMemoryProvenance === true;
     this.fs = options.fs || fs;
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
@@ -751,6 +752,28 @@ class RecallPolicyStore {
     this._deriveRuns(state);
     if (state.suppressedRefs.has(event.id)
       || (event.runId && (state.suppressedRefs.has(event.runId) || state.derivedRuns.has(event.runId)))) return false;
+    if (this.requireOwnMemoryProvenance && ["assistant", "tool_call", "tool_result", "artifact"].includes(event.kind)) {
+      const proof = require("./shoggoth-memory/own-memory-provenance.cjs").ownMemoryProof(event, state.profileId);
+      // Old or incomplete history cannot prove that a reformulated answer is
+      // independent of a forgotten fact. Keep the original chat, omit it from
+      // memory/context projection after revocation. Explicit user text keeps
+      // its existing independent-source and reauthorization rules.
+      if ((!proof || !proof.complete) && state.hasSuppressions) return false;
+      const dependencyRevision = JSON.stringify([this.memoryStore.getRevision(state.profileId), state.revision, state.derivedSourceRevision]);
+      if (state.ownDependencyRevision !== dependencyRevision) {
+        state.ownDependencyRevision = dependencyRevision; state.ownDependencyVisibility = new Map();
+      }
+      for (const ref of proof?.refs || []) {
+        const key = `${ref.id}:${ref.hash}`;
+        if (!state.ownDependencyVisibility.has(key)) {
+          if (state.ownDependencyVisibility.size >= 2048) state.ownDependencyVisibility.clear();
+          const item = this.memoryStore.get(state.profileId, ref.id);
+          state.ownDependencyVisibility.set(key, Boolean(item && hashContent(item.content) === ref.hash
+            && this._isMemoryVisible(state, state.profileId, item)));
+        }
+        if (!state.ownDependencyVisibility.get(key)) return false;
+      }
+    }
     const content = event.content?.text;
     if (typeof content === "string") {
       const normalized = normalizeContent(content);

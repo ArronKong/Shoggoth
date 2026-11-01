@@ -123,14 +123,18 @@ test("DSH monotonic guard denies every native or foreign MCP call, including sub
   assert.deepEqual(await before({ name: "mcp__shoggoth__workspace_execute" }, async () => ({ kind: "allow" })), { kind: "allow" });
   assert.equal(guard({ name: "mcp__shoggoth__browser_open" }), undefined, "product confirmation remains in the Service");
   assert.throws(() => installWorkspaceExecutionGuard({ tools: {}, on() {} }), { code: "WORKSPACE_RUNTIME_GUARD_UNAVAILABLE" });
-  let names, mode, setup;
+  let names, mode, setup, promptSection, promptVariable;
   const bridge = new BridgeRuntime({ agents: { async create(options) { setup = options.setup;
     setup({ tools: { presentAs(value) { mode = value; }, schemas: () => ["bash", "read_file", "mcp__shoggoth__workspace_execute", "mcp__shoggoth__browser_open"]
-      .map(name => ({ name })), restrict(filter) { names = filter.allow; } }, systemPrompt: { section() {} } });
+      .map(name => ({ name })), restrict(filter) { names = filter.allow; } }, systemPrompt: { section(value) { promptSection = value; }, variable(name, render) {
+      assert.equal(name, "shoggoth_developer_instructions"); assert.equal(typeof render, "function"); promptVariable = render;
+    } } });
     return { agent: { session: {} } }; } }, permissionPresets: { async set() {} } }, { workspaceExecution: true });
   await bridge.createHandle({ remoteSessionId: "guard-session", cwd: "/private/workspace",
     selection: { provider: "fixture", model: "model" }, developerInstructions: "", permissionMode: "workspace-write" }, false);
   assert.equal(mode, "native");
   assert.deepEqual(names, ["mcp__shoggoth__workspace_execute", "mcp__shoggoth__browser_open"]);
   assert.equal(typeof setup, "function");
+  assert.equal(promptSection.complete, true); assert.equal(promptSection.text, "{{shoggoth_developer_instructions}}");
+  assert.equal(typeof promptVariable(), "string");
 });

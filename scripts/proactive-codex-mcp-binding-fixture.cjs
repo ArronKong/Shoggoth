@@ -76,6 +76,8 @@ async function until(predicate) {
     hostFactory(options) {
       nativeHost = new CodexRuntimeHost({ ...options, repoRoot: repo, cwd: root,
         parentEnv: { HOME: root, PATH: process.env.PATH, TMPDIR: root },
+        prepareRuntime: async () => ({ spawnEnv: { OPENAI_API_KEY: "synthetic-fixture-key" }, registeredSecrets: ["synthetic-fixture-key"],
+          configArgs: [], runtimeConfig: { provider: { kind: "openai-api-key" } } }),
         spawnProcess(command, args, opts) {
           assert.equal(opts.env.HOME, root); assert.equal(opts.env.CODEX_HOME, home);
           const child = spawn(command, args, opts); let buffered = "";
@@ -94,6 +96,10 @@ async function until(predicate) {
     } });
   service = createAgentService({ paths, safeStorage, runtimePool: pool, autoSparkNotes: false, now: () => clock.value,
     prewarmMcpAuth: false, parentEnv: {}, proactiveProfileAvailable: () => true,
+    modelSecretRequest: (url, options, callback) => {
+      assert.equal(url.origin, "https://api.openai.com");
+      return http.request(new URL(url.pathname, `http://127.0.0.1:${provider.address().port}`), options, callback);
+    },
     proactiveRuntimeCapability: () => ({ semanticVerified: true, reason: null }),
     setProactiveTimer: () => 1, clearProactiveTimer() {}, notificationSender: async () => ({ state: "submitted" }) });
   await service.start(); const profile = service.productStore.listAgentProfiles().find(item => item.enabled);
@@ -138,7 +144,7 @@ async function until(predicate) {
   await service.proactiveService.handle("proactive.document.set", { profileId: profile.id, expectedRevision: document.document.revision,
     content: "# Check\nReview the supplied check and record working notes. Notify once for this acceptance." });
   const heartbeat = { ...defaultConfig("heartbeat", profile.id, clock.value, "UTC"), enabled: true, activeHours: null };
-  service.proactiveStore.setMonitor({ operationId: id(), expectedRevision: 0, config: heartbeat });
+  service.proactiveStore.setMonitor({ operationId: id(), expectedRevision: service.proactiveStore.getMonitor(heartbeat.id)?.revision ?? 0, config: heartbeat });
   const heartbeatOccurrence = service.proactiveStore.claimOccurrence(heartbeat.id, clock.value, clock.value);
   const heartbeatResult = await service.proactiveService.check(heartbeatOccurrence);
   assert.equal(heartbeatResult.state, "published", JSON.stringify(heartbeatResult));

@@ -1,0 +1,45 @@
+{
+  "server": {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "app.linear/linear",
+    "description": "Find and manage issues, projects, and documents in your Linear workspace.",
+    "title": "Linear",
+    "version": "1.0.2",
+    "websiteUrl": "https://linear.app",
+    "icons": [
+      {
+        "src": "https://static.linear.app/integrations/mcp/icon.svg",
+        "mimeType": "image/svg+xml",
+        "sizes": [
+          "any"
+        ]
+      },
+      {
+        "src": "https://static.linear.app/integrations/mcp/icon-256.png",
+        "mimeType": "image/png",
+        "sizes": [
+          "256x256"
+        ]
+      }
+    ],
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.linear.app/mcp"
+      },
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.linear.app/mcp/readonly"
+      }
+    ]
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "statusChangedAt": "2026-10-22T16:47:17.1938Z",
+      "publishedAt": "2026-10-22T16:47:17.1938Z",
+      "updatedAt": "2026-10-22T16:47:17.1938Z",
+      "isLatest": true
+    }
+  }
+}

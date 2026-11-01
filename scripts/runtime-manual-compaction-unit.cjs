@@ -3,6 +3,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
 const { openFixture, FakeHost, waitUntil, recoveryStore, SESSION_KEY } = require("./shoggoth-work-run-coordinator-unit.cjs");
 
 function deferred() {
@@ -37,7 +38,7 @@ async function fixture(options = {}) {
   } };
 }
 
-for (const evidence of ["context_compacted", "usage"]) {
+for (const evidence of ["context_compacted"]) {
   test(`Codex /compact acknowledgement waits for session-scoped ${evidence} evidence`, async () => {
     const f = await fixture();
     try {
@@ -58,6 +59,40 @@ for (const evidence of ["context_compacted", "usage"]) {
     } finally { await f.coordinator.close(); }
   });
 }
+
+test("ordinary usage updates cannot complete compaction or release the next input", async () => {
+  const f = await fixture();
+  try {
+    const ack = await f.send();
+    await waitUntil(() => f.host.compactCalls === 1, 1000, "compact dispatch");
+    const next = await f.coordinator.send({ operationId: "after-compact", sessionKey: SESSION_KEY, prompt: "current input" });
+    assert.equal(next.disposition, "queued");
+    f.complete("usage");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.coordinator.getRun(ack.run.id).status, "running", "usage is not a compaction receipt");
+    assert.equal(f.coordinator.getRun(next.run.id).status, "queued");
+    assert.equal(f.host.turnStartCalls, 0);
+    f.host.emit(normalizeCodexEvent({ method: "item/completed", params: {
+      threadId: "compact-thread", turnId: "native-compact-turn",
+      item: { id: "compact-item", type: "contextCompaction" },
+    } }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.coordinator.getRun(ack.run.id).status, "running", "the compact item still owns a native turn");
+    f.host.emit(normalizeCodexEvent({ method: "turn/completed", params: {
+      threadId: "compact-thread", turn: { id: "other-turn", status: "completed" },
+    } }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.coordinator.getRun(next.run.id).status, "queued", "another turn cannot release this compaction");
+    f.host.emit(normalizeCodexEvent({ method: "turn/completed", params: {
+      threadId: "compact-thread", turn: { id: "native-compact-turn", status: "completed" },
+    } }));
+    await f.coordinator.waitForIdle(ack.run.id);
+    await f.coordinator.waitForIdle(next.run.id);
+    assert.equal(f.coordinator.getRun(ack.run.id).status, "completed");
+    assert.equal(f.coordinator.getRun(next.run.id).status, "running");
+    assert.equal(f.host.turnStartCalls, 1, "only the original queued input is sent");
+  } finally { await f.coordinator.close(); }
+});
 
 test("cancel holds capacity until the concrete Codex host confirms exit", async () => {
   const stopGate = deferred();

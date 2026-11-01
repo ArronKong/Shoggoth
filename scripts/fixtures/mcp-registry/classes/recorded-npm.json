@@ -1,0 +1,43 @@
+{
+  "server": {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.docfork/docfork-mcp",
+    "description": "Up-to-date docs for AI. DEPRECATED: Use io.github.docfork/docfork instead.",
+    "repository": {
+      "url": "https://github.com/docfork/docfork",
+      "source": "github"
+    },
+    "version": "1.3.3",
+    "icons": [
+      {
+        "src": "https://mcp.docfork.com/icon.svg",
+        "mimeType": "image/svg+xml"
+      }
+    ],
+    "packages": [
+      {
+        "registryType": "npm",
+        "identifier": "docfork",
+        "version": "1.3.0",
+        "transport": {
+          "type": "stdio"
+        }
+      }
+    ],
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.docfork.com"
+      }
+    ]
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "statusChangedAt": "2026-01-14T07:37:36.327015Z",
+      "publishedAt": "2026-01-14T07:37:36.327015Z",
+      "updatedAt": "2026-01-14T07:37:36.327015Z",
+      "isLatest": true
+    }
+  }
+}

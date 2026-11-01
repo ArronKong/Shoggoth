@@ -14,6 +14,8 @@ const SESSION_RUNTIME_PUBLIC_MESSAGES = Object.freeze({
   CHAT_RUNTIME_HISTORY_CAPACITY: "该会话的原生会话索引已达容量上限，请新建会话",
   CHAT_RUNTIME_SWITCH_PENDING: "上一次会话创建或变更尚未确认完成，请稍后重试",
   SESSION_RUNTIME_UNAVAILABLE: "暂时无法切换会话 Runtime",
+  SESSION_MODEL_PROVIDER_UNAVAILABLE: "此会话选择的模型来源已不可用，请在模型菜单重新选择模型",
+  SESSION_MODEL_PROVIDER_INVALID: "模型来源选择无效",
   CONTEXT_INPUT_TOO_LARGE: "目标窗口无法容纳必需的指令、当前消息或附件，原会话已保留",
   CONTEXT_COMPACTION_REQUIRED: "目标窗口需要先摘要，请启用自动摘要并配置摘要 Runtime",
   CONTEXT_RECORD_TOO_LARGE: "单条历史超过摘要 Runtime 容量，原文已保留",
@@ -33,12 +35,17 @@ function exact(value, fields) {
 function text(value, nullable = false) { return (nullable && value === null) || (typeof value === "string"
   && value.length > 0 && value.length <= 1024 && value.isWellFormed() && !value.includes("\0")); }
 function revision(value) { return Number.isSafeInteger(value) && value >= 1; }
+// Optional model source of a model choice ("@chatgpt" or a source provider id).
+const MODEL_PROVIDER_SELECTION = /^(?:@chatgpt|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u;
+function providerSelection(value) { return typeof value === "string" && MODEL_PROVIDER_SELECTION.test(value); }
 function validateSessionRuntimeParams(method, value) {
   const selectingModel = method === "chat.session.runtime.model.set";
   const switching = method === "chat.session.runtime.switch" || selectingModel;
+  const sourced = selectingModel && Object.hasOwn(value || {}, "modelProviderRef");
   if (!SESSION_RUNTIME_METHODS.includes(method)
     || !exact(value, ["profileId", "sessionKey", ...(switching ? ["bindingId", "revision", "acceptAdjustments"] : []),
-      ...(selectingModel ? ["model"] : [])])
+      ...(selectingModel ? ["model"] : []), ...(sourced ? ["modelProviderRef"] : [])])
+    || (sourced && !providerSelection(value.modelProviderRef))
     || !text(value.profileId) || value.profileId.length > 128 || !UUID.test(value.sessionKey)
     || (switching && (!UUID.test(value.bindingId) || !revision(value.revision) || typeof value.acceptAdjustments !== "boolean"))
     || (selectingModel && (!text(value.model) || Buffer.byteLength(value.model, "utf8") > 512))) {
@@ -48,7 +55,10 @@ function validateSessionRuntimeParams(method, value) {
 }
 function validateSessionRuntimeResult(value, params) {
   try {
-    if (!exact(value, ["sessionKey", "revision", "bindingId", "runtime", "model", "contextUsage", "candidates", "canSwitch"])
+    const sourced = Object.hasOwn(value || {}, "modelProviderRef");
+    if (!exact(value, ["sessionKey", "revision", "bindingId", "runtime", "model", "contextUsage", "candidates", "canSwitch",
+      ...(sourced ? ["modelProviderRef"] : [])])
+      || (sourced && !providerSelection(value.modelProviderRef))
       || !UUID.test(value.sessionKey) || (params && value.sessionKey !== params.sessionKey)
       || !UUID.test(value.bindingId) || !revision(value.revision) || !text(value.runtime)
       || !text(value.model, true) || typeof value.canSwitch !== "boolean"

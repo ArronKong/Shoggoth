@@ -51,6 +51,40 @@ const wait = async (predicate: () => unknown, label: string) => {
   await frame();
 };
 const pageButton = (element: Element = thread()) => element.querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier"]');
+const boundaryNote = (element: Element = thread()) => element.querySelector<HTMLElement>('[data-testid="chat-history-complete"]');
+const wheel = (element: HTMLElement, deltaY: number) => element.dispatchEvent(new WheelEvent("wheel", { deltaY, bubbles: true }));
+async function checkHistoryBoundary(label: string, element: HTMLElement = thread()) {
+  check(!boundaryNote(element), `${label}: boundary hidden before user overscroll`);
+  if (element.scrollHeight > element.clientHeight + 50) {
+    element.scrollTop = 40;
+    element.dispatchEvent(new Event("scroll")); await frame();
+    wheel(element, -10); await frame();
+    check(!boundaryNote(element), `${label}: near the top is not the boundary`);
+  }
+  element.scrollTop = 0;
+  element.dispatchEvent(new Event("scroll")); await frame();
+  check(!boundaryNote(element), `${label}: programmatic scroll must not reveal the boundary`);
+  wheel(element, 20); await frame();
+  check(!boundaryNote(element), `${label}: downward input must not reveal the boundary`);
+  wheel(element, -20);
+  await wait(() => !!boundaryNote(element), `${label}: upward overscroll reveals the boundary`);
+  check(element.querySelectorAll(".chat-archive-bar.is-note").length === 1,
+    `${label}: one combined boundary note`);
+  check(boundaryNote(element)?.textContent === "没有更早的消息", `${label}: combined boundary wording`);
+  await pause(100); await frame();
+  check(!!boundaryNote(element) && element.scrollTop <= 1, `${label}: boundary remains visible at the top`);
+  wheel(element, 20); await frame();
+  check(!boundaryNote(element), `${label}: downward input hides the boundary`);
+  wheel(element, -20);
+  await wait(() => !!boundaryNote(element), `${label}: repeated overscroll works`);
+  if (element.scrollHeight > element.clientHeight + 50) {
+    element.scrollTop = 40;
+    element.dispatchEvent(new Event("scroll")); await frame();
+    check(!boundaryNote(element), `${label}: leaving the top hides the boundary`);
+  } else {
+    wheel(element, 20); await frame();
+  }
+}
 const stats = async () => (await fetch("/fixture/stats")).json();
 const visibleAnchor = (element: HTMLElement, selector: string) => {
   const bounds = element.getBoundingClientRect();
@@ -114,8 +148,11 @@ state.runNewSessionHistoryFixture = async () => {
     if (row.id === "hermes") check(!(await stats()).requests.some((request: any) => request.key === created.key),
       "fresh Hermes history must not query its unpersisted transcript");
     await control(created.key, "append");
-    await wait(() => count(row.id) === 1 && !!thread().querySelector('[data-testid="chat-history-complete"]'),
+    await wait(() => count(row.id) === 1 && !pageButton(),
       `${row.id}: first persisted message loads normally`);
+    check(!thread().querySelector('[data-testid="chat-history-complete"]'),
+      `${row.id}: opening a short session must not show a history boundary note`);
+    await checkHistoryBoundary(`${row.id}: short session`);
     results.push({ backend: row.backendId, newSession: true, empty: true, immersive: true, reopened: true, firstMessage: true });
   }
   return results;
@@ -146,7 +183,12 @@ state.runHistoryFixture = async () => {
     await wait(() => count(row.id) === 151 && thread().textContent?.includes(`HIST_${row.id}_999`), `${row.id}: new arrival preserves expansion`);
     check(thread().textContent?.includes(oldest), `${row.id}: refresh lost expanded prefix`);
     await earlier(row.id, 182);
-    check(!!thread().querySelector('[data-testid="chat-history-complete"]') && !pageButton(), `${row.id}: all-loaded state`);
+    check(!boundaryNote() && !pageButton(), `${row.id}: exhausted history stays quiet by default`);
+    if (row.backendId !== "openclaw") await checkHistoryBoundary(row.id);
+    else {
+      thread().scrollTop = 0; wheel(thread(), -20); await frame();
+      check(!boundaryNote(), "available archive must not claim there are no earlier messages");
+    }
     const other = cases.find(item => item.key !== row.key)!;
     select(other.key); await wait(() => count(other.id) === 50, "switch away");
     const observed: number[] = [];
@@ -154,6 +196,7 @@ state.runHistoryFixture = async () => {
     observer.observe(document.getElementById("root")!, { subtree: true, childList: true, characterData: true });
     select(row.key);
     await wait(() => count(row.id) === 50 && !!pageButton(), `${row.id}: reopen 50`);
+    check(!boundaryNote(), `${row.id}: reopening hides the boundary`);
     await pause(400); observer.disconnect();
     check(observed.every(value => value === 0 || value <= 50), `${row.id}: cached reopen flashed expanded history`);
     results.push({ reader: row.name, initial: 50, pages: [100, 150], afterArrival: 151, all: 182, reopen: 50, anchored });
@@ -173,7 +216,10 @@ state.runHistoryFixture = async () => {
     check(!!button, `archive paging entry retained before ${expected}`); button.click();
     await wait(() => count("archive") === expected, `archive ${expected}`);
     check(count(openclaw.id) === 50, "archive paging changed current transcript size");
+    check(!boundaryNote(), "unread current history must not show an exhausted boundary");
   }
+  for (const expected of [100, 150, 182]) await earlier(openclaw.id, expected);
+  await checkHistoryBoundary("OpenClaw current history and archive exhausted");
   const native = cases[2];
   select(native.key); await wait(() => count(native.id) === 50 && !!pageButton(), "immersive source");
   document.querySelector<HTMLButtonElement>('[data-testid="chat-immersive-enter"]')!.click();
@@ -181,6 +227,9 @@ state.runHistoryFixture = async () => {
   const immersiveThread = document.querySelector<HTMLElement>("[data-glass-clip]")!;
   check(count(native.id, immersiveThread) === 50, "immersive first page");
   await earlier(native.id, 100, immersiveThread, true);
+  await earlier(native.id, 150, immersiveThread, true);
+  await earlier(native.id, 182, immersiveThread, true);
+  await checkHistoryBoundary("immersive", immersiveThread);
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(() => !document.querySelector("[data-glass-clip]"), "exit immersive");
   // A deliberately slow page completes after a session switch; it must not leak.
@@ -193,5 +242,5 @@ state.runHistoryFixture = async () => {
   check(count(native.id) === 0 && count("hermes") === 50, "late older page overwrote another session");
   await control(native.key, "fast");
   select(native.key); await wait(() => count(native.id) === 50, "final initial window");
-  return { passed: true, results, archive: [50, 100, 123], immersive: [50, 100], lateSwitch: true };
+  return { passed: true, results, archive: [50, 100, 123], immersive: [50, 100, 150, 182], historyBoundary: true, lateSwitch: true };
 };

@@ -83,7 +83,8 @@ test("eight-entry capability matrix is explicit; only pinned Pi has a native too
   const { host } = routingHost(), native = piNativeHookCapabilities(host);
   for (const runtime of HOOK_RUNTIME_TARGETS) {
     const caps = runtimeHookCapabilities(runtime, runtime === "pi" ? native : {});
-    for (const scope of ["product", "native_mcp", "plugin_mcp"]) for (const kind of ["guard", "arguments", "result", "action", "observe"]) assert.equal(caps.scopes[scope][kind].status, "supported");
+    for (const scope of ["product", "native_mcp", "connector"]) for (const kind of ["guard", "arguments", "result", "action", "observe"]) assert.equal(caps.scopes[scope][kind].status, "supported");
+    for (const kind of ["guard", "arguments", "result", "action", "observe"]) assert.equal(caps.scopes.plugin_mcp[kind].status, "unsupported");
     assert.equal(caps.scopes.runtime_builtin.guard.status, runtime === "pi" ? "supported" : "unsupported");
     assert.equal(caps.scopes.runtime_mcp.guard.status, "unsupported");
     assert.equal(caps.events["model.request.before"].status, "unsupported");

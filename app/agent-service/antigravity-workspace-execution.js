@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 
-// ACP 1.2.1 reads hooks and global MCP servers from GEMINI_HOME, and reads
+// Verified ACP 1.2.1 and 1.4.3 read hooks and global MCP servers from GEMINI_HOME, and read
 // workspace hooks from the native session cwd. The managed execution mode must
 // not inherit those executable surfaces. Keep auth, trajectories and MCP schema
 // artifacts in the account's existing ACP store, while giving this one host an

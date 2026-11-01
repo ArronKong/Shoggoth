@@ -38,12 +38,16 @@ function adapterError(code, message) {
 }
 
 class PiRuntimeHandle {
-  constructor(binding, host) {
+  constructor(binding, host, secretGateway) {
     this.runtime = PI_RUNTIME;
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = PI_CAPABILITIES;
     this.host = host;
+    this.secretGateway = secretGateway;
+    this.secretRoutes = new Map();
+    this.host.modelSecretEndpoints = new Map();
+    Promise.resolve(host.terminated).then(() => this.closeSecretRoutes(), () => this.closeSecretRoutes());
     this.workspace = host.workspace;
     this.controlInstance = host.controlInstance === true;
   }
@@ -58,8 +62,21 @@ class PiRuntimeHandle {
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);
   }
-  sessionStart(input) { return this.host.sessionStart(input); }
-  sessionResume(input) { return this.host.sessionResume(input); }
+  closeSecretRoutes() { for (const route of this.secretRoutes.values()) route.close(); this.secretRoutes.clear(); this.host.modelSecretEndpoints.clear(); }
+  async bindSecretScope(input, invoke) {
+    if (!this.secretGateway || !input.modelSecretScope) return invoke();
+    const version = Array.isArray(this.host.cliVersion) ? this.host.cliVersion.join(".") : this.host.cliVersion;
+    if (version !== "1.3.0") throw adapterError("SECRET_MODEL_RUNTIME_UNSUPPORTED", "Pi model projection requires the verified 1.3.0 contract");
+    const route = await this.secretGateway.bindLocal({ scope: input.modelSecretScope });
+    try {
+      const response = await invoke(), id = response.session.id;
+      this.secretRoutes.get(id)?.close(); this.secretRoutes.set(id, route);
+      this.host.modelSecretEndpoints.set(id, route.baseUrl);
+      return response;
+    } catch (error) { route.close(); throw error; }
+  }
+  sessionStart(input) { return this.bindSecretScope(input, () => this.host.sessionStart(input)); }
+  sessionResume(input) { return this.bindSecretScope(input, () => this.host.sessionResume(input)); }
   sessionRead(input) { return this.host.sessionRead(input); }
   sessionList(input) { return this.host.sessionList(input); }
   sessionRename(input) { return this.host.sessionRename(input); }
@@ -82,10 +99,13 @@ class PiRuntimeAdapter {
       throw adapterError("RUNTIME_ADAPTER_INVALID", "Pi adapter requires a PiRuntimePool");
     }
     this.runtimePool = options.runtimePool;
+    this.secretGateway = options.secretGateway || null;
     this.modelOnly = true;
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }
+
+  runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
 
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);
@@ -95,7 +115,7 @@ class PiRuntimeAdapter {
     const host = await this.runtimePool.get(binding, options);
     const existing = this.handles.get(host);
     if (existing) return existing.handle;
-    const handle = Object.freeze(new PiRuntimeHandle(binding, host));
+    const handle = Object.freeze(new PiRuntimeHandle(binding, host, this.secretGateway));
     const entry = { host, handle };
     this.handles.set(host, entry);
     if (host.terminated && typeof host.terminated.then === "function") {

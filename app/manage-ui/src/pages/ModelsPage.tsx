@@ -131,8 +131,8 @@ export default function ModelsPage() {
       supported: false, create: false, update: false, rename: false, delete: false,
       updateProvider: false, blockers: ["capability_unavailable"],
     } as ModelChangeCapabilities));
-    // 提供方页面有独立的数据源；不要先等待不会显示的模型目录、主模型和配置。
-    if (capabilities.providerDirectory || capabilities.perAgentModelSettings) return {
+    // 账号与提供方页面有独立的数据源，不读取不会显示的模型目录、主模型和配置。
+    if (capabilities.providerDirectory || capabilities.perAgentModelSettings || capabilities.providerManagedCatalog) return {
       models: [] as UnifiedModel[], catalogRevision: "", catalogError: "",
       byScope: {}, providerByScope: {}, config: { providers: [] } as ModelConfig,
       capabilities, pending: [] as PendingModelChange[], authProviders: [] as string[],
@@ -195,13 +195,12 @@ export default function ModelsPage() {
   const perAgentModelSettings = modelsData?.capabilities.perAgentModelSettings === true;
   const showProviders = shapeReady && perAgentModelSettings;
   const showCatalog = shapeReady && !perAgentModelSettings;
-  // 目录形态后端有「提供方」数据面（OpenClaw：providerDirectory 静态能力位）时，
-  // 提供方内容（OAuth 卡 + Provider 目录卡 + 自定义端点卡 + 工具密钥卡）就是页面
-  // 全部（R356/R359 用户定案，对齐 Hermes tab）；模型目录网格只在**无该位**的目录
-  // 形态后端出现。Hermes（showProviders 形态）不受影响。
+  // 提供方目录（OpenClaw）及账号/端点提供的目录（Shoggoth）只显示配置卡片，
+  // 与 Hermes 一致；聊天和助理的模型选择仍各自读取完整目录。
   const providerDirectory = modelsData?.capabilities.providerDirectory === true;
   const canManageAuthProfiles = capabilities.manageAuthProfiles === true;
-  const showModelsPane = showCatalog && !providerDirectory;
+  const providerManagedCatalog = capabilities.providerManagedCatalog === true;
+  const showModelsPane = showCatalog && !providerDirectory && !providerManagedCatalog;
   const showDirectoryPane = showCatalog && providerDirectory;
   // 有授权 profile 的 provider 集合;config 条目共存时组头同时给「编辑端点」和「授权」入口
   const authProviderSet = useMemo(
@@ -1205,7 +1204,7 @@ export default function ModelsPage() {
               />
               <button
                 type="button"
-                className={styles.keyToggle}
+                className={`btn-secondary btn-md ${styles.keyToggle}`}
                 onClick={() => showKey ? setShowKey(false) : void revealExistingProviderKey()}
                 disabled={revealingKey}
               >
@@ -1246,7 +1245,7 @@ export default function ModelsPage() {
           {canManageAuthProfiles && authProviderSet.has(editProvider.key) && (
             <button
               type="button"
-              className={styles.keyToggle}
+              className={`btn-secondary btn-md ${styles.keyToggle}`}
               title={t("models.authManageTip")}
               onClick={() => {
                 const k = editProvider.key;
@@ -1315,11 +1314,10 @@ export default function ModelsPage() {
         title={t("models.pageTitle")}
         subtitle={
           // 形态未知时只说「加载中」：这时报目录统计等于把旧形态的口径先亮出来。
-          // providerDirectory 形态（OpenClaw 提供方主体）与 Hermes 同款副标题——
-          // 页面内容就是共享凭证层，模型统计没有对应物（网格已随 R359 移除）。
+          // 配置卡片形态使用同一副标题，不再显示没有对应模型列表的目录统计。
           !shapeReady
             ? t("common.loading")
-            : showProviders || showDirectoryPane
+            : !showModelsPane
               ? t("models.providersSubtitle")
               : loading && displayModels.length === 0
                 ? t("common.loading")
@@ -1350,7 +1348,7 @@ export default function ModelsPage() {
           {showModelsPane && hasEnvCreds && (
             <button className="ui-cbtn" onClick={() => setCredsOpen(true)}>{t("models.credsBtn")}</button>
           )}
-          {showModelsPane && (
+          {showModelsPane && !providerManagedCatalog && (
             <button
               className="ui-cbtn ui-cbtn--gold"
               onClick={() => showEditor({ mode: "create" })}
@@ -1367,7 +1365,7 @@ export default function ModelsPage() {
         onChanged={() => void refreshAccountsAndModels()} />}
 
       {/* 目录写能力相关的两条横幅只对目录形态有意义（整合设置面里没有目录写入口）。 */}
-      {showCatalog && capabilityReadOnlyReason && (
+      {showCatalog && capabilityReadOnlyReason && !providerManagedCatalog && (
         <div className="ui-banner ui-banner--warn" role="status">
           <span>{t("models.capabilityReadOnly", { reason: capabilityReadOnlyReason })}</span>
         </div>

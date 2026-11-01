@@ -11,7 +11,7 @@ const path = require("node:path");
 //
 // 所有 git 命令都在宿主进程里用 execFile 执行（不经 shell），关闭仓库钩子和 GPG 签名，同一仓库的
 // 写操作串行。任何一步失败调用方都按「没有独立副本」处理，退回原来的排队。
-const GIT_TIMEOUT_MS = 60_000;
+const GIT_TIMEOUT_MS = 180_000;
 const MAX_BLOB_BYTES = 16 * 1024 * 1024;
 const BRANCH_PREFIX = "shoggoth-group/";
 

@@ -2,14 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   bindShoggothChatGpt,
+  bindShoggothEndpoint,
   clearShoggothProvider,
   configureShoggothProvider,
   getShoggothChatGptModels,
+  listCustomEndpoints,
   logoutRuntimeAccount,
+  removeShoggothProvider,
   startShoggothChatGptLogin,
 } from "../api/client";
 import { ApiError } from "../api/client";
 import type {
+  CustomEndpoint,
   ShoggothChatGptModel,
   ShoggothProviderConfiguration,
   ShoggothProviderSnapshot,
@@ -20,8 +24,12 @@ import { profileProviderId, providerOperationId as operationId } from "../lib/sh
 import styles from "./ShoggothProviderSetup.module.css";
 
 type Kind = Exclude<ShoggothProviderConfiguration["provider"]["kind"], "custom-responses"> | "chatgpt";
+// A saved custom endpoint chosen as the source; its models come from the endpoint.
+type Source = Kind | `endpoint:${string}`;
+const ENDPOINT_SOURCE = "endpoint:";
 
 const INTERNAL_CODEX_ACCOUNT_ID = "shoggoth-internal-codex-default-v1";
+const READY_STATUSES = ["protocol_valid", "agent_compatible"];
 
 const NAMES: Record<Kind, string> = {
   chatgpt: "ChatGPT",
@@ -43,7 +51,11 @@ export function ShoggothProviderSetup({
 }) {
   const { t } = useTranslation();
   const confirm = useConfirm();
-  const [kind, setKind] = useState<Kind>("chatgpt");
+  const [source, setSource] = useState<Source>("chatgpt");
+  const [endpoints, setEndpoints] = useState<CustomEndpoint[]>([]);
+  const endpoint = source.startsWith(ENDPOINT_SOURCE)
+    ? endpoints.find((entry) => `${ENDPOINT_SOURCE}${entry.id}` === source) ?? null : null;
+  const kind: Kind | null = source.startsWith(ENDPOINT_SOURCE) ? null : source as Kind;
   const [model, setModel] = useState("");
   const [models, setModels] = useState<ShoggothChatGptModel[]>([]);
   const [catalogState, setCatalogState] = useState<"idle" | "loading" | "ready" | "empty" | "failed">("idle");
@@ -57,13 +69,20 @@ export function ShoggothProviderSetup({
   const [locallyLoggedOut, setLocallyLoggedOut] = useState(false);
   const chatgpt = snapshot?.providers.find((provider) => provider.kind === "chatgpt");
   const effectiveChatGptAuthState = locallyLoggedOut ? "missing" : chatgpt?.authState;
-  const needsSecret = ["openai-api-key", "openrouter"].includes(kind);
+  const needsSecret = kind !== null && ["openai-api-key", "openrouter"].includes(kind);
   const customConfigured = snapshot?.providers.some((provider) =>
     provider.id === snapshot.profile?.configuredProviderId && provider.kind === "custom-responses");
   const selectedModel = useMemo(
     () => models.find((entry) => entry.id === model) || null,
     [model, models],
   );
+  // A preset saved for this assistant stays a chat source after the default
+  // moves elsewhere; it can be made the default again or removed.
+  const savedPreset = (value: Kind) => value === "chatgpt" ? null
+    : snapshot?.providers.find((provider) => provider.kind === value
+      && provider.id === profileProviderId(value, snapshot)) ?? null;
+  const saved = kind === null ? null : savedPreset(kind);
+  const reusable = saved !== null && READY_STATUSES.includes(saved.validationStatus ?? "");
 
   useEffect(() => {
     if (kind !== "chatgpt" || effectiveChatGptAuthState !== "authenticated") {
@@ -97,6 +116,42 @@ export function ShoggothProviderSetup({
     return () => { cancelled = true; };
   }, [catalogAttempt, effectiveChatGptAuthState, kind, profileId, snapshot?.profile?.defaultModel]);
 
+  // Saved endpoints are offered as sources; the current default starts selected.
+  const configuredProviderId = snapshot?.profile?.configuredProviderId ?? null;
+  const currentPresetKind = snapshot?.providers.find((provider) => provider.id === configuredProviderId
+    && provider.kind !== "chatgpt" && provider.kind in NAMES)?.kind as Kind | undefined;
+  useEffect(() => {
+    if (!currentPresetKind) return;
+    setSource(currentPresetKind);
+    setModel(snapshot?.profile?.defaultModel ?? "");
+  }, [currentPresetKind, snapshot?.profile?.defaultModel]);
+  useEffect(() => {
+    let cancelled = false;
+    void listCustomEndpoints("shoggoth", profileId ?? undefined, { refreshAuth: false }).then((list) => {
+      if (cancelled) return;
+      setEndpoints(list.endpoints);
+      if (customConfigured && list.endpoints.some((entry) => entry.id === configuredProviderId)) {
+        setSource(`${ENDPOINT_SOURCE}${configuredProviderId}`);
+        setModel(snapshot?.profile?.defaultModel ?? "");
+      }
+    }).catch(() => { if (!cancelled) setEndpoints([]); });
+    return () => { cancelled = true; };
+  }, [profileId, configuredProviderId, customConfigured, snapshot?.profile?.defaultModel]);
+
+  const chooseSource = (value: string) => {
+    setSource(value as Source);
+    setMessage(null);
+    const next = endpoints.find((entry) => `${ENDPOINT_SOURCE}${entry.id}` === value);
+    if (next) {
+      const current = configuredProviderId === next.id ? snapshot?.profile?.defaultModel : null;
+      setModel(current && next.models.includes(current) ? current : next.models[0] ?? "");
+    } else if (value !== "chatgpt") {
+      setModel(savedPreset(value as Kind)?.defaultModel ?? "");
+    } else if (source.startsWith(ENDPOINT_SOURCE)) {
+      setModel("");
+    }
+  };
+
   useEffect(() => {
     // A request that started before logout may still return a fresh object with
     // the old authenticated value. Keep the local downgrade until the server
@@ -121,7 +176,16 @@ export function ShoggothProviderSetup({
     setBusy(true);
     setMessage(null);
     try {
-      if (kind === "chatgpt") {
+      if (endpoint) {
+        await bindShoggothEndpoint({
+          profileId,
+          operationId: operationId("endpoint-bind"),
+          providerRef: endpoint.id,
+          defaultModel: model.trim(),
+          createdAt: Date.now(),
+        });
+        setMessage(t("shoggothProvider.configured"));
+      } else if (kind === "chatgpt") {
         if (effectiveChatGptAuthState !== "authenticated") {
           await openIndependentChatGptLogin();
           setMessage(t("shoggothProvider.finishLogin"));
@@ -135,7 +199,17 @@ export function ShoggothProviderSetup({
           setAuthUrl(null);
           setMessage(t("shoggothProvider.configured"));
         }
-      } else {
+      } else if (kind !== null && reusable && !secret && model.trim() === saved.defaultModel) {
+        // Same saved preset and model: make it the default without new credentials.
+        await bindShoggothEndpoint({
+          profileId,
+          operationId: operationId("provider-bind"),
+          providerRef: saved.id,
+          defaultModel: model.trim(),
+          createdAt: Date.now(),
+        });
+        setMessage(t("shoggothProvider.configured"));
+      } else if (kind !== null) {
         if (needsSecret && !secret) return setMessage(t("shoggothProvider.secretRequired"));
         await configureShoggothProvider({
           profileId,
@@ -207,6 +281,35 @@ export function ShoggothProviderSetup({
     }
   };
 
+  const remove = async () => {
+    if (kind === null || saved === null) return;
+    const accepted = await confirm({
+      title: t("shoggothProvider.removeTitle", { name: NAMES[kind] }),
+      message: t("shoggothProvider.removeMessage"),
+      confirmLabel: t("shoggothProvider.remove"),
+      danger: true,
+    });
+    if (!accepted) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      await removeShoggothProvider({
+        profileId,
+        operationId: operationId("provider-remove"),
+        providerId: saved.id,
+        createdAt: Date.now(),
+      });
+      setSecret("");
+      setModel("");
+      setMessage(t("shoggothProvider.removed", { name: NAMES[kind] }));
+      await onConfigured();
+    } catch {
+      setMessage(t("shoggothProvider.failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const clear = async () => {
     setBusy(true);
     setMessage(null);
@@ -236,15 +339,26 @@ export function ShoggothProviderSetup({
         && chatgpt?.authSource === "native-codex" && (
         <span className="ui-hint" role="status">{t("shoggothProvider.nativeCodexConnected")}</span>
       )}
-      <Field label={t("shoggothProvider.kind")}>
-        <Select value={kind} onChange={(value) => setKind(value as Kind)} disabled={busy}>
+      <Field label={t("shoggothProvider.kind")} hint={t("shoggothProvider.sourcesHint")}>
+        <Select value={source} onChange={chooseSource} disabled={busy}>
           {(Object.keys(NAMES) as Kind[]).map((value) => (
-            <Option key={value} value={value}>{NAMES[value]}</Option>
+            <Option key={value} value={value}>
+              {savedPreset(value) ? `${NAMES[value]} · ${t("shoggothProvider.configuredTag")}` : NAMES[value]}
+            </Option>
+          ))}
+          {endpoints.map((entry) => (
+            <Option key={entry.id} value={`${ENDPOINT_SOURCE}${entry.id}`}>
+              {t("shoggothProvider.endpointSource", { name: entry.name })}
+            </Option>
           ))}
         </Select>
       </Field>
       <Field label={t("shoggothProvider.model")}>
-        {kind === "chatgpt" ? (
+        {endpoint ? (
+          <Select value={model} onChange={setModel} disabled={busy || endpoint.models.length === 0}>
+            {endpoint.models.map((entry) => <Option key={entry} value={entry}>{entry}</Option>)}
+          </Select>
+        ) : kind === "chatgpt" ? (
           effectiveChatGptAuthState === "authenticated" ? (
             <Select value={model} onChange={setModel}
               disabled={busy || catalogState !== "ready" || models.length === 0}>
@@ -278,7 +392,8 @@ export function ShoggothProviderSetup({
         )}
       </Field>
       {needsSecret && (
-        <Field label={t("shoggothProvider.secret")} hint={t("shoggothProvider.secretHint")}>
+        <Field label={t("shoggothProvider.secret")}
+          hint={t(reusable ? "shoggothProvider.secretSaved" : "shoggothProvider.secretHint")}>
           <TextInput type="password" autoComplete="off" value={secret} disabled={busy}
             onChange={(event) => setSecret(event.target.value)} />
         </Field>
@@ -311,6 +426,12 @@ export function ShoggothProviderSetup({
               {t("shoggothProvider.logout")}
             </button>
           </>
+        )}
+        {saved !== null && saved.id !== configuredProviderId && (
+          <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={busy}
+            onClick={() => void remove()}>
+            {t("shoggothProvider.remove")}
+          </button>
         )}
         {!customConfigured && snapshot?.profile && (snapshot.profile.configuredProviderId !== null
           || snapshot.profile.defaultModel !== null) && (

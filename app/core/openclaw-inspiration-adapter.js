@@ -13,7 +13,7 @@ const {
 
 const TERMINAL = new Set(["completed", "failed", "canceled", "interrupted"]);
 const FINAL_RESULT_GRACE_MS = 5000;
-const FINAL_RESULT_RETENTION_MS = 5 * 60 * 1000;
+const FINAL_RESULT_RETENTION_MS = 30 * 60 * 1000;
 const MAX_DRAFT_CHARS = 4000;
 const METHOD_SCOPES = {
   "agents.list": "operator.read",
@@ -298,7 +298,7 @@ class OpenClawInspirationAdapter {
             observation.draft = chars.length <= MAX_DRAFT_CHARS ? incoming
               : `…${chars.slice(-(MAX_DRAFT_CHARS - 1)).join("")}`;
             observation.activity.observeEvents([{ seq: ++observation.activitySeq, type: "text",
-              payload: { itemId: "answer", text: incoming } }], observation.activity.streamGeneration);
+              payload: { itemId: `paragraph:${observation.publicParagraph}`, text: incoming } }], observation.activity.streamGeneration);
           },
           onTool: data => {
             if (this.sessionPurpose !== "group" || this.observations.get(key) !== observation
@@ -320,8 +320,14 @@ class OpenClawInspirationAdapter {
               || !["ok", "error", "timeout"].includes(payload.status)) return;
             observation.final = true;
             observation.finalStatus = payload.status;
-            observation.activity.observeStatus(payload.status === "ok" ? "completed" : "failed");
             observation.fullText = finalResultText(payload);
+            if (payload.status === "ok" && observation.fullText) {
+              const previous = observation.publicProgress.items.get(String(observation.publicParagraph));
+              if (observation.publicCommentary && previous !== observation.fullText) observation.publicParagraph++;
+              observation.activity.observeEvents([{ seq: ++observation.activitySeq, type: "text",
+                payload: { itemId: `paragraph:${observation.publicParagraph}`, text: observation.fullText } }], observation.activity.streamGeneration);
+            }
+            observation.activity.observeStatus(payload.status === "ok" ? "completed" : "failed");
             const agentMeta = payload.result?.meta?.agentMeta;
             observation.responseMetadata = gatewayResponseMetadata({ role: "assistant", model: agentMeta?.model, usage: agentMeta?.usage });
             if (Number.isSafeInteger(agentMeta?.promptTokens) && agentMeta.promptTokens >= 0

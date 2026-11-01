@@ -9,6 +9,19 @@ const { McpProductToolController, MCP_PRODUCT_TOOL_DEFINITIONS, validateMcpProdu
 const { productToolRisk, SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS } = require("../app/agent-service/product-capability-manifest");
 
 const unused = () => assert.fail("Unrelated domain must not be accessed");
+
+test("unscoped shared projection preserves MCP structure, redacts cross-field echoes, and withholds raw media", async () => {
+  const { projectUnscopedResult } = require("../app/agent-service/temporary-secret-store");
+  const result = { content: [{ type: "text", text: "SharedFixture987 and public receipt" },
+    { type: "image", data: "private-pixels", mimeType: "image/png" }],
+    structuredContent: { count: 32, echo: "123456", password: 123456, api_key: "SharedFixture987" }, isError: false };
+  const before = JSON.stringify(result), safe = await projectUnscopedResult(result);
+  assert.equal(safe.structuredContent.count, 32); assert.equal(safe.content[0].type, "text");
+  assert.equal(safe.isError, false); assert.match(safe.content[0].text, /public receipt/u);
+  for (const value of ["SharedFixture987", "123456", "private-pixels", "SHOGGOTH_SECRET_"]) assert(!JSON.stringify(safe).includes(value));
+  assert.equal(JSON.stringify(result), before);
+  await assert.rejects(projectUnscopedResult({ a: undefined }), { code: "SECRET_INPUT_INVALID" });
+});
 async function mcpFixture(t) {
   const f = await fixture(t);
   let ready = true;
@@ -173,4 +186,53 @@ test("missing services, malformed responses, and sensitive outputs fail closed",
   await assert.rejects(malformed.handle("inspiration_get", args, f.authority()), { code: "MCP_TOOL_RESPONSE_INVALID" });
   const leaking = new McpProductToolController({ ...f.options, inspirationService: { handle: async () => ({ idea: { ...f.service.view(idea.id), body: "private-secret-canary" } }) } });
   await assert.rejects(leaking.handle("inspiration_get", args, f.authority()), { code: "MCP_TOOL_SECRET_REJECTED" });
+});
+
+test("legacy federation note reads return data without borrowing a native credential scope", async t => {
+  const f = await mcpFixture(t);
+  await f.create("给花浇水");
+  const controller = new McpProductToolController({ ...f.options,
+    secretExecution: { projectForModel: unused },
+    getSecretScope() { throw Object.assign(Error("no native session"), { code: "SECRET_REFERENCE_FORBIDDEN" }); },
+  });
+  for (const federationClient of ["hermes", "openclaw"]) {
+    const result = await controller.handle("inspiration_list", { query: "", filter: "all", cursor: null, limit: 50 },
+      { ...f.authority(), federationClient });
+    assert.equal(result.total, 1);
+    assert.equal(result.items[0].body, "给花浇水");
+    assert.equal(result.operationStatus, undefined);
+  }
+});
+
+test("legacy note results redact credentials without minting references and keep write replay exact", async t => {
+  const f = await mcpFixture(t);
+  const controller = new McpProductToolController({ ...f.options,
+    secretExecution: { projectForModel: unused }, getSecretScope: unused,
+  });
+  const auth = { ...f.authority(), federationClient: "hermes" };
+  const input = { body: "echo PrivateFixture987\npassword: PrivateFixture987\n公开便签" }; // gitleaks:allow -- synthetic redaction fixture
+  const result = await controller.handle("inspiration_create", input, auth);
+  assert.match(result.idea.body, /公开便签/u);
+  assert(!JSON.stringify(result).includes("PrivateFixture987"));
+  assert(!JSON.stringify(result).includes("SHOGGOTH_SECRET_"));
+  assert.deepEqual(await controller.handle("inspiration_create", input, auth), result);
+  assert.equal((await f.call("list", { query: "", filter: "all", cursor: null, limit: 50 })).total, 1);
+  const idea = await f.create("private-secret-canary");
+  await assert.rejects(controller.handle("inspiration_get", { id: idea.id }, { ...f.authority(), federationClient: "hermes" }),
+    { code: "MCP_TOOL_SECRET_REJECTED" });
+});
+
+test("a scoped external call cannot downgrade to unscoped result projection", async t => {
+  const f = await mcpFixture(t);
+  await f.create("公开便签"); let projections = 0;
+  const controller = new McpProductToolController({ ...f.options,
+    secretExecution: { projectForModel() { projections++; assert.fail("foreign scope must not project"); } },
+    getSecretScope() { throw Object.assign(Error("foreign session"), { code: "SECRET_REFERENCE_FORBIDDEN" }); },
+  });
+  const result = await controller.handle("inspiration_list", { query: "", filter: "all", cursor: null, limit: 50 },
+    { ...f.authority(), federationClient: "hermes" }, { assertCurrent() {} });
+  assert.equal(result.operationStatus, "completed");
+  assert.equal(result.retryAllowed, false);
+  assert.equal(result.items, undefined);
+  assert.equal(projections, 0);
 });

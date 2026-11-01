@@ -1,6 +1,4 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { openPluginApp } from "../api/client";
 
 // A result reference is only a UI hint. The Service verifies the durable call,
 // current conversation, account and Grants again before the native prompt.
@@ -28,15 +26,7 @@ export function pluginAppCallReference(output: string | undefined): string | nul
 
 export function PluginAppCard({ callId, backendId, sessionKey }: { callId: string; backendId: string; sessionKey: string }) {
   const { t } = useTranslation();
-  const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
-  return <div>
-    <button type="button" className="btn-secondary" disabled={busy}
-      onClick={async () => {
-        setBusy(true); setFailed(false);
-        try { await openPluginApp({ backendId, sessionKey, callId }); }
-        catch { setFailed(true); } finally { setBusy(false); }
-      }}>{t(busy ? "plugins.appOpening" : "plugins.appOpen")}</button>
-    {failed && <p role="status">{t("plugins.appUnavailable")}</p>}
-  </div>;
+  return <p role="status" data-legacy-plugin-call={callId} data-backend={backendId} data-session={sessionKey}>
+    {t("chat.legacyPluginAppRetired")}
+  </p>;
 }

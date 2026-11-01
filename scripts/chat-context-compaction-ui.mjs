@@ -17,7 +17,7 @@ const scenes = ["openclaw", "hermes", "shoggoth"].flatMap(backend =>
 scenes.push({ backend: "hermes", language: "zh-CN", theme: "light", terminal: "aborted", width: 600 });
 try {
   await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-tool-activity.tsx")], bundle: true, format: "esm",
-    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" },
+    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), `<!doctype html><meta charset="utf-8"><title>上下文压缩动态验证</title>
 <link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}</style>

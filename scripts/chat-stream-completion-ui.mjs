@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,6 +25,7 @@ const backend = new ShoggothBackend({ requestService: async () => { throw Error(
 const runtime = process.env.CHAT_STREAM_RUNTIME || "codex";
 const terminal = process.env.CHAT_STREAM_TERMINAL || "final";
 const replay = process.env.CHAT_STREAM_REPLAY === "1";
+const historyFirst = process.env.CHAT_STREAM_HISTORY_FIRST === "1";
 const key = "agent:shoggoth-default:stream-fixture";
 const note = "我会先检查资料，再整理成产品能力、使用场景与潜在风险三部分。";
 const answer = "这是一段包含 **重点说明** 的完整回答。\n\n1. 第一部分保留清晰的分段。\n2. 第二部分包含可阅读的列表。\n3. 最后一部分给出结论。\n\n```js\nconst stable = true;\n```\n\n正文在输出过程中保持相同气泡，完成后仍然可以逐段复制。";
@@ -36,7 +38,8 @@ const emit = (state, text, meta) => frames.push({ type: "event", event: "chat", 
     ...(state === "interim" && meta?.activityId ? { activity: true, segmentId: meta.activityId } : {}) }], ...(meta?.displayId ? { shoggoth: { nativeUiVersion: 1, displayId: meta.displayId, runId: meta.runId } } : {}) },
 } });
 const context = { sessionKey: "stream-fixture", run: { id: "run-fixture" }, poll: {}, hooks: {
-  delta: (text, meta) => emit("delta", text, meta), interim: (text, meta) => emit("interim", text, meta), final: (text, _error, meta) => emit("final", text, meta),
+  delta: (text, meta) => emit("delta", text, meta), interim: (text, meta) => emit("interim", text, meta),
+  final: (text, _error, meta) => emit(meta?.stopReason === "aborted" ? "aborted" : "final", text, meta),
   error: (errorMessage) => frames.push({ type: "event", event: "chat", payload: {
     sessionKey: key, runId: "run-fixture", state: "error", errorMessage,
   } }),
@@ -91,9 +94,9 @@ if (terminal.startsWith("aborted")) frames[frames.length - 1] = { type: "event",
 } };
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-chat-stream-"));
 try {
-  await build({
+  await build({ plugins: [viteArtworkFixturePlugin(root)],
     entryPoints: [path.join(root, "scripts/fixtures/chat-stream-completion.tsx")], bundle: true, format: "esm",
-    define: { "process.env.NODE_ENV": '"production"', __STREAM_FIXTURE__: JSON.stringify({ key, note, answer, frames, expectedTexts, terminal }) },
+    define: { "process.env.NODE_ENV": '"production"', __STREAM_FIXTURE__: JSON.stringify({ key, note, answer, frames, expectedTexts, terminal, historyFirst }) },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
     nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
   });
@@ -104,6 +107,7 @@ try {
   fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron");const fs=require("node:fs");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1360,height:950,webPreferences:{backgroundThrottling:false}});let passed=false;
+w.webContents.on("console-message",event=>{if(event.level==="error")console.error("[fixture renderer] "+event.message);});
 try {const results=[];for(const width of [1360,600])for(const theme of ["light","dark"]){
   w.setContentSize(width,950);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))});
   await w.webContents.executeJavaScript('document.documentElement.setAttribute("data-theme",'+JSON.stringify(theme)+')');
@@ -111,7 +115,7 @@ try {const results=[];for(const width of [1360,600])for(const theme of ["light",
   if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/"+width+"-"+theme+"-live.png",(await w.webContents.capturePage()).toPNG());
   const result=await w.webContents.executeJavaScript('window.finishFixture()');results.push({width,theme,...result});
   if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/"+width+"-"+theme+"-final.png",(await w.webContents.capturePage()).toPNG());
-}console.log(JSON.stringify({passed:true,runtime:${JSON.stringify(runtime)},replay:${JSON.stringify(replay)},terminal:${JSON.stringify(terminal)},results}));passed=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(passed?0:1);}});`);
+}console.log(JSON.stringify({passed:true,runtime:${JSON.stringify(runtime)},replay:${JSON.stringify(replay)},terminal:${JSON.stringify(terminal)},historyFirst:${historyFirst},results}));passed=true;}catch(error){console.error(error.stack||error);try{console.error("FIXTURE_DIAGNOSTIC",await w.webContents.executeJavaScript("window.fixtureError || document.body.innerText"));}catch{}}finally{w.destroy();app.exit(passed?0:1);}});`);
   const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], {
     encoding: "utf8", timeout: 60_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
   });

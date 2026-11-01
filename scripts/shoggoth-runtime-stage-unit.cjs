@@ -49,7 +49,15 @@ for (const stage of STARTUP_STAGES.slice(0, -1)) {
   assert.equal(runtimeStageError("runtime_acquire", legacy), legacy, "旧错误码必须继续可读");
 }
 assert.throws(() => runtimeStageCode("unknown"), TypeError);
+const unavailableWorkspace = runtimeStageError("runtime_acquire", Object.assign(new Error("private/workspace/path"), {
+  code: "RUNTIME_WORKSPACE_UNAVAILABLE",
+}));
+assert.equal(unavailableWorkspace.code, "RUNTIME_WORKSPACE_UNAVAILABLE");
+assert.equal(runtimeStageFromError(unavailableWorkspace), "runtime_acquire");
+assert.equal(unavailableWorkspace.message.includes("private/workspace/path"), false);
+assert.equal(isRetryablePreTurnStageError(unavailableWorkspace), false, "a missing workspace is deterministic, not a retryable acquire failure");
 for (const code of ["RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "RUNTIME_SESSION_ACCEPTANCE_UNKNOWN",
+  ...Object.keys(require("../app/core/chat-secret-contract").SECRET_MESSAGES),
   "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "RUNTIME_SESSION_BUSY", "RUNTIME_MODEL_UNAVAILABLE",
   "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_ACCOUNT_BLOCKED", "RUNTIME_MODEL_SETTINGS_INVALID",
   "CODEX_ACCOUNT_PROTOCOL_INVALID", "CODEX_SCHEMA_ERROR", "RUNTIME_PROTOCOL_ERROR", "RUNTIME_OUTPUT_LIMIT_EXCEEDED"]) {

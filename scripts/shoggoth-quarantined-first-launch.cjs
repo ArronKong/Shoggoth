@@ -1,0 +1,154 @@
+#!/usr/bin/env node
+"use strict";
+
+// Normal LaunchServices launch on an empty, disposable GitHub-hosted account.
+// Quarantine is assigned to the exact downloaded draft App for this check;
+// this is controlled quarantine evidence, not a browser-download claim.
+const assert = require("node:assert/strict");
+const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
+const { execFileSync } = require("node:child_process");
+const { randomUUID, createHash } = require("node:crypto");
+const { setTimeout: delay } = require("node:timers/promises");
+
+function command(executable, args, timeout = 15000) {
+  return execFileSync(executable, args, { encoding: "utf8", timeout, maxBuffer: 2 * 1024 * 1024 });
+}
+function inside(root, target) {
+  const relative = path.relative(root, target);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+function mainProcesses(binary) {
+  return command("/bin/ps", ["-axo", "pid=,args="]).trim().split("\n").flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/u);
+    if (!match || (match[2] !== binary && !match[2].startsWith(`${binary} `))
+      || match[2].includes("--shoggoth-internal-role=")) return [];
+    return [Number(match[1])];
+  });
+}
+
+async function main() {
+  if (process.argv.includes("--help")) {
+    console.log("Usage: node scripts/shoggoth-quarantined-first-launch.cjs --app /absolute/Shoggoth.app --output /absolute/new-directory (disposable GitHub-hosted runner only)");
+    return;
+  }
+  // These guards precede every filesystem write, xattr change and App launch.
+  assert.equal(process.platform, "darwin");
+  assert.equal(process.env.GITHUB_ACTIONS, "true");
+  assert.equal(process.env.RUNNER_ENVIRONMENT, "github-hosted");
+  assert.equal(os.userInfo().username, "runner");
+  assert.equal(os.userInfo().homedir, "/Users/runner");
+  assert.equal(process.argv.length, 6);
+  assert.equal(process.argv[2], "--app");
+  assert.equal(process.argv[4], "--output");
+  const sourceApp = path.resolve(process.argv[3]), output = path.resolve(process.argv[5]);
+  assert.equal(path.isAbsolute(process.argv[3]), true);
+  assert.equal(path.isAbsolute(process.argv[5]), true);
+  assert.equal(inside(path.join(fs.realpathSync(process.env.GITHUB_WORKSPACE), "dist"), sourceApp), true);
+  assert.equal(inside(fs.realpathSync(process.env.RUNNER_TEMP), output), true);
+  assert.equal(fs.existsSync(output), false);
+  const home = os.userInfo().homedir;
+  for (const relative of ["Library/Application Support/Shoggoth", "Library/LaunchAgents/com.shoggoth.agent-service.plist", ".openclaw", ".hermes"]) {
+    assert.equal(fs.existsSync(path.join(home, relative)), false, "First-launch proof requires an empty disposable product account");
+  }
+  const app = "/Applications/Shoggoth.app";
+  assert.equal(fs.lstatSync("/Applications").isSymbolicLink(), false);
+  assert.equal(fs.existsSync(app), false, "First-launch check must never replace an installed App");
+  const marker = JSON.parse(fs.readFileSync(path.join(sourceApp, "Contents/Resources/shoggoth-release.json"), "utf8"));
+  assert.equal(marker.distribution, "official");
+  assert.equal(marker.signingMode, "developer-id");
+  assert.equal(marker.version, require("../package.json").version);
+  const binary = path.join(app, "Contents/MacOS/Shoggoth");
+  assert.deepEqual(mainProcesses(binary), []);
+  const gatekeeper = command("/usr/sbin/spctl", ["--status"]).trim();
+  assert.equal(gatekeeper, "assessments enabled", "GUI proof requires enforced Gatekeeper");
+  command("/usr/bin/codesign", ["--verify", "--deep", "--strict", sourceApp], 180000);
+  command("/usr/bin/xcrun", ["stapler", "validate", sourceApp], 60000);
+  command("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=4", sourceApp], 60000);
+  fs.mkdirSync(output, { recursive: false, mode: 0o700 });
+  const evidence = { version: marker.version, launch: "LaunchServices open -n; no runtime role or data-root override",
+    account: "empty disposable GitHub-hosted runner", gatekeeper, installedApp: app,
+    downloadProvenance: "exact draft download copied to the disposable runner Applications directory with controlled quarantine",
+    browserDownloadVerified: false, quarantineRemoved: false, normalOpenConfirmation: false, verified: false };
+  let launched = false;
+  const screenshot = () => {
+    try { command("/usr/sbin/screencapture", ["-x", path.join(output, "first-launch.png")]); } catch { /* keep the original failure */ }
+  };
+  try {
+    // The product deliberately refuses background-service installation from
+    // an unstable folder. Exercise the same /Applications path as a user install.
+    command("/usr/bin/sudo", ["/bin/cp", "-cRp", sourceApp, app], 180000);
+    for (const relative of ["Contents/MacOS/Shoggoth", "Contents/Resources/app.asar"]) {
+      const hash = root => createHash("sha256").update(fs.readFileSync(path.join(root, relative))).digest("hex");
+      assert.equal(hash(app), hash(sourceApp), "Installed draft payload differs");
+    }
+    command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app], 180000);
+    command("/usr/bin/xcrun", ["stapler", "validate", app], 60000);
+    evidence.installedPayloadMatchesDraft = true;
+    const quarantine = `0001;${Math.floor(Date.now() / 1000).toString(16)};ShoggothReleaseVerification;${randomUUID()}`;
+    command("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, app]);
+    evidence.quarantineBefore = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
+    launched = true;
+    command("/usr/bin/open", ["-n", app]);
+    let pid;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const candidates = mainProcesses(binary);
+      assert.ok(candidates.length <= 1, "Unexpected duplicate GUI process");
+      if (candidates.length === 1) { pid = candidates[0]; break; }
+      if (attempt === 20) {
+        // Accept only the ordinary Internet-download Open prompt. A damaged,
+        // untrusted, or privacy-permission dialog has no matching action here.
+        try {
+          const answer = command("/usr/bin/osascript", ["-e", 'tell application "System Events"\nif exists process "CoreServicesUIAgent" then\ntell process "CoreServicesUIAgent"\nrepeat with w in windows\nif exists button "Open" of w then\nclick button "Open" of w\nreturn "ordinary-open-confirmed"\nend if\nend repeat\nend tell\nend if\nreturn "no-ordinary-open-prompt"']);
+          evidence.normalOpenConfirmation = answer.trim() === "ordinary-open-confirmed";
+        } catch { /* process/window checks still decide acceptance */ }
+      }
+      await delay(500);
+    }
+    assert.ok(pid, "Normal quarantined GUI did not launch");
+    await delay(10000);
+    assert.deepEqual(mainProcesses(binary), [pid]);
+    const renderer = command("/bin/ps", ["-axo", "ppid=,args="]).split("\n")
+      .some(line => line.trim().startsWith(`${pid} `) && line.includes("--type=renderer"));
+    assert.equal(renderer, true, "Normal GUI renderer is absent");
+    const listeners = command("/usr/sbin/lsof", ["-nP", "-a", "-p", String(pid), "-iTCP:18799", "-sTCP:LISTEN", "-Fp"]);
+    assert.ok(listeners.split("\n").includes(`p${pid}`), "UI server belongs to another process");
+    const response = await fetch("http://127.0.0.1:18799/", { signal: AbortSignal.timeout(10000), redirect: "error" });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /<div id="root"><\/div>/u);
+    const swift = path.join(output, "windows.swift");
+    fs.writeFileSync(swift, 'import Foundation\nimport CoreGraphics\nlet pid = Int(CommandLine.arguments[1])!\nlet all = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []\nlet windows = all.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }.compactMap { $0[kCGWindowBounds as String] as? [String: Any] }\nlet data = try JSONSerialization.data(withJSONObject: windows)\nprint(String(data: data, encoding: .utf8)!)\n');
+    const windows = JSON.parse(command("/usr/bin/swift", [swift, String(pid)], 60000));
+    assert.ok(windows.some(window => window.Width >= 600 && window.Height >= 400), "No visible normal App window");
+    const { resolveCanonicalServicePaths } = require("../app/agent-service/paths");
+    const { readClientToken, requestService } = require("../app/agent-service/client");
+    const { PROTOCOL_VERSION } = require("../app/agent-service/server");
+    const paths = resolveCanonicalServicePaths();
+    const status = await requestService(paths, { token: readClientToken(paths), version: PROTOCOL_VERSION, method: "service.status", params: {} }, { timeoutMs: 10000 });
+    assert.equal(status.healthy, true);
+    assert.equal(status.serviceVersion, marker.version);
+    screenshot();
+    assert.equal(fs.existsSync(path.join(output, "first-launch.png")), true);
+    evidence.windowBounds = windows;
+    evidence.guiPid = pid;
+    evidence.rendererPresent = true;
+    evidence.productServiceHealthy = true;
+    evidence.quarantineAfter = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
+    command("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]);
+    for (let attempt = 0; attempt < 120 && mainProcesses(binary).length; attempt++) await delay(500);
+    assert.deepEqual(mainProcesses(binary), [], "GUI failed to quit normally");
+    evidence.naturalGuiExit = true;
+    evidence.verified = true;
+  } catch (error) {
+    screenshot();
+    evidence.failure = String(error.message).slice(0,1000);
+    throw error;
+  } finally {
+    fs.writeFileSync(path.join(output, "result.json"), JSON.stringify(evidence, null, 2) + "\n", { mode: 0o600 });
+    if (launched && mainProcesses(binary).length) {
+      try { command("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]); } catch { /* failure remains visible */ }
+    }
+  }
+  console.log(JSON.stringify(evidence));
+}
+
+main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });

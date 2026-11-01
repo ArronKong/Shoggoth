@@ -106,6 +106,10 @@ function enforceSnapshotByteLimit(snapshot, maxSnapshotBytes) {
 
 function safeSnapshot(value, rawOptions = {}) {
   const registeredSecrets = validateRegisteredSecrets(rawOptions.registeredSecrets || []);
+  // Only the normalizer's known conversation text opts in. Identity fields,
+  // tools, approval payloads and unknown diagnostics retain normal redaction.
+  const preserveConversationText = rawOptions.preserveConversationText === true
+    && value?.known === true && ["text", "text_delta"].includes(value.type);
   const configuredMax = rawOptions.maxSnapshotBytes ?? DEFAULT_MAX_SNAPSHOT_BYTES;
   if (!Number.isSafeInteger(configuredMax) || configuredMax < MIN_MAX_SNAPSHOT_BYTES) {
     const error = new Error(`Codex normalized event byte limit must be at least ${MIN_MAX_SNAPSHOT_BYTES}`);
@@ -130,9 +134,9 @@ function safeSnapshot(value, rawOptions = {}) {
     seen: new WeakSet(),
   };
 
-  function stringSnapshot(input, maxBytes = MAX_SINGLE_STRING_BYTES) {
+  function stringSnapshot(input, maxBytes = MAX_SINGLE_STRING_BYTES, preserve = false) {
     if (state.remainingStringBytes <= 0) return "";
-    const redacted = redactDiagnostic(input, registeredSecrets);
+    const redacted = preserve ? input : redactDiagnostic(input, registeredSecrets);
     const allowed = Math.min(maxBytes, state.remainingStringBytes);
     const output = jsonEncodedPrefix(redacted, allowed);
     state.remainingStringBytes -= Buffer.byteLength(JSON.stringify(output)) - 2;
@@ -180,14 +184,19 @@ function safeSnapshot(value, rawOptions = {}) {
       const key = keySnapshot(rawKey);
       if (!key || Object.hasOwn(output, key)) continue;
       let child;
-      try { child = visit(input[rawKey], depth + 1); } catch { child = "[Unreadable]"; }
+      try {
+        const entry = input[rawKey];
+        child = preserveConversationText && depth === 0 && ["text", "delta"].includes(rawKey) && typeof entry === "string"
+          ? stringSnapshot(entry, MAX_SINGLE_STRING_BYTES, true) : visit(entry, depth + 1);
+      } catch { child = "[Unreadable]"; }
       if (child !== undefined) output[key] = child;
     }
     return output;
   }
 
   const snapshot = enforceSnapshotByteLimit(visit(value, 0), maxSnapshotBytes);
-  return containsRegisteredSecret(JSON.stringify(snapshot), registeredSecrets) ? {} : snapshot;
+  const metadata = preserveConversationText ? { ...snapshot, text: undefined, delta: undefined } : snapshot;
+  return containsRegisteredSecret(JSON.stringify(metadata), registeredSecrets) ? {} : snapshot;
 }
 
 module.exports = {

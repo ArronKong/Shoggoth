@@ -1,4 +1,5 @@
 "use strict";
+(async () => {
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -175,7 +176,7 @@ assert.equal(
 
 const hookSource = fs.readFileSync(path.join(__dirname, "adhoc-sign.cjs"), "utf8");
 const firstCodesign = hookSource.indexOf('execFileSync("codesign"');
-for (const check of ["checkPackagedDependencies(", "checkBundledPlugins("]) {
+for (const check of ["checkPackagedDependencies(", "checkPackagedConnector("]) {
   assert.ok(hookSource.indexOf(check) > 0 && hookSource.indexOf(check) < firstCodesign,
     `${check} must reject an incomplete App before any signing command`);
 }
@@ -184,7 +185,7 @@ const blockedApp = path.join(__dirname, ".adhoc-sign-blocked-fixture", "Shoggoth
 try {
   fs.mkdirSync(path.join(blockedApp, "Contents", "Resources"), { recursive: true });
   fs.writeFileSync(path.join(blockedApp, "Contents", "Resources", "signing.p12"), "fixture");
-  assert.throws(() => require("./adhoc-sign.cjs").default({
+  await assert.rejects(() => require("./adhoc-sign.cjs").default({
     electronPlatformName: "darwin",
     appOutDir: path.dirname(blockedApp),
     packager: { appInfo: { productFilename: "Shoggoth" } },
@@ -193,4 +194,28 @@ try {
   fs.rmSync(path.dirname(blockedApp), { recursive: true, force: true });
 }
 
+
+const mediaAppRoot = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "shoggoth-media-manifest-unit-"));
+try {
+  const appPath = path.join(mediaAppRoot, "Shoggoth.app"), directory = path.join(appPath, "Contents", "Resources", "local-media");
+  fs.mkdirSync(directory, { recursive: true });
+  const binary = path.join(directory, "shoggoth-secret-media"), manifestPath = path.join(directory, "manifest.json");
+  const digest = value => require("node:crypto").createHash("sha256").update(value).digest("hex");
+  const original = { version: 1, minimumMacOS: "13.0", architectures: ["arm64", "x86_64"],
+    sourceSha256: "a".repeat(64), builderSha256: "b".repeat(64), sha256: digest("before-sign") };
+  fs.writeFileSync(binary, "before-sign"); fs.writeFileSync(manifestPath, JSON.stringify(original));
+  const { packagedLocalMediaManifest } = require("./adhoc-sign.cjs");
+  assert.equal(packagedLocalMediaManifest(appPath), binary);
+  fs.writeFileSync(binary, "after-sign-native-bytes");
+  assert.throws(() => packagedLocalMediaManifest(appPath), /Local media native helper identity mismatch/u);
+  assert.equal(packagedLocalMediaManifest(appPath, true), binary);
+  const sealed = JSON.parse(fs.readFileSync(manifestPath));
+  assert.deepEqual(sealed, { ...original, sha256: digest("after-sign-native-bytes") });
+  assert.equal(packagedLocalMediaManifest(appPath), binary);
+  fs.writeFileSync(manifestPath, JSON.stringify({ ...sealed, sourceSha256: "invalid" }));
+  assert.throws(() => packagedLocalMediaManifest(appPath, true), /identity mismatch/u);
+} finally { fs.rmSync(mediaAppRoot, { recursive: true, force: true }); }
+
 console.log("Ad-hoc/local/Developer ID signing unit: PASS (including vendor verification failure)");
+
+})().catch(error => { console.error(error); process.exitCode = 1; });

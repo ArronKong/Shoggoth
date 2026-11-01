@@ -82,8 +82,10 @@ function fixture(t, env = {}) {
     clearTimeout: clock.clearTimeout,
     getProcessIdentity: (pid) => (pid === ctx.host?.child?.pid ? "fake-acp-server-start" : ""),
     getProcessLink: (pid) => (pid === HARNESS_PID
-      ? { ppid: ctx.host.child.pid, executable: fs.realpathSync(harnessPath) }
-      : { ppid: 0, executable: "" }),
+      ? { ppid: ctx.host.child.pid, executable: fs.realpathSync(harnessPath), command: harnessPath }
+      : pid === ctx.host?.child?.pid
+        ? { ppid: process.pid, executable: fs.realpathSync(serverPath), command: serverPath }
+        : { ppid: 0, executable: "", command: "" }),
   }).open();
   ctx.host = new AntigravityAcpRuntimeHost({
     paths,
@@ -211,16 +213,19 @@ test("a helper started from another process tree is still refused after renewal"
   await sendPrompt(ctx, session, "op-foreign-parent");
   const descriptor = ctx.descriptor();
   const env = Object.fromEntries(descriptor.env.map(({ name, value }) => [name, value]));
-  // main() refuses a role synchronously; wrap it so the refusal is observed.
+  const originalLink = ctx.issuer.getProcessLink;
+  ctx.issuer.getProcessLink = pid => pid === HARNESS_PID
+    ? { ppid: ctx.host.child.pid + 1, executable: fs.realpathSync(ctx.harnessPath), command: ctx.harnessPath }
+    : originalLink(pid);
+  let dispatched = false;
   await assert.rejects(async () => main(descriptor.args, env, {
     defaultApp: true,
     ppid: HARNESS_PID,
     now: ctx.clock.now,
     userInfo: () => ({ homedir: ctx.root }),
-    parent: { executable: fs.realpathSync(ctx.harnessPath), command: ctx.harnessPath, ppid: ctx.host.child.pid + 1 },
-    ancestor: { executable: fs.realpathSync(ctx.serverPath) },
-    openRuntimeMcpBridge: async () => { throw new Error("must not reach the Service"); },
-  }, { runtimeMcpRelay: () => "relay-started" }), rejectedWith("RUNTIME_MCP_GATE_PARENT_MISMATCH"));
+    openRuntimeMcpBridge: async context => ctx.issuer.consume(context),
+  }, { runtimeMcpRelay: () => { dispatched = true; } }), rejectedWith("RUNTIME_MCP_GATE_INVALID"));
+  assert.equal(dispatched, false, "a foreign process tree must be rejected before MCP relay dispatch");
 });
 
 test("MCP renewal happens after queued ACP writes, at the prompt write boundary", async (t) => {

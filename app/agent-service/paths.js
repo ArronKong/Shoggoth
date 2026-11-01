@@ -43,13 +43,14 @@ function resolveServicePaths(options = {}) {
   const agentsDir = path.join(stateDir, "agents");
   const skillsDir = path.join(stateDir, "skills");
   const pluginsDir = path.join(stateDir, "plugins");
+  const connectorsDir = path.join(stateDir, "connectors");
   const nativeMcpDir = path.join(stateDir, "mcp-servers");
   const runtimeAccountsDir = path.join(stateDir, "runtime-accounts");
   const runtimeIntegrationDir = path.join(stateDir, "runtime-integration");
   const runtimeSessionOwnershipDir = path.join(stateDir, "runtime-session-ownership");
   const computerDir = path.join(stateDir, "computer");
   return Object.freeze({
-    productSchemaVersion: 15,
+    productSchemaVersion: 16,
     homeDir,
     stateDir,
     userDataRoot,
@@ -74,6 +75,10 @@ function resolveServicePaths(options = {}) {
     agentsDir,
     skillsDir,
     pluginsDir,
+    connectorsDir,
+    connectorAccessPath: path.join(connectorsDir, "access-v1.json"),
+    connectorRuntimeDir: path.join(connectorsDir, "runtime"),
+    connectorRuntimeVersionPath: path.join(connectorsDir, "runtime-version.json"),
     pluginCatalogPath: path.join(pluginsDir, "catalog.sqlite"),
     pluginPackagesDir: path.join(pluginsDir, "packages"),
     pluginStagingDir: path.join(pluginsDir, "staging"),

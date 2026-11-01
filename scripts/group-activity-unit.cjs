@@ -22,6 +22,30 @@ function projection() {
   return { p, advance: time => { now += time; } };
 }
 
+test("provider retry activity survives running snapshots and clears only on new work or an explicit transition", () => {
+  const { p, advance } = projection();
+  p.observeStatus("running");
+  p.observeEvents([event(1, "status", { status: "retrying", reason: "RUNTIME_UPSTREAM_UNAVAILABLE", message: "private trace" })], "s1");
+  assert.equal(p.snapshot().phase, "retrying");
+  assert.ok(validGroupActivity(p.snapshot()));
+  const at = p.snapshot().lastProgressAt;
+  advance(20);
+  p.observeStatus("running");
+  p.observeEvents([event(2, "status", { status: "retrying" })], "s1");
+  assert.equal(p.snapshot().phase, "retrying");
+  assert.equal(p.snapshot().lastProgressAt, at, "polling and repeated retries cannot invent progress");
+  p.observeEvents([event(3, "status", { status: "running" })], "s1");
+  assert.equal(p.snapshot().phase, "running");
+  p.observeEvents([event(4, "status", { status: "retrying" }), event(5, "text.delta", { delta: "new reply" })], "s1");
+  assert.equal(p.snapshot().phase, "text");
+  p.observeEvents([event(6, "status", { status: "retrying" })], "s1");
+  assert.equal(p.snapshot().phase, "retrying");
+  p.observeStatus("canceled");
+  p.observeEvents([event(7, "status", { status: "retrying" })], "s1");
+  assert.equal(p.snapshot().phase, "cancelled");
+  assert.equal(JSON.stringify(p.snapshot()).includes("private trace"), false);
+});
+
 test("explicit compaction Run events retain a bounded receipt through resumed work and terminal fences", () => {
   const { p, advance } = projection();
   p.observeEvents([event(1, "status", { status: "compacting", text: "untrusted status detail" })], "s1");
@@ -394,6 +418,12 @@ for (const mode of ["gateway", "acp"]) test(`Hermes ${mode}: actual hooks projec
   const at = adapter.activity(input).lastProgressAt; clock += 500; hooks.thinking("private");
   assert.equal(adapter.activity(input).lastProgressAt, at);
   const caps = await adapter.probe(input); assert.equal(caps.mode, mode); assert.equal(caps.interactive, mode === "gateway");
+  hooks.delta("第一条消息"); hooks.interim("第一条消息"); hooks.delta("第二条消息");
+  assert.deepEqual(adapter.activity(input).textMessages.map(item => item.text), ["第一条消息", "第二条消息"]);
+  assert.deepEqual(adapter.activity(input).textMessages.map(item => item.pending), [false, true]);
+  hooks.final("第二条消息", false);
+  assert.deepEqual(adapter.activity(input).textMessages.map(item => item.text), ["第一条消息", "第二条消息"]);
+  assert.equal(adapter.activity(input).textMessages.at(-1).final, true);
   backend._lifecycleGeneration++; hooks.delta("late"); assert.equal(adapter.activity(input), null); finish();
 });
 
@@ -419,9 +449,12 @@ test("OpenClaw group adapter exposes actual tools and full snapshots without rea
   assert.equal(adapter.activity(input).phase, "tool"); clock += 50;
   observer.onTool({ phase: "result", toolCallId: "t", output: "" }); assert.equal(adapter.activity(input).recentTools[0].status, "completed");
   observer.onAssistant({ text: "private", phase: "analysis" }); assert.equal(adapter.draft(input), null);
-  observer.onAssistant({ text: "public" }); assert.equal(adapter.activity(input).phase, "text");
+  observer.onAssistant({ text: "public", itemId: "one", phase: "commentary" }); assert.equal(adapter.activity(input).phase, "text");
+  observer.onAssistant({ text: "second", itemId: "two", phase: "commentary" });
+  assert.deepEqual(adapter.activity(input).textMessages.map(item => item.text), ["public", "second"]);
   const caps = await adapter.probe(input); assert.equal(caps.toolEvents, true); assert.equal(caps.collaborationSupport, true);
   observer.onFinal({ payload: { runId: "r", status: "ok", result: { payloads: [{ text: "done" }] } } });
+  assert.deepEqual(adapter.activity(input).textMessages.map(item => item.text), ["public", "second", "done"]);
   observer.onTool({ phase: "start", toolCallId: "late", name: "exec" }); assert.equal(adapter.activity(input).phase, "completed");
   adapter.reset();
 });

@@ -30,6 +30,29 @@ function verify(source) {
   return { source, sourceCommit: MANIFEST.sourceCommit, fileCount: MANIFEST.files.length };
 }
 
+// The managed input freezer reads tracked files from this exact Git object,
+// not from the installed working tree. Updating the user's checkout must not
+// prevent reproducing an older pinned host with the same dependency closure.
+function verifyArchivedRevision(source) {
+  source = fs.realpathSync(source);
+  const actual = execFileSync('git', ['rev-parse', `${MANIFEST.sourceCommit}^{commit}`], { cwd: source, encoding: 'utf8' }).trim();
+  assert.equal(actual, MANIFEST.sourceCommit, 'Pinned Hermes source object is unavailable');
+  for (const item of MANIFEST.files) {
+    assert.ok(!path.isAbsolute(item.path) && !item.path.split('/').includes('..'), 'Unsafe manifest path');
+    const entry = execFileSync('git', ['ls-tree', MANIFEST.sourceCommit, '--', item.path], { cwd: source, encoding: 'utf8' }).trim();
+    if (item.originalSha256 === null) assert.equal(entry, '', 'New compatibility file already exists in pinned source');
+    else {
+      assert.match(entry, /^100(?:644|755) blob [a-f0-9]+\t/, 'Pinned source must be a regular Git blob');
+      const bytes = execFileSync('git', ['show', `${MANIFEST.sourceCommit}:${item.path}`], { cwd: source, maxBuffer: 16 * 1024 * 1024 });
+      assert.equal(sha(bytes), item.originalSha256, `Pinned archive hash mismatch: ${item.path}`);
+    }
+    const payload = path.join(PAYLOAD, 'patched', item.path);
+    assert.ok(!fs.lstatSync(payload).isSymbolicLink(), 'Patch payload may not be a symlink');
+    assert.equal(sha(fs.readFileSync(payload)), item.patchedSha256, `Patch payload hash mismatch: ${item.path}`);
+  }
+  return { source, sourceCommit: actual, fileCount: MANIFEST.files.length };
+}
+
 function archive(source, output) {
   return new Promise((resolve, reject) => {
     const git = spawn('git', ['archive', '--format=tar', MANIFEST.sourceCommit], { cwd: source, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -94,4 +117,4 @@ if (require.main === module) {
     console.error('Hermes host compatibility patch stopped: ' + error.message); process.exitCode = 1;
   });
 }
-module.exports = { materialize, verify, MANIFEST, PAYLOAD, DEFAULT_SOURCE };
+module.exports = { materialize, verify, verifyArchivedRevision, MANIFEST, PAYLOAD, DEFAULT_SOURCE };

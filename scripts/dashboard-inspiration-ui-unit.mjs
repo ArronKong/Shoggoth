@@ -59,6 +59,36 @@ const tabs = renderer => renderer.root.findAllByType('filters').find(node => nod
 const settle = async fn => act(async () => { fn?.(); await new Promise(setImmediate); });
 
 let renderer;
+// Reproduce the screenshot: two executions of the same monitor, only one report.
+const silentCron = { ...cron, id: 'silent-monitor', title: 'Tibo 额度重置监测',
+  run: { backendId: 'native', jobId: 'monitor', runId: 'silent', status: 'ok', outputDisposition: 'silent' } };
+const monitorReport = { ...silentCron, id: 'monitor-report', summary: '额度重置已生效',
+  run: { ...silentCron.run, runId: 'report', outputDisposition: 'deliver' } };
+const silentPage = { ...empty, items: [monitorReport, inspiration, silentCron] };
+await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: silentPage })); });
+assert.equal(rows(renderer).length, 2, 'Cached silent executions must be hidden without hiding the same task’s report');
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '2', 'Visible rows and activity count agree');
+assert.match(textOf(renderer.toJSON()), /额度重置已生效/);
+fetchPage = async () => ({ ...empty, items: [silentCron, monitorReport] });
+await settle(() => tabs(renderer).props.onChange('cron'));
+assert.equal(rows(renderer).length, 1, 'Task-filter responses from older servers also hide silent output');
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
+await settle(() => renderer.unmount());
+fetchPage = async () => ({ ...empty, items: [silentCron, monitorReport] });
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [silentCron], hasMore: true, nextCursor: 'after-silent' },
+})); });
+assert.equal(rows(renderer).length, 1, 'An all-silent page still loads the next page and reaches real output');
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [silentCron] },
+})));
+assert.equal(rows(renderer).length, 0);
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '0');
+assert.match(textOf(renderer.toJSON()), /dashboard.feedEmpty/);
+await settle(() => renderer.unmount());
+fetchPage = async () => empty;
+
 await settle(() => { renderer = create(React.createElement(Feed, props)); });
 assert.ok(tabs(renderer).props.items.some(item => item.value === 'inspiration' && item.label === 'dashboard.filterInspiration'));
 assert.equal(rows(renderer).length, 2);
@@ -218,6 +248,68 @@ await settle(() => renderer.update(React.createElement(Feed, { ...props,
   firstPage: { ...empty, items: [completedCron, secondExecution] },
 })));
 assert.equal(rows(renderer).length, 2, 'Identical titles, results and times do not merge distinct executions');
+await settle(() => renderer.unmount());
+
+// Hermes can switch between the durable ledger and its session-backed fallback.
+// Both describe the same run, with different start stamps and optional runId.
+const sessionCron = { ...cron, id: 'cron:native:daily:150:', occurredAt: 200,
+  run: { backendId: 'native', jobId: 'daily', sessionKey: 'cron-daily-session', startedAt: 150, finishedAt: 200, status: 'ok' } };
+const ledgerCron = { ...sessionCron, id: 'cron:native:daily:run:ledger-run',
+  run: { ...sessionCron.run, runId: 'ledger-run', runIdAliases: [sessionCron.run.sessionKey], startedAt: 100 } };
+const partialPage = items => ({ ...empty, items, degradedSources: [{ backend: 'native', source: 'cron', reason: 'latest-only' }] });
+for (const [before, after] of [[ledgerCron, sessionCron], [sessionCron, ledgerCron]]) {
+  await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: partialPage([before]) })); });
+  await settle(() => renderer.update(React.createElement(Feed, { ...props, firstPage: partialPage([after]) })));
+  assert.equal(rows(renderer).length, 1, 'Ledger/session fallback switching must update one activity in either direction');
+  assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
+  await settle(() => renderer.update(React.createElement(Feed, { ...props,
+    firstPage: partialPage([{ ...after, id: `${after.id}:refresh`, run: { ...after.run, startedAt: 175 } }]),
+  })));
+  assert.equal(rows(renderer).length, 1, 'A later legacy refresh retains the previously proven identity and aliases');
+  await settle(() => renderer.unmount());
+}
+const identifiedSessionCron = { ...sessionCron, id: 'cron:native:daily:run:cron-daily-session',
+  run: { ...sessionCron.run, runId: sessionCron.run.sessionKey, runIdAliases: [sessionCron.run.sessionKey] } };
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  firstPage: partialPage([ledgerCron, sessionCron, identifiedSessionCron]),
+})); });
+assert.equal(rows(renderer).length, 1, 'Cached session aliases and the durable execution collapse on the first render');
+const sharedSessionRun = { ...ledgerCron, id: 'second-ledger-run', run: { ...ledgerCron.run, runId: 'second-ledger-run' } };
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [ledgerCron, sharedSessionRun] },
+})));
+assert.equal(rows(renderer).length, 2, 'Two durable executions in the same session remain distinct');
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: partialPage([ledgerCron, sharedSessionRun, sessionCron]),
+})));
+assert.equal(rows(renderer).length, 3, 'An ambiguous legacy session cannot be assigned to an arbitrary execution');
+const otherJobSession = { ...identifiedSessionCron, id: 'other-job', run: { ...identifiedSessionCron.run, jobId: 'other-job' } };
+const otherBackendSession = { ...identifiedSessionCron, id: 'other-backend', backendId: 'other',
+  run: { ...identifiedSessionCron.run, backendId: 'other' } };
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [identifiedSessionCron, otherJobSession, otherBackendSession] },
+})));
+assert.equal(rows(renderer).length, 3, 'Session aliases are scoped to their backend and job');
+await settle(() => renderer.unmount());
+
+const sharedConversation = { ...ledgerCron, run: { ...ledgerCron.run, runIdAliases: undefined } };
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  firstPage: partialPage([sharedConversation, sessionCron, { ...sessionCron, id: 'another-legacy-run',
+    run: { ...sessionCron.run, startedAt: 50 } }]),
+})); });
+assert.equal(rows(renderer).length, 3, 'A shared conversation is not an execution alias without backend proof');
+await settle(() => renderer.unmount());
+
+const dailyTasks = Array.from({ length: 4 }, (_, i) => ({ ...ledgerCron, id: `daily-${i}`,
+  run: { ...ledgerCron.run, jobId: `daily-${i}`, runId: `execution-${i}`, sessionKey: `session-${i}`, runIdAliases: [`session-${i}`] } }));
+await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: partialPage(dailyTasks) })); });
+for (let refresh = 0; refresh < 6; refresh++) {
+  const items = refresh % 2 ? dailyTasks : dailyTasks.map(task => ({ ...task, id: `${task.id}-fallback-${refresh}`,
+    run: { ...task.run, runId: undefined, startedAt: 150 + refresh / 10 } }));
+  await settle(() => renderer.update(React.createElement(Feed, { ...props, firstPage: partialPage(items) })));
+  assert.equal(rows(renderer).length, 4, 'Repeated partial refreshes cannot double multiple daily tasks');
+  assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '4');
+}
 await settle(() => renderer.unmount());
 
 // Session-backed fallbacks may be superseded without a shared run id. The

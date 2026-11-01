@@ -12,6 +12,31 @@ const contractCodes = ["CODEX_RUNTIME_VERSION_MISMATCH", "CLAUDE_CODE_VERSION_UN
   "PI_VERSION_UNSUPPORTED", "GROK_ACP_INITIALIZE_INVALID", "OPENCODE_VERSION_UNSUPPORTED",
   "DEEPSEEK_HARNESS_PROTOCOL_UNSUPPORTED", "ANTIGRAVITY_ACP_INITIALIZE_INVALID"];
 
+test("upgrade and missing capability failures stay distinct, sanitized and non-retryable", () => {
+  for (const code of ["RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED"]) {
+    const cause = new Error("private auth read", { cause: fail(code) });
+    const result = runtimeStageError("runtime_authentication", cause);
+    assert.equal(result.code, code);
+    assert.equal(result.message, code);
+    assert.equal(isRuntimeIncompatible(result), false);
+    assert.equal(isRetryablePreTurnStageError(result), false);
+  }
+});
+
+test("settings readiness observes same-path replacements without spawning a process", t => {
+  const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sg-readiness-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const binary = path.join(root, "cli"); fs.writeFileSync(binary, "one");
+  const backend = new ShoggothBackend({ paths: {} });
+  backend.runtimeCliAuth = new Map([["account", { binaryPath: binary }]]);
+  backend._runtimeReadiness = new Map([["account", { readiness: "incompatible", generation: backend._generation,
+    observedAt: Date.now(), binaryPath: binary, executableStamp: backend._runtimeExecutableStamp(binary) }]]);
+  assert.equal(backend._runtimeReadinessFor("account"), "incompatible");
+  fs.writeFileSync(binary, "two");
+  assert.equal(backend._runtimeReadinessFor("account"), "unverified");
+});
+
 test("all seven runtime contract failures survive wrapping without exposing diagnostics or retrying", async () => {
   for (const code of contractCodes) {
     const wrapped = new Error("private", { cause: fail(code) });
@@ -46,17 +71,20 @@ test("native account readiness requires protocol, auth and catalog proof; rechec
     loginArgs: [], logoutArgs: [], docsUrl: "https://example.invalid/", unavailableReason: "missing",
   })) });
   backend.getStatus = async () => ({ connected: true });
+  backend._runtimeExecutableStamp = binary => `fixture-stamp:${binary}`;
   backend._profilesByAgent = new Map(accounts.map(account => [account.id, {
     id: account.id, agentId: account.id, name: account.runtime, runtime: account.runtime,
     runtimeAccountId: account.id, providerRef: null,
   }]));
   backend._call = async (method, input) => {
+    if (method === "runtime.extension.status.get") return { entries: [] };
     calls.push([method, input.profileId]);
     const runtime = accounts.find(account => account.id === input.profileId).runtime;
     if ((runtime === "pi" && piFailure) || runtime === "antigravity") throw fail("RUNTIME_INCOMPATIBLE");
     if (runtime === "deepseek-harness") throw fail("REQUEST_TIMEOUT");
     if (method === "profile.auth.read") return { status: runtime === "grok-build" ? "unverified"
       : runtime === "opencode" ? "unauthenticated" : "authenticated" };
+    if (method === "profile.capabilities.read") return { attachments: ["file"], resume: "unsupported", compact: "unsupported", steer: "unsupported" };
     assert.equal(method, "profile.models.list");
     assert.equal(input.limit, 1);
     return { models: [{ id: "model" }], nextCursor: null };
@@ -65,6 +93,12 @@ test("native account readiness requires protocol, auth and catalog proof; rechec
   const row = runtime => rows.find(item => item.runtime === runtime);
   assert.equal(rows.length, 7);
   assert.equal(row("codex").readiness, "ready");
+  assert.deepEqual(row("codex").features.attachments, ["file"]);
+  const caps = backend._chatCapabilitiesForProfile({ id: "fixture", runtime: "codex" }, row("codex").features);
+  assert.equal(caps.attachments.image, undefined);
+  assert.ok(caps.attachments.file);
+  assert.equal(caps.attachments.pdf, undefined);
+  assert.equal(caps.steer, false);
   assert.equal(row("pi").readiness, "incompatible");
   assert.equal(row("grok-build").readiness, "unverified");
   assert.equal(row("deepseek-harness").readiness, "unverified");

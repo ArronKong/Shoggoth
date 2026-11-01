@@ -325,6 +325,11 @@ async function installApiFake(page, state) {
       await route.fulfill({ status: 503, json: { error: "native service is outside the provider fixture" } });
       return;
     }
+    if (url.pathname === "/__api/connectors/mcp/approvals") {
+      if (method !== "GET") return rejectUnexpected(["GET"]);
+      await route.fulfill({ json: { items: [], generation: 0 } });
+      return;
+    }
     if (!globalRoute && rawBackend !== state.backend) return rejectUnexpected([], 400);
     const backend = globalRoute ? state.backend : rawBackend;
     if (method === "GET" && state.readFailures.includes(url.pathname)) {
@@ -615,6 +620,8 @@ async function installApiFake(page, state) {
           } : {
             nameEditable: true,
             firstModelIsDefault: true,
+            apiOptions: ["", "chat_completions", "codex_responses", "anthropic_messages"],
+            defaultApi: "",
           },
         },
       });
@@ -1081,10 +1088,10 @@ async function providerScenario(browser, baseUrl) {
     const layoutByBackend = {};
     for (const { backend, page } of harnesses) {
       const providerTitle = backend === "hermes" ? "模型 Provider" : "模型 Provider（API Key）";
-      const titles = ["Provider 登录（OAuth）", providerTitle, "自定义端点"];
+      const titles = ["Provider 登录（OAuth）", providerTitle, "自定义模型"];
       const cards = [];
       for (const title of titles) {
-        const heading = title === "自定义端点"
+        const heading = title === "自定义模型"
           ? page.getByText(title, { exact: true })
           : page.getByRole("heading", { name: title, exact: true });
         assert.equal(await heading.count(), 1, `${backend}: 缺少唯一卡片 ${title}`);
@@ -1105,7 +1112,7 @@ async function providerScenario(browser, baseUrl) {
       }
       assert.ok(
         cards.every((card, index) => index === 0 || card.top > cards[index - 1].top),
-        `${backend}: 卡片顺序必须是 OAuth → Provider → 自定义端点`,
+        `${backend}: 卡片顺序必须是 OAuth → Provider → 自定义模型`,
       );
       assert.equal(new Set(cards.map((card) => card.left)).size, 1, `${backend}: 卡片左边缘未对齐`);
       assert.equal(new Set(cards.map((card) => card.width)).size, 1, `${backend}: 卡片宽度不一致`);
@@ -1246,7 +1253,7 @@ async function managedProviderScenario(browser, baseUrl) {
     await withManaged({ provider: { inConfig: false, baseUrl: null, keyConfigured: false, ...provider } },
       async ({ page, state }) => {
         const row = firstRow(page);
-        await row.getByText("目录缺少明确的协议或默认模型，请在下方自定义端点中填写端点、协议和真实模型 ID。", { exact: true }).waitFor();
+        await row.getByText("目录缺少明确的协议或默认模型，请在下方自定义模型中填写端点、协议和真实模型 ID。", { exact: true }).waitFor();
         assert.equal(await row.locator("[data-provider-secret] button").first().isDisabled(), true);
         assert.equal(await row.locator("[data-provider-fields]").locator(":scope > *").nth(0).locator("input").isDisabled(), true);
         assert.equal(callCount(state, "create-provider-secret") + callCount(state, "create-provider-endpoint"), 0);

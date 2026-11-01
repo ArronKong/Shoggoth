@@ -36,7 +36,10 @@ class GroupNativeExecutor {
     for (let i = 0; i < 16; i++) {
       const page = await this.listBindingModels({ profileId: member.profileId,
         bindingId: profile.selectedBindingId ?? profile.defaultBindingId, cursor, limit: 100 });
-      models.push(...page.models.map(item => ({ id: item.id, name: item.displayName || item.id, provider: profile.runtime })));
+      // A group member keeps its Agent's default source; a choice from another
+      // source (modelProviderRef) needs a per-conversation source it cannot store.
+      models.push(...page.models.filter(item => !item.modelProviderRef)
+        .map(item => ({ id: item.id, name: item.displayName || item.id, provider: profile.runtime })));
       if (models.length > 512) throw modelError("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
       if (!page.hasMore) {
         const current = productStore.resolveAgentRuntimeProfile(member.profileId, session?.runtimeBindingId ?? undefined);
@@ -236,6 +239,21 @@ class GroupNativeExecutor {
     const selected = [...messages].reverse().find((event) => event.content.phase === "final_answer")
       || [...messages].reverse().find((event) => event.content.phase == null);
     return selected ? (this.transcriptStore.displayEvent?.(session.profileId, session.id, selected) ?? selected).content.text : null;
+  }
+
+  replyMessages(run) {
+    const session = this.chatSessionStore.getSession(run.sourceId);
+    if (!session || session.profileId !== run.profileId) return [];
+    const events = this.transcriptStore.listEvents(session.profileId, session.id)
+      .filter(event => event.runId === run.id && event.kind === "assistant" && event.content?.delivery !== "async"
+        && [null, undefined, "commentary", "final_answer"].includes(event.content?.phase)
+        && validText(event.content?.text) && event.content.text.trim() && !isPassReply(event.content.text));
+    const selected = events.findLast(event => event.content.phase === "final_answer")
+      ?? events.findLast(event => event.content.phase == null);
+    const through = selected ? events.indexOf(selected) + 1 : events.length;
+    return events.slice(0, through).map((event, index) => ({ id: String(event.content.itemId ?? event.id ?? `message:${index}`),
+      text: redactGrantTokens((this.transcriptStore.displayEvent?.(session.profileId, session.id, event) ?? event).content.text),
+      final: event === selected }));
   }
 
   responseMetadata(run) {

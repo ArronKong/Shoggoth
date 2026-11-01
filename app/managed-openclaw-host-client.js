@@ -108,7 +108,7 @@ function createManagedOpenClawHostClient(options={}){
     throw failure("MANAGED_WORKER_INIT_INVALID");
   const init=initFor(options);const channelId=crypto.randomBytes(32).toString('hex');const {port1,port2}=new MessageChannel();
   const factory=options.workerFactory||((file,workerOptions)=>new Worker(file,workerOptions));if(typeof factory!=='function')throw failure("MANAGED_WORKER_INIT_INVALID");
-  if(options.commandTimeoutMs!==undefined&&(!Number.isSafeInteger(options.commandTimeoutMs)||options.commandTimeoutMs<25||options.commandTimeoutMs>600000))throw failure("MANAGED_WORKER_TIMEOUT_INVALID");
+  if(options.commandTimeoutMs!==undefined&&(!Number.isSafeInteger(options.commandTimeoutMs)||options.commandTimeoutMs<25||options.commandTimeoutMs>3600000))throw failure("MANAGED_WORKER_TIMEOUT_INVALID");
   let worker,closed=false,closing=false,closePromise=null,cleanupOperationId=null,modelHold=null,lastCredentialFinish=null,poisoned=false,cache=null,sequence=0;const pending=new Map();const listeners=new Set();const leases=new WeakMap();const records=new Set();
   let readyResolve,readyReject;const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});
   // Avoid an unhandled rejection when a composition root observes ready later.
@@ -158,7 +158,7 @@ function createManagedOpenClawHostClient(options={}){
   catch(error){clearTimeout(readyTimer);port1.close();port2.close();clear("MANAGED_WORKER_START_FAILED");throw error;}
   worker.on('error',()=>{clearTimeout(readyTimer);clear("MANAGED_WORKER_FAILED");});
   worker.on('exit',()=>{clearTimeout(readyTimer);if(!closed)clear("MANAGED_WORKER_EXITED");});
-  const timeouts={inspectSource:120000,prepareCandidate:600000,activateCandidate:180000,getCandidate:120000,getActive:120000,observe:15000,recover:15000,stopOwned:60000,request:60000,modelSupported:15000,modelAcquire:60000,modelAction:180000,modelTerminalRecover:90000};
+  const timeouts={inspectSource:120000,prepareCandidate:1800000,activateCandidate:180000,getCandidate:120000,getActive:120000,observe:15000,recover:15000,stopOwned:60000,request:60000,modelSupported:15000,modelAcquire:60000,modelAction:180000,modelTerminalRecover:90000};
   async function command(kind,args={},cleanupDeadlineAt=null,signal=null){
     argsFor(kind,args);signal?.throwIfAborted();const recoveryAllowed=()=>!closing&&modelHold&&(kind==='modelSupported'
       ||kind==='modelAcquire'&&args.recovery===true&&args.operationId===modelHold.operationId&&args.requestDigest===modelHold.requestDigest

@@ -8,7 +8,7 @@ const crypto = require("node:crypto");
 const { assertHookWorkspace } = require("./hook-process-host");
 const { workspaceAutoExecution, validWorkspaceExecutionArguments, widerWorkspaceAccess } = require("./workspace-execution-tools");
 const { serviceError, ensurePrivateDirectoryTree } = require("./security");
-const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
+const { executionTimeoutMs } = require("../execution-timeout");
 // Snapshot trusted launcher bytes before any model-controlled workspace writes.
 const supervisorSource = fs.readFileSync(path.join(__dirname, "workspace-execution-supervisor.js"));
 const inside = (child, root) => child === root || child.startsWith(root + path.sep);
@@ -158,7 +158,7 @@ class WorkspaceExecutionService {
     };
     return { readPaths: (raw.readPaths || []).map(normalize), writePaths: (raw.writePaths || []).map(normalize), network: raw.network === true };
   }
-  async #launch(command, workspace, cwd, timeoutMs, scope, access) {
+  async #launch(command, workspace, cwd, timeoutMs, scope, access, resolveSecretEnvironment = null) {
     scope.assertCurrent(); if (scope.signal?.aborted) fail("HOST_CAPABILITY_REVOKED");
     ensurePrivateDirectoryTree(this.cacheDir, this.paths.trustedRoot || path.dirname(this.cacheDir));
     const control = fs.mkdtempSync(path.join(this.cacheDir, "execution-"));
@@ -190,7 +190,7 @@ class WorkspaceExecutionService {
           try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") failure = serviceError("WORKSPACE_EXECUTION_CLEANUP_FAILED", "无法确认命令已停止"); }
         };
         const abort = () => stop("HOST_CAPABILITY_REVOKED");
-        const timer = setTimeout(() => stop("WORKSPACE_EXECUTION_TIMEOUT"), timeoutMs);
+        const timer = timeoutMs === null ? null : setTimeout(() => stop("WORKSPACE_EXECUTION_TIMEOUT"), timeoutMs);
         scope.signal?.addEventListener("abort", abort, { once: true });
         for (const channel of ["stdout", "stderr"]) child[channel].on("data", chunk => {
           const captured = output[channel]; captured.bytes += chunk.length;
@@ -232,7 +232,12 @@ class WorkspaceExecutionService {
             sandbox: "workspace", network: access?.network ? "approved-for-command" : "denied", cwd,
             ...(access && (access.readPaths.length || access.writePaths.length) ? { approvedAccess: access } : {}) });
         });
-        child.stdin.end(JSON.stringify({ parentPid: process.pid, command, cwd, timeoutMs, profile, env, processOwner, marker, guard }));
+        try {
+          scope.assertCurrent();
+          const secretEnv = resolveSecretEnvironment ? resolveSecretEnvironment() : {};
+          child.stdin.end(JSON.stringify({ parentPid: process.pid, command, cwd, timeoutMs, profile,
+            env: { ...env, ...secretEnv }, processOwner, marker, guard }));
+        } catch { stop("HOST_CAPABILITY_REVOKED"); }
         if (scope.signal?.aborted) abort();
       });
     } finally {
@@ -264,28 +269,36 @@ class WorkspaceExecutionService {
     })();
     return this.verified;
   }
-  async execute({ contract, run, args, scope }) {
+  async execute({ contract, run, args, scope, resolveSecretEnvironment = null }) {
     if (!workspaceAutoExecution(contract) || contract.runId !== run?.id || contract.profileId !== run.profileId
       || contract.workspace !== run.workspace || typeof scope?.assertCurrent !== "function"
       || scope.runId !== run.id || !validWorkspaceExecutionArguments(args)) fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
+    if (args.secretEnv && typeof resolveSecretEnvironment !== "function") fail("SECRET_TOOL_NOT_SUPPORTED");
     scope.assertCurrent();
     const release = this.pauseRuntimeTimeout?.({ runId: run.id, profileId: run.profileId, assertCurrent: scope.assertCurrent }) || (() => {});
     if (typeof release !== "function") fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
     const controller = new AbortController(); this.callControllers.add(controller);
     const signal = scope.signal ? AbortSignal.any([scope.signal, controller.signal]) : controller.signal;
+    const assertAuthority = () => {
+      scope.assertCurrent();
+      // An in-flight process retains its environment. Stop the owned process
+      // when a referenced credential expires or is revoked; do not leave it
+      // alive with a value that the Service has already removed.
+      if (args.secretEnv) resolveSecretEnvironment();
+    };
     const current = { ...scope, signal, assertCurrent() {
-      scope.assertCurrent(); if (signal.aborted) fail("HOST_CAPABILITY_REVOKED");
+      assertAuthority(); if (signal.aborted) fail("HOST_CAPABILITY_REVOKED");
     } };
     const monitor = setInterval(() => {
-      try { scope.assertCurrent(); } catch { controller.abort(); }
+      try { assertAuthority(); } catch { controller.abort(); }
     }, 100);
     monitor.unref?.();
-    const execution = this.#execute({ contract, run, args, scope: current });
+    const execution = this.#execute({ contract, run, args, scope: current, resolveSecretEnvironment });
     this.pending.add(execution);
     try { return await execution; }
     finally { clearInterval(monitor); this.callControllers.delete(controller); this.pending.delete(execution); release(); }
   }
-  async #execute({ contract, run, args, scope }) {
+  async #execute({ contract, run, args, scope, resolveSecretEnvironment }) {
     const workspace = this.#workspace(contract.workspace);
     if (this.blockedWorkspaces.has(workspace)) fail("WORKSPACE_EXECUTION_CLEANUP_FAILED");
     const access = this.#access(args.access);
@@ -311,7 +324,7 @@ class WorkspaceExecutionService {
     } catch (error) { if (error?.code === "HOST_CAPABILITY_REVOKED") throw error; fail("WORKSPACE_EXECUTION_SCOPE_INVALID"); }
     if (!(await this.verify())) fail("WORKSPACE_EXECUTION_UNAVAILABLE");
     scope.assertCurrent();
-    return this.#launch(args.command, workspace, cwd, args.timeoutMs ?? EXECUTION_TIMEOUT_MS, scope, access);
+    return this.#launch(args.command, workspace, cwd, executionTimeoutMs(args.timeoutMs), scope, access, resolveSecretEnvironment);
   }
   async close() {
     for (const controller of this.callControllers) controller.abort();

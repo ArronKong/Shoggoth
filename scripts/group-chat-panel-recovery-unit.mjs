@@ -86,7 +86,8 @@ async function harness(t, detail, messages = id => page(id), options = {}) {
       if (name.endsWith('/components/ui')) return { useToast: () => ({ error() {} }), useConfirm: () => async () => false, usePrompt: () => async () => null };
       if (name.endsWith('.css')) return new Proxy({}, { get: (_target, key) => key === '__esModule' ? undefined : String(key) });
       if (name.endsWith('/components/ChatMarkdown')) return { __esModule: true, default: props => React.createElement('p', null, props.text) };
-      if (name === './GroupChatMarkdown') return { __esModule: true, default: props => React.createElement('p', null, props.lead, props.text) };
+      if (name === './GroupChatMarkdown') return { __esModule: true, default: props => React.createElement('p', null, props.lead, props.text),
+        groupAttachmentsOutsideMarkdown: (_text, attachments) => attachments };
       if (name === './ChatPromptCard') return { __esModule: true, default: props => React.createElement('section', { 'data-approval': props.entry.id }) };
       if (name === './inspiration-media') return { MAX_INSPIRATION_ATTACHMENTS: 8, inspirationMediaLimit: () => 0 };
       return stubs;

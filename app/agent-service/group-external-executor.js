@@ -141,11 +141,13 @@ class GroupExternalExecutor {
     if (EXTERNAL_TERMINAL.has(snapshot.status)) {
       let text = snapshot.resultSummary;
       let responseMetadata = null;
+      let replyMessages = null;
       if (kind === "turn" && snapshot.status === "completed" && !observed.record.abortReason) {
         if (this.reading.has(key)) return;
         this.reading.add(key);
         try {
           text = await this.#readResult(observed.record.external);
+          try { replyMessages = (await this.activity(observed.record))?.textMessages ?? null; } catch {}
           // Older Hosts can omit this read-only capability. Missing usage must
           // never fail a verified answer or trigger another execution.
           try {
@@ -164,7 +166,7 @@ class GroupExternalExecutor {
           return;
         } finally { this.reading.delete(key); }
       }
-      if (!this.stopped) this.#settle(key, { status: snapshot.status, text, errorCode: snapshot.errorCode, responseMetadata });
+      if (!this.stopped) this.#settle(key, { status: snapshot.status, text, errorCode: snapshot.errorCode, responseMetadata, replyMessages });
       return;
     }
     if (kind === "turn" && observed.record.state === "waiting" && snapshot.status === "running" && !snapshot.attention?.active) {

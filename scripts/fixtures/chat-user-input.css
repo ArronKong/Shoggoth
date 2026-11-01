@@ -1,0 +1,20 @@
+html, body, #root { margin: 0; min-height: 100%; width: 100%; }
+body { background: #f5f5f5; }
+.input-preview { width: min(688px, calc(100% - 48px)); margin: 40px auto; color: #1a1a1a; }
+.input-preview__header { display: flex; align-items: center; gap: 12px; padding: 0 8px 24px; border-bottom: 1px solid #e4e1de; }
+.input-preview__avatar { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; background: #e4ece5; color: #3e5d45; font-size: 20px; font-weight: 600; }
+.input-preview__header strong { font-size: 18px; font-weight: 600; }
+.input-preview__header p { margin: 4px 0 0; color: #80766f; font-size: 12px; }
+.input-preview__preview { margin-left: auto; font-size: 11px; color: #80766f; }
+.input-preview__conversation { display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding-top: 24px; }
+.input-preview__conversation > p { margin: 0; }
+.input-preview__user { align-self: flex-end; max-width: 84%; padding: 14px 18px; border-radius: 20px; background: #e9e9e9; font-size: 14px; line-height: 1.7; }
+.input-preview__assistant { align-self: flex-start; max-width: 90%; padding: 18px 22px; border-radius: 4px 24px 24px; background: #fff; font-size: 14px; line-height: 1.8; }
+.input-preview .chat-prompt { margin: 0; max-width: none; }
+.input-preview__note { padding: 0 4px; font-size: 11px; line-height: 1.7; color: #80766f; }
+.input-preview__error { color: #b42318; font-size: 13px; }
+.input-preview__receipt { padding: 24px; background: #edf3ed; border-radius: 24px; }
+.input-preview__receipt > span { font-size: 12px; font-weight: 600; color: #3e5d45; }
+.input-preview__receipt p { margin: 12px 0 20px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.8; }
+.input-preview__receipt button { display: block; margin-top: 12px; border: 1px solid #c3cec4; padding: 8px 14px; border-radius: 999px; cursor: pointer; background: transparent; color: #3e5d45; font: inherit; font-size: 12px; }
+@media (max-width: 600px) { .input-preview { width: calc(100% - 32px); margin: 24px auto; } .input-preview .chat-prompt { padding: 20px; } }

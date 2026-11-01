@@ -8,15 +8,13 @@ const failure = code => Object.assign(new Error("聊天文字分片无效，需�
 // Run events keep the existing 48 KiB bound. Large immutable text snapshots
 // are transported as independently bounded pieces, without changing segment
 // or canonical source identity. The ordinary text path remains unchanged.
-function appendChatText(stream, type, payload, assertSecretSafe, runId) {
+function appendChatText(stream, type, payload) {
   if (!["text", "text.delta"].includes(type)) return stream.append(type, payload);
   const bytes = Buffer.from(JSON.stringify(payload));
   if (bytes.length <= 40 * 1024) return stream.append(type, payload);
   if (bytes.length > MAX_TEXT_BYTES) throw failure("RUN_EVENT_TOO_LARGE");
-  // Inspect the original value before base64 wrapping; a transport encoding
-  // must never turn secret-bearing content into an accepted public event.
-  const accepted = assertSecretSafe(payload, Object.freeze({ runId, type, kind: "fullText" }));
-  if (accepted === false || accepted?.then) throw failure("RUN_EVENT_SECRET_REJECTED");
+  // Fragmentation changes transport only. User-visible conversation text must
+  // retain the same contents whether it fits one event or several fragments.
   const transferId = randomUUID(), sha256 = hash(bytes), count = Math.ceil(bytes.length / CHUNK_BYTES);
   for (let index = 0; index < count; index += 1) stream.append("text.fragment", {
     version: 1, transferId, type, index, count, byteLength: bytes.length, sha256,

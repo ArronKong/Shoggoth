@@ -16,6 +16,7 @@ import { getModelOperationRecoverySnapshot, modelOperationRecoveryBlocks, subscr
 import { useSlowPending } from "./useSlowPending";
 import { usePageCache } from "../../lib/usePageCache";
 import { endpointMutationNotice } from "./endpoint-mutation-state";
+import { IconTrash } from "../keys/ProviderCredentialFields";
 import styles from "./CustomEndpointsPanel.module.css";
 // Custom/fixture controllers stay isolated unless they explicitly share a snapshot scope.
 const controllerKeys = new WeakMap<EndpointController, string>();
@@ -352,7 +353,10 @@ export default function CustomEndpointsPanel({
               <span className={styles.endpointActions}>
                 {endpoint.source !== "direct-config" && (
                   <button
-                    className="btn-danger"
+                    type="button"
+                    className={deleteRecovery?.endpoint.id === endpoint.id ? "btn-secondary btn-sm" : styles.deleteButton}
+                    title={t(deleteRecovery?.endpoint.id === endpoint.id ? "models.settings.endpoints.retryMutation" : "common.delete")}
+                    aria-label={`${endpoint.name} — ${t(deleteRecovery?.endpoint.id === endpoint.id ? "models.settings.endpoints.retryMutation" : "common.delete")}`}
                     onClick={() => void doDelete(endpoint)}
                     disabled={Boolean(
                       deleting === endpoint.id || !deleteRecovery && modelOperationRecoveryBlocks(controller.backend, endpoint.id)
@@ -361,7 +365,7 @@ export default function CustomEndpointsPanel({
                   >
                     {deleteRecovery?.endpoint.id === endpoint.id
                       ? t("models.settings.endpoints.retryMutation")
-                      : t("common.delete")}
+                      : <IconTrash />}
                   </button>
                 )}
               </span>

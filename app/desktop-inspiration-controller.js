@@ -13,7 +13,7 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
   let stoppingBackend = false;
   let visibleRequested = false, presentationId = 0;
   let hideTimer = null;
-  let registered = null, captureTimer = null, captureOwner = null;
+  let registered = null, captureOwner = null;
   const handles = [], listeners = [];
   const configured = () => normalizeInspirationShortcut(configStore.read().inspirationShortcut) || DEFAULT_INSPIRATION_SHORTCUT;
   const trustedWindow = (event, candidate) => {
@@ -103,7 +103,6 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
     } catch { return false; }
   };
   const stopCapture = () => {
-    clearTimeout(captureTimer); captureTimer = null;
     captureOwner?.removeListener("blur", stopCapture);
     captureOwner?.removeListener("closed", stopCapture);
     captureOwner = null;
@@ -128,7 +127,6 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
     if (registered) globalShortcut.unregister(registered);
     registered = null;
     captureOwner.once("blur", stopCapture); captureOwner.once("closed", stopCapture);
-    captureTimer = setTimeout(stopCapture, 30_000);
     return state();
   });
   bind("set-shortcut", false, input => {

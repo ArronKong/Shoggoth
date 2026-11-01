@@ -13,7 +13,7 @@ const MAX_SESSIONS = 2;
 // worker grants, not a deadline on the owning WorkRun or public session.
 const DRIVER_GRANT_SECONDS = 900;
 const DRIVER_RENEW_MARGIN_MS = 60_000;
-const WORKER_IDLE_MS = 120_000;
+const WORKER_IDLE_MS = 600_000;
 const MAX_ELEMENTS = 300;
 const MAX_TREE_BYTES = 64 * 1024;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -557,7 +557,7 @@ class ComputerUseController {
     return found;
   }
 
-  async snapshot(input) {
+  async snapshot(input, { textOnly = false, projectImage = null } = {}) {
     return this.#withSession(input, async record => {
       if (this.isScreenLocked()) {
         this.#pause(record, "screen_locked");
@@ -571,7 +571,7 @@ class ComputerUseController {
         window_id: input.windowId,
         max_elements: MAX_ELEMENTS,
         max_depth: 20,
-        include_screenshot: true,
+        include_screenshot: !textOnly,
       });
       if (!Array.isArray(value.elements) || value.elements.length > MAX_ELEMENTS
         || typeof value.snapshot_id !== "string") {
@@ -605,7 +605,7 @@ class ComputerUseController {
       };
       record.updatedAt = this.now();
       record.idleSeconds = this.getSystemIdleTime();
-      const image = await this.#storeSnapshotImage(record, result.images);
+      const image = textOnly ? null : await this.#storeSnapshotImage(record, result.images, projectImage);
       return {
         sessionId: record.id,
         snapshotRevision: revision,
@@ -619,14 +619,21 @@ class ComputerUseController {
     });
   }
 
-  async #storeSnapshotImage(record, images) {
+  async #storeSnapshotImage(record, images, projectImage = null) {
     if (!Array.isArray(images) || images.length === 0) return null;
-    const source = images[0];
+    let source = images[0];
     if (!source || !["image/png", "image/jpeg"].includes(source.mimeType)
       || typeof source.dataBase64 !== "string") throw computerError("COMPUTER_DRIVER_RESPONSE_INVALID");
-    const data = Buffer.from(source.dataBase64, "base64");
+    let data = Buffer.from(source.dataBase64, "base64");
     if (data.length === 0 || data.length > MAX_IMAGE_BYTES
       || data.toString("base64") !== source.dataBase64) throw computerError("COMPUTER_DRIVER_RESPONSE_INVALID");
+    if (projectImage) {
+      try {
+        const safe = await projectImage({ mimeType: source.mimeType, data: source.dataBase64 });
+        if (safe?.mimeType !== "image/png" || !Buffer.isBuffer(safe.data) || !safe.data.length || safe.data.length > MAX_IMAGE_BYTES) return null;
+        data = safe.data; source = { mimeType: safe.mimeType };
+      } catch { return null; }
+    }
     const directoryName = crypto.createHash("sha256").update(record.profileId).digest("hex").slice(0, 32);
     const directory = path.join(this.paths.computerArtifactsDir, directoryName);
     ensurePrivateDirectoryTree(directory, this.paths.trustedRoot);
@@ -713,7 +720,7 @@ class ComputerUseController {
     throw computerError("COMPUTER_ARGUMENTS_INVALID");
   }
 
-  async action(input) {
+  async action(input, { resolveSecretText = null } = {}) {
     return this.#withSession(input, async record => {
       const snapshot = this.#assertActionReady(record, input);
       let name;
@@ -743,8 +750,8 @@ class ComputerUseController {
           args = this.#targetArgs(snapshot, { ...input, sessionLabel: record.sessionLabel }, {
             allowCoordinates: false, requireRef: true,
           });
-          if (args._secure) throw computerError("COMPUTER_SECURE_INPUT_FORBIDDEN");
-          args.text = input.text;
+          if (args._secure && !resolveSecretText) throw computerError("COMPUTER_SECURE_INPUT_FORBIDDEN");
+          args.text = resolveSecretText ? resolveSecretText(input.text) : input.text;
         } else if (input.action === "key") {
           name = input.modifiers.length > 0 ? "hotkey" : "press_key";
           args = input.ref ? this.#targetArgs(snapshot, {

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "sourceCommit": "f9e027330ed345a47cae310e8538db2589d07d3b",
+  "purpose": "Frozen old readers for Product16 and prepared execution backward compatibility tests",
+  "sources": {
+    "product-store.js": {
+      "file": "runtime-prepared-legacy-product-store-v15.source.cjs",
+      "sha256": "25020d53c920ff091deb076c665d0749b853c44a0cb2cd13bb48ed788e68c0c0"
+    },
+    "run-execution-store.js": {
+      "file": "runtime-prepared-legacy-run-execution-store-v2.source.cjs",
+      "sha256": "3da9152196150ae186196948dd802acb8c0fb7ddac320145ffe03f1a7ec051f6"
+    },
+    "runtime-acp-handle.js": {
+      "file": "runtime-prepared-legacy-acp-handle-v1.source.cjs",
+      "sha256": "32cb5acda4770594ab47e3218b4a538a5a36e9b0361a88165f31db5e4b13804b"
+    }
+  }
+}

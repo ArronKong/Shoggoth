@@ -102,6 +102,34 @@ for (const runId of [undefined, null, "", 123, {}]) {
   assert.equal(timelines(legacy).length, 3, "without Run or call ownership, legacy gap boundaries remain");
 }
 
+// Gateway 2026.9.9 projects Cron inputs as forwarded assistant messages and
+// strips the [cron:...] envelope. Producer provenance and the boundary survive.
+const projectedCronInput = {
+  role: "assistant", timestamp: 183000,
+  content: "你是定时任务后台执行器。生成《设计师日报》。This is an unattended scheduled run.",
+  provenance: { kind: "internal_system", sourceTool: "cron", jobId: "fixture-cron" },
+  __openclaw: { id: "cron-input", turnBoundary: true },
+  senderLabel: "Forwarded from Cron: designers-daily-digest",
+  senderSession: { label: "Cron: designers-daily-digest" },
+};
+const cronInputBefore = JSON.stringify(projectedCronInput);
+const normalizedCronInput = normalize(projectedCronInput);
+assert.equal(normalizedCronInput.role, "user", "a projected Cron input retains input semantics for hiding, previews and unread");
+assert.equal(normalizedCronInput.provenance.sourceTool, "cron", "the existing visibility rule can still identify the producer");
+assert.equal(timelines([...sample, normalizedCronInput, ...turn("run-1", 184000, 1000, "after-cron")]).length, 2,
+  "a hidden projected Cron input must separate runs even with a reused run identity");
+assert.equal(JSON.stringify(projectedCronInput), cronInputBefore, "normalization never changes the Gateway's source message");
+for (const output of [
+  { ...projectedCronInput, __openclaw: { id: "final" }, content: "设计师日报暂停：bird 当前无可用数据（0/10）。" },
+  { ...projectedCronInput, provenance: undefined },
+  { ...projectedCronInput, provenance: { kind: "external_user", sourceTool: "cron" } },
+  { ...projectedCronInput, provenance: { kind: "internal_system", sourceTool: "exec" } },
+  { ...projectedCronInput, provenance: undefined, automation: "cron" },
+]) assert.equal(normalize(output).role, "assistant", "assistant output requires both official Cron provenance and an input boundary to be reclassified");
+assert.equal(normalize({ ...projectedCronInput, role: "user", provenance: undefined, __openclaw: undefined }).role, "user",
+  "a human follow-up with the same task words is unchanged");
+console.log("PASS projected OpenClaw Cron input: producer identity, turn boundaries, assistant output and immutable source");
+
 const hermes = turn(undefined).map(message => ({ ...message, historySource: "hermes" }));
 assert.equal(timelines(hermes).length, 1, "Hermes tool latency does not split a stored turn");
 assert.equal(timelines([...hermes, { role: "user", automation: "cron", parts: [] }, ...hermes]).length, 2,

@@ -45,11 +45,13 @@ test("closing the client while a product confirmation is pending never sends", a
   f.send({ id: 2, method: "tools/call", params: { name: "group_chat_dispatch", arguments: args } });
   await f.next(frame => frame.method === "elicitation/create");
   f.input.end();
-  assert.equal((await f.next(frame => frame.id === 2)).result.isError, true);
+  assert.deepEqual(await f.next(frame => frame.id === 2), { jsonrpc: "2.0", id: 2,
+    error: { code: -32800, message: "Request cancelled" } });
+  assert.equal(f.frames.filter(frame => frame.id === 2).length, 1);
   assert.equal(f.writes(), 0);
 });
 
-test("ordinary input keeps its finite deadline", async t => {
+test("ordinary input enforces an explicitly configured finite deadline", async t => {
   const f = await fixture(t);
   f.send({ id: 2, method: "tools/call", params: { name: "request_user_input", arguments: { questions: [
     { id: "choice", header: "选择", question: "选哪个？", options: [{ label: "甲", description: "第一个" }, { label: "乙", description: "第二个" }] },

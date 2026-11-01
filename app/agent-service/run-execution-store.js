@@ -6,7 +6,7 @@ const path = require("node:path");
 const { atomicWritePrivateFile, preparePrivateParent, readPrivateFile,
   recoverInterruptedPrivateFile, statIfExists } = require("./private-file");
 const { serviceError } = require("./security");
-const { runtimeBinding } = require("./runtime-adapter");
+const { runtimeBinding, runtimeAttemptRef } = require("./runtime-adapter");
 const { validateFrozenExecutionProviderRoute } = require("./execution-provider-route");
 
 // Recovery includes the encoded context plus the command and encryption
@@ -48,8 +48,9 @@ class RunExecutionStore {
   }
 
   #validate(value, run) {
-    if (!value || ![1, 2].includes(value.version) || Object.keys(value).sort().join(",")
-      !== "command,contract,identity,version" || fingerprint(value.identity) !== fingerprint(identity(run))) {
+    if (!value || ![1, 2, 3].includes(value.version) || Object.keys(value).sort().join(",")
+      !== (value.version === 3 ? "attempt,command,contract,identity,version" : "command,contract,identity,version")
+      || fingerprint(value.identity) !== fingerprint(identity(run))) {
       throw invalid();
     }
     const c = value.contract;
@@ -77,10 +78,18 @@ class RunExecutionStore {
     try {
       runtimeBinding({ runtime: c.runtime, runtimeProfileId: c.runtimeProfileId, runtimeAccountId: c.runtimeAccountId });
     } catch { throw invalid(); }
-    if (value.version === 2) {
+    if (value.version >= 2) {
       try { validateFrozenExecutionProviderRoute(c); } catch { throw invalid(); }
       if (!(c.bindingId === null || (typeof c.bindingId === "string" && c.bindingId.length > 0
         && c.bindingId.length <= 128 && !c.bindingId.includes("\0")))) throw invalid();
+    }
+    if (value.version === 3) {
+      try {
+        const { runtime, runtimeProfileId, runtimeAccountId, ...details } = value.attempt || {};
+        const attempt = runtimeAttemptRef({ runtime, runtimeProfileId, runtimeAccountId }, details);
+        if (["runtime", "runtimeProfileId", "runtimeAccountId"].some(key => attempt[key] !== c[key])
+          || attempt.operationId !== command.operationId || attempt.dispatchState !== "prepared") throw invalid();
+      } catch { throw invalid(); }
     }
     return value;
   }
@@ -90,6 +99,18 @@ class RunExecutionStore {
     const { runtimeAccountGeneration: ignored, ...frozenContract } = contract;
     const record = this.#validate({ version: 2, identity: identity(run),
       contract: frozenContract, command: structuredClone(command) }, run);
+    return this.#persist(record, run, fence, cryptoOptions);
+  }
+
+  async putAttempt(run, attempt, fence = () => {}, cryptoOptions = {}) {
+    const previous = await this.get(run);
+    fence();
+    if (!previous || (previous.version === 3 && fingerprint(previous.attempt) !== fingerprint(attempt))) throw invalid();
+    const record = this.#validate({ ...previous, version: 3, attempt: structuredClone(attempt) }, run);
+    return this.#persist(record, run, fence, cryptoOptions);
+  }
+
+  async #persist(record, run, fence, cryptoOptions) {
     let plaintext = Buffer.from(JSON.stringify(record));
     let ciphertext;
     try {

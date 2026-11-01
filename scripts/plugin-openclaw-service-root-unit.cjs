@@ -46,7 +46,7 @@ async function run(f,beforeUse){let child;const messages=[];let output='';let re
 }
 async function listen(dir,marker,token){let calls=0;const target=path.join(dir,'run/service.sock');const sockets=new Set();
  const server=net.createServer(socket=>{sockets.add(socket);socket.once('close',()=>sockets.delete(socket));let bytes='';socket.on('data',chunk=>{
-  bytes+=chunk;if(!bytes.endsWith('\n'))return;const frame=JSON.parse(bytes);assert.equal(frame.version,11);assert.equal(frame.method,'fixture.read');
+  bytes+=chunk;if(!bytes.endsWith('\n'))return;const frame=JSON.parse(bytes);assert.equal(frame.version,require('../app/agent-service/service-protocol-version').SERVICE_PROTOCOL_VERSION);assert.equal(frame.method,'fixture.read');
   if(token)assert.equal(frame.params.credentialToken,token);calls+=1;socket.end(JSON.stringify({id:frame.id,ok:true,result:{marker}})+'\n');});});
  servers.push({server,sockets});await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(target,resolve);});fs.chmodSync(target,0o600);return {calls:()=>calls,target};}
 async function main(){try{

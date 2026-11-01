@@ -28,7 +28,7 @@ const ROOT = path.resolve(__dirname, '../..');
 async function startInspirationFixture(options = {}) {
   // Leave room for app-host.sock within macOS's Unix socket path limit.
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'shg-insp-')));
-  const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, 'state'),
+  const paths = resolveServicePaths({ homeDir: options.isolatedHome ? root : undefined, trustedRoot: root, stateRoot: path.join(root, 'state'),
     profileRoot: path.join(root, 'profiles'), cacheRoot: path.join(root, 'cache') });
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (value) => Buffer.from(value), decryptString: (value) => Buffer.from(value).toString() };
   const responsesPath = path.join(root, 'responses.jsonl');
@@ -60,6 +60,7 @@ async function startInspirationFixture(options = {}) {
         CODEX_FAKE_PROFILE: `inspiration-${hostOptions.runtimeProfileId}`, CODEX_FAKE_ID_NAMESPACE: hostOptions.runtimeProfileId,
         CODEX_FAKE_ELICITATION_MODE: 'valid', CODEX_FAKE_ELICITATION_RESPONSE_PATH: responsesPath,
         CODEX_FAKE_INDEPENDENT_IDS: '1', CODEX_FAKE_GROUP_CONTROLLED: '1', CODEX_FAKE_GROUP_CONTROL_PATH: groupControlPath,
+        ...(options.modelCaptureUrl ? { CODEX_FAKE_MODEL_CAPTURE_URL: options.modelCaptureUrl } : {}),
       } } : {}),
       spawnProcess(_cmd, _args, options) { return spawn(process.execPath, [path.join(ROOT, 'scripts/fixtures/codex-app-server-fake.cjs')], options); },
       requestTimeoutMs: 2000, initializeTimeoutMs: 2000, serverRequestTimeoutMs: 300000,
@@ -68,11 +69,22 @@ async function startInspirationFixture(options = {}) {
   const service = createAgentService({ paths, safeStorage, runtimePool, version: 'inspiration-l2', ...options.serviceOptions });
   await service.start();
   const token = readClientToken(paths);
-  const ipc = (method, params) => requestService(paths, { id: crypto.randomUUID(), token, version: PROTOCOL_VERSION, method, params });
+  const ipc = async (method, params) => {
+    try { return await requestService(paths, { id: crypto.randomUUID(), token, version: PROTOCOL_VERSION, method, params }); }
+    catch (error) { error.fixtureMethod = method; throw error; }
+  };
   const profile = service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
-  for (let index = 1; index < (options.agentCount || 1); index++) {
-    await ipc('agent.create', { operationId: `inspiration-fixture-agent-${index}`, backendId: 'shoggoth',
-      name: `Growth Agent ${index + 1}`, defaultCwd: null, createdAt: Date.now() });
+  try {
+    for (let index = 1; index < (options.agentCount || 1); index++) {
+      await ipc('agent.create', { operationId: `inspiration-fixture-agent-${index}`, backendId: 'shoggoth',
+        name: `Growth Agent ${index + 1}`, defaultCwd: null, createdAt: Date.now() });
+    }
+  } catch (error) {
+    // A timed-out durable creation may already have committed. Never replay it;
+    // drain the owned Service before removing this disposable fixture root.
+    try { await service.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+    catch (cleanupError) { error.fixtureCleanupError = cleanupError.code || 'FIXTURE_CLEANUP_FAILED'; }
+    throw error;
   }
   let helperAuthentications = 0;
   const loadSession = async () => {
@@ -91,7 +103,7 @@ async function startInspirationFixture(options = {}) {
       getNativeMemorySharingConfig: () => require('../../app/core/config-store').projectNativeMemorySharingConfig(options.configStore.read()),
       updateNativeMemoryConfig: input => memoryConfig.update(input),
     } : {}) });
-  registry.register(backend); registry.setInspirationOwner(backend);
+  registry.register(backend); registry.setInspirationOwner(backend); registry.setChatSecretOwner(backend);
   for (const extra of options.extraBackends || []) registry.register(extra);
   // Registry installs the same session/activity observers as the desktop app.
   if ((await registry.start()).get(backend.id) !== true) { await service.stop(); throw new Error('Fixture backend did not start'); }

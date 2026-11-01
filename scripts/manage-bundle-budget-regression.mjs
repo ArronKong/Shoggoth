@@ -4,7 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const distDir = path.join(projectRoot, "app/manage-ui/dist");
+const explicitDist = process.argv.find(value => value.startsWith("--dist="))?.slice(7);
+const distDir = explicitDist ? path.resolve(explicitDist) : path.join(projectRoot, "app/manage-ui/dist");
 const htmlPath = path.join(distDir, "index.html");
 const html = fs.readFileSync(htmlPath, "utf8");
 const entryMatch = /<script[^>]+type="module"[^>]+src="([^"]+\.js)"/.exec(html)

@@ -160,36 +160,57 @@ const handlerSource = ts.transpileModule(
 for (const [backendId, native, args, expectedWorkspace] of [
   ["shoggoth", true, "", null],
   ["codex", true, "   ", null],
+  ["claude-code", true, "", null],
+  ["grok-build", true, "", null],
+  ["opencode", true, "", null],
+  ["pi", true, "", null],
+  ["antigravity", true, "", null],
   ["deepseek-harness", true, "  /tmp/日常工作区 with spaces  ", "/tmp/日常工作区 with spaces"],
   ["openclaw", false, "", undefined],
   ["hermes", false, "", undefined],
 ]) {
-  const key = `agent:${backendId}-fixture:parent`, newKey = `agent:${backendId}-fixture:fresh`;
-  const active = { model: "fixture-model", modelProvider: "fixture-provider" };
-  const requests = [], registered = [], opened = [], toasts = [];
-  const context = {
-    agentOf: () => `${backendId}-fixture`, backendOfSession: () => backendId,
-    chatBackendDescriptors: new Map([[backendId, { surfaces: { agentHarness: native } }]]),
-    models: [], active, modelsBackendRef: { current: backendId }, inheritedModelChoice: () => undefined,
-    setToast: value => toasts.push(value), t: value => value,
-    pushLocal: () => assert.fail("/new 不应要求输入工作区或报告缺失 key"),
-    send: async (method, params) => { requests.push({ method, params }); return { payload: { key: newKey } }; },
-    ensureSessionRow: rowKey => registered.push(rowKey),
-    openSession: rowKey => { assert.deepEqual(registered, [rowKey]); opened.push(rowKey); },
-    setTimeout: () => {},
-  };
-  vm.runInNewContext(handlerSource, context);
-  assert.equal(await context.runNew(key, args), true);
-  assert.equal(requests.length, 1, "/new 只创建一次会话，不发送模型请求");
-  const [{ method, params }] = requests;
-  assert.equal(method, "sessions.create");
-  assert.equal(params.parentSessionKey, key);
-  assert.equal(params.workspace, expectedWorkspace, `${backendId}: 裸 /new 必须明确使用 Agent 默认目录`);
-  assert.equal(Object.hasOwn(params, "workspace"), native, "外部后端继续使用其原有创建契约");
-  assert.equal(params.model, active.model);
-  assert.equal(params.modelProvider, active.modelProvider);
-  assert.deepEqual(opened, [newKey]);
-  assert.equal(toasts.at(-1).kind, "success");
+  for (const [permissionMode, createdPermissionMode] of [
+    ["full-access", "request-approval"], ["request-approval", "full-access"],
+    ["auto-review", "auto-review"], ["ask", "auto-review"], [undefined, "auto-review"],
+    ["full-access", undefined],
+  ]) {
+    const key = `agent:${backendId}-fixture:parent`, newKey = `agent:${backendId}-fixture:fresh`;
+    const active = { model: "fixture-model", modelProvider: "fixture-provider", permissionMode };
+    const requests = [], registered = [], opened = [], toasts = [];
+    let syntheticRow;
+    let permissionAtOpen;
+    const context = {
+      agentOf: () => `${backendId}-fixture`, backendOfSession: () => backendId,
+      chatBackendDescriptors: new Map([[backendId, { surfaces: { agentHarness: native } }]]),
+      models: [], active, modelsBackendRef: { current: backendId }, inheritedModelChoice: () => undefined,
+      setToast: value => toasts.push(value), t: value => value,
+      pushLocal: () => assert.fail("/new 不应要求输入工作区或报告缺失 key"),
+      send: async (method, params) => { requests.push({ method, params }); return { payload: { key: newKey, permissionMode: createdPermissionMode } }; },
+      ensureSessionRow: (rowKey, updatedAt, seed) => { registered.push(rowKey); syntheticRow = seed; },
+      openSession: rowKey => {
+        assert.deepEqual(registered, [rowKey]);
+        permissionAtOpen = syntheticRow.permissionMode;
+        opened.push(rowKey);
+      },
+      setTimeout: () => {},
+    };
+    vm.runInNewContext(handlerSource, context);
+    assert.equal(await context.runNew(key, args), true);
+    assert.equal(requests.length, 1, "/new 只创建一次会话，不发送模型请求");
+    const [{ method, params }] = requests;
+    assert.equal(method, "sessions.create");
+    assert.equal(params.parentSessionKey, key);
+    assert.equal(params.workspace, expectedWorkspace, `${backendId}: 裸 /new 必须明确使用 Agent 默认目录`);
+    assert.equal(Object.hasOwn(params, "workspace"), native, "外部后端继续使用其原有创建契约");
+    assert.equal(params.model, active.model);
+    assert.equal(params.modelProvider, active.modelProvider);
+    assert.equal(Object.hasOwn(params, "permissionMode"), false,
+      "permission inheritance stays authoritative in the backend, not a UI setting write");
+    assert.deepEqual(opened, [newKey]);
+    assert.equal(permissionAtOpen, native ? createdPermissionMode : undefined,
+      `${backendId}: the first render must use the created session permission, never a derived or stale parent value`);
+    assert.equal(toasts.at(-1).kind, "success");
+  }
 }
 
-console.log("chat-new-session-recovery-regression: native slash recovery and workspace defaults passed");
+console.log("chat-new-session-recovery-regression: native slash recovery, workspace defaults, and 60 creation permission cases passed");

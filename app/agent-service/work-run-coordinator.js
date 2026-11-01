@@ -10,8 +10,9 @@ const { assertNoSensitiveFields } = require("./product-store");
 const { TextDecoder } = require("node:util");
 const { inspirationUserText, inspirationUserAttachments } = require("../core/inspiration-chat-history");
 const { validAttachments, attachmentFields } = require("./inspiration-media");
-const { normalizePluginSelection, resolvePluginSelection } = require("./plugin-chat-selection");
+
 const { prepareChatAttachments, chatAttachmentDirectory, attachmentPrompt } = require("./chat-attachments");
+const { canUseOriginal, prepareForSend, projectTextOrOriginal } = require("../core/chat-secret-fallback");
 const { createRunEventStream } = require("./run-event-stream");
 const { createMemoryModelTextStream } = require("./memory-model-text-stream");
 const { domainOperationId, domainThreadSource } = require("./domain-work-run-executor");
@@ -28,6 +29,7 @@ const { isDesktopBinding } = require("./codex-desktop-session-store");
 const { RuntimeMcpCallBindings, parseBindingElicitation } = require("./runtime-mcp-call-binding");
 const { runtimeCommandUsesReservedHostCapability } = require("./runtime-host-command-policy");
 const { classifyProviderFailure } = require("./runtime-provider-errors");
+const { runtimeFailureDetail, runtimeFailureFromError } = require("./runtime-failure-detail");
 const { startManualCompaction } = require("./runtime-manual-compaction");
 const {
   STARTUP_STAGES,
@@ -41,7 +43,7 @@ const {
 } = require("./runtime-stage-error");
 const { transcriptEventId } = require("./transcript-store");
 const { SESSION_RUNTIME_PUBLIC_MESSAGES } = require("./session-runtime-protocol");
-const { resolveRuntimePermissionMode, adapterPermissionMode, isUnifiedPermissionMode } = require("./runtime-permission-modes");
+const { resolveRuntimePermissionMode, adapterPermissionMode, isUnifiedPermissionMode, runtimePermissionModeOptions } = require("./runtime-permission-modes");
 const { automaticRuntimeApproval } = require("./runtime-automatic-approval");
 const { CRON_INSTRUCTIONS, readProductConfirmationIdentity, cronApprovalDescriptor, cronApprovalDisplay, cronDenialResponse } = require("./cron-approval-policy");
 const { workspaceAutoExecution, workspaceExecutionInstructions } = require("./workspace-execution-tools");
@@ -62,7 +64,9 @@ const {
   runtimeBinding,
   runtimeSessionRef,
   runtimeTurnRef,
+  runtimeAttemptRef,
 } = require("./runtime-adapter");
+const codexSessionProvider = require("./codex-session-provider");
 
 const ACTIVE_COMMAND_STATES = new Set(["pending", "dispatching"]);
 const { validateRuntimeContextUsage, runtimeContextCapabilities, nativeCompaction, selfManagedCompaction,
@@ -84,7 +88,8 @@ const DEFAULT_TERMINAL_STREAM_TTL_MS = 15 * 60 * 1_000;
 const MAX_TERMINAL_STREAM_TTL_MS = 24 * 60 * 60 * 1_000;
 const MAX_CONTROL_OPERATIONS = 1_024;
 const MAX_CONTROL_MESSAGE_BYTES = 64 * 1024;
-const MAX_PROMPT_TIMEOUT_MS = DEFAULT_PROMPT_TIMEOUT_MS;
+const { MAX_EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
+const MAX_PROMPT_TIMEOUT_MS = MAX_EXECUTION_TIMEOUT_MS;
 const MAX_PENDING_REQUESTS = 100;
 const MAX_SESSION_APPROVAL_SCOPES = 256;
 const MAX_DOMAIN_EXECUTIONS = 8_192;
@@ -132,10 +137,12 @@ const RUNTIME_PREPARATION_CONFLICT_CODES = new Set([
   "RUNTIME_PERMISSION_POLICY_CONFLICT", "RUNTIME_ACCOUNT_BINDING_CONFLICT", "RUNTIME_HOOK_SCOPE_CONFLICT",
 ]);
 const PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES = new Set([
+  ...Object.keys(require("../core/chat-secret-contract").SECRET_MESSAGES),
   ...RUNTIME_PREPARATION_CONFLICT_CODES,
   "RUNTIME_INCOMPATIBLE",
+  "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED",
   "PROACTIVE_RUNTIME_UNVERIFIED", "PROACTIVE_SCOPE_INVALID",
-  "EXECUTION_CONTRACT_STALE",
+  "EXECUTION_CONTRACT_STALE", "CONTEXT_SOURCE_STALE",
   "RUNTIME_PROTOCOL_ERROR", "RUNTIME_OUTPUT_LIMIT_EXCEEDED", "RUNTIME_CONNECTION_LOST", "RUNTIME_HOST_RESTARTED",
   "RUNTIME_PERMISSION_REQUIRED",
   "RUNTIME_APPROVAL_UNAVAILABLE",
@@ -145,6 +152,7 @@ const PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES = new Set([
   "ANTIGRAVITY_ACP_OUTBOUND_FRAME_TOO_LARGE", "ANTIGRAVITY_ACP_REQUEST_TIMEOUT",
   "ANTIGRAVITY_ACP_WRITE_FAILED", "ANTIGRAVITY_ACP_STDIN_CLOSED",
   "RUNTIME_QUOTA_EXHAUSTED",
+  "RUNTIME_MAX_TOKENS", "RUNTIME_MAX_TURN_REQUESTS", "RUNTIME_REFUSED",
   "RUNTIME_RATE_LIMITED",
   "RUNTIME_SPENDING_LIMIT_REACHED",
   "RUNTIME_ACCOUNT_BLOCKED",
@@ -208,8 +216,11 @@ const SAFE_RUNTIME_CAUSE_CODES = new Map([
     "ANTIGRAVITY_ACP_PROCESS_EXITED"].map((code) => [code, "RUNTIME_CONNECTION_LOST"]),
 ]);
 const START_OPERATIONAL_ERROR_CODES = new Set([
+  ...Object.keys(require("../core/chat-secret-contract").SECRET_MESSAGES),
   ...RUNTIME_PREPARATION_CONFLICT_CODES,
   "RUNTIME_INCOMPATIBLE",
+  "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED",
+  "RUNTIME_ATTACHMENT_UNSUPPORTED",
   "PROACTIVE_RUNTIME_UNVERIFIED", "PROACTIVE_SCOPE_INVALID",
   "CONTEXT_SOURCE_STALE",
   "CONTEXT_COMPACTION_REQUIRED", "RUNTIME_COMPACTION_UNSUPPORTED",
@@ -253,6 +264,16 @@ function ownDataErrorCode(error) {
   } catch {
     return null;
   }
+}
+
+function runtimeErrorChainHasCode(error, expected) {
+  let current = error;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    if (ownDataErrorCode(current) === expected) return true;
+    try { current = Object.getOwnPropertyDescriptor(current, "cause")?.value ?? null; }
+    catch { return false; }
+  }
+  return false;
 }
 
 function publicRuntimeOperationalErrorCode(error) {
@@ -308,6 +329,8 @@ function workingContextFailureBlocks(error) {
 }
 
 function failedTurnErrorCode(turn, fallback = "RUNTIME_TURN_FAILED") {
+  const acpReason = { max_tokens: "RUNTIME_MAX_TOKENS", max_turn_requests: "RUNTIME_MAX_TURN_REQUESTS", refusal: "RUNTIME_REFUSED" }[turn?.execution?.stopReason];
+  if (acpReason && turn.execution.terminal === true && turn.execution.remoteAccepted === true) return acpReason;
   if (["AUTH_REQUIRED", RUNTIME_AUTH_REQUIRED_CODE].includes(turn?.errorCode)
     || turn?.error?.codexErrorInfo === "unauthorized") {
     return RUNTIME_AUTH_REQUIRED_CODE;
@@ -345,6 +368,32 @@ function runtimeSessionIdOf(value) {
 
 function runtimeTurnIdOf(value) {
   return value?.runtimeTurnRef?.turnId ?? null;
+}
+
+function contextOwnsRun(run, context) {
+  if (!run || !context) return false;
+  if (runtimeSessionIdOf(run) === context.threadId && runtimeTurnIdOf(run) === context.turnId) return true;
+  const attempt = run.runtimeAttemptRef;
+  return context.prepared === true && attempt?.dispatchState === "write_attempted"
+    && attempt.sessionId === context.threadId && attempt.turnId === context.turnId
+    && attempt.attemptId === context.attemptId && attempt.fingerprint === context.fingerprint
+    && attempt.runtime === context.runtimeBinding?.runtime
+    && attempt.runtimeProfileId === context.runtimeProfileId && attempt.runtimeAccountId === context.runtimeAccountId;
+}
+
+function runtimeRequestCanStart(run, context) {
+  return contextOwnsRun(run, context) && context.cancelRequested !== true && (run.status === "running" || context.prepared === true && run.status === "starting");
+}
+
+function confirmedAcpExecution(value, attempt, turn) {
+  return !!attempt && !!value && exactObject(value, ["version", "sessionId", "turnId", "attemptId", "operationId", "fingerprint",
+    "dispatchState", "frameWritten", "remoteAccepted", "terminal", "unknown", "stopReason"])
+    && value.version === 1 && ["sessionId", "turnId", "attemptId", "operationId", "fingerprint"].every(key => value[key] === attempt[key])
+    && value.dispatchState === "write_attempted" && typeof value.frameWritten === "boolean"
+    && value.remoteAccepted === true && value.terminal === true && value.unknown === false
+    && ["end_turn", "cancelled", "max_tokens", "max_turn_requests", "refusal"].includes(value.stopReason)
+    && turn?.id === attempt.turnId && turn.status === (value.stopReason === "end_turn" ? "completed"
+      : value.stopReason === "cancelled" ? "canceled" : "failed");
 }
 
 function appSessionCommandRule(method, params) {
@@ -432,6 +481,14 @@ function plainRecord(value) {
 function safeToolDisplayText(value, options, maxBytes, singleLine) {
   if (typeof value !== "string" || !value.isWellFormed() || value.includes("\0")) return null;
   const scanValue = utf8Prefix(value, MAX_TOOL_DISPLAY_SCAN_BYTES);
+  if (options.projectDisplay) {
+    try {
+      const projected = options.projectDisplay(scanValue);
+      if (typeof projected !== "string" || options.assertSecretSafe([projected], { kind: "toolDisplay", runId: options.runId }) !== true) return null;
+      const normalized = singleLine ? projected.replace(/\s+/gu, " ").trim() : projected.trim();
+      return normalized ? utf8Prefix(normalized, maxBytes) : null;
+    } catch { return null; }
+  }
   let sanitized;
   try {
     sanitized = options.sanitizeSummary(scanValue, Object.freeze({
@@ -844,15 +901,6 @@ class WorkRunCoordinator {
         "contextCompiler 必须提供 compile",
       );
     }
-    if (options.pluginStore !== undefined && options.pluginStore !== null
-      && (typeof options.pluginStore.getInstallation !== "function"
-        || typeof options.pluginStore.getRelease !== "function")) {
-      throw coordinatorError("WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED", "pluginStore 必须提供安装和版本读取");
-    }
-    if (options.pluginToolCatalogRegistry != null
-      && typeof options.pluginToolCatalogRegistry.listForBinding !== "function") {
-      throw coordinatorError("WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED", "插件工具目录必须支持绑定查询");
-    }
     if (options.productMcpApprovalPolicy !== undefined
       && (!options.productMcpApprovalPolicy
         || typeof options.productMcpApprovalPolicy.evaluate !== "function")) {
@@ -908,12 +956,12 @@ class WorkRunCoordinator {
         `terminalStreamTtlMs 必须是 1..${MAX_TERMINAL_STREAM_TTL_MS} 的安全整数`,
       );
     }
-    if (options.promptTimeoutMs !== undefined
+    if (options.promptTimeoutMs !== undefined && options.promptTimeoutMs !== null
       && (!Number.isSafeInteger(options.promptTimeoutMs)
         || options.promptTimeoutMs <= 0 || options.promptTimeoutMs > MAX_PROMPT_TIMEOUT_MS)) {
       throw coordinatorError(
         "WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED",
-        `promptTimeoutMs 必须是 1..${MAX_PROMPT_TIMEOUT_MS} 的安全整数`,
+        `promptTimeoutMs 必须是 null 或 1..${MAX_PROMPT_TIMEOUT_MS} 的安全整数`,
       );
     }
     if (options.approvalTimeoutMs !== undefined && options.approvalTimeoutMs !== null
@@ -956,6 +1004,8 @@ class WorkRunCoordinator {
     this.transcriptStore = options.transcriptStore || null;
     this.verifyMemoryExtractionSource = options.verifyMemoryExtractionSource || null;
     this.contextCompiler = options.contextCompiler || null;
+    this.temporarySecrets = options.temporarySecrets || null;
+    this.secretMedia = options.secretMedia || null;
     this.hookService = options.hookService || null;
     this.hookWorkspaceWriters = options.hookWorkspaceWriters || null;
     this.conversationCheckpointStore = options.conversationCheckpointStore || null;
@@ -966,9 +1016,9 @@ class WorkRunCoordinator {
     this.onConversationRenewed = options.onConversationRenewed || (() => {});
     this.runExecutionStore = options.runExecutionStore || null;
     this.captureExecutionProviderRoute = options.captureExecutionProviderRoute || null;
-    this.pluginRuntimeToolService = options.pluginRuntimeToolService || null;
-    this.pluginStore = options.pluginStore || null;
-    this.pluginToolCatalogRegistry = options.pluginToolCatalogRegistry || null;
+    this.resolveMemoryTextRoute = options.resolveMemoryTextRoute || null;
+    this.hostMemoryCommands = options.hostMemoryCommands || null;
+    this.mcpConnectorController = options.mcpConnectorController || null;
     this.runtimeMcpCallBindings = new RuntimeMcpCallBindings({ now: options.now || Date.now });
     this.assertExecutionProviderRouteCurrent = options.assertExecutionProviderRouteCurrent || null;
     this.productMcpApprovalPolicy = options.productMcpApprovalPolicy || null;
@@ -980,6 +1030,8 @@ class WorkRunCoordinator {
     this.getMediaStore = options.getMediaStore;
     this.resolveRunSession = options.resolveRunSession || (() => null);
     this.assertProactiveRunCurrent = options.assertProactiveRunCurrent || (() => { throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查的授权不可用"); });
+    this.submitProactiveResponse = options.submitProactiveResponse;
+    this.proactiveModelUsage = options.proactiveModelUsage;
     this.inbox = options.inbox;
     this.runtimeManager = options.runtimeManager
       || new CodexRuntimeAdapter({ runtimePool: options.runtimePool });
@@ -992,16 +1044,13 @@ class WorkRunCoordinator {
     this.sessionBindingReconciliations = new Set();
     this.beforeSessionSend = options.beforeSessionSend || (() => {});
     this.validateUiAction = options.validateUiAction || (() => null);
-    if (options.preparePluginSelection != null && typeof options.preparePluginSelection !== "function") {
-      throw coordinatorError("WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED", "preparePluginSelection 必须是函数");
-    }
-    this.preparePluginSelection = options.preparePluginSelection || null;
+
     this.onRuntimeMcpRequest = options.onRuntimeMcpRequest || null;
     this.followDefaultSessionBinding = options.followDefaultSessionBinding || null;
     this.manualCompactions = new Map();
-    this.manualCompactionTimeoutMs = options.manualCompactionTimeoutMs ?? 5 * 60_000;
+    this.manualCompactionTimeoutMs = options.manualCompactionTimeoutMs ?? 60 * 60_000;
     if (!Number.isSafeInteger(this.manualCompactionTimeoutMs)
-      || this.manualCompactionTimeoutMs < 1 || this.manualCompactionTimeoutMs > 10 * 60_000) {
+      || this.manualCompactionTimeoutMs < 1 || this.manualCompactionTimeoutMs > 2 * 60 * 60_000) {
       throw coordinatorError("WORK_RUN_COORDINATOR_OPTIONS_INVALID", "Compaction timeout is invalid");
     }
     this.runtimeContextUsage = new Map();
@@ -1058,6 +1107,7 @@ class WorkRunCoordinator {
     this.lifecycleGeneration = 0;
     this.runGenerations = new Map();
     this.runTails = new Map();
+    this.runControlTails = new Map();
     this.lastErrors = new Map();
     this.runStreams = new Map();
     this.runQueueStates = new Map();
@@ -1067,6 +1117,8 @@ class WorkRunCoordinator {
     this.rehydratedTerminalStreams = new Set();
     this.terminalizingRuns = new Set();
     this.runContexts = new Map();
+    this.preparedRunContexts = new Map();
+    this.preparingAcpCancellations = new Map();
     this.runExecutionContracts = new Map();
     this.recoveringRuns = new Set();
     this.runAccountAdmissions = new Map();
@@ -1112,7 +1164,7 @@ class WorkRunCoordinator {
           this.state = "closed";
           this.lifecycleGeneration += 1;
         }
-        this.runContexts.clear();
+        this.runContexts.clear(); this.preparedRunContexts.clear();
         this.#releaseAllRuntimeAccountAdmissions();
         this.runExecutionContracts.clear();
         this.recoveringRuns.clear();
@@ -1172,17 +1224,17 @@ class WorkRunCoordinator {
       "WorkRunCoordinator 正在关闭",
     ));
     this.closePromise = (async () => {
-      while (this.runTails.size > 0) {
-        const tails = [...this.runTails.values()];
+      while (this.runTails.size > 0 || this.runControlTails.size > 0) {
+        const tails = [...this.runTails.values(), ...this.runControlTails.values()];
         await Promise.allSettled(tails);
       }
       await Promise.allSettled([...this.memoryExtractionTasks.values()].map((task) => task.promise));
       const admissionReleaseErrors = this.#releaseAllRuntimeAccountAdmissions();
       this.state = "closed";
-      this.runTails.clear();
+      this.runTails.clear(); this.runControlTails.clear();
       this.runGenerations.clear();
       this.lastErrors.clear();
-      this.runContexts.clear();
+      this.runContexts.clear(); this.preparedRunContexts.clear();
       this.runExecutionContracts.clear();
       this.recoveringRuns.clear();
       this.domainCommands.clear();
@@ -1321,7 +1373,9 @@ class WorkRunCoordinator {
 
   #contextConfigurationKey(session, profile) {
     const binding = this.productStore.getAgentRuntimeBinding?.(session.profileId, session.runtimeBindingId);
-    const route = this.captureExecutionProviderRoute?.(profile, session.modelOverride ?? profile.defaultModel) ?? null;
+    let providerRef;
+    try { providerRef = this.#sessionProviderRef(session, profile); } catch { providerRef = undefined; }
+    const route = this.captureExecutionProviderRoute?.(profile, session.modelOverride ?? profile.defaultModel, providerRef) ?? null;
     return crypto.createHash("sha256").update(JSON.stringify([binding?.revision ?? null,
       this.runtimeAccountAdmission?.read?.(profile.runtimeAccountId)?.generation ?? 0,
       profile.runtimeProfileId, session.modelSettings ?? null, route])).digest("hex");
@@ -1331,12 +1385,49 @@ class WorkRunCoordinator {
     return attachments.map(attachment => {
       const media = this.getMediaStore?.();
       if (!media) return { ...attachment, unavailable: true };
-      try { return prepareChatAttachments(media, [attachment], sessionKey)[0]; }
+      try { return this.#safeChatAttachments([attachment], sessionKey)[0]; }
       catch (error) {
         if (/^UNSAFE_/u.test(error?.code || "")) throw error;
         return { ...attachment, unavailable: true };
       }
     });
+  }
+
+  #safeChatAttachments(attachments, sessionKey) {
+    if (!this.secretMedia) return prepareChatAttachments(this.getMediaStore(), attachments, sessionKey);
+    const session = this.chatSessionStore.getSession(sessionKey);
+    if (!session) throw coordinatorError("CHAT_SESSION_NOT_FOUND", "附件所属会话不存在");
+    const scope = { profileId: session.profileId, sessionId: sessionKey };
+    return attachments.map(attachment => {
+      try {
+        const safe = this.secretMedia.read(scope, attachment);
+        if (safe) return safe;
+      } catch (error) { if (!canUseOriginal(error)) throw error; }
+      // Original delivery still uses the regular attachment ownership and file
+      // checks. No raw path is accepted from a processing error or cache record.
+      return prepareChatAttachments(this.getMediaStore(), [attachment], sessionKey)[0];
+    });
+  }
+
+  async #prepareSecretMedia(session, current = []) {
+    if (!this.secretMedia || !session?.sessionKey) return;
+    const scope = { profileId: session.profileId, sessionId: session.sessionKey };
+    const media = this.getMediaStore();
+    for (const attachment of current) {
+      try { await this.secretMedia.prepare(scope, attachment, media); }
+      catch (error) { if (!canUseOriginal(error)) throw error; }
+    }
+    // Original records and IDs stay untouched. Historical attachment failures
+    // use the same current-request fallback and normal attachment validation.
+    const seen = new Set(current.map(item => item.id));
+    for (const event of this.transcriptStore?.listEvents?.(session.profileId, session.id, { includeContextExcluded: false }) || []) {
+      for (const attachment of event.content?.attachments || []) {
+        if (seen.has(attachment.id)) continue;
+        seen.add(attachment.id);
+        try { await this.secretMedia.prepare(scope, attachment, media); }
+        catch (error) { if (/^UNSAFE_/u.test(error?.code || "")) throw error; }
+      }
+    }
   }
 
   #modelContextKey(session, profile) {
@@ -1353,7 +1444,10 @@ class WorkRunCoordinator {
       || this.productStore.getAgentProfile(session.profileId);
     const key = this.#runtimeContextKey(session, profile);
     const usage = runtimeSessionIdOf(session) ? this.runtimeContextUsage.get(key)?.usage || this.runtimeContextCache?.get(key) : null;
-    const freshUsage = usage && usage.observedAt <= this.now() && this.now() - usage.observedAt <= 5 * 60_000 ? usage : null;
+    // Occupancy does not grow while idle. This cache key includes the native
+    // session, binding, account, model and configuration; the compiler adds
+    // records after the observation and compaction explicitly invalidates it.
+    const freshUsage = usage && usage.observedAt <= this.now() ? usage : null;
     const catalogWindow = this.getRuntimeModelContextWindow(session, profile);
     let window = freshUsage?.contextWindow, source = "runtime";
     if (validWindow(window) && validWindow(catalogWindow) && catalogWindow < window) {
@@ -1382,7 +1476,6 @@ class WorkRunCoordinator {
       window = recovery.contextWindow; source = recovery.source === "estimate" ? "fallback" : "last_observed";
     }
     return { budget: conversationContextBudget(window, source), limits: this.getRuntimeModelContextLimits(session, profile),
-      // Only recent observations drive admission; older values remain display evidence.
       usage: freshUsage };
   }
 
@@ -1552,6 +1645,10 @@ class WorkRunCoordinator {
   // Memory callers can bind to the current Product conversation. Background
   // imports retain the Agent's default Binding; neither route creates a WorkRun.
   // 角色资料维护复用同一个隔离无工具生成器，只接收已过滤的公开原文，不读取或写入个人记忆。
+  generateMemoryText(input) {
+    return this.#generateModelText(input, "memory_text");
+  }
+
   generateMemoryImportText(input) {
     return this.#generateModelText(input, "memory_extraction");
   }
@@ -1604,7 +1701,7 @@ class WorkRunCoordinator {
       || input.prompt.includes("\0") || Buffer.byteLength(input.prompt, "utf8") > 128 * 1024
       || !Number.isSafeInteger(input.maxOutputBytes) || input.maxOutputBytes < 1
       || input.maxOutputBytes > 64 * 1024
-      || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 15 * 60_000
+      || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 60 * 60_000
       || (input.sessionKey !== undefined && !validOpaqueId(input.sessionKey))
       || (input.model !== undefined && (!safeNonEmptyString(input.model, 512) || /[\u0000-\u001f\u007f]/u.test(input.model)))
       || (input.onText !== undefined && typeof input.onText !== "function")
@@ -1614,17 +1711,17 @@ class WorkRunCoordinator {
     }
     if (input.execution !== undefined) input = { ...input,
       execution: require("./memory-model-settings").validateMemoryModelExecution(input.execution) };
-    const route = this.#memoryGenerationRoute(input), { profile } = route;
+    const route = this.#memoryGenerationRoute(input, purpose), { profile } = route;
     if (input.modelSelection !== undefined) {
       const selection = this.#memoryModelSelections.get(input.modelSelection);
       if (!selection || selection.profileId !== input.profileId || selection.sessionKey !== input.sessionKey
-        || selection.model !== input.model || selection.fingerprint !== route.fingerprint) {
+        || selection.model !== input.model || selection.purpose !== purpose || selection.fingerprint !== route.fingerprint) {
         throw coordinatorError("MEMORY_MODEL_SELECTION_INVALID", "记忆模型选择凭证无效");
       }
       input.modelSelection.assertCurrent();
     }
     if (profile.runtime !== "codex" && !this.runtimeManager.canGenerateModelOnly?.(profile.runtime)) {
-      throw coordinatorError("MODEL_ONLY_UNSUPPORTED", "该 Runtime 不支持无工具生成");
+      throw coordinatorError("MODEL_ONLY_UNSUPPORTED", "该模型通道尚不支持无工具生成；本地记忆仍可使用，可在记忆设置中选择独立模型");
     }
     return this.#startMemoryGenerationTask(input, route, false, purpose);
   }
@@ -1647,7 +1744,11 @@ class WorkRunCoordinator {
     return promise;
   }
 
-  #memoryGenerationRoute(input) {
+  #memoryGenerationRoute(input, purpose = "memory_extraction") {
+    if (purpose === "memory_text") {
+      if (!this.resolveMemoryTextRoute) throw coordinatorError("MEMORY_TEXT_MODEL_UNAVAILABLE", "独立记忆模型尚未就绪");
+      return this.resolveMemoryTextRoute(input);
+    }
     const session = input.sessionKey === undefined ? null : this.chatSessionStore.getSession(input.sessionKey);
     if (input.sessionKey !== undefined && (!sendableSession(session) || session.profileId !== input.profileId)) {
       throw coordinatorError("MEMORY_IMPORT_SOURCE_UNAVAILABLE", "记忆模型调用的聊天归属不可用");
@@ -1657,7 +1758,9 @@ class WorkRunCoordinator {
       profile = this.productStore.resolveAgentRuntimeProfile(input.profileId, session?.runtimeBindingId ?? undefined);
     } catch { /* An absent or disabled Binding cannot select another Runtime. */ }
     if (!profile?.enabled) throw coordinatorError("MEMORY_IMPORT_PROFILE_UNAVAILABLE", "记忆模型调用的目标 Agent 不可用");
-    const model = input.model ?? session?.modelOverride ?? profile.defaultModel ?? null;
+    // Background memory work keeps the Profile's source. A model the session
+    // picked from another source is not a route on that source.
+    const model = input.model ?? (session?.modelProviderRef ? null : session?.modelOverride) ?? profile.defaultModel ?? null;
     const providerRoute = this.captureExecutionProviderRoute?.(profile, model) ?? null;
     const providerIdentity = controlFingerprint("memory-model-route", [profile.selectedBindingId, profile.runtime,
       profile.runtimeProfileId, profile.runtimeAccountId, profile.providerRef ?? null, profile.defaultModel ?? null, profile.permissionPolicy,
@@ -1668,48 +1771,51 @@ class WorkRunCoordinator {
     return { profile, session, model, providerRoute, providerIdentity, fingerprint };
   }
 
-  resolveMemoryModelContext({ profileId, sessionKey }) {
+  resolveMemoryModelContext({ profileId, sessionKey }, purpose = "memory_extraction") {
     this.#assertOpen();
     if (!validOpaqueId(profileId) || sessionKey !== undefined && !validOpaqueId(sessionKey)) {
       throw coordinatorError("MEMORY_IMPORT_INVALID", "记忆模型路由请求无效");
     }
     const input = { profileId, ...(sessionKey === undefined ? {} : { sessionKey }) };
-    const route = this.#memoryGenerationRoute(input), lifecycle = this.lifecycleGeneration;
+    const route = this.#memoryGenerationRoute(input, purpose), lifecycle = this.lifecycleGeneration;
     return Object.freeze({ currentModel: route.session ? route.model : null,
       defaultModel: route.profile.defaultModel ?? null, runtime: route.profile.runtime,
       bindingId: route.profile.selectedBindingId, providerIdentity: route.providerIdentity, fingerprint: route.fingerprint,
       assertCurrent: () => {
         this.#fenceLifecycle(lifecycle);
-        if (this.#memoryGenerationRoute(input).fingerprint !== route.fingerprint) {
+        if (this.#memoryGenerationRoute(input, purpose).fingerprint !== route.fingerprint) {
           throw coordinatorError("MEMORY_IMPORT_BINDING_STALE", "记忆模型调用的聊天或运行环境已变化");
         }
         if (route.providerRoute) this.assertExecutionProviderRouteCurrent?.(route.providerRoute);
       } });
   }
 
-  async prepareMemoryModelContext(input) {
+  async prepareMemoryModelContext(input, purpose = "memory_extraction") {
     this.#assertOpen();
     if (!input || Object.keys(input).some(key => !["profileId", "sessionKey", "model", "modelAliases", "signal", "assertCurrent", "timeoutMs"].includes(key))
       || (input.model !== undefined && (!safeNonEmptyString(input.model, 512)
         || (input.modelAliases ? /[\u0000-\u001f\u007f]/u : /[\u0000-\u0020\u007f]/u).test(input.model)))
       || (input.signal !== undefined && !(input.signal instanceof AbortSignal))
       || (input.assertCurrent !== undefined && typeof input.assertCurrent !== "function")
-      || (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 30_000))) {
+      || (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 90_000))) {
       throw coordinatorError("MEMORY_IMPORT_INVALID", "记忆模型发现请求无效");
     }
     input = { ...input };
     if (input.modelAliases !== undefined) input.modelAliases = require("./native-memory-config-protocol").validateNativeMemoryModelAliases(input.modelAliases);
-    const context = this.resolveMemoryModelContext(input);
+    const context = this.resolveMemoryModelContext(input, purpose);
     input.assertCurrent?.();
     if (input.signal?.aborted) throw coordinatorError("MODEL_ONLY_CANCELED", "记忆模型发现已取消");
-    const route = this.#memoryGenerationRoute(input);
-    const request = { ...input, operationId: `memory-model-${crypto.randomUUID()}`, timeoutMs: input.timeoutMs ?? 30_000 };
-    const discovered = await this.#startMemoryGenerationTask(request, route, true);
+    const route = this.#memoryGenerationRoute(input, purpose);
+    if (route.independent && route.profile.runtime !== "codex" && !this.runtimeManager.canGenerateModelOnly?.(route.profile.runtime)) {
+      throw coordinatorError("MODEL_ONLY_UNSUPPORTED", "该模型通道尚不支持无工具生成，可在记忆设置中选择独立模型");
+    }
+    const request = { ...input, operationId: `memory-model-${crypto.randomUUID()}`, timeoutMs: input.timeoutMs ?? 90_000 };
+    const discovered = await this.#startMemoryGenerationTask(request, route, true, purpose);
     context.assertCurrent(); input.assertCurrent?.();
     // An unavailable discovery capability preserves the existing uncached
     // route. It never turns a catalog's first row into execution evidence.
     if (!discovered) return context;
-    const selected = this.#memoryGenerationRoute({ ...input, model: discovered.model });
+    const selected = this.#memoryGenerationRoute({ ...input, model: discovered.model }, purpose);
     if (selected.providerIdentity !== route.providerIdentity) {
       throw coordinatorError("MEMORY_IMPORT_BINDING_STALE", "模型发现改变了 Runtime 提供商路由");
     }
@@ -1719,29 +1825,35 @@ class WorkRunCoordinator {
       fingerprint: controlFingerprint("memory-resolved-model", [context.fingerprint, discovered.model, discovered.provider]),
       assertCurrent: () => {
         context.assertCurrent(); discovered.assertCurrent();
-        if (this.#memoryGenerationRoute({ ...input, model: discovered.model }).fingerprint !== selected.fingerprint) {
+        if (this.#memoryGenerationRoute({ ...input, model: discovered.model }, purpose).fingerprint !== selected.fingerprint) {
           throw coordinatorError("MEMORY_IMPORT_BINDING_STALE", "已确认的记忆模型路由变化");
         }
         if (selected.providerRoute) this.assertExecutionProviderRouteCurrent?.(selected.providerRoute);
       } });
     this.#memoryModelSelections.set(selection, { profileId: input.profileId, sessionKey: input.sessionKey,
-      model: discovered.model, fingerprint: selected.fingerprint });
+      model: discovered.model, purpose, fingerprint: selected.fingerprint });
     return selection;
   }
 
   async #runMemoryImportGeneration(input, route, task, resolveOnly = false, purpose = "memory_extraction") {
     const { profile, model, providerRoute } = route;
+    const modelSecretScope = { profileId: profile.id, sessionId: input.sessionKey || `${purpose}:${input.operationId}` };
+    if (!resolveOnly && this.temporarySecrets) input = { ...input,
+      prompt: projectTextOrOriginal(this.temporarySecrets, modelSecretScope, input.prompt) };
     const instructions = purpose === "skill_learning" ? LEARNING_MODEL_INSTRUCTIONS : MEMORY_MODEL_INSTRUCTIONS;
     const binding = runtimeBinding({ runtime: profile.runtime,
       runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
+    const modelProvider = this.#routeModelProvider({ runtime: binding.runtime, profileId: profile.id,
+      runtimeAccountId: binding.runtimeAccountId, provider: providerRoute?.provider });
     let admission = null;
     let holdAdmission = false;
     const fence = () => {
       this.#fenceLifecycle(task.lifecycle);
       input.assertCurrent?.();
       input.modelSelection?.assertCurrent();
+      route.assertCurrent?.();
       if (task.controller.signal.aborted) throw coordinatorError("MODEL_ONLY_CANCELED", "记忆导入已取消");
-      if (this.#memoryGenerationRoute(input).fingerprint !== route.fingerprint) {
+      if (this.#memoryGenerationRoute(input, purpose).fingerprint !== route.fingerprint) {
         throw coordinatorError("MEMORY_IMPORT_BINDING_STALE", "导入目标 Agent 的运行环境已变化");
       }
       if (admission) this.runtimeAccountAdmission.assertGeneration(admission);
@@ -1774,8 +1886,12 @@ class WorkRunCoordinator {
       // A pooled Codex host keeps the Agent's own host policy; its thread and
       // turn are read-only, never ask for approval and have no tools.
       const host = modelHost = await this.runtimeManager.acquire(binding, codex
-        ? { workspace: null, permissionPolicy: profile.permissionPolicy }
-        : { workspace: null, permissionPolicy: isolated,
+        ? { workspace: null, permissionPolicy: profile.permissionPolicy,
+          ...(route.independent ? { executionContract: { ...providerRoute,
+            profileId: providerRoute?.providerFence.profileId ?? profile.id,
+            runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
+            runtimeAccountId: binding.runtimeAccountId } } : {}) }
+        : { workspace: null, permissionPolicy: isolated, modelOnly: true,
           executionContract: { runId: input.operationId, source: purpose, profileId: input.profileId,
             runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
             runtimeAccountId: binding.runtimeAccountId, workspace: null, permissionPolicy: isolated,
@@ -1797,7 +1913,10 @@ class WorkRunCoordinator {
       // reuse the local Codex login, and a signed-out account stops here.
       const authentication = await readRuntimeAuthenticationState(host, { allowDeferred: true });
       fence();
-      if (authentication.status === "unauthenticated") throw runtimeAuthRequiredError();
+      if (authentication.status === "unauthenticated" && codexSessionProvider.routeRequiresOpenaiAuth(this.productStore,
+        { runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId, provider: providerRoute?.provider })) {
+        throw runtimeAuthRequiredError();
+      }
       if (resolveOnly) {
         let requestedModel = model;
         if (model && input.modelAliases) {
@@ -1806,7 +1925,7 @@ class WorkRunCoordinator {
             aliases: input.modelAliases, profileId: input.profileId, runtime: binding.runtime, raw: model, catalog });
         } else if (model) await this.#assertMemoryModelAvailable(host, model, fence);
         const result = require("./runtime-model-resolution").validateModelResolution(await host.resolveModelOnly({
-          operationId: input.operationId, signal: task.controller.signal,
+          operationId: input.operationId, signal: task.controller.signal, ...definedProperties({ modelProvider }),
           ...(requestedModel ? { model: requestedModel } : {}) }));
         host.assertExecutionProviderCurrent?.(); fence();
         return { ...result, assertCurrent: () => {
@@ -1818,12 +1937,13 @@ class WorkRunCoordinator {
       if (input.model !== undefined && input.modelSelection === undefined) await this.#assertMemoryModelAvailable(host, model, fence);
       const output = codex
         ? await this.#generateIsolatedCodexText(host, { prompt: input.prompt, model,
-          instructions,
+          instructions, modelSecretScope, modelProvider,
           requireConfirmedStop: purpose === "skill_learning",
           execution: input.execution,
           expectedResolvedModel: input.modelSelection ? model : undefined,
           operationId: input.operationId, signal: task.controller.signal, fence, ...streaming })
         : await host.generateModelOnly({ prompt: input.prompt, model,
+          modelSecretScope,
           assertCurrent: fence,
           ...(input.execution ? { execution: input.execution } : {}),
           operationId: input.operationId, signal: task.controller.signal, ...streaming });
@@ -1901,14 +2021,15 @@ class WorkRunCoordinator {
   // Codex cannot read an ephemeral thread back, so the answer is the turn's
   // final agent message, joined from its streamed deltas because a completed
   // item event keeps at most 8 KiB of text. Any tool event voids the answer.
-  async #generateIsolatedCodexText(host, { prompt, model, expectedResolvedModel, execution, operationId, signal, fence, onText,
+  async #generateIsolatedCodexText(host, { prompt, model, expectedResolvedModel, execution, modelSecretScope, modelProvider, operationId, signal, fence, onText,
     instructions = MEMORY_MODEL_INSTRUCTIONS, requireConfirmedStop = false }) {
     if (requireConfirmedStop && typeof host.releaseModelOnlySession !== "function") {
       throw coordinatorError("LEARNING_UNSUPPORTED", "当前 Runtime 无法确认复盘会话释放");
     }
     const permissionPolicy = { approvalPolicy: "never", sandbox: "read-only" };
     const started = await host.sessionStart({ persistent: false, isolatedGeneration: true,
-      permissionPolicy, developerInstructions: instructions, ...(model ? { model } : {}) });
+      permissionPolicy, developerInstructions: instructions, ...(model ? { model } : {}), ...definedProperties({ modelProvider }),
+      ...(this.temporarySecrets ? { modelSecretScope } : {}) });
     const sessionId = started.session.id;
     this.memoryImportSessions.add(sessionId);
     let turnId = null;
@@ -2025,12 +2146,14 @@ class WorkRunCoordinator {
   }
 
   async #runMemoryExtractionModelOnly(input, session, profile, task) {
+    const modelSecretScope = { profileId: profile.id, sessionId: session.sessionKey };
+    const modelPrompt = this.temporarySecrets ? projectTextOrOriginal(this.temporarySecrets, modelSecretScope, input.prompt) : input.prompt;
     const binding = runtimeBinding({ runtime: profile.runtime,
       runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
     const bindingId = profile.selectedBindingId ?? profile.defaultBindingId ?? session.runtimeBindingId ?? null;
     // The current binding can reuse the model the user selected for this
     // conversation. A different fallback binding keeps its own model identity.
-    const selectedModel = bindingId === session.runtimeBindingId
+    const selectedModel = bindingId === session.runtimeBindingId && !session.modelProviderRef
       ? session.modelOverride ?? profile.defaultModel ?? null : profile.defaultModel ?? null;
     const providerRoute = this.captureExecutionProviderRoute?.(profile, selectedModel) ?? null;
     const fence = () => {
@@ -2075,6 +2198,7 @@ class WorkRunCoordinator {
       }
       fence();
       const host = await this.runtimeManager.acquire(binding, { workspace: session.workspace,
+        modelOnly: true,
         permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
         executionContract: { runId: input.operationId, source: "memory_extraction", profileId: input.profileId,
           runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
@@ -2090,7 +2214,8 @@ class WorkRunCoordinator {
       // Runtime acquisition may wait while a user forgets the source. Check
       // the exact frozen user events immediately before sending the prompt.
       this.#assertMemoryExtractionSourceCurrent(input);
-      const output = await host.generateModelOnly({ prompt: input.prompt, model: selectedModel,
+      const output = await host.generateModelOnly({ prompt: modelPrompt, model: selectedModel,
+        modelSecretScope, assertCurrent: fence,
         operationId: input.operationId, signal: task.controller.signal });
       fence();
       host.assertExecutionProviderCurrent?.();
@@ -2127,12 +2252,90 @@ class WorkRunCoordinator {
       session.modelOverride ?? profile.defaultModel ?? null, this.#contextConfigurationKey(session, profile)]);
   }
 
+  #executionContext(runId) { return this.runContexts.get(runId) ?? this.preparedRunContexts.get(runId); }
+
+  #turnPreparationObserver(host, threadId, contract, command, token) {
+    if (host.capabilities?.["turn.start.prepare"] !== true) return undefined;
+    const run = this.dispatcher.getRun(token.runId);
+    const attemptId = run.runtimeAttemptRef?.attemptId
+      ?? this.hostCapabilityIssuer.assert(this.runCapabilityLeases.get(token.runId)).attemptId;
+    const binding = runtimeBinding({ runtime: contract.runtime, runtimeProfileId: contract.runtimeProfileId,
+      runtimeAccountId: contract.runtimeAccountId });
+    let context;
+    const assertCurrent = () => {
+      this.#fenceRuntimeAccount(token);
+      const current = this.dispatcher.getRun(token.runId), assignment = this.runHostAssignments.get(token.runId);
+      if (token.controller.signal.aborted || context?.cancelRequested || !ACTIVE_RUN_STATES.has(current?.status) || assignment?.host !== host
+        || assignment.generation !== token.run || assignment.lifecycle !== token.lifecycle
+        || (context && this.preparedRunContexts.get(token.runId) !== context)) {
+        throw coordinatorError("HOST_CAPABILITY_REVOKED", "Prepared execution is no longer current");
+      }
+      host.host?.assertRuntimeIdentityCurrent?.();
+      // Preparation includes asynchronous encrypted persistence. Recheck the
+      // same recall/revocation authority at the final synchronous write fence.
+      if (contract.nativeMemoryVersion && JSON.stringify(contract.nativeMemoryVersion) !== JSON.stringify(
+        this.conversationCheckpointStore?.nativeMemoryVersion?.(contract.profileId))) {
+        throw coordinatorError("CONTEXT_SOURCE_STALE", "记忆或撤回状态在准备后变化");
+      }
+      const memory = this.contextCompiler?.memoryEngine;
+      memory?.sharing?.assertRunCurrent(token.runId);
+      if (contract.borrowedMemoryRefs?.length
+        && memory?.borrowedMemoryDependenciesCurrent(contract.profileId, contract.transcriptSessionId, contract.borrowedMemoryRefs) !== true) {
+        throw coordinatorError("CONTEXT_SOURCE_STALE", "借阅来源在准备后变化");
+      }
+      for (const id of contract.reviewedMemoryIds || []) {
+        const item = this.contextCompiler?.memoryStore?.get(contract.profileId, id)
+          ?? memory?.findSharedItem?.(contract.profileId, id)?.item;
+        if (item?.status !== "active" || memory?.isRecallCommitted(contract.profileId, item) !== true) {
+          throw coordinatorError("CONTEXT_SOURCE_STALE", "候选记忆的原话在准备后已失效");
+        }
+      }
+    };
+    return Object.freeze({ version: 1, attemptId, assertCurrent,
+      onPrepared: async receipt => {
+        assertCurrent();
+        if (receipt.sessionId !== threadId || receipt.operationId !== command.operationId || receipt.attemptId !== attemptId) {
+          throw coordinatorError("WORK_RUN_BINDING_CONFLICT", "Prepared execution identity changed");
+        }
+        const ref = runtimeAttemptRef(binding, { ...receipt, dispatchState: "prepared" });
+        requireMethods(this.dispatcher, ["prepareAttempt", "markAttemptDispatch", "bindAcceptedAttempt"], "Prepared dispatcher");
+        if (this.runExecutionStore) {
+          requireMethods(this.runExecutionStore, ["putAttempt"], "Prepared execution store");
+          await this.runExecutionStore.putAttempt(this.dispatcher.getRun(token.runId), ref, assertCurrent,
+            { waitForCapacity: true, signal: token.controller.signal });
+          assertCurrent();
+        }
+        this.dispatcher.prepareAttempt(token.runId, ref); assertCurrent();
+        context = { prepared: true, attemptId, fingerprint: receipt.fingerprint,
+          host, runtimeBinding: binding, sessionRef: null, turnRef: null,
+          runtimeProfileId: binding.runtimeProfileId, runtimeAccountId: binding.runtimeAccountId,
+          generation: token.run, threadId, turnId: receipt.turnId, profileId: contract.profileId };
+        this.preparedRunContexts.set(token.runId, context);
+        this.telemetry.record("runtime.stage", { runId: token.runId, stage: "prepared", outcome: "success", count: 1 });
+      },
+      onDispatchAttempt: receipt => {
+        assertCurrent();
+        if (!context || receipt.turnId !== context.turnId || receipt.fingerprint !== context.fingerprint) {
+          throw coordinatorError("WORK_RUN_BINDING_CONFLICT", "Dispatch identity changed");
+        }
+        this.dispatcher.markAttemptDispatch(token.runId, receipt); assertCurrent();
+        this.hostCapabilityIssuer.bind(this.runCapabilityLeases.get(token.runId), { sessionId: threadId, turnId: receipt.turnId });
+        this.telemetry.record("runtime.stage", { runId: token.runId, stage: "write_attempted", outcome: "success", count: 1 });
+        this.#flushPendingHostEvents(host, context);
+      },
+    });
+  }
+
   hasActiveRuntimeWork(runtimeProfileId, runtimeAccountId, runId) {
     if (!runId || this.poisonError || !["opening", "open"].includes(this.state)) return false;
     const run = this.dispatcher.getRun(runId);
     const contract = this.runExecutionContracts.get(runId);
     try { this.hostCapabilityIssuer.assert(this.runCapabilityLeases.get(runId), { kind: "mcp" }); }
     catch { return false; }
+    const assignment = this.runHostAssignments.get(runId), context = this.#executionContext(runId);
+    if (assignment?.host.capabilities?.["turn.start.prepare"] === true
+      && (!contextOwnsRun(run, context) || context.cancelRequested === true || assignment.host !== context.host
+        || assignment.generation !== context.generation || assignment.lifecycle !== this.lifecycleGeneration)) return false;
     return !!run && ACTIVE_RUN_STATES.has(run.status) && !!contract
       && contract.runtimeProfileId === runtimeProfileId && contract.runtimeAccountId === runtimeAccountId;
   }
@@ -2147,7 +2350,7 @@ class WorkRunCoordinator {
       if (!this.hasActiveRuntimeWork(runtimeProfileId, runtimeAccountId, runId)) {
         throw coordinatorError("HOST_CAPABILITY_REVOKED", "执行权限租约已失效");
       }
-      const context = this.runContexts.get(runId);
+      const context = this.#executionContext(runId);
       const assignment = this.runHostAssignments.get(runId);
       if (!context || !assignment || assignment.host !== context.host
         || !exactObject(params, ["message", "requestedSchema", ...(Object.hasOwn(params || {}, "_meta") ? ["_meta"] : [])])
@@ -2209,7 +2412,7 @@ class WorkRunCoordinator {
       });
       if (event) require("./chat-text-fragments").appendChatText(this.#streamFor(run.id), "text", {
         ...part, sourceEventId: event.id, transcriptSeq: event.seq, phase: "ui_boundary",
-      }, this.assertSecretSafe, run.id);
+      });
       return event;
     });
   }
@@ -2226,7 +2429,7 @@ class WorkRunCoordinator {
       });
       if (event) require("./chat-text-fragments").appendChatText(this.#streamFor(runId), "text", {
         ...part, phase: "commentary", sourceEventId: event.id, transcriptSeq: event.seq,
-      }, this.assertSecretSafe, runId);
+      });
       return event;
     });
   }
@@ -2257,8 +2460,16 @@ class WorkRunCoordinator {
     }
     const lease = this.runCapabilityLeases.get(runId);
     const scope = { kind, identity: { runId, runtimeAccountId } };
-    return this.hostCapabilityIssuer.invoke(lease, scope, signal => action({ signal, runId,
-      assertCurrent: () => this.hostCapabilityIssuer.assert(lease, scope) }));
+    const context = this.#executionContext(runId), assignment = this.runHostAssignments.get(runId);
+    if (assignment?.host.capabilities?.["turn.start.prepare"] === true) {
+      scope.sessionId = context.threadId; scope.turnId = context.turnId;
+    }
+    const resumeTimeout = context && assignment?.host === context.host
+      ? assignment.host.pauseManagedToolTimeout?.({ sessionId: context.threadId, turnId: context.turnId }) : null;
+    try {
+      return await this.hostCapabilityIssuer.invoke(lease, scope, signal => action({ signal, runId,
+        assertCurrent: () => this.hostCapabilityIssuer.assert(lease, scope) }));
+    } finally { resumeTimeout?.(); }
   }
 
   // Internal Service inspection only. The caller cannot supply a lease or
@@ -2307,7 +2518,7 @@ class WorkRunCoordinator {
   }
 
   async requestHookApproval(input) {
-    return this.requestPluginToolApproval({ ...input, packageName: "持续规则", purpose: "hook" });
+    return this.requestToolApproval({ ...input, packageName: "持续规则", purpose: "hook" });
   }
 
   async requestWorkspaceApproval(input) {
@@ -2315,7 +2526,7 @@ class WorkRunCoordinator {
     if (!workspaceAutoExecution(contract) || contract.profileId !== input?.profileId) {
       throw coordinatorError("HOST_CAPABILITY_REVOKED", "工作区自动执行授权已失效");
     }
-    return this.requestPluginToolApproval({ ...input, toolName: "workspace_execute",
+    return this.requestToolApproval({ ...input, toolName: "workspace_execute",
       packageName: "工作区命令", purpose: "workspace" });
   }
 
@@ -2323,31 +2534,31 @@ class WorkRunCoordinator {
     if (typeof input?.assertCurrent !== "function") throw coordinatorError("HOST_CAPABILITY_REVOKED", "执行权限租约已失效");
     input.assertCurrent();
     const contract = this.runExecutionContracts.get(input.runId), assignment = this.runHostAssignments.get(input.runId),
-      context = this.runContexts.get(input.runId);
+      context = this.#executionContext(input.runId);
     if (!workspaceAutoExecution(contract) || contract.profileId !== input.profileId || !assignment || !context
       || assignment.host !== context.host || assignment.generation !== context.generation
       || assignment.lifecycle !== this.lifecycleGeneration) throw coordinatorError("HOST_CAPABILITY_REVOKED", "工作区执行所属 Runtime 已变化");
     return assignment.host.pauseManagedToolTimeout?.({ sessionId: context.threadId, turnId: context.turnId }) || (() => {});
   }
 
-  async requestPluginToolApproval(input) {
+  async requestToolApproval(input) {
     this.#assertOpen();
     if (!input || typeof input.assertCurrent !== "function"
       || !validOpaqueId(input.runId) || !validOpaqueId(input.profileId)
       || typeof input.toolName !== "string" || !input.toolName || input.toolName.length > 128
       || typeof input.packageName !== "string" || !input.packageName || input.packageName.length > 256
       || !input.arguments || typeof input.arguments !== "object" || Array.isArray(input.arguments)) {
-      throw coordinatorError("CAPABILITY_FORBIDDEN", "插件调用审批参数无效");
+      throw coordinatorError("CAPABILITY_FORBIDDEN", "工具调用审批参数无效");
     }
     input.assertCurrent();
     const run = this.dispatcher.getRun(input.runId);
     const assignment = this.runHostAssignments.get(input.runId);
-    const context = this.runContexts.get(input.runId);
-    if (!run || run.profileId !== input.profileId || run.status !== "running"
+    const context = this.#executionContext(input.runId);
+    if (!run || run.profileId !== input.profileId || !runtimeRequestCanStart(run, context)
       || !assignment || !context || assignment.host !== context.host
       || assignment.generation !== context.generation
       || assignment.lifecycle !== this.lifecycleGeneration) {
-      throw coordinatorError("HOST_CAPABILITY_REVOKED", "插件调用执行已失效");
+      throw coordinatorError("HOST_CAPABILITY_REVOKED", "工具调用执行已失效");
     }
     let serialized;
     try { serialized = JSON.stringify(input.arguments); } catch {}
@@ -2360,15 +2571,17 @@ class WorkRunCoordinator {
     const result = await this.#requestInteraction({ host: assignment.host,
       method: "shoggoth/pluginTool/requestApproval", run, runId: run.id, context, assignment,
       requestContext: { signal: input.signal },
-      approvalTimeoutMs: input.purpose === "workspace" ? this.approvalTimeoutMs
-        : this.approvalTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS,
-      params: { toolName: ["hook", "workspace"].includes(input.purpose) ? input.toolName : `插件工具 · ${input.toolName}`, toolInput: structuredClone(input.arguments),
+      approvalTimeoutMs: this.approvalTimeoutMs,
+      params: { toolName: ["hook", "workspace", "device"].includes(input.purpose) ? input.toolName
+        : `插件工具 · ${input.toolName}`, toolInput: structuredClone(input.arguments),
         ...(input.authorizationIdentity ? { authorizationIdentity: input.authorizationIdentity } : {}),
         // Existing approval cards render this preformatted field in full;
         // their selected argument summary alone is insufficient for consent.
         command: serialized,
         reason: input.purpose === "workspace"
           ? "工作区命令请求扩大访问范围。仅允许以下最终参数执行一次。"
+          : input.purpose === "device"
+          ? `${input.packageName}：${String(input.reason || "请批准本次设备操作。").slice(0, 1024)}`
           : input.purpose === "hook"
           ? `持续规则要求确认以下最终参数：${String(input.reason || "执行前确认").slice(0, 1024)}`
           : `${input.packageName} 请求调用插件工具 ${input.toolName}。仅允许以下参数执行一次。${input.reason ? " 持续规则：" + String(input.reason).slice(0, 1024) : ""}`,
@@ -2378,75 +2591,10 @@ class WorkRunCoordinator {
     });
     input.assertCurrent();
     if (this.runHostAssignments.get(run.id) !== assignment
-      || this.runContexts.get(run.id) !== context) {
-      throw coordinatorError("HOST_CAPABILITY_REVOKED", "插件调用审批所属执行已变化");
+      || this.#executionContext(run.id) !== context) {
+      throw coordinatorError("HOST_CAPABILITY_REVOKED", "工具调用审批所属执行已变化");
     }
     return Object.freeze({ approved: result?.decision === "accept" });
-  }
-
-  // A managed MCP server may request form input while one authorized tool call
-  // is in flight. The Service, rather than the server, binds it to the Run.
-  async requestPluginMcpElicitation(input) {
-    this.#assertOpen();
-    if (!input || typeof input.assertCurrent !== "function"
-      || !validOpaqueId(input.runId) || !validOpaqueId(input.profileId)
-      || typeof input.serverName !== "string" || !/^plugin\.[a-f0-9]{64}$/u.test(input.serverName)
-      || typeof input.packageName !== "string" || !input.packageName || input.packageName.length > 256
-      || !input.request || typeof input.request !== "object") {
-      throw coordinatorError("CAPABILITY_FORBIDDEN", "插件表单请求缺少受信执行上下文");
-    }
-    input.assertCurrent();
-    const params = input.request.params;
-    if (!params || (params.mode !== undefined && params.mode !== "form")
-      || typeof params.message !== "string" || !params.message
-      || !params.message.isWellFormed() || params.message.includes("\0")
-      || !params.requestedSchema || typeof params.requestedSchema !== "object") {
-      return Object.freeze({ action: "cancel" });
-    }
-    const message = `${input.packageName}：${params.message}`;
-    if (Buffer.byteLength(message, "utf8") > 4 * 1024) return Object.freeze({ action: "cancel" });
-    let card, payload;
-    try {
-      payload = { requestId: "preview", method: "mcpServer/elicitation/request",
-        kind: "mcp_elicitation", serverName: input.serverName, mode: "form", message,
-        requestedSchema: structuredClone(params.requestedSchema) };
-      card = normalizeInteractiveRequestV1({ runId: input.runId,
-        eventType: "prompt", payload });
-    } catch { return Object.freeze({ action: "cancel" }); }
-    if (card.fields.length === 0) {
-      const approval = await this.requestPluginToolApproval({ runId: input.runId,
-        profileId: input.profileId, packageName: input.packageName,
-        toolName: "MCP 表单确认", arguments: { message },
-        authorizationIdentity: input.authorizationIdentity,
-        signal: input.signal, assertCurrent: input.assertCurrent });
-      return Object.freeze(approval.approved
-        ? { action: "accept", content: {} } : { action: "cancel" });
-    }
-    const run = this.dispatcher.getRun(input.runId);
-    const assignment = this.runHostAssignments.get(input.runId);
-    const context = this.runContexts.get(input.runId);
-    if (!run || run.profileId !== input.profileId || run.status !== "running"
-      || !assignment || !context || assignment.host !== context.host
-      || assignment.generation !== context.generation
-      || assignment.lifecycle !== this.lifecycleGeneration) {
-      throw coordinatorError("HOST_CAPABILITY_REVOKED", "插件表单所属执行已失效");
-    }
-    this.hostCapabilityIssuer.assert(this.runCapabilityLeases.get(run.id), {
-      kind: "input", sessionId: context.threadId, turnId: context.turnId,
-    });
-    const response = await this.#requestInteraction({ host: assignment.host,
-      method: "mcpServer/elicitation/request", run, runId: run.id, context, assignment,
-      requestContext: { signal: input.signal },
-      params: { ...payload, requestId: undefined } });
-    input.assertCurrent();
-    if (this.runHostAssignments.get(run.id) !== assignment
-      || this.runContexts.get(run.id) !== context) {
-      throw coordinatorError("HOST_CAPABILITY_REVOKED", "插件表单所属执行已变化");
-    }
-    if (response?.action !== "accept") return Object.freeze({ action: "cancel" });
-    const validated = validateInteractiveResponseV1(card,
-      { action: "submit", answers: response.content });
-    return Object.freeze({ action: "accept", content: structuredClone(validated.answers) });
   }
 
   isRuntimeHostIdle(binding, host, excludingRunId = null) {
@@ -2503,7 +2651,7 @@ class WorkRunCoordinator {
     if (!validOpaqueId(profileId) || !validOpaqueId(runId)) return null;
     const run = this.dispatcher.getRun(runId);
     const execution = this.runExecutionContracts.get(runId);
-    const context = this.runContexts.get(runId);
+    const context = this.#executionContext(runId);
     const assignment = this.runHostAssignments.get(runId);
     if (!run || run.profileId !== profileId || !ACTIVE_RUN_STATES.has(run.status)
       || !execution || execution.profileId !== profileId || !context || assignment?.host !== context.host) return null;
@@ -2552,7 +2700,7 @@ class WorkRunCoordinator {
       terminalStreams: this.terminalStreams.size,
       rehydratedTerminalStreams: this.rehydratedTerminalStreams.size,
       runGenerations: this.runGenerations.size,
-      runContexts: this.runContexts.size,
+      runContexts: this.runContexts.size + this.preparedRunContexts.size,
       runExecutionContracts: this.runExecutionContracts.size,
       runHostAssignments: this.runHostAssignments.size,
       controlOperations: this.controlOperations.size,
@@ -2581,6 +2729,10 @@ class WorkRunCoordinator {
           "running",
         );
         requireMethods(assignment.host, ["turnSteer"], "RuntimeHandle turn steer");
+        if (this.temporarySecrets) input = { ...input, message: (await prepareForSend(this.temporarySecrets, {
+          scope: { profileId: run.profileId, sessionId: input.sessionKey }, operationId: input.operationId, text: input.message,
+        })).text };
+        this.#fence(token);
         const response = await assignment.host.turnSteer({
           sessionId: context.threadId,
           turnId: context.turnId,
@@ -2622,33 +2774,78 @@ class WorkRunCoordinator {
       const initial = this.#selectChatRun(input.sessionKey, input.runId, true);
       const compact = this.manualCompactions.get(initial.id);
       compact?.cancel();
-      return this.#chainRunTask(initial.id, async () => {
+      return this.#chainRunControlTask(initial.id, async () => {
         if (compact) this.#assertOpen();
         const current = this.dispatcher.getRun(initial.id);
         if (compact && TERMINAL_RUN_STATES.has(current?.status)) return current;
         if (current?.status === "queued") return this.#cancelQueuedChatRun(current);
+        const preparingAssignment = this.runHostAssignments.get(initial.id);
+        if (current?.status === "starting" && preparingAssignment?.host.capabilities?.["turn.start.prepare"] === true
+          && current.runtimeSessionRef === null && current.runtimeTurnRef === null
+          && current.runtimeAttemptRef?.dispatchState !== "write_attempted") {
+          return this.#cancelUnsentAcpStart(current, preparingAssignment);
+        }
         const { run, assignment, context, token } = this.#activeAssignment(
           initial.id,
           input.sessionKey,
         );
         requireMethods(assignment.host, ["turnInterrupt"], "RuntimeHandle turn interrupt");
+        if (context.prepared) {
+          context.cancelRequested = true;
+          this.hostCapabilityIssuer.revokeGrants(this.runCapabilityLeases.get(run.id));
+        }
         if (this.#settlePendingForAbort(run.id, assignment) > 0) {
           this.#fence(token);
           this.#interactiveTransition(run.id, "running", {});
           this.#fence(token);
         }
-        await assignment.host.turnInterrupt({
-          sessionId: context.threadId,
-          turnId: context.turnId,
-        });
+        let interrupted;
+        try { interrupted = await assignment.host.turnInterrupt({ sessionId: context.threadId, turnId: context.turnId }); }
+        catch (error) {
+          if (error?.code === "RUNTIME_STOP_UNCONFIRMED") this.#poison(error);
+          const finished = this.dispatcher.getRun(run.id);
+          if (context.prepared && TERMINAL_RUN_STATES.has(finished?.status)) return finished;
+          throw error;
+        }
+        const currentRun = this.dispatcher.getRun(run.id);
+        if (context.prepared && TERMINAL_RUN_STATES.has(currentRun?.status)) return currentRun;
         this.#fence(token);
         if (this.runHostAssignments.get(run.id) !== assignment
-          || !this.hostObservers.has(assignment.host)) {
+          || (!this.hostObservers.has(assignment.host) && !(context.prepared && interrupted?.stopped === true))) {
           throw coordinatorError("WORK_RUN_CONTROL_STALE", "turn/interrupt 返回后 Run binding 已变化");
         }
+        this.telemetry.record("runtime.stage", { runId: run.id, stage: "cancel_confirm", outcome: "success", count: 1 });
         return this.#cancelRunAfterInterrupt(run.id, token);
       });
     });
+  }
+
+  async #cancelUnsentAcpStart(run, assignment) {
+    const token = { lifecycle: assignment.lifecycle, run: assignment.generation, runId: run.id };
+    this.#fence(token);
+    const controller = this.startupControllers.get(run.id);
+    if (!controller || this.runHostAssignments.get(run.id) !== assignment) {
+      throw coordinatorError("WORK_RUN_CONTROL_STALE", "准备中的执行已变化");
+    }
+    const cancellation = { assignment, generation: token.run, lifecycle: token.lifecycle,
+      driveSettled: false, controlSettled: false };
+    this.preparingAcpCancellations.set(run.id, cancellation);
+    const context = this.preparedRunContexts.get(run.id);
+    if (context) context.cancelRequested = true;
+    // No write marker exists. Abort every future callback immediately, then
+    // confirm the concrete per-Run process stopped before publishing canceled.
+    controller.abort();
+    try {
+      await this.#stopManualCompactionHost(assignment.host);
+      this.#fence(token);
+      this.telemetry.record("runtime.stage", { runId: run.id, stage: "cancel_confirm", outcome: "success", count: 1 });
+      return await this.#cancelRunAfterInterrupt(run.id, token);
+    } finally {
+      cancellation.controlSettled = true;
+      if (cancellation.driveSettled && this.preparingAcpCancellations.get(run.id) === cancellation) {
+        this.preparingAcpCancellations.delete(run.id);
+      }
+    }
   }
 
   respondApproval(input) {
@@ -2663,7 +2860,7 @@ class WorkRunCoordinator {
     return this.#idempotentControl(
       input.operationId,
       controlFingerprint("approval", input),
-      () => this.#chainRunTask(input.runId, () => this.#respondApproval(input)),
+      () => this.#chainRunControlTask(input.runId, () => this.#respondApproval(input)),
     );
   }
 
@@ -2685,7 +2882,7 @@ class WorkRunCoordinator {
     return this.#idempotentControl(
       input.operationId,
       controlFingerprint("input", input),
-      () => this.#chainRunTask(input.runId, () => this.#respondInput(input)),
+      () => this.#chainRunControlTask(input.runId, () => this.#respondInput(input)),
     );
   }
 
@@ -2883,16 +3080,17 @@ class WorkRunCoordinator {
         if (admission.disposition === "queued") continue;
       }
       if (ACTIVE_RUN_STATES.has(run.status) && !this.runExecutionContracts.has(run.id)
-        && (run.status === "starting" || this.runExecutionStore)) {
+        && !this.#isHostMemoryRun(run) && (run.status === "starting" || this.runExecutionStore)) {
         await this.#interruptForLostExecutionContract(run.id, lifecycle);
         continue;
       }
-      if (run.status === "starting" || this.recoveringRuns.has(run.id)) recoveries.push(this.#schedule(run.id));
+      if (run.status === "starting" || this.recoveringRuns.has(run.id) || this.#isHostMemoryRun(run)) recoveries.push(this.#schedule(run.id));
     }
     return recoveries;
   }
 
   async #restoreExecution(run, lifecycle) {
+    if (this.#isHostMemoryRun(run)) { this.recoveringRuns.add(run.id); return true; }
     const stored = await this.runExecutionStore.get(run);
     this.#fenceLifecycle(lifecycle);
     const current = this.dispatcher.getRun(run.id);
@@ -2905,7 +3103,7 @@ class WorkRunCoordinator {
       ? this.productStore.resolveAgentRuntimeProfile(run.profileId, contract.bindingId)
       : this.productStore.getAgentProfile(run.profileId);
     if (this.assertExecutionProviderRouteCurrent) {
-      if (stored.version !== 2) throw coordinatorError("EXECUTION_CONTRACT_STALE", "旧执行契约缺少可验证的 Provider 版本");
+      if (stored.version < 2) throw coordinatorError("EXECUTION_CONTRACT_STALE", "旧执行契约缺少可验证的 Provider 版本");
       this.assertExecutionProviderRouteCurrent(contract);
     }
     if (!profile || profile.enabled === false || (profile.runtime || "codex") !== contract.runtime
@@ -2950,6 +3148,15 @@ class WorkRunCoordinator {
         throw coordinatorError("EXECUTION_BINDING_INVALID", "Frozen permission contract changed during restart");
       }
     }
+    if (stored.version === 3) {
+      const attempt = current.runtimeAttemptRef;
+      if (attempt && Object.keys(stored.attempt).some(key => key !== "dispatchState" && stored.attempt[key] !== attempt[key])) {
+        throw coordinatorError("EXECUTION_BINDING_INVALID", "Prepared execution changed during restart");
+      }
+      if (!attempt) this.dispatcher.prepareAttempt(current.id, stored.attempt);
+    } else if (current.runtimeAttemptRef) {
+      throw coordinatorError("EXECUTION_BINDING_INVALID", "Prepared execution descriptor is missing");
+    }
     const command = stored.command;
     if (run.source === "chat") {
       const active = this.#commandForRun(run);
@@ -2957,7 +3164,7 @@ class WorkRunCoordinator {
         || active.command.runId !== command.runId || active.command.sessionKey !== command.sessionKey
         || active.command.prompt !== command.prompt
         || JSON.stringify(active.command.attachments || []) !== JSON.stringify(command.attachments || [])
-        || JSON.stringify(active.command.pluginSelection || []) !== JSON.stringify(command.pluginSelection || [])) {
+        || JSON.stringify(active.command.connectorSelection ?? null) !== JSON.stringify(command.connectorSelection ?? null)) {
         throw coordinatorError("EXECUTION_BINDING_INVALID", "Chat command binding changed");
       }
     } else {
@@ -3150,8 +3357,9 @@ class WorkRunCoordinator {
       const targetConfiguration = this.#contextConfigurationKey(shadow, profile);
       const operationId = pendingOperationId ?? `handoff-preview-${session.revision}`;
       const waitingCommand = restorePolicy && excludingRunId ? this.#commandForRun(this.dispatcher.getRun(excludingRunId))?.command : null;
+      await this.#prepareSecretMedia(session, waitingCommand?.attachments || []);
       const currentAttachments = waitingCommand?.attachments?.length
-        ? prepareChatAttachments(this.getMediaStore(), waitingCommand.attachments, key) : [];
+        ? this.#safeChatAttachments(waitingCommand.attachments, key) : [];
       const currentPrompt = attachmentPrompt(waitingCommand?.prompt ?? "", currentAttachments);
       let previousCoverage = null;
       let transportLimited = false;
@@ -3445,21 +3653,13 @@ class WorkRunCoordinator {
     if (this.contextHandoffs.has(input?.sessionKey) || this.sessionBindingReconciliations.has(input?.sessionKey)) {
       throw coordinatorError("SESSION_BUSY", "正在准备或恢复会话上下文");
     }
+    if (input && Object.hasOwn(input, "pluginSelection")) throw coordinatorError("PLUGIN_PLATFORM_RETIRED", "旧插件选择已停用，请重新选择连接器账号");
     const inputFields = attachmentFields(input, ["operationId", "sessionKey", "prompt"]);
-    if (input?.pluginSelection !== undefined) inputFields.push("pluginSelection");
-    if (!exactObject(input, inputFields)
-      || (input.attachments !== undefined && !validAttachments(input.attachments))) {
-      throw coordinatorError("WORK_RUN_SEND_INVALID", "send 需要 operationId/sessionKey/prompt，可附带有效的附件描述");
+    if (input && Object.hasOwn(input, "connectorSelection")) throw coordinatorError("OPEN_CONNECTOR_RETIRED", "This request uses retired OpenConnector account selection; start a new request using MCP connectors");
+    if (!exactObject(input, inputFields) || (input.attachments !== undefined && !validAttachments(input.attachments))) {
+      throw coordinatorError("WORK_RUN_SEND_INVALID", "send 需要 operationId/sessionKey/prompt，可附带附件和连接器账号选择");
     }
-    const pluginSelection = normalizePluginSelection(input.pluginSelection);
-    if (pluginSelection) {
-      // The optional catalog wait cannot let the caller change the original
-      // operation, owner, message, attachments or selection while it is pending.
-      Object.freeze(pluginSelection);
-      for (const row of pluginSelection) Object.freeze(row);
-      input = Object.freeze({ ...input, pluginSelection,
-        ...(input.attachments ? { attachments: Object.freeze(input.attachments.map(row => Object.freeze({ ...row }))) } : {}) });
-    }
+    const connectorSelection = null; // Historical inbox fingerprints remain readable; no new selection is accepted.
     const sendLifecycle = this.lifecycleGeneration;
     let session = this.chatSessionStore.getSession(input.sessionKey);
     if (!session) {
@@ -3481,8 +3681,8 @@ class WorkRunCoordinator {
     // Terminal tombstones keep the full command fingerprint, not the selection
     // rows. enqueue() verifies that fingerprint without restoring old authority.
     if (existingCommand && ACTIVE_COMMAND_STATES.has(existingCommand.state)
-      && JSON.stringify(existingCommand.pluginSelection || []) !== JSON.stringify(pluginSelection || [])) {
-      throw coordinatorError("WORK_RUN_OPERATION_CONFLICT", "operationId 已对应不同的插件选择");
+      && JSON.stringify(existingCommand.connectorSelection ?? null) !== JSON.stringify(connectorSelection)) {
+      throw coordinatorError("WORK_RUN_OPERATION_CONFLICT", "operationId 已对应不同的连接器账号选择");
     }
     if (run && !existingCommand) {
       throw coordinatorError(
@@ -3498,26 +3698,16 @@ class WorkRunCoordinator {
     }
     const terminalReplay = Boolean(existingCommand && run
       && !ACTIVE_COMMAND_STATES.has(existingCommand.state));
-    if (pluginSelection && !existingCommand && !run && !terminalReplay && this.preparePluginSelection) {
-      if (!sendableSession(session)) throw coordinatorError("CHAT_SESSION_NOT_READY", `ChatSession 当前不可发送: ${session.status}`);
-      const sessionSnapshot = JSON.stringify(session);
-      await this.preparePluginSelection(pluginSelection);
-      this.#assertOpen();
-      this.#assertInboxAvailable();
-      if (sendLifecycle !== this.lifecycleGeneration) throw coordinatorError("WORK_RUN_SEND_CANCELED", "等待插件目录的发送代次已关闭");
-      if (this.contextHandoffs.has(input.sessionKey)) throw coordinatorError("SESSION_BUSY", "正在准备会话上下文");
-      session = this.chatSessionStore.getSession(input.sessionKey);
-      if (!session || !sendableSession(session) || JSON.stringify(session) !== sessionSnapshot) {
-        throw coordinatorError("CHAT_SESSION_NOT_READY", "等待插件目录期间会话已变化，请重新发送");
-      }
-      // send() serializes this session; an operation claimed by another owner
-      // while awaiting is observed on the next request, never minted twice.
-      if (this.inbox.get(input.operationId) || this.#findRunByIdempotencyKey(key)) {
-        throw coordinatorError("WORK_RUN_OPERATION_CONFLICT", "等待插件目录期间 operationId 已被占用");
-      }
+    // Existing admitted operations retain their original fingerprints.
+    if (this.temporarySecrets && (!existingCommand && !run || this.temporarySecrets.hasPreparation(
+      { profileId: session.profileId, sessionId: session.sessionKey }, input.operationId))) {
+      try {
+        const prepared = await prepareForSend(this.temporarySecrets, { scope: { profileId: session.profileId, sessionId: session.sessionKey },
+          operationId: input.operationId, text: input.prompt });
+        input = { ...input, prompt: prepared.text };
+      } catch (error) { error.admissionAccepted = false; throw error; }
     }
-    let resolvedSelection = pluginSelection && !terminalReplay
-      ? resolvePluginSelection(this.pluginStore, pluginSelection, this.pluginToolCatalogRegistry) : [];
+    let resolvedSelection = [];
     if (!sendableSession(session) && !terminalReplay) {
       throw coordinatorError("CHAT_SESSION_NOT_READY", `ChatSession 当前不可发送: ${session.status}`);
     }
@@ -3548,10 +3738,7 @@ class WorkRunCoordinator {
       session = this.chatSessionStore.getSession(input.sessionKey);
       if (!session || !sendableSession(session)) throw coordinatorError("CHAT_SESSION_NOT_READY", "发送准备期间会话已不可发送");
       if (this.contextHandoffs.has(input.sessionKey)) throw coordinatorError("SESSION_BUSY", "正在准备会话上下文");
-      if (pluginSelection) {
-        if (this.inbox.get(input.operationId) || this.#findRunByIdempotencyKey(key)) throw coordinatorError("WORK_RUN_OPERATION_CONFLICT", "operationId 已被占用");
-        resolvedSelection = resolvePluginSelection(this.pluginStore, pluginSelection, this.pluginToolCatalogRegistry);
-      }
+
     }
     const runId = existingCommand?.runId || run?.id || this.randomUUID();
     const uiSource = terminalReplay ? previousUiSource(this.transcriptStore, session, input.operationId) : this.validateUiAction(input);
@@ -3563,7 +3750,7 @@ class WorkRunCoordinator {
       sessionKey: input.sessionKey,
       prompt: input.prompt,
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-      ...(pluginSelection ? { pluginSelection } : {}),
+      ...(connectorSelection ? { connectorSelection } : {}),
       createdAt,
     });
     if (!run) run = this.dispatcher.enqueue(runInput);
@@ -3585,7 +3772,7 @@ class WorkRunCoordinator {
     const previousUser = existingCommand && this.transcriptStore?.listEvents?.(session.profileId, session.id)
       .find(event => event.id === userEventId);
     const selectionSnapshot = previousUser
-      ? previousUser.content?.pluginSelectionSnapshot
+      ? previousUser.content?.connectorSelectionSnapshot
       : resolvedSelection?.length ? resolvedSelection : undefined;
     this.#appendTranscript(run.id, {
       id: userEventId,
@@ -3593,8 +3780,8 @@ class WorkRunCoordinator {
       content: { text: input.prompt, operationId: input.operationId,
         ...(uiSource || {}),
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-        ...(pluginSelection ? { pluginSelection } : {}),
-        ...(selectionSnapshot?.length ? { pluginSelectionSnapshot: selectionSnapshot } : {}) },
+        ...(connectorSelection ? { connectorSelection } : {}),
+        ...(selectionSnapshot?.length ? { connectorSelectionSnapshot: selectionSnapshot } : {}) },
       runtimeRef: null,
       contextExcluded: false,
       occurredAt: command.createdAt,
@@ -3898,13 +4085,12 @@ class WorkRunCoordinator {
       throw coordinatorError("WORK_RUN_NOT_CONTROLLABLE", `WorkRun ${runId} 当前不可控制: ${run.status}`);
     }
     const assignment = this.runHostAssignments.get(runId);
-    const context = this.runContexts.get(runId);
+    const context = this.#executionContext(runId);
     if (!assignment || !context || assignment.host !== context.host
       || assignment.generation !== context.generation
       || assignment.lifecycle !== this.lifecycleGeneration
       || !this.hostObservers.has(assignment.host)
-      || runtimeSessionIdOf(run) !== context.threadId
-      || runtimeTurnIdOf(run) !== context.turnId) {
+      || !contextOwnsRun(run, context)) {
       throw coordinatorError("WORK_RUN_CONTROL_UNASSIGNED", `WorkRun ${runId} 缺少当前 Host binding`);
     }
     const token = { lifecycle: assignment.lifecycle, run: assignment.generation, runId };
@@ -3980,7 +4166,22 @@ class WorkRunCoordinator {
     stream = createRunEventStream({
       runId,
       getSnapshot: () => this.#runStreamSnapshot(runId),
-      assertSecretSafe: this.assertSecretSafe,
+      ...(this.temporarySecrets ? { projectSnapshot: (payload, context) => {
+        const run = this.dispatcher.getRun(runId), sessionId = run && (this.getRunSessionKey(run) || run.sourceId);
+        return require("./chat-event-projection").projectChatEvent(payload, context,
+          text => projectTextOrOriginal(this.temporarySecrets, { profileId: run.profileId, sessionId }, text));
+      } } : {}),
+      assertSecretSafe: (payload, context) => {
+        if (this.temporarySecrets) return require("./chat-event-projection")
+          .checkProjectedChatEvent(payload, context, this.assertSecretSafe);
+        if (context.kind === "event" && ["text", "text.delta", "text.fragment"].includes(context.type)) {
+          // The owner's conversation body is not a diagnostic or a memory
+          // fact. Keep checking the routing/fragment metadata around it.
+          const { text, delta, data, ...metadata } = payload;
+          return this.assertSecretSafe(metadata, context);
+        }
+        return this.assertSecretSafe(payload, context);
+      },
       randomUUID: this.randomUUID,
     });
     this.runStreams.set(runId, stream);
@@ -4022,8 +4223,13 @@ class WorkRunCoordinator {
     }
   }
 
-  async #timedPerformanceStage(runId, stage, task) {
+  async #timedPerformanceStage(runId, stage, task, startupStage = null) {
     const startedAt = this.now();
+    // Public startup feedback is separate from diagnostic timings and never
+    // changes admission, execution ownership, or the underlying Run state.
+    if (startupStage && this.dispatcher.getRun(runId)?.status === "starting") {
+      this.#streamFor(runId).append("status", { status: "starting", stage: startupStage });
+    }
     try {
       const result = await task();
       this.#appendPerformanceStage(runId, stage, startedAt, "success");
@@ -4125,7 +4331,7 @@ class WorkRunCoordinator {
       if (validResponseMetadata(saved)) return structuredClone(saved);
       const records = this.usageStore?.list?.({ profileId: run.profileId, runId }) || [];
       return nativeResponseMetadata({ records, selectedModel: this.runExecutionContracts.get(runId)?.defaultModel,
-        context: this.runContexts.get(runId)?.responseContextUsage });
+        context: this.#executionContext(runId)?.responseContextUsage });
     } catch { return null; } // Missing observations must not alter a reply's outcome.
   }
 
@@ -4187,11 +4393,7 @@ class WorkRunCoordinator {
       // TranscriptStore preserves the first timestamp on an idempotent append;
       // admission can happen later than the initial queued conversation write.
       runtimeRef: null, contextExcluded: false };
-    try { this.#appendTranscript(run.id, event); }
-    catch (error) {
-      if (!["TRANSCRIPT_SECRET_REJECTED", "TRANSCRIPT_EVENT_TOO_LARGE"].includes(error?.code)) throw error;
-      this.#appendTranscript(run.id, { ...event, content: { ...event.content, text: "[REDACTED]" } });
-    }
+    this.#appendTranscript(run.id, event);
     return session;
   }
 
@@ -4235,7 +4437,7 @@ class WorkRunCoordinator {
     if (TERMINAL_RUN_STATES.has(run.status)) return run;
     if (run.status === "queued") return this.cancelQueuedDomainRun(runId);
     this.startupControllers.get(runId)?.abort();
-    const context = this.runContexts.get(runId);
+    const context = this.#executionContext(runId);
     if (context?.host && context.turnId) {
       try { await context.host.turnInterrupt({ sessionId: context.threadId, turnId: context.turnId }); } catch {}
     }
@@ -4252,12 +4454,16 @@ class WorkRunCoordinator {
     if (run?.source !== "proactive") throw coordinatorError("WORK_RUN_NOT_CONTROLLABLE", "只能停止主动检查回合");
     if (TERMINAL_RUN_STATES.has(run.status)) return run;
     if (run.status === "queued") return this.cancelQueuedDomainRun(runId);
-    const context = this.runContexts.get(runId);
+    const context = this.#executionContext(runId);
     this.startupControllers.get(runId)?.abort();
     if (context?.host && context.turnId) {
       try { await context.host.turnInterrupt({ sessionId: context.threadId, turnId: context.turnId }); } catch {}
     }
-    return this.#chainRunTask(runId, () => this.#interruptForLostExecutionContract(runId, this.lifecycleGeneration, "PROACTIVE_REVIEW_STOPPED"));
+    return this.#chainRunTask(runId, () => {
+      const current = this.dispatcher.getRun(runId);
+      if (TERMINAL_RUN_STATES.has(current?.status)) return current;
+      return this.#interruptForLostExecutionContract(runId, this.lifecycleGeneration, "PROACTIVE_REVIEW_STOPPED");
+    });
   }
 
   async stopBorrowedMemoryRun(runId) {
@@ -4268,7 +4474,7 @@ class WorkRunCoordinator {
     // all of them immediately, while sharing one physical interrupt and finish.
     this.startupControllers.get(runId)?.abort();
     const stopped = Promise.resolve().then(async () => {
-      const context = this.runContexts.get(runId);
+      const context = this.#executionContext(runId);
       if (context?.host && context.turnId) {
         try { await context.host.turnInterrupt({ sessionId: context.threadId, turnId: context.turnId }); } catch {}
       }
@@ -4308,9 +4514,26 @@ class WorkRunCoordinator {
     if (!session || session.profileId !== run.profileId) {
       throw coordinatorError("TRANSCRIPT_SESSION_INVALID", "WorkRun Transcript session binding 无效");
     }
+    if (this.temporarySecrets && !this.transcriptStore.getEvent?.(run.profileId, session.id, event.id)) {
+      // The user explicitly authorized normal private chat retention when
+      // masking fails. Diagnostic admission and long-term memory stay separate.
+      const project = text => projectTextOrOriginal(this.temporarySecrets, { profileId: run.profileId, sessionId: sessionKey }, text);
+      const { projectTranscriptContent } = require("./chat-event-projection");
+      event = { ...event, content: projectTranscriptContent(event.content, project),
+        ...(event.contextContent !== undefined ? { contextContent: projectTranscriptContent(event.contextContent, project) } : {}) };
+    }
     const borrowedMemoryRefs = ["assistant", "tool_call", "tool_result", "artifact"].includes(event.kind)
       ? mergeBorrowedMemoryRefs(this.contextCompiler?.memoryEngine?.sharing?.borrowedRefsForRun(runId) || [],
         this.runExecutionContracts.get(runId)?.borrowedMemoryRefs || [], extractBorrowedMemoryRefs(event)) : [];
+    const ownMemoryProvenance = ["assistant", "tool_call", "tool_result", "artifact"].includes(event.kind)
+      ? this.contextCompiler?.memoryEngine?.ownMemory?.projection(run) : null;
+    const withOwnMemoryProof = value => {
+      const projected = { ...value }; delete projected.ownMemoryProvenance;
+      if (ownMemoryProvenance) projected.ownMemoryProvenance = ownMemoryProvenance;
+      return projected;
+    };
+    const content = { ...withOwnMemoryProof(event.content),
+      ...(borrowedMemoryRefs.length ? { borrowedMemoryRefs, borrowedMemoryDerived: true } : {}) };
     const committed = this.transcriptStore.appendEvent({
       profileId: run.profileId,
       sessionId: session.id,
@@ -4318,8 +4541,8 @@ class WorkRunCoordinator {
       runId: run.id,
       kind: event.kind,
       ...(["assistant", "tool_call", "tool_result", "artifact"].includes(event.kind) ? { borrowedMemoryProjection: { refs: borrowedMemoryRefs, derived: borrowedMemoryRefs.length > 0 } } : {}),
-      content: borrowedMemoryRefs.length ? { ...event.content, borrowedMemoryRefs, borrowedMemoryDerived: true } : event.content,
-      ...(event.contextContent !== undefined ? { contextContent: event.contextContent } : {}),
+      content,
+      ...(event.contextContent !== undefined ? { contextContent: withOwnMemoryProof(event.contextContent) } : {}),
       runtimeRef: event.runtimeRef,
       contextExcluded: event.contextExcluded,
       occurredAt: event.occurredAt,
@@ -4334,6 +4557,20 @@ class WorkRunCoordinator {
   }
 
   #appendTerminal(runId, payload) {
+    const { failure: suppliedFailure, ...basePayload } = payload;
+    let failure = payload.errorCode ? runtimeFailureDetail(suppliedFailure) : null;
+    if (failure) {
+      try {
+        const scope = Object.freeze({ kind: "runtimeFailure", runId });
+        const message = this.sanitizeSummary(failure.message, scope);
+        failure = !consumeThenable(message) && typeof message === "string" ? runtimeFailureDetail({ ...failure, message }) : null;
+        if (failure) {
+          const accepted = this.assertSecretSafe({ failure }, scope);
+          if (accepted === false || consumeThenable(accepted)) failure = null;
+        }
+      } catch { failure = null; }
+    }
+    payload = { ...basePayload, ...(failure ? { failure } : {}) };
     this.nativeUiTextProjection?.forget(runId);
     const run = this.dispatcher.getRun(runId);
     if (run?.source === "cron" && !this.getRunSessionKey(run)) {
@@ -4343,16 +4580,49 @@ class WorkRunCoordinator {
     if (run?.source === "cron") this.chatSessionStore.touchCronSession?.(runId, run.finishedAt ?? this.now());
     const cronOutput = this.getCronOutput(run);
     if (cronOutput) payload = { ...payload, cronOutput };
-    const responseMetadata = this.getRunMessageMetadata(runId);
-    if (this.getRunSessionKey(run)) {
-      this.#appendTranscript(runId, {
-        id: transcriptEventId("chat-terminal", runId, payload.status),
+    let responseMetadata = this.getRunMessageMetadata(runId);
+    const sessionKey = this.getRunSessionKey(run);
+    if (sessionKey) {
+      const id = transcriptEventId("chat-terminal", runId, payload.status);
+      // Recovery is stream metadata, not a change to the immutable transcript.
+      // Retain the legacy marker if an older recovery already persisted it.
+      // appendEvent still verifies every other field and rejects real conflicts.
+      const { recovered, ...terminalPayload } = payload;
+      let contextExcluded = payload.errorCode === "RUNTIME_REFUSED";
+      if (recovered === true && this.transcriptStore?.getEvent) {
+        const session = this.chatSessionStore.getSession(sessionKey);
+        if (session?.profileId === run.profileId) {
+          const saved = this.transcriptStore.getEvent(run.profileId, session.id, id);
+          if (saved) {
+            const content = (this.transcriptStore.displayEvent?.(run.profileId, session.id, saved) || saved).content;
+            if (content.recovered === true) terminalPayload.recovered = true;
+            if (runtimeFailureDetail(content.failure)) {
+              // The original terminal is immutable, including its diagnosis.
+              terminalPayload.failure = content.failure;
+              payload.failure = content.failure;
+            }
+            if (validResponseMetadata(content.responseMetadata)) responseMetadata = content.responseMetadata;
+            contextExcluded = saved.contextExcluded;
+          }
+        }
+      }
+      const transcript = {
+        id,
         kind: payload.errorCode ? "error" : "status",
-        content: { transcriptType: "terminal", ...payload, ...(responseMetadata ? { responseMetadata } : {}) },
+        content: { transcriptType: "terminal", ...terminalPayload, ...(responseMetadata ? { responseMetadata } : {}) },
         runtimeRef: run.runtimeTurnRef || run.runtimeSessionRef || null,
-        contextExcluded: false,
+        contextExcluded,
         occurredAt: run.finishedAt ?? this.now(),
-      });
+      };
+      try { this.#appendTranscript(runId, transcript); }
+      catch (error) {
+        if (error?.code !== "TRANSCRIPT_SECRET_REJECTED" || !transcript.content.failure) throw error;
+        // Diagnostics are optional. A rejected detail must not poison an
+        // otherwise valid terminal or leak through its live event instead.
+        delete transcript.content.failure;
+        delete payload.failure;
+        this.#appendTranscript(runId, transcript);
+      }
     }
     const appended = this.#streamFor(runId).append("terminal", payload);
     if (run && this.onRunTerminal) {
@@ -4428,8 +4698,9 @@ class WorkRunCoordinator {
     this.#settlePendingForAbort(runId);
     this.#resolveTerminalWaiter(runId);
     this.runContexts.delete(runId);
+    this.preparedRunContexts.delete(runId);
     this.runExecutionContracts.delete(runId);
-    this.pluginRuntimeToolService?.releaseRun(runId);
+      this.mcpConnectorController?.releaseRun(runId);
     this.hookService?.releaseRun?.(runId);
     this.domainCommands.delete(runId);
     this.runHostAssignments.delete(runId);
@@ -4674,10 +4945,13 @@ class WorkRunCoordinator {
       this.runCapabilityLeases.delete(runId);
       const run = this.dispatcher.getRun(runId);
       if (!ACTIVE_RUN_STATES.has(run.status)) continue;
+      // An explicit unsent cancellation owns convergence after physical stop.
+      // A generic host-terminated task must not race it into interrupted.
+      if (this.preparingAcpCancellations.get(runId)?.assignment === assignment) continue;
       const code = publicRuntimeOperationalErrorCode(error)
         || (isRuntimeAuthRequired(error) ? RUNTIME_AUTH_REQUIRED_CODE : null)
         || (assignment.runtime === "codex" ? "CODEX_HOST_TERMINATED" : "RUNTIME_CONNECTION_LOST");
-      const context = this.runContexts.get(runId);
+      const context = this.#executionContext(runId);
       // Record the scoped cause before queuing cleanup: a complete event may
       // already be reconciling history on this same per-Run task chain.
       if (context?.host === host && context.generation === assignment.generation
@@ -4709,7 +4983,7 @@ class WorkRunCoordinator {
       throw coordinatorError("WORK_RUN_REQUEST_UNROUTABLE", "Runtime request is no longer active");
     }
     const requestSessionId = params?.sessionId ?? params?.threadId;
-    const match = [...this.runContexts.entries()].find(([runId, context]) => {
+    const match = [...this.runContexts.entries(), ...this.preparedRunContexts.entries()].find(([runId, context]) => {
       const assignment = this.runHostAssignments.get(runId);
       return assignment?.host === host
         && assignment.generation === context.generation
@@ -4724,8 +4998,7 @@ class WorkRunCoordinator {
     const [runId, context] = match;
     const run = this.dispatcher.getRun(runId);
     const assignment = this.runHostAssignments.get(runId);
-    if (!run || run.status !== "running" || runtimeSessionIdOf(run) !== context.threadId
-      || runtimeTurnIdOf(run) !== context.turnId || !assignment) {
+    if (!runtimeRequestCanStart(run, context) || !assignment) {
       throw coordinatorError("WORK_RUN_REQUEST_UNROUTABLE", "Codex server request 的 Run 不可等待");
     }
     if (method === "mcpServer/elicitation/request") {
@@ -4742,7 +5015,7 @@ class WorkRunCoordinator {
         const kind = proof.name === "artifact_publish" ? "artifact" : "mcp";
         const assertCurrent = () => {
           this.#assertOpen();
-          if (this.runContexts.get(runId) !== context || this.runHostAssignments.get(runId) !== assignment
+          if (this.#executionContext(runId) !== context || this.runHostAssignments.get(runId) !== assignment
             || assignment.lifecycle !== this.lifecycleGeneration
             || !ACTIVE_RUN_STATES.has(this.dispatcher.getRun(runId)?.status)) {
             throw coordinatorError("HOST_CAPABILITY_REVOKED", "Runtime call execution has changed");
@@ -4803,14 +5076,18 @@ class WorkRunCoordinator {
       });
       // Transcript observers can synchronously cancel/retire a run. A review
       // result must never authorize a stale execution after that callback.
-      if (requestContext.signal?.aborted || this.runContexts.get(runId) !== context
-        || this.runHostAssignments.get(runId) !== assignment || this.dispatcher.getRun(runId)?.status !== "running") {
+      if (requestContext.signal?.aborted || this.#executionContext(runId) !== context
+        || this.runHostAssignments.get(runId) !== assignment || !runtimeRequestCanStart(this.dispatcher.getRun(runId), context)) {
         throw coordinatorError("WORK_RUN_REQUEST_UNROUTABLE", "Runtime approval execution changed");
       }
       this.hostCapabilityIssuer.assert(this.runCapabilityLeases.get(runId), {
         kind: "approval", sessionId: context.threadId, turnId: context.turnId,
       });
       return automatic.response;
+    }
+    if (context.prepared && contract?.permissionPolicy?.approvalPolicy === "never") {
+      if (run.source === "cron") this.#recordCronAuthorization(runId, method, "deny", "profile-never");
+      return Object.freeze({ decision: "decline" });
     }
     const sessionApprovalRule = runtimeApprovalSupportsSession(method, params)
       ? appSessionCommandRule(method, params) : null;
@@ -4839,6 +5116,12 @@ class WorkRunCoordinator {
     }
     const contract = this.runExecutionContracts.get(runId);
     let cronApproval = null;
+    if (run?.source === "cron" && contract?.permissionMode !== "full-access") {
+      // Catalog-less profile modes gain no unattended approval authority.
+      // Preserve the existing full-access gate below; deny unsupported asks.
+      this.#recordCronAuthorization(runId, method, "deny", "unsupported-permission-mode");
+      return Promise.resolve(cronDenialResponse(method));
+    }
     if (run?.source === "cron" && contract?.permissionMode === "full-access") {
       let safe = false;
       try { safe = Buffer.byteLength(JSON.stringify(params)) <= 12 * 1024
@@ -4850,8 +5133,8 @@ class WorkRunCoordinator {
         const decision = cronApproval ? "accept" : "deny";
         this.#recordCronAuthorization(runId, method, decision,
           cronApproval ? "task-grant" : "unattended-scope-denied");
-        if (requestContext.signal?.aborted || this.runContexts.get(runId) !== context
-          || this.runHostAssignments.get(runId) !== assignment || this.dispatcher.getRun(runId)?.status !== "running") {
+        if (requestContext.signal?.aborted || this.#executionContext(runId) !== context
+          || this.runHostAssignments.get(runId) !== assignment || !runtimeRequestCanStart(this.dispatcher.getRun(runId), context)) {
           throw coordinatorError("HOST_CAPABILITY_REVOKED", "定时任务授权执行已失效");
         }
         this.hostCapabilityIssuer.assert(this.runCapabilityLeases.get(runId), {
@@ -4909,6 +5192,7 @@ class WorkRunCoordinator {
     };
     this.#fence(token);
     this.pendingRequests.set(requestId, record);
+    this.telemetry.record("runtime.stage", { runId, stage: "approval_wait", outcome: "unknown", count: 1 });
     try {
       this.#interactiveTransition(
         runId,
@@ -5178,16 +5462,28 @@ class WorkRunCoordinator {
         sessionId: record.context.threadId,
         turnId: record.context.turnId,
       });
-      this.#fence(record.token);
+      const finished = this.dispatcher.getRun(input.runId);
+      if (!(record.context.prepared && TERMINAL_RUN_STATES.has(finished?.status))) this.#fence(record.token);
     }
-    return Object.freeze({ requestId: input.requestId, state: "responded", run: resumed });
+    return Object.freeze({ requestId: input.requestId, state: "responded",
+      run: record.context.prepared ? this.dispatcher.getRun(input.runId) ?? resumed : resumed });
   }
 
-  #respondInput(input) {
+  async #respondInput(input) {
     const record = this.#pendingRequest(input.runId, input.requestId, "input");
     const run = this.dispatcher.getRun(input.runId);
     if (run.status !== "waiting_input" || run.waitingRequestId !== input.requestId) {
       throw coordinatorError("WORK_RUN_REQUEST_MISMATCH", "WorkRun waiting input 已变化");
+    }
+    // Product confirmations retain their exact selected values and authority.
+    // Free-form answers use the same local preparation as the composer.
+    if (input.action === "submit" && this.temporarySecrets && !record.cronApproval
+      && !record.params?.requestedSchema?.properties?.confirm_product_action) {
+      const prepared = await prepareForSend(this.temporarySecrets, { scope: { profileId: run.profileId,
+        sessionId: this.getRunSessionKey(run) || run.sourceId }, operationId: `answer:${input.operationId}`,
+        ...require("../core/chat-secret-contract").secretAnswerInput(input.answers, record.params?.requestedSchema) });
+      input = { ...input, answers: JSON.parse(prepared.text) };
+      this.#fence(record.token);
     }
     let response = input.action === "submit"
       ? { action: "accept", content: structuredClone(input.answers) }
@@ -5249,16 +5545,33 @@ class WorkRunCoordinator {
           const field = record.params?.requestedSchema?.properties?.[key];
           return `${key}: ${field?.writeOnly === true || field?.format === "password" ? "[隐藏]" : value}`;
         }).join("\n");
+    let displayText;
+    if (record.kind === "input") {
+      if (input.action === "cancel") displayText = "取消补充";
+      else {
+        try {
+          const request = normalizeInteractiveRequestV1({ runId: record.runId, eventType: "prompt",
+            payload: { ...record.params, requestId: record.requestId } });
+          const fields = new Map(request.fields.map(field => [field.id, field]));
+          if (fields.size) displayText = Object.entries(input.answers).map(([key, value]) => {
+            const field = fields.get(key);
+            return field?.secret ? "[隐藏]" : field?.options.find(option => option.value === value)?.label ?? value;
+          }).join("\n");
+        } catch { /* Keep the committed masked fallback for unsupported forms. */ }
+      }
+    }
     const event = {
       id: transcriptEventId("interactive-response", record.requestId), kind: "user",
       content: { transcriptType: "interaction.response", requestId: record.requestId,
-        operationId: input.operationId, text: record.kind === "approval" ? `授权：${label}` : `补充：${label}` },
+        operationId: input.operationId, text: record.kind === "approval" ? `授权：${label}` : `补充：${label}`,
+        ...(displayText === undefined ? {} : { displayText }) },
       runtimeRef: record.context.turnRef || null, contextExcluded: record.kind === "approval", occurredAt: this.now(),
     };
     try { this.#appendTranscript(record.runId, event); } catch (error) {
       if (!["TRANSCRIPT_SECRET_REJECTED", "TRANSCRIPT_EVENT_TOO_LARGE"].includes(error?.code)) throw error;
       this.#appendTranscript(record.runId, { ...event, content: { ...event.content,
-        text: "已提交补充信息（内容未保存在会话记录中）" }, contextExcluded: true });
+        text: "已提交补充信息（内容未保存在会话记录中）",
+        ...(displayText === undefined ? {} : { displayText: "已提交补充信息（内容未保存在会话记录中）" }) }, contextExcluded: true });
     }
   }
 
@@ -5595,6 +5908,30 @@ class WorkRunCoordinator {
     return true;
   }
 
+  #recordNativeCompaction(profileId, session, event, runId = null) {
+    if (!session || !this.transcriptStore) return true;
+    const nativeId = event.contextUsage?.runtimeSessionId;
+    // A requested compact has two receipts: its native notice and command
+    // completion. Defer the single boundary until the matching turn finishes.
+    for (const [commandRunId, wait] of this.manualCompactions) {
+      if (wait.sessionId === nativeId && this.getRunSessionKey(this.dispatcher.getRun(commandRunId)) === session.sessionKey) {
+        wait.compactionEvent = event;
+        return false;
+      }
+    }
+    const cycle = event.compactionId ?? event.contextUsage?.observedAt;
+    const scope = event.compactionId ? JSON.stringify([session.runtimeBindingId ?? null, nativeId]) : runId ?? nativeId;
+    const id = transcriptEventId("native-context-compacted", scope, cycle);
+    if (this.transcriptStore.listEvents(profileId, session.id).some(entry => entry.id === id)) return false;
+    const record = { id, kind: "status", contextExcluded: true,
+      content: { transcriptType: "context.native.compacted", runtimeSessionId: nativeId,
+        ...(event.compactionId ? { compactionId: event.compactionId, runtimeBindingId: session.runtimeBindingId ?? null } : {}) }, occurredAt: this.now() };
+    if (runId) this.#appendTranscript(runId, record);
+    else this.transcriptStore.appendEvent({ profileId, sessionId: session.id, ...record });
+    this.telemetry.record("runtime.stage", { ...(runId ? { runId } : {}), stage: "compaction_completed", outcome: "success", count: 1 });
+    return true;
+  }
+
   #publishRuntimeContext(profileId, sessionKey, host, rawUsage) {
     try {
       const usage = validateRuntimeContextUsage(rawUsage);
@@ -5637,7 +5974,7 @@ class WorkRunCoordinator {
     const eventSessionId = event.sessionId ?? event.threadId;
     if (this.memoryImportSessions.has(eventSessionId)) return;
     const contextEvent = ["context_usage", "context_compacted"].includes(event.type);
-    const match = [...this.runContexts.entries()].find(([runId, context]) => (
+    const match = [...this.runContexts.entries(), ...this.preparedRunContexts.entries()].find(([runId, context]) => (
       context.host === host
       && context.generation === this.runGenerations.get(runId)
       && eventSessionId === context.threadId
@@ -5652,10 +5989,7 @@ class WorkRunCoordinator {
             && this.#runtimeContextKey(session) === cached.key) {
             this.#publishRuntimeContext(cached.profileId, cached.sessionKey, host, event.contextUsage);
             if (event.type === "context_compacted" && event.contextUsage?.runtimeSessionId === eventSessionId) {
-              this.transcriptStore?.appendEvent({ profileId: session.profileId, sessionId: session.id,
-                id: transcriptEventId("native-context-compacted", eventSessionId, event.contextUsage.observedAt),
-                kind: "status", contextExcluded: true,
-                content: { transcriptType: "context.native.compacted", runtimeSessionId: eventSessionId }, occurredAt: this.now() });
+              this.#recordNativeCompaction(session.profileId, session, event);
             }
             return;
           }
@@ -5670,15 +6004,26 @@ class WorkRunCoordinator {
           "tool_start", "tool_update", "tool_result", "status", "complete", "usage", "context_usage", "context_compacted",
         ].includes(event.type)) {
         observer.pendingEvents.push(event);
-        if (observer.pendingEvents.length > 256) observer.pendingEvents.shift();
+        if (observer.pendingEvents.length > 256) {
+          observer.pendingEvents.shift();
+          try { this.telemetry.record("runtime.stage", { stage: "unbound_event_dropped",
+            code: "RUNTIME_EVENT_BUFFER_DROPPED", outcome: "unknown", count: 1 }); } catch {}
+        }
       }
       return;
     }
     const [runId, context] = match;
     const run = this.dispatcher.getRun(runId);
-    if (!run || !ACTIVE_RUN_STATES.has(run.status)
-      || runtimeSessionIdOf(run) !== context.threadId
-      || runtimeTurnIdOf(run) !== context.turnId) return;
+    if (!run || !ACTIVE_RUN_STATES.has(run.status) || !contextOwnsRun(run, context)) return;
+    if (context.cancelRequested && event.type !== "complete") return;
+    if (!context.firstEventRecorded) {
+      context.firstEventRecorded = true;
+      this.telemetry.record("runtime.stage", { runId, stage: "first_event", outcome: "success", count: 1 });
+    }
+    const firstKind = ["text_delta", "text"].includes(event.type) ? "first_text"
+      : ["tool_start", "tool_update", "tool_result"].includes(event.type) ? "first_tool" : null;
+    if (firstKind && !context[firstKind]) { context[firstKind] = true;
+      this.telemetry.record("runtime.stage", { runId, stage: firstKind, outcome: "success", count: 1 }); }
     if (contextEvent) {
       // Message presentation observes the matched turn independently of the
       // optional context-management feature. Never reuse a later session value.
@@ -5688,14 +6033,12 @@ class WorkRunCoordinator {
       if (event.contextUsage?.runtimeSessionId === context.threadId) {
         this.#publishRuntimeContext(run.profileId, this.getRunSessionKey(run), host, event.contextUsage);
         if (event.type === "context_compacted") {
-          this.#appendTranscript(runId, {
-            id: transcriptEventId("native-context-compacted", runId, event.contextUsage.observedAt), kind: "status", contextExcluded: true,
-            content: { transcriptType: "context.native.compacted", runtimeSessionId: context.threadId },
-          });
+          const session = this.chatSessionStore.getSession(this.getRunSessionKey(run));
+          const firstCompletion = this.#recordNativeCompaction(run.profileId, session, event, runId);
           // Only the already matched active execution receives this fact. Native
           // completion does not imply an observed start or a Run terminal state.
           // contextUsage.observedAt can be a local receipt time, not a cycle ID.
-          this.#streamFor(runId).append("status", { status: "compacted" });
+          if (firstCompletion) this.#streamFor(runId).append("status", { status: "compacted" });
         }
       }
       return;
@@ -5745,6 +6088,10 @@ class WorkRunCoordinator {
       return;
     }
     if (event.type === "complete") {
+      if (context.prepared) { context.pendingComplete = event; return; }
+      if (["failed", "interrupted"].includes(event.status)) {
+        context.failure ??= runtimeFailureDetail(event.failure, host.registeredSecrets || []);
+      }
       const terminal = event.terminalEvidence;
       if (context.runtimeBinding?.runtime === "codex" && event.method === "turn/completed"
         && terminal?.id === context.turnId
@@ -5785,6 +6132,9 @@ class WorkRunCoordinator {
       name: event.tool?.name ?? previousDisplay?.name,
       kind: event.tool?.kind ?? previousDisplay?.kind,
     } : undefined;
+    const displayRun = this.dispatcher.getRun(runId);
+    const projectDisplay = this.temporarySecrets ? text => projectTextOrOriginal(this.temporarySecrets, {
+      profileId: displayRun.profileId, sessionId: this.getRunSessionKey(displayRun) || displayRun.sourceId }, text) : undefined;
     const payload = {
       "text.delta": () => ({ ...common, delta: event.delta }),
       text: () => ({ ...common, text: event.text, phase: event.phase, delivery: event.delivery }),
@@ -5806,6 +6156,7 @@ class WorkRunCoordinator {
         ...common,
         tool: publicToolDescriptor(displayTool, {
           runId,
+          projectDisplay,
           toolNameOverride: federationToolName,
           sanitizeSummary: this.sanitizeSummary,
           assertSecretSafe: this.assertSecretSafe,
@@ -5815,6 +6166,7 @@ class WorkRunCoordinator {
         ...common,
         tool: publicToolDescriptor(displayTool, {
           runId,
+          projectDisplay,
           toolNameOverride: federationToolName,
           sanitizeSummary: this.sanitizeSummary,
           assertSecretSafe: this.assertSecretSafe,
@@ -5829,6 +6181,7 @@ class WorkRunCoordinator {
         ...common,
         tool: publicToolDescriptor(displayTool, {
           runId,
+          projectDisplay,
           toolNameOverride: federationToolName,
           sanitizeSummary: this.sanitizeSummary,
           assertSecretSafe: this.assertSecretSafe,
@@ -5838,7 +6191,7 @@ class WorkRunCoordinator {
         }),
       }),
       status: () => ({ method: event.method, status: event.status,
-        ...(event.status === "retrying" && event.reason === "RUNTIME_RATE_LIMITED"
+        ...(event.status === "retrying" && ["RUNTIME_RATE_LIMITED", "RUNTIME_UPSTREAM_UNAVAILABLE"].includes(event.reason)
           ? { reason: event.reason } : {}) }),
     }[type]();
     let publicPayload = definedProperties(payload);
@@ -5846,8 +6199,6 @@ class WorkRunCoordinator {
       publicPayload = retainToolDisplay(context, type, publicPayload);
     }
     if (type === "text" && typeof event.contextText === "string" && event.contextIncomplete !== true) {
-      const accepted = this.assertSecretSafe({ text: event.contextText }, Object.freeze({ runId, type, kind: "fullText" }));
-      if (accepted === false || accepted?.then) throw coordinatorError("RUN_EVENT_SECRET_REJECTED", "Run event 含敏感信息");
       publicPayload.text = event.contextText;
     }
     const originalText = type === "text" ? publicPayload.text : undefined;
@@ -5894,11 +6245,12 @@ class WorkRunCoordinator {
           // Unkeyed compaction status can repeat. Its deterministic transcript
           // ID retains the first receipt time; the live stream still orders
           // every observation without pretending that a new cycle was proven.
-          occurredAt: type === "status" && ["compacting", "compacted"].includes(publicPayload.status) ? undefined : this.now(),
+          occurredAt: type === "status" && (["compacting", "compacted"].includes(publicPayload.status)
+            || typeof event.compaction?.id === "string") ? undefined : this.now(),
         });
         if (committed && type === "text") publicPayload = { ...publicPayload, sourceEventId: committed.id, transcriptSeq: committed.seq };
       } catch (error) {
-        if (!["TRANSCRIPT_SECRET_REJECTED", "TRANSCRIPT_EVENT_TOO_LARGE"].includes(error?.code)) {
+        if (type === "text" || !["TRANSCRIPT_SECRET_REJECTED", "TRANSCRIPT_EVENT_TOO_LARGE"].includes(error?.code)) {
           throw error;
         }
         publicPayload = definedProperties({
@@ -5906,7 +6258,6 @@ class WorkRunCoordinator {
           itemId: event.itemId,
           toolCallId: event.toolCallId,
           redacted: true,
-          ...(type === "text" ? { text: "[REDACTED]", phase: event.phase, segmentId: publicPayload.segmentId } : {}),
         });
         this.#appendTranscript(runId, {
           id: eventId,
@@ -5918,7 +6269,7 @@ class WorkRunCoordinator {
         });
       }
     }
-    require("./chat-text-fragments").appendChatText(this.#streamFor(runId), type, publicPayload, this.assertSecretSafe, runId);
+    require("./chat-text-fragments").appendChatText(this.#streamFor(runId), type, publicPayload);
   }
 
   #flushPendingHostEvents(host, context) {
@@ -5933,6 +6284,20 @@ class WorkRunCoordinator {
       return false;
     });
     for (const event of matching) this.#routeHostEvent(host, event, false);
+  }
+
+  #admissionPreparation(run, reason) {
+    const previous = this.runQueueStates.get(run.id);
+    // Retain an established resource wait while retrying its preparation.
+    if (previous && !["CONTEXT_PREPARING", "RUNTIME_PREPARING", "CONTEXT_COMPACTING"].includes(previous.reason)) return;
+    if (previous?.reason === reason) return;
+    const queuedAt = previous?.queuedAt ?? this.queueArrivalTimes.get(run.id)
+      ?? this.#commandForRun(run)?.command?.createdAt ?? this.now();
+    const payload = { status: "queued", reason, queuedAt };
+    this.runQueueStates.set(run.id, payload);
+    // Preparation remains durably queued until admission succeeds. It is active
+    // work, so it neither records a blocked queue sample nor schedules a retry.
+    this.#streamFor(run.id).append("status", payload);
   }
 
   #queuedAdmission(run, reason, retryAt = null) {
@@ -6000,6 +6365,51 @@ class WorkRunCoordinator {
     return task.promise;
   }
 
+  hasHostMemoryTransaction(run) { return this.#isHostMemoryRun(run); }
+
+  #isHostMemoryRun(run) {
+    return !!this.hostMemoryCommands?.enrolled(run, this.#commandForRun(run)?.command);
+  }
+
+  async #driveHostMemory(run, command, token) {
+    this.#fence(token);
+    if (run.status === "starting") run = this.dispatcher.transition(run.id, "running");
+    let result;
+    try { result = await this.hostMemoryCommands.execute(run, command, () => this.#fence(token)); }
+    catch (error) {
+      // Known, precondition failures are terminal. Uncertain storage/lifecycle
+      // failures retain the enrolled transaction for recovery; no native replay.
+      const code = ownDataErrorCode(error);
+      if (!["MEMORY_REVISION_CONFLICT", "MEMORY_SOURCE_REVOKED", "MEMORY_BORROWED_READ_ONLY",
+        "MEMORY_NOT_FOUND", "MEMORY_CONFLICT_INVALID", "MEMORY_SECRET_REJECTED", "MEMORY_RESTRICTED",
+        "CONVERSATION_SOURCE_INVALID"].includes(code)) throw error;
+      this.#fence(token);
+      return this.#withTerminalizing(run.id, async () => {
+        const terminal = this.dispatcher.transition(run.id, "failed", { resultSummary: null, errorCode: code });
+        this.#appendTerminal(run.id, { status: "failed", resultSummary: null, errorCode: code });
+        await this.#completeCommandForRun(terminal, () => this.#fence(token));
+        this.#fence(token); this.#releaseTerminalRun(run.id);
+        await this.#drainQueuedRuns(token.lifecycle);
+        return terminal;
+      });
+    }
+    this.#fence(token);
+    return this.#withTerminalizing(run.id, async () => {
+      const id = transcriptEventId("host-memory-answer", run.id);
+      const event = this.#appendTranscript(run.id, { id, kind: "assistant", content: { text: result.text, transcriptType: "text", phase: "final_answer" },
+        runtimeRef: null, contextExcluded: false, occurredAt: command.createdAt });
+      if (event) require("./chat-text-fragments").appendChatText(this.#streamFor(run.id), "text", {
+        text: result.text, phase: "final_answer", itemId: id, sourceEventId: event.id, transcriptSeq: event.seq });
+      const terminal = this.dispatcher.transition(run.id, "completed", { resultSummary: result.text, errorCode: null });
+      this.#appendTerminal(run.id, { status: "completed", resultSummary: result.text, errorCode: null });
+      await this.#completeCommandForRun(terminal, () => this.#fence(token));
+      this.#fence(token);
+      this.#releaseTerminalRun(run.id);
+      await this.#drainQueuedRuns(token.lifecycle);
+      return terminal;
+    });
+  }
+
   async #prepareAdmission(runId, profileId, lifecycle) {
     this.#fenceLifecycle(lifecycle);
     const run = this.dispatcher.getRun(runId);
@@ -6010,6 +6420,20 @@ class WorkRunCoordinator {
     try { const command = run?.source === "chat" && this.#commandForRun(run)?.command; if (command) this.validateUiAction(command); }
     catch (error) { return { disposition: "rejected", reason: error.code || "UI_SOURCE_EXPIRED", run }; }
     const profile = this.productStore.getAgentProfile(profileId);
+    const command = run?.source === "chat" && this.#commandForRun(run)?.command;
+    if (this.hostMemoryCommands?.recognizes(run, command)) {
+      if (this.admissionsQuiesced) return this.#queuedAdmission(run, "SERVICE_QUIESCED");
+      if (this.listSessionRuns(run.sourceId).some(other => other.id !== run.id && ACTIVE_RUN_STATES.has(other.status))) {
+        return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+      }
+      await this.hostMemoryCommands.prepare(run, command, () => {
+        this.#fenceLifecycle(lifecycle);
+        if (this.dispatcher.getRun(runId)?.status !== "queued") throw coordinatorError("WORK_RUN_COORDINATOR_STALE_RUN", "记忆操作已结束");
+      });
+      this.#fenceLifecycle(lifecycle);
+      const existing = this.#existingAdmission(runId);
+      return existing || this.dispatcher.admit(runId, { writable: false });
+    }
     if (run && profile && this.contextCompiler?.semanticSearch && run.source === "chat") {
       // Renew stale native history before recall captures the Product session
       // revision. #admit rechecks after inference for changes while awaiting it.
@@ -6024,8 +6448,9 @@ class WorkRunCoordinator {
           throw error;
         }
       }
-      try { await this.contextCompiler.prepareRelated({ profile, run,
-        query: this.#commandForRun(run)?.command?.prompt || run.sourceId }); } catch {}
+      this.#admissionPreparation(run, "CONTEXT_PREPARING");
+      try { await this.#timedPerformanceStage(runId, "admission_context", () => this.contextCompiler.prepareRelated({ profile, run,
+        query: this.#commandForRun(run)?.command?.prompt || run.sourceId })); } catch {}
     }
     this.#fenceLifecycle(lifecycle);
     // Another drain or cancellation may finish while inference yields. Only
@@ -6056,12 +6481,14 @@ class WorkRunCoordinator {
     const workingBarrier = this.workingContextBarriers.get(sessionKey);
     if (run.source !== "compaction" && workingBarrier) {
       if (workingBarrier.error) throw workingBarrier.error;
-      return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+      return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
     }
     // A native turn may be compacting its own history. Wait for its terminal
     // observation before planning a product summary for the next queued turn.
     if (sessionRuns.some(candidate => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status))) {
-      return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+      return this.#queuedAdmission(run, sessionRuns.some(candidate => candidate.id !== run.id
+        && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction")
+        ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING");
     }
     if (run.source !== "compaction" && sessionKey && this.conversationCheckpointStore) {
       const session = this.chatSessionStore.getSession(sessionKey);
@@ -6074,7 +6501,8 @@ class WorkRunCoordinator {
       }
     }
     let executionContract;
-    try { executionContract = await this.#executionContract(profile, run); }
+    this.#admissionPreparation(run, "RUNTIME_PREPARING");
+    try { executionContract = await this.#timedPerformanceStage(runId, "admission_runtime", () => this.#executionContract(profile, run)); }
     catch (error) {
       if (lifecycle !== null) this.#fenceLifecycle(lifecycle);
       const existing = this.#existingAdmission(runId);
@@ -6098,11 +6526,13 @@ class WorkRunCoordinator {
     const preparing = this.workingContextBarriers.get(sessionKey);
     if (run.source !== "compaction" && preparing) {
       if (preparing.error) throw preparing.error;
-      return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+      return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
     }
     sessionRuns = sessionKey ? this.listSessionRuns(sessionKey) : [];
     if (sessionRuns.some(candidate => candidate.id !== run.id && ACTIVE_RUN_STATES.has(candidate.status))) {
-      return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+      return this.#queuedAdmission(run, sessionRuns.some(candidate => candidate.id !== run.id
+        && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction")
+        ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING");
     }
     if (this.hookWorkspaceWriters?.busy(runId, run.workspace, executionContract.permissionPolicy.sandbox)) {
       return this.#queuedAdmission(run, "WORKSPACE_WRITE_BUSY");
@@ -6148,7 +6578,7 @@ class WorkRunCoordinator {
         if (TERMINAL_RUN_STATES.has(compact.status)) {
           return { disposition: "rejected", reason: nativeCompactionRejection(compact), run };
         }
-        return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+        return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
       }
     }
     if (requestPlan && (requestPlan.fixedTokens > requestPlan.limitTokens || requestPlan.fixedTransportExceeded)) {
@@ -6196,12 +6626,12 @@ class WorkRunCoordinator {
             }).catch(error => { barrier.error = require("./product-context-protocol").compactionErrorCode(error); })
               .finally(() => { barrier.waiting = false; });
           }
-          if (plan) return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+          if (plan) return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
         }
         this.compactionBarriers.delete(sessionKey);
       }
     }
-    const workingTarget = require("./conversation-context-budget").WORKING_CONTEXT_TARGET;
+    const workingTarget = requestPlan?.limitTokens;
     if (run.source !== "compaction" && !manualNativeCompact && sessionKey && requestPlan
       && !executionContract.contextFresh && !requestPlan.transportExceeded
       && this.transcriptStore && this.conversationCheckpointStore
@@ -6214,10 +6644,10 @@ class WorkRunCoordinator {
         && !this.conversationCheckpointStore?.hasHistoricalSource?.(session.profileId,
           this.transcriptStore.listEvents(session.profileId, session.id));
       if (eligible && requestPlan.estimatedTokens >= workingTarget
-        && (selfManagedRuntime || (requestPlan.limitTokens > workingTarget && !requestPlan.exceedsBudget))) {
+        && (selfManagedRuntime || !requestPlan.exceedsBudget)) {
         const { latest } = this.#maintenanceState(session, executionContract, action);
         const compact = latest && this.dispatcher.getRun(latest.id);
-        if (compact && !TERMINAL_RUN_STATES.has(compact.status)) return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+        if (compact && !TERMINAL_RUN_STATES.has(compact.status)) return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
         if (compact?.status === "completed" && latest.waitingRunId === run.id && latest.state !== "paused") {
           require("./context-transfer").recordMaintenance(this.transcriptStore, session, { ...latest, state: "paused" });
         }
@@ -6254,7 +6684,7 @@ class WorkRunCoordinator {
               });
             }
           }
-          return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+          return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
         }
         this.advisoryCompactionPaused.add(JSON.stringify(latest.scope));
         while (this.advisoryCompactionPaused.size > 512) {
@@ -6282,6 +6712,7 @@ class WorkRunCoordinator {
         && !this.conversationCheckpointStore?.hasRevocations?.(session.profileId)
         && !this.conversationCheckpointStore?.hasHistoricalSource?.(session.profileId,
           this.transcriptStore.listEvents(session.profileId, session.id))) {
+        this.#admissionPreparation(run, "CONTEXT_COMPACTING");
         const compact = await this.#prepareNativeConversationCompaction(session, executionContract, run.id);
         if (compact.status === "completed") {
           return { disposition: "rejected", reason: "CONTEXT_COMPACTION_REQUIRED", run };
@@ -6289,7 +6720,7 @@ class WorkRunCoordinator {
         if (["failed", "interrupted", "canceled"].includes(compact.status)) {
           return { disposition: "rejected", reason: nativeCompactionRejection(compact), run };
         }
-        return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+        return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
       }
       return { disposition: "rejected", reason: "CONTEXT_COMPACTION_REQUIRED", run };
     }
@@ -6330,7 +6761,7 @@ class WorkRunCoordinator {
       if (lifecycle !== null) this.#fenceLifecycle(lifecycle);
       const uiCommand = run.source === "chat" && this.#commandForRun(run)?.command;
       if (uiCommand) this.validateUiAction(uiCommand);
-      this.pluginRuntimeToolService?.captureRun({ ...run, status: "starting" });
+      this.mcpConnectorController?.captureRun({ ...run, status: "starting" });
       admission = this.dispatcher.admit(runId, {
         onBusy: "queue",
         writable: executionContract.permissionPolicy.sandbox !== "read-only",
@@ -6338,7 +6769,7 @@ class WorkRunCoordinator {
           ? {} : { contextSnapshotId: executionContract.contextSnapshotId }),
       });
     } catch (error) {
-      this.pluginRuntimeToolService?.releaseRun(runId);
+      this.mcpConnectorController?.releaseRun(runId);
       this.startupGate?.release(runId);
       if (accountAdmission) {
         this.runtimeAccountAdmission.release({
@@ -6381,7 +6812,7 @@ class WorkRunCoordinator {
       });
     }
     if (admission.disposition !== "started") {
-      this.pluginRuntimeToolService?.releaseRun(runId);
+      this.mcpConnectorController?.releaseRun(runId);
       this.startupGate?.release(runId);
     }
     return admission.disposition === "queued" ? this.#queuedAdmission(run, admission.reason) : admission;
@@ -6396,6 +6827,7 @@ class WorkRunCoordinator {
     }
     let defaultModel = profile.defaultModel;
     let sessionModelOverride = null;
+    let sessionProviderRef;
     let sessionPermissionMode = null;
     let modelSettings;
     let transcriptSessionId = null;
@@ -6414,6 +6846,10 @@ class WorkRunCoordinator {
         modelSettings = { thinkingLevel: null, serviceTier: null };
       }
       transcriptSessionId = session.id;
+      sessionProviderRef = this.#sessionProviderRef(session, profile);
+      if (sessionProviderRef !== undefined) {
+        defaultModel = codexSessionProvider.applyProviderRef(this.productStore, profile, sessionProviderRef).defaultModel;
+      }
       defaultModel = sessionModelOverride ?? defaultModel;
     }
     if (run.source === "compaction") {
@@ -6433,12 +6869,13 @@ class WorkRunCoordinator {
     }
     if (run.source === "proactive") this.assertProactiveRunCurrent(run);
     const resolvedPermission = run.source === "proactive"
-      ? { mode: null, nativeMode: null, permissionPolicy: Object.freeze({ approvalPolicy: "on-request", sandbox: "read-only" }) }
+      ? { mode: null, nativeMode: null, permissionPolicy: Object.freeze({ approvalPolicy: profile.runtime === "codex" ? "on-request" : "never", sandbox: "read-only" }) }
       : run.source === "compaction"
       ? { mode: null, nativeMode: null, permissionPolicy: Object.freeze({ approvalPolicy: "never", sandbox: "read-only" }) }
       : resolveRuntimePermissionMode(
       profile.runtime || "codex",
-      run.source === "cron" ? "full-access" : sessionPermissionMode,
+      run.source === "cron" ? (runtimePermissionModeOptions(profile.runtime || "codex")
+        .some(option => option.id === "full-access") ? "full-access" : null) : sessionPermissionMode,
       profile.permissionPolicy,
     );
     if (run.workspace === null && resolvedPermission.permissionPolicy.sandbox !== "read-only") {
@@ -6448,9 +6885,10 @@ class WorkRunCoordinator {
       );
     }
     const command = this.#commandForRun(run)?.command || null;
-    const selectedPlugins = command?.pluginSelection?.length
-      ? resolvePluginSelection(this.pluginStore, command.pluginSelection,
-        this.pluginToolCatalogRegistry) : [];
+    if (command?.pluginSelection !== undefined) throw coordinatorError("PLUGIN_PLATFORM_RETIRED", "原任务依赖已停用的插件选择，需要重新选择连接器账号");
+    if (command?.connectorSelection !== undefined) throw coordinatorError("OPEN_CONNECTOR_RETIRED", "This saved task needs migration from OpenConnector to MCP connectors");
+    this.mcpConnectorController?.captureRun(run);
+    const mcpConnectors = this.mcpConnectorController?.available(profile.id, run.id) || [];
     const handoff = !!boundSession && runtimeSessionIdOf(boundSession) === null
       && boundSession.retiredRuntimeSessions?.length > 0;
     const contextLifecycleV1 = handoff || this.getNativeRuntimeConfig()?.flags?.runtimeContextLifecycleV1 === true;
@@ -6463,8 +6901,14 @@ class WorkRunCoordinator {
     const contextState = this.#conversationContextState(budgetSession, profile);
     // Use the same saved-copy paths and prompt wrapper as turnStart. Their
     // metadata and instructions also consume input and transport capacity.
-    const currentAttachments = command?.attachments?.length && boundSessionKey
-      ? prepareChatAttachments(this.getMediaStore(), command.attachments, boundSessionKey) : command?.attachments ?? [];
+    const mediaAttachments = run.source === "inspiration" ? (() => {
+      const execution = this.resolveRunSession(run);
+      return execution?.inputSource === "chat" ? execution.turnAttachments || []
+        : [...(execution?.attachments || []), ...(execution?.turnAttachments || [])];
+    })() : command?.attachments || [];
+    await this.#prepareSecretMedia(boundSession, mediaAttachments);
+    const currentAttachments = mediaAttachments.length && boundSessionKey
+      ? this.#safeChatAttachments(mediaAttachments, boundSessionKey) : mediaAttachments;
     const currentPrompt = attachmentPrompt(command?.prompt ?? "", currentAttachments);
     const hookPreparation = this.hookService && !["compaction", "proactive", "automation"].includes(run.source)
       ? await this.hookService.prepareRun(run, profile, () => {
@@ -6479,14 +6923,13 @@ class WorkRunCoordinator {
     const snapshot = this.contextCompiler && !["compaction", "proactive", "automation"].includes(run.source) ? this.contextCompiler.compile({
       profile,
       run,
-      pluginToolProjection: this.pluginRuntimeToolService?.skillToolProjectionForRun(run) || [],
       hookPreparation,
       transcriptSessionId,
       query: command?.prompt || run.sourceId,
       contextLifecycleV1,
       restorePolicy,
       currentOperationId: command?.operationId ?? null,
-      selectedPlugins,
+      mcpConnectors,
       nativeSessionId: runtimeSessionIdOf(boundSession),
       ...(boundSession ? { resolveAttachments: attachments => this.#contextAttachmentReferences(attachments, boundSession.sessionKey) } : {}),
       ...(contextState ? { requestBudget: contextState.budget, contextLimits: contextState.limits, nativeUsage: contextState.usage,
@@ -6523,11 +6966,12 @@ class WorkRunCoordinator {
       sessionModelOverride,
       defaultModel,
       effectiveModel: defaultModel,
-      ...(this.captureExecutionProviderRoute ? this.captureExecutionProviderRoute(profile, defaultModel) : {}),
+      ...(this.captureExecutionProviderRoute ? this.captureExecutionProviderRoute(profile, defaultModel, sessionProviderRef) : {}),
       bindingId: profile.selectedBindingId ?? profile.defaultBindingId ?? null,
       ...(modelSettings ? { modelSettings: Object.freeze({ ...modelSettings }) } : {}),
       workspace: run.workspace,
       contextSnapshotId: snapshot?.id ?? null,
+      contextRevisions: snapshot?.revisions ? Object.freeze({ ...snapshot.revisions }) : null,
       contextRequest: snapshot?.report?.request ?? null,
       contextFresh: boundSession ? runtimeSessionIdOf(boundSession) === null : true,
       nativeMemoryVersion,
@@ -6539,7 +6983,7 @@ class WorkRunCoordinator {
       toolPermissionRevision: snapshot?.revisions?.permission ?? null,
       turnDeveloperInstructions: [snapshot?.turnDeveloperInstructions, workspaceInstructions, cronInstructions].filter(Boolean).join("\n\n") || null,
       developerInstructions: [snapshot?.stableDeveloperInstructions ?? snapshot?.developerInstructions
-        ?? (run.source === "proactive" ? require("./proactive-service").proactiveDeveloperInstructions(run)
+        ?? (run.source === "proactive" ? require("./proactive-service").proactiveDeveloperInstructions(run, profile.runtime !== "codex")
           : run.source === "compaction" ? "Summarize conversation data without tools or side effects."
           : run.source === "automation" ? "Execute this Codex automation prompt in its configured workspace using the native Codex configuration. Report the actual result and any failures."
           : shoggothProductDeveloperInstructions({
@@ -6572,6 +7016,18 @@ class WorkRunCoordinator {
     return this.#chainRunTask(runId, () => this.#runAttempt(runId));
   }
 
+  #chainRunControlTask(runId, task) {
+    if (!this.preparedRunContexts.has(runId)
+      && this.runHostAssignments.get(runId)?.host.capabilities?.["turn.start.prepare"] !== true) return this.#chainRunTask(runId, task);
+    const previous = this.runControlTails.get(runId) || Promise.resolve();
+    const scheduled = previous.catch(() => {}).then(task);
+    this.runControlTails.set(runId, scheduled); scheduled.catch(() => {});
+    scheduled.finally(() => {
+      if (this.runControlTails.get(runId) === scheduled) this.runControlTails.delete(runId);
+    }).catch(() => {});
+    return scheduled;
+  }
+
   #chainRunTask(runId, task) {
     const previous = this.runTails.get(runId) || Promise.resolve();
     const scheduled = previous.catch(() => {}).then(task);
@@ -6601,6 +7057,12 @@ class WorkRunCoordinator {
     try {
       await this.#drive(runId, token);
     } catch (error) {
+      const cancellation = this.preparingAcpCancellations.get(runId);
+      if (cancellation?.generation === token.run && cancellation.lifecycle === token.lifecycle) return;
+      const settled = this.dispatcher.getRun(runId);
+      if (settled?.runtimeAttemptRef && TERMINAL_RUN_STATES.has(settled.status)
+        && token.lifecycle === this.lifecycleGeneration && ["HOST_CAPABILITY_REVOKED", "WORK_RUN_COORDINATOR_STALE_RUN"]
+          .includes(ownDataErrorCode(error))) return;
       if (await this.#recoverInstructionContext(runId, token, error)) return;
       if (await this.#recoverRejectedContext(runId, token, error)) return;
       if (token.hostCapacity && !this.recoveringRuns.has(runId)) {
@@ -6608,7 +7070,7 @@ class WorkRunCoordinator {
         const run = this.dispatcher.requeueBeforeDispatch(runId);
         this.#releaseRuntimeAccountAdmission(runId);
         this.runExecutionContracts.delete(runId);
-    this.pluginRuntimeToolService?.releaseRun(runId);
+      this.mcpConnectorController?.releaseRun(runId);
         this.runExecutionStore?.remove(run);
         const record = this.#commandForRun(run);
         if (record?.kind === "chat" && record.command.state === "dispatching") {
@@ -6618,7 +7080,28 @@ class WorkRunCoordinator {
         this.#queuedAdmission(run, "HOST_CAPACITY");
         return;
       }
+      if (this.recoveringRuns.has(runId) && settled?.runtimeAttemptRef
+        && runtimeErrorChainHasCode(error, "RUNTIME_STOP_UNCONFIRMED")) {
+        const failure = coordinatorError("RUNTIME_STOP_UNCONFIRMED", "运行时停止结果未确认");
+        this.lastErrors.set(runId, failure);
+        this.#poison(failure);
+        throw failure;
+      }
       if (await this.#quiesceUncertainStart(runId, token, error)) return;
+      // An unreadable crash transaction cannot prove that an already prepared
+      // operation was unsent. Keep its durable attempt and the ledger's recovery
+      // barrier; do not present this as a fresh start failure or replay it.
+      if (this.recoveringRuns.has(runId) && settled?.runtimeAttemptRef
+        && runtimeStageFromError(error) === "runtime_acquire" && !this.runHostAssignments.has(runId)
+        && runtimeErrorChainHasCode(error, "RUNTIME_LEDGER_UNCERTAIN")
+        && !runtimeErrorChainHasCode(error, "RUNTIME_STOP_UNCONFIRMED")
+        && !runtimeErrorChainHasCode(error, "STORE_COMMIT_UNCERTAIN")) {
+        this.#fence(token);
+        this.telemetry.record("runtime.stage", { runId, stage: "recovery", outcome: "unknown", count: 1,
+          code: "RUNTIME_LEDGER_UNCERTAIN" });
+        await this.#interruptForLostExecutionContract(runId, token.lifecycle, "RUNTIME_TURN_ACCEPTANCE_UNKNOWN");
+        return;
+      }
       if (await this.#failRunStart(runId, token, error)) return;
       if (this.recoveringRuns.has(runId) && !this.poisonError) {
         this.#fence(token);
@@ -6630,6 +7113,11 @@ class WorkRunCoordinator {
       this.lastErrors.set(runId, error);
       throw error;
     } finally {
+      const cancellation = this.preparingAcpCancellations.get(runId);
+      if (cancellation?.generation === token.run && cancellation.lifecycle === token.lifecycle) {
+        cancellation.driveSettled = true;
+        if (cancellation.controlSettled) this.preparingAcpCancellations.delete(runId);
+      }
       if (this.startupControllers.get(runId) === token.controller) this.startupControllers.delete(runId);
       const released = this.startupGate?.release(runId);
       if (released && !token.hostCapacity && token.lifecycle === this.lifecycleGeneration
@@ -6674,7 +7162,7 @@ class WorkRunCoordinator {
       this.#releaseRuntimeAccountAdmission(runId);
       this.runHostAssignments.delete(runId);
       this.runExecutionContracts.delete(runId);
-      this.pluginRuntimeToolService?.releaseRun(runId);
+      this.mcpConnectorController?.releaseRun(runId);
       this.runExecutionStore?.remove(queued);
       const record = this.#commandForRun(queued);
       if (record?.kind === "chat" && record.command.state === "dispatching") await this.inbox.transition(record.operationId, "pending");
@@ -6741,7 +7229,7 @@ class WorkRunCoordinator {
     const queued = this.dispatcher.requeueBeforeDispatch(runId);
     this.#releaseRuntimeAccountAdmission(runId);
     this.runExecutionContracts.delete(runId);
-    this.pluginRuntimeToolService?.releaseRun(runId);
+      this.mcpConnectorController?.releaseRun(runId);
     this.runExecutionStore?.remove(queued);
     const record = this.#commandForRun(queued);
     if (record?.kind === "chat" && record.command.state === "dispatching") await this.inbox.transition(record.operationId, "pending");
@@ -6757,7 +7245,8 @@ class WorkRunCoordinator {
   async #quiesceUncertainStart(runId, token, error) {
     const maintenance = this.domainCommands.get(runId);
     if (!this.getNativeRuntimeConfig()?.flags?.runtimeAdmissionV1
-      && !(maintenance?.nativeCompaction && maintenance.advisory)) return false;
+      && !(maintenance?.nativeCompaction && maintenance.advisory)
+      && this.runHostAssignments.get(runId)?.host.capabilities?.["turn.start.prepare"] !== true) return false;
     let current = error;
     let code = null;
     for (let depth = 0; depth < 8 && current; depth++) {
@@ -6775,8 +7264,12 @@ class WorkRunCoordinator {
       // Retire its profile host before returning the global reservation. The
       // adapter's bounded stop also resolves its other assigned Run observers.
       await Promise.race([
-        Promise.resolve().then(() => this.runtimeManager.stop(runtimeBinding({ runtime: contract.runtime,
-          runtimeProfileId: contract.runtimeProfileId, runtimeAccountId: contract.runtimeAccountId }))),
+        Promise.resolve().then(() => {
+          const assigned = this.runHostAssignments.get(runId)?.host;
+          return assigned?.capabilities?.["turn.start.prepare"] === true ? assigned.stop()
+            : this.runtimeManager.stop(runtimeBinding({ runtime: contract.runtime,
+              runtimeProfileId: contract.runtimeProfileId, runtimeAccountId: contract.runtimeAccountId }));
+        }),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(coordinatorError("RUNTIME_STOP_UNCONFIRMED", "运行时停止结果未确认")), 5_000);
         }),
@@ -6822,6 +7315,9 @@ class WorkRunCoordinator {
     await this.#withTerminalizing(runId, async () => {
       this.#fence(token);
       const publicErrorCode = publicStartErrorCode(error);
+      // Only explicitly projected diagnostics cross the start-error boundary;
+      // arbitrary local Error messages may contain request/configuration data.
+      const failure = runtimeFailureFromError(error);
       let terminal;
       try {
         terminal = this.dispatcher.transition(runId, "failed", {
@@ -6837,6 +7333,7 @@ class WorkRunCoordinator {
           status: "failed",
           resultSummary: null,
           errorCode: publicErrorCode,
+          ...(failure ? { failure } : {}),
         });
       } catch (error) {
         this.#poison(error);
@@ -6888,10 +7385,12 @@ class WorkRunCoordinator {
     const lease = this.hostCapabilityIssuer.issue({ identity: {
       runId: token.runId, profileId: contract.profileId, bindingId: contract.bindingId || contract.runtimeProfileId,
       runtime: contract.runtime, runtimeAccountId: contract.runtimeAccountId,
-      attemptId: `${token.lifecycle}:${token.run}`, workspace: contract.workspace,
+      attemptId: token.attemptId ??= this.dispatcher.getRun(token.runId)?.runtimeAttemptRef?.attemptId
+        ?? `${token.lifecycle}:${token.run}:${this.randomUUID()}`, workspace: contract.workspace,
       toolRevision: contract.toolRegistryRevision, permissionRevision: contract.toolPermissionRevision,
       accountGeneration: contract.runtimeAccountGeneration,
-    }, grants: contract.source === "compaction" ? [] : undefined, signal: token.controller.signal,
+    }, expiresAt: null, grants: contract.source === "compaction"
+      || contract.source === "proactive" && contract.runtime !== "codex" ? [] : undefined, signal: token.controller.signal,
     validate: () => {
       if (token.lifecycle !== this.lifecycleGeneration || this.runGenerations.get(token.runId) !== token.run) return false;
       const profile = this.productStore.resolveAgentRuntimeProfile
@@ -6943,7 +7442,7 @@ class WorkRunCoordinator {
     } finally { clearTimeout(timer); }
   }
 
-  #armAdvisoryNativeTimeout(runId, token, host, sessionKey) {
+  #armNativeCompactionTimeout(runId, token, host, sessionKey) {
     const timer = setTimeout(() => {
       if (token.controller.signal.aborted || token.lifecycle !== this.lifecycleGeneration
         || this.state !== "open" || TERMINAL_RUN_STATES.has(this.dispatcher.getRun(runId)?.status)) return;
@@ -6992,6 +7491,7 @@ class WorkRunCoordinator {
         });
       },
     });
+    wait.sessionId = threadId;
     this.manualCompactions.set(runId, wait);
     let outcome;
     try {
@@ -7008,9 +7508,12 @@ class WorkRunCoordinator {
       if (outcome === "completed" && this.getNativeRuntimeConfig()?.flags?.runtimeContextLifecycleV1) {
         // A missing boundary only keeps the estimate high; it never changes the outcome.
         try {
-          this.#appendTranscript(runId, { id: transcriptEventId("native-context-compacted", runId, "command"),
-            kind: "status", contextExcluded: true,
-            content: { transcriptType: "context.native.compacted", runtimeSessionId: threadId } });
+          this.manualCompactions.delete(runId);
+          this.#recordNativeCompaction(session.profileId, session, {
+            ...wait.compactionEvent,
+            compactionId: wait.compactionEvent?.compactionId ?? `command:${runId}`,
+            contextUsage: { runtimeSessionId: threadId },
+          }, runId);
         } catch {}
       }
       return await this.#withTerminalizing(runId, async () => {
@@ -7028,6 +7531,81 @@ class WorkRunCoordinator {
       if (error?.code === "STORE_COMMIT_UNCERTAIN") this.#poison(error);
       throw error;
     } finally { this.manualCompactions.delete(runId); }
+  }
+
+  async #driveProactiveModelReview(run, command, host, contract, token) {
+    if (host.capabilities?.["model.generate.toolFree"] !== true || typeof host.generateModelOnly !== "function") {
+      throw coordinatorError("PROACTIVE_RUNTIME_UNVERIFIED", "当前 Runtime 没有受限检查能力");
+    }
+    const assertCurrent = (checkHost = true) => {
+      this.#fence(token);
+      if (token.controller.signal.aborted) throw coordinatorError("MODEL_ONLY_CANCELED", "主动检查已取消");
+      this.#fenceRuntimeAccount(token);
+      const current = this.productStore.resolveAgentRuntimeProfile(run.profileId);
+      if (current.selectedBindingId !== contract.bindingId || current.runtime !== contract.runtime
+        || current.runtimeAccountId !== contract.runtimeAccountId || current.defaultModel !== contract.profileDefaultModel) {
+        throw coordinatorError("PROACTIVE_SCOPE_INVALID", "Agent 默认模型或 Runtime 已变化");
+      }
+      this.assertProactiveRunCurrent(this.dispatcher.getRun(run.id));
+      if (checkHost) host.assertExecutionProviderCurrent?.();
+      if (contract.providerFence) this.assertExecutionProviderRouteCurrent?.(contract);
+    };
+    assertCurrent();
+    // This durable boundary precedes every provider call. Recovery never
+    // replays a running model-only review, even without a native session ID.
+    this.dispatcher.transition(run.id, "running");
+    this.startupGate?.release(run.id);
+    this.#streamFor(run.id).append("status", { status: "running" });
+    let errorCode = null, dispatched = false;
+    try {
+      const auth = await readRuntimeAuthenticationState(host, { allowDeferred: true });
+      assertCurrent();
+      if (auth.status === "unauthenticated") throw runtimeAuthRequiredError();
+      const modelSecretScope = this.#modelSecretScope(contract, {});
+      const text = `${contract.developerInstructions}\n\n${command.prompt}`;
+      const prompt = this.temporarySecrets ? projectTextOrOriginal(this.temporarySecrets, modelSecretScope, text) : text;
+      assertCurrent();
+      this.proactiveModelUsage?.(run, false); dispatched = true;
+      const input = { prompt, model: contract.defaultModel ?? null, modelSecretScope,
+        operationId: command.operationId, signal: token.controller.signal, assertCurrent };
+      const output = await require("./runtime-model-only").runBoundedModelOnly(input,
+        signal => host.generateModelOnly({ ...input, signal }));
+      // Record actual usage even when a changed rule/default invalidates the
+      // verdict. Unknown usage retains a durable budget barrier, never zero.
+      if (Number.isSafeInteger(output.usage?.totalTokens) && output.usage.totalTokens > 0 && this.usageStore) {
+        const profile = this.productStore.getAgentProfile(run.profileId);
+        this.usageStore.record({ profileId: run.profileId, agentId: profile.agentId || profile.id,
+          agentName: profile.name || profile.id, runId: run.id, source: "proactive", sourceId: run.sourceId,
+          runtime: contract.runtime, runtimeAccountId: contract.runtimeAccountId,
+          threadId: `model-only:${run.id}`, turnId: run.id, responseId: command.operationId,
+          model: output.model || contract.defaultModel, provider: output.provider || null,
+          usage: output.usage, createdAt: this.now() });
+        this.proactiveModelUsage?.(run, true);
+      }
+      // Dedicated model workers have already confirmed their process exit.
+      // Recheck account/default/rules/runtime identity and provider route,
+      // without asking a retired transport to prove that it is still alive.
+      assertCurrent(false);
+      let response;
+      try { response = JSON.parse(output.text); } catch { throw coordinatorError("PROACTIVE_RESPONSE_INVALID", "检查结果不是结构化 JSON"); }
+      this.submitProactiveResponse(this.dispatcher.getRun(run.id), response);
+    } catch (error) {
+      if (error?.code === "RUNTIME_STOP_UNCONFIRMED" || error?.code === "STORE_COMMIT_UNCERTAIN") {
+        this.#poison(error); throw error;
+      }
+      this.#fence(token);
+      errorCode = token.controller.signal.aborted ? "PROACTIVE_REVIEW_STOPPED"
+        : ["PROACTIVE_SCOPE_INVALID", "PROACTIVE_RESPONSE_INVALID", "MODEL_ONLY_ACCEPTANCE_UNKNOWN"].includes(error?.code)
+          ? error.code : publicStartErrorCode(error);
+      if (!dispatched) this.proactiveModelUsage?.(run, true);
+    }
+    this.#fence(token);
+    const status = errorCode === "PROACTIVE_REVIEW_STOPPED" ? "interrupted" : errorCode ? "failed" : "completed";
+    const terminal = this.dispatcher.transition(run.id, status, { errorCode });
+    this.#appendTerminal(run.id, { status, resultSummary: null, errorCode });
+    await this.#completeCommandForRun(terminal, () => this.#fence(token));
+    this.#releaseTerminalRun(run.id);
+    await this.#drainQueuedRuns(token.lifecycle);
   }
 
   async #driveProductCompaction(run, command, host, contract, token) {
@@ -7055,7 +7633,10 @@ class WorkRunCoordinator {
         throw coordinatorError("CHECKPOINT_STALE", "摘要原文或记忆状态已变化");
       }
       this.conversationCheckpointStore.assertSourceProjectionCurrent?.(command.plan);
-      const output = await host.generateModelOnly({ prompt: command.prompt, model: contract.defaultModel,
+      const modelPrompt = this.temporarySecrets ? projectTextOrOriginal(this.temporarySecrets, { profileId: run.profileId,
+        sessionId: this.getRunSessionKey(run) || command.plan.sessionId }, command.prompt) : command.prompt;
+      const output = await host.generateModelOnly({ prompt: modelPrompt, model: contract.defaultModel,
+        modelSecretScope: { profileId: run.profileId, sessionId: this.getRunSessionKey(run) || command.plan.sessionId },
         operationId: command.operationId, signal: token.controller.signal });
       this.#fenceRuntimeAccount(token);
       const profile = this.productStore.getAgentProfile(run.profileId);
@@ -7093,6 +7674,47 @@ class WorkRunCoordinator {
     await this.#drainQueuedRuns(token.lifecycle);
   }
 
+  async #recoverPreparedAcpRun(run, host, contract, session, token) {
+    const attempt = run.runtimeAttemptRef;
+    if (!this.recoveringRuns.has(run.id) || !attempt || run.runtimeTurnRef !== null
+      || host.capabilities?.["turn.start.prepare"] !== true) return false;
+    this.telemetry.record("runtime.stage", { runId: run.id, stage: "recovery", outcome: "unknown", count: 1 });
+    await this.#resumeRecoveredThread(host, attempt.sessionId, contract, session, token);
+    this.#fence(token);
+    const thread = await this.#readThread(host, attempt.sessionId, token, { turnId: attempt.turnId });
+    const matches = thread?.turns?.filter(turn => turn?.execution?.operationId === attempt.operationId);
+    if (!Array.isArray(matches) || matches.length !== 1) {
+      throw coordinatorError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "ACP recovery has no unique operation evidence");
+    }
+    const turn = matches[0], evidence = turn.execution;
+    if (!confirmedAcpExecution(evidence, attempt, turn)) {
+      // Only the exact durable no-write receipt may return to normal dispatch.
+      // A partial load or absent operation is never a no-execution proof.
+      if (attempt.dispatchState === "prepared" && evidence?.dispatchState === "not_sent"
+        && evidence.remoteAccepted === false && evidence.terminal === false && evidence.unknown === false
+        && ["sessionId", "turnId", "attemptId", "operationId", "fingerprint"].every(key => evidence[key] === attempt[key])) return false;
+      throw coordinatorError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "ACP recovery remains uncertain");
+    }
+    const binding = runtimeBinding({ runtime: contract.runtime, runtimeProfileId: contract.runtimeProfileId,
+      runtimeAccountId: contract.runtimeAccountId });
+    if (attempt.dispatchState === "prepared") this.dispatcher.markAttemptDispatch(run.id,
+      Object.fromEntries(["sessionId", "turnId", "attemptId", "operationId", "fingerprint"].map(key => [key, attempt[key]])));
+    this.dispatcher.bindAcceptedAttempt(run.id, { attemptId: attempt.attemptId, sessionId: attempt.sessionId, turnId: attempt.turnId });
+    this.#fence(token);
+    const sessionKey = this.getRunSessionKey(run);
+    if (sessionKey) { this.#commitChatThreadBinding(sessionKey, attempt.sessionId); this.#finishContextTransfer(run.id, "accepted"); }
+    const context = { host, prepared: false, runtimeBinding: binding, sessionRef: runtimeSessionRef(binding, attempt.sessionId),
+      turnRef: runtimeTurnRef(binding, attempt.sessionId, attempt.turnId), runtimeProfileId: binding.runtimeProfileId,
+      runtimeAccountId: binding.runtimeAccountId, generation: token.run, threadId: attempt.sessionId,
+      turnId: attempt.turnId, profileId: run.profileId };
+    this.runContexts.set(run.id, context);
+    this.hostCapabilityIssuer.bind(this.runCapabilityLeases.get(run.id), { sessionId: attempt.sessionId, turnId: attempt.turnId });
+    this.recoveringRuns.delete(run.id);
+    await this.#reconcileTerminal(run.id, context);
+    this.telemetry.record("runtime.stage", { runId: run.id, stage: "recovery", outcome: "success", count: 1 });
+    return true;
+  }
+
   async #drive(runId, token) {
     this.#fence(token);
     let run = this.dispatcher.getRun(runId);
@@ -7103,6 +7725,10 @@ class WorkRunCoordinator {
     if (!commandRecord) return;
     const operationId = commandRecord.operationId;
     let { command } = commandRecord;
+    if (this.#isHostMemoryRun(run)) {
+      await this.#driveHostMemory(run, command, token);
+      return;
+    }
     const manualCompact = (commandRecord.kind === "chat" && command.prompt === "/compact"
       && (!command.attachments || command.attachments.length === 0))
       || (run.source === "compaction" && command.nativeCompaction === true);
@@ -7197,11 +7823,12 @@ class WorkRunCoordinator {
             return await this.runtimeManager.acquire(binding, {
               // These pools isolate execution processes by runId. Codex uses
               // a shared app-server and applies policy on thread/turn instead.
-              permissionPolicy: isUnifiedPermissionMode(executionContract.permissionMode)
+              permissionPolicy: (executionContract.source === "proactive" || isUnifiedPermissionMode(executionContract.permissionMode))
                 && executionContract.runtime !== "codex"
                 ? executionContract.permissionPolicy : executionContract.runtimeHostPermissionPolicy,
               workspace: executionContract.workspace,
               executionContract,
+              ...(executionContract.source === "proactive" && executionContract.runtime !== "codex" ? { modelOnly: true } : {}),
               ...(this.hookService ? { nativeHookScope: this.hookService.nativeRunScope?.(runId) ?? null } : {}),
             });
           } catch (error) {
@@ -7210,8 +7837,18 @@ class WorkRunCoordinator {
           }
         },
       ),
+      "connecting",
     );
     this.#fence(token);
+    if (run.source === "proactive" && executionContract.runtime !== "codex") {
+      if (recoveringActive) {
+        await this.#interruptForLostExecutionContract(runId, token.lifecycle, "RUNTIME_RECOVERY_UNAVAILABLE");
+        return;
+      }
+      this.#issueRunCapability(token, executionContract);
+      await this.#driveProactiveModelReview(run, command, host, executionContract, token);
+      return;
+    }
     if (run.source === "compaction" && !manualCompact) {
       this.#issueRunCapability(token, executionContract);
       await this.#driveProductCompaction(run, command, host, executionContract, token);
@@ -7219,9 +7856,11 @@ class WorkRunCoordinator {
     }
     requireMethods(
       host,
-      ["sessionList", "sessionStart", "sessionResume", "sessionRead", "turnStart"],
+      ["sessionList", "sessionStart", "sessionRead", "turnStart"],
       "RuntimeHandle",
     );
+    require("./runtime-capability-evidence").assertRuntimeOperation(host, "chat");
+    require("./runtime-capability-evidence").assertRuntimeAttachments(host, command.attachments);
     const authState = await this.#timedPerformanceStage(
       runId,
       "runtime_authentication",
@@ -7232,7 +7871,8 @@ class WorkRunCoordinator {
       ),
     );
     this.#fence(token);
-    if (authState.status === "unauthenticated") throw runtimeAuthRequiredError();
+    if (authState.status === "unauthenticated"
+      && codexSessionProvider.routeRequiresOpenaiAuth(this.productStore, executionContract)) throw runtimeAuthRequiredError();
     this.#fenceRuntimeAccount(token);
     this.#issueRunCapability(token, executionContract);
     this.runHostAssignments.set(runId, Object.freeze({
@@ -7246,6 +7886,7 @@ class WorkRunCoordinator {
     }));
     this.#observeHost(host, executionContract.runtimeProfileId, this.runAccountAdmissions.get(runId));
 
+    if (await this.#recoverPreparedAcpRun(run, host, executionContract, executionSession, token)) return;
     if (recoveringActive) {
       // A durable remote turn is never sent again. Resume only its session and
       // reconcile the exact operation/turn from complete native history.
@@ -7279,21 +7920,22 @@ class WorkRunCoordinator {
       && (runtimeSessionIdOf(executionSession) !== null || executionSession.status === "binding"
         || executionSession.retiredRuntimeSessions?.length > 0
         || this.getNativeRuntimeConfig()?.flags?.runtimeConversationHandoff);
-    const threadBinding = productSessionKey && (run.source !== "cron" || cronHasSessionAuthority)
-      ? await this.#ensureThread(
+    const threadBinding = await this.#timedPerformanceStage(runId, "session_prepare", () =>
+      productSessionKey && (run.source !== "cron" || cronHasSessionAuthority)
+      ? this.#ensureThread(
         host,
         executionSession,
         executionContract,
         command,
         token,
       )
-      : await this.#ensureDomainThread(
+      : this.#ensureDomainThread(
         host,
         executionSession,
         executionContract,
         command,
         token,
-      );
+      ), runtimeSessionIdOf(executionSession) || executionSession.retiredRuntimeSessions?.length ? "restoring" : "opening");
     const { threadId, fresh } = threadBinding;
     this.#fence(token);
     if (run.source === "compaction" && command.nativeCompaction === true
@@ -7326,7 +7968,7 @@ class WorkRunCoordinator {
             throw coordinatorError("RUNTIME_COMMAND_PARAMS_INVALID", "Native compact command is unavailable");
           }
         } catch (error) {
-          if (!command.advisory || workingContextFailureBlocks(error)) throw error;
+          if (workingContextFailureBlocks(error)) throw error;
           // A turn-mode command resolves locally before turnStart. Retire the
           // handle even on an unexpected adapter error before releasing input.
           await this.#stopManualCompactionHost(host);
@@ -7362,11 +8004,15 @@ class WorkRunCoordinator {
     this.#fence(token);
     if (productSessionKey) {
       this.#commitChatThreadBinding(productSessionKey, threadId);
+      this.#recordSessionModelSource(productSessionKey, threadId, executionContract);
       this.#finishContextTransfer(runId, "accepted");
     }
     this.#fence(token);
     run = this.dispatcher.getRun(runId);
-    if (run?.status === "starting") {
+    if (host.capabilities?.["turn.start.prepare"] === true) {
+      const attempt = run?.runtimeAttemptRef;
+      this.dispatcher.bindAcceptedAttempt(runId, { attemptId: attempt?.attemptId, sessionId: threadId, turnId });
+    } else if (run?.status === "starting") {
       this.dispatcher.transition(runId, "running", {
         runtimeSessionRef: runtimeSessionRef(binding, threadId),
         runtimeTurnRef: runtimeTurnRef(binding, threadId, turnId),
@@ -7378,7 +8024,10 @@ class WorkRunCoordinator {
     this.#fence(token);
     this.recoveringRuns.delete(runId);
     this.hostCapabilityIssuer.bind(this.runCapabilityLeases.get(runId), { sessionId: threadId, turnId });
+    const preparedContext = this.preparedRunContexts.get(runId);
+    this.preparedRunContexts.delete(runId);
     this.runContexts.set(runId, {
+      ...preparedContext, prepared: false,
       host,
       runtimeBinding: binding,
       sessionRef: runtimeSessionRef(binding, threadId),
@@ -7390,13 +8039,14 @@ class WorkRunCoordinator {
       turnId,
       profileId: run.profileId,
     });
-    if (command.nativeCompaction && command.advisory && nativeCompaction(binding.runtime)?.mode === "turn") {
-      this.#armAdvisoryNativeTimeout(runId, token, host, productSessionKey);
+    if (command.nativeCompaction && nativeCompaction(binding.runtime)?.mode === "turn") {
+      this.#armNativeCompactionTimeout(runId, token, host, productSessionKey);
     }
-    this.#flushPendingHostEvents(host, this.runContexts.get(runId));
-    this.#streamFor(runId).append("status", { status: "running" });
+    this.#flushPendingHostEvents(host, this.#executionContext(runId));
+    this.#streamFor(runId).append("status", { status: "running",
+      ...(!this.#performanceFor(runId).firstRuntimeEventSeen ? { stage: "waiting" } : {}) });
     this.hookService?.observeRun(this.dispatcher.getRun(runId), "run.started", {});
-    await this.#reconcileTerminal(runId, this.runContexts.get(runId));
+    await this.#reconcileTerminal(runId, this.#executionContext(runId));
   }
 
   async #runtimeStageCall(stage, token, task) {
@@ -7495,6 +8145,12 @@ class WorkRunCoordinator {
         throw coordinatorError("CODEX_THREAD_HISTORY_INCOMPLETE", "terminal thread/read 不是 full history");
       }
       const operationId = this.#operationIdForRun(run);
+      if (context.host.capabilities?.["turn.start.prepare"] === true) {
+        if (operationId !== run.runtimeAttemptRef?.operationId
+          || !confirmedAcpExecution(turn.execution, run.runtimeAttemptRef, turn)) {
+          throw coordinatorError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "ACP operation terminal could not be verified");
+        }
+      } else {
       assertHistoryCanProveAbsence(thread, operationId);
       let operationTurns;
       try {
@@ -7511,6 +8167,7 @@ class WorkRunCoordinator {
           "CODEX_TERMINAL_OPERATION_MISMATCH",
           `terminal turn ${context.turnId} 不属于当前 operation`,
         );
+      }
       }
     }
     const mapping = {
@@ -7534,10 +8191,36 @@ class WorkRunCoordinator {
       if (errorCode === "CRON_AUTHORIZATION_DENIED") resultSummary = null;
     }
     const patch = definedProperties({ resultSummary, errorCode: mapping.errorCode });
+    const failure = mapping.errorCode && ["failed", "interrupted"].includes(turn.status)
+      ? runtimeFailureDetail(context.failure ?? turn.error, context.host.registeredSecrets || []) : null;
     return this.#withTerminalizing(runId, async () => {
       let terminal;
       try {
         this.#fence(token);
+        // Only the verified native terminal above can retire executable grants.
+        // A Runtime may finish after its MCP client timed out while a Service
+        // approval/input card is still open. Cancel that work before resolving
+        // the card, so observers and late replies cannot authorize an old call.
+        const lease = this.runCapabilityLeases.get(runId);
+        if (lease) this.hostCapabilityIssuer.revokeGrants(lease);
+        this.#settlePendingForAbort(runId);
+        const current = this.dispatcher.getRun(runId);
+        if (["waiting_approval", "waiting_input"].includes(current?.status)) {
+          this.#interactiveTransition(runId, "running", { waitingRequestId: null });
+        }
+        this.#fence(token);
+        if (mapping.errorCode === "RUNTIME_REFUSED") {
+          // ACP excludes a refused prompt and all its output from future input.
+          // Preserve readable history, using the existing durable context flag.
+          const sessionKey = this.getRunSessionKey(run);
+          const session = sessionKey && this.chatSessionStore?.getSession(sessionKey);
+          if (session && this.transcriptStore) {
+            for (const event of this.transcriptStore.listEvents(run.profileId, session.id)) {
+              if (event.runId === runId && !event.contextExcluded) this.transcriptStore.setContextExcluded({
+                profileId: run.profileId, sessionId: session.id, eventId: event.id, contextExcluded: true });
+            }
+          }
+        }
         terminal = this.dispatcher.transition(runId, mapping.status, patch);
       } catch (error) {
         if (error?.code === "STORE_COMMIT_UNCERTAIN") this.#poison(error);
@@ -7549,6 +8232,7 @@ class WorkRunCoordinator {
           status: mapping.status,
           resultSummary,
           errorCode: mapping.errorCode,
+          ...(failure ? { failure } : {}),
         });
       } catch (error) {
         this.#poison(error);
@@ -7981,6 +8665,7 @@ class WorkRunCoordinator {
         };
       } catch (error) {
         if (desktop || isRuntimeAuthRequired(error) || isRuntimeSessionOwnershipError(error)
+          || ["RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED"].includes(error?.code)
           || runtimeAccountRetryAt(error) !== null || runtimeSessionResumePreservesSession(error)) throw error;
         this.#fence(token);
         this.#assertSemanticRecoveryAvailable(session, token);
@@ -8214,6 +8899,8 @@ class WorkRunCoordinator {
 
   async #resumeThread(host, threadId, profile, session, token, expectedThreadSource = null) {
     this.#assertRuntimeSessionOwned(token, threadId);
+    require("./runtime-capability-evidence").assertRuntimeOperation(host, "resume");
+    requireMethods(host, ["sessionResume"], "RuntimeHandle resume");
     const response = await this.#timedPerformanceStage(
       token.runId,
       "session_resume",
@@ -8241,9 +8928,8 @@ class WorkRunCoordinator {
     const list = observation?.list ?? (params => this.#retryablePreTurnCall(
       "session_start_or_resume", token, () => host.sessionList(params)));
     const fence = observation?.fence ?? (() => this.#fence(token));
-    const matches = [];
-    const seenIds = new Map();
-    for (const archived of [false, true]) {
+    const scan = async (archived) => {
+      const matches = new Map();
       const seenCursors = new Set();
       let cursor;
       let exhausted = false;
@@ -8263,17 +8949,7 @@ class WorkRunCoordinator {
           if (typeof runtimeSession.id !== "string" || runtimeSession.id.length === 0) {
             throw coordinatorError("CODEX_THREAD_LIST_INVALID_RESPONSE", "thread/list 返回无 id thread");
           }
-          const previousPartition = seenIds.get(runtimeSession.id);
-          if (previousPartition !== undefined && previousPartition !== archived) {
-            throw coordinatorError(
-              "CODEX_THREAD_STATE_CONFLICT",
-              `Codex thread ${runtimeSession.id} 同时出现在 active 与 archived 分区`,
-            );
-          }
-          if (previousPartition === undefined) {
-            seenIds.set(runtimeSession.id, archived);
-            matches.push({ id: runtimeSession.id, archived });
-          }
+          matches.set(runtimeSession.id, { id: runtimeSession.id, archived });
         }
         const nextCursor = response.nextCursor;
         if (nextCursor === null || nextCursor === undefined) {
@@ -8289,6 +8965,19 @@ class WorkRunCoordinator {
       if (!exhausted) {
         throw coordinatorError("CODEX_THREAD_LIST_PAGE_LIMIT", "thread/list 分页超过安全上限");
       }
+      return [...matches.values()];
+    };
+    // Active and archived inventories are independent read-only queries. Wait
+    // for both (including a slow failure) before claiming absence or dispatching.
+    const partitions = await Promise.allSettled([scan(false), scan(true)]);
+    fence();
+    for (const result of partitions) if (result.status === "rejected") throw result.reason;
+    const matches = [], seen = new Set();
+    for (const result of partitions) for (const match of result.value) {
+      if (seen.has(match.id)) throw coordinatorError("CODEX_THREAD_STATE_CONFLICT",
+        `Codex thread ${match.id} 同时出现在 active 与 archived 分区`);
+      seen.add(match.id);
+      matches.push(match);
     }
     return matches;
   }
@@ -8313,7 +9002,8 @@ class WorkRunCoordinator {
     token.contextAttemptSessionId = threadId;
     let thread;
     let matches;
-    if (!fresh) {
+    const preparesTurn = host.capabilities?.["turn.start.prepare"] === true;
+    if (!fresh && !preparesTurn) {
       thread = await this.#readThread(host, threadId, token);
       matches = userMessageTurnIds(thread, command.operationId);
       if (matches.length === 1) return matches[0];
@@ -8373,13 +9063,26 @@ class WorkRunCoordinator {
               throw coordinatorError("CONTEXT_SOURCE_STALE", "native session 的记忆版本无法持久确认");
             }
           }
-          return host.turnStart(this.#turnStartParams(threadId, profile, session, command, fresh));
+          const params = this.#turnStartParams(threadId, profile, session, command, fresh);
+          if (this.temporarySecrets) {
+            const secretScope = this.#modelSecretScope(profile, session);
+            for (const key of ["prompt", "context", "turnDeveloperInstructions"]) if (typeof params[key] === "string") {
+              params[key] = projectTextOrOriginal(this.temporarySecrets, secretScope, params[key]);
+            }
+            require("./context-request-budget").assertContextTransport({ runtime: profile.runtime,
+              prompt: params.prompt, context: params.context ?? "", attachments: params.attachments || [] });
+          }
+          if (preparesTurn) Object.assign(params, { signal: token.controller.signal,
+            contextSnapshotId: profile.contextSnapshotId, contextRevisions: profile.contextRevisions ?? null,
+            nativeMemoryVersion: profile.nativeMemoryVersion ?? null });
+          return host.turnStart(params, this.#turnPreparationObserver(host, threadId, profile, command, token));
         },
       );
       this.#appendPerformanceStage(token.runId, "turn_start", turnStartedAt, "success");
       this.#fence(token);
     } catch (error) {
       this.#appendPerformanceStage(token.runId, "turn_start", turnStartedAt, "error");
+      if (preparesTurn) throw error;
       if (isRuntimeAuthRequired(error) || runtimeAccountRetryAt(error) !== null) throw error;
       this.#fence(token);
       let reconciliationTimer;
@@ -8405,6 +9108,10 @@ class WorkRunCoordinator {
         token.rejectedTurnSessionId = threadId;
       }
       throw error;
+    }
+    if (preparesTurn && !confirmedAcpExecution(response?.execution,
+      this.dispatcher.getRun(token.runId)?.runtimeAttemptRef, response?.turn)) {
+      throw coordinatorError("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "ACP terminal acceptance is not confirmed");
     }
     const turnId = response?.turn?.id;
     if (typeof turnId !== "string" || turnId.length === 0) {
@@ -8435,8 +9142,48 @@ class WorkRunCoordinator {
     return response.session;
   }
 
+  #modelSecretScope(profile, session) {
+    // Sessionless domain reviews use the same monitor/run identity for local
+    // projection and the Runtime's model gateway; neither grants chat access.
+    return { profileId: profile.profileId, sessionId: session.sessionKey || profile.sourceId || profile.runId };
+  }
+
+  // Remembers which source the conversation's native thread runs on. Advisory:
+  // a failed write only loses the source-change renewal for this thread.
+  #recordSessionModelSource(sessionKey, threadId, contract) {
+    if (!codexSessionProvider.supportsSessionProviders(contract) || !contract.provider) return;
+    try {
+      this.chatSessionStore.recordRuntimeModelSource?.(sessionKey, threadId,
+        codexSessionProvider.sourceToken(contract.provider.providerRef));
+    } catch {}
+  }
+
+  // A conversation's model source, when it is not the Profile default.
+  #sessionProviderRef(session, profile) {
+    if (!session?.modelProviderRef
+      || session.runtimeBindingId !== (profile.selectedBindingId ?? profile.defaultBindingId)) return undefined;
+    return codexSessionProvider.resolveProviderSelection(this.productStore, profile, session.modelProviderRef);
+  }
+
+  // The built-in Codex process declares several providers; every native
+  // thread names the one its frozen route uses, including resumed threads.
+  // Without a frozen route (no captureExecutionProviderRoute injected) it
+  // names the Profile default source; if even that cannot be resolved the
+  // source stays unnamed and the adapter refuses the model work.
+  #routeModelProvider(contract) {
+    if (!codexSessionProvider.supportsSessionProviders(contract)) return undefined;
+    if (contract.provider) return codexSessionProvider.codexModelProvider(this.productStore, contract.provider.providerRef);
+    try {
+      return codexSessionProvider.codexModelProvider(this.productStore,
+        this.productStore.getAgentProfile?.(contract.profileId)?.providerRef ?? null);
+    } catch { return undefined; }
+  }
+
   #sessionStartParams(threadSource, profile, session) {
     return definedProperties({
+      modelProvider: this.#routeModelProvider(profile),
+      ...(this.temporarySecrets && ["codex", "pi", "opencode", "deepseek-harness", "grok-build"].includes(profile.runtime)
+        ? { modelSecretScope: this.#modelSecretScope(profile, session) } : {}),
       source: threadSource,
       persistent: profile.source !== "proactive",
       ...(profile.source === "proactive" ? { proactiveReview: true } : {}),
@@ -8450,6 +9197,9 @@ class WorkRunCoordinator {
 
   #sessionResumeParams(threadId, profile, session) {
     return definedProperties({
+      modelProvider: this.#routeModelProvider(profile),
+      ...(this.temporarySecrets && ["codex", "pi", "opencode", "deepseek-harness", "grok-build"].includes(profile.runtime)
+        ? { modelSecretScope: this.#modelSecretScope(profile, session) } : {}),
       sessionId: threadId,
       developerInstructions: profile.developerInstructions,
       model: profile.defaultModel,
@@ -8462,14 +9212,14 @@ class WorkRunCoordinator {
 
   #turnStartParams(threadId, profile, session, command, fresh = false) {
     const attachments = command.attachments?.length
-      ? prepareChatAttachments(this.getMediaStore(), command.attachments, session.sessionKey) : [];
+      ? this.#safeChatAttachments(command.attachments, session.sessionKey) : [];
     const params = { ...definedProperties({
       sessionId: threadId,
       operationId: command.operationId,
       prompt: attachmentPrompt(command.prompt, attachments),
       ...(profile.turnDeveloperInstructions ? { turnDeveloperInstructions: profile.turnDeveloperInstructions } : {}),
       ...(attachments.length ? { attachments } : {}),
-      attachmentDirectory: chatAttachmentDirectory(this.getMediaStore?.(), session.sessionKey),
+      attachmentDirectory: this.secretMedia ? undefined : chatAttachmentDirectory(this.getMediaStore?.(), session.sessionKey),
       context: profile.contextLifecycleV1 && !fresh && !profile.contextFresh
         ? profile.dynamicContextWithoutTranscript : profile.dynamicContext,
       observeContextUsage: profile.contextLifecycleV1 === true,

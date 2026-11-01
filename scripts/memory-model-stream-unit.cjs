@@ -113,7 +113,9 @@ test("Pi model-only RPC streams before terminal completion and rejects an oversi
 test("DeepSeek native model stream is operation scoped and never published as a chat event", async () => {
   const { BridgeRuntime } = await import("../resources/deepseek-harness/shoggoth-dsh-bridge.mjs");
   const bridge = new BridgeRuntime({}), seen = [], requests = [];
-  const host = { _assertReady() {}, modelTextObservers: new Map(), _handleEvent() { assert.fail("model text reached chat"); } };
+  const host = { _assertReady() {}, modelTextObservers: new Map(), modelSecretScopes: new Map(),
+    _bindModelScope: DeepSeekHarnessRuntimeHost.prototype._bindModelScope,
+    _handleEvent() { assert.fail("model text reached chat"); } };
   bridge.ctx = { agentDefaultModel: { currentSelection: () => ({ provider: "fixture", model: "model" }) },
     llm: { async *stream() { yield { type: "text-delta", text: "Am" }; yield { type: "text-delta", text: "ber" }; yield { type: "finish", reason: { kind: "stop" } }; } } };
   bridge.write = async ({ event }) => {

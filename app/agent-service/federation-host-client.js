@@ -22,9 +22,11 @@ const {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const PUBLIC_HOST_CODES = new Set([
+  ...Object.keys(require("../core/apple-device-contract").APPLE_DEVICE_PUBLIC_MESSAGES),
   ...FEDERATION_RUN_ERROR_CODES,
   "APP_HOST_UNAVAILABLE", "BACKEND_UNAVAILABLE", "AGENT_NOT_FOUND",
   "AGENT_OPERATION_FAILED", "AGENT_RUN_TIMEOUT", "FEDERATION_OPERATION_CONFLICT",
+  "MCP_CONNECTION_HOST_UNAVAILABLE", "MCP_CONNECTION_OWNER_UNCONFIRMED", "MODEL_PROJECTION_OWNER_UNCONFIRMED", "MCP_CONNECTION_ACK_UNKNOWN", "MCP_CONNECTION_ACK_CAPACITY",
   "FEDERATION_RESPONSE_INVALID", "FEDERATION_TASK_NOT_FOUND",
   "FEDERATION_TASK_STATE_CONFLICT",
   "FEDERATION_COMMIT_UNCERTAIN", "APP_MANAGE_RESOURCE_CHANGED", "APP_MANAGE_OUTCOME_UNKNOWN", "APP_MANAGE_CAPACITY", "APP_MANAGE_OPERATION_UNSUPPORTED", "APP_STATE_CURSOR_INVALID", "APP_STATE_CURSOR_EXPIRED", "APP_STATE_RESPONSE_TOO_LARGE",
@@ -81,10 +83,12 @@ class FederationHostClient {
     }
   }
 
-  request(method, params) {
+  request(method, params, options = {}) {
     if (!validateFederationParams(method, params)) {
       return Promise.reject(serviceError("APP_HOST_INVALID_REQUEST", "app_host_invalid_request"));
     }
+    const signal = ["apple.device.invoke", "agent.run"].includes(method) ? options.signal : null;
+    if (signal?.aborted) return Promise.reject(serviceError(method === "agent.run" ? "AGENT_OPERATION_FAILED" : "APPLE_DEVICE_CANCELED", "操作已取消"));
     let token;
     let before;
     try {
@@ -95,16 +99,18 @@ class FederationHostClient {
     // 灵感与群聊的外部执行方法同形，按规范名统一超时与「变更」语义。
     const externalMethod = canonicalExternalMethod(method);
     const external = externalMethod !== null;
-    const externalMutation = method === "app.manage" || external && externalMethod !== "inspiration.external.get";
-    const timeoutMs = method === "group.external.metadata" ? Math.min(this.timeoutMs, 2000) : method === "agent.run"
-      ? params.timeoutMs + 2_000
+    const appleWrite = method === "apple.device.invoke" && params.operationId !== null;
+    const externalMutation = appleWrite || method === "app.manage" || method === "mcp.connection.ack" || external && externalMethod !== "inspiration.external.get";
+    const timeoutMs = method === "apple.device.invoke" ? (params.operation === "requestAccess" ? null : 35_000)
+      : method === "group.external.metadata" ? Math.min(this.timeoutMs, 2000) : method === "agent.run"
+      ? (params.timeoutMs == null || params.timeoutMs === 0 ? null : params.timeoutMs + 2_000)
       : ["federation.run", "federation.message"].includes(method)
-        ? Math.min(30_000, Math.max(this.timeoutMs, params.timeoutMs + 2_000))
+        ? 260_000
         : !this._customTimeout && (externalMethod === "inspiration.external.prepare" || method === "group.external.models") ? 30_000
-          : !this._customTimeout && ["app.state.read", "app.manage"].includes(method) ? 30_000
+          : !this._customTimeout && ["app.state.read", "app.manage", "mcp.connection.ack"].includes(method) ? 30_000
           // A directory read includes backend readiness and then live profile
           // defaults. Their separate bounded probes can exceed the 5s IPC default.
-          : !this._customTimeout && ["agent.list", "agent.get"].includes(method) ? 15_000
+          : !this._customTimeout && ["agent.list", "agent.get", "mcp.connection.owner", "model.projection.owner"].includes(method) ? 15_000
           : !this._customTimeout && ["inspiration.external.respond", "inspiration.external.cancel"].includes(externalMethod)
             ? 15_000 : this.timeoutMs;
     const payload = `${JSON.stringify({
@@ -123,9 +129,14 @@ class FederationHostClient {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         socket.destroy();
         if (error) reject(error); else resolve(value);
       };
+      const onAbort = () => finish(serviceError(method === "agent.run"
+        ? (sent ? "FEDERATION_COMMIT_UNCERTAIN" : "AGENT_OPERATION_FAILED")
+        : appleWrite && sent ? "APPLE_DEVICE_WRITE_UNCERTAIN" : "APPLE_DEVICE_CANCELED",
+      "操作已取消，请核对已派发操作的结果"));
       const timer = setTimeout(() => finish(serviceError(
         method.includes("create") || method.includes("update") || method.includes("delete")
           || method.includes("write") || method === "agent.run"
@@ -133,13 +144,14 @@ class FederationHostClient {
           || externalMutation
           ? "FEDERATION_COMMIT_UNCERTAIN" : "APP_HOST_UNAVAILABLE",
         "app_host_timeout",
-      )), timeoutMs);
+      )), timeoutMs === null ? 30_000 : timeoutMs);
       socket.on("connect", () => {
         const current = lstatIfExists(this.paths.federationSocketPath);
         if (!current || current.dev !== before.dev || current.ino !== before.ino) {
           finish(serviceError("APP_HOST_UNAVAILABLE", "app_host_changed"));
           return;
         }
+        if (timeoutMs === null) clearTimeout(timer);
         sent = true;
         socket.write(payload);
       });
@@ -185,6 +197,8 @@ class FederationHostClient {
       socket.on("close", () => {
         if (!settled) finish(unavailable());
       });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   }
 }

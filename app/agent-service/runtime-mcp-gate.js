@@ -104,11 +104,11 @@ function defaultProcessLink(pid) {
       encoding: "utf8",
       timeout: 500,
       stdio: ["ignore", "pipe", "ignore"],
-      maxBuffer: 4096,
+      maxBuffer: 16 * 1024,
     }).trim();
-    return { ppid: Number(read("ppid")), executable: read("comm") };
+    return { ppid: Number(read("ppid")), executable: read("comm"), command: read("command") };
   } catch {
-    return { ppid: 0, executable: "" };
+    return { ppid: 0, executable: "", command: "" };
   }
 }
 
@@ -144,6 +144,7 @@ class RuntimeMcpGateIssuer {
     this.gateRoot = path.join(this.paths.runtimeDir, "mcp-gates");
     this.issued = new Map();
     this.opened = false;
+    this.generation = 0;
   }
 
   open() {
@@ -163,6 +164,7 @@ class RuntimeMcpGateIssuer {
       this.fs.unlinkSync(target);
     }
     this.opened = true;
+    this.generation += 1;
     return this;
   }
 
@@ -210,6 +212,10 @@ class RuntimeMcpGateIssuer {
       || Buffer.byteLength(executionRunId, "utf8") > 256)) {
       throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP execution binding is invalid");
     }
+    if (input.assertExecutionCurrent !== undefined
+      && (typeof input.assertExecutionCurrent !== "function" || executionRunId === null)) {
+      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP execution guard is invalid");
+    }
     const parentExecutable = assertExecutable(
       this.fs,
       input.parentExecutable,
@@ -222,6 +228,24 @@ class RuntimeMcpGateIssuer {
       input.ancestorExecutable,
       "RUNTIME_MCP_GATE_INPUT_INVALID",
     );
+    // DeepSeek's direct child waits on fd 3 in a fixed system shell before
+    // exec preserves its PID. This pin is Service-only: the published ticket
+    // and consume still require parentExecutable, never the launcher.
+    let parentLauncherExecutable = null;
+    if (input.parentLauncherExecutable !== undefined) {
+      if (input.parentLauncherExecutable !== "/bin/sh" || ancestorExecutable !== null) {
+        throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP launcher is invalid");
+      }
+      try {
+        parentLauncherExecutable = assertExecutable(
+          this.fs,
+          this.fs.realpathSync("/bin/sh"),
+          "RUNTIME_MCP_GATE_INPUT_INVALID",
+        );
+      } catch {
+        throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP launcher is unavailable or unsafe");
+      }
+    }
     const nonceBytes = this.randomBytes(32);
     if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 32) {
       throw gateError("RUNTIME_MCP_GATE_RANDOM_FAILED", "Runtime MCP gate randomness failed");
@@ -244,7 +268,10 @@ class RuntimeMcpGateIssuer {
       runtimeAccountId,
       parentPid: null,
       executionRunId,
+      assertExecutionCurrent: input.assertExecutionCurrent ?? null,
+      issuerGeneration: this.generation,
       parentExecutable,
+      parentLauncherExecutable,
       parentIdentity: null,
       ancestorExecutable,
       ancestorPid: null,
@@ -295,6 +322,15 @@ class RuntimeMcpGateIssuer {
     if (typeof boundIdentity !== "string" || boundIdentity.length === 0
       || Buffer.byteLength(boundIdentity, "utf8") > 4096) {
       throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP parent process is unavailable");
+    }
+    const boundLink = this.getProcessLink(boundPid);
+    const boundExecutable = harnessChild ? record.ancestorExecutable
+      : record.parentLauncherExecutable || record.parentExecutable;
+    if (path.resolve(boundLink?.executable || "") !== path.resolve(boundExecutable)
+      || (record.parentLauncherExecutable !== null && boundLink?.ppid !== process.pid)
+      || typeof boundLink?.command !== "string" || boundLink.command.length === 0
+      || this.getProcessIdentity(boundPid) !== boundIdentity) {
+      throw gateError("RUNTIME_MCP_GATE_INPUT_INVALID", "Runtime MCP parent process changed");
     }
     const identity = this.#publish(gatePath, record, boundPid, record.expiresAt);
     record.bound = true;
@@ -402,12 +438,25 @@ class RuntimeMcpGateIssuer {
       || record.expiresAt < this.now()) {
       throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
     }
+    const boundPid = harnessChild ? record.ancestorPid : record.parentPid;
+    const boundIdentity = harnessChild ? record.ancestorIdentity : record.parentIdentity;
+    if ((!harnessChild && record.parentPid !== input.parentPid)
+      || this.getProcessIdentity(boundPid) !== boundIdentity) {
+      throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
+    }
+    // Process inspection belongs to the trusted Service: the relay inherits
+    // CLI sandbox restrictions and may be unable to spawn ps. Both ticket types
+    // still require the pinned executable, a live command and PID start identity.
+    const link = this.getProcessLink(input.parentPid);
+    if (path.resolve(link?.executable || "") !== path.resolve(record.parentExecutable)
+      || typeof link?.command !== "string" || link.command.length === 0) {
+      throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
+    }
     if (harnessChild) {
-      // The relay reports its direct parent. It must be the pinned harness
-      // executable, running directly under the still-live bound runtime process.
-      const link = this.getProcessLink(input.parentPid);
-      if (link?.ppid !== record.ancestorPid
-        || path.resolve(link?.executable || "") !== path.resolve(record.parentExecutable)
+      const ancestor = this.getProcessLink(record.ancestorPid);
+      if (link.ppid !== record.ancestorPid
+        || path.resolve(ancestor?.executable || "") !== path.resolve(record.ancestorExecutable)
+        || typeof ancestor?.command !== "string" || ancestor.command.length === 0
         || this.getProcessIdentity(record.ancestorPid) !== record.ancestorIdentity) {
         throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP gate is invalid");
       }
@@ -461,13 +510,40 @@ class RuntimeMcpGateIssuer {
       record.timer = this.#scheduleExpiry(input.gatePath, Math.max(1, record.renewUntil - this.now()));
       this.issued.set(input.gatePath, record);
     }
+    // A Generic ACP bridge may connect eagerly during session/new. The
+    // Service keeps this closure private and checks it for every actual tool
+    // call. Ticket/IPC payloads carry no callable authority or product token.
+    const assertExecutionCurrent = record.assertExecutionCurrent && (() => {
+      if (!this.opened || this.generation !== record.issuerGeneration
+        || this.getProcessIdentity(boundPid) !== boundIdentity) {
+        throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP execution changed");
+      }
+      const current = this.getProcessLink(input.parentPid);
+      if (path.resolve(current?.executable || "") !== path.resolve(record.parentExecutable)
+        || typeof current?.command !== "string" || current.command.length === 0) {
+        throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP parent changed");
+      }
+      if (harnessChild) {
+        const ancestor = this.getProcessLink(record.ancestorPid);
+        if (current.ppid !== record.ancestorPid
+          || path.resolve(ancestor?.executable || "") !== path.resolve(record.ancestorExecutable)
+          || !ancestor.command || this.getProcessIdentity(record.ancestorPid) !== record.ancestorIdentity) {
+          throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP ancestor changed");
+        }
+      }
+      const result = record.assertExecutionCurrent();
+      if (result === false || result?.then) throw gateError("RUNTIME_MCP_GATE_INVALID", "Runtime MCP execution is unavailable");
+      return true;
+    });
     return Object.freeze({ consumed: true,
-      ...(record.executionRunId ? { executionRunId: record.executionRunId } : {}) });
+      ...(record.executionRunId ? { executionRunId: record.executionRunId } : {}),
+      ...(assertExecutionCurrent ? { assertExecutionCurrent } : {}) });
   }
 
   close() {
     for (const target of [...this.issued.keys()]) this.#removeIssued(target);
     this.opened = false;
+    this.generation += 1;
   }
 
   #removeIssued(target) {

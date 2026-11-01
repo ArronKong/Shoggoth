@@ -45,7 +45,11 @@ class MemoryLocalEmbeddingHost {
     this.acquireConfigured = core.createConfiguredProviderLocalServiceAcquirer(() => {
       const operation = this.scope.getStore();
       if (!operation) throw failure("MEMORY_SCOPE_REVOKED");
-      operation.check(); return operation.options.config;
+      operation.check();
+      const config = operation.options.config, provider = this.provider(config);
+      return { ...config, models: { ...config.models, providers: { ...config.models.providers,
+        "llama-cpp": { ...provider, localService: { readyTimeoutMs: 10 * 60_000, ...provider.localService } },
+      } } };
     });
   }
 

@@ -326,15 +326,23 @@ test("session recall receipts survive completed replies, later appends and resta
 });
 
 
-test("default cold-start grace is bounded and does not replace explicit recall deadlines", () => {
+test("product recall defaults use low and five minutes without truncating saved budgets", () => {
   const { projectActiveMemoryDefaults } = require("../app/agent-service/active-memory-defaults");
   const { core } = require("../app/agent-service/shoggoth-memory/host.cjs");
   const resolve = policy => {
     const cfg = projectActiveMemoryDefaults({ plugins: { entries: { "active-memory": { enabled: true, config: policy } } } }, [alpha]);
     return core.normalizeActiveMemoryConfig(active(cfg).config, cfg, ["memory_search", "memory_get"]);
   };
-  assert.equal(resolve({}).timeoutMs, 15000); assert.equal(resolve({}).setupGraceTimeoutMs, 10000);
+  assert.equal(resolve({}).thinking, "low");
+  assert.equal(resolve({}).timeoutMs, 300000); assert.equal(resolve({}).setupGraceTimeoutMs, 10000);
+  assert.equal(resolve({}).maxSummaryChars, 600);
+  assert.equal(resolve({ thinking: "off" }).thinking, "off");
+  assert.equal(resolve({ thinking: "high" }).thinking, "high");
   assert.equal(resolve({ timeoutMs: 700 }).timeoutMs, 700); assert.equal(resolve({ timeoutMs: 700 }).setupGraceTimeoutMs, 0);
   assert.equal(resolve({ setupGraceTimeoutMs: 0 }).setupGraceTimeoutMs, 0);
+  assert.equal(resolve({ setupGraceTimeoutMs: 0 }).timeoutMs, 300000);
+  assert.equal(resolve({ timeoutMs: 600000 }).timeoutMs, 600000);
+  assert.equal(resolve({ timeoutMs: 700000 }).timeoutMs, 600000);
+  assert.equal(resolve({ maxSummaryChars: 220 }).maxSummaryChars, 220);
   assert.equal(resolve({ timeoutMs: 1200, setupGraceTimeoutMs: 300 }).setupGraceTimeoutMs, 300);
 });

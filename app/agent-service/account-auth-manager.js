@@ -10,9 +10,9 @@ const TERMINAL_STATUSES = new Set([
   "succeeded", "failed", "canceled", "timed_out", "interrupted", "unknown",
 ]);
 const MODES = new Set(["browser", "deviceCode"]);
-const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_LOGIN_TIMEOUT_MS = 60 * 60 * 1000;
 const MIN_LOGIN_TIMEOUT_MS = 1_000;
-const MAX_LOGIN_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_LOGIN_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const RUNTIME_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 function authError(code, message) {

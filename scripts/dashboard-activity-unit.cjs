@@ -19,6 +19,7 @@ const {
   decodeCursor,
   buildActivityPage,
   computeRunStats,
+  computeTaskStats,
   collectActivities,
 } = require("../app/core/dashboard-activity");
 
@@ -411,6 +412,39 @@ async function testCollectFetchesIndependentSourcesConcurrently() {
   assert.equal(cronStarted && kanbanStarted, true);
 }
 
+async function testCollectHidesSilentOutputBeforePaginationAndTaskCounts() {
+  for (const backendId of ["shoggoth", "openclaw", "hermes"]) {
+    const runs = [
+      { runId: "report", outputDisposition: "deliver", summary: "额度重置已生效" },
+      { runId: "empty", outputDisposition: "silent", deliverySuppressionReason: "empty" },
+      { runId: "token", outputDisposition: "silent", summary: "NO_REPLY", deliverySuppressionReason: "token" },
+      // No summary alone is not proof of silence: the run can have an artifact,
+      // an unread legacy transcript, or a failure that needs attention.
+      { runId: "artifact", outputDisposition: "deliver" },
+      { runId: "legacy" },
+      { runId: "failure", status: "error", outputDisposition: "deliver", error: "ACCESS_REQUIRED" },
+    ].map((run, i) => ({ backendId, jobId: "monitor", jobName: "Tibo 额度重置监测",
+      agentId: "agent", startedAt: T0 + i, status: "ok", ...run }));
+    const backend = fakeBackend(backendId, {
+      getRecentCronRuns: async () => ({ runs }),
+      getRecentKanbanActivities: async () => ({ supported: false, reason: "unsupported", items: [] }),
+    });
+    const res = await collectActivities({ backends: [backend], sinceMs: T0 });
+    assert.deepEqual(res.entries.map(entry => entry.run.runId), ["report", "artifact", "legacy", "failure"],
+      "Explicitly silent runs must not produce empty activity rows on any backend");
+    const first = buildActivityPage(res.entries, { backend: backendId, kind: "cron", limit: 3 });
+    const second = buildActivityPage(res.entries, { cursor: first.nextCursor, limit: 3 });
+    assert.equal(first.items.length, 3, "Silent rows must not consume page slots");
+    assert.deepEqual(second.items.map(entry => entry.run.runId), ["report"]);
+    assert.equal(second.hasMore, false);
+    assert.deepEqual(res.taskStats.total, { ok: 3, error: 1 });
+    assert.deepEqual(computeTaskStats(runs.map(cronRunToActivity)).total, { ok: 3, error: 1 },
+      "Direct task statistics must use the same silent-output rule");
+    assert.equal(res.runs.length, 6, "The source run history remains complete");
+    assert.equal(res.runStats.total.total, 6, "Raw execution accounting still records work that ran");
+  }
+}
+
 // ---------- runner ----------
 
 const tests = [
@@ -423,6 +457,7 @@ const tests = [
   testPageRejectsInvalidInput, testPageDedupesById, testComputeRunStats,
   testCollectFailSoftAndDegrades, testCollectHonorsMaxPerSource,
   testCollectHidesOnlySystemHeartbeatRuns,
+  testCollectHidesSilentOutputBeforePaginationAndTaskCounts,
   testCollectFetchesIndependentSourcesConcurrently,
 ];
 

@@ -7,6 +7,7 @@ const {
   validateRegisteredSecrets,
 } = require("./codex-rpc-safety");
 const { safeSnapshot } = require("./codex-event-snapshot");
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
 
 const TOOL_ITEM_TYPES = new Set([
   "commandExecution",
@@ -287,7 +288,7 @@ function normalizeCodexEvent(message, rawOptions = {}) {
   const method = identifiers.method;
   const known = (type, extra = {}) => safeSnapshot(
     compact({ known: true, type, ...identifiers, ...extra }),
-    options,
+    { ...options, preserveConversationText: ["text", "text_delta"].includes(type) },
   );
 
   if (method === "item/agentMessage/delta") {
@@ -307,6 +308,9 @@ function normalizeCodexEvent(message, rawOptions = {}) {
   }
   if (method === "item/started" || method === "item/completed") {
     const item = params.item && typeof params.item === "object" ? params.item : null;
+    if (method === "item/completed" && item?.type === "contextCompaction") {
+      return known("context_compacted", { compactionId: safeId(item.id, options) ?? identifiers.turnId });
+    }
     if (item?.type === "reasoning") {
       return known("reasoning", { itemId: safeId(item.id, options), reasoning: item.summary ?? item.content ?? [] });
     }
@@ -382,6 +386,8 @@ function normalizeCodexEvent(message, rawOptions = {}) {
     return known("complete", {
       turnId: safeId(params.turn?.id ?? params.turnId, options),
       status: params.turn?.status ?? "completed",
+      ...(["failed", "interrupted"].includes(params.turn?.status)
+        ? { failure: runtimeFailureDetail(params.turn.error, options.registeredSecrets) } : {}),
       // Only explicit native status/identity can prove a live turn ended when
       // canonical history is unavailable; a default status is not evidence.
       terminalEvidence: typeof params.turn?.id === "string"
@@ -403,7 +409,7 @@ function normalizeCodexEvent(message, rawOptions = {}) {
         && params.tokenUsage.modelContextWindow > 0 ? params.tokenUsage.modelContextWindow : null,
     });
   }
-  if (method === "thread/compacted") return known("context_compacted");
+  if (method === "thread/compacted") return known("context_compacted", { compactionId: identifiers.turnId });
   if (method === "rawResponse/completed") {
     // 该通知在 Codex 协议中明确标记为 internal-only。保留安全诊断摘要，
     // 但只用公开的 thread/tokenUsage/updated 写入统计，避免两种事件重复计量。

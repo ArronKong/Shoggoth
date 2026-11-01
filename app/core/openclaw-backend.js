@@ -655,7 +655,7 @@ class OpenClawBackend extends AgentBackend {
    * @param {() => (string|undefined)} [opts.getOrigin] optional Origin header to present (mirrors the UI page origin)
    * @param {object} [opts.authResolver] device-auth createAuthResolver 实例(与 chat-broker 共享凭证)
    */
-  constructor({ getUpstreamUrl, getOrigin, authResolver, externalPluginSelectionService = null,
+  constructor({ getUpstreamUrl, getOrigin, authResolver, connectorService = null,
     getManagedExecution = null, restartManagedHost = null } = {}) {
     super();
     this._getUpstreamUrl = typeof getUpstreamUrl === "function" ? getUpstreamUrl : () => DEFAULT_GATEWAY_URL;
@@ -674,7 +674,6 @@ class OpenClawBackend extends AgentBackend {
     this._cancelConnecting = null;
     this._pending = new Map(); // reqId -> { resolve, reject, socket }
     this._finalObservers = new Map(); // original agent RPC id -> socket-bound final observer
-    this._externalPluginSelectionService = externalPluginSelectionService;
     // 统一凭证解析(config.token / operator 身份 / loopback 网关 token / 已存设备令牌)。
     // 无注入时自建缺省(独立脚本直接 new 本类的旧用法保持可跑)。
     this._authResolver =
@@ -766,24 +765,6 @@ class OpenClawBackend extends AgentBackend {
   _localUserHome() { return this._resolveLocalRuntime()?.home || os.homedir(); }
   _localConfigPath() { return this._resolveLocalRuntime()?.configPath || this._localRuntimeScope.configPath(); }
 
-  async getPluginSelectionReadiness({ agentId, sessionKey } = {}) {
-    try {
-      if (typeof agentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(agentId)
-        || typeof sessionKey !== "string" || Buffer.byteLength(sessionKey, "utf8") > 256
-        || /[\u0000-\u001f\u007f]/u.test(sessionKey) || agentIdFromSessionKey(sessionKey) !== agentId
-        || !this._externalPluginSelectionService) return false;
-      await this._connect();
-      const generation = this._connectionGeneration;
-      if (!this.hasGatewayMethod("chat.selection.capabilities") || !this.hasGatewayMethod("chat.selection.get")) return false;
-      const agent = await this.getAgent(agentId);
-      if (!agent || agent.id !== agentId || generation !== this._connectionGeneration) return false;
-      // The no-subject form observes registration only. Supplying sessionKey
-      // would materialize a physical session, which a readiness GET must not do.
-      const capability = await this.request("chat.selection.capabilities", {});
-      return generation === this._connectionGeneration
-        && require("./openclaw-plugin-selection").supportsOpenClawPluginSelection(capability);
-    } catch { return false; }
-  }
 
   getBackendDescriptor() {
     return {
@@ -1008,6 +989,38 @@ class OpenClawBackend extends AgentBackend {
     } catch {
       return { ...unsupportedAdvancedSessionResult("error", methods), environments: [], profiles: [] };
     }
+  }
+
+  async resolveMcpConnectionSession({ agentId, sessionId } = {}) {
+    return this._resolveProjectionOwner({ agentId, sessionId }, true);
+  }
+
+  async resolveModelProjectionSession({ agentId, sessionId } = {}) {
+    const owner = await this._resolveProjectionOwner({ agentId, sessionId }, false);
+    return owner ? { sessionKey: owner.sessionKey } : null;
+  }
+
+  async _resolveProjectionOwner({ agentId, sessionId }, directOnly) {
+    if (typeof agentId !== "string" || !agentId || typeof sessionId !== "string" || !sessionId
+      || agentId.length > 128 || sessionId.length > 512 || /[\0\r\n]/u.test(sessionId)) return null;
+    try {
+      await this._connect();
+      const socket = this._ws, generation = this._stopGeneration;
+      const [directory, snapshot] = await Promise.all([
+        this.request("agents.list", {}, 15000), this.request("sessions.list", {}, 15000),
+      ]);
+      if (socket !== this._ws || generation !== this._stopGeneration || this._ready !== true
+        || !Array.isArray(directory?.agents) || directory.agents.filter(agent => agent.id === agentId && agent.enabled !== false).length !== 1
+        || !Array.isArray(snapshot?.sessions)) return null;
+      const matches = snapshot.sessions.filter(row => row && (row.key === sessionId || row.sessionId === sessionId || row.id === sessionId));
+      if (matches.length !== 1) return null;
+      const row = matches[0];
+      if (typeof row.key !== "string" || agentIdFromSessionKey(row.key) !== agentId
+        || (row.agentId !== undefined && row.agentId !== agentId) || row.archived === true
+        || directOnly && (row.kind !== "direct" || row.groupId || row.parentSessionKey || row.spawnedBy
+          || /:(?:cron|group|subagent)(?::|$)/u.test(row.key))) return null;
+      return { sessionKey: row.key, kind: "direct", idle: row.hasActiveRun === false && row.status !== "running" };
+    } catch { return null; }
   }
 
   async describeSession(agentId, sessionKey) {
@@ -4430,56 +4443,15 @@ class OpenClawBackend extends AgentBackend {
   }
 
   /** Send an RPC request on the live socket. */
-  attachExternalPluginSelectionService(service) { this._externalPluginSelectionService = service; }
-
-  async prepareExternalChatSelection(params, { requestHost } = {}) {
-    const generation = this._connectionGeneration;
-    return require("./openclaw-plugin-selection").prepareOpenClawPluginSelection({
-      params, service: this._externalPluginSelectionService,
-      requestHost: requestHost || ((method, value) => this.request(method, value)),
-      assertCurrent: () => {
-        if (generation !== this._connectionGeneration) {
-          throw Object.assign(new Error("OpenClaw 插件选择连接已变化，请核实原操作"),
-            { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", executionUncertain: true });
-        }
-      },
-    });
-  }
-
-  cancelExternalChatSelections(sessionKey, { requestHost } = {}) {
-    return require("./openclaw-plugin-selection").cancelOpenClawPluginSelectionSession({
-      sessionKey, service: this._externalPluginSelectionService,
-      requestHost: requestHost || ((method, params) => this.request(method, params)),
-    });
-  }
-
-  getExternalChatSelectionOperation(sessionKey, operationId, { requestHost } = {}) {
-    return require("./openclaw-plugin-selection").readOpenClawPluginSelectionOperation({
-      sessionKey, operationId, requestHost: requestHost || ((method, params) => this.request(method, params)),
-    });
-  }
+  prepareExternalChatSelection() { return Promise.reject(Object.assign(new Error("OpenConnector 已退役，请使用 MCP 连接器"), {code:"OPEN_CONNECTOR_RETIRED"})); }
+  cancelExternalChatSelections() { return Promise.reject(Object.assign(new Error("OpenConnector 已退役，旧操作状态保持待核对"), {code:"OPEN_CONNECTOR_RETIRED"})); }
+  getExternalChatSelectionOperation() { return Promise.reject(Object.assign(new Error("OpenConnector 已退役，旧操作不会重新执行"), {code:"OPEN_CONNECTOR_RETIRED"})); }
 
   request(method, params, timeoutMs = REQUEST_TIMEOUT_MS, observer = null) {
-    // Direct backend callers must use the same Service/Host negotiation as
-    // the Proxy. An unconfigured or incompatible Host cannot fall back to an
-    // ordinary chat.send that silently loses the user's selected plugins.
-    if (method === "chat.send" && params
-      && Object.prototype.hasOwnProperty.call(params, "pluginSelection")) {
-      if (!this._externalPluginSelectionService) {
-        const error = new Error("OpenClaw 尚无法将插件选择绑定到本次真实执行回合");
-        error.code = "PLUGIN_SELECTION_UNAVAILABLE";
-        return Promise.reject(error);
-      }
-      return this.prepareExternalChatSelection(params).then(async prepared => {
-        const result = await this.request(method, prepared.params, timeoutMs, observer);
-        if (!["started", "accepted"].includes(result?.status) || result.runId !== prepared.selection.operationId) {
-          throw Object.assign(new Error("OpenClaw 原插件消息回执需要核实"),
-            { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", executionUncertain: true });
-        }
-        require("./openclaw-plugin-selection").validateOpenClawSelectionReceipt(result?.capabilitySelection, prepared.selection);
-        return result;
-      });
-    }
+    if (method === "chat.send" && params && Object.hasOwn(params, "pluginSelection")) return Promise.reject(
+      Object.assign(new Error("旧插件选择已停用，请重新选择连接器账号"), { code: "PLUGIN_PLATFORM_RETIRED" }));
+    if (method === "chat.send" && params && Object.hasOwn(params,"connectorSelection")) return Promise.reject(
+      Object.assign(new Error("OpenConnector 已退役，请使用 MCP 连接器"),{code:"OPEN_CONNECTOR_RETIRED"}));
     const ws = this._ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       try { observer?.onClose?.(); } catch { /* observer is isolated from RPC */ }
@@ -4505,9 +4477,7 @@ class OpenClawBackend extends AgentBackend {
       if (observer) {
         const entry = { ...observer, socket: ws, runId: params.idempotencyKey,
           sessionKey: params.sessionKey, agentId: params.agentId,
-          abort: () => this._closeFinalObserver(id),
-          timer: setTimeout(() => this._closeFinalObserver(id), 60 * 60 * 1000) };
-        entry.timer.unref?.();
+          abort: () => this._closeFinalObserver(id), timer: null };
         this._finalObservers.set(id, entry);
         observer.signal?.addEventListener("abort", entry.abort, { once: true });
       }

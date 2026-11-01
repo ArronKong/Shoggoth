@@ -22,6 +22,7 @@ const {
   validateMcpProductToolArguments,
 } = require("./agent-service/mcp-product-tool-controller");
 const { MESSAGES: CHAT_UI_PUBLIC_MESSAGES } = require("./agent-service/chat-ui-messages");
+const { SECRET_MESSAGES: SECRET_PUBLIC_MESSAGES } = require("./core/chat-secret-contract");
 const { groupManagementRequest } = require("./agent-service/group-chat-agent-tools");
 const { PRODUCT_CONFIRMATION_META, productConfirmationIdentity } = require("./agent-service/cron-approval-policy");
 const {
@@ -31,13 +32,13 @@ const {
 } = require("./agent-service/product-capability-manifest");
 const {
   DEFAULT_SERVER_REQUEST_TIMEOUT_MS,
-  DEFAULT_MCP_TOOL_TIMEOUT_MS,
   serverRequestUsesApprovalWait,
 } = require("./agent-service/interactive-timeouts");
 const {
   resolveCanonicalServicePaths,
 } = require("./agent-service/paths");
 const { serviceError } = require("./agent-service/security");
+const { encodeInputChoicesDescription } = require("./core/shoggoth-interaction-contract");
 const {
   SERVICE_PROTOCOL_VERSION: MCP_SERVICE_PROTOCOL_VERSION,
 } = require("./agent-service/service-protocol-version");
@@ -72,9 +73,6 @@ const MCP_SESSION_REFRESH_TIMEOUT_MS = 30_000;
 const MCP_OUTPUT_TIMEOUT_MS = 10_000;
 const MCP_CLIENT_REQUEST_TIMEOUT_MS = DEFAULT_SERVER_REQUEST_TIMEOUT_MS;
 const MCP_AUTH_SERVICE_TIMEOUT_MS = 10_000;
-const MCP_TOOL_SERVICE_TIMEOUT_MS = 45_000;
-// Tools that keep the call open while the user answers a Service-raised card.
-const USER_WAIT_TOOL_NAMES = new Set(["browser_session_wait_for_user", "plugin_secret_request", "workspace_execute"]);
 const MCP_PACKAGED_CRYPTO_TIMEOUT_MS = 30_000;
 const MCP_MAX_QUESTIONS = 3;
 const MCP_MAX_QUESTION_OPTIONS = 3;
@@ -89,7 +87,7 @@ const PUBLIC_SERVICE_ERROR_PREFIXES = Object.freeze([
   "SKILL_", "SYSTEM_", "TOOL_", "TRANSCRIPT_", "USAGE_", "WORKSPACE_",
 ]);
 const EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS = Object.freeze(
-  MCP_PRODUCT_TOOL_DEFINITIONS.filter((definition) => !isNativeOnlyMcpTool(definition.name)),
+  MCP_PRODUCT_TOOL_DEFINITIONS.filter((definition) => !isNativeOnlyMcpTool(definition.name) && !definition.name.startsWith("mcp_server_")),
 );
 const EXTERNAL_FEDERATION_MCP_INSTRUCTIONS = [
   "You are an external Agent connected to Shoggoth through its local federated MCP server.",
@@ -427,8 +425,10 @@ function publicServiceErrorCode(error) {
   return /^[A-Z][A-Z0-9_]{2,63}$/u.test(code)
     && (PUBLIC_SERVICE_ERROR_PREFIXES.some((prefix) => code.startsWith(prefix))
       || Object.hasOwn(CHAT_UI_PUBLIC_MESSAGES, code)
+      || Object.hasOwn(SECRET_PUBLIC_MESSAGES, code)
       || code.startsWith("WEB_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
       || code.startsWith("PROACTIVE_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
+      || code.startsWith("APPLE_DEVICE_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
       || require("./agent-service/hook-contract").HOOK_PUBLIC_ERROR_CODES.includes(code))
     ? code
     : "SERVICE_REQUEST_FAILED";
@@ -436,7 +436,7 @@ function publicServiceErrorCode(error) {
 
 function toolFailureResponse(id, error) {
   const code = publicServiceErrorCode(error);
-  const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || "Shoggoth Service request failed";
+  const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || SECRET_PUBLIC_MESSAGES[code] || "Shoggoth Service request failed";
   return jsonRpcResult(id, {
     content: [{ type: "text", text: `${message} (${code})` }],
     structuredContent: { error: { code } },
@@ -589,17 +589,17 @@ function validateRequestUserInputArguments(value) {
   const ids = new Set();
   const questions = [];
   for (const question of value.questions) {
-    if (!exactObject(question, ["header", "id", "question", "options"])
+    if (!exactObject(question, ["header", "id", "question", ...(Object.hasOwn(question || {}, "options") ? ["options"] : [])])
       || !boundedNonEmptyString(question.header, 64)
       || !boundedNonEmptyString(question.id, 64)
       || !/^[A-Za-z][A-Za-z0-9_-]*$/u.test(question.id)
       || ids.has(question.id)
       || !boundedNonEmptyString(question.question, 1024)
-      || !Array.isArray(question.options) || question.options.length < 2
-      || question.options.length > MCP_MAX_QUESTION_OPTIONS) return null;
+      || (question.options !== undefined && (!Array.isArray(question.options)
+        || question.options.length === 1 || question.options.length > MCP_MAX_QUESTION_OPTIONS))) return null;
     const labels = new Set();
     const options = [];
-    for (const option of question.options) {
+    for (const option of question.options || []) {
       if (!exactObject(option, ["label", "description"])
         || !boundedNonEmptyString(option.label, 128)
         || !boundedNonEmptyString(option.description, 512)
@@ -618,21 +618,22 @@ function validateRequestUserInputArguments(value) {
   return questions;
 }
 
-function elicitationParamsFor(questions) {
+function elicitationParamsFor(questions, allowFreeText = false) {
   const properties = {};
   for (const question of questions) {
+    const labels = question.options.map((option) => option.label);
+    const openAnswer = allowFreeText && question.id !== "confirm_product_action";
     properties[question.id] = {
       type: "string",
       title: question.header,
-      description: [
+      description: openAnswer && labels.length ? encodeInputChoicesDescription(question.question, question.options) : [
         // Product details live once in message, where the confirmation card
         // renders them in full. Duplicating a large roster here exceeds the
         // bounded transport and the field-description limit.
         question.id === "confirm_product_action" ? question.header : question.question,
         ...question.options.map((option) => `${option.label}: ${option.description}`),
       ].join("\n"),
-      enum: question.options.map((option) => option.label),
-      enumNames: question.options.map((option) => option.label),
+      ...(!openAnswer && labels.length ? { enum: labels, enumNames: labels } : {}),
     };
   }
   return {
@@ -645,7 +646,7 @@ function elicitationParamsFor(questions) {
   };
 }
 
-function normalizeElicitationResult(value, questions) {
+function normalizeElicitationResult(value, questions, allowFreeText = false) {
   const allowedKeys = new Set(["action", "content", "_meta"]);
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype
@@ -669,8 +670,9 @@ function normalizeElicitationResult(value, questions) {
   const answers = {};
   for (const question of questions) {
     const answer = value.content[question.id];
-    if (typeof answer !== "string"
-      || !question.options.some((option) => option.label === answer)) {
+    if (!boundedNonEmptyString(answer, 16 * 1024) || !answer.isWellFormed() || answer.includes("\0") || !answer.trim()
+      || (!(allowFreeText && question.id !== "confirm_product_action")
+        && !question.options.some((option) => option.label === answer))) {
       throw helperError("MCP_HELPER_ELICITATION_INVALID", "mcp_helper_elicitation_invalid");
     }
     answers[question.id] = { answers: [answer] };
@@ -678,44 +680,7 @@ function normalizeElicitationResult(value, questions) {
   return { answers };
 }
 
-function listPreview(names, limit = 8) {
-  const shown = names.slice(0, limit).map(value => JSON.stringify(String(value).slice(0, 64)));
-  return `${shown.join("、")}${names.length > limit ? ` 等 ${names.length} 项` : ""}`;
-}
-
-function endpointLabel(target) {
-  try { return new URL(target).origin; } catch { return String(target).slice(0, 128); }
-}
-
-function pluginConfirmationQuestion(name, args, plugin) {
-  if (name === "plugin_install") {
-    const skills = plugin.previewComponents.skills.map(item => item.name);
-    const servers = plugin.previewComponents.mcpServers.map(item => item.name);
-    const contents = [`${skills.length} 个技能${skills.length ? `（${listPreview(skills)}）` : ""}`,
-      `${servers.length} 个 MCP 服务${servers.length ? `（${listPreview(servers)}）` : ""}`].join("、");
-    const version = plugin.declaredVersion || "未标注";
-    const installed = plugin.installation;
-    const update = Boolean(installed) && installed.releaseDigest !== plugin.previewDigest;
-    const verb = update ? "更新" : "安装";
-    const head = update
-      ? `Shoggoth 将把插件 ${JSON.stringify(plugin.name)} 从版本 ${installed.declaredVersion || "未标注"} 更新为 ${version}：${contents}。${installed.desiredState === "enabled"
-        ? "更新前会先停用旧版本，并等待进行中的调用结束。" : ""}`
-      : `Shoggoth 将安装插件 ${JSON.stringify(plugin.name)}（版本 ${version}）：${contents}。`;
-    return `${head}${args.enable
-      ? `${verb}后立即为所有助理启用其技能；MCP 服务的连接与工具授权${update ? "需要重新" : "仍需单独"}确认。`
-      : `${verb}后保持停用。`}是否继续？`;
-  }
-  const active = plugin.components.filter(item => !["unsupported", "secret_required"].includes(item.state));
-  const skipped = plugin.components.filter(item => ["unsupported", "secret_required"].includes(item.state));
-  const lines = active.map(item => `${JSON.stringify(item.name)}（${item.transport === "stdio"
-    ? `运行 ${JSON.stringify(item.target)}` : `连接 ${endpointLabel(item.target)}`}${item.interpreter && !item.interpreterReady
-    ? `，使用本机已安装的 ${item.interpreter === "node" ? "Node.js" : "Python"}` : ""}）`);
-  return `Shoggoth 将启用插件 ${JSON.stringify(plugin.packageName)}${lines.length
-    ? `，并连接 MCP 服务 ${lines.join("；")}。所有助理将可使用这些服务提供的全部工具；标注为破坏性的工具每次调用前仍会询问你，可随时在插件页撤销`
-    : ""}。${skipped.length ? `${listPreview(skipped.map(item => item.name))} 尚需凭据或在插件页连接账号，本次不处理。` : ""}是否继续？`;
-}
-
-function confirmationQuestionFor(name, args, nativeAgent = null, hookGrant = null, plugin = null, group = null, management = null) {
+function confirmationQuestionFor(name, args, nativeAgent = null, hookGrant = null, _retiredPlugin = null, group = null, management = null) {
   if (["group_chat_create", "group_chat_members_add"].includes(name)) {
     if (!management || management.ok !== true || management.state !== "prepared" || !Array.isArray(management.members)
       || management.ownerScope !== args.ownerScope || management.previewDigest !== args.previewDigest) {
@@ -741,13 +706,6 @@ function confirmationQuestionFor(name, args, nativeAgent = null, hookGrant = nul
     if (Buffer.byteLength(question) > 12 * 1024) throw helperError("MCP_TOOL_CAPACITY", "group_dispatch_preflight_failed");
     return [{ header: "确认群内安排", id: "confirm_product_action", question,
       options: [{ label: "确认执行", description: "仅向上述群和成员提交这一次安排。" }, { label: "取消", description: "不发送群消息，不启动执行。" }] }];
-  }
-  if (name === "plugin_install" || name === "plugin_activate") {
-    const question = pluginConfirmationQuestion(name, args, plugin);
-    if (Buffer.byteLength(question, "utf8") > 4096) throw helperError("MCP_TOOL_CAPACITY", "plugin_preflight_failed");
-    return [{ header: name === "plugin_install" ? "确认安装" : "确认启用", id: "confirm_product_action", question,
-      options: [{ label: "确认执行", description: "仅执行上述已列出的插件操作。" },
-        { label: "取消", description: "不修改插件状态。" }] }];
   }
   if (name === "hook_grant") {
     if (!hookGrant || hookGrant.hookId !== args.hookId || hookGrant.version !== args.version) {
@@ -804,7 +762,7 @@ function confirmationQuestionFor(name, args, nativeAgent = null, hookGrant = nul
     computer_session_resume: () => `Computer Use 会话 ${args.sessionId}`,
     browser_session_open: () => `Browser Use 会话（随当前任务结束；使用本机 Chrome，运行与登录状态模式遵循设置）`,
     skill_install_global: () => `全局 Skill 包 ${JSON.stringify(args.sourcePath)}`,
-    mcp_server_register: () => `共享 MCP Server ${JSON.stringify(args.name)}（${args.id}；${JSON.stringify(args.command)}）`,
+    mcp_server_register: () => `共享 MCP Server ${JSON.stringify(args.name)}（${args.id}；${JSON.stringify(args.command)}）。就绪后将对所有现有和以后新建的助理开启，可逐个关闭`,
     mcp_server_remove: () => `共享 MCP Server ${args.id}（仅移除注册，不删除安装文件）`,
   };
   const risk = productToolRisk(name);
@@ -853,6 +811,7 @@ function toolSuccessResponse(id, result, toolName) {
   // Browser calls and workspace commands return an execution outcome inside a
   // successful Service RPC. Preserve their real failure in the MCP envelope.
   const isError = (toolName === "browser_tool_call" && result?.isError === true)
+    || (toolName === "connector_execute_action" && result?.isError === true)
     || (toolName === "workspace_execute" && Number.isInteger(result?.exitCode) && result.exitCode !== 0);
   let response = jsonRpcResult(id, { content, structuredContent: result, isError });
   if (Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES) return response;
@@ -1070,7 +1029,14 @@ function createMcpStdioHandler(options = {}) {
   const interactionClient = options.interactionClient || null;
   const canAskUser = context => interactionClient !== null
     || (supportsElicitation && typeof context.requestClient === "function");
-  const askUser = (context, method, params) => (interactionClient || context.requestClient)(method, params);
+  const assertRequestCurrent = context => {
+    if (context.signal?.aborted) throw helperError("REQUEST_ABORTED", "mcp_helper_request_aborted");
+  };
+  const askUser = (context, method, params) => {
+    assertRequestCurrent(context);
+    return (interactionClient || context.requestClient)(method, params,
+      context.signal ? { signal: context.signal } : undefined);
+  };
 
   const refresh = async () => {
     if (!refreshSession || closed) {
@@ -1107,7 +1073,9 @@ function createMcpStdioHandler(options = {}) {
     return true;
   };
 
-  const requestTool = (name, args, callId, confirmed = false) => requestService(paths, {
+  const requestTool = (name, args, callId, confirmed = false, context = {}) => {
+    assertRequestCurrent(context);
+    return requestService(paths, {
     version: MCP_SERVICE_PROTOCOL_VERSION,
     method: "mcp.tool.call",
     params: {
@@ -1119,20 +1087,21 @@ function createMcpStdioHandler(options = {}) {
       arguments: args,
       ...(confirmed ? { confirmation: true } : {}),
     },
-  // Plugin calls can first await per-use approval, then execute with their own
-  // bounded tool/input window. The envelope must cover both sequential phases.
-  }, { timeoutMs: name === "workspace_execute" ? DEFAULT_MCP_TOOL_TIMEOUT_MS
-    : name === "mcp_server_call" ? 2 * DEFAULT_SERVER_REQUEST_TIMEOUT_MS + MCP_TOOL_SERVICE_TIMEOUT_MS
-    : name === "external_agent_run" ? DEFAULT_SERVER_REQUEST_TIMEOUT_MS + MCP_TOOL_SERVICE_TIMEOUT_MS : USER_WAIT_TOOL_NAMES.has(name)
-    ? DEFAULT_SERVER_REQUEST_TIMEOUT_MS + MCP_TOOL_SERVICE_TIMEOUT_MS : MCP_TOOL_SERVICE_TIMEOUT_MS });
+  // Any tool may require a per-use/Hook approval. The execution scope and
+  // transport cancellation own this wait; individual network operations stay bounded.
+  }, { timeoutMs: null,
+    ...(context.signal ? { signal: context.signal } : {}) });
+  };
 
   const invokeTool = async (name, args, confirmed = false, context = {}) => {
+    assertRequestCurrent(context);
     let callId;
     try { callId = randomUUID(); } catch {
       throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
     }
     if (!UUID_PATTERN.test(callId)) throw helperError("MCP_HELPER_CALL_ID_FAILED", "mcp_helper_call_id_failed");
     const refreshed = await refreshIfExpiring();
+    assertRequestCurrent(context);
     const bind = async () => { if (bindRuntimeCalls) {
       if (!supportsElicitation || typeof context.requestClient !== "function") {
         throw helperError("MCP_SESSION_INVALID", "mcp_session_invalid");
@@ -1146,12 +1115,15 @@ function createMcpStdioHandler(options = {}) {
       }
     } };
     await bind();
-    try { return await requestTool(name, args, callId, confirmed); }
+    assertRequestCurrent(context);
+    try { return await requestTool(name, args, callId, confirmed, context); }
     catch (error) {
+      assertRequestCurrent(context);
       if (dataErrorCode(error) !== "MCP_SESSION_INVALID" || refreshed || !refreshSession) throw error;
       await refresh();
+      assertRequestCurrent(context);
       await bind();
-      return requestTool(name, args, callId, confirmed);
+      return requestTool(name, args, callId, confirmed, context);
     }
   };
 
@@ -1269,9 +1241,9 @@ function createMcpStdioHandler(options = {}) {
         }
         try {
           const elicitation = await askUser(
-            context, "elicitation/create", elicitationParamsFor(questions),
+            context, "elicitation/create", elicitationParamsFor(questions, true),
           );
-          const result = normalizeElicitationResult(elicitation, questions);
+          const result = normalizeElicitationResult(elicitation, questions, true);
           return jsonRpcResult(message.id, {
             content: [{ type: "text", text: JSON.stringify(result) }],
             structuredContent: result,
@@ -1289,12 +1261,11 @@ function createMcpStdioHandler(options = {}) {
       }
       let nativeAgent = null;
       let hookGrant = null;
-      let plugin = null;
       let group = null;
       let management = null;
       try {
         // The confirmation text is built from the Service's own current view of
-        // the draft or installation, never from model-supplied descriptions.
+        // the proposed operation, never from model-supplied descriptions.
         if (message.params.name === "group_chat_dispatch") {
           group = cloneMcpServiceResult(await invokeTool("group_chat_get", { groupId: toolArguments.groupId }, false, context));
         }
@@ -1308,24 +1279,6 @@ function createMcpStdioHandler(options = {}) {
             if (management.receipt?.previewDigest !== toolArguments.previewDigest) throw helperError("MCP_TOOL_STATE_CONFLICT", "group_management_preflight_failed");
             return jsonRpcResult(message.id, { content: [{ type: "text", text: JSON.stringify(management.receipt) }],
               structuredContent: management.receipt, isError: false });
-          }
-        }
-        if (message.params.name === "plugin_install") {
-          plugin = cloneMcpServiceResult(await invokeTool("plugin_status", {
-            draftId: toolArguments.draftId }, false, context));
-          if (plugin?.draftId !== toolArguments.draftId || plugin.installable !== true
-            || plugin.previewDigest !== toolArguments.previewDigest
-            || !Array.isArray(plugin.previewComponents?.skills)
-            || !Array.isArray(plugin.previewComponents?.mcpServers)) {
-            throw helperError("MCP_TOOL_STATE_CONFLICT", "plugin_install_preflight_failed");
-          }
-        }
-        if (message.params.name === "plugin_activate") {
-          plugin = cloneMcpServiceResult(await invokeTool("plugin_setup_get", {
-            installationId: toolArguments.installationId }, false, context));
-          if (plugin?.installationId !== toolArguments.installationId
-            || plugin.releaseDigest !== toolArguments.releaseDigest || !Array.isArray(plugin.components)) {
-            throw helperError("MCP_TOOL_STATE_CONFLICT", "plugin_activate_preflight_failed");
           }
         }
         if (message.params.name === "hook_grant") {
@@ -1377,7 +1330,7 @@ function createMcpStdioHandler(options = {}) {
         }
       } catch (error) { return toolFailureResponse(message.id, error); }
       let confirmation;
-      try { confirmation = confirmationQuestionFor(message.params.name, toolArguments, nativeAgent, hookGrant, plugin, group, management); }
+      try { confirmation = confirmationQuestionFor(message.params.name, toolArguments, nativeAgent, hookGrant, null, group, management); }
       catch (error) { return toolFailureResponse(message.id, error); }
       let confirmed = false;
       if (confirmation) {
@@ -1534,8 +1487,8 @@ async function runMcpStdioSession(options = {}) {
     || maxFrameBytes > 1024 * 1024
     || !Number.isSafeInteger(outputTimeoutMs) || outputTimeoutMs < 1
     || outputTimeoutMs > 30_000
-    || !Number.isSafeInteger(clientRequestTimeoutMs) || clientRequestTimeoutMs < 10
-    || clientRequestTimeoutMs > DEFAULT_SERVER_REQUEST_TIMEOUT_MS) {
+    || (clientRequestTimeoutMs !== null && (!Number.isSafeInteger(clientRequestTimeoutMs) || clientRequestTimeoutMs < 10
+      || clientRequestTimeoutMs > 2_147_000_000))) {
     throw helperError("MCP_HELPER_OPTIONS_INVALID", "mcp_helper_options_invalid");
   }
   let buffered = Buffer.alloc(0);
@@ -1545,6 +1498,7 @@ async function runMcpStdioSession(options = {}) {
   let signalFailure;
   const failed = new Promise(resolve => { signalFailure = resolve; });
   const pendingClientRequests = new Map();
+  const activeRequests = new Map();
   const handlerTasks = new Set();
   const emit = (payload, frameLimit = maxFrameBytes) => {
     const current = outputTail.then(() => {
@@ -1560,14 +1514,19 @@ async function runMcpStdioSession(options = {}) {
   const rejectPendingClientRequests = () => {
     for (const pending of pendingClientRequests.values()) {
       clearTimeout(pending.timer);
+      pending.signal?.removeEventListener("abort", pending.onAbort);
       pending.reject(helperError("MCP_HELPER_CLIENT_REQUEST_FAILED", "mcp_helper_client_request_failed"));
     }
     pendingClientRequests.clear();
+  };
+  const abortActiveRequests = () => {
+    for (const record of activeRequests.values()) record.controller.abort();
   };
   const failSession = (error) => {
     if (sessionError) return;
     sessionError = error;
     signalFailure();
+    abortActiveRequests();
     rejectPendingClientRequests();
     handler.close?.();
     output.destroy?.();
@@ -1584,8 +1543,9 @@ async function runMcpStdioSession(options = {}) {
   };
   output.on("error", onOutputError);
   output.once("close", onOutputClose);
-  const requestClient = async (method, params) => {
+  const requestClient = async (method, params, { signal } = {}) => {
     if (sessionError || method !== "elicitation/create" || !boundedJsonObject(params, 16 * 1024)
+      || signal?.aborted
       // Binding proofs must accommodate a parallel roster read batch while
       // retaining a bounded number of client requests.
       || pendingClientRequests.size >= 128) {
@@ -1593,18 +1553,26 @@ async function runMcpStdioSession(options = {}) {
     }
     requestSequence += 1;
     const id = `shoggoth-elicitation-${requestSequence}`;
-    // Match the Service card's approval lifetime. Binding proofs and ordinary
-    // input retain a finite transport deadline; EOF/error still rejects every
-    // pending request. A short helper timer must not leave a live, unusable card.
+    // Match the Service card's lifetime. EOF/error and explicit cancellation
+    // reject pending requests; ordinary input has no elapsed-time deadline.
     const approvalWait = Object.hasOwn(params.requestedSchema?.properties ?? {}, "confirm_product_action")
       && serverRequestUsesApprovalWait("mcpServer/elicitation/request", { ...params, serverName: "shoggoth", mode: "form" });
     let timer;
+    let onAbort;
     const response = new Promise((resolve, reject) => {
-      if (!approvalWait) timer = setTimeout(() => {
+      if (!approvalWait && clientRequestTimeoutMs !== null) timer = setTimeout(() => {
         pendingClientRequests.delete(id);
+        signal?.removeEventListener("abort", onAbort);
         reject(helperError("MCP_HELPER_CLIENT_REQUEST_FAILED", "mcp_helper_client_request_failed"));
       }, clientRequestTimeoutMs);
-      pendingClientRequests.set(id, { resolve, reject, timer });
+      onAbort = () => {
+        if (!pendingClientRequests.delete(id)) return;
+        clearTimeout(timer); signal.removeEventListener("abort", onAbort);
+        reject(helperError("MCP_HELPER_CLIENT_REQUEST_FAILED", "mcp_helper_client_request_failed"));
+        void emit({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }).catch(() => {});
+      };
+      pendingClientRequests.set(id, { resolve, reject, timer, signal, onAbort });
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
     // A transport failure may reject the response while emit is still pending.
     response.catch(() => {});
@@ -1615,6 +1583,7 @@ async function runMcpStdioSession(options = {}) {
       if (pending) {
         pendingClientRequests.delete(id);
         clearTimeout(pending.timer);
+        pending.signal?.removeEventListener("abort", pending.onAbort);
         pending.reject(helperError("MCP_HELPER_CLIENT_REQUEST_FAILED", "mcp_helper_client_request_failed"));
       }
     }
@@ -1627,6 +1596,7 @@ async function runMcpStdioSession(options = {}) {
     if (!pending) return false;
     pendingClientRequests.delete(message.id);
     clearTimeout(pending.timer);
+    pending.signal?.removeEventListener("abort", pending.onAbort);
     const isResult = exactObject(message, ["jsonrpc", "id", "result"]);
     const isError = exactObject(message, ["jsonrpc", "id", "error"]);
     if (isResult && boundedJsonObject(message.result, 16 * 1024)) {
@@ -1638,22 +1608,55 @@ async function runMcpStdioSession(options = {}) {
     return true;
   };
   const dispatch = (message) => {
+    const hasId = message && Object.prototype.hasOwnProperty.call(message, "id");
+    if (message?.jsonrpc === "2.0" && message.method === "notifications/cancelled" && !hasId) {
+      const params = message.params;
+      const fields = ["requestId", "reason", "_meta"].filter(key => Object.hasOwn(params || {}, key));
+      if (exactObject(params, fields) && validJsonRpcId(params.requestId)
+        && (params.reason === undefined || typeof params.reason === "string" && Buffer.byteLength(params.reason) <= 1024)
+        && (params._meta === undefined || boundedJsonObject(params._meta, 4 * 1024))) {
+        const record = activeRequests.get(params.requestId);
+        // MCP initialization is not cancelable. An unknown/completed ID grants
+        // no authority over another request, including its string/number twin.
+        if (record && record.method !== "initialize") record.controller.abort();
+      }
+      return;
+    }
+    const record = hasId && validJsonRpcId(message.id)
+      ? { method: message.method, controller: new AbortController() } : null;
+    if (record && activeRequests.has(message.id)) {
+      failSession(helperError("MCP_HELPER_REQUEST_ID_CONFLICT", "mcp_helper_request_id_conflict"));
+      return;
+    }
+    if (record) activeRequests.set(message.id, record);
     let task;
     task = Promise.resolve().then(async () => {
       if (sessionError) return;
       let response;
       try {
-        response = await handler(message, { requestClient });
+        response = record?.controller.signal.aborted ? null : await handler(message, {
+          requestClient: (method, params, options) => requestClient(method, params,
+            record ? { signal: record.controller.signal } : options),
+          ...(record ? { signal: record.controller.signal } : {}),
+        });
       } catch {
         response = jsonRpcError(message?.id, -32603, "Internal error");
       }
+      if (record?.controller.signal.aborted) response = jsonRpcError(message.id, -32800, "Request cancelled");
+      if (record && activeRequests.get(message.id) === record) activeRequests.delete(message.id);
       if (response) await emit(response, message.method === "tools/list"
         ? Math.max(maxFrameBytes, MCP_MAX_CATALOG_FRAME_BYTES) : maxFrameBytes);
-    }).catch(failSession).finally(() => handlerTasks.delete(task));
+    }).catch(failSession).finally(() => {
+      handlerTasks.delete(task);
+      if (record && activeRequests.get(message.id) === record) activeRequests.delete(message.id);
+    });
     handlerTasks.add(task);
   };
   const readInput = async () => {
-    for await (const chunk of input) {
+    // A bridge is a half-open Duplex: input EOF cancels caller authority, but
+    // its output must survive until the canceled responses finish draining.
+    const chunks = typeof input.iterator === "function" ? input.iterator({ destroyOnReturn: false }) : input;
+    for await (const chunk of chunks) {
       if (sessionError) {
         if (Buffer.isBuffer(chunk)) chunk.fill(0);
         break;
@@ -1708,6 +1711,9 @@ async function runMcpStdioSession(options = {}) {
   };
   try {
     await Promise.race([readInput(), failed]);
+    // EOF ends caller authority even while its output can still drain. A late
+    // approval must not dispatch an action after the client stopped reading it.
+    abortActiveRequests();
     rejectPendingClientRequests();
     // Successful EOF drains in-flight handlers. A broken transport must not wait
     // for a tool or a user confirmation that can no longer deliver its result.

@@ -4,9 +4,9 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { resolveServicePaths } = require("../app/agent-service/paths");
+const { resolveCanonicalServicePaths, resolveServicePaths } = require("../app/agent-service/paths");
 const { startShoggothMcpHelper } = require("../app/shoggoth-mcp-helper");
-const { Transform } = require("node:stream");
+const { createMcpEvidenceObserver } = require("./shoggoth-memory-live-mcp-evidence.cjs");
 
 const root = fs.realpathSync(process.env.HOME || "");
 if (!root.startsWith("/private/tmp/sgmemlive-") && !root.startsWith("/tmp/sgmemlive-")) {
@@ -33,39 +33,36 @@ const safeStorage = {
     return Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString("utf8");
   },
 };
-const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
-  cacheRoot: path.join(root, "cache"), profileRoot: path.join(root, "profile") });
-const observe = (direction) => {
-  let pending = "";
-  return new Transform({ transform(chunk, encoding, done) {
-    pending += chunk.toString("utf8");
-    for (let end; (end = pending.indexOf("\n")) >= 0;) {
-      const line = pending.slice(0, end); pending = pending.slice(end + 1);
-      try {
-        const message = JSON.parse(line);
-        const entry = { direction, method: message.method ?? "response" };
-        if (message.method === "initialize") entry.capabilities = Object.keys(message.params?.capabilities ?? {});
-        if (message.result?.action) entry.action = message.result.action;
-        if (message.error?.code) entry.errorCode = message.error.code;
-        fs.appendFileSync(path.join(root, "mcp-fixture-io.jsonl"),JSON.stringify(entry)+"\n",{mode:0o600});
-      } catch {}
-    }
-    if (pending.length>1024*1024) pending="";
-    // The product writer zeroes its frame after this Transform acknowledges
-    // write(). stdout can still be draining it, so retain an independent copy.
-    done(null,Buffer.from(chunk));
-  } });
-};
+const config = JSON.parse(fs.readFileSync(path.join(root, "worker.json"), "utf8"));
+if (config.root !== root) throw new Error("MCP_HELPER_FIXTURE_CONFIG_INVALID");
+const paths = config.suite === "repair"
+  ? resolveCanonicalServicePaths({ userInfo: () => ({ homedir: root }) })
+  : resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
+    cacheRoot: path.join(root, "cache"), profileRoot: path.join(root, "profile") });
+const evidencePath = path.join(root, "mcp-fixture-io.jsonl");
+const record = entry => fs.appendFileSync(evidencePath, JSON.stringify(entry) + "\n", { mode: 0o600 });
+const runtimeGatePresent = process.env.SHOGGOTH_RUNTIME_MCP_GATE_FILE !== undefined;
+record({ direction: "fixture", method: "transport", route: runtimeGatePresent ? "runtime-gate-relay" : "local-auth",
+  runtimeGatePresent });
+const observe = createMcpEvidenceObserver(record);
 const input = observe("client"), output = observe("helper");
 process.stdin.pipe(input); output.pipe(process.stdout);
-startShoggothMcpHelper({ paths, safeStorage,
-  input, output,
-  electronApp: { whenReady: async () => {}, quit() {} },
-  serviceVersion: "isolated-memory-live-acceptance" }).catch((error) => {
-  const code = /^MCP_HELPER_[A-Z0-9_]+$/u.test(error?.code || "")
-    ? error.code : "MCP_HELPER_FAILED";
-  try { fs.appendFileSync(path.join(root, "mcp-helper-errors.jsonl"), `${JSON.stringify({ code })}\n`,
-    { mode: 0o600 }); } catch {}
+// Match the product entry point: non-Codex runtimes authenticate an exact Run
+// through a consumed gate. The fixture supplies only its isolated system home;
+// production bootstrap validation, relay, and Service gate checks all execute.
+Promise.resolve().then(() => runtimeGatePresent
+  ? require("../app/bootstrap-role").main(process.argv.slice(1), process.env,
+    { userInfo: () => ({ homedir: root }) },
+    { runtimeMcpRelay: bridge => require("../app/runtime-mcp-relay").startRuntimeMcpRelay({ ...bridge, input, output }) })
+  : startShoggothMcpHelper({ paths, safeStorage, input, output,
+    electronApp: { whenReady: async () => {}, quit() {} },
+    serviceVersion: "isolated-memory-live-acceptance" })).catch((error) => {
+  const codes = [];
+  for (let current = error, depth = 0; current && depth < 4; current = current.cause, depth++) {
+    if (/^[A-Z][A-Z0-9_]{0,100}$/u.test(current.code || "")) codes.push(current.code);
+  }
+  const code = codes[0] || "MCP_HELPER_FAILED";
+  try { record({ direction: "fixture", method: "startup-error", code, codes }); } catch {}
   process.stderr.write(`${code}\n`);
   process.exitCode = 1;
 }).finally(() => key.fill(0));

@@ -7,13 +7,16 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { atomicWritePrivateFile } = require("./agent-service/private-file");
 const { ensurePrivateDirectoryTree } = require("./agent-service/security");
-const { ensureCredential } = require("./agent-service/external-plugin-adapter-auth");
+const { ensureCredential } = require("./agent-service/external-host-pairing");
 const { assertAdapterProtocol } = require("./external-plugin-adapter-protocol");
+const { planOpenClawToolGrants } = require("./external-plugin-openclaw-tool-policy");
 const { discoverHermesProfiles } = require("./federation-mcp-registrar");
+const { MCP_PRODUCT_TOOL_DEFINITIONS } = require("./agent-service/mcp-product-tool-controller");
+const MCP_TOOL_NAMES = MCP_PRODUCT_TOOL_DEFINITIONS.filter(tool=>tool.name.startsWith("mcp_server_")).map(tool=>tool.name);
 
 const FILES = Object.freeze({
-  openclaw: ["index.mjs", "transport.mjs", "package.json", "openclaw.plugin.json"],
-  hermes: ["__init__.py", "transport.py", "plugin.yaml"],
+  openclaw: ["index.mjs", "transport.mjs", "package.json", "openclaw.plugin.json", "mcp-tools.json"],
+  hermes: ["__init__.py", "transport.py", "plugin.yaml", "mcp-tools.json"],
 });
 const HERMES_PLUGIN = "shoggoth_shared_capabilities";
 const OPENCLAW_PLUGIN = "shoggoth-shared-capabilities";
@@ -22,7 +25,7 @@ const COMMAND_TIMEOUT_MS = 15_000;
 const OPENCLAW_TOOLS = Object.freeze([
   "group_member_role_read", "group_messages_read", "group_task", "group_collaborate",
   "shoggoth_capability_search", "shoggoth_skill_read",
-  "shoggoth_skill_file_read", "shoggoth_plugin_resource_read", "shoggoth_plugin_call",
+  "shoggoth_skill_file_read", ...MCP_TOOL_NAMES,
 ]);
 
 function readPackagedFiles(root, backend) {
@@ -56,7 +59,26 @@ function materialize(paths, resourcesRoot, backend) {
   ensurePrivateDirectoryTree(target, paths.trustedRoot);
   const expected = new Set(FILES[backend]);
   const existing = fs.readdirSync(target);
-  if (existing.some(name => !expected.has(name))) throw new Error("Shoggoth adapter directory changed");
+  if (existing.some(name => !expected.has(name) && !(backend === "hermes" && name === "__pycache__"))) {
+    throw new Error("Shoggoth adapter directory changed");
+  }
+  if (backend === "hermes" && existing.includes("__pycache__")) {
+    // CPython creates this after loading the verified source. Its presence is
+    // normal on the next App startup; it must never admit extra source or links.
+    const cache = path.join(target, "__pycache__"), stat = fs.lstatSync(cache);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid()
+      || (stat.mode & 0o022) !== 0) throw new Error("Shoggoth Hermes bytecode cache unsafe");
+    const names = fs.readdirSync(cache);
+    if (names.length > 32) throw new Error("Shoggoth Hermes bytecode cache changed");
+    for (const name of names) {
+      const file = fs.lstatSync(path.join(cache, name));
+      if (!/^(?:__init__|transport)\.cpython-\d{2,3}(?:\.opt-[12])?\.pyc$/u.test(name)
+        || !file.isFile() || file.isSymbolicLink() || file.nlink !== 1 || file.uid !== process.getuid()
+        || (file.mode & 0o077) !== 0 || file.size > 512 * 1024) {
+        throw new Error("Shoggoth Hermes bytecode cache unsafe");
+      }
+    }
+  }
   for (const [name, bytes] of files) {
     const destination = path.join(target, name);
     if (!fs.existsSync(destination)) {
@@ -111,6 +133,17 @@ function parseToolAllowList(output) {
     item => typeof item === "string" && item.length > 0 && item.length <= 128);
 }
 
+function parseToolGrantSnapshot(output) {
+  return parseOptionalConfig(output, "tools.alsoAllow", data => Array.isArray(data)
+    && data.length <= 1024 && data.every(item => typeof item === "string"
+      && item.length > 0 && item.length <= 128), undefined);
+}
+
+function parseAgentSnapshot(output) {
+  const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  return parseOptionalConfig(output, "agents", record, {});
+}
+
 function parsePluginPolicy(output) {
   const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
   const plugins = parseOptionalConfig(output, "plugins", record, {});
@@ -161,7 +194,7 @@ function symlinkHermes(profileHome, target, managedRoot) {
     if (!path.isAbsolute(previous) || !previous.startsWith(managedRoot + path.sep)) {
       throw new Error("Hermes Shoggoth adapter link is not owned by Shoggoth");
     }
-    if (previous === target) return { path: link, created: false };
+    if (previous === target) return { path: link, created: false, changed: false };
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -169,7 +202,7 @@ function symlinkHermes(profileHome, target, managedRoot) {
   fs.symlinkSync(target, staged);
   try { fs.renameSync(staged, link); }
   finally { try { fs.unlinkSync(staged); } catch {} }
-  return { path: link, created: previous === null };
+  return { path: link, created: previous === null, changed: previous !== null };
 }
 
 function createExternalPluginAdapterRegistrar(options = {}) {
@@ -214,12 +247,30 @@ function createExternalPluginAdapterRegistrar(options = {}) {
         // sandbox restrictions in the user's OpenClaw policy still win.
         const allowed = await execute(settings.openclawBin,
           ["config", "get", "tools.alsoAllow", "--json"])
-          .then(result => parseToolAllowList(result.stdout),
-            error => parseToolAllowList(String(error.stdout || error.stderr || "")));
-        const nextAllowed = [...new Set([...allowed, ...OPENCLAW_TOOLS])];
-        if (JSON.stringify(allowed) !== JSON.stringify(nextAllowed)) {
-          await execute(settings.openclawBin,
-            ["config", "set", "tools.alsoAllow", JSON.stringify(nextAllowed)]);
+          .then(result => parseToolGrantSnapshot(result.stdout),
+            error => parseToolGrantSnapshot(String(error.stdout || error.stderr || "")));
+        const agents = await execute(settings.openclawBin, ["config", "get", "agents", "--json"])
+          .then(result => parseAgentSnapshot(result.stdout),
+            error => parseAgentSnapshot(String(error.stdout || error.stderr || "")));
+        const operations = planOpenClawToolGrants({ globalAlsoAllow: allowed,
+          ...(Object.hasOwn(agents, "entries") ? { agentEntries: agents.entries }
+            : Object.hasOwn(agents, "list") ? { agentList: agents.list } : {}),
+          toolNames: OPENCLAW_TOOLS });
+        for (const operation of operations) {
+          try {
+            await execute(settings.openclawBin, ["config", "set", operation.path,
+              JSON.stringify(operation.value), "--strict-json", ...(operation.replace ? ["--replace"] : []),
+              ...(operation.expectAbsent ? ["--expect-current-absent"]
+                : ["--expect-current-json", JSON.stringify(operation.expectedValue)])]);
+          } catch {
+            // execFile errors include argv. A roster CAS carries unrelated Agent
+            // fields, so never return its raw command or Host error to callers.
+            throw new Error(`OpenClaw ${operation.path} tool grants changed concurrently or could not be saved`);
+          }
+          const verified = await execute(settings.openclawBin, ["config", "get", operation.path, "--json"]);
+          if (JSON.stringify(JSON.parse(verified.stdout)) !== JSON.stringify(operation.value)) {
+            throw new Error(`OpenClaw ${operation.path} tool grants verification failed`);
+          }
         }
         const verifiedPluginAllow = await readPluginPolicy();
         if (verifiedPluginAllow.length > 0 && !includesOpenClawPlugin(verifiedPluginAllow)) {
@@ -255,6 +306,14 @@ function createExternalPluginAdapterRegistrar(options = {}) {
               "plugins", "enable", HERMES_PLUGIN,
             ]);
             outcome.hermes.push(profile);
+            if (settings.reconcileHermesAdapter) {
+              const runtime = await settings.reconcileHermesAdapter({ profile,
+                expectedTools: OPENCLAW_TOOLS, forceRefresh: link.changed, adapterRevision: path.basename(target) });
+              (outcome.hermesRuntime ||= {})[profile] = runtime;
+              if (!["ready", "deferred"].includes(runtime?.state)) {
+                outcome.errors[`hermes-runtime:${profile}`] = "Hermes shared adapter runtime unavailable";
+              }
+            }
           } catch (error) { outcome.errors[`hermes:${profile}`] = error.message; }
         }
       }

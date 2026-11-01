@@ -15,7 +15,8 @@ for (const [runtime, Host, account, code] of [
   ["codex", CodexRuntimeHost, "shoggoth-internal-codex-default-v1", "CODEX_PROCESS_INVALID"],
   ["grok-build", GrokBuildRuntimeHost, "native-grok-build-default-v1", "GROK_BUILD_PROCESS_INVALID"],
   ["antigravity", AntigravityAcpRuntimeHost, "native-antigravity-default-v1", "ANTIGRAVITY_ACP_PROCESS_INVALID"],
-]) for (const failure of ["missing-directory", "missing-executable"]) {
+]) for (const failure of ["missing-directory", "missing-executable",
+  ...(runtime === "antigravity" ? ["missing-workspace", "file-workspace"] : [])]) {
   test(`${runtime} contains the asynchronous OS error after ${failure}`, async (t) => {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-spawn-failure-")));
     fs.chmodSync(root, 0o700);
@@ -24,6 +25,11 @@ for (const [runtime, Host, account, code] of [
     const binaryPath = path.join(root, "runtime"), harnessPath = path.join(root, "harness");
     for (const directory of [stateDir, home, userHome, workspace]) fs.mkdirSync(directory, { mode: 0o700 });
     for (const file of [binaryPath, harnessPath]) fs.writeFileSync(file, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const invalidWorkspace = failure === "missing-workspace" || failure === "file-workspace";
+    if (invalidWorkspace) {
+      fs.rmdirSync(workspace);
+      if (failure === "file-workspace") fs.writeFileSync(workspace, "not a directory", { mode: 0o600 });
+    }
     let child, childClosed;
     const managed = runtime === "codex";
     const nativeHome = managed ? null : path.join(userHome, runtime === "antigravity" ? ".gemini" : ".grok");
@@ -53,7 +59,12 @@ for (const [runtime, Host, account, code] of [
       },
     });
     t.after(async () => { await host.stop().catch(() => {}); fs.rmSync(root, { recursive: true, force: true }); });
-    await assert.rejects(host.initialize(), { code });
+    await assert.rejects(host.initialize(), { code: invalidWorkspace ? "RUNTIME_WORKSPACE_UNAVAILABLE" : code });
+    if (invalidWorkspace) {
+      assert.equal(child, undefined, "an invalid execution workspace cannot spawn a runtime");
+      assert.equal(fs.existsSync(workspace), failure === "file-workspace", "do not recreate an explicit workspace or use another directory");
+      return;
+    }
     assert.equal(child.pid, undefined);
     await childClosed;
     assert.equal(child.listenerCount("error"), 0, "retired startup guard must release its listener after physical close");

@@ -2,7 +2,7 @@
 """Production transport binding tests; no Host or remote-provider claim."""
 import sys
 
-# Import the production adapter without changing its exact three-file tree.
+# Import the production adapter without changing its packaged file tree.
 sys.dont_write_bytecode = True
 
 import importlib.util
@@ -15,6 +15,7 @@ import tempfile
 import threading
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'resources/external-plugin-adapters/hermes/transport.py'
+SERVICE_VERSION = json.loads(SOURCE.with_name('mcp-tools.json').read_text())['serviceProtocolVersion']
 KEYS = ('SHOGGOTH_HERMES_MANAGED_CONTROL_FILE', 'SHOGGOTH_SERVICE_USER_DATA_ROOT', 'HERMES_HOME')
 original = {key: os.environ.get(key) for key in KEYS}
 cases = []
@@ -122,11 +123,11 @@ try:
                 errors.append(type(error).__name__)
         thread = threading.Thread(target=respond, daemon=True)
         thread.start()
-        assert managed.request_service('plugin.external.selection.bind', {}) == {'actualSocket': True}
+        assert managed.request_service('connector.external.selection.bind', {}) == {'actualSocket': True}
         thread.join(3)
         listener.close()
         assert not thread.is_alive() and not errors
-        assert seen == [{'method': 'plugin.external.selection.bind', 'version': 11}]
+        assert seen == [{'method': 'connector.external.selection.bind', 'version': SERVICE_VERSION}]
         cases.append('unchanged production request frame reaches only the bound private UNIX socket')
         credential.rename(core / 'original.auth')
         credential.symlink_to(core / 'original.auth')

@@ -1,0 +1,21 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"PingFang SC, Arial, sans-serif","fontSize":"17px","primaryTextColor":"#17304d","lineColor":"#66819d"},"flowchart":{"curve":"basis","nodeSpacing":55,"rankSpacing":90}}}%%
+flowchart LR
+  U["用户原话"] --> H["Shoggoth 记忆宿主<br/>识别明确意图 · 核对来源与权限<br/>检索 · 保存 · 更正 · 遗忘"]
+  H -->|"已授权事务<br/>收据 · 去重 · 崩溃恢复"| D[("记忆原文与状态<br/>Markdown 文件<br/>SQLite 索引 · 证据 · 撤回记录")]
+  D -->|"仍有效的记忆与来源"| H
+  H -->|"需要文本辅助时"| M["独立纯文本模型<br/>默认用 Agent 已保存的账号和模型<br/>可显式改选，也可仅用本地检索<br/>无终端、文件、MCP 操作工具"]
+  M -->|"建议 / 摘要 / 候选<br/>由宿主校验后处理"| H
+  H -->|"已验证的本轮记忆上下文"| R["聊天 Runtime<br/>使用原聊天账号、模型与权限<br/>兼容的 MCP 请求仍沿原审批"]
+  R --> A["回复用户"]
+  H -->|"明确操作的执行结果"| A
+  D --> B["后台整理与提炼<br/>仅处理允许的来源"]
+  B -. "需要文本推理时" .-> M
+
+  classDef user fill:#eef1f6,stroke:#8190a2,color:#26384a;
+  classDef host fill:#eaf6f1,stroke:#5a9c83,color:#1c4c3c;
+  classDef model fill:#fff5e5,stroke:#c89a53,color:#60431d;
+  classDef runtime fill:#edf2fd,stroke:#7891c1,color:#253d66;
+  class U,A user;
+  class H,D,B host;
+  class M model;
+  class R runtime;

@@ -16,6 +16,17 @@ function assertBase(event, type) {
   assert.equal(event.turnId, "turn-1");
 }
 
+// Current Codex emits a typed item lifecycle for compaction; the deprecated
+// thread/compacted event is not guaranteed to accompany it.
+{
+  const params = { threadId: "thread-1", turnId: "turn-1", item: { id: "compact-1", type: "contextCompaction" } };
+  const started = normalizeCodexEvent({ method: "item/started", params });
+  assert.notEqual(started.type, "context_compacted", "a started item cannot finish compaction");
+  const completed = normalizeCodexEvent({ method: "item/completed", params });
+  assertBase(completed, "context_compacted");
+  assert.equal(completed.itemId, "compact-1");
+}
+
 function testTextReasoningAndPlan() {
   const text = normalizeCodexEvent({
     method: "item/agentMessage/delta",
@@ -144,9 +155,12 @@ function testStatusApprovalPromptCompleteAndError() {
       undefined, "missing or defaulted status/identity is not terminal proof");
   }
   const terminalFailure = normalizeCodexEvent({ method: "turn/completed", params: { threadId: "thread-1",
-    turn: { id: "turn-1", status: "failed", error: { codexErrorInfo: "unauthorized", message: "private upstream detail" } } } });
+    turn: { id: "turn-1", status: "failed", error: { codexErrorInfo: "unauthorized", message: "HTTP 401: Invalid credential. token=private-token", stack: "private upstream stack" } } } });
   assert.deepEqual(terminalFailure.terminalEvidence, { id: "turn-1", status: "failed", error: { codexErrorInfo: "unauthorized" } });
-  assert.equal(JSON.stringify(terminalFailure).includes("private upstream detail"), false);
+  assert.match(terminalFailure.failure.message, /Invalid credential/u);
+  assert.equal(terminalFailure.failure.httpStatus, 401);
+  assert.equal(JSON.stringify(terminalFailure).includes("private-token"), false);
+  assert.equal(JSON.stringify(terminalFailure).includes("private upstream stack"), false);
 
   const failed = normalizeCodexEvent({
     method: "error",

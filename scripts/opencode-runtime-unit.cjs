@@ -11,13 +11,13 @@ const { OpenCodeHttpClient } = require("../app/agent-service/opencode-http-clien
 const { OpenCodeRuntimeLedger } = require("../app/agent-service/opencode-runtime-ledger");
 const { OpenCodeRuntimeHost, answersShoggothToolPrompts, commandEnvironment, modelRef,
   usageFromTokens, nativePermissionRules } = require("../app/agent-service/opencode-runtime-host");
-const { supportsOpenCodeVersion, normalizeOpenCodeWorkspace } = require("../app/agent-service/opencode-runtime-paths");
+const { parseOpenCodeVersion, normalizeOpenCodeWorkspace } = require("../app/agent-service/opencode-runtime-paths");
 const { attachmentPrompt } = require("../app/agent-service/chat-attachments");
 
-test("OpenCode version and workspace identity reject unsupported or missing targets", () => {
-  assert.equal(supportsOpenCodeVersion("1.18.31"), false);
-  assert.equal(supportsOpenCodeVersion("1.18.32"), true);
-  assert.equal(supportsOpenCodeVersion("2.0.0"), true);
+test("OpenCode versions are diagnostic metadata and workspace identity stays strict", () => {
+  assert.deepEqual(parseOpenCodeVersion("1.18.31"), [1, 18, 31]);
+  assert.deepEqual(parseOpenCodeVersion("2.0.0"), [2, 0, 0]);
+  assert.equal(parseOpenCodeVersion("nightly"), null);
   assert.throws(() => normalizeOpenCodeWorkspace("/not-a-shoggoth-workspace"),
     { code: "OPENCODE_WORKSPACE_INVALID" });
   assert.equal(normalizeOpenCodeWorkspace(fs.realpathSync(os.tmpdir())), fs.realpathSync(os.tmpdir()));
@@ -84,6 +84,33 @@ test("corrupt or foreign operation ledger fails closed instead of resetting", ()
 });
 
 const POLICY = Object.freeze({ approvalPolicy: "on-request", sandbox: "danger-full-access" });
+
+test("OpenCode old/future/nonstandard labels use the actual private protocol and effective permissions", async t => {
+  for (const [version, scenario, failure] of [["1.18.31", "valid"], ["2.0.0", "valid"], ["nightly", "valid"], ["2.0.0", "no-compact"],
+    ["1.18.32", "missing-route", "OPENCODE_PROTOCOL_UNSUPPORTED"],
+    ["1.18.32", "no-auth", "OPENCODE_HANDSHAKE_FAILED"],
+    ["1.18.32", "unsafe-permission", "OPENCODE_PERMISSION_UNSAFE"]]) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-opencode-contract-")));
+    const account = "native-opencode-default-v1";
+    const host = new OpenCodeRuntimeHost({ paths: { stateDir: path.join(root, "state"), trustedRoot: root },
+      runtimeBinding: { runtime: "opencode", runtimeProfileId: "contract", runtimeAccountId: account },
+      runtimeEnvironment: Object.freeze({ runtime: "opencode", runtimeAccountId: account, home: root,
+        binaryPath: process.execPath, configurationMode: "native", configSourceHome: root,
+        launchArgs: Object.freeze([]), spawnEnv: Object.freeze({ HOME: root, XDG_DATA_HOME: root }) }),
+      controlInstance: true, permissionPolicy: POLICY,
+      spawnProcess(_binary, args, options) { return require("node:child_process").spawn(process.execPath,
+        [path.join(__dirname, "fixtures/opencode-compatibility-server.cjs"), scenario, version, ...args], options); },
+    });
+    try {
+      if (failure) await assert.rejects(host.initialize(), { code: failure });
+      else {
+        await host.initialize(); assert.equal(host.state, "ready"); assert.equal(host.effectivePermissionsVerified, true);
+        assert.equal(host.protocolFeatures.nativeCompact, scenario !== "no-compact");
+        assert.equal((await host.commandsList()).commands.length, scenario === "no-compact" ? 0 : 1);
+      }
+    } finally { await host.stop(); fs.rmSync(root, { force: true, recursive: true }); }
+  }
+});
 
 function openCodeFixture(prefix) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
@@ -274,7 +301,7 @@ test("native provider failures keep upstream availability distinct from limits a
     } }, "RUNTIME_ATTACHMENT_UNSUPPORTED"],
     ...[400, 401, 403, 404, 499, 600, "503", null].map(status =>
       [`client or invalid status ${status}`, apiError(status), "OPENCODE_TURN_FAILED"]),
-    ["unknown failure", { name: "UnknownError", data: { message: privateTrace } }, "OPENCODE_TURN_FAILED"],
+    ["unknown failure", { name: "UnknownError", data: { message: `Unexpected upstream error. token=${privateTrace}` } }, "OPENCODE_TURN_FAILED"],
   ];
   for (const [name, nativeError, expected] of cases) await t.test(name, async () => {
     const fixture = openCodeFixture("shoggoth-opencode-provider-error-");
@@ -301,7 +328,9 @@ test("native provider failures keep upstream availability distinct from limits a
     try {
       await host.turnStart({ sessionId, operationId: "provider-failure", prompt: "hi",
         cwd: fixture.workspace, permissionPolicy: POLICY });
-      assert.equal((await settled).status, "failed");
+      const terminal = await settled;
+      assert.equal(terminal.status, "failed");
+      assert.ok(terminal.failure?.message, "the structured provider reason reaches the terminal event");
       const read = await host.sessionRead({ sessionId, includeTurns: true });
       assert.equal(read.session.turns[0].errorCode, expected);
       const restored = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
@@ -764,6 +793,7 @@ test("a turn past its deadline is aborted natively and settled as interrupted wi
   const client = stoppingClient(sessionId, () => { clock += 31 * 60_000; return { type: "busy" }; },
     { name: "MessageAbortedError", data: { message: "Aborted" } });
   const host = fixture.host(ledger, client.request, () => clock);
+  host.promptTimeoutMs = 30 * 60_000; // Explicit finite policy still enforces a deadline.
   const { events, settled } = completion(host);
   try {
     await host.turnStart({ sessionId, operationId: "deadline", prompt: "work",
@@ -806,7 +836,7 @@ test("provider rate limit is visible while OpenCode retries and remains safe on 
   host.ledger = ledger;
   host.state = "ready";
   let userMessageId = null, statusReads = 0, prompts = 0;
-  const privateError = "Rate limit exceeded. private provider trace must not leave the host";
+  const privateError = "Rate limit exceeded. Request id: retry-fixture\n    at providerRequest (/Users/private/stack.js:10:2)";
   host.client = { request: async (method, route, body) => {
     if (method === "POST" && route === `/session/${sessionId}/prompt_async`) {
       prompts += 1;
@@ -853,6 +883,8 @@ test("provider rate limit is visible while OpenCode retries and remains safe on 
     assert.equal(host.sessionList().data[0].id, sessionId);
     assert.equal(ledger.snapshot().sessions[0].turns[0].errorCode, "RUNTIME_RATE_LIMITED");
     assert.equal(JSON.stringify(events).includes(privateError), false);
+    assert.equal(result.failure.message, "Rate limit exceeded. Request id: retry-fixture");
+    assert.equal(result.failure.httpStatus, 429);
     assert.equal(prompts, 1);
   } finally {
     clearTimeout(completionTimer);

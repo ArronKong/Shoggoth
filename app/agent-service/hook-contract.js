@@ -36,7 +36,7 @@ const HOOK_PUBLIC_ERROR_CODES = Object.freeze([
   "HOOK_WORKSPACE_REQUIRED", "HOOK_WRITE_FORBIDDEN",
 ]);
 const HOOK_SOURCES = Object.freeze(["chat", "cron", "kanban", "inspiration"]);
-const HOOK_TOOL_SCOPES = Object.freeze(["product", "native_mcp", "plugin_mcp", "runtime_builtin", "runtime_mcp"]);
+const HOOK_TOOL_SCOPES = Object.freeze(["product", "native_mcp", "plugin_mcp", "connector", "runtime_builtin", "runtime_mcp"]);
 const BUILTINS = Object.freeze({
   "guard.block": ["guard"], "guard.require_approval": ["guard"], "guard.condition": ["guard"],
   "arguments.patch": ["transform"], "result.redact": ["transform"],

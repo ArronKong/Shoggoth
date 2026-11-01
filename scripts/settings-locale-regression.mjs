@@ -31,7 +31,7 @@ try {
     bundle: true, format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"', "import.meta.glob": "fixtureGlob" },
     // Vite's provider-logo glob is unrelated to settings behavior.
     banner: { js: "const fixtureGlob = () => ({});" },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl" }, outfile: path.join(temp, "fixture.js"),
+    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
     nodePaths: [path.join(uiRoot, "node_modules")], logLevel: "silent",
     plugins: sourceRef ? [{ name: "baseline-source", setup(builder) {
       builder.onLoad({ filter: /SettingsPage\.tsx$/ }, ({ path: file }) => ({

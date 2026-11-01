@@ -12,13 +12,14 @@ const { EXTERNAL_EXECUTION_METHODS, canonicalExternalMethod, validateExternalIns
 const { APP_STATE_HOST_SECTIONS, validAppStateArguments, validateAppStateHostResult } = require("./agent-service/app-state-contract");
 
 const { validHostManageArguments, APP_MANAGE_OPERATIONS } = require("./agent-service/app-manage-contract");
-const { FEDERATION_TASK_MAX_TIMEOUT_MS } = require("./federation-task-timeout");
+const { validFederationTaskTimeout } = require("./federation-task-timeout");
 
 const FEDERATION_PROTOCOL_VERSION = 1;
 const FEDERATION_MAX_FRAME_BYTES = 64 * 1024;
 const FEDERATION_METHODS = Object.freeze([
+  "apple.device.invoke",
   "backend.status", "backend.require", "app.state.read", "app.manage",
-  "notification.context", "chat.ui.click.verify",
+  "notification.context", "chat.ui.click.verify", "model.projection.owner", "mcp.connection.owner", "mcp.connection.status", "mcp.connection.ack",
   "group.hosts.list", "group.host.test", "group.external.member", "group.external.role", "group.external.models",
   "inspiration.executor.ready",
   "cron.list",
@@ -169,7 +170,15 @@ function validCronJob(value, backendId) {
 
 function validateFederationParams(method, params) {
   if (!FEDERATION_METHOD_SET.has(method)) return false;
+  if (method === "apple.device.invoke") {
+    try { require("./core/apple-device-contract").validateAppleDeviceInvokeParams(params); return true; } catch { return false; }
+  }
   if (EXTERNAL_EXECUTION_METHODS.includes(method)) return validateExternalInspirationParams(method, params);
+  if (["model.projection.owner", "mcp.connection.owner", "mcp.connection.status", "mcp.connection.ack"].includes(method)) return exactObject(params,
+    method !== "mcp.connection.ack" ? ["backendId", "agentId", "sessionId"] : ["backendId", "agentId", "sessionId", "requestId"])
+    && validBackendId(params.backendId) && validAgentId(params.agentId) && boundedString(params.sessionId, 512)
+    && !/[\u0000-\u001f\u007f]/u.test(params.sessionId)
+    && (method !== "mcp.connection.ack" || /^mcp-request-[A-Za-z0-9-]{1,100}$/u.test(params.requestId));
   if (method === "group.hosts.list") return exactObject(params, []);
   if (method === "group.host.test") return exactObject(params, ["peer"]) && require("./group-runtime-host-protocol").validPeer(params.peer);
   if (method === "group.external.models") return validateGroupExternalCapabilitiesParams(params)
@@ -243,8 +252,7 @@ function validateFederationParams(method, params) {
     return exactObject(params, ["backendId", "agentId", "prompt", "timeoutMs", "operationId"])
       && validBackendId(params.backendId) && validAgentId(params.agentId)
       && boundedString(params.prompt, 16 * 1024)
-      && Number.isSafeInteger(params.timeoutMs) && params.timeoutMs >= 5_000
-      && params.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS && validOperationId(params.operationId);
+      && validFederationTaskTimeout(params.timeoutMs) && validOperationId(params.operationId);
   }
   if (method === "federation.message") {
     return exactObject(params, [
@@ -253,8 +261,7 @@ function validateFederationParams(method, params) {
       && boundedString(params.taskId, 256) && OPAQUE_ID_PATTERN.test(params.taskId)
       && Number.isSafeInteger(params.expectedTurn) && params.expectedTurn >= 1
       && params.expectedTurn <= 32 && boundedString(params.prompt, 16 * 1024)
-      && Number.isSafeInteger(params.timeoutMs) && params.timeoutMs >= 5_000
-      && params.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS && validOperationId(params.operationId);
+      && validFederationTaskTimeout(params.timeoutMs) && validOperationId(params.operationId);
   }
   if (method === "federation.task.get") {
     return exactObject(params, ["backendId", "agentId", "taskId"])
@@ -271,7 +278,7 @@ function validateFederationParams(method, params) {
     && exactObject(params, ["backendId", "agentId", "prompt", "timeoutMs", "operationId"])
     && validBackendId(params.backendId) && validAgentId(params.agentId)
     && boundedString(params.prompt, 16 * 1024)
-    && Number.isSafeInteger(params.timeoutMs) && params.timeoutMs >= 5_000 && params.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS
+    && validFederationTaskTimeout(params.timeoutMs)
     && validOperationId(params.operationId);
 }
 
@@ -290,8 +297,20 @@ function safeJsonValue(value, state = { nodes: 0 }, depth = 0) {
 }
 
 function validateFederationResult(method, result, params) {
+  if (method === "apple.device.invoke") {
+    try { require("./core/apple-device-contract").validateAppleDeviceInvokeResult(params?.operation, result); return true; } catch { return false; }
+  }
   if (method === "group.external.models") return require("./group-member-model").validModelCatalog(result);
   if (!FEDERATION_METHOD_SET.has(method) || !safeJsonValue(result)) return false;
+  if (method === "mcp.connection.status") return exactObject(result, ["idle"]) && typeof result.idle === "boolean";
+  if (method === "mcp.connection.owner" || method === "model.projection.owner") return exactObject(result, ["owner"])
+    && exactObject(result.owner, ["backendId", "agentId", "sessionKey", "profileId", "transcriptSessionId"])
+    && validBackendId(result.owner.backendId) && validAgentId(result.owner.agentId) && validAgentId(result.owner.profileId)
+    && validAgentId(result.owner.transcriptSessionId) && boundedString(result.owner.sessionKey, 512)
+    && (!params || result.owner.backendId === params.backendId && result.owner.agentId === params.agentId && result.owner.sessionKey.startsWith(`agent:${params.agentId}:`));
+  if (method === "mcp.connection.ack") return exactObject(result, ["requestId", "status", "sessionKey"])
+    && /^mcp-request-[A-Za-z0-9-]{1,100}$/u.test(result.requestId) && ["accepted", "unknown"].includes(result.status)
+    && boundedString(result.sessionKey, 512) && (!params || result.requestId === params.requestId && result.sessionKey.startsWith(`agent:${params.agentId}:`));
   if (method === "group.hosts.list") return exactObject(result, ["members"]) && Array.isArray(result.members) && result.members.length <= 32
     && result.members.every(member => exactObject(member, ["peerId", "backendId", "agentId", "name", "connected", "groupTools"])
       && validBackendId(member.backendId) && boundedString(member.agentId, 128) && boundedString(member.peerId, 128)

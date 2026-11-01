@@ -5,13 +5,25 @@ const crypto = require("node:crypto");
 const { ensurePrivateDirectoryTree } = require("./security");
 const { atomicWritePrivateFile, readPrivateFile, validatePrivateStat, validateDirectoryStat,
   openExistingPrivateFile, writeFully, fsyncPrivateParent, recoverInterruptedPrivateFile } = require("./private-file");
-const { normalizePluginSelection } = require("./plugin-chat-selection");
+const { validateLegacyPluginSelection } = require("../core/legacy-plugin-selection");
+// Historical account selections are observation metadata only.
+function normalizeConnectorSelection(value) {
+  if (!Array.isArray(value) || value.length > 64 || value.some(id => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(id)) || new Set(value).size !== value.length) throw new TypeError("selection");
+  return value;
+}
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const c = require("./chat-ui-contract");
 const SEED = c.hash("shoggoth-chat-ui-journal-v1");
 const MAX_RECORD = 128 * 1024;
 const COMPACT_BYTES = 4 * 1024 * 1024;
 const copy = value => structuredClone(value);
+function validateEnvelopeSelection(envelope) {
+  try {
+    if (envelope.pluginSelection !== undefined && envelope.connectorSelection !== undefined) throw new TypeError("mixed selection");
+    if (envelope.pluginSelection !== undefined) validateLegacyPluginSelection(envelope.pluginSelection);
+    if (envelope.connectorSelection !== undefined) normalizeConnectorSelection(envelope.connectorSelection);
+  } catch { throw c.uiError("UI_STORAGE_CORRUPT"); }
+}
 const identity = stat => `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
 const directoryIdentity = stat => `${stat.dev}:${stat.ino}`;
 const marker = state => ({ version: 1, profileId: state.profileId, sessionId: state.sessionId, seq: state.seq, checksum: state.checksum });
@@ -71,7 +83,7 @@ class ChatUiStore {
     this.lease = null; this.opened = false; this.sessions.clear(); this.publications.clear();
   }
   _empty(profileId, sessionId) { return { profileId, sessionId, owner: null, epoch: 1, seq: 0, checksum: SEED,
-    artifacts: new Map(), publications: new Map(), operations: new Map(), error: null }; }
+    artifacts: new Map(), publications: new Map(), operations: new Map(), connectionRequests: new Map(), error: null }; }
   _current(state) {
     this._assertOpen(); if (state.error) throw state.error;
     const files = this._paths(state.profileId, state.sessionId);
@@ -136,6 +148,16 @@ class ChatUiStore {
   }
   _apply(state, type, payload) {
     c.record(payload, "UI_STORAGE_CORRUPT");
+    if (type === "connectionRequest.upsert") {
+      c.fields(payload, ["request"], ["request"], "UI_STORAGE_CORRUPT");
+      const request = c.normalizeConnectionRequest(payload.request), previous = state.connectionRequests.get(request.requestId);
+      if (previous && (request.createdAt !== previous.createdAt || request.kind !== previous.kind
+        || request.updatedAt < previous.updatedAt || previous.status !== "pending" && request.status !== previous.status
+        || ["registryName", "url", "title", "purpose", "requiredFields", "expiresAt"].some(key => c.canonical(request[key]) !== c.canonical(previous[key]))
+        || JSON.stringify(request.serverIds) !== JSON.stringify(previous.serverIds)
+        || request.serverId !== previous.serverId && !(previous.kind === "connection" && previous.serverId === null && request.status === "completed"))) throw c.uiError("UI_STORAGE_CORRUPT");
+      state.connectionRequests.set(request.requestId, copy(request)); return;
+    }
     if (type === "checkpoint.begin") {
       const fields = ["sessionKey", "previousSeq", "previousChecksum", "publicationCount", "operationCount", "finalEpoch"];
       c.fields(payload, fields, fields, "UI_STORAGE_CORRUPT");
@@ -177,11 +199,11 @@ class ChatUiStore {
         c.normalizeState(op.snapshot, rev.declaration.stateSchema, this.secretMatcher);
         const action = rev.declaration.actions.find(value => value.actionId === op.actionId);
         if (!action || c.canonical(op.action) !== c.canonical(action) || c.hash(op.sendEnvelope) !== op.sendFingerprint) throw c.uiError("UI_STORAGE_CORRUPT");
-        c.fields(op.sendEnvelope, ["operationId", "sessionKey", "prompt", "pluginSelection"], ["operationId", "sessionKey", "prompt"], "UI_STORAGE_CORRUPT");
+        c.fields(op.sendEnvelope, ["operationId", "sessionKey", "prompt", "pluginSelection", "connectorSelection"], ["operationId", "sessionKey", "prompt"], "UI_STORAGE_CORRUPT");
         if (op.sendEnvelope.operationId !== op.operationId || op.sendEnvelope.sessionKey !== state.owner.sessionKey
           || typeof op.sendEnvelope.prompt !== "string" || !op.sendEnvelope.prompt.isWellFormed()
           || Buffer.byteLength(op.sendEnvelope.prompt) > 40 * 1024) throw c.uiError("UI_STORAGE_CORRUPT");
-        if (op.sendEnvelope.pluginSelection !== undefined) normalizePluginSelection(op.sendEnvelope.pluginSelection);
+        validateEnvelopeSelection(op.sendEnvelope);
       }
       c.sensitive(op, this.secretMatcher); state.operations.set(op.actionRequestId, copy(op)); return;
     }
@@ -245,10 +267,10 @@ class ChatUiStore {
       if (op.baseStateRevision !== rev.stateRevision || op.stateRevision !== rev.stateRevision
         + Number(c.canonical(op.snapshot) !== c.canonical(rev.state))) throw c.uiError("UI_STORAGE_CORRUPT");
       c.positive(op.revision); c.positive(op.createdAt, "UI_STORAGE_CORRUPT", true); c.id(op.actionId);
-      c.fields(op.sendEnvelope, ["operationId", "sessionKey", "prompt", "pluginSelection"], ["operationId", "sessionKey", "prompt"], "UI_STORAGE_CORRUPT");
+      c.fields(op.sendEnvelope, ["operationId", "sessionKey", "prompt", "pluginSelection", "connectorSelection"], ["operationId", "sessionKey", "prompt"], "UI_STORAGE_CORRUPT");
       if (typeof op.sendEnvelope.prompt !== "string" || !op.sendEnvelope.prompt.isWellFormed()
         || Buffer.byteLength(op.sendEnvelope.prompt) > 40 * 1024) throw c.uiError("UI_STORAGE_CORRUPT");
-      if (op.sendEnvelope.pluginSelection !== undefined) normalizePluginSelection(op.sendEnvelope.pluginSelection);
+      validateEnvelopeSelection(op.sendEnvelope);
       const action = rev.declaration.actions.find(value => value.actionId === op.actionId);
       if (!action || c.canonical(action) !== c.canonical(op.action) || op.sendEnvelope?.operationId !== op.operationId
         || op.sendEnvelope?.sessionKey !== state.owner.sessionKey || c.hash(op.sendEnvelope) !== op.sendFingerprint) throw c.uiError("UI_STORAGE_CORRUPT");
@@ -336,6 +358,26 @@ class ChatUiStore {
     const state = this._load(owner.profileId, owner.transcriptSessionId);
     if (state.owner?.sessionKey !== owner.sessionKey) throw c.uiError("UI_SCOPE_MISMATCH"); return state;
   }
+  upsertConnectionRequest(owner, request) {
+    this.ensureSession(owner);
+    const state = this._owned(owner), normalized = c.normalizeConnectionRequest(request);
+    const old = state.connectionRequests.get(normalized.requestId);
+    if (old && c.canonical(old) === c.canonical(normalized)) return copy(old);
+    this._append(state, "connectionRequest.upsert", { request: normalized });
+    return this.getConnectionRequest(owner, normalized.requestId);
+  }
+  getConnectionRequest(owner, requestId) {
+    const request = this._owned(owner).connectionRequests.get(c.id(requestId));
+    if (!request) return null;
+    return { ...copy(request), status: request.status === "pending" && this.now() >= request.expiresAt ? "expired" : request.status };
+  }
+  listConnectionRequests(owner) {
+    const state = this._owned(owner);
+    return [...state.connectionRequests.keys()].map(id => this.getConnectionRequest(owner, id));
+  }
+  connectionRequestPart(request) {
+    return { type: "connectionRequest", schemaVersion: 1, ...c.normalizeConnectionRequest(request) };
+  }
   lookupPublication(profileId, callId, fingerprint) {
     this._assertOpen(); const entry = this.publications.get(`${c.id(profileId)}:${c.id(callId)}`); if (!entry) return null;
     const pub = this._load(profileId, entry.sessionId).publications.get(entry.publicationId);
@@ -408,6 +450,8 @@ class ChatUiStore {
       : [...state.operations.values()].find(value => value.operationId === operationId); return op ? copy(op) : null;
   }
   prepareOperation(owner, operation) {
+    if (operation.sendEnvelope && Object.hasOwn(operation.sendEnvelope, "pluginSelection")) throw c.uiError("UI_PLUGIN_PLATFORM_RETIRED");
+    if (operation.sendEnvelope && Object.hasOwn(operation.sendEnvelope, "connectorSelection")) throw c.uiError("UI_OPEN_CONNECTOR_RETIRED");
     const state = this._owned(owner), old = state.operations.get(operation.actionRequestId);
     if (old) { if (old.fingerprint !== operation.fingerprint) throw c.uiError("UI_OPERATION_CONFLICT"); return copy(old); }
     const rev = this.revision(owner, operation.artifactId, operation.revision, operation.sourceEventId);
@@ -462,7 +506,7 @@ class ChatUiStore {
   _stateHash(state) {
     return c.hash({ owner: state.owner, epoch: state.epoch, publications: [...state.publications.values()],
       artifacts: [...state.artifacts.values()].map(value => ({ ...value, revisions: [...value.revisions.values()] })),
-      operations: [...state.operations.values()] });
+      operations: [...state.operations.values()], ...(state.connectionRequests.size ? { connectionRequests: [...state.connectionRequests.values()] } : {}) });
   }
   compact(owner) { return this._compact(this._owned(owner)); }
   _compact(state) {
@@ -491,6 +535,7 @@ class ChatUiStore {
     }
     if (next.epoch !== state.epoch) append("checkpoint.epoch", { epoch: state.epoch });
     for (const operation of state.operations.values()) append("checkpoint.operation", copy(operation));
+    for (const request of state.connectionRequests.values()) append("connectionRequest.upsert", { request: copy(request) });
     if (this._stateHash(next) !== this._stateHash(state)) throw c.uiError("UI_STORAGE_CORRUPT");
     append("checkpoint.end", { stateHash: this._stateHash(next) });
     const bytes = Buffer.concat(records), files = this._paths(state.profileId, state.sessionId);

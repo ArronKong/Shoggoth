@@ -804,11 +804,10 @@ function startProxyGateway({
     const SESSION_MESSAGE_COALESCE_MS = 800;
     const lastSessionMessageAt = new Map(); // sessionKey -> ts
     const pendingSessionMessage = new Map(); // sessionKey -> { raw, timer }
-    const selectionControlRequests = new Map();
+    const hostControlRequests = new Map();
     const steeringRequests = new Map(); // browser request id -> new admission run id
     const steeringRuns = new Map(); // admission-only empty finals must not end the live reply
 
-    const selectedUpstreamSends = new Map();
     const sentUpstreamRequests = new Map(); // actual sends only; never replayed across owners
 
     // Device-auth gate for locally-served foreign RPCs. The proxy holds no
@@ -875,7 +874,7 @@ function startProxyGateway({
           event: "chat",
           payload: { runId, sessionKey, state, ...payload },
         });
-        if (state === "final") {
+        if (state === "final" || state === "aborted") {
           if (livePromptsBySession.get(sessionKey)?.owner === promptOwner) {
             livePromptsBySession.delete(sessionKey);
           }
@@ -904,7 +903,7 @@ function startProxyGateway({
         }, meta?.runId ?? runId ?? null);
       return {
         nativeContent: (state, parts, meta) => {
-          if (!["delta", "final", "interim"].includes(state) || !Array.isArray(parts)) return;
+          if (!["delta", "final", "interim", "aborted"].includes(state) || !Array.isArray(parts)) return;
           chatEvent(state, { message: { role: "assistant", content: parts,
             timestamp: Date.now(), shoggoth: { nativeUiVersion: 1, runId: meta.runId, displayId: meta.displayId },
             ...(meta.errorMessage ? { errorMessage: meta.errorMessage } : {}),
@@ -914,6 +913,7 @@ function startProxyGateway({
         delta: (text, meta) => emitMessage("delta", text, meta),
         final: (text, errored, meta) => {
           if (errored === true) chatEvent("error", { errorMessage: text });
+          else if (meta?.stopReason === "aborted" || meta?.stopReason === "cancelled") emitMessage("aborted", text, meta);
           else if (meta?.outputDisposition === "silent") chatEvent("final", { outputDisposition: "silent" }, meta.runId);
           else emitMessage("final", text, meta);
         },
@@ -930,7 +930,8 @@ function startProxyGateway({
         plan: (entries) => chatEvent("plan", { plan: entries }),
         status: (data) => chatEvent("status", { statusKind: data?.kind, text: data?.text,
           ...(typeof data?.reason === "string" ? { reason: data.reason } : {}),
-          ...(Number.isSafeInteger(data?.queuedAt) ? { queuedAt: data.queuedAt } : {}) }),
+          ...(Number.isSafeInteger(data?.queuedAt) ? { queuedAt: data.queuedAt } : {}),
+          ...(["preparing", "context", "capabilities", "connecting", "restoring", "opening", "waiting"].includes(data?.stage) ? { stage: data.stage } : {}) }),
         prompt: (data) => {
           livePromptsBySession.set(sessionKey, { runId, prompt: data, owner: promptOwner });
           chatEvent("prompt", { prompt: data });
@@ -1001,7 +1002,7 @@ function startProxyGateway({
     };
 
     const startSendObserver = (
-      backend, sessionKey, message, runId, hooks, promptOwner, attachments, inputProvenance, pluginSelection,
+      backend, sessionKey, message, runId, hooks, promptOwner, attachments, inputProvenance,
     ) => {
       // A new send takes over this client's session stream. Invalidate queued
       // history watchers and locally cancel/await any previous send observer;
@@ -1038,7 +1039,6 @@ function startProxyGateway({
           runId,
           hooks,
           { attachments, inputProvenance,
-            ...(pluginSelection === undefined ? {} : { pluginSelection }),
             signal: controller.signal,
             onAccepted: hooks.accepted },
         );
@@ -1192,24 +1192,13 @@ function startProxyGateway({
     const enterDegraded = (retiring = false) => {
       const wasDown = upstreamDown;
       upstreamDown = true;
-      for (const control of selectionControlRequests.values()) {
+      for (const control of hostControlRequests.values()) {
         clearTimeout(control.timer);
-        control.reject(Object.assign(new Error("插件协商连接已中断"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+        control.reject(Object.assign(new Error("后台查询连接已中断"), { code: "UPSTREAM_NEEDS_VERIFICATION" }));
       }
-      selectionControlRequests.clear();
+      hostControlRequests.clear();
       steeringRequests.clear();
       steeringRuns.clear();
-      for (const [id, selected] of selectedUpstreamSends) {
-        clearTimeout(selected.timer);
-        sendToClient(JSON.stringify({ type: "res", id, ok: false, error: {
-          // An unsent retry may still name a previously accepted original
-          // operation; transport loss alone cannot prove non-admission.
-          code: "PLUGIN_SELECTION_NEEDS_VERIFICATION",
-          message: "插件消息连接已中断，请查询原操作，不能自动重发",
-        } }));
-      }
-      for (const id of selectedUpstreamSends.keys()) sentUpstreamRequests.delete(id);
-      selectedUpstreamSends.clear();
       for (const id of sentUpstreamRequests.keys()) {
         listRequestTracker.forget(id);
         sendToClient(JSON.stringify({ type: "res", id, ok: false, error: {
@@ -1270,9 +1259,8 @@ function startProxyGateway({
     };
 
     const forwardUpstream = (data, frame) => {
-      const selected = selectedUpstreamSends.has(frame?.id);
       if (!currentUpstream()) {
-        if (!selected) rejectUnsent(data);
+        rejectUnsent(data);
         return false;
       }
       if (frame?.type === "req" && frame.method !== "connect") {
@@ -1283,11 +1271,9 @@ function startProxyGateway({
           return false;
         }
         sentUpstreamRequests.set(frame.id, { method: frame.method,
-          ...(frame.method === "chat.send" && !selected ? {
+          ...(frame.method === "chat.send" ? {
             sessionKey: frame.params?.sessionKey, runId: frame.params?.idempotencyKey,
           } : {}) });
-        const selectedEntry = selectedUpstreamSends.get(frame.id);
-        if (selectedEntry) selectedEntry.dispatched = true;
       }
       try { upstream.send(data); return true; }
       catch { retireUpstream(); return false; }
@@ -1296,9 +1282,8 @@ function startProxyGateway({
     const sendToUpstream = (data) => {
       const frame = safeParse(data.toString());
       if (upstream && !endpointGuard.isCurrent(upstreamBinding)) {
-        const selected = selectedUpstreamSends.has(frame?.id);
-        retireUpstream();
-        if (!selected) rejectUnsent(data);
+          retireUpstream();
+        rejectUnsent(data);
         return false;
       }
       let leaveAdmission = null;
@@ -1347,41 +1332,35 @@ function startProxyGateway({
       }
     };
 
-    // Recovery and selection negotiation use this browser's authenticated Host.
+    // Recovery queries use this browser's authenticated Host.
     // A second backend socket may have a different receipt owner.
     const requestHostControl = (method, params, expectedSocket = upstream) => {
       if (!currentUpstream() || !authed || upstreamDown || !upstreamReady || upstream?.readyState !== WebSocket.OPEN
         || upstream !== expectedSocket
-        || selectionControlRequests.size >= 128
-        || !["chat.selection.capabilities", "chat.selection.get", "chat.history", "agent.wait"].includes(method)) {
-        return Promise.reject(Object.assign(new Error("插件选择宿主暂不可用"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+        || hostControlRequests.size >= 128
+        || !["chat.history", "agent.wait"].includes(method)) {
+        return Promise.reject(Object.assign(new Error("后台查询宿主暂不可用"), { code: "UPSTREAM_NEEDS_VERIFICATION" }));
       }
-      const id = `selection-control-${randomUUID()}`;
+      const id = `host-control-${randomUUID()}`;
       return new Promise((resolve, reject) => {
         const entry = { resolve, reject, socket: upstream, timer: null };
         entry.timer = setTimeout(() => {
-          selectionControlRequests.delete(id);
-          reject(Object.assign(new Error("插件选择协商超时，消息未发送"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+          hostControlRequests.delete(id);
+          reject(Object.assign(new Error("后台查询超时，原结果仍待核实"), { code: "UPSTREAM_NEEDS_VERIFICATION" }));
         }, 10_000);
-        selectionControlRequests.set(id, entry);
+        hostControlRequests.set(id, entry);
         try {
           if (!currentUpstream()) return;
           upstream.send(JSON.stringify({ type: "req", id, method, params }));
         }
         catch (error) {
           clearTimeout(entry.timer);
-          selectionControlRequests.delete(id);
+          hostControlRequests.delete(id);
           reject(error);
         }
       });
     };
-    const requestSelectionControl = (method, params) => {
-      if (!["chat.selection.capabilities", "chat.selection.get"].includes(method)) {
-        return Promise.reject(Object.assign(new Error("插件选择宿主暂不可用"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
-      }
-      return requestHostControl(method, params);
-    };
-    const selectionOwner = (agentId) => {
+    const chatOperationOwner = (agentId) => {
       const routed = registry?.route(agentId);
       if (routed) return routed;
       // OpenClaw is the passthrough owner and intentionally injects no agents
@@ -1614,7 +1593,7 @@ function startProxyGateway({
 
     // UI -> gateway
     client.on("message", async (data) => {
-      const raw = data.toString();
+      let raw = data.toString();
       const frame = safeParse(raw);
       if (frame && frame.type === "req") {
         // Product pagination is consumed here, including the default backend.
@@ -1680,80 +1659,30 @@ function startProxyGateway({
             return; // never forward a foreign frame upstream
           }
         }
-        const hasPluginSelection = frame.params
-          && Object.prototype.hasOwnProperty.call(frame.params, "pluginSelection");
-        if (frame.params && (Object.hasOwn(frame.params, "capabilitySelection")
-          || Object.hasOwn(frame.params, "selection_dispatch"))) {
+        if (frame.params && Object.hasOwn(frame.params, "pluginSelection")) {
           if (!authed) { denyUnauthed(frame.id); return; }
           sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
-            error: { code: "PLUGIN_SELECTION_UNAVAILABLE", message: "插件选择必须由 Shoggoth 验证后发送" } }));
+            error: { code: "PLUGIN_PLATFORM_RETIRED", message: "旧插件选择已停用，请重新选择连接器账号后发送" } }));
           return;
         }
-        // A selection is admitted with a new chat.send only. In particular,
-        // steer and prompt responses may resume an already-running turn; an
-        // unknown field must not silently become authority for that turn.
-        if (hasPluginSelection && (frame.method === "chat.steer" || frame.method === "chat.respond")) {
+        if (frame.params && ["connectorSelection", "capabilitySelection", "selection_dispatch"].some(key => Object.hasOwn(frame.params,key))) {
           if (!authed) { denyUnauthed(frame.id); return; }
-          sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
-            error: { code: "PLUGIN_SELECTION_UNAVAILABLE",
-              message: "插件选择仅能随新消息发送，追加消息或回应不能更改本回合授权" } }));
+          sendToClient(JSON.stringify({type:"res",id:frame.id,ok:false,error:{code:"OPEN_CONNECTOR_RETIRED",
+            message:"旧连接器账号选择已退役，原执行结果仍须核对；不能自动重新发送",receiptUncertain:true}}));
           return;
         }
-        if (frame.method === "chat.send" && hasPluginSelection) {
+        if (frame.method === "chat.send" && registry?.chatSecretRequest) {
           if (!authed) { denyUnauthed(frame.id); return; }
-          const owner = selectionOwner(agentIdFromSessionKey(frame.params.sessionKey));
-          if (owner?.id === "openclaw" && typeof owner.prepareExternalChatSelection === "function") {
-            if (selectedUpstreamSends.size >= 64 || selectedUpstreamSends.has(frame.id)) {
-              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
-                error: { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "插件消息正在处理，请稍后核实" } }));
-              return;
-            }
-            const selected = { selection: null, socket: upstream, dispatched: false, timer: null };
-            selected.timer = setTimeout(() => {
-              if (selectedUpstreamSends.get(frame.id) !== selected) return;
-              selectedUpstreamSends.delete(frame.id);
-              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
-                code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "插件消息回执超时，请查询原操作，不能自动重发",
-              } }));
-            }, 60_000);
-            selected.timer.unref?.();
-            selectedUpstreamSends.set(frame.id, selected);
-            try {
-              const prepared = await owner.prepareExternalChatSelection(frame.params, { requestHost: requestSelectionControl });
-              if (selectedUpstreamSends.get(frame.id) !== selected) return;
-              if (client.readyState !== WebSocket.OPEN || selected.socket !== upstream
-                || !currentUpstream() || upstreamDown || !upstreamReady) throw Object.assign(new Error("插件消息连接已变化"), { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION" });
-              selected.selection = prepared.selection;
-              if (sendToUpstream(JSON.stringify({ ...frame, params: prepared.params })) === false) {
-                // A local admission rejection has already answered this request.
-                // It must not later produce an ambiguous timeout for an unsent turn.
-                clearTimeout(selected.timer);
-                selectedUpstreamSends.delete(frame.id);
-              }
-            } catch (error) {
-              if (selectedUpstreamSends.get(frame.id) !== selected) return;
-              clearTimeout(selected.timer);
-              selectedUpstreamSends.delete(frame.id);
-              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
-                error: { code: error?.code === "PLUGIN_SELECTION_NEEDS_VERIFICATION"
-                  ? error.code : "PLUGIN_SELECTION_UNAVAILABLE",
-                  message: error?.code === "PLUGIN_SELECTION_NEEDS_VERIFICATION"
-                    ? "原插件消息需要核实，请保留输入并查询原操作" : "插件选择暂不可用，消息未发送，输入已保留" } }));
-            }
-            return;
-          }
-          if (owner?.id !== "shoggoth" && !(owner?.id === "hermes" && owner.supportsExternalChatSelection?.() === true)) {
+          try {
+            const prepared = await registry.chatSecretRequest("prepare", { sessionKey: frame.params?.sessionKey,
+              operationId: frame.params?.idempotencyKey ?? frame.params?.runId,
+              text: String(frame.params?.message ?? "") });
+            frame.params = { ...frame.params, message: prepared.text }; raw = JSON.stringify(frame);
+          } catch (error) {
+            const messages = require("./chat-secret-contract").SECRET_MESSAGES;
+            const code = Object.hasOwn(messages, error?.code) ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
             sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
-              error: { code: "PLUGIN_SELECTION_UNAVAILABLE",
-                message: "当前宿主尚未接入 Shoggoth 插件选择，请保留草稿并切换到支持的 Agent" } }));
-            return;
-          }
-        }
-        if (frame.method === "chat.abort" && authed) {
-          const owner = selectionOwner(agentIdFromSessionKey(frame.params?.sessionKey));
-          if (owner?.id === "openclaw" && typeof owner.cancelExternalChatSelections === "function") {
-            try { await owner.cancelExternalChatSelections(frame.params.sessionKey, { requestHost: requestSelectionControl }); }
-            catch { /* Host Stop still runs if selection discovery is unavailable. */ }
+              error: { code, message: messages[code], admissionAccepted: false } })); return;
           }
         }
         if (registry?.hasExternalInspirationSessionBridge?.() === true
@@ -1795,9 +1724,9 @@ function startProxyGateway({
         } else if (frame.method === "chat.operation.get") {
           const sessionKey = frame.params?.sessionKey;
           const agentId = agentIdFromSessionKey(sessionKey);
-          const selectionBackend = selectionOwner(agentId);
-          if (frame.params?.operationKind === "chat" && (selectionBackend?.id === "openclaw"
-            || (!selectionBackend && agentId && !claims(agentId)))) {
+          const operationBackend = chatOperationOwner(agentId);
+          if (frame.params?.operationKind === "chat" && (operationBackend?.id === "openclaw"
+            || (!operationBackend && agentId && !claims(agentId)))) {
             if (!authed) { denyUnauthed(frame.id); return; }
             const socket = upstream;
             try {
@@ -1813,17 +1742,10 @@ function startProxyGateway({
             }
             return;
           }
-          if (selectionBackend?.id === "openclaw" && typeof selectionBackend.getExternalChatSelectionOperation === "function") {
+          if (operationBackend?.id === "openclaw") {
             if (!authed) { denyUnauthed(frame.id); return; }
-            try {
-              const payload = await selectionBackend.getExternalChatSelectionOperation(
-                sessionKey, frame.params?.idempotencyKey, { requestHost: requestSelectionControl });
-              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
-            } catch {
-              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
-                code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "暂时无法核验原插件消息，请稍后查询，不能自动重发",
-              } }));
-            }
+            sendToClient(JSON.stringify({type:"res",id:frame.id,ok:false,error:{code:"OPEN_CONNECTOR_RETIRED",
+              message:"旧账号选择回执已退役；原结果仍待核实，不能自动重发"}}));
             return;
           }
           if (owns(agentId)) {
@@ -1918,7 +1840,6 @@ function startProxyGateway({
             const inputProvenance = normalizeFederationInputProvenance(
               frame.params?.systemInputProvenance,
             );
-            const pluginSelection = frame.params?.pluginSelection;
             sendToClient(
               JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { status: "started" } }),
             );
@@ -1939,7 +1860,6 @@ function startProxyGateway({
                 promptOwner,
                 attachments,
                 inputProvenance,
-                pluginSelection,
               );
             }
             return; // do NOT forward
@@ -1967,13 +1887,27 @@ function startProxyGateway({
                 error: { code: "STEERING_UNAVAILABLE", message: "OpenClaw 当前连接不支持引导消息" } }));
               return;
             }
-            const message = String(frame.params?.message ?? "").trim();
+            let message = String(frame.params?.message ?? "").trim();
             if (!message || steeringRuns.size >= 128) {
               sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
                 error: { code: "INVALID_PARAMS", message: "引导消息无效或仍有未确认的引导请求" } }));
               return;
             }
             const operationId = randomUUID();
+            if (registry?.chatSecretRequest) {
+              try { message = (await registry.chatSecretRequest("prepare", { sessionKey: key, operationId, text: message })).text; }
+              catch (error) {
+                const code = Object.hasOwn(require("./chat-secret-contract").SECRET_MESSAGES, error?.code || "") ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
+                sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+                  error: { code, message: require("./chat-secret-contract").SECRET_MESSAGES[code], admissionAccepted: false } }));
+                return;
+              }
+              if (!currentUpstream() || upstreamDown || !upstreamReady) {
+                sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+                  error: { code: "STEERING_UNAVAILABLE", message: "连接已变化，引导消息尚未发送", admissionAccepted: false } }));
+                return;
+              }
+            }
             steeringRequests.set(frame.id, operationId);
             steeringRuns.set(operationId, key);
             const translated = { ...frame, method: "chat.send", params: {
@@ -2145,8 +2079,13 @@ function startProxyGateway({
                 if (typeof newKey !== "string" || !newKey) {
                   throw new Error("后端未返回有效的新会话 key");
                 }
+                // Native create publishes its durable child row before returning.
+                // Its mode may differ from the parent's derived display default.
+                const permissionMode = createBackend.getSessionRows?.()
+                  ?.find((row) => row.key === newKey)?.permissionMode;
                 sendToClient(
-                  JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { key: newKey } }),
+                  JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { key: newKey,
+                    ...(typeof permissionMode === "string" && permissionMode ? { permissionMode } : {}) } }),
                 );
               })
               .catch((err) =>
@@ -2251,38 +2190,14 @@ function startProxyGateway({
         if (frame.payload.state === "final" && (!frame.payload.message
           || (Array.isArray(frame.payload.message.content) && frame.payload.message.content.length === 0))) return;
       }
-      if (frame?.type === "res" && selectionControlRequests.has(frame.id)) {
-        const control = selectionControlRequests.get(frame.id);
-        selectionControlRequests.delete(frame.id);
+      if (frame?.type === "res" && hostControlRequests.has(frame.id)) {
+        const control = hostControlRequests.get(frame.id);
+        hostControlRequests.delete(frame.id);
         clearTimeout(control.timer);
         if (control.socket !== upstream || !frame.ok) {
-          control.reject(Object.assign(new Error("插件选择宿主协商失败"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+          control.reject(Object.assign(new Error("后台查询未获得明确结果"), { code: "UPSTREAM_NEEDS_VERIFICATION" }));
         } else control.resolve(frame.payload);
         return;
-      }
-      if (frame?.type === "res" && selectedUpstreamSends.has(frame.id)) {
-        const selected = selectedUpstreamSends.get(frame.id);
-        selectedUpstreamSends.delete(frame.id);
-        clearTimeout(selected.timer);
-        if (frame.ok) {
-          try {
-            if (selected.socket !== upstream || !["started", "accepted"].includes(frame.payload?.status)
-              || frame.payload.runId !== selected.selection?.operationId) throw new Error("invalid receipt");
-            const receipt = require("./openclaw-plugin-selection").validateOpenClawSelectionReceipt(
-              frame.payload.capabilitySelection, selected.selection);
-            sendToClient(raw);
-            sendToClient(JSON.stringify({ type: "event", event: "chat", payload: {
-              sessionKey: selected.selection.sessionKey, runId: selected.selection.operationId,
-              state: receipt.status === "needs-verification" ? "status" : "accepted",
-              ...(receipt.status === "needs-verification" ? { status: { kind: "needs_verification", text: "needs_verification" } } : {}),
-            } }));
-          } catch {
-            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false, error: {
-              code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "插件消息回执需要核实，请查询原操作，不能自动重发",
-            } }));
-          }
-          return;
-        }
       }
       let replayPromptsAfterSend = false;
       if (frame && frame.type === "res" && connectReqIds.has(frame.id)) {
@@ -2395,15 +2310,13 @@ function startProxyGateway({
       cleaned = true;
       clients.delete(client);
       stopClientWatchers();
-      for (const control of selectionControlRequests.values()) {
+      for (const control of hostControlRequests.values()) {
         clearTimeout(control.timer);
-        control.reject(Object.assign(new Error("插件协商连接已关闭"), { code: "PLUGIN_SELECTION_UNAVAILABLE" }));
+        control.reject(Object.assign(new Error("后台查询连接已关闭"), { code: "UPSTREAM_NEEDS_VERIFICATION" }));
       }
-      selectionControlRequests.clear();
+      hostControlRequests.clear();
       steeringRequests.clear();
       steeringRuns.clear();
-      for (const selected of selectedUpstreamSends.values()) clearTimeout(selected.timer);
-      selectedUpstreamSends.clear();
       sentUpstreamRequests.clear();
       backlog.length = 0;
       connectionRetirements.delete(retireUpstream);

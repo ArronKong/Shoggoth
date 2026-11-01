@@ -1,4 +1,7 @@
 "use strict";
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
+
+const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -19,7 +22,7 @@ const { unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { DEFAULT_MCP_TOOL_TIMEOUT_MS } = require("./interactive-timeouts");
 const {
   OPENCODE_RUNTIME, normalizeOpenCodePermissionPolicy, normalizeOpenCodeWorkspace,
-  openCodeWorkspaceShardId, parseOpenCodeVersion, supportsOpenCodeVersion,
+  openCodeWorkspaceShardId, parseOpenCodeVersion,
 } = require("./opencode-runtime-paths");
 
 const error = (code, message) => serviceError(code, message);
@@ -43,7 +46,7 @@ const copiedMessageContent = messages => JSON.stringify(messages.map(message => 
 const LOGIN_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const LOGIN_PROMPT_KEY = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
 const LOGIN_PROVIDER_LIMIT = 600;
-const LOGIN_CALLBACK_TIMEOUT_MS = 15 * 60_000;
+const LOGIN_CALLBACK_TIMEOUT_MS = 60 * 60_000;
 
 function loginProvider(value) {
   if (typeof value !== "string" || !LOGIN_PROVIDER_ID.test(value)) {
@@ -129,6 +132,8 @@ function openCodeRateLimited(value) {
 }
 
 function openCodeFailureCode(nativeError) {
+  if ([nativeError?.data?.message, nativeError?.message]
+    .some(value => value === "SECRET_MODEL_PROJECTION_UNAVAILABLE")) return "SECRET_MODEL_PROJECTION_UNAVAILABLE";
   if (classifyProviderLimit(nativeError?.data?.responseBody, nativeError?.data?.message,
     nativeError?.message) === "RUNTIME_QUOTA_EXHAUSTED") return "RUNTIME_QUOTA_EXHAUSTED";
   if (openCodeRateLimited(nativeError)) return "RUNTIME_RATE_LIMITED";
@@ -140,6 +145,12 @@ function openCodeFailureCode(nativeError) {
     return "RUNTIME_ATTACHMENT_UNSUPPORTED";
   }
   return "OPENCODE_TURN_FAILED";
+}
+
+function openCodeFailureDetail(error, secrets) {
+  const statusCode = error?.data?.statusCode ?? error?.statusCode;
+  return runtimeFailureDetail({ message: error?.data?.responseBody, statusCode }, secrets)
+    || runtimeFailureDetail({ message: error?.data?.message ?? error?.message, statusCode }, secrets);
 }
 
 function openCodeRetryLimit(status, now, deadline) {
@@ -225,6 +236,11 @@ function commandEnvironment(parentEnv, runtimeEnvironment, privateConfig, passwo
       environment: Object.fromEntries(gate.env.map(entry => [entry.name, entry.value])),
     } } } : {}),
   });
+  // Local projection and MCP requests must not pass through the user's proxy.
+  const bypass = new Set([env.NO_PROXY, env.no_proxy].filter(Boolean)
+    .flatMap(value => value.split(",").map(host => host.trim()).filter(Boolean)));
+  for (const host of ["localhost", "127.0.0.1", "::1"]) bypass.add(host);
+  env.NO_PROXY = env.no_proxy = [...bypass].join(",");
   return env;
 }
 
@@ -334,19 +350,32 @@ class OpenCodeRuntimeHost {
     this.permissionPolicy = normalizeOpenCodePermissionPolicy(options.permissionPolicy);
     this.workspaceExecutionVersion = options.workspaceExecutionVersion === 1 ? 1 : null;
     this.controlInstance = options.controlInstance === true;
+    this.modelOnlyInstance = options.modelOnlyInstance === true;
+    this.modelInstructions = options.modelInstructions ?? "";
+    if (!safe(this.modelInstructions, 1024 * 1024, true)) {
+      throw error("OPENCODE_HOST_OPTIONS_INVALID", "OpenCode model instructions are invalid");
+    }
     this.workspace = this.controlInstance ? null : normalizeOpenCodeWorkspace(options.workspace);
     this.mcpExecutionRunId = options.mcpExecutionRunId ?? null;
     this.mcpGateIssuer = options.mcpGateIssuer || null;
+    this.secretGateway = options.secretGateway || null;
+    this.modelSecretScopes = new Map();
+    this.modelSecretRoute = null;
+    this.modelProjectionPluginPath = options.modelProjectionPluginPath
+      || path.resolve(__dirname, "../../resources/opencode/shoggoth-secret-projection.mjs");
     this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.parentEnv = options.parentEnv || process.env;
     this.fs = options.fs || fs;
     this.spawnProcess = options.spawnProcess || spawn;
     this.now = options.now || Date.now;
+    this.promptTimeoutMs = executionTimeoutMs(options.promptTimeoutMs);
+    if (!isExecutionTimeoutMs(this.promptTimeoutMs)) throw error("OPENCODE_OPTIONS_INVALID", "Prompt timeout is invalid");
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.listeners = new Set();
     this.serverRequestHandlers = new Map();
     this.activeTurns = new Map();
     this.compactions = new Set();
+    this.modelWorkers = new Set();
     this.sessionConfigs = new Map();
     this.state = "new";
     this.child = null;
@@ -365,17 +394,22 @@ class OpenCodeRuntimeHost {
     if (this.state !== "new") throw error("OPENCODE_HOST_STATE_INVALID", "OpenCode host state is invalid");
     this.state = "initializing";
     try {
-      const version = await this.#controlVersion();
-      if (!supportsOpenCodeVersion(parseOpenCodeVersion(version))) {
-        throw error("OPENCODE_VERSION_UNSUPPORTED", "OpenCode 1.18.32 or newer is required");
+      // Protocol checks below remain mandatory. Model-body interception also
+      // depends on the verified plugin/fetch contract of this exact release.
+      const versionText = await this.#controlVersion();
+      this.cliVersion = parseOpenCodeVersion(versionText);
+      if (this.state !== "initializing") throw error("MODEL_ONLY_CANCELED", "OpenCode initialization canceled");
+      if (this.secretGateway && versionText.trim() !== "1.19.3") {
+        throw error("SECRET_MODEL_RUNTIME_UNSUPPORTED", "This OpenCode version has no verified private-input protection");
       }
       const shard = openCodeWorkspaceShardId({ controlInstance: this.controlInstance, workspace: this.workspace });
-      this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new OpenCodeRuntimeLedger({
+      if (!this.modelOnlyInstance) this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new OpenCodeRuntimeLedger({
         fs: this.fs, runtimeProfileId: this.runtimeProfileId, runtimeAccountId: this.runtimeAccountId,
         workspaceShardId: shard, stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", "opencode"),
         trustedRoot: this.paths.trustedRoot,
       }).open());
       await this.#startServer(shard);
+      if (this.state !== "initializing") throw error("MODEL_ONLY_CANCELED", "OpenCode initialization canceled");
       this.state = "ready";
       return this;
     } catch (cause) {
@@ -386,7 +420,8 @@ class OpenCodeRuntimeHost {
 
   beginAcquire() { this.#assertReady(); }
   canRetireIdle() {
-    return this.state === "ready" && this.activeTurns.size === 0 && this.compactions.size === 0 && this.childClosed === false;
+    return this.state === "ready" && this.activeTurns.size === 0 && this.compactions.size === 0
+      && this.modelWorkers.size === 0 && this.childClosed === false;
   }
   subscribe(listener) {
     if (typeof listener !== "function") throw error("RUNTIME_EVENT_LISTENER_INVALID", "OpenCode listener is invalid");
@@ -458,6 +493,11 @@ class OpenCodeRuntimeHost {
     }
     const configured = provider.connected.length > 0;
     return { authenticated: configured, credentialPresent: configured };
+  }
+
+  async generateModelOnly(input) {
+    this.#assertReady();
+    return require("./opencode-model-only").generateOpenCodeModelOnly(this, input);
   }
 
   async modelsList(input = {}) {
@@ -790,7 +830,8 @@ class OpenCodeRuntimeHost {
       return Promise.reject(error("RUNTIME_COMMAND_PARAMS_INVALID", "OpenCode command catalog input is invalid"));
     }
     if (input.sessionId) this.#requireSession(input.sessionId);
-    return Promise.resolve({ supported: true, reason: null, commands: OPENCODE_COMMANDS });
+    return Promise.resolve({ supported: true, reason: null,
+      commands: this.protocolFeatures?.nativeCompact === false ? [] : OPENCODE_COMMANDS });
   }
 
   // `/compact` runs OpenCode's own session summarize outside any turn. The
@@ -798,6 +839,9 @@ class OpenCodeRuntimeHost {
   // completion fact the coordinator waits for.
   async commandExecute(input) {
     this.#assertExecution();
+    if (this.protocolFeatures?.nativeCompact === false) {
+      throw error("RUNTIME_CAPABILITY_UNSUPPORTED", "OpenCode native compaction is unavailable");
+    }
     if (!input || typeof input !== "object" || (input.sessionId !== null && !safe(input.sessionId))
       || !safe(input.text, 64 * 1024)) {
       throw error("RUNTIME_COMMAND_PARAMS_INVALID", "OpenCode command input is invalid");
@@ -823,7 +867,7 @@ class OpenCodeRuntimeHost {
       }
       if (!model) throw error("RUNTIME_MODEL_UNAVAILABLE", "OpenCode compaction requires a model");
       const response = await this.client.request("POST", this.#sessionRoute(session.id, "/summarize"),
-        { providerID: model.providerID, modelID: model.id }, { timeoutMs: 10 * 60_000 });
+        { providerID: model.providerID, modelID: model.id }, { timeoutMs: 45 * 60_000 });
       if (response.data !== true) throw error("RUNTIME_PROTOCOL_INVALID", "OpenCode summarize response is invalid");
       this.#publish({ known: true, method: "opencode/session.summarize", type: "context_compacted",
         sessionId: session.id, turnId: null,
@@ -946,7 +990,7 @@ class OpenCodeRuntimeHost {
     active.textSeen = new Map();
     active.reasoningSeen = new Map();
     active.toolSeen = new Map();
-    const deadline = this.now() + 30 * 60_000;
+    const deadline = this.promptTimeoutMs === null ? Infinity : this.now() + this.promptTimeoutMs;
     while (!active.done && this.state === "ready") {
       const messages = await this.#messages(active.sessionId, active.messageId);
       this.#projectMessageParts(active, messages);
@@ -1173,7 +1217,8 @@ class OpenCodeRuntimeHost {
       responseId: last.info.id, provider: last.info.providerID, model: last.info.modelID,
       usage, ...(typeof last.info.cost === "number" ? { costUsd: last.info.cost } : {}) });
     this.#publish({ known: true, method: "opencode/session.message", type: "complete",
-      sessionId: active.sessionId, turnId: active.turnId, status });
+      sessionId: active.sessionId, turnId: active.turnId, status,
+      ...(status === "failed" ? { failure: openCodeFailureDetail(last.info.error, this.registeredSecrets) } : {}) });
   }
 
   async #reconcileSession(sessionId) {
@@ -1288,7 +1333,8 @@ class OpenCodeRuntimeHost {
       responseId: last.info.id, provider: last.info.providerID, model: last.info.modelID,
       usage, ...(typeof last.info.cost === "number" ? { costUsd: last.info.cost } : {}) });
     this.#publish({ known: true, method: "opencode/session.message", type: "complete",
-      sessionId: active.sessionId, turnId: active.turnId, status, ...(errorCode ? { errorCode } : {}) });
+      sessionId: active.sessionId, turnId: active.turnId, status, ...(errorCode ? { errorCode,
+        failure: openCodeFailureDetail(nativeError, this.registeredSecrets) } : {}) });
     return true;
   }
 
@@ -1340,6 +1386,8 @@ class OpenCodeRuntimeHost {
     this.stopPromise = (async () => {
       if (this.state === "stopped") return;
       this.state = "stopping";
+      this.modelSecretRoute?.close(); this.modelSecretScopes.clear();
+      const modelStops = await Promise.allSettled([...this.modelWorkers].map(worker => worker.stop()));
       for (const active of this.activeTurns.values()) { active.abort.abort(); this.#failActive(active,
         error("RUNTIME_HOST_TERMINATED", "OpenCode host stopped")); }
       if (this.reservationId) try { this.mcpGateIssuer.revokeMcpServer({ reservationId: this.reservationId }); } catch {}
@@ -1355,6 +1403,10 @@ class OpenCodeRuntimeHost {
       this.#releaseLiveTurns();
       this.state = "stopped";
       if (!this.child) this.resolveTerminated();
+      if (this.modelOnlyInstance && this.privateConfig) this.fs.rmSync(this.privateConfig, { recursive: true, force: true });
+      if (modelStops.some(result => result.status === "rejected")) {
+        throw error("RUNTIME_STOP_UNCONFIRMED", "OpenCode model worker did not terminate");
+      }
     })();
     return this.stopPromise;
   }
@@ -1378,17 +1430,19 @@ class OpenCodeRuntimeHost {
   }
 
   async #startServer(shard) {
-    const privateConfig = path.join(this.paths.stateDir, "runtime-integration", "opencode",
-      this.runtimeAccountId, this.runtimeProfileId, shard);
+    const privateConfig = this.privateConfig = path.join(this.paths.stateDir, "runtime-integration", "opencode",
+      this.runtimeAccountId, this.runtimeProfileId, this.modelOnlyInstance ? `model-only-${crypto.randomUUID()}` : shard);
     ensurePrivateDirectoryTree(privateConfig, this.paths.trustedRoot);
     for (const name of ["cache", "state"]) {
       ensurePrivateDirectoryTree(path.join(privateConfig, name), this.paths.trustedRoot);
     }
+    const protectedModel = this.secretGateway && (!this.controlInstance || this.modelOnlyInstance);
+    const protectionPlugin = protectedModel ? require("node:url").pathToFileURL(this.modelProjectionPluginPath).href : null;
     preparePrivateOpenCodeConfig(this.fs, this.runtimeEnvironment.configSourceHome,
-      privateConfig, this.paths.trustedRoot, this.workspaceExecutionVersion);
+      privateConfig, this.paths.trustedRoot, this.modelOnlyInstance || protectedModel ? 1 : this.workspaceExecutionVersion);
     const password = crypto.randomBytes(32).toString("hex");
     let gate = null;
-    if (!this.controlInstance && this.mcpGateIssuer) {
+    if (!this.controlInstance && !this.modelOnlyInstance && this.mcpGateIssuer) {
       gate = this.mcpGateIssuer.reserveMcpServer({ runtimeProfileId: this.runtimeProfileId,
         runtimeAccountId: this.runtimeAccountId, executionRunId: this.mcpExecutionRunId,
         parentExecutable: this.runtimeEnvironment.binaryPath,
@@ -1397,13 +1451,44 @@ class OpenCodeRuntimeHost {
     }
     const env = commandEnvironment(this.parentEnv, this.runtimeEnvironment, privateConfig, password,
       this.permissionPolicy, gate, this.workspaceExecutionVersion);
+    if (this.modelOnlyInstance) {
+      require("./opencode-model-only").isolateOpenCodeModelEnvironment(env, privateConfig);
+      ensurePrivateDirectoryTree(env.HOME, this.paths.trustedRoot);
+    }
+    if (protectedModel) {
+      // --pure suppresses even the explicitly installed protection hook.
+      // Preserve its external-plugin isolation with an empty process Home,
+      // private model-only config and disabled project/skill discovery. The
+      // native account's XDG data (auth and sessions) stays at its original path.
+      const runtimeHome = path.join(privateConfig, "home");
+      ensurePrivateDirectoryTree(runtimeHome, this.paths.trustedRoot);
+      env.HOME = runtimeHome;
+      env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+      env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+      env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
+      env.OPENCODE_DISABLE_LSP_DOWNLOAD = "1";
+      // This local JavaScript plugin has no package imports. OpenCode starts a
+      // background SDK install even for such plugins; keep that unrelated
+      // discovery offline so readiness never depends on npm availability.
+      env.npm_config_offline = "true";
+      env.npm_config_cache = path.join(privateConfig, "cache", "npm");
+      this.modelSecretRoute?.close();
+      this.modelSecretRoute = await this.secretGateway.bindLocalSessions({
+        resolveScope: id => this.modelSecretScopes.get(id),
+        assertCurrent: () => { if (["stopping", "stopped"].includes(this.state)) throw error("SECRET_MODEL_CANCELED", "Model worker stopped"); },
+      });
+      env.SHOGGOTH_OPENCODE_SECRET_PROJECTION = this.modelSecretRoute.baseUrl;
+      const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+      config.plugin = [protectionPlugin];
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
+    }
     this.registeredSecrets = validateRegisteredSecrets([password,
       ...(gate?.env || []).filter(entry => /(?:authorization|credential|nonce|password|secret|token|api[_-]?key)/iu
         .test(entry.name) && typeof entry.value === "string" && Buffer.byteLength(entry.value, "utf8") >= 4)
         .map(entry => entry.value)]);
-    const cwd = this.workspace || this.runtimeEnvironment.spawnEnv.HOME;
+    const cwd = this.modelOnlyInstance ? env.HOME : this.workspace || this.runtimeEnvironment.spawnEnv.HOME;
     const child = this.spawnProcess(this.runtimeEnvironment.binaryPath,
-      ["serve", "--hostname", "127.0.0.1", "--port", "0", "--pure"],
+      ["serve", "--hostname", "127.0.0.1", "--port", "0", ...(protectedModel ? [] : ["--pure"])],
       { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     this.child = child;
     let spawnError = null;
@@ -1416,6 +1501,7 @@ class OpenCodeRuntimeHost {
     child.stderr.on("data", () => {});
     child.once("close", () => {
       this.childClosed = true;
+      this.modelSecretRoute?.close(); this.modelSecretScopes.clear();
       this.resolveTerminated();
       if (this.state === "ready") {
         this.state = "stopped";
@@ -1449,6 +1535,11 @@ class OpenCodeRuntimeHost {
           throw error("OPENCODE_PROTOCOL_UNSUPPORTED", "OpenCode V1 session protocol is unavailable");
         }
         const configuration = (await client.request("GET", "/config")).data;
+        if (this.modelOnlyInstance) require("./opencode-model-only").assertOpenCodeModelConfiguration(configuration, protectionPlugin);
+        if (protectedModel && JSON.stringify(configuration?.plugin)
+          !== JSON.stringify([protectionPlugin])) {
+          throw error("SECRET_MODEL_RUNTIME_UNSUPPORTED", "OpenCode loaded an unexpected protection plugin configuration");
+        }
         if (configuration?.permission?.["*"] !== (this.workspaceExecutionVersion === 1
           || this.permissionPolicy.approvalPolicy === "never" ? "deny" : "ask")
           || (this.workspaceExecutionVersion === 1 && configuration.permission["shoggoth_*"] !== "ask")) {
@@ -1458,6 +1549,10 @@ class OpenCodeRuntimeHost {
           throw error("WORKSPACE_RUNTIME_GUARD_UNSAFE", "OpenCode loaded an unmanaged native MCP server");
         }
         this.answersShoggothToolPrompts = answersShoggothToolPrompts(configuration);
+        const summarize = doc.data.paths["/session/{sessionID}/summarize"]?.post;
+        this.protocolFeatures = Object.freeze({ nativeCompact: !!summarize
+          && typeof summarize === "object" && !Array.isArray(summarize) });
+        this.effectivePermissionsVerified = true;
         this.client = client;
         return;
       }
@@ -1468,4 +1563,4 @@ class OpenCodeRuntimeHost {
 }
 
 module.exports = { OpenCodeRuntimeHost, answersShoggothToolPrompts, commandEnvironment, modelRef,
-  usageFromTokens, preparePrivateOpenCodeConfig, nativePermissionRules, modelConnectionConfig };
+  usageFromTokens, preparePrivateOpenCodeConfig, nativePermissionRules, modelConnectionConfig, openCodeFailureCode };

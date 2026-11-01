@@ -36,30 +36,40 @@ const { resolveServicePaths } = require(path.join(
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
-test("异步及旧同步联邦报告在 MCP 和 Host 均以 30 分钟为上限", () => {
+test("联邦任务默认无总时限，MCP 和 Host 兼容显式有限预算", () => {
   const { validateFederationParams } = require("../app/federation-host-protocol");
-  const args = { backendId: "hermes", agentId: "bull", prompt: "report", timeoutMs: 600_000 };
-  for (const timeoutMs of [5000, 600_000, 1_800_000]) {
+  const { MAX_EXECUTION_TIMEOUT_MS } = require("../app/execution-timeout");
+  const args = { backendId: "hermes", agentId: "bull", prompt: "report" };
+  assert.equal(validateMcpProductToolArguments("federation_agent_run", args), true);
+  assert.equal(validateMcpProductToolArguments("external_agent_run", args), true);
+  assert.equal(validateMcpProductToolArguments("federation_agent_message", { handle: "fixture", message: "report" }), true);
+  for (const timeoutMs of [0, 5000, 600_000, 1_800_000, 1_800_001, MAX_EXECUTION_TIMEOUT_MS]) {
     assert.equal(validateMcpProductToolArguments("federation_agent_run", { ...args, timeoutMs }), true);
     assert.equal(validateMcpProductToolArguments("external_agent_run", { ...args, timeoutMs }), true);
     assert.equal(validateMcpProductToolArguments("federation_agent_message", { handle: "fixture", message: "report", timeoutMs }), true);
     assert.equal(validateFederationParams("federation.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), true);
     assert.equal(validateFederationParams("agent.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), true);
   }
-  for (const timeoutMs of [4999, 1_800_001, Infinity]) {
+  for (const timeoutMs of [-1, 1, 4999, 5000.5, MAX_EXECUTION_TIMEOUT_MS + 1, Infinity, NaN, null, "5000"]) {
     assert.equal(validateMcpProductToolArguments("federation_agent_run", { ...args, timeoutMs }), false);
     assert.equal(validateMcpProductToolArguments("external_agent_run", { ...args, timeoutMs }), false);
+    assert.equal(validateMcpProductToolArguments("federation_agent_message", { handle: "fixture", message: "report", timeoutMs }), false);
     assert.equal(validateFederationParams("federation.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), false);
     assert.equal(validateFederationParams("agent.run", { ...args, timeoutMs, operationId: `mcp-v1-${"a".repeat(48)}` }), false);
   }
   for (const tool of ["federation_agent_run", "federation_agent_message"]) {
-    assert.equal(MCP_PRODUCT_TOOL_DEFINITIONS.find(definition => definition.name === tool).inputSchema.properties.timeoutMs.maximum, 1_800_000);
+    const schema = MCP_PRODUCT_TOOL_DEFINITIONS.find(definition => definition.name === tool).inputSchema;
+    assert.equal(schema.properties.timeoutMs.minimum, 0);
+    assert.equal(schema.properties.timeoutMs.maximum, MAX_EXECUTION_TIMEOUT_MS);
+    assert.equal(schema.required.includes("timeoutMs"), false);
   }
   // The federation workflow travels with the tool the model uses to dispatch.
   const instructions = MCP_PRODUCT_TOOL_DEFINITIONS.find(definition => definition.name === "federation_agent_run").description;
   assert.match(instructions, /Never infer missing output/);
   assert.match(instructions, /Native tasks follow their Runtime's execution policy/);
-  assert.match(instructions, /use 1800000ms unless the user specifies a shorter limit/);
+  assert.match(instructions, /Omit timeoutMs or use 0 for no total time limit/);
+  assert.match(instructions, /positive deadline of at least 5000ms only when requested/);
+  assert.match(instructions, /handle to observe or cancel/);
 });
 
 const PROFILE_ID = "11111111-1111-4111-8111-111111111111";
@@ -485,7 +495,8 @@ test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定�
     assert.equal(f.mcpCalls.size, 0, "refused external access must not create native durable writes");
     assert.equal(f.calls.length, beforeCalls);
     const projection = await f.controller.handle("app_capabilities", {}, trusted);
-    assert.equal(projection.capabilities.length, 93);
+    assert.equal(projection.capabilities.length, 105);
+    for (const tool of ["mcp_server_add", "mcp_server_import"]) assert.ok(projection.capabilities.some(item => item.tool === tool));
     for (const name of ["group_task", "group_collaborate"]) {
       assert.equal(projection.capabilities.some((item) => item.tool === name), false);
     }
@@ -566,19 +577,22 @@ test("外部管理的未知结果冻结在原调用回执，后续同 callId 不
   assert.equal(writes, 1); assert.equal(f.controller.poisonError, null);
 });
 
-test("固定 152 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 152);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 152);
+test("固定 162 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 162);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 162);
   for (const name of ["group_task", "group_collaborate"]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name), false);
   for (const required of [
     "workspace_execute",
+    "apple_calendar_list", "apple_calendar_events", "apple_calendar_get", "apple_calendar_create", "apple_calendar_update", "apple_calendar_delete",
+    "apple_reminders_lists", "apple_reminders_search", "apple_reminders_get", "apple_reminders_create", "apple_reminders_update", "apple_reminders_delete",
     "app_capabilities", "app_help_search", "app_help_get", "app_state_get", "app_manage", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
     "cron_create", "cron_delete", "backend_status", "external_cron_list", "web_search", "web_fetch", "web_settings_get", "web_settings_set", "web_defaults_set",
     "heartbeat_settings_get", "heartbeat_settings_set",
     "federation_agent_list", "federation_agent_get", "federation_agent_run",
     "federation_agent_message", "federation_task_get", "federation_task_cancel",
-    "skill_catalog", "skill_read", "skill_file_read", "skill_learn", "plugin_resource_read", "skill_install_global",
-    "plugin_create", "plugin_install", "plugin_status", "plugin_setup_get", "plugin_secret_request", "plugin_activate",
+    "skill_catalog", "skill_read", "skill_file_read", "skill_learn", "skill_install_global",
+    "mcp_server_registry_search", "mcp_server_request_connection", "mcp_server_request_secret",
+    "mcp_server_add", "mcp_server_import",
     "mcp_server_list", "mcp_server_register", "mcp_server_tools", "mcp_server_call", "mcp_server_remove",
     "system_application_search", "system_application_launch",
     "system_open_url", "finder_open_folder", "computer_status", "computer_session_open", "computer_snapshot",
@@ -628,12 +642,23 @@ test("固定 152 个模型可见产品工具及 strict object schemas，不暴�
     "backend_status", "uiTarget.href", "App-internal", "absolute http(s)", "UI-only", "skill_catalog", "skill_read",
     "current WorkRun workspace", "~/Downloads", "absolute path of every deliverable",
     "finder_open_folder", "macOS open command", ".app/Contents/MacOS",
-    "Computer Use", "user takeover", "secure fields", "federation_agent_list",
+    "Computer Use", "user takeover", "federation_agent_list",
     "owner-bound handle"]) {
     assert.equal(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes(phrase), true, phrase);
   }
   assert.equal(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes("Managed Browser"), false);
   assert.equal(SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS.includes("browser_session_open"), true);
+});
+
+test("Computer Use shared and tool instructions agree on mediated secure input", () => {
+  for (const instructions of [SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS,
+    productToolDescription("computer_session_open"), productToolDescription("computer_type")]) {
+    assert.match(instructions,
+      /secure fields accept only locally mediated credential references through computer_type, never ordinary plaintext/i);
+    assert.doesNotMatch(instructions, /never automate secure fields|only non-secure|one non-secure fresh element/i);
+  }
+  assert.match(productToolDescription("computer_session_open"), /fresh computer_snapshot before every input action/);
+  assert.match(productToolDescription("computer_session_open"), /stop when the session pauses for user takeover/);
 });
 
 test("外层 Permission Engine 不接受只有 Codex approval、缺少本次确认凭据的破坏操作", async () => {
@@ -789,7 +814,7 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 139);
+  assert.equal(capabilities.capabilities.length, 149);
   for (const name of ["group_task", "group_collaborate"]) {
     assert.equal(capabilities.capabilities.some((item) => item.tool === name), false);
   }
@@ -896,9 +921,7 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
     {
       availableTools: calls.find(([kind]) => kind === "catalog")[2].availableTools,
       allowedTools: calls.find(([kind]) => kind === "catalog")[2].allowedTools,
-      allowPluginSkills: true,
       runtimeCapabilities: ["mcp", "filesystem", "shell"],
-      pluginToolProjection: [],
     },
   ]);
   const first = await fixture.controller.handle("skill_read", {
@@ -916,13 +939,13 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
 test("skill_file_read 只读已启用 Skill 的冻结附属文本，按 UTF-8 页与身份范围拒绝旧请求", async () => {
   let enabled = false;
   const calls = [];
-  const skill = { id: "plugin-support", name: "plugin-support", version: "1.0.0",
-    description: "Support file fixture", source: "plugin", contentHash: "a".repeat(64),
+  const skill = { id: "independent-support", name: "independent-support", version: "1.0.0",
+    description: "Support file fixture", source: "user", contentHash: "a".repeat(64),
     requiredTools: [], requiredRuntimeCapabilities: [] };
   const fixture = makeFixture({ skillStore: {
-    catalog(_profileId, options) {
+    catalog(profileId) {
       return { registryRevision: "b".repeat(64), profileRevision: 1,
-        items: enabled && options.allowPluginSkills ? [skill] : [], ineligible: [] };
+        items: enabled && profileId === PROFILE_ID ? [skill] : [], ineligible: [] };
     },
     read() { throw new Error("Not exercised by file read test"); },
     readFile(input) {
@@ -958,63 +981,30 @@ test("skill_file_read 只读已启用 Skill 的冻结附属文本，按 UTF-8 �
     }, authorityFor("4")), "MCP_TOOL_INVALID_ARGUMENTS");
   }
   await expectCode(() => fixture.controller.handle("skill_file_read", input,
-    { ...authorityFor("5"), federationClient: "openclaw" }), "MCP_TOOL_NOT_FOUND");
+    { ...authorityFor("5"), profileId: OTHER_PROFILE_ID }), "MCP_TOOL_NOT_FOUND");
   enabled = false;
   await expectCode(() => fixture.controller.handle("skill_file_read", input,
     authorityFor("6")), "MCP_TOOL_NOT_FOUND");
   assert.equal(calls.length, 2, "rejected file reads must not reach Skill storage");
 });
 
-test("plugin_resource_read 只读合格插件 Skill 的同包共享文本，拒绝联邦身份与旧版本", async () => {
-  let enabled = false;
-  const calls = [];
-  const skill = { id: "plugin-resource", name: "plugin-resource", version: "1.0.0",
-    description: "Installed plugin resource", source: "plugin", contentHash: "a".repeat(64),
-    requiredTools: [], requiredRuntimeCapabilities: [] };
-  const fixture = makeFixture({ skillStore: {
-    catalog(_profileId, options) {
-      return { registryRevision: "b".repeat(64), profileRevision: 1,
-        items: enabled && options.allowPluginSkills ? [skill] : [], ineligible: [] };
-    },
-    read() { throw new Error("Not exercised by package resource read test"); },
-    readResource(input) {
-      calls.push(structuredClone(input));
-      return { ...skill, relativePath: input.relativePath,
-        fileHash: "c".repeat(64), content: "共😀享" };
-    },
-  } });
-  const input = { name: skill.name, contentHash: skill.contentHash,
-    relativePath: "shared/workflow.md", cursor: 0, maxBytes: 7 };
-  await expectCode(() => fixture.controller.handle("plugin_resource_read", input,
-    authorityFor("0")), "MCP_TOOL_NOT_FOUND");
-  enabled = true;
-  const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.currentAgent.tools.find(item => item.tool === "plugin_resource_read").availability,
-    "available", "resource availability must use the storage facade's actual readResource method");
-  const first = await fixture.controller.handle("plugin_resource_read", input, authorityFor("1"));
-  assert.equal(first.content, "共😀");
-  assert.equal(first.nextCursor, 2);
-  assert.equal(first.relativePath, "shared/workflow.md");
-  assert.equal(first.fileHash, "c".repeat(64));
-  await expectCode(() => fixture.controller.handle("plugin_resource_read", {
-    ...input, contentHash: "d".repeat(64),
-  }, authorityFor("2")), "MCP_TOOL_NOT_FOUND");
-  await expectCode(() => fixture.controller.handle("plugin_resource_read", {
-    ...input, relativePath: "../shared/workflow.md",
-  }, authorityFor("3")), "MCP_TOOL_INVALID_ARGUMENTS");
-  await expectCode(() => fixture.controller.handle("plugin_resource_read", input,
-    { ...authorityFor("4"), federationClient: "openclaw" }), "MCP_TOOL_NOT_FOUND");
-  enabled = false;
-  await expectCode(() => fixture.controller.handle("plugin_resource_read", input,
-    authorityFor("5")), "MCP_TOOL_NOT_FOUND");
-  assert.equal(calls.length, 1);
+test("plugin_resource_read 已退役；原生和联邦调用均不能触发旧包读取", async () => {
+  const calls=[];
+  const fixture=makeFixture({skillStore:{catalog(){calls.push("catalog");return {items:[],ineligible:[]};},read(){calls.push("read");},readResource(){calls.push("resource");}}});
+  const input={name:"retired-plugin",contentHash:"a".repeat(64),relativePath:"shared/workflow.md",cursor:0,maxBytes:7};
+  for(const federationClient of [undefined,"openclaw","hermes"]){
+    await expectCode(()=>fixture.controller.handle("plugin_resource_read",input,{...authorityFor("1"),...(federationClient?{federationClient}:{})}),"PLUGIN_PLATFORM_RETIRED");
+  }
+  const capabilities=await fixture.controller.handle("app_capabilities",{},authorityFor("a"));
+  assert.equal(capabilities.currentAgent.tools.some(item=>item.tool==="plugin_resource_read"),false);
+  assert.deepEqual(calls,[]);
 });
 
 test("大型 Skill 目录按查询返回末尾匹配项，默认五条且不暴露未安装项", async () => {
   const items = Array.from({ length: 5_000 }, (_, index) => ({
     id: `installed-${index}`, name: `installed-skill-${index}`,
     version: "1", description: index === 4_999 ? "rare telescope calibration" : "generic task",
-    source: "plugin", contentHash: "a".repeat(64), requiredTools: [],
+    source: "user", contentHash: "a".repeat(64), requiredTools: [],
     requiredRuntimeCapabilities: [],
   }));
   const fixture = makeFixture({ skillStore: {
@@ -1040,38 +1030,26 @@ test("大型 Skill 目录按查询返回末尾匹配项，默认五条且不暴�
   }, authorityFor("4")), "MCP_TOOL_INVALID_ARGUMENTS");
 });
 
-test("联邦 Skill 目录不继承默认原生 Profile 的插件绑定", async () => {
-  const calls = [];
-  const fixture = makeFixture({
-    skillStore: {
-      catalog(_profileId, options) {
-        calls.push(options.allowPluginSkills);
-        return { registryRevision: "b".repeat(64), profileRevision: 1,
-          items: options.allowPluginSkills ? [{
-            id: "plugin-fixture", name: "plugin-fixture", version: "1",
-            description: "Plugin fixture", source: "plugin", contentHash: "a".repeat(64),
-            requiredTools: [], requiredRuntimeCapabilities: [],
-          }] : [], ineligible: [] };
-      },
-      read() { throw new Error("Federation client must not read plugin Skill"); },
-    },
-  });
-  const external = authority({ federationClient: "openclaw" });
-  const catalog = await fixture.controller.handle("skill_catalog", { cursor: 0, limit: 10 }, external);
-  assert.deepEqual(catalog.items, []);
-  assert.deepEqual(calls, [false]);
+test("联邦 Skill 目录不再请求已退役的插件绑定或工具投影", async () => {
+  const calls=[];
+  const fixture=makeFixture({skillStore:{
+    catalog(profileId,options){calls.push({profileId,options});return {registryRevision:"b".repeat(64),profileRevision:1,items:[],ineligible:[]};},
+    read(){throw new Error("No independent Skill selected");}
+  }});
+  const catalog=await fixture.controller.handle("skill_catalog",{cursor:0,limit:10},authority({federationClient:"openclaw"}));
+  assert.deepEqual(catalog.items,[]);assert.equal(calls.length,1);
+  assert.equal(Object.hasOwn(calls[0].options,"allowPluginSkills"),false);
+  assert.equal(Object.hasOwn(calls[0].options,"pluginToolProjection"),false);
 });
 
-test("产品安装入口经真实 PluginSkillFacade 安装通用包，并返回可用于下一次安装的 registryVersion", async () => {
+test("产品安装入口经独立 NativeSkillStore 安装通用包，并返回可用于下一次安装的 registryVersion", async () => {
   const { NativeSkillStore } = require("../app/agent-service/native-skill-store");
-  const { PluginSkillFacade } = require("../app/agent-service/plugin-skill-facade");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-portable-product-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), trustedRoot: root });
   const native = new NativeSkillStore({ paths });
   try {
     native.open([PROFILE_ID, OTHER_PROFILE_ID]);
-    const skillStore = new PluginSkillFacade({ nativeStore: native,
-      resolver: { listEnabledSkillDescriptors: () => [], inspectSkill() {}, inspectSkillFile() {} } });
+    const skillStore = native;
     assert.equal(typeof skillStore.installGlobalFromDirectory, "function");
     const fixture = makeFixture({ skillStore });
     for (const [index, name] of ["portable-first", "portable-second"].entries()) {
@@ -1157,9 +1135,8 @@ test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 A
 
   const external = authorityFor("6");
   external.federationClient = "openclaw";
-  assert.deepEqual(await fixture.controller.handle("mcp_server_list", {}, external), {
-    revision: 1, servers: [],
-  });
+  await expectCode(() => fixture.controller.handle("mcp_server_list", {}, external), "MCP_CONNECTOR_ACCESS_DENIED");
+  fixture.controller.resolveMcpSubject = (caller, scope) => ({ profileId: caller.federationClient ? "mcp-openclaw-trusted-fixture" : caller.profileId, runId: scope?.runId });
 
   const restored = { id: "restored", name: "Restored", enabled: false,
     command: "/Users/old-machine/private/fixture-mcp", args: ["--stale-private-arg"],
@@ -1167,8 +1144,8 @@ test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 A
   listedServers = [server, restored];
   for (const caller of [authorityFor("8"), { ...authorityFor("9"), federationClient: "hermes" }]) {
     const visible = await fixture.controller.handle("mcp_server_list", {}, caller);
-    assert.deepEqual(visible.servers[0], server,
-      "an active server retains the existing model-facing tool contract");
+    assert.deepEqual(visible.servers[0], {id:server.id,name:server.name,enabled:true},
+      "active launch configuration must not enter the model context");
     assert.deepEqual(visible.servers[1], { id: "restored", name: "Restored",
       enabled: false, createdAt: 10, updatedAt: 20 });
     assert.equal(JSON.stringify(visible).includes("old-machine"), false);
@@ -1196,6 +1173,37 @@ test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 A
     expectedRevision: 1, ...server,
   }, authorityFor("7")), "MCP_TOOL_RESPONSE_INVALID");
   assert.equal(hostileRegistered, false);
+});
+
+test("官方 MCP 会话上下文来自可信原生 Run 或外部身份，模型参数不能覆盖", async () => {
+  const seen = [], nativeSession = "a1111111-1111-4111-8111-111111111111", externalSession = "b2222222-2222-4222-8222-222222222222";
+  let failureCode;
+  const fixture = makeFixture({
+    nativeMcpStore: { list: () => ({ revision: 1, servers: [] }), get: () => null, prepare() {}, register() {}, remove() {} },
+    nativeMcpClientManager: { async probe() { return []; }, async listTools() { return []; }, async closeServer() {},
+      async callTool(id, name, args, options) { options.assertCurrent(); seen.push({ args, sessionId: options.officialSessionId }); if (failureCode) throw Object.assign(new Error("private-provider-detail"), { code: failureCode }); return { content: [] }; } },
+  });
+  fixture.runs.set(RUN_ID, run({ runtimeSessionRef: { sessionId: nativeSession } }));
+  const input = { serverId: "official-alipay", toolName: "submit_payment", arguments: { officialSessionId: "model-forgery" } };
+  const scope = { runId: RUN_ID, assertCurrent() {} };
+  await fixture.controller.handle("mcp_server_call", input, authorityFor("1"), scope);
+  assert.equal(seen.at(-1).sessionId, nativeSession);
+  fixture.runs.set(RUN_ID, run({ runtimeSessionId: nativeSession }));
+  await fixture.controller.handle("mcp_server_call", input, authorityFor("2"), scope);
+  assert.equal(seen.at(-1).sessionId, nativeSession, "legacy Run retains its actual session id");
+  fixture.controller.resolveMcpSubject = caller => ({ profileId: caller.profileId, runId: RUN_ID });
+  await fixture.controller.handle("mcp_server_call", input, { ...authorityFor("3"), federationClient: "hermes" },
+    { ...scope, mcpIdentity: { sessionId: externalSession } });
+  assert.equal(seen.at(-1).sessionId, externalSession, "external identity never borrows the native Run session");
+  await fixture.controller.handle("mcp_server_call", input, { ...authorityFor("4"), federationClient: "hermes" }, scope);
+  assert.equal(seen.at(-1).sessionId, undefined, "missing external identity cannot use model or native fallback");
+  await fixture.controller.handle("mcp_server_call", input, authorityFor("5"));
+  assert.equal(seen.at(-1).sessionId, undefined, "unbound native calls cannot invent a session");
+  for (const code of [...Object.keys(require("../app/core/official-skill-connector-dto").OFFICIAL_SKILL_PUBLIC_MESSAGES), "MCP_SERVER_RESULT_UNKNOWN"]) {
+    failureCode = code;
+    await assert.rejects(fixture.controller.handle("mcp_server_call", input, authority({ callId: crypto.randomUUID(), confirmation: true }), scope),
+      error => error.code === code && !error.message.includes("private-provider-detail"));
+  }
 });
 
 test("System Host 工具走 Service Controller，写操作 durable replay 且拒绝伪造响应", async () => {
@@ -2673,7 +2681,8 @@ test("workspace commands share concurrent calls and never replay a pending comma
   await expectCode(() => restarted.handle("workspace_execute", args, authority(), { ...scope, runId: OTHER_RUN_ID }), "MCP_TOOL_FORBIDDEN");
 });
 
-(async () => {
+module.exports = {makeFixture,authority,authorityFor,PROFILE_ID,OTHER_PROFILE_ID,RUN_ID,run,cleanupFixtures:()=>{ for(const root of ownedArtifactRoots) fs.rmSync(root,{recursive:true,force:true}); ownedArtifactRoots.clear(); }};
+if (require.main === module) (async () => {
   let failed = 0;
   for (const { name, fn } of tests) {
     try {

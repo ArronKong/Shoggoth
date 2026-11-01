@@ -14,6 +14,7 @@ const {
   modelCatalogFromConfig,
 } = require("../app/agent-service/antigravity-acp-runtime-host");
 const { AntigravityRuntimeAdapter } = require("../app/agent-service/antigravity-runtime-adapter");
+const { ANTIGRAVITY_ACP_SERVER_VERSION } = require("../app/agent-service/antigravity-acp-distribution");
 const {
   antigravityUsedOnThisMac,
   prepareAntigravityKeychainContext,
@@ -104,7 +105,7 @@ async function until(predicate, label, timeout = 5_000) {
   throw new Error(`Timed out: ${label}`);
 }
 
-function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, serverVersion = "1.2.1" } = {}) {
+function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, serverVersion = ANTIGRAVITY_ACP_SERVER_VERSION, reportedVersion = serverVersion } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agy-acp-host-")));
   fs.chmodSync(root, 0o700);
   const paths = { stateDir: path.join(root, "state"), runtimeDir: path.join(root, "run"), trustedRoot: root };
@@ -128,6 +129,7 @@ function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, s
   const log = path.join(root, "server.jsonl");
   const gateCalls = [];
   const hosts = [];
+  const timeoutBridges = [], spawns = [];
   const runtimeEnvironment = Object.freeze({
     runtime: "antigravity", runtimeAccountId: ACCOUNT, kind: "native-user", installationKind: "system",
     homeKind: "integration", strategy: "account-integration", home, nativeHome: path.join(root, "native", ".gemini"),
@@ -145,9 +147,21 @@ function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, s
       platform: "linux",
       parentEnv: { PATH: process.env.PATH, HTTPS_PROXY: "http://127.0.0.1:7897", SECRET_TOKEN: "leak" },
       verifyServer: async () => ({ version: serverVersion, serverPath, harnessPath }),
+      resolveMcpTimeoutBootstrap: () => path.join(bin, "harness-bootstrap"),
+      createMcpTimeoutBridge: (options) => {
+        const bridge = { options, descriptors: [], removed: [], closed: false,
+          env: { SHOGGOTH_AGY_TIMEOUT_TOKEN: "t".repeat(64), SHOGGOTH_AGY_TIMEOUT_SOCKET: "/fixture/control.sock",
+            SHOGGOTH_AGY_HARNESS_PATH: harnessPath },
+          async start() { return this.env; },
+          registerMcpServer(descriptor) { this.descriptors.push(descriptor); return () => this.removed.push(descriptor); },
+          async close() { this.closed = true; } };
+        timeoutBridges.push(bridge); return bridge;
+      },
       spawnProcess: (command, args, options) => {
         assert.equal(command, serverPath);
-        return spawn(process.execPath, [FAKE_SERVER, ...args], { ...options, env: { ...options.env, ...env, FAKE_ACP_LOG: log } });
+        spawns.push({ command, args, options });
+        return spawn(process.execPath, [FAKE_SERVER, ...args], { ...options, env: { ...options.env, ...env,
+          FAKE_ACP_SERVER_VERSION: reportedVersion, FAKE_ACP_LOG: log } });
       },
       mcpGateIssuer: {
         createMcpServer: (input) => {
@@ -170,8 +184,55 @@ function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, s
     for (const host of hosts) { try { await host.stop(); } catch {} }
     fs.rmSync(root, { recursive: true, force: true });
   });
-  return { root, paths, home, workspace, serverPath, harnessPath, gateCalls, records, create };
+  return { root, paths, home, workspace, serverPath, harnessPath, gateCalls, records, create, timeoutBridges, spawns };
 }
+
+test("1.4.3 installs a trusted timeout bridge before spawn and registers only its issued MCP descriptor", async t => {
+  const f = fixture(t), host = f.create();
+  await host.initialize();
+  assert.equal(f.timeoutBridges.length, 1);
+  const bridge = f.timeoutBridges[0];
+  assert.equal(bridge.options.server.harnessPath, f.harnessPath);
+  assert.equal(bridge.options.getAcpPid(), host.child.pid);
+  assert.equal(f.spawns[0].options.env.ANTIGRAVITY_HARNESS_PATH, path.join(f.root, "bin/harness-bootstrap"));
+  assert.equal(f.spawns[0].options.env.SHOGGOTH_AGY_HARNESS_PATH, f.harnessPath);
+  assert.equal(f.spawns[0].options.env.SHOGGOTH_AGY_TIMEOUT_TOKEN, bridge.env.SHOGGOTH_AGY_TIMEOUT_TOKEN);
+  const mcp = await host._mcpServers();
+  assert.deepEqual(bridge.descriptors, mcp.mcpServers);
+  assert.equal(f.gateCalls[0].parentExecutable, f.harnessPath);
+  assert.equal(f.gateCalls[0].ancestorExecutable, f.serverPath);
+  assert.equal(f.gateCalls[0].ancestorPid, host.child.pid);
+  await host.stop(); assert.equal(bridge.closed, true);
+});
+
+test("timeout bridge startup failures stop before any ACP spawn; missing helper never falls back", async t => {
+  const f = fixture(t), host = f.create({ resolveMcpTimeoutBootstrap() {
+    throw Object.assign(new Error("missing helper"), { code: "ANTIGRAVITY_MCP_TIMEOUT_UNAVAILABLE" });
+  } });
+  await assert.rejects(host.initialize(), { code: "ANTIGRAVITY_MCP_TIMEOUT_UNAVAILABLE" });
+  assert.equal(f.spawns.length, 0);
+});
+
+test("verified legacy ACP keeps its old transport and ignores caller-supplied harness overrides", async t => {
+  const f = fixture(t, { serverVersion: "1.2.1" }), host = f.create({
+    parentEnv: { PATH: process.env.PATH, ANTIGRAVITY_HARNESS_PATH: "/untrusted/wrapper",
+      SHOGGOTH_AGY_TIMEOUT_TOKEN: "attacker" },
+  });
+  await host.initialize();
+  assert.equal(f.timeoutBridges.length, 0);
+  assert.equal(f.spawns[0].options.env.ANTIGRAVITY_HARNESS_PATH, undefined);
+  assert.equal(f.spawns[0].options.env.SHOGGOTH_AGY_TIMEOUT_TOKEN, undefined);
+});
+
+test("timeout proxy cleanup errors cannot skip native process cleanup", async t => {
+  const f = fixture(t), host = f.create(); await host.initialize();
+  f.timeoutBridges[0].close = async () => {
+    throw Object.assign(new Error("cleanup failed"), { code: "ANTIGRAVITY_MCP_TIMEOUT_CLEANUP_FAILED" });
+  };
+  await assert.rejects(host.stop(), { code: "ANTIGRAVITY_MCP_TIMEOUT_CLEANUP_FAILED" });
+  assert.equal(host.cleanupIncomplete, true);
+  assert.equal(host.processGroupExists(host.child.pid), false);
+});
 
 async function startedSession(t, options = {}) {
   const f = fixture(t, options);
@@ -182,6 +243,37 @@ async function startedSession(t, options = {}) {
   const { session } = await host.sessionStart({ source: "chat:one", cwd: f.workspace, permissionMode: options.permissionMode ?? "accept-edits" });
   return { ...f, host, events, session };
 }
+
+test("model-only Antigravity uses an empty tool allowlist, isolated config, no MCP and confirmed process cleanup", async t => {
+  const f = fixture(t), host = f.create({ workspace: null, modelOnlyInstance: true,
+    permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
+  await host.initialize();
+  const isolated = host.workspaceExecutionHome;
+  assert.ok(isolated); assert.notEqual(isolated.cwd, f.workspace);
+  assert.deepEqual(fs.readdirSync(path.join(isolated.geminiHome, "config")), []);
+  const output = await require("../app/agent-service/acp-model-only").generateAcpModelOnly(host, {
+    prompt: "DIRECTIVE:PLAIN", model: null, operationId: "heartbeat-model-only" });
+  assert.ok(output.text);
+  assert.equal(output.usage, null, "unreported native usage must never be fabricated");
+  assert.equal(f.gateCalls.length, 0);
+  const start = f.records().find(row => row.method === "session/new");
+  assert.deepEqual(start.params.mcpServers, []);
+  assert.deepEqual(start.params._meta.agy.enabledTools, []);
+  assert.equal(host.state, "stopped"); assert.equal(host.processGroupExists(host.child.pid), false);
+  assert.equal(fs.existsSync(isolated.cwd), false);
+});
+
+test("model-only Antigravity meters native per-turn usage, including cache and reasoning", async t => {
+  const f = fixture(t, { env: { FAKE_ACP_TURN_USAGE: JSON.stringify({ totalTokens: 22, inputTokens: 12,
+    outputTokens: 8, cachedReadTokens: 4, cachedWriteTokens: 0, thoughtTokens: 2 }) } });
+  const host = f.create({ workspace: null, modelOnlyInstance: true,
+    permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
+  await host.initialize();
+  const output = await require("../app/agent-service/acp-model-only").generateAcpModelOnly(host, {
+    prompt: "DIRECTIVE:PLAIN", model: null, operationId: "heartbeat-metered" });
+  assert.deepEqual(output.usage, { totalTokens: 26, inputTokens: 16, outputTokens: 10,
+    cachedInputTokens: 4, cacheWriteInputTokens: 0, reasoningOutputTokens: 2 });
+});
 
 async function runTurn(ctx, prompt, extra = {}) {
   const accepted = await ctx.host.turnStart({ sessionId: ctx.session.id, operationId: `op-${prompt}-${Date.now()}`,
@@ -310,6 +402,26 @@ test("an unverified ACP version cannot silently start managed workspace executio
   assert.equal(f.records().length, 0);
 });
 
+test("the verified 1.4.3 distribution retains the managed workspace boundary", async t => {
+  const f = fixture(t, { serverVersion: "1.4.3" });
+  const host = f.create({ workspaceExecutionVersion: 1 });
+  await host.initialize();
+  assert.equal(host.server.version, "1.4.3");
+  assert.ok(host.workspaceExecutionHome);
+  assert.ok(host.nativeToolResults, "the known error broadcast still needs authoritative native tool results");
+  const session = await host.sessionStart({ source: "latest-managed-boundary", cwd: f.workspace });
+  assert.ok(session.session.id);
+  const create = f.records().find(record => record.method === "session/new").params;
+  assert.deepEqual(create._meta, { agy: { enabledTools: ["ask_question", "finish"] } });
+  assert.equal(create.cwd, host.workspaceExecutionHome.cwd);
+  assert.notEqual(create.cwd, f.workspace);
+});
+
+test("the native initialize version must match the verified distribution", async t => {
+  const f = fixture(t, { serverVersion: "1.2.1", reportedVersion: "1.4.3" });
+  await assert.rejects(f.create().initialize(), { code: "ANTIGRAVITY_ACP_INITIALIZE_INVALID" });
+});
+
 // Synthetic values in the pinned native protobuf/SQLite format. Do not copy
 // user transcripts or infer results from the assistant's answer.
 function protoVarint(value) {
@@ -397,8 +509,8 @@ function nativeDenied({ sessionId, idx = 1, id = "call_grep", startedAt, complet
       sessionId, idx, startedAt, completedAt })], [24, proto([[3, error], [4, 1], [5, 1]])], [31, error]]) };
 }
 
-test("ACP error broadcast preserves the successful read and the separately denied tool before turn end", async (t) => {
-  const ctx = await startedSession(t);
+for (const serverVersion of ["1.2.1", "1.4.3"]) test(`ACP ${serverVersion} error broadcast preserves the successful read and the separately denied tool before turn end`, async (t) => {
+  const ctx = await startedSession(t, { serverVersion });
   let wrote = false;
   ctx.host.subscribe(event => {
     if (event.type !== "tool_start" || wrote) return;
@@ -440,7 +552,7 @@ test("native denied-tool discovery rejects another trajectory, stale rows and du
 test("native recovery excludes prior turns and stale or mismatched evidence", async (t) => {
   for (const scenario of ["prior turn", "arguments", "call ID", "duplicate ID", "session", "malformed", "oversized", "unknown version"]) {
     await t.test(scenario, async (t) => {
-      const ctx = await startedSession(t, { serverVersion: scenario === "unknown version" ? "1.3.0" : "1.2.1" });
+      const ctx = await startedSession(t, { serverVersion: scenario === "unknown version" ? "1.3.0" : ANTIGRAVITY_ACP_SERVER_VERSION });
       if (scenario === "prior turn") nativeStore(ctx, [nativeRead({ output: "OLD TURN" })]);
       let wrote = false;
       ctx.host.subscribe((event) => {
@@ -534,7 +646,7 @@ test("native reader rejects unsafe paths, sidecars and escaping session identifi
   }
 });
 
-test("native content still passes registered-secret filtering", async (t) => {
+test("native conversation originals retain private values while tool diagnostics stay redacted", async (t) => {
   const ctx = await startedSession(t);
   ctx.host.registeredSecrets.push("PRIVATE-SYNTHETIC-TOKEN");
   let wrote = false;
@@ -546,8 +658,8 @@ test("native content still passes registered-secret filtering", async (t) => {
   await runTurn(ctx, "DIRECTIVE:BROKEN_TOOL_RESULTS");
   const read = ctx.events.find((event) => event.type === "tool_result" && event.toolCallId === "call_read");
   assert.equal(read.tool.success, true);
-  assert.equal(read.contextTool, undefined);
-  assert.ok(!JSON.stringify(read).includes("PRIVATE-SYNTHETIC-TOKEN"));
+  assert.deepEqual(read.contextTool, { output: { result: "PRIVATE-SYNTHETIC-TOKEN" } });
+  assert.ok(!JSON.stringify(read.tool).includes("PRIVATE-SYNTHETIC-TOKEN"));
 });
 
 test("pending lossy results settle once on native cancellation and transport loss without replay", async (t) => {
@@ -713,6 +825,59 @@ test("an in-band server failure fails the turn instead of completing with an err
   assert.equal(complete.errorCode, "ANTIGRAVITY_MCP_UNAVAILABLE");
   assert.ok(!ctx.events.some((event) => event.type === "text" && event.turnId === accepted.turn.id),
     "the server's error explanation is not presented as an answer");
+});
+
+function nativeTurnError(sessionId, idx, now, message, { status = 3, tool = false } = {}) {
+  const timestamp = proto([[1, Math.floor(now / 1000)], [2, (now % 1000) * 1e6]]);
+  const metadata = proto([[1, timestamp], [20, proto([[1, sessionId], [2, idx], [4, sessionId]])],
+    ...(tool ? [[4, proto([[1, "tool-call"]])]] : [])]);
+  return { type: 17, status, payload: proto([[1, 17], [4, status], [5, metadata],
+    [24, proto([[3, proto([[1, "Agent execution terminated due to error."], [2, message],
+      [3, "private stack must not leave the reader"]])]])]]) };
+}
+
+test("native current-turn failure survives the SDK generic error and reaches terminal diagnostics", async t => {
+  const ctx = await startedSession(t);
+  const finish = ctx.host._finishPrompt.bind(ctx.host);
+  let wrote = false;
+  ctx.host._finishPrompt = (active, response) => {
+    if (!wrote) {
+      wrote = true;
+      nativeStore(ctx, [{ type: 14, status: 3, payload: proto([[1, 14], [4, 3]]) },
+        nativeTurnError(ctx.session.id, 1, Date.now(), "agent executor error: Error 400, Message: User location is not supported for the API use., Status: FAILED_PRECONDITION, Details: []")]);
+    }
+    return finish(active, response);
+  };
+  const { complete } = await runTurn(ctx, "DIRECTIVE:INBAND_UNKNOWN_ERROR");
+  assert.equal(complete.errorCode, "ANTIGRAVITY_REGION_UNSUPPORTED");
+  assert.deepEqual(complete.failure, { message: "User location is not supported for the API use.", httpStatus: 400, upstreamCode: "FAILED_PRECONDITION" });
+  const next = await runTurn(ctx, "next ordinary message");
+  assert.equal(next.complete.status, "completed", "the previous native error cannot poison the next turn");
+  assert.equal(next.complete.failure, undefined);
+});
+
+test("native turn diagnosis rejects stale, foreign, tool and ambiguous error records", async t => {
+  const ctx = await startedSession(t);
+  const reader = ctx.host.nativeToolResults;
+  const now = Date.now();
+  const input = { type: 14, status: 3, payload: proto([[1, 14], [4, 3]]) };
+  const file = nativeStore(ctx, [input, nativeTurnError(ctx.session.id, 1, now, "genuine unknown upstream reason")]);
+  assert.equal(reader.turnFailure(ctx.session.id, -1, now, now).message, "genuine unknown upstream reason");
+  assert.equal(reader.turnFailure(ctx.session.id, null, now, now), null);
+  assert.equal(reader.turnFailure(ctx.session.id, 1, now, now), null);
+  assert.equal(reader.turnFailure(ctx.session.id, -1, now + 1, now + 2), null);
+  const db = new DatabaseSync(file);
+  try {
+    for (const row of [nativeTurnError("00000000-0000-0000-0000-000000000000", 1, now, "foreign"),
+      nativeTurnError(ctx.session.id, 99, now, "wrong idx"),
+      nativeTurnError(ctx.session.id, 1, now, "tool failure", { tool: true })]) {
+      db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 1").run(row.payload);
+      assert.equal(reader.turnFailure(ctx.session.id, -1, now, now), null);
+    }
+    db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 1").run(nativeTurnError(ctx.session.id, 1, now, "valid").payload);
+    db.prepare("INSERT INTO steps VALUES (2, 14, 3, ?, NULL)").run(input.payload);
+    assert.equal(reader.turnFailure(ctx.session.id, -1, now, now), null, "a later input is a different turn");
+  } finally { db.close(); }
 });
 
 test("an explicit remote error on the prompt fails the turn with its cause, never as an unknown outcome", async (t) => {
@@ -1015,4 +1180,45 @@ test("the Antigravity Agent is offered when this Mac has the agy command or the 
   assert.equal(antigravityUsedOnThisMac({ ...options, fs: fakeFs([], ["/Users/example/Applications/Antigravity.app"]) }), true);
   assert.equal(antigravityUsedOnThisMac({ ...options, fs: fakeFs(["relative/bin/agy"]) }), false);
   assert.equal(antigravityUsedOnThisMac({ ...options, fs: fakeFs([]) }), false);
+});
+
+
+test("file credential storage never prepares the macOS keychain and retains managed account paths", async t => {
+  const f = fixture(t);
+  let keychainCalls = 0;
+  const host = f.create({ platform: "darwin", credentialStorage: "file", workspaceExecutionVersion: 1,
+    parentEnv: { PATH: process.env.PATH, AGY_ACP_FORCE_FILE_STORAGE: "0" },
+    securityExecFile: () => { keychainCalls++; throw new Error("Keychain must not be accessed"); },
+    securityExecFileSync: () => { keychainCalls++; throw new Error("Keychain must not be accessed"); },
+  });
+  await host.initialize();
+  assert.equal(keychainCalls, 0);
+  const env = f.spawns[0].options.env;
+  assert.equal(env.AGY_ACP_FORCE_FILE_STORAGE, "1");
+  assert.equal(env.HOME, f.home);
+  assert.equal(fs.realpathSync(path.join(env.GEMINI_HOME, "antigravity-acp")),
+    path.join(f.home, ".gemini", "antigravity-acp"));
+  assert.equal(fs.existsSync(path.join(f.home, "Library", "Preferences", "com.apple.security.plist")), false);
+  await host.stop();
+  assert.equal(fs.existsSync(env.GEMINI_HOME), false, "private host config is removed only after stop");
+  assert.equal(fs.existsSync(path.join(f.home, ".gemini", "antigravity-acp", "settings.json")), true);
+});
+
+test("ambient credential storage overrides cannot change the normal keychain path", async t => {
+  const f = fixture(t);
+  const host = f.create({ parentEnv: { PATH: process.env.PATH, AGY_ACP_FORCE_FILE_STORAGE: "1" } });
+  await host.initialize();
+  assert.equal(host.credentialStorage, "keychain");
+  assert.equal(f.spawns[0].options.env.AGY_ACP_FORCE_FILE_STORAGE, undefined);
+});
+
+test("file credential storage rejects unverified versions before any keychain or process access", async t => {
+  const f = fixture(t, { serverVersion: "1.2.1" });
+  let calls = 0;
+  const host = f.create({ platform: "darwin", credentialStorage: "file",
+    securityExecFile: () => { calls++; throw new Error("unexpected Keychain access"); } });
+  await assert.rejects(host.initialize(), { code: "ANTIGRAVITY_CREDENTIAL_STORAGE_UNSUPPORTED" });
+  assert.equal(calls, 0);
+  assert.equal(f.spawns.length, 0);
+  assert.throws(() => f.create({ credentialStorage: "unknown" }), { code: "ANTIGRAVITY_HOST_OPTIONS_INVALID" });
 });

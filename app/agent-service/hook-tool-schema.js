@@ -7,11 +7,11 @@ const ajv = new Ajv({ strict: false, allErrors: false, validateFormats: false })
 const ajv2019 = new Ajv2019({ strict: false, allErrors: false, validateFormats: false });
 const ajv2020 = new Ajv2020({ strict: false, allErrors: false, validateFormats: false });
 const validators = new WeakMap();
-function validateHookToolArguments(schema, args) {
+function validateHookToolArguments(schema, args, { maxSchemaBytes = 65536 } = {}) {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) fail("HOOK_TOOL_CONTRACT_UNAVAILABLE");
   let validate = validators.get(schema);
   if (!validate) {
-    try { safeJson(schema, 65536);
+    try { safeJson(schema, maxSchemaBytes);
       const compiler = schema.$schema?.includes("2020-12") ? ajv2020 : schema.$schema?.includes("2019-09") ? ajv2019 : ajv;
       validate = compiler.compile(schema); validators.set(schema, validate); }
     catch { fail("HOOK_TOOL_CONTRACT_INVALID"); }

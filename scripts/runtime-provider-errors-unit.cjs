@@ -9,6 +9,7 @@ test("real model and capacity failures produce finite public codes", () => {
     ["Codex error: The model `gpt-5.5` does not exist or you do not have access to it.", "RUNTIME_MODEL_UNAVAILABLE"],
     [JSON.stringify({ error: { code: "unsupported_value", message: "Unsupported value: 'max' is not supported with the 'gpt-5.5' model.", param: "reasoning.effort" }, status: 400 }), "RUNTIME_MODEL_SETTINGS_INVALID"],
     ["server_overloaded: Selected model is at capacity", "RUNTIME_UPSTREAM_UNAVAILABLE"],
+    ["API error (status 500 Internal Server Error): The model is currently at capacity due to high demand.", "RUNTIME_UPSTREAM_UNAVAILABLE"],
     ["Rate limit reached for this API key, please retry later", "RUNTIME_RATE_LIMITED"],
     ["insufficient_quota: You exceeded your current quota", "RUNTIME_QUOTA_EXHAUSTED"],
     ["'file part media type application/octet-stream' functionality not supported.", "RUNTIME_ATTACHMENT_UNSUPPORTED"],

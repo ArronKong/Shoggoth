@@ -52,7 +52,7 @@ function validRequestId(value) {
 
 function validTimeout(value, fallback, naming = DEFAULT_NAMING) {
   const result = value === undefined ? fallback : value;
-  if (!Number.isSafeInteger(result) || result < 1 || result > 24 * 60 * 60 * 1_000) {
+  if (result !== null && (!Number.isSafeInteger(result) || result < 1 || result > 2_147_000_000)) {
     throw acpError(`${naming.codePrefix}_OPTIONS_INVALID`, `${naming.protocolLabel} timeout is invalid`);
   }
   return result;
@@ -234,7 +234,7 @@ class AcpJsonlClient {
     }
     const paused = [];
     for (const [id, pending] of this.pending) {
-      if (pending.method !== method || !predicate(pending.params)) continue;
+      if (pending.method !== method || pending.remainingTimeoutMs === null || !predicate(pending.params)) continue;
       pending.pauseDepth += 1;
       if (pending.pauseDepth === 1) {
         pending.remainingTimeoutMs = Math.max(1, pending.deadlineAt - Date.now());
@@ -343,6 +343,7 @@ class AcpJsonlClient {
 
   _armRequestTimeout(id, pending, timeoutMs) {
     pending.remainingTimeoutMs = timeoutMs;
+    if (timeoutMs === null) { pending.deadlineAt = null; pending.timer = null; return; }
     pending.deadlineAt = Date.now() + timeoutMs;
     pending.timer = setTimeout(() => {
       if (this.pending.get(id) !== pending) return;

@@ -1,0 +1,419 @@
+{
+  "version": 1,
+  "package": "openclaw",
+  "packageVersion": "2026.9.9",
+  "files": [
+    {
+      "path": "dist/sessions-Bw59kgfQ.mjs",
+      "edits": [
+        {
+          "before": "const ChatSendParamsSchema = closedObject({",
+          "after": "const CapabilitySelectionSchema = closedObject({\n\tversion: Type.Literal(1),\n\toperationId: Type.String({ minLength: 1, maxLength: 128, pattern: \"^[A-Za-z0-9][A-Za-z0-9._:-]*$\" }),\n\tdispatchRef: Type.String({ minLength: 1, maxLength: 256, pattern: \"^[A-Za-z0-9][A-Za-z0-9._:-]*$\" }),\n\tselectionDigest: Type.String({ pattern: \"^[a-f0-9]{64}$\" }),\n\trequiredAdapterId: Type.String({ minLength: 1, maxLength: 128, pattern: \"^[a-z0-9][a-z0-9._-]*$\" }),\n\tadapterGeneration: Type.String({ minLength: 1, maxLength: 128, pattern: \"^[A-Za-z0-9][A-Za-z0-9._:-]*$\" })\n});\nconst ChatSendParamsSchema = closedObject({"
+        },
+        {
+          "before": "\ttoolBindings: Type.Optional(RunToolBindingsSchema),",
+          "after": "\ttoolBindings: Type.Optional(RunToolBindingsSchema),\n\tcapabilitySelection: Type.Optional(CapabilitySelectionSchema),"
+        }
+      ],
+      "beforeSha256": "044fb9b42bd88b3d6b326b527ff61dc029c47517fcdbd7e75629a98ec4730734",
+      "afterSha256": "031a735b91c4c075e3a9e13a0ec7f5f2358448c239159d0bbe541951a97a96a7"
+    },
+    {
+      "path": "dist/setup-registry-2Voi6xC9.mjs",
+      "edits": [
+        {
+          "before": "\tregisterTool: () => {},",
+          "after": "\tregisterTool: () => {},\n\tregisterCapabilitySelectionGate: () => { throw new Error(\"CAPABILITY_SELECTION_API_UNAVAILABLE\"); },"
+        },
+        {
+          "before": "\tregisterCapabilitySelectionGate: () => { throw new Error(\"CAPABILITY_SELECTION_API_UNAVAILABLE\"); },",
+          "after": "\tregisterCapabilitySelectionGate: () => { throw new Error(\"CAPABILITY_SELECTION_API_UNAVAILABLE\"); },\n\tregisterModelProjection: () => { throw new Error(\"SECRET_MODEL_PROJECTION_UNAVAILABLE\"); },"
+        }
+      ],
+      "beforeSha256": "fc427b31435067c6a0c41381ea8bffe5f45e6ae1fde35befc70b706827262f0d",
+      "afterSha256": "a5734ea42864da8ff1d5ca0115ea58946b9e8841148a0e5bc772c7572f9d4efd"
+    },
+    {
+      "path": "dist/loader-runtime-load-DpgEqnzx.mjs",
+      "edits": [
+        {
+          "before": "import { D as resolveExpiresAtMsFromDurationMs, R as timestampMsToIsoString } from \"./number-coercion-Dq1l5muL.mjs\";\n",
+          "after": "import { registerSelectionGate } from \"./shoggoth-capability-selection.mjs\";\nimport { D as resolveExpiresAtMsFromDurationMs, R as timestampMsToIsoString } from \"./number-coercion-Dq1l5muL.mjs\";\n"
+        },
+        {
+          "before": "\t\t\t\t...registrationCapabilities.capabilityHandlers ? {\n\t\t\t\t\t...bound,",
+          "after": "\t\t\t\t...registrationCapabilities.capabilityHandlers ? {\n\t\t\t\t\t...bound,\n\t\t\t\t\tregisterCapabilitySelectionGate: (handler, metadata) => registerSelectionGate(record, handler, metadata),"
+        },
+        {
+          "before": "import { registerSelectionGate } from \"./shoggoth-capability-selection.mjs\";",
+          "after": "import { registerSelectionGate, registerModelProjection } from \"./shoggoth-capability-selection.mjs\";"
+        },
+        {
+          "before": "\t\t\t\t\tregisterCapabilitySelectionGate: (handler, metadata) => registerSelectionGate(record, handler, metadata),",
+          "after": "\t\t\t\t\tregisterCapabilitySelectionGate: (handler, metadata) => registerSelectionGate(record, handler, metadata),\n\t\t\t\t\tregisterModelProjection: (handler) => registerModelProjection(record, handler),"
+        }
+      ],
+      "beforeSha256": "3c30c5d43fb3cd19525853bb6b756cf45cfd05f5da32a732dc129b85cb309787",
+      "afterSha256": "1f28a8203356abd1cd02391ea028ccd9202e45f5b1fec57a331f22c6ac468c42"
+    },
+    {
+      "path": "dist/chat-send-handler-CxoF4cDR.mjs",
+      "edits": [
+        {
+          "before": "import { g as isFutureDateTimestampMs } from \"./number-coercion-Dq1l5muL.mjs\";\n",
+          "after": "import { validateSelectionEnvelope, assertSelectionRegistration, replaySelectionRequest, acceptSelection, markSelection } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-9cxii0oQ.mjs\";\nimport { g as isFutureDateTimestampMs } from \"./number-coercion-Dq1l5muL.mjs\";\n"
+        },
+        {
+          "before": "\tconst p = controlUiReconnectResume.params;",
+          "after": "\tlet p = controlUiReconnectResume.params;\n\tif (p.capabilitySelection) {\n\t\ttry { validateSelectionEnvelope(p.capabilitySelection, p.idempotencyKey); }\n\t\tcatch (error) { return { ok: false, error: error.code }; }\n\t\tif (p.queueMode !== void 0 && p.queueMode !== \"followup\" || p.intent || params.goalResume || p.toolBindings || p.message.trimStart().startsWith(\"/\") || p.message.trimStart().startsWith(\"!\") || isChatStopCommandText(p.message) || isBtwRequestText(p.message)) return { ok: false, error: \"CAPABILITY_SELECTION_PATH_UNSUPPORTED\" };\n\t\tp = { ...p, queueMode: \"followup\", capabilitySelection: validateSelectionEnvelope(p.capabilitySelection, p.idempotencyKey) };\n\t}"
+        },
+        {
+          "before": "\t\t...providerReview ? [providerReview.review.id, providerReview.target.sessionId] : []\n\t])).digest(\"hex\");",
+          "after": "\t\t...providerReview ? [providerReview.review.id, providerReview.target.sessionId] : [],\n\t\tp.capabilitySelection ?? null\n\t])).digest(\"hex\");"
+        },
+        {
+          "before": "eligible: isBrowserOperatorUiClient(request.clientInfo) && turnKind === \"main\"",
+          "after": "eligible: !p.capabilitySelection && isBrowserOperatorUiClient(request.clientInfo) && turnKind === \"main\""
+        },
+        {
+          "before": "\tif (normalizedRequest.value.mentions) {",
+          "after": "\ttry {\n\t\tassertCurrent?.();\n\t\tconst selectedRequest = normalizedRequest.value;\n\t\tconst selectedSession = loadedSession.value;\n\t\tconst replay = replaySelectionRequest({ envelope: selectedRequest.p.capabilitySelection, operationId: selectedSession.clientRunId,\n\t\t\trequestIdentity: selectedRequest.requestIdentity, sessionKey: selectedSession.sessionKey,\n\t\t\tagentId: selectedSession.selectedAgent.agentId ?? selectedSession.agentId, client });\n\t\tif (replay) { respond(true, replay); return; }\n\t\tassertSelectionRegistration(selectedRequest.p.capabilitySelection, getSelectionRegistrationRegistry());\n\t} catch (error) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, error.code || \"CAPABILITY_SELECTION_ADMISSION_FAILED\")); return; }\n\tif (normalizedRequest.value.mentions) {"
+        },
+        {
+          "before": "\t\tconst receipt = userTurnRecorder.getAdmissionReceipt?.();\n\t\tconst ackPayload = {",
+          "after": "\t\tconst receipt = userTurnRecorder.getAdmissionReceipt?.();\n\t\tconst selectionReceipt = acceptSelection({ envelope: p.capabilitySelection, requestIdentity: normalizedRequest.value.requestIdentity,\n\t\t\tidentity: { operationId: clientRunId, agentId: selectedAgent.agentId ?? preparedSession.value.agentId, sessionKey, sessionId: admittedSessionId }, client });\n\t\tconst ackPayload = {\n\t\t\t...selectionReceipt ? { capabilitySelection: selectionReceipt } : {},"
+        },
+        {
+          "before": "\t\t\t\t\tqueueModeOverride: p.queueMode,",
+          "after": "\t\t\t\t\tqueueModeOverride: p.queueMode,\n\t\t\t\t\tcapabilitySelection: p.capabilitySelection,"
+        },
+        {
+          "before": "\t\thasCronCreatorAuthority: cronCreatorAuthority !== void 0,",
+          "after": "\t\thasCronCreatorAuthority: cronCreatorAuthority !== void 0,\n\t\tcapabilitySelection: p.capabilitySelection,"
+        },
+        {
+          "before": "\t\t\tif (enqueued) {\n\t\t\t\tlateFollowup.recordQueued();",
+          "after": "\t\t\tif (enqueued) {\n\t\t\t\tlateFollowup.recordQueued();\n\t\t\t\tmarkSelection(params.capabilitySelection, \"queued\");"
+        },
+        {
+          "before": "\t}).catch(dispatchErrorLifecycle.handleError);",
+          "after": "\t}).catch((error) => { markSelection(p.capabilitySelection, \"failed\"); return dispatchErrorLifecycle.handleError(error); });"
+        }
+      ],
+      "beforeSha256": "88c6f573055ea5cddb674a4242505a1a74eb7d4d3722bc2599d7de55ebc0ea22",
+      "afterSha256": "0576fc4c2e3a71e13663d3fb1b6fcaff9d9c07ac4e226b051c9d8ed689922a8d"
+    },
+    {
+      "path": "dist/get-reply-eZY--4sq.mjs",
+      "edits": [
+        {
+          "before": "\t\t\ttoolBindings: ctx.GatewayRunToolBindings,",
+          "after": "\t\t\ttoolBindings: ctx.GatewayRunToolBindings,\n\t\t\tcapabilitySelection: opts?.capabilitySelection,"
+        }
+      ],
+      "beforeSha256": "91560fd5ddf6e6f1fd09670c723135069954ccf2dac9c93e263855abe524ca00",
+      "afterSha256": "6a2cb207e40aa99e61ffa3d805086c6f6e7f7d88b1cf3b1d1572b0a3c0504617"
+    },
+    {
+      "path": "dist/agent-runner.runtime-BinSrYfK.mjs",
+      "edits": [
+        {
+          "before": "import { S as parseStrictInteger, f as asSafeIntegerInRange, l as asNonNegativeFiniteNumber, s as asFiniteNumber, u as asPositiveFiniteNumber } from \"./number-coercion-Dq1l5muL.mjs\";\n",
+          "after": "import { enforceSelection, finishSelection, markSelection, rejectSelectionRuntime } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-9cxii0oQ.mjs\";\nimport { S as parseStrictInteger, f as asSafeIntegerInRange, l as asNonNegativeFiniteNumber, s as asFiniteNumber, u as asPositiveFiniteNumber } from \"./number-coercion-Dq1l5muL.mjs\";\n"
+        },
+        {
+          "before": "\tconst runId = params.opts?.runId ?? crypto.randomUUID();\n\tconst agentTurnTiming =",
+          "after": "\tconst runId = params.opts?.runId ?? crypto.randomUUID();\n\tawait enforceSelection(params.followupRun.run.capabilitySelection, { operationId: params.followupRun.run.capabilitySelection?.operationId,\n\t\tagentId: params.followupRun.run.agentId, sessionKey: params.sessionKey ?? params.followupRun.run.sessionKey,\n\t\tsessionId: params.followupRun.run.sessionId, actualRunId: runId }, getSelectionRegistrationRegistry());\n\tconst agentTurnTiming ="
+        },
+        {
+          "before": "async function runCliFallbackCandidate(params) {\n\tconst turn = params.turn;",
+          "after": "async function runCliFallbackCandidate(params) {\n\tconst turn = params.turn;\n\trejectSelectionRuntime(turn.followupRun.run.capabilitySelection, \"cli-fallback\");"
+        },
+        {
+          "before": "\tconst embeddedRunProvider = resolveOpenAIRuntimeProvider({",
+          "after": "\tif (turn.followupRun.run.capabilitySelection && agentHarnessPolicy.runtime !== \"openclaw\") rejectSelectionRuntime(turn.followupRun.run.capabilitySelection, agentHarnessPolicy.runtime);\n\tif (turn.followupRun.run.capabilitySelection && resolveSessionPinnedHarnessId(turn.getActiveSessionEntry()) && resolveSessionPinnedHarnessId(turn.getActiveSessionEntry()) !== \"openclaw\") rejectSelectionRuntime(turn.followupRun.run.capabilitySelection, \"pinned-harness\");\n\tconst embeddedRunProvider = resolveOpenAIRuntimeProvider({"
+        },
+        {
+          "before": "\t\treturn await executeAgentTurnInternalLoop(params, commitTerminalOutcome, commitMcpAppModelContext, preparedRunAdmission, admittedRunContext, deferredLifecycle, compaction);",
+          "after": "\t\tconst result = await executeAgentTurnInternalLoop(params, commitTerminalOutcome, commitMcpAppModelContext, preparedRunAdmission, admittedRunContext, deferredLifecycle, compaction);\n\t\tawait finishSelection(params.followupRun.run.capabilitySelection, result.kind === \"aborted\" ? \"aborted\" : result.terminalRunFailed ? \"failed\" : \"completed\", getSelectionRegistrationRegistry());\n\t\treturn result;\n\t} catch (error) {\n\t\tmarkSelection(params.followupRun.run.capabilitySelection, \"failed\", error.code);\n\t\tthrow error;"
+        }
+      ],
+      "beforeSha256": "cb6eab57cd73619064ffee88347841ed747893abf17236c779590e99f3eb6e7a",
+      "afterSha256": "266331c4e35f503f82c63084c30d9b5b62967b0ef3e50d430a17eebc83a99dcc"
+    },
+    {
+      "path": "dist/builtin-openclaw-D1Xfnzzr.mjs",
+      "edits": [
+        {
+          "before": "import { D as resolveExpiresAtMsFromDurationMs, F as resolveTimerTimeoutMs, g as isFutureDateTimestampMs, h as finiteSecondsToTimerSafeMilliseconds, m as clampTimerTimeoutMs, o as asDateTimestampMs, s as asFiniteNumber, v as parseDateFirstTimestampMs, w as parseStrictPositiveInteger, y as parseDateStringTimestampMs } from \"./number-coercion-Dq1l5muL.mjs\";\n",
+          "after": "import { assertSelectionRun, selectionSystemContext } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-9cxii0oQ.mjs\";\nimport { D as resolveExpiresAtMsFromDurationMs, F as resolveTimerTimeoutMs, g as isFutureDateTimestampMs, h as finiteSecondsToTimerSafeMilliseconds, m as clampTimerTimeoutMs, o as asDateTimestampMs, s as asFiniteNumber, v as parseDateFirstTimestampMs, w as parseStrictPositiveInteger, y as parseDateStringTimestampMs } from \"./number-coercion-Dq1l5muL.mjs\";\n"
+        },
+        {
+          "before": "async function runEmbeddedAttemptBeforeAgentRun(input) {",
+          "after": "async function runEmbeddedAttemptBeforeAgentRun(input) {\n\ttry { assertSelectionRun(input.attempt.runId, { agentId: input.hookContext.agentId, sessionKey: input.attempt.sessionKey, sessionId: input.attempt.sessionId }, getSelectionRegistrationRegistry()); }\n\tcatch (error) { return { blockedBy: \"capabilitySelection\", promptError: new Error(error.code || \"CAPABILITY_SELECTION_GATE_FAILED\") }; }"
+        },
+        {
+          "before": "\tconst modelAwareSystemPrompt = isSettledTurnFinalization ? systemPromptText : appendModelIdentitySystemPrompt({",
+          "after": "\tconst selectionContext = selectionSystemContext(attempt.runId, { agentId: input.hookAgentId, sessionKey: attempt.sessionKey, sessionId: attempt.sessionId }, getSelectionRegistrationRegistry());\n\tif (selectionContext) setSystemPrompt(composeSystemPromptWithHookContext({ baseSystemPrompt: systemPromptText, prependSystemContext: selectionContext }));\n\tconst modelAwareSystemPrompt = isSettledTurnFinalization ? systemPromptText : appendModelIdentitySystemPrompt({"
+        },
+        {
+          "before": "import { assertSelectionRun, selectionSystemContext } from \"./shoggoth-capability-selection.mjs\";",
+          "after": "import { assertSelectionRun, selectionSystemContext, projectModelPayload } from \"./shoggoth-capability-selection.mjs\";"
+        },
+        {
+          "before": "\t\t\t\tconst finalPayload = replacement === void 0 ? payload : replacement;\n\t\t\t\tif (modelRequestBodyState(observedOptions).enabled)",
+          "after": "\t\t\t\tconst finalPayload = await projectModelPayload(replacement === void 0 ? payload : replacement, params.secretScope, getSelectionRegistrationRegistry());\n\t\t\t\tif (modelRequestBodyState(observedOptions).enabled)"
+        },
+        {
+          "before": "\tsession.agent.streamFn = wrapStreamFnWithProviderPromptState({\n\t\tstreamFn: session.agent.streamFn,",
+          "after": "\tsession.agent.streamFn = wrapStreamFnWithProviderPromptState({\n\t\tsecretScope: { agentId: input.sessionAgentId, sessionId: attempt.sessionId, runId: attempt.runId },\n\t\tstreamFn: session.agent.streamFn,"
+        }
+      ],
+      "beforeSha256": "cde1b380d227ffe432d5597e0a7422df5241b459df7150a9564bb0b7cec84953",
+      "afterSha256": "f2da6def6e58cd8974091a78e0c4ebc670a4a0a5b57d8c87d2e35b227bbecd87"
+    },
+    {
+      "path": "dist/dispatch-from-config-BG9rT_X3.mjs",
+      "edits": [
+        {
+          "before": "import { o as asDateTimestampMs } from \"./number-coercion-Dq1l5muL.mjs\";\n",
+          "after": "import { rejectSelectionRuntime } from \"./shoggoth-capability-selection.mjs\";\nimport { t as getSelectionDispatchHooks } from \"./hook-runner-global-CFWs616h.mjs\";\nimport { o as asDateTimestampMs } from \"./number-coercion-Dq1l5muL.mjs\";\n"
+        },
+        {
+          "before": "\tconst dispatchKind = resolveSessionDispatchKind(acpDispatchSessionKey, sessionStoreEntry.entry);",
+          "after": "\tconst dispatchKind = resolveSessionDispatchKind(acpDispatchSessionKey, sessionStoreEntry.entry);\n\tif (params.replyOptions?.capabilitySelection && (dispatchKind !== \"agent\" || getSelectionDispatchHooks()?.hasHooks(\"reply_dispatch\") || getSelectionDispatchHooks()?.hasHooks(\"before_dispatch\"))) rejectSelectionRuntime(params.replyOptions.capabilitySelection, \"dispatch-takeover\");"
+        },
+        {
+          "before": "\tif (pluginOwnedBinding) {\n\t\tif (isPreDispatchOperationAborted()) return {",
+          "after": "\tif (pluginOwnedBinding) {\n\t\trejectSelectionRuntime(params.replyOptions?.capabilitySelection, \"plugin-bound-dispatch\");\n\t\tif (isPreDispatchOperationAborted()) return {"
+        }
+      ],
+      "beforeSha256": "a110ec6fe2d59a34d40267aeb84f1df136999c6b47bd9aeeeab410d1c3610fd1",
+      "afterSha256": "e0874322246bbb980668526d6537e7a4fea6234d68d24e8abe205eaa210d2f2a"
+    },
+    {
+      "path": "dist/chat-hybxELR_.mjs",
+      "edits": [
+        {
+          "before": "import { l as normalizeOptionalString } from \"./string-coerce-6kR-86XC.mjs\";\n",
+          "after": "import { querySelection, selectionCapabilities } from \"./shoggoth-capability-selection.mjs\";\nimport { l as getSelectionRegistrationRegistry } from \"./runtime-9cxii0oQ.mjs\";\nimport { t as selectionSessionCreateHandlers } from \"./sessions-create-e0JO9_Bc.mjs\";\nimport { l as normalizeOptionalString } from \"./string-coerce-6kR-86XC.mjs\";\n"
+        },
+        {
+          "before": "const chatHandlers = {",
+          "after": "const chatHandlers = {\n\t\"chat.selection.capabilities\": async (options) => {\n\t\tconst { params, respond } = options;\n\t\tif (params && (Object.keys(params).some(key => ![\"sessionKey\", \"agentId\"].includes(key)) || params.sessionKey !== void 0 && (typeof params.sessionKey !== \"string\" || params.sessionKey.length < 1 || params.sessionKey.length > 512) || params.agentId !== void 0 && (typeof params.agentId !== \"string\" || params.agentId.length < 1 || params.agentId.length > 128))) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, \"CAPABILITY_SELECTION_QUERY_INVALID\")); return; }\n\t\tlet subject;\n\t\tif (params?.sessionKey) {\n\t\t\tconst requestedAgent = resolveRequestedSessionAgentId(options.context.getRuntimeConfig(), params.sessionKey, params.agentId);\n\t\t\tif (!requestedAgent.ok) { respond(false, void 0, requestedAgent.error); return; }\n\t\t\tlet creationError;\n\t\t\tawait selectionSessionCreateHandlers[\"sessions.create\"]({ ...options, params: { key: params.sessionKey, ...params.agentId ? { agentId: params.agentId } : {} }, respond: (ok, payload, error) => {\n\t\t\t\tif (!ok) { creationError = error; return; }\n\t\t\t\tif (payload?.key !== params.sessionKey || typeof payload?.sessionId !== \"string\" || payload.runStarted === true) { creationError = errorShape(ErrorCodes.INVALID_REQUEST, \"CAPABILITY_SELECTION_SESSION_MISMATCH\"); return; }\n\t\t\t\tsubject = { sessionKey: payload.key, sessionId: payload.sessionId, agentId: requestedAgent.agentId };\n\t\t\t} });\n\t\t\tif (creationError || !subject) { respond(false, void 0, creationError ?? errorShape(ErrorCodes.UNAVAILABLE, \"CAPABILITY_SELECTION_SESSION_UNAVAILABLE\")); return; }\n\t\t}\n\t\trespond(true, { ...selectionCapabilities(getSelectionRegistrationRegistry()), ...subject ? { subject } : {} });\n\t},\n\t\"chat.selection.get\": async ({ params, client, respond }) => {\n\t\ttry { respond(true, querySelection(params, client)); }\n\t\tcatch (error) { respond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, error.code || \"CAPABILITY_SELECTION_QUERY_FAILED\")); }\n\t},"
+        }
+      ],
+      "beforeSha256": "0c74d3eef798dcd403651ee89abe287fdfd9c8274c24740c1c9cd1cb5fe19009",
+      "afterSha256": "e29c1ae928d8f861f895fdfdadd6363a84a408b8e2e948a0d5277521b575cf5b"
+    },
+    {
+      "path": "dist/core-method-policy-BePoiMRV.mjs",
+      "edits": [
+        {
+          "before": "\t[\n\t\t\"chat.send\",\n\t\t\"chat-send\",",
+          "after": "\t[ \"chat.selection.capabilities\", \"chat\", \"operator.write\", \"2026.9.9-shoggoth-v1\" ],\n\t[ \"chat.selection.get\", \"chat\", \"operator.write\", \"2026.9.9-shoggoth-v1\" ],\n\t[\n\t\t\"chat.send\",\n\t\t\"chat-send\","
+        },
+        {
+          "before": "const CORE_GATEWAY_METHOD_SPECS = [",
+          "after": "const CORE_GATEWAY_METHOD_SPECS = [\n\t[\"gateway.shoggoth.managed.status\",\"shoggoth-managed\",\"operator.admin\",\"2026.9.9-shoggoth-managed-v1\"],\n\t[\"gateway.shoggoth.managed.pause\",\"shoggoth-managed\",\"operator.admin\",\"2026.9.9-shoggoth-managed-v1\"],\n\t[\"gateway.shoggoth.managed.resume\",\"shoggoth-managed\",\"operator.admin\",\"2026.9.9-shoggoth-managed-v1\"],\n\t[\"gateway.shoggoth.managed.retire\",\"shoggoth-managed\",\"operator.admin\",\"2026.9.9-shoggoth-managed-v1\"],\n\t[\"gateway.shoggoth.managed.model.read\",\"shoggoth-managed\",\"operator.admin\",\"2026.9.9-shoggoth-model-read-v1\"],"
+        }
+      ],
+      "beforeSha256": "04b8d2a10d93b36c392395fe3a8f5c086c695a284e0d35be9af6d1004d2ab99d",
+      "afterSha256": "b34dd109ef8b64015fb012ec598d81638f1ea8b0c809ed6f82496db2260d5b14"
+    },
+    {
+      "path": "dist/agent-tools.before-tool-call-Cg8vCu9u.mjs",
+      "edits": [
+        {
+          "before": "import { a as addTimerTimeoutGraceMs } from \"./number-coercion-Dq1l5muL.mjs\";\n",
+          "after": "import { selectionToolContext } from \"./shoggoth-capability-selection.mjs\";\nimport { a as addTimerTimeoutGraceMs } from \"./number-coercion-Dq1l5muL.mjs\";\n"
+        },
+        {
+          "before": "async function runBeforeToolCallHook(args) {\n\tconst toolName =",
+          "after": "async function runBeforeToolCallHook(args) {\n\tselectionToolContext(args.ctx?.runId, args.ctx, getActivePluginRegistry());\n\tconst toolName ="
+        },
+        {
+          "before": "\t\tconst buildToolContext = (identity) => ({",
+          "after": "\t\tconst buildToolContext = (identity) => selectionToolContext(args.ctx?.runId, {"
+        },
+        {
+          "before": "\t\t\t...args.ctx?.requester ? { requester: args.ctx.requester } : {}\n\t\t});",
+          "after": "\t\t\t...args.ctx?.requester ? { requester: args.ctx.requester } : {}\n\t\t}, getActivePluginRegistry());"
+        },
+        {
+          "before": "\t\t\tassertAgentPluginRuntimeCurrent();\n\t\t\trunAgentToolSourceExecutionGuard(tool);",
+          "after": "\t\t\tassertAgentPluginRuntimeCurrent();\n\t\t\tselectionToolContext(ctx?.runId, ctx, getActivePluginRegistry());\n\t\t\trunAgentToolSourceExecutionGuard(tool);"
+        }
+      ],
+      "beforeSha256": "69abb7861a76913024828b0a7fd1948fc72081f9a8c91b629d0bc06e966f49c5",
+      "afterSha256": "d2c818c24085cc80236256c586ea973e74cc0ae5a7cf9f732a5ca636c1d18865"
+    },
+    {
+      "path": "dist/gateway-work-admission-CpqGU6O4.mjs",
+      "edits": [
+        {
+          "before": "import { t as createDeferredCore }",
+          "after": "import { isManagedGatewayPaused } from \"./shoggoth-managed-admission.mjs\";\nimport { t as createDeferredCore }"
+        },
+        {
+          "before": "function isGatewayWorkAdmissionClosed() {\n\treturn ",
+          "after": "function isGatewayWorkAdmissionClosed() {\n\treturn isManagedGatewayPaused() || "
+        },
+        {
+          "before": "\tif (current) return current.released;\n\treturn GATEWAY_WORK_ADMISSION_STATE.suspendPhase !== \"accepting\";",
+          "after": "\tif (current) return current.released;\n\treturn isManagedGatewayPaused() || GATEWAY_WORK_ADMISSION_STATE.suspendPhase !== \"accepting\";"
+        },
+        {
+          "before": "function getGatewaySuspendAdmissionPhase() {\n\treturn GATEWAY_WORK_ADMISSION_STATE.suspendPhase;",
+          "after": "function getGatewaySuspendAdmissionPhase() {\n\tif (isManagedGatewayPaused() && GATEWAY_WORK_ADMISSION_STATE.suspendPhase === \"accepting\") return GATEWAY_WORK_ADMISSION_STATE.activeRootWork.size > 0 ? \"draining\" : \"prepared\";\n\treturn GATEWAY_WORK_ADMISSION_STATE.suspendPhase;"
+        },
+        {
+          "before": "function tryBeginGatewayIndependentRootWorkAdmission(origin = \"independent\") {\n\tif (",
+          "after": "function tryBeginGatewayIndependentRootWorkAdmission(origin = \"independent\") {\n\tif (isManagedGatewayPaused() || "
+        },
+        {
+          "before": "function tryBeginGatewayRestartStartupRootWorkAdmission() {\n",
+          "after": "function tryBeginGatewayRestartStartupRootWorkAdmission() {\n\tif (isManagedGatewayPaused()) return null;\n"
+        },
+        {
+          "before": "function tryBeginGatewayPreparedRestartRootWorkAdmission() {\n",
+          "after": "function tryBeginGatewayPreparedRestartRootWorkAdmission() {\n\tif (isManagedGatewayPaused()) return null;\n"
+        },
+        {
+          "before": "//#region src/process/gateway-work-admission.ts",
+          "after": "export function notifyManagedGatewayAdmissionChange() { resolveSuspendOpenWaiters(); notifyGatewaySuspendAdmission(); }\n//#region src/process/gateway-work-admission.ts"
+        }
+      ],
+      "beforeSha256": "ebf3a18ed30b070baa619905f17f20b5000a6ad65632c6d2d9b3cda0d430133d",
+      "afterSha256": "0be268c46e6b31f224d7eddc1a1e2c2454324c835086ffbaf5acfc9932b14524"
+    },
+    {
+      "path": "dist/core-handlers-B6k5XxVT.mjs",
+      "edits": [
+        {
+          "before": "const CORE_GATEWAY_HANDLER_MODULES = {",
+          "after": "const CORE_GATEWAY_HANDLER_MODULES = {\n\t\"shoggoth-managed\": () => import(\"./shoggoth-managed-runtime.mjs\").then(module => module.managedRuntimeHandlers),"
+        }
+      ],
+      "beforeSha256": "40761419320aff5ec5f81955d50a04077dd21d02c51256e2b6cf508dbfd10b90",
+      "afterSha256": "352e1c7a901acfaa16e0e684ffad265d9b43af3115549bb30ee03223b56ac946"
+    },
+    {
+      "path": "dist/server-methods-DJEQKCcV.mjs",
+      "edits": [
+        {
+          "before": "const SUSPEND_CONTROL_METHODS = /* @__PURE__ */ new Set([",
+          "after": "const SUSPEND_CONTROL_METHODS = /* @__PURE__ */ new Set([\n\t\"gateway.shoggoth.managed.status\",\n\t\"gateway.shoggoth.managed.pause\",\n\t\"gateway.shoggoth.managed.resume\",\n\t\"gateway.shoggoth.managed.retire\",\n\t\"gateway.shoggoth.managed.model.read\","
+        }
+      ],
+      "beforeSha256": "6a4db1ab8f440777eb96f7149dc00f12d311770d1400629092c990f6e92a3848",
+      "afterSha256": "2d328154ca4642467ed493c41f6fde53bbf4500d995e5610e2a12535a3daf57b"
+    },
+    {
+      "path": "dist/retry-9Fsc3xWg.mjs",
+      "beforeSha256": "3dda8a3961cea831d073ae9f31113d813ad0462deea7923b13877f6560af4ce6",
+      "afterSha256": "1406d6002b44dcb0f03b84cfb1ee3a9bec0d76143c7b9673a8b2fd6e50386cb9",
+      "edits": [
+        {
+          "before": "function isTerminalAssistantError(message) {",
+          "after": "function isTerminalAssistantError(message) {\n\tif (message?.stopReason === \"error\" && message.errorMessage?.trim() === \"SECRET_MODEL_PROJECTION_UNAVAILABLE\") return true;"
+        }
+      ]
+    },
+    {
+      "path": "dist/embedded-agent-helpers-CNzM9z5K.mjs",
+      "beforeSha256": "73d0194fa72a0d8b072130585a8e78f40a57fa92777d9371930d15dd3f8b6e59",
+      "afterSha256": "af1f90768235652363202968344beca64865ef0a2f34acd072e7c30f0dde387c",
+      "edits": [
+        {
+          "before": "\tconst raw = (msg.errorMessage ?? \"\").trim();\n\tif (msg.stopReason !== \"error\" && !raw) return;",
+          "after": "\tconst raw = (msg.errorMessage ?? \"\").trim();\n\tif (raw === \"SECRET_MODEL_PROJECTION_UNAVAILABLE\") return \"SECRET_MODEL_PROJECTION_UNAVAILABLE\";\n\tif (msg.stopReason !== \"error\" && !raw) return;"
+        },
+        {
+          "before": "\t\tcode: signal.code\n\t};",
+          "after": "\t\tcode: msg.errorMessage?.trim() === \"SECRET_MODEL_PROJECTION_UNAVAILABLE\" ? \"SECRET_MODEL_PROJECTION_UNAVAILABLE\" : signal.code\n\t};"
+        }
+      ]
+    },
+    {
+      "path": "dist/assistant-request-failure-copy-DDaASoSI.mjs",
+      "beforeSha256": "5680579b6129494ff3eb22985b211bb134f5ad7dadccb3ca118f12e46f414b0a",
+      "edits": [
+        {
+          "before": "function renderAssistantRequestFailureCopy(facts) {",
+          "after": "function renderAssistantRequestFailureCopy(facts) {\n\tif (facts.code === \"SECRET_MODEL_PROJECTION_UNAVAILABLE\") return \"SECRET_MODEL_PROJECTION_UNAVAILABLE\";"
+        }
+      ],
+      "afterSha256": "d3f7e4e917e1fdb52a1d221e6110015e88cd97820cceb5b56ab880f54fbb718d"
+    }
+  ],
+  "newFiles": [
+    {
+      "path": "dist/shoggoth-capability-selection.mjs",
+      "source": "shoggoth-capability-selection.mjs",
+      "sha256": "243765a57a350b266fe0fa6bdf79a3b8e52d6174c8e9e865d15c2063dbb9ca0f"
+    },
+    {
+      "path": "dist/shoggoth-managed-admission.mjs",
+      "source": "shoggoth-managed-admission.mjs",
+      "sha256": "9315738d644ef1f57fd6e77e2d86bf9175a636338ae497160ecfdb697ba7ac73"
+    },
+    {
+      "path": "dist/shoggoth-managed-runtime.mjs",
+      "source": "shoggoth-managed-runtime.mjs",
+      "sha256": "beee7e05db4b0ee85691f74173b7e68a0355ecf2f73bd5d9d8102c8e6996ae5b"
+    }
+  ],
+  "dependencies": [
+    {
+      "path": "dist/runtime-9cxii0oQ.mjs",
+      "sha256": "9f18ed5dbca908c9a71f126d08f09bcfed73e93d80efe9e668fecb5a6e568356"
+    },
+    {
+      "path": "dist/registry-lifecycle-DyhiReoE.mjs",
+      "sha256": "2da2111b77487c3bd64bacf9aa5a8ffb21d972445ca08100c393dd4e475da851"
+    },
+    {
+      "path": "dist/sessions-create-e0JO9_Bc.mjs",
+      "sha256": "f649a7a5ef98dbbcbc72996ecdc7b6d20cd72ea0831e4b16bdf28f973ee4a0f9"
+    },
+    {
+      "path": "dist/gateway-active-work-5pqysFui.mjs",
+      "sha256": "eda74e229fee3f0555ecdcdca87ea0e8bcfa6f3fa1d70c92829a2a0c5d94c0cf"
+    },
+    {
+      "path": "dist/server-active-work-DN_B69-k.mjs",
+      "sha256": "3c4ef8af2d14ec9bb70ca2b50dd07b7d0ea0e92c561db1da525ca07e8d7366b1"
+    },
+    {
+      "path": "dist/models-C4HiAbON.mjs",
+      "sha256": "199cc3ddf86c80289002df22f2fa464916fd428f88261f88505617b5d794ffad"
+    },
+    {
+      "path": "dist/config-BwxVHElu.mjs",
+      "sha256": "c618f1b1d93474e759928f33f277280a73491ce28abdfc462009cccb985fd70e"
+    },
+    {
+      "path": "dist/sessions-read-D1WlYLmb.mjs",
+      "sha256": "dd10e30169e2eb063617dc43cb2a586dc02bd3e341891ea924fbfa0e5d61f097"
+    },
+    {
+      "path": "dist/cron-CreQqGN3.mjs",
+      "sha256": "247f414fd673c08f421dfff9b9d18f1362e80a2417d375443140a1ca2b75f7a9"
+    }
+  ],
+  "upstreamSource": "https://www.npmjs.com/package/openclaw/v/2026.9.9",
+  "licenseFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "73571b25326281d369087f469842c02444fe39faaecebda4d82ed21ff3a1c29d"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "sha256": "c1d1bbc550feee74853eba104e347341569cbbbe37a9f77659993ca0766277d5"
+    }
+  ],
+  "managedProtocol": "openclaw-managed-v1",
+  "managedModelReadProtocol": "openclaw-model-read-v1",
+  "modelSecretProjectionProtocol": "local-model-projection-v1"
+}

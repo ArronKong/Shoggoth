@@ -1,5 +1,7 @@
 "use strict";
 
+const { requiresConnectorMigration } = require("../core/legacy-plugin-dependency");
+
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -621,6 +623,13 @@ class NativeCronScheduler {
         }
         continue;
       }
+      if (requiresConnectorMigration(job)) {
+        runs[index] = this.dispatcher.transition(run.id, run.status === "queued" ? "skipped" : "interrupted", {
+          ...(run.status === "queued" ? { resultSummary: "CRON_CONNECTOR_MIGRATION_REQUIRED" }
+            : { errorCode: "CRON_CONNECTOR_MIGRATION_REQUIRED" }),
+        });
+        continue;
+      }
       try {
         if (intent) {
           const frozen = frozenJob(job);
@@ -762,7 +771,7 @@ class NativeCronScheduler {
     for (const initial of this.cronStore.listJobs({ enabled: true })) {
       this.#assertGeneration(generation);
       const job = this.cronStore.getJob(initial.id);
-      if (!job) continue;
+      if (!job || requiresConnectorMigration(job)) continue;
       const frozen = this.#freezeJobExecution(job);
       if (!frozen.job.enabled || frozen.job.nextRunAt === null
         || frozen.job.nextRunAt > wallNow) continue;
@@ -1031,6 +1040,7 @@ class NativeCronScheduler {
       }
       const currentJob = this.cronStore.getJob(existing.run.sourceId);
       if (!currentJob) return existing.run;
+      if (requiresConnectorMigration(currentJob)) throw schedulerError("CRON_CONNECTOR_MIGRATION_REQUIRED", "此任务依赖旧插件，请编辑任务并重新选择连接器账号");
       try {
         const frozen = this.#freezeJobExecution(currentJob);
         this.#assertExecutionBinding(existing.intent, frozen.execution);
@@ -1061,6 +1071,7 @@ class NativeCronScheduler {
     this.#preflightOperationTimestamp(input.createdAt);
     const job = this.cronStore.getJob(input.jobId);
     if (!job) throw schedulerError("CRON_JOB_NOT_FOUND", "Cron Job 不存在");
+    if (requiresConnectorMigration(job)) throw schedulerError("CRON_CONNECTOR_MIGRATION_REQUIRED", "此任务依赖旧插件，请编辑任务并重新选择连接器账号");
     const frozen = this.#freezeJobExecution(job);
     const intent = Object.freeze({
       jobId: job.id,
@@ -1318,6 +1329,7 @@ class NativeCronScheduler {
     let memoryDue = null;
     try { memoryDue = this.memoryMaintenance?.nextDueAt() ?? null; } catch (error) { this.memoryMaintenanceError = error; }
     const next = [...this.cronStore.listJobs({ enabled: true })
+      .filter(job => !requiresConnectorMigration(job))
       .map((job) => job.nextRunAt)
       , memoryDue]
       .filter((value) => value !== null)

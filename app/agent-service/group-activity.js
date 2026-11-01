@@ -2,12 +2,13 @@
 
 const { hasSecret } = require("./memory-engine");
 const crypto = require("node:crypto");
+const { groupReplyMessages } = require("../group-reply-messages");
 
 const TERMINAL_PHASES = new Set(["completed", "failed", "cancelled"]);
-const PHASES = new Set(["preparing", "queued", "running", "tool", "text", "waiting_approval", "waiting_input",
+const PHASES = new Set(["preparing", "queued", "running", "retrying", "tool", "text", "waiting_approval", "waiting_input",
   "compacting", "compacted", "stopping", "reconciling", ...TERMINAL_PHASES]);
 const TITLES = Object.freeze({ preparing: "准备执行", queued: "排队等待", running: "执行中", tool: "工具执行",
-  text: "生成正文", waiting_approval: "等待审批", waiting_input: "等待补充", stopping: "停止待确认",
+  text: "生成正文", retrying: "模型服务暂时出错，正在重试", waiting_approval: "等待审批", waiting_input: "等待补充", stopping: "停止待确认",
   reconciling: "执行待核对", compacting: "正在压缩上下文", compacted: "上下文已压缩",
   completed: "已完成", failed: "执行失败", cancelled: "已取消" });
 const BINDING_FIELDS = ["groupId", "discussionId", "memberId", "opportunityId", "taskId", "attemptId", "runId", "executionGeneration"];
@@ -105,7 +106,7 @@ class GroupActivityProjection {
     this.streamGeneration = stream; this.eventSeq = 0; this.items.clear(); this.itemHashes.clear(); this.lastItem = null;
     this.tools.clear(); this.currentToolId = null;
     this.compaction = null;
-    if (["compacting", "compacted"].includes(this.phase)) this.phase = "running";
+    if (["compacting", "compacted", "retrying"].includes(this.phase)) this.phase = "running";
     return true;
   }
   #progress(at) { this.lastProgressAt = Math.max(this.lastProgressAt ?? 0, at); }
@@ -130,7 +131,7 @@ class GroupActivityProjection {
     if (signature === this.statusSignature) return false;
     this.statusSignature = signature;
     // Repeated running snapshots must not erase a more specific tool/text activity.
-    if (phase === "running" && ["tool", "text", "compacting", "compacted"].includes(this.phase)) return false;
+    if (phase === "running" && ["tool", "text", "compacting", "compacted", "retrying"].includes(this.phase)) return false;
     this.phase = phase; this.terminal = TERMINAL_PHASES.has(phase); this.#progress(at); return true;
   }
   observeEvents(events, stream) {
@@ -145,6 +146,17 @@ class GroupActivityProjection {
       const p = event.payload ?? {}; const at = Number.isSafeInteger(event.createdAt) ? Math.min(event.createdAt, this.now())
         : Number.isSafeInteger(event.occurredAt) ? Math.min(event.occurredAt, this.now()) : this.now();
       if (event.type === "terminal" || event.type === "status") {
+        if (event.type === "status" && p.status === "retrying") {
+          if (this.phase !== "retrying") {
+            this.phase = "retrying"; this.statusSignature = null;
+            this.#progress(at); changed = true;
+          }
+          continue;
+        }
+        if (event.type === "status" && p.status === "running" && this.phase === "retrying") {
+          this.phase = "running"; this.statusSignature = "running";
+          this.#progress(at); changed = true; continue;
+        }
         if (event.type === "status" && ["compacting", "compacted"].includes(p.status)) {
           if (this.compaction?.status !== p.status) {
             this.phase = p.status;
@@ -160,10 +172,12 @@ class GroupActivityProjection {
         }
         changed = this.observeStatus(p.status, { at }) || changed; continue;
       }
-      if (["text", "text.delta"].includes(event.type) && p.delivery !== "async" && p.phase !== "analysis"
+      if (["text", "text.delta", "text.done"].includes(event.type) && p.delivery !== "async" && p.phase !== "analysis"
         && p.phase !== "reasoning") {
         const id = p.itemId ?? "default";
-        if (!this.#text(id, event.type === "text" ? p.text : p.delta, event.type === "text.delta")) continue;
+        const updated = this.#text(id, event.type === "text.delta" ? p.delta : p.text, event.type === "text.delta");
+        if (event.type === "text.done" && this.items.has(id)) this.phase = "running";
+        if (!updated && event.type !== "text.done") continue;
         this.#progress(at); changed = true; continue;
       }
       if (!["tool.start", "tool.update", "tool.result"].includes(event.type)) continue;
@@ -203,6 +217,11 @@ class GroupActivityProjection {
     return changed;
   }
   draft() { return this.lastItem === null ? null : textTail([...this.items.values()].filter(Boolean).join("\n\n")); }
+  replyMessages() {
+    return groupReplyMessages([...this.items].map(([id, text]) => ({ id, text: safeValue(text, 0, { bytes: 4096 }),
+      pending: !this.terminal && this.phase === "text" && id === this.lastItem,
+      final: this.terminal && this.phase === "completed" && id === this.lastItem })));
+  }
   observeDraft(text) {
     if (this.terminal || !this.#text("draft", text)) return false;
     this.observedAt = this.now(); this.#progress(this.observedAt); return true;
@@ -220,6 +239,10 @@ class GroupActivityProjection {
     this.tools = new Map(activity.recentTools.map(tool => [tool.id, sanitize(tool)]));
     if (activity.tool) this.tools.set(activity.tool.id, sanitize(activity.tool));
     this.currentToolId = activity.tool?.id ?? null;
+    if (activity.textMessages) {
+      this.items = new Map(groupReplyMessages(activity.textMessages).map(item => [item.id, item.text]));
+      this.lastItem = [...this.items.keys()].at(-1) ?? null;
+    }
     return before !== JSON.stringify(this.snapshot());
   }
   snapshot() {
@@ -230,6 +253,8 @@ class GroupActivityProjection {
       recentTools: [...this.tools.values()].slice(-8).map(publicTool),
       ...(this.compaction ? { compaction: { ...this.compaction } } : {}) };
     while (value.recentTools.length && Buffer.byteLength(JSON.stringify(value), "utf8") > 64 * 1024) value.recentTools.shift();
+    const textMessages = this.replyMessages();
+    if (textMessages.length) value.textMessages = textMessages;
     return value;
   }
 }
@@ -247,14 +272,26 @@ function validGroupActivity(value) {
     && item.eventSeq >= 0 && item.eventSeq <= value.eventSeq && timestamp(item.observedAt)
     && timestamp(item.lastObservedAt) && item.lastObservedAt >= item.observedAt;
   if (!value || Object.getPrototypeOf(value) !== Object.prototype
-    || Object.keys(value).length !== keys.length + (Object.hasOwn(value, "compaction") ? 1 : 0)
+    || Object.keys(value).length !== keys.length + (Object.hasOwn(value, "compaction") ? 1 : 0) + (Object.hasOwn(value, "textMessages") ? 1 : 0)
     || !keys.every(key => Object.hasOwn(value, key)) || !BINDING_FIELDS.every(key => value[key] === null || text(value[key]))
     || !PHASES.has(value.phase) || !text(value.title) || !Number.isSafeInteger(value.eventSeq) || value.eventSeq < 0
     || !(value.streamGeneration === null || text(value.streamGeneration))
     || !timestamp(value.observedAt) || !timestamp(value.lastProgressAt) || !(value.tool === null || tool(value.tool))
     || !Array.isArray(value.recentTools) || value.recentTools.length > 8 || !value.recentTools.every(tool)
-    || Object.hasOwn(value, "compaction") && !compaction(value.compaction)) return false;
-  try { return Buffer.byteLength(JSON.stringify(value)) <= 64 * 1024; } catch { return false; }
+    || Object.hasOwn(value, "compaction") && !compaction(value.compaction)
+    || Object.hasOwn(value, "textMessages") && (!Array.isArray(value.textMessages)
+      || groupReplyMessages(value.textMessages).length !== value.textMessages.length
+      || !value.textMessages.every((item, index) => {
+        const normalized = groupReplyMessages(value.textMessages)[index];
+        return normalized.id === item.id && normalized.text === item.text
+          && Object.keys(item).every(key => ["id", "text", "pending", "final"].includes(key))
+          && (item.pending === undefined || typeof item.pending === "boolean") && (item.final === undefined || typeof item.final === "boolean");
+      }))) return false;
+  try {
+    const { textMessages, ...activity } = value;
+    return Buffer.byteLength(JSON.stringify(activity)) <= 64 * 1024
+      && Buffer.byteLength(JSON.stringify(value)) <= (textMessages ? 256 : 64) * 1024;
+  } catch { return false; }
 }
 
 module.exports = { GroupActivityProjection, PHASES, BINDING_FIELDS, safeValue, toolTitle, phaseFor, validGroupActivity };

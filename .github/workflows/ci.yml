@@ -18,7 +18,16 @@ jobs:
           npm ci --ignore-scripts
           node node_modules/electron/install.js
       - name: Headless Hooks source, real Service and Electron ASAR boundaries
+        env:
+          SHOGGOTH_CONNECTOR_HOOK_RUNTIME: source
         run: npm run test:hooks
+      - name: Native CLI identity and bilingual capability UI
+        run: |
+          npm --prefix app/manage-ui ci --ignore-scripts
+          node --test scripts/runtime-executable-identity-unit.cjs
+          node scripts/runtime-compatibility-ui-regression.mjs
+      - name: MCP connector storage, transport and OAuth fixtures
+        run: npm run test:mcp-connectors
       - name: Static UI ASAR disk-write failure regressions
         run: node --test scripts/static-ui-assets-regression.cjs scripts/system-issue-unit.cjs
       - name: Borrowed-memory Hook isolation in the real macOS sandbox
@@ -44,10 +53,34 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm --prefix app/manage-ui ci --ignore-scripts
+      - name: Prepare sandboxed Linux desktop fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          node node_modules/electron/install.js
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          Xvfb :99 -screen 0 1440x1000x24 > "$RUNNER_TEMP/shoggoth-xvfb.log" 2>&1 &
+          DISPLAY_PID=$!
+          echo "$DISPLAY_PID" > "$RUNNER_TEMP/shoggoth-xvfb.pid"
+          for attempt in $(seq 1 40); do
+            kill -0 "$DISPLAY_PID"
+            if node -e 'const s=require("node:net").createConnection({path:"/tmp/.X11-unix/X99"});s.once("connect",()=>s.end());s.once("error",()=>{process.exitCode=1});s.setTimeout(1000,()=>{s.destroy();process.exitCode=1});' >/dev/null 2>&1; then
+              echo "DISPLAY=:99" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat "$RUNNER_TEMP/shoggoth-xvfb.log"
+          exit 1
       - name: Type check and production UI build
         run: |
           npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json
           npm run build:manage
+      - name: MCP connector contracts and retained plugin history
+        run: |
+          npm run test:mcp-connectors
+          npm run test:mcp-connectors:history
       - name: Third-party license completeness and consistency
         run: |
           npm run fetch:codex
@@ -65,6 +98,7 @@ jobs:
           node scripts/adhoc-sign-unit.cjs
           node scripts/release-package-checks-unit.cjs
           node scripts/notarize-unit.cjs
+          node --test scripts/undici-security-regression.cjs
           node scripts/shoggoth-memory-sharing-unit.cjs
           node scripts/shoggoth-memory-trust-unit.cjs
           node --test scripts/shoggoth-memory-consolidation-unit.cjs
@@ -81,10 +115,27 @@ jobs:
           node scripts/proxy-smoke.mjs
           node scripts/proxy-chat-smoke.mjs
           node scripts/hermes-start-smoke.cjs
-      - name: Pinned OpenClaw memory core and isolated Service
+      - name: Prepare pinned memory assets and verify core
         run: |
+          node scripts/fetch-e5-model.mjs
           npm run check:memory-core
-          npm run test:memory-core
+      - name: Native CLI capability and upgrade contracts
+        run: |
+          node --test scripts/runtime-capability-evidence-unit.cjs scripts/runtime-executable-identity-unit.cjs scripts/runtime-pool-upgrade-unit.cjs scripts/runtime-compatibility-unit.cjs scripts/runtime-support-unit.cjs
+          node --test scripts/grok-build-runtime-adapter-unit.cjs scripts/opencode-runtime-unit.cjs
+          node scripts/codex-app-server-smoke.cjs
+          node scripts/shoggoth-profile-service-unit.cjs
+      - name: Native Agent Computer Use and Browser Use path
+        run: |
+          node scripts/shoggoth-runtime-adapter-contract.cjs
+          node scripts/shoggoth-work-run-coordinator-unit.cjs
+          node --test scripts/runtime-execution-context-unit.cjs
+          node --test scripts/runtime-mcp-bridge-isolation-unit.cjs
+          node --test scripts/runtime-mcp-bridge-confirmation-unit.cjs
+          node --test scripts/product-confirmation-schema-unit.cjs
+          node --test scripts/computer-browser-use-conformance.cjs
+      - name: Pinned OpenClaw memory core and isolated Service
+        run: npm run test:memory-core
       - name: OpenClaw endpoint and credential regressions
         run: |
           node --test scripts/openclaw-credential-rpc-regression.cjs scripts/openclaw-endpoint-activity-regression.cjs
@@ -101,8 +152,8 @@ jobs:
           node scripts/computer-use-settings-ui-unit.mjs
       - name: Dependency vulnerability audit
         run: |
-          npm audit --audit-level=moderate
-          npm --prefix app/manage-ui audit --audit-level=moderate
+          node --test scripts/dependency-audit-policy-unit.cjs
+          npm run audit:release
       - name: Product help and Browser Use regressions
         run: |
           node --test scripts/shoggoth-browser-use-controller-unit.cjs
@@ -112,15 +163,6 @@ jobs:
           node scripts/browser-use-settings-ui-unit.mjs
           node scripts/browser-use-service-unit.cjs
           node scripts/shoggoth-mcp-helper-hardening-unit.cjs
-      - name: Native Agent Computer Use and Browser Use path
-        run: |
-          node scripts/shoggoth-runtime-adapter-contract.cjs
-          node scripts/shoggoth-work-run-coordinator-unit.cjs
-          node --test scripts/runtime-execution-context-unit.cjs
-          node --test scripts/runtime-mcp-bridge-isolation-unit.cjs
-          node --test scripts/runtime-mcp-bridge-confirmation-unit.cjs
-          node --test scripts/product-confirmation-schema-unit.cjs
-          node --test scripts/computer-browser-use-conformance.cjs
       - name: Scan the public source export for secrets
         shell: bash
         run: |

@@ -159,10 +159,14 @@ test("model and Provider rename edit definitions without rewriting bindings or c
 
 test("provider draft replaces model selection once without changing existing metadata or defaults", () => {
   const f = fixture();
+  f.config.models.providers.xmxm.headers = { "x-fixture": "retained", Authorization: "fixture-private-header" };
+  f.config.models.providers.xmxm.params = { region: "fixture-region", nested: { enabled: true } };
   const result = buildOpenClawModelDraft(f.config, { kind: "save-provider", providerKey: "xmxm", patch: { modelIds: ["mimo", "second"], baseUrl: "https://changed.invalid/v1" } });
   assert.deepEqual(result.config.models.providers.xmxm.models[0], f.config.models.providers.xmxm.models[0]);
   assert.deepEqual(result.config.models.providers.xmxm.models[1], { id: "second", name: "second" });
   assert.deepEqual(result.config.agents, f.config.agents);
+  assert.deepEqual(result.config.models.providers.xmxm.headers, f.config.models.providers.xmxm.headers);
+  assert.deepEqual(result.config.models.providers.xmxm.params, f.config.models.providers.xmxm.params);
 });
 
 test("existing coordinator deletes referenced Provider through exactly one official config.set", async t => {

@@ -114,12 +114,19 @@ class MemoryIndexEmbedding extends core.MemoryManagerEmbeddingOps {
   }
   attachProvider(provider, runtime, batch) {
     this.provider = provider ? this.admitProvider(provider) : null;
-    this.providerRuntime = runtime?.batchEmbed
-      ? { ...runtime, batchEmbed: options => this.providerCall(() => runtime.batchEmbed(options)) } : runtime;
+    // Raise upstream provider defaults through runtime facts. Explicit product
+    // sync.embeddingBatchTimeoutSeconds still wins inside the upstream resolver.
+    const local = ["local", "llama-cpp", "ollama"].includes(provider?.id);
+    this.providerRuntime = {
+      ...runtime,
+      inlineQueryTimeoutMs: Math.max(local ? 15 * 60_000 : 3 * 60_000, runtime?.inlineQueryTimeoutMs || 0),
+      inlineBatchTimeoutMs: Math.max(local ? 30 * 60_000 : 10 * 60_000, runtime?.inlineBatchTimeoutMs || 0),
+      ...(runtime?.batchEmbed ? { batchEmbed: options => this.providerCall(() => runtime.batchEmbed(options)) } : {}),
+    };
     const configured = batch || this.settings.remote?.batch;
     this.batch = { enabled: Boolean(configured?.enabled && runtime?.batchEmbed), wait: configured?.wait ?? true,
       concurrency: Math.max(1, configured?.concurrency ?? 2), pollIntervalMs: configured?.pollIntervalMs ?? 2000,
-      timeoutMs: (configured?.timeoutMinutes ?? 60) * 60_000 };
+      timeoutMs: (configured?.timeoutMinutes ?? 240) * 60_000 };
   }
 
   get database() { return this.databaseScopes.getStore() || this.publishedDatabase; }

@@ -26,7 +26,7 @@ export class ChatWsClient {
   private reqId = 1;
 
   // 帧协议与 ChatPage 同款:{type:"req",id,method,params} ↔ {type:"res",id,ok,error,payload}。
-  connect(timeoutMs = 3000): Promise<void> {
+  connect(timeoutMs = 10000): Promise<void> {
     return new Promise((resolve, reject) => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
       let ws: WebSocket;
@@ -80,7 +80,7 @@ export class ChatWsClient {
     });
   }
 
-  request(method: string, params: unknown, timeoutMs = 15000): Promise<any> {
+  request(method: string, params: unknown, timeoutMs = 45000): Promise<any> {
     return new Promise((resolve, reject) => {
       const ws = this.ws;
       if (!ws || ws.readyState !== WebSocket.OPEN) return reject(new Error("not connected"));

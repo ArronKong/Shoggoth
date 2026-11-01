@@ -138,6 +138,8 @@ function rpcFixture(behavior = {}) {
   let reservationSequence = 0;
   const mcpGateIssuer = {
     reserveMcpServer(input) {
+      assert.equal(input.parentLauncherExecutable, "/bin/sh",
+        "Pi must reserve its waiting shell before bind releases fd 3");
       reservations.push(input);
       reservationSequence += 1;
       const reservationId = reservationSequence.toString(16).padStart(64, "0");
@@ -705,7 +707,7 @@ test("Pi normal turns append complete policy to the native system prompt and kee
   try {
     const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
     const runtime = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
-    assert.equal(runtime.host.promptTimeoutMs, 30 * 60_000, "ordinary turns retain a finite thirty-minute budget");
+    assert.equal(runtime.host.promptTimeoutMs, null, "ordinary turns have no total deadline");
     const started = await runtime.sessionStart({ source: "chat:system-policy", cwd: value.workspace,
       model: "openai/gpt-5.6", permissionPolicy, developerInstructions: "FULL_POLICY_WITH_RARE_CAPABILITY" });
     const events = [];
@@ -1047,6 +1049,28 @@ test("Pi permission uses approval semantics and pauses the active turn deadline"
   }
 });
 
+test("Pi input preserves MCP suggestions and returns a verbatim custom answer", async () => {
+  const { PiRuntimeHost } = require("../app/agent-service/pi-runtime-host");
+  const { encodeInputChoicesDescription, normalizeInteractiveRequestV1,
+    validateInteractiveResponseV1 } = require("../app/core/shoggoth-interaction-contract");
+  const host = Object.create(PiRuntimeHost.prototype);
+  const answer = "麦乐鸡 🍟\n不要辣";
+  const description = encodeInputChoicesDescription("想吃什么？", [
+    { label: "汉堡", description: "单人餐" }, { label: "炸鸡", description: "两件" },
+  ]);
+  host.serverRequestHandlers = new Map([["mcpServer/elicitation/request", async (params) => {
+    const request = normalizeInteractiveRequestV1({ runId: "pi-input-run", eventType: "prompt",
+      payload: { ...params, requestId: "pi-input", method: "mcpServer/elicitation/request", kind: "mcp_elicitation" } });
+    assert.equal(request.fields[0].type, "choice_or_text");
+    assert.deepEqual(request.fields[0].options.map(option => option.label), ["汉堡", "炸鸡"]);
+    const response = validateInteractiveResponseV1(request, { action: "submit", answers: { answer } });
+    return { action: "accept", content: response.answers };
+  }]]);
+  assert.deepEqual(await host._onExtensionRequest({ sessionId: "pi-session", turnId: "pi-turn", settled: false }, {
+    method: "input", id: "pi-input", title: "餐品", placeholder: description,
+  }), { type: "extension_ui_response", id: "pi-input", value: answer });
+});
+
 test("Pi product confirmation preserves its field identity and pauses the active turn deadline", async () => {
   const value = rpcFixture({ requestProductConfirmation: true, promptTimeoutMs: 100 });
   try {
@@ -1347,6 +1371,8 @@ test("Pi surfaces provider authentication errors without locking the conversatio
     const { session } = await runtime.sessionStart({
       source: "chat:auth-failure", cwd: value.workspace, model: "openai/gpt-5.6", permissionPolicy,
     });
+    const failures = [];
+    runtime.host.subscribe(event => { if (event.type === "complete") failures.push(event); });
     for (const [index, [message, expectedCode]] of [
       ["OAuth refresh failed for xai: xAI OAuth token refresh failed (HTTP 400): invalid_grant: User account is blocked", "RUNTIME_ACCOUNT_BLOCKED"],
       ["OAuth refresh failed: invalid_grant: token expired", "AUTH_REQUIRED"],
@@ -1368,6 +1394,8 @@ test("Pi surfaces provider authentication errors without locking the conversatio
       const read = await runtime.sessionRead({ sessionId: session.id, includeTurns: true });
       assert.equal(read.session.turns[index].errorCode, expectedCode);
       assert.equal(read.session.turns[index].status, message ? "failed" : "completed");
+      if (message) assert.ok(failures[index].failure?.message, "provider diagnostic survives the terminal boundary");
+      else assert.equal(failures[index].failure, undefined);
       if (["AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED"].includes(expectedCode)) assert.equal(runtime.host.profileState.auth, null);
       else assert.notEqual(runtime.host.profileState.auth, null, "a provider limit must not invalidate the login");
     }

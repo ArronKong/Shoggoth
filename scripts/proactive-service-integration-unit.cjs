@@ -252,6 +252,59 @@ test("scoped Chat reminders and saved legacy notices open the authoritative comp
   assert.equal(new URL(current.items[0].href, "http://fixture.local").searchParams.get("session"), gatewayKey);
   assert.equal(f.sent.length, 1); assert.equal(f.host.turnStarts, 2);
 });
+
+test("a published notice enters the next Service chat turn in an existing native session", async t => {
+  const f = await fixture(t), profile = f.service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+  const runtimeConfig = f.service.nativeRuntimeConfig.read();
+  f.service.nativeRuntimeConfig.apply({ ...runtimeConfig, revision: runtimeConfig.revision + 1,
+    flags: { ...runtimeConfig.flags, runtimeContextLifecycleV1: true } });
+  const turns = [], turnStart = f.host.turnStart.bind(f.host);
+  f.host.turnStart = async params => { turns.push(structuredClone(params)); return turnStart(params); };
+  const gatewayKey = await f.backend.createSession(profile.agentId);
+  const sessionKey = gatewayKey.slice(`agent:${profile.agentId}:`.length);
+  const send = async prompt => {
+    const accepted = await f.ipc("chat.send", { operationId: id(), sessionKey, prompt, createdAt: f.clock.value });
+    await until(() => f.service.workDispatcher.getRun(accepted.run.id).status === "running");
+    return f.service.workDispatcher.getRun(accepted.run.id);
+  };
+  const first = await send("Hello before the reminder.");
+  f.host.complete(first, "Hello."); await until(() => f.service.workDispatcher.getRun(first.id).status === "completed");
+  const { monitor } = await f.monitor();
+  const config = { ...monitor.config, enabled: true, activeHours: null, target: { mode: "explicit", sessionKey },
+    checklist: [{ id: "review-state", instruction: "Review the local state", enabled: true, mode: "review" }] };
+  await f.save(config); f.clock.value += 30 * 60000; await f.service.proactiveScheduler.tick();
+  await until(() => f.service.workDispatcher.listRuns({ source: "proactive" })[0]?.status === "running");
+  const review = f.service.workDispatcher.listRuns({ source: "proactive" })[0];
+  const occurrence = f.service.proactiveStore.occurrenceForRun(review.id);
+  f.service.proactiveService.respond(review, { runId: review.id, outcome: "notice", reason: "Useful local reminder",
+    candidates: occurrence.candidates.map(({ id, evidenceVersion }) => ({ id, evidenceVersion })), body: "PUBLIC_NOTICE_SERVICE_ROUNDTRIP" });
+  f.host.complete(review, "PRIVATE_BACKGROUND_REVIEW"); await f.service.proactiveScheduler.waitForIdle();
+  assert.equal(f.sent.length, 1);
+  const next = await send("What did you just remind me about?");
+  assert.equal(next.runtimeSessionRef.sessionId, first.runtimeSessionRef.sessionId);
+  assert.equal(f.host.lastInjectedItems.threadId, next.runtimeSessionRef.sessionId);
+  assert.match(JSON.stringify(f.host.lastInjectedItems.items), /PUBLIC_NOTICE_SERVICE_ROUNDTRIP/u);
+  assert.doesNotMatch(JSON.stringify(f.host.lastInjectedItems.items), /PRIVATE_BACKGROUND_REVIEW/u);
+  assert.match(JSON.stringify(turns.at(-1).input), /What did you just remind me about/u);
+  const session = f.service.chatSessionStore.getSession(sessionKey);
+  const event = f.service.transcriptStore.listEvents(profile.id, session.id).find(item => item.content?.proactiveNotice);
+  assert.equal(event.contextExcluded, false);
+  f.service.conversationRecallService.prebuildProfile(profile.id);
+  await f.service.conversationRecallService.whenIndexReady(profile.id);
+  const lease = f.service.workRunCoordinator.runCapabilityLeases.get(next.id);
+  const scope = { runId: next.id, assertCurrent: () => f.service.workRunCoordinator.hostCapabilityIssuer.assert(lease,
+    { kind: "mcp", identity: { runId: next.id } }) };
+  const call = (name, args) => f.service.mcpProductToolController.handle(name,
+    { source: "chat", sourceId: sessionKey, ...args }, { profileId: profile.id, callId: id() }, scope);
+  const found = await call("conversation_search", { query: "PUBLIC_NOTICE_SERVICE_ROUNDTRIP" });
+  assert.deepEqual(found.results.map(item => item.eventId), [event.id]);
+  const original = await call("conversation_get", { sessionId: session.id, eventId: event.id });
+  assert.match(original.events[0].text, /PUBLIC_NOTICE_SERVICE_ROUNDTRIP/u);
+  f.host.complete(next, "The published reminder was available.");
+  await until(() => f.service.workDispatcher.getRun(next.id).status === "completed");
+  const read = await f.ipc("chat.history", { sessionKey, cursor: null, limit: 100 });
+  assert.equal(read.messages.filter(item => item.payload.message?.shoggoth?.proactiveNotice).length, 1);
+});
 test("unstructured ack stays silent and disabling an active check rejects its later tool response", async t => {
   const f = await fixture(t), { monitor } = await f.monitor();
   const config = { ...monitor.config, enabled: true, activeHours: null,
@@ -282,6 +335,10 @@ test("unstructured ack stays silent and disabling an active check rejects its la
 });
 test("expired reply authority is excluded from reminders without answering or cancelling the original request", async t => {
   const f = await fixture(t), { idea } = await f.ipc("inspiration.create", { operationId: id(), body: "等待审批的灵感" });
+  // Production interactions have no default deadline. Give this fixture an
+  // explicit lease expiry so it continues to cover expired reply authority.
+  const issuer = f.service.workRunCoordinator.hostCapabilityIssuer, issue = issuer.issue.bind(issuer);
+  issuer.issue = input => issue({ ...input, expiresAt: f.clock.value + DAY_MS });
   const profile = f.service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
   const started = (await f.ipc("inspiration.start", { operationId: id(), id: idea.id, expectedRevision: idea.revision, agentId: profile.agentId, backendId: profile.backendId, instruction: "", workspace: null })).idea;
   const runId = started.latestExecution.runId; await until(() => f.service.workDispatcher.getRun(runId).status === "running");
@@ -400,6 +457,113 @@ test("HEARTBEAT file facade, bounded web evidence and structured scratch survive
   assert.equal((await f.ipc("proactive.scratch.get", { profileId: run.profileId })).scratch.content, "Last seen: release 3.");
   assert.equal((await f.ipc("proactive.document.get", { profileId: run.profileId })).document.content, content);
   assert.equal(f.sent.length, 1); assert.equal(calls.length, 2);
+});
+test("daily rules are editable through the Agent file facade and persist without starting a review", async t => {
+  const f = await fixture(t, { autoSparkNotes: true }), profile = f.service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+  const detail = await f.backend.getAgent(profile.agentId);
+  assert.ok(detail.files.some(file => file.name === "DAILY_REVIEW.md" && file.readOnly === false));
+  const initial = await f.backend.getAgentFile(profile.agentId, "DAILY_REVIEW.md");
+  assert.match(initial.content, /seeds created today/); assert.equal(initial.missing, true);
+  const heartbeat = await f.backend.getAgentFile(profile.agentId, "HEARTBEAT.md"), monitor = (await f.monitor("inspiration")).monitor;
+  const rules = "Review all supplied ideas. Notify only when I can unblock a concrete next step.\n";
+  const saved = await f.backend.setAgentFile(profile.agentId, "DAILY_REVIEW.md", rules, { expectedRevision: initial.revision });
+  const reread = await f.backend.getAgentFile(profile.agentId, "DAILY_REVIEW.md");
+  assert.equal(reread.content, rules); assert.equal(reread.revision, saved.fileRevision);
+  await assert.rejects(() => f.backend.setAgentFile(profile.agentId, "DAILY_REVIEW.md", "stale", { expectedRevision: initial.revision }), { code: "PROACTIVE_REVISION_CONFLICT" });
+  assert.deepEqual(await f.backend.getAgentFile(profile.agentId, "HEARTBEAT.md"), heartbeat);
+  assert.deepEqual((await f.monitor("inspiration")).monitor, monitor); assert.equal(f.host.turnStarts, 0);
+  await f.service.stop({ notify: false }); await f.service.start(); await f.service.proactiveScheduler.waitForIdle();
+  assert.deepEqual(await f.backend.getAgentFile(profile.agentId, "DAILY_REVIEW.md"), reread);
+  assert.equal(f.host.turnStarts, 0);
+});
+test("today's new seed reaches the real daily Service flow under frozen edited rules", async t => {
+  const f = await fixture(t, { autoSparkNotes: true }), profile = f.service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+  await f.save({ ...(await f.monitor()).monitor.config, enabled: false });
+  const daily = (await f.monitor("inspiration")).monitor;
+  await f.save({ ...daily.config, timezone: "UTC", schedule: { kind: "cron", expr: "0 20 * * *", tz: "UTC" } });
+  const initial = await f.backend.getAgentFile(profile.agentId, "DAILY_REVIEW.md");
+  const rules = "Prefer useful seeds created today. Stay silent without an actionable next step.\n";
+  const saved = await f.backend.setAgentFile(profile.agentId, "DAILY_REVIEW.md", rules, { expectedRevision: initial.revision });
+  f.clock.value = Date.UTC(2026, 8, 29, 19, 50);
+  await f.ipc("inspiration.create", { operationId: id(), body: "A seed created ten minutes before the review." });
+  f.clock.value = Date.UTC(2026, 8, 29, 20); await f.service.proactiveScheduler.tick();
+  await until(() => f.service.workDispatcher.listRuns({ source: "proactive" }).some(run => run.sourceId === daily.config.id && ["running", "failed"].includes(run.status)));
+  const run = f.service.workDispatcher.listRuns({ source: "proactive" }).find(run => run.sourceId === daily.config.id);
+  assert.equal(run.status, "running", run.errorCode);
+  const occurrence = f.service.proactiveStore.occurrenceForRun(run.id), document = f.service.proactiveStore.dailyReviewDocument(occurrence.id);
+  assert.equal(occurrence.candidates.length, 1); assert.equal(occurrence.candidates[0].ageDays, 0);
+  assert.deepEqual(document, { content: rules, revision: saved.fileRevision });
+  f.service.proactiveService.respond(run, { runId: run.id, outcome: "silent", candidates: [], reason: "No reason to notify", body: "" });
+  f.host.complete(run, "Completed"); await f.service.proactiveScheduler.waitForIdle();
+  assert.equal(f.service.proactiveStore.occurrenceForRun(run.id).reason, "model_silent"); assert.equal(f.sent.length, 0);
+});
+test("sessionless HEARTBEAT and daily SparkNotes keep credential projection bound to their Runtime scope", async t => {
+  const f = await fixture(t, { autoSparkNotes: true }), observed = [];
+  const secrets = f.service.workRunCoordinator.temporarySecrets;
+  const project = secrets.projectText.bind(secrets);
+  secrets.projectText = (scope, text) => {
+    observed.push({ stage: "projection", scope: { ...scope } });
+    return project(scope, text);
+  };
+  const acquire = f.service.codexRuntimeAdapter.acquire.bind(f.service.codexRuntimeAdapter);
+  f.service.codexRuntimeAdapter.acquire = async (...args) => {
+    const handle = await acquire(...args), traced = Object.create(handle);
+    for (const method of ["sessionStart", "sessionResume"]) traced[method] = input => {
+      observed.push({ stage: method, scope: { ...input.modelSecretScope } });
+      return handle[method](input);
+    };
+    return traced;
+  };
+  const assertScope = monitorId => {
+    const scope = { profileId: DEFAULT_AGENT_PROFILE_ID, sessionId: monitorId };
+    assert.ok(observed.some(row => row.stage === "sessionStart"), "The actual Runtime receives the scope");
+    assert.ok(observed.some(row => row.stage === "projection"), "The real credential projection runs");
+    for (const row of observed) assert.deepEqual(row.scope, scope, row.stage);
+    return scope;
+  };
+  const respond = (run, response) => f.service.mcpProductToolController.handle("proactive_respond", {
+    runId: run.id, ...response,
+  }, { profileId: run.profileId, callId: id() }, {
+    runId: run.id, assertCurrent: () => f.service.proactiveService.assertRunCurrent(f.service.workDispatcher.getRun(run.id)),
+  });
+  const rules = "Review the supplied state and record the last meaningful change in working notes.";
+  await heartbeatFile(f, rules);
+  const config = { ...(await f.monitor()).monitor.config, activeHours: null };
+  await f.save(config);
+  f.clock.value += 30 * 60000; await f.service.proactiveScheduler.tick();
+  await until(() => f.service.workDispatcher.listRuns({ source: "proactive" }).some(run => ["running", "failed"].includes(run.status)));
+  const heartbeat = f.service.workDispatcher.listRuns({ source: "proactive" })[0];
+  assert.equal(heartbeat.status, "running", JSON.stringify({ errorCode: heartbeat.errorCode, observed }));
+  const heartbeatScope = assertScope(config.id), check = f.service.proactiveStore.occurrenceForRun(heartbeat.id);
+  assert.equal(f.service.workRunCoordinator.getRunSessionKey(heartbeat), null);
+  await respond(heartbeat, { outcome: "notice", candidates: check.candidates.map(({ id, evidenceVersion }) => ({ id, evidenceVersion })),
+    reason: "A meaningful change", body: "The scoped heartbeat review completed.", scratch: "Last reviewed change: 1." });
+  f.host.complete(heartbeat, "Completed"); await f.service.proactiveScheduler.waitForIdle();
+  assert.equal(f.service.proactiveStore.occurrenceForRun(heartbeat.id).state, "published");
+  assert.equal((await f.ipc("proactive.scratch.get", { profileId: heartbeat.profileId })).scratch.content, "Last reviewed change: 1.");
+  assert.equal((await f.ipc("proactive.document.get", { profileId: heartbeat.profileId })).document.content, rules);
+  const value = "isolated-heartbeat-secret", prepared = await secrets.prepare({ scope: heartbeatScope, operationId: id(), text: value,
+    selections: [{ start: 0, end: value.length, kind: "password" }] });
+  assert.throws(() => secrets.resolve({ ...heartbeatScope, sessionId: "inspiration-daily" }, prepared.text), { code: "SECRET_REFERENCE_FORBIDDEN" });
+  assert.throws(() => secrets.resolve({ ...heartbeatScope, profileId: "another-profile" }, prepared.text), { code: "SECRET_REFERENCE_FORBIDDEN" });
+  await f.save({ ...config, enabled: false });
+  await f.ipc("inspiration.create", { operationId: id(), body: "A saved idea ready for the daily review." });
+  observed.length = 0;
+  f.clock.value += 2 * DAY_MS; await f.service.proactiveScheduler.tick();
+  await until(() => f.service.workDispatcher.listRuns({ source: "proactive" }).some(run => run.sourceId === "inspiration-daily" && ["running", "failed"].includes(run.status)));
+  const daily = f.service.workDispatcher.listRuns({ source: "proactive" }).find(run => run.sourceId === "inspiration-daily");
+  assert.equal(daily.status, "running", JSON.stringify({ errorCode: daily.errorCode, observed }));
+  const dailyScope = assertScope("inspiration-daily"), dailyCheck = f.service.proactiveStore.occurrenceForRun(daily.id);
+  assert.notDeepEqual(dailyScope, heartbeatScope);
+  await respond(daily, { outcome: "notice", candidates: dailyCheck.candidates.map(({ id, evidenceVersion }) => ({ id, evidenceVersion })),
+    reason: "An idea worth revisiting", body: "Review this saved idea." });
+  f.host.complete(daily, "Completed"); await f.service.proactiveScheduler.waitForIdle();
+  assert.equal(f.service.proactiveStore.occurrenceForRun(daily.id).state, "published");
+  assert.equal(f.sent.length, 2);
+  await f.service.stop({ notify: false }); await f.service.start(); await f.service.proactiveScheduler.waitForIdle();
+  assert.equal((await f.ipc("proactive.scratch.get", { profileId: heartbeat.profileId })).scratch.content, "Last reviewed change: 1.");
+  assert.equal(f.service.proactiveStore.occurrenceForRun(daily.id).state, "published");
+  assert.equal(f.sent.length, 2, "Restart does not replay either notification");
 });
 test("cleared scratch wins over an in-flight model proposal; failed runs never save scratch", async t => {
   const f = await fixture(t); await heartbeatFile(f, "Review the supplied state. Stay silent unless it changed.");

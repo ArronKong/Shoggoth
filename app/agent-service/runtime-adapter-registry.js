@@ -26,13 +26,14 @@ class RuntimeAdapterRegistry {
   constructor(options = {}) {
     this.validateHandles = options.validateHandles !== false;
     this.onProtocolViolation = options.onProtocolViolation || (() => {});
+    this.onCapabilityDifference = options.onCapabilityDifference || (() => {});
     this.isIdle = options.isIdle;
-    this.idleTimeoutMs = options.idleTimeoutMs ?? 120_000;
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.setTimer = options.setTimer || setTimeout;
     this.clearTimer = options.clearTimer || clearTimeout;
     this.onIdleError = options.onIdleError || (() => {});
     if (this.isIdle !== undefined && (typeof this.isIdle !== "function"
-      || !Number.isSafeInteger(this.idleTimeoutMs) || this.idleTimeoutMs < 1)) {
+      || !Number.isSafeInteger(this.idleTimeoutMs) || this.idleTimeoutMs < 0)) {
       throw registryError("RUNTIME_IDLE_POLICY_INVALID", "Runtime idle policy is invalid");
     }
     assertRuntimeAdapter(this);
@@ -58,14 +59,43 @@ class RuntimeAdapterRegistry {
     const raw = await (!this.isIdle ? adapter.acquire(binding, options) : this.#acquireManaged(binding, options, adapter));
     if (!this.validateHandles) return raw;
     if (!this.#facades.has(raw)) {
-      const facade = require("./runtime-handle-v1").runtimeHandleV1(raw, binding, { onViolation: this.onProtocolViolation });
+      const facade = require("./runtime-handle-v1").runtimeHandleV1(raw, binding, {
+        onViolation: this.onProtocolViolation, onCapabilityDifference: this.onCapabilityDifference });
       this.#facades.set(raw, facade); this.#hosts.add(facade);
       facade.terminated.finally(() => { if (this.#hosts.delete(facade)) this.#retired++; }).catch(() => {});
     }
     return this.#facades.get(raw);
   }
 
+  // Read only: never acquire a transport or wait for a pending startup. The
+  // returned facade must still belong to this exact binding and policy, and its
+  // trusted adapter must confirm the executable/account identity is current.
+  peek(value, { permissionPolicy, workspace } = {}) {
+    const binding = runtimeBinding(value);
+    if (this.#closing || !isRuntimeAvailable(binding.runtime) || !this.#adapters.has(binding.runtime)
+      || this.#stops.has(this.#key(binding))) return null;
+    const matches = [];
+    for (const handle of this.#hosts) {
+      if (["runtime", "runtimeProfileId", "runtimeAccountId"].some(key => handle[key] !== binding[key])
+        || workspace !== undefined && handle.workspace !== workspace) continue;
+      const policy = handle.capabilityEvidence?.scope.permissionPolicy;
+      if (permissionPolicy && (!policy || ["sandbox", "approvalPolicy"].some(key => policy[key] !== permissionPolicy[key]))) continue;
+      try {
+        handle.assertExecutionProviderCurrent();
+        handle.host?.assertRuntimeIdentityCurrent?.();
+      } catch { continue; }
+      matches.push(handle);
+    }
+    // A settings read cannot guess which workspace host owns a session fact.
+    return matches.length === 1 ? matches[0] : null;
+  }
+
   statistics() { return { hosts: this.#hosts.size, retiredHosts: this.#retired, adapters: this.#adapters.size }; }
+
+  runtimeIdentityKey(value) {
+    const binding = runtimeBinding(value);
+    return this.#adapter(binding.runtime).runtimeIdentityKey?.(binding) ?? null;
+  }
 
   // A Service request leases only the bindings it actually acquires. Keep the
   // lease until the operation settles, even if its IPC caller disconnects.
@@ -88,7 +118,19 @@ class RuntimeAdapterRegistry {
     return !!entry && (entry.pending > 0 || entry.requests.size > 0);
   }
 
-  canGenerateModelOnly(runtime) { return isRuntimeAvailable(runtime) && this.#adapters.get(runtime)?.modelOnly === true; }
+  isBindingActiveExceptCurrent(value) {
+    const entry = this.#idle.get(this.#key(runtimeBinding(value)));
+    const current = this.#activity.getStore();
+    return !!entry && (entry.pending > 1 || [...entry.requests].some(scope => scope !== current));
+  }
+
+  canGenerateModelOnly(runtime, { purpose = null } = {}) {
+    const adapter = this.#adapters.get(runtime);
+    // A purpose-specific proof must not silently enable other model-only
+    // consumers, such as conversation compaction or memory extraction.
+    return isRuntimeAvailable(runtime) && adapter?.modelOnly === true
+      && (!adapter.modelOnlyPurposes || adapter.modelOnlyPurposes.includes(purpose));
+  }
 
   // A native session id that the runtime can never continue (for example one
   // created by a retired transport). Callers move the conversation to a fresh session.
@@ -171,7 +213,7 @@ class RuntimeAdapterRegistry {
   }
 
   #schedule(key, entry) {
-    if (this.#closing || this.#idle.get(key) !== entry) return;
+    if (this.idleTimeoutMs === 0 || this.#closing || this.#idle.get(key) !== entry) return;
     this.clearTimer(entry.timer);
     entry.timer = this.setTimer(() => {
       if (this.#idle.get(key) !== entry || this.#closing) return;

@@ -1,0 +1,23 @@
+"use strict";
+// Pure guard tests only. No App, Service, native addon or Apple data access.
+const assert = require("node:assert/strict");
+const { createScopeGuard } = require("./fixtures/apple-device-real-acceptance-core.cjs");
+const guard = createScopeGuard({ calendarId: "dedicated-calendar", listId: "dedicated-list", token: "a".repeat(32) });
+const rev = "b".repeat(64), event = { title: `${guard.marker} event`, notes: `${guard.marker} notes`, calendarId: "dedicated-calendar", start: "2026-10-29T09:00:00Z", end: "2026-10-29T10:00:00Z" };
+for (const [operation, args] of [["calendar.list", {}], ["reminders.lists", {}], ["requestAccess", { resource: "calendar" }], ["settings.open", { resource: "calendar" }], ["calendar.events", { start: event.start, end: event.end, limit: 100 }], ["reminders.search", { limit: 100 }], ["calendar.create", { ...event, calendarId: undefined }], ["calendar.create", { ...event, calendarId: "other" }], ["calendar.get", { id: "foreign" }]]) assert.throws(() => guard.checkNative(operation, args));
+guard.checkTool("apple_calendar_create", event);
+guard.acceptWrite("apple_calendar_create", { event: { id: "owned", revision: rev } });
+guard.checkNative("calendar.get", { id: "owned" });
+guard.checkNative("calendar.update", { id: "owned", expectedRevision: rev, scope: "this", patch: { title: `${guard.marker} changed` } });
+assert.throws(() => guard.checkNative("calendar.update", { id: "owned", expectedRevision: rev, scope: "future", patch: { title: `${guard.marker} changed` } }));
+assert.throws(() => guard.checkNative("calendar.update", { id: "owned", expectedRevision: rev, scope: "this", patch: { calendarId: "other" } }));
+assert.throws(() => guard.checkNative("calendar.update", { id: "owned", expectedRevision: rev, scope: "this", patch: { title: "unrelated" } }));
+assert.throws(() => guard.checkRead("calendar", { events: [{ calendarId: "dedicated-calendar", title: "Private existing event", recurring: false }], truncated: false }));
+assert.throws(() => guard.checkRead("reminders", { reminders: [], truncated: true }));
+const args = { id: "owned", expectedRevision: rev, scope: "this", patch: { title: `${guard.marker} changed` } };
+const input = { target: { target: "owned", current: { title: event.title } }, arguments: args };
+const record = { method: "shoggoth/pluginTool/requestApproval", params: { toolName: "apple_calendar_update", toolInput: input, command: JSON.stringify(input), sessionApprovalAvailable: false, approvalOptions: [{ choice: "once" }, { choice: "deny" }] } };
+guard.verifyApproval(record, { name: "apple_calendar_update", arguments: args });
+assert.throws(() => guard.verifyApproval({ ...record, params: { ...record.params, sessionApprovalAvailable: true } }, { name: "apple_calendar_update", arguments: args }));
+assert.throws(() => guard.acceptWrite("apple_calendar_update", { event: { id: "foreign", revision: rev } }));
+console.log("PASS acceptance scope guard: explicit containers, filtered queries, token/owned-id/revision fences, exact once-only approval preview; no Apple data accessed");

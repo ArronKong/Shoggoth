@@ -1,19 +1,26 @@
 "use strict";
 const { digest, fail } = require("./proactive-service-protocol");
 const { readRuntimeAuthenticationState } = require("./runtime-adapter");
-const POLICY = "codex-proactive-readonly-response-tool-v3";
+const codexSessionProvider = require("./codex-session-provider");
+const POLICY = "proactive-readonly-default-runtime-v4";
 class ProactiveRuntimeVerifier {
-  constructor({ store, productStore, codexAdapter, now = Date.now }) {
-    this.store = store; this.products = productStore; this.adapter = codexAdapter; this.now = now; this.pending = new Map();
+  constructor({ store, productStore, codexAdapter, runtimeManager, now = Date.now }) {
+    this.store = store; this.products = productStore; this.adapter = codexAdapter; this.runtimes = runtimeManager;
+    this.now = now; this.pending = new Map();
   }
   #profile(id) { try { return this.products.resolveAgentRuntimeProfile(id); } catch { return null; } }
   #fingerprint(profile) { return digest([POLICY, profile.id, profile.selectedBindingId, profile.runtime,
-    profile.runtimeProfileId, profile.runtimeAccountId, profile.updatedAt, profile.permissionPolicy, profile.providerRef, profile.defaultModel]); }
+    profile.runtimeProfileId, profile.runtimeAccountId, profile.updatedAt, profile.permissionPolicy, profile.providerRef, profile.defaultModel,
+    this.runtimes?.runtimeIdentityKey?.({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId }) ?? null]); }
+  #supported(profile) { return profile && (profile.runtime === "codex"
+    || this.runtimes?.canGenerateModelOnly?.(profile.runtime, { purpose: "proactive" }) === true); }
   capability(value) {
     const profile = this.#profile(value.id);
-    if (!profile || profile.runtime !== "codex") return { semanticVerified: false, reason: "PROACTIVE_RUNTIME_UNVERIFIED" };
+    if (!this.#supported(profile)) return { semanticVerified: false, reason: "PROACTIVE_RUNTIME_UNVERIFIED" };
     const proof = this.store.getCursor(`capability:${profile.id}`);
-    return proof?.policy === POLICY && proof.fingerprint === this.#fingerprint(profile)
+    let fingerprint; try { fingerprint = this.#fingerprint(profile); } catch { return { semanticVerified: false, reason: "PROACTIVE_RUNTIME_UNVERIFIED" }; }
+    return proof?.policy === POLICY && proof.fingerprint === fingerprint
       ? { semanticVerified: true, reason: null, runtime: profile.runtime, runtimeAccountId: profile.runtimeAccountId,
         verification: { policy: POLICY, verifiedAt: proof.verifiedAt } }
       : { semanticVerified: false, reason: "PROACTIVE_RUNTIME_UNVERIFIED" };
@@ -25,18 +32,32 @@ class ProactiveRuntimeVerifier {
   async #verify(id) {
     const profile = this.#profile(id);
     if (!profile || !profile.enabled) fail("PROACTIVE_PROFILE_UNAVAILABLE");
-    if (profile.runtime !== "codex") fail("PROACTIVE_RUNTIME_UNVERIFIED");
+    if (!this.#supported(profile)) fail("PROACTIVE_RUNTIME_UNVERIFIED");
     this.store.setCursor(`capability:${id}`, null);
+    let handle;
     try {
-      const handle = await this.adapter.acquire({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
-        runtimeAccountId: profile.runtimeAccountId }, { permissionPolicy: profile.permissionPolicy });
-      const auth = await readRuntimeAuthenticationState(handle, { allowDeferred: false });
-      if (auth.status !== "authenticated") fail("PROACTIVE_PROFILE_UNAVAILABLE");
-      await handle.verifyProactiveReview();
+      const codex = profile.runtime === "codex";
+      handle = await (codex ? this.adapter : this.runtimes).acquire({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
+        runtimeAccountId: profile.runtimeAccountId }, codex ? { permissionPolicy: profile.permissionPolicy }
+        : { workspace: null, modelOnly: true, permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+          executionContract: { runId: `proactive-verify:${id}` } });
+      const auth = await readRuntimeAuthenticationState(handle, { allowDeferred: !codex });
+      // The built-in Codex process reports ChatGPT sign-in; a default source
+      // with its own credential (custom endpoint) does not depend on it.
+      const ownCredential = codex && codexSessionProvider.supportsSessionProviders(profile)
+        && !codexSessionProvider.routeRequiresOpenaiAuth(this.products, { provider: { providerRef: profile.providerRef } });
+      if (!ownCredential && (auth.status === "unauthenticated" || codex && auth.status !== "authenticated")) {
+        fail("PROACTIVE_PROFILE_UNAVAILABLE");
+      }
+      if (codex) await handle.verifyProactiveReview();
+      else if (handle.capabilities?.["model.generate.toolFree"] !== true || typeof handle.generateModelOnly !== "function") fail("PROACTIVE_RUNTIME_UNVERIFIED");
+      // Metadata probes must not occupy an execution slot between checks.
+      if (handle.host?.modelOnlyInstance) await handle.host.stop();
       const current = this.#profile(id); if (!current || this.#fingerprint(current) !== this.#fingerprint(profile)) fail("PROACTIVE_SCOPE_INVALID");
       this.store.setCursor(`capability:${id}`, { policy: POLICY, fingerprint: this.#fingerprint(profile), verifiedAt: this.now() });
       return this.capability(profile);
     } catch (error) {
+      if (handle?.host?.modelOnlyInstance) await handle.host.stop().catch(() => {});
       if (["PROACTIVE_PROFILE_UNAVAILABLE", "PROACTIVE_SCOPE_INVALID"].includes(error.code)) throw error;
       fail("PROACTIVE_RUNTIME_UNVERIFIED");
     }

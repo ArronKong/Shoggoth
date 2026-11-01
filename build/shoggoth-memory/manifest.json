@@ -6339,6 +6339,11 @@
     },
     {
       "kind": "dependency",
+      "path": "undici/index-fetch.js",
+      "sha256": "155df504376841f714239ffbb43c7fbbfe3532c44aafe19ca7fd1615a18d5f1d"
+    },
+    {
+      "kind": "dependency",
       "path": "undici/index.js",
       "sha256": "93fc85c00a59b58f410c901e5477d56770de3816bfbe183e751624aeb4a5e6a5"
     },
@@ -6385,22 +6390,22 @@
     {
       "kind": "dependency",
       "path": "undici/lib/cache/memory-cache-store.js",
-      "sha256": "b87fafa563690bb4ab6a7a50a5a040d3c6ef8a99ea65ea1ed16a544b1a6caf72"
+      "sha256": "ffceeb83235561ae38507707fe5a3888cb86f800539ab78666fa3b84ddadf310"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/cache/sqlite-cache-store.js",
-      "sha256": "389b37a214dce9353079be0e0d7c7925ce981888f3646b1dc48bfe0c31d7e64d"
+      "sha256": "773880f6d9283127a137969d23c7a77f250fc119df0480c9ea11eb2d6f71c651"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/core/connect.js",
-      "sha256": "4bf7ce84d6d31ffacebb0130164d50e619645b79cf6c4221ac374ab5ada677e3"
+      "sha256": "266125b72199c68f93c6277b1c1e4455c3cc32803fbbce4842d74169cf4bb428"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/core/constants.js",
-      "sha256": "a9c9c59d69a6db90fd3fdf46ebce943cbdc5da6e2acd143a00ed3282a8c65ca0"
+      "sha256": "7a27b3232c6157c58942adad922bc2af060e49201ee49d205a829973dec92063"
     },
     {
       "kind": "dependency",
@@ -6410,12 +6415,12 @@
     {
       "kind": "dependency",
       "path": "undici/lib/core/errors.js",
-      "sha256": "47c1e438402a802f5132da4a2084e1294ad3fd1496f8f7b47117292165c17fd9"
+      "sha256": "79c537740ceec5c546311657a4443c2b52068eb4d5d069dcfa9bb03cccb0b7ee"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/core/request.js",
-      "sha256": "ef5b4b9d34dde2ac2df21249228cd4d75f19f6c301307a84fda36fbd4bdee724"
+      "sha256": "1492642f86c32ff8dde73278fdaf33f4fe42ef09d99b41eebca39eae4fe8cef6"
     },
     {
       "kind": "dependency",
@@ -6430,7 +6435,7 @@
     {
       "kind": "dependency",
       "path": "undici/lib/core/symbols.js",
-      "sha256": "2fbebeafbc65374261b6cc10146a3cdc0083342a125b7e957afe2ecb4a4c41d0"
+      "sha256": "7dc886d7ef9f8912519581f3168c5b6149163cde9a0af1d1f919309a3f8aa545"
     },
     {
       "kind": "dependency",
@@ -6440,12 +6445,12 @@
     {
       "kind": "dependency",
       "path": "undici/lib/core/util.js",
-      "sha256": "cb110920638fb3e418a8e4ffc55b5e18a220e6bc08e2a0f6d8174029292cd8a2"
+      "sha256": "f66443ee69b3ae34ea7ebfab4df71a0b87ac990769aaf76b278739dee8aedb7c"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/agent.js",
-      "sha256": "b54f75ea0978a432484110017bb2eb4768c61d4bc68b3726d6f7f2399eb14649"
+      "sha256": "da798dc8fa3a8e03582ea002639bf7bec249910f6bdac7ea69ceca8772e58d86"
     },
     {
       "kind": "dependency",
@@ -6455,22 +6460,22 @@
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/client-h1.js",
-      "sha256": "e8eb930546e7f7755471c75069878e3584b50f2c9ec8468fc8f2a1d236dab9a4"
+      "sha256": "b4473e4ef9e6a3fb5ca0de69fd705c3797d138e7586e40beb49fa13b58c8a370"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/client-h2.js",
-      "sha256": "2f848e5316242e9babf3f9fa81657e0b2b3f58b081b6c41585b19f536c3a9435"
+      "sha256": "9acfef9064b7639a937d5f279e93bafb831ca2e3c018b4e3864b198f97368fb9"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/client.js",
-      "sha256": "05061b7d9f484d7db7894f9b5b1f9585f40af6a7eb26694a2b762084ffe2b461"
+      "sha256": "714bf317d177728a63e5e06d2f41c1beda1aef9c7002a72e84925abb4e6d9b26"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/dispatcher-base.js",
-      "sha256": "2796a3361c387a89abaf621b6666c1ea2b9ac808abff664fc5eb70539d19c989"
+      "sha256": "fc576c6cf1822079c9f65e94a4b36eeccb9d1cd194328c499d1b45362c340697"
     },
     {
       "kind": "dependency",
@@ -6480,7 +6485,7 @@
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/dispatcher1-wrapper.js",
-      "sha256": "9c4d64198b782a38f98fd8054eabc150694c791038a52e454da4cc1780d7d8e0"
+      "sha256": "480fcedacd9a1132af22cdfc61ea0ebbc3a6f25171d7a273f88364f57cda7850"
     },
     {
       "kind": "dependency",
@@ -6499,28 +6504,33 @@
     },
     {
       "kind": "dependency",
+      "path": "undici/lib/dispatcher/parser-h1.js",
+      "sha256": "fa3c00225f66878ee7ff45888c75da9f5864f208e0827d4fb318613239b1ec7d"
+    },
+    {
+      "kind": "dependency",
       "path": "undici/lib/dispatcher/pool-base.js",
-      "sha256": "23792e58781239dee97bae8a849d14b1181836a6415c41fb9235ee23bd61dc44"
+      "sha256": "a46216d826a98f384f8a980177f2197f53854bc74c90bf2f2c6675a5748176fd"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/pool.js",
-      "sha256": "a92d0f6144cc553357b1a18f47ffb6f6c850e43622dddda71dcad71cf0430393"
+      "sha256": "25ccf86edc1960bd61ca18c368dad7887bf1712c779ad066dbdcfc3f55532435"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/proxy-agent.js",
-      "sha256": "63920d0209b6f69a874cabfa383084c2db537e88f1932b7c593132cacf0cd9bf"
+      "sha256": "102a936a873a91fd1eb5d93e3b45d3b5ba87e93bad7675eccd4f64593ac68bfd"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/retry-agent.js",
-      "sha256": "1c3100b5bf5c808631710f7168650e4895fcacca8a8a8bf55803480f172a3bc2"
+      "sha256": "ea92167b64fb8e0a60cf65420c05b502d59b2eabdc5a043ca3c6b68245f27459"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/dispatcher/round-robin-pool.js",
-      "sha256": "77c5c15e9c68a274f6c00847a1bbe54b71476e0aa8618aac5ed629194e54685c"
+      "sha256": "59bbd5fbb5627907289ee3eb66f9b622f89cf71e44eff7e5b50c2942ece173b8"
     },
     {
       "kind": "dependency",
@@ -6540,7 +6550,7 @@
     {
       "kind": "dependency",
       "path": "undici/lib/handler/cache-handler.js",
-      "sha256": "7de20ca8ef41db87c4d5d452def61e0546082b3285c178c61dafb11f2a3ceaaf"
+      "sha256": "e64eceff6b7216b1c94fee8811faf69673bbf4a0af1fda323dc365c5f0276d49"
     },
     {
       "kind": "dependency",
@@ -6555,27 +6565,27 @@
     {
       "kind": "dependency",
       "path": "undici/lib/handler/deduplication-handler.js",
-      "sha256": "9f8f7081af3f5e01ff03254dab41c531ecafc9e222284dad57fbf971a9f05ae6"
+      "sha256": "35b372c444691ec81b10481f41cdb95cd3b1338734775f7a2e4c04f652cce2ca"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/handler/redirect-handler.js",
-      "sha256": "383d7755878d4009b1df8962c32e08c805f9c04a8c7d0f639ba9ca1673fb62a5"
+      "sha256": "c4b1c55835ef186586d92b1a93a2cf180e9b7861dd317c6a081ba9e0a1047458"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/handler/retry-handler.js",
-      "sha256": "23ac4cde79d4063ff74fd159d2c9d4f454dc1f14bd7b3dfbd3489f547c9a7e7e"
+      "sha256": "cdf8caab5f874cf40d75402b33ed0d2c90f03c4cfbf5e2e4263592d731012da0"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/interceptor/cache.js",
-      "sha256": "1c4bf1b8e9c5dae9b3bfc6949a880ab3fb03f51ea49997fb6645a35140872170"
+      "sha256": "9b9e5d1ffa6adeac5753ec11c37041655c3b41b14ccbd39dd5f1348448012ae3"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/interceptor/decompress.js",
-      "sha256": "b5a5a621f7c9f7a73ba87aa3e8c86cff83267d06587f0ea8fa472d39a1b99e59"
+      "sha256": "00b8d54de012d5936893a866917a620c6aaf0a10ae53e9321c813b2a556743cc"
     },
     {
       "kind": "dependency",
@@ -6585,7 +6595,7 @@
     {
       "kind": "dependency",
       "path": "undici/lib/interceptor/dns.js",
-      "sha256": "c5397eac5d7813c863e7a6af87a24bd9eda0d7244f84c3e044ac0322913aa557"
+      "sha256": "ab8724195f579710ab20b4c95174f7c22a06a8d946625df3a427ee0d5ac23f67"
     },
     {
       "kind": "dependency",
@@ -6600,12 +6610,17 @@
     {
       "kind": "dependency",
       "path": "undici/lib/interceptor/response-error.js",
-      "sha256": "9cb06334d1c1f791784005789cc5afb9daea396c7f5e0c962af90538b4843e10"
+      "sha256": "6b3ec20b48590a5ba47063ec9a4bf664c93fb4226a0f6214c8c266bd178adf57"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/interceptor/retry.js",
       "sha256": "488cf270ae143cc13a6ecf82ba523314fdbb17fd9ee08677c4488d4410f047c3"
+    },
+    {
+      "kind": "dependency",
+      "path": "undici/lib/llhttp/constants.d.ts",
+      "sha256": "9a9b4b9f5e08bd6c88bb2ad56007441e20b34b103dad02883d84e6e7c5c04e03"
     },
     {
       "kind": "dependency",
@@ -6624,13 +6639,33 @@
     },
     {
       "kind": "dependency",
+      "path": "undici/lib/llhttp/utils.d.ts",
+      "sha256": "c79b06274bc1e38c70aa5259a1279290afd5b914fc01438efb0ea54a617a9ffb"
+    },
+    {
+      "kind": "dependency",
       "path": "undici/lib/llhttp/utils.js",
       "sha256": "e21afcaf44b0fec37acfff86945e4526541e990ac0efd2f1efa2ea9f2b259b6b"
     },
     {
       "kind": "dependency",
+      "path": "undici/lib/milo/LICENSE.md",
+      "sha256": "ca5cc852fbcbe4598fe1f8b04c103c8073a64fa9cbb14b358bfdd87232ae8bd9"
+    },
+    {
+      "kind": "dependency",
+      "path": "undici/lib/milo/no-simd.js",
+      "sha256": "ece090d1e2e962e0de7428bf542b900b373876e5cf1d7eda43e5cd08a92bf9b7"
+    },
+    {
+      "kind": "dependency",
+      "path": "undici/lib/milo/simd.js",
+      "sha256": "3bc5b7120aa8732d6a1fb2692714d549d4025aa27482ba3b47e7b80ff74f23cc"
+    },
+    {
+      "kind": "dependency",
       "path": "undici/lib/mock/mock-agent.js",
-      "sha256": "0554f474e0d717d578412f512eb4ae5d270540104b6942c1a86e0dfba4ae5ce4"
+      "sha256": "7b58dcf7a615687d698c6723a64039c428feb1cc22cae6a5ef8911fa184ac8e2"
     },
     {
       "kind": "dependency",
@@ -6680,17 +6715,17 @@
     {
       "kind": "dependency",
       "path": "undici/lib/mock/snapshot-recorder.js",
-      "sha256": "ec7ea35855aad0fd471fc7c7f03075bb7586613dd6b9ecd9de181882ccd33c54"
+      "sha256": "40c88ed7dee1341b35f3b487fcf306b92b5458086497468672a828512123ca06"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/mock/snapshot-utils.js",
-      "sha256": "0971c847787d90abcb0bf4e1d76161a2f82651169cc8e637b26875fecab666f8"
+      "sha256": "42d9b1cfe392d61131e14896c76eebef1c283b2394c7939a36b737044cabc834"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/util/cache.js",
-      "sha256": "0818df2477bcab9b9c05ce4d89eb08e821af54904bb753695ce266ef17db36ee"
+      "sha256": "317a6dc0974beda5fc7881f17a3d15fb187081a3e340d081566560a0cb5b86be"
     },
     {
       "kind": "dependency",
@@ -6745,17 +6780,17 @@
     {
       "kind": "dependency",
       "path": "undici/lib/web/cookies/util.js",
-      "sha256": "7ff71ceb2e25c6f06055c120eb09be938b2bef7af8a65703baf25bac6b74477c"
+      "sha256": "90cd7c91caf598cd21f466d9255e0d7032038c251ac8360e3d6022d2b380cdb1"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/web/eventsource/eventsource-stream.js",
-      "sha256": "098a79aa4af46a8ddfd8583be35510b6824b8fc513023c5b2295b5f3be474fe2"
+      "sha256": "975c5c6430fe441579cfd1f684684409ec53a616f04b1c5bf0424f7c73e1864f"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/web/eventsource/eventsource.js",
-      "sha256": "64c11485baf8e397e379b9f0b336eabdfd57d124a692b75bf0bd903561f98442"
+      "sha256": "49e3a261fb818406367b4dc9d4741c57f50474e203de048ab2f06cf43357c41d"
     },
     {
       "kind": "dependency",
@@ -6765,7 +6800,7 @@
     {
       "kind": "dependency",
       "path": "undici/lib/web/fetch/body.js",
-      "sha256": "19c019e31d5b472fcbc2feb6944a4c585965f28ba1e82b981a23c3403a917f22"
+      "sha256": "d14c9cf426f78a0ef5f9ea07e896e777da55d545b032120fd81f5e2ed06b9352"
     },
     {
       "kind": "dependency",
@@ -6780,7 +6815,7 @@
     {
       "kind": "dependency",
       "path": "undici/lib/web/fetch/formdata-parser.js",
-      "sha256": "d5d048201a040865a4376e423fd78b102ad164cb51ad7b0ade56897c7318bd6b"
+      "sha256": "51c6f86a8389d0db242c8d6f82f70c1f7b5c35373044ecaff69d9ab5331f22a0"
     },
     {
       "kind": "dependency",
@@ -6795,12 +6830,17 @@
     {
       "kind": "dependency",
       "path": "undici/lib/web/fetch/headers.js",
-      "sha256": "1fc876d1484319421fc2c840d616c5a0fffbf12cb66e66ee44b8383356dbebbb"
+      "sha256": "3a581380ced63ee942d4fa87a1c73eacb4e44d456b35d4c0e696e595126d89eb"
     },
     {
       "kind": "dependency",
       "path": "undici/lib/web/fetch/index.js",
-      "sha256": "8269824463f434e3e15c5aad090e03f19aefe9d27b40efad9d8ef7ed308d1d27"
+      "sha256": "e3cc1063bb3bb8353f918d2b1c54b8d6991a71b06c4278959f0c2ef412a433b1"
+    },
+    {
+      "kind": "dependency",
+      "path": "undici/lib/web/fetch/LICENSE",
+      "sha256": "a21d6c8d3fc631198b97e57584697f7f9c37805c71c6cf9a12e4442b40394b88"
     },
     {
       "kind": "dependency",
@@ -6824,8 +6864,13 @@
     },
     {
       "kind": "dependency",
+      "path": "undici/lib/web/subresource-integrity/Readme.md",
+      "sha256": "0d3da607c6e6d7420679c47e869bdc926266cc94d39fb243d9cd3f9a217986f8"
+    },
+    {
+      "kind": "dependency",
       "path": "undici/lib/web/subresource-integrity/subresource-integrity.js",
-      "sha256": "65997037f348e22746f0852037998ba64fb83e6428485c6e200d42da8a154a75"
+      "sha256": "ac59fabbef7d6ad839d723ba3ed1690953d0849ad231970a8bfdfbc0df6d1ae9"
     },
     {
       "kind": "dependency",
@@ -6860,7 +6905,7 @@
     {
       "kind": "dependency",
       "path": "undici/lib/web/websocket/receiver.js",
-      "sha256": "94c44a1f59b99fd935f7fbbd95b02fc134f6b6afb9b8748259db2d4025f3177b"
+      "sha256": "d58a5e8bb0da2dcbc51cc0b668213357a12cfd5cb03e700883c488460ce9f015"
     },
     {
       "kind": "dependency",
@@ -6895,7 +6940,7 @@
     {
       "kind": "dependency",
       "path": "undici/package.json",
-      "sha256": "05686bb347560226dd9fffc0c8152e5d9aa154c76d9eeceae11b52d42eb6e1db"
+      "sha256": "16723528eaa06df7f3b29ea52584e9127608fd9e8de066c39339aa806ad9da84"
     },
     {
       "kind": "dependency",
@@ -9991,6 +10036,22 @@
       "kind": "upstream",
       "path": "src/version.ts",
       "sha256": "142a8aa698e8ff0cb2d673ecc1706fe34a1a736af561d3788762c5755b38d035"
+    }
+  ],
+  "dependencyOverrides": [
+    {
+      "name": "undici",
+      "previousVersion": "8.11.2",
+      "version": "8.12.2",
+      "archiveUrl": "https://registry.npmjs.org/undici/-/undici-8.12.2.tgz",
+      "integrity": "sha512-XtuDWVdqTLr3NAxm2ly9/hU6kUsJOgGh1RASzMBbsw6aWCOaQzHdW+QQDfdERjfJ2V5vL5pRPa4RetO9UfivDg==",
+      "archiveSha256": "a765b5e63ab5c6b1b91a59072c88f7857b36f47b09c376762241d177279cdefd",
+      "license": "MIT",
+      "reason": "Security update of the bundled HTTP client; pinned OpenClaw source files are unchanged",
+      "advisories": [
+        "https://github.com/nodejs/undici/security/advisories/GHSA-2m5v-pch6-74hx",
+        "https://github.com/nodejs/undici/security/advisories/GHSA-xjj6-f33q-929c"
+      ]
     }
   ]
 }

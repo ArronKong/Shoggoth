@@ -30,14 +30,50 @@ test("memory extraction on the current binding uses the explicitly selected sess
     const routes = [];
     value.coordinator.captureExecutionProviderRoute = (_profile, model) => { routes.push(model); return null; };
     let request;
+    const protectedScopes = [];
+    value.coordinator.temporarySecrets = { projectText(scope, text) { protectedScopes.push(scope); return text; } };
     value.coordinator.runtimeManager.acquire = async () => ({
       capabilities: { "model.generate.toolFree": true },
       generateModelOnly: async (args) => { request = args; return { text: '{"candidates":[]}' }; },
     });
     const result = await value.coordinator.extractMemoryCandidatesModelOnly(input(value.sessions.session));
     assert.equal(request.model, "selected-model");
+    assert.deepEqual(request.modelSecretScope, { profileId: PROFILE_ID, sessionId: SESSION_KEY });
+    assert.deepEqual(protectedScopes, [request.modelSecretScope]);
     assert.deepEqual(routes, ["selected-model"]);
     assert.equal(result.model, "selected-model");
+  } finally { await value.coordinator.close(); }
+});
+
+test("Codex memory import without execution settings retains the source secret scope", async () => {
+  const value = await openFixture({ sessionStatus: "ready" });
+  try {
+    value.coordinator.productStore.resolveAgentRuntimeProfile = id => value.coordinator.productStore.getAgentProfile(id);
+    const source = { profileId: PROFILE_ID, sessionId: SESSION_KEY };
+    const scopes = [], listeners = new Set(); let start;
+    value.coordinator.temporarySecrets = { projectText(scope, text) {
+      scopes.push(scope); assert.deepEqual(scope, source);
+      return text.replace("123456", "{{SHOGGOTH_SECRET_00000000000000000000000000000001}}");
+    } };
+    value.coordinator.runtimeManager.acquire = async () => ({
+      sessionStart: async args => { start = args; return { session: { id: "isolated-memory" }, model: "gpt-test" }; },
+      subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+      turnStart: async args => {
+        assert(!args.prompt.includes("123456"));
+        for (const listener of listeners) {
+          listener({ type: "text", sessionId: "isolated-memory", itemId: "answer", text: "Saved summary", phase: "final_answer" });
+          listener({ type: "complete", sessionId: "isolated-memory", turnId: "memory-turn", status: "completed" });
+        }
+        return { turn: { id: "memory-turn" } };
+      },
+    });
+    const result = await value.coordinator.generateMemoryImportText({ profileId: PROFILE_ID, sessionKey: SESSION_KEY,
+      operationId: "secret-memory-import", prompt: "The earlier credential is 123456.", timeoutMs: 1000, maxOutputBytes: 1024 });
+    assert.equal(result.text, "Saved summary");
+    assert.equal(start.isolatedGeneration, true);
+    assert.deepEqual(start.modelSecretScope, source);
+    assert.deepEqual(scopes, [source]);
+    assert.equal(value.dispatcher.listRuns().length, 0);
   } finally { await value.coordinator.close(); }
 });
 

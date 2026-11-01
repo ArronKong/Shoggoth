@@ -10,6 +10,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXTENSION_PATH = path.join(ROOT, "resources", "pi", "shoggoth-pi-extension.mjs");
 const require = createRequire(import.meta.url);
+const { encodeInputChoicesDescription } = require("../app/core/shoggoth-interaction-contract");
+const INPUT_DESCRIPTION = encodeInputChoicesDescription("Choose a skill version", [
+  { label: "stable", description: "Current version" }, { label: "next", description: "Upcoming version" },
+]);
 const { MCP_PRODUCT_TOOL_DEFINITIONS, validateMcpProductToolArguments } = require(
   path.join(ROOT, "app", "agent-service", "mcp-product-tool-controller.js"),
 );
@@ -143,7 +147,9 @@ process.stdin.on("data", (chunk) => {
             properties: {
               [pendingField]: productConfirmation
                 ? { type: "string", title: "确认修改", enum: ["确认执行", "取消"] }
-                : { type: "string", title: "Version", enum: ["stable", "next"] },
+                : message.params.name === "request_user_input"
+                  ? { type: "string", title: "Version", description: ${JSON.stringify(INPUT_DESCRIPTION)} }
+                  : { type: "string", title: "Version", enum: ["stable", "next"] },
             },
             required: [pendingField],
           },
@@ -346,12 +352,23 @@ try {
   assert.deepEqual(selections, [{
     title: "Version",
     options: ["stable", "next"],
-    settings: { timeout: 30 * 60 * 1000 },
+    settings: undefined,
   }]);
   assert.deepEqual(toolResult, {
     content: [{ type: "text", text: "selected:stable;secret:absent" }],
     details: { choice: "stable" },
   });
+  const customAnswer = "指定版本 🍟\n保留原始换行";
+  const inputResult = await requestUserInputTool.execute(
+    "tool-call-custom-input", preparedQuestionArgs, new AbortController().signal, () => {}, {
+      ui: { async input(title, placeholder) {
+        assert.equal(title, "Version");
+        assert.equal(placeholder, INPUT_DESCRIPTION);
+        return customAnswer;
+      } },
+    },
+  );
+  assert.equal(inputResult.details.choice, customAnswer);
   const productConfirmationResult = await skillTool.execute(
     "tool-call-product-confirmation",
     { name: "product-confirmation" },

@@ -50,8 +50,9 @@ function blocked(session, { forceable = false } = {}) {
     recovery: { code, stage: "preflight", locked: false, retryable: false, references } };
 }
 const buttons = (renderer, label) => renderer.root.findAllByType("button")
-  .filter((button) => button.children.includes(label));
-const editButtons = (renderer) => renderer.root.findAllByType("button").filter(button => button.props.type === "button");
+  .filter((button) => button.children.includes(label) || button.props.title === label);
+const editButtons = (renderer) => renderer.root.findAllByType("button")
+  .filter(button => button.props.type === "button" && !button.props["aria-label"]);
 
 test("a rejected endpoint deletion explains its references and leaves the panel usable", async () => {
   const attempts = [], releases = [];

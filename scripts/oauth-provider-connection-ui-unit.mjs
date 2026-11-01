@@ -74,7 +74,7 @@ const buttons = () => renderer.root.findAllByType('button');
 
 // Connected: 断开 writes the switch only.
 providers = [provider(true)];
-await settle(() => { renderer = create(React.createElement(Card, { backend: 'shoggoth', showActionLabels: true })); });
+await settle(() => { renderer = create(React.createElement(Card, { backend: 'shoggoth' })); });
 const off = buttons().find((button) => button.props.title === 'settings.disconnect');
 assert.ok(off, 'a connected native CLI offers the app switch');
 providers = [provider(false)];
@@ -90,7 +90,7 @@ assert.ok(calls.some(([name, title]) => name === 'confirm' && title === 'setting
 // Disconnected: the row keeps its login and offers only to reconnect.
 assert.ok(text(renderer.toJSON()).includes('keys.oauthConnectionOff'));
 assert.equal(buttons().some((button) => button.props.title === 'settings.disconnect'), false);
-const on = buttons().find((button) => text(button) === 'settings.reconnect');
+const on = buttons().find((button) => button.props.title === 'settings.reconnect');
 assert.ok(on, 'a disconnected native CLI offers to reconnect');
 providers = [provider(true)];
 calls.length = 0;
@@ -102,7 +102,7 @@ renderer.unmount();
 // An incompatible CLI offers a read-only recheck instead of repeating login.
 providers = [{ ...provider(true, false), status: { ...provider(true, false).status,
   verification: 'incompatible', error: 'safe fixed message' } }];
-await settle(() => { renderer = create(React.createElement(Card, { backend: 'shoggoth-incompatible', showActionLabels: true, refreshKey: 1 })); });
+await settle(() => { renderer = create(React.createElement(Card, { backend: 'shoggoth-incompatible', refreshKey: 1 })); });
 await settle();
 assert.ok(text(renderer.toJSON()).includes('settings.runtimeIncompatible'));
 const retry = buttons().find(button => button.props.title === 'settings.retry');

@@ -3,6 +3,7 @@
 const { OpenCodeRuntimeHost } = require("./opencode-runtime-host");
 const { OPENCODE_RUNTIME, normalizeOpenCodePermissionPolicy, normalizeOpenCodeWorkspace } = require("./opencode-runtime-paths");
 const { poolLedgerSlot } = require("./runtime-shared-ledger");
+const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 const { runtimeBinding, validRuntimeProfileId } = require("./runtime-adapter");
 const { NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 const { RuntimeAccountResolver, defaultRuntimeAccountLookup, validateResolvedEnvironment } = require("./runtime-account-resolver");
@@ -31,6 +32,8 @@ class OpenCodeRuntimePool {
     this.closing = false;
   }
 
+  runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }
+
   async get(value, options = {}) {
     const binding = typeof value === "string" ? runtimeBinding({ runtime: OPENCODE_RUNTIME,
       runtimeProfileId: value, runtimeAccountId: NATIVE_OPENCODE_RUNTIME_ACCOUNT_ID }) : runtimeBinding(value);
@@ -42,10 +45,19 @@ class OpenCodeRuntimePool {
     const workspace = controlInstance ? null : normalizeOpenCodeWorkspace(options.workspace);
     const executionRunId = executionRunIdForPool(options);
     const policy = normalizeOpenCodePermissionPolicy(options.permissionPolicy);
+    const modelOnlyInstance = options.modelOnly === true;
+    const modelInstructions = modelOnlyInstance ? options.executionContract?.developerInstructions ?? "" : "";
+    if (typeof modelInstructions !== "string" || !modelInstructions.isWellFormed()
+      || modelInstructions.includes("\0") || Buffer.byteLength(modelInstructions) > 1024 * 1024) {
+      throw poolError("RUNTIME_EXECUTION_CONTRACT_INVALID", "OpenCode model instructions are invalid");
+    }
+    if (modelOnlyInstance && (policy.approvalPolicy !== "never" || policy.sandbox !== "read-only")) {
+      throw poolError("OPENCODE_PERMISSION_UNSAFE", "OpenCode model tasks require a tool-free policy");
+    }
     const workspaceExecutionVersion = require("./workspace-execution-tools").workspaceAutoExecution(options.executionContract) ? 1 : null;
-    const fingerprint = JSON.stringify([policy, workspaceExecutionVersion]);
+    const fingerprint = JSON.stringify([policy, workspaceExecutionVersion, modelOnlyInstance, modelInstructions]);
     const key = JSON.stringify([profileId, binding.runtimeAccountId,
-      controlInstance ? "control" : "execution", workspace, executionRunId]);
+      modelOnlyInstance ? "model-only" : controlInstance ? "control" : "execution", workspace, executionRunId]);
     const conflicting = [...this.entries.values()].find(entry => entry.runtimeProfileId === profileId
       && entry.runtimeAccountId !== binding.runtimeAccountId);
     if (conflicting) throw poolError("RUNTIME_ACCOUNT_BINDING_CONFLICT", "Stop OpenCode before changing its RuntimeAccount");
@@ -53,7 +65,7 @@ class OpenCodeRuntimePool {
     if (existing) {
       if (existing.retiring) return existing.retiring.then(() => this.get(binding, options));
       if (existing.policyFingerprint !== fingerprint) throw poolError("RUNTIME_PERMISSION_POLICY_CONFLICT", "Stop OpenCode before changing permission policy");
-      const host = await existing.promise;
+      const host = await reusePoolHost(this, existing, options, () => this.get(binding, options));
       host.beginAcquire();
       return host;
     }
@@ -70,20 +82,23 @@ class OpenCodeRuntimePool {
     const ledgerSlot = poolLedgerSlot(this, ledgerKey);
     const host = this.hostFactory({ ...this.hostOptions, ...this.options,
       runtimeBinding: binding, runtimeEnvironment, permissionPolicy: policy,
-      controlInstance, workspace, mcpExecutionRunId: executionRunId,
-      workspaceExecutionVersion,
+      controlInstance, workspace, mcpExecutionRunId: executionRunId, modelOnlyInstance,
+      workspaceExecutionVersion, modelInstructions,
       ledgerSlot, paths: this.options.paths ?? this.hostOptions.paths });
-    const entry = { host, key, ledgerKey, ledgerSlot, policyFingerprint: fingerprint,
+    const entry = { host, key, runtimeEnvironment, ledgerKey, ledgerSlot, policyFingerprint: fingerprint,
       runtimeProfileId: profileId, runtimeAccountId: binding.runtimeAccountId,
       promise: null };
     trackPoolHost(entry, binding);
-    entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+    entry.promise = Promise.resolve().then(async () => {
+      await preparePoolHostIdentity(this, entry, binding, options);
+      await host.initialize();
+      host.assertRuntimeIdentityCurrent?.();
+    }).then(() => {
       entry.capacity.ready = true;
-      host.terminated?.finally(() => { if (this.entries.get(key) === entry) this.entries.delete(key); }).catch(() => {});
+      host.terminated?.finally(() => { if (this.entries.get(key) === entry && !entry.retiring) this.entries.delete(key); }).catch(() => {});
       return host;
     }).catch(async cause => {
-      try { await host.stop(); } catch { this.blockedProfiles.add(profileId); }
-      if (this.entries.get(key) === entry) this.entries.delete(key);
+      await cleanupFailedPoolHost(this, entry, profileId);
       throw cause;
     });
     this.entries.set(key, entry);

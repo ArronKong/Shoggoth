@@ -1,6 +1,7 @@
 "use strict";
 
 const { validResponseMetadata } = require("../chat-response-metadata");
+const { groupReplyMessages } = require("../group-reply-messages");
 
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -197,6 +198,7 @@ class GroupChatStore {
         fsyncPrivateParent(this.paths.stateDir);
       }
       if (this.db.prepare("PRAGMA quick_check").get().quick_check !== "ok") fail("GROUP_CHAT_STORE_CORRUPT");
+      this.db.exec("CREATE INDEX IF NOT EXISTS messages_revision ON messages(group_id,json_extract(data,'$.revision'))");
       this.tables = new Set(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
       this.internalSessionKeys = new Set(this.db.prepare("SELECT session_key, external FROM session_bindings").all()
         .flatMap((row) => [row.session_key, ...retiredSessions(row.external)].filter(Boolean)));
@@ -375,10 +377,11 @@ class GroupChatStore {
     const latest = this.db.prepare("SELECT max(seq) AS seq FROM messages WHERE group_id=?").get(group.id).seq ?? 0;
     const seq = Math.max(group.lastSeq, latest) + 1;
     const stored = { ...message, id: message.id ?? this.randomUUID(), groupId: group.id, seq,
-      threadId: MAIN_THREAD, createdAt: this.now() };
+      threadId: MAIN_THREAD, createdAt: this.now(), revision: (group.messageRevision ?? 0) + 1 };
     this.db.prepare("INSERT INTO messages(id,group_id,seq,origin_key,data) VALUES(?,?,?,?,?)")
       .run(stored.id, group.id, seq, stored.originKey, JSON.stringify(stored));
     group.lastSeq = seq;
+    group.messageRevision = stored.revision;
     group.updatedAt = stored.createdAt;
     return stored;
   }
@@ -713,7 +716,7 @@ class GroupChatStore {
     return this.#groupView(this.#requireGroup(groupId));
   }
 
-  listMessages({ groupId, afterSeq = null, beforeSeq = null, limit = 50 }) {
+  listMessages({ groupId, afterSeq = null, beforeSeq = null, limit = 50, afterRevision }) {
     this.#ready();
     this.#requireGroup(groupId);
     let rows;
@@ -729,7 +732,7 @@ class GroupChatStore {
       hasMore = rows.length > limit;
       rows = rows.slice(0, limit).reverse();
     }
-    return { messages: rows.map(row => {
+    const result = { messages: rows.map(row => {
       const message = parse(row), reply = message.replyTo;
       // 已保存的旧引用只含文字。在当前群按原 ID/seq 补媒体元数据，不重写历史，也不要求原图在这一页。
       if (reply && reply.attachments === undefined && reply.seq < message.seq) {
@@ -739,7 +742,18 @@ class GroupChatStore {
           message.replyTo = { ...reply, attachments: replySnapshot(quoted).attachments };
       }
       return message;
-    }), hasMore };
+    }), hasMore, revision: this.#requireGroup(groupId).messageRevision ?? 0 };
+    if (afterRevision !== undefined) {
+      const group = this.#requireGroup(groupId);
+      const updates = afterSeq === null ? [] : this.db.prepare(`SELECT data FROM messages WHERE group_id=?
+        AND json_extract(data,'$.revision')>? ORDER BY json_extract(data,'$.revision') LIMIT ?`)
+        .all(groupId, afterRevision, limit + 1).map(parse);
+      result.updates = updates.slice(0, limit);
+      result.hasMoreUpdates = updates.length > limit;
+      result.revision = afterSeq === null ? group.messageRevision ?? 0
+        : result.updates.at(-1)?.revision ?? afterRevision;
+    }
+    return result;
   }
 
   readMessage({ groupId, seq, offset = 0, digest: expected = null }) {
@@ -1503,7 +1517,7 @@ class GroupChatStore {
    * 让出发言位：开始用工具一段时间后、或等用户审批时。回合在后台继续，下一位开始发言。
    * text：让位那一刻已经写出的正文，先作为一条消息发到群里；其中的 @ 照常叫人。
    */
-  releaseTurn({ opportunityId, reason, fence = undefined, text = null }) {
+  releaseTurn({ opportunityId, reason, fence = undefined, text = null, replyMessages = [] }) {
     return this.#write(() => {
       const turn = this.#turn(opportunityId);
       if (!turn || !holdsFloor(turn) || (fence !== undefined && (fence !== this.getDriverFence() || turn.fence !== fence))) {
@@ -1515,7 +1529,13 @@ class GroupChatStore {
       let messageId = null;
       const body = typeof text === "string" ? text.trim() : "";
       if (reason === "working" && body && !isPassReply(body) && group.status === "active" && member?.state === "active") {
-        const message = this.#publish(group, turn, member, body, { partial: true });
+        const parts = groupReplyMessages(replyMessages);
+        if (parts.length) this.#syncTurnMessages(group, turn, member, parts);
+        const published = turn.individualMessages ? this.#turnTextMessages(turn) : [];
+        const message = published.at(-1) ?? this.#publish(group, turn, member, body, { partial: true });
+        if (published.length) this.#route(group, turn, member, { ...message, mentions: { ...message.mentions,
+          memberIds: [...new Set(published.flatMap(item => item.mentions.memberIds))],
+          broadcast: published.some(item => item.mentions.broadcast) } });
         turn.postedText = body;
         messageId = message.id;
       }
@@ -1523,6 +1543,95 @@ class GroupChatStore {
       this.#putGroup(group);
       return { changed: true, groupId: turn.groupId, messageId };
     });
+  }
+
+  #turnTextMessages(turn) {
+    return this.db.prepare(`SELECT data FROM messages WHERE group_id=? AND json_extract(data,'$.origin.opportunityId')=?
+      AND json_extract(data,'$.origin.runId') IS ? AND json_extract(data,'$.origin.textItemId') IS NOT NULL ORDER BY seq`)
+      .all(turn.groupId, turn.id, turn.runId ?? null).map(parse);
+  }
+
+  #replaceMessage(group, prior, text, patch = {}) {
+    let mentions = prior.mentions;
+    if (text !== prior.body && prior.author.kind === "member") {
+      const parsed = parseMentions(text, this.#members(group.id, { activeOnly: true }).map(peer => ({ memberId: peer.id, handle: peer.handle })));
+      mentions = { memberIds: parsed.memberIds.filter(id => id !== prior.author.memberId),
+        broadcast: parsed.broadcast && prior.author.memberId === this.#owner(group)?.id, unresolved: parsed.unresolved };
+    }
+    const next = { ...prior, mentions, ...patch, body: utf8Prefix(text, MAX_MEMBER_REPLY_BYTES),
+      fullResult: { bytes: Buffer.byteLength(text, "utf8"), digest: sha256(text) }, revision: (group.messageRevision ?? 0) + 1 };
+    this.db.prepare("UPDATE messages SET data=? WHERE id=? AND group_id=?").run(JSON.stringify(next), prior.id, group.id);
+    this.db.prepare(`INSERT INTO message_results VALUES(?,?,?,?) ON CONFLICT(message_id)
+      DO UPDATE SET body=excluded.body,digest=excluded.digest,bytes=excluded.bytes`)
+      .run(next.id, text, next.fullResult.digest, next.fullResult.bytes);
+    group.messageRevision = next.revision;
+    group.updatedAt = this.now();
+    return next;
+  }
+
+  #textMessageKey(turn, id) { return `turn-text:${turn.id}:${sha256(JSON.stringify([turn.runId ?? null, id]))}`; }
+
+  #syncTurnMessages(group, turn, member, value, { authoritative = false } = {}) {
+    const messages = [];
+    const items = groupReplyMessages(value, authoritative ? { maxTextBytes: 32 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024 } : {});
+    const observedIds = new Set(items.map(item => item.id));
+    for (const prior of this.#turnTextMessages(turn)) if (prior.origin.streaming && !observedIds.has(prior.origin.textItemId))
+      messages.push(this.#replaceMessage(group, prior, prior.body, { origin: { ...prior.origin, streaming: false } }));
+    for (const item of items) {
+      if (isPassReply(item.text) || "(pass)".startsWith(item.text.trim().toLowerCase())) continue;
+      const key = this.#textMessageKey(turn, item.id);
+      const prior = parse(this.db.prepare("SELECT data FROM messages WHERE group_id=? AND origin_key=?").get(group.id, key));
+      if (!prior) {
+        messages.push(this.#publish(group, turn, member, item.text, { partial: true, route: false, originKey: key,
+          textItemId: item.id, streaming: item.pending === true }));
+        continue;
+      }
+      if (prior.origin.streaming !== true && item.pending === true) continue;
+      const shown = prior.body.replace(/…$/u, "");
+      const canUpdate = prior.origin.streaming === true || authoritative
+        && (item.text.startsWith(shown) || shown.startsWith("…") && item.text.includes(shown.slice(1)));
+      const text = canUpdate ? item.text : prior.body;
+      const streaming = prior.origin.streaming === true && item.pending === true;
+      if (text !== prior.body || streaming !== prior.origin.streaming) messages.push(this.#replaceMessage(group, prior, text,
+        { origin: { ...prior.origin, streaming } }));
+    }
+    if (messages.length) turn.individualMessages = true;
+    return messages;
+  }
+
+  /** First publication fixes seq/time. Subsequent deltas can only update that same source message. */
+  syncTurnMessages({ opportunityId, fence, runId, messages }) {
+    return this.#write(() => {
+      const turn = this.#turn(opportunityId);
+      if (!turn || !ACTIVE_TURN.includes(turn.state) || turn.fence !== fence || fence !== this.getDriverFence()
+        || turn.runId !== runId || turn.abortReason) return { changed: false };
+      const group = this.#group(turn.groupId), member = this.#member(turn.memberId);
+      if (group.status !== "active" || member.state !== "active") return { changed: false };
+      const updates = this.#syncTurnMessages(group, turn, member, messages);
+      if (updates.length) { this.#putTurn(turn); this.#putGroup(group); }
+      return { changed: updates.length > 0, groupId: group.id, messages: updates };
+    });
+  }
+
+  #finishTextMessage(group, turn, member, text, { id, attachments, replyToSeq, responseMetadata, authoritative = false }) {
+    let key = this.#textMessageKey(turn, id);
+    let prior = parse(this.db.prepare("SELECT data FROM messages WHERE group_id=? AND origin_key=?").get(group.id, key));
+    // Legacy Hosts without an authoritative final identity must append a new answer when they reuse a completed item ID.
+    if (prior && !authoritative && !prior.origin.streaming && prior.body !== text && !text.startsWith(prior.body)) {
+      id = `final:${id}`; key = this.#textMessageKey(turn, id); prior = null;
+    }
+    prior ??= this.#publish(group, turn, member, text, { partial: true, route: false, originKey: key, textItemId: id });
+    const quoted = replyToSeq === null ? null : parse(this.db.prepare("SELECT data FROM messages WHERE group_id=? AND seq=?").get(group.id, replyToSeq));
+    const mentions = parseMentions(text, this.#members(group.id, { activeOnly: true }).map(peer => ({ memberId: peer.id, handle: peer.handle })));
+    const origin = { ...prior.origin, partial: false, streaming: false, ...(turn.released ? { late: true } : {}) };
+    const message = this.#replaceMessage(group, prior, text, { origin,
+      mentions: { memberIds: mentions.memberIds.filter(id => id !== member.id), broadcast: mentions.broadcast && member.id === this.#owner(group)?.id,
+        unresolved: mentions.unresolved },
+      ...(quoted && quoted.author.kind !== "system" ? { replyTo: replySnapshot(quoted) } : {}),
+      ...(attachments.length ? { attachments: attachments.map(({ id, name, mimeType, size }) => ({ id, name, mimeType, size })) } : {}),
+      ...(validResponseMetadata(responseMetadata) ? { responseMetadata: clone(responseMetadata) } : {}) });
+    this.#route(group, turn, member, message, { late: Boolean(turn.released) });
+    return message;
   }
 
   /**
@@ -1634,7 +1743,8 @@ class GroupChatStore {
   }
 
   /** 成员的一条群消息（最终回答或让位时已写出的正文）。 */
-  #publish(group, turn, member, text, { partial = false, attachments = [], replyToSeq = null, responseMetadata = null } = {}) {
+  #publish(group, turn, member, text, { partial = false, attachments = [], replyToSeq = null, responseMetadata = null, replyMessages = [],
+    originKey = null, route = true, textItemId = null, streaming = false } = {}) {
     const quoted = replyToSeq === null ? null : parse(this.db.prepare(
       "SELECT data FROM messages WHERE group_id=? AND seq=?").get(group.id, replyToSeq));
     const replyTo = quoted && quoted.author.kind !== "system" ? replySnapshot(quoted) : null;
@@ -1644,17 +1754,18 @@ class GroupChatStore {
     const owner = this.#owner(group);
     const late = turn.released && !partial;
     const message = this.#insertMessage(group, {
-      originKey: partial ? `turn-partial:${turn.id}` : `turn:${turn.id}`, author: { kind: "member", memberId: member.id },
+      originKey: originKey ?? (partial ? `turn-partial:${turn.id}` : `turn:${turn.id}`), author: { kind: "member", memberId: member.id },
       body: utf8Prefix(text, MAX_MEMBER_REPLY_BYTES), fullResult: { bytes: Buffer.byteLength(text, "utf8"), digest: sha256(text) },
       mentions: { memberIds: called, broadcast: parsed.broadcast && member.id === owner?.id, unresolved: parsed.unresolved },
       origin: { opportunityId: turn.id, runId: turn.runId, discussionId: turn.discussionId,
-        ...(partial ? { partial: true } : {}), ...(late ? { late: true } : {}) },
+        ...(partial ? { partial: true } : {}), ...(late ? { late: true } : {}), ...(textItemId ? { textItemId, streaming } : {}) },
       ...(replyTo ? { replyTo } : {}),
       ...(validResponseMetadata(responseMetadata) ? { responseMetadata: clone(responseMetadata) } : {}),
       ...(attachments.length ? { attachments: attachments.map(({ id, name, mimeType, size }) => ({ id, name, mimeType, size })) } : {}),
+      ...(replyMessages.length ? { replyMessages: replyMessages.map(({ id, text }) => ({ id, text })) } : {}),
     });
     this.db.prepare("INSERT INTO message_results VALUES(?,?,?,?)").run(message.id, text, message.fullResult.digest, message.fullResult.bytes);
-    this.#route(group, turn, member, message, { late });
+    if (route) this.#route(group, turn, member, message, { late });
     return message;
   }
 
@@ -1694,7 +1805,7 @@ class GroupChatStore {
    *   attachments?: object[], replyToSeq?: number|null}} input attachments / replyToSeq：成员随回复发的文件
    *   （已存进媒体库）与它引用的消息序号，由驱动从回复文本里解析并核对
    */
-  completeTurn({ opportunityId, fence, status, text = null, errorCode = null, attachments = [], replyToSeq = null, responseMetadata = null }) {
+  completeTurn({ opportunityId, fence, status, text = null, errorCode = null, attachments = [], replyToSeq = null, responseMetadata = null, replyMessages = [] }) {
     return this.#write(() => {
       const turn = this.#turn(opportunityId);
       if (!turn || !ACTIVE_TURN.includes(turn.state) || turn.fence !== fence || fence !== this.getDriverFence()) {
@@ -1703,6 +1814,10 @@ class GroupChatStore {
       const group = this.#group(turn.groupId);
       const member = this.#member(turn.memberId);
       const round = this.#round(turn.discussionId);
+      const parts = groupReplyMessages(replyMessages, { maxTextBytes: 32 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024 });
+      const individual = turn.individualMessages || parts.length > 0;
+      const pending = this.#turnTextMessages(turn).findLast(message => message.origin.streaming && typeof text === "string" && text.startsWith(message.body));
+      const finalItemId = groupReplyMessages(replyMessages).findLast(item => item.final)?.id ?? pending?.origin.textItemId ?? "terminal-final";
       if (typeof text === "string") {
         const header = parseReplyHeader(text);
         const quoted = header.replyToSeq === null ? null : parse(this.db.prepare(
@@ -1710,30 +1825,43 @@ class GroupChatStore {
         if (quoted && quoted.author.kind !== "system") { text = header.body; replyToSeq = quoted.seq; }
       }
       // 让位时已经发出的那段正文不重复发。
-      if (typeof text === "string" && turn.postedText) {
+      if (typeof text === "string" && turn.postedText && !individual) {
         const trimmed = text.trim();
         if (trimmed.startsWith(turn.postedText)) text = trimmed.slice(turn.postedText.length).trim();
       }
       const finish = (state, extra = {}) => Object.assign(turn, { state, finishedAt: this.now(), ...extra });
+      const preserveVisibleReplies = () => {
+        if (group.status === "active" && member.state === "active") this.#syncTurnMessages(group, turn, member,
+          parts.filter(item => !item.final && (status !== "completed" || item.id !== finalItemId)).map(item => ({ ...item, pending: false })), { authoritative: true });
+        for (const message of this.#turnTextMessages(turn)) if (message.origin.streaming
+          && (status !== "completed" || message.origin.textItemId !== finalItemId))
+          this.#replaceMessage(group, message, message.body, { origin: { ...message.origin, streaming: false } });
+      };
       let message = null;
       if (group.status !== "active" || USER_STOPS.has(turn.abortReason) || member.state !== "active") {
         finish("cancelled", { errorCode: turn.abortReason ?? "GROUP_DISCUSSION_STOPPED" });
+        preserveVisibleReplies();
         if (turn.abortReason === "GROUP_MEMBER_STOPPED" && group.status === "active") {
           message = this.#systemMessage(group, { eventType: "turn_stopped", memberId: member.id }, `turn:${turn.id}`);
         }
       } else if (turn.abortReason || status !== "completed") {
         const code = turn.abortReason ?? errorCode ?? `GROUP_TURN_${String(status).toUpperCase()}`;
         finish("failed", { errorCode: code });
+        preserveVisibleReplies();
         message = this.#systemMessage(group, { eventType: "turn_failed", memberId: member.id, errorCode: code }, `turn:${turn.id}`);
         this.#ownerFallback(group, round, turn);
       } else if (attachments.length === 0 && (typeof text !== "string" || !text.trim()) && !turn.postedText) {
         turn.recovery = { type: "result", reason: "GROUP_TURN_RESULT_EMPTY", since: this.now(), cancelRequested: false };
       } else if (attachments.length === 0 && (typeof text !== "string" || !text.trim() || isPassReply(text))) {
         finish("passed");
+        preserveVisibleReplies();
         // 后台干完了、结果在之前的话里已经说过：告诉派活者它做完了。
         if (turn.released && turn.postedText) this.#route(group, turn, member, null, { done: true });
       } else {
-        message = this.#publish(group, turn, member, text ?? "", { attachments, replyToSeq, responseMetadata });
+        preserveVisibleReplies();
+        message = individual ? this.#finishTextMessage(group, turn, member, text ?? "", { id: finalItemId, attachments, replyToSeq, responseMetadata,
+          authoritative: groupReplyMessages(replyMessages).some(item => item.id === finalItemId && item.final) })
+          : this.#publish(group, turn, member, text ?? "", { attachments, replyToSeq, responseMetadata });
         finish("replied", { resultMessageId: message.id });
       }
       if (["replied", "passed"].includes(turn.state)) turn.recovery = null;

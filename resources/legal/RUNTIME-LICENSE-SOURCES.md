@@ -29,15 +29,17 @@ and SHA-256 digests are retained in `codex-voice/sources.json`; the upstream bui
 source and commit are identified in `codex-voice/manifest.json`.
 When updating Codex, review its license and notices at the new pinned version.
 
-## gogcli 0.42.0
+## OpenConnector 1.9.2 and Bun 1.4.0
 
-The independent Gmail MCP runtime is the unmodified `gog` executable from
-<https://github.com/openclaw/gogcli/releases/tag/v0.42.0>. Its arm64 and x64
-release artifacts are pinned in `build/gog-runtime-manifest.json` and copied
-into `gogcli/gog` in the application. The project declares MIT; its copyright
-notice and complete MIT terms are retained in
-[GOGCLI.txt](licenses/source/GOGCLI.txt). Shoggoth's Service adapter is separate
-from the upstream binary.
+The business connector runtime is pinned to OpenConnector source
+`2748be7758ad388b4eb59a33696285a8444a3c81` and the exact npm SRI dependency lock.
+Its App resource `open-connector/` contains the complete generated npm license
+texts and SBOM, Bun's original static-link notices, the application source kit
+and `legal/REBUILD.md`. Bun source is pinned to
+`34cbb9a40b4bd1bd767d134a7065e66c2432a676`. The LGPL linked-library source and
+relink distribution, and sdk-base's supplemental license provenance, remain
+public-release review gates. Internal executable smoke tests do not clear them.
+The former gogcli/Gmail sidecar is retired and is absent from new App resources.
 
 ## Cua and UniFFI
 

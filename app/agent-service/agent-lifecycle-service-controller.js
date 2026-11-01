@@ -26,7 +26,7 @@ const PROTECTED_PROFILE_IDS = new Set([DEFAULT_AGENT_PROFILE_ID]);
 const RETRYABLE_CODES = new Set([
   "AGENT_RETENTION_FAILED",
   "AGENT_INITIALIZATION_FAILED", "AGENT_RUNTIME_CLEANUP_FAILED", "AGENT_COMMIT_UNCERTAIN",
-  "AGENT_PLUGIN_REVOKE_FAILED",
+  "AGENT_CONNECTOR_REVOKE_FAILED",
   "AGENT_SERVICE_CLOSED",
 ]);
 
@@ -184,8 +184,8 @@ function createAgentLifecycleServiceController(options = {}) {
   if (typeof options.initializeProfile !== "function"
     || typeof options.activateProfile !== "function"
     || (options.onProfileChanged !== undefined && typeof options.onProfileChanged !== "function")
-    || (options.revokePluginProfile !== undefined
-      && typeof options.revokePluginProfile !== "function")
+    || (options.revokeSharedProfileAccess !== undefined
+      && typeof options.revokeSharedProfileAccess !== "function")
     || (options.hasActiveExternalRuns !== undefined && typeof options.hasActiveExternalRuns !== "function")) {
     throw lifecycleError("AGENT_SERVICE_CLOSED", "Profile lifecycle callbacks are invalid");
   }
@@ -261,15 +261,15 @@ function createAgentLifecycleServiceController(options = {}) {
     }
   }
 
-  function revokePluginProfile(profileId) {
-    if (!options.revokePluginProfile) return;
+  function revokeSharedProfileAccess(profileId) {
+    if (!options.revokeSharedProfileAccess) return;
     try {
-      const result = options.revokePluginProfile(profileId);
+      const result = options.revokeSharedProfileAccess(profileId);
       if (result && typeof result.then === "function") {
-        throw new TypeError("plugin revocation must complete synchronously");
+        throw new TypeError("shared account revocation must complete synchronously");
       }
     } catch {
-      throw lifecycleError("AGENT_PLUGIN_REVOKE_FAILED");
+      throw lifecycleError("AGENT_CONNECTOR_REVOKE_FAILED");
     }
   }
 
@@ -350,16 +350,16 @@ function createAgentLifecycleServiceController(options = {}) {
         || options.hasActiveExternalRuns?.(profile.id) === true) {
         throw lifecycleError("AGENT_ACTIVE_RUNS");
       }
-      // Revoke in the plugin Store before publishing disabled Product state.
-      // A failed plugin transaction must not leave a frozen dispatch ticket
+      // Revoke shared account access before publishing disabled Product state.
+      // A failed account transaction must not leave a frozen dispatch ticket
       // authorized while the UI reports this Profile as archived.
-      revokePluginProfile(profile.id);
+      revokeSharedProfileAccess(profile.id);
       // No await between the final run check and disabled commit. ProductStore
       // independently rejects new WorkRuns for disabled Profiles.
       profile = putProfile({ ...profile, enabled: false });
     } else {
       // Repair a disabled Profile left by an older interrupted archive.
-      revokePluginProfile(profile.id);
+      revokeSharedProfileAccess(profile.id);
     }
     options.archiveRetention?.recordArchive(profile);
     assertOpen(expectedGeneration);
@@ -388,8 +388,8 @@ function createAgentLifecycleServiceController(options = {}) {
     }
     assertCas(profile, binding.expectedUpdatedAt);
     // An interrupted archive may have disabled ProductStore before revoking
-    // plugin authority. Never restore the Profile before fencing those Grants.
-    revokePluginProfile(profile.id);
+    // shared account authority. Never restore the Profile before fencing those Grants.
+    revokeSharedProfileAccess(profile.id);
     await initialize(profile, expectedGeneration);
     await activate(profile, expectedGeneration);
     profile = loadProfile(profile.id);

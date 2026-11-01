@@ -8,6 +8,7 @@ const {
   runtimeBinding,
   runtimeSessionRef,
   runtimeTurnRef,
+  runtimeAttemptRef,
 } = require("./runtime-adapter");
 const {
   DEFAULT_RUNTIME_ACCOUNTS,
@@ -17,10 +18,10 @@ const {
 const {
   BINDING_STATE_FIELDS, PROJECTED_RUNTIME_FIELDS, MAX_AGENT_RUNTIME_BINDINGS, MAX_BINDING_OPERATIONS,
   bindingError, bindingId, runtimeProfileIdForBinding, validateAgentRuntimeBinding, validateBindingState,
-  withInitialBinding, projectProfile, profileToDisk, profileWithoutBindingState,
+  withInitialBinding, projectProfile, runtimeModelProfile, profileToDisk, profileWithoutBindingState,
 } = require("./agent-runtime-binding");
 
-const STORE_SCHEMA_VERSION = 15;
+const STORE_SCHEMA_VERSION = 16;
 const DEFAULT_AGENT_PROFILE_UUID = "f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4";
 const DEFAULT_AGENT_PROFILE_ID = DEFAULT_AGENT_PROFILE_UUID;
 const DEFAULT_AGENT_BACKEND_ID = "shoggoth";
@@ -46,7 +47,7 @@ const BINDING_AGENT_PROFILE_FIELDS = Object.freeze([
 ]);
 const WORK_RUN_FIELDS = Object.freeze([
   "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace", "status",
-  "contextSnapshotId", "runtimeSessionRef", "runtimeTurnRef", "eventSeq", "waitingRequestId", "startedAt",
+  "contextSnapshotId", "runtimeSessionRef", "runtimeTurnRef", "runtimeAttemptRef", "eventSeq", "waitingRequestId", "startedAt",
   "finishedAt", "resultSummary", "errorCode", "retryOf",
 ]);
 const RUN_NOTE_FIELDS = Object.freeze([
@@ -507,6 +508,10 @@ function validateWorkRun(record, source = null) {
       run.runtimeTurnRef.sessionId,
       run.runtimeTurnRef.turnId,
     );
+    if (run.runtimeAttemptRef !== null) {
+      const { runtime, runtimeProfileId, runtimeAccountId, ...attempt } = run.runtimeAttemptRef;
+      run.runtimeAttemptRef = runtimeAttemptRef({ runtime, runtimeProfileId, runtimeAccountId }, attempt);
+    }
   } catch {
     throw storeError("STORE_INVALID_RECORD", "WorkRun Runtime ref 无效");
   }
@@ -516,6 +521,14 @@ function validateWorkRun(record, source = null) {
     || run.runtimeTurnRef.runtimeAccountId !== run.runtimeSessionRef.runtimeAccountId
     || run.runtimeTurnRef.sessionId !== run.runtimeSessionRef.sessionId)) {
     throw storeError("STORE_INVALID_RECORD", "WorkRun.runtimeTurnRef 需要匹配 runtimeSessionRef");
+  }
+  if (run.runtimeAttemptRef !== null && (run.status === "queued"
+    || run.runtimeAttemptRef.dispatchState === "prepared" && (run.runtimeSessionRef !== null || run.runtimeTurnRef !== null)
+    || [run.runtimeSessionRef, run.runtimeTurnRef].some(ref => ref !== null
+      && ["runtime", "runtimeProfileId", "runtimeAccountId", "sessionId"].some(key => ref[key] !== run.runtimeAttemptRef[key]))
+    || (run.runtimeTurnRef !== null && (run.runtimeAttemptRef.dispatchState !== "write_attempted"
+      || run.runtimeTurnRef.turnId !== run.runtimeAttemptRef.turnId)))) {
+    throw storeError("STORE_INVALID_RECORD", "WorkRun attempt 与执行引用冲突");
   }
   if (!Number.isSafeInteger(run.eventSeq) || run.eventSeq < 1) {
     throw storeError("STORE_INVALID_RECORD", "WorkRun.eventSeq 必须是正安全整数");
@@ -547,7 +560,13 @@ function validateWorkRun(record, source = null) {
   return run;
 }
 
-function workRunFromDisk(record) { return validateWorkRun(record); }
+function workRunFromDisk(record, schemaVersion = STORE_SCHEMA_VERSION) {
+  if (schemaVersion === 15) {
+    if (Object.hasOwn(record, "runtimeAttemptRef")) throw storeError("STORE_INVALID_RECORD", "Legacy WorkRun attempt 无效");
+    return validateWorkRun({ ...record, runtimeAttemptRef: null });
+  }
+  return validateWorkRun(record);
+}
 
 function sameRuntimeRef(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -814,6 +833,7 @@ class JsonlProductStore extends ProductStore {
     this.commitUncertain = false;
     this.commitError = null;
     this.lastEventSeq = 0;
+    this.legacySourceFiles = new Map(); this.sawLegacySchema = false;
     this.modelProviders = new Map();
     this.runtimeAccounts = new Map();
     this.runtimeAccountTombstones = new Map();
@@ -852,10 +872,17 @@ class JsonlProductStore extends ProductStore {
     this.lastEventSeq = 0;
     this.commitUncertain = false;
     this.commitError = null;
+    this.legacySourceFiles = new Map(); this.sawLegacySchema = false;
     this.#readSnapshot();
     this.#ensureDefaultRuntimeAccounts();
-    this.#replayEventLog();
-    this.#assertAllReferences();
+    this.#replayEventLog(() => {
+      this.#assertAllReferences();
+      // Validate and retain the exact legacy sources before any journal repair.
+      // A failed backup or invalid reference must leave the original bytes intact.
+      if (this.sawLegacySchema) require("./product-schema-migration").preserveLegacyProduct({
+        paths: this.paths, fs: this.fs, sources: this.legacySourceFiles, from: 15, to: STORE_SCHEMA_VERSION });
+      this.legacySourceFiles.clear();
+    });
     this.opened = true;
     if (!this.agentProfiles.has(DEFAULT_AGENT_PROFILE_ID)) {
       const profile = defaultAgentProfile(this.now());
@@ -1042,7 +1069,7 @@ class JsonlProductStore extends ProductStore {
     const binding = profile.bindings.find((entry) => entry.id === id);
     if (!binding) throw bindingError("NOT_FOUND");
     if (!binding.enabled || !profile.enabled) throw bindingError("DISABLED");
-    return clone({ ...projectProfile(profile, id), selectedBindingId: id });
+    return clone(runtimeModelProfile({ ...projectProfile(profile, id), selectedBindingId: id }));
   }
 
   addAgentRuntimeBinding(profileId, spec, options = {}) {
@@ -1572,7 +1599,7 @@ class JsonlProductStore extends ProductStore {
       else if (field === "waitingRequestId") expected = null;
       else if (field === "finishedAt") expected = finishedAt;
       else if (field === "errorCode") expected = "SERVICE_RESTARTED";
-      const unchanged = field === "runtimeSessionRef" || field === "runtimeTurnRef"
+      const unchanged = field === "runtimeSessionRef" || field === "runtimeTurnRef" || field === "runtimeAttemptRef"
         ? sameRuntimeRef(run[field], expected)
         : run[field] === expected;
       if (!unchanged) {
@@ -1634,11 +1661,13 @@ class JsonlProductStore extends ProductStore {
     let snapshot;
     const fd = this.#openExistingSafe(this.paths.stateSnapshotPath, this.fs.constants.O_RDONLY);
     try {
-      snapshot = JSON.parse(this.fs.readFileSync(fd, "utf8"));
+      const original = this.fs.readFileSync(fd);
+      this.legacySourceFiles?.set("snapshot", Buffer.from(original));
+      snapshot = JSON.parse(original.toString("utf8"));
     } catch (error) {
       throw storeError("STORE_CORRUPT_SNAPSHOT", `无法读取 ProductStore snapshot: ${error.message}`);
     } finally { this.fs.closeSync(fd); }
-    if (snapshot?.schemaVersion !== this.schemaVersion) {
+    if (![15, this.schemaVersion].includes(snapshot?.schemaVersion)) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
         `不支持 ProductStore snapshot schemaVersion: ${String(snapshot?.schemaVersion)}`,
@@ -1653,6 +1682,7 @@ class JsonlProductStore extends ProductStore {
       || typeof snapshot.checksum !== "string" || snapshot.checksum !== snapshotChecksum(snapshot)) {
       throw storeError("STORE_CORRUPT_SNAPSHOT", "ProductStore snapshot 结构无效");
     }
+    if (snapshot.schemaVersion === 15) this.sawLegacySchema = true;
     this.#assertNoSensitiveFields(snapshot, false);
     for (const raw of snapshot.modelProviders || []) {
       const provider = modelProviderFromDisk(raw, snapshot.schemaVersion);
@@ -1714,10 +1744,11 @@ class JsonlProductStore extends ProductStore {
     this.lastEventSeq = snapshot.lastSeq;
   }
 
-  #replayEventLog() {
+  #replayEventLog(afterValidated = () => {}) {
     const target = this.paths.eventLogPath;
     if (!this.#lstatIfExists(target)) {
       if (this.readOnly) throw storeError("STORE_SOURCE_MISSING", "只读 Product journal 缺失");
+      afterValidated();
       const fd = this.#openNewSafe(
         target,
         this.fs.constants.O_CREAT | this.fs.constants.O_EXCL | this.fs.constants.O_RDWR,
@@ -1729,6 +1760,7 @@ class JsonlProductStore extends ProductStore {
     const fd = this.#openExistingSafe(target, this.readOnly ? this.fs.constants.O_RDONLY : this.fs.constants.O_RDWR);
     try {
       const bytes = this.fs.readFileSync(fd);
+      this.legacySourceFiles?.set("journal", Buffer.from(bytes));
       const lastNewline = bytes.lastIndexOf(0x0a);
       const completeLength = lastNewline < 0 ? 0 : lastNewline + 1;
       const complete = bytes.subarray(0, completeLength).toString("utf8");
@@ -1753,6 +1785,7 @@ class JsonlProductStore extends ProductStore {
         this.lastEventSeq = event.seq;
         expectedSeq += 1;
       }
+      afterValidated();
       if (completeLength !== bytes.length) {
         if (this.readOnly) throw storeError("STORE_TRANSACTION_UNSETTLED", "只读 Product journal 拒绝未闭合尾部");
         // 只有完整前缀已经全部验证后才截掉崩溃尾部；使用已 pin inode 的 fd 截断。
@@ -1763,7 +1796,7 @@ class JsonlProductStore extends ProductStore {
   }
 
   #validateEnvelope(event, line) {
-    if (event?.schemaVersion !== this.schemaVersion) {
+    if (![15, this.schemaVersion].includes(event?.schemaVersion)) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
         `不支持 events.jsonl 第 ${line} 行 schemaVersion: ${String(event?.schemaVersion)}`,
@@ -1776,6 +1809,7 @@ class JsonlProductStore extends ProductStore {
       || typeof event.checksum !== "string" || event.checksum !== eventChecksum(event)) {
       throw storeError("STORE_CORRUPT_EVENT_LOG", `events.jsonl 第 ${line} 行 envelope/校验和无效`);
     }
+    if (event.schemaVersion === 15) this.sawLegacySchema = true;
     this.#assertNoSensitiveFields(event.payload, false);
   }
 
@@ -2136,6 +2170,24 @@ class JsonlProductStore extends ProductStore {
         throw storeError(code, `WorkRun.${field} 非空后不可清空或更换`);
       }
     }
+    if (existing.runtimeAttemptRef === null && candidate.runtimeAttemptRef != null
+      && (existing.status !== "starting" || existing.runtimeSessionRef !== null || existing.runtimeTurnRef !== null)) {
+      throw storeError(code, "不能为已接受的执行补造准备身份");
+    }
+    if (existing.runtimeAttemptRef?.dispatchState === "prepared"
+      && (candidate.runtimeSessionRef !== null || candidate.runtimeTurnRef !== null)) {
+      throw storeError(code, "接受引用需要先持久化写出标记");
+    }
+    if (existing.runtimeAttemptRef !== null) {
+      const before = existing.runtimeAttemptRef, after = candidate.runtimeAttemptRef ?? null;
+      const unsentRequeue = before.dispatchState === "prepared" && candidate.status === "queued"
+        && existing.status === "starting" && existing.runtimeSessionRef === null && existing.runtimeTurnRef === null
+        && candidate.runtimeSessionRef === null && candidate.runtimeTurnRef === null && after === null;
+      const monotonic = after && Object.keys(before).every(key => key === "dispatchState"
+        ? before[key] === after[key] || before[key] === "prepared" && after[key] === "write_attempted"
+        : before[key] === after[key]);
+      if (!unsentRequeue && !monotonic) throw storeError(code, "WorkRun attempt 不能更换或撤回写出证据");
+    }
     if (existing.contextSnapshotId !== null
       && candidate.contextSnapshotId !== existing.contextSnapshotId) {
       // A proven-unsent attempt can be requeued before native ownership is
@@ -2151,7 +2203,7 @@ class JsonlProductStore extends ProductStore {
   }
 
   #assertWorkRunRuntimeBinding(run, profile, code) {
-    for (const ref of [run.runtimeSessionRef, run.runtimeTurnRef]) {
+    for (const ref of [run.runtimeSessionRef, run.runtimeTurnRef, run.runtimeAttemptRef]) {
       if (ref === null) continue;
       const matched = (profile.bindings || [profile]).some((binding) => ref.runtime === binding.runtime
         && ref.runtimeProfileId === binding.runtimeProfileId && ref.runtimeAccountId === binding.runtimeAccountId);
@@ -2173,15 +2225,17 @@ class JsonlProductStore extends ProductStore {
   }
 
   #assertActiveThreadUnique(candidate, code) {
-    if (!ACTIVE_WORK_RUN_STATUSES.has(candidate.status)
-      || candidate.runtimeSessionRef === null) return;
-    const conflict = [...this.workRuns.values()].find((run) => run.id !== candidate.id
-      && ACTIVE_WORK_RUN_STATUSES.has(run.status)
-      && sameRuntimeRef(run.runtimeSessionRef, candidate.runtimeSessionRef));
+    const owned = candidate.runtimeSessionRef ?? candidate.runtimeAttemptRef;
+    if (!ACTIVE_WORK_RUN_STATUSES.has(candidate.status) || owned === null) return;
+    const conflict = [...this.workRuns.values()].find((run) => {
+      const other = run.runtimeSessionRef ?? run.runtimeAttemptRef;
+      return run.id !== candidate.id && ACTIVE_WORK_RUN_STATUSES.has(run.status) && other !== null
+        && ["runtime", "runtimeProfileId", "runtimeAccountId", "sessionId"].every(key => owned[key] === other[key]);
+    });
     if (conflict) {
       throw storeError(
         code,
-        `Runtime session ${candidate.runtimeSessionRef.sessionId} 已绑定 active Run ${conflict.id}`,
+        `Runtime session ${owned.sessionId} 已绑定 active Run ${conflict.id}`,
       );
     }
   }

@@ -22,6 +22,7 @@ const CUSTOM_PROVIDER_SECRET_KINDS = new Set([
   "zoom-oauth-client", "dropbox-oauth-client",
   "external-provider-api-key",
   "plugin-secret", "web-provider-api-key",
+  "connector-runtime-key", "connector-operation",
 ]);
 
 function secretError(code, message = code) {
@@ -85,6 +86,48 @@ function validateContainer(value) {
   return normalized;
 }
 
+// MCP connector envelopes are encrypted as one credential. Match only their
+// sensitive leaves in addition to the original complete plaintext. These
+// derived buffers live for one synchronous matching scope and are zeroed there.
+function mcpEnvelopeSensitiveValues(plaintext, classification = null) {
+  let envelope;
+  try { envelope=require("./mcp-connector-secrets").validateSecrets(JSON.parse(plaintext.toString("utf8"))); }
+  catch { return []; } // Existing raw mcp-oauth formats keep their original matcher.
+  // These exact, shipped runtime defaults are public configuration. Matching
+  // their leaves would reject ordinary JSON (errorCode / true) globally. Keep
+  // unknown names, other values, and the complete encrypted envelope protected;
+  // an API_KEY whose value happens to be "error" must still be matched.
+  const envSecrets = Object.entries(envelope.env || {})
+    .filter(([name, value]) => classification?.isPublic("env", name, value) !== true)
+    .map(([, value]) => value);
+  const values = new Set([
+    ...envSecrets,...Object.entries(envelope.headers || {})
+      .filter(([name, value]) => classification?.isPublic("headers", name, value) !== true).map(([, value]) => value),
+    ...require("./mcp-transport-utils").querySecretVariants(envelope.query),
+    envelope.oauthToken?.access_token,envelope.oauthToken?.refresh_token,envelope.oauthToken?.id_token,
+    envelope.oauthClient?.client_secret,envelope.oauthClient?.clientSecret,
+  ].filter(value=>typeof value==="string"&&value.length>0));
+  // A server may echo only the credential payload, decoded Basic pair/password.
+  // Keep the complete header too; never derive metadata/client IDs as secrets.
+  for (const header of Object.values(envelope.headers||{})) {
+    const match = /^(Bearer|Basic)\s+(.+)$/iu.exec(header);
+    if (!match) continue;
+    const payload = match[2].trim();
+    if (payload) values.add(payload);
+    if (match[1].toLowerCase() !== "basic" || !/^[A-Za-z0-9+/]+={0,2}$/u.test(payload)) continue;
+    const decoded = Buffer.from(payload,"base64");
+    try {
+      if (decoded.toString("base64").replace(/=+$/u,"") !== payload.replace(/=+$/u,"")) continue;
+      const credential = new TextDecoder("utf-8",{fatal:true}).decode(decoded);
+      if (credential) values.add(credential);
+      const colon = credential.indexOf(":");
+      if (colon >= 0 && credential.slice(colon+1)) values.add(credential.slice(colon+1));
+    } catch { /* Non-UTF8 Basic payload still matches its original encoded value. */ }
+    finally { decoded.fill(0); }
+  }
+  return [...values];
+}
+
 function lockedError() {
   return secretError("credentials_locked", "credentials_locked");
 }
@@ -122,6 +165,8 @@ class EncryptedSecretStore {
     this.container = { version: SECRET_CONTAINER_VERSION, revision: 0, credentials: {} };
     this.plaintextCache = new Map();
     this.matcherCacheLocked = false;
+    this.classificationProvider = () => null;
+    this.derivedMatcherCache = new Map();
   }
 
   async open() {
@@ -197,10 +242,16 @@ class EncryptedSecretStore {
     }
     const entries = Object.keys(this.container.credentials);
     let active = true;
+    const derivedBuffers=[];
     try {
       if (entries.length > 0 && (this.matcherCacheLocked
         || this.plaintextCache.size !== entries.length)) throw lockedError();
       const plaintextBuffers = [...this.plaintextCache.values()];
+      for(const [ref,plaintext] of this.plaintextCache) {
+        if(this.container.credentials[ref]?.kind!=="mcp-oauth")continue;
+        for(const value of this.#derivedValues(ref, plaintext))derivedBuffers.push(Buffer.from(value,"utf8"));
+      }
+      plaintextBuffers.push(...derivedBuffers);
       const matches = (candidate) => {
         if (!active) throw secretError("SECRET_MATCHER_CLOSED", "敏感值 matcher 已关闭");
         if (typeof candidate !== "string") {
@@ -220,7 +271,36 @@ class EncryptedSecretStore {
       return result;
     } finally {
       active = false;
+      for(const buffer of derivedBuffers)buffer.fill(0);
     }
+  }
+
+  setClassificationProvider(provider) {
+    if (typeof provider !== "function") throw new TypeError("Trusted classification provider required");
+    this.classificationProvider = provider; this.derivedMatcherCache.clear();
+  }
+
+  #derivedValues(ref, plaintext) {
+    const classification = this.classificationProvider(ref);
+    const key = `${this.container.revision}:${classification?.digest || "unknown"}`;
+    const cached = this.derivedMatcherCache.get(ref);
+    if (cached?.key === key) return cached.values;
+    const values = mcpEnvelopeSensitiveValues(plaintext, classification);
+    this.derivedMatcherCache.set(ref, { key, values }); return values;
+  }
+
+  // Service-internal model projection; callers select credentials using the
+  // authenticated Profile's current connector permissions. Never a public RPC.
+  sensitiveValues(credentialRefs) {
+    this.#assertOpen();
+    if (!Array.isArray(credentialRefs) || this.matcherCacheLocked) throw lockedError();
+    return [...new Set(credentialRefs)].flatMap(ref => {
+      const entry = this.container.credentials[ref], bytes = this.plaintextCache.get(ref);
+      if (!entry) return [];
+      if (!bytes) throw lockedError();
+      return (entry.kind === "mcp-oauth" ? [bytes.toString("utf8"), ...this.#derivedValues(ref, bytes)] : [bytes.toString("utf8")])
+        .filter(Boolean).map(value => ({ value, kind: "secret" }));
+    });
   }
 
   get(credentialRef) {
@@ -304,6 +384,7 @@ class EncryptedSecretStore {
       };
       this.#write(candidate);
       this.container = candidate;
+      this.derivedMatcherCache.clear();
       const previous = this.plaintextCache.get(credentialRef);
       if (previous) previous.fill(0);
       this.plaintextCache.set(credentialRef, Buffer.from(plaintext, "utf8"));
@@ -389,6 +470,7 @@ class EncryptedSecretStore {
       };
       this.#write(candidate);
       this.container = candidate;
+      this.derivedMatcherCache.clear();
       const cached = this.plaintextCache.get(credentialRef);
       if (cached) cached.fill(0);
       this.plaintextCache.delete(credentialRef);
@@ -468,6 +550,7 @@ class EncryptedSecretStore {
   }
 
   #clearPlaintextCache() {
+    this.derivedMatcherCache.clear();
     for (const value of this.plaintextCache.values()) value.fill(0);
     this.plaintextCache.clear();
   }
@@ -489,6 +572,7 @@ class EncryptedSecretStore {
 }
 
 module.exports = {
+  mcpEnvelopeSensitiveValues,
   CUSTOM_PROVIDER_SECRET_KINDS,
   EncryptedSecretStore,
   MAX_ENCRYPTED_SECRET_FILE_BYTES,

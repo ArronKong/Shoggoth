@@ -4,9 +4,10 @@ const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile }
 const { lstatIfExists } = require("./security");
 const EVENTS = new Set(["runtime.admission.admitted", "runtime.admission.queued", "runtime.startup.waiting", "runtime.startup.started",
   "runtime.context.usage_updated", "runtime.compaction.requested", "runtime.compaction.completed", "runtime.binding.changed",
-  "session.runtime.switched", "runtime.preflight.failed", "runtime.stage", "runtime.switch.first_turn", "runtime.handle.violation"]);
+  "session.runtime.switched", "runtime.preflight.failed", "runtime.stage", "runtime.switch.first_turn", "runtime.handle.violation",
+  "runtime.capability.difference"]);
 class RuntimeTelemetry {
-  constructor({ now = Date.now, sink = () => {} } = {}) { this.now = now; this.sink = sink; this.events = []; this.counters = {}; this.cryptoWaitMs = 0; this.pendingSwitches = new Set(); }
+  constructor({ now = Date.now, sink = () => {} } = {}) { this.now = now; this.sink = sink; this.events = []; this.counters = {}; this.cryptoWaitMs = 0; this.pendingSwitches = new Set(); this.stageSamples = new Map(); }
   record(name, input = {}) {
     if (!EVENTS.has(name)) return;
     const event = { name, at: this.now() };
@@ -16,11 +17,20 @@ class RuntimeTelemetry {
       while (this.pendingSwitches.size > 4096) this.pendingSwitches.delete(this.pendingSwitches.values().next().value);
     }
     for (const key of ["source", "reason", "quality", "stage", "outcome"]) if (typeof input[key] === "string" && /^[a-zA-Z0-9_.-]{1,80}$/u.test(input[key])) event[key] = input[key];
+    if (typeof input.code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/u.test(input.code)) event.code = input.code;
+    if (Number.isSafeInteger(input.count) && input.count >= 0 && input.count <= 1_000_000_000) event.count = input.count;
     if (Number.isSafeInteger(input.durationMs) && input.durationMs >= 0) event.durationMs = input.durationMs;
     this.counters[name] = Math.min(Number.MAX_SAFE_INTEGER, (this.counters[name] || 0) + 1);
     if (name === "runtime.switch.first_turn") {
-      const metric = input.outcome === "error" ? "switchFirstTurnFailed" : "switchFirstTurnSucceeded";
+      const metric = input.outcome === "error" ? "switchFirstTurnFailed" : input.outcome === "success" ? "switchFirstTurnSucceeded" : "switchFirstTurnUnknown";
       this.counters[metric] = (this.counters[metric] || 0) + 1;
+    }
+    if (name === "runtime.stage" && event.stage) {
+      if (!this.stageSamples.has(event.stage) && this.stageSamples.size < 128) this.stageSamples.set(event.stage, { count: 0, success: 0, error: 0, unknown: 0 });
+      const sample = this.stageSamples.get(event.stage);
+      if (sample) { sample.count = Math.min(Number.MAX_SAFE_INTEGER, sample.count + 1);
+        const outcome = ["success", "error"].includes(event.outcome) ? event.outcome : "unknown";
+        sample[outcome] = Math.min(Number.MAX_SAFE_INTEGER, sample[outcome] + 1); }
     }
     if (/crypto|encrypt/u.test(event.stage || "")) this.cryptoWaitMs = Math.min(Number.MAX_SAFE_INTEGER, this.cryptoWaitMs + (event.durationMs || 0));
     this.events.push(event); if (this.events.length > 512) this.events.shift();
@@ -34,6 +44,8 @@ class RuntimeTelemetry {
   snapshot() { const failed = this.counters.switchFirstTurnFailed || 0, succeeded = this.counters.switchFirstTurnSucceeded || 0;
     return structuredClone({ version: 1, scope: "service-process", counters: this.counters, cryptoWaitMs: this.cryptoWaitMs,
       switchFirstTurnFailureRate: failed + succeeded ? failed / (failed + succeeded) : null,
+      switchFirstTurnSamples: { known: failed + succeeded, unknown: this.counters.switchFirstTurnUnknown || 0, succeeded, failed },
+      stageSamples: Object.fromEntries(this.stageSamples),
       events: this.events.slice(-64), retainedEvents: this.events.length }); }
 }
 // Durable queue arrival times are scheduling metadata, not execution authority.

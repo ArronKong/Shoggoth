@@ -624,8 +624,8 @@ export default function ModelEditorDrawer({
           ))}
           {state.phase === "confirming" && (
             <div className={styles.impactActions} role="alertdialog" aria-label={t("models.impactConfirmAria")}>
-              <button type="button" className="btn-secondary" autoFocus onClick={() => setField("name", state.values.name)}>{t("common.cancel")}</button>
-              <button type="button" className="btn-danger" onClick={() => state.preview && void runApply(state.preview)}>
+              <button type="button" className="btn-secondary btn-md" autoFocus onClick={() => setField("name", state.values.name)}>{t("common.cancel")}</button>
+              <button type="button" className="btn-danger btn-md" onClick={() => state.preview && void runApply(state.preview)}>
                 {t("models.confirmApply")}
               </button>
             </div>

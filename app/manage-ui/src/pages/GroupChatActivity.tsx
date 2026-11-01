@@ -5,7 +5,7 @@ import styles from "./GroupChatPanel.module.css";
 
 export type GroupActivityBinding = { groupId: string; memberId: string; opportunityId?: string; taskId?: string; attemptId?: string };
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
-const PHASES = new Set(["preparing", "queued", "running", "tool", "text", "waiting_approval", "waiting_input", "compacting", "compacted", "stopping", "reconciling", ...TERMINAL]);
+const PHASES = new Set(["preparing", "queued", "running", "retrying", "tool", "text", "waiting_approval", "waiting_input", "compacting", "compacted", "stopping", "reconciling", ...TERMINAL]);
 /** Presentation never transfers a previous execution's activity to a new opportunity or task attempt. */
 export function boundGroupActivity(activity: GroupActivity | null | undefined, binding: GroupActivityBinding): GroupActivity | null {
   if (!activity || activity.groupId !== binding.groupId || activity.memberId !== binding.memberId || !PHASES.has(activity.phase)

@@ -63,5 +63,5 @@ const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
     response.writeHead(200, { "Content-Type": types[path.extname(target)] || "application/octet-stream" });
     fs.createReadStream(target).pipe(response);
   });
-  server.listen(0, "127.0.0.1", () => console.log(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/`, output })));
+  server.listen(Number(process.env.PREVIEW_PORT) || 0, "127.0.0.1", () => console.log(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/`, output })));
 })().catch(error => { console.error(error); process.exitCode = 1; });

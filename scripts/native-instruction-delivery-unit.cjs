@@ -166,9 +166,13 @@ test("Codex appends only current Run data when unchanged session policy is resum
 test("DeepSeek combines stable and current-Run instructions in one registered complete prompt", async () => {
   const { BridgeRuntime } = await import("../resources/deepseek-harness/shoggoth-dsh-bridge.mjs");
   const sections = new Map([["native:core", "NATIVE_CORE_WITH_ALL_TOOLS"]]);
+  const variables = new Map();
   const ctx = {
     agents: { create: async options => {
-      options.setup({ systemPrompt: { section: value => {
+      options.setup({ systemPrompt: { variable: (name, provider) => {
+        assert.equal(variables.has(name), false, "native DSH rejects duplicate variables");
+        variables.set(name, provider);
+      }, section: value => {
         assert.equal(sections.has(value.name), false, "native DSH rejects duplicate registration");
         sections.set(value.name, value);
       } } });
@@ -182,8 +186,12 @@ test("DeepSeek combines stable and current-Run instructions in one registered co
   for (const text of ["CURRENT_RUN_1", "CURRENT_RUN_2", ""]) {
     await bridge.turnStart({ remoteSessionId: "s", sessionId: "public", turnId: "t", operationId: "op",
       prompt: "/fixture-command", turnDeveloperInstructions: text });
-    assert.equal(sections.get("shoggoth:developer-instructions").text(),
-      systemInstructions("COMPLETE_STABLE_POLICY", text));
+    const section = sections.get("shoggoth:developer-instructions");
+    const template = typeof section.text === "function" ? section.text() : section.text;
+    const rendered = template.replace(/\{\{([a-z][a-z0-9_]*)\}\}/gu, (_reference, name) => {
+      assert(variables.has(name), "unknown prompt variable"); return variables.get(name)();
+    });
+    assert.equal(rendered, systemInstructions("COMPLETE_STABLE_POLICY", text));
   }
   assert.equal(sections.get("native:core"), "NATIVE_CORE_WITH_ALL_TOOLS");
   assert.equal(sections.get("shoggoth:developer-instructions").complete, true);

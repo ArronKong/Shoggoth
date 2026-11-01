@@ -1,5 +1,7 @@
 "use strict";
 
+const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
+
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -14,6 +16,7 @@ const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
 const { classifyProviderLimit } = require("./runtime-provider-errors");
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { runtimeSessionResumeError } = require("./runtime-stage-error");
 const { classifyAntigravitySessionRemoteError, isTransientAntigravitySessionError,
   recordAntigravitySessionDiagnostic } = require("./antigravity-session-diagnostics");
@@ -72,6 +75,22 @@ const STDERR_SETTLE_MS = 100;
 const LOGIN_FLOW_PATTERN = /Credentials missing or invalid|Launching browser login flow|Open the following link to authenticate/u;
 const PROMPT_ERROR_PATTERN = /Antigravity SDK error processing prompt for session ([0-9A-Za-z-]{1,128})/u;
 const LIVE_UNKNOWN_TURNS = new WeakMap();
+// Both releases retain the managed tool filter and the same constrained native
+// result schema. 1.4.3 still broadcasts step errors across open tool calls.
+// Keep this explicit: a future distribution requires its own compatibility audit.
+const VERIFIED_COMPATIBILITY_VERSIONS = new Set(["1.2.1", "1.4.3"]);
+// 1.4.3's PromptResponse usage is a per-turn delta, unlike usage_update
+// (context occupancy). The native total excludes cached reads; normalize the
+// supplied counts to the product's inclusive input/output convention.
+function modelOnlyTurnUsage(value) {
+  const keys = ["totalTokens", "inputTokens", "outputTokens", "cachedReadTokens", "cachedWriteTokens", "thoughtTokens"];
+  if (!plain(value) || keys.some(key => !Number.isSafeInteger(value[key]) || value[key] < 0)) return null;
+  const usage = { totalTokens: value.totalTokens + value.cachedReadTokens + value.cachedWriteTokens,
+    inputTokens: value.inputTokens + value.cachedReadTokens + value.cachedWriteTokens,
+    outputTokens: value.outputTokens + value.thoughtTokens, cachedInputTokens: value.cachedReadTokens,
+    cacheWriteInputTokens: value.cachedWriteTokens, reasoningOutputTokens: value.thoughtTokens };
+  return Object.values(usage).every(Number.isSafeInteger) && usage.totalTokens >= usage.inputTokens + usage.outputTokens ? usage : null;
+}
 
 function hostError(code, message) {
   return serviceError(code, message);
@@ -189,7 +208,10 @@ function nativeCommandExitCode(update, output, call) {
 }
 
 // Only the Settings sign-in lets the server open a browser window.
-function antigravityAcpSpawnEnvironment({ parentEnv, userHome, home, geminiHome, openBrowser }) {
+function antigravityAcpSpawnEnvironment({ parentEnv, userHome, home, geminiHome, openBrowser, credentialStorage = "keychain" }) {
+  if (!["keychain", "file"].includes(credentialStorage)) {
+    throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity credential storage is invalid");
+  }
   const env = Object.create(null);
   for (const key of PARENT_ENV_ALLOWLIST) {
     const value = parentEnv[key];
@@ -199,6 +221,7 @@ function antigravityAcpSpawnEnvironment({ parentEnv, userHome, home, geminiHome,
   env.PATH = runtimePath(parentEnv.PATH, userHome);
   env.HOME = home;
   env.GEMINI_HOME = geminiHome;
+  if (credentialStorage === "file") env.AGY_ACP_FORCE_FILE_STORAGE = "1";
   if (openBrowser !== true) env.BROWSER = "/usr/bin/true";
   return env;
 }
@@ -255,6 +278,9 @@ class AntigravityAcpRuntimeHost {
     this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeAntigravityPermissionPolicy(options.permissionPolicy);
+    this.modelOnlyInstance = options.modelOnlyInstance === true;
+    if (this.modelOnlyInstance && (this.permissionPolicy.approvalPolicy !== "never" || this.permissionPolicy.sandbox !== "read-only"
+      || options.workspace !== null || options.controlInstance === true)) throw hostError("MODEL_ONLY_TOOLS_FORBIDDEN", "Invalid model-only policy");
     this.workspaceExecutionVersion = options.workspaceExecutionVersion === 1 ? 1 : null;
     this.workspaceExecutionHome = null;
     this.controlInstance = options.controlInstance === true;
@@ -262,22 +288,36 @@ class AntigravityAcpRuntimeHost {
     this.home = this.runtimeEnvironment.home;
     this.userHome = path.dirname(this.runtimeEnvironment.nativeHome);
     this.parentEnv = options.parentEnv || process.env;
+    // Only the trusted host constructor chooses storage. Do not inherit the
+    // upstream override from an ambient environment or change the login default.
+    this.credentialStorage = options.credentialStorage ?? "keychain";
+    if (!["keychain", "file"].includes(this.credentialStorage)) {
+      throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity credential storage is invalid");
+    }
     this.platform = options.platform || process.platform;
     this.fs = options.fs || fs;
     this.spawnProcess = options.spawnProcess || spawn;
     this.killProcessGroup = options.killProcessGroup || defaultKillProcessGroup;
     this.processGroupExists = options.processGroupExists || defaultProcessGroupExists;
     this.verifyServer = options.verifyServer || verifyAntigravityAcpServer;
+    this.resolveMcpTimeoutBootstrap = options.resolveMcpTimeoutBootstrap
+      || require("./antigravity-mcp-timeout-bootstrap").resolveAntigravityMcpTimeoutBootstrap;
+    this.createMcpTimeoutBridge = options.createMcpTimeoutBridge
+      || (input => new (require("./antigravity-mcp-timeout-bridge").AntigravityMcpTimeoutBridge)(input));
+    this.mcpTimeoutBridge = null;
+    this.mcpTimeoutEnv = null;
+    this.mcpTimeoutRegistrations = new Map();
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.onDiagnostic = typeof options.onDiagnostic === "function" ? options.onDiagnostic : null;
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? 60_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 90_000;
-    this.promptTimeoutMs = options.promptTimeoutMs ?? 30 * 60 * 1_000;
+    this.promptTimeoutMs = executionTimeoutMs(options.promptTimeoutMs);
+    if (!isExecutionTimeoutMs(this.promptTimeoutMs)) throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Prompt timeout is invalid");
     this.acceptanceTimeoutMs = options.acceptanceTimeoutMs ?? 90_000;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
     this.killGraceMs = options.killGraceMs ?? 1_000;
-    for (const value of [this.initializeTimeoutMs, this.requestTimeoutMs, this.promptTimeoutMs,
+    for (const value of [this.initializeTimeoutMs, this.requestTimeoutMs,
       this.acceptanceTimeoutMs, this.shutdownGraceMs, this.killGraceMs]) {
       if (!Number.isSafeInteger(value) || value < 10 || value > 2 * 60 * 60 * 1_000) {
         throw hostError("ANTIGRAVITY_HOST_OPTIONS_INVALID", "Antigravity host timeout is invalid");
@@ -340,6 +380,14 @@ class AntigravityAcpRuntimeHost {
   }
 
   async _start() {
+    if (this.workspace !== null) {
+      try {
+        if (!this.fs.statSync(this.workspace).isDirectory()) throw new Error("not a directory");
+        this.fs.accessSync(this.workspace, fs.constants.R_OK | fs.constants.X_OK);
+      } catch {
+        throw hostError("RUNTIME_WORKSPACE_UNAVAILABLE", "The execution workspace is unavailable");
+      }
+    }
     const workspaceShardId = antigravityWorkspaceShardId({ controlInstance: this.controlInstance, workspace: this.workspace });
     this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new AntigravityAcpRuntimeLedger({
       fs: this.fs,
@@ -349,32 +397,49 @@ class AntigravityAcpRuntimeHost {
       workspaceShardId,
     }).open());
     this.server = await this.verifyServer({ paths: this.paths, fs: this.fs });
-    if (this.workspaceExecutionVersion === 1 && this.server.version !== "1.2.1") {
+    if (this.modelOnlyInstance && this.server.version !== "1.4.3"
+      || this.workspaceExecutionVersion === 1 && !VERIFIED_COMPATIBILITY_VERSIONS.has(this.server.version)) {
       throw hostError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "This Antigravity ACP version has no verified managed tool boundary");
     }
     if (path.resolve(this.runtimeEnvironment.binaryPath) !== path.resolve(this.server.serverPath)) {
       throw hostError("ANTIGRAVITY_ACP_INTEGRITY_FAILED", "Antigravity runtime binary does not match the verified ACP server");
     }
     if (this.state !== "starting") throw hostError("RUNTIME_HOST_TERMINATED", "Antigravity host stopped before keychain preparation");
-    this.keychainAbort = new AbortController();
-    this.keychainPreparation = prepareAntigravityKeychainContextAsync({
-      home: this.home,
-      userHome: this.userHome,
-      trustedRoot: this.paths.trustedRoot,
-      platform: this.platform,
-      execFileSync: this.options.securityExecFileSync,
-      execFile: this.options.securityExecFile,
-      signal: this.keychainAbort.signal,
-    });
-    try { await this.keychainPreparation; }
-    finally { this.keychainPreparation = null; this.keychainAbort = null; }
+    if (this.credentialStorage === "file" && this.server.version !== "1.4.3") {
+      throw hostError("ANTIGRAVITY_CREDENTIAL_STORAGE_UNSUPPORTED", "This Antigravity version has no verified file credential storage");
+    }
+    if (this.credentialStorage === "keychain") {
+      this.keychainAbort = new AbortController();
+      this.keychainPreparation = prepareAntigravityKeychainContextAsync({
+        home: this.home,
+        userHome: this.userHome,
+        trustedRoot: this.paths.trustedRoot,
+        platform: this.platform,
+        execFileSync: this.options.securityExecFileSync,
+        execFile: this.options.securityExecFile,
+        signal: this.keychainAbort.signal,
+      });
+      try { await this.keychainPreparation; }
+      finally { this.keychainPreparation = null; this.keychainAbort = null; }
+    }
     if (this.state !== "starting") throw hostError("RUNTIME_HOST_TERMINATED", "Antigravity host stopped before spawn");
     this.acpHome = prepareAntigravityAcpHome({ fs: this.fs, home: this.home, trustedRoot: this.paths.trustedRoot });
-    if (this.workspaceExecutionVersion === 1) {
+    if (this.modelOnlyInstance || this.workspaceExecutionVersion === 1) {
       this.workspaceExecutionHome = prepareAntigravityWorkspaceExecution({ fs: this.fs,
         paths: this.paths, acpHome: this.acpHome });
     }
-    if (this.server.version === "1.2.1") this.nativeToolResults = new AntigravityNativeToolResults({ home: this.home });
+    if (VERIFIED_COMPATIBILITY_VERSIONS.has(this.server.version)) this.nativeToolResults = new AntigravityNativeToolResults({ home: this.home });
+    if (this.server.version === "1.4.3") {
+      const bootstrapPath = this.resolveMcpTimeoutBootstrap();
+      this.mcpTimeoutBridge = this.createMcpTimeoutBridge({ paths: this.paths, server: this.server, bootstrapPath,
+        getAcpPid: () => this.child?.pid,
+        onFatal: error => {
+          if (!["stopping", "stopped", "failed"].includes(this.state)) void this._fatal(error);
+        } });
+      const env = await this.mcpTimeoutBridge.start();
+      this.mcpTimeoutEnv = { ...env, ANTIGRAVITY_HARNESS_PATH: bootstrapPath };
+      this.registeredSecrets.push(env.SHOGGOTH_AGY_TIMEOUT_TOKEN);
+    }
     if (this.state !== "starting") throw hostError("RUNTIME_HOST_TERMINATED", "Antigravity host stopped before spawn");
     const child = this.spawnProcess(this.server.serverPath, [], {
       cwd: this.workspaceExecutionHome?.cwd || this.workspace || this.home,
@@ -410,7 +475,8 @@ class AntigravityAcpRuntimeHost {
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
       clientInfo: { name: "shoggoth", version: String(this.options.packageVersion || "0.0.0") },
     }, { timeoutMs: this.initializeTimeoutMs });
-    if (!plain(response) || response.protocolVersion !== 1 || response.agentInfo?.name !== "antigravity-acp") {
+    if (!plain(response) || response.protocolVersion !== 1 || response.agentInfo?.name !== "antigravity-acp"
+      || response.agentInfo.version !== this.server.version) {
       throw hostError("ANTIGRAVITY_ACP_INITIALIZE_INVALID", "Antigravity ACP initialize response is invalid");
     }
     this.agentCapabilities = plain(response.agentCapabilities) ? structuredClone(response.agentCapabilities) : {};
@@ -421,13 +487,14 @@ class AntigravityAcpRuntimeHost {
   _spawnEnvironment() {
     // The server may start a browser OAuth flow when credentials are missing.
     // Background runs must never open a window; login happens only from Settings.
-    return antigravityAcpSpawnEnvironment({
+    return { ...antigravityAcpSpawnEnvironment({
       parentEnv: this.parentEnv,
       userHome: this.userHome,
       home: this.runtimeEnvironment.spawnEnv.HOME,
       geminiHome: this.workspaceExecutionHome?.geminiHome || this.acpHome.geminiHome,
+      credentialStorage: this.credentialStorage,
       openBrowser: false,
-    });
+    }), ...this.mcpTimeoutEnv };
   }
 
   _onStderr(chunk) {
@@ -559,7 +626,7 @@ class AntigravityAcpRuntimeHost {
 
   _nativeSessionArguments(cwd) {
     return { cwd: this.workspaceExecutionHome?.cwd || cwd,
-      _meta: antigravityWorkspaceSessionMeta(this.workspaceExecutionVersion) };
+      _meta: this.modelOnlyInstance ? { agy: { enabledTools: [] } } : antigravityWorkspaceSessionMeta(this.workspaceExecutionVersion) };
   }
 
   _assertCwd(value) {
@@ -653,6 +720,7 @@ class AntigravityAcpRuntimeHost {
   _requestFailure(error, fallbackCode) {
     if (this.loginFlowSeen || error?.code === "AUTH_REQUIRED") {
       const failure = hostError("AUTH_REQUIRED", "Antigravity authentication is required");
+      failure.failure = runtimeFailureDetail(error?.rpcDetail, this.registeredSecrets);
       failure.dispatchState = error?.dispatchState || "not_sent";
       failure.remote = true;
       return failure;
@@ -660,6 +728,7 @@ class AntigravityAcpRuntimeHost {
     if (error?.code === "ANTIGRAVITY_ACP_REMOTE_ERROR") {
       const code = classifyAntigravityFailure(error.rpcDetail) || fallbackCode;
       const failure = hostError(code === "RUNTIME_AUTH_REQUIRED" ? "AUTH_REQUIRED" : code, "Antigravity request failed");
+      failure.failure = runtimeFailureDetail(error.rpcDetail, this.registeredSecrets);
       failure.dispatchState = error.dispatchState;
       failure.remote = true;
       return failure;
@@ -668,6 +737,7 @@ class AntigravityAcpRuntimeHost {
   }
 
   async _mcpServers() {
+    if (this.modelOnlyInstance) return { reservationId: null, mcpServers: [] };
     const descriptor = await this.mcpGateIssuer.createMcpServer({
       runtimeProfileId: this.runtimeProfileId,
       runtimeAccountId: this.runtimeAccountId,
@@ -682,14 +752,19 @@ class AntigravityAcpRuntimeHost {
       this._revokeMcpTicket(descriptor.reservationId);
       throw hostError("RUNTIME_HOST_TERMINATED", "Antigravity host stopped while preparing MCP");
     }
+    const mcpServer = {
+      name: descriptor.name, command: descriptor.command, args: [...descriptor.args],
+      env: descriptor.env.map(entry => ({ name: entry.name, value: entry.value })),
+    };
+    if (this.mcpTimeoutBridge) {
+      try {
+        const unregister = this.mcpTimeoutBridge.registerMcpServer(mcpServer);
+        if (descriptor.reservationId) this.mcpTimeoutRegistrations.set(descriptor.reservationId, unregister);
+      } catch (error) { this._revokeMcpTicket(descriptor.reservationId); throw error; }
+    }
     return {
       reservationId: typeof descriptor.reservationId === "string" ? descriptor.reservationId : null,
-      mcpServers: [{
-        name: descriptor.name,
-        command: descriptor.command,
-        args: [...descriptor.args],
-        env: descriptor.env.map((entry) => ({ name: entry.name, value: entry.value })),
-      }],
+      mcpServers: [mcpServer],
     };
   }
 
@@ -716,6 +791,8 @@ class AntigravityAcpRuntimeHost {
 
   _revokeMcpTicket(reservationId) {
     if (!reservationId) return;
+    this.mcpTimeoutRegistrations.get(reservationId)?.();
+    this.mcpTimeoutRegistrations.delete(reservationId);
     try { this.mcpGateIssuer.revokeMcpServer({ reservationId }); }
     catch { this._diagnostic("RUNTIME_MCP_GATE_CLEANUP_FAILED"); }
     this.ownedMcpReservations.delete(reservationId);
@@ -1322,7 +1399,7 @@ class AntigravityAcpRuntimeHost {
       }
       if (active.completedToolCalls.has(update.toolCallId)) return;
       const call = active.toolCalls.get(update.toolCallId);
-      // ACP 1.2.1 broadcasts every ERROR step to all open call IDs. Even a
+      // Verified ACP releases broadcast every ERROR step to all open call IDs. Even a
       // concrete error body can belong to a different tool. Verify every failure.
       const lossy = update.status === "failed"
         // Successful MCP rawOutput is a model-written summary, with no stable
@@ -1355,7 +1432,7 @@ class AntigravityAcpRuntimeHost {
         active.pendingToolResultBytes -= active.pendingToolResults.get(update.toolCallId)?.pendingBytes || 0;
         active.pendingToolResults.delete(update.toolCallId);
       }
-      if (update.status === "failed" && this.server.version === "1.2.1") {
+      if (update.status === "failed" && VERIFIED_COMPATIBILITY_VERSIONS.has(this.server.version)) {
         this._publishUnverifiedToolResult(active, update, this.now());
       } else this._publishToolUpdate(active, update);
       return;
@@ -1588,11 +1665,18 @@ class AntigravityAcpRuntimeHost {
     if (!plain(response) || !STOP_REASONS.has(response.stopReason)) {
       throw hostError("ANTIGRAVITY_ACP_PROMPT_RESPONSE_INVALID", "Antigravity prompt response is invalid");
     }
-    // In-band failures are only visible on stderr, which races stdout.
+    // stderr races stdout; the pinned server can omit the real reason there.
     if (!active.failureCode && response.stopReason !== "cancelled") await delay(STDERR_SETTLE_MS);
     if (this.activeTurns.get(active.sessionId) !== active) return;
     if (!active.timedOut) this._acceptTurn(active);
     this._flushToolResults(active);
+    if (response.stopReason !== "cancelled") {
+      const nativeFailure = this.nativeToolResults?.turnFailure(active.sessionId, active.nativeToolCursor, active.createdAt, this.now());
+      if (nativeFailure) {
+        active.failureCode = classifyAntigravityFailure(nativeFailure.message) || active.failureCode || "ANTIGRAVITY_TURN_FAILED";
+        active.failure = runtimeFailureDetail(nativeFailure, this.registeredSecrets);
+      }
+    }
     const failureCode = active.failureCode;
     if (!failureCode && response.stopReason === "end_turn") this.authVerified = true;
     const status = failureCode ? "failed"
@@ -1620,10 +1704,13 @@ class AntigravityAcpRuntimeHost {
     this.activeTurns.delete(active.sessionId);
     if (active.timedOut) return;
     const common = { known: true, method: "session/update", sessionId: active.sessionId, turnId: active.turnId };
+    const usage = this.modelOnlyInstance && this.server.version === "1.4.3" ? modelOnlyTurnUsage(response.usage) : null;
+    if (usage) this._publish({ ...common, type: "usage", usage, responseId: `antigravity-usage-${active.turnId}` });
     if (text.length > 0) {
       this._publish({ ...common, type: "text", itemId, text, phase: "final_answer", delivery: "local" });
     }
-    this._publish({ ...common, method: "session/prompt", type: "complete", status, ...(errorCode ? { errorCode } : {}) });
+    this._publish({ ...common, method: "session/prompt", type: "complete", status,
+      ...(errorCode ? { errorCode, ...(active.failure ? { failure: active.failure } : {}) } : {}) });
     active.terminal.resolve({ status });
   }
 
@@ -1633,6 +1720,7 @@ class AntigravityAcpRuntimeHost {
     if (!error?.dispatchState) {
       const original = error;
       error = hostError(original?.code || "ANTIGRAVITY_TURN_FAILED", "Antigravity prompt failed");
+      error.failure = original?.failure;
       error.dispatchState = active.dispatchState;
       if (original?.remote === true) error.remote = true;
     }
@@ -1672,6 +1760,7 @@ class AntigravityAcpRuntimeHost {
     this._publish({
       known: true, method: "session/prompt", type: "complete", sessionId: active.sessionId,
       turnId: active.turnId, status, errorCode: error.code,
+      ...(error.failure ? { failure: error.failure } : {}),
     });
   }
 
@@ -1714,8 +1803,17 @@ class AntigravityAcpRuntimeHost {
     }
     this.activeTurns.clear();
     try { await this.rpc?.terminate(); } catch {}
+    let timeoutBridgeCleanupError;
+    try { await this.mcpTimeoutBridge?.close(); }
+    catch (error) { this.cleanupIncomplete = true; timeoutBridgeCleanupError = error; }
+    this.mcpTimeoutEnv = null;
+    this.mcpTimeoutRegistrations.clear();
     const child = this.child;
-    if (!child) { this.workspaceExecutionHome?.dispose(); this.workspaceExecutionHome = null; return; }
+    if (!child) {
+      this.workspaceExecutionHome?.dispose(); this.workspaceExecutionHome = null;
+      if (timeoutBridgeCleanupError && !fromFatal) throw timeoutBridgeCleanupError;
+      return;
+    }
     let exists = !this.childClosed;
     if (!exists) { try { exists = this.processGroupExists(child.pid); } catch { exists = true; } }
     if (exists) {
@@ -1741,6 +1839,7 @@ class AntigravityAcpRuntimeHost {
     this._releaseLiveTurns();
     this.workspaceExecutionHome?.dispose();
     this.workspaceExecutionHome = null;
+    if (timeoutBridgeCleanupError && !fromFatal) throw timeoutBridgeCleanupError;
   }
 }
 

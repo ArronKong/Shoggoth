@@ -1,16 +1,14 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { installSecretProjection } from "./shoggoth-pi-secret-projection.mjs";
 
 const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_CATALOG_FRAME_BYTES = 256 * 1024;
 const MAX_TOOLS = 256;
 const CONTROL_REQUEST_TIMEOUT_MS = 45_000;
-// Standalone extension: match the 30-minute input budget plus Service reply grace.
-const INPUT_TIMEOUT_MS = 30 * 60_000;
-const TOOL_REQUEST_TIMEOUT_MS = INPUT_TIMEOUT_MS + 30_000 + 45_000;
-const PLUGIN_REQUEST_TIMEOUT_MS = 2 * (INPUT_TIMEOUT_MS + 30_000) + 45_000;
-const WORKSPACE_REQUEST_TIMEOUT_MS = 2_147_000_000;
+// Tools and human input are canceled by the owning runtime/connection.
+const TOOL_REQUEST_TIMEOUT_MS = null;
 const PRODUCT_CONFIRMATION_SELECT_PREFIX = "[[shoggoth-product-confirmation]]";
 const NATIVE_HOOK_TITLE = "[[shoggoth-native-tool-hook-v1]]";
 const RUNTIME_CALL_BINDING_TITLE = "[[shoggoth-runtime-call-binding-v1]]";
@@ -228,26 +226,21 @@ async function answerElicitation(params, ctx) {
     if (!plain(property)) return { action: "cancel" };
     const title = safeString(property.title, 1024)
       ? property.title : safeString(params.message, 4096) ? params.message : name;
-    const description = safeString(property.description, 4096) ? property.description : "";
+    const description = safeString(property.description, 16 * 1024) ? property.description : "";
     if (Array.isArray(property.enum) && property.enum.length > 0
       && property.enum.length <= 32 && property.enum.every((item) => safeString(item, 1024))) {
       const selected = productConfirmation
         ? await ctx.ui.select(`${PRODUCT_CONFIRMATION_SELECT_PREFIX}${title}`, property.enum)
-        : await ctx.ui.select(title, property.enum, { timeout: INPUT_TIMEOUT_MS });
+        : await ctx.ui.select(title, property.enum);
       if (selected === undefined) return { action: "cancel" };
       content[name] = selected;
     } else if (property.type === "boolean") {
       content[name] = await ctx.ui.confirm(
         title,
         description || (safeString(params.message, 4096) ? params.message : title),
-        {
-          timeout: INPUT_TIMEOUT_MS,
-        },
       );
     } else if (property.type === "string") {
-      const entered = await ctx.ui.input(title, description, {
-        timeout: INPUT_TIMEOUT_MS,
-      });
+      const entered = await ctx.ui.input(title, description);
       if (entered === undefined) return { action: "cancel" };
       content[name] = entered;
     } else {
@@ -354,9 +347,7 @@ class McpClient {
       this.armPendingTimeout(
         id,
         pending,
-        ctx && method === "tools/call" && params?.name === "workspace_execute" ? WORKSPACE_REQUEST_TIMEOUT_MS
-          : ctx && method === "tools/call" && params?.name === "mcp_server_call" ? PLUGIN_REQUEST_TIMEOUT_MS
-          : ctx ? TOOL_REQUEST_TIMEOUT_MS : CONTROL_REQUEST_TIMEOUT_MS,
+        ctx ? TOOL_REQUEST_TIMEOUT_MS : CONTROL_REQUEST_TIMEOUT_MS,
       );
       this.activeContext = ctx;
       if (ctx) this.activeRequestId = id;
@@ -373,6 +364,7 @@ class McpClient {
 
   armPendingTimeout(id, pending, timeoutMs) {
     pending.remainingTimeoutMs = timeoutMs;
+    if (timeoutMs === null) { pending.deadlineAt = null; pending.timer = null; return; }
     pending.deadlineAt = Date.now() + timeoutMs;
     pending.timer = setTimeout(() => {
       if (this.pending.get(id) !== pending) return;
@@ -426,6 +418,7 @@ class McpClient {
 }
 
 export default async function shoggothPiExtension(pi) {
+  installSecretProjection(pi);
   const workspaceExecution = process.env.SHOGGOTH_PI_WORKSPACE_EXECUTION_VERSION === "1";
   const command = process.env.SHOGGOTH_PI_MCP_COMMAND;
   const rawArgs = process.env.SHOGGOTH_PI_MCP_ARGS;

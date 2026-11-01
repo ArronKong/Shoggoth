@@ -1,8 +1,8 @@
 {
   "id": "shoggoth-shared-capabilities",
-  "name": "Shoggoth Shared Capabilities",
-  "description": "Discover and invoke user-installed Shoggoth capabilities through a per-call Service lease.",
-  "version": "0.1.0",
+  "name": "Shoggoth MCP Connectors",
+  "description": "Use MCP connectors through trusted Host identities and Service approvals.",
+  "version": "0.3.0",
   "activation": {
     "onStartup": true
   },
@@ -12,11 +12,31 @@
       "group_messages_read",
       "group_task",
       "group_collaborate",
+      "mcp_server_registry_search",
+      "mcp_server_request_connection",
+      "mcp_server_request_secret",
+      "mcp_server_add",
+      "mcp_server_import",
+      "mcp_server_list",
+      "mcp_server_register",
+      "mcp_server_tools",
+      "mcp_server_call",
+      "mcp_server_remove",
+      "apple_calendar_list",
+      "apple_calendar_events",
+      "apple_calendar_get",
+      "apple_calendar_create",
+      "apple_calendar_update",
+      "apple_calendar_delete",
+      "apple_reminders_lists",
+      "apple_reminders_search",
+      "apple_reminders_get",
+      "apple_reminders_create",
+      "apple_reminders_update",
+      "apple_reminders_delete",
       "shoggoth_capability_search",
       "shoggoth_skill_read",
-      "shoggoth_skill_file_read",
-      "shoggoth_plugin_resource_read",
-      "shoggoth_plugin_call"
+      "shoggoth_skill_file_read"
     ]
   },
   "configSchema": {

@@ -13,7 +13,15 @@ const {
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
 const { validAttachments, attachmentFields } = require("./inspiration-media");
-const { normalizePluginSelection, validPluginSelection } = require("./plugin-chat-selection");
+const { normalizeLegacyPluginSelection: normalizePluginSelection,
+  validLegacyPluginSelection: validPluginSelection } = require("../core/legacy-plugin-selection");
+// Read-only parser for historical encrypted inbox fingerprints. It grants no authority.
+function normalizeLegacyConnectorSelection(value) {
+  if(value===undefined)return null;
+  if(!Array.isArray(value)||value.length>64||value.some(item=>!validOpaqueId(item))||new Set(value).size!==value.length)
+    throw serviceError("CONNECTOR_SELECTION_INVALID","Historical connector selection is invalid");
+  return Object.freeze([...value]);
+}
 
 const PENDING_COMMAND_INBOX_VERSION = 1;
 const MAX_PENDING_COMMAND_FILE_BYTES = 16 * 1024 * 1024;
@@ -71,6 +79,7 @@ function fingerprintCommand(input) {
     input.createdAt,
     ...(input.attachments?.length ? [input.attachments] : []),
     ...(input.pluginSelection?.length ? [normalizePluginSelection(input.pluginSelection)] : []),
+    ...(input.connectorSelection !== undefined ? ["connector-selection-v1", normalizeLegacyConnectorSelection(input.connectorSelection)] : []),
   ])).digest("hex");
 }
 
@@ -86,10 +95,14 @@ function rejectionFingerprint(operationId, sessionKey, createdAt) {
 function commandFields(input, base) {
   const fields = [...attachmentFields(input, base)];
   if (input?.pluginSelection !== undefined) fields.push("pluginSelection");
+  if (input?.connectorSelection !== undefined) fields.push("connectorSelection");
   return fields;
 }
 
 function normalizeCommand(input, corrupt = false) {
+  if (!corrupt && input?.pluginSelection !== undefined) throw inboxError("PLUGIN_PLATFORM_RETIRED", "旧插件选择已停用，请重新选择连接器账号");
+  if (!corrupt && input?.connectorSelection !== undefined) throw inboxError("OPEN_CONNECTOR_RETIRED","OpenConnector account selection is retired");
+  if (input?.connectorSelection !== undefined) normalizeLegacyConnectorSelection(input.connectorSelection);
   const code = corrupt ? "PENDING_COMMAND_INBOX_CORRUPT" : "PENDING_COMMAND_INVALID";
   if (!exactObject(input, commandFields(input, COMMAND_FIELDS))
     || !validOpaqueId(input.operationId) || !validOpaqueId(input.runId)
@@ -97,13 +110,15 @@ function normalizeCommand(input, corrupt = false) {
     || typeof input.prompt !== "string" || (!input.prompt.length && !input.attachments?.length) || input.prompt.includes("\0")
     || (input.attachments !== undefined && !validAttachments(input.attachments))
     || (input.pluginSelection !== undefined && !validPluginSelection(input.pluginSelection))
+    || (input.pluginSelection !== undefined && input.connectorSelection !== undefined)
     || Buffer.byteLength(input.prompt, "utf8") > MAX_PROMPT_BYTES
     || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0
     || !["pending", "dispatching"].includes(input.state)) {
     throw inboxError(code, "PendingCommand 数据无效");
   }
   return Object.fromEntries(commandFields(input, COMMAND_FIELDS).map((field) => [field,
-    field === "pluginSelection" ? normalizePluginSelection(input[field]) : clone(input[field])]));
+    field === "pluginSelection" ? normalizePluginSelection(input[field])
+      : field === "connectorSelection" ? normalizeLegacyConnectorSelection(input[field]) : clone(input[field])]));
 }
 
 function normalizeTombstone(input, corrupt = false) {

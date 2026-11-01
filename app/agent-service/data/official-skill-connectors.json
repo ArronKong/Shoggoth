@@ -1,0 +1,203 @@
+[
+  {
+    "id": "doordash",
+    "name": "DoorDash",
+    "description": {
+      "zh-CN": "搜索餐厅和菜单、管理个人购物车、确认点餐并查询订单。",
+      "en": "Find restaurants and menus, manage your cart, confirm orders and check order status."
+    },
+    "docsUrl": "https://github.com/doordash-oss/doordash-cli",
+    "accessUrl": "https://forms.gle/gvCQZvu9C1EKA6aM6",
+    "version": "0.2.6",
+    "fields": [],
+    "note": {
+      "zh-CN": "当前需获批的 DoorDash 账号；组件安装完成不代表账号已获准使用。支持 Apple Silicon Mac 和 Linux x86_64。使用官方页面授权后，把回调地址粘贴到本窗口完成连接。下单前须确认价格、小费、配送地址和扣款卡片；结果不明时不会重复提交。本地退出不等于撤销服务端授权。",
+      "en": "Requires an approved DoorDash account; installation does not establish access. Supports Apple Silicon Macs and Linux x86_64. Authorize on the official page, then paste the callback address into this window. Confirm pricing, tip, delivery address and payment card before ordering. Uncertain submissions are not repeated. Local sign-out does not revoke provider access."
+    }
+  },
+  {
+    "id": "shop",
+    "name": "Shopify",
+    "description": {
+      "zh-CN": "搜索和比较商品、管理购物车、使用 Shop 结账，并追踪个人订单。",
+      "en": "Find and compare products, manage carts, check out with Shop and track your orders."
+    },
+    "docsUrl": "https://shop.com/skill.md",
+    "version": "1.2.0",
+    "fields": [],
+    "note": {
+      "zh-CN": "使用官方 Shop Skill 和 Shop 服务。商品搜索无需登录；连接个人 Shop 账号可使用保存的地址、Shop Pay 和订单历史。购买须确认商家、商品、总额和支付方式。暂不提供网页填卡代付。退出或移除仅清除本地授权，撤销服务端权限请到 Shop 的 Connections 设置。",
+      "en": "Uses the official Shop Skill and Shop service. Search without signing in; connect your personal account for saved addresses, Shop Pay and order history. Confirm the merchant, items, total and payment method before purchasing. Browser card-entry payments are not available. Sign-out and removal clear local access; revoke the connection in Shop's Connections settings."
+    }
+  },
+  {
+    "id": "quark-drive",
+    "name": "夸克网盘",
+    "description": {
+      "zh-CN": "搜索与传输网盘文件、分享转存、批量重命名，并使用网盘 AI 总结和整理相册。",
+      "en": "Search and transfer Quark Drive files, share and save links, rename batches, summarize files and organize photos."
+    },
+    "docsUrl": "https://www.quark.cn/documents/help/quark-drive-skill",
+    "version": "1.0.25",
+    "fields": [],
+    "note": {
+      "zh-CN": "在夸克官方页面授权，可在夸克网盘 App 中调整文件范围。AI 能力取决于账号权益。上传仅限明确选中的本地文件；移动、分享、重命名和整理须确认。退出或移除只清除本地授权，撤销服务端权限请在夸克网盘 App 完成。",
+      "en": "Authorize on Quark’s official page and manage file access in the Quark Drive app. AI features depend on account entitlements. Upload only explicitly selected local files; moves, shares, renames and organization require confirmation. Sign-out or removal clears local access; revoke provider access in the Quark Drive app."
+    }
+  },
+  {
+    "id": "rollinggo-hotel",
+    "name": "RollingGo 酒店 / RollingGo Hotels",
+    "description": {
+      "zh-CN": "搜索酒店、查看房型与实时价格，确认预订、查询订单并办理退订。",
+      "en": "Search hotels, compare rooms and live rates, confirm bookings, check orders and request cancellation."
+    },
+    "docsUrl": "https://github.com/RollingGo-AI/rollinggo-hotel-skill-CN",
+    "version": "1.1.6",
+    "fields": [],
+    "note": {
+      "zh-CN": "使用官方酒店预订 Skill 和 CLI，无需 API Key；在 RollingGo 官方网页授权个人账号。锁价后须确认总额、日期、入住人和退改政策，再创建待支付订单，由你打开官方支付链接完成付款。退订须先查看罚金并再次确认；结果不明时不会重复提交。退出或移除仅清除本地授权。",
+      "en": "Uses the official hotel-booking Skill and CLI without an API key. Authorize your account on the RollingGo website. Review the locked total, dates, guests and cancellation policy before creating an unpaid order, then pay through the returned official link. Review penalties and confirm again before cancellation. Uncertain submissions are not repeated. Sign-out or removal clears local access."
+    }
+  },
+  {
+    "id": "fliggy",
+    "name": "飞猪",
+    "description": {
+      "zh-CN": "搜索机票、酒店、景点与旅行商品，返回官方预订入口。",
+      "en": "Search flights, hotels, attractions and travel products with official booking links."
+    },
+    "docsUrl": "https://open.fly.ai/",
+    "version": "1.0.16",
+    "fields": [
+      {
+        "name": "FLYAI_API_KEY",
+        "required": false,
+        "secret": true,
+        "label": {
+          "zh-CN": "飞猪 API Key（可选）",
+          "en": "FlyAI API key (optional)"
+        }
+      }
+    ],
+    "note": {
+      "zh-CN": "官方支持有限试用；配置自己的 Key 可获得增强结果。安装后仍需检查服务是否可用。",
+      "en": "The official CLI supports limited trial access. A personal API key enables enhanced results. Installation does not verify service availability."
+    }
+  },
+  {
+    "id": "meituan-paotui",
+    "name": "美团跑腿",
+    "description": {
+      "zh-CN": "扫码授权后查询地址、预览费用、确认提交跑腿订单并查询状态。",
+      "en": "Authorize with Meituan to search addresses, preview delivery fees, confirm orders and check status."
+    },
+    "docsUrl": "https://github.com/meituan/MT-Paotui-For-Client",
+    "version": "2026.10.28",
+    "fields": [],
+    "note": {
+      "zh-CN": "使用美团 App 扫码授权。提交订单必须先预览并由你确认；本地移除不等于撤销美团侧授权。",
+      "en": "Sign in with the Meituan app. Orders require a fee preview and your confirmation. Removing local access does not revoke authorization at Meituan."
+    }
+  },
+  {
+    "id": "weread",
+    "name": "微信读书",
+    "description": {
+      "zh-CN": "搜索书籍，读取书架、笔记划线和阅读统计。",
+      "en": "Search books and read your bookshelf, notes, highlights and reading statistics."
+    },
+    "docsUrl": "https://weread.qq.com/r/weread-skills",
+    "version": "1.0.5",
+    "fields": [
+      {
+        "name": "WEREAD_API_KEY",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "微信读书 API Key",
+          "en": "WeRead API key"
+        }
+      }
+    ],
+    "note": {
+      "zh-CN": "在微信读书官方页面获取个人 API Key；配置后通过只读请求验证。",
+      "en": "Get your personal API key from the official WeRead page, then verify it with a read-only request."
+    }
+  },
+  {
+    "id": "alipay",
+    "name": "支付宝",
+    "description": {
+      "zh-CN": "授权个人 AI 钱包，确认支付宝收银台付款并查询本次支付状态。",
+      "en": "Authorize your AI wallet, confirm Alipay cashier payments and check their status."
+    },
+    "docsUrl": "https://aipay.alipay.com/products/pc-agent-pay",
+    "version": "0.4.8",
+    "fields": [],
+    "note": {
+      "zh-CN": "使用支付宝 App 授权；每笔支付须确认。当前提供收银台付款，不包含个人历史账单查询；关闭授权需在支付宝完成。",
+      "en": "Authorize in the Alipay app and confirm each payment. This connector supports cashier payments, not historical personal statements. Revocation is completed in Alipay."
+    }
+  },
+  {
+    "id": "netease-music",
+    "name": "网易云音乐",
+    "description": {
+      "zh-CN": "授权后搜索音乐、查看收藏歌单并创建歌单。",
+      "en": "Authorize to search music, view collected playlists and create playlists."
+    },
+    "docsUrl": "https://developer.music.163.com/st/developer/apply/account?type=INDIVIDUAL",
+    "version": "0.1.7",
+    "fields": [
+      {
+        "name": "NCM_APP_ID",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "开放平台 App ID",
+          "en": "Developer App ID"
+        }
+      },
+      {
+        "name": "NCM_PRIVATE_KEY",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "开放平台 Private Key",
+          "en": "Developer private key"
+        }
+      }
+    ],
+    "note": {
+      "zh-CN": "先申请开放平台凭据，再用网易云音乐 App 授权。当前支持搜索与歌单，暂不提供播放控制。",
+      "en": "Apply for developer credentials, then authorize with the NetEase Music app. This connector supports search and playlists; playback controls are not available."
+    }
+  },
+  {
+    "id": "baidu-maps",
+    "name": "百度地图 / Baidu Maps",
+    "description": {
+      "zh-CN": "按自然语言查找地点、规划出行，查询地址与天气，并在地图上查看结果。",
+      "en": "Find places, plan trips, resolve addresses, check weather and view results on a map."
+    },
+    "docsUrl": "https://github.com/baidu-maps/map-skills",
+    "accessUrl": "https://lbsyun.baidu.com/products/agentplan",
+    "version": "1.0.9",
+    "fields": [
+      {
+        "name": "BAIDU_MAP_AUTH_TOKEN",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "Agent Plan token",
+          "en": "Agent Plan token"
+        }
+      }
+    ],
+    "note": {
+      "zh-CN": "使用百度地图官方 baidu-ai-map Skill。前往 Agent Plan 页面申请自己的 token，无需申请开发者 AK；凭据在本机加密保存。支持地点检索、驾车/步行/骑行/公交、地址解析、天气与地图链接；同名地点需先澄清。不提供批量距离矩阵、IP 定位或独立区域路况查询，额度与可用性以当前账号和服务为准。",
+      "en": "Uses the official baidu-ai-map Skill. Get your own token on the Agent Plan page without applying for a developer AK; credentials are encrypted locally. Supports place search, driving/walking/cycling/transit, address lookup, weather and map links. Resolve ambiguous places before planning. No distance matrix, IP location or independent regional traffic query. Quotas and availability depend on the account and service."
+    }
+  }
+]

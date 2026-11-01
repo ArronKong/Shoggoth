@@ -32,6 +32,13 @@ PRAGMA user_version=1;
 const clone = value => value == null ? value : structuredClone(value);
 const parse = row => row ? JSON.parse(row.data) : null;
 const occurrenceId = (monitorId, scheduledAt) => `occ-${digest([monitorId, scheduledAt])}`;
+function validateDailyReviewDocument(value) {
+  if (!exact(value, ["revision", "content"]) || !/^[a-f0-9]{64}$/u.test(value.revision)
+    || !text(value.content, 16384, true) || Buffer.byteLength(JSON.stringify(value.content)) > 20 * 1024
+    || value.revision !== "0".repeat(64)
+      && value.revision !== crypto.createHash("sha256").update(value.content).digest("hex")) fail("PROACTIVE_STORE_CORRUPT");
+  return value;
+}
 
 class ProactiveStore {
   constructor({ paths, now = Date.now, randomUUID = crypto.randomUUID, database = openDatabase }) {
@@ -52,6 +59,15 @@ class ProactiveStore {
       }
       if (this.db.prepare("PRAGMA quick_check").get().quick_check !== "ok") fail("PROACTIVE_STORE_CORRUPT");
       this.db.exec("CREATE INDEX IF NOT EXISTS occurrences_review_day ON occurrences(json_extract(data,'$.config.profileId'),created_at) WHERE run_id IS NOT NULL");
+      // Additive table: older clients reject unknown meta cursor keys during
+      // open, so budget barriers must not make rollback corrupt the store.
+      this.db.exec("CREATE TABLE IF NOT EXISTS review_usage_pending(monitor_id TEXT NOT NULL,run_id TEXT PRIMARY KEY,started_at INTEGER NOT NULL)");
+      // Freeze the rules separately from occurrence DTOs so older binaries can
+      // still read their existing rows when the user restores a previous App.
+      this.db.exec("CREATE TABLE IF NOT EXISTS daily_review_documents(occurrence_id TEXT PRIMARY KEY,data TEXT NOT NULL CHECK(json_valid(data)))");
+      for (const row of this.db.prepare("SELECT * FROM review_usage_pending").all()) {
+        if (!id(row.monitor_id) || !id(row.run_id) || !at(row.started_at)) fail("PROACTIVE_STORE_CORRUPT");
+      }
       for (const row of this.db.prepare("SELECT * FROM monitors").all()) {
         const monitor = validateMonitor(parse(row));
         if (monitor.revision < 1 || row.id !== monitor.config.id || row.enabled !== Number(monitor.config.enabled)
@@ -76,6 +92,21 @@ class ProactiveStore {
         }
       }
       for (const row of this.db.prepare("SELECT * FROM meta").all()) this.#validateMeta(row.key, JSON.parse(row.value));
+      // A restored older App may have pruned settled occurrences without
+      // knowing this auxiliary table. Their snapshots carry no live authority.
+      this.db.prepare("DELETE FROM daily_review_documents WHERE occurrence_id NOT IN (SELECT id FROM occurrences)").run();
+      let documentCursor = "";
+      for (;;) {
+        const rows = this.db.prepare("SELECT * FROM daily_review_documents WHERE occurrence_id>? ORDER BY occurrence_id LIMIT 100").all(documentCursor);
+        for (const row of rows) {
+          if (!id(row.occurrence_id)) fail("PROACTIVE_STORE_CORRUPT");
+          validateDailyReviewDocument(parse(row));
+          const occurrence = parse(this.db.prepare("SELECT data FROM occurrences WHERE id=?").get(row.occurrence_id));
+          if (occurrence?.config.kind !== "inspiration") fail("PROACTIVE_STORE_CORRUPT");
+        }
+        if (rows.length < 100) break;
+        documentCursor = rows.at(-1).occurrence_id;
+      }
       let operationCursor = "";
       for (;;) {
         const rows = this.db.prepare("SELECT * FROM operations WHERE id>? ORDER BY id LIMIT 100").all(operationCursor);
@@ -110,6 +141,36 @@ class ProactiveStore {
   }
   getCursor(key) { this.#ready(); const row = this.db.prepare("SELECT value FROM meta WHERE key=?").get(`cursor:${key}`); return row ? JSON.parse(row.value) : null; }
   setCursor(key, value) { this.#validateMeta(`cursor:${key}`, value); return this.#write(() => this.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(`cursor:${key}`, JSON.stringify(value))); }
+  dailyReviewDocument(occurrenceIdValue) {
+    this.#ready(); if (!id(occurrenceIdValue)) fail();
+    return parse(this.db.prepare("SELECT data FROM daily_review_documents WHERE occurrence_id=?").get(occurrenceIdValue));
+  }
+  bindDailyReviewDocument(occurrenceIdValue, document) {
+    const value = validateDailyReviewDocument({ revision: document.revision, content: document.content });
+    return this.#write(() => {
+      const occurrence = this.getOccurrence(occurrenceIdValue);
+      if (occurrence?.config.kind !== "inspiration" || occurrence.runId !== null) fail("PROACTIVE_SCOPE_INVALID");
+      const prior = this.dailyReviewDocument(occurrenceIdValue);
+      if (prior) {
+        if (digest(prior) !== digest(value)) fail("PROACTIVE_REVISION_CONFLICT");
+        return prior;
+      }
+      this.db.prepare("INSERT INTO daily_review_documents VALUES(?,?)").run(occurrenceIdValue, JSON.stringify(value));
+      return clone(value);
+    });
+  }
+  pendingModelUsage(monitorId) {
+    this.#ready(); if (!id(monitorId)) fail();
+    return this.db.prepare("SELECT started_at FROM review_usage_pending WHERE monitor_id=?").all(monitorId).map(row => row.started_at);
+  }
+  modelUsage(run, measured) {
+    if (!id(run?.sourceId) || !id(run?.id) || typeof measured !== "boolean") fail();
+    return this.#write(() => {
+      this.db.prepare("DELETE FROM review_usage_pending WHERE started_at<?").run(this.now() - 2 * DAY_MS);
+      if (measured) this.db.prepare("DELETE FROM review_usage_pending WHERE monitor_id=? AND run_id=?").run(run.sourceId, run.id);
+      else this.db.prepare("INSERT INTO review_usage_pending VALUES(?,?,?) ON CONFLICT(run_id) DO NOTHING").run(run.sourceId, run.id, this.now());
+    });
+  }
   heartbeatScratch(profileId) {
     if (!id(profileId)) fail();
     return this.getCursor("heartbeat-scratch:" + profileId) ?? { revision: 0, content: "", updatedAt: 0 };
@@ -227,10 +288,11 @@ class ProactiveStore {
     return this.db.prepare("SELECT data FROM occurrences WHERE monitor_id=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?")
       .all(monitorId, boundary.createdAt, boundary.createdAt, boundary.id, limit).map(parse);
   }
-  countReviewAttempts(profileId, now, timezone) {
+  countReviewAttempts(profileId, now, timezone, monitorId = null) {
     this.#ready(); const day = localParts(now, timezone).day;
-    return this.db.prepare("SELECT created_at FROM occurrences WHERE run_id IS NOT NULL AND json_extract(data,'$.config.profileId')=? AND created_at>=? AND created_at<?")
-      .all(profileId, Math.max(0, now - 2 * DAY_MS), now + 2 * DAY_MS).filter(row => localParts(row.created_at, timezone).day === day).length;
+    return this.db.prepare("SELECT created_at FROM occurrences WHERE run_id IS NOT NULL AND json_extract(data,'$.config.profileId')=? AND created_at>=? AND created_at<? AND (? IS NULL OR monitor_id=?)")
+      .all(profileId, Math.max(0, now - 2 * DAY_MS), now + 2 * DAY_MS, monitorId, monitorId)
+      .filter(row => localParts(row.created_at, timezone).day === day).length;
   }
   getNote(ideaId) {
     this.#ready();
@@ -329,6 +391,7 @@ class ProactiveStore {
     this.db.prepare("DELETE FROM notices WHERE id IN (SELECT id FROM notices WHERE app_state IN ('published','failed','suppressed') AND system_state IN ('submitted','failed','suppressed') AND created_at<? ORDER BY created_at LIMIT 128)")
       .run(this.now() - 30 * 86_400_000);
     this.db.prepare("DELETE FROM events WHERE reminded_at<?").run(this.now() - 30 * 86_400_000);
+    this.db.prepare("DELETE FROM daily_review_documents WHERE occurrence_id NOT IN (SELECT id FROM occurrences)").run();
     if (this.db.prepare("SELECT count(*) AS n FROM occurrences").get().n > 65_536) fail("PROACTIVE_UNAVAILABLE");
   }
   pauseProfile(profileId) {
@@ -341,6 +404,7 @@ class ProactiveStore {
       for (const notice of notices) this.db.prepare("DELETE FROM events WHERE notice_id=?").run(notice.id);
       this.db.prepare("DELETE FROM notices WHERE profile_id=?").run(profileId);
       this.db.prepare("DELETE FROM occurrences WHERE json_extract(data,'$.config.profileId')=?").run(profileId);
+      this.db.prepare("DELETE FROM daily_review_documents WHERE occurrence_id NOT IN (SELECT id FROM occurrences)").run();
       this.db.prepare("DELETE FROM monitors WHERE profile_id=?").run(profileId);
       this.db.prepare("DELETE FROM targets WHERE profile_id=?").run(profileId);
       this.db.prepare("DELETE FROM meta WHERE key=?").run("cursor:heartbeat-scratch:" + profileId);

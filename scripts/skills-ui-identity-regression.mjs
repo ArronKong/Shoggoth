@@ -10,20 +10,25 @@ const esbuild = require("esbuild");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-skills-ui-"));
 const output = path.join(temporary, "test.cjs");
 const mocks = {
-  "./SelfImprovementPanel": "export default function SelfImprovementPanel() { return null; }",
+  "./SelfImprovementPanel": "export default function SelfImprovementPanel(props) { return <learned-detail-fixture {...props} />; }",
   "../api/client": `
     export class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
     export const getSkillUsage = async () => [];
     export const installSkill = async () => ({ canceled: true });
     export const listAgents = async () => [];
     export const listSkills = async () => [];
-    export const selfImprovement = async () => ({ supported: false });
+    export const selfImprovement = async (backend, agentId, action, input) => {
+      globalThis.calls.push({ method: 'learning', backend, agentId, action, input });
+      globalThis.skills = globalThis.skills.map(skill => skill.id === input.skillId && skill.agentId === agentId
+        ? { ...skill, enabled: input.action === 'restore' } : skill);
+    };
     export const listDisabledStandaloneMcp = async () => ({ revision: 1, totalDisabled: 0,
       items: [], nextCursor: 0, hasMore: false });
     export const rebindStandaloneMcp = async () => { throw new Error('not expected'); };
     export const activateStandaloneMcp = async () => { throw new Error('not expected'); };
     export const listSkillsPage = async (backend, agentId, options) => {
       globalThis.calls.push({ method: 'page', backend, agentId, options });
+      if (globalThis.failNextPage) { globalThis.failNextPage = false; throw new ApiError('unavailable', 503); }
       const revision = String(globalThis.skills.length) + '-' + globalThis.skills.map(skill => Number(skill.enabled)).join('');
       if (options.pageIndex > 0 && options.expectedRevision !== revision) throw new ApiError('changed', 409);
       const filtered = globalThis.skills.filter(skill => (!options.status || (options.status === 'on') === skill.enabled)
@@ -43,6 +48,7 @@ const mocks = {
     export const updateSkill = async (backend, name, patch, agent) => {
       globalThis.calls.push({ method: 'update', backend, name, patch, agent });
       globalThis.skills = globalThis.skills.map(s => s.id === patch.id && s.source === patch.source && s.version === patch.version
+        && (s.source === 'user' || s.agentId === agent)
         ? { ...s, enabled: patch.enabled, registryVersion: s.registryVersion + 1 } : s);
       return globalThis.skills.find(s => s.id === patch.id && s.source === patch.source && s.version === patch.version);
     };
@@ -63,15 +69,16 @@ const mocks = {
   "../lib/page-refresh": "export function useRegisterPageRefresh() {} export function useRegisterPageLoading() {}",
   "../lib/backends": `
     import { useState } from 'react';
-    const catalog = [{ id: 'native-fixture', name: 'Fixture', surfaces: { agentHarness: true } }];
+    const catalog = [{ id: 'native-fixture', name: 'Fixture', surfaces: { agentHarness: true } },
+      ...['openclaw', 'hermes'].map(id => ({ id, name: id, surfaces: { agentHarness: false } }))];
     export const useBackendCatalog = () => catalog;
-    export const useBackendState = () => useState('native-fixture');
+    export const useBackendState = () => useState(globalThis.initialBackend || 'native-fixture');
   `,
   "../lib/useStickyState": "import { useState } from 'react'; export const useStickyState = (key, value) => useState(value);",
   "../components/Field": `
     export const Field = ({children}) => children;
     export const Option = () => null;
-    export const Select = () => null;
+    export const Select = () => <select-fixture />;
     export const TextInput = () => null;
     export const TextArea = () => null;
     export const Switch = (props) => <switch-fixture {...props} />;
@@ -84,7 +91,7 @@ const mocks = {
   `,
   "../lib/markdown": "export const toSanitizedMarkdownHtml = value => value;",
   "../components/PageHead": "export const PageHead = ({actions}) => <header>{actions}</header>;",
-  "../components/BackendTabs": "export default function BackendTabs() { return null; }",
+  "../components/BackendTabs": "export default function BackendTabs(props) { return <backend-tabs-fixture {...props} />; }",
   "../components/FilterTabs": "export default function FilterTabs() { return null; }",
   "../components/SearchCapsule": "export default function SearchCapsule(props) { return <search-fixture {...props} />; }",
   "react-i18next": `
@@ -103,7 +110,7 @@ try {
       import TestRenderer, { act } from 'react-test-renderer';
       import SkillsPage from './src/pages/SkillsPage';
       import { skillIdentity } from './src/lib/skillIdentity';
-      import { previewSkill, uninstallSkill } from './src/api/client';
+      import { listSkillsPage, previewSkill, uninstallSkill } from './src/api/client';
       import en from './src/i18n/locales/en';
       import zh from './src/i18n/locales/zh-CN';
       async function main() {
@@ -120,6 +127,13 @@ try {
         assert.notEqual(skillIdentity(newer), skillIdentity({ ...newer, source: 'builtin' }));
         let renderer;
         await act(async () => { renderer = TestRenderer.create(<SkillsPage />); });
+        assert.equal(globalThis.calls.find(call => call.method === 'page').agentId, undefined,
+          'the catalog must request all Agents');
+        assert.equal(renderer.root.findAllByType('search-fixture').length, 0);
+        assert.equal(renderer.root.findAllByType('select-fixture').length, 0);
+        assert.equal(renderer.root.findAllByType('learned-detail-fixture').length, 0,
+          'the automatic learning card must not be mounted');
+        assert.equal(renderer.root.findAllByType('button').some(node => node.children.includes(en.skills.install)), false);
         await act(async () => { renderer.root.findByProps({ 'aria-label': 'review v1.0.1 · user' }).props.onClick(); });
         const cards = () => renderer.root.findAllByType('article');
         assert.equal(cards().filter(node => node.props.className.includes('skill-card-selected')).length, 1);
@@ -143,48 +157,118 @@ try {
         assert.deepEqual(globalThis.skills.map(skill => skill.version), ['1.0.0']);
         await act(async () => renderer.unmount());
 
+        globalThis.window = Object.assign(new EventTarget(), {
+          requestAnimationFrame(callback) { callback(); }, matchMedia() { return { matches: false }; },
+        });
+        globalThis.skills = ['agent-a', 'agent-b'].flatMap((agentId, index) => [
+          { backendId: 'native-fixture', agentId, id: 'scoped-review', name: 'scoped-review',
+            version: '1.0.0', source: 'builtin', description: 'Agent method', enabled: true,
+            profileRevision: index + 3, usageCount: index + 1 },
+          { backendId: 'native-fixture', agentId, id: 'learned-' + agentId, name: 'learned-review',
+            version: '1.0.0', source: 'learned', description: 'Learned method', enabled: true,
+            contentHash: String(index + 1).repeat(64), learnedRevision: index + 5, usageCount: index + 7 },
+        ]);
+        await act(async () => { renderer = TestRenderer.create(<SkillsPage />); });
+        assert.equal(cards().length, 4, 'skills from both Agents must appear together');
+        assert.deepEqual(cards().map(card => card.findByProps({ className: 'skill-badge skill-badge-used' }).children.join('')),
+          [1, 7, 2, 8].map(count => en.skills.usedTimes.replace('{{count}}', String(count))),
+          'same-name usage must stay scoped to each row');
+        await act(async () => cards()[2].findByProps({ className: 'skill-card-open' }).props.onClick());
+        assert.equal(globalThis.calls.findLast(call => call.method === 'preview').agent, 'agent-b');
+        await act(async () => detail().findByType('switch-fixture').props.onChange(false));
+        const scopedUpdate = globalThis.calls.findLast(call => call.method === 'update');
+        assert.equal(scopedUpdate.agent, 'agent-b');
+        assert.equal(scopedUpdate.patch.expectedRevision, 4);
+        assert.equal(globalThis.skills[0].enabled, true, 'another Agent must keep its own enabled state');
+        await act(async () => cards()[3].findByProps({ className: 'skill-card-open' }).props.onClick());
+        const learnedDetail = renderer.root.findByType('learned-detail-fixture');
+        assert.equal(learnedDetail.props.detailOnly, true);
+        assert.equal(learnedDetail.props.agentId, 'agent-b');
+        assert.equal(learnedDetail.props.skillSelection.id, 'learned-agent-b');
+        await act(async () => cards()[3].findByType('switch-fixture').props.onChange(false));
+        const learnedChange = globalThis.calls.findLast(call => call.method === 'learning');
+        assert.equal(learnedChange.agentId, 'agent-b');
+        assert.equal(learnedChange.input.expectedRevision, 6);
+        assert.equal(globalThis.skills[1].enabled, true);
+        assert.equal(globalThis.skills[3].enabled, false);
+        const beforeChange = globalThis.calls.filter(call => call.method === 'page').length;
+        await act(async () => window.dispatchEvent(new CustomEvent('shoggoth:skills-changed', {
+          detail: { backendId: 'native-fixture', agentId: 'agent-a' },
+        })));
+        assert.equal(globalThis.calls.filter(call => call.method === 'page').length, beforeChange + 1,
+          'a change from any Agent must refresh the aggregate');
+        await act(async () => renderer.unmount());
+        delete globalThis.window;
+
         globalThis.skills = Array.from({ length: 5000 }, (_, index) => ({
           backendId: 'native-fixture', agentId: 'agent-a', id: 'scale-' + String(index).padStart(4, '0'),
           name: 'scale-' + String(index).padStart(4, '0'), version: '1.0.0', source: 'user',
           description: 'Skill at ' + index, enabled: true, profileRevision: 1, registryVersion: 2,
         }));
+        const observers = [];
+        globalThis.IntersectionObserver = class {
+          constructor(callback) { this.callback = callback; observers.push(this); }
+          observe() { this.active = true; }
+          disconnect() { this.active = false; }
+        };
+        const loadNext = () => {
+          const observer = observers.findLast(value => value.active);
+          assert.ok(observer, 'the visible loading sentinel must be observed');
+          observer.callback([{ isIntersecting: true }]);
+          observer.callback([{ isIntersecting: true }]);
+        };
         globalThis.pageFocus = [];
-        await act(async () => { renderer = TestRenderer.create(<SkillsPage />, { createNodeMock(element) {
+        const createNodeMock = element => {
+          if (element.props.className === 'skill-load-more') return {};
           if (element.props.className !== 'skill-main-content') return null;
-          return {
-            scrollTo(options) { globalThis.pageFocus.push({ action: 'scroll', top: options.top }); },
-            querySelector(selector) {
-              const first = renderer.root.findAllByProps({ className: 'skill-card-open' })[0];
-              return { focus(options) { globalThis.pageFocus.push({ action: 'focus', selector,
-                label: first.props['aria-label'], preventScroll: options.preventScroll }); } };
-            },
-          };
-        } }); });
-        assert.equal(cards().length, 73, 'server byte boundaries must bound mounted cards');
-        assert.deepEqual(globalThis.pageFocus, [], 'initial render must not steal keyboard focus');
-        const pageNav = () => renderer.root.findByType('nav');
-        assert.match(pageNav().findByType('span').children.join(''), /Page 1 of 69/);
-        await act(async () => pageNav().findAllByType('button')[1].props.onClick());
-        assert.equal(cards().length, 73);
-        assert.match(cards()[0].props.title, /scale-0073/);
-        assert.deepEqual(globalThis.pageFocus, [
-          { action: 'scroll', top: 0 },
-          { action: 'focus', selector: '.skill-card-open',
-            label: 'scale-0073 v1.0.0 · user', preventScroll: true },
-        ], 'pagination must show and focus the first card on the new page');
-        assert.equal(globalThis.calls.findLast(call => call.method === 'page').options.pageIndex, 1);
+          return { scrollTo() { globalThis.pageFocus.push('scroll'); } };
+        };
+        await act(async () => { renderer = TestRenderer.create(<SkillsPage />, { createNodeMock }); });
+        assert.equal(cards().length, 73, 'initial loading must respect server byte boundaries');
+        assert.equal(renderer.root.findAllByType('nav').length, 0, 'there are no pagination controls');
+        await act(async () => loadNext());
+        assert.equal(cards().length, 146, 'scrolling appends the next batch');
+        assert.equal(cards()[0].props.title, 'scale-0000', 'earlier cards remain in place');
+        assert.equal(globalThis.calls.findLast(call => call.method === 'page').options.pageIndex, 1,
+          'repeated observer callbacks must not skip a batch');
+        assert.deepEqual(globalThis.pageFocus, [], 'loading more must preserve scroll and keyboard focus');
+        globalThis.failNextPage = true;
+        await act(async () => loadNext());
+        assert.equal(cards().length, 146, 'a failed next batch must retain already loaded cards');
+        await act(async () => renderer.root.findAllByType('button').find(node => node.children.includes(en.skills.retryLoad)).props.onClick());
+        assert.equal(cards().length, 219, 'retry resumes the failed batch without duplication');
         globalThis.skills[0] = { ...globalThis.skills[0], enabled: false };
-        await act(async () => pageNav().findAllByType('button')[1].props.onClick());
-        assert.match(pageNav().findByType('span').children.join(''), /Page 1 of 69/,
-          'stale revision must restart at the first page');
+        await act(async () => loadNext());
+        assert.equal(cards().length, 73, 'stale catalog revisions must restart from a consistent snapshot');
         assert.equal(globalThis.calls.findLast(call => call.method === 'page').options.pageIndex, 0);
         assert.equal(cards()[0].props.title, 'scale-0000');
-        await act(async () => renderer.root.findByType('search-fixture').props.onChange('scale-4999'));
-        assert.equal(cards().length, 1, 'search must include items outside the mounted page');
-        assert.equal(cards()[0].props.title, 'scale-4999');
-        assert.equal(renderer.root.findAllByType('nav').length, 0);
-        assert.equal(globalThis.pageFocus.length, 4, 'search reset must not steal focus');
+        assert.equal(renderer.root.findAllByType('search-fixture').length, 0);
         await act(async () => renderer.unmount());
+
+        for (const backend of ['openclaw', 'hermes']) {
+          globalThis.initialBackend = backend;
+          globalThis.skills = Array.from({ length: 250 }, (_, index) => ({
+            backendId: backend, name: 'external-' + String(index).padStart(3, '0'),
+            description: 'External Skill ' + index, enabled: true,
+          }));
+          await act(async () => { renderer = TestRenderer.create(<SkillsPage />, { createNodeMock }); });
+          assert.equal(cards().length, 100, backend + ' starts with one batch');
+          await act(async () => loadNext());
+          assert.equal(cards().length, 200, backend + ' appends on scroll');
+          await act(async () => loadNext());
+          assert.equal(cards().length, 250, backend + ' reaches the final batch');
+          assert.equal(cards()[0].props.title, 'external-000');
+          assert.equal(cards().at(-1).props.title, 'external-249');
+          assert.equal(renderer.root.findAllByType('nav').length, 0);
+          assert.equal(renderer.root.findAllByProps({ className: 'skill-load-more' }).length, 0,
+            'the observer stops when all Skills are visible');
+          await act(async () => renderer.root.findByType('backend-tabs-fixture').props.onChange('native-fixture'));
+          await act(async () => renderer.root.findByType('backend-tabs-fixture').props.onChange(backend));
+          assert.equal(cards().length, 100, 'changing backend resets the visible batch');
+          await act(async () => renderer.unmount());
+        }
+        delete globalThis.initialBackend;
+        delete globalThis.IntersectionObserver;
 
         const requests = [];
         globalThis.fetch = async (url, init) => { requests.push({ url, init }); return { ok: true, text: async () => JSON.stringify({ preview: { content: 'test' } }) }; };
@@ -197,6 +281,9 @@ try {
           assert.equal(params.get('version'), '1.0.1');
           assert.equal(params.get('agentId'), 'agent-a');
         }
+        globalThis.fetch = async url => { requests.push({ url }); return { ok: true, text: async () => JSON.stringify({ page: { supported: true } }) }; };
+        await listSkillsPage('native-fixture', undefined, { query: '', status: '', pageIndex: 0, limit: 100, expectedRevision: null });
+        assert.equal(new URL(requests.at(-1).url, 'http://localhost').searchParams.has('agentId'), false);
         for (const dictionary of [en, zh]) {
           for (const key of ['install', 'installedToast', 'uninstall', 'uninstallTitle', 'uninstallMessage',
             'uninstalledToast', 'instructionsSection', 'dependenciesSection', 'requiredTools',
@@ -205,7 +292,7 @@ try {
             assert.equal(dictionary.models[key], undefined, 'Skill text must live in its own namespace');
           }
         }
-        console.log('PASS Skills React selection, preview, enable, uninstall, 5k pagination/search, transport identity and bilingual labels');
+        console.log('PASS Skills all-Agent catalog, hidden controls, scoped details/toggles/usage, all three backends scroll loading/retry, transport identity and bilingual labels');
       }
       export default main();
     ` },

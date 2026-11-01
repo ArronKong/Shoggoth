@@ -137,7 +137,8 @@ function load(relative) {
       if (name === "@base-ui/react/menu") return { Menu: menuMock };
       if (name.endsWith("/components/ChatMarkdown")) return passthrough("p");
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
-      if (name === "./GroupChatMarkdown") return { __esModule: true, default: props => React.createElement("p", null, props.lead, props.text) };
+      if (name === "./GroupChatMarkdown") return { __esModule: true, default: props => React.createElement("p", null, props.lead, props.text),
+        groupAttachmentsOutsideMarkdown: (_text, attachments) => attachments };
       if (name === "./ChatPromptCard") return { __esModule: true, default: () => null };
       if (name === "./ChatModelMenu") return { __esModule: true, default: props => React.createElement("model-menu", props) };
       if (name === "./chatIcons") return load("src/pages/chatIcons.tsx");
@@ -557,8 +558,8 @@ assert.equal(buttons("groupChat.status.stop").length, 3);
 await click(buttons("groupChat.status.stop")[1]);
 assert.deepEqual(plain(named("stopMember")[0].args), ["g", "b"], "stopping one member leaves the others running");
 assert.equal(named("stop").length, 0);
-assert.equal(byClass("muted").filter(node => node.children.includes("groupChat.turn.working")).length, 2,
-  "members that gave up the floor are shown as working in the background");
+assert.equal(byClass("muted").filter(node => node.children.includes("groupChat.turn.working")).length, 0,
+  "background work uses the same quiet loading bubble as a speaking member");
 assert.deepEqual(byClass("resultTag"), [], "reply type labels are hidden from the message author footer");
 assert.equal(messages[1].origin.late, true, "hiding the label preserves the saved reply identity");
 assert.equal(buttons("groupChat.stop").length, 1, "a running discussion keeps its stop action");

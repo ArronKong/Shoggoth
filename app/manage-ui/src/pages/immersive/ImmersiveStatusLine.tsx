@@ -56,9 +56,10 @@ export default function ImmersiveStatusLine({ phase, live }: { phase: ImmersiveP
     return () => document.removeEventListener("keydown", onKey, true);
   }, [open]);
 
-  if (!shown || live?.wait?.kind === "retrying") return null;
-  if (shown.wait?.kind === "retrying") return null;
-  if (shown.wait && live?.wait) return <div className={styles.wrap}><ChatRunWait state={live.wait} /></div>;
+  // Startup already lives in the shared activity timeline above the reply.
+  if (!shown || live?.wait?.kind === "retrying" || live?.wait?.kind === "starting") return null;
+  if (shown.wait?.kind === "retrying" || shown.wait?.kind === "starting") return null;
+  if (shown.wait) return live?.wait ? <div className={styles.wrap}><ChatRunWait state={live.wait} /></div> : null;
   const toolTitle = (tool: ImmersiveLiveTool) => tool.title || toolActivityTitle(tool.name, undefined, t);
   const runningTool = [...shown.tools].reverse().find((x) => !x.done);
   const thinkingLines = (shown.thinkingText || "").trim().split("\n").filter(Boolean);

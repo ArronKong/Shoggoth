@@ -7,6 +7,8 @@ function startManualCompaction({ host, sessionId, signal, timeoutMs, dispatch, o
   let settled = false;
   let acknowledged = false;
   let observed = false;
+  let observedTurnId = null;
+  const terminalTurns = new Map();
   let issued = false;
   let unsubscribe = () => {};
   let timer;
@@ -19,12 +21,28 @@ function startManualCompaction({ host, sessionId, signal, timeoutMs, dispatch, o
     signal?.removeEventListener("abort", onAbort);
     resolve(outcome);
   };
+  const settleObserved = () => {
+    if (!acknowledged || !observed) return;
+    // New Codex compaction items finish before their native turn releases its
+    // execution slot. Keep the session reserved through that same turn's end.
+    if (observedTurnId === null) { finish("completed"); return; }
+    const terminal = terminalTurns.get(observedTurnId);
+    if (terminal) finish(terminal === "completed" ? "completed" : "unknown");
+  };
   const onAbort = () => finish("closing");
   unsubscribe = host.subscribe(event => {
-    if (!issued || event?.known !== true || event.sessionId !== sessionId
-      || !["context_compacted", "context_usage"].includes(event.type)) return;
-    observed = true;
-    if (acknowledged) finish("completed");
+    if (!issued || event?.known !== true || event.sessionId !== sessionId) return;
+    if (event.type === "context_compacted") {
+      observed = true;
+      if (observedTurnId === null && typeof event.turnId === "string" && event.turnId.length > 0) {
+        observedTurnId = event.turnId;
+      }
+    } else if (event.type === "complete" && typeof event.turnId === "string"
+      && ["completed", "failed", "interrupted", "canceled"].includes(event.status)) {
+      terminalTurns.set(event.turnId, event.status);
+      if (terminalTurns.size > 64) terminalTurns.delete(terminalTurns.keys().next().value);
+    } else return;
+    settleObserved();
   });
   timer = setTimeout(() => finish("timeout"), timeoutMs);
   signal?.addEventListener("abort", onAbort, { once: true });
@@ -40,7 +58,7 @@ function startManualCompaction({ host, sessionId, signal, timeoutMs, dispatch, o
     if (settled) return;
     acknowledged = true;
     try { onAccepted(); } catch { finish("unknown"); return; }
-    if (observed) finish("completed");
+    settleObserved();
   }, () => finish("unknown"));
   return { promise, cancel: () => finish("canceled") };
 }

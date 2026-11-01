@@ -125,7 +125,7 @@ class AgentHarnessServiceController {
     }
     this.nativeMcpStore = options.nativeMcpStore || null;
     this.nativeMcpClientManager = options.nativeMcpClientManager || null;
-    if (this.nativeMcpStore && ["list", "get", "prepare", "register"].some(
+    if (this.nativeMcpStore && ["list", "get", "getPrivate", "prepare", "register"].some(
       (method) => typeof this.nativeMcpStore[method] !== "function")) {
       throw new TypeError("NativeMcpStore dependency is invalid");
     }
@@ -184,7 +184,7 @@ class AgentHarnessServiceController {
     return result?.then ? result.then(publicMemoryResult) : publicMemoryResult(result);
   }
   _handle(method, params) {
-    this._profile(params.profileId);
+    if (!(method === "harness.skills.query" && params.profileId === null)) this._profile(params.profileId);
     if (this.memoryEngine.owner === "shoggoth-memory-core") {
       if (method === "harness.definition.read" && ["MEMORY", "USER"].includes(params.kind) && params.revision === null) {
         return this.memoryEngine.readCanonical(params.profileId, params.kind);
@@ -206,12 +206,19 @@ class AgentHarnessServiceController {
     if (method === "harness.mcp.list") {
       const value = this.nativeMcpStore.list();
       const disabled = value.servers.filter((server) => !server.enabled);
-      const items = disabled.slice(params.cursor, params.cursor + params.limit).map((server) => ({
-        id: server.id, name: server.name,
-        commandLabel: (path.basename(server.command) || "(root)").slice(0, 128),
-        cwdLabel: (path.basename(server.cwd) || "(root)").slice(0, 128),
-        argCount: server.args.length, updatedAt: server.updatedAt,
-      }));
+      const items = disabled.slice(params.cursor, params.cursor + params.limit).map((server) => {
+        // The old repair API remains a redacted projection after schema 2.
+        // Private arguments are used only to count; no value leaves Service.
+        const transport = this.nativeMcpStore.getPrivate(server.id).transport;
+        return {
+          id: server.id, name: server.name,
+          commandLabel: (transport.kind === "stdio-command" ? path.basename(transport.command) || "(root)"
+            : transport.kind === "stdio-package" ? transport.registryType : "remote").slice(0, 128),
+          cwdLabel: (transport.kind === "stdio-command" ? path.basename(transport.cwd) || "(root)" : "—").slice(0, 128),
+          argCount: transport.kind === "stdio-command" ? transport.args.length : transport.kind === "stdio-package" ? (transport.packageArgs || []).length : 0,
+          updatedAt: server.updatedAt,
+        };
+      });
       const nextCursor = params.cursor + items.length;
       return { revision: value.revision, totalDisabled: disabled.length, items,
         nextCursor, hasMore: nextCursor < disabled.length };
@@ -220,11 +227,13 @@ class AgentHarnessServiceController {
       if (this.nativeMcpStore.revision !== params.expectedRevision) {
         throw harnessError("MCP_REGISTRY_REVISION_CONFLICT", "MCP Registry revision 已变化");
       }
-      const current = this.nativeMcpStore.get(params.id);
+      const current = this.nativeMcpStore.getPrivate(params.id);
       if (!current) throw harnessError("MCP_SERVER_NOT_FOUND", "MCP Server 不存在");
       if (current.enabled) throw harnessError("MCP_SERVER_ALREADY_ENABLED", "MCP Server 已启用");
-      const server = this.nativeMcpStore.prepare({ id: current.id, name: current.name,
-        command: params.command, args: params.args, cwd: params.cwd, enabled: false });
+      const { createdAt, updatedAt, ...spec } = current;
+      const server = this.nativeMcpStore.prepare({ ...spec, source: { kind: "custom" },
+        transport: { kind: "stdio-command", command: params.command, args: params.args, cwd: params.cwd },
+        enabled: false, status: "disabled", lastCheck: null });
       return (async () => {
         await this.nativeMcpClientManager.closeServer(current.id);
         const value = this.nativeMcpStore.register({ expectedRevision: params.expectedRevision, server });
@@ -242,11 +251,11 @@ class AgentHarnessServiceController {
         || pending.activationToken !== params.activationToken) {
         throw harnessError("MCP_REBIND_REQUIRED", "请重新设置 MCP 启动路径后再启用");
       }
-      const current = this.nativeMcpStore.get(params.id);
+      const current = this.nativeMcpStore.getPrivate(params.id);
       if (!current) throw harnessError("MCP_SERVER_NOT_FOUND", "MCP Server 不存在");
       if (current.enabled) throw harnessError("MCP_SERVER_ALREADY_ENABLED", "MCP Server 已启用");
-      const server = this.nativeMcpStore.prepare({ id: current.id, name: current.name,
-        command: current.command, args: current.args, cwd: current.cwd, enabled: true });
+      const { createdAt, updatedAt, ...spec } = current;
+      const server = this.nativeMcpStore.prepare({ ...spec, enabled: true, status: "ready", lastCheck: null });
       return (async () => {
         let tools;
         try { tools = await this.nativeMcpClientManager.probe(server); }
@@ -493,12 +502,17 @@ class AgentHarnessServiceController {
       };
     }
     if (method === "harness.skills.query") {
-      const profile = this._profile(params.profileId);
-      const value = this.skillStore.list(params.profileId);
-      const learned = this.learnedSkillStore?.management(params.profileId) ?? [];
-      const registryRevision = learned.length ? crypto.createHash("sha256").update(JSON.stringify([
-        value.registryRevision, learned.map(skill => [skill.id, skill.contentHash, skill.learnedRevision, skill.enabled]),
-      ])).digest("hex") : value.registryRevision;
+      const allAgents = params.profileId === null;
+      const profiles = allAgents
+        ? this.productStore.listAgentProfiles().filter(profile => profile.enabled && profile.backendId === "shoggoth")
+          .sort((a, b) => a.agentId.localeCompare(b.agentId))
+        : [this._profile(params.profileId)];
+      const catalogs = profiles.map(profile => ({ profile, value: this.skillStore.list(profile.id),
+        learned: this.learnedSkillStore?.management(profile.id) ?? [] }));
+      const registryRevision = crypto.createHash("sha256").update(JSON.stringify(catalogs.map(({ profile, value, learned }) => [
+        profile.id, profile.name, value.registryRevision, value.registryVersion, value.profileRevision,
+        learned.map(skill => [skill.id, skill.contentHash, skill.learnedRevision, skill.enabled, skill.usageCount]),
+      ]))).digest("hex");
       const usage = new Map();
       const usageAgents = new Map();
       usage.supported = true;
@@ -522,24 +536,40 @@ class AgentHarnessServiceController {
         usageAgents.clear();
         usage.supported = false;
       }
-      if (usage.supported) for (const skill of learned) {
-        usage.set(skill.name, skill.usageCount);
-        if (skill.usageCount > 0) usageAgents.set(skill.name, { [profile.agentId]: skill.usageCount });
+      const items = [];
+      const shared = new Map();
+      for (const { profile, value, learned } of catalogs) for (const skill of [...value.items, ...learned]) {
+        // Installed packages are shared. Built-ins and learned methods retain
+        // their owning Agent so their switches and details stay scoped.
+        const sharedKey = skill.source === "user" ? JSON.stringify([skill.id, skill.version]) : null;
+        if (allAgents && sharedKey && shared.has(sharedKey)) {
+          shared.get(sharedKey).enabled ||= skill.enabled;
+          continue;
+        }
+        const scoped = skill.source === "learned" || (allAgents && skill.source === "builtin");
+        const usageCount = skill.source === "learned" ? skill.usageCount
+          : scoped ? usageAgents.get(skill.name)?.[profile.agentId] || 0 : usage.get(skill.name) || 0;
+        const item = {
+          ...skill,
+          backendId: "shoggoth",
+          category: skill.source === "learned" ? "Shoggoth learned"
+            : skill.source === "builtin" ? "Shoggoth built-in" : "Shoggoth native",
+          emoji: "🧩",
+          profileId: profile.id,
+          agentId: profile.agentId,
+          agentName: profile.name || profile.agentId,
+          registryRevision,
+          registryVersion: value.registryVersion,
+          profileRevision: value.profileRevision,
+          usageCount: usage.supported ? usageCount : 0,
+          usageAgents: scoped
+            ? usage.supported && usageCount > 0 ? { [profile.agentId]: usageCount } : {}
+            : usageAgents.get(skill.name) || {},
+        };
+        items.push(item);
+        if (sharedKey) shared.set(sharedKey, item);
       }
-      const items = [...value.items, ...learned].map(skill => ({
-        ...skill,
-        backendId: "shoggoth",
-        category: skill.source === "learned" ? "Shoggoth learned"
-          : skill.source === "builtin" ? "Shoggoth built-in" : "Shoggoth native",
-        emoji: "🧩",
-        profileId: profile.id,
-        agentId: profile.agentId,
-        registryRevision,
-        registryVersion: value.registryVersion,
-        profileRevision: value.profileRevision,
-        usageCount: usage.get(skill.name) || 0,
-        usageAgents: usageAgents.get(skill.name) || {},
-      }));
+      const value = catalogs[0]?.value ?? { registryVersion: 1, profileRevision: 1 };
       return querySkillManagementCatalog({ catalog: { ...value, registryRevision, items }, usage,
         query: params.query, status: params.status, pageIndex: params.pageIndex,
         limit: params.limit, expectedRevision: params.expectedRevision });

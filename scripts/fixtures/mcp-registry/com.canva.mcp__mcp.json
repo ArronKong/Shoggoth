@@ -1,0 +1,24 @@
+{
+  "server": {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "com.canva.mcp/mcp",
+    "description": "Create, search, edit, and export designs and assets from Canva.",
+    "title": "Canva MCP",
+    "version": "1.0.0",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://mcp.canva.com/mcp"
+      }
+    ]
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "statusChangedAt": "2026-09-25T02:10:54.057249Z",
+      "publishedAt": "2026-09-25T02:10:54.057249Z",
+      "updatedAt": "2026-09-25T02:10:54.057249Z",
+      "isLatest": true
+    }
+  }
+}

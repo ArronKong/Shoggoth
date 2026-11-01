@@ -236,6 +236,11 @@ process.stdin.on("data", (chunk) => {
     if (newline < 0) break;
     const message = JSON.parse(buffer.slice(0, newline));
     buffer = buffer.slice(newline + 1);
+    if (process.env.CODEX_FAKE_MODEL_CAPTURE_URL && ["thread/start", "thread/resume", "turn/start", "turn/steer"].includes(message.method)) {
+      const capture = new URL(process.env.CODEX_FAKE_MODEL_CAPTURE_URL);
+      if (capture.hostname !== "127.0.0.1" || capture.protocol !== "http:") throw Error("Capture fixture requires loopback HTTP");
+      void fetch(capture, { method: "POST", body: JSON.stringify(message), headers: { "Content-Type": "application/json" } }).catch(() => {});
+    }
     if (Object.prototype.hasOwnProperty.call(message, "id") && !message.method) {
       if (groupBindingRequests.has(message.id)) {
         const pending = groupBindingRequests.get(message.id);

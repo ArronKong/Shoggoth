@@ -66,6 +66,11 @@ class ConversationMemoryService {
       maxSensitivity: "private", limit: 20, maxBytes: 24 * 1024 });
     return { ...result, viewStatus: this.engine.viewStatus(profileId) };
   }
+  readAuthorityRevision(profileId) {
+    // The file-backed owner separates source withdrawal from additive writes.
+    // MCP publication must use the same boundary as the underlying read.
+    return this.engine.owner === "shoggoth-memory-core" ? this.engine.authorityStamp(profileId) : null;
+  }
   async searchWithSemantic(profileId, args, run) {
     if (this.engine.owner === "shoggoth-memory-core") {
       this.bind("memory_search", args, run);
@@ -108,6 +113,7 @@ class ConversationMemoryService {
       || (["project", "workspace"].includes(item.scope) && !matchesWorkspace(item, run.workspace))) {
       throw serviceError("MEMORY_NOT_FOUND", "记忆不可读取");
     }
+    this.engine.ownMemory?.read({ profileId, run }, { items: [item] });
     return { item: this._publicItem(item), revision: this.store.getRevision(profileId), viewStatus: this.engine.viewStatus(profileId),
       ...(shared ? { sharedFrom: home } : {}) };
   }
@@ -197,6 +203,7 @@ class ConversationMemoryService {
     return this.engine.owner === "shoggoth-memory-core" ? projectFields(item, PUBLIC_MEMORY_FIELDS) : item;
   }
   async _writeShoggoth(name, profileId, args, call) {
+    call.assertCurrent?.();
     this.engine.recallPolicy.assertReady(profileId);
     const binding = call.binding, id = memoryOperationId(profileId, call.operationId);
     const sharing = this.engine.sharing;
@@ -226,13 +233,14 @@ class ConversationMemoryService {
     let item;
     if (name === "memory_save") {
       const unsupported = !quoteSupportsContent(args.sourceQuote || "", args.content);
-      item = await this.engine.propose({ ...args, profileId, id, type: args.validUntil == null ? "semantic" : "temporary",
+      item = await this.engine.propose({ ...args, profileId, id, assertCurrent: call.assertCurrent, type: args.validUntil == null ? "semantic" : "temporary",
         sourceRefs: [...binding.sourceRefs, ...(["project", "workspace"].includes(args.scope) ? workspaceMemoryRefs(binding.workspace, args.scope) : []),
           ...(unsupported ? [`${UNTRUSTED_REF_PREFIX}quote-unsupported`] : [])] });
       this._recordSource(profileId, id, item, binding);
-    } else item = await this.engine.forgetEverywhere({ profileId, id: args.id, reason: "forgotten",
+    } else item = await this.engine.forgetEverywhere({ profileId, id: args.id, assertCurrent: call.assertCurrent, reason: "forgotten",
       operationId: `forget-${id}`, revocationSourceRefs: binding.sourceRefs });
     if (!item) throw serviceError("MEMORY_NOT_FOUND", "记忆不存在");
+    if (name === "memory_save") this.engine.ownMemory?.read({ profileId, run: { id: binding.runId } }, { items: [item] });
     return this.result(profileId, item);
   }
   getFile(profileId, args, run) {

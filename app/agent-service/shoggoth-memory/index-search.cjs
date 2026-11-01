@@ -63,7 +63,21 @@ class MemoryIndexSearch extends core.MemorySearchOrchestration {
 
   applyProviderResult(result) {
     super.applyProviderResult(result);
-    if (this.index.usesNativeProvider(this.settings)) this.executor.attachProvider(this.provider, this.providerRuntime);
+    if (this.index.usesNativeProvider(this.settings)) this.attachExecutorProvider();
+  }
+  attachExecutorProvider() {
+    // Product adjusts timeout facts and admits batch calls at this boundary.
+    // Queries and indexing must use that same admitted generation, including
+    // after fallback or degradation. Do not wrap the adjusted runtime again.
+    if (this.executor.provider === this.provider && this.executor.providerRuntime === this.providerRuntime) return;
+    const runtime = this.providerRuntime;
+    this.executor.attachProvider(this.provider, runtime);
+    // Search keeps the native batch operation; only the executor owns the
+    // guarded wrapper. Reusing that wrapper here would nest admission on each
+    // prepare while obscuring the native provider's batch identity.
+    this.providerRuntime = runtime?.batchEmbed
+      ? { ...this.executor.providerRuntime, batchEmbed: runtime.batchEmbed }
+      : this.executor.providerRuntime;
   }
   prepareLocalProvider() { return this.prepareNativeProvider(); }
   async prepareNativeProvider() {
@@ -81,21 +95,21 @@ class MemoryIndexSearch extends core.MemorySearchOrchestration {
       this.markEmbeddingBootstrapFailure(error);
     }
     this.assertCurrent();
-    this.executor.attachProvider(this.provider, this.providerRuntime);
+    this.attachExecutorProvider();
     this.index.embeddingFailure = this.provider ? null : "MEMORY_EMBEDDING_UNAVAILABLE";
   }
   async activateFallbackProvider(reason) {
     try { return await super.activateFallbackProvider(reason); }
     finally {
       if (this.index.usesNativeProvider(this.settings) && !this.executor.closed) {
-        this.executor.attachProvider(this.provider, this.providerRuntime);
+        this.attachExecutorProvider();
         this.index.configurePublication(this.settings, this.stamp);
       }
     }
   }
   markLocalEmbeddingProviderDegraded(error) {
     super.markLocalEmbeddingProviderDegraded(error);
-    if (this.index.usesNativeProvider(this.settings)) this.executor.attachProvider(this.provider, this.providerRuntime);
+    if (this.index.usesNativeProvider(this.settings)) this.attachExecutorProvider();
   }
 
   assertCurrent() {

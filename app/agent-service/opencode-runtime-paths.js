@@ -8,7 +8,6 @@ const { validRuntimeProfileId } = require("./runtime-adapter");
 const { serviceError } = require("./security");
 
 const OPENCODE_RUNTIME = "opencode";
-const MIN_OPENCODE_VERSION = Object.freeze([1, 18, 32]);
 const VALID_APPROVAL_POLICIES = new Set(["untrusted", "on-failure", "on-request", "never"]);
 const VALID_SANDBOXES = new Set(["read-only", "workspace-write", "danger-full-access"]);
 
@@ -42,18 +41,6 @@ function parseOpenCodeVersion(value) {
   const match = typeof value === "string" && value.length <= 1024
     ? value.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/u) : null;
   return match ? match.slice(1).map(Number) : null;
-}
-
-function supportsOpenCodeVersion(value) {
-  const version = Array.isArray(value) ? value : parseOpenCodeVersion(value);
-  if (!version || version.length !== 3 || !version.every(Number.isSafeInteger)) return false;
-  // New major releases still have to pass the private HTTP/OpenAPI and
-  // effective-permission handshake; the version number alone is not a ceiling.
-  for (let i = 0; i < 3; i += 1) {
-    if (version[i] > MIN_OPENCODE_VERSION[i]) return true;
-    if (version[i] < MIN_OPENCODE_VERSION[i]) return false;
-  }
-  return true;
 }
 
 function normalizeOpenCodeWorkspace(value) {
@@ -93,4 +80,4 @@ function assertOpenCodeProfileId(value) {
 
 module.exports = { OPENCODE_RUNTIME, assertOpenCodeProfileId, normalizeOpenCodePermissionPolicy,
   normalizeOpenCodeWorkspace, openCodeWorkspaceShardId, parseOpenCodeVersion,
-  resolveOpenCodeBinary, supportsOpenCodeVersion };
+  resolveOpenCodeBinary };

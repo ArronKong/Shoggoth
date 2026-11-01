@@ -26,20 +26,18 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parsePackagedSmokeOptions } from "./shoggoth-packaged-smoke-options.cjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), "..");
 const configuredArtifactRoot = process.env.SHOGGOTH_SMOKE_DIST_DIR;
-if (configuredArtifactRoot !== undefined
-  && (!path.isAbsolute(configuredArtifactRoot)
-    || configuredArtifactRoot.includes("\0")
-    || !configuredArtifactRoot.isWellFormed())) {
-  throw new Error("SHOGGOTH_SMOKE_DIST_DIR must be a well-formed absolute path");
-}
+const cli = parsePackagedSmokeOptions(process.argv.slice(2), { artifactRoot: configuredArtifactRoot });
 const ARTIFACT_ROOT = configuredArtifactRoot === undefined
   ? path.join(REPO_ROOT, "dist")
   : path.normalize(configuredArtifactRoot);
 const require = createRequire(import.meta.url);
+const { SERVICE_PROTOCOL_VERSION: EXPECTED_SERVICE_PROTOCOL_VERSION } = require(path.join(REPO_ROOT, "app/agent-service/service-protocol-version.js"));
+assert.equal(Number.isSafeInteger(EXPECTED_SERVICE_PROTOCOL_VERSION) && EXPECTED_SERVICE_PROTOCOL_VERSION > 0, true);
 const { extractFile: extractAsarFile, listPackage: listAsarFiles } = require("@electron/asar");
 const yauzl = require("yauzl");
 const OUTPUT_LIMIT = 512 * 1024;
@@ -159,8 +157,8 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
   const agentServiceServerPath = path.join(
     resourcesPath, "app.asar", "app", "agent-service", "server.js",
   );
-  const pluginMcpClientPath = path.join(
-    resourcesPath, "app.asar", "app", "agent-service", "plugin-mcp-client.js",
+  const standaloneMcpClientPath = path.join(
+    resourcesPath, "app.asar", "app", "agent-service", "native-mcp-client-manager.js",
   );
   const scratchPath = await mkdtemp(path.join(tmpdir(), "shoggoth-run-as-node-"));
   await chmod(scratchPath, 0o700);
@@ -177,7 +175,7 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
         require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/bootstrap-role.js"))})
           .assertServiceRoleIsolation();
         const agentServiceServer = require(${JSON.stringify(agentServiceServerPath)});
-        const pluginMcpClient = require(${JSON.stringify(pluginMcpClientPath)});
+        const standaloneMcpClient = require(${JSON.stringify(standaloneMcpClientPath)});
         const { resolveServicePaths } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/paths.js"))});
         const { createRuntimeCliAuth } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/runtime-cli-auth.js"))});
         const { normalizeConfig, projectNativeRuntimeConfig, projectNativeChatUiConfig } = require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/core/config-store.js"))});
@@ -243,8 +241,8 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
           agentServiceStartType: typeof agentService.startAgentServiceProcess,
           agentServiceServerResolved: require.resolve(${JSON.stringify(agentServiceServerPath)}),
           agentServiceCreateType: typeof agentServiceServer.createAgentService,
-          pluginMcpClientResolved: require.resolve(${JSON.stringify(pluginMcpClientPath)}),
-          pluginMcpClientType: typeof pluginMcpClient.PluginMcpClient,
+          standaloneMcpClientResolved: require.resolve(${JSON.stringify(standaloneMcpClientPath)}),
+          standaloneMcpClientType: typeof standaloneMcpClient.NativeMcpClientManager,
           initialRuntimeConfig: projectNativeRuntimeConfig(normalizeConfig({})),
           enabledRuntimeAccountIds: require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/agent-service/runtime-account.js"))}).DEFAULT_RUNTIME_ACCOUNTS
             .filter(account => require(${JSON.stringify(path.join(resourcesPath, "app.asar/app/runtime-availability.js"))}).isRuntimeAvailable(account.runtime))
@@ -294,9 +292,9 @@ async function verifyPackagedRunAsNode(appPath, electronExecutable) {
     assert.equal(result.agentServiceStartType, "function");
     assert.equal(result.agentServiceServerResolved, agentServiceServerPath);
     assert.equal(result.agentServiceCreateType, "function");
-    assert.equal(result.pluginMcpClientResolved, pluginMcpClientPath);
-    assert.equal(result.pluginMcpClientType, "function",
-      "packaged plugin MCP client and its transitive SDK modules must load");
+    assert.equal(result.standaloneMcpClientResolved, standaloneMcpClientPath);
+    assert.equal(result.standaloneMcpClientType, "function",
+      "packaged independent MCP client must load");
     assert.deepEqual(result.initialRuntimeConfig, { revision: 0, maxActive: 32, startupConcurrency: 8,
       flags: { runtimeAdmissionV1: true, runtimeContextLifecycleV1: true,
         runtimeMultiBinding: true, runtimeConversationHandoff: true } },
@@ -348,13 +346,12 @@ async function verifyPackagedService(appPath) {
         encryptString: value => Buffer.from(value), decryptString: value => Buffer.from(value).toString() };
       const ipc = async (method, params) => {
         const startedAt = performance.now();
-        // Match the actual facade's 5s ordinary/30s local plugin deadlines,
+        // Match the actual facade's ordinary and connector deadlines,
         // rather than the low-level client's 2s convenience default. This
         // persistence probe separately bounds cold readiness at 10s; it is
         // not an assertion of the GUI's 1s status probe/retry latency.
         const timeoutMs = method === "service.status" ? 10_000
-          : ["plugins.install.preview", "plugins.install", "plugins.installations.set"].includes(method)
-            ? 30_000 : 5_000;
+          : method.startsWith("connector.") ? 95_000 : 5_000;
         try {
           const result = await requestService(paths, { id: crypto.randomUUID(),
             token: readClientToken(paths), version: PROTOCOL_VERSION, method, params }, { timeoutMs });
@@ -367,9 +364,14 @@ async function verifyPackagedService(appPath) {
           throw error;
         }
       };
+      let mcpProbe;
       (async () => {
-        assert.equal(PROTOCOL_VERSION, 13, "packaged Service v13 Cron output DTO contract is required");
-        assert.equal(STORE_SCHEMA_VERSION, 15, "packaged current Product15 reader is required");
+        assert.equal(PROTOCOL_VERSION, ${JSON.stringify(EXPECTED_SERVICE_PROTOCOL_VERSION)}, "packaged Service protocol must match the fixed source contract");
+        const { PROFILE_SERVICE_METHODS } = require(path.join(appRoot, "agent-service/profile-service-protocol.js"));
+        for (const method of ["profile.capabilities.read", "profile.binding.capabilities.read"]) {
+          assert.equal(PROFILE_SERVICE_METHODS.includes(method), true, "packaged v15 capability read method: " + method);
+        }
+        assert.equal(STORE_SCHEMA_VERSION, 16, "packaged current Product16 reader is required");
         assert.equal(CHAT_SESSION_STORE_VERSION, 8, "packaged Chat8 reader is required");
         assert.equal(TOKEN_USAGE_STORE_VERSION, 2, "packaged usage attribution reader is required");
         assert.equal(validateDataAuthorityManifest(DATA_AUTHORITY_MANIFEST), true);
@@ -378,8 +380,7 @@ async function verifyPackagedService(appPath) {
         assert.equal(DATA_AUTHORITY_MANIFEST.stores.tokenUsage.schemaVersion, TOKEN_USAGE_STORE_VERSION);
         let session;
         let idea;
-        let pluginInstallation;
-        let pluginAuthority;
+        let mcpConnectorId;
         let nativeMemoryOwnerId;
         let packagedMemoryId;
         let packagedUiMemoryId;
@@ -388,14 +389,6 @@ async function verifyPackagedService(appPath) {
         const sourceText = "Please remember: Packaged memory survives restart";
         const memoryList = status => ipc("harness.memory.list", {
           profileId, status, scope: null, cursor: 0, limit: 20 });
-        const pluginSourcePath = path.join(root, "plugin-source");
-        fs.mkdirSync(path.join(pluginSourcePath, "skills/fixture"), { recursive: true });
-        fs.writeFileSync(path.join(pluginSourcePath, "plugin.json"), JSON.stringify({
-          $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-          name: "packaged-fixture", description: "Local packaged startup fixture",
-        }));
-        fs.writeFileSync(path.join(pluginSourcePath, "skills/fixture/SKILL.md"),
-          "---\\nname: fixture\\ndescription: Local packaged startup regression\\n---\\nRead the local fixture.\\n");
         const image = Buffer.alloc(CHUNK_BYTES + 31, 42);
         Buffer.from("89504e470d0a1a0a", "hex").copy(image);
         const voice = Buffer.alloc(80); voice.write("RIFF"); voice.write("WAVE", 8);
@@ -403,6 +396,18 @@ async function verifyPackagedService(appPath) {
           { data: image, attachment: { id: crypto.randomUUID(), name: "packaged-note.png", mimeType: "image/png", size: image.length } },
           { data: voice, attachment: { id: crypto.randomUUID(), name: "packaged-voice.wav", mimeType: "audio/wav", size: voice.length } },
         ];
+        mcpProbe = require("node:http").createServer((req,res) => {
+          if(req.method!=="POST"){res.writeHead(405);res.end();return;}
+          let raw="";req.on("data",chunk=>raw+=chunk);req.on("end",()=>{
+            const msg=JSON.parse(raw||"{}");if(!Object.hasOwn(msg,"id")){res.writeHead(202);res.end();return;}
+            const result=msg.method==="initialize"?{protocolVersion:"2025-03-26",capabilities:{tools:{}},serverInfo:{name:"packaged-probe",version:"1.0.0"}}
+              :msg.method==="tools/list"?{tools:[{name:"echo",description:"Package fixture echo",inputSchema:{type:"object",properties:{value:{type:"string"}}}}]}
+              :{content:[{type:"text",text:msg.params.arguments.value}]};
+            res.writeHead(200,{"content-type":"application/json"});res.end(JSON.stringify({jsonrpc:"2.0",id:msg.id,result}));
+          });
+        });
+        await new Promise(resolve=>mcpProbe.listen(0,"127.0.0.1",resolve));
+        const mcpProbeUrl="http://127.0.0.1:"+mcpProbe.address().port+"/mcp";
         for (let generation = 0; generation < 3; generation++) {
           const service = createAgentService({ paths, safeStorage, prewarmMcpAuth: true,
             packaged: true, resourcesPath: ${JSON.stringify(resourcesPath)}, parentEnv: {},
@@ -427,27 +432,26 @@ async function verifyPackagedService(appPath) {
               await new Promise(resolve => setTimeout(resolve, 20));
             }
             assert.equal(status.healthy, true);
-            assert.equal(status.productSchemaVersion, 15);
+            assert.equal(status.productSchemaVersion, STORE_SCHEMA_VERSION);
             assert.equal(status.pendingCommandsLocked, false);
             assert.equal(status.mcpCredentialsLocked, false);
-            assert.ok(service.pluginStore, "default packaged Service must open its plugin database");
-            const rawLibrary = await ipc("plugins.bundled.list", {});
-            const desktopLibrary = await new ShoggothBackend({ paths }).listBundledPlugins();
-            assert.deepEqual(desktopLibrary, rawLibrary,
-              "every bundled plugin must pass the packaged desktop response validator");
-            if (generation === 0) {
-              const source = { kind: "directory", path: pluginSourcePath };
-              const preview = await ipc("plugins.install.preview", { source });
-              assert.equal(preview.installable, true);
-              const result = await ipc("plugins.install", { source, previewDigest: preview.previewDigest,
-                expectedRevision: preview.expectedRevision, operationId: "packaged-default-plugin" });
-              pluginInstallation = result.installation;
-              pluginAuthority = service.pluginStore.getAuthorityIncarnation();
-            }
-            const plugins = await ipc("plugins.capabilities.list", { cursor: 0, limit: 10, catalogRevision: null });
-            assert.deepEqual(plugins.items.map(item => item.installationId), [pluginInstallation.installationId]);
-            assert.equal(service.pluginStore.getAuthorityIncarnation(), pluginAuthority,
-              "plugin authority survives read-only startup preflight and Service restart");
+            assert.equal(Object.hasOwn(service, "pluginStore"), false);
+            assert.equal(fs.existsSync(paths.pluginCatalogPath), false, "a fresh connector App never creates a retired catalog");
+            assert.equal(service.connectorRuntime,null,"retired sidecar is never constructed");
+            assert.equal(fs.existsSync(path.join(${JSON.stringify(resourcesPath)},"open-connector")),false);
+            await assert.rejects(ipc("connector.apps.list",{q:"github",limit:10}),{code:"OPEN_CONNECTOR_RETIRED"});
+            const installed=await ipc("connector.mcp.list",{});
+            if(generation===0){
+              const added=await ipc("connector.mcp.add",{source:{kind:"custom"},name:"Packaged MCP fixture",
+                option:{kind:"remote",protocol:"streamable-http",url:mcpProbeUrl},expectedRevision:installed.revision});
+              assert.equal(added.server.status,"ready");mcpConnectorId=added.server.id;
+            }else assert.ok(installed.servers.some(server=>server.id===mcpConnectorId),"MCP connector persists across actual Service restart");
+            const checked=await ipc("connector.mcp.verify",{id:mcpConnectorId});assert.equal(checked.server.lastCheck.toolCount,1);
+            const echoed=await service.nativeMcpClientManager.callTool(mcpConnectorId,"echo",{value:"packaged-mcp-value"});
+            assert.equal(echoed.content[0].text,"packaged-mcp-value");
+            assert.equal(fs.existsSync(path.join(paths.connectorsDir,"runtime-child.json")),false);
+            process.stdout.write("PACKAGED_MCP_CONNECTOR_OK "+generation+String.fromCharCode(10));
+            await assert.rejects(ipc("plugins.install", {}), { code: "PLUGIN_PLATFORM_RETIRED" });
             assert.ok(service.productStore.listAgentProfiles().every(profile => profile.backendId === "shoggoth"),
               "packaged native Profiles share the current shoggoth owner");
             const profile = service.productStore.getAgentProfile(profileId);
@@ -586,10 +590,112 @@ async function verifyPackagedService(appPath) {
             }
             const search = await ipc("inspiration.list", { query: "SQLite", filter: "all", cursor: null, limit: 10 });
             assert.deepEqual(search.items.map(item => item.id), [idea.id]);
-          } finally { await service.stop({ notify: false }); }
+          } finally {
+            await service.stop({ notify: false });
+            assert.equal(fs.existsSync(path.join(paths.connectorsDir,"runtime-child.json")),false);
+
+          }
+        }
+        // A second, independent root proves an actual packaged upgrade rather
+        // than treating the fresh three-generation path as migration evidence.
+        const upgradeRoot = path.join(root, "upgrade");
+        fs.mkdirSync(upgradeRoot, { mode: 0o700 });
+        const upgradePaths = resolveServicePaths({ trustedRoot: upgradeRoot, stateRoot: path.join(upgradeRoot, "state"),
+          profileRoot: path.join(upgradeRoot, "profiles"), cacheRoot: path.join(upgradeRoot, "cache") });
+        const legacy = { "plugins/catalog.sqlite": "opaque retired catalog", "plugins/catalog.sqlite-wal": "opaque WAL",
+          "plugins/packages/previous/manifest.json": "opaque retired package", "plugins/active-memory/transcripts/kept.jsonl": "independent retained memory" };
+        for (const [relative, text] of Object.entries(legacy)) {
+          const file = path.join(upgradePaths.stateDir, relative);
+          fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(file, text, { mode: 0o600 });
+        }
+        const legacyOC = {
+          "access-v1.json": Buffer.from("opaque retired account data; intentionally not JSON"),
+          "external-selection-v1.sqlite": Buffer.from([0, 255, 13, 10, 7]),
+          "external-selection-v1.sqlite-wal": Buffer.from("opaque old selection WAL"),
+          "external-selection-v1.sqlite-shm": Buffer.from("opaque old selection SHM"),
+          "runtime-version.json": Buffer.from("opaque old runtime version; intentionally not JSON"),
+          "runtime/connect.sqlite": Buffer.from([0, 1, 254, 255, 42]),
+          "runtime/nested/kept.bin": Buffer.from([255, 254, 253, 0]),
+        };
+        const ocHashes = new Map();
+        for (const [relative, bytes] of Object.entries(legacyOC)) {
+          const file = path.join(upgradePaths.connectorsDir, relative);
+          fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(file, bytes, { mode: 0o600 });
+          ocHashes.set(relative, crypto.createHash("sha256").update(bytes).digest("hex"));
+        }
+        const assertOcBytesPreserved = () => {
+          for (const [relative, bytes] of Object.entries(legacyOC)) {
+            const actual = fs.readFileSync(path.join(upgradePaths.connectorsDir, relative));
+            assert.deepEqual(actual, bytes, "retired OpenConnector data stays byte-identical: " + relative);
+            assert.equal(crypto.createHash("sha256").update(actual).digest("hex"), ocHashes.get(relative));
+          }
+        };
+        const upgradeEmbeddingChildren = new Set();
+        const assertNoConnectorChildren = (service, { stopped = false } = {}) => {
+          assert.equal(service.connectorRuntime, null, "upgrade must never construct the retired sidecar");
+          assert.equal(service.nativeMcpClientManager.clients.size, 0, "opaque old registrations never become MCP clients");
+          assert.equal(fs.existsSync(path.join(upgradePaths.connectorsDir, "runtime-child.json")), false);
+          const liveChildren = process._getActiveHandles().filter(handle => handle.constructor?.name === "ChildProcess"
+            && handle.exitCode === null && handle.signalCode === null);
+          if (stopped) {
+            assert.equal(liveChildren.length, 0, "Service stop reaps all upgrade children, including its owned embedding worker");
+            for (const child of upgradeEmbeddingChildren) assert.ok(child.exitCode !== null || child.signalCode !== null,
+              "the exact observed embedding child has exited");
+            return;
+          }
+          // Packaged native recall owns one E5 worker. Permit only the exact
+          // Service-owned child with the exact bundled script and executable;
+          // unrelated children, retired sidecars and MCP clients still fail.
+          for (const child of liveChildren) {
+            assert.equal(child, service.nativeMemorySemanticService.embedding.child,
+              "the only permitted upgrade child is this Service's owned embedding worker");
+            assert.equal(child.spawnfile, process.execPath);
+            assert.ok(child.spawnargs.includes(path.join(appRoot, "agent-service", "embedding-worker.cjs")));
+            upgradeEmbeddingChildren.add(child);
+          }
+        };
+        let ocReceiptBytes;
+        for (let upgradeGeneration = 0; upgradeGeneration < 2; upgradeGeneration++) {
+          const upgraded = createAgentService({ paths: upgradePaths, safeStorage, prewarmMcpAuth: false,
+            packaged: true, resourcesPath: ${JSON.stringify(resourcesPath)}, parentEnv: {}, runtimeStorageHomedir: upgradeRoot,
+            version: "packaged-connector-upgrade", memoryCoreConfig: { memory: { search: { provider: "none" } } } });
+          try {
+            await upgraded.start();
+            assertNoConnectorChildren(upgraded); assertOcBytesPreserved();
+            const receipt = JSON.parse(fs.readFileSync(path.join(upgradePaths.connectorsDir, "legacy-platform-retired-v1.json"), "utf8"));
+            assert.equal(receipt.version, 2); assert.equal(receipt.legacyExecution, false); assert.ok(receipt.upgradeSnapshot);
+            const snapshot = require(path.join(appRoot, "agent-service/upgrade-snapshot.js")).verifyUpgradeSnapshot({
+              paths: upgradePaths, generationId: receipt.upgradeSnapshot.generationId });
+            assert.equal(snapshot.manifest.authorityRootDigest, receipt.upgradeSnapshot.rootDigest);
+            // The original plugin snapshot contract remains unchanged. Old
+            // OpenConnector runtime data is preserved locally, never copied
+            // back into a new authority snapshot or opened as executable data.
+            for (const [relative, text] of Object.entries(legacy)) {
+              assert.equal(fs.readFileSync(path.join(upgradePaths.stateDir, relative), "utf8"), text);
+              assert.equal(fs.readFileSync(path.join(snapshot.backupPath, "payload", relative), "utf8"), text);
+            }
+            const receiptPath = path.join(upgradePaths.connectorsDir, "open-connector-retired-v1.json"), currentReceiptBytes = fs.readFileSync(receiptPath);
+            const ocReceipt = JSON.parse(currentReceiptBytes.toString("utf8"));
+            assert.equal(ocReceipt.state, "retired"); assert.equal(ocReceipt.legacyDataPreserved, true);
+            assert.equal(ocReceipt.credentialEntriesPreserved, true);
+            assert.equal(ocReceipt.files.length, Object.keys(legacyOC).length);
+            for (const [relative, bytes] of Object.entries(legacyOC)) {
+              const entry = ocReceipt.files.find(file => file.path === relative);
+              assert.ok(entry, "retirement receipt hashes every old OpenConnector file: " + relative);
+              assert.equal(entry.bytes, bytes.length); assert.equal(entry.sha256, ocHashes.get(relative));
+            }
+            if (ocReceiptBytes) assert.deepEqual(currentReceiptBytes, ocReceiptBytes, "restart does not rewrite the retirement receipt");
+            else ocReceiptBytes = currentReceiptBytes;
+            await assert.rejects(requestService(upgradePaths,{id:crypto.randomUUID(),token:readClientToken(upgradePaths),
+              version:PROTOCOL_VERSION,method:"connector.apps.list",params:{q:"github",limit:10}},{timeoutMs:95000}),{code:"OPEN_CONNECTOR_RETIRED"});
+          } finally {
+            await upgraded.stop({notify:false});
+            assertNoConnectorChildren(upgraded, { stopped: true }); assertOcBytesPreserved();
+          }
+          process.stdout.write("PACKAGED_CONNECTOR_UPGRADE_CLOSED " + upgradeGeneration + "\\n");
         }
         process.stdout.write("PACKAGED_SERVICE_PERSISTENCE_OK");
-      })().catch(error => { process.stderr.write(String(error?.stack || error)); process.exitCode = 1; });
+      })().catch(error => { process.stderr.write(String(error?.stack || error)); process.exitCode = 1; }).finally(()=>mcpProbe?.close());
     `], {
       cwd: scratchPath,
       env: { ELECTRON_RUN_AS_NODE: "1", HOME: scratchPath, PATH: "/usr/bin:/bin", TMPDIR: scratchPath },
@@ -597,7 +703,8 @@ async function verifyPackagedService(appPath) {
     assert.equal(probe.code, 0, `packaged Agent Service startup/persistence failed: ${probe.stderr}`);
     assert.ok(probe.stdout.includes("PACKAGED_SERVICE_PERSISTENCE_OK"));
     for (const line of probe.stdout.split("\n")) {
-      if (line.startsWith("SLOW_IPC ")) console.log(`[shoggoth-packaged-runtime-smoke] ${line}`);
+      if (line.startsWith("SLOW_IPC ") || line.startsWith("PACKAGED_CONNECTOR_CHILD_CLOSED ")
+        || line.startsWith("PACKAGED_CONNECTOR_UPGRADE_CLOSED ") || line.startsWith("PACKAGED_CONNECTOR_LOCAL_ACTION_OK")) console.log(`[shoggoth-packaged-runtime-smoke] ${line}`);
     }
   } finally {
     await rm(scratchPath, { recursive: true, force: true });
@@ -806,18 +913,8 @@ async function verifyPackagedCua(appPath, archivePath, electronExecutable, expec
   ]) await access(path.join(resourcesPath, "legal", legalName));
   const sbom = JSON.parse(await readFile(path.join(resourcesPath, "legal", "release-sbom.cdx.json"), "utf8"));
   assert.equal(sbom.bomFormat, "CycloneDX");
-  const bundledCatalog = JSON.parse(await readFile(path.join(resourcesPath, "bundled-plugins", "catalog.json"), "utf8"));
-  const bundledEntries = sbom.components.filter((component) =>
-    component["bom-ref"].startsWith("urn:shoggoth:bundled-plugin:"));
-  assert.equal(bundledEntries.length, bundledCatalog.packages.length);
-  for (const entry of bundledCatalog.packages) {
-    const component = bundledEntries.find((candidate) =>
-      candidate["bom-ref"] === `urn:shoggoth:bundled-plugin:${entry.id}`);
-    assert.equal(component?.properties?.find((property) =>
-      property.name === "shoggoth:source-digest-sha256")?.value, entry.sourceDigest);
-    assert.equal(component?.properties?.find((property) =>
-      property.name === "shoggoth:redistribution-review")?.value, "unverified");
-  }
+  assert.equal(sbom.components.some(component => component.name === "@oomol-lab/open-connector"), false);
+  assert.equal(sbom.components.some(component => component.name === "gogcli" || component["bom-ref"].startsWith("urn:shoggoth:bundled-plugin:")), false);
   assert.equal(sbom.components.some((component) => (
     component.name === `@trycua/cua-driver-darwin-${expected.arch}`
   )), true);
@@ -897,11 +994,11 @@ async function verifySourceContract(onlyArch = null) {
   assert.equal(packageJson.repository?.url, "https://github.com/ArronKong/Shoggoth.git");
   assert.equal(
     packageJson.scripts?.dist,
-    "node scripts/shoggoth-host-capability-coverage-unit.cjs && node scripts/release-package-checks.cjs preflight && npm run build:manage && npm run prepare:runtimes && npm run release:metadata && electron-builder --mac",
-    "dist must check Electron host capabilities, pass the release preflight and build the Manage UI before packaging",
+    "node scripts/shoggoth-host-capability-coverage-unit.cjs && npm run build:manage && npm run prepare:runtimes && node scripts/release-package-checks.cjs preflight && npm run release:metadata && electron-builder --mac",
+    "dist must check capabilities, build the UI/runtimes, then validate complete inputs before packaging",
   );
-  assert.match(packageJson.scripts?.["dist:arm64"] || "", /^node scripts\/shoggoth-host-capability-coverage-unit\.cjs && node scripts\/release-package-checks\.cjs preflight &&/u,
-    "dist:arm64 must check Electron host capabilities before packaging");
+  assert.match(packageJson.scripts?.["dist:arm64"] || "", /^node scripts\/shoggoth-host-capability-coverage-unit\.cjs && npm run build:manage && npm run prepare:runtimes:arm64 && node scripts\/release-package-checks\.cjs preflight &&/u,
+    "dist:arm64 must validate prepared UI and runtime inputs before packaging");
   const agentService = require(path.join(REPO_ROOT, "app", "agent-service.js"));
   const agentServiceServer = require(path.join(REPO_ROOT, "app", "agent-service", "server.js"));
   assert.equal(typeof agentService.startAgentServiceProcess, "function");
@@ -1261,15 +1358,8 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   assert.deepEqual(JSON.parse(require("node:child_process").execFileSync("/usr/bin/plutil", ["-extract",
     "CFBundleLocalizations", "json", "-o", "-", path.join(appPath, "Contents", "Info.plist")], { encoding: "utf8" })),
   ["en", "zh_CN"], "the packaged App declares its UI languages");
-  const bundledRoot = path.join(appPath, "Contents", "Resources", "bundled-plugins");
-  const { BundledPluginCatalog } = require("../app/core/bundled-plugin-catalog.js");
-  const bundledCatalog = new BundledPluginCatalog(bundledRoot);
-  const sourceCatalog = new BundledPluginCatalog(path.join(REPO_ROOT, "resources", "bundled-plugins"));
-  assert.equal(bundledCatalog.batchDigest, sourceCatalog.batchDigest, "packaged bundled plugin batch differs from source");
-  assert.deepEqual([...bundledCatalog.entries.values()], [...sourceCatalog.entries.values()],
-    "packaged bundled plugin catalog differs from the reviewed source");
-  for (const item of bundledCatalog.entries.values()) bundledCatalog.assertCurrent(item.id);
-  console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: bundled-plugin-integrity`);
+  await require("./connector-package-checks.cjs").checkPackagedConnector(appPath, { arch: expected.arch });
+  console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: retired-connector-absence`);
   const electronExecutable = path.join(appPath, "Contents", "MacOS", "Shoggoth");
   require("./adhoc-sign.cjs").verifyPackagedSqlite(appPath);
   await verifyPackagedRunAsNode(appPath, electronExecutable);
@@ -1470,7 +1560,7 @@ async function extractVerifiedZip(zipPath, destination, referenceAppPath) {
 }
 
 async function verifyZipArtifact(zipPath, expected) {
-  // The bundled plugin catalog adds thousands of entries. Quiet integrity
+  // Quiet integrity
   // output stays bounded; extractVerifiedZip validates every member name and
   // payload while comparing the complete inventory with the built App.
   const checked = await runCaptured("/usr/bin/unzip", ["-tq", zipPath], { timeoutMs: 120_000 });
@@ -1506,30 +1596,34 @@ async function verifyPackagedSpike(onlyArch = null) {
   }
 }
 
-const requestedArch = ["--spike-arm64", "--app-arm64"].includes(process.argv[2]) ? "arm64"
-  : process.argv[2] === "--spike-x64" ? "x64" : null;
-if (process.argv[2] === "--run-as-node-app") {
-  if (process.argv.length !== 4 || !path.isAbsolute(process.argv[3])) {
+const { requestedArch } = cli;
+if (cli.mode === "--run-as-node-app") {
+  if (!cli.appPath || !path.isAbsolute(cli.appPath)) {
     throw new Error("--run-as-node-app requires one absolute App path");
   }
-  await verifyPackagedRunAsNode(process.argv[3], path.join(process.argv[3], "Contents", "MacOS", "Shoggoth"));
+  await verifyPackagedRunAsNode(cli.appPath, path.join(cli.appPath, "Contents", "MacOS", "Shoggoth"));
   console.log("[shoggoth-packaged-runtime-smoke] PASS packaged Electron node:sqlite FTS5 and RunAsNode");
   process.exit(0);
 }
-if (process.argv[2] === "--service-app") {
-  if (process.argv.length !== 4 || !path.isAbsolute(process.argv[3])) {
+if (cli.mode === "--service-app") {
+  if (!cli.appPath || !path.isAbsolute(cli.appPath)) {
     throw new Error("--service-app requires one absolute App path");
   }
-  await verifyPackagedService(process.argv[3]);
+  await verifyPackagedService(cli.appPath);
   console.log("[shoggoth-packaged-runtime-smoke] PASS Agent Service startup and persistence");
   process.exit(0);
 }
 await verifySourceContract(requestedArch);
-if (process.argv[2] === "--spike") await verifyPackagedSpike();
-else if (process.argv[2] === "--app-arm64") await verifyApp(path.join(ARTIFACT_ROOT, "mac-arm64", "Shoggoth.app"),
+if (cli.mode === "--spike") await verifyPackagedSpike();
+else if (cli.mode === "--app-arm64") await verifyApp(path.join(ARTIFACT_ROOT, "mac-arm64", "Shoggoth.app"),
   { arch: "arm64", target: "aarch64-apple-darwin", binaryArch: "arm64" }, process.arch === "arm64");
-else if (process.argv[2] === "--spike-arm64") await verifyPackagedSpike("arm64");
-else if (process.argv[2] === "--spike-x64") await verifyPackagedSpike("x64");
-else if (process.argv.length > 2) throw new Error(`unknown argument: ${process.argv[2]}`);
-console.log(`[shoggoth-packaged-runtime-smoke] PASS${process.argv[2] === "--app-arm64" ? " packaged App (directory only)"
-  : process.argv[2]?.startsWith("--spike") ? " packaged spike" : " source contract"}`);
+else if (cli.mode === "--zip-arm64") {
+  const expected = { appPath: path.join(ARTIFACT_ROOT, "mac-arm64", "Shoggoth.app"), arch: "arm64", target: "aarch64-apple-darwin", binaryArch: "arm64" };
+  await verifyZipArtifact(path.join(ARTIFACT_ROOT, `Shoggoth-${require(path.join(REPO_ROOT, "package.json")).version}-arm64-mac.zip`), expected);
+}
+else if (cli.mode === "--spike-arm64") await verifyPackagedSpike("arm64");
+else if (cli.mode === "--spike-x64") await verifyPackagedSpike("x64");
+else if (cli.mode !== null) throw new Error(`unknown argument: ${cli.mode}`);
+console.log(`[shoggoth-packaged-runtime-smoke] PASS${cli.mode === "--app-arm64" ? " packaged App (directory only)"
+  : cli.mode === "--zip-arm64" ? " packaged arm64 ZIP (CRC, complete extraction and actual App checks)"
+  : cli.mode?.startsWith("--spike") ? " packaged spike" : " source contract"}`);

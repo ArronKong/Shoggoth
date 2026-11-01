@@ -19,6 +19,17 @@ const { ProductMemorySessions } = require("./session-source.cjs");
 const { readPrivateFile } = require("../private-file");
 const { MemoryMaintenance } = require("./maintenance.cjs");
 const { SharedReadService } = require("./shared-read-service.cjs");
+const { RecallSignals } = require("./recall-signals.cjs");
+const { OwnMemoryProvenance } = require("./own-memory-provenance.cjs");
+
+// The own results a search actually delivered, carrying their original
+// relevance and provenance. Sharing fuses ranks into `score`, which must
+// never become promotion evidence.
+function deliveredOwnResults(ownResults, delivered) {
+  const key = result => `${result.source}\0${result.path}\0${result.startLine}\0${result.endLine}`;
+  const own = new Map(ownResults.map(result => [key(result), result]));
+  return delivered.filter(result => result.borrowed !== true).map(result => own.get(key(result))).filter(Boolean);
+}
 const { isBorrowedMemoryDerived, assertNoBorrowedMemoryWrite } = require("./borrowed-memory-provenance.cjs");
 const { ActiveMemory } = require("./active-memory.cjs");
 const { ActiveMemoryCommands } = require("./active-memory-commands.cjs");
@@ -32,11 +43,12 @@ const fail = (code, message) => { throw serviceError(code, message); };
 
 class ShoggothMemoryService {
   constructor({ paths, profiles, definitionStore, transcriptStore, chatSessionStore, candidateStore,
-    now = Date.now, randomUUID = crypto.randomUUID, getConfig = () => ({}), logger = console, remoteProviderResources, projectProviderMetadata, sharingConfig, resolveRun, initialization = "fresh" }) {
+    now = Date.now, randomUUID = crypto.randomUUID, getConfig = () => ({}), logger = console, remoteProviderResources, projectEmbeddingInput, projectProviderMetadata, sharingConfig, resolveRun, initialization = "fresh" }) {
     this.paths = paths; this.profiles = profiles; this.definitionStore = definitionStore;
     this.transcriptStore = transcriptStore; this.chatSessionStore = chatSessionStore;
     this.now = now; this.randomUUID = randomUUID; this.getConfig = getConfig; this.logger = logger;
     this.projectProviderMetadata = projectProviderMetadata; this.resolveRun = resolveRun;
+    this.projectEmbeddingInput = projectEmbeddingInput;
     this.owner = "shoggoth-memory-core"; this.opened = false; this.hosts = new Map(); this.blockedProfiles = new Set();
     this.searchScope = new AsyncLocalStorage(); this.sourceAuthority = new AsyncLocalStorage(); this.jobs = new Map();
     this.profileControllers = new Map();
@@ -44,7 +56,7 @@ class ShoggothMemoryService {
     this.remoteEmbeddingResources = this.createRemoteProviderResources();
     this.database = new MemoryDatabase({ paths, now });
     this.recallPolicy = new RecallPolicyStore({ paths, memoryStore: {}, transcriptStore, chatSessionStore,
-      now, randomUUID, strictSourceResolution: true });
+      now, randomUUID, strictSourceResolution: true, requireOwnMemoryProvenance: true });
     if (!["fresh", "migration"].includes(initialization)) fail("MEMORY_INITIALIZATION_INVALID", "记忆初始化方式无效");
     this.legacy = initialization === "migration" ? new LegacyMemoryReader({ paths, recallPolicy: this.recallPolicy, candidateStore,
       now, getRecall: () => this.conversationRecall }) : null;
@@ -57,6 +69,8 @@ class ShoggothMemoryService {
     this.sharing = new SharedReadService(this, { config: sharingConfig });
     this.maintenance = new MemoryMaintenance(this);
     this.activeMemory = new ActiveMemory(this);
+    this.recallSignals = new RecallSignals(this); this.signalCommits = new Set();
+    this.ownMemory = new OwnMemoryProvenance(this);
     this.activeMemoryCommands = new ActiveMemoryCommands(this);
     this.localEmbeddingHost = new MemoryLocalEmbeddingHost({ getConfig: id => this.config(id),
       assertCurrent: id => this.assertProfile(id) });
@@ -66,7 +80,12 @@ class ShoggothMemoryService {
     return new MemoryRemoteProviderResources({ getConfig: id => this.config(id), assertCurrent: id => {
       this.assertProfile(id);
       if (this.profileControllers.get(id)?.signal.aborted) fail("MEMORY_SCOPE_REVOKED", "助理记忆已停止");
-    }, resolveOwner: input.resolveOwner, secretStore: input.secretStore });
+    }, resolveOwner: input.resolveOwner, secretStore: input.secretStore,
+    projectInput: this.projectEmbeddingInput ? (profileId, value, options) => {
+      const query = this.searchScope.getStore();
+      return this.projectEmbeddingInput(profileId, value, { ...options,
+        sessionId: query?.profileId === profileId ? query.sessionId : undefined });
+    } : input.projectInput });
   }
   setSharingConfig(config) { this.sharing.setConfig(config); }
   borrowedMemoryDependenciesCurrent(profileId, sessionId, refs) { return this.sharing.dependenciesCurrent(profileId, sessionId, refs); }
@@ -79,7 +98,10 @@ class ShoggothMemoryService {
     const { e5Identity } = require("../e5-model-contract"), { E5_RUNTIME } = require("../e5-encoder");
     this.embedding = { identity: `intfloat/multilingual-e5-small:${e5Identity(E5_RUNTIME.onnx, E5_RUNTIME.tokenizer)}`, encode: async (text, mode) => {
       await service.embedding.start();
-      return service.embedding.request(mode === "query" ? "encode-query" : "encode-passage", { text }, { timeoutMs: 30_000 });
+      const vector = await service.embedding.request(mode === "query" ? "encode-query" : "encode-passage", { text }, { timeoutMs: mode === "query" ? 30_000 : 120_000 });
+      // Worker IPC preserves Float32Array; the native memory provider contract
+      // requires number[]. Leave dimension/finite-coordinate checks to the core.
+      return vector instanceof Float32Array ? Array.from(vector) : vector;
     } };
   }
   attach({ conversationRecall, complete, checkpointStore, resolveModelContext, prepareModelContext, getConfigProjection }) {
@@ -136,7 +158,7 @@ class ShoggothMemoryService {
     if (!this.opened || !this.profiles().some(profile => profile.id === id)) fail("MEMORY_SCOPE_REVOKED", "助理记忆已关闭或归属已变化");
     if (this.blockedProfiles.has(id)) fail("RECALL_POLICY_UNAVAILABLE", "此助理的撤回记录不可验证，记忆仍保留但暂不可读取");
     const authority = this.sourceAuthority.getStore();
-    if (authority?.profileId === id && authority.stamp !== this.sourcePolicyStamp(id)) fail("MEMORY_SOURCE_REVOKED", "整理期间原始会话或撤回策略已经变化");
+    if (authority?.profileId === id && authority.stamp !== this.sourceAuthorityStamp(id)) fail("MEMORY_SOURCE_REVOKED", "整理期间原始会话或撤回策略已经变化");
   }
   open(profileIds = []) {
     if (this.remoteEmbeddingResources.closed) this.remoteEmbeddingResources = this.createRemoteProviderResources();
@@ -157,6 +179,7 @@ class ShoggothMemoryService {
   }
   async close() {
     this.sharing.close();
+    this.ownMemory.close();
     this.opened = false;
     for (const controller of this.profileControllers.values()) controller.abort();
     const remoteClosing = Promise.resolve().then(() => this.remoteEmbeddingResources.close());
@@ -169,6 +192,7 @@ class ShoggothMemoryService {
       Promise.resolve().then(() => this.maintenance.close()),
       Promise.resolve().then(() => this.activeMemory.close()),
       Promise.allSettled([...this.jobs.values()]),
+      Promise.allSettled([...this.signalCommits]),
     ]);
     const resources = await Promise.allSettled([
       remoteClosing, Promise.resolve().then(() => this.localEmbeddingHost.close()),
@@ -186,6 +210,8 @@ class ShoggothMemoryService {
   }
   async stopProfile(profileId) {
     this.profileSignal(profileId); this.profileControllers.get(profileId).abort();
+    this.recallSignals.discardProfile(profileId);
+    this.ownMemory.stopProfile(profileId);
     await this.sharing.reconcileConfig();
     await Promise.allSettled([this.jobs.get(profileId),
       this.activeMemory.stopProfile(profileId),
@@ -446,13 +472,18 @@ class ShoggothMemoryService {
     const deadlineAt = performance.now() + 30_000;
     return this.sharing.withRequest(input, async scoped => {
       const policy = this.sharing.policy(scoped);
-      const own = await this.searchOwnMemory(policy.enabled && scoped.memoryScope !== "own" ? { ...scoped, record: false } : scoped);
-      return this.sharing.search({ ...scoped, deadlineAt }, own);
+      // Searches never count recalls themselves. The completed user turn
+      // commits the own results it actually delivered (RecallSignals).
+      const own = await this.searchOwnMemory({ ...scoped, record: false });
+      const result = await this.sharing.search({ ...scoped, deadlineAt }, own);
+      this.ownMemory.read(scoped, { results: deliveredOwnResults(own.results, result.results) });
+      if (scoped.record !== false) this.recallSignals.stage(scoped, deliveredOwnResults(own.results, result.results));
+      return result;
     });
   }
   async searchOwnMemory(input) {
     this.assertProfile(input.profileId); this.recallPolicy.assertReady(input.profileId);
-    const host = this.host(input.profileId), stamp = this.semanticStamp(input.profileId);
+    const host = this.host(input.profileId), stamp = this.authorityStamp(input.profileId);
     let results;
     try {
       results = await this.searchScope.run(input, () => host.searchIndex.search(input.query, {
@@ -463,10 +494,10 @@ class ShoggothMemoryService {
       // Native cache admission now notices source withdrawal before publication.
       // Preserve the public conflict contract for that earlier rejection.
       if (["MEMORY_SESSION_CHANGED", "MEMORY_SESSION_REVOKED"].includes(error.code)
-        && stamp !== this.semanticStamp(input.profileId)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
+        && stamp !== this.authorityStamp(input.profileId)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
       throw error;
     }
-    if (stamp !== this.semanticStamp(input.profileId)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
+    if (stamp !== this.authorityStamp(input.profileId)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
     const active = this.store.list(input.profileId, { status: "active" }), items = [], seen = new Set();
     let bytes = 0;
     for (const result of results) for (const item of active) {
@@ -497,6 +528,7 @@ class ShoggothMemoryService {
     if (Buffer.byteLength(text) > 24 * 1024) fail("MEMORY_RANGE_TOO_LARGE", "请缩小记忆读取行数");
     const items = this.store.list(input.profileId, { status: "active" }).filter(item => item.memoryPath === relative
       && item.startLine <= endLine && item.endLine >= from && this.visible(item, input));
+    this.ownMemory.read(input, { items, results: [{ ...result, source: "memory" }] });
     return { path: relative, text, from, lines: Math.max(0, endLine - from + 1), totalLines: lines.length,
       items, revision: this.store.getRevision(input.profileId), viewStatus: this.viewStatus(input.profileId) };
   }
@@ -543,6 +575,26 @@ class ShoggothMemoryService {
     this.transcriptStore?.getChangeRevision?.(profileId), this.sessionScopeStamp(profileId), this.config(profileId)]); }
   sourcePolicyStamp(profileId) { return JSON.stringify([this.recallPolicy.getRevision(profileId),
     this.transcriptStore?.getChangeRevision?.(profileId), this.sessionScopeStamp(profileId), this.profiles().find(profile => profile.id === profileId), this.config(profileId)]); }
+  // In-flight reads and same-turn recall reuse are revoked only by changes that
+  // can withdraw content already returned: rewriting or deleting a committed
+  // memory, recall policy, context exclusion or forgetting, session ownership
+  // or workspace, Profile settings and configuration. Additive writes (new
+  // memories, ordinary transcript appends, session timestamps) keep them
+  // valid. Caches keyed by semanticStamp still refresh on every change.
+  authorityStamp(profileId) {
+    return JSON.stringify([this.store.getRevisions(profileId).invalidationRevision, this.sourceAuthorityStamp(profileId)]);
+  }
+  // The source part alone. Dreaming checks this one, because its own report
+  // and promotion writes must not revoke the run that produces them.
+  sourceAuthorityStamp(profileId) {
+    const transcripts = this.transcriptStore;
+    return JSON.stringify([this.recallPolicy.getRevision(profileId),
+      typeof transcripts?.getInvalidationRevision === "function" ? transcripts.getInvalidationRevision(profileId) : transcripts?.getChangeRevision?.(profileId),
+      typeof this.chatSessionStore?.profileSessionsAuthorityRevision === "function" ? this.chatSessionStore.profileSessionsAuthorityRevision(profileId) : this.sessionScopeStamp(profileId),
+      // The whole Profile, as in sourcePolicyStamp: its fields are settings
+      // (Runtime Binding, account, model, permissions), never per-turn state.
+      this.profiles().find(profile => profile.id === profileId) ?? null, this.config(profileId)]);
+  }
   semanticDocuments() { return []; } // The upstream index owns memory embeddings.
   listShared() { return { items: [], truncated: false }; }
   findSharedItem() { return null; }
@@ -584,6 +636,7 @@ class ShoggothMemoryService {
     if (!["explicit", "imported", "inferred"].includes(input.classification) || typeof input.content !== "string" || !input.content.trim()) fail("MEMORY_INVALID", "记忆内容无效");
     if (hasSecret(input.content)) fail("MEMORY_SECRET_REJECTED", "记忆不能保存凭据");
     const check = () => {
+      input.assertCurrent?.();
       this.assertProfile(input.profileId);
       this.assertOwnedMemorySources(input);
       if (!this.recallPolicy.isSourceVisible(input.profileId, input.sourceRefs || [])
@@ -630,6 +683,7 @@ class ShoggothMemoryService {
     check(); return this.store.upsertMany(records, { expectedRevision, assertCurrent: check });
   }
   async delete(input) {
+    input.assertCurrent?.();
     this.assertProfile(input.profileId); this.recallPolicy.assertReady(input.profileId);
     const item = this.store.get(input.profileId, input.id); if (!item) return null;
     const all = this.store.list(input.profileId), ids = new Set([item.id]);
@@ -644,7 +698,8 @@ class ShoggothMemoryService {
     this.recallPolicy.recordReason({ profileId: input.profileId, item, relatedItems: lineage.filter(record => record.id !== item.id),
       reason: input.reason || "user_deleted", revocationSourceRefs: input.revocationSourceRefs || [],
       ...(input.operationId ? { operationId: input.operationId } : {}) });
-    await this.store.upsertMany(lineage.map(record => ({ ...record, status: "deleted", updatedAt: Math.max(record.updatedAt, this.now()) })));
+    await this.store.upsertMany(lineage.map(record => ({ ...record, status: "deleted", updatedAt: Math.max(record.updatedAt, this.now()) })),
+      { assertCurrent: input.assertCurrent });
     this.sharing.withdraw(input.profileId, lineage);
     await this.sharing.reconcileConfig();
     return this.store.get(input.profileId, item.id);
@@ -678,10 +733,21 @@ class ShoggothMemoryService {
   flushBeforeCompaction(input) { return this.maintenance.flush(input); }
   observeBeforeSend(input) { return this.maintenance.flush({ ...input, preflight: true }); }
   prepareActiveMemory(input) { return this.activeMemory.prepare(input); }
-  takeActiveMemory(input) { return this.activeMemory.take(input); }
-  async finishActiveMemoryRun(run) {
-    this.sharing.endRun(run);
-    return this.activeMemory.endRun(run);
+  takeActiveMemory(input) {
+    const result = this.activeMemory.take(input);
+    if (result?.content) this.ownMemory.read({ profileId: input.profile.id, run: input.run }, { results: result.evidence || [] });
+    return result;
+  }
+  async finishActiveMemoryRun(run, status = run?.status) {
+    // The commit must see the run's borrowing before the broker forgets it.
+    // A failed commit only loses that turn's signals and never blocks cleanup.
+    const commit = this.recallSignals.commit(run, status).catch(() => { this.logger.warn?.("memory: recall signal commit failed"); });
+    this.signalCommits.add(commit); void commit.finally(() => this.signalCommits.delete(commit));
+    try { await commit; } finally {
+      this.ownMemory.end(run);
+      this.sharing.endRun(run);
+      await this.activeMemory.endRun(run);
+    }
   }
   config(profileId) {
     const raw = this.getConfig();
@@ -695,7 +761,7 @@ class ShoggothMemoryService {
     if (this.jobs.has(profileId)) return this.jobs.get(profileId);
     signal = AbortSignal.any([this.maintenance.controller.signal, this.profileSignal(profileId), ...(signal ? [signal] : [])]);
     const host = this.host(profileId);
-    const job = this.sourceAuthority.run({ profileId, stamp: this.sourcePolicyStamp(profileId) }, () => host.runWithSourceEvidence(async () => {
+    const job = this.sourceAuthority.run({ profileId, stamp: this.sourceAuthorityStamp(profileId) }, () => host.runWithSourceEvidence(async () => {
       signal?.throwIfAborted();
       await host.pruneUnavailableLibraryCandidates();
       const cfg = this.config(profileId), config = core.resolveMemoryDeepDreamingConfig({ cfg, pluginConfig: core.resolveMemoryDreamingPluginConfig(cfg) });

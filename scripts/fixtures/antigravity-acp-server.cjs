@@ -155,7 +155,8 @@ async function prompt(message) {
   }
   update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } });
   update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `ANSWER(${images} images)` } });
-  send({ id: message.id, result: { stopReason: "end_turn" } });
+  send({ id: message.id, result: { stopReason: "end_turn",
+    ...(process.env.FAKE_ACP_TURN_USAGE ? { usage: JSON.parse(process.env.FAKE_ACP_TURN_USAGE) } : {}) } });
 }
 
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -172,7 +173,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: true, embeddedContext: true },
         mcpCapabilities: { http: true, sse: true }, sessionCapabilities: { list: {}, resume: {} }, auth: { logout: {} } },
       authMethods: [{ id: "oauth-personal", name: "Log in with Google" }],
-      agentInfo: { name: "antigravity-acp", title: "Google Antigravity", version: "1.2.1" },
+      agentInfo: { name: "antigravity-acp", title: "Google Antigravity", version: process.env.FAKE_ACP_SERVER_VERSION || "1.2.1" },
     } });
   } else if (message.method === "authenticate") {
     if (process.env.FAKE_ACP_LOGIN_FLOW === "1") {

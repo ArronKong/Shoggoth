@@ -5,7 +5,7 @@ d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc  CODEX-LICENSE.
 7a3345247b8233d0b90e7af1a368e48e95283ceaae0a8737b7c3aeff388b164b  E5-MODEL-NOTICE.txt
 3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04  MPL-2.0.txt
 2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c  ONNX-RUNTIME-LICENSE.txt
-770108d6f42fd1fd41db094bbc98d69724cb916e3089dbdeecbf2abe6f7046dd  RUNTIME-LICENSE-SOURCES.md
+db6090a093444b6be0a81ddfaf26d8185258700605d3b42422f2b945c25f3e5d  RUNTIME-LICENSE-SOURCES.md
 117da2af0d4ce0fe1c8e19b5cff9dcd806adf973d328d27b11d4448c4ff24f76  licenses/npm/_babel_runtime@7.29.7/LICENSE
 dc65dbc1cb6dc35e18861d341fa1d98a6e40aaa19b43d7d0a40ba67914d47c55  licenses/npm/_base-ui_react@1.5.0/LICENSE
 dc65dbc1cb6dc35e18861d341fa1d98a6e40aaa19b43d7d0a40ba67914d47c55  licenses/npm/_base-ui_utils@0.2.9/LICENSE
@@ -50,7 +50,7 @@ cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164  licenses/npm/e
 835eb611a23301b27115ca1be9f754c876e643ceb7fe63049c6b50609a1cafeb  licenses/npm/eventsource-parser@3.1.1/LICENSE
 f683a72ffe6a9675b5507af22fe0f448d8c8de3da1e14f139d370a7e6a54a23e  licenses/npm/eventsource@3.0.7/LICENSE
 7bf9b2de73a6b356761c948d0e9eeb4be6c1270bd04c79cd489c1e400ffdfc1a  licenses/npm/fast-deep-equal@3.1.3/LICENSE
-df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f  licenses/npm/fast-uri@3.1.8/LICENSE
+df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f  licenses/npm/fast-uri@3.1.9/LICENSE
 766daa9b2ab0ab2698c769f334a6d72c42437b0a7d0d0dfd5c13c64b3120117b  licenses/npm/fflate@0.8.3/LICENSE
 1e76029602ae9b21cc4e612db2496d92febed882ba13ba745f8b3309e85f9d39  licenses/npm/fs-extra@10.1.0/LICENSE
 ba98e94118579117505f6f11fd9a4354c5e65ece03b4898d8b8f7785efcd25c1  licenses/npm/global-agent@3.0.0/LICENSE
@@ -81,6 +81,7 @@ e7cefb44454d371c9eddb390fb829d34fc6ffa79e63776873c34f8413bf3268b  licenses/npm/m
 1662fae9b5314d11cf51284e2dcd1f006a354f7343f08712a730fcff9a359801  licenses/npm/ms@2.1.3/license.md
 89024017b88a9f2b763f79b941a4f2db3b4428edfcacdc0b23866b2da633ad0c  licenses/npm/node-addon-api@8.9.2/LICENSE.md
 61b723ee61d8544f2d998214ac9cc5e2a97deb8d717e9ac90aeb9e3b07964441  licenses/npm/object-keys@1.1.1/LICENSE
+960f7fc16d8baa126802316a7df9078a383af4fb6bc60033adb28e85c08d5e5e  licenses/npm/opencc-js@1.4.2/LICENSE
 48da2f39e100d4085767e94966b43f4fa95ff6a0698fba57ed460914e35f94a0  licenses/npm/path-key@3.1.1/license
 824f6069c5a59b0c1650d0fb9f8d091866c6019eb761c8e658dfc03f001eabd2  licenses/npm/pinyin-pro@3.29.3/LICENSE
 feb87a2e0c305de3464cc44077da5393c52d8ca6362d37427157d04ec6f4510d  licenses/npm/pkce-challenge@5.0.1/LICENSE
@@ -115,6 +116,7 @@ d013c4966dbea41607b4abf37517d6d72f66488bc97cdf309aaa5ffb59d35b9f  licenses/npm/t
 64a93ffc0a06a2266dbb57ed7ebe3b56ba66ab337b6347fabdbf86c76819fbae  licenses/npm/type-fest@0.13.1/license
 e9262ce6b9f0115feeaa6f6be2820acf87e8ffe2e29a44cbaf485ef40d51aba9  licenses/npm/typescript@5.9.3/LICENSE.txt
 483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a  licenses/npm/uc.micro@2.1.0/LICENSE.txt
+a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27  licenses/npm/undici@7.30.1/LICENSE
 3fda5977c0904e226190b4e21d64340c1731e2142d6fe5f3dee0090a216b8b63  licenses/npm/universalify@2.0.1/LICENSE
 da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93  licenses/npm/use-sync-external-store@1.6.0/LICENSE
 405a272eaef556691ad7dda96db3237c9544afe18725842a1a5b3ec308960222  licenses/npm/void-elements@3.1.0/LICENSE
@@ -124,7 +126,6 @@ da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93  licenses/npm/u
 efe8f1903440d3e757fa3c91fdbbe410c496b7983f1a92420f252ce3b417e0ee  licenses/overrides/LAZY-VAL.txt
 af691e837eb18415075db251f47a4a0b1457257ff20fedcc6b460b7ed71d74ac  licenses/source/CHILL-KAI.txt
 9a755af092b494944c99f471be6fddd19b006a448fefdc4717e4ee0aa09a97b0  licenses/source/COURIER-PRIME.txt
-14293556b79940745123d0160c71d27ed0e9fe9b8a848093f3ed78f4853caafe  licenses/source/GOGCLI.txt
 821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6  licenses/source/HERMES.txt
 f51aa7a410f3d3ff9352a5422b76c072588ac76b63861f59447502caeacacc16  licenses/source/HTML-PARSE-STRINGIFY.txt
 443026f6370045fa3dc070649d20f33fe36655ad06f2f8a153064377c33dfb9e  licenses/source/LIQUIDGLASS.txt
@@ -166,5 +167,7 @@ c77d564d48f13e7ece47d5dcc57102810744828d5f5af5826808a0320de3bb76  licenses/sourc
 eb0bff8faaba4581e0f09c962e0f795f1f8810191c9d616f3f66f36be4b3a5dc  licenses/source/openclaw-memory/token-types.txt
 e8a7cc256941a26ba8234f04390165243a4d42f74fd6491934140605bf7eae2d  licenses/source/openclaw-memory/typebox.txt
 5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3  licenses/source/openclaw-memory/uint8array-extras.txt
+a21d6c8d3fc631198b97e57584697f7f9c37805c71c6cf9a12e4442b40394b88  licenses/source/openclaw-memory/undici-fetch.txt
+ca5cc852fbcbe4598fe1f8b04c103c8073a64fa9cbb14b358bfdd87232ae8bd9  licenses/source/openclaw-memory/undici-milo.txt
 a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27  licenses/source/openclaw-memory/undici.txt
 5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3  licenses/source/openclaw-memory/yocto-queue.txt

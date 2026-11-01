@@ -144,7 +144,8 @@ async function fixture(options = {}) {
     createManagedOpenClawProductHost, createManagedOpenClawProductAuth, createManagedOpenClawProviderCredentialBroker,
     createOpenClawRuntimeApply, createOpenClawModelChange, createManagedOpenClawModelApply,
     require: name => {
-      if (name === "./agent-service/external-plugin-adapter-auth") return { ensureCredential: () => events.push({ kind: "credential-boundary-not-executed" }) };
+      if (name === "./agent-service/external-host-pairing") return { ensureCredential: () => events.push({ kind: "credential-boundary-not-executed" }) };
+      if (name === "../resources/external-plugin-adapters/openclaw/mcp-tools.json") return require("../resources/external-plugin-adapters/openclaw/mcp-tools.json");
       if (name === "./managed-openclaw-host-client") return { createManagedOpenClawHostClient: () => { createCount++; return client; } };
       throw new Error(`unanticipated desktop composition import ${name}`);
     },

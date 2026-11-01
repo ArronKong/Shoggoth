@@ -105,6 +105,18 @@ function fixturePaths(prefix = "shoggoth-mcp-") {
 function trustedRunFixture(service, profileValue) {
   const { bindingElicitation, parseBindingElicitation } = require("../app/agent-service/runtime-mcp-call-binding");
   const runId = "test-bound-runtime-run";
+  // A trusted lease also needs its real private WorkRun/session ownership;
+  // a fabricated binding alone cannot authorize credential/result projection.
+  if (!service.workDispatcher.getRun(runId)) service.workDispatcher.enqueue({
+    id: runId, source: "chat", sourceId: "mcp-bound-fixture-session",
+    idempotencyKey: "mcp-bound-fixture-run", profileId: profileValue.id, workspace: null,
+  });
+  assert.equal(service.workDispatcher.getRun(runId).profileId, profileValue.id);
+  // Freeze the same Hook snapshot used by production run preparation. Keep
+  // the real hook guard and result-projection ownership checks active.
+  const run = service.workDispatcher.getRun(runId);
+  service.hookService.freezeRun(run, profileValue);
+  assert.equal(service.hookStore.snapshotForRun(runId).profileId, profileValue.id);
   const coordinator = service.workRunCoordinator;
   let live = true;
   const assertCurrent = () => { assert.equal(live, true); };
@@ -124,6 +136,7 @@ function trustedRunFixture(service, profileValue) {
   };
   return {
     register,
+    scope: { runId, assertCurrent, signal: new AbortController().signal },
     bind(input) { register(bindingElicitation(input)); },
     revoke() { live = false; coordinator.runtimeMcpCallBindings.releaseRun(runId); },
   };
@@ -1197,7 +1210,7 @@ async function authenticateServiceSession(
   }
 }
 
-test("Service start 不触发 safeStorage，首次 challenge 才创建 secret 并完成 Profile 短 token", async () => {
+test("Service start 仅初始化完成回执密钥，首次 challenge 才创建 MCP secret 与 Profile 短 token", async () => {
   const paths = fixturePaths("sm-si-");
   let encryptCalls = 0;
   const safeStorage = fakeSafeStorage({
@@ -1216,7 +1229,8 @@ test("Service start 不触发 safeStorage，首次 challenge 才创建 secret �
   const profileValue = service.productStore.listAgentProfiles()[0];
   const { runtimeProfileId, runtimeAccountId: runtimeAccountIdValue } = profileValue;
   try {
-    assert.equal(encryptCalls, 0);
+    assert.equal(encryptCalls, 1, "the new completed-result ledger owns one separate startup key");
+    assert.equal(fs.existsSync(path.join(paths.stateDir, "secret-tool-receipts-v1.key")), true);
     assert.equal(fs.existsSync(paths.mcpAuthPath), false);
     const clientToken = readClientToken(paths);
     assert.equal((await requestService(paths, {
@@ -1233,7 +1247,7 @@ test("Service start 不触发 safeStorage，首次 challenge 才创建 secret �
         clientNonce,
       },
     });
-    assert.equal(encryptCalls, 1);
+    assert.equal(encryptCalls, 2, "first challenge performs the one additional MCP-secret encryption");
     assert.equal(fs.existsSync(paths.mcpAuthPath), true);
     const helperStore = new McpAuthSecretStore({
       paths, access: "helper", safeStorage,
@@ -1707,9 +1721,10 @@ test("默认 MCP Product Controller 装配 Service 状态、Token 用量与 Fede
   await service.start();
   try {
     const profileValue = service.productStore.listAgentProfiles()[0];
+    const trustedRun = trustedRunFixture(service, profileValue);
     const authority = (callId) => ({ profileId: profileValue.id, callId });
     const appStatus = await service.mcpProductToolController.handle(
-      "app_status", {}, authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1"),
+      "app_status", {}, authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1"), trustedRun.scope,
     );
     assert.equal(appStatus.service.healthy, true);
     assert.equal(appStatus.service.serviceVersion, "mcp-tool-default-dependencies");
@@ -1720,23 +1735,23 @@ test("默认 MCP Product Controller 装配 Service 状态、Token 用量与 Fede
     });
 
     const usage = await service.mcpProductToolController.handle(
-      "usage_get", { range: "7d" }, authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2"),
+      "usage_get", { range: "7d" }, authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2"), trustedRun.scope,
     );
     assert.equal(usage.range, "7d");
     assert.equal(usage.usage.series.totals.totalTokens, 0);
 
     await assert.rejects(() => service.mcpProductToolController.handle(
       "runtime_context_get", { source: "chat", sourceId: "nonexistent-chat" },
-      authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee6"),
+      authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee6"), trustedRun.scope,
     ), (error) => error.code === "MCP_TOOL_NOT_FOUND",
     "默认 Service composition root 必须真实接入 Coordinator，而不是返回 unavailable stub");
 
     assert.deepEqual(await service.mcpProductToolController.handle(
-      "backend_status", {}, authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee3"),
+      "backend_status", {}, authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee3"), trustedRun.scope,
     ), { backends: expectedBackends });
     assert.deepEqual(await service.mcpProductToolController.handle(
       "external_cron_list", { backendId: "openclaw", enabled: null, limit: 10 },
-      authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee4"),
+      authority("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee4"), trustedRun.scope,
     ), { backendId: "openclaw", total: 0, jobs: [] });
     assert.deepEqual(federationCalls, [
       ["backend.status", {}],
@@ -1747,7 +1762,7 @@ test("默认 MCP Product Controller 装配 Service 状态、Token 用量与 Fede
   }
 });
 
-test("原生和外部 MCP helper 经认证 Service 共用只读帮助，外部不继承原生私人能力", async () => {
+test("原生 helper 绑定真实 WorkRun 后读取帮助，未绑定外部 helper 不继承私人会话投影", async () => {
   const paths = fixturePaths("sm-help-");
   const safeStorage = fakeSafeStorage();
   const service = createAgentService({ paths, safeStorage, version: "mcp-product-help" });
@@ -1784,6 +1799,36 @@ test("原生和外部 MCP helper 经认证 Service 共用只读帮助，外部�
           assert.ok(params._meta?.["shoggoth/runtime-call-binding"], "帮助查询不请求产品写入确认");
           trustedRun.register(params); return { action: "accept", content: {} };
         } });
+      if (handler === external) {
+        // The legacy federation token proves a Profile, not a conversation.
+        // Do not invent a session to make model-result projection succeed.
+        for (const [id, name, args] of [[3, "app_help_search", { query: "灵感是什么" }],
+          [4, "app_help_get", { featureId: "memory" }]]) {
+          const withheld = await call(id, name, args);
+          assert.equal(withheld.result.isError, false, JSON.stringify(withheld));
+          assert.deepEqual(withheld.result.structuredContent,
+            require("../app/agent-service/secret-execution-broker").completedNotice);
+          assert.equal(Object.hasOwn(withheld.result.structuredContent, "items"), false);
+          assert.equal(Object.hasOwn(withheld.result.structuredContent, "actions"), false);
+        }
+        const denied = await call(5, "memory_search", { query: "private", limit: 5 });
+        assert.equal(denied.error.code, -32602, "the external catalogue still excludes native memory tools");
+        // Keep the external role's public help/capability assertions separate
+        // from delivery: it cannot borrow the native test's Run identity.
+        const externalAuthority = { profileId: profile.id,
+          callId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee7", federationClient: "hermes" };
+        const roleHelp = service.mcpProductToolController.productHelpService;
+        const publicHelp = await roleHelp.get({ featureId: "inspiration" }, externalAuthority);
+        assert.match(publicHelp.summary, /灵感/);
+        assert.equal(publicHelp.title, "灵感便签");
+        assert.equal(publicHelp.actions.find(item => item.id === "delete").availability, "requires_confirmation");
+        const memoryHelp = await roleHelp.get({ featureId: "memory" }, externalAuthority);
+        const searchState = memoryHelp.actions.find(item => item.id === "search");
+        assert.equal(searchState.availability, "unavailable");
+        assert.equal(searchState.reason.code, "NATIVE_ONLY");
+        assert.equal((await roleHelp.get({ featureId: "inspiration", locale: "en" }, externalAuthority)).title, "SparkNotes");
+        continue;
+      }
       const search = await call(3, "app_help_search", { query: "灵感是什么" });
       assert.equal(search.result.isError, false, JSON.stringify(search));
       assert.equal(search.result.structuredContent.items[0].featureId, "inspiration");
@@ -1944,11 +1989,18 @@ test("Electron ready 后注入原生 Notification sender，公开 payload 不携
       profileId: profileValue.id,
       workspace: null,
     });
+    service.hookService.freezeRun(service.workDispatcher.getRun("run-notification"), profileValue);
+    assert.equal(service.hookStore.snapshotForRun("run-notification").profileId, profileValue.id);
     const result = await service.mcpProductToolController.handle(
       "notification_send",
       { runId: "run-notification", title: "Title", body: "Body" },
       { profileId: profileValue.id, callId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+      { runId: "run-notification", assertCurrent() {
+        assert.equal(service.workDispatcher.getRun("run-notification").profileId, profileValue.id);
+      } },
     );
+    // Notification keeps its minimal public payload; completion-receipt
+    // envelopes belong to other tool routes, not this Notification contract.
     assert.deepEqual(result, { delivered: true });
     assert.deepEqual(shown, [
       { phase: "construct", options: { title: "Title", body: "Body" } },
@@ -2339,7 +2391,7 @@ test("MCP stdio 提供初始化、ping、固定产品工具与受控 request_use
   assert.equal(calls[0].params.callId, "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
   assert.equal(calls[0].params.name, "profile_get");
   assert.deepEqual(calls[0].params.arguments, {});
-  assert.deepEqual(requestOptions, [{ timeoutMs: 45_000 }]);
+  assert.deepEqual(requestOptions, [{ timeoutMs: null }], "the current ordinary MCP-call contract has no overall deadline");
   assert.equal(JSON.stringify(called).includes(calls[0].params.sessionToken), false);
   const unknown = await handler({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "unknown", arguments: {} } });
   assert.equal(unknown.error.code, -32602);
@@ -2410,6 +2462,45 @@ test("MCP helper 将 12 个远程工具 exact 路由到 Service，非法 authori
   assert.equal(invalid.result.isError, true);
   assert.deepEqual(invalid.result.structuredContent.error.problems, ["不支持参数 profileId"]);
   assert.equal(calls.length, before);
+});
+
+test("memory_get explains exclusive references and range rules without dispatching invalid calls", async () => {
+  const calls = [];
+  const handler = createMcpStdioHandler({
+    runtimeProfileId: "runtime-a", runtimeAccountId: runtimeAccountId("runtime-a"),
+    sessionToken: nonce(0x76), serviceVersion: "0.0.test",
+    paths: fixturePaths("shoggoth-memory-get-hints-"),
+    requestService: async (_paths, request) => { calls.push(request); return { borrowed: true }; },
+  });
+  try {
+    await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "fixture", version: "1" },
+    } });
+    const source = { source: "chat", sourceId: "PRIVATE_SESSION" };
+    const id = "shared-memory:PRIVATE_REFERENCE", path = "shared/PRIVATE_PATH/MEMORY.md";
+    const call = args => handler({ jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: { name: "memory_get", arguments: { ...source, ...args } } });
+    for (const [args, expected] of [
+      [{ id, path, from: 1, lines: 20 }, /exactly one of id or path/u],
+      [{}, /exactly one of id or path/u],
+      [{ id, from: 1 }, /from and lines are only valid with path/u],
+      [{ id, lines: 20 }, /from and lines are only valid with path/u],
+    ]) {
+      const response = await call(args);
+      assert.equal(response.result.isError, true);
+      assert.equal(response.result.structuredContent.error.code, "MCP_TOOL_INVALID_ARGUMENTS");
+      assert.match(response.result.structuredContent.error.problems.join(" "), expected);
+      assert.match(response.result.content[0].text, /borrowed sourceRef as id/u);
+      assert.doesNotMatch(JSON.stringify(response), /PRIVATE_/u);
+    }
+    assert.equal(calls.length, 0, "invalid combinations never reach Service");
+    for (const args of [{ id }, { path }, { path, from: 1, lines: 2 }]) {
+      const response = await call(args);
+      assert.equal(response.result.isError, false);
+      assert.deepEqual(calls.at(-1).params.arguments, { ...source, ...args });
+    }
+    assert.equal(calls.length, 3, "existing legal forms remain unchanged");
+  } finally { handler.close(); }
 });
 
 test("MCP helper 在重复结构化结果超过帧预算时保留完整文本结果", async () => {

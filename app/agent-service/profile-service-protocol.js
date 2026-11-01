@@ -8,12 +8,16 @@ const {
 
 const PROFILE_SERVICE_METHODS = Object.freeze([
   "profile.models.list", "profile.binding.models.list", "profile.auth.read", "profile.binding.auth.read",
+  "profile.capabilities.read", "profile.binding.capabilities.read",
   "profile.bind", "profile.configure", "profile.clear",
 ]);
 const PROFILE_SERVICE_METHOD_SET = new Set(PROFILE_SERVICE_METHODS);
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const PUBLIC_MESSAGES = Object.freeze({
-  RUNTIME_INCOMPATIBLE: "当前 CLI 版本与应用不兼容，请更新 CLI 或应用后重新检查",
+  RUNTIME_INCOMPATIBLE: "当前 CLI 未满足必需协议，请更新 CLI 或应用后重新检查",
+  RUNTIME_EXECUTABLE_CHANGED: "CLI 安装已变化，请等待当前任务结束后重新检查",
+  RUNTIME_IDENTITY_UNAVAILABLE: "暂时无法确认 CLI 安装状态，请稍后重新检查",
+  RUNTIME_CAPABILITY_UNSUPPORTED: "当前 Agent Runtime 不支持该操作",
   INVALID_PARAMS: "请求参数无效",
   PROFILE_TARGET_FORBIDDEN: "只允许配置 Shoggoth 内置 Codex Profile",
   PROFILE_NOT_FOUND: "Shoggoth Profile 不存在",
@@ -84,7 +88,12 @@ function cloneParams(value) {
 function validateProfileServiceParams(method, params) {
   if (!PROFILE_SERVICE_METHOD_SET.has(method)) throw protocolError("INVALID_PARAMS");
   if (method === "profile.models.list" || method === "profile.binding.models.list") {
-    if (!exactObject(params, ["profileId", "cursor", "limit", ...(method === "profile.binding.models.list" ? ["bindingId"] : [])])
+    // `source: "chatgpt"` reads only the ChatGPT catalog of a Profile that
+    // offers several model sources (codex-session-provider).
+    const sourced = method === "profile.models.list" && Object.hasOwn(params || {}, "source");
+    if (!exactObject(params, ["profileId", "cursor", "limit", ...(method === "profile.binding.models.list" ? ["bindingId"] : []),
+      ...(sourced ? ["source"] : [])])
+      || (sourced && params.source !== "chatgpt")
       || !validOpaqueId(params.profileId) || !validString(params.cursor, 1024, true)
       || (method === "profile.binding.models.list" && !validOpaqueId(params.bindingId))
       || !Number.isSafeInteger(params.limit) || params.limit < 1 || params.limit > 100) {
@@ -92,10 +101,11 @@ function validateProfileServiceParams(method, params) {
     }
     return cloneParams(params);
   }
-  if (method === "profile.auth.read" || method === "profile.binding.auth.read") {
-    if (!exactObject(params, ["profileId", ...(method === "profile.binding.auth.read" ? ["bindingId"] : [])])
+  if (["profile.auth.read", "profile.binding.auth.read", "profile.capabilities.read", "profile.binding.capabilities.read"].includes(method)) {
+    const bound = method.startsWith("profile.binding.");
+    if (!exactObject(params, ["profileId", ...(bound ? ["bindingId"] : [])])
       || !validOpaqueId(params.profileId)
-      || (method === "profile.binding.auth.read" && !validOpaqueId(params.bindingId))) {
+      || (bound && !validOpaqueId(params.bindingId))) {
       throw protocolError("INVALID_PARAMS");
     }
     return cloneParams(params);
@@ -118,6 +128,16 @@ function validateProfileServiceParams(method, params) {
 }
 
 function validateProfileServiceResult(method, result) {
+  if (method === "profile.capabilities.read" || method === "profile.binding.capabilities.read") {
+    if (!exactObject(result, ["attachments", "resume", "compact", "steer"])
+      || !Array.isArray(result.attachments) || result.attachments.length > 3
+      || new Set(result.attachments).size !== result.attachments.length
+      || result.attachments.some(kind => !["image", "pdf", "file"].includes(kind))
+      || ["resume", "compact", "steer"].some(name => !["supported", "unsupported", "unverified"].includes(result[name]))) {
+      throw protocolError("PROFILE_RESPONSE_INVALID");
+    }
+    return { attachments: [...result.attachments], resume: result.resume, compact: result.compact, steer: result.steer };
+  }
   if (method === "profile.auth.read" || method === "profile.binding.auth.read") {
     if (!exactObject(result, ["status"])
       || !["authenticated", "unverified", "unauthenticated"].includes(result.status)) {
@@ -135,21 +155,32 @@ function validateProfileServiceResult(method, result) {
     }
     const seen = new Set();
     const models = result.models.map((model) => {
+      // Optional source of a row (built-in Codex with custom endpoints): the
+      // selection token (absent = Profile default source) and its display name.
+      const sourced = Object.hasOwn(model || {}, "modelProviderRef");
+      const named = Object.hasOwn(model || {}, "sourceName");
+      const key = `${sourced ? model.modelProviderRef : ""}\0${model?.id}`;
       if (!exactObject(model, ["id", "displayName", "description", "isDefault",
-        ...(Object.hasOwn(model || {}, "capabilities") ? ["capabilities"] : [])])
+        ...(Object.hasOwn(model || {}, "capabilities") ? ["capabilities"] : []),
+        ...(sourced ? ["modelProviderRef"] : []), ...(named ? ["sourceName"] : [])])
         || (Object.hasOwn(model || {}, "capabilities") && !validModelCapabilities(model.capabilities))
+        || (sourced && (typeof model.modelProviderRef !== "string"
+          || !/^(?:@chatgpt|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u.test(model.modelProviderRef)))
+        || (named && !validString(model.sourceName, 512))
         || !validString(model.id, 512) || !validString(model.displayName, 512)
         || !validText(model.description, 4096) || typeof model.isDefault !== "boolean"
-        || seen.has(model.id)) {
+        || seen.has(key)) {
         throw protocolError("PROFILE_RESPONSE_INVALID");
       }
-      seen.add(model.id);
+      seen.add(key);
       return {
         id: model.id,
         displayName: model.displayName,
         description: model.description,
         isDefault: model.isDefault,
         ...(model.capabilities ? { capabilities: structuredClone(model.capabilities) } : {}),
+        ...(sourced ? { modelProviderRef: model.modelProviderRef } : {}),
+        ...(named ? { sourceName: model.sourceName } : {}),
       };
     });
     return { models, nextCursor: result.nextCursor, hasMore: result.hasMore };

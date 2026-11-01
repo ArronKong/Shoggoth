@@ -897,7 +897,7 @@ test("日志轮转发现 events 被替换为 symlink 时拒绝且不清空 victi
 });
 
 test("当前 schema 持久化 append-only RunNote，重放/快照顺序稳定且返回 clone", () => {
-  assert.equal(STORE_SCHEMA_VERSION, 15);
+  assert.equal(STORE_SCHEMA_VERSION, 16);
   assert.deepEqual(RUN_NOTE_FIELDS, [
     "id", "runId", "profileId", "kind", "cardId", "body", "percent", "createdAt",
   ]);

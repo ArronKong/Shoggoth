@@ -17,7 +17,7 @@ import { useStickyState } from "../../lib/useStickyState";
 import ApprovalRow from "./ApprovalRow";
 import { activityStatusRows } from "./activityStatusRows";
 
-// 统一活动流（今日动态）：cron / kanban / inspiration，隐藏系统健康及 heartbeat 记录。
+// 统一活动流（今日动态）：cron / kanban / inspiration，隐藏静默输出、系统健康及 heartbeat 记录。
 // - 首屏来自 summary.activityPage（默认筛选第一页）；筛选/加载更多走
 //   /__api/dashboard/activities（服务端筛选 + opaque cursor）。
 // - 45s 轮询的新首屏替换其覆盖范围，只保留已加载的更旧记录；来源降级时保留旧数据。
@@ -27,10 +27,11 @@ import { activityStatusRows } from "./activityStatusRows";
 
 const KIND_FILTERS = ["", "cron", "inspiration"] as const;
 
-// 服务端已过滤 heartbeat；旧缓存和尚未升级的服务端也要遵循同一显示规则。
+// 服务端已过滤静默输出和 heartbeat；旧缓存和尚未升级的服务端也要遵循同一显示规则。
 // 与 core/dashboard-activity.js 保持一致，仅匹配系统结果，不按任务名过滤。
 export function isVisibleDashboardActivity(entry: DashboardActivityEntry): entry is Exclude<DashboardActivityEntry, { kind: "health" }> {
   if (entry.kind === "health") return false;
+  if (entry.kind === "cron" && entry.run.outputDisposition === "silent") return false;
   return !(entry.kind === "cron" && entry.backendId === "openclaw"
     && [entry.summary, entry.run.summary, entry.run.error].some((message) =>
       typeof message === "string" && /^heartbeat (?:(?:wake requested|(?:task )?completed)$|(?:failed|skipped):)/.test(message),
@@ -47,14 +48,44 @@ const entryOrder = (a: DashboardActivityEntry, b: DashboardActivityEntry): numbe
   a.occurredAt !== b.occurredAt ? b.occurredAt - a.occurredAt : a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 
 function mergeEntries(base: DashboardActivityEntry[], incoming: DashboardActivityEntry[]): DashboardActivityEntry[] {
+  const entries = [...base, ...incoming];
+  const aliasExecutions = new Map<string, Set<string>>();
+  const executionScope = (e: Extract<DashboardActivityEntry, { kind: "cron" }>, id: string) =>
+    JSON.stringify([e.kind, e.backendId, e.run.jobId, id]);
+  // A conversation can contain multiple executions. Use session identity only
+  // when the backend explicitly proves it is an alias for this execution.
+  for (const e of entries) {
+    if (e.kind !== "cron" || !e.run.runId || !Array.isArray(e.run.runIdAliases)) continue;
+    for (const alias of e.run.runIdAliases) {
+      if (typeof alias !== "string" || !alias) continue;
+      const scope = executionScope(e, alias);
+      const identities = aliasExecutions.get(scope) || new Set<string>();
+      if (e.run.runId !== alias) identities.add(e.run.runId);
+      aliasExecutions.set(scope, identities);
+    }
+  }
   const byId = new Map<string, DashboardActivityEntry>();
-  for (const e of [...base, ...incoming]) {
+  for (const e of entries) {
     // Older servers and persisted caches include startedAt in the activity id.
     // Reconcile those rows by execution identity, never by title or result text.
-    const runId = e.kind === "cron" && e.run.runId;
+    let runId = e.kind === "cron" ? e.run.runId : undefined;
+    if (e.kind === "cron") {
+      const alias = runId || e.run.sessionKey;
+      const identities = alias ? aliasExecutions.get(executionScope(e, alias)) : undefined;
+      if (identities) runId = identities.size === 1 ? [...identities][0] : runId || (identities.size === 0 ? alias : undefined);
+    }
     const key = e.kind === "cron" && runId
-      ? JSON.stringify([e.kind, e.backendId, e.run.jobId, runId]) : e.id;
-    byId.set(key, e);
+      ? executionScope(e, runId) : e.id;
+    // Retain proven identities and aliases across a downgrade, so subsequent
+    // partial refreshes cannot split this row again.
+    const previous = byId.get(key);
+    if (e.kind === "cron" && runId) {
+      const aliases = [...new Set([
+        ...(previous?.kind === "cron" && Array.isArray(previous.run.runIdAliases) ? previous.run.runIdAliases : []),
+        ...(Array.isArray(e.run.runIdAliases) ? e.run.runIdAliases : []),
+      ])].filter(alias => typeof alias === "string" && alias);
+      byId.set(key, { ...e, run: { ...e.run, runId, ...(aliases.length ? { runIdAliases: aliases } : {}) } });
+    } else byId.set(key, e);
   }
   return [...byId.values()].sort(entryOrder);
 }

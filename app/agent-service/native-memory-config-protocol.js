@@ -168,7 +168,14 @@ const search = object({ enabled: bool, rememberAcrossConversations: bool,
   cache: object({ enabled: bool }),
   store: object({ fts: object({ tokenizer: choice("unicode61", "trigram") }) }),
   query: object({ maxResults: num(1, 200), minScore: fraction }) });
-const memory = object({ search });
+const textModel = value => {
+  const result = record(value, { source: choice("agent-default", "binding", "local"),
+    profileId: publicId, bindingId: publicId, model: localText(512, true) }, ["source"]);
+  if (result.source === "binding" ? !result.profileId || !result.bindingId
+    : result.profileId !== undefined || result.bindingId !== undefined || result.model !== undefined) invalid();
+  return result;
+};
+const memory = object({ search, textModel });
 // Alias collisions use upstream's insertion order (last wins). Unlike Profile
 // maps, sorting these keys would change the user's model selection semantics.
 const models = value => {
@@ -277,6 +284,9 @@ function validateNativeMemoryConfigResult(method, value) {
     const id = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(value)
       && !["__proto__", "prototype", "constructor"].includes(value) ? value : invalid();
     const result = record(value, { owner: choice("shoggoth-memory-core", "legacy"),
+      textModelRoutes: list(value => record(value, { profileId: id, bindingId: publicId, name: text(512),
+        runtime: publicId, accountName: text(512), defaultModel: value => value === null ? null : text(512)(value),
+        supported: bool }, ["profileId", "bindingId", "name", "runtime", "accountName", "defaultModel", "supported"]), 2048),
       agents: list(value => record(value, { profileId: id, agentId: text(128), name: text(512) },
         ["profileId", "agentId", "name"]), 256) }, ["owner", "agents"]);
     if (new Set(result.agents.map(agent => agent.profileId)).size !== result.agents.length) invalid();

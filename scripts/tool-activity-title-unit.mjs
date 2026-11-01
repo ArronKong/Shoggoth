@@ -127,7 +127,7 @@ for (const language of ["zh-CN", "en"]) {
     assert.ok(!expected.startsWith("turnLab."));
     assert.equal(toolActivityTitle("app_state_get", { section }, t), expected);
   }
-  for (const source of [catalog.openclaw, catalog.hermes, catalog.externalAdapters]) {
+  for (const source of [catalog.openclaw, catalog.hermes, catalog.externalAdapters, catalog.legacyExternalAdapters]) {
     for (const name of source.tools) {
       const title = toolActivityTitle(name, {}, t);
       assert.ok(title && !title.startsWith("turnLab.") && title !== name

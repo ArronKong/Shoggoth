@@ -92,6 +92,23 @@ test("被禁用的 Claude 即使被注册也不能启动", async () => {
   assert.equal(called, false);
 });
 
+test("主动检查专用能力不会自动启用摘要或记忆任务", async () => {
+  const registry = new RuntimeAdapterRegistry();
+  const pool = { get() { throw new Error("capability read must not spawn"); }, stop() {}, stopAll() {} };
+  registry.register("grok-build", new (require("../app/agent-service/grok-build-runtime-adapter").GrokBuildRuntimeAdapter)({ runtimePool: pool }));
+  registry.register("antigravity", new (require("../app/agent-service/antigravity-runtime-adapter").AntigravityRuntimeAdapter)({ runtimePool: pool }));
+  registry.register("pi", adapter({ modelOnly: true }));
+  registry.register("claude-code", adapter({ modelOnly: true }));
+  for (const runtime of ["grok-build", "antigravity"]) {
+    assert.equal(registry.canGenerateModelOnly(runtime), false);
+    assert.equal(registry.canGenerateModelOnly(runtime, { purpose: "memory_extraction" }), false);
+    assert.equal(registry.canGenerateModelOnly(runtime, { purpose: "proactive" }), true);
+  }
+  assert.equal(registry.canGenerateModelOnly("pi"), true);
+  assert.equal(registry.canGenerateModelOnly("pi", { purpose: "proactive" }), true);
+  assert.equal(registry.canGenerateModelOnly("claude-code", { purpose: "proactive" }), false);
+});
+
 test("stop 保留目标 Adapter 的清理失败", async () => {
   const expected = new Error("profile cleanup failed");
   const registry = new RuntimeAdapterRegistry({ validateHandles: false });

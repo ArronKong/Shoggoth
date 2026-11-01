@@ -16,6 +16,9 @@ if (process.argv.includes("--peer")) {
   const child = spawn(process.execPath, [__filename, "--peer"], {
     stdio: ["pipe", "pipe", "pipe", "ipc"],
   });
+  // Node's child close accounting includes stdout/stderr, but not stdin.
+  // Observe stdin immediately: its physical close may follow child.close.
+  const stdinClosed = new Promise(resolve => child.stdin.once("close", resolve));
   const closed = new Promise(resolve => child.once("close", (code, signal) => resolve({ code, signal })));
   const rpc = new AcpJsonlClient(child);
   (async () => {
@@ -30,6 +33,7 @@ if (process.argv.includes("--peer")) {
     assert.equal(error.code, mode === "terminate" ? "ACP_TERMINATED" : "ACP_STDOUT_ENDED");
     assert.equal(error.dispatchState, "write_attempted");
     assert.deepEqual(await closed, { code: 0, signal: null });
+    await stdinClosed;
     await new Promise(setImmediate);
     assert.equal(rpc.pending.size, 0);
     assert.equal(rpc.ended, true);

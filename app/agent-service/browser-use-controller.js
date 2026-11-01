@@ -57,7 +57,7 @@ class BrowserUseController {
   async reconcile() {
     const enabled = !this.closed && this.getSettings().enabled;
     await Promise.allSettled([...this.sessions.values()]
-      .filter(record => !enabled || !this.isAuthorized(record))
+      .filter(record => !enabled || !this.isAuthorized(record) || !this._secretsCurrent(record))
       .map(record => this._close(record)));
   }
   async status(profileId = null) {
@@ -73,6 +73,12 @@ class BrowserUseController {
     if (this.closed || !this.getSettings().enabled) throw browserError("BROWSER_DISABLED");
     if (!record || this.sessions.get(record.id) !== record || !["starting", "ready"].includes(record.status)) throw browserError("BROWSER_SESSION_NOT_FOUND");
     if (!this.isAuthorized(record)) throw browserError("BROWSER_SESSION_FORBIDDEN");
+    if (!this._secretsCurrent(record)) throw browserError("BROWSER_SESSION_FORBIDDEN");
+  }
+  _secretsCurrent(record) {
+    if (!record.secretContext) return true;
+    try { return record.secretContext.expiresAt > Date.now() && record.secretContext.isCurrent() === true; }
+    catch { return false; }
   }
   _record(input) {
     const record = this.sessions.get(input.sessionId);
@@ -122,7 +128,7 @@ class BrowserUseController {
     if (record.status !== "ready") throw browserError("BROWSER_SESSION_BUSY");
     return { sessionId: record.id, tools: structuredClone(record.tools), untrusted: true };
   }
-  async callTool(input) {
+  async callTool(input, { resolveArguments = null, secretContext = null } = {}) {
     const record = this._record(input);
     if (record.status !== "ready" || record.busy) throw browserError("BROWSER_SESSION_BUSY");
     const validate = record.validators.get(input.toolName);
@@ -139,7 +145,16 @@ class BrowserUseController {
     record.pending = new Promise(resolve => { release = resolve; });
     try {
       this._assert(record);
-      const value = await record.client.callTool(input.toolName, structuredClone(input.arguments));
+      const actual = resolveArguments ? resolveArguments(input.toolName, input.arguments) : structuredClone(input.arguments);
+      this._assert(record);
+      if (!validate(actual)) throw browserError("BROWSER_ARGUMENTS_INVALID");
+      if (secretContext?.bindings?.length) {
+        if (typeof record.client.setSecrets !== "function") throw browserError("BROWSER_ENGINE_UNAVAILABLE");
+        record.client.setSecrets(secretContext.bindings);
+        record.secretContext = { scope: secretContext.scope, references: secretContext.bindings.map(item => item.reference),
+          expiresAt: Math.min(...secretContext.bindings.map(item => item.expiresAt)), isCurrent: secretContext.isCurrent };
+      }
+      const value = await record.client.callTool(input.toolName, actual);
       this._assert(record);
       return { sessionId: record.id, toolName: input.toolName, ...boundedBrowserResult(value) };
     } catch (error) {
@@ -213,6 +228,11 @@ class BrowserUseController {
   async closeForWorkRun(profileId, workRunId) {
     await Promise.allSettled([...this.sessions.values()].filter(record => record.profileId === profileId
       && record.workRunId === workRunId).map(record => this._close(record)));
+  }
+  async closeForSecret(scope, reference) {
+    const rows = [...this.sessions.values()].filter(record => record.secretContext?.scope.profileId === scope.profileId
+      && record.secretContext.scope.sessionId === scope.sessionId && record.secretContext.references.includes(reference));
+    await Promise.all(rows.map(record => this._close(record)));
   }
   async closeForProfile(profileId) {
     const results = await Promise.allSettled([...this.sessions.values()].filter(record => record.profileId === profileId).map(record => this._close(record)));

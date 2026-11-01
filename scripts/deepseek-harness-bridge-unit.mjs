@@ -7,8 +7,15 @@ import { BridgeRuntime } from "../resources/deepseek-harness/shoggoth-dsh-bridge
 // that silently overwrites registrations hides both first- and second-turn bugs.
 function promptRegistry() {
   const sections = new Map([["native:core", { name: "native:core", text: "NATIVE_CORE" }]]);
+  const variables = new Map([["cwd", () => "NATIVE_WORKSPACE_VALUE"]]);
   return {
     sections,
+    variable(name, provider) {
+      assert.match(name, /^[a-z][a-z0-9_]*$/u);
+      assert.equal(variables.has(name), false, "native DSH rejects duplicate variables");
+      variables.set(name, provider);
+      return () => variables.delete(name);
+    },
     section(value) {
       if (sections.has(value.name)) throw new Error(`prompt section "${value.name}" is already registered`);
       sections.set(value.name, value);
@@ -19,6 +26,12 @@ function promptRegistry() {
       if (complete.length > 1) throw new Error("multiple complete prompt sections are active");
       return (complete.length ? complete : [...sections.values()])
         .map(section => typeof section.text === "function" ? section.text({}) : section.text)
+        // Like native DSH, substitutions are a single pass over the section.
+        .map(text => text.replace(/\{\{([^{}]*)\}\}/gu, (_reference, name) => {
+          assert.match(name, /^[a-z][a-z0-9_]*$/u);
+          assert(variables.has(name), "unknown prompt variable");
+          return variables.get(name)({});
+        }))
         .filter(Boolean).join("\n\n");
     },
   };
@@ -130,6 +143,16 @@ test("continuous turns keep one complete prompt and replace only current instruc
   assert.equal(f.dispatches, 3);
 });
 
+test("host and current Run text preserve credential references and native-looking variables literally", async () => {
+  const f = fixture();
+  const stable = "References: {{SHOGGOTH_SECRET_<opaque ID>}}; examples: {{cwd}} {{not_registered}} {{{nested}}}";
+  await f.start("literal", stable);
+  await f.turn("first-literal", "Rule {{current_unknown}}", "literal");
+  await f.turn("second-literal", "Changed {{cwd}}", "literal");
+  assert.deepEqual(f.prompts.map(row => row.prompt), [stable + "\n\nRule {{current_unknown}}", stable + "\n\nChanged {{cwd}}"]);
+  assert.equal(f.dispatches, 2);
+});
+
 test("sessions and resumed handles cannot retain another turn's instructions", async () => {
   const f = fixture();
   await f.start("one", "BASE_ONE");
@@ -162,7 +185,10 @@ for (const [behavior, status, errorCode] of [
   assert.equal(terminals[0].event.errorCode, errorCode);
   assert.ok(f.frames.indexOf(response) < f.frames.indexOf(terminals[0]), "acceptance precedes the terminal event");
   assert.equal(f.bridge.activeTurns.size, 0);
-  assert.equal(JSON.stringify(f.frames).includes("private"), false, "upstream details stay private");
+  if (["auth-before-message", "idle-reject"].includes(behavior)) {
+    assert.equal(typeof terminals[0].event.failure.message, "string", "private bridge carries the structured reason to the redacting Host");
+    assert.equal(terminals[0].event.failure.stack, undefined);
+  }
   assert.equal(f.dispatches, 1, "failure never replays the original turn");
   f.behavior("complete");
   await f.turn("next-explicit", "NEW_RULE");

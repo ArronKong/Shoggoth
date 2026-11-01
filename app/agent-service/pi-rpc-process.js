@@ -1,5 +1,5 @@
 "use strict";
-const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
+const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
 
 const crypto = require("node:crypto");
 const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
@@ -68,16 +68,16 @@ class PiRpcProcess {
     if (!safeString(id, 256) || this.pending.has(id)) {
       return Promise.reject(processError("PI_RPC_REQUEST_ID_INVALID", "Pi RPC request id is invalid"));
     }
-    const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > EXECUTION_TIMEOUT_MS) {
+    const timeoutMs = executionTimeoutMs(options.timeoutMs, this.requestTimeoutMs);
+    if (!isExecutionTimeoutMs(timeoutMs, 100)) {
       return Promise.reject(processError("PI_RPC_TIMEOUT_INVALID", "Pi RPC timeout is invalid"));
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = timeoutMs === null ? null : setTimeout(() => {
         this.pending.delete(id);
         reject(processError("PI_RPC_REQUEST_TIMEOUT", `Pi RPC ${type} timed out`));
       }, timeoutMs);
-      timer.unref?.();
+      timer?.unref?.();
       this.pending.set(id, { type, resolve, reject, timer });
       try {
         this.child.stdin.write(encodePiRpcCommand({ id, type, ...fields }));

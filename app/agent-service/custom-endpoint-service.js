@@ -54,7 +54,7 @@ class CustomEndpointService {
         activeIn: profiles.filter((profile) => profile.providerRef === provider.id).map((profile) => profile.name),
       }));
     return { supported: true, endpoints, profiles: profiles.map((profile) => profile.name),
-      form: { apiOptions: ["openai-responses"], defaultApi: "openai-responses", nameEditable: false, firstModelIsDefault: true } };
+      form: { apiOptions: ["openai-responses"], defaultApi: "openai-responses", nameEditable: false, firstModelIsDefault: false } };
   }
 
   enqueue(action) {
@@ -95,10 +95,15 @@ class CustomEndpointService {
         baseUrl: draft.baseUrl, model: draft.model, models: draft.models, headers: draft.headers });
       if (key) await this.providerService.setSecret({ providerId: id, secret: key });
       await this.providerService.validate({ providerId: id, level: "protocol" });
-      await this.profileServiceController.handle("profile.bind", {
-        operationId: `endpoint-${this.randomUUID()}`, profileId: profile.id,
-        providerRef: id, defaultModel: draft.model, createdAt: this.now(),
-      });
+      // Saving adds the endpoint's models to every conversation's menu; it no
+      // longer replaces the assistant's default source. Only an assistant that
+      // already defaults to this endpoint keeps a default model it still offers.
+      if (profile.providerRef === id && !(draft.models ?? [draft.model]).includes(profile.defaultModel)) {
+        await this.profileServiceController.handle("profile.bind", {
+          operationId: `endpoint-${this.randomUUID()}`, profileId: profile.id,
+          providerRef: id, defaultModel: draft.model, createdAt: this.now(),
+        });
+      }
       return this.list(profile.id);
     });
   }

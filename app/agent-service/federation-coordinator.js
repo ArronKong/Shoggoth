@@ -180,7 +180,7 @@ class FederationCoordinator {
         backendId: args.backendId,
         agentId: args.agentId,
         prompt: args.prompt,
-        timeoutMs: args.timeoutMs,
+        timeoutMs: args.timeoutMs ?? 0,
         operationId: args.operationId,
       });
       return this.#externalResult(result, target, authority);
@@ -218,7 +218,7 @@ class FederationCoordinator {
         taskId: payload.taskId,
         expectedTurn: payload.turn,
         prompt: args.message,
-        timeoutMs: args.timeoutMs,
+        timeoutMs: args.timeoutMs ?? 0,
         operationId: args.operationId,
       });
       return this.#externalResult(result, target, authority);

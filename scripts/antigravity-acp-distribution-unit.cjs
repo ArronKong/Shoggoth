@@ -87,7 +87,9 @@ test("installing the real Google archive extracts, verifies and is idempotent (o
   const fakeCurl = (command, args, options, callback) => {
     if (command !== "/usr/bin/curl") return execFile(command, args, options, callback);
     downloads += 1;
-    fs.copyFileSync(process.env.SHOGGOTH_AGY_ACP_ARCHIVE, args[args.indexOf("--output") + 1]);
+    const target = args[args.indexOf("--output") + 1];
+    if (process.platform === "darwin") require("node:child_process").execFileSync("/bin/cp", ["-c", process.env.SHOGGOTH_AGY_ACP_ARCHIVE, target]);
+    else fs.copyFileSync(process.env.SHOGGOTH_AGY_ACP_ARCHIVE, target);
     return callback(null);
   };
   const installed = await installAntigravityAcpServer({ paths: f.paths, platform: "darwin", arch: "arm64", execFile: fakeCurl });
@@ -96,21 +98,42 @@ test("installing the real Google archive extracts, verifies and is idempotent (o
   assert.equal((await antigravityAcpInstallState({ paths: f.paths, platform: "darwin", arch: "arm64" })).state, "installed");
   await installAntigravityAcpServer({ paths: f.paths, platform: "darwin", arch: "arm64", execFile: fakeCurl });
   assert.equal(downloads, 1, "a verified install is reused without downloading again");
+  const descriptor = fs.openSync(installed.harnessPath, "r+");
+  try {
+    const offset = fs.fstatSync(descriptor).size - 1;
+    const byte = Buffer.alloc(1);
+    fs.readSync(descriptor, byte, 0, 1, offset);
+    byte[0] ^= 0xff;
+    fs.writeSync(descriptor, byte, 0, 1, offset);
+  } finally { fs.closeSync(descriptor); }
+  await assert.rejects(verifyAntigravityAcpServer({ paths: f.paths, platform: "darwin", arch: "arm64" }),
+    { code: "ANTIGRAVITY_ACP_INTEGRITY_FAILED" }, "a modified installed harness must be rejected");
 });
 
 test("the real Google build verifies when present locally (opt-in)", { skip: !process.env.SHOGGOTH_AGY_ACP_SERVER_DIR }, async (t) => {
   const f = fixture(t);
   fs.mkdirSync(f.dir, { recursive: true, mode: 0o700 });
   for (const name of ["agy_acp_server.par", "localharness_external"]) {
-    fs.copyFileSync(path.join(process.env.SHOGGOTH_AGY_ACP_SERVER_DIR, name), path.join(f.dir, name));
+    const source = path.join(process.env.SHOGGOTH_AGY_ACP_SERVER_DIR, name);
+    const target = path.join(f.dir, name);
+    if (process.platform === "darwin") {
+      // Node's clone hint can fall back to a full copy on macOS. Keep this
+      // disposable tamper-test copy independent with an actual APFS clone.
+      require("node:child_process").execFileSync("/bin/cp", ["-c", source, target]);
+    } else fs.copyFileSync(source, target, fs.constants.COPYFILE_FICLONE);
     fs.chmodSync(path.join(f.dir, name), 0o755);
   }
   const verified = await verifyAntigravityAcpServer({ paths: f.paths, platform: "darwin", arch: "arm64" });
   assert.equal(verified.version, ANTIGRAVITY_ACP_SERVER_VERSION);
   const harness = path.join(f.dir, "localharness_external");
-  const bytes = fs.readFileSync(harness);
-  bytes[bytes.length - 1] ^= 0xff;
-  fs.writeFileSync(harness, bytes, { mode: 0o755 });
+  const descriptor = fs.openSync(harness, "r+");
+  try {
+    const offset = fs.fstatSync(descriptor).size - 1;
+    const byte = Buffer.alloc(1);
+    fs.readSync(descriptor, byte, 0, 1, offset);
+    byte[0] ^= 0xff;
+    fs.writeSync(descriptor, byte, 0, 1, offset);
+  } finally { fs.closeSync(descriptor); }
   await assert.rejects(verifyAntigravityAcpServer({ paths: f.paths, platform: "darwin", arch: "arm64" }),
     { code: "ANTIGRAVITY_ACP_INTEGRITY_FAILED" }, "a modified harness must be rejected");
 });

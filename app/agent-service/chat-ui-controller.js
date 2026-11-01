@@ -331,8 +331,7 @@ class ChatUiController {
     const snapshot = c.normalizeState(params.snapshot, rev.declaration.stateSchema, this.store.secretMatcher);
     const selected = Object.fromEntries(action.stateFields.map(key => [key, snapshot[key]]));
     const fingerprint = c.hash({ version: 1, owner: lease.owner, artifactId: rev.artifactId, revision: rev.revision,
-      sourceEventId: rev.sourceEventId, actionId: action.actionId, stateRevision: params.stateRevision, snapshot,
-      ...(params.pluginSelection ? { pluginSelection: params.pluginSelection } : {}) });
+      sourceEventId: rev.sourceEventId, actionId: action.actionId, stateRevision: params.stateRevision, snapshot });
     const old = this.store.getOperation(lease.owner, { actionRequestId: params.actionRequestId });
     if (old) {
       if (old.fingerprint !== fingerprint) throw c.uiError("UI_OPERATION_CONFLICT");
@@ -340,8 +339,7 @@ class ChatUiController {
     }
     const operationId = `ui-operation-${require("node:crypto").randomUUID()}`;
     const prompt = `[Interactive card: ${rev.declaration.title}]\n${rev.declaration.summary}\n${action.instruction}\nCurrent selection: ${c.canonical(selected)}`;
-    const sendEnvelope = { operationId, sessionKey: lease.owner.sessionKey, prompt,
-      ...(params.pluginSelection ? { pluginSelection: params.pluginSelection } : {}) };
+    const sendEnvelope = { operationId, sessionKey: lease.owner.sessionKey, prompt };
     const operation = this.store.prepareOperation(lease.owner, { actionRequestId: params.actionRequestId, operationId,
       artifactId: rev.artifactId, revision: rev.revision, sourceEventId: rev.sourceEventId,
       actionId: action.actionId, action, baseStateRevision: params.stateRevision, snapshot,
@@ -349,13 +347,14 @@ class ChatUiController {
     return this.deliver(lease.owner, operation);
   }
   assertOperationCurrent(input) {
+    if (input && Object.hasOwn(input, "pluginSelection")) throw c.uiError("UI_PLUGIN_PLATFORM_RETIRED");
+    if (input && Object.hasOwn(input, "connectorSelection")) throw c.uiError("UI_OPEN_CONNECTOR_RETIRED");
     const found = this.store.opened ? this.store.operationById(input.operationId) : null;
     if (!found) { if (input.operationId.startsWith("ui-operation-")) throw c.uiError("UI_OPERATION_EXPIRED"); return null; }
     const { owner, operation: op } = found;
     if (op.sendEnvelope === null || op.status === "expired" || op.status === "failed"
       || owner.sessionKey !== input.sessionKey || c.hash({ operationId: input.operationId, sessionKey: input.sessionKey,
-        prompt: input.prompt, ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-        ...(input.pluginSelection ? { pluginSelection: input.pluginSelection } : {}) }) !== op.sendFingerprint) throw c.uiError("UI_SOURCE_EXPIRED");
+        prompt: input.prompt, ...(input.attachments?.length ? { attachments: input.attachments } : {}) }) !== op.sendFingerprint) throw c.uiError("UI_SOURCE_EXPIRED");
     if (this.now() - op.createdAt >= c.LIMITS.retentionMs) throw c.uiError("UI_OPERATION_EXPIRED");
     const rev = this._current(owner, this.store.revision(owner, op.artifactId, op.revision, op.sourceEventId), { execution: true });
     if (op.conversationEpoch !== rev.currentEpoch) throw c.uiError("UI_SOURCE_EXPIRED");
@@ -388,6 +387,13 @@ class ChatUiController {
     const previous = this.deliveries.get(op.operationId); if (previous) return previous;
     const task = (async () => {
       try {
+        if (op.sendEnvelope && (Object.hasOwn(op.sendEnvelope, "pluginSelection") || Object.hasOwn(op.sendEnvelope, "connectorSelection"))) {
+          if (this.coordinator.getChatRunByOperation(op.operationId, owner.sessionKey)) return this.operationResult(owner, op);
+          // A missing Run does not prove an old prepared card was never sent.
+          // Preserve the observation barrier and require a new explicit action.
+          op = this.store.receipt(owner, op.actionRequestId, "unknown", null, Object.hasOwn(op.sendEnvelope, "connectorSelection") ? "UI_OPEN_CONNECTOR_RETIRED" : "UI_PLUGIN_PLATFORM_RETIRED");
+          return this.operationResult(owner, op);
+        }
         this.assertOperationCurrent(op.sendEnvelope);
         const inbox = this.coordinator.inbox.get(op.operationId), run = this.coordinator.getChatRunByOperation(op.operationId, owner.sessionKey);
         if ((!inbox && run) || (!inbox && op.createdAt <= this.coordinator.inbox.idempotencyFloorMs)
@@ -400,7 +406,7 @@ class ChatUiController {
         }
       } catch (error) {
         const code = error?.code || "UI_COMMIT_UNCERTAIN";
-        const definite = /^(UI_|CHAT_SESSION_|RUNTIME_DISABLED|CODEX_DESKTOP_|PLUGIN_SELECTION_)/u.test(code)
+        const definite = /^(UI_|CHAT_SESSION_|RUNTIME_DISABLED|CODEX_DESKTOP_|CONNECTOR_SELECTION_)/u.test(code)
           && !["UI_COMMIT_UNCERTAIN", "UI_STORAGE_FAILED"].includes(code);
         try { op = this.store.receipt(owner, op.actionRequestId, definite ? "failed" : "unknown", null, code); }
         catch { op = { ...op, status: "unknown", publicCode: "UI_COMMIT_UNCERTAIN" }; }

@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-25T21:29:20.415Z",
+  "policy": "Metadata recording only. No server installation, execution, payment, account login or OAuth registration.",
+  "entries": [
+    {
+      "file": "recorded-fork.json",
+      "classes": [
+        "fork"
+      ],
+      "synthetic": false,
+      "source": "https://registry.modelcontextprotocol.io/v0.1/servers?search=fork&limit=100",
+      "registryName": "ai.smithery/renCosta2025-context7fork",
+      "provenance": {
+        "repository": "https://github.com/renCosta2025/context7fork",
+        "fork": true,
+        "parent": "https://github.com/upstash/context7",
+        "source": "https://api.github.com/repos/renCosta2025/context7fork"
+      },
+      "sha256": "fd157c50fee5e3c69939e510b1a81ca9a12c4d59aa0edabb2fa0b60e94cfff28"
+    },
+    {
+      "file": "recorded-paid.json",
+      "classes": [
+        "paid"
+      ],
+      "synthetic": false,
+      "source": "https://registry.modelcontextprotocol.io/v0.1/servers?search=paid&limit=100",
+      "registryName": "dev.workers.rjhsignaltech.ai/licence-audit-paid",
+      "provenance": {
+        "claim": "Publisher description advertises all tools paid; pricing, service safety and payment execution were not verified."
+      },
+      "sha256": "3999bc641ae2c36da5466a19a845fb6e81148d62e7e5c11d7d8cd129ddb5ce2b"
+    },
+    {
+      "file": "recorded-pypi.json",
+      "classes": [
+        "pypi"
+      ],
+      "synthetic": false,
+      "source": "https://registry.modelcontextprotocol.io/v0.1/servers?search=paid&limit=100",
+      "registryName": "com.provenpaid/mcp",
+      "sha256": "2fbf55685ad4661e4b54a327c249b01775e56fb7ea3273ee05f0556f705cad07"
+    },
+    {
+      "file": "synthetic-oci-digest.json",
+      "classes": [
+        "oci",
+        "env"
+      ],
+      "synthetic": true,
+      "source": "Locally defined boundary case, not a published Registry service",
+      "sha256": "4adb48f9b8b1d057b51893550bc9f2584cfd0978dce68c34359b397712bc237c"
+    },
+    {
+      "file": "synthetic-invalid-shape.json",
+      "classes": [
+        "invalid"
+      ],
+      "synthetic": true,
+      "source": "Locally defined boundary case, not a published Registry service",
+      "sha256": "c10d0c06c5a22ca2470880aa99b922edc97e35657187cb59092bc662af4ef9b1"
+    },
+    {
+      "file": "synthetic-invalid-versions.json",
+      "classes": [
+        "invalid"
+      ],
+      "synthetic": true,
+      "source": "Locally defined boundary case, not a published Registry service",
+      "sha256": "f5569334ba1cab6532e42dca7f88fb10c563e3db19b7dabddba0b492bfa5df91"
+    },
+    {
+      "file": "synthetic-secret-argv.json",
+      "classes": [
+        "invalid"
+      ],
+      "synthetic": true,
+      "source": "Locally defined boundary case, not a published Registry service",
+      "sha256": "a9c30ddeec597e5b63ae715bcff5b8525883a9a25a95dd6de06fc280479992ef"
+    },
+    {
+      "file": "../com.supabase__mcp.json",
+      "classes": [
+        "npm-unsafe-runtime-flags"
+      ],
+      "synthetic": false,
+      "source": "https://registry.modelcontextprotocol.io/v0.1/servers",
+      "sha256": "8282821174bfc52e96cc325ccdce3d4fce9371101444af874859d736ee99c073",
+      "expected": "Remote option accepted; npm option rejected because publisher metadata uses runtimeArguments instead of reviewed packageArguments."
+    },
+    {
+      "file": "../io.github.github__github-mcp-server.json",
+      "classes": [
+        "Header",
+        "oci-unsafe-runtime-flags"
+      ],
+      "synthetic": false,
+      "source": "https://registry.modelcontextprotocol.io/v0.1/servers",
+      "expected": "Remote Header option accepted; OCI option rejected because publisher runtimeArguments includes host port and environment flags.",
+      "sha256": "788182d599dd2235a1c5349ff49e7c013673cb6fe1468d8449d75aae17724050"
+    },
+    {
+      "file": "recorded-npm.json",
+      "classes": [
+        "npm"
+      ],
+      "synthetic": false,
+      "source": "https://registry.modelcontextprotocol.io/v0.1/servers?search=fork&limit=100",
+      "registryName": "com.docfork/docfork-mcp",
+      "sha256": "b5edbb16e5d9904ada6343024186506ead062ddd069a60601c59b8615efbfe56"
+    }
+  ]
+}

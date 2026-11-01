@@ -4,7 +4,6 @@
 // current borrowed turn, including output arriving before interrupt returns.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
@@ -58,8 +57,7 @@ test("reader memory_forget fences the borrowed in-flight turn without copying or
     const prompt = "Forget that telescope memory";
     const run = await f.send(session.sessionKey, "reader-forget-inflight", prompt);
     assert.equal(run.status, "running", run.errorCode);
-    const call = (current, name, args) => f.service.mcpProductToolController.handle(name,
-      { source: "chat", sourceId: current.sourceId, ...args }, { profileId: f.profile.id, callId: crypto.randomUUID() });
+    const call = (current, name, args) => f.callTool(current, name, args);
     const found = await call(run, "memory_search", { query: "telescope", minScore: 0, ownerProfileId: f.B, maxResults: 20 });
     const borrowed = found.results.find(value => value.ownerProfileId === f.B && value.borrowed);
     assert.ok(borrowed, "the current actual chat borrows through real MCP");

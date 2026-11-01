@@ -8,13 +8,16 @@ const module = { exports: {} };
 vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
   target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
 const { createPendingChatSendStore, shouldTrackChatSend, classifyChatSendObservation, isExplicitChatSendRejection, isUncertainChatSendReceipt,
-  PENDING_CHAT_SENDS_KEY } = module.exports;
+  PENDING_CHAT_SENDS_KEY, chatVerificationNoticeKey } = module.exports;
+assert.equal(chatVerificationNoticeKey({ accepted: true }), "chat.executionNeedsVerification");
+assert.equal(chatVerificationNoticeKey({}), "chat.sendNeedsVerification");
+assert.equal(chatVerificationNoticeKey(), "chat.observeNeedsVerification");
 const values = new Map(), storage = { getItem: key => values.get(key) ?? null,
   setItem: (key, value) => values.set(key, value) };
 const store = createPendingChatSendStore(() => storage, () => 10);
 const key = "agent:openclaw-fixture:session", idem = "operation-original";
 for (const backend of ["openclaw", "hermes"]) {
-  assert.equal(shouldTrackChatSend(backend, [{ installationId: "plugin", revision: 1 }]), true);
+  assert.equal(shouldTrackChatSend(backend, ["connection-one"]), false);
   assert.equal(shouldTrackChatSend(backend, []), false);
 }
 assert.equal(shouldTrackChatSend("shoggoth", []), true);
@@ -24,13 +27,14 @@ assert.equal(store.remember(key, "new-operation"), false, "a new operation canno
 assert.equal(store.remember(key, idem), true);
 assert.equal(store.accepted(key, idem), true); assert.equal(store.read()[0].accepted, true);
 store.forget(key, idem);
-const selected = [{ installationId: "plugin", revision: 1, secret: "never-store" }];
-assert.equal(store.remember(key, idem, selected), true);
-selected[0].revision = 2;
-assert.equal(store.read()[0].selection[0].revision, 1);
-assert.equal(values.get(PENDING_CHAT_SENDS_KEY).includes("never-store"), false);
+const selected = ["connection-one"];
+assert.equal(store.remember(key, idem, selected), false, "retired connector selection cannot enter a new send");
+assert.equal(store.remember(key, idem), true);
+assert.equal(store.read()[0].selection, undefined);
 store.forget(key, idem);
-assert.equal(store.remember(key, idem, [{ installationId: "plugin", revision: 1 }], "openclaw"), true);
+assert.equal(store.remember(key, idem, [{ installationId: "plugin", revision: 1, secret: "never-store" }], "openclaw"), false);
+assert.equal(values.get(PENDING_CHAT_SENDS_KEY).includes("never-store"), false);
+assert.equal(store.remember(key, idem, undefined, "openclaw"), true);
 assert.equal(store.read()[0].backendId, "openclaw");
 assert.equal(store.remember(key, idem, [], "hermes"), false, "same key cannot change the original operation owner");
 assert.equal(store.read()[0].backendId, "openclaw");
@@ -82,10 +86,21 @@ assert.equal(isUncertainChatSendReceipt({ code: "UPSTREAM_CHANGED", admissionAcc
 assert.equal(isExplicitChatSendRejection({ code: "UPSTREAM_CHANGED", admissionAccepted: false }), true);
 assert.equal(isExplicitChatSendRejection({ code: "PLUGIN_SELECTION_UNAVAILABLE", receiptUncertain: true }), false);
 assert.equal(isExplicitChatSendRejection({ code: "PLUGIN_SELECTION_UNAVAILABLE" }), true);
+assert.equal(isExplicitChatSendRejection({ code: "CONNECTOR_SELECTION_UNAVAILABLE" }), true);
+assert.equal(isExplicitChatSendRejection({ code: "CONNECTOR_SELECTION_NEEDS_VERIFICATION" }), false);
 assert.equal(isExplicitChatSendRejection({ requestNotSent: true }), true);
 values.set(PENDING_CHAT_SENDS_KEY, "broken-json");
 assert.equal(store.remember(key, idem), false); assert.equal(values.get(PENDING_CHAT_SENDS_KEY), "broken-json");
 values.set(PENDING_CHAT_SENDS_KEY, JSON.stringify(Array.from({ length: 256 }, (_, index) => ({ key: `key-${index}`, idem: `op-${index}`, at: 1 }))));
 assert.equal(store.remember(key, idem), false);
+values.set(PENDING_CHAT_SENDS_KEY, JSON.stringify([{ key, idem, at: 1, backendId: "openclaw",
+  selection: [{ installationId: "old-plugin", revision: 2 }] }]));
+assert.equal(store.has(key), true);
+assert.equal(store.read()[0].selection, undefined);
+assert.equal(store.read()[0].legacySelection[0].installationId, "old-plugin");
+assert.equal(store.remember(key, "new-operation", ["connection-one"], "openclaw"), false,
+  "an uncertain legacy operation remains a send barrier after the cutover");
+assert.equal(store.accepted(key, idem), true);
+assert.equal(values.get(PENDING_CHAT_SENDS_KEY).includes("legacySelection"), true);
 console.log(JSON.stringify({ outcome: "PASS", checks: 12, ordinaryDispatchedUncertaintyNotRetryable: true, terminalObservationSurvivesReload: true, terminalReceiptLagRetained: true, originalBackendPinned: true, legacyRecordsRetained: true, newOperationOverwrite: false,
   replayPayloadStored: false, unresolvedNeverRetryable: true, ordinaryExternalUnchanged: true }));

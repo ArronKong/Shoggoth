@@ -97,6 +97,7 @@ export interface ChatHistoryController<TMessage> {
   open(key: string): Promise<void>;
   load(key: string): Promise<void>;
   markSend(key: string, messages?: TMessage[]): void;
+  updateLive(key: string, update: TMessage[] | ((previous: TMessage[]) => TMessage[])): void;
   markNeedsRevalidate(key: string): void;
   revalidateReady(readyAgentIds: Iterable<string>): Promise<void>;
   revalidateConnected(connectedBackends: Iterable<string>): Promise<void>;
@@ -322,6 +323,13 @@ export function createChatHistoryController<TMessage>(
     markSend: (key, messages) => {
       sendEpochs.set(key, (sendEpochs.get(key) ?? 0) + 1);
       if (Array.isArray(messages)) liveSnapshots.set(key, messages);
+    },
+    updateLive: (key, update) => {
+      const previous = liveSnapshots.get(key);
+      // Only a retained local send owns this snapshot. Observing a foreign run
+      // must not create a send fence or block its first canonical history load.
+      if (!previous || deletedKeys.has(key)) return;
+      liveSnapshots.set(key, typeof update === "function" ? update(previous) : update);
     },
     markNeedsRevalidate: (key) => {
       needsRevalidate.add(key);

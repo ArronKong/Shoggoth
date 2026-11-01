@@ -117,6 +117,15 @@ const upstreamUrl = `ws://127.0.0.1:${upstreamHttp.address().port}`;
 
 // --- proxy ------------------------------------------------------------------
 const registry = new BackendRegistry();
+// Routing-only fixture: the credential Service is exercised by its own actual
+// REST/Service acceptance. Supply the same dependency as the desktop registry.
+registry.setChatSecretOwner({ async chatSecretRequest(action, input) {
+  if (action !== "prepare") throw new Error("Unexpected secret action");
+  return { text: input.text, references: [], version: 1 };
+} });
+registry.register(new (class extends AgentBackend {
+  get id() { return "openclaw"; }
+})());
 const mockBackend = new MockBackend();
 registry.register(mockBackend);
 registry.register(new DelayedBackend());

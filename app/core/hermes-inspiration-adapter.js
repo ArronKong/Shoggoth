@@ -226,6 +226,7 @@ class HermesInspirationAdapter {
       },
       interim: text => {
         if (!this.#generationMatches(run) || TERMINAL.has(run.snapshot.status)) return;
+        run.activity.observeEvents([{ seq: ++run.activitySeq, type: "text.done", payload: { text, itemId: `paragraph:${run.publicParagraph}` } }], run.activity.streamGeneration);
         run.publicProgress.put(String(run.publicParagraph), text);
         run.publicParagraph++; run.draft = null;
         progress();
@@ -238,6 +239,8 @@ class HermesInspirationAdapter {
         if (errored) return this.#finish(run, snapshot("failed", "HERMES_EXECUTION_FAILED"));
         const value = snapshot(meta?.stopReason === "cancelled" ? "canceled" : "completed");
         run.finalText = typeof text === "string" && text.isWellFormed() && !text.includes("\0") ? text : null;
+        if (run.finalText) run.activity.observeEvents([{ seq: ++run.activitySeq, type: "text",
+          payload: { text: run.finalText, itemId: `paragraph:${run.publicParagraph}` } }], run.activity.streamGeneration);
         run.responseMetadata = gatewayResponseMetadata({ role: "assistant", model: meta?.model, usage: meta?.usage });
         value.resultSummary = resultSummary(text);
         this.#finish(run, value);

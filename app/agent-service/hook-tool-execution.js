@@ -1,6 +1,7 @@
 "use strict";
 const { digest, fail, object } = require("./hook-contract");
-const FACT_KEYS = new Set(["status", "success", "isError", "exitCode", "code", "id", "operationId", "artifactId", "callId"]);
+const FACT_KEYS = new Set(["status", "success", "isError", "exitCode", "code", "id", "operationId", "artifactId", "callId",
+  "phase", "outcome", "executionId", "retryAllowed", "connectionId", "actionId"]);
 function businessStatus(result, depth = 0) {
   if (result?.isError === true || result?.success === false || ["failed", "error", "canceled", "cancelled", "interrupted", "skipped"].includes(result?.status)
     || typeof result?.exitCode === "number" && result.exitCode !== 0) return "failed";
@@ -106,6 +107,12 @@ class HookToolExecution {
     }
     return result;
   }
+  failed(token) {
+    const record = this.#tokens.get(token);
+    if (!record) fail("HOOK_AUTHORITY_INVALID");
+    this.service.observe(record.snapshot, this.service.event(record.snapshot, record.run, "tool.after",
+      "tool-after:" + record.run.id + ":" + record.callId, { status: "failed" }, record.tool, record.callId));
+  }
   async execute(input, action) {
     const prepared = await this.before(input);
     if (prepared.requiresApproval) await this.approve(prepared.token);
@@ -113,9 +120,7 @@ class HookToolExecution {
     let result;
     try { result = await action(prepared.arguments, prepared); }
     catch (error) {
-      const record = this.#tokens.get(prepared.token);
-      this.service.observe(record.snapshot, this.service.event(record.snapshot, input.run, "tool.after",
-        "tool-after:" + input.run.id + ":" + input.callId, { status: "failed" }, input.tool, input.callId));
+      this.failed(prepared.token);
       throw error;
     }
     return this.after(prepared.token, result);

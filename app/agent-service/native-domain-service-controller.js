@@ -1,5 +1,7 @@
 "use strict";
 
+const { requiresConnectorMigration } = require("../core/legacy-plugin-dependency");
+
 const crypto = require("node:crypto");
 const {
   chunkDomainContent,
@@ -163,6 +165,7 @@ function cronJobDto(value, systemManaged = false) {
     enabled,
     profileId,
     promptMeta: dtoContentMeta(prompt),
+    connectorMigrationRequired: requiresConnectorMigration(value),
     ...(systemManaged ? { systemManaged: true } : {}),
     workspace,
     schedule,

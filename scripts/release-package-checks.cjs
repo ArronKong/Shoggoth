@@ -4,8 +4,8 @@
 // and the afterPack hook (App assembled, nothing signed yet). Internal builds
 // run from development checkouts, so nothing here assumes a fresh `npm ci` or
 // the public-source export. electron-builder exits 0 even when it drops
-// transitive dependencies (symlinked node_modules) or dotfiles that a bundled
-// plugin's frozen digest covers; both leave an App that fails at runtime.
+// transitive dependencies (symlinked node_modules) or frozen connector assets;
+// either can leave an App that fails at runtime.
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -102,33 +102,6 @@ function checkPackagedDependencies(appPath, { repo = REPO, arch }) {
     .map((pkg) => `${pkg.name}@${pkg.version} (${pkg.key}) is missing from the App`);
 }
 
-/** Runs the product's own install-time integrity check on every bundled plugin. */
-function checkBundledPlugins(root, { packaged = false } = {}) {
-  const { BundledPluginCatalog } = require("../app/core/bundled-plugin-catalog.js");
-  let catalog;
-  try { catalog = new BundledPluginCatalog(root); } catch (error) { return [`bundled plugin catalog: ${error.message}`]; }
-  const problems = [];
-  const ids = catalog.list().items.map(item => item.id).sort();
-  if (packaged) {
-    const rootEntries = fs.readdirSync(root).sort();
-    const expectedRoot = ids.length ? ["catalog.json", "packages"] : ["catalog.json"];
-    if (JSON.stringify(rootEntries) !== JSON.stringify(expectedRoot)) {
-      problems.push("bundled plugin resources contain unexpected files");
-    }
-    const packageRoot = path.join(root, "packages");
-    const packagedIds = fs.existsSync(packageRoot) ? fs.readdirSync(packageRoot).sort() : [];
-    if (JSON.stringify(packagedIds) !== JSON.stringify(ids)) {
-      problems.push("bundled plugin resources contain unexpected package directories");
-    }
-  }
-  for (const id of ids) {
-    try { catalog.assertCurrent(id); } catch (error) {
-      problems.push(`bundled plugin ${id} fails its install integrity check (${error.code || error.message})`);
-    }
-  }
-  return problems;
-}
-
 /** Preflight: repository content the App ships passes the release gates. */
 function checkPackagingInputs(repo = REPO) {
   const { scanDirectory } = require("./check-release-private-keys.cjs");
@@ -137,7 +110,8 @@ function checkPackagingInputs(repo = REPO) {
     try { scanDirectory(path.join(repo, dir)); } catch (error) { problems.push(`${dir}: ${error.message}`); }
   }
   return [...problems, ...require("../app/external-plugin-adapter-protocol").checkAdapterProtocols(
-    path.join(repo, "resources", "external-plugin-adapters")), ...checkBundledPlugins(path.join(repo, "resources", "bundled-plugins"))];
+    path.join(repo, "resources", "external-plugin-adapters")),
+    ...require("./connector-package-checks.cjs").checkConnectorBuildInputs(repo)];
 }
 
 if (require.main === module) {
@@ -159,7 +133,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  checkBundledPlugins,
   checkInstalledDependencies,
   checkPackagedDependencies,
   checkPackagingInputs,

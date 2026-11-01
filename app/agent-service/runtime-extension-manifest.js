@@ -46,17 +46,36 @@ class RuntimeExtensionCatalog {
     if (recoverInterruptedPrivateFile(this.file, { trustedRoot: this.paths.trustedRoot }) === "uncertain") throw fail();
     if (!lstatIfExists(this.file)) return [];
     const data = JSON.parse(readPrivateFile(this.file, { maxBytes: 1024 * 1024 }));
-    if (data.version !== 1 || !Array.isArray(data.entries) || data.entries.length > 32) throw fail();
+    if (!data || Object.keys(data).sort().join() !== "entries,version"
+      || data.version !== 1 || !Array.isArray(data.entries) || data.entries.length > 32) throw fail();
     const ids = new Set();
     return data.entries.map(entry => {
       if (!entry || Object.keys(entry).sort().join() !== "enabled,envelope,trustedKey" || typeof entry.enabled !== "boolean") throw fail();
       // Disabled entries retain their package metadata; changed/missing binaries
       // cannot prevent the user from disabling or uninstalling them.
       const id = entry.envelope?.manifest?.runtime;
-      if (!validRuntime(id) || ids.has(id)) throw fail(); ids.add(id);
+      if (!validRuntime(id) || !id.startsWith("ext-") || ids.has(id)) throw fail(); ids.add(id);
       if (verifyEnabled && entry.enabled) verifyManifest(entry.envelope, entry.trustedKey);
       return entry;
     });
+  }
+  // Preserve private-file transaction recovery; startup never rewrites catalog
+  // contents or erases historical accounts when a package becomes untrusted.
+  // Structural/private-file failures have no reliable package ownership, so
+  // isolate the whole catalog. A well-formed entry has an exact runtime owner;
+  // its signature or executable failure only isolates that enabled package.
+  loadEnabled() {
+    let entries;
+    try { entries = this.read({ verifyEnabled: false }); }
+    catch { return { entries: [], diagnostics: [{ scope: "catalog", code: "RUNTIME_EXTENSION_CATALOG_UNAVAILABLE" }] }; }
+    const loaded = [], diagnostics = [];
+    for (const entry of entries) {
+      if (!entry.enabled) continue;
+      try { loaded.push({ entry, manifest: verifyManifest(entry.envelope, entry.trustedKey) }); }
+      catch { diagnostics.push({ scope: "package", runtime: entry.envelope.manifest.runtime,
+        code: "RUNTIME_EXTENSION_UNTRUSTED" }); }
+    }
+    return { entries: loaded, diagnostics };
   }
   write(entries) { if (entries.length > 32) throw fail(); atomicWritePrivateFile(this.file,
     JSON.stringify({ version: 1, entries }) + "\n", { trustedRoot: this.paths.trustedRoot }); }

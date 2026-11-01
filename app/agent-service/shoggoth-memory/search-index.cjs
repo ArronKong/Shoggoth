@@ -9,6 +9,7 @@ const { MemorySourceFiles } = require("./source-files.cjs");
 const { MemoryIndexEmbedding } = require("./index-embedding.cjs");
 const { MemoryIndexRebuild } = require("./index-rebuild.cjs");
 const { MemoryIndexSearch } = require("./index-search.cjs");
+const { planCjkQueryTerms, scoreCjkCandidate, cjkQueryVariants } = require("./cjk-query.cjs");
 
 // The SQL schema and all retrieval/ranking policies come from the pinned core.
 // This owner supplies a derived local index and the Product embedding service.
@@ -204,8 +205,12 @@ class MemorySearchIndex {
     const cfg = this.getConfig();
     // E5 is a named Product adapter, not the upstream `local` GGUF plugin.
     // Keep the established offline default when no explicit provider is selected.
+    // Chinese and mixed text has no spaces. Trigram lets a short word match
+    // inside a sentence; an explicitly configured tokenizer still wins.
+    const search = cfg.memory?.search || {};
     const hostConfig = { ...cfg, memory: { ...cfg.memory, search: {
-      provider: this.embedding ? "shoggoth-e5" : "none", ...cfg.memory?.search } } };
+      provider: this.embedding ? "shoggoth-e5" : "none", ...search,
+      store: { ...search.store, fts: { tokenizer: "trigram", ...search.store?.fts } } } } };
     const resolved = this.host.run(() => core.resolveMemorySearchConfig(hostConfig, this.agentId));
     if (resolved && (!Number.isSafeInteger(resolved.query.maxResults) || resolved.query.maxResults < 1
       || resolved.query.maxResults > 200 || !Number.isFinite(resolved.query.minScore))) throw new TypeError("Invalid configured memory search limits");
@@ -548,13 +553,45 @@ class MemorySearchIndex {
 
   async keywordWorker(query, signal, includeIndexState = false) {
     signal?.throwIfAborted();
-    const body = await core.searchKeyword({ ...query.body, sourceFilter: this.constrainSourceFilter(query.body.sourceFilter, undefined), db: this.db });
+    const body = await this.keywordBody(query.body, signal);
     const paths = await core.searchPathKeyword({ ...query.path, sourceFilter: this.constrainSourceFilter(query.path.sourceFilter, query.path.pathFtsTable, "path"), db: this.db });
     signal?.throwIfAborted(); this.host.assertCurrent();
     const admitted = new Set(this.admitCandidates([...body, ...paths]).map(result => result.id));
     return { kind: "keyword", body: { rows: body.filter(result => admitted.has(result.id)) }, path: { rows: paths.filter(result => admitted.has(result.id)) },
       ...(includeIndexState ? { indexState: core.readMemoryRetrievalIndexState(this.db) } : {}),
       ...(query.includeRecallMetadata ? { recallData: this.recallMetadata({ candidates: [...body, ...paths] }) } : {}) };
+  }
+
+  // Records own recall signals that a completed user turn proved (see
+  // RecallSignals); the search itself never records. Stale results drop out.
+  async recordRecallSignals({ questionKey, results, nowMs }) {
+    if (!questionKey || !results.length) return;
+    await this.host.run(async () => {
+      await this.host.pruneUnavailableLibraryCandidates();
+      const current = results.filter(result => this.isCurrent(result));
+      if (current.length) await core.recordShortTermRecalls({ workspaceDir: this.workspaceDir, query: questionKey, results: current, nowMs });
+    });
+  }
+
+  // A short CJK word sits inside a long unsegmented token. The trigram index
+  // finds it as a substring, but the upstream score cannot see it. Search each
+  // planned term as well and score candidates by coverage; limits, sources,
+  // permissions and final ranking stay with the pinned core and the host.
+  async keywordBody(params, signal) {
+    const search = request => core.searchKeyword({ ...request, sourceFilter: this.constrainSourceFilter(request.sourceFilter, undefined), db: this.db });
+    const rows = await search(params);
+    const terms = params.ftsTokenizer === "trigram" ? planCjkQueryTerms(params.query) : [];
+    if (!terms.length) return rows;
+    const byId = new Map(rows.map(row => [row.id, row]));
+    for (const term of new Set(terms.flatMap(cjkQueryVariants))) {
+      signal?.throwIfAborted();
+      for (const row of await search({ ...params, query: term, rankingQuery: term })) if (!byId.has(row.id)) byId.set(row.id, row);
+    }
+    const text = this.db.prepare("SELECT text FROM memory_index_chunks WHERE id=?");
+    return [...byId.values()].map(row => {
+      const score = scoreCjkCandidate(text.get(row.id)?.text, terms);
+      return score > row.score ? { ...row, score } : row;
+    }).sort((left, right) => right.score - left.score).slice(0, params.limit);
   }
 
   admitCandidates(candidates) {

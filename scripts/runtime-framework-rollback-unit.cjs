@@ -51,7 +51,7 @@ test("all flags can be disabled after handoff without downgrading schemas, movin
   } finally { await f.close(); }
 });
 
-test("verified authority backup restores Product15, Chat8 and complete transcript into a new isolated directory", async () => {
+test("verified authority backup restores Product16, Chat8 and complete transcript into a new isolated directory", async () => {
   const f = await openHandoffFixture();
   let restoredProduct, restoredChat, restoredTranscript;
   try {
@@ -84,7 +84,7 @@ test("verified authority backup restores Product15, Chat8 and complete transcrip
     assert.deepEqual(restoredProduct.listWorkRuns(), runs);
     assert.deepEqual(restoredChat.listSessions(), sessions);
     assert.deepEqual(restoredTranscript.listEvents(f.profile.id, session.id), events);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(destinationStateDir, "state.snapshot.json"))).schemaVersion, 15);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(destinationStateDir, "state.snapshot.json"))).schemaVersion, 16);
     assert.equal(JSON.parse(fs.readFileSync(path.join(destinationStateDir, "chat-sessions.json"))).version, 8);
   } finally {
     restoredTranscript?.close(); restoredChat?.close(); restoredProduct?.close();

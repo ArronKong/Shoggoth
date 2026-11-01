@@ -1,5 +1,5 @@
 import "../i18n/promptCardResources";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatPromptEntry } from "./ChatPromptCard";
 import ChatPromptChoices from "./ChatPromptChoices";
@@ -16,13 +16,14 @@ function inputObject(value?: string): Record<string, unknown> {
   } catch { return {}; }
 }
 
-export default function ChatApprovalCard({ entry, submitting, onChoose, compact = false, agentName }: {
+export default function ChatApprovalCard({ entry, submitting, onChoose, compact = false, agentName, children }: {
   entry: ChatPromptEntry;
   submitting: boolean;
   onChoose: (choice: string) => void;
   compact?: boolean;
   /** Who is asking, e.g. "Antigravity"; falls back to a generic subject. */
   agentName?: string;
+  children?: ReactNode;
 }) {
   const { t, i18n } = useTranslation();
   const [selection, setSelection] = useState<{ id: string; choice: string } | null>(null);
@@ -137,6 +138,7 @@ export default function ChatApprovalCard({ entry, submitting, onChoose, compact 
   return (
     <section className={`chat-prompt chat-prompt--approval${selectionMode ? " chat-prompt--selection" : ""}${details?.kind === "file_change" ? " chat-prompt--file-change" : ""}`} aria-busy={submitting}>
       {compact ? <div className="chat-prompt__content">{content}</div> : content}
+      {children}
       {interrupted ? <div className="chat-prompt__desc" role="status">{t("chat.promptInterruptedApprovalHint")}</div>
         : <div className="chat-prompt__row chat-prompt__actions">
         {selectionMode ? <button type="button" className="chat-prompt__btn is-primary" disabled={submitting || !selected}

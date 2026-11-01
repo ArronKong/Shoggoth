@@ -2,7 +2,10 @@ import { fetchWithSsrFGuard as guardedFetch } from "upstream:src/infra/net/fetch
 import { memoryEmbeddingExecutionSignal, assertMemoryEmbeddingExecutionCurrent } from "./embedding-execution.ts";
 
 export async function fetchWithSsrFGuard(params: Parameters<typeof guardedFetch>[0]) {
-  const result = await guardedFetch({ ...params, signal: memoryEmbeddingExecutionSignal(params.signal ?? params.init?.signal) });
+  // Product transport policy: large verified model downloads get a larger
+  // finite budget; upstream hashing, SSRF protection and publication stay intact.
+  const timeoutMs = params.auditContext === "llama-cpp-download" ? 90 * 60_000 : params.timeoutMs;
+  const result = await guardedFetch({ ...params, timeoutMs, signal: memoryEmbeddingExecutionSignal(params.signal ?? params.init?.signal) });
   try { assertMemoryEmbeddingExecutionCurrent(); return result; }
   catch (error) {
     try { await result.response.body?.cancel(); } catch {}

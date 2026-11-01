@@ -207,7 +207,14 @@ function createRunEventStream(options = {}) {
     let snapshot;
     try {
       snapshot = canonicalJsonSnapshotBounded(value, byteLimit, tooLargeCode);
+      if (options.projectSnapshot) {
+        snapshot = canonicalJsonSnapshotBounded(callMutationCallback(() => options.projectSnapshot(
+          snapshot, Object.freeze({ ...context }))), byteLimit, tooLargeCode);
+      }
     } catch (error) {
+      if (Object.hasOwn(require("../core/chat-secret-contract").SECRET_MESSAGES, error?.code || "")) {
+        throw streamError(error.code, require("../core/chat-secret-contract").SECRET_MESSAGES[error.code]);
+      }
       if (["RUN_EVENT_TOO_LARGE", "RUN_EVENT_SNAPSHOT_TOO_LARGE"].includes(error?.code)) {
         throw error;
       }
@@ -220,6 +227,7 @@ function createRunEventStream(options = {}) {
       );
     } catch (error) {
       if (error?.code === "RUN_EVENT_REENTRANT") throw error;
+      if (error?.code === "credentials_locked") throw streamError("SECRET_PROCESSING_UNAVAILABLE", require("../core/chat-secret-contract").SECRET_MESSAGES.SECRET_PROCESSING_UNAVAILABLE);
       throw streamError("RUN_EVENT_SECRET_REJECTED", "Run event 未通过敏感信息检查");
     }
     if (accepted === false || consumeThenable(accepted)) {
@@ -426,6 +434,7 @@ function createRunEventStream(options = {}) {
 }
 
 module.exports = {
+  canonicalJsonSnapshotBounded,
   MAX_RUN_EVENT_BYTES,
   MAX_RUN_EVENT_COUNT,
   MAX_RUN_EVENT_TOTAL_BYTES,

@@ -395,11 +395,87 @@ test("an authorized initial lookup supplies native evidence before the first and
     assert.equal(history[0].result.results[0].citation, "MEMORY.md#L1");
     assert.equal(Object.hasOwn(history[0].result.results[0], "sourceHash"), false);
     assert.equal(f.rows()[0].events[0].message.details.results[0].sourceHash, "a".repeat(64), "full source receipt must remain available to native evidence");
-    assert.match(prompt, /partial grounded summary is useful/u);
+    assert.match(prompt, /Check each requested aspect/u);
+    assert.match(prompt, /memory_search arguments: required query \(string, at most 4096 characters\), optional maxResults and minScore; no other fields\./u);
+    assert.match(prompt, /memory_get arguments: required path from a returned result, optional from and lines; no other fields\./u);
+    assert.match(prompt, /checkpoint belongs beside tool and arguments, never inside arguments/u);
     return { text: '{"summary":"The amber telescope is in the observatory."}' };
   } });
   const native = await run(runtime); assert.equal(result(native).status, "ok");
   assert.equal(native.hasUsableMemoryResult, true); assert.equal(models, 1); assert.deepEqual(f.rows(), []);
+});
+
+test("multi-part recall keeps five-minute model budgets and combines facts after a focused follow-up", async t => {
+  const f = fixture(t), queries = [];
+  const { projectActiveMemoryDefaults } = require("../app/agent-service/active-memory-defaults");
+  const projected = projectActiveMemoryDefaults({ plugins: { entries: { "active-memory": { enabled: true, config: { mode: "always" } } } } }, ["one"]);
+  const config = core.normalizeActiveMemoryConfig(projected.plugins.entries["active-memory"].config, projected, ["memory_search", "memory_get"]);
+  const review = "Amber review is Wednesday 10:30 in the observatory. The engineering lead brings the calibration report, while the operator checks that the telescope is parked before the review begins.";
+  const release = "The revised release is Thursday 14:30 with Lin as owner; the Tuesday 09:00 slot with Zhao is obsolete. Rollback requires the signed calibration record.";
+  const summary = `${review} ${release}`;
+  assert.ok(summary.length > 220 && summary.length < 600);
+  let models = 0;
+  const { runtime } = f.create({ config, initialSearchQuery: "amber review and release", callTool: async (_name, args) => {
+    queries.push(args.query);
+    return { results: [{ path: "MEMORY.md", startLine: 1, endLine: 2, snippet: queries.length === 1 ? review : release }] };
+  }, complete: async ({ prompt, timeoutMs }) => {
+    assert.equal(timeoutMs, 310000, "native normalizer and model transport retain the full budget plus setup grace");
+    assert.match(prompt, /under 600 characters/u);
+    if (++models === 1) return { text: JSON.stringify({ tool: "memory_search", arguments: { query: "amber revised release owner rollback" }, checkpoint: review }) };
+    assert.match(prompt, /signed calibration record/u);
+    assert.ok(f.rows()[0].events.some(event => event.message.role === "assistant" && event.message.content[0].text === review));
+    return { text: JSON.stringify({ summary }) };
+  } });
+  const native = await run(runtime), value = core.buildSubagentRecallResult({ subagentResult: native, elapsedMs: 1, maxSummaryChars: config.maxSummaryChars });
+  assert.equal(value.status, "ok"); assert.equal(value.summary, summary);
+  assert.deepEqual(queries, ["amber review and release", "amber revised release owner rollback"]);
+  assert.equal(models, 2); assert.deepEqual(f.rows(), []);
+});
+
+test("recall checkpoints survive a later timeout only with grounding and never survive parent cancellation", async t => {
+  const f = fixture(t);
+  for (const mode of ["grounded", "ungrounded", "parent-cancel"]) {
+    const id = `${f.root}:checkpoint:${mode}`; t.after(() => core.forgetActiveRecallRun(id));
+    let models = 0;
+    const { runtime, controller } = f.create({ initialSearchQuery: "amber review", config: { ...f.config, timeoutMs: 120, setupGraceTimeoutMs: 0, circuitBreakerMaxTimeouts: 20 },
+      callTool: async () => ({ results: mode === "ungrounded" ? [] : [{ path: "MEMORY.md", startLine: 1, endLine: 1, snippet: "CHECKPOINT_AMBER review is Wednesday 10:30." }] }),
+      complete: async ({ signal }) => {
+        if (++models === 1) return { text: JSON.stringify({ tool: "memory_search", arguments: { query: "amber release owner" }, checkpoint: "CHECKPOINT_AMBER review is Wednesday 10:30; the release owner is still unknown." }) };
+        if (mode === "parent-cancel") controller.abort();
+        await new Promise((_resolve, reject) => {
+          if (signal.aborted) reject(signal.reason); else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      } });
+    const keepAlive = setTimeout(() => controller.abort(), 2000);
+    try {
+      if (mode === "parent-cancel") await assert.rejects(resolveNative(runtime, id, id));
+      else {
+        const value = await resolveNative(runtime, id, id);
+        assert.equal(value.status, mode === "grounded" ? "timeout_partial" : "timeout");
+        if (mode === "grounded") assert.match(value.summary, /CHECKPOINT_AMBER/u); else assert.equal(value.summary, null);
+      }
+      await runtime.settled; assert.deepEqual(f.rows(), []);
+      const statuses = f.database.db.prepare("SELECT value FROM memory_state WHERE namespace=? AND value IS NOT NULL").all(statusNamespace);
+      assert.ok(!JSON.stringify(statuses).includes("CHECKPOINT_AMBER"));
+    } finally { clearTimeout(keepAlive); }
+  }
+});
+
+test("checkpoint text cannot authorize a repeated search or an unknown tool field", async t => {
+  const f = fixture(t);
+  for (const invalid of ["repeat", "unknown-field", "invalid-checkpoint"]) {
+    let calls = 0, searches = 0;
+    const { runtime } = f.create({ callTool: async () => { searches++; return { results: [{ path: "MEMORY.md", snippet: "Amber is in the observatory." }] }; },
+      complete: async () => {
+        const action = { tool: "memory_search", arguments: { query: "amber telescope" } };
+        if (++calls > 1) {
+          action.checkpoint = invalid === "invalid-checkpoint" ? { summary: "not a string" } : "Amber is in the observatory.";
+          if (invalid === "unknown-field") action.execute = "forbidden";
+        }
+        return { text: JSON.stringify(action) };
+      } });
+    assert.equal(result(await run(runtime)).status, "failed"); assert.equal(searches, 1); assert.deepEqual(f.rows(), []);
+  }
 });
 
 test("initial lookup preserves tool opt-outs and cancellation cannot publish a late source", async t => {

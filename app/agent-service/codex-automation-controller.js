@@ -156,11 +156,11 @@ class CodexAutomationController {
     const cwd = fs.realpathSync(expanded);
     if (d.execution_environment === "local") return cwd;
     try {
-      const root = (await execFile("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 10000 })).stdout.trim();
+      const root = (await execFile("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 30000 })).stdout.trim();
       const target = path.join(this.paths.stateDir, "codex-automation-worktrees", hash(operationId));
       if (fs.existsSync(target)) fail("CODEX_AUTOMATION_COMMIT_UNCERTAIN");
       fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-      await execFile("git", ["-C", root, "worktree", "add", "--detach", target, "HEAD"], { timeout: 30000 });
+      await execFile("git", ["-C", root, "worktree", "add", "--detach", target, "HEAD"], { timeout: 120000 });
       return fs.realpathSync(target);
     } catch (error) { if (error.code?.startsWith("CODEX_AUTOMATION_")) throw error; fail("CODEX_AUTOMATION_WORKSPACE_UNAVAILABLE"); }
   }

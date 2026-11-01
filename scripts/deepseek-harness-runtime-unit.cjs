@@ -528,7 +528,7 @@ async function main() {
   const authEvent = bridge.mapEvent({ sessionId: "session-auth", turnId: "turn-auth" }, nativeAuthFailure)[0];
   assert.equal(authEvent.status, "failed");
   assert.equal(authEvent.errorCode, "RUNTIME_AUTH_REQUIRED");
-  assert.equal(JSON.stringify(authEvent).includes("private-credential-marker"), false);
+  assert.equal(authEvent.failure.message, nativeAuthFailure.data.reason.error.message, "private bridge retains only structured error fields for Host redaction");
   for (const error of [{ code: "AUTH" }, { code: "MISSING_CREDENTIAL" }, { status: 401 }]) {
     assert.equal(bridge.mapEvent({}, { type: "turn/end", data: { reason: { kind: "error", error } } })[0]
       .errorCode, "RUNTIME_AUTH_REQUIRED");
@@ -538,7 +538,7 @@ async function main() {
   } } })[0];
   assert.equal(nonAuth.status, "failed");
   assert.equal(nonAuth.errorCode, "NETWORK");
-  assert.equal(JSON.stringify(nonAuth).includes("private-credential-marker"), false);
+  assert.deepEqual(nonAuth.failure, { message: "private-credential-marker", httpStatus: 503, upstreamCode: "NETWORK" });
   for (const [kind, status] of [["completed", "completed"], ["max-tokens", "completed"], ["aborted", "interrupted"]]) {
     const event = bridge.mapEvent({}, { type: "turn/end", data: { reason: { kind } } })[0];
     assert.equal(event.status, status);

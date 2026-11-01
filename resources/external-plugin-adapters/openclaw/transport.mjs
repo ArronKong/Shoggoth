@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-const VERSION = 13; // Checked against the Service at registration and packaging.
+const VERSION = 27; // Checked against the Service at registration and packaging.
 const MAX_FRAME = 64 * 1024;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u;
 
@@ -142,7 +142,7 @@ export function request(method, params, { signal, timeoutMs = 10_000 } = {}) {
       if (error) reject(error); else resolve(value);
     };
     const onAbort = () => finish(new Error("Shoggoth adapter call canceled"));
-    const timer = setTimeout(() => finish(new Error("Shoggoth adapter request timed out")), timeoutMs);
+    const timer = setTimeout(() => finish(new Error("Shoggoth adapter request timed out")), timeoutMs === null ? 30_000 : timeoutMs);
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) { onAbort(); return; }
     socket.on("connect", () => {
@@ -152,6 +152,7 @@ export function request(method, params, { signal, timeoutMs = 10_000 } = {}) {
       if (current.dev !== before.dev || current.ino !== before.ino) {
         finish(new Error("Shoggoth Service socket changed")); return;
       }
+      if (timeoutMs === null) clearTimeout(timer);
       socket.write(frame);
     });
     socket.on("data", chunk => {

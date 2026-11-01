@@ -22,9 +22,10 @@ function measureComposition({ stableInstructions, turnInstructions, definitionTe
   historyDelivered, prompt = "", attachments = [] }) {
   const definitionTokens = estimateContextTokens(definitionText);
   const skillBodyTokens = blockTokens(blocks, ["skill"]);
+  const noticeTokens = blockTokens(blocks, ["notice"]);
   return {
     version: COMPOSITION_VERSION,
-    historyDelivered,
+    historyDelivered: historyDelivered || noticeTokens > 0,
     toolExposure,
     rulesTokens: Math.max(0, estimateContextTokens(stableInstructions) + estimateContextTokens(turnInstructions)
       - definitionTokens - skillBodyTokens),
@@ -32,7 +33,7 @@ function measureComposition({ stableInstructions, turnInstructions, definitionTe
     toolTokens: estimateContextTokens(JSON.stringify(tools)),
     memoryTokens: blockTokens(blocks, ["user", "memory", "hook-data"]),
     skillTokens: skillBodyTokens + blockTokens(blocks, ["skill-catalog"]),
-    historyTokens: historyDelivered ? blockTokens(blocks, ["transcript", "checkpoint", "handoff"]) : 0,
+    historyTokens: noticeTokens + (historyDelivered ? blockTokens(blocks, ["transcript", "checkpoint", "handoff"]) : 0),
     messageTokens: estimateContextTokens(prompt) + attachmentTokens(attachments),
     toolCount: tools.length,
   };

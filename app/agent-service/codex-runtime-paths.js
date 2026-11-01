@@ -290,6 +290,11 @@ function buildCodexSpawnEnv({ codexHome, parentEnv = process.env, spawnEnv = {},
   Object.assign(env, normalizeProxyEnvironment(Object.fromEntries(proxyKeys
     .filter(key => env[key] !== undefined).map(key => [key, env[key]])),
   () => runtimeError("CODEX_SPAWN_ENV_INVALID", "Codex proxy environment is invalid")));
+  // The credential projection gateway and local MCP endpoints are process-local.
+  // They must not send request bodies or local route tokens through a proxy.
+  const bypass = new Set((env.NO_PROXY || "").split(",").map(value => value.trim()).filter(Boolean));
+  for (const host of ["localhost", "127.0.0.1", "::1"]) bypass.add(host);
+  env.NO_PROXY = env.no_proxy = [...bypass].join(",");
   env.CODEX_HOME = codexHome;
   return Object.freeze(env);
 }

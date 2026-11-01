@@ -23,8 +23,8 @@ function bodyOf(detail: LearnedSkillDetail) {
     .replace(/^---\n[\s\S]*?\n---\n\n# [^\n]*\n\n/u, "").trimEnd();
 }
 
-export default function SelfImprovementPanel({ backend, agentId, skillSelection, onSelectionClosed, onSkillsChanged }: {
-  backend: string; agentId: string;
+export default function SelfImprovementPanel({ backend, agentId, skillSelection, onSelectionClosed, onSkillsChanged, detailOnly = false }: {
+  backend: string; agentId: string; detailOnly?: boolean;
   skillSelection?: { id: string; versionHash: string } | null;
   onSelectionClosed?: () => void; onSkillsChanged?: () => void;
 }) {
@@ -53,6 +53,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
   }, []);
   const load = useCallback(async () => {
     clearInspection();
+    if (detailOnly) return;
     const revision = ++epoch.current;
     const next = await api<LearningStatus>("status");
     if (!alive.current || revision !== epoch.current) return;
@@ -61,7 +62,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
     const [skillPage, history] = await Promise.all([api<LearningPage<LearnedSkill>>("skills"), api<LearningPage<LearningJob>>("history")]);
     if (!alive.current || revision !== epoch.current) return;
     setSkills(skillPage); setJobs(history); setError("");
-  }, [api, clearInspection]);
+  }, [api, clearInspection, detailOnly]);
   useEffect(() => {
     alive.current = true;
     void load().catch(cause => { if (alive.current) setError(errorText(cause)); });
@@ -120,12 +121,44 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
     if (!detail) return;
     await api("change", { skillId: detail.skill.id, expectedRevision: detail.skill.revision, action, ...extra });
     setDetail(null); setPrevious(null); setEditing(null); await load(); onSkillsChanged?.();
+    if (detailOnly) onSelectionClosed?.();
   });
   const resolve = (action: "accept" | "reject") => run(async () => {
     if (!proposal) return;
     await api("resolve", { jobId: proposal.id, expectedRevision: proposal.revision, action });
     setProposal(null); await load(); onSkillsChanged?.();
   });
+  const detailView = detail && <article className={`${styles.detail}${detailOnly ? ` ${styles.detailOnly}` : ""}`} ref={detailRef} aria-label="学习技能详情"><div className={styles.head}><h3>{detail.version.title}</h3>
+        <button className="btn-secondary" disabled={busy} onClick={() => {
+          clearInspection(); onSelectionClosed?.();
+        }}>关闭详情</button></div>
+        <p>{reasonText[detail.version.reason] ?? detail.version.reason}</p><small>版本 {detail.version.hash.slice(0, 12)} · {detail.usage.reads} 个任务读取 · {detail.version.sourceTaskCount} 个来源任务 / {detail.version.sourceEventCount} 条证据</small>
+        <p className="muted">进入候选 {detail.usage.exposures} 次 · 显式选择 {detail.usage.selections} 次 · 含纠正信号的任务 {detail.usage.correctionSignals} 个。
+          使用与任务结果只表示关联，不代表技能导致成功或失败。</p>
+        {editing !== null ? <Field label="编辑方法正文" hint="保存后转为用户管理，后台不再自动覆盖。"><TextArea rows={12} value={editing}
+          onChange={event => setEditing(event.target.value)} disabled={busy} /></Field> : <div className={styles.diff}>
+          {previous && <div><h4>上一版本</h4><pre>{bodyOf(previous)}</pre></div>}<div><h4>{previous ? "当前查看的版本" : "方法正文"}</h4><pre>{bodyOf(detail)}</pre></div></div>}
+        {detail.files.filter(file => file.path !== "SKILL.md").map(file => <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
+        <details><summary>来源任务{detail.version.sourceTaskCount > detail.version.sources.length ? `（显示前 ${detail.version.sources.length} 个）` : ""}</summary>
+          <ul>{detail.version.sources.map(source => <li key={source.runId}><code>{source.runId}</code></li>)}</ul></details>
+        <div className={styles.actions}>{editing !== null ? <><button className="btn-primary" disabled={busy || !editing.trim()} onClick={() => change("edit", { body: editing })}>保存并转为用户管理</button>
+          <button className="btn-secondary" disabled={busy} onClick={() => setEditing(null)}>取消编辑</button></> : <>
+          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.pinned ? "unpin" : "pin")}>{detail.skill.pinned ? "取消固定" : "固定技能"}</button>
+          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.archived ? "restore" : "archive")}>{detail.skill.archived ? "恢复技能" : "归档技能"}</button>
+          {detail.skill.owner === "managed" && <button className="btn-secondary" disabled={busy} onClick={() => change("adopt")}>转为用户管理</button>}
+          <button className="btn-secondary" disabled={busy || detail.version.hash !== detail.skill.head} onClick={() => setEditing(bodyOf(detail))}>编辑正文</button>
+          {detail.version.hash !== detail.skill.head && <button className="btn-primary" disabled={busy} onClick={() => change("revert", { versionHash: detail.version.hash })}>恢复为此版本</button>}
+        </>}</div>
+        <details><summary>最近 10 个版本</summary><div className={styles.list}>{detail.history.map(version => <button key={version.hash} className={styles.item}
+          disabled={busy || version.revoked} onClick={() => void run(() => choose(detail.skill, version.hash))}>
+          <span>{version.hash.slice(0, 12)} · {date(version.createdAt)}{version.revoked ? " · 已撤回" : ""}</span><small>{reasonText[version.reason] ?? version.reason}</small></button>)}</div></details>
+        <details><summary>变更记录</summary><ul>{detail.changes.map(change => <li key={change.id}>
+          {date(change.createdAt)} · {({ create: "创建", patch: "更新", pin: "固定", unpin: "取消固定", archive: "归档", restore: "恢复", adopt: "转为用户管理", edit: "编辑", revert: "恢复旧版本", withdraw: "来源撤回" } as Record<string, string>)[change.action] ?? change.action}
+          {` · ${change.actor === "user" ? "用户操作" : change.actor === "curator" ? "闲置整理" : "自动学习"}`}</li>)}</ul></details>
+      </article>;
+  if (detailOnly) return detail || error ? <aside className="skill-detail">
+    {error && <p className="error" role="alert">{error}</p>}{detailView}
+  </aside> : null;
   if (status?.supported === false) return null;
   const visibleSkills = skills?.items.filter(skill => filter === "all" || (filter === "archived" ? skill.archived : !skill.archived));
   return <section className={styles.panel} aria-label="自动学习">
@@ -218,34 +251,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
         <div className={styles.actions}><button className="btn-primary" disabled={busy} onClick={() => resolve("accept")}>接受并保存</button>
           <button className="btn-secondary" disabled={busy} onClick={() => resolve("reject")}>拒绝提案</button>
           <button className="btn-secondary" onClick={clearInspection}>关闭</button></div></article>}
-      {detail && <article className={styles.detail} ref={detailRef} aria-label="学习技能详情"><div className={styles.head}><h3>{detail.version.title}</h3>
-        <button className="btn-secondary" disabled={busy} onClick={() => {
-          clearInspection(); onSelectionClosed?.();
-        }}>关闭详情</button></div>
-        <p>{reasonText[detail.version.reason] ?? detail.version.reason}</p><small>版本 {detail.version.hash.slice(0, 12)} · {detail.usage.reads} 个任务读取 · {detail.version.sourceTaskCount} 个来源任务 / {detail.version.sourceEventCount} 条证据</small>
-        <p className="muted">进入候选 {detail.usage.exposures} 次 · 显式选择 {detail.usage.selections} 次 · 含纠正信号的任务 {detail.usage.correctionSignals} 个。
-          使用与任务结果只表示关联，不代表技能导致成功或失败。</p>
-        {editing !== null ? <Field label="编辑方法正文" hint="保存后转为用户管理，后台不再自动覆盖。"><TextArea rows={12} value={editing}
-          onChange={event => setEditing(event.target.value)} disabled={busy} /></Field> : <div className={styles.diff}>
-          {previous && <div><h4>上一版本</h4><pre>{bodyOf(previous)}</pre></div>}<div><h4>{previous ? "当前查看的版本" : "方法正文"}</h4><pre>{bodyOf(detail)}</pre></div></div>}
-        {detail.files.filter(file => file.path !== "SKILL.md").map(file => <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
-        <details><summary>来源任务{detail.version.sourceTaskCount > detail.version.sources.length ? `（显示前 ${detail.version.sources.length} 个）` : ""}</summary>
-          <ul>{detail.version.sources.map(source => <li key={source.runId}><code>{source.runId}</code></li>)}</ul></details>
-        <div className={styles.actions}>{editing !== null ? <><button className="btn-primary" disabled={busy || !editing.trim()} onClick={() => change("edit", { body: editing })}>保存并转为用户管理</button>
-          <button className="btn-secondary" disabled={busy} onClick={() => setEditing(null)}>取消编辑</button></> : <>
-          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.pinned ? "unpin" : "pin")}>{detail.skill.pinned ? "取消固定" : "固定技能"}</button>
-          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.archived ? "restore" : "archive")}>{detail.skill.archived ? "恢复技能" : "归档技能"}</button>
-          {detail.skill.owner === "managed" && <button className="btn-secondary" disabled={busy} onClick={() => change("adopt")}>转为用户管理</button>}
-          <button className="btn-secondary" disabled={busy || detail.version.hash !== detail.skill.head} onClick={() => setEditing(bodyOf(detail))}>编辑正文</button>
-          {detail.version.hash !== detail.skill.head && <button className="btn-primary" disabled={busy} onClick={() => change("revert", { versionHash: detail.version.hash })}>恢复为此版本</button>}
-        </>}</div>
-        <details><summary>最近 10 个版本</summary><div className={styles.list}>{detail.history.map(version => <button key={version.hash} className={styles.item}
-          disabled={busy || version.revoked} onClick={() => void run(() => choose(detail.skill, version.hash))}>
-          <span>{version.hash.slice(0, 12)} · {date(version.createdAt)}{version.revoked ? " · 已撤回" : ""}</span><small>{reasonText[version.reason] ?? version.reason}</small></button>)}</div></details>
-        <details><summary>变更记录</summary><ul>{detail.changes.map(change => <li key={change.id}>
-          {date(change.createdAt)} · {({ create: "创建", patch: "更新", pin: "固定", unpin: "取消固定", archive: "归档", restore: "恢复", adopt: "转为用户管理", edit: "编辑", revert: "恢复旧版本", withdraw: "来源撤回" } as Record<string, string>)[change.action] ?? change.action}
-          {` · ${change.actor === "user" ? "用户操作" : change.actor === "curator" ? "闲置整理" : "自动学习"}`}</li>)}</ul></details>
-      </article>}
+      {detailView}
     </>}
   </section>;
 }

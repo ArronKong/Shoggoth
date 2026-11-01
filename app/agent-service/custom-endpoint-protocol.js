@@ -30,7 +30,8 @@ function validateCustomEndpointResult(method, value) {
       discoverModels: false, profiles: [...entry.profiles], activeIn: [...entry.activeIn] };
   });
   return { supported: true, profiles: [...value.profiles], endpoints,
-    form: { apiOptions: ["openai-responses"], defaultApi: "openai-responses", nameEditable: false, firstModelIsDefault: true } };
+    // Saving adds models to the chat menu; it does not choose the assistant default.
+    form: { apiOptions: ["openai-responses"], defaultApi: "openai-responses", nameEditable: false, firstModelIsDefault: false } };
 }
 
 module.exports = { validateCustomEndpointResult };

@@ -314,13 +314,11 @@ class HookStore {
       .filter(item => item.definition.scope.sources.includes(run.source) && (item.definition.scope.workspace === null || item.definition.scope.workspace === run.workspace))
       .filter(item => onlyEvent === null || item.definition.kind === "observe" && item.definition.event === onlyEvent)
       .filter(item => onlyEvent === null || this.row(run.profileId, item.hookId).updated_at <= run.finishedAt);
-    if (!["compaction", "proactive"].includes(run.source)) entries.push(...(this.pluginHooks?.entriesForRun(run) || [])
-      .filter(item => onlyEvent === null || item.definition.kind === "observe" && item.definition.event === onlyEvent && item.activatedAt <= run.finishedAt));
     if (entries.length > HOOK_LIMITS.perProfile) fail("HOOK_CAPACITY");
     for (const item of entries) {
       assertSupported(item.definition);
-      if (item.owner === "plugin") this.pluginHooks.assertCurrent({ profileId: run.profileId }, item);
-      else if (!this.isGranted(item.hookId, item.version, item.epoch, item.definition)) fail("HOOK_GRANT_REQUIRED");
+      if (item.owner === "plugin") fail("HOOK_PLUGIN_UNAVAILABLE");
+      if (!this.isGranted(item.hookId, item.version, item.epoch, item.definition)) fail("HOOK_GRANT_REQUIRED");
     }
     const snapshot = { id: "hook-snapshot-" + this.randomUUID(), runId: run.id, profileId: run.profileId, createdAt: this.now(),
       workspace: run.workspace, source: run.source, incarnation: this.incarnation, capabilities, entries };
@@ -339,8 +337,7 @@ class HookStore {
     return { ...snapshot, entries: snapshot.entries.map(entry => {
       if (entry.owner === "plugin") {
         try {
-          if (!this.pluginHooks) fail("HOOK_PLUGIN_UNAVAILABLE");
-          return this.pluginHooks.hydrate(entry, snapshot);
+          fail("HOOK_PLUGIN_UNAVAILABLE");
         } catch (error) {
           // Only the durable observer outbox may discard an unavailable
           // immutable package. Mandatory Run hydration still fails closed.
@@ -367,10 +364,6 @@ class HookStore {
       .filter(entry => entry.definition.kind === "observe" && entry.definition.event === event
         && entry.definition.scope.sources.includes("chat")
         && (entry.definition.scope.workspace === null || entry.definition.scope.workspace === session.workspace));
-    entries.push(...(this.pluginHooks?.entriesForRun({ profileId: session.profileId, workspace: session.workspace, source: "chat" }) || [])
-      .filter(item => item.definition.kind === "observe" && item.definition.event === event
-        && (event !== "session.created" || item.activatedAt <= session.createdAt)
-        && (event !== "session.closed" || item.activatedAt <= session.updatedAt)));
     if (entries.length > HOOK_LIMITS.perProfile) fail("HOOK_CAPACITY");
     const snapshot = { id: snapshotId, runId: null, profileId: session.profileId, workspace: session.workspace,
       source: "chat", incarnation: this.incarnation, createdAt: this.now(), capabilities, entries };
@@ -379,8 +372,7 @@ class HookStore {
   assertCurrent(snapshot, entry) {
     this.ready();
     if (entry.owner === "plugin") {
-      if (snapshot.incarnation !== this.incarnation || !this.pluginHooks) fail("HOOK_REVOKED");
-      return this.pluginHooks.assertCurrent(snapshot, entry);
+      fail("HOOK_REVOKED");
     }
     const row = this.db.prepare("SELECT * FROM hooks WHERE id=?").get(entry.hookId);
     if (snapshot.incarnation !== this.incarnation || !row || row.removed || row.active === null

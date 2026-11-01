@@ -12,7 +12,7 @@ if (!process.versions.electron) {
     buildSync({ stdin: { contents: `import {toSanitizedMarkdownHtml} from ${JSON.stringify(path.join(src, "markdown.ts"))};
       import {installHtmlArtifacts,setHtmlArtifactScope,setSendPromptHandler} from ${JSON.stringify(path.join(src, "htmlArtifacts.ts"))};
       window.policy={render:toSanitizedMarkdownHtml,install:installHtmlArtifacts,scope:setHtmlArtifactScope,handler:setSendPromptHandler};`,
-      resolveDir: root }, bundle: true, platform: "browser", format: "iife", loader: { ".css": "empty" }, outfile: path.join(dir, "policy.js") });
+      resolveDir: root }, bundle: true, platform: "browser", format: "iife", loader: { ".css": "empty", ".png": "dataurl" }, outfile: path.join(dir, "policy.js") });
     const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
     const result = require("node:child_process").spawnSync(process.env.NATIVE_CHAT_UI_ELECTRON || require("electron"), [__filename, "--fixture", dir], { env, stdio: "inherit", timeout: 30000 });
     assert.equal(result.status, 0, String(result.error || result.signal || "source policy failed"));

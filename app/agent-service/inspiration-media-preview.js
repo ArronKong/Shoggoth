@@ -44,7 +44,7 @@ async function convertPreview(source, target, attachment, paths) {
     const args = isVideo(attachment)
       ? ["--source", source, "--preset", "PresetAppleM4V720pHD", "--output", output]
       : ["-s", "format", "jpeg", "-s", "formatOptions", "88", "-Z", "2048", source, "--out", output];
-    await run(command, args, { timeout: 120_000, maxBuffer: 64 * 1024 });
+    await run(command, args, { timeout: 600_000, maxBuffer: 64 * 1024 });
     fs.chmodSync(output, 0o600);
     const data = readPrivateFile(output, { maxBytes: isVideo(attachment) ? MAX_VIDEO_BYTES : MAX_MEDIA_BYTES });
     const valid = data && (isVideo(attachment) ? data.toString("ascii", 4, 8) === "ftyp" : data.subarray(0, 3).equals(Buffer.from("ffd8ff", "hex")));

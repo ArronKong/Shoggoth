@@ -5,8 +5,6 @@ import { useInspirationReturnTarget } from "./lib/inspiration-navigation";
 import agentsIcon from "./assets/nav-icons/agents.svg";
 import inspirationIcon from "./assets/nav-icons/inspiration.svg";
 import chatIcon from "./assets/nav-icons/chat.svg";
-import cliIcon from "./assets/nav-icons/cli.svg";
-import componentsIcon from "./assets/nav-icons/components.svg";
 import cronIcon from "./assets/nav-icons/cron.svg";
 import dashboardIcon from "./assets/nav-icons/dashboard.svg";
 import modelsIcon from "./assets/nav-icons/models.svg";
@@ -50,7 +48,8 @@ const TasksPage = lazy(() => import("./pages/FederatedTasksPage"));
 const ModelsPage = lazy(() => import("./pages/ModelsPage"));
 const UsagePage = lazy(() => import("./pages/UsagePage"));
 const SkillsPage = lazy(() => import("./pages/SkillsPage"));
-const PluginsPage = lazy(() => import("./pages/PluginsPage"));
+const McpApprovalInbox = lazy(() => import("./components/McpApprovalInbox"));
+const ConnectorsPage = lazy(() => import("./pages/ConnectorsPage"));
 const CliPage = lazy(() => import("./pages/CliPage"));
 const AgentsPage = lazy(() => import("./pages/AgentsPage"));
 const GlassLab = lazy(() => import("./pages/GlassLab"));
@@ -59,9 +58,11 @@ const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 type NavEntry = { to: string; labelKey: string; iconSrc: string };
 
-// 顶部导航顺序 = Figma 7036:1497 自上而下（Components 是设计图之外的自建页，垫在 CLI 之后）。
+// 顶部导航顺序 = Figma 7036:1497 自上而下。
 // 看板暂时移出主导航；/tasks 页面及内部深链保留，恢复步骤见 docs/kanban-resume.md。
 // 玻璃实验台暂时移出主导航；保留 /glass 页面，方便后续恢复入口。
+// 本版本暂时隐藏 CLI 导航入口；保留 /cli 页面，方便后续恢复入口。
+// 组件展厅暂时移出主导航；保留 /components 页面，方便后续恢复入口。
 const PRIMARY_NAV: NavEntry[] = [
   { to: "/dashboard", labelKey: "nav.dashboard", iconSrc: dashboardIcon },
   { to: "/chat", labelKey: "nav.chat", iconSrc: chatIcon },
@@ -71,9 +72,7 @@ const PRIMARY_NAV: NavEntry[] = [
   { to: "/token", labelKey: "nav.token", iconSrc: tokenIcon },
   { to: "/models", labelKey: "nav.models", iconSrc: modelsIcon },
   { to: "/skills", labelKey: "nav.skills", iconSrc: skillsIcon },
-  { to: "/plugins", labelKey: "nav.plugins", iconSrc: pluginsIcon },
-  { to: "/cli", labelKey: "nav.cli", iconSrc: cliIcon },
-  { to: "/components", labelKey: "nav.components", iconSrc: componentsIcon },
+  { to: "/connectors", labelKey: "nav.connectors", iconSrc: pluginsIcon },
 ];
 
 // 设置入口固定在导航栏底部，匹配 Figma 中独立贴底的齿轮按钮。
@@ -386,6 +385,7 @@ export default function App() {
           <div className="nav-bottom">{BOTTOM_NAV.map((entry) => <GuardedNavLink key={entry.to} entry={entry} label={t(entry.labelKey)} />)}</div>
         </nav>
       </aside>
+      <Suspense fallback={null}><McpApprovalInbox /></Suspense>
       <main className="content">
         {/* 常驻保活：display:contents 让 .chat-shell 仍是 .content 的直接子（不破坏其 grid/flex 布局），隐藏时彻底不占位。 */}
         {(chatMounted || onChat) && (
@@ -417,7 +417,8 @@ export default function App() {
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/token" element={<UsagePage />} />
               <Route path="/skills" element={<SkillsPage />} />
-              <Route path="/plugins" element={<PluginsPage />} />
+              <Route path="/connectors" element={<ConnectorsPage />} />
+              <Route path="/plugins/*" element={<Navigate to="/connectors?legacy=1" replace />} />
               <Route path="/cli" element={<CliPage />} />
               <Route path="/models" element={<ModelsPage />} />
               <Route path="/glass" element={<GlassLab />} />

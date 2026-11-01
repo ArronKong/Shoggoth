@@ -75,6 +75,8 @@ state.fetch = async (url: unknown) => {
   const path = String(url);
   const payload = path.includes("/__api/status") ? { backends: [{ id: backend, connected: true }] }
     : path.includes("/__api/backends") ? { backends: [] }
+    : path.includes("/__api/group-chats") ? { groups: [], enabled: true, internalSessions: [] }
+    : path.includes("/__api/connectors/mcp/requests") ? { items: [] }
     : path.includes("runtime-models") ? { selection: { bindingId: "fixture", runtime, model: null, canSwitch: false, candidates: [] }, capabilities: { attachments: {}, slash: false }, models: [], runtimes: [] }
     : path.includes("/archive") ? { archive: { supported: true, segments: [] } } : {};
   return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
@@ -395,6 +397,15 @@ state.runNestedToolHistoryFixture = async () => {
 // Compaction follows the real ChatPage WS path, including status-only turns.
 state.runCompactionFixture = async () => {
   await wait(() => thread()?.textContent?.includes(intro.content) && state.socket, "ChatPage history");
+  history = [intro, { id: "native-compact-receipt", role: "assistant", timestamp: now + 1,
+    notice: "contextCompacted", content: [{ type: "text", text: "Context compacted", semanticType: "contextCompaction" }],
+    shoggoth: { sourceEventId: "native-compact-receipt", contextExcluded: true } }];
+  state.socket.emit({ type: "event", event: "session.message", payload: { sessionKey: key } });
+  await wait(() => thread().textContent?.includes(i18n.t("chat.compactedCtx")), "saved native completion history");
+  check(Array.from(thread().querySelectorAll(".chat-reset-divider__label"))
+    .some(node => node.textContent === i18n.t("chat.compactedCtx")), "saved native completion uses a localized history notice");
+  check(!Array.from(thread().querySelectorAll(".chat-bubble")).some(node => node.textContent === "Context compacted"),
+    "a compaction receipt is not fabricated model output");
   const status = (statusKind: string, message?: string, sessionKey = key) => state.socket.emit({ type: "event", event: "chat",
     payload: { sessionKey, backendId: backend, runId: "compaction-run", state: "status", statusKind, text: message } });
   const rows = () => Array.from(thread().querySelectorAll<HTMLButtonElement>("button"))

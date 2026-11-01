@@ -358,7 +358,9 @@ function fixture(behavior = {}) {
   const revocations = [];
   let reservation = 0;
   const mcpGateIssuer = {
-    reserveMcpServer() {
+    reserveMcpServer(input) {
+      assert.equal(input.parentLauncherExecutable, "/bin/sh",
+        "Claude Code must reserve its waiting shell before bind releases fd 3");
       reservation += 1;
       const reservationId = reservation.toString(16).padStart(64, "0");
       return {

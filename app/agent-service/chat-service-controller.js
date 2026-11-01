@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { validResponseMetadata } = require("../chat-response-metadata");
 const { publicCronTranscript } = require("./cron-output-policy");
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { managedChatWorkspace } = require("./chat-workspace");
 const {
   federationInputProvenanceForOperationId,
@@ -85,6 +86,8 @@ function runtimeSessionIdOf(session) {
 }
 
 function transcriptMessageText(event) {
+  if (event.kind === "user" && event.content?.transcriptType === "interaction.response"
+    && typeof event.content.displayText === "string") return event.content.displayText;
   if (typeof event.content?.text === "string") return event.content.text;
   if (typeof event.content?.message === "string") return event.content.message;
   if (typeof event.content?.explanation === "string") return event.content.explanation;
@@ -142,6 +145,10 @@ function transcriptMessage(event, role, content) {
       contextExcluded: event.contextExcluded,
       ...(role === "user" && event.content?.attachments?.length
         ? { attachments: structuredClone(event.content.attachments) } : {}),
+      ...(role === "user" && event.content?.connectorSelection?.length
+        ? { connectorSelection: structuredClone(event.content.connectorSelection) } : {}),
+      ...(role === "user" && event.content?.connectorSelectionSnapshot?.length
+        ? { connectorSelectionSnapshot: structuredClone(event.content.connectorSelectionSnapshot) } : {}),
       ...(role === "user" && event.content?.pluginSelection?.length
         ? { pluginSelection: structuredClone(event.content.pluginSelection) } : {}),
       ...(role === "user" && event.content?.pluginSelectionSnapshot?.length
@@ -178,9 +185,24 @@ function transcriptHistoryItem(event, runSource) {
     role = "system";
     type = "error";
     message = transcriptMessage(event, role, [{ type: "text", text }]);
+    if (transcriptType === "terminal") {
+      const failure = runtimeFailureDetail(event.content.failure);
+      if (failure) { message.failure = failure; message.errorCode = event.content.errorCode; }
+    }
     if (transcriptType === "terminal" && isRestartInterruption(event.content)) {
       message.notice = "runInterrupted";
     }
+  } else if (event.kind === "status" && transcriptType === "context.native.compacted"
+    && event.contextExcluded === true && typeof event.content.runtimeSessionId === "string"
+    && event.content.runtimeSessionId.length > 0) {
+    // This durable boundary is written only after native replacement succeeds.
+    // Keep it visible across reload without inventing an assistant reply or
+    // promoting an acknowledgement, start event or terminal Run into success.
+    role = "assistant";
+    type = "status";
+    message = transcriptMessage(event, role, [{ type: "text", text: "Context compacted",
+      semanticType: "contextCompaction" }]);
+    message.notice = "contextCompacted";
   } else if (transcriptType === "reasoning") {
     const text = transcriptStructuredText(event.content?.reasoning);
     if (!text) return null;
@@ -265,6 +287,23 @@ function transcriptHistoryItem(event, runSource) {
   };
 }
 
+// Older command compactions wrote an unbound native receipt immediately
+// followed by a second command receipt. Hide only that exact producer pair;
+// keep the journal, distinct native cycles and all intervening turns intact.
+function withoutLegacyCompactionDuplicates(events) {
+  const { transcriptEventId } = require("./transcript-store");
+  return events.filter((event, index) => {
+    const previous = events[index - 1];
+    return !(event.content?.transcriptType === "context.native.compacted" && event.contextExcluded === true
+      && event.runId && event.id === transcriptEventId("native-context-compacted", event.runId, "command")
+      && previous?.content?.transcriptType === "context.native.compacted" && previous.contextExcluded === true
+      && previous.runId === null && !previous.content.compactionId && !event.content.compactionId
+      && previous.content.runtimeSessionId === event.content.runtimeSessionId
+      && event.seq === previous.seq + 1 && event.occurredAt >= previous.occurredAt
+      && event.occurredAt - previous.occurredAt < 1000);
+  });
+}
+
 function paginateTranscriptEvents(options) {
   const { params, responseId, cursorCodec } = options;
   // One footer per native response, even when it has several text/tool/UI
@@ -286,6 +325,8 @@ function paginateTranscriptEvents(options) {
     || (event.kind === "input" && mcpElicitationUsesApprovalWait(event.content));
   const requestKey = (event) => JSON.stringify([event.runId, event.content?.requestId]);
   const approvalRequests = new Set(options.events.filter(isApproval).map(requestKey));
+  const inputRequests = new Map(options.events.filter(event => event.kind === "input" && !isApproval(event))
+    .map(event => [requestKey(event), event]));
   const query = {
     method: "chat.history",
     params: { sessionKey: params.sessionKey, limit: params.limit, ...(params.auditRunId ? { auditRunId: params.auditRunId } : {}) },
@@ -307,7 +348,24 @@ function paginateTranscriptEvents(options) {
     .filter((event) => !isApproval(event)
       && !(event.content?.transcriptType === "interaction.response" && approvalRequests.has(requestKey(event))))
     .flatMap((event) => {
-      const item = transcriptHistoryItem(options.resolveDisplay?.(event) || event, options.getRunSource?.(event.runId));
+      let display = options.resolveDisplay?.(event) || event;
+      const request = inputRequests.get(requestKey(event));
+      // Older replies only stored the technical envelope. Strip it only when
+      // its exact Run/request proves a single field; ordinary user prose and
+      // ambiguous multi-field legacy answers retain their original text.
+      if (event.kind === "user" && event.content?.transcriptType === "interaction.response" && request
+        && event.content.displayText === undefined && typeof event.content.text === "string") {
+        try {
+          const normalized = normalizeInteractiveRequestV1({ runId: event.runId, eventType: "prompt", payload: request.content });
+          const field = normalized.fields.length === 1 ? normalized.fields[0] : null;
+          const prefix = field ? `补充：${field.id}: ` : null;
+          const value = prefix && event.content.text.startsWith(prefix) ? event.content.text.slice(prefix.length) : null;
+          const text = event.content.text === "补充：取消补充" ? "取消补充" : value === null ? null
+            : field.secret ? "[隐藏]" : field.options.find(option => option.value === value)?.label ?? value;
+          if (text !== null) display = { ...display, content: { ...display.content, displayText: text } };
+        } catch { /* A missing/redacted schema never authorizes text rewriting. */ }
+      }
+      const item = transcriptHistoryItem(display, options.getRunSource?.(event.runId));
       if (item && finalTextByRun.get(event.runId)?.id === event.id) {
         const metadata = savedMetadata.get(event.runId) ?? options.getResponseMetadata?.(event.runId);
         if (metadata) item.payload.message.responseMetadata = metadata;
@@ -534,6 +592,10 @@ function createChatServiceController(options = {}) {
         params.sessionKey, params.operationId, params.createdAt,
       );
     } else {
+      // Revocation precedes the existing durable delete request. A failed
+      // revocation cannot leave an invisible, still-usable chat credential.
+      const deleting = chatSessionStore.getSession(params.sessionKey);
+      if (deleting && options.revokeSessionSecrets) await options.revokeSessionSecrets(deleting);
       operation = chatSessionStore.requestDelete(
         params.sessionKey, params.operationId, params.createdAt,
       );
@@ -765,7 +827,7 @@ function createChatServiceController(options = {}) {
     return paginateTranscriptEvents({
       params, responseId, cursorCodec,
       events: params.auditRunId ? events.filter(event => event.runId === params.auditRunId)
-        : publicCronTranscript(events, runId => coordinator.getCronOutput?.(runId, events)),
+        : publicCronTranscript(withoutLegacyCompactionDuplicates(events), runId => coordinator.getCronOutput?.(runId, events)),
       resolveDisplay: event => transcriptStore.displayEvent(session.profileId, session.id, event),
       getRunSource: runId => coordinator.getRun(runId)?.source,
       getResponseMetadata: runId => coordinator.getRunMessageMetadata?.(runId, { profileId: session.profileId, sessionKey: session.sessionKey }, events),
@@ -994,11 +1056,11 @@ function createChatServiceController(options = {}) {
       throw controllerError("THREAD_ACTIVE_TURN_CONFLICT", "ChatSession 已有待执行任务");
     }
     if (/^\/compact\s*$/u.test(params.text.trim())) {
-      const acknowledgement = await coordinator.send({ operationId: `compact-${crypto.randomUUID()}`,
-        sessionKey: session.sessionKey, prompt: "/compact" });
-      fence(generation);
-      return { kind: "output", text: acknowledgement.run.status === "queued"
-        ? "上下文压缩已排队。" : "上下文压缩请求已提交，等待运行时完成。", warning: null };
+      // The typed handoff lets chat.send own the one operation, stream and
+      // terminal history. Starting a run here leaves the composer with only a
+      // local acknowledgement and no subscription to its real completion.
+      // Coordinator still validates manual compaction when that send arrives.
+      return { kind: "send", text: "/compact", warning: null };
     }
     const profile = profileForSession(session);
     const runtimeSessionId = runtimeSessionIdOf(session);
@@ -1022,6 +1084,9 @@ function createChatServiceController(options = {}) {
   }
 
   async function handleImpl(method, rawParams, responseId, generation) {
+    if (method === "chat.send" && rawParams && Object.hasOwn(rawParams, "pluginSelection")) {
+      throw controllerError("PLUGIN_PLATFORM_RETIRED", "旧插件选择已停用，请重新选择连接器账号");
+    }
     if (!IMPLEMENTED_METHODS.has(method)) {
       throw controllerError("UNKNOWN_METHOD", `Chat Service 方法尚未接线: ${String(method)}`);
     }
@@ -1139,7 +1204,7 @@ function createChatServiceController(options = {}) {
         sessionKey: params.sessionKey,
         prompt: params.prompt,
         ...(params.attachments?.length ? { attachments: params.attachments } : {}),
-        ...(params.pluginSelection ? { pluginSelection: params.pluginSelection } : {}),
+        ...(params.connectorSelection !== undefined ? { connectorSelection: params.connectorSelection } : {}),
       };
       result = validateChatServiceResult(method, await (origin
         ? inspiration().sendFromSession(sendInput) : coordinator.send(sendInput)));

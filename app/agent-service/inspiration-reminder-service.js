@@ -11,7 +11,8 @@ function inspirationReminderCandidate(idea, config, now) {
   let group, reason, enteredAt, request = null;
   if (status === "saved" || status === "skipped") {
     group = "seed"; reason = "seed_review"; enteredAt = idea.createdAt;
-    if (now < enteredAt + config.review.seedAgeDays * DAY_MS) return { candidate: null, unknown: null };
+    // Seeds have no minimum age. Keep legacy seedAgeDays in persisted configs
+    // for compatibility; the review rules decide which ages deserve attention.
   } else if (status === "completed") {
     group = "sprouted"; reason = "sprouted_review";
     if (!at(execution?.finishedAt)) return { candidate: null, unknown: { ideaId: idea.id, reason: "stage_time_unknown" } };

@@ -13,6 +13,8 @@ const CONFIG_FIELDS = Object.freeze(["id", "kind", "profileId", "enabled", "sche
 const METHODS = Object.freeze({
   "proactive.document.get": ["profileId"],
   "proactive.document.set": ["profileId", "content", "expectedRevision"],
+  "proactive.review-document.get": ["profileId"],
+  "proactive.review-document.set": ["profileId", "content", "expectedRevision"],
   "proactive.scratch.get": ["profileId"],
   "proactive.scratch.set": ["profileId", "content", "expectedRevision"],
   "proactive.agents.list": ["cursor", "limit"],
@@ -106,7 +108,7 @@ function validateConfig(value) {
   if (!exact(value.budget, ["maxRunsPerDay", "maxTokensPerDay"])
     || !Number.isInteger(value.budget.maxRunsPerDay) || value.budget.maxRunsPerDay < 1 || value.budget.maxRunsPerDay > 48
     || !Number.isInteger(value.budget.maxTokensPerDay) || value.budget.maxTokensPerDay < 1024
-    || value.budget.maxTokensPerDay > (value.kind === "heartbeat" ? 10_000_000 : 1_000_000)) fail();
+    || value.budget.maxTokensPerDay > 10_000_000) fail();
   if (value.kind === "heartbeat" ? value.review !== null : !exact(value.review, ["seedAgeDays", "sproutedAgeDays", "maxItems", "groups"])
     || ![value.review.seedAgeDays, value.review.sproutedAgeDays].every(days => Number.isInteger(days) && days >= 1 && days <= 365)
     || !Number.isInteger(value.review.maxItems) || value.review.maxItems < 1 || value.review.maxItems > 10
@@ -133,10 +135,10 @@ function validateParams(method, value) {
   if (method === "proactive.runtime.verify" && !id(value.profileId)) fail();
   if (["proactive.targets.list", "proactive.runs.list"].includes(method) && !id(value.profileId)) fail();
   for (const field of ["id", "operationId"]) if (Object.hasOwn(value, field) && !id(value[field])) fail();
-  if (Object.hasOwn(value, "expectedRevision") && (method === "proactive.document.set"
+  if (Object.hasOwn(value, "expectedRevision") && (["proactive.document.set", "proactive.review-document.set"].includes(method)
     ? typeof value.expectedRevision !== "string" || !/^[a-f0-9]{64}$/u.test(value.expectedRevision) : !at(value.expectedRevision))) fail();
-  if (/^proactive\.(?:document|scratch)\./u.test(method) && !id(value.profileId)) fail();
-  if (method === "proactive.document.set" && !text(value.content, 16384, true)) fail("PROACTIVE_DOCUMENT_INVALID");
+  if (/^proactive\.(?:document|review-document|scratch)\./u.test(method) && !id(value.profileId)) fail();
+  if (["proactive.document.set", "proactive.review-document.set"].includes(method) && !text(value.content, 16384, true)) fail("PROACTIVE_DOCUMENT_INVALID");
   if (method === "proactive.scratch.set" && !scratchText(value.content)) fail();
   if (["proactive.agents.list", "proactive.monitor.list", "proactive.targets.list", "proactive.runs.list"].includes(method) && (!Number.isInteger(value.limit) || value.limit < 1 || value.limit > 50
     || !(value.cursor === null || id(value.cursor)))) fail();
@@ -268,10 +270,11 @@ function validateResult(method, result) {
       || !id(value.id) || !at(value.revision) || ![value.lastRemindedAt, value.snoozedUntil].every(value => value === null || at(value))
       || typeof value.disabled !== "boolean" || typeof value.handled !== "boolean" || !(value.noticeId === null || id(value.noticeId))) bad();
   };
-  if (["proactive.document.get", "proactive.document.set"].includes(method)) {
+  if (["proactive.document.get", "proactive.document.set", "proactive.review-document.get", "proactive.review-document.set"].includes(method)) {
     const d = result.document;
     if (!exact(result, ["document"]) || !exact(d, ["name", "content", "revision", "missing", "readOnly"])
-      || d.name !== "HEARTBEAT.md" || !text(d.content, 16384, true) || !/^[a-f0-9]{64}$/u.test(d.revision)
+      || d.name !== (method.startsWith("proactive.review-document.") ? "DAILY_REVIEW.md" : "HEARTBEAT.md")
+      || !text(d.content, 16384, true) || !/^[a-f0-9]{64}$/u.test(d.revision)
       || typeof d.missing !== "boolean" || d.readOnly !== false) bad();
   } else if (["proactive.scratch.get", "proactive.scratch.set"].includes(method)) {
     const s = result.scratch;

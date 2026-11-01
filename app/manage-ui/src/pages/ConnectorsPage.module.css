@@ -1,0 +1,163 @@
+.page { width: 100%; min-width: 0; max-width: 100%; flex-shrink: 0; container: connectors / inline-size; }
+.contentCard { min-width: 0; padding: 24px; background: var(--ui-surface-1); border-radius: 24px; box-shadow: var(--ui-shadow-card); }
+.contentCard > .section:first-of-type { margin-top: 0; }
+.contentCard > .section:last-of-type { margin-bottom: 0; }
+.page input, .page select, .field input, .field select, .field textarea, .actionSearch {
+  box-sizing: border-box; border: 1px solid var(--ui-hairline); border-radius: 9px;
+  background: var(--ui-surface-1); color: var(--ui-text-1); padding: 10px 12px; font: inherit; font-size: 13px; min-width: 0;
+}
+.page input:focus-visible, .page select:focus-visible, .detail :is(button,input,select,textarea,a,summary):focus-visible {
+  outline: 2px solid var(--ui-focus); outline-offset: 3px;
+}
+.page button, .detail button { font: inherit; }
+.section { margin: 26px 0 30px; }
+.sectionHeading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.sectionHeading h2 { font-size: 18px; line-height: 24px; font-weight: 500; margin: 0; color: var(--ui-text-1); }
+.count, .muted { color: var(--ui-text-2); font-size: 12px; line-height: 1.6; }
+.catalog { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 0 24px; }
+.service { display: flex; align-items: center; gap: 14px; padding: 16px 8px; text-align: left; border: 0;
+  border-bottom: 1px solid var(--ui-hairline); border-radius: 0; background: transparent; color: var(--ui-text-1); cursor: pointer; min-width: 0; }
+.service:hover { background: var(--ui-surface-2); }
+.monogram { display: grid; place-items: center; width: 39px; height: 39px; flex: none; border-radius: 10px;
+  background: var(--ui-surface-2); color: var(--ui-text-2); font-size: 16px; font-weight: 500; }
+.serviceText { display: grid; gap: 5px; min-width: 0; flex: 1; }
+.serviceText strong { font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
+.serviceText small { font-size: 12px; color: var(--ui-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.serviceState { font-size: 11px; color: var(--ui-text-2); max-width: 130px; text-align: right; }
+.installedList { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px 12px; padding: 0; margin: 0; list-style: none; }
+.installedItem { display: flex; flex: 0 0 112px; min-width: 0; max-width: 100%; }
+.installedOpen { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; min-width: 0; max-width: 100%; padding: 8px 4px;
+  border: 0; border-radius: 10px; background: transparent; color: var(--ui-text-1); text-align: center; cursor: pointer; }
+.installedOpen:hover { opacity: .75; }
+.installedOpen:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+.installedOpen > :first-child { width: 48px; height: 48px; flex: none; }
+.installedOpen > [data-mcp-icon] img { inset: 6px; width: 36px; height: 36px; }
+.installedLabel { display: grid; gap: 3px; min-width: 0; width: 100%; }
+.installedLabel strong { font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.connectionHint { color: var(--ui-text-2); font-size: 12px; line-height: 16px; }
+.accountRow { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--ui-hairline); min-width: 0; }
+.accountLabel { flex: 1; min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; font-size: 13px; color: var(--ui-text-1); }
+.accountLabel small { color: var(--ui-text-2); font-size: 12px; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; white-space: nowrap; color: var(--ui-text-2); }
+.status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.status[data-state="ready"], .status[data-state="connected"] { color: var(--ui-success, #3c7a5a); }
+.notice { padding: 12px 14px; border-radius: 9px; background: var(--ui-surface-2); font-size: 12px; line-height: 1.6;
+  color: var(--ui-text-2); overflow-wrap: anywhere; white-space: pre-line; margin: 12px 0; }
+.error { color: var(--ui-danger, #a8533d); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.button, .primary, .danger { border: 1px solid var(--ui-hairline); background: var(--ui-surface-1); color: var(--ui-text-1);
+  padding: 8px 13px; border-radius: 9px; font-size: 12px; cursor: pointer; line-height: 1.4; }
+.primary { background: var(--ui-text-1); color: var(--ui-surface-1); border-color: transparent; }
+.danger { color: var(--ui-danger, #a8533d); }
+.button:disabled, .primary:disabled, .danger:disabled, .textButton:disabled { cursor: default; opacity: .5; }
+.textButton { border: 0; background: none; padding: 3px 0; color: var(--ui-text-1); font-size: 12px; cursor: pointer; text-align: left; }
+.detail { color: var(--ui-text-1); min-width: 0; font-size: 13px; }
+.detail h3 { font-size: 14px; font-weight: 600; margin: 22px 0 10px; }
+.detail h3:first-child { margin-top: 0; }
+.detail p { line-height: 1.6; }
+.setupSteps { padding-left: 22px; line-height: 1.6; overflow-wrap: anywhere; }
+.setupSteps li + li { margin-top: 8px; }
+.detail hr { border: 0; border-top: 1px solid var(--ui-hairline); margin: 26px 0; }
+.detail code { font-size: 11px; overflow-wrap: anywhere; }
+.detail select { max-width: 100%; }
+.fields { display: grid; gap: 15px; margin: 16px 0; }
+.field { display: grid; gap: 7px; }
+.fieldLabel { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 12px; }
+.fieldLabel > label { min-width: 0; overflow-wrap: anywhere; }
+.fieldLabel > button { flex: none; }
+.modal > header p { word-break: normal; overflow-wrap: anywhere; }
+.field input, .field select, .field textarea { width: 100%; }
+.field textarea { resize: vertical; min-height: 75px; line-height: 1.6; }
+.field small { color: var(--ui-text-2); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.masked { -webkit-text-security: disc; }
+.scopes { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0; margin: 8px 0; list-style: none; color: var(--ui-text-2); font-size: 11px; overflow-wrap: anywhere; }
+.choices { border: 0; padding: 0; margin: 10px 0; display: grid; gap: 8px; }
+.choices legend { color: var(--ui-text-2); font-size: 12px; padding: 0 0 10px; }
+.choice { display: flex; gap: 9px; align-items: flex-start; font-size: 12px; line-height: 1.6; }
+.choice input { accent-color: var(--ui-text-1); margin: 3px 0 0; flex: none; }
+.choice span { min-width: 0; overflow-wrap: anywhere; }
+.choice small { display: block; color: var(--ui-text-2); font-size: 11px; }
+.clientSetup { margin: 15px 0; }
+.clientSetup summary { cursor: pointer; font-size: 12px; padding: 4px 0; }
+.clientSetup ol { padding-left: 20px; color: var(--ui-text-2); font-size: 12px; line-height: 1.7; }
+.desktopConnection { min-width: 0; }
+.desktopHeading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.desktopHeading strong { font-size: 14px; font-weight: 600; }
+.desktopAddress { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; padding: 12px 14px; background: var(--ui-surface-2); border-radius: 9px; }
+.desktopAddress > span { color: var(--ui-text-2); font-size: 12px; }
+.desktopAddress code { user-select: all; }
+.desktopConnection .clientSetup { border-top: 1px solid var(--ui-hairline); margin-top: 20px; padding-top: 12px; }
+.desktopConnection .clientSetup li + li { margin-top: 6px; }
+.desktopConnection .clientSetup a { font-size: 12px; color: var(--ui-text-1); text-underline-offset: 3px; }
+.actionList { list-style: none; padding: 0; margin: 12px 0; }
+.actionList li { padding: 11px 0; border-bottom: 1px solid var(--ui-hairline); overflow-wrap: anywhere; }
+.actionLine { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; }
+.actionLine strong { flex: 1; min-width: 0; font-size: 12px; font-weight: 550; }
+.actionList p { margin: 4px 0; font-size: 12px; color: var(--ui-text-2); }
+.actionSearch { width: 100%; margin: 6px 0; }
+.receipt { padding: 10px 0; border-bottom: 1px solid var(--ui-hairline); font-size: 12px; }
+.receipt > div { display: flex; gap: 10px; flex-wrap: wrap; justify-content: space-between; }
+.receipt small { display: block; color: var(--ui-text-2); margin-top: 4px; font-size: 11px; }
+@media (max-width: 680px) {
+  .modal { max-width: calc(100vw - 32px); padding: 24px; border-radius: 28px; }
+  .accountRow { flex-wrap: wrap; }
+  .accountLabel { flex-basis: calc(100% - 120px); }
+  .serviceState { max-width: 95px; }
+}
+@container connectors (max-width: 560px) {
+  .contentCard { padding: 20px 16px; }
+  .installedList { gap: 20px 8px; }
+  .installedItem { flex-basis: 104px; }
+}
+
+.modeTabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+.sectionHeading > button { margin-left: auto; }
+.detail :is(input,textarea,select) { box-sizing: border-box; max-width: 100%; }
+.requestList { display: grid; gap: 12px; margin: 16px 0; }
+.requestCard { border: 1px solid var(--ui-hairline); border-radius: 12px; padding: 16px; color: var(--ui-text-1); background: var(--ui-surface-1); }
+.requestCard h3 { font-size: 14px; margin: 0 0 8px; }
+.requestCard p { margin: 6px 0; line-height: 1.6; font-size: 12px; overflow-wrap: anywhere; }
+@media (max-width: 680px) { .modeTabs > button { flex: 1; } .detail .actions > button { flex: 1; } }
+
+.updateHint { color: var(--ui-text-1); font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
+.updatePanel { margin-top: 18px; padding-top: 4px; border-top: 1px solid var(--ui-hairline); min-width: 0; }
+.updatePanel :is(p,strong,a) { overflow-wrap: anywhere; }
+.authorization { display: flex; align-items: center; gap: 22px; margin: 18px 0; }
+.authorization img { flex: none; background: white; border-radius: 8px; }
+.authorization > div { min-width: 0; }
+.authorization a { display: inline-flex; text-decoration: none; }
+.authReady { color: var(--ui-success, #3c7a5a); font-weight: 550; }
+@media (max-width: 480px) { .authorization { flex-direction: column; align-items: flex-start; gap: 8px; } }
+
+/* Catalog entries expose one title, one description and one add action. */
+.service { gap: 12px; padding: 16px 0; cursor: default; }
+.serviceOpen { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; padding: 4px 8px; text-align: left; border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-1); cursor: pointer; }
+.serviceOpen:hover { color: var(--ui-text-1); background: var(--ui-surface-2); }
+.service > .button { flex: none; border-radius: 999px; }
+.serviceText strong, .accountLabel strong, .accountLabel small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dialogIdentity { display: inline-flex; gap: 12px; align-items: center; min-width: 0; }
+.overview { margin: 22px 0; }
+.overview h3 { margin-bottom: 8px; }
+.overview p { margin: 0 0 10px; font-size: 14px; }
+.overview a { color: var(--ui-text-2); font-size: 12px; text-underline-offset: 3px; }
+.connectionPanel { border-top: 1px solid var(--ui-hairline); margin-top: 24px; padding-top: 22px; }
+.connectionPanel > h3 { margin: 0 0 14px; }
+.connectionPanel .fields { margin-top: 16px; }
+.connectionPanel .primary { min-height: 40px; padding: 10px 20px; border-radius: 20px; }
+.toolDetails, .management { padding: 18px 0; border-top: 1px solid var(--ui-hairline); }
+.toolDetails summary, .management > summary { cursor: pointer; font-size: 13px; font-weight: 500; }
+.toolDetails summary span { margin-left: 8px; font-weight: 400; color: var(--ui-text-2); }
+.toolList { list-style: none; padding: 0; margin: 12px 0 0; max-height: 290px; overflow: auto; overscroll-behavior: contain; }
+.toolList li { padding: 10px 0; border-bottom: 1px solid var(--ui-hairline); overflow-wrap: anywhere; }
+.toolList strong { font-size: 12px; font-weight: 500; }
+.toolList p { color: var(--ui-text-2); font-size: 12px; margin: 4px 0 0; white-space: pre-wrap; }
+.dialogFooter { display: flex; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--ui-hairline); }
+.dialogFooter .danger { min-width: 80px; }
+.embeddedManagement { margin-top: 20px; }
+.catalog + .sectionHeading { margin-top: 28px; }
+@media (max-width: 480px) {
+  .service { gap: 6px; }
+  .serviceOpen { gap: 10px; padding-left: 0; }
+  .accountRow .status { margin-left: 0; }
+  .dialogIdentity { max-width: 100%; overflow-wrap: anywhere; }
+}

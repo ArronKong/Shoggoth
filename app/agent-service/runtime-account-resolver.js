@@ -25,6 +25,7 @@ const { resolveClaudeCodeBinary } = require("./claude-code-runtime-paths");
 const { resolveOpenCodeBinary } = require("./opencode-runtime-paths");
 const { resolveDeepSeekHarnessBinary } = require("./deepseek-harness-runtime-paths");
 const { serviceError } = require("./security");
+const { RuntimeExecutableIdentity, executableInterpreter } = require("./runtime-executable-identity");
 
 const DEFAULT_ACCOUNT_BY_ID = new Map(
   DEFAULT_RUNTIME_ACCOUNTS.map((account) => [account.id, account]),
@@ -246,7 +247,48 @@ class RuntimeAccountResolver {
     this.resourcesPath = options.resourcesPath;
     this.platform = options.platform;
     this.arch = options.arch;
+    this.executableIdentity = new RuntimeExecutableIdentity({ fileSystem: this.fs });
   }
+
+  // Resolve only executable inputs. Unlike resolve(), this never prepares a
+  // Runtime home or changes configuration and can run at an admission fence.
+  observeExecutable(bindingValue, accountValue, options = {}) {
+    const binding = runtimeBinding(bindingValue), account = validateRuntimeAccount(accountValue);
+    if (account.id !== binding.runtimeAccountId || account.runtime !== binding.runtime) {
+      throw resolverError("RUNTIME_ACCOUNT_BINDING_MISMATCH", "Runtime executable binding changed");
+    }
+    const binaryOptions = { binaryPath: options.binaryPath, parentEnv: this.parentEnv,
+      homedir: this.userHome, fs: this.fs, paths: this.paths };
+    const resolvers = { codex: resolveCodexSystemBinary, "grok-build": resolveGrokBuildBinary,
+      antigravity: resolveAntigravityBinary, pi: resolvePiBinary, "claude-code": resolveClaudeCodeBinary,
+      opencode: resolveOpenCodeBinary, "deepseek-harness": resolveDeepSeekHarnessBinary };
+    const binaryPath = account.kind !== "native-user" ? resolveCodexRuntimeLayout({
+      repoRoot: options.repoRoot ?? this.repoRoot, packaged: options.packaged ?? this.packaged,
+      resourcesPath: options.resourcesPath ?? this.resourcesPath, platform: this.platform, arch: this.arch,
+    }).runtimePath : resolvers[binding.runtime](binaryOptions);
+    let interpreterPath = null;
+    if (["pi", "deepseek-harness"].includes(binding.runtime)) {
+      const launch = binding.runtime === "pi"
+        ? require("./pi-runtime-paths").resolvePiLaunch(binaryPath, binaryOptions)
+        : require("./deepseek-harness-runtime-paths").resolveDeepSeekHarnessLaunch(binaryPath, binaryOptions);
+      if (launch.command !== binaryPath) interpreterPath = launch.command;
+    } else {
+      const parentPath = String(this.parentEnv.PATH || "/usr/bin:/bin").split(path.delimiter).filter(path.isAbsolute);
+      const local = path.join(this.userHome, ".local", "bin");
+      const searchPath = ["claude-code", "antigravity"].includes(binding.runtime)
+        ? ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", local, ...parentPath]
+        : binding.runtime === "opencode" ? ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", ...parentPath]
+          : binding.runtime === "codex" ? [...parentPath, local, "/opt/homebrew/bin", "/usr/local/bin"] : [...parentPath, local];
+      interpreterPath = executableInterpreter(binaryPath, searchPath.join(path.delimiter), this.fs);
+    }
+    const extraPaths = [options.extensionPath, options.bridgePath].filter(value => typeof value === "string");
+    if (binding.runtime === "codex" && (this.platform ?? process.platform) === "darwin" && path.basename(binaryPath) === "codex.js") {
+      extraPaths.push(...require("./codex-runtime-paths").resolveCodexMcpParentBinaries(binaryOptions));
+    }
+    return this.executableIdentity.observe({ binaryPath, interpreterPath, extraPaths });
+  }
+
+  captureExecutable(observation) { return this.executableIdentity.capture(observation); }
 
   resolve(bindingValue, accountValue, options = {}) {
     const binding = runtimeBinding(bindingValue);

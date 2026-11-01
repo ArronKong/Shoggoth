@@ -1,0 +1,1660 @@
+[
+  {
+    "id": "cloudflare",
+    "name": "Cloudflare",
+    "url": "https://mcp.cloudflare.com/mcp",
+    "docsUrl": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/",
+    "description": {
+      "zh-CN": "管理 Cloudflare 账户、Workers 和云服务。",
+      "en": "Manage Cloudflare accounts, Workers and cloud services."
+    }
+  },
+  {
+    "id": "clickup",
+    "name": "ClickUp",
+    "url": "https://mcp.clickup.com/mcp",
+    "docsUrl": "https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server-1",
+    "description": {
+      "zh-CN": "管理任务、项目、文档和工时。",
+      "en": "Manage tasks, projects, documents and time tracking."
+    },
+    "note": {
+      "zh-CN": "调用额度取决于 ClickUp 工作区套餐。",
+      "en": "Usage limits depend on your ClickUp workspace plan."
+    }
+  },
+  {
+    "id": "monday",
+    "name": "monday.com",
+    "registryName": "com.monday/monday.com",
+    "url": "https://mcp.monday.com/mcp",
+    "docsUrl": "https://developer.monday.com/api-reference/docs/mcp-dynamic-client-registration",
+    "description": {
+      "zh-CN": "管理项目看板与业务流程。",
+      "en": "Manage project boards and business workflows."
+    },
+    "note": {
+      "zh-CN": "首次连接通常需要账户管理员批准；批准后请重新登录授权。",
+      "en": "An account admin usually needs to approve the first connection. Sign in again after approval."
+    }
+  },
+  {
+    "id": "todoist",
+    "name": "Todoist",
+    "registryName": "net.todoist/mcp",
+    "url": "https://ai.todoist.net/mcp",
+    "docsUrl": "https://developer.todoist.com/",
+    "description": {
+      "zh-CN": "整理个人与团队待办、项目和任务。",
+      "en": "Organize personal and team tasks and projects."
+    }
+  },
+  {
+    "id": "miro",
+    "name": "Miro",
+    "registryName": "io.github.miroapp/mcp-server",
+    "url": "https://mcp.miro.com/",
+    "docsUrl": "https://developers.miro.com/docs/miro-mcp",
+    "description": {
+      "zh-CN": "连接白板、流程图与协作内容。",
+      "en": "Work with whiteboards, diagrams and collaborative content."
+    },
+    "note": {
+      "zh-CN": "团队或组织管理员可能需要先开启 MCP。",
+      "en": "Your team or organization admin may need to enable MCP."
+    }
+  },
+  {
+    "id": "airtable",
+    "name": "Airtable",
+    "registryName": "com.airtable/mcp",
+    "url": "https://mcp.airtable.com/mcp",
+    "docsUrl": "https://support.airtable.com/articles/9897799762-using-the-airtable-mcp-server",
+    "description": {
+      "zh-CN": "查询和更新表格数据库与业务记录。",
+      "en": "Query and update bases and business records."
+    },
+    "note": {
+      "zh-CN": "如果组织限制第三方集成，需要管理员放行此连接。",
+      "en": "If your organization restricts third-party integrations, an admin must allow this connection."
+    }
+  },
+  {
+    "id": "webflow",
+    "name": "Webflow",
+    "registryName": "com.webflow/mcp",
+    "url": "https://mcp.webflow.com/mcp",
+    "docsUrl": "https://developers.webflow.com/mcp/reference/getting-started",
+    "description": {
+      "zh-CN": "管理网站、CMS 内容和设计操作。",
+      "en": "Manage websites, CMS content and design operations."
+    },
+    "note": {
+      "zh-CN": "操作设计画布时，还需要在 Webflow 中打开官方 Bridge App。",
+      "en": "Design canvas operations also require the official Bridge App to be open in Webflow."
+    }
+  },
+  {
+    "id": "granola",
+    "name": "Granola",
+    "url": "https://mcp.granola.ai/mcp",
+    "docsUrl": "https://www.granola.ai/blog/granola-mcp",
+    "description": {
+      "zh-CN": "检索会议笔记、摘要和讨论记录。",
+      "en": "Search meeting notes, summaries and discussions."
+    },
+    "note": {
+      "zh-CN": "可访问的数据范围取决于套餐；企业管理员可能需要开启 MCP。",
+      "en": "Available data depends on your plan. Enterprise admins may need to enable MCP."
+    }
+  },
+  {
+    "id": "attio",
+    "name": "Attio",
+    "url": "https://mcp.attio.com/mcp",
+    "docsUrl": "https://docs.attio.com/mcp/overview",
+    "description": {
+      "zh-CN": "管理客户、联系人和销售跟进。",
+      "en": "Manage customers, contacts and sales follow-ups."
+    }
+  },
+  {
+    "id": "intercom",
+    "name": "Intercom",
+    "url": "https://mcp.intercom.com/mcp",
+    "docsUrl": "https://developers.intercom.com/docs/guides/mcp",
+    "description": {
+      "zh-CN": "检索客服对话和客户资料。",
+      "en": "Search support conversations and customer records."
+    },
+    "note": {
+      "zh-CN": "目前仅支持数据托管在美国的工作区。",
+      "en": "Currently available only for US-hosted workspaces."
+    }
+  },
+  {
+    "id": "neon",
+    "name": "Neon",
+    "registryName": "com.neon/mcp",
+    "url": "https://mcp.neon.tech/mcp",
+    "docsUrl": "https://neon.com/docs/ai/neon-mcp-server",
+    "description": {
+      "zh-CN": "管理 Postgres 项目、数据库分支和 SQL。",
+      "en": "Manage Postgres projects, database branches and SQL."
+    }
+  },
+  {
+    "id": "sentry",
+    "name": "Sentry",
+    "registryName": "io.github.getsentry/sentry-mcp",
+    "url": "https://mcp.sentry.dev/mcp",
+    "docsUrl": "https://mcp.sentry.dev/",
+    "description": {
+      "zh-CN": "查询错误、分析问题并辅助排障。",
+      "en": "Investigate errors, analyze issues and troubleshoot."
+    }
+  },
+  {
+    "id": "netlify",
+    "name": "Netlify",
+    "url": "https://netlify-mcp.netlify.app/mcp",
+    "docsUrl": "https://docs.netlify.com/build/build-with-ai/agent-setup-guides/set-up-codex-for-netlify/",
+    "description": {
+      "zh-CN": "管理网站部署、项目与团队资源。",
+      "en": "Manage site deployments, projects and team resources."
+    }
+  },
+  {
+    "id": "posthog",
+    "name": "PostHog",
+    "url": "https://mcp.posthog.com/mcp",
+    "docsUrl": "https://posthog.com/docs/model-context-protocol",
+    "description": {
+      "zh-CN": "分析产品事件、用户行为与实验。",
+      "en": "Analyze product events, user behavior and experiments."
+    }
+  },
+  {
+    "id": "amplitude",
+    "name": "Amplitude",
+    "registryName": "com.amplitude/mcp-server",
+    "url": "https://mcp.amplitude.com/mcp",
+    "docsUrl": "https://amplitude.com/docs/amplitude-ai/amplitude-mcp",
+    "description": {
+      "zh-CN": "分析产品指标和用户行为。",
+      "en": "Analyze product metrics and user behavior."
+    },
+    "note": {
+      "zh-CN": "欧盟数据区请在连接地址中选择 mcp.eu.amplitude.com。",
+      "en": "For EU data, select the mcp.eu.amplitude.com endpoint."
+    }
+  },
+  {
+    "id": "plaid",
+    "name": "Plaid",
+    "url": "https://api.dashboard.plaid.com/mcp/",
+    "docsUrl": "https://plaid.com/docs/resources/mcp/",
+    "setup": "oauth",
+    "description": {
+      "zh-CN": "诊断 Plaid 银行连接，查看转化率和产品用量。",
+      "en": "Diagnose Plaid connections and review Link conversion and product usage."
+    },
+    "note": {
+      "zh-CN": "需要团队至少有一个 Plaid 产品获批 Production 权限；仅支持生产数据。",
+      "en": "Requires Production approval for at least one Plaid product in your team. Only Production data is supported."
+    }
+  },
+  {
+    "id": "readwise",
+    "name": "Readwise",
+    "docsUrl": "https://docs.readwise.io/tools/mcp",
+    "description": {
+      "zh-CN": "搜索阅读收藏、划线和 Reader 文档。",
+      "en": "Search saved reading, highlights and Reader documents."
+    },
+    "url": "https://mcp2.readwise.io/mcp"
+  },
+  {
+    "id": "raindrop",
+    "name": "Raindrop.io",
+    "docsUrl": "https://help.raindrop.io/integrations/mcp",
+    "description": {
+      "zh-CN": "整理书签、收藏夹，找回保存过的网页。",
+      "en": "Organize bookmarks and collections, and find saved pages."
+    },
+    "url": "https://api.raindrop.io/rest/v2/ai/mcp",
+    "note": {
+      "zh-CN": "免费账户可有限使用；全文和语义搜索需要 Pro。",
+      "en": "Free accounts have limited access. Full-text and semantic search require Pro."
+    }
+  },
+  {
+    "id": "pocket",
+    "name": "Pocket",
+    "docsUrl": "https://docs.heypocketai.com/docs/mcp",
+    "description": {
+      "zh-CN": "搜索 Pocket 录音、转录与会议摘要。",
+      "en": "Search Pocket recordings, transcripts and meeting summaries."
+    },
+    "url": "https://public.heypocketai.com/mcp",
+    "note": {
+      "zh-CN": "这是 Pocket AI 录音服务，需要已有账户和录音内容。",
+      "en": "This is the Pocket AI recording service. An account and existing recordings are required."
+    }
+  },
+  {
+    "id": "home-assistant",
+    "name": "Home Assistant",
+    "docsUrl": "https://www.home-assistant.io/integrations/mcp_server/",
+    "description": {
+      "zh-CN": "连接自己的智能家居，查询和控制已公开的设备。",
+      "en": "Connect your smart home to query and control exposed devices."
+    },
+    "setup": "instance",
+    "note": {
+      "zh-CN": "先在 Home Assistant 添加 MCP Server 集成并选择可访问的设备。填写自己实例的 HTTPS 地址，路径为 /api/mcp；本机回环地址也支持 HTTP。",
+      "en": "Enable the MCP Server integration in Home Assistant and choose exposed devices. Enter your instance’s HTTPS URL ending in /api/mcp; HTTP is also supported for loopback addresses."
+    }
+  },
+  {
+    "id": "kiwi",
+    "name": "Kiwi.com",
+    "docsUrl": "https://www.kiwi.com/en/pages/mcp/",
+    "description": {
+      "zh-CN": "搜索航班、比较行程并获取预订链接。",
+      "en": "Search flights, compare itineraries and get booking links."
+    },
+    "url": "https://mcp.kiwi.com",
+    "setup": "none",
+    "note": {
+      "zh-CN": "搜索无需登录；预订需打开 Kiwi.com 链接完成。",
+      "en": "No sign-in is needed for search. Complete bookings through the Kiwi.com link."
+    }
+  },
+  {
+    "id": "fantastical",
+    "name": "Fantastical",
+    "docsUrl": "https://flexibits.com/fantastical/help/fantastical-mcp-server-in-app",
+    "description": {
+      "zh-CN": "通过本机 Fantastical 管理日历与日程。",
+      "en": "Work with calendars and events through Fantastical on this Mac."
+    },
+    "setup": "local",
+    "transport": {
+      "kind": "stdio-command",
+      "command": "/Applications/Fantastical.app/Contents/Helpers/FantasticalMCP.app/Contents/MacOS/FantasticalMCP",
+      "args": []
+    },
+    "note": {
+      "zh-CN": "需要在本机 Applications 文件夹安装 Fantastical 4.1.17 或更新版本。",
+      "en": "Requires Fantastical 4.1.17 or later installed in this Mac’s Applications folder."
+    }
+  },
+  {
+    "id": "day-one",
+    "name": "Day One",
+    "docsUrl": "https://dayoneapp.com/guides/day-one-for-mac/day-one-mcp-server/",
+    "description": {
+      "zh-CN": "搜索、回顾和记录本机 Day One 日记。",
+      "en": "Search, review and write Day One journal entries on this Mac."
+    },
+    "setup": "local",
+    "transport": {
+      "kind": "stdio-command",
+      "command": "/usr/local/bin/dayone",
+      "args": [
+        "mcp"
+      ]
+    },
+    "note": {
+      "zh-CN": "需要 Day One Mac 2026.17+ 和 Silver/Gold 订阅。先在应用中安装 Command Line Tools，并在 Labs → MCP Access Control 中授权日记。",
+      "en": "Requires Day One for Mac 2026.17+ and a Silver/Gold subscription. Install Command Line Tools from the app, then authorize journals in Labs → MCP Access Control."
+    }
+  },
+  {
+    "id": "amap",
+    "name": "高德地图 / Amap",
+    "docsUrl": "https://lbs.amap.com/api/mcp-server/gettingstarted",
+    "description": {
+      "zh-CN": "查地点、规划路线，获取天气和出行信息。",
+      "en": "Find places, plan routes and check weather and travel information."
+    },
+    "setup": "api-key",
+    "envKey": "AMAP_MAPS_API_KEY",
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "npm",
+      "identifier": "@amap/amap-maps-mcp-server",
+      "version": "0.0.8"
+    },
+    "note": {
+      "zh-CN": "需要在高德开放平台创建应用并申请 Web 服务 API Key。保存时会运行官方 MCP 包，Key 通过加密保存的环境变量传递。",
+      "en": "Create an app and Web Service API key on Amap’s developer platform. Saving runs the official MCP package; the key is passed through an encrypted environment variable."
+    }
+  },
+  {
+    "id": "strava",
+    "name": "Strava",
+    "docsUrl": "https://support.strava.com/en-us/articles/15401531-what-is-the-strava-mcp-connector",
+    "description": {
+      "zh-CN": "了解官方运动数据与训练趋势连接器。",
+      "en": "Explore the official activity data and training trends connector."
+    },
+    "setup": "restricted",
+    "note": {
+      "zh-CN": "官方当前仅支持 Claude 接入，并需要 Strava 订阅。Shoggoth 暂不能直接连接；此处提供官方接入说明。",
+      "en": "The official connector currently supports Claude and requires a Strava subscription. Direct connection from Shoggoth is unavailable; see the official guide."
+    }
+  },
+  {
+    "id": "calendly",
+    "name": "Calendly",
+    "setup": "oauth",
+    "url": "https://mcp.calendly.com/",
+    "docsUrl": "https://developer.calendly.com/docs/mcp/calendly-mcp-server",
+    "description": {
+      "zh-CN": "查看预约、空闲时间和安排会议。",
+      "en": "Review bookings, availability and meeting schedules."
+    },
+    "note": {
+      "zh-CN": "需要 Calendly 账户；可用操作取决于账户权限。",
+      "en": "Requires a Calendly account. Available actions depend on account permissions."
+    }
+  },
+  {
+    "id": "evernote",
+    "name": "Evernote",
+    "setup": "oauth",
+    "url": "https://mcp.evernote.com/mcp",
+    "docsUrl": "https://dev.evernote.com/mcp",
+    "description": {
+      "zh-CN": "搜索和整理笔记与笔记本。",
+      "en": "Search and organize notes and notebooks."
+    },
+    "note": {
+      "zh-CN": "需要付费套餐；官方 MCP 仍在 Beta 开放阶段。",
+      "en": "Requires a paid plan. The official MCP is still rolling out in beta."
+    }
+  },
+  {
+    "id": "klaviyo",
+    "name": "Klaviyo",
+    "setup": "oauth",
+    "url": "https://mcp.klaviyo.com/mcp",
+    "docsUrl": "https://developers.klaviyo.com/en/docs/connect_to_the_klaviyo_mcp_server",
+    "description": {
+      "zh-CN": "查看客户资料、营销活动和分析数据。",
+      "en": "Work with customer profiles, campaigns and marketing analytics."
+    },
+    "note": {
+      "zh-CN": "需要账户 Owner、Admin 或 Manager 权限。",
+      "en": "Requires an Owner, Admin or Manager role."
+    }
+  },
+  {
+    "id": "withings",
+    "name": "Withings",
+    "setup": "oauth",
+    "url": "https://mcp.withings.com/mcp",
+    "docsUrl": "https://static.withings.com/content/v2/app/mcp/en/index.html",
+    "description": {
+      "zh-CN": "查询 Withings 设备和健康记录。",
+      "en": "Query Withings devices and health records."
+    },
+    "note": {
+      "zh-CN": "需要 Withings 账户及相应会员资格，并授权可访问的数据。",
+      "en": "Requires a Withings account, an eligible membership and permission to access your data."
+    }
+  },
+  {
+    "id": "healthex",
+    "name": "HealthEx",
+    "setup": "oauth",
+    "url": "https://api.healthex.io/mcp",
+    "docsUrl": "https://docs.healthex.io/mcp-server/oauth-flow/",
+    "description": {
+      "zh-CN": "读取自己授权的健康记录。",
+      "en": "Read health records you have authorized."
+    },
+    "note": {
+      "zh-CN": "需完成 HealthEx 身份与医疗机构授权；记录可用性取决于支持的机构，授权可能需要较长时间。",
+      "en": "Complete HealthEx identity and provider consent. Available records depend on supported providers, and consent can take some time."
+    }
+  },
+  {
+    "id": "replit",
+    "name": "Replit",
+    "setup": "oauth",
+    "url": "https://mcp.replit.com/server/mcp",
+    "docsUrl": "https://docs.replit.com/platforms/mcp-server",
+    "description": {
+      "zh-CN": "创建、查看和管理 Replit 应用。",
+      "en": "Create, inspect and manage Replit apps."
+    },
+    "note": {
+      "zh-CN": "使用自己的 Replit 账户授权；仅能访问账户有权限的项目。",
+      "en": "Authorize with your Replit account. Only projects you can access are available."
+    }
+  },
+  {
+    "id": "lovable",
+    "name": "Lovable",
+    "setup": "oauth",
+    "url": "https://mcp.lovable.dev",
+    "docsUrl": "https://docs.lovable.dev/integrations/lovable-mcp-server",
+    "description": {
+      "zh-CN": "创建和管理 Lovable 项目与应用。",
+      "en": "Create and manage Lovable projects and apps."
+    },
+    "note": {
+      "zh-CN": "桌面本机回调支持自动注册；企业管理员可能需要先允许 MCP。",
+      "en": "Desktop loopback callbacks support automatic registration. Enterprise admins may need to enable MCP."
+    }
+  },
+  {
+    "id": "zapier",
+    "name": "Zapier",
+    "setup": "oauth",
+    "url": "https://mcp.zapier.com/api/v1/connect",
+    "docsUrl": "https://docs.zapier.com/mcp/clients",
+    "description": {
+      "zh-CN": "通过已授权的应用执行自动化动作。",
+      "en": "Run automation actions through connected apps."
+    },
+    "note": {
+      "zh-CN": "先在 Zapier 连接下游应用并选择动作；调用消耗 Zapier tasks。",
+      "en": "Connect your apps and select actions in Zapier first. Calls consume Zapier tasks."
+    }
+  },
+  {
+    "id": "gmail",
+    "name": "Gmail",
+    "setup": "oauth-client",
+    "url": "https://gmailmcp.googleapis.com/mcp/v1",
+    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "description": {
+      "zh-CN": "搜索邮件并处理草稿。",
+      "en": "Search mail and work with drafts."
+    },
+    "note": {
+      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
+      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "google-calendar",
+    "name": "Google Calendar",
+    "setup": "oauth-client",
+    "url": "https://calendarmcp.googleapis.com/mcp/v1",
+    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "description": {
+      "zh-CN": "查看日历、空闲时间和事件。",
+      "en": "Read calendars, availability and events."
+    },
+    "note": {
+      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
+      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "google-contacts",
+    "name": "Google Contacts",
+    "setup": "oauth-client",
+    "url": "https://people.googleapis.com/mcp/v1",
+    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "description": {
+      "zh-CN": "查询联系人与组织目录。",
+      "en": "Look up contacts and directory entries."
+    },
+    "note": {
+      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
+      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "google-docs",
+    "name": "Google Docs",
+    "setup": "oauth-client",
+    "url": "https://docsmcp.googleapis.com/mcp/v1",
+    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "description": {
+      "zh-CN": "读取和编辑 Google 文档。",
+      "en": "Read and edit Google documents."
+    },
+    "note": {
+      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
+      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "google-drive",
+    "name": "Google Drive",
+    "setup": "oauth-client",
+    "url": "https://drivemcp.googleapis.com/mcp/v1",
+    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "description": {
+      "zh-CN": "搜索和管理云端文件。",
+      "en": "Search and manage cloud files."
+    },
+    "note": {
+      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
+      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "google-sheets",
+    "name": "Google Sheets",
+    "setup": "oauth-client",
+    "url": "https://sheetsmcp.googleapis.com/mcp/v1",
+    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "description": {
+      "zh-CN": "读取和编辑电子表格。",
+      "en": "Read and edit spreadsheets."
+    },
+    "note": {
+      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
+      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "google-slides",
+    "name": "Google Slides",
+    "setup": "oauth-client",
+    "url": "https://slidesmcp.googleapis.com/mcp/v1",
+    "docsUrl": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "description": {
+      "zh-CN": "读取和编辑演示文稿。",
+      "en": "Read and edit presentations."
+    },
+    "note": {
+      "zh-CN": "需要 Google Workspace 开发者预览资格、已启用对应 API 的 Cloud 项目，以及自己的 OAuth Client ID / Secret；请登记下方显示的回调地址。",
+      "en": "Requires Google Workspace Developer Preview access, a Cloud project with the APIs enabled and your OAuth client credentials. Register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "zoom",
+    "name": "Zoom",
+    "setup": "oauth-client",
+    "url": "https://mcp.zoom.us/mcp/zoom/streamable",
+    "docsUrl": "https://developers.zoom.us/docs/mcp/",
+    "description": {
+      "zh-CN": "连接 Zoom 会议与协作工具。",
+      "en": "Connect Zoom meetings and collaboration tools."
+    },
+    "note": {
+      "zh-CN": "先创建 Zoom General App，配置用户 OAuth 和所需权限，并登记下方回调地址。",
+      "en": "Create a Zoom General App with user OAuth and the required scopes, then register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "asana",
+    "name": "Asana",
+    "setup": "oauth-client",
+    "url": "https://mcp.asana.com/v2/mcp",
+    "docsUrl": "https://developers.asana.com/docs/connecting-mcp-clients-to-asanas-v2-server",
+    "description": {
+      "zh-CN": "管理任务、项目和团队工作。",
+      "en": "Manage tasks, projects and team work."
+    },
+    "note": {
+      "zh-CN": "使用 Asana v2 MCP；需要预先登记的 OAuth Client ID / Secret 和当前回调地址。",
+      "en": "Uses Asana v2 MCP. Supply a registered OAuth client and register the current callback URL."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "box",
+    "name": "Box",
+    "setup": "oauth-client",
+    "url": "https://mcp.box.com",
+    "docsUrl": "https://developer.box.com/guides/box-mcp/setup",
+    "description": {
+      "zh-CN": "搜索和处理 Box 文件与内容。",
+      "en": "Search and work with Box files and content."
+    },
+    "note": {
+      "zh-CN": "请让 Box 管理员为 MCP 添加 Integration Credentials，并登记下方回调地址。",
+      "en": "Ask a Box admin to create MCP Integration Credentials and register the callback URL shown below."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "dropbox",
+    "name": "Dropbox",
+    "setup": "oauth-client",
+    "url": "https://mcp.dropbox.com/mcp",
+    "docsUrl": "https://help.dropbox.com/integrations/connect-dropbox-mcp-server",
+    "description": {
+      "zh-CN": "搜索和管理 Dropbox 文件。",
+      "en": "Search and manage Dropbox files."
+    },
+    "note": {
+      "zh-CN": "Shoggoth 使用自备 Dropbox App 的 OAuth 凭据；请按官方指南配置权限和下方回调地址。",
+      "en": "Use your own Dropbox App OAuth credentials. Configure its permissions and the callback URL below using the official guide."
+    },
+    "clientSecretRequired": true
+  },
+  {
+    "id": "canva",
+    "name": "Canva",
+    "setup": "oauth",
+    "url": "https://mcp.canva.com/mcp",
+    "docsUrl": "https://www.canva.com/help/mcp-agent-setup/",
+    "description": {
+      "zh-CN": "搜索、创建和编辑 Canva 设计。",
+      "en": "Search, create and edit Canva designs."
+    },
+    "note": {
+      "zh-CN": "使用 Canva 账号登录并授权，无需手动填写 OAuth 应用凭据。团队账号可能需要管理员开启 AI Connector。",
+      "en": "Sign in with your Canva account and authorize access; no manual OAuth app credentials are required. Team accounts may need an admin to enable AI Connector."
+    }
+  },
+  {
+    "id": "highlevel",
+    "name": "HighLevel",
+    "setup": "token",
+    "url": "https://services.leadconnectorhq.com/mcp/",
+    "docsUrl": "https://help.gohighlevel.com/support/solutions/articles/155000005741",
+    "description": {
+      "zh-CN": "管理联系人、商机和客户流程。",
+      "en": "Manage contacts, opportunities and customer workflows."
+    },
+    "note": {
+      "zh-CN": "需要 HighLevel Private Integration Token 和 locationId；请从自己的子账户获取。",
+      "en": "Requires a HighLevel Private Integration Token and locationId from your sub-account."
+    },
+    "fields": [
+      {
+        "name": "locationId",
+        "location": "header",
+        "required": true,
+        "secret": false,
+        "label": {
+          "zh-CN": "Location ID",
+          "en": "Location ID"
+        }
+      }
+    ]
+  },
+  {
+    "id": "tessie",
+    "name": "Tessie",
+    "setup": "token",
+    "url": "https://mcp.tessie.com",
+    "docsUrl": "https://developer.tessie.com/reference/mcp",
+    "description": {
+      "zh-CN": "查询车辆数据并使用已授权的车辆控制工具。",
+      "en": "Query vehicle data and use authorized vehicle controls."
+    },
+    "note": {
+      "zh-CN": "在 Tessie Developer Settings 创建访问令牌；可用工具取决于令牌权限。",
+      "en": "Create an access token in Tessie Developer Settings. Available tools depend on its permissions."
+    }
+  },
+  {
+    "id": "google-places",
+    "name": "Places / Google Maps",
+    "setup": "api-key",
+    "url": "https://mapstools.googleapis.com/mcp",
+    "docsUrl": "https://developers.google.com/maps/architecture/grounding-with-maps-mcp",
+    "description": {
+      "zh-CN": "搜索地点、查询天气和规划路线。",
+      "en": "Search places, check weather and plan routes."
+    },
+    "note": {
+      "zh-CN": "使用已启用 Maps Grounding Lite 的 Google Maps API Key；用量与计费遵循 Google Cloud 项目设置。",
+      "en": "Use a Google Maps API key with Maps Grounding Lite enabled. Usage and billing follow your Cloud project settings."
+    },
+    "fields": [
+      {
+        "name": "X-Goog-Api-Key",
+        "location": "header",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "Google Maps API Key",
+          "en": "Google Maps API key"
+        }
+      }
+    ]
+  },
+  {
+    "id": "shopify",
+    "supersededBy": "shop",
+    "name": "Shopify / Shop",
+    "setup": "none",
+    "url": "https://mcp.shop.com",
+    "docsUrl": "https://shopify.dev/changelog/posts/add-shopping-and-shop-pay-checkout-to-any-agent-with-shop-mcp",
+    "description": {
+      "zh-CN": "搜索 Shopify 商品、比较商品并建立购物车。",
+      "en": "Search Shopify products, compare items and build carts."
+    },
+    "note": {
+      "zh-CN": "商品搜索无需登录；此入口不提供完整商家后台管理。Shop Pay 和订单历史需要额外的 Shop 登录适配。",
+      "en": "Product search needs no sign-in. This is not full merchant-admin access. Shop Pay and order history require additional Shop sign-in support."
+    }
+  },
+  {
+    "id": "shopify-ucp",
+    "supersededBy": "shop",
+    "name": "Shopify UCP",
+    "setup": "token",
+    "docsUrl": "https://shopify.dev/docs/agents/carts-and-checkout/checkout-mcp",
+    "description": {
+      "zh-CN": "连接指定店铺的 UCP 结账工具。",
+      "en": "Connect to a store's UCP checkout tools."
+    },
+    "note": {
+      "zh-CN": "填写店铺的 HTTPS 地址，路径为 /api/ucp/mcp，并提供 Catalog 访问令牌和买家 IP。令牌通常 60 分钟过期，需手动更新；工具调用需符合自己的 UCP 代理配置。",
+      "en": "Enter the store's HTTPS URL ending in /api/ucp/mcp, a Catalog access token and buyer IP. Tokens normally expire after 60 minutes and must be updated manually. Tool calls must use your UCP agent profile."
+    },
+    "fields": [
+      {
+        "name": "Shopify-Buyer-IP",
+        "location": "header",
+        "required": true,
+        "secret": false,
+        "label": {
+          "zh-CN": "买家 IP 地址",
+          "en": "Buyer IP address"
+        }
+      }
+    ]
+  },
+  {
+    "id": "tailscale",
+    "name": "Tailscale Aperture",
+    "setup": "endpoint",
+    "docsUrl": "https://tailscale.com/docs/aperture/mcp-server",
+    "description": {
+      "zh-CN": "连接自己的 tailnet、SSH 与 Aperture 工具。",
+      "en": "Connect your tailnet, SSH and Aperture tools."
+    },
+    "note": {
+      "zh-CN": "先配置 Aperture 与 grants，并连接对应 tailnet。填写自己的 HTTPS MCP 地址（/v1/mcp）；本机回环地址也支持 HTTP。",
+      "en": "Configure Aperture and grants, then connect to its tailnet. Enter your HTTPS MCP URL ending in /v1/mcp; loopback HTTP is also supported."
+    }
+  },
+  {
+    "id": "link-by-stripe",
+    "name": "Link by Stripe",
+    "setup": "local",
+    "docsUrl": "https://github.com/stripe/link-cli",
+    "description": {
+      "zh-CN": "使用自己的 Link 钱包和已授权的财务数据。",
+      "en": "Use your Link wallet and authorized financial data."
+    },
+    "note": {
+      "zh-CN": "需要 Node.js 24+；首次使用前按官方指南运行 Link CLI 登录。当前支持美国和加拿大 Link 账户。",
+      "en": "Requires Node.js 24+. Sign in with the Link CLI using the official guide before first use. Currently supports US and Canadian Link accounts."
+    },
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "npm",
+      "identifier": "@stripe/link-cli",
+      "version": "0.30.0",
+      "packageArgs": [
+        "--mcp"
+      ]
+    }
+  },
+  {
+    "id": "quickbooks",
+    "name": "QuickBooks Online",
+    "setup": "local",
+    "requiresOAuthApp": true,
+    "docsUrl": "https://github.com/intuit/quickbooks-online-mcp-server",
+    "description": {
+      "zh-CN": "查询和管理 QuickBooks Online 公司账务。",
+      "en": "Query and manage QuickBooks Online company data."
+    },
+    "note": {
+      "zh-CN": "先下载并构建 Intuit 官方项目，完成 OAuth 授权。填写构建后 dist/index.js 的绝对路径（位于自己的用户目录），并提供凭据与可写的 Token 文件路径；不要填写未发布的 npm 包名。",
+      "en": "Build Intuit's official project and complete OAuth first. Enter the absolute path to the built dist/index.js inside your user directory, plus credentials and a writable token-file path. The source package is not currently published to npm."
+    },
+    "transport": {
+      "kind": "stdio-command",
+      "command": "",
+      "args": []
+    },
+    "fields": [
+      {
+        "name": "QUICKBOOKS_CLIENT_ID",
+        "location": "env",
+        "required": true,
+        "secret": false,
+        "label": {
+          "zh-CN": "Intuit Client ID",
+          "en": "Intuit client ID"
+        }
+      },
+      {
+        "name": "QUICKBOOKS_CLIENT_SECRET",
+        "location": "env",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "Intuit Client secret",
+          "en": "Intuit client secret"
+        }
+      },
+      {
+        "name": "QUICKBOOKS_REFRESH_TOKEN",
+        "location": "env",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "Refresh token",
+          "en": "Refresh token"
+        }
+      },
+      {
+        "name": "QUICKBOOKS_REALM_ID",
+        "location": "env",
+        "required": true,
+        "secret": false,
+        "label": {
+          "zh-CN": "公司 Realm ID",
+          "en": "Company realm ID"
+        }
+      },
+      {
+        "name": "QUICKBOOKS_ENVIRONMENT",
+        "location": "env",
+        "required": true,
+        "secret": false,
+        "label": {
+          "zh-CN": "环境（sandbox 或 production）",
+          "en": "Environment (sandbox or production)"
+        },
+        "default": "sandbox"
+      },
+      {
+        "name": "QUICKBOOKS_TOKEN_STORE_PATH",
+        "location": "env",
+        "required": true,
+        "secret": false,
+        "label": {
+          "zh-CN": "可写 Token 文件（绝对路径）",
+          "en": "Writable token file (absolute path)"
+        }
+      }
+    ]
+  },
+  {
+    "id": "1password",
+    "name": "1Password",
+    "setup": "local",
+    "docsUrl": "https://www.1password.dev/environments/mcp-server",
+    "description": {
+      "zh-CN": "管理开发环境与环境变量挂载。",
+      "en": "Manage developer environments and environment-variable mounts."
+    },
+    "note": {
+      "zh-CN": "在 1Password 桌面应用的 Developer 设置中开启 MCP 集成，并让 1password-mcp 可从 PATH 找到。需要时由桌面应用授权；此服务不返回密码或密钥值。",
+      "en": "Enable MCP integration in the 1Password desktop Developer settings and make 1password-mcp available on PATH. Approvals happen in the desktop app. This service never returns password or secret values."
+    },
+    "transport": {
+      "kind": "stdio-command",
+      "command": "1password-mcp",
+      "args": []
+    }
+  },
+  {
+    "id": "outlook-mail",
+    "name": "Outlook Mail",
+    "setup": "restricted",
+    "requiresOAuthApp": true,
+    "docsUrl": "https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/mcp-authentication?view=foundry",
+    "description": {
+      "zh-CN": "查看 Microsoft 企业邮件 MCP 接入方式。",
+      "en": "Review Microsoft enterprise mail MCP setup."
+    },
+    "note": {
+      "zh-CN": "需要 Agent 365 / Frontier 租户、Entra 应用和管理员授权；尚未提供适用于普通 Outlook 账户的通用接入配置。",
+      "en": "Requires an Agent 365 / Frontier tenant, an Entra app and admin consent. A generic setup for personal Outlook accounts is not available."
+    }
+  },
+  {
+    "id": "outlook-calendar",
+    "name": "Outlook Calendar",
+    "setup": "restricted",
+    "requiresOAuthApp": true,
+    "docsUrl": "https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/mcp-authentication?view=foundry",
+    "description": {
+      "zh-CN": "查看 Microsoft 企业日历 MCP 接入方式。",
+      "en": "Review Microsoft enterprise calendar MCP setup."
+    },
+    "note": {
+      "zh-CN": "需要 Agent 365 / Frontier 租户、Entra 应用和管理员授权；尚未提供适用于普通 Outlook 账户的通用接入配置。",
+      "en": "Requires an Agent 365 / Frontier tenant, an Entra app and admin consent. A generic setup for personal Outlook accounts is not available."
+    }
+  },
+  {
+    "id": "vercel",
+    "name": "Vercel",
+    "setup": "restricted",
+    "docsUrl": "https://vercel.com/docs/agent-resources/vercel-mcp",
+    "description": {
+      "zh-CN": "查看官方部署和项目 MCP 的接入要求。",
+      "en": "Review access requirements for Vercel's deployment and project MCP."
+    },
+    "note": {
+      "zh-CN": "官方远程 MCP 仅接受审核通过的客户端；Shoggoth 的客户端准入尚未确认。",
+      "en": "The official remote MCP accepts approved clients only. Shoggoth client approval has not been confirmed."
+    }
+  },
+  {
+    "id": "shop-pay",
+    "supersededBy": "shop",
+    "name": "Shop Pay",
+    "setup": "restricted",
+    "docsUrl": "https://shopify.dev/changelog/posts/add-shopping-and-shop-pay-checkout-to-any-agent-with-shop-mcp",
+    "description": {
+      "zh-CN": "查看 Shop 登录与 Shop Pay 结账接入说明。",
+      "en": "Review Shop sign-in and Shop Pay checkout setup."
+    },
+    "note": {
+      "zh-CN": "Shop Pay 需要 Shop 登录；当前推荐可直接使用 Shopify 商品搜索，支付授权流程仍需单独适配。",
+      "en": "Shop Pay requires Shop sign-in. Shopify product search is available separately; the payment authorization flow still needs integration."
+    }
+  },
+  {
+    "id": "runway",
+    "name": "Runway",
+    "setup": "oauth",
+    "url": "https://mcp.runwayml.com/mcp",
+    "docsUrl": "https://help.runwayml.com/hc/en-us/articles/51931843164691-Connecting-to-Runway-MCP",
+    "description": {
+      "zh-CN": "生成图像和视频，将创作结果保存到 Runway 素材库。",
+      "en": "Generate images and videos and save results to your Runway library."
+    },
+    "note": {
+      "zh-CN": "使用 Runway 账号登录，无需 API Key。生成会消耗账号积分，可用模型取决于套餐；MCP 不支持 Explore Mode。",
+      "en": "Sign in with your Runway account; no API key is needed. Generations use account credits and model access depends on your plan. Explore Mode is unavailable through MCP."
+    }
+  },
+  {
+    "id": "higgsfield",
+    "name": "Higgsfield",
+    "setup": "oauth",
+    "url": "https://mcp.higgsfield.ai/mcp",
+    "docsUrl": "https://higgsfield.ai/enterprise-help-center/platform/integrations",
+    "description": {
+      "zh-CN": "生成和编辑图像、视频与音频，整理创作素材。",
+      "en": "Generate and edit images, video and audio, and organize creative assets."
+    },
+    "note": {
+      "zh-CN": "使用 Higgsfield 账号登录，无需 API Key。需要有效的付费订阅；MCP 生成会消耗套餐积分，网页端的免费或 Unlimited 额度不适用。",
+      "en": "Sign in with your Higgsfield account; no API key is needed. An active paid subscription is required. MCP generations use plan credits; web-only free and Unlimited allowances do not apply."
+    }
+  },
+  {
+    "id": "black-forest-labs",
+    "name": "Black Forest Labs",
+    "setup": "oauth",
+    "url": "https://mcp.bfl.ai",
+    "docsUrl": "https://docs.bfl.ai/api_integration/mcp_integration",
+    "description": {
+      "zh-CN": "通过官方 FLUX MCP 生成、编辑图像和视频，查看历史作品。",
+      "en": "Generate and edit images and video, and browse past results with the official FLUX MCP."
+    },
+    "note": {
+      "zh-CN": "使用 BFL 账号登录并选择计费组织，无需 API Key。生成费用由所选组织承担；更换组织需要断开后重新登录。",
+      "en": "Sign in with your BFL account and choose the billed organization; no API key is needed. Generations are billed to that organization. Reconnect to choose a different organization."
+    }
+  },
+  {
+    "id": "fal-ai",
+    "name": "fal.ai",
+    "setup": "oauth",
+    "url": "https://mcp.fal.ai/mcp-relay",
+    "docsUrl": "https://fal.ai/docs/documentation/setting-up/mcp",
+    "description": {
+      "zh-CN": "查找生成模型与价格，生成图像、视频和音频并查询任务结果。",
+      "en": "Find generative models and pricing, create images, video and audio, and retrieve job results."
+    },
+    "note": {
+      "zh-CN": "通过 fal 官方网页登录授权，无需填写 FAL_KEY。生成按模型用量计费，使用 fal 控制台中选定的 MCP 账号。",
+      "en": "Authorize through fal's browser sign-in; no FAL_KEY is needed. Generations are billed by model usage to the active MCP account selected in your fal dashboard."
+    }
+  },
+  {
+    "id": "blender-lab",
+    "name": "Blender Lab",
+    "setup": "local",
+    "docsUrl": "https://www.blender.org/lab/mcp-server/",
+    "transport": {
+      "kind": "stdio-command",
+      "command": "",
+      "args": [
+        "-m",
+        "blmcp"
+      ]
+    },
+    "description": {
+      "zh-CN": "连接 Blender 官方 Lab MCP，分析场景、编辑对象并操作 Blender Python API。",
+      "en": "Connect the official Blender Lab MCP to inspect scenes, edit objects and use the Blender Python API."
+    },
+    "setupSteps": [
+      {
+        "zh-CN": "安装并打开 Blender 5.1 或更新版本，按官方指南安装 MCP 插件，并在插件设置中启动连接服务。",
+        "en": "Install and open Blender 5.1 or newer, install the MCP add-on from the official guide, and start its bridge in the add-on preferences."
+      },
+      {
+        "zh-CN": "从 projects.blender.org/lab/blender_mcp 安装官方 MCP 服务到当前用户目录下的 Python 虚拟环境。PyPI 上的同名 blender-mcp 属于另一个项目。",
+        "en": "Install the official server from projects.blender.org/lab/blender_mcp into a Python virtual environment under your user directory. The similarly named blender-mcp on PyPI is a different project."
+      },
+      {
+        "zh-CN": "在启动命令中填写该环境的 Python 绝对路径，例如 /Users/你的用户名/blender_mcp/mcp/.venv/bin/python。保留下方已填好的参数，保存后检查连接。",
+        "en": "Enter the absolute path to that environment's Python executable, for example /Users/your-name/blender_mcp/mcp/.venv/bin/python. Keep the prefilled arguments, save, then check the connection."
+      }
+    ],
+    "note": {
+      "zh-CN": "本机连接无需账号登录。使用场景工具时保持 Blender 与插件服务运行；MCP 可以执行 Python 并修改当前场景，请先保存工程副本。",
+      "en": "This local connection needs no account sign-in. Keep Blender and its bridge running when using scene tools. MCP can execute Python and change the current scene; save a copy of your project first."
+    }
+  },
+  {
+    "id": "mijia",
+    "name": "米家 / Xiaomi Home",
+    "setup": "token",
+    "docsUrl": "https://github.com/XiaoMi/ha_xiaomi_home",
+    "description": {
+      "zh-CN": "通过小米官方 Home Assistant 集成连接米家设备。",
+      "en": "Connect Xiaomi Home devices through Xiaomi’s official Home Assistant integration."
+    },
+    "note": {
+      "zh-CN": "需要已有 Home Assistant 实例。米家账号扫码在小米官方集成中完成；这里连接该实例，不提供独立米家云端扫码入口。填写实例的 /api/mcp 地址和长期访问令牌。",
+      "en": "Requires an existing Home Assistant instance. Sign in to Xiaomi Home in Xiaomi’s official integration, then connect that instance here using its /api/mcp URL and a long-lived access token."
+    },
+    "setupSteps": [
+      {
+        "zh-CN": "在 Home Assistant 安装 Xiaomi/ha_xiaomi_home，并在官方页面扫码授权米家账号。",
+        "en": "Install Xiaomi/ha_xiaomi_home in Home Assistant and authorize your Xiaomi account on its official sign-in page."
+      },
+      {
+        "zh-CN": "在 Home Assistant 启用 Model Context Protocol Server，并选择允许助理访问的设备。",
+        "en": "Enable Model Context Protocol Server in Home Assistant and select the devices agents may access."
+      },
+      {
+        "zh-CN": "填写 HTTPS 实例地址，以 /api/mcp 结尾；本机回环可用 HTTP。在个人资料的安全设置创建长期访问令牌后粘贴到下方。",
+        "en": "Enter your HTTPS instance URL ending in /api/mcp; loopback HTTP is supported. Create a long-lived access token in your profile’s Security settings and paste it below."
+      }
+    ]
+  },
+  {
+    "id": "didi",
+    "name": "滴滴打车 / DiDi",
+    "setup": "api-key",
+    "url": "https://mcp.didichuxing.com/mcp-servers",
+    "docsUrl": "https://mcp.didichuxing.com/api",
+    "description": {
+      "zh-CN": "查询出行方案、预估费用，并在确认后发起打车。",
+      "en": "Explore ride options, estimate fares and request a ride after confirmation."
+    },
+    "fields": [
+      {
+        "name": "key",
+        "location": "query",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "滴滴 MCP 申请 Key",
+          "en": "DiDi MCP key"
+        }
+      }
+    ],
+    "note": {
+      "zh-CN": "先在滴滴 MCP 平台申请 Key。Key 会加密保存，只在连接官方服务时注入，不需要放进上面的地址。行程创建与取消会使用你的滴滴账号。",
+      "en": "Apply for a key on DiDi’s MCP platform. It is stored encrypted and injected only when connecting to the official service; keep it out of the URL. Ride requests and cancellations use your DiDi account."
+    }
+  },
+  {
+    "id": "uber",
+    "name": "Uber",
+    "hidden": true,
+    "setup": "none",
+    "url": "https://mcp.uber.com/claude/rides-3p/mcp",
+    "docsUrl": "https://claude.com/marketplace/connectors/uber",
+    "description": {
+      "zh-CN": "查询美国境内 Uber 车型、预估车费与接驾时间，在 Uber App 完成叫车。",
+      "en": "Compare Uber ride options, fare estimates and pickup times in the US. Complete bookings in the Uber app."
+    },
+    "note": {
+      "zh-CN": "官方目录标注查询无需登录。若服务拒绝连接（403），请向 Uber 确认当前客户端的接入条件。叫车与付款需在 Uber App 中完成。",
+      "en": "The official directory lists searches as requiring no sign-in. If the service denies the connection (403), confirm client access requirements with Uber. Booking and payment take place in the Uber app."
+    }
+  },
+  {
+    "id": "uber-eats",
+    "name": "Uber Eats",
+    "hidden": true,
+    "setup": "none",
+    "url": "https://mcp.ubereats.com/eats-claude/mcp",
+    "docsUrl": "https://claude.com/marketplace/connectors/uber-eats",
+    "description": {
+      "zh-CN": "搜索美国境内的餐厅、菜单和菜品，在 Uber Eats App 完成下单与付款。",
+      "en": "Search restaurants, menus and dishes in the US. Complete orders and payments in the Uber Eats app."
+    },
+    "note": {
+      "zh-CN": "官方目录标注搜索无需登录。若服务拒绝连接（403），请向 Uber 确认当前客户端的接入条件。此连接器仅用于浏览，购物车、下单与付款需在 Uber Eats App 中完成。",
+      "en": "The official directory lists searches as requiring no sign-in. If the service denies the connection (403), confirm client access requirements with Uber. This connector supports browsing; finalize your cart, order and payment in the Uber Eats app."
+    }
+  },
+  {
+    "id": "luckin",
+    "name": "瑞幸咖啡 / Luckin Coffee",
+    "setup": "token",
+    "url": "https://gwmcp.lkcoffee.com/order/user/mcp",
+    "docsUrl": "https://open.lkcoffee.com/",
+    "description": {
+      "zh-CN": "查找门店、浏览饮品与优惠，并在确认后下单。",
+      "en": "Find stores, browse drinks and offers, and place orders after confirmation."
+    },
+    "note": {
+      "zh-CN": "在瑞幸官方开放页面登录并获取个人授权 Token，粘贴到访问令牌。连接检查不会下单；实际订单需按你的指令确认。",
+      "en": "Sign in on Luckin’s official platform and paste your personal authorization token below. Connection checks do not place orders; ordering requires your instruction."
+    }
+  },
+  {
+    "id": "mcdonalds",
+    "name": "麦当劳 / McDonald’s",
+    "setup": "token",
+    "url": "https://mcp.mcd.cn",
+    "docsUrl": "https://open.mcd.cn/mcp/doc",
+    "description": {
+      "zh-CN": "查询麦当劳活动、优惠券、门店与餐品信息。",
+      "en": "Explore McDonald’s promotions, coupons, stores and menu information."
+    },
+    "note": {
+      "zh-CN": "在麦当劳官方 MCP 页面登录并获取 Token。可用工具与活动资格由账号权限决定。",
+      "en": "Sign in on McDonald’s official MCP page to obtain a token. Available tools and offer eligibility depend on your account."
+    }
+  },
+  {
+    "id": "chrome-devtools",
+    "name": "Chrome DevTools",
+    "docsUrl": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+    "description": {
+      "zh-CN": "检查浏览器网络、控制台与页面性能，协助调试网站。",
+      "en": "Inspect browser requests, console output and page performance to debug websites."
+    },
+    "note": {
+      "zh-CN": "需要本机 Chrome 和 Node.js。使用专用浏览器资料，登录一次后会保留登录状态并在重开时恢复；网站登录过期时需重新登录。",
+      "en": "Requires local Chrome and Node.js. A dedicated browser profile keeps sign-ins and restores the session when reopened. Sign in again when a website's login expires."
+    },
+    "setup": "local",
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "npm",
+      "identifier": "chrome-devtools-mcp",
+      "version": "1.12.0",
+      "packageArgs": [
+        "--no-usage-statistics",
+        "--no-performance-crux"
+      ]
+    }
+  },
+  {
+    "id": "context7",
+    "name": "Context7",
+    "docsUrl": "https://github.com/upstash/context7",
+    "description": {
+      "zh-CN": "查询开发库与框架的最新文档和代码示例。",
+      "en": "Find current library and framework documentation and code examples."
+    },
+    "note": {
+      "zh-CN": "可先匿名连接，额度较低。需要更多额度时，在下方访问令牌中填写 Context7 API Key。",
+      "en": "Anonymous access has lower limits. For higher limits, enter your Context7 API key in the access-token field below."
+    },
+    "setup": "none",
+    "url": "https://mcp.context7.com/mcp"
+  },
+  {
+    "id": "storybook",
+    "name": "Storybook",
+    "docsUrl": "https://storybook.js.org/docs/ai/mcp",
+    "description": {
+      "zh-CN": "读取项目组件与文档，辅助编写 Stories 和测试。",
+      "en": "Read project components and documentation to write stories and tests."
+    },
+    "note": {
+      "zh-CN": "先在自己的 Storybook 项目安装官方 @storybook/addon-mcp 并启动开发服务器，再填写项目的 MCP 地址。默认端口为 6006。",
+      "en": "Install the official @storybook/addon-mcp in your Storybook project and start its dev server, then enter the project MCP address. The default port is 6006."
+    },
+    "setup": "endpoint",
+    "url": "http://127.0.0.1:6006/mcp",
+    "setupSteps": [
+      {
+        "zh-CN": "在项目中安装 @storybook/addon-mcp，并加入 Storybook addons 配置。",
+        "en": "Install @storybook/addon-mcp in your project and add it to the Storybook addons configuration."
+      },
+      {
+        "zh-CN": "启动 Storybook；确认下面的地址与实际端口和 MCP 路径一致。",
+        "en": "Start Storybook and ensure the address below uses its actual port and MCP path."
+      }
+    ]
+  },
+  {
+    "id": "filesystem",
+    "name": "Filesystem",
+    "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+    "description": {
+      "zh-CN": "在你指定的目录中读取、搜索和编辑文件。",
+      "en": "Read, search and edit files inside a directory you choose."
+    },
+    "note": {
+      "zh-CN": "MCP 官方参考服务器。必须填写允许访问的绝对目录；没有默认授权目录。修改目录后保存会重新连接，留空保留已有配置。",
+      "en": "An official MCP reference server. Enter the absolute directory to allow; no directory is granted by default. Saving a new directory reconnects; leaving it blank preserves the existing configuration."
+    },
+    "setup": "none",
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "npm",
+      "identifier": "@modelcontextprotocol/server-filesystem",
+      "version": "1.0.0",
+      "packageArgs": [
+        "{directory}"
+      ]
+    },
+    "fields": [
+      {
+        "name": "directory",
+        "location": "argument",
+        "label": {
+          "zh-CN": "允许访问的目录（绝对路径）",
+          "en": "Allowed directory (absolute path)"
+        },
+        "required": true,
+        "secret": false,
+        "format": "absolute-path"
+      }
+    ]
+  },
+  {
+    "id": "fetch",
+    "name": "Fetch",
+    "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+    "description": {
+      "zh-CN": "抓取公开网页并提取适合阅读的内容。",
+      "en": "Fetch public web pages and extract readable content."
+    },
+    "note": {
+      "zh-CN": "MCP 官方参考服务器，无需账号。需要本机 uv；保存时以 uvx 运行固定版本 Python 包。",
+      "en": "An official MCP reference server without an account requirement. Requires local uv; saving runs the pinned Python package with uvx."
+    },
+    "setup": "none",
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "pypi",
+      "identifier": "mcp-server-fetch",
+      "version": "2026.10.24"
+    }
+  },
+  {
+    "id": "time",
+    "name": "Time",
+    "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
+    "description": {
+      "zh-CN": "查询当前时间，换算日期与时区。",
+      "en": "Look up current time and convert between time zones."
+    },
+    "note": {
+      "zh-CN": "MCP 官方参考服务器，无需账号。需要本机 uv；默认使用本机时区。",
+      "en": "An official MCP reference server without an account requirement. Requires local uv and uses the local time zone by default."
+    },
+    "setup": "none",
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "pypi",
+      "identifier": "mcp-server-time",
+      "version": "2026.10.19"
+    }
+  },
+  {
+    "id": "n8n",
+    "name": "n8n MCP",
+    "docsUrl": "https://github.com/czlonkowski/n8n-mcp",
+    "description": {
+      "zh-CN": "查询 n8n 节点和模板，辅助构建与验证工作流。",
+      "en": "Find n8n nodes and templates to build and validate workflows."
+    },
+    "note": {
+      "zh-CN": "社区维护的 MCP。节点文档和模板无需 n8n 账号；管理实际工作流时，需同时填写自己的实例地址和 API Key。工作流使用的第三方服务仍需各自授权。",
+      "en": "A community-maintained MCP. Node documentation and templates need no n8n account. To manage workflows, supply both your instance URL and API key. Services used by workflows require their own authorization."
+    },
+    "setup": "none",
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "npm",
+      "identifier": "n8n-mcp",
+      "version": "2.96.1"
+    },
+    "fields": [
+      {
+        "name": "N8N_API_URL",
+        "location": "env",
+        "label": {
+          "zh-CN": "n8n 实例地址（可选）",
+          "en": "n8n instance URL (optional)"
+        },
+        "required": false,
+        "secret": false
+      },
+      {
+        "name": "N8N_API_KEY",
+        "location": "env",
+        "label": {
+          "zh-CN": "n8n API Key（可选）",
+          "en": "n8n API key (optional)"
+        },
+        "required": false,
+        "secret": true
+      }
+    ],
+    "defaults": {
+      "env": {
+        "LOG_LEVEL": "error",
+        "DISABLE_CONSOLE_OUTPUT": "true",
+        "N8N_MCP_TELEMETRY_DISABLED": "true"
+      }
+    }
+  },
+  {
+    "id": "variflight",
+    "name": "飞常准 / VariFlight",
+    "docsUrl": "https://ai.variflight.com/zh",
+    "description": {
+      "zh-CN": "查询航班动态、机场天气、机票及中转信息。",
+      "en": "Look up flight status, airport weather, fares and transfer information."
+    },
+    "note": {
+      "zh-CN": "注册飞友 AI 开放平台并创建 API Key。填写一次即可接入航空数据与 Tripmatch（火车票及空铁联运）两项服务，实际可用范围和计费按账号权限提供。",
+      "en": "Create an API key on the VariFlight AI platform. Enter it once to connect both aviation data and Tripmatch (train and air-rail transfers). Account permissions and metered pricing apply."
+    },
+    "setup": "api-key",
+    "url": "https://ai.variflight.com/servers/aviation/mcp",
+    "connectAllServices": true,
+    "endpoints": [
+      {
+        "url": "https://ai.variflight.com/servers/aviation/mcp",
+        "label": {
+          "zh-CN": "航空数据",
+          "en": "Aviation"
+        }
+      },
+      {
+        "url": "https://ai.variflight.com/servers/tripmatch/mcp",
+        "label": {
+          "zh-CN": "跨城与空铁联运",
+          "en": "Tripmatch"
+        }
+      }
+    ],
+    "fields": [
+      {
+        "name": "X-API-Key",
+        "location": "header",
+        "label": {
+          "zh-CN": "飞常准 API Key",
+          "en": "VariFlight API key"
+        },
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "stockmap",
+    "name": "StockMap",
+    "docsUrl": "https://stockmap.io/assistants",
+    "description": {
+      "zh-CN": "研究美股两周走势、比较个股与板块，并查看加密市场分析。",
+      "en": "Research two-week US stock calls, compare stocks and sectors, and explore crypto market analysis."
+    },
+    "note": {
+      "zh-CN": "公开研究无需登录或 API Key；免费版有使用额度，按 StockMap 当前套餐提供。个人自选股工具需另行授权 StockMap 账号。模型判断仅供研究参考。",
+      "en": "Public research needs no sign-in or API key. Free usage is limited by StockMap's current plan. Personal watchlist tools require separate StockMap account authorization. Model calls are research, not investment advice."
+    },
+    "setup": "none",
+    "url": "https://stockmap.io/mcp"
+  },
+  {
+    "id": "eastmoney",
+    "name": "东方财富妙想 / Eastmoney",
+    "docsUrl": "https://marketing.dfcfs.com/views/finskillshub/indexZfdcxNpu?appfenxiang=1",
+    "description": {
+      "zh-CN": "查询证券行情、财务数据与金融资讯。",
+      "en": "Query securities data, financial statements and financial news."
+    },
+    "note": {
+      "zh-CN": "从妙想平台领取自己的 API Key。使用公开远程 MCP，额度和数据范围按账号权限提供。",
+      "en": "Obtain your own API key from the MX platform. Uses the public remote MCP; quota and data coverage depend on your account."
+    },
+    "setup": "api-key",
+    "url": "https://mxapi.eastmoney.com/mxds/mcp",
+    "fields": [
+      {
+        "name": "em_api_key",
+        "location": "header",
+        "label": {
+          "zh-CN": "妙想 API Key",
+          "en": "MX API key"
+        },
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "ifind",
+    "name": "同花顺 iFinD",
+    "docsUrl": "https://mcp.51ifind.com/#/documents/guide-prepare",
+    "description": {
+      "zh-CN": "查询股票、基金、宏观与公告等专业金融数据。",
+      "en": "Query professional stock, fund, macroeconomic and announcement data."
+    },
+    "note": {
+      "zh-CN": "登录同花顺或 iFinD 账号，在个人中心获取 MCP 密钥。填写密钥原值，无需加 Bearer；额度与数据权限按套餐提供。",
+      "en": "Sign in with a Tonghuashun or iFinD account and get an MCP key from your personal center. Enter the raw key without Bearer; quota and data access depend on your plan."
+    },
+    "setup": "api-key",
+    "url": "https://api-mcp.51ifind.com:8643/ds-mcp-servers/hexin-ifind-ds-mcp",
+    "fields": [
+      {
+        "name": "Authorization",
+        "location": "header",
+        "label": {
+          "zh-CN": "iFinD MCP 密钥（原值）",
+          "en": "iFinD MCP key (raw value)"
+        },
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "wind",
+    "name": "万得金融数据",
+    "docsUrl": "https://market.windalice.com",
+    "description": {
+      "zh-CN": "将 Wind 金融数据与分析能力接入助理。",
+      "en": "Connect Wind financial data and analysis tools to your assistant."
+    },
+    "note": {
+      "zh-CN": "1. 访问 https://market.windalice.com，使用手机号登录。\n2. 登录后，前往个人中心获取您的专属密钥。",
+      "en": "1. Visit https://market.windalice.com and sign in with your phone number.\n2. After signing in, go to your personal center to get your dedicated API key."
+    },
+    "setup": "token",
+    "url": "https://mcp.wind.com.cn/vserver_analytics_data/mcp/",
+    "connectAllServices": true,
+    "endpoints": [
+      {
+        "url": "https://mcp.wind.com.cn/vserver_analytics_data/mcp/",
+        "label": {
+          "zh-CN": "综合分析",
+          "en": "Cross-domain analytics"
+        }
+      },
+      {
+        "url": "https://mcp.wind.com.cn/vserver_stock_data/mcp/",
+        "label": {
+          "zh-CN": "股票",
+          "en": "Stocks"
+        }
+      },
+      {
+        "url": "https://mcp.wind.com.cn/vserver_fund_data/mcp/",
+        "label": {
+          "zh-CN": "基金",
+          "en": "Funds"
+        }
+      },
+      {
+        "url": "https://mcp.wind.com.cn/vserver_index_data/mcp/",
+        "label": {
+          "zh-CN": "指数",
+          "en": "Indices"
+        }
+      },
+      {
+        "url": "https://mcp.wind.com.cn/vserver_bond_data/mcp/",
+        "label": {
+          "zh-CN": "债券",
+          "en": "Bonds"
+        }
+      },
+      {
+        "url": "https://mcp.wind.com.cn/vserver_financial_docs/mcp/",
+        "label": {
+          "zh-CN": "金融文档",
+          "en": "Financial documents"
+        }
+      },
+      {
+        "url": "https://mcp.wind.com.cn/vserver_economic_data/mcp/",
+        "label": {
+          "zh-CN": "宏观经济",
+          "en": "Economic data"
+        }
+      }
+    ]
+  },
+  {
+    "id": "12306",
+    "name": "12306",
+    "docsUrl": "https://github.com/Joooook/12306-mcp",
+    "description": {
+      "zh-CN": "查询火车余票、车次、中转与经停站。",
+      "en": "Look up train availability, timetables, transfers and intermediate stops."
+    },
+    "note": {
+      "zh-CN": "Joooook 维护的社区 MCP，无需账号或 Key。需要本机 Node.js，仅提供铁路信息查询；购票请在官方渠道完成。",
+      "en": "A community MCP maintained by Joooook. Requires local Node.js, with no account or key needed. Provides rail information; complete bookings through official channels."
+    },
+    "setup": "none",
+    "transport": {
+      "kind": "stdio-package",
+      "registryType": "npm",
+      "identifier": "12306-mcp",
+      "version": "0.3.10"
+    }
+  },
+  {
+    "id": "ticketmaster",
+    "name": "Ticketmaster",
+    "setup": "api-key",
+    "docsUrl": "https://developer.ticketmaster.com/products-and-docs/tutorials/events-search/search_events_with_discovery_api.html",
+    "transport": {
+      "kind": "stdio-command",
+      "command": "shoggoth-ticketmaster",
+      "args": [],
+      "cwd": ""
+    },
+    "fields": [
+      {
+        "name": "TICKETMASTER_API_KEY",
+        "location": "env",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "Consumer Key（API Key）",
+          "en": "Consumer Key (API key)"
+        }
+      }
+    ],
+    "description": {
+      "zh-CN": "搜索演唱会、赛事、艺人和场馆，查看图片、公开票价区间与官方活动链接。",
+      "en": "Search concerts, events, artists and venues; get images, public price ranges and official event links."
+    },
+    "setupSteps": [
+      {
+        "zh-CN": "在 Ticketmaster 开发者后台的 My Apps 中，复制 Consumer Key，并填写到下方。",
+        "en": "In Ticketmaster Developer Portal → My Apps, copy your Consumer Key into the field below."
+      },
+      {
+        "zh-CN": "保存后自动检查连接，再选择哪些助理可以使用。查询程序随 App 提供，本机需有 Python 3.9 或更新版本。",
+        "en": "Save to check the connection, then choose which agents can use it. The query program is bundled; Python 3.9 or newer is required on this computer."
+      }
+    ],
+    "note": {
+      "zh-CN": "独立的本地查询连接器，使用官方公开 Discovery API。Key 加密保存在本机；每次检查连接使用 1 次查询。默认额度为每天 5000 次，实际按账号限制；仅提供查询，实际选座和购买请打开官方活动链接。",
+      "en": "Independent local connector using the official public Discovery API. The key is encrypted locally. Each connection check uses one query. Default quota is 5,000 requests/day, subject to account limits. Queries only; use official event links to select seats and purchase."
+    }
+  },
+  {
+    "id": "flightaware",
+    "name": "FlightAware",
+    "setup": "api-key",
+    "docsUrl": "https://www.flightaware.com/aeroapi/portal/",
+    "transport": {
+      "kind": "stdio-command",
+      "command": "shoggoth-flightaware",
+      "args": [],
+      "cwd": ""
+    },
+    "fields": [
+      {
+        "name": "FLIGHTAWARE_API_KEY",
+        "location": "env",
+        "required": true,
+        "secret": true,
+        "label": {
+          "zh-CN": "AeroAPI Key",
+          "en": "AeroAPI key"
+        }
+      }
+    ],
+    "description": {
+      "zh-CN": "查询航班状态、位置与轨迹、时刻表、机场和航司动态，以及账号用量。",
+      "en": "Look up flight status, positions, tracks, schedules, airport and airline activity, and account usage."
+    },
+    "setupSteps": [
+      {
+        "zh-CN": "已有 AeroAPI Key 时填写到下方。获取 Key 需在 FlightAware 官网单独开通 AeroAPI；此连接器不会替你订阅或付款。",
+        "en": "Enter an existing AeroAPI key below. Obtaining one requires separate AeroAPI enrollment on FlightAware; this connector does not subscribe or pay for you."
+      },
+      {
+        "zh-CN": "本机需要 Python 3.9 或更新版本。保存和检查只读取官方标价为 $0 的账号用量接口，不查询航班。",
+        "en": "Python 3.9+ is required. Saving/checking reads only the documented $0 account-usage endpoint, not flight data."
+      },
+      {
+        "zh-CN": "可能计费的查询默认关闭。以后确认账号已开通并接受按量费用后，再勾选允许查询并保存。",
+        "en": "Metered queries are off by default. Enable and save them only after enrollment and acceptance of usage charges."
+      }
+    ],
+    "note": {
+      "zh-CN": "独立本地连接器，使用官方 AeroAPI v4；Key 加密保存在本机。Personal 的 $5 月度额度不是费用硬上限；计费按账号和端点执行，不能保证免费。每次只取一页，不自动重试，不创建提醒或提交飞行计划。",
+      "en": "Independent local connector using official AeroAPI v4. Keys are encrypted locally. The Personal $5 monthly credit is not a hard spending cap; charges depend on account and endpoint. Single-page reads, no automatic retries, alerts or flight-intent writes."
+    }
+  }
+]

@@ -90,6 +90,7 @@ const DEFAULT_RUN_FILTERS: CronRunsFilters = {
 
 // 状态空值使用更明确的中文文案，减少列表里裸露的 undefined。
 function stateLabel(job: UnifiedCronJob, t: TFunction): string {
+  if (job.connectorMigrationRequired) return t("connectors.cronMigrationRequired");
   if (!job.enabled) return t("cron.disabled");
   if (job.stateLabel && !["ok", "error", "skipped", "scheduled", "disabled"].includes(job.stateLabel)) return job.stateLabel;
   return t("cron.enabled");

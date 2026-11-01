@@ -26,8 +26,11 @@ function projectActiveMemoryDefaults(config, profileIds) {
   return { ...config, plugins: { ...config.plugins, entries: { ...config.plugins?.entries,
     "active-memory": { ...entry, enabled: entry?.enabled ?? true,
       config: { ...policy,
+        thinking: policy.thinking ?? "low",
+        timeoutMs: policy.timeoutMs ?? 300_000,
+        maxSummaryChars: policy.maxSummaryChars ?? 600,
         // Native Runtime discovery and the first authorized index lookup share
-        // the hook's wall-clock budget. Keep the native 15s recall budget and
+        // the hook's wall-clock budget. Allow five minutes for recall and
         // allow bounded cold setup only when the user left both times unset.
         ...(policy.timeoutMs === undefined && policy.setupGraceTimeoutMs === undefined ? { setupGraceTimeoutMs: 10_000 } : {}),
         mode: policy.mode ?? "escalate", agents } },

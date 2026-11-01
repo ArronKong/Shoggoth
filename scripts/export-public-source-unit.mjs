@@ -14,9 +14,9 @@ assert.deepEqual(exported.files, original.files);
 assert.deepEqual(exported.mac, original.mac);
 assert.deepEqual(exported.publish, original.publish);
 assert.deepEqual(publicSourceBytes('electron-builder.yml', exportedBytes), exportedBytes);
-const catalog = JSON.parse(publicSourceBytes('resources/bundled-plugins/catalog.json', Buffer.from('{}')));
-assert.deepEqual(catalog.packages, []);
-for (const file of ['docs/private.md', 'resources/bundled-plugins/packages/temporal/assets/.gitkeep', 'app/.DS_Store']) {
+assert.equal(original.extraResources.some(item => ["resources/bundled-plugins", "resources/shoggoth-plugins", ".vendor/gogcli"].some(prefix => String(item.from).startsWith(prefix))), false);
+assert.equal(original.extraResources.some(item => ["open-connector", "open-connector-runtime", "gogcli"].includes(item.to)), false);
+for (const file of ['docs/private.md', 'resources/bundled-plugins/packages/temporal/assets/.gitkeep', 'resources/shoggoth-plugins/old/plugin.json', 'app/.DS_Store', 'resources/open-connector/host.json', 'resources/open-connector-runtime/runtime.json', 'resources/gogcli/bin/gog', 'resources/shoggoth-skills/shoggoth-plugin-authoring/SKILL.md']) {
   assert.equal(isPublicSourcePath(file), false);
 }
 assert.equal(isPublicSourcePath('LICENSE'), true);

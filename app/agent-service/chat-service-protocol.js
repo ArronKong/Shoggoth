@@ -4,7 +4,6 @@ const crypto = require("node:crypto");
 const { validInteractiveApprovalChoice } = require("../core/shoggoth-interaction-contract");
 const { PUBLIC_MESSAGES: INSPIRATION_PUBLIC_MESSAGES } = require("./inspiration-service-protocol");
 const { validAttachments, attachmentFields } = require("./inspiration-media");
-const { normalizePluginSelection, validPluginSelection } = require("./plugin-chat-selection");
 const { validModelSettings, validModelSettingsPatch } = require("./chat-model-settings");
 const { validateRuntimeContextUsage, validateRuntimeContextCapabilities } = require("./runtime-context-usage");
 
@@ -65,13 +64,18 @@ const CHAT_SERVICE_METHODS = Object.freeze([
 const CHAT_SERVICE_METHOD_SET = new Set(CHAT_SERVICE_METHODS);
 
 const PUBLIC_MESSAGES = Object.freeze({
+  ...require("../core/chat-secret-contract").SECRET_MESSAGES,
+  ...require("../core/connector-errors").CONNECTOR_PUBLIC_MESSAGES,
+  PLUGIN_PLATFORM_RETIRED: "旧插件选择已停用，请重新选择连接器账号",
   ...require("./active-memory-command-protocol").MESSAGES,
   CODEX_DESKTOP_RUNTIME_PINNED: "Codex Desktop 原对话需要使用原生 Codex CLI",
   CODEX_DESKTOP_CONTEXT_CHANGED: "原对话的 Shoggoth 记忆或撤回状态已变化，请新建会话继续",
   CODEX_DESKTOP_BUSY: "原对话正在 Codex 客户端运行，请等当前回合结束后再发送",
   ...INSPIRATION_PUBLIC_MESSAGES,
   RUNTIME_AUTH_REQUIRED: "当前 Agent 尚未登录或登录已失效，请前往「模型」登录后重试",
-  RUNTIME_INCOMPATIBLE: "当前 CLI 版本与应用不兼容，请更新 CLI 或应用后重新检查",
+  RUNTIME_INCOMPATIBLE: "当前 CLI 未满足必需协议，请更新 CLI 或应用后重新检查",
+  RUNTIME_EXECUTABLE_CHANGED: "CLI 安装已变化，请等待当前任务结束后重新检查",
+  RUNTIME_IDENTITY_UNAVAILABLE: "暂时无法确认 CLI 安装状态，请稍后重新检查",
   INVALID_PARAMS: "请求参数无效",
   SERVICE_UNAVAILABLE: "Shoggoth Service 暂时不可用",
   BACKEND_NOT_READY: "Shoggoth Agent 暂不可用",
@@ -149,6 +153,8 @@ const DIRECT_INTERNAL_ERROR_MAP = Object.freeze({
   AUTH_REQUIRED: "RUNTIME_AUTH_REQUIRED",
   RUNTIME_AUTH_REQUIRED: "RUNTIME_AUTH_REQUIRED",
   RUNTIME_INCOMPATIBLE: "RUNTIME_INCOMPATIBLE",
+  RUNTIME_EXECUTABLE_CHANGED: "RUNTIME_EXECUTABLE_CHANGED",
+  RUNTIME_IDENTITY_UNAVAILABLE: "RUNTIME_IDENTITY_UNAVAILABLE",
   CODEX_SYSTEM_BINARY_NOT_FOUND: "BACKEND_NOT_READY",
   CODEX_RUNTIME_VERSION_MISMATCH: "BACKEND_NOT_READY",
   CODEX_RUNTIME_VERSION_PROBE_FAILED: "BACKEND_NOT_READY",
@@ -352,11 +358,10 @@ function validateChatServiceParams(method, params) {
       || !params.text.trimStart().startsWith("/")) failParams();
   } else if (method === "chat.send") {
     const fields = attachmentFields(params, ["operationId", "sessionKey", "prompt", "createdAt"]);
-    if (params?.pluginSelection !== undefined) fields.push("pluginSelection");
+    if (Object.hasOwn(params||{},"connectorSelection")) throw Object.assign(new Error("OpenConnector account selection is retired"),{code:"OPEN_CONNECTOR_RETIRED"});
     if (!validateOperationBase(params, fields)
       || !validUuid(params.sessionKey)
       || (params.attachments !== undefined && !validAttachments(params.attachments))
-      || (params.pluginSelection !== undefined && !validPluginSelection(params.pluginSelection))
       || !(validString(params.prompt, MAX_FRAME_BYTES) || (params.prompt === "" && params.attachments?.length))) failParams();
   } else if (method === "chat.operation.reconcile") {
     if (!validateOperationBase(params, ["operationId", "sessionKey", "createdAt"])
@@ -403,9 +408,6 @@ function validateChatServiceParams(method, params) {
       || (params.action === "cancel" && Object.keys(params.answers).length !== 0)) failParams();
   }
   const cloned = cloneParams(params);
-  if (method === "chat.send" && cloned.pluginSelection !== undefined) {
-    cloned.pluginSelection = normalizePluginSelection(cloned.pluginSelection);
-  }
   return cloned;
 }
 
@@ -489,16 +491,41 @@ function hasRuntimeSessionFields(value) {
   return ["runtimeBindingId", "retiredRuntimeSessions", "revision"].some(key => Object.hasOwn(value || {}, key));
 }
 
+const MODEL_PROVIDER_SELECTION = /^(?:@chatgpt|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u;
+function validModelProviderSelection(value) {
+  return typeof value === "string" && MODEL_PROVIDER_SELECTION.test(value);
+}
+
 function validateNextRuntimeSelection(value, recurse) {
   const { nextRuntimeSelection: next, ...session } = value;
-  if (!exactObject(next, ["bindingId", "model", "permissionMode", "modelSettings"])
+  const hasProvider = Object.hasOwn(next || {}, "modelProviderRef");
+  if (!exactObject(next, ["bindingId", "model", "permissionMode", "modelSettings", ...(hasProvider ? ["modelProviderRef"] : [])])
     || !validUuid(next.bindingId) || !validString(next.model, 512)
+    || (hasProvider && !validModelProviderSelection(next.modelProviderRef))
     || !validString(next.permissionMode, 64, true) || !validModelSettings(next.modelSettings)) failResponse();
   return { ...recurse(session), nextRuntimeSelection: cloneCanonical(next) };
 }
 
+// Optional per-session model source (codex-session-provider selection token).
+function validateModelProviderField(value, recurse) {
+  const { modelProviderRef, ...session } = value;
+  if (!validModelProviderSelection(modelProviderRef)) failResponse();
+  return { ...recurse(session), modelProviderRef };
+}
+
+// Internal record of the source a native session runs on; never projected.
+function withoutRuntimeModelSource(value) {
+  const { runtimeModelSource, ...session } = value;
+  if (!exactObject(runtimeModelSource, ["runtimeSessionId", "source"])
+    || !validString(runtimeModelSource.runtimeSessionId, 512)
+    || !validModelProviderSelection(runtimeModelSource.source)) failResponse();
+  return session;
+}
+
 function validateSession(value) {
+  if (Object.hasOwn(value || {}, "runtimeModelSource")) return validateSession(withoutRuntimeModelSource(value));
   if (Object.hasOwn(value || {}, "nextRuntimeSelection")) return validateNextRuntimeSelection(value, validateSession);
+  if (Object.hasOwn(value || {}, "modelProviderRef")) return validateModelProviderField(value, validateSession);
   if (hasRuntimeSessionFields(value)) return validateRuntimeSessionFields(value, validateSession);
   if (Object.hasOwn(value || {}, "modelSettings")) {
     const { modelSettings, ...session } = value;
@@ -520,7 +547,9 @@ function validateSession(value) {
 }
 
 function validateListedSession(value) {
+  if (Object.hasOwn(value || {}, "runtimeModelSource")) return validateListedSession(withoutRuntimeModelSource(value));
   if (Object.hasOwn(value || {}, "nextRuntimeSelection")) return validateNextRuntimeSelection(value, validateListedSession);
+  if (Object.hasOwn(value || {}, "modelProviderRef")) return validateModelProviderField(value, validateListedSession);
   if (value?.source === "codex-desktop") {
     const { source, codexDesktopWriter, ...session } = value;
     let writer;
@@ -606,6 +635,8 @@ function validateRun(value) {
     || !validOpaqueIdWithLimit(run.idempotencyKey, 256) || !validOpaqueId(run.profileId)
     || !validString(run.workspace, 4096, true)
     || !validRunRuntimeRef(run.runtimeSessionRef) || !validRunRuntimeRef(run.runtimeTurnRef, true)
+    || (run.runtimeAttemptRef !== null && (!["sessionId", "turnId", "attemptId", "operationId"]
+      .every(key => validString(run.runtimeAttemptRef[key], 512))))
     || !validString(run.waitingRequestId, 128, true) || !validString(run.resultSummary, 16 * 1024, true)
     || !validString(run.errorCode, 128, true) || !validNullableOpaqueId(run.retryOf)) failResponse();
   return run;

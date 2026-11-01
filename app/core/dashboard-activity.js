@@ -280,7 +280,7 @@ function computeTaskStats(entries, { sinceMs = 0, degradedSources = [] } = {}) {
     if (entry.occurredAt < sinceMs) continue;
     let outcome;
     let identity;
-    if (entry.kind === "cron" && !isHeartbeatCronNoise(entry.run)) {
+    if (entry.kind === "cron" && entry.run.outputDisposition !== "silent" && !isHeartbeatCronNoise(entry.run)) {
       outcome = entry.run.status === "ok" ? "ok" : entry.run.status === "error" ? "error" : null;
       identity = entry.run.runId || entry.run.id || `${entry.run.jobId}:${entry.run.startedAt}`;
     } else if (entry.kind === "inspiration") {
@@ -358,7 +358,9 @@ async function collectActivities({ backends, sinceMs, healthEvents = [], inspira
           let truncated = r.truncated || items.length > maxPerSource;
           if (items.length > maxPerSource) items = items.slice(0, maxPerSource);
           allRuns.push(...items);
-          entries.push(...items.filter((run) => !isHeartbeatCronNoise(run)).map(cronRunToActivity));
+          // The output policy also accounts for attachments and failures. A
+          // missing summary alone cannot prove there was nothing to show.
+          entries.push(...items.filter((run) => run.outputDisposition !== "silent" && !isHeartbeatCronNoise(run)).map(cronRunToActivity));
           const latestOnly = r.latestOnly || (items.length > 0 && items.every((x) => x.synthesized));
           if (latestOnly) degradedSources.push({ backend: backend.id, source: "cron", reason: "latest-only" });
           if (truncated) degradedSources.push({ backend: backend.id, source: "cron", reason: "truncated" });

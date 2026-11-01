@@ -1,7 +1,8 @@
 "use strict";
 const crypto = require("node:crypto");
-const { runtimeBinding, runtimeCapabilities } = require("./runtime-adapter");
+const { runtimeBinding } = require("./runtime-adapter");
 const { validateRuntimeContextUsage } = require("./runtime-context-usage");
+const { runtimeCapabilityEvidence, capabilitiesFromEvidence, assertRuntimeOperation, assertRuntimeAttachments } = require("./runtime-capability-evidence");
 const { serviceError } = require("./security");
 const METHODS = Object.freeze({
   sessionStart: "session.start", sessionResume: "session.resume", sessionRead: "session.read", sessionList: "session.list",
@@ -13,6 +14,9 @@ const METHODS = Object.freeze({
 });
 const EVENT_TYPES = new Set(["text", "text_delta", "reasoning", "reasoning_delta", "plan", "tool_start", "tool_update", "tool_result", "status",
   "complete", "usage", "context_usage", "context_compacted", "error", "warning", "account_backoff", "account_unavailable", "rate_limits"]);
+const IDENTITY_FENCED_METHODS = new Set(["sessionStart", "sessionResume", "turnStart", "turnSteer",
+  "sessionRename", "sessionArchive", "sessionUnarchive", "sessionDelete", "commandExecute", "commandsList",
+  "modelsList", "accountRead", "accountLogin", "accountLogout", "generateModelOnly", "resolveModelOnly"]);
 const fail = (code = "RUNTIME_HANDLE_INVALID") => serviceError(code, "Runtime V1 contract rejected the operation");
 function data(value, maxBytes = 8 * 1024 * 1024) {
   let size = 0, nodes = 0;
@@ -66,16 +70,72 @@ function validateEvent(value) {
   if (event.type === "reasoning" && event.reasoning !== undefined
     && typeof event.reasoning !== "string" && !Array.isArray(event.reasoning)) throw fail("RUNTIME_PROTOCOL_INVALID");
   if (["context_usage", "context_compacted"].includes(event.type)) validateRuntimeContextUsage(event.contextUsage);
+  if (event.compactionId !== undefined && (event.type !== "context_compacted" || !id(event.compactionId)
+    || event.compaction?.id !== event.compactionId || event.compaction?.status !== "completed")) throw fail("RUNTIME_PROTOCOL_INVALID");
   return Object.freeze(event);
+}
+
+// These callbacks belong to the Coordinator, not a remote Runtime. Read only
+// own data properties so accessors cannot execute during contract validation.
+function localTurnObserver(value, expectedSessionId, expectedOperationId, assertAlive, isCurrentCall) {
+  if (value === undefined) return undefined;
+  const keys = ["version", "attemptId", "onPrepared", "onDispatchAttempt", "assertCurrent"];
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype
+    || Reflect.ownKeys(value).length !== keys.length || keys.some(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return !descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, "value");
+    }) || value.version !== 1 || !id(value.attemptId)
+    || ["onPrepared", "onDispatchAttempt", "assertCurrent"].some(key => typeof value[key] !== "function")) {
+    throw fail("RUNTIME_PROTOCOL_INVALID");
+  }
+  let prepared = null, preparationStarted = false, dispatchAttempted = false;
+  const fence = () => {
+    assertAlive(); if (!isCurrentCall()) throw fail("RUNTIME_HANDLE_TERMINATED");
+    const current = value.assertCurrent();
+    if (current && typeof current.then === "function") {
+      Promise.resolve(current).catch(() => {}); throw fail("RUNTIME_PROTOCOL_INVALID");
+    }
+  };
+  const receipt = input => {
+    const checked = data(input, 8 * 1024);
+    if (!checked || Object.keys(checked).sort().join(",") !== "attemptId,fingerprint,operationId,sessionId,turnId"
+      || checked.attemptId !== value.attemptId || checked.sessionId !== expectedSessionId
+      || checked.operationId !== expectedOperationId || !id(checked.turnId)
+      || !/^[a-f0-9]{64}$/u.test(checked.fingerprint)) throw fail("RUNTIME_PROTOCOL_INVALID");
+    return Object.freeze(checked);
+  };
+  return Object.freeze({ version: 1, attemptId: value.attemptId, assertCurrent: fence,
+    async onPrepared(input) {
+      fence(); const checked = receipt(input);
+      if (preparationStarted || dispatchAttempted) throw fail("RUNTIME_PROTOCOL_INVALID");
+      preparationStarted = true;
+      await value.onPrepared(checked); fence();
+      prepared = checked;
+    },
+    onDispatchAttempt(input) {
+      fence(); const checked = receipt(input);
+      if (!prepared || dispatchAttempted || Object.keys(checked).some(key => checked[key] !== prepared[key])) {
+        throw fail("RUNTIME_PROTOCOL_INVALID");
+      }
+      const result = value.onDispatchAttempt(checked);
+      if (result && typeof result.then === "function") throw fail("RUNTIME_PROTOCOL_INVALID");
+      fence(); dispatchAttempted = true;
+    },
+  });
 }
 
 // One facade per pooled transport. It owns no run authority; the Coordinator's
 // per-attempt leases still fence every execution and host capability call.
-function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) {
+function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapabilityDifference = () => {} } = {}) {
   const binding = runtimeBinding(expectedBinding);
   if (!raw || ["runtime", "runtimeProfileId", "runtimeAccountId"].some(key => raw[key] !== binding[key])
     || typeof raw.subscribe !== "function" || !raw.terminated || typeof raw.terminated.then !== "function") throw fail();
-  const capabilities = runtimeCapabilities(raw.capabilities);
+  const capabilityEvidence = runtimeCapabilityEvidence(raw, binding, crypto.randomUUID());
+  const capabilities = capabilitiesFromEvidence(capabilityEvidence);
+  for (const [name, supported] of Object.entries(raw.capabilities || {})) {
+    if (supported !== capabilities[name]) onCapabilityDifference({ runtime: binding.runtime, capability: name,
+      previous: supported, current: capabilities[name] });
+  }
   const nativeMethod = method => method === "accountLogin" && !raw.accountLogin ? "accountLoginStart" : method;
   for (const [method, capability] of Object.entries(METHODS)) if (capabilities[capability] && typeof raw[nativeMethod(method)] !== "function") throw fail();
   if (capabilities.serverRequests && typeof raw.registerServerRequestHandler !== "function") throw fail();
@@ -83,13 +143,13 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
   if (home !== null && typeof home !== "string") throw fail();
   const identity = Object.freeze({ ...binding, homeIdentity: crypto.createHash("sha256")
     .update(JSON.stringify([binding.runtime, binding.runtimeAccountId, home])).digest("hex") });
-  let alive = true;
+  let alive = true, terminatedCleanly = false;
   const cleanups = new Set(), observations = new Map();
   const assertAlive = () => { if (!alive) throw fail("RUNTIME_HANDLE_TERMINATED"); };
   const finish = () => { alive = false; for (const unsubscribe of cleanups) { try { unsubscribe(); } catch {} } cleanups.clear(); observations.clear(); };
-  const terminated = Promise.resolve(raw.terminated).then(value => { finish(); return value; }, error => { finish(); throw error; });
+  const terminated = Promise.resolve(raw.terminated).then(value => { terminatedCleanly = true; finish(); return value; }, error => { finish(); throw error; });
   terminated.catch(() => {});
-  const facade = { kind: "shoggoth-runtime-handle", version: 1, ...binding, identity, capabilities, terminated,
+  const facade = { kind: "shoggoth-runtime-handle", version: 1, ...binding, identity, capabilities, capabilityEvidence, terminated,
     host: raw.host, workspace: raw.workspace, controlInstance: raw.controlInstance === true,
     get registeredSecrets() { return raw.registeredSecrets || []; },
     assertExecutionProviderCurrent() { assertAlive(); raw.assertExecutionProviderCurrent?.(); },
@@ -107,7 +167,8 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
       let released = false;
       return () => { if (!released) { released = true; release(); } };
     },
-    async authenticationState(input) { assertAlive(); if (typeof raw.authenticationState !== "function") throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
+    async authenticationState(input) { assertAlive(); raw.host?.assertRuntimeIdentityCurrent?.();
+      if (typeof raw.authenticationState !== "function") throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
       const result = await raw.authenticationState(input); assertAlive(); return data(result); },
     subscribe(listener) {
       assertAlive();
@@ -162,8 +223,13 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
   };
   for (const [method, capability] of Object.entries(METHODS)) {
     if (!capabilities[capability]) continue;
-    facade[method] = async input => {
+    facade[method] = async (input, turnObserver) => {
     assertAlive(); if (!capabilities[capability]) throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
+    const operation = method === "sessionResume" ? "resume" : method === "generateModelOnly" ? "modelOnly"
+      : method === "resolveModelOnly" ? "modelResolve" : method === "commandExecute" && input?.text?.trim() === "/compact"
+        ? "compact" : null;
+    if (operation) assertRuntimeOperation(facade, operation);
+    if (IDENTITY_FENCED_METHODS.has(method)) raw.host?.assertRuntimeIdentityCurrent?.();
     // Model-only observers and dispatch fences stay local to this call; they
     // must never be serialized into a Runtime or provider RPC.
     const { signal, onText, assertCurrent, ...payload } = input || {};
@@ -172,10 +238,16 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
     let checked;
     try { checked = data(payload); }
     catch (error) { recordSessionHandleFailure(method, payload, "handle_request", error); throw error; }
+    if (turnObserver !== undefined && (method !== "turnStart" || !capabilities["turn.start.prepare"])) {
+      throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
+    }
+    let observing = true;
+    const preparedObserver = method === "turnStart"
+      ? localTurnObserver(turnObserver, checked.sessionId, checked.operationId, assertAlive, () => observing) : undefined;
+    if (method === "turnStart") assertRuntimeAttachments(facade, checked.attachments);
     if (method === "releaseModelOnlySession" && (Object.keys(checked).length !== 1 || !id(checked.sessionId))) {
       throw fail("RUNTIME_PROTOCOL_INVALID");
     }
-    let observing = true;
     if (method === "resolveModelOnly" && checked.model !== undefined && !capabilities["model.resolve.explicit"]) {
       throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
     }
@@ -191,8 +263,18 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
     });
     try {
       const result = await raw[nativeMethod(method)]({ ...checked, ...(signal ? { signal } : {}),
-        ...(observer ? { onText: observer } : {}), ...(fence ? { assertCurrent: fence } : {}) });
-      try { assertAlive(); return validateResult(method, result, checked); }
+        ...(observer ? { onText: observer } : {}), ...(fence ? { assertCurrent: fence } : {}) }, preparedObserver);
+      try {
+        // Dedicated ACP model workers return only after their process group
+        // has stopped. Accept that one completed result, never a later call
+        // or a result from cancellation/failed cleanup. This is a trusted
+        // adapter contract, not a remotely advertised Runtime capability.
+        const ownedModelStop = method === "generateModelOnly" && raw.modelOnlyStopsHost === true
+          && raw.host?.modelOnlyInstance === true && raw.host.state === "stopped" && terminatedCleanly;
+        if (!ownedModelStop) assertAlive();
+        if (method === "generateModelOnly" && signal?.aborted) throw fail("MODEL_ONLY_CANCELED");
+        return validateResult(method, result, checked);
+      }
       catch (error) {
         if (method === "releaseModelOnlySession") throw fail("RUNTIME_STOP_UNCONFIRMED");
         recordSessionHandleFailure(method, checked, "handle_response", error); throw error;
@@ -202,11 +284,12 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {} } = {}) 
   }
   if (facade.accountLogin) facade.accountLoginStart = facade.accountLogin;
   for (const method of ["accountLoginApiKey", "accountLoginCancel"]) if (capabilities["account.login"] && typeof raw[method] === "function") {
-    facade[method] = async input => { assertAlive(); const result = await raw[method](data(input)); assertAlive(); return data(result); };
+    facade[method] = async input => { assertAlive(); if (method !== "accountLoginCancel") raw.host?.assertRuntimeIdentityCurrent?.();
+      const result = await raw[method](data(input)); assertAlive(); return data(result); };
   }
   // Settings sign-in into model providers (OpenCode); a waiting callback keeps its abort signal.
   for (const method of ["providerLoginOptions", "providerLoginAuthorize", "providerLoginCallback", "providerLoginApiKey"]) if (typeof raw[method] === "function") {
-    facade[method] = async input => { assertAlive(); const { signal, ...payload } = input || {};
+    facade[method] = async input => { assertAlive(); raw.host?.assertRuntimeIdentityCurrent?.(); const { signal, ...payload } = input || {};
       const result = await raw[method]({ ...data(payload), ...(signal ? { signal } : {}) }); assertAlive(); return data(result ?? null); };
   }
   return Object.freeze(facade);

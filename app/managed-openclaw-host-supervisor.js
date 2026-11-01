@@ -25,7 +25,7 @@ const {pathToFileURL}=require("node:url");
 const ID = "shoggoth-shared-capabilities";
 const HASH = /^[a-f0-9]{64}$/;
 const OP = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const ADAPTER_FILES = ["index.mjs", "openclaw.plugin.json", "package.json", "transport.mjs"];
+const ADAPTER_FILES = ["index.mjs", "mcp-tools.json", "openclaw.plugin.json", "package.json", "transport.mjs"];
 const fail = code => Object.assign(new Error(code), { code });
 const requireValue = (value, code) => { if (!value) throw fail(code); };
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");

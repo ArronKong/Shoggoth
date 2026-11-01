@@ -20,12 +20,13 @@ const defaults = (method: OAuthLoginMethod | undefined) => Object.fromEntries((m
 // flow "providers": pick the model provider a runtime signs into (OpenCode),
 // a sign-in method, and the inputs it asks for. OAuth continues in the modal's
 // browser flow; an API key is saved directly.
-export default function ProviderLoginPicker({ backend, providerId, busy, onOAuth, onApiKey }: {
+export default function ProviderLoginPicker({ backend, providerId, busy, onOAuth, onApiKey, onCancel }: {
   backend: string;
   providerId: string;
   busy: boolean;
   onOAuth: (target: OAuthLoginTarget) => void;
   onApiKey: (target: OAuthLoginTarget, key: string) => void;
+  onCancel?: () => void;
 }) {
   const { t } = useTranslation();
   const [options, setOptions] = useState<OAuthLoginProviderOption[] | null>(null);
@@ -77,13 +78,18 @@ export default function ProviderLoginPicker({ backend, providerId, busy, onOAuth
   if (error) {
     return <div className={styles.providerPicker}>
       <p className={styles.modalError}>{error}</p>
-      <div className={styles.modalFoot}>
-        <span />
-        <button className={styles.smallBtn} onClick={() => setAttempt((value) => value + 1)}>{t("keys.oauthRetry")}</button>
+      <div className={styles.loginActions}>
+        {onCancel && <button type="button" className="btn-secondary" onClick={onCancel}>{t("common.cancel")}</button>}
+        <button type="button" className="btn-primary" onClick={() => setAttempt((value) => value + 1)}>{t("keys.oauthRetry")}</button>
       </div>
     </div>;
   }
-  if (options === null) return <p className="muted">{t("keys.providerLoading")}</p>;
+  if (options === null) return <>
+    <p className="muted">{t("keys.providerLoading")}</p>
+    {onCancel && <div className={styles.loginActions}>
+      <button type="button" className="btn-secondary" onClick={onCancel}>{t("common.cancel")}</button>
+    </div>}
+  </>;
 
   if (!chosen || !method) {
     return <div className={styles.providerPicker}>
@@ -100,6 +106,9 @@ export default function ProviderLoginPicker({ backend, providerId, busy, onOAuth
         {matches.length === 0 && <p className="muted">{t("keys.providerNoMatch")}</p>}
       </div>
       {matches.length > LIST_LIMIT && <p className={styles.cardHint}>{t("keys.providerMore", { count: matches.length - LIST_LIMIT })}</p>}
+      {onCancel && <div className={styles.loginActions}>
+        <button type="button" className="btn-secondary" onClick={onCancel}>{t("common.cancel")}</button>
+      </div>}
     </div>;
   }
 
@@ -108,14 +117,14 @@ export default function ProviderLoginPicker({ backend, providerId, busy, onOAuth
   return <div className={styles.providerPicker}>
     <div className={styles.providerHead}>
       <span>{chosen.name}</span>
-      <button type="button" className={styles.smallBtn} disabled={busy} onClick={() => setChosen(null)}>
+      <button type="button" className="btn-subtle btn-sm" disabled={busy} onClick={() => setChosen(null)}>
         {t("keys.providerChooseAnother")}
       </button>
     </div>
     {chosen.methods.length > 1 && (
       <div className={styles.providerMethods} role="group" aria-label={t("keys.providerMethod")}>
         {chosen.methods.map((item) => (
-          <button key={item.index} type="button" className={styles.smallBtn} aria-pressed={item.index === method.index}
+          <button key={item.index} type="button" className={`${item.index === method.index ? "btn-dark" : "btn-subtle"} btn-sm`} aria-pressed={item.index === method.index}
             disabled={busy} onClick={() => chooseMethod(item)}>{item.label}</button>
         ))}
       </div>
@@ -143,9 +152,9 @@ export default function ProviderLoginPicker({ backend, providerId, busy, onOAuth
           disabled={busy} onChange={(e) => setKey(e.target.value)} />
       </Field>
     )}
-    <div className={styles.modalFoot}>
-      <span />
-      <button type="button" className={`${styles.smallBtn} ui-cbtn ui-cbtn--sm`} disabled={busy || !ready}
+    <div className={styles.loginActions}>
+      {onCancel && <button type="button" className="btn-secondary" disabled={busy} onClick={onCancel}>{t("common.cancel")}</button>}
+      <button type="button" className="btn-primary" disabled={busy || !ready}
         onClick={() => (method.type === "api" ? onApiKey(target(), key.trim()) : onOAuth(target()))}>
         {t(method.type === "api" ? "keys.providerSave" : "keys.providerContinue")}
       </button>

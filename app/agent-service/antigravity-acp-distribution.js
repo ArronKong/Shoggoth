@@ -10,7 +10,7 @@ const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 // Google's official Antigravity ACP server (ACP registry id `antigravity-acp`).
 // Shoggoth pins one verified release; upgrading means editing this manifest
 // and re-running the live acceptance, never following the registry silently.
-const ANTIGRAVITY_ACP_SERVER_VERSION = "1.2.1";
+const ANTIGRAVITY_ACP_SERVER_VERSION = "1.4.3";
 const GOOGLE_TEAM_IDENTIFIER = "EQHXZ8M8AV";
 const googleRequirement = (identifier) => `identifier "${identifier}" and anchor apple generic`
   + " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */"
@@ -20,24 +20,24 @@ const SERVER_FILE = "agy_acp_server.par";
 const HARNESS_FILE = "localharness_external";
 const RELEASES = Object.freeze({
   "darwin-arm64": Object.freeze({
-    url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-arm64.zip",
-    archiveBytes: 111_725_488,
-    archiveSha256: "0fab9938812e6b32b3b543e65e4f3a0025ceef755413db13542d9a9b81ea803c",
+    url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-arm64.zip",
+    archiveBytes: 114_147_623,
+    archiveSha256: "c57db0a9b8b712daa9c3c17cdb990a61842ea569f279e8bd79d7aa85a303b20b",
     files: Object.freeze({
       [SERVER_FILE]: Object.freeze({
-        bytes: 276_920_768,
-        sha256: "c93c86c0f505fcdf8b13c695bed26d306141ef5446189d591397074d324db34e",
+        bytes: 282_446_160,
+        sha256: "1251927db3e21f3d693fd042d6890d82f65eb00587e97f1f3d8f0d798e7f0954",
         requirement: googleRequirement("agy_acp_server"),
       }),
       [HARNESS_FILE]: Object.freeze({
-        bytes: 120_663_872,
-        sha256: "1b8a2b712ca312c9769e425b800bfbcceec4770f19736404474d1e8e50d65456",
+        bytes: 122_957_936,
+        sha256: "9e8fdc6e20a3262ca0a771850ca4a8414ca839a642cc964ec5c547cc2c33c200",
         requirement: googleRequirement("localharness_external"),
       }),
     }),
   }),
 });
-const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1_000;
+const DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1_000;
 const PROXY_ENV = Object.freeze([
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
   "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -222,7 +222,7 @@ async function installAntigravityAcpServer(options = {}) {
     fileSystem.mkdirSync(extracted, { mode: 0o700 });
     try {
       await run(execFileImpl, "/usr/bin/ditto", ["-x", "-k", archive, extracted], {
-        env: { PATH: "/usr/bin:/bin" }, timeout: 5 * 60 * 1_000, maxBuffer: 64 * 1024,
+        env: { PATH: "/usr/bin:/bin" }, timeout: 15 * 60 * 1_000, maxBuffer: 64 * 1024,
       });
     } catch {
       throw distributionError("ANTIGRAVITY_ACP_INSTALL_FAILED", "Extracting the Antigravity ACP server failed");

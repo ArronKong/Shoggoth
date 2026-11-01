@@ -109,6 +109,9 @@
 .head:disabled {
   cursor: default;
 }
+.head[data-startup="1"] {
+  opacity: 1;
+}
 .name {
   flex: none;
   font-size: 12px;

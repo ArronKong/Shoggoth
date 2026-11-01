@@ -27,10 +27,11 @@ npm run build:manage
 npm start
 ```
 
-`prepare:runtimes` obtains the pinned Codex and Cua releases and prepares SQLite
-binaries for both Mac architectures. Downloads and extracted binaries are
-verified against manifests under `build/`. It does not install or configure
-external agents or sign in to an account. Generated resources live in `.vendor/`.
+`prepare:runtimes` obtains the pinned Codex, Cua and offline E5 resources,
+prepares SQLite binaries for both Mac architectures, and builds the local
+workspace, Apple-device and media helpers. Downloads and extracted binaries
+are verified against manifests under `build/`. It does not configure external
+agents or sign in to an account. Generated resources live in `.vendor/`.
 Do not commit that directory.
 
 To work on the UI, run `npm --prefix app/manage-ui run dev` and, in a second
@@ -73,12 +74,12 @@ first updater-capable signed build must be installed manually; later signed
 releases can update it in place.
 
 For each source update, run `npm run export:source -- /absolute/path/to/an-empty-directory`.
-The export excludes internal development notes and Git history. It also omits
-the third-party bundled plugin packages until their redistribution terms have
-been reviewed; the source build shows an empty built-in plugin catalog. Other
-plugin installation paths remain available. Its file-hash
-manifest is written beside the directory as `<directory>.manifest.json` for local
-verification. Review and scan every export before updating the public repository.
+The export excludes internal development notes, Git history and retired plugin /
+OpenConnector resources. Connections use the Service-managed MCP client and
+its recommended-app catalog. Registry tools are installed only after the user
+confirms their exact versions and launch settings. The file-hash manifest is
+written beside the directory as `<directory>.manifest.json` for local verification.
+Review and scan every export before updating the public repository.
 
 ## Integrations and data
 
@@ -112,16 +113,25 @@ node scripts/desktop-app-update-unit.cjs
 node scripts/app-update-release-contract-unit.cjs
 node scripts/adhoc-sign-unit.cjs
 node scripts/notarize-unit.cjs
-node scripts/shoggoth-packaged-runtime-smoke.mjs
 node scripts/shoggoth-builtin-cli-profiles-unit.cjs
 node scripts/runtime-cli-auth-unit.cjs
 node scripts/shoggoth-runtime-adapter-registry-unit.cjs
 node scripts/proxy-smoke.mjs
 node scripts/proxy-chat-smoke.mjs
 node scripts/hermes-start-smoke.cjs
-npm audit
-npm --prefix app/manage-ui audit
+node --test scripts/dependency-audit-policy-unit.cjs scripts/undici-security-regression.cjs
+npm run audit:release
 ```
+
+For a built candidate, run the package checks against its explicit output directory:
+
+```sh
+SHOGGOTH_SMOKE_DIST_DIR=/absolute/path/to/candidate npm run test:mcp-connectors:app -- --spike-arm64
+```
+
+Use `--spike-x64` for the Intel candidate; a formal release also requires native
+Intel acceptance. Dependency audit applicability reviews are documented in
+[RELEASING.md](RELEASING.md), with the original audit reports retained.
 
 On macOS, after installing Electron and building the UI:
 

@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const {
+  encodeInputChoicesDescription,
   mcpElicitationUsesApprovalWait,
   normalizeInteractiveRequestV1,
   parseMcpToolPermission,
@@ -81,6 +82,35 @@ assert.throws(() => validateInteractiveResponseV1(request, {
   action: "submit",
   answers: { region: "East" },
 }), (error) => error.code === "INTERACTION_RESPONSE_INVALID");
+
+const openSchema = structuredClone(choicePayload.requestedSchema);
+delete openSchema.properties.region.enum;
+delete openSchema.properties.region.enumNames;
+const suggestions = [{ label: "North", description: "First region" }, { label: "East", description: "Second region" }];
+openSchema.properties.region.description = encodeInputChoicesDescription("Choose one region", suggestions);
+const openRequest = normalizeInteractiveRequestV1({ runId: "run-open", eventType: "prompt",
+  payload: { ...choicePayload, requestedSchema: openSchema } });
+assert.equal(openRequest.fields[0].type, "choice_or_text");
+assert.deepEqual(openRequest.fields[0].options.map(option => option.description), ["First region", "Second region"]);
+for (const answer of ["East", "成都\n保留原始换行 🍟"]) {
+  assert.equal(validateInteractiveResponseV1(openRequest, { action: "submit", answers: { region: answer } }).answers.region, answer);
+}
+for (const answer of ["", " \n ", "x".repeat(16 * 1024 + 1), "bad\0input", "\ud800"]) {
+  assert.throws(() => validateInteractiveResponseV1(openRequest, { action: "submit", answers: { region: answer } }),
+    error => error.code === "INTERACTION_RESPONSE_INVALID");
+}
+for (const edit of [
+  schema => { schema.properties.region.description = encodeInputChoicesDescription("Choose", [suggestions[0], suggestions[0]]); },
+  schema => { schema.properties.region.description = encodeInputChoicesDescription("Choose", [suggestions[0]]); },
+  schema => { schema.properties.region.description = encodeInputChoicesDescription("Choose", "A"); },
+  schema => { schema.properties.region.description += "trailing junk"; },
+  schema => { schema.properties.region.enum = ["A", "B"]; },
+  schema => { schema.properties.region.writeOnly = true; },
+]) {
+  const schema = structuredClone(openSchema); edit(schema);
+  assert.throws(() => normalizeInteractiveRequestV1({ runId: "run-open", eventType: "prompt",
+    payload: { ...choicePayload, requestedSchema: schema } }), error => error.code === "INTERACTION_REQUEST_INVALID");
+}
 
 const oneTimeRuntimeApproval = normalizeInteractiveRequestV1({
   runId: "run-approval-once",

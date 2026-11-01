@@ -67,3 +67,55 @@ test("disabled bindings do not start discovery", async () => {
   assert.deepEqual(supports({ binding: { ...binding, enabled: false }, facts: result, requirements }),
     { supported: false, code: "BINDING_DISABLED" });
 });
+
+test("auth and catalog observations do not erase each other's independent proof", async () => {
+  const profile = { permissionPolicy: requirements.permissionPolicy };
+  const failure = () => { throw Object.assign(new Error("private"), { code: "REQUEST_TIMEOUT" }); };
+  const host = { authenticationState: async () => ({ authenticated: true }), modelsList: failure };
+  let result = await createRuntimeSupportFacts({ runtimeManager: { acquire: async () => host } }).read(binding, profile);
+  assert.equal(result.authenticated, true);
+  assert.equal(result.installed, true);
+  assert.equal(result.catalogState, "unverified");
+  assert.equal(supports({ binding, facts: result, requirements }).code, "RUNTIME_FACTS_UNKNOWN");
+  assert.deepEqual(supports({ binding, facts: result, requirements: { ...requirements, model: null } }), { supported: true });
+  result = await createRuntimeSupportFacts({ runtimeManager: { acquire: async () => ({ ...host,
+    authenticationState: failure, modelsList: async () => ({ data: [{ model: "known" }] }) }) } }).read(binding, profile);
+  assert.equal(result.authenticated, "unknown");
+  assert.deepEqual(result.models, ["known"]);
+  assert.equal(result.catalogState, "verified");
+  assert.equal(supports({ binding, facts: result, requirements }).code, "ACCOUNT_AUTH_UNKNOWN");
+});
+
+test("a late discovery cannot publish facts after account or context identity changes", async () => {
+  for (const change of ["account", "context", "clear"]) {
+    let generation = 1, identity = "first", finish;
+    const cache = createRuntimeSupportFacts({ timeoutMs: 1000,
+      runtimeAccountAdmission: { read: () => ({ generation }) }, contextIdentity: () => identity,
+      discover: () => new Promise(resolve => { finish = () => resolve(facts); }) });
+    const profile = { permissionPolicy: requirements.permissionPolicy };
+    const reading = cache.read(binding, profile);
+    await new Promise(resolve => setImmediate(resolve));
+    if (change === "account") generation++;
+    else if (change === "context") identity = "second";
+    else cache.clear();
+    finish();
+    assert.equal((await reading).authenticated, "unknown", change);
+    const next = cache.read(binding, profile);
+    await new Promise(resolve => setImmediate(resolve));
+    finish();
+    assert.equal((await next).authenticated, true);
+  }
+});
+
+test("clearing facts retains the bound on unfinished discovery", async () => {
+  let finish, calls = 0;
+  const cache = createRuntimeSupportFacts({ timeoutMs: 1000, maxPending: 1,
+    discover: () => { calls++; return new Promise(resolve => { finish = resolve; }); } });
+  const reading = cache.read(binding, {});
+  await new Promise(resolve => setImmediate(resolve));
+  cache.clear();
+  assert.equal((await cache.read(binding, {})).installed, "unknown");
+  assert.equal(calls, 1);
+  finish(facts);
+  assert.equal((await reading).installed, "unknown");
+});

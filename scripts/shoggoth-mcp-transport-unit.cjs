@@ -122,6 +122,77 @@ test("output failure aborts a pending elicitation without waiting for the client
   } finally { input.destroy(); output.destroy(); await result; }
 });
 
+test("notifications/cancelled aborts only the matching tools/call while its MCP connection stays open", async () => {
+  const input = new PassThrough(), output = new PassThrough();
+  const frames = [], calls = [];
+  let buffer = "";
+  output.on("data", chunk => {
+    buffer += chunk.toString();
+    for (let end; (end = buffer.indexOf("\n")) !== -1;) {
+      frames.push(JSON.parse(buffer.slice(0, end))); buffer = buffer.slice(end + 1);
+    }
+  });
+  const handler = createMcpStdioHandler({ runtimeProfileId: "cancel-fixture", runtimeAccountId: "cancel-account",
+    sessionToken: Buffer.alloc(32, 1).toString("base64url"),
+    requestService: (_paths, request, options) => new Promise((resolve, reject) => {
+      const call = { ...options, resolve: () => resolve({ calendars: [] }), request }; calls.push(call);
+      options.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { code: "REQUEST_ABORTED" })), { once: true });
+    }) });
+  const running = runMcpStdioSession({ input, output, handler });
+  const until = async predicate => {
+    const deadline = Date.now() + 800;
+    while (!predicate()) {
+      if (Date.now() >= deadline) throw new Error("request cancellation did not settle");
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  };
+  try {
+    input.write(line({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "cancel-client", version: "1" },
+    } }));
+    await within(until(() => frames.some(frame => frame.id === 1)));
+    for (const id of [7, "7"]) input.write(line({ jsonrpc: "2.0", id, method: "tools/call",
+      params: { name: "apple_calendar_list", arguments: {} } }));
+    await within(until(() => calls.length === 2));
+    assert.ok(calls.every(call => call.signal instanceof AbortSignal), "each Service call must receive its own request signal");
+    input.write(line({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "missing" } }));
+    input.write(line({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: { id: 7 } } }));
+    input.write(line({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 7, reason: "upstream MCP timeout after 180000ms" } }));
+    await within(until(() => calls[0].signal.aborted));
+    assert.equal(calls[1].signal.aborted, false, "string and number request IDs must stay independent");
+    await within(until(() => frames.some(frame => frame.id === 7)));
+    assert.ok(frames.find(frame => frame.id === 7).error || frames.find(frame => frame.id === 7).result?.isError);
+    calls[1].resolve();
+    await within(until(() => frames.some(frame => frame.id === "7")));
+    assert.equal(frames.find(frame => frame.id === "7").result.isError, false);
+    input.write(line({ jsonrpc: "2.0", id: 8, method: "ping" }));
+    await within(until(() => frames.some(frame => frame.id === 8)));
+    assert.deepEqual(frames.find(frame => frame.id === 8).result, {});
+    assert.equal(input.destroyed, false);
+    input.end(); await within(running);
+  } finally {
+    for (const call of calls) call.resolve();
+    input.destroy(); output.destroy(); await running.catch(() => {}); handler.close();
+  }
+});
+
+test("MCP input EOF aborts its in-flight Service call before draining the response", async () => {
+  const input = new PassThrough(), output = new PassThrough(); output.resume();
+  let signal, arrive, finish;
+  const arrived = new Promise(resolve => { arrive = resolve; });
+  const handler = async (message, context) => {
+    signal = context.signal; arrive();
+    await new Promise(resolve => { finish = resolve; signal?.addEventListener("abort", resolve, { once: true }); });
+    return reply(message);
+  };
+  const running = runMcpStdioSession({ input, output, handler });
+  try {
+    input.write(line(request(1))); await within(arrived);
+    input.end(); await within(running);
+    assert.equal(signal.aborted, true);
+  } finally { finish?.(); input.destroy(); output.destroy(); await running.catch(() => {}); }
+});
+
 async function slowSocketSession({ pauseMs, outputTimeoutMs }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-wire-"));
   const socketPath = path.join(root, "mcp.sock");

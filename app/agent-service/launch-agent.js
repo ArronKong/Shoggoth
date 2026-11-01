@@ -418,17 +418,23 @@ function createLaunchAgentController(options = {}) {
             timer = setTimeout(() => reject(serviceError("HEALTH_PROBE_TIMEOUT", "probe timeout")), attemptTimeoutMs);
           }),
         ]);
-        if (status?.healthy === true
-          && status.protocolVersion === PROTOCOL_VERSION
-          && status.serviceVersion === serviceVersion) return status;
+        if (status?.healthy === true) {
+          if (status.protocolVersion !== PROTOCOL_VERSION || status.serviceVersion !== serviceVersion) {
+            throw healthNotConfirmed();
+          }
+          return status;
+        }
       } catch (error) {
-        let recoveryRequired = false;
+        let restartRequired = false;
         try {
-          recoveryRequired = Object.getOwnPropertyDescriptor(error, "code")?.value === "SERVICE_RECOVERY_REQUIRED";
+          const code = Object.getOwnPropertyDescriptor(error, "code")?.value;
+          restartRequired = ["SERVICE_RECOVERY_REQUIRED", "SERVICE_HEALTH_NOT_CONFIRMED",
+            "PROTOCOL_VERSION_MISMATCH"].includes(code);
         } catch { /* Do not read accessors on an untrusted probe error. */ }
-        // Poisoned durable state cannot recover in this process. Hand it to the
-        // existing single stop/bootstrap recovery immediately, within its budget.
-        if (recoveryRequired) throw healthNotConfirmed();
+        // Poisoned storage and an old App/protocol cannot recover in this process.
+        // Preserve the shared deadline for the one stop/bootstrap and cold startup;
+        // spending the loaded grace here would leave only five seconds to start.
+        if (restartRequired) throw healthNotConfirmed();
         // launchctl loaded 只表示 job 已注册；socket 可能尚未发布或处于 crash loop。
       } finally {
         if (timer) clearTimeout(timer);

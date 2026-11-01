@@ -6,9 +6,9 @@
 // It reuses the Google sign-in already in the macOS keychain (run Settings sign-in
 // first) and never opens a browser. Each run makes a handful of real model calls.
 //
-//   node scripts/antigravity-acp-live-smoke.cjs --live [--tool-results-only] [--server-dir <dir with the two 1.2.1 files>] [--keep]
+//   node scripts/antigravity-acp-live-smoke.cjs --live [--tool-results-only] [--server-dir <dir with the two pinned files>] [--keep]
 //
-// Without --server-dir the pinned archive (about 107 MB) is downloaded and verified.
+// Without --server-dir the pinned archive is downloaded and verified.
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");

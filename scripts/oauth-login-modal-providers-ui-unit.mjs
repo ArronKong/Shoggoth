@@ -67,7 +67,7 @@ function load(file) {
       useConfirm: () => async () => true,
       useToast: () => ({ success: (key) => calls.push(['toast', key]), error: (key) => calls.push(['error', key]), info: () => {} }),
     };
-    if (name.endsWith('/components/Modal')) return { __esModule: true, default: ({ children }) => React.createElement('div', null, children) };
+    if (name.endsWith('/components/Modal')) return { __esModule: true, default: ({ children, footer }) => React.createElement('div', null, children, footer) };
     if (name.endsWith('/components/Field')) return {
       Field: ({ label, children }) => React.createElement('label', null, label, children),
       TextInput: (props) => React.createElement('input', props),

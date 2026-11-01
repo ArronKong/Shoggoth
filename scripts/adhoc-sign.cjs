@@ -33,23 +33,6 @@ function verifyPackagedSqlite(appPath) {
   }
 }
 
-function verifyPackagedGogSource(appPath, arch) {
-  const { verifiedGogBinary } = require("../app/agent-service/plugin-gogcli-gmail-runtime");
-  const source = verifiedGogBinary({ repoRoot: path.resolve(__dirname, ".."), arch });
-  const packaged = path.join(appPath, "Contents", "Resources", "gogcli", "gog");
-  const sha = file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-  if (sha(packaged) !== sha(source)) {
-    throw new Error("PACKAGED_GOG_SOURCE_MISMATCH: bundled gog differs from pinned v0.42.0 binary");
-  }
-  return packaged;
-}
-
-function verifySignedPackagedGog(appPath, arch) {
-  const { verifiedGogBinary } = require("../app/agent-service/plugin-gogcli-gmail-runtime");
-  const resourcesPath = path.join(appPath, "Contents", "Resources");
-  return verifiedGogBinary({ packaged: true, resourcesPath, arch });
-}
-
 function packagedWorkspaceManifest(appPath, update = false) {
   const directory = path.join(appPath, "Contents", "Resources", "workspace-execution");
   const manifestPath = path.join(directory, "manifest.json");
@@ -58,6 +41,20 @@ function packagedWorkspaceManifest(appPath, update = false) {
   const sha256 = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
   if (manifest.version !== 1 || !/^[a-f0-9]{64}$/u.test(manifest.sourceSha256)
     || (!update && manifest.sha256 !== sha256)) throw new Error("Workspace execution native helper identity mismatch");
+  if (update) fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, sha256 }, null, 2) + "\n");
+  return executable;
+}
+
+
+function packagedLocalMediaManifest(appPath, update = false) {
+  const directory = path.join(appPath, "Contents", "Resources", "local-media");
+  const manifestPath = path.join(directory, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const executable = path.join(directory, "shoggoth-secret-media");
+  const sha256 = crypto.createHash("sha256").update(fs.readFileSync(executable)).digest("hex");
+  if (manifest.version !== 1 || !/^[a-f0-9]{64}$/u.test(manifest.sourceSha256)
+    || !/^[a-f0-9]{64}$/u.test(manifest.builderSha256)
+    || (!update && manifest.sha256 !== sha256)) throw new Error("Local media native helper identity mismatch");
   if (update) fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, sha256 }, null, 2) + "\n");
   return executable;
 }
@@ -191,7 +188,7 @@ function shouldSignMachO({ mode, valid, teamId }) {
   return !PRESERVED_VENDOR_TEAMS.has(teamId);
 }
 
-exports.default = function adhocSign(context) {
+exports.default = async function adhocSign(context) {
   if (context.electronPlatformName !== "darwin") return;
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
   // afterPack runs after app.asar and extraResources are copied, before any
@@ -210,10 +207,7 @@ exports.default = function adhocSign(context) {
     throw new TypeError("SHOGGOTH_CODESIGN_MODE/IDENTITY/KEYCHAIN combination is invalid");
   }
   if (distribution === "official") {
-    require("./check-bundled-plugin-public-release.cjs").checkPublicBundledPluginRelease(
-      path.resolve(__dirname, ".."),
-      path.join(appPath, "Contents", "Resources", "bundled-plugins", "catalog.json"),
-    );
+    require("./connector-package-checks.cjs").checkPublicConnectorRelease();
   }
   const timestamp = mode === "developer-id";
   // Electron 下载缓存可能把 com.apple.provenance 复制进 Framework；Ventura+
@@ -230,19 +224,20 @@ exports.default = function adhocSign(context) {
   // electron-builder exits 0 even when it drops transitive dependencies (for
   // example behind a symlinked node_modules) or a dotfile a bundled plugin's
   // frozen digest covers. Either leaves an App that fails at runtime.
-  const { checkBundledPlugins, checkPackagedDependencies } = require("./release-package-checks.cjs");
+  const { checkPackagedDependencies } = require("./release-package-checks.cjs");
   const incomplete = [
     ...require("../app/external-plugin-adapter-protocol").checkAdapterProtocols(
       path.join(appPath, "Contents", "Resources", "external-plugin-adapters")),
     ...checkPackagedDependencies(appPath, { arch: require("builder-util").Arch[context.arch] }),
-    ...checkBundledPlugins(path.join(appPath, "Contents", "Resources", "bundled-plugins"),
-      { packaged: true }),
   ];
   if (incomplete.length) throw new Error(`PACKAGED_APP_INCOMPLETE: ${incomplete.join("; ")}`);
   const targetArch = require("builder-util").Arch[context.arch];
-  verifyPackagedGogSource(appPath, targetArch);
+  await require("./connector-package-checks.cjs").checkPackagedConnector(appPath, { arch: targetArch, beforeSigning: true, repo: path.resolve(__dirname, "..") });
   packagedWorkspaceManifest(appPath);
-  console.log("  • packaged dependencies and bundled plugins verified before signing");
+  packagedLocalMediaManifest(appPath);
+  require("./antigravity-mcp-timeout-package.cjs").packagedAntigravityMcpTimeoutManifest(appPath, false, { arch: targetArch });
+  require("./apple-device-package.cjs").packagedAppleDeviceManifest(appPath, false, { arch: targetArch });
+  console.log("  • packaged dependencies and retired connector absence verified before signing");
   // This marker is covered by the final App signature. Runtime update checks are
   // enabled only when it says this is an official Developer ID build.
   writeReleaseMarker(appPath, { mode, distribution, version: context.packager.appInfo.version });
@@ -270,6 +265,8 @@ exports.default = function adhocSign(context) {
   // Re-signing the first-party helper changes its whole-file hash. Seal the
   // final helper hash into the App resource manifest before signing the App.
   packagedWorkspaceManifest(appPath, true);
+  require("./antigravity-mcp-timeout-package.cjs").packagedAntigravityMcpTimeoutManifest(appPath, true, { arch: targetArch });
+  require("./apple-device-package.cjs").packagedAppleDeviceManifest(appPath, true, { arch: targetArch });
   // macOS can reattach provenance while nested binaries are being signed.
   // Clear it again before sealing the final Framework/App bundles.
   execFileSync("xattr", ["-cr", appPath], { stdio: "inherit" });
@@ -280,10 +277,23 @@ exports.default = function adhocSign(context) {
     keychainPath,
     timestamp,
   }), { stdio: "inherit" });
-  // The upstream gog release carries an invalid embedded signature and must
-  // be re-signed. Its whole-file hash consequently changes; reject any changed
-  // executable payload or invalid final signature before builder emits a ZIP.
-  verifySignedPackagedGog(appPath, targetArch);
+  // --deep may sign an embedded-plist executable (local media) only while
+  // sealing the outer App. Refresh every final helper digest after that pass,
+  // then reseal only the outer bundle so nested bytes cannot change again.
+  packagedWorkspaceManifest(appPath, true);
+  packagedLocalMediaManifest(appPath, true);
+  require("./antigravity-mcp-timeout-package.cjs").packagedAntigravityMcpTimeoutManifest(appPath, true, { arch: targetArch });
+  require("./apple-device-package.cjs").packagedAppleDeviceManifest(appPath, true, { arch: targetArch });
+  execFileSync("xattr", ["-cr", appPath], { stdio: "inherit" });
+  execFileSync("codesign", buildCodesignArgs({
+    appPath, entitlementsPath, identity, keychainPath, timestamp,
+  }).filter(argument => argument !== "--deep"), { stdio: "inherit" });
+  packagedWorkspaceManifest(appPath);
+  packagedLocalMediaManifest(appPath);
+  require("./apple-device-package.cjs").packagedAppleDeviceManifest(appPath, false, { arch: targetArch });
+  // Verify retired resources remain absent after nested signing.
+  require("./antigravity-mcp-timeout-package.cjs").packagedAntigravityMcpTimeoutManifest(appPath, false, { arch: targetArch });
+  await require("./connector-package-checks.cjs").checkPackagedConnector(appPath, { arch: targetArch });
   console.log(`  • ${mode} signed  ${appPath}`);
 };
 
@@ -297,6 +307,6 @@ exports.writeReleaseMarker = writeReleaseMarker;
 exports.shouldSignMachO = shouldSignMachO;
 exports.inspectCodeSignature = inspectCodeSignature;
 exports.verifyPackagedSqlite = verifyPackagedSqlite;
-exports.verifyPackagedGogSource = verifyPackagedGogSource;
-exports.verifySignedPackagedGog = verifySignedPackagedGog;
 exports.packagedWorkspaceManifest = packagedWorkspaceManifest;
+
+exports.packagedLocalMediaManifest = packagedLocalMediaManifest;

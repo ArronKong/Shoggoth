@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const { WebSocket } = require("ws");
 const { federationRunErrorCode } = require("./federation-run-error");
-const { FEDERATION_TASK_MAX_TIMEOUT_MS } = require("./federation-task-timeout");
+const { validFederationTaskTimeout } = require("./federation-task-timeout");
 const {
   FEDERATION_AGENT_MESSAGE_SOURCE_TOOL,
   FEDERATION_AGENT_RUN_SOURCE_TOOL,
@@ -33,15 +33,15 @@ function brokerUrl(origin) {
 }
 
 function runFederatedAgentViaBroker(options = {}) {
+  if (options.signal?.aborted) return Promise.reject(runnerError("AGENT_OPERATION_FAILED"));
   if (typeof options.origin !== "string" || !options.origin
     || typeof options.agentId !== "string" || !options.agentId
     || typeof options.prompt !== "string" || !options.prompt
-    || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 5_000
-    || options.timeoutMs > FEDERATION_TASK_MAX_TIMEOUT_MS) {
+    || !validFederationTaskTimeout(options.timeoutMs ?? 0)) {
     return Promise.reject(runnerError("AGENT_OPERATION_FAILED"));
   }
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(brokerUrl(options.origin), { origin: options.origin });
+    const ws = new WebSocket(brokerUrl(options.origin), { origin: options.origin, handshakeTimeout: 120_000 });
     const pending = new Map();
     let seq = 0;
     let sessionKey = null;
@@ -50,23 +50,38 @@ function runFederatedAgentViaBroker(options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       for (const entry of pending.values()) entry.reject(runnerError("AGENT_OPERATION_FAILED"));
       pending.clear();
       try { ws.close(); } catch {}
       if (error) reject(error); else resolve(value);
     };
-    const timer = setTimeout(() => finish(runnerError("AGENT_RUN_TIMEOUT")), options.timeoutMs);
+    const cancelRemote = () => {
+      if (sessionKey && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: "req", id: `federation-abort-${++seq}`, method: "chat.abort", params: { sessionKey } })); } catch {}
+      }
+    };
+    const onAbort = () => { cancelRemote(); finish(runnerError("AGENT_OPERATION_FAILED")); };
+    const timer = options.timeoutMs > 0 ? setTimeout(() => { cancelRemote(); finish(runnerError("AGENT_RUN_TIMEOUT")); }, options.timeoutMs) : null;
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) { onAbort(); return; }
     const send = (method, params) => new Promise((resolveRpc, rejectRpc) => {
+      if (settled) { rejectRpc(runnerError("AGENT_OPERATION_FAILED")); return; }
       const id = `federation-${++seq}`;
-      pending.set(id, { resolve: resolveRpc, reject: rejectRpc });
+      const rpcTimer = setTimeout(() => {
+        pending.delete(id); rejectRpc(runnerError("APP_HOST_UNAVAILABLE"));
+      }, 120_000);
+      pending.set(id, { resolve: value => { clearTimeout(rpcTimer); resolveRpc(value); },
+        reject: error => { clearTimeout(rpcTimer); rejectRpc(error); } });
       try { ws.send(JSON.stringify({ type: "req", id, method, params })); } catch {
-        pending.delete(id);
+        clearTimeout(rpcTimer); pending.delete(id);
         rejectRpc(runnerError("AGENT_OPERATION_FAILED"));
       }
     });
     ws.on("open", async () => {
       try {
         const created = await send("sessions.create", { agentId: options.agentId });
+        if (settled) return;
         sessionKey = created?.payload?.key;
         if (typeof sessionKey !== "string" || !sessionKey) throw runnerError("AGENT_OPERATION_FAILED");
         await send("chat.send", {
@@ -153,7 +168,7 @@ class FederatedAgentTaskRunner {
       turn: 1,
       result: null,
       errorCode: null,
-      timeoutMs: input.timeoutMs,
+      timeoutMs: input.timeoutMs ?? 0,
       timer: null,
       socket: null,
       sequence: 0,
@@ -173,7 +188,7 @@ class FederatedAgentTaskRunner {
     });
     this.#arm(task);
     try {
-      task.socket = new this.WebSocket(brokerUrl(this.origin), { origin: this.origin });
+      task.socket = new this.WebSocket(brokerUrl(this.origin), { origin: this.origin, handshakeTimeout: 120_000 });
       this.#bind(task);
     } catch {
       this.#fail(task, "APP_HOST_UNAVAILABLE");
@@ -184,8 +199,7 @@ class FederatedAgentTaskRunner {
   async message(input) {
     const task = this.#task(input);
     if (typeof input.prompt !== "string" || !input.prompt
-      || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 5_000
-      || input.timeoutMs > FEDERATION_TASK_MAX_TIMEOUT_MS) throw runnerError("AGENT_OPERATION_FAILED");
+      || !validFederationTaskTimeout(input.timeoutMs ?? 0)) throw runnerError("AGENT_OPERATION_FAILED");
     if (!Number.isSafeInteger(input.expectedTurn) || input.expectedTurn !== task.turn) {
       throw runnerError("FEDERATION_TASK_STATE_CONFLICT");
     }
@@ -199,7 +213,7 @@ class FederatedAgentTaskRunner {
     task.status = "running";
     task.result = null;
     task.errorCode = null;
-    task.timeoutMs = input.timeoutMs;
+    task.timeoutMs = input.timeoutMs ?? 0;
     this.#arm(task);
     try {
       await this.#sendTurn(task, input.prompt, FEDERATION_AGENT_MESSAGE_SOURCE_TOOL);
@@ -253,8 +267,7 @@ class FederatedAgentTaskRunner {
       && ["openclaw", "hermes"].includes(input.backendId)
       && typeof input.agentId === "string" && input.agentId.length > 0
       && typeof input.prompt === "string" && input.prompt.length > 0
-      && Number.isSafeInteger(input.timeoutMs) && input.timeoutMs >= 5_000
-      && input.timeoutMs <= FEDERATION_TASK_MAX_TIMEOUT_MS;
+      && validFederationTaskTimeout(input.timeoutMs ?? 0);
   }
 
   #task(input) {
@@ -280,6 +293,7 @@ class FederatedAgentTaskRunner {
     task.socket.on("open", async () => {
       try {
         const created = await this.#rpc(task, "sessions.create", { agentId: task.agentId });
+        if (TASK_TERMINAL_STATUSES.has(task.status) || this.closed) return;
         task.sessionKey = created?.payload?.key;
         if (typeof task.sessionKey !== "string" || !task.sessionKey) {
           throw runnerError("AGENT_OPERATION_FAILED");
@@ -361,7 +375,7 @@ class FederatedAgentTaskRunner {
     for (const frame of deferred) this.#onMessage(task, JSON.stringify(frame));
   }
 
-  #rpc(task, method, params, timeoutMs = null) {
+  #rpc(task, method, params, timeoutMs = 120_000) {
     return new Promise((resolve, reject) => {
       if (!task.socket || task.socket.readyState !== this.WebSocket.OPEN) {
         reject(runnerError("APP_HOST_UNAVAILABLE"));
@@ -394,6 +408,7 @@ class FederatedAgentTaskRunner {
 
   #arm(task) {
     clearTimeout(task.timer);
+    if (task.timeoutMs === 0) { task.timer = null; return; }
     task.timer = setTimeout(() => {
       this.#fail(task, "AGENT_RUN_TIMEOUT");
       if (task.sessionKey && task.socket?.readyState === this.WebSocket.OPEN) {

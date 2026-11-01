@@ -26,7 +26,7 @@ async function desktopFixture() {
   assert.equal(mounted.ok, true, JSON.stringify(mounted));
   const bridge = value => host.entries.get(mountId).onMessage(value);
   const action = (extra = {}) => ({ mountId, actionId: "continue", actionRequestId: crypto.randomUUID(),
-    draftId: main.entries.get(mountId).draftId, pluginSelection: [], ...extra });
+    draftId: main.entries.get(mountId).draftId, ...extra });
   return { f, registry, backend, main, host, notifications, invoke, bridge, action, part, mountId, profile, key,
     async remove() { await main.close(); await federation.stop(); await registry.stop(); await f.remove(); } };
 }

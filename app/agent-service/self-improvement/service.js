@@ -305,7 +305,7 @@ class LearningService {
         job = started.job; call = started.call;
         // No learning-specific total deadline; use the shared generator's
         // maximum call timeout. Native Runtime deadlines still apply.
-        const timeoutMs = 15 * 60_000;
+        const timeoutMs = 60 * 60_000;
         const output = await this.getCoordinator().generateLearningText({ profileId: job.profileId,
           operationId: `${job.id}-${call.attempt}`, prompt, maxOutputBytes: LIMITS.outputBytes, timeoutMs,
           ...(this.store.settings(job.profileId).config.model === null ? {} : { model: context.model }),

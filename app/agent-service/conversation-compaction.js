@@ -2,7 +2,7 @@
 
 const { coveredTranscript, SUMMARY_FIELDS, validateSummary } = require("./conversation-checkpoint-store");
 const { serviceError } = require("./security");
-const { conversationContextBudget, estimateContextTokens, WORKING_CONTEXT_TARGET } = require("./conversation-context-budget");
+const { conversationContextBudget, estimateContextTokens } = require("./conversation-context-budget");
 const { contextTransportLimits } = require("./context-request-budget");
 const crypto = require("node:crypto");
 const MAX_SOURCE_BYTES = 96 * 1024;
@@ -47,13 +47,12 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   const projectionOverflow = freshSession && (requestPlan?.historyTruncated || requestPlan?.transportExceeded
     || pending.reduce((sum, event) => sum + size(event), 0) > transportBytes);
   const trigger = requestPlan?.limitTokens ?? budget.triggerTokens;
-  // With advisory=true a caller also accepts a summary past the working target
-  // while the request still fits; the plan is marked advisory so that a failed
-  // early summary never blocks a turn that does not need it.
-  // Required means the request cannot proceed without it; continuing a planned
+  // The effective request limit already accounts for the model window, input
+  // cap and output reserve. A separate fixed target would compact large-window
+  // conversations before that budget requires it. Continuing a committed
   // target below the trigger stays advisory.
   const required = force || projectionOverflow || used >= trigger;
-  if (!required && !continuing && !(advisory && used >= Math.min(trigger, WORKING_CONTEXT_TARGET))) return null;
+  if (!required && !continuing) return null;
   // A native session can include much more tool/system context than its
   // display transcript. Still summarize a useful prefix in that case.
   const retainedTokens = Math.max(0, Math.min(trigger - (requestPlan?.fixedTokens ?? 0) - 1024,

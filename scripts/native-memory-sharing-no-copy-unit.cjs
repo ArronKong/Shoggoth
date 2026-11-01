@@ -3,7 +3,6 @@
 // transport is controlled; provider execution is outside this acceptance.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
@@ -42,8 +41,7 @@ function markdownText(directory) {
   }).join("\n");
 }
 function callFor(f, run) {
-  return (name, args) => f.service.mcpProductToolController.handle(name,
-    { source: "chat", sourceId: run.sourceId, ...args }, { profileId: f.profile.id, callId: crypto.randomUUID() });
+  return (name, args) => f.callTool(run, name, args);
 }
 function ownerState(f) {
   return { file: fs.readFileSync(path.join(f.owner.store.workspace(f.B), "MEMORY.md"), "utf8"),

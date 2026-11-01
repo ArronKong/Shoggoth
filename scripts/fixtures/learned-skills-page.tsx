@@ -29,12 +29,6 @@ const filter = async (text: string, count: number) => {
   [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find(item => item.textContent === text)!.click();
   await wait(() => cards().length === count, "filter " + text);
 };
-const search = async (text: string, count: number) => {
-  const input = document.querySelector<HTMLInputElement>('input[type="search"]')!;
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
-  input.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-  await wait(() => cards().length === count, "search " + text);
-};
 const api = async (action: string, input = {}) => {
   const response = await fetch("/__api/skills/learning", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ backend: "shoggoth", agentId, action, input }) });
@@ -43,22 +37,25 @@ const api = async (action: string, input = {}) => {
 scope.learnedSkillsAcceptance = async (stage: string) => {
   if (stage === "catalog") {
     await wait(() => cards().length === 3 && learned(), "three unified cards");
+    check(cards().some(card => card.innerText.includes("Second Skills Agent")), "second Agent skills share the same list");
     check(document.body.innerText.includes("3 个已装 · 启用 1 个 · AI 助理用过 1 个"), "unified totals");
     check(learned().innerText.includes("自动学习") && learned().querySelector(".skill-badge-used")?.textContent?.trim() === "1 次", "source and actual usage badge");
     const label = learned().querySelector<HTMLElement>(".skill-name")!;
     check(label.scrollWidth <= label.clientWidth + 1, "metadata badges do not squeeze the visible title");
     const opener = learned().querySelector<HTMLButtonElement>(".skill-card-open")!; opener.click();
     await wait(() => detail()?.innerText.includes("方法正文"), "main card opens learned details");
-    check(!document.querySelector("aside.skill-detail"), "learned card uses its version-aware detail");
+    check(!document.querySelector('[aria-label="自动学习"]'), "automatic learning card remains hidden");
     check(detail()?.innerText.includes("来源任务") && detail()?.innerText.includes("最近 10 个版本"), "provenance and version history");
     check((await api("skills")).items[0].usage.reads === 1, "UI inspection does not add an Agent read");
     button("关闭详情").click(); await wait(() => !detail(), "close learned detail");
     check(document.activeElement === opener, "close restores main-card focus");
-    await search(title, 1); check(learned(), "title search"); await search("", 3);
+    check(!document.querySelector('input[type="search"]'), "search is hidden");
+    check(!document.querySelector('.ui-toolbar [role="combobox"]'), "Agent filter is hidden");
+    check(![...document.querySelectorAll(".ui-toolbar button")].some(item => item.textContent?.includes("安装")), "installation is hidden");
     await filter("已启用", 1); check(learned(), "active learned skill is enabled");
     await filter("已停用", 2); check(!learned(), "disabled filter contains only ordinary skills");
     await filter("全部", 3);
-    return { total: 3, enabled: 1, used: 1, titleSearch: true, detail: true };
+    return { total: 3, enabled: 1, used: 1, hiddenControls: true, detail: true };
   }
   if (stage === "archive") {
     learned().querySelector<HTMLElement>('[role="switch"]')!.click();

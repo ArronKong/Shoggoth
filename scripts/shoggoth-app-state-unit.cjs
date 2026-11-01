@@ -144,16 +144,17 @@ test("private host protocol rejects extra fields and wrong-section results", asy
 });
 
 
-test("installed plugin and inactive components remain visible, with names and bundled library state", async () => {
-  const f = fixture(); f.options.pluginStore.listInstallations = () => [{ installationId: "plugin", desiredState: "disabled", sourceIdentity: CANARY }];
-  f.options.bundledPluginCatalog = { list: () => ({ items: [{ id: "bundled", installationId: "other", displayName: "Bundled", converted: { skills: 2, mcp: 1 } }] }) };
+test("retired platform stays opaque and global connector status cannot enumerate account authority", async () => {
+  const f = fixture();
+  f.options.pluginStore = new Proxy({}, { get() { assert.fail("retired Store must never be consulted"); } });
+  f.options.getConnectorStatus = () => ({ state: "ready", version: "1.9.2", accountId: CANARY, label: CANARY, grants: [CANARY] });
   const service = new AppStateReadService(f.options);
-  const plugins = await all(service, "plugins"); assert.equal(plugins.summary.installations, 1); assert.equal(plugins.summary.library, 1);
-  assert.equal(plugins.items.find(row => row.type === "installation").name, "Fixture Plugin");
-  assert.equal(plugins.items.find(row => row.type === "library").installed, false);
-  const skills = await all(service, "skills"); assert.equal(skills.items.find(row => row.source === "plugin").enabled, false);
-  const mcp = await all(service, "mcp"); assert.equal(mcp.items.find(row => row.source === "installed_plugin").enabled, false);
-  assert.equal(JSON.stringify({ plugins, skills, mcp }).includes(CANARY), false);
+  const plugins = await all(service, "plugins"); assert.deepEqual(plugins.items, []);
+  assert.equal(plugins.summary.state, "retired"); assert.equal(plugins.summary.executionEnabled, false);
+  const connectors = await all(service, "connectors"); assert.deepEqual(connectors.items, [{ state: "ready", version: "1.9.2" }]);
+  const skills = await all(service, "skills"); assert.equal(skills.items.some(row => row.source === "plugin"), false);
+  const mcp = await all(service, "mcp"); assert.equal(mcp.items.some(row => row.source === "installed_plugin"), false);
+  assert.equal(JSON.stringify({ plugins, connectors, skills, mcp }).includes(CANARY), false);
 });
 
 test("native role summaries never expose personal definitions to external callers", async () => {

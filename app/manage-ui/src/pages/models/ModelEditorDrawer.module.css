@@ -39,13 +39,10 @@
 
 .impactActions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.5rem;
   margin-top: 0.75rem;
-}
-
-.impactActions button {
-  min-height: 40px;
 }
 
 .results p {

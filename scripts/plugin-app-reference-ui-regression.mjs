@@ -23,6 +23,7 @@ try {
   fs.writeFileSync(main, `const {app,BrowserWindow,session}=require("electron");
 const fs=require("node:fs"),path=require("node:path"),assert=require("node:assert/strict");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
+if(process.platform==="linux")app.disableHardwareAcceleration();
 app.whenReady().then(async()=>{
   session.defaultSession.webRequest.onBeforeRequest((details,callback)=>callback({cancel: !/^(file:|data:)/.test(details.url)}));
   const w=new BrowserWindow({show:false,width:900,height:950,webPreferences:{backgroundThrottling:false}});

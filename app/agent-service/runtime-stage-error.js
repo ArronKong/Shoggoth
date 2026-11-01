@@ -33,7 +33,11 @@ const RETRYABLE_PRE_TURN_STAGES = new Set([
 // A stage describes where a failure happened, not whether replay is safe.
 // In particular, an unknown remote outcome must retain its deduplication fence.
 const NON_RETRYABLE_START_CODES = new Set([
+  ...Object.keys(require("../core/chat-secret-contract").SECRET_MESSAGES),
   "RUNTIME_INCOMPATIBLE",
+  "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED",
+  "RUNTIME_ATTACHMENT_UNSUPPORTED",
+  "RUNTIME_WORKSPACE_UNAVAILABLE",
   "PROACTIVE_RUNTIME_UNVERIFIED", "PROACTIVE_SCOPE_INVALID",
   "EXECUTION_CONTRACT_STALE",
   "AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED", "RUNTIME_ACCOUNT_BLOCKED",
@@ -107,7 +111,8 @@ function runtimeStageCode(stage) {
 }
 
 function runtimeStageFromError(error) {
-  if (error?.code === "RUNTIME_INCOMPATIBLE") {
+  if (["RUNTIME_INCOMPATIBLE", "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE",
+    "RUNTIME_CAPABILITY_UNSUPPORTED", "RUNTIME_WORKSPACE_UNAVAILABLE"].includes(error?.code)) {
     const stage = Object.getOwnPropertyDescriptor(error, "stage")?.value;
     return FAILURE_STAGES.has(stage) ? stage : null;
   }
@@ -130,6 +135,13 @@ function runtimeStageError(stage, cause = null) {
     code: "RUNTIME_INCOMPATIBLE", stage: runtimeStageFromError(cause) || stage,
   });
   const operational = runtimeOperationalError(cause);
+  for (let current = operational, depth = 0; current && depth < 8; depth++) {
+    const blocked = Object.getOwnPropertyDescriptor(current, "code")?.value;
+    if (["RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED", "RUNTIME_ATTACHMENT_UNSUPPORTED", "RUNTIME_WORKSPACE_UNAVAILABLE"].includes(blocked)) {
+      return Object.assign(new Error(blocked), { code: blocked, stage: runtimeStageFromError(current) || stage });
+    }
+    current = Object.getOwnPropertyDescriptor(current, "cause")?.value;
+  }
   if (operational?.code === "RUNTIME_AUTH_REQUIRED" || operational?.code === "RUNTIME_SESSION_WRITER_BUSY" || runtimeStageFromError(operational)) {
     return operational;
   }
