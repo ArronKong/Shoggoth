@@ -2,7 +2,18 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { test } = require("node:test");
-const { launchAndWait } = require("./shoggoth-quarantined-first-launch.cjs");
+const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
+const { execFileSync } = require("node:child_process");
+const { launchAndWait, ORDINARY_OPEN_SCRIPT } = require("./shoggoth-quarantined-first-launch.cjs");
+
+test("the exact ordinary Open script compiles with the macOS System Events dictionary", { skip: process.platform !== "darwin" }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-open-script-"));
+  try {
+    execFileSync("/usr/bin/osacompile", ["-o", path.join(directory, "ordinary-open.scpt"), "-e", ORDINARY_OPEN_SCRIPT], { timeout: 15000 });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function fixture(options = {}) {
   const child = new EventEmitter();

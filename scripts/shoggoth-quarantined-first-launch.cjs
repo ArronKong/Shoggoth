@@ -33,6 +33,19 @@ function mainProcesses(binary) {
     return [Number(match[1])];
   });
 }
+const ORDINARY_OPEN_SCRIPT = `tell application "System Events"
+  if exists process "CoreServicesUIAgent" then
+    tell process "CoreServicesUIAgent"
+      repeat with w in windows
+        if exists button "Open" of w then
+          click button "Open" of w
+          return "ordinary-open-confirmed"
+        end if
+      end repeat
+    end tell
+  end if
+  return "no-ordinary-open-prompt"
+end tell`;
 
 async function launchAndWait(app, binary, evidence, dependencies = {}) {
   const spawnProcess = dependencies.spawnProcess || spawn;
@@ -62,7 +75,7 @@ async function launchAndWait(app, binary, evidence, dependencies = {}) {
         // Accept only the ordinary Internet-download Open prompt. A damaged,
         // untrusted, or privacy-permission dialog has no matching action here.
         try {
-          const answer = runCommand("/usr/bin/osascript", ["-e", 'tell application "System Events"\nif exists process "CoreServicesUIAgent" then\ntell process "CoreServicesUIAgent"\nrepeat with w in windows\nif exists button "Open" of w then\nclick button "Open" of w\nreturn "ordinary-open-confirmed"\nend if\nend repeat\nend tell\nend if\nreturn "no-ordinary-open-prompt"']);
+          const answer = runCommand("/usr/bin/osascript", ["-e", ORDINARY_OPEN_SCRIPT]);
           evidence.normalOpenConfirmation = answer.trim() === "ordinary-open-confirmed";
         } catch { evidence.ordinaryOpenAutomationFailed = true; }
       }
@@ -183,5 +196,5 @@ async function main() {
   console.log(JSON.stringify(evidence));
 }
 
-module.exports = { launchAndWait };
+module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT };
 if (require.main === module) main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });
