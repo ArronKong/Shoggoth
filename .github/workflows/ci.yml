@@ -53,6 +53,26 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm --prefix app/manage-ui ci --ignore-scripts
+      - name: Prepare sandboxed Linux desktop fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          node node_modules/electron/install.js
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          Xvfb :99 -screen 0 1440x1000x24 > "$RUNNER_TEMP/shoggoth-xvfb.log" 2>&1 &
+          DISPLAY_PID=$!
+          echo "$DISPLAY_PID" > "$RUNNER_TEMP/shoggoth-xvfb.pid"
+          for attempt in $(seq 1 40); do
+            kill -0 "$DISPLAY_PID"
+            if DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then
+              echo "DISPLAY=:99" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat "$RUNNER_TEMP/shoggoth-xvfb.log"
+          exit 1
       - name: Type check and production UI build
         run: |
           npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json
