@@ -55,6 +55,40 @@ jobs:
           node-version: "22.22.3"
           cache: npm
 
+      - name: Verify first-launch harness and preserve tagged product source
+        env:
+          VERIFICATION_HARNESS_SHA: ${{ github.sha }}
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs'), path = require('node:path');
+          const { createHash } = require('node:crypto');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.arch, process.env.SHOGGOTH_DRAFT_ARCH);
+          const git = args => execFileSync('git', args, { encoding: 'utf8', timeout: 120000 }).trim();
+          const source = git(['rev-parse', 'HEAD']);
+          const harness = process.env.VERIFICATION_HARNESS_SHA;
+          assert.match(harness, /^[a-f0-9]{40}$/);
+          if (source !== harness) git(['fetch', '--no-tags', '--depth=1', 'origin', harness]);
+          const changedPaths = git(['diff', '--name-only', source, harness]).split('\n').filter(Boolean).sort();
+          const allowed = ['.github/workflows/verify-signed-draft.yml',
+            'scripts/shoggoth-quarantined-first-launch.cjs', 'scripts/shoggoth-quarantined-first-launch-unit.cjs',
+            'scripts/shoggoth-memory-batch-smoke.cjs', 'scripts/shoggoth-active-memory-diagnostics-regression.cjs'];
+          assert.ok(changedPaths.every(name => allowed.includes(name)), 'Harness differs in product or unrelated files');
+          const hashes = {};
+          for (const name of allowed.slice(1)) {
+            const bytes = execFileSync('git', ['show', `${harness}:${name}`]);
+            hashes[name] = createHash('sha256').update(bytes).digest('hex');
+            fs.writeFileSync(name, bytes);
+          }
+          execFileSync(process.execPath, ['--test', allowed[2]], { stdio: 'inherit', timeout: 30000 });
+          assert.equal(git(['rev-parse', 'HEAD']), source);
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'verification-harness.json'), JSON.stringify({
+            sourceCommit: source, harnessCommit: harness, architecture: process.arch,
+            changedPaths, hashes, unitTestsPassed: true, taggedProductSourcePreserved: true,
+          }, null, 2) + '\n', { flag: 'wx' });
+          NODE
+
       - name: Install dependencies and pinned runtimes
         run: |
           node -e 'require("node:assert/strict").equal(process.arch, process.env.SHOGGOTH_DRAFT_ARCH, "Draft verification requires native hardware")'
@@ -164,4 +198,5 @@ jobs:
           path: |
             ${{ runner.temp }}/shoggoth-first-launch/
             ${{ runner.temp }}/e5-${{ matrix.arch }}-result.json
+            ${{ runner.temp }}/verification-harness.json
           if-no-files-found: error

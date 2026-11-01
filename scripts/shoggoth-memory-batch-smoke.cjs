@@ -172,14 +172,50 @@ for (const kind of Object.keys(adapters)) {
     assert.equal(server.jobs.get("job-2").polls, 0); assert.equal(server.requests.filter(row => row.method === "GET").length, 2);
   });
   test(`${kind} unfinished jobs honor the original total polling timeout`, async t => {
-    const server = await fixture(t, kind, { wait: true, poll: (_request, res, job, states) => { json(res, states.pending(job)); return true; } });
-    const { runtime } = await create(kind, server), started = Date.now(), pollIntervalMs = 1000;
-    await assert.rejects(runtime.batchEmbed({ ...controls, timeoutMs: 50, pollIntervalMs }), error => /timed out/u.test(error.message));
-    assert.ok(Date.now() - started < pollIntervalMs, "the total deadline stops before a full polling interval");
-    // Timer wake-up and Date.now() can differ at the deadline boundary. A last
-    // status read with remaining time is valid; an unfinished job has no output.
-    assert.ok(server.requests.filter(row => row.method === "GET").every(row => row.pathname.includes("/batches/")),
-      "an unfinished batch never downloads result or error files");
+    if (process.env.SHOGGOTH_BATCH_DEADLINE_CASE !== kind) {
+      // A fake polling clock also changes Undici's connection timers. Keep it
+      // in a fresh process so later real-HTTP cancellation cases use a native
+      // clock and their original connection pool.
+      const env = { ...process.env, SHOGGOTH_BATCH_DEADLINE_CASE: kind };
+      delete env.NODE_TEST_CONTEXT;
+      const { stdout } = await promisify(execFile)(process.execPath, ["--test", "--test-reporter=tap",
+        `--test-name-pattern=^${kind} unfinished jobs honor the original total polling timeout$`, __filename],
+      { env, timeout: 10000 });
+      assert.match(stdout, new RegExp(`ok \\d+ - ${kind} unfinished jobs honor the original total polling timeout`));
+      assert.match(stdout, /# pass 1\n/u);
+      return;
+    }
+    let created, releaseCreate, sleepArmed;
+    const creation = new Promise(resolve => { created = resolve; });
+    const waiting = new Promise(resolve => { sleepArmed = resolve; });
+    const server = await fixture(t, kind, { create: (_request, res, job, states) => {
+      releaseCreate = () => json(res, states.pending(job)); created(); return true;
+    }, poll: (_request, res, job, states) => { json(res, states.pending(job)); return true; } });
+    const { runtime } = await create(kind, server), timeoutMs = 50, pollIntervalMs = 1000;
+    const operation = runtime.batchEmbed({ ...controls, timeoutMs, pollIntervalMs });
+    let settled = false;
+    const rejected = assert.rejects(operation, error => /timed out/u.test(error.message)).then(() => { settled = true; });
+    await creation;
+    // Keep the real upload/create HTTP boundary. Drive only the polling clock
+    // after creation; a wall-clock wake-up one millisecond early otherwise
+    // races a last status HTTP request against its remaining native timeout.
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1000 });
+    const schedule = globalThis.setTimeout;
+    const timerMock = t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) => {
+      const timer = schedule(callback, delay, ...args);
+      if (delay === timeoutMs) sleepArmed();
+      return timer;
+    });
+    try {
+      const started = Date.now(); releaseCreate(); await waiting;
+      t.mock.timers.tick(timeoutMs - 1); await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false, "the original deadline must not expire early");
+      t.mock.timers.tick(1); await rejected;
+      assert.equal(Date.now() - started, timeoutMs);
+      assert.ok(Date.now() - started < pollIntervalMs, "the total deadline stops before a full polling interval");
+      assert.deepEqual(server.requests.filter(row => row.method === "GET"), [],
+        "an expired unfinished batch never polls or downloads result/error files");
+    } finally { timerMock.mock.restore(); t.mock.timers.reset(); }
   });
   test(`${kind} error and output files cannot leak reflected memory through the adapter or debug callback`, async t => {
     for (const mode of ["output", "terminal"]) {

@@ -6,24 +6,131 @@
 // this is controlled quarantine evidence, not a browser-download claim.
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const { randomUUID, createHash } = require("node:crypto");
+const { performance } = require("node:perf_hooks");
 const { setTimeout: delay } = require("node:timers/promises");
 
 function command(executable, args, timeout = 15000) {
-  return execFileSync(executable, args, { encoding: "utf8", timeout, maxBuffer: 2 * 1024 * 1024 });
+  try {
+    return execFileSync(executable, args, { encoding: "utf8", timeout, maxBuffer: 2 * 1024 * 1024 });
+  } catch (error) {
+    if (executable === "/usr/bin/xcrun" && args[0] === "stapler" && args[1] === "validate") {
+      console.error("STAPLER_VALIDATE_FAILED " + JSON.stringify({ status: error.status, signal: error.signal,
+        stdout: String(error.stdout || "").slice(0, 2000), stderr: String(error.stderr || "").slice(0, 2000) }));
+    }
+    throw error;
+  }
 }
 function inside(root, target) {
   const relative = path.relative(root, target);
   return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
-function mainProcesses(binary) {
-  return command("/bin/ps", ["-axo", "pid=,args="]).trim().split("\n").flatMap(line => {
+function embeddingWorkerCommand(binary) {
+  return `${binary} ${path.join(path.dirname(path.dirname(binary)), "Resources/app.asar/app/agent-service/embedding-worker.cjs")}`;
+}
+function guiProcessRecords(output, binary) {
+  return output.trim().split("\n").flatMap(line => {
     const match = line.trim().match(/^(\d+)\s+(.+)$/u);
     if (!match || (match[2] !== binary && !match[2].startsWith(`${binary} `))
-      || match[2].includes("--shoggoth-internal-role=")) return [];
-    return [Number(match[1])];
+      || match[2].includes("--shoggoth-internal-role=") || match[2] === embeddingWorkerCommand(binary)) return [];
+    return [{ pid: Number(match[1]), command: match[2] }];
   });
+}
+function mainProcessRecords(binary) {
+  return guiProcessRecords(command("/bin/ps", ["-axo", "pid=,args="]), binary);
+}
+function embeddingProcessRecords(binary) {
+  const expected = embeddingWorkerCommand(binary);
+  return command("/bin/ps", ["-axo", "pid=,args="]).trim().split("\n").flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/u);
+    return match?.[2] === expected ? [{ pid: Number(match[1]), command: match[2] }] : [];
+  });
+}
+function mainProcesses(binary) { return mainProcessRecords(binary).map(item => item.pid); }
+const ORDINARY_OPEN_SCRIPT = `tell application "System Events"
+  if exists process "CoreServicesUIAgent" then
+    tell process "CoreServicesUIAgent"
+      repeat with w in windows
+        if exists button "Open" of w then
+          click button "Open" of w
+          return "ordinary-open-confirmed"
+        end if
+      end repeat
+    end tell
+  end if
+  return "no-ordinary-open-prompt"
+end tell`;
+
+function quitScript(pid) {
+  assert.ok(Number.isInteger(pid) && pid > 0 && pid <= 2147483647, "Invalid verified GUI PID");
+  return `tell application "System Events"
+  set targetProcess to first process whose unix id is ${pid}
+  set frontmost of targetProcess to true
+  tell targetProcess
+    keystroke "q" using command down
+  end tell
+end tell`;
+}
+
+async function quitAndWait(binary, pid, evidence, dependencies = {}) {
+  const readProcesses = dependencies.readProcesses || mainProcesses;
+  const runCommand = dependencies.runCommand || command;
+  const wait = dependencies.wait || delay;
+  const script = quitScript(pid);
+  assert.deepEqual(readProcesses(binary), [pid], "Quit target is not the sole verified GUI process");
+  evidence.quitMethod = "System Events Cmd+Q to verified GUI PID";
+  evidence.quitTargetPid = pid;
+  runCommand("/usr/bin/osascript", ["-e", script]);
+  for (let attempt = 0; attempt < 120 && readProcesses(binary).length; attempt++) await wait(500);
+  assert.deepEqual(readProcesses(binary), [], "GUI failed to quit normally");
+  evidence.naturalGuiExit = true;
+}
+
+async function launchAndWait(app, binary, evidence, dependencies = {}) {
+  const spawnProcess = dependencies.spawnProcess || spawn;
+  const readProcesses = dependencies.readProcesses || mainProcesses;
+  const runCommand = dependencies.runCommand || command;
+  const wait = dependencies.wait || delay;
+  const now = dependencies.now || (() => performance.now());
+  const startupBudgetMs = 60000;
+  const deadline = now() + startupBudgetMs;
+  // LaunchServices can keep `open` pending until the ordinary download prompt
+  // is confirmed. Gatekeeper, open and the PID share the existing 60s startup
+  // budget; a short utility-command timer must not cut that budget off early.
+  const launcher = spawnProcess("/usr/bin/open", ["-n", app], { stdio: "ignore", timeout: startupBudgetMs });
+  let result;
+  launcher.once("error", error => { result = { error }; });
+  launcher.once("close", (code, signal) => { result = { ...result, code, signal }; });
+  try {
+    for (let attempt = 0; attempt < 120 && now() < deadline; attempt++) {
+      if (result?.error) throw result.error;
+      if (result && Object.hasOwn(result, "code")) {
+        assert.equal(result.code, 0, "LaunchServices open failed or timed out");
+        assert.equal(result.signal, null, "LaunchServices open did not exit normally");
+      }
+      const candidates = readProcesses(binary);
+      assert.ok(candidates.length <= 1, "Unexpected duplicate GUI process");
+      assert.ok(now() < deadline, "Normal quarantined GUI did not launch within 60 seconds");
+      if (candidates.length === 1 && result?.code === 0 && result.signal === null) {
+        evidence.launcherNaturalExit = { code: result.code, signal: result.signal };
+        evidence.startupBudgetMs = startupBudgetMs;
+        return candidates[0];
+      }
+      if (attempt % 4 === 2 && evidence.normalOpenConfirmation !== true) {
+        // Accept only the ordinary Internet-download Open prompt. A damaged,
+        // untrusted, or privacy-permission dialog has no matching action here.
+        try {
+          const answer = runCommand("/usr/bin/osascript", ["-e", ORDINARY_OPEN_SCRIPT], Math.max(1, Math.min(15000, deadline - now())));
+          evidence.normalOpenConfirmation = answer.trim() === "ordinary-open-confirmed";
+        } catch { evidence.ordinaryOpenAutomationFailed = true; }
+      }
+      await wait(Math.min(500, Math.max(0, deadline - now())));
+    }
+    assert.fail("Normal quarantined GUI did not launch");
+  } finally {
+    if (!result || !Object.hasOwn(result, "code")) launcher.kill("SIGTERM");
+  }
 }
 
 async function main() {
@@ -69,7 +176,7 @@ async function main() {
     account: "empty disposable GitHub-hosted runner", gatekeeper, installedApp: app,
     downloadProvenance: "exact draft download copied to the disposable runner Applications directory with controlled quarantine",
     browserDownloadVerified: false, quarantineRemoved: false, normalOpenConfirmation: false, verified: false };
-  let launched = false;
+  let launched = false, guiPid;
   const screenshot = () => {
     try { command("/usr/sbin/screencapture", ["-x", path.join(output, "first-launch.png")]); } catch { /* keep the original failure */ }
   };
@@ -88,23 +195,8 @@ async function main() {
     command("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, app]);
     evidence.quarantineBefore = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
     launched = true;
-    command("/usr/bin/open", ["-n", app]);
-    let pid;
-    for (let attempt = 0; attempt < 120; attempt++) {
-      const candidates = mainProcesses(binary);
-      assert.ok(candidates.length <= 1, "Unexpected duplicate GUI process");
-      if (candidates.length === 1) { pid = candidates[0]; break; }
-      if (attempt === 20) {
-        // Accept only the ordinary Internet-download Open prompt. A damaged,
-        // untrusted, or privacy-permission dialog has no matching action here.
-        try {
-          const answer = command("/usr/bin/osascript", ["-e", 'tell application "System Events"\nif exists process "CoreServicesUIAgent" then\ntell process "CoreServicesUIAgent"\nrepeat with w in windows\nif exists button "Open" of w then\nclick button "Open" of w\nreturn "ordinary-open-confirmed"\nend if\nend repeat\nend tell\nend if\nreturn "no-ordinary-open-prompt"']);
-          evidence.normalOpenConfirmation = answer.trim() === "ordinary-open-confirmed";
-        } catch { /* process/window checks still decide acceptance */ }
-      }
-      await delay(500);
-    }
-    assert.ok(pid, "Normal quarantined GUI did not launch");
+    const pid = await launchAndWait(app, binary, evidence);
+    guiPid = pid;
     await delay(10000);
     assert.deepEqual(mainProcesses(binary), [pid]);
     const renderer = command("/bin/ps", ["-axo", "ppid=,args="]).split("\n")
@@ -133,22 +225,27 @@ async function main() {
     evidence.rendererPresent = true;
     evidence.productServiceHealthy = true;
     evidence.quarantineAfter = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
-    command("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]);
-    for (let attempt = 0; attempt < 120 && mainProcesses(binary).length; attempt++) await delay(500);
-    assert.deepEqual(mainProcesses(binary), [], "GUI failed to quit normally");
-    evidence.naturalGuiExit = true;
+    evidence.processesBeforeQuit = mainProcessRecords(binary);
+    evidence.backgroundEmbeddingWorkersBeforeQuit = embeddingProcessRecords(binary);
+    await quitAndWait(binary, pid, evidence);
+    evidence.processesAfterQuit = mainProcessRecords(binary);
+    evidence.backgroundEmbeddingWorkersAfterQuit = embeddingProcessRecords(binary);
     evidence.verified = true;
   } catch (error) {
+    try { evidence.processesAtFailure = mainProcessRecords(binary); } catch { evidence.processSnapshotFailed = true; }
     screenshot();
     evidence.failure = String(error.message).slice(0,1000);
     throw error;
   } finally {
     fs.writeFileSync(path.join(output, "result.json"), JSON.stringify(evidence, null, 2) + "\n", { mode: 0o600 });
-    if (launched && mainProcesses(binary).length) {
-      try { command("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]); } catch { /* failure remains visible */ }
+    if (launched && guiPid) {
+      try {
+        if (mainProcesses(binary).includes(guiPid)) command("/usr/bin/osascript", ["-e", quitScript(guiPid)]);
+      } catch { /* failure remains visible */ }
     }
   }
   console.log(JSON.stringify(evidence));
 }
 
-main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });
+module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords };
+if (require.main === module) main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });
