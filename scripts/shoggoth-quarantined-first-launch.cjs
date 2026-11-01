@@ -6,7 +6,7 @@
 // this is controlled quarantine evidence, not a browser-download claim.
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const { randomUUID, createHash } = require("node:crypto");
 const { setTimeout: delay } = require("node:timers/promises");
 
@@ -24,6 +24,46 @@ function mainProcesses(binary) {
       || match[2].includes("--shoggoth-internal-role=")) return [];
     return [Number(match[1])];
   });
+}
+
+async function launchAndWait(app, binary, evidence, dependencies = {}) {
+  const spawnProcess = dependencies.spawnProcess || spawn;
+  const readProcesses = dependencies.readProcesses || mainProcesses;
+  const runCommand = dependencies.runCommand || command;
+  const wait = dependencies.wait || delay;
+  // LaunchServices can keep `open` pending until the ordinary download prompt
+  // is confirmed. Keep the existing 15s command budget while polling that UI.
+  const launcher = spawnProcess("/usr/bin/open", ["-n", app], { stdio: "ignore", timeout: 15000 });
+  let result;
+  launcher.once("error", error => { result = { error }; });
+  launcher.once("close", (code, signal) => { result = { ...result, code, signal }; });
+  try {
+    for (let attempt = 0; attempt < 120; attempt++) {
+      if (result?.error) throw result.error;
+      if (result && Object.hasOwn(result, "code")) {
+        assert.equal(result.code, 0, "LaunchServices open failed or timed out");
+        assert.equal(result.signal, null, "LaunchServices open did not exit normally");
+      }
+      const candidates = readProcesses(binary);
+      assert.ok(candidates.length <= 1, "Unexpected duplicate GUI process");
+      if (candidates.length === 1 && result?.code === 0 && result.signal === null) {
+        evidence.launcherNaturalExit = { code: result.code, signal: result.signal };
+        return candidates[0];
+      }
+      if (attempt === 20) {
+        // Accept only the ordinary Internet-download Open prompt. A damaged,
+        // untrusted, or privacy-permission dialog has no matching action here.
+        try {
+          const answer = runCommand("/usr/bin/osascript", ["-e", 'tell application "System Events"\nif exists process "CoreServicesUIAgent" then\ntell process "CoreServicesUIAgent"\nrepeat with w in windows\nif exists button "Open" of w then\nclick button "Open" of w\nreturn "ordinary-open-confirmed"\nend if\nend repeat\nend tell\nend if\nreturn "no-ordinary-open-prompt"']);
+          evidence.normalOpenConfirmation = answer.trim() === "ordinary-open-confirmed";
+        } catch { evidence.ordinaryOpenAutomationFailed = true; }
+      }
+      await wait(500);
+    }
+    assert.fail("Normal quarantined GUI did not launch");
+  } finally {
+    if (!result || !Object.hasOwn(result, "code")) launcher.kill("SIGTERM");
+  }
 }
 
 async function main() {
@@ -88,23 +128,7 @@ async function main() {
     command("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, app]);
     evidence.quarantineBefore = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
     launched = true;
-    command("/usr/bin/open", ["-n", app]);
-    let pid;
-    for (let attempt = 0; attempt < 120; attempt++) {
-      const candidates = mainProcesses(binary);
-      assert.ok(candidates.length <= 1, "Unexpected duplicate GUI process");
-      if (candidates.length === 1) { pid = candidates[0]; break; }
-      if (attempt === 20) {
-        // Accept only the ordinary Internet-download Open prompt. A damaged,
-        // untrusted, or privacy-permission dialog has no matching action here.
-        try {
-          const answer = command("/usr/bin/osascript", ["-e", 'tell application "System Events"\nif exists process "CoreServicesUIAgent" then\ntell process "CoreServicesUIAgent"\nrepeat with w in windows\nif exists button "Open" of w then\nclick button "Open" of w\nreturn "ordinary-open-confirmed"\nend if\nend repeat\nend tell\nend if\nreturn "no-ordinary-open-prompt"']);
-          evidence.normalOpenConfirmation = answer.trim() === "ordinary-open-confirmed";
-        } catch { /* process/window checks still decide acceptance */ }
-      }
-      await delay(500);
-    }
-    assert.ok(pid, "Normal quarantined GUI did not launch");
+    const pid = await launchAndWait(app, binary, evidence);
     await delay(10000);
     assert.deepEqual(mainProcesses(binary), [pid]);
     const renderer = command("/bin/ps", ["-axo", "ppid=,args="]).split("\n")
@@ -151,4 +175,5 @@ async function main() {
   console.log(JSON.stringify(evidence));
 }
 
-main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });
+module.exports = { launchAndWait };
+if (require.main === module) main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });
