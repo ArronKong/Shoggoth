@@ -4,7 +4,7 @@ const { EventEmitter } = require("node:events");
 const { test } = require("node:test");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
 const { execFileSync } = require("node:child_process");
-const { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait } = require("./shoggoth-quarantined-first-launch.cjs");
+const { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords } = require("./shoggoth-quarantined-first-launch.cjs");
 
 test("the exact ordinary Open script compiles with the macOS System Events dictionary", { skip: process.platform !== "darwin" }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-open-script-"));
@@ -153,4 +153,20 @@ test("a GUI that ignores normal Quit retains the original 60 second failure budg
   }), /GUI failed to quit normally/u);
   assert.equal(ticks, 120);
   assert.equal(evidence.naturalGuiExit, undefined);
+});
+
+test("actual packaged embedding worker and explicit Service role are distinct from the GUI", () => {
+  const binary = "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth";
+  const worker = `${binary} /Applications/Shoggoth.app/Contents/Resources/app.asar/app/agent-service/embedding-worker.cjs`;
+  const rows = `8918 ${binary}\n9811 ${worker}\n9910 ${binary} --shoggoth-internal-role=agent-service`;
+  assert.deepEqual(guiProcessRecords(rows, binary), [{ pid: 8918, command: binary }]);
+  assert.deepEqual(guiProcessRecords(`9811 ${worker}`, binary), []);
+});
+
+test("other script paths, extra Worker arguments and duplicate bare GUI processes remain visible", () => {
+  const binary = "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth";
+  for (const second of [binary, `${binary} --unexpected`, `${binary} /tmp/embedding-worker.cjs`,
+    `${binary} /Applications/Shoggoth.app/Contents/Resources/app.asar/app/agent-service/embedding-worker.cjs --unexpected`]) {
+    assert.deepEqual(guiProcessRecords(`8918 ${binary}\n9811 ${second}`, binary), [{ pid: 8918, command: binary }, { pid: 9811, command: second }]);
+  }
 });

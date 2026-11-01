@@ -25,12 +25,25 @@ function inside(root, target) {
   const relative = path.relative(root, target);
   return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
-function mainProcessRecords(binary) {
-  return command("/bin/ps", ["-axo", "pid=,args="]).trim().split("\n").flatMap(line => {
+function embeddingWorkerCommand(binary) {
+  return `${binary} ${path.join(path.dirname(path.dirname(binary)), "Resources/app.asar/app/agent-service/embedding-worker.cjs")}`;
+}
+function guiProcessRecords(output, binary) {
+  return output.trim().split("\n").flatMap(line => {
     const match = line.trim().match(/^(\d+)\s+(.+)$/u);
     if (!match || (match[2] !== binary && !match[2].startsWith(`${binary} `))
-      || match[2].includes("--shoggoth-internal-role=")) return [];
+      || match[2].includes("--shoggoth-internal-role=") || match[2] === embeddingWorkerCommand(binary)) return [];
     return [{ pid: Number(match[1]), command: match[2] }];
+  });
+}
+function mainProcessRecords(binary) {
+  return guiProcessRecords(command("/bin/ps", ["-axo", "pid=,args="]), binary);
+}
+function embeddingProcessRecords(binary) {
+  const expected = embeddingWorkerCommand(binary);
+  return command("/bin/ps", ["-axo", "pid=,args="]).trim().split("\n").flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/u);
+    return match?.[2] === expected ? [{ pid: Number(match[1]), command: match[2] }] : [];
   });
 }
 function mainProcesses(binary) { return mainProcessRecords(binary).map(item => item.pid); }
@@ -206,8 +219,10 @@ async function main() {
     evidence.productServiceHealthy = true;
     evidence.quarantineAfter = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
     evidence.processesBeforeQuit = mainProcessRecords(binary);
+    evidence.backgroundEmbeddingWorkersBeforeQuit = embeddingProcessRecords(binary);
     await quitAndWait(binary, pid, evidence);
     evidence.processesAfterQuit = mainProcessRecords(binary);
+    evidence.backgroundEmbeddingWorkersAfterQuit = embeddingProcessRecords(binary);
     evidence.verified = true;
   } catch (error) {
     try { evidence.processesAtFailure = mainProcessRecords(binary); } catch { evidence.processSnapshotFailed = true; }
@@ -225,5 +240,5 @@ async function main() {
   console.log(JSON.stringify(evidence));
 }
 
-module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait };
+module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords };
 if (require.main === module) main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });
