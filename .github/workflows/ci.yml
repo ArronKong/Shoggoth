@@ -115,11 +115,27 @@ jobs:
           node scripts/proxy-smoke.mjs
           node scripts/proxy-chat-smoke.mjs
           node scripts/hermes-start-smoke.cjs
-      - name: Pinned OpenClaw memory core and isolated Service
+      - name: Prepare pinned memory assets and verify core
         run: |
           node scripts/fetch-e5-model.mjs
           npm run check:memory-core
-          npm run test:memory-core
+      - name: Native CLI capability and upgrade contracts
+        run: |
+          node --test scripts/runtime-capability-evidence-unit.cjs scripts/runtime-executable-identity-unit.cjs scripts/runtime-pool-upgrade-unit.cjs scripts/runtime-compatibility-unit.cjs scripts/runtime-support-unit.cjs
+          node --test scripts/grok-build-runtime-adapter-unit.cjs scripts/opencode-runtime-unit.cjs
+          node scripts/codex-app-server-smoke.cjs
+          node scripts/shoggoth-profile-service-unit.cjs
+      - name: Native Agent Computer Use and Browser Use path
+        run: |
+          node scripts/shoggoth-runtime-adapter-contract.cjs
+          node scripts/shoggoth-work-run-coordinator-unit.cjs
+          node --test scripts/runtime-execution-context-unit.cjs
+          node --test scripts/runtime-mcp-bridge-isolation-unit.cjs
+          node --test scripts/runtime-mcp-bridge-confirmation-unit.cjs
+          node --test scripts/product-confirmation-schema-unit.cjs
+          node --test scripts/computer-browser-use-conformance.cjs
+      - name: Pinned OpenClaw memory core and isolated Service
+        run: npm run test:memory-core
       - name: OpenClaw endpoint and credential regressions
         run: |
           node --test scripts/openclaw-credential-rpc-regression.cjs scripts/openclaw-endpoint-activity-regression.cjs
@@ -147,21 +163,6 @@ jobs:
           node scripts/browser-use-settings-ui-unit.mjs
           node scripts/browser-use-service-unit.cjs
           node scripts/shoggoth-mcp-helper-hardening-unit.cjs
-      - name: Native CLI capability and upgrade contracts
-        run: |
-          node --test scripts/runtime-capability-evidence-unit.cjs scripts/runtime-executable-identity-unit.cjs scripts/runtime-pool-upgrade-unit.cjs scripts/runtime-compatibility-unit.cjs scripts/runtime-support-unit.cjs
-          node --test scripts/grok-build-runtime-adapter-unit.cjs scripts/opencode-runtime-unit.cjs
-          node scripts/codex-app-server-smoke.cjs
-          node scripts/shoggoth-profile-service-unit.cjs
-      - name: Native Agent Computer Use and Browser Use path
-        run: |
-          node scripts/shoggoth-runtime-adapter-contract.cjs
-          node scripts/shoggoth-work-run-coordinator-unit.cjs
-          node --test scripts/runtime-execution-context-unit.cjs
-          node --test scripts/runtime-mcp-bridge-isolation-unit.cjs
-          node --test scripts/runtime-mcp-bridge-confirmation-unit.cjs
-          node --test scripts/product-confirmation-schema-unit.cjs
-          node --test scripts/computer-browser-use-conformance.cjs
       - name: Scan the public source export for secrets
         shell: bash
         run: |

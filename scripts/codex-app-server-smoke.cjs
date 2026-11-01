@@ -35,9 +35,10 @@ function codexHostRuntimeOptions({
   repoRoot = REPO_ROOT,
   packaged = false,
   resourcesPath,
+  platform,
 }) {
   const home = prepareCodexHome(paths, runtimeProfileId);
-  const layout = resolveCodexRuntimeLayout({ repoRoot, packaged, resourcesPath });
+  const layout = resolveCodexRuntimeLayout({ repoRoot, packaged, resourcesPath, platform });
   const runtimeBinding = Object.freeze({
     runtime: "codex",
     runtimeProfileId,
@@ -592,6 +593,7 @@ function testPackagedRuntimeUsesResourcesLayout() {
     );
     const layout = resolveCodexRuntimeLayout({
       packaged: true,
+      platform: "darwin",
       resourcesPath: resources,
       repoRoot: "/must/not/be/used",
     });
@@ -744,6 +746,7 @@ async function testPackagedHostUsesPhysicalCodexHomeAsProcessCwd() {
     probeBinary: async (_binary, options) => { probeCwd = options.cwd; },
     hostOptions: {
       packaged: true,
+      platform: "darwin",
       resourcesPath,
       repoRoot: virtualRepoRoot,
       schemaContract: new CodexSchemaContract({ repoRoot: REPO_ROOT }),
