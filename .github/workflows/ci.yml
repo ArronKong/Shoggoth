@@ -65,7 +65,7 @@ jobs:
           echo "$DISPLAY_PID" > "$RUNNER_TEMP/shoggoth-xvfb.pid"
           for attempt in $(seq 1 40); do
             kill -0 "$DISPLAY_PID"
-            if DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then
+            if node -e 'const s=require("node:net").createConnection({path:"/tmp/.X11-unix/X99"});s.once("connect",()=>s.end());s.once("error",()=>{process.exitCode=1});s.setTimeout(1000,()=>{s.destroy();process.exitCode=1});' >/dev/null 2>&1; then
               echo "DISPLAY=:99" >> "$GITHUB_ENV"
               exit 0
             fi
