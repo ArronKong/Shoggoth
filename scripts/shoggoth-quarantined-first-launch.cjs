@@ -11,7 +11,15 @@ const { randomUUID, createHash } = require("node:crypto");
 const { setTimeout: delay } = require("node:timers/promises");
 
 function command(executable, args, timeout = 15000) {
-  return execFileSync(executable, args, { encoding: "utf8", timeout, maxBuffer: 2 * 1024 * 1024 });
+  try {
+    return execFileSync(executable, args, { encoding: "utf8", timeout, maxBuffer: 2 * 1024 * 1024 });
+  } catch (error) {
+    if (executable === "/usr/bin/xcrun" && args[0] === "stapler" && args[1] === "validate") {
+      console.error("STAPLER_VALIDATE_FAILED " + JSON.stringify({ status: error.status, signal: error.signal,
+        stdout: String(error.stdout || "").slice(0, 2000), stderr: String(error.stderr || "").slice(0, 2000) }));
+    }
+    throw error;
+  }
 }
 function inside(root, target) {
   const relative = path.relative(root, target);
